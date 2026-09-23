@@ -3806,13 +3806,15 @@ no row and so never read as booked or sent.
 
 ## The Job Conversation Shows An Email Where The Ladder Put It
 
-`getJobConversation` (ops-api) reads `inbox_events` only for legacy inbox rows
-with NO `business_events` copy (context R0): `inbox_events.job_id` is the old
-monitor-inbox matcher's guess, so an email whose event copy exists is shown by
-the evidence block alone, on the job the ladder chose (or nowhere, while it
-rests unplaced). Copies are found by source pointer, `graph:` provider key or
-`payload.inbox_events_id` at the same instant; a failed lookup keeps the rows,
-marked `event_copy: 'unknown'`, never hides them. Evidence rows carry
-`attribution_status`, `attribution_step`, `placement_rule`. The inbox block is
-removed by email slice EM-R2. Module and tests:
+`getJobConversation` (ops-api) treats `inbox_events.job_id` as the old
+monitor-inbox matcher's guess (context R0). An email whose `business_events`
+copy sits on a job is shown by the evidence block alone, on the ladder's job.
+A copy the ladder left unplaced keeps its inbox row, labelled as an unplaced
+guess, only while P4's flag `context_unlinked_rules_v1` is off, missing or
+unreadable; once it is on, the ladder's answer is final and the row is hidden.
+Inbox rows with no copy stay, labelled, until email slice EM-R2. Copies are
+found by source pointer (every live copy has one), `graph:` provider key, or
+`payload.inbox_events_id` at the same instant; a failed lookup keeps rows,
+marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
+`attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.

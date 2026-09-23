@@ -386,7 +386,7 @@ import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
-import { LEGACY_INBOX_LABEL, legacyInboxRowsToShow, readInboxEventCopies } from './job_conversation_inbox_copy.ts'
+import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -15973,9 +15973,11 @@ async function getJobConversation(client: any, body: any) {
 
   // 2. inbox_events — legacy inbox copies only (context slice R0). Its job_id
   //    is the old monitor-inbox matcher's guess, so an email whose
-  //    business_events copy exists is shown by block 4 alone, on the job the
-  //    ladder chose. Rows with no event copy stay, labelled, until email slice
-  //    EM-R2 removes this block. See job_conversation_inbox_copy.ts.
+  //    business_events copy sits on a job is shown by block 4 alone, on the
+  //    job the ladder chose. A copy the ladder left unplaced keeps the inbox
+  //    row (labelled) until P4's flag context_unlinked_rules_v1 is on. Rows
+  //    with no event copy stay, labelled, until email slice EM-R2 removes
+  //    this block. See job_conversation_inbox_copy.ts.
   try {
     let q = client.from('inbox_events')
       .select('id, graph_message_id, from_email, from_name, to_email, subject, body_preview, received_at, classification, mailbox')
@@ -15989,7 +15991,10 @@ async function getJobConversation(client: any, body: any) {
     if (!copyCheck.ok) {
       console.error('[ops-api] get_job_conversation inbox event-copy check incomplete:', copyCheck.errors.join('; '))
     }
-    for (const { row: r, event_copy } of legacyInboxRowsToShow<any>(inbox || [], copyCheck)) {
+    // The flag is read only when it can change the answer.
+    const hasUnplacedCopy = [...copyCheck.copies.values()].some((job) => !job)
+    const unlinkedRulesOn = hasUnplacedCopy ? await readUnlinkedRulesOn(client) : false
+    for (const { row: r, event_copy, label } of legacyInboxRowsToShow<any>(inbox || [], copyCheck, { unlinkedRulesOn })) {
       messages.push({
         id: `inbox:${r.id}`,
         job_id: jobId,
@@ -16003,7 +16008,7 @@ async function getJobConversation(client: any, body: any) {
         source_system: 'inbox',
         source_ref: r.id,
         placed_by: 'old_inbox_matcher',
-        label: LEGACY_INBOX_LABEL,
+        label,
         event_copy,
       })
     }

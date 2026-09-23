@@ -12,32 +12,40 @@
 //   - adminbucket N1, SWP-261379: inbox aa6745bb (18 Sep 06:46:52Z). The old
 //     matcher put it on SWP-261379 by the client's email; its event copy
 //     5165975f is `client.email_in`, `admin_bucket`, step 6, no job. (The email
-//     note lists aa6745bb as inbox-only; production shows the copy.) R0: the
-//     inbox copy is not shown; the evidence row is where the ladder left it.
+//     note lists aa6745bb as inbox-only; production shows the copy.) R0, by
+//     P4's flag context_unlinked_rules_v1: off, missing or unreadable, the
+//     inbox row stays on SWP-261379 labelled as a guess the ladder has not
+//     placed; on, it is not shown (the ladder's answer is final).
 //   - adminbucket N8, SWP-26183: inbox a7e0d2ba (11 Aug), the supplier email
 //     naming SWP-26183 and SWP-26941. Production shows NO event copy (the
 //     design note expected one), so it stays on SWP-26183, labelled as the old
 //     matcher's placement, and never appears on SWP-26941.
+// Shape cases (synthetic ids; no named row of these shapes in the design):
 //   - same-job copy: an email whose inbox row and event copy sit on one job
 //     shows once, from the evidence row.
+//   - other-job copy: an inbox row guessed onto one job whose event copy the
+//     ladder placed on another shows only on the ladder's job.
 //
-// Pins:
+// Pins (each in both flag states where the flag can matter):
 //   1. Same job: one message, from business_events, with attribution_status /
 //      attribution_step / placement_rule.
-//   2. E2: the three inbox-only rows still show, labelled, event_copy "none".
-//   3. N1: the inbox copy is not shown when its event copy is in the bucket.
-//   4. N8: an inbox-only row stays on its guessed job, labelled; not on the
-//      second job it names.
-//   5. Each of the three writer keys (source pointer, provider key, payload
+//   2. Other job: shown only on the ladder's job.
+//   3. E2: the three inbox-only rows still show, labelled, event_copy "none".
+//   4. N1: flag off / missing / unreadable -> shown, labelled unplaced; flag
+//      on -> not shown.
+//   5. N8: an inbox-only row stays on its guessed job, labelled, in both flag
+//      states; never on the second job it names. No flag read is made when no
+//      copy is unplaced.
+//   6. Each of the three writer keys (source pointer, provider key, payload
 //      pointer at the same instant) alone proves a copy; a payload pointer at
 //      a different instant does not.
-//   6. A database answer that does not really reference the inbox row never
+//   7. A database answer that does not really reference the inbox row never
 //      hides it (the check re-verifies every candidate).
-//   7. A failed lookup hides nothing it could not prove: rows stay, marked
+//   8. A failed lookup hides nothing it could not prove: rows stay, marked
 //      event_copy "unknown".
-//   8. Every copy lookup is keyed (indexed in production: source pointer
+//   9. Every copy lookup is keyed (indexed in production: source pointer
 //      `idx_events_source_pointer`, provider key unique index, occurred_at).
-//   9. The dossier conversation carries the same answer; the merge stays
+//  10. The dossier conversation carries the same answer; the merge stays
 //      read-only (the fake client exposes no write methods).
 
 import {
@@ -52,6 +60,8 @@ import {
   LEGACY_INBOX_LABEL,
   legacyInboxRowsToShow,
   readInboxEventCopies,
+  UNLINKED_RULES_FLAG,
+  UNPLACED_INBOX_LABEL,
 } from "./job_conversation_inbox_copy.ts";
 
 // ── Recorded fixtures ─────────────────────────────────────────────────────
@@ -89,12 +99,20 @@ const SAME_INBOX = "5a3e0000-0000-4000-8000-0000000inbox";
 const SAME_EVENT = "5a3e0000-0000-4000-8000-0000000event";
 const SAME_AT = "2026-09-20T02:00:00+00:00";
 
+const OTHER_GUESS_JOB = "0f3c2a10-0000-4000-8000-0000000guess";
+const OTHER_LADDER_JOB = "0f3c2a10-0000-4000-8000-000000ladder";
+const OTHER_INBOX = "07e40000-0000-4000-8000-0000000inbox";
+const OTHER_EVENT = "07e40000-0000-4000-8000-0000000event";
+const OTHER_AT = "2026-09-21T03:00:00+00:00";
+
 function jobsTable() {
   return [
     { id: SWP_26183, job_number: "SWP-26183", ghl_contact_id: null },
     { id: SWP_26941, job_number: "SWP-26941", ghl_contact_id: null },
     { id: SWP_261379, job_number: "SWP-261379", ghl_contact_id: null },
     { id: SAME_JOB, job_number: "SWP-SAMEJOB", ghl_contact_id: null },
+    { id: OTHER_GUESS_JOB, job_number: "SWP-GUESS", ghl_contact_id: null },
+    { id: OTHER_LADDER_JOB, job_number: "SWP-LADDER", ghl_contact_id: null },
   ];
 }
 
@@ -186,6 +204,52 @@ function sameJobTables() {
   };
 }
 
+/** An inbox row guessed onto one job; the ladder placed its copy on another. */
+function otherJobTables() {
+  return {
+    jobs: jobsTable(),
+    inbox_events: [{
+      id: OTHER_INBOX,
+      job_id: OTHER_GUESS_JOB,
+      graph_message_id: "AAMkfixture-other",
+      from_email: "supplier@example.test",
+      subject: "Re: order for SWP-LADDER",
+      body_preview: "supplier reply",
+      received_at: OTHER_AT,
+    }],
+    business_events: [{
+      id: OTHER_EVENT,
+      job_id: OTHER_LADDER_JOB,
+      event_type: "supplier.email_in",
+      source: "monitor-inbox",
+      occurred_at: OTHER_AT,
+      source_table: "inbox_events",
+      source_id: OTHER_INBOX,
+      provider_message_id: "graph:AAMkfixture-other",
+      attribution_status: "direct",
+      attribution_step: 1,
+      metadata: { written_as: "service_role" },
+      payload: { body: "supplier reply", inbox_events_id: OTHER_INBOX },
+    }],
+  };
+}
+
+type FlagState = "missing" | "off" | "on";
+
+/** Adds P4's flag row in the given state ("missing": no row at all). */
+function withFlag<T extends Record<string, any>>(tables: T, flag: FlagState) {
+  return {
+    ...tables,
+    feature_flags: flag === "missing" ? [] : [{
+      flag_name: UNLINKED_RULES_FLAG,
+      enabled: flag === "on",
+      updated_at: "2026-09-23T00:00:00+00:00",
+    }],
+  };
+}
+
+const FLAG_STATES: FlagState[] = ["missing", "off", "on"];
+
 // ── Read-only fake that honours the filters the reader sends ─────────────
 
 type Tables = Record<string, any[]>;
@@ -213,7 +277,12 @@ function project(row: any, select: string): any {
 
 function fakeClient(
   tables: Tables,
-  opts: { failTable?: string; failColumn?: string; lieOn?: string } = {},
+  opts: {
+    failTable?: string;
+    failColumn?: string;
+    failAll?: string;
+    lieOn?: string;
+  } = {},
 ) {
   const reads: Array<{ table: string; filters: string[] }> = [];
   return {
@@ -224,7 +293,7 @@ function fakeClient(
       let select = "*";
       let single = false;
       let limit: number | null = null;
-      let fail = false;
+      let fail = table === opts.failAll;
       const q: any = {};
       // Filters the conversation never sends (other dossier sections) pass through.
       for (
@@ -326,56 +395,110 @@ const conversation = async (client: any, jobId: string) =>
 const refs = (messages: any[], ...ids: string[]) =>
   messages.filter((m) => ids.includes(m.source_ref));
 
-Deno.test("R0 same job: an email with an event copy shows once, from the evidence row", async () => {
-  const messages = await conversation(fakeClient(sameJobTables()), SAME_JOB);
-  const email = refs(messages, SAME_EVENT, SAME_INBOX);
-  assertEquals(email.length, 1, "the email must appear exactly once");
-  assertEquals(email[0].source_system, "business_events");
-  assertEquals(email[0].attribution_status, "direct");
-  assertEquals(email[0].attribution_step, 1);
-  assertEquals(email[0].placement_rule, null); // written from P4 onwards
-});
-
-Deno.test("R0 E2: SWP-261379's three inbox-only emails still show, labelled", async () => {
-  const messages = await conversation(
-    fakeClient(swp261379Tables()),
-    SWP_261379,
-  );
-  const inbox = messages.filter((m) => m.source_system === "inbox");
-  assertEquals(inbox.map((m) => m.source_ref).sort(), [...E2_IDS].sort());
-  for (const m of inbox) {
-    assertEquals(m.label, LEGACY_INBOX_LABEL);
-    assertEquals(m.placed_by, "old_inbox_matcher");
-    assertEquals(m.event_copy, "none");
-    assertEquals(m.channel, "email");
+Deno.test("R0 same job: an email with an event copy shows once, from the evidence row, in every flag state", async () => {
+  for (const flag of FLAG_STATES) {
+    const messages = await conversation(
+      fakeClient(withFlag(sameJobTables(), flag)),
+      SAME_JOB,
+    );
+    const email = refs(messages, SAME_EVENT, SAME_INBOX);
+    assertEquals(email.length, 1, `flag ${flag}: exactly once`);
+    assertEquals(email[0].source_system, "business_events");
+    assertEquals(email[0].attribution_status, "direct");
+    assertEquals(email[0].attribution_step, 1);
+    assertEquals(email[0].placement_rule, null); // written from P4 onwards
   }
 });
 
-Deno.test("R0 N1: an inbox copy whose event copy rests in the bucket is not shown on the guessed job", async () => {
+Deno.test("R0 other job: an email the ladder placed elsewhere shows only on the ladder's job, in every flag state", async () => {
+  for (const flag of FLAG_STATES) {
+    const tables = withFlag(otherJobTables(), flag);
+    const onGuess = await conversation(fakeClient(tables), OTHER_GUESS_JOB);
+    assertEquals(onGuess, [], `flag ${flag}: not on the guessed job`);
+    const onLadder = await conversation(fakeClient(tables), OTHER_LADDER_JOB);
+    const email = refs(onLadder, OTHER_EVENT, OTHER_INBOX);
+    assertEquals(email.length, 1);
+    assertEquals(email[0].source_system, "business_events");
+  }
+});
+
+Deno.test("R0 E2: SWP-261379's three inbox-only emails still show, labelled, in every flag state", async () => {
+  for (const flag of FLAG_STATES) {
+    const messages = await conversation(
+      fakeClient(withFlag(swp261379Tables(), flag)),
+      SWP_261379,
+    );
+    const e2 = refs(messages, ...E2_IDS);
+    assertEquals(e2.map((m) => m.source_ref).sort(), [...E2_IDS].sort());
+    for (const m of e2) {
+      assertEquals(m.source_system, "inbox");
+      assertEquals(m.label, LEGACY_INBOX_LABEL);
+      assertEquals(m.placed_by, "old_inbox_matcher");
+      assertEquals(m.event_copy, "none");
+      assertEquals(m.channel, "email");
+    }
+  }
+});
+
+Deno.test("R0 N1, P4 flag off or missing: the bucketed customer email stays on SWP-261379, labelled as an unplaced guess", async () => {
+  for (const flag of ["missing", "off"] as FlagState[]) {
+    const messages = await conversation(
+      fakeClient(withFlag(swp261379Tables(), flag)),
+      SWP_261379,
+    );
+    const n1 = refs(messages, N1_INBOX, N1_EVENT);
+    assertEquals(n1.length, 1, `flag ${flag}`);
+    assertEquals(n1[0].source_ref, N1_INBOX);
+    assertEquals(n1[0].source_system, "inbox");
+    assertEquals(n1[0].event_copy, "unplaced");
+    assertEquals(n1[0].label, UNPLACED_INBOX_LABEL);
+    assertEquals(n1[0].placed_by, "old_inbox_matcher");
+    assertEquals(messages.length, 4); // E2 x3 plus N1
+  }
+});
+
+Deno.test("R0 N1, P4 flag unreadable: reads as off, so the email stays", async () => {
   const messages = await conversation(
-    fakeClient(swp261379Tables()),
+    fakeClient(withFlag(swp261379Tables(), "on"), {
+      failAll: "feature_flags",
+    }),
+    SWP_261379,
+  );
+  assertEquals(refs(messages, N1_INBOX)[0]?.event_copy, "unplaced");
+});
+
+Deno.test("R0 N1, P4 flag on: the ladder's answer is final, the inbox copy is not shown", async () => {
+  const messages = await conversation(
+    fakeClient(withFlag(swp261379Tables(), "on")),
     SWP_261379,
   );
   assertEquals(refs(messages, N1_INBOX, N1_EVENT).length, 0);
   assertEquals(messages.length, 3); // the E2 rows only
 });
 
-Deno.test("R0 N8: an inbox-only row stays on its guessed job, labelled, and never reaches the second job", async () => {
-  const on26183 = await conversation(fakeClient(n8Tables()), SWP_26183);
-  const n8 = refs(on26183, N8_INBOX);
-  assertEquals(n8.length, 1);
-  assertEquals(n8[0].label, LEGACY_INBOX_LABEL);
-  assertEquals(n8[0].event_copy, "none");
-  assertEquals(await conversation(fakeClient(n8Tables()), SWP_26941), []);
+Deno.test("R0 N8: an inbox-only row stays on its guessed job, labelled, in every flag state, and never reaches the second job", async () => {
+  for (const flag of FLAG_STATES) {
+    const client = fakeClient(withFlag(n8Tables(), flag));
+    const n8 = refs(await conversation(client, SWP_26183), N8_INBOX);
+    assertEquals(n8.length, 1, `flag ${flag}`);
+    assertEquals(n8[0].label, LEGACY_INBOX_LABEL);
+    assertEquals(n8[0].event_copy, "none");
+    // No copy is unplaced, so the flag cannot change the answer and is not read.
+    assertEquals(client.reads.some((r) => r.table === "feature_flags"), false);
+    assertEquals(
+      await conversation(fakeClient(withFlag(n8Tables(), flag)), SWP_26941),
+      [],
+    );
+  }
 });
 
-Deno.test("R0: each writer key alone proves an event copy", async () => {
+Deno.test("R0: each writer key alone proves an event copy and where it sits", async () => {
   const inbox = {
     id: N1_INBOX,
     graph_message_id: N1_GRAPH,
     received_at: N1_AT,
   };
-  const base = swp261379Tables().business_events[0];
+  const base = { ...swp261379Tables().business_events[0], job_id: SWP_261379 };
   const variants: Record<string, any> = {
     source_pointer: {
       ...base,
@@ -402,7 +525,7 @@ Deno.test("R0: each writer key alone proves an event copy", async () => {
       [inbox],
     );
     assert(check.ok, key);
-    assert(check.copied.has(N1_INBOX), `${key} must prove the copy`);
+    assertEquals(check.copies.get(N1_INBOX), SWP_261379, key);
   }
   const otherInstant = {
     ...variants.payload_pointer,
@@ -412,16 +535,17 @@ Deno.test("R0: each writer key alone proves an event copy", async () => {
     fakeClient({ business_events: [otherInstant] }),
     [inbox],
   );
-  assertEquals(check.copied.size, 0);
+  assertEquals(check.copies.size, 0);
 });
 
 Deno.test("R0: a database answer that does not reference the inbox row never hides it", async () => {
   // The fake ignores the payload-pointer id filter, as a mis-shaped query
-  // would; an unrelated event at E2 row 1's instant must not hide it.
-  const tables = swp261379Tables();
+  // would; an unrelated placed event at E2 row 1's instant must not hide it.
+  const tables: any = withFlag(swp261379Tables(), "on");
   tables.business_events = [{
     ...tables.business_events[0],
     id: "unrelated-event",
+    job_id: SWP_261379,
     source_table: "graph_group_post",
     source_id: "some-post",
     provider_message_id: "graph:someone-else",
@@ -438,30 +562,34 @@ Deno.test("R0: a database answer that does not reference the inbox row never hid
 });
 
 Deno.test("R0: a failed lookup keeps every row it could not prove copied, marked unknown", async () => {
-  const client = fakeClient(swp261379Tables(), {
+  const client = fakeClient(withFlag(swp261379Tables(), "off"), {
     failTable: "business_events",
     failColumn: "provider_message_id",
   });
   const messages = await conversation(client, SWP_261379);
-  const inbox = messages.filter((m) => m.source_system === "inbox");
-  // N1 is still proven copied by its source pointer, so it stays hidden.
-  assertEquals(inbox.map((m) => m.source_ref).sort(), [...E2_IDS].sort());
-  for (const m of inbox) assertEquals(m.event_copy, "unknown");
+  for (const m of refs(messages, ...E2_IDS)) {
+    assertEquals(m.event_copy, "unknown");
+  }
+  assertEquals(refs(messages, ...E2_IDS).length, 3);
+  // N1's copy is still proven by its source pointer: unplaced, flag off.
+  assertEquals(refs(messages, N1_INBOX)[0]?.event_copy, "unplaced");
 
-  // With every lookup failing, nothing is hidden.
-  const pure = legacyInboxRowsToShow([{ id: "x" }, { id: "y" }], {
-    ok: false,
-    copied: new Set(),
-    errors: ["timeout"],
-  });
-  assertEquals(pure.map((p) => [p.row.id, p.event_copy]), [
-    ["x", "unknown"],
-    ["y", "unknown"],
-  ]);
+  // With every lookup failing, nothing is hidden, in either flag state.
+  for (const unlinkedRulesOn of [false, true]) {
+    const pure = legacyInboxRowsToShow([{ id: "x" }, { id: "y" }], {
+      ok: false,
+      copies: new Map(),
+      errors: ["timeout"],
+    }, { unlinkedRulesOn });
+    assertEquals(pure.map((p) => [p.row.id, p.event_copy]), [
+      ["x", "unknown"],
+      ["y", "unknown"],
+    ]);
+  }
 });
 
 Deno.test("R0: every event-copy lookup is keyed, so it stays on an index", async () => {
-  const client = fakeClient(swp261379Tables());
+  const client = fakeClient(withFlag(swp261379Tables(), "off"));
   await conversation(client, SWP_261379);
   const lookups = client.reads.filter((r) =>
     r.table === "business_events" && !r.filters.includes("eq:job_id")
@@ -475,19 +603,31 @@ Deno.test("R0: every event-copy lookup is keyed, so it stays on an index", async
       `unkeyed lookup: ${r.filters.join(",")}`,
     );
   }
+  const flagReads = client.reads.filter((r) => r.table === "feature_flags");
+  assertEquals(flagReads.length, 1);
+  assert(flagReads[0].filters.includes("eq:flag_name"));
 });
 
-Deno.test("R0: the dossier conversation carries the same answer", async () => {
-  const dossier: any = await _assembleJobDossierForTest(
-    fakeClient(swp261379Tables()),
+Deno.test("R0: the dossier conversation carries the same answer in both flag states", async () => {
+  const off: any = await _assembleJobDossierForTest(
+    fakeClient(withFlag(swp261379Tables(), "off")),
     { job_id: SWP_261379 },
   );
-  assertEquals(dossier.diagnostics.sourceStatus.conversation.ok, true);
-  const ids = dossier.conversation.map((m: any) => m.source_ref);
-  assertEquals(ids.includes(N1_INBOX), false);
-  for (const id of E2_IDS) assert(ids.includes(id));
+  assertEquals(off.diagnostics.sourceStatus.conversation.ok, true);
+  const offIds = off.conversation.map((m: any) => m.source_ref);
+  assert(offIds.includes(N1_INBOX));
+  for (const id of E2_IDS) assert(offIds.includes(id));
+
+  const on: any = await _assembleJobDossierForTest(
+    fakeClient(withFlag(swp261379Tables(), "on")),
+    { job_id: SWP_261379 },
+  );
+  const onIds = on.conversation.map((m: any) => m.source_ref);
+  assertEquals(onIds.includes(N1_INBOX), false);
+  for (const id of E2_IDS) assert(onIds.includes(id));
+
   const same: any = await _assembleJobDossierForTest(
-    fakeClient(sameJobTables()),
+    fakeClient(withFlag(sameJobTables(), "on")),
     { job_id: SAME_JOB },
   );
   const email = refs(same.conversation, SAME_EVENT, SAME_INBOX);
