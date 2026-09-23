@@ -32,7 +32,7 @@ export type AppointmentResult = {
 };
 export type AppointmentRequest = {
   fingerprint: string;
-  state: "reserved" | "sending" | "complete";
+  state: "reserved" | "sending" | "complete" | "released";
   result: AppointmentResult | null;
 };
 export interface AppointmentLedger {
@@ -384,6 +384,11 @@ export async function createCalendarAppointmentAction(args: {
       }
       if (previous?.state === "sending") {
         return await recover(deps, input, payload, fingerprint);
+      }
+      // A captain released this stuck key after checking GHL by hand. It is
+      // terminal: it never posts again. Book the slot under a new approval.
+      if (previous?.state === "released") {
+        return refuse("invalid_request", 409, "request_released");
       }
     }
     if (start <= nowMs()) {

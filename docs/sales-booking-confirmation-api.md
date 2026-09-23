@@ -11,8 +11,9 @@ This release joins the read and independent approval **storage** contracts.
 It does not execute a booking or message, enable a provider, or supply a model.
 Published availability evidence and durable visit records are composed below. No production behavior was observed.
 Apply `20260922150000_sales_booking_approvals.sql` before deploying these handlers.
-The legacy `sales_booking_stamp_write/read` path remains available, deprecated;
-legacy KEEP/CUT never translates into either independent approval.
+`sales_booking_stamp_write` was retired on 23 Sep 2026 (unknown action);
+`sales_booking_stamp_read` still returns stored legacy stamps, and legacy
+KEEP/CUT never translates into either independent approval.
 
 ## Producer handoff
 

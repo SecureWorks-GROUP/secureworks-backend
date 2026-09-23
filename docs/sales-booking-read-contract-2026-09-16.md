@@ -91,8 +91,8 @@ store). Skip the write when the merged map equals the row just read.
 After insert, delete only older `as_of` for the same resource, week_start,
 and kind — a concurrent newer row stays.
 
-`sales_booking_pack_publish` and `sales_booking_stamp_write` persist
-pack/stamp rows only. `sales_booking_threads_refresh` (api key, POST) does
+`sales_booking_pack_publish` persists pack rows only (the stamp writer,
+`sales_booking_stamp_write`, was retired on 23 Sep 2026). `sales_booking_threads_refresh` (api key, POST) does
 a full background refresh for one resource into the same thread-facts
 store. Nothing is sent.
 
@@ -236,14 +236,8 @@ Publish / stamp / approval actions (no send):
   Returns `{ok, id, as_of}`.
 - `POST sales_booking_approval_write`: independent calendar or exact-message
   approval. Owner: `docs/sales-booking-confirmation-api.md`.
-- `POST sales_booking_stamp_write` (allow-listed captain JWT only;
-  env `SALES_BOOKING_CAPTAIN_EMAILS`, comma-separated, case-insensitive;
-  unset or blank defaults to `marnin@secureworkswa.com.au`; the ops API
-  key and every other JWT are 403 `stamp_write_requires_captain`): body
-  `{resource, week_start, stamp}` where `stamp` is `{captain, approved,
-  rejected, decisions, stage_moves}`. The body `captain` field is
-  ignored. Stores `kind=stamp` with `as_of` now and `published_by` = the
-  JWT email. Returns `{ok, id, as_of, published_by}`. No other side effect.
+- `POST sales_booking_stamp_write`: retired 23 Sep 2026; answers
+  `Unknown action`. Stored stamps stay readable below.
 - `GET sales_booking_stamp_read` (api key only): `{resource, week_start}`
   returns the latest stamp payload and `as_of`, or
   `{ok:true, stamp:null, as_of:null}`.

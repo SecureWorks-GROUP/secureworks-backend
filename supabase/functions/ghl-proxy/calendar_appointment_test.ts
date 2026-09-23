@@ -698,3 +698,25 @@ Deno.test("writer refuses a real write with a live approval but no executor clai
   );
   assertEquals(unread.posts.length, 0);
 });
+Deno.test("a released stuck key is terminal: no recovery, reservation or POST", async () => {
+  const f = fixture();
+  let attempts = 0;
+  f.deps.ghlPost = () => {
+    attempts++;
+    return Promise.reject(new Error("provider down private detail"));
+  };
+  const stuck = await f.call();
+  assertEquals(stuck.status, 502);
+  assertEquals(f.records.get(INPUT.idempotencyKey)?.state, "sending");
+  // The captain checked GHL by hand and released the fence.
+  f.records.get(INPUT.idempotencyKey)!.state = "released";
+  const reads = f.gets.length, writes = f.writes();
+  const again = await f.call();
+  assertEquals(again, {
+    status: 409,
+    body: { ok: false, code: "invalid_request", reason: "request_released" },
+  });
+  assertEquals(f.gets.length, reads);
+  assertEquals(f.writes(), writes);
+  assertEquals(attempts, 1);
+});

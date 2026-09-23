@@ -3720,10 +3720,15 @@ switch (`SALES_BOOKING_BOOK_EXECUTE`) turns booking and that Outlook copy
 on together. The event spans the exact GHL appointment. The suburb is the
 one the booking read publishes. A mirror failure never un-books GHL, and a
 retry press replays GHL from its ledger and writes Outlook at most once.
+The old booking path is retired (23 Sep 2026): `book_scope`, `assign_scoper`
+and `sales_booking_stamp_write` answer `Unknown action`, pinned by
+`retired_booking_actions_test.ts`; do not re-add them. `approve_booking_proposal`
+survives only for sale.html's dry-run preview, and its Railway bearer is
+`AGENT_BEARER_TOKEN` or `SW_API_KEY`, never the service-role key.
 `sales_booking_read` shows what a press did from `sales_booking_executions`
 (`sales_booking_execution_read.ts`); dry runs and pre-claim refusals leave
 no row and so never read as booked or sent.
 
 ## GHL appointment write safety
 
-`create_calendar_appointment` is disabled by default. Its caller, retry, notification and deployment contracts are in `docs/ghl-calendar-appointment-write.md`; the durable sending fence must never be cleared just because a provider window is empty. The server action owns the only appointment POST, while the agent-side tool lives in another repository.
+`create_calendar_appointment` is disabled by default. Its caller, retry, notification and deployment contracts are in `docs/ghl-calendar-appointment-write.md`; the durable sending fence must never be cleared just because a provider window is empty; the only way out is the captain/service-role `release_calendar_appointment_request` (terminal `released` state, row kept, key never posts again). The server action owns the only appointment POST, while the agent-side tool lives in another repository.

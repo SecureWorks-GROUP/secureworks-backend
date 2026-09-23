@@ -242,6 +242,7 @@ jobs:
             supabase/functions/ghl-proxy/sms_sender_default_test.ts \
             supabase/functions/ghl-proxy/calendar_events_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_test.ts \
+            supabase/functions/ghl-proxy/calendar_appointment_release_test.ts \
             supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts \
             supabase/functions/xero-sync/xero_age_test.ts \
             supabase/functions/_shared/xero_cooldown_test.ts \
@@ -270,6 +271,7 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
             supabase/functions/ops-api/proposed_sms_receipt_test.ts \
+            supabase/functions/ops-api/retired_booking_actions_test.ts \
             supabase/functions/ops-api/invoice_context_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \
             supabase/functions/ops-api/job_commercial_read_test.ts
