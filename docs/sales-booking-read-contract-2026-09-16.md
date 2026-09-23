@@ -125,9 +125,19 @@ Reference keys, unchanged: `ok`, `fixture:false`, `send_hold:true`,
 Additions:
 
 - **`diary[]`** — the scoper's GHL calendar events for Mon..Sun of
-  `week_start`. Each entry: `event_id`, `start`, `end` (ISO with `+08:00`),
-  `title`, `kind` (`busy` | `leave` | `personal`), `source` (`ghl_calendar`),
-  plus `show_as`, `blocks_capacity`, `is_all_day`, `location`, `title_withheld`.
+  `week_start`, merged with that person's Outlook primary calendar when the
+  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (today: `marnin`;
+  decision D2, 23 Sep 2026). Each entry: `event_id`, `start`, `end` (ISO with
+  `+08:00`), `title`, `kind` (`busy` | `leave` | `personal`), `source`
+  (`ghl` | `outlook`), plus `show_as`, `blocks_capacity`, `is_all_day`,
+  `location`, `title_withheld`, `mirror_of_ghl_event_id`. Outlook is read with
+  Graph `calendarView` through the mail app's existing app-only credential
+  (`_shared/graph_client.ts`); `showAs:oof` is leave, a private sensitivity is
+  personal with title and location withheld, `free` and cancelled do not block.
+  An Outlook event written by the booking mirror
+  (`sales_booking_outlook_mirror.ts`) names its GHL appointment in
+  `mirror_of_ghl_event_id`; both rows stay so each calendar shows event for
+  event.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,
@@ -146,8 +156,18 @@ Additions:
 - **`coverage.roster_source` / `roster_age_ms`** — `cache` or `live`, and the
   cached roster's age in milliseconds (`0` when live). Additive; the door's
   existing keys are unchanged.
-- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by}`.
-  `source` is `ghl_calendar`. `calendar_email` may be null; `ghl_user_id` is
+- **`diary_read`** — `{read_ok, reason, source, calendar_email, ghl_user_id, mapped_by, sources}`.
+  `source` is `ghl+outlook` for a resource with an Outlook calendar, else
+  `ghl`. `read_ok` is true only when every configured source read. A failed
+  Outlook read is `read_ok:false` with reason
+  `outlook_calendar_unread: <named failure>` (for example
+  `outlook_calendar_http_403`), keeps the GHL rows that did read, and is never
+  a free day. `sources.ghl` is `{read_ok, reason, event_count}`;
+  `sources.outlook` is `{state: read | failed | not_configured, read_ok,
+  reason, calendar_email, event_count, malformed_dropped}`.
+  `coverage.operational_leave` is `primary_outlook_calendar_only` when Outlook
+  read, else `not_read`: leave in any other calendar is never read.
+  `calendar_email` may be null; `ghl_user_id` is
   the confirmed GHL user id or null when unread. `mapped_by` is `email` or
   `name` when that id was confirmed, else null. Name is the weaker match:
   `reason` is then `ghl_user_mapped_by_name`.
@@ -305,3 +325,15 @@ email map with `ghl_user_id` null and is not a `SALES_BOOKING_RESOURCES`
 booking resource. Dedicated-calendar ids live on
 `SALES_BOOKING_SCOPER_CALENDARS` (calendar-read paragraph above), not on
 this map. User ids stay null-pinned; this table records emails only.
+
+## Outlook mirror write (D2, 23 Sep 2026)
+
+`sales_booking_outlook_mirror.ts` exports `mirrorGhlAppointmentToOutlook` for
+the booking executor to call after a GHL appointment write. It is not wired
+into any request path here. It creates one event titled `Scope: Name, Suburb`
+spanning the arrival window on the resource's Outlook primary calendar, with
+no attendees (no invitation is sent). It is idempotent on the GHL appointment
+id (a named extended property, looked up before create, plus a deterministic
+Graph `transactionId`); a failed lookup writes nothing. Only
+`SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true` writes; otherwise it returns
+`code:"flag_off"` with `would_write` and makes no Graph call.

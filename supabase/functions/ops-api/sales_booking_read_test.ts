@@ -152,6 +152,15 @@ function deps(
         mapped_by: "email",
         scoper_user_id: SALES_BOOKING_RESOURCES.marnin.scoper_user_id,
       }),
+    readOutlookDiary: () =>
+      Promise.resolve({
+        state: "read",
+        read_ok: true,
+        reason: null,
+        entries: [],
+        malformed_dropped: 0,
+        calendar_email: "marnin@secureworkswa.com.au",
+      }),
     readThread: () => Promise.resolve([] as SalesBookingMessage[]),
     now: () => NOW,
     ...overrides,
@@ -444,7 +453,7 @@ Deno.test("diary kind and blocks_capacity come from GHL status, never from title
     end: "2026-09-15T11:30:00+08:00",
     title: "Scope visit - Beckenham",
     kind: "busy",
-    source: "ghl_calendar",
+    source: "ghl",
     show_as: "confirmed",
     blocks_capacity: true,
     title_withheld: false,
@@ -554,7 +563,11 @@ Deno.test("response keeps the reference shape the Sales Booking view consumes", 
   assertEquals(payload.coverage.enumerated, 1);
   assertEquals(payload.coverage.total, 1);
   assertEquals(payload.coverage.excluded_by_stage, 0);
-  assertEquals(payload.coverage.operational_leave, "not_read");
+  // Marnin's Outlook primary calendar is read; other leave calendars are not.
+  assertEquals(
+    payload.coverage.operational_leave,
+    "primary_outlook_calendar_only",
+  );
   assertEquals(payload.coverage.roster_source, "live");
   assertEquals(payload.coverage.roster_age_ms, 0);
   assert(payload.coverage.gaps.length >= 2);
@@ -693,7 +706,7 @@ Deno.test("a GHL week with confirmed, cancelled and all-day entries keeps UI dia
     { resource: "marnin", week_start: WEEK },
   );
   assertEquals(payload.diary_read.read_ok, true);
-  assertEquals(payload.diary_read.source, "ghl_calendar");
+  assertEquals(payload.diary_read.source, "ghl+outlook");
   assertEquals(payload.diary_read.ghl_user_id, "ghl_user_marnin");
   assertEquals(payload.diary.map((row) => row.event_id), [
     "evt-1",
@@ -706,7 +719,7 @@ Deno.test("a GHL week with confirmed, cancelled and all-day entries keeps UI dia
   assertEquals(payload.diary[1].show_as, "cancelled");
   assertEquals(payload.diary[2].is_all_day, true);
   for (const row of payload.diary) {
-    assertEquals(row.source, "ghl_calendar");
+    assertEquals(row.source, "ghl");
     assert(
       [
         "event_id",
@@ -720,6 +733,7 @@ Deno.test("a GHL week with confirmed, cancelled and all-day entries keeps UI dia
         "is_all_day",
         "location",
         "title_withheld",
+        "mirror_of_ghl_event_id",
       ].every((key) => key in row),
     );
   }
@@ -756,7 +770,9 @@ Deno.test("an unmapped scoper is diary_read.read_ok false with ghl_user_unmapped
   );
   assertEquals(payload.diary_read.read_ok, false);
   assertEquals(payload.diary_read.reason, "ghl_user_unmapped");
-  assertEquals(payload.diary_read.source, "ghl_calendar");
+  // An unknown scoper has no Outlook mailbox either: GHL is the only source.
+  assertEquals(payload.diary_read.source, "ghl");
+  assertEquals(payload.diary_read.sources.outlook.state, "not_configured");
   assertEquals(payload.diary, []);
   assertEquals(payload.cases.length, 1);
 });
@@ -1352,6 +1368,7 @@ Deno.test("the deps object handed to the runner exposes no write members", async
       "readDiary",
       "readJobSites",
       "readOpportunities",
+      "readOutlookDiary",
       "readThread",
     ].sort(),
   );
