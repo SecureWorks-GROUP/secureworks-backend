@@ -4,7 +4,7 @@
 //
 // One read: invoice in, everything the system already holds out. Job link,
 // Luna facts only (v1 stamp or per-job luna_v2 — Haiku / instruction extractors
-// do not count), stored conversation (five-source merge), Xero cache state,
+// do not count), stored conversation (getJobConversation merge), Xero cache state,
 // chase log, and an explicit owned blocker for every missing piece. SELECT-only.
 // Never calls Xero or GHL, never writes, never classifies.
 //
@@ -65,7 +65,7 @@ export class InvoiceContextError extends Error {
 export interface InvoiceContextDeps {
   client: any;
   orgId: string;
-  /** The existing five-source conversation merge (index.ts getJobConversation). Returns newest first. */
+  /** The job conversation merge (index.ts getJobConversation, four sources since chat_logs was retired). Returns newest first. */
   getJobConversation: (
     client: any,
     body: { job_id: string; limit: number },
@@ -1202,8 +1202,11 @@ export async function invoiceContext(
         preview: m.preview ?? String(m.body ?? "").slice(0, 500),
       }
       : null;
-  // All five merge sources are always present, zero included, so the screen
-  // never has to tell "no rows" apart from "key absent".
+  // Every merge source key is always present, zero included, so the screen
+  // never has to tell "no rows" apart from "key absent". chat_logs is a
+  // retired source (context slice D0): getJobConversation no longer merges
+  // internal AI chat, so it stays 0. The key is kept so the response shape
+  // does not change for readers that expect all five.
   const perSource: Record<string, number> = {
     ghl_cache: 0,
     inbox: 0,
