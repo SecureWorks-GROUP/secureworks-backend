@@ -137,8 +137,8 @@ function sentBy(item: GhlMessageItem, direction: string, ctx: GhlCaptureContext)
   if (ctx.sentByKind) return ctx.sentByKind;
   if (item.meta?.marketplace?.appId === SECUREWORKS_GHL_APP_ID) return "our_tool";
   const source = String(item.source ?? "").toLowerCase();
-  // GHL's automatic senders: a workflow step, a campaign, a bulk action.
-  if (source === "workflow" || source === "campaign" || source === "bulk_actions") return "workflow";
+  // sms.md §2 / R4: only source workflow maps to sent_by_kind workflow.
+  if (source === "workflow") return "workflow";
   if (text(item.userId)) return "staff_app";
   return "unknown";
 }

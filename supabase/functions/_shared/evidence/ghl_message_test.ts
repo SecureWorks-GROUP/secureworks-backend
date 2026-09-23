@@ -69,6 +69,20 @@ Deno.test("R4: a GHL workflow text is client.sms_out by workflow, never our huma
   assertEquals(r.payload.automated, undefined);
 });
 
+Deno.test("outbound bulk_actions follows the named rules, not the workflow alias", () => {
+  const withUser = row({ ...R2_LIST_ITEM, id: "bulkActionsWithUser1", source: "bulk_actions" });
+  assertEquals(withUser.event_type, "client.sms_out");
+  assertEquals(withUser.payload.sent_by_kind, "staff_app");
+  assertEquals(withUser.payload.sent_by_user, "RgDWTnYL6zL3eJA6nLht");
+  assertEquals(withUser.payload.provider_source, "bulk_actions");
+
+  const withoutUser = row({ ...R4_LIST_ITEM, id: "bulkActionsNoUser1", source: "bulk_actions" });
+  assertEquals(withoutUser.event_type, "client.sms_out");
+  assertEquals(withoutUser.payload.sent_by_kind, "unknown");
+  assertEquals(withoutUser.payload.sent_by_user, null);
+  assertEquals(withoutUser.payload.provider_source, "bulk_actions");
+});
+
 Deno.test("R5: our tool's send and GHL's webhook build the same key; the tool row carries the verified job and line 771", () => {
   const tool = row({ messageId: R5.messageId, messageType: "SMS", direction: "outbound", body: R5.body, contactId: R5.contactId,
     conversationId: R5.sendResult.conversationId }, {
