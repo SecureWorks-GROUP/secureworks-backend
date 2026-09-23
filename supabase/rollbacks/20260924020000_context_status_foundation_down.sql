@@ -1,11 +1,28 @@
--- Roll back F1 (20260923160500_context_status_foundation).
+-- Roll back F1 (20260924020000_context_status_foundation).
 --
 -- Refuses rather than discarding data or a later slice's work: it stops if any
 -- row carries a new status or a stored candidate list, if any capture run was
--- recorded, or if a later slice has replaced one of the F1 status stubs.
--- Those slices roll back first.
+-- recorded, if a later slice has replaced one of the F1 status stubs, or if
+-- the heartbeat, the Luna custody writer or the current-facts view is no
+-- longer the F1 definition. Those slices roll back first.
+--
+-- It restores the live production definitions byte for byte (read from
+-- production 23 Sep 2026) and checks them afterwards:
+--   context_pipeline_status()  md5(prosrc) 0fa6842cebf236e47b608a520c6c9fd1
+--   persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)
+--                              md5(prosrc) d3441ee4b6c93777564f1385b00c73dc
+--   current_job_context_facts  md5(pg_get_viewdef) 4430e6fe155e0bbb8f95c110df417c7c
+--   the nine-value business_events_attribution_status_check.
+-- The other persist_luna_context_revision overload (text,text,jsonb,text,jsonb)
+-- is never touched.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
+
+-- md5 of the current-facts view text as PostgreSQL prints it, with public on
+-- the search path (how the live fingerprint was read).
+CREATE OR REPLACE FUNCTION pg_temp.f1_viewdef_md5() RETURNS text LANGUAGE sql STABLE SET search_path=public AS $$
+ SELECT md5(pg_get_viewdef(to_regclass('public.current_job_context_facts')))
+$$;
 
 DO $$
 DECLARE f text;
@@ -20,6 +37,13 @@ BEGIN
   IF coalesce(obj_description(to_regprocedure('public.'||f||'()'),'pg_proc'),'') NOT LIKE 'F1 stub.%'
   THEN RAISE EXCEPTION 'f1_rollback_refused: % is no longer the F1 stub; roll back its owning slice first',f; END IF;
  END LOOP;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()')) IS DISTINCT FROM '6f78816a6f676cd9a28f6271d2c6c8e0'
+ THEN RAISE EXCEPTION 'f1_rollback_refused: context_pipeline_status() is not the F1 composer'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
+    IS DISTINCT FROM '2ef95a949f0aae99cc323abde10f2ee7'
+ THEN RAISE EXCEPTION 'f1_rollback_refused: persist_luna_context_revision is not the F1 body'; END IF;
+ IF pg_temp.f1_viewdef_md5() IS DISTINCT FROM '19f87c83a8a7c6d0d2540aedc34620be'
+ THEN RAISE EXCEPTION 'f1_rollback_refused: current_job_context_facts is not the F1 view'; END IF;
 END $$;
 
 -- The heartbeat returns to the single 17 Sep body (same signature, grants kept).
@@ -263,3 +287,18 @@ ALTER TABLE public.business_events DROP COLUMN IF EXISTS candidate_job_ids;
 ALTER TABLE public.business_events DROP CONSTRAINT IF EXISTS business_events_attribution_status_check;
 ALTER TABLE public.business_events ADD CONSTRAINT business_events_attribution_status_check
  CHECK (attribution_status IN ('direct','thread','single_open','single_line','luna','admin_bucket','pending_luna','empty','automated'));
+
+-- Post-check: the live production definitions are back exactly.
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()')) IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
+ THEN RAISE EXCEPTION 'f1_rollback_postcheck: context_pipeline_status() is not the live body'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
+    IS DISTINCT FROM 'd3441ee4b6c93777564f1385b00c73dc'
+ THEN RAISE EXCEPTION 'f1_rollback_postcheck: persist_luna_context_revision is not the live body'; END IF;
+ IF (SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c WHERE c.conrelid='public.business_events'::regclass AND c.conname='business_events_attribution_status_check')
+    IS DISTINCT FROM 'CHECK ((attribution_status = ANY (ARRAY[''direct''::text, ''thread''::text, ''single_open''::text, ''single_line''::text, ''luna''::text, ''admin_bucket''::text, ''pending_luna''::text, ''empty''::text, ''automated''::text])))'
+ THEN RAISE EXCEPTION 'f1_rollback_postcheck: business_events_attribution_status_check is not the live nine values'; END IF;
+ IF pg_temp.f1_viewdef_md5() IS DISTINCT FROM '4430e6fe155e0bbb8f95c110df417c7c'
+ THEN RAISE EXCEPTION 'f1_rollback_postcheck: current_job_context_facts is not the live view'; END IF;
+END $$;

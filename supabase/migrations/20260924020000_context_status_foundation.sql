@@ -22,8 +22,82 @@
 --   7. context_capture_runs, written only through record_capture_run().
 --
 -- No flag or switch changes. No row is written or rewritten.
+--
+-- Built on the LIVE production definitions, read from production 23 Sep 2026
+-- (read-only). Every object this migration replaces was compared with the
+-- repository body it starts from; all are byte-identical, so no live change is
+-- lost:
+--   context_pipeline_status()                    md5(prosrc) 0fa6842cebf236e47b608a520c6c9fd1
+--     = the 20260917210000 body. Moved unchanged into context_core_status().
+--   persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)
+--                                                md5(prosrc) d3441ee4b6c93777564f1385b00c73dc
+--     = the 20260921140000 body. Replaced by that full signature; the only
+--     change is the one linked-status predicate.
+--   persist_luna_context_revision(text,text,jsonb,text,jsonb)
+--                                                md5(prosrc) f8c4bd29bba0878396ee7626c21ee65d
+--     = the 20260910112833 body. Not touched.
+--   business_events_attribution_status_check: the nine live values
+--     direct, thread, single_open, single_line, luna, admin_bucket, pending_luna,
+--     empty, automated. All nine are kept; three are added.
+--   current_job_context_facts                    md5(pg_get_viewdef) 4430e6fe155e0bbb8f95c110df417c7c
+--     (PostgreSQL 17) = the 20260917120000 view. Only the linked-status
+--     predicate changes; column order is unchanged.
+-- The ledger held nothing at or after 20260923230000 other than that migration.
+-- The guard below refuses unless each object is still that pre-image (or
+-- already this migration's result, for a re-apply), and unless every new
+-- function name is absent or already this migration's body. Anything else is
+-- a live change nobody read, and replacing it would silently revert it.
+-- Rollback: supabase/rollbacks/20260924020000_context_status_foundation_down.sql
+-- restores the live bodies byte for byte and checks their md5 afterwards.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
+
+-- 0. Pre-image guard. Reports every mismatch at once.
+DO $guard$
+DECLARE problems text[]:='{}'; live text; x record; view_md5 text; old_path text:=current_setting('search_path');
+BEGIN
+ FOR x IN SELECT * FROM (VALUES
+  -- Replaced objects: live pre-image, or this migration's body.
+  ('public.context_pipeline_status()',ARRAY['0fa6842cebf236e47b608a520c6c9fd1','6f78816a6f676cd9a28f6271d2c6c8e0'],false),
+  ('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)',
+   ARRAY['d3441ee4b6c93777564f1385b00c73dc','2ef95a949f0aae99cc323abde10f2ee7'],false),
+  -- New functions: absent, or already this migration's body.
+  ('public.context_linked_status(text)',ARRAY['e1a2e3d6d2477925378d8506cf6ff76d'],true),
+  ('public.context_unplaced_for_job(uuid)',ARRAY['f2382688c5ae085bd0a7f88a11053c12'],true),
+  ('public.context_source_freshness_policy()',ARRAY['230c0b1965208474fc6ea076e5dd3f6f'],true),
+  ('public.context_in_business_hours(timestamptz)',ARRAY['7671d80cb63a637fd02d99b964a779fc'],true),
+  ('public.context_business_minutes(timestamptz,timestamptz)',ARRAY['510dbec36291c25aa1887ade89e2ca4e'],true),
+  ('public.context_source_freshness()',ARRAY['ce094feb8df8b7dd596e639ac47a7825'],true),
+  ('public.context_core_status()',ARRAY['0fa6842cebf236e47b608a520c6c9fd1'],true),
+  ('public.context_cadence_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4'],true),
+  ('public.context_ghl_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4'],true),
+  ('public.context_booking_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4'],true),
+  ('public.context_parties_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4'],true),
+  ('public.record_capture_run(jsonb)',ARRAY['a85b48f9422fff111ee96093bad55c40'],true)
+ ) AS t(sig,accepted,may_be_absent) LOOP
+  live:=NULL;
+  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
+  IF live IS NULL AND x.may_be_absent THEN CONTINUE; END IF;
+  IF live IS NULL OR NOT live=ANY(x.accepted) THEN problems:=problems||format('%s md5 %s',x.sig,coalesce(live,'<missing>')); END IF;
+ END LOOP;
+ live:=NULL;
+ SELECT pg_get_constraintdef(c.oid) INTO live FROM pg_constraint c
+ WHERE c.conrelid='public.business_events'::regclass AND c.conname='business_events_attribution_status_check';
+ IF live IS NULL OR live NOT IN (
+  'CHECK ((attribution_status = ANY (ARRAY[''direct''::text, ''thread''::text, ''single_open''::text, ''single_line''::text, ''luna''::text, ''admin_bucket''::text, ''pending_luna''::text, ''empty''::text, ''automated''::text])))',
+  'CHECK ((attribution_status = ANY (ARRAY[''direct''::text, ''thread''::text, ''single_open''::text, ''single_line''::text, ''luna''::text, ''admin_bucket''::text, ''pending_luna''::text, ''empty''::text, ''automated''::text, ''content_ref''::text, ''party''::text, ''unplaced''::text])))')
+ THEN problems:=problems||format('business_events_attribution_status_check is %s',coalesce(live,'<missing>')); END IF;
+ -- The view text as PostgreSQL prints it, with public on the search path:
+ -- the live view (4430e6fe...), or this migration's view (19f87c83...).
+ PERFORM set_config('search_path','public',true);
+ SELECT md5(pg_get_viewdef(to_regclass('public.current_job_context_facts'))) INTO view_md5;
+ PERFORM set_config('search_path',old_path,true);
+ IF view_md5 IS NULL OR view_md5 NOT IN ('4430e6fe155e0bbb8f95c110df417c7c','19f87c83a8a7c6d0d2540aedc34620be')
+ THEN problems:=problems||format('current_job_context_facts viewdef md5 %s',coalesce(view_md5,'<missing>')); END IF;
+ IF cardinality(problems)>0 THEN
+  RAISE EXCEPTION 'context_status_preimage_mismatch: %; read the live definitions before replacing them',array_to_string(problems,'; ');
+ END IF;
+END $guard$;
 
 -- 1. Statuses. A wider check cannot fail on existing rows.
 ALTER TABLE public.business_events DROP CONSTRAINT IF EXISTS business_events_attribution_status_check;

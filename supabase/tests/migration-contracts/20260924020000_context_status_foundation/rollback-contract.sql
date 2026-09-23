@@ -13,6 +13,18 @@ BEGIN
   IF to_regprocedure(f) IS NOT NULL THEN RAISE EXCEPTION 'f1 rollback left %',f; END IF;
  END LOOP;
  IF to_regclass('public.context_capture_runs') IS NOT NULL THEN RAISE EXCEPTION 'f1 rollback left context_capture_runs'; END IF;
+ -- The live production bodies are back byte for byte; the other overload never moved.
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()')) IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
+ THEN RAISE EXCEPTION 'f1 rollback heartbeat is not the live body'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
+    IS DISTINCT FROM 'd3441ee4b6c93777564f1385b00c73dc'
+ THEN RAISE EXCEPTION 'f1 rollback custody writer is not the live body'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(text,text,jsonb,text,jsonb)'))
+    IS DISTINCT FROM 'f8c4bd29bba0878396ee7626c21ee65d'
+ THEN RAISE EXCEPTION 'f1 rollback moved the 5-arg overload'; END IF;
+ IF (SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c WHERE c.conrelid='public.business_events'::regclass AND c.conname='business_events_attribution_status_check')
+    IS DISTINCT FROM 'CHECK ((attribution_status = ANY (ARRAY[''direct''::text, ''thread''::text, ''single_open''::text, ''single_line''::text, ''luna''::text, ''admin_bucket''::text, ''pending_luna''::text, ''empty''::text, ''automated''::text])))'
+ THEN RAISE EXCEPTION 'f1 rollback status check is not the live nine values'; END IF;
  IF EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.business_events'::regclass AND attname='candidate_job_ids' AND NOT attisdropped)
  THEN RAISE EXCEPTION 'f1 rollback left candidate_job_ids'; END IF;
  IF pg_get_constraintdef((SELECT oid FROM pg_constraint WHERE conname='business_events_attribution_status_check')) LIKE '%unplaced%'

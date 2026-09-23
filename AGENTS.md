@@ -542,7 +542,7 @@ time as `coalesce(event_at, occurred_at)` (`20260917120000`); do not restore
 an `event_at`-only gate — production almost never populates `event_at`.
 The captain heartbeat is `GET ops-api?action=context_pipeline_status`
 (migration `20260917210000`). Field contract: `docs/context/pipeline-status.md`.
-Since F1 (`20260923160500`) it is a composer: `context_core_status()` keys stay
+Since F1 (`20260924020000`) it is a composer: `context_core_status()` keys stay
 top-level and each owner slice replaces only its own block sub-function
 (`cadence`, `capture_sources`, `ghl_capture`, `booking_capture`, `parties`);
 only F1 edits `context_pipeline_status()`. "Linked" is

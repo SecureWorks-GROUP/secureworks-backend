@@ -380,3 +380,33 @@ BEGIN
  IF (SELECT count(*) FROM public.context_capture_runs)-before_runs<>2 THEN RAISE EXCEPTION 'f1 refused calls wrote rows'; END IF;
 END $$;
 ROLLBACK;
+
+-- 9. Only the intended objects moved. The other persist_luna_context_revision
+-- overload is still the production body, the 9-arg writer is the production
+-- body with the one linked-status predicate changed, the heartbeat body lives
+-- on unchanged as context_core_status(), and every live attribution status is
+-- still allowed.
+BEGIN;
+DO $$
+DECLARE s text; j uuid:=gen_random_uuid(); e uuid;
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(text,text,jsonb,text,jsonb)'))
+    IS DISTINCT FROM 'f8c4bd29bba0878396ee7626c21ee65d'
+ THEN RAISE EXCEPTION 'f1 touched the 5-arg persist_luna_context_revision overload'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
+    IS DISTINCT FROM '2ef95a949f0aae99cc323abde10f2ee7'
+ THEN RAISE EXCEPTION 'f1 9-arg persist_luna_context_revision is not the expected F1 body'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')) IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
+ THEN RAISE EXCEPTION 'f1 context_core_status() is not the production heartbeat body'; END IF;
+ IF (SELECT count(*) FROM pg_proc WHERE proname='persist_luna_context_revision' AND pronamespace='public'::regnamespace)<>2
+ THEN RAISE EXCEPTION 'f1 changed the number of persist_luna_context_revision overloads'; END IF;
+ IF (SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c WHERE c.conrelid='public.business_events'::regclass AND c.conname='business_events_attribution_status_check')
+    IS DISTINCT FROM 'CHECK ((attribution_status = ANY (ARRAY[''direct''::text, ''thread''::text, ''single_open''::text, ''single_line''::text, ''luna''::text, ''admin_bucket''::text, ''pending_luna''::text, ''empty''::text, ''automated''::text, ''content_ref''::text, ''party''::text, ''unplaced''::text])))'
+ THEN RAISE EXCEPTION 'f1 attribution status check is not the nine live values plus content_ref, party, unplaced'; END IF;
+ INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,'00000000-0000-0000-0000-000000000001','accepted','fencing','F1-LIVE-'||j);
+ e:=pg_temp.f1_event(j,'f1-live-contact','direct',NULL,now(),'live status row');
+ FOREACH s IN ARRAY ARRAY['direct','thread','single_open','single_line','luna','admin_bucket','pending_luna','empty','automated'] LOOP
+  UPDATE public.business_events SET attribution_status=s WHERE id=e;
+ END LOOP;
+END $$;
+ROLLBACK;
