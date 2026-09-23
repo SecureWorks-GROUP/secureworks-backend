@@ -15893,7 +15893,7 @@ async function getJobContextFacts(client: any, body: any) {
   return { rows, excluded_count: (data || []).length - rows.length, coverage: 'bounded_rows_only' }
 }
 
-// Conversation reader for the Job Brain. 5-source merge into a normalized
+// Conversation reader for the Job Brain. 4-source merge into a normalized
 // Message[] shape so JARVIS / Secure Sale can read the per-job thread without
 // learning every source's column topology. Read-only, service-role bypass.
 async function getJobConversation(client: any, body: any) {
@@ -16077,34 +16077,12 @@ async function getJobConversation(client: any, body: any) {
     console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
   }
 
-  // 5. chat_logs — JARVIS / crew dialogue referencing this job (lower priority).
-  try {
-    let q = client.from('chat_logs')
-      .select('id, role, query, response, user_email, created_at, job_ids_referenced')
-      .contains('job_ids_referenced', [jobId])
-      .order('created_at', { ascending: false })
-      .limit(Math.min(limit, 25))
-    if (sinceFilter) q = q.gt('created_at', sinceFilter)
-    const { data: logs } = await q
-    for (const r of (logs || [])) {
-      const body = String(r.query || '') + (r.response ? `\n\n${r.response}` : '')
-      messages.push({
-        id: `chat:${r.id}`,
-        job_id: jobId,
-        channel: 'crew',
-        direction: 'internal',
-        occurred_at: r.created_at,
-        author: r.user_email || r.role || null,
-        body,
-        preview: body.slice(0, 500),
-        subject: undefined,
-        source_system: 'chat_logs',
-        source_ref: r.id,
-      })
-    }
-  } catch (e) {
-    console.log('[ops-api] get_job_conversation chat_logs read failed:', (e as Error).message)
-  }
+  // chat_logs (internal AI chat) is deliberately NOT a source. It is our own
+  // assistant dialogue, not customer or crew evidence: on a busy job it filled
+  // almost half the conversation slots, some with prompt-injection text, and
+  // pushed real messages out of the bounded read. Retired by context slice D0
+  // (23 Sep 2026). The invoice door keeps perSource.chat_logs at 0 so its
+  // response keys do not change. Do not re-add it here.
 
   messages.sort((a, b) => {
     const ax = a.occurred_at || ''
@@ -16320,7 +16298,7 @@ async function assembleJobDossier(client: any, body: any) {
   })
   sourceStatus.businessEvents = eventsRead.status
 
-  // ── Conversation: 5-source merge (reuses getJobConversation internal helper) ──
+  // ── Conversation: 4-source merge (reuses getJobConversation internal helper) ──
   const conversationRead = await safeRead('conversation', async () => {
     const { messages } = await getJobConversation(client, {
       job_id: jobId,
@@ -59963,3 +59941,4 @@ export const _updateInvoiceForTest = updateInvoice
 
 export const _getJobContextFactsForTest = getJobContextFacts
 export const _assembleJobDossierForTest = assembleJobDossier
+export const _getJobConversationForTest = getJobConversation
