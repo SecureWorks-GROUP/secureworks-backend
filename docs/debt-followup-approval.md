@@ -78,7 +78,11 @@ text) and both `send_invoice_email` branches route through
 
 `send_payment_link` needs `xero_invoice_id`; a job-only call is refused rather
 than guessing the job's latest invoice. The Xero-direct `/Invoices/{id}/Email`
-route is gone: invoice emails go only through the verified Outlook transport.
+route is no longer used by the debt-follow-up `send_invoice_email` path;
+approved sends from that path use the verified Outlook transport. Ordinary
+invoice-issue email remains outside this executor in `approve_and_send_invoice`,
+`createInvoice`, and `update_invoice`. Those existing paths are a named follow-up
+for a separate ordinary-invoice email design; they are not debtor follow-up.
 `handle_payment_event` still stops the chase workflow, resolves follow-ups and
 logs the payment; only its text needs an approval.
 
@@ -89,13 +93,19 @@ canonical message row is written by ghl-proxy `send_sms` through
 `capture_business_event` (keyed `ghl:<id>`), so it appears once in the
 conversation. A confirmed email stores the Outlook acceptance, recipients,
 subject and the SHA-256 of the attached PDF; the transport's own
-`invoice.emailed` business event carries the approval id and that hash. Graph
+`invoice.emailed` business event carries the approval id and that hash, and
+`getJobConversation` reads that event once as an outbound email. Graph
 `sendMail` returns no message id, so email proof is acceptance, not delivery.
+If the business-event write fails after Outlook accepts the send, the executor
+keeps the send as confirmed and exposes `timeline_write_failed: true` in its
+provider proof.
 
 ## Known follow-ups (not in this change)
 
-- `trigger_chase_workflow` still adds the GHL `chase-overdue` tag, which a GHL
-  workflow can turn into a text. It is outside this executor.
+- `trigger_chase_workflow` now refuses with
+  `chase_workflow_trigger_disabled` and makes no GHL call. Replacing it with an
+  approved workflow handoff needs its own design. `stop_chase_workflow` remains
+  available to remove the chase tag and clear its fields.
 - A new debtor reply since approval is not yet a refusal reason.
 - The Clear Debt screen (secureworks-ux) still calls the old actions without an
   approval; those calls are now recorded dry runs until the screen gains the

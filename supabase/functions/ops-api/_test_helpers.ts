@@ -110,6 +110,7 @@ export function makeStubLogBusinessEvent() {
   const events: any[] = []
   const logBusinessEvent = async (_client: any, event: any) => {
     events.push(event)
+    return true
   }
   return { logBusinessEvent, events }
 }

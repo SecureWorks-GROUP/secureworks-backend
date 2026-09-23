@@ -3692,8 +3692,15 @@ unchanged, AND `DEBT_FOLLOWUP_SEND_EXECUTE` exactly `"true"` with a captain
 press. The switch is unset; never set it in code, env or a flag (a test fails on
 an assignment). Turning it on is the captain's call. Anything else records a
 dry run and makes no provider call; one approval sends at most once. Never add
-a debtor send that bypasses it, and never restore the Xero-direct
-`/Invoices/{id}/Email` route. Contract and follow-ups:
+a debtor send that bypasses it. `trigger_chase_workflow` refuses and makes no
+GHL call or tag/custom-field write; `stop_chase_workflow` may still remove the
+tag and clear those fields. The debt-follow-up `send_invoice_email` path no
+longer uses Xero's direct `/Invoices/{id}/Email` route. Ordinary invoice-issue
+email in `approve_and_send_invoice`, `createInvoice`, and `update_invoice`
+remains outside this executor and is a named follow-up for a separate design.
+Confirmed Outlook sends appear once in `getJobConversation` through their
+`invoice.emailed` business event; a failed event write is surfaced as
+`timeline_write_failed` in provider proof. Contract and follow-ups:
 `docs/debt-followup-approval.md`.
 
 ## Outbound SMS Sender Policy Is One Shared Module

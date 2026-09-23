@@ -30,6 +30,7 @@ import {
   buildExpectedRecipientSet,
   normaliseFullEmail,
 } from "./recipient_anchors.ts";
+import { SMS_DEFAULT_FROM_NUMBER } from "../_shared/sms_from_number.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -42,8 +43,6 @@ export const DEBT_FOLLOWUP_CAPTAIN_EMAILS_ENV = "DEBT_FOLLOWUP_CAPTAIN_EMAILS";
 export const DEBT_FOLLOWUP_APPROVAL_TTL_MS = 30 * 60_000;
 export const DEBT_FOLLOWUP_MAX_INVOICES = 20;
 export const DEBT_FOLLOWUP_MAX_SMS_CHARS = 1600;
-/** ghl-proxy's company default sender (_shared/sms_from_number.ts). Bound for review. */
-export const DEBT_FOLLOWUP_SMS_FROM = "+61489267771";
 
 export const DEBT_FOLLOWUP_KINDS = [
   "chase_sms",
@@ -67,10 +66,13 @@ export const DEBT_FOLLOWUP_HOLD_CLASSES = new Set([
   "in_dispute",
   "not_owed",
   "bad_debt",
+  "blocked_by_us",
 ]);
 export const DEBT_FOLLOWUP_HOLD_BLOCKERS = new Set([
   "paid_unallocated",
   "payment_claimed",
+  "invoice_wrong",
+  "context_pending",
 ]);
 const INVOICE_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
@@ -559,7 +561,7 @@ export async function buildDebtFollowupProposal(
       channel: "sms",
       ghl_contact_id: verified,
       phone: phoneKey(c.value.phone),
-      from_number: DEBT_FOLLOWUP_SMS_FROM,
+      from_number: SMS_DEFAULT_FROM_NUMBER,
     };
   } else {
     const x = xeroById.get(first.xero_invoice_id)!;
@@ -1378,6 +1380,7 @@ async function sendOnce(
             invoice_number: attachment.invoice_number,
             attachment_sha256: res.body?.attachment_sha256 ?? null,
             body_sha256: p.body_sha256,
+            timeline_write_failed: res.body?.timeline_write_failed === true,
           },
         };
       } else if (
