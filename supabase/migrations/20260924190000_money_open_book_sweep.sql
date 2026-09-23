@@ -69,7 +69,7 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_money_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','de2b5f6c198f6ac3499bf33d3a18fdd2'],false),
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
-  ('public.context_money_policy()',ARRAY['815fa0d93470e23b20149bb131d1f9b4'],true),
+  ('public.context_money_policy()',ARRAY['68f05a887a7e5c890e6afb9d0a8983d8'],true),
   ('public.context_money_open_book_mode()',ARRAY['6288fa83702498c3097df69a5f5db23a'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
