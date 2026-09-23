@@ -214,7 +214,16 @@ function invoice(n: number, over: Record<string, any>) {
     job_number: null,
     synced_at: "2026-09-24T01:00:00.000Z",
     raw_json: {
-      Contact: { ContactID: contact },
+      Contact: {
+        ContactID: contact,
+        EmailAddress: contact ? `payer-${contact}@example.test` : undefined,
+        Phones: contact
+          ? [{
+            PhoneAreaCode: "+61",
+            PhoneNumber: `0412 345 67${String(contact).slice(-1)}`,
+          }]
+          : [],
+      },
       SentToContact: true,
       Payments: [],
     },
@@ -413,7 +422,7 @@ const JOB_A_MESSAGES = [
 
 Deno.test("grouping: verified contact only; a shared name never joins, a conflict or no contact stands alone", async () => {
   const out: any = await debtWorklist(
-    new URLSearchParams({ timeline: "none" }),
+    new URLSearchParams({ timeline: "recent" }),
     deps(fakeClient(unitTables())),
   );
   const keys = out.debtors.map((d: any) => d.key).sort();
@@ -457,6 +466,8 @@ Deno.test("contact matches and cached messages stay inside the invoice org", asy
       xero_contact_id: "xc-1",
       ghl_contact_id: "ghl-own",
       job_id: null,
+      email: "other@example.test",
+      phone: "+61 412 345 671",
     },
     {
       org_id: "00000000-0000-0000-0000-000000000099",
@@ -489,9 +500,66 @@ Deno.test("contact matches and cached messages stay inside the invoice org", asy
   assert(!debtor.timeline.entries.some((e: any) => e.provider_id === "ghl:foreign-1"));
 });
 
+Deno.test("duplicate names do not verify a contact match or attach its GHL messages", async () => {
+  const tables = unitTables();
+  tables.xero_invoices = [
+    invoice(1, { job_id: null }),
+    invoice(5, { job_id: null, xero_contact_id: "xc-2" }),
+  ];
+  tables.jobs = [];
+  tables.contact_matches = [{
+    id: "name-only-match",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-name-only",
+    job_id: null,
+    client_name: "Shared Name Pty",
+    email: "different@example.test",
+    phone: "+61 499 555 111",
+  }];
+  tables.ghl_conversation_cache.push({
+    contact_id: "ghl-name-only",
+    messages: [{
+      id: "wrong-payer-message",
+      type: "TYPE_SMS",
+      body: "Message for another payer",
+      timestamp: "2026-09-23T01:00:00Z",
+    }],
+    message_count: 1,
+    synced_at: "2026-09-24T01:00:00Z",
+  });
+  const out: any = await debtWorklist(
+    new URLSearchParams(),
+    deps(fakeClient(tables)),
+  );
+  const debtors = out.debtors.filter((d: any) =>
+    d.identity.names.includes("Shared Name Pty")
+  );
+  assertEquals(debtors.length, 2);
+  for (const debtor of debtors) {
+    assertEquals(
+      debtor.timeline.entries.some((e: any) =>
+        e.provider_id === "ghl:wrong-payer-message"
+      ),
+      false,
+    );
+  }
+  const candidate = debtors.find((d: any) => d.key === "xero:xc-1");
+  assertEquals(candidate.sources.ghl.status, "unverified_candidate");
+  assertEquals(candidate.timeline.complete, false);
+  assertEquals(candidate.sources.ghl.unverified_candidates, [{
+    contact_match_id: "name-only-match",
+    ghl_contact_id: "ghl-name-only",
+    job_id: null,
+    status: "unverified",
+    why: "The candidate email and phone do not match the Xero contact",
+  }]);
+  assertEquals(candidate.sources.ghl.contact_ids, []);
+});
+
 Deno.test("invoice rows: link, next step and owner, freshness, chase and as-of on every row", async () => {
   const out: any = await debtWorklist(
-    new URLSearchParams({ timeline: "none" }),
+    new URLSearchParams({ timeline: "recent" }),
     deps(fakeClient(unitTables())),
   );
   const rows = out.debtors.flatMap((d: any) => d.invoices);
@@ -547,7 +615,7 @@ Deno.test("invoice rows: link, next step and owner, freshness, chase and as-of o
 
 Deno.test("summary: every count names its denominator", async () => {
   const out: any = await debtWorklist(
-    new URLSearchParams({ timeline: "none" }),
+    new URLSearchParams({ timeline: "recent" }),
     deps(fakeClient(unitTables())),
   );
   const s = out.summary;
@@ -577,6 +645,38 @@ Deno.test("summary: every count names its denominator", async () => {
     of: 4,
     denominator: "debtors",
   });
+  assertEquals(s.debtors.shown, {
+    n: 4,
+    of: 4,
+    denominator: "debtors_in_returned_set",
+    returned_set: 4,
+    total_book: 4,
+  });
+});
+
+Deno.test("filtered worklist keeps whole-book and returned-slice reconciliation separate", async () => {
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1" }),
+    deps(fakeClient(unitTables())),
+  );
+  assertEquals(out.reconciliation.scope, "whole_book");
+  assertEquals(out.reconciliation.book_invoice_ids, 8);
+  assertEquals(out.reconciliation.book_represented_invoice_ids, 8);
+  assertEquals(out.reconciliation.shown_invoice_ids, 4);
+  assertEquals(out.reconciliation.exactly_once, true);
+  assertEquals(out.reconciliation.not_shown, []);
+  assertEquals(out.reconciliation.returned_debtor_keys, ["xero:xc-1"]);
+  assertEquals(out.reconciliation.returned_invoice_ids.length, 4);
+  assertEquals(out.reconciliation.returned_exactly_once, true);
+  assertEquals(out.reconciliation.returned_not_shown, []);
+  assertEquals(out.summary.debtors.shown, {
+    n: 1,
+    of: 4,
+    denominator: "all_debtors_in_book",
+    returned_set: 1,
+    total_book: 4,
+  });
+  assertEquals(out.faults, []);
 });
 
 Deno.test("timeline: one stream, provider ids, the same message seen twice appears once", async () => {
@@ -605,6 +705,8 @@ Deno.test("timeline: one stream, provider ids, the same message seen twice appea
   const m2 = t.entries.filter((e: any) => e.provider_id === "ghl:m2");
   assertEquals(m2.length, 1);
   assertEquals(m2[0].seen_in.sort(), ["ghl_cache", "payment_chase_logs"]);
+  assertEquals(m2[0].job_id, JOB_A);
+  assertEquals(m2[0].invoice_scope, "job");
   assert(!keys.includes("chase:c-sms"));
   assertEquals(t.duplicates_merged, 2);
   // Every kind in one stream.
@@ -660,6 +762,30 @@ Deno.test("timeline: one stream, provider ids, the same message seen twice appea
     out.debtors[0].invoices.every((i: any) => i.brief === null),
     true,
   );
+});
+
+Deno.test("one provider message copied across jobs is represented at debtor scope", () => {
+  const first = entryFromConversation({
+    channel: "sms",
+    direction: "inbound",
+    occurred_at: "2026-09-20T01:00:00Z",
+    preview: "same provider message",
+    source_system: "ghl_cache",
+    provider_message_id: "ghl:shared-copy",
+  }, JOB_A, [INV(1)]);
+  const second = entryFromConversation({
+    channel: "sms",
+    direction: "inbound",
+    occurred_at: "2026-09-20T01:00:00Z",
+    preview: "same provider message",
+    source_system: "ghl_cache",
+    provider_message_id: "ghl:shared-copy",
+  }, JOB_B, [INV(3)]);
+  const merged = mergeTimeline([first, second]);
+  assertEquals(merged.entries.length, 1);
+  assertEquals(merged.entries[0].job_id, null);
+  assertEquals(merged.entries[0].invoice_scope, "debtor");
+  assertEquals(merged.entries[0].invoice_ids.sort(), [INV(1), INV(3)].sort());
 });
 
 Deno.test("chase SMS dedupe keeps earlier, ambiguous and competing copies", () => {
@@ -760,11 +886,43 @@ Deno.test("timeline: recent mode trims per debtor and says so", async () => {
   assertEquals(t.truncated, true);
   assertEquals(t.per_job_cap_reached, ["SWP-26001"]);
   assertEquals(t.complete, false);
+  assertEquals(
+    out.debtors.find((d: any) => d.key === "xero:xc-1").last_contact.status,
+    "incomplete",
+  );
+});
+
+Deno.test("last contact uses merged entries before the recent debtor trim", async () => {
+  const tables = unitTables();
+  const start = Date.parse("2026-09-20T01:00:00Z");
+  tables.payment_chase_logs = Array.from({ length: 13 }, (_, i) => ({
+    id: `new-note-${i}`,
+    xero_invoice_id: INV(1),
+    job_id: JOB_A,
+    method: "note",
+    notes: `Internal note ${i}`,
+    chased_by: "desk@example.test",
+    created_at: new Date(start + i * 60_000).toISOString(),
+  }));
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "recent" }),
+    deps(fakeClient(tables), conversationStub({ [JOB_A]: JOB_A_MESSAGES }).fn),
+  );
+  const debtor = out.debtors[0];
+  assertEquals(debtor.timeline.entries.length, 12);
+  assertEquals(debtor.timeline.truncated, true);
+  assertEquals(
+    debtor.timeline.entries.some((e: any) => e.provider_id === "ghl:m1"),
+    false,
+  );
+  assertEquals(debtor.last_contact.last.at, "2026-09-14T01:00:00.000Z");
+  assertEquals(debtor.last_contact.status, "complete");
+  assertEquals(debtor.last_contact.complete, true);
 });
 
 Deno.test("faults: an unreadable source is a fault on the row, never a clean zero", async () => {
   const out: any = await debtWorklist(
-    new URLSearchParams({ timeline: "none" }),
+    new URLSearchParams({ timeline: "recent" }),
     deps(
       fakeClient(
         unitTables(),
@@ -794,7 +952,7 @@ Deno.test("faults: a failed context read marks every row unknown, and the book s
   const tables = unitTables();
   const client = fakeClient(tables, new Set(["jobs", "contact_matches"]));
   const out: any = await debtWorklist(
-    new URLSearchParams({ timeline: "none" }),
+    new URLSearchParams({ timeline: "recent" }),
     deps(client),
   );
   assertEquals(out.reconciliation.exactly_once, true);
@@ -833,6 +991,7 @@ Deno.test("faults: conversation read faults surface on the debtor and its timeli
   assertEquals(d.sources.ghl.status, "unreadable");
   assertEquals(d.timeline.complete, false);
   assertEquals(d.last_contact.complete, false);
+  assertEquals(d.last_contact.status, "incomplete");
 });
 
 Deno.test("refusals: unreadable book, unknown debtor, bad params", async () => {
@@ -878,6 +1037,15 @@ Deno.test("refusals: unreadable book, unknown debtor, bad params", async () => {
         deps(fakeClient(unitTables())),
       ),
     DebtWorklistError,
+  );
+  await assertRejects(
+    () =>
+      debtWorklist(
+        new URLSearchParams({ timeline: "none" }),
+        deps(fakeClient(unitTables())),
+      ),
+    DebtWorklistError,
+    "timeline must be recent or full",
   );
 });
 
@@ -1212,7 +1380,7 @@ Deno.test("org boundary: a signed-in caller from another org is refused before a
   );
   assertEquals(client.reads, []);
   const ok: any = await debtWorklist(
-    new URLSearchParams({ timeline: "none" }),
+    new URLSearchParams({ timeline: "recent" }),
     {
       ...deps(fakeClient(unitTables())),
       callerOrgId: ORG,
@@ -1246,7 +1414,7 @@ Deno.test({
       auth: { persistSession: false },
     });
     const out: any = await debtWorklist(
-      new URLSearchParams({ timeline: "none" }),
+      new URLSearchParams({ timeline: "recent" }),
       {
         client,
         orgId: LIVE_ORG,

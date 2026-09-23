@@ -46,6 +46,7 @@ import {
   XERO_STALE_HOURS,
 } from "./invoice_context.ts";
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
+import { emailKey, phoneKey } from "../_shared/job_refs.ts";
 
 export const DEBT_WORKLIST_VERSION = "debt-worklist/v1";
 
@@ -57,7 +58,7 @@ const TIMELINE_BOUNDS = {
   // One debtor: everything the merge will return per job, no debtor trim.
   full: { per_job: 100, facts_per_job: 60, per_debtor: null as number | null },
 } as const;
-type TimelineMode = "none" | keyof typeof TIMELINE_BOUNDS;
+type TimelineMode = keyof typeof TIMELINE_BOUNDS;
 // A chase-log SMS and the provider's copy of it are one message when the text
 // matches and they are this close in time.
 const SAME_SMS_WINDOW_MS = 15 * 60_000;
@@ -186,6 +187,43 @@ function providerFromId(providerId: string | null, fallback: string): string {
   if (prefix === "ghl") return "ghl";
   if (prefix === "graph" || prefix === "graph-group") return "outlook";
   return prefix || fallback;
+}
+
+function xeroContactEvidence(invoices: any[]) {
+  const byContact = new Map<string, { emails: Set<string>; phones: Set<string> }>();
+  for (const invoice of invoices) {
+    const identity = debtorIdentityFor(invoice);
+    if (identity.status !== "verified" || !identity.xero_contact_id) continue;
+    const evidence = byContact.get(identity.xero_contact_id) ?? {
+      emails: new Set<string>(),
+      phones: new Set<string>(),
+    };
+    const email = emailKey(str(invoice.raw_contact_email));
+    if (email) evidence.emails.add(email);
+    const phones = Array.isArray(invoice.raw_contact_phones)
+      ? invoice.raw_contact_phones
+      : [];
+    for (const phone of phones) {
+      const key = phoneKey(
+        `${phone?.PhoneAreaCode ?? ""}${phone?.PhoneNumber ?? ""}`,
+      );
+      if (key) evidence.phones.add(key);
+    }
+    byContact.set(identity.xero_contact_id, evidence);
+  }
+  return {
+    byContact,
+    verifies(match: Record<string, unknown>) {
+      const evidence = byContact.get(String(match.xero_contact_id ?? ""));
+      if (!evidence) return false;
+      const email = emailKey(str(match.email));
+      const phone = phoneKey(str(match.phone));
+      return Boolean(
+        (email && evidence.emails.has(email)) ||
+          (phone && evidence.phones.has(phone)),
+      );
+    },
+  };
 }
 
 // ── debtor identity ──────────────────────────────────────────────────────────
@@ -543,6 +581,10 @@ export function mergeTimeline(entries: TimelineEntry[]): {
   const byKey = new Map<string, TimelineEntry>();
   let merged = 0;
   const absorb = (keep: TimelineEntry, other: TimelineEntry) => {
+    if (keep.job_id !== other.job_id) {
+      keep.job_id = null;
+      keep.invoice_scope = "debtor";
+    }
     for (const s of other.seen_in) {
       if (!keep.seen_in.includes(s)) keep.seen_in.push(s);
     }
@@ -682,6 +724,8 @@ const INVOICE_COLS = [
   "debt_proposal_status",
   "debt_proposal_at",
   "raw_contact_id:raw_json->Contact->>ContactID",
+  "raw_contact_email:raw_json->Contact->>EmailAddress",
+  "raw_contact_phones:raw_json->Contact->Phones",
   "raw_payments:raw_json->Payments",
   "sent_to_contact:raw_json->SentToContact",
 ].join(", ");
@@ -719,8 +763,8 @@ export async function debtWorklist(
   }
   const timelineRaw = str(params.get("timeline")) ??
     (debtorFilter ? "full" : "recent");
-  if (!["none", "recent", "full"].includes(timelineRaw)) {
-    throw new DebtWorklistError("timeline must be none, recent or full");
+  if (!Object.hasOwn(TIMELINE_BOUNDS, timelineRaw)) {
+    throw new DebtWorklistError("timeline must be recent or full");
   }
   const timelineMode = timelineRaw as TimelineMode;
   if (timelineMode === "full" && !debtorFilter) {
@@ -754,6 +798,8 @@ export async function debtWorklist(
     );
   }
   const populationIds = population.map((i) => i.xero_invoice_id);
+  const xeroContact = xeroContactEvidence(population);
+  const isContactMatchVerified = xeroContact.verifies;
 
   // 2. Per-invoice context from the coverage read (link, facts, conversation
   //    counts, blockers). One call for the whole book.
@@ -763,7 +809,7 @@ export async function debtWorklist(
   try {
     coverage = await debtContextCoverage(
       new URLSearchParams({ population: "open" }),
-      deps,
+      { ...deps, isContactMatchVerified },
     );
     for (const row of coverage.rows ?? []) {
       coverageById.set(row.xero_invoice_id, row);
@@ -848,7 +894,7 @@ export async function debtWorklist(
 
   const invoiceEvents = new Map<string, any[]>();
   let invoiceEventsFault: string | null = null;
-  if (timelineMode !== "none") {
+  {
     try {
       for (const ids of chunk(populationIds)) {
         const rows = await pageThrough(
@@ -889,6 +935,7 @@ export async function debtWorklist(
     ),
   ];
   const contactMatchGhl = new Map<string, Set<string>>();
+  const unverifiedContactMatches = new Map<string, any[]>();
   let contactMatchFault: string | null = null;
   try {
     for (const ids of chunk(verifiedContactIds)) {
@@ -896,13 +943,35 @@ export async function debtWorklist(
         "contact_matches",
         () =>
           client.from("contact_matches")
-            .select("id, xero_contact_id, ghl_contact_id, job_id")
+            .select(
+              "id, xero_contact_id, ghl_contact_id, job_id, email, phone",
+            )
             .eq("org_id", deps.orgId)
             .in("xero_contact_id", ids),
         warnings,
       );
       for (const r of rows) {
         if (!r.xero_contact_id || !r.ghl_contact_id) continue;
+        if (!isContactMatchVerified(r)) {
+          const evidence = xeroContact.byContact.get(r.xero_contact_id);
+          const reason = !evidence ||
+              (evidence.emails.size === 0 && evidence.phones.size === 0)
+            ? "No Xero contact email or phone is available to verify this candidate"
+            : !emailKey(str(r.email)) && !phoneKey(str(r.phone))
+            ? "The candidate has no email or phone to verify against Xero"
+            : "The candidate email and phone do not match the Xero contact";
+          const candidates = unverifiedContactMatches.get(r.xero_contact_id) ??
+            [];
+          candidates.push({
+            contact_match_id: str(r.id),
+            ghl_contact_id: str(r.ghl_contact_id),
+            job_id: str(r.job_id),
+            status: "unverified",
+            why: reason,
+          });
+          unverifiedContactMatches.set(r.xero_contact_id, candidates);
+          continue;
+        }
         const set = contactMatchGhl.get(r.xero_contact_id) ?? new Set();
         set.add(r.ghl_contact_id);
         contactMatchGhl.set(r.xero_contact_id, set);
@@ -1159,7 +1228,7 @@ export async function debtWorklist(
     string,
     { messages: any[]; faults: string[] }
   >();
-  if (timelineMode !== "none") {
+  {
     const bounds = TIMELINE_BOUNDS[timelineMode];
     const wanted = [
       ...new Set(
@@ -1220,7 +1289,7 @@ export async function debtWorklist(
   const factsByJob = new Map<string, any[]>();
   const factsCapJobs = new Set<string>();
   let factsReadFault: string | null = null;
-  if (timelineMode !== "none") {
+  {
     const bounds = TIMELINE_BOUNDS[timelineMode];
     const contactOnly = [
       ...new Set(debtorKeys.flatMap((k) => contactOnlyGhlFor(k))),
@@ -1303,6 +1372,9 @@ export async function debtWorklist(
     const identity: DebtorIdentity = rows[0]._identity;
     const names = [...new Set(rows.map((r) => r.contact.name).filter(Boolean))]
       .sort();
+    const unverifiedCandidates = identity.xero_contact_id
+      ? unverifiedContactMatches.get(identity.xero_contact_id) ?? []
+      : [];
     const debtorFaults: Fault[] = [];
     for (const r of rows) {
       for (const f of r.faults) {
@@ -1343,9 +1415,11 @@ export async function debtWorklist(
     ];
 
     // Timeline.
-    let timeline: any = null;
+    let timeline: any;
+    let mergedTimelineEntries: TimelineEntry[] = [];
+    let timelineSourcesComplete = false;
     const conversationFaults: string[] = [];
-    if (timelineMode !== "none") {
+    {
       const bounds = TIMELINE_BOUNDS[timelineMode];
       const raw: TimelineEntry[] = [];
       for (const jobId of linkedJobs) {
@@ -1397,6 +1471,7 @@ export async function debtWorklist(
         j,
       ) => jobs.get(j)?.job_number ?? j);
       const merged = mergeTimeline(raw);
+      mergedTimelineEntries = merged.entries;
       const perJobCapHit = linkedJobs.filter((j) =>
         (conversations.get(j)?.messages.length ?? 0) >= bounds.per_job
       )
@@ -1430,6 +1505,13 @@ export async function debtWorklist(
             "GHL messages held by contact (no job) could not be read for this debtor",
         });
       }
+      timelineSourcesComplete = conversationFaults.length === 0 && !chaseFault &&
+        !invoiceEventsFault && !coverageFault && !linkUnknown &&
+        !jobsFault && !(factsReadFault && linkedJobs.length) &&
+        !(contactMatchFault && identity.status === "verified") &&
+        !(contactMessagesFault && contactOnlyGhl.length) &&
+        perJobCapHit.length === 0 && factsCapHit.length === 0 &&
+        unverifiedCandidates.length === 0;
       timeline = {
         mode: timelineMode,
         order: "newest_first",
@@ -1441,20 +1523,15 @@ export async function debtWorklist(
         per_job_cap_reached: perJobCapHit,
         facts_per_job_cap: bounds.facts_per_job,
         facts_cap_reached: factsCapHit,
-        complete: conversationFaults.length === 0 && !chaseFault &&
-          !invoiceEventsFault && !coverageFault && !linkUnknown &&
-          !jobsFault && !(factsReadFault && linkedJobs.length) &&
-          !(contactMatchFault && identity.status === "verified") &&
-          !(contactMessagesFault && contactOnlyGhl.length) &&
-          perJobCapHit.length === 0 && factsCapHit.length === 0 &&
-          entries.length === total,
+        complete: timelineSourcesComplete && entries.length === total,
+        sources_complete: timelineSourcesComplete,
         note: STORED_COPIES_NOTE,
       };
     }
 
     // Last contact: newest provider message in either direction.
     // A logged call counts whichever way it went; a message needs a direction.
-    const contactEntries = (timeline?.entries ?? []).filter((
+    const contactEntries = mergedTimelineEntries.filter((
       e: TimelineEntry,
     ) =>
       e.kind === "call" ||
@@ -1472,45 +1549,18 @@ export async function debtWorklist(
           source: e.source,
         }
         : null;
-    const fallbackInbound = rows.map((r) =>
-      r.context.last_client_message_at
-    ).filter(Boolean).sort().pop() ?? null;
-    const lastContact = timeline
-      ? {
-        last: brief(contactEntries[0]),
-        last_inbound: brief(
-          contactEntries.find((e: TimelineEntry) => e.direction === "inbound"),
-        ),
-        last_outbound: brief(
-          contactEntries.find((e: TimelineEntry) => e.direction === "outbound"),
-        ),
-        complete: timeline.complete,
-        basis: "stored timeline copies",
-      }
-      : {
-        last: fallbackInbound
-          ? {
-            at: fallbackInbound,
-            channel: null,
-            direction: "inbound",
-            provider: null,
-            source: "context counts",
-          }
-          : null,
-        last_inbound: fallbackInbound
-          ? {
-            at: fallbackInbound,
-            channel: null,
-            direction: "inbound",
-            provider: null,
-            source: "context counts",
-          }
-          : null,
-        last_outbound: null,
-        complete: false,
-        basis:
-          "context counts only (timeline not read); inbound email and business events, no GHL cache timestamps",
-      };
+    const lastContact = {
+      last: brief(contactEntries[0]),
+      last_inbound: brief(
+        contactEntries.find((e: TimelineEntry) => e.direction === "inbound"),
+      ),
+      last_outbound: brief(
+        contactEntries.find((e: TimelineEntry) => e.direction === "outbound"),
+      ),
+      complete: timelineSourcesComplete,
+      status: timelineSourcesComplete ? "complete" : "incomplete",
+      basis: "merged stored timeline copies before the debtor trim",
+    };
 
     // Per-source status.
     const staleIds = rows.filter((r) => !r.xero.fresh).map((r) =>
@@ -1535,9 +1585,7 @@ export async function debtWorklist(
       ? "partial"
       : "missing";
     const countIn = (pred: (e: TimelineEntry) => boolean) =>
-      timeline
-        ? (timeline.entries as TimelineEntry[]).filter(pred).length
-        : null;
+      (timeline.entries as TimelineEntry[]).filter(pred).length;
 
     // GHL: every bound contact with its own cache sync time and stale flag.
     const staleCutoff = now.getTime() - GHL_CACHE_STALE_HOURS * 3_600_000;
@@ -1571,10 +1619,12 @@ export async function debtWorklist(
       Boolean(ghlCacheFault) ||
       Boolean(contactMatchFault && identity.status === "verified") ||
       Boolean(contactMessagesFault && contactOnlyGhl.length) ||
-      Boolean(timeline && convFaultBy("ghl_cache"));
+      Boolean(convFaultBy("ghl_cache"));
     const ghlStale = !ghlUnreadable && ghlContacts.some((c) => c.stale);
     const ghlStatus = ghlUnreadable
       ? "unreadable"
+      : !ghlContacts.length && unverifiedCandidates.length
+      ? "unverified_candidate"
       : !linkedRows.length && !ghlContacts.length
       ? "no_job"
       : ghlContacts.length === 0
@@ -1586,11 +1636,9 @@ export async function debtWorklist(
       : "several";
     const ghlSyncs = ghlContacts.map((c) => c.cache_synced_at);
     const emailUnreadable = linkUnknown ||
-      Boolean(
-        timeline && (convFaultBy("inbox") || convFaultBy("business_events")),
-      );
+      Boolean(convFaultBy("inbox") || convFaultBy("business_events"));
     const notesUnreadable = Boolean(chaseFault) ||
-      Boolean(timeline && convFaultBy("job_events"));
+      Boolean(convFaultBy("job_events"));
     const sources = {
       xero: {
         status: staleIds.length ? "stale" : "current",
@@ -1606,7 +1654,7 @@ export async function debtWorklist(
           ? null
           : [...ghlSyncs].sort()[0],
         stale_after: `${GHL_CACHE_STALE_HOURS}h`,
-        stale: ghlUnreadable ? null : ghlStale,
+        stale: ghlUnreadable || unverifiedCandidates.length ? null : ghlStale,
         owner: "CIO",
         recovery_action: ghlUnreadable
           ? "Retry the read; if it keeps failing, CIO checks the job link, contact_matches and GHL cache reads"
@@ -1614,12 +1662,13 @@ export async function debtWorklist(
           ? "CIO: run the GHL message reconcile for the stale contact(s)"
           : ghlStatus === "no_contact"
           ? "CIO: bind the job's GHL contact"
+          : ghlStatus === "unverified_candidate"
+          ? "CIO: verify the candidate GHL contact using a matching Xero email or phone"
           : null,
         contact_ids: ghlContacts,
+        unverified_candidates: unverifiedCandidates,
         messages_shown: countIn((e) => e.provider === "ghl"),
-        read: timeline
-          ? "stored GHL cache and captured business events"
-          : "not read (timeline=none)",
+        read: "stored GHL cache and captured business events",
       },
       email: {
         // Never complete: Outlook Sent Items are not captured anywhere yet.
@@ -1627,9 +1676,7 @@ export async function debtWorklist(
           ? "unreadable"
           : !linkedRows.length
           ? "no_job"
-          : timeline
-          ? "partial"
-          : "not_read",
+          : "partial",
         last_success_at: null,
         stale_after: null,
         owner: "CIO",
@@ -1669,9 +1716,7 @@ export async function debtWorklist(
           r.context.facts === "present"
         ).length,
         of_invoices: rows.length,
-        timeline_read: !timeline
-          ? "not_read"
-          : factsReadFault && linkedJobs.length
+        timeline_read: factsReadFault && linkedJobs.length
           ? "unreadable"
           : "read",
         facts_shown: countIn((e) => e.kind === "fact"),
@@ -1748,25 +1793,43 @@ export async function debtWorklist(
     a.key.localeCompare(b.key)
   );
 
-  // 7. Exactly-once check. Run on every response: a failure is published, never hidden.
-  const seen = new Map<string, number>();
-  for (const d of debtors) {
-    for (const i of d.invoices) {
-      seen.set(i.xero_invoice_id, (seen.get(i.xero_invoice_id) ?? 0) + 1);
+  const bookSeen = new Map<string, number>();
+  for (const rows of groups.values()) {
+    for (const row of rows) {
+      const id = row.xero_invoice_id;
+      bookSeen.set(id, (bookSeen.get(id) ?? 0) + 1);
     }
   }
-  const expectedIds = debtorFilter
+  const bookNotShown = populationIds.filter((id) => !bookSeen.has(id));
+  const bookShownTwice = [...bookSeen.entries()]
+    .filter(([, n]) => n > 1)
+    .map(([id]) => id);
+  const returnedSeen = new Map<string, number>();
+  for (const d of debtors) {
+    for (const i of d.invoices) {
+      returnedSeen.set(
+        i.xero_invoice_id,
+        (returnedSeen.get(i.xero_invoice_id) ?? 0) + 1,
+      );
+    }
+  }
+  const returnedExpectedIds = debtorFilter
     ? groups.get(debtorFilter)!.map((r) => r.xero_invoice_id)
     : populationIds;
-  const notShown = expectedIds.filter((id) => !seen.has(id));
-  const shownTwice = [...seen.entries()].filter(([, n]) => n > 1).map(([id]) =>
-    id
+  const returnedNotShown = returnedExpectedIds.filter((id) =>
+    !returnedSeen.has(id)
   );
-  if (notShown.length || shownTwice.length) {
+  const returnedShownTwice = [...returnedSeen.entries()]
+    .filter(([, n]) => n > 1)
+    .map(([id]) => id);
+  if (
+    bookNotShown.length || bookShownTwice.length || returnedNotShown.length ||
+    returnedShownTwice.length
+  ) {
     faults.push({
       source: "worklist",
       detail:
-        `invoice representation broken: ${notShown.length} not shown, ${shownTwice.length} shown more than once`,
+        `invoice representation broken: book ${bookNotShown.length} not shown and ${bookShownTwice.length} duplicated; returned ${returnedNotShown.length} not shown and ${returnedShownTwice.length} duplicated`,
     });
   }
   if (extraInContext.length) {
@@ -1871,7 +1934,15 @@ export async function debtWorklist(
         allDebtorKeys.length,
         "debtors",
       ),
-      shown: debtors.length,
+      shown: {
+        n: debtors.length,
+        of: debtorFilter ? allDebtorKeys.length : debtors.length,
+        denominator: debtorFilter
+          ? "all_debtors_in_book"
+          : "debtors_in_returned_set",
+        returned_set: debtors.length,
+        total_book: allDebtorKeys.length,
+      },
     },
   };
 
@@ -1885,11 +1956,19 @@ export async function debtWorklist(
     filter: { debtor: debtorFilter, timeline: timelineMode },
     summary,
     reconciliation: {
+      scope: "whole_book",
       book_invoice_ids: populationIds.length,
-      shown_invoice_ids: seen.size,
-      exactly_once: notShown.length === 0 && shownTwice.length === 0,
-      not_shown: notShown,
-      shown_more_than_once: shownTwice,
+      book_represented_invoice_ids: bookSeen.size,
+      shown_invoice_ids: returnedSeen.size,
+      exactly_once: bookNotShown.length === 0 && bookShownTwice.length === 0,
+      not_shown: bookNotShown,
+      shown_more_than_once: bookShownTwice,
+      returned_debtor_keys: debtors.map((d) => d.key),
+      returned_invoice_ids: [...returnedSeen.keys()],
+      returned_exactly_once: returnedNotShown.length === 0 &&
+        returnedShownTwice.length === 0,
+      returned_not_shown: returnedNotShown,
+      returned_shown_more_than_once: returnedShownTwice,
       missing_from_context: missingFromContext,
       extra_in_context: extraInContext,
     },
@@ -1902,9 +1981,7 @@ export async function debtWorklist(
         ? { ok: false, error: jobsFault }
         : { ok: true, count: jobs.size },
       notes: chaseFault ? { ok: false, error: chaseFault } : { ok: true },
-      xero_events: timelineMode === "none"
-        ? { ok: true, read: false }
-        : invoiceEventsFault
+      xero_events: invoiceEventsFault
         ? { ok: false, error: invoiceEventsFault }
         : { ok: true },
     },

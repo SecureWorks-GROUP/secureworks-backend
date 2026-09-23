@@ -12,11 +12,13 @@
   {
    "ghl_contact_id": "ghl-syn-9",
    "job_id": "a0000000-0000-4000-8000-000000000009",
+   "email": "synthetic-builders@example.test",
    "xero_contact_id": "c0000000-0000-4000-8000-000000000007"
   },
   {
    "ghl_contact_id": "ghl-syn-contact-only",
    "job_id": null,
+   "email": "synthetic-homes@example.test",
    "xero_contact_id": "c0000000-0000-4000-8000-000000000002"
   }
  ],
@@ -444,7 +446,8 @@
    "org_id": "00000000-0000-0000-0000-00000000000f",
    "raw_json": {
     "Contact": {
-     "ContactID": "c0000000-0000-4000-8000-000000000002"
+     "ContactID": "c0000000-0000-4000-8000-000000000002",
+     "EmailAddress": "synthetic-homes@example.test"
     },
     "Payments": [],
     "SentToContact": true
@@ -478,7 +481,8 @@
    "org_id": "00000000-0000-0000-0000-00000000000f",
    "raw_json": {
     "Contact": {
-     "ContactID": "c0000000-0000-4000-8000-000000000002"
+     "ContactID": "c0000000-0000-4000-8000-000000000002",
+     "EmailAddress": "synthetic-homes@example.test"
     },
     "Payments": [],
     "SentToContact": true
@@ -716,7 +720,8 @@
    "org_id": "00000000-0000-0000-0000-00000000000f",
    "raw_json": {
     "Contact": {
-     "ContactID": "c0000000-0000-4000-8000-000000000007"
+     "ContactID": "c0000000-0000-4000-8000-000000000007",
+     "EmailAddress": "synthetic-builders@example.test"
     },
     "Payments": [],
     "SentToContact": true

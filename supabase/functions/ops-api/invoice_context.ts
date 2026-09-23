@@ -82,6 +82,7 @@ export interface InvoiceContextDeps {
   isCurrentContextFact: (row: Record<string, unknown>, now?: number) => boolean;
   /** Optional override; defaults to current + isLunaSubscriptionFact (v1 or luna_v2). */
   isCurrentLunaFact?: (row: Record<string, unknown>, now?: number) => boolean;
+  isContactMatchVerified?: (match: Record<string, unknown>) => boolean;
   now?: () => Date;
 }
 
@@ -262,6 +263,7 @@ export async function resolveJobLinks(
   client: any,
   invoices: any[],
   orgId?: string,
+  isContactMatchVerified?: (match: Record<string, unknown>) => boolean,
 ): Promise<Map<string, JobLink>> {
   const links = new Map<string, JobLink>();
   const none = (): JobLink => ({
@@ -318,7 +320,7 @@ export async function resolveJobLinks(
   const contactGhlIds = new Map<string, Set<string>>();
   for (const ids of chunk([...wantContacts])) {
     let query = client.from("contact_matches")
-      .select("xero_contact_id, ghl_contact_id, job_id").in(
+      .select("xero_contact_id, ghl_contact_id, job_id, email, phone").in(
         "xero_contact_id",
         ids,
       );
@@ -326,6 +328,7 @@ export async function resolveJobLinks(
     const rows = unwrap(await query);
     for (const m of rows || []) {
       if (!m.xero_contact_id) continue;
+      if (isContactMatchVerified && !isContactMatchVerified(m)) continue;
       if (m.job_id) {
         (contactJobIds.get(m.xero_contact_id) ??
           contactJobIds.set(m.xero_contact_id, new Set()).get(
@@ -864,7 +867,13 @@ export async function invoiceContext(
   // 2. Link.
   const linkRead = await safeRead(
     "job_link",
-    () => resolveJobLinks(client, [inv], deps.orgId),
+    () =>
+      resolveJobLinks(
+        client,
+        [inv],
+        deps.orgId,
+        deps.isContactMatchVerified,
+      ),
   );
   const link: JobLink = linkRead.data?.get(inv.xero_invoice_id) ??
     {
@@ -1370,7 +1379,13 @@ export async function debtContextCoverage(
 
   const linkRead = await safeRead(
     "job_link",
-    () => resolveJobLinks(client, invoices, deps.orgId),
+    () =>
+      resolveJobLinks(
+        client,
+        invoices,
+        deps.orgId,
+        deps.isContactMatchVerified,
+      ),
   );
   sources.job_link = linkRead.status;
   const links = linkRead.data ?? new Map<string, JobLink>();

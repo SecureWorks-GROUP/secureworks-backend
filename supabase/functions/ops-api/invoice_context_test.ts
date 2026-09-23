@@ -43,6 +43,7 @@ import {
   isCurrentContextFact,
   isLunaSubscriptionFact,
 } from "./context_visibility.ts";
+import { emailKey, phoneKey } from "../_shared/job_refs.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const NOW = new Date("2026-09-11T05:00:00.000Z");
@@ -779,6 +780,41 @@ Deno.test("contact resolver rejects matches and jobs outside the invoice org", a
   assertEquals(links.get("contact-route")?.status, "none");
   assertEquals(links.get("id-route")?.status, "none");
   assertEquals(links.get("number-route")?.status, "none");
+});
+
+Deno.test("contact resolver ignores uncorroborated contact matches", async () => {
+  const t = baseTables();
+  const jobId = "a0000000-0000-4000-8000-000000000055";
+  t.jobs = [{
+    id: jobId,
+    org_id: ORG,
+    job_number: "SWF-261955",
+    status: "scheduled",
+    ghl_contact_id: "ghl-cross",
+  }];
+  t.contact_matches = [{
+    id: "match-cross",
+    org_id: ORG,
+    xero_contact_id: "xc-cross",
+    ghl_contact_id: "ghl-cross",
+    job_id: jobId,
+    email: "another-payer@example.test",
+    phone: null,
+  }];
+  const isVerified = (match: Record<string, unknown>) =>
+    emailKey(String(match.email ?? "")) === emailKey("payer@example.test") ||
+    phoneKey(String(match.phone ?? "")) === phoneKey("+61 412 345 678");
+  const invoices = [{ xero_invoice_id: "contact-route", xero_contact_id: "xc-cross" }];
+  const unverified = await resolveJobLinks(fakeClient(t), invoices, ORG, isVerified);
+  assertEquals(unverified.get("contact-route")?.status, "none");
+  t.contact_matches[0].email = "Payer <PAYER@example.test>";
+  const corroborated = await resolveJobLinks(fakeClient(t), invoices, ORG, isVerified);
+  assertEquals(corroborated.get("contact-route")?.status, "linked");
+  assertEquals(corroborated.get("contact-route")?.job_id, jobId);
+  t.contact_matches[0].email = "another-payer@example.test";
+  t.contact_matches[0].phone = "+61 412 345 678";
+  const phoneCorroborated = await resolveJobLinks(fakeClient(t), invoices, ORG, isVerified);
+  assertEquals(phoneCorroborated.get("contact-route")?.status, "linked");
 });
 
 Deno.test("4. one failing source is reported, the rest of the picture still returns", async () => {
