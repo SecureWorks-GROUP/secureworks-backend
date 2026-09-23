@@ -3875,10 +3875,14 @@ contact: the mirror's `xero_contact_id` must equal `raw_json.Contact.ContactID`,
 and any invoice that fails that (INV-1435 on 24 Sep 2026) stands alone. Never
 group by name or GHL contact. Every response publishes `reconciliation.exactly_once`
 over the whole open book; a failed read is a row fault (a failed link read is
-`unknown`, never `none`), never a zero. The timeline is stored copies only, not
-a live GHL or Outlook read, and email never reads complete while Outlook Sent
-Items are not captured. Never commit production Xero ids, job ids or amounts
-as fixtures: `debt_worklist_read_model_test.ts` runs over the synthetic
+`unknown`, never `none`), never a zero. Each debtor timeline publishes
+`scope: "open_invoices"`; closed-invoice events and payments are outside v1,
+and completeness applies only to open-invoice sources. Each invoice publishes
+`source_status: "from_debtor"` to direct GHL, email and notes health lookups to
+its debtor's `sources`. The timeline is stored copies only, not a live GHL or
+Outlook read, and email never reads complete while Outlook Sent Items are not
+captured. Never commit production Xero ids, job ids or amounts as fixtures:
+`debt_worklist_read_model_test.ts` runs over the synthetic
 `fixtures/debt_worklist_synthetic_book_v1.json`, and its real-book check runs
 read-only against the live database only when `SUPABASE_URL` and
 `SUPABASE_SERVICE_ROLE_KEY` are set.

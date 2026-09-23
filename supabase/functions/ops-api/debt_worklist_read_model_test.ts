@@ -807,6 +807,11 @@ Deno.test("timeline: one stream, provider ids, the same message seen twice appea
   assertEquals(conv.calls[0].report_faults, true);
   assertEquals(conv.calls[0].limit, 100);
   const t = out.debtors[0].timeline;
+  assertEquals(t.scope, "open_invoices");
+  assertEquals(
+    t.scope_note,
+    "Completeness applies only to open-invoice sources; closed-invoice events and payments are not read.",
+  );
   assertEquals(t.mode, "full");
   assertEquals(t.order, "newest_first");
   const keys = t.entries.map((e: any) => e.key);
@@ -877,6 +882,59 @@ Deno.test("timeline: one stream, provider ids, the same message seen twice appea
   assertEquals(
     out.debtors[0].invoices.every((i: any) => i.brief === null),
     true,
+  );
+});
+
+Deno.test("invoice rows point to debtor-level GHL, email and notes status", async () => {
+  const out: any = await debtWorklist(
+    new URLSearchParams(),
+    deps(fakeClient(unitTables()), conversationStub({}).fn),
+  );
+  const invoices = out.debtors.flatMap((debtor: any) => debtor.invoices);
+  assert(invoices.length > 0);
+  assert(invoices.every((invoice: any) =>
+    invoice.source_status === "from_debtor"
+  ));
+});
+
+Deno.test("invoice event authors prefer metadata.operator and fall back to payload", async () => {
+  const tables = unitTables();
+  tables.business_events.push(
+    {
+      id: "ev-authorised",
+      event_type: "invoice.authorised",
+      entity_type: "xero_invoice",
+      entity_id: INV(1),
+      job_id: JOB_A,
+      occurred_at: "2026-09-12T01:00:00.000Z",
+      metadata: { operator: "operator@example.test" },
+      payload: { actor: "payload@example.test" },
+    },
+    {
+      id: "ev-approved",
+      event_type: "invoice.approved",
+      entity_type: "xero_invoice",
+      entity_id: INV(2),
+      job_id: JOB_A,
+      occurred_at: "2026-09-11T01:00:00.000Z",
+      metadata: { operator: null },
+      payload: { actor: "fallback@example.test" },
+    },
+  );
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables), conversationStub({ [JOB_A]: [] }).fn),
+  );
+  const events = out.debtors[0].timeline.entries.filter((entry: any) =>
+    entry.kind === "invoice_event"
+  );
+  assertEquals(
+    events.find((entry: any) => entry.source_ref === "ev-authorised")?.author,
+    "operator@example.test",
+  );
+  assertEquals(
+    events.find((entry: any) => entry.source_ref === "ev-approved")?.author,
+    "fallback@example.test",
   );
 });
 

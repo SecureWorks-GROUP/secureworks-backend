@@ -10,6 +10,9 @@
 // not a join, and neither is a shared GHL contact. An invoice whose contact
 // cannot be verified stands alone as its own debtor with the reason on it.
 // Every open invoice is listed separately under exactly one debtor.
+// A debtor timeline covers open invoices only; closed-invoice events and
+// payments are outside this read. Invoice GHL/email/notes health points to the
+// debtor's source status rather than repeating it on every invoice.
 //
 // It builds no second status or message engine. It consumes:
 //   - debt_picture.ts      the desk's stored classification, next step and
@@ -426,7 +429,8 @@ export function entryFromInvoiceEvent(row: any): TimelineEntry {
     at: str(row.occurred_at),
     at_precision: "time",
     direction: outbound ? "outbound" : "system",
-    author: str(p.operator_email ?? p.sent_by ?? p.actor),
+    author: str(row.metadata_operator) ??
+      str(p.operator_email) ?? str(p.sent_by) ?? str(p.actor),
     source: "business_events",
     source_ref: str(row.id),
     subject: type,
@@ -938,7 +942,7 @@ export async function debtWorklist(
           () =>
             client.from("business_events")
               .select(
-                "id, event_type, entity_type, entity_id, job_id, occurred_at, payload, provider_message_id",
+                "id, event_type, entity_type, entity_id, job_id, occurred_at, payload, metadata_operator:metadata->>operator, provider_message_id",
               )
               .in("entity_type", ["invoice", "xero_invoice"])
               .in("event_type", INVOICE_EVENT_TYPES)
@@ -1234,6 +1238,7 @@ export async function debtWorklist(
         fresh: xeroFresh,
       },
       as_of: asOf,
+      source_status: "from_debtor",
       faults: rowFaults,
       _identity: identity,
       _raw: inv,
@@ -1602,6 +1607,9 @@ export async function debtWorklist(
         perJobCapHit.length === 0 && factsCapHit.length === 0 &&
         unverifiedCandidates.length === 0;
       timeline = {
+        scope: "open_invoices",
+        scope_note:
+          "Completeness applies only to open-invoice sources; closed-invoice events and payments are not read.",
         mode: timelineMode,
         order: "newest_first",
         entries,
