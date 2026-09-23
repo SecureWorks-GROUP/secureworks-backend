@@ -478,3 +478,4 @@ ops-api|supabase/migrations/20260921160000_visit_outcomes.sql|column|visit_outco
 ops-api|supabase/migrations/20260921160000_visit_outcomes.sql|column|visit_outcomes.recorded_at
 ops-api|supabase/migrations/20260921160000_visit_outcomes.sql|column|visit_outcomes.source
 ops-api|supabase/migrations/20260921160000_visit_outcomes.sql|column|visit_outcomes.supersedes
+ops-api|supabase/migrations/20260924030000_context_evidence_cadence.sql|function|context_job_freshness

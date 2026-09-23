@@ -37,7 +37,8 @@
 //   Failures: a failed value read is a null section with a code; a failed
 //   recipient read keeps values and marks sent_to unknown.
 //   Read only: the dossier makes no insert/update/delete/upsert, calls only
-//   the job_quote_values RPC, and makes no network call.
+//   the job_quote_values RPC (and K4's context_job_freshness), and makes no
+//   network call.
 
 import {
   assert,
@@ -1356,10 +1357,15 @@ Deno.test("D1 dossier: quotes, variations and scope sections on SWF-26818, read 
 
     // read-only contract
     assertEquals(client.writes, []);
-    assertEquals([...new Set(client.rpcs)], ["job_quote_values"]);
+    // job_quote_values (D1) and context_job_freshness (K4) are the only calls.
+    assertEquals([...new Set(client.rpcs)].sort(), [
+      "context_job_freshness",
+      "job_quote_values",
+    ]);
     assertEquals(fetches, 0);
 
-    assertEquals(d.sections_version, 2);
+    // The version literal is pinned by job_freshness_test.ts (the newest section).
+    assert(d.sections_version >= 2);
     assertEquals(d._kind, "job_dossier_v1");
     const q = d.operationalTruth.quotes;
     assertEquals(q.status, "viewed");

@@ -385,6 +385,7 @@ import {
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
+import { readJobFreshness } from './job_freshness.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
@@ -16115,6 +16116,9 @@ async function getJobConversation(client: any, body: any) {
 //     job_commercial_read.ts: SELECTs plus the read-only SQL function
 //     job_quote_values, the one interpreter of a sent quote's value.
 //     Enforced by job_commercial_read_test.ts (dossier read-only contract).
+//   - Freshness (context K4) comes from job_freshness.ts: one call to the
+//     read-only SQL function context_job_freshness (cadence K1), the same
+//     judgement the extraction worker uses. Enforced by job_freshness_test.ts.
 //
 // Per the JARVIS Memory Extraction Canon (2026-05-01):
 // raw evidence -> async extraction queue -> extractor worker
@@ -16345,13 +16349,17 @@ async function assembleJobDossier(client: any, body: any) {
   // ── Commercial (context D1): quotes, variations, scope summary ──
   // Each read reports its own state; a failed section is null with a code,
   // never an empty list that reads as "nothing quoted".
-  const [quotesRead, variationsRead, signOffRead] = await Promise.all([
+  // ── Freshness (context K4): how current the facts are, from the SQL
+  // cadence judgement. A failed read is null with a code, never "fresh".
+  const [quotesRead, variationsRead, signOffRead, freshnessRead] = await Promise.all([
     readJobQuotes(client, { id: jobId, client_email: jobRow.client_email ?? null }),
     readJobVariations(client, jobId),
     readScopeSignOff(client, jobId),
+    readJobFreshness(client, jobId),
   ])
   sourceStatus.quotes = quotesRead.status
   sourceStatus.variations = variationsRead.status
+  sourceStatus.freshness = freshnessRead.status
   const scope = summariseScope(jobRow, {
     newestQuoteSentAt: quotesRead.quotes?.current[0]?.sent_at ?? null,
     quoteReadFailed: !quotesRead.status.ok,
@@ -16416,6 +16424,8 @@ async function assembleJobDossier(client: any, body: any) {
     conversation: conversationAsc,
     facts: visibleFacts,
     temporaryFacts,
+    // How current `facts` are (context K4, cadence design section 4).
+    freshness: freshnessRead.freshness,
     proposedActions: proposedRead.data,
     transcripts: [] as any[],
     reasoning: [] as any[],
@@ -16436,7 +16446,8 @@ async function assembleJobDossier(client: any, body: any) {
     // Provenance hint for the canon: the assembler is read-only.
     _kind: 'job_dossier_v1',
     // 2 = operationalTruth.quotes / .variations and scope (context D1).
-    sections_version: 2,
+    // 3 = freshness (context K4).
+    sections_version: 3,
     _ghlContactId: ghlContactId,
   }
 }

@@ -820,7 +820,10 @@ booking_read_rows = []
 from pathlib import Path
 import hashlib
 for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
-                      ("20260921160000", "visit_outcomes")]:
+                      ("20260921160000", "visit_outcomes"),
+                      # context K4: the dossier freshness section reads
+                      # context_job_freshness (cadence K1).
+                      ("20260924030000", "context_evidence_cadence")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
