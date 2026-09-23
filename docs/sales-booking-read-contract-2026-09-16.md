@@ -149,8 +149,10 @@ Additions:
   `classification`, `read_ok`, `reason`, `message_count`,
   `template_outbound_count`, `read_at`.
 - Per case **`suburb`**, **`job_type`**, **`enquiry_at`**, **`pipeline_stage_id`**
-  beside `stage_name`. Suburb is contact city, a WA suburb parsed from the
-  street line, or `jobs.site_suburb` when GHL has no parseable city/address.
+  beside `stage_name`. Suburb is `salesBookingPublishedSuburb`: contact city,
+  a WA suburb parsed from the street line, or `jobs.site_suburb` when GHL has
+  no parseable city/address. The booking executor titles the Outlook event
+  from this same value (`docs/sales-booking-executor.md`).
   Job type is enquiry tags then the resource book lane (Nithin patio, Marnin
   fencing). Either field is `"not given"` when none of those exist — never
   invented. A live-week missing-rate bar is not acceptance: 14 Sep 2026
@@ -347,12 +349,7 @@ this map. User ids stay null-pinned; this table records emails only.
 
 ## Outlook mirror write (D2, 23 Sep 2026)
 
-`sales_booking_outlook_mirror.ts` exports `mirrorGhlAppointmentToOutlook` for
-the booking executor to call after a GHL appointment write. It is not wired
-into any request path here. It creates one event titled `Scope: Name, Suburb`
-spanning the arrival window on the resource's Outlook primary calendar, with
-no attendees (no invitation is sent). It is idempotent on the GHL appointment
-id (a named extended property, looked up before create, plus a deterministic
-Graph `transactionId`); a failed lookup writes nothing. Only
-`SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED=true` writes; otherwise it returns
-`code:"flag_off"` with `would_write` and makes no Graph call.
+Owner: `docs/sales-booking-executor.md`. `sales_booking_book` writes the
+matching Outlook event after GHL holds the appointment. A diary row names that
+event in `mirror_of_ghl_event_id`. Module switch and Graph request shape:
+`sales_booking_outlook_mirror.ts`.

@@ -1,6 +1,7 @@
 /** Production adapters for sales_booking_execute.ts. Reads only, except the
- * two ghl-proxy calls and the executor-ledger claim/settle, which the executor
- * makes only when its switch is on and the captain pressed.
+ * two ghl-proxy calls, the executor-ledger claim/settle and the Outlook mirror
+ * write, which the executor makes only when SALES_BOOKING_BOOK_EXECUTE is on
+ * and the captain pressed.
  *
  * Credential: ops-api calls ghl-proxy server-to-server with the project's
  * SUPABASE_SERVICE_ROLE_KEY as `Authorization: Bearer`, which ghl-proxy
@@ -16,10 +17,13 @@ import type {
   OutlookRead,
   SalesBookingExecuteDeps,
 } from "./sales_booking_execute.ts";
+import { mirrorGhlAppointmentToOutlook } from "./sales_booking_outlook_mirror.ts";
 import {
   ghlRead,
+  readJobSitesLive,
   readSalesBookingThreadMessages,
   SALES_BOOKING_GHL_USERS,
+  salesBookingPublishedSuburb,
 } from "./sales_booking_read.ts";
 
 // Supabase's structural query builder is owned by the pinned runtime client.
@@ -173,6 +177,14 @@ export function createSalesBookingExecuteDeps(
   client: Client,
 ): SalesBookingExecuteDeps {
   const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
+  async function readContact(contactId: string): Promise<Obj> {
+    const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
+    const contact = body?.contact as Obj | undefined;
+    if (contact?.id !== contactId || contact?.locationId !== locationId) {
+      throw new Error("contact_mismatch");
+    }
+    return contact;
+  }
   return {
     async findApproval(bindingHash) {
       const { data, error } = await client.from("sales_booking_approvals")
@@ -199,13 +211,25 @@ export function createSalesBookingExecuteDeps(
       ),
     readOutlook: readResourceOutlook,
     async readContactPhone(contactId) {
-      const body = await ghlRead(`/contacts/${encodeURIComponent(contactId)}`);
-      const contact = body?.contact as Obj | undefined;
-      if (contact?.id !== contactId || contact?.locationId !== locationId) {
-        throw new Error("contact_mismatch");
-      }
+      const contact = await readContact(contactId);
       return typeof contact.phone === "string" ? contact.phone : null;
     },
+    async readOutlookLead({ contactId, opportunityId }) {
+      const contact = await readContact(contactId);
+      const jobSites = await readJobSitesLive(
+        client,
+        opportunityId ? [opportunityId] : [],
+        contactId ? [contactId] : [],
+      );
+      const job = (opportunityId && jobSites[opportunityId]) ||
+        (contactId ? jobSites[contactId] : undefined);
+      return {
+        contact,
+        suburb: salesBookingPublishedSuburb(contact, job),
+      };
+    },
+    mirrorToOutlook: (input, options) =>
+      mirrorGhlAppointmentToOutlook(input, options),
     callAppointmentWriter: (body) =>
       callGhlProxy("create_calendar_appointment", body),
     callSendSms: (body) => callGhlProxy("send_sms", body),

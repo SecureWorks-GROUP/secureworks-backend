@@ -25,13 +25,14 @@ Result (HTTP 200, except `press_requires_captain` which is 403):
 
 `booked`/`sent` also carry `replayed` (true when a second press returned the
 first result). `refused` may carry `detail` (for example the clashing Outlook
-events).
+events). `booked`, and a `dry_run` of a book, also carry `outlook_mirror` (next
+section).
 
 ## Switches (default: dry run)
 
 | Switch | Effect |
 | --- | --- |
-| `SALES_BOOKING_BOOK_EXECUTE` | Exactly `true` lets a captain press book. Anything else: dry run. |
+| `SALES_BOOKING_BOOK_EXECUTE` | Exactly `true` lets a captain press book in GHL and write the matching Outlook event. Anything else: dry run, no Graph write. |
 | `SALES_BOOKING_SEND_EXECUTE` | Exactly `true` lets a captain press send. Anything else: dry run. |
 | `GHL_CALENDAR_APPOINTMENT_WRITE_ENABLED` | Unchanged. The GHL writer's own switch; off still previews even when the book switch is on (`reason: appointment_writer_flag_off`). |
 
@@ -48,10 +49,12 @@ Both actions:
 
 1. `method_not_allowed`, `press_requires_captain`, `approval_id_required`.
 2. `approval_not_found`, `approval_unreadable`, `approval_step_mismatch`.
-3. Already ran: a second press returns the first result and never writes or
-   sends twice. A book uses the GHL writer's own ledger, keyed on the approval
-   hash; a send uses `sales_booking_executions` (`step=message`). An unsettled earlier attempt
-   refuses `execution_outcome_unknown` and is never repeated.
+3. Already ran: a send returns the first result and never sends twice. A book
+   uses the GHL writer's own ledger, keyed on the approval hash, so GHL is
+   never booked twice; a retry still writes the Outlook mirror at most once
+   (next section). A send uses `sales_booking_executions` (`step=message`).
+   An unsettled earlier attempt refuses `execution_outcome_unknown` and is
+   never repeated.
 4. `approval_not_approved` (a refusal decision), `approval_not_by_captain`
    (approver email not in `SALES_BOOKING_CAPTAIN_EMAILS`),
    `content_hash_mismatch` (the stored snapshot no longer hashes to its binding
@@ -67,7 +70,14 @@ Both actions:
    (`_shared/graph_client.ts`, mailbox from `SALES_BOOKING_GHL_USERS`). Any busy
    event refuses `outlook_calendar_clash`, naming subject and times; a failed
    read refuses `outlook_unreadable`. Free and cancelled events never block.
-7. A live press claims `sales_booking_executions` (`step=calendar`) and
+7. When the resource has an Outlook calendar
+   (`SALES_BOOKING_OUTLOOK_MAILBOXES`): published suburb and client name,
+   before any GHL write (dry run included). Suburb is
+   `salesBookingPublishedSuburb` (the same value the booking read publishes).
+   Missing that value, a usable name, or the contact read refuses
+   `suburb_not_given` / `client_name_not_given` / `contact_unreadable` and
+   books nothing.
+8. A live press claims `sales_booking_executions` (`step=calendar`) and
    passes `executorClaim` to the GHL writer
    (`ghl-proxy?action=create_calendar_appointment`), which re-reads the
    person's GHL diary plus every assigned calendar and refuses
@@ -86,6 +96,39 @@ Both actions:
 
 A text that names no time ("does Friday suit?") is fully supported: sending
 needs no calendar booking or receipt.
+
+## Outlook mirror after the GHL booking (Decision D2)
+
+Once GHL holds the appointment, `sales_booking_book` writes the matching event
+on the owner's Outlook calendar through `sales_booking_outlook_mirror.ts`
+(`mirrorGhlAppointmentToOutlook`), keyed on the GHL appointment id. One switch
+(`SALES_BOOKING_BOOK_EXECUTE`) turns the booking and this Outlook copy on
+together (plus the existing captain-JWT press and not `dry_run`). The event
+is `Scope: Name, Suburb` spanning the exact GHL appointment
+(`startTime`/`endTime` from the writer result, or the GHL would-write body
+on a dry run), with the approved address and no attendees. Name comes from
+the GHL contact; suburb is the one the booking read already publishes
+(`salesBookingPublishedSuburb`: `salesBookingSuburbFromContact` plus the
+`jobs.site_suburb` overlay). A suburb is never guessed.
+
+`outlook_mirror` on the response:
+
+| `outlook` | Meaning |
+| --- | --- |
+| `written` | Outlook holds the event (`outlook_event_id`). `reason: "already_mirrored"` when an earlier press wrote it. |
+| `dry_run` | Nothing written. `would_write` is the exact Graph request. `reason` is the press's dry-run reason (`api_key_press_is_dry_run`, `dry_run_requested`, `book_switch_off`, or `appointment_writer_flag_off`). A dry run names the GHL id as `pending_ghl_appointment_id`. |
+| `failed` | GHL is booked, Outlook is not. `reason` names why (`mirror_write_failed: outlook_create_http_403`, `mirror_outcome_unknown: ...`, `contact_unreadable`, ...). |
+| `not_applicable` | The resource has no Outlook calendar (`SALES_BOOKING_OUTLOOK_MAILBOXES`; GHL-only people such as Nithin). |
+
+Every response carries a plain `message`. The booking always stands; the mirror
+never turns a booking into a refusal. **Retry:** pressing the same approval
+again replays the GHL booking from the writer's ledger (no second GHL call,
+even after the approval has expired) and re-runs the mirror, which looks up the
+GHL id on the calendar before creating, so Outlook is written at most once.
+
+A missing published suburb or name refuses before GHL (check 7). The
+mirror writes on a live press (captain JWT, book switch on); it does not
+use a second Outlook write switch.
 
 ## The GHL writer refuses without the executor's per-press claim
 
@@ -170,6 +213,6 @@ Tests: `ops-api/sales_booking_execution_read_test.ts`.
 
 ## Out of scope
 
-Outlook writes (the mirror event), stage moves, the screen UI, Stratco intake,
+Stage moves, the screen UI, Stratco intake,
 Luna, and retiring the old booking paths. Prior-offer census across other leads
 is not re-read at the press.

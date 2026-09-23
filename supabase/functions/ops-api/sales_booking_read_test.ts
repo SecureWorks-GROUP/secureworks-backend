@@ -57,6 +57,7 @@ import {
   salesBookingGhl429DelayMs,
   salesBookingJobTypeFromOpportunity,
   type SalesBookingMessage,
+  salesBookingPublishedSuburb,
   salesBookingRead,
   type SalesBookingReadDependencies,
   SalesBookingRequestError,
@@ -1476,6 +1477,38 @@ Deno.test("suburb comes from city or a WA address line; job_type from custom fie
   assertEquals(
     salesBookingSuburbFromContact({ city: "St James" }),
     "St James",
+  );
+  assertEquals(
+    salesBookingPublishedSuburb({ city: "St James" }),
+    "St James",
+  );
+  assertEquals(
+    salesBookingPublishedSuburb({ city: "", address1: "Bassendean" }, {
+      suburb: "Balcatta",
+      address: "6 Moorby Pl",
+    }),
+    "Balcatta",
+  );
+  assertEquals(
+    salesBookingPublishedSuburb({ city: "", address1: "6 Moorby Pl" }, {
+      suburb: "Balcatta",
+      address: "6 Moorby Pl",
+    }),
+    "Balcatta",
+  );
+  assertEquals(
+    salesBookingPublishedSuburb({ city: "", address1: "6 Moorby Pl" }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
+  assertEquals(
+    salesBookingPublishedSuburb({ city: "", address1: "Bassendean" }),
+    SALES_BOOKING_NOT_GIVEN,
+  );
+  assertEquals(
+    salesBookingPublishedSuburb({
+      address1: "9 Reef Rd, Hillarys WA 6025",
+    }),
+    "Hillarys",
   );
   assertEquals(
     salesBookingSuburbFromContact({
