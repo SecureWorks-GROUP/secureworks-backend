@@ -282,13 +282,18 @@ includes `roster`).
   `needs_decision`. Classification lives only in `thread_facts`.
 - **Cases with no entry in `thread_facts`** were never attempted (a bound was
   hit). `coverage.gaps` names how many and why. Do not paint them as clear.
-- **`kind` and `blocks_capacity` come from GHL `appointmentStatus` only.**
-  Confirmed/booked (and any non-cancelled status) block; cancelled or deleted
-  does not block but is still returned with `show_as:'cancelled'`. GHL has no
-  leave/personal sensitivity, so those kinds are never invented from a title.
-  **`is_all_day` is `event.isAllDay === true` only** — no midnight or duration
-  inference. **`title_withheld` is always false** (GHL has no
-  private-sensitivity flag).
+- **`kind` and `blocks_capacity` come from the event's own provider, never
+  from title text.** GHL rows use `appointmentStatus` only: confirmed/booked
+  (and any non-cancelled status) block; cancelled or deleted does not block
+  but is still returned with `show_as:'cancelled'`. GHL has no
+  leave/personal sensitivity, so those kinds are never invented and
+  **`title_withheld` is always false**. Outlook rows use Graph fields:
+  `showAs:oof` is `kind:'leave'`, a private/personal/confidential
+  sensitivity is `kind:'personal'` with title and location withheld
+  (`title_withheld:true` when a subject was present), and
+  **`blocks_capacity` follows `showAs`** — `free` and cancelled do not
+  block. **`is_all_day` is `event.isAllDay === true` only** — no midnight
+  or duration inference.
 - **`classification` never emits `booked`.** Thread classification is not a
   booking attribution. Bindable booked visits live on `booked_visits`
   (`docs/sales-booking-confirmation-api.md`); do not invent a `booked`
