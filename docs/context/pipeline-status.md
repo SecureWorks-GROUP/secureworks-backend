@@ -7,8 +7,8 @@ extractable evidence by attribution status, ready-job count (capped at 400),
 and `coverage` of open jobs and authorised receivables.
 
 Since F1 (`20260924020000_context_status_foundation.sql`) the SQL function is
-a composer. Today's keys above are `context_core_status()` (the 17 Sep body,
-unchanged) and stay top-level with identical values. The composer adds:
+a composer. Today's keys above are `context_core_status()` and stay top-level
+with identical values. The composer adds:
 
 | Key | Sub-function | Owner slice | Until built |
 |---|---|---|---|
@@ -69,8 +69,9 @@ handler is GET-only and SELECT-only.
 ## SQL
 
 `20260917210000_context_pipeline_status.sql` installed `context_coverage()` and
-the original heartbeat body. F1 (`20260924020000`) moved that body unchanged
-to `context_core_status()` and made `context_pipeline_status()` the composer
+the original heartbeat body. F1 (`20260924020000`) moved that body to
+`context_core_status()` (same keys and values; `ready_jobs` now reads
+`context_ready_jobs_count`) and made `context_pipeline_status()` the composer
 documented above. F1 is built on the live production definitions (read
 23 Sep 2026): its opening guard refuses unless the heartbeat, the 9-arg
 `persist_luna_context_revision` and the current-facts view are still that
@@ -117,6 +118,6 @@ the payload.
 Registered contracts
 `supabase/tests/migration-contracts/20260917210000_context_pipeline_status` and
 `supabase/tests/migration-contracts/20260924020000_context_status_foundation`
-(the latter compares the composer with a verbatim copy of the 17 Sep body on
-the same fixtures).
+(the latter compares existing composer keys with a copy of the 17 Sep body on
+the same fixtures, and pins `ready_jobs` to the candidates count).
 Deno: `supabase/functions/ops-api/context_pipeline_test.ts`.
