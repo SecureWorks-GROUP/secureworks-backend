@@ -74,6 +74,30 @@ export const DEBT_FOLLOWUP_HOLD_BLOCKERS = new Set([
   "invoice_wrong",
   "context_pending",
 ]);
+const DEBT_HOLD_JOB_STATUSES = new Set([
+  "in_progress",
+  "scheduled",
+  "draft",
+  "scoping",
+  "quoted",
+]);
+const COMPLETED_DEBT_JOB_STATUSES = new Set(["complete", "invoiced"]);
+
+export function autoDebtClassificationForJobStatus(
+  status: string | null,
+): { classification: "blocked_by_us" | "genuine_debt"; reason: string } | null {
+  if (!status) return null;
+  if (DEBT_HOLD_JOB_STATUSES.has(status)) {
+    return { classification: "blocked_by_us", reason: `Job status: ${status}` };
+  }
+  if (COMPLETED_DEBT_JOB_STATUSES.has(status)) {
+    return {
+      classification: "genuine_debt",
+      reason: "Job complete, payment outstanding",
+    };
+  }
+  return null;
+}
 const INVOICE_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
 // ── Request ────────────────────────────────────────────────────────────────
@@ -280,8 +304,10 @@ export interface DebtFollowupReads {
   invoiceMirror(ids: string[]): Promise<MirrorInvoiceRow[]>;
   /** Live Xero GET /Invoices/{id}: the Invoices[0] object. */
   xeroInvoice(id: string): Promise<Obj>;
-  /** jobs.ghl_contact_id for each job id. */
-  jobGhlContacts(jobIds: string[]): Promise<Record<string, string | null>>;
+  /** Current job status and GHL contact for each linked job. */
+  jobFacts(jobIds: string[]): Promise<
+    Record<string, { status: string | null; ghl_contact_id: string | null }>
+  >;
   /** contact_matches: the GHL contact bound to a Xero contact, or null. */
   contactMatch(xeroContactId: string): Promise<string | null>;
   /** Live GHL contact read (location-checked). */
@@ -314,7 +340,11 @@ export interface InvoiceSnapshot {
   xero_contact_id: string;
   updated_date_utc: string | null;
   job_id: string | null;
-  hold: { classification: string | null; blocker: string | null };
+  hold: {
+    classification: string | null;
+    blocker: string | null;
+    job_status: string | null;
+  };
 }
 
 export type SmsDestination = {
@@ -428,6 +458,27 @@ export async function buildDebtFollowupProposal(
     return refuse("sealed_ses_invoice", { refusal: fence.value });
   }
 
+  const linkedJobIds = [
+    ...new Set(mirrorRead.value.map((row) => row.job_id).filter(Boolean)),
+  ] as string[];
+  const jobFactsRead = linkedJobIds.length
+    ? await tryRead(
+      () => reads.jobFacts(linkedJobIds),
+      kind === "thank_you_sms"
+        ? "job_contact_unreadable"
+        : "job_status_unreadable",
+    )
+    : { ok: true as const, value: {} };
+  if (!jobFactsRead.ok) return jobFactsRead;
+  if (kind !== "thank_you_sms") {
+    for (const jobId of linkedJobIds) {
+      const status = jobFactsRead.value[jobId]?.status;
+      if (typeof status !== "string" || !status) {
+        return refuse("job_status_unreadable", { job_id: jobId });
+      }
+    }
+  }
+
   const invoices: InvoiceSnapshot[] = [];
   const xeroById = new Map<string, Obj>();
   for (const id of ids) {
@@ -455,6 +506,13 @@ export async function buildDebtFollowupProposal(
     if (row.xero_contact_id && row.xero_contact_id !== contactId) {
       return refuse("contact_identity_drift", { xero_invoice_id: id });
     }
+    const jobStatus = row.job_id
+      ? jobFactsRead.value[row.job_id]?.status ?? null
+      : null;
+    const currentClassification = row.debt_classification || "unclassified";
+    const derivedClassification = currentClassification === "unclassified"
+      ? autoDebtClassificationForJobStatus(jobStatus)
+      : null;
     xeroById.set(id, x);
     invoices.push({
       xero_invoice_id: id,
@@ -470,8 +528,10 @@ export async function buildDebtFollowupProposal(
         : null,
       job_id: row.job_id || null,
       hold: {
-        classification: row.debt_classification || null,
+        classification: derivedClassification?.classification ??
+          (row.debt_classification || null),
         blocker: row.debt_blocker || null,
+        job_status: jobStatus,
       },
     });
   }
@@ -484,6 +544,12 @@ export async function buildDebtFollowupProposal(
       if (inv.status !== "PAID" || inv.amount_due !== 0) {
         return refuse("invoice_not_paid", {
           xero_invoice_id: inv.xero_invoice_id,
+        });
+      }
+      if (inv.currency_code?.toUpperCase() !== "AUD") {
+        return refuse("payment_currency_unsupported", {
+          xero_invoice_id: inv.xero_invoice_id,
+          currency_code: inv.currency_code,
         });
       }
       continue;
@@ -517,18 +583,13 @@ export async function buildDebtFollowupProposal(
   let destination: SmsDestination | EmailDestination;
   let contactName: string | null = null;
   if (SMS_KINDS.has(kind)) {
-    const jobContacts = await tryRead(
-      () =>
-        jobIds.length
-          ? reads.jobGhlContacts(jobIds)
-          : Promise.resolve({} as Record<string, string | null>),
-      "job_contact_unreadable",
-    );
-    if (!jobContacts.ok) return jobContacts;
+    const jobFacts = jobFactsRead.value;
     const bound = new Set<string>();
     let matchFor: string | null | undefined;
     for (const inv of invoices) {
-      let contact = inv.job_id ? jobContacts.value[inv.job_id] ?? null : null;
+      let contact = inv.job_id
+        ? jobFacts[inv.job_id]?.ghl_contact_id ?? null
+        : null;
       if (!contact) {
         if (matchFor === undefined) {
           const m = await tryRead(

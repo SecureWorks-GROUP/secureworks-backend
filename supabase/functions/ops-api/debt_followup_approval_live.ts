@@ -191,14 +191,20 @@ export function debtFollowupReads(
       if (!invoice) throw new Error("xero_invoice_missing");
       return invoice;
     },
-    async jobGhlContacts(jobIds) {
+    async jobFacts(jobIds) {
       const { data, error } = await client.from("jobs").select(
-        "id,ghl_contact_id",
+        "id,status,ghl_contact_id",
       ).in("id", jobIds);
-      if (error) throw new Error("job_contact_unreadable");
-      const out: Record<string, string | null> = {};
+      if (error) throw new Error("job_read_unreadable");
+      const out: Record<
+        string,
+        { status: string | null; ghl_contact_id: string | null }
+      > = {};
       for (const row of (data as Obj[] | null) ?? []) {
-        out[row.id] = row.ghl_contact_id || null;
+        out[row.id] = {
+          status: typeof row.status === "string" ? row.status : null,
+          ghl_contact_id: row.ghl_contact_id || null,
+        };
       }
       return out;
     },

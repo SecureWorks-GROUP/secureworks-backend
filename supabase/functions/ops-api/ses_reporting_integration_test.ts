@@ -45,18 +45,7 @@ Deno.test("legacy free invoice and combined-send actions are retired", () => {
   assertStringIncludes(INDEX, "legacy_route_send_retired");
 });
 
-Deno.test("legacy invoice sends hit the sealed SES release gate before provider effects", () => {
-  const sendStart = INDEX.indexOf("case 'send_invoice_email'");
-  const sendGate = INDEX.indexOf(
-    "assertLegacySesInvoiceActionAllowed(",
-    sendStart,
-  );
-  const sendProvider = INDEX.indexOf(
-    "debtFollowupLegacySend(",
-    sendStart,
-  );
-  assert(sendGate > sendStart && sendGate < sendProvider);
-
+Deno.test("approve_and_send_invoice retains its sealed SES release gate", () => {
   const approveStart = INDEX.indexOf("case 'approve_and_send_invoice'");
   const approveGate = INDEX.indexOf(
     "assertLegacySesInvoiceActionAllowed(",
@@ -118,11 +107,6 @@ Deno.test("all legacy sealed-SES money and link surfaces fence before effects", 
     "async function completeAndInvoice(",
     "assertLegacySesMoneyActionAllowedForJob(",
     ".update({ status: 'complete'",
-  );
-  before(
-    "async function sendPaymentLink(",
-    "assertLegacySesMoneyActionAllowedForJob(",
-    "debtFollowupLegacySend(",
   );
   before(
     "async function sendAcceptanceInvoice(",

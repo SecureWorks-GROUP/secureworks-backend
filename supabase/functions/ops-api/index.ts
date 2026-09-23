@@ -828,6 +828,7 @@ import { applySalesBookingExecutions } from './sales_booking_execution_read.ts'
 import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_execute.ts'
 import { createOwnerApprovalDeps, createSalesBookingExecuteDeps, ownerApprovalReader } from './sales_booking_execute_live.ts'
 import {
+  autoDebtClassificationForJobStatus,
   debtFollowupApproveAction,
   debtFollowupExecuteAction,
   debtFollowupLegacySend,
@@ -3816,6 +3817,9 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   ).join('')
   let siBin = ''; for (let i = 0; i < siBytes.length; i++) siBin += String.fromCharCode(siBytes[i])
   const siPdfB64 = btoa(siBin)
+  const siSubject = siSubj || `Invoice ${siNum} — SecureWorks Group`
+  const siEmailBody = invoiceEmailHtmlBody(siNum)
+  const siAttachmentFileName = `${siNum}.pdf`
 
   // Send via Outlook with PDF attached
   const siEmailResp = await dfetch(`${env.SUPABASE_URL}/functions/v1/send-outlook-email`, {
@@ -3824,13 +3828,13 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     body: JSON.stringify({
       to: siTo,
       cc: siCcSafe,
-      subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
-      htmlBody: invoiceEmailHtmlBody(siNum),
+      subject: siSubject,
+      htmlBody: siEmailBody,
       job_id: verifiedJobId,
       xero_invoice_id: siId,
       attachments: [{
         contentBytes: siPdfB64,
-        name: `${siNum}.pdf`,
+        name: siAttachmentFileName,
         contentType: 'application/pdf',
         xero_invoice_id: siId,
       }],
@@ -3869,6 +3873,9 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     body_preview: INVOICE_EMAILED_BODY_PREVIEW,
     payload: {
       invoice_number: siNum, to: siTo, via: 'outlook', linked: Boolean(verifiedJobId),
+      subject: siSubject,
+      body: siEmailBody,
+      attachment_file_name: siAttachmentFileName,
       provider_proof: outlookProviderProof,
       ...(body.debt_followup_approval_id
         ? { debt_followup_approval_id: body.debt_followup_approval_id, attachment_sha256: siAttachmentSha256 }
@@ -59027,19 +59034,10 @@ async function listOverdueInvoices(client: any) {
 
     // Auto-classify (computed, not stored) — only override if current is 'unclassified'
     let classification = inv.debt_classification || 'unclassified'
-    let classificationReason = inv.debt_classification_reason || null
-    let autoClassified = false
     if (classification === 'unclassified') {
-      if (job) {
-        if (['in_progress', 'scheduled', 'draft', 'scoping', 'quoted'].includes(job.status)) {
-          classification = 'blocked_by_us'
-          classificationReason = 'Job status: ' + job.status
-          autoClassified = true
-        } else if (['complete', 'invoiced'].includes(job.status)) {
-          classification = 'genuine_debt'
-          classificationReason = 'Job complete, payment outstanding'
-          autoClassified = true
-        }
+      const inferred = autoDebtClassificationForJobStatus(job?.status || null)
+      if (inferred) {
+        classification = inferred.classification
       }
     }
 
