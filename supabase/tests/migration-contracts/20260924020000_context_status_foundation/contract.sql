@@ -144,7 +144,8 @@ BEGIN
  IF (SELECT array_agg(x ORDER BY x) FROM jsonb_object_keys(composed) x) IS DISTINCT FROM
     (SELECT array_agg(x ORDER BY x) FROM (SELECT jsonb_object_keys(legacy) x UNION SELECT unnest(new_keys)) u)
  THEN RAISE EXCEPTION 'f1 composer keys: %',(SELECT array_agg(x ORDER BY x) FROM jsonb_object_keys(composed) x); END IF;
- IF composed->'cadence'<>'null'::jsonb OR composed->'ghl_capture'<>'null'::jsonb OR composed->'booking_capture'<>'null'::jsonb
+ -- The cadence block is built by K1 (20260924030000).
+ IF jsonb_typeof(composed->'cadence')<>'object' OR composed->'ghl_capture'<>'null'::jsonb OR composed->'booking_capture'<>'null'::jsonb
   OR composed->'parties'<>'null'::jsonb THEN RAISE EXCEPTION 'f1 unbuilt blocks must be null %',composed; END IF;
  IF jsonb_typeof(composed->'alarms')<>'array' OR jsonb_typeof(composed->'capture_sources')<>'object'
  THEN RAISE EXCEPTION 'f1 alarms or capture_sources shape %',composed; END IF;
@@ -477,14 +478,13 @@ BEGIN
  INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,finished_at) VALUES(done_today,d,'extraction','done',now());
  PERFORM pg_temp.f1_event(bucket,'f1-ready','admin_bucket',NULL,now()-interval '2 hours','Bucket text.');
  UPDATE public.business_events SET context_captured_at=coalesce(context_captured_at,now()) WHERE job_id IN (ready1,ready2,holding,outbound_only,blank,receipted,done_today,bucket);
- IF (SELECT count(*) FROM public.context_extraction_candidates(400) c WHERE c.job_id IN (ready1,ready2))<>2
-  OR EXISTS(SELECT 1 FROM public.context_extraction_candidates(400) c WHERE c.job_id IN (holding,outbound_only,blank,not_captured,receipted,done_today,bucket))
- THEN RAISE EXCEPTION 'f1 ready fixture does not exercise candidates as intended: %',(SELECT array_agg(job_id) FROM public.context_extraction_candidates(400)); END IF;
+ -- K1 (20260924030000) replaced the candidates rule and made ready_jobs the
+ -- candidates read itself; its contract owns the due-rule fixtures. The
+ -- equality below still holds at every cap.
  FOREACH cap IN ARRAY ARRAY[400,base+2,base+1,1,0] LOOP
   want:=(SELECT count(*) FROM public.context_extraction_candidates(cap)); got:=public.context_ready_jobs_count(cap);
   IF got IS DISTINCT FROM want THEN RAISE EXCEPTION 'f1 ready_jobs % differs from candidates % at cap %',got,want,cap; END IF;
  END LOOP;
- IF public.context_ready_jobs_count(400)<>base+2 THEN RAISE EXCEPTION 'f1 ready_jobs did not count the two ready jobs'; END IF;
  IF (public.context_pipeline_status()->>'ready_jobs')::int IS DISTINCT FROM (SELECT count(*) FROM public.context_extraction_candidates(400))::int
  THEN RAISE EXCEPTION 'f1 heartbeat ready_jobs differs from the candidates read'; END IF;
  UPDATE public.automation_switches SET extraction=false WHERE id=1;

@@ -565,6 +565,19 @@ migration lanes: `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh`
 (disposable localhost Postgres, applies the new migrations twice). Record:
 `docs/context/b3-fact-custody.md`.
 
+Extraction cadence (K1, `20260924030000`): when a job is read is decided in
+SQL from the evidence, never by a daily clock. Every number is in
+`context_cadence_policy()` (changed only by migration; `live_since` is the
+first apply time and rows captured before it never wake). The one judgement is
+`context_jobs_cadence(uuid[])`; the claim, candidates, freshness and status
+all read it, so never re-derive "due" elsewhere. The one unread definition is
+the inlinable `context_unread_rows(uuid[])` (no SET clause, on purpose). The
+BEFORE INSERT trigger stamps `metadata.written_as` from the request role and
+overwrites what the writer sent; only `service_role` rows wake a read or enter
+a batch. `context_extraction_events` returns exact rows because
+`persist_luna_context_revision` compares them byte for byte; per-row `ours` and
+`older_context` come from `context_extraction_event_flags`.
+
 Attribution ladder step 1 matching is owned by
 `docs/context/b2-capture-attribution.md` (`20260923230000`). Each later ladder
 change replaces the whole `resolve_context_attribution` body and must follow

@@ -66,7 +66,10 @@ BEGIN
  IF public.reserve_context_model_call('extraction',run,tok)->>'ordinal'<>'2' THEN RAISE EXCEPTION 'retry consumes call'; END IF;
  IF NOT public.finish_context_extraction_run(run,tok,'done',ARRAY[e],10,1,0,0,NULL,NULL) THEN RAISE EXCEPTION 'completion'; END IF;
  IF (SELECT count(*) FROM public.context_extraction_event_receipts WHERE event_id=e)<>1 THEN RAISE EXCEPTION 'receipt'; END IF;
- IF public.claim_context_extraction_run(j,d,'extraction')->>'outcome'<>'done' THEN RAISE EXCEPTION 'done not repeated'; END IF;
+ -- K1 (20260924030000): a finished run is no longer the day's last; the job
+ -- is held by its 30-minute cooldown instead.
+ r2:=public.claim_context_extraction_run(j,d,'extraction');
+ IF r2->>'outcome'<>'paused' OR r2->>'reason'<>'cooldown' THEN RAISE EXCEPTION 'done not repeated %',r2; END IF;
  IF public.reserve_context_model_call('extraction',run,tok)->>'outcome'<>'stale' THEN RAISE EXCEPTION 'finished lease call'; END IF;
  BEGIN
   PERFORM public.reserve_context_model_call('extraction',NULL,NULL);
@@ -109,35 +112,42 @@ BEGIN
  IF r->>'outcome'<>'reserved' OR r->>'ordinal'<>'400' THEN RAISE EXCEPTION '400th admission %',r; END IF;
  IF NOT public.finish_context_extraction_run(run,tok,'failed','{}',0,0,0,0,'post-model failure',NULL) THEN RAISE EXCEPTION 'post-model failure'; END IF;
  r:=public.claim_context_extraction_run(j,d,'extraction');tok:=(r->'run'->>'lease_token')::uuid;
- IF r->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'claim independent of budget'; END IF;
+ -- K1: before 12:00 Perth the morning reserve (300 of 400 calls) holds new claims.
+ IF r->>'outcome'<>(CASE WHEN (now() AT TIME ZONE 'Australia/Perth')::time<time '12:00' THEN 'pacing' ELSE 'claimed' END)
+ THEN RAISE EXCEPTION 'claim independent of budget %',r; END IF;
+ IF r->>'outcome'='pacing' THEN
+  UPDATE public.context_extraction_runs SET status='running',lease_token=gen_random_uuid(),lease_expires_at=now()+interval '30 minutes' WHERE id=run RETURNING lease_token INTO tok;
+ END IF;
  IF public.reserve_context_model_call('extraction',run,tok)->>'outcome'<>'cap' THEN RAISE EXCEPTION '401st retry admitted'; END IF;
  j:=gen_random_uuid();
  INSERT INTO public.jobs(id,org_id,status,type,job_number) VALUES(j,gen_random_uuid(),'draft','patio','B1-'||j);
  r:=public.claim_context_extraction_run(j,d,'extraction');
- IF r->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'new claim at cap'; END IF;
+ IF r->>'outcome'<>(CASE WHEN (now() AT TIME ZONE 'Australia/Perth')::time<time '12:00' THEN 'pacing' ELSE 'claimed' END)
+ THEN RAISE EXCEPTION 'new claim at cap %',r; END IF;
+ IF r->>'outcome'='pacing' THEN
+  INSERT INTO public.context_extraction_runs(job_id,run_date,phase,status,lease_token,lease_expires_at)
+   VALUES(j,d,'extraction','running',gen_random_uuid(),now()+interval '30 minutes') RETURNING jsonb_build_object('run',to_jsonb(context_extraction_runs)) INTO r;
+ END IF;
  IF public.reserve_context_model_call('extraction',(r->'run'->>'id')::uuid,(r->'run'->>'lease_token')::uuid)->>'outcome'<>'cap' THEN RAISE EXCEPTION '401st new extraction admitted'; END IF;
  IF public.reserve_context_model_call('attribution',NULL,NULL)->>'outcome'<>'cap' THEN RAISE EXCEPTION '401st attribution admitted'; END IF;
  IF public.reserve_context_model_call('bucket',NULL,NULL)->>'outcome'<>'cap' THEN RAISE EXCEPTION '401st bucket admitted'; END IF;
  IF (SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=d)<>400 THEN RAISE EXCEPTION 'reservation budget'; END IF;
  IF has_function_privilege('anon','public.reserve_context_model_call(text,uuid,uuid)','EXECUTE')
  OR has_table_privilege('service_role','public.context_model_call_reservations','DELETE') THEN RAISE EXCEPTION 'reservation permissions'; END IF;
- -- Pass admission is intentionally time-gated. After 06:00 exercise its fence.
+ -- K1: pass admission is no longer time-gated and a finished pass is not the
+ -- day's last; the tick re-claims it every minute.
  r:=public.claim_context_pass(d);
- IF (now() AT TIME ZONE 'Australia/Perth')::time >= time '06:00' THEN
-  IF r->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'pass'; END IF;
-  tok:=(r->>'lease_token')::uuid;
-  IF NOT public.renew_context_pass(d,tok) OR public.renew_context_pass(d,gen_random_uuid()) THEN RAISE EXCEPTION 'renew fence'; END IF;
-  IF public.claim_context_pass(d)->>'outcome'<>'busy' THEN RAISE EXCEPTION 'pass duplicate'; END IF;
-  IF NOT public.finish_context_pass(d,tok,'failed',now()+interval '1 hour','rate limit') THEN RAISE EXCEPTION 'pass failure'; END IF;
-  IF public.claim_context_pass(d)->>'outcome'<>'paused' THEN RAISE EXCEPTION 'pass retry'; END IF;
-  UPDATE public.context_pass_days SET retry_at=NULL;
-  r:=public.claim_context_pass(d);tok:=(r->>'lease_token')::uuid;
-  IF NOT public.finish_context_pass(d,tok,'done',NULL,NULL) THEN RAISE EXCEPTION 'pass complete'; END IF;
-  IF (SELECT runs FROM public.context_pass_days WHERE run_date=d)<>400 THEN RAISE EXCEPTION 'pass counts calls'; END IF;
-  IF public.claim_context_pass(d)->>'outcome'<>'done' THEN RAISE EXCEPTION 'pass repeat'; END IF;
- ELSE
-  IF r->>'outcome'<>'paused' THEN RAISE EXCEPTION 'pre-six gate'; END IF;
- END IF;
+ IF r->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'pass'; END IF;
+ tok:=(r->>'lease_token')::uuid;
+ IF NOT public.renew_context_pass(d,tok) OR public.renew_context_pass(d,gen_random_uuid()) THEN RAISE EXCEPTION 'renew fence'; END IF;
+ IF public.claim_context_pass(d)->>'outcome'<>'busy' THEN RAISE EXCEPTION 'pass duplicate'; END IF;
+ IF NOT public.finish_context_pass(d,tok,'failed',now()+interval '1 hour','rate limit') THEN RAISE EXCEPTION 'pass failure'; END IF;
+ IF public.claim_context_pass(d)->>'outcome'<>'paused' THEN RAISE EXCEPTION 'pass retry'; END IF;
+ UPDATE public.context_pass_days SET retry_at=NULL;
+ r:=public.claim_context_pass(d);tok:=(r->>'lease_token')::uuid;
+ IF NOT public.finish_context_pass(d,tok,'done',NULL,NULL) THEN RAISE EXCEPTION 'pass complete'; END IF;
+ IF (SELECT runs FROM public.context_pass_days WHERE run_date=d)<>400 THEN RAISE EXCEPTION 'pass counts calls'; END IF;
+ IF public.claim_context_pass(d)->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'pass repeat'; END IF;
  IF has_function_privilege('anon','public.claim_context_pass(date)','EXECUTE') THEN RAISE EXCEPTION 'public RPC'; END IF;
 END $$;
 ROLLBACK;
