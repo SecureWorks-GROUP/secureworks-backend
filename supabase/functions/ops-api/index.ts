@@ -383,7 +383,9 @@ import {
   SesPackBuildDoorError,
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
-import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows, unlinkedActor } from './context_unlinked.ts'
+import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
+import { resolveRequestActor } from '../_shared/request_actor.ts'
+import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
@@ -1100,7 +1102,6 @@ import {
   listReconQueue as _listReconQueue,
   assignReconRow as _assignReconRow,
   markReconNotJobRelated as _markReconNotJobRelated,
-  resolveActor as _resolveReconActor,
 } from './materials_recon.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
 import {
@@ -4821,6 +4822,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     if (!_jobId || !(await verifyCostReportToken(_jobId, _token, costReportSecret()))) {
       return new Response(renderCostReportError('This link is invalid or has expired. Ask the office to resend the review email.'), { status: 403, headers: _crHtml })
     }
+    const _costReportActor = { actor: 'actor_missing', source: 'hmac_link', missing: true } as const
+    console.log(opsApiRequestLogLine(MAKESAFE_COST_REPORT_ACTION, req.method, _costReportActor))
+    recordOpsApiActorMissing(sb, 'hmac_link', _costReportActor)
     try {
       const _crClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
       const _crData = await getJobCostReport(_crClient, _jobId, _invoiceId)
@@ -4929,6 +4933,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     })
   }
 
+  // F-ACT (INTEGRATION X31): who asked, for audit only. The verified JWT user,
+  // else x-sw-actor only with a service or agent server secret, else
+  // actor_missing. Shared browser-key and routine headers are untrusted. It is
+  // written into one log line per call, a refused call included, and
+  // server-key classes without one are counted for the core status
+  // (actor_calls.ts). Never refused: this is not an access gate.
+  const requestActor = resolveRequestActor({
+    verifiedUserId: authMode === 'jwt' ? authUser?.id : null,
+    headers: req.headers,
+    trustActorHeader: authMode !== 'jwt' && serverSecretPresented,
+  })
+
   const actionAuthorization = _authorizeOpsApiAction({
     url: _preAuthUrl,
     authMode,
@@ -4936,6 +4952,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     serverSecretPresented,
   })
   if (!actionAuthorization.ok) {
+    console.log(opsApiDeniedLogLine(
+      _preAuthUrl.searchParams.get('action'),
+      req.method,
+      requestActor,
+      actionAuthorization.status,
+      actionAuthorization.code,
+    ))
+    recordOpsApiActorMissing(sb, authMode, requestActor)
     return new Response(JSON.stringify({
       error: actionAuthorization.error,
       code: actionAuthorization.code,
@@ -4953,7 +4977,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
     auditAction = action
-    console.log(`[ops-api] action=${action} method=${req.method}`)
+    console.log(opsApiRequestLogLine(action, req.method, requestActor))
+    recordOpsApiActorMissing(sb, authMode, requestActor)
 
     if (authMode === 'agent_read') {
       // ── Scoped headless agent READ allow-list ──
@@ -5254,6 +5279,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             mode: authMode,
             role: authUser?.role ?? null,
             userId: authUser?.id ?? null,
+            actor: receiptActor(requestActor, authMode),
           }, body && typeof body === 'object' ? body : {}))
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
@@ -6452,7 +6478,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         try {
           return json(await _correctMakesafeFalseSendStamps(client, body, {
-            actor: authMode === 'api_key' ? 'ops-api:api_key' : (authUser?.id || 'ops-api:jwt'),
+            actor: receiptActor(requestActor, authMode),
           }))
         } catch (err) {
           // A malformed request is the caller's fault, not an outage: without
@@ -6891,7 +6917,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             instructionKey: body?.instruction_key ?? body?.instructionKey ?? null,
             fills: body?.fills ?? null,
             evidenceNote: body?.evidence_note ?? body?.evidenceNote ?? null,
-            actor: body?.actor ?? null,
+            actor: receiptActor(requestActor, authMode),
           }))
         } catch (e) {
           if (e instanceof _GapFillError) return json({ error: e.message }, e.status)
@@ -7010,9 +7036,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (req.method !== 'POST') {
           return json({ error: 'run_ses_trade_chase requires POST' }, 405)
         }
-        const chaseActor = authMode === 'routine'
-          ? 'makesafe-reporting-routine'
-          : authUser?.email || `ops-api:${authMode}`
+        const chaseActor = receiptActor(requestActor, authMode)
         const summary = await runSesTradeChase({
           org_id: DEFAULT_ORG_ID,
           enabled: Deno.env.get('SES_TRADE_CHASE_ENABLED') === 'true',
@@ -7074,9 +7098,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         try {
           const request = normalizeSesPrepareRequest(body)
-          const actor = authMode === 'routine'
-            ? 'makesafe-reporting-routine'
-            : authUser?.email || `ops-api:${authMode}`
+          const actor = receiptActor(requestActor, authMode)
           const response = await prepareSesDocketRevisionAtHttpBoundary(
             request,
             createSesAssemblerRuntimeDependencies(client, {
@@ -7163,11 +7185,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         if (req.method !== 'POST') {
           return json({ error: 'run_ses_report_trigger requires POST' }, 405)
         }
-        const triggerActor = typeof body?.actor === 'string' && body.actor.trim()
-          ? `ses-report-trigger:${body.actor.trim().slice(0, 64)}`
-          : `ses-report-trigger:${authMode}`
+        const triggerActor = `ses-report-trigger:${receiptActor(requestActor, authMode).slice(0, 64)}`
         try {
-          const outcome = await runSesReportTrigger(body || {}, {
+          const outcome = await runSesReportTrigger({
+            ...(body || {}),
+            actor: triggerActor,
+          }, {
             client,
             actor: triggerActor,
             // The ONE shared pack read. A throw here is caught by the handler
@@ -7229,7 +7252,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'context_unlinked_rows': {
         if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
         if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
-        const actor = unlinkedActor(authUser?.id, req.headers)
+        const actor = requestActor.actor
         try {
           return json(action === 'context_unlinked_census'
             ? await contextUnlinkedCensus(client, url.searchParams, actor)
@@ -7337,9 +7360,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'generate_attach_makesafe_swms requires POST' }, 405)
         }
         try {
-          const actor = authMode === 'routine'
-            ? 'makesafe-reporting-routine'
-            : authUser?.email || `ops-api:${authMode}`
+          const actor = receiptActor(requestActor, authMode)
           const runtime = createSesAssemblerRuntimeDependencies(client, {
             org_id: DEFAULT_ORG_ID,
             created_by: actor,
@@ -7452,7 +7473,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'record_ses_portal_capture_evidence requires POST' }, 405)
         }
         try {
-          const actor = authUser?.email || `ops-api:${authMode}`
+          const actor = receiptActor(requestActor, authMode)
           return json(await recordSesPortalCaptureEvidence(client, body, actor))
         } catch (error) {
           if (error instanceof SesPortalCaptureEvidenceError) {
@@ -7629,14 +7650,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           jobId: body.job_id ?? body.jobId ?? null,
           jobNumber: body.job_number ?? body.jobNumber ?? null,
           useSuggestion: body.use_suggestion === true || body.useSuggestion === true,
-          actor: _resolveReconActor(body),
+          actor: receiptActor(requestActor, authMode),
           orgId: DEFAULT_ORG_ID,
         }))
       case 'materials_recon_not_job_related':
         return json(await _markReconNotJobRelated(client, {
           queueId: body.queue_id ?? body.queueId ?? null,
           xeroInvoiceId: body.xero_invoice_id ?? body.xeroInvoiceId ?? null,
-          actor: _resolveReconActor(body),
+          actor: receiptActor(requestActor, authMode),
           orgId: DEFAULT_ORG_ID,
         }))
 

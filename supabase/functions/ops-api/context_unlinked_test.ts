@@ -13,7 +13,6 @@ import {
   ContextUnlinkedError,
   contextUnlinkedRows,
   rowsArgs,
-  unlinkedActor,
 } from "./context_unlinked.ts";
 import {
   _authorizeOpsApiAction,
@@ -308,25 +307,6 @@ Deno.test("rows refuses unknown scopes and reasons, half cursors, bad ids, dates
     );
     assertEquals([e.code, e.status], ["invalid_request", 400], q);
   }
-});
-
-Deno.test("the actor is the signed-in user, else a well-formed x-sw-actor, else actor_missing", () => {
-  assertEquals(
-    unlinkedActor("u-1", new Headers({ "x-sw-actor": "workflow:x" })),
-    "user:u-1",
-  );
-  assertEquals(
-    unlinkedActor(null, new Headers({ "x-sw-actor": "workflow:census" })),
-    "workflow:census",
-  );
-  assertEquals(
-    unlinkedActor(
-      null,
-      new Headers({ "x-sw-actor": "not a valid actor; drop table" }),
-    ),
-    "actor_missing",
-  );
-  assertEquals(unlinkedActor(undefined, new Headers()), "actor_missing");
 });
 
 Deno.test("both doors are staff-only: not profile-scoped, not agent-read, trades refused", () => {

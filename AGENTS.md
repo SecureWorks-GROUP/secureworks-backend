@@ -565,6 +565,8 @@ re-apply contract when that owner moves on; the contract stands the pinned
 body back up inside its rolled-back transaction (C1d does this for F1's
 `record_capture_run`). "Linked" is
 `context_linked_status()`; never re-list the linked statuses in new SQL.
+The ops-api request-actor and `actor_missing` contract is owned by
+[`docs/context/pipeline-status.md`](docs/context/pipeline-status.md).
 The heartbeat hit the API statement timeout (57014, 8 s): never call
 `context_extraction_candidates` from it (the pre-K1 body detoasted
 `jobs.scope_json` per event, 15.5 s live); `ready_jobs` is

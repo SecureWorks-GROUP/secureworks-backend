@@ -10,8 +10,9 @@
 //
 // Both return what the database returns; there is no redaction layer here
 // (Review S1): the rows read carries what the job read carries. Neither writes.
-// Every call logs one line with the actor (the signed-in user id, else the
-// x-sw-actor header, else actor_missing) and counts, never row content.
+// Every call logs one line with the verified JWT user, trusted server-key
+// header actor, or actor_missing; the one rule is F-ACT's
+// _shared/request_actor.ts. It counts, never row content.
 
 export class ContextUnlinkedError extends Error {
   constructor(
@@ -97,16 +98,6 @@ function intIn(
   const n = Number(raw);
   if (n < min || n > max) bad(`${key} must be between ${min} and ${max}`);
   return n;
-}
-
-/** The actor for the log line (INTEGRATION X31: recorded, never required). */
-export function unlinkedActor(
-  userId: string | null | undefined,
-  headers: Headers,
-): string {
-  if (userId) return `user:${userId}`;
-  const h = (headers.get("x-sw-actor") || "").trim();
-  return /^[A-Za-z0-9_.:@-]{1,128}$/.test(h) ? h : "actor_missing";
 }
 
 export function censusArgs(params: URLSearchParams): Record<string, unknown> {

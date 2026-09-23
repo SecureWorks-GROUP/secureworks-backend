@@ -79,6 +79,30 @@ the receiver enforces auth; observe-mode `auth=missing` is counted, not
 alarmed). Thresholds: `context_ghl_capture_policy()`. The reconciler itself:
 [ghl-message-reconcile.md](ghl-message-reconcile.md).
 
+`actor_missing` (F-ACT, `20260924201000_ops_api_actor_recording.sql`,
+INTEGRATION X31) is a core key, so it sits at the top level with the others:
+`{state, today, last_7_days}`, the number of ops-api calls in the `api_key`,
+`routine`, and `agent_read` classes, plus valid HMAC-link cost-report calls,
+that carried no usable trusted actor, today and over the last 7 Perth days,
+today included. `x-sw-actor` is trusted only
+with the service or agent server secret. Shared browser-key and routine calls
+ignore a claimed header and count as missing; JWT calls use the verified user
+and ignore the header. `state` is `available`, or `unavailable` with `code`
+when the counter cannot be read; it never fails the heartbeat. Calls with a
+usable actor are not counted. It raises no alarm: identity is for audit only,
+and such a call is never refused. The counter is `ops_api_actor_calls`, one row
+per Perth day holding the missing count only; rows more than 35 days old are
+purged when a new day row is opened. It is written only through
+`record_ops_api_actor_missing()`, which takes no argument. Each authenticated
+ops-api call is logged, including action-authorization refusals. A valid
+HMAC-link cost-report call gets the same log; requests rejected as
+unauthenticated or with an invalid HMAC are outside this audit path. The
+resolved actor is in that log line:
+`[ops-api] action=<action> method=<m> actor=<actor> actor_source=<jwt|header|header_invalid|header_untrusted|hmac_link|none>`
+for a served call, and `[ops-api] denied action=... actor=... actor_source=... status=<n> code=<code>`
+for an authenticated call the front door refused. The count runs through
+`EdgeRuntime.waitUntil`, best-effort.
+
 Alarms are read by the CIO desk's scheduled check (INTEGRATION decision D-A),
 never Telegram.
 

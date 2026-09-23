@@ -322,7 +322,6 @@ Deno.test("W5 browser-key 401, staff board 200, and routine board refusal remain
   const allowStart = index.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set([");
   const agentDispatchStart = index.indexOf(
     "    if (authMode === 'agent_read') {",
-    index.indexOf("console.log(`[ops-api] action=${action}"),
   );
   const agentDispatch = index.slice(agentDispatchStart, allowStart);
   assertEquals(

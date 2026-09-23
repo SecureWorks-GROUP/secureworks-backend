@@ -126,6 +126,11 @@ BEGIN
  IF to_regprocedure('public.context_bucket_status()') IS NOT NULL THEN
   new_keys:=new_keys||ARRAY['email_capture','transcript_capture','money','bucket'];
  END IF;
+ -- F-ACT (same owner, 20260924201000) adds one core key, actor_missing; its
+ -- own contract checks it. Every other core key must still be the 17 Sep value.
+ IF to_regprocedure('public.context_actor_missing_status()') IS NOT NULL THEN
+  new_keys:=new_keys||ARRAY['actor_missing'];
+ END IF;
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
   (j,org,'accepted','fencing','F1-SAME-A-'||j,'f1-same-contact'),(k,org,'accepted','fencing','F1-SAME-B-'||k,'f1-same-contact');
  INSERT INTO public.xero_invoices(org_id,xero_invoice_id,invoice_number,invoice_type,status,amount_due,job_id,updated_at)
@@ -140,7 +145,7 @@ BEGIN
 
  legacy:=pg_temp.legacy_context_pipeline_status();
  composed:=public.context_pipeline_status();
- core:=public.context_core_status();
+ core:=public.context_core_status()-'actor_missing';
  IF core IS DISTINCT FROM legacy THEN RAISE EXCEPTION 'f1 core differs from the 17 Sep body: % vs %',core,legacy; END IF;
  FOR key IN SELECT jsonb_object_keys(legacy) LOOP
   IF NOT composed ? key OR composed->key IS DISTINCT FROM legacy->key
@@ -423,8 +428,10 @@ BEGIN
  THEN RAISE EXCEPTION 'f1 9-arg persist_luna_context_revision is not the expected F1 body'; END IF;
  -- The core body is the production heartbeat body with exactly one line
  -- changed: the ready_jobs read.
- IF md5(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
-    ' ready:=public.context_ready_jobs_count(400);',' SELECT count(*) INTO ready FROM public.context_extraction_candidates(400);'))
+ IF md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+    ' ready:=public.context_ready_jobs_count(400);',' SELECT count(*) INTO ready FROM public.context_extraction_candidates(400);'),
+    -- F-ACT's one added key (20260924201000), when that migration has run.
+    E',\n  ''actor_missing'',public.context_actor_missing_status());',');'))
     IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
  THEN RAISE EXCEPTION 'f1 context_core_status() differs from the production heartbeat body beyond the ready_jobs read'; END IF;
  IF (SELECT count(*) FROM pg_proc WHERE proname='persist_luna_context_revision' AND pronamespace='public'::regnamespace)<>2
