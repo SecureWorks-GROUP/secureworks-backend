@@ -10,8 +10,8 @@ import {
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import { XeroSyncProviderError } from "./xero_transport.ts";
 import {
-  CLOSURE_SINGLE_READS_PER_RUN,
   classifyLiveOpen,
+  CLOSURE_SINGLE_READS_PER_RUN,
   OPEN_BOOK_ACTOR,
   OPEN_BOOK_RUN_SOURCE,
   openBookCursor,
@@ -32,7 +32,6 @@ import {
 
 const NOW = new Date("2026-09-24T02:00:00.000Z");
 
-// deno-lint-ignore no-explicit-any
 type Inv = Record<string, any>;
 
 // A scripted Xero: the open book (paged by 100), the IDs= read and the
@@ -68,7 +67,9 @@ function scriptedXero(opts: {
         calls.push(`one:${id}`);
         const r = opts.single?.[id];
         if (r instanceof Error) return Promise.reject(r);
-        if (!r) return Promise.reject(new XeroSyncProviderError(404, "/Invoices"));
+        if (!r) {
+          return Promise.reject(new XeroSyncProviderError(404, "/Invoices"));
+        }
         return Promise.resolve({ Invoices: [r] });
       },
       quota: () => ({
@@ -95,7 +96,10 @@ function deps(
     readMode: () =>
       mode === "throws"
         ? Promise.reject(new Error("rpc down"))
-        : Promise.resolve({ mode, state: mode === "off" ? "missing" : "present" }),
+        : Promise.resolve({
+          mode,
+          state: mode === "off" ? "missing" : "present",
+        }),
   };
 }
 
@@ -371,13 +375,20 @@ Deno.test("M17: a deposit invoice closed only by the closure read stamps deposit
   assertEquals(byId(db.table("xero_invoices"), M17.id)!.status, "PAID");
   const events = db.table("business_events").map((e) => e.event_type);
   assertEquals(events.filter((e) => e === "job.deposit_stamped").length, 1);
-  assertEquals(events.filter((e) => e === "invoice.payment_received").length, 1);
+  assertEquals(
+    events.filter((e) => e === "invoice.payment_received").length,
+    1,
+  );
 
   // The next run: the invoice is no longer open here, so nothing is re-read,
   // and the stamp and completion are not repeated.
   const second = await sweepOpenReceivables(
     db.client,
-    deps("apply", scriptedXero({ open: [], byId: { [M17.id]: paid } }).xero, completed),
+    deps(
+      "apply",
+      scriptedXero({ open: [], byId: { [M17.id]: paid } }).xero,
+      completed,
+    ),
   );
   assertEquals(second.counts.open_here_not_in_xero, 0);
   assertEquals(second.counts.deposit_stamps, 0);
@@ -477,13 +488,18 @@ Deno.test("closure: at most ten single reads a run; the rest and unreadable ones
   assertEquals(s.counts.closure_unverified, 3);
   // Unsettled closures do not fail the sweep; they have their own alarm.
   assertEquals(s.status, "succeeded");
-  assertEquals(db.table("xero_invoices").filter((r) => r.status === "AUTHORISED").length, 3);
+  assertEquals(
+    db.table("xero_invoices").filter((r) => r.status === "AUTHORISED").length,
+    3,
+  );
 });
 
 Deno.test("F1: a failed page closes nothing, applies the rows it saw and records partial", async () => {
   const cached = Array.from({ length: 150 }, (_, i) =>
     cachedRow({
-      xero_invoice_id: `00000000-0000-4000-8000-000000p${String(i).padStart(5, "0")}`,
+      xero_invoice_id: `00000000-0000-4000-8000-000000p${
+        String(i).padStart(5, "0")
+      }`,
       status: "AUTHORISED",
       total: 5,
       amount_due: 5,
@@ -517,7 +533,11 @@ Deno.test("F1: a failed page closes nothing, applies the rows it saw and records
 Deno.test("F12: a cooldown is recorded as failed on the receipt, then raised", async () => {
   const db = fakeDb({ tables: { xero_invoices: [] } });
   const cooldown = new XeroCooldownError("cooling down", 429, "xero_cooldown");
-  const { xero } = scriptedXero({ open: [], failPage: 1, failPageWith: cooldown });
+  const { xero } = scriptedXero({
+    open: [],
+    failPage: 1,
+    failPageWith: cooldown,
+  });
   await assertRejects(
     () => sweepOpenReceivables(db.client, deps("observe", xero)),
     XeroCooldownError,
@@ -528,7 +548,13 @@ Deno.test("F12: a cooldown is recorded as failed on the receipt, then raised", a
 
 Deno.test("F16: off, and an unreadable mode, read nothing and write nothing", async () => {
   for (const mode of ["off", "throws"] as const) {
-    const db = fakeDb({ tables: { xero_invoices: [cachedRow({ xero_invoice_id: "x", status: "AUTHORISED" })] } });
+    const db = fakeDb({
+      tables: {
+        xero_invoices: [
+          cachedRow({ xero_invoice_id: "x", status: "AUTHORISED" }),
+        ],
+      },
+    });
     const { xero, calls } = scriptedXero({ open: [] });
     const s = await sweepOpenReceivables(db.client, deps(mode, xero));
     assertEquals([s.mode, s.ran, s.status], ["off", false, "skipped"]);
@@ -588,7 +614,10 @@ Deno.test("the receipt cursor always fits the 4096-byte column check", () => {
     ids[k] = Array.from({ length: 60 }, () => crypto.randomUUID());
   }
   const cursor = openBookCursor("apply", "present", ids);
-  assert(jsonbTextBytes(cursor) <= 4096, `cursor ${jsonbTextBytes(cursor)} bytes`);
+  assert(
+    jsonbTextBytes(cursor) <= 4096,
+    `cursor ${jsonbTextBytes(cursor)} bytes`,
+  );
   assertEquals((cursor as any).ids_truncated, true);
   assertEquals((cursor as any).actor, OPEN_BOOK_ACTOR);
 });

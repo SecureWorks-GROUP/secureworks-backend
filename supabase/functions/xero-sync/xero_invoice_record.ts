@@ -29,14 +29,14 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import {
-  sealedSesMoneyRefusal,
   type SealedSesJobRecord,
   type SealedSesMoneyRefusal,
+  sealedSesMoneyRefusal,
 } from "../_shared/sealed_ses_money_fence.ts";
 import {
   applyDepositStamp,
-  depositStampRelevant,
   type DepositStampOutcome,
+  depositStampRelevant,
   xeroDateToIsoTimestamp,
 } from "./deposit_stamp.ts";
 
@@ -67,6 +67,8 @@ export type ExistingInvoiceLink = {
 export const EXISTING_LINK_COLUMNS =
   "job_id, job_contact_id, invoice_obligation_revision_id, ses_external_token";
 
+// Async so every caller keeps its await (moved from index.ts unchanged).
+// deno-lint-ignore require-await
 export async function sealedSesXeroLinkRefusal(
   _client: Db,
   invoice: XeroInvoiceLinkRecord,
