@@ -191,10 +191,14 @@ BEGIN
  UPDATE public.context_attribution_attempts SET next_at=clock_timestamp()-interval '1 second' WHERE event_id=eid;
  SELECT count(*) INTO n FROM public.context_attribution_due(200) WHERE id=eid;
  IF n<>1 THEN RAISE EXCEPTION 'row past its backoff not offered'; END IF;
- -- Second ask the same Perth day: waits for the next Perth day, not 2 hours.
+ -- Second ask the same Perth day: waits until at least the next Perth day.
+ -- Attempt 2 also applies the 2-hour backoff, so after 22:00 Perth that
+ -- landing is after midnight; the daily cap still holds either way.
  r:=public.record_attribution_error(eid,'rpc_error');
- IF (r->>'attempts')::int<>2 OR (r->>'asks_on_date')::int<>2 OR (r->>'next_at')::timestamptz<>tomorrow
- THEN RAISE EXCEPTION 'second ask today must wait for the next Perth day, got % (want %)',r,tomorrow; END IF;
+ IF (r->>'attempts')::int<>2 OR (r->>'asks_on_date')::int<>2
+  OR (r->>'next_at')::timestamptz<tomorrow
+  OR (r->>'next_at')::timestamptz>=tomorrow+interval '2 hours'
+ THEN RAISE EXCEPTION 'second ask today must wait for the next Perth day, got % (want % .. +2h)',r,tomorrow; END IF;
  -- A later day: the third consecutive failure also waits for the next Perth day.
  UPDATE public.context_attribution_attempts SET asks_date=asks_date-1,next_at=clock_timestamp()-interval '1 second' WHERE event_id=eid;
  r:=public.record_attribution_error(eid,'model_timeout');
