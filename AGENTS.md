@@ -613,6 +613,14 @@ terminal time is when the job last became terminal, not a later archive.
 Never re-derive candidates from today's open jobs (`context_contact_jobs`),
 and never treat a GHL conversation key as a job thread. A later ladder slice
 must also widen the md5 lists in the earlier ladder contracts it supersedes.
+Since P1b (`20260924160000`) the ONE reopen path is
+`context_reconsider_contact(contact, since, reason, job)`, called by the job
+insert trigger over the new job's lead window (no contact: nothing). It moves
+only bucket, `unplaced`, `pending_luna` and contact-rule rows (`single_open`,
+`single_line`, `luna`), once per job, and stamps `capture_mode='relink'`
+only on unplaced and sibling reopen (first bind keeps its mode); never add
+a second reopen path, and a new reason (sites' `party_linked`) replaces
+its body.
 
 Luna's answer carries an outcome (`job`, `several`, `undecided`); the last two
 rest the row as `unplaced`, attribution asks are recorded per row with backoff
