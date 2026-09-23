@@ -83,7 +83,7 @@ export function acceptedProofsForType(type: string | null): AuthProof[] {
 
 export function resolveAuthMode(raw: string | null | undefined): AuthMode {
   const value = (raw ?? "").trim().toLowerCase();
-  return value === "enforce" || value === "enforcing" ? "enforce" : "observe";
+  return value === "enforce" ? "enforce" : "observe";
 }
 
 /** Constant-time string comparison (length is not secret). */

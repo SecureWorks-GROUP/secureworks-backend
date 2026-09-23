@@ -45,7 +45,7 @@ Deno.test("mode is observe unless explicitly enforce", () => {
   assertEquals(resolveAuthMode("observe"), "observe");
   assertEquals(resolveAuthMode("yes"), "observe");
   assertEquals(resolveAuthMode("enforce"), "enforce");
-  assertEquals(resolveAuthMode(" ENFORCING "), "enforce");
+  assertEquals(resolveAuthMode("enforcing"), "observe");
 });
 
 Deno.test("proof classes by event type", () => {

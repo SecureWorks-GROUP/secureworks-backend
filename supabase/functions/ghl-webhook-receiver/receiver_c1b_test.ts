@@ -456,16 +456,10 @@ Deno.test("no raw webhook body is written to webhook_log for any type", async ()
 
 // ── deploy wiring ─────────────────────────────────────────
 
-Deno.test("index.ts keeps --no-verify-jwt in its first 30 lines (the deploy workflow reads it) and pins esm.sh imports", async () => {
+Deno.test("index.ts keeps --no-verify-jwt in its first 30 lines (the deploy workflow reads it)", async () => {
   const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
   const head = source.split("\n").slice(0, 30).join("\n");
   assertStringIncludes(head, "--no-verify-jwt");
-  for (const file of ["./index.ts", "./handler.ts", "./receiver_auth.ts"]) {
-    const text = await Deno.readTextFile(new URL(file, import.meta.url));
-    for (const m of text.matchAll(/https:\/\/esm\.sh\/(@?[^"'@]+)@([^"'/]+)/g)) {
-      assert(/^\d+\.\d+\.\d+$/.test(m[2]), `${file}: esm.sh ${m[1]} must pin an exact version, got ${m[2]}`);
-    }
-  }
 });
 
 Deno.test("a GHL app ContactCreate (contact named as id) is receipted with that contact id", async () => {

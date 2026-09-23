@@ -500,7 +500,7 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
                 matched_at: new Date().toISOString(),
               });
             }
-            console.log(`[ghl-webhook-receiver] attribution upsert contactId=${contactId} keys=${Object.keys(patch).join(",")}`);
+            console.log(`[ghl-webhook-receiver] attribution upsert contactId=${safeId(contactId) || "none"} keys=${Object.keys(patch).join(",")}`);
           }
         }
       } catch (attrErr) {
@@ -846,7 +846,7 @@ export async function handleGhlWebhook(req: Request, deps: ReceiverDeps): Promis
             message_id = lookup.message_id;
             conversation_id = lookup.conversation_id;
             lookup_status = lookup.lookup_status;
-            console.log(`[ghl-webhook-receiver] ghl recording lookup contactId=${_contact_id} status=${lookup_status} found=${recording_url ? "yes" : "no"} message_id=${message_id || "n/a"}`);
+            console.log(`[ghl-webhook-receiver] ghl recording lookup contactId=${safeId(_contact_id) || "none"} status=${lookup_status} found=${recording_url ? "yes" : "no"} message_id=${message_id || "n/a"}`);
           }
           if (!recording_url) {
             console.warn(`[ghl-webhook-receiver] CallCompleted with no recoverable recording_url; skipping transcribe-call. lookup_status=${lookup_status}`);
