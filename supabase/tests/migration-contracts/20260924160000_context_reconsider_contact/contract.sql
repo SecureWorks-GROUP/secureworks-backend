@@ -67,6 +67,7 @@ BEGIN
   OR e2.job_id IS NOT NULL OR e2.attribution_status IS DISTINCT FROM 'pending_luna' OR e2.candidate_job_ids IS DISTINCT FROM ARRAY[j31,j48]
  THEN RAISE EXCEPTION 'R14: 16 Sep texts must reopen with both quotes, got % % % / % %',e1.attribution_status,e1.job_id,e1.candidate_job_ids,e2.attribution_status,e2.candidate_job_ids; END IF;
  IF e1.metadata->>'placement_rule' IS DISTINCT FROM 'reopen_new_job' OR e1.metadata->>'capture_mode' IS DISTINCT FROM 'relink'
+  OR e1.metadata->>'capture_mode_before' IS DISTINCT FROM 'live'
   OR e1.metadata->'placement_reconsidered'->>'job_id' IS DISTINCT FROM j48::text OR e1.metadata->'placement_reconsidered'->>'from_job_id' IS DISTINCT FROM j31::text
   OR e1.metadata->'placement_reconsidered'->>'from_status' IS DISTINCT FROM 'single_open'
   OR e1.attributed_at IS NOT NULL OR e1.match_method IS DISTINCT FROM 'none' OR e1.match_status IS DISTINCT FROM 'unresolved'
@@ -261,6 +262,60 @@ BEGIN
 END $$;
 ROLLBACK;
 
+-- 6b. Review findings: the window ends at the job's creation; a repeat call
+-- never re-moves a row the ladder placed for this job event; a non-GHL row
+-- whose conversation is bound to a job is kept; the eligibility test refuses
+-- direct, thread and automated rows (it is applied again under the lock).
+BEGIN;
+DO $$
+DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; a uuid:=gen_random_uuid(); b uuid:=gen_random_uuid();
+ p uuid:=gen_random_uuid(); f uuid:=gen_random_uuid(); late public.business_events; sl public.business_events; em public.business_events; r jsonb;
+BEGIN
+ -- A job inserted with a backdated creation (5 Sep) after a 10 Sep text was
+ -- placed on the only job then known: the 10 Sep text is after the new job's
+ -- creation, outside its lead window, and stays.
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at) VALUES(a,org,'quoted','fencing','P1B-LATE-A','p1b-late','2026-09-01Z');
+ INSERT INTO public.business_events(source,payload,contact_id,provider_message_id,channel,direction,event_at)
+ VALUES('ghl-webhook-receiver','{"body":"Any update?"}','p1b-late','ghl:p1b-late-10sep','sms','inbound','2026-09-10Z') RETURNING * INTO late;
+ IF late.job_id IS DISTINCT FROM a THEN RAISE EXCEPTION 'late fixture: expected single_open on A'; END IF;
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at) VALUES(b,org,'quoted','fencing','P1B-LATE-B','p1b-late','2026-09-05Z');
+ SELECT * INTO late FROM public.business_events WHERE id=late.id;
+ IF late.job_id IS DISTINCT FROM a OR late.attribution_status IS DISTINCT FROM 'single_open'
+ THEN RAISE EXCEPTION 'window: a text after the new job''s creation was moved, got % %',late.attribution_status,late.job_id; END IF;
+
+ -- Two jobs created together: the ladder places a fencing-line text on the
+ -- fencing job by line; a repeat call for the patio job does not re-move it.
+ INSERT INTO public.business_events(source,payload,contact_id,provider_message_id,channel,direction,event_at)
+ VALUES('ghl-webhook-receiver','{"body":"Fence and patio please","line":"fencing"}','p1b-line','ghl:p1b-line-1sep','sms','inbound','2026-09-01Z') RETURNING * INTO sl;
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at) VALUES
+ (p,org,'quoted','patio','P1B-LINE-P','p1b-line','2026-09-05Z'),(f,org,'quoted','fencing','P1B-LINE-F','p1b-line','2026-09-05Z');
+ SELECT * INTO sl FROM public.business_events WHERE id=sl.id;
+ IF sl.job_id IS DISTINCT FROM f OR sl.attribution_status IS DISTINCT FROM 'single_line'
+ THEN RAISE EXCEPTION 'line fixture: expected single_line on the fencing job, got % %',sl.attribution_status,sl.job_id; END IF;
+ r:=public.context_reconsider_contact('p1b-line','2026-08-06Z','job_created',p);
+ SELECT * INTO sl FROM public.business_events WHERE id=sl.id;
+ IF sl.job_id IS DISTINCT FROM f OR (r->>'reopened')::int IS DISTINCT FROM 0
+ THEN RAISE EXCEPTION 'once per event: a repeat call re-moved a row placed for the same job, got % %',sl.attribution_status,r; END IF;
+
+ -- A non-GHL email whose conversation the ladder bound to A: kept on A.
+ INSERT INTO public.business_events(source,payload,contact_id,thread_key,channel,direction,event_at)
+ VALUES('monitor-inbox','{"body":"Re: fence quote"}','p1b-late','outlook:p1b-late-thread','email','inbound','2026-09-04Z') RETURNING * INTO em;
+ UPDATE public.business_events SET job_id=a,attribution_status='single_open',attribution_step=3,match_method='contact_id',candidate_job_ids=NULL WHERE id=em.id;
+ INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES('outlook:p1b-late-thread',a,'ladder',em.id);
+ r:=public.context_reconsider_contact('p1b-late','2026-08-06Z','job_created',b);
+ SELECT * INTO em FROM public.business_events WHERE id=em.id;
+ IF em.job_id IS DISTINCT FROM a OR (r->>'kept_thread_bound')::int IS DISTINCT FROM 1
+ THEN RAISE EXCEPTION 'thread-bound: a non-GHL row bound to a conversation was reopened, got % %',em.attribution_status,r; END IF;
+
+ -- The eligibility test itself.
+ IF public.context_reconsider_eligible(ROW(em.*)::public.business_events,b) IS DISTINCT FROM true THEN RAISE EXCEPTION 'eligible: single_open row refused'; END IF;
+ em.attribution_status:='direct'; IF public.context_reconsider_eligible(em,b) THEN RAISE EXCEPTION 'eligible: direct row accepted'; END IF;
+ em.attribution_status:='thread'; IF public.context_reconsider_eligible(em,b) THEN RAISE EXCEPTION 'eligible: thread row accepted'; END IF;
+ em.job_id:=NULL; em.attribution_status:='automated'; IF public.context_reconsider_eligible(em,b) THEN RAISE EXCEPTION 'eligible: automated row accepted'; END IF;
+ em.attribution_status:='admin_bucket'; em.candidate_job_ids:=ARRAY[b]; IF public.context_reconsider_eligible(em,b) THEN RAISE EXCEPTION 'eligible: row already naming the job accepted'; END IF;
+END $$;
+ROLLBACK;
+
 -- 7. Audit I9: a job with no customer reconsiders nothing (the old body re-ran
 -- the whole bucket for every customer).
 BEGIN;
@@ -323,23 +378,26 @@ ROLLBACK;
 DO $$
 DECLARE f text; role_name text;
 BEGIN
- FOREACH f IN ARRAY ARRAY['public.context_reconsider_contact(text,timestamptz,text,uuid)','public.context_job_created_reconsider()'] LOOP
+ FOREACH f IN ARRAY ARRAY['public.context_reconsider_contact(text,timestamptz,text,uuid)','public.context_job_created_reconsider()',
+  'public.context_reconsider_eligible(public.business_events,uuid)'] LOOP
   FOREACH role_name IN ARRAY ARRAY['anon','authenticated'] LOOP
    IF has_function_privilege(role_name,f,'EXECUTE') THEN RAISE EXCEPTION '% can execute %',role_name,f; END IF;
   END LOOP;
  END LOOP;
  IF NOT has_function_privilege('service_role','public.context_reconsider_contact(text,timestamptz,text,uuid)','EXECUTE')
  THEN RAISE EXCEPTION 'service_role cannot execute context_reconsider_contact'; END IF;
+ IF has_function_privilege('service_role','public.context_reconsider_eligible(public.business_events,uuid)','EXECUTE')
+ THEN RAISE EXCEPTION 'service_role can call the private eligibility helper'; END IF;
  IF (SELECT prosecdef FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) IS NOT TRUE
-  OR NOT (SELECT proconfig FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) @> ARRAY['search_path=public, pg_temp','lock_timeout=2s']
- THEN RAISE EXCEPTION 'context_reconsider_contact must be SECURITY DEFINER with a fixed search_path and a 2 s lock wait'; END IF;
+  OR (SELECT proconfig FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) IS DISTINCT FROM ARRAY['search_path=public, pg_temp']
+ THEN RAISE EXCEPTION 'context_reconsider_contact must be SECURITY DEFINER with a fixed search_path'; END IF;
 END $$;
 CREATE TEMP TABLE p1b_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
- WHERE n.nspname='public' AND p.proname IN ('context_reconsider_contact','context_job_created_reconsider');
+ WHERE n.nspname='public' AND p.proname IN ('context_reconsider_contact','context_job_created_reconsider','context_reconsider_eligible');
 \ir ../../../migrations/20260924160000_context_reconsider_contact.sql
 DO $$
 BEGIN
- IF (SELECT count(*) FROM p1b_before)<>2 THEN RAISE EXCEPTION 'expected 2 P1b functions, got %',(SELECT count(*) FROM p1b_before); END IF;
+ IF (SELECT count(*) FROM p1b_before)<>3 THEN RAISE EXCEPTION 'expected 3 P1b functions, got %',(SELECT count(*) FROM p1b_before); END IF;
  IF EXISTS(SELECT 1 FROM p1b_before b LEFT JOIN pg_proc p ON p.oid=b.sig::regprocedure WHERE md5(p.prosrc) IS DISTINCT FROM b.md5)
  THEN RAISE EXCEPTION 'P1b re-apply changed a body'; END IF;
 END $$;

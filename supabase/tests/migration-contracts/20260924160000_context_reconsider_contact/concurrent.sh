@@ -7,8 +7,8 @@ case "$CONTRACT_DATABASE_URL" in
 esac
 
 # A message locked by another session (say, Luna placing it) must never block
-# a job insert: P1b waits at most 2 seconds for it, skips it, and the insert
-# commits. The skipped message stays where it was.
+# a job insert: P1b skips it without waiting, and the insert commits. The
+# skipped message stays where it was.
 psql "$CONTRACT_DATABASE_URL" -X -q -v ON_ERROR_STOP=1 <<'SQL'
 INSERT INTO public.business_events(source,payload,contact_id,channel,direction,event_at)
 VALUES('ghl-webhook-receiver','{"body":"Busy text"}','p1b-busy','sms','inbound','2026-09-01Z');
@@ -28,7 +28,7 @@ VALUES(gen_random_uuid(),'00000000-0000-0000-0000-000000000001','quoted','fencin
 SQL
 elapsed=$(( $(date +%s) - started ))
 wait "$holder"
-if [ "$elapsed" -ge 5 ]; then
+if [ "$elapsed" -ge 3 ]; then
   echo "contract: the job insert waited ${elapsed}s on a locked message" >&2
   exit 1
 fi
