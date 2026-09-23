@@ -1,5 +1,6 @@
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 import { XeroSyncProviderError } from "./xero_transport.ts";
+import { buildVerifiedInvoicePatch } from "./xero_invoice_record.ts";
 
 // Reconciliation needs a positively identified provider record. An unavailable
 // record (including HTTP404) does not prove that an accounting balance is zero.
@@ -33,35 +34,9 @@ export async function reconcileXeroInvoice(
       "Invoice reconciliation is incomplete: provider balances are unverified",
     );
   }
-  const patch: Record<string, unknown> = {
-    status: inv.Status,
-    amount_due: inv.AmountDue,
-    amount_paid: inv.AmountPaid,
-    synced_at: now.toISOString(),
-    // The attempt stamp orders the daily draft sweep. A verified read clears
-    // any recorded failure; synced_at stays a verification timestamp only.
-    reconcile_attempted_at: now.toISOString(),
-    reconcile_last_error: null,
-    // Keep the verified provider snapshot aligned with status and balances.
-    raw_json: inv,
-  };
-  // Optional omissions cannot erase known cached values.
-  if (
-    typeof inv.DueDateString === "string" &&
-    Number.isFinite(Date.parse(inv.DueDateString))
-  ) {
-    patch.due_date = inv.DueDateString;
-  }
-  if (Array.isArray(inv.LineItems)) patch.line_items = inv.LineItems;
-  const date = String(inv.UpdatedDateUTC ?? "").match(
-    /\/Date\((\d+)([+-]\d+)?\)\//,
-  );
-  // updated_at drives the incremental sync watermark. A retrieval timestamp
-  // cannot substitute for a missing provider update timestamp.
-  const updated = date ? new Date(Number(date[1])) : null;
-  if (updated && Number.isFinite(updated.getTime())) {
-    patch.updated_at = updated.toISOString();
-  }
+  // One builder for every single-record read (money slice MN1): contact and
+  // reference refresh here too, and xero_verified_at records the read.
+  const patch = buildVerifiedInvoicePatch(inv, now);
   const { error } = await client.from("xero_invoices").update(patch)
     .eq("xero_invoice_id", invoiceId).eq("org_id", orgId);
   if (error) {
@@ -83,8 +58,17 @@ export const DRAFT_RECONCILE_LIMIT = 5;
 export const DRAFT_RECONCILE_KEY = "draft_reconcile_last_run_at";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+export interface StaleXeroSelectionOptions {
+  // Money slice MN1: once the open-book sweep runs in apply mode and finished
+  // this run, it verifies the whole open book in two or three calls, so the
+  // hourly one-by-one open verify is skipped. Cached drafts are unaffected.
+  skipOpen?: boolean;
+}
+
 export interface StaleXeroSelection {
   invoices: Array<{ xero_invoice_id: string }>;
+  // True when the open receivables were not selected (skipOpen).
+  openSkipped: boolean;
   // Whether this run spent quota on the daily draft sweep.
   draftsDue: boolean;
   drafts: number;
@@ -143,14 +127,17 @@ export async function listStaleXeroInvoices(
   client: any,
   orgId: string,
   now: Date = new Date(),
+  options: StaleXeroSelectionOptions = {},
 ): Promise<StaleXeroSelection> {
   const invalid = (data: unknown, error: unknown) =>
     error || !Array.isArray(data) ||
     data.some((row) =>
       !row || typeof row.xero_invoice_id !== "string" || !row.xero_invoice_id
     );
-  // Open receivables: verified hourly while money is owed.
-  const open = await client.from("xero_invoices")
+  // Open receivables: verified hourly while money is owed, unless the
+  // open-book sweep already verified the whole book this run.
+  const open = options.skipOpen ? { data: [], error: null } : await client
+    .from("xero_invoices")
     .select("xero_invoice_id")
     .eq("org_id", orgId).eq("invoice_type", "ACCREC")
     .in("status", ["AUTHORISED", "SUBMITTED"])
@@ -206,6 +193,7 @@ export async function listStaleXeroInvoices(
   const drafts = take(draftRows, DRAFT_RECONCILE_LIMIT);
   return {
     invoices: merged,
+    openSkipped: options.skipOpen === true,
     draftsDue: gate.due,
     drafts,
     draftGateSkipped: gate.skipped,
@@ -220,6 +208,7 @@ export interface StaleReconcileSummary {
   drafts_selected: number;
   draft_sweep_ran: boolean;
   draft_gate_skipped: string | null;
+  open_verify_skipped: boolean;
 }
 
 // One unverifiable invoice must not hold up the batch. The same row is first
@@ -265,8 +254,9 @@ export async function reconcileStaleXeroInvoices(
   // payload. Used by the deposit stamp. A cooldown propagates; any other
   // hook failure is logged and never counts as a reconcile failure.
   onReconciled?: (invoiceId: string, verifiedPayload: unknown) => Promise<void>,
+  options: StaleXeroSelectionOptions = {},
 ): Promise<StaleReconcileSummary> {
-  const selection = await listStaleXeroInvoices(client, orgId, now);
+  const selection = await listStaleXeroInvoices(client, orgId, now, options);
   const summary: StaleReconcileSummary = {
     reconciled: 0,
     attempted: 0,
@@ -275,6 +265,7 @@ export async function reconcileStaleXeroInvoices(
     drafts_selected: selection.drafts,
     draft_sweep_ran: selection.draftsDue,
     draft_gate_skipped: selection.draftGateSkipped,
+    open_verify_skipped: selection.openSkipped,
   };
   try {
     for (const stale of selection.invoices) {

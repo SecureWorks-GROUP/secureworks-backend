@@ -314,6 +314,16 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/xero-sync/xero_transport_test.ts
 
+      # Slice MN1: the one provider-invoice path (row, reference link, deposit
+      # stamp, paid-job automation) on every Xero read, and the 15-minute
+      # open-book sweep with its closure read, on the named money rows.
+      - name: Test the money open-book sweep and the one invoice path
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/xero-sync/open_book_sweep_test.ts \
+            supabase/functions/xero-sync/xero_invoice_record_test.ts \
+            supabase/functions/xero-sync/deposit_stamp_test.ts
+
   # Execute migration behaviour against PostgreSQL, not a text parser. The
   # repository's historical migrations include Supabase-only schemas and live
   # baseline drift, so the contract registry supplies the narrow prerequisites
