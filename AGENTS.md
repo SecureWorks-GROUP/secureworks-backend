@@ -2629,6 +2629,14 @@ resolved ambiguities and the front-end half:
 `trade_access_tier_test.ts`, `trade_manager_job_access_test.ts`,
 `docs/evidence/trade-fencing-visibility-2026-08-17.md`.
 
+A trade reaches `create_variation` only through `createVariationForCaller`
+(`index.ts`): the caller's own live assignment on the job, session identity
+(never `body.user_id`), and always `pending_approval` whatever the cost (the
+staff-only $200 auto-approve never applies). The `share_token` is withheld from
+the trade response because send-quote's variation page lets the customer accept
+straight from it, skipping the office. Tests:
+`trade_variation_request_test.ts`.
+
 Trade multi-person allocation must preserve one assignment row per crew member:
 when the representative row is reassigned to a person already on that job/date,
 return the existing target row idempotently rather than collapsing the crew or

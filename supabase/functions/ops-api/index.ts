@@ -4176,6 +4176,11 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'confirm_roof_report_done',
   'cancel_makesafe',
   'reopen_makesafe',
+  // Trade "Request Variation" (trade-app-audit-20260923 B5). Staff keep the
+  // unchanged createVariation path; a non-staff JWT is routed at the dispatch
+  // case to createTradeVariationRequest, which requires the caller's own live
+  // assignment on the job and always files the request for office approval.
+  'create_variation',
 ])
 
 export function _opsApiActionNeedsSignedCaller(url: URL): boolean {
@@ -8844,7 +8849,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'confirm_price': return json(await confirmPrice(client, body))
       case 'dismiss_price': return json(await dismissPrice(client, body))
       case 'pending_prices': return json(await getPendingPrices(client))
-      case 'create_variation': return json(await createVariation(client, body))
+      case 'create_variation': return json(await createVariationForCaller(client, body, authMode, authUser))
       case 'approve_variation': return json(await approveVariation(client, body))
       case 'list_variations': return json(await listVariations(client, url.searchParams))
       case 'analyse_supplier_quote': return json(await analyseSupplierQuote(client, body))
@@ -53010,14 +53015,104 @@ async function createTradeAlert(client: any, userId: string, body: any) {
 // VARIATION FLOW — site conditions differ from scope
 // ════════════════════════════════════════════════════════════
 
-async function createVariation(client: any, body: any) {
+// create_variation dispatch. Staff (api_key, or an admin / owner / ops_manager
+// JWT) keep the unchanged createVariation path. Every other signed-in caller
+// is a trade and goes through createTradeVariationRequest. No other auth mode
+// reaches here: routine is refused by ROUTINE_ALLOWED_ACTIONS and agent_read
+// by AGENT_READ_ALLOWED_ACTIONS.
+export async function createVariationForCaller(
+  client: any,
+  body: any,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser: TradeAuthContext | null,
+) {
+  if (authMode === 'jwt' && !_opsApiCallerIsStaffOperator(authMode, authUser)) {
+    if (!authUser) throw new ApiError('A signed-in Supabase user session is required.', 401, {
+      error: 'A signed-in Supabase user session is required.',
+      code: 'user_jwt_required',
+    })
+    return await createTradeVariationRequest(client, body, authUser)
+  }
+  return await createVariation(client, body)
+}
+
+// Trade "Request Variation" (trade-app-audit-20260923 B5; captain: the office
+// still approves every variation). A trade may only RECORD a request for
+// office review:
+//   - only on a job where the caller's OWN user holds a live assignment
+//     (not cancelled, not a ghost watcher row). makesafe_open and division
+//     manager tiers do not qualify; this is the assigned-crew check.
+//   - the actor is the verified session user; body.user_id / userId is ignored.
+//   - always pending_approval, whatever the cost. The staff-only "$200 and
+//     under auto-approves" shortcut never applies to a trade.
+//   - nothing is sent and no price or invoice moves. The share_token is
+//     withheld from the response because send-quote's variation page lets a
+//     customer accept straight from that link, which would skip the office.
+export async function createTradeVariationRequest(
+  client: any,
+  body: any,
+  tradeUser: Pick<TradeAuthContext, 'id' | 'orgId'>,
+) {
+  const jobId = String(body?.job_id || body?.jobId || '').trim()
+  const description = typeof body?.description === 'string' ? body.description.trim() : ''
+  if (!jobId || !description) {
+    throw new ApiError('job_id and description required', 400, {
+      error: 'job_id and description required',
+      code: 'variation_fields_required',
+    })
+  }
+
+  const job = await getTradeJobForAccess(client, jobId)
+  if (!job || (tradeUser.orgId && String(job.org_id || '') !== tradeUser.orgId)) {
+    throw new ApiError('Job not found', 404, { error: 'Job not found', code: 'job_not_found' })
+  }
+
+  // job_assignments.status is nullable, so NULL must be kept explicitly: a
+  // bare .neq('status', 'cancelled') would drop a legacy NULL-status row.
+  const { data: assignment, error: assignmentErr } = await client
+    .from('job_assignments')
+    .select('id')
+    .eq('job_id', jobId)
+    .eq('user_id', tradeUser.id)
+    .eq('is_ghost', false)
+    .or('status.is.null,status.neq.cancelled')
+    .limit(1)
+    .maybeSingle()
+  if (assignmentErr) throw assignmentErr
+  if (!assignment) {
+    throw new ApiError('Only crew assigned to this job can request a variation', 403, {
+      error: 'Only crew assigned to this job can request a variation',
+      code: 'variation_requires_assignment',
+    })
+  }
+
+  const result = await createVariation(client, {
+    job_id: jobId,
+    description,
+    estimated_cost: body?.estimated_cost,
+    amount: body?.amount,
+    cost_estimate: body?.cost_estimate,
+    reason: body?.reason,
+    photo_url: body?.photo_url,
+    user_id: tradeUser.id,
+  }, { requireOfficeApproval: true })
+  const { share_token: _withheld, ...tradeResult } = result
+  return tradeResult
+}
+
+async function createVariation(
+  client: any,
+  body: any,
+  options: { requireOfficeApproval?: boolean } = {},
+) {
   const { job_id, jobId, description, estimated_cost, amount, photo_url, user_id, userId, reason, cost_estimate, invoice_method } = body
   const jId = job_id || jobId
   const uid = user_id || userId
   if (!jId || !description) throw new Error('job_id and description required')
 
   const cost = Number(estimated_cost || amount || 0)
-  const needsApproval = cost > 200
+  const officeApprovalRequired = options.requireOfficeApproval === true
+  const needsApproval = officeApprovalRequired || cost > 200
 
   // Get job info for routing to correct salesperson
   const { data: job } = await client.from('jobs')
@@ -53074,7 +53169,7 @@ async function createVariation(client: any, body: any) {
     },
   })
 
-  // If over $200, create an alert for the salesperson / ops
+  // If over $200 (or a trade request), create an alert for the salesperson / ops
   if (needsApproval) {
     await client.from('ai_alerts').insert({
       org_id: DEFAULT_ORG_ID,
@@ -53101,7 +53196,9 @@ async function createVariation(client: any, body: any) {
     share_token: variation.share_token,
     needs_approval: needsApproval,
     auto_approved: !needsApproval,
-    message: needsApproval
+    message: officeApprovalRequired
+      ? `Variation #${variationNumber} sent to the office for approval.`
+      : needsApproval
       ? `Variation #${variationNumber} logged — $${cost} requires approval. ${job?.type === 'fencing' ? 'Khairo' : 'Nathan'} has been notified.`
       : `Variation #${variationNumber} logged and auto-approved ($${cost} under $200 threshold).`,
   }
