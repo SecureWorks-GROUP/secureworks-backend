@@ -4,7 +4,7 @@
 -- foundation slice owns it now; roll that back first). Otherwise it restores
 -- F1's context_core_status() byte for byte (md5 3df30c5ccf6db32c4782ba7859591b86,
 -- checked afterwards), then drops context_actor_missing_status(),
--- record_ops_api_actor_call() and the ops_api_actor_calls counter. The counter
+-- record_ops_api_actor_missing() and the ops_api_actor_calls counter. The counter
 -- holds counts only (no actor, no request content); its loss removes the
 -- actor_missing history, nothing else. The ops-api log line keeps naming the
 -- actor after this runs; ops-api's count call then fails quietly (it is
@@ -52,7 +52,7 @@ REVOKE ALL ON FUNCTION public.context_core_status() FROM PUBLIC,anon,authenticat
 GRANT EXECUTE ON FUNCTION public.context_core_status() TO service_role;
 
 DROP FUNCTION IF EXISTS public.context_actor_missing_status();
-DROP FUNCTION IF EXISTS public.record_ops_api_actor_call(text,text,text);
+DROP FUNCTION IF EXISTS public.record_ops_api_actor_missing();
 DROP TABLE IF EXISTS public.ops_api_actor_calls;
 
 DO $$

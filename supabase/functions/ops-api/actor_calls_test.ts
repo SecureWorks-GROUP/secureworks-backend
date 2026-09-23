@@ -1,23 +1,19 @@
 /**
  * F-ACT (INTEGRATION X31): ops-api records who asked, counts server-key calls
- * with no actor, and never refuses one.
+ * with no usable actor, and never refuses one.
  *
- * Unit half: the log line, the counted state and action, and the best-effort
- * count (scheduled off the request path, never thrown, never for JWT calls).
- * The SQL writer's action grammar is read from the migration, so the two
- * sides cannot drift.
+ * Unit half: the two log lines and the best-effort missing count (scheduled
+ * off the request path, never thrown, never for JWT calls or calls with an
+ * actor, and carrying nothing a caller chose).
  */
 // deno-lint-ignore-file no-import-prefix
-import {
-  assert,
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { resolveRequestActor } from "../_shared/request_actor.ts";
 import {
-  actorCallState,
-  countedActionName,
+  loggedActionName,
+  opsApiDeniedLogLine,
   opsApiRequestLogLine,
-  recordOpsApiActorCall,
+  recordOpsApiActorMissing,
 } from "./actor_calls.ts";
 
 const MISSING = resolveRequestActor({ headers: new Headers() });
@@ -32,7 +28,7 @@ const USER = resolveRequestActor({
   headers: new Headers(),
 });
 
-type Call = { fn: string; args?: Record<string, unknown> };
+type Call = { fn: string; args: unknown[] };
 
 function fakeClient(
   result: () => PromiseLike<{ data: unknown; error: unknown }>,
@@ -42,7 +38,7 @@ function fakeClient(
   const factory = () => {
     built++;
     return {
-      rpc: (fn: string, args?: Record<string, unknown>) => {
+      rpc: (fn: string, ...args: unknown[]) => {
         calls.push({ fn, args });
         return result();
       },
@@ -56,6 +52,8 @@ function fakeRuntime() {
   return { waitUntil: (p: Promise<unknown>) => waited.push(p), waited };
 }
 
+const ok = () => Promise.resolve({ data: null, error: null });
+
 async function captureWarn(fn: () => Promise<void>): Promise<string[]> {
   const lines: string[] = [];
   const original = console.warn;
@@ -68,7 +66,7 @@ async function captureWarn(fn: () => Promise<void>): Promise<string[]> {
   return lines;
 }
 
-Deno.test("log line carries the actor and its source, ids only", () => {
+Deno.test("served-call line carries the actor and its source, ids only", () => {
   assertEquals(
     opsApiRequestLogLine("context_unlinked_census", "GET", MISSING),
     "[ops-api] action=context_unlinked_census method=GET actor=actor_missing actor_source=none",
@@ -82,93 +80,76 @@ Deno.test("log line carries the actor and its source, ids only", () => {
     "[ops-api] action=job_detail method=POST actor=user:u-1 actor_source=jwt",
   );
   // A malformed header and a hostile action name never reach the line raw.
-  const line = opsApiRequestLogLine('x"; drop', "GET", INVALID);
   assertEquals(
-    line,
+    opsApiRequestLogLine('x"; drop', "GET", INVALID),
     "[ops-api] action=other method=GET actor=actor_missing actor_source=header_invalid",
   );
 });
 
-Deno.test("state: present, missing, invalid_header", () => {
-  assertEquals(actorCallState(CLAIMED), "present");
-  assertEquals(actorCallState(USER), "present");
-  assertEquals(actorCallState(MISSING), "missing");
-  assertEquals(actorCallState(INVALID), "invalid_header");
-});
-
-Deno.test("action names: kept when they fit the grammar, else other or none", () => {
-  assertEquals(countedActionName("where_is_it_at"), "where_is_it_at");
-  assertEquals(countedActionName(null), "none");
-  assertEquals(countedActionName("  "), "none");
-  assertEquals(countedActionName("Makesafe-Board"), "other");
-  assertEquals(countedActionName("a".repeat(65)), "other");
-  assertEquals(countedActionName("a".repeat(64)), "a".repeat(64));
-});
-
-Deno.test("the TypeScript and SQL action grammars are the same", async () => {
-  const sql = await Deno.readTextFile(
-    new URL(
-      "../../migrations/20260924201000_ops_api_actor_recording.sql",
-      import.meta.url,
+Deno.test("refused-call line carries the same actor plus the refusal", () => {
+  assertEquals(
+    opsApiDeniedLogLine(
+      "makesafe_board",
+      "GET",
+      USER,
+      403,
+      "operator_access_required",
     ),
+    "[ops-api] denied action=makesafe_board method=GET actor=user:u-1 actor_source=jwt status=403 code=operator_access_required",
   );
-  const src = await Deno.readTextFile(
-    new URL("./actor_calls.ts", import.meta.url),
+  assertEquals(
+    opsApiDeniedLogLine(null, "POST", MISSING, 401, "Bad Code!"),
+    "[ops-api] denied action=none method=POST actor=actor_missing actor_source=none status=401 code=other",
   );
-  const grammar = "^[a-z][a-z0-9_]{0,63}$";
-  assert(sql.includes(`action ~ '${grammar}'`), "table check");
-  assert(sql.includes(`IF a !~ '${grammar}' THEN a:='other'`), "writer");
-  assert(src.includes(`/${grammar}/`), "ts");
 });
 
-Deno.test("each server-key class is counted once, off the request path", async () => {
+Deno.test("logged action names: kept when they fit the grammar, else other or none", () => {
+  assertEquals(loggedActionName("where_is_it_at"), "where_is_it_at");
+  assertEquals(loggedActionName(null), "none");
+  assertEquals(loggedActionName("  "), "none");
+  assertEquals(loggedActionName("Makesafe-Board"), "other");
+  assertEquals(loggedActionName("a".repeat(65)), "other");
+  assertEquals(loggedActionName("a".repeat(64)), "a".repeat(64));
+});
+
+Deno.test("a server-key call with no usable actor is counted once, with no argument, off the request path", async () => {
   for (
-    const [mode, actor, state] of [
-      ["api_key", MISSING, "missing"],
-      ["api_key", CLAIMED, "present"],
-      ["routine", MISSING, "missing"],
-      ["agent_read", INVALID, "invalid_header"],
+    const [mode, actor] of [
+      ["api_key", MISSING],
+      ["routine", MISSING],
+      ["agent_read", INVALID],
     ] as const
   ) {
-    const c = fakeClient(() => Promise.resolve({ data: null, error: null }));
+    const c = fakeClient(ok);
     const rt = fakeRuntime();
-    assertEquals(
-      recordOpsApiActorCall(
-        c.factory,
-        mode,
-        actor,
-        "context_unlinked_census",
-        rt,
-      ),
-      true,
-    );
-    assertEquals(c.calls, [{
-      fn: "record_ops_api_actor_call",
-      args: {
-        p_caller_class: mode,
-        p_actor_state: state,
-        p_action: "context_unlinked_census",
-      },
-    }]);
+    assertEquals(recordOpsApiActorMissing(c.factory, mode, actor, rt), true);
+    assertEquals(c.calls, [{ fn: "record_ops_api_actor_missing", args: [] }]);
     assertEquals(rt.waited.length, 1);
     await Promise.all(rt.waited);
   }
 });
 
-Deno.test("a JWT call is never counted and builds no client", () => {
-  const c = fakeClient(() => Promise.resolve({ data: null, error: null }));
-  assertEquals(
-    recordOpsApiActorCall(c.factory, "jwt", USER, "job_detail", fakeRuntime()),
-    false,
-  );
-  assertEquals(c.built(), 0);
-  assertEquals(c.calls, []);
+Deno.test("calls with an actor, and JWT calls, write nothing and build no client", () => {
+  for (
+    const [mode, actor] of [
+      ["api_key", CLAIMED],
+      ["jwt", USER],
+      ["jwt", MISSING],
+      ["none", MISSING],
+    ] as const
+  ) {
+    const c = fakeClient(ok);
+    const rt = fakeRuntime();
+    assertEquals(recordOpsApiActorMissing(c.factory, mode, actor, rt), false);
+    assertEquals(c.built(), 0);
+    assertEquals(rt.waited.length, 0);
+  }
 });
 
 Deno.test("no EdgeRuntime: nothing is counted and no client is built", () => {
-  const c = fakeClient(() => Promise.resolve({ data: null, error: null }));
+  const c = fakeClient(ok);
   assertEquals(
-    recordOpsApiActorCall(c.factory, "api_key", MISSING, "job_detail", null),
+    recordOpsApiActorMissing(c.factory, "api_key", MISSING, null),
     false,
   );
   assertEquals(c.built(), 0);
@@ -188,7 +169,7 @@ Deno.test("a failed count logs one coded line and never throws", async () => {
     for (const c of [errored, rejected]) {
       const rt = fakeRuntime();
       assertEquals(
-        recordOpsApiActorCall(c.factory, "api_key", MISSING, "job_detail", rt),
+        recordOpsApiActorMissing(c.factory, "api_key", MISSING, rt),
         true,
       );
       await Promise.all(rt.waited);
@@ -197,13 +178,7 @@ Deno.test("a failed count logs one coded line and never throws", async () => {
       throw new Error("boom");
     };
     assertEquals(
-      recordOpsApiActorCall(
-        throwing,
-        "api_key",
-        MISSING,
-        "job_detail",
-        fakeRuntime(),
-      ),
+      recordOpsApiActorMissing(throwing, "api_key", MISSING, fakeRuntime()),
       false,
     );
   });

@@ -12,7 +12,7 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()')) IS DISTINCT FROM '9183a756c0d4b3881507656751c0d422'
  THEN RAISE EXCEPTION 'f-act setup: context_pipeline_status() is not the production (F1b) composer'; END IF;
  IF to_regclass('public.ops_api_actor_calls') IS NOT NULL
-  OR to_regprocedure('public.record_ops_api_actor_call(text,text,text)') IS NOT NULL
+  OR to_regprocedure('public.record_ops_api_actor_missing()') IS NOT NULL
   OR to_regprocedure('public.context_actor_missing_status()') IS NOT NULL
  THEN RAISE EXCEPTION 'f-act setup: a new object already exists'; END IF;
 END $$;

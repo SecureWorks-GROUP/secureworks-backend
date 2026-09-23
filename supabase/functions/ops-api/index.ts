@@ -385,7 +385,7 @@ import {
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
-import { opsApiRequestLogLine, recordOpsApiActorCall } from './actor_calls.ts'
+import { opsApiDeniedLogLine, opsApiRequestLogLine, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
@@ -4931,6 +4931,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     })
   }
 
+  // F-ACT (INTEGRATION X31): who asked, for audit only. The verified JWT user,
+  // else the x-sw-actor header on a server-key call, else actor_missing. It is
+  // written into one log line per call, a refused call included, and
+  // server-key calls without one are counted for the core status
+  // (actor_calls.ts). Never refused: this is not an access gate.
+  const requestActor = resolveRequestActor({
+    verifiedUserId: authMode === 'jwt' ? authUser?.id : null,
+    headers: req.headers,
+  })
+
   const actionAuthorization = _authorizeOpsApiAction({
     url: _preAuthUrl,
     authMode,
@@ -4938,6 +4948,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     serverSecretPresented,
   })
   if (!actionAuthorization.ok) {
+    console.log(opsApiDeniedLogLine(
+      _preAuthUrl.searchParams.get('action'),
+      req.method,
+      requestActor,
+      actionAuthorization.status,
+      actionAuthorization.code,
+    ))
+    recordOpsApiActorMissing(sb, authMode, requestActor)
     return new Response(JSON.stringify({
       error: actionAuthorization.error,
       code: actionAuthorization.code,
@@ -4946,15 +4964,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       headers: { ...CORS, 'Content-Type': 'application/json' },
     })
   }
-
-  // F-ACT (INTEGRATION X31): who asked, for audit only. The verified JWT user,
-  // else the x-sw-actor header on a server-key call, else actor_missing. It is
-  // written into the request log line and server-key calls are counted for the
-  // core status (actor_calls.ts). Never refused: this is not an access gate.
-  const requestActor = resolveRequestActor({
-    verifiedUserId: authMode === 'jwt' ? authUser?.id : null,
-    headers: req.headers,
-  })
 
   // Hoisted so the outer catch can audit a refused SES money-chain press: consts
   // declared inside the try are not in scope in its catch (defect 2).
@@ -4965,7 +4974,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     const action = url.searchParams.get('action')
     auditAction = action
     console.log(opsApiRequestLogLine(action, req.method, requestActor))
-    recordOpsApiActorCall(sb, authMode, requestActor, action)
+    recordOpsApiActorMissing(sb, authMode, requestActor)
 
     if (authMode === 'agent_read') {
       // ── Scoped headless agent READ allow-list ──

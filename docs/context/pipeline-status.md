@@ -80,21 +80,21 @@ alarmed). Thresholds: `context_ghl_capture_policy()`. The reconciler itself:
 [ghl-message-reconcile.md](ghl-message-reconcile.md).
 
 `actor_missing` (F-ACT, `20260924201000_ops_api_actor_recording.sql`,
-INTEGRATION X31) is a core key, so it sits at the top level with the others.
-It counts server-key ops-api calls (MCP tools, `sw-axi`, automations) that
-carried no usable actor: no `x-sw-actor` header, or a malformed one. Keys:
-`state` (`available`, or `unavailable` with `code` when the counter cannot be
-read; it never fails the heartbeat), `today`, `last_7_days` (Perth days, today
-included), `invalid_header_last_7_days`, `server_key_calls_today`,
-`server_key_calls_last_7_days`, `by_caller_last_7_days` (`api_key`,
-`routine`, `agent_read`) and `by_action_last_7_days` (top 20). JWT calls are
-not counted: a signed-in call always has a verified user. It raises no alarm:
-identity is for audit only, and such a call is never refused. The counter is
-`ops_api_actor_calls` (counts only, 35 days kept), written only through
-`record_ops_api_actor_call`; the actor itself is in the ops-api log line
-`[ops-api] action=<action> method=<m> actor=<actor> actor_source=<jwt|header|header_invalid|none>`.
-`server_key_calls_today` at 0 while calls are being served means counting has
-stopped (it runs through `EdgeRuntime.waitUntil`, best-effort).
+INTEGRATION X31) is a core key, so it sits at the top level with the others:
+`{state, today, last_7_days}`, the number of server-key ops-api calls (MCP
+tools, `sw-axi`, automations) that carried no usable actor (no `x-sw-actor`
+header, or a malformed one), today and over the last 7 Perth days, today
+included. `state` is `available`, or `unavailable` with `code` when the
+counter cannot be read; it never fails the heartbeat. JWT calls and calls with
+an actor are not counted. It raises no alarm: identity is for audit only, and
+such a call is never refused. The counter is `ops_api_actor_calls`, one row
+per Perth day holding the missing count only (35 days kept), written only
+through `record_ops_api_actor_missing()`, which takes no argument. The actor
+itself is in the ops-api log line, one per call:
+`[ops-api] action=<action> method=<m> actor=<actor> actor_source=<jwt|header|header_invalid|none>`
+for a served call, and `[ops-api] denied action=... actor=... status=<n> code=<code>`
+for a call the front door refused. The count runs through
+`EdgeRuntime.waitUntil`, best-effort.
 
 Alarms are read by the CIO desk's scheduled check (INTEGRATION decision D-A),
 never Telegram.
