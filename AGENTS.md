@@ -570,6 +570,11 @@ Attribution ladder step 1 matching is owned by
 change replaces the whole `resolve_context_attribution` body and must follow
 the pre-image guard in that document.
 
+Luna's answer carries an outcome (`job`, `several`, `undecided`); the last two
+rest the row as `unplaced`, attribution asks are recorded per row with backoff
+and capped at 60 of the 400 daily calls (`20260924060000`). Contract and the
+unchanged legacy three-argument call: `docs/context/a1-attribution-attempts.md`.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before

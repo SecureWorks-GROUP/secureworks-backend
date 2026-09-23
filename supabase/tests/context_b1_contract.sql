@@ -85,8 +85,10 @@ BEGIN
  IF public.reserve_context_model_call('bucket',NULL,NULL)->>'outcome'<>'paused' THEN RAISE EXCEPTION 'bucket off'; END IF;
  UPDATE public.automation_switches SET attribution=true;
  INSERT INTO public.context_model_call_reservations(run_date,ordinal,phase,reserved_at) VALUES(d-1,400,'bucket',now()-interval '1 day');
+ -- A1 (20260924060000) caps attribution at 60 a day inside the shared 400:
+ -- alternate while attribution has headroom (odd i from 3 to 121 is 60 calls).
  FOR i IN 3..399 LOOP
-  r:=public.reserve_context_model_call(CASE WHEN i%2=0 THEN 'bucket' ELSE 'attribution' END,NULL,NULL);
+  r:=public.reserve_context_model_call(CASE WHEN i%2=0 OR i>121 THEN 'bucket' ELSE 'attribution' END,NULL,NULL);
   IF r->>'outcome'<>'reserved' OR (r->>'ordinal')::int<>i THEN RAISE EXCEPTION 'shared admission %: %',i,r; END IF;
  END LOOP;
  j:=gen_random_uuid();
