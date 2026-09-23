@@ -53,7 +53,9 @@ export function executionLedger(client: Client): ExecutionLedger {
         claimed_by_email: row.claimed_by_email,
       });
       if (!error) return true;
-      if (error.code !== "23505") throw new Error("execution_ledger_unwritable");
+      if (error.code !== "23505") {
+        throw new Error("execution_ledger_unwritable");
+      }
       if (row.step !== "calendar") return false;
       const { data, error: updateError } = await client.from(table).update({
         press_token: row.press_token,

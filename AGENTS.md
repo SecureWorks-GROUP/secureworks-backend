@@ -3654,8 +3654,9 @@ exact-message approval. A diary read alone is not person-wide availability.
 Only `sales_booking_book` / `sales_booking_send` act on an approval
 (`docs/sales-booking-executor.md`): dry run unless their switch is exactly
 `true` and a captain pressed, re-checked at the press, idempotent on the
-approval hash. The GHL writer refuses any real write whose `idempotencyKey` is
-not a live captain approval of those exact fields.
+approval hash. The GHL writer refuses any real write that lacks that
+executor's per-press claim, not just an approval
+(`docs/ghl-calendar-appointment-write.md`).
 
 ## GHL appointment write safety
 

@@ -226,7 +226,9 @@ live database migration, SMS or configuration change was performed. The agent-si
 tool is a separate-repository follow-up.
 
 Before enabling writes, apply
-`20260921062158_ghl_calendar_appointment_requests.sql`, then deploy `ghl-proxy`
+`20260921062158_ghl_calendar_appointment_requests.sql` and
+`20260923181500_sales_booking_executions.sql` (the executor claim table;
+`docs/sales-booking-executor.md`), then deploy `ghl-proxy`
 through the existing approved deployment path with `--no-verify-jwt` (the proxy
 verifies credentials internally). Keep `GHL_CALENDAR_APPOINTMENT_WRITE_ENABLED`
 unset until the owner authorizes activation and reviews the notification/workflow

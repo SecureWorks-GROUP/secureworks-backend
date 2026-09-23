@@ -131,7 +131,9 @@ function instant(value: unknown): number | null {
 /** `dryRun: true` and `executorClaim` are the only optional fields. */
 function parseRequest(
   body: unknown,
-): { input: AppointmentInput; dryRun: boolean; executorClaim: string | null } | null {
+):
+  | { input: AppointmentInput; dryRun: boolean; executorClaim: string | null }
+  | null {
   if (!object(body)) return null;
   if ("dryRun" in body && body.dryRun !== true) return null;
   if (

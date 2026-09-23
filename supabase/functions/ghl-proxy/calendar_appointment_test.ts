@@ -87,7 +87,10 @@ const INPUT_CAL2: AppointmentInput = await approved({
   calendarId: "cal2",
 });
 const CLAIM_TOKEN = "7c3c6e2e-0c6a-4f2d-9c1a-2b8f0d4e1a77";
-function claimRow(_key: string, extra: Partial<ExecutorClaimRow> = {}): ExecutorClaimRow {
+function claimRow(
+  _key: string,
+  extra: Partial<ExecutorClaimRow> = {},
+): ExecutorClaimRow {
   return {
     step: "calendar",
     state: "claimed",
