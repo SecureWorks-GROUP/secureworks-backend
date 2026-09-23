@@ -405,7 +405,10 @@ DO $$
 DECLARE x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_core_status()','3df30c5ccf6db32c4782ba7859591b86'),
+  -- F1's core body, or F-ACT's (same owner, 20260924201000: one key added,
+  -- checked by its own contract).
+  ('public.context_core_status()',CASE WHEN to_regprocedure('public.context_actor_missing_status()') IS NULL
+    THEN '3df30c5ccf6db32c4782ba7859591b86' ELSE 'e26a2d4387c9f642f473aa16caf4ab98' END),
   ('public.context_business_minutes(timestamptz,timestamptz)','510dbec36291c25aa1887ade89e2ca4e'),
   ('public.context_in_business_hours(timestamptz)','70164e9d1d6aa636c4e9d54357396f16'),
   ('public.context_booking_capture_status()','155104bfb08b8b3c2f98bdec089d4ee4'),

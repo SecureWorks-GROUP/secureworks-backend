@@ -383,7 +383,9 @@ import {
   SesPackBuildDoorError,
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
-import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows, unlinkedActor } from './context_unlinked.ts'
+import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
+import { resolveRequestActor } from '../_shared/request_actor.ts'
+import { opsApiRequestLogLine, recordOpsApiActorCall } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
@@ -4945,6 +4947,15 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     })
   }
 
+  // F-ACT (INTEGRATION X31): who asked, for audit only. The verified JWT user,
+  // else the x-sw-actor header on a server-key call, else actor_missing. It is
+  // written into the request log line and server-key calls are counted for the
+  // core status (actor_calls.ts). Never refused: this is not an access gate.
+  const requestActor = resolveRequestActor({
+    verifiedUserId: authMode === 'jwt' ? authUser?.id : null,
+    headers: req.headers,
+  })
+
   // Hoisted so the outer catch can audit a refused SES money-chain press: consts
   // declared inside the try are not in scope in its catch (defect 2).
   let auditAction: string | null = null
@@ -4953,7 +4964,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
     auditAction = action
-    console.log(`[ops-api] action=${action} method=${req.method}`)
+    console.log(opsApiRequestLogLine(action, req.method, requestActor))
+    recordOpsApiActorCall(sb, authMode, requestActor, action)
 
     if (authMode === 'agent_read') {
       // ── Scoped headless agent READ allow-list ──
@@ -7229,7 +7241,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'context_unlinked_rows': {
         if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
         if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
-        const actor = unlinkedActor(authUser?.id, req.headers)
+        const actor = requestActor.actor
         try {
           return json(action === 'context_unlinked_census'
             ? await contextUnlinkedCensus(client, url.searchParams, actor)

@@ -488,3 +488,5 @@ ops-api|supabase/migrations/20260921160000_visit_outcomes.sql|column|visit_outco
 ops-api|supabase/migrations/20260924030000_context_evidence_cadence.sql|function|context_job_freshness
 ops-api|supabase/migrations/20260924183000_context_unlinked_census.sql|function|context_unlinked_census
 ops-api|supabase/migrations/20260924183000_context_unlinked_census.sql|function|context_unlinked_rows
+ops-api|supabase/migrations/20260924201000_ops_api_actor_recording.sql|table|ops_api_actor_calls
+ops-api|supabase/migrations/20260924201000_ops_api_actor_recording.sql|function|record_ops_api_actor_call
