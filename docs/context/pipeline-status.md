@@ -12,7 +12,7 @@ with identical values. The composer adds:
 
 | Key | Sub-function | Owner slice | Until built |
 |---|---|---|---|
-| `cadence` | `context_cadence_status()` | cadence K1 | `null` |
+| `cadence` | `context_cadence_status()` | cadence K1 | built |
 | `capture_sources` | `context_source_freshness()` | F1 | built |
 | `ghl_capture` | `context_ghl_capture_status()` | sms C1d | `null` |
 | `booking_capture` | `context_booking_capture_status()` | dossier D3 | `null` |
@@ -30,6 +30,14 @@ Rules for the owning slices:
   failure still fails the whole read (unchanged behaviour).
 - Your rollback restores the F1 stub (`SELECT NULL::jsonb`, comment starting
   `F1 stub.`). The F1 rollback refuses while any stub is replaced.
+
+`cadence` (K1, `20260924030000`): `context_cadence_status()` replaces the F1
+stub. The composer is untouched. The block publishes `policy`, due and waiting
+job counts, `oldest_unread_landed_at`, `oldest_due_wait_minutes`,
+`cadence_breach` (a due job waited over 90 minutes with the extraction lane on
+and model budget left), runs today, ceiling and pacing holds, lease takeovers,
+unplaced rows, rows not written as `service_role`, and `alarms`. Due is
+`context_jobs_cadence`; do not re-derive it here.
 
 `capture_sources`: last `context_captured_at` per `business_events.source`
 (rows with `metadata.capture_mode` `backfill` or `relink` ignored), business
@@ -56,7 +64,8 @@ never Telegram.
 - `context_unplaced_for_job(job_id)`: `pending_luna`/`unplaced` rows whose
   `candidate_job_ids` contain the job, the job contact's `admin_bucket` rows,
   and the job contact's worded rows on a `do_not_schedule` holding job. Newest
-  first. Shared by the dossier last contact (sms R1) and cadence freshness (K4).
+  first. Shared by the dossier last contact (sms R1) and K1
+  `context_job_freshness` (dossier K4 consumes the same helper).
 - `context_capture_runs`, written only through `record_capture_run(jsonb)`
   (service_role may SELECT, never write directly). One row per reconcile run
   (`source` e.g. `ghl_message_reconcile`, `scope_booking`); a running row may
@@ -78,13 +87,13 @@ documented above. F1 is built on the live production definitions (read
 pre-image (or already F1's result) and the status check still holds the nine
 live values, and its rollback restores those bodies byte for byte and checks
 their md5. F1 also made the heartbeat cheaper without changing any output.
-`ready_jobs` no longer calls `context_extraction_candidates(400)` (15.5 s in
-production on 23 Sep 2026: it serialises the whole jobs row, `scope_json`
-included, once per linked event, which is why the read hit the 8 s API
-timeout, 57014). It reads `context_ready_jobs_count(400)`, which admits
-exactly the same jobs in a cheaper order and is pinned equal by the contract;
-whoever changes the candidates read (cadence K1) changes it in step. The
-per-row helpers `context_linked_status` and `context_in_business_hours`
+`ready_jobs` no longer inlines the pre-K1 `context_extraction_candidates`
+body (15.5 s in production on 23 Sep 2026: that body serialised the whole
+jobs row, `scope_json` included, once per linked event, which is why the
+read hit the 8 s API timeout, 57014). It reads `context_ready_jobs_count(400)`,
+which K1 made a count of the due-rule `context_extraction_candidates` read
+(still capped at 400). Keep those two in step. The per-row helpers
+`context_linked_status` and `context_in_business_hours`
 inline (no SET clause), the current-facts view reads `b.metadata` for
 retraction instead of serialising each cited event row, and expression
 statistics on `xero_invoices` let coverage hash its invoice counts. On 200k
@@ -116,8 +125,10 @@ the payload.
 ## Proof
 
 Registered contracts
-`supabase/tests/migration-contracts/20260917210000_context_pipeline_status` and
+`supabase/tests/migration-contracts/20260917210000_context_pipeline_status`,
 `supabase/tests/migration-contracts/20260924020000_context_status_foundation`
 (the latter compares existing composer keys with a copy of the 17 Sep body on
-the same fixtures, and pins `ready_jobs` to the candidates count).
+the same fixtures, and pins `ready_jobs` to the candidates count), and
+`supabase/tests/migration-contracts/20260924030000_context_evidence_cadence`
+(K1 cadence block, due rule, and ready-job count).
 Deno: `supabase/functions/ops-api/context_pipeline_test.ts`.

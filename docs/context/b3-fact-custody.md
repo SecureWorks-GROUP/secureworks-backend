@@ -46,7 +46,7 @@ The migration backfills existing rows from provenance they already carry: `extra
 
 ## D4: budget scope
 
-`context_job_extractable(jobs)` is false only for holding jobs, marked by `metadata.do_not_schedule = true` (the SWF-PDF-BUCKET row also carries `metadata.purpose = 'pdf_unlock_bucket'`, no contact and an internal site; the marker, not the number or `jobs.status`, is the rule). Quiet, closed or archived jobs are not rechecked unless something new lands; that is the fresh-inbound rule on candidates and events, not an archived-status exclusion. `context_extraction_candidates` admits a job only on unreceipted non-outbound evidence; `context_extraction_events` includes outbound rows only when the same batch has unreceipted inbound or internal evidence, so our own messages are read beside the client's and never extracted alone. Names, signatures, the per-day one-run guard, the 400 cap and the reservation functions are unchanged.
+`context_job_extractable(jobs)` is false only for holding jobs, marked by `metadata.do_not_schedule = true` (the SWF-PDF-BUCKET row also carries `metadata.purpose = 'pdf_unlock_bucket'`, no contact and an internal site; the marker, not the number or `jobs.status`, is the rule). Quiet, closed or archived jobs are not rechecked unless something new lands; that is not an archived-status exclusion. Extraction due, batch selection and the run ledger are owned by K1 (`20260924030000`); do not restate them here. The 400-call reservation functions stay A1/B1.
 
 ## First production apply failed: ambiguous `source_id` (2026-09-16)
 
