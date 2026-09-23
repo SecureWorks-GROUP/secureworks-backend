@@ -299,10 +299,11 @@ jobs:
       # contract feeds that writer.
       - name: Test GHL message row builder and send_sms evidence
         run: |
-          deno test --allow-read \
+          deno test --allow-read --allow-env \
             supabase/functions/_shared/evidence/ghl_message_test.ts \
             supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts \
-            supabase/functions/ghl-proxy/sms_capture_test.ts
+            supabase/functions/ghl-proxy/sms_capture_test.ts \
+            supabase/functions/ghl-proxy/send_sms_response_test.ts
 
       - name: Test the 15-minute GHL message reconciler
         run: |
