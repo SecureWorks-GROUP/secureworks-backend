@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix
+// Keep direct URL dependencies consistent with the edge runtime and lockfile.
 import {
   assertEquals,
   assertStrictEquals,
@@ -42,13 +44,13 @@ function fakeServerHarness() {
     serveHttp(connection: FakeConnection) {
       let served = false;
       return {
-        async nextRequest() {
-          if (served) return null;
+        nextRequest() {
+          if (served) return Promise.resolve(null);
           served = true;
-          return {
+          return Promise.resolve({
             request: connection.request,
             respondWith: connection.respond,
-          };
+          });
         },
         close() {},
       };
