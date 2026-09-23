@@ -3691,7 +3691,9 @@ snapshot, hold state, 30-minute expiry), a press that re-reads and rebuilds it
 unchanged, AND `DEBT_FOLLOWUP_SEND_EXECUTE` exactly `"true"` with a captain
 press. The switch is unset; never set it in code, env or a flag (a test fails on
 an assignment). Turning it on is the captain's call. Anything else records a
-dry run and makes no provider call; one approval sends at most once. Never add
+dry run and makes no provider call; one approval sends at most once. v1 scope is one job per approval (`single_job_scope_required`), and only
+signed-in SecureWorks office staff or the privileged ops key reach the three
+`debt_followup_*` actions (the caller gate runs before any read). Never add
 a debtor send that bypasses it. `trigger_chase_workflow` refuses and makes no
 GHL call or tag/custom-field write; `stop_chase_workflow` may still remove the
 tag and clear those fields. The debt-follow-up `send_invoice_email` path no

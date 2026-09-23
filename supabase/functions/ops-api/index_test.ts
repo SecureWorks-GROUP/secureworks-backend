@@ -98,14 +98,19 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
   const { fetch, calls: fetchCalls } = makeStubFetch(fetchRoutes)
   const { getToken } = makeStubGetToken()
-  const { logBusinessEvent, events } = makeStubLogBusinessEvent()
+  const { logBusinessEvent, events: legacyEvents } = makeStubLogBusinessEvent()
+  const events: any[] = []
+  const captureBusinessEvent = async (_client: any, row: any) => {
+    events.push(row)
+    return { outcome: "inserted" }
+  }
 
   const resp = await _verifyAndSendInvoiceEmail({
     client, body: makeBody({
       debt_followup_approval_id: "approval-123",
       subject_override: "Approved invoice subject",
     }),
-    getToken, xeroGet, logBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
+    getToken, xeroGet, logBusinessEvent, captureBusinessEvent, fetch, xeroFetch: fetch, env: STUB_ENV,
   })
 
   assertEquals(resp.status, 200)
@@ -128,17 +133,28 @@ Deno.test("T2: matching to_email → 200, PDF + Outlook called once each, audit 
   assertEquals(pdfCalls.length, 1)
   assertEquals(outlookCalls.length, 1)
 
-  // Audit written: business_events + job_events (linked path)
+  // An approved send's evidence goes through capture_business_event, keyed on
+  // the approval, and the writer owns time and attribution.
+  assertEquals(legacyEvents.length, 0)
   assertEquals(events.length, 1)
   assertEquals(events[0].event_type, "invoice.emailed")
+  assertEquals(events[0].provider_message_id, "outlook-accepted:approval-123")
+  assertEquals(events[0].metadata, { capture_mode: "live" })
+  assertEquals(events[0].channel, "email")
   assertEquals(events[0].direction, "outbound")
   assertEquals(events[0].job_id, "job-uuid-1")
+  assertEquals(events[0].match_method, "direct_job_id")
+  for (const writerOwned of ["occurred_at", "event_at", "match_status", "match_confidence", "attribution_status"]) {
+    assertEquals(writerOwned in events[0], false, writerOwned)
+  }
   assertEquals(events[0].payload.linked, true)
+  assertEquals(events[0].payload.debt_followup_approval_id, "approval-123")
   assertEquals(events[0].payload.subject, "Approved invoice subject")
   assertEquals(
-    events[0].payload.body,
+    events[0].payload.email_body_html,
     "<p>Please find your invoice attached.</p><p>Invoice: <strong>INV-001</strong></p>",
   )
+  assertEquals("body" in events[0].payload, false)
   assertEquals(events[0].payload.attachment_file_name, "INV-001.pdf")
   assertEquals(events[0].payload.provider_proof, j.provider_proof)
   // job_events insert happens via stub client
@@ -167,6 +183,36 @@ Deno.test("capture skipped after the first gate check is a failed timeline write
   assertEquals(written, false)
   assertEquals(laneChecks, 2)
   assertEquals(evidenceWrites, 0)
+})
+
+Deno.test("an approved send whose capture write does not land reports timeline_write_failed", async () => {
+  for (const capture of [
+    async () => ({ outcome: "capture_disabled" }),
+    async () => ({ outcome: "error", code: "rpc_error" }),
+    async () => { throw new Error("rpc threw") },
+  ]) {
+    const fix = happyFixture()
+    const { client } = makeStubClient(fix.seed)
+    const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
+    const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
+    const { getToken } = makeStubGetToken()
+    const { logBusinessEvent, events } = makeStubLogBusinessEvent()
+    const resp = await _verifyAndSendInvoiceEmail({
+      client,
+      body: makeBody({ debt_followup_approval_id: "approval-9" }),
+      getToken, xeroGet, logBusinessEvent,
+      captureBusinessEvent: capture as any,
+      fetch, xeroFetch: fetch, env: STUB_ENV,
+    })
+    assertEquals(resp.status, 200)
+    const body = await jsonBody(resp)
+    assertEquals(body.emailed, true)
+    assertEquals(body.timeline_write_failed, true)
+    assertEquals(events.length, 0)
+    assertEquals(calls.filter((call) => call.url.startsWith(
+      `${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`,
+    )).length, 1)
+  }
 })
 
 Deno.test("confirmed Outlook send surfaces a failed conversation event write", async () => {

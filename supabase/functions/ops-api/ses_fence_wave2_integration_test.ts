@@ -79,8 +79,9 @@ Deno.test("every wave-2 outbound action fences the authoritative job before effe
 Deno.test("chase workflow actions fence supplied identity before GHL effects", () => {
   for (
     const [start, effect] of [
+      // trigger_chase_workflow is disabled outright (no handler, no GHL call);
+      // its refusal is proven in debt_followup_trigger_chase_test.ts.
       ["async function sendChaseSms(", "functions/v1/ghl-proxy"],
-      ["async function triggerChaseWorkflow(", "?action=add_contact_tag"],
       ["async function stopChaseWorkflow(", "?action=remove_contact_tag"],
     ]
   ) {

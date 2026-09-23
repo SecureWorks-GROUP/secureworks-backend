@@ -829,12 +829,11 @@ import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_
 import { createOwnerApprovalDeps, createSalesBookingExecuteDeps, ownerApprovalReader } from './sales_booking_execute_live.ts'
 import {
   autoDebtClassificationForJobStatus,
-  debtFollowupApproveAction,
-  debtFollowupExecuteAction,
+  debtFollowupActionEntry,
   debtFollowupLegacySend,
-  debtFollowupProposeAction,
   type DebtFollowupAuth,
   type DebtFollowupDeps,
+  debtInvoiceEmailEvidenceRow,
   invoiceEmailHtmlBody,
   legacySendResponse,
 } from './debt_followup_approval.ts'
@@ -3583,6 +3582,15 @@ export type SendInvoiceVerifyDeps = {
   fetch: typeof globalThis.fetch
   xeroFetch: typeof globalThis.fetch
   env: { XERO_API_BASE: string; SUPABASE_URL: string; SW_API_KEY: string }
+  /** The one evidence writer (capture_business_event) for an approved debt send.
+   * Defaults to the database RPC; tests inject it. */
+  captureBusinessEvent?: (client: any, row: Record<string, unknown>) => Promise<{ outcome?: string } | null>
+}
+
+async function _captureBusinessEventRpc(client: any, row: Record<string, unknown>) {
+  const { data, error } = await client.rpc('capture_business_event', { p_row: row })
+  if (error) return { outcome: 'error', code: String(error.code ?? 'rpc_error') }
+  return data && typeof data === 'object' ? data : { outcome: 'error', code: 'rpc_no_result' }
 }
 
 export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): Promise<Response> {
@@ -3856,32 +3864,55 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     attachment_sha256: siAttachmentSha256,
   }
 
-  // Audit (non-blocking).
-  //   - business_events is the canonical conversation event and accepts null job_id.
-  //   - job_events: only when verifiedJobId is set. job_events.job_id is NOT NULL, so
-  //     unlinked sends would fail this insert; we deliberately skip it rather than
-  //     misattributing the row to a caller-supplied job_id.
-  const timelineWritten = await logBusinessEvent(client, {
-    event_type: 'invoice.emailed',
-    entity_type: 'xero_invoice',
-    entity_id: siId,
-    job_id: verifiedJobId || undefined,
-    event_at: sentAt,
-    direction: 'outbound',
-    // K3: digit-free words so the ladder's number match cannot fire; the
-    // invoice number and address stay in payload only.
-    body_preview: INVOICE_EMAILED_BODY_PREVIEW,
-    payload: {
-      invoice_number: siNum, to: siTo, via: 'outlook', linked: Boolean(verifiedJobId),
-      subject: siSubject,
-      body: siEmailBody,
-      attachment_file_name: siAttachmentFileName,
-      provider_proof: outlookProviderProof,
-      ...(body.debt_followup_approval_id
-        ? { debt_followup_approval_id: body.debt_followup_approval_id, attachment_sha256: siAttachmentSha256 }
-        : {}),
-    },
-  }, true)
+  // Evidence. An approved debt send (debt_followup_approval.ts) writes its one
+  // conversation event through the shared writer capture_business_event, keyed
+  // outlook-accepted:<approval_id> (one approval sends at most once); the writer
+  // owns the event time and attribution. Any other send keeps the legacy
+  // non-blocking business_events write. Either way a failed write is surfaced
+  // as timeline_write_failed, never swallowed, and never un-sends the email.
+  let timelineWritten: boolean
+  if (body.debt_followup_approval_id) {
+    try {
+      const captured = verifiedJobId
+        ? await (deps.captureBusinessEvent ?? _captureBusinessEventRpc)(client, debtInvoiceEmailEvidenceRow({
+          approval_id: String(body.debt_followup_approval_id),
+          xero_invoice_id: siId,
+          job_id: verifiedJobId,
+          invoice_number: siNum,
+          to: siTo,
+          cc: ccVerified,
+          subject: siSubject,
+          body: siEmailBody,
+          attachment_file_name: siAttachmentFileName,
+          body_preview: INVOICE_EMAILED_BODY_PREVIEW,
+          provider_proof: outlookProviderProof,
+          source: 'ops-api/debt_followup_execute',
+        }))
+        : null
+      timelineWritten = captured?.outcome === 'inserted' || captured?.outcome === 'duplicate'
+    } catch {
+      timelineWritten = false
+    }
+  } else {
+    timelineWritten = await logBusinessEvent(client, {
+      event_type: 'invoice.emailed',
+      entity_type: 'xero_invoice',
+      entity_id: siId,
+      job_id: verifiedJobId || undefined,
+      event_at: sentAt,
+      direction: 'outbound',
+      // K3: digit-free words so the ladder's number match cannot fire; the
+      // invoice number and address stay in payload only.
+      body_preview: INVOICE_EMAILED_BODY_PREVIEW,
+      payload: {
+        invoice_number: siNum, to: siTo, via: 'outlook', linked: Boolean(verifiedJobId),
+        subject: siSubject,
+        email_body_html: siEmailBody,
+        attachment_file_name: siAttachmentFileName,
+        provider_proof: outlookProviderProof,
+      },
+    }, true) !== false
+  }
   if (verifiedJobId) {
     try {
       await client.from('job_events').insert({
@@ -3896,7 +3927,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     success: true, emailed: true, invoice_number: siNum, to: siTo, via: 'outlook',
     attachment_sha256: siAttachmentSha256,
     provider_proof: outlookProviderProof,
-    timeline_write_failed: timelineWritten === false,
+    timeline_write_failed: !timelineWritten,
   })
 }
 
@@ -5374,23 +5405,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'debt_followup_approve':
       case 'debt_followup_execute': {
         // Debt follow-up: exact-message approval and the one send executor
-        // (debt_followup_approval.ts, docs/debt-followup-approval.md). A press
+        // (debt_followup_approval.ts, docs/debt-followup-approval.md). Only
+        // signed-in SecureWorks office staff or the privileged ops key get past
+        // the caller gate, which runs before any dependency is built. A press
         // sends only when DEBT_FOLLOWUP_SEND_EXECUTE is exactly "true" AND an
         // allow-listed captain session pressed; every other press is a recorded
         // dry run. Never writes Xero or moves money.
-        const dfArgs = {
+        const dfEntry = await debtFollowupActionEntry({
+          action,
+          caller: {
+            mode: authMode,
+            staff_role: authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role),
+            org_id: authMode === 'jwt' ? (String(authUser?.orgId || '') || null) : null,
+            server_secret: serverSecretPresented,
+          },
+          orgId: DEFAULT_ORG_ID,
           method: req.method,
           auth: debtFollowupAuth(authMode, authUser),
           body: body && typeof body === 'object' ? body : {},
-          deps: createDebtFollowupDepsForOps(client),
-        }
-        const dfResult = action === 'debt_followup_propose'
-          ? await debtFollowupProposeAction(dfArgs)
-          : action === 'debt_followup_approve'
-          ? await debtFollowupApproveAction(dfArgs)
-          : await debtFollowupExecuteAction(dfArgs)
-        const dfCaptainOnly = dfResult.status === 'refused' && dfResult.reason === 'approval_requires_captain'
-        return json(dfResult, dfCaptainOnly ? 403 : 200)
+          makeDeps: () => createDebtFollowupDepsForOps(client),
+        })
+        return json(dfEntry.body, dfEntry.status)
       }
       case 'sales_booking_stamp_read': {
         // Engine --apply-stamp reader. API key only.
@@ -16209,7 +16244,13 @@ async function getJobConversation(client: any, body: any) {
       const direction: string = r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'ghl.note_added' || r.event_type === 'supplier.email_in'
         ? 'inbound'
         : 'outbound'
-      const body = String(p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
+      // An invoice email keeps its approved HTML under email_body_html, a key the
+      // attribution ladder's context_event_text never reads (K3: its words stay
+      // digit-free), so the conversation shows it from there.
+      const invoiceEmailBody = r.event_type === 'invoice.emailed' && typeof p.email_body_html === 'string'
+        ? p.email_body_html
+        : ''
+      const body = String(invoiceEmailBody || p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
       messages.push({
         id: `bev:${r.id}`,
         job_id: jobId,
@@ -52165,8 +52206,15 @@ async function sendPaymentLink(
 }
 
 // ── Debt follow-up executor wiring (debt_followup_approval.ts) ──
-function debtFollowupAuth(authMode: string, authUser: { email?: string | null } | null): DebtFollowupAuth {
-  return { mode: authMode, email: authMode === 'jwt' ? (authUser?.email || null) : null }
+function debtFollowupAuth(
+  authMode: string,
+  authUser: { id?: string | null; email?: string | null } | null,
+): DebtFollowupAuth {
+  return {
+    mode: authMode,
+    email: authMode === 'jwt' ? (authUser?.email || null) : null,
+    user_id: authMode === 'jwt' ? (authUser?.id || null) : null,
+  }
 }
 
 function createDebtFollowupDepsForOps(client: any): DebtFollowupDeps {

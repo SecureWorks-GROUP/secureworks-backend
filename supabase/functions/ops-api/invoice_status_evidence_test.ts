@@ -281,3 +281,45 @@ Deno.test("K3 emailed (linked): digit-free words, no address, number kept in pay
   assertEquals(ev.payload.invoice_number, "INV-1477");
   assertEquals(ev.payload.to, "client@example.com");
 });
+
+// An approved debt follow-up send writes its row through capture_business_event
+// (debt_followup_approval.ts). The same K3 contract holds for that row: the
+// ladder's words stay digit-free and address-free, the number stays in payload.
+Deno.test("K3 emailed (approved debt send): the capture row's words stay digit-free", async () => {
+  const fix = happyFixture();
+  const seed = structuredClone(fix.seed);
+  seed.xero_invoices["inv-123"].invoice_number = "INV-1477";
+  const { client } = makeStubClient(seed);
+  const { xeroGet } = makeStubXeroGet({
+    invoices: { "inv-123": fix.xeroInvoice },
+  });
+  const { fetch } = makeStubFetch(fix.fetchRoutes);
+  const { getToken } = makeStubGetToken();
+  const { logBusinessEvent } = makeStubLogBusinessEvent();
+  const rows: Row[] = [];
+  const resp = await _verifyAndSendInvoiceEmail({
+    client,
+    body: makeBody({ debt_followup_approval_id: "approval-1477" }),
+    getToken,
+    xeroGet,
+    logBusinessEvent,
+    captureBusinessEvent: (_client: unknown, row: Row) => {
+      rows.push(row);
+      return Promise.resolve({ outcome: "inserted" });
+    },
+    fetch,
+    xeroFetch: fetch,
+    env: STUB_ENV,
+  });
+
+  assertEquals(resp.status, 200);
+  assertEquals(rows.length, 1);
+  const words = contextEventText(rows[0]);
+  assertEquals(words, INVOICE_EMAILED_BODY_PREVIEW);
+  assert(!/\d/.test(words), "emailed words must be digit-free");
+  assert(!words.includes("@"), "emailed words must carry no address");
+  for (const ref of REFERENCES) {
+    assert(!stepOneMatches(words, ref), `step 1 must not match ${ref}`);
+  }
+  assertEquals((rows[0].payload as Row).invoice_number, "INV-1477");
+});

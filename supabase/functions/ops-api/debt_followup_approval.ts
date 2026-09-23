@@ -441,6 +441,17 @@ export async function buildDebtFollowupProposal(
       return refuse("invoice_not_receivable", { xero_invoice_id: id });
     }
   }
+  // v1 scope: every approval and send covers invoices of exactly ONE job, so a
+  // confirmed send always carries that job id and lands once in that job's
+  // conversation. Unlinked invoices and multi-job selections are refused here,
+  // before any provider read, at approval and again at the press.
+  const scopeJobs = new Set(ids.map((id) => mirror.get(id)!.job_id || ""));
+  if (scopeJobs.has("") || scopeJobs.size !== 1) {
+    return refuse("single_job_scope_required", {
+      job_ids: [...scopeJobs].filter(Boolean).sort(),
+      unlinked_invoice_ids: ids.filter((id) => !mirror.get(id)!.job_id),
+    });
+  }
 
   const fence = await tryRead(
     () =>
@@ -794,6 +805,8 @@ export interface ApprovalRecord {
   proposal: DebtFollowupProposal;
   body_sha256: string;
   approved_by_email: string;
+  /** The approving captain's user id (the caller identity on the approval). */
+  approved_by_user_id: string;
   approved_at: string;
   expires_at: string;
 }
@@ -891,6 +904,8 @@ export interface DebtFollowupDeps {
 export interface DebtFollowupAuth {
   mode: string;
   email: string | null;
+  /** The signed-in user's id (JWT callers); null for the ops key. */
+  user_id?: string | null;
 }
 
 export type DebtFollowupResult =
@@ -1027,7 +1042,8 @@ export async function debtFollowupApproveAction(args: {
   const { deps } = args;
   if (args.method !== "POST") return refused("method_not_allowed");
   const approver = captainEmail(args.auth, deps);
-  if (!approver) return refused("approval_requires_captain");
+  const approverUserId = String(args.auth.user_id || "").trim();
+  if (!approver || !approverUserId) return refused("approval_requires_captain");
   const expected = args.body?.expected_binding_hash;
   if (typeof expected !== "string" || !APPROVAL_ID_PATTERN.test(expected)) {
     return refused("expected_binding_hash_required");
@@ -1074,6 +1090,7 @@ export async function debtFollowupApproveAction(args: {
     proposal: built.proposal,
     body_sha256: built.proposal.body_sha256,
     approved_by_email: approver,
+    approved_by_user_id: approverUserId,
     approved_at: approvedAt,
     expires_at: new Date(now.getTime() + DEBT_FOLLOWUP_APPROVAL_TTL_MS)
       .toISOString(),
@@ -1592,6 +1609,143 @@ export async function debtFollowupLegacySend(args: {
     would_send: built.proposal,
     execute_switch: switchOn ? "on" : "off",
     recorded,
+  };
+}
+
+// ── Who may use the three debt follow-up actions ───────────────────────────
+
+/** The caller as the ops-api front door resolved it. */
+export interface DebtFollowupCaller {
+  /** ops-api auth mode: api_key, jwt, routine, agent_read, none. */
+  mode: string;
+  /** A signed-in session with the ONE staff-operator role set. */
+  staff_role: boolean;
+  /** The server-owned profile org of a signed-in caller. */
+  org_id: string | null;
+  /** The privileged ops key (a server-only credential), never the shared browser key. */
+  server_secret: boolean;
+}
+
+/** Captain's standing ruling: one staff access level, signed-in office staff of
+ * the SecureWorks org (identity recorded, not restricted), or the privileged
+ * ops key. Everyone else is a 403 before any dependency is built. */
+export function debtFollowupCallerRefusal(
+  caller: DebtFollowupCaller,
+  orgId: string,
+): { code: string; error: string } | null {
+  if (caller.mode === "api_key" && caller.server_secret) return null;
+  if (caller.mode === "jwt" && caller.staff_role) {
+    if (caller.org_id && caller.org_id === orgId) return null;
+    return {
+      code: "operator_org_required",
+      error: "Debt follow-up is limited to SecureWorks office staff.",
+    };
+  }
+  return {
+    code: "operator_access_required",
+    error:
+      "Debt follow-up requires a signed-in SecureWorks staff session or the privileged ops key.",
+  };
+}
+
+export type DebtFollowupAction =
+  | "debt_followup_propose"
+  | "debt_followup_approve"
+  | "debt_followup_execute";
+
+/** The one door for the three actions: the caller gate runs first, and the
+ * dependencies (every read and the ledger) are built only for an allowed caller. */
+export async function debtFollowupActionEntry(input: {
+  action: DebtFollowupAction;
+  caller: DebtFollowupCaller;
+  orgId: string;
+  method: string;
+  auth: DebtFollowupAuth;
+  body: Obj;
+  makeDeps: () => DebtFollowupDeps;
+}): Promise<{ status: number; body: Obj }> {
+  const refusal = debtFollowupCallerRefusal(input.caller, input.orgId);
+  if (refusal) {
+    return {
+      status: 403,
+      body: {
+        status: "refused",
+        reason: refusal.code,
+        code: refusal.code,
+        error: refusal.error,
+      },
+    };
+  }
+  const args = {
+    method: input.method,
+    auth: input.auth,
+    body: input.body,
+    deps: input.makeDeps(),
+  };
+  const result = input.action === "debt_followup_propose"
+    ? await debtFollowupProposeAction(args)
+    : input.action === "debt_followup_approve"
+    ? await debtFollowupApproveAction(args)
+    : await debtFollowupExecuteAction(args);
+  const captainOnly = result.status === "refused" &&
+    result.reason === "approval_requires_captain";
+  return { status: captainOnly ? 403 : 200, body: result as Obj };
+}
+
+// ── Invoice email evidence (through capture_business_event) ────────────────
+
+/** One approval sends at most once, so the approval id is a stable evidence key. */
+export function debtInvoiceEmailProviderMessageId(approvalId: string): string {
+  return `outlook-accepted:${approvalId}`;
+}
+
+/** The capture_business_event row for one approved, Outlook-accepted invoice
+ * email. Keyed on the approval; the writer owns the event time and attribution
+ * (no occurred_at, event_at, match_status or attribution field is supplied). */
+export function debtInvoiceEmailEvidenceRow(input: {
+  approval_id: string;
+  xero_invoice_id: string;
+  job_id: string;
+  invoice_number: string;
+  to: string;
+  cc: string[];
+  subject: string;
+  body: string;
+  attachment_file_name: string;
+  body_preview: string;
+  provider_proof: Obj;
+  source: string;
+}): Obj {
+  return {
+    event_type: "invoice.emailed",
+    source: input.source,
+    entity_type: "xero_invoice",
+    entity_id: input.xero_invoice_id,
+    job_id: input.job_id,
+    match_method: "direct_job_id",
+    provider_message_id: debtInvoiceEmailProviderMessageId(input.approval_id),
+    channel: "email",
+    direction: "outbound",
+    body_preview: input.body_preview,
+    safe_summary: input.body_preview,
+    privacy_classification: "staff_only",
+    retention_class: "7y_audit",
+    payload: {
+      invoice_number: input.invoice_number,
+      to: input.to,
+      cc: input.cc,
+      via: "outlook",
+      linked: true,
+      subject: input.subject,
+      // Not under `body`: context_event_text reads payload.body first, and the
+      // invoice number in this HTML would feed the ladder's number match (K3).
+      email_body_html: input.body,
+      attachment_file_name: input.attachment_file_name,
+      provider_proof: input.provider_proof,
+      debt_followup_approval_id: input.approval_id,
+      attachment_sha256: input.provider_proof.attachment_sha256 ?? null,
+    },
+    metadata: { capture_mode: "live" },
   };
 }
 

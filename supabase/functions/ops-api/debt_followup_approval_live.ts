@@ -28,9 +28,11 @@ type Client = any;
 type Obj = Record<string, any>;
 
 const APPROVALS = "debt_followup_approvals";
+/** contact_matches rows read per Xero contact; more than this fails closed. */
+export const CONTACT_MATCH_SCAN_LIMIT = 500;
 const EXECUTIONS = "debt_followup_executions";
 const APPROVAL_COLUMNS =
-  "approval_id,binding_hash,kind,request,proposal,body_sha256,approved_by_email,approved_at,expires_at";
+  "approval_id,binding_hash,kind,request,proposal,body_sha256,approved_by_email,approved_by_user_id,approved_at,expires_at";
 
 export function debtFollowupLedger(client: Client): DebtFollowupLedger {
   return {
@@ -75,6 +77,7 @@ export function debtFollowupLedger(client: Client): DebtFollowupLedger {
         proposal: record.proposal,
         body_sha256: record.body_sha256,
         approved_by_email: record.approved_by_email,
+        approved_by_user_id: record.approved_by_user_id,
         approved_at: record.approved_at,
         expires_at: record.expires_at,
       });
@@ -213,8 +216,13 @@ export function debtFollowupReads(
         .select("ghl_contact_id").eq("org_id", inputs.orgId).eq(
           "xero_contact_id",
           xeroContactId,
-        ).limit(10);
+        ).limit(CONTACT_MATCH_SCAN_LIMIT + 1);
       if (error) throw new Error("contact_match_unreadable");
+      // Every row is checked for a second GHL contact; a set too large to check
+      // in one read fails closed instead of silently using the first rows.
+      if ((data?.length ?? 0) > CONTACT_MATCH_SCAN_LIMIT) {
+        throw new Error("contact_match_too_many");
+      }
       const ids = new Set(
         ((data as Obj[] | null) ?? []).map((r) => r.ghl_contact_id).filter(
           Boolean,

@@ -46,6 +46,14 @@ Nothing here writes Xero, allocates money, voids, or changes a payment.
 
 ## Actions
 
+Who may call them (captain's standing ruling: one staff access level; identity
+recorded, not restricted): a signed-in staff/operator session whose profile org
+is the SecureWorks org, or the privileged ops key. Other-org staff get 403
+`operator_org_required`; trades, crew, anonymous callers and the shared browser
+key get 403 `operator_access_required`. The gate (`debtFollowupCallerRefusal`,
+through `debtFollowupActionEntry`) runs before any read or ledger dependency is
+built. An approval records the captain's email and user id.
+
 | Action | What it does | Writes |
 |---|---|---|
 | `debt_followup_propose` (POST `{request}`) | Builds the exact proposal from fresh reads; returns `binding_hash`. | Nothing |
@@ -54,9 +62,15 @@ Nothing here writes Xero, allocates money, voids, or changes a payment.
 
 `request`: `{kind, xero_invoice_ids[], ghl_contact_id?, message?, to_email?, cc?, subject?}`.
 
+One job per approval (v1): every selected invoice must be linked to the same
+single job. A selection spanning two jobs, or any invoice with no job, is
+refused `single_job_scope_required` before any provider read, at approval and
+again at the press. Every confirmed send therefore carries that one job id and
+appears once in that job's conversation.
+
 | kind | Invoices | Body | Destination |
 |---|---|---|---|
-| `chase_sms` | 1 to 20, one debtor, AUTHORISED with a balance, not on hold | The operator's exact `message` | The GHL contact bound to every invoice (job contact, else `contact_matches`) |
+| `chase_sms` | 1 to 20, one debtor, one job, AUTHORISED with a balance, not on hold | The operator's exact `message` | The job's GHL contact, else the org-scoped `contact_matches` binding (every row checked; two contacts or too many rows refuse) |
 | `payment_link_sms` | Exactly 1, same rules | Composed from the Xero online-invoice URL | Same |
 | `thank_you_sms` | Exactly 1, PAID | Composed from Xero's amount paid | Same |
 | `invoice_email` | Exactly 1, same rules as chase | The fixed invoice email body (`invoiceEmailHtmlBody`) plus the Xero PDF | Xero contact emails and verified anchors only; default the Xero primary email |
@@ -92,13 +106,17 @@ A confirmed SMS stores the GHL message id and ghl-proxy's evidence outcome; the
 canonical message row is written by ghl-proxy `send_sms` through
 `capture_business_event` (keyed `ghl:<id>`), so it appears once in the
 conversation. A confirmed email stores the Outlook acceptance, recipients,
-subject and the SHA-256 of the attached PDF; the transport's own
-`invoice.emailed` business event carries the approval id and that hash, and
-`getJobConversation` reads that event once as an outbound email. Graph
-`sendMail` returns no message id, so email proof is acceptance, not delivery.
-If the business-event write fails after Outlook accepts the send, the executor
-keeps the send as confirmed and exposes `timeline_write_failed: true` in its
-provider proof.
+subject and the SHA-256 of the attached PDF. Its `invoice.emailed` event is
+written through `capture_business_event` under the writer's existing contract,
+keyed `outlook-accepted:<approval_id>` (one approval sends at most once), with
+`capture_mode: live`; the writer owns the event time and attribution. The
+approved subject and HTML sit in the payload (`subject`, `email_body_html`,
+never `body`, so the ladder's words stay the digit-free preview), and
+`getJobConversation` shows the event once as an outbound email with a proof
+block labelled "accepted by Outlook". Graph `sendMail` returns no message id,
+so email proof is acceptance, not delivery. If the evidence write does not land
+after Outlook accepts the send, the send stays confirmed and the result carries
+`timeline_write_failed: true`.
 
 ## Known follow-ups (not in this change)
 

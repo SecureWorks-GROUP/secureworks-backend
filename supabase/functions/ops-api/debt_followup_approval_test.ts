@@ -11,7 +11,10 @@ import {
   type ApprovalRecord,
   type AttemptRow,
   DEBT_FOLLOWUP_EXECUTE_ENV,
+  debtFollowupActionEntry,
   debtFollowupApproveAction,
+  type DebtFollowupCaller,
+  debtFollowupCallerRefusal,
   type DebtFollowupDeps,
   debtFollowupExecuteAction,
   debtFollowupExecuteSwitchOn,
@@ -24,6 +27,7 @@ import {
   type MirrorInvoiceRow,
 } from "./debt_followup_approval.ts";
 import {
+  CONTACT_MATCH_SCAN_LIMIT,
   debtFollowupLedger,
   debtFollowupReads,
 } from "./debt_followup_approval_live.ts";
@@ -35,7 +39,8 @@ type Obj = Record<string, any>;
 const ORG = "00000000-0000-0000-0000-000000000001";
 const NOW = new Date("2026-09-24T01:00:00Z");
 const CAPTAIN = "marnin@secureworkswa.com.au";
-const captain = { mode: "jwt", email: CAPTAIN };
+const CAPTAIN_USER_ID = "706c5258-70dd-483a-b36c-af6864b24498";
+const captain = { mode: "jwt", email: CAPTAIN, user_id: CAPTAIN_USER_ID };
 const staff = { mode: "jwt", email: "ops@secureworkswa.com.au" };
 const apiKey = { mode: "api_key", email: null };
 const SWITCH_ON = { [DEBT_FOLLOWUP_EXECUTE_ENV]: "true" };
@@ -307,12 +312,12 @@ Deno.test("contact matching is scoped to the executor organization", async () =>
   };
   const reads = debtFollowupReads(client, {
     orgId: "org-a",
-    getToken: async () => ({ accessToken: "", tenantId: "" }),
-    xeroGet: async () => ({}),
-    assertInvoiceAllowed: async () => undefined,
+    getToken: () => Promise.resolve({ accessToken: "", tenantId: "" }),
+    xeroGet: () => Promise.resolve({}),
+    assertInvoiceAllowed: () => Promise.resolve(undefined),
     fenceRefusal: () => null,
-    sendInvoiceEmail: async () => ({ status: 200, body: {} }),
-    sendSms: async () => ({ status: 200, body: {} }),
+    sendInvoiceEmail: () => Promise.resolve({ status: 200, body: {} }),
+    sendSms: () => Promise.resolve({ status: 200, body: {} }),
   });
 
   assertEquals(await reads.contactMatch("same-xero"), "ghl-a");
@@ -336,7 +341,11 @@ Deno.test("job facts read current status and the GHL contact together", async ()
           assertEquals(column, "id");
           assertEquals(ids, ["job-1"]);
           return Promise.resolve({
-            data: [{ id: "job-1", status: "scheduled", ghl_contact_id: "ghl-1" }],
+            data: [{
+              id: "job-1",
+              status: "scheduled",
+              ghl_contact_id: "ghl-1",
+            }],
             error: null,
           });
         },
@@ -346,12 +355,12 @@ Deno.test("job facts read current status and the GHL contact together", async ()
   };
   const reads = debtFollowupReads(client, {
     orgId: "org-a",
-    getToken: async () => ({ accessToken: "", tenantId: "" }),
-    xeroGet: async () => ({}),
-    assertInvoiceAllowed: async () => undefined,
+    getToken: () => Promise.resolve({ accessToken: "", tenantId: "" }),
+    xeroGet: () => Promise.resolve({}),
+    assertInvoiceAllowed: () => Promise.resolve(undefined),
     fenceRefusal: () => null,
-    sendInvoiceEmail: async () => ({ status: 200, body: {} }),
-    sendSms: async () => ({ status: 200, body: {} }),
+    sendInvoiceEmail: () => Promise.resolve({ status: 200, body: {} }),
+    sendSms: () => Promise.resolve({ status: 200, body: {} }),
   });
 
   assertEquals(await reads.jobFacts(["job-1"]), {
@@ -914,7 +923,9 @@ Deno.test("chase, payment-link, and invoice email proposals refuse internal debt
 });
 
 Deno.test("unclassified invoices on active jobs are held across debtor send kinds", async () => {
-  for (const status of ["in_progress", "scheduled", "draft", "scoping", "quoted"]) {
+  for (
+    const status of ["in_progress", "scheduled", "draft", "scoping", "quoted"]
+  ) {
     for (const request of [CHASE, LINK, EMAIL]) {
       const w = world();
       w.jobStatuses["job-1"] = status;
@@ -997,10 +1008,12 @@ Deno.test("Xero null or missing invoice amounts refuse proposal construction", a
 });
 
 Deno.test("outbound proposals refuse em dashes in chase text and email subject", async () => {
-  for (const request of [
-    { ...CHASE, message: "Hi Sam — please review this invoice." },
-    { ...EMAIL, subject: "Invoice INV-0857 — payment needed" },
-  ]) {
+  for (
+    const request of [
+      { ...CHASE, message: "Hi Sam — please review this invoice." },
+      { ...EMAIL, subject: "Invoice INV-0857 — payment needed" },
+    ]
+  ) {
     const result = await debtFollowupProposeAction({
       method: "POST",
       body: { request },
@@ -1094,8 +1107,10 @@ Deno.test("chase: one debtor, verified destination, and a named contact must mat
     assertEquals(multi.reason, "multiple_debtors");
   }
 
+  // The job carries no GHL contact: the org-scoped contact_matches binding is
+  // the fallback (the invoice itself must still belong to one job).
   const unlinked = world();
-  unlinked.mirror["inv-1"].job_id = null;
+  unlinked.jobs["job-1"] = null;
   const viaMatch = await debtFollowupProposeAction({
     method: "POST",
     body: { request: CHASE },
@@ -1150,24 +1165,25 @@ Deno.test("chase: one debtor, verified destination, and a named contact must mat
 Deno.test("invoice email: recipient must be a verified anchor; the approved subject and address are what go", async () => {
   const w = world({
     env: SWITCH_ON,
-    emailResponse: () => Promise.resolve({
-      status: 200,
-      body: {
-        success: true,
-        emailed: true,
-        via: "outlook",
-        attachment_sha256: "a".repeat(64),
-        provider_proof: {
-          label: "accepted by Outlook",
-          status: 202,
-          request_id: "outlook-request-1",
-          client_request_id: "client-request-1",
-          sent_at: "2026-09-24T01:02:03.000Z",
+    emailResponse: () =>
+      Promise.resolve({
+        status: 200,
+        body: {
+          success: true,
+          emailed: true,
+          via: "outlook",
           attachment_sha256: "a".repeat(64),
+          provider_proof: {
+            label: "accepted by Outlook",
+            status: 202,
+            request_id: "outlook-request-1",
+            client_request_id: "client-request-1",
+            sent_at: "2026-09-24T01:02:03.000Z",
+            attachment_sha256: "a".repeat(64),
+          },
+          timeline_write_failed: true,
         },
-        timeline_write_failed: true,
-      },
-    }),
+      }),
   });
   const stranger = await debtFollowupProposeAction({
     method: "POST",
@@ -1328,6 +1344,306 @@ Deno.test("old actions refuse what they cannot bind, and record the refusal", as
   assertEquals(r.status, "dry_run");
   if (r.status === "dry_run") assertEquals(r.recorded, false);
   assertEquals(providerCalls(broken) + providerCalls(w), 0);
+});
+
+// ── One job per approval (v1 scope) ───────────────────────────────────────
+
+Deno.test("an approval covering two jobs is refused at approval, with 0 provider calls", async () => {
+  const w = world({ env: SWITCH_ON });
+  w.mirror["inv-2"].job_id = "job-2";
+  w.jobs["job-2"] = "ghl-1";
+  w.jobStatuses["job-2"] = "complete";
+  const request = { ...CHASE, xero_invoice_ids: ["inv-1", "inv-2"] };
+  const proposed = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request },
+    deps: deps(w),
+  });
+  assertEquals(proposed.status, "refused");
+  if (proposed.status === "refused") {
+    assertEquals(proposed.reason, "single_job_scope_required");
+    assertEquals(proposed.detail?.job_ids, ["job-1", "job-2"]);
+  }
+  const approved = await debtFollowupApproveAction({
+    method: "POST",
+    auth: captain,
+    body: { request, expected_binding_hash: "a".repeat(64) },
+    deps: deps(w),
+  });
+  assertEquals(approved.status, "refused");
+  if (approved.status === "refused") {
+    assertEquals(approved.reason, "single_job_scope_required");
+  }
+  assertEquals(w.approvals.size, 0);
+  assertEquals(providerCalls(w), 0);
+});
+
+Deno.test("an invoice that moves to a second job after approval refuses the press", async () => {
+  const w = world({ env: SWITCH_ON });
+  const id = await approve(w, {
+    ...CHASE,
+    xero_invoice_ids: ["inv-1", "inv-2"],
+  });
+  w.mirror["inv-2"].job_id = "job-2";
+  const result = await press(w, id);
+  assertEquals(result.status, "refused");
+  if (result.status === "refused") {
+    assertEquals(result.reason, "single_job_scope_required");
+  }
+  assertEquals(providerCalls(w), 0);
+  assertEquals(w.live.size, 0);
+});
+
+Deno.test("an invoice with no job is refused for every kind before any provider read", async () => {
+  for (
+    const [request, prep] of [[CHASE, () => {}], [LINK, () => {}], [
+      THANKS,
+      paid,
+    ], [EMAIL, () => {}]] as [Obj, (w: World) => void][]
+  ) {
+    const w = world({ env: SWITCH_ON });
+    prep(w);
+    w.mirror["inv-1"].job_id = null;
+    w.fail.add("xero");
+    w.fail.add("ghl");
+    const result = await debtFollowupProposeAction({
+      method: "POST",
+      body: { request },
+      deps: deps(w),
+    });
+    assertEquals(result.status, "refused", request.kind);
+    if (result.status === "refused") {
+      assertEquals(result.reason, "single_job_scope_required", request.kind);
+      assertEquals(result.detail?.unlinked_invoice_ids, ["inv-1"]);
+    }
+    assertEquals(providerCalls(w), 0);
+  }
+});
+
+Deno.test("a single-job send carries that job id to the provider", async () => {
+  const sms = world({ env: SWITCH_ON });
+  const sid = await approve(sms, {
+    ...CHASE,
+    xero_invoice_ids: ["inv-1", "inv-2"],
+  });
+  assertEquals((await press(sms, sid)).status, "sent");
+  assertEquals(sms.sms.length, 1);
+  assertEquals(sms.sms[0].jobId, "job-1");
+
+  const email = world({ env: SWITCH_ON });
+  const eid = await approve(email, EMAIL);
+  assertEquals((await press(email, eid)).status, "sent");
+  assertEquals(email.emails.length, 1);
+  assertEquals(email.emails[0].job_id, "job-1");
+});
+
+// ── Who may use the three actions ─────────────────────────────────────────
+
+const STAFF_CALLER: DebtFollowupCaller = {
+  mode: "jwt",
+  staff_role: true,
+  org_id: ORG,
+  server_secret: false,
+};
+
+Deno.test("only SecureWorks office staff or the privileged ops key pass the caller gate", () => {
+  assertEquals(debtFollowupCallerRefusal(STAFF_CALLER, ORG), null);
+  assertEquals(
+    debtFollowupCallerRefusal({
+      mode: "api_key",
+      staff_role: false,
+      org_id: null,
+      server_secret: true,
+    }, ORG),
+    null,
+  );
+  const refusals: [string, DebtFollowupCaller, string][] = [
+    [
+      "other-org staff",
+      { ...STAFF_CALLER, org_id: "other-org" },
+      "operator_org_required",
+    ],
+    [
+      "staff with no profile org",
+      { ...STAFF_CALLER, org_id: null },
+      "operator_org_required",
+    ],
+    [
+      "trade or crew",
+      { ...STAFF_CALLER, staff_role: false },
+      "operator_access_required",
+    ],
+    ["shared browser key", {
+      mode: "api_key",
+      staff_role: false,
+      org_id: null,
+      server_secret: false,
+    }, "operator_access_required"],
+    ["anon", {
+      mode: "none",
+      staff_role: false,
+      org_id: null,
+      server_secret: false,
+    }, "operator_access_required"],
+    ["routine", {
+      mode: "routine",
+      staff_role: false,
+      org_id: null,
+      server_secret: false,
+    }, "operator_access_required"],
+    ["agent read", {
+      mode: "agent_read",
+      staff_role: false,
+      org_id: null,
+      server_secret: true,
+    }, "operator_access_required"],
+  ];
+  for (const [label, caller, code] of refusals) {
+    assertEquals(debtFollowupCallerRefusal(caller, ORG)?.code, code, label);
+  }
+});
+
+Deno.test("a refused caller gets 403 before any dependency is built or read", async () => {
+  for (
+    const action of [
+      "debt_followup_propose",
+      "debt_followup_approve",
+      "debt_followup_execute",
+    ] as const
+  ) {
+    for (
+      const caller of [
+        { ...STAFF_CALLER, org_id: "other-org" },
+        { ...STAFF_CALLER, staff_role: false },
+        {
+          mode: "api_key",
+          staff_role: false,
+          org_id: null,
+          server_secret: false,
+        },
+        { mode: "none", staff_role: false, org_id: null, server_secret: false },
+      ]
+    ) {
+      let built = 0;
+      const result = await debtFollowupActionEntry({
+        action,
+        caller,
+        orgId: ORG,
+        method: "POST",
+        auth: captain,
+        body: { request: CHASE },
+        makeDeps: () => {
+          built++;
+          return deps(world());
+        },
+      });
+      assertEquals(result.status, 403, `${action} ${JSON.stringify(caller)}`);
+      assertEquals(built, 0);
+    }
+  }
+  const w = world();
+  let built = 0;
+  const allowed = await debtFollowupActionEntry({
+    action: "debt_followup_propose",
+    caller: STAFF_CALLER,
+    orgId: ORG,
+    method: "POST",
+    auth: staff,
+    body: { request: CHASE },
+    makeDeps: () => {
+      built++;
+      return deps(w);
+    },
+  });
+  assertEquals(allowed.status, 200);
+  assertEquals(allowed.body.status, "proposed");
+  assertEquals(built, 1);
+});
+
+Deno.test("the approval records the approving captain's user id; none means no approval", async () => {
+  const w = world();
+  const id = await approve(w, CHASE);
+  assertEquals(w.approvals.get(id)!.approved_by_user_id, CAPTAIN_USER_ID);
+  const proposed = await debtFollowupProposeAction({
+    method: "POST",
+    body: { request: LINK },
+    deps: deps(w),
+  });
+  assert(proposed.status === "proposed");
+  const noId = await debtFollowupApproveAction({
+    method: "POST",
+    auth: { mode: "jwt", email: CAPTAIN },
+    body: { request: LINK, expected_binding_hash: proposed.binding_hash },
+    deps: deps(w),
+  });
+  assertEquals(noId, {
+    status: "refused",
+    reason: "approval_requires_captain",
+  });
+  assertEquals(w.approvals.size, 1);
+});
+
+Deno.test("contact matching reads every row and fails closed past its scan limit", async () => {
+  const reader = (count: number, second: boolean) => {
+    const rows = Array.from({ length: count }, (_, i) => ({
+      org_id: ORG,
+      xero_contact_id: "xc-1",
+      ghl_contact_id: second && i === count - 1 ? "ghl-2" : "ghl-1",
+    }));
+    const client = {
+      from() {
+        const filters: Array<[string, unknown]> = [];
+        const query: Obj = {
+          select: () => query,
+          eq(field: string, value: unknown) {
+            filters.push([field, value]);
+            return query;
+          },
+          limit(n: number) {
+            return Promise.resolve({
+              data: rows.filter((r) =>
+                filters.every(([f, v]) => (r as Obj)[f] === v)
+              ).slice(0, n),
+              error: null,
+            });
+          },
+        };
+        return query;
+      },
+    };
+    return debtFollowupReads(client, {
+      orgId: ORG,
+      getToken: () => Promise.resolve({ accessToken: "", tenantId: "" }),
+      xeroGet: () => Promise.resolve({}),
+      assertInvoiceAllowed: () => Promise.resolve(undefined),
+      fenceRefusal: () => null,
+      sendInvoiceEmail: () => Promise.resolve({ status: 200, body: {} }),
+      sendSms: () => Promise.resolve({ status: 200, body: {} }),
+    });
+  };
+  const rejects = async (p: Promise<unknown>) => {
+    try {
+      await p;
+      return null;
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  // A second contact past the first 10 rows is still seen.
+  assertEquals(
+    await rejects(reader(12, true).contactMatch("xc-1")),
+    "contact_match_ambiguous",
+  );
+  assertEquals(
+    await reader(CONTACT_MATCH_SCAN_LIMIT, false).contactMatch("xc-1"),
+    "ghl-1",
+  );
+  assertEquals(
+    await rejects(
+      reader(CONTACT_MATCH_SCAN_LIMIT + 1, false).contactMatch("xc-1"),
+    ),
+    "contact_match_too_many",
+  );
 });
 
 // ── Production ledger adapter ──────────────────────────────────────────────

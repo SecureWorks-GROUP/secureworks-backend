@@ -21,18 +21,18 @@ BEGIN
 
   INSERT INTO public.debt_followup_approvals
     (approval_id, binding_hash, contract, kind, channel, xero_invoice_ids, request, proposal,
-     body_sha256, approved_by_email, approved_at, expires_at)
+     body_sha256, approved_by_email, approved_by_user_id, approved_at, expires_at)
   VALUES (repeat('a',64), repeat('b',64), 'debt-followup-approval/v1', 'chase_sms', 'sms',
      ARRAY['inv-1'], '{}'::jsonb, prop, repeat('e',64), 'captain@example.test',
-     '2026-09-24T00:00Z', '2026-09-24T00:30Z');
+     '706c5258-70dd-483a-b36c-af6864b24498', '2026-09-24T00:00Z', '2026-09-24T00:30Z');
 
   BEGIN
     INSERT INTO public.debt_followup_approvals
       (approval_id, binding_hash, contract, kind, channel, xero_invoice_ids, request, proposal,
-       body_sha256, approved_by_email, approved_at, expires_at)
+       body_sha256, approved_by_email, approved_by_user_id, approved_at, expires_at)
     VALUES (repeat('c',64), repeat('b',64), 'debt-followup-approval/v1', 'chase_sms', 'sms',
        ARRAY['inv-1'], '{}'::jsonb, prop, repeat('f',64), 'captain@example.test',
-       '2026-09-24T00:00Z', '2026-09-24T00:30Z');
+       '706c5258-70dd-483a-b36c-af6864b24498', '2026-09-24T00:00Z', '2026-09-24T00:30Z');
     RAISE EXCEPTION 'approval whose body hash differs from its proposal was accepted';
   EXCEPTION WHEN check_violation THEN NULL; END;
 

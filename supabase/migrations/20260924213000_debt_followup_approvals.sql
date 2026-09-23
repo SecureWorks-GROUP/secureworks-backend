@@ -29,7 +29,7 @@ DECLARE
       'approval_id', 'text|NO', 'binding_hash', 'text|NO', 'contract', 'text|NO',
       'kind', 'text|NO', 'channel', 'text|NO', 'xero_invoice_ids', 'ARRAY|NO',
       'request', 'jsonb|NO', 'proposal', 'jsonb|NO', 'body_sha256', 'text|NO',
-      'approved_by_email', 'text|NO',
+      'approved_by_email', 'text|NO', 'approved_by_user_id', 'uuid|NO',
       'approved_at', 'timestamp with time zone|NO',
       'expires_at', 'timestamp with time zone|NO',
       'created_at', 'timestamp with time zone|NO'
@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS public.debt_followup_approvals (
   proposal jsonb NOT NULL CHECK (jsonb_typeof(proposal) = 'object'),
   body_sha256 text NOT NULL CHECK (body_sha256 ~ '^[a-f0-9]{64}$'),
   approved_by_email text NOT NULL CHECK (length(approved_by_email) BETWEEN 3 AND 320),
+  approved_by_user_id uuid NOT NULL,
   approved_at timestamptz NOT NULL,
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
