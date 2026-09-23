@@ -255,6 +255,8 @@ export function safeEventType(raw: unknown): string {
 export type ReceiptOutcome =
   | "event_created"
   | "duplicate"
+  | "skipped"
+  | "unresolved_id"
   | "skipped_unsupported"
   | "capture_disabled"
   | "attribution_captured"
@@ -317,6 +319,72 @@ export function buildWebhookReceipt(args: {
       auth_detail: decision.detail,
       auth_mode: mode,
     },
+  };
+}
+
+/** Capture detail recorded on a ghl_webhook_receipts row (slice C1c). Ids and counts only. */
+export interface ReceiptCapture {
+  reason?: string | null;
+  itemId?: string | null;
+  eventId?: string | null;
+  upgraded?: boolean;
+  targeted?: {
+    status: "ok" | "failed" | "skipped";
+    seen: number;
+    inserted: number;
+    duplicates: number;
+    skipped: number;
+    errors: number;
+  } | null;
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The argument of public.record_ghl_webhook_receipt: one row of
+ * ghl_webhook_receipts (sms.md §7 step 8). No body, no text: identifiers,
+ * codes and counts only; the database refuses anything that is not id-shaped.
+ */
+export function buildGhlReceiptRow(args: {
+  body: Record<string, unknown>;
+  decision: AuthDecision;
+  mode: AuthMode;
+  outcome: ReceiptOutcome;
+  errorCode?: string | null;
+  capture?: ReceiptCapture | null;
+}): Record<string, unknown> {
+  const { body, decision, mode, outcome, capture } = args;
+  const type = safeEventType(body.type);
+  const appointment = body.appointment && typeof body.appointment === "object"
+    ? body.appointment as Record<string, unknown>
+    : null;
+  const eventId = capture?.eventId && UUID_PATTERN.test(capture.eventId)
+    ? capture.eventId
+    : null;
+  const t = capture?.targeted ?? null;
+  return {
+    event_type: type,
+    webhook_id: safeId(body.webhookId ?? body.webhook_id),
+    message_id: capture?.itemId ?? safeId(body.messageId ?? body.message_id),
+    contact_id: safeId(
+      body.contactId ?? body.contact_id ?? appointment?.contactId ??
+        (type.startsWith("Contact") ? body.id : null),
+    ),
+    outcome,
+    reason: safeId(capture?.reason ?? null),
+    event_id: eventId,
+    upgraded: capture?.upgraded === true,
+    auth: decision.auth,
+    auth_detail: decision.detail,
+    auth_mode: mode,
+    error_code: args.errorCode ? safeId(args.errorCode) ?? "error" : null,
+    targeted_read: t?.status ?? null,
+    targeted_seen: t ? t.seen : null,
+    targeted_inserted: t ? t.inserted : null,
+    targeted_duplicates: t ? t.duplicates : null,
+    targeted_skipped: t ? t.skipped : null,
+    targeted_errors: t ? t.errors : null,
   };
 }
 

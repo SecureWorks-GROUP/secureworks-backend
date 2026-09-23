@@ -217,3 +217,173 @@ export const ACTIVITY_ITEM = {
   conversationId: R1_CONVERSATION,
   dateAdded: "2026-09-22T01:00:00.000Z",
 };
+
+// ── Rank 10 (slice C1c): the GHL app's note, task and appointment webhooks ──
+// sms.md §10 R25 to R31 name these rows by job and kind but the design's read
+// budget recorded no GHL ids for them, so the ids below are placeholders the
+// L6 validator replaces with one real delivery each (like R32). Contacts are
+// the design's where it names one (R25 and R27 are the SWF-261335 contact),
+// placeholders otherwise. Bodies are neutral placeholder text. Shapes follow
+// GHL's documented app webhooks: notes and tasks carry the item at the top
+// level, appointments nest it under `appointment`.
+
+/** R25: internal note on SWF-261335 (price concession, audit A). */
+export const R25_NOTE_CREATE = {
+  type: "NoteCreate",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r25-note-0001",
+  id: "r25NotePlaceholder01",
+  contactId: R5.contactId,
+  userId: "47AptTIxjOPutvcl6RpO",
+  body: "Note text for the R25 fixture: price concession agreed.",
+  dateAdded: "2026-09-08T02:10:00.000Z",
+};
+
+/** R27: the same note edited later (NoteUpdate). A new row; R25's row is kept. */
+export const R27_NOTE_UPDATE = {
+  type: "NoteUpdate",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r27-note-0001",
+  id: R25_NOTE_CREATE.id,
+  contactId: R5.contactId,
+  userId: "47AptTIxjOPutvcl6RpO",
+  body: "Note text for the R25 fixture: price concession agreed, edited.",
+  dateAdded: R25_NOTE_CREATE.dateAdded,
+  dateUpdated: "2026-09-09T01:00:00.000Z",
+};
+
+/** R26: scope handoff note on a contact holding SWF-261421 and SWF-261422 (two option quotes). */
+export const R26_NOTE_CREATE = {
+  type: "NoteCreate",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r26-note-0001",
+  id: "r26NotePlaceholder01",
+  contactId: "r26-contact-placeholder",
+  userId: "RgDWTnYL6zL3eJA6nLht",
+  body: "Note text for the R26 fixture: scope handoff.",
+  dateAdded: "2026-09-16T03:00:00.000Z",
+};
+
+/** R28: a task assigned to a staff user (the design: Nithin). */
+export const R28_TASK_CREATE = {
+  type: "TaskCreate",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r28-task-0001",
+  id: "r28TaskPlaceholder01",
+  contactId: "r28-contact-placeholder",
+  assignedTo: "r28-staff-user-placeholder",
+  title: "Task title for the R28 fixture",
+  body: "Task body for the R28 fixture.",
+  dueDate: "2026-09-25T00:00:00.000Z",
+  dateAdded: "2026-09-22T01:00:00.000Z",
+};
+
+/** R29: that task completed, reopened, then completed again: two completion rows. */
+export const R29_TASK_COMPLETE_FIRST = {
+  ...R28_TASK_CREATE,
+  type: "TaskComplete",
+  webhookId: "wh-r29-task-0001",
+  completed: true,
+  timestamp: "2026-09-23T02:00:00.000Z",
+};
+export const R29_TASK_COMPLETE_SECOND = {
+  ...R28_TASK_CREATE,
+  type: "TaskComplete",
+  webhookId: "wh-r29-task-0002",
+  completed: true,
+  timestamp: "2026-09-23T05:30:00.000Z",
+};
+
+/** R30: SWF-261424's appointment rescheduled (AppointmentUpdate); the original was never cancelled. */
+export const R30_APPOINTMENT_UPDATE = {
+  type: "AppointmentUpdate",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r30-appt-0001",
+  appointment: {
+    id: "r30ApptPlaceholder01",
+    contactId: "r30-contact-placeholder",
+    calendarId: "r30-calendar-placeholder",
+    title: "Appointment title for the R30 fixture",
+    appointmentStatus: "confirmed",
+    assignedUserId: "RgDWTnYL6zL3eJA6nLht",
+    startTime: "2026-09-26T01:00:00.000Z",
+    endTime: "2026-09-26T02:00:00.000Z",
+    dateAdded: "2026-09-19T00:00:00.000Z",
+    dateUpdated: "2026-09-22T04:00:00.000Z",
+  },
+};
+
+/** R31: SWF-261438's appointment created 48 minutes after its job, and a later AppointmentDelete. */
+export const R31_APPOINTMENT_CREATE = {
+  type: "AppointmentCreate",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r31-appt-0001",
+  appointment: {
+    id: "r31ApptPlaceholder01",
+    contactId: "r31-contact-placeholder",
+    calendarId: "r31-calendar-placeholder",
+    title: "Appointment title for the R31 fixture",
+    appointmentStatus: "confirmed",
+    assignedUserId: "RgDWTnYL6zL3eJA6nLht",
+    startTime: "2026-09-24T01:00:00.000Z",
+    endTime: "2026-09-24T02:00:00.000Z",
+    dateAdded: "2026-09-18T00:48:00.000Z",
+    dateUpdated: "2026-09-18T00:48:00.000Z",
+  },
+};
+export const R31_APPOINTMENT_DELETE = {
+  type: "AppointmentDelete",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r31-appt-0002",
+  appointment: {
+    ...R31_APPOINTMENT_CREATE.appointment,
+    appointmentStatus: "cancelled",
+    dateUpdated: "2026-09-20T03:00:00.000Z",
+  },
+};
+
+// ── Message webhooks as the receiver sees them (slice C1c) ──
+
+/** R1: inbound "I haven't received all three quotes as yet?", two open fencing quotes on the contact. */
+export const R1_WEBHOOK = {
+  type: "InboundMessage",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r1-0001",
+  messageId: "pffXnIL1v2FTaKnz4DHm",
+  contactId: R1_CONTACT,
+  conversationId: R1_CONVERSATION,
+  messageType: "SMS",
+  direction: "inbound",
+  to: "+61489267772",
+  body: "I haven't received all three quotes as yet?",
+  dateAdded: "2026-09-23T04:35:00.000Z",
+};
+
+/** R1 again, as a webhook that carries no message id: nothing is written from its body. */
+export const R1_WEBHOOK_NO_ID = {
+  type: "InboundMessage",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r1-noid-0001",
+  contactId: R1_CONTACT,
+  conversationId: R1_CONVERSATION,
+  messageType: "SMS",
+  direction: "inbound",
+  body: "I haven't received all three quotes as yet?",
+  dateAdded: "2026-09-23T04:35:00.000Z",
+};
+
+/** R4 as the OutboundMessage webhook of a GHL workflow send. */
+export const R4_WEBHOOK = {
+  type: "OutboundMessage",
+  locationId: "loc-secureworks-test",
+  webhookId: "wh-r4-0001",
+  messageId: R4_LIST_ITEM.id,
+  contactId: R1_CONTACT,
+  conversationId: R1_CONVERSATION,
+  messageType: "SMS",
+  direction: "outbound",
+  source: "workflow",
+  from: "+61489267772",
+  body: R4_LIST_ITEM.body,
+  dateAdded: R4_LIST_ITEM.dateAdded,
+};

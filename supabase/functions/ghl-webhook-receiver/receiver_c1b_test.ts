@@ -7,8 +7,15 @@ import {
   assertFalse,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _resetFlagCache } from "../_shared/evidence/feature_flag.ts";
-import { handleGhlWebhook, type ReceiverDeps } from "./handler.ts";
+import {
+  assertIdsOnly,
+  evidenceRows,
+  ghlReceipt,
+  post,
+  receipt,
+  type Row,
+  run,
+} from "./receiver_test_support.ts";
 import {
   CALL_COMPLETED,
   CONTACT_CREATE,
@@ -22,236 +29,6 @@ import {
   TEST_LOCATION_ID,
   TEST_WEBHOOK_SECRET,
 } from "./named_rows_fixture.ts";
-
-// ── in-memory database ────────────────────────────────────
-
-type Row = Record<string, unknown>;
-interface Op {
-  table: string;
-  kind: "select" | "insert" | "update";
-  row?: Row;
-  filters: Array<[string, unknown]>;
-}
-
-interface DbOptions {
-  laneOn?: boolean;
-  jobs?: Row[];
-  insertError?: { code: string; message: string } | null;
-}
-
-function fakeDb(opts: DbOptions = {}) {
-  const ops: Op[] = [];
-  const rpcs: string[] = [];
-  const client = {
-    rpc(name: string) {
-      rpcs.push(name);
-      return Promise.resolve({
-        data: name === "automation_lane_enabled" ? (opts.laneOn ?? true) : null,
-        error: null,
-      });
-    },
-    from(table: string) {
-      const op: Op = { table, kind: "select", filters: [] };
-      const result = () => {
-        if (op.kind === "insert") {
-          if (table === "business_events" && opts.insertError) {
-            return { data: null, error: opts.insertError };
-          }
-          return { data: null, error: null };
-        }
-        if (op.kind === "update") return { data: null, error: null };
-        if (table === "jobs") return { data: opts.jobs ?? [], error: null };
-        if (table === "feature_flags") {
-          return { data: [{ enabled: false }], error: null };
-        }
-        return { data: null, error: null };
-      };
-      // deno-lint-ignore no-explicit-any
-      const builder: any = {
-        select: () => builder,
-        eq: (k: string, v: unknown) => (op.filters.push([k, v]), builder),
-        not: () => builder,
-        order: () => builder,
-        limit: () => builder,
-        insert: (row: Row) => {
-          op.kind = "insert";
-          op.row = row;
-          ops.push(op);
-          return builder;
-        },
-        update: (row: Row) => {
-          op.kind = "update";
-          op.row = row;
-          ops.push(op);
-          return builder;
-        },
-        maybeSingle: () => Promise.resolve({ data: null, error: null }),
-        then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
-          if (op.kind === "select") ops.push(op);
-          return Promise.resolve(result()).then(res, rej);
-        },
-      };
-      return builder;
-    },
-  };
-  return { client, ops, rpcs };
-}
-
-// ── keys, env, requests ───────────────────────────────────
-
-const keyPair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
-  "sign",
-  "verify",
-]) as CryptoKeyPair;
-const otherKeyPair = await crypto.subtle.generateKey(
-  { name: "Ed25519" },
-  true,
-  ["sign", "verify"],
-) as CryptoKeyPair;
-const spki = new Uint8Array(
-  await crypto.subtle.exportKey("spki", keyPair.publicKey),
-);
-const PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----\n${
-  btoa(String.fromCharCode(...spki))
-}\n-----END PUBLIC KEY-----`;
-
-async function sign(raw: string, pair = keyPair): Promise<string> {
-  const sig = new Uint8Array(
-    await crypto.subtle.sign(
-      { name: "Ed25519" },
-      pair.privateKey,
-      new TextEncoder().encode(raw),
-    ),
-  );
-  return btoa(String.fromCharCode(...sig));
-}
-
-function env(mode: "observe" | "enforce", extra: Record<string, string> = {}) {
-  const values: Record<string, string> = {
-    GHL_WEBHOOK_PUBLIC_KEY: PUBLIC_KEY_PEM,
-    GHL_LOCATION_ID: TEST_LOCATION_ID,
-    GHL_WEBHOOK_SECRET: TEST_WEBHOOK_SECRET,
-    SUPABASE_URL: "https://project.example.test",
-    SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
-    ...extra,
-  };
-  if (mode === "enforce") values.GHL_WEBHOOK_AUTH_MODE = "enforce";
-  return (name: string) => values[name];
-}
-
-type Proof = "signature" | "secret" | "wrong_key" | "legacy" | "none";
-
-async function post(
-  body: unknown,
-  proof: Proof,
-  rawOverride?: string,
-): Promise<Request> {
-  const raw = rawOverride ?? JSON.stringify(body);
-  const headers = new Headers({ "Content-Type": "application/json" });
-  if (proof === "signature") headers.set("X-GHL-Signature", await sign(raw));
-  if (proof === "wrong_key") {
-    headers.set("X-GHL-Signature", await sign(raw, otherKeyPair));
-  }
-  if (proof === "secret") headers.set("X-Webhook-Secret", TEST_WEBHOOK_SECRET);
-  if (proof === "legacy") {
-    headers.set("X-WH-Signature", "bGVnYWN5LXJzYS1zaWduYXR1cmU=");
-  }
-  return new Request(
-    "https://project.example.test/functions/v1/ghl-webhook-receiver",
-    { method: "POST", headers, body: raw },
-  );
-}
-
-interface Run {
-  res: Response;
-  json: Row;
-  ops: Op[];
-  rpcs: string[];
-  logs: string;
-  fetches: Array<{ url: string; body: string }>;
-}
-
-async function run(
-  req: Request,
-  mode: "observe" | "enforce",
-  db: DbOptions = {},
-  envExtra: Record<string, string> = {},
-): Promise<Run> {
-  _resetFlagCache();
-  const { client, ops, rpcs } = fakeDb(db);
-  const fetches: Array<{ url: string; body: string }> = [];
-  const pending: Promise<unknown>[] = [];
-  const deps: ReceiverDeps = {
-    env: env(mode, envExtra),
-    createSupabase: () => client,
-    fetch: ((input: string | URL | Request, init?: RequestInit) => {
-      fetches.push({ url: String(input), body: String(init?.body ?? "") });
-      return Promise.resolve(new Response("{}", { status: 200 }));
-    }) as typeof fetch,
-    waitUntil: (p) => void pending.push(p),
-  };
-  const lines: string[] = [];
-  const original = {
-    log: console.log,
-    error: console.error,
-    warn: console.warn,
-  };
-  const capture = (...args: unknown[]) =>
-    void lines.push(args.map(String).join(" "));
-  console.log = capture;
-  console.error = capture;
-  console.warn = capture;
-  try {
-    const res = await handleGhlWebhook(req, deps);
-    await Promise.all(pending);
-    const text = await res.text();
-    return {
-      res,
-      json: text ? JSON.parse(text) : {},
-      ops,
-      rpcs,
-      logs: lines.join("\n"),
-      fetches,
-    };
-  } finally {
-    Object.assign(console, original);
-  }
-}
-
-const receipts = (r: Run) =>
-  r.ops.filter((o) => o.table === "webhook_log" && o.kind === "insert");
-const receipt = (r: Run) => {
-  const all = receipts(r);
-  assertEquals(all.length, 1, "exactly one webhook_log receipt per delivery");
-  return all[0].row as Row & { payload: Row };
-};
-const evidenceRows = (r: Run) =>
-  r.ops.filter((o) => o.table === "business_events" && o.kind === "insert").map(
-    (o) => o.row as Row,
-  );
-
-/** A receipt carries identifiers and codes only: never text, phone, email or custom fields. */
-function assertIdsOnly(r: Run, forbidden: string[]) {
-  const rec = receipt(r);
-  assertEquals(Object.keys(rec.payload).sort(), [
-    "auth",
-    "auth_detail",
-    "auth_mode",
-    "contact_id",
-    "message_id",
-    "outcome",
-    "receipt",
-    "type",
-    "webhook_id",
-  ]);
-  const serialised = JSON.stringify(rec);
-  for (const s of forbidden) {
-    assertFalse(serialised.includes(s), `receipt must not carry ${s}`);
-  }
-  for (const s of forbidden) {
-    assertFalse(r.logs.includes(s), `logs must not carry ${s}`);
-  }
-}
 
 const R1_JOBS = [
   {
@@ -330,8 +107,18 @@ Deno.test("R1 unsigned in enforce mode gets 401: nothing read, nothing written, 
   });
   assertEquals(r.res.status, 401);
   assertEquals(evidenceRows(r).length, 0);
-  assertEquals(r.ops.filter((o) => o.table !== "webhook_log").length, 0);
-  assertEquals(r.rpcs.length, 0, "no capture lane read before auth");
+  assertEquals(
+    r.ops.filter((o) =>
+      o.table !== "webhook_log" && o.table !== "ghl_webhook_receipts"
+    ).length,
+    0,
+  );
+  assertEquals(
+    r.rpcs.filter((n) => n !== "record_ghl_webhook_receipt").length,
+    0,
+    "no capture lane read before auth",
+  );
+  assertEquals(ghlReceipt(r).outcome, "unauthorized");
   const rec = receipt(r);
   assertEquals(rec.status, "rejected");
   assertEquals(rec.payload.outcome, "unauthorized");
@@ -406,7 +193,7 @@ Deno.test("R2 staff reply signed by the app is captured outbound, ids-only recei
 
 // ── body.job_id is never trusted ──────────────────────────
 
-Deno.test("R1 with a forged body.job_id: the row carries no job, the matcher ignores it, no nudge is cancelled", async () => {
+Deno.test("R1 with a forged body.job_id: the row carries no job, no receiver matcher, no nudge is cancelled", async () => {
   const forged = {
     ...R1_INBOUND,
     job_id: R1_JOB_A,
@@ -421,18 +208,21 @@ Deno.test("R1 with a forged body.job_id: the row carries no job, the matcher ign
   assertEquals(row.job_id, null);
   assertEquals(row.match_method, "none");
   const payload = row.payload as Row;
-  assertEquals(
-    payload.suggested_job_id,
-    null,
-    "two open jobs, the forged id picks neither",
+  assertFalse(
+    JSON.stringify(row).includes(R1_JOB_A),
+    "the forged id is nowhere",
   );
-  assertEquals((payload.attribution_hint as Row).job_id, null);
+  assertFalse("suggested_job_id" in payload, "no receiver matcher (slice C1c)");
   assertEquals(
     r.ops.filter((o) => o.kind === "update").length,
     0,
     "no smart_nudges or proposal cancelled",
   );
-  assertEquals(r.json.job_matched, false);
+  assertEquals(
+    r.ops.filter((o) => o.table === "jobs").length,
+    0,
+    "the receiver reads no jobs: the ladder places the row",
+  );
 });
 
 Deno.test("a forged job id nobody owns never reaches the evidence row (observe, unauthenticated)", async () => {
@@ -458,6 +248,7 @@ Deno.test("CallCompleted workflow post with the shared secret is accepted; forge
   assertEquals(rec.payload.auth, "workflow_secret");
   assertEquals(rec.payload.type, "CallCompleted");
   assertEquals(evidenceRows(r)[0].job_id, null);
+  assertEquals(r.ops.filter((o) => o.table === "jobs").length, 0);
   assertEquals(r.fetches.length, 1);
   const transcribe = JSON.parse(r.fetches[0].body);
   assertEquals(transcribe.job_id, null);
@@ -527,7 +318,7 @@ Deno.test("ContactCreate accepts either proof and its receipt carries no attribu
 Deno.test("an unsupported signed app event is skipped with a receipt", async () => {
   const r = await run(
     await post({
-      type: "TaskCreate",
+      type: "InvoiceCreate",
       locationId: TEST_LOCATION_ID,
       contactId: "c1",
       title: "Task words",
@@ -564,7 +355,7 @@ Deno.test("an insert failure returns the error code only, never the database mes
     insertError: { code: "22P02", message: `invalid input syntax: ${R1_TEXT}` },
   });
   assertEquals(r.res.status, 500);
-  assertEquals(r.json.error, "22P02");
+  assertEquals(r.json.reason, "22P02");
   const rec = receipt(r);
   assertEquals(rec.status, "failed");
   assertEquals(rec.error_message, "22P02");
