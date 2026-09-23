@@ -554,6 +554,11 @@ migration lanes: `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh`
 (disposable localhost Postgres, applies the new migrations twice). Record:
 `docs/context/b3-fact-custody.md`.
 
+Attribution ladder step 1 matching is owned by
+`docs/context/b2-capture-attribution.md` (`20260923230000`). Each later ladder
+change replaces the whole `resolve_context_attribution` body and must follow
+the pre-image guard in that document.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before
