@@ -37,8 +37,8 @@ After the pack overlay, for the person on screen:
    times are withheld.
 5. Open offers: the same census the owner press uses
    (`systemOfferCensus`, `sales_booking_executions` claimed in the last 21
-   days joined to their approvals, plus live owner approvals). An offer to a
-   lead who now has a GHL appointment is dropped. Hand-sent texts are not
+   days joined to their approvals, plus live owner approvals). Offers remain holds until the census drops them; an unrelated GHL
+   appointment for the same contact does not remove a separate visit commitment. Hand-sent texts are not
    machine-checked and say so.
 
 `booking_flow` then carries:
@@ -157,3 +157,7 @@ apart, plus `end_iso` 30 minutes after the latest arrival. Windows start on a
 five-minute grid and include travel clearance on both sides. Approval continues
 to accept 60–90-minute arrival windows; exact-time bookings are not permitted.
 The read and approval share `ownerVisitTiming` for window and on-site duration.
+
+When neighboring intervals tie on their end or start, every tied location
+constrains travel. The largest known travel gap applies; any unknown location
+withholds that gap's arrival windows.

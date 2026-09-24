@@ -271,12 +271,23 @@ function arrivalWindowsWithTravelStatus(
     exempt
       ? { minutes: 0, basis: "protected_band_buffer" }
       : salesBookingTravelMinutes(from, to);
+  const neighboringTravel = (neighbors: Busy[], preceding: boolean) => {
+    const estimates = neighbors.map((item) =>
+      preceding
+        ? travel(item.location, location, item.travel_exempt)
+        : travel(location, item.location, item.travel_exempt)
+    );
+    return estimates.find((estimate) => estimate.minutes === null) ??
+      estimates.reduce((largest, estimate) =>
+        estimate.minutes! > largest.minutes! ? estimate : largest
+      );
+  };
   const push = (next: Busy | null) => {
     const before = prev
-      ? travel(prev.location, location, prev.travel_exempt)
+      ? neighboringTravel(items.filter((item) => item.end === prev!.end), true)
       : { minutes: 0, basis: "day_start" };
     const after = next
-      ? travel(location, next.location, next.travel_exempt)
+      ? neighboringTravel(items.filter((item) => item.start === next.start), false)
       : null;
     if (before.minutes === null || after?.minutes === null) {
       const possibleFrom = ceil5(Math.max(
@@ -483,12 +494,7 @@ export function computeSalesBookingAvailability(
       `system_offers_unreadable: ${input.census.reason}`,
     );
   } else {
-    const bookedInGhl = new Set(
-      events.map((e) => e.contact_id).filter((c): c is string => !!c),
-    );
-    const live = input.census.value.offers.filter((o) =>
-      !bookedInGhl.has(o.contact_id)
-    );
+    const live = input.census.value.offers;
     commitments = live.map((o) => ({
       id: o.binding_hash,
       contact_id: o.contact_id,
@@ -519,7 +525,6 @@ export function computeSalesBookingAvailability(
         "live_owner_approvals",
         "bookings_mid_press",
       ],
-      booked_in_ghl_dropped: input.census.value.offers.length - live.length,
       unverified_texts: input.census.value.unverified_texts.length,
       hand_sent_texts: "not_machine_checked",
     };

@@ -399,7 +399,7 @@ Deno.test("availability requires a confirmed-active GHL calendar", () => {
   assertEquals(r.free_times, null);
 });
 
-Deno.test("open offers come from the census, block their slot, and drop once that lead is booked in GHL", () => {
+Deno.test("open offers remain holds until the census drops them", () => {
   const census = ok({
     offers: [
       {
@@ -426,29 +426,30 @@ Deno.test("open offers come from the census, block their slot, and drop once tha
     cases: [
       lead("opp:a", "c-a", "Hillarys"),
       lead("opp:b", "c-b", "Hillarys"),
+      lead("opp:booked", "c-booked", "Hillarys"),
     ],
     events: ok([{
       id: "ev-booked",
-      startTime: "2026-10-05T09:00:00+08:00",
-      endTime: "2026-10-05T10:00:00+08:00",
+      startTime: "2026-09-29T09:00:00+08:00",
+      endTime: "2026-09-29T10:00:00+08:00",
       assignedUserId: MARNIN,
       contactId: "c-booked",
     }]),
   }));
   assertEquals(r.commitments!.map((c) => [c.id, c.contact_id, c.state]), [
     ["h1", "c-b", "offered"],
+    ["h2", "c-booked", "offered"],
   ]);
-  assertEquals(r.commitments_read.booked_in_ghl_dropped, 1);
   // Different visits in Hillarys use the 15-minute minimum.
   const forA = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
-  assertEquals(windows(forA), [["11:15", "15:00"]]);
+  assertEquals(windows(forA), [["11:15", "11:15"], ["14:45", "15:00"]]);
   // The offered lead's own offer does not block their own free times.
   const forB = r.case_free_times["opp:b"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
-  assertEquals(windows(forB), [["08:00", "15:00"]]);
+  assertEquals(windows(forB), [["08:00", "11:15"], ["14:45", "15:00"]]);
 });
 
 Deno.test("an unreadable offer census keeps commitments null (unknown) while the calendar still reads", () => {
@@ -667,6 +668,38 @@ Deno.test("every advertised empty-Friday arrival window passes owner rules", () 
       }, NOW);
       assertEquals(checked.windowEnd - checked.start, 60 * 60000);
       assertEquals(checked.end - checked.windowEnd, 30 * 60000);
+    }
+  }
+});
+
+Deno.test("tied neighbors require every location and the largest travel gap", () => {
+  for (const side of ["before", "after"]) {
+    for (const distantLocation of [null, "Two Rocks"]) {
+      for (const reverse of [false, true]) {
+        const events = [
+          { id: "near", startTime: side === "before" ? "2026-10-02T10:00:00+08:00" : "2026-10-02T12:00:00+08:00", endTime: side === "before" ? "2026-10-02T11:00:00+08:00" : "2026-10-02T13:00:00+08:00", address: "Canning Vale" },
+          { id: "other", startTime: side === "before" ? "2026-10-02T09:00:00+08:00" : "2026-10-02T12:00:00+08:00",
+            endTime: side === "before" ? "2026-10-02T11:00:00+08:00" : "2026-10-02T14:00:00+08:00", address: distantLocation },
+        ];
+        const result = computeSalesBookingAvailability(input({
+          cases: [lead("opp:a", "c-a", "Canning Vale")],
+          events: ok(reverse ? events.reverse() : events),
+        }));
+        const day = result.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02");
+        const boundary = Date.parse(side === "before" ? "2026-10-02T11:00:00+08:00" : "2026-10-02T12:00:00+08:00");
+        const affected = day.arrival_windows.filter((w: { from_iso: string; end_iso: string }) =>
+          side === "before" ? Date.parse(w.from_iso) >= boundary : Date.parse(w.end_iso) <= boundary);
+        if (distantLocation === null) assertEquals(affected, []);
+        else {
+          assert(affected.length > 0);
+          const required = salesBookingTravelMinutes("Two Rocks", "Canning Vale").minutes! * 60000;
+          for (const window of affected) {
+            assert(side === "before"
+              ? Date.parse(window.from_iso) >= boundary + required
+              : Date.parse(window.end_iso) <= boundary - required);
+          }
+        }
+      }
     }
   }
 });
