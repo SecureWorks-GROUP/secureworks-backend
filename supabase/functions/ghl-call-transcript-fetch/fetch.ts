@@ -653,7 +653,7 @@ export async function runLiveFetch(deps: FetchDeps): Promise<LiveResult> {
 export interface BackfillCursor {
   contact_id: string;
   conversation_page: string | null;
-  conversation_index: number;
+  conversation_ids: string[] | null;
   message_page: string | null;
 }
 
@@ -785,7 +785,7 @@ export async function runBackfill(
       cursor ??= {
         contact_id: contact.ghl_contact_id,
         conversation_page: null,
-        conversation_index: 0,
+        conversation_ids: null,
         message_page: null,
       };
       while (cursor) {
@@ -798,34 +798,38 @@ export async function runBackfill(
           complete = false;
           break contactLoop;
         }
-        const convs = await deps.listConversations(
-          contact.ghl_contact_id,
-          cursor.conversation_page ?? undefined,
-        );
-        counts.provider_list_reads++;
         pagesRead++;
-        const conv = convs.conversations[cursor.conversation_index];
-        if (!conv) {
-          if (convs.next) {
-            cursor = {
-              ...cursor,
-              conversation_page: convs.next,
-              conversation_index: 0,
-              message_page: null,
-            };
-            continue;
+        if (
+          cursor.conversation_ids === null ||
+          cursor.conversation_ids.length === 0
+        ) {
+          if (
+            cursor.conversation_ids !== null &&
+            cursor.conversation_page === null
+          ) {
+            cursor = null;
+            break;
           }
-          cursor = null;
-          break;
-        }
-        const convId = text(conv.id);
-        if (!convId) {
+          const convs = await deps.listConversations(
+            contact.ghl_contact_id,
+            cursor.conversation_page ?? undefined,
+          );
+          counts.provider_list_reads++;
+          const ids = convs.conversations.map((conv) => text(conv.id));
+          if (ids.some((id) => !id)) {
+            throw Object.assign(new Error("conversation_identity_missing"), {
+              code: "conversation_identity_missing",
+            });
+          }
           cursor = {
             ...cursor,
-            conversation_index: cursor.conversation_index + 1,
+            conversation_page: convs.next,
+            conversation_ids: ids as string[],
+            message_page: null,
           };
-          continue;
+          if (ids.length === 0) continue;
         }
+        const convId = cursor.conversation_ids![0];
         const page = await deps.listMessages(
           contact.ghl_contact_id,
           convId,
@@ -1006,7 +1010,7 @@ export async function runBackfill(
         }
         cursor = page.next ? { ...cursor, message_page: page.next } : {
           ...cursor,
-          conversation_index: cursor.conversation_index + 1,
+          conversation_ids: cursor.conversation_ids!.slice(1),
           message_page: null,
         };
       }

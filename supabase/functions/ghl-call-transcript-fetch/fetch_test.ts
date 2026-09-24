@@ -865,5 +865,52 @@ Deno.test("history time budget retains the unprocessed message page", async () =
   assertFalse(result.complete);
   assertEquals(result.next_after, null);
   assertEquals(result.next_cursor?.message_page, null);
-  assertEquals(result.next_cursor?.conversation_index, 0);
+  assertEquals(result.next_cursor?.conversation_ids, [
+    N4_CONTACT.conversationId,
+  ]);
+});
+
+Deno.test("history continuation keeps conversation identities despite provider reordering", async () => {
+  const w = n4Backfill({ flag: false });
+  const d = deps(w);
+  let searches = 0;
+  const visited: string[] = [];
+  d.listConversations = () => {
+    searches++;
+    return Promise.resolve({
+      conversations: (searches === 1 ? ["A", "B"] : ["B", "A"]).map((id) => ({
+        id,
+      })),
+      next: null,
+    });
+  };
+  d.listMessages = (_contact, conversation, page) => {
+    visited.push(conversation + ":" + (page ?? "first"));
+    return Promise.resolve({
+      messages: [],
+      next: conversation === "A" && !page ? "second" : null,
+    });
+  };
+  let clockReads = 0;
+  d.now = () => ++clockReads > 3 ? w.now + 101_000 : w.now;
+  const first = await runBackfill({
+    dryRun: true,
+    after: null,
+    maxContacts: 10,
+  }, d);
+  assert(first.outcome === "ran");
+  assertFalse(first.complete);
+  assertEquals(first.next_cursor?.conversation_ids, ["A", "B"]);
+  assertEquals(first.next_cursor?.message_page, "second");
+  d.now = () => w.now;
+  const second = await runBackfill({
+    dryRun: true,
+    after: null,
+    maxContacts: 10,
+    cursor: first.next_cursor,
+  }, d);
+  assert(second.outcome === "ran");
+  assert(second.complete);
+  assertEquals(visited, ["A:first", "A:second", "B:first"]);
+  assertEquals(searches, 1);
 });

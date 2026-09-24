@@ -257,14 +257,10 @@ export async function flattenTranscript(
           : ""
       }`
       : " ";
-    let piece = prefix + s.text;
+    const piece = prefix + s.text;
     if (encoder.encode(text + piece).length > maxBytes) {
       cut = true;
-      if (kept > 0) break;
-      // One sentence alone is over the limit: keep what fits of it.
-      while (piece && encoder.encode(piece).length > maxBytes) {
-        piece = piece.slice(0, Math.floor(piece.length * 0.9));
-      }
+      break;
     }
     if (newTurn) {
       current = [s.channel, s.start, s.end, text.length + (text ? 1 : 0)];
@@ -274,10 +270,9 @@ export async function flattenTranscript(
     }
     text += piece;
     kept++;
-    if (cut) break;
   }
   if (cut) {
-    text += `\n[Transcript cut here by capture: longer than ${
+    text += `${text ? "\n" : ""}[Transcript cut here by capture: longer than ${
       Math.round(maxBytes / 1024)
     } KB. ${kept} of ${sentences.length} sentences kept.]`;
   }
