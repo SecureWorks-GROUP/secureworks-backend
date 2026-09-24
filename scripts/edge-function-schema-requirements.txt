@@ -499,3 +499,5 @@ ops-api|supabase/migrations/20260924183000_context_unlinked_census.sql|function|
 ops-api|supabase/migrations/20260924183000_context_unlinked_census.sql|function|context_unlinked_rows
 ops-api|supabase/migrations/20260924201000_ops_api_actor_recording.sql|table|ops_api_actor_calls
 ops-api|supabase/migrations/20260924201000_ops_api_actor_recording.sql|function|record_ops_api_actor_missing
+ops-api|supabase/migrations/20260925040000_job_parties_foundation.sql|function|link_site_jobs
+ops-api|supabase/migrations/20260925040000_job_parties_foundation.sql|table|job_site_links

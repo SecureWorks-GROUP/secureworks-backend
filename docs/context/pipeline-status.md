@@ -16,7 +16,7 @@ with identical values. The composer adds:
 | `capture_sources` | `context_source_freshness()` | F1 | built |
 | `ghl_capture` | `context_ghl_capture_status()` | sms C1d | built |
 | `booking_capture` | `context_booking_capture_status()` | dossier D3 | `null` |
-| `parties` | `context_parties_status()` | sites S-M1 | `null` |
+| `parties` | `context_parties_status()` | sites S-M1 | built |
 | `email_capture` | `context_email_capture_status()` | email EM1 | `null` (F1b stub) |
 | `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | `null` (F1b stub) |
 | `money` | `context_money_status()` | money MN1 | `null` (F1b stub) |

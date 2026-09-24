@@ -384,6 +384,7 @@ import {
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
+import { linkSiteJobs, SiteLinkError } from './site_links.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
@@ -7261,6 +7262,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             : await contextUnlinkedRows(client, url.searchParams, actor))
         } catch (error) {
           if (error instanceof ContextUnlinkedError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
+          throw error
+        }
+      }
+      // ── Same-site links (sites slice S-M1): a person proposes, confirms or
+      // rejects that two legacy job records are one site. Staff front door,
+      // not on the routine or agent-read lists; actor recorded on the receipt.
+      case 'link_site_jobs': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+        try {
+          return json(await linkSiteJobs(client, body, receiptActor(requestActor, authMode)))
+        } catch (error) {
+          if (error instanceof SiteLinkError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }
