@@ -14,6 +14,9 @@ BEGIN
  IF to_regclass('public.context_catchup_jobs') IS NULL OR to_regclass('public.context_catchup_reads') IS NULL
  THEN RAISE EXCEPTION 'catch-up rollback dropped the list or the read record'; END IF;
  IF public.context_cadence_status() ? 'catchup' THEN RAISE EXCEPTION 'catch-up rollback status still has the block'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
+  IS DISTINCT FROM '2ef95a949f0aae99cc323abde10f2ee7'
+ THEN RAISE EXCEPTION 'catch-up rollback did not restore the 9-argument persistence body'; END IF;
  IF has_function_privilege('anon','public.context_extraction_candidates(integer)','EXECUTE')
   OR NOT has_function_privilege('service_role','public.context_extraction_candidates(integer)','EXECUTE')
  THEN RAISE EXCEPTION 'catch-up rollback grants'; END IF;

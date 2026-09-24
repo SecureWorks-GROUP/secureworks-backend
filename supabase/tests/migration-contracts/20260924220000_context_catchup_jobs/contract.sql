@@ -62,7 +62,8 @@ CREATE FUNCTION pg_temp.cu_today() RETURNS date LANGUAGE sql AS $$ SELECT (now()
 DO $$
 DECLARE f regprocedure; t regclass;
 BEGIN
- FOREACH f IN ARRAY ARRAY['public.context_catchup_request(boolean)','public.context_catchup_eligible_rows(uuid[])','public.context_catchup_pending_rows(uuid[])','public.context_jobs_cadence(uuid[])','public.context_cadence_pool()',
+ FOREACH f IN ARRAY ARRAY['public.context_catchup_request(boolean)','public.context_catchup_eligible_rows(uuid[])','public.context_catchup_pending_rows(uuid[])',
+  'public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)','public.context_jobs_cadence(uuid[])','public.context_cadence_pool()',
   'public.context_extraction_candidates(integer)','public.context_extraction_events(uuid,integer)','public.context_extraction_event_flags(uuid,uuid[])',
   'public.context_cadence_status()']::regprocedure[] LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') OR NOT has_function_privilege('service_role',f,'EXECUTE')
@@ -97,14 +98,14 @@ BEGIN
  THEN RAISE EXCEPTION 'catch-up moved live_since %',p; END IF;
 END $$;
 
--- 3. The writer picks by rule: live jobs (accepted, scheduled, in progress,
--- or quoted in the last 60 days) with readable evidence and no done read
+-- 3. The writer picks by rule: live jobs (the active status set, or quoted
+-- within the last 60 days) with readable evidence and no done read
 -- since live_since; priority 1 when something is unread. Dry run is the
 -- default and writes nothing; a real run writes exactly the dry run's jobs,
 -- never lowers a priority, and leaves a done job done.
 BEGIN;
 DO $$
-DECLARE a uuid; b uuid; c uuid; i uuid; f uuid; h uuid; uncaptured uuid; untrusted uuid;
+DECLARE a uuid; b uuid; c uuid; i uuid; expanded uuid; outside uuid; f uuid; h uuid; uncaptured uuid; untrusted uuid;
  r jsonb; w jsonb; mine jsonb; want jsonb;
 BEGIN
  PERFORM pg_temp.cu_policy();
@@ -116,6 +117,8 @@ BEGIN
  PERFORM pg_temp.cu_read(b,'15 days');
  -- c: quoted 10 days ago, never read, unread -> 1.
  c:=pg_temp.cu_job('CU-C','{}','quoted','fencing','10 days'); PERFORM pg_temp.cu_ev(c,'quote.sent','Quote Q-9 sent for 30 m of fence.','11 days');
+ expanded:=pg_temp.cu_job('CU-EXPANDED','{}','partially_accepted'); PERFORM pg_temp.cu_ev(expanded,'client.sms_in','Partial acceptance follow-up','12 days');
+ outside:=pg_temp.cu_job('CU-OUTSIDE','{}','order_confirmed'); PERFORM pg_temp.cu_ev(outside,'client.sms_in','Confirmed order follow-up','12 days');
  -- i: accepted, read before go-live, newer text since -> 1.
  i:=pg_temp.cu_job('CU-I','{}','accepted'); PERFORM pg_temp.cu_ev(i,'client.sms_in','Older text','20 days');
  PERFORM pg_temp.cu_read(i,'15 days'); PERFORM pg_temp.cu_ev(i,'client.sms_in','Newer text','12 days');
@@ -148,9 +151,9 @@ BEGIN
  THEN RAISE EXCEPTION 'catch-up dry run wrote %',r; END IF;
  SELECT jsonb_object_agg(x->>'job_number',(x->>'priority')::int) INTO mine
   FROM jsonb_array_elements(r->'jobs') x WHERE x->>'job_number' LIKE 'CU-%';
- want:='{"CU-A":1,"CU-B":2,"CU-C":1,"CU-I":1}';
+ want:='{"CU-A":1,"CU-B":2,"CU-C":1,"CU-EXPANDED":1,"CU-I":1}';
  IF mine IS DISTINCT FROM want THEN RAISE EXCEPTION 'catch-up picked % want %',mine,want; END IF;
- IF EXISTS(SELECT 1 FROM jsonb_array_elements(r->'jobs') x WHERE x->>'job_number' IN ('CU-UNCAPTURED','CU-UNTRUSTED'))
+ IF EXISTS(SELECT 1 FROM jsonb_array_elements(r->'jobs') x WHERE x->>'job_number' IN ('CU-UNCAPTURED','CU-UNTRUSTED','CU-OUTSIDE'))
  THEN RAISE EXCEPTION 'catch-up selected worded evidence the pending reader cannot read %',r; END IF;
  IF (r->>'candidates')::int<>jsonb_array_length(r->'jobs')
   OR (r->'by_priority'->>'1')::int+(r->'by_priority'->>'2')::int<>(r->>'candidates')::int
@@ -258,6 +261,8 @@ ROLLBACK;
 BEGIN;
 DO $$
 DECLARE b uuid; c jsonb; claim jsonb; ids uuid[]; receipts_before integer;
+ events jsonb; facts jsonb; result jsonb; run_id uuid; lease uuid;
+ replay_id uuid; replay_lease uuid; unlisted uuid; unlisted_event uuid; unlisted_events jsonb; unlisted_facts jsonb; refused jsonb;
 BEGIN
  PERFORM pg_temp.cu_policy();
  b:=pg_temp.cu_job('CU-B','{}','in_progress','makesafe');
@@ -274,15 +279,47 @@ BEGIN
  SELECT array_agg(id) INTO ids FROM public.context_extraction_events(b,25);
  IF cardinality(ids)<>3 OR EXISTS(SELECT 1 FROM public.context_extraction_event_flags(b,ids) WHERE older_context)
  THEN RAISE EXCEPTION 'catch-up CU-B batch % or flags',ids; END IF;
+ SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) INTO events FROM public.business_events e WHERE e.id=ANY(ids);
+ SELECT jsonb_agg(jsonb_build_object('kind','job_brief','text','Fresh catch-up fact '||source.event_id::text,
+   'confidence',0.9,'source_event_ids',jsonb_build_array(source.event_id))) INTO facts FROM unnest(ids) source(event_id);
  SELECT count(*) INTO receipts_before FROM public.context_extraction_event_receipts WHERE job_id=b;
- IF NOT public.finish_context_extraction_run((claim->'run'->>'id')::uuid,(claim->'run'->>'lease_token')::uuid,'done',ids,10,2,0,0,NULL,NULL)
- THEN RAISE EXCEPTION 'catch-up CU-B finish refused'; END IF;
+ run_id:=(claim->'run'->>'id')::uuid; lease:=(claim->'run'->>'lease_token')::uuid;
+ result:=public.persist_luna_context_revision(run_id,lease,b,events,facts,'[]','[]','luna_v2',10);
+ IF result->>'outcome'<>'inserted' OR (result->>'facts_new')::int<>3
+  OR (SELECT count(*) FROM public.current_job_context_facts WHERE job_id=b AND correlation_id=run_id
+   AND value->>'text' LIKE 'Fresh catch-up fact %')<>3
+  OR EXISTS(SELECT 1 FROM unnest(ids) source(event_id) WHERE NOT EXISTS(
+   SELECT 1 FROM public.current_job_context_facts f WHERE f.job_id=b AND f.correlation_id=run_id
+    AND f.source_event_ids @> ARRAY[source.event_id]))
+ THEN RAISE EXCEPTION 'catch-up CU-B did not persist its receipted evidence %',result; END IF;
  IF (SELECT count(*) FROM public.context_extraction_event_receipts WHERE job_id=b)<>receipts_before
   OR (SELECT count(*) FROM public.context_catchup_reads WHERE job_id=b)<>3
-  OR (SELECT done_run_id FROM public.context_catchup_jobs WHERE job_id=b) IS DISTINCT FROM (claim->'run'->>'id')::uuid
+  OR (SELECT done_run_id FROM public.context_catchup_jobs WHERE job_id=b) IS DISTINCT FROM run_id
  THEN RAISE EXCEPTION 'catch-up CU-B run did not complete the job'; END IF;
+ result:=public.persist_luna_context_revision(run_id,lease,b,events,facts,'[]','[]','luna_v2',10);
+ IF result->>'outcome'<>'idempotent' OR (SELECT count(*) FROM public.current_job_context_facts WHERE job_id=b AND correlation_id=run_id)<>3
+ THEN RAISE EXCEPTION 'catch-up CU-B same-run retry was not idempotent %',result; END IF;
+ replay_id:=gen_random_uuid(); replay_lease:=gen_random_uuid();
+ INSERT INTO public.context_extraction_runs(id,job_id,run_date,phase,status,run_seq,lease_token,lease_expires_at)
+  VALUES(replay_id,b,pg_temp.cu_today(),'extraction','running',2,replay_lease,now()+interval '30 minutes');
+ refused:=public.persist_luna_context_revision(replay_id,replay_lease,b,events,facts,'[]','[]','luna_v2',10);
+ IF refused->>'outcome'<>'held' OR refused->>'reason'<>'source_already_processed'
+  OR EXISTS(SELECT 1 FROM public.luna_context_job_revisions revision WHERE revision.run_id=replay_id)
+ THEN RAISE EXCEPTION 'catch-up CU-B covered rows were not refused on a new run %',refused; END IF;
  IF pg_temp.cu_due(b) OR EXISTS(SELECT 1 FROM public.context_extraction_events(b,25))
  THEN RAISE EXCEPTION 'catch-up CU-B still due after its read'; END IF;
+ unlisted:=pg_temp.cu_job('CU-UNLISTED','{}','in_progress','makesafe');
+ unlisted_event:=pg_temp.cu_ev(unlisted,'client.sms_in','Receipted outside catch-up','20 days');
+ PERFORM pg_temp.cu_read(unlisted,'15 days');
+ SELECT jsonb_agg(to_jsonb(e)) INTO unlisted_events FROM public.business_events e WHERE e.id=unlisted_event;
+ unlisted_facts:=jsonb_build_array(jsonb_build_object('kind','job_brief','text','Unlisted fact','confidence',0.9,
+  'source_event_ids',jsonb_build_array(unlisted_event)));
+ replay_id:=gen_random_uuid(); replay_lease:=gen_random_uuid();
+ INSERT INTO public.context_extraction_runs(id,job_id,run_date,phase,status,run_seq,lease_token,lease_expires_at)
+  VALUES(replay_id,unlisted,pg_temp.cu_today(),'extraction','running',1,replay_lease,now()+interval '30 minutes');
+ refused:=public.persist_luna_context_revision(replay_id,replay_lease,unlisted,unlisted_events,unlisted_facts,'[]','[]','luna_v2',10);
+ IF refused->>'outcome'<>'held' OR refused->>'reason'<>'source_already_processed'
+ THEN RAISE EXCEPTION 'unlisted receipted evidence was accepted %',refused; END IF;
  -- Older rows outside a catch-up keep K1's older_context flag.
  IF NOT (SELECT bool_and(older_context) FROM public.context_extraction_event_flags(b,ids))
  THEN RAISE EXCEPTION 'catch-up changed older_context outside the catch-up'; END IF;
