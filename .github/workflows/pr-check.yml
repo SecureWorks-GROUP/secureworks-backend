@@ -292,8 +292,8 @@ jobs:
       # doorbell (targeted read, calls saved as client.call_logged) with it on.
       # CustomerReplied: the GHL workflow post for an inbound text is the same
       # doorbell, and a reconciler pass after it writes nothing new.
-      # UserReplied: the staff-reply workflow post is that doorbell too, reading
-      # the post's conversation id when it names one.
+      # UserReplied: the staff-reply workflow post is that doorbell too; it
+      # ignores any posted conversation id and reads the newest conversation.
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
