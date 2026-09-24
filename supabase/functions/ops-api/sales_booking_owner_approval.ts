@@ -933,6 +933,49 @@ async function checkOwnerVisitAvailability(
     refuse("ghl_calendar_unreadable");
   }
   const events = ghlBusyEvents(batches.flat());
+  let outlook: OutlookRead;
+  try {
+    outlook = await deps.readOutlook(RULES.resource, dayStart, dayEnd);
+  } catch {
+    outlook = { ok: false, reason: "outlook_read_failed" };
+  }
+  if (!outlook.ok) refuse("outlook_unreadable", { reason: outlook.reason });
+  const others = census.offers.filter((o) => {
+    if (perthDate(bookingInstant(o.start_iso)) !== visit.date) return false;
+    if (o.contact_id !== row.contact_id) return true;
+    if (o.source !== "owner_approval") return false;
+    return o.start_iso !== visit.window_start_iso ||
+      o.end_iso !== visit.end_iso;
+  });
+  const outlookBusy = outlook.events.filter((e) =>
+    !e.is_cancelled && e.show_as !== "free"
+  );
+  const intervals = [
+    ...events.map((e) => ({
+      start: bookingInstant(e.startTime),
+      end: bookingInstant(e.endTime),
+    })),
+    ...outlookBusy.map((e) => {
+      const start = bookingInstant(e.start), end = bookingInstant(e.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        refuse("outlook_unreadable", { reason: "event_times_malformed" });
+      }
+      return { start, end };
+    }),
+    ...others.map((o) => ({
+      start: bookingInstant(o.start_iso),
+      end: bookingInstant(o.end_iso),
+    })),
+  ];
+  const precedingEnd = Math.max(
+    ...intervals.filter((i) => i.end <= visit.start).map((i) => i.end),
+  );
+  const followingStart = Math.min(
+    ...intervals.filter((i) => i.start >= visit.end).map((i) => i.start),
+  );
+  const hasOverlap = intervals.some((i) =>
+    overlaps(visit.start, visit.end, i.start, i.end)
+  );
   const suburbs = salesBookingSuburbByUnambiguousContact(workspaceCases);
   const here = visitLocation;
   // The gap a neighbouring booking needs: travel from it before the visit,
@@ -946,6 +989,10 @@ async function checkOwnerVisitAvailability(
     if (overlaps(visit.start, visit.end, itemStart, itemEnd)) {
       return { clash: true, travel_minutes: 0 };
     }
+    if (
+      hasOverlap ||
+      (itemEnd !== precedingEnd && itemStart !== followingStart)
+    ) return { clash: false, travel_minutes: 0 };
     const before = salesBookingTravelMinutes(location, here);
     const after = salesBookingTravelMinutes(here, location);
     if (before.minutes === null || after.minutes === null) {
@@ -998,19 +1045,8 @@ async function checkOwnerVisitAvailability(
       events: ghlClashes,
     });
   }
-  let outlook: OutlookRead;
-  try {
-    outlook = await deps.readOutlook(RULES.resource, dayStart, dayEnd);
-  } catch {
-    outlook = { ok: false, reason: "outlook_read_failed" };
-  }
-  if (!outlook.ok) refuse("outlook_unreadable", { reason: outlook.reason });
-  const outlookHits = outlook.events.flatMap((e) => {
-    if (e.is_cancelled || e.show_as === "free") return [];
+  const outlookHits = outlookBusy.flatMap((e) => {
     const start = bookingInstant(e.start), end = bookingInstant(e.end);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-      refuse("outlook_unreadable", { reason: "event_times_malformed" });
-    }
     const gap = needsGap(start, end, e.location ?? null, "outlook");
     return gap.clash
       ? [{
@@ -1027,13 +1063,6 @@ async function checkOwnerVisitAvailability(
       events: outlookHits,
     });
   }
-  const others = census.offers.filter((o) => {
-    if (perthDate(bookingInstant(o.start_iso)) !== visit.date) return false;
-    if (o.contact_id !== row.contact_id) return true;
-    if (o.source !== "owner_approval") return false;
-    return o.start_iso !== visit.window_start_iso ||
-      o.end_iso !== visit.end_iso;
-  });
   const offerClashes = others.filter((o) =>
     needsGap(
       bookingInstant(o.start_iso),

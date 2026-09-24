@@ -48,10 +48,10 @@ After the pack overlay, for the person on screen:
 | `calendar_read` | `state: read / could_not_read / not_configured`, `provider:"ghl"`, `source:"server_live_read"`, `reason`, `person`, `ghl_user_id`, `calendars`, `occupied_intervals`, `ghl_events`, `ghl_blocked_slots`, `outlook:{state,events,not_in_ghl}`, `caveats` |
 | `commitments` | Open offers `{id, contact_id, state:offered/agreed, start_iso, end_iso, source}`; `null` when the census could not be read (unknown, never an empty ledger) |
 | `commitments_read` | `read` or `could_not_read` with the reason |
-| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`, `travel_unknown`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; null when the Outlook diary dropped malformed events |
+| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`, `travel_unknown`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; null when the Outlook diary dropped malformed events or the required offer census is unreadable |
 
 Each case carries `free_times` (null when the Outlook diary dropped malformed
-events): `location:{suburb, known}` and per day the `arrival_windows` for a visit
+events or the required offer census is unreadable): `location:{suburb, known}` and per day the `arrival_windows` for a visit
 to that lead's suburb, excluding that lead's own offers.
 
 ### Named reasons
@@ -142,3 +142,8 @@ Nithin and Khairo already have GHL calendars; no click for them.
 - Khairo is on the screen's switch but is not a `sales_booking_read` resource
   (400). Adding him needs a decision on which leads are his.
 - Wiki profile `fencing-stratco-marnin.json` still says `visit_minutes: 60`.
+
+Approval checks overlap against every busy interval and calculates travel only
+against the immediately preceding and following intervals across GHL, Outlook
+and open offers. An unreadable offer census preserves `calendar_read.state: read`
+and names its failure in `commitments_read`, while withholding both free-time outputs.

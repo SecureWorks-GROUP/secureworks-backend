@@ -646,7 +646,7 @@ export function computeSalesBookingAvailability(
     },
     commitments,
     commitments_read: commitmentsRead,
-    free_times: outlookMalformedDropped ? null : {
+    free_times: outlookMalformedDropped || commitments === null ? null : {
       version: SALES_BOOKING_AVAILABILITY_VERSION,
       as_of: asOf,
       person: person.name,
@@ -675,7 +675,7 @@ export function computeSalesBookingAvailability(
         ...d
       }) => d),
     },
-    case_free_times: outlookMalformedDropped ? {} : caseFree,
+    case_free_times: outlookMalformedDropped || commitments === null ? {} : caseFree,
   };
 }
 

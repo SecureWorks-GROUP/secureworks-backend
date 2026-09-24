@@ -1277,3 +1277,84 @@ Deno.test("a live unexpired owner offer or visit blocks another lead on that slo
   });
   assert("dry_run" in noSlotOk);
 });
+
+Deno.test("owner travel uses adjacent intervals across GHL and Outlook", async () => {
+  const at = (time: string) => `2026-09-25T${time}:00+08:00`;
+  for (const adjacentSource of ["ghl", "outlook"]) {
+    const near = [
+      { start: at("08:30"), end: at("08:50"), location: "12 Fictional Way, Canning Vale" },
+      { start: at("11:40"), end: at("12:00"), location: "12 Fictional Way, Canning Vale" },
+    ];
+    const remote = [
+      { start: at("07:00"), end: at("08:00"), location: null },
+      { start: at("13:00"), end: at("14:00"), location: null },
+    ];
+    const { deps: d } = deps({
+      ghlEvents: (adjacentSource === "ghl" ? near : remote).map((e, i) => ({
+        id: `ghl-${i}`, startTime: e.start, endTime: e.end, address: e.location,
+      })),
+      outlookEvents: (adjacentSource === "outlook" ? near : remote).map((e, i) => ({
+        id: `outlook-${i}`, ...e, show_as: "busy", is_cancelled: false,
+      })),
+    });
+    assert("dry_run" in await call(d, {
+      owner_input: input("calendar"), dry_run: true,
+    }));
+  }
+});
+
+Deno.test("owner overlap checks retain enclosing intervals before checking travel", async () => {
+  const { deps: d, rows } = deps({
+    ghlEvents: [{
+      id: "enclosing",
+      startTime: "2026-09-25T07:00:00+08:00",
+      endTime: "2026-09-25T12:00:00+08:00",
+    }, {
+      id: "earlier-unknown",
+      startTime: "2026-09-25T06:00:00+08:00",
+      endTime: "2026-09-25T06:30:00+08:00",
+    }],
+    outlookEvents: [{
+      id: "near",
+      start: "2026-09-25T08:30:00+08:00",
+      end: "2026-09-25T08:50:00+08:00",
+      location: "12 Fictional Way, Canning Vale",
+      show_as: "busy",
+    }],
+  });
+  const error = await refusal(call(d, {
+    owner_input: input("calendar"), dry_run: true,
+  }), "ghl_calendar_clash");
+  assertEquals(error.detail?.events.length, 1);
+  assertEquals(error.detail?.events[0].travel_minutes, 0);
+  assertEquals(rows.length, 0);
+});
+
+Deno.test("an adjacent open offer supplies travel location after an unknown event", async () => {
+  const earlier = deps();
+  await approve(earlier.deps, input("message", { offer: FRI }));
+  const { deps: d } = deps({
+    cases: [
+      { id: CASE, contact_id: CONTACT, suburb: "Canning Vale" },
+      { id: "opp:other", opportunity_id: "other", contact_id: "other-lead", suburb: "Canning Vale" },
+    ],
+    contact: { ...michael(), id: "other-lead" },
+    approvals: earlier.rows,
+    ghlEvents: [{
+      id: "unknown-early",
+      startTime: "2026-09-25T07:00:00+08:00",
+      endTime: "2026-09-25T08:00:00+08:00",
+    }],
+  });
+  assert("dry_run" in await call(d, {
+    owner_input: input("calendar", {
+      case_id: "opp:other", contact_id: "other-lead",
+      visit: {
+        window_start_iso: "2026-09-25T14:00:00+08:00",
+        window_end_iso: "2026-09-25T15:30:00+08:00",
+        end_iso: "2026-09-25T16:00:00+08:00",
+      },
+    }),
+    dry_run: true,
+  }));
+});

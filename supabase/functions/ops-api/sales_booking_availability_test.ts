@@ -451,6 +451,8 @@ Deno.test("an unreadable offer census keeps commitments null (unknown) while the
   );
   assertEquals(r.calendar_read.state, "read");
   assertEquals(r.commitments, null);
+  assertEquals(r.free_times, null);
+  assertEquals(r.case_free_times, {});
   assertEquals(r.commitments_read.state, "could_not_read");
   assertEquals(
     r.commitments_read.reason,
@@ -605,4 +607,16 @@ Deno.test("a throwing reader is a named reason on the banner, never an exception
     "ghl_calendar_directory_unreadable: ghl_calendars_incomplete",
   );
   assertEquals(after.booking_flow!.commitments, null);
+});
+
+Deno.test("an unreadable offer census withholds generic and case free times", async () => {
+  const { deps } = liveDeps({
+    readSystemOfferRecords: () => Promise.reject(new Error("ledger unavailable")),
+  });
+  const after = await applySalesBookingAvailability(readResponse(), deps);
+  assertEquals(after.booking_flow!.calendar_read.state, "read");
+  assertEquals(after.booking_flow!.commitments_read.reason,
+    "system_offers_unreadable: ledger unavailable");
+  assertEquals(after.booking_flow!.free_times, null);
+  assertEquals(after.cases[0].free_times, null);
 });
