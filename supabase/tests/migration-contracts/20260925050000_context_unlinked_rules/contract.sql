@@ -622,6 +622,22 @@ BEGIN
  jsonb_build_object('from','council@council.example','subject','14 O''Connor Road','body','RFI')) RETURNING * INTO e;
  IF e.job_id IS DISTINCT FROM b OR e.attribution_status<>'content_ref' OR e.metadata->>'placement_rule'<>'site_address'
  THEN RAISE EXCEPTION 'apostrophe address did not match: %',row_to_json(e); END IF;
+ -- A curly apostrophe and repeated spaces in the stored site still match the
+ -- exact key the shared normaliser gives the message (no raw-text prefilter
+ -- may drop them).
+ INSERT INTO public.jobs(id,org_id,job_number,status,type,site_address,created_at) VALUES
+ ('d4000000-0000-4000-8000-0000000000c1',gen_random_uuid(),'SWP-99884','quoted','patio','22 O’Connor Rd, Perth','2026-01-01Z'),
+ ('d4000000-0000-4000-8000-0000000000c2',gen_random_uuid(),'SWP-99885','quoted','patio','7  St   Kilda  Rd, Perth','2026-01-01Z');
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,payload)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z',
+ jsonb_build_object('from','council@council.example','subject','22 O''Connor Road','body','RFI')) RETURNING * INTO e;
+ IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-0000000000c1' OR e.attribution_status<>'content_ref'
+ THEN RAISE EXCEPTION 'curly apostrophe site did not match: %',row_to_json(e); END IF;
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,payload)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z',
+ jsonb_build_object('from','council@council.example','subject','7 St Kilda Road','body','RFI')) RETURNING * INTO e;
+ IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-0000000000c2' OR e.attribution_status<>'content_ref'
+ THEN RAISE EXCEPTION 'repeated-space site did not match: %',row_to_json(e); END IF;
 END $$;
 
 DO $$
@@ -661,7 +677,7 @@ BEGIN
 END $$;
 CREATE TEMP TABLE p4_retired_before AS SELECT * FROM public.event_threads WHERE retired_at IS NOT NULL;
 CREATE TEMP TABLE p4_thread_count AS SELECT count(*) AS n FROM public.event_threads;
-\ir ../../../rollbacks/20260924213000_context_unlinked_rules_down.sql
+\ir ../../../rollbacks/20260925050000_context_unlinked_rules_down.sql
 DO $$
 DECLARE e public.business_events;
 BEGIN
@@ -724,7 +740,7 @@ ROLLBACK;
 -- Re-apply is a no-op.
 CREATE TEMP TABLE p4_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p
  WHERE obj_description(p.oid,'pg_proc') LIKE 'P4:%' OR p.oid='public.attribute_business_event()'::regprocedure OR p.proname='attribute_context_event_with_luna';
-\ir ../../../migrations/20260924213000_context_unlinked_rules.sql
+\ir ../../../migrations/20260925050000_context_unlinked_rules.sql
 DO $$
 BEGIN
  IF (SELECT count(*) FROM p4_before)<>13 THEN RAISE EXCEPTION 'expected 13 P4 functions, got %',(SELECT count(*) FROM p4_before); END IF;
