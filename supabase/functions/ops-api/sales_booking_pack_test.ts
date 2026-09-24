@@ -257,6 +257,7 @@ function readDeps(): SalesBookingReadDependencies {
       Promise.resolve({
         opportunities: [{
           id: "opp-1",
+          assignedTo: null,
           name: "Jane Smith",
           pipelineStageId: marninScopeStage,
           updatedAt: "2026-09-15T01:00:00.000Z",
@@ -450,6 +451,7 @@ function twoOppReadDeps(): SalesBookingReadDependencies {
   const stage = SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[0];
   const opp = (id: string, name: string) => ({
     id,
+    assignedTo: null,
     name,
     pipelineStageId: stage,
     updatedAt: "2026-09-15T01:00:00.000Z",
