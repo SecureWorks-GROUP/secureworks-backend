@@ -16,7 +16,8 @@
 //   POST ?action=set_line_markup {revision_id, line_key, multiplier, reason?}
 //   POST ?action=freeze          {revision_id, valid_until}
 //   POST ?action=issue_link      {revision_id, party_id}  -> token, once
-//   POST ?action=revoke_link     {link_id, reason}
+//   POST ?action=revoke_link     {link_id, reason}        -> count revoked;
+//        revokes EVERY link that party holds for the job, forwarding links too
 //   GET  ?action=revision&revision_id=
 //   GET  ?action=job_acceptance&job_id=
 // The actor on every write is the signed-in user; a server caller must name

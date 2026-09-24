@@ -1203,6 +1203,9 @@ BEGIN
     'revision_id', r.id, 'party_id', p_party_id);
 END $$;
 
+-- Revocation is per party per quote: revoking any one link revokes every link
+-- that party holds for the job (older forwarding links included), so a link
+-- that reached the wrong person cannot be reopened through an earlier one.
 CREATE OR REPLACE FUNCTION public.quote_v2_revoke_party_link(
   p_link_id uuid,
   p_revoked_by text,
