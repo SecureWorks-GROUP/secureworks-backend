@@ -267,7 +267,7 @@ jobs:
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
-      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job commercial read, job freshness and actor recording
+      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job commercial read, job freshness, actor recording and monitored mailboxes
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
@@ -280,7 +280,8 @@ jobs:
             supabase/functions/ops-api/trade_variation_request_test.ts \
             supabase/functions/ops-api/context_unlinked_test.ts \
             supabase/functions/ops-api/actor_calls_test.ts \
-            supabase/functions/ops-api/actor_calls_handler_test.ts
+            supabase/functions/ops-api/actor_calls_handler_test.ts \
+            supabase/functions/ops-api/monitored_mailboxes_test.ts
 
       # Slice C1b: the GHL webhook receiver's two-proof auth (observe until
       # GHL_WEBHOOK_AUTH_MODE=enforce), ids-only webhook_log receipts and the
@@ -332,6 +333,14 @@ jobs:
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/monitor-inbox/classify_email_test.ts
+
+      # Slice EM1: the old monitor-inbox path stays pinned to its own five
+      # mailboxes and two groups, and never reads monitored_mailboxes (the new
+      # poller's list, behind email_capture_v2). email.md review M14, row E22.
+      - name: Test the pinned old mailbox poll
+        run: |
+          deno test --allow-read \
+            supabase/functions/monitor-inbox/legacy_mailboxes_test.ts
 
       # Slice F-ACT: the one actor rule (verified user, else x-sw-actor on a
       # server-key call, else actor_missing; never refused).

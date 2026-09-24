@@ -384,6 +384,7 @@ import {
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
+import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
@@ -7243,6 +7244,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await contextPipelineStatus(client))
         } catch (error) {
           if (error instanceof ContextPipelineError) return json({ error: error.message, code: error.code, reason: error.reason }, error.status)
+          throw error
+        }
+      }
+      // ── Email capture sources (slice EM1, email.md §13a): the one door that
+      // changes which Outlook mailboxes the new poller reads. Server key or a
+      // company admin/owner only; the actor is recorded on the row and its
+      // receipt. Adding or removing a source is a migration.
+      case 'set_monitored_mailbox': {
+        if (!canChangeMonitoredMailboxes(authMode, authUser, DEFAULT_ORG_ID)) {
+          return json({ error: 'An owner or admin session, or the privileged ops key, is required to change monitored mailboxes.', code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+        try {
+          return json(await setMonitoredMailbox(client, body, receiptActor(requestActor, authMode)))
+        } catch (error) {
+          if (error instanceof MonitoredMailboxError) return json({ error: error.message, code: error.code }, error.status)
           throw error
         }
       }

@@ -17,7 +17,7 @@ with identical values. The composer adds:
 | `ghl_capture` | `context_ghl_capture_status()` | sms C1d | built |
 | `booking_capture` | `context_booking_capture_status()` | dossier D3 | `null` |
 | `parties` | `context_parties_status()` | sites S-M1 | `null` |
-| `email_capture` | `context_email_capture_status()` | email EM1 | `null` (F1b stub) |
+| `email_capture` | `context_email_capture_status()` | email EM1 | built |
 | `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | `null` (F1b stub) |
 | `money` | `context_money_status()` | money MN1 | `null` (F1b stub) |
 | `bucket` | `context_bucket_status()` | bucket B2 | `null` (F1b stub) |
@@ -46,6 +46,12 @@ job counts, `oldest_unread_landed_at`, `oldest_due_wait_minutes`,
 and model budget left), runs today, ceiling and pacing holds, lease takeovers,
 unplaced rows, rows not written as `service_role`, and `alarms`. Due is
 `context_jobs_cadence`; do not re-derive it here.
+
+`email_capture` (EM1, `20260924213000`): every `monitored_mailboxes` source
+with its poll, sweep and history run rows and the alarms `email_source_error`,
+`email_poll_missed`, `email_backlog`, `sweep_incomplete`, raised only while
+flag `email_capture_v2` and the capture lane are on. Contract, run-row names
+and thresholds: [`email-capture.md`](email-capture.md).
 
 `capture_sources`: last `context_captured_at` per `business_events.source`
 (rows with `metadata.capture_mode` `backfill` or `relink` ignored), business

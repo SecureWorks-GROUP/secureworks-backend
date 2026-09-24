@@ -1,0 +1,2 @@
+context_email_capture_config_preimage_mismatch
+monitored_mailboxes exists with columns id:uuid,email:text,enabled:boolean,status:text,last_polled_at:timestamp with time zone
