@@ -986,3 +986,54 @@ Deno.test("delivery: a provider refusal is failed; a provider 5xx may have deliv
   assertEquals((await at(500)).outcome, "unknown");
   assertEquals((await at(502)).outcome, "unknown");
 });
+
+Deno.test("handler build and create_draft: a stated cost is recorded as the caller, never the name sent", async () => {
+  const cost = {
+    source: "stated",
+    unit_cost_ex_gst: 1,
+    stated_by: "marnin@secureworkswa.com.au",
+    evidence: "supplier quote 426",
+  };
+  for (
+    const [auth, extra, who] of [
+      ["jwt-scoper", {}, "khairo@secureworkswa.com.au"],
+      ["service-secret", { acting_for: "nithin" }, "nithin (via server)"],
+    ] as const
+  ) {
+    const built = deps();
+    const res = await handleQuoteV2Request(
+      post("?action=build", {
+        job_id: JOB,
+        ...extra,
+        ...scope([{ key: "slats", description: "Slats", qty: 1, cost }]),
+      }, auth),
+      built,
+    );
+    assertEquals(res.status, 200);
+    const drafted = deps();
+    const draftRes = await handleQuoteV2Request(
+      post("?action=create_draft", {
+        job_id: JOB,
+        ...extra,
+        payload: {
+          family: "patio",
+          parties: [CLIENT],
+          lines: [{ line_key: "slats", description: "Slats", qty: 1, cost }],
+        },
+      }, auth),
+      drafted,
+    );
+    assertEquals(draftRes.status, 200);
+    for (
+      const [d, fn] of [
+        [built, "quote_v2_build_draft"],
+        [drafted, "quote_v2_create_draft"],
+      ] as const
+    ) {
+      const payload = d.calls.find((c) => c.fn === fn)!.args.p_payload as {
+        lines: { cost: Record<string, unknown> }[];
+      };
+      assertEquals(payload.lines[0].cost, { ...cost, stated_by: who });
+    }
+  }
+});

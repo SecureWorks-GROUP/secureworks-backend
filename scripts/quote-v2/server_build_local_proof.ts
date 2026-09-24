@@ -577,6 +577,19 @@ check(
   gwLines.every((l) => l.sell_basis !== "stated" || l.sell_stated_by === OWNER),
   gwLines.map((l) => [l.line_key, l.sell_basis, l.sell_stated_by]),
 );
+const kikoLines = ((await rpc("quote_v2_staff_revision", {
+  p_revision_id: kiko.revision.revision_id,
+  // deno-lint-ignore no-explicit-any
+})).data as any).lines as any[];
+check(
+  "a stated cost is recorded as the caller who stated it, with its evidence",
+  kikoLines.filter((l) => l.cost_source === "stated").length === 4 &&
+    kikoLines.every((l) =>
+      l.cost_source !== "stated" ||
+      (l.cost_stated_by === OWNER && !!l.cost_evidence)
+    ),
+  kikoLines.map((l) => [l.line_key, l.cost_source, l.cost_stated_by]),
+);
 const linkBody = {
   revision_id: gw.revision.revision_id,
   party_id: gw.parties[0].party_id,

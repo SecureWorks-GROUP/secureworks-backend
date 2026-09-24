@@ -37,7 +37,9 @@ tool never supplies a sell: a `stated` or `adjustment` sell (on `build` or
 `create_draft`) is refused `quote_sell_owner_only` unless the caller is a
 verified session on `QUOTE_V2_SEND_APPROVER_EMAILS`, and its `stated_by` /
 `stated_at` are overwritten with that session's email and the time of the
-call. To re-quote the same people, name their
+call. A stated cost's `stated_by` is likewise always the caller (the
+signed-in user, or a server caller's `acting_for`); its `evidence` is kept
+as sent. To re-quote the same people, name their
 `party_id`s so their old links forward to the new revision.
 
 ## Rendering

@@ -39,8 +39,9 @@
 //   GET  ?action=send_status&preview_id=
 // The actor on every write is the signed-in user; a server caller must name
 // who it acts for in `acting_for`. Callers never choose the actor otherwise.
-// A stated or adjustment sell is the owner's alone: only an approver's own
-// session may send one, and it is recorded as that approver, now.
+// A stated cost is recorded as that actor. A stated or adjustment sell is the
+// owner's alone: only an approver's own session may send one, and it is
+// recorded as that approver, now.
 //
 // All money and state rules live in SQL (migration
 // 20260925020000_quote_v2_records.sql); this handler only routes and renders.
@@ -118,10 +119,12 @@ function isApprover(
     );
 }
 
-/** Stamp every stated or adjustment sell in a draft payload with the
- * verified approver, or refuse when the caller is not one. */
-function ownerSells<P extends Record<string, unknown>>(
+/** Record who stated each line's price: a stated cost is the caller's
+ * (`actor`); a stated or adjustment sell is the verified approver's, and is
+ * refused when the caller is not one. */
+function attributeLines<P extends Record<string, unknown>>(
   payload: P,
+  actor: string,
   auth: { caller: "server" | "user"; email: string | null },
   deps: QuoteV2Deps,
 ): { payload: P } | { response: Response } {
@@ -130,33 +133,32 @@ function ownerSells<P extends Record<string, unknown>>(
   const at = new Date().toISOString();
   const out = [];
   for (const line of lines) {
-    const sell = line && typeof line === "object"
-      ? (line as Record<string, unknown>).sell
-      : undefined;
-    const basis = sell && typeof sell === "object"
-      ? (sell as Record<string, unknown>).basis
-      : undefined;
-    if (basis !== "stated" && basis !== "adjustment") {
+    if (!line || typeof line !== "object") {
       out.push(line);
       continue;
     }
-    if (!isApprover(auth, deps)) {
-      return {
-        response: refuse(
-          403,
-          "quote_sell_owner_only",
-          "A stated or adjustment sell is the owner's, from their own session.",
-        ),
-      };
+    const l = { ...(line as Record<string, unknown>) };
+    const cost = l.cost as Record<string, unknown> | undefined;
+    if (cost && typeof cost === "object" && cost.source === "stated") {
+      l.cost = { ...cost, stated_by: actor };
     }
-    out.push({
-      ...(line as Record<string, unknown>),
-      sell: {
-        ...(sell as Record<string, unknown>),
-        stated_by: auth.email,
-        stated_at: at,
-      },
-    });
+    const sell = l.sell as Record<string, unknown> | undefined;
+    if (
+      sell && typeof sell === "object" &&
+      (sell.basis === "stated" || sell.basis === "adjustment")
+    ) {
+      if (!isApprover(auth, deps)) {
+        return {
+          response: refuse(
+            403,
+            "quote_sell_owner_only",
+            "A stated or adjustment sell is the owner's, from their own session.",
+          ),
+        };
+      }
+      l.sell = { ...sell, stated_by: auth.email, stated_at: at };
+    }
+    out.push(l);
   }
   return { payload: { ...payload, lines: out } };
 }
@@ -501,7 +503,7 @@ async function staff(
         );
       }
       const payload = body.payload as Record<string, unknown>;
-      const owned = ownerSells(payload, auth, deps);
+      const owned = attributeLines(payload, actor, auth, deps);
       if ("response" in owned) return owned.response;
       return await callStaff(deps, "quote_v2_create_draft", {
         p_job_id: body.job_id,
@@ -678,7 +680,7 @@ async function buildAction(
     if (e instanceof ScopeBuildError) return refuse(409, e.code, e.message);
     throw e;
   }
-  const owned = ownerSells(plan.payload, auth, deps);
+  const owned = attributeLines(plan.payload, actor, auth, deps);
   if ("response" in owned) return owned.response;
   const { data, error } = await deps.rpc("quote_v2_build_draft", {
     p_job_id: jobId,

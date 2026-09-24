@@ -196,7 +196,6 @@ export const KIKO: ScopeInput = {
       cost: {
         source: "stated",
         unit_cost_ex_gst: 2015.44,
-        stated_by: "kiko-balcatta-slats-quote-20260917",
         evidence: e426,
       },
     },
@@ -208,7 +207,6 @@ export const KIKO: ScopeInput = {
       cost: {
         source: "stated",
         unit_cost_ex_gst: 50,
-        stated_by: "marnin",
         evidence: "labour $50/m (hold H4, provisional)",
       },
     },
@@ -220,7 +218,6 @@ export const KIKO: ScopeInput = {
       cost: {
         source: "stated",
         unit_cost_ex_gst: 737.63,
-        stated_by: "kiko-balcatta-slats-quote-20260917",
         evidence: e426,
       },
     },
@@ -232,7 +229,6 @@ export const KIKO: ScopeInput = {
       cost: {
         source: "stated",
         unit_cost_ex_gst: 300,
-        stated_by: "marnin",
         evidence: "labour $300 per gate (hold H4, provisional)",
       },
     },
