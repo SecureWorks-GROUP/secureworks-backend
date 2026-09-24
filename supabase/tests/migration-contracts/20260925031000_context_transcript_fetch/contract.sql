@@ -153,7 +153,7 @@ BEGIN
  -- 0Gct: tried once, next try in 2 minutes (not due). ZKxE: terminal not_returned (six tries).
  PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','0Gct0u0TQNZox8DRAVLo','call_event_id',e3,'result','not_ready','code','empty'));
  PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','ZKxEtfBzwb5qZx3o6p3v','call_event_id',e4,'result','not_ready','code','empty'))
-  FROM generate_series(1,6);
+  FROM generate_series(1,7);
  SELECT array_agg(d.call_message_id ORDER BY d.event_at) INTO ids FROM public.context_transcript_due_calls(40) d;
  IF ids IS DISTINCT FROM ARRAY['Ag9DKkqpfsadWkJS8jst','ps9i5b2x4f8WqRjEe1Bs','MeVPH47LXDbgcvPUAkjY','Py9PovOwc4I4vNkn9jXg','6kn6WmrtfTMvhEJtmfeJ']
  THEN RAISE EXCEPTION 't2 due calls %',ids; END IF;
@@ -170,6 +170,8 @@ ROLLBACK;
 
 BEGIN;
 -- 5. The writer: the backoff is the database's, terminal is final (§2 steps 5, 6).
+-- Six waits (2 min, 5 min, 15 min, 1 h, 6 h, 24 h), each after a failed read;
+-- the read after the 24 h wait that fails again is terminal.
 SELECT pg_temp.t2_call('6kn6WmrtfTMvhEJtmfeJ','Oxqi7eCx2rGCsS0BXOH2',now()-interval '20 minutes','completed',109);
 SELECT pg_temp.t2_call('0Gct0u0TQNZox8DRAVLo','Oxqi7eCx2rGCsS0BXOH2',now()-interval '2 days','completed',67);
 SELECT pg_temp.t2_call('bJNGSorrVRMHxehZtQHT','Oxqi7eCx2rGCsS0BXOH2',now()-interval '72 days','completed',303);
@@ -181,8 +183,8 @@ BEGIN
  SELECT id INTO e3 FROM public.business_events WHERE provider_message_id='ghl:0Gct0u0TQNZox8DRAVLo';
  SELECT id INTO e10 FROM public.business_events WHERE provider_message_id='ghl:bJNGSorrVRMHxehZtQHT';
  SELECT id INTO e2 FROM public.business_events WHERE provider_message_id='ghl:Py9PovOwc4I4vNkn9jXg';
- -- Not ready: 2 min, 5 min, 15 min, 1 h, 6 h, then terminal not_returned.
- FOR i IN 1..5 LOOP
+ -- Not ready: 2 min, 5 min, 15 min, 1 h, 6 h, 24 h, then terminal not_returned.
+ FOR i IN 1..6 LOOP
   r:=pg_temp.t2_rec(jsonb_build_object('call_message_id','0Gct0u0TQNZox8DRAVLo','call_event_id',e3,'result','not_ready','code','transcript_not_found',
    'provider_status','completed','provider_duration_seconds',67));
   SELECT * INTO f FROM public.call_transcript_fetches WHERE call_message_id='0Gct0u0TQNZox8DRAVLo';
@@ -192,15 +194,15 @@ BEGIN
  END LOOP;
  r:=pg_temp.t2_rec(jsonb_build_object('call_message_id','0Gct0u0TQNZox8DRAVLo','call_event_id',e3,'result','not_ready','code','empty'));
  SELECT * INTO f FROM public.call_transcript_fetches WHERE call_message_id='0Gct0u0TQNZox8DRAVLo';
- IF r->>'outcome'<>'not_returned' OR f.outcome<>'not_returned' OR f.next_at IS NOT NULL OR f.finished_at IS NULL OR f.attempts<>6
-  OR f.provider_status<>'completed' OR f.provider_duration_seconds<>67 THEN RAISE EXCEPTION 't2 terminal not_returned %',row_to_json(f); END IF;
+ IF r->>'outcome'<>'not_returned' OR f.outcome<>'not_returned' OR f.next_at IS NOT NULL OR f.finished_at IS NULL OR f.attempts<>7
+  OR f.provider_status<>'completed' OR f.provider_duration_seconds<>67 OR f.attempts<>7 THEN RAISE EXCEPTION 't2 terminal not_returned %',row_to_json(f); END IF;
  -- Terminal is never reopened, not even by a save.
  r:=pg_temp.t2_rec(jsonb_build_object('call_message_id','0Gct0u0TQNZox8DRAVLo','call_event_id',e3,'result','not_ready','code','empty'));
- IF r->>'outcome'<>'unchanged' OR (SELECT attempts FROM public.call_transcript_fetches WHERE call_message_id='0Gct0u0TQNZox8DRAVLo')<>6
+ IF r->>'outcome'<>'unchanged' OR (SELECT attempts FROM public.call_transcript_fetches WHERE call_message_id='0Gct0u0TQNZox8DRAVLo')<>7
  THEN RAISE EXCEPTION 't2 terminal reopened %',r; END IF;
 
- -- Errors: same ladder, terminal failed:<code> after the sixth.
- FOR i IN 1..6 LOOP
+ -- Errors: same ladder, terminal failed:<code> on the seventh failed read.
+ FOR i IN 1..7 LOOP
   r:=pg_temp.t2_rec(jsonb_build_object('call_message_id','6kn6WmrtfTMvhEJtmfeJ','call_event_id',e1,'result','error','code','http_500'));
  END LOOP;
  SELECT * INTO f FROM public.call_transcript_fetches WHERE call_message_id='6kn6WmrtfTMvhEJtmfeJ';

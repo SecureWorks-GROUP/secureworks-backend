@@ -28,7 +28,8 @@
 //    backfill, so a past call never wakes an extraction read. dry_run is the
 //    default: a dry run reads GHL and reports what it would write, and writes
 //    nothing at all (no call row, no transcript, no fetch record, no run
-//    row). A real run needs the fetch flag and the capture lane on, like the
+//    row). While the fetch flag is off a dry run reads no transcript either:
+//    it lists the calls it would fetch (would_fetch). A real run needs the fetch flag and the capture lane on, like the
 //    live fetcher: transcripts are the most sensitive rows (transcripts.md
 //    §13, G-ANON), and the flag stays off until that gate.
 //
@@ -680,7 +681,8 @@ export interface BackfillCallReport {
     | CallOutcome
     | "skipped_terminal"
     | "skipped_not_eligible"
-    | "skipped_recent";
+    | "skipped_recent"
+    | "would_fetch";
   code?: string;
   sentences?: number;
 }
@@ -707,8 +709,12 @@ export async function runBackfill(
   req: BackfillRequest,
   deps: BackfillDeps,
 ): Promise<BackfillResult> {
+  // The fetch flag gates every transcript read, not only every write: a real
+  // run is refused while it is off, and a dry run then lists the calls it
+  // would fetch without ever asking GHL for a transcript's words.
+  const flagOn = await deps.flagOn();
   if (!req.dryRun) {
-    if (!(await deps.flagOn())) {
+    if (!flagOn) {
       return { outcome: "refused", reason: "fetch_flag_off" };
     }
     if (!(await deps.laneOn())) {
@@ -928,6 +934,12 @@ export async function runBackfill(
           seen_digest: null,
           seen_at: null,
         };
+        if (!flagOn) {
+          // Dry run with the fetch flag off: no transcript read at all.
+          report.outcome = "would_fetch";
+          counts.would_fetch = (counts.would_fetch ?? 0) + 1;
+          continue;
+        }
         const step = await processCall(
           due,
           "backfill",
