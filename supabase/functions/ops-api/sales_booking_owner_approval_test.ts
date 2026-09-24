@@ -841,7 +841,7 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
     "2026-10-02",
   ]);
   assertEquals(owner.rulebook.visit_minutes, 30);
-  assertEquals(owner.rulebook.on_site_minutes, 30);
+  assert(!("on_site_minutes" in owner.rulebook));
   assertEquals(owner.rulebook.travel.version, "straight-line-v1");
   assertEquals(owner.rulebook.calendar.calendar_id, "dEQKVKHthsjSYaen1fiE");
   assertEquals(engine.engine_proposal, true);

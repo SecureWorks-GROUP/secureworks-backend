@@ -1101,7 +1101,6 @@ export function ownerRulebookView(now: Date): BookingObject {
     window_min_minutes: RULES.window_min_minutes,
     window_max_minutes: RULES.window_max_minutes,
     visit_minutes: RULES.visit_minutes,
-    on_site_minutes: RULES.visit_minutes,
     travel_buffer_minutes: RULES.travel_buffer_minutes,
     travel: { ...SALES_BOOKING_TRAVEL_MODEL },
     max_per_day: RULES.max_per_day,

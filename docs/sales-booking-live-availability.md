@@ -101,17 +101,19 @@ location that cannot be placed takes 30 minutes each way, the old fixed buffer.
 
 ## Owner clicks
 
-None is needed to clear the banner: it clears when this change deploys.
-Optional, so GHL itself holds Marnin's Outlook (today it holds 0 of his 8
-Outlook blocks; the screen still counts them through the existing Outlook
-read, so booking is not blocked by this):
+The banner clears when this change deploys. To make Marnin's GHL calendar
+contain the Outlook conflicts required by the intended setup, the owner must
+connect Outlook and set it as the conflict calendar for STRATCO FENCING.
+Today GHL has 0 of his 8 Outlook blocks. The current server read separately
+counts those Outlook blocks for Marnin, but that does not connect or populate
+his GHL calendar:
 
 1. In GHL, open Settings > Calendars > Connections, signed in as Marnin.
 2. Connect Microsoft 365 / Outlook with marnin@secureworkswa.com.au.
 3. Set that Outlook calendar as the conflict calendar for STRATCO FENCING.
 4. Reload the booking screen and check `calendar_read.outlook.not_in_ghl`
-   falls to 0. If it does not, GHL is not exposing synced Outlook time
-   through its API, and the Outlook read stays the source for that time.
+   falls to 0. If it does not, the GHL mirror is still incomplete and needs
+   investigation before it can be relied on as the source of free times.
 
 Nithin and Khairo already have GHL calendars; no click for them.
 
