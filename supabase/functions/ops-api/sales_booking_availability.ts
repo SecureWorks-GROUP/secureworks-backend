@@ -28,6 +28,7 @@ import type {
 import {
   type GhlDirectory,
   OWNER_OFFER_CENSUS_DAYS,
+  ownerVisitTiming,
   perthIso,
   STRATCO_BOOKING_RULEBOOK,
   type SystemOfferCensus,
@@ -226,6 +227,7 @@ interface ArrivalWindow {
   from_iso: string;
   to_iso: string;
   minutes: number;
+  end_iso: string;
   travel_before_minutes: number;
   travel_before_basis: string;
   travel_after_minutes: number | null;
@@ -258,7 +260,8 @@ function arrivalWindowsWithTravelStatus(
   earliest: number,
   location: string | null,
 ): { windows: ArrivalWindow[]; travel_unknown: boolean } {
-  const onSite = SALES_BOOKING_ON_SITE_MINUTES * MINUTE;
+  const windowMinutes = STRATCO_BOOKING_RULEBOOK.window_min_minutes;
+  const onSite = ownerVisitTiming(0, windowMinutes)!.end;
   const items = [...busy]
     .sort((a, b) => a.start - b.start || a.end - b.end);
   const out: ArrivalWindow[] = [];
@@ -278,7 +281,7 @@ function arrivalWindowsWithTravelStatus(
     if (before.minutes === null || after?.minutes === null) {
       const possibleFrom = ceil5(Math.max(
         dayStart,
-        earliest,
+        earliest + 1,
         prev
           ? prev.end + (before.minutes ?? 0) * MINUTE
           : dayStart,
@@ -292,7 +295,7 @@ function arrivalWindowsWithTravelStatus(
     }
     const from = ceil5(Math.max(
       dayStart,
-      earliest,
+      earliest + 1,
       prev ? prev.end + before.minutes * MINUTE : dayStart,
     ));
     const latest = next
@@ -300,15 +303,19 @@ function arrivalWindowsWithTravelStatus(
       : dayEnd - onSite;
     const to = floor5(Math.min(latest, dayEnd - onSite));
     if (to < from) return;
-    out.push({
-      from_iso: perthIso(from),
-      to_iso: perthIso(to),
-      minutes: (to - from) / MINUTE,
-      travel_before_minutes: before.minutes,
-      travel_before_basis: before.basis,
-      travel_after_minutes: after ? after.minutes : null,
-      travel_after_basis: after ? after.basis : null,
-    });
+    for (let start = from; start <= to; start += 5 * MINUTE) {
+      const timing = ownerVisitTiming(start, windowMinutes)!;
+      out.push({
+        from_iso: perthIso(start),
+        to_iso: perthIso(timing.windowEnd),
+        end_iso: perthIso(timing.end),
+        minutes: windowMinutes,
+        travel_before_minutes: before.minutes,
+        travel_before_basis: before.basis,
+        travel_after_minutes: after ? after.minutes : null,
+        travel_after_basis: after ? after.basis : null,
+      });
+    }
   };
   for (const item of items) {
     push(item);
@@ -443,7 +450,7 @@ export function computeSalesBookingAvailability(
   const ghlEventIds = new Set(events.flatMap((e) =>
     e.source === "ghl" && e.event_id ? [e.event_id] : []
   ));
-  const outlookNotInGhl = input.outlook.state === "read"
+  const outlookUnverifiedCorrespondence = input.outlook.state === "read"
     ? input.outlook.entries.filter((o) =>
       o.source === "outlook" && o.blocks_capacity &&
       (!o.mirror_of_ghl_event_id ||
@@ -639,7 +646,7 @@ export function computeSalesBookingAvailability(
       outlook: {
         state: input.outlook.state,
         events: outlook.length,
-        not_in_ghl: outlookNotInGhl,
+        unverified_correspondence: outlookUnverifiedCorrespondence,
       },
       caveats,
     },

@@ -45,7 +45,7 @@ After the pack overlay, for the person on screen:
 
 | Field | Meaning |
 |---|---|
-| `calendar_read` | `state: read / could_not_read / not_configured`, `provider:"ghl"`, `source:"server_live_read"`, `reason`, `person`, `ghl_user_id`, `calendars`, `occupied_intervals`, `ghl_events`, `ghl_blocked_slots`, `outlook:{state,events,not_in_ghl}`, `caveats` |
+| `calendar_read` | `state: read / could_not_read / not_configured`, `provider:"ghl"`, `source:"server_live_read"`, `reason`, `person`, `ghl_user_id`, `calendars`, `occupied_intervals`, `ghl_events`, `ghl_blocked_slots`, `outlook:{state,events,unverified_correspondence}`, `caveats` |
 | `commitments` | Open offers `{id, contact_id, state:offered/agreed, start_iso, end_iso, source}`; `null` when the census could not be read (unknown, never an empty ledger) |
 | `commitments_read` | `read` or `could_not_read` with the reason |
 | `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`, `travel_unknown`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; null when the Outlook diary dropped malformed events or the required offer census is unreadable |
@@ -112,7 +112,8 @@ suburb, so a generic day with unknown travel can still have an `open` case row.
   "SW Fencing Scope Calendar" (`i6j9vaCy6c94n3i93cir`).
 - Marnin, 21 Sep to 3 Oct: GHL returned **0** events; his Outlook had **8**
   busy blocks. So GHL is not showing his Outlook today, and the read's
-  `calendar_read.outlook.not_in_ghl` says how many Outlook events GHL lacks.
+  `calendar_read.outlook.unverified_correspondence` counts Outlook events whose correspondence is unverified. The custom marker
+  proves only this system's GHL-to-Outlook copies; native GHL sync does not supply it.
 - Production behaviour of the new read, including the blocked-slots call,
   has not been observed: it ships with the next edge deploy.
 
@@ -128,16 +129,16 @@ his GHL calendar:
 1. In GHL, open Settings > Calendars > Connections, signed in as Marnin.
 2. Connect Microsoft 365 / Outlook with marnin@secureworkswa.com.au.
 3. Set that Outlook calendar as the conflict calendar for STRATCO FENCING.
-4. Reload the booking screen and check `calendar_read.outlook.not_in_ghl`
-   falls to 0. If it does not, the GHL mirror is still incomplete and needs
-   investigation before it can be relied on as the source of free times.
+4. Confirm in GHL that a known Outlook busy interval prevents booking on
+   STRATCO FENCING. The unverified-correspondence count cannot certify native
+   sync success or failure and need not fall to zero after connection.
 
 Nithin and Khairo already have GHL calendars; no click for them.
 
 ## Follow-ups
 
 - Screen (secureworks-ux `modules/ops-sales-booking.js`): paint
-  `free_times` / case `free_times`, and show `calendar_read.outlook.not_in_ghl`.
+  `free_times` / case `free_times`, and show `calendar_read.outlook.unverified_correspondence`.
   The banner itself clears with no UX change (it reads `calendar_read.state`).
 - Khairo is on the screen's switch but is not a `sales_booking_read` resource
   (400). Adding him needs a decision on which leads are his.
@@ -150,3 +151,9 @@ for that person and day; failed or malformed reads refuse as
 `ghl_blocked_slots_unreadable`. Availability retains neighboring visits outside
 working hours for travel while keeping arrival windows within working hours. An unreadable offer census preserves `calendar_read.state: read`
 and names its failure in `commitments_read`, while withholding both free-time outputs.
+
+Each advertised arrival window has `from_iso` and `to_iso` exactly 60 minutes
+apart, plus `end_iso` 30 minutes after the latest arrival. Windows start on a
+five-minute grid and include travel clearance on both sides. Approval continues
+to accept 60–90-minute arrival windows; exact-time bookings are not permitted.
+The read and approval share `ownerVisitTiming` for window and on-site duration.

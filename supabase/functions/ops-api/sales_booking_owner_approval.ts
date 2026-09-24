@@ -174,6 +174,16 @@ type CheckedVisit = OwnerVisit & {
   date: string;
 };
 
+export function ownerVisitTiming(start: number, windowMinutes: number) {
+  if (
+    !Number.isFinite(windowMinutes) ||
+    windowMinutes < RULES.window_min_minutes ||
+    windowMinutes > RULES.window_max_minutes
+  ) return null;
+  const windowEnd = start + windowMinutes * 60_000;
+  return { windowEnd, end: windowEnd + RULES.visit_minutes * 60_000 };
+}
+
 /** Rulebook-only checks, in the order a refusal is reported. No reads. */
 export function checkOwnerVisitRules(
   visit: unknown,
@@ -201,10 +211,8 @@ export function checkOwnerVisitRules(
     refuse("owner_visit_day_not_permitted", { day, days: [...RULES.days] });
   }
   const windowMinutes = (windowEnd.ms - start.ms) / 60_000;
-  if (
-    windowMinutes < RULES.window_min_minutes ||
-    windowMinutes > RULES.window_max_minutes
-  ) {
+  const timing = ownerVisitTiming(start.ms, windowMinutes);
+  if (!timing) {
     refuse("owner_visit_window_length", {
       minutes: windowMinutes,
       min: RULES.window_min_minutes,
@@ -214,7 +222,7 @@ export function checkOwnerVisitRules(
   if (!(end.ms > windowEnd.ms)) {
     refuse("owner_visit_window_not_inside_visit");
   }
-  if (end.ms - windowEnd.ms < RULES.visit_minutes * 60_000) {
+  if (end.ms < timing.end) {
     refuse("owner_visit_too_short", {
       visit_minutes_after_latest_arrival: RULES.visit_minutes,
     });

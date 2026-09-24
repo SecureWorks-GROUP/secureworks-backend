@@ -212,10 +212,6 @@ export const PERTH_SUBURB_POINTS: Readonly<
   "yokine": [-31.8909, 115.8494],
 });
 
-const SUBURB_NAMES = Object.keys(PERTH_SUBURB_POINTS).sort((a, b) =>
-  b.length - a.length
-);
-
 function clean(value: string): string {
   return value.toLowerCase().replace(/[’`]/g, "'")
     .replace(/\b(?:western australia|wa)\b/g, " ")
@@ -229,27 +225,21 @@ export interface SuburbPoint {
   lng: number;
 }
 
-/** A known suburb named by `value`: the whole text, else the last known
- * suburb name inside an address line ("12 Smith St, Duncraig WA 6023"). */
 export function salesBookingSuburbPoint(value: unknown): SuburbPoint | null {
   if (typeof value !== "string" || !value.trim()) return null;
-  const whole = clean(value);
-  const hit = (name: string) => {
-    const p = PERTH_SUBURB_POINTS[name];
-    return { suburb: name, lat: p[0], lng: p[1] };
-  };
-  if (PERTH_SUBURB_POINTS[whole]) return hit(whole);
-  // Address line: the suburb sits after the street, so take the match that
-  // ends latest (longest name first breaks ties: "north perth" over "perth").
-  const padded = ` ${whole.replace(/\bmt\b/g, "mount")} `;
-  let best: { name: string; at: number } | null = null;
-  for (const name of SUBURB_NAMES) {
-    const at = padded.lastIndexOf(` ${name} `);
-    if (at < 0) continue;
-    const end = at + name.length;
-    if (!best || end > best.at + best.name.length) best = { name, at };
+  const withoutRegion = value.trim()
+    .replace(/[,\s]+Australia$/i, "")
+    .replace(/[,\s]+(?:WA|Western Australia)?\s*\d{4}$/i, "")
+    .replace(/[,\s]+(?:WA|Western Australia)$/i, "");
+  let locality = withoutRegion.split(",").at(-1)!.trim();
+  if (/\d/.test(locality)) {
+    const street = locality.match(/^.*\b(?:street|st|road|rd|avenue|ave|drive|dr|way|court|ct|close|cl|crescent|cres|terrace|tce|parade|pde|place|pl|lane|ln)\s+(.+)$/i);
+    if (!street) return null;
+    locality = street[1];
   }
-  return best ? hit(best.name) : null;
+  const name = clean(locality).replace(/\bmt\b/g, "mount");
+  const point = PERTH_SUBURB_POINTS[name];
+  return point ? { suburb: name, lat: point[0], lng: point[1] } : null;
 }
 
 export function salesBookingSuburbByUnambiguousContact(

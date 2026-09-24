@@ -10,13 +10,13 @@ import {
   type SalesBookingAvailabilityDeps,
 } from "./sales_booking_availability.ts";
 import { emptyBookingFlow } from "./sales_booking_confirmation.ts";
-import type { GhlDirectory } from "./sales_booking_owner_approval.ts";
+import { checkOwnerVisitRules, type GhlDirectory } from "./sales_booking_owner_approval.ts";
 import type {
   SalesBookingCase,
   SalesBookingDiaryEntry,
   SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
-import { salesBookingTravelMinutes } from "./sales_booking_travel.ts";
+import { salesBookingSuburbPoint, salesBookingTravelMinutes } from "./sales_booking_travel.ts";
 
 // Thu 24 Sep 2026 10:00 Perth. The week read is the next one: Tue 29 Sep
 // (protected band 13:00-15:30) and Fri 2 Oct.
@@ -84,11 +84,18 @@ function input(o: Partial<AvailabilityInput> = {}): AvailabilityInput {
 
 const friday = (r: ReturnType<typeof computeSalesBookingAvailability>) =>
   r.free_times!.days.find((d: { date: string }) => d.date === "2026-10-02");
-const windows = (d: { arrival_windows: Array<Record<string, unknown>> }) =>
-  d.arrival_windows.map((w) => [
-    String(w.from_iso).slice(11, 16),
-    String(w.to_iso).slice(11, 16),
-  ]);
+const windows = (d: { arrival_windows: Array<Record<string, unknown>> }) => {
+  const ranges: string[][] = [];
+  let previous = -Infinity;
+  for (const w of d.arrival_windows) {
+    const start = Date.parse(String(w.from_iso));
+    const time = String(w.from_iso).slice(11, 16);
+    if (start !== previous + 5 * 60000) ranges.push([time, time]);
+    else ranges[ranges.length - 1][1] = time;
+    previous = start;
+  }
+  return ranges;
+};
 
 Deno.test("travel: straight-line estimates require both locations", () => {
   assertEquals(salesBookingTravelMinutes("Duncraig", "Hillarys").minutes, 15);
@@ -123,7 +130,7 @@ Deno.test("travel: straight-line estimates require both locations", () => {
   );
 });
 
-Deno.test("an empty diary reads as read, and every bookable day is free 08:00 to 16:00 arrivals", () => {
+Deno.test("an empty diary reads as read, and every bookable day is free 08:00 to 15:00 arrival-window starts", () => {
   const r = computeSalesBookingAvailability(input());
   assertEquals(r.calendar_read.state, "read");
   assertEquals(r.calendar_read.provider, "ghl");
@@ -135,12 +142,11 @@ Deno.test("an empty diary reads as read, and every bookable day is free 08:00 to
     r.free_times!.days.map((d: { date: string }) => d.date),
     ["2026-09-29", "2026-10-02"],
   );
-  // Last arrival leaves 30 minutes on site before 16:30.
-  assertEquals(windows(friday(r)), [["08:00", "16:00"]]);
+  assertEquals(windows(friday(r)), [["08:00", "15:00"]]);
   assertEquals(r.free_times!.rule.on_site_minutes, 30);
   // Tuesday: protected band 13:00-15:30 with its 30-minute buffer each side.
   const tue = r.free_times!.days[0];
-  assertEquals(windows(tue), [["08:00", "12:00"], ["16:00", "16:00"]]);
+  assertEquals(windows(tue), [["08:00", "11:00"]]);
 });
 
 Deno.test("a visit fits 30 minutes on site plus travel to and from the neighbouring bookings", () => {
@@ -158,10 +164,10 @@ Deno.test("a visit fits 30 minutes on site plus travel to and from the neighbour
   const own = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
-  assertEquals(windows(own), [["08:00", "09:15"], ["11:15", "16:00"]]);
+  assertEquals(windows(own), [["08:00", "08:15"], ["11:15", "15:00"]]);
   assertEquals(own.state, "open");
   assertEquals(own.arrival_windows[0].travel_after_minutes, 15);
-  assertEquals(own.arrival_windows[1].travel_before_minutes, 15);
+  assertEquals(own.arrival_windows.at(-1).travel_before_minutes, 15);
   assertEquals(r.calendar_read.ghl_events, 1);
 });
 
@@ -260,7 +266,7 @@ Deno.test("Outlook events already read for the diary are busy too, and ones miss
   assertEquals(r.calendar_read.outlook, {
     state: "read",
     events: 1,
-    not_in_ghl: 1,
+    unverified_correspondence: 1,
   });
   const mirrored = computeSalesBookingAvailability(input({
     outlook: {
@@ -275,7 +281,7 @@ Deno.test("Outlook events already read for the diary are busy too, and ones miss
       assignedUserId: MARNIN,
     }]),
   }));
-  assertEquals(mirrored.calendar_read.outlook.not_in_ghl, 0);
+  assertEquals(mirrored.calendar_read.outlook.unverified_correspondence, 0);
   const blockedOnly = computeSalesBookingAvailability(input({
     outlook: { state: "read", reason: null, entries: [entry] },
     blocked: ok([{
@@ -285,7 +291,7 @@ Deno.test("Outlook events already read for the diary are busy too, and ones miss
       assignedUserId: MARNIN,
     }]),
   }));
-  assertEquals(blockedOnly.calendar_read.outlook.not_in_ghl, 1);
+  assertEquals(blockedOnly.calendar_read.outlook.unverified_correspondence, 1);
   // A failed Outlook read is a named caveat; GHL is still the source.
   const failed = computeSalesBookingAvailability(input({
     outlook: {
@@ -437,12 +443,12 @@ Deno.test("open offers come from the census, block their slot, and drop once tha
   const forA = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
-  assertEquals(windows(forA), [["08:00", "08:15"], ["11:15", "16:00"]]);
+  assertEquals(windows(forA), [["11:15", "15:00"]]);
   // The offered lead's own offer does not block their own free times.
   const forB = r.case_free_times["opp:b"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
-  assertEquals(windows(forB), [["08:00", "16:00"]]);
+  assertEquals(windows(forB), [["08:00", "15:00"]]);
 });
 
 Deno.test("an unreadable offer census keeps commitments null (unknown) while the calendar still reads", () => {
@@ -632,9 +638,35 @@ Deno.test("travel retains neighboring visits outside working hours", () => {
   const day = result.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02");
   const travel = salesBookingTravelMinutes("Two Rocks", "Canning Vale").minutes!;
   assert(travel > 0);
-  assertEquals(day.arrival_windows.length, 1);
+  assert(day.arrival_windows.length > 0);
   assertEquals(Date.parse(day.arrival_windows[0].from_iso),
     Date.parse("2026-10-02T08:00:00+08:00") + travel * 60000);
-  assertEquals(Date.parse(day.arrival_windows[0].to_iso),
-    Date.parse("2026-10-02T16:30:00+08:00") - (travel + 30) * 60000);
+  assertEquals(Date.parse(day.arrival_windows.at(-1).end_iso),
+    Date.parse("2026-10-02T16:30:00+08:00") - travel * 60000);
+});
+
+Deno.test("street names cannot establish the booking locality", () => {
+  for (const address of [
+    "12 Scarborough Beach Road, Osborne Park",
+    "12 Scarborough Beach Road Osborne Park WA 6017",
+    "12 Scarborough Beach Road",
+  ]) assertEquals(salesBookingSuburbPoint(address), null);
+  assertEquals(salesBookingSuburbPoint("12 Scarborough Beach Road, Duncraig WA 6023")?.suburb, "duncraig");
+});
+
+Deno.test("every advertised empty-Friday arrival window passes owner rules", () => {
+  const r = computeSalesBookingAvailability(input());
+  const days = [friday(r), r.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02")];
+  for (const day of days) {
+    assert(day.arrival_windows.length > 0);
+    for (const w of day.arrival_windows) {
+      const checked = checkOwnerVisitRules({
+        window_start_iso: w.from_iso,
+        window_end_iso: w.to_iso,
+        end_iso: w.end_iso,
+      }, NOW);
+      assertEquals(checked.windowEnd - checked.start, 60 * 60000);
+      assertEquals(checked.end - checked.windowEnd, 30 * 60000);
+    }
+  }
 });
