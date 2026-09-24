@@ -14725,6 +14725,7 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
     { data: deliveriesByReq },
     { data: deliveriesByConfirmed },
     intelResult,
+    orgEventsResult,
   ] = await Promise.all([
     client.from('purchase_orders').select(poSelect)
       .eq('org_id', DEFAULT_ORG_ID).gte('delivery_date', from).lte('delivery_date', to)
@@ -14738,7 +14739,22 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
     uniqueJobIds.length > 0
       ? client.from('job_intelligence').select('*').in('job_id', uniqueJobIds)
       : Promise.resolve({ data: [] }),
+    // Public holidays and company days (Create > Event > "Holiday / Company Day").
+    // The dashboard and trade app read these as `orgEvents` to paint the day-header
+    // badge, but the feed never sent them, so every holiday was silently invisible.
+    // Same overlap rule as the assignments above, so a multi-day company day that
+    // starts before the window still shows.
+    client.from('org_events')
+      .select('id, event_date, event_end, title, event_type, description, visible_to_trades')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .lte('event_date', to)
+      .or(`event_end.gte.${from},and(event_end.is.null,event_date.gte.${from})`)
+      .order('event_date', { ascending: true }),
   ])
+
+  // A holiday lookup failure must never blank the calendar; the grid just
+  // renders without badges.
+  const orgEvents = orgEventsResult?.error ? [] : (orgEventsResult?.data || [])
 
   // Merge and deduplicate by id
   const deliveryMap = new Map<string, any>()
@@ -14792,7 +14808,7 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
   // with no signal. Surface it so the FE can warn the user the view is partial.
   const truncated = (data?.length ?? 0) >= CAL_EVENT_LIMIT
 
-  return { events: lightEvents, deliveries: deliveries || [], readiness, truncated }
+  return { events: lightEvents, deliveries: deliveries || [], readiness, truncated, orgEvents }
 }
 
 // ── Pipeline pricing projection ─────────────────────────────────────────────

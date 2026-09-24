@@ -312,6 +312,7 @@ Deno.test("response shape unchanged — rd_* aliases and scope_json/org_id are s
   assertEquals(Object.keys(res).sort(), [
     "deliveries",
     "events",
+    "orgEvents",
     "readiness",
     "truncated",
   ]);
