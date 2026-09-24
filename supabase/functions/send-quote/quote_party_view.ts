@@ -210,6 +210,12 @@ export function everyQuotePartyAccepted(
     partyDocs.push(d)
     byParty.set(party, partyDocs)
   }
+  const keys = [...byParty.keys()]
+  if (keys.some((key) => JSON.parse(key).jobContactId !== null)) {
+    for (const key of keys) {
+      if (JSON.parse(key).jobContactId === null) byParty.delete(key)
+    }
+  }
   if (byParty.size === 0) return false
   for (const partyDocs of byParty.values()) {
     if (!partyDocs.length) return false

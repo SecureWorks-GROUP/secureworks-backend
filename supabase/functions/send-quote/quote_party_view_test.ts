@@ -424,6 +424,24 @@ Deno.test('current party decisions agree across view, accept, status and deposit
       current: 'old', view: 'single', acceptable: true, acceptedAfterWrite: false,
     },
     {
+      name: 'SWF-26333 client accepts first while neighbour is pending',
+      docs: [
+        make('26333-a', { run_label: null, version: 2 }),
+        make('26333-v1', { run_label: null, job_contact_id: null, version: 1 }),
+        make('26333-b', { run_label: null, job_contact_id: 'neighbour', version: 3 }),
+      ],
+      current: '26333-a', view: 'single', acceptable: true, acceptedAfterWrite: false,
+    },
+    {
+      name: 'SWF-26333 neighbour accepts after client and the stale job-wide v1 does not block',
+      docs: [
+        make('26333-b', { run_label: null, job_contact_id: 'neighbour', version: 3 }),
+        make('26333-v1', { run_label: null, job_contact_id: null, version: 1 }),
+        make('26333-a', { run_label: null, version: 2, accepted_at: early }),
+      ],
+      current: '26333-b', view: 'single', acceptable: true, acceptedAfterWrite: true,
+    },
+    {
       name: 'R10 replacement is acceptable after accepted predecessor retires',
       docs: [
         make('new', { run_label: null, sent_at: late }),
