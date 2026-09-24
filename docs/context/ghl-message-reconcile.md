@@ -37,7 +37,9 @@ live`). It never places a row; the ladder does on insert.
   a precheck or write error, a remaining backlog, or a boundary-tie fallback
   keeps the retry pending. While it remains pending, the run is partial
   (`retry_pending` unless a more specific error applies), even when the scan
-  itself reached its top. The status projection exposes the latest
+  itself reached its top. An unfinished scan carries its incomplete-read marker
+  across budget continuations; after that scan finishes, a new clean scan is
+  required before clearing the retry. The status projection exposes the latest
   `reconciler.retry_from`. The watermark moves only when the scan completes and
   can step back; it reads as lag until the message is saved.
   First run: 2 hours back. Ordinary look-back after a pause is capped at 72 hours

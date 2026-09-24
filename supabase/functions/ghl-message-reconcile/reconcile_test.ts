@@ -1161,11 +1161,11 @@ Deno.test("an unfinished scan rewinds to retry a failed save before continuing",
   assert(rowFor(db, "earlyText000000"), "the failed text is retried");
 
   db.clock = T0 + 30 * MIN;
-  let next = await runGhlMessageReconcile(deps(ghl, db), small);
+  let next = await runGhlMessageReconcile(deps(ghl, db), POLICY);
   for (let i = 0; next.outcome === "ran" && next.status === "partial"; i++) {
     assert(i < 5, "the retry scan drains");
     db.clock += 15 * MIN;
-    next = await runGhlMessageReconcile(deps(ghl, db), small);
+    next = await runGhlMessageReconcile(deps(ghl, db), POLICY);
   }
   assert(next.outcome === "ran" && next.status === "succeeded");
   assertEquals(
@@ -1301,11 +1301,22 @@ Deno.test("an unreadable retry conversation stays pending when a peer at its tim
   db.clock = T0 + 30 * MIN;
   const cleanRetry = await runGhlMessageReconcile(deps(ghl, db));
   assert(cleanRetry.outcome === "ran");
-  assertEquals(cleanRetry.status, "succeeded");
+  assertEquals(cleanRetry.status, "partial");
+  assertEquals(cleanRetry.error_code, "retry_pending");
+  assertEquals(cleanRetry.counts.scan_continued, 1);
   assertEquals(cleanRetry.counts.inserted, 1);
   assertEquals(cleanRetry.counts.write_errors, 0);
-  assertEquals(cleanRetry.watermark, new Date(T0 + 15 * MIN).toISOString());
+  assertEquals(cleanRetry.watermark, failedAt);
   assert(rowFor(db, "retryText000001"), "the failed text is finally saved");
+
+  db.clock = T0 + 45 * MIN;
+  const cleanScan = await runGhlMessageReconcile(deps(ghl, db));
+  assert(cleanScan.outcome === "ran");
+  assertEquals(cleanScan.status, "succeeded");
+  assertEquals(cleanScan.error_code, null);
+  assertEquals(cleanScan.counts.inserted, 0);
+  assertEquals(cleanScan.counts.write_errors, 0);
+  assertEquals(cleanScan.watermark, new Date(T0 + 45 * MIN).toISOString());
   assertEquals(
     db.rows.filter((row) => row.provider_message_id === "ghl:retryText000001")
       .length,
@@ -1369,4 +1380,109 @@ Deno.test("a dateless retry conversation keeps the retry pending until it can be
     1,
   );
   assertEquals((db.runs[0].cursor as { retry_from: unknown }).retry_from, null);
+});
+
+Deno.test("an incomplete retry read survives budget continuations until a clean scan", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const failedAt = new Date(T0 - 40 * MIN).toISOString();
+  quietConversation(
+    ghl,
+    "budgetRetryConversation",
+    "budgetRetryText",
+    failedAt,
+  );
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  db.failOnce.set("ghl:budgetRetryText", "57014");
+
+  const first = await runGhlMessageReconcile(deps(ghl, db));
+  assert(first.outcome === "ran");
+  assertEquals(first.status, "partial");
+  assertEquals(first.watermark, failedAt);
+  assertEquals(rowFor(db, "budgetRetryText"), undefined);
+
+  ghl.conversations.get("budgetRetryConversation")!.lastMessageDate = null;
+  quietConversation(
+    ghl,
+    "scanHeadConversation",
+    "scanHeadText",
+    new Date(T0 - MIN).toISOString(),
+  );
+  quietConversation(
+    ghl,
+    "scanBacklogConversation",
+    "scanBacklogText",
+    new Date(T0 - 5 * MIN).toISOString(),
+  );
+  db.clock = T0 + 15 * MIN;
+  const oneConversation = { ...POLICY, maxConversationsPerRun: 1 };
+  const retryDeps = deps(ghl, db);
+  const listRecent = retryDeps.listRecentConversations;
+  retryDeps.listRecentConversations = async (args) => {
+    const page = await listRecent(args);
+    return args.startAfterDate
+      ? {
+        ...page,
+        conversations: page.conversations.filter((row) =>
+          row.id !== "budgetRetryConversation"
+        ),
+      }
+      : page;
+  };
+
+  const firstRetrySegment = await runGhlMessageReconcile(
+    retryDeps,
+    oneConversation,
+  );
+  assert(firstRetrySegment.outcome === "ran");
+  assertEquals(firstRetrySegment.counts.conversations_no_date, 1);
+  assertEquals(firstRetrySegment.counts.backlog_conversations, 1);
+  assertEquals(firstRetrySegment.status, "partial");
+  assertEquals(firstRetrySegment.error_code, "retry_pending");
+  assertEquals(firstRetrySegment.counts.scan_completed, 0);
+  assertEquals(
+    (db.runs[0].cursor as { incomplete_read: boolean }).incomplete_read,
+    true,
+  );
+  assertEquals(rowFor(db, "budgetRetryText"), undefined);
+
+  db.clock = T0 + 30 * MIN;
+  const cleanContinuation = await runGhlMessageReconcile(retryDeps);
+  assert(cleanContinuation.outcome === "ran");
+  assertEquals(cleanContinuation.counts.scan_continued, 1);
+  assertEquals(cleanContinuation.counts.conversations_no_date, 0);
+  assertEquals(cleanContinuation.counts.scan_completed, 1);
+  assertEquals(cleanContinuation.status, "partial");
+  assertEquals(cleanContinuation.error_code, "retry_pending");
+  assertEquals(cleanContinuation.watermark, failedAt);
+  assertEquals(rowFor(db, "budgetRetryText"), undefined);
+  assertEquals(
+    (db.runs[0].cursor as { incomplete_read: boolean }).incomplete_read,
+    true,
+  );
+  assertEquals(
+    (db.runs[0].cursor as { retry_from: string }).retry_from,
+    failedAt,
+  );
+
+  db.clock = T0 + 45 * MIN;
+  ghl.conversations.get("budgetRetryConversation")!.lastMessageDate = Date
+    .parse(failedAt);
+  const cleanScan = await runGhlMessageReconcile(deps(ghl, db));
+  assert(cleanScan.outcome === "ran");
+  assertEquals(cleanScan.counts.scan_continued, 0);
+  assertEquals(cleanScan.counts.inserted, 1);
+  assertEquals(cleanScan.status, "succeeded");
+  assertEquals(cleanScan.error_code, null);
+  assertEquals(cleanScan.watermark, new Date(T0 + 45 * MIN).toISOString());
+  assertEquals(
+    (db.runs[0].cursor as { incomplete_read: boolean }).incomplete_read,
+    false,
+  );
+  assertEquals((db.runs[0].cursor as { retry_from: unknown }).retry_from, null);
+  assertEquals(
+    db.rows.filter((row) => row.provider_message_id === "ghl:budgetRetryText")
+      .length,
+    1,
+  );
 });

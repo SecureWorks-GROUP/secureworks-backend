@@ -96,6 +96,7 @@ export interface ScanState {
   position: { last_message_ms: number; ids: string[] } | null;
   /** Earliest time of a message whose save failed in this scan. */
   retry_from?: string | null;
+  incomplete_read: boolean;
   complete: boolean;
 }
 
@@ -307,6 +308,10 @@ export function parseScanState(cursor: unknown): ScanState | null {
     retryFrom = ms(c.retry_from);
     if (retryFrom === null) return null;
   }
+  const incompleteRead = c.incomplete_read === undefined
+    ? false
+    : c.incomplete_read;
+  if (typeof incompleteRead !== "boolean") return null;
   return {
     v: 1,
     scan_top: iso(top),
@@ -314,6 +319,7 @@ export function parseScanState(cursor: unknown): ScanState | null {
     message_floor: iso(messageFloor),
     position,
     retry_from: retryFrom === null ? null : iso(retryFrom),
+    incomplete_read: incompleteRead,
     complete: c.complete,
   };
 }
@@ -434,9 +440,11 @@ export async function runGhlMessageReconcile(
       message_floor: iso(messageFloor),
       position: null,
       retry_from: pendingRetryMs === null ? null : iso(pendingRetryMs),
+      incomplete_read: false,
       complete: false,
     };
   }
+  scan.incomplete_read ||= !readWasComplete(counts);
   const listFloorMs = ms(scan.list_floor)!;
   const messageFloorMs = ms(scan.message_floor)!;
   const window = { from: scan.message_floor, to: scan.scan_top };
@@ -714,6 +722,7 @@ export async function runGhlMessageReconcile(
         break;
       }
       // Save progress after every fully read page (review M12).
+      scan.incomplete_read ||= !readWasComplete(counts);
       await deps.recordRun({
         run_id: runId,
         source: RUN_SOURCE,
@@ -740,8 +749,10 @@ export async function runGhlMessageReconcile(
   const complete = scan.complete && !stop;
   if (!complete) scan.complete = false;
   counts.scan_completed = complete ? 1 : 0;
+  scan.incomplete_read ||= !readWasComplete(counts);
   if (
-    complete && retryFromMs !== null && readWasComplete(counts)
+    complete && retryFromMs !== null && readWasComplete(counts) &&
+    !scan.incomplete_read
   ) {
     retryFromMs = null;
     scan.retry_from = null;
