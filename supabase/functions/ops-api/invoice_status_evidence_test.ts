@@ -299,7 +299,11 @@ Deno.test("K3 emailed (approved debt send): the capture row's words stay digit-f
   const rows: Row[] = [];
   const resp = await _verifyAndSendInvoiceEmail({
     client,
-    body: makeBody({ debt_followup_approval_id: "approval-1477" }),
+    body: makeBody({
+      debt_followup_approval_id: "approval-1477",
+      approved_invoice_number: "INV-1477",
+      approved_attachment_file_name: "INV-1477.pdf",
+    }),
     getToken,
     xeroGet,
     logBusinessEvent,
