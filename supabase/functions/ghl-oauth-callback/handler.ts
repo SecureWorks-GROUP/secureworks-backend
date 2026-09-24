@@ -1,22 +1,12 @@
 // ════════════════════════════════════════════════════════════
 // SecureWorks — GHL Marketplace app OAuth install callback
 //
-// Installing the SecureWorks Live Feed app on a GHL sub-account sends the
-// installer here with `?code=`. This function completes the install by
-// exchanging that code at GHL's token endpoint and then DISCARDS the access
-// and refresh tokens: the app exists only so GHL delivers webhooks to
-// ghl-webhook-receiver, and every API read keeps the existing private
-// integration token. Nothing is stored except one ids-only receipt.
+// Setup and install/receipt contract:
+// docs/project-knowledge/edge-functions.md#ghl-oauth-callback---no-verify-jwt
 //
 // Never logged, stored or returned: the authorization code, any token, the
 // client secret, or the provider's response body. Output is a small plain
 // page carrying an outcome code only.
-//
-// Receipt: one `webhook_log` row per accepted exchange, source `ghl_oauth`, event_type
-// `AppInstall`, payload `receipt: ghl_app_install_v1` with outcome, location
-// id (only when it equals GHL_LOCATION_ID) and company id. The source is
-// deliberately not `ghl_webhook` so install receipts never count toward the
-// receiver's webhook heartbeat.
 //
 // Entry point: index.ts (serve). This module exports the handler so tests can
 // drive it with a stubbed fetch and no network.

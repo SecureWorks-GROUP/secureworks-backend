@@ -299,8 +299,8 @@ jobs:
             supabase/functions/ghl-webhook-receiver/receiver_t1_test.ts \
             supabase/functions/ghl-webhook/message_webhook_test.ts
 
-      # The SecureWorks Live Feed app's OAuth install callback: exchanges the
-      # code, discards the tokens and writes one ids-only receipt. Stubbed fetch.
+      # OAuth callback contract: docs/project-knowledge/edge-functions.md.
+      # Stubbed fetch, no live installation.
       - name: Test GHL app OAuth install callback
         run: |
           deno test --allow-read --allow-env \
