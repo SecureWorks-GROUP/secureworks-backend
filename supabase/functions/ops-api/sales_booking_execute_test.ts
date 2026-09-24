@@ -14,9 +14,9 @@ import {
   salesBookingSendAction,
 } from "./sales_booking_execute.ts";
 import {
+  SALES_BOOKING_RESOURCES,
   type SalesBookingJobSiteFact,
   type SalesBookingMessage,
-  SALES_BOOKING_RESOURCES,
   salesBookingPublishedSuburb,
 } from "./sales_booking_read.ts";
 import {

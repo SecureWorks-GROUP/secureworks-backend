@@ -181,10 +181,11 @@ function request(
       reason: null,
     } as BookingObject,
     readWorkspace: () => Promise.resolve(response),
-    readOpportunityOwnership: () => Promise.resolve({
-      assignedTo: assignee,
-      pipelineId: response.resource.pipeline_id,
-    }),
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: assignee,
+        pipelineId: response.resource.pipeline_id,
+      }),
     now: () => NOW,
     envGet,
   };
@@ -997,13 +998,15 @@ Deno.test("engine approval: a Stratco lead now assigned to Khairo or Nithin is n
   assertEquals(written.approval.resource, "marnin");
   const moved = await fixture(), movedStore = memoryStore();
   await assertRejects(
-    () => salesBookingApprovalWriteAction({
-      ...request(moved, movedStore.store, "message"),
-      readOpportunityOwnership: () => Promise.resolve({
-        assignedTo: null,
-        pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
+    () =>
+      salesBookingApprovalWriteAction({
+        ...request(moved, movedStore.store, "message"),
+        readOpportunityOwnership: () =>
+          Promise.resolve({
+            assignedTo: null,
+            pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
+          }),
       }),
-    }),
     Error,
     "lead_assigned_to_someone_else",
   );

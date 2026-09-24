@@ -601,10 +601,11 @@ function executorDeps(
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: [] }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
-    readOpportunityOwnership: () => Promise.resolve({
-      assignedTo: null,
-      pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
-    }),
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: null,
+        pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+      }),
     readOutlookLead: () =>
       Promise.resolve({
         contact: {
