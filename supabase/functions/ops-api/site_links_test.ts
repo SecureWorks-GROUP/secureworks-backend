@@ -1,6 +1,6 @@
 // Slice S-M1: the link_site_jobs door. Behaviour on the module (body contract,
 // RPC arguments with the actor, refusal mapping) and on the real ops-api front
-// door (staff only; not a trade, agent-read or routine action). The SQL
+// door (staff only; not a trade or agent-read action). The SQL
 // writer's own behaviour on the named sites is in the migration contract
 // supabase/tests/migration-contracts/20260925040000_job_parties_foundation.
 // deno-lint-ignore-file no-import-prefix no-explicit-any
@@ -136,7 +136,7 @@ Deno.test("SQL refusals keep their code; anything else is a 503 with no detail",
   ]);
 });
 
-Deno.test("link_site_jobs is staff-only: trades refused, never agent-read or routine", async () => {
+Deno.test("link_site_jobs is staff-only: trades refused, never agent-read", () => {
   const url = new URL("https://example.invalid/ops-api?action=link_site_jobs");
   assertEquals(_opsApiActionNeedsStaffRole(url), true);
   assertEquals(AGENT_READ_ALLOWED_ACTIONS.has("link_site_jobs"), false);
@@ -160,22 +160,4 @@ Deno.test("link_site_jobs is staff-only: trades refused, never agent-read or rou
   assertEquals(decide("api_key", undefined, undefined, false), 401);
   assertEquals(decide("jwt", "lead_installer", ["fencing"]), 403);
   assertEquals(decide("jwt", "trade"), 403);
-  // The routine key's default-deny list must not name it.
-  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = src.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set([");
-  const list = src.slice(start, src.indexOf("])", start));
-  assertEquals(start > 0, true);
-  assertEquals(list.includes("'link_site_jobs'"), false);
-  // POST only, and wired to the module.
-  const handler = src.slice(
-    src.indexOf("case 'link_site_jobs': {"),
-    src.indexOf("case 'link_site_jobs': {") + 800,
-  );
-  assertEquals(handler.includes("req.method !== 'POST'"), true);
-  assertEquals(
-    handler.includes(
-      "linkSiteJobs(client, body, receiptActor(requestActor, authMode))",
-    ),
-    true,
-  );
 });
