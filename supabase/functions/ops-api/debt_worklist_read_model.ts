@@ -73,6 +73,23 @@ type TimelineMode = keyof typeof TIMELINE_BOUNDS;
 const SAME_SMS_WINDOW_MS = 15 * 60_000;
 // The v1 default GHL conversation cache freshness threshold.
 export const GHL_CACHE_STALE_HOURS = 24;
+export const JOB_CONTACT_LABEL = "job's contact, not the payer";
+const PARTY_CHANNELS = new Set(["sms", "email", "call"]);
+
+/** Sets the party on a provider message entry; other entries carry none. */
+export function withParty(
+  entry: TimelineEntry,
+  party: "payer" | "job_contact" | "unknown",
+): TimelineEntry {
+  if (
+    !PARTY_CHANNELS.has(String(entry.channel)) || entry.kind === "invoice_event"
+  ) {
+    return entry;
+  }
+  entry.party = party;
+  if (party === "job_contact" && !entry.label) entry.label = JOB_CONTACT_LABEL;
+  return entry;
+}
 
 export const POPULATION_DENOMINATOR =
   "open receivables: Xero ACCREC invoices with status AUTHORISED or SUBMITTED and amount due above zero";
@@ -134,6 +151,15 @@ export interface TimelineEntry {
   invoice_scope: "invoice" | "job" | "debtor" | "unplaced";
   seen_in: string[];
   label: string | null;
+  /**
+   * Whose conversation a provider message (sms, email, call) is: "payer" when
+   * it comes from a verified Xero/GHL contact binding, or from a linked job
+   * whose contact corroborates to the payer's Xero contact by phone or email;
+   * "job_contact" when it is the linked job's own contact (site customer,
+   * homeowner) who is not shown to be the payer; "unknown" when the record
+   * names no recipient (a chase log). Only "payer" counts toward last_contact.
+   */
+  party?: "payer" | "job_contact" | "unknown";
   /** Only on captured fact entries. */
   fact?: {
     kind: string | null;
@@ -357,12 +383,10 @@ export function entryFromGhlContactEvent(
     : eventType.endsWith("_out")
     ? "outbound"
     : null;
-  const body = withheld
-    ? ""
-    : String(
-      payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
-        row.body_preview ?? "",
-    );
+  const body = withheld ? "" : String(
+    payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
+      row.body_preview ?? "",
+  );
   return {
     key: (providerId && ghlNoteTimelineKey(providerId)) ??
       providerId ?? `business_events:${row.id}`,
@@ -397,8 +421,10 @@ export function entryFromGhlContactEvent(
 function channelFromEventType(eventType: string | null): string | null {
   if (!eventType) return null;
   if (eventType.includes(".call")) return "call";
-  if (eventType === "ghl.note_added" || eventType === "ghl.internal_comment" ||
-    eventType.includes(".note")) return "note";
+  if (
+    eventType === "ghl.note_added" || eventType === "ghl.internal_comment" ||
+    eventType.includes(".note")
+  ) return "note";
   if (eventType === "client.reply" || eventType.includes(".sms_")) {
     return "sms";
   }
@@ -666,6 +692,14 @@ export function mergeTimeline(entries: TimelineEntry[]): {
       if (!keep.seen_in.includes(s)) keep.seen_in.push(s);
     }
     if (!keep.author && other.author) keep.author = other.author;
+    // A copy proven to be the payer's conversation wins over a job-contact or
+    // unknown copy of the same message.
+    if (other.party === "payer" && keep.party !== "payer") {
+      keep.party = "payer";
+      if (keep.label === JOB_CONTACT_LABEL) keep.label = other.label ?? null;
+    } else if (!keep.party && other.party) {
+      keep.party = other.party;
+    }
     if (keep.key.startsWith("ghl-note:")) {
       const keepAt = Date.parse(keep.at ?? "");
       const otherAt = Date.parse(other.at ?? "");
@@ -685,10 +719,14 @@ export function mergeTimeline(entries: TimelineEntry[]): {
         keep.label = other.label;
       }
     }
-    if (keep.invoice_scope !== "unplaced" && other.invoice_scope === "unplaced") {
+    if (
+      keep.invoice_scope !== "unplaced" && other.invoice_scope === "unplaced"
+    ) {
       return;
     }
-    if (keep.invoice_scope === "unplaced" && other.invoice_scope !== "unplaced") {
+    if (
+      keep.invoice_scope === "unplaced" && other.invoice_scope !== "unplaced"
+    ) {
       keep.job_id = other.job_id;
       keep.invoice_scope = other.invoice_scope;
       keep.invoice_ids = [...other.invoice_ids];
@@ -755,7 +793,9 @@ export function mergeTimeline(entries: TimelineEntry[]): {
     const matches = matchesByLog.get(log.key) ?? [];
     if (matches.length !== 1) continue;
     const match = matches[0];
-    if (consumed.has(match.key) || logsByProvider.get(match.key)?.length !== 1) {
+    if (
+      consumed.has(match.key) || logsByProvider.get(match.key)?.length !== 1
+    ) {
       continue;
     }
     consumed.add(match.key);
@@ -976,7 +1016,7 @@ export async function debtWorklist(
         "jobs",
         () =>
           client.from("jobs").select(
-            "id, job_number, ghl_contact_id, status, type",
+            "id, job_number, ghl_contact_id, status, type, client_phone, client_email",
           ).eq("org_id", deps.orgId).in("id", ids),
         warnings,
         "id",
@@ -1149,7 +1189,8 @@ export async function debtWorklist(
     }
   } catch (e) {
     ghlCacheFault = errText(e);
-    ghlCachePageCapHit = ghlCachePageCapHit || ghlCacheFault.includes("page ceiling");
+    ghlCachePageCapHit = ghlCachePageCapHit ||
+      ghlCacheFault.includes("page ceiling");
     faults.push({
       source: "ghl",
       detail: `ghl_conversation_cache read failed: ${ghlCacheFault}`,
@@ -1178,7 +1219,8 @@ export async function debtWorklist(
     }
   } catch (e) {
     ghlJobCacheFault = errText(e);
-    ghlCachePageCapHit = ghlCachePageCapHit || ghlJobCacheFault.includes("page ceiling");
+    ghlCachePageCapHit = ghlCachePageCapHit ||
+      ghlJobCacheFault.includes("page ceiling");
     faults.push({
       source: "ghl",
       detail: `job-keyed GHL cache read failed: ${ghlJobCacheFault}`,
@@ -1456,10 +1498,9 @@ export async function debtWorklist(
     const rows = groups.get(key)!;
     const identity: DebtorIdentity = rows[0]._identity;
     if (identity.status !== "verified" || !identity.xero_contact_id) return [];
-    return [...new Set([
-      ...(contactMatchGhl.get(identity.xero_contact_id) ?? []),
-      ...rows.map((r) => r.ghl_contact_id).filter(Boolean),
-    ])].sort();
+    // Only verified Xero/GHL contact_matches bindings. A linked job's stored
+    // GHL contact is the job's contact, never the debtor's own contact set.
+    return [...(contactMatchGhl.get(identity.xero_contact_id) ?? [])].sort();
   };
   const debtorGhlContactIds = new Map(
     debtorKeys.map((key) => [key, ghlContactIdsFor(key)]),
@@ -1496,7 +1537,8 @@ export async function debtWorklist(
     contactEventsFault = errText(e);
     faults.push({
       source: "ghl",
-      detail: `contact-level GHL message and note read failed: ${contactEventsFault}`,
+      detail:
+        `contact-level GHL message and note read failed: ${contactEventsFault}`,
     });
   }
   const contactMessages = new Map<string, any[]>();
@@ -1645,6 +1687,34 @@ export async function debtWorklist(
         ),
       ]),
     );
+    // A linked job's contact is the payer only when the job's own phone or
+    // email corroborates to this debtor's verified Xero contact.
+    const payerInvoices = identity.status === "verified" &&
+        identity.xero_contact_id
+      ? verifiedInvoicesByContact.get(identity.xero_contact_id) ?? []
+      : [];
+    const jobContactIsPayer = new Map(
+      linkedJobs.map((jobId) => {
+        const job = jobs.get(jobId);
+        const match = {
+          email: job?.client_email ?? null,
+          phone: job?.client_phone ?? null,
+        };
+        const boundGhl = identity.status === "verified" &&
+          identity.xero_contact_id && job?.ghl_contact_id &&
+          (contactMatchGhl.get(identity.xero_contact_id)?.has(
+            job.ghl_contact_id,
+          ) ??
+            false);
+        return [
+          jobId,
+          Boolean(boundGhl) || Boolean(job) &&
+            payerInvoices.some((inv) =>
+              contactMatchCorroboratesInvoice(inv, match)
+            ),
+        ];
+      }),
+    );
     const staleCutoff = now.getTime() - GHL_CACHE_STALE_HOURS * 3_600_000;
     const ghlJobCaches = linkedJobs.map((jobId) => {
       const job = jobs.get(jobId);
@@ -1709,18 +1779,21 @@ export async function debtWorklist(
           }
           const providerId = str(m.provider_message_id);
           raw.push(
-            entryFromConversation(
-              m,
-              jobId,
-              jobInvoiceIds,
-              providerId ? directChannels.get(providerId) : undefined,
+            withParty(
+              entryFromConversation(
+                m,
+                jobId,
+                jobInvoiceIds,
+                providerId ? directChannels.get(providerId) : undefined,
+              ),
+              jobContactIsPayer.get(jobId) ? "payer" : "job_contact",
             ),
           );
         }
       }
       for (const r of rows) {
         for (const c of chaseByInvoice.get(r.xero_invoice_id) ?? []) {
-          raw.push(entryFromChaseLog(c));
+          raw.push(withParty(entryFromChaseLog(c), "unknown"));
         }
         for (const ev of invoiceEvents.get(r.xero_invoice_id) ?? []) {
           const eventJobId = str(ev.job_id);
@@ -1732,7 +1805,12 @@ export async function debtWorklist(
       const debtorInvoiceIds = rows.map((r) => r.xero_invoice_id);
       for (const g of contactOnlyGhl) {
         for (const m of contactMessages.get(g) ?? []) {
-          raw.push(entryFromGhlCacheMessage(m, g, debtorInvoiceIds));
+          raw.push(
+            withParty(
+              entryFromGhlCacheMessage(m, g, debtorInvoiceIds),
+              "payer",
+            ),
+          );
         }
       }
       const contactIds = debtorGhlContactIds.get(key) ?? [];
@@ -1743,10 +1821,22 @@ export async function debtWorklist(
             const jobInvoiceIds = invoicesByLinkedJob.get(eventJobId);
             if (!jobInvoiceIds) continue;
             raw.push(
-              entryFromGhlContactEvent(event, debtorInvoiceIds, jobInvoiceIds),
+              withParty(
+                entryFromGhlContactEvent(
+                  event,
+                  debtorInvoiceIds,
+                  jobInvoiceIds,
+                ),
+                "payer",
+              ),
             );
           } else {
-            raw.push(entryFromGhlContactEvent(event, debtorInvoiceIds));
+            raw.push(
+              withParty(
+                entryFromGhlContactEvent(event, debtorInvoiceIds),
+                "payer",
+              ),
+            );
           }
         }
       }
@@ -1805,7 +1895,8 @@ export async function debtWorklist(
         (contactMessagesFault && contactOnlyGhl.length) ||
         (contactEventsFault && contactIds.length) ||
         (ghlCacheFault && contactIds.length) ||
-        (ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read))
+        (ghlJobCacheFault &&
+          ghlJobCaches.some((c) => c.used_by_conversation_read))
       ) {
         debtorFaults.push({
           source: "ghl",
@@ -1813,7 +1904,8 @@ export async function debtWorklist(
             "GHL contact messages or notes could not be read for this debtor",
         });
       }
-      timelineSourcesComplete = conversationFaults.length === 0 && !chaseFault &&
+      timelineSourcesComplete = conversationFaults.length === 0 &&
+        !chaseFault &&
         !invoiceEventsFault && !coverageFault && !linkUnknown &&
         !jobsFault && !(factsReadFault && linkedJobs.length) &&
         !ghlCachePageCapHit &&
@@ -1821,7 +1913,8 @@ export async function debtWorklist(
         !(contactMessagesFault && contactOnlyGhl.length) &&
         !(contactEventsFault && contactIds.length) &&
         !(ghlCacheFault && contactIds.length) &&
-        !(ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read)) &&
+        !(ghlJobCacheFault &&
+          ghlJobCaches.some((c) => c.used_by_conversation_read)) &&
         perJobCapHit.length === 0 && factsCapHit.length === 0 &&
         unconfirmedEmailProviderIds.size === 0 &&
         unverifiedCandidates.length === 0;
@@ -1845,15 +1938,18 @@ export async function debtWorklist(
       };
     }
 
-    // Last contact: newest provider message in either direction.
+    // Last contact: newest provider message with the PAYER in either
+    // direction. A job's own contact (site customer) and unknown-recipient
+    // chase logs stay on the timeline but never set the payer's contact date.
     // A logged call counts whichever way it went; a message needs a direction.
     const contactEntries = mergedTimelineEntries.filter((
       e: TimelineEntry,
     ) =>
-      e.kind === "call" ||
-      ((e.direction === "inbound" || e.direction === "outbound") &&
-        ["sms", "email"].includes(String(e.channel)) &&
-        e.kind !== "invoice_event")
+      e.party === "payer" &&
+      (e.kind === "call" ||
+        ((e.direction === "inbound" || e.direction === "outbound") &&
+          ["sms", "email"].includes(String(e.channel)) &&
+          e.kind !== "invoice_event"))
     );
     const brief = (e: TimelineEntry | undefined) =>
       e
@@ -1875,7 +1971,8 @@ export async function debtWorklist(
       ),
       complete: timelineSourcesComplete,
       status: timelineSourcesComplete ? "complete" : "incomplete",
-      basis: "merged stored timeline copies before the debtor trim",
+      basis:
+        "payer-confirmed entries of the merged stored timeline before the debtor trim; job-contact and unknown-recipient entries are excluded",
     };
 
     // Per-source status.
@@ -1932,6 +2029,10 @@ export async function debtWorklist(
         ghl_contact_id: id,
         via,
         via_job_ids: jobIds,
+        party: via === "contact_match" ||
+            jobIds.some((jobId) => jobContactIsPayer.get(jobId))
+          ? "payer" as const
+          : "job_contact" as const,
         cache_synced_at: syncedAt,
         cache_message_count: ghlCacheFault
           ? null
@@ -1950,11 +2051,16 @@ export async function debtWorklist(
     });
     const ghlUnreadable = linkUnknown || Boolean(jobsFault) ||
       Boolean(ghlCacheFault) ||
-      Boolean(ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read)) ||
+      Boolean(
+        ghlJobCacheFault &&
+          ghlJobCaches.some((c) => c.used_by_conversation_read),
+      ) ||
       ghlCachePageCapHit ||
       Boolean(contactMatchFault && identity.status === "verified") ||
       Boolean(contactMessagesFault && contactOnlyGhl.length) ||
-      Boolean(contactEventsFault && (debtorGhlContactIds.get(key)?.length ?? 0)) ||
+      Boolean(
+        contactEventsFault && (debtorGhlContactIds.get(key)?.length ?? 0),
+      ) ||
       Boolean(convFaultBy("ghl_cache")) ||
       Boolean(convFaultBy("business_events")) ||
       Boolean(convFaultBy("jobs"));
@@ -1986,7 +2092,7 @@ export async function debtWorklist(
     const emailUnreadable = linkUnknown ||
       Boolean(
         convFaultBy("inbox") || convFaultBy("inbox_event_copies") ||
-          convFaultBy("business_events")
+          convFaultBy("business_events"),
       );
     const notesUnreadable = Boolean(chaseFault) ||
       Boolean(convFaultBy("job_events"));
@@ -2043,7 +2149,9 @@ export async function debtWorklist(
         note:
           `${STORED_COPIES_NOTE}; no email capture health is published, so there is no last success time` +
           (unconfirmedEmailProviderIds.size
-            ? `; ${unconfirmedEmailProviderIds.size} possible email${unconfirmedEmailProviderIds.size === 1 ? " was" : "s were"} not shown because their match is unconfirmed`
+            ? `; ${unconfirmedEmailProviderIds.size} possible email${
+              unconfirmedEmailProviderIds.size === 1 ? " was" : "s were"
+            } not shown because their match is unconfirmed`
             : ""),
       },
       notes: {
