@@ -29,14 +29,14 @@ DECLARE f regprocedure;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_transcript_capture_policy()','public.context_transcript_fetch_flag()',
   'public.record_call_transcript_fetch(jsonb)','public.context_call_transcript_eligible(text,text,jsonb)',
-  'public.context_transcript_due_calls(integer)','public.context_transcript_backfill_contacts(text,integer)',
+  'public.context_transcript_due_calls(integer,boolean)',
   'public.context_transcript_capture_status()','public.trigger_ghl_call_transcript_fetch()','public.automation_switch_cron_lanes()']::regprocedure[] LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') OR has_function_privilege('public',f,'EXECUTE')
   THEN RAISE EXCEPTION 't2 public execute on %',f; END IF;
   IF (SELECT proconfig FROM pg_proc WHERE oid=f) IS NULL THEN RAISE EXCEPTION 't2 % has no fixed search_path',f; END IF;
  END LOOP;
  FOREACH f IN ARRAY ARRAY['public.context_transcript_fetch_flag()','public.record_call_transcript_fetch(jsonb)',
-  'public.context_transcript_due_calls(integer)','public.context_transcript_backfill_contacts(text,integer)',
+  'public.context_transcript_due_calls(integer,boolean)',
   'public.context_transcript_capture_status()','public.trigger_ghl_call_transcript_fetch()']::regprocedure[] LOOP
   IF NOT (SELECT prosecdef FROM pg_proc WHERE oid=f) THEN RAISE EXCEPTION 't2 % must be SECURITY DEFINER',f; END IF;
  END LOOP;
@@ -261,30 +261,50 @@ END $$;
 ROLLBACK;
 
 BEGIN;
--- 6. History load contacts: the jobs live now (owner, 24 Sep 2026), through
--- jobs.ghl_contact_id, ascending, resumable.
+-- 6. History mode: the past calls (older than the live 14 days) of GHL
+-- contacts of jobs live now, by M4's one live-job definition, with the
+-- contact's live job numbers. The live mode never sees them, and they never
+-- see the live window.
 INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
  ('10000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-000000000001','in_progress','patio','T2-LIVE-1','Oxqi7eCx2rGCsS0BXOH2'),
+ ('10000000-0000-4000-8000-000000000007','00000000-0000-0000-0000-000000000001','scheduled','patio','T2-LIVE-2','Oxqi7eCx2rGCsS0BXOH2'),
  ('10000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-000000000001','quoted','fencing','T2-QUOTED-SENT','lYPee0K2DuQHXH2xHL1P'),
  ('10000000-0000-4000-8000-000000000003','00000000-0000-0000-0000-000000000001','quoted','fencing','T2-QUOTED-OLD','contactQuotedOld01'),
- ('10000000-0000-4000-8000-000000000004','00000000-0000-0000-0000-000000000001','draft','fencing','T2-DRAFT-NONE','contactDraftNone01'),
- ('10000000-0000-4000-8000-000000000005','00000000-0000-0000-0000-000000000001','complete','fencing','T2-DONE','contactComplete001'),
- ('10000000-0000-4000-8000-000000000006','00000000-0000-0000-0000-000000000001','accepted','fencing','T2-NO-CONTACT',NULL),
- ('10000000-0000-4000-8000-000000000007','00000000-0000-0000-0000-000000000001','scheduled','patio','T2-LIVE-2','Oxqi7eCx2rGCsS0BXOH2'),
- ('10000000-0000-4000-8000-000000000008','00000000-0000-0000-0000-000000000001','draft','fencing','T2-DRAFT-REV','contactDraftRev01');
+ ('10000000-0000-4000-8000-000000000005','00000000-0000-0000-0000-000000000001','complete','fencing','T2-DONE','contactComplete001');
 INSERT INTO public.job_documents(job_id,type,sent_at) VALUES
  ('10000000-0000-4000-8000-000000000002','quote',now()-interval '10 days'),
  ('10000000-0000-4000-8000-000000000003','quote',now()-interval '90 days');
-INSERT INTO public.quote_revisions(job_id,version,totals_snapshot_json,released_via,sent_at) VALUES ('10000000-0000-4000-8000-000000000008',1,'{}','send-quote/send',now()-interval '59 days');
+-- N10 (72 days) and N4 (20 days): past calls on live-job contacts.
+SELECT pg_temp.t2_call('bJNGSorrVRMHxehZtQHT','Oxqi7eCx2rGCsS0BXOH2',now()-interval '72 days','completed',303);
+SELECT pg_temp.t2_call('Ag9DKkqpfsadWkJS8jst','lYPee0K2DuQHXH2xHL1P',now()-interval '20 days','completed',127,'client.call_logged','772');
+-- N1: 20 minutes old, the live mode's.
+SELECT pg_temp.t2_call('6kn6WmrtfTMvhEJtmfeJ','Oxqi7eCx2rGCsS0BXOH2',now()-interval '20 minutes','completed',109);
+-- Old calls that are not history: a quote sent 90 days ago, a finished job,
+-- a no-answer call, and one whose fetch already ended.
+SELECT pg_temp.t2_call('quotedOldCall01','contactQuotedOld01',now()-interval '30 days','completed',80);
+SELECT pg_temp.t2_call('completeJobCall1','contactComplete001',now()-interval '30 days','completed',80);
+SELECT pg_temp.t2_call('meYkjPC1Se4b7vCLZGaZ','Oxqi7eCx2rGCsS0BXOH2',now()-interval '79 days','no-answer',NULL);
+SELECT pg_temp.t2_call('ZKxEtfBzwb5qZx3o6p3v','Oxqi7eCx2rGCsS0BXOH2',now()-interval '70 days','completed',22);
 DO $$
-DECLARE got text;
+DECLARE got text; e uuid;
 BEGIN
- SELECT string_agg(c.ghl_contact_id||'='||array_to_string(c.job_numbers,'+'),' ' ORDER BY c.ghl_contact_id COLLATE "C") INTO got
- FROM public.context_transcript_backfill_contacts(NULL,50) c;
- IF got IS DISTINCT FROM 'Oxqi7eCx2rGCsS0BXOH2=T2-LIVE-1+T2-LIVE-2 contactDraftRev01=T2-DRAFT-REV lYPee0K2DuQHXH2xHL1P=T2-QUOTED-SENT'
- THEN RAISE EXCEPTION 't2 backfill contacts %',got; END IF;
- SELECT string_agg(c.ghl_contact_id,' ') INTO got FROM public.context_transcript_backfill_contacts('Oxqi7eCx2rGCsS0BXOH2',1) c;
- IF got IS DISTINCT FROM 'contactDraftRev01' THEN RAISE EXCEPTION 't2 backfill paging %',got; END IF;
+ SELECT id INTO e FROM public.business_events WHERE provider_message_id='ghl:ZKxEtfBzwb5qZx3o6p3v';
+ PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','ZKxEtfBzwb5qZx3o6p3v','call_event_id',e,'mode','backfill',
+  'result','not_expected','code','provider_too_short'));
+ SELECT string_agg(d.call_message_id||'='||array_to_string(d.job_numbers,'+'),' ' ORDER BY d.event_at) INTO got
+ FROM public.context_transcript_due_calls(40,true) d;
+ IF got IS DISTINCT FROM 'bJNGSorrVRMHxehZtQHT=T2-LIVE-1+T2-LIVE-2 Ag9DKkqpfsadWkJS8jst=T2-QUOTED-SENT'
+ THEN RAISE EXCEPTION 't2 history calls %',got; END IF;
+ SELECT string_agg(d.call_message_id,' ') INTO got FROM public.context_transcript_due_calls(40,false) d;
+ IF got IS DISTINCT FROM '6kn6WmrtfTMvhEJtmfeJ' THEN RAISE EXCEPTION 't2 live calls %',got; END IF;
+ IF (SELECT count(*) FROM public.context_transcript_due_calls(40,false) d WHERE d.job_numbers IS NOT NULL)<>0
+ THEN RAISE EXCEPTION 't2 live rows carry no job numbers'; END IF;
+ -- A history call waiting for its next try is not offered again early.
+ SELECT id INTO e FROM public.business_events WHERE provider_message_id='ghl:bJNGSorrVRMHxehZtQHT';
+ PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','bJNGSorrVRMHxehZtQHT','call_event_id',e,'mode','backfill',
+  'result','awaiting_agreement','sentences',130,'digest',repeat('b',64)));
+ SELECT string_agg(d.call_message_id,' ') INTO got FROM public.context_transcript_due_calls(40,true) d;
+ IF got IS DISTINCT FROM 'Ag9DKkqpfsadWkJS8jst' THEN RAISE EXCEPTION 't2 history next_at %',got; END IF;
 END $$;
 ROLLBACK;
 

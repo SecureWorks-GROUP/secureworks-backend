@@ -1,7 +1,7 @@
 -- C1d's automation_switch_cron_lanes(), byte for byte (20260924133000,
 -- md5(prosrc) 459035de5d3f7f7af49c36f09d9be29e). Not a migration. C1d's
 -- contract re-applies C1d inside a rolled-back transaction; T2
--- (20260925031000) adds its own job to this list, so that contract loads this
+-- (20260925043000) adds its own job to this list, so that contract loads this
 -- file first to stand C1d's pre-image back up. This contract checks the md5.
 CREATE OR REPLACE FUNCTION public.automation_switch_cron_lanes()
 RETURNS TABLE (cron_jobname text, lane text)

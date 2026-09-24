@@ -29,17 +29,21 @@
 --     answered calls that do carry a transcript: MeVPH47LXDbgcvPUAkjY, 21 Sep,
 --     90 sentences), or a voicemail; a tool-initiated call with no status yet
 --     is asked and the provider's own re-read decides.
---  6. context_transcript_due_calls(limit): the calls due a fetch now: call
---     rows keyed ghl: with event_at in the last 14 days (review M11), no
---     terminal outcome and next try due, oldest first. A call whose ghltx:
---     transcript row already exists is returned too, so a run that crashed
---     after saving records `saved` next run with no provider call.
---  7. context_transcript_backfill_contacts(after, limit): the GHL contacts of
---     the jobs that are live now, for the history load (the owner, 24 Sep:
---     "for call transcripts i need all the evidence of past jobs as well",
---     "i just need it for the jobs that are currently live"): jobs in the live
---     statuses of the policy, plus draft or quoted jobs with a quote sent in
---     the last 60 days, through jobs.ghl_contact_id, contact ids ascending.
+--  6. context_transcript_due_calls(limit, history): the one selection of
+--     calls due a fetch now: call rows keyed ghl:, eligible, no terminal
+--     outcome and next try due, oldest first. A call whose ghltx: transcript
+--     row already exists is returned too, so a run that crashed after saving
+--     records `saved` next run with no provider call.
+--       live (history false): event_at in the last 14 days (review M11);
+--       history (true): the past calls of the jobs that are live now (the
+--       owner, 24 Sep: "for call transcripts i need all the evidence of past
+--       jobs as well", "i just need it for the jobs that are currently
+--       live"): event_at older than those 14 days, on a GHL contact of a job
+--       in M4's context_ghl_history_live_jobs() (the one live-job definition),
+--       with that contact's live job numbers. The past call rows themselves
+--       are written by M4's history load and live capture; T2 only
+--       transcribes them. The two modes never select the same call.
+--  7. (no seventh object: T2 has no history load of its own.)
 --  8. context_transcript_capture_status() replaces the F1b stub (X22): last
 --     run, due, saved, pending, not returned, failed by code, coverage by
 --     line, oldest pending, aged_out_unfetched_24h, and the four alarms
@@ -67,13 +71,13 @@
 --   context_business_minutes(timestamptz,timestamptz) md5(prosrc) 510dbec36291c25aa1887ade89e2ca4e (F1)
 --   automation_lane_enabled(text)         md5(prosrc) 818a13be854748e2d272bdd648c88b59
 --   sw_service_key()                      present
---   the eight new functions: absent; call_transcript_fetches: absent;
+--   context_ghl_history_live_jobs()       md5(prosrc) 49eb23015b724a29058c11b2743954bf (M4, 20260925031500; read, not replaced)
+--   the seven new functions: absent; call_transcript_fetches: absent;
 --   cron job ghl-call-transcript-fetch: absent; flag ghl_call_transcript_fetch_v1: no row
---   jobs_status_check lists every live status the policy names
 -- The guard refuses unless each is still that pre-image or already this
 -- migration's result (a re-apply).
 --
--- Rollback: supabase/rollbacks/20260925031000_context_transcript_fetch_down.sql
+-- Rollback: supabase/rollbacks/20260925043000_context_transcript_fetch_down.sql
 -- (unschedules the job, restores the stub and the three-row lane list, drops
 -- the new functions and the table). The edge function idles while the flag is
 -- off; turn the flag off before rolling back.
@@ -82,7 +86,7 @@ SET LOCAL statement_timeout = '60s';
 
 -- 0. Pre-image guard. Reports every mismatch at once.
 DO $guard$
-DECLARE problems text[]:='{}'; live text; x record; cmd text; cols text; st text;
+DECLARE problems text[]:='{}'; live text; x record; cmd text; cols text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_transcript_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','fce1a8f610ddf41a26cb097e9bae1171'],false),
@@ -91,12 +95,12 @@ BEGIN
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.context_business_minutes(timestamptz,timestamptz)',ARRAY['510dbec36291c25aa1887ade89e2ca4e'],false),
   ('public.automation_lane_enabled(text)',ARRAY['818a13be854748e2d272bdd648c88b59'],false),
-  ('public.context_transcript_capture_policy()',ARRAY['fd638cb8133da14fa0c7f51a99d82994'],true),
+  ('public.context_transcript_capture_policy()',ARRAY['2d446e84a410eff5ed3ca75936db6079'],true),
   ('public.context_transcript_fetch_flag()',ARRAY['3cae5d15d6b1c00c4d94739fcf3b8744'],true),
   ('public.record_call_transcript_fetch(jsonb)',ARRAY['5b87c8022ac3caa71c7903590cca76f1'],true),
   ('public.context_call_transcript_eligible(text,text,jsonb)',ARRAY['cd3cb55ab8fa9359b744d3626f14ec6c'],true),
-  ('public.context_transcript_due_calls(integer)',ARRAY['8dc5c214c9f28497259d13e2d3627440'],true),
-  ('public.context_transcript_backfill_contacts(text,integer)',ARRAY['4ac8914b5a6a01b32f10807fe9903e51'],true),
+  ('public.context_ghl_history_live_jobs()',ARRAY['49eb23015b724a29058c11b2743954bf'],false),
+  ('public.context_transcript_due_calls(integer,boolean)',ARRAY['154a9926c0531d265aa8465c7f8f2a05'],true),
   ('public.trigger_ghl_call_transcript_fetch()',ARRAY['0ec1769f5f45dff78a5de49f319286a6'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
@@ -110,13 +114,6 @@ BEGIN
   FROM pg_attribute a WHERE a.attrelid='public.call_transcript_fetches'::regclass AND a.attnum>0 AND NOT a.attisdropped;
   IF cols IS DISTINCT FROM 'call_message_id:text,call_event_id:uuid,mode:text,outcome:text,attempts:integer,next_at:timestamp with time zone,last_code:text,failure_code:text,provider_status:text,provider_duration_seconds:numeric,seen_sentences:integer,seen_digest:text,seen_at:timestamp with time zone,transcript_event_id:uuid,created_at:timestamp with time zone,updated_at:timestamp with time zone,finished_at:timestamp with time zone'
   THEN problems:=problems||format('call_transcript_fetches exists with columns %s',cols); END IF;
- END IF;
- SELECT pg_get_constraintdef(c.oid) INTO st FROM pg_constraint c WHERE c.conrelid=to_regclass('public.jobs') AND c.conname='jobs_status_check';
- IF st IS NOT NULL THEN
-  FOR x IN SELECT unnest(ARRAY['accepted','partially_accepted','scheduled','in_progress','processing','approvals','order_materials',
-    'schedule_install','awaiting_supplier','awaiting_deposit','final_payment','rectification','draft','quoted']) AS s LOOP
-   IF position(''''||x.s||'''' IN st)=0 THEN problems:=problems||format('jobs_status_check has no status %s',x.s); END IF;
-  END LOOP;
  END IF;
  IF to_regclass('cron.job') IS NOT NULL THEN
   EXECUTE 'SELECT string_agg(command,'' | '') FROM cron.job WHERE jobname=''ghl-call-transcript-fetch''' INTO cmd;
@@ -162,12 +159,7 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'coverage_min_eligible',5,
   -- Coverage looks at calls that ended between 26 h and 2 h ago (time to fetch).
   'coverage_from_hours',26,
-  'coverage_to_hours',2,
-  -- History load: live jobs (the owner, 24 Sep 2026).
-  'live_statuses',jsonb_build_array('accepted','partially_accepted','scheduled','in_progress','processing','approvals',
-   'order_materials','schedule_install','awaiting_supplier','awaiting_deposit','final_payment','rectification'),
-  'quoted_statuses',jsonb_build_array('draft','quoted'),
-  'quote_sent_days',60)
+  'coverage_to_hours',2)
 $$;
 
 -- 2. The fetch flag. Fails closed: no table, no row, or an error is off.
@@ -330,25 +322,36 @@ COMMENT ON FUNCTION public.context_call_transcript_eligible(text,text,jsonb) IS
  'Whether a stored GHL call row is worth asking for a transcript (transcripts slice T2, review M1): completed and at least 5 s or with no duration recorded, or a voicemail; a tool-initiated call with no status yet is asked and the provider decides.';
 
 -- 6. Calls due a fetch now.
-CREATE OR REPLACE FUNCTION public.context_transcript_due_calls(p_limit integer DEFAULT 40)
+CREATE OR REPLACE FUNCTION public.context_transcript_due_calls(p_limit integer DEFAULT 40,p_history boolean DEFAULT false)
 RETURNS TABLE (call_event_id uuid, call_message_id text, event_type text, event_at timestamptz, contact_id text,
  conversation_key text, direction text, call_status text, duration_seconds numeric, call_sid text, line text,
  from_line text, by_user text, capture_mode text, transcript_event_id uuid, attempts integer,
- seen_sentences integer, seen_digest text, seen_at timestamptz)
+ seen_sentences integer, seen_digest text, seen_at timestamptz, job_numbers text[])
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
  WITH policy AS (SELECT public.context_transcript_capture_policy() AS p),
+ live AS (
+  -- History only: the GHL contacts of the jobs live now (M4's one definition).
+  SELECT l.ghl_contact_id AS contact, array_agg(l.job_number ORDER BY l.job_number) AS job_numbers
+  FROM public.context_ghl_history_live_jobs() l
+  WHERE coalesce(p_history,false) AND l.ghl_contact_id IS NOT NULL
+  GROUP BY l.ghl_contact_id
+ ),
  calls AS (
-  SELECT e.*, substr(e.provider_message_id,5) AS msg
-  FROM public.business_events e, policy
+  SELECT e.*, substr(e.provider_message_id,5) AS msg, lv.job_numbers
+  FROM public.business_events e CROSS JOIN policy
+  LEFT JOIN live lv ON lv.contact=e.contact_id
   WHERE e.event_type IN (SELECT jsonb_array_elements_text(policy.p->'call_event_types'))
    AND e.provider_message_id LIKE 'ghl:%'
-   AND e.event_at > now()-make_interval(days=>(policy.p->>'window_days')::integer) AND e.event_at <= now()
+   AND CASE WHEN coalesce(p_history,false)
+    THEN e.event_at <= now()-make_interval(days=>(policy.p->>'window_days')::integer) AND lv.contact IS NOT NULL
+    ELSE e.event_at > now()-make_interval(days=>(policy.p->>'window_days')::integer) AND e.event_at <= now() END
  )
  SELECT c.id, c.msg, c.event_type, c.event_at, c.contact_id, c.conversation_key, c.direction,
   c.payload->>'call_status',
   CASE WHEN jsonb_typeof(c.payload->'duration_seconds')='number' THEN (c.payload->>'duration_seconds')::numeric END,
   c.payload->>'call_sid', c.payload->>'line', c.payload->>'from_line', c.payload->>'by_user',
-  coalesce(c.metadata->>'capture_mode','live'), tx.id, coalesce(f.attempts,0), f.seen_sentences, f.seen_digest, f.seen_at
+  coalesce(c.metadata->>'capture_mode','live'), tx.id, coalesce(f.attempts,0), f.seen_sentences, f.seen_digest, f.seen_at,
+  c.job_numbers
  FROM calls c
  LEFT JOIN public.call_transcript_fetches f ON f.call_message_id=c.msg
  LEFT JOIN public.business_events tx ON tx.provider_message_id='ghltx:'||c.msg
@@ -358,35 +361,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
  ORDER BY c.event_at, c.id
  LIMIT greatest(1,least(coalesce(p_limit,40),200))
 $$;
-COMMENT ON FUNCTION public.context_transcript_due_calls(integer) IS
- 'Calls due a transcript fetch now (transcripts slice T2): GHL call rows of the last 14 days, eligible from their stored status and duration, with no terminal fetch record and the next try due, oldest first. A call whose transcript row already exists is included so the fetcher records it saved.';
-
--- 7. History load: the contacts of the jobs that are live now.
-CREATE OR REPLACE FUNCTION public.context_transcript_backfill_contacts(p_after text DEFAULT NULL,p_limit integer DEFAULT 10)
-RETURNS TABLE (ghl_contact_id text, job_ids uuid[], job_numbers text[], statuses text[])
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
- WITH policy AS (SELECT public.context_transcript_capture_policy() AS p),
- live AS (
-  SELECT j.id, j.job_number, j.status, btrim(j.ghl_contact_id) AS contact
-  FROM public.jobs j, policy
-  WHERE nullif(btrim(j.ghl_contact_id),'') IS NOT NULL
-   AND (j.status IN (SELECT jsonb_array_elements_text(policy.p->'live_statuses'))
-    OR (j.status IN (SELECT jsonb_array_elements_text(policy.p->'quoted_statuses'))
-     AND (EXISTS (SELECT 1 FROM public.job_documents d WHERE d.job_id=j.id AND d.type='quote'
-                   AND d.sent_at>now()-make_interval(days=>(policy.p->>'quote_sent_days')::integer))
-       OR EXISTS (SELECT 1 FROM public.quote_revisions r WHERE r.job_id=j.id
-                   AND r.sent_at>now()-make_interval(days=>(policy.p->>'quote_sent_days')::integer)))))
- )
- SELECT l.contact, array_agg(l.id ORDER BY l.job_number), array_agg(l.job_number ORDER BY l.job_number),
-  array_agg(DISTINCT l.status)
- FROM live l
- WHERE l.contact ~ '^[A-Za-z0-9_-]{6,64}$' AND (p_after IS NULL OR l.contact COLLATE "C" > p_after COLLATE "C")
- GROUP BY l.contact
- ORDER BY l.contact COLLATE "C"
- LIMIT greatest(1,least(coalesce(p_limit,10),50))
-$$;
-COMMENT ON FUNCTION public.context_transcript_backfill_contacts(text,integer) IS
- 'History load (transcripts slice T2, owner 24 Sep 2026): GHL contacts of the jobs that are live now (live statuses of the policy, or draft or quoted with a quote sent in the last 60 days), contact ids ascending, after p_after.';
+COMMENT ON FUNCTION public.context_transcript_due_calls(integer,boolean) IS
+ 'Calls due a transcript fetch now (transcripts slice T2): GHL call rows eligible from their stored status and duration, with no terminal fetch record and the next try due, oldest first; live: the last 14 days; history: older, on a GHL contact of a job live now (M4 context_ghl_history_live_jobs), with its live job numbers. A call whose transcript row already exists is included so the fetcher records it saved.';
 
 -- 8. The transcript_capture status block.
 CREATE OR REPLACE FUNCTION public.context_transcript_capture_status() RETURNS jsonb
@@ -570,11 +546,11 @@ END $cron$;
 -- 11. Grants. Service-side only.
 REVOKE ALL ON FUNCTION public.context_transcript_capture_policy(),public.context_transcript_fetch_flag(),
  public.record_call_transcript_fetch(jsonb),public.context_call_transcript_eligible(text,text,jsonb),
- public.context_transcript_due_calls(integer),public.context_transcript_backfill_contacts(text,integer),
+ public.context_transcript_due_calls(integer,boolean),
  public.context_transcript_capture_status(),public.trigger_ghl_call_transcript_fetch() FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_transcript_capture_policy(),public.context_transcript_fetch_flag(),
  public.record_call_transcript_fetch(jsonb),public.context_call_transcript_eligible(text,text,jsonb),
- public.context_transcript_due_calls(integer),public.context_transcript_backfill_contacts(text,integer),
+ public.context_transcript_due_calls(integer,boolean),
  public.context_transcript_capture_status() TO service_role;
 GRANT EXECUTE ON FUNCTION public.trigger_ghl_call_transcript_fetch() TO postgres;
 REVOKE ALL ON FUNCTION public.automation_switch_cron_lanes() FROM PUBLIC, anon, authenticated;

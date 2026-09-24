@@ -371,7 +371,7 @@ export const NODUR = {
   ),
 };
 
-/** The same conversation's list read, as the history load sees it: a text, an activity and the two calls. */
+/** The same conversation's list read (the shape M4's history load and the reconciler build call rows from): a text, an activity and the two calls. */
 export const N4_CONVERSATION_PAGE = [
   {
     id: "unJUR0MY5jwawuYXWYgR",

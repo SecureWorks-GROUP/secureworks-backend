@@ -3732,13 +3732,17 @@ GHL's transcript answer is read only through `_shared/ghl/call_transcript.ts`
 (ghl-proxy uses it too; `mediaChannel` and `speaker` optional). The backoff
 and terminal outcomes live in the SQL writer `record_call_transcript_fetch`,
 never in TypeScript. Flag `ghl_call_transcript_fetch_v1` gates the live run
-and any real history load (`mode: backfill`, dry run unless `dry_run: false`,
-capture mode always `backfill`). Measured 24 Sep 2026: GHL sometimes leaves
+and every transcript read of the history mode (`mode: backfill`, dry run unless
+`dry_run: false`, capture mode always `backfill`). The history mode only
+transcribes call rows already stored (M4's `ghl-history-load` writes the past
+ones); it lists no GHL conversation and writes no call row, and both modes go
+through the one selection `context_transcript_due_calls(limit, history)`, whose
+history side reuses M4's `context_ghl_history_live_jobs()`. Measured 24 Sep 2026: GHL sometimes leaves
 `meta.call.duration` empty on an answered call that has a transcript, so
 "completed with no duration" is eligible; a no-answer call's transcription
 answers HTTP 400; the list read names our line by number but the single-item
 read says "SecureWorks WA" for inbound calls. Tests: `fetch_test.ts`,
-`call_transcript_test.ts`, migration contract `20260925031000_context_transcript_fetch`.
+`call_transcript_test.ts`, migration contract `20260925043000_context_transcript_fetch`.
 
 ## A pg_cron Bearer Is Not The Function's Service Key
 
