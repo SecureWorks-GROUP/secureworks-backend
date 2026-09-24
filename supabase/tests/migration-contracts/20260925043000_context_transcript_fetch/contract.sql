@@ -316,16 +316,15 @@ BEGIN
  -- The live cron is not offered it early either.
  SELECT string_agg(d.call_message_id,' ') INTO got FROM public.context_transcript_due_calls(40,false) d;
  IF got IS DISTINCT FROM '6kn6WmrtfTMvhEJtmfeJ' THEN RAISE EXCEPTION 't2 live before history next_at %',got; END IF;
- -- Once its next try is due, the live cron takes it too (oldest first), with
- -- the call row's backfill capture mode; an old call with a LIVE-mode pending
- -- record is still not the live run's.
+ -- Once its next try is due, the live cron takes it too (oldest first),
+ -- carrying its backfill fetch mode even though the call row was captured
+ -- live; an old call with a LIVE-mode pending record is still not the live run's.
  UPDATE public.call_transcript_fetches SET next_at=now()-interval '1 minute' WHERE call_message_id='bJNGSorrVRMHxehZtQHT';
  SELECT id INTO e FROM public.business_events WHERE provider_message_id='ghl:Ag9DKkqpfsadWkJS8jst';
  PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','Ag9DKkqpfsadWkJS8jst','call_event_id',e,'result','not_ready','code','empty'));
  UPDATE public.call_transcript_fetches SET next_at=now()-interval '1 minute' WHERE call_message_id='Ag9DKkqpfsadWkJS8jst';
- UPDATE public.business_events SET metadata='{"capture_mode":"backfill"}' WHERE provider_message_id='ghl:bJNGSorrVRMHxehZtQHT';
- SELECT string_agg(d.call_message_id||':'||d.capture_mode,' ' ORDER BY d.event_at) INTO got FROM public.context_transcript_due_calls(40,false) d;
- IF got IS DISTINCT FROM 'bJNGSorrVRMHxehZtQHT:backfill 6kn6WmrtfTMvhEJtmfeJ:live' THEN RAISE EXCEPTION 't2 live retries due history %',got; END IF;
+ SELECT string_agg(d.call_message_id||':'||d.capture_mode||':'||coalesce(d.fetch_mode,'-'),' ' ORDER BY d.event_at) INTO got FROM public.context_transcript_due_calls(40,false) d;
+ IF got IS DISTINCT FROM 'bJNGSorrVRMHxehZtQHT:live:backfill 6kn6WmrtfTMvhEJtmfeJ:live:-' THEN RAISE EXCEPTION 't2 live retries due history %',got; END IF;
  IF (public.context_transcript_history_pending()->>'pending')::integer<>2 THEN RAISE EXCEPTION 't2 history pending both %',public.context_transcript_history_pending(); END IF;
  -- A finished history call is no longer pending.
  PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','bJNGSorrVRMHxehZtQHT','call_event_id',

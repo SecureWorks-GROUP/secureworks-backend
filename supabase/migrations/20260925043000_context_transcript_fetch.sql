@@ -107,7 +107,7 @@ BEGIN
   ('public.record_call_transcript_fetch(jsonb)',ARRAY['5b87c8022ac3caa71c7903590cca76f1'],true),
   ('public.context_call_transcript_eligible(text,text,jsonb)',ARRAY['cd3cb55ab8fa9359b744d3626f14ec6c'],true),
   ('public.context_ghl_history_live_jobs()',ARRAY['49eb23015b724a29058c11b2743954bf'],false),
-  ('public.context_transcript_due_calls(integer,boolean)',ARRAY['0418205a3ffaa398965001a4b4fc8115'],true),
+  ('public.context_transcript_due_calls(integer,boolean)',ARRAY['74d87e872300c883676c6ed8a3188023'],true),
   ('public.context_transcript_history_pending()',ARRAY['87c5b235cfc4ae10d10fed033356e801'],true),
   ('public.trigger_ghl_call_transcript_fetch()',ARRAY['0ec1769f5f45dff78a5de49f319286a6'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
@@ -333,7 +333,7 @@ CREATE OR REPLACE FUNCTION public.context_transcript_due_calls(p_limit integer D
 RETURNS TABLE (call_event_id uuid, call_message_id text, event_type text, event_at timestamptz, contact_id text,
  conversation_key text, direction text, call_status text, duration_seconds numeric, call_sid text, line text,
  from_line text, by_user text, capture_mode text, transcript_event_id uuid, attempts integer,
- seen_sentences integer, seen_digest text, seen_at timestamptz, job_numbers text[])
+ seen_sentences integer, seen_digest text, seen_at timestamptz, job_numbers text[], fetch_mode text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
  WITH policy AS (SELECT public.context_transcript_capture_policy() AS p),
  live AS (
@@ -360,7 +360,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
   CASE WHEN jsonb_typeof(c.payload->'duration_seconds')='number' THEN (c.payload->>'duration_seconds')::numeric END,
   c.payload->>'call_sid', c.payload->>'line', c.payload->>'from_line', c.payload->>'by_user',
   coalesce(c.metadata->>'capture_mode','live'), tx.id, coalesce(f.attempts,0), f.seen_sentences, f.seen_digest, f.seen_at,
-  c.job_numbers
+  c.job_numbers, f.mode
  FROM calls c
  LEFT JOIN public.call_transcript_fetches f ON f.call_message_id=c.msg
  LEFT JOIN public.business_events tx ON tx.provider_message_id='ghltx:'||c.msg
@@ -371,7 +371,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
  LIMIT greatest(1,least(coalesce(p_limit,40),200))
 $$;
 COMMENT ON FUNCTION public.context_transcript_due_calls(integer,boolean) IS
- 'Calls due a transcript fetch now (transcripts slice T2): GHL call rows eligible from their stored status and duration, with no terminal fetch record and the next try due, oldest first; live: the last 14 days, plus history calls whose backfill fetch record is pending and due now; history: older, on a GHL contact of a job live now (M4 context_ghl_history_live_jobs), with its live job numbers. A call whose transcript row already exists is included so the fetcher records it saved.';
+ 'Calls due a transcript fetch now (transcripts slice T2): GHL call rows eligible from their stored status and duration, with no terminal fetch record and the next try due, oldest first; live: the last 14 days, plus history calls whose backfill fetch record is pending and due now; history: older, on a GHL contact of a job live now (M4 context_ghl_history_live_jobs), with its live job numbers. A call whose transcript row already exists is included so the fetcher records it saved. fetch_mode is the open fetch record''s mode; a backfill record is always saved as backfill.';
 
 -- 7. History calls still pending: the calls the history selection covers
 -- (older than the live window, on a GHL contact of a job live now) whose

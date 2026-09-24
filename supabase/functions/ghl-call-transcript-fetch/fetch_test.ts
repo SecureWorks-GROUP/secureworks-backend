@@ -733,6 +733,33 @@ Deno.test("history: 30 calls under the page size, every first read awaiting agre
   ]);
 });
 
+Deno.test("a live-captured past call whose history fetch record is pending, finished by the live run, is saved as backfill", async () => {
+  const w = history();
+  const call = w.history[0];
+  assertEquals(call.capture_mode, "backfill");
+  const first = await runBackfill(
+    { dryRun: false, maxCalls: 1 },
+    deps(w),
+  );
+  assert(first.outcome === "ran");
+  assertEquals(first.counts.awaiting_agreement, 1);
+  w.now += 5 * 60_000;
+  w.due = [{
+    ...call,
+    capture_mode: "live",
+    fetch_mode: "backfill",
+    job_numbers: null,
+    ...w.outcomes.get(call.call_message_id)!,
+  }];
+  const live = await runLiveFetch(deps(w));
+  assert(live.outcome === "ran");
+  assertEquals(live.counts.saved, 1);
+  assertEquals(
+    w.captured.map((r) => [r.provider_message_id, r.metadata]),
+    [["ghltx:" + call.call_message_id, { capture_mode: "backfill" }]],
+  );
+});
+
 Deno.test("history: an unreadable pending count is not finished", async () => {
   const w = history({ flag: false });
   const d = deps(w);

@@ -117,6 +117,8 @@ export interface DueCall {
   seen_at: string | null;
   /** History mode only: the live jobs of the call's contact. */
   job_numbers?: string[] | null;
+  /** The open fetch record's mode; a backfill record is always saved as backfill. */
+  fetch_mode?: string | null;
 }
 
 /** A provider read: the parsed body, or why there is none. Never words in a code. */
@@ -456,11 +458,12 @@ export async function processCall(
     byUser: call.by_user,
   };
   const stored = call.capture_mode;
-  const captureMode: CaptureMode = mode === "backfill"
-    ? "backfill"
-    : stored === "backfill" || stored === "relink"
-    ? stored
-    : "live";
+  const captureMode: CaptureMode =
+    mode === "backfill" || call.fetch_mode === "backfill"
+      ? "backfill"
+      : stored === "backfill" || stored === "relink"
+      ? stored
+      : "live";
   const built = buildGhlCallTranscriptRow(facts, flat, {
     captureMode,
     agreement,
