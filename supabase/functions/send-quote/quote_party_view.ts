@@ -312,3 +312,51 @@ export async function retireOtherPublishedPartyRunDocuments(
     .filter((id: unknown): id is string => typeof id === 'string')
   return { ok: true, retiredIds }
 }
+
+export type QuoteAcceptanceSnapshot = {
+  documents: QuotePartyDocument[]
+  acceptances: QuoteRunAcceptance[]
+  runNeighbourId: string | null
+}
+
+/**
+ * The accept handler reads everything its status and deposit decision needs
+ * BEFORE it writes the acceptance. A failed read then leaves nothing written,
+ * so the customer's retry still works; reading after the write left a retried
+ * last acceptance at "Already accepted" with no deposits and no status change.
+ */
+export function quoteAcceptanceReadFailed(reads: Array<{ error?: unknown } | null | undefined>): boolean {
+  return (reads || []).some((read) => !read || !!read.error)
+}
+
+/**
+ * Lays the acceptance about to be written over the pre-write snapshot, so the
+ * decision sees exactly the state the writes will produce: the accepted
+ * document carries `acceptedAt`, and for a fence run the party's
+ * run_acceptances row (keyed like the upsert: job_contact_id + source
+ * run_label) becomes this document's accepted row.
+ */
+export function withPendingAcceptance(
+  snapshot: QuoteAcceptanceSnapshot,
+  doc: QuotePartyDocument,
+  sourceRunLabel: string | null,
+  acceptedAt: string,
+): QuoteAcceptanceSnapshot {
+  const accepted = { ...doc, accepted_at: acceptedAt }
+  const documents = (snapshot.documents || []).some((d) => d.id === doc.id)
+    ? snapshot.documents.map((d) => d.id === doc.id ? { ...d, accepted_at: acceptedAt } : d)
+    : [...(snapshot.documents || []), accepted]
+  if (sourceRunLabel === null) return { ...snapshot, documents }
+  const contactId = doc.job_contact_id ?? null
+  const acceptances = (snapshot.acceptances || []).filter((row) =>
+    !((row.job_contact_id ?? null) === contactId && row.run_label === sourceRunLabel)
+  )
+  acceptances.push({
+    job_document_id: doc.id,
+    job_contact_id: contactId,
+    run_label: sourceRunLabel,
+    status: 'accepted',
+    accepted_at: acceptedAt,
+  })
+  return { ...snapshot, documents, acceptances }
+}

@@ -41,8 +41,11 @@ import {
   quoteDocumentAcceptable,
   quoteDocumentRunLabel,
   quotePartyGreetingName,
+  quoteAcceptanceReadFailed,
+  type QuoteAcceptanceSnapshot,
   quoteViewRetryPage,
   quoteViewDecision,
+  withPendingAcceptance,
   retireOtherPublishedPartyRunDocuments,
   sendRetiresPriorPartyQuotes,
 } from './quote_party_view.ts'
@@ -1677,6 +1680,41 @@ serve(async (req: Request) => {
       }
 
       const acceptedAt = new Date().toISOString()
+
+      // Read everything the status and deposit decision needs BEFORE writing
+      // the acceptance (quoteAcceptanceReadFailed). A failed read writes
+      // nothing, so the customer's retry can still complete the acceptance.
+      let acceptanceSnapshot: QuoteAcceptanceSnapshot | null = null
+      if (doc.job_id) {
+        const [acceptancesRead, documentsRead, runItemsRead] = await Promise.all([
+          sb.from('run_acceptances')
+            .select('job_document_id, job_contact_id, run_label, status, accepted_at')
+            .eq('job_id', doc.job_id),
+          sb.from('job_documents')
+            .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
+            .eq('job_id', doc.job_id)
+            .eq('type', 'quote'),
+          sourceRunLabel !== null
+            ? sb.from('run_line_items')
+              .select('job_contact_id')
+              .eq('job_id', doc.job_id)
+              .eq('run_label', sourceRunLabel)
+              .limit(1)
+            : Promise.resolve({ data: [], error: null }),
+        ])
+        if (quoteAcceptanceReadFailed([acceptancesRead, documentsRead, runItemsRead])) {
+          console.error('[accept] pre-acceptance read failed; nothing written')
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
+        acceptanceSnapshot = withPendingAcceptance({
+          documents: documentsRead.data || [],
+          acceptances: acceptancesRead.data || [],
+          runNeighbourId: (runItemsRead.data as Array<{ job_contact_id?: string | null }> | null)?.[0]?.job_contact_id || null,
+        }, doc, sourceRunLabel, acceptedAt)
+      }
+
       const { error: acceptError } = await sb
         .from('job_documents')
         .update({ accepted_at: acceptedAt })
@@ -1803,7 +1841,7 @@ serve(async (req: Request) => {
           job_document_id: doc.id,
           run_label: runLabel,
           status: 'accepted',
-          accepted_at: new Date().toISOString(),
+          accepted_at: acceptedAt,
         }, { onConflict: 'job_id,job_contact_id,run_label' })
 
         // Get job data
@@ -1815,29 +1853,11 @@ serve(async (req: Request) => {
         const run = findQuoteRun(pj, runLabel)
         const runName = run?.run_name || runLabel
 
-        const [acceptancesRead, documentsRead, runItemsRead] = await Promise.all([
-          sb.from('run_acceptances')
-            .select('job_document_id, job_contact_id, run_label, status, accepted_at')
-            .eq('job_id', doc.job_id),
-          sb.from('job_documents')
-            .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
-            .eq('job_id', doc.job_id)
-            .eq('type', 'quote'),
-          sb.from('run_line_items')
-            .select('job_contact_id')
-            .eq('job_id', doc.job_id)
-            .eq('run_label', runLabel)
-            .limit(1),
-        ])
-        if (acceptancesRead.error || documentsRead.error || runItemsRead.error) {
-          return new Response(quoteViewRetryPage(), {
-            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
-          })
-        }
-        const runNeighbourId = runItemsRead.data?.[0]?.job_contact_id || null
+        const snapshot = acceptanceSnapshot!
+        const runNeighbourId = snapshot.runNeighbourId
         const hasNeighbour = !!runNeighbourId
         const { jobStatus, depositAcceptances } = quoteRunAcceptanceDecision(
-          documentsRead.data || [], acceptancesRead.data || [], runLabel, runNeighbourId,
+          snapshot.documents, snapshot.acceptances, runLabel, runNeighbourId,
         )
         const allAccepted = depositAcceptances.length > 0
 
@@ -1961,17 +1981,8 @@ serve(async (req: Request) => {
           .eq('job_id', doc.job_id)
 
         const isMultiContact = allContacts && allContacts.length > 1
-        const [documentsRead, requiredPartiesRead] = await Promise.all([
-          sb.from('job_documents')
-            .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
-            .eq('job_id', doc.job_id)
-            .eq('type', 'quote'),
-          sb.from('run_acceptances')
-            .select('job_contact_id, run_label')
-            .eq('job_id', doc.job_id),
-        ])
-        const newStatus = !documentsRead.error && !requiredPartiesRead.error &&
-            everyQuotePartyAccepted(documentsRead.data || [], requiredPartiesRead.data || [])
+        const snapshot = acceptanceSnapshot!
+        const newStatus = everyQuotePartyAccepted(snapshot.documents, snapshot.acceptances)
           ? 'accepted'
           : 'partially_accepted'
 

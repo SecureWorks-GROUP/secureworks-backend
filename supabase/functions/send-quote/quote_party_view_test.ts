@@ -11,8 +11,10 @@ import {
   quotePartyGreetingName,
   quotePartyKey,
   quoteViewDecision,
+  quoteAcceptanceReadFailed,
   quoteViewRetryPage,
   retireOtherPublishedPartyRunDocuments,
+  withPendingAcceptance,
   sameQuoteParty,
   sendRetiresPriorPartyQuotes,
 } from "./quote_party_view.ts"
@@ -593,4 +595,62 @@ Deno.test('snapshot routing keeps blank-labelled documents in the run view and a
     assert(!quoteDocumentAcceptable(client, [client, replacement]))
   }
   assertEquals(quoteDocumentRunLabel({ run_label: null }), null)
+})
+
+// ── R7: decide from a pre-write snapshot, so a failed read writes nothing ──
+
+Deno.test("R7 a failed pre-acceptance read is detected before anything is written", () => {
+  assert(quoteAcceptanceReadFailed([{ error: null }, { error: { message: "boom" } }, { error: null }]))
+  assert(quoteAcceptanceReadFailed([{ error: null }, null]))
+  assert(!quoteAcceptanceReadFailed([{ error: null }, { error: null }, { error: null }]))
+})
+
+Deno.test("R7 the last party's pending acceptance completes the run from the pre-write snapshot", () => {
+  const client = doc("r7-c", { job_contact_id: "client", run_label: "RHS", created_at: "2026-09-20T00:00:00Z" })
+  const neighbour = doc("r7-n", { job_contact_id: "neighbour", run_label: "RHS", created_at: "2026-09-20T00:00:01Z" })
+  // Before the write: the client already accepted, the neighbour is pending.
+  const before = {
+    documents: [{ ...client, accepted_at: "2026-09-21T00:00:00Z" }, neighbour],
+    acceptances: [
+      { job_document_id: "r7-c", job_contact_id: "client", run_label: "RHS", status: "accepted", accepted_at: "2026-09-21T00:00:00Z" },
+      { job_document_id: "r7-n", job_contact_id: "neighbour", run_label: "RHS", status: "pending", accepted_at: null },
+    ],
+    runNeighbourId: "neighbour",
+  }
+  const beforeDecision = quoteRunAcceptanceDecision(before.documents, before.acceptances, "RHS", "neighbour")
+  assertEquals(beforeDecision.depositAcceptances.length, 0)
+
+  const after = withPendingAcceptance(before, neighbour, "RHS", "2026-09-22T00:00:00Z")
+  assertEquals(after.acceptances.filter((row) => row.job_contact_id === "neighbour").length, 1)
+  const decision = quoteRunAcceptanceDecision(after.documents, after.acceptances, "RHS", "neighbour")
+  assertEquals(decision.jobStatus, "accepted")
+  assertEquals(decision.depositAcceptances.map((row) => row.job_contact_id).sort(), ["client", "neighbour"])
+})
+
+Deno.test("R7 the pending acceptance replaces the party's row by its source label and leaves others alone", () => {
+  const padded = doc("r7-p", { job_contact_id: "client", run_label: " RHS ", created_at: "2026-09-20T00:00:00Z" })
+  const snapshot = {
+    documents: [padded],
+    acceptances: [
+      { job_document_id: "old", job_contact_id: "client", run_label: " RHS ", status: "pending", accepted_at: null },
+      { job_document_id: "other", job_contact_id: "client", run_label: "LHS", status: "pending", accepted_at: null },
+    ],
+    runNeighbourId: null,
+  }
+  const after = withPendingAcceptance(snapshot, padded, " RHS ", "2026-09-22T00:00:00Z")
+  assertEquals(after.acceptances.map((row) => `${row.run_label}|${row.job_document_id}|${row.status}`).sort(), [
+    " RHS |r7-p|accepted",
+    "LHS|other|pending",
+  ])
+  assertEquals(after.documents[0].accepted_at, "2026-09-22T00:00:00Z")
+})
+
+Deno.test("R7 a whole-job acceptance is judged on the snapshot with the accepted document", () => {
+  const client = doc("r7-wc", { job_contact_id: "client", created_at: "2026-09-20T00:00:00Z" })
+  const neighbour = doc("r7-wn", { job_contact_id: "neighbour", created_at: "2026-09-20T00:00:01Z", accepted_at: "2026-09-21T00:00:00Z" })
+  const snapshot = { documents: [client, neighbour], acceptances: [], runNeighbourId: null }
+  assert(!everyQuotePartyAccepted(snapshot.documents, snapshot.acceptances))
+  const after = withPendingAcceptance(snapshot, client, null, "2026-09-22T00:00:00Z")
+  assertEquals(after.acceptances, [])
+  assert(everyQuotePartyAccepted(after.documents, after.acceptances))
 })
