@@ -18,8 +18,8 @@
 --      No switch or flag is turned on here.
 --   2. resolve_context_attribution(e, p_preview, p_rules_on): the one ladder.
 --      With the rules off (today, and until the flag goes on) it runs P1a's
---      ladder unchanged (context_ladder_p1a, the live body moved verbatim, with
---      only its thread-binding write skipped in preview). With the rules on it
+--      ladder (context_ladder_p1a, with retired bindings excluded and
+--      its thread-binding write skipped in preview). With the rules on it
 --      runs adminbucket.md section 4, in this order:
 --        0. Writer check: a row whose metadata.written_as (recorded by the
 --           insert trigger, item 6) is not service_role is never placed; any
@@ -420,8 +420,8 @@ COMMENT ON FUNCTION public.context_contact_jobs_at(text,timestamptz,text,text) I
  'P4: candidate jobs at p_at for a contact and the message''s own phone and email keys (clause live), or, when none is live, finished jobs with an ACCREC invoice unpaid at p_at (aftercare_unpaid) or finished in the 60 days before (aftercare_window); both review only.';
 
 -- 2a. P1a's ladder, moved verbatim from resolve_context_attribution (live md5
--- fe50f14f...) with one change: in preview it writes no thread binding and
--- reads the existing one instead. Private: runs while the rules are off.
+-- fe50f14f...) except for excluding retired thread bindings and skipping
+-- thread writes in preview. Private: runs while the rules are off.
 CREATE OR REPLACE FUNCTION public.context_ladder_p1a(e public.business_events,p_preview boolean) RETURNS public.business_events
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE words text; tokens text; ids uuid[]; candidate uuid; n int; line text; contact_ids text[]; prior_status text; source_method text;
@@ -474,7 +474,7 @@ BEGIN
  IF candidate IS NOT NULL THEN e.attribution_status:='direct'; e.attribution_step:=1;
  ELSE
   IF NOT is_ghl THEN
-   SELECT job_id INTO candidate FROM public.event_threads WHERE thread_key=e.thread_key;
+   SELECT job_id INTO candidate FROM public.event_threads WHERE thread_key=e.thread_key AND retired_at IS NULL;
   END IF;
   IF candidate IS NOT NULL THEN e.attribution_status:='thread'; e.attribution_step:=2;
   ELSE
@@ -747,7 +747,9 @@ BEGIN
    IF cand IS NULL THEN
     n:=cardinality(ids);
     review_ids:=NULL;
-    IF n=1 AND cardinality(guard_ids)=0 THEN
+    IF n>0 AND (e.metadata ? 'identity_conflict' OR cardinality(other_ids)>0) THEN
+     rule:='review_identity_conflict'; review_ids:=ids||guard_ids;
+    ELSIF n=1 AND cardinality(guard_ids)=0 THEN
      cand:=ids[1]; e.attribution_status:='single_open'; e.attribution_step:=3;
      rule:=CASE WHEN e.metadata ? 'contact_recovered_by' THEN 'identity_'||(e.metadata->>'contact_recovered_by')
       WHEN contact IS NULL AND ek IS NOT NULL THEN 'identity_email' WHEN contact IS NULL THEN 'identity_phone' ELSE 'single_open' END;
@@ -801,7 +803,16 @@ BEGIN
        AND coalesce(j.created_at,'-infinity'::timestamptz)<=v_at
        AND (NOT (j.status::text IN ('cancelled','archived','lost','closed','complete','completed') OR coalesce(j.archived,false)
          OR (j.status::text='invoiced' AND j.completed_at IS NOT NULL))
-        OR coalesce(j.completed_at,j.updated_at,'-infinity'::timestamptz)>=v_at-interval '60 days'))
+        OR coalesce((
+         SELECT min(coalesce(be.event_at,be.occurred_at)) FROM public.business_events be
+         WHERE be.entity_type='job' AND be.entity_id=j.id::text AND be.event_type='job.status_changed'
+          AND lower(be.payload->'changes'->'status'->>'to') IN ('cancelled','archived','lost','closed','complete','completed')
+          AND coalesce(be.event_at,be.occurred_at)>coalesce((
+           SELECT max(coalesce(nt.event_at,nt.occurred_at)) FROM public.business_events nt
+           WHERE nt.entity_type='job' AND nt.entity_id=j.id::text AND nt.event_type='job.status_changed'
+            AND lower(nt.payload->'changes'->'status'->>'to') NOT IN ('cancelled','archived','lost','closed','complete','completed')
+          ),'-infinity'::timestamptz)
+        ),j.completed_at,'-infinity'::timestamptz)>=v_at-interval '60 days'))
      SELECT array_agg(DISTINCT n.id ORDER BY n.id) FILTER (WHERE n.k=ANY(coalesce(exact_keys,'{}'))),
       array_agg(DISTINCT n.id ORDER BY n.id) FILTER (WHERE n.lk && loose_keys)
      INTO exact_ids,loose_ids FROM near n;

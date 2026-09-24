@@ -570,6 +570,60 @@ BEGIN
   OR NOT EXISTS(SELECT 1 FROM public.event_threads WHERE thread_key='supplier_ref:perth.metroll.example:7654321')
  THEN RAISE EXCEPTION 're-run: must decide as the preview did, got % %',e.attribution_status,e.job_id; END IF;
 END $$;
+
+DO $$
+DECLARE e public.business_events; mode text;
+BEGIN
+ UPDATE public.jobs SET client_email='ambiguous.p4@example.com',ghl_contact_id='p4-ambiguous-a'
+ WHERE id='d4000000-0000-4000-8000-000000000183';
+ UPDATE public.jobs SET client_email='ambiguous.p4@example.com',ghl_contact_id='p4-ambiguous-b',
+ status='archived',completed_at='2025-01-01Z',updated_at='2025-01-01Z'
+ WHERE id='d4000000-0000-4000-8000-000000000941';
+ FOREACH mode IN ARRAY ARRAY['live','backfill','relink'] LOOP
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,payload,metadata)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z',
+ '{"from":"ambiguous.p4@example.com","subject":"Question","body":"Can you help?"}',
+ jsonb_build_object('capture_mode',mode)) RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR NOT (e.metadata ? 'identity_conflict')
+ OR e.candidate_job_ids IS DISTINCT FROM ARRAY['d4000000-0000-4000-8000-000000000183']::uuid[]
+ OR e.attribution_status IS DISTINCT FROM (CASE WHEN mode='live' THEN 'pending_luna' ELSE 'unplaced' END)
+ THEN RAISE EXCEPTION 'ambiguous identity shortcut: %',row_to_json(e); END IF;
+ END LOOP;
+ UPDATE public.jobs SET status='archived',completed_at=NULL,updated_at='2026-09-20Z'
+ WHERE id='d4000000-0000-4000-8000-000000000701';
+ INSERT INTO public.business_events(event_type,source,entity_type,entity_id,channel,direction,event_at,payload)
+ VALUES('job.status_changed','app/office','job','d4000000-0000-4000-8000-000000000701','status','internal',
+ '2026-06-01Z','{"changes":{"status":{"to":"completed"}}}');
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,payload)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z',
+ '{"from":"council@council.example","subject":"14 Bradley Street","body":"RFI"}') RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status='content_ref'
+ THEN RAISE EXCEPTION 'old terminal site placed: %',row_to_json(e); END IF;
+ UPDATE public.feature_flags SET enabled=false WHERE flag_name='context_unlinked_rules_v1';
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,thread_key,payload)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z','outlook:e21-conv',
+ '{"from":"crew@supplier.example","subject":"Re: materials","body":"Running late."}') RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status='thread'
+ THEN RAISE EXCEPTION 'flag off followed retired thread'; END IF;
+END $$;
+CREATE TEMP TABLE p4_retired_before AS SELECT * FROM public.event_threads WHERE retired_at IS NOT NULL;
+CREATE TEMP TABLE p4_thread_count AS SELECT count(*) AS n FROM public.event_threads;
+\ir ../../../rollbacks/20260924213000_context_unlinked_rules_down.sql
+DO $$
+DECLARE e public.business_events;
+BEGIN
+ IF EXISTS(SELECT 1 FROM p4_retired_before b LEFT JOIN public.event_threads t
+ ON t.thread_key='retired:'||b.thread_key
+ WHERE t.job_id IS DISTINCT FROM b.job_id OR t.retired_at IS DISTINCT FROM b.retired_at)
+ OR (SELECT count(*) FROM public.event_threads)<>(SELECT n FROM p4_thread_count)
+ THEN RAISE EXCEPTION 'rollback failed to preserve and rekey retired bindings'; END IF;
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,thread_key,payload)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z','outlook:e21-conv',
+ '{"from":"crew@supplier.example","subject":"Re: materials","body":"Running late."}') RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status='thread'
+ THEN RAISE EXCEPTION 'rollback followed retired thread'; END IF;
+END $$;
+
 ROLLBACK;
 
 -- C. Structure.
@@ -598,13 +652,14 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_jobs_at(text,timestamptz)'::regprocedure)<>'911811b617fa760f5ddf847fb1ab853d'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz)'::regprocedure)<>'2bc8e76f14fda242eb6e4d414e93fefa'
  THEN RAISE EXCEPTION 'p4: P1a''s two-argument candidate set changed'; END IF;
- -- P1a's ladder body moved verbatim: undoing the one preview guard gives back
+ -- P1a's ladder body moved verbatim: undoing the retirement filter and preview guard gives back
  -- P1a's live body byte for byte.
- IF md5(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
+ IF md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
+   'WHERE thread_key=e.thread_key AND retired_at IS NULL;', 'WHERE thread_key=e.thread_key;'),
    E'   IF NOT p_preview THEN\n    INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,candidate,''ladder'',e.id) ON CONFLICT DO NOTHING;\n   END IF;\n   IF EXISTS (SELECT 1 FROM public.event_threads WHERE thread_key=e.thread_key AND job_id<>candidate) THEN',
    E'   INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,candidate,''ladder'',e.id) ON CONFLICT DO NOTHING;\n   IF NOT EXISTS (SELECT 1 FROM public.event_threads WHERE thread_key=e.thread_key AND job_id=candidate) THEN'))
   <>'fe50f14f4ab28d4d6c9dbb70bc85e7df'
- THEN RAISE EXCEPTION 'p4: context_ladder_p1a is not P1a''s body plus the preview guard'; END IF;
+ THEN RAISE EXCEPTION 'p4: context_ladder_p1a is not P1a''s body plus retirement and preview guards'; END IF;
 END $$;
 
 -- An unreadable flag table reads as off.
