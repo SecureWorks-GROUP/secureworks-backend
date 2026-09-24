@@ -43,6 +43,7 @@ import {
   buildGhlMessageRow,
   type GhlMessageItem,
 } from "../_shared/evidence/ghl_message.ts";
+import type { LegacyCallPairOutcome } from "../_shared/evidence/ghl_call_pair.ts";
 
 /** context_capture_runs.source for this reconciler. */
 export const RUN_SOURCE = "ghl_message_reconcile";
@@ -142,6 +143,14 @@ export interface ReconcileDeps {
   existingKeys(keys: string[]): Promise<Set<string>>;
   /** capture_business_event(row). Never throws: a transport fault is outcome error. */
   capture(row: Record<string, unknown>): Promise<CaptureOutcome>;
+  /**
+   * For a call row: the row to write, with payload.legacy_event_id when exactly
+   * one legacy client.call_complete row of the contact sits around the call
+   * (_shared/evidence/ghl_call_pair.ts, slice T1). Never throws.
+   */
+  pairLegacyCall(
+    row: Record<string, unknown>,
+  ): Promise<{ row: Record<string, unknown>; outcome: LegacyCallPairOutcome }>;
 }
 
 export type ReconcileResult =
@@ -176,7 +185,13 @@ const COUNT_KEYS = [
   "skipped_no_id",
   "skipped_no_contact",
   "skipped_no_direction",
+  // Since slice T1 calls are saved as client.call_logged rows, so this stays 0;
+  // kept so every run row has the same count keys.
   "skipped_call",
+  // Slice T1: call rows that recorded their one legacy call row, and lookups
+  // that could not be read (the row is then written as normal).
+  "calls_paired_legacy",
+  "call_pair_unreadable",
   "skipped_activity",
   "skipped_unsupported_type",
   "backlog_conversations",
@@ -550,7 +565,16 @@ export async function runGhlMessageReconcile(
           counts.duplicates++;
           continue;
         }
-        const out = await deps.capture(row);
+        let toWrite = row;
+        if (row.event_type === "client.call_logged") {
+          const paired = await deps.pairLegacyCall(row);
+          toWrite = paired.row;
+          if (paired.outcome === "paired") counts.calls_paired_legacy++;
+          else if (paired.outcome === "unreadable") {
+            counts.call_pair_unreadable++;
+          }
+        }
+        const out = await deps.capture(toWrite);
         if (out.outcome === "inserted") {
           counts.inserted++;
           counts.webhook_misses++;
