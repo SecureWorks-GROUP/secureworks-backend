@@ -40,6 +40,7 @@ import {
   isGhlRecordEventType,
 } from "../_shared/evidence/ghl_message.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
+import { pairLegacyCall } from "../_shared/evidence/ghl_call_pair.ts";
 import {
   GhlProviderReadError,
   readGhlProvider,
@@ -107,14 +108,33 @@ type WriteOutcome =
   | { outcome: "capture_disabled" }
   | { outcome: "error"; code: string };
 
-/** Save one built row through capture_business_event. Never throws. */
+/**
+ * Save one built row through capture_business_event. A call row first looks
+ * for the one legacy client.call_complete row it stands for (ghl_call_pair.ts)
+ * and records it in payload.legacy_event_id. Never throws.
+ */
 export async function writeCapturedRow(
   client: Db,
   row: Record<string, unknown>,
 ): Promise<WriteOutcome> {
   try {
+    let toWrite = row;
+    if (row.event_type === "client.call_logged") {
+      const paired = await pairLegacyCall(client, row);
+      toWrite = paired.row;
+      if (paired.outcome !== "none") {
+        console.log(
+          `[ghl-webhook-receiver] legacy call pair: outcome=${paired.outcome} key=${
+            safeId(
+              String(row.provider_message_id ?? "").replace(/^ghl:/, ""),
+            ) ??
+              "none"
+          }`,
+        );
+      }
+    }
     const { data, error } = await client.rpc("capture_business_event", {
-      p_row: row,
+      p_row: toWrite,
     });
     if (error) return { outcome: "error", code: errorCode(error) };
     const out = data && typeof data === "object"

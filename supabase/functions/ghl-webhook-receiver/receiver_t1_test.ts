@@ -362,3 +362,44 @@ Deno.test("T1 flag on: the capture lane off still answers capture_disabled befor
   assertEquals(gh.seen.length, 0);
   assertEquals(ghlReceipt(r).outcome, "capture_disabled");
 });
+
+// ── one real call is one call (finding T1-002, ruling A2) ─────
+
+Deno.test("T1-002 flag on: the doorbell's N1 row records the one legacy CallCompleted row; N2 (no legacy row) is written as normal; nothing existing is edited", async () => {
+  const legacyN1 = {
+    id: "aaaaaaaa-0000-4000-8000-000000000001",
+    event_type: "client.call_complete",
+    contact_id: CONTACT,
+    event_at: null,
+    occurred_at: "2026-09-23T07:43:06.000Z",
+    provider_message_id: null,
+    payload: { duration: 109 },
+  };
+  const gh = provider(CALLS);
+  const r = await run(
+    await post(N1_CALL_COMPLETED, "secret"),
+    "enforce",
+    { ...ON, events: [legacyN1] },
+    TOKEN,
+    gh.answer,
+  );
+  assertEquals(r.res.status, 200);
+  const [n1, n2, n3] = captureRows(r);
+  assertEquals(
+    (n1.payload as Row).legacy_event_id,
+    "aaaaaaaa-0000-4000-8000-000000000001",
+  );
+  assertFalse("legacy_event_id" in (n2.payload as Row));
+  assertFalse("legacy_event_id" in (n3.payload as Row));
+  assertEquals(
+    ghlReceipt(r).targeted_inserted,
+    3,
+    "each call still written once",
+  );
+  assertEquals(
+    r.ops.filter((o) => o.table === "business_events" && o.kind === "update")
+      .length,
+    0,
+    "no existing row is edited",
+  );
+});

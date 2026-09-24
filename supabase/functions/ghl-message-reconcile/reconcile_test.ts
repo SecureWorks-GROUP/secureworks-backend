@@ -23,6 +23,11 @@ import {
   R5,
   R7_LIST_ITEMS,
 } from "../_shared/evidence/ghl_message_fixtures.ts";
+import { pairLegacyCall } from "../_shared/evidence/ghl_call_pair.ts";
+import {
+  legacyCallClient,
+  type StoredEvent,
+} from "../_shared/evidence/ghl_call_pair_test_support.ts";
 import {
   CAPTURE_RUN_CURSOR_MAX_BYTES,
   captureRunCursorBytes,
@@ -163,6 +168,9 @@ class FakeDb {
   })[] = [];
   keys = new Set<string>();
   rows: Record<string, unknown>[] = [];
+  /** Existing business_events rows the legacy call pairing reads (slice T1). */
+  events: StoredEvent[] = [];
+  eventsUnreadable = false;
   captureCalls = 0;
   refusedCursors = 0;
   flag = true;
@@ -272,6 +280,17 @@ function deps(ghl: FakeGhl, db: FakeDb): ReconcileDeps {
     existingKeys: (keys) =>
       Promise.resolve(new Set(keys.filter((k) => db.keys.has(k)))),
     capture: (row) => Promise.resolve(db.capture(row)),
+    // The real pairing, over a stand-in for its two business_events reads.
+    pairLegacyCall: (row) =>
+      pairLegacyCall(
+        legacyCallClient(
+          db.events,
+          db.eventsUnreadable
+            ? { error: { code: "57014", message: "canceling statement" } }
+            : {},
+        ).client,
+        row,
+      ),
   };
 }
 
@@ -440,6 +459,52 @@ Deno.test("T1 N1 to N3: calls the webhook missed are saved as one call record ea
     "voicemail",
   );
   assertEquals(rowFor(db, N3_CALL_ITEM.id), undefined, "no second row");
+});
+
+Deno.test("T1-002: a call the webhook missed records its one legacy CallCompleted row; the run counts the pairing; an unreadable lookup writes as normal", async () => {
+  const legacyN2 = {
+    id: "aaaaaaaa-0000-4000-8000-000000000002",
+    event_type: "client.call_complete",
+    contact_id: N2_CALL_ITEM.contactId,
+    event_at: null,
+    occurred_at: "2026-09-22T23:00:02.000Z", // the voicemail's post, as it ended
+    provider_message_id: null,
+    payload: { voicemail: true },
+  };
+  for (const unreadable of [false, true]) {
+    const ghl = new FakeGhl();
+    const db = new FakeDb();
+    db.events = [legacyN2];
+    db.eventsUnreadable = unreadable;
+    ghl.add({
+      id: N1_CALL_ITEM.conversationId,
+      contactId: N1_CALL_ITEM.contactId,
+      messages: [N1_CALL_ITEM, N2_CALL_ITEM, N3_CALL_ITEM] as Msg[],
+    });
+    seedCompleteScan(db, "2026-09-21T23:00:00.000Z");
+    db.clock = at("2026-09-23T07:50:00.000Z");
+    const result = await runGhlMessageReconcile(deps(ghl, db));
+    assert(result.outcome === "ran");
+    assertEquals(result.counts.inserted, 3, "every call still written once");
+    const n2 = rowFor(db, N2_CALL_ITEM.id)!.payload as Record<string, unknown>;
+    const n1 = rowFor(db, N1_CALL_ITEM.id)!.payload as Record<string, unknown>;
+    assertEquals("legacy_event_id" in n1, false);
+    if (unreadable) {
+      assertEquals("legacy_event_id" in n2, false);
+      assertEquals(result.counts.calls_paired_legacy, 0);
+      assertEquals(result.counts.call_pair_unreadable, 3);
+      assertEquals(
+        result.status,
+        "succeeded",
+        "a lookup fault never fails the run",
+      );
+    } else {
+      assertEquals(n2.legacy_event_id, "aaaaaaaa-0000-4000-8000-000000000002");
+      assertEquals(result.counts.calls_paired_legacy, 1);
+      assertEquals(result.counts.call_pair_unreadable, 0);
+    }
+    assertEquals(db.events, [legacyN2], "the legacy row is never edited");
+  }
 });
 
 Deno.test("R5: a text our tool already saved is a duplicate; no second row and no writer call", async () => {

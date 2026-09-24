@@ -231,36 +231,3 @@ Deno.test("D0 row 1 SWP-26354: the job dossier conversation and evidence carry 0
     "the dossier must not read chat_logs",
   );
 });
-
-Deno.test("a paired legacy call is shown once, using the provider call row", async () => {
-  const tables = swp26354Tables();
-  tables.business_events.push(
-    {
-      id: "legacy-call-1",
-      event_type: "client.call_complete",
-      source: "ghl-webhook-receiver",
-      occurred_at: "2026-09-18T03:00:00.000Z",
-      body_preview: "[legacy call]",
-      direction: "inbound",
-      payload: { duration: 109 },
-    },
-    {
-      id: "logged-call-1",
-      event_type: "client.call_logged",
-      source: "ghl-webhook-receiver",
-      occurred_at: "2026-09-18T03:00:30.000Z",
-      body_preview: "[Call, inbound. Provider status: completed.]",
-      direction: "inbound",
-      payload: { legacy_event_id: "legacy-call-1" },
-    },
-  );
-  const { messages }: any = await _getJobConversationForTest(
-    fakeClient(tables),
-    { job_id: JOB_ID, limit: 20 },
-  );
-  const calls = messages.filter((message: any) => message.channel === "call");
-  assertEquals(calls.length, 1);
-  assertEquals(calls[0].source_ref, "logged-call-1");
-  assertEquals(calls[0].direction, "inbound");
-  assertEquals(calls[0].body, "[Call, inbound. Provider status: completed.]");
-});

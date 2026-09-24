@@ -23,6 +23,7 @@ import {
   readGhlProvider,
 } from "../ghl-proxy/provider_reads.ts";
 import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
+import { pairLegacyCall } from "../_shared/evidence/ghl_call_pair.ts";
 import {
   type CaptureOutcome,
   ITEM_FLAG,
@@ -167,6 +168,7 @@ export function liveReconcileDeps(deps: HandlerDeps): ReconcileDeps {
         ),
       );
     },
+    pairLegacyCall: (row) => pairLegacyCall(supabase, row),
     async capture(row): Promise<CaptureOutcome> {
       try {
         const { data, error } = await supabase.rpc("capture_business_event", {

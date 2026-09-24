@@ -1094,30 +1094,6 @@ Deno.test("7b. Haiku / instruction facts do not count as Luna coverage", async (
   assertEquals(cov.totals.facts_present, 0);
 });
 
-Deno.test("coverage counts a call and its referenced legacy copy once", async () => {
-  const t = baseTables();
-  t.business_events.push(
-    {
-      id: "legacy-call-coverage",
-      job_id: JOB1,
-      event_type: "client.call_complete",
-      occurred_at: "2026-09-04T00:00:00.000Z",
-      payload: { duration: 109 },
-    },
-    {
-      id: "logged-call-coverage",
-      job_id: JOB1,
-      event_type: "client.call_logged",
-      occurred_at: "2026-09-04T00:00:30.000Z",
-      payload: { legacy_event_id: "legacy-call-coverage" },
-    },
-  );
-  const out = await debtContextCoverage(new URLSearchParams({}), deps(t));
-  const row = out.rows.find((item: any) => item.invoice_number === "INV-1419")!;
-  assertEquals(row.conversation_sources.business_events, 2);
-  assertEquals(row.conversation_count, 4);
-});
-
 Deno.test("7. multi-row reads page past the PostgREST 1000-row cap", async () => {
   const t = baseTables();
   // The fake client enforces the real 1000-row response cap, so an unpaged

@@ -3688,8 +3688,13 @@ A GHL call item is one `client.call_logged` row (channel `call`, key
 builder (slice T1). The `CallCompleted` workflow post branches on the same flag:
 off, it writes the legacy `client.call_complete` row; on, it is a doorbell that
 writes nothing and reads the contact's newest conversation (the live post has no
-conversation id). A call's transcript is always a separate row. Tests:
-`receiver_t1_test.ts`.
+conversation id). A call's transcript is always a separate row. Before a call
+row is written, `_shared/evidence/ghl_call_pair.ts` records the one legacy
+`client.call_complete` row of the contact from 120 s before the call to 120 s
+after it ended in `payload.legacy_event_id` (none or several: written as
+normal; existing rows never edited). Counting that pair once is the readers'
+and T4's job, not the writer's. Tests: `receiver_t1_test.ts`,
+`ghl_call_pair_test.ts`.
 
 ## A pg_cron Bearer Is Not The Function's Service Key
 

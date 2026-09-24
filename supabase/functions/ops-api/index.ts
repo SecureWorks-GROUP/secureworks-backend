@@ -1,6 +1,5 @@
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
-import { filterPairedLegacyCallRows } from "../_shared/evidence/ghl_call_pair.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
@@ -16090,7 +16089,7 @@ async function getJobConversation(client: any, body: any) {
     const messageEventTypes = [
       'client.reply', 'client.email_in', 'client.email_out',
       'client.sms_in', 'client.sms_out',
-      'client.call_complete', 'client.call_logged', 'client.message_in',
+      'client.call_complete', 'client.message_in',
       'supplier.email_in', 'ghl.note_added',
     ]
     // attribution_status / attribution_step / placement_rule (context slice
@@ -16098,26 +16097,24 @@ async function getJobConversation(client: any, body: any) {
     // this job. placement_rule is metadata.placement_rule (null until the
     // placement rules that write it ship).
     let q = client.from('business_events')
-      .select('id, event_type, source, occurred_at, body_preview, payload, direction, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule')
+      .select('id, event_type, source, occurred_at, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule')
       .eq('job_id', jobId)
       .in('event_type', messageEventTypes)
       .order('occurred_at', { ascending: false })
-      .limit(limit * 2)
+      .limit(limit)
     if (sinceFilter) q = q.gt('occurred_at', sinceFilter)
     const { data: bev, error: bevErr } = await q
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr.message)
-    for (const r of (await filterPairedLegacyCallRows(client, bev || [])).slice(0, limit)) {
+    for (const r of (bev || [])) {
       const p: any = r.payload || {}
       const channel: string = r.event_type.includes('sms') ? 'sms'
         : r.event_type.includes('call') ? 'call'
         : r.event_type.includes('note') ? 'note'
         : 'email'
-      const direction: string = r.event_type === 'client.call_logged' && ['inbound', 'outbound'].includes(r.direction)
-        ? r.direction
-        : r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'ghl.note_added' || r.event_type === 'supplier.email_in'
+      const direction: string = r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'ghl.note_added' || r.event_type === 'supplier.email_in'
         ? 'inbound'
         : 'outbound'
-      const body = String(p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || r.body_preview || '')
+      const body = String(p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
       messages.push({
         id: `bev:${r.id}`,
         job_id: jobId,
@@ -16366,11 +16363,11 @@ async function assembleJobDossier(client: any, body: any) {
       .select('id, event_type, source, occurred_at, payload, correlation_id')
       .eq('job_id', jobId)
       .order('occurred_at', { ascending: false })
-      .limit(Math.min(eventsLimit * 2, 1000))
+      .limit(eventsLimit)
     if (since) q = q.gt('occurred_at', since)
     const { data, error } = await q
     if (error) throw new Error(error.message)
-    return (await filterPairedLegacyCallRows(client, data || [])).slice(0, eventsLimit)
+    return data
   })
   sourceStatus.businessEvents = eventsRead.status
 
