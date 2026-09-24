@@ -277,6 +277,22 @@ Deno.test("run acceptance uses only the newest document; whole-quote options acc
   ]))
 })
 
+Deno.test("a contact-less client run document stays a required party beside the neighbour", () => {
+  const docs = [
+    doc("client-run", { job_contact_id: null, run_label: "RHS", created_at: "2026-09-03T00:00:00Z" }),
+    doc("neighbour-run", { job_contact_id: "nbr", run_label: "RHS", accepted_at: "2026-09-04T00:00:00Z", created_at: "2026-09-03T00:00:00Z" }),
+  ]
+  const acceptances = [
+    { job_document_id: "client-run", job_contact_id: null, run_label: "RHS", status: "pending", accepted_at: null },
+    { job_document_id: "neighbour-run", job_contact_id: "nbr", run_label: "RHS", status: "accepted", accepted_at: "2026-09-04T00:00:00Z" },
+  ]
+  assert(!everyQuotePartyAccepted(docs))
+  assert(!everyQuotePartyAccepted(docs, acceptances))
+  const decision = quoteRunAcceptanceDecision(docs, acceptances, "RHS", "nbr")
+  assertEquals(decision.jobStatus, "partially_accepted")
+  assertEquals(decision.depositAcceptances, [])
+})
+
 // ── Retirement on send ──────────────────────────────────────────────────────
 
 Deno.test("/send retires the party's earlier quotes by default; explicit false opts out", () => {

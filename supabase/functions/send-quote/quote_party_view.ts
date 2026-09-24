@@ -213,7 +213,8 @@ export function everyQuotePartyAccepted(
   const keys = [...byParty.keys()]
   if (keys.some((key) => JSON.parse(key).jobContactId !== null)) {
     for (const key of keys) {
-      if (JSON.parse(key).jobContactId === null) byParty.delete(key)
+      const party = JSON.parse(key)
+      if (party.jobContactId === null && party.runLabel === null) byParty.delete(key)
     }
   }
   if (byParty.size === 0) return false
