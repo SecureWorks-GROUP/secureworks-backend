@@ -47,11 +47,8 @@ and model budget left), runs today, ceiling and pacing holds, lease takeovers,
 unplaced rows, rows not written as `service_role`, and `alarms`. Due is
 `context_jobs_cadence`; do not re-derive it here.
 
-`email_capture` (EM1, `20260924213000`): every `monitored_mailboxes` source
-with its poll, sweep and history run rows and the alarms `email_source_error`,
-`email_poll_missed`, `email_backlog`, `sweep_incomplete`, raised only while
-flag `email_capture_v2` and the capture lane are on. Contract, run-row names
-and thresholds: [`email-capture.md`](email-capture.md).
+`email_capture`: the grouped health shape and alarm contract are owned by
+[`email-capture.md`](email-capture.md#health-email_capture-status-block).
 
 `capture_sources`: last `context_captured_at` per `business_events.source`
 (rows with `metadata.capture_mode` `backfill` or `relink` ignored), business

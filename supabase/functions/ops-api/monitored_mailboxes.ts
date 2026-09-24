@@ -58,20 +58,25 @@ export function parseSetMonitoredMailboxBody(
   body: unknown,
 ): SetMonitoredMailboxInput {
   const bad = (message: string) =>
-    new MonitoredMailboxError("monitored_mailbox_request_invalid", 400, message);
+    new MonitoredMailboxError(
+      "monitored_mailbox_request_invalid",
+      400,
+      message,
+    );
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw bad("A JSON object body is required.");
   }
   const b = body as Record<string, unknown>;
   const unknown = Object.keys(b).filter((k) => !BODY_KEYS.has(k));
   if (unknown.length) throw bad(`Unknown field: ${unknown.sort().join(", ")}.`);
-  const email = typeof b.email === "string"
-    ? b.email.trim().toLowerCase()
-    : "";
+  const email = typeof b.email === "string" ? b.email.trim().toLowerCase() : "";
   if (!ADDRESS.test(email) || email.length > 254) {
     throw bad("email must be a mailbox address.");
   }
-  if (b.enabled !== undefined && b.enabled !== null && typeof b.enabled !== "boolean") {
+  if (
+    b.enabled !== undefined && b.enabled !== null &&
+    typeof b.enabled !== "boolean"
+  ) {
     throw bad("enabled must be true or false.");
   }
   if (

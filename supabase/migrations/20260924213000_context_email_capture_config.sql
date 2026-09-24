@@ -45,11 +45,8 @@
 --      guard requires it absent on a first apply; a re-apply leaves the row
 --      this migration created as it is.
 --   6. context_email_capture_policy() and context_email_capture_status(),
---      replacing F1b's stub for status block email_capture. Per source: its
---      poll, sweep and history run rows in context_capture_runs, and four
---      alarms (email.md §8): email_source_error, email_poll_missed,
---      email_backlog, sweep_incomplete. Alarms are raised only while the flag
---      is on and the capture lane is on: before that nothing is meant to run.
+--      replacing F1b's stub with grouped health, never per-mailbox identities.
+--      Output and alarm contract: docs/context/email-capture.md.
 --
 -- Run-row contract for the email writers (EM2, EM3). record_capture_run()
 -- takes a source matching ^[a-z][a-z0-9_]{2,62}$, so a mailbox address cannot

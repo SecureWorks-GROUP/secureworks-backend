@@ -34,7 +34,10 @@ Writers: the migration seed, then only `set_monitored_mailbox()`, reached
 through ops-api `POST ?action=set_monitored_mailbox`
 `{email, enabled?, status?, reason}` (server key or a company admin or
 owner). It changes `enabled` and `status` only, records `updated_by` (the
-actor, INTEGRATION X31) and a `monitored_mailbox_changes` receipt. Adding or
+actor, INTEGRATION X31) and a `monitored_mailbox_changes` receipt. Setting
+`status: "pending_review"` without `enabled` also disables the source. An
+unchanged request returns `outcome: "unchanged"` without a new receipt or
+actor stamp. Adding or
 removing a source is a migration. Both tables: RLS on, every grant revoked
 from PUBLIC, anon and authenticated (the draft's `authenticated_select`
 policy dropped); service_role reads. The draft's other columns
@@ -86,7 +89,10 @@ the owner, sales, ops and other labels. Each line has counts (`sources`,
 `selected`, `pending_review`, `healthy`, `erroring`, `never_seen`) and
 `oldest_last_seen_at` (the oldest last successful poll among its selected
 sources). No address, source key, run-row name or privacy setting appears;
-those stay in the service-role table.
+those stay in the service-role table. `healthy` means selected with no active
+alarms, not proof of a successful poll: while alarms are disabled, even a
+never-seen selected source counts as healthy. `never_seen` remains separate;
+`oldest_last_seen_at` ignores null sightings.
 
 Alarms are raised only while the flag and the capture lane are on, for
 selected sources (enabled and `active`), and are reported per line and key
