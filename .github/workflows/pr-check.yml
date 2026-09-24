@@ -322,6 +322,13 @@ jobs:
             supabase/functions/_shared/job_refs_test.ts \
             supabase/functions/_shared/job_refs_contract_rows_test.ts
 
+      # Slice EM0: monitor-inbox classifies by rules on both paths, with no
+      # model or network call (named email rows, fetch trapped, source pin).
+      - name: Test monitor-inbox rules-only email triage
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/monitor-inbox/classify_email_test.ts
+
       # Slice F-ACT: the one actor rule (verified user, else x-sw-actor on a
       # server-key call, else actor_missing; never refused).
       - name: Test the shared request actor rule
