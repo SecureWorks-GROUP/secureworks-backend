@@ -27,11 +27,7 @@ export interface SalesBookingSenderPerson {
   profile: string;
   /** E.164 GHL number this person's booking texts go from. */
   line: string;
-  source: string;
 }
-
-const WIKI_PROFILES =
-  "secureworks-wiki harness/ops/skills/secureworks-scope-booking/profiles";
 
 export const SALES_BOOKING_SENDER_LINES: Readonly<
   Record<string, Readonly<SalesBookingSenderPerson>>
@@ -42,7 +38,6 @@ export const SALES_BOOKING_SENDER_LINES: Readonly<
     scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
     profile: "fencing-stratco-marnin",
     line: "+61489267776",
-    source: `${WIKI_PROFILES}/fencing-stratco-marnin.json@c5640616`,
   }),
   nithin: Object.freeze({
     person: "nithin",
@@ -50,7 +45,6 @@ export const SALES_BOOKING_SENDER_LINES: Readonly<
     scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
     profile: "patio-nithin",
     line: "+61489267774",
-    source: `${WIKI_PROFILES}/patio-nithin.json@c5640616`,
   }),
   khairo: Object.freeze({
     person: "khairo",
@@ -58,7 +52,6 @@ export const SALES_BOOKING_SENDER_LINES: Readonly<
     scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
     profile: "fencing-khairo",
     line: "+61489267772",
-    source: `${WIKI_PROFILES}/fencing-khairo.json@c5640616`,
   }),
 });
 

@@ -291,6 +291,8 @@ Deno.test("owner message: the executor dry-runs the owner's exact text from 776"
       readThread: () => Promise.resolve([]),
       readOutlook: () => Promise.reject(new Error("unused")),
       readContactPhone: () => Promise.resolve("0412 345 678"),
+      readOpportunityAssignee: () =>
+        Promise.resolve("RgDWTnYL6zL3eJA6nLht"),
       readOutlookLead: () => Promise.reject(new Error("unused")),
       mirrorToOutlook: () => Promise.reject(new Error("unused")),
       callAppointmentWriter: () => Promise.reject(new Error("unused")),
@@ -1213,6 +1215,7 @@ Deno.test("owner message for Nithin and Khairo: approved through the gate, sent 
     });
     assertEquals(result.checks.sender.line, line);
     assertEquals(result.checks.sender.person, resource);
+    assertEquals("source" in result.checks.sender, false);
     // The owner is still the only approver.
     assertEquals(
       await approvalGateRefusal(record, "message", NOW, [
@@ -1239,6 +1242,8 @@ Deno.test("owner message for Nithin and Khairo: approved through the gate, sent 
         readThread: () => Promise.resolve([]),
         readOutlook: () => Promise.reject(new Error("unused")),
         readContactPhone: () => Promise.resolve("0412 345 678"),
+        readOpportunityAssignee: () =>
+          Promise.resolve("RgDWTnYL6zL3eJA6nLht"),
         readOutlookLead: () => Promise.reject(new Error("unused")),
         mirrorToOutlook: () => Promise.reject(new Error("unused")),
         callAppointmentWriter: () => Promise.reject(new Error("unused")),

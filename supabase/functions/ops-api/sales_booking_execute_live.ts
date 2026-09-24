@@ -218,6 +218,27 @@ export function createSalesBookingExecuteDeps(
       const contact = await readContact(contactId);
       return typeof contact.phone === "string" ? contact.phone : null;
     },
+    async readOpportunityAssignee(opportunityId) {
+      const location = Deno.env.get("GHL_LOCATION_ID") || "";
+      if (!location) throw new Error("location_unconfigured");
+      const response = await ghlRead(
+        `/opportunities/${encodeURIComponent(opportunityId)}`,
+        { headers: { Version: "v3" } },
+      );
+      const opportunity = response?.opportunity as Obj | undefined;
+      if (
+        !opportunity || opportunity.id !== opportunityId ||
+        (typeof opportunity.locationId === "string" &&
+          opportunity.locationId !== location) ||
+        !Object.hasOwn(opportunity, "assignedTo")
+      ) throw new Error("opportunity_assignment_unreadable");
+      if (opportunity.assignedTo === null) return null;
+      if (
+        typeof opportunity.assignedTo !== "string" ||
+        !opportunity.assignedTo.trim()
+      ) throw new Error("opportunity_assignment_unreadable");
+      return opportunity.assignedTo;
+    },
     async readOutlookLead({ contactId, opportunityId }) {
       const contact = await readContact(contactId);
       const jobSites = await readJobSitesLive(

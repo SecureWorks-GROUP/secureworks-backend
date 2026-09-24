@@ -28,6 +28,7 @@ import {
   messageTimestamp,
   SALES_BOOKING_NOT_GIVEN,
   SALES_BOOKING_OUTLOOK_MAILBOXES,
+  SALES_BOOKING_RESOURCES,
   type SalesBookingMessage,
 } from "./sales_booking_read.ts";
 import {
@@ -157,6 +158,7 @@ export interface SalesBookingExecuteDeps {
     endIso: string,
   ): Promise<OutlookRead>;
   readContactPhone(contactId: string): Promise<string | null>;
+  readOpportunityAssignee(opportunityId: string): Promise<string | null>;
   /** GHL contact plus the suburb the booking read publishes for this lead. */
   readOutlookLead(args: {
     contactId: string;
@@ -846,7 +848,6 @@ export async function salesBookingSendAction(args: {
       person: who.sender.person,
     });
   }
-
   // The approved recipient must still be the contact's number in GHL.
   let phone: string | null;
   try {
@@ -865,6 +866,29 @@ export async function salesBookingSendAction(args: {
       (messageTimestamp(m) ?? -Infinity) >= approvedAt
     )
   ) return refused("text_already_in_thread");
+
+  const requiredAssignee =
+    SALES_BOOKING_RESOURCES[who.sender.person]?.assigned_ghl_user_id;
+  if (requiredAssignee) {
+    const approvedId = loaded.snapshot.id;
+    const opportunityId = typeof approvedId === "string" &&
+        approvedId.startsWith("opp:")
+      ? approvedId.slice(4)
+      : "";
+    if (!opportunityId) return refused("opportunity_identity_invalid");
+    let currentAssignee: string | null;
+    try {
+      currentAssignee = await deps.readOpportunityAssignee(opportunityId);
+    } catch {
+      return refused("opportunity_assignment_unreadable");
+    }
+    if (currentAssignee !== requiredAssignee) {
+      return refused("opportunity_assignee_changed", {
+        expected_assignee: requiredAssignee,
+        current_assignee: currentAssignee,
+      });
+    }
+  }
 
   const wouldSend = {
     method: "POST",

@@ -729,7 +729,6 @@ export async function salesBookingOwnerApprovalAction(args: {
       line: who.sender.line,
       person: who.sender.person,
       name: who.sender.name,
-      source: who.sender.source,
     };
     if (input.offer != null) visit = checkOwnerVisitRules(input.offer, now);
     content = {

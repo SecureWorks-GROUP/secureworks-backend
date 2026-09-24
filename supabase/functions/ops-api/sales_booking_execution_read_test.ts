@@ -598,6 +598,7 @@ function executorDeps(
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: [] }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
+    readOpportunityAssignee: () => Promise.resolve(null),
     readOutlookLead: () =>
       Promise.resolve({
         contact: {

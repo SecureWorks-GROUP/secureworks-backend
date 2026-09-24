@@ -133,8 +133,9 @@ week values shown by the UI. No trimming, newline conversion or rewording.
 The handler uses the existing allow-listed captain JWT policy
 (`SALES_BOOKING_CAPTAIN_EMAILS`) and requires a verified user ID. Request actor
 fields are ignored. API keys, routine callers and other JWTs cannot approve.
-Only the Stratco/Marnin profile is supported. One request names exactly one step;
-neither channel can trigger or grant the other.
+Message approvals support Marnin, Nithin and Khairo; calendar approvals remain
+Stratco/Marnin only. One request names exactly one step; neither channel can
+trigger or grant the other.
 
 Before recording, the handler re-reads the current workspace and compares the
 entire snapshot semantically, verifies the computed hash and proposal expiry.
@@ -342,7 +343,7 @@ GHL, Outlook, the thread and the recipient at its own press.
 ### What the read returns
 
 `sales_booking_read` adds `booking_flow.owner_approval_write:
-"owner-authored-v1"` (null off the Stratco resource), `booking_flow.owner_rulebook`,
+"owner-authored-v1"` for Marnin, Nithin and Khairo, `booking_flow.owner_rulebook`,
 and `hand_sent_texts` / `hand_sent_texts_note`. Each case carries
 `owner_booking`:
 

@@ -100,6 +100,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     sms: [] as Obj[],
     claims: 0,
     contactReads: 0,
+    assignmentReads: [] as string[],
     outlookGets: [] as string[],
     outlookPosts: [] as Obj[],
   };
@@ -133,6 +134,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
   let thread: SalesBookingMessage[] = [];
   let outlook: OutlookEvent[] = [];
   let contact: Obj = { ...GHL_CONTACT };
+  let opportunityAssignee: string | null = "RgDWTnYL6zL3eJA6nLht";
   const jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
   let smsResponse: { status: number; body: Obj } = {
@@ -146,6 +148,10 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: outlook }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
+    readOpportunityAssignee: (id) => {
+      calls.assignmentReads.push(id);
+      return Promise.resolve(opportunityAssignee);
+    },
     readOutlookLead: ({ contactId, opportunityId }) => {
       calls.contactReads++;
       const job = jobSites[opportunityId] || jobSites[contactId];
@@ -246,6 +252,9 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     setThread: (m: SalesBookingMessage[]) => (thread = m),
     setOutlook: (e: OutlookEvent[]) => (outlook = e),
     setContact: (c: Obj) => (contact = c),
+    setOpportunityAssignee: (id: string | null) => {
+      opportunityAssignee = id;
+    },
     setJobSite: (id: string, site: SalesBookingJobSiteFact) => {
       jobSites[id] = site;
     },
@@ -346,6 +355,30 @@ Deno.test("book and send each refuse, naming the failed check, and write or send
     deps: f.deps,
   });
   assertEquals(reasonOf(get), "method_not_allowed");
+});
+
+Deno.test("send rechecks Khairo's current opportunity assignment", async () => {
+  const record = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267772" },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const f = fakes([record], LIVE);
+  f.setOpportunityAssignee("different-ghl-user");
+
+  assertEquals(
+    reasonOf(await send(f, record.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(f.calls.assignmentReads, ["khairo-lead"]);
+  assertEquals(f.calls.sms, []);
+  assertEquals(f.calls.claims, 0);
 });
 
 Deno.test("book re-checks the thread tail and Outlook at the press, naming the clash", async () => {
