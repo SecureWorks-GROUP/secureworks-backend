@@ -1,0 +1,178 @@
+-- Down for 20260924213000 (P4): restore the two live production bodies byte
+-- for byte and drop P4's functions. Rows placed, rested or stamped under P4
+-- keep what they have; event_threads keeps its retirement columns and rows
+-- (P1a's ladder does not read them), and the flag row stays (off or on, it
+-- is read by nothing once P4's functions are gone). Rolling back is also
+-- possible without this file: turn feature_flags.context_unlinked_rules_v1 off.
+--   resolve_context_attribution(business_events)  md5(prosrc) fe50f14f4ab28d4d6c9dbb70bc85e7df (P1a)
+--   attribute_business_event()                    md5(prosrc) 7c1b8ffeeed8829288ee42c30e4314e5 (K1)
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
+-- Refuse to overwrite a later change: each body must be P4's (or already the
+-- restored live body, for a repeated rollback).
+DO $guard$
+DECLARE problems text[]:='{}'; live text; x record;
+BEGIN
+ FOR x IN SELECT * FROM (VALUES
+  ('public.resolve_context_attribution(public.business_events)',ARRAY['32365101d23dde1695707a0bddff640b','fe50f14f4ab28d4d6c9dbb70bc85e7df']),
+  ('public.attribute_business_event()',ARRAY['8cc435a72090c636707cb947b19e1e12','7c1b8ffeeed8829288ee42c30e4314e5'])
+ ) AS t(sig,accepted) LOOP
+  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
+  IF live IS NULL OR NOT live=ANY(x.accepted) THEN problems:=problems||format('%s md5 %s',x.sig,coalesce(live,'<missing>')); END IF;
+ END LOOP;
+ IF cardinality(problems)>0 THEN
+  RAISE EXCEPTION 'context_unlinked_rules_rollback_mismatch: %; a later change must be rolled back first',array_to_string(problems,'; ');
+ END IF;
+END $guard$;
+
+-- The trigger first, so no insert reaches a dropped function.
+CREATE OR REPLACE FUNCTION public.attribute_business_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF NEW.context_captured_at IS NULL THEN
+    NEW.context_captured_at := clock_timestamp();
+  END IF;
+  NEW := public.resolve_context_attribution(NEW);
+  NEW.metadata := coalesce(NEW.metadata, '{}'::jsonb) || jsonb_build_object('written_as', public.context_request_role());
+  RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.resolve_context_attribution(e public.business_events) RETURNS public.business_events
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE words text; tokens text; ids uuid[]; candidate uuid; n int; line text; contact_ids text[]; prior_status text; source_method text;
+ v_at timestamptz; is_ghl boolean; line_ids uuid[]; guard_ids uuid[]; contactless_ids uuid[]; used_updated_at boolean; rule text;
+BEGIN
+ prior_status:=e.attribution_status;
+ source_method:=e.match_method;
+ IF e.job_id IS NOT NULL AND source_method IN ('direct_job_id','direct_reference','manual') THEN
+   e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('source_job_binding',jsonb_build_object('job_id',e.job_id,'match_method',source_method));
+ ELSIF e.job_id IS NULL AND e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
+   SELECT id INTO e.job_id FROM public.jobs WHERE id::text=e.metadata->'source_job_binding'->>'job_id';
+   source_method:=e.metadata->'source_job_binding'->>'match_method';
+ END IF;
+ IF e.job_id IS NOT NULL AND coalesce(source_method,'none') NOT IN ('direct_job_id','direct_reference','manual') THEN
+   e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
+   e.job_id:=NULL;
+ END IF;
+ e.attribution_checked_at:=clock_timestamp();
+ words:=public.context_event_text(e);
+ e.attribution_status:='admin_bucket'; e.attribution_step:=6;
+ e.attribution_confidence:=NULL; e.attributed_at:=NULL;
+ e.match_status:='unresolved'; e.match_method:='none'; e.match_confidence:=NULL;
+ e.candidate_job_ids:=NULL;
+ IF e.metadata ?| ARRAY['placement_rule','placement_contactless_job_ids','placement_guard_job_ids'] THEN
+  e.metadata:=e.metadata-'placement_rule'-'placement_contactless_job_ids'-'placement_guard_job_ids';
+ END IF;
+ IF e.payload ? 'terminal_time_source' THEN e.payload:=e.payload-'terminal_time_source'; END IF;
+ IF NOT public.automation_lane_enabled('attribution') THEN e.job_id:=NULL; RETURN e; END IF;
+ IF to_jsonb(e)->>'channel' IN ('system','audit') THEN e.attribution_status:='automated'; RETURN e; END IF;
+ IF btrim(words)='' THEN e.attribution_status:='empty'; RETURN e; END IF;
+ IF prior_status='automated' OR e.payload->>'automated'='true' OR e.payload->>'auto_submitted' IN ('auto-generated','auto-replied')
+ THEN e.attribution_status:='automated'; RETURN e; END IF;
+ is_ghl:=public.context_event_is_ghl(e);
+ SELECT id INTO candidate FROM public.jobs WHERE id=e.job_id;
+ IF candidate IS NULL THEN
+   tokens:=' '||upper(regexp_replace(words,'[^a-zA-Z0-9-]+',' ','g'))||' ';
+   SELECT array_agg(DISTINCT refs.job_id) INTO ids FROM (
+     SELECT j.id AS job_id FROM public.jobs j WHERE length(btrim(j.job_number))>=5
+      AND strpos(tokens,' '||upper(j.job_number)||' ')>0
+     UNION SELECT x.job_id FROM public.xero_invoices x WHERE x.job_id IS NOT NULL
+      AND x.invoice_type='ACCREC' AND upper(x.invoice_number) LIKE 'INV-%' AND length(btrim(x.invoice_number))>=5
+      AND strpos(tokens,' '||upper(x.invoice_number)||' ')>0
+     UNION SELECT po.job_id FROM public.purchase_orders po WHERE po.job_id IS NOT NULL AND length(btrim(po.po_number))>=5
+      AND strpos(tokens,' '||upper(po.po_number)||' ')>0
+   ) refs JOIN public.jobs ref_job ON ref_job.id=refs.job_id
+   WHERE coalesce(to_jsonb(ref_job)->'metadata'->>'do_not_schedule','') NOT IN ('true','1');
+   IF cardinality(ids)=1 THEN candidate:=ids[1];
+   ELSIF cardinality(ids)>1 THEN e.job_id:=NULL; RETURN e; END IF;
+ END IF;
+ IF candidate IS NOT NULL THEN e.attribution_status:='direct'; e.attribution_step:=1;
+ ELSE
+  IF NOT is_ghl THEN
+   SELECT job_id INTO candidate FROM public.event_threads WHERE thread_key=e.thread_key;
+  END IF;
+  IF candidate IS NOT NULL THEN e.attribution_status:='thread'; e.attribution_step:=2;
+  ELSE
+   IF e.contact_id IS NULL THEN
+    SELECT array_agg(DISTINCT j.ghl_contact_id) INTO contact_ids FROM public.jobs j
+    WHERE j.ghl_contact_id IS NOT NULL AND (
+      (nullif(e.payload->>'email','') IS NOT NULL AND lower(to_jsonb(j)->>'client_email')=lower(e.payload->>'email')) OR
+      (length(regexp_replace(coalesce(e.payload->>'phone',''),'[^0-9]','','g'))>=8 AND
+       right(regexp_replace(coalesce(to_jsonb(j)->>'client_phone',to_jsonb(j)->>'phone',''),'[^0-9]','','g'),9)=right(regexp_replace(e.payload->>'phone','[^0-9]','','g'),9)));
+    IF cardinality(contact_ids)=1 THEN e.contact_id:=contact_ids[1]; END IF;
+   END IF;
+   v_at:=coalesce(e.event_at,e.occurred_at,clock_timestamp());
+   line:=lower(coalesce(e.payload->>'line',e.payload->>'business_line',''));
+   SELECT coalesce(array_agg(t.job_id ORDER BY t.created_at,t.job_id) FILTER (WHERE t.candidate),'{}'),
+    coalesce(array_agg(t.job_id ORDER BY t.created_at,t.job_id) FILTER (WHERE t.candidate AND t.type=line AND line IN ('fencing','patio')),'{}'),
+    coalesce(array_agg(t.job_id ORDER BY t.terminal_at DESC,t.job_id) FILTER (WHERE NOT t.candidate AND t.terminal
+     AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '90 days'),'{}'),
+    coalesce(array_agg(t.job_id ORDER BY t.job_id) FILTER (WHERE t.basis='contactless' AND (t.candidate OR (NOT t.candidate AND t.terminal
+     AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '90 days'))),'{}'),
+    coalesce(bool_or(t.terminal_time_source='updated_at' AND (t.candidate OR (NOT t.candidate AND t.terminal
+     AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '90 days'))),false)
+   INTO ids,line_ids,guard_ids,contactless_ids,used_updated_at
+   FROM public.context_contact_job_timeline(e.contact_id,v_at) t;
+   n:=cardinality(ids);
+   IF n=1 AND cardinality(guard_ids)=0 THEN
+    candidate:=ids[1]; e.attribution_status:='single_open'; e.attribution_step:=3; rule:='single_open';
+   ELSIF n=1 THEN
+    e.attribution_status:='pending_luna'; e.attribution_step:=5; rule:='review_recent_other_job';
+    e.candidate_job_ids:=ids||guard_ids;
+   ELSIF n>1 AND cardinality(line_ids)=1 THEN
+    candidate:=line_ids[1]; e.attribution_status:='single_line'; e.attribution_step:=4; rule:='single_line';
+   ELSIF n>1 THEN
+    e.attribution_status:='pending_luna'; e.attribution_step:=5; rule:='review_several';
+    e.candidate_job_ids:=ids;
+   ELSE
+    rule:=CASE WHEN e.contact_id IS NULL THEN 'no_contact' ELSE 'no_candidate_at_time' END;
+   END IF;
+   e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('placement_rule',rule);
+   IF cardinality(contactless_ids)>0 THEN
+    e.metadata:=e.metadata||jsonb_build_object('placement_contactless_job_ids',to_jsonb(contactless_ids));
+   END IF;
+   IF rule='review_recent_other_job' THEN
+    e.metadata:=e.metadata||jsonb_build_object('placement_guard_job_ids',to_jsonb(guard_ids));
+   END IF;
+   IF used_updated_at THEN e.payload:=coalesce(e.payload,'{}'::jsonb)||jsonb_build_object('terminal_time_source','updated_at'); END IF;
+  END IF;
+ END IF;
+ e.job_id:=candidate;
+ IF candidate IS NOT NULL THEN
+  IF nullif(e.thread_key,'') IS NOT NULL AND NOT is_ghl THEN
+   INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,candidate,'ladder',e.id) ON CONFLICT DO NOTHING;
+   IF NOT EXISTS (SELECT 1 FROM public.event_threads WHERE thread_key=e.thread_key AND job_id=candidate) THEN
+    e.job_id:=NULL; e.attribution_status:='admin_bucket'; e.attribution_step:=6;
+    e.payload:=coalesce(e.payload,'{}')||jsonb_build_object('attribution_error','thread_conflict'); RETURN e;
+   END IF;
+  END IF;
+  e.attribution_confidence:=1; e.attributed_at:=clock_timestamp();
+  e.match_status:='matched'; e.match_method:=CASE WHEN e.attribution_status='direct' THEN 'direct_job_id' ELSE 'contact_id' END; e.match_confidence:=1;
+ ELSE e.match_status:='unresolved'; e.match_method:='none'; e.match_confidence:=NULL;
+ END IF;
+ RETURN e;
+EXCEPTION WHEN OTHERS THEN
+ e.job_id:=NULL; e.attribution_status:='admin_bucket'; e.attribution_step:=6;
+ e.attribution_confidence:=NULL; e.attributed_at:=NULL; e.candidate_job_ids:=NULL;
+ e.match_status:='unresolved'; e.match_method:='none'; e.match_confidence:=NULL;
+ e.payload:=coalesce(e.payload,'{}')||jsonb_build_object('attribution_error',SQLERRM);
+ RETURN e;
+END $$;
+
+-- The live entry carried no comment; P4's would outlive CREATE OR REPLACE.
+COMMENT ON FUNCTION public.resolve_context_attribution(public.business_events) IS NULL;
+
+DROP FUNCTION IF EXISTS public.context_attribution_preview(uuid,boolean);
+DROP FUNCTION IF EXISTS public.resolve_context_attribution(public.business_events,boolean,boolean);
+DROP FUNCTION IF EXISTS public.context_ladder_p1a(public.business_events,boolean);
+DROP FUNCTION IF EXISTS public.context_contact_jobs_at(text,timestamptz,text,text);
+DROP FUNCTION IF EXISTS public.context_contact_job_timeline(text,timestamptz,text,text);
+DROP FUNCTION IF EXISTS public.context_job_unpaid_at(uuid,timestamptz);
+DROP FUNCTION IF EXISTS public.context_sender_key(public.business_events);
+DROP FUNCTION IF EXISTS public.context_supplier_order_tokens(text);
+DROP FUNCTION IF EXISTS public.context_unlinked_rules_enabled();
+
+-- The live ACL of the two restored objects (postgres and service_role).
+REVOKE ALL ON FUNCTION public.resolve_context_attribution(public.business_events),public.attribute_business_event() FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.resolve_context_attribution(public.business_events),public.attribute_business_event() TO service_role;
