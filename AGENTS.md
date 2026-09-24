@@ -3887,3 +3887,8 @@ shows only that party's current revision. The freeze in SQL is the only
 writer of prices and totals, and `quote-v2` runs without gateway JWT
 verification, so it never trusts a JWT claim. Contract:
 [`docs/quote-v2/quote-records-v1.md`](docs/quote-v2/quote-records-v1.md).
+Stage 3 builds quotes on the server from a tool's scope, renders each party's
+HTML and PDF from the frozen revision, and sends only on the owner's stamp of
+an exact preview hash. Sends are captured to `quote_v2_outbox` and never
+delivered unless a staging-only gate is open; never open it outside staging.
+Contract: [`docs/quote-v2/server-build-and-send-v1.md`](docs/quote-v2/server-build-and-send-v1.md).

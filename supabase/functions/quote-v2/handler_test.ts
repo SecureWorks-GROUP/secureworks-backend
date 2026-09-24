@@ -32,6 +32,7 @@ const STEPHEN: PartyQuoteView = {
     exclusions: ["Root removal: neighbour only, priced separately"],
   },
   valid_until: "2026-10-24",
+  issued_on: "2026-09-24",
   expired: false,
   job_total: { ex_gst: 4330, gst: 433, inc_gst: 4763 },
   party: {
@@ -111,7 +112,7 @@ function deps(
           error: { message: over.rpcError },
         });
       }
-      if (fn === "quote_v2_open_party_link") {
+      if (fn === "quote_v2_open_party_document") {
         return Promise.resolve({
           data: over.link ??
             { state: "current", link_revision_number: 1, quote: STEPHEN },
@@ -151,11 +152,11 @@ Deno.test("party page: shows only the party's own quote, with the job total and 
   const html = await res.text();
   assertEquals(res.status, 200);
   assertEquals(d.calls, [{
-    fn: "quote_v2_open_party_link",
+    fn: "quote_v2_open_party_document",
     args: { p_token: TOKEN },
   }]);
-  assertStringIncludes(html, "Quote for Stephen");
-  assertStringIncludes(html, "you 50%, Fiona 50%");
+  assertStringIncludes(html, '<div class="who">Stephen</div>');
+  assertStringIncludes(html, "You pay 50%; Fiona pays 50%");
   assertStringIncludes(html, "$4,763.00");
   assertStringIncludes(html, "$2,381.50");
   assertStringIncludes(html, `data-revision="${REV}"`);
@@ -230,7 +231,7 @@ Deno.test("party page: a replaced revision's link shows the same party's current
   assertEquals(res.status, 200);
   assertStringIncludes(html, "This quote was updated");
   assertStringIncludes(html, "revision 2");
-  assertStringIncludes(html, "Quote for Stephen");
+  assertStringIncludes(html, '<div class="who">Stephen</div>');
 });
 
 Deno.test("party page: no current quote, revoked and malformed links show nothing of the job", async () => {
@@ -492,7 +493,7 @@ Deno.test("staff: reads and link actions route to their functions", async () => 
     "quote_v2_revoke_party_link",
   ]);
   const res = await handleQuoteV2Request(
-    post("?action=send", {}, headers),
+    post("?action=delete_quote", {}, headers),
     deps(),
   );
   assertEquals(res.status, 400);

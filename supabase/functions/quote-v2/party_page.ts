@@ -4,9 +4,15 @@
 // that party's current revision (job total, their share line by line, the
 // other parties by first name and split) and their own Accept. It is given
 // nothing else, so it cannot show another party's quote, a cost, a markup or
-// a contact. Branded rendering is stage 3; this page is deliberately plain.
+// a contact. Since stage 3 the quote itself is the branded document
+// (quote_document.ts); link states with no quote stay plain.
 //
 // Pure: no network or database.
+
+import {
+  type QuoteDocumentView,
+  renderQuoteDocumentHtml,
+} from "./quote_document.ts";
 
 export interface PartyQuoteView {
   revision_id: string;
@@ -14,7 +20,7 @@ export interface PartyQuoteView {
   content_hash: string;
   job_number: string | null;
   site_suburb: string | null;
-  family: string;
+  family: "fencing" | "patio" | "stratco" | "misc";
   scope: {
     title?: string;
     summary?: string;
@@ -44,6 +50,8 @@ export interface PartyQuoteView {
     share_of_job_percent: number;
   }[];
   accepted_at: string | null;
+  /** The day the revision was frozen (quote_v2_open_party_document). */
+  issued_on?: string;
 }
 
 export interface PartyLinkResult {
@@ -52,28 +60,8 @@ export interface PartyLinkResult {
   quote: PartyQuoteView | null;
 }
 
-export function escapeHtml(value: unknown): string {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-const AUD = new Intl.NumberFormat("en-AU", {
-  style: "currency",
-  currency: "AUD",
-});
-
-export function money(value: number | string): string {
-  return AUD.format(Number(value));
-}
-
-function qty(value: number | string): string {
-  const n = Number(value);
-  return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(3)));
-}
+export { escapeHtml, money } from "./format.ts";
+import { escapeHtml, money } from "./format.ts";
 
 function perthDate(iso: string): string {
   const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
@@ -120,6 +108,8 @@ function page(title: string, body: string, nonce: string): string {
 // The token never leaves the address bar except to this same function.
 const ACCEPT_SCRIPT = `
 (function(){
+  var t0=new URLSearchParams(location.search).get('t'),p=document.getElementById('pdf');
+  if(p&&t0)p.href=location.pathname+'?t='+encodeURIComponent(t0)+'&format=pdf';
   var f=document.getElementById('accept');if(!f)return;
   f.addEventListener('submit',function(e){
     e.preventDefault();
@@ -170,104 +160,41 @@ export function renderPartyPage(
     };
   }
   const q = result.quote;
-  const place = [q.job_number, q.site_suburb].filter(Boolean).join(", ");
-  const scope = q.scope ?? {};
-  const list = (items?: string[]) =>
-    items?.length
-      ? `<ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>`
-      : "";
   const forwarded = result.state === "forwarded"
-    ? `<div class="card notice">This quote was updated. You are viewing your current quote (revision ${
+    ? `<p class="note"><b>This quote was updated.</b> You are viewing your current quote (revision ${
       escapeHtml(q.revision_number)
     }); the earlier one (revision ${
       escapeHtml(result.link_revision_number)
-    }) no longer applies.</div>`
+    }) no longer applies.</p>`
     : "";
-  const shared = q.other_parties.length > 0;
-  const others = shared
-    ? `<p>This work is shared: ${
-      [
-        `you ${q.party.share_of_job_percent}%`,
-        ...q.other_parties.map((o) =>
-          `${escapeHtml(o.first_name)} ${o.share_of_job_percent}%`
-        ),
-      ].join(", ")
-    }.</p>`
-    : "";
-  const rows = q.lines.map((l) =>
-    `<tr><td>${escapeHtml(l.description)}<div class="muted">${
-      escapeHtml(qty(l.qty))
-    } ${escapeHtml(l.unit)}</div></td>${
-      shared ? `<td class="n">${money(l.line_total_ex_gst)}</td>` : ""
-    }<td class="n">${money(l.your_share_ex_gst)}</td></tr>`
-  ).join("");
-  const accept = q.accepted_at
-    ? `<p><strong>Accepted</strong> on ${
+  const action = q.accepted_at
+    ? `<p style="margin:0"><strong>Accepted</strong> on ${
       escapeHtml(perthDate(q.accepted_at))
-    }. Thank you.</p>`
+    }. Thank you, we will be in touch to confirm your install date.</p>`
     : q.expired
-    ? `<p>This quote was valid until ${
+    ? `<p style="margin:0">This quote was valid until ${
       escapeHtml(perthDate(q.valid_until))
     }. Please contact SecureWorks Group for an updated quote.</p>`
     : `<form id="accept" data-revision="${
       escapeHtml(q.revision_id)
     }" data-hash="${
       escapeHtml(q.content_hash)
-    }"><label>Your name<input name="accepted_name" autocomplete="name" maxlength="200"></label><button type="submit">Accept ${
+    }"><p style="margin:0 0 4px"><strong>Ready to go ahead?</strong> Accepting confirms ${
+      q.other_parties.length ? "your share of " : ""
+    }this quote, exactly as shown.</p><label>Your name<input name="accepted_name" autocomplete="name" maxlength="200"></label><button type="submit">Accept ${
       money(q.party.share.inc_gst)
     } inc GST</button><p id="accept-msg" class="muted" role="status"></p></form>`;
-  const body = `
-<h1>${escapeHtml(scope.title || "Your quote")}</h1>
-<p class="muted">${escapeHtml(place)}${place ? " &middot; " : ""}Quote for ${
-    escapeHtml(q.party.first_name)
-  } &middot; revision ${escapeHtml(q.revision_number)} &middot; valid until ${
-    escapeHtml(perthDate(q.valid_until))
-  }</p>
-${forwarded}
-<div class="card">
-${scope.summary ? `<p>${escapeHtml(scope.summary)}</p>` : ""}
-${
-    scope.inclusions?.length
-      ? `<p><strong>Includes</strong></p>${list(scope.inclusions)}`
-      : ""
-  }
-${
-    scope.exclusions?.length
-      ? `<p><strong>Not included</strong></p>${list(scope.exclusions)}`
-      : ""
-  }
-${scope.notes ? `<p>${escapeHtml(scope.notes)}</p>` : ""}
-${others}
-</div>
-<div class="card">
-<table><thead><tr><th>Item</th>${
-    shared ? '<th class="n">Job</th>' : ""
-  }<th class="n">${
-    shared ? "Your share" : "Amount"
-  }</th></tr></thead><tbody>${rows}</tbody>
-<tfoot>
-${
-    shared
-      ? `<tr><td>Job total inc GST</td><td class="n">${
-        money(q.job_total.inc_gst)
-      }</td><td></td></tr>`
-      : ""
-  }
-<tr><td>Your total ex GST</td>${shared ? "<td></td>" : ""}<td class="n">${
-    money(q.party.share.ex_gst)
-  }</td></tr>
-<tr><td>GST</td>${shared ? "<td></td>" : ""}<td class="n">${
-    money(q.party.share.gst)
-  }</td></tr>
-<tr class="total"><td>Your total inc GST</td>${
-    shared ? "<td></td>" : ""
-  }<td class="n">${money(q.party.share.inc_gst)}</td></tr>
-</tfoot></table>
-</div>
-<div class="card">${accept}</div>
-<p class="muted">SecureWorks Group</p>`;
+  const panel =
+    `${forwarded}<div class="panel">${action}<p class="muted" style="margin:10px 0 0"><a class="btn alt" href="#" id="pdf">Download PDF</a></p></div>`;
+  const view: QuoteDocumentView = {
+    ...q,
+    issued_on: q.issued_on ?? q.valid_until,
+  };
   return {
     status: 200,
-    html: page(`Quote ${q.job_number ?? ""}`.trim(), body, nonce),
+    html: renderQuoteDocumentHtml(view, {
+      beforeIncluded: panel,
+      script: nonce ? { nonce, source: ACCEPT_SCRIPT } : undefined,
+    }),
   };
 }

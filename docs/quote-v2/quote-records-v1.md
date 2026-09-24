@@ -10,8 +10,10 @@ pay, and per-party totals computed once at freeze that sum to the job to the
 cent. Each party reaches it through their own link, which can only ever show
 and accept that party's own current revision. New tables and functions only:
 the legacy `send-quote` paths, `job_documents`, `job_contacts` and
-`quote_revisions` are untouched. Nothing sends, emails, or writes jobs, GHL or
-Xero; the branded page, sending and deposits are stage 3.
+`quote_revisions` are untouched. Nothing here sends, emails, or writes jobs,
+GHL or Xero. Stage 3 adds the server build, the branded page and PDF, and the
+stamped send: [`server-build-and-send-v1.md`](server-build-and-send-v1.md).
+Deposits are not built yet.
 
 Schema and every rule: `supabase/migrations/20260925020000_quote_v2_records.sql`.
 Executable proof: migration contract
