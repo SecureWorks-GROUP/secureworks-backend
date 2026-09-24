@@ -145,8 +145,8 @@ Every vertical decision routes through `_jobVertical`:
 division manager gets the repair open pool, allocation rights, the lead
 control and the quote exactly like any other vertical, and a make-safe or
 fencing manager LOSES automatic access to a job the moment its family says
-repair (on a make-safe job they fall to `makesafe_open`, otherwise to
-`allocated` or `none`). Every `jobs` select that
+repair (they fall to `allocated` or `none`; the former `makesafe_open`
+fallback is retired, see the 2026-09-24 addendum). Every `jobs` select that
 feeds one of those calls selects `metadata` (`assertAssignmentMutationAuthz`,
 `allocateJob`, `getTradeJobForAccess`, `reopenMakesafe`, `cancelMakesafe`,
 `reattendMakesafe`, the `submit_work_order_invoice` work-order fetch and the

@@ -45,15 +45,15 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _resolveManagerVisibility,
-  type TradeAuthContext,
-  type TradeJobAccessContext,
   myJobs,
   resolveTradeJobAccessTier,
   searchAllJobs,
+  type TradeAuthContext,
+  type TradeJobAccessContext,
 } from "./index.ts";
 import {
-  resolveMakesafeTradeViewer,
   type MakesafeBoardViewer,
+  resolveMakesafeTradeViewer,
 } from "./makesafe_board_read_model.ts";
 
 const ORG_A = "00000000-0000-0000-0000-000000000001";
@@ -66,20 +66,59 @@ const JOB_DECKING = "job-decking-1";
 const JOB_MAKESAFE = "job-makesafe-1";
 const JOB_TENANT_B = "job-tenant-b-fencing";
 
-type Job = { id: string; org_id: string; type: string; job_number?: string; status: string };
+type Job = {
+  id: string;
+  org_id: string;
+  type: string;
+  job_number?: string;
+  status: string;
+};
 const JOBS: Job[] = [
-  { id: JOB_FENCING, org_id: ORG_A, type: "fencing", job_number: "SWF-1", status: "scheduled" },
-  { id: JOB_PATIO, org_id: ORG_A, type: "patio", job_number: "SWP-1", status: "scheduled" },
-  { id: JOB_DECKING, org_id: ORG_A, type: "decking", job_number: "SWD-1", status: "scheduled" },
-  { id: JOB_MAKESAFE, org_id: ORG_A, type: "makesafe", job_number: "SWMS-1", status: "in_progress" },
-  { id: JOB_TENANT_B, org_id: ORG_B, type: "fencing", job_number: "SWF-B1", status: "scheduled" },
+  {
+    id: JOB_FENCING,
+    org_id: ORG_A,
+    type: "fencing",
+    job_number: "SWF-1",
+    status: "scheduled",
+  },
+  {
+    id: JOB_PATIO,
+    org_id: ORG_A,
+    type: "patio",
+    job_number: "SWP-1",
+    status: "scheduled",
+  },
+  {
+    id: JOB_DECKING,
+    org_id: ORG_A,
+    type: "decking",
+    job_number: "SWD-1",
+    status: "scheduled",
+  },
+  {
+    id: JOB_MAKESAFE,
+    org_id: ORG_A,
+    type: "makesafe",
+    job_number: "SWMS-1",
+    status: "in_progress",
+  },
+  {
+    id: JOB_TENANT_B,
+    org_id: ORG_B,
+    type: "fencing",
+    job_number: "SWF-B1",
+    status: "scheduled",
+  },
 ];
 
 // Ordinary crew's own assignment set: one PAST (300 days ago — proving "past
 // and present" reaches well beyond any 30-day floor), one PRESENT.
 const CREW_ID = "u-ordinary-crew";
 const GHOST_ONLY_ID = "u-ghost-only-ops-manager";
-const PAST_DATE = new Date(Date.now() - 300 * 86400_000).toISOString().slice(0, 10);
+const PAST_DATE = new Date(Date.now() - 300 * 86400_000).toISOString().slice(
+  0,
+  10,
+);
 const TODAY = new Date().toISOString().slice(0, 10);
 type Assignment = {
   id: string;
@@ -90,13 +129,38 @@ type Assignment = {
   is_ghost?: boolean;
 };
 const ASSIGNMENTS: Assignment[] = [
-  { id: "a-crew-fencing", job_id: JOB_FENCING, user_id: CREW_ID, status: "scheduled", scheduled_date: PAST_DATE },
-  { id: "a-crew-patio", job_id: JOB_PATIO, user_id: CREW_ID, status: "scheduled", scheduled_date: TODAY },
+  {
+    id: "a-crew-fencing",
+    job_id: JOB_FENCING,
+    user_id: CREW_ID,
+    status: "scheduled",
+    scheduled_date: PAST_DATE,
+  },
+  {
+    id: "a-crew-patio",
+    job_id: JOB_PATIO,
+    user_id: CREW_ID,
+    status: "scheduled",
+    scheduled_date: TODAY,
+  },
   // A cancelled row must never grant access — it is the one exclusion.
-  { id: "a-crew-cancelled", job_id: JOB_DECKING, user_id: "u-someone-else", status: "cancelled", scheduled_date: TODAY },
+  {
+    id: "a-crew-cancelled",
+    job_id: JOB_DECKING,
+    user_id: "u-someone-else",
+    status: "cancelled",
+    scheduled_date: TODAY,
+  },
   // A ghost watcher row (auto-mirrored onto an ops manager's account) is a
   // calendar mirror, never an allocation.
-  { id: "a-ghost-mirror", job_id: JOB_MAKESAFE, user_id: GHOST_ONLY_ID, status: "scheduled", scheduled_date: TODAY, is_ghost: true },
+  {
+    id: "a-ghost-mirror",
+    job_id: JOB_MAKESAFE,
+    user_id: GHOST_ONLY_ID,
+    status: "scheduled",
+    scheduled_date: TODAY,
+    is_ghost: true,
+  },
 ];
 
 function accessClient(): any {
@@ -125,7 +189,8 @@ function accessClient(): any {
               a.job_id === this._eq?.job_id &&
               a.user_id === this._eq?.user_id &&
               a.status !== (this._neq?.status ?? "__none__") &&
-              (this._eq?.is_ghost === undefined || (a.is_ghost ?? false) === this._eq.is_ghost)
+              (this._eq?.is_ghost === undefined ||
+                (a.is_ghost ?? false) === this._eq.is_ghost)
             );
             return { data: row || null, error: null };
           }
@@ -169,11 +234,26 @@ const ORDINARY_CREW = _resolveManagerVisibility({
   seeEverything: false,
 });
 
-const ACCESS_ALL: TradeJobAccessContext = { orgId: ORG_A, managedVerticals: ["makesafe", "fencing", "patio", "decking"] };
-const ACCESS_FENCING: TradeJobAccessContext = { orgId: ORG_A, managedVerticals: ["fencing"] };
-const ACCESS_PATIO_DECKING: TradeJobAccessContext = { orgId: ORG_A, managedVerticals: ["patio", "decking"] };
-const ACCESS_MAKESAFE: TradeJobAccessContext = { orgId: ORG_A, managedVerticals: ["makesafe"] };
-const ACCESS_NONE: TradeJobAccessContext = { orgId: ORG_A, managedVerticals: [] };
+const ACCESS_ALL: TradeJobAccessContext = {
+  orgId: ORG_A,
+  managedVerticals: ["makesafe", "fencing", "patio", "decking"],
+};
+const ACCESS_FENCING: TradeJobAccessContext = {
+  orgId: ORG_A,
+  managedVerticals: ["fencing"],
+};
+const ACCESS_PATIO_DECKING: TradeJobAccessContext = {
+  orgId: ORG_A,
+  managedVerticals: ["patio", "decking"],
+};
+const ACCESS_MAKESAFE: TradeJobAccessContext = {
+  orgId: ORG_A,
+  managedVerticals: ["makesafe"],
+};
+const ACCESS_NONE: TradeJobAccessContext = {
+  orgId: ORG_A,
+  managedVerticals: [],
+};
 
 // ── 1. _resolveManagerVisibility: the see-everything / category-manager
 //    split is role-independent ────────────────────────────────────────────
@@ -183,14 +263,22 @@ Deno.test("rule table: see-everything sees every category, role-independent", ()
 });
 
 Deno.test("rule table: a fencing manager holding an ops_manager role is a CATEGORY manager, not see-everything", () => {
-  assertEquals(FENCING_MANAGER_OPS_ROLE.isDispatcher, false, "ops_manager role alone no longer grants see-everything");
+  assertEquals(
+    FENCING_MANAGER_OPS_ROLE.isDispatcher,
+    false,
+    "ops_manager role alone no longer grants see-everything",
+  );
   assertEquals(FENCING_MANAGER_OPS_ROLE.poolVerticals, ["fencing"]);
 });
 
 Deno.test("rule table: a fencing manager holding lead_installer gets the identical category scope as the ops_manager-titled one", () => {
   assertEquals(FENCING_MANAGER_LEAD.isDispatcher, false);
   assertEquals(FENCING_MANAGER_LEAD.poolVerticals, ["fencing"]);
-  assertEquals(FENCING_MANAGER_LEAD.poolVerticals, FENCING_MANAGER_OPS_ROLE.poolVerticals, "role never changes the category answer");
+  assertEquals(
+    FENCING_MANAGER_LEAD.poolVerticals,
+    FENCING_MANAGER_OPS_ROLE.poolVerticals,
+    "role never changes the category answer",
+  );
 });
 
 Deno.test("rule table: a patio+decking manager gets both categories, canonical order, no fencing/makesafe", () => {
@@ -251,7 +339,11 @@ Deno.test("rule table: a fencing category manager (either role) is division_mana
 });
 
 Deno.test("rule table: a patio+decking manager is division_manager on both, refused on fencing and make-safe", async () => {
-  const t = await tiers(PATIO_DECKING_MANAGER, "u-patio-decking-manager", ACCESS_PATIO_DECKING);
+  const t = await tiers(
+    PATIO_DECKING_MANAGER,
+    "u-patio-decking-manager",
+    ACCESS_PATIO_DECKING,
+  );
   assertEquals(t, {
     [JOB_FENCING]: "none",
     [JOB_PATIO]: "division_manager",
@@ -261,7 +353,11 @@ Deno.test("rule table: a patio+decking manager is division_manager on both, refu
 });
 
 Deno.test("rule table: a make-safe manager is division_manager on the make-safe job (never makesafe_open), refused on every other category", async () => {
-  const t = await tiers(MAKESAFE_MANAGER, "u-makesafe-manager", ACCESS_MAKESAFE);
+  const t = await tiers(
+    MAKESAFE_MANAGER,
+    "u-makesafe-manager",
+    ACCESS_MAKESAFE,
+  );
   assertEquals(t, {
     [JOB_FENCING]: "none",
     [JOB_PATIO]: "none",
@@ -282,18 +378,34 @@ Deno.test("rule table: ordinary crew is 'allocated' only on jobs they hold an as
 
 Deno.test("rule table: a cancelled assignment never grants access, for anyone", async () => {
   const client = accessClient();
-  const d = await resolveTradeJobAccessTier(client, JOB_DECKING, "u-someone-else", {
-    isOffice: false,
-    access: ACCESS_NONE,
-  });
+  const d = await resolveTradeJobAccessTier(
+    client,
+    JOB_DECKING,
+    "u-someone-else",
+    {
+      isOffice: false,
+      access: ACCESS_NONE,
+    },
+  );
   assertEquals(d.tier, "none");
 });
 
 Deno.test("rule table: quote visibility is exactly office and division_manager — unchanged by this ruling", async () => {
   const client = accessClient();
-  const office = await resolveTradeJobAccessTier(client, JOB_FENCING, "x", { isOffice: true, access: ACCESS_ALL });
-  const manager = await resolveTradeJobAccessTier(client, JOB_FENCING, "x", { isOffice: false, access: ACCESS_FENCING });
-  const allocated = await resolveTradeJobAccessTier(client, JOB_FENCING, CREW_ID, { isOffice: false, access: ACCESS_NONE });
+  const office = await resolveTradeJobAccessTier(client, JOB_FENCING, "x", {
+    isOffice: true,
+    access: ACCESS_ALL,
+  });
+  const manager = await resolveTradeJobAccessTier(client, JOB_FENCING, "x", {
+    isOffice: false,
+    access: ACCESS_FENCING,
+  });
+  const allocated = await resolveTradeJobAccessTier(
+    client,
+    JOB_FENCING,
+    CREW_ID,
+    { isOffice: false, access: ACCESS_NONE },
+  );
   assertEquals(office.quoteVisible, true);
   assertEquals(manager.quoteVisible, true);
   assertEquals(allocated.quoteVisible, false);
@@ -301,8 +413,16 @@ Deno.test("rule table: quote visibility is exactly office and division_manager �
 
 // ── 3. resolveMakesafeTradeViewer: the make-safe board's own resolver
 //    stays in step with the same rule ───────────────────────────────────────
-function boardViewer(overrides: Partial<MakesafeBoardViewer>): MakesafeBoardViewer {
-  return { userId: "x", role: "crew", managedVerticals: [], seeEverything: false, ...overrides };
+function boardViewer(
+  overrides: Partial<MakesafeBoardViewer>,
+): MakesafeBoardViewer {
+  return {
+    userId: "x",
+    role: "crew",
+    managedVerticals: [],
+    seeEverything: false,
+    ...overrides,
+  };
 }
 
 Deno.test("rule table: make-safe board — see-everything sees all and may allocate", () => {
@@ -313,7 +433,9 @@ Deno.test("rule table: make-safe board — see-everything sees all and may alloc
 
 Deno.test("rule table: make-safe board — a make-safe category manager sees all and may allocate, role-independent", () => {
   for (const role of ["ops_manager", "lead_installer", "crew"]) {
-    const p = resolveMakesafeTradeViewer(boardViewer({ role, managedVerticals: ["makesafe"] }));
+    const p = resolveMakesafeTradeViewer(
+      boardViewer({ role, managedVerticals: ["makesafe"] }),
+    );
     assertEquals(p.sees_all_makesafes, true, role);
     assertEquals(p.can_allocate, true, role);
   }
@@ -321,7 +443,9 @@ Deno.test("rule table: make-safe board — a make-safe category manager sees all
 
 Deno.test("rule table: make-safe board — a fencing-only manager (any role) gets plain allocated_only, no special view-only shape", () => {
   for (const role of ["ops_manager", "lead_installer", "sales"]) {
-    const p = resolveMakesafeTradeViewer(boardViewer({ role, managedVerticals: ["fencing"] }));
+    const p = resolveMakesafeTradeViewer(
+      boardViewer({ role, managedVerticals: ["fencing"] }),
+    );
     assertEquals(p.sees_all_makesafes, false, role);
     assertEquals(p.can_allocate, false, role);
     assertEquals(p.fencing_view_only, false, role);
@@ -337,7 +461,11 @@ Deno.test("rule table: make-safe board — ordinary crew is allocated_only, may 
 // ── 4. End-to-end: search_all_jobs and my_jobs for the two personas the
 //    brief names explicitly ─────────────────────────────────────────────────
 
-type QueryLog = { table: string; eq: Record<string, unknown>; inVals: unknown[] | null }[];
+type QueryLog = {
+  table: string;
+  eq: Record<string, unknown>;
+  inVals: unknown[] | null;
+}[];
 
 function surfaceClient(log: QueryLog): any {
   function builder(table: string) {
@@ -350,14 +478,30 @@ function surfaceClient(log: QueryLog): any {
       orStr: null as string | null,
     };
     const b: any = {
-      select: (s: string) => { st.select = s; return b; },
-      eq: (k: string, v: unknown) => { st.eq[k] = v; return b; },
+      select: (s: string) => {
+        st.select = s;
+        return b;
+      },
+      eq: (k: string, v: unknown) => {
+        st.eq[k] = v;
+        return b;
+      },
       neq: () => b,
       gte: () => b,
       lt: () => b,
-      not: (k: string, op: string, v: string) => { if (k === "status" && op === "in") st.notIn = v; return b; },
-      in: (k: string, arr: unknown[]) => { st.inCol = k; st.inVals = arr; return b; },
-      or: (s: string) => { st.orStr = s; return b; },
+      not: (k: string, op: string, v: string) => {
+        if (k === "status" && op === "in") st.notIn = v;
+        return b;
+      },
+      in: (k: string, arr: unknown[]) => {
+        st.inCol = k;
+        st.inVals = arr;
+        return b;
+      },
+      or: (s: string) => {
+        st.orStr = s;
+        return b;
+      },
       order: () => b,
       range: () => b,
       limit: () => b,
@@ -367,7 +511,8 @@ function surfaceClient(log: QueryLog): any {
         if (table === "job_assignments") {
           let rows = ASSIGNMENTS.filter((a) =>
             a.user_id === st.eq.user_id && a.status !== "cancelled" &&
-            (st.eq.is_ghost === undefined || (a.is_ghost ?? false) === st.eq.is_ghost)
+            (st.eq.is_ghost === undefined ||
+              (a.is_ghost ?? false) === st.eq.is_ghost)
           );
           // myJobs' personal lane applies its own, separately-ruled 30-day
           // recency window via .or(_myJobsPersonalRecencyFilter(floor)) — a
@@ -380,18 +525,25 @@ function surfaceClient(log: QueryLog): any {
           const recencyMatch = st.orStr?.match(/^scheduled_end\.gte\.([^,]+),/);
           if (recencyMatch) {
             const floor = recencyMatch[1];
-            rows = rows.filter((a) => a.scheduled_date == null || a.scheduled_date >= floor);
+            rows = rows.filter((a) =>
+              a.scheduled_date == null || a.scheduled_date >= floor
+            );
           }
           // The 180-day make-safe backstop's own jobs-embed type filter —
           // never let a non-make-safe assignment ride the backstop.
           if (st.orStr?.includes("type.eq.makesafe")) {
-            rows = rows.filter((a) => JOBS.find((j) => j.id === a.job_id)?.type === "makesafe");
+            rows = rows.filter((a) =>
+              JOBS.find((j) => j.id === a.job_id)?.type === "makesafe"
+            );
           }
           // search_all_jobs reads a flat job_id list; myJobs reads the full
           // row with an embedded jobs relation — the real client shapes the
           // response differently for each, so the mock must too.
           if (st.select.replace(/\s+/g, "") === "id,job_id") {
-            resolve({ data: rows.map((a) => ({ id: a.id, job_id: a.job_id })), error: null });
+            resolve({
+              data: rows.map((a) => ({ id: a.id, job_id: a.job_id })),
+              error: null,
+            });
             return;
           }
           resolve({
@@ -434,7 +586,9 @@ function surfaceClient(log: QueryLog): any {
           }
           if (st.orStr) {
             const excludeStatuses = new Set(
-              (st.orStr.match(/type\.eq\.(\w+)/g) || []).map((m) => m.split(".")[2]),
+              (st.orStr.match(/type\.eq\.(\w+)/g) || []).map((m) =>
+                m.split(".")[2]
+              ),
             );
             if (excludeStatuses.size > 0) {
               rows = rows.filter((j) => excludeStatuses.has(j.type));
@@ -472,9 +626,17 @@ Deno.test("rule table (end-to-end): ordinary crew's search_all_jobs is restricte
     ORDINARY_CREW.isDispatcher,
   );
   const ids = res.jobs.map((j: any) => j.id).sort();
-  assertEquals(ids, [JOB_FENCING, JOB_PATIO], "only their own allocations — never job-decking-1 or job-makesafe-1");
+  assertEquals(
+    ids,
+    [JOB_FENCING, JOB_PATIO],
+    "only their own allocations — never job-decking-1 or job-makesafe-1",
+  );
   const jobsQuery = log.find((q) => q.table === "jobs");
-  assertEquals(jobsQuery?.inVals?.slice().sort(), [JOB_FENCING, JOB_PATIO], "the DB query itself is restricted, not just a client-side filter");
+  assertEquals(
+    jobsQuery?.inVals?.slice().sort(),
+    [JOB_FENCING, JOB_PATIO],
+    "the DB query itself is restricted, not just a client-side filter",
+  );
 });
 
 Deno.test("rule table (end-to-end): ordinary crew's search_all_jobs stays restricted even when typing a query — no client 2-character minimum relied on", async () => {
@@ -523,7 +685,11 @@ Deno.test("rule table (end-to-end): my_jobs for ordinary crew carries the presen
     ...(g.recentCompleted || []),
     ...(g.unscheduled || []),
   ].map((a: any) => a.jobs?.id);
-  assertEquals(seen.includes(JOB_PATIO), true, "the present allocation is on the personal board");
+  assertEquals(
+    seen.includes(JOB_PATIO),
+    true,
+    "the present allocation is on the personal board",
+  );
   assertEquals(
     seen.includes(JOB_FENCING),
     false,
@@ -539,15 +705,28 @@ Deno.test("rule table (end-to-end): my_jobs for ordinary crew carries the presen
     ORDINARY_CREW.isDispatcher,
   );
   const searchIds = searchRes.jobs.map((j: any) => j.id);
-  assertEquals(searchIds.includes(JOB_FENCING), true, "search carries the far-past allocation");
+  assertEquals(
+    searchIds.includes(JOB_FENCING),
+    true,
+    "search carries the far-past allocation",
+  );
 });
 
 Deno.test("rule table: a ghost watcher row never grants the allocated tier", async () => {
-  const d = await resolveTradeJobAccessTier(accessClient(), JOB_MAKESAFE, GHOST_ONLY_ID, {
-    isOffice: false,
-    access: ACCESS_NONE,
-  });
-  assertEquals(d.tier, "none", "an auto-mirrored ghost is a calendar mirror, not an allocation");
+  const d = await resolveTradeJobAccessTier(
+    accessClient(),
+    JOB_MAKESAFE,
+    GHOST_ONLY_ID,
+    {
+      isOffice: false,
+      access: ACCESS_NONE,
+    },
+  );
+  assertEquals(
+    d.tier,
+    "none",
+    "an auto-mirrored ghost is a calendar mirror, not an allocation",
+  );
 });
 
 Deno.test("rule table (end-to-end): a ghost-only user's search_all_jobs is empty and never queries jobs", async () => {
@@ -573,8 +752,18 @@ function manyAllocationsClient(jobCount: number, inSizes: number[]): any {
     created_at: new Date(Date.UTC(2025, 0, 1) + i * 86400_000).toISOString(),
   }));
   const assignments = [
-    ...jobs.map((j, i) => ({ id: `a-${String(i).padStart(4, "0")}`, job_id: j.id, user_id: CREW_ID, is_ghost: false })),
-    ...jobs.map((j, i) => ({ id: `g-${String(i).padStart(4, "0")}`, job_id: j.id, user_id: CREW_ID, is_ghost: true })),
+    ...jobs.map((j, i) => ({
+      id: `a-${String(i).padStart(4, "0")}`,
+      job_id: j.id,
+      user_id: CREW_ID,
+      is_ghost: false,
+    })),
+    ...jobs.map((j, i) => ({
+      id: `g-${String(i).padStart(4, "0")}`,
+      job_id: j.id,
+      user_id: CREW_ID,
+      is_ghost: true,
+    })),
   ];
   function builder(table: string) {
     const eq: Record<string, unknown> = {};
@@ -582,22 +771,36 @@ function manyAllocationsClient(jobCount: number, inSizes: number[]): any {
     let range: [number, number] | null = null;
     const b: any = {
       select: () => b,
-      eq: (k: string, v: unknown) => { eq[k] = v; return b; },
+      eq: (k: string, v: unknown) => {
+        eq[k] = v;
+        return b;
+      },
       neq: () => b,
       not: () => b,
       or: () => b,
       order: () => b,
-      in: (_k: string, vals: string[]) => { inVals = vals; inSizes.push(vals.length); return b; },
-      range: (from: number, to: number) => { range = [from, to]; return b; },
+      in: (_k: string, vals: string[]) => {
+        inVals = vals;
+        inSizes.push(vals.length);
+        return b;
+      },
+      range: (from: number, to: number) => {
+        range = [from, to];
+        return b;
+      },
       then: (resolve: any) => {
         if (table === "job_assignments") {
-          let rows = assignments.filter((a) => a.user_id === eq.user_id && a.is_ghost === eq.is_ghost);
+          let rows = assignments.filter((a) =>
+            a.user_id === eq.user_id && a.is_ghost === eq.is_ghost
+          );
           if (range) rows = rows.slice(range[0], range[1] + 1);
           resolve({ data: rows, error: null });
           return;
         }
         if (table === "jobs") {
-          const rows = jobs.filter((j) => j.org_id === eq.org_id && (!inVals || inVals.includes(j.id)));
+          const rows = jobs.filter((j) =>
+            j.org_id === eq.org_id && (!inVals || inVals.includes(j.id))
+          );
           resolve({ data: rows.map((j) => ({ ...j })), error: null });
           return;
         }
@@ -612,15 +815,33 @@ function manyAllocationsClient(jobCount: number, inSizes: number[]): any {
 Deno.test("rule table (end-to-end): an allocated-only history of 60 jobs is read in 25-id chunks and paged honestly", async () => {
   const inSizes: number[] = [];
   const client = manyAllocationsClient(60, inSizes);
-  const first = await searchAllJobs(client, new URLSearchParams("page_size=50"), tradeAuth({}), false);
+  const first = await searchAllJobs(
+    client,
+    new URLSearchParams("page_size=50"),
+    tradeAuth({}),
+    false,
+  );
   assertEquals(first.total, 60);
   assertEquals(first.jobs.length, 50);
   assertEquals(first.next_offset, 50);
   assertEquals(first.truncated, true);
-  assertEquals(first.jobs[0].job_number, "SWF-59", "newest first across chunk boundaries");
-  assertEquals(inSizes.length > 0 && inSizes.every((n) => n <= 25), true, "no id filter exceeds 25 ids");
+  assertEquals(
+    first.jobs[0].job_number,
+    "SWF-59",
+    "newest first across chunk boundaries",
+  );
+  assertEquals(
+    inSizes.length > 0 && inSizes.every((n) => n <= 25),
+    true,
+    "no id filter exceeds 25 ids",
+  );
 
-  const second = await searchAllJobs(client, new URLSearchParams("page_size=50&offset=50"), tradeAuth({}), false);
+  const second = await searchAllJobs(
+    client,
+    new URLSearchParams("page_size=50&offset=50"),
+    tradeAuth({}),
+    false,
+  );
   assertEquals(second.jobs.length, 10);
   assertEquals(second.next_offset, null);
   assertEquals(second.truncated, false);
@@ -630,15 +851,60 @@ Deno.test("rule table (end-to-end): an allocated-only history of 60 jobs is read
 
 function categoryManagerClient(): any {
   const jobs = [
-    { id: "cm-fence-1", org_id: ORG_A, type: "fencing", job_number: "SWF-10", client_name: "Alpha", status: "scheduled", created_at: "2026-09-01T00:00:00Z" },
-    { id: "cm-fence-2", org_id: ORG_A, type: "fencing", job_number: "SWF-11", client_name: "Bravo", status: "complete", created_at: "2026-08-01T00:00:00Z" },
-    { id: "cm-patio-own", org_id: ORG_A, type: "patio", job_number: "SWP-20", client_name: "Alpha", status: "complete", created_at: "2026-07-01T00:00:00Z" },
-    { id: "cm-patio-deleted", org_id: ORG_A, type: "patio", job_number: "SWP-21", client_name: "Alpha", status: "deleted", created_at: "2026-06-01T00:00:00Z" },
-    { id: "cm-patio-other", org_id: ORG_A, type: "patio", job_number: "SWP-22", client_name: "Alpha", status: "scheduled", created_at: "2026-05-01T00:00:00Z" },
+    {
+      id: "cm-fence-1",
+      org_id: ORG_A,
+      type: "fencing",
+      job_number: "SWF-10",
+      client_name: "Alpha",
+      status: "scheduled",
+      created_at: "2026-09-01T00:00:00Z",
+    },
+    {
+      id: "cm-fence-2",
+      org_id: ORG_A,
+      type: "fencing",
+      job_number: "SWF-11",
+      client_name: "Bravo",
+      status: "complete",
+      created_at: "2026-08-01T00:00:00Z",
+    },
+    {
+      id: "cm-patio-own",
+      org_id: ORG_A,
+      type: "patio",
+      job_number: "SWP-20",
+      client_name: "Alpha",
+      status: "complete",
+      created_at: "2026-07-01T00:00:00Z",
+    },
+    {
+      id: "cm-patio-deleted",
+      org_id: ORG_A,
+      type: "patio",
+      job_number: "SWP-21",
+      client_name: "Alpha",
+      status: "deleted",
+      created_at: "2026-06-01T00:00:00Z",
+    },
+    {
+      id: "cm-patio-other",
+      org_id: ORG_A,
+      type: "patio",
+      job_number: "SWP-22",
+      client_name: "Alpha",
+      status: "scheduled",
+      created_at: "2026-05-01T00:00:00Z",
+    },
   ];
   const assignments = [
     { id: "cma-1", job_id: "cm-patio-own", user_id: "u-cm", is_ghost: false },
-    { id: "cma-2", job_id: "cm-patio-deleted", user_id: "u-cm", is_ghost: false },
+    {
+      id: "cma-2",
+      job_id: "cm-patio-deleted",
+      user_id: "u-cm",
+      is_ghost: false,
+    },
   ];
   function builder(table: string) {
     const eq: Record<string, unknown> = {};
@@ -648,33 +914,65 @@ function categoryManagerClient(): any {
     let range: [number, number] | null = null;
     let head = false;
     const b: any = {
-      select: (_s: string, opts?: { head?: boolean }) => { head = !!opts?.head; return b; },
-      eq: (k: string, v: unknown) => { eq[k] = v; return b; },
-      neq: () => b,
-      not: (k: string, op: string, v: string) => {
-        if (k === "status" && op === "in") notIn = [...v.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+      select: (_s: string, opts?: { head?: boolean }) => {
+        head = !!opts?.head;
         return b;
       },
-      or: (s: string) => { ors.push(s); return b; },
+      eq: (k: string, v: unknown) => {
+        eq[k] = v;
+        return b;
+      },
+      neq: () => b,
+      not: (k: string, op: string, v: string) => {
+        if (k === "status" && op === "in") {
+          notIn = [...v.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+        }
+        return b;
+      },
+      or: (s: string) => {
+        ors.push(s);
+        return b;
+      },
       order: () => b,
-      in: (_k: string, vals: string[]) => { inVals = vals; return b; },
-      range: (from: number, to: number) => { range = [from, to]; return b; },
+      in: (_k: string, vals: string[]) => {
+        inVals = vals;
+        return b;
+      },
+      range: (from: number, to: number) => {
+        range = [from, to];
+        return b;
+      },
       then: (resolve: any) => {
         if (table === "job_assignments") {
-          resolve({ data: assignments.filter((a) => a.user_id === eq.user_id && a.is_ghost === eq.is_ghost), error: null });
+          resolve({
+            data: assignments.filter((a) =>
+              a.user_id === eq.user_id && a.is_ghost === eq.is_ghost
+            ),
+            error: null,
+          });
           return;
         }
         if (table === "jobs") {
-          let rows = jobs.filter((j) => j.org_id === eq.org_id && !notIn.includes(j.status));
+          let rows = jobs.filter((j) =>
+            j.org_id === eq.org_id && !notIn.includes(j.status)
+          );
           if (inVals) rows = rows.filter((j) => inVals!.includes(j.id));
           for (const o of ors) {
             const types = [...o.matchAll(/type\.eq\.(\w+)/g)].map((m) => m[1]);
             const text = o.match(/client_name\.ilike\.%([^%]+)%/)?.[1];
             if (types.length) rows = rows.filter((j) => types.includes(j.type));
-            if (text) rows = rows.filter((j) => j.client_name.toLowerCase().includes(text) || j.job_number.toLowerCase().includes(text));
+            if (text) {
+              rows = rows.filter((j) =>
+                j.client_name.toLowerCase().includes(text) ||
+                j.job_number.toLowerCase().includes(text)
+              );
+            }
           }
           rows.sort((a, c) => c.created_at.localeCompare(a.created_at));
-          if (head) { resolve({ data: null, count: rows.length, error: null }); return; }
+          if (head) {
+            resolve({ data: null, count: rows.length, error: null });
+            return;
+          }
           if (range) rows = rows.slice(range[0], range[1] + 1);
           resolve({ data: rows.map((j) => ({ ...j })), error: null });
           return;
@@ -687,22 +985,51 @@ function categoryManagerClient(): any {
   return { from: (table: string) => builder(table) };
 }
 
-const FENCING_CATEGORY_MANAGER = tradeAuth({ id: "u-cm", role: "ops_manager", managedVerticals: ["fencing"] });
+const FENCING_CATEGORY_MANAGER = tradeAuth({
+  id: "u-cm",
+  role: "ops_manager",
+  managedVerticals: ["fencing"],
+});
 
 Deno.test("rule table (end-to-end): a category manager's own out-of-vertical allocation joins page one only, never a deleted job", async () => {
   const client = categoryManagerClient();
-  const first = await searchAllJobs(client, new URLSearchParams("page_size=1"), FENCING_CATEGORY_MANAGER, false);
-  assertEquals(first.jobs.map((j: any) => j.id).sort(), ["cm-fence-1", "cm-patio-own"]);
+  const first = await searchAllJobs(
+    client,
+    new URLSearchParams("page_size=1"),
+    FENCING_CATEGORY_MANAGER,
+    false,
+  );
+  assertEquals(first.jobs.map((j: any) => j.id).sort(), [
+    "cm-fence-1",
+    "cm-patio-own",
+  ]);
   assertEquals(first.total, 3);
   assertEquals(first.next_offset, 1);
 
-  const second = await searchAllJobs(client, new URLSearchParams("page_size=1&offset=1"), FENCING_CATEGORY_MANAGER, false);
-  assertEquals(second.jobs.map((j: any) => j.id), ["cm-fence-2"], "the seed is not re-merged into later pages");
+  const second = await searchAllJobs(
+    client,
+    new URLSearchParams("page_size=1&offset=1"),
+    FENCING_CATEGORY_MANAGER,
+    false,
+  );
+  assertEquals(
+    second.jobs.map((j: any) => j.id),
+    ["cm-fence-2"],
+    "the seed is not re-merged into later pages",
+  );
   assertEquals(second.total, 3);
   assertEquals(second.next_offset, null);
 });
 
 Deno.test("rule table (end-to-end): a category manager's typed search reaches their own out-of-vertical allocation, never a deleted or unallocated one", async () => {
-  const res = await searchAllJobs(categoryManagerClient(), new URLSearchParams("q=alpha"), FENCING_CATEGORY_MANAGER, false);
-  assertEquals(res.jobs.map((j: any) => j.id).sort(), ["cm-fence-1", "cm-patio-own"]);
+  const res = await searchAllJobs(
+    categoryManagerClient(),
+    new URLSearchParams("q=alpha"),
+    FENCING_CATEGORY_MANAGER,
+    false,
+  );
+  assertEquals(res.jobs.map((j: any) => j.id).sort(), [
+    "cm-fence-1",
+    "cm-patio-own",
+  ]);
 });
