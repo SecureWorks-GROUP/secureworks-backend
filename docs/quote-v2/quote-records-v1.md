@@ -44,7 +44,8 @@ Cost (per unit, ex GST) comes from one of:
   is refused `quote_line_unpriced`. The line records item, cost row, supplier,
   rate date, blessed or provisional, and which rate basis priced it.
 - `stated` (a named person and evidence), `tool` (a calculation id), or
-  `none` (only with a stated sell or adjustment).
+  `none` (only with an owner-stated sell or adjustment; the owner's preview
+  reads "no cost recorded", the party copy never shows it).
 
 Sell is one of:
 
@@ -53,8 +54,9 @@ Sell is one of:
   who, when, why and the default at the time) or the family default from
   `price_book_current_markup`. No markup (fencing today) refuses the freeze
   `quote_markup_unset`. Below 1.0 is refused.
-- `stated`: an agreed sell by a named person and time (`owner`) or the
-  scoping tool (`tool` with its calculation id). Cost is still recorded.
+- `stated`: a sell the owner names, with who and when (`kind: owner`, the
+  only kind). A tool supplies cost and quantity, never a sell; any other
+  kind is refused `quote_line_sell_kind_unknown`.
 - `adjustment`: a signed amount by a named person with a reason (rounding).
 
 Line sell = round(qty x unit sell, 2). `quote_v2_line_price_source` says in
@@ -89,6 +91,10 @@ The job's current revision is its highest-numbered frozen revision.
   `unknown`. The view (`quote_v2_party_view`) holds only that party's share,
   the job total, each line with their share, and the other parties by first
   name and percentage. Never a cost, markup, source, contact or token.
+- `quote_v2_revoke_party_link(link, by, reason)` revokes per party per quote:
+  every link that party holds for the job, forwarding links included. It
+  returns how many were newly revoked; an unknown link is refused
+  `quote_link_missing`. A link issued afterwards is fresh and live.
 - `quote_v2_accept(token, revision_id, content_hash, name)` records one
   party's acceptance of the current revision, only if the echoed revision and
   hash are exactly current and it has not expired. Idempotent.

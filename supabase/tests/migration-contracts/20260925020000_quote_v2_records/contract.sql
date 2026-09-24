@@ -143,7 +143,47 @@ BEGIN
   IF (SELECT ghl_contact_id FROM public.quote_v2_revision_parties WHERE revision_id = rev AND party_id = pid_c) <> 'ghl-stephen' THEN
     RAISE EXCEPTION 'the GHL contact at prepare time is kept on the revision party';
   END IF;
+  -- An owner-stated sell with no cost says so on the owner's preview, never
+  -- on the party's copy.
+  IF (SELECT public.quote_v2_line_price_source(x) FROM public.quote_v2_lines x WHERE revision_id = rev AND line_key = 'fence')
+     NOT LIKE 'sell stated by marnin at %, no cost recorded'
+     OR position('no cost' IN public.quote_v2_staff_revision(rev)::text) = 0 THEN
+    RAISE EXCEPTION 'a stated sell with no cost must read "no cost recorded" to staff, got %',
+      (SELECT public.quote_v2_line_price_source(x) FROM public.quote_v2_lines x WHERE revision_id = rev AND line_key = 'fence');
+  END IF;
+  IF position('no cost' IN public.quote_v2_party_view(rev, pid_c)::text) > 0 THEN
+    RAISE EXCEPTION 'the party copy must not carry the owner''s cost note';
+  END IF;
   INSERT INTO ids VALUES ('gw_rev1', rev::text), ('gw_client', pid_c::text), ('gw_nb', pid_n::text);
+END $$;
+
+-- ── A tool supplies cost and quantity, never a sell ─────────────────────
+DO $$
+DECLARE
+  job uuid := '00000000-0000-4000-8000-000000261423';
+  party jsonb := jsonb_build_array(jsonb_build_object('ref', 'c', 'role', 'client', 'display_name', 'Tess Tool',
+    'share_rule', 'sole', 'share_bp', 10000));
+BEGIN
+  PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_create_draft(%L, %L, %L)', job, jsonb_build_object(
+      'family', 'patio', 'parties', party,
+      'lines', jsonb_build_array(jsonb_build_object('line_key', 'posts', 'description', 'Posts', 'qty', 5, 'unit', 'each',
+        'cost', jsonb_build_object('source', 'tool', 'unit_cost_ex_gst', 145.55, 'evidence', 'patio-tool calc 1'),
+        'sell', jsonb_build_object('basis', 'stated', 'kind', 'tool', 'unit_sell_ex_gst', 181.94, 'source_ref', 'patio-tool calc 1')))),
+      'contract'),
+    'quote_line_sell_kind_unknown', 'a tool-stated sell was accepted');
+  PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_create_draft(%L, %L, %L)', job, jsonb_build_object(
+      'family', 'patio', 'parties', party,
+      'lines', jsonb_build_array(jsonb_build_object('line_key', 'posts', 'description', 'Posts', 'qty', 5, 'unit', 'each',
+        'cost', jsonb_build_object('source', 'tool', 'unit_cost_ex_gst', 145.55, 'evidence', 'patio-tool calc 1'),
+        'sell', jsonb_build_object('basis', 'stated', 'unit_sell_ex_gst', 181.94)))),
+      'contract'),
+    'quote_line_sell_kind_unknown', 'a stated sell with no owner was accepted');
+  PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_create_draft(%L, %L, %L)', job, jsonb_build_object(
+      'family', 'patio', 'parties', party,
+      'lines', jsonb_build_array(jsonb_build_object('line_key', 'posts', 'description', 'Posts', 'qty', 5, 'unit', 'each',
+        'cost', jsonb_build_object('source', 'none'), 'sell', jsonb_build_object('basis', 'cost_markup')))),
+      'contract'),
+    'quote_v2_lines_check', 'a marked-up line with no cost was accepted');
 END $$;
 
 -- ── The party view: own quote only, never cost, markup or other money ───
@@ -286,6 +326,26 @@ BEGIN
   END IF;
   PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_accept(%L, %L, %L)', tok_c2, rev2, h),
     'quote_link_invalid', 'a revoked link accepted');
+  -- Revoking is per party: the client's older, forwarding link stops too,
+  -- the neighbour's links do not, and a re-issued link is fresh and live.
+  IF public.quote_v2_open_party_link(tok_c1)->>'state' <> 'revoked'
+     OR public.quote_v2_open_party_link(tok_c1)->'quote' <> 'null'::jsonb THEN
+    RAISE EXCEPTION 'revoking one of a party''s links must revoke its forwarding links, got %',
+      public.quote_v2_open_party_link(tok_c1)->>'state';
+  END IF;
+  IF public.quote_v2_open_party_link(tok_n1)->>'state' <> 'forwarded' THEN
+    RAISE EXCEPTION 'revoking the client''s links must not touch the neighbour''s';
+  END IF;
+  IF public.quote_v2_revoke_party_link((lk->>'link_id')::uuid, 'contract', 'again') <> 0 THEN
+    RAISE EXCEPTION 'revoking an already revoked party revokes nothing more';
+  END IF;
+  PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_revoke_party_link(%L, %L, %L)', gen_random_uuid(), 'contract', 'x'),
+    'quote_link_missing', 'an unknown link was revoked');
+  tok_c2 := (public.quote_v2_issue_party_link(rev2, pc, 'contract'))->>'token';
+  IF public.quote_v2_open_party_link(tok_c2)->>'state' <> 'current'
+     OR public.quote_v2_accept(tok_c2, rev2, h)->>'state' <> 'already_accepted' THEN
+    RAISE EXCEPTION 'a link re-issued after revocation must open the party''s current quote';
+  END IF;
   INSERT INTO ids VALUES ('gw_rev2', rev2::text);
 END $$;
 
@@ -359,6 +419,7 @@ DO $$
 DECLARE
   job uuid := '00000000-0000-4000-8000-000000026051';
   tool text := 'patio-tool pricing_json generated 2026-04-02T05:23:10.383Z';
+  tool_at timestamptz := '2026-04-02T05:23:10.383Z';
   base jsonb;
   dup jsonb;
   lines jsonb;
@@ -366,12 +427,13 @@ DECLARE
   rev uuid;
   res jsonb;
 BEGIN
-  -- qty, unit, unit cost, unit sell exactly as the scoping tool priced them
+  -- qty, unit and unit cost exactly as the scoping tool recorded them; the
+  -- sell it showed is carried as the owner's stated sell
   -- (Ridge Cap, Gable Barges and Fascia Board carry their true metres).
   SELECT jsonb_agg(jsonb_build_object(
       'line_key', x.k, 'description', x.d, 'qty', x.q, 'unit', x.u,
       'cost', jsonb_build_object('source', 'tool', 'unit_cost_ex_gst', x.c, 'evidence', tool),
-      'sell', jsonb_build_object('basis', 'stated', 'kind', 'tool', 'unit_sell_ex_gst', x.s, 'source_ref', tool))
+      'sell', jsonb_build_object('basis', 'stated', 'kind', 'owner', 'unit_sell_ex_gst', x.s, 'stated_by', 'marnin', 'stated_at', tool_at))
     ORDER BY x.o)
   INTO base
   FROM (VALUES
@@ -395,7 +457,7 @@ BEGIN
   ) AS x(o, k, d, q, u, c, s);
   dup := jsonb_build_object('line_key', 'gutter-beam-extra', 'description', 'Gutter Beam 100×50×2', 'qty', 1, 'unit', 'each',
     'cost', jsonb_build_object('source', 'tool', 'unit_cost_ex_gst', 195, 'evidence', tool),
-    'sell', jsonb_build_object('basis', 'stated', 'kind', 'tool', 'unit_sell_ex_gst', 248, 'source_ref', tool));
+    'sell', jsonb_build_object('basis', 'stated', 'kind', 'owner', 'unit_sell_ex_gst', 248, 'stated_by', 'marnin', 'stated_at', tool_at));
   lines := base || jsonb_build_array(dup);
   rev_dup := public.quote_v2_create_draft(job, jsonb_build_object(
     'family', 'patio',

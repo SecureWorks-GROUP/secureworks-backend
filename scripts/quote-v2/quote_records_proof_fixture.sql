@@ -54,11 +54,11 @@ BEGIN
   INSERT INTO quote_v2_proof_links VALUES
     ('gwelup-neighbour-rev2', public.quote_v2_issue_party_link(rev2, pn, 'quote-v2-proof')->>'token');
 
-  -- SWP-26051 exactly as the patio tool priced it, without the second
-  -- "Gutter Beam 100x50x2" line.
+  -- SWP-26051 at the patio tool's costs, its sells carried as the owner's
+  -- stated sells, without the second "Gutter Beam 100x50x2" line.
   SELECT jsonb_agg(jsonb_build_object('line_key', x.k, 'description', x.d, 'qty', x.q, 'unit', x.u,
       'cost', jsonb_build_object('source', 'tool', 'unit_cost_ex_gst', x.c, 'evidence', tool),
-      'sell', jsonb_build_object('basis', 'stated', 'kind', 'tool', 'unit_sell_ex_gst', x.s, 'source_ref', tool)) ORDER BY x.o)
+      'sell', jsonb_build_object('basis', 'stated', 'kind', 'owner', 'unit_sell_ex_gst', x.s, 'stated_by', 'marnin', 'stated_at', '2026-04-02T05:23:10.383Z')) ORDER BY x.o)
   INTO swp_lines
   FROM (VALUES
     (1, 'posts', 'Posts 90×90×2', 5, 'each', 145.55, 181.938),

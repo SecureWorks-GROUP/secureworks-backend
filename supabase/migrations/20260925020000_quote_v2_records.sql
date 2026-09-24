@@ -301,10 +301,9 @@ CREATE TABLE public.quote_v2_lines (
   markup_override_id uuid REFERENCES public.quote_line_markup_overrides(id),
   markup_set_by text,
   markup_set_at timestamptz,
-  sell_stated_kind text CHECK (sell_stated_kind IN ('owner', 'tool')),
+  sell_stated_kind text CHECK (sell_stated_kind = 'owner'),
   sell_stated_by text,
   sell_stated_at timestamptz,
-  sell_source_ref text,
   unit_sell_ex_gst numeric(12,4),
   line_cost_ex_gst numeric(12,2),
   line_sell_ex_gst numeric(12,2),
@@ -332,14 +331,14 @@ CREATE TABLE public.quote_v2_lines (
     AND markup_set_by IS NOT NULL AND markup_set_at IS NOT NULL)),
   CHECK (sell_basis = 'cost_markup' OR (markup_multiplier IS NULL AND markup_source IS NULL)),
   CHECK (sell_basis <> 'stated' OR (unit_sell_ex_gst > 0 AND sell_stated_kind IS NOT NULL)),
+  CHECK (cost_source <> 'none' OR sell_stated_kind = 'owner'),
   CHECK (sell_stated_kind IS DISTINCT FROM 'owner' OR (btrim(coalesce(sell_stated_by, '')) <> ''
     AND sell_stated_at IS NOT NULL)),
-  CHECK (sell_stated_kind IS DISTINCT FROM 'tool' OR btrim(coalesce(sell_source_ref, '')) <> ''),
   CHECK (sell_basis <> 'adjustment' OR (cost_source = 'none' AND qty = 1 AND unit_sell_ex_gst <> 0
     AND sell_stated_kind = 'owner' AND btrim(coalesce(note, '')) <> ''))
 );
 COMMENT ON TABLE public.quote_v2_lines IS
-  'Quote v2 line: cost to us with its source, then sell as cost x markup (family default or a scoper''s line override, with who) or a stated sell (owner with time, or tool with calculation id).';
+  'Quote v2 line: cost to us with its source, then sell as cost x markup (family default or a scoper''s line override, with who) or a stated sell (owner with time). A tool supplies cost and quantity, never a sell.';
 
 -- An explicit split for one line, overriding the parties' default share
 -- (for example a removal the neighbour alone pays for).
@@ -652,7 +651,6 @@ END $$;
 --           | {"source":"none"},
 --     "sell": {"basis":"cost_markup","family"?}
 --           | {"basis":"stated","kind":"owner","unit_sell_ex_gst","stated_by","stated_at"}
---           | {"basis":"stated","kind":"tool","unit_sell_ex_gst","source_ref"}
 --           | {"basis":"adjustment","amount_ex_gst","stated_by","stated_at"},
 --     "splits": [{"party_ref","share_bp"}]?, "duplicate_ack"?, "note"?}]
 -- }
@@ -788,13 +786,16 @@ BEGIN
     ELSIF sell->>'basis' NOT IN ('cost_markup', 'stated') OR sell->>'basis' IS NULL THEN
       RAISE EXCEPTION 'quote_line_sell_basis_unknown: %', sell->>'basis';
     END IF;
+    IF sell->>'basis' = 'stated' AND sell->>'kind' IS DISTINCT FROM 'owner' THEN
+      RAISE EXCEPTION 'quote_line_sell_kind_unknown: % (only the owner states a sell; a tool supplies cost)', ln->>'line_key';
+    END IF;
 
     INSERT INTO public.quote_v2_lines (
       revision_id, line_key, ordinal, description, category, qty, unit,
       cost_source, item_key, cost_row_id, stock_length_mm, cost_rate_basis, cost_supplier,
       cost_as_at, cost_status, unit_cost_ex_gst, cost_stated_by, cost_evidence,
       sell_basis, markup_family, sell_stated_kind, sell_stated_by, sell_stated_at,
-      sell_source_ref, unit_sell_ex_gst, duplicate_ack, note)
+      unit_sell_ex_gst, duplicate_ack, note)
     VALUES (
       rev_id, ln->>'line_key', ord, ln->>'description', ln->>'category', v_qty, v_unit,
       cost->>'source',
@@ -812,7 +813,6 @@ BEGIN
            WHEN sell->>'basis' = 'stated' THEN sell->>'kind' END,
       CASE WHEN sell->>'basis' IN ('stated', 'adjustment') THEN sell->>'stated_by' END,
       CASE WHEN sell->>'basis' IN ('stated', 'adjustment') THEN (sell->>'stated_at')::timestamptz END,
-      CASE WHEN sell->>'basis' = 'stated' THEN sell->>'source_ref' END,
       CASE WHEN sell->>'basis' = 'stated' THEN (sell->>'unit_sell_ex_gst')::numeric
            WHEN sell->>'basis' = 'adjustment' THEN (sell->>'amount_ex_gst')::numeric END,
       nullif(btrim(ln->>'duplicate_ack'), ''),
@@ -1208,10 +1208,22 @@ CREATE OR REPLACE FUNCTION public.quote_v2_revoke_party_link(
   p_revoked_by text,
   p_reason text
 )
-RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  pid uuid;
+  n integer;
+BEGIN
+  SELECT k.party_id INTO pid FROM public.quote_v2_party_links k WHERE k.id = p_link_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'quote_link_missing: %', p_link_id;
+  END IF;
   INSERT INTO public.quote_v2_link_revocations (link_id, reason, revoked_by)
-  VALUES (p_link_id, p_reason, p_revoked_by)
-$$;
+  SELECT k.id, p_reason, p_revoked_by FROM public.quote_v2_party_links k
+  WHERE k.party_id = pid
+  ON CONFLICT (link_id) DO NOTHING;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END $$;
 
 -- What ONE party may see of one revision. Never costs, markups, sources,
 -- tokens, contact details, or another party's amounts; other parties appear
@@ -1402,9 +1414,8 @@ RETURNS text LANGUAGE sql STABLE AS $$
         WHEN 'line_override' THEN ' set by ' || l.markup_set_by || ' at ' || l.markup_set_at
         ELSE ' ' || l.markup_family || ' default (' || coalesce(l.markup_rule_status, '') || ')' END,
         ' x ' || l.markup_family || ' markup (not yet frozen)')
-    WHEN 'stated' THEN CASE l.sell_stated_kind
-      WHEN 'owner' THEN 'sell stated by ' || l.sell_stated_by || ' at ' || l.sell_stated_at
-      ELSE 'sell from tool (' || l.sell_source_ref || ')' END
+    WHEN 'stated' THEN 'sell stated by ' || l.sell_stated_by || ' at ' || l.sell_stated_at
+      || CASE WHEN l.cost_source = 'none' THEN ', no cost recorded' ELSE '' END
     ELSE 'adjustment by ' || l.sell_stated_by || ': ' || l.note END
 $$;
 
