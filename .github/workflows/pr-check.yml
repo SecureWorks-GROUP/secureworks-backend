@@ -236,6 +236,7 @@ jobs:
             supabase/functions/send-outlook-email/ses_delivery_fence_test.ts \
             supabase/functions/send-quote/xero_quote_outcome_test.ts \
             supabase/functions/send-quote/send_runs_request_test.ts \
+            supabase/functions/send-quote/quote_party_view_test.ts \
             supabase/functions/ghl-proxy/hardening_helpers_test.ts \
             supabase/functions/ghl-proxy/provider_reads_test.ts \
             supabase/functions/ghl-proxy/lead_search_test.ts \

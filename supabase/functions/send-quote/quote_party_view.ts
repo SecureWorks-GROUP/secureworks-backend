@@ -1,0 +1,256 @@
+// Party scoping for customer quote links.
+//
+// A quote document belongs to exactly one party on a job: the pair
+// (job_contact_id, run_label), with null meaning "no contact" / "whole job".
+// The client and each neighbour are different parties, and so is a
+// whole-job quote that predates a neighbour split. A customer link must only
+// ever show, forward to, or accept documents of its own party.
+//
+// Before this module the /view page listed every live sent quote on the job
+// as "options", so a neighbour saw the client's quote, the whole-job quote
+// and every unretired revision, each with an Accept button carrying that
+// other document's token (live on SWF-26646, SWF-26333, SWF-261276,
+// SWF-26670, SWF-26760, 2026-09-24).
+
+export type QuotePartyDocument = {
+  id: string
+  job_contact_id?: string | null
+  run_label?: string | null
+  share_token?: string | null
+  sent_to_client?: boolean | null
+  sent_at?: string | null
+  accepted_at?: string | null
+  declined_at?: string | null
+  superseded_at?: string | null
+  created_at?: string | null
+  version?: number | null
+}
+
+export type QuotePartyKey = {
+  jobContactId: string | null
+  runLabel: string | null
+}
+
+function normalised(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length ? trimmed : null
+}
+
+export function quotePartyKey(
+  doc: { job_contact_id?: string | null; run_label?: string | null },
+): QuotePartyKey {
+  return {
+    jobContactId: normalised(doc?.job_contact_id),
+    runLabel: normalised(doc?.run_label),
+  }
+}
+
+export function sameQuoteParty(
+  a: { job_contact_id?: string | null; run_label?: string | null },
+  b: { job_contact_id?: string | null; run_label?: string | null },
+): boolean {
+  const left = quotePartyKey(a)
+  const right = quotePartyKey(b)
+  return left.jobContactId === right.jobContactId && left.runLabel === right.runLabel
+}
+
+function isRetired(doc: QuotePartyDocument): boolean {
+  return typeof doc.superseded_at === 'string' && doc.superseded_at.trim().length > 0
+}
+
+function isLiveSent(doc: QuotePartyDocument): boolean {
+  return doc.sent_to_client === true && !isRetired(doc)
+}
+
+function timeOf(value: string | null | undefined): number {
+  const t = typeof value === 'string' ? Date.parse(value) : NaN
+  return Number.isFinite(t) ? t : 0
+}
+
+/** Newest first: created_at, then version, then id (deterministic). */
+function newestFirst(a: QuotePartyDocument, b: QuotePartyDocument): number {
+  const byTime = timeOf(b.created_at) - timeOf(a.created_at)
+  if (byTime !== 0) return byTime
+  const byVersion = (b.version ?? 0) - (a.version ?? 0)
+  if (byVersion !== 0) return byVersion
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+}
+
+/**
+ * The party's current document: its newest live sent document. An accepted
+ * document always wins, so a party that already accepted keeps seeing what
+ * they accepted.
+ */
+export function currentQuoteForParty(
+  docs: QuotePartyDocument[],
+  party: { job_contact_id?: string | null; run_label?: string | null },
+): QuotePartyDocument | null {
+  const own = (docs || []).filter((d) => d && typeof d.id === 'string' && sameQuoteParty(d, party) && isLiveSent(d))
+  if (!own.length) return null
+  const accepted = own.filter((d) => !!d.accepted_at).sort(newestFirst)
+  if (accepted.length) return accepted[0]
+  return own.sort(newestFirst)[0]
+}
+
+export type QuoteViewDecision =
+  | { kind: 'forward'; current: QuotePartyDocument }
+  | { kind: 'options'; documents: QuotePartyDocument[] }
+  | { kind: 'single' }
+
+/**
+ * What a live sent document's link may show, given the job's live sent quote
+ * documents (any party). Other parties' documents are ignored entirely.
+ *
+ * - A fence-run document (run_label set) is never an option: runs have one
+ *   document per party. If it is not the party's current document it forwards
+ *   to that party's current one.
+ * - A whole-quote document (run_label null) may show same-party options
+ *   (A/B alternatives sent to the same person), never another party's.
+ */
+export function quoteViewDecision(
+  doc: QuotePartyDocument,
+  jobLiveDocs: QuotePartyDocument[],
+): QuoteViewDecision {
+  const key = quotePartyKey(doc)
+  const partyDocs = [doc, ...(jobLiveDocs || []).filter((d) => d && d.id !== doc.id)]
+    .filter((d) => sameQuoteParty(d, doc) && isLiveSent(d))
+  if (key.runLabel !== null) {
+    const current = currentQuoteForParty(partyDocs, doc)
+    if (current && current.id !== doc.id) return { kind: 'forward', current }
+    return { kind: 'single' }
+  }
+  if (partyDocs.length > 1) {
+    const [self, ...rest] = partyDocs
+    return { kind: 'options', documents: [self, ...rest] }
+  }
+  return { kind: 'single' }
+}
+
+/**
+ * Whether a document may be accepted: it must be live, and a fence-run
+ * document must be its party's current document (older duplicates of the
+ * same run for the same person are not separately acceptable).
+ */
+export function quoteDocumentAcceptable(
+  doc: QuotePartyDocument,
+  jobLiveDocs: QuotePartyDocument[],
+): boolean {
+  if (isRetired(doc)) return false
+  if (quotePartyKey(doc).runLabel === null) return true
+  const current = currentQuoteForParty([doc, ...(jobLiveDocs || [])], doc)
+  return !current || current.id === doc.id
+}
+
+/**
+ * Legacy per-contact acceptance: every contact with a current (unretired)
+ * document has accepted one of its current documents. Retired revisions are
+ * ignored, so one revision no longer leaves a fully accepted job stuck at
+ * partially_accepted.
+ */
+export function everyQuotePartyAccepted(
+  docs: Array<{ job_contact_id?: string | null; accepted_at?: string | null; superseded_at?: string | null }>,
+): boolean {
+  const byContact = new Map<string, boolean>()
+  for (const d of docs || []) {
+    const contact = normalised(d?.job_contact_id)
+    if (!contact) continue
+    if (typeof d.superseded_at === 'string' && d.superseded_at.trim().length > 0) continue
+    byContact.set(contact, (byContact.get(contact) ?? false) || !!d.accepted_at)
+  }
+  if (byContact.size === 0) return false
+  for (const accepted of byContact.values()) {
+    if (!accepted) return false
+  }
+  return true
+}
+
+/**
+ * send-runs retirement: for each party whose document was just published or
+ * reused, every other live published document of that same party (same job,
+ * contact and run) is retired. Keeps exactly the kept document per party.
+ * Unpublished drafts and other parties' documents are never touched.
+ */
+export function otherPartyRunDocumentIdsToRetire(
+  keep: Array<{ id: string; job_contact_id?: string | null; run_label?: string | null }>,
+  jobDocs: QuotePartyDocument[],
+): string[] {
+  const keepIds = new Set((keep || []).map((d) => d.id))
+  const out = new Set<string>()
+  for (const kept of keep || []) {
+    if (quotePartyKey(kept).runLabel === null) continue
+    for (const d of jobDocs || []) {
+      if (!d || keepIds.has(d.id)) continue
+      if (!sameQuoteParty(d, kept)) continue
+      if (isRetired(d)) continue
+      const published = d.sent_to_client === true || !!d.accepted_at ||
+        (d.sent_to_client !== false && typeof d.sent_at === 'string' && d.sent_at.length > 0)
+      if (!published) continue
+      if (d.accepted_at) continue
+      out.add(d.id)
+    }
+  }
+  return [...out].sort()
+}
+
+/**
+ * Name to greet a link's reader by: the party's own contact name, never the
+ * job client's name on a neighbour's link.
+ */
+export function quotePartyGreetingName(doc: {
+  job_contact_id?: string | null
+  job_contacts?: { client_name?: string | null } | null
+  jobs?: { client_name?: string | null } | null
+}): string {
+  if (normalised(doc?.job_contact_id)) return normalised(doc?.job_contacts?.client_name) ?? ''
+  return normalised(doc?.jobs?.client_name) ?? ''
+}
+
+/**
+ * /send retires the same party's earlier published versions by default. One
+ * /send call publishes one document, so an older live document for the same
+ * (job_contact_id, run_label) is a superseded revision, not an option. A
+ * caller that genuinely sends separate A/B options one call at a time must
+ * pass supersede_prior:false explicitly.
+ */
+export function sendRetiresPriorPartyQuotes(supersedePrior: unknown): boolean {
+  return supersedePrior !== false
+}
+
+// deno-lint-ignore no-explicit-any
+type QuotePartyClient = { from: (table: string) => any }
+
+/**
+ * After a successful send-runs, retire every other live published run
+ * document of each kept party (same job, job_contact_id and run_label).
+ * `keepIds` must be only documents that are published now: this request's
+ * successfully emailed documents plus reused already-published ones, so a
+ * failed new email never retires the party's last live quote.
+ */
+export async function retireOtherPublishedPartyRunDocuments(
+  sb: QuotePartyClient,
+  input: { jobId: string; keepIds: string[]; now?: Date },
+): Promise<{ ok: true; retiredIds: string[] } | { ok: false; error: string }> {
+  const keepIds = [...new Set((input.keepIds || []).filter((id) => typeof id === 'string' && id))]
+  if (!keepIds.length) return { ok: true, retiredIds: [] }
+  const { data, error } = await sb.from('job_documents')
+    .select('id, job_contact_id, run_label, sent_to_client, sent_at, accepted_at, superseded_at')
+    .eq('job_id', input.jobId)
+    .eq('type', 'quote')
+    .is('superseded_at', null)
+  if (error) return { ok: false, error: String(error?.message || error) }
+  const rows: QuotePartyDocument[] = Array.isArray(data) ? data : []
+  const keep = rows.filter((row) => keepIds.includes(row.id))
+  const ids = otherPartyRunDocumentIdsToRetire(keep, rows)
+  if (!ids.length) return { ok: true, retiredIds: [] }
+  const { data: updated, error: updateError } = await sb.from('job_documents')
+    .update({ superseded_at: (input.now || new Date()).toISOString() })
+    .in('id', ids)
+    .is('superseded_at', null)
+    .select('id')
+  if (updateError) return { ok: false, error: String(updateError?.message || updateError) }
+  const retiredIds = (Array.isArray(updated) ? updated : [])
+    .map((row: { id?: string | null }) => row?.id)
+    .filter((id: unknown): id is string => typeof id === 'string')
+  return { ok: true, retiredIds }
+}

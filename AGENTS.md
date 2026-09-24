@@ -3874,3 +3874,18 @@ found by source pointer (every live copy has one), `graph:` provider key, or
 marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 `attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
+
+## A Customer Quote Link Belongs To One Party
+
+A quote document's party is `(job_contact_id, run_label)`, null matching only
+null: the client, each neighbour and a whole-job quote are different parties.
+`send-quote/view` may show only that party's documents (same-party A/B options,
+or a forward from an older fence-run duplicate to the party's current one), and
+a retired link forwards only to the same party's current quote. Before this
+rule the page listed every live quote on the job with an Accept button each, so
+neighbours saw and could accept the client's quote (SWF-26646 had 18). Accept
+refuses a non-current run duplicate; "all accepted" counts current documents
+only. `/send` retires the party's earlier versions unless the caller passes
+`supersede_prior: false`; `/send-runs` retires each published party's older run
+duplicates. Rules and tests: `send-quote/quote_party_view.ts`,
+`quote_party_view_test.ts`.
