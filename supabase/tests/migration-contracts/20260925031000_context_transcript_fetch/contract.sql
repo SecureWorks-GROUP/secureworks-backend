@@ -223,10 +223,18 @@ BEGIN
  SELECT * INTO f FROM public.call_transcript_fetches WHERE call_message_id='Py9PovOwc4I4vNkn9jXg';
  IF f.outcome<>'saved' OR f.transcript_event_id<>tx OR f.finished_at IS NULL OR f.last_code<>'saved' THEN RAISE EXCEPTION 't2 saved %',row_to_json(f); END IF;
 
- -- History load: a 72-day-old call with nothing is final at once; a young one backs off.
  r:=pg_temp.t2_rec(jsonb_build_object('call_message_id','bJNGSorrVRMHxehZtQHT','call_event_id',e10,'mode','backfill','result','not_ready','code','empty'));
- IF r->>'outcome'<>'not_returned' OR (SELECT mode FROM public.call_transcript_fetches WHERE call_message_id='bJNGSorrVRMHxehZtQHT')<>'backfill'
+ IF r->>'outcome'<>'pending' OR (SELECT mode FROM public.call_transcript_fetches WHERE call_message_id='bJNGSorrVRMHxehZtQHT')<>'backfill'
  THEN RAISE EXCEPTION 't2 backfill old not_ready %',r; END IF;
+ SELECT * INTO f FROM public.call_transcript_fetches WHERE call_message_id='bJNGSorrVRMHxehZtQHT';
+ IF f.attempts<>1 OR f.finished_at IS NOT NULL OR f.next_at < clock_timestamp()+interval '1 minute'
+ THEN RAISE EXCEPTION 't2 backfill retry not scheduled %',row_to_json(f); END IF;
+ FOR i IN 2..7 LOOP
+  r:=pg_temp.t2_rec(jsonb_build_object('call_message_id','bJNGSorrVRMHxehZtQHT','call_event_id',e10,'mode','backfill','result','not_ready','code','empty'));
+  IF i<7 AND r->>'outcome'<>'pending' THEN RAISE EXCEPTION 't2 backfill prematurely terminal %',r; END IF;
+ END LOOP;
+ IF r->>'outcome'<>'not_returned' THEN RAISE EXCEPTION 't2 backfill exhausted retries %',r; END IF;
+
 
  -- Refusals: malformed, unknown key, the wrong call row, a missing code.
  IF pg_temp.t2_refused('{"call_message_id":"6kn6WmrtfTMvhEJtmfeJ","result":"saved","words":"x"}') NOT LIKE '%transcript_fetch_invalid%' THEN RAISE EXCEPTION 't2 unknown key'; END IF;
