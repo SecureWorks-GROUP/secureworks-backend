@@ -69,11 +69,15 @@ export function quoteRunAcceptanceDecision(
     ? runParties.size >= 2 && runDocs.some((document) => document.job_contact_id === neighbourId)
     : runParties.size >= 1
   const runAccepted = hasRequiredParties && everyQuotePartyAccepted(runDocs)
+  const requiredPartiesAccepted = acceptances.every((acceptance) =>
+    !!currentQuoteForParty(qualifiedDocs, acceptance)?.accepted_at
+  )
+  const jobAccepted = runAccepted && requiredPartiesAccepted && everyQuotePartyAccepted(qualifiedDocs)
   const anyDecision = qualifiedDocs.some((document) =>
     isLiveSent(document) && (document.accepted_at || document.declined_at)
   )
   return {
-    jobStatus: everyQuotePartyAccepted(qualifiedDocs) ? 'accepted' : anyDecision ? 'partially_accepted' : 'quoted',
+    jobStatus: jobAccepted ? 'accepted' : anyDecision ? 'partially_accepted' : 'quoted',
     depositAcceptances: runAccepted
       ? currentAcceptances.filter((row) =>
         normaliseQuoteRunLabel(row.run_label) === normaliseQuoteRunLabel(runLabel) && row.status === 'accepted'

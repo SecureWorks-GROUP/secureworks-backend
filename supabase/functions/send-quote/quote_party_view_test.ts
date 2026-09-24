@@ -400,6 +400,19 @@ Deno.test('current party decisions agree across view, accept, status and deposit
       current: 'new', view: 'forward', acceptable: false,
     },
     {
+      name: 'unpublished required neighbour keeps the job partially accepted',
+      docs: [
+        make('old', { accepted_at: early }),
+        make('neighbour', { job_contact_id: 'neighbour', sent_to_client: false, sent_at: null }),
+      ],
+      current: 'old', view: 'single', acceptable: true,
+    },
+    {
+      name: 'pending required neighbour keeps the job partially accepted',
+      docs: [make('old', { accepted_at: early }), make('neighbour', { job_contact_id: 'neighbour' })],
+      current: 'old', view: 'single', acceptable: true,
+    },
+    {
       name: 'same-send whole-quote options stay acceptable',
       docs: [make('old', { run_label: null, accepted_at: early }), make('new', { run_label: null })],
       current: 'old', view: 'options', acceptable: true,
@@ -429,26 +442,38 @@ Deno.test('current party decisions agree across view, accept, status and deposit
     assertEquals(currentQuoteForParty(scenario.docs, linked)?.id, scenario.current, scenario.name)
     assertEquals(quoteViewDecision(linked, scenario.docs).kind, scenario.view, scenario.name)
     assertEquals(quoteDocumentAcceptable(linked, scenario.docs), scenario.acceptable, scenario.name)
-    const acceptances = scenario.docs.filter((document) => document.accepted_at).map((document) => ({
+    const acceptances = scenario.docs.map((document) => ({
       job_document_id: document.id,
       job_contact_id: document.job_contact_id ?? null,
       run_label: document.run_label ?? null,
-      status: 'accepted',
+      status: document.accepted_at ? 'accepted' : 'pending',
       accepted_at: document.accepted_at,
     }))
     const decision = quoteRunAcceptanceDecision(scenario.docs, acceptances, 'RHS', 'neighbour')
     assertEquals(decision.depositAcceptances, [], scenario.name)
-    assertEquals(decision.jobStatus === 'accepted', ['same-send whole-quote options stay acceptable', 'tied versions without sent times use creation'].includes(scenario.name), scenario.name)
+    assertEquals(decision.jobStatus === 'accepted', false, scenario.name)
+    if (scenario.name.includes('required neighbour keeps')) {
+      assertEquals(decision.jobStatus, 'partially_accepted', scenario.name)
+    }
     if (scenario.name === 'older accepted client and newly accepting neighbour cannot unlock deposits') {
       const acceptedDocs = scenario.docs.map((document) =>
         document.id === 'new' ? { ...document, accepted_at: late } : document
       )
-      const completed = quoteRunAcceptanceDecision(acceptedDocs, [...acceptances, {
+      const completed = quoteRunAcceptanceDecision(acceptedDocs, [...acceptances.filter((row) => row.job_document_id !== 'new'), {
         job_document_id: 'new', job_contact_id: 'client', run_label: 'RHS',
         status: 'accepted', accepted_at: late,
       }], 'RHS', 'neighbour')
       assertEquals(completed.jobStatus, 'accepted')
       assertEquals(completed.depositAcceptances.map((row) => row.job_document_id).sort(), ['neighbour', 'new'])
+      const otherRunPending = quoteRunAcceptanceDecision(acceptedDocs, [...acceptances.filter((row) => row.job_document_id !== 'new'), {
+        job_document_id: 'new', job_contact_id: 'client', run_label: 'RHS',
+        status: 'accepted', accepted_at: late,
+      }, {
+        job_document_id: 'unsent-other-run', job_contact_id: 'neighbour', run_label: 'LHS',
+        status: 'pending', accepted_at: null,
+      }], 'RHS', 'neighbour')
+      assertEquals(otherRunPending.jobStatus, 'partially_accepted')
+
     }
   }
 })
