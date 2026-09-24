@@ -218,8 +218,12 @@ FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure \gset
 \if :c1d_writer_moved
 \ir ../20260924152100_context_status_f1b/f1_record_capture_run.sql
 \endif
+-- The later retry-status migration owns a newer version of this status block.
+-- Restore C1d before checking its re-apply, then put the follow-up back in order.
+\ir ../../../rollbacks/20260924210000_context_ghl_retry_status_down.sql
 \ir ../../../migrations/20260924133000_context_ghl_message_reconcile.sql
 \ir ../../../migrations/20260924133000_context_ghl_message_reconcile.sql
+\ir ../../../migrations/20260924210000_context_ghl_retry_status.sql
 DO $$
 DECLARE w record;
 BEGIN
