@@ -33,6 +33,15 @@ import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outco
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
+  currentQuoteForParty,
+  everyQuotePartyAccepted,
+  quoteDocumentAcceptable,
+  quotePartyGreetingName,
+  quoteViewDecision,
+  retireOtherPublishedPartyRunDocuments,
+  sendRetiresPriorPartyQuotes,
+} from './quote_party_view.ts'
+import {
   persistTradePackOnDocuments,
   persistTradePackWriteConfirmed,
   quoteDocumentHasClientSend,
@@ -800,7 +809,7 @@ serve(async (req: Request) => {
       if (claimed.status !== 'claimed') {
         // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
-        if (supersede_prior === true && doc.job_id && quoteDocumentHasClientSend(doc)) {
+        if (sendRetiresPriorPartyQuotes(supersede_prior) && doc.job_id && quoteDocumentHasClientSend(doc)) {
           const retrySupersede = await supersedePriorPublishedQuoteDocuments(sb, {
             jobId: doc.job_id,
             currentDocumentId: doc.id,
@@ -1227,14 +1236,16 @@ serve(async (req: Request) => {
 
         // (M4 G-B2) Supersede prior published quote versions so old client
         // links show the branded "quote was updated" page (see /view + G-B1)
-        // and stale frozen extracts leave allocated trades. Gated on
-        // supersede_prior:true — a plain or multi-option send must NOT
-        // supersede coexisting option docs. Scope key = (job_id,
-        // job_contact_id, run_label); only lower versions matched. Uses the
-        // same durable-publication predicate as extract eligibility. A
-        // failed write is loud (500) so a retry can finish supersession on
-        // the already_sent path instead of leaving stale extracts current.
-        if (supersede_prior === true) {
+        // and stale frozen extracts leave allocated trades. On by default:
+        // one /send publishes one document, so an older live document of the
+        // same party is a revision. Only an explicit supersede_prior:false
+        // keeps coexisting same-party option docs (sendRetiresPriorPartyQuotes).
+        // Scope key = (job_id, job_contact_id, run_label); only lower versions
+        // matched, so another party's quote is never retired. Uses the same
+        // durable-publication predicate as extract eligibility. A failed write
+        // is loud (500) so a retry can finish supersession on the already_sent
+        // path instead of leaving stale extracts current.
+        if (sendRetiresPriorPartyQuotes(supersede_prior)) {
           const superseded = await supersedePriorPublishedQuoteDocuments(sb, {
             jobId: doc.job_id,
             currentDocumentId: doc.id,
@@ -1301,7 +1312,7 @@ serve(async (req: Request) => {
       // Try job_documents first
       let { data: doc, error } = await sb
         .from('job_documents')
-        .select('*, jobs(client_name, site_suburb, type, status)')
+        .select('*, jobs(client_name, site_suburb, type, status), job_contacts(client_name)')
         .eq('share_token', token)
         .eq('sent_to_client', true)
         .is('superseded_at', null)
@@ -1325,25 +1336,32 @@ serve(async (req: Request) => {
         // links to the current live quote — never a dead end, never a stale price.
         const { data: supDoc } = await sb
           .from('job_documents')
-          .select('id, job_id, superseded_at, jobs(client_name, type)')
+          .select('id, job_id, superseded_at, job_contact_id, run_label, jobs(client_name, type), job_contacts(client_name)')
           .eq('share_token', token)
           .eq('sent_to_client', true)
           .not('superseded_at', 'is', null)
           .maybeSingle()
         if (supDoc && supDoc.superseded_at) {
-          // Find the current live quote for the same job to link forward to.
-          const { data: liveDoc } = await sb
+          // Forward only to the SAME party's current quote (same job_contact_id
+          // and run_label). Never to another party's document: a neighbour's
+          // retired link must not open the client's quote.
+          let liveQuery = sb
             .from('job_documents')
-            .select('share_token')
+            .select('id, share_token, job_contact_id, run_label, sent_to_client, accepted_at, superseded_at, created_at, version')
             .eq('job_id', supDoc.job_id)
             .eq('type', 'quote')
             .eq('sent_to_client', true)
             .is('superseded_at', null)
-            .order('version', { ascending: false })
-            .limit(1)
-            .maybeSingle()
+          liveQuery = supDoc.job_contact_id
+            ? liveQuery.eq('job_contact_id', supDoc.job_contact_id)
+            : liveQuery.is('job_contact_id', null)
+          liveQuery = supDoc.run_label
+            ? liveQuery.eq('run_label', supDoc.run_label)
+            : liveQuery.is('run_label', null)
+          const { data: liveDocs } = await liveQuery
+          const liveDoc = currentQuoteForParty(liveDocs || [], supDoc)
           const currentUrl = liveDoc?.share_token ? `${url.origin}${url.pathname}?token=${liveDoc.share_token}` : null
-          return await htmlResponse(supersededQuotePage((supDoc.jobs as any)?.client_name || '', currentUrl))
+          return await htmlResponse(supersededQuotePage(quotePartyGreetingName(supDoc as any), currentUrl))
         }
 
         return await htmlResponse(errorPage('Quote not found or link has expired'))
@@ -1356,21 +1374,36 @@ serve(async (req: Request) => {
           .eq('id', doc.id)
       }
 
-      // Check for multi-option siblings (same job, different options)
+      // Same-party siblings only. A link belongs to one party (job_contact_id,
+      // run_label): it may show that party's A/B options, or forward an older
+      // run duplicate to the party's current document, but never another
+      // party's document or Accept button (quote_party_view.ts).
       if (doc.job_id) {
-        const { data: siblings } = await sb.from('job_documents')
-          .select('id, quote_number, pdf_url, html_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id, run_label')
+        let siblingQuery = sb.from('job_documents')
+          .select('id, quote_number, pdf_url, html_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id, run_label, sent_to_client, superseded_at, created_at, version')
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
           .is('superseded_at', null)
           .neq('id', doc.id)
-          .order('created_at')
+        siblingQuery = doc.job_contact_id
+          ? siblingQuery.eq('job_contact_id', doc.job_contact_id)
+          : siblingQuery.is('job_contact_id', null)
+        siblingQuery = doc.run_label
+          ? siblingQuery.eq('run_label', doc.run_label)
+          : siblingQuery.is('run_label', null)
+        const { data: siblings } = await siblingQuery.order('created_at')
 
-        if (siblings && siblings.length > 0) {
-          // Multi-option job — show option picker page
-          const allDocs = [doc, ...siblings]
-          return await htmlResponse(buildMultiOptionPage(allDocs, doc.jobs, token))
+        const viewDecision = quoteViewDecision(doc, siblings || [])
+        if (viewDecision.kind === 'forward') {
+          const currentUrl = viewDecision.current.share_token
+            ? `${url.origin}${url.pathname}?token=${viewDecision.current.share_token}`
+            : null
+          return await htmlResponse(supersededQuotePage(quotePartyGreetingName(doc as any), currentUrl))
+        }
+        if (viewDecision.kind === 'options') {
+          // Same-party options only — show option picker page
+          return await htmlResponse(buildMultiOptionPage(viewDecision.documents, doc.jobs, token))
         }
       }
 
@@ -1556,6 +1589,35 @@ serve(async (req: Request) => {
           errorPage('This option is no longer available — another option was already accepted.'),
           { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
         )
+      }
+      if (doc.job_id && doc.run_label) {
+        // A fence-run link is acceptable only when it is its party's CURRENT
+        // document (same job_contact_id + run_label). Older duplicate run links
+        // for the same person must not accept again or mint a second deposit.
+        let partyQuery = sb.from('job_documents')
+          .select('id, job_contact_id, run_label, sent_to_client, accepted_at, superseded_at, created_at, version')
+          .eq('job_id', doc.job_id)
+          .eq('type', 'quote')
+          .eq('run_label', doc.run_label)
+          .eq('sent_to_client', true)
+          .is('superseded_at', null)
+        partyQuery = doc.job_contact_id
+          ? partyQuery.eq('job_contact_id', doc.job_contact_id)
+          : partyQuery.is('job_contact_id', null)
+        const { data: partyDocs, error: partyErr } = await partyQuery
+        if (partyErr) {
+          console.error('[accept] party current-document read failed:', partyErr.message)
+          return new Response(
+            errorPage('We could not confirm this quote right now. Please try again shortly.'),
+            { status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+          )
+        }
+        if (!quoteDocumentAcceptable(doc, partyDocs || [])) {
+          return new Response(
+            errorPage('This quote link is no longer current. Please open the latest quote we sent you.'),
+            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+          )
+        }
       }
       if (doc.job_id && !doc.run_label) {
         // Sibling options for the SAME recipient: match job_contact_id null-to-null
@@ -1879,17 +1941,18 @@ serve(async (req: Request) => {
 
         if (isMultiContact) {
           // Check how many contacts have accepted (via their job_documents)
+          // Count only CURRENT (unretired) documents, per contact: a contact is
+          // accepted when one of its current documents is accepted. Retired
+          // revisions no longer hold a fully accepted job at partially_accepted.
           const { data: allDocs } = await sb
             .from('job_documents')
-            .select('id, job_contact_id, accepted_at')
+            .select('id, job_contact_id, accepted_at, superseded_at')
             .eq('job_id', doc.job_id)
             .eq('type', 'quote')
             .not('job_contact_id', 'is', null)
+            .is('superseded_at', null)
 
-          const totalContactDocs = allDocs?.length || 0
-          const acceptedDocs = allDocs?.filter((d: any) => d.accepted_at)?.length || 0
-
-          if (acceptedDocs >= totalContactDocs && totalContactDocs > 0) {
+          if (everyQuotePartyAccepted(allDocs || [])) {
             newStatus = 'accepted' // all contacts accepted
           } else {
             newStatus = 'partially_accepted' // some still pending
@@ -2956,6 +3019,31 @@ serve(async (req: Request) => {
           code: sendOutcome.code,
           emails_sent: emailsSent,
         }, sendOutcome.httpStatus, corsHeaders)
+      }
+
+      // Retire each party's older duplicate run documents, keeping only the
+      // document that is published for that party now. Old duplicate links
+      // then forward to the party's current quote instead of staying
+      // separately acceptable. A failed write is loud (500); the retry takes
+      // the already-published path and finishes the retirement.
+      {
+        const retired = await retireOtherPublishedPartyRunDocuments(sb, {
+          jobId: job.id,
+          keepIds: [
+            ...publishedDocIds,
+            ...publishedExistingDocs.map((d: any) => d?.id).filter((id: unknown) => typeof id === 'string'),
+          ],
+        })
+        if (!retired.ok) {
+          console.error('[send-quote] send-runs party retirement failed:', retired.error)
+          return jsonResponse({
+            error: 'Failed to supersede prior quote documents',
+            code: 'quote_supersede_failed',
+          }, 500, corsHeaders)
+        }
+        if (retired.retiredIds.length) {
+          console.log(`[send-quote] send-runs retired ${retired.retiredIds.length} older party run document(s) for job ${job.id}`)
+        }
       }
 
       // Per ADR 2026-04-27: 'quoted' = quote sent to the primary client.
