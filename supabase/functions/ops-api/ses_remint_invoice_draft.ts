@@ -269,10 +269,15 @@ export function makeDefaultRemintDeps(
         .eq("job_id", jobId)
         .order("updated_at", { ascending: false });
       const rows = Array.isArray(res.data) ? res.data : [];
-      const live = rows.find((row: any) => {
+      const liveRows = rows.filter((row: any) => {
         const st = liveStatus(row.status);
         return st !== "VOIDED" && st !== "DELETED";
       });
+      const locked = liveRows.find((row: any) => {
+        const st = liveStatus(row.status);
+        return st === "AUTHORISED" || st === "PAID" || st === "SUBMITTED";
+      });
+      const live = locked || liveRows[0];
       return live
         ? {
           xero_invoice_id: String(live.xero_invoice_id),
