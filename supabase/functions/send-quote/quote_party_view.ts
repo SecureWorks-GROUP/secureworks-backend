@@ -45,7 +45,8 @@ function normalised(value: string | null | undefined): string | null {
 }
 
 export function normaliseQuoteRunLabel(value: string | null | undefined): string | null {
-  return normalised(value)
+  if (typeof value !== 'string') return null
+  return value.trim().length ? value : null
 }
 
 export function quotePartyKey(
@@ -53,7 +54,7 @@ export function quotePartyKey(
 ): QuotePartyKey {
   return {
     jobContactId: normalised(doc?.job_contact_id),
-    runLabel: normalised(doc?.run_label),
+    runLabel: normaliseQuoteRunLabel(doc?.run_label),
   }
 }
 

@@ -85,6 +85,7 @@ import {
   emitV2SealedEvent,
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
+import { findQuoteRun, quoteRunDepositAmount } from './quote_run.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -1454,7 +1455,7 @@ serve(async (req: Request) => {
 
         if (fullJob?.pricing_json?.runs) {
           const pj = typeof fullJob.pricing_json === 'string' ? JSON.parse(fullJob.pricing_json) : fullJob.pricing_json
-          const run = (pj.runs || []).find((r: any) => r.run_label === doc.run_label)
+          const run = findQuoteRun(pj, doc.run_label)
           if (run) {
             // Determine viewer type: client or neighbour (based on job_contact_id)
             const isNeighbour = doc.job_contact_id && fullJob.job_contacts?.some(
@@ -1796,7 +1797,7 @@ serve(async (req: Request) => {
           .eq('id', doc.job_id).single()
 
         const pj = typeof job?.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job?.pricing_json || {})
-        const run = (pj.runs || []).find((r: any) => r.run_label === runLabel)
+        const run = findQuoteRun(pj, runLabel)
         const runName = run?.run_name || runLabel
 
         // Check if both parties accepted this run
@@ -1906,10 +1907,7 @@ serve(async (req: Request) => {
             if (!contact) continue
 
             const isClient = contact.is_primary
-            const shareInc = isClient
-              ? (run?.totals?.client_share_inc || 0)
-              : (run?.totals?.neighbour_share_inc || 0)
-            const depositAmount = Math.round(shareInc * (depositPercent / 100) * 100) / 100
+            const depositAmount = quoteRunDepositAmount(run, isClient, depositPercent)
 
             if (depositAmount <= 0) continue
 

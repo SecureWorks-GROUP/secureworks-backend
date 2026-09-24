@@ -7,12 +7,14 @@ import {
   type QuotePartyDocument,
   quoteDocumentAcceptable,
   quotePartyGreetingName,
+  quotePartyKey,
   quoteViewDecision,
   quoteViewRetryPage,
   retireOtherPublishedPartyRunDocuments,
   sameQuoteParty,
   sendRetiresPriorPartyQuotes,
 } from "./quote_party_view.ts"
+import { findQuoteRun, quoteRunDepositAmount } from "./quote_run.ts"
 
 // ── Fixtures: the stored quote documents of five live fencing jobs, read
 // read-only with sw_list_job_documents on 2026-09-24. Ids and contacts are
@@ -194,7 +196,24 @@ Deno.test("blank quote run labels normalize to the null party value", () => {
   assertEquals(normaliseQuoteRunLabel(null), null)
   assertEquals(normaliseQuoteRunLabel(undefined), null)
   assertEquals(normaliseQuoteRunLabel("  \t "), null)
-  assertEquals(normaliseQuoteRunLabel(" RHS "), "RHS")
+  assertEquals(normaliseQuoteRunLabel(" RHS "), " RHS ")
+  assertEquals(quotePartyKey({ run_label: " RHS " }).runLabel, " RHS ")
+  assert(!sameQuoteParty({ run_label: " RHS " }, { run_label: "RHS" }))
+})
+
+Deno.test("padded run labels preserve their run data and deposit basis", () => {
+  const label = normaliseQuoteRunLabel(" RHS ")!
+  const run = findQuoteRun({
+    deposit: { percent: 50 },
+    runs: [{
+      run_label: " RHS ",
+      run_name: "Right side",
+      totals: { client_share_inc: 275.5, neighbour_share_inc: 119.25 },
+    }],
+  }, label)
+  assertEquals(run?.run_name, "Right side")
+  assertEquals(quoteRunDepositAmount(run, true, 50), 137.75)
+  assertEquals(quoteRunDepositAmount(run, false, 50), 59.63)
 })
 
 Deno.test("quote read retry page asks the customer to retry without an Accept action", () => {
