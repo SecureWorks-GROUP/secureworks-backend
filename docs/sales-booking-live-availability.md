@@ -75,19 +75,22 @@ The owner press (`sales_booking_owner_approval.ts`) applies the same rule:
 gap covers the computed travel. It refuses a neighboring event or offer when
 either location cannot be placed.
 
-### Travel estimate (`straight-line-v1`)
+### Travel estimate (`straight-line-v2`)
 
 No routing API key is configured and none was added.
 
 `minutes = 5 + straight-line km x 1.3 / 55 km/h x 60`, rounded up to 5.
 Examples: Duncraig to Hillarys 15, Duncraig to Canning Vale 50.
 
-Locations are suburb points: the median geocoded `jobs.site_lat/site_lng` per
-suburb in production (177 suburbs, read-only SELECT 24 Sep 2026), matched on
-the case suburb, a GHL event's address, or its contact's case suburb. A
-location that cannot be placed has no travel estimate: affected arrival gaps
-are withheld, and owner approval waits until both locations resolve. Outlook
-events use their location display name for the same calculation.
+Different suburbs use the median geocoded `jobs.site_lat/site_lng` point per
+suburb in production (177 suburbs, read-only SELECT 24 Sep 2026). A suburb
+centroid cannot estimate a trip between two different addresses in the same
+suburb, so that gap is unknown unless both location strings identify the same
+numbered address. Contact-based event and offer locations are used only when
+every loaded case for that contact agrees on one suburb. A location that cannot
+be placed has no travel estimate: affected arrival gaps are withheld, and owner
+approval waits until both locations resolve. Outlook events use their location
+display name for the same calculation.
 
 ## Measured on 24 Sep 2026 (read-only)
 

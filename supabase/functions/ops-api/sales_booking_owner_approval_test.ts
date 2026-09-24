@@ -419,7 +419,7 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
       endTime: "2026-09-25T14:00:00+08:00",
       assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
       contactId: "someone-else",
-      address: "1 Test St, Canning Vale",
+      address: "12 Fictional Way, Canning Vale",
     }],
   });
   const result = await approve(d, input("calendar"));
@@ -445,7 +445,7 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
     end_iso: "2026-09-25T11:30:00+08:00",
     on_site_minutes: 30,
     travel: "computed_per_neighbour",
-    travel_model: "straight-line-v1",
+    travel_model: "straight-line-v2",
     travel_buffer_minutes: 30,
   });
   // Diary by user, then only the calendar the owner is on.
@@ -481,7 +481,7 @@ Deno.test("owner calendar: the gap a GHL booking needs is travel from where it i
       endTime: "2026-09-25T08:30:00+08:00",
       assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
       contactId: "someone-else",
-      address: "1 Other St, Canning Vale",
+      address: "12 Fictional Way, Canning Vale",
     }],
   });
   assert(
@@ -503,6 +503,58 @@ Deno.test("owner calendar: the gap a GHL booking needs is travel from where it i
     "ghl_calendar_clash",
   );
   assert(error.detail?.events[0].travel_minutes > 30);
+});
+
+Deno.test("owner approval requires a resolvable same-suburb travel location", async () => {
+  const { deps: d, rows } = deps({
+    ghlEvents: [{
+      id: "ev-same-suburb",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:30:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "someone-else",
+      address: "1 Other St, Canning Vale",
+    }],
+  });
+  const error = await refusal(
+    call(d, { owner_input: input("calendar"), dry_run: true }),
+    "travel_location_unknown",
+  );
+  assertEquals(error.detail?.source, "ghl");
+  assertEquals(rows.length, 0);
+});
+
+Deno.test("owner approval does not borrow the last suburb for a multi-suburb contact", async () => {
+  const { deps: d, rows } = deps({
+    cases: [
+      { id: CASE, contact_id: CONTACT, suburb: "Canning Vale" },
+      {
+        id: "neighbor-two-rocks",
+        opportunity_id: "opp-two-rocks",
+        contact_id: "neighbor",
+        suburb: "Two Rocks",
+      },
+      {
+        id: "neighbor-duncraig",
+        opportunity_id: "opp-duncraig",
+        contact_id: "neighbor",
+        suburb: "Duncraig",
+      },
+    ],
+    ghlEvents: [{
+      id: "ev-ambiguous-contact",
+      startTime: "2026-09-25T12:30:00+08:00",
+      endTime: "2026-09-25T13:00:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "neighbor",
+    }],
+  });
+  const error = await refusal(
+    call(d, { owner_input: input("calendar"), dry_run: true }),
+    "travel_location_unknown",
+  );
+  assertEquals(error.detail?.source, "ghl");
+  assertEquals(rows.length, 0);
 });
 
 Deno.test("owner approval refuses an unlocated neighboring GHL event", async () => {
@@ -637,7 +689,7 @@ Deno.test("owner calendar: GHL, own-booking, offers, capacity, unknown target, u
     endTime: `2026-09-25T${e}:00+08:00`,
     assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
     contactId: "other",
-    address: "1 Test St, Canning Vale",
+    address: "12 Fictional Way, Canning Vale",
     ...extra,
   });
   const offerExecution = (contact: string) => ({
@@ -866,7 +918,7 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   ]);
   assertEquals(owner.rulebook.visit_minutes, 30);
   assert(!("on_site_minutes" in owner.rulebook));
-  assertEquals(owner.rulebook.travel.version, "straight-line-v1");
+  assertEquals(owner.rulebook.travel.version, "straight-line-v2");
   assertEquals(owner.rulebook.calendar.calendar_id, "dEQKVKHthsjSYaen1fiE");
   assertEquals(engine.engine_proposal, true);
   assertEquals(engine.engine_window.start, "2026-09-25T13:00:00+08:00");

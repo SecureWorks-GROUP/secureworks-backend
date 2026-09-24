@@ -12,7 +12,7 @@
  */
 
 export const SALES_BOOKING_TRAVEL_MODEL = Object.freeze({
-  version: "straight-line-v1",
+  version: "straight-line-v2",
   basis: "straight_line_distance_between_suburb_points",
   road_factor: 1.3,
   speed_kmh: 55,
@@ -251,6 +251,49 @@ export function salesBookingSuburbPoint(value: unknown): SuburbPoint | null {
   return best ? hit(best.name) : null;
 }
 
+export function salesBookingSuburbByUnambiguousContact(
+  cases: ReadonlyArray<{
+    contact_id?: unknown;
+    suburb?: unknown;
+  }>,
+): Map<string, string> {
+  const suburbsByContact = new Map<string, Set<string>>();
+  for (const row of cases) {
+    if (typeof row.contact_id !== "string" || !row.contact_id.trim()) continue;
+    const contactId = row.contact_id.trim();
+    const suburb = salesBookingSuburbPoint(row.suburb)?.suburb ?? "";
+    const suburbs = suburbsByContact.get(contactId) ?? new Set<string>();
+    suburbs.add(suburb);
+    suburbsByContact.set(contactId, suburbs);
+  }
+  const result = new Map<string, string>();
+  for (const [contactId, suburbs] of suburbsByContact) {
+    if (suburbs.size !== 1 || suburbs.has("")) continue;
+    result.set(contactId, [...suburbs][0]);
+  }
+  return result;
+}
+
+function normalizedSpecificAddress(value: unknown, suburb: string): string | null {
+  if (typeof value !== "string" || !/\d/.test(value)) return null;
+  const escapedSuburb = suburb.split(/\s+/).map((part) =>
+    part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  ).join("\\s+");
+  const normalized = value.toLowerCase()
+    .replace(/\bwestern australia\b|\bwa\b/g, " ")
+    .replace(/\b\d{4}\b/g, " ")
+    .replace(/[.,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const detail = normalized.replace(
+    new RegExp(`\\b${escapedSuburb}\\b`, "g"),
+    " ",
+  ).replace(/\s+/g, " ").trim();
+  return /\d/.test(detail) && /[a-z]{2}/i.test(detail)
+    ? `${detail}, ${suburb}`
+    : null;
+}
+
 function km(a: SuburbPoint, b: SuburbPoint): number {
   const rad = Math.PI / 180;
   const dLat = (b.lat - a.lat) * rad, dLng = (b.lng - a.lng) * rad;
@@ -282,6 +325,19 @@ export function salesBookingTravelMinutes(
       from: a?.suburb ?? null,
       to: b?.suburb ?? null,
     };
+  }
+  if (a.suburb === b.suburb) {
+    const fromAddress = normalizedSpecificAddress(from, a.suburb);
+    const toAddress = normalizedSpecificAddress(to, b.suburb);
+    if (!fromAddress || fromAddress !== toAddress) {
+      return {
+        minutes: null,
+        basis: "unknown_location",
+        km: null,
+        from: a.suburb,
+        to: b.suburb,
+      };
+    }
   }
   const distance = km(a, b);
   const raw = m.fixed_minutes + distance * m.road_factor / m.speed_kmh * 60;

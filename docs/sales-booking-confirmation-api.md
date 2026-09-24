@@ -352,7 +352,7 @@ and `hand_sent_texts` / `hand_sent_texts_note`. Each case carries
   "rulebook": {"days": ["Tue","Fri"], "bookable_dates": ["2026-09-25", "..."],
     "day_start": "08:00", "day_end": "16:30", "window_min_minutes": 60,
     "window_max_minutes": 90, "visit_minutes": 30, "travel_buffer_minutes": 30,
-    "travel": {"version": "straight-line-v1", ...},
+    "travel": {"version": "straight-line-v2", ...},
     "max_per_day": 6, "protected_bands": [...], "sender": "+61489267776",
     "calendar": {...}, "timezone": "Australia/Perth", "utc_offset": "+08:00"},
   "approvals": [{"approval_id", "step", "state", "reason",

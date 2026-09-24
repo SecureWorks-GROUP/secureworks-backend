@@ -38,6 +38,8 @@ import { ghlRead } from "./sales_booking_read.ts";
 import {
   SALES_BOOKING_ON_SITE_MINUTES,
   SALES_BOOKING_TRAVEL_MODEL,
+  salesBookingSuburbByUnambiguousContact,
+  salesBookingSuburbPoint,
   salesBookingTravelMinutes,
 } from "./sales_booking_travel.ts";
 
@@ -403,12 +405,7 @@ export function computeSalesBookingAvailability(
       !ghlAll.some((g) => g.start < o.end && o.start < g.end)
     ).length;
 
-  const suburbByContact = new Map<string, string>();
-  for (const row of input.cases) {
-    if (row.contact_id && row.suburb) {
-      suburbByContact.set(row.contact_id, row.suburb);
-    }
-  }
+  const suburbByContact = salesBookingSuburbByUnambiguousContact(input.cases);
   for (const e of events) {
     if (!e.location && e.contact_id) {
       e.location = suburbByContact.get(e.contact_id) ?? null;
@@ -537,8 +534,7 @@ export function computeSalesBookingAvailability(
     caseFree[row.id] = {
       location: {
         suburb: row.suburb,
-        known: salesBookingTravelMinutes(row.suburb, row.suburb).basis ===
-          "straight_line",
+        known: salesBookingSuburbPoint(row.suburb) !== null,
       },
       days: days.map((d) => ({
         date: d.date,

@@ -101,6 +101,21 @@ Deno.test("travel: straight-line estimates require both locations", () => {
   const unknown = salesBookingTravelMinutes("Atlantis", "Hillarys");
   assertEquals([unknown.basis, unknown.minutes], ["unknown_location", null]);
   assertEquals(salesBookingTravelMinutes(null, "Hillarys").minutes, null);
+  assertEquals(salesBookingTravelMinutes("Hillarys", "Hillarys").minutes, null);
+  assertEquals(
+    salesBookingTravelMinutes(
+      "5 Somewhere Rd, Canning Vale WA 6155",
+      "70 Other St, Canning Vale",
+    ).minutes,
+    null,
+  );
+  assertEquals(
+    salesBookingTravelMinutes(
+      "5 Somewhere Rd, Canning Vale WA 6155",
+      "5 Somewhere Rd, Canning Vale",
+    ).minutes,
+    5,
+  );
 });
 
 Deno.test("an empty diary reads as read, and every bookable day is free 08:00 to 16:00 arrivals", () => {
@@ -161,6 +176,24 @@ Deno.test("an unlocated neighboring event withholds arrival windows", () => {
   );
   assert(caseDay);
   assertEquals(windows(caseDay), []);
+});
+
+Deno.test("a contact with cases in different suburbs cannot locate its event", () => {
+  const r = computeSalesBookingAvailability(input({
+    cases: [
+      lead("opp:a", "shared-contact", "Canning Vale"),
+      lead("opp:b", "shared-contact", "Duncraig"),
+    ],
+    events: ok([{
+      id: "ev-shared-contact",
+      startTime: "2026-10-02T10:00:00+08:00",
+      endTime: "2026-10-02T11:00:00+08:00",
+      assignedUserId: MARNIN,
+      contactId: "shared-contact",
+    }]),
+  }));
+  assertEquals(r.calendar_read.occupied_intervals[0].location, null);
+  assertEquals(windows(friday(r)), []);
 });
 
 Deno.test("other assignees and cancelled rows never block; blocked-off time does", () => {
@@ -334,7 +367,7 @@ Deno.test("open offers come from the census, block their slot, and drop once tha
     census,
     cases: [
       lead("opp:a", "c-a", "Hillarys"),
-      lead("opp:b", "c-b", "Hillarys"),
+      lead("opp:b", "c-b", "Duncraig"),
     ],
     events: ok([{
       id: "ev-booked",
@@ -348,11 +381,11 @@ Deno.test("open offers come from the census, block their slot, and drop once tha
     ["h1", "c-b", "offered"],
   ]);
   assertEquals(r.commitments_read.booked_in_ghl_dropped, 1);
-  // Hillarys to Hillarys: 5 minutes travel after the 11:00 offer ends.
+  // Duncraig to Hillarys: 15 minutes travel after the 11:00 offer ends.
   const forA = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
-  assertEquals(windows(forA), [["08:00", "08:25"], ["11:05", "16:00"]]);
+  assertEquals(windows(forA), [["08:00", "08:15"], ["11:15", "16:00"]]);
   // The offered lead's own offer does not block their own free times.
   const forB = r.case_free_times["opp:b"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"

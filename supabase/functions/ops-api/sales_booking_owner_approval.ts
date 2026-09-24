@@ -40,6 +40,7 @@ import type { OutlookRead } from "./sales_booking_execute.ts";
 import {
   SALES_BOOKING_ON_SITE_MINUTES,
   SALES_BOOKING_TRAVEL_MODEL,
+  salesBookingSuburbByUnambiguousContact,
   salesBookingTravelMinutes,
 } from "./sales_booking_travel.ts";
 
@@ -697,6 +698,7 @@ export async function salesBookingOwnerApprovalAction(args: {
   // Build the exact content. Identity and route come from server truth only.
   let content: BookingObject;
   let visit: CheckedVisit | null = null;
+  let visitLocation: string | null = lead.suburb;
   if (input.step === "message") {
     const t = input.text;
     if (typeof t !== "string" || !t.trim() || t.length > MAX_TEXT) {
@@ -737,6 +739,7 @@ export async function salesBookingOwnerApprovalAction(args: {
     const site = ownerSiteAddress(lead.contact, lead.suburb, lead.job_site);
     if (!site) refuse("contact_suburb_missing");
     const address = site.address;
+    visitLocation = address;
     checks.address_street_source = site.street_source;
     content = {
       provider: "ghl",
@@ -835,7 +838,7 @@ export async function salesBookingOwnerApprovalAction(args: {
           census,
           deps,
           response.cases,
-          lead.suburb,
+          visitLocation,
         ),
       );
     }
@@ -893,7 +896,7 @@ async function checkOwnerVisitAvailability(
   census: SystemOfferCensus,
   deps: OwnerApprovalDeps,
   workspaceCases: SalesBookingCase[],
-  visitSuburb: string,
+  visitLocation: string | null,
 ): Promise<BookingObject> {
   let directory: GhlDirectory;
   try {
@@ -922,12 +925,8 @@ async function checkOwnerVisitAvailability(
     refuse("ghl_calendar_unreadable");
   }
   const events = ghlBusyEvents(batches.flat());
-  const suburbs = new Map(
-    workspaceCases.filter((c) => c.contact_id && c.suburb).map((
-      c,
-    ) => [c.contact_id as string, c.suburb]),
-  );
-  const here = visitSuburb;
+  const suburbs = salesBookingSuburbByUnambiguousContact(workspaceCases);
+  const here = visitLocation;
   // The gap a neighbouring booking needs: travel from it before the visit,
   // travel to it after.
   const needsGap = (
