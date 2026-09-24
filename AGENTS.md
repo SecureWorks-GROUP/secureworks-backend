@@ -3691,6 +3691,16 @@ The `CallCompleted`, `CustomerReplied` and `UserReplied` workflow doorbells, SMS
 setup, flag behavior, call mapping and recovery contract are owned by
 [`docs/context/ghl-message-reconcile.md`](docs/context/ghl-message-reconcile.md).
 
+## GHL History Loads As Backfill Under A Reserved Daily Cap
+
+The manual M4 entry point and request contract are in
+[`ghl-history-load/handler.ts`](supabase/functions/ghl-history-load/handler.ts).
+Read the load invariants in `ghl-history-load/history_load.ts` and the exact-key
+linking contract in `ghl-history-load/link.ts` before running either action.
+The database policy, atomic daily reservation and link/reversal guards belong to
+`20260925031500_context_ghl_history_load.sql`; its behavioural contract is in
+`supabase/tests/migration-contracts/20260925031500_context_ghl_history_load/`.
+
 ## A pg_cron Bearer Is Not The Function's Service Key
 
 pg_cron triggers call edge functions with `Bearer <sw_service_key()>`, a
