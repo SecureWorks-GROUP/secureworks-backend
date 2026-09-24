@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix
 // EM1 (email.md review M14, named row E22): with the monitored_mailboxes table
 // seeded and the flag off, the old path polls exactly its own five mailboxes
 // and two groups, and never reads the new table.
@@ -35,7 +36,9 @@ Deno.test("E22: seeded sources the old path cannot poll never enter its plan", (
     ]
   ) assertEquals(polled.has(address), false, address);
   // Groups are never polled as user mailboxes (ErrorInvalidUser).
-  for (const group of plan.groups) assertEquals(plan.users.includes(group), false);
+  for (const group of plan.groups) {
+    assertEquals(plan.users.includes(group), false);
+  }
 });
 
 Deno.test("E22: the plan is frozen, so no caller can widen the old path at run time", () => {
