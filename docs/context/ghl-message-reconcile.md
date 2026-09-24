@@ -9,6 +9,42 @@ messages and call items through `_shared/evidence/ghl_message.ts` and
 `capture_business_event` (source `ghl-message-reconcile`, `capture_mode:
 live`). It never places a row; the ladder does on insert.
 
+## Inbound SMS workflow (`CustomerReplied`)
+
+Configure a GHL workflow with trigger **Customer Replied**, reply channel
+**SMS**, and a **Custom Webhook** action posting to
+`/functions/v1/ghl-webhook-receiver`. Set `X-Webhook-Secret` to the configured
+`GHL_WEBHOOK_SECRET` and supply custom data:
+
+```json
+{
+  "type": "CustomerReplied",
+  "contactId": "{{contact.id}}",
+  "locationId": "{{location.id}}"
+}
+```
+
+This workflow needs no installed GHL app or message webhook. It uses workflow
+secret authentication; in `GHL_WEBHOOK_AUTH_MODE=enforce`, missing or invalid
+proof is refused. Observe mode retains processing with `auth: missing` receipts.
+
+With the capture lane and `ghl_message_capture_v2` enabled, the post triggers
+an immediate read of the contact's newest conversation and its newest 20
+messages. Any conversation id supplied in the post is ignored. No evidence is
+built from the post body: each eligible provider message goes through the shared
+builder and `capture_business_event` under `ghl:<GHL message id>`, the same key
+used by the reconciler. Repeated deliveries and later reconciliation therefore
+do not create duplicate evidence rows. Receipts and logs contain ids and codes,
+never message content or credentials.
+
+An off, missing or unreadable flag prevents the read and evidence capture;
+there is no legacy evidence write for `CustomerReplied`. The capture lane also
+gates the read. The immediate read is bounded, not a delivery-time guarantee:
+if it misses a message or fails, the 15-minute reconciler remains the recovery
+path. This change does not enable the flag or create the GHL workflow.
+Regression coverage: `receiver_customer_replied_test.ts` in
+`supabase/functions/ghl-webhook-receiver/`.
+
 ## Call items and the `CallCompleted` workflow (slice T1)
 
 The shared row builder maps GHL `TYPE_CALL`, voicemail and IVR call items to

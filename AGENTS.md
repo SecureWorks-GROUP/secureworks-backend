@@ -591,7 +591,11 @@ SQL from the evidence, never by a daily clock. Every number is in
 `context_cadence_policy()` (changed only by migration; `live_since` is the
 first apply time and rows captured before it never wake). The one judgement is
 `context_jobs_cadence(uuid[])`; the claim, candidates, freshness and status
-all read it, so never re-derive "due" elsewhere. The one unread definition is
+all read it, so never re-derive "due" elsewhere. The one exception to
+`live_since` is the catch-up list (`20260924220000`, `context_catchup_jobs`,
+written only by `context_catchup_request`): a listed job is due inside that same
+judgement until `done` runs have re-read every row (`context_catchup_reads`,
+receipts or not); field contract in `docs/context/pipeline-status.md`. The one unread definition is
 the inlinable `context_unread_rows(uuid[])` (no SET clause, on purpose). The
 BEFORE INSERT trigger stamps `metadata.written_as` from the request role and
 overwrites what the writer sent; only `service_role` rows wake a read or enter
@@ -3683,11 +3687,9 @@ posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook
 proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
-`CallCompleted` remains on the legacy path with the capture flag off and becomes
-a doorbell to shared `client.call_logged` capture with the flag on. The call
-mapping, recovery read and legacy-pairing contract are in
+The `CallCompleted` and `CustomerReplied` workflow doorbells, SMS workflow
+setup, flag behavior, call mapping and recovery contract are owned by
 [`docs/context/ghl-message-reconcile.md`](docs/context/ghl-message-reconcile.md).
-Tests: `receiver_t1_test.ts`, `ghl_call_pair_test.ts`.
 
 ## A pg_cron Bearer Is Not The Function's Service Key
 
