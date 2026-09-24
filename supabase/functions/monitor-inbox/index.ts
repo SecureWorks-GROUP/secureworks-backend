@@ -5,13 +5,13 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 //
 // Triggered via pg_cron every 5 minutes.
 // Polls unread emails from monitored mailboxes via Microsoft Graph,
-// classifies with Haiku and stores in inbox_events.
+// classifies by rules (no model call, slice EM0) and stores in inbox_events.
 //
 // Auth: SW_API_KEY header or Supabase service role
 // Graph: client_credentials flow (same as send-outlook-email)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.39.0'
+import { classifyEmail } from './classify_email.ts'
 // T7 Loop 3 — single capture choke point. Atomic cutover on
 // evidence_capture_v1 flag: when ON, recordEvidence runs (full envelope,
 // match_status, body_pointer); when OFF, the legacy business_events
@@ -23,7 +23,6 @@ import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_KEY')!
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
-const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 // Monitored mailboxes
@@ -83,108 +82,6 @@ async function getGraphToken(): Promise<string> {
   return data.access_token
 }
 
-// ── Classify email with Haiku ──
-function extractJobRef(subject: string, bodyPreview: string): string | null {
-  const haystack = `${subject}\n${bodyPreview}`
-  const legacy = haystack.match(/\bSW\d{4,}\b/i)
-  if (legacy) return legacy[0]
-  const prefixed = haystack.match(/\bSW[PFD]-\d+\b/i)
-  if (prefixed) return prefixed[0]
-  const po = haystack.match(/\bPO-?\d{6}\b/i)
-  if (po) return po[0].toUpperCase().startsWith('PO-') ? po[0].toUpperCase() : `PO-${po[0].replace(/PO/i, '')}`
-  return null
-}
-
-/** Rules triage — Context must not depend on a paid classifier being funded. */
-function classifyEmailRules(
-  from: string,
-  subject: string,
-  bodyPreview: string,
-): { classification: string; priority: string; action_needed: string | null; job_ref: string | null } {
-  const fromLower = (from || '').toLowerCase()
-  const hay = `${subject}\n${bodyPreview}`.toLowerCase()
-  const job_ref = extractJobRef(subject, bodyPreview)
-
-  if (
-    /noreply|no-reply|mailer-daemon|notifications?@|newsletter|unsubscribe/.test(fromLower) ||
-    /\bunsubscribe\b|\bview in browser\b|\bemail preferences\b/.test(hay)
-  ) {
-    return { classification: 'newsletter', priority: 'low', action_needed: null, job_ref }
-  }
-  if (/\burgent\b|\basap\b|\bcomplaint\b|\bunhappy\b|\bangry\b/.test(hay)) {
-    return { classification: 'complaint', priority: 'high', action_needed: 'review', job_ref }
-  }
-  if (/\binvoice\b|\binv-\d+/i.test(hay)) {
-    return { classification: 'invoice', priority: 'normal', action_needed: null, job_ref }
-  }
-  if (/\bquote\b|\bquotation\b|\bestimate\b/.test(hay)) {
-    return { classification: 'supplier_quote', priority: 'normal', action_needed: null, job_ref }
-  }
-  if (/\bcouncil\b|\bpermit\b|\bba\b|\bbuilding approval\b/.test(hay)) {
-    return { classification: 'council', priority: 'high', action_needed: 'review', job_ref }
-  }
-  // Default: treat as client reply so Context gets the words. Attribution
-  // ladder + Luna decide the job; empty/automated rows stay out of extraction.
-  return { classification: 'client_reply', priority: 'normal', action_needed: null, job_ref }
-}
-
-async function classifyEmail(
-  from: string,
-  subject: string,
-  bodyPreview: string,
-): Promise<{ classification: string; priority: string; action_needed: string | null; job_ref: string | null }> {
-  // R1: rules are enough to store; Haiku is optional enrichment only.
-  // Never block capture on unpaid/slow Haiku.
-  const rules = classifyEmailRules(from, subject, bodyPreview)
-  if (!ANTHROPIC_API_KEY) return rules
-  try {
-    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
-    const resp = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 200,
-      system: `You classify business emails for a Perth outdoor construction company (SecureWorks WA).
-Return JSON only: { "classification": "...", "priority": "...", "action_needed": "..." or null, "job_ref": "SWP-XXXXX" or null }
-
-Classifications: client_reply, supplier_quote, supplier_response, council, invoice, complaint, urgent, newsletter, spam, other
-Priority: high (complaints, urgent, council deadlines, large invoices), normal (client replies, supplier responses), low (newsletters, marketing, spam)
-action_needed: brief description of recommended action, or null if informational only
-job_ref: extract FIRST match from subject or body, in this priority order, or null:
-  1. Legacy/bare job number: SW\\d{4,} (e.g., SW1895)
-  2. Prefixed: SWP-\\d+, SWF-\\d+, SWD-\\d+ (e.g., SWP-26046)
-  3. PO number: PO-\\d+ (e.g., PO-061378) — return as "PO-XXXXXX"
-  4. Supplier invoice number: INV-\\d+ — return as "INV-XXXXX"
-  5. Supplier quote ref: Quote #\\d+ — return as "Quote#XXX"
-Return the raw matched string preserving case/format. Leave null only if none present.`,
-      messages: [{
-        role: 'user',
-        content: `From: ${from}\nSubject: ${subject}\nPreview: ${bodyPreview}`,
-      }],
-    })
-
-    const text = resp.content[0].type === 'text' ? resp.content[0].text : ''
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[0])
-        // Never let a vague "other" drop Context capture when rules found a
-        // concrete class. Prefer model job_ref when present.
-        if (parsed?.classification && parsed.classification !== 'other') {
-          return {
-            classification: String(parsed.classification),
-            priority: String(parsed.priority || rules.priority),
-            action_needed: parsed.action_needed ?? null,
-            job_ref: parsed.job_ref || rules.job_ref,
-          }
-        }
-      } catch { /* fall through to rules */ }
-    }
-  } catch (e) {
-    console.log('[monitor-inbox] Classification failed; using rules:', (e as Error).message)
-  }
-
-  return rules
-}
-
 // ── Comprehensive job resolution — tries every ref pattern + supplier/client fallbacks.
 //
 // Returns a confidence tier so that downstream logic (e.g. auto-attaching a supplier
@@ -207,7 +104,10 @@ async function resolveJobId(
 ): Promise<{ jobId: string | null; matchedVia: string | null; confidence: 'high' | 'low' | 'none' }> {
   const haystack = `${subject}\n${bodyPreview}`
 
-  // 1. AI classifier job_ref — could be SW####, SW[PFD]-####, PO-######, INV-#####, Quote####
+  // 1. Classifier job_ref. Since EM0 this is the rules result only
+  //    (SW####, SW[PFD]-####, PO-######); the INV-/Quote# branches below were
+  //    fed by the retired model and stay for any caller that supplies one.
+  //    The `ai_*` matchedVia labels are kept so stored rows stay comparable.
   if (classifierJobRef) {
     const ref = classifierJobRef.trim()
     if (/^PO-?\d+$/i.test(ref)) {
@@ -399,7 +299,7 @@ async function processMailbox(
     const receivedAt = msg.receivedDateTime
 
     // Classify
-    const classification = await classifyEmail(fromEmail, subject, bodyPreview)
+    const classification = classifyEmail(fromEmail, subject, bodyPreview)
 
     // Try to match to a job — comprehensive ref-based resolution
     let jobId: string | null = null
@@ -785,7 +685,7 @@ async function processGroupMailbox(
         const bodyPreview = rawBody.slice(0, 500)
         if (!bodyPreview) continue
 
-        const classification = await classifyEmail(fromEmail, subject, bodyPreview)
+        const classification = classifyEmail(fromEmail, subject, bodyPreview)
         const isNoise = ['newsletter', 'spam'].includes(classification.classification)
         if (isNoise) continue
         const isSupplier = ['supplier_quote', 'supplier_response'].includes(classification.classification)
