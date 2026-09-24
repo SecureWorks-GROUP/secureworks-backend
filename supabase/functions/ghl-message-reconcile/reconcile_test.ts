@@ -165,6 +165,8 @@ class FakeDb {
   flag = true;
   lane = true;
   captureDisabledAfter = Infinity;
+  /** provider_message_id -> error code: the next save of that key fails once. */
+  failOnce = new Map<string, string>();
   clock = T0;
   recordRun(run: Record<string, unknown>): string {
     const allowed = [
@@ -238,6 +240,11 @@ class FakeDb {
       return { outcome: "capture_disabled" as const };
     }
     const key = String(row.provider_message_id);
+    const failure = this.failOnce.get(key);
+    if (failure) {
+      this.failOnce.delete(key);
+      return { outcome: "error" as const, code: failure };
+    }
     if (this.keys.has(key)) return { outcome: "duplicate" as const };
     this.keys.add(key);
     this.rows.push(row);
@@ -999,4 +1006,157 @@ Deno.test("a same-millisecond blast of typical GHL ids drains without a refused 
       assert(jsonbStyleCursorBytes(run.cursor) <= CAPTURE_RUN_CURSOR_MAX_BYTES);
     }
   }
+});
+
+// Live run feb52d08 (24 Sep 02:03Z): one save hit a statement timeout (57014)
+// and the completed scan moved the watermark past that message, so it was
+// re-read only if its conversation changed again.
+function quietConversation(
+  ghl: FakeGhl,
+  id: string,
+  textId: string,
+  iso: string,
+) {
+  ghl.add({
+    id,
+    contactId: `${id}-c`,
+    messages: [msg(textId, id, `${id}-c`, iso)],
+  });
+}
+
+Deno.test("a failed save is retried by the next run and saved exactly once, though its conversation never changes", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  // Both texts sit more than the 30-minute overlap below the scan top, so a
+  // watermark at the top would leave the failed one behind for good.
+  const failedAt = new Date(T0 - 40 * MIN).toISOString();
+  quietConversation(ghl, "timeoutConversation", "timeoutText0001", failedAt);
+  quietConversation(
+    ghl,
+    "neighbourConversation",
+    "neighbourText001",
+    new Date(T0 - 35 * MIN).toISOString(),
+  );
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  db.failOnce.set("ghl:timeoutText0001", "57014");
+
+  const first = await runGhlMessageReconcile(deps(ghl, db));
+  assert(first.outcome === "ran");
+  assertEquals(first.status, "partial");
+  assertEquals(first.error_code, "write_error:57014");
+  assertEquals(first.counts.write_errors, 1);
+  assertEquals(first.counts.inserted, 1);
+  assertEquals(first.counts.scan_completed, 1);
+  assertEquals(
+    first.watermark,
+    failedAt,
+    "the watermark stops at the failed message, not the scan top",
+  );
+  assertEquals(rowFor(db, "timeoutText0001"), undefined);
+
+  db.clock = T0 + 15 * MIN;
+  const second = await runGhlMessageReconcile(deps(ghl, db));
+  assert(second.outcome === "ran");
+  assertEquals(second.status, "succeeded");
+  assertEquals(second.counts.inserted, 1);
+  assertEquals(second.counts.write_errors, 0);
+  assert(rowFor(db, "timeoutText0001"), "the missed text is saved");
+  assertEquals(
+    second.watermark,
+    new Date(T0 + 15 * MIN).toISOString(),
+    "a clean run moves the watermark to its top again",
+  );
+
+  db.clock = T0 + 30 * MIN;
+  const third = await runGhlMessageReconcile(deps(ghl, db));
+  assert(third.outcome === "ran");
+  assertEquals(third.counts.inserted, 0);
+  assertEquals(
+    db.rows.filter((r) => r.provider_message_id === "ghl:timeoutText0001")
+      .length,
+    1,
+    "saved exactly once",
+  );
+  assertEquals(db.rows.length, 2);
+});
+
+Deno.test("a failed save in an early run of a scan still holds the watermark when a later run completes the scan", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const failedAt = new Date(T0 - 40 * MIN).toISOString();
+  quietConversation(
+    ghl,
+    "earlyConversation",
+    "earlyText000001",
+    new Date(T0 - 5 * MIN).toISOString(),
+  );
+  // Newest message T0-5min, but the failing text is older in the same thread.
+  ghl.conversations.get("earlyConversation")!.messages.push(
+    msg(
+      "earlyText000000",
+      "earlyConversation",
+      "earlyConversation-c",
+      failedAt,
+    ),
+  );
+  quietConversation(
+    ghl,
+    "laterConversation",
+    "laterText000001",
+    new Date(T0 - 36 * MIN).toISOString(),
+  );
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  db.failOnce.set("ghl:earlyText000000", "57014");
+  const small = { ...POLICY, maxConversationsPerRun: 1, listPageLimit: 1 };
+
+  const first = await runGhlMessageReconcile(deps(ghl, db), small);
+  assert(first.outcome === "ran");
+  assertEquals(first.counts.write_errors, 1);
+  assertEquals(first.counts.scan_completed, 0);
+  assertEquals(
+    (db.runs[0].cursor as { retry_from: string }).retry_from,
+    failedAt,
+    "the failure is kept in the scan's cursor",
+  );
+
+  db.clock = T0 + 15 * MIN;
+  const second = await runGhlMessageReconcile(deps(ghl, db), small);
+  assert(second.outcome === "ran");
+  assertEquals(second.counts.scan_continued, 1);
+  assertEquals(second.counts.write_errors, 0);
+  assertEquals(second.counts.scan_completed, 1);
+  assertEquals(second.watermark, failedAt);
+  assertEquals(rowFor(db, "earlyText000000"), undefined);
+
+  db.clock = T0 + 30 * MIN;
+  let next = await runGhlMessageReconcile(deps(ghl, db), small);
+  for (let i = 0; next.outcome === "ran" && next.status === "partial"; i++) {
+    assert(i < 5, "the retry scan drains");
+    db.clock += 15 * MIN;
+    next = await runGhlMessageReconcile(deps(ghl, db), small);
+  }
+  assert(next.outcome === "ran" && next.status === "succeeded");
+  assertEquals(
+    db.rows.filter((r) => r.provider_message_id === "ghl:earlyText000000")
+      .length,
+    1,
+  );
+});
+
+Deno.test("a run with no failed save moves the watermark to the scan top", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  quietConversation(
+    ghl,
+    "cleanConversation",
+    "cleanText000001",
+    new Date(T0 - 40 * MIN).toISOString(),
+  );
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  const result = await runGhlMessageReconcile(deps(ghl, db));
+  assert(result.outcome === "ran");
+  assertEquals(result.status, "succeeded");
+  assertEquals(result.counts.inserted, 1);
+  assertEquals(result.watermark, new Date(T0).toISOString());
+  assertEquals((db.runs[0].cursor as { retry_from: unknown }).retry_from, null);
 });

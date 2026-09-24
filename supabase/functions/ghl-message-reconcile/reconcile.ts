@@ -20,12 +20,18 @@
 //                     messages back to the previous floor recovers what it held
 //                     (one GHL page usually covers it, so this costs little);
 //   * position        the last conversation fully read, as (last message time,
-//                     ids at that exact time), saved after every page.
+//                     ids at that exact time), saved after every page;
+//   * retry_from      the earliest time of a message whose save failed in this
+//                     scan (null when none did), carried across the runs of
+//                     one scan.
 // A scan that cannot finish in one run (page or time budget) is continued by the
 // next run from its position, so a burst larger than one run drains over
 // several runs instead of re-reading the same newest page forever (review M12).
 // The watermark (top of the last complete scan) only moves when a scan
 // completes; a failed run holds both the position and the watermark (F6).
+// A scan that completes with a failed save moves the watermark only up to that
+// message's time (retry_from), so the next scan's floors sit below it and the
+// message is read and saved again, whether or not its conversation changes.
 //
 // When the item flag ghl_message_capture_v2 or the capture lane is off the run
 // is idle: no provider read, no run row (F8: it drains on re-enable, reading
@@ -89,6 +95,8 @@ export interface ScanState {
   list_floor: string;
   message_floor: string;
   position: { last_message_ms: number; ids: string[] } | null;
+  /** Earliest time of a message whose save failed in this scan. */
+  retry_from?: string | null;
   complete: boolean;
 }
 
@@ -272,12 +280,18 @@ export function parseScanState(cursor: unknown): ScanState | null {
     ) return null;
     position = { last_message_ms: at, ids: p.ids as string[] };
   }
+  let retryFrom: number | null = null;
+  if (c.retry_from !== null && c.retry_from !== undefined) {
+    retryFrom = ms(c.retry_from);
+    if (retryFrom === null) return null;
+  }
   return {
     v: 1,
     scan_top: iso(top),
     list_floor: iso(listFloor),
     message_floor: iso(messageFloor),
     position,
+    retry_from: retryFrom === null ? null : iso(retryFrom),
     complete: c.complete,
   };
 }
@@ -389,6 +403,7 @@ export async function runGhlMessageReconcile(
       list_floor: iso(listFloor),
       message_floor: iso(messageFloor),
       position: null,
+      retry_from: null,
       complete: false,
     };
   }
@@ -409,6 +424,15 @@ export async function runGhlMessageReconcile(
   let firstIssue: string | null = null;
   const issue = (code: string) => {
     firstIssue ??= code;
+  };
+  // A failed save pins the next scan's floors at or below its time. A message
+  // with no readable time pins the floor this scan read from, which still
+  // lists its conversation and reads the message again.
+  let retryFromMs = ms(scan.retry_from);
+  const failedSave = (at: number | null) => {
+    const t = at ?? messageFloorMs;
+    retryFromMs = retryFromMs === null ? t : Math.min(retryFromMs, t);
+    scan.retry_from = iso(retryFromMs);
   };
 
   const readConversation = async (
@@ -441,7 +465,7 @@ export async function runGhlMessageReconcile(
       counts.message_pages++;
       const items = read.messages;
       counts.items_seen += items.length;
-      const rows: Record<string, unknown>[] = [];
+      const rows: { row: Record<string, unknown>; at: number | null }[] = [];
       const keys = new Set<string>();
       let oldestOnPage: number | null = null;
       for (const item of items) {
@@ -469,7 +493,7 @@ export async function runGhlMessageReconcile(
         const key = String(built.row.provider_message_id);
         if (keys.has(key)) continue;
         keys.add(key);
-        rows.push(built.row);
+        rows.push({ row: built.row, at });
       }
       let existing = new Set<string>();
       if (rows.length) {
@@ -481,7 +505,7 @@ export async function runGhlMessageReconcile(
           counts.precheck_errors++;
         }
       }
-      for (const row of rows) {
+      for (const { row, at } of rows) {
         if (existing.has(String(row.provider_message_id))) {
           counts.duplicates++;
           continue;
@@ -497,6 +521,7 @@ export async function runGhlMessageReconcile(
         } else {
           counts.write_errors++;
           issue(`write_error:${safeCode(out.code, "unknown")}`);
+          failedSave(at);
         }
       }
       if (
@@ -655,7 +680,7 @@ export async function runGhlMessageReconcile(
   if (!complete) scan.complete = false;
   counts.scan_completed = complete ? 1 : 0;
   const watermark = complete
-    ? scan.scan_top
+    ? iso(Math.min(ms(scan.scan_top)!, retryFromMs ?? Infinity))
     : watermarkMs === null
     ? null
     : iso(watermarkMs);
