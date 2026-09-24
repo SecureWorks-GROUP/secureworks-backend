@@ -17,9 +17,6 @@
 // owner-level decision, so this gate is deliberately stricter than the staff
 // set (ops_manager is refused), like the other admin/owner surfaces.
 //
-// One log line per call: action, email (a company mailbox, never customer
-// data), outcome or refusal code, actor. The reason text is not logged.
-
 export class MonitoredMailboxError extends Error {
   constructor(
     public code: string,
@@ -144,17 +141,9 @@ export async function setMonitoredMailbox(
   if (error || !data || typeof data !== "object") {
     const e = (error && typeof error === "object" ? error : {}) as {
       message?: unknown;
-      code?: unknown;
     };
     const message = typeof e.message === "string" ? e.message.trim() : "";
     const status = REFUSALS[message];
-    console.log(JSON.stringify({
-      event: "set_monitored_mailbox",
-      email: input.email,
-      refused: status ? message : "rpc_failed",
-      code: typeof e.code === "string" ? e.code : null,
-      actor,
-    }));
     if (status) {
       throw new MonitoredMailboxError(
         message,
@@ -168,12 +157,5 @@ export async function setMonitoredMailbox(
       "The mailbox list could not be changed.",
     );
   }
-  const result = data as Record<string, unknown>;
-  console.log(JSON.stringify({
-    event: "set_monitored_mailbox",
-    email: input.email,
-    outcome: result.outcome ?? null,
-    actor,
-  }));
-  return result;
+  return data as Record<string, unknown>;
 }

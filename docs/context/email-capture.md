@@ -79,9 +79,11 @@ Written only through `record_capture_run()` into `context_capture_runs`.
 ## Health: `email_capture` status block
 
 `context_email_capture_status()` (and `context_email_capture_status_at(p_now)`
-for a fixed clock) lists every source with its latest poll, sweep and history
-run, and raises, only while the flag and the capture lane are on, for sources
-that are enabled and active:
+for a fixed clock) lists every source by `scope_label` with its latest poll,
+sweep and history health, and raises, only while the flag and the capture lane
+are on, for sources that are enabled and active. This staff-wide status omits
+mailbox addresses, source keys and mailbox privacy settings; those remain
+available only from the service-role mailbox table:
 
 | Alarm | When |
 |---|---|

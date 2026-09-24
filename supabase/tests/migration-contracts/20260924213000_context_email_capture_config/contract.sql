@@ -250,34 +250,40 @@ BEGIN
  s:=public.context_email_capture_status_at('2026-09-24 10:00+08');
  IF NOT (s->>'alarms_active')::boolean OR NOT (s#>>'{flag,enabled}')::boolean THEN RAISE EXCEPTION 'em1 status: alarms not active with flag on'; END IF;
  IF s->'counts'<>'{"sources":14,"selected":11,"pending_review":3}' THEN RAISE EXCEPTION 'em1 status: counts %',s->'counts'; END IF;
- SELECT string_agg(format('%s|%s|%s',x->>'key',x->>'source',coalesce(x->>'reason','')),E'\n' ORDER BY x->>'source',x->>'key') INTO got
+ SELECT string_agg(format('%s|%s|%s',x->>'key',x->>'scope_label',coalesce(x->>'reason','')),E'\n' ORDER BY x->>'scope_label',x->>'key') INTO got
  FROM jsonb_array_elements(s->'alarms') x;
  want:=array_to_string(ARRAY[
-  'email_backlog|jan@secureworkswa.com.au|',
-  'email_source_error|khairo@secureworkswa.com.au|no_recent_run',
-  'sweep_incomplete|khairo@secureworkswa.com.au|',
-  'email_source_error|marnin@secureworkswa.com.au|failed_last_runs',
-  'email_poll_missed|nithin@secureworkswa.com.au|',
-  'sweep_incomplete|shaun@secureworkswa.com.au|'],E'\n');
+  'email_backlog|owner|',
+  'email_source_error|owner|failed_last_runs',
+  'sweep_incomplete|ops|',
+  'email_poll_missed|sales|',
+  'email_source_error|sales|no_recent_run',
+  'sweep_incomplete|sales|'],E'\n');
  IF got IS DISTINCT FROM want THEN RAISE EXCEPTION 'em1 alarms at 10:00: got %', got; END IF;
  -- Alarm detail.
- SELECT x INTO a FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='email_source_error' AND x->>'source'='marnin@secureworkswa.com.au';
+ SELECT x INTO a FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='email_source_error' AND x->>'scope_label'='owner' AND x->>'reason'='failed_last_runs';
  IF a->>'error_code'<>'graph_403' OR (a->>'since')::timestamptz<>'2026-09-24 09:50+08' THEN RAISE EXCEPTION 'em1 alarm detail: %',a; END IF;
  SELECT x INTO a FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='email_poll_missed';
  IF (a->>'sweep_misses')::integer<>2 THEN RAISE EXCEPTION 'em1 alarm detail: %',a; END IF;
- SELECT x INTO a FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='sweep_incomplete' AND x->>'source'='shaun@secureworkswa.com.au';
+ SELECT x INTO a FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='sweep_incomplete' AND x->>'scope_label'='ops';
  IF a->>'last_status'<>'partial' THEN RAISE EXCEPTION 'em1 alarm detail: %',a; END IF;
- -- Per-source detail: admin@ healthy, history run shown, ids and codes only.
- SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'email'='admin@secureworkswa.com.au';
+ -- Per-scope detail: latest poll, sweep and history health, without mailbox identity.
+ SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'scope_label'='admin';
  IF src#>>'{poll,last_status}'<>'succeeded' OR src#>>'{history,last_status}'<>'partial' OR src#>>'{history,last_error_code}'<>'budget_exhausted'
   OR NOT (src#>>'{sweep,finished_since_last_0200}')::boolean
  THEN RAISE EXCEPTION 'em1 status: admin@ detail %',src; END IF;
  IF (src#>>'{poll,failed_of_last,failed}')::integer<>0 THEN RAISE EXCEPTION 'em1 status: admin@ counted an old failure'; END IF;
  -- Pending-review sources are listed and never alarmed.
- SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'email'='plans@secureworkswa.com.au';
+ SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'scope_label'='approvals' AND x->>'status'='pending_review';
  IF (src->>'selected')::boolean OR src->>'status'<>'pending_review' THEN RAISE EXCEPTION 'em1 status: plans@ %',src; END IF;
  -- Users first, then groups, then unknown.
  IF s#>>'{sources,0,kind}'<>'user' OR s#>>'{sources,13,kind}'<>'unknown' THEN RAISE EXCEPTION 'em1 status: source order'; END IF;
+ IF EXISTS(SELECT 1 FROM jsonb_array_elements(s->'sources') x
+   WHERE x ?| ARRAY['email','source_key','owner_privacy','files_supplier_pdfs']
+    OR x#>'{poll,run_source}' IS NOT NULL OR x#>'{sweep,run_source}' IS NOT NULL OR x#>'{history,run_source}' IS NOT NULL)
+  OR EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x ?| ARRAY['source','email','source_key','owner_privacy','files_supplier_pdfs'])
+  OR s::text ~* '@secureworkswa[.]com[.]au|outlook_(marnin|jan|nithin|shaun|khairo)'
+ THEN RAISE EXCEPTION 'em1 status: mailbox identity or privacy settings leaked'; END IF;
 
  -- Before 03:00 Perth the night's sweep is not yet due: no sweep_incomplete.
  s:=public.context_email_capture_status_at('2026-09-24 02:30+08');
@@ -307,7 +313,7 @@ UPDATE public.monitored_mailboxes SET updated_at='2026-09-24 09:55+08' WHERE ema
 DO $$
 DECLARE s jsonb:=public.context_email_capture_status_at('2026-09-24 10:00+08');
 BEGIN
- IF EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'source'='khairo@secureworkswa.com.au')
+ IF EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x WHERE x->>'scope_label'='sales' AND x->>'key'='email_source_error' AND x->>'reason'='no_recent_run')
  THEN RAISE EXCEPTION 'em1 status: freshly enabled khairo@ alarmed: %',s->'alarms'; END IF;
 END $$;
 UPDATE public.feature_flags SET updated_at='2026-09-24 08:00+08' WHERE flag_name='email_capture_v2';
@@ -340,10 +346,12 @@ BEGIN
  IF s->'email_capture' IS NULL OR jsonb_typeof(s->'email_capture')<>'object' OR s#>>'{email_capture,counts,sources}'<>'14'
  THEN RAISE EXCEPTION 'em1 composer: email_capture block %',s->'email_capture'; END IF;
  IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(s->'alarms') x
-   WHERE x->>'block'='email_capture' AND x->>'key'='email_source_error' AND x->>'source'='marnin@secureworkswa.com.au' AND x->>'reason'='failed_last_runs')
+   WHERE x->>'block'='email_capture' AND x->>'key'='email_source_error' AND x->>'scope_label'='owner' AND x->>'reason'='failed_last_runs')
  THEN RAISE EXCEPTION 'em1 composer: alarm not carried: %',s->'alarms'; END IF;
- -- Ids and codes only: no mail text can reach the block.
- IF (s->'email_capture')::text ~* 'subject|body|preview' THEN RAISE EXCEPTION 'em1 composer: block carries message text keys'; END IF;
+ -- Health is staff-visible; mailbox identity and privacy settings stay service-role only.
+ IF (s->'email_capture')::text ~* '@secureworkswa[.]com[.]au|outlook_(marnin|jan|nithin|shaun|khairo)|owner_privacy|files_supplier_pdfs'
+  OR (s->'email_capture')::text ~* 'subject|body|preview'
+ THEN RAISE EXCEPTION 'em1 composer: identity, privacy settings or mail text leaked'; END IF;
 END $$;
 ROLLBACK;
 

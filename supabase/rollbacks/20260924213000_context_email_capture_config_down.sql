@@ -33,7 +33,7 @@ DECLARE x record; flag_on boolean:=false; sightings boolean:=false; receipts boo
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_email_capture_status()','39f700ff23752f161c2215ecc500ece8'),
-  ('public.context_email_capture_status_at(timestamptz)','5cd6a81919fa414ca4077093664e1172'),
+  ('public.context_email_capture_status_at(timestamptz)','071eeded3d84f3177c6578da97c00fb1'),
   ('public.context_email_capture_policy()','ae811e23b69cc7ea382ca727d1b61b39'),
   ('public.set_monitored_mailbox(text,boolean,text,text,text)','490a637f9ea0da6aae196e9ce1aeaf5d')) AS t(sig,md5) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(x.sig)) IS DISTINCT FROM x.md5

@@ -115,7 +115,7 @@ BEGIN
   -- New: absent, or already this migration's body.
   ('public.context_email_capture_policy()',ARRAY['ae811e23b69cc7ea382ca727d1b61b39'],true),
   ('public.set_monitored_mailbox(text,boolean,text,text,text)',ARRAY['490a637f9ea0da6aae196e9ce1aeaf5d'],true),
-  ('public.context_email_capture_status_at(timestamptz)',ARRAY['5cd6a81919fa414ca4077093664e1172'],true)
+  ('public.context_email_capture_status_at(timestamptz)',ARRAY['071eeded3d84f3177c6578da97c00fb1'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
@@ -438,46 +438,45 @@ BEGIN
   misses:=CASE WHEN jsonb_typeof(miss_run.counts->'sweep_misses')='number' THEN (miss_run.counts->>'sweep_misses')::bigint ELSE 0 END;
   -- Nothing is expected of a source before the flag, and its own enabling, have been in place.
   since:=greatest(flag_changed,m.updated_at);
-  poll:=jsonb_build_object('run_source',poll_src,
-   'last_started_at',(last_runs[1]).started_at,'last_finished_at',(last_runs[1]).finished_at,
+  poll:=jsonb_build_object('last_started_at',(last_runs[1]).started_at,'last_finished_at',(last_runs[1]).finished_at,
    'last_status',(last_runs[1]).status,'last_error_code',(last_runs[1]).error_code,
    'last_succeeded_at',(SELECT max(r.finished_at) FROM public.context_capture_runs r WHERE r.source=poll_src AND r.status='succeeded'),
    'failed_of_last',jsonb_build_object('runs',least(cardinality(last_runs),failed_n),'failed',n_failed),
    'backlog_of_last',jsonb_build_object('runs',least(cardinality(last_runs),backlog_n),'backlog',n_backlog));
-  sweep:=jsonb_build_object('run_source',sweep_src,'last_started_at',last_sweep.started_at,'last_status',last_sweep.status,
+  sweep:=jsonb_build_object('last_started_at',last_sweep.started_at,'last_status',last_sweep.status,
    'last_error_code',last_sweep.error_code,'finished_since_last_0200',swept,'sweep_misses',misses);
-  hist:=jsonb_build_object('run_source',hist_src,'last_started_at',last_hist.started_at,'last_status',last_hist.status,'last_error_code',last_hist.error_code);
-  sources:=sources||jsonb_build_array(jsonb_build_object('email',m.email,'source_key',m.source_key,'kind',m.kind,
-   'enabled',m.enabled,'status',m.status,'selected',polled,'owner_privacy',m.owner_privacy,'files_supplier_pdfs',m.files_supplier_pdfs,
+  hist:=jsonb_build_object('last_started_at',last_hist.started_at,'last_status',last_hist.status,'last_error_code',last_hist.error_code);
+  sources:=sources||jsonb_build_array(jsonb_build_object('scope_label',m.scope_label,'kind',m.kind,
+   'enabled',m.enabled,'status',m.status,'selected',polled,
    'poll',poll,'sweep',sweep,'history',hist));
   IF alarms_active AND polled THEN
    IF (cardinality(last_runs)>=failed_n AND n_failed=failed_n) THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',(last_runs[failed_n]).started_at,
-     'source',m.email,'reason','failed_last_runs','error_code',(last_runs[1]).error_code,
+     'scope_label',m.scope_label,'reason','failed_last_runs','error_code',(last_runs[1]).error_code,
      'what_to_do','This mailbox failed its last polls. Check the Microsoft Graph credentials and the app''s permission on this mailbox or group.'));
    ELSIF NOT recent_finish AND (since IS NULL OR since<=now_time-no_run) THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',coalesce((last_runs[1]).finished_at,since),
-     'source',m.email,'reason','no_recent_run',
+     'scope_label',m.scope_label,'reason','no_recent_run',
      'what_to_do','No poll of this mailbox has finished in the last 15 minutes. Check that the monitor-inbox cron job runs and that the function is not failing.'));
    END IF;
    IF cardinality(last_runs)>=backlog_n AND n_backlog=backlog_n THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_backlog','severity','warning','since',(last_runs[backlog_n]).started_at,
-     'source',m.email,'what_to_do','This mailbox has had more mail than one poll reads for three polls running. It will catch up; if it does not, raise the page bound.'));
+     'scope_label',m.scope_label,'what_to_do','This mailbox has had more mail than one poll reads for three polls running. It will catch up; if it does not, raise the page bound.'));
    END IF;
    IF misses>0 THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_poll_missed','severity','warning','since',miss_run.started_at,
-     'source',m.email,'sweep_misses',misses,
+     'scope_label',m.scope_label,'sweep_misses',misses,
      'what_to_do','The nightly sweep found mail the 5-minute poll missed (now captured). Check the poll''s run rows for this mailbox.'));
    END IF;
    IF sweep_due AND NOT swept AND (since IS NULL OR since<sweep_at) THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','sweep_incomplete','severity','warning','since',sweep_at,
-     'source',m.email,'last_status',last_sweep.status,
+     'scope_label',m.scope_label,'last_status',last_sweep.status,
      'what_to_do','This mailbox did not finish its 02:00 sweep. Check the monitor-inbox-sweep cron job and this mailbox''s sweep run rows.'));
    END IF;
   END IF;
  END LOOP;
  IF alarms_active AND n_polled=0 THEN
-  alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',flag_changed,'source',NULL,
+  alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',flag_changed,'scope_label',NULL,
    'reason','no_polled_sources','what_to_do','Email capture is on but no mailbox is enabled. Enable the mailboxes with set_monitored_mailbox.'));
  END IF;
  RETURN jsonb_build_object('as_of',now_time,
@@ -492,7 +491,7 @@ COMMENT ON FUNCTION public.context_email_capture_status_at(timestamptz) IS
 CREATE OR REPLACE FUNCTION public.context_email_capture_status() RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$ SELECT public.context_email_capture_status_at(now()) $$;
 COMMENT ON FUNCTION public.context_email_capture_status() IS
- 'Status block email_capture (EM1, replacing the F1b stub): every monitored_mailboxes source with its poll, sweep and history run rows, and alarms email_source_error, email_poll_missed, email_backlog, sweep_incomplete, raised only while flag email_capture_v2 and the capture lane are on. Ids and codes only.';
+ 'Status block email_capture (EM1, replacing the F1b stub): every monitored_mailboxes source by scope_label with its poll, sweep and history health, and alarms email_source_error, email_poll_missed, email_backlog, sweep_incomplete, raised only while flag email_capture_v2 and the capture lane are on. No mailbox addresses, source keys or privacy settings.';
 
 -- 6. Grants. No PUBLIC, anon or authenticated execute; service_role only.
 REVOKE ALL ON FUNCTION

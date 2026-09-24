@@ -17,7 +17,6 @@ Deno.test("E22: the old path polls exactly the five old user mailboxes and two g
     "patios@secureworkswa.com.au",
     "fencing@secureworkswa.com.au",
   ]);
-  assertEquals(plan.mailbox_source, "hard_coded");
 });
 
 Deno.test("E22: seeded sources the old path cannot poll never enter its plan", () => {

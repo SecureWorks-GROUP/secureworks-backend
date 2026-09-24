@@ -1,5 +1,5 @@
 // Slice EM1: the set_monitored_mailbox door. Behaviour on the module (body
-// rules, RPC arguments, refusal mapping, one log line with ids and codes only)
+// rules, RPC arguments, refusal mapping)
 // and on the real ops-api front door (staff-only, never agent-read or a
 // trade) plus the in-route owner-level gate.
 // deno-lint-ignore-file no-import-prefix no-explicit-any
@@ -23,19 +23,6 @@ import {
 const ORG = "00000000-0000-0000-0000-000000000001";
 const ACTION = "set_monitored_mailbox";
 
-function capture<T>(fn: () => Promise<T>) {
-  const lines: string[] = [];
-  const log = console.log, err = console.error;
-  console.log = (...a: unknown[]) => lines.push(a.map(String).join(" "));
-  console.error = (...a: unknown[]) => lines.push(a.map(String).join(" "));
-  return fn().finally(() => {
-    console.log = log;
-    console.error = err;
-  }).then((result) => ({ result, lines }), (error) => {
-    throw Object.assign(error, { lines });
-  });
-}
-
 function fakeRpc(data: unknown, error: unknown = null) {
   const calls: { fn: string; args: unknown }[] = [];
   return {
@@ -49,14 +36,12 @@ function fakeRpc(data: unknown, error: unknown = null) {
   };
 }
 
-Deno.test("disabling a source passes the change and the actor to the one writer and logs no reason text", async () => {
+Deno.test("disabling a source passes the change and the actor to the one writer", async () => {
   const f = fakeRpc({ outcome: "updated", email: "khairo@secureworkswa.com.au", enabled: false, status: "active" });
-  const { result, lines } = await capture(() =>
-    setMonitoredMailbox(
-      f.client,
-      { email: " Khairo@SecureWorksWA.com.au ", enabled: false, reason: "private matter this week" },
-      "user:u1",
-    )
+  const result = await setMonitoredMailbox(
+    f.client,
+    { email: " Khairo@SecureWorksWA.com.au ", enabled: false, reason: "private matter this week" },
+    "user:u1",
   );
   assertEquals(result.outcome, "updated");
   assertEquals(f.calls, [{
@@ -69,24 +54,14 @@ Deno.test("disabling a source passes the change and the actor to the one writer 
       p_actor: "user:u1",
     },
   }]);
-  assertEquals(lines.length, 1);
-  assertEquals(JSON.parse(lines[0]), {
-    event: "set_monitored_mailbox",
-    email: "khairo@secureworkswa.com.au",
-    outcome: "updated",
-    actor: "user:u1",
-  });
-  assertEquals(lines[0].includes("private matter"), false);
 });
 
 Deno.test("a located source is marked active and enabled in one call", async () => {
   const f = fakeRpc({ outcome: "updated" });
-  await capture(() =>
-    setMonitoredMailbox(
-      f.client,
-      { email: "plans@secureworkswa.com.au", enabled: true, status: "active", reason: "located: delivers to approvals@" },
-      "actor_missing",
-    )
+  await setMonitoredMailbox(
+    f.client,
+    { email: "plans@secureworkswa.com.au", enabled: true, status: "active", reason: "located: delivers to approvals@" },
+    "actor_missing",
   );
   assertEquals((f.calls[0].args as any).p_enabled, true);
   assertEquals((f.calls[0].args as any).p_status, "active");
@@ -125,11 +100,11 @@ Deno.test("writer refusals map to their own status and code; any other fault is 
     ] as const
   ) {
     const f = fakeRpc(null, { code: "P0001", message });
-    const e = await assertRejects(() => capture(() => setMonitoredMailbox(f.client, body, "workflow:test")), MonitoredMailboxError);
+    const e = await assertRejects(() => setMonitoredMailbox(f.client, body, "workflow:test"), MonitoredMailboxError);
     assertEquals([e.code, e.status], [message, status]);
   }
   const f = fakeRpc(null, { code: "57014", message: "canceling statement due to statement timeout" });
-  const e = await assertRejects(() => capture(() => setMonitoredMailbox(f.client, body, "workflow:test")), MonitoredMailboxError);
+  const e = await assertRejects(() => setMonitoredMailbox(f.client, body, "workflow:test"), MonitoredMailboxError);
   assertEquals([e.code, e.status], ["monitored_mailbox_unavailable", 503]);
   assertEquals(e.message.includes("timeout"), false);
 });

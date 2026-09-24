@@ -31,11 +31,9 @@ export const LEGACY_GROUP_MAILBOXES: readonly string[] = Object.freeze([
 export function legacyPollPlan(): {
   users: readonly string[];
   groups: readonly string[];
-  mailbox_source: "hard_coded";
 } {
   return {
     users: LEGACY_USER_MAILBOXES,
     groups: LEGACY_GROUP_MAILBOXES,
-    mailbox_source: "hard_coded",
   };
 }
