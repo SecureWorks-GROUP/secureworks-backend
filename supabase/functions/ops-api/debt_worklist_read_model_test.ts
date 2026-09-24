@@ -62,10 +62,14 @@ function pick(row: any, src: string): any {
 
 function fakeClient(tables: Tables, failing: Set<string> = new Set()) {
   const reads: string[] = [];
+  const queryCalls: Array<{ table: string; filters: any[] }> = [];
   return {
     reads,
+    queryCalls,
     from(table: string) {
       reads.push(table);
+      const queryCall = { table, filters: [] as any[] };
+      queryCalls.push(queryCall);
       const filters: Array<(row: any) => boolean> = [];
       let order: { col: string; asc: boolean } | null = null;
       let limit: number | null = null;
@@ -90,7 +94,10 @@ function fakeClient(tables: Tables, failing: Set<string> = new Set()) {
             : { out: piece, src: piece };
         });
       });
-      q.eq = chain((c: string, v: any) => filters.push((r) => r[c] === v));
+      q.eq = chain((c: string, v: any) => {
+        queryCall.filters.push({ operator: "eq", column: c, value: v });
+        filters.push((r) => r[c] === v);
+      });
       q.neq = chain((c: string, v: any) => filters.push((r) => r[c] !== v));
       q.gt = chain((c: string, v: any) =>
         filters.push((r) => r[c] != null && r[c] > v)
@@ -98,9 +105,10 @@ function fakeClient(tables: Tables, failing: Set<string> = new Set()) {
       q.lt = chain((c: string, v: any) =>
         filters.push((r) => r[c] != null && r[c] < v)
       );
-      q.in = chain((c: string, v: any[]) =>
-        filters.push((r) => v.includes(r[c]))
-      );
+      q.in = chain((c: string, v: any[]) => {
+        queryCall.filters.push({ operator: "in", column: c, value: [...v] });
+        filters.push((r) => v.includes(r[c]));
+      });
       q.ilike = chain((c: string, v: string) =>
         filters.push((r) =>
           String(r[c] ?? "").toLowerCase() === v.toLowerCase()
@@ -916,6 +924,26 @@ Deno.test("contact event provider follows its Graph provider id", async () => {
     privacy_classification: "staff_only",
     source: "monitor-inbox",
     payload: { body: "An email captured from Graph" },
+  }, {
+    id: "foreign-job-contact-email",
+    contact_id: "ghl-contact-only",
+    job_id: "other-org-job",
+    event_type: "client.email_in",
+    occurred_at: "2026-09-23T03:00:00Z",
+    channel: "email",
+    direction: "inbound",
+    provider_message_id: "graph:foreign-contact-email",
+    source: "monitor-inbox",
+    payload: { body: "Another organisation's job email" },
+  }, {
+    id: "foreign-job-invoice-event",
+    entity_type: "xero_invoice",
+    entity_id: INV(1),
+    job_id: "other-org-job",
+    event_type: "invoice.emailed",
+    occurred_at: "2026-09-23T04:00:00Z",
+    provider_message_id: "graph:foreign-invoice-event",
+    payload: { to_email: "other-org@example.test" },
   }];
   const out: any = await debtWorklist(
     new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
@@ -927,6 +955,149 @@ Deno.test("contact event provider follows its Graph provider id", async () => {
   assert(entry);
   assertEquals(entry.provider, "outlook");
   assertEquals(entry.preview, "An email captured from Graph");
+  assertEquals(
+    out.debtors[0].timeline.entries.some((candidate: any) =>
+      candidate.provider_id === "graph:foreign-contact-email" ||
+      candidate.provider_id === "graph:foreign-invoice-event"
+    ),
+    false,
+  );
+});
+
+Deno.test("worklist and job conversation execute the same event-type read", async () => {
+  const jobId = "c0000000-0000-4000-8000-000000000003";
+  const jobClient = fakeClient({
+    jobs: [{ id: jobId, job_number: "SWP-3", ghl_contact_id: null }],
+    business_events: [],
+    job_events: [],
+    inbox_events: [],
+    ghl_conversation_cache: [],
+  });
+  await _getJobConversationForTest(jobClient, {
+    job_id: jobId,
+    limit: 10,
+    report_faults: true,
+  });
+
+  const tables = unitTables();
+  tables.xero_invoices = [invoice(1, { job_id: null })];
+  tables.jobs = [];
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-contact-only",
+    job_id: null,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  const worklistClient = fakeClient(tables);
+  await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(worklistClient),
+  );
+
+  const getEventTypes = (client: any, contactRead: boolean) => {
+    const query = client.queryCalls.find((call: any) =>
+      call.table === "business_events" &&
+      call.filters.some((filter: any) =>
+        filter.column === "event_type" && filter.operator === "in"
+      ) && call.filters.some((filter: any) =>
+        contactRead
+          ? filter.column === "contact_id"
+          : filter.column === "job_id"
+      )
+    );
+    assert(query);
+    return query.filters.find((filter: any) =>
+      filter.column === "event_type"
+    ).value;
+  };
+  assertEquals(getEventTypes(worklistClient, true), getEventTypes(jobClient, false));
+});
+
+Deno.test("contact-only call events appear in the debtor timeline", async () => {
+  const tables = unitTables();
+  tables.xero_invoices = [invoice(1, { job_id: null })];
+  tables.jobs = [];
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-contact-only",
+    job_id: null,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  tables.business_events = [{
+    id: "contact-call-event",
+    contact_id: "ghl-contact-only",
+    job_id: null,
+    event_type: "client.call_complete",
+    occurred_at: "2026-09-23T05:00:00Z",
+    direction: "inbound",
+    provider_message_id: "ghl:contact-call-1",
+    payload: { body: "Discussed the unpaid invoice" },
+  }];
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables)),
+  );
+  const call = out.debtors[0].timeline.entries.find((entry: any) =>
+    entry.provider_id === "ghl:contact-call-1"
+  );
+  assert(call);
+  assertEquals(call.kind, "call");
+  assertEquals(call.channel, "call");
+  assertEquals(call.direction, "inbound");
+});
+
+Deno.test("a captured client.reply event determines the merged SMS channel", async () => {
+  const tables = unitTables();
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-a",
+    job_id: JOB_A,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  const providerId = "ghl:job-reply-1";
+  tables.business_events.push({
+    id: "job-reply-event",
+    contact_id: "ghl-a",
+    job_id: JOB_A,
+    event_type: "client.reply",
+    occurred_at: "2026-09-23T06:00:00Z",
+    channel: "email",
+    direction: "inbound",
+    provider_message_id: providerId,
+    source: "ghl-webhook-receiver",
+    payload: { body: "The debtor replied by text" },
+  });
+  const jobCopy = {
+    id: "bev:job-reply-event",
+    job_id: JOB_A,
+    source_system: "business_events",
+    source_ref: "job-reply-event",
+    provider_message_id: providerId,
+    event_type: "client.email_in",
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-09-23T06:00:00Z",
+    preview: "The debtor replied by text",
+  };
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables), conversationStub({ [JOB_A]: [jobCopy] }).fn),
+  );
+  const entries = out.debtors[0].timeline.entries.filter((entry: any) =>
+    entry.provider_id === providerId
+  );
+  assertEquals(entries.length, 1);
+  assertEquals(entries[0].channel, "sms");
+  assertEquals(entries[0].kind, "sms");
 });
 
 Deno.test("conversation business-event faults make GHL source unreadable", async () => {

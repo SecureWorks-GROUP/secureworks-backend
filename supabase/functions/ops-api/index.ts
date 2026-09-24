@@ -1,6 +1,6 @@
 import { applyBookingApprovals, bookingApprovalStore, salesBookingApprovalWriteRoute } from './sales_booking_confirmation.ts'
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
-import { GHL_CAPTURED_MESSAGE_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
+import { JOB_CONVERSATION_EVENT_TYPES } from "../_shared/evidence/conversation_event_types.ts";
 import { sourceTime } from "../_shared/source_time.ts";
 import { automationLaneEnabled, contextActionLane } from '../_shared/automation_switch.ts'
 import { salesPerformanceAction, salesPerformanceStore } from './sales_performance.ts'
@@ -16118,10 +16118,6 @@ async function getJobConversation(client: any, body: any) {
 
   // 4. business_events — message-shaped rows (sms/email/note/call).
   try {
-    const messageEventTypes = [
-      ...GHL_CAPTURED_MESSAGE_EVENT_TYPES,
-      'client.call_complete', 'client.message_in', 'supplier.email_in',
-    ]
     // attribution_status / attribution_step / placement_rule (context slice
     // R0): how the ladder placed the row, so a reader can see why it is on
     // this job. placement_rule is metadata.placement_rule (null until the
@@ -16129,7 +16125,7 @@ async function getJobConversation(client: any, body: any) {
     let q = client.from('business_events')
       .select('id, event_type, source, occurred_at, direction, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, provider_message_id, privacy_classification')
       .eq('job_id', jobId)
-      .in('event_type', messageEventTypes)
+      .in('event_type', JOB_CONVERSATION_EVENT_TYPES)
       .order('occurred_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('occurred_at', sinceFilter)
@@ -16169,6 +16165,7 @@ async function getJobConversation(client: any, body: any) {
           ? {
             provider_message_id: r.provider_message_id ?? null,
             privacy_classification: r.privacy_classification ?? null,
+            event_type: r.event_type,
             ...(channel === 'email' ? { payload_mailbox: p.mailbox ?? null } : {}),
           }
           : {}),

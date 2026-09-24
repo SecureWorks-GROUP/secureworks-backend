@@ -52,7 +52,7 @@ import {
   XERO_STALE_HOURS,
 } from "./invoice_context.ts";
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
-import { GHL_CAPTURED_MESSAGE_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
+import { JOB_CONVERSATION_EVENT_TYPES } from "../_shared/evidence/conversation_event_types.ts";
 import { emailMailboxPrivacy } from "../_shared/evidence/email_mailbox_privacy.ts";
 
 export const DEBT_WORKLIST_VERSION = "debt-worklist/v1";
@@ -267,6 +267,7 @@ export function entryFromConversation(
   m: any,
   jobId: string,
   jobInvoiceIds: string[],
+  directEventChannel?: string,
 ): TimelineEntry {
   const source = String(m.source_system ?? "unknown");
   const providerId = str(m.provider_message_id);
@@ -275,7 +276,8 @@ export function entryFromConversation(
     : source === "inbox"
     ? "outlook"
     : "secureworks";
-  const channel = str(m.channel);
+  const channel = directEventChannel ??
+    channelFromEventType(str(m.event_type)) ?? str(m.channel);
   const privacyClassification = str(m.privacy_classification) ??
     emailMailboxPrivacy(
       source === "inbox"
@@ -329,14 +331,7 @@ export function entryFromGhlContactEvent(
   const eventType = str(row.event_type) ?? "";
   const isNote = eventType === "ghl.note_added" ||
     eventType === "ghl.internal_comment";
-  const eventChannel = eventType === "client.reply" ||
-      eventType.includes(".sms_")
-    ? "sms"
-    : eventType.includes(".email_")
-    ? "email"
-    : isNote
-    ? "note"
-    : null;
+  const eventChannel = channelFromEventType(eventType);
   const channel = eventChannel ?? str(row.channel) ?? str(payload.channel) ??
     "note";
   const privacyClassification = str(row.privacy_classification) ??
@@ -380,6 +375,18 @@ export function entryFromGhlContactEvent(
     seen_in: ["business_events"],
     label: withheld ? `content withheld: ${privacyClassification}` : null,
   };
+}
+
+function channelFromEventType(eventType: string | null): string | null {
+  if (!eventType) return null;
+  if (eventType.includes(".call")) return "call";
+  if (eventType === "ghl.note_added" || eventType === "ghl.internal_comment" ||
+    eventType.includes(".note")) return "note";
+  if (eventType === "client.reply" || eventType.includes(".sms_")) {
+    return "sms";
+  }
+  if (eventType.includes(".email_")) return "email";
+  return null;
 }
 
 /** A payment_chase_logs row: a desk note, a logged call, an SMS send log, or a classification change. */
@@ -933,7 +940,7 @@ export async function debtWorklist(
         () =>
           client.from("jobs").select(
             "id, job_number, ghl_contact_id, status, type",
-          ).in("id", ids),
+          ).eq("org_id", deps.orgId).in("id", ids),
         warnings,
         "id",
       );
@@ -1433,13 +1440,15 @@ export async function debtWorklist(
             .select(
               "id, contact_id, job_id, event_type, occurred_at, direction, channel, payload, body_preview, provider_message_id, privacy_classification, source",
             )
-            .in("event_type", GHL_CAPTURED_MESSAGE_EVENT_TYPES)
+            .in("event_type", JOB_CONVERSATION_EVENT_TYPES)
             .in("contact_id", ids),
         warnings,
         "id",
         true,
       );
       for (const row of rows) {
+        const eventJobId = str(row.job_id);
+        if (eventJobId && !jobs.has(eventJobId)) continue;
         const events = contactEventsByGhl.get(row.contact_id) ?? [];
         events.push(row);
         contactEventsByGhl.set(row.contact_id, events);
@@ -1631,6 +1640,16 @@ export async function debtWorklist(
     {
       const bounds = TIMELINE_BOUNDS[timelineMode];
       const raw: TimelineEntry[] = [];
+      const directChannels = new Map<string, string>();
+      for (const contactId of debtorGhlContactIds.get(key) ?? []) {
+        for (const event of contactEventsByGhl.get(contactId) ?? []) {
+          const eventJobId = str(event.job_id);
+          if (eventJobId && !invoicesByLinkedJob.has(eventJobId)) continue;
+          const providerId = str(event.provider_message_id);
+          const channel = channelFromEventType(str(event.event_type));
+          if (providerId && channel) directChannels.set(providerId, channel);
+        }
+      }
       for (const jobId of linkedJobs) {
         const conv = conversations.get(jobId);
         const jobInvoiceIds = invoicesByLinkedJob.get(jobId) ?? [];
@@ -1641,7 +1660,15 @@ export async function debtWorklist(
           );
         }
         for (const m of conv.messages) {
-          raw.push(entryFromConversation(m, jobId, jobInvoiceIds));
+          const providerId = str(m.provider_message_id);
+          raw.push(
+            entryFromConversation(
+              m,
+              jobId,
+              jobInvoiceIds,
+              providerId ? directChannels.get(providerId) : undefined,
+            ),
+          );
         }
       }
       for (const r of rows) {
@@ -1649,6 +1676,8 @@ export async function debtWorklist(
           raw.push(entryFromChaseLog(c));
         }
         for (const ev of invoiceEvents.get(r.xero_invoice_id) ?? []) {
+          const eventJobId = str(ev.job_id);
+          if (eventJobId && !invoicesByLinkedJob.has(eventJobId)) continue;
           raw.push(entryFromInvoiceEvent(ev));
         }
         raw.push(...xeroEntriesFor(r._raw));
