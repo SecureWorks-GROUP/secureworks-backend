@@ -34,7 +34,7 @@ Railway Agent ──→ ops-api / reporting-api
 | **completion-pack** | 836 | Branded HTML completion report generator | GHL |
 | **ghl-webhook** | 611 | GHL opportunity sync on stage changes | GHL webhook |
 | **receive-po-email** | 549 | Inbound PO email processing, supplier quote analysis | Resend webhook |
-| **monitor-inbox** | 329 | Graph inbox polling and Haiku classification | Microsoft Graph, Claude API |
+| **monitor-inbox** | — | Graph inbox polling and rules-only email classification | Microsoft Graph |
 | **send-po-email** | 301 | PO email via Resend with thread tracking | Resend API |
 | **resend-webhook** | 287 | Email delivery tracking (sent, opened, bounced) | Resend webhook |
 | **send-outlook-email** | 245 | Microsoft Graph email sending with signature, CC, attachments | Microsoft Graph |
