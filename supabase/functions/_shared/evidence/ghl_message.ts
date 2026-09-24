@@ -448,6 +448,142 @@ function buildCallRow(
   };
 }
 
+// ── Transcripts: one row per GHL call transcript (slice T2; transcripts.md §2) ──
+//
+// The only writer is the ghl-call-transcript-fetch edge function. The row is
+// keyed ghltx:<the call's GHL message id>, so every retry, a crashed run and
+// the history load land one row. It sits beside its call row and never
+// replaces it:
+//   * payload.ghl_call_id is the call's GHL message id: the key the runtime's
+//     callTranscriptLinks already pairs a transcript to its call by (review M8);
+//     payload.call_event_provider_id is the call row's key ghl:<id>;
+//   * event_at, contact, direction and line are the call's own. The ladder
+//     places the transcript at the call's time like any text (placement slice
+//     P-T moves the call to follow it);
+//   * the words are stored once: payload.transcript (the attribution and
+//     extraction reads take the words from there, context_event_text) and
+//     body_preview, its first 500 characters (review M8). payload.turns point
+//     into that text;
+//   * speaker_roles is always "not_given": a channel is never a role (D-T2);
+//   * capture_mode is the call row's (review S8), unless the caller is the
+//     history load, which always writes backfill so a past call never wakes a read.
+// safe_summary carries no words: it is capture's own account of the row.
+
+/** The stored call row a transcript belongs to, as the fetcher selected it. */
+export interface CallRowFacts {
+  /** The call's GHL message id (its row key without the ghl: prefix). */
+  ghlMessageId: string;
+  contactId: string;
+  eventAt: string;
+  direction: string | null;
+  conversationKey: string | null;
+  callSid: string | null;
+  durationSeconds: number | null;
+  line: string | null;
+  fromLine: string | null;
+  byUser: string | null;
+}
+
+export interface TranscriptRowInput {
+  text: string;
+  turns: [number | null, number, number, number][];
+  speakerLabels: boolean;
+  speakerChannels: number[];
+  sentenceCount: number;
+  sentencesKept: number;
+  wordCount: number;
+  cut: boolean;
+  lowSignal: boolean;
+}
+
+export const CALL_TRANSCRIPT_EVENT_TYPE = "call.transcript_completed";
+export const CALL_TRANSCRIPT_SOURCE = "ghl-call-transcript";
+
+/** The transcript row for one call. Pure; refuses (skip) a call with no usable id or time. */
+export function buildGhlCallTranscriptRow(
+  call: CallRowFacts,
+  transcript: TranscriptRowInput,
+  ctx: {
+    captureMode: CaptureMode;
+    agreement?: "reached" | "not_reached" | "not_needed";
+  },
+): GhlMessageBuild {
+  const id = text(call.ghlMessageId);
+  if (!id || !GHL_ID.test(id)) return { kind: "skip", reason: "no_id" };
+  const contactId = text(call.contactId);
+  if (!contactId) return { kind: "skip", reason: "no_contact" };
+  const eventAt = sourceTime(call.eventAt);
+  const direction =
+    call.direction === "inbound" || call.direction === "outbound"
+      ? call.direction
+      : "unknown";
+  const summary =
+    `[Call transcript, ${direction}. ${transcript.sentenceCount} sentence${
+      transcript.sentenceCount === 1 ? "" : "s"
+    }, ${transcript.wordCount} word${transcript.wordCount === 1 ? "" : "s"}. ${
+      transcript.speakerLabels
+        ? `${transcript.speakerChannels.length} speakers, roles not given.`
+        : "Speakers not separated by the provider."
+    }${transcript.lowSignal ? " Low signal." : ""}]`;
+  const payload: Record<string, unknown> = {
+    words: true,
+    channel: "call",
+    direction,
+    transcript: transcript.text,
+    turns: transcript.turns,
+    speaker_labels: transcript.speakerLabels,
+    speaker_channels: transcript.speakerChannels,
+    speaker_roles: "not_given",
+    sentence_count: transcript.sentenceCount,
+    word_count: transcript.wordCount,
+    low_signal: transcript.lowSignal,
+    provider: "ghl",
+    transcript_version: "ghl-v3",
+    ghl_call_id: id,
+    call_event_provider_id: `ghl:${id}`,
+    ghl_contact_id: contactId,
+    conversation_key: text(call.conversationKey),
+    call_sid: text(call.callSid),
+    duration_seconds: call.durationSeconds,
+    line: text(call.line),
+    from_line: text(call.fromLine),
+    by_user: text(call.byUser),
+    event_at_source: eventAt ? "call" : "missing",
+  };
+  if (transcript.cut) {
+    payload.cut = {
+      at_bytes: "64KB",
+      sentences_kept: transcript.sentencesKept,
+      sentences_total: transcript.sentenceCount,
+    };
+  }
+  if (ctx.agreement) payload.agreement = ctx.agreement;
+  return {
+    kind: "row",
+    row: {
+      event_type: CALL_TRANSCRIPT_EVENT_TYPE,
+      source: CALL_TRANSCRIPT_SOURCE,
+      entity_type: "contact",
+      entity_id: contactId,
+      contact_id: contactId,
+      job_id: null,
+      match_method: "none",
+      event_at: eventAt,
+      provider_message_id: `ghltx:${id}`,
+      channel: "call",
+      direction,
+      thread_key: null,
+      conversation_key: text(call.conversationKey),
+      body_preview: transcript.text.slice(0, EXCERPT),
+      safe_summary: summary.slice(0, 280),
+      privacy_classification: "staff_only",
+      retention_class: "7y_audit",
+      payload,
+      metadata: { capture_mode: ctx.captureMode },
+    },
+  };
+}
+
 // ── Rank 10: GHL notes, tasks and appointments (slice C1c; sms.md §2) ──
 //
 // The same builder maps the GHL app webhooks NoteCreate / NoteUpdate,

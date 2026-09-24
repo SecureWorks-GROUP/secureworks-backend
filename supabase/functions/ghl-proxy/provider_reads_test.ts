@@ -894,10 +894,12 @@ Deno.test("transcript shape diagnostics expose only bounded allowlisted structur
   f.done();
 });
 
-Deno.test("transcript diagnostic reasons distinguish absent and invalid optional provider fields without relaxation", async () => {
+Deno.test("transcript diagnostic reasons distinguish absent and invalid optional provider fields", async () => {
   for (
     const [body, reason] of [
-      [{ transcript: "PRIVATE_WORDS" }, "missing_field:mediaChannel"],
+      [{ transcript: "PRIVATE_WORDS" }, "missing_field:sentenceIndex"],
+      [{ ...sentence, mediaChannel: "one" }, "invalid_numeric:mediaChannel"],
+      [{ ...sentence, speaker: { name: "x" } }, "invalid_type:speaker"],
       [{ ...sentence, confidence: null }, "invalid_numeric:confidence"],
       [{ ...sentence, transcript: 123 }, "invalid_type:transcript"],
       [[sentence, { ...sentence, endTime: 0 }], "reversed_timing"],
@@ -916,6 +918,26 @@ Deno.test("transcript diagnostic reasons distinguish absent and invalid optional
     assert(!err.message.includes(sentence.transcript));
     f.done();
   }
+});
+
+// Slice T2 (transcripts.md §2 step 3, §8 F4): an older transcript shape
+// carries no mediaChannel (every voice on one channel, or none). The shared
+// reader accepts it, keeping the absence; it never invents a channel.
+Deno.test("transcript without mediaChannel or speaker is accepted as given (T2 tolerant reader)", async () => {
+  const noChannel: Record<string, unknown> = { ...sentence };
+  delete noChannel.mediaChannel;
+  const f = fixture([...callReplies(), {
+    path: transcriptPath,
+    body: [noChannel, { ...sentence, sentenceIndex: "2", speaker: "1" }],
+  }]);
+  const result = await f.run("get_ghl_call_transcript", callArgs);
+  const returned =
+    (result.data.transcript as { sentences: Record<string, unknown>[] })
+      .sentences;
+  assertEquals(returned.length, 2);
+  assert(!Object.hasOwn(returned[0], "mediaChannel"));
+  assertEquals(returned[1].speaker, "1");
+  f.done();
 });
 
 Deno.test("transcript shape diagnostics bound nested structures and large arrays", async () => {
