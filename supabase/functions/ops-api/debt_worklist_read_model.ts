@@ -53,6 +53,7 @@ import {
 } from "./invoice_context.ts";
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
 import { GHL_CAPTURED_MESSAGE_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
+import { emailMailboxPrivacy } from "../_shared/evidence/email_mailbox_privacy.ts";
 
 export const DEBT_WORKLIST_VERSION = "debt-worklist/v1";
 
@@ -275,7 +276,14 @@ export function entryFromConversation(
     ? "outlook"
     : "secureworks";
   const channel = str(m.channel);
-  const privacyClassification = str(m.privacy_classification);
+  const privacyClassification = str(m.privacy_classification) ??
+    emailMailboxPrivacy(
+      source === "inbox"
+        ? m.mailbox
+        : channel === "email"
+        ? m.payload_mailbox
+        : null,
+    );
   const withheld = privacyClassification === "restricted_pii" ||
     privacyClassification === "audio_unredacted";
   const unplacedInbox = source === "inbox";
@@ -319,9 +327,6 @@ export function entryFromGhlContactEvent(
   const providerId = str(row.provider_message_id);
   const jobId = str(row.job_id);
   const eventType = str(row.event_type) ?? "";
-  const privacyClassification = str(row.privacy_classification);
-  const withheld = privacyClassification === "restricted_pii" ||
-    privacyClassification === "audio_unredacted";
   const isNote = eventType === "ghl.note_added" ||
     eventType === "ghl.internal_comment";
   const eventChannel = eventType === "client.reply" ||
@@ -334,6 +339,10 @@ export function entryFromGhlContactEvent(
     : null;
   const channel = eventChannel ?? str(row.channel) ?? str(payload.channel) ??
     "note";
+  const privacyClassification = str(row.privacy_classification) ??
+    emailMailboxPrivacy(channel === "email" ? payload.mailbox : null);
+  const withheld = privacyClassification === "restricted_pii" ||
+    privacyClassification === "audio_unredacted";
   const eventDirection = isNote
     ? "internal"
     : eventType === "client.reply" || eventType.endsWith("_in")
@@ -1023,6 +1032,8 @@ export async function debtWorklist(
             .eq("org_id", deps.orgId)
             .in("xero_contact_id", ids),
         warnings,
+        "id",
+        true,
       );
       for (const r of rows) {
         if (!r.xero_contact_id || !r.ghl_contact_id) continue;

@@ -769,6 +769,22 @@ Deno.test("restricted contact events keep metadata but withhold content", async 
       body: "Private email body",
       from: "private.sender@example.test",
     },
+  }, {
+    id: "legacy-private-contact-email",
+    contact_id: "ghl-contact-only",
+    event_type: "client.email_in",
+    occurred_at: "2026-09-23T02:00:00Z",
+    channel: "email",
+    direction: "inbound",
+    provider_message_id: "graph:legacy-private-email-1",
+    source: "monitor-inbox",
+    body_preview: "Legacy private preview",
+    payload: {
+      mailbox: "marnin@secureworkswa.com.au",
+      from: "legacy.private.sender@example.test",
+      subject: "Legacy private subject",
+      body: "Legacy private body",
+    },
   }];
   const out: any = await debtWorklist(
     new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
@@ -786,6 +802,19 @@ Deno.test("restricted contact events keep metadata but withhold content", async 
   assertEquals(entry.preview, "");
   assertEquals(entry.subject, null);
   assertEquals(entry.label, "content withheld: restricted_pii");
+  const legacy = out.debtors[0].timeline.entries.find((candidate: any) =>
+    candidate.provider_id === "graph:legacy-private-email-1"
+  );
+  assert(legacy);
+  assertEquals(legacy.provider, "outlook");
+  assertEquals(legacy.provider_id, "graph:legacy-private-email-1");
+  assertEquals(legacy.at, "2026-09-23T02:00:00Z");
+  assertEquals(legacy.direction, "inbound");
+  assertEquals(legacy.source, "business_events");
+  assertEquals(legacy.author, null);
+  assertEquals(legacy.preview, "");
+  assertEquals(legacy.subject, null);
+  assertEquals(legacy.label, "content withheld: restricted_pii");
 });
 
 Deno.test("protected job conversation content is withheld in the debt timeline", () => {
@@ -812,6 +841,55 @@ Deno.test("protected job conversation content is withheld in the debt timeline",
   assertEquals(entry.preview, "");
   assertEquals(entry.subject, null);
   assertEquals(entry.label, "content withheld: audio_unredacted");
+  const legacyInbox = entryFromConversation({
+    id: "legacy-personal-inbox",
+    source_system: "inbox",
+    source_ref: "inbox-1",
+    provider_message_id: "graph:legacy-inbox-email",
+    mailbox: "marnin@secureworkswa.com.au",
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-09-23T02:00:00Z",
+    author: "Private sender",
+    subject: "Private subject",
+    body: "Private body",
+    preview: "Private preview",
+  }, JOB_A, [INV(1)]);
+  assertEquals(legacyInbox.provider, "outlook");
+  assertEquals(legacyInbox.provider_id, "graph:legacy-inbox-email");
+  assertEquals(legacyInbox.at, "2026-09-23T02:00:00Z");
+  assertEquals(legacyInbox.direction, "inbound");
+  assertEquals(legacyInbox.source, "inbox");
+  assertEquals(legacyInbox.invoice_scope, "unplaced");
+  assertEquals(legacyInbox.job_id, null);
+  assertEquals(legacyInbox.invoice_ids, []);
+  assertEquals(legacyInbox.author, null);
+  assertEquals(legacyInbox.preview, "");
+  assertEquals(legacyInbox.subject, null);
+  assertEquals(legacyInbox.label, "content withheld: restricted_pii");
+  const legacyJobEmail = entryFromConversation({
+    id: "legacy-private-job-email",
+    source_system: "business_events",
+    source_ref: "event-2",
+    provider_message_id: "graph:legacy-job-email",
+    payload_mailbox: "jan@secureworkswa.com.au",
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-09-23T03:00:00Z",
+    author: "Private sender",
+    subject: "Private subject",
+    body: "Private body",
+    preview: "Private preview",
+  }, JOB_A, [INV(1)]);
+  assertEquals(legacyJobEmail.provider, "outlook");
+  assertEquals(legacyJobEmail.provider_id, "graph:legacy-job-email");
+  assertEquals(legacyJobEmail.at, "2026-09-23T03:00:00Z");
+  assertEquals(legacyJobEmail.direction, "inbound");
+  assertEquals(legacyJobEmail.source, "business_events");
+  assertEquals(legacyJobEmail.author, null);
+  assertEquals(legacyJobEmail.preview, "");
+  assertEquals(legacyJobEmail.subject, null);
+  assertEquals(legacyJobEmail.label, "content withheld: restricted_pii");
 });
 
 Deno.test("contact event provider follows its Graph provider id", async () => {
@@ -1084,6 +1162,35 @@ Deno.test("GHL cache page ceiling marks the source and timeline incomplete", asy
   assert(
     out.faults.some((fault: any) =>
       fault.source === "ghl" && fault.detail.includes("page ceiling")
+    ),
+  );
+});
+
+Deno.test("contact match page ceiling marks GHL and timeline incomplete", async () => {
+  const tables = unitTables();
+  tables.contact_matches = Array.from({ length: 20_001 }, (_, i) => ({
+    id: `contact-match-${String(i).padStart(5, "0")}`,
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-a",
+    job_id: JOB_A,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }));
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables), conversationStub({ [JOB_A]: JOB_A_MESSAGES }).fn),
+  );
+  const debtor = out.debtors[0];
+  assertEquals(debtor.sources.ghl.complete, false);
+  assertEquals(debtor.sources.ghl.status, "unreadable");
+  assertEquals(debtor.timeline.complete, false);
+  assertEquals(debtor.timeline.sources_complete, false);
+  assert(
+    out.faults.some((fault: any) =>
+      fault.source === "ghl" &&
+      fault.detail.includes("contact_matches read failed") &&
+      fault.detail.includes("page ceiling")
     ),
   );
 });
@@ -2137,6 +2244,7 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
       graph_message_id: "G1",
       received_at: "2026-09-02T00:00:00Z",
       body_preview: "mail",
+      mailbox: "marnin@secureworkswa.com.au",
     }],
     job_events: [],
     business_events: [{
@@ -2168,6 +2276,20 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
       direction: "outbound",
       provider_message_id: "ghlcomment:comment-2:2026-09-04T00:00:00Z",
       payload: { direction: "outbound", body: "Staff internal comment" },
+    }, {
+      id: "legacy-email-event",
+      job_id: jobId,
+      event_type: "client.email_in",
+      source: "monitor-inbox",
+      occurred_at: "2026-09-05T00:00:00Z",
+      direction: "inbound",
+      provider_message_id: "graph:legacy-email-1",
+      payload: {
+        mailbox: "marnin@secureworkswa.com.au",
+        from: "private.sender@example.test",
+        subject: "Private subject",
+        body: "Private body",
+      },
     }],
   };
   const plain: any = await _getJobConversationForTest(fakeClient(tables), {
@@ -2177,6 +2299,8 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   assertEquals("read_faults" in plain, false);
   assert(plain.messages.every((m: any) => !("provider_message_id" in m)));
   assert(plain.messages.every((m: any) => !("privacy_classification" in m)));
+  assert(plain.messages.every((m: any) => !("mailbox" in m)));
+  assert(plain.messages.every((m: any) => !("payload_mailbox" in m)));
 
   const failing = fakeClient(
     tables,
@@ -2202,6 +2326,7 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   assertEquals(clean.read_faults, []);
   const inbox = clean.messages.find((m: any) => m.source_system === "inbox");
   assertEquals(inbox.provider_message_id, "graph:G1");
+  assertEquals(inbox.mailbox, "marnin@secureworkswa.com.au");
   const note = clean.messages.find((m: any) =>
     m.provider_message_id === "ghlnote:note-1:2026-09-03T00:00:00Z"
   );
@@ -2219,6 +2344,10 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   assertEquals(inboundSms.channel, "sms");
   assertEquals(inboundSms.direction, "inbound");
   assertEquals(inboundSms.privacy_classification, "staff_only");
+  const legacyEmail = clean.messages.find((m: any) =>
+    m.provider_message_id === "graph:legacy-email-1"
+  );
+  assertEquals(legacyEmail.payload_mailbox, "marnin@secureworkswa.com.au");
 });
 
 Deno.test("getJobConversation reports an unreadable unlinked-rules flag and keeps its fallback", async () => {

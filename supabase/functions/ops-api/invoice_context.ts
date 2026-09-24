@@ -47,14 +47,17 @@ const MODE_BOUNDS = {
 } as const;
 type Mode = keyof typeof MODE_BOUNDS;
 
-// Message-shaped business events. Same list as getJobConversation so the
-// coverage count and the door's conversation agree on what "a message" is.
+// Message-shaped business events. Same list as getJobConversation.
 const MESSAGE_EVENT_TYPES = [
   ...GHL_CAPTURED_MESSAGE_EVENT_TYPES,
   "client.call_complete",
   "client.message_in",
   "supplier.email_in",
 ];
+const CLIENT_CONVERSATION_EVENT_TYPES = MESSAGE_EVENT_TYPES.filter(
+  (eventType) =>
+    eventType !== "ghl.note_added" && eventType !== "ghl.internal_comment",
+);
 
 export class InvoiceContextError extends Error {
   constructor(
@@ -737,7 +740,10 @@ async function conversationCountsByJob(
         () =>
           client.from("business_events").select(
             "id, job_id, event_type, occurred_at",
-          ).in("event_type", MESSAGE_EVENT_TYPES).in("job_id", ids),
+          ).in("event_type", CLIENT_CONVERSATION_EVENT_TYPES).in(
+            "job_id",
+            ids,
+          ),
         warnings,
       );
       for (const row of rows) {

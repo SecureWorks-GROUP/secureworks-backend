@@ -17,6 +17,7 @@ import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.39.0'
 // match_status, body_pointer); when OFF, the legacy business_events
 // insert below runs unchanged. No dual-write.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
+import { emailMailboxPrivacy } from '../_shared/evidence/email_mailbox_privacy.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
 
@@ -650,13 +651,7 @@ async function processMailbox(
       if (t7Enabled && inboxEventId) {
         // Privacy: personal mailboxes (Marnin, Jan) carry stricter
         // classification than the shared/group mailboxes.
-        const personalMailboxes = new Set([
-          'marnin@secureworkswa.com.au',
-          'jan@secureworkswa.com.au',
-        ])
-        const privacy = personalMailboxes.has(mailbox)
-          ? 'restricted_pii' as const
-          : 'staff_only' as const
+        const privacy = emailMailboxPrivacy(mailbox) ?? 'staff_only'
 
         try {
           await recordEvidence(sb, {

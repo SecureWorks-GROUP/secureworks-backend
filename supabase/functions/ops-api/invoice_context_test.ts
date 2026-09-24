@@ -1174,31 +1174,28 @@ Deno.test("6. coverage counts the open population with the same rules", async ()
   );
 });
 
-Deno.test("coverage counts a GHL internal comment as conversation evidence", async () => {
-  const t = baseTables();
-  t.ghl_conversation_cache = [];
-  t.inbox_events = [];
-  t.job_events = [];
-  t.business_events = [{
-    id: "internal-comment-only",
-    job_id: JOB1,
-    event_type: "ghl.internal_comment",
-    occurred_at: "2026-09-04T00:00:00.000Z",
-    direction: "internal",
-  }];
+Deno.test("coverage does not count internal GHL notes as client conversation", async () => {
+  for (const eventType of ["ghl.note_added", "ghl.internal_comment"]) {
+    const t = baseTables();
+    t.ghl_conversation_cache = [];
+    t.inbox_events = [];
+    t.job_events = [];
+    t.business_events = [{
+      id: `internal-only-${eventType}`,
+      job_id: JOB1,
+      event_type: eventType,
+      occurred_at: "2026-09-04T00:00:00.000Z",
+      direction: "internal",
+    }];
 
-  const out = await debtContextCoverage(new URLSearchParams({}), deps(t));
-  const row = out.rows.find((candidate: any) =>
-    candidate.invoice_number === "INV-1419"
-  )!;
-  assertEquals(row.conversation_count, 1);
-  assertEquals(row.conversation_sources, {
-    ghl_cache: 0,
-    inbox: 0,
-    business_events: 1,
-    notes: 0,
-  });
-  assertEquals(row.blockers.includes("conversation_missing"), false);
+    const out = await debtContextCoverage(new URLSearchParams({}), deps(t));
+    const row = out.rows.find((candidate: any) =>
+      candidate.invoice_number === "INV-1419"
+    )!;
+    assertEquals(row.conversation_count, 0);
+    assertEquals(row.conversation_sources, null);
+    assertEquals(row.blockers.includes("conversation_missing"), true);
+  }
 });
 
 Deno.test("helpers: Xero dates, reference job numbers, queue detail", () => {

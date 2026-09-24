@@ -16070,7 +16070,10 @@ async function getJobConversation(client: any, body: any) {
         subject: r.subject || null,
         source_system: 'inbox',
         source_ref: r.id,
-        ...(reportFaults ? { provider_message_id: r.graph_message_id ? `graph:${r.graph_message_id}` : null } : {}),
+        ...(reportFaults ? {
+          provider_message_id: r.graph_message_id ? `graph:${r.graph_message_id}` : null,
+          mailbox: r.mailbox ?? null,
+        } : {}),
         placed_by: 'old_inbox_matcher',
         label,
         event_copy,
@@ -16166,6 +16169,7 @@ async function getJobConversation(client: any, body: any) {
           ? {
             provider_message_id: r.provider_message_id ?? null,
             privacy_classification: r.privacy_classification ?? null,
+            ...(channel === 'email' ? { payload_mailbox: p.mailbox ?? null } : {}),
           }
           : {}),
       })
