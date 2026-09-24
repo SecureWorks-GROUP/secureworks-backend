@@ -17,6 +17,7 @@
 // one door call per invoice.
 
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
+import { filterPairedLegacyCallRows } from "../_shared/evidence/ghl_call_pair.ts";
 import {
   currentPriceIncGst,
   readJobQuotes,
@@ -53,6 +54,7 @@ const MESSAGE_EVENT_TYPES = [
   "client.sms_in",
   "client.sms_out",
   "client.call_complete",
+  "client.call_logged",
   "client.message_in",
   "supplier.email_in",
   "ghl.note_added",
@@ -685,11 +687,11 @@ async function conversationCountsByJob(
         "business_events",
         () =>
           client.from("business_events").select(
-            "id, job_id, event_type, occurred_at",
+            "id, job_id, event_type, occurred_at, payload",
           ).in("event_type", MESSAGE_EVENT_TYPES).in("job_id", ids),
         warnings,
       );
-      for (const row of rows) {
+      for (const row of await filterPairedLegacyCallRows(client, rows)) {
         const c = get(row.job_id);
         c.business_events += 1;
         const inbound = String(row.event_type).endsWith("_in") ||

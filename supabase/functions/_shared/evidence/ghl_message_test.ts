@@ -455,7 +455,7 @@ Deno.test("T1 N1: an answered inbound call is one client.call_logged row, keyed 
     line: "patio",
     from_line: "774",
     our_number: "+61489267774",
-    provider_source: null,
+    source: null,
     provider_status: "completed",
     transcript_expected: true,
     event_at_source: "provider",
@@ -494,7 +494,8 @@ Deno.test("T1 N3: an outbound call placed in the GHL app keeps its direction, ou
   assertEquals(r.payload.duration_seconds, 67);
   assertEquals(r.payload.call_status, "completed");
   assertEquals(r.payload.by_user, "ERAycY7r6KZ8OA66WQCy");
-  assertEquals(r.payload.provider_source, "app");
+  assertEquals(r.payload.source, "app");
+  assertFalse("provider_source" in r.payload);
   // Outbound: our number is the one rung from.
   assertEquals(r.payload.our_number, "+61489267774");
   assertEquals(r.payload.from_line, "774");

@@ -3,7 +3,7 @@
 //   * Off (the shipped state), missing: today's legacy client.call_complete
 //     row is written, so every call still reaches the job read.
 //   * On: a doorbell only. The post writes nothing itself; one targeted read of
-//     the caller's conversation saves each call item once, through the shared
+//     the contact's newest conversation saves each call item once, through the shared
 //     builder and capture_business_event, as client.call_logged under
 //     ghl:<GHL message id>.
 // Driven through the real handler with the N1 to N3 call items recorded read
@@ -65,10 +65,10 @@ const N1_CALL_COMPLETED = {
   workflowId: "wf-call-completed",
 };
 
-/** A post that does name the conversation (not what GHL sends today; the receiver reads it directly). */
+/** A post naming another conversation; the receiver must still resolve the newest one. */
 const N1_CALL_COMPLETED_WITH_CONVERSATION = {
   ...N1_CALL_COMPLETED,
-  conversationId: CONVERSATION,
+  conversationId: "another-valid-conversation-id",
 };
 
 const onOurLocation = (item: Row) => ({
@@ -210,6 +210,8 @@ Deno.test("T1 flag on: N1's CallCompleted writes nothing itself; one targeted re
   assertEquals((n2.payload as Row).call_status, "voicemail");
   assertEquals(n3.direction, "outbound");
   assertEquals((n3.payload as Row).duration_seconds, 67);
+  assertEquals((n3.payload as Row).source, "app");
+  assertFalse("provider_source" in (n3.payload as Row));
 
   // No Whisper chain and no recording fetch on the doorbell.
   assertEquals(transcribeFetches(r).length, 0);
@@ -254,7 +256,7 @@ Deno.test("T1 flag on: N1's CallCompleted writes nothing itself; one targeted re
   }
 });
 
-Deno.test("T1 flag on: a post that names its conversation is read on it directly, with no search", async () => {
+Deno.test("T1 flag on: a body conversation id cannot bypass resolving the contact's newest conversation", async () => {
   const gh = provider(CALLS);
   const r = await run(
     await post(N1_CALL_COMPLETED_WITH_CONVERSATION, "secret"),
@@ -265,8 +267,11 @@ Deno.test("T1 flag on: a post that names its conversation is read on it directly
   );
   assertEquals(r.res.status, 200);
   assertEquals(captureRows(r).length, 3);
-  assertFalse(gh.seen.includes("/conversations/search"));
+  assert(gh.seen.includes("/conversations/search"));
+  assertFalse(gh.seen.includes("/conversations/another-valid-conversation-id"));
   assertEquals(gh.seen, [
+    `/contacts/${CONTACT}`,
+    "/conversations/search",
     `/contacts/${CONTACT}`,
     `/conversations/${CONVERSATION}`,
     `/conversations/${CONVERSATION}/messages`,

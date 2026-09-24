@@ -415,7 +415,7 @@ function buildCallRow(
     line: line.line,
     from_line: line.from_line,
     our_number: line.our_number,
-    provider_source: text(item.source),
+    source: text(item.source),
     provider_status: text(item.status),
     transcript_expected: transcriptExpected,
     event_at_source: eventAt ? "provider" : "missing",

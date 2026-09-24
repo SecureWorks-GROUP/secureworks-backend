@@ -24,7 +24,7 @@
 // flag. Off, the handler keeps writing today's legacy client.call_complete row,
 // so every call still reaches the job read before live capture. On, the post is
 // a doorbell only: it writes nothing itself and makes the same targeted read of
-// the caller's conversation, so the call arrives once, through the builder,
+// the contact's newest conversation, so the call arrives once, through the builder,
 // as client.call_logged under ghl:<GHL message id> (callCompletedDoorbell).
 //
 // Nothing here logs message text, names, numbers or addresses: ids and codes.
@@ -317,10 +317,10 @@ async function newestConversationId(
 
 /**
  * CallCompleted while live capture is on (slice T1): a doorbell. The post
- * writes nothing itself; one targeted read of the caller's conversation saves
+ * writes nothing itself; one targeted read of the contact's newest conversation saves
  * the call item (and any other missing item) through the builder and writer.
- * A post without a conversation id is resolved to the contact's newest
- * conversation. When the read cannot run, the 15-minute reconciler covers the
+ * The post's conversation id is ignored. When the read cannot run, the
+ * 15-minute reconciler covers the
  * call. The caller has authenticated the post, checked the capture lane and
  * read the flag on. Never throws.
  */
@@ -333,13 +333,10 @@ export async function callCompletedDoorbell(
   },
 ): Promise<CaptureResult> {
   const contactId = safeId(body.contactId);
-  let conversationId = safeId(body.conversationId);
-  let resolveCode: string | null = null;
-  if (contactId && !conversationId) {
-    const newest = await newestConversationId(contactId, deps);
-    conversationId = newest.id;
-    resolveCode = newest.code;
-  }
+  const newest = contactId
+    ? await newestConversationId(contactId, deps)
+    : { id: null, code: null };
+  const conversationId = newest.id;
   const targeted = conversationId
     ? await targetedConversationRead(
       client,
@@ -348,7 +345,7 @@ export async function callCompletedDoorbell(
     )
     : {
       status: "skipped" as const,
-      code: resolveCode ?? "no_conversation",
+      code: newest.code ?? (contactId ? "no_conversation" : "no_contact"),
       seen: 0,
       inserted: 0,
       duplicates: 0,
