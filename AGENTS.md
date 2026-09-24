@@ -663,6 +663,30 @@ many re-stamps happened in the last 24 hours): the hint carries no time and
 every re-run re-checks bucket rows, so an exact count needs the placement
 track to stamp the hint with its time (a named follow-up, not B0).
 
+## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
+
+Since P4 (`20260924213000_context_unlinked_rules.sql`) every caller uses
+`resolve_context_attribution(e)`, a one-line entry into
+`resolve_context_attribution(e, p_preview, p_rules_on)`. With
+`feature_flags.context_unlinked_rules_v1` off (missing or unreadable = off) it
+runs `context_ladder_p1a`, P1a's live body moved verbatim (the contract proves
+it byte for byte); with it on, the P4 rules. A later placement slice (P2, P3,
+P-T) replaces the rules body in the 3-argument function, never the frozen
+P1a copy, and must widen the successor md5 lists and the `\if` re-apply
+guards in the L1, P1a and P1b contracts, and roll P4 back first in L1's
+break-contract, exactly as P4 did for P1a.
+
+The writer check reads `metadata.written_as`, which the insert trigger now
+stamps BEFORE the ladder as well as after: a writer-supplied value never
+survives. The email sender is read through `context_event_identity`
+(`payload.from` included); P1a's copy still reads `payload->>'email'` only,
+which is why email never matched a customer before the flag. P1a's
+two-argument `context_contact_jobs_at` is unchanged and still serves the Luna
+guard and P1b; the rules use the keyed four-argument overload. Preview a
+stored row with `context_attribution_preview(event_id, rules_on)` (writes
+nothing) before trusting a rule change. Contract and named rows:
+`supabase/tests/migration-contracts/20260924213000_context_unlinked_rules/`.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before

@@ -426,6 +426,12 @@ BEGIN
   OR (SELECT proconfig FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure) IS DISTINCT FROM ARRAY['search_path=public, pg_temp']
  THEN RAISE EXCEPTION 'context_reconsider_contact must be SECURITY DEFINER with a fixed search_path'; END IF;
 END $$;
+-- Re-apply is a no-op. P1b's guard reads P1a's ladder body, so the re-apply
+-- runs only while that body is live; a later registered ladder slice (P4
+-- 20260924213000) replaces it and P1b's own three functions stay unchanged.
+SELECT md5(prosrc)='fe50f14f4ab28d4d6c9dbb70bc85e7df' AS p1a_ladder_live
+FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure \gset
+\if :p1a_ladder_live
 CREATE TEMP TABLE p1b_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND p.proname IN ('context_reconsider_contact','context_job_created_reconsider','context_reconsider_eligible');
 \ir ../../../migrations/20260924160000_context_reconsider_contact.sql
@@ -436,3 +442,12 @@ BEGIN
  THEN RAISE EXCEPTION 'P1b re-apply changed a body'; END IF;
 END $$;
 DROP TABLE p1b_before;
+\else
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_contact(text,timestamptz,text,uuid)'::regprocedure)<>'5f9dbe883f0add7a6987f3ed265a08af'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_reconsider_eligible(public.business_events,uuid)'::regprocedure)<>'375857877700389aa8f6f730095b8800'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_job_created_reconsider()'::regprocedure)<>'2e199e27d38730e95bd5f2b0b8a9b165'
+ THEN RAISE EXCEPTION 'P1b: a later slice changed a P1b body'; END IF;
+END $$;
+\endif
