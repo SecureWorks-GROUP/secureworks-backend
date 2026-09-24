@@ -40,6 +40,11 @@ pack revision, evidence, expiry, calendar preview, locked template and route.
 null. Existing arbitrary pack drafts are never promoted into locked templates.
 Missing validation checks remain null, never manufactured passes.
 
+The live server read (`docs/sales-booking-live-availability.md`) now replaces
+`calendar_read` and `commitments` below on every read and every approval
+press; the engine-published values stay under `published_calendar_read`, and
+a fresh engine census only adds holds.
+
 The envelope includes `resource.id` and `booking_flow` version
 `booking-confirm.v1`, with `approval_write:"separate-v1"`. Each matched model
 may publish `validation.availability:{state,occupied_intervals,reason}` where
@@ -290,8 +295,8 @@ JSON `fencing-stratco-marnin.json` and the calendar target in its GO-LIVE.md):
 `owner_visit_not_future`, `owner_visit_spans_days`,
 `owner_visit_day_not_permitted` (Tue and Fri), `owner_visit_window_length`
 (60 to 90 minutes), `owner_visit_window_not_inside_visit`,
-`owner_visit_too_short` (visit ends at least 60 minutes after the latest
-arrival), `owner_visit_outside_hours` (window start at or after 08:00, visit
+`owner_visit_too_short` (visit ends at least 30 minutes after the latest
+arrival: 30 minutes on site, owner's rule of 24 Sep 2026), `owner_visit_outside_hours` (window start at or after 08:00, visit
 end by 16:30), `owner_visit_protected_band` (Tue 13:00 to 15:30 Stratco /
 Canning Vale, including the 30-minute travel buffer).
 
@@ -306,8 +311,11 @@ this lead is mid-press (calendar step); `text_already_in_thread` /
 thread).
 
 Availability, read at the press for the visit's whole Perth day (calendar
-step, and a message with an `offer`). The visit occupies window start minus
-30 minutes to visit end plus 30 minutes:
+step, and a message with an `offer`). The visit runs from window start to
+visit end; a neighbouring GHL booking or open offer needs a gap of the travel
+time between its location and the lead's suburb
+(`sales_booking_travel.ts`, `docs/sales-booking-live-availability.md`), and
+an Outlook event (which carries no location here) needs 30 minutes:
 `owner_calendar_unreadable`; `owner_calendar_unknown` (the STRATCO FENCING
 calendar must be active, list the owner's GHL user, and that user must be the
 one roster entry for marnin@secureworkswa.com.au); `ghl_calendar_unreadable`
@@ -344,7 +352,8 @@ and `hand_sent_texts` / `hand_sent_texts_note`. Each case carries
   "engine_window": null,
   "rulebook": {"days": ["Tue","Fri"], "bookable_dates": ["2026-09-25", "..."],
     "day_start": "08:00", "day_end": "16:30", "window_min_minutes": 60,
-    "window_max_minutes": 90, "visit_minutes": 60, "travel_buffer_minutes": 30,
+    "window_max_minutes": 90, "visit_minutes": 30, "on_site_minutes": 30, "travel_buffer_minutes": 30,
+    "travel": {"version": "straight-line-v1", ...},
     "max_per_day": 6, "protected_bands": [...], "sender": "+61489267776",
     "calendar": {...}, "timezone": "Australia/Perth", "utc_offset": "+08:00"},
   "approvals": [{"approval_id", "step", "state", "reason",

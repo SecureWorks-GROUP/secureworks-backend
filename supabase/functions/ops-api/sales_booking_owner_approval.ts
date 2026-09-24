@@ -37,6 +37,11 @@ import type {
   BookingStep,
 } from "./sales_booking_confirmation.ts";
 import { outlookClashes, type OutlookRead } from "./sales_booking_execute.ts";
+import {
+  SALES_BOOKING_ON_SITE_MINUTES,
+  SALES_BOOKING_TRAVEL_MODEL,
+  salesBookingTravelMinutes,
+} from "./sales_booking_travel.ts";
 
 export const OWNER_APPROVAL_VERSION = "owner-authored-v1";
 const SCHEMA = "scope-booking-approval.v1";
@@ -52,8 +57,10 @@ export const OWNER_OFFER_CENSUS_DAYS = 21;
 /** The Stratco rulebook. Values are the engine's own profile JSON (wiki
  * `harness/ops/skills/secureworks-scope-booking/profiles/fencing-stratco-marnin.json`,
  * commit 55421112) and the calendar target the owner confirmed in that
- * skill's GO-LIVE.md. The Python engine is no longer a runtime; this is its
- * rulebook. Change both together. */
+ * skill's GO-LIVE.md, except `visit_minutes`: the owner's 24 Sep 2026 rule
+ * is 30 minutes on site, with travel between visits computed from their
+ * locations (sales_booking_travel.ts) rather than a fixed buffer. The Python
+ * engine is no longer a runtime; this is its rulebook. Change both together. */
 export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
   profile: "fencing-stratco-marnin",
   resource: "marnin",
@@ -68,7 +75,9 @@ export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
   window_min_minutes: 60,
   window_max_minutes: 90,
   /** Visit length after latest arrival; the visit ends at or after this. */
-  visit_minutes: 60,
+  visit_minutes: SALES_BOOKING_ON_SITE_MINUTES,
+  /** Fixed buffer around a protected band, and the travel allowed when a
+   * location cannot be placed. Visits use computed travel. */
   travel_buffer_minutes: 30,
   max_per_day: 6,
   protected_bands: Object.freeze([
@@ -821,7 +830,14 @@ export async function salesBookingOwnerApprovalAction(args: {
     if (visit) {
       Object.assign(
         checks,
-        await checkOwnerVisitAvailability(visit, row, census, deps),
+        await checkOwnerVisitAvailability(
+          visit,
+          row,
+          census,
+          deps,
+          response.cases,
+          lead.suburb,
+        ),
       );
     }
   }
@@ -877,6 +893,8 @@ async function checkOwnerVisitAvailability(
   row: SalesBookingCase,
   census: SystemOfferCensus,
   deps: OwnerApprovalDeps,
+  workspaceCases: SalesBookingCase[],
+  visitSuburb: string,
 ): Promise<BookingObject> {
   let directory: GhlDirectory;
   try {
@@ -905,24 +923,55 @@ async function checkOwnerVisitAvailability(
     refuse("ghl_calendar_unreadable");
   }
   const events = ghlBusyEvents(batches.flat());
+  const suburbs = new Map(
+    workspaceCases.filter((c) => c.contact_id && c.suburb).map((
+      c,
+    ) => [c.contact_id as string, c.suburb]),
+  );
+  const here = visitSuburb;
+  // The gap a neighbouring booking needs: travel from it before the visit,
+  // travel to it after. An unplaced location falls back to 30 minutes.
+  const needsGap = (
+    itemStart: number,
+    itemEnd: number,
+    location: string | null,
+  ) => {
+    const before = salesBookingTravelMinutes(location, here).minutes;
+    const after = salesBookingTravelMinutes(here, location).minutes;
+    return {
+      clash: overlaps(
+        visit.start - before * 60_000,
+        visit.end + after * 60_000,
+        itemStart,
+        itemEnd,
+      ),
+      travel_minutes: itemEnd <= visit.start ? before : after,
+    };
+  };
+  const eventLocation = (e: BookingObject) =>
+    text(e.address) || suburbs.get(text(e.contactId)) || null;
   const own = events.filter((e) => e.contactId === row.contact_id);
   if (own.length) {
     refuse("contact_already_booked_that_day", {
       events: own.map(eventSummary),
     });
   }
-  const ghlClashes = events.filter((e) =>
-    overlaps(
-      visit.occupiedStart,
-      visit.occupiedEnd,
+  let maxTravel = 0;
+  const ghlClashes = events.flatMap((e) => {
+    const gap = needsGap(
       bookingInstant(e.startTime),
       bookingInstant(e.endTime),
-    )
-  );
+      eventLocation(e),
+    );
+    if (!gap.clash) return [];
+    maxTravel = Math.max(maxTravel, gap.travel_minutes);
+    return [{ ...eventSummary(e), travel_minutes: gap.travel_minutes }];
+  });
   if (ghlClashes.length) {
     refuse("ghl_calendar_clash", {
-      travel_buffer_minutes: RULES.travel_buffer_minutes,
-      events: ghlClashes.map(eventSummary),
+      travel_buffer_minutes: maxTravel,
+      travel_model: SALES_BOOKING_TRAVEL_MODEL.version,
+      events: ghlClashes,
     });
   }
   let outlook: OutlookRead;
@@ -932,15 +981,19 @@ async function checkOwnerVisitAvailability(
     outlook = { ok: false, reason: "outlook_read_failed" };
   }
   if (!outlook.ok) refuse("outlook_unreadable", { reason: outlook.reason });
+  // Outlook rows carry no location here, so each side takes the fallback.
+  const outlookGap = SALES_BOOKING_TRAVEL_MODEL.unknown_location_minutes *
+    60_000;
   const outlookHits = outlookClashes(
     outlook.events,
-    new Date(visit.occupiedStart).toISOString(),
-    new Date(visit.occupiedEnd).toISOString(),
+    new Date(visit.start - outlookGap).toISOString(),
+    new Date(visit.end + outlookGap).toISOString(),
   );
   if (outlookHits.length) {
     refuse("outlook_calendar_clash", {
       mailbox: outlook.mailbox,
-      travel_buffer_minutes: RULES.travel_buffer_minutes,
+      travel_buffer_minutes:
+        SALES_BOOKING_TRAVEL_MODEL.unknown_location_minutes,
       events: outlookHits.map((e) => ({
         subject: e.subject,
         start: e.start,
@@ -955,12 +1008,11 @@ async function checkOwnerVisitAvailability(
       o.end_iso !== visit.end_iso;
   });
   const offerClashes = others.filter((o) =>
-    overlaps(
-      visit.occupiedStart,
-      visit.occupiedEnd,
+    needsGap(
       bookingInstant(o.start_iso),
       bookingInstant(o.end_iso),
-    )
+      suburbs.get(o.contact_id) ?? null,
+    ).clash
   );
   if (offerClashes.length) {
     refuse("system_offer_clash", {
@@ -996,8 +1048,11 @@ async function checkOwnerVisitAvailability(
     },
     outlook: { mailbox: outlook.mailbox, clashes: 0 },
     occupied: {
-      start_iso: perthIso(visit.occupiedStart),
-      end_iso: perthIso(visit.occupiedEnd),
+      start_iso: perthIso(visit.start),
+      end_iso: perthIso(visit.end),
+      on_site_minutes: RULES.visit_minutes,
+      travel: "computed_per_neighbour",
+      travel_model: SALES_BOOKING_TRAVEL_MODEL.version,
       travel_buffer_minutes: RULES.travel_buffer_minutes,
     },
     day_count_with_this_visit: dayCount,
@@ -1046,7 +1101,9 @@ export function ownerRulebookView(now: Date): BookingObject {
     window_min_minutes: RULES.window_min_minutes,
     window_max_minutes: RULES.window_max_minutes,
     visit_minutes: RULES.visit_minutes,
+    on_site_minutes: RULES.visit_minutes,
     travel_buffer_minutes: RULES.travel_buffer_minutes,
+    travel: { ...SALES_BOOKING_TRAVEL_MODEL },
     max_per_day: RULES.max_per_day,
     protected_bands: RULES.protected_bands.map((b) => ({ ...b })),
     sender: RULES.sender,

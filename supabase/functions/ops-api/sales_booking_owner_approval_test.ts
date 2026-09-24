@@ -440,8 +440,11 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
   assertEquals(result.checks.ghl.events_that_day, 1);
   assertEquals(result.checks.day_count_with_this_visit, 2);
   assertEquals(result.checks.occupied, {
-    start_iso: "2026-09-25T08:30:00+08:00",
-    end_iso: "2026-09-25T12:00:00+08:00",
+    start_iso: "2026-09-25T09:00:00+08:00",
+    end_iso: "2026-09-25T11:30:00+08:00",
+    on_site_minutes: 30,
+    travel: "computed_per_neighbour",
+    travel_model: "straight-line-v1",
     travel_buffer_minutes: 30,
   });
   // Diary by user, then only the calendar the owner is on.
@@ -465,6 +468,40 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
     title: "Scope visit: Michael Sample",
     address: "12 Fictional Way, Canning Vale",
   });
+});
+
+Deno.test("owner calendar: the gap a GHL booking needs is travel from where it is", async () => {
+  // The visit (Canning Vale) arrives from 09:00. A booking ending 08:30 in
+  // Canning Vale needs 5 minutes; the same booking in Two Rocks needs far more.
+  const near = deps({
+    ghlEvents: [{
+      id: "ev-near",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:30:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "someone-else",
+      address: "1 Other St, Canning Vale",
+    }],
+  });
+  assert(
+    "dry_run" in
+      await call(near.deps, { owner_input: input("calendar"), dry_run: true }),
+  );
+  const far = deps({
+    ghlEvents: [{
+      id: "ev-far",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:30:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "someone-else",
+      address: "1 Other St, Two Rocks WA 6037",
+    }],
+  });
+  const error = await refusal(
+    call(far.deps, { owner_input: input("calendar"), dry_run: true }),
+    "ghl_calendar_clash",
+  );
+  assert(error.detail?.events[0].travel_minutes > 30);
 });
 
 Deno.test("owner calendar: an Outlook event near the visit clashes and nothing is written", async () => {
@@ -540,7 +577,7 @@ Deno.test("owner calendar rulebook refusals are named", async () => {
       "owner_visit_window_not_inside_visit",
       v({ end_iso: "2026-09-25T10:00:00+08:00" }),
     ],
-    ["owner_visit_too_short", v({ end_iso: "2026-09-25T11:00:00+08:00" })],
+    ["owner_visit_too_short", v({ end_iso: "2026-09-25T10:45:00+08:00" })],
     ["owner_visit_outside_hours", {
       visit: {
         window_start_iso: "2026-09-25T07:30:00+08:00",
@@ -803,7 +840,9 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
     "2026-09-29",
     "2026-10-02",
   ]);
-  assertEquals(owner.rulebook.visit_minutes, 60);
+  assertEquals(owner.rulebook.visit_minutes, 30);
+  assertEquals(owner.rulebook.on_site_minutes, 30);
+  assertEquals(owner.rulebook.travel.version, "straight-line-v1");
   assertEquals(owner.rulebook.calendar.calendar_id, "dEQKVKHthsjSYaen1fiE");
   assertEquals(engine.engine_proposal, true);
   assertEquals(engine.engine_window.start, "2026-09-25T13:00:00+08:00");

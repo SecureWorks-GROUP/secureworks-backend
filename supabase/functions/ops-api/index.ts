@@ -830,6 +830,7 @@ import { applySalesBookingExecutions } from './sales_booking_execution_read.ts'
 import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_execute.ts'
 import { createOwnerApprovalDeps, createSalesBookingExecuteDeps, ownerApprovalReader } from './sales_booking_execute_live.ts'
 import { applyOwnerBooking, OwnerApprovalRefusal } from './sales_booking_owner_approval.ts'
+import { applySalesBookingAvailability, createSalesBookingAvailabilityDeps } from './sales_booking_availability.ts'
 import {
   salesBookingReadAction,
   SalesBookingRequestError,
@@ -5258,9 +5259,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             assembled.resource.resource_id,
             assembled.week_start,
           )
+          // Live availability (sales_booking_availability.ts) replaces the
+          // engine-only calendar_read before approvals and visits compose.
+          const live = await applySalesBookingAvailability(
+            applySalesBookingPackOverlay(assembled, overlay), createSalesBookingAvailabilityDeps(client))
           return json(await applyOwnerBooking(await applySalesBookingVisits(client,
             await applySalesBookingExecutions(client,
-              await applyBookingApprovals(applySalesBookingPackOverlay(assembled, overlay), bookingApprovalStore(client))),
+              await applyBookingApprovals(live, bookingApprovalStore(client))),
             { visit_outcomes_from: sbParam('visit_outcomes_from'), visit_outcomes_to: sbParam('visit_outcomes_to') }),
             ownerApprovalReader(client)))
         } catch (e) {
@@ -5296,7 +5301,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             readWorkspace: async (resource, week_start) => {
               const assembled = await salesBookingReadAction(client, { resource, week_start })
               const overlay = await loadSalesBookingPackOverlay(client, resource, assembled.week_start)
-              return applySalesBookingPackOverlay(assembled, overlay)
+              return await applySalesBookingAvailability(
+                applySalesBookingPackOverlay(assembled, overlay), createSalesBookingAvailabilityDeps(client))
             },
             // Owner-authored approvals (owner_input body): reads only.
             owner: createOwnerApprovalDeps(client),

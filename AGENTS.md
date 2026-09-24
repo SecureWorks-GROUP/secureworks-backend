@@ -3834,7 +3834,13 @@ Read/approval handoff, published availability freshness and ledger/outcome
 composition live in `docs/sales-booking-confirmation-api.md`,
 `sales_booking_confirmation.ts` and `sales_booking_visits.ts`.
 Legacy combined KEEP/CUT stamps never grant either independent calendar or
-exact-message approval. A diary read alone is not person-wide availability.
+exact-message approval. The screen's `calendar_read`, open-offer
+`commitments` and `free_times` are recomputed live on the server at every read
+and press from the person's GHL calendars, GHL blocked time, the diary's
+Outlook rows and the offer census (`sales_booking_availability.ts`,
+`docs/sales-booking-live-availability.md`); an engine pack no longer decides
+them. A visit is 30 minutes on site plus travel from locations
+(`sales_booking_travel.ts`); keep the read and the owner press on that one rule.
 The owner-authored path (`owner_input` body, `sales_booking_owner_approval.ts`,
 "Owner-authored approvals" in that doc) needs no engine publish: it rebuilds
 the snapshot from server truth and checks the Stratco rulebook, GHL, Outlook
