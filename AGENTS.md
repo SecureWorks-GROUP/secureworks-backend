@@ -3683,6 +3683,23 @@ posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook
 proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
+## GHL History Is Loaded As Backfill, Never Asked Of The Model
+
+The M4 history load (`supabase/functions/ghl-history-load`, migration
+`20260925031500`) is manual and dry run unless the body says `"dry_run": false`.
+Its scope is `context_ghl_history_live_jobs()` (captain ruling 24 Sep 2026: live
+statuses and quotes sent in 60 days, never closed jobs) and 100 jobs a Perth
+day, both bounded in SQL. It saves only through `capture_ghl_history_event`,
+which accepts only `capture_mode: backfill` rows naming no job and rests any row
+the ladder sends to review as `unplaced` in the same transaction (X27): never
+save history through `capture_business_event` directly, or it reaches the
+model. Its `action: "link"` writes `jobs.ghl_contact_id` only while null or
+blank, on an exact B0 key match to exactly one GHL contact, with one
+`context_ghl_contact_links` audit row per change (`reverse_ghl_contact_link`
+undoes one). Run the link before the load: the load reads contacts from
+`jobs.ghl_contact_id` only. Calls are skipped by the shared row builder until a
+call writer exists; `retry_skipped_calls` reloads those contacts later.
+
 ## A pg_cron Bearer Is Not The Function's Service Key
 
 pg_cron triggers call edge functions with `Bearer <sw_service_key()>`, a

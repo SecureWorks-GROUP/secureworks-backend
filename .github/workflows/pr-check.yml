@@ -313,6 +313,17 @@ jobs:
             supabase/functions/ghl-message-reconcile/reconcile_test.ts \
             supabase/functions/ghl-message-reconcile/handler_test.ts
 
+      # Slice M4: the one-off GHL history load for live-job contacts (dry run by
+      # default, backfill rows only, resume, the day's job count) and its link
+      # action (a GHL contact on live jobs with none, exact key match to one
+      # contact only), on the design's named rows.
+      - name: Test the GHL history load and link action
+        run: |
+          deno test --allow-read \
+            supabase/functions/ghl-history-load/history_load_test.ts \
+            supabase/functions/ghl-history-load/link_test.ts \
+            supabase/functions/ghl-history-load/handler_test.ts
+
       # Slice B0: the placement keys and token rule (TypeScript twin of the SQL
       # helpers) on the one fixture table, and proof that the migration
       # contract runs the SQL helpers on that same table.
