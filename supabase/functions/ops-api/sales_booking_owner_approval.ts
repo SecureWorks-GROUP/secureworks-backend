@@ -546,6 +546,11 @@ export interface OwnerApprovalDeps {
     startIso: string,
     endIso: string,
   ): Promise<BookingObject[]>;
+  readGhlBlockedSlots(
+    userId: string,
+    startIso: string,
+    endIso: string,
+  ): Promise<BookingObject[]>;
   readOutlook(
     resource: string,
     startIso: string,
@@ -933,6 +938,15 @@ async function checkOwnerVisitAvailability(
     refuse("ghl_calendar_unreadable");
   }
   const events = ghlBusyEvents(batches.flat());
+  let blocked: BookingObject[];
+  try {
+    blocked = ghlBusyEvents(await deps.readGhlBlockedSlots(
+      RULES.calendar.assigned_user_id, dayStart, dayEnd,
+    ));
+  } catch {
+    refuse("ghl_blocked_slots_unreadable");
+  }
+
   let outlook: OutlookRead;
   try {
     outlook = await deps.readOutlook(RULES.resource, dayStart, dayEnd);
@@ -951,7 +965,7 @@ async function checkOwnerVisitAvailability(
     !e.is_cancelled && e.show_as !== "free"
   );
   const intervals = [
-    ...events.map((e) => ({
+    ...[...events, ...blocked].map((e) => ({
       start: bookingInstant(e.startTime),
       end: bookingInstant(e.endTime),
     })),
@@ -984,7 +998,7 @@ async function checkOwnerVisitAvailability(
     itemStart: number,
     itemEnd: number,
     location: string | null,
-    source: "ghl" | "outlook" | "system_offer",
+    source: "ghl" | "ghl_blocked" | "outlook" | "system_offer",
   ) => {
     if (overlaps(visit.start, visit.end, itemStart, itemEnd)) {
       return { clash: true, travel_minutes: 0 };
@@ -1027,12 +1041,15 @@ async function checkOwnerVisitAvailability(
     });
   }
   let maxTravel = 0;
-  const ghlClashes = events.flatMap((e) => {
+  const ghlClashes = [
+    ...events.map((event) => ({ event, source: "ghl" as const })),
+    ...blocked.map((event) => ({ event, source: "ghl_blocked" as const })),
+  ].flatMap(({ event: e, source }) => {
     const gap = needsGap(
       bookingInstant(e.startTime),
       bookingInstant(e.endTime),
       eventLocation(e),
-      "ghl",
+      source,
     );
     if (!gap.clash) return [];
     maxTravel = Math.max(maxTravel, gap.travel_minutes);

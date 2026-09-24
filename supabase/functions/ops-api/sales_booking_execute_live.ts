@@ -326,6 +326,26 @@ export function createOwnerApprovalDeps(
       }));
       return { calendars, users };
     },
+    async readGhlBlockedSlots(userId, startIso, endIso) {
+      const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
+      if (!locationId) throw new Error("location_unconfigured");
+      const query = new URLSearchParams({
+        locationId,
+        userId,
+        startTime: String(Date.parse(startIso)),
+        endTime: String(Date.parse(endIso)),
+      });
+      const body = await ghlRead(
+        `/calendars/blocked-slots?${query.toString()}`,
+      );
+      const rows = body?.events;
+      if (
+        !Array.isArray(rows) ||
+        !rows.every((r) => !!r && typeof r === "object" && !Array.isArray(r)) ||
+        body.nextPage || body.nextPageUrl || body.hasMore || body.error
+      ) throw new Error("ghl_blocked_slots_incomplete");
+      return rows as Obj[];
+    },
     async readGhlEvents(selector, startIso, endIso) {
       const query = new URLSearchParams({
         locationId: locationId(),

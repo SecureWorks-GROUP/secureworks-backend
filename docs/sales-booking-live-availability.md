@@ -144,6 +144,9 @@ Nithin and Khairo already have GHL calendars; no click for them.
 - Wiki profile `fencing-stratco-marnin.json` still says `visit_minutes: 60`.
 
 Approval checks overlap against every busy interval and calculates travel only
-against the immediately preceding and following intervals across GHL, Outlook
-and open offers. An unreadable offer census preserves `calendar_read.state: read`
+against the immediately preceding and following intervals across GHL appointments,
+GHL blocked slots, Outlook and open offers. The owner press re-reads blocked slots
+for that person and day; failed or malformed reads refuse as
+`ghl_blocked_slots_unreadable`. Availability retains neighboring visits outside
+working hours for travel while keeping arrival windows within working hours. An unreadable offer census preserves `calendar_read.state: read`
 and names its failure in `commitments_read`, while withholding both free-time outputs.

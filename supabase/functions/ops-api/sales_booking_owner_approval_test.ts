@@ -161,6 +161,7 @@ function deps(o: Overrides = {}) {
       calls.push(`ghl:${JSON.stringify(selector)}`);
       return Promise.resolve(o.ghlEvents ?? []);
     },
+    readGhlBlockedSlots: () => Promise.resolve([]),
     readOutlook: () => {
       calls.push("outlook");
       return Promise.resolve({
@@ -1357,4 +1358,33 @@ Deno.test("an adjacent open offer supplies travel location after an unknown even
     }),
     dry_run: true,
   }));
+});
+
+Deno.test("owner visits and offers enforce GHL blocked slots and unreadable input", async () => {
+  for (const step of ["calendar", "message"] as const) {
+    const request = { owner_input: input(step, step === "message" ? { offer: FRI } : {}), dry_run: true };
+    for (const blocked of [
+      { startTime: FRI.window_start_iso, endTime: FRI.end_iso },
+      { startTime: "2026-09-25T08:00:00+08:00", endTime: "2026-09-25T08:30:00+08:00", address: "Two Rocks" },
+    ]) {
+      const { deps: d, rows } = deps({
+        readGhlBlockedSlots: (userId, start, end) => {
+          assertEquals(userId, "3S20LGVTjsVYy9vTJ9wM");
+          assertEquals(start, "2026-09-25T00:00:00+08:00");
+          assertEquals(end, "2026-09-26T00:00:00+08:00");
+          return Promise.resolve([{ id: "block", ...blocked }]);
+        },
+      });
+      await refusal(call(d, request), "ghl_calendar_clash");
+      assertEquals(rows.length, 0);
+    }
+    for (const reader of [
+      () => Promise.reject(new Error("unavailable")),
+      () => Promise.resolve([{ startTime: "bad", endTime: "bad" }]),
+    ]) {
+      const { deps: d, rows } = deps({ readGhlBlockedSlots: reader });
+      await refusal(call(d, request), "ghl_blocked_slots_unreadable");
+      assertEquals(rows.length, 0);
+    }
+  }
 });

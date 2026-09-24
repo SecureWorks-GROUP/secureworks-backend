@@ -620,3 +620,21 @@ Deno.test("an unreadable offer census withholds generic and case free times", as
   assertEquals(after.booking_flow!.free_times, null);
   assertEquals(after.cases[0].free_times, null);
 });
+
+Deno.test("travel retains neighboring visits outside working hours", () => {
+  const result = computeSalesBookingAvailability(input({
+    cases: [lead("opp:a", "c-a", "Canning Vale")],
+    events: ok([
+      { id: "before", startTime: "2026-10-02T07:00:00+08:00", endTime: "2026-10-02T08:00:00+08:00", address: "Two Rocks" },
+      { id: "after", startTime: "2026-10-02T16:30:00+08:00", endTime: "2026-10-02T17:30:00+08:00", address: "Two Rocks" },
+    ]),
+  }));
+  const day = result.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02");
+  const travel = salesBookingTravelMinutes("Two Rocks", "Canning Vale").minutes!;
+  assert(travel > 0);
+  assertEquals(day.arrival_windows.length, 1);
+  assertEquals(Date.parse(day.arrival_windows[0].from_iso),
+    Date.parse("2026-10-02T08:00:00+08:00") + travel * 60000);
+  assertEquals(Date.parse(day.arrival_windows[0].to_iso),
+    Date.parse("2026-10-02T16:30:00+08:00") - (travel + 30) * 60000);
+});

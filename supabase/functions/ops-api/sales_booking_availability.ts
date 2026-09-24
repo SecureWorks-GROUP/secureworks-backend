@@ -34,7 +34,6 @@ import {
   systemOfferCensus,
 } from "./sales_booking_owner_approval.ts";
 import { createOwnerApprovalDeps } from "./sales_booking_execute_live.ts";
-import { ghlRead } from "./sales_booking_read.ts";
 import {
   SALES_BOOKING_ON_SITE_MINUTES,
   SALES_BOOKING_TRAVEL_MODEL,
@@ -260,7 +259,7 @@ function arrivalWindowsWithTravelStatus(
   location: string | null,
 ): { windows: ArrivalWindow[]; travel_unknown: boolean } {
   const onSite = SALES_BOOKING_ON_SITE_MINUTES * MINUTE;
-  const items = busy.filter((b) => b.end > dayStart && b.start < dayEnd)
+  const items = [...busy]
     .sort((a, b) => a.start - b.start || a.end - b.end);
   const out: ArrivalWindow[] = [];
   let travelUnknown = false;
@@ -826,25 +825,6 @@ export function createSalesBookingAvailabilityDeps(
     readGhlDirectory: owner.readGhlDirectory,
     readGhlEvents: owner.readGhlEvents,
     readSystemOfferRecords: owner.readSystemOfferRecords,
-    async readGhlBlockedSlots(userId, startIso, endIso) {
-      const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
-      if (!locationId) throw new Error("location_unconfigured");
-      const query = new URLSearchParams({
-        locationId,
-        userId,
-        startTime: String(Date.parse(startIso)),
-        endTime: String(Date.parse(endIso)),
-      });
-      const body = await ghlRead(
-        `/calendars/blocked-slots?${query.toString()}`,
-      );
-      const rows = body?.events;
-      if (
-        !Array.isArray(rows) ||
-        !rows.every((r) => !!r && typeof r === "object" && !Array.isArray(r)) ||
-        body.nextPage || body.nextPageUrl || body.hasMore || body.error
-      ) throw new Error("ghl_blocked_slots_incomplete");
-      return rows as BookingObject[];
-    },
+    readGhlBlockedSlots: owner.readGhlBlockedSlots,
   };
 }
