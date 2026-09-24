@@ -51,7 +51,7 @@ ROLLBACK;
 BEGIN;
 UPDATE public.users SET trade_sees_all_jobs = false
 WHERE id = 'f5000000-0000-4000-8000-000000000003';
-\ir ../../../migrations/20260924230000_users_trade_sees_all_jobs.sql
+\ir ../../../migrations/20260925040000_users_trade_sees_all_jobs.sql
 DO $$
 BEGIN
   IF (SELECT trade_sees_all_jobs FROM public.users WHERE id = 'f5000000-0000-4000-8000-000000000003') THEN

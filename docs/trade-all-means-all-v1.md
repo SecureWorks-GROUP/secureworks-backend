@@ -269,7 +269,7 @@ surface, when only Esther was meant to.
 
 | Tier | Grant | Gets |
 |---|---|---|
-| **See-everything** | `users.trade_sees_all_jobs = true` (new column, migration `20260924230000`). Target membership: Shaun, Marnin, Jan, Esther (see "Rollout" below for how it gets there). | Every job, every category, full history, on every surface — including new allocations as they happen. |
+| **See-everything** | `users.trade_sees_all_jobs = true` (new column, migration `20260925040000`). Target membership: Shaun, Marnin, Jan, Esther (see "Rollout" below for how it gets there). | Every job, every category, full history, on every surface — including new allocations as they happen. |
 | **Category manager** | `users.managed_verticals` contains the job's vertical (`_jobVertical`), REGARDLESS OF ROLE. | Full history of every job in the managed categories, on every surface, plus their own allocations outside those categories (never narrower than their personal lane). |
 | **Everyone else** | default. | Only jobs they hold (or held) a non-cancelled, non-ghost `job_assignments` row for — past and present, on every surface **including search**. Never a company-wide or "active-jobs" browse. |
 
@@ -288,7 +288,7 @@ check and `search_all_jobs`' allocated set both exclude it.
 ### What changed in code
 
 - **New column**: `users.trade_sees_all_jobs boolean not null default false`
-  (migration `20260924230000_users_trade_sees_all_jobs.sql`), read by
+  (migration `20260925040000_users_trade_sees_all_jobs.sql`), read by
   `authTrade()` into `TradeAuthContext.seeEverything`.
 - **`_resolveManagerVisibility`** (`index.ts`) — the one resolver `my_jobs`
   (all modes), `trade_calendar`, `my_work_orders`, and `search_all_jobs`'s
@@ -385,14 +385,14 @@ surface routes through, plus end-to-end proof for `search_all_jobs` and
 ### Rollout (two phases)
 
 **Phase 1 — the merge is invisible.** Migration
-`20260924230000_users_trade_sees_all_jobs.sql` adds the column AND, in the same
+`20260925040000_users_trade_sees_all_jobs.sql` adds the column AND, in the same
 apply, sets `trade_sees_all_jobs = true` for every existing user whose role is
 `admin`, `owner` or `ops_manager` (matched by role only, no names or ids). That is
 exactly the set that saw everything under the old role-derived code, so the
 moment the matching `ops-api` deploys nobody loses or gains Trade App visibility.
 The backfill runs only on the apply that creates the column, so it can never
 re-widen a Phase 2 narrowing. Contract:
-`supabase/tests/migration-contracts/20260924230000_users_trade_sees_all_jobs/`.
+`supabase/tests/migration-contracts/20260925040000_users_trade_sees_all_jobs/`.
 
 **Phase 2 — the Captain's rules, a separate Marnin-approved data change, run any
 time after merge.** This is the moment visibility actually changes.
@@ -442,7 +442,7 @@ Step 3, verify with the Step 1 select.
 
 ## Deploy
 
-The schema migration (`20260924230000_users_trade_sees_all_jobs.sql`) applies
+The schema migration (`20260925040000_users_trade_sees_all_jobs.sql`) applies
 before the matching `ops-api` through the standard lane
 (`docs/project-knowledge/EDGE_DEPLOY_LANE.md`); its backfill makes that deploy
 change nobody's visibility. The Phase 2 data change above is a separate,

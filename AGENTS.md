@@ -2628,7 +2628,7 @@ The Trade app is a THREE-TIER model, RE-TIERED 2026-09-24 ("go A"): office role
 visibility are now two separate questions. Tier boundaries:
 see-everything (`users.trade_sees_all_jobs`, a new explicit per-user column —
 NOT role — target membership Shaun/Marnin/Jan/Esther: everything, every
-category, full history, every surface; migration `20260924230000` backfills it
+category, full history, every surface; migration `20260925040000` backfills it
 for every existing admin/owner/ops_manager so the deploy narrows nobody, and a
 separate approved data change narrows the rest), division/category manager
 (`users.managed_verticals` contains the job's vertical, role-independent:
