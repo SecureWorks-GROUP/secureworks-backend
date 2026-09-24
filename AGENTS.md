@@ -3883,11 +3883,11 @@ marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 
 ## Email Capture Sources Are Data; The Old Poller Is Pinned
 
-`monitored_mailboxes` (EM1, `20260924213000`) is the new Outlook poller's
-source list, behind flag `email_capture_v2` (off until EM-M2). The old
-monitor-inbox path polls only `monitor-inbox/legacy_mailboxes.ts` and must
-never read that table: the table deliberately has no `status` or
-`last_polled_at`, so the pre-EM1 query is refused (contract row E22). Change a
+`monitored_mailboxes` (the T7 draft table, built on by EM1, `20260924213000`)
+is the new Outlook poller's source list, behind flag `email_capture_v2` (off
+until EM-M2). The old monitor-inbox path polls only
+`monitor-inbox/legacy_mailboxes.ts` and must never read that table: EM1 drops
+its `last_polled_at`, so the pre-EM1 query is refused (contract row E22). Change a
 source only through ops-api `set_monitored_mailbox` (server key or a company
 admin/owner, actor recorded); add or remove one by migration. Email run rows
 are `outlook_<source_key>`, `outlook_sweep_<source_key>`,

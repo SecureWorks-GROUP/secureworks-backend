@@ -3,28 +3,39 @@
 --
 -- The first email slice. It adds the data the new mail poller (EM2) will read
 -- and the status block the CIO desk will watch. Nothing reads mail
--- differently: flag email_capture_v2 is created OFF, no poller reads the new
--- table, and the old monitor-inbox path is pinned to its own hard-coded list
--- (see the note on the old path below).
+-- differently: flag email_capture_v2 is created OFF, no poller reads the
+-- source list yet, and the old monitor-inbox path is pinned to its own
+-- hard-coded list (see the note on the old path below).
 --
---   1. monitored_mailboxes: one row per Outlook source (user mailbox or M365
---      group). Seeded with the captain's list of 24 Sep 2026: user mailboxes
---      marnin@, jan@, nithin@, shaun@, admin@, khairo@; groups patios@,
---      fencing@, finance@, approvals@ (Plans and Approvals, council plans)
---      and ses@, all enabled; info@, sales@ and plans@ disabled and
---      pending_review until their delivery is located (email.md P1, gate
---      G-EM-MAILBOX). A source is polled only when enabled; enabling needs
---      state 'active'. owner_privacy and files_supplier_pdfs carry email.md's
---      two per-mailbox rules (D-EM3, §7 step 8) so EM2 reads them from here.
---      RLS on, no policies, revoked from PUBLIC, anon, authenticated;
---      service_role may read. Written only by this migration's seed and by
---      set_monitored_mailbox().
+--   1. monitored_mailboxes, which already exists in production: the 2 May T7
+--      draft (ledger 20260503063735), 17 columns, EMPTY, no seed, no trigger,
+--      view, function or cron reading it. EM1 owns it from here (INTEGRATION
+--      §2) and builds on it:
+--        - adds source_key, kind, owner_privacy, files_supplier_pdfs, note,
+--          updated_by;
+--        - widens the scope_label rule with approvals (Plans and Approvals,
+--          council plans) and ses;
+--        - enabled now defaults to false, and a source may be enabled only in
+--          status 'active'; selected = enabled and status 'active';
+--        - drops last_polled_at and its index (the draft's per-mailbox cursor;
+--          the cursor lives in context_capture_runs), which also makes the
+--          old path's query fail (below);
+--        - revokes every grant from PUBLIC, anon and authenticated and drops
+--          the draft's authenticated_select policy (X32); service_role reads.
+--      Seeded with the captain's list of 24 Sep 2026: user mailboxes marnin@,
+--      jan@, nithin@, shaun@, admin@, khairo@; groups patios@, fencing@,
+--      finance@, approvals@ and ses@, all enabled; info@, sales@ and plans@
+--      disabled and pending_review until their delivery is located (email.md
+--      P1, gate G-EM-MAILBOX). owner_privacy and files_supplier_pdfs carry
+--      email.md's two per-mailbox rules (D-EM3, §7 step 8). The draft's other
+--      columns (poll_interval_seconds, graph_*, last_message_at, last_error*,
+--      privacy_classification) are kept and not read by EM code.
 --   2. monitored_mailbox_changes: the receipt of every change made through
---      set_monitored_mailbox(), with the actor (X31). Append-only; same access
---      rule. Ids, flags and a short reason only.
---   3. set_monitored_mailbox(address, enabled, state, reason, actor): the one
+--      set_monitored_mailbox(), with the actor (X31). Append-only; RLS on, no
+--      policies, revoked from PUBLIC, anon, authenticated; service_role reads.
+--   3. set_monitored_mailbox(email, enabled, status, reason, actor): the one
 --      writer after the seed (ops-api action set_monitored_mailbox). It
---      changes only enabled and state of an existing row, records updated_by
+--      changes only enabled and status of an existing row, records updated_by
 --      and a receipt, and never adds or removes a source (a migration does).
 --   4. inbox_events gains the sighting columns EM2 writes: business_event_id
 --      (the one evidence row this mailbox copy is), provider_message_id (its
@@ -51,44 +62,60 @@
 -- the messages the poll missed in counts.sweep_misses.
 --
 -- The old path (email.md finding 15, review M14). The deployed monitor-inbox
--- reads monitored_mailboxes when it has enabled rows (select id, email,
--- enabled, status, last_polled_at ... enabled = true, status <> 'paused') and
--- would then poll every seeded address as a user mailbox. The same change set
--- pins that code to its hard-coded list, and this table deliberately has
--- neither a status nor a last_polled_at column (the cursor lives in
--- context_capture_runs, the review state is 'state'), so the old query is
--- refused by the database and falls back to the hard-coded list even in the
--- minutes between this migration and the function deploy. The contract test
--- runs that exact query and requires it to fail.
+-- reads monitored_mailboxes (select id, email, enabled, status,
+-- last_polled_at ... enabled = true, status <> 'paused') and, once it has
+-- rows, polls every one of them as a user mailbox instead of its own list:
+-- the seeded groups and khairo@ would be polled by the wrong path. The same
+-- change set pins that code to its hard-coded list, and this migration drops
+-- last_polled_at, so the old query is refused by the database and falls back
+-- to the hard-coded list even in the minutes between this migration and the
+-- function deploy. The contract runs that exact query and requires it to fail.
 --
--- No switch is turned on. No existing row is written or rewritten, except
--- that a missing email_capture_v2 flag row is inserted as off. No grant,
--- policy or view is added for anon or authenticated.
+-- No switch is turned on. The only rows written are the seed into the empty
+-- table and a missing email_capture_v2 flag row, inserted as off. No grant,
+-- policy or view is added for anon or authenticated; theirs are removed.
 --
 -- Built on the LIVE production definitions, read from production 24 Sep 2026
--- (read-only): see the guard below. The guard refuses unless each object is
--- still that pre-image or already this migration's result (a re-apply).
--- Anything else is a live change nobody read, and replacing it would silently
--- revert it.
+-- (read-only transaction, rolled back):
+--   context_email_capture_status()  md5(prosrc) 155104bfb08b8b3c2f98bdec089d4ee4 (F1b stub)
+--   context_pipeline_status()       md5(prosrc) 9183a756c0d4b3881507656751c0d422 (F1b; not replaced)
+--   monitored_mailboxes: the T7 draft's 17 columns, 0 rows, checks on
+--     scope_label (owner admin finance sales patios fencing ops other),
+--     status (active paused discovered_in_code pending_review),
+--     privacy_classification and poll_interval_seconds; unique email; policies
+--     service_role_all and authenticated_select; no trigger or dependent view
+--   monitored_mailbox_changes, set_monitored_mailbox(): absent
+--   inbox_events: 19 columns incl. graph_message_id, mailbox, spine_event_id;
+--     RLS on, policy service_role_all; none of the three sighting columns
+--   business_events.id uuid primary key; feature_flags(flag_name unique), no
+--     email_capture_v2 row; context_capture_runs with window_end_id (F1b)
+--   ledger: nothing after 20260924201000
+-- The guard refuses unless each object is still that pre-image or already
+-- this migration's result (a re-apply). Anything else is a live change nobody
+-- read, and replacing it would silently revert it.
 --
 -- Rollback: supabase/rollbacks/20260924213000_context_email_capture_config_down.sql
--- restores F1b's stub (md5 checked), drops the functions, the two tables and
--- the three inbox_events columns, and deletes the flag row while it is still
--- off. It refuses while the flag is on or a sighting column holds a value.
+-- restores F1b's stub (md5 checked) and the draft table exactly as it was
+-- (empty, its columns, checks, grants and policies), drops the receipts
+-- table, the functions and the three inbox_events columns, and deletes the
+-- flag row while it is still off. It refuses while the flag is on, a sighting
+-- column holds a value, or a receipt exists.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
 -- 0. Pre-image guard. Reports every mismatch at once.
 DO $guard$
-DECLARE problems text[]:='{}'; live text; x record; cols text; t text;
+DECLARE problems text[]:='{}'; live text; x record; cols text; t text; reapply boolean; n bigint;
+ draft_cols constant text:='id:uuid:t,org_id:uuid:f,email:text:t,display_name:text:f,scope_label:text:t,enabled:boolean:t,status:text:t,poll_interval_seconds:integer:t,privacy_classification:text:t,graph_subscription_id:text:f,graph_app_credential_id:text:f,last_polled_at:timestamp with time zone:f,last_message_at:timestamp with time zone:f,last_error:text:f,last_error_at:timestamp with time zone:f,created_at:timestamp with time zone:t,updated_at:timestamp with time zone:t';
+ em1_cols constant text:='id:uuid:t,org_id:uuid:f,email:text:t,display_name:text:f,scope_label:text:t,enabled:boolean:t,status:text:t,poll_interval_seconds:integer:t,privacy_classification:text:t,graph_subscription_id:text:f,graph_app_credential_id:text:f,last_message_at:timestamp with time zone:f,last_error:text:f,last_error_at:timestamp with time zone:f,created_at:timestamp with time zone:t,updated_at:timestamp with time zone:t,source_key:text:t,kind:text:t,owner_privacy:boolean:t,files_supplier_pdfs:boolean:t,note:text:f,updated_by:text:t';
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: F1b's stub, or this migration's body.
   ('public.context_email_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','39f700ff23752f161c2215ecc500ece8'],false),
   -- New: absent, or already this migration's body.
   ('public.context_email_capture_policy()',ARRAY['ae811e23b69cc7ea382ca727d1b61b39'],true),
-  ('public.set_monitored_mailbox(text,boolean,text,text,text)',ARRAY['1c06b0e19359e747c29b921ae7145ac8'],true),
-  ('public.context_email_capture_status_at(timestamptz)',ARRAY['3e6866177bdda5f89305aff50206d01d'],true)
+  ('public.set_monitored_mailbox(text,boolean,text,text,text)',ARRAY['490a637f9ea0da6aae196e9ce1aeaf5d'],true),
+  ('public.context_email_capture_status_at(timestamptz)',ARRAY['5cd6a81919fa414ca4077093664e1172'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
@@ -103,25 +130,53 @@ BEGIN
                     coalesce(to_regprocedure('public.context_email_capture_status_at(timestamptz)'),0),
                     coalesce(to_regprocedure('public.context_email_capture_status()'),0));
  IF cols IS NOT NULL THEN problems:=problems||format('unexpected overloads: %s',cols); END IF;
- -- The two new tables: absent, or exactly this migration's columns.
- FOR x IN SELECT * FROM (VALUES
-  ('monitored_mailboxes','address:text,source_key:text,kind:text,enabled:boolean,state:text,owner_privacy:boolean,files_supplier_pdfs:boolean,note:text,created_at:timestamp with time zone,updated_at:timestamp with time zone,updated_by:text'),
-  ('monitored_mailbox_changes','id:bigint,address:text,changed_at:timestamp with time zone,actor:text,reason:text,before:jsonb,after:jsonb')
- ) AS t(tbl,want) LOOP
-  IF to_regclass('public.'||x.tbl) IS NOT NULL THEN
-   SELECT string_agg(a.attname||':'||format_type(a.atttypid,a.atttypmod),',' ORDER BY a.attnum) INTO cols
-   FROM pg_attribute a WHERE a.attrelid=('public.'||x.tbl)::regclass AND a.attnum>0 AND NOT a.attisdropped;
-   IF cols IS DISTINCT FROM x.want THEN problems:=problems||format('%s exists with columns %s',x.tbl,cols); END IF;
+ -- monitored_mailboxes: the live T7 draft, empty; or this migration's shape.
+ IF to_regclass('public.monitored_mailboxes') IS NULL THEN
+  problems:=problems||'monitored_mailboxes missing (production has the T7 draft table)'::text;
+ ELSE
+  -- Compared as sets: a column re-added by a rollback sits last.
+  SELECT string_agg(a.attname||':'||format_type(a.atttypid,a.atttypmod)||':'||CASE WHEN a.attnotnull THEN 't' ELSE 'f' END,',' ORDER BY a.attname) INTO cols
+  FROM pg_attribute a WHERE a.attrelid='public.monitored_mailboxes'::regclass AND a.attnum>0 AND NOT a.attisdropped;
+  reapply:=cols=(SELECT string_agg(c,',' ORDER BY split_part(c,':',1)) FROM unnest(string_to_array(em1_cols,',')) c);
+  IF NOT reapply THEN
+   IF cols IS DISTINCT FROM (SELECT string_agg(c,',' ORDER BY split_part(c,':',1)) FROM unnest(string_to_array(draft_cols,',')) c) THEN problems:=problems||format('monitored_mailboxes columns are %s',cols); END IF;
+   EXECUTE 'SELECT count(*) FROM public.monitored_mailboxes' INTO n;
+   IF n<>0 THEN problems:=problems||format('monitored_mailboxes is not empty (%s rows); someone seeded it',n); END IF;
+   -- The draft's checks, one per column, and its unique email.
+   SELECT string_agg(a.attname,',' ORDER BY a.attname) INTO t FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey)
+   WHERE c.conrelid='public.monitored_mailboxes'::regclass AND c.contype='c';
+   IF t IS DISTINCT FROM 'poll_interval_seconds,privacy_classification,scope_label,status' THEN problems:=problems||format('monitored_mailboxes checks are on %s',t); END IF;
+   IF NOT EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid='public.monitored_mailboxes'::regclass AND c.contype='u'
+     AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='email')]::int2[])
+   THEN problems:=problems||'monitored_mailboxes has no unique email'::text; END IF;
+   SELECT pg_get_constraintdef(c.oid) INTO t FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey)
+   WHERE c.conrelid='public.monitored_mailboxes'::regclass AND c.contype='c' AND a.attname='status';
+   IF t IS NULL OR t !~ 'active' OR t !~ 'pending_review' THEN problems:=problems||format('monitored_mailboxes status check is %s',t); END IF;
+   SELECT string_agg(policyname::text,',' ORDER BY policyname) INTO t FROM pg_policies WHERE schemaname='public' AND tablename='monitored_mailboxes';
+   IF t IS DISTINCT FROM 'authenticated_select,service_role_all' THEN problems:=problems||format('monitored_mailboxes policies are %s',t); END IF;
+   IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.monitored_mailboxes'::regclass AND NOT tgisinternal)
+   THEN problems:=problems||'monitored_mailboxes has a trigger'::text; END IF;
+   IF EXISTS(SELECT 1 FROM pg_depend d JOIN pg_rewrite rw ON rw.oid=d.objid WHERE d.refobjid='public.monitored_mailboxes'::regclass AND rw.ev_class<>'public.monitored_mailboxes'::regclass)
+   THEN problems:=problems||'a view depends on monitored_mailboxes'::text; END IF;
   END IF;
- END LOOP;
+ END IF;
+ -- monitored_mailbox_changes: absent, or this migration's columns.
+ IF to_regclass('public.monitored_mailbox_changes') IS NOT NULL THEN
+  SELECT string_agg(a.attname||':'||format_type(a.atttypid,a.atttypmod),',' ORDER BY a.attnum) INTO cols
+  FROM pg_attribute a WHERE a.attrelid='public.monitored_mailbox_changes'::regclass AND a.attnum>0 AND NOT a.attisdropped;
+  IF cols IS DISTINCT FROM 'id:bigint,email:text,changed_at:timestamp with time zone,actor:text,reason:text,before:jsonb,after:jsonb'
+  THEN problems:=problems||format('monitored_mailbox_changes exists with columns %s',cols); END IF;
+ END IF;
  -- inbox_events: the live table, and the three sighting columns absent or ours.
  IF to_regclass('public.inbox_events') IS NULL THEN problems:=problems||'inbox_events missing'::text; END IF;
  FOR x IN SELECT * FROM (VALUES ('business_event_id','uuid'),('provider_message_id','text'),('folder_kind','text')) AS t(col,typ) LOOP
+  t:=NULL;
   SELECT format_type(a.atttypid,a.atttypmod) INTO t FROM pg_attribute a
   WHERE a.attrelid=to_regclass('public.inbox_events') AND a.attname=x.col AND NOT a.attisdropped;
   IF t IS NOT NULL AND t<>x.typ THEN problems:=problems||format('inbox_events.%s exists as %s',x.col,t); END IF;
  END LOOP;
  -- What this migration reads or references.
+ t:=NULL;
  SELECT format_type(a.atttypid,a.atttypmod) INTO t FROM pg_attribute a
  WHERE a.attrelid=to_regclass('public.business_events') AND a.attname='id' AND NOT a.attisdropped;
  IF t IS DISTINCT FROM 'uuid' THEN problems:=problems||format('business_events.id is %s',coalesce(t,'<missing>')); END IF;
@@ -141,40 +196,91 @@ BEGIN
  END IF;
 END $guard$;
 
--- 1. The source list.
-CREATE TABLE IF NOT EXISTS public.monitored_mailboxes (
- address text PRIMARY KEY,
- source_key text NOT NULL UNIQUE,
- kind text NOT NULL,
- enabled boolean NOT NULL DEFAULT false,
- state text NOT NULL DEFAULT 'pending_review',
- owner_privacy boolean NOT NULL DEFAULT false,
- files_supplier_pdfs boolean NOT NULL DEFAULT false,
- note text,
- created_at timestamptz NOT NULL DEFAULT now(),
- updated_at timestamptz NOT NULL DEFAULT now(),
- updated_by text NOT NULL,
- CONSTRAINT monitored_mailboxes_address CHECK (address=lower(address) AND address ~ '^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$'),
- CONSTRAINT monitored_mailboxes_source_key CHECK (source_key ~ '^[a-z][a-z0-9_]{1,40}$'),
- CONSTRAINT monitored_mailboxes_kind CHECK (kind IN ('user','group','unknown')),
- CONSTRAINT monitored_mailboxes_state CHECK (state IN ('active','pending_review')),
- -- Only a located, reviewed source is ever polled.
- CONSTRAINT monitored_mailboxes_enabled_active CHECK (NOT enabled OR state='active'),
- CONSTRAINT monitored_mailboxes_unknown_pending CHECK (kind<>'unknown' OR state='pending_review'),
- -- The two per-mailbox rules apply to user mailboxes only.
- CONSTRAINT monitored_mailboxes_user_rules CHECK (kind='user' OR NOT (owner_privacy OR files_supplier_pdfs)),
- CONSTRAINT monitored_mailboxes_note CHECK (note IS NULL OR length(note) BETWEEN 1 AND 300),
- CONSTRAINT monitored_mailboxes_updated_by CHECK (updated_by ~ '^[A-Za-z0-9_.:@-]{1,128}$')
-);
+-- 1. The source list: the live T7 draft table, built on.
+-- The draft's per-mailbox cursor goes (the cursor lives in context_capture_runs);
+-- with it goes the column the old monitor-inbox query selects.
+DROP INDEX IF EXISTS public.idx_monitored_mailboxes_enabled;
+ALTER TABLE public.monitored_mailboxes DROP COLUMN IF EXISTS last_polled_at;
+-- A source is never selected by default.
+ALTER TABLE public.monitored_mailboxes ALTER COLUMN enabled SET DEFAULT false;
+ALTER TABLE public.monitored_mailboxes
+ ADD COLUMN IF NOT EXISTS source_key text,
+ ADD COLUMN IF NOT EXISTS kind text,
+ ADD COLUMN IF NOT EXISTS owner_privacy boolean NOT NULL DEFAULT false,
+ ADD COLUMN IF NOT EXISTS files_supplier_pdfs boolean NOT NULL DEFAULT false,
+ ADD COLUMN IF NOT EXISTS note text,
+ ADD COLUMN IF NOT EXISTS updated_by text;
+-- scope_label gains approvals (Plans and Approvals) and ses. The draft's check
+-- has a generated name, so it is found by its column.
+DO $$
+DECLARE c record;
+BEGIN
+ FOR c IN SELECT con.conname FROM pg_constraint con
+  WHERE con.conrelid='public.monitored_mailboxes'::regclass AND con.contype='c'
+   AND con.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=con.conrelid AND attname='scope_label')]::int2[]
+   AND con.conname<>'monitored_mailboxes_scope_label_em1' LOOP
+  EXECUTE format('ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT %I',c.conname);
+ END LOOP;
+END $$;
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_scope_label_em1;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_scope_label_em1
+ CHECK (scope_label IN ('owner','admin','finance','sales','patios','fencing','ops','other','approvals','ses'));
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_email_format;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_email_format
+ CHECK (email=lower(email) AND email ~ '^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$');
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_source_key;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_source_key CHECK (source_key ~ '^[a-z][a-z0-9_]{1,40}$');
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_source_key_unique;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_source_key_unique UNIQUE (source_key);
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_kind;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_kind CHECK (kind IN ('user','group','unknown'));
+-- Only a located, reviewed source is ever selected.
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_enabled_active;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_enabled_active CHECK (NOT enabled OR status='active');
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_unknown_pending;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_unknown_pending CHECK (kind<>'unknown' OR status='pending_review');
+-- The two per-mailbox rules apply to user mailboxes only.
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_user_rules;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_user_rules CHECK (kind='user' OR NOT (owner_privacy OR files_supplier_pdfs));
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_note;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_note CHECK (note IS NULL OR length(note) BETWEEN 1 AND 300);
+ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_updated_by;
+ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_updated_by CHECK (updated_by ~ '^[A-Za-z0-9_.:@-]{1,128}$');
+
+-- The captain's list, 24 Sep 2026. Re-apply leaves existing rows untouched.
+INSERT INTO public.monitored_mailboxes(email,source_key,kind,enabled,status,scope_label,privacy_classification,owner_privacy,files_supplier_pdfs,note,updated_by) VALUES
+ ('marnin@secureworkswa.com.au','marnin','user',true,'active','owner','restricted_pii',true,true,'Owner mailbox.','migration:20260924213000'),
+ ('jan@secureworkswa.com.au','jan','user',true,'active','owner','restricted_pii',true,true,'Owner mailbox.','migration:20260924213000'),
+ ('nithin@secureworkswa.com.au','nithin','user',true,'active','sales','restricted_pii',false,true,'Sales, patios.','migration:20260924213000'),
+ ('shaun@secureworkswa.com.au','shaun','user',true,'active','ops','restricted_pii',false,true,'Operations.','migration:20260924213000'),
+ ('admin@secureworkswa.com.au','admin','user',true,'active','admin','restricted_pii',false,true,'Shared admin mailbox.','migration:20260924213000'),
+ ('khairo@secureworkswa.com.au','khairo','user',true,'active','sales','restricted_pii',false,false,'Sales, fencing. Not read by the old path. No PDF filing until private storage (F-EM6).','migration:20260924213000'),
+ ('patios@secureworkswa.com.au','patios','group',true,'active','patios','staff_only',false,false,'Patios group.','migration:20260924213000'),
+ ('fencing@secureworkswa.com.au','fencing','group',true,'active','fencing','staff_only',false,false,'Fencing group.','migration:20260924213000'),
+ ('finance@secureworkswa.com.au','finance','group',true,'active','finance','staff_only',false,false,'Supplier bills, remittances and delivery disputes.','migration:20260924213000'),
+ ('approvals@secureworkswa.com.au','approvals','group',true,'active','approvals','staff_only',false,false,'Plans and Approvals: council and certifier mail.','migration:20260924213000'),
+ ('ses@secureworkswa.com.au','ses','group',true,'active','ses','staff_only',false,false,'SES make-safe intake group (captain 24 Sep). The make-safe intake pipeline keeps its own read.','migration:20260924213000'),
+ ('info@secureworkswa.com.au','info','unknown',false,'pending_review','other','staff_only',false,false,'Named to customers; delivery not located (email.md P1).','migration:20260924213000'),
+ ('sales@secureworkswa.com.au','sales','unknown',false,'pending_review','sales','staff_only',false,false,'Named to customers; delivery not located (email.md P1).','migration:20260924213000'),
+ ('plans@secureworkswa.com.au','plans','unknown',false,'pending_review','approvals','staff_only',false,false,'Named to customers; may deliver to approvals@. Not located (email.md P1).','migration:20260924213000')
+ON CONFLICT (email) DO NOTHING;
+ALTER TABLE public.monitored_mailboxes
+ ALTER COLUMN source_key SET NOT NULL,
+ ALTER COLUMN kind SET NOT NULL,
+ ALTER COLUMN updated_by SET NOT NULL;
+
+-- Access (X32): RLS on; nothing for PUBLIC, anon or authenticated; service_role
+-- reads, and writes only through set_monitored_mailbox().
 ALTER TABLE public.monitored_mailboxes ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS authenticated_select ON public.monitored_mailboxes;
 REVOKE ALL ON TABLE public.monitored_mailboxes FROM PUBLIC,anon,authenticated,service_role;
 GRANT SELECT ON TABLE public.monitored_mailboxes TO service_role;
 COMMENT ON TABLE public.monitored_mailboxes IS
- 'Outlook sources for email capture (email.md, slice EM1). One row per user mailbox or M365 group. Polled by the new poller (EM2) only while enabled and flag email_capture_v2 is on; enabling needs state active. Run rows in context_capture_runs are named outlook_<source_key>, outlook_sweep_<source_key>, outlook_history_<source_key>. owner_privacy: human-sent outbound mail is captured only with job evidence (D-EM3). files_supplier_pdfs: supplier PDF filing allowed (email.md §7 step 8). Written only by the EM1 seed and set_monitored_mailbox(). RLS on, no policies; service_role reads.';
+ 'Outlook sources for email capture (email.md; built on the T7 draft by slice EM1). One row per user mailbox or M365 group. Selected for the new poller (EM2) when enabled and status active, and read only while flag email_capture_v2 is on; the old monitor-inbox path never reads it. Run rows in context_capture_runs are named outlook_<source_key>, outlook_sweep_<source_key>, outlook_history_<source_key>. owner_privacy: human-sent outbound mail is captured only with job evidence (D-EM3). files_supplier_pdfs: supplier PDF filing allowed (email.md §7 step 8). poll_interval_seconds, graph_*, last_message_at, last_error*, privacy_classification are T7 draft columns not read by EM code. Written only by the EM1 seed and set_monitored_mailbox(). No grants for anon or authenticated; service_role reads.';
 
 CREATE TABLE IF NOT EXISTS public.monitored_mailbox_changes (
  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
- address text NOT NULL REFERENCES public.monitored_mailboxes(address),
+ email text NOT NULL REFERENCES public.monitored_mailboxes(email),
  changed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  actor text NOT NULL,
  reason text NOT NULL,
@@ -183,30 +289,12 @@ CREATE TABLE IF NOT EXISTS public.monitored_mailbox_changes (
  CONSTRAINT monitored_mailbox_changes_actor CHECK (actor ~ '^[A-Za-z0-9_.:@-]{1,128}$'),
  CONSTRAINT monitored_mailbox_changes_reason CHECK (length(reason) BETWEEN 3 AND 300)
 );
-CREATE INDEX IF NOT EXISTS monitored_mailbox_changes_address ON public.monitored_mailbox_changes(address,changed_at DESC);
+CREATE INDEX IF NOT EXISTS monitored_mailbox_changes_email ON public.monitored_mailbox_changes(email,changed_at DESC);
 ALTER TABLE public.monitored_mailbox_changes ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.monitored_mailbox_changes FROM PUBLIC,anon,authenticated,service_role;
 GRANT SELECT ON TABLE public.monitored_mailbox_changes TO service_role;
 COMMENT ON TABLE public.monitored_mailbox_changes IS
- 'Receipt of every change to monitored_mailboxes made through set_monitored_mailbox(): who (actor, INTEGRATION X31), when, why, and enabled/state before and after. Append-only; written only by set_monitored_mailbox(). RLS on, no policies; service_role reads.';
-
--- The captain's list, 24 Sep 2026. Re-apply leaves existing rows untouched.
-INSERT INTO public.monitored_mailboxes(address,source_key,kind,enabled,state,owner_privacy,files_supplier_pdfs,note,updated_by) VALUES
- ('marnin@secureworkswa.com.au','marnin','user',true,'active',true,true,'Owner mailbox.','migration:20260924213000'),
- ('jan@secureworkswa.com.au','jan','user',true,'active',true,true,'Owner mailbox.','migration:20260924213000'),
- ('nithin@secureworkswa.com.au','nithin','user',true,'active',false,true,'Sales, patios.','migration:20260924213000'),
- ('shaun@secureworkswa.com.au','shaun','user',true,'active',false,true,'Operations.','migration:20260924213000'),
- ('admin@secureworkswa.com.au','admin','user',true,'active',false,true,'Shared admin mailbox.','migration:20260924213000'),
- ('khairo@secureworkswa.com.au','khairo','user',true,'active',false,false,'Sales, fencing. Not read by the old path. No PDF filing until private storage (F-EM6).','migration:20260924213000'),
- ('patios@secureworkswa.com.au','patios','group',true,'active',false,false,'Patios group.','migration:20260924213000'),
- ('fencing@secureworkswa.com.au','fencing','group',true,'active',false,false,'Fencing group.','migration:20260924213000'),
- ('finance@secureworkswa.com.au','finance','group',true,'active',false,false,'Supplier bills, remittances and delivery disputes.','migration:20260924213000'),
- ('approvals@secureworkswa.com.au','approvals','group',true,'active',false,false,'Plans and Approvals: council and certifier mail.','migration:20260924213000'),
- ('ses@secureworkswa.com.au','ses','group',true,'active',false,false,'SES make-safe intake group (captain 24 Sep). The make-safe intake pipeline keeps its own read.','migration:20260924213000'),
- ('info@secureworkswa.com.au','info','unknown',false,'pending_review',false,false,'Named to customers; delivery not located (email.md P1).','migration:20260924213000'),
- ('sales@secureworkswa.com.au','sales','unknown',false,'pending_review',false,false,'Named to customers; delivery not located (email.md P1).','migration:20260924213000'),
- ('plans@secureworkswa.com.au','plans','unknown',false,'pending_review',false,false,'Named to customers; may deliver to approvals@. Not located (email.md P1).','migration:20260924213000')
-ON CONFLICT (address) DO NOTHING;
+ 'Receipt of every change to monitored_mailboxes made through set_monitored_mailbox(): who (actor, INTEGRATION X31), when, why, and enabled/status before and after. Append-only; written only by set_monitored_mailbox(). RLS on, no policies; service_role reads.';
 
 -- 2. Sighting columns on inbox_events (written by EM2's poller only).
 ALTER TABLE public.inbox_events
@@ -237,33 +325,33 @@ SELECT 'email_capture_v2',false,'Email capture v2 (email.md): the whole-mailbox 
 WHERE NOT EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name='email_capture_v2');
 
 -- 4. The one writer after the seed.
-CREATE OR REPLACE FUNCTION public.set_monitored_mailbox(p_address text,p_enabled boolean,p_state text,p_reason text,p_actor text)
+CREATE OR REPLACE FUNCTION public.set_monitored_mailbox(p_email text,p_enabled boolean,p_status text,p_reason text,p_actor text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
-DECLARE r public.monitored_mailboxes; addr text:=lower(btrim(coalesce(p_address,''))); why text:=btrim(coalesce(p_reason,''));
- new_enabled boolean; new_state text; before_v jsonb; after_v jsonb;
+DECLARE r public.monitored_mailboxes; addr text:=lower(btrim(coalesce(p_email,''))); why text:=btrim(coalesce(p_reason,''));
+ new_enabled boolean; new_status text; before_v jsonb; after_v jsonb;
 BEGIN
  IF p_actor IS NULL OR p_actor !~ '^[A-Za-z0-9_.:@-]{1,128}$' THEN RAISE EXCEPTION 'monitored_mailbox_actor_invalid'; END IF;
  IF length(why)<3 OR length(why)>300 OR why ~ '[[:cntrl:]]' THEN RAISE EXCEPTION 'monitored_mailbox_reason_invalid'; END IF;
- IF p_state IS NOT NULL AND p_state NOT IN ('active','pending_review') THEN RAISE EXCEPTION 'monitored_mailbox_state_invalid'; END IF;
- IF p_enabled IS NULL AND p_state IS NULL THEN RAISE EXCEPTION 'monitored_mailbox_change_missing'; END IF;
- SELECT * INTO r FROM public.monitored_mailboxes m WHERE m.address=addr FOR UPDATE;
+ IF p_status IS NOT NULL AND p_status NOT IN ('active','pending_review') THEN RAISE EXCEPTION 'monitored_mailbox_status_invalid'; END IF;
+ IF p_enabled IS NULL AND p_status IS NULL THEN RAISE EXCEPTION 'monitored_mailbox_change_missing'; END IF;
+ SELECT * INTO r FROM public.monitored_mailboxes m WHERE m.email=addr FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'monitored_mailbox_unknown'; END IF;
  new_enabled:=coalesce(p_enabled,r.enabled);
- new_state:=coalesce(p_state,r.state);
- IF new_state='pending_review' AND p_enabled IS NULL THEN new_enabled:=false; END IF;
- IF new_enabled AND new_state<>'active' THEN RAISE EXCEPTION 'monitored_mailbox_enable_requires_active'; END IF;
- IF r.kind='unknown' AND new_state<>'pending_review' THEN RAISE EXCEPTION 'monitored_mailbox_kind_unknown'; END IF;
- before_v:=jsonb_build_object('enabled',r.enabled,'state',r.state);
- after_v:=jsonb_build_object('enabled',new_enabled,'state',new_state);
+ new_status:=coalesce(p_status,r.status);
+ IF new_status<>'active' AND p_enabled IS NULL THEN new_enabled:=false; END IF;
+ IF new_enabled AND new_status<>'active' THEN RAISE EXCEPTION 'monitored_mailbox_enable_requires_active'; END IF;
+ IF r.kind='unknown' AND new_status<>'pending_review' THEN RAISE EXCEPTION 'monitored_mailbox_kind_unknown'; END IF;
+ before_v:=jsonb_build_object('enabled',r.enabled,'status',r.status);
+ after_v:=jsonb_build_object('enabled',new_enabled,'status',new_status);
  IF before_v=after_v THEN
-  RETURN jsonb_build_object('outcome','unchanged','address',r.address,'enabled',r.enabled,'state',r.state);
+  RETURN jsonb_build_object('outcome','unchanged','email',r.email,'enabled',r.enabled,'status',r.status);
  END IF;
- UPDATE public.monitored_mailboxes m SET enabled=new_enabled,state=new_state,updated_at=clock_timestamp(),updated_by=p_actor WHERE m.address=r.address;
- INSERT INTO public.monitored_mailbox_changes(address,actor,reason,before,after) VALUES(r.address,p_actor,why,before_v,after_v);
- RETURN jsonb_build_object('outcome','updated','address',r.address,'enabled',new_enabled,'state',new_state,'before',before_v);
+ UPDATE public.monitored_mailboxes m SET enabled=new_enabled,status=new_status,updated_at=clock_timestamp(),updated_by=p_actor WHERE m.email=r.email;
+ INSERT INTO public.monitored_mailbox_changes(email,actor,reason,before,after) VALUES(r.email,p_actor,why,before_v,after_v);
+ RETURN jsonb_build_object('outcome','updated','email',r.email,'enabled',new_enabled,'status',new_status,'before',before_v);
 END $$;
 COMMENT ON FUNCTION public.set_monitored_mailbox(text,boolean,text,text,text) IS
- 'The one writer of monitored_mailboxes after the EM1 seed (ops-api set_monitored_mailbox). Changes enabled and/or state of an existing source, records updated_by and a monitored_mailbox_changes receipt; never adds or removes a source. Setting pending_review without naming enabled also disables. Refusal codes: monitored_mailbox_actor_invalid, monitored_mailbox_reason_invalid, monitored_mailbox_state_invalid, monitored_mailbox_change_missing, monitored_mailbox_unknown, monitored_mailbox_enable_requires_active, monitored_mailbox_kind_unknown.';
+ 'The one writer of monitored_mailboxes after the EM1 seed (ops-api set_monitored_mailbox). Changes enabled and/or status (active, pending_review) of an existing source, records updated_by and a monitored_mailbox_changes receipt; never adds or removes a source. Setting a status other than active without naming enabled also disables. Refusal codes: monitored_mailbox_actor_invalid, monitored_mailbox_reason_invalid, monitored_mailbox_status_invalid, monitored_mailbox_change_missing, monitored_mailbox_unknown, monitored_mailbox_enable_requires_active, monitored_mailbox_kind_unknown.';
 
 -- 5. Health: policy and the status block.
 CREATE OR REPLACE FUNCTION public.context_email_capture_policy() RETURNS jsonb
@@ -329,11 +417,11 @@ BEGIN
  IF sweep_at>now_time THEN sweep_at:=((date_trunc('day',now_time AT TIME ZONE tz)-interval '1 day'+(policy->>'sweep_local_time')::time) AT TIME ZONE tz); END IF;
  sweep_due:=now_time>=sweep_at+sweep_grace;
 
- FOR m IN SELECT * FROM public.monitored_mailboxes ORDER BY array_position(ARRAY['user','group','unknown'],kind),address LOOP
+ FOR m IN SELECT * FROM public.monitored_mailboxes ORDER BY array_position(ARRAY['user','group','unknown'],kind),email LOOP
   n_sources:=n_sources+1;
-  polled:=m.enabled AND m.state='active';
+  polled:=m.enabled AND m.status='active';
   IF polled THEN n_polled:=n_polled+1; END IF;
-  IF m.state='pending_review' THEN n_pending:=n_pending+1; END IF;
+  IF m.status='pending_review' THEN n_pending:=n_pending+1; END IF;
   poll_src:='outlook_'||m.source_key; sweep_src:='outlook_sweep_'||m.source_key; hist_src:='outlook_history_'||m.source_key;
   SELECT coalesce(array_agg(c ORDER BY c.started_at DESC),'{}') INTO last_runs FROM (
    SELECT * FROM public.context_capture_runs r WHERE r.source=poll_src AND r.status<>'running' ORDER BY r.started_at DESC LIMIT greatest(failed_n,backlog_n)) c;
@@ -359,31 +447,31 @@ BEGIN
   sweep:=jsonb_build_object('run_source',sweep_src,'last_started_at',last_sweep.started_at,'last_status',last_sweep.status,
    'last_error_code',last_sweep.error_code,'finished_since_last_0200',swept,'sweep_misses',misses);
   hist:=jsonb_build_object('run_source',hist_src,'last_started_at',last_hist.started_at,'last_status',last_hist.status,'last_error_code',last_hist.error_code);
-  sources:=sources||jsonb_build_array(jsonb_build_object('address',m.address,'source_key',m.source_key,'kind',m.kind,
-   'enabled',m.enabled,'state',m.state,'selected',polled,'owner_privacy',m.owner_privacy,'files_supplier_pdfs',m.files_supplier_pdfs,
+  sources:=sources||jsonb_build_array(jsonb_build_object('email',m.email,'source_key',m.source_key,'kind',m.kind,
+   'enabled',m.enabled,'status',m.status,'selected',polled,'owner_privacy',m.owner_privacy,'files_supplier_pdfs',m.files_supplier_pdfs,
    'poll',poll,'sweep',sweep,'history',hist));
   IF alarms_active AND polled THEN
    IF (cardinality(last_runs)>=failed_n AND n_failed=failed_n) THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',(last_runs[failed_n]).started_at,
-     'source',m.address,'reason','failed_last_runs','error_code',(last_runs[1]).error_code,
+     'source',m.email,'reason','failed_last_runs','error_code',(last_runs[1]).error_code,
      'what_to_do','This mailbox failed its last polls. Check the Microsoft Graph credentials and the app''s permission on this mailbox or group.'));
    ELSIF NOT recent_finish AND (since IS NULL OR since<=now_time-no_run) THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',coalesce((last_runs[1]).finished_at,since),
-     'source',m.address,'reason','no_recent_run',
+     'source',m.email,'reason','no_recent_run',
      'what_to_do','No poll of this mailbox has finished in the last 15 minutes. Check that the monitor-inbox cron job runs and that the function is not failing.'));
    END IF;
    IF cardinality(last_runs)>=backlog_n AND n_backlog=backlog_n THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_backlog','severity','warning','since',(last_runs[backlog_n]).started_at,
-     'source',m.address,'what_to_do','This mailbox has had more mail than one poll reads for three polls running. It will catch up; if it does not, raise the page bound.'));
+     'source',m.email,'what_to_do','This mailbox has had more mail than one poll reads for three polls running. It will catch up; if it does not, raise the page bound.'));
    END IF;
    IF misses>0 THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_poll_missed','severity','warning','since',miss_run.started_at,
-     'source',m.address,'sweep_misses',misses,
+     'source',m.email,'sweep_misses',misses,
      'what_to_do','The nightly sweep found mail the 5-minute poll missed (now captured). Check the poll''s run rows for this mailbox.'));
    END IF;
    IF sweep_due AND NOT swept AND (since IS NULL OR since<sweep_at) THEN
     alarms:=alarms||jsonb_build_array(jsonb_build_object('key','sweep_incomplete','severity','warning','since',sweep_at,
-     'source',m.address,'last_status',last_sweep.status,
+     'source',m.email,'last_status',last_sweep.status,
      'what_to_do','This mailbox did not finish its 02:00 sweep. Check the monitor-inbox-sweep cron job and this mailbox''s sweep run rows.'));
    END IF;
   END IF;

@@ -2,11 +2,11 @@
 // Outlook sources email capture reads.
 //
 //   POST ?action=set_monitored_mailbox
-//        {address, enabled?, state?, reason}
-//     -> RPC set_monitored_mailbox(p_address, p_enabled, p_state, p_reason,
+//        {email, enabled?, status?, reason}
+//     -> RPC set_monitored_mailbox(p_email, p_enabled, p_status, p_reason,
 //        p_actor), the one writer of monitored_mailboxes after the EM1 seed.
 //
-// It changes only `enabled` and/or `state` ('active' | 'pending_review') of a
+// It changes only `enabled` and/or `status` ('active' | 'pending_review') of a
 // source that already exists; adding or removing a source is a migration.
 // The actor (INTEGRATION X31) is recorded as `updated_by` and on the
 // monitored_mailbox_changes receipt. A missing actor is recorded as
@@ -17,7 +17,7 @@
 // owner-level decision, so this gate is deliberately stricter than the staff
 // set (ops_manager is refused), like the other admin/owner surfaces.
 //
-// One log line per call: action, address (a company mailbox, never customer
+// One log line per call: action, email (a company mailbox, never customer
 // data), outcome or refusal code, actor. The reason text is not logged.
 
 export class MonitoredMailboxError extends Error {
@@ -31,15 +31,15 @@ export class MonitoredMailboxError extends Error {
 }
 
 export interface SetMonitoredMailboxInput {
-  address: string;
+  email: string;
   enabled: boolean | null;
-  state: "active" | "pending_review" | null;
+  status: "active" | "pending_review" | null;
   reason: string;
 }
 
 const ADDRESS = /^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 const STATES = new Set(["active", "pending_review"]);
-const BODY_KEYS = new Set(["address", "enabled", "state", "reason"]);
+const BODY_KEYS = new Set(["email", "enabled", "status", "reason"]);
 
 /** The in-route gate: the privileged server key, or an admin or owner of
  * the company organisation. */
@@ -68,27 +68,27 @@ export function parseSetMonitoredMailboxBody(
   const b = body as Record<string, unknown>;
   const unknown = Object.keys(b).filter((k) => !BODY_KEYS.has(k));
   if (unknown.length) throw bad(`Unknown field: ${unknown.sort().join(", ")}.`);
-  const address = typeof b.address === "string"
-    ? b.address.trim().toLowerCase()
+  const email = typeof b.email === "string"
+    ? b.email.trim().toLowerCase()
     : "";
-  if (!ADDRESS.test(address) || address.length > 254) {
-    throw bad("address must be a mailbox address.");
+  if (!ADDRESS.test(email) || email.length > 254) {
+    throw bad("email must be a mailbox address.");
   }
   if (b.enabled !== undefined && b.enabled !== null && typeof b.enabled !== "boolean") {
     throw bad("enabled must be true or false.");
   }
   if (
-    b.state !== undefined && b.state !== null &&
-    !(typeof b.state === "string" && STATES.has(b.state))
+    b.status !== undefined && b.status !== null &&
+    !(typeof b.status === "string" && STATES.has(b.status))
   ) {
-    throw bad("state must be active or pending_review.");
+    throw bad("status must be active or pending_review.");
   }
   const enabled = typeof b.enabled === "boolean" ? b.enabled : null;
-  const state = typeof b.state === "string"
-    ? b.state as "active" | "pending_review"
+  const status = typeof b.status === "string"
+    ? b.status as "active" | "pending_review"
     : null;
-  if (enabled === null && state === null) {
-    throw bad("Name enabled, state, or both.");
+  if (enabled === null && status === null) {
+    throw bad("Name enabled, status, or both.");
   }
   const reason = typeof b.reason === "string" ? b.reason.trim() : "";
   const hasControl = [...reason].some((c) => {
@@ -98,7 +98,7 @@ export function parseSetMonitoredMailboxBody(
   if (reason.length < 3 || reason.length > 300 || hasControl) {
     throw bad("reason is required: 3 to 300 characters on one line.");
   }
-  return { address, enabled, state, reason };
+  return { email, enabled, status, reason };
 }
 
 // Refusals raised by set_monitored_mailbox(), by status.
@@ -107,7 +107,7 @@ const REFUSALS: Record<string, number> = {
   monitored_mailbox_enable_requires_active: 409,
   monitored_mailbox_kind_unknown: 409,
   monitored_mailbox_reason_invalid: 400,
-  monitored_mailbox_state_invalid: 400,
+  monitored_mailbox_status_invalid: 400,
   monitored_mailbox_change_missing: 400,
   monitored_mailbox_actor_invalid: 400,
 };
@@ -116,7 +116,7 @@ const MESSAGES: Record<string, string> = {
   monitored_mailbox_unknown:
     "No such monitored mailbox. Adding a source is a migration.",
   monitored_mailbox_enable_requires_active:
-    "Only a source in state active can be enabled; set state active first (it must have been located and verified).",
+    "Only a source in status active can be enabled; set status active first (it must have been located and verified).",
   monitored_mailbox_kind_unknown:
     "This address has not been located as a user mailbox or group yet; it stays pending_review.",
 };
@@ -135,9 +135,9 @@ export async function setMonitoredMailbox(
 ): Promise<Record<string, unknown>> {
   const input = parseSetMonitoredMailboxBody(body);
   const { data, error } = await client.rpc("set_monitored_mailbox", {
-    p_address: input.address,
+    p_email: input.email,
     p_enabled: input.enabled,
-    p_state: input.state,
+    p_status: input.status,
     p_reason: input.reason,
     p_actor: actor,
   });
@@ -150,7 +150,7 @@ export async function setMonitoredMailbox(
     const status = REFUSALS[message];
     console.log(JSON.stringify({
       event: "set_monitored_mailbox",
-      address: input.address,
+      email: input.email,
       refused: status ? message : "rpc_failed",
       code: typeof e.code === "string" ? e.code : null,
       actor,
@@ -171,7 +171,7 @@ export async function setMonitoredMailbox(
   const result = data as Record<string, unknown>;
   console.log(JSON.stringify({
     event: "set_monitored_mailbox",
-    address: input.address,
+    email: input.email,
     outcome: result.outcome ?? null,
     actor,
   }));

@@ -50,11 +50,11 @@ function fakeRpc(data: unknown, error: unknown = null) {
 }
 
 Deno.test("disabling a source passes the change and the actor to the one writer and logs no reason text", async () => {
-  const f = fakeRpc({ outcome: "updated", address: "khairo@secureworkswa.com.au", enabled: false, state: "active" });
+  const f = fakeRpc({ outcome: "updated", email: "khairo@secureworkswa.com.au", enabled: false, status: "active" });
   const { result, lines } = await capture(() =>
     setMonitoredMailbox(
       f.client,
-      { address: " Khairo@SecureWorksWA.com.au ", enabled: false, reason: "private matter this week" },
+      { email: " Khairo@SecureWorksWA.com.au ", enabled: false, reason: "private matter this week" },
       "user:u1",
     )
   );
@@ -62,9 +62,9 @@ Deno.test("disabling a source passes the change and the actor to the one writer 
   assertEquals(f.calls, [{
     fn: "set_monitored_mailbox",
     args: {
-      p_address: "khairo@secureworkswa.com.au",
+      p_email: "khairo@secureworkswa.com.au",
       p_enabled: false,
-      p_state: null,
+      p_status: null,
       p_reason: "private matter this week",
       p_actor: "user:u1",
     },
@@ -72,7 +72,7 @@ Deno.test("disabling a source passes the change and the actor to the one writer 
   assertEquals(lines.length, 1);
   assertEquals(JSON.parse(lines[0]), {
     event: "set_monitored_mailbox",
-    address: "khairo@secureworkswa.com.au",
+    email: "khairo@secureworkswa.com.au",
     outcome: "updated",
     actor: "user:u1",
   });
@@ -84,12 +84,12 @@ Deno.test("a located source is marked active and enabled in one call", async () 
   await capture(() =>
     setMonitoredMailbox(
       f.client,
-      { address: "plans@secureworkswa.com.au", enabled: true, state: "active", reason: "located: delivers to approvals@" },
+      { email: "plans@secureworkswa.com.au", enabled: true, status: "active", reason: "located: delivers to approvals@" },
       "actor_missing",
     )
   );
   assertEquals((f.calls[0].args as any).p_enabled, true);
-  assertEquals((f.calls[0].args as any).p_state, "active");
+  assertEquals((f.calls[0].args as any).p_status, "active");
   assertEquals((f.calls[0].args as any).p_actor, "actor_missing");
 });
 
@@ -98,15 +98,15 @@ Deno.test("the body is refused before any database call when it is malformed", (
     null,
     [],
     "text",
-    { address: "khairo@secureworkswa.com.au", enabled: false, reason: "ok reason", extra: 1 },
-    { address: "not an address", enabled: false, reason: "ok reason" },
-    { address: "khairo@secureworkswa.com.au", enabled: "false", reason: "ok reason" },
-    { address: "khairo@secureworkswa.com.au", state: "paused", reason: "ok reason" },
-    { address: "khairo@secureworkswa.com.au", reason: "ok reason" },
-    { address: "khairo@secureworkswa.com.au", enabled: false },
-    { address: "khairo@secureworkswa.com.au", enabled: false, reason: "no" },
-    { address: "khairo@secureworkswa.com.au", enabled: false, reason: "two\nlines" },
-    { address: "khairo@secureworkswa.com.au", enabled: false, reason: "x".repeat(301) },
+    { email: "khairo@secureworkswa.com.au", enabled: false, reason: "ok reason", extra: 1 },
+    { email: "not an address", enabled: false, reason: "ok reason" },
+    { email: "khairo@secureworkswa.com.au", enabled: "false", reason: "ok reason" },
+    { email: "khairo@secureworkswa.com.au", status: "paused", reason: "ok reason" },
+    { email: "khairo@secureworkswa.com.au", reason: "ok reason" },
+    { email: "khairo@secureworkswa.com.au", enabled: false },
+    { email: "khairo@secureworkswa.com.au", enabled: false, reason: "no" },
+    { email: "khairo@secureworkswa.com.au", enabled: false, reason: "two\nlines" },
+    { email: "khairo@secureworkswa.com.au", enabled: false, reason: "x".repeat(301) },
   ];
   for (const body of cases) {
     const e = assertThrows(() => parseSetMonitoredMailboxBody(body), MonitoredMailboxError);
@@ -115,7 +115,7 @@ Deno.test("the body is refused before any database call when it is malformed", (
 });
 
 Deno.test("writer refusals map to their own status and code; any other fault is 503 with no detail", async () => {
-  const body = { address: "info@secureworkswa.com.au", enabled: true, reason: "turn it on" };
+  const body = { email: "info@secureworkswa.com.au", enabled: true, reason: "turn it on" };
   for (
     const [message, status] of [
       ["monitored_mailbox_unknown", 404],

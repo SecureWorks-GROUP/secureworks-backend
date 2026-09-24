@@ -11,13 +11,16 @@ modes) is EM2.
 
 ## Sources: `monitored_mailboxes`
 
-One row per Outlook source, keyed by `address`.
+The table already existed in production as the empty 2 May T7 draft
+(ledger `20260503063735`); EM1 builds on it. One row per Outlook source,
+unique by `email`.
 
 | Column | Meaning |
 |---|---|
 | `source_key` | names the source's run rows (below) |
 | `kind` | `user`, `group`, or `unknown` (not yet located) |
-| `enabled`, `state` | polled only when `enabled` and `state = 'active'`; enabling needs `active`; `unknown` stays `pending_review` |
+| `enabled`, `status` | selected only when `enabled` and `status = 'active'`; enabling needs `active`; `unknown` stays `pending_review`; `enabled` defaults to false |
+| `scope_label` | owner, admin, finance, sales, patios, fencing, ops, other, and (EM1) approvals, ses |
 | `owner_privacy` | human-sent outbound mail is captured only with job evidence (D-EM3). marnin@, jan@ |
 | `files_supplier_pdfs` | supplier PDF filing allowed (email.md §7 step 8). The five mailboxes the old path already files for |
 
@@ -29,20 +32,23 @@ G-EM-MAILBOX). All `@secureworkswa.com.au`.
 
 Writers: the migration seed, then only `set_monitored_mailbox()`, reached
 through ops-api `POST ?action=set_monitored_mailbox`
-`{address, enabled?, state?, reason}` (server key or a company admin or
-owner). It changes `enabled` and `state` only, records `updated_by` (the
+`{email, enabled?, status?, reason}` (server key or a company admin or
+owner). It changes `enabled` and `status` only, records `updated_by` (the
 actor, INTEGRATION X31) and a `monitored_mailbox_changes` receipt. Adding or
-removing a source is a migration. Both tables: RLS on, no policies, revoked
-from PUBLIC, anon and authenticated; service_role reads.
+removing a source is a migration. Both tables: RLS on, every grant revoked
+from PUBLIC, anon and authenticated (the draft's `authenticated_select`
+policy dropped); service_role reads. The draft's other columns
+(`poll_interval_seconds`, `graph_*`, `last_message_at`, `last_error*`,
+`privacy_classification`) are kept and not read by EM code.
 
 ## The old path
 
 The old monitor-inbox path polls its pinned list only
 (`supabase/functions/monitor-inbox/legacy_mailboxes.ts`: the five user
 mailboxes and patios@, fencing@) and never reads `monitored_mailboxes`. Before
-EM1 it switched to that table whenever it had enabled rows; the table has no
-`status` or `last_polled_at` column, so that old query is refused even by the
-previously deployed code. The contract runs the query and requires the
+EM1 it switched to that table whenever it had enabled rows; EM1 drops the
+draft's `last_polled_at` (the cursor lives in `context_capture_runs`), so that
+old query is refused even by the previously deployed code. The contract runs the query and requires the
 refusal (named row E22).
 
 ## Sightings: `inbox_events`

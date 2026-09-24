@@ -5,23 +5,23 @@
 DO $$
 DECLARE got text; want text;
 BEGIN
- SELECT string_agg(format('%s|%s|%s|%s|%s|%s|%s',address,source_key,kind,enabled::text,state,owner_privacy::text,files_supplier_pdfs::text),E'\n' ORDER BY address)
+ SELECT string_agg(format('%s|%s|%s|%s|%s|%s|%s|%s|%s',email,source_key,kind,enabled::text,status,owner_privacy::text,files_supplier_pdfs::text,scope_label,privacy_classification),E'\n' ORDER BY email)
  INTO got FROM public.monitored_mailboxes;
  want:=array_to_string(ARRAY[
-  'admin@secureworkswa.com.au|admin|user|true|active|false|true',
-  'approvals@secureworkswa.com.au|approvals|group|true|active|false|false',
-  'fencing@secureworkswa.com.au|fencing|group|true|active|false|false',
-  'finance@secureworkswa.com.au|finance|group|true|active|false|false',
-  'info@secureworkswa.com.au|info|unknown|false|pending_review|false|false',
-  'jan@secureworkswa.com.au|jan|user|true|active|true|true',
-  'khairo@secureworkswa.com.au|khairo|user|true|active|false|false',
-  'marnin@secureworkswa.com.au|marnin|user|true|active|true|true',
-  'nithin@secureworkswa.com.au|nithin|user|true|active|false|true',
-  'patios@secureworkswa.com.au|patios|group|true|active|false|false',
-  'plans@secureworkswa.com.au|plans|unknown|false|pending_review|false|false',
-  'sales@secureworkswa.com.au|sales|unknown|false|pending_review|false|false',
-  'ses@secureworkswa.com.au|ses|group|true|active|false|false',
-  'shaun@secureworkswa.com.au|shaun|user|true|active|false|true'],E'\n');
+  'admin@secureworkswa.com.au|admin|user|true|active|false|true|admin|restricted_pii',
+  'approvals@secureworkswa.com.au|approvals|group|true|active|false|false|approvals|staff_only',
+  'fencing@secureworkswa.com.au|fencing|group|true|active|false|false|fencing|staff_only',
+  'finance@secureworkswa.com.au|finance|group|true|active|false|false|finance|staff_only',
+  'info@secureworkswa.com.au|info|unknown|false|pending_review|false|false|other|staff_only',
+  'jan@secureworkswa.com.au|jan|user|true|active|true|true|owner|restricted_pii',
+  'khairo@secureworkswa.com.au|khairo|user|true|active|false|false|sales|restricted_pii',
+  'marnin@secureworkswa.com.au|marnin|user|true|active|true|true|owner|restricted_pii',
+  'nithin@secureworkswa.com.au|nithin|user|true|active|false|true|sales|restricted_pii',
+  'patios@secureworkswa.com.au|patios|group|true|active|false|false|patios|staff_only',
+  'plans@secureworkswa.com.au|plans|unknown|false|pending_review|false|false|approvals|staff_only',
+  'sales@secureworkswa.com.au|sales|unknown|false|pending_review|false|false|sales|staff_only',
+  'ses@secureworkswa.com.au|ses|group|true|active|false|false|ses|staff_only',
+  'shaun@secureworkswa.com.au|shaun|user|true|active|false|true|ops|restricted_pii'],E'\n');
  IF got IS DISTINCT FROM want THEN RAISE EXCEPTION 'em1 seed list: got %', got; END IF;
  IF EXISTS(SELECT 1 FROM public.monitored_mailboxes WHERE updated_by<>'migration:20260924213000')
  THEN RAISE EXCEPTION 'em1 seed: updated_by not the migration'; END IF;
@@ -56,7 +56,8 @@ DECLARE r text; t text; f text;
 BEGIN
  FOREACH t IN ARRAY ARRAY['public.monitored_mailboxes','public.monitored_mailbox_changes'] LOOP
   IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid=t::regclass) THEN RAISE EXCEPTION 'em1 access: RLS off on %',t; END IF;
-  IF EXISTS(SELECT 1 FROM pg_policies WHERE schemaname||'.'||tablename=t) THEN RAISE EXCEPTION 'em1 access: % has a policy',t; END IF;
+  IF EXISTS(SELECT 1 FROM pg_policies WHERE schemaname||'.'||tablename=t AND NOT roles<@ARRAY['service_role']::name[])
+  THEN RAISE EXCEPTION 'em1 access: % has a policy for a role other than service_role',t; END IF;
   FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
    IF has_table_privilege(r,t,'select') OR has_table_privilege(r,t,'insert') OR has_table_privilege(r,t,'update') OR has_table_privilege(r,t,'delete')
    THEN RAISE EXCEPTION 'em1 access: % has a privilege on %',r,t; END IF;
@@ -77,6 +78,40 @@ BEGIN
  END LOOP;
  IF NOT (SELECT prosecdef FROM pg_proc WHERE oid='public.set_monitored_mailbox(text,boolean,text,text,text)'::regprocedure)
  THEN RAISE EXCEPTION 'em1 access: set_monitored_mailbox is not SECURITY DEFINER'; END IF;
+END $$;
+
+-- 3b. Built on the live draft table: its cursor column and index are gone,
+-- enabled defaults to off, scope_label takes approvals and ses (one rule), the
+-- draft's authenticated_select policy is gone and a new row with no enabled
+-- is not selected.
+DO $$
+DECLARE bad boolean;
+BEGIN
+ IF EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.monitored_mailboxes'::regclass AND attname='last_polled_at' AND NOT attisdropped)
+  OR to_regclass('public.idx_monitored_mailboxes_enabled') IS NOT NULL
+ THEN RAISE EXCEPTION 'em1 table: the draft cursor column or its index survived'; END IF;
+ IF (SELECT pg_get_expr(adbin,adrelid) FROM pg_attrdef WHERE adrelid='public.monitored_mailboxes'::regclass
+     AND adnum=(SELECT attnum FROM pg_attribute WHERE attrelid='public.monitored_mailboxes'::regclass AND attname='enabled'))<>'false'
+ THEN RAISE EXCEPTION 'em1 table: enabled does not default to false'; END IF;
+ IF (SELECT count(*) FROM pg_constraint c WHERE c.conrelid='public.monitored_mailboxes'::regclass AND c.contype='c'
+     AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='scope_label')]::int2[])<>1
+ THEN RAISE EXCEPTION 'em1 table: scope_label must have exactly one check'; END IF;
+ IF EXISTS(SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='monitored_mailboxes' AND policyname='authenticated_select')
+ THEN RAISE EXCEPTION 'em1 table: authenticated_select survived'; END IF;
+ BEGIN
+  INSERT INTO public.monitored_mailboxes(email,source_key,kind,scope_label,updated_by) VALUES('x@secureworkswa.com.au','x_new','user','other','t');
+  IF (SELECT enabled FROM public.monitored_mailboxes WHERE email='x@secureworkswa.com.au') THEN RAISE EXCEPTION 'em1 table: a new row is enabled by default'; END IF;
+  bad:=false;
+  BEGIN INSERT INTO public.monitored_mailboxes(email,source_key,kind,scope_label,updated_by) VALUES('y@secureworkswa.com.au','y_new','user','council','t');
+  EXCEPTION WHEN check_violation THEN bad:=true; END;
+  IF NOT bad THEN RAISE EXCEPTION 'em1 table: an unknown scope_label was accepted'; END IF;
+  bad:=false;
+  BEGIN INSERT INTO public.monitored_mailboxes(email,source_key,kind,scope_label,enabled,status,updated_by) VALUES('z@secureworkswa.com.au','z_new','user','other',true,'paused','t');
+  EXCEPTION WHEN check_violation THEN bad:=true; END;
+  IF NOT bad THEN RAISE EXCEPTION 'em1 table: an enabled paused source was accepted'; END IF;
+  RAISE EXCEPTION 'em1_rollback_block';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'em1_rollback_block' THEN RAISE; END IF;
+ END;
 END $$;
 
 -- 4. inbox_events: three new columns, every existing row untouched, the
@@ -134,18 +169,18 @@ BEGIN
  -- Disable khairo@: updated, updated_by and one receipt.
  r:=public.set_monitored_mailbox('Khairo@SecureWorksWA.com.au',false,NULL,'pause while Khairo is told (email.md P5)','user:0b7e0c0e-1111-4222-8333-444455556666');
  IF r->>'outcome'<>'updated' OR (r->>'enabled')::boolean THEN RAISE EXCEPTION 'em1 setter: disable gave %',r; END IF;
- IF NOT EXISTS(SELECT 1 FROM public.monitored_mailboxes WHERE address='khairo@secureworkswa.com.au' AND NOT enabled
+ IF NOT EXISTS(SELECT 1 FROM public.monitored_mailboxes WHERE email='khairo@secureworkswa.com.au' AND NOT enabled
    AND updated_by='user:0b7e0c0e-1111-4222-8333-444455556666')
  THEN RAISE EXCEPTION 'em1 setter: khairo row not updated with the actor'; END IF;
- SELECT count(*) INTO n FROM public.monitored_mailbox_changes WHERE address='khairo@secureworkswa.com.au'
-  AND actor='user:0b7e0c0e-1111-4222-8333-444455556666' AND before='{"enabled":true,"state":"active"}' AND after='{"enabled":false,"state":"active"}';
+ SELECT count(*) INTO n FROM public.monitored_mailbox_changes WHERE email='khairo@secureworkswa.com.au'
+  AND actor='user:0b7e0c0e-1111-4222-8333-444455556666' AND before='{"enabled":true,"status":"active"}' AND after='{"enabled":false,"status":"active"}';
  IF n<>1 THEN RAISE EXCEPTION 'em1 setter: expected one receipt, got %',n; END IF;
  -- The same change again: unchanged, no second receipt.
  r:=public.set_monitored_mailbox('khairo@secureworkswa.com.au',false,NULL,'again','workflow:test');
  IF r->>'outcome'<>'unchanged' OR (SELECT count(*) FROM public.monitored_mailbox_changes)<>1 THEN RAISE EXCEPTION 'em1 setter: repeat gave %',r; END IF;
  -- Setting pending_review without naming enabled also disables.
  r:=public.set_monitored_mailbox('shaun@secureworkswa.com.au',NULL,'pending_review','mailbox under review','actor_missing');
- IF r->>'outcome'<>'updated' OR (r->>'enabled')::boolean OR r->>'state'<>'pending_review' THEN RAISE EXCEPTION 'em1 setter: pending_review gave %',r; END IF;
+ IF r->>'outcome'<>'updated' OR (r->>'enabled')::boolean OR r->>'status'<>'pending_review' THEN RAISE EXCEPTION 'em1 setter: pending_review gave %',r; END IF;
  -- Refusals, each by its code, each writing nothing.
  FOR code,r IN SELECT * FROM (VALUES
    ('monitored_mailbox_enable_requires_active',jsonb_build_object('a','info@secureworkswa.com.au','e',true,'s',NULL,'why','turn it on','who','workflow:test')),
@@ -153,7 +188,7 @@ BEGIN
    ('monitored_mailbox_unknown',jsonb_build_object('a','nobody@secureworkswa.com.au','e',false,'s',NULL,'why','nope','who','workflow:test')),
    ('monitored_mailbox_reason_invalid',jsonb_build_object('a','jan@secureworkswa.com.au','e',false,'s',NULL,'why','x','who','workflow:test')),
    ('monitored_mailbox_reason_invalid',jsonb_build_object('a','jan@secureworkswa.com.au','e',false,'s',NULL,'why',E'two\nlines','who','workflow:test')),
-   ('monitored_mailbox_state_invalid',jsonb_build_object('a','jan@secureworkswa.com.au','e',NULL,'s','paused','why','pause it','who','workflow:test')),
+   ('monitored_mailbox_status_invalid',jsonb_build_object('a','jan@secureworkswa.com.au','e',NULL,'s','paused','why','pause it','who','workflow:test')),
    ('monitored_mailbox_change_missing',jsonb_build_object('a','jan@secureworkswa.com.au','e',NULL,'s',NULL,'why','nothing','who','workflow:test')),
    ('monitored_mailbox_actor_invalid',jsonb_build_object('a','jan@secureworkswa.com.au','e',false,'s',NULL,'why','no actor','who','two words')),
    ('monitored_mailbox_actor_invalid',jsonb_build_object('a','jan@secureworkswa.com.au','e',false,'s',NULL,'why','no actor','who',NULL))
@@ -166,7 +201,7 @@ BEGIN
   END;
  END LOOP;
  IF (SELECT count(*) FROM public.monitored_mailbox_changes)<>2 THEN RAISE EXCEPTION 'em1 setter: a refusal wrote a receipt'; END IF;
- IF NOT (SELECT enabled FROM public.monitored_mailboxes WHERE address='jan@secureworkswa.com.au') THEN RAISE EXCEPTION 'em1 setter: a refusal changed jan@'; END IF;
+ IF NOT (SELECT enabled FROM public.monitored_mailboxes WHERE email='jan@secureworkswa.com.au') THEN RAISE EXCEPTION 'em1 setter: a refusal changed jan@'; END IF;
  -- Re-enabling a reviewed source works.
  r:=public.set_monitored_mailbox('shaun@secureworkswa.com.au',true,'active','back from review','workflow:test');
  IF r->>'outcome'<>'updated' OR NOT (r->>'enabled')::boolean THEN RAISE EXCEPTION 'em1 setter: re-enable gave %',r; END IF;
@@ -233,14 +268,14 @@ BEGIN
  SELECT x INTO a FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key'='sweep_incomplete' AND x->>'source'='shaun@secureworkswa.com.au';
  IF a->>'last_status'<>'partial' THEN RAISE EXCEPTION 'em1 alarm detail: %',a; END IF;
  -- Per-source detail: admin@ healthy, history run shown, ids and codes only.
- SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'address'='admin@secureworkswa.com.au';
+ SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'email'='admin@secureworkswa.com.au';
  IF src#>>'{poll,last_status}'<>'succeeded' OR src#>>'{history,last_status}'<>'partial' OR src#>>'{history,last_error_code}'<>'budget_exhausted'
   OR NOT (src#>>'{sweep,finished_since_last_0200}')::boolean
  THEN RAISE EXCEPTION 'em1 status: admin@ detail %',src; END IF;
  IF (src#>>'{poll,failed_of_last,failed}')::integer<>0 THEN RAISE EXCEPTION 'em1 status: admin@ counted an old failure'; END IF;
  -- Pending-review sources are listed and never alarmed.
- SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'address'='plans@secureworkswa.com.au';
- IF (src->>'selected')::boolean OR src->>'state'<>'pending_review' THEN RAISE EXCEPTION 'em1 status: plans@ %',src; END IF;
+ SELECT x INTO src FROM jsonb_array_elements(s->'sources') x WHERE x->>'email'='plans@secureworkswa.com.au';
+ IF (src->>'selected')::boolean OR src->>'status'<>'pending_review' THEN RAISE EXCEPTION 'em1 status: plans@ %',src; END IF;
  -- Users first, then groups, then unknown.
  IF s#>>'{sources,0,kind}'<>'user' OR s#>>'{sources,13,kind}'<>'unknown' THEN RAISE EXCEPTION 'em1 status: source order'; END IF;
 
@@ -268,7 +303,7 @@ UPDATE public.automation_switches SET capture=true WHERE id=1;
 
 -- A source enabled five minutes ago is not yet expected to have polled, and a
 -- flag turned on after 02:00 does not expect last night's sweep.
-UPDATE public.monitored_mailboxes SET updated_at='2026-09-24 09:55+08' WHERE address='khairo@secureworkswa.com.au';
+UPDATE public.monitored_mailboxes SET updated_at='2026-09-24 09:55+08' WHERE email='khairo@secureworkswa.com.au';
 DO $$
 DECLARE s jsonb:=public.context_email_capture_status_at('2026-09-24 10:00+08');
 BEGIN
@@ -329,7 +364,7 @@ SELECT public.set_monitored_mailbox('ses@secureworkswa.com.au',false,NULL,'owner
 DO $$
 BEGIN
  IF NOT (SELECT enabled FROM public.feature_flags WHERE flag_name='email_capture_v2') THEN RAISE EXCEPTION 'em1 re-apply: flag clobbered'; END IF;
- IF (SELECT enabled FROM public.monitored_mailboxes WHERE address='ses@secureworkswa.com.au') THEN RAISE EXCEPTION 'em1 re-apply: owner change clobbered'; END IF;
+ IF (SELECT enabled FROM public.monitored_mailboxes WHERE email='ses@secureworkswa.com.au') THEN RAISE EXCEPTION 'em1 re-apply: owner change clobbered'; END IF;
  IF (SELECT count(*) FROM public.monitored_mailboxes)<>14 OR (SELECT count(*) FROM public.monitored_mailbox_changes)<>1 THEN RAISE EXCEPTION 'em1 re-apply: rows changed'; END IF;
 END $$;
 ROLLBACK;
