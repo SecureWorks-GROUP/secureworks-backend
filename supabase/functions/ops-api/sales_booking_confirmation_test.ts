@@ -167,6 +167,8 @@ function request(
   response: SalesBookingReadResponse,
   store: BookingApprovalStore,
   step: "calendar" | "message" = "calendar",
+  // The lead's live GHL assignee; unassigned is Marnin's (Stratco default).
+  assignee: string | null = null,
 ) {
   return {
     store,
@@ -178,6 +180,7 @@ function request(
       reason: null,
     } as BookingObject,
     readWorkspace: () => Promise.resolve(response),
+    readOpportunityAssignee: () => Promise.resolve(assignee),
     now: () => NOW,
     envGet,
   };
@@ -833,6 +836,7 @@ Deno.test("engine path through the approval route is unchanged and never reads o
       readGhlEvents: untouched,
       readOutlook: untouched,
       readSystemOfferRecords: untouched,
+      readOpportunityAssignee: untouched,
     },
   });
   assert("approval" in written);
@@ -903,25 +907,37 @@ async function personFixture(resource: string, profile: string, line: string) {
 }
 
 Deno.test("engine approval for Nithin and Khairo: a text on their own profile and line; a visit stays Stratco", async () => {
-  const people: Array<[string, string, string, string]> = [
+  const people: Array<[string, string, string, string, string]> = [
     [
       "nithin",
       "patio-nithin",
       "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
       "+61489267774",
+      "ERAycY7r6KZ8OA66WQCy",
     ],
     [
       "khairo",
       "fencing-khairo",
       "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
       "+61489267772",
+      "RgDWTnYL6zL3eJA6nLht",
     ],
   ];
-  for (const [resource, profile, scoperUserId, line] of people) {
+  for (const [resource, profile, scoperUserId, line, ghlUser] of people) {
     const f = await personFixture(resource, profile, line);
     const { store, records } = memoryStore();
+    // Assigned to Marnin in GHL: never this person's lead.
+    await assertRejects(
+      () =>
+        salesBookingApprovalWriteAction(
+          request(f, store, "message", "3S20LGVTjsVYy9vTJ9wM"),
+        ),
+      Error,
+      "lead_assigned_to_someone_else",
+    );
+    assertEquals(records.size, 0);
     const written = await salesBookingApprovalWriteAction(
-      request(f, store, "message"),
+      request(f, store, "message", ghlUser),
     );
     assertEquals(written.approval.resource, resource);
     assertEquals(written.approval.snapshot.profile, profile);
@@ -936,7 +952,10 @@ Deno.test("engine approval for Nithin and Khairo: a text on their own profile an
     assertEquals(records.size, 1);
     // No visit approval for either of them here.
     await assertRejects(
-      () => salesBookingApprovalWriteAction(request(f, store, "calendar")),
+      () =>
+        salesBookingApprovalWriteAction(
+          request(f, store, "calendar", ghlUser),
+        ),
       Error,
       "stratco_profile_required",
     );
@@ -944,10 +963,43 @@ Deno.test("engine approval for Nithin and Khairo: a text on their own profile an
     const g = await personFixture(resource, profile, "+61489267776");
     const other = memoryStore();
     await assertRejects(
-      () => salesBookingApprovalWriteAction(request(g, other.store, "message")),
+      () =>
+        salesBookingApprovalWriteAction(
+          request(g, other.store, "message", ghlUser),
+        ),
       Error,
       "sender_not_scoper_line",
     );
     assertEquals(other.records.size, 0);
   }
+});
+
+Deno.test("engine approval: a Stratco lead now assigned to Khairo or Nithin is not Marnin's", async () => {
+  for (const other of ["RgDWTnYL6zL3eJA6nLht", "ERAycY7r6KZ8OA66WQCy"]) {
+    const f = await fixture(), { store, records } = memoryStore();
+    await assertRejects(
+      () =>
+        salesBookingApprovalWriteAction(request(f, store, "message", other)),
+      Error,
+      "lead_assigned_to_someone_else",
+    );
+    assertEquals(records.size, 0);
+  }
+  // Assigned to Marnin himself is his.
+  const f = await fixture(), { store } = memoryStore();
+  const written = await salesBookingApprovalWriteAction(
+    request(f, store, "message", "3S20LGVTjsVYy9vTJ9wM"),
+  );
+  assertEquals(written.approval.resource, "marnin");
+  // Unreadable assignment refuses.
+  const g = await fixture(), broken = memoryStore();
+  await assertRejects(
+    () =>
+      salesBookingApprovalWriteAction({
+        ...request(g, broken.store, "message"),
+        readOpportunityAssignee: () => Promise.reject(new Error("down")),
+      }),
+    Error,
+    "opportunity_assignment_unreadable",
+  );
 });

@@ -134,7 +134,8 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
   let thread: SalesBookingMessage[] = [];
   let outlook: OutlookEvent[] = [];
   let contact: Obj = { ...GHL_CONTACT };
-  let opportunityAssignee: string | null = "RgDWTnYL6zL3eJA6nLht";
+  // Unassigned: a Stratco (and patio) lead's default owner.
+  let opportunityAssignee: string | null = null;
   const jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
   let smsResponse: { status: number; body: Obj } = {
@@ -357,7 +358,7 @@ Deno.test("book and send each refuse, naming the failed check, and write or send
   assertEquals(reasonOf(get), "method_not_allowed");
 });
 
-Deno.test("send rechecks Khairo's current opportunity assignment", async () => {
+Deno.test("send rechecks the lead's current GHL assignee for every person", async () => {
   const record = await approval(
     "message",
     { ...MESSAGE, sender: "+61489267772" },
@@ -379,6 +380,29 @@ Deno.test("send rechecks Khairo's current opportunity assignment", async () => {
   assertEquals(f.calls.assignmentReads, ["khairo-lead"]);
   assertEquals(f.calls.sms, []);
   assertEquals(f.calls.claims, 0);
+  // Unassigned is not Khairo's either.
+  const g = fakes([record], LIVE);
+  assertEquals(
+    reasonOf(await send(g, record.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  // Marnin's Stratco lead moved to Khairo never goes out from 776.
+  const stratco = await approval("message", MESSAGE);
+  const h = fakes([stratco], LIVE);
+  h.setOpportunityAssignee("RgDWTnYL6zL3eJA6nLht");
+  assertEquals(
+    reasonOf(await send(h, stratco.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(h.calls.sms, []);
+  // An unreadable assignment is a refusal, never a send.
+  const k = fakes([stratco], LIVE);
+  k.deps.readOpportunityAssignee = () => Promise.reject(new Error("down"));
+  assertEquals(
+    reasonOf(await send(k, stratco.binding_hash)),
+    "opportunity_assignment_unreadable",
+  );
+  assertEquals(k.calls.sms, []);
 });
 
 Deno.test("book re-checks the thread tail and Outlook at the press, naming the clash", async () => {
@@ -938,12 +962,12 @@ const KHAIRO = {
 };
 
 Deno.test("send goes from the visit person's own line: Marnin 776, Nithin 774, Khairo 772", async () => {
-  const people: Array<[Obj, string]> = [
-    [{}, "+61489267776"],
-    [NITHIN, "+61489267774"],
-    [KHAIRO, "+61489267772"],
+  const people: Array<[Obj, string, string | null]> = [
+    [{}, "+61489267776", null],
+    [NITHIN, "+61489267774", "ERAycY7r6KZ8OA66WQCy"],
+    [KHAIRO, "+61489267772", "RgDWTnYL6zL3eJA6nLht"],
   ];
-  for (const [person, line] of people) {
+  for (const [person, line, assignee] of people) {
     const msg = await approval(
       "message",
       { ...MESSAGE, sender: line },
@@ -951,6 +975,7 @@ Deno.test("send goes from the visit person's own line: Marnin 776, Nithin 774, K
       person,
     );
     const dry = fakes([msg]);
+    dry.setOpportunityAssignee(assignee);
     const preview = await send(dry, msg.binding_hash);
     assertEquals(preview.status, "dry_run");
     if (preview.status !== "dry_run") continue;
@@ -960,6 +985,7 @@ Deno.test("send goes from the visit person's own line: Marnin 776, Nithin 774, K
     assertEquals(dry.calls.sms.length, 0);
 
     const live = fakes([msg], LIVE);
+    live.setOpportunityAssignee(assignee);
     const sent = await send(live, msg.binding_hash);
     assertEquals(sent.status, "sent");
     assertEquals(live.calls.sms.length, 1);

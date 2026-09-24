@@ -11,11 +11,23 @@
  * `harness/ops/skills/secureworks-sales-weekly/lanes/fencing.json`).
  * Change a line here and in that profile together.
  *
- * The person is the approval snapshot's `scoper_user_id`. Its `resource` and
+ * This is the ONE table of booking people: app user, GHL user and line. The
+ * booking read's resources, the screen defaults, both approval routes and the
+ * executor all derive from it; do not restate a line or id elsewhere.
+ *
+ * Whose lead is it: the opportunity's current GHL assignee (owner decision
+ * 2026-09-24). A lead assigned to Nithin or Khairo is only ever theirs; a lead
+ * assigned to Marnin, or unassigned in the Stratco (fencing) pipeline, is
+ * Marnin's; an unassigned patio lead is Nithin's. Anyone else's lead belongs
+ * to nobody here. GHL user ids: Marnin's matches the Stratco calendar
+ * assignee, Khairo's the user on his 772 replies, Nithin's is from that
+ * decision.
+ *
+ * The person on an approval is its `scoper_user_id`. Its `resource` and
  * `profile`, when they name a known person, must name the same one. There is
  * no fallback line: an unknown or missing person refuses with a named reason.
- * This module imports nothing so the owner-approval and executor modules can
- * both use it without an import cycle.
+ * This module imports nothing so the read, owner-approval and executor
+ * modules can all use it without an import cycle.
  */
 
 export interface SalesBookingSenderPerson {
@@ -27,6 +39,8 @@ export interface SalesBookingSenderPerson {
   profile: string;
   /** E.164 GHL number this person's booking texts go from. */
   line: string;
+  /** GHL user id: an opportunity assigned to it is this person's lead. */
+  ghl_user_id: string;
 }
 
 export const SALES_BOOKING_SENDER_LINES: Readonly<
@@ -38,6 +52,7 @@ export const SALES_BOOKING_SENDER_LINES: Readonly<
     scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
     profile: "fencing-stratco-marnin",
     line: "+61489267776",
+    ghl_user_id: "3S20LGVTjsVYy9vTJ9wM",
   }),
   nithin: Object.freeze({
     person: "nithin",
@@ -45,6 +60,7 @@ export const SALES_BOOKING_SENDER_LINES: Readonly<
     scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
     profile: "patio-nithin",
     line: "+61489267774",
+    ghl_user_id: "ERAycY7r6KZ8OA66WQCy",
   }),
   khairo: Object.freeze({
     person: "khairo",
@@ -52,6 +68,7 @@ export const SALES_BOOKING_SENDER_LINES: Readonly<
     scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
     profile: "fencing-khairo",
     line: "+61489267772",
+    ghl_user_id: "RgDWTnYL6zL3eJA6nLht",
   }),
 });
 
@@ -113,4 +130,27 @@ export function salesBookingSenderFor(snapshot: {
     };
   }
   return { ok: true, sender };
+}
+
+/**
+ * Whose lead an opportunity is: the booking person its GHL assignee names, or
+ * `unassignedOwner` (the pipeline's default person) when nobody is assigned.
+ * An assignee who is not a booking person, or an unreadable value, is nobody.
+ */
+export function salesBookingLeadOwner(
+  assignedTo: unknown,
+  unassignedOwner: string | null,
+): string | null {
+  if (assignedTo === null || assignedTo === undefined || assignedTo === "") {
+    return unassignedOwner;
+  }
+  if (typeof assignedTo !== "string") return null;
+  return Object.values(SALES_BOOKING_SENDER_LINES).find((p) =>
+    p.ghl_user_id === assignedTo
+  )?.person ?? null;
+}
+
+/** The short line label the screen shows (`776`). */
+export function salesBookingLineLabel(person: string): string {
+  return SALES_BOOKING_SENDER_LINES[person].line.slice(-3);
 }

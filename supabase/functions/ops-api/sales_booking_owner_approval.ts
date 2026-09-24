@@ -32,6 +32,7 @@ import {
   messageDirection,
   SALES_BOOKING_NOT_GIVEN,
   type SalesBookingCase,
+  salesBookingLeadBelongsTo,
   type SalesBookingMessage,
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
@@ -535,6 +536,8 @@ export interface OwnerApprovalDeps {
     job_site?: { address?: unknown; suburb?: unknown } | null;
   }>;
   readThread(contactId: string): Promise<SalesBookingMessage[]>;
+  /** The opportunity's current GHL assignee, read live; throws when unread. */
+  readOpportunityAssignee(opportunityId: string): Promise<string | null>;
   /** Throws when either the calendars or the users read is incomplete. */
   readGhlDirectory(): Promise<GhlDirectory>;
   /** One complete GHL window read; throws when incomplete. */
@@ -703,6 +706,23 @@ export async function salesBookingOwnerApprovalAction(args: {
     hand_sent_texts_note: HAND_SENT_TEXTS_NOTE,
   };
   const approving = dryRun || decision === "approved";
+  // Whose lead is it, read live: a lead assigned to someone else never takes
+  // this person's path or line.
+  if (approving) {
+    let assignee: string | null;
+    try {
+      if (!row.opportunity_id) throw new Error("no opportunity");
+      assignee = await deps.readOpportunityAssignee(row.opportunity_id);
+    } catch {
+      refuse("opportunity_assignment_unreadable");
+    }
+    if (!salesBookingLeadBelongsTo(assignee, input.resource)) {
+      refuse("lead_assigned_to_someone_else", {
+        resource: input.resource,
+        current_assignee: assignee,
+      });
+    }
+  }
 
   // Build the exact content. Identity and route come from server truth only.
   let content: BookingObject;

@@ -28,7 +28,7 @@ import {
   messageTimestamp,
   SALES_BOOKING_NOT_GIVEN,
   SALES_BOOKING_OUTLOOK_MAILBOXES,
-  SALES_BOOKING_RESOURCES,
+  salesBookingLeadBelongsTo,
   type SalesBookingMessage,
 } from "./sales_booking_read.ts";
 import {
@@ -867,27 +867,26 @@ export async function salesBookingSendAction(args: {
     )
   ) return refused("text_already_in_thread");
 
-  const requiredAssignee =
-    SALES_BOOKING_RESOURCES[who.sender.person]?.assigned_ghl_user_id;
-  if (requiredAssignee) {
-    const approvedId = loaded.snapshot.id;
-    const opportunityId = typeof approvedId === "string" &&
-        approvedId.startsWith("opp:")
+  // The lead must still be this person's in GHL right now (its current
+  // assignee, or unassigned where their pipeline's unassigned leads are
+  // theirs). A lead moved to someone else never gets this person's line.
+  const approvedId = loaded.snapshot.id;
+  const opportunityId =
+    typeof approvedId === "string" && approvedId.startsWith("opp:")
       ? approvedId.slice(4)
       : "";
-    if (!opportunityId) return refused("opportunity_identity_invalid");
-    let currentAssignee: string | null;
-    try {
-      currentAssignee = await deps.readOpportunityAssignee(opportunityId);
-    } catch {
-      return refused("opportunity_assignment_unreadable");
-    }
-    if (currentAssignee !== requiredAssignee) {
-      return refused("opportunity_assignee_changed", {
-        expected_assignee: requiredAssignee,
-        current_assignee: currentAssignee,
-      });
-    }
+  if (!opportunityId) return refused("opportunity_identity_invalid");
+  let currentAssignee: string | null;
+  try {
+    currentAssignee = await deps.readOpportunityAssignee(opportunityId);
+  } catch {
+    return refused("opportunity_assignment_unreadable");
+  }
+  if (!salesBookingLeadBelongsTo(currentAssignee, who.sender.person)) {
+    return refused("opportunity_assignee_changed", {
+      person: who.sender.person,
+      current_assignee: currentAssignee,
+    });
   }
 
   const wouldSend = {

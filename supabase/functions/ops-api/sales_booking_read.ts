@@ -62,6 +62,11 @@ import {
   type GhlLocationUser,
 } from "../ghl-proxy/calendar_events.ts";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  salesBookingLeadOwner,
+  salesBookingLineLabel,
+} from "./sales_booking_sender.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
 
@@ -92,7 +97,11 @@ export const SALES_BOOKING_TEMPLATE_MARKERS: readonly string[] = [
 export const SALES_BOOKING_CAPTAIN_DEFAULTS = {
   scopers: ["nithin", "marnin", "khairo"] as const,
   scopes_done_window: "this_week_plus_last",
-  sender_lines: { nithin: "774", marnin: "776", khairo: "772" },
+  sender_lines: {
+    nithin: salesBookingLineLabel("nithin"),
+    marnin: salesBookingLineLabel("marnin"),
+    khairo: salesBookingLineLabel("khairo"),
+  },
   stamp_board: "agent_driven_human_typed_later",
   recorded: "2026-09-16",
 } as const;
@@ -114,12 +123,13 @@ export interface SalesBookingResource {
    */
   scope_stage_ids: readonly string[];
   /**
-   * When set, only opportunities GHL assigns to this user are this person's
-   * leads. Needed where two people share one pipeline (Khairo and Stratco
-   * both live in the fencing pipeline), so a lead never shows on the wrong
-   * person's list and so never gets a text from the wrong line.
+   * Whether an unassigned lead in this pipeline is this person's. A lead is
+   * on a person's list only when its current GHL assignee is that person, or
+   * it is unassigned and this is true (`salesBookingLeadBelongsTo`). Khairo
+   * and Stratco share the fencing pipeline, so a lead never shows on the
+   * wrong person's list and never gets a text from the wrong line.
    */
-  assigned_ghl_user_id?: string;
+  owns_unassigned: boolean;
 }
 
 /**
@@ -153,8 +163,8 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     resource_id: "nithin",
     lane: "patio",
     pipeline_id: "OGZLpPPVWVarN94HL6af",
-    scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
-    sender_line: "774",
+    scoper_user_id: SALES_BOOKING_SENDER_LINES.nithin.scoper_user_id,
+    sender_line: salesBookingLineLabel("nithin"),
     sender_line_source: "patio_profile_source_backed",
     // patio-nithin.json visit/reply/quote: waiting on a reply, needs a visit,
     // scope booked, quote to send. Dropped Client Needs To Be Contacted
@@ -165,13 +175,15 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "1c312cc2-b6f6-4aad-b3c0-a4b14784a5c5", // Scope Booked
       "9b9e5313-8e0e-4ed6-8654-d50413b99885", // Scope Complete / Quote to be Sent
     ],
+    // An unassigned patio lead is Nithin's.
+    owns_unassigned: true,
   },
   marnin: {
     resource_id: "marnin",
     lane: "fencing",
     pipeline_id: "I9t8njpuR0Dm7B2NDcvI",
-    scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
-    sender_line: "776",
+    scoper_user_id: SALES_BOOKING_SENDER_LINES.marnin.scoper_user_id,
+    sender_line: salesBookingLineLabel("marnin"),
     sender_line_source: "captain_default_2026-09-16",
     // fencing-stratco-marnin.json visit/reply/quote: replied, presentation,
     // urgent visit, booked, scheduled, quote to send. Dropped:
@@ -187,13 +199,15 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
+    // An unassigned fencing (Stratco) lead is Marnin's.
+    owns_unassigned: true,
   },
   khairo: {
     resource_id: "khairo",
     lane: "fencing",
     pipeline_id: "I9t8njpuR0Dm7B2NDcvI",
-    scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
-    sender_line: "772",
+    scoper_user_id: SALES_BOOKING_SENDER_LINES.khairo.scoper_user_id,
+    sender_line: salesBookingLineLabel("khairo"),
     sender_line_source: "wiki_fencing_khairo_profile_sms_from_number",
     // Same visit/reply/quote stages as the Stratco profile: both profiles
     // (fencing-khairo.json, fencing-stratco-marnin.json) list the one fencing
@@ -207,8 +221,8 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
-    // Khairo's GHL user (his 772 replies carry it). Only his assigned leads.
-    assigned_ghl_user_id: "RgDWTnYL6zL3eJA6nLht",
+    // Only leads GHL assigns to him; an unassigned fencing lead is Stratco's.
+    owns_unassigned: false,
   },
 };
 
@@ -1234,19 +1248,29 @@ export function projectSalesBookingCase(
 }
 
 /**
+ * Whether an opportunity with this GHL assignee is `resourceId`'s lead: its
+ * assignee is that person, or it is unassigned in a pipeline whose unassigned
+ * leads are theirs. The read list, both approval routes and the send check
+ * all ask this one question.
+ */
+export function salesBookingLeadBelongsTo(
+  assignedTo: unknown,
+  resourceId: string,
+): boolean {
+  const resource = Object.hasOwn(SALES_BOOKING_RESOURCES, resourceId)
+    ? SALES_BOOKING_RESOURCES[resourceId]
+    : null;
+  if (!resource) return false;
+  return salesBookingLeadOwner(
+    assignedTo,
+    resource.owns_unassigned ? resourceId : null,
+  ) === resourceId;
+}
+
+/**
  * True when the opportunity is still in a stage that needs a visit, a reply
  * or a quote. Unknown or blank stage ids are out of scope (never the whole CRM).
  */
-/** Whether GHL assigns this opportunity to the resource's own person. A
- * resource with no `assigned_ghl_user_id` owns every row of its pipeline. */
-export function isSalesBookingAssignedToResource(
-  raw: { assignedTo?: unknown },
-  resource: Pick<SalesBookingResource, "assigned_ghl_user_id">,
-): boolean {
-  return !resource.assigned_ghl_user_id ||
-    raw.assignedTo === resource.assigned_ghl_user_id;
-}
-
 export function isSalesBookingScopeStage(
   stageId: string | null | undefined,
   scopeStageIds: readonly string[],
@@ -2682,7 +2706,9 @@ export async function salesBookingRead(
       ? raw.pipelineStageId
       : "";
     if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) continue;
-    if (!isSalesBookingAssignedToResource(raw, resource)) continue;
+    if (!salesBookingLeadBelongsTo(raw.assignedTo, resource.resource_id)) {
+      continue;
+    }
     const contactId = salesBookingContactId(raw);
     if (contactId) scopedContactIds.push(contactId);
     if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
@@ -2745,7 +2771,9 @@ export async function salesBookingRead(
   let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
     // Another person's lead in a shared pipeline is not on this list at all.
-    if (!isSalesBookingAssignedToResource(raw, resource)) continue;
+    if (!salesBookingLeadBelongsTo(raw.assignedTo, resource.resource_id)) {
+      continue;
+    }
     const contactId = salesBookingContactId(raw);
     const opportunityId = typeof raw.id === "string" ? raw.id : "";
     const job = jobSites[opportunityId] ||

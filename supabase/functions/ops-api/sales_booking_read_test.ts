@@ -1175,12 +1175,15 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
   assertEquals(khairo.resource.pipeline_id, marnin.resource.pipeline_id);
   assertEquals(khairo.resource.sender_line, "772");
   assertEquals(khairo.cases.map((c) => c.opportunity_id), ["opp-khairo"]);
-  // Marnin's list is unchanged: every scoped row of the pipeline.
+  // Marnin's list: his own and unassigned Stratco leads, never Khairo's or
+  // anyone else's.
   const marninShared = await salesBookingRead(shared, {
     resource: "marnin",
     week_start: WEEK,
   });
-  assertEquals(marninShared.cases.length, 3);
+  assertEquals(marninShared.cases.map((c) => c.opportunity_id), [
+    "opp-unassigned",
+  ]);
 
   await assertRejects(
     () => salesBookingRead(deps(), { resource: "someone", week_start: WEEK }),

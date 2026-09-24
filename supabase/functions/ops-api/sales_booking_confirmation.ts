@@ -2,9 +2,10 @@
  * This module has no provider or send capability. Contract:
  * docs/sales-booking-confirmation-api.md.
  */
-import type {
-  SalesBookingCase,
-  SalesBookingReadResponse,
+import {
+  type SalesBookingCase,
+  salesBookingLeadBelongsTo,
+  type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
 import {
   assertSalesBookingStampWriteAuth,
@@ -497,6 +498,8 @@ export async function salesBookingApprovalWriteAction(args: {
     resource: string,
     week: string,
   ) => Promise<SalesBookingReadResponse>;
+  /** The opportunity's current GHL assignee (live, not the cached roster). */
+  readOpportunityAssignee?: (opportunityId: string) => Promise<string | null>;
   now?: () => Date;
   envGet?: SalesBookingEnvGet;
 }): Promise<{ ok: true; approval: BookingApprovalRecord }> {
@@ -544,6 +547,15 @@ export async function salesBookingApprovalWriteAction(args: {
     opportunity(model.id) !== row.opportunity_id || model.profile !== profile ||
     !hashPattern.test(model.pack_revision ?? "")
   ) fail("current_booking_model_required");
+  // The lead must be this person's in GHL right now, read live: a lead
+  // assigned to someone else never takes this person's path or line.
+  if (decision === "approved") {
+    await assertLeadBelongsToResource(
+      args.readOpportunityAssignee,
+      row.opportunity_id,
+      snapshot.resource,
+    );
+  }
   const expected = bookingApprovalSnapshot(response, row, snapshot.step);
   if (canonicalBookingJson(snapshot) !== canonicalBookingJson(expected)) {
     fail("approval_snapshot_changed");
@@ -669,6 +681,29 @@ export async function salesBookingApprovalWriteAction(args: {
     fail("approval_expired_requires_new_proposal");
   }
   return { ok: true, approval: written };
+}
+
+/** Refuse unless the opportunity's live GHL assignee makes it `resource`'s
+ * lead (sales_booking_read.ts `salesBookingLeadBelongsTo`). */
+export async function assertLeadBelongsToResource(
+  readOpportunityAssignee:
+    | ((opportunityId: string) => Promise<string | null>)
+    | undefined,
+  opportunityId: string | null | undefined,
+  resource: string,
+): Promise<void> {
+  if (!readOpportunityAssignee || !opportunityId) {
+    fail("opportunity_assignment_unreadable");
+  }
+  let assignee: string | null;
+  try {
+    assignee = await readOpportunityAssignee(opportunityId);
+  } catch {
+    fail("opportunity_assignment_unreadable");
+  }
+  if (!salesBookingLeadBelongsTo(assignee, resource)) {
+    fail("lead_assigned_to_someone_else");
+  }
 }
 
 /** `sales_booking_approval_write`: an `owner_input` body is an

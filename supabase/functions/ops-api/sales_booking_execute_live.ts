@@ -314,6 +314,7 @@ export function createOwnerApprovalDeps(
       };
     },
     readThread: execute.readThread,
+    readOpportunityAssignee: execute.readOpportunityAssignee,
     readOutlook: readResourceOutlook,
     async readGhlDirectory() {
       const location = encodeURIComponent(locationId());

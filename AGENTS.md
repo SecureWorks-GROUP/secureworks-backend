@@ -3840,8 +3840,12 @@ approval hash. A booking text goes from the visit person's own line
 (`sales_booking_sender.ts`: Marnin 776, Nithin 774, Khairo 772, from their
 wiki scope-booking profiles); no person or another line refuses, never a
 776 fallback. Nithin and Khairo take text approvals only; visits stay
-Stratco. Khairo shares the fencing pipeline, so his list is only the leads
-GHL assigns to him (`assigned_ghl_user_id`). The GHL writer refuses any real write that lacks that
+Stratco. Whose lead it is = the opportunity's current GHL assignee (unassigned:
+Marnin on fencing/Stratco, Nithin on patio), checked at the read, at approval
+and again at send (`salesBookingLeadBelongsTo`); the one people table (app
+user, GHL user, line) is `sales_booking_sender.ts`. Apply
+`20260924230000_sales_booking_approvals_people.sql` before the matching
+`ops-api`, or Nithin/Khairo approvals fail the table's resource check. The GHL writer refuses any real write that lacks that
 executor's per-press claim, not just an approval
 (`docs/ghl-calendar-appointment-write.md`). After GHL holds the booking the
 executor writes its Outlook mirror (keyed on the GHL appointment id). One

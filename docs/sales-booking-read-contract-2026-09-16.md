@@ -105,7 +105,7 @@ Remaining 429s are `coverage.remaining_429_count`.
 
 | Param | Default | Notes |
 |---|---|---|
-| `resource` | `nithin` | `nithin` (patio), `marnin` (fencing/Stratco) or `khairo` (fencing, only opportunities GHL assigns to his user `RgDWTnYL6zL3eJA6nLht`). Anything else is a 400. |
+| `resource` | `nithin` | `nithin` (patio), `marnin` (fencing/Stratco) or `khairo` (fencing). A row is on a person's list only when its current GHL assignee is that person, or it is unassigned in the pipeline whose unassigned leads are theirs (Marnin: fencing/Stratco, Nithin: patio; never Khairo). GHL user ids live in `sales_booking_sender.ts`. Anything else is a 400. |
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
 | `scoper_user_id` | the resource's own | Overrides the diary read only (GHL plus Outlook when that scoper has a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`), and only when it matches a v1 scoper (Nithin / Marnin / Khairo). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |

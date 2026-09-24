@@ -201,6 +201,17 @@ path follows the same split. Same `sales_booking_approvals` table, same
 `approval_id` the executor takes. Each case's `owner_booking.steps` names
 what it can take (`["message","calendar"]` on Stratco, `["message"]` else).
 
+Whose lead it is: the opportunity's current GHL assignee, read live at every
+approval (both routes, including the owner preview) and again at send. A lead
+assigned to Nithin or Khairo is only theirs; one assigned to Marnin, or
+unassigned in the Stratco pipeline, is Marnin's; an unassigned patio lead is
+Nithin's. Otherwise `lead_assigned_to_someone_else`; an unreadable assignee
+refuses `opportunity_assignment_unreadable`. The people, their GHL users and
+lines are one table, `sales_booking_sender.ts`. The approvals table accepts
+`marnin`, `nithin` and `khairo` from migration
+`20260924230000_sales_booking_approvals_people` (apply before the matching
+`ops-api`).
+
 ### Two presses: preview, then decide
 
 Both are `POST ops-api?action=sales_booking_approval_write`. A body carrying

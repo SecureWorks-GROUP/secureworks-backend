@@ -101,6 +101,12 @@ Both actions:
    send from another. `would_send.sender` names the line and whose it is.
 7. `recipient_changed` unless the contact's GHL phone is still the approved
    recipient.
+   Then the opportunity's live GHL assignee must still make it that
+   person's lead (`salesBookingLeadBelongsTo`): assigned to that person, or
+   unassigned where their pipeline's unassigned leads are theirs (Marnin on
+   fencing/Stratco, Nithin on patio; never Khairo). Otherwise
+   `opportunity_assignee_changed`; an unreadable assignee refuses
+   `opportunity_assignment_unreadable`. Nothing is sent.
 8. `text_already_in_thread` if the exact text was already sent since approval.
 9. Claim the send, call ghl-proxy `send_sms` with the exact text, settle.
    An unclear provider answer settles `unknown` and refuses

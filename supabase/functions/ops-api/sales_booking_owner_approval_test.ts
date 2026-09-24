@@ -154,6 +154,12 @@ function deps(o: Overrides = {}) {
         job_site: o.jobSite ?? null,
       }),
     readThread: () => Promise.resolve(o.thread ?? []),
+    // The lead's live GHL assignee: unassigned (Stratco default), or the
+    // person's own user for a Khairo list.
+    readOpportunityAssignee: () =>
+      Promise.resolve(
+        o.resource === "khairo" ? "RgDWTnYL6zL3eJA6nLht" : null,
+      ),
     readGhlDirectory: () => Promise.resolve(calendarDirectory()),
     readGhlEvents: (selector) => {
       calls.push(`ghl:${JSON.stringify(selector)}`);
@@ -291,8 +297,8 @@ Deno.test("owner message: the executor dry-runs the owner's exact text from 776"
       readThread: () => Promise.resolve([]),
       readOutlook: () => Promise.reject(new Error("unused")),
       readContactPhone: () => Promise.resolve("0412 345 678"),
-      readOpportunityAssignee: () =>
-        Promise.resolve("RgDWTnYL6zL3eJA6nLht"),
+      // An unassigned Stratco lead is Marnin's.
+      readOpportunityAssignee: () => Promise.resolve(null),
       readOutlookLead: () => Promise.reject(new Error("unused")),
       mirrorToOutlook: () => Promise.reject(new Error("unused")),
       callAppointmentWriter: () => Promise.reject(new Error("unused")),
@@ -1177,6 +1183,13 @@ Deno.test("a live unexpired owner offer or visit blocks another lead on that slo
 
 // ── Nithin's and Khairo's texts through the real approval gate ─────────────
 
+/** Each person's GHL user id: a lead assigned to it is that person's. */
+const ASSIGNEE: Record<string, string | null> = {
+  marnin: null,
+  nithin: "ERAycY7r6KZ8OA66WQCy",
+  khairo: "RgDWTnYL6zL3eJA6nLht",
+};
+
 Deno.test("owner message for Nithin and Khairo: approved through the gate, sent from their own line", async () => {
   const people: Array<[string, string, string, string]> = [
     [
@@ -1242,8 +1255,7 @@ Deno.test("owner message for Nithin and Khairo: approved through the gate, sent 
         readThread: () => Promise.resolve([]),
         readOutlook: () => Promise.reject(new Error("unused")),
         readContactPhone: () => Promise.resolve("0412 345 678"),
-        readOpportunityAssignee: () =>
-          Promise.resolve("RgDWTnYL6zL3eJA6nLht"),
+        readOpportunityAssignee: () => Promise.resolve(ASSIGNEE[resource]),
         readOutlookLead: () => Promise.reject(new Error("unused")),
         mirrorToOutlook: () => Promise.reject(new Error("unused")),
         callAppointmentWriter: () => Promise.reject(new Error("unused")),
@@ -1275,4 +1287,37 @@ Deno.test("owner message for Nithin and Khairo: approved through the gate, sent 
     }]);
     assertEquals(ledger.length, 1);
   }
+});
+
+Deno.test("owner approval: a lead assigned to someone else never takes this person's path", async () => {
+  // Marnin's screen, but GHL now assigns the lead to Khairo: refused, nothing
+  // recorded, both at preview and at the decision.
+  const { deps: d, rows } = deps({
+    readOpportunityAssignee: () => Promise.resolve("RgDWTnYL6zL3eJA6nLht"),
+  });
+  await refusal(
+    call(d, { owner_input: input("message"), dry_run: true }),
+    "lead_assigned_to_someone_else",
+  );
+  assertEquals(rows.length, 0);
+  // Khairo's screen on a lead that is not assigned to him.
+  const k = deps({
+    resource: "khairo",
+    readOpportunityAssignee: () => Promise.resolve(null),
+  });
+  await refusal(
+    call(k.deps, {
+      owner_input: input("message", { resource: "khairo" }),
+      dry_run: true,
+    }),
+    "lead_assigned_to_someone_else",
+  );
+  // An unreadable assignment refuses; it never guesses Marnin.
+  const u = deps({
+    readOpportunityAssignee: () => Promise.reject(new Error("down")),
+  });
+  await refusal(
+    call(u.deps, { owner_input: input("message"), dry_run: true }),
+    "opportunity_assignment_unreadable",
+  );
 });
