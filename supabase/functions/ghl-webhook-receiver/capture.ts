@@ -27,6 +27,14 @@
 // the contact's newest conversation, so the call arrives once, through the builder,
 // as client.call_logged under ghl:<GHL message id> (callCompletedDoorbell).
 //
+// CustomerReplied (a GHL workflow post: trigger Customer Replied, channel SMS)
+// is the same doorbell for inbound texts, so a reply reaches the evidence table
+// within seconds instead of at the next reconciler run. The post carries the
+// contact only (no GHL message id, usually no conversation id) and writes
+// nothing from its body; the targeted read saves each message under
+// ghl:<GHL message id>, the reconciler's own key, so a text is saved once.
+// Flag off, nothing is written (customerRepliedDoorbell).
+//
 // Nothing here logs message text, names, numbers or addresses: ids and codes.
 // ════════════════════════════════════════════════════════════
 
@@ -298,7 +306,7 @@ export async function targetedConversationRead(
 
 /**
  * The contact's newest GHL conversation, for a post that names the contact
- * only (GHL workflow posts such as CallCompleted). Never throws.
+ * only (GHL workflow posts: CallCompleted, CustomerReplied). Never throws.
  */
 async function newestConversationId(
   contactId: string,
@@ -336,21 +344,21 @@ async function newestConversationId(
 }
 
 /**
- * CallCompleted while live capture is on (slice T1): a doorbell. The post
- * writes nothing itself; one targeted read of the contact's newest conversation saves
- * the call item (and any other missing item) through the builder and writer.
- * The post's conversation id is ignored. When the read cannot run, the
- * 15-minute reconciler covers the
- * call. The caller has authenticated the post, checked the capture lane and
- * read the flag on. Never throws.
+ * A workflow post that names the contact only: a doorbell. The post writes
+ * nothing itself; one targeted read of the contact's newest conversation saves
+ * every missing item through the builder and writer. The post's conversation
+ * id is ignored. When the read cannot run, the 15-minute reconciler covers it.
+ * The caller has authenticated the post, checked the capture lane and read the
+ * flag on. Never throws.
  */
-export async function callCompletedDoorbell(
+async function contactDoorbell(
   client: Db,
   body: Record<string, unknown>,
   deps: {
     env: (name: string) => string | undefined;
     fetch: typeof fetch;
   },
+  rungReason: "call_doorbell" | "reply_doorbell",
 ): Promise<CaptureResult> {
   const contactId = safeId(body.contactId);
   const newest = contactId
@@ -378,7 +386,7 @@ export async function callCompletedDoorbell(
     reason: failed
       ? targeted.code ?? "capture_no_result"
       : targeted.status === "ok"
-      ? "call_doorbell"
+      ? rungReason
       : targeted.code,
     eventId: null,
     upgraded: false,
@@ -387,6 +395,49 @@ export async function callCompletedDoorbell(
     // A failed save of a row the read did find is a real error: GHL retries.
     httpStatus: failed ? 500 : 200,
   };
+}
+
+/**
+ * CallCompleted while live capture is on (slice T1): a doorbell. The call item
+ * (and any other missing item) is saved as client.call_logged by the read.
+ */
+export function callCompletedDoorbell(
+  client: Db,
+  body: Record<string, unknown>,
+  deps: {
+    env: (name: string) => string | undefined;
+    fetch: typeof fetch;
+  },
+): Promise<CaptureResult> {
+  return contactDoorbell(client, body, deps, "call_doorbell");
+}
+
+/**
+ * CustomerReplied (GHL workflow, trigger Customer Replied on SMS): the same
+ * doorbell as CallCompleted. Flag off, nothing is written and the receipt says
+ * capture_disabled (flag_off); the reconciler catches up once it is on. Never
+ * throws.
+ */
+export async function customerRepliedDoorbell(
+  client: Db,
+  body: Record<string, unknown>,
+  deps: {
+    env: (name: string) => string | undefined;
+    fetch: typeof fetch;
+  },
+): Promise<CaptureResult> {
+  if (!(await messageCaptureEnabled(client))) {
+    return {
+      outcome: "capture_disabled",
+      reason: "flag_off",
+      eventId: null,
+      upgraded: false,
+      itemId: null,
+      targeted: null,
+      httpStatus: 200,
+    };
+  }
+  return await contactDoorbell(client, body, deps, "reply_doorbell");
 }
 
 /** Whether live GHL capture is switched on for this item (fail closed). */

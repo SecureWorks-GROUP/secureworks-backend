@@ -3684,7 +3684,10 @@ proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
 `CallCompleted` remains on the legacy path with the capture flag off and becomes
-a doorbell to shared `client.call_logged` capture with the flag on. The call
+a doorbell to shared `client.call_logged` capture with the flag on.
+`CustomerReplied` (a GHL workflow post, secret-checked, carrying only the
+contact) is the same doorbell for inbound texts and writes nothing with the
+flag off; tests `receiver_customer_replied_test.ts`. The call
 mapping, recovery read and legacy-pairing contract are in
 [`docs/context/ghl-message-reconcile.md`](docs/context/ghl-message-reconcile.md).
 Tests: `receiver_t1_test.ts`, `ghl_call_pair_test.ts`.
