@@ -2,11 +2,13 @@ import { assert, assertEquals } from "https://deno.land/std@0.208.0/assert/mod.t
 import {
   currentQuoteForParty,
   everyQuotePartyAccepted,
+  normaliseQuoteRunLabel,
   otherPartyRunDocumentIdsToRetire,
   type QuotePartyDocument,
   quoteDocumentAcceptable,
   quotePartyGreetingName,
   quoteViewDecision,
+  quoteViewRetryPage,
   retireOtherPublishedPartyRunDocuments,
   sameQuoteParty,
   sendRetiresPriorPartyQuotes,
@@ -188,6 +190,20 @@ Deno.test("party identity: null matches only null; contact and run both count", 
   assert(!sameQuoteParty({ job_contact_id: "client", run_label: "RHS" }, { job_contact_id: "client", run_label: "LHS" }))
 })
 
+Deno.test("blank quote run labels normalize to the null party value", () => {
+  assertEquals(normaliseQuoteRunLabel(null), null)
+  assertEquals(normaliseQuoteRunLabel(undefined), null)
+  assertEquals(normaliseQuoteRunLabel("  \t "), null)
+  assertEquals(normaliseQuoteRunLabel(" RHS "), "RHS")
+})
+
+Deno.test("quote read retry page asks the customer to retry without an Accept action", () => {
+  const page = quoteViewRetryPage()
+  assert(page.includes("Please try again shortly."))
+  assert(!page.includes("<button"))
+  assert(!page.includes("<a "))
+})
+
 Deno.test("a retired document is never acceptable", () => {
   assert(!quoteDocumentAcceptable({ ...SWF_26760[0], superseded_at: "2026-09-17T00:25:02Z" }, []))
 })
@@ -196,10 +212,10 @@ Deno.test("a retired document is never acceptable", () => {
 
 Deno.test("all accepted counts current documents only: one revision no longer sticks at partial", () => {
   const docs = [
-    { job_contact_id: "client", accepted_at: null, superseded_at: "2026-09-02T00:00:00Z" },
-    { job_contact_id: "neighbour", accepted_at: null, superseded_at: "2026-09-02T00:00:00Z" },
-    { job_contact_id: "client", accepted_at: "2026-09-03T00:00:00Z", superseded_at: null },
-    { job_contact_id: "neighbour", accepted_at: "2026-09-04T00:00:00Z", superseded_at: null },
+    doc("accept-old-client", { job_contact_id: "client", accepted_at: null, superseded_at: "2026-09-02T00:00:00Z", created_at: "2026-09-01T00:00:00Z" }),
+    doc("accept-old-neighbour", { job_contact_id: "neighbour", accepted_at: null, superseded_at: "2026-09-02T00:00:00Z", created_at: "2026-09-01T00:00:00Z" }),
+    doc("accept-client", { job_contact_id: "client", accepted_at: "2026-09-03T00:00:00Z", created_at: "2026-09-03T00:00:00Z" }),
+    doc("accept-neighbour", { job_contact_id: "neighbour", accepted_at: "2026-09-04T00:00:00Z", created_at: "2026-09-04T00:00:00Z" }),
   ]
   // Old rule: accepted docs (2) >= all contact docs (4) was false.
   assert(!(docs.filter((d) => d.accepted_at).length >= docs.length))
@@ -208,22 +224,33 @@ Deno.test("all accepted counts current documents only: one revision no longer st
 
 Deno.test("all accepted stays false while a current party has not accepted", () => {
   assert(!everyQuotePartyAccepted([
-    { job_contact_id: "client", run_label: null, accepted_at: "2026-09-03T00:00:00Z", sent_to_client: true, superseded_at: null },
-    { job_contact_id: "neighbour", run_label: null, accepted_at: null, sent_to_client: true, sent_at: "2026-09-03T00:00:00Z", superseded_at: null },
+    doc("whole-client", { job_contact_id: "client", accepted_at: "2026-09-03T00:00:00Z", created_at: "2026-09-03T00:00:00Z" }),
+    doc("whole-neighbour", { job_contact_id: "neighbour", accepted_at: null, created_at: "2026-09-03T00:00:00Z" }),
   ]))
   assert(!everyQuotePartyAccepted([]))
 })
 
 Deno.test("all accepted counts a contact's separate current runs as separate parties", () => {
   assert(!everyQuotePartyAccepted([
-    { job_contact_id: "client", run_label: "RHS", accepted_at: "2026-09-03T00:00:00Z", sent_to_client: true },
-    { job_contact_id: "client", run_label: "LHS", accepted_at: null, sent_to_client: true, sent_at: "2026-09-04T00:00:00Z" },
+    doc("client-rhs", { job_contact_id: "client", run_label: "RHS", accepted_at: "2026-09-03T00:00:00Z", created_at: "2026-09-03T00:00:00Z" }),
+    doc("client-lhs", { job_contact_id: "client", run_label: "LHS", accepted_at: null, created_at: "2026-09-04T00:00:00Z" }),
   ]))
   assert(everyQuotePartyAccepted([
-    { job_contact_id: "client", run_label: "RHS", accepted_at: "2026-09-03T00:00:00Z", sent_to_client: true },
-    { job_contact_id: "client", run_label: "LHS", accepted_at: "2026-09-04T00:00:00Z", sent_to_client: true },
-    { job_contact_id: null, run_label: null, accepted_at: "2026-09-05T00:00:00Z", sent_to_client: true },
-    { job_contact_id: null, run_label: "RHS", accepted_at: "2026-09-06T00:00:00Z", sent_to_client: true },
+    doc("client-rhs-accepted", { job_contact_id: "client", run_label: "RHS", accepted_at: "2026-09-03T00:00:00Z", created_at: "2026-09-03T00:00:00Z" }),
+    doc("client-lhs-accepted", { job_contact_id: "client", run_label: "LHS", accepted_at: "2026-09-04T00:00:00Z", created_at: "2026-09-04T00:00:00Z" }),
+  ]))
+})
+
+Deno.test("run acceptance uses only the newest document; whole-quote options accept any current option", () => {
+  const runDocs = [
+    doc("old-run", { job_contact_id: "client", run_label: "RHS", version: 1, accepted_at: "2026-09-03T00:00:00Z", created_at: "2026-09-03T00:00:00Z" }),
+    doc("new-run", { job_contact_id: "client", run_label: "RHS", version: 2, accepted_at: null, created_at: "2026-09-04T00:00:00Z" }),
+  ]
+  assert(!everyQuotePartyAccepted(runDocs))
+  assert(everyQuotePartyAccepted([
+    ...runDocs.map((d) => d.id === "new-run" ? { ...d, accepted_at: "2026-09-05T00:00:00Z" } : d),
+    doc("whole-option-a", { job_contact_id: "neighbour", accepted_at: null, created_at: "2026-09-03T00:00:00Z" }),
+    doc("whole-option-b", { job_contact_id: "neighbour", accepted_at: "2026-09-04T00:00:00Z", created_at: "2026-09-04T00:00:00Z" }),
   ]))
 })
 

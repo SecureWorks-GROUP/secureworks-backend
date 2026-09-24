@@ -35,8 +35,10 @@ import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_min
 import {
   currentQuoteForParty,
   everyQuotePartyAccepted,
+  normaliseQuoteRunLabel,
   quoteDocumentAcceptable,
   quotePartyGreetingName,
+  quoteViewRetryPage,
   quoteViewDecision,
   retireOtherPublishedPartyRunDocuments,
   sendRetiresPriorPartyQuotes,
@@ -1318,6 +1320,11 @@ serve(async (req: Request) => {
         .is('superseded_at', null)
         .single()
 
+      if (error && error.code !== 'PGRST116') {
+        console.error('[send-quote/view] quote read failed:', error.message || String(error))
+        return await htmlResponse(quoteViewRetryPage())
+      }
+
       // Fallback: check job_variations table for variation acceptance links
       if (error || !doc) {
         const { data: variation } = await sb
@@ -1334,13 +1341,17 @@ serve(async (req: Request) => {
         // (M4 G-B1) If the token points at a SUPERSEDED quote (client kept an old link
         // after a revision was sent), show a friendly "this quote was updated" page that
         // links to the current live quote — never a dead end, never a stale price.
-        const { data: supDoc } = await sb
+        const { data: supDoc, error: supDocError } = await sb
           .from('job_documents')
           .select('id, job_id, superseded_at, job_contact_id, run_label, jobs(client_name, type), job_contacts(client_name)')
           .eq('share_token', token)
           .eq('sent_to_client', true)
           .not('superseded_at', 'is', null)
           .maybeSingle()
+        if (supDocError) {
+          console.error('[send-quote/view] retired quote read failed:', supDocError.message || String(supDocError))
+          return await htmlResponse(quoteViewRetryPage())
+        }
         if (supDoc && supDoc.superseded_at) {
           // Forward only to the SAME party's current quote (same job_contact_id
           // and run_label). Never to another party's document: a neighbour's
@@ -1358,7 +1369,11 @@ serve(async (req: Request) => {
           liveQuery = supDoc.run_label
             ? liveQuery.eq('run_label', supDoc.run_label)
             : liveQuery.is('run_label', null)
-          const { data: liveDocs } = await liveQuery
+          const { data: liveDocs, error: liveDocsError } = await liveQuery
+          if (liveDocsError) {
+            console.error('[send-quote/view] current quote read failed:', liveDocsError.message || String(liveDocsError))
+            return await htmlResponse(quoteViewRetryPage())
+          }
           const liveDoc = currentQuoteForParty(liveDocs || [], supDoc)
           const currentUrl = liveDoc?.share_token ? `${url.origin}${url.pathname}?token=${liveDoc.share_token}` : null
           return await htmlResponse(supersededQuotePage(quotePartyGreetingName(supDoc as any), currentUrl))
@@ -1392,7 +1407,11 @@ serve(async (req: Request) => {
         siblingQuery = doc.run_label
           ? siblingQuery.eq('run_label', doc.run_label)
           : siblingQuery.is('run_label', null)
-        const { data: siblings } = await siblingQuery.order('created_at')
+        const { data: siblings, error: siblingsError } = await siblingQuery.order('created_at')
+        if (siblingsError) {
+          console.error('[send-quote/view] sibling quote read failed:', siblingsError.message || String(siblingsError))
+          return await htmlResponse(quoteViewRetryPage())
+        }
 
         const viewDecision = quoteViewDecision(doc, siblings || [])
         if (viewDecision.kind === 'forward') {
@@ -1942,7 +1961,7 @@ serve(async (req: Request) => {
         if (isMultiContact) {
           const { data: allDocs } = await sb
             .from('job_documents')
-            .select('id, job_contact_id, run_label, accepted_at, superseded_at, sent_to_client, sent_at, send_claimed_at')
+            .select('id, job_contact_id, run_label, accepted_at, superseded_at, sent_to_client, sent_at, send_claimed_at, created_at, version')
             .eq('job_id', doc.job_id)
             .eq('type', 'quote')
             .is('superseded_at', null)
@@ -2571,11 +2590,12 @@ serve(async (req: Request) => {
           || fallback
       }
 
-      for (const run of runs) {
-        const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(run.run_label)) : null
+      for (const sourceRun of runs) {
+        const run = { ...sourceRun, run_label: normaliseQuoteRunLabel(sourceRun?.run_label) }
+        const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(sourceRun.run_label)) : null
 
         // Client document for this run
-        const runPdfUrl = run_pdfs?.[run.run_label] || null
+        const runPdfUrl = run_pdfs?.[sourceRun.run_label] || null
         const clientKey = { runLabel: String(run.run_label || ''), jobContactId: primaryContact.id || null }
         const clientResolution = resolveSendRunDocument(existingQuoteDocs, clientKey)
         let clientDoc: any = null
@@ -2758,7 +2778,7 @@ serve(async (req: Request) => {
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
           const run = recipient.runs[i]
-          return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label} - View &amp; Accept &rarr;</a>`
+          return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label || 'Fence run'} - View &amp; Accept &rarr;</a>`
         }).join('')
 
         const emailHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
@@ -2790,11 +2810,11 @@ serve(async (req: Request) => {
           const attachments: any[] = []
           if (run_pdfs) {
             for (const run of recipient.runs) {
-              const pdfUrl = run_pdfs[run.run_label]
+              const pdfUrl = run_pdfs[run.run_label || '']
               if (pdfUrl) {
                 attachments.push({
                   path: pdfUrl,
-                  filename: `Quote_${job.job_number || 'SWF'}_${run.run_label}.pdf`,
+                  filename: `Quote_${job.job_number || 'SWF'}_${run.run_label || 'RUN'}.pdf`,
                 })
               }
             }

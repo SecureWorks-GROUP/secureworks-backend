@@ -44,6 +44,10 @@ function normalised(value: string | null | undefined): string | null {
   return trimmed.length ? trimmed : null
 }
 
+export function normaliseQuoteRunLabel(value: string | null | undefined): string | null {
+  return normalised(value)
+}
+
 export function quotePartyKey(
   doc: { job_contact_id?: string | null; run_label?: string | null },
 ): QuotePartyKey {
@@ -128,27 +132,30 @@ export function quoteDocumentAcceptable(
 }
 
 export function everyQuotePartyAccepted(
-  docs: Array<{
-    job_contact_id?: string | null
-    run_label?: string | null
-    accepted_at?: string | null
-    superseded_at?: string | null
-    sent_to_client?: boolean | null
-    sent_at?: string | null
-    send_claimed_at?: string | null
-  }>,
+  docs: QuotePartyDocument[],
 ): boolean {
-  const byParty = new Map<string, boolean>()
+  const byParty = new Map<string, QuotePartyDocument[]>()
   for (const d of docs || []) {
     if (quoteDocumentIsSuperseded(d) || !quoteDocumentHasClientSend(d)) continue
     const party = JSON.stringify(quotePartyKey(d))
-    byParty.set(party, (byParty.get(party) ?? false) || !!d.accepted_at)
+    const partyDocs = byParty.get(party) || []
+    partyDocs.push(d)
+    byParty.set(party, partyDocs)
   }
   if (byParty.size === 0) return false
-  for (const accepted of byParty.values()) {
-    if (!accepted) return false
+  for (const partyDocs of byParty.values()) {
+    if (quotePartyKey(partyDocs[0]).runLabel !== null) {
+      const current = currentQuoteForParty(partyDocs, partyDocs[0])
+      if (!current?.accepted_at) return false
+    } else if (!partyDocs.some((d) => d.accepted_at)) {
+      return false
+    }
   }
   return true
+}
+
+export function quoteViewRetryPage(): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Quote temporarily unavailable</title></head><body><main><h1>We could not load this quote right now.</h1><p>Please try again shortly.</p></main></body></html>`
 }
 
 export function otherPartyRunDocumentIdsToRetire(
