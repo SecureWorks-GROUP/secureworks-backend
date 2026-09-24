@@ -98,24 +98,16 @@ Deno.test("the history load is a dry run unless dry_run is exactly false", async
     await handleFetch(post(body, "service-key"), deps, runners);
   }
   await handleFetch(
-    post({
-      mode: "backfill",
-      dry_run: false,
-      after: "lYPee0K2DuQHXH2xHL1P",
-      max_contacts: 3,
-    }, "service-key"),
+    post({ mode: "backfill", dry_run: false, max_calls: 3 }, "service-key"),
     deps,
     runners,
   );
   assertEquals(seen.backfill.map((r) => r.dryRun), [true, true, true, false]);
-  assertEquals(seen.backfill[3], {
-    dryRun: false,
-    after: "lYPee0K2DuQHXH2xHL1P",
-    maxContacts: 3,
-  });
+  assertEquals(seen.backfill[3], { dryRun: false, maxCalls: 3 });
+  assertEquals(seen.backfill[0], { dryRun: true, maxCalls: 40 });
 });
 
-Deno.test("a refused real history load answers 409; bad cursor or mode answers 400", async () => {
+Deno.test("a refused real history load answers 409; a bad page size or mode answers 400", async () => {
   const { runners, deps } = setup();
   const refused = await handleFetch(
     post({ mode: "backfill", dry_run: false }, "service-key"),
@@ -126,7 +118,7 @@ Deno.test("a refused real history load answers 409; bad cursor or mode answers 4
   assertEquals((await refused.json()).reason, "fetch_flag_off");
   assertEquals(
     (await handleFetch(
-      post({ mode: "backfill", after: "bad id!" }, "service-key"),
+      post({ mode: "backfill", max_calls: 0 }, "service-key"),
       deps,
       runners,
     )).status,
@@ -187,59 +179,30 @@ Deno.test("ghlGet never follows a redirect, never reads an error body, and repor
   assertEquals(new Headers(calls[0].headers).get("version"), "v3");
 });
 
-Deno.test("history adapters refuse unresolved pagination and accept explicit exhaustion", async () => {
-  const locationId = "location123";
-  const contactId = "contact123";
-  const conversationId = "conversation123";
-  let answer: unknown = {};
-  const d = liveDeps({
-    env: (key) => key === "GHL_LOCATION_ID" ? locationId : "token",
-    createSupabase: () => ({}),
-    fetch: (input) => {
-      const path = new URL(String(input)).pathname;
-      const body = path.endsWith("/contacts/" + contactId)
-        ? { contact: { id: contactId, locationId } }
-        : path.endsWith("/conversations/" + conversationId)
-        ? { conversation: { id: conversationId, contactId, locationId } }
-        : path.endsWith("/conversations/messages/message123")
-        ? {
-          message: { id: "message123", conversationId, contactId, locationId },
-        }
-        : answer;
-      return Promise.resolve(
-        new Response(JSON.stringify(body), { status: 200 }),
-      );
+Deno.test("the history selection asks the one due-call selection in history mode; live asks it in live mode", async () => {
+  const asked: unknown[] = [];
+  const supabase = {
+    rpc: (name: string, args: unknown) => {
+      asked.push([name, args]);
+      return Promise.resolve({ data: [], error: null });
     },
+  };
+  const d = liveDeps({ env: () => undefined, createSupabase: () => supabase });
+  await d.historyCalls(7);
+  await d.dueCalls(40);
+  assertEquals(asked, [
+    ["context_transcript_due_calls", { p_limit: 7, p_history: true }],
+    ["context_transcript_due_calls", { p_limit: 40, p_history: false }],
+  ]);
+  const failing = liveDeps({
+    env: () => undefined,
+    createSupabase: () => ({
+      rpc: () => Promise.resolve({ data: null, error: { message: "x" } }),
+    }),
   });
-  for (const nextPage of [true, undefined]) {
-    answer = { messages: { messages: [], nextPage } };
-    await assertRejects(
-      () => d.listMessages(contactId, conversationId),
-      Error,
-      "pagination_unresolved",
-    );
-  }
-  answer = {
-    messages: { messages: [], nextPage: true, lastMessageId: "message123" },
-  };
   await assertRejects(
-    () => d.listMessages(contactId, conversationId, "message123"),
+    () => failing.historyCalls(1),
     Error,
-    "pagination_unresolved",
+    "history_calls_unreadable",
   );
-  answer = { messages: { messages: [], nextPage: false } };
-  assertEquals((await d.listMessages(contactId, conversationId)).next, null);
-  answer = {
-    conversations: Array.from(
-      { length: 50 },
-      () => ({ id: conversationId, contactId, locationId }),
-    ),
-  };
-  await assertRejects(
-    () => d.listConversations(contactId),
-    Error,
-    "pagination_unresolved",
-  );
-  answer = { conversations: [] };
-  assertEquals((await d.listConversations(contactId)).next, null);
 });

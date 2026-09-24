@@ -10,33 +10,27 @@
 //     after 5 seconds, so the run continues in the background
 //     (EdgeRuntime.waitUntil) and the reply is 202. {"wait": true} runs in the
 //     foreground and returns the summary (ids, counts and codes only).
-//   * the history load, by hand: {"mode": "backfill", "dry_run": true|false,
-//     "after": "<contact id>", "max_contacts": 10}. Always foreground.
-//     dry_run defaults to true: only an explicit false writes.
+//   * the history mode, by hand: {"mode": "backfill", "dry_run": true|false,
+//     "max_calls": 40}. Always foreground. dry_run defaults to true: only an
+//     explicit false writes. Run it again while it answers more: true, and
+//     again 5 minutes later so the agreement rule's second read can save.
 //
 // GHL reads: the call item (API version 2021-07-28) and its transcription
 // (v3), each bound to our configured location; a provider error body is never
-// read or echoed. Contact and conversation listing for the history load reuse
-// ghl-proxy/provider_reads.ts, as the reconciler does.
+// read or echoed. No conversation listing: the call rows are already stored
+// (the M4 history load, live capture).
 //
 // Logs carry codes, counts and ids only, never words.
 
-import {
-  GhlProviderReadError,
-  readGhlProvider,
-} from "../ghl-proxy/provider_reads.ts";
 import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
-import { pairLegacyCall } from "../_shared/evidence/ghl_call_pair.ts";
 import {
-  type BackfillCursor,
   type BackfillDeps,
   type BackfillResult,
   type CaptureOutcome,
   type DueCall,
   FETCH_FLAG,
   type FetchPolicy,
-  type FetchState,
   type LiveResult,
   type ProviderRead,
   runBackfill,
@@ -134,15 +128,6 @@ export function liveDeps(deps: HandlerDeps): BackfillDeps {
     status: null,
     code: "provider_not_configured",
   };
-  const read = (
-    action: "list_ghl_conversations" | "list_ghl_messages",
-    params: Record<string, string>,
-  ) =>
-    readGhlProvider(action, new URLSearchParams(params), {
-      locationId,
-      token,
-      fetchFn: deps.fetch,
-    });
   return {
     now: deps.now ?? (() => Date.now()),
     locationId,
@@ -192,7 +177,7 @@ export function liveDeps(deps: HandlerDeps): BackfillDeps {
     async dueCalls(limit) {
       const { data, error } = await supabase.rpc(
         "context_transcript_due_calls",
-        { p_limit: limit },
+        { p_limit: limit, p_history: false },
       );
       if (error) {
         throw Object.assign(new Error("due_calls_unreadable"), {
@@ -250,111 +235,18 @@ export function liveDeps(deps: HandlerDeps): BackfillDeps {
         return { error: "record_fetch_threw" };
       }
     },
-    async backfillContacts(after, limit) {
+    async historyCalls(limit) {
       const { data, error } = await supabase.rpc(
-        "context_transcript_backfill_contacts",
-        { p_after: after, p_limit: limit },
+        "context_transcript_due_calls",
+        { p_limit: limit, p_history: true },
       );
       if (error) {
-        throw Object.assign(new Error("backfill_contacts_unreadable"), {
-          code: "backfill_contacts_unreadable",
+        throw Object.assign(new Error("history_calls_unreadable"), {
+          code: "history_calls_unreadable",
         });
       }
-      return data ?? [];
+      return (data ?? []) as DueCall[];
     },
-    async listConversations(contactId, startAfterDate) {
-      const params: Record<string, string> = {
-        contact_id: contactId,
-        limit: "50",
-      };
-      if (startAfterDate) params.start_after_date = startAfterDate;
-      const result = await read("list_ghl_conversations", params);
-      const next = result.pagination?.next_cursor as
-        | Record<string, unknown>
-        | null
-        | undefined;
-      const nextPage = typeof next?.start_after_date === "string" ||
-          typeof next?.start_after_date === "number"
-        ? String(next.start_after_date)
-        : null;
-      if (
-        result.pagination?.has_more !== false &&
-        (!nextPage || nextPage === startAfterDate)
-      ) {
-        throw Object.assign(new Error("pagination_unresolved"), {
-          code: "pagination_unresolved",
-        });
-      }
-      return {
-        conversations: (result.data.conversations ?? []) as Record<
-          string,
-          unknown
-        >[],
-        next: result.pagination?.has_more === false ? null : nextPage,
-      };
-    },
-    async listMessages(contactId, conversationId, lastMessageId) {
-      const params: Record<string, string> = {
-        contact_id: contactId,
-        conversation_id: conversationId,
-        limit: "100",
-      };
-      if (lastMessageId) params.last_message_id = lastMessageId;
-      const result = await read("list_ghl_messages", params);
-      const container = (result.data.messages ?? {}) as Record<string, unknown>;
-      const next = result.pagination?.next_cursor as
-        | Record<string, unknown>
-        | null
-        | undefined;
-      const nextPage = typeof next?.last_message_id === "string"
-        ? String(next.last_message_id)
-        : null;
-      if (
-        result.pagination?.has_more !== false &&
-        (!nextPage || nextPage === lastMessageId)
-      ) {
-        throw Object.assign(new Error("pagination_unresolved"), {
-          code: "pagination_unresolved",
-        });
-      }
-      return {
-        messages: (container.messages ?? []) as Record<string, unknown>[],
-        next: result.pagination?.has_more === false ? null : nextPage,
-      };
-    },
-    async existingRows(keys) {
-      const found = new Map<string, string>();
-      for (let i = 0; i < keys.length; i += 100) {
-        const { data, error } = await supabase.from("business_events")
-          .select("id,provider_message_id")
-          .in("provider_message_id", keys.slice(i, i + 100));
-        if (error) {
-          throw Object.assign(new Error("precheck_failed"), {
-            code: "precheck_failed",
-          });
-        }
-        for (const r of data ?? []) found.set(r.provider_message_id, r.id);
-      }
-      return found;
-    },
-    async fetchOutcomes(ids) {
-      const found = new Map<string, FetchState>();
-      for (let i = 0; i < ids.length; i += 100) {
-        const { data, error } = await supabase.from("call_transcript_fetches")
-          .select(
-            "call_message_id,outcome,next_at,attempts,seen_sentences,seen_digest,seen_at",
-          )
-          .in("call_message_id", ids.slice(i, i + 100));
-        if (error) {
-          throw Object.assign(new Error("fetch_records_unreadable"), {
-            code: "fetch_records_unreadable",
-          });
-        }
-        for (const r of data ?? []) found.set(r.call_message_id, r);
-      }
-      return found;
-    },
-    pairLegacyCall: (row) => pairLegacyCall(supabase, row),
   };
 }
 
@@ -379,9 +271,7 @@ function logBackfill(result: BackfillResult): void {
         result.run_id ?? "-"
       } status=${result.status} error=${
         result.error_code ?? "-"
-      } contacts=${c.contacts} calls=${c.call_items} saved=${c.saved} would_save=${
-        c.would_save ?? 0
-      } next_after=${result.next_after ?? "-"}`,
+      } selected=${c.selected} saved=${c.saved} awaiting=${c.awaiting_agreement} would_fetch=${c.would_fetch} more=${result.more}`,
     );
   } else {
     console.log(
@@ -420,38 +310,18 @@ export async function handleFetch(
   }
 
   if (body.mode === "backfill") {
-    const after = typeof body.after === "string" && GHL_ID.test(body.after)
-      ? body.after
-      : null;
-    if (body.after !== undefined && body.after !== null && !after) {
-      return json({ error: "after_invalid" }, 400);
-    }
-    const cursor = body.cursor as BackfillCursor | null | undefined;
-    if (
-      cursor != null && (
-        typeof cursor !== "object" || typeof cursor.contact_id !== "string" ||
-        !GHL_ID.test(cursor.contact_id) ||
-        !(cursor.conversation_ids === null ||
-          (Array.isArray(cursor.conversation_ids) &&
-            cursor.conversation_ids.length <= 50 &&
-            cursor.conversation_ids.every((id) =>
-              typeof id === "string" && GHL_ID.test(id)
-            ))) ||
-        (cursor.message_page !== null && !cursor.conversation_ids?.length) ||
-        ![cursor.conversation_page, cursor.message_page].every((v) =>
-          v === null ||
-          (typeof v === "string" && v.length > 0 && v.length <= 4096)
-        )
-      )
-    ) return json({ error: "cursor_invalid" }, 400);
     // Only an explicit false writes.
     const dryRun = body.dry_run !== false;
-    const maxContacts = typeof body.max_contacts === "number"
-      ? body.max_contacts
-      : 10;
+    if (
+      body.max_calls !== undefined &&
+      !(typeof body.max_calls === "number" &&
+        Number.isInteger(body.max_calls) &&
+        body.max_calls >= 1 && body.max_calls <= 100)
+    ) return json({ error: "max_calls_invalid" }, 400);
+    const maxCalls = typeof body.max_calls === "number" ? body.max_calls : 40;
     try {
       const result = await runners.backfill(
-        { dryRun, after, maxContacts, ...(cursor ? { cursor } : {}) },
+        { dryRun, maxCalls },
         liveDeps(deps),
       );
       logBackfill(result);
@@ -460,9 +330,7 @@ export async function handleFetch(
         result.outcome === "refused" ? 409 : 200,
       );
     } catch (error) {
-      const c = error instanceof GhlProviderReadError
-        ? error.code
-        : code(error);
+      const c = code(error);
       console.error(`[ghl-call-transcript-fetch] backfill failed code=${c}`);
       return json({ mode: "backfill", outcome: "error", code: c }, 500);
     }
@@ -479,9 +347,7 @@ export async function handleFetch(
       logLive(result);
       return result;
     } catch (error) {
-      const c = error instanceof GhlProviderReadError
-        ? error.code
-        : code(error);
+      const c = code(error);
       console.error(`[ghl-call-transcript-fetch] live run failed code=${c}`);
       return { outcome: "error", code: c };
     }

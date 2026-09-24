@@ -11,8 +11,7 @@ BEGIN
  IF to_regclass('public.call_transcript_fetches') IS NOT NULL
   OR to_regprocedure('public.trigger_ghl_call_transcript_fetch()') IS NOT NULL
   OR to_regprocedure('public.record_call_transcript_fetch(jsonb)') IS NOT NULL
-  OR to_regprocedure('public.context_transcript_due_calls(integer)') IS NOT NULL
-  OR to_regprocedure('public.context_transcript_backfill_contacts(text,integer)') IS NOT NULL
+  OR to_regprocedure('public.context_transcript_due_calls(integer,boolean)') IS NOT NULL
   OR to_regprocedure('public.context_call_transcript_eligible(text,text,jsonb)') IS NOT NULL
   OR to_regprocedure('public.context_transcript_fetch_flag()') IS NOT NULL
   OR to_regprocedure('public.context_transcript_capture_policy()') IS NOT NULL

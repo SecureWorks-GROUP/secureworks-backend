@@ -466,7 +466,7 @@ function buildCallRow(
 //     into that text;
 //   * speaker_roles is always "not_given": a channel is never a role (D-T2);
 //   * capture_mode is the call row's (review S8), unless the caller is the
-//     history load, which always writes backfill so a past call never wakes a read.
+//     history mode, which always writes backfill so a past call never wakes a read.
 // safe_summary carries no words: it is capture's own account of the row.
 
 /** The stored call row a transcript belongs to, as the fetcher selected it. */

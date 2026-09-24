@@ -1,4 +1,4 @@
--- Roll back T2 (20260925031000_context_transcript_fetch).
+-- Roll back T2 (20260925043000_context_transcript_fetch).
 --
 -- Turn feature flag ghl_call_transcript_fetch_v1 off first: this refuses while
 -- it is on. Then it unschedules the ghl-call-transcript-fetch cron job,
@@ -55,8 +55,7 @@ AS $fn$
 $fn$;
 
 DROP FUNCTION IF EXISTS public.trigger_ghl_call_transcript_fetch();
-DROP FUNCTION IF EXISTS public.context_transcript_backfill_contacts(text,integer);
-DROP FUNCTION IF EXISTS public.context_transcript_due_calls(integer);
+DROP FUNCTION IF EXISTS public.context_transcript_due_calls(integer,boolean);
 DROP FUNCTION IF EXISTS public.context_call_transcript_eligible(text,text,jsonb);
 DROP FUNCTION IF EXISTS public.record_call_transcript_fetch(jsonb);
 DROP TABLE IF EXISTS public.call_transcript_fetches;
