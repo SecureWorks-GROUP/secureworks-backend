@@ -18,7 +18,8 @@
 //   max_jobs             load: jobs to ask the due list for (1 to 100, default
 //                        20; the 100-jobs-a-day limit is enforced in SQL
 //                        whatever is asked). link: jobs to judge (default 500).
-//   retry_skipped_calls  also reload contacts whose calls were skipped.
+//   after_job_id         link: start after this job id instead of where the
+//                        previous link run stopped.
 //   wait                 true runs in the foreground and returns the summary
 //                        (counts, contact ids, codes); otherwise 202 and the
 //                        run continues in the background.
@@ -31,6 +32,7 @@ import {
 } from "../ghl-proxy/provider_reads.ts";
 import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import { resolveRequestActor } from "../_shared/request_actor.ts";
+import { pairLegacyCall } from "../_shared/evidence/ghl_call_pair.ts";
 import { sameSecret } from "../ghl-message-reconcile/handler.ts";
 import {
   type DueList,
@@ -110,7 +112,7 @@ export function liveHistoryDeps(deps: HandlerDeps): HistoryDeps {
     },
     async latestRun(source) {
       const { data, error } = await supabase.from("context_capture_runs")
-        .select("id,status,updated_at")
+        .select("id,status,updated_at,cursor")
         .eq("source", source)
         .order("started_at", { ascending: false })
         .limit(1);
@@ -130,15 +132,28 @@ export function liveHistoryDeps(deps: HandlerDeps): HistoryDeps {
       }
       return data.run_id;
     },
-    async due(maxJobs, retrySkippedCalls) {
+    async due(maxJobs) {
       const { data, error } = await supabase.rpc("context_ghl_history_due", {
         p_max_jobs: maxJobs,
-        p_retry_skipped_calls: retrySkippedCalls,
       });
       if (error || !data || typeof data !== "object") {
         throw refusal(error, "history_due_unreadable");
       }
       return data as DueList;
+    },
+    async reserve(maxJobs, actor) {
+      const { data, error } = await supabase.rpc("reserve_ghl_history_run", {
+        p_max_jobs: maxJobs,
+        p_actor: actor,
+      });
+      if (
+        error || !data || typeof data !== "object" ||
+        typeof data.run_id !== "string" ||
+        (data.outcome !== "reserved" && data.outcome !== "run_in_progress")
+      ) {
+        throw refusal(error, "history_reserve_failed");
+      }
+      return data;
     },
     async recordContact(row) {
       const { error } = await supabase.rpc("record_ghl_history_contact", {
@@ -204,6 +219,7 @@ export function liveHistoryDeps(deps: HandlerDeps): HistoryDeps {
         ) => [r.provider_message_id, r.event_at]),
       );
     },
+    pairLegacyCall: (row) => pairLegacyCall(supabase, row),
     async capture(row): Promise<HistoryCaptureOutcome> {
       try {
         const { data, error } = await supabase.rpc(
@@ -232,9 +248,10 @@ export function liveLinkDeps(deps: HandlerDeps): LinkDeps {
     now: history.now,
     latestRun: history.latestRun,
     recordRun: history.recordRun,
-    async candidates() {
+    async candidates(after, limit) {
       const { data, error } = await supabase.rpc(
         "context_ghl_history_link_candidates",
+        { p_after: after, p_limit: limit },
       );
       if (error || !Array.isArray(data)) {
         throw refusal(error, "history_link_candidates_unreadable");
@@ -247,10 +264,19 @@ export function liveLinkDeps(deps: HandlerDeps): LinkDeps {
         new URLSearchParams({ query, limit: String(limit) }),
         { locationId, token, fetchFn: deps.fetch },
       );
+      const contacts = (result.data.contacts ?? []) as Record<
+        string,
+        unknown
+      >[];
+      const total = (result.data.meta as Record<string, unknown> | undefined)
+        ?.total;
+      // Complete only on an explicit end: the read says there is no more, or
+      // GHL's own total says every match is on this page. A short page alone
+      // is not proof (review M4-7).
       return {
-        contacts: (result.data.contacts ?? []) as Record<string, unknown>[],
+        contacts,
         complete: result.pagination?.has_more === false ||
-          ((result.data.contacts ?? []) as unknown[]).length < limit,
+          (typeof total === "number" && total <= contacts.length),
       };
     },
     async link(row): Promise<LinkWriteOutcome> {
@@ -289,7 +315,7 @@ function logResult(result: HistoryResult, actor: string): void {
     console.log(
       `[ghl-history-load] run=${result.run_id} dry_run=${result.dry_run} actor=${actor} status=${result.status} error=${
         result.error_code ?? "-"
-      } contacts=${result.contacts.length} jobs_covered=${c.jobs_covered} inserted=${c.inserted} would_insert=${c.would_insert} duplicates=${c.duplicates} placed=${c.placed_on_job} unplaced=${c.rested_unplaced} bucket=${c.admin_bucket} skipped_call=${c.skipped_call} backlog=${c.backlog_contacts}`,
+      } contacts=${result.contacts.length} jobs_covered=${c.jobs_covered} inserted=${c.inserted} would_insert=${c.would_insert} duplicates=${c.duplicates} placed=${c.placed_on_job} pending_review=${c.pending_review} unplaced=${c.unplaced} bucket=${c.admin_bucket} calls_paired_legacy=${c.calls_paired_legacy} backlog=${c.backlog_contacts}`,
     );
   } else {
     console.log(`[ghl-history-load] ${result.outcome} actor=${actor}`);

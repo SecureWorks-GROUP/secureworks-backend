@@ -29,6 +29,7 @@ import {
   runGhlHistoryLoad,
 } from "./history_load.ts";
 import {
+  GAUCI_CALL,
   GAUCI_CONTACT,
   GAUCI_CONVERSATION,
   GAUCI_MESSAGES,
@@ -106,6 +107,7 @@ class FakeDb {
   saved: Record<string, unknown>[] = [];
   status = new Map<string, string>(); // key -> ladder status
   captureFault: HistoryCaptureOutcome | null = null;
+  legacyCallFor = new Map<string, string>(); // call key -> legacy call_complete id
   events: string[] = [];
   n = 0;
   recordRun(run: Record<string, unknown>): string {
@@ -203,6 +205,33 @@ function harness(opts: {
       dueCalls++;
       return Promise.resolve(dueOf(opts.due));
     },
+    // reserve_ghl_history_run's contract (proven in the SQL contract and its
+    // concurrent case): one live real run, the offered jobs counted on the new
+    // run row before any work.
+    reserve: (_max, actor) => {
+      dueCalls++;
+      const live = [...db.runs].reverse().find((r) =>
+        r.source === RUN_SOURCE && r.status === "running"
+      );
+      if (live && T0 - Date.parse(live.updated_at) < POLICY.runningStaleMs) {
+        return Promise.resolve({
+          outcome: "run_in_progress" as const,
+          run_id: live.id,
+        });
+      }
+      if (live) {
+        Object.assign(live, { status: "failed", error_code: "run_abandoned" });
+      }
+      const due = dueOf(opts.due);
+      const run_id = db.recordRun({
+        source: RUN_SOURCE,
+        status: "running",
+        cursor: { v: 1, actor },
+        counts: { jobs_covered: due.jobs_offered },
+      });
+      db.events.push(`reserve:jobs_covered=${due.jobs_offered}`);
+      return Promise.resolve({ outcome: "reserved" as const, run_id, due });
+    },
     recordContact: (row) => {
       db.ledger.set(String(row.contact_id), structuredClone(row));
       db.events.push(`ledger:${row.contact_id}:${row.status}`);
@@ -222,6 +251,25 @@ function harness(opts: {
         ),
       ),
     capture: (row) => Promise.resolve(db.capture(row)),
+    // ghl_call_pair's contract (tested in ghl_call_pair_test.ts): exactly one
+    // legacy row in the window is recorded on the call row.
+    pairLegacyCall: (row) => {
+      const legacy = db.legacyCallFor.get(String(row.provider_message_id));
+      return Promise.resolve(
+        legacy
+          ? {
+            row: {
+              ...row,
+              payload: {
+                ...(row.payload as Record<string, unknown>),
+                legacy_event_id: legacy,
+              },
+            },
+            outcome: "paired" as const,
+          }
+          : { row, outcome: "none" as const },
+      );
+    },
   };
   return { ghl, db, deps, dueCalls: () => dueCalls };
 }
@@ -229,7 +277,6 @@ function harness(opts: {
 const real = {
   dryRun: false,
   maxJobs: 20,
-  retrySkippedCalls: false,
   actor: "m4-test",
 };
 const dry = { ...real, dryRun: true };
@@ -308,21 +355,40 @@ Deno.test("R5 class: a stored copy at the wrong time is counted for the time rep
   );
 });
 
-Deno.test("R1 to R4 and a call: each placed by the ladder; history the ladder sends to review rests unplaced; calls counted, not written", async () => {
+Deno.test("R1 to R4 and a call: each placed by the ladder and counted as it lands; the load moves nothing; the call is loaded with its legacy record", async () => {
   const h = harness({ due: [contact(GAUCI_CONTACT, 2)] });
   h.ghl.add(GAUCI_CONTACT, GAUCI_CONVERSATION, [
     ...GAUCI_MESSAGES,
     ACTIVITY_ITEM,
   ]);
-  // capture_ghl_history_event's answer for R1 (two live quotes): rested.
-  h.db.status.set(`ghl:${R1_ITEM.id}`, "unplaced");
+  // The ladder's answer for R1 (two live quotes): review. The load only
+  // counts it; it writes no placement of its own.
+  h.db.status.set(`ghl:${R1_ITEM.id}`, "pending_luna");
   h.db.status.set("ghl:OPzxTmGv37UAMzf1hD3Q", "unplaced");
+  // The call's old CallCompleted record (one legacy row around the call).
+  h.db.legacyCallFor.set(`ghl:${GAUCI_CALL.id}`, "legacy-call-row-0001");
   const out = await runGhlHistoryLoad(h.deps, real);
   assert(out.outcome === "ran");
-  assertEquals(out.counts.inserted, 4);
-  assertEquals(out.counts.rested_unplaced, 2);
-  assertEquals(out.counts.placed_on_job, 2);
-  assertEquals(out.counts.skipped_call, 1);
+  assertEquals(out.counts.inserted, 5);
+  assertEquals(out.counts.pending_review, 1);
+  assertEquals(out.counts.unplaced, 1);
+  assertEquals(out.counts.placed_on_job, 3);
+  assertEquals(out.counts.skipped_call, 0);
+  assertEquals(out.counts.calls_paired_legacy, 1);
+  // Slice T1's builder: the call is one client.call_logged row, as history.
+  const call = h.db.saved.find((r) =>
+    r.provider_message_id === `ghl:${GAUCI_CALL.id}`
+  )!;
+  assertEquals(call.event_type, "client.call_logged");
+  assertEquals(call.event_at, GAUCI_CALL.dateAdded);
+  assertEquals(
+    (call.metadata as Record<string, unknown>).capture_mode,
+    "backfill",
+  );
+  assertEquals(
+    (call.payload as Record<string, unknown>).legacy_event_id,
+    "legacy-call-row-0001",
+  );
   assertEquals(out.counts.skipped_activity, 1);
   assertEquals(out.counts.jobs_covered, 2);
   const r4 = h.db.saved.find((r) =>
@@ -333,7 +399,7 @@ Deno.test("R1 to R4 and a call: each placed by the ladder; history the ladder se
     "workflow",
   );
   const led = h.db.ledger.get(GAUCI_CONTACT)!;
-  assertEquals(led.skipped_calls, 1); // a later retry_skipped_calls run reloads it
+  assertEquals(led.skipped_calls, 0);
   assertEquals(led.status, "done");
 });
 
@@ -387,7 +453,7 @@ Deno.test("a real run waits for live texts, the capture lane and the attribution
   }
 });
 
-Deno.test("the day's jobs are counted on the run row before the contact is read", async () => {
+Deno.test("the day's jobs are reserved on the run row before any contact is read", async () => {
   const h = harness({
     due: [contact(GAUCI_CONTACT, 2), contact(R12_CONTACT, 1)],
   });
@@ -397,12 +463,15 @@ Deno.test("the day's jobs are counted on the run row before the contact is read"
   const firstRead = h.db.events.findIndex((e) =>
     e.startsWith(`read:${GAUCI_CONVERSATION}`)
   );
-  const counted = h.db.events.indexOf("run:running:jobs_covered=2");
-  assert(counted >= 0 && counted < firstRead, h.db.events.join(" "));
-  const second = h.db.events.findIndex((e) =>
-    e.startsWith(`read:${R12_CONVERSATION}`)
+  const reserved = h.db.events.indexOf("reserve:jobs_covered=3");
+  assert(reserved >= 0 && reserved < firstRead, h.db.events.join(" "));
+  // Progress saves never lower what was reserved.
+  assert(
+    h.db.events.filter((e) => e.startsWith("run:")).every((e) =>
+      e.endsWith("jobs_covered=3")
+    ),
+    h.db.events.join(" "),
   );
-  assert(h.db.events.indexOf("run:running:jobs_covered=3") < second);
   assertEquals(h.db.runs[0].counts.jobs_covered, 3);
 });
 
@@ -533,7 +602,7 @@ Deno.test("one run at a time: a fresh running run stops a second; an abandoned o
     "failed",
     "run_abandoned",
   ]);
-  // A dry run does not wait on a real run, and the reverse.
+  // A dry run does not wait on a real run, and never reserves.
   h.db.runs.push({
     id: "busy",
     source: RUN_SOURCE,
@@ -542,6 +611,44 @@ Deno.test("one run at a time: a fresh running run stops a second; an abandoned o
     counts: {},
   });
   assert((await runGhlHistoryLoad(h.deps, dry)).outcome === "ran");
+});
+
+Deno.test("a conversation list that cannot be read to its end leaves the contact failed, never done", async () => {
+  const h = harness({ due: [contact(SHERIDAN_CONTACT)] });
+  h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  // A full page of conversations with no usable next cursor (the provider
+  // read's has_more null with a pagination warning).
+  h.deps.listConversations = ({ contactId }) =>
+    Promise.resolve({
+      conversations: Array.from(
+        { length: POLICY.conversationPageLimit },
+        (_, i) => ({
+          id: `fullPageConv${String(i).padStart(4, "0")}`,
+          contactId,
+        }),
+      ),
+      hasMore: null,
+      nextStartAfterDate: null,
+    });
+  const out = await runGhlHistoryLoad(h.deps, real);
+  assert(out.outcome === "ran");
+  const led = h.db.ledger.get(SHERIDAN_CONTACT)!;
+  assertEquals([led.status, led.error_code], [
+    "failed",
+    "conversation_cursor_missing",
+  ]);
+  assertEquals(h.db.saved.length, 0);
+  // A short page without a cursor is simply the end of the list.
+  const short = harness({ due: [contact(SHERIDAN_CONTACT)] });
+  short.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  const listConversations = short.deps.listConversations;
+  short.deps.listConversations = async (a) => ({
+    ...(await listConversations(a)),
+    hasMore: null,
+    nextStartAfterDate: null,
+  });
+  await runGhlHistoryLoad(short.deps, real);
+  assertEquals(short.db.ledger.get(SHERIDAN_CONTACT)!.status, "done");
 });
 
 Deno.test("the time budget leaves the remaining contacts for the next run", async () => {
@@ -563,5 +670,6 @@ Deno.test("the time budget leaves the remaining contacts for the next run", asyn
   assertEquals(out.status, "partial");
   assertEquals(out.counts.backlog_contacts, 1);
   assertEquals(h.db.ledger.has(SHERIDAN_CONTACT), false);
-  assertEquals(out.counts.jobs_covered, 1);
+  // The reservation stands: the day counts both contacts' jobs, loaded or not.
+  assertEquals(out.counts.jobs_covered, 2);
 });

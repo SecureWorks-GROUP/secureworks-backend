@@ -31,27 +31,33 @@
 --     code). Ids, times, counts and codes only, never message text. Written
 --     only through record_ghl_history_contact(). RLS on, no policies, revoked
 --     from PUBLIC, anon, authenticated; service_role may read.
---  4. context_ghl_history_due(p_max_jobs, p_retry_skipped_calls): the next
---     contacts to load, grouped from the live jobs, with the daily bound: the
---     jobs covered by today's real runs (Perth day, counted from the
---     ghl_history_load run rows written through record_capture_run) plus the
---     jobs offered may not exceed 100. A contact with more live jobs than the
---     whole day's limit is offered alone, on a day with nothing counted yet.
---     Partial loads resume first; a contact that failed 3 times is not offered
---     again. Read only.
+--  4. context_ghl_history_due(p_max_jobs): the next contacts to load, grouped
+--     from the live jobs, under a strict daily bound: the jobs reserved by
+--     today's real runs (Perth day, the ghl_history_load run rows written
+--     through record_capture_run) plus the jobs offered never exceed 100. A
+--     contact whose live jobs do not fit what is left today waits for a later
+--     day; one with more live jobs than a whole day is never offered and is
+--     counted. Partial loads resume first; a failed contact is offered again
+--     on a later day. Read only.
+--     reserve_ghl_history_run(p_max_jobs, p_actor): how a real run starts.
+--     Under one transaction-scoped advisory lock it closes an abandoned run,
+--     refuses while another real run is live, selects the due contacts and
+--     creates the run row with those jobs already counted (jobs_covered), so
+--     two simultaneous runs can never take the same remaining quota.
 --  5. record_ghl_history_contact(p_row): the one writer of the ledger.
 --  6. capture_ghl_history_event(p_row): the history load's only way to save a
 --     row. It accepts only a backfill row from source ghl-history-load that
 --     names no job (a history row never asserts a job; the ladder decides),
---     refuses while the attribution lane is off, saves it through the one
---     writer capture_business_event (C1a), and, in the same transaction, rests
---     a row the ladder sent to review (pending_luna) as unplaced with its
---     candidate list kept. X27: backfill rows never go to Luna; several
---     candidates means unplaced directly. The model is never asked about a
---     history row, and nothing outside this transaction ever sees it pending.
+--     refuses while the attribution lane is off, and saves it through the one
+--     writer capture_business_event (C1a). It writes no placement field: the
+--     placement-owned BEFORE INSERT trigger places the row, and the load
+--     leaves it as the trigger leaves it. The live ladder (P1a) does not yet
+--     treat backfill rows differently, so a history row it sends to review
+--     stays pending_luna; X27's "backfill never goes to the model" is a
+--     placement-track follow-up, not something this slice writes around.
 --  7. The link action (runs before the load, so linked jobs fold into it):
---     context_ghl_history_link_candidates(): live jobs whose ghl_contact_id is
---       null or blank, with their B0 phone and email keys (context_phone_key,
+--     context_ghl_history_link_candidates(p_after, p_limit): one keyset page
+--       (by job id) of the live jobs whose ghl_contact_id is null or blank, with their B0 phone and email keys (context_phone_key,
 --       context_email_key) and the contact our own records already give those
 --       keys (context_contact_for_key). The edge function searches GHL with
 --       the keys and decides certain (exactly one contact), ambiguous or none.
@@ -75,9 +81,9 @@
 -- Built on the LIVE production definitions it calls (read from production,
 -- see the guard): capture_business_event(jsonb) is the C1a body
 -- (md5 4819869e6dcc40d5cd19a7eba295392c); record_capture_run(jsonb) the F1b
--- body (md5 db03c98a6da49f128595342f5a93f84c). The wrapper relies on the
--- writer's contract (outcome inserted carries the ladder's final
--- attribution_status), so the guard pins it.
+-- body (md5 db03c98a6da49f128595342f5a93f84c). The load relies on the
+-- writer's contract (its outcome names the ladder's attribution_status) and
+-- the reservation on the run writer's, so the guard pins both.
 --
 -- Rollback: supabase/rollbacks/20260925031500_context_ghl_history_load_down.sql
 -- drops the new objects. It refuses while the ledger or the link audit holds a
@@ -96,12 +102,13 @@ BEGIN
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.automation_lane_enabled(text)',NULL::text[],false),
   -- New: absent, or already this migration's body (a re-apply).
-  ('public.context_ghl_history_policy()',ARRAY['d9e5e45f35bb2dd43fba7a3cb5199f43'],true),
+  ('public.context_ghl_history_policy()',ARRAY['ae330644d6d87cf4be51f7adb2191891'],true),
   ('public.context_ghl_history_live_jobs()',ARRAY['49eb23015b724a29058c11b2743954bf'],true),
-  ('public.context_ghl_history_due(integer,boolean)',ARRAY['870cea5fdfecae8e259cc252fb2d92f9'],true),
+  ('public.reserve_ghl_history_run(integer,text)',ARRAY['dc0848e3b103f0e5c8a9a3947bebc154'],true),
+  ('public.context_ghl_history_due(integer)',ARRAY['a52b2ffa5db7ca748e1d1069ec97da00'],true),
   ('public.record_ghl_history_contact(jsonb)',ARRAY['4880dd100bc6161d61b91695231acb52'],true),
-  ('public.capture_ghl_history_event(jsonb)',ARRAY['08f1fde945282cc2613d43aa93e8f1ef'],true),
-  ('public.context_ghl_history_link_candidates()',ARRAY['879d1dadbe42ab5c1902a38a37451b19'],true),
+  ('public.capture_ghl_history_event(jsonb)',ARRAY['3e51278532e7c92a64b0cc9935ce2652'],true),
+  ('public.context_ghl_history_link_candidates(uuid,integer)',ARRAY['8b250cbde48e1d0067c541fa10d3c506'],true),
   ('public.link_job_ghl_contact(jsonb)',ARRAY['4608d962499ddf1c03d3f90ce4a894df'],true),
   ('public.reverse_ghl_contact_link(uuid,text)',ARRAY['bc62193d8d08ecdfe0a4c3ad2b0bacfe'],true),
   -- Called B0 helpers (the placement track's key rule).
@@ -120,12 +127,13 @@ BEGIN
  FOR x IN SELECT p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig
   FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
   WHERE n.nspname='public' AND p.proname IN ('context_ghl_history_policy','context_ghl_history_live_jobs','context_ghl_history_due',
+   'reserve_ghl_history_run',
    'record_ghl_history_contact','capture_ghl_history_event','context_ghl_history_link_candidates','link_job_ghl_contact',
    'reverse_ghl_contact_link')
   AND p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' NOT IN (
    'context_ghl_history_policy()','context_ghl_history_live_jobs()',
-   'context_ghl_history_due(p_max_jobs integer, p_retry_skipped_calls boolean)',
-   'record_ghl_history_contact(p_row jsonb)','capture_ghl_history_event(p_row jsonb)','context_ghl_history_link_candidates()',
+   'context_ghl_history_due(p_max_jobs integer)','reserve_ghl_history_run(p_max_jobs integer, p_actor text)',
+   'record_ghl_history_contact(p_row jsonb)','capture_ghl_history_event(p_row jsonb)','context_ghl_history_link_candidates(p_after uuid, p_limit integer)',
    'link_job_ghl_contact(p_row jsonb)','reverse_ghl_contact_link(p_link_id uuid, p_actor text)') LOOP
   problems:=problems||format('unexpected overload %s',x.sig);
  END LOOP;
@@ -151,11 +159,8 @@ BEGIN
   ('jobs','id','uuid'),('jobs','job_number','text'),('jobs','ghl_contact_id','text'),('jobs','archived','boolean'),
   ('jobs','metadata','jsonb'),('jobs','created_at','timestamp with time zone'),('jobs','updated_at','timestamp with time zone'),
   ('job_documents','job_id','uuid'),('job_documents','type','text'),('job_documents','sent_at','timestamp with time zone'),
-  ('business_events','attribution_status','text'),('business_events','attribution_step',NULL),
-  ('business_events','attribution_confidence',NULL),('business_events','attributed_at','timestamp with time zone'),
-  ('business_events','attribution_checked_at','timestamp with time zone'),('business_events','match_status','text'),
-  ('business_events','match_method','text'),('business_events','match_confidence',NULL),
-  ('business_events','candidate_job_ids','uuid[]'),('business_events','metadata','jsonb'),('business_events','job_id','uuid'),
+  -- Read by the edge function's duplicate check (provider_message_id, event_at).
+  ('business_events','provider_message_id','text'),('business_events','event_at','timestamp with time zone'),
   ('context_capture_runs','source','text'),('context_capture_runs','started_at','timestamp with time zone'),
   ('context_capture_runs','counts','jsonb'),('jobs','status',NULL),('jobs','client_phone','text'),('jobs','client_email','text')
  ) AS c(tbl,col,typ) LOOP
@@ -168,10 +173,6 @@ BEGIN
    problems:=problems||format('%s.%s is %s, expected %s',x.tbl,x.col,coalesce(live,'<missing>'),coalesce(x.typ,'present'));
   END IF;
  END LOOP;
- -- The resting status must exist (F1).
- IF NOT EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid='public.business_events'::regclass
-   AND c.conname='business_events_attribution_status_check' AND pg_get_constraintdef(c.oid) LIKE '%''unplaced''::text%')
- THEN problems:=problems||'business_events_attribution_status_check does not allow unplaced (F1 not applied)'::text; END IF;
  IF cardinality(problems)>0 THEN
   RAISE EXCEPTION 'ghl_history_load_preimage_mismatch: %; read the live definitions before building on them',array_to_string(problems,'; ');
  END IF;
@@ -194,8 +195,10 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   -- sms.md section 12 M4: at most 100 jobs a day.
   'daily_job_limit',100,
   'day_zone','Australia/Perth',
-  -- A contact whose load failed this many times is not offered again.
-  'max_failed_attempts',3,
+  -- A real run whose row has not moved for this long is abandoned.
+  'running_stale_minutes',10,
+  -- Link candidates per page (keyset by job id).
+  'link_page_limit',500,
   'run_source','ghl_history_load',
   'dry_run_source','ghl_history_load_dry',
   'event_source','ghl-history-load',
@@ -203,7 +206,7 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'link_dry_run_source','ghl_history_link_dry')
 $$;
 COMMENT ON FUNCTION public.context_ghl_history_policy() IS
- 'M4 GHL history load: live-job allow-lists (captain ruling 24 Sep 2026), the 60-day quote window, the 100-jobs-a-day limit, the failed-attempt cap and the run and event sources.';
+ 'M4 GHL history load: live-job allow-lists (captain ruling 24 Sep 2026), the 60-day quote window, the strict 100-jobs-a-day limit, the abandoned-run window, the link page size and the run and event sources.';
 
 -- 2. The live jobs. A job is live when its status is on the live allow-list,
 -- or it is a draft or quoted job with a quote document sent in the last 60
@@ -267,13 +270,14 @@ GRANT SELECT ON TABLE public.context_ghl_history_contacts TO service_role;
 COMMENT ON TABLE public.context_ghl_history_contacts IS
  'M4 GHL history load ledger: one row per GHL contact whose history was loaded (done), is part loaded (partial, with a resume point) or failed (with a code). Ids, times, counts and codes only, never message text. Written only through record_ghl_history_contact(); service_role has SELECT only.';
 
--- 4. The next contacts to load, and the day's bound.
-CREATE OR REPLACE FUNCTION public.context_ghl_history_due(p_max_jobs integer, p_retry_skipped_calls boolean DEFAULT false) RETURNS jsonb
+-- 4. The next contacts to load under the day's strict bound, and the atomic
+-- reservation a real run starts with.
+CREATE OR REPLACE FUNCTION public.context_ghl_history_due(p_max_jobs integer) RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE
  pol jsonb:=public.context_ghl_history_policy(); lim integer; day_start timestamptz; counted integer; remaining integer;
- picked jsonb:='[]'::jsonb; used integer:=0; waiting_contacts integer:=0; waiting_jobs integer:=0; oversized boolean:=false; r record;
- bad_ids integer;
+ picked jsonb:='[]'::jsonb; used integer:=0; waiting_contacts integer:=0; waiting_jobs integer:=0; over_contacts integer:=0; over_jobs integer:=0;
+ r record; bad_ids integer;
 BEGIN
  IF p_max_jobs IS NULL OR p_max_jobs<1 THEN RAISE EXCEPTION 'history_due_max_jobs_invalid'; END IF;
  lim:=(pol->>'daily_job_limit')::integer;
@@ -293,32 +297,57 @@ BEGIN
   )
   SELECT b.*, h.status AS prior_status, h.resume, coalesce(h.attempts,0) AS attempts
   FROM by_contact b LEFT JOIN public.context_ghl_history_contacts h ON h.contact_id=b.contact_id
-  WHERE h.contact_id IS NULL OR h.status='partial'
-   OR (h.status='failed' AND h.attempts<(pol->>'max_failed_attempts')::integer)
-   OR (coalesce(p_retry_skipped_calls,false) AND h.status='done' AND h.skipped_calls>0)
+  -- Never loaded, part loaded, or failed on an earlier day (retried, never given up on).
+  WHERE h.contact_id IS NULL OR h.status='partial' OR (h.status='failed' AND h.last_attempt_at<day_start)
   ORDER BY (h.status='partial') DESC NULLS LAST, b.tier, b.activity_at DESC NULLS LAST, b.contact_id
  LOOP
-  IF oversized OR used>=p_max_jobs THEN
-   waiting_contacts:=waiting_contacts+1; waiting_jobs:=waiting_jobs+r.jobs;
-  ELSIF used+r.jobs<=remaining THEN
+  IF r.jobs>lim THEN
+   -- More live jobs than a whole day allows: never inside the bound, so never offered.
+   over_contacts:=over_contacts+1; over_jobs:=over_jobs+r.jobs;
+  ELSIF used<p_max_jobs AND used+r.jobs<=remaining THEN
    picked:=picked||jsonb_build_array(jsonb_build_object('contact_id',r.contact_id,'job_ids',to_jsonb(r.job_ids),'jobs',r.jobs,
     'prior_status',r.prior_status,'resume',r.resume,'attempts',r.attempts));
    used:=used+r.jobs;
-  ELSIF used=0 AND counted=0 AND r.jobs>lim THEN
-   -- More live jobs than a whole day allows: loaded alone, on a day with nothing counted yet.
-   picked:=jsonb_build_array(jsonb_build_object('contact_id',r.contact_id,'job_ids',to_jsonb(r.job_ids),'jobs',r.jobs,
-    'prior_status',r.prior_status,'resume',r.resume,'attempts',r.attempts,'oversized',true));
-   used:=r.jobs; oversized:=true;
   ELSE
    waiting_contacts:=waiting_contacts+1; waiting_jobs:=waiting_jobs+r.jobs;
   END IF;
  END LOOP;
  RETURN jsonb_build_object('daily_job_limit',lim,'jobs_counted_today',counted,'daily_remaining',remaining,'max_jobs',p_max_jobs,
   'day_start',day_start,'contacts',picked,'jobs_offered',used,'contacts_waiting',waiting_contacts,'jobs_waiting',waiting_jobs,
+  'contacts_over_daily_limit',over_contacts,'jobs_over_daily_limit',over_jobs,
   'daily_limit_reached',remaining=0,'jobs_invalid_contact_id',bad_ids);
 END $$;
-COMMENT ON FUNCTION public.context_ghl_history_due(integer,boolean) IS
- 'M4: the next GHL contacts to load, from the live jobs grouped by contact: partial loads first, then in progress, scheduled, accepted, quotes, newest activity first. The jobs offered never exceed 100 minus the jobs counted by today''s ghl_history_load runs (Perth day); contacts are added until p_max_jobs is reached (the last one may pass it). A contact with more live jobs than a whole day is offered alone on a day with nothing counted. Done contacts are not offered (with p_retry_skipped_calls, done contacts whose calls were skipped are). Read only.';
+COMMENT ON FUNCTION public.context_ghl_history_due(integer) IS
+ 'M4: the next GHL contacts to load, from the live jobs grouped by contact: partial loads first, then in progress, booked, accepted, quotes, newest activity first. The jobs offered never exceed 100 minus the jobs counted by today''s ghl_history_load runs (Perth day); contacts are added while fewer than p_max_jobs are offered and the whole contact fits. A contact with more live jobs than a whole day is never offered (counted). Done contacts are not offered; failed ones are offered again on a later day. Read only.';
+
+CREATE OR REPLACE FUNCTION public.reserve_ghl_history_run(p_max_jobs integer, p_actor text) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE pol jsonb:=public.context_ghl_history_policy(); v_actor text:=coalesce(nullif(p_actor,''),'actor_missing');
+ live_run record; due jsonb; created jsonb;
+BEGIN
+ IF v_actor !~ '^[A-Za-z0-9_.:@-]{1,128}$' THEN RAISE EXCEPTION 'history_reserve_actor_invalid'; END IF;
+ -- One reservation at a time: a second caller waits here, then sees the first
+ -- run's counted jobs.
+ PERFORM pg_advisory_xact_lock(hashtextextended('context_ghl_history_load',0));
+ SELECT c.id, c.updated_at INTO live_run FROM public.context_capture_runs c
+ WHERE c.source=pol->>'run_source' AND c.status='running' ORDER BY c.started_at DESC LIMIT 1;
+ IF FOUND THEN
+  IF live_run.updated_at>clock_timestamp()-make_interval(mins=>(pol->>'running_stale_minutes')::integer) THEN
+   RETURN jsonb_build_object('outcome','run_in_progress','run_id',live_run.id);
+  END IF;
+  -- The worker died mid-run. Its counted jobs stay counted.
+  PERFORM public.record_capture_run(jsonb_build_object('run_id',live_run.id,'source',pol->>'run_source','status','failed','error_code','run_abandoned'));
+ END IF;
+ due:=public.context_ghl_history_due(p_max_jobs);
+ created:=public.record_capture_run(jsonb_build_object('source',pol->>'run_source','status','running','window_to',clock_timestamp(),
+  'cursor',jsonb_build_object('v',1,'actor',v_actor),
+  'counts',jsonb_build_object('dry_run',0,'jobs_covered',(due->>'jobs_offered')::integer,'daily_job_limit',(due->>'daily_job_limit')::integer,
+   'jobs_counted_before',(due->>'jobs_counted_today')::integer,'daily_remaining',(due->>'daily_remaining')::integer,
+   'contacts_due',jsonb_array_length(due->'contacts'))));
+ RETURN jsonb_build_object('outcome','reserved','run_id',created->>'run_id','due',due);
+END $$;
+COMMENT ON FUNCTION public.reserve_ghl_history_run(integer,text) IS
+ 'M4: starts a real history-load run atomically. Under one transaction-scoped advisory lock: refuses while another real run is live (run_in_progress), closes an abandoned one (run_abandoned), selects the due contacts and creates the run row with their jobs already counted in jobs_covered, so simultaneous callers never share the remaining daily quota. Returns {outcome: reserved, run_id, due} or {outcome: run_in_progress, run_id}.';
 
 -- 5. The one writer of the ledger. p_row keys: contact_id, run_id, status
 -- (done, partial, failed), job_ids, jobs, earliest_message_at,
@@ -387,10 +416,11 @@ END $$;
 COMMENT ON FUNCTION public.record_ghl_history_contact(jsonb) IS
  'The one writer of context_ghl_history_contacts (M4). Upserts one contact''s load record against a ghl_history_load run; attempts counted, first attempt kept, a done row clears its resume point. Refusal codes: history_contact_invalid, history_contact_id_invalid, history_contact_status_invalid, history_contact_actor_invalid, history_contact_counts_invalid, history_contact_resume_invalid, history_contact_error_code_invalid, history_contact_error_code_required, history_contact_run_invalid.';
 
--- 6. The history load's only way to save a row.
+-- 6. The history load's only way to save a row. It writes no placement field:
+-- the placement-owned trigger places the row as it places every row.
 CREATE OR REPLACE FUNCTION public.capture_ghl_history_event(p_row jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
-DECLARE pol jsonb:=public.context_ghl_history_policy(); out jsonb; rested uuid;
+DECLARE pol jsonb:=public.context_ghl_history_policy();
 BEGIN
  IF p_row IS NULL OR jsonb_typeof(p_row)<>'object' THEN RETURN jsonb_build_object('outcome','error','code','capture_row_invalid'); END IF;
  IF jsonb_typeof(p_row->'metadata')<>'object' OR p_row->'metadata'->>'capture_mode' IS DISTINCT FROM 'backfill' THEN
@@ -402,38 +432,21 @@ BEGIN
  IF nullif(p_row->>'job_id','') IS NOT NULL OR coalesce(nullif(p_row->>'match_method',''),'none')<>'none' THEN
   RETURN jsonb_build_object('outcome','error','code','history_row_job_refused');
  END IF;
- -- With the attribution lane off the ladder places nothing, and a later bucket
- -- re-run could send the row to review; history is loaded only while it is on.
+ -- With the attribution lane off the ladder places nothing; history is loaded
+ -- only while it is on, so every row is placed at its own time on insert.
  IF NOT public.automation_lane_enabled('attribution') THEN RETURN jsonb_build_object('outcome','error','code','attribution_disabled'); END IF;
- BEGIN
-  out:=public.capture_business_event(p_row);
-  IF out->>'outcome'='inserted' AND out->>'attribution_status'='pending_luna' THEN
-   -- X27: a backfill row never goes to Luna. Rest it exactly as a several or
-   -- undecided answer rests a row: off every job, candidates kept, shown in
-   -- each candidate's not-yet-placed lane. Same transaction as the insert.
-   UPDATE public.business_events e SET job_id=NULL,attribution_status='unplaced',attribution_step=5,
-    attribution_confidence=NULL,attributed_at=NULL,attribution_checked_at=clock_timestamp(),
-    match_status='unresolved',match_method='none',match_confidence=NULL,
-    metadata=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('unplaced_reason','backfill_never_luna','unplaced_at',clock_timestamp())
-   WHERE e.id=(out->>'id')::uuid AND e.attribution_status='pending_luna'
-   RETURNING e.id INTO rested;
-   IF rested IS NULL THEN RAISE EXCEPTION 'history_rest_failed'; END IF;
-   out:=out||jsonb_build_object('attribution_status','unplaced','rested','backfill_never_luna');
-  END IF;
-  RETURN out;
- EXCEPTION WHEN OTHERS THEN
-  -- The insert and the rest commit together or not at all.
-  RETURN jsonb_build_object('outcome','error','code',CASE WHEN SQLERRM='history_rest_failed' THEN 'history_rest_failed' ELSE SQLSTATE END);
- END;
+ RETURN public.capture_business_event(p_row);
 END $$;
 COMMENT ON FUNCTION public.capture_ghl_history_event(jsonb) IS
- 'M4: the GHL history load''s only writer. Accepts only a capture_mode backfill row from source ghl-history-load that names no job, only while the attribution lane is on; saves it through capture_business_event and, in the same transaction, rests a row the ladder sent to review as unplaced (candidates kept, metadata.unplaced_reason backfill_never_luna). Backfill rows never go to Luna (INTEGRATION X27). Returns the writer''s outcome.';
+ 'M4: the GHL history load''s only writer. Accepts only a capture_mode backfill row from source ghl-history-load that names no job, only while the attribution lane is on, and saves it through capture_business_event; the placement-owned trigger places it. Writes no placement field. Returns the writer''s outcome.';
 
 -- 7. The link action. A live job with no GHL contact gets one only on an exact
 -- key match to exactly one contact (decided by the edge function against GHL
 -- and against the contact our own records give the same keys). Captain,
 -- 24 Sep 2026: "yes link all live jobs to their contacts".
-CREATE OR REPLACE FUNCTION public.context_ghl_history_link_candidates()
+-- One keyset page by job id: p_after is the last job id of the previous page
+-- (null for the first page), so repeated runs reach every job without a contact.
+CREATE OR REPLACE FUNCTION public.context_ghl_history_link_candidates(p_after uuid, p_limit integer)
 RETURNS TABLE(job_id uuid, job_number text, tier integer, phone_key text, email_key text, own_contact_id text, own_contacts integer)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT l.job_id, l.job_number, l.tier, k.phone_key, k.email_key, o.contact_id, coalesce(o.contacts,0)
@@ -441,11 +454,12 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  JOIN public.jobs j ON j.id=l.job_id
  CROSS JOIN LATERAL (SELECT public.context_phone_key(j.client_phone) AS phone_key, public.context_email_key(j.client_email) AS email_key) k
  LEFT JOIN LATERAL (SELECT * FROM public.context_contact_for_key(k.email_key,k.phone_key)) o ON k.phone_key IS NOT NULL OR k.email_key IS NOT NULL
- WHERE l.ghl_contact_id IS NULL
- ORDER BY l.tier, l.activity_at DESC NULLS LAST, l.job_id
+ WHERE l.ghl_contact_id IS NULL AND (p_after IS NULL OR l.job_id>p_after)
+ ORDER BY l.job_id
+ LIMIT greatest(1,least(coalesce(p_limit,500),(public.context_ghl_history_policy()->>'link_page_limit')::integer))
 $$;
-COMMENT ON FUNCTION public.context_ghl_history_link_candidates() IS
- 'M4 link action: live jobs with no GHL contact, with their B0 phone and email keys and the one contact our own records give those keys (context_contact_for_key; own_contacts counts several). Read only; the keys go only to the service-role edge function.';
+COMMENT ON FUNCTION public.context_ghl_history_link_candidates(uuid,integer) IS
+ 'M4 link action: one keyset page (job id after p_after, at most 500) of live jobs with no GHL contact, with their B0 phone and email keys and the one contact our own records give those keys (context_contact_for_key; own_contacts counts several). Read only; the keys go only to the service-role edge function.';
 
 CREATE TABLE IF NOT EXISTS public.context_ghl_contact_links (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -541,12 +555,12 @@ COMMENT ON FUNCTION public.reverse_ghl_contact_link(uuid,text) IS
 
 -- 8. Grants: nothing reachable by the public key or a signed-in login.
 REVOKE ALL ON FUNCTION
- public.context_ghl_history_policy(),public.context_ghl_history_live_jobs(),public.context_ghl_history_due(integer,boolean),
+ public.context_ghl_history_policy(),public.context_ghl_history_live_jobs(),public.context_ghl_history_due(integer),public.reserve_ghl_history_run(integer,text),
  public.record_ghl_history_contact(jsonb),public.capture_ghl_history_event(jsonb),
- public.context_ghl_history_link_candidates(),public.link_job_ghl_contact(jsonb),public.reverse_ghl_contact_link(uuid,text)
+ public.context_ghl_history_link_candidates(uuid,integer),public.link_job_ghl_contact(jsonb),public.reverse_ghl_contact_link(uuid,text)
 FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION
- public.context_ghl_history_policy(),public.context_ghl_history_live_jobs(),public.context_ghl_history_due(integer,boolean),
+ public.context_ghl_history_policy(),public.context_ghl_history_live_jobs(),public.context_ghl_history_due(integer),public.reserve_ghl_history_run(integer,text),
  public.record_ghl_history_contact(jsonb),public.capture_ghl_history_event(jsonb),
- public.context_ghl_history_link_candidates(),public.link_job_ghl_contact(jsonb),public.reverse_ghl_contact_link(uuid,text)
+ public.context_ghl_history_link_candidates(uuid,integer),public.link_job_ghl_contact(jsonb),public.reverse_ghl_contact_link(uuid,text)
 TO service_role;

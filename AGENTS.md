@@ -3689,22 +3689,24 @@ mapping, recovery read and legacy-pairing contract are in
 [`docs/context/ghl-message-reconcile.md`](docs/context/ghl-message-reconcile.md).
 Tests: `receiver_t1_test.ts`, `ghl_call_pair_test.ts`.
 
-## GHL History Is Loaded As Backfill, Never Asked Of The Model
+## GHL History Loads As Backfill Under A Reserved Daily Cap
 
 The M4 history load (`supabase/functions/ghl-history-load`, migration
 `20260925031500`) is manual and dry run unless the body says `"dry_run": false`.
 Its scope is `context_ghl_history_live_jobs()` (captain ruling 24 Sep 2026: live
-statuses and quotes sent in 60 days, never closed jobs) and 100 jobs a Perth
-day, both bounded in SQL. It saves only through `capture_ghl_history_event`,
-which accepts only `capture_mode: backfill` rows naming no job and rests any row
-the ladder sends to review as `unplaced` in the same transaction (X27): never
-save history through `capture_business_event` directly, or it reaches the
-model. Its `action: "link"` writes `jobs.ghl_contact_id` only while null or
-blank, on an exact B0 key match to exactly one GHL contact, with one
-`context_ghl_contact_links` audit row per change (`reverse_ghl_contact_link`
-undoes one). Run the link before the load: the load reads contacts from
-`jobs.ghl_contact_id` only. Calls are skipped by the shared row builder until a
-call writer exists; `retry_skipped_calls` reloads those contacts later.
+statuses and quotes sent in 60 days, never closed jobs). A real run starts only
+through `reserve_ghl_history_run`, which under one advisory lock refuses a second
+live run and counts the day's jobs (strict 100 a Perth day) before any work;
+never start a real run another way. Rows go through `capture_ghl_history_event`
+(backfill only, no job asserted), which writes no placement field: the ladder
+places them, and until the placement track keeps backfill from the model (X27)
+a review row stays `pending_luna`. Its `action: "link"` writes
+`jobs.ghl_contact_id` only while null or blank, on an exact B0 key match to one
+GHL contact, with one `context_ghl_contact_links` audit row per change
+(`reverse_ghl_contact_link` undoes one); candidates are keyset-paged by job id.
+Run the link before the load: the load reads contacts from
+`jobs.ghl_contact_id` only. Calls load as `client.call_logged` through T1's
+builder, paired with their legacy record like every call writer.
 
 ## A pg_cron Bearer Is Not The Function's Service Key
 

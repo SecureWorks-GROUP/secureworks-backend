@@ -31,10 +31,11 @@ END $$;
 
 DROP FUNCTION IF EXISTS public.reverse_ghl_contact_link(uuid,text);
 DROP FUNCTION IF EXISTS public.link_job_ghl_contact(jsonb);
-DROP FUNCTION IF EXISTS public.context_ghl_history_link_candidates();
+DROP FUNCTION IF EXISTS public.context_ghl_history_link_candidates(uuid,integer);
 DROP FUNCTION IF EXISTS public.capture_ghl_history_event(jsonb);
 DROP FUNCTION IF EXISTS public.record_ghl_history_contact(jsonb);
-DROP FUNCTION IF EXISTS public.context_ghl_history_due(integer,boolean);
+DROP FUNCTION IF EXISTS public.reserve_ghl_history_run(integer,text);
+DROP FUNCTION IF EXISTS public.context_ghl_history_due(integer);
 DROP FUNCTION IF EXISTS public.context_ghl_history_live_jobs();
 DROP FUNCTION IF EXISTS public.context_ghl_history_policy();
 DROP TABLE IF EXISTS public.context_ghl_contact_links;

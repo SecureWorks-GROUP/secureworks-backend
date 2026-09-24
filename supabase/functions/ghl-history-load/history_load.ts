@@ -19,32 +19,35 @@
 //      (gate G-ANON, sms.md section 13a, holds the flag), so the evidence
 //      table never gains customer history while it is still publicly readable,
 //      and nothing between the load and live capture is left uncovered.
-//   3. One run at a time per source (a run row still running and fresh stops a
-//      second one).
+//   3. A real run starts with reserve_ghl_history_run, which under one lock
+//      refuses a second live run, closes an abandoned one, picks the due
+//      contacts and counts their jobs on the new run row before any work, so
+//      the day's 100 is strict and never shared by two runs. A dry run reads
+//      the same due list without reserving anything (one dry run at a time).
 //   4. For each due contact: every GHL conversation of the contact, every
 //      message page back to the first message. Each item goes through the one
 //      row builder (_shared/evidence/ghl_message.ts) with capture_mode
-//      backfill, and is saved through capture_ghl_history_event (the one
-//      writer, capture_business_event, plus the backfill resting rule: a row
-//      the ladder sends to review rests unplaced, never asked of the model).
-//      Calls are counted skipped while the builder has no call rows (they stay
-//      with the call writer, rank 9); a later run with retry_skipped_calls
-//      reloads those contacts.
+//      backfill, and is saved through capture_ghl_history_event (checks, then
+//      the one writer capture_business_event). The load writes no placement
+//      field: the placement-owned trigger places each row at its own GHL time.
+//      Calls are saved as client.call_logged rows by the same builder (slice
+//      T1); before a call row is written the load records its one legacy
+//      client.call_complete row, as every call writer does (ghl_call_pair.ts).
 //   5. Per contact, one ledger row (context_ghl_history_contacts): done,
-//      partial with a resume point (page or time budget, or a stopping
-//      provider failure), or failed with a code. The run row's counts are
-//      saved before each contact, so the day's job count (jobs_covered) is
-//      never under-counted.
+//      partial with a resume point (page or time budget, a stopping provider
+//      failure, or a conversation list that cannot be read to its end), or
+//      failed with a code (offered again on a later day).
 //
-// None of these rows wakes an extraction read (capture_mode backfill, X15),
-// none is ever sent to the model (X27), and the ladder alone places each one
-// at its own GHL time. Pure orchestration over injected reads and writes: no
+// None of these rows wakes an extraction read (capture_mode backfill, X15).
+// The live ladder does not yet keep backfill rows from the model (X27); rows
+// it sends to review are counted pending_review, never moved here. Pure orchestration over injected reads and writes: no
 // model call, no clock but the one injected.
 
 import {
   buildGhlMessageRow,
   type GhlMessageItem,
 } from "../_shared/evidence/ghl_message.ts";
+import type { LegacyCallPairOutcome } from "../_shared/evidence/ghl_call_pair.ts";
 import {
   failureStopsRun,
   type ProviderFailure,
@@ -102,6 +105,7 @@ export interface RunRow {
   id: string;
   status: "running" | "succeeded" | "partial" | "failed";
   updated_at: string;
+  cursor?: unknown;
 }
 
 export interface Resume {
@@ -133,6 +137,8 @@ export interface DueList {
   jobs_waiting: number;
   daily_limit_reached: boolean;
   jobs_invalid_contact_id?: number;
+  contacts_over_daily_limit?: number;
+  jobs_over_daily_limit?: number;
 }
 
 export type HistoryCaptureOutcome =
@@ -154,8 +160,13 @@ export interface HistoryDeps {
   latestRun(source: string): Promise<RunRow | null>;
   /** record_capture_run. Throws on a refusal. Returns the run id. */
   recordRun(run: Record<string, unknown>): Promise<string>;
-  /** context_ghl_history_due. Throws when unreadable. */
-  due(maxJobs: number, retrySkippedCalls: boolean): Promise<DueList>;
+  /** context_ghl_history_due (dry runs: read only). Throws when unreadable. */
+  due(maxJobs: number): Promise<DueList>;
+  /** reserve_ghl_history_run (real runs). Throws on a refusal. */
+  reserve(maxJobs: number, actor: string): Promise<
+    | { outcome: "reserved"; run_id: string; due: DueList }
+    | { outcome: "run_in_progress"; run_id: string }
+  >;
   /** record_ghl_history_contact. Throws on a refusal. */
   recordContact(row: Record<string, unknown>): Promise<void>;
   listConversations(args: {
@@ -181,12 +192,20 @@ export interface HistoryDeps {
   existingKeys(keys: string[]): Promise<Map<string, string | null>>;
   /** capture_ghl_history_event(row). Never throws: a fault is outcome error. */
   capture(row: Record<string, unknown>): Promise<HistoryCaptureOutcome>;
+  /**
+   * For a call row: the row to write, with payload.legacy_event_id when exactly
+   * one legacy client.call_complete row of the contact sits around the call
+   * (_shared/evidence/ghl_call_pair.ts, slice T1). Never throws.
+   */
+  pairLegacyCall(row: Record<string, unknown>): Promise<{
+    row: Record<string, unknown>;
+    outcome: LegacyCallPairOutcome;
+  }>;
 }
 
 export interface HistoryRequest {
   dryRun: boolean;
   maxJobs: number;
-  retrySkippedCalls: boolean;
   actor: string;
 }
 
@@ -226,6 +245,7 @@ const COUNT_KEYS = [
   "jobs_due",
   "contacts_waiting",
   "jobs_invalid_contact_id",
+  "contacts_over_daily_limit",
   "jobs_covered",
   "contacts_done",
   "contacts_partial",
@@ -241,7 +261,8 @@ const COUNT_KEYS = [
   "duplicates",
   "existing_time_differs",
   "placed_on_job",
-  "rested_unplaced",
+  "pending_review",
+  "unplaced",
   "admin_bucket",
   "other_status",
   "write_errors",
@@ -252,6 +273,10 @@ const COUNT_KEYS = [
   "skipped_call",
   "skipped_activity",
   "skipped_unsupported_type",
+  // Slice T1: call rows that recorded their one legacy call row, and lookups
+  // that could not be read (the row is then written as normal).
+  "calls_paired_legacy",
+  "call_pair_unreadable",
   "backlog_contacts",
 ] as const;
 type CountKey = typeof COUNT_KEYS[number];
@@ -265,7 +290,8 @@ const CONTACT_COUNT_KEYS = [
   "duplicates",
   "existing_time_differs",
   "placed_on_job",
-  "rested_unplaced",
+  "pending_review",
+  "unplaced",
   "admin_bucket",
   "other_status",
   "write_errors",
@@ -338,7 +364,6 @@ export function parseRequest(
   return {
     dryRun: body.dry_run !== false,
     maxJobs: Math.min(Math.max(n, 1), policy.maxJobsCeiling),
-    retrySkippedCalls: body.retry_skipped_calls === true,
     actor,
   };
 }
@@ -372,23 +397,31 @@ export async function runGhlHistoryLoad(
   const source = req.dryRun ? DRY_RUN_SOURCE : RUN_SOURCE;
   const started = deps.now();
 
-  // 1. One run at a time; close a run the worker abandoned.
-  const latest = await deps.latestRun(source);
-  if (latest?.status === "running") {
-    const updated = ms(latest.updated_at) ?? 0;
-    if (started - updated < policy.runningStaleMs) {
-      return { outcome: "run_in_progress", run_id: latest.id };
+  // 1. The due contacts and the day's bound (SQL decides both). A real run
+  // reserves them atomically; a dry run only reads them.
+  let due: DueList;
+  let runId: string | null = null;
+  if (req.dryRun) {
+    const latest = await deps.latestRun(source);
+    if (latest?.status === "running") {
+      const updated = ms(latest.updated_at) ?? 0;
+      if (started - updated < policy.runningStaleMs) {
+        return { outcome: "run_in_progress", run_id: latest.id };
+      }
+      await deps.recordRun({
+        run_id: latest.id,
+        source,
+        status: "failed",
+        error_code: "run_abandoned",
+      });
     }
-    await deps.recordRun({
-      run_id: latest.id,
-      source,
-      status: "failed",
-      error_code: "run_abandoned",
-    });
+    due = await deps.due(req.maxJobs);
+  } else {
+    const reserved = await deps.reserve(req.maxJobs, req.actor);
+    if (reserved.outcome === "run_in_progress") return reserved;
+    due = reserved.due;
+    runId = reserved.run_id;
   }
-
-  // 2. The due contacts and the day's bound (SQL decides both).
-  const due = await deps.due(req.maxJobs, req.retrySkippedCalls);
   const counts = Object.fromEntries(COUNT_KEYS.map((k) => [k, 0])) as Counts;
   counts.dry_run = req.dryRun ? 1 : 0;
   counts.daily_job_limit = due.daily_job_limit;
@@ -399,18 +432,22 @@ export async function runGhlHistoryLoad(
   counts.jobs_due = due.jobs_offered;
   counts.contacts_waiting = due.contacts_waiting;
   counts.jobs_invalid_contact_id = due.jobs_invalid_contact_id ?? 0;
+  counts.contacts_over_daily_limit = due.contacts_over_daily_limit ?? 0;
+  // A real run's jobs were counted when it was reserved; they stay counted.
+  counts.jobs_covered = req.dryRun ? 0 : due.jobs_offered;
 
-  const runId = await deps.recordRun({
-    source,
-    status: "running",
-    window_to: new Date(started).toISOString(),
-    cursor: {
-      v: 1,
-      actor: req.actor,
-      retry_skipped_calls: req.retrySkippedCalls,
-    },
-    counts,
-  });
+  if (runId === null) {
+    runId = await deps.recordRun({
+      source,
+      status: "running",
+      window_to: new Date(started).toISOString(),
+      cursor: { v: 1, actor: req.actor },
+      counts,
+    });
+  } else {
+    await deps.recordRun({ run_id: runId, source, counts });
+  }
+  const run = runId;
 
   const outcomes: ContactSummary[] = [];
   let stop: string | null = null;
@@ -472,10 +509,13 @@ export async function runGhlHistoryLoad(
         const id = text(row.id);
         if (id && !conversations.includes(id)) conversations.push(id);
       }
-      if (
-        !list.conversations.length || list.hasMore === false ||
-        !list.nextStartAfterDate
-      ) break;
+      if (!list.conversations.length || list.hasMore === false) break;
+      if (!list.nextStartAfterDate) {
+        // A short page is the end of the list; a full one with no cursor
+        // cannot prove it read every conversation.
+        if (list.conversations.length < policy.conversationPageLimit) break;
+        return out("failed", "conversation_cursor_missing", null);
+      }
       startAfterDate = list.nextStartAfterDate;
     }
 
@@ -567,7 +607,7 @@ export async function runGhlHistoryLoad(
           keys.add(key);
           built.row.metadata = {
             ...(built.row.metadata as Record<string, unknown>),
-            history_run_id: runId,
+            history_run_id: run,
           };
           rows.push(built.row);
         }
@@ -602,15 +642,26 @@ export async function runGhlHistoryLoad(
             counts.would_insert++;
             continue;
           }
-          const saved = await deps.capture(row);
+          let toWrite = row;
+          if (row.event_type === "client.call_logged") {
+            const paired = await deps.pairLegacyCall(row);
+            toWrite = paired.row;
+            if (paired.outcome === "paired") counts.calls_paired_legacy++;
+            else if (paired.outcome === "unreadable") {
+              counts.call_pair_unreadable++;
+            }
+          }
+          const saved = await deps.capture(toWrite);
           if (saved.outcome === "inserted") {
             counts.inserted++;
             c.inserted++;
             const status = saved.attribution_status ?? null;
             const bucket: ContactCountKey = status && LINKED.has(status)
               ? "placed_on_job"
+              : status === "pending_luna"
+              ? "pending_review"
               : status === "unplaced"
-              ? "rested_unplaced"
+              ? "unplaced"
               : status === "admin_bucket"
               ? "admin_bucket"
               : "other_status";
@@ -671,9 +722,7 @@ export async function runGhlHistoryLoad(
         counts.backlog_contacts = due.contacts.length - i;
         break;
       }
-      // Count the jobs before the work, so the day's bound never under-counts.
-      if (!req.dryRun) counts.jobs_covered += contact.jobs;
-      await deps.recordRun({ run_id: runId, source, counts });
+      await deps.recordRun({ run_id: run, source, counts });
 
       const result = await loadContact(contact);
       counts[
@@ -695,7 +744,7 @@ export async function runGhlHistoryLoad(
       if (!req.dryRun) {
         await deps.recordContact({
           contact_id: contact.contact_id,
-          run_id: runId,
+          run_id: run,
           status: result.status,
           job_ids: contact.job_ids,
           jobs: contact.jobs,
@@ -732,7 +781,7 @@ export async function runGhlHistoryLoad(
     : "succeeded";
   const errorCode = stop ?? firstIssue;
   await deps.recordRun({
-    run_id: runId,
+    run_id: run,
     source,
     status,
     counts,
@@ -740,7 +789,7 @@ export async function runGhlHistoryLoad(
   });
   return {
     outcome: "ran",
-    run_id: runId,
+    run_id: run,
     dry_run: req.dryRun,
     status,
     error_code: errorCode,

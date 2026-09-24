@@ -57,12 +57,18 @@ function harness(
     status: string;
     counts: Record<string, number>;
     error_code?: string | null;
+    cursor?: unknown;
+    updated_at: string;
   }[] = [];
+  const pages: (string | null)[] = [];
   const linked: Record<string, unknown>[] = [];
   const queries: string[] = [];
   const deps: LinkDeps = {
     now: () => T0,
-    latestRun: () => Promise.resolve(null),
+    latestRun: (source) =>
+      Promise.resolve(
+        ([...runs].reverse().find((r) => r.source === source) ?? null) as never,
+      ),
     recordRun: (run) => {
       if (run.run_id) {
         const r = runs.find((x) => x.id === run.run_id)!;
@@ -71,6 +77,7 @@ function harness(
           r.counts = structuredClone(run.counts as Record<string, number>);
         }
         if ("error_code" in run) r.error_code = run.error_code as string | null;
+        if ("cursor" in run) r.cursor = structuredClone(run.cursor);
         return Promise.resolve(r.id);
       }
       runs.push({
@@ -78,10 +85,20 @@ function harness(
         source: String(run.source),
         status: "running",
         counts: {},
+        cursor: run.cursor,
+        updated_at: new Date(T0).toISOString(),
       });
       return Promise.resolve(runs.at(-1)!.id);
     },
-    candidates: () => Promise.resolve(candidates),
+    // context_ghl_history_link_candidates' keyset page: the list is in job-id
+    // order; a page starts after the given job and holds at most `limit`.
+    candidates: (after, limit) => {
+      pages.push(after);
+      const start = after === null
+        ? 0
+        : candidates.findIndex((c) => c.job_id === after) + 1;
+      return Promise.resolve(candidates.slice(start, start + limit));
+    },
     searchContacts: (query) => {
       queries.push(query);
       const hit = directory[query];
@@ -98,7 +115,7 @@ function harness(
       );
     },
   };
-  return { deps, runs, linked, queries };
+  return { deps, runs, linked, queries, pages };
 }
 
 const real = { dryRun: false, maxJobs: 500, actor: "m4-test" };
@@ -341,4 +358,61 @@ Deno.test("a refused search fails that job; a rate limit stops the run with the 
     out.counts.backlog_jobs,
   ], [1, 1, 2]);
   assertEquals(h.linked.length, 0);
+});
+
+Deno.test("keyset paging: each run starts where the last stopped, so every live job is reached; the end starts over", async () => {
+  const jobs = [1, 2, 3, 4, 5].map((i) =>
+    job(`M4-K${i}`, { job_id: `55555555-5555-4555-8555-00000000000${i}` })
+  );
+  const h = harness(jobs, {});
+  const page = { ...real, dryRun: true, maxJobs: 2 };
+  const first = await runGhlContactLink(h.deps, page);
+  assert(first.outcome === "ran");
+  assertEquals([first.after_job_id, first.next_after_job_id], [
+    null,
+    jobs[1].job_id,
+  ]);
+  assertEquals(first.none_job_numbers, ["M4-K1", "M4-K2"]);
+  assertEquals(first.status, "partial"); // more remain
+  const second = await runGhlContactLink(h.deps, page);
+  assert(second.outcome === "ran");
+  assertEquals(second.none_job_numbers, ["M4-K3", "M4-K4"]);
+  const third = await runGhlContactLink(h.deps, page);
+  assert(third.outcome === "ran");
+  assertEquals(third.none_job_numbers, ["M4-K5"]);
+  assertEquals(third.next_after_job_id, null); // reached the end
+  const fourth = await runGhlContactLink(h.deps, page);
+  assert(fourth.outcome === "ran");
+  assertEquals(fourth.none_job_numbers, ["M4-K1", "M4-K2"]);
+  assertEquals(h.pages, [null, jobs[1].job_id, jobs[3].job_id, null]);
+  // The caller can start anywhere; the run row keeps its own cursor.
+  const chosen = await runGhlContactLink(h.deps, {
+    ...page,
+    afterJobId: jobs[2].job_id,
+  });
+  assert(chosen.outcome === "ran");
+  assertEquals(chosen.none_job_numbers, ["M4-K4", "M4-K5"]);
+  assertEquals(
+    parseLinkRequest({ after_job_id: jobs[2].job_id }, "a").afterJobId,
+    jobs[2].job_id,
+  );
+  assertEquals(
+    parseLinkRequest({ after_job_id: "not-a-uuid" }, "a").afterJobId,
+    null,
+  );
+});
+
+Deno.test("a rate limit keeps the cursor at the last job judged, so the next run resumes there", async () => {
+  const jobs = [1, 2, 3].map((i) =>
+    job(`M4-R${i}`, {
+      job_id: `66666666-6666-4666-8666-00000000000${i}`,
+      phone_key: `40000005${i}`,
+    })
+  );
+  const h = harness(jobs, {
+    [phone("400000052")]: failure("provider_request_failed", 429, 429),
+  });
+  const out = await runGhlContactLink(h.deps, { ...real, dryRun: true });
+  assert(out.outcome === "ran");
+  assertEquals([out.status, out.next_after_job_id], ["failed", jobs[0].job_id]);
 });

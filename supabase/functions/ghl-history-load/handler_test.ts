@@ -36,23 +36,27 @@ function fakeSupabase(state: { flag?: boolean }) {
           return ok(true);
         case "record_capture_run":
           return ok({ run_id: args.p_run.run_id ?? `run-${++runs}` });
-        case "context_ghl_history_due":
+        case "reserve_ghl_history_run":
           return ok({
-            daily_job_limit: 100,
-            jobs_counted_today: 0,
-            daily_remaining: 100,
-            contacts: [{
-              contact_id: R12_CONTACT,
-              job_ids: ["j1"],
-              jobs: 1,
-              prior_status: null,
-              resume: null,
-              attempts: 0,
-            }],
-            jobs_offered: 1,
-            contacts_waiting: 0,
-            jobs_waiting: 0,
-            daily_limit_reached: false,
+            outcome: "reserved",
+            run_id: `run-${++runs}`,
+            due: {
+              daily_job_limit: 100,
+              jobs_counted_today: 0,
+              daily_remaining: 100,
+              contacts: [{
+                contact_id: R12_CONTACT,
+                job_ids: ["j1"],
+                jobs: 1,
+                prior_status: null,
+                resume: null,
+                attempts: 0,
+              }],
+              jobs_offered: 1,
+              contacts_waiting: 0,
+              jobs_waiting: 0,
+              daily_limit_reached: false,
+            },
           });
         case "capture_ghl_history_event":
           return ok({
@@ -102,7 +106,7 @@ function fakeSupabase(state: { flag?: boolean }) {
   return client;
 }
 
-function ghlFetch(log: URL[]) {
+function ghlFetch(log: URL[], contactsTotal?: number) {
   const conversation = {
     id: R12_CONVERSATION,
     contactId: R12_CONTACT,
@@ -134,7 +138,7 @@ function ghlFetch(log: URL[]) {
           locationId: "loc_secureworks",
           phone: "+61412345678",
         }],
-        meta: {},
+        meta: contactsTotal === undefined ? {} : { total: contactsTotal },
       };
     } else throw new Error(`unexpected ${url}`);
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
@@ -234,7 +238,11 @@ Deno.test("wiring: a real load reads GHL through the provider reads and saves on
     1,
   ]);
   const names = sb.calls.map((c) => c.name);
-  assert(names.includes("context_ghl_history_due"));
+  assert(names.includes("reserve_ghl_history_run"));
+  assert(
+    !names.includes("context_ghl_history_due"),
+    "a real run only reserves",
+  );
   assert(!names.includes("capture_business_event"), "never the bare writer");
   const saved = sb.calls.find((c) => c.name === "capture_ghl_history_event")!;
   assertEquals(saved.args.p_row.metadata.capture_mode, "backfill");
@@ -244,9 +252,15 @@ Deno.test("wiring: a real load reads GHL through the provider reads and saves on
     "done",
     "m4-validator",
   ]);
-  // The day's count is saved with the run before the contact is read.
-  const due = sb.calls.find((c) => c.name === "context_ghl_history_due")!;
-  assertEquals(due.args, { p_max_jobs: 20, p_retry_skipped_calls: false });
+  // The day's jobs are reserved with the run, before any contact is read.
+  const reserve = sb.calls.find((c) => c.name === "reserve_ghl_history_run")!;
+  assertEquals(reserve.args, { p_max_jobs: 20, p_actor: "m4-validator" });
+  assert(
+    !names.includes("record_capture_run") ||
+      sb.calls.filter((c) => c.name === "record_capture_run").every((c) =>
+        c.args.p_run.run_id
+      ),
+  );
   assert(
     sb.calls.some((c) =>
       c.name === "from:business_events:select" &&
@@ -267,7 +281,7 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
   const sb = fakeSupabase({});
   const res = await handleHistoryLoad(
     post({}, { action: "link", dry_run: false, wait: true }),
-    { env, createSupabase: () => sb, fetch: ghlFetch(log) },
+    { env, createSupabase: () => sb, fetch: ghlFetch(log, 1) },
   );
   const body = await res.json();
   assertEquals([
@@ -276,6 +290,10 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
     body.counts.certain,
     body.counts.linked,
   ], ["link", "ran", 1, 1]);
+  const page = sb.calls.find((c) =>
+    c.name === "context_ghl_history_link_candidates"
+  )!;
+  assertEquals(page.args, { p_after: null, p_limit: 500 });
   const link = sb.calls.find((c) => c.name === "link_job_ghl_contact")!;
   assertEquals(link.args.p_row.contact_id, R21_CONTACT);
   assertEquals(link.args.p_row.key_kind, "phone");
@@ -289,7 +307,7 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
     await (await handleHistoryLoad(post({}, { action: "link", wait: true }), {
       env,
       createSupabase: () => sb2,
-      fetch: ghlFetch([]),
+      fetch: ghlFetch([], 1),
     })).json();
   assertEquals([dry.dry_run, dry.counts.certain, dry.counts.linked], [
     true,
@@ -297,4 +315,34 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
     0,
   ]);
   assert(!sb2.calls.some((c) => c.name === "link_job_ghl_contact"));
+});
+
+Deno.test("wiring: a GHL contact search is complete only on an explicit end (review M4-7)", async () => {
+  // One exact match on a short page, but GHL says nothing about the end: an
+  // unfinished search, so the job stays ambiguous and nothing is written.
+  const sb = fakeSupabase({});
+  const body = await (await handleHistoryLoad(
+    post({}, { action: "link", dry_run: false, wait: true }),
+    { env, createSupabase: () => sb, fetch: ghlFetch([]) },
+  )).json();
+  assertEquals([
+    body.counts.ambiguous,
+    body.counts.search_incomplete,
+    body.counts.linked,
+  ], [1, 1, 0]);
+  assert(!sb.calls.some((c) => c.name === "link_job_ghl_contact"));
+  // GHL's own total covering the page is an explicit end.
+  const sb2 = fakeSupabase({});
+  const done = await (await handleHistoryLoad(
+    post({}, { action: "link", dry_run: false, wait: true }),
+    { env, createSupabase: () => sb2, fetch: ghlFetch([], 1) },
+  )).json();
+  assertEquals(done.counts.linked, 1);
+  // A total larger than the page is not.
+  const sb3 = fakeSupabase({});
+  const more = await (await handleHistoryLoad(
+    post({}, { action: "link", dry_run: false, wait: true }),
+    { env, createSupabase: () => sb3, fetch: ghlFetch([], 2) },
+  )).json();
+  assertEquals([more.counts.ambiguous, more.counts.linked], [1, 0]);
 });

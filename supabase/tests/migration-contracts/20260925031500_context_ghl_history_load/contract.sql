@@ -10,16 +10,18 @@
 --        backfill, linked to SWF-261335, waking no read on their own.
 --   R5   mDS89hMzWE2R3VCMqxP2  the tool-sent row already saved: a duplicate,
 --        never a second row, its direct link untouched.
---   R1   pffXnIL1v2FTaKnz4DHm  two live fencing quotes: as live it goes to the
---        model; as history it rests unplaced with both candidates, never asked.
+--   R1   pffXnIL1v2FTaKnz4DHm  two live fencing quotes: history is placed by the
+--        placement-owned trigger exactly as a live row is (review, both stored);
+--        the load writes no placement field of its own.
 --   R14  XyDhsX5IZ9kaS2XxPEzr, oS67q2BCAyhbIl4SjihH  pre-job texts loaded after
---        both quotes exist: both at-time candidates, so unplaced on both lanes.
+--        both quotes exist: both at-time candidates, in both lanes.
 --   R15  vylm5LHmbChCfgZLawc2  3 Jul, SWF-261209 created 14 Aug: before any
 --        job (X18: stays before any job until P3), never pulled onto the job.
 --   R9   1TPog9f79izPytVu8yoo  one live patio job: single_open.
 --   R8   uQQ42WwGWSnz0Ccvs5Go  lead with no job: not a live job, never loaded.
 --   Scope: the captain's 24 Sep ruling, bounded in SQL, on the live status
---   vocabulary read from production 24 Sep. The day bound: 100 jobs.
+--   vocabulary read from production 24 Sep. The day bound: 100 jobs, strict,
+--   reserved atomically (concurrent.sh proves two callers at once).
 --   Link action: a live job with no GHL contact gets one, never an overwrite,
 --   one audit row per change, reversible.
 
@@ -61,8 +63,8 @@ DO $$
 DECLARE f regprocedure;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_ghl_history_policy()','public.context_ghl_history_live_jobs()',
-  'public.context_ghl_history_due(integer,boolean)','public.record_ghl_history_contact(jsonb)','public.capture_ghl_history_event(jsonb)',
-  'public.context_ghl_history_link_candidates()','public.link_job_ghl_contact(jsonb)','public.reverse_ghl_contact_link(uuid,text)']::regprocedure[] LOOP
+  'public.context_ghl_history_due(integer)','public.reserve_ghl_history_run(integer,text)','public.record_ghl_history_contact(jsonb)','public.capture_ghl_history_event(jsonb)',
+  'public.context_ghl_history_link_candidates(uuid,integer)','public.link_job_ghl_contact(jsonb)','public.reverse_ghl_contact_link(uuid,text)']::regprocedure[] LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') OR has_function_privilege('public',f,'EXECUTE')
   THEN RAISE EXCEPTION 'm4 public execute on %',f; END IF;
   IF NOT has_function_privilege('service_role',f,'EXECUTE') THEN RAISE EXCEPTION 'm4 service_role cannot execute %',f; END IF;
@@ -137,7 +139,7 @@ BEGIN
    WHEN j.live_basis='quote_sent' THEN 4 ELSE 3 END) THEN RAISE EXCEPTION 'm4 scope: % tier %',j.job_number,j.tier; END IF;
  END LOOP;
  -- The load never offers a job with no contact.
- IF public.context_ghl_history_due(100,false)::text ~ '"contact_id": null' THEN RAISE EXCEPTION 'm4 due offered a contactless job'; END IF;
+ IF public.context_ghl_history_due(100)::text ~ '"contact_id": null' THEN RAISE EXCEPTION 'm4 due offered a contactless job'; END IF;
 END $$;
 ROLLBACK;
 
@@ -154,7 +156,7 @@ BEGIN
  PERFORM pg_temp.m4_job('SWP-26941','in_progress','patio','Oxqi7eCx2rGCsS0BXOH2','2026-09-01T02:00:00Z');
  -- R6 (stand-in status scheduled: install text sent 18 Sep).
  PERFORM pg_temp.m4_job('SWF-261335','scheduled','fencing','1VHBzZX6DsjMZW2WbgQn','2026-08-20T02:00:00Z');
- d:=public.context_ghl_history_due(20,false);
+ d:=public.context_ghl_history_due(20);
  IF (d->>'daily_job_limit')::integer<>100 OR (d->>'jobs_counted_today')::integer<>0 OR (d->>'daily_remaining')::integer<>100 THEN RAISE EXCEPTION 'm4 due header %',d; END IF;
  IF jsonb_array_length(d->'contacts')<>3 OR (d->>'jobs_offered')::integer<>4 THEN RAISE EXCEPTION 'm4 due contacts %',d->'contacts'; END IF;
  -- Tier order: in progress, scheduled, then quotes.
@@ -164,7 +166,7 @@ BEGIN
  IF (c->>'jobs')::integer<>2 OR NOT (c->'job_ids' @> to_jsonb(gauci) AND to_jsonb(gauci) @> (c->'job_ids')) THEN RAISE EXCEPTION 'm4 due grouping %',c; END IF;
  -- A contact id that is not a GHL id is counted, never offered.
  PERFORM pg_temp.m4_job('M4-BADID','accepted','fencing','not a ghl id!','2026-08-01Z');
- d:=public.context_ghl_history_due(20,false);
+ d:=public.context_ghl_history_due(20);
  IF (d->>'jobs_invalid_contact_id')::integer<>1 OR d::text LIKE '%not a ghl id%' THEN RAISE EXCEPTION 'm4 bad contact id %',d; END IF;
  -- R8: a lead with no job is never offered.
  IF d::text LIKE '%cS6dKRalWMgthDS9mELw%' THEN RAISE EXCEPTION 'm4 a lead with no job was offered'; END IF;
@@ -172,17 +174,17 @@ BEGIN
  -- 97 jobs already covered today: only 3 remain, so the 2-job contact fits
  -- after the 1-job contacts and nothing more is offered.
  run:=pg_temp.m4_run('ghl_history_load',97);
- d:=public.context_ghl_history_due(20,false);
+ d:=public.context_ghl_history_due(20);
  IF (d->>'jobs_counted_today')::integer<>97 OR (d->>'daily_remaining')::integer<>3 OR (d->>'jobs_offered')::integer<>2
   OR (d->>'contacts_waiting')::integer<>1 OR (d->>'jobs_waiting')::integer<>2
  THEN RAISE EXCEPTION 'm4 day bound at 97: %',d; END IF;
  -- A dry run and yesterday's runs never count against today.
  PERFORM pg_temp.m4_run('ghl_history_load_dry',50);
  PERFORM pg_temp.m4_run('ghl_history_load',50,now()-interval '2 days');
- IF (public.context_ghl_history_due(20,false)->>'jobs_counted_today')::integer<>97 THEN RAISE EXCEPTION 'm4 day count took a dry or old run'; END IF;
+ IF (public.context_ghl_history_due(20)->>'jobs_counted_today')::integer<>97 THEN RAISE EXCEPTION 'm4 day count took a dry or old run'; END IF;
  -- The day is full: nothing offered.
  PERFORM pg_temp.m4_run('ghl_history_load',3);
- d:=public.context_ghl_history_due(20,false);
+ d:=public.context_ghl_history_due(20);
  IF (d->>'daily_limit_reached')::boolean IS NOT TRUE OR jsonb_array_length(d->'contacts')<>0 OR (d->>'jobs_waiting')::integer<>4
  THEN RAISE EXCEPTION 'm4 full day still offers %',d; END IF;
 END $$;
@@ -190,34 +192,31 @@ ROLLBACK;
 
 BEGIN;
 -- 4. The per-call size stops adding contacts, but never blocks a contact the
--- day can hold; a contact bigger than a whole day goes alone on a fresh day.
+-- day can hold; a contact bigger than a whole day is never offered.
 DO $$
 DECLARE d jsonb; i integer;
 BEGIN
  FOR i IN 1..3 LOOP PERFORM pg_temp.m4_job('M4-BIG-'||i,'accepted','fencing','m4BigContact00001','2026-08-01Z'); END LOOP;
  PERFORM pg_temp.m4_job('M4-ONE-1','scheduled','fencing','m4OneContact00001','2026-08-01Z');
- d:=public.context_ghl_history_due(1,false);
+ d:=public.context_ghl_history_due(1);
  -- max 1: the scheduled contact (tier 2) is taken, then the call is full.
  IF jsonb_array_length(d->'contacts')<>1 OR d#>>'{contacts,0,contact_id}'<>'m4OneContact00001' THEN RAISE EXCEPTION 'm4 max jobs 1: %',d; END IF;
- d:=public.context_ghl_history_due(2,false);
+ d:=public.context_ghl_history_due(2);
  -- max 2: one taken (1 < 2), the 3-job contact still fits the day and is taken.
  IF (d->>'jobs_offered')::integer<>4 THEN RAISE EXCEPTION 'm4 max jobs 2: %',d; END IF;
  FOR i IN 4..101 LOOP PERFORM pg_temp.m4_job('M4-BIG-'||i,'accepted','fencing','m4BigContact00001','2026-08-01Z'); END LOOP;
- d:=public.context_ghl_history_due(100,false);
- IF d#>>'{contacts,0,contact_id}'<>'m4OneContact00001' OR jsonb_array_length(d->'contacts')<>1 OR (d->>'jobs_waiting')::integer<>101
- THEN RAISE EXCEPTION 'm4 oversized waits behind a fitting contact: %',d; END IF;
  DELETE FROM public.jobs WHERE job_number='M4-ONE-1';
- d:=public.context_ghl_history_due(20,false);
- IF jsonb_array_length(d->'contacts')<>1 OR (d#>>'{contacts,0,oversized}')::boolean IS NOT TRUE OR (d->>'jobs_offered')::integer<>101
- THEN RAISE EXCEPTION 'm4 oversized contact on a fresh day: %',d; END IF;
- PERFORM pg_temp.m4_run('ghl_history_load',1);
- IF jsonb_array_length(public.context_ghl_history_due(20,false)->'contacts')<>0 THEN RAISE EXCEPTION 'm4 oversized contact on a counted day'; END IF;
+ -- 101 live jobs on one contact: never inside the day's bound, even on a fresh day.
+ d:=public.context_ghl_history_due(100);
+ IF jsonb_array_length(d->'contacts')<>0 OR (d->>'jobs_offered')::integer<>0 OR (d->>'contacts_over_daily_limit')::integer<>1
+  OR (d->>'jobs_over_daily_limit')::integer<>101
+ THEN RAISE EXCEPTION 'm4 oversized contact must never be offered: %',d; END IF;
 END $$;
 ROLLBACK;
 
 BEGIN;
 -- 5. The ledger: done contacts are not offered again, partial loads resume
--- first, a contact failed 3 times rests, calls skipped are reloaded on request.
+-- first, a failed contact is offered again on a later day, never given up on.
 DO $$
 DECLARE run uuid; dry uuid; d jsonb; r jsonb;
 BEGIN
@@ -249,16 +248,24 @@ BEGIN
   r:=public.record_ghl_history_contact(jsonb_build_object('contact_id','m4LedgerFail0001','run_id',run,'status','failed','error_code','provider_request_failed','actor','m4-test'));
  END LOOP;
  IF r->>'attempts'<>'3' OR r->>'outcome'<>'updated' THEN RAISE EXCEPTION 'm4 attempts %',r; END IF;
+ -- Failed today: not offered again today.
+ IF public.context_ghl_history_due(20)::text LIKE '%m4LedgerFail0001%' THEN RAISE EXCEPTION 'm4 failed contact retried the same day'; END IF;
  PERFORM public.record_ghl_history_contact(jsonb_build_object('contact_id','m4LedgerCall0001','run_id',run,'status','done','jobs',1,'skipped_calls',2,'actor','m4-test'));
  -- A done row keeps no resume point and records when it was completed.
  IF (SELECT resume IS NOT NULL OR completed_at IS NULL FROM public.context_ghl_history_contacts WHERE contact_id='m4LedgerDone0001')
  THEN RAISE EXCEPTION 'm4 done row kept a resume point'; END IF;
- d:=public.context_ghl_history_due(20,false);
+ d:=public.context_ghl_history_due(20);
  IF jsonb_array_length(d->'contacts')<>1 OR d#>>'{contacts,0,contact_id}'<>'m4LedgerPart0001' OR d#>>'{contacts,0,prior_status}'<>'partial'
   OR d#>>'{contacts,0,resume,last_message_id}'<>'m4Cursor00000001'
  THEN RAISE EXCEPTION 'm4 ledger due %',d; END IF;
- d:=public.context_ghl_history_due(20,true);
- IF jsonb_array_length(d->'contacts')<>2 OR d#>>'{contacts,1,contact_id}'<>'m4LedgerCall0001' THEN RAISE EXCEPTION 'm4 retry skipped calls %',d; END IF;
+ -- Failed on an earlier day, after three attempts: offered again (in progress first).
+ UPDATE public.context_ghl_history_contacts SET last_attempt_at=now()-interval '2 days' WHERE contact_id='m4LedgerFail0001';
+ d:=public.context_ghl_history_due(20);
+ IF jsonb_array_length(d->'contacts')<>2 OR d#>>'{contacts,1,contact_id}'<>'m4LedgerFail0001' OR d#>>'{contacts,1,prior_status}'<>'failed'
+ THEN RAISE EXCEPTION 'm4 failed contact not retried on a later day %',d; END IF;
+ -- Skipped calls are recorded on a done contact, which is not offered again.
+ IF (SELECT skipped_calls FROM public.context_ghl_history_contacts WHERE contact_id='m4LedgerCall0001')<>2 OR d::text LIKE '%m4LedgerCall0001%'
+ THEN RAISE EXCEPTION 'm4 skipped calls'; END IF;
  -- An earlier message found later widens the recorded span; never narrows it.
  PERFORM public.record_ghl_history_contact(jsonb_build_object('contact_id','m4LedgerDone0001','run_id',run,'status','done','actor','m4-test',
   'earliest_message_at','2026-05-01T00:00:00Z','latest_message_at','2026-05-02T00:00:00Z'));
@@ -284,7 +291,7 @@ BEGIN
  FOR o IN SELECT public.capture_ghl_history_event(pg_temp.m4_row(x.id,'1VHBzZX6DsjMZW2WbgQn','outbound','Staff app text for the R6 fixture.',x.at))
   FROM (VALUES ('foM3hD1SggjmCoNexihJ','2026-09-04T01:00:00Z'),('BIuigfV2iHxTTeFN8YG5','2026-09-04T01:05:00Z'),('XPtcG3KZv34WWXdIOdKy','2026-09-04T01:10:00Z')) x(id,at)
  LOOP
-  IF o->>'outcome'<>'inserted' OR o->>'attribution_status'<>'single_open' OR o->>'job_id'<>j::text OR o ? 'rested'
+  IF o->>'outcome' IS DISTINCT FROM 'inserted' OR o->>'attribution_status' IS DISTINCT FROM 'single_open' OR o->>'job_id'<>j::text OR o ? 'rested'
   THEN RAISE EXCEPTION 'R6: history must land on SWF-261335, got %',o; END IF;
  END LOOP;
  SELECT * INTO e FROM public.business_events WHERE provider_message_id='ghl:foM3hD1SggjmCoNexihJ';
@@ -295,7 +302,7 @@ BEGIN
  o:=public.capture_ghl_history_event(pg_temp.m4_row('mDS89hMzWE2R3VCMqxP2','1VHBzZX6DsjMZW2WbgQn','outbound','Install text for the R5 fixture.','2026-09-18T01:10:00Z'));
  SELECT count(*) INTO n FROM public.business_events WHERE provider_message_id='ghl:mDS89hMzWE2R3VCMqxP2';
  SELECT * INTO e FROM public.business_events WHERE id=existing;
- IF o->>'outcome'<>'duplicate' OR (o->>'upgraded')::boolean OR n<>1 OR e.job_id IS DISTINCT FROM j OR e.metadata->>'capture_mode'<>'live'
+ IF o->>'outcome' IS DISTINCT FROM 'duplicate' OR (o->>'upgraded')::boolean OR n<>1 OR e.job_id IS DISTINCT FROM j OR e.metadata->>'capture_mode'<>'live'
  THEN RAISE EXCEPTION 'R5: a duplicate must change nothing, got % n=% %',o,n,e.metadata; END IF;
  -- Waking: the three history rows are unread but none wakes the job.
  c:=(SELECT cadence FROM public.context_jobs_cadence(ARRAY[j]));
@@ -310,22 +317,31 @@ END $$;
 ROLLBACK;
 
 BEGIN;
--- 7. R1 and R14: two live quotes. Captured live, R1 goes to the model
--- (pending_luna). Loaded as history, it rests unplaced with both candidates,
--- in both jobs' not-yet-placed lane, and is never offered to the model.
+-- 7. R1 and R14: two live quotes. The load writes no placement field: the
+-- placement-owned trigger places a history row exactly as it places a live
+-- row (review, both candidates stored, in both jobs' not-yet-placed lane).
+-- The live ladder does not yet keep backfill rows from the model (X27); that
+-- is the placement track's follow-up, recorded here as today's behaviour.
 DO $$
-DECLARE j31 uuid; j48 uuid; o jsonb; e public.business_events; n integer;
+DECLARE j31 uuid; j48 uuid; o jsonb; e public.business_events; c public.business_events; n integer;
 BEGIN
  j31:=pg_temp.m4_job('SWF-261431','quoted','fencing','lYPee0K2DuQHXH2xHL1P','2026-09-17T02:00:00Z',now()-interval '5 days');
  j48:=pg_temp.m4_job('SWF-261448','quoted','fencing','lYPee0K2DuQHXH2xHL1P','2026-09-21T02:00:00Z',now()-interval '3 days');
  o:=public.capture_ghl_history_event(pg_temp.m4_row('pffXnIL1v2FTaKnz4DHm','lYPee0K2DuQHXH2xHL1P','inbound',
   'I haven''t received all three quotes as yet?','2026-09-23T04:35:00Z'));
  SELECT * INTO e FROM public.business_events WHERE provider_message_id='ghl:pffXnIL1v2FTaKnz4DHm';
- IF o->>'outcome'<>'inserted' OR o->>'attribution_status'<>'unplaced' OR o->>'rested'<>'backfill_never_luna'
-  OR e.attribution_status<>'unplaced' OR e.job_id IS NOT NULL OR e.candidate_job_ids IS DISTINCT FROM ARRAY[j31,j48]
-  OR e.metadata->>'unplaced_reason'<>'backfill_never_luna' OR e.metadata->>'placement_rule'<>'review_several' OR e.attributed_at IS NOT NULL
- THEN RAISE EXCEPTION 'R1: history must rest unplaced with both candidates, got % / % % % %',o,e.attribution_status,e.job_id,e.candidate_job_ids,e.metadata; END IF;
- IF EXISTS(SELECT 1 FROM public.context_attribution_due(200) d WHERE d.id=e.id) THEN RAISE EXCEPTION 'R1: history offered to the model'; END IF;
+ -- Control: the same kind of message captured live, at the same time.
+ PERFORM public.capture_business_event(pg_temp.m4_row('m4LiveControl0002','lYPee0K2DuQHXH2xHL1P','inbound','Live control text.',
+  '2026-09-23T04:35:00Z','live','ghl-webhook-receiver'));
+ SELECT * INTO c FROM public.business_events WHERE provider_message_id='ghl:m4LiveControl0002';
+ IF o->>'outcome' IS DISTINCT FROM 'inserted' OR o->>'attribution_status'<>e.attribution_status OR o ? 'rested'
+  OR e.metadata ? 'unplaced_reason' OR e.metadata->>'capture_mode'<>'backfill'
+ THEN RAISE EXCEPTION 'R1: the load must return the writer''s outcome and add no placement of its own, got % %',o,e.metadata; END IF;
+ IF (e.attribution_status,e.attribution_step,e.job_id,e.candidate_job_ids,e.metadata->>'placement_rule')
+    IS DISTINCT FROM (c.attribution_status,c.attribution_step,c.job_id,c.candidate_job_ids,c.metadata->>'placement_rule')
+  OR e.candidate_job_ids IS DISTINCT FROM ARRAY[j31,j48]
+ THEN RAISE EXCEPTION 'R1: history must be placed exactly as a live row, got % % % / live % %',e.attribution_status,e.candidate_job_ids,e.metadata,
+  c.attribution_status,c.candidate_job_ids; END IF;
  SELECT count(*) INTO n FROM public.context_unplaced_for_job(j31) WHERE id=e.id;
  IF n<>1 THEN RAISE EXCEPTION 'R1: missing from the SWF-261431 lane'; END IF;
  SELECT count(*) INTO n FROM public.context_unplaced_for_job(j48) WHERE id=e.id;
@@ -335,17 +351,9 @@ BEGIN
   FROM (VALUES ('XyDhsX5IZ9kaS2XxPEzr','2026-09-16T03:00:00Z'),('oS67q2BCAyhbIl4SjihH','2026-09-16T03:05:00Z')) x(id,at)
  LOOP
   SELECT * INTO e FROM public.business_events WHERE id=(o->>'id')::uuid;
-  IF e.attribution_status<>'unplaced' OR e.candidate_job_ids IS DISTINCT FROM ARRAY[j31,j48]
-   OR EXISTS(SELECT 1 FROM public.context_attribution_due(200) d WHERE d.id=e.id)
-  THEN RAISE EXCEPTION 'R14: pre-job history must rest unplaced on both, got % %',e.attribution_status,e.candidate_job_ids; END IF;
+  IF e.attribution_status<>o->>'attribution_status' OR e.candidate_job_ids IS DISTINCT FROM ARRAY[j31,j48] OR e.job_id IS NOT NULL
+  THEN RAISE EXCEPTION 'R14: pre-job history must have both quotes as candidates, got % %',e.attribution_status,e.candidate_job_ids; END IF;
  END LOOP;
- SELECT count(*) INTO n FROM public.business_events WHERE attribution_status='pending_luna' AND contact_id='lYPee0K2DuQHXH2xHL1P';
- IF n<>0 THEN RAISE EXCEPTION 'R1/R14: % history rows left pending the model',n; END IF;
- -- Control: the same message captured live goes to the model.
- PERFORM public.capture_business_event(pg_temp.m4_row('m4LiveControl0002','lYPee0K2DuQHXH2xHL1P','inbound','Live control text.','2026-09-23T05:00:00Z','live','ghl-webhook-receiver'));
- SELECT * INTO e FROM public.business_events WHERE provider_message_id='ghl:m4LiveControl0002';
- IF e.attribution_status<>'pending_luna' OR NOT EXISTS(SELECT 1 FROM public.context_attribution_due(200) d WHERE d.id=e.id)
- THEN RAISE EXCEPTION 'R1 control: a live review row must reach the model, got %',e.attribution_status; END IF;
 END $$;
 ROLLBACK;
 
@@ -364,7 +372,7 @@ BEGIN
  THEN RAISE EXCEPTION 'R15: must stay before any job, got % % %',e.attribution_status,e.job_id,e.metadata; END IF;
  j41:=pg_temp.m4_job('SWP-26941','in_progress','patio','Oxqi7eCx2rGCsS0BXOH2','2026-09-01T02:00:00Z');
  o:=public.capture_ghl_history_event(pg_temp.m4_row('1TPog9f79izPytVu8yoo','Oxqi7eCx2rGCsS0BXOH2','inbound','are the guys coming today?','2026-09-22T23:08:00Z'));
- IF o->>'attribution_status'<>'single_open' OR o->>'job_id'<>j41::text THEN RAISE EXCEPTION 'R9: one live job, got %',o; END IF;
+ IF o->>'attribution_status' IS DISTINCT FROM 'single_open' OR o->>'job_id'<>j41::text THEN RAISE EXCEPTION 'R9: one live job, got %',o; END IF;
 END $$;
 ROLLBACK;
 
@@ -376,36 +384,54 @@ DECLARE j uuid; o jsonb; n integer;
 BEGIN
  j:=pg_temp.m4_job('SWF-261335','scheduled','fencing','1VHBzZX6DsjMZW2WbgQn','2026-08-20T02:00:00Z');
  o:=public.capture_ghl_history_event(pg_temp.m4_row('m4Refuse00000001','1VHBzZX6DsjMZW2WbgQn','inbound','x','2026-09-04T01:00:00Z','live'));
- IF o->>'code'<>'history_row_not_backfill' THEN RAISE EXCEPTION 'm4 live row taken %',o; END IF;
+ IF o->>'code' IS DISTINCT FROM 'history_row_not_backfill' THEN RAISE EXCEPTION 'm4 live row taken %',o; END IF;
  o:=public.capture_ghl_history_event(pg_temp.m4_row('m4Refuse00000002','1VHBzZX6DsjMZW2WbgQn','inbound','x','2026-09-04T01:00:00Z','backfill','ghl_sms_cache_backfill'));
- IF o->>'code'<>'history_row_source_invalid' THEN RAISE EXCEPTION 'm4 other source taken %',o; END IF;
+ IF o->>'code' IS DISTINCT FROM 'history_row_source_invalid' THEN RAISE EXCEPTION 'm4 other source taken %',o; END IF;
  o:=public.capture_ghl_history_event(pg_temp.m4_row('m4Refuse00000003','1VHBzZX6DsjMZW2WbgQn','inbound','x','2026-09-04T01:00:00Z')
   ||jsonb_build_object('job_id',j,'match_method','direct_job_id'));
- IF o->>'code'<>'history_row_job_refused' THEN RAISE EXCEPTION 'm4 job assertion taken %',o; END IF;
+ IF o->>'code' IS DISTINCT FROM 'history_row_job_refused' THEN RAISE EXCEPTION 'm4 job assertion taken %',o; END IF;
  o:=public.capture_ghl_history_event(pg_temp.m4_row('m4Refuse00000004','1VHBzZX6DsjMZW2WbgQn','inbound','x','2026-09-04T01:00:00Z')||'{"metadata":null}');
- IF o->>'code'<>'history_row_not_backfill' THEN RAISE EXCEPTION 'm4 row without metadata taken %',o; END IF;
+ IF o->>'code' IS DISTINCT FROM 'history_row_not_backfill' THEN RAISE EXCEPTION 'm4 row without metadata taken %',o; END IF;
  UPDATE public.automation_switches SET attribution=false WHERE id=1;
  o:=public.capture_ghl_history_event(pg_temp.m4_row('m4Refuse00000005','1VHBzZX6DsjMZW2WbgQn','inbound','x','2026-09-04T01:00:00Z'));
- IF o->>'code'<>'attribution_disabled' THEN RAISE EXCEPTION 'm4 attribution off taken %',o; END IF;
+ IF o->>'code' IS DISTINCT FROM 'attribution_disabled' THEN RAISE EXCEPTION 'm4 attribution off taken %',o; END IF;
  SELECT count(*) INTO n FROM public.business_events WHERE provider_message_id LIKE 'ghl:m4Refuse%';
  IF n<>0 THEN RAISE EXCEPTION 'm4 a refused row was written (%)',n; END IF;
 END $$;
 ROLLBACK;
 
 BEGIN;
--- 10. The save and the rest commit together: if the rest cannot be written,
--- no row is left pending the model.
-CREATE FUNCTION pg_temp.m4_refuse_rest() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN IF NEW.attribution_status='unplaced' THEN RAISE EXCEPTION 'm4 rest blocked'; END IF; RETURN NEW; END $$;
-CREATE TRIGGER m4_refuse_rest BEFORE UPDATE ON public.business_events FOR EACH ROW EXECUTE FUNCTION pg_temp.m4_refuse_rest();
+-- 10. A real run starts through one reservation: the jobs it will cover are
+-- counted on its run row before any work, a second live run is refused, an
+-- abandoned one is closed, and the next reservation sees the counted jobs.
 DO $$
-DECLARE o jsonb; n integer;
+DECLARE r jsonb; r2 jsonb; id1 uuid;
 BEGIN
+ PERFORM pg_temp.m4_job('SWP-26941','in_progress','patio','Oxqi7eCx2rGCsS0BXOH2','2026-09-01T02:00:00Z');
  PERFORM pg_temp.m4_job('SWF-261431','quoted','fencing','lYPee0K2DuQHXH2xHL1P','2026-09-17T02:00:00Z',now()-interval '5 days');
  PERFORM pg_temp.m4_job('SWF-261448','quoted','fencing','lYPee0K2DuQHXH2xHL1P','2026-09-21T02:00:00Z',now()-interval '3 days');
- o:=public.capture_ghl_history_event(pg_temp.m4_row('pffXnIL1v2FTaKnz4DHm','lYPee0K2DuQHXH2xHL1P','inbound','x','2026-09-23T04:35:00Z'));
- SELECT count(*) INTO n FROM public.business_events WHERE provider_message_id='ghl:pffXnIL1v2FTaKnz4DHm';
- IF o->>'outcome'<>'error' OR n<>0 THEN RAISE EXCEPTION 'm4 insert survived a failed rest: % n=%',o,n; END IF;
+ BEGIN PERFORM public.reserve_ghl_history_run(20,'bad actor!'); RAISE EXCEPTION 'm4 bad actor taken';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'history_reserve_actor_invalid' THEN RAISE; END IF; END;
+ r:=public.reserve_ghl_history_run(1,'m4-validator');
+ id1:=(r->>'run_id')::uuid;
+ IF r->>'outcome'<>'reserved' OR jsonb_array_length(r#>'{due,contacts}')<>1 OR r#>>'{due,contacts,0,contact_id}'<>'Oxqi7eCx2rGCsS0BXOH2'
+ THEN RAISE EXCEPTION 'm4 reserve %',r; END IF;
+ IF (SELECT (counts->>'jobs_covered')::integer<>1 OR status<>'running' OR source<>'ghl_history_load' OR cursor->>'actor'<>'m4-validator'
+  FROM public.context_capture_runs WHERE id=id1) THEN RAISE EXCEPTION 'm4 reservation not counted on its run row'; END IF;
+ -- A second real run while the first is live: refused, nothing counted.
+ r2:=public.reserve_ghl_history_run(20,'m4-validator');
+ IF r2<>jsonb_build_object('outcome','run_in_progress','run_id',id1) THEN RAISE EXCEPTION 'm4 second live run %',r2; END IF;
+ -- The first finishes; the next reservation sees its job counted and takes the rest.
+ PERFORM public.record_ghl_history_contact(jsonb_build_object('contact_id','Oxqi7eCx2rGCsS0BXOH2','run_id',id1,'status','done','jobs',1,'actor','m4-validator'));
+ PERFORM public.record_capture_run(jsonb_build_object('run_id',id1,'source','ghl_history_load','status','succeeded'));
+ r2:=public.reserve_ghl_history_run(20,'m4-validator');
+ IF r2#>>'{due,jobs_counted_today}'<>'1' OR r2#>>'{due,jobs_offered}'<>'2' THEN RAISE EXCEPTION 'm4 next reservation %',r2; END IF;
+ -- A run left running past the window is abandoned, and its counted jobs stay counted.
+ UPDATE public.context_capture_runs SET updated_at=now()-interval '11 minutes' WHERE id=(r2->>'run_id')::uuid;
+ r:=public.reserve_ghl_history_run(20,'m4-validator');
+ IF r->>'outcome'<>'reserved' OR r#>>'{due,jobs_counted_today}'<>'3'
+  OR (SELECT status<>'failed' OR error_code<>'run_abandoned' FROM public.context_capture_runs WHERE id=(r2->>'run_id')::uuid)
+ THEN RAISE EXCEPTION 'm4 abandoned run %',r; END IF;
 END $$;
 ROLLBACK;
 
@@ -426,14 +452,14 @@ BEGIN
  jdone:=pg_temp.m4_job('M4-LNK-DONE','complete','fencing',NULL,'2026-06-01Z');
  UPDATE public.jobs SET client_phone='0400 999 888' WHERE id=jdone;
  -- Candidates: live and contactless only, with B0 keys; our records name no contact for them.
- SELECT count(*) INTO n FROM public.context_ghl_history_link_candidates() WHERE job_id IN (j67,jdone);
+ SELECT count(*) INTO n FROM public.context_ghl_history_link_candidates(NULL,500) WHERE job_id IN (j67,jdone);
  IF n<>0 THEN RAISE EXCEPTION 'm4 link candidates took a contacted or closed job'; END IF;
- SELECT * INTO c FROM public.context_ghl_history_link_candidates() WHERE job_id=j68;
+ SELECT * INTO c FROM public.context_ghl_history_link_candidates(NULL,500) WHERE job_id=j68;
  IF c.phone_key<>'412345678' OR c.email_key<>'chris.test@example.com' OR c.own_contact_id IS NOT NULL OR c.own_contacts<>0
  THEN RAISE EXCEPTION 'm4 link candidate keys %',to_jsonb(c); END IF;
  -- Our records already give the key to a contact: the candidate says so.
  UPDATE public.jobs SET client_phone='0400 111 222' WHERE id=jblank;
- SELECT * INTO c FROM public.context_ghl_history_link_candidates() WHERE job_id=jblank;
+ SELECT * INTO c FROM public.context_ghl_history_link_candidates(NULL,500) WHERE job_id=jblank;
  IF c.own_contact_id IS DISTINCT FROM 'TZ8YSOsYK6et7nCbviSs' OR c.own_contacts<>1 THEN RAISE EXCEPTION 'm4 own records %',to_jsonb(c); END IF;
 
  run:=pg_temp.m4_run('ghl_history_link',0);
@@ -449,7 +475,7 @@ BEGIN
  -- Certain: written, with its audit row.
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4LinkContact0001','key_kind','phone_and_email','run_id',run,'actor','m4-test'));
  SELECT * INTO l FROM public.context_ghl_contact_links WHERE job_id=j68;
- IF o->>'outcome'<>'linked' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68)<>'m4LinkContact0001'
+ IF o->>'outcome' IS DISTINCT FROM 'linked' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68)<>'m4LinkContact0001'
   OR l.old_value IS NOT NULL OR l.new_contact_id<>'m4LinkContact0001' OR l.key_kind<>'phone_and_email' OR l.run_id<>run
   OR l.actor<>'m4-test' OR l.job_number<>'SWF-26168' OR l.reversed_at IS NOT NULL
  THEN RAISE EXCEPTION 'm4 link write % %',o,to_jsonb(l); END IF;
@@ -458,23 +484,23 @@ BEGIN
  THEN RAISE EXCEPTION 'm4 linked job not in the load scope'; END IF;
  -- Never an overwrite: a second link, or a link on a job that has a contact.
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4OtherContact001','key_kind','email','run_id',run,'actor','m4-test'));
- IF o->>'outcome'<>'already_linked' OR (o->>'same_contact')::boolean OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68)<>'m4LinkContact0001'
+ IF o->>'outcome' IS DISTINCT FROM 'already_linked' OR (o->>'same_contact')::boolean OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68)<>'m4LinkContact0001'
  THEN RAISE EXCEPTION 'm4 overwrite %',o; END IF;
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j67,'contact_id','m4OtherContact001','key_kind','phone','run_id',run,'actor','m4-test'));
- IF o->>'outcome'<>'already_linked' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j67)<>'TZ8YSOsYK6et7nCbviSs'
+ IF o->>'outcome' IS DISTINCT FROM 'already_linked' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j67)<>'TZ8YSOsYK6et7nCbviSs'
  THEN RAISE EXCEPTION 'm4 overwrite of an existing contact %',o; END IF;
  -- A closed job is never linked.
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jdone,'contact_id','m4OtherContact001','key_kind','phone','run_id',run,'actor','m4-test'));
- IF o->>'outcome'<>'not_live' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jdone) IS NOT NULL THEN RAISE EXCEPTION 'm4 closed job linked %',o; END IF;
+ IF o->>'outcome' IS DISTINCT FROM 'not_live' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jdone) IS NOT NULL THEN RAISE EXCEPTION 'm4 closed job linked %',o; END IF;
  -- A blank value is replaced, and the blank is what the audit keeps.
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jblank,'contact_id','TZ8YSOsYK6et7nCbviSs','key_kind','phone','run_id',run,'actor','m4-test'));
- IF o->>'outcome'<>'linked' OR (SELECT old_value FROM public.context_ghl_contact_links WHERE job_id=jblank)<>'  '
+ IF o->>'outcome' IS DISTINCT FROM 'linked' OR (SELECT old_value FROM public.context_ghl_contact_links WHERE job_id=jblank)<>'  '
  THEN RAISE EXCEPTION 'm4 blank link %',o; END IF;
  SELECT count(*) INTO n FROM public.context_ghl_contact_links;
  IF n<>2 THEN RAISE EXCEPTION 'm4 audit rows % (one per change only)',n; END IF;
  -- Reverse: the old value comes back and the audit row says who reversed it.
  o:=public.reverse_ghl_contact_link(l.id,'m4-reverser');
- IF o->>'outcome'<>'reversed' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68) IS NOT NULL
+ IF o->>'outcome' IS DISTINCT FROM 'reversed' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68) IS NOT NULL
   OR (SELECT reversed_by FROM public.context_ghl_contact_links WHERE id=l.id)<>'m4-reverser'
  THEN RAISE EXCEPTION 'm4 reverse %',o; END IF;
  IF public.reverse_ghl_contact_link(l.id,'m4-reverser')->>'outcome'<>'already_reversed' THEN RAISE EXCEPTION 'm4 reverse twice'; END IF;
@@ -482,7 +508,7 @@ BEGIN
  SELECT * INTO l FROM public.context_ghl_contact_links WHERE job_id=jblank;
  UPDATE public.jobs SET ghl_contact_id='m4HandSetContact1' WHERE id=jblank;
  o:=public.reverse_ghl_contact_link(l.id,'m4-reverser');
- IF o->>'outcome'<>'link_superseded' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jblank)<>'m4HandSetContact1'
+ IF o->>'outcome' IS DISTINCT FROM 'link_superseded' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jblank)<>'m4HandSetContact1'
  THEN RAISE EXCEPTION 'm4 reverse over a later change %',o; END IF;
  -- Only ghl_contact_id changes: a job with a frozen expected-cost baseline is
  -- linked and keeps it, and the SES money seal never fires.
@@ -490,7 +516,7 @@ BEGIN
  jfrozen:=pg_temp.m4_job('M4-LNK-FROZEN','accepted','fencing',NULL,'2026-08-01Z');
  UPDATE public.jobs SET expected_costs='{"version":1}',expected_frozen_at='2026-08-02Z',client_phone='0433 222 111' WHERE id=jfrozen;
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jfrozen,'contact_id','m4FrozenContact01','key_kind','phone','run_id',run,'actor','m4-test'));
- IF o->>'outcome'<>'linked' OR (SELECT expected_costs<>'{"version":1}' OR expected_frozen_at<>'2026-08-02Z' OR ghl_contact_id<>'m4FrozenContact01'
+ IF o->>'outcome' IS DISTINCT FROM 'linked' OR (SELECT expected_costs<>'{"version":1}' OR expected_frozen_at<>'2026-08-02Z' OR ghl_contact_id<>'m4FrozenContact01'
   FROM public.jobs WHERE id=jfrozen) THEN RAISE EXCEPTION 'm4 frozen-cost job %',o; END IF;
  -- The stand-in proves itself: a real seal-column change does fire it.
  BEGIN UPDATE public.jobs SET type='patio' WHERE id=jfrozen; RAISE EXCEPTION 'm4 seal stand-in did not fire';
@@ -500,11 +526,34 @@ BEGIN
  jdraft:=pg_temp.m4_job('M4-LNK-DRAFT1','draft','fencing','m4DraftOwner00001','2026-08-01Z',NULL,false,'{"booking_intake_draft":"true"}');
  jdraft2:=pg_temp.m4_job('M4-LNK-DRAFT2','draft','fencing',NULL,'2026-08-01Z',now()-interval '2 days',false,'{"booking_intake_draft":"true"}');
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jdraft2,'contact_id','m4DraftOwner00001','key_kind','phone','run_id',run,'actor','m4-test'));
- IF o->>'outcome'<>'booking_draft_conflict' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jdraft2) IS NOT NULL
+ IF o->>'outcome' IS DISTINCT FROM 'booking_draft_conflict' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jdraft2) IS NOT NULL
   OR EXISTS(SELECT 1 FROM public.context_ghl_contact_links WHERE job_id=jdraft2)
  THEN RAISE EXCEPTION 'm4 second booking draft %',o; END IF;
  -- The reversed job can be linked again (one open link per job).
  o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4LinkContact0001','key_kind','phone','run_id',run,'actor','m4-test'));
- IF o->>'outcome'<>'linked' THEN RAISE EXCEPTION 'm4 relink after reverse %',o; END IF;
+ IF o->>'outcome' IS DISTINCT FROM 'linked' THEN RAISE EXCEPTION 'm4 relink after reverse %',o; END IF;
+END $$;
+ROLLBACK;
+
+BEGIN;
+-- 12. Link candidates are paged by job id (keyset), so repeated runs reach
+-- every live job without a contact, not the same first page.
+DO $$
+DECLARE i integer; ids uuid[]; seen uuid[]:='{}'; page uuid[]; after uuid; pages integer:=0;
+BEGIN
+ FOR i IN 1..5 LOOP PERFORM pg_temp.m4_job('M4-PAGE-'||i,'accepted','fencing',NULL,'2026-08-01Z'); END LOOP;
+ SELECT array_agg(id ORDER BY id) INTO ids FROM public.jobs WHERE job_number LIKE 'M4-PAGE-%';
+ -- Walk pages of 2 from the start, each after the last job of the one before.
+ LOOP
+  SELECT array_agg(job_id ORDER BY job_id) INTO page FROM public.context_ghl_history_link_candidates(after,2);
+  EXIT WHEN page IS NULL;
+  pages:=pages+1;
+  IF cardinality(page)>2 OR (after IS NOT NULL AND page[1]<=after) THEN RAISE EXCEPTION 'm4 keyset page % after %',page,after; END IF;
+  seen:=seen||page; after:=page[cardinality(page)];
+  EXIT WHEN pages>1000;
+ END LOOP;
+ IF NOT (seen @> ids) OR cardinality(seen)<>(SELECT count(DISTINCT x) FROM unnest(seen) x) THEN RAISE EXCEPTION 'm4 keyset walk % missed or repeated %',seen,ids; END IF;
+ IF (SELECT count(*) FROM public.context_ghl_history_link_candidates(NULL,100000))>500 THEN RAISE EXCEPTION 'm4 page larger than 500'; END IF;
+ IF EXISTS(SELECT 1 FROM public.context_ghl_history_link_candidates(ids[5],500) WHERE job_id=ANY(ids)) THEN RAISE EXCEPTION 'm4 page after the last job'; END IF;
 END $$;
 ROLLBACK;

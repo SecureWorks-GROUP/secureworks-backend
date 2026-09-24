@@ -17,6 +17,11 @@
 //     the email name different contacts, our records name another contact or
 //     several, or the GHL search could not be read to its end. none: no key,
 //     or no GHL contact carries the key. failed: the search could not be read;
+//   * candidates come a keyset page at a time, by job id: each run starts
+//     after the last job the previous run of the same kind judged (its run
+//     row cursor), or after_job_id when given, and records where it stopped,
+//     so repeated runs reach every live job with no contact; a run that
+//     reaches the end starts the next one from the beginning;
 //   * a dry run (the default) writes nothing but its own run row
 //     (ghl_history_link_dry) and returns the counts and the job numbers of
 //     the ambiguous, none and failed jobs (numbers only, no names). A real run
@@ -75,8 +80,8 @@ export interface LinkDeps {
   now(): number;
   latestRun(source: string): Promise<RunRow | null>;
   recordRun(run: Record<string, unknown>): Promise<string>;
-  /** context_ghl_history_link_candidates(). Throws when unreadable. */
-  candidates(): Promise<LinkCandidate[]>;
+  /** context_ghl_history_link_candidates(after, limit). Throws when unreadable. */
+  candidates(after: string | null, limit: number): Promise<LinkCandidate[]>;
   /** GHL contact search (list_ghl_contacts query). Throws a provider failure. */
   searchContacts(query: string, limit: number): Promise<{
     contacts: Record<string, unknown>[];
@@ -90,6 +95,8 @@ export interface LinkRequest {
   dryRun: boolean;
   maxJobs: number;
   actor: string;
+  /** Start after this job id instead of where the previous run stopped. */
+  afterJobId?: string | null;
 }
 
 export type LinkVerdict =
@@ -122,6 +129,9 @@ export type LinkResult =
     ambiguous_job_numbers: string[];
     none_job_numbers: string[];
     failed_job_numbers: string[];
+    /** Where this run started and where the next one starts (null: from the beginning). */
+    after_job_id: string | null;
+    next_after_job_id: string | null;
   };
 
 const COUNT_KEYS = [
@@ -275,10 +285,17 @@ export function parseLinkRequest(
   const n = typeof body.max_jobs === "number" && Number.isInteger(body.max_jobs)
     ? body.max_jobs
     : policy.defaultMaxJobs;
+  const after = typeof body.after_job_id === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        body.after_job_id,
+      )
+    ? body.after_job_id.toLowerCase()
+    : null;
   return {
     dryRun: body.dry_run !== false,
     maxJobs: Math.min(Math.max(n, 1), policy.maxJobsCeiling),
     actor,
+    afterJobId: after,
   };
 }
 
@@ -290,6 +307,13 @@ export async function runGhlContactLink(
   const source = req.dryRun ? LINK_DRY_RUN_SOURCE : LINK_RUN_SOURCE;
   const started = deps.now();
   const latest = await deps.latestRun(source);
+  // Where the previous run of this kind stopped, unless the caller says.
+  const previousNext = latest && latest.status !== "running" &&
+      latest.cursor && typeof latest.cursor === "object"
+    ? (latest.cursor as Record<string, unknown>).next_after
+    : null;
+  const after = req.afterJobId ??
+    (typeof previousNext === "string" ? previousNext : null);
   if (latest?.status === "running") {
     const updated = Date.parse(latest.updated_at) || 0;
     if (started - updated < policy.runningStaleMs) {
@@ -315,7 +339,7 @@ export async function runGhlContactLink(
     source,
     status: "running",
     window_to: new Date(started).toISOString(),
-    cursor: { v: 1, actor: req.actor },
+    cursor: { v: 1, actor: req.actor, after, next_after: after },
     counts,
   });
 
@@ -326,15 +350,19 @@ export async function runGhlContactLink(
   let stop: string | null = null;
   let firstIssue: string | null = null;
   const label = (job: LinkCandidate) => job.job_number ?? job.job_id;
+  let nextAfter: string | null = null;
 
   try {
-    const all = await deps.candidates();
-    const jobs = all.slice(0, req.maxJobs);
-    counts.backlog_jobs = all.length - jobs.length;
+    const jobs = await deps.candidates(after, req.maxJobs);
+    // A full page may have more after it; a short one reached the end.
+    const fullPage = jobs.length >= req.maxJobs;
+    nextAfter = fullPage && jobs.length ? jobs[jobs.length - 1].job_id : null;
+    if (fullPage) counts.backlog_jobs = 1; // at least the next page
     for (let i = 0; i < jobs.length; i++) {
       const job = jobs[i];
       if (deps.now() - started >= policy.timeBudgetMs) {
-        counts.backlog_jobs += jobs.length - i;
+        counts.backlog_jobs = Math.max(counts.backlog_jobs, jobs.length - i);
+        nextAfter = i > 0 ? jobs[i - 1].job_id : after;
         break;
       }
       counts.jobs_considered++;
@@ -344,8 +372,9 @@ export async function runGhlContactLink(
       } catch (error) {
         if (error instanceof StopRun) {
           stop = error.stopCode;
-          counts.backlog_jobs += jobs.length - i;
+          counts.backlog_jobs = Math.max(counts.backlog_jobs, jobs.length - i);
           counts.jobs_considered--;
+          nextAfter = i > 0 ? jobs[i - 1].job_id : after;
           break;
         }
         throw error;
@@ -401,10 +430,19 @@ export async function runGhlContactLink(
         counts.link_errors++;
         firstIssue ??= `link_error:${safeCode(written.code, "unknown")}`;
       }
-      if (i % 10 === 9) await deps.recordRun({ run_id: runId, source, counts });
+      if (i % 10 === 9) {
+        await deps.recordRun({
+          run_id: runId,
+          source,
+          counts,
+          cursor: { v: 1, actor: req.actor, after, next_after: job.job_id },
+        });
+      }
     }
   } catch (error) {
     stop = safeCode(providerFailure(error).code ?? "run_error");
+    // Nothing after the start point can be trusted as judged: start there again.
+    nextAfter = after;
   }
 
   const status: "succeeded" | "partial" | "failed" = stop
@@ -419,11 +457,14 @@ export async function runGhlContactLink(
     status,
     counts,
     error_code: errorCode,
+    cursor: { v: 1, actor: req.actor, after, next_after: nextAfter },
   });
   return {
     outcome: "ran",
     run_id: runId,
     dry_run: req.dryRun,
+    after_job_id: after,
+    next_after_job_id: nextAfter,
     status,
     error_code: errorCode,
     counts,
