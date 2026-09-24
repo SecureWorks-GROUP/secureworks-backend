@@ -91,9 +91,9 @@ BEGIN
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.context_business_minutes(timestamptz,timestamptz)',ARRAY['510dbec36291c25aa1887ade89e2ca4e'],false),
   ('public.automation_lane_enabled(text)',ARRAY['818a13be854748e2d272bdd648c88b59'],false),
-  ('public.context_transcript_capture_policy()',ARRAY['45cb788bf9b15bbe1815b629cc7ce050'],true),
+  ('public.context_transcript_capture_policy()',ARRAY['fd638cb8133da14fa0c7f51a99d82994'],true),
   ('public.context_transcript_fetch_flag()',ARRAY['3cae5d15d6b1c00c4d94739fcf3b8744'],true),
-  ('public.record_call_transcript_fetch(jsonb)',ARRAY['fb5cd8aa09d37e6e72b90928e1e36cd8'],true),
+  ('public.record_call_transcript_fetch(jsonb)',ARRAY['5b87c8022ac3caa71c7903590cca76f1'],true),
   ('public.context_call_transcript_eligible(text,text,jsonb)',ARRAY['cd3cb55ab8fa9359b744d3626f14ec6c'],true),
   ('public.context_transcript_due_calls(integer)',ARRAY['8dc5c214c9f28497259d13e2d3627440'],true),
   ('public.context_transcript_backfill_contacts(text,integer)',ARRAY['4ac8914b5a6a01b32f10807fe9903e51'],true),
@@ -149,10 +149,8 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'backoff_minutes',jsonb_build_array(2,5,15,60,360,1440),
   -- Agreement rule (review M10): a call younger than this at read time is saved
   -- only when two reads at least agreement_minutes apart return the same words.
-  'agreement_young_minutes',120,
   'agreement_minutes',5,
   -- History load: a read of a call older than this that finds nothing is final.
-  'backfill_final_after_hours',48,
   -- Terminal fetch records older than this are purged by the writer.
   'purge_days',30,
   -- Alarms.
@@ -227,7 +225,7 @@ DECLARE
  now_time timestamptz:=clock_timestamp();
  msg text; ev uuid; md text; res text; code text; tx uuid; call_at timestamptz; call_key text; tx_key text;
  r public.call_transcript_fetches; existed boolean; steps jsonb:=policy->'backoff_minutes'; max_attempts integer;
- n_attempts integer; final_now boolean:=false; purged integer;
+ n_attempts integer; purged integer;
 BEGIN
  IF p IS NULL OR jsonb_typeof(p)<>'object'
   OR EXISTS(SELECT 1 FROM jsonb_object_keys(p) k WHERE k NOT IN ('call_message_id','call_event_id','mode','result','code',
@@ -281,9 +279,7 @@ BEGIN
   r.next_at:=now_time+make_interval(mins=>(policy->>'agreement_minutes')::integer);
  ELSE
   n_attempts:=r.attempts+1; r.attempts:=n_attempts;
-  final_now:= res='not_ready' AND md='backfill'
-   AND call_at < now_time-make_interval(hours=>(policy->>'backfill_final_after_hours')::integer);
-  IF final_now OR n_attempts>=max_attempts THEN
+  IF n_attempts>=max_attempts THEN
    r.next_at:=NULL; r.finished_at:=now_time;
    IF res='not_ready' THEN r.outcome:='not_returned';
    ELSE r.outcome:='failed'; r.failure_code:=code; END IF;
