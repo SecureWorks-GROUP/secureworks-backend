@@ -516,9 +516,13 @@ END $$;
 DROP TABLE p1a_before;
 \else
 -- Superseded by P4: its entry runs P1a's body (context_ladder_p1a) while the
--- rules flag is off, and P1a's other functions are untouched.
+-- rules flag is off; P4 also owns the two Luna write boundaries.
 DO $$
 BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_context_event_with_luna(uuid,uuid,numeric)'::regprocedure)<>'62ed28cbcf041d7cdcda298907a756fa'
+ THEN RAISE EXCEPTION 'P1a: unregistered Luna successor'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_context_event_with_luna(uuid,uuid,numeric,text)'::regprocedure)<>'11c9fb6fedce9cdd4a730e461d5a6fda'
+ THEN RAISE EXCEPTION 'P1a: unregistered Luna successor'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)
   <>'32365101d23dde1695707a0bddff640b' THEN RAISE EXCEPTION 'P1a: ladder entry is neither P1a''s nor P4''s'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_jobs_at(text,timestamptz)'::regprocedure)<>'911811b617fa760f5ddf847fb1ab853d'
