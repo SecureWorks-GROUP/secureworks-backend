@@ -7554,8 +7554,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           authUser,
           req.method,
         )
-      case 'submit_makesafe_report':
-        return json(await dispatchMakesafeReport(client, body, authMode, authUser))
+      case 'submit_makesafe_report': {
+        const makesafeTradeAppIsOffice = authMode === 'jwt' && authUser &&
+            !_opsApiCallerIsStaffOperator(authMode, authUser)
+          ? _resolveManagerVisibility({
+            role: authUser.role,
+            managedVerticals: authUser.managedVerticals,
+            seeEverything: authUser.seeEverything,
+          }).isDispatcher
+          : undefined
+        return json(await dispatchMakesafeReport(client, body, authMode, authUser, makesafeTradeAppIsOffice))
+      }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'read_xero_organisation':
       case 'read_xero_tracking_categories':
@@ -10084,11 +10093,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               body?.job_id || body?.jobId
             let quoteVisible = false
             if (roofJobId) {
-              const decision = await resolveTradeJobAccessTier(
+              const decision = await assertAssignedOrMakesafeAccess(
                 client,
-                roofJobId,
+                String(roofJobId),
                 tradeUser.id,
-                { isOffice: isDispatcher, access: tradeJobAccess },
+                isDispatcher,
+                tradeJobAccess,
               )
               quoteVisible = decision.quoteVisible
             }
@@ -10096,9 +10106,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               return json(await getRoofReportTemplateForJob(client, roofJobId, { quoteVisible }))
             }
             if (action === 'save_roof_report') {
-              return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }, { quoteVisible }))
+              return json(await saveRoofReport(client, { ...body, job_id: roofJobId, jobId: roofJobId, userId: tradeUser.id }, { quoteVisible }))
             }
-            return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }, {}, { quoteVisible }))
+            return json(await submitRoofReport(client, { ...body, job_id: roofJobId, jobId: roofJobId, userId: tradeUser.id }, {}, { quoteVisible }))
           }
           case 'update_my_assignment': return json(await updateMyAssignment(client, body, tradeUser.id))
           case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
@@ -10925,7 +10935,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             return json({ success: true })
           }
-          case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
+          case 'create_trade_alert': {
+            const alertJobId = body?.jobId || body?.job_id
+            if (alertJobId) {
+              await assertAssignedOrMakesafeAccess(client, String(alertJobId), tradeUser.id, isDispatcher, tradeJobAccess)
+            }
+            return json(await createTradeAlert(client, tradeUser.id, body))
+          }
           case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id, isDispatcher, tradeJobAccess))
           case 'update_job_phase': return json(await updateJobPhase(client, body, tradeUser.id))
           case 'list_pending_verifications': return json(await listPendingVerifications(client, tradeUser.id, url.searchParams))
@@ -42277,6 +42293,15 @@ async function submitServiceReport(
   const reportStatus = status || 'submitted'
   const uId = userId || user_id || null
 
+  // Verify user is assigned or holds a tier on this job, before any job read or
+  // write on either branch below (make-safe included).
+  // Fail closed: unknown viewer (no user, not office) never sees raw money.
+  let quoteVisible = isOffice
+  if (uId) {
+    const decision = await assertAssignedOrMakesafeAccess(client, jId, uId, isOffice, access)
+    quoteVisible = decision.quoteVisible
+  }
+
   // The deployed Trade UI still has a generic service-report caller. Route every
   // MakeSafe status through the dedicated authority seam so that caller remains
   // compatible without retaining a job-global/cycleless write path. Ordinary
@@ -42289,14 +42314,6 @@ async function submitServiceReport(
       userId: uId,
       status: reportStatus,
     }, access, { isOffice })
-  }
-
-  // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
-  // Fail closed: unknown viewer (no user, not office) never sees raw money.
-  let quoteVisible = isOffice
-  if (uId) {
-    const decision = await assertAssignedOrMakesafeAccess(client, jId, uId, isOffice, access)
-    quoteVisible = decision.quoteVisible
   }
 
   // Upload signature to storage if provided (instead of storing base64 in DB)

@@ -42,8 +42,10 @@
 //     (makesafe_open) is retired. Only see-everything or a make-safe
 //     category manager may open/allocate an unassigned make-safe job.
 
+import "./trade_app_visibility_rules_test_env.ts";
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _opsApiRequestHandlerForTest,
   _resolveManagerVisibility,
   myJobs,
   resolveTradeJobAccessTier,
@@ -1033,3 +1035,150 @@ Deno.test("rule table (end-to-end): a category manager's typed search reaches th
     "cm-patio-own",
   ]);
 });
+
+// ── Every per-job Trade App door refuses an unallocated ordinary trade ──────
+//
+// Driven through the REAL ops-api request handler (auth, front door, dispatch
+// switch), so a door added to the trade switch without the shared tier check
+// fails here. The caller is ordinary crew: no see-everything, no managed
+// vertical, no assignment on the make-safe job in their own tenant. The only
+// tables a refused call may touch are the caller's profile and the access
+// read itself (jobs + job_assignments); nothing may be written.
+//
+// Assignment-id doors (update_my_assignment, update_job_phase, clock_event)
+// are not job-id doors: they are gated by owning the assignment row itself.
+const PER_JOB_TRADE_DOORS: Array<
+  { action: string; body?: Record<string, unknown> }
+> = [
+  { action: "trade_job_detail" },
+  { action: "trade_quote_extract" },
+  { action: "add_note", body: { text: "hello" } },
+  { action: "upload_photo", body: { dataUrl: "data:image/png;base64,AAAA" } },
+  {
+    action: "get_upload_url",
+    body: { fileName: "site.jpg", contentType: "image/jpeg" },
+  },
+  {
+    action: "confirm_upload",
+    body: { publicUrl: "https://example.invalid/p.jpg", path: "p.jpg" },
+  },
+  { action: "get_service_report" },
+  {
+    action: "submit_service_report",
+    body: { status: "submitted", checklist: {} },
+  },
+  { action: "submit_makesafe_report", body: { status: "submitted" } },
+  { action: "unlock_makesafe_report" },
+  { action: "roof_report_template" },
+  { action: "save_roof_report", body: { fields: {} } },
+  { action: "submit_roof_report", body: { fields: {} } },
+  { action: "trade_labour_budget" },
+  { action: "complete_my_job" },
+  { action: "waive_neighbour_signoff", body: { reason: "neighbour away" } },
+  { action: "log_my_job_hours", body: { hours: 2 } },
+  {
+    action: "create_trade_alert",
+    body: { issueType: "access", detail: "gate locked" },
+  },
+];
+
+const DOOR_TRADE_ID = "7d4f0a52-0000-4000-8000-0000000d00e1";
+const DOOR_JOB_ID = "7d4f0a52-0000-4000-8000-0000000d00b1";
+
+async function callTradeDoor(
+  action: string,
+  body: Record<string, unknown>,
+): Promise<
+  { status: number; text: string; tables: string[]; writes: string[] }
+> {
+  const tables: string[] = [];
+  const writes: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: Request | URL | string, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const method = String(
+      init?.method ?? (input instanceof Request ? input.method : "GET"),
+    ).toUpperCase();
+    if (url.pathname.startsWith("/auth/v1/user")) {
+      return Promise.resolve(
+        Response.json({ id: DOOR_TRADE_ID, email: "", aud: "authenticated" }),
+      );
+    }
+    const rest = url.pathname.match(/^\/rest\/v1\/(.+)$/);
+    if (rest) tables.push(rest[1]);
+    if (method !== "GET" && method !== "HEAD") {
+      writes.push(`${method} ${url.pathname}`);
+    }
+    if (rest?.[1] === "users") {
+      return Promise.resolve(Response.json({
+        org_id: ORG_A,
+        role: "trade",
+        managed_verticals: [],
+        trade_sees_all_jobs: false,
+      }));
+    }
+    if (rest?.[1] === "jobs") {
+      return Promise.resolve(Response.json({
+        id: DOOR_JOB_ID,
+        org_id: ORG_A,
+        type: "makesafe",
+        job_number: "SWMS-DOOR",
+        status: "in_progress",
+        metadata: {},
+      }));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  try {
+    const url = new URL("https://example.invalid/ops-api");
+    url.searchParams.set("action", action);
+    url.searchParams.set("jobId", DOOR_JOB_ID);
+    url.searchParams.set("job_id", DOOR_JOB_ID);
+    const res = await _opsApiRequestHandlerForTest(
+      new Request(url, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer ordinary-crew-jwt",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          ...body,
+          jobId: DOOR_JOB_ID,
+          job_id: DOOR_JOB_ID,
+        }),
+      }),
+    );
+    return { status: res.status, text: await res.text(), tables, writes };
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+for (const door of PER_JOB_TRADE_DOORS) {
+  Deno.test(`rule table (end-to-end): ${door.action} refuses an unallocated ordinary trade before touching job data`, async () => {
+    const out = await callTradeDoor(door.action, door.body ?? {});
+    assertEquals(
+      out.status >= 400,
+      true,
+      `${door.action} returned ${out.status}: ${out.text}`,
+    );
+    assertEquals(
+      out.status === 401,
+      false,
+      `${door.action} failed auth, not the tier gate: ${out.text}`,
+    );
+    assertEquals(
+      /not assigned to this job|job_not_found|Job not found/i.test(out.text),
+      true,
+      `${door.action} did not refuse on the tier gate: ${out.status} ${out.text}`,
+    );
+    assertEquals(out.writes, [], `${door.action} wrote before refusing`);
+    assertEquals(
+      out.tables.filter((t) =>
+        t !== "users" && t !== "jobs" && t !== "job_assignments"
+      ),
+      [],
+      `${door.action} read job data before refusing`,
+    );
+  });
+}

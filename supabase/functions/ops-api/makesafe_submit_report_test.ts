@@ -1709,8 +1709,33 @@ Deno.test("submit_service_report delegates a live generic MakeSafe final into ac
   );
 });
 
-Deno.test("submit_service_report delegates MakeSafe drafts without assignment or final side effects", async () => {
+Deno.test("submit_service_report refuses an unallocated trade's MakeSafe report before any write", async () => {
   const { client, rows } = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _submitServiceReportForTest(client, {
+        job_id: "job-1",
+        userId: "trade-1",
+        checklist: [{ item: "final through generic caller" }],
+        notes: "final",
+        status: "submitted",
+      }, { orgId: "org-test", managedVerticals: [] }),
+    Error,
+    "You are not assigned to this job",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_events.length, 0);
+});
+
+Deno.test("submit_service_report delegates an allocated trade's MakeSafe draft without final side effects", async () => {
+  const assignment = {
+    id: "assignment-1",
+    job_id: "job-1",
+    user_id: "trade-1",
+    status: "scheduled",
+  };
+  const { client, rows } = makeSubmitClient(baseRows({ job_assignments: [assignment] }));
   const result: any = await _submitServiceReportForTest(client, {
     job_id: "job-1",
     userId: "trade-1",
@@ -1721,7 +1746,7 @@ Deno.test("submit_service_report delegates MakeSafe drafts without assignment or
 
   assertEquals(result.report.status, "draft");
   assertEquals(result.report.cycle_attribution, "bound");
-  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_assignments, [assignment]);
   assertEquals(rows.job_events.length, 0);
 });
 
