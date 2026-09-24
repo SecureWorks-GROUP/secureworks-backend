@@ -606,6 +606,16 @@ export function computeSalesBookingAvailability(
         known: salesBookingSuburbPoint(row.suburb) !== null,
       },
       days: days.map((d) => {
+        if (d._busy.some((b) =>
+          b.source === "ghl" && b.contact_id === row.contact_id
+        )) {
+          return {
+            date: d.date,
+            state: "already_booked",
+            already_booked_that_day: true,
+            arrival_windows: [],
+          };
+        }
         const caseBusy = d._busy.filter((b) =>
           !(b.contact_id === row.contact_id &&
             b.source === "offer" && b.offer_source === "system_text")
@@ -638,9 +648,7 @@ export function computeSalesBookingAvailability(
         return {
           date: d.date,
           state,
-          already_booked_that_day: d._busy.some((b) =>
-            b.source === "ghl" && b.contact_id === row.contact_id
-          ),
+          already_booked_that_day: false,
           arrival_windows: caseAvailability.windows,
         };
       }),

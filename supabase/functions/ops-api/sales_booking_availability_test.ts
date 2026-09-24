@@ -767,3 +767,30 @@ Deno.test("protected bands constrain overlap without masking real travel neighbo
     }
   }
 });
+
+Deno.test("already booked cases have no arrival windows on their booked day", () => {
+  const result = computeSalesBookingAvailability(input({
+    cases: [lead("opp:a", "c-a", "Hillarys"), lead("opp:b", "c-b", "Hillarys")],
+    events: ok([{
+      id: "booked-a",
+      startTime: "2026-10-02T09:00:00+08:00",
+      endTime: "2026-10-02T10:30:00+08:00",
+      assignedUserId: MARNIN,
+      contactId: "c-a",
+      address: "Hillarys",
+    }]),
+  }));
+  const days = result.case_free_times["opp:a"].days;
+  assertEquals(days.find((d: { date: string }) => d.date === "2026-10-02"), {
+    date: "2026-10-02",
+    state: "already_booked",
+    already_booked_that_day: true,
+    arrival_windows: [],
+  });
+  assert(days.find((d: { date: string }) => d.date === "2026-09-29").arrival_windows.length > 0);
+  const other = result.case_free_times["opp:b"].days.find(
+    (d: { date: string }) => d.date === "2026-10-02",
+  );
+  assertEquals(other.already_booked_that_day, false);
+  assert(other.arrival_windows.length > 0);
+});

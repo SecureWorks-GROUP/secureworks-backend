@@ -54,6 +54,8 @@ Each case carries `free_times` (null when the Outlook diary dropped malformed
 events or the required offer census is unreadable): `location:{suburb, known}` and per day the `arrival_windows` for a visit
 to that lead's suburb, excluding only that lead's own sent-text offers. Live owner-approval holds
 remain busy and count toward that case's daily capacity.
+A case already booked in GHL that day has `state: already_booked`,
+`already_booked_that_day: true`, and no arrival windows.
 
 ### Named reasons
 
