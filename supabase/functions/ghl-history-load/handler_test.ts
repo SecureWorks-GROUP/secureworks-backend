@@ -326,6 +326,8 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
   const link = sb.calls.find((c) => c.name === "link_job_ghl_contact")!;
   assertEquals(link.args.p_row.contact_id, R21_CONTACT);
   assertEquals(link.args.p_row.key_kind, "phone");
+  assertEquals(link.args.p_row.phone_key, "412345678");
+  assertEquals(link.args.p_row.email_key, null);
   assertEquals(
     log.find((u) => u.pathname === "/contacts/")!.searchParams.get("query"),
     "+61412345678",

@@ -109,7 +109,7 @@ BEGIN
   ('public.record_ghl_history_contact(jsonb)',ARRAY['4880dd100bc6161d61b91695231acb52'],true),
   ('public.capture_ghl_history_event(jsonb)',ARRAY['3e51278532e7c92a64b0cc9935ce2652'],true),
   ('public.context_ghl_history_link_candidates(uuid,integer)',ARRAY['8b250cbde48e1d0067c541fa10d3c506'],true),
-  ('public.link_job_ghl_contact(jsonb)',ARRAY['4608d962499ddf1c03d3f90ce4a894df'],true),
+  ('public.link_job_ghl_contact(jsonb)',ARRAY['713bf6bd8950d2ed1f363ff68f17e624'],true),
   ('public.reverse_ghl_contact_link(uuid,text)',ARRAY['bc62193d8d08ecdfe0a4c3ad2b0bacfe'],true),
   -- Called B0 helpers (the placement track's key rule).
   ('public.context_phone_key(text)',ARRAY['ad18564daffd9bb955949dbd4a5282c1'],false),
@@ -491,7 +491,7 @@ DECLARE pol jsonb:=public.context_ghl_history_policy(); v_job uuid; v_contact te
  j record; link_id uuid;
 BEGIN
  IF p_row IS NULL OR jsonb_typeof(p_row)<>'object'
-  OR EXISTS(SELECT 1 FROM jsonb_object_keys(p_row) x WHERE x NOT IN ('job_id','contact_id','key_kind','run_id','actor'))
+  OR EXISTS(SELECT 1 FROM jsonb_object_keys(p_row) x WHERE x NOT IN ('job_id','contact_id','key_kind','run_id','actor','phone_key','email_key'))
  THEN RAISE EXCEPTION 'link_invalid'; END IF;
  BEGIN
   v_job:=(p_row->>'job_id')::uuid; v_run:=(p_row->>'run_id')::uuid;
@@ -504,7 +504,7 @@ BEGIN
  IF v_actor !~ '^[A-Za-z0-9_.:@-]{1,128}$' THEN RAISE EXCEPTION 'link_actor_invalid'; END IF;
  IF v_run IS NULL OR NOT EXISTS(SELECT 1 FROM public.context_capture_runs c WHERE c.id=v_run AND c.source=pol->>'link_run_source')
  THEN RAISE EXCEPTION 'link_run_invalid'; END IF;
- SELECT jb.id, jb.job_number, jb.ghl_contact_id, jb.status::text AS status, jb.metadata INTO j FROM public.jobs jb WHERE jb.id=v_job FOR UPDATE;
+ SELECT jb.id, jb.job_number, jb.ghl_contact_id, jb.status::text AS status, jb.metadata, jb.client_phone, jb.client_email INTO j FROM public.jobs jb WHERE jb.id=v_job FOR UPDATE;
  IF NOT FOUND THEN RETURN jsonb_build_object('outcome','job_missing','job_id',v_job); END IF;
  -- Never an overwrite: a job that has any contact keeps it.
  IF nullif(btrim(j.ghl_contact_id),'') IS NOT NULL THEN
@@ -513,6 +513,10 @@ BEGIN
  -- Only a job that is live now.
  IF NOT EXISTS(SELECT 1 FROM public.context_ghl_history_live_jobs() l WHERE l.job_id=v_job) THEN
   RETURN jsonb_build_object('outcome','not_live','job_id',v_job);
+ END IF;
+ IF public.context_phone_key(j.client_phone) IS DISTINCT FROM (p_row->>'phone_key')
+  OR public.context_email_key(j.client_email) IS DISTINCT FROM (p_row->>'email_key') THEN
+  RETURN jsonb_build_object('outcome','key_changed','job_id',v_job);
  END IF;
  -- A booking-intake draft is unique per contact
  -- (jobs_booking_intake_draft_ghl_contact_id): never a second one.

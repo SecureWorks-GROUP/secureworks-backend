@@ -163,6 +163,8 @@ Deno.test("R21 (SWF-26168): one GHL contact by phone and email is certain and is
     job_id: R21_JOB.job_id,
     contact_id: R21_CONTACT,
     key_kind: "phone_and_email",
+    phone_key: R21_JOB.phone_key,
+    email_key: R21_JOB.email_key,
     run_id: out.run_id,
     actor: "m4-test",
   }]);
@@ -296,7 +298,7 @@ Deno.test("dry run is the default: counts and job numbers, nothing written", asy
 });
 
 Deno.test("the writer's answer is counted: never an overwrite, not live, booking-draft conflict", async () => {
-  const jobs = ["M4-W1", "M4-W2", "M4-W3", "M4-W4"].map((n, i) =>
+  const jobs = ["M4-W1", "M4-W2", "M4-W3", "M4-W4", "M4-W5"].map((n, i) =>
     job(n, { phone_key: `40000002${i}` })
   );
   const directory = Object.fromEntries(
@@ -312,6 +314,7 @@ Deno.test("the writer's answer is counted: never an overwrite, not live, booking
     [jobs[1].job_id]: { outcome: "already_linked", same_contact: false },
     [jobs[2].job_id]: { outcome: "not_live" },
     [jobs[3].job_id]: { outcome: "booking_draft_conflict" },
+    [jobs[4].job_id]: { outcome: "key_changed" },
   });
   const out = await runGhlContactLink(h.deps, real);
   assert(out.outcome === "ran");
@@ -320,7 +323,8 @@ Deno.test("the writer's answer is counted: never an overwrite, not live, booking
     out.counts.already_linked,
     out.counts.not_live,
     out.counts.link_conflicts,
-  ], [1, 1, 1, 1]);
+    out.counts.key_changed,
+  ], [1, 1, 1, 1, 1]);
   assertEquals(out.ambiguous_job_numbers, ["M4-W4"]);
 });
 

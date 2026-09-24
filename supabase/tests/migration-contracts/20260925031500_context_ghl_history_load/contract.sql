@@ -465,15 +465,23 @@ BEGIN
  run:=pg_temp.m4_run('ghl_history_link',0);
  dry:=pg_temp.m4_run('ghl_history_link_dry',0);
  BEGIN
-  PERFORM public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4LinkContact0001','key_kind','phone','run_id',dry,'actor','m4-test'));
+  PERFORM public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=j68),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=j68),'contact_id','m4LinkContact0001','key_kind','phone','run_id',dry,'actor','m4-test'));
   RAISE EXCEPTION 'm4 a dry run linked';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'link_run_invalid' THEN RAISE; END IF; END;
  BEGIN
-  PERFORM public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4LinkContact0001','key_kind','name','run_id',run,'actor','m4-test'));
+  PERFORM public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=j68),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=j68),'contact_id','m4LinkContact0001','key_kind','name','run_id',run,'actor','m4-test'));
   RAISE EXCEPTION 'm4 a name link taken';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'link_key_kind_invalid' THEN RAISE; END IF; END;
+ SELECT * INTO c FROM public.context_ghl_history_link_candidates(NULL,500) WHERE job_id=j68;
+ UPDATE public.jobs SET client_phone='0499 123 456' WHERE id=j68;
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4LinkContact0001','key_kind','phone_and_email','phone_key',c.phone_key,'email_key',c.email_key,'run_id',run,'actor','m4-test'));
+ IF o->>'outcome' IS DISTINCT FROM 'key_changed'
+  OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68) IS NOT NULL
+  OR EXISTS(SELECT 1 FROM public.context_ghl_contact_links WHERE job_id=j68)
+ THEN RAISE EXCEPTION 'm4 stale key linked %',o; END IF;
+ UPDATE public.jobs SET client_phone='0412 345 678' WHERE id=j68;
  -- Certain: written, with its audit row.
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4LinkContact0001','key_kind','phone_and_email','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=j68),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=j68),'contact_id','m4LinkContact0001','key_kind','phone_and_email','run_id',run,'actor','m4-test'));
  SELECT * INTO l FROM public.context_ghl_contact_links WHERE job_id=j68;
  IF o->>'outcome' IS DISTINCT FROM 'linked' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68)<>'m4LinkContact0001'
   OR l.old_value IS NOT NULL OR l.new_contact_id<>'m4LinkContact0001' OR l.key_kind<>'phone_and_email' OR l.run_id<>run
@@ -483,17 +491,17 @@ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.context_ghl_history_live_jobs() WHERE job_id=j68 AND ghl_contact_id='m4LinkContact0001')
  THEN RAISE EXCEPTION 'm4 linked job not in the load scope'; END IF;
  -- Never an overwrite: a second link, or a link on a job that has a contact.
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4OtherContact001','key_kind','email','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=j68),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=j68),'contact_id','m4OtherContact001','key_kind','email','run_id',run,'actor','m4-test'));
  IF o->>'outcome' IS DISTINCT FROM 'already_linked' OR (o->>'same_contact')::boolean OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j68)<>'m4LinkContact0001'
  THEN RAISE EXCEPTION 'm4 overwrite %',o; END IF;
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j67,'contact_id','m4OtherContact001','key_kind','phone','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j67,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=j67),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=j67),'contact_id','m4OtherContact001','key_kind','phone','run_id',run,'actor','m4-test'));
  IF o->>'outcome' IS DISTINCT FROM 'already_linked' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=j67)<>'TZ8YSOsYK6et7nCbviSs'
  THEN RAISE EXCEPTION 'm4 overwrite of an existing contact %',o; END IF;
  -- A closed job is never linked.
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jdone,'contact_id','m4OtherContact001','key_kind','phone','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jdone,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=jdone),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=jdone),'contact_id','m4OtherContact001','key_kind','phone','run_id',run,'actor','m4-test'));
  IF o->>'outcome' IS DISTINCT FROM 'not_live' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jdone) IS NOT NULL THEN RAISE EXCEPTION 'm4 closed job linked %',o; END IF;
  -- A blank value is replaced, and the blank is what the audit keeps.
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jblank,'contact_id','TZ8YSOsYK6et7nCbviSs','key_kind','phone','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jblank,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=jblank),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=jblank),'contact_id','TZ8YSOsYK6et7nCbviSs','key_kind','phone','run_id',run,'actor','m4-test'));
  IF o->>'outcome' IS DISTINCT FROM 'linked' OR (SELECT old_value FROM public.context_ghl_contact_links WHERE job_id=jblank)<>'  '
  THEN RAISE EXCEPTION 'm4 blank link %',o; END IF;
  SELECT count(*) INTO n FROM public.context_ghl_contact_links;
@@ -515,7 +523,7 @@ BEGIN
  PERFORM set_config('m4.forbid_seal','on',true);
  jfrozen:=pg_temp.m4_job('M4-LNK-FROZEN','accepted','fencing',NULL,'2026-08-01Z');
  UPDATE public.jobs SET expected_costs='{"version":1}',expected_frozen_at='2026-08-02Z',client_phone='0433 222 111' WHERE id=jfrozen;
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jfrozen,'contact_id','m4FrozenContact01','key_kind','phone','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jfrozen,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=jfrozen),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=jfrozen),'contact_id','m4FrozenContact01','key_kind','phone','run_id',run,'actor','m4-test'));
  IF o->>'outcome' IS DISTINCT FROM 'linked' OR (SELECT expected_costs<>'{"version":1}' OR expected_frozen_at<>'2026-08-02Z' OR ghl_contact_id<>'m4FrozenContact01'
   FROM public.jobs WHERE id=jfrozen) THEN RAISE EXCEPTION 'm4 frozen-cost job %',o; END IF;
  -- The stand-in proves itself: a real seal-column change does fire it.
@@ -525,12 +533,12 @@ BEGIN
  -- A booking-intake draft is unique per contact: never a second one.
  jdraft:=pg_temp.m4_job('M4-LNK-DRAFT1','draft','fencing','m4DraftOwner00001','2026-08-01Z',NULL,false,'{"booking_intake_draft":"true"}');
  jdraft2:=pg_temp.m4_job('M4-LNK-DRAFT2','draft','fencing',NULL,'2026-08-01Z',now()-interval '2 days',false,'{"booking_intake_draft":"true"}');
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jdraft2,'contact_id','m4DraftOwner00001','key_kind','phone','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',jdraft2,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=jdraft2),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=jdraft2),'contact_id','m4DraftOwner00001','key_kind','phone','run_id',run,'actor','m4-test'));
  IF o->>'outcome' IS DISTINCT FROM 'booking_draft_conflict' OR (SELECT ghl_contact_id FROM public.jobs WHERE id=jdraft2) IS NOT NULL
   OR EXISTS(SELECT 1 FROM public.context_ghl_contact_links WHERE job_id=jdraft2)
  THEN RAISE EXCEPTION 'm4 second booking draft %',o; END IF;
  -- The reversed job can be linked again (one open link per job).
- o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'contact_id','m4LinkContact0001','key_kind','phone','run_id',run,'actor','m4-test'));
+ o:=public.link_job_ghl_contact(jsonb_build_object('job_id',j68,'phone_key',(SELECT public.context_phone_key(client_phone) FROM public.jobs WHERE id=j68),'email_key',(SELECT public.context_email_key(client_email) FROM public.jobs WHERE id=j68),'contact_id','m4LinkContact0001','key_kind','phone','run_id',run,'actor','m4-test'));
  IF o->>'outcome' IS DISTINCT FROM 'linked' THEN RAISE EXCEPTION 'm4 relink after reverse %',o; END IF;
 END $$;
 ROLLBACK;

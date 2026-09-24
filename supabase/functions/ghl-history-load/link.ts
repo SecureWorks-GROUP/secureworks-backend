@@ -70,6 +70,7 @@ export interface LinkCandidate {
 export type LinkWriteOutcome =
   | { outcome: "linked"; link_id?: string }
   | { outcome: "already_linked"; same_contact?: boolean }
+  | { outcome: "key_changed" }
   | { outcome: "not_live" }
   | { outcome: "job_missing" }
   | { outcome: "booking_draft_conflict" }
@@ -155,6 +156,7 @@ const COUNT_KEYS = [
   "contacts_on_several_jobs",
   "linked",
   "already_linked",
+  "key_changed",
   "not_live",
   "job_missing",
   "link_conflicts",
@@ -413,11 +415,14 @@ export async function runGhlContactLink(
         job_id: job.job_id,
         contact_id: verdict.contact_id,
         key_kind: verdict.key_kind,
+        phone_key: job.phone_key,
+        email_key: job.email_key,
         run_id: runId,
         actor: req.actor,
       });
       if (written.outcome === "linked") counts.linked++;
       else if (written.outcome === "already_linked") counts.already_linked++;
+      else if (written.outcome === "key_changed") counts.key_changed++;
       else if (written.outcome === "not_live") counts.not_live++;
       else if (written.outcome === "job_missing") counts.job_missing++;
       else if (
