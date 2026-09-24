@@ -12,6 +12,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   CALL_ITEM,
+  N1_CALL_ITEM,
   R11_BODY,
   R11_LIST_ITEM,
   R1_WEBHOOK,
@@ -300,21 +301,27 @@ Deno.test("R7: an internal comment is note / internal, never a text we sent", as
   assertEquals(row.direction, "internal");
 });
 
-Deno.test("a call message webhook is not written here (calls stay with CallCompleted until one call writer exists)", async () => {
+Deno.test("T1: a call message webhook is one client.call_logged row through the writer, under ghl:<id>", async () => {
   const r = await run(
     await signed({
-      ...CALL_ITEM,
+      ...N1_CALL_ITEM,
+      id: undefined,
       type: "InboundMessage",
-      messageId: CALL_ITEM.id,
+      messageId: N1_CALL_ITEM.id,
       messageType: "CALL",
     }),
     "enforce",
     ON,
   );
   assertEquals(r.res.status, 200);
-  assertEquals(captureCalls(r).length, 0);
-  assertEquals(ghlReceipt(r).outcome, "skipped");
-  assertEquals(ghlReceipt(r).reason, "skipped_call");
+  assertEquals(captureCalls(r).length, 1);
+  const row = captureCalls(r)[0].args?.p_row as Row;
+  assertEquals(row.event_type, "client.call_logged");
+  assertEquals(row.channel, "call");
+  assertEquals(row.provider_message_id, "ghl:6kn6WmrtfTMvhEJtmfeJ");
+  assertEquals(row.job_id, null);
+  assertEquals((row.payload as Row).duration_seconds, 109);
+  assertEquals(ghlReceipt(r).outcome, "event_created");
 });
 
 Deno.test("a writer error answers 500 so GHL retries, with the code only", async () => {
@@ -407,7 +414,12 @@ Deno.test("R1 without a message id: nothing from its body; one targeted read sav
   const keys = captureCalls(r).map((c) =>
     (c.args?.p_row as Row).provider_message_id
   );
-  assertEquals(keys, ["ghl:pffXnIL1v2FTaKnz4DHm", "ghl:EHw3wdBraMS847Q3V380"]);
+  // Since slice T1 the call on the page is saved too, as a call record.
+  assertEquals(keys, [
+    "ghl:pffXnIL1v2FTaKnz4DHm",
+    "ghl:EHw3wdBraMS847Q3V380",
+    "ghl:callItemFixture01",
+  ]);
   for (const c of captureCalls(r)) {
     assertEquals((c.args?.p_row as Row).source, "ghl-webhook-receiver");
     assertEquals(((c.args?.p_row as Row).metadata as Row).capture_mode, "live");
@@ -429,8 +441,8 @@ Deno.test("R1 without a message id: nothing from its body; one targeted read sav
   assertEquals(g.message_id, null);
   assertEquals(g.targeted_read, "ok");
   assertEquals(g.targeted_seen, 3);
-  assertEquals(g.targeted_inserted, 2);
-  assertEquals(g.targeted_skipped, 1);
+  assertEquals(g.targeted_inserted, 3);
+  assertEquals(g.targeted_skipped, 0);
   assertEquals(g.targeted_errors, 0);
   assertEquals(receipt(r).payload.outcome, "unresolved_id");
   assertNoText(r, [R1_TEXT, "ghl-token-for-tests"]);

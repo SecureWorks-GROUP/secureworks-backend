@@ -13,6 +13,9 @@ import {
 import {
   ACTIVITY_ITEM,
   CALL_ITEM,
+  N1_CALL_ITEM,
+  N2_CALL_ITEM,
+  N3_CALL_ITEM,
   R13_LIST_ITEM,
   R2_LIST_ITEM,
   R3_LIST_ITEM,
@@ -343,9 +346,10 @@ Deno.test("R1 to R4, R13: texts the webhook missed are saved once, mapped by the
   const result = await runGhlMessageReconcile(deps(ghl, db));
   assert(result.outcome === "ran");
   assertEquals(result.status, "succeeded");
-  assertEquals(result.counts.inserted, 5);
-  assertEquals(result.counts.webhook_misses, 5);
-  assertEquals(result.counts.skipped_call, 1);
+  // Six rows: the five texts and, since slice T1, the call.
+  assertEquals(result.counts.inserted, 6);
+  assertEquals(result.counts.webhook_misses, 6);
+  assertEquals(result.counts.skipped_call, 0);
   assertEquals(result.counts.skipped_activity, 1);
 
   const r1 = rowFor(db, R1_LIST_ITEM.id)!;
@@ -381,7 +385,10 @@ Deno.test("R1 to R4, R13: texts the webhook missed are saved once, mapped by the
     (r13.payload as Record<string, unknown>).body,
     "I only see one price of $5,478",
   );
-  assertEquals(rowFor(db, CALL_ITEM.id), undefined);
+  const call = rowFor(db, CALL_ITEM.id)!;
+  assertEquals(call.event_type, "client.call_logged");
+  assertEquals(call.channel, "call");
+  assertEquals(call.provider_message_id, `ghl:${CALL_ITEM.id}`);
 
   // The run row: counts and codes only, window and watermark.
   const run = db.runs[0];
@@ -398,7 +405,41 @@ Deno.test("R1 to R4, R13: texts the webhook missed are saved once, mapped by the
   const again = await runGhlMessageReconcile(deps(ghl, db));
   assert(again.outcome === "ran");
   assertEquals(again.counts.inserted, 0);
-  assertEquals(db.rows.length, 5);
+  assertEquals(db.rows.length, 6);
+});
+
+Deno.test("T1 N1 to N3: calls the webhook missed are saved as one call record each; a call lead-thread-capture already keyed is a duplicate", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  // lead-thread-capture writes call items under the same ghl:<id> key today.
+  db.keys.add(`ghl:${N3_CALL_ITEM.id}`);
+  ghl.add({
+    id: N1_CALL_ITEM.conversationId,
+    contactId: N1_CALL_ITEM.contactId,
+    messages: [N1_CALL_ITEM, N2_CALL_ITEM, N3_CALL_ITEM] as Msg[],
+  });
+  seedCompleteScan(db, "2026-09-21T23:00:00.000Z");
+  db.clock = at("2026-09-23T07:50:00.000Z");
+  const result = await runGhlMessageReconcile(deps(ghl, db));
+  assert(result.outcome === "ran");
+  assertEquals(result.counts.inserted, 2);
+  assertEquals(result.counts.duplicates, 1);
+  assertEquals(result.counts.skipped_call, 0);
+  for (const item of [N1_CALL_ITEM, N2_CALL_ITEM]) {
+    const r = rowFor(db, item.id)!;
+    assertEquals(r.event_type, "client.call_logged");
+    assertEquals(r.channel, "call");
+    assertEquals(r.direction, "inbound");
+    assertEquals(r.event_at, item.dateAdded);
+    assertEquals(r.metadata, { capture_mode: "live" });
+    assertEquals(r.job_id, null, "the ladder places the call");
+  }
+  assertEquals(
+    (rowFor(db, N2_CALL_ITEM.id)!.payload as Record<string, unknown>)
+      .call_status,
+    "voicemail",
+  );
+  assertEquals(rowFor(db, N3_CALL_ITEM.id), undefined, "no second row");
 });
 
 Deno.test("R5: a text our tool already saved is a duplicate; no second row and no writer call", async () => {

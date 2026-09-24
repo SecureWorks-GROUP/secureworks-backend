@@ -3683,6 +3683,14 @@ posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook
 proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
+A GHL call item is one `client.call_logged` row (channel `call`, key
+`ghl:<id>`, no words, provider status and duration verbatim) from the same
+builder (slice T1). The `CallCompleted` workflow post branches on the same flag:
+off, it writes the legacy `client.call_complete` row; on, it is a doorbell that
+writes nothing and reads the contact's newest conversation (the live post has no
+conversation id). A call's transcript is always a separate row. Tests:
+`receiver_t1_test.ts`.
+
 ## A pg_cron Bearer Is Not The Function's Service Key
 
 pg_cron triggers call edge functions with `Bearer <sw_service_key()>`, a

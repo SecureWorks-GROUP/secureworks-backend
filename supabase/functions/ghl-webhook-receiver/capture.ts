@@ -20,6 +20,13 @@
 // each through the same builder and writer under ghl:<id>. If the read fails,
 // the reconciler covers it. Either way the receipt says unresolved_id.
 //
+// CallCompleted (slice T1, transcripts.md §2 review B2) branches on the same
+// flag. Off, the handler keeps writing today's legacy client.call_complete row,
+// so every call still reaches the job read before live capture. On, the post is
+// a doorbell only: it writes nothing itself and makes the same targeted read of
+// the caller's conversation, so the call arrives once, through the builder,
+// as client.call_logged under ghl:<GHL message id> (callCompletedDoorbell).
+//
 // Nothing here logs message text, names, numbers or addresses: ids and codes.
 // ════════════════════════════════════════════════════════════
 
@@ -267,6 +274,102 @@ export async function targetedConversationRead(
     }
   }
   return read;
+}
+
+/**
+ * The contact's newest GHL conversation, for a post that names the contact
+ * only (GHL workflow posts such as CallCompleted). Never throws.
+ */
+async function newestConversationId(
+  contactId: string,
+  deps: {
+    env: (name: string) => string | undefined;
+    fetch: typeof fetch;
+  },
+): Promise<{ id: string | null; code: string | null }> {
+  const token = deps.env("GHL_API_TOKEN") ?? "";
+  const locationId = (deps.env("GHL_LOCATION_ID") ?? "").trim();
+  if (!token || !locationId) {
+    return { id: null, code: "provider_not_configured" };
+  }
+  try {
+    const result = await readGhlProvider(
+      "list_ghl_conversations",
+      new URLSearchParams({ contact_id: contactId, limit: "1" }),
+      {
+        locationId,
+        token,
+        fetchFn: boundedFetch(deps.fetch, TARGETED_READ_REQUEST_MS),
+      },
+    );
+    const rows = (result.data as { conversations?: unknown })?.conversations;
+    const id = Array.isArray(rows)
+      ? safeId((rows[0] as { id?: unknown } | undefined)?.id)
+      : null;
+    return id ? { id, code: null } : { id: null, code: "no_conversation" };
+  } catch (e) {
+    return {
+      id: null,
+      code: e instanceof GhlProviderReadError ? e.code : errorCode(e),
+    };
+  }
+}
+
+/**
+ * CallCompleted while live capture is on (slice T1): a doorbell. The post
+ * writes nothing itself; one targeted read of the caller's conversation saves
+ * the call item (and any other missing item) through the builder and writer.
+ * A post without a conversation id is resolved to the contact's newest
+ * conversation. When the read cannot run, the 15-minute reconciler covers the
+ * call. The caller has authenticated the post, checked the capture lane and
+ * read the flag on. Never throws.
+ */
+export async function callCompletedDoorbell(
+  client: Db,
+  body: Record<string, unknown>,
+  deps: {
+    env: (name: string) => string | undefined;
+    fetch: typeof fetch;
+  },
+): Promise<CaptureResult> {
+  const contactId = safeId(body.contactId);
+  let conversationId = safeId(body.conversationId);
+  let resolveCode: string | null = null;
+  if (contactId && !conversationId) {
+    const newest = await newestConversationId(contactId, deps);
+    conversationId = newest.id;
+    resolveCode = newest.code;
+  }
+  const targeted = conversationId
+    ? await targetedConversationRead(
+      client,
+      { contactId, conversationId },
+      deps,
+    )
+    : {
+      status: "skipped" as const,
+      code: resolveCode ?? "no_conversation",
+      seen: 0,
+      inserted: 0,
+      duplicates: 0,
+      skipped: 0,
+      errors: 0,
+    };
+  const failed = targeted.errors > 0;
+  return {
+    outcome: failed ? "error" : "skipped",
+    reason: failed
+      ? targeted.code ?? "capture_no_result"
+      : targeted.status === "ok"
+      ? "call_doorbell"
+      : targeted.code,
+    eventId: null,
+    upgraded: false,
+    itemId: null,
+    targeted,
+    // A failed save of a row the read did find is a real error: GHL retries.
+    httpStatus: failed ? 500 : 200,
+  };
 }
 
 /** Whether live GHL capture is switched on for this item (fail closed). */

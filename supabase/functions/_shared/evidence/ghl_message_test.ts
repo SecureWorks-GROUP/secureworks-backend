@@ -7,6 +7,7 @@ import {
 import {
   buildGhlMessageRow,
   buildGhlRecordRow,
+  CALL_LOG_TRANSCRIPT_PENDING,
   type GhlCaptureContext,
   type GhlMessageItem,
   type GhlRecordBody,
@@ -16,6 +17,9 @@ import {
 import {
   ACTIVITY_ITEM,
   CALL_ITEM,
+  N1_CALL_ITEM,
+  N2_CALL_ITEM,
+  N3_CALL_ITEM,
   R10_INBOUND,
   R10_OUTBOUND,
   R11_BODY,
@@ -30,6 +34,7 @@ import {
   R5_WEBHOOK,
   R7_LIST_ITEMS,
   R9_WEBHOOK,
+  SHORT_CALL_ITEM,
 } from "./ghl_message_fixtures.ts";
 
 const LIVE: GhlCaptureContext = {
@@ -282,11 +287,7 @@ Deno.test("R32 GHL Email: client.email_in, channel email, provider email id kept
   assertEquals(r.provider_message_id, "ghl:r32EmailPlaceholder1");
 });
 
-Deno.test("calls, activity items, id-less and contact-less items are not written, with a reason", () => {
-  assertEquals(buildGhlMessageRow(CALL_ITEM, LIVE), {
-    kind: "skip",
-    reason: "skipped_call",
-  });
+Deno.test("activity items, id-less and contact-less items are not written, with a reason", () => {
   assertEquals(buildGhlMessageRow(ACTIVITY_ITEM, LIVE), {
     kind: "skip",
     reason: "skipped_activity",
@@ -410,4 +411,195 @@ Deno.test("rank 10: no contact means no row; an appointment's contact is read fr
     (appt.row.metadata as Record<string, unknown>).capture_mode,
     "live",
   );
+});
+
+// ── Slice T1: one call record per GHL call item (transcripts.md §2, §10) ──
+
+Deno.test("T1 N1: an answered inbound call is one client.call_logged row, keyed ghl:<id>, facts as given", () => {
+  const r = row(N1_CALL_ITEM);
+  assertEquals(r.event_type, "client.call_logged");
+  assertEquals(r.provider_message_id, "ghl:6kn6WmrtfTMvhEJtmfeJ");
+  assertEquals(r.channel, "call");
+  assertEquals(r.direction, "inbound");
+  assertEquals(r.contact_id, "Oxqi7eCx2rGCsS0BXOH2");
+  assertEquals(r.entity_type, "contact");
+  assertEquals(r.thread_key, null);
+  assertEquals(r.conversation_key, "3GOBTMJT1qEXkGwcodQK");
+  // Provider time, never ingestion time; the writer stamps occurred_at.
+  assertEquals(r.event_at, "2026-09-23T07:40:55.171Z");
+  assert(!("occurred_at" in r));
+  assertEquals(r.job_id, null, "the ladder places a call, never the builder");
+  assertEquals(r.match_method, "none");
+  assertEquals(r.metadata, { capture_mode: "live" });
+  assertEquals(r.privacy_classification, "staff_only");
+  assertEquals(r.retention_class, "7y_audit");
+  assertEquals(
+    r.body_preview,
+    `[Call, inbound. Provider status: completed. Duration: 109 seconds. ${CALL_LOG_TRANSCRIPT_PENDING}]`,
+  );
+  assertEquals(r.safe_summary, r.body_preview.slice(0, 280));
+  assertEquals(r.payload, {
+    described_by_capture: true,
+    words: false,
+    channel: "call",
+    direction: "inbound",
+    ghl_message_id: "6kn6WmrtfTMvhEJtmfeJ",
+    ghl_contact_id: "Oxqi7eCx2rGCsS0BXOH2",
+    ghl_message_type: "TYPE_CALL",
+    conversation_key: "3GOBTMJT1qEXkGwcodQK",
+    conversation_id: "3GOBTMJT1qEXkGwcodQK",
+    call_sid: "CAfcb0bf0b3d5308f16a6087ca116874a8",
+    call_status: "completed",
+    duration_seconds: 109,
+    by_user: "ERAycY7r6KZ8OA66WQCy",
+    line: "patio",
+    from_line: "774",
+    our_number: "+61489267774",
+    provider_source: null,
+    provider_status: "completed",
+    transcript_expected: true,
+    event_at_source: "provider",
+  });
+});
+
+Deno.test("T1 N1: a call row has no words: nothing a reader takes for what someone said", () => {
+  const r = row(N1_CALL_ITEM);
+  for (const key of ["body", "text", "message", "message_text", "transcript"]) {
+    assert(!(key in r.payload), `payload.${key} must be absent on a call row`);
+  }
+  assertEquals(r.payload.words, false);
+});
+
+Deno.test("T1 N2: a voicemail keeps the provider's status, no duration is invented, and a transcript is expected", () => {
+  const r = row(N2_CALL_ITEM);
+  assertEquals(r.event_type, "client.call_logged");
+  assertEquals(r.provider_message_id, "ghl:Py9PovOwc4I4vNkn9jXg");
+  assertEquals(r.direction, "inbound");
+  assertEquals(r.event_at, "2026-09-22T22:59:20.907Z");
+  assertEquals(r.payload.call_status, "voicemail");
+  assertEquals(r.payload.duration_seconds, null);
+  assertEquals(r.payload.transcript_expected, true);
+  assertEquals(r.payload.line, "patio");
+  assertEquals(
+    r.body_preview,
+    `[Call, inbound. Provider status: voicemail. Duration: none recorded. ${CALL_LOG_TRANSCRIPT_PENDING}]`,
+  );
+});
+
+Deno.test("T1 N3: an outbound call placed in the GHL app keeps its direction, our line and the staff user", () => {
+  const r = row(N3_CALL_ITEM);
+  assertEquals(r.provider_message_id, "ghl:0Gct0u0TQNZox8DRAVLo");
+  assertEquals(r.direction, "outbound");
+  assertEquals(r.event_at, "2026-09-21T23:16:29.130Z");
+  assertEquals(r.payload.duration_seconds, 67);
+  assertEquals(r.payload.call_status, "completed");
+  assertEquals(r.payload.by_user, "ERAycY7r6KZ8OA66WQCy");
+  assertEquals(r.payload.provider_source, "app");
+  // Outbound: our number is the one rung from.
+  assertEquals(r.payload.our_number, "+61489267774");
+  assertEquals(r.payload.from_line, "774");
+  assertEquals(r.payload.transcript_expected, true);
+  assert(
+    r.body_preview.startsWith(
+      "[Call, outbound. Provider status: completed. Duration: 67 seconds.",
+    ),
+  );
+});
+
+Deno.test("T1: a completed call under 5 s expects no transcript; a no-answer is never written as completed", () => {
+  assertEquals(row(SHORT_CALL_ITEM).payload.transcript_expected, false);
+  const noAnswer = row({
+    ...N3_CALL_ITEM,
+    status: "no-answer",
+    meta: { call: { duration: 0, status: "no-answer" } },
+  });
+  assertEquals(noAnswer.payload.call_status, "no-answer");
+  assertEquals(noAnswer.payload.transcript_expected, false);
+  assert(noAnswer.body_preview.includes("Provider status: no-answer."));
+});
+
+Deno.test("T1: the app webhook shape (messageType CALL, callStatus, callDuration) builds the same row as the list item", () => {
+  const listed = row(N1_CALL_ITEM);
+  const hooked = row({
+    messageId: N1_CALL_ITEM.id,
+    messageType: "CALL",
+    direction: "inbound",
+    contactId: N1_CALL_ITEM.contactId,
+    conversationId: N1_CALL_ITEM.conversationId,
+    dateAdded: N1_CALL_ITEM.dateAdded,
+    userId: N1_CALL_ITEM.userId,
+    status: "completed",
+    callStatus: "completed",
+    callDuration: "109",
+    altId: N1_CALL_ITEM.altId,
+    from: N1_CALL_ITEM.from,
+    to: N1_CALL_ITEM.to,
+  });
+  assertEquals(hooked.provider_message_id, listed.provider_message_id);
+  assertEquals(hooked.body_preview, listed.body_preview);
+  assertEquals(
+    { ...hooked.payload, ghl_message_type: null },
+    { ...listed.payload, ghl_message_type: null },
+  );
+});
+
+Deno.test("T1: GHL's voicemail and IVR call types are call records too; a call with no direction is unknown, not guessed", () => {
+  for (const messageType of ["TYPE_VOICEMAIL", "TYPE_IVR_CALL"]) {
+    const r = row({ ...CALL_ITEM, messageType });
+    assertEquals(r.event_type, "client.call_logged");
+    assertEquals(r.channel, "call");
+  }
+  assertEquals(
+    row({ ...CALL_ITEM, messageType: "TYPE_VOICEMAIL" }).payload
+      .transcript_expected,
+    true,
+  );
+  const undirected = row({ ...N1_CALL_ITEM, direction: null });
+  assertEquals(undirected.direction, "unknown");
+  assertEquals(
+    undirected.payload.line,
+    "patio",
+    "our line found on either end",
+  );
+  assert(undirected.body_preview.startsWith("[Call, direction not given."));
+  // The placeholder call item: nothing but id, type, direction and time.
+  const bare = row(CALL_ITEM);
+  assertEquals(bare.payload.call_status, null);
+  assertEquals(bare.payload.duration_seconds, null);
+  assertEquals(bare.payload.call_sid, null);
+  assertEquals(bare.payload.transcript_expected, false);
+  assert(
+    bare.body_preview.includes(
+      "Provider status: not given. Duration: none recorded.",
+    ),
+  );
+});
+
+Deno.test("T1: a call with no usable id or no contact writes nothing", () => {
+  assertEquals(buildGhlMessageRow({ ...N1_CALL_ITEM, id: undefined }, LIVE), {
+    kind: "skip",
+    reason: "no_id",
+  });
+  assertEquals(
+    buildGhlMessageRow({ ...N1_CALL_ITEM, contactId: null }, LIVE),
+    { kind: "skip", reason: "no_contact" },
+  );
+});
+
+Deno.test("T1: capture mode, a verified tool job id and the tool's actor are carried; an unverified id is a hint only", () => {
+  const backfill = row(N1_CALL_ITEM, { ...LIVE, captureMode: "backfill" });
+  assertEquals(backfill.metadata, { capture_mode: "backfill" });
+  const job = "33333333-3333-4333-8333-333333333341";
+  const tool = row(N3_CALL_ITEM, {
+    ...LIVE,
+    verifiedJobId: job,
+    initiatedBy: "workflow:sw_initiate_call",
+  });
+  assertEquals(tool.job_id, job);
+  assertEquals(tool.match_method, "direct_job_id");
+  assertEquals(tool.payload.initiated_by, "workflow:sw_initiate_call");
+  const hint = row(N3_CALL_ITEM, { ...LIVE, unverifiedJobId: job });
+  assertEquals(hint.job_id, job);
+  assertEquals(hint.match_method, "none");
+  assert(!("initiated_by" in hint.payload));
 });

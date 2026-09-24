@@ -8,9 +8,13 @@ import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // TaskComplete, TaskDelete, AppointmentCreate, AppointmentUpdate,
 // AppointmentDelete) are saved through the one row builder and the one writer
 // capture_business_event, behind flag ghl_message_capture_v2 (capture.ts,
-// slice C1c). The legacy workflow posts (CallCompleted, AppointmentCreated,
-// NoteAdded, ContactStageChanged) keep their existing rows until their own
-// slices replace them. The receiver never picks a job: the database ladder
+// slice C1c). CallCompleted branches on the same flag (slice T1): off, it
+// writes today's legacy client.call_complete row; on, it is a doorbell that
+// writes nothing itself and reads the caller's conversation, so the call is
+// saved once as client.call_logged through the builder. The other legacy
+// workflow posts (AppointmentCreated, NoteAdded, ContactStageChanged) keep
+// their existing rows until their own slices replace them. The receiver never
+// picks a job: the database ladder
 // places every row (no receiver matcher, no inline nudge or proposal
 // cancellation; the event listener owns cancellation).
 //
@@ -33,9 +37,11 @@ import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
 import { resolveMatch } from "../_shared/evidence/match.ts";
 import type { Channel, Direction } from "../_shared/evidence/types.ts";
 import {
+  callCompletedDoorbell,
   captureGhlDelivery,
   type CaptureResult,
   isCapturedEventType,
+  messageCaptureEnabled,
 } from "./capture.ts";
 import { GHL_RECORD_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
 import {
@@ -670,6 +676,37 @@ export async function handleGhlWebhook(
         ),
         captured.outcome === "error" ? captured.reason : null,
         captured,
+      );
+    }
+
+    // ── CallCompleted while live capture is on: a doorbell only (slice T1) ──
+    // Off, missing or unreadable, the legacy client.call_complete row below is
+    // written as today, so calls reach the job read before live capture.
+    if (type === "CallCompleted" && await messageCaptureEnabled(supabase)) {
+      const rung = await callCompletedDoorbell(supabase, body, {
+        env: deps.env,
+        fetch: fetchImpl,
+      });
+      console.log(
+        `[ghl-webhook-receiver] Call doorbell: outcome=${rung.outcome} reason=${
+          rung.reason ?? "none"
+        } read=${rung.targeted?.status ?? "none"} inserted=${
+          rung.targeted?.inserted ?? 0
+        } duplicates=${rung.targeted?.duplicates ?? 0}`,
+      );
+      return await finish(
+        rung.outcome,
+        jsonResponse(
+          {
+            received: true,
+            outcome: rung.outcome,
+            reason: rung.reason,
+            event_created: false,
+          },
+          rung.httpStatus,
+        ),
+        rung.outcome === "error" ? rung.reason : null,
+        rung,
       );
     }
 

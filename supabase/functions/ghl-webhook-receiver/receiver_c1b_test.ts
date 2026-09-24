@@ -236,12 +236,16 @@ Deno.test("a forged job id nobody owns never reaches the evidence row (observe, 
 });
 
 // ── workflow posts ─────────────────────────────────────────
+// CallCompleted writes its legacy row only while ghl_message_capture_v2 is off
+// (the shipped state; slice T1 makes it a doorbell when on), so these tests
+// run with the flag off.
+const LEGACY_CALL = { flags: {} };
 
 Deno.test("CallCompleted workflow post with the shared secret is accepted; forged job id never reaches the row or transcribe-call", async () => {
   const r = await run(
     await post({ ...CALL_COMPLETED, job_id: R1_JOB_B }, "secret"),
     "enforce",
-    { jobs: R1_JOBS },
+    { ...LEGACY_CALL, jobs: R1_JOBS },
   );
   assertEquals(r.res.status, 200);
   const rec = receipt(r);
@@ -289,7 +293,11 @@ Deno.test("CallCompleted with a wrong secret or only an app signature is refused
 });
 
 Deno.test("CallCompleted unauthenticated in observe mode keeps working and says auth=missing (the G-AUTH count)", async () => {
-  const r = await run(await post(CALL_COMPLETED, "none"), "observe");
+  const r = await run(
+    await post(CALL_COMPLETED, "none"),
+    "observe",
+    LEGACY_CALL,
+  );
   assertEquals(r.res.status, 200);
   assertEquals(evidenceRows(r).length, 1);
   assertEquals(receipt(r).payload.auth, "missing");

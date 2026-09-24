@@ -168,6 +168,8 @@ const COUNT_KEYS = [
   "skipped_no_id",
   "skipped_no_contact",
   "skipped_no_direction",
+  // Since slice T1 calls are saved as client.call_logged rows, so this stays 0;
+  // kept so every run row has the same count keys.
   "skipped_call",
   "skipped_activity",
   "skipped_unsupported_type",

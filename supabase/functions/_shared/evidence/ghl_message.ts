@@ -16,8 +16,12 @@
 //   * the body is kept whole in payload.body (no 500-character cut);
 //   * outbound texts say who sent them: staff in the GHL app, a GHL workflow,
 //     or our own tools; internal comments are internal, never "we texted";
-//   * calls, voicemails and activity items are not written here (calls stay
-//     with CallCompleted until one call writer exists); the caller counts them.
+//   * a call (TYPE_CALL, and GHL's voicemail and IVR call types) is one
+//     client.call_logged row, channel call, keyed ghl:<id> like a text: the
+//     one call record (slice T1, transcripts.md §2). It carries the provider's
+//     status, direction and duration as given and no words; a transcript is
+//     always a separate row for the same call (T2). Activity items are not
+//     written here; the caller counts them.
 //
 // Pure: no I/O, no clock, no model call. The caller supplies the capture mode
 // and, for our own sends, the job id it verified.
@@ -59,9 +63,16 @@ export interface GhlMessageItem {
   from?: string | null;
   to?: string | null;
   emailMessageId?: string | null;
+  /** Calls: the provider's call id (the carrier's call sid), when given. */
+  altId?: string | null;
+  /** Calls, app webhook shape: status and duration at the top level. */
+  callStatus?: string | null;
+  callDuration?: number | string | null;
   meta?: {
     email?: { messageIds?: unknown } | null;
     marketplace?: { appId?: unknown } | null;
+    /** Calls, conversation list shape: status and duration under meta.call. */
+    call?: { status?: unknown; duration?: unknown } | null;
   } | null;
 }
 
@@ -83,13 +94,14 @@ export interface GhlCaptureContext {
   sentByKind?: SentByKind;
   /** sha-256 of the body, for the sender's 10-minute duplicate-send check. */
   bodyHash?: string | null;
+  /** Calls placed by one of our tools: the actor who asked (INTEGRATION X31). */
+  initiatedBy?: string | null;
 }
 
 export type GhlSkipReason =
   | "no_id"
   | "no_contact"
   | "no_direction"
-  | "skipped_call"
   | "skipped_activity"
   | "unsupported_type";
 
@@ -182,9 +194,7 @@ export function buildGhlMessageRow(
   if (!contactId) return { kind: "skip", reason: "no_contact" };
 
   const kind = messageKind(item.messageType);
-  if (kind === "CALL" || kind === "VOICEMAIL" || kind === "IVRCALL") {
-    return { kind: "skip", reason: "skipped_call" };
-  }
+  if (CALL_KINDS.has(kind)) return buildCallRow(item, id, contactId, ctx);
   if (kind.startsWith("ACTIVITY")) {
     return { kind: "skip", reason: "skipped_activity" };
   }
@@ -292,6 +302,144 @@ export function buildGhlMessageRow(
       body_preview: read.slice(0, EXCERPT),
       safe_summary: read.slice(0, 280),
       ...(ctx.bodyHash ? { body_hash: ctx.bodyHash } : {}),
+      privacy_classification: "staff_only",
+      retention_class: "7y_audit",
+      payload,
+      metadata: { capture_mode: ctx.captureMode },
+    },
+  };
+}
+
+// ── Calls: one call record per GHL call item (slice T1; transcripts.md §2, §3) ──
+//
+// Every door that meets a GHL call item (the conversation read behind the
+// receiver's doorbell, the 15-minute reconciler, a targeted read) builds the
+// same row here: client.call_logged, channel call, keyed ghl:<GHL message id>,
+// the key the runtime's lead-thread-capture already uses, so the two writers
+// land one row. Provider facts are copied as given, never interpreted: a
+// no-answer is never written as a completed call, and a missing direction is
+// `unknown`, never guessed. The row has no words (words: false); capture's own
+// bracketed account goes only in body_preview and safe_summary, as for a text
+// with no words. The transcript, when GHL has one, is its own row keyed
+// ghltx:<same id> (slice T2). A call row is context only: it never wakes an
+// extraction read on its own (cadence K-X keys that on the event type).
+
+/** GHL's call item types, as messageKind reads them. */
+const CALL_KINDS: ReadonlySet<string> = new Set([
+  "CALL",
+  "VOICEMAIL",
+  "IVRCALL",
+]);
+
+/** What a call row says where its words would be (the runtime's lead-thread-capture says the same). */
+export const CALL_LOG_TRANSCRIPT_PENDING =
+  "Transcript: none in this record; any transcript is a separate event for this call.";
+
+/** Below this a completed call has nothing worth transcribing (transcripts.md §2 step 1). */
+const TRANSCRIPT_MIN_SECONDS = 5;
+
+/** The call's duration in seconds as the provider gave it: meta.call (conversation list) or callDuration (app webhook). */
+function callDurationSeconds(item: GhlMessageItem): number | null {
+  const raw = item.meta?.call?.duration ?? item.callDuration;
+  const n = typeof raw === "number"
+    ? raw
+    : typeof raw === "string" && /^\d{1,7}(\.\d{1,3})?$/.test(raw.trim())
+    ? Number(raw.trim())
+    : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** The call's status as the provider gave it, verbatim: meta.call, then callStatus, then the item status. */
+function callStatusText(item: GhlMessageItem): string | null {
+  return text(item.meta?.call?.status) ?? text(item.callStatus) ??
+    text(item.status);
+}
+
+function buildCallRow(
+  item: GhlMessageItem,
+  id: string,
+  contactId: string,
+  ctx: GhlCaptureContext,
+): GhlMessageBuild {
+  const given = String(item.direction ?? "").toLowerCase();
+  const direction: "inbound" | "outbound" | "unknown" =
+    given === "inbound" || given === "outbound" ? given : "unknown";
+  const status = callStatusText(item);
+  const duration = callDurationSeconds(item);
+  const read = `[Call, ${
+    direction === "unknown" ? "direction not given" : direction
+  }. Provider status: ${status ?? "not given"}. Duration: ${
+    duration === null ? "none recorded" : `${duration} seconds`
+  }. ${CALL_LOG_TRANSCRIPT_PENDING}]`;
+
+  // Our line: the one rung (inbound) or rung from (outbound); either end
+  // when the provider gave no direction.
+  const numbers = text(ctx.ourNumber)
+    ? [ctx.ourNumber]
+    : direction === "inbound"
+    ? [item.to]
+    : direction === "outbound"
+    ? [item.from]
+    : [item.to, item.from];
+  const line =
+    numbers.map((n) => ourLineForNumber(text(n))).find((l) => l.our_number) ??
+      ourLineForNumber(null);
+
+  const lowered = (status ?? "").toLowerCase();
+  const transcriptExpected = lowered === "voicemail" ||
+    messageKind(item.messageType) === "VOICEMAIL" ||
+    (lowered === "completed" && duration !== null &&
+      duration >= TRANSCRIPT_MIN_SECONDS);
+
+  const eventAt = sourceTime(item.dateAdded);
+  const verifiedJobId = text(ctx.verifiedJobId);
+  const hintJobId = verifiedJobId ? null : text(ctx.unverifiedJobId);
+  const altId = text(item.altId);
+  const conversationId = text(item.conversationId);
+  const initiatedBy = text(ctx.initiatedBy);
+
+  const payload: Record<string, unknown> = {
+    described_by_capture: true,
+    words: false,
+    channel: "call",
+    direction,
+    ghl_message_id: id,
+    ghl_contact_id: contactId,
+    ghl_message_type: item.messageType ?? null,
+    conversation_key: conversationId,
+    conversation_id: conversationId,
+    call_sid: altId && GHL_ID.test(altId) ? altId : null,
+    call_status: status,
+    duration_seconds: duration,
+    by_user: text(item.userId),
+    line: line.line,
+    from_line: line.from_line,
+    our_number: line.our_number,
+    provider_source: text(item.source),
+    provider_status: text(item.status),
+    transcript_expected: transcriptExpected,
+    event_at_source: eventAt ? "provider" : "missing",
+  };
+  if (initiatedBy) payload.initiated_by = initiatedBy;
+
+  return {
+    kind: "row",
+    row: {
+      event_type: "client.call_logged",
+      source: ctx.source,
+      entity_type: "contact",
+      entity_id: contactId,
+      contact_id: contactId,
+      job_id: verifiedJobId ?? hintJobId,
+      match_method: verifiedJobId ? "direct_job_id" : "none",
+      event_at: eventAt,
+      provider_message_id: `ghl:${id}`,
+      channel: "call",
+      direction,
+      thread_key: null,
+      conversation_key: conversationId,
+      body_preview: read.slice(0, EXCERPT),
+      safe_summary: read.slice(0, 280),
       privacy_classification: "staff_only",
       retention_class: "7y_audit",
       payload,
