@@ -9867,7 +9867,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw new ApiError('job_id, requested_trade_id, and requested_dates[] required', 400)
         }
 
-        const requestedBy = body.requested_by || body.user_id
+        const raTradeCaller = authMode === 'jwt' && authUser && !_opsApiCallerIsStaffOperator(authMode, authUser)
+          ? authUser
+          : null
+        if (raTradeCaller) {
+          await assertAssignedOrMakesafeAccess(
+            client,
+            String(job_id),
+            raTradeCaller.id,
+            _resolveManagerVisibility({
+              role: raTradeCaller.role,
+              managedVerticals: raTradeCaller.managedVerticals,
+              seeEverything: raTradeCaller.seeEverything,
+            }).isDispatcher,
+            { orgId: raTradeCaller.orgId, managedVerticals: raTradeCaller.managedVerticals },
+          )
+        }
+        const requestedBy = raTradeCaller ? raTradeCaller.id : (body.requested_by || body.user_id)
         if (!requestedBy) throw new ApiError('requested_by (user_id) required', 400)
 
         // Verify job exists

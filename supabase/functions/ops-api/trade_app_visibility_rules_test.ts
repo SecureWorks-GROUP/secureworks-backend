@@ -1077,6 +1077,14 @@ const PER_JOB_TRADE_DOORS: Array<
   { action: "waive_neighbour_signoff", body: { reason: "neighbour away" } },
   { action: "log_my_job_hours", body: { hours: 2 } },
   {
+    action: "request_assistance",
+    body: {
+      requested_trade_id: "u-other-trade",
+      requested_dates: ["2026-09-30"],
+      requested_by: "u-spoofed",
+    },
+  },
+  {
     action: "create_trade_alert",
     body: { issueType: "access", detail: "gate locked" },
   },
@@ -1088,11 +1096,19 @@ const DOOR_JOB_ID = "7d4f0a52-0000-4000-8000-0000000d00b1";
 async function callTradeDoor(
   action: string,
   body: Record<string, unknown>,
+  allocated = false,
 ): Promise<
-  { status: number; text: string; tables: string[]; writes: string[] }
+  {
+    status: number;
+    text: string;
+    tables: string[];
+    writes: string[];
+    inserted: unknown[];
+  }
 > {
   const tables: string[] = [];
   const writes: string[] = [];
+  const inserted: unknown[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((input: Request | URL | string, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -1108,6 +1124,16 @@ async function callTradeDoor(
     if (rest) tables.push(rest[1]);
     if (method !== "GET" && method !== "HEAD") {
       writes.push(`${method} ${url.pathname}`);
+      const raw = init?.body;
+      inserted.push(typeof raw === "string" && raw ? JSON.parse(raw) : raw);
+    }
+    if (allocated && rest?.[1] === "job_assignments") {
+      return Promise.resolve(Response.json([{ id: "a-door" }]));
+    }
+    if (rest?.[1] === "assignment_requests" && method === "POST") {
+      return Promise.resolve(
+        Response.json({ id: "req-door" }, { status: 201 }),
+      );
     }
     if (rest?.[1] === "users") {
       return Promise.resolve(Response.json({
@@ -1148,7 +1174,13 @@ async function callTradeDoor(
         }),
       }),
     );
-    return { status: res.status, text: await res.text(), tables, writes };
+    return {
+      status: res.status,
+      text: await res.text(),
+      tables,
+      writes,
+      inserted,
+    };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1182,3 +1214,14 @@ for (const door of PER_JOB_TRADE_DOORS) {
     );
   });
 }
+
+Deno.test("rule table (end-to-end): an allocated trade's request_assistance is filed under their own session id, never the body's requested_by", async () => {
+  const out = await callTradeDoor("request_assistance", {
+    requested_trade_id: "u-other-trade",
+    requested_dates: ["2026-09-30"],
+    requested_by: "u-spoofed",
+  }, true);
+  assertEquals(out.status, 200, out.text);
+  assertEquals(out.writes, ["POST /rest/v1/assignment_requests"]);
+  assertEquals((out.inserted[0] as any).requested_by, DOOR_TRADE_ID);
+});
