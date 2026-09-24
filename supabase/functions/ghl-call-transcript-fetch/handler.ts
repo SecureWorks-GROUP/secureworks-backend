@@ -29,12 +29,14 @@ import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import { isFlagOn } from "../_shared/evidence/feature_flag.ts";
 import { pairLegacyCall } from "../_shared/evidence/ghl_call_pair.ts";
 import {
+  type BackfillCursor,
   type BackfillDeps,
   type BackfillResult,
   type CaptureOutcome,
   type DueCall,
   FETCH_FLAG,
   type FetchPolicy,
+  type FetchState,
   type LiveResult,
   type ProviderRead,
   runBackfill,
@@ -322,17 +324,19 @@ export function liveDeps(deps: HandlerDeps): BackfillDeps {
       return found;
     },
     async fetchOutcomes(ids) {
-      const found = new Map<string, string>();
+      const found = new Map<string, FetchState>();
       for (let i = 0; i < ids.length; i += 100) {
         const { data, error } = await supabase.from("call_transcript_fetches")
-          .select("call_message_id,outcome")
+          .select(
+            "call_message_id,outcome,next_at,attempts,seen_sentences,seen_digest,seen_at",
+          )
           .in("call_message_id", ids.slice(i, i + 100));
         if (error) {
           throw Object.assign(new Error("fetch_records_unreadable"), {
             code: "fetch_records_unreadable",
           });
         }
-        for (const r of data ?? []) found.set(r.call_message_id, r.outcome);
+        for (const r of data ?? []) found.set(r.call_message_id, r);
       }
       return found;
     },
@@ -408,6 +412,19 @@ export async function handleFetch(
     if (body.after !== undefined && body.after !== null && !after) {
       return json({ error: "after_invalid" }, 400);
     }
+    const cursor = body.cursor as BackfillCursor | null | undefined;
+    if (
+      cursor != null && (
+        typeof cursor !== "object" || typeof cursor.contact_id !== "string" ||
+        !GHL_ID.test(cursor.contact_id) ||
+        !Number.isSafeInteger(cursor.conversation_index) ||
+        cursor.conversation_index < 0 ||
+        ![cursor.conversation_page, cursor.message_page].every((v) =>
+          v === null ||
+          (typeof v === "string" && v.length > 0 && v.length <= 4096)
+        )
+      )
+    ) return json({ error: "cursor_invalid" }, 400);
     // Only an explicit false writes.
     const dryRun = body.dry_run !== false;
     const maxContacts = typeof body.max_contacts === "number"
@@ -415,7 +432,7 @@ export async function handleFetch(
       : 10;
     try {
       const result = await runners.backfill(
-        { dryRun, after, maxContacts },
+        { dryRun, after, maxContacts, ...(cursor ? { cursor } : {}) },
         liveDeps(deps),
       );
       logBackfill(result);

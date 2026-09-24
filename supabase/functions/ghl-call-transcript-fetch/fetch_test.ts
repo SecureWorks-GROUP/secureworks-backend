@@ -9,16 +9,22 @@ import {
   assertFalse,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  type BackfillCursor,
   type BackfillDeps,
   type CaptureOutcome,
   type DueCall,
   type FetchPolicy,
   type FetchRecord,
+  type FetchState,
   processCall,
   type ProviderRead,
   runBackfill,
   runLiveFetch,
 } from "./fetch.ts";
+import {
+  flattenTranscript,
+  normaliseSentences,
+} from "../_shared/ghl/call_transcript.ts";
 import { buildGhlMessageRow } from "../_shared/evidence/ghl_message.ts";
 import {
   LOCATION_ID,
@@ -40,7 +46,6 @@ const POLICY: FetchPolicy = {
   backfill_run_source: "ghl_call_transcript_backfill",
   batch_limit: 40,
   min_call_seconds: 5,
-  agreement_young_minutes: 120,
   agreement_minutes: 5,
 };
 
@@ -60,7 +65,7 @@ interface World {
   due: DueCall[];
   latest: { id: string; status: string; started_at: string } | null;
   existing: Map<string, string>;
-  outcomes: Map<string, string>;
+  outcomes: Map<string, FetchState>;
   contacts: {
     ghl_contact_id: string;
     job_ids: string[];
@@ -140,6 +145,22 @@ function deps(w: World): BackfillDeps {
     },
     recordFetch: (record) => {
       w.fetches.push(record);
+      const prior = w.outcomes.get(record.call_message_id);
+      w.outcomes.set(record.call_message_id, {
+        outcome: ["saved", "not_expected"].includes(record.result)
+          ? record.result
+          : "pending",
+        next_at: new Date(
+          w.now + (record.result === "awaiting_agreement" ? 5 : 2) * 60_000,
+        ).toISOString(),
+        attempts: (prior?.attempts ?? 0) +
+          (record.result === "awaiting_agreement" ? 0 : 1),
+        seen_sentences: record.sentences ?? prior?.seen_sentences ?? null,
+        seen_digest: record.digest ?? prior?.seen_digest ?? null,
+        seen_at: record.digest
+          ? new Date(w.now).toISOString()
+          : prior?.seen_at ?? null,
+      });
       return Promise.resolve({ outcome: record.result });
     },
     backfillContacts: (after, limit) =>
@@ -219,6 +240,23 @@ function due(item: Item, extra: Partial<DueCall> = {}): DueCall {
   };
 }
 
+const agreed = new Map<
+  string,
+  Pick<DueCall, "seen_sentences" | "seen_digest" | "seen_at">
+>();
+for (const fixture of [N1, N2, N4, NODUR, VMG, ONECH]) {
+  const flat = await flattenTranscript(normaliseSentences(fixture.sentences));
+  agreed.set(fixture.item.id, {
+    seen_sentences: flat.sentenceCount,
+    seen_digest: flat.digest,
+    seen_at: new Date(Date.parse(fixture.item.dateAdded) + 5 * 60_000)
+      .toISOString(),
+  });
+}
+function agreedDue(item: Item): DueCall {
+  return due(item, agreed.get(String(item.id)));
+}
+
 const ok = (body: unknown): ProviderRead => ({ ok: true, body });
 const hours = (h: number) => h * 3_600_000;
 
@@ -293,12 +331,12 @@ Deno.test("N1: words that changed between the two reads wait again, they are nev
   assertEquals(w.fetches[1].sentences, 50);
 });
 
-Deno.test("N1 read a day later: final, saved at once with no agreement wait", async () => {
+Deno.test("N1 read a day later still requires agreement", async () => {
   const w = withCall(world(), N1.item, ok(N1.sentences));
   w.now = Date.parse(N1.item.dateAdded) + hours(22);
   const step = await processCall(due(N1_CALL_ITEM), "live", POLICY, deps(w));
-  assertEquals(step.outcome, "saved");
-  assertEquals((w.captured[0].payload as Item).agreement, "not_needed");
+  assertEquals(step.outcome, "awaiting_agreement");
+  assertEquals(w.captured.length, 0);
 });
 
 Deno.test("crash replay: a call whose ghltx: row exists is recorded saved with no provider call", async () => {
@@ -320,7 +358,12 @@ Deno.test("a duplicate save (the other mode got there first) is recorded saved o
   const w = withCall(world(), N1.item, ok(N1.sentences));
   w.now = Date.parse(N1.item.dateAdded) + hours(3);
   w.existing.set("ghltx:6kn6WmrtfTMvhEJtmfeJ", "tx-other");
-  const step = await processCall(due(N1_CALL_ITEM), "live", POLICY, deps(w));
+  const step = await processCall(
+    agreedDue(N1_CALL_ITEM),
+    "live",
+    POLICY,
+    deps(w),
+  );
   assertEquals(step.outcome, "duplicate_saved");
   assertEquals(w.fetches[0].transcript_event_id, "tx-other");
 });
@@ -329,7 +372,7 @@ Deno.test("N2 voicemail with no duration: fetched, saved, low signal", async () 
   const w = withCall(world(), N2.item, ok(N2.sentences));
   w.now = Date.parse(N2.item.dateAdded) + hours(3);
   const step = await processCall(
-    due({ ...N2.item, to: "+61489267774" }),
+    agreedDue({ ...N2.item, to: "+61489267774" }),
     "live",
     POLICY,
     deps(w),
@@ -346,7 +389,7 @@ Deno.test("NODUR: completed with no duration recorded carries a transcript, and 
   const w = withCall(world(), NODUR.item, ok(NODUR.sentences));
   w.now = Date.parse(NODUR.item.dateAdded) + hours(5);
   const step = await processCall(
-    due(N4_CONVERSATION_PAGE[1]),
+    agreedDue(N4_CONVERSATION_PAGE[1]),
     "live",
     POLICY,
     deps(w),
@@ -364,7 +407,7 @@ Deno.test("NOANS: the re-read says no-answer, so terminal not_expected and the t
   });
   // A stale stored status (the webhook fired early) is corrected by the re-read (F16).
   const step = await processCall(
-    due({
+    agreedDue({
       ...NOANS.item,
       to: "+61489267774",
       meta: { call: { status: "completed", duration: 40 } },
@@ -384,7 +427,7 @@ Deno.test("VMG: a 'completed' call that is a voicemail greeting is saved low sig
   const w = withCall(world(), VMG.item, ok(VMG.sentences));
   w.now = Date.parse(VMG.item.dateAdded) + hours(3);
   await processCall(
-    due({ ...VMG.item, to: "+61489267774" }),
+    agreedDue({ ...VMG.item, to: "+61489267774" }),
     "live",
     POLICY,
     deps(w),
@@ -397,13 +440,14 @@ Deno.test("VMG: a 'completed' call that is a voicemail greeting is saved low sig
 Deno.test("ONECH: both voices on one channel are saved without speaker labels (N6)", async () => {
   const w = withCall(world(), ONECH.item, ok(ONECH.sentences));
   w.now = Date.parse(ONECH.item.dateAdded) + hours(3);
-  await processCall(due(ONECH.item), "live", POLICY, deps(w));
+  await processCall(agreedDue(ONECH.item), "live", POLICY, deps(w));
   const p = w.captured[0].payload as Item;
   assertEquals(p.speaker_labels, false);
   assertEquals(p.speaker_roles, "not_given");
 });
 
-Deno.test("N17 class: nothing yet (empty list or 404) is not_ready; the database owns the backoff and when it ends", async () => {
+// Synthetic N17 stand-in: no recorded N17 case was found.
+Deno.test("Synthetic N17 stand-in: nothing yet (empty list or 404) is not_ready; the database owns the backoff and when it ends", async () => {
   for (
     const [answer, code] of [
       [ok([]), "empty"],
@@ -465,7 +509,12 @@ Deno.test("a save refused by the writer (e.g. the 8 s statement timeout) is an e
   const w = withCall(world(), N1.item, ok(N1.sentences));
   w.now = Date.parse(N1.item.dateAdded) + hours(3);
   w.captureAnswer = () => ({ outcome: "error", code: "57014" });
-  const step = await processCall(due(N1_CALL_ITEM), "live", POLICY, deps(w));
+  const step = await processCall(
+    agreedDue(N1_CALL_ITEM),
+    "live",
+    POLICY,
+    deps(w),
+  );
   assertEquals(step.outcome, "error");
   assertEquals(w.fetches[0].code, "capture_57014");
 });
@@ -478,7 +527,7 @@ Deno.test("live run: idle with no read and no run row while the flag or the lane
       "capture_lane_off",
     ]] as const
   ) {
-    const w = world({ flag, lane, due: [due(N1_CALL_ITEM)] });
+    const w = world({ flag, lane, due: [agreedDue(N1_CALL_ITEM)] });
     const result = await runLiveFetch(deps(w));
     assertEquals(result, { outcome: "idle", reason });
     assertEquals(w.runs, []);
@@ -489,7 +538,7 @@ Deno.test("live run: idle with no read and no run row while the flag or the lane
 Deno.test("live run: a run still going (under 10 min) is not overlapped", async () => {
   const w = world({
     latest: { id: "r0", status: "running", started_at: "2026-09-24T04:57:00Z" },
-    due: [due(N1_CALL_ITEM)],
+    due: [agreedDue(N1_CALL_ITEM)],
   });
   const result = await runLiveFetch(deps(w));
   assertEquals(result, { outcome: "run_in_progress", run_id: "r0" });
@@ -503,9 +552,9 @@ Deno.test("live run: records a run with counts only; a 429 ends it partial; capt
   withCall(w, ONECH.item, ok(ONECH.sentences));
   w.now = Date.parse("2026-09-24T05:00:00Z");
   w.due = [
-    due(N1_CALL_ITEM),
-    due({ ...N4.item, to: "+61489267772" }),
-    due(ONECH.item),
+    agreedDue(N1_CALL_ITEM),
+    agreedDue({ ...N4.item, to: "+61489267772" }),
+    agreedDue(ONECH.item),
   ];
   const result = await runLiveFetch(deps(w));
   assert(result.outcome === "ran");
@@ -525,7 +574,7 @@ Deno.test("live run: records a run with counts only; a 429 ends it partial; capt
 
   const w2 = withCall(world(), N1.item, ok(N1.sentences));
   w2.now = Date.parse("2026-09-24T05:00:00Z");
-  w2.due = [due(N1_CALL_ITEM)];
+  w2.due = [agreedDue(N1_CALL_ITEM)];
   w2.captureAnswer = () => ({ outcome: "capture_disabled" });
   const r2 = await runLiveFetch(deps(w2));
   assert(r2.outcome === "ran");
@@ -558,6 +607,14 @@ function n4Backfill(partial: Partial<World> = {}): World {
   w.pages.set(N4_CONTACT.conversationId, N4_CONVERSATION_PAGE);
   withCall(w, N4.item, ok(N4.sentences));
   withCall(w, NODUR.item, ok(NODUR.sentences));
+  for (const fixture of [N4, NODUR]) {
+    w.outcomes.set(fixture.item.id, {
+      outcome: "pending",
+      next_at: null,
+      attempts: 0,
+      ...agreed.get(fixture.item.id)!,
+    });
+  }
   return w;
 }
 
@@ -677,7 +734,10 @@ Deno.test("backfill real run: call rows and transcripts are capture mode backfil
 
 Deno.test("backfill: a call with a terminal fetch outcome is skipped; one with a transcript row is recorded saved with no GHL call", async () => {
   const w = n4Backfill();
-  w.outcomes.set("MeVPH47LXDbgcvPUAkjY", "not_returned");
+  w.outcomes.set("MeVPH47LXDbgcvPUAkjY", {
+    ...w.outcomes.get("MeVPH47LXDbgcvPUAkjY")!,
+    outcome: "not_returned",
+  });
   w.existing.set("ghl:Ag9DKkqpfsadWkJS8jst", "call-n4");
   w.existing.set("ghltx:Ag9DKkqpfsadWkJS8jst", "tx-n4");
   const result = await runBackfill(
@@ -693,16 +753,117 @@ Deno.test("backfill: a call with a terminal fetch outcome is skipped; one with a
   assertEquals(w.captured, []);
 });
 
-Deno.test("backfill leaves a call that ended under 2 hours ago to the live fetcher (no agreement wait in a history load)", async () => {
+Deno.test("backfill reads recent calls and waits for agreement", async () => {
   const w = n4Backfill({
     now: Date.parse(N4.item.dateAdded) + 127_000 + 30 * 60_000,
   });
+  w.outcomes.clear();
   const result = await runBackfill(
     { dryRun: true, after: null, maxContacts: 10 },
     deps(w),
   );
   assert(result.outcome === "ran");
   const n4 = result.calls.find((c) => c.call_message_id === N4.item.id)!;
-  assertEquals(n4.outcome, "skipped_recent");
-  assertEquals(w.reads.filter((r) => r.includes(N4.item.id)), []);
+  assertEquals(n4.outcome, "awaiting_agreement");
+  assertEquals(w.reads.filter((r) => r.includes(N4.item.id)).length, 2);
+});
+
+Deno.test("history retries stay on their page and respect next_at and agreement", async () => {
+  const w = n4Backfill({ now: Date.parse("2026-11-24T05:00:00Z") });
+  w.outcomes.clear();
+  w.transcripts.set(N4.item.id, { ok: false, status: 500, code: "http_500" });
+  const d = deps(w);
+  const req = { dryRun: false, after: null, maxContacts: 10 };
+  const first = await runBackfill(req, d);
+  assert(first.outcome === "ran");
+  assertFalse(first.complete);
+  assertEquals(first.next_after, null);
+  assertEquals(first.contacts_done, 0);
+  assert(first.next_cursor);
+  assertEquals((w.runs.at(-1)!.cursor as Item).next_cursor, first.next_cursor);
+  const reads = w.reads.filter((r) => r.startsWith("transcription:")).length;
+  const waiting = await runBackfill({ ...req, cursor: first.next_cursor }, d);
+  assert(waiting.outcome === "ran");
+  assertFalse(waiting.complete);
+  assertEquals(waiting.counts.retry_wait, 2);
+  assertEquals(
+    w.reads.filter((r) => r.startsWith("transcription:")).length,
+    reads,
+  );
+  w.now += 5 * 60_000;
+  w.transcripts.set(N4.item.id, ok(N4.sentences));
+  const agree = await runBackfill({ ...req, cursor: first.next_cursor }, d);
+  assert(agree.outcome === "ran");
+  assertFalse(agree.complete);
+  w.now += 5 * 60_000;
+  const done = await runBackfill({ ...req, cursor: agree.next_cursor }, d);
+  assert(done.outcome === "ran");
+  assert(done.complete);
+  assertEquals(done.next_cursor, null);
+  assertEquals(done.next_after, N4_CONTACT.contactId);
+});
+
+Deno.test("history resumes beyond twenty message pages and five conversation pages", async () => {
+  const w = n4Backfill({ flag: false });
+  const d = deps(w);
+  const visited: string[] = [];
+  d.listConversations = (_contact, cursor) => {
+    const n = Number(cursor ?? 0);
+    return Promise.resolve({
+      conversations: [{ id: `conv${n}` }],
+      next: n < 5 ? String(n + 1) : null,
+    });
+  };
+  d.listMessages = (_contact, conv, cursor) => {
+    const n = Number(cursor ?? 0);
+    visited.push(`${conv}:${n}`);
+    return Promise.resolve({
+      messages: n === 24 ? [N4_CONVERSATION_PAGE[0]] : [],
+      next: n < 24 ? String(n + 1) : null,
+    });
+  };
+  let cursor: BackfillCursor | null = null;
+  let done = false;
+  for (let i = 0; i < 20; i++) {
+    const result = await runBackfill({
+      dryRun: true,
+      after: null,
+      maxContacts: 10,
+      cursor,
+    }, d);
+    assert(result.outcome === "ran");
+    if (result.complete) {
+      done = true;
+      assertEquals(result.contacts_done, 1);
+      break;
+    }
+    assertEquals(result.next_after, null);
+    assertEquals(result.contacts_done, 0);
+    assert(result.next_cursor);
+    cursor = result.next_cursor;
+  }
+  assert(done);
+  assertEquals(visited.length, 150);
+  assertEquals(new Set(visited).size, 150);
+});
+
+Deno.test("history time budget retains the unprocessed message page", async () => {
+  const w = n4Backfill();
+  const d = deps(w);
+  const list = d.listMessages;
+  d.listMessages = async (...args) => {
+    const page = await list(...args);
+    w.now += 101_000;
+    return page;
+  };
+  const result = await runBackfill({
+    dryRun: false,
+    after: null,
+    maxContacts: 10,
+  }, d);
+  assert(result.outcome === "ran");
+  assertFalse(result.complete);
+  assertEquals(result.next_after, null);
+  assertEquals(result.next_cursor?.message_page, null);
+  assertEquals(result.next_cursor?.conversation_index, 0);
 });

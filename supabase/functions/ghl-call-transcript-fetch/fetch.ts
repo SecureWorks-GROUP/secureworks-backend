@@ -46,10 +46,6 @@
 //     any other failure is an error with its code. The backoff and when an
 //     outcome becomes terminal are the database writer's
 //     (record_call_transcript_fetch), never this file's.
-//  4. Agreement rule (review M10): a call younger than
-//     agreement_young_minutes at read time is saved only when two reads at
-//     least agreement_minutes apart return the same words (sentence count and
-//     digest); older calls are final and saved at once.
 //  5. Build the row (buildGhlCallTranscriptRow) and save it through
 //     capture_business_event; a duplicate is a save. Record the outcome.
 //
@@ -80,7 +76,6 @@ export interface FetchPolicy {
   backfill_run_source: string;
   batch_limit: number;
   min_call_seconds: number;
-  agreement_young_minutes: number;
   agreement_minutes: number;
 }
 
@@ -90,7 +85,6 @@ export const LIMITS = {
   runningStaleMs: 10 * 60_000,
   backfillDefaultContacts: 10,
   backfillMaxContacts: 25,
-  conversationPages: 5,
   conversationPageLimit: 50,
   messagePages: 20,
   messagePageLimit: 100,
@@ -203,7 +197,7 @@ export interface BackfillDeps extends FetchDeps {
   /** Which of these provider_message_id keys already have a row, with the row id. Throws when unreadable. */
   existingRows(keys: string[]): Promise<Map<string, string>>;
   /** Fetch records of these call message ids. Throws when unreadable. */
-  fetchOutcomes(ids: string[]): Promise<Map<string, string>>;
+  fetchOutcomes(ids: string[]): Promise<Map<string, FetchState>>;
   pairLegacyCall(
     row: Record<string, unknown>,
   ): Promise<{ row: Record<string, unknown>; outcome: LegacyCallPairOutcome }>;
@@ -425,35 +419,26 @@ export async function processCall(
   }
   const flat = await flattenTranscript(normaliseSentences(read.sentences));
 
-  // 4. Agreement rule for young calls.
   const nowMs = deps.now();
-  const startMs = Date.parse(call.event_at);
-  const endMs = startMs +
-    1000 * (finalDuration ?? call.duration_seconds ?? 0);
-  const young = mode === "live" && Number.isFinite(endMs) &&
-    nowMs - endMs < policy.agreement_young_minutes * 60_000;
-  let agreement: "reached" | "not_reached" | "not_needed" = "not_needed";
-  if (young) {
-    const seenAt = call.seen_at ? Date.parse(call.seen_at) : NaN;
-    const agrees = call.seen_digest === flat.digest &&
-      call.seen_sentences === flat.sentenceCount &&
-      Number.isFinite(seenAt) &&
-      nowMs - seenAt >= policy.agreement_minutes * 60_000;
-    if (!agrees) {
-      return record({
-        result: "awaiting_agreement",
-        sentences: flat.sentenceCount,
-        digest: flat.digest,
-        ...provider,
-      }, {
-        outcome: "awaiting_agreement",
-        reads: 2,
-        sentences: flat.sentenceCount,
-        lowSignal: flat.lowSignal,
-      });
-    }
-    agreement = "reached";
+  const seenAt = call.seen_at ? Date.parse(call.seen_at) : NaN;
+  const agrees = call.seen_digest === flat.digest &&
+    call.seen_sentences === flat.sentenceCount &&
+    Number.isFinite(seenAt) &&
+    nowMs - seenAt >= policy.agreement_minutes * 60_000;
+  if (!agrees) {
+    return record({
+      result: "awaiting_agreement",
+      sentences: flat.sentenceCount,
+      digest: flat.digest,
+      ...provider,
+    }, {
+      outcome: "awaiting_agreement",
+      reads: 2,
+      sentences: flat.sentenceCount,
+      lowSignal: flat.lowSignal,
+    });
   }
+  const agreement = "reached";
 
   // 5. Build and save.
   const facts: CallRowFacts = {
@@ -665,7 +650,24 @@ export async function runLiveFetch(deps: FetchDeps): Promise<LiveResult> {
   };
 }
 
+export interface BackfillCursor {
+  contact_id: string;
+  conversation_page: string | null;
+  conversation_index: number;
+  message_page: string | null;
+}
+
+export interface FetchState {
+  outcome: string;
+  next_at: string | null;
+  attempts: number;
+  seen_sentences: number | null;
+  seen_digest: string | null;
+  seen_at: string | null;
+}
+
 export interface BackfillRequest {
+  cursor?: BackfillCursor | null;
   dryRun: boolean;
   after: string | null;
   maxContacts: number;
@@ -681,7 +683,7 @@ export interface BackfillCallReport {
     | CallOutcome
     | "skipped_terminal"
     | "skipped_not_eligible"
-    | "skipped_recent"
+    | "retry_wait"
     | "would_fetch";
   code?: string;
   sentences?: number;
@@ -697,6 +699,7 @@ export type BackfillResult =
     error_code: string | null;
     contacts_done: number;
     next_after: string | null;
+    next_cursor: BackfillCursor | null;
     complete: boolean;
     counts: Record<string, number>;
     calls: BackfillCallReport[];
@@ -733,7 +736,12 @@ export async function runBackfill(
   const runId = req.dryRun ? null : await deps.recordRun({
     source: policy.backfill_run_source,
     status: "running",
-    cursor: { actor: ACTOR, mode: "backfill", after: req.after },
+    cursor: {
+      actor: ACTOR,
+      mode: "backfill",
+      after: req.after,
+      next_cursor: req.cursor ?? null,
+    },
   });
   const counts: Record<string, number> = {
     ...emptyCounts(),
@@ -746,7 +754,7 @@ export async function runBackfill(
     calls_paired_legacy: 0,
     skipped_terminal: 0,
     skipped_not_eligible: 0,
-    skipped_recent: 0,
+    retry_wait: 0,
     provider_list_reads: 0,
   };
   const calls: BackfillCallReport[] = [];
@@ -755,6 +763,8 @@ export async function runBackfill(
   let lastDone: string | null = req.after;
   let contactsDone = 0;
   let complete = false;
+  let cursor = req.cursor ?? null;
+  let pagesRead = 0;
   try {
     const contacts = await deps.backfillContacts(req.after, max);
     complete = contacts.length < max;
@@ -767,196 +777,238 @@ export async function runBackfill(
         break;
       }
       counts.contacts++;
-      // Every call item of this contact, from all its conversations.
-      const items: GhlMessageItem[] = [];
-      let convCursor: string | undefined;
-      for (let page = 0; page < LIMITS.conversationPages; page++) {
+      if (cursor && cursor.contact_id !== contact.ghl_contact_id) {
+        throw Object.assign(new Error("cursor_contact_mismatch"), {
+          code: "cursor_contact_mismatch",
+        });
+      }
+      cursor ??= {
+        contact_id: contact.ghl_contact_id,
+        conversation_page: null,
+        conversation_index: 0,
+        message_page: null,
+      };
+      while (cursor) {
+        if (
+          pagesRead >= LIMITS.messagePages ||
+          deps.now() - started > LIMITS.timeBudgetMs
+        ) {
+          status = "partial";
+          errorCode = "page_or_time_budget";
+          complete = false;
+          break contactLoop;
+        }
         const convs = await deps.listConversations(
           contact.ghl_contact_id,
-          convCursor,
+          cursor.conversation_page ?? undefined,
         );
         counts.provider_list_reads++;
-        for (const conv of convs.conversations) {
-          const convId = text(conv.id);
-          if (!convId) continue;
-          counts.conversations++;
-          let msgCursor: string | undefined;
-          for (let mp = 0; mp < LIMITS.messagePages; mp++) {
-            const page = await deps.listMessages(
-              contact.ghl_contact_id,
-              convId,
-              msgCursor,
-            );
-            counts.provider_list_reads++;
-            for (const m of page.messages) {
-              if (CALL_TYPES.test(String(m.messageType ?? ""))) {
-                items.push(m as GhlMessageItem);
-              }
-            }
-            if (!page.next) break;
-            msgCursor = page.next;
-          }
-        }
-        if (!convs.next) break;
-        convCursor = convs.next;
-      }
-      counts.call_items += items.length;
-      const built = items.map((item) =>
-        buildGhlMessageRow(item, {
-          source: BACKFILL_CALL_SOURCE,
-          captureMode: "backfill",
-        })
-      ).filter((b): b is { kind: "row"; row: Record<string, unknown> } =>
-        b.kind === "row" && b.row.contact_id === contact.ghl_contact_id
-      ).map((b) => b.row);
-      const ids = built.map((r) => String(r.provider_message_id).slice(4));
-      const existing = ids.length
-        ? await deps.existingRows(
-          ids.flatMap((id) => [`ghl:${id}`, `ghltx:${id}`]),
-        )
-        : new Map<string, string>();
-      const outcomes = ids.length
-        ? await deps.fetchOutcomes(ids)
-        : new Map<string, string>();
-
-      for (const row of built) {
-        const id = String(row.provider_message_id).slice(4);
-        const payload = row.payload as Record<string, unknown>;
-        const report: BackfillCallReport = {
-          call_message_id: id,
-          contact_id: contact.ghl_contact_id,
-          job_numbers: contact.job_numbers,
-          event_at: (row.event_at as string | null) ?? null,
-          call_row: "skipped",
-          outcome: "skipped_not_eligible",
-        };
-        calls.push(report);
-        const prior = outcomes.get(id);
-        if (prior && prior !== "pending") {
-          report.outcome = "skipped_terminal";
-          report.code = prior;
-          counts.skipped_terminal++;
-          continue;
-        }
-        // The call row: exists, or written now (backfill, legacy pairing).
-        let callEventId = existing.get(`ghl:${id}`) ?? null;
-        if (callEventId) {
-          report.call_row = "exists";
-          counts.call_rows_existing++;
-        } else if (req.dryRun) {
-          report.call_row = "would_write";
-          callEventId = "00000000-0000-0000-0000-000000000000";
-        } else {
-          const paired = await deps.pairLegacyCall(row);
-          if (paired.outcome === "paired") counts.calls_paired_legacy++;
-          const out = await deps.capture(paired.row);
-          if (out.outcome === "capture_disabled") {
-            report.call_row = "failed";
-            status = "partial";
-            errorCode = "capture_disabled";
-            break contactLoop;
-          }
-          if (
-            (out.outcome === "inserted" || out.outcome === "duplicate") &&
-            out.id
-          ) {
-            callEventId = out.id;
-            report.call_row = "written";
-            counts.call_rows_written++;
-          } else {
-            report.call_row = "failed";
-            report.code = `capture_${
-              codePart(out.outcome === "error" ? out.code ?? "error" : "no_id")
-            }`;
-            counts.call_rows_failed++;
+        pagesRead++;
+        const conv = convs.conversations[cursor.conversation_index];
+        if (!conv) {
+          if (convs.next) {
+            cursor = {
+              ...cursor,
+              conversation_page: convs.next,
+              conversation_index: 0,
+              message_page: null,
+            };
             continue;
           }
+          cursor = null;
+          break;
         }
-        // Selection eligibility from the stored (here: just built) row. The
-        // provider re-read inside processCall decides again.
-        const eligible = providerCallEligible(
-          text(payload.call_status),
-          typeof payload.duration_seconds === "number"
-            ? payload.duration_seconds
-            : null,
-          text(payload.ghl_message_type),
-          policy.min_call_seconds,
-        );
-        const txId = existing.get(`ghltx:${id}`) ?? null;
-        if (!eligible.eligible && !txId) {
-          report.code = eligible.code;
-          counts.skipped_not_eligible++;
+        const convId = text(conv.id);
+        if (!convId) {
+          cursor = {
+            ...cursor,
+            conversation_index: cursor.conversation_index + 1,
+          };
           continue;
         }
-        // A call that ended less than agreement_young_minutes ago may still
-        // have a partial transcript: the history load has no agreement wait,
-        // so it leaves such a call to the live fetcher.
-        const endMs = Date.parse(String(row.event_at ?? "")) +
-          1000 *
-            (typeof payload.duration_seconds === "number"
+        const page = await deps.listMessages(
+          contact.ghl_contact_id,
+          convId,
+          cursor.message_page ?? undefined,
+        );
+        counts.provider_list_reads++;
+        counts.conversations++;
+        const items = page.messages.filter((m) =>
+          CALL_TYPES.test(String(m.messageType ?? ""))
+        ) as GhlMessageItem[];
+        let pending = false;
+        counts.call_items += items.length;
+        const built = items.map((item) =>
+          buildGhlMessageRow(item, {
+            source: BACKFILL_CALL_SOURCE,
+            captureMode: "backfill",
+          })
+        ).filter((b): b is { kind: "row"; row: Record<string, unknown> } =>
+          b.kind === "row" && b.row.contact_id === contact.ghl_contact_id
+        ).map((b) => b.row);
+        const ids = built.map((r) => String(r.provider_message_id).slice(4));
+        const existing = ids.length
+          ? await deps.existingRows(
+            ids.flatMap((id) => [`ghl:${id}`, `ghltx:${id}`]),
+          )
+          : new Map<string, string>();
+        const outcomes = ids.length
+          ? await deps.fetchOutcomes(ids)
+          : new Map<string, FetchState>();
+
+        for (const row of built) {
+          const id = String(row.provider_message_id).slice(4);
+          const payload = row.payload as Record<string, unknown>;
+          const report: BackfillCallReport = {
+            call_message_id: id,
+            contact_id: contact.ghl_contact_id,
+            job_numbers: contact.job_numbers,
+            event_at: (row.event_at as string | null) ?? null,
+            call_row: "skipped",
+            outcome: "skipped_not_eligible",
+          };
+          calls.push(report);
+          const prior = outcomes.get(id);
+          if (prior && prior.outcome !== "pending") {
+            report.outcome = "skipped_terminal";
+            report.code = prior.outcome;
+            counts.skipped_terminal++;
+            continue;
+          }
+          if (
+            prior?.next_at && Date.parse(prior.next_at) > deps.now() &&
+            !existing.has(`ghltx:${id}`)
+          ) {
+            report.outcome = "retry_wait";
+            counts.retry_wait++;
+            pending = true;
+            continue;
+          }
+          // The call row: exists, or written now (backfill, legacy pairing).
+          let callEventId = existing.get(`ghl:${id}`) ?? null;
+          if (callEventId) {
+            report.call_row = "exists";
+            counts.call_rows_existing++;
+          } else if (req.dryRun) {
+            report.call_row = "would_write";
+            callEventId = "00000000-0000-0000-0000-000000000000";
+          } else {
+            const paired = await deps.pairLegacyCall(row);
+            if (paired.outcome === "paired") counts.calls_paired_legacy++;
+            const out = await deps.capture(paired.row);
+            if (out.outcome === "capture_disabled") {
+              report.call_row = "failed";
+              status = "partial";
+              errorCode = "capture_disabled";
+              break contactLoop;
+            }
+            if (
+              (out.outcome === "inserted" || out.outcome === "duplicate") &&
+              out.id
+            ) {
+              callEventId = out.id;
+              report.call_row = "written";
+              counts.call_rows_written++;
+            } else {
+              report.call_row = "failed";
+              report.code = `capture_${
+                codePart(
+                  out.outcome === "error" ? out.code ?? "error" : "no_id",
+                )
+              }`;
+              counts.call_rows_failed++;
+              pending = true;
+              continue;
+            }
+          }
+          // Selection eligibility from the stored (here: just built) row. The
+          // provider re-read inside processCall decides again.
+          const eligible = providerCallEligible(
+            text(payload.call_status),
+            typeof payload.duration_seconds === "number"
               ? payload.duration_seconds
-              : 0);
-        if (
-          !txId && Number.isFinite(endMs) &&
-          deps.now() - endMs < policy.agreement_young_minutes * 60_000
-        ) {
-          report.outcome = "skipped_recent";
-          counts.skipped_recent++;
-          continue;
+              : null,
+            text(payload.ghl_message_type),
+            policy.min_call_seconds,
+          );
+          const txId = existing.get(`ghltx:${id}`) ?? null;
+          if (!eligible.eligible && !txId) {
+            report.code = eligible.code;
+            counts.skipped_not_eligible++;
+            continue;
+          }
+          if (deps.now() - started > LIMITS.timeBudgetMs) {
+            status = "partial";
+            errorCode = "time_budget";
+            complete = false;
+            break contactLoop;
+          }
+          counts.selected++;
+          const due: DueCall = {
+            call_event_id: callEventId,
+            call_message_id: id,
+            event_type: String(row.event_type),
+            event_at: String(row.event_at ?? ""),
+            contact_id: contact.ghl_contact_id,
+            conversation_key: text(row.conversation_key),
+            direction: text(row.direction),
+            call_status: text(payload.call_status),
+            duration_seconds: typeof payload.duration_seconds === "number"
+              ? payload.duration_seconds
+              : null,
+            call_sid: text(payload.call_sid),
+            line: text(payload.line),
+            from_line: text(payload.from_line),
+            by_user: text(payload.by_user),
+            capture_mode: "backfill",
+            transcript_event_id: txId,
+            attempts: prior?.attempts ?? 0,
+            seen_sentences: prior?.seen_sentences ?? null,
+            seen_digest: prior?.seen_digest ?? null,
+            seen_at: prior?.seen_at ?? null,
+          };
+          if (!flagOn) {
+            // Dry run with the fetch flag off: no transcript read at all.
+            report.outcome = "would_fetch";
+            counts.would_fetch = (counts.would_fetch ?? 0) + 1;
+            continue;
+          }
+          const step = await processCall(
+            due,
+            "backfill",
+            policy,
+            deps,
+            req.dryRun,
+          );
+          if (
+            !req.dryRun &&
+            !["saved", "saved_existing", "duplicate_saved", "not_expected"]
+              .includes(step.outcome)
+          ) {
+            pending = true;
+          }
+          tally(counts, step);
+          report.outcome = step.outcome;
+          if (step.code) report.code = step.code;
+          if (step.sentences !== undefined) report.sentences = step.sentences;
+          if (step.stop) {
+            status = "partial";
+            errorCode = step.stop;
+            complete = false;
+            break contactLoop;
+          }
         }
-        if (deps.now() - started > LIMITS.timeBudgetMs) {
+        if (pending) {
           status = "partial";
-          errorCode = "time_budget";
+          errorCode = "retry_pending";
           complete = false;
           break contactLoop;
         }
-        counts.selected++;
-        const due: DueCall = {
-          call_event_id: callEventId,
-          call_message_id: id,
-          event_type: String(row.event_type),
-          event_at: String(row.event_at ?? ""),
-          contact_id: contact.ghl_contact_id,
-          conversation_key: text(row.conversation_key),
-          direction: text(row.direction),
-          call_status: text(payload.call_status),
-          duration_seconds: typeof payload.duration_seconds === "number"
-            ? payload.duration_seconds
-            : null,
-          call_sid: text(payload.call_sid),
-          line: text(payload.line),
-          from_line: text(payload.from_line),
-          by_user: text(payload.by_user),
-          capture_mode: "backfill",
-          transcript_event_id: txId,
-          attempts: 0,
-          seen_sentences: null,
-          seen_digest: null,
-          seen_at: null,
+        cursor = page.next ? { ...cursor, message_page: page.next } : {
+          ...cursor,
+          conversation_index: cursor.conversation_index + 1,
+          message_page: null,
         };
-        if (!flagOn) {
-          // Dry run with the fetch flag off: no transcript read at all.
-          report.outcome = "would_fetch";
-          counts.would_fetch = (counts.would_fetch ?? 0) + 1;
-          continue;
-        }
-        const step = await processCall(
-          due,
-          "backfill",
-          policy,
-          deps,
-          req.dryRun,
-        );
-        tally(counts, step);
-        report.outcome = step.outcome;
-        if (step.code) report.code = step.code;
-        if (step.sentences !== undefined) report.sentences = step.sentences;
-        if (step.stop) {
-          status = "partial";
-          errorCode = step.stop;
-          complete = false;
-          break contactLoop;
-        }
       }
       lastDone = contact.ghl_contact_id;
       contactsDone++;
@@ -979,6 +1031,7 @@ export async function runBackfill(
         mode: "backfill",
         after: req.after,
         next_after: lastDone,
+        next_cursor: cursor,
       },
       ...(errorCode ? { error_code: errorCode } : {}),
     });
@@ -991,7 +1044,8 @@ export async function runBackfill(
     error_code: errorCode,
     contacts_done: contactsDone,
     next_after: lastDone,
-    complete: complete && status === "succeeded",
+    next_cursor: cursor,
+    complete: complete && cursor === null && status === "succeeded",
     counts,
     calls,
   };
