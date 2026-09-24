@@ -145,6 +145,8 @@ BEGIN
   -- Replaced: live pre-image, or this migration's body.
   ('public.resolve_context_attribution(public.business_events)',ARRAY['fe50f14f4ab28d4d6c9dbb70bc85e7df','32365101d23dde1695707a0bddff640b']),
   ('public.attribute_business_event()',ARRAY['7c1b8ffeeed8829288ee42c30e4314e5','d0036a1bc36f4b2a779f4a8b192cd687']),
+  ('public.attribute_context_event_with_luna(uuid,uuid,numeric)',ARRAY['fde44559c43dcc770d1c42909f4adeaf','62ed28cbcf041d7cdcda298907a756fa']),
+  ('public.attribute_context_event_with_luna(uuid,uuid,numeric,text)',ARRAY['cbb46324b06a0f5b6c3f5ddf695ddb1a','11c9fb6fedce9cdd4a730e461d5a6fda']),
   -- Read, not replaced: must be the merged bodies these rules were written against.
   ('public.context_contact_job_timeline(text,timestamp with time zone)',ARRAY['2bc8e76f14fda242eb6e4d414e93fefa']),
   ('public.context_event_is_ghl(public.business_events)',ARRAY['6bd4046317c4530a67ae38b0d7052cf4']),
@@ -798,7 +800,7 @@ BEGIN
       SELECT j.id, public.context_address_key(j.site_address) AS k, public.context_address_loose_keys(j.site_address) AS lk
       FROM public.jobs j
       WHERE j.site_address IS NOT NULL
-       AND EXISTS (SELECT 1 FROM unnest(loose_keys) l WHERE strpos(lower(j.site_address),substring(l from ' (.*)$'))>0)
+       AND EXISTS (SELECT 1 FROM unnest(loose_keys) l WHERE strpos(translate(lower(j.site_address),chr(39)||chr(96),''),translate(lower(substring(l from ' (.*)$')),chr(39)||chr(96),''))>0)
        AND coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
        AND coalesce(j.created_at,'-infinity'::timestamptz)<=v_at
        AND (NOT (j.status::text IN ('cancelled','archived','lost','closed','complete','completed') OR coalesce(j.archived,false)
@@ -1001,3 +1003,91 @@ GRANT EXECUTE ON FUNCTION
  public.context_contact_jobs_at(text,timestamptz,text,text),
  public.context_attribution_preview(uuid,boolean)
 TO service_role;
+
+CREATE OR REPLACE FUNCTION public.attribute_context_event_with_luna(p_event_id uuid,p_job_id uuid,p_confidence numeric)
+RETURNS public.business_events LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE e public.business_events; chosen uuid;
+BEGIN
+ IF NOT public.automation_lane_enabled('attribution') THEN RAISE EXCEPTION 'attribution disabled'; END IF;
+ SELECT * INTO e FROM public.business_events WHERE id=p_event_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'event not found'; END IF;
+ IF e.attribution_status IS DISTINCT FROM 'pending_luna' THEN RAISE EXCEPTION 'event is not pending Luna'; END IF;
+ IF p_job_id IS NOT NULL THEN
+  IF p_confidence IS NULL OR p_confidence<0 OR p_confidence>1 OR p_confidence='NaN'::numeric THEN RAISE EXCEPTION 'invalid confidence'; END IF;
+  IF NOT (p_job_id=ANY(coalesce(e.candidate_job_ids,ARRAY(SELECT c.job_id FROM public.context_contact_jobs_at(e.contact_id,coalesce(e.event_at,e.occurred_at)) c))))
+  THEN RAISE EXCEPTION 'job is not a contact candidate'; END IF;
+  chosen:=p_job_id;
+  IF nullif(e.thread_key,'') IS NOT NULL AND NOT public.context_event_is_ghl(e) THEN
+   IF p_confidence>=0.8 THEN
+    INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,p_job_id,'luna',e.id) ON CONFLICT DO NOTHING;
+   END IF;
+   SELECT coalesce((SELECT job_id FROM public.event_threads WHERE thread_key=e.thread_key
+    AND retired_at IS NULL
+    AND job_id=ANY(coalesce(e.candidate_job_ids,ARRAY(SELECT c.job_id FROM public.context_contact_jobs_at(e.contact_id,coalesce(e.event_at,e.occurred_at)) c)))),p_job_id) INTO chosen;
+   IF chosen<>p_job_id THEN p_confidence:=1; END IF;
+  END IF;
+ END IF;
+ UPDATE public.business_events SET job_id=chosen,
+ attribution_status=CASE WHEN chosen IS NULL THEN 'admin_bucket' WHEN chosen<>p_job_id THEN 'thread' ELSE 'luna' END,
+ attribution_step=CASE WHEN chosen IS NULL THEN 6 WHEN chosen<>p_job_id THEN 2 ELSE 5 END,
+ attribution_confidence=CASE WHEN chosen IS NOT NULL THEN p_confidence END,
+ attributed_at=CASE WHEN chosen IS NOT NULL THEN clock_timestamp() END,
+ attribution_checked_at=clock_timestamp(),match_status=CASE WHEN chosen IS NULL THEN 'unresolved' ELSE 'matched' END,
+ match_method=CASE WHEN chosen IS NULL THEN 'none' ELSE 'contact_id' END,
+ match_confidence=CASE WHEN chosen IS NOT NULL THEN p_confidence END
+ WHERE id=e.id RETURNING * INTO e;
+ RETURN e;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.attribute_context_event_with_luna(p_event_id uuid,p_job_id uuid,p_confidence numeric,p_outcome text)
+RETURNS public.business_events LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE e public.business_events; chosen uuid; v_outcome text:=p_outcome; v_now timestamptz:=clock_timestamp(); v_note jsonb;
+BEGIN
+ IF NOT public.automation_lane_enabled('attribution') THEN RAISE EXCEPTION 'attribution disabled'; END IF;
+ IF p_outcome IS NULL OR p_outcome NOT IN ('job','several','undecided') THEN RAISE EXCEPTION 'invalid attribution outcome'; END IF;
+ IF p_outcome='job' AND p_job_id IS NULL THEN RAISE EXCEPTION 'job outcome needs a job'; END IF;
+ IF p_outcome<>'job' AND p_job_id IS NOT NULL THEN RAISE EXCEPTION 'several or undecided names no job'; END IF;
+ SELECT * INTO e FROM public.business_events WHERE id=p_event_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'event not found'; END IF;
+ IF e.attribution_status IS DISTINCT FROM 'pending_luna' THEN RAISE EXCEPTION 'event is not pending Luna'; END IF;
+ v_note:=jsonb_build_object('luna_outcome',p_outcome,'luna_outcome_at',v_now);
+ IF p_outcome='job' THEN
+  IF p_confidence IS NULL OR p_confidence<0 OR p_confidence>1 OR p_confidence='NaN'::numeric THEN RAISE EXCEPTION 'invalid confidence'; END IF;
+  IF NOT (p_job_id=ANY(coalesce(e.candidate_job_ids,ARRAY(SELECT c.job_id FROM public.context_contact_jobs_at(e.contact_id,coalesce(e.event_at,e.occurred_at)) c))))
+  THEN RAISE EXCEPTION 'job is not a contact candidate'; END IF;
+  IF p_confidence<0.8 THEN
+   -- Below the floor: honestly unknown beats confidently wrong. Rest it.
+   v_outcome:='undecided';
+   v_note:=jsonb_build_object('luna_outcome','undecided','luna_outcome_at',v_now,
+    'luna_below_floor',jsonb_build_object('job_id',p_job_id,'confidence',p_confidence));
+  END IF;
+ END IF;
+ IF v_outcome='job' THEN
+  chosen:=p_job_id;
+  IF nullif(e.thread_key,'') IS NOT NULL AND NOT public.context_event_is_ghl(e) THEN
+   INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,p_job_id,'luna',e.id) ON CONFLICT DO NOTHING;
+   SELECT coalesce((SELECT job_id FROM public.event_threads WHERE thread_key=e.thread_key
+    AND retired_at IS NULL
+    AND job_id=ANY(coalesce(e.candidate_job_ids,ARRAY(SELECT c.job_id FROM public.context_contact_jobs_at(e.contact_id,coalesce(e.event_at,e.occurred_at)) c)))),p_job_id) INTO chosen;
+   -- A racing reply follows the thread winner; it never overwrites that binding.
+   IF chosen<>p_job_id THEN p_confidence:=1; END IF;
+  END IF;
+  UPDATE public.business_events SET job_id=chosen,
+   attribution_status=CASE WHEN chosen<>p_job_id THEN 'thread' ELSE 'luna' END,
+   attribution_step=CASE WHEN chosen<>p_job_id THEN 2 ELSE 5 END,
+   attribution_confidence=p_confidence,attributed_at=v_now,attribution_checked_at=v_now,
+   match_status='matched',match_method='contact_id',match_confidence=p_confidence,
+   metadata=coalesce(metadata,'{}'::jsonb)||v_note
+  WHERE id=e.id RETURNING * INTO e;
+ ELSE
+  -- Resting: off every job, candidates kept, never selected again by the
+  -- bucket re-run or the Luna page; shown in each candidate's not-yet-placed lane.
+  UPDATE public.business_events SET job_id=NULL,attribution_status='unplaced',attribution_step=5,
+   attribution_confidence=NULL,attributed_at=NULL,attribution_checked_at=v_now,
+   match_status='unresolved',match_method='none',match_confidence=NULL,
+   metadata=coalesce(metadata,'{}'::jsonb)||v_note
+  WHERE id=e.id RETURNING * INTO e;
+ END IF;
+ PERFORM public.context_attribution_record_attempt(e,v_outcome,NULL);
+ RETURN e;
+END $$;

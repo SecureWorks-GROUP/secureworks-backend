@@ -572,6 +572,59 @@ BEGIN
 END $$;
 
 DO $$
+DECLARE a uuid:=gen_random_uuid(); b uuid:=gen_random_uuid(); c uuid:=gen_random_uuid();
+ e public.business_events; arity int; scenario int; key text;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,job_number,status,type,ghl_contact_id,site_address,created_at) VALUES
+ (a,gen_random_uuid(),'SWP-99881','quoted','patio','p4-luna-other',NULL,'2026-01-01Z'),
+ (b,gen_random_uuid(),'SWP-99882','quoted','patio','p4-luna-owner','14 O''Connor Rd','2026-01-01Z'),
+ (c,gen_random_uuid(),'SWP-99883','quoted','patio','p4-luna-owner',NULL,'2026-01-01Z');
+ FOR arity IN 3..4 LOOP
+  FOR scenario IN 1..4 LOOP
+   key:='outlook:p4-luna-'||arity||'-'||scenario;
+   IF scenario=1 THEN
+    INSERT INTO public.event_threads(thread_key,job_id,bound_by) VALUES(key,a,'ladder');
+   END IF;
+   INSERT INTO public.business_events(event_type,source,channel,direction,event_at,contact_id,thread_key,payload)
+   VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z','p4-luna-owner',key,
+    '{"subject":"Question","body":"Please clarify"}') RETURNING * INTO e;
+   IF e.attribution_status<>'pending_luna' OR e.job_id IS NOT NULL
+   THEN RAISE EXCEPTION 'Luna fixture must enter review: %',row_to_json(e); END IF;
+   IF scenario=2 THEN
+    INSERT INTO public.event_threads(thread_key,job_id,bound_by,retired_at,retired_reason)
+    VALUES(key,c,'ladder',now(),'conflict');
+   ELSIF scenario=3 THEN
+    INSERT INTO public.event_threads(thread_key,job_id,bound_by) VALUES(key,c,'ladder');
+    UPDATE public.business_events SET candidate_job_ids=NULL WHERE id=e.id;
+   END IF;
+   IF arity=3 THEN
+    e:=public.attribute_context_event_with_luna(e.id,b,CASE WHEN scenario=4 THEN 0.7 ELSE 0.9 END);
+   ELSE
+    e:=public.attribute_context_event_with_luna(e.id,b,CASE WHEN scenario=4 THEN 0.7 ELSE 0.9 END,'job');
+   END IF;
+   IF scenario IN (1,2) THEN
+    IF e.job_id IS DISTINCT FROM b OR e.attribution_status<>'luna' OR e.attribution_confidence<>0.9
+     OR (SELECT job_id FROM public.event_threads WHERE thread_key=key) IS DISTINCT FROM (CASE WHEN scenario=1 THEN a ELSE c END)
+    THEN RAISE EXCEPTION 'invalid thread overrode model pick: %',row_to_json(e); END IF;
+   ELSIF scenario=3 THEN
+    IF e.job_id IS DISTINCT FROM c OR e.attribution_status<>'thread' OR e.attribution_confidence<>1
+    THEN RAISE EXCEPTION 'eligible live thread was not followed'; END IF;
+   ELSE
+    IF EXISTS(SELECT 1 FROM public.event_threads WHERE thread_key=key)
+    THEN RAISE EXCEPTION 'below-floor pick created binding'; END IF;
+    IF arity=4 AND (e.job_id IS NOT NULL OR e.attribution_status<>'unplaced')
+    THEN RAISE EXCEPTION 'below-floor outcome failed to rest'; END IF;
+   END IF;
+  END LOOP;
+ END LOOP;
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,payload)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-21Z',
+ jsonb_build_object('from','council@council.example','subject','14 O''Connor Road','body','RFI')) RETURNING * INTO e;
+ IF e.job_id IS DISTINCT FROM b OR e.attribution_status<>'content_ref' OR e.metadata->>'placement_rule'<>'site_address'
+ THEN RAISE EXCEPTION 'apostrophe address did not match: %',row_to_json(e); END IF;
+END $$;
+
+DO $$
 DECLARE e public.business_events; mode text;
 BEGIN
  UPDATE public.jobs SET client_email='ambiguous.p4@example.com',ghl_contact_id='p4-ambiguous-a'
@@ -670,11 +723,11 @@ ROLLBACK;
 
 -- Re-apply is a no-op.
 CREATE TEMP TABLE p4_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p
- WHERE obj_description(p.oid,'pg_proc') LIKE 'P4:%' OR p.oid='public.attribute_business_event()'::regprocedure;
+ WHERE obj_description(p.oid,'pg_proc') LIKE 'P4:%' OR p.oid='public.attribute_business_event()'::regprocedure OR p.proname='attribute_context_event_with_luna';
 \ir ../../../migrations/20260924213000_context_unlinked_rules.sql
 DO $$
 BEGIN
- IF (SELECT count(*) FROM p4_before)<>11 THEN RAISE EXCEPTION 'expected 11 P4 functions, got %',(SELECT count(*) FROM p4_before); END IF;
+ IF (SELECT count(*) FROM p4_before)<>13 THEN RAISE EXCEPTION 'expected 13 P4 functions, got %',(SELECT count(*) FROM p4_before); END IF;
  IF EXISTS(SELECT 1 FROM p4_before b LEFT JOIN pg_proc p ON p.oid=b.sig::regprocedure WHERE md5(p.prosrc) IS DISTINCT FROM b.md5)
  THEN RAISE EXCEPTION 'P4 re-apply changed a body'; END IF;
  IF (SELECT count(*) FROM public.feature_flags WHERE flag_name='context_unlinked_rules_v1')<>1 THEN RAISE EXCEPTION 'P4 re-apply duplicated the flag row'; END IF;

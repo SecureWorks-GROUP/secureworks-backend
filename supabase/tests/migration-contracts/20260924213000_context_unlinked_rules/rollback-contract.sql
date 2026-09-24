@@ -23,3 +23,9 @@ DO $$ BEGIN
  THEN RAISE EXCEPTION 'p4 rollback: ladder or writer record no longer works'; END IF;
 END $$;
 ROLLBACK;
+
+DO $$ BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_context_event_with_luna(uuid,uuid,numeric)'::regprocedure)<>'fde44559c43dcc770d1c42909f4adeaf'
+ OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_context_event_with_luna(uuid,uuid,numeric,text)'::regprocedure)<>'cbb46324b06a0f5b6c3f5ddf695ddb1a'
+ THEN RAISE EXCEPTION 'rollback did not restore Luna pre-images'; END IF;
+END $$;
