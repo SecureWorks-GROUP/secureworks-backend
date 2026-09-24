@@ -741,6 +741,90 @@ Deno.test("contact-level GHL messages and notes retain direction and scope", asy
   }
 });
 
+Deno.test("restricted contact events keep metadata but withhold content", async () => {
+  const tables = unitTables();
+  tables.xero_invoices = [invoice(1, { job_id: null })];
+  tables.jobs = [];
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-contact-only",
+    job_id: null,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  tables.business_events = [{
+    id: "restricted-contact-email",
+    contact_id: "ghl-contact-only",
+    event_type: "client.email_in",
+    occurred_at: "2026-09-23T01:00:00Z",
+    channel: "email",
+    direction: "inbound",
+    provider_message_id: "graph:restricted-email-1",
+    privacy_classification: "restricted_pii",
+    source: "monitor-inbox",
+    body_preview: "Private email preview",
+    payload: {
+      body: "Private email body",
+      from: "private.sender@example.test",
+    },
+  }];
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables)),
+  );
+  const entry = out.debtors[0].timeline.entries.find((candidate: any) =>
+    candidate.provider_id === "graph:restricted-email-1"
+  );
+  assert(entry);
+  assertEquals(entry.provider, "outlook");
+  assertEquals(entry.at, "2026-09-23T01:00:00Z");
+  assertEquals(entry.direction, "inbound");
+  assertEquals(entry.source, "business_events");
+  assertEquals(entry.author, null);
+  assertEquals(entry.preview, "");
+  assertEquals(entry.subject, null);
+  assertEquals(entry.label, "content withheld: restricted_pii");
+});
+
+Deno.test("contact event provider follows its Graph provider id", async () => {
+  const tables = unitTables();
+  tables.xero_invoices = [invoice(1, { job_id: null })];
+  tables.jobs = [];
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-contact-only",
+    job_id: null,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  tables.business_events = [{
+    id: "graph-contact-email",
+    contact_id: "ghl-contact-only",
+    event_type: "client.email_in",
+    occurred_at: "2026-09-23T02:00:00Z",
+    channel: "email",
+    direction: "inbound",
+    provider_message_id: "graph:contact-email-1",
+    privacy_classification: "staff_only",
+    source: "monitor-inbox",
+    payload: { body: "An email captured from Graph" },
+  }];
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables)),
+  );
+  const entry = out.debtors[0].timeline.entries.find((candidate: any) =>
+    candidate.provider_id === "graph:contact-email-1"
+  );
+  assert(entry);
+  assertEquals(entry.provider, "outlook");
+  assertEquals(entry.preview, "An email captured from Graph");
+});
+
 Deno.test("conversation business-event faults make GHL source unreadable", async () => {
   const out: any = await debtWorklist(
     new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),

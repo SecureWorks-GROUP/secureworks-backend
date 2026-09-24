@@ -192,7 +192,9 @@ function normText(value: unknown): string {
 function providerFromId(providerId: string | null, fallback: string): string {
   if (!providerId) return fallback;
   const prefix = providerId.split(":")[0];
-  if (prefix === "ghl") return "ghl";
+  if (prefix === "ghl" || prefix === "ghlnote" || prefix === "ghlcomment") {
+    return "ghl";
+  }
   if (prefix === "graph" || prefix === "graph-group") return "outlook";
   return prefix || fallback;
 }
@@ -287,9 +289,7 @@ export function entryFromConversation(
     key: providerId ?? `${source}:${m.source_ref ?? m.id}`,
     kind,
     channel,
-    provider: providerId?.startsWith("ghlnote:")
-      ? "ghl"
-      : providerFromId(providerId, fallbackProvider),
+    provider: providerFromId(providerId, fallbackProvider),
     provider_id: providerId,
     at: str(m.occurred_at),
     at_precision: "time",
@@ -317,34 +317,39 @@ export function entryFromGhlContactEvent(
   const payload = row.payload ?? {};
   const providerId = str(row.provider_message_id);
   const jobId = str(row.job_id);
+  const restricted = row.privacy_classification === "restricted_pii";
   const channel = str(row.channel) ?? str(payload.channel) ?? "note";
   const isNote = channel === "note";
-  const body = String(
-    payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
-      row.body_preview ?? "",
-  );
+  const body = restricted
+    ? ""
+    : String(
+      payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
+        row.body_preview ?? "",
+    );
   return {
     key: providerId ?? `business_events:${row.id}`,
     kind: isNote ? "ghl_note" : channel,
     channel,
-    provider: "ghl",
+    provider: providerFromId(providerId, str(row.source) ?? "ghl"),
     provider_id: providerId,
     at: str(row.occurred_at),
     at_precision: "time",
     direction: isNote
       ? "internal"
       : str(row.direction) ?? str(payload.direction) ?? "unknown",
-    author: str(payload.added_by) ?? str(payload.sent_by_user) ??
-      str(payload.from),
+    author: restricted
+      ? null
+      : str(payload.added_by) ?? str(payload.sent_by_user) ??
+        str(payload.from),
     source: "business_events",
     source_ref: str(row.id),
     subject: null,
-    preview: body.slice(0, 500),
+    preview: restricted ? "" : body.slice(0, 500),
     job_id: jobId,
     invoice_ids: jobId ? [...(jobInvoiceIds ?? [])] : [...debtorInvoiceIds],
     invoice_scope: jobId ? "job" : "debtor",
     seen_in: ["business_events"],
-    label: null,
+    label: restricted ? "content withheld: restricted_pii" : null,
   };
 }
 
@@ -1395,7 +1400,7 @@ export async function debtWorklist(
         () =>
           client.from("business_events")
             .select(
-              "id, contact_id, job_id, event_type, occurred_at, direction, channel, payload, body_preview, provider_message_id",
+              "id, contact_id, job_id, event_type, occurred_at, direction, channel, payload, body_preview, provider_message_id, privacy_classification, source",
             )
             .in("event_type", GHL_CAPTURED_MESSAGE_EVENT_TYPES)
             .in("contact_id", ids),
