@@ -269,19 +269,26 @@ surface, when only Esther was meant to.
 
 | Tier | Grant | Gets |
 |---|---|---|
-| **See-everything** | `users.trade_sees_all_jobs = true` (new column, migration `20260924220000`). Membership: Shaun, Marnin, Jan, Esther. | Every job, every category, full history, on every surface — including new allocations as they happen. |
+| **See-everything** | `users.trade_sees_all_jobs = true` (new column, migration `20260924230000`). Target membership: Shaun, Marnin, Jan, Esther (see "Rollout" below for how it gets there). | Every job, every category, full history, on every surface — including new allocations as they happen. |
 | **Category manager** | `users.managed_verticals` contains the job's vertical (`_jobVertical`), REGARDLESS OF ROLE. | Full history of every job in the managed categories, on every surface, plus their own allocations outside those categories (never narrower than their personal lane). |
-| **Everyone else** | default. | Only jobs they hold (or held) a non-cancelled `job_assignments` row for — past and present, on every surface **including search**. Never a company-wide or "active-jobs" browse. |
+| **Everyone else** | default. | Only jobs they hold (or held) a non-cancelled, non-ghost `job_assignments` row for — past and present, on every surface **including search**. Never a company-wide or "active-jobs" browse. |
 
 Make-safe specifically: the `makesafe_open` field-report door (any
 signed-in trade could open/report an unassigned make-safe) is **retired**.
 Only see-everything or a make-safe category manager may open or allocate an
-unassigned make-safe job now.
+unassigned make-safe job now. A Trade App `submit_makesafe_report` (draft or
+final) passes the same per-job tier gate (`resolveTradeJobAccessTier`, with the
+caller's see-everything flag as `isOffice`) before any write; the Ops Dashboard /
+routine / api-key path keeps its existing staff-role behaviour unchanged.
+
+A ghost watcher row (`job_assignments.is_ghost = true`, the ops-manager mirror
+written by `ghost_observer_mirror.ts`) is never an allocation: the per-job tier
+check and `search_all_jobs`' allocated set both exclude it.
 
 ### What changed in code
 
 - **New column**: `users.trade_sees_all_jobs boolean not null default false`
-  (migration `20260924220000_users_trade_sees_all_jobs.sql`), read by
+  (migration `20260924230000_users_trade_sees_all_jobs.sql`), read by
   `authTrade()` into `TradeAuthContext.seeEverything`.
 - **`_resolveManagerVisibility`** (`index.ts`) — the one resolver `my_jobs`
   (all modes), `trade_calendar`, `my_work_orders`, and `search_all_jobs`'s
@@ -325,8 +332,10 @@ unassigned make-safe job now.
     equivalent of `tradeCalendarVerticalFilter`) UNIONED with their own
     personal assignments (so a one-off out-of-vertical allocation is never
     hidden — matches `my_jobs`' personal lane).
-  - **Everyone else** is restricted, server-side, to `.in('id', <their own
-    assigned job ids>)` — every path (empty-query browse, typed search, and
+  - **Everyone else** is restricted, server-side, to their own assigned job
+    ids (the assignment read is paged to completion; the id filter is sent in
+    25-id chunks and merged, newest first, so a long history never overflows a
+    PostgREST URL) — every path (empty-query browse, typed search, and
     the external-ref match) is filtered through the same
     `jobWithinVisibility` gate, so a 1-character query can never leak a
     company-wide result. This governs `.notIn` status exclusion too: the
@@ -373,19 +382,69 @@ AND a present allocation) against the shared decision primitives every
 surface routes through, plus end-to-end proof for `search_all_jobs` and
 `my_jobs`.
 
-### Data (not applied here)
+### Rollout (two phases)
 
-`users.trade_sees_all_jobs` is schema-only in this repo; no row is seeded.
-The per-person tier assignment (Shaun/Marnin/Jan/Esther `true`; Khairo
-`managed_verticals=[fencing]`; Hugo `[makesafe]`; Nithin `[patio, decking]`;
-Ryan `[]`) is a captain/Marnin-approved data change tracked in the PR that
-introduces this addendum, applied BEFORE the code deploys (see that PR body
-for the exact SQL and the reasoning for that order).
+**Phase 1 — the merge is invisible.** Migration
+`20260924230000_users_trade_sees_all_jobs.sql` adds the column AND, in the same
+apply, sets `trade_sees_all_jobs = true` for every existing user whose role is
+`admin`, `owner` or `ops_manager` (matched by role only, no names or ids). That is
+exactly the set that saw everything under the old role-derived code, so the
+moment the matching `ops-api` deploys nobody loses or gains Trade App visibility.
+The backfill runs only on the apply that creates the column, so it can never
+re-widen a Phase 2 narrowing. Contract:
+`supabase/tests/migration-contracts/20260924230000_users_trade_sees_all_jobs/`.
+
+**Phase 2 — the Captain's rules, a separate Marnin-approved data change, run any
+time after merge.** This is the moment visibility actually changes.
+
+Step 1, read-only: resolve each person's stable id once, by name, and confirm
+exactly one row per name with Marnin. Stop on any ambiguous or missing name.
+
+```sql
+select id, name, email, role, managed_verticals, trade_sees_all_jobs
+from public.users
+where name ilike any (array[
+  '%shaun%', '%marnin%', '%jan%', '%esther%',
+  '%khairo%', '%hugo%', '%nithin%', '%ryan%'
+])
+order by name;
+```
+
+Step 2, the writes, by id only:
+
+```sql
+-- See-everything: Shaun, Marnin, Jan, Esther. Already true from the Phase 1
+-- backfill (all four hold an admin/ops_manager role); this is a confirmation.
+update public.users set trade_sees_all_jobs = true
+where id in ('<shaun-id>', '<marnin-id>', '<jan-id>', '<esther-id>');
+
+-- Nithin, Khairo, Hugo: ops_manager role, so Phase 1 left them seeing
+-- everything. THIS edit is what narrows each of them to their category.
+update public.users set trade_sees_all_jobs = false
+where id in ('<nithin-id>', '<khairo-id>', '<hugo-id>');
+
+update public.users set managed_verticals = array['fencing']::text[]
+where id = '<khairo-id>';
+update public.users set managed_verticals = array['makesafe']::text[]
+where id = '<hugo-id>';
+update public.users set managed_verticals = array['patio', 'decking']::text[]
+where id = '<nithin-id>';
+
+-- Ryan: crew, managed_verticals [makesafe] -> []. NOT a no-op, and independent
+-- of the backfill: the moment this row is edited Ryan loses make-safe-wide
+-- visibility and allocation and becomes allocated-only ("Ryan is like
+-- everyone else").
+update public.users set managed_verticals = array[]::text[]
+where id = '<ryan-id>';
+```
+
+Step 3, verify with the Step 1 select.
 
 ## Deploy
 
-Code-only — no migration data seed. The schema migration
-(`20260924220000_users_trade_sees_all_jobs.sql`, additive column with a safe
-default) rides the next `ops-api` deploy through the standard captain-gated
-lane (`docs/project-knowledge/EDGE_DEPLOY_LANE.md`); the per-person data
-change above is a separate, explicitly-approved step.
+The schema migration (`20260924230000_users_trade_sees_all_jobs.sql`) applies
+before the matching `ops-api` through the standard lane
+(`docs/project-knowledge/EDGE_DEPLOY_LANE.md`); its backfill makes that deploy
+change nobody's visibility. The Phase 2 data change above is a separate,
+explicitly approved step.
+

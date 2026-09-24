@@ -78,6 +78,7 @@ const JOBS: Job[] = [
 // Ordinary crew's own assignment set: one PAST (300 days ago — proving "past
 // and present" reaches well beyond any 30-day floor), one PRESENT.
 const CREW_ID = "u-ordinary-crew";
+const GHOST_ONLY_ID = "u-ghost-only-ops-manager";
 const PAST_DATE = new Date(Date.now() - 300 * 86400_000).toISOString().slice(0, 10);
 const TODAY = new Date().toISOString().slice(0, 10);
 type Assignment = {
@@ -86,12 +87,16 @@ type Assignment = {
   user_id: string;
   status: string;
   scheduled_date: string | null;
+  is_ghost?: boolean;
 };
 const ASSIGNMENTS: Assignment[] = [
   { id: "a-crew-fencing", job_id: JOB_FENCING, user_id: CREW_ID, status: "scheduled", scheduled_date: PAST_DATE },
   { id: "a-crew-patio", job_id: JOB_PATIO, user_id: CREW_ID, status: "scheduled", scheduled_date: TODAY },
   // A cancelled row must never grant access — it is the one exclusion.
   { id: "a-crew-cancelled", job_id: JOB_DECKING, user_id: "u-someone-else", status: "cancelled", scheduled_date: TODAY },
+  // A ghost watcher row (auto-mirrored onto an ops manager's account) is a
+  // calendar mirror, never an allocation.
+  { id: "a-ghost-mirror", job_id: JOB_MAKESAFE, user_id: GHOST_ONLY_ID, status: "scheduled", scheduled_date: TODAY, is_ghost: true },
 ];
 
 function accessClient(): any {
@@ -119,7 +124,8 @@ function accessClient(): any {
             const row = ASSIGNMENTS.find((a) =>
               a.job_id === this._eq?.job_id &&
               a.user_id === this._eq?.user_id &&
-              a.status !== (this._neq?.status ?? "__none__")
+              a.status !== (this._neq?.status ?? "__none__") &&
+              (this._eq?.is_ghost === undefined || (a.is_ghost ?? false) === this._eq.is_ghost)
             );
             return { data: row || null, error: null };
           }
@@ -360,7 +366,8 @@ function surfaceClient(log: QueryLog): any {
         log.push({ table, eq: { ...st.eq }, inVals: st.inVals });
         if (table === "job_assignments") {
           let rows = ASSIGNMENTS.filter((a) =>
-            a.user_id === st.eq.user_id && a.status !== "cancelled"
+            a.user_id === st.eq.user_id && a.status !== "cancelled" &&
+            (st.eq.is_ghost === undefined || (a.is_ghost ?? false) === st.eq.is_ghost)
           );
           // myJobs' personal lane applies its own, separately-ruled 30-day
           // recency window via .or(_myJobsPersonalRecencyFilter(floor)) — a
@@ -383,8 +390,8 @@ function surfaceClient(log: QueryLog): any {
           // search_all_jobs reads a flat job_id list; myJobs reads the full
           // row with an embedded jobs relation — the real client shapes the
           // response differently for each, so the mock must too.
-          if (st.select.trim() === "job_id") {
-            resolve({ data: rows.map((a) => ({ job_id: a.job_id })), error: null });
+          if (st.select.replace(/\s+/g, "") === "id,job_id") {
+            resolve({ data: rows.map((a) => ({ id: a.id, job_id: a.job_id })), error: null });
             return;
           }
           resolve({
@@ -533,4 +540,90 @@ Deno.test("rule table (end-to-end): my_jobs for ordinary crew carries the presen
   );
   const searchIds = searchRes.jobs.map((j: any) => j.id);
   assertEquals(searchIds.includes(JOB_FENCING), true, "search carries the far-past allocation");
+});
+
+Deno.test("rule table: a ghost watcher row never grants the allocated tier", async () => {
+  const d = await resolveTradeJobAccessTier(accessClient(), JOB_MAKESAFE, GHOST_ONLY_ID, {
+    isOffice: false,
+    access: ACCESS_NONE,
+  });
+  assertEquals(d.tier, "none", "an auto-mirrored ghost is a calendar mirror, not an allocation");
+});
+
+Deno.test("rule table (end-to-end): a ghost-only user's search_all_jobs is empty and never queries jobs", async () => {
+  const log: QueryLog = [];
+  const res = await searchAllJobs(
+    surfaceClient(log),
+    new URLSearchParams(),
+    tradeAuth({ id: GHOST_ONLY_ID, role: "ops_manager" }),
+    false,
+  );
+  assertEquals(res.jobs, []);
+  assertEquals(res.total, 0);
+  assertEquals(log.some((q) => q.table === "jobs"), false);
+});
+
+function manyAllocationsClient(jobCount: number, inSizes: number[]): any {
+  const jobs = Array.from({ length: jobCount }, (_, i) => ({
+    id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    org_id: ORG_A,
+    type: "fencing",
+    job_number: `SWF-${i}`,
+    status: "complete",
+    created_at: new Date(Date.UTC(2025, 0, 1) + i * 86400_000).toISOString(),
+  }));
+  const assignments = [
+    ...jobs.map((j, i) => ({ id: `a-${String(i).padStart(4, "0")}`, job_id: j.id, user_id: CREW_ID, is_ghost: false })),
+    ...jobs.map((j, i) => ({ id: `g-${String(i).padStart(4, "0")}`, job_id: j.id, user_id: CREW_ID, is_ghost: true })),
+  ];
+  function builder(table: string) {
+    const eq: Record<string, unknown> = {};
+    let inVals: string[] | null = null;
+    let range: [number, number] | null = null;
+    const b: any = {
+      select: () => b,
+      eq: (k: string, v: unknown) => { eq[k] = v; return b; },
+      neq: () => b,
+      not: () => b,
+      or: () => b,
+      order: () => b,
+      in: (_k: string, vals: string[]) => { inVals = vals; inSizes.push(vals.length); return b; },
+      range: (from: number, to: number) => { range = [from, to]; return b; },
+      then: (resolve: any) => {
+        if (table === "job_assignments") {
+          let rows = assignments.filter((a) => a.user_id === eq.user_id && a.is_ghost === eq.is_ghost);
+          if (range) rows = rows.slice(range[0], range[1] + 1);
+          resolve({ data: rows, error: null });
+          return;
+        }
+        if (table === "jobs") {
+          const rows = jobs.filter((j) => j.org_id === eq.org_id && (!inVals || inVals.includes(j.id)));
+          resolve({ data: rows.map((j) => ({ ...j })), error: null });
+          return;
+        }
+        resolve({ data: [], error: null });
+      },
+    };
+    return b;
+  }
+  return { from: (table: string) => builder(table) };
+}
+
+Deno.test("rule table (end-to-end): an allocated-only history of 60 jobs is read in 25-id chunks and paged honestly", async () => {
+  const inSizes: number[] = [];
+  const client = manyAllocationsClient(60, inSizes);
+  const first = await searchAllJobs(client, new URLSearchParams("page_size=50"), tradeAuth({}), false);
+  assertEquals(first.total, 60);
+  assertEquals(first.jobs.length, 50);
+  assertEquals(first.next_offset, 50);
+  assertEquals(first.truncated, true);
+  assertEquals(first.jobs[0].job_number, "SWF-59", "newest first across chunk boundaries");
+  assertEquals(inSizes.length > 0 && inSizes.every((n) => n <= 25), true, "no id filter exceeds 25 ids");
+
+  const second = await searchAllJobs(client, new URLSearchParams("page_size=50&offset=50"), tradeAuth({}), false);
+  assertEquals(second.jobs.length, 10);
+  assertEquals(second.next_offset, null);
+  assertEquals(second.truncated, false);
+  const allIds = new Set([...first.jobs, ...second.jobs].map((j: any) => j.id));
+  assertEquals(allIds.size, 60, "every allocated job appears exactly once");
 });

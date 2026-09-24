@@ -4392,6 +4392,7 @@ async function dispatchMakesafeReport(
   body: any,
   authMode: 'api_key' | 'jwt' | 'routine',
   authUser: TradeAuthContext | null,
+  tradeAppIsOffice?: boolean,
 ) {
   const reportStatus = normalizeMakesafeReportStatus(body?.status)
   if (authMode === 'routine' && reportStatus !== 'draft') {
@@ -4400,15 +4401,24 @@ async function dispatchMakesafeReport(
       403,
     )
   }
+  const actor = _resolveMakesafeReportActor(authMode, authUser, body)
+  const access = authUser
+    ? { orgId: authUser.orgId, managedVerticals: authUser.managedVerticals }
+    : undefined
+  const isOffice = tradeAppIsOffice === undefined
+    ? _opsApiCallerIsStaffOperator(authMode, authUser)
+    : tradeAppIsOffice === true
+  if (tradeAppIsOffice !== undefined) {
+    const jobId = body?.job_id || body?.jobId
+    if (!jobId) throw new ApiError('job_id required', 400)
+    if (!actor) throw new ApiError('user_jwt_required', 401)
+    await assertAssignedOrMakesafeAccess(client, String(jobId), String(actor), isOffice, access)
+  }
   return submitMakesafeReport(client, {
     ...body,
     status: reportStatus,
-    userId: _resolveMakesafeReportActor(authMode, authUser, body),
-  }, authUser
-    ? { orgId: authUser.orgId, managedVerticals: authUser.managedVerticals }
-    : undefined, {
-    isOffice: _opsApiCallerIsStaffOperator(authMode, authUser),
-  })
+    userId: actor,
+  }, access, { isOffice })
 }
 
 // Trade Board route: always the production canonical loader. There is no
@@ -12680,7 +12690,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
 
           case 'submit_makesafe_report':
-            return json(await dispatchMakesafeReport(client, body, 'jwt', tradeUser))
+            return json(await dispatchMakesafeReport(client, body, 'jwt', tradeUser, isDispatcher))
         }
       }
 
@@ -38214,6 +38224,7 @@ export async function resolveTradeJobAccessTier(
     .eq('job_id', jobId)
     .eq('user_id', userId)
     .neq('status', 'cancelled')
+    .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
     .limit(1)
     .maybeSingle()
   if (assigned) {
@@ -38510,12 +38521,18 @@ export async function searchAllJobs(
   // passes through below.
   let assignedJobIds: string[] = []
   if (isAllocatedOnly || isCategoryManager) {
-    const { data: assignedRows, error: assignedErr } = await client.from('job_assignments')
-      .select('job_id')
-      .eq('user_id', viewer.id)
-      .neq('status', 'cancelled')
-    if (assignedErr) throw assignedErr
-    assignedJobIds = collectUniqueStringIds((assignedRows || []).map((r: any) => r.job_id))
+    const assignedRows = await readPagedRows(
+      (from, limit) =>
+        client.from('job_assignments')
+          .select('id, job_id')
+          .eq('user_id', viewer.id)
+          .neq('status', 'cancelled')
+          .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
+          .order('id', { ascending: true })
+          .range(from, from + limit - 1),
+      'search_all_jobs allocated set',
+    )
+    assignedJobIds = collectUniqueStringIds(assignedRows.map((r: any) => r.job_id))
   }
 
   // No manager standing and no allocation at all: nothing to show, on any
@@ -38536,14 +38553,34 @@ export async function searchAllJobs(
   // vertical (a one-off allocation) — union it in exactly like my_jobs'
   // personal lane does, so search is never narrower than that lane for the
   // same person.
+  const readAssignedJobChunks = async (
+    buildChunk: (idChunk: string[]) => any,
+  ): Promise<any[]> => {
+    const byId = new Map<string, any>()
+    for (let i = 0; i < assignedJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+      const { data, error } = await buildChunk(assignedJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      if (error) throw error
+      for (const row of data || []) {
+        if (row?.id && !byId.has(String(row.id))) byId.set(String(row.id), row)
+      }
+    }
+    return [...byId.values()].sort((a: any, b: any) => {
+      const createdDiff = new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+      if (createdDiff !== 0) return createdDiff
+      const aId = String(a.id)
+      const bId = String(b.id)
+      return aId < bId ? -1 : aId > bId ? 1 : 0
+    })
+  }
+
   let seedJobs: any[] = []
   if (isCategoryManager && assignedJobIds.length > 0) {
-    const { data: seedRows, error: seedErr } = await client.from('jobs')
-      .select(jobFeedSelect)
-      .eq('org_id', viewer.orgId)
-      .in('id', assignedJobIds)
-    if (seedErr) throw seedErr
-    seedJobs = seedRows || []
+    seedJobs = await readAssignedJobChunks((idChunk) =>
+      client.from('jobs')
+        .select(jobFeedSelect)
+        .eq('org_id', viewer.orgId)
+        .in('id', idChunk)
+    )
   }
 
   const assignedJobIdSet = new Set(assignedJobIds)
@@ -38563,7 +38600,11 @@ export async function searchAllJobs(
   // Tenant is a boundary, not a display preference. supabase-js only exposes
   // filters AFTER select(), so the shared filter set is applied to a
   // freshly-selected builder rather than to a stored one.
-  const buildJobQuery = (columns: string, options?: { count: 'exact'; head: true }) => {
+  const buildJobQuery = (
+    columns: string,
+    options?: { count: 'exact'; head: true },
+    idChunk?: string[],
+  ) => {
     let jobQuery = (options ? client.from('jobs').select(columns, options) : client.from('jobs').select(columns))
       .eq('org_id', viewer.orgId)
       .not('status', 'in', _GLOBAL_SEARCH_STATUS_EXCLUDE)
@@ -38574,7 +38615,7 @@ export async function searchAllJobs(
       )
     }
     if (isAllocatedOnly) {
-      jobQuery = jobQuery.in('id', assignedJobIds)
+      jobQuery = jobQuery.in('id', idChunk || [])
     } else if (isCategoryManager) {
       jobQuery = jobQuery.or(_jobsTableVerticalFilter(managedVerticals))
     }
@@ -38593,11 +38634,18 @@ export async function searchAllJobs(
       String(job?.org_id || viewer.orgId) === String(viewer.orgId) &&
       jobWithinVisibility(job)
     )
-    const { data: baseRows, error: baseErr } = await buildJobQuery(jobFeedSelect)
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: true })
-      .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
-    if (baseErr) throw baseErr
+    let baseRows: any[]
+    if (isAllocatedOnly) {
+      baseRows = (await readAssignedJobChunks((idChunk) => buildJobQuery(jobFeedSelect, undefined, idChunk)))
+        .slice(0, TRADE_JOB_SEARCH_RESULT_CAP + 1)
+    } else {
+      const { data, error: baseErr } = await buildJobQuery(jobFeedSelect)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
+      if (baseErr) throw baseErr
+      baseRows = data || []
+    }
 
     const byId: Record<string, any> = {}
     for (const job of [...(baseRows || []).filter(jobWithinVisibility), ...externalRefJobs]) {
@@ -38637,20 +38685,28 @@ export async function searchAllJobs(
   // same imprecision every other vertical-scoped surface here accepts), never
   // under-count.
   let total: number | null = null
-  try {
-    const countResult = await buildJobQuery('id', { count: 'exact', head: true })
-    if (countResult?.error) throw countResult.error
-    total = typeof countResult?.count === 'number' ? countResult.count : null
-  } catch (countErr: any) {
-    console.log('[ops-api] search_all_jobs count failed (non-blocking):', countErr?.message)
-  }
+  let allJobs: any[]
+  if (isAllocatedOnly) {
+    const allowedJobs = await readAssignedJobChunks((idChunk) => buildJobQuery(jobFeedSelect, undefined, idChunk))
+    total = allowedJobs.length
+    allJobs = allowedJobs.slice(offset, offset + pageSize)
+  } else {
+    try {
+      const countResult = await buildJobQuery('id', { count: 'exact', head: true })
+      if (countResult?.error) throw countResult.error
+      total = typeof countResult?.count === 'number' ? countResult.count : null
+    } catch (countErr: any) {
+      console.log('[ops-api] search_all_jobs count failed (non-blocking):', countErr?.message)
+    }
 
-  // created_at is not unique, so paging needs the id tiebreak for a total order.
-  const { data: allJobs, error: allJobsErr } = await buildJobQuery(jobFeedSelect)
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: true })
-    .range(offset, offset + pageSize - 1)
-  if (allJobsErr) throw allJobsErr
+    // created_at is not unique, so paging needs the id tiebreak for a total order.
+    const { data, error: allJobsErr } = await buildJobQuery(jobFeedSelect)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1)
+    if (allJobsErr) throw allJobsErr
+    allJobs = data || []
+  }
 
   // One job = one entry, keyed by job id — the captain's explicit condition.
   const byId: Record<string, any> = {}

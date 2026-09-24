@@ -184,8 +184,8 @@ function resolve(
     // job_id list only (no jobs embed at all) to build the caller's
     // assignment-id restriction — does not require the job row to exist in
     // this fixture set.
-    if (st.select === "job_id") {
-      return { data: page(rows.map((a) => ({ job_id: a.job_id })), st), error: null };
+    if (st.select.replace(/\s+/g, "") === "id,job_id") {
+      return { data: page(rows.map((a) => ({ id: a.id, job_id: a.job_id })), st), error: null };
     }
     // Inner join on jobs; a referenced-table or() constrains the parent rows.
     let joined = rows

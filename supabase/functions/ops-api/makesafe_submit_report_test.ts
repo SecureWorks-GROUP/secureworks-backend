@@ -121,7 +121,9 @@ function makeSubmitClient(
     const b: any = {
       select: () => b,
       eq: (col: string, val: any) => {
-        preds.push((r) => r?.[col] === val);
+        preds.push((r) =>
+          (col === "is_ghost" ? r?.[col] ?? false : r?.[col]) === val
+        );
         return b;
       },
       neq: (col: string, val: any) => {
@@ -307,6 +309,109 @@ Deno.test("submit_makesafe_report JWT authority is tenant-scoped before report o
   );
   assertEquals(rows.job_service_reports.length, 0);
   assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report through the Trade App refuses an unallocated ops_manager who is neither see-everything nor a make-safe manager; the Ops path is unchanged", async () => {
+  const opsManager = {
+    id: "ops-manager-1",
+    email: "ops@example.test",
+    orgId: "org-test",
+    role: "ops_manager",
+    managedVerticals: ["fencing"],
+    seeEverything: false,
+  };
+  const trade = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _dispatchMakesafeReportForTest(
+        trade.client,
+        validBody(),
+        "jwt",
+        opsManager,
+        false,
+      ),
+    Error,
+    "not assigned",
+  );
+  assertEquals(trade.rows.job_service_reports.length, 0);
+  assertEquals(trade.rows.job_assignments.length, 0);
+
+  const ghostOnly = makeSubmitClient(baseRows({
+    job_assignments: [{
+      id: "ghost-1",
+      job_id: "job-1",
+      user_id: "ops-manager-1",
+      status: "scheduled",
+      is_ghost: true,
+    }],
+  }));
+  await assertRejects(
+    () =>
+      _dispatchMakesafeReportForTest(
+        ghostOnly.client,
+        validBody(),
+        "jwt",
+        opsManager,
+        false,
+      ),
+    Error,
+    "not assigned",
+  );
+  assertEquals(ghostOnly.rows.job_service_reports.length, 0);
+
+  const ops = makeSubmitClient(baseRows());
+  const result: any = await _dispatchMakesafeReportForTest(
+    ops.client,
+    validBody(),
+    "jwt",
+    opsManager,
+  );
+  assertEquals(result.ok, true);
+  assertEquals(ops.rows.job_service_reports[0].submitted_by, "ops-manager-1");
+});
+
+Deno.test("submit_makesafe_report through the Trade App admits an allocated trade and a make-safe manager", async () => {
+  const allocated = makeSubmitClient(baseRows({
+    job_assignments: [{
+      id: "assign-1",
+      job_id: "job-1",
+      user_id: "trade-1",
+      status: "scheduled",
+      is_ghost: false,
+    }],
+  }));
+  const allocatedResult: any = await _dispatchMakesafeReportForTest(
+    allocated.client,
+    validBody(),
+    "jwt",
+    {
+      id: "trade-1",
+      email: "trade@example.test",
+      orgId: "org-test",
+      role: "crew",
+      managedVerticals: [],
+      seeEverything: false,
+    },
+    false,
+  );
+  assertEquals(allocatedResult.ok, true);
+
+  const manager = makeSubmitClient(baseRows());
+  const managerResult: any = await _dispatchMakesafeReportForTest(
+    manager.client,
+    validBody(),
+    "jwt",
+    {
+      id: "hugo-user-id",
+      email: "hugo@example.test",
+      orgId: "org-test",
+      role: "ops_manager",
+      managedVerticals: ["makesafe"],
+      seeEverything: false,
+    },
+    false,
+  );
+  assertEquals(managerResult.ok, true);
 });
 
 Deno.test("submit_makesafe_report routine callers may save drafts but cannot finalize a trade report", async () => {

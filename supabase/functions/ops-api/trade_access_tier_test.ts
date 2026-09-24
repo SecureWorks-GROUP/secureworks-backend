@@ -106,7 +106,7 @@ function makeClient(tables: Tables, recorded: any[] = []) {
       },
       eq: (c: string, v: any) => {
         rec.eq[c] = v;
-        preds.push((r) => String(r?.[c] ?? "") === String(v));
+        preds.push((r) => String((c === "is_ghost" ? r?.[c] ?? false : r?.[c]) ?? "") === String(v));
         return api;
       },
       neq: (c: string, v: any) => {

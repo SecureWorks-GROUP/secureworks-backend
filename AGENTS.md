@@ -2627,17 +2627,20 @@ The Trade app is a THREE-TIER model, RE-TIERED 2026-09-24 ("go A"): office role
 (Ops Dashboard staff set, `admin/owner/ops_manager`) and Trade App job
 visibility are now two separate questions. Tier boundaries:
 see-everything (`users.trade_sees_all_jobs`, a new explicit per-user column —
-NOT role — membership Shaun/Marnin/Jan/Esther: everything, every category,
-full history, every surface), division/category manager
+NOT role — target membership Shaun/Marnin/Jan/Esther: everything, every
+category, full history, every surface; migration `20260924230000` backfills it
+for every existing admin/owner/ops_manager so the deploy narrows nobody, and a
+separate approved data change narrows the rest), division/category manager
 (`users.managed_verticals` contains the job's vertical, role-independent:
 everything in that trade incl. the quote, allocates, sets the lead, full
 history — no more rolling window for a non-fencing vertical), allocated trade
-(`job_assignments` row, `is_lead` true OR false with NO visibility difference,
+(non-cancelled, non-ghost `job_assignments` row, `is_lead` true OR false with NO visibility difference,
 everything except the quote, past AND present, on every surface including
 `search_all_jobs` which is now filtered server-side). The pre-existing
 `makesafe_open` field-report exception (any signed-in trade could open an
 unassigned make-safe) is RETIRED: only see-everything or a make-safe category
-manager may open/allocate one now. Full rule table, the retired
+manager may open/allocate one now, and a Trade App `submit_makesafe_report`
+passes the same tier gate (the Ops/routine path keeps its staff-role check). Full rule table, the retired
 `fencing_view_only`/`makesafe_view`/`makesafe_readonly` make-safe-board
 special cases, and the corrected `search_all_jobs` server-side scoping (which
 supersedes the 2026-07-31 "all means all" search behaviour):
