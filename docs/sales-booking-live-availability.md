@@ -43,8 +43,7 @@ After the pack overlay, for the person on screen:
 | `calendar_read` | `state: read / could_not_read / not_configured`, `provider:"ghl"`, `source:"server_live_read"`, `reason`, `person`, `ghl_user_id`, `calendars`, `occupied_intervals`, `ghl_events`, `ghl_blocked_slots`, `outlook:{state,events,not_in_ghl}`, `caveats` |
 | `commitments` | Open offers `{id, contact_id, state:offered/agreed, start_iso, end_iso, source}`; `null` when the census could not be read (unknown, never an empty ledger) |
 | `commitments_read` | `read` or `could_not_read` with the reason |
-| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location |
-| `published_calendar_read` | Whatever the engine pack had published (diagnostic) |
+| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; intervals needing an unknown travel estimate are withheld |
 
 Each case carries `free_times`: `location:{suburb, known}` and per day the
 `arrival_windows` for a visit to that lead's suburb, excluding that lead's own
@@ -56,7 +55,7 @@ offers.
 `ghl_calendar_assignments_unreadable`, `person_has_no_ghl_calendar`
 (`not_configured`), `ghl_events_unreadable: <why>`,
 `ghl_blocked_slots_unreadable: <why>`, `ghl_event_times_malformed`,
-`person_not_configured`. Offers: `system_offers_unreadable: <why>`,
+`person_not_configured`, `travel_location_unknown`. Offers: `system_offers_unreadable: <why>`,
 `system_sends_no_offers_for_this_person` (Nithin, Khairo: this system has no
 send path for their leads, so its own census is complete and empty).
 
@@ -73,7 +72,8 @@ are each person's profile (Marnin Tue/Fri 08:00 to 16:30, max 6, Tue 13:00 to
 
 The owner press (`sales_booking_owner_approval.ts`) applies the same rule:
 `visit_minutes` is now 30, and a GHL booking or open offer clashes unless the
-gap covers the computed travel.
+gap covers the computed travel. It refuses a neighboring event or offer when
+either location cannot be placed.
 
 ### Travel estimate (`straight-line-v1`)
 
@@ -85,7 +85,9 @@ Examples: Duncraig to Hillarys 15, Duncraig to Canning Vale 50.
 Locations are suburb points: the median geocoded `jobs.site_lat/site_lng` per
 suburb in production (177 suburbs, read-only SELECT 24 Sep 2026), matched on
 the case suburb, a GHL event's address, or its contact's case suburb. A
-location that cannot be placed takes 30 minutes each way, the old fixed buffer.
+location that cannot be placed has no travel estimate: affected arrival gaps
+are withheld, and owner approval waits until both locations resolve. Outlook
+events use their location display name for the same calculation.
 
 ## Measured on 24 Sep 2026 (read-only)
 

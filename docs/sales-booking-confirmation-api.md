@@ -42,8 +42,7 @@ Missing validation checks remain null, never manufactured passes.
 
 The live server read (`docs/sales-booking-live-availability.md`) now replaces
 `calendar_read` and `commitments` below on every read and every approval
-press; the engine-published values stay under `published_calendar_read`, and
-a fresh engine census only adds holds.
+press; a fresh engine census only adds holds.
 
 The envelope includes `resource.id` and `booking_flow` version
 `booking-confirm.v1`, with `approval_write:"separate-v1"`. Each matched model

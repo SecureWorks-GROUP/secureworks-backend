@@ -7,9 +7,8 @@
  *   minutes = 5 + (straight-line km x 1.3 road factor) / 55 km/h x 60,
  *   rounded UP to the next 5 minutes.
  *
- * A location this table cannot place (no suburb, or a suburb never geocoded)
- * falls back to 30 minutes, the travel buffer the Stratco rulebook already
- * used. Contract: docs/sales-booking-live-availability.md.
+ * A location this table cannot place has no travel estimate. Contract:
+ * docs/sales-booking-live-availability.md.
  */
 
 export const SALES_BOOKING_TRAVEL_MODEL = Object.freeze({
@@ -19,8 +18,6 @@ export const SALES_BOOKING_TRAVEL_MODEL = Object.freeze({
   speed_kmh: 55,
   fixed_minutes: 5,
   round_up_to_minutes: 5,
-  /** Either end has no known point: the rulebook's old fixed buffer. */
-  unknown_location_minutes: 30,
   points_source:
     "median jobs.site_lat/site_lng per site_suburb, production, read 2026-09-24",
 });
@@ -263,7 +260,7 @@ function km(a: SuburbPoint, b: SuburbPoint): number {
 }
 
 export interface TravelEstimate {
-  minutes: number;
+  minutes: number | null;
   basis: "straight_line" | "unknown_location";
   km: number | null;
   from: string | null;
@@ -279,7 +276,7 @@ export function salesBookingTravelMinutes(
   const a = salesBookingSuburbPoint(from), b = salesBookingSuburbPoint(to);
   if (!a || !b) {
     return {
-      minutes: m.unknown_location_minutes,
+      minutes: null,
       basis: "unknown_location",
       km: null,
       from: a?.suburb ?? null,

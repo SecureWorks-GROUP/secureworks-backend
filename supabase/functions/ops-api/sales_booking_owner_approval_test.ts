@@ -419,6 +419,7 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
       endTime: "2026-09-25T14:00:00+08:00",
       assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
       contactId: "someone-else",
+      address: "1 Test St, Canning Vale",
     }],
   });
   const result = await approve(d, input("calendar"));
@@ -504,12 +505,30 @@ Deno.test("owner calendar: the gap a GHL booking needs is travel from where it i
   assert(error.detail?.events[0].travel_minutes > 30);
 });
 
+Deno.test("owner approval refuses an unlocated neighboring GHL event", async () => {
+  const { deps: d, rows } = deps({
+    ghlEvents: [{
+      id: "ev-unknown",
+      startTime: "2026-09-25T12:05:00+08:00",
+      endTime: "2026-09-25T13:00:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "outside-current-cases",
+    }],
+  });
+  const error = await refusal(
+    call(d, { owner_input: input("calendar"), dry_run: true }),
+    "travel_location_unknown",
+  );
+  assertEquals(error.detail?.source, "ghl");
+  assertEquals(rows.length, 0);
+});
+
 Deno.test("owner calendar: an Outlook event near the visit clashes and nothing is written", async () => {
   const { deps: d, rows } = deps({
-    // 11:45 is after the visit end but inside the 30-minute travel buffer.
     outlookEvents: [{
       id: "o1",
       subject: "Dentist",
+      location: "Two Rocks WA 6037",
       start: "2026-09-25T03:45:00Z",
       end: "2026-09-25T04:30:00Z",
       show_as: "busy",
@@ -618,6 +637,7 @@ Deno.test("owner calendar: GHL, own-booking, offers, capacity, unknown target, u
     endTime: `2026-09-25T${e}:00+08:00`,
     assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
     contactId: "other",
+    address: "1 Test St, Canning Vale",
     ...extra,
   });
   const offerExecution = (contact: string) => ({
@@ -642,7 +662,11 @@ Deno.test("owner calendar: GHL, own-booking, offers, capacity, unknown target, u
     },
   };
   const cases: Array<[string, Overrides]> = [
-    ["ghl_calendar_clash", { ghlEvents: [at("11:45", "12:30")] }],
+    ["ghl_calendar_clash", {
+      ghlEvents: [at("11:45", "12:30", {
+        address: "1 Test St, Duncraig WA 6023",
+      })],
+    }],
     ["contact_already_booked_that_day", {
       ghlEvents: [at("14:00", "15:00", { contactId: CONTACT })],
     }],

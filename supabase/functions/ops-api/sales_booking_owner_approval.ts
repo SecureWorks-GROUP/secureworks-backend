@@ -36,7 +36,7 @@ import type {
   BookingObject,
   BookingStep,
 } from "./sales_booking_confirmation.ts";
-import { outlookClashes, type OutlookRead } from "./sales_booking_execute.ts";
+import type { OutlookRead } from "./sales_booking_execute.ts";
 import {
   SALES_BOOKING_ON_SITE_MINUTES,
   SALES_BOOKING_TRAVEL_MODEL,
@@ -76,8 +76,7 @@ export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
   window_max_minutes: 90,
   /** Visit length after latest arrival; the visit ends at or after this. */
   visit_minutes: SALES_BOOKING_ON_SITE_MINUTES,
-  /** Fixed buffer around a protected band, and the travel allowed when a
-   * location cannot be placed. Visits use computed travel. */
+  /** Fixed buffer around a protected band. Visits use computed travel. */
   travel_buffer_minutes: 30,
   max_per_day: 6,
   protected_bands: Object.freeze([
@@ -930,22 +929,39 @@ async function checkOwnerVisitAvailability(
   );
   const here = visitSuburb;
   // The gap a neighbouring booking needs: travel from it before the visit,
-  // travel to it after. An unplaced location falls back to 30 minutes.
+  // travel to it after.
   const needsGap = (
     itemStart: number,
     itemEnd: number,
     location: string | null,
+    source: "ghl" | "outlook" | "system_offer",
   ) => {
-    const before = salesBookingTravelMinutes(location, here).minutes;
-    const after = salesBookingTravelMinutes(here, location).minutes;
+    if (overlaps(visit.start, visit.end, itemStart, itemEnd)) {
+      return { clash: true, travel_minutes: 0 };
+    }
+    const before = salesBookingTravelMinutes(location, here);
+    const after = salesBookingTravelMinutes(here, location);
+    if (before.minutes === null || after.minutes === null) {
+      refuse("travel_location_unknown", {
+        source,
+        neighboring_location: location,
+        visit_location: here,
+        neighboring_start: Number.isFinite(itemStart)
+          ? perthIso(itemStart)
+          : null,
+        neighboring_end: Number.isFinite(itemEnd) ? perthIso(itemEnd) : null,
+      });
+    }
     return {
       clash: overlaps(
-        visit.start - before * 60_000,
-        visit.end + after * 60_000,
+        visit.start - before.minutes * 60_000,
+        visit.end + after.minutes * 60_000,
         itemStart,
         itemEnd,
       ),
-      travel_minutes: itemEnd <= visit.start ? before : after,
+      travel_minutes: itemEnd <= visit.start
+        ? before.minutes
+        : after.minutes,
     };
   };
   const eventLocation = (e: BookingObject) =>
@@ -962,6 +978,7 @@ async function checkOwnerVisitAvailability(
       bookingInstant(e.startTime),
       bookingInstant(e.endTime),
       eventLocation(e),
+      "ghl",
     );
     if (!gap.clash) return [];
     maxTravel = Math.max(maxTravel, gap.travel_minutes);
@@ -981,27 +998,30 @@ async function checkOwnerVisitAvailability(
     outlook = { ok: false, reason: "outlook_read_failed" };
   }
   if (!outlook.ok) refuse("outlook_unreadable", { reason: outlook.reason });
-  // Outlook rows carry no location here, so each side takes the fallback.
-  const outlookGap = SALES_BOOKING_TRAVEL_MODEL.unknown_location_minutes *
-    60_000;
-  const outlookHits = outlookClashes(
-    outlook.events,
-    new Date(visit.start - outlookGap).toISOString(),
-    new Date(visit.end + outlookGap).toISOString(),
-  );
-  if (outlookHits.length) {
-    refuse("outlook_calendar_clash", {
-      mailbox: outlook.mailbox,
-      travel_buffer_minutes:
-        SALES_BOOKING_TRAVEL_MODEL.unknown_location_minutes,
-      events: outlookHits.map((e) => ({
+  const outlookHits = outlook.events.flatMap((e) => {
+    if (e.is_cancelled || e.show_as === "free") return [];
+    const start = bookingInstant(e.start), end = bookingInstant(e.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      refuse("outlook_unreadable", { reason: "event_times_malformed" });
+    }
+    const gap = needsGap(start, end, e.location ?? null, "outlook");
+    return gap.clash
+      ? [{
         subject: e.subject,
         start: e.start,
         end: e.end,
-      })),
+        travel_minutes: gap.travel_minutes,
+      }]
+      : [];
+  });
+  if (outlookHits.length) {
+    refuse("outlook_calendar_clash", {
+      mailbox: outlook.mailbox,
+      events: outlookHits,
     });
   }
   const others = census.offers.filter((o) => {
+    if (perthDate(bookingInstant(o.start_iso)) !== visit.date) return false;
     if (o.contact_id !== row.contact_id) return true;
     if (o.source !== "owner_approval") return false;
     return o.start_iso !== visit.window_start_iso ||
@@ -1012,6 +1032,7 @@ async function checkOwnerVisitAvailability(
       bookingInstant(o.start_iso),
       bookingInstant(o.end_iso),
       suburbs.get(o.contact_id) ?? null,
+      "system_offer",
     ).clash
   );
   if (offerClashes.length) {

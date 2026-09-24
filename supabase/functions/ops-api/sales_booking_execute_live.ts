@@ -105,7 +105,7 @@ export async function readResourceOutlook(
   url.searchParams.set("endDateTime", endIso);
   url.searchParams.set(
     "$select",
-    "id,subject,start,end,showAs,isCancelled,isAllDay",
+    "id,subject,location,start,end,showAs,isCancelled,isAllDay",
   );
   url.searchParams.set("$top", "100");
   const events: OutlookEvent[] = [];
@@ -138,6 +138,9 @@ export async function readResourceOutlook(
       events.push({
         id: String(item?.id ?? ""),
         subject: typeof item?.subject === "string" ? item.subject : null,
+        location: typeof item?.location?.displayName === "string"
+          ? item.location.displayName
+          : null,
         start: utc(item?.start),
         end: utc(item?.end),
         show_as: typeof item?.showAs === "string" ? item.showAs : null,

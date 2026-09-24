@@ -89,7 +89,7 @@ const windows = (d: { arrival_windows: Array<Record<string, unknown>> }) =>
     String(w.to_iso).slice(11, 16),
   ]);
 
-Deno.test("travel: straight-line estimate rounds up to 5 minutes; unknown suburbs take 30", () => {
+Deno.test("travel: straight-line estimates require both locations", () => {
   assertEquals(salesBookingTravelMinutes("Duncraig", "Hillarys").minutes, 15);
   assertEquals(
     salesBookingTravelMinutes("12 Smith St, Duncraig WA 6023", "Hillarys")
@@ -99,8 +99,8 @@ Deno.test("travel: straight-line estimate rounds up to 5 minutes; unknown suburb
   const far = salesBookingTravelMinutes("Duncraig", "Canning Vale");
   assertEquals([far.basis, far.minutes], ["straight_line", 50]);
   const unknown = salesBookingTravelMinutes("Atlantis", "Hillarys");
-  assertEquals([unknown.basis, unknown.minutes], ["unknown_location", 30]);
-  assertEquals(salesBookingTravelMinutes(null, "Hillarys").minutes, 30);
+  assertEquals([unknown.basis, unknown.minutes], ["unknown_location", null]);
+  assertEquals(salesBookingTravelMinutes(null, "Hillarys").minutes, null);
 });
 
 Deno.test("an empty diary reads as read, and every bookable day is free 08:00 to 16:00 arrivals", () => {
@@ -133,8 +133,7 @@ Deno.test("a visit fits 30 minutes on site plus travel to and from the neighbour
       address: "5 Somewhere Rd, Duncraig WA 6023",
     }]),
   }));
-  // Screen-level: lead location unknown, so 30 minutes each side.
-  assertEquals(windows(friday(r)), [["08:00", "09:00"], ["11:30", "16:00"]]);
+  assertEquals(windows(friday(r)), []);
   // For the Hillarys lead: Duncraig is 15 minutes away.
   const own = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
@@ -143,6 +142,25 @@ Deno.test("a visit fits 30 minutes on site plus travel to and from the neighbour
   assertEquals(own.arrival_windows[0].travel_after_minutes, 15);
   assertEquals(own.arrival_windows[1].travel_before_minutes, 15);
   assertEquals(r.calendar_read.ghl_events, 1);
+});
+
+Deno.test("an unlocated neighboring event withholds arrival windows", () => {
+  const r = computeSalesBookingAvailability(input({
+    events: ok([{
+      id: "ev-unknown",
+      startTime: "2026-10-02T10:00:00+08:00",
+      endTime: "2026-10-02T11:00:00+08:00",
+      assignedUserId: MARNIN,
+      contactId: "outside-current-cases",
+    }]),
+  }));
+  assertEquals(r.calendar_read.state, "read");
+  assertEquals(windows(friday(r)), []);
+  const caseDay = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
+    d.date === "2026-10-02"
+  );
+  assert(caseDay);
+  assertEquals(windows(caseDay), []);
 });
 
 Deno.test("other assignees and cancelled rows never block; blocked-off time does", () => {
@@ -169,7 +187,7 @@ Deno.test("other assignees and cancelled rows never block; blocked-off time does
       assignedUserId: MARNIN,
     }]),
   }));
-  assertEquals(windows(friday(r)), [["08:00", "12:00"]]);
+  assertEquals(windows(friday(r)), []);
   assertEquals(r.calendar_read.ghl_blocked_slots, 1);
 });
 
@@ -430,10 +448,7 @@ Deno.test("the live read replaces the hard-coded not-connected banner reason", a
   assertEquals(flow.calendar_read.state, "read");
   assertEquals(flow.calendar_read.reason, null);
   assert(Array.isArray(flow.commitments));
-  assertEquals(
-    flow.published_calendar_read.reason,
-    "person_wide_calendars_and_prior_offer_ledger_not_connected",
-  );
+  assert(!("published_calendar_read" in flow));
   assert(after.cases[0].free_times);
   // User-id window, then each calendar the person is on, then blocked time.
   assertEquals(calls.slice(0, 3), [

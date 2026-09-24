@@ -254,6 +254,7 @@ export function arrivalWindows(
     const after = next
       ? travel(location, next.location, next.travel_exempt)
       : null;
+    if (before.minutes === null || after?.minutes === null) return;
     const from = ceil5(Math.max(
       dayStart,
       earliest,
@@ -595,9 +596,8 @@ export function computeSalesBookingAvailability(
           buffer_minutes: STRATCO_BOOKING_RULEBOOK.travel_buffer_minutes,
         })),
         source: person.rules_source,
-        note: "Arrival windows here assume an unknown lead location " +
-          `(${SALES_BOOKING_TRAVEL_MODEL.unknown_location_minutes} minutes travel). ` +
-          "Each case's free_times uses that lead's suburb.",
+        note: "Intervals needing travel to or from an unknown location are " +
+          "withheld. Each case's free_times uses that lead's suburb.",
       },
       days: days.map(({ _busy, _dayStart, _dayEnd, ...d }) => d),
     },
@@ -630,8 +630,7 @@ const failure = (e: unknown) =>
     : "unknown";
 
 /** Runs the reads, then overwrites `booking_flow.calendar_read` and
- * `commitments` with the live answer and adds `free_times`. The engine's own
- * published availability, if any, is kept under `published_calendar_read`. */
+ * `commitments` with the live answer and adds `free_times`. */
 export async function applySalesBookingAvailability(
   response: SalesBookingReadResponse,
   deps: SalesBookingAvailabilityDeps,
@@ -711,7 +710,8 @@ export async function applySalesBookingAvailability(
     census,
     cases: response.cases,
   });
-  const flow = response.booking_flow ?? {};
+  const flow = { ...(response.booking_flow ?? {}) };
+  delete flow.published_calendar_read;
   // A published engine census that is still fresh adds its holds (never
   // removes ours): offers it saw in hand-read threads stay blocked.
   let commitments = computed.commitments;
@@ -730,7 +730,6 @@ export async function applySalesBookingAvailability(
     booking_flow: {
       ...flow,
       calendar_read: computed.calendar_read,
-      published_calendar_read: flow.calendar_read ?? null,
       commitments,
       commitments_read: computed.commitments_read,
       free_times: computed.free_times,
