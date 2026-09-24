@@ -1175,7 +1175,13 @@ Deno.test("6. coverage counts the open population with the same rules", async ()
 });
 
 Deno.test("coverage does not count internal GHL notes as client conversation", async () => {
-  for (const eventType of ["ghl.note_added", "ghl.internal_comment"]) {
+  for (
+    const eventType of [
+      "ghl.note_added",
+      "ghl.note_updated",
+      "ghl.internal_comment",
+    ]
+  ) {
     const t = baseTables();
     t.ghl_conversation_cache = [];
     t.inbox_events = [];

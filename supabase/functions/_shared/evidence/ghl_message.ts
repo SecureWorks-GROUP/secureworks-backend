@@ -31,6 +31,7 @@ export const GHL_CAPTURED_MESSAGE_EVENT_TYPES = [
   "client.sms_in",
   "client.sms_out",
   "ghl.note_added",
+  "ghl.note_updated",
   "ghl.internal_comment",
 ] as const;
 

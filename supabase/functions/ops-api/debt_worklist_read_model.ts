@@ -271,6 +271,7 @@ export function entryFromConversation(
 ): TimelineEntry {
   const source = String(m.source_system ?? "unknown");
   const providerId = str(m.provider_message_id);
+  const eventType = str(m.event_type);
   const fallbackProvider = source === "ghl_cache"
     ? "ghl"
     : source === "inbox"
@@ -289,13 +290,14 @@ export function entryFromConversation(
   const withheld = privacyClassification === "restricted_pii" ||
     privacyClassification === "audio_unredacted";
   const unplacedInbox = source === "inbox";
+  const noteKey = providerId ? ghlNoteTimelineKey(providerId) : null;
   const kind = channel === "note" && source === "job_events"
     ? "job_note"
     : channel === "note"
     ? "ghl_note"
     : channel ?? "message";
   return {
-    key: providerId ?? `${source}:${m.source_ref ?? m.id}`,
+    key: noteKey ?? providerId ?? `${source}:${m.source_ref ?? m.id}`,
     kind,
     channel,
     provider: providerFromId(providerId, fallbackProvider),
@@ -316,8 +318,15 @@ export function entryFromConversation(
       ? `content withheld: ${privacyClassification}`
       : unplacedInbox
       ? "unplaced, matched by the old guess"
+      : eventType === "ghl.note_updated"
+      ? "edited"
       : str(m.label),
   };
+}
+
+function ghlNoteTimelineKey(providerId: string): string | null {
+  const match = /^ghlnote:([^:]+):/.exec(providerId);
+  return match ? `ghl-note:${match[1]}` : null;
 }
 
 export function entryFromGhlContactEvent(
@@ -330,6 +339,7 @@ export function entryFromGhlContactEvent(
   const jobId = str(row.job_id);
   const eventType = str(row.event_type) ?? "";
   const isNote = eventType === "ghl.note_added" ||
+    eventType === "ghl.note_updated" ||
     eventType === "ghl.internal_comment";
   const eventChannel = channelFromEventType(eventType);
   const channel = eventChannel ?? str(row.channel) ?? str(payload.channel) ??
@@ -352,7 +362,8 @@ export function entryFromGhlContactEvent(
         row.body_preview ?? "",
     );
   return {
-    key: providerId ?? `business_events:${row.id}`,
+    key: (providerId && ghlNoteTimelineKey(providerId)) ??
+      providerId ?? `business_events:${row.id}`,
     kind: isNote ? "ghl_note" : channel,
     channel,
     provider: providerFromId(providerId, str(row.source) ?? "ghl"),
@@ -373,7 +384,11 @@ export function entryFromGhlContactEvent(
     invoice_ids: jobId ? [...(jobInvoiceIds ?? [])] : [...debtorInvoiceIds],
     invoice_scope: jobId ? "job" : "debtor",
     seen_in: ["business_events"],
-    label: withheld ? `content withheld: ${privacyClassification}` : null,
+    label: withheld
+      ? `content withheld: ${privacyClassification}`
+      : eventType === "ghl.note_updated"
+      ? "edited"
+      : null,
   };
 }
 
@@ -647,6 +662,26 @@ export function mergeTimeline(entries: TimelineEntry[]): {
   const absorb = (keep: TimelineEntry, other: TimelineEntry) => {
     for (const s of other.seen_in) {
       if (!keep.seen_in.includes(s)) keep.seen_in.push(s);
+    }
+    if (!keep.author && other.author) keep.author = other.author;
+    if (keep.key.startsWith("ghl-note:")) {
+      const keepAt = Date.parse(keep.at ?? "");
+      const otherAt = Date.parse(other.at ?? "");
+      const otherIsNewer = Number.isFinite(otherAt) &&
+        (!Number.isFinite(keepAt) || otherAt > keepAt ||
+          (otherAt === keepAt && other.label === "edited" &&
+            keep.label !== "edited"));
+      if (otherIsNewer) {
+        keep.provider = other.provider;
+        keep.provider_id = other.provider_id;
+        keep.at = other.at;
+        keep.at_precision = other.at_precision;
+        keep.source_ref = other.source_ref;
+        keep.subject = other.subject;
+        keep.preview = other.preview;
+        keep.direction = "internal";
+        keep.label = other.label;
+      }
     }
     if (keep.invoice_scope !== "unplaced" && other.invoice_scope === "unplaced") {
       return;
@@ -962,6 +997,7 @@ export async function debtWorklist(
             .select(
               "id, xero_invoice_id, job_id, method, outcome, notes, follow_up_date, follow_up_resolved, chased_by, created_at",
             )
+            .eq("org_id", deps.orgId)
             .in("xero_invoice_id", ids),
         warnings,
         "id",

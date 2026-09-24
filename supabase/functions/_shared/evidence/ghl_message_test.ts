@@ -5,6 +5,8 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  GHL_CAPTURED_MESSAGE_EVENT_TYPES,
+  GHL_RECORD_EVENT_TYPES,
   buildGhlMessageRow,
   buildGhlRecordRow,
   type GhlCaptureContext,
@@ -13,6 +15,7 @@ import {
   type GhlRecordEventType,
   ourLineForNumber,
 } from "./ghl_message.ts";
+import { GHL_RECORD_EVENT_TYPES_EXCLUDED_FROM_DEBT_TIMELINE } from "./conversation_event_types.ts";
 import {
   ACTIVITY_ITEM,
   CALL_ITEM,
@@ -410,4 +413,37 @@ Deno.test("rank 10: no contact means no row; an appointment's contact is read fr
     (appt.row.metadata as Record<string, unknown>).capture_mode,
     "live",
   );
+});
+
+Deno.test("every GHL record event is included or explicitly excluded from the debt timeline", () => {
+  const emitted = new Set<string>();
+  for (const [index, type] of GHL_RECORD_EVENT_TYPES.entries()) {
+    const built = buildGhlRecordRow(type, {
+      id: `recordFixture${index}`,
+      contactId: "contact-fixture",
+      dateAdded: "2026-09-20T01:00:00Z",
+      dateUpdated: "2026-09-21T01:00:00Z",
+      appointment: {
+        id: `apptFixture${index}`,
+        contactId: "contact-fixture",
+        dateUpdated: "2026-09-21T01:00:00Z",
+      },
+    }, { source: "ghl-webhook-receiver", captureMode: "live" });
+    assert(built.kind === "row", `${type} produces a persisted row`);
+    emitted.add(String(built.row.event_type));
+  }
+
+  const included = new Set<string>(GHL_CAPTURED_MESSAGE_EVENT_TYPES);
+  const excluded = GHL_RECORD_EVENT_TYPES_EXCLUDED_FROM_DEBT_TIMELINE;
+  for (const eventType of emitted) {
+    assert(
+      included.has(eventType) || eventType in excluded,
+      `${eventType} has a timeline disposition`,
+    );
+  }
+  for (const [eventType, reason] of Object.entries(excluded)) {
+    assert(emitted.has(eventType), `${eventType} is emitted by the builder`);
+    assert(reason.trim().length > 0 && !reason.includes("\n"));
+    assert(!included.has(eventType), `${eventType} is not double-classified`);
+  }
 });

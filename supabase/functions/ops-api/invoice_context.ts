@@ -56,7 +56,8 @@ const MESSAGE_EVENT_TYPES = [
 ];
 const CLIENT_CONVERSATION_EVENT_TYPES = MESSAGE_EVENT_TYPES.filter(
   (eventType) =>
-    eventType !== "ghl.note_added" && eventType !== "ghl.internal_comment",
+    eventType !== "ghl.note_added" && eventType !== "ghl.note_updated" &&
+    eventType !== "ghl.internal_comment",
 );
 
 export class InvoiceContextError extends Error {

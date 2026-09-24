@@ -16140,7 +16140,9 @@ async function getJobConversation(client: any, body: any) {
         : r.event_type.includes('call') ? 'call'
         : r.event_type === 'ghl.internal_comment' || r.event_type.includes('note') ? 'note'
         : 'email'
-      const direction: string = r.event_type === 'ghl.note_added' || r.event_type === 'ghl.internal_comment'
+      const direction: string = r.event_type === 'ghl.note_added' ||
+          r.event_type === 'ghl.note_updated' ||
+          r.event_type === 'ghl.internal_comment'
         ? 'internal'
         : p.direction || r.direction || (r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'supplier.email_in'
           ? 'inbound'

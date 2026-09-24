@@ -37,8 +37,10 @@ import {
   DebtWorklistError,
   entryFromChaseLog,
   entryFromConversation,
+  entryFromGhlContactEvent,
   mergeTimeline,
 } from "./debt_worklist_read_model.ts";
+import { buildGhlRecordRow } from "../_shared/evidence/ghl_message.ts";
 import { isCurrentContextFact } from "./context_visibility.ts";
 import { _getJobConversationForTest } from "./index.ts";
 
@@ -344,6 +346,7 @@ function unitTables(): Tables {
     payment_chase_logs: [
       {
         id: "c-note",
+        org_id: ORG,
         xero_invoice_id: INV(1),
         job_id: JOB_A,
         method: "note",
@@ -354,6 +357,7 @@ function unitTables(): Tables {
       },
       {
         id: "c-sms",
+        org_id: ORG,
         xero_invoice_id: INV(2),
         job_id: JOB_A,
         method: "sms",
@@ -364,6 +368,7 @@ function unitTables(): Tables {
       },
       {
         id: "c-call",
+        org_id: ORG,
         xero_invoice_id: INV(3),
         job_id: JOB_B,
         method: "call",
@@ -749,6 +754,78 @@ Deno.test("contact-level GHL messages and notes retain direction and scope", asy
   }
 });
 
+Deno.test("GHL note edits replace the prior note version in the timeline", async () => {
+  const tables = unitTables();
+  tables.xero_invoices = [invoice(1, { job_id: null })];
+  tables.jobs = [];
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-contact-only",
+    job_id: null,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  const record = (type: "NoteCreate" | "NoteUpdate", body: string, at: string) => {
+    const result = buildGhlRecordRow(type, {
+      id: "noteFixture01",
+      contactId: "ghl-contact-only",
+      body,
+      dateAdded: "2026-09-20T01:00:00Z",
+      dateUpdated: at,
+    }, { source: "ghl-webhook-receiver", captureMode: "live" });
+    if (result.kind !== "row") throw new Error(`GHL ${type} was skipped`);
+    return { ...result.row, id: `row-${type}`, occurred_at: result.row.event_at };
+  };
+  const added = record("NoteCreate", "Original note", "2026-09-20T01:00:00Z");
+  const updated = record("NoteUpdate", "Edited note", "2026-09-22T01:00:00Z");
+  tables.business_events = [added, updated];
+
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(fakeClient(tables)),
+  );
+  const notes = out.debtors[0].timeline.entries.filter((entry: any) =>
+    entry.kind === "ghl_note"
+  );
+  assertEquals(notes.length, 1);
+  assertEquals(notes[0].preview, "Edited note");
+  assertEquals(notes[0].provider_id, updated.provider_message_id);
+  assertEquals(notes[0].at, "2026-09-22T01:00:00.000Z");
+  assertEquals(notes[0].direction, "internal");
+  assertEquals(notes[0].label, "edited");
+});
+
+Deno.test("payment chase notes are scoped to the worklist organization", async () => {
+  const tables = unitTables();
+  tables.payment_chase_logs.push({
+    id: "foreign-org-note",
+    org_id: "00000000-0000-0000-0000-000000000099",
+    xero_invoice_id: INV(1),
+    job_id: JOB_A,
+    method: "note",
+    notes: "Other org private note",
+    chased_by: "other@example.test",
+    created_at: "2026-09-18T02:00:00.000Z",
+  });
+  const client = fakeClient(tables);
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(client),
+  );
+  const timeline = out.debtors[0].timeline.entries;
+  assert(!timeline.some((entry: any) => entry.preview.includes("Other org private note")));
+  const chaseRead = client.queryCalls.find((query) =>
+    query.table === "payment_chase_logs"
+  );
+  assert(chaseRead);
+  assert(chaseRead.filters.some((filter) =>
+    filter.operator === "eq" && filter.column === "org_id" &&
+    filter.value === ORG
+  ));
+});
+
 Deno.test("restricted contact events keep metadata but withhold content", async () => {
   const tables = unitTables();
   tables.xero_invoices = [invoice(1, { job_id: null })];
@@ -1125,6 +1202,7 @@ Deno.test("capped chase and invoice-event reads keep timeline incomplete", async
   const tables = unitTables();
   tables.payment_chase_logs = Array.from({ length: 20_001 }, (_, index) => ({
     id: `capped-chase-${index}`,
+    org_id: ORG,
     xero_invoice_id: INV(1),
     method: "note",
     notes: `Debt note ${index}`,
@@ -1697,6 +1775,35 @@ Deno.test("an unplaced inbox copy cannot downgrade a confirmed message placement
   assertEquals(merged.entries[0].seen_in.sort(), ["business_events", "inbox"]);
 });
 
+Deno.test("duplicate message copies fill a missing author without replacing one", () => {
+  const event = (author: string | null) => entryFromConversation({
+    channel: "sms",
+    direction: "outbound",
+    occurred_at: "2026-09-20T01:00:00Z",
+    author,
+    preview: "A sent message",
+    source_system: "business_events",
+    provider_message_id: "ghl:author-copy",
+  }, JOB_A, [INV(1)]);
+  const contactCopy = entryFromGhlContactEvent({
+    event_type: "client.sms_out",
+    occurred_at: "2026-09-20T01:00:00Z",
+    provider_message_id: "ghl:author-copy",
+    source: "ghl-webhook-receiver",
+    payload: { body: "A sent message", sent_by_user: "operator@example.test" },
+  }, [INV(1)]);
+  const filled = mergeTimeline([event(null), contactCopy]);
+  assertEquals(filled.entries.length, 1);
+  assertEquals(filled.entries[0].author, "operator@example.test");
+
+  const retained = mergeTimeline([
+    event("Known author"),
+    { ...contactCopy, author: "Other author" },
+  ]);
+  assertEquals(retained.entries.length, 1);
+  assertEquals(retained.entries[0].author, "Known author");
+});
+
 Deno.test("chase SMS dedupe matches earlier, ambiguous and competing copies", () => {
   const provider = (id: string, at: string) => ({
     key: `ghl:${id}`,
@@ -1842,6 +1949,7 @@ Deno.test("last contact uses merged entries before the recent debtor trim", asyn
   const start = Date.parse("2026-09-20T01:00:00Z");
   tables.payment_chase_logs = Array.from({ length: 13 }, (_, i) => ({
     id: `new-note-${i}`,
+    org_id: ORG,
     xero_invoice_id: INV(1),
     job_id: JOB_A,
     method: "note",
