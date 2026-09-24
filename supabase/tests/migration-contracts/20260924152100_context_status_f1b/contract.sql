@@ -115,6 +115,9 @@ BEGIN
  END LOOP;
  FOREACH f IN ARRAY ARRAY['public.context_email_capture_status()','public.context_transcript_capture_status()','public.context_money_status()',
   'public.context_bucket_status()']::regprocedure[] LOOP
+  -- Only while the stub stands: its owning slice (T2, EM1, MN1, B2) replaces
+  -- the body, comment and search_path, and proves its own block's grants.
+  CONTINUE WHEN (SELECT md5(prosrc) FROM pg_proc WHERE oid=f)<>'155104bfb08b8b3c2f98bdec089d4ee4';
   IF (SELECT NOT prosecdef OR proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog'] FROM pg_proc WHERE oid=f)
   THEN RAISE EXCEPTION 'f1b stub % must be SECURITY DEFINER with search_path=pg_catalog',f; END IF;
   IF obj_description(f,'pg_proc') NOT LIKE 'F1b stub.%' THEN RAISE EXCEPTION 'f1b stub comment on %',f; END IF;
