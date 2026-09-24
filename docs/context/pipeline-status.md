@@ -17,7 +17,7 @@ with identical values. The composer adds:
 | `ghl_capture` | `context_ghl_capture_status()` | sms C1d | built |
 | `booking_capture` | `context_booking_capture_status()` | dossier D3 | `null` |
 | `parties` | `context_parties_status()` | sites S-M1 | `null` |
-| `email_capture` | `context_email_capture_status()` | email EM1 | `null` (F1b stub) |
+| `email_capture` | `context_email_capture_status()` | email EM1 | built |
 | `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | `null` (F1b stub) |
 | `money` | `context_money_status()` | money MN1 | `null` (F1b stub) |
 | `bucket` | `context_bucket_status()` | bucket B2 | `null` (F1b stub) |
@@ -72,6 +72,9 @@ read of a listed job also counts as its catch-up read. A job completes only when
 `done` run leaves it nothing pending (a job with
 more than one batch takes several runs). A job due only by catch-up never raises
 `cadence_breach`.
+
+`email_capture`: the grouped health shape and alarm contract are owned by
+[`email-capture.md`](email-capture.md#health-email_capture-status-block).
 
 `capture_sources`: last `context_captured_at` per `business_events.source`
 (rows with `metadata.capture_mode` `backfill` or `relink` ignored), business

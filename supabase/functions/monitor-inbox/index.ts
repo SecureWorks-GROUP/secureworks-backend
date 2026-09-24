@@ -18,6 +18,7 @@ import { classifyEmail } from './classify_email.ts'
 // insert below runs unchanged. No dual-write.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { legacyPollPlan } from './legacy_mailboxes.ts'
 import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -25,22 +26,9 @@ const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.e
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
-// Monitored mailboxes
-// Step 17: Expanded from 2 to 7 mailboxes (GRAF Level 6)
-// khairo@ excluded — MS365 mailbox not provisioned (needs admin action)
-const MONITORED_MAILBOXES = [
-  'marnin@secureworkswa.com.au',
-  'jan@secureworkswa.com.au',
-  'nithin@secureworkswa.com.au',    // Sales (patios) — confirmed working
-  'shaun@secureworkswa.com.au',     // Ops manager — returns Apr 13, mailbox active
-  'admin@secureworkswa.com.au',     // Shared admin inbox
-]
-
-/** M365 Groups (receive-only). Never call /users/{mail} — that returns ErrorInvalidUser. */
-const GROUP_MAILBOXES = [
-  'patios@secureworkswa.com.au',
-  'fencing@secureworkswa.com.au',
-]
+// Monitored mailboxes: the old path's pinned list (legacy_mailboxes.ts). It
+// never reads the monitored_mailboxes table, which belongs to the new poller.
+const { users: MONITORED_MAILBOXES, groups: GROUP_MAILBOXES } = legacyPollPlan()
 
 // Graph token cache
 let _cachedToken: { token: string; expires: number } | null = null
@@ -770,43 +758,12 @@ Deno.serve(async (req) => {
     const token = await getGraphToken()
     let totalProcessed = 0
 
-    // T7 Loop 8 — mailbox list as data, not code.
-    // When monitored_mailboxes table is present and has enabled rows,
-    // we iterate those (with per-mailbox last_polled_at as cursor).
-    // Falls back to the hard-coded MONITORED_MAILBOXES on any error or
-    // when the table is empty — preserves the existing behavior during
-    // rollout. Loop 8 ships the migration draft AND seeds the table
-    // separately; this function adapts to whichever is present.
-    let activeMailboxes: string[] = MONITORED_MAILBOXES
-    let configRows: Array<{ id: string; email: string }> = []
-    try {
-      const { data: rows, error } = await sb
-        .from('monitored_mailboxes')
-        .select('id, email, enabled, status, last_polled_at')
-        .eq('enabled', true)
-        .neq('status', 'paused')
-      if (!error && Array.isArray(rows) && rows.length > 0) {
-        configRows = rows.map((r: any) => ({ id: r.id, email: r.email }))
-        activeMailboxes = configRows.map((r) => r.email)
-        console.log(`[monitor-inbox] using monitored_mailboxes config: ${activeMailboxes.length} mailboxes`)
-      }
-    } catch {
-      // Table doesn't exist yet (Loop 1 draft not applied). Stay on the
-      // hard-coded list. No error — this is the expected pre-Loop-8 path.
-    }
-
-    for (const mailbox of activeMailboxes) {
+    // The old path polls its pinned list only (EM1, email.md review M14). The
+    // monitored_mailboxes table is the new poller's list; reading it here would
+    // poll khairo@ and group addresses as user mailboxes.
+    for (const mailbox of MONITORED_MAILBOXES) {
       const { processed } = await processMailbox(sb, token, mailbox)
       totalProcessed += processed
-      // Per-mailbox cursor update (only when monitored_mailboxes is live).
-      const cfg = configRows.find((r) => r.email === mailbox)
-      if (cfg) {
-        try {
-          await sb.from('monitored_mailboxes')
-            .update({ last_polled_at: new Date().toISOString() })
-            .eq('id', cfg.id)
-        } catch { /* non-fatal */ }
-      }
     }
 
     // R7: Group inboxes (patios@, fencing@) — Graph /groups path, not /users.
@@ -819,8 +776,8 @@ Deno.serve(async (req) => {
       success: true,
       processed: totalProcessed,
       notified: 0,
-      mailboxes: activeMailboxes.length,
-      mailbox_source: configRows.length > 0 ? 'monitored_mailboxes' : 'hard_coded',
+      mailboxes: MONITORED_MAILBOXES.length,
+      mailbox_source: 'hard_coded',
       timestamp: new Date().toISOString(),
     }
 

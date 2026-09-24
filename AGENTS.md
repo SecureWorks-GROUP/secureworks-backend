@@ -3896,3 +3896,11 @@ found by source pointer (every live copy has one), `graph:` provider key, or
 marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 `attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
+
+## Email Capture Sources Are Data; The Old Poller Is Pinned
+
+The old monitor-inbox path must poll only `monitor-inbox/legacy_mailboxes.ts`,
+never `monitored_mailboxes`, which belongs to the new poller. Source changes,
+access, run-row naming and health are owned by
+[`docs/context/email-capture.md`](docs/context/email-capture.md); the migration
+contract's E22 case pins the old-path boundary.

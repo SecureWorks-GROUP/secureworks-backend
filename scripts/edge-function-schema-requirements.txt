@@ -499,3 +499,6 @@ ops-api|supabase/migrations/20260924183000_context_unlinked_census.sql|function|
 ops-api|supabase/migrations/20260924183000_context_unlinked_census.sql|function|context_unlinked_rows
 ops-api|supabase/migrations/20260924201000_ops_api_actor_recording.sql|table|ops_api_actor_calls
 ops-api|supabase/migrations/20260924201000_ops_api_actor_recording.sql|function|record_ops_api_actor_missing
+ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|table|monitored_mailboxes
+ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|table|monitored_mailbox_changes
+ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|function|set_monitored_mailbox
