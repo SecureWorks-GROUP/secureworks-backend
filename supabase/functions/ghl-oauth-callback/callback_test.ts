@@ -137,6 +137,7 @@ Deno.test("success: exchanges the code, writes an ids-only receipt, returns the 
     new Headers(h.calls[0].init?.headers).get("Content-Type"),
     "application/x-www-form-urlencoded",
   );
+  assertEquals(new Headers(h.calls[0].init?.headers).get("Version"), "v3");
   const form = new URLSearchParams(String(h.calls[0].init?.body));
   assertEquals(Object.fromEntries(form), {
     client_id: CLIENT_ID,
@@ -180,11 +181,8 @@ Deno.test("failed exchange: provider rejects, returns the error page with a code
   assertStringIncludes(text, "Error code: exchange_rejected");
   assert(!text.includes("invalid_grant"), "provider body must not be returned");
   assertEquals(h.calls.length, 1);
-  assertEquals(h.receipts.length, 1);
-  assertEquals(h.receipts[0].status, "failed");
-  assertEquals(h.receipts[0].payload.outcome, "exchange_rejected");
-  assertEquals(h.receipts[0].payload.provider_status, 400);
-  assertEquals(h.receipts[0].payload.location_id, null);
+  assertEquals(h.receipts, []);
+  assertEquals(lines.length, 1);
 });
 
 Deno.test("failed exchange: network error returns the error page", async () => {
@@ -199,18 +197,27 @@ Deno.test("failed exchange: network error returns the error page", async () => {
   assertEquals(res.status, 502);
   const text = await assertNoSecrets(res, h.receipts, lines);
   assertStringIncludes(text, "Error code: exchange_unreachable");
-  assertEquals(h.receipts[0].payload.outcome, "exchange_unreachable");
+  assertEquals(h.receipts, []);
+  assertEquals(lines.length, 1);
 });
 
-Deno.test("failed exchange: a non-JSON 200 returns the error page", async () => {
-  const h = harness({
-    respond: () => new Response("not json", { status: 200 }),
+for (const body of ["not json", "null", "[]", '"invalid"']) {
+  Deno.test(`failed exchange: invalid response ${body} writes no receipt`, async () => {
+    const h = harness({
+      respond: () => new Response(body, { status: 200 }),
+    });
+    const { result: res, lines } = await captureConsole(() =>
+      handleGhlOAuthCallback(callbackRequest(), h.deps)
+    );
+    assertEquals(res.status, 502);
+    assertStringIncludes(
+      await assertNoSecrets(res, h.receipts, lines),
+      "exchange_invalid_response",
+    );
+    assertEquals(h.receipts, []);
+    assertEquals(lines.length, 1);
   });
-  const res = await handleGhlOAuthCallback(callbackRequest(), h.deps);
-  assertEquals(res.status, 502);
-  assertStringIncludes(await res.text(), "exchange_invalid_response");
-  assertEquals(h.receipts[0].payload.outcome, "exchange_invalid_response");
-});
+}
 
 for (
   const name of [
@@ -229,22 +236,24 @@ for (
     const text = await assertNoSecrets(res, h.receipts, lines);
     assertStringIncludes(text, "Error code: missing_env");
     assertEquals(h.calls.length, 0);
-    assertEquals(h.receipts.length, 1);
-    assertEquals(h.receipts[0].payload.outcome, "missing_env");
+    assertEquals(h.receipts, []);
+    assertEquals(lines.length, 1);
   });
 }
 
 Deno.test("missing code: returns the error page without calling fetch", async () => {
   const h = harness({});
-  const res = await handleGhlOAuthCallback(
-    callbackRequest("?error=access_denied"),
-    h.deps,
+  const { result: res, lines } = await captureConsole(() =>
+    handleGhlOAuthCallback(callbackRequest("?error=access_denied"), h.deps)
   );
   assertEquals(res.status, 400);
-  assertStringIncludes(await res.text(), "Error code: missing_code");
+  assertStringIncludes(
+    await assertNoSecrets(res, h.receipts, lines),
+    "Error code: missing_code",
+  );
   assertEquals(h.calls.length, 0);
-  assertEquals(h.receipts[0].payload.outcome, "missing_code");
-  assertEquals(h.receipts[0].status, "rejected");
+  assertEquals(h.receipts, []);
+  assertEquals(lines.length, 1);
 });
 
 Deno.test("location mismatch: records location_mismatch and never stores the foreign location id", async () => {
@@ -256,6 +265,7 @@ Deno.test("location mismatch: records location_mismatch and never stores the for
   assertEquals(res.status, 403);
   const text = await assertNoSecrets(res, h.receipts, lines);
   assertStringIncludes(text, "Error code: location_mismatch");
+  assertEquals(h.receipts.length, 1);
   assertEquals(h.receipts[0].payload.outcome, "location_mismatch");
   assertEquals(h.receipts[0].payload.location_id, null);
   assert(!JSON.stringify(h.receipts).includes(foreign));
@@ -263,14 +273,20 @@ Deno.test("location mismatch: records location_mismatch and never stores the for
 
 Deno.test("non-GET: refused without calling fetch", async () => {
   const h = harness({});
-  const res = await handleGhlOAuthCallback(
-    new Request(callbackRequest().url, { method: "POST" }),
-    h.deps,
+  const { result: res, lines } = await captureConsole(() =>
+    handleGhlOAuthCallback(
+      new Request(callbackRequest().url, { method: "POST" }),
+      h.deps,
+    )
   );
   assertEquals(res.status, 405);
-  await res.body?.cancel();
+  assertStringIncludes(
+    await assertNoSecrets(res, h.receipts, lines),
+    "Error code: method_not_allowed",
+  );
   assertEquals(h.calls.length, 0);
-  assertEquals(h.receipts[0].payload.outcome, "method_not_allowed");
+  assertEquals(h.receipts, []);
+  assertEquals(lines.length, 1);
 });
 
 Deno.test("a receipt write failure never changes the page", async () => {

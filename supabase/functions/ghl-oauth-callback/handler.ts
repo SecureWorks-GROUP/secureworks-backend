@@ -12,7 +12,7 @@
 // client secret, or the provider's response body. Output is a small plain
 // page carrying an outcome code only.
 //
-// Receipt: one `webhook_log` row per request, source `ghl_oauth`, event_type
+// Receipt: one `webhook_log` row per accepted exchange, source `ghl_oauth`, event_type
 // `AppInstall`, payload `receipt: ghl_app_install_v1` with outcome, location
 // id (only when it equals GHL_LOCATION_ID) and company id. The source is
 // deliberately not `ghl_webhook` so install receipts never count toward the
@@ -113,28 +113,26 @@ export async function handleGhlOAuthCallback(
   let providerStatus: number | null = null;
 
   const finish = async (outcome: InstallOutcome): Promise<Response> => {
-    const receipt: InstallReceipt = {
-      org_id: DEFAULT_ORG_ID,
-      source: "ghl_oauth",
-      event_type: "AppInstall",
-      status: outcome === "installed"
-        ? "processed"
-        : outcome === "missing_env" || outcome.startsWith("exchange_")
-        ? "failed"
-        : "rejected",
-      error_message: outcome === "installed" ? null : outcome,
-      payload: {
-        receipt: "ghl_app_install_v1",
-        outcome,
-        location_id: locationId,
-        company_id: companyId,
-        provider_status: providerStatus,
-      },
-    };
-    try {
-      await deps.writeReceipt(receipt);
-    } catch {
-      console.error(`[${FUNCTION_NAME}] receipt write threw`);
+    if (outcome === "installed" || outcome === "location_mismatch") {
+      const receipt: InstallReceipt = {
+        org_id: DEFAULT_ORG_ID,
+        source: "ghl_oauth",
+        event_type: "AppInstall",
+        status: outcome === "installed" ? "processed" : "rejected",
+        error_message: outcome === "installed" ? null : outcome,
+        payload: {
+          receipt: "ghl_app_install_v1",
+          outcome,
+          location_id: locationId,
+          company_id: companyId,
+          provider_status: providerStatus,
+        },
+      };
+      try {
+        await deps.writeReceipt(receipt);
+      } catch {
+        console.error(`[${FUNCTION_NAME}] receipt write threw`);
+      }
     }
     if (outcome !== "installed") {
       console.error(`[${FUNCTION_NAME}] install not completed: ${outcome}`);
@@ -169,6 +167,7 @@ export async function handleGhlOAuthCallback(
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
+        Version: "v3",
       },
       body: new URLSearchParams({
         client_id: clientId,
