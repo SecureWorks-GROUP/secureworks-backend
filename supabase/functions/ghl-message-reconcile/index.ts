@@ -1,7 +1,7 @@
 // GHL message reconciler (context slice C1d; design sms.md §7 step 9).
 // Called every 15 minutes by pg_cron (trigger_ghl_message_reconcile) with the
 // service key. JWT verification stays on (the default deploy): only the service
-// key is accepted, checked again in handler.ts. The run is reconcile.ts.
+// role is accepted, checked again in handler.ts. The run is reconcile.ts.
 // deno-lint-ignore no-import-prefix
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
 import { handleReconcile } from "./handler.ts";

@@ -166,12 +166,99 @@ Deno.test("only the service key may start a run; GET is refused", async () => {
       env: () => undefined,
     }, run)).status,
     401,
-    "no configured key refuses everyone",
+    "no configured key refuses a non-JWT bearer",
   );
   assertEquals(ran, 0);
   assert(sameSecret("abc", "abc"));
   assert(!sameSecret("abc", "abd"));
   assert(!sameSecret("abc", "abcd"));
+});
+
+function fakeJwt(payload: Record<string, unknown>): string {
+  const b64url = (v: unknown) =>
+    btoa(JSON.stringify(v)).replace(/\+/g, "-").replace(/\//g, "_").replace(
+      /=+$/,
+      "",
+    );
+  return `${b64url({ alg: "HS256", typ: "JWT" })}.${
+    b64url(payload)
+  }.fixture-signature`;
+}
+
+Deno.test("the service role is accepted by exact key or by role claim; every other caller is 401", async () => {
+  const started: string[] = [];
+  let caller = "";
+  const run = () => {
+    started.push(caller);
+    return Promise.resolve({
+      outcome: "idle" as const,
+      reason: "item_flag_off" as const,
+    });
+  };
+  const deps = {
+    env,
+    createSupabase: () => fakeSupabase({ flag: false, runs: [], keys: [] }),
+  };
+  const call = async (label: string, headers: Record<string, string>) => {
+    caller = label;
+    const res = await handleReconcile(post(headers, { wait: true }), deps, run);
+    return { status: res.status, body: await res.json() };
+  };
+
+  // The exact injected key.
+  assertEquals(
+    (await call("env", { Authorization: `Bearer ${SERVICE}` })).status,
+    200,
+  );
+
+  // The cron's sw_service_key(): a service_role JWT that is not the env string.
+  const cronJwt = fakeJwt({
+    iss: "supabase",
+    ref: "proj",
+    role: "service_role",
+  });
+  assert(cronJwt !== SERVICE);
+  assertEquals(
+    (await call("cron", { Authorization: `Bearer ${cronJwt}` })).status,
+    200,
+  );
+
+  // Anyone else is refused before a run starts.
+  for (
+    const [label, headers] of [
+      ["anon", { Authorization: `Bearer ${fakeJwt({ role: "anon" })}` }],
+      ["authenticated", {
+        Authorization: `Bearer ${
+          fakeJwt({ role: "authenticated", sub: "user-1" })
+        }`,
+      }],
+      ["no role", { Authorization: `Bearer ${fakeJwt({ sub: "user-1" })}` }],
+      ["near miss", {
+        Authorization: `Bearer ${fakeJwt({ role: "service_role_x" })}`,
+      }],
+      ["not a jwt", { Authorization: "Bearer totally-garbage" }],
+      ["no bearer", {}],
+      ["empty bearer", { Authorization: "Bearer " }],
+      ["not bearer scheme", { Authorization: `Basic ${cronJwt}` }],
+    ] as [string, Record<string, string>][]
+  ) {
+    const res = await call(label, headers);
+    assertEquals(res.status, 401, label);
+    assertEquals(res.body, { error: "service_key_required" }, label);
+  }
+
+  // A service_role JWT is still accepted when the env key is absent: the claim,
+  // not the env string, is what the platform-verified token proves.
+  caller = "cron-no-env";
+  assertEquals(
+    (await handleReconcile(
+      post({ Authorization: `Bearer ${cronJwt}` }, { wait: true }),
+      { ...deps, env: () => undefined },
+      run,
+    )).status,
+    200,
+  );
+  assertEquals(started, ["env", "cron", "cron-no-env"]);
 });
 
 Deno.test("the cron call is answered 202 and the run continues in the background", async () => {

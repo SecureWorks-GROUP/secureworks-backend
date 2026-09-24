@@ -3683,6 +3683,17 @@ posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook
 proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
+## A pg_cron Bearer Is Not The Function's Service Key
+
+pg_cron triggers call edge functions with `Bearer <sw_service_key()>`, a
+signature-valid legacy service-role JWT that does NOT byte-equal the function's
+injected `SUPABASE_SERVICE_ROLE_KEY`. An exact-string check alone 401s every
+cron run silently (monitor-ses-makesafes, then the C1d GHL message reconciler,
+which never recorded a run). A cron-called function deployed with JWT
+verification on authorises the exact key OR a JWT whose `role` claim is exactly
+`service_role`, through `_shared/service_role_jwt.ts` — never a second decoder,
+and never any other role. Tests: `ghl-message-reconcile/handler_test.ts`.
+
 ## Outbound SMS Sender Policy Is One Shared Module
 
 Every outbound SMS defaults to +61489267771 (SecureWorks Group Admin) — company
