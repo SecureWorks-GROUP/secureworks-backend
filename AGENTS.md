@@ -665,7 +665,7 @@ track to stamp the hint with its time (a named follow-up, not B0).
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
-Since P4 (`20260924213000_context_unlinked_rules.sql`) every caller uses
+Since P4 (`20260925050000_context_unlinked_rules.sql`) every caller uses
 `resolve_context_attribution(e)`, a one-line entry into
 `resolve_context_attribution(e, p_preview, p_rules_on)`. With
 `feature_flags.context_unlinked_rules_v1` off (missing or unreadable = off) it
@@ -685,7 +685,7 @@ two-argument `context_contact_jobs_at` is unchanged and still serves the Luna
 guard and P1b; the rules use the keyed four-argument overload. Preview a
 stored row with `context_attribution_preview(event_id, rules_on)` (writes
 nothing) before trusting a rule change. Contract and named rows:
-`supabase/tests/migration-contracts/20260924213000_context_unlinked_rules/`.
+`supabase/tests/migration-contracts/20260925050000_context_unlinked_rules/`.
 
 ## Migrations Apply Before Edge Deploys
 

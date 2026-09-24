@@ -1,4 +1,4 @@
--- Down for 20260924213000 (P4): disable P4, restore the two live production
+-- Down for 20260925050000 (P4): disable P4, restore the two live production
 -- bodies byte for byte, and drop P4's functions. Rows placed, rested or stamped
 -- under P4 keep what they have; event_threads keeps its retirement columns and
 -- rows (P1a's ladder does not read them), and the flag row stays off.

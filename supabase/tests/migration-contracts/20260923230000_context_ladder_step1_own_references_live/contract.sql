@@ -113,7 +113,7 @@ ROLLBACK;
 
 -- Structure: the live body is this migration's (or a later registered ladder
 -- slice built on it: P1a 20260924140000 replaces steps 3 to 6 and keeps step 1
--- byte for byte; P4 20260924213000 makes it the entry that runs P1a's body
+-- byte for byte; P4 20260925050000 makes it the entry that runs P1a's body
 -- while its rules flag is off), and no public role may call it.
 DO $$
 BEGIN

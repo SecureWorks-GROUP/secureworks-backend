@@ -2,7 +2,7 @@
 -- registered ladder slice (P4, then P1a) is rolled back first, as its down requires.
 SELECT to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)') IS NOT NULL AS p4_live \gset
 \if :p4_live
-\ir ../../../rollbacks/20260924213000_context_unlinked_rules_down.sql
+\ir ../../../rollbacks/20260925050000_context_unlinked_rules_down.sql
 \endif
 SELECT to_regprocedure('public.context_contact_jobs_at(text,timestamptz)') IS NOT NULL AS p1a_live \gset
 \if :p1a_live

@@ -428,7 +428,7 @@ BEGIN
 END $$;
 -- Re-apply is a no-op. P1b's guard reads P1a's ladder body, so the re-apply
 -- runs only while that body is live; a later registered ladder slice (P4
--- 20260924213000) replaces it and P1b's own three functions stay unchanged.
+-- 20260925050000) replaces it and P1b's own three functions stay unchanged.
 SELECT md5(prosrc)='fe50f14f4ab28d4d6c9dbb70bc85e7df' AS p1a_ladder_live
 FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure \gset
 \if :p1a_ladder_live
