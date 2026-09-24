@@ -37,8 +37,9 @@
 --      invoice or a run acceptance) and the incoming identity disagrees, the
 --      stored party is retired and a new party '<key>#<n>' is inserted. The
 --      same name words on the key are the same person: a corrected phone or
---      email updates the party in place and the receipt records the
---      correction (key fingerprints, never the phone or email). A neighbour's
+--      email updates the party in place and the receipt records which key
+--      kind was corrected (phone or email) and why, never a value or hash of
+--      either. A neighbour's
 --      GHL and Xero ids are written on insert only; after that they change
 --      only through set_job_party_ids. The
 --      owner party ('primary') follows jobs one way (review M2, X19): its
@@ -162,7 +163,7 @@ BEGIN
   ('public.job_party_email_key(text)',ARRAY['670df0b3697061286a48f63ecc261e70'],true),
   ('public.job_party_receipt(uuid,uuid,text,text,text,text,uuid,jsonb,jsonb,jsonb)',ARRAY['49c6aa92c24dd47585d8acdd8f78e12b'],true),
   ('public.job_party_reconsider(public.job_contacts,text)',ARRAY['5dd79285ad333d7221d82839a7c659ac'],true),
-  ('public.upsert_job_party(uuid,text,jsonb,text,uuid)',ARRAY['9f7c10cd83c8c06c200398e947bbc325'],true),
+  ('public.upsert_job_party(uuid,text,jsonb,text,uuid)',ARRAY['ac80dae384812c2f026b6e69b4df2701'],true),
   ('public.set_job_party_ids(uuid,text,text,text,text,text)',ARRAY['468ba14f0f8dce6ed92bd592ba48b801'],true),
   ('public.job_contacts_owner_mirror()',ARRAY['42e95ad1c5ecae48fc4f799ba0babf94'],true),
   ('public.context_contact_parties_at(text,timestamptz)',ARRAY['a78d5a40dfc528f9b47cc6e902216168'],true),
@@ -446,7 +447,7 @@ DECLARE
  portion_inc numeric; portion_ex numeric; total_inc numeric; share numeric; qv numeric; eff timestamptz; letter text; ms text;
  disagree boolean; anchored boolean; replaced uuid; set_ghl boolean:=false; divergence jsonb:='[]'::jsonb;
  replaced_ids jsonb:='[]'::jsonb; id_field text; job_val text; row_val text; same_name boolean; corrections jsonb:='[]'::jsonb;
- owner_unknown uuid;
+ owner_id uuid; owner_share numeric; no_neighbours boolean;
 BEGIN
  -- Contract checks.
  IF p_job_id IS NULL THEN RAISE EXCEPTION 'party_job_required'; END IF;
@@ -522,10 +523,10 @@ BEGIN
     =ARRAY(SELECT DISTINCT w FROM regexp_split_to_table(lower(cur.client_name),'[^a-z0-9]+') w WHERE length(w)>=2 ORDER BY w);
   IF same_name THEN
    IF pk IS NOT NULL AND cur.phone_last9 IS NOT NULL AND pk<>cur.phone_last9 THEN
-    corrections:=corrections||jsonb_build_object('key','phone','old',left(md5(cur.phone_last9),12),'new',left(md5(pk),12),'method','same_name');
+    corrections:=corrections||jsonb_build_object('key','phone','method','same_name');
    END IF;
    IF ek IS NOT NULL AND public.job_party_email_key(cur.client_email) IS NOT NULL AND ek<>public.job_party_email_key(cur.client_email) THEN
-    corrections:=corrections||jsonb_build_object('key','email','old',left(md5(public.job_party_email_key(cur.client_email)),12),'new',left(md5(ek),12),'method','same_name');
+    corrections:=corrections||jsonb_build_object('key','email','method','same_name');
    END IF;
   ELSIF (pk IS NOT NULL AND cur.phone_last9 IS NOT NULL) OR (ek IS NOT NULL AND public.job_party_email_key(cur.client_email) IS NOT NULL) THEN
    disagree:=(pk IS NULL OR cur.phone_last9 IS NULL OR pk<>cur.phone_last9)
@@ -588,10 +589,10 @@ BEGIN
   IF f ? 'assigned_runs' THEN nw.assigned_runs:=CASE WHEN jsonb_typeof(f->'assigned_runs')='array' THEN f->'assigned_runs' END; END IF;
   IF in_role IS NOT NULL THEN nw.party_role:=in_role; ELSIF nw.party_role IS NULL THEN nw.party_role:=CASE WHEN is_owner THEN 'owner' ELSE 'neighbour' END; END IF;
   IF share IS NOT NULL THEN nw.share_percentage:=share;
-  ELSIF is_owner AND nw.share_percentage=100 AND EXISTS (SELECT 1 FROM public.job_contacts o WHERE o.job_id=p_job_id
-    AND o.is_primary IS NOT TRUE AND o.status IS DISTINCT FROM 'removed')
+  ELSIF is_owner AND (nw.share_percentage IS NULL OR nw.share_percentage=100)
    AND NOT EXISTS (SELECT 1 FROM public.job_party_events e WHERE e.job_contact_id=cur.id AND e.detail ? 'share_from_portions') THEN
-   nw.share_percentage:=NULL;
+   nw.share_percentage:=CASE WHEN EXISTS (SELECT 1 FROM public.job_contacts o WHERE o.job_id=p_job_id
+    AND o.is_primary IS NOT TRUE AND o.status IS DISTINCT FROM 'removed') THEN NULL ELSE 100 END;
   END IF;
   IF qv IS NOT NULL THEN nw.quote_value_ex_gst:=qv; END IF;
   IF nw.effective_from IS NULL THEN
@@ -646,14 +647,17 @@ BEGIN
   END IF;
  END IF;
 
- -- Rule 5: an owner with no portions stops holding the whole job once a
- -- neighbour is active.
- IF NOT is_owner AND nw.status IS DISTINCT FROM 'removed' THEN
-  UPDATE public.job_contacts o SET share_percentage=NULL,updated_at=now()
-  WHERE o.job_id=p_job_id AND o.source_party_key='primary' AND o.share_percentage=100
+ -- Rule 5: an owner with no portions holds the whole job only while no
+ -- neighbour is active; otherwise its share is unknown.
+ IF NOT is_owner THEN
+  no_neighbours:=NOT EXISTS (SELECT 1 FROM public.job_contacts o WHERE o.job_id=p_job_id
+   AND o.is_primary IS NOT TRUE AND o.status IS DISTINCT FROM 'removed');
+  UPDATE public.job_contacts o SET share_percentage=CASE WHEN no_neighbours THEN 100 END,updated_at=now()
+  WHERE o.job_id=p_job_id AND o.source_party_key='primary' AND (o.share_percentage IS NULL OR o.share_percentage=100)
+   AND o.share_percentage IS DISTINCT FROM CASE WHEN no_neighbours THEN 100 END
    AND NOT EXISTS (SELECT 1 FROM public.job_party_events e WHERE e.job_contact_id=o.id AND e.detail ? 'share_from_portions')
-  RETURNING o.id INTO owner_unknown;
-  IF owner_unknown IS NOT NULL THEN detail:=detail||jsonb_build_object('owner_share_unknown',owner_unknown); END IF;
+  RETURNING o.id,o.share_percentage INTO owner_id,owner_share;
+  IF owner_id IS NOT NULL THEN detail:=detail||jsonb_build_object('owner_share',jsonb_build_object('job_contact_id',owner_id,'share_percentage',owner_share)); END IF;
  END IF;
  IF jsonb_array_length(corrections)>0 THEN detail:=detail||jsonb_build_object('identity_correction',corrections); END IF;
  IF jsonb_array_length(divergence)>0 THEN detail:=detail||jsonb_build_object('owner_id_divergence',divergence); END IF;
