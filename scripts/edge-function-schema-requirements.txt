@@ -375,6 +375,18 @@ ghl-history-load|supabase/migrations/20260925031500_context_ghl_history_load.sql
 ghl-history-load|supabase/migrations/20260925031500_context_ghl_history_load.sql|table|context_ghl_contact_links
 ghl-history-load|supabase/migrations/20260924133000_context_ghl_message_reconcile.sql|function|context_ghl_item_flag
 ghl-history-load|supabase/migrations/20260924020000_context_status_foundation.sql|function|record_capture_run
+# T2: the call transcript fetcher selects due calls, records each try through
+# its one writer, reads the history-load contacts and the policy, records runs,
+# and saves transcripts and history call rows through the one evidence writer.
+ghl-call-transcript-fetch|supabase/migrations/20260925031000_context_transcript_fetch.sql|table|call_transcript_fetches
+ghl-call-transcript-fetch|supabase/migrations/20260925031000_context_transcript_fetch.sql|function|record_call_transcript_fetch
+ghl-call-transcript-fetch|supabase/migrations/20260925031000_context_transcript_fetch.sql|function|context_transcript_due_calls
+ghl-call-transcript-fetch|supabase/migrations/20260925031000_context_transcript_fetch.sql|function|context_transcript_backfill_contacts
+ghl-call-transcript-fetch|supabase/migrations/20260925031000_context_transcript_fetch.sql|function|context_transcript_capture_policy
+ghl-call-transcript-fetch|supabase/migrations/20260924020000_context_status_foundation.sql|table|context_capture_runs
+ghl-call-transcript-fetch|supabase/migrations/20260924020000_context_status_foundation.sql|function|record_capture_run
+ghl-call-transcript-fetch|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
+ghl-call-transcript-fetch|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 transcribe-call|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 send-quote|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 monitor-ses-makesafes|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled

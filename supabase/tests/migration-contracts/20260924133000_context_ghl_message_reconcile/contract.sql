@@ -45,8 +45,9 @@ BEGIN
   OR NOT (SELECT prosecdef FROM pg_proc WHERE oid='public.trigger_ghl_message_reconcile()'::regprocedure)
  THEN RAISE EXCEPTION 'c1d status and cron caller must be SECURITY DEFINER'; END IF;
  -- The capture lane owns the job; the other two jobs are unchanged.
- IF (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
-    IS DISTINCT FROM ARRAY['contact-matching:attribution','ghl-message-reconcile:capture','monitor-inbox-poll:capture']
+ -- Containment, not equality: a later capture slice (T2) adds its own job.
+ IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
+    @> ARRAY['contact-matching:attribution','ghl-message-reconcile:capture','monitor-inbox-poll:capture']
  THEN RAISE EXCEPTION 'c1d cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;
@@ -221,6 +222,12 @@ FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure \gset
 -- The later retry-status migration owns a newer version of this status block.
 -- Restore C1d before checking its re-apply, then put the follow-up back in order.
 \ir ../../../rollbacks/20260924210000_context_ghl_retry_status_down.sql
+-- Likewise T2 (20260925031000) adds its own job to the lane list C1d pins.
+SELECT md5(prosrc)<>'459035de5d3f7f7af49c36f09d9be29e' AS c1d_lanes_moved
+FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure \gset
+\if :c1d_lanes_moved
+\ir ../20260925031000_context_transcript_fetch/c1d_cron_lanes.sql
+\endif
 \ir ../../../migrations/20260924133000_context_ghl_message_reconcile.sql
 \ir ../../../migrations/20260924133000_context_ghl_message_reconcile.sql
 \ir ../../../migrations/20260924210000_context_ghl_retry_status.sql

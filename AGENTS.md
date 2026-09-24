@@ -3723,6 +3723,23 @@ The database policy, atomic daily reservation and link/reversal guards belong to
 `20260925031500_context_ghl_history_load.sql`; its behavioural contract is in
 `supabase/tests/migration-contracts/20260925031500_context_ghl_history_load/`.
 
+A call's transcript has ONE writer, `ghl-call-transcript-fetch` (slice T2):
+row `call.transcript_completed`, source `ghl-call-transcript`, key
+`ghltx:<the call's GHL message id>`, `payload.ghl_call_id` pairing it to its
+call, words stored once in `payload.transcript` (`body_preview` its first 500
+characters, `safe_summary` never words), `speaker_roles: "not_given"` always.
+GHL's transcript answer is read only through `_shared/ghl/call_transcript.ts`
+(ghl-proxy uses it too; `mediaChannel` and `speaker` optional). The backoff
+and terminal outcomes live in the SQL writer `record_call_transcript_fetch`,
+never in TypeScript. Flag `ghl_call_transcript_fetch_v1` gates the live run
+and any real history load (`mode: backfill`, dry run unless `dry_run: false`,
+capture mode always `backfill`). Measured 24 Sep 2026: GHL sometimes leaves
+`meta.call.duration` empty on an answered call that has a transcript, so
+"completed with no duration" is eligible; a no-answer call's transcription
+answers HTTP 400; the list read names our line by number but the single-item
+read says "SecureWorks WA" for inbound calls. Tests: `fetch_test.ts`,
+`call_transcript_test.ts`, migration contract `20260925031000_context_transcript_fetch`.
+
 ## A pg_cron Bearer Is Not The Function's Service Key
 
 pg_cron triggers call edge functions with `Bearer <sw_service_key()>`, a
