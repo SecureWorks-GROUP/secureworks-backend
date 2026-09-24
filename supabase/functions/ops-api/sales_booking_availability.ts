@@ -143,6 +143,7 @@ interface Busy {
   location: string | null;
   contact_id: string | null;
   event_id?: string | null;
+  offer_source?: SystemOfferCensus["offers"][number]["source"];
   /** Protected bands already carry their fixed travel buffer. */
   travel_exempt: boolean;
 }
@@ -509,6 +510,7 @@ export function computeSalesBookingAvailability(
       start: bookingInstant(o.start_iso),
       end: bookingInstant(o.end_iso),
       source: "offer" as const,
+      offer_source: o.source,
       label: null,
       location: suburbByContact.get(o.contact_id) ?? null,
       contact_id: o.contact_id,
@@ -587,7 +589,6 @@ export function computeSalesBookingAvailability(
       _dayStart: dayStart,
       _dayEnd: dayEnd,
       _ghlCount: ghlCount,
-      _offeredContactIds: [...offeredContacts],
     };
   });
 
@@ -600,9 +601,13 @@ export function computeSalesBookingAvailability(
         known: salesBookingSuburbPoint(row.suburb) !== null,
       },
       days: days.map((d) => {
-        const caseCount = d._ghlCount + d._offeredContactIds.filter((id) =>
-          id !== row.contact_id
-        ).length;
+        const caseBusy = d._busy.filter((b) =>
+          !(b.contact_id === row.contact_id &&
+            b.source === "offer" && b.offer_source === "system_text")
+        );
+        const caseCount = d._ghlCount + new Set(
+          caseBusy.filter((b) => b.source === "offer").map((b) => b.contact_id),
+        ).size;
         const caseDayState = d.state === "past"
           ? "past"
           : caseCount >= d.max_per_day
@@ -612,7 +617,7 @@ export function computeSalesBookingAvailability(
             caseDayState === "full"
           ? { windows: [], travel_unknown: false }
           : arrivalWindowsWithTravelStatus(
-            d._busy.filter((b) => b.contact_id !== row.contact_id),
+            caseBusy,
             d._dayStart,
             d._dayEnd,
             now,
@@ -682,7 +687,6 @@ export function computeSalesBookingAvailability(
         _dayStart,
         _dayEnd,
         _ghlCount,
-        _offeredContactIds,
         ...d
       }) => d),
     },

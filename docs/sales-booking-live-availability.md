@@ -52,7 +52,8 @@ After the pack overlay, for the person on screen:
 
 Each case carries `free_times` (null when the Outlook diary dropped malformed
 events or the required offer census is unreadable): `location:{suburb, known}` and per day the `arrival_windows` for a visit
-to that lead's suburb, excluding that lead's own offers.
+to that lead's suburb, excluding only that lead's own sent-text offers. Live owner-approval holds
+remain busy and count toward that case's daily capacity.
 
 ### Named reasons
 

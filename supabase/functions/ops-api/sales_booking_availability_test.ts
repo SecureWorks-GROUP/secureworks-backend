@@ -703,3 +703,41 @@ Deno.test("tied neighbors require every location and the largest travel gap", ()
     }
   }
 });
+
+Deno.test("own owner approvals remain busy and count toward case capacity", () => {
+  for (const count of [0, 5]) {
+    for (const source of ["owner_approval", "system_text"] as const) {
+      const result = computeSalesBookingAvailability(input({
+        events: ok(Array.from({ length: count }, (_, i) => ({
+          id: String(i),
+          startTime: "2026-10-02T07:00:00+08:00",
+          endTime: "2026-10-02T07:30:00+08:00",
+          address: "Hillarys",
+        }))),
+        census: ok({
+          offers: [{
+            contact_id: "c-a", source, binding_hash: "own-hold",
+            start_iso: "2026-10-02T09:00:00+08:00",
+            end_iso: "2026-10-02T10:30:00+08:00",
+          }],
+          booked: {}, unverified_texts: [], unsettled_messages: [],
+        }),
+      }));
+      const day = result.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02");
+      if (source === "system_text") {
+        assertEquals(day.state, "open");
+        assert(day.arrival_windows.some((w: { from_iso: string }) => w.from_iso === "2026-10-02T09:30:00+08:00"));
+      } else if (count === 5) {
+        assertEquals(day.state, "full");
+        assertEquals(day.arrival_windows, []);
+      } else {
+        assertEquals(day.state, "open");
+        assert(day.arrival_windows.length > 0);
+        for (const w of day.arrival_windows) {
+          assert(Date.parse(w.end_iso) <= Date.parse("2026-10-02T09:00:00+08:00") ||
+            Date.parse(w.from_iso) >= Date.parse("2026-10-02T10:30:00+08:00"));
+        }
+      }
+    }
+  }
+});
