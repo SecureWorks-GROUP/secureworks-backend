@@ -1,21 +1,29 @@
--- One-time catch-up read of named live jobs (captain, 24 Sep 2026).
+-- One-time catch-up read of live jobs (captain, 24 Sep 2026).
 --
 -- K1 (20260924030000) reads a job only when evidence lands at or after
--- live_since, so evidence captured before go-live sits unread for good. This
--- migration lets a named list of jobs become due ONCE through the normal K2
+-- live_since, so evidence captured before go-live is never read again. This
+-- migration gives each listed job one fresh full read through the normal K2
 -- tick, caps and leases, without moving live_since:
 --
 --   context_catchup_jobs      the list: one row per job, priority 1 or 2,
 --                             requested_at, done_at, done_run_id.
+--   context_catchup_reads     which rows a catch-up read has covered, per
+--                             job; recorded from the receipts a done run
+--                             writes (a BEFORE INSERT trigger, so a row that
+--                             already had a receipt is recorded too).
+--   context_catchup_pending_rows  a listed, not-yet-done job's rows still to
+--                             read: every placed, worded, service-role row on
+--                             the job that no catch-up read has covered,
+--                             earlier receipts or not.
 --   context_catchup_request   the one writer of the list (service role),
 --                             chosen over a migration seed so the set is
 --                             measured at the moment it runs: live jobs with
 --                             readable evidence and no done read since
 --                             live_since, priority 1 when something is
 --                             unread. Dry run by default: counts by priority
---                             and group plus the job list, nothing written.
+--                             plus the job list, nothing written.
 --   context_jobs_cadence      one added rule: a listed, not-yet-done job with
---                             any unread evidence is due now (requested_at),
+--                             pending rows is due from its request time,
 --                             unless it has live waking evidence, which keeps
 --                             K1's quiet and ceiling times. Cooldown, retry,
 --                             the daily run limit, pacing (300 before 12:00)
@@ -24,19 +32,22 @@
 --   context_extraction_candidates  jobs due on live evidence keep K1's order
 --                             and come first; jobs due only by catch-up follow,
 --                             priority 1 before 2. Same signature and cap.
---   context_catchup_mark_done a trigger on context_extraction_runs: the first
---                             extraction run of a listed job to finish done
---                             marks it done, so it is never due by catch-up
---                             again.
+--   context_extraction_events for a listed, not-yet-done job the batch is
+--                             drawn from its pending rows instead of its unread
+--                             rows; same 25-row batch, order and exact rows.
+--   context_extraction_event_flags  a pending catch-up row is not flagged
+--                             older_context, so the read is a fresh one.
+--   context_catchup_mark_done a trigger on context_extraction_runs: a run that
+--                             finishes done and leaves the job with no pending
+--                             rows marks it done. A job with more rows than one
+--                             batch takes further runs under the same caps.
 --   context_cadence_status    a catchup block (requested, done, remaining,
 --                             oldest requested), and a job due only by
 --                             catch-up never raises cadence_breach (a backlog
 --                             waiting its turn is not a stalled worker).
 --
 -- Unchanged: context_cadence_policy() (live_since included), the claim, the
--- batch read, receipts, the tick lease, and every cap number.
--- A catch-up run reads at most one batch (25 rows, newest first); rows past
--- the batch stay unread until live evidence wakes the job.
+-- finish, receipts, the tick lease, and every cap number.
 -- Immediate stop needs no rollback: switch the extraction lane off, or mark the
 -- remaining rows done. Rollback: supabase/rollbacks/20260924220000_context_catchup_jobs_down.sql.
 SET LOCAL lock_timeout = '5s';
@@ -44,20 +55,25 @@ SET LOCAL statement_timeout = '120s';
 
 -- 0. Pre-image guard. Each replaced function must be K1's body or this
 -- migration's (re-apply). Read from production on 24 Sep 2026 (read-only): all
--- four live md5(prosrc) values equal K1's below, context_catchup_jobs did not
--- exist, and the newest ledger version at or after 20260924200000 was
--- 20260924201000. Each new name must be absent or already this
+-- four cadence functions' live md5(prosrc) values equal K1's below,
+-- context_catchup_jobs did not exist, and the newest ledger version at or
+-- after 20260924200000 was 20260924201000. The batch and flags reads are
+-- pinned to K1's bodies. Each new name must be absent or already this
 -- migration's.
 DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_jobs_cadence(uuid[])',ARRAY['71db787a8a80b5519b5a5c9b8d915d5c','6bce520e98aaa347c930a833e71b9c82'],false),
+  ('public.context_jobs_cadence(uuid[])',ARRAY['71db787a8a80b5519b5a5c9b8d915d5c','184bfbf98717e2a85cfaed282bcca9a6'],false),
   ('public.context_cadence_pool()',ARRAY['6943c7ed49e09cddc23a517255805fba','5cb50d8d47eb917acb2406ae3f0d9369'],false),
   ('public.context_extraction_candidates(integer)',ARRAY['0257dc0ea9c35a249b3b8adcb99a18d4','fc0f681d15d59c80a8ee41b45d0486cc'],false),
-  ('public.context_cadence_status()',ARRAY['04a99b46fbdf6b6ac830602da6a92c3d','241c4dc026b223497875b9dfe6c54f54'],false),
-  ('public.context_catchup_request(boolean)',ARRAY['5e5f9a1d8318c78d247c36ad42805345'],true),
-  ('public.context_catchup_mark_done()',ARRAY['04b36af3941f02fa2038acf43e981288'],true)
+  ('public.context_cadence_status()',ARRAY['04a99b46fbdf6b6ac830602da6a92c3d','552d7971757d43624ec3667e3dc1fb99'],false),
+  ('public.context_extraction_events(uuid,integer)',ARRAY['b808f4b6fb24515a337c149a6353edf8','68f6da2aac47cae91aa62a0420402d74'],false),
+  ('public.context_extraction_event_flags(uuid,uuid[])',ARRAY['c384d748eca9b3b94ba6e54b26b781e5','5aedb3e5a7aa3286145079032e8e22f8'],false),
+  ('public.context_catchup_request(boolean)',ARRAY['00e528957da6f35f40b478db61dddaca'],true),
+  ('public.context_catchup_pending_rows(uuid[])',ARRAY['a0e09f635eff10a48fa51b40aef5bafd'],true),
+  ('public.context_catchup_record_read()',ARRAY['5420a6486bee3e03501200008aca6053'],true),
+  ('public.context_catchup_mark_done()',ARRAY['f52e823ab347b0983bb561bcb951514d'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
@@ -67,6 +83,9 @@ BEGIN
  IF to_regclass('public.context_catchup_jobs') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pg_description d
    WHERE d.objoid=to_regclass('public.context_catchup_jobs') AND d.classoid='pg_class'::regclass AND d.objsubid=0 AND d.description LIKE 'Catch-up:%')
  THEN problems:=problems||'public.context_catchup_jobs already exists and is not this migration''s'::text; END IF;
+ IF to_regclass('public.context_catchup_reads') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pg_description d
+   WHERE d.objoid=to_regclass('public.context_catchup_reads') AND d.classoid='pg_class'::regclass AND d.objsubid=0 AND d.description LIKE 'Catch-up:%')
+ THEN problems:=problems||'public.context_catchup_reads already exists and is not this migration''s'::text; END IF;
  IF cardinality(problems)>0 THEN
   RAISE EXCEPTION 'context_catchup_preimage_mismatch: %; read the live definitions before replacing them',array_to_string(problems,'; ');
  END IF;
@@ -83,10 +102,54 @@ CREATE TABLE IF NOT EXISTS public.context_catchup_jobs (
  CHECK ((done_at IS NULL)=(done_run_id IS NULL))
 );
 COMMENT ON TABLE public.context_catchup_jobs IS
- 'Catch-up: jobs to read once regardless of live_since (20260924220000). Written by context_catchup_request; done_at is set by the first extraction run to finish done. Service role only.';
+ 'Catch-up: jobs to give one fresh full read regardless of live_since (20260924220000). Written by context_catchup_request; done_at is set by the first done extraction run that leaves the job with no pending rows. Service role only.';
 ALTER TABLE public.context_catchup_jobs ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.context_catchup_jobs FROM PUBLIC,anon,authenticated;
 GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE public.context_catchup_jobs TO service_role;
+
+CREATE TABLE IF NOT EXISTS public.context_catchup_reads (
+ job_id uuid NOT NULL REFERENCES public.jobs(id) ON DELETE CASCADE,
+ event_id uuid NOT NULL REFERENCES public.business_events(id) ON DELETE CASCADE,
+ run_id uuid NOT NULL,
+ read_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY (job_id,event_id)
+);
+COMMENT ON TABLE public.context_catchup_reads IS
+ 'Catch-up: rows a catch-up read has covered, per job (20260924220000). Written only by the context_catchup_record_read trigger on context_extraction_event_receipts. Service role only.';
+ALTER TABLE public.context_catchup_reads ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.context_catchup_reads FROM PUBLIC,anon,authenticated;
+GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE public.context_catchup_reads TO service_role;
+
+-- The rows a listed, not-yet-done job still has to read: the unread
+-- definition (context_unread_rows) without its receipt clause, with the
+-- catch-up read record in its place.
+CREATE OR REPLACE FUNCTION public.context_catchup_pending_rows(p_job_ids uuid[]) RETURNS SETOF public.business_events
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ SELECT e.* FROM public.business_events e
+ JOIN public.context_catchup_jobs c ON c.job_id=e.job_id AND c.done_at IS NULL
+ WHERE e.job_id=ANY(p_job_ids)
+  AND public.context_linked_status(e.attribution_status)
+  AND e.context_captured_at IS NOT NULL
+  AND coalesce(e.metadata->>'written_as','service_role')='service_role'
+  AND btrim(public.context_event_text(e))<>''
+  AND NOT EXISTS(SELECT 1 FROM public.context_catchup_reads r WHERE r.job_id=e.job_id AND r.event_id=e.id)
+$$;
+COMMENT ON FUNCTION public.context_catchup_pending_rows(uuid[]) IS
+ 'Catch-up: rows on listed, not-yet-done jobs that no catch-up read has covered, earlier receipts or not. Service role only.';
+
+-- A done run's receipts record the rows it read. BEFORE INSERT, so a row whose
+-- receipt already exists (ON CONFLICT DO NOTHING in the finish) is recorded too.
+CREATE OR REPLACE FUNCTION public.context_catchup_record_read() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM public.context_catchup_jobs c WHERE c.job_id=NEW.job_id AND c.done_at IS NULL) THEN
+  INSERT INTO public.context_catchup_reads(job_id,event_id,run_id) VALUES(NEW.job_id,NEW.event_id,NEW.run_id) ON CONFLICT DO NOTHING;
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS context_catchup_record_read ON public.context_extraction_event_receipts;
+CREATE TRIGGER context_catchup_record_read BEFORE INSERT ON public.context_extraction_event_receipts
+ FOR EACH ROW EXECUTE FUNCTION public.context_catchup_record_read();
 
 -- 2. The writer. The list is defined by rule, never by a typed job list:
 --   live      status accepted, scheduled or in_progress (make-safe included),
@@ -96,8 +159,7 @@ GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE public.context_catchup_jobs TO servic
 --             row the extraction read could see);
 --   stale     no extraction run finished done at or after live_since.
 -- Priority 1: something still unread (context_unread_rows, the one unread
--- definition). Priority 2: the rest. Group: makesafe (jobs.type makesafe),
--- quote (status quoted), active (the rest).
+-- definition). Priority 2: the rest.
 -- p_dry_run (default true) returns the counts and the job list without
 -- writing. A real run adds new jobs, raises a pending job from 2 to 1 when it
 -- now has unread evidence, never lowers a priority, and leaves done jobs done
@@ -109,8 +171,7 @@ DECLARE live_from timestamptz:=(public.context_cadence_policy()->>'live_since'):
 BEGIN
  PERFORM pg_advisory_xact_lock(20260924,22);
  WITH live AS (
-  SELECT j.id, j.job_number, public.context_job_extractable(j) AS extractable,
-   CASE WHEN j.type='makesafe' THEN 'makesafe' WHEN j.status='quoted' THEN 'quote' ELSE 'active' END AS grp
+  SELECT j.id, j.job_number, public.context_job_extractable(j) AS extractable
   FROM public.jobs j
   WHERE j.status IN ('accepted','scheduled','in_progress') OR (j.status='quoted' AND j.quoted_at>=now()-interval '60 days')
  ), facts AS (
@@ -125,8 +186,8 @@ BEGIN
    f.extractable AND f.has_evidence AND (f.last_read IS NULL OR f.last_read<live_from) AS pick
   FROM facts f
  )
- SELECT coalesce(jsonb_agg(jsonb_build_object('job_id',g.id,'job_number',g.job_number,'priority',g.priority,'group',g.grp,'last_read_at',g.last_read)
-   ORDER BY g.priority,g.grp,g.job_number) FILTER (WHERE g.pick),'[]'::jsonb),
+ SELECT coalesce(jsonb_agg(jsonb_build_object('job_id',g.id,'job_number',g.job_number,'priority',g.priority,'last_read_at',g.last_read)
+   ORDER BY g.priority,g.job_number) FILTER (WHERE g.pick),'[]'::jsonb),
   jsonb_build_object('live_jobs',count(*),'holding_job',count(*) FILTER (WHERE NOT g.extractable),
    'no_evidence',count(*) FILTER (WHERE g.extractable AND NOT g.has_evidence),
    'read_since_live',count(*) FILTER (WHERE g.extractable AND g.has_evidence AND g.last_read>=live_from))
@@ -148,22 +209,22 @@ BEGIN
   'candidates',jsonb_array_length(picked),
   'by_priority',jsonb_build_object('1',(SELECT count(*) FROM jsonb_array_elements(picked) x WHERE (x->>'priority')::int=1),
    '2',(SELECT count(*) FROM jsonb_array_elements(picked) x WHERE (x->>'priority')::int=2)),
-  'by_group',(SELECT coalesce(jsonb_object_agg(grp,n),'{}'::jsonb) FROM (SELECT grp, jsonb_build_object('total',count(*),
-    '1',count(*) FILTER (WHERE pr=1),'2',count(*) FILTER (WHERE pr=2)) AS n
-   FROM (SELECT x->>'group' AS grp, (x->>'priority')::int AS pr FROM jsonb_array_elements(picked) x) y GROUP BY grp) z),
   'excluded',excluded,'jobs',picked,
   'written',CASE WHEN coalesce(p_dry_run,true) THEN NULL ELSE jsonb_build_object('added',added,'priority_raised',raised,'already_listed',kept,'already_done',done) END);
 END $$;
 COMMENT ON FUNCTION public.context_catchup_request(boolean) IS
- 'Catch-up: pick live jobs with readable evidence and no done extraction run since live_since; priority 1 when something is unread, else 2. Dry run (the default) returns counts by priority and group plus the job list without writing; false writes the list. Service role only.';
+ 'Catch-up: pick live jobs with readable evidence and no done extraction run since live_since; priority 1 when something is unread, else 2. Dry run (the default) returns counts by priority plus the job list without writing; false writes the list. Service role only.';
 
--- 3. Done marker: the first extraction run of a listed job to finish done.
+-- 3. Done marker: a run that finishes done and leaves the job with nothing
+-- pending. Its receipts (and so its catch-up reads) are written before the
+-- run's status changes, inside the same finish call.
 CREATE OR REPLACE FUNCTION public.context_catchup_mark_done() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 BEGIN
  IF NEW.phase='extraction' AND NEW.status='done' AND NEW.job_id IS NOT NULL
   AND (TG_OP='INSERT' OR OLD.status IS DISTINCT FROM 'done') THEN
-  UPDATE public.context_catchup_jobs SET done_at=now(),done_run_id=NEW.id WHERE job_id=NEW.job_id AND done_at IS NULL;
+  UPDATE public.context_catchup_jobs SET done_at=now(),done_run_id=NEW.id WHERE job_id=NEW.job_id AND done_at IS NULL
+   AND NOT EXISTS(SELECT 1 FROM public.context_catchup_pending_rows(ARRAY[NEW.job_id]));
  END IF;
  RETURN NULL;
 END $$;
@@ -202,6 +263,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
    (array_agg(u.id ORDER BY u.landed DESC NULLS LAST, u.id DESC) FILTER (WHERE u.live AND NOT u.so))[1] AS newest_wake_id,
    count(*) FILTER (WHERE u.live AND u.so) AS so_n, min(u.landed) FILTER (WHERE u.live AND u.so) AS oldest_so
   FROM u GROUP BY u.job_id
+ ), cp AS (
+  -- catch-up: rows still to read on a listed, not-yet-done job.
+  SELECT x.job_id, count(*)::integer AS pending_n FROM public.context_catchup_pending_rows(p_job_ids) x GROUP BY x.job_id
  ), runs AS (
   SELECT r.job_id, count(*) FILTER (WHERE r.run_date=k.today) AS runs_today, max(r.started_at) AS last_started,
    max(r.finished_at) FILTER (WHERE r.status='done') AS last_finished,
@@ -216,9 +280,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
    coalesce((SELECT b.direction='inbound' AND NOT public.context_event_is_ours(b) FROM public.business_events b WHERE b.id=ev.newest_wake_id),false) AS customer,
    coalesce(runs.runs_today,0)::integer AS runs_today, runs.last_started, runs.last_finished, coalesce(runs.run_live,false) AS run_live,
    runs.retry_until, coalesce(runs.ran_evening,false) AS ran_evening,
-   -- catch-up: listed, not done, and something unread to read.
-   CASE WHEN coalesce(ev.unread_n,0)>0 THEN j.catchup_priority END AS catchup_priority, j.catchup_requested_at
-  FROM j CROSS JOIN k LEFT JOIN ev ON ev.job_id=j.id LEFT JOIN runs ON runs.job_id=j.id
+   -- catch-up: listed, not done, and rows still to read.
+   CASE WHEN coalesce(cp.pending_n,0)>0 THEN j.catchup_priority END AS catchup_priority, j.catchup_requested_at,
+   coalesce(cp.pending_n,0) AS catchup_pending_n
+  FROM j CROSS JOIN k LEFT JOIN ev ON ev.job_id=j.id LEFT JOIN runs ON runs.job_id=j.id LEFT JOIN cp ON cp.job_id=j.id
  ), limits AS (
   SELECT b.*,
    b.local_now::time<(b.p->>'morning_until')::time AND b.calls>=(b.p->>'morning_cap')::integer AS pacing,
@@ -252,11 +317,11 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
   'last_run_started_at',g.last_started,'last_run_finished_at',g.last_finished,
   'model_calls_today',g.calls,'pacing_held',g.pacing,'model_cap_reached',g.capped,
   -- catch-up: catchup_only is true when the catch-up rule, not live evidence, sets the due time.
-  'catchup_priority',g.catchup_priority,'catchup_only',(g.catchup_priority IS NOT NULL AND g.wake_n=0))
+  'catchup_priority',g.catchup_priority,'catchup_only',(g.catchup_priority IS NOT NULL AND g.wake_n=0),'catchup_pending_count',g.catchup_pending_n)
  FROM judged g
 $$;
 COMMENT ON FUNCTION public.context_jobs_cadence(uuid[]) IS
- 'K1: the one cadence judgement (cadence.md 5.1) for a set of jobs: due, blocked_reason, next_due_at and the facts behind them. Read by the claim, candidates, freshness and status. Catch-up (20260924220000): a listed, not-yet-done job with unread evidence is due from its request time.';
+ 'K1: the one cadence judgement (cadence.md 5.1) for a set of jobs: due, blocked_reason, next_due_at and the facts behind them. Read by the claim, candidates, freshness and status. Catch-up (20260924220000): a listed, not-yet-done job with pending rows is due from its request time.';
 
 -- 5. The pool: K1's live_since pool plus listed jobs not yet done.
 CREATE OR REPLACE FUNCTION public.context_cadence_pool() RETURNS SETOF uuid
@@ -281,6 +346,56 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  ORDER BY CASE WHEN (j.c->>'catchup_only')::boolean THEN (j.c->>'catchup_priority')::integer ELSE 0 END,
   (j.c->>'runs_today')::integer, (j.c->>'order_at')::timestamptz NULLS LAST, (j.c->>'oldest_unread_landed_at')::timestamptz NULLS LAST, j.job_id
  LIMIT greatest(0,least(coalesce(p_limit,400),400))
+$$;
+
+-- 6a. The batch: K1's read, with a listed, not-yet-done job's rows drawn from
+-- its pending catch-up rows (earlier receipts or not) instead of its unread
+-- rows. Same order, same 25-row cap, exact business_events rows.
+CREATE OR REPLACE FUNCTION public.context_extraction_events(p_job_id uuid,p_limit integer DEFAULT 25) RETURNS SETOF public.business_events
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ WITH admitted AS (
+  SELECT public.automation_lane_enabled('extraction')
+   AND EXISTS(SELECT 1 FROM public.jobs j WHERE j.id=p_job_id AND public.context_job_extractable(j)) AS ok,
+   EXISTS(SELECT 1 FROM public.context_catchup_jobs c WHERE c.job_id=p_job_id AND c.done_at IS NULL) AS catchup
+ ), unread AS MATERIALIZED (
+  SELECT u.* FROM public.context_unread_rows(ARRAY[p_job_id]) u WHERE (SELECT ok AND NOT catchup FROM admitted)
+  UNION ALL
+  -- catch-up: the job's pending rows.
+  SELECT c.* FROM public.context_catchup_pending_rows(ARRAY[p_job_id]) c WHERE (SELECT ok AND catchup FROM admitted)
+ ), anchor AS (
+  SELECT e.id FROM unread u JOIN public.business_events e ON e.id=u.id
+  WHERE NOT public.context_event_is_ours(e)
+  ORDER BY greatest(e.context_captured_at,e.attributed_at) DESC NULLS LAST, e.id DESC LIMIT 1
+ ), live_key AS (
+  SELECT (pol.p->>'live_since')::timestamptz AS live_since, j.created_at
+  FROM (SELECT public.context_cadence_policy() AS p) pol
+  JOIN public.jobs j ON j.id=p_job_id
+ ), picked AS (
+  SELECT u.* FROM unread u CROSS JOIN live_key k
+  ORDER BY (u.id IN (SELECT id FROM anchor)) DESC,
+   (u.context_captured_at>=k.live_since AND coalesce(u.metadata->>'capture_mode','live')='live' AND u.metadata->>'written_as'='service_role'
+    AND NOT (coalesce(u.attribution_step,0) IN (3,4) AND coalesce(u.event_at,u.occurred_at)<k.created_at)
+    AND NOT public.context_event_status_only(u)) DESC,
+   greatest(u.context_captured_at,u.attributed_at) DESC NULLS LAST, u.id DESC
+  LIMIT greatest(0,least(coalesce(p_limit,25),25))
+ ) SELECT * FROM picked ORDER BY coalesce(event_at,occurred_at), id
+$$;
+
+-- 6b. Flags: K1's, except that a pending catch-up row is never older_context
+-- (the catch-up is a fresh read of rows read before go-live).
+CREATE OR REPLACE FUNCTION public.context_extraction_event_flags(p_job_id uuid,p_event_ids uuid[])
+RETURNS TABLE(event_id uuid, ours boolean, older_context boolean)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ WITH pol AS (SELECT public.context_cadence_policy() AS p),
+ last_read AS (SELECT max(r.started_at) AS at FROM public.context_extraction_runs r
+  WHERE r.job_id=p_job_id AND r.phase='extraction' AND r.status='done'),
+ pending AS (SELECT c.id FROM public.context_catchup_pending_rows(ARRAY[p_job_id]) c)
+ SELECT e.id, public.context_event_is_ours(e),
+  coalesce(e.id NOT IN (SELECT id FROM pending) AND (coalesce(e.event_at,e.occurred_at)<now()-make_interval(days=>(pol.p->>'age_window_days')::integer)
+   OR coalesce(e.event_at,e.occurred_at)<(SELECT at FROM last_read)),false)
+ FROM public.business_events e, pol
+ WHERE p_job_id IS NOT NULL AND e.job_id=p_job_id AND e.id=ANY(coalesce(p_event_ids,'{}'::uuid[]))
+ ORDER BY coalesce(e.event_at,e.occurred_at), e.id
 $$;
 
 -- 7. The cadence status block: K1's block plus catchup; a job due only by
@@ -310,14 +425,14 @@ BEGIN
  SELECT count(*) INTO not_service FROM public.business_events
   WHERE context_captured_at>now_t-interval '24 hours' AND metadata ? 'written_as' AND metadata->>'written_as'<>'service_role';
  SELECT count(*), min(coalesce(event_at,occurred_at)) INTO unplaced_n, oldest_unplaced FROM public.business_events WHERE attribution_status='unplaced';
- -- catch-up: remaining = not done; of those, due now, and nothing unread (a
- -- read would find nothing, so the job stays remaining until evidence lands).
+ -- catch-up: remaining = not done; of those, due now, and nothing to read (no
+ -- placed worded rows, so the job stays remaining until evidence lands).
  SELECT jsonb_build_object('requested',count(*),'done',count(*) FILTER (WHERE cj.done_at IS NOT NULL),
   'remaining',count(*) FILTER (WHERE cj.done_at IS NULL),
   'remaining_priority_1',count(*) FILTER (WHERE cj.done_at IS NULL AND cj.priority=1),
   'remaining_priority_2',count(*) FILTER (WHERE cj.done_at IS NULL AND cj.priority=2),
   'due_now',count(*) FILTER (WHERE cj.done_at IS NULL AND (jc.c->>'due')::boolean),
-  'remaining_nothing_unread',count(*) FILTER (WHERE cj.done_at IS NULL AND coalesce((jc.c->>'unread_count')::integer,0)=0),
+  'remaining_nothing_to_read',count(*) FILTER (WHERE cj.done_at IS NULL AND coalesce((jc.c->>'catchup_pending_count')::integer,0)=0),
   'oldest_requested_at',min(cj.requested_at) FILTER (WHERE cj.done_at IS NULL),
   'last_done_at',max(cj.done_at))
  INTO catchup
@@ -342,9 +457,11 @@ COMMENT ON FUNCTION public.context_cadence_status() IS
  'Status block cadence, owned by cadence slice K1 (cadence.md 9.A item 9). Due and waiting jobs from context_job_cadence, runs today, ceiling and pacing holds, lease takeovers, unplaced rows, rows not written as service_role, the cadence_breach alarm (jobs due only by catch-up excluded), and the catch-up progress block (20260924220000).';
 
 -- 8. Grants: service role only.
-REVOKE ALL ON FUNCTION public.context_catchup_request(boolean),public.context_catchup_mark_done(),
+REVOKE ALL ON FUNCTION public.context_catchup_request(boolean),public.context_catchup_mark_done(),public.context_catchup_record_read(),
+ public.context_catchup_pending_rows(uuid[]),public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[]),
  public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status()
 FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_catchup_request(boolean),
+ public.context_catchup_pending_rows(uuid[]),public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[]),
  public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status()
 TO service_role;

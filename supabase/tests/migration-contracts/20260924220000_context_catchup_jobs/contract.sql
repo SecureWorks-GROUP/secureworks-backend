@@ -57,25 +57,31 @@ CREATE FUNCTION pg_temp.cu_pool(p_job uuid) RETURNS boolean LANGUAGE sql AS $$
  SELECT EXISTS(SELECT 1 FROM public.context_cadence_pool() p WHERE p=p_job) $$;
 CREATE FUNCTION pg_temp.cu_today() RETURNS date LANGUAGE sql AS $$ SELECT (now() AT TIME ZONE 'Australia/Perth')::date $$;
 
--- 1. Grants and shape: the list and every new or replaced function are
+-- 1. Grants and shape: the list, the read record and every new or replaced function are
 -- service role only with a fixed search_path; the table has row security.
 DO $$
-DECLARE f regprocedure;
+DECLARE f regprocedure; t regclass;
 BEGIN
- FOREACH f IN ARRAY ARRAY['public.context_catchup_request(boolean)','public.context_jobs_cadence(uuid[])','public.context_cadence_pool()',
-  'public.context_extraction_candidates(integer)','public.context_cadence_status()']::regprocedure[] LOOP
+ FOREACH f IN ARRAY ARRAY['public.context_catchup_request(boolean)','public.context_catchup_pending_rows(uuid[])','public.context_jobs_cadence(uuid[])','public.context_cadence_pool()',
+  'public.context_extraction_candidates(integer)','public.context_extraction_events(uuid,integer)','public.context_extraction_event_flags(uuid,uuid[])',
+  'public.context_cadence_status()']::regprocedure[] LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') OR NOT has_function_privilege('service_role',f,'EXECUTE')
   THEN RAISE EXCEPTION 'catch-up grants on %',f; END IF;
   IF (SELECT proconfig FROM pg_proc WHERE oid=f) IS NULL THEN RAISE EXCEPTION 'catch-up function without fixed search_path %',f; END IF;
  END LOOP;
- IF has_function_privilege('anon','public.context_catchup_mark_done()','EXECUTE') OR has_function_privilege('authenticated','public.context_catchup_mark_done()','EXECUTE')
- THEN RAISE EXCEPTION 'catch-up trigger function executable by the public roles'; END IF;
- IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid='public.context_catchup_jobs'::regclass)
-  OR has_table_privilege('anon','public.context_catchup_jobs','SELECT') OR has_table_privilege('authenticated','public.context_catchup_jobs','SELECT')
-  OR has_table_privilege('authenticated','public.context_catchup_jobs','INSERT') OR NOT has_table_privilege('service_role','public.context_catchup_jobs','SELECT')
- THEN RAISE EXCEPTION 'catch-up table access wrong'; END IF;
+ FOREACH f IN ARRAY ARRAY['public.context_catchup_mark_done()','public.context_catchup_record_read()']::regprocedure[] LOOP
+  IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE')
+  THEN RAISE EXCEPTION 'catch-up trigger function % executable by the public roles',f; END IF;
+ END LOOP;
+ FOREACH t IN ARRAY ARRAY['public.context_catchup_jobs','public.context_catchup_reads']::regclass[] LOOP
+  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid=t)
+   OR has_table_privilege('anon',t,'SELECT') OR has_table_privilege('authenticated',t,'SELECT')
+   OR has_table_privilege('authenticated',t,'INSERT') OR NOT has_table_privilege('service_role',t,'SELECT')
+  THEN RAISE EXCEPTION 'catch-up table access wrong on %',t; END IF;
+ END LOOP;
  IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.context_extraction_runs'::regclass AND tgname='context_catchup_mark_done' AND NOT tgisinternal)
- THEN RAISE EXCEPTION 'catch-up done trigger missing'; END IF;
+  OR NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.context_extraction_event_receipts'::regclass AND tgname='context_catchup_record_read' AND NOT tgisinternal)
+ THEN RAISE EXCEPTION 'catch-up triggers missing'; END IF;
 END $$;
 
 -- 2. Caps are unchanged: the policy is K1's, every number and live_since
@@ -102,14 +108,14 @@ DECLARE a uuid; b uuid; c uuid; i uuid; f uuid; h uuid; late uuid; r jsonb; w js
 BEGIN
  PERFORM pg_temp.cu_policy();
  DELETE FROM public.context_catchup_jobs;
- -- a: scheduled, never read, old unread text -> 1, active.
+ -- a: scheduled, never read, old unread text -> 1.
  a:=pg_temp.cu_job('CU-A'); PERFORM pg_temp.cu_ev(a,'client.sms_in','Old text','12 days');
- -- b: make-safe in progress, read before go-live, nothing unread -> 2, makesafe.
+ -- b: make-safe in progress, read before go-live, nothing unread -> 2.
  b:=pg_temp.cu_job('CU-B','{}','in_progress','makesafe'); PERFORM pg_temp.cu_ev(b,'client.sms_in','Old email','20 days');
  PERFORM pg_temp.cu_read(b,'15 days');
- -- c: quoted 10 days ago, never read, unread -> 1, quote.
+ -- c: quoted 10 days ago, never read, unread -> 1.
  c:=pg_temp.cu_job('CU-C','{}','quoted','fencing','10 days'); PERFORM pg_temp.cu_ev(c,'quote.sent','Quote Q-9 sent for 30 m of fence.','11 days');
- -- i: accepted, read before go-live, newer text since -> 1, active.
+ -- i: accepted, read before go-live, newer text since -> 1.
  i:=pg_temp.cu_job('CU-I','{}','accepted'); PERFORM pg_temp.cu_ev(i,'client.sms_in','Older text','20 days');
  PERFORM pg_temp.cu_read(i,'15 days'); PERFORM pg_temp.cu_ev(i,'client.sms_in','Newer text','12 days');
  -- Left out: quoted 90 days ago; no evidence (only a wordless row); read since
@@ -125,14 +131,13 @@ BEGIN
  r:=public.context_catchup_request();
  IF (r->>'dry_run')::boolean IS DISTINCT FROM true OR r->'written' IS DISTINCT FROM 'null'::jsonb OR EXISTS(SELECT 1 FROM public.context_catchup_jobs)
  THEN RAISE EXCEPTION 'catch-up dry run wrote %',r; END IF;
- SELECT jsonb_object_agg(x->>'job_number',jsonb_build_array((x->>'priority')::int,x->>'group')) INTO mine
+ SELECT jsonb_object_agg(x->>'job_number',(x->>'priority')::int) INTO mine
   FROM jsonb_array_elements(r->'jobs') x WHERE x->>'job_number' LIKE 'CU-%';
- want:='{"CU-A":[1,"active"],"CU-B":[2,"makesafe"],"CU-C":[1,"quote"],"CU-I":[1,"active"]}';
+ want:='{"CU-A":1,"CU-B":2,"CU-C":1,"CU-I":1}';
  IF mine IS DISTINCT FROM want THEN RAISE EXCEPTION 'catch-up picked % want %',mine,want; END IF;
  IF (r->>'candidates')::int<>jsonb_array_length(r->'jobs')
   OR (r->'by_priority'->>'1')::int+(r->'by_priority'->>'2')::int<>(r->>'candidates')::int
-  OR (SELECT sum((v->>'total')::int) FROM jsonb_each(r->'by_group') AS g(k,v))<>(r->>'candidates')::int
-  OR (r->'by_group'->'makesafe'->>'2')::int<1 OR (r->'by_group'->'quote'->>'1')::int<1 OR (r->'by_group'->'active'->>'1')::int<2
+  OR r ? 'by_group' OR (r->'jobs'->0) ? 'group'
   OR (r->'excluded'->>'holding_job')::int<1 OR (r->'excluded'->>'no_evidence')::int<1 OR (r->'excluded'->>'read_since_live')::int<1
  THEN RAISE EXCEPTION 'catch-up counts %',r; END IF;
 
@@ -154,12 +159,12 @@ END $$;
 ROLLBACK;
 
 -- 4. The rule. A listed job whose only unread evidence predates live_since is
--- due once; the same evidence on an unlisted job stays not due; a successful
--- run marks the listed job done and it is never due by catch-up again, even
--- with rows past its batch still unread.
+-- due; the same evidence on an unlisted job stays not due. A job with more
+-- rows than one batch takes two runs under the normal caps, and only the run
+-- that leaves nothing pending marks it done.
 BEGIN;
 DO $$
-DECLARE listed uuid; unlisted uuid; c jsonb; claim jsonb; ids uuid[]; st jsonb;
+DECLARE listed uuid; unlisted uuid; c jsonb; claim jsonb; ids uuid[]; st jsonb; first_run uuid;
 BEGIN
  PERFORM pg_temp.cu_policy();
  listed:=pg_temp.cu_job('CU-LISTED'); unlisted:=pg_temp.cu_job('CU-UNLISTED');
@@ -170,7 +175,7 @@ BEGIN
  PERFORM pg_temp.cu_list(listed,1);
  c:=public.context_job_cadence(listed);
  IF NOT pg_temp.cu_due(listed) OR NOT (c->>'due')::boolean OR NOT (c->>'catchup_only')::boolean OR (c->>'catchup_priority')::int<>1
-  OR (c->>'waking_count')::int<>0 OR (c->>'unread_count')::int<>30
+  OR (c->>'waking_count')::int<>0 OR (c->>'unread_count')::int<>30 OR (c->>'catchup_pending_count')::int<>30
  THEN RAISE EXCEPTION 'catch-up listed job with old unread evidence not due %',c; END IF;
  IF pg_temp.cu_due(unlisted) OR pg_temp.cu_pool(unlisted) OR (public.context_job_cadence(unlisted)->>'due')::boolean
  THEN RAISE EXCEPTION 'catch-up unlisted job with old evidence became due %',public.context_job_cadence(unlisted); END IF;
@@ -180,29 +185,85 @@ BEGIN
  IF (st->>'requested')::int<>1 OR (st->>'done')::int<>0 OR (st->>'remaining')::int<>1 OR (st->>'due_now')::int<>1
   OR (st->>'remaining_priority_1')::int<>1 OR (st->>'oldest_requested_at') IS NULL
  THEN RAISE EXCEPTION 'catch-up status before the run %',st; END IF;
- -- The normal claim and batch: 25 rows, newest first.
+ -- Run 1: the normal claim and batch, 25 rows, newest first.
  claim:=public.claim_context_extraction_run(listed,pg_temp.cu_today(),'extraction');
  IF claim->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'catch-up claim %',claim; END IF;
+ first_run:=(claim->'run'->>'id')::uuid;
  SELECT array_agg(id) INTO ids FROM public.context_extraction_events(listed,25);
  IF cardinality(ids)<>25 THEN RAISE EXCEPTION 'catch-up batch size %',cardinality(ids); END IF;
- IF NOT public.finish_context_extraction_run((claim->'run'->>'id')::uuid,(claim->'run'->>'lease_token')::uuid,'done',ids,10,3,0,0,NULL,NULL)
+ IF EXISTS(SELECT 1 FROM public.context_extraction_event_flags(listed,ids) WHERE older_context)
+ THEN RAISE EXCEPTION 'catch-up pending rows flagged older_context'; END IF;
+ IF NOT public.finish_context_extraction_run(first_run,(claim->'run'->>'lease_token')::uuid,'done',ids,10,3,0,0,NULL,NULL)
  THEN RAISE EXCEPTION 'catch-up finish refused'; END IF;
- IF (SELECT done_run_id FROM public.context_catchup_jobs WHERE job_id=listed) IS DISTINCT FROM (claim->'run'->>'id')::uuid
- THEN RAISE EXCEPTION 'catch-up run did not mark the job done'; END IF;
  c:=public.context_job_cadence(listed);
- IF (c->>'unread_count')::int<>5 OR (c->>'due')::boolean OR c->>'next_due_at' IS NOT NULL OR c->>'catchup_priority' IS NOT NULL
+ IF (SELECT done_at FROM public.context_catchup_jobs WHERE job_id=listed) IS NOT NULL
+  OR (c->>'catchup_pending_count')::int<>5 OR (c->>'unread_count')::int<>5 OR (c->>'catchup_priority')::int<>1
+ THEN RAISE EXCEPTION 'catch-up job with rows left marked done or lost its rows %',c; END IF;
+ -- Inside the 30-minute cooldown it waits; after it, it is due again.
+ IF pg_temp.cu_due(listed) OR public.claim_context_extraction_run(listed,pg_temp.cu_today(),'extraction')->>'reason'<>'cooldown'
+ THEN RAISE EXCEPTION 'catch-up second run skipped the cooldown'; END IF;
+ UPDATE public.context_extraction_runs SET started_at=now()-interval '2 hours',finished_at=now()-interval '2 hours' WHERE job_id=listed;
+ IF NOT pg_temp.cu_due(listed) THEN RAISE EXCEPTION 'catch-up job with rows left not due after cooldown %',public.context_job_cadence(listed); END IF;
+ -- Run 2 reads the last 5 and completes the job.
+ claim:=public.claim_context_extraction_run(listed,pg_temp.cu_today(),'extraction');
+ IF claim->>'outcome'<>'claimed' OR (claim->'run'->>'run_seq')::int<>2 THEN RAISE EXCEPTION 'catch-up second claim %',claim; END IF;
+ SELECT array_agg(id) INTO ids FROM public.context_extraction_events(listed,25);
+ IF cardinality(ids)<>5 THEN RAISE EXCEPTION 'catch-up second batch size %',cardinality(ids); END IF;
+ IF NOT public.finish_context_extraction_run((claim->'run'->>'id')::uuid,(claim->'run'->>'lease_token')::uuid,'done',ids,10,1,0,0,NULL,NULL)
+ THEN RAISE EXCEPTION 'catch-up second finish refused'; END IF;
+ IF (SELECT done_run_id FROM public.context_catchup_jobs WHERE job_id=listed) IS DISTINCT FROM (claim->'run'->>'id')::uuid
+  OR (SELECT count(*) FROM public.context_catchup_reads WHERE job_id=listed)<>30
+ THEN RAISE EXCEPTION 'catch-up second run did not complete the job'; END IF;
+ c:=public.context_job_cadence(listed);
+ IF (c->>'unread_count')::int<>0 OR (c->>'due')::boolean OR c->>'next_due_at' IS NOT NULL OR c->>'catchup_priority' IS NOT NULL
   OR pg_temp.cu_pool(listed) OR pg_temp.cu_due(listed)
  THEN RAISE EXCEPTION 'catch-up done job still due %',c; END IF;
- -- Even after its cooldown, a done job stays quiet until live evidence lands.
- UPDATE public.context_extraction_runs SET started_at=now()-interval '2 hours',finished_at=now()-interval '2 hours' WHERE job_id=listed;
- IF pg_temp.cu_due(listed) THEN RAISE EXCEPTION 'catch-up done job due again after cooldown'; END IF;
  st:=public.context_cadence_status()->'catchup';
  IF (st->>'done')::int<>1 OR (st->>'remaining')::int<>0 OR (st->>'oldest_requested_at') IS NOT NULL OR (st->>'last_done_at') IS NULL
- THEN RAISE EXCEPTION 'catch-up status after the run %',st; END IF;
- -- Live evidence still wakes it the K1 way.
+ THEN RAISE EXCEPTION 'catch-up status after the runs %',st; END IF;
+ -- Live evidence still wakes it the K1 way, once run 2's cooldown is over.
+ UPDATE public.context_extraction_runs SET started_at=now()-interval '2 hours',finished_at=now()-interval '2 hours' WHERE job_id=listed;
  PERFORM pg_temp.cu_ev(listed,'client.sms_in','New message','20 minutes',false);
  IF NOT pg_temp.cu_due(listed) OR (public.context_job_cadence(listed)->>'catchup_only')::boolean
  THEN RAISE EXCEPTION 'catch-up done job lost the live rule %',public.context_job_cadence(listed); END IF;
+END $$;
+ROLLBACK;
+
+-- 4b. A job read before go-live with nothing unread gets one fresh full read:
+-- it is due, its batch is its already-receipted rows (not older_context), the
+-- finish keeps the old receipts, and the run completes the job. Unlisted, the
+-- same job stays quiet and its batch is empty.
+BEGIN;
+DO $$
+DECLARE b uuid; c jsonb; claim jsonb; ids uuid[]; receipts_before integer;
+BEGIN
+ PERFORM pg_temp.cu_policy();
+ b:=pg_temp.cu_job('CU-B','{}','in_progress','makesafe');
+ PERFORM pg_temp.cu_ev(b,'client.sms_in','Old email '||g,make_interval(days=>20,mins=>g)) FROM generate_series(1,3) g;
+ PERFORM pg_temp.cu_read(b,'15 days');
+ IF (public.context_job_cadence(b)->>'unread_count')::int<>0 OR pg_temp.cu_due(b) OR EXISTS(SELECT 1 FROM public.context_extraction_events(b,25))
+ THEN RAISE EXCEPTION 'catch-up fixture: read job not quiet before listing'; END IF;
+ PERFORM pg_temp.cu_list(b,2);
+ c:=public.context_job_cadence(b);
+ IF NOT pg_temp.cu_due(b) OR (c->>'catchup_priority')::int<>2 OR (c->>'catchup_pending_count')::int<>3
+ THEN RAISE EXCEPTION 'catch-up read-before-go-live job not due %',c; END IF;
+ claim:=public.claim_context_extraction_run(b,pg_temp.cu_today(),'extraction');
+ IF claim->>'outcome'<>'claimed' THEN RAISE EXCEPTION 'catch-up CU-B claim %',claim; END IF;
+ SELECT array_agg(id) INTO ids FROM public.context_extraction_events(b,25);
+ IF cardinality(ids)<>3 OR EXISTS(SELECT 1 FROM public.context_extraction_event_flags(b,ids) WHERE older_context)
+ THEN RAISE EXCEPTION 'catch-up CU-B batch % or flags',ids; END IF;
+ SELECT count(*) INTO receipts_before FROM public.context_extraction_event_receipts WHERE job_id=b;
+ IF NOT public.finish_context_extraction_run((claim->'run'->>'id')::uuid,(claim->'run'->>'lease_token')::uuid,'done',ids,10,2,0,0,NULL,NULL)
+ THEN RAISE EXCEPTION 'catch-up CU-B finish refused'; END IF;
+ IF (SELECT count(*) FROM public.context_extraction_event_receipts WHERE job_id=b)<>receipts_before
+  OR (SELECT count(*) FROM public.context_catchup_reads WHERE job_id=b)<>3
+  OR (SELECT done_run_id FROM public.context_catchup_jobs WHERE job_id=b) IS DISTINCT FROM (claim->'run'->>'id')::uuid
+ THEN RAISE EXCEPTION 'catch-up CU-B run did not complete the job'; END IF;
+ IF pg_temp.cu_due(b) OR EXISTS(SELECT 1 FROM public.context_extraction_events(b,25))
+ THEN RAISE EXCEPTION 'catch-up CU-B still due after its read'; END IF;
+ -- Older rows outside a catch-up keep K1's older_context flag.
+ IF NOT (SELECT bool_and(older_context) FROM public.context_extraction_event_flags(b,ids))
+ THEN RAISE EXCEPTION 'catch-up changed older_context outside the catch-up'; END IF;
 END $$;
 ROLLBACK;
 
@@ -282,8 +343,8 @@ END $$;
 ROLLBACK;
 
 -- 7. Live evidence keeps K1's timing on a listed job; status-only live rows do
--- not delay the catch-up to the evening read; a listed job with nothing unread
--- is never due and is reported; a job due only by catch-up never raises
+-- not delay the catch-up to the evening read; a listed job with nothing to
+-- read is never due and is reported; a job due only by catch-up never raises
 -- cadence_breach.
 BEGIN;
 DO $$
@@ -308,7 +369,7 @@ BEGIN
  UPDATE public.context_catchup_jobs SET requested_at=now()-interval '3 hours';
  st:=public.context_cadence_status();
  IF (st->>'cadence_breach')::boolean OR st->>'oldest_due_wait_minutes' IS NOT NULL OR (st->>'due_jobs')::int<2
-  OR (st->'catchup'->>'remaining')::int<>4 OR (st->'catchup'->>'remaining_nothing_unread')::int<>1
+  OR (st->'catchup'->>'remaining')::int<>4 OR (st->'catchup'->>'remaining_nothing_to_read')::int<>1
   OR (st->'catchup'->>'remaining_priority_2')::int<>4 OR (st->'catchup'->>'due_now')::int<>2
   OR (st->'catchup'->>'oldest_requested_at')::timestamptz>now()-interval '179 minutes'
  THEN RAISE EXCEPTION 'catch-up status or breach %',st; END IF;

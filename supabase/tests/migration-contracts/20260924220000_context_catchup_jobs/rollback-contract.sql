@@ -1,13 +1,17 @@
 -- After the down migration: K1's bodies are back (the down migration checks
--- their md5 itself), the writer and done trigger are gone, the list is kept,
+-- their md5 itself), the writer, pending read and triggers are gone, the list
+-- and read record are kept,
 -- and a listed job with only pre-go-live evidence is no longer due.
 DO $$
 DECLARE j uuid:=gen_random_uuid(); e uuid;
 BEGIN
  IF to_regprocedure('public.context_catchup_request(boolean)') IS NOT NULL OR to_regprocedure('public.context_catchup_mark_done()') IS NOT NULL
+  OR to_regprocedure('public.context_catchup_record_read()') IS NOT NULL OR to_regprocedure('public.context_catchup_pending_rows(uuid[])') IS NOT NULL
   OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.context_extraction_runs'::regclass AND tgname='context_catchup_mark_done')
- THEN RAISE EXCEPTION 'catch-up rollback left the writer or the trigger'; END IF;
- IF to_regclass('public.context_catchup_jobs') IS NULL THEN RAISE EXCEPTION 'catch-up rollback dropped the list'; END IF;
+  OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.context_extraction_event_receipts'::regclass AND tgname='context_catchup_record_read')
+ THEN RAISE EXCEPTION 'catch-up rollback left the writer, the pending read or a trigger'; END IF;
+ IF to_regclass('public.context_catchup_jobs') IS NULL OR to_regclass('public.context_catchup_reads') IS NULL
+ THEN RAISE EXCEPTION 'catch-up rollback dropped the list or the read record'; END IF;
  IF public.context_cadence_status() ? 'catchup' THEN RAISE EXCEPTION 'catch-up rollback status still has the block'; END IF;
  IF has_function_privilege('anon','public.context_extraction_candidates(integer)','EXECUTE')
   OR NOT has_function_privilege('service_role','public.context_extraction_candidates(integer)','EXECUTE')
@@ -20,6 +24,7 @@ BEGIN
   metadata=metadata-'written_as' WHERE id=e;
  INSERT INTO public.context_catchup_jobs(job_id,job_number,priority) VALUES(j,'CU-RB',1);
  IF EXISTS(SELECT 1 FROM public.context_extraction_candidates(400) c WHERE c.job_id=j) THEN RAISE EXCEPTION 'catch-up rollback still reads listed jobs'; END IF;
+ IF (SELECT count(*) FROM public.context_extraction_events(j,25))<>1 THEN RAISE EXCEPTION 'catch-up rollback batch is not the unread read'; END IF;
  DELETE FROM public.context_catchup_jobs WHERE job_id=j;
  DELETE FROM public.business_events WHERE job_id=j;
  DELETE FROM public.jobs WHERE id=j;

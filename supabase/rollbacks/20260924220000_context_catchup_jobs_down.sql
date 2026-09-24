@@ -1,9 +1,10 @@
 -- Down migration for 20260924220000_context_catchup_jobs.
 --
 -- Restores the four replaced functions to K1's bodies (20260924030000), byte
--- for byte (md5 checked at the end), and drops the catch-up writer and the
--- done trigger. Kept on purpose (no data is lost): public.context_catchup_jobs
--- and its rows, the record of which jobs were listed and when each was read.
+-- for byte (md5 checked at the end), and drops the catch-up writer, the
+-- pending-rows read and both triggers. Kept on purpose (no data is lost):
+-- public.context_catchup_jobs and public.context_catchup_reads with their
+-- rows, the record of which jobs were listed, which rows were read and when.
 -- Nothing reads it after this rollback, and a re-apply resumes from it.
 -- Immediate stop needs no rollback: switch the extraction lane off.
 SET LOCAL lock_timeout = '5s';
@@ -12,6 +13,8 @@ SET LOCAL statement_timeout = '120s';
 DROP TRIGGER IF EXISTS context_catchup_mark_done ON public.context_extraction_runs;
 DROP FUNCTION IF EXISTS public.context_catchup_mark_done();
 DROP FUNCTION IF EXISTS public.context_catchup_request(boolean);
+DROP TRIGGER IF EXISTS context_catchup_record_read ON public.context_extraction_event_receipts;
+DROP FUNCTION IF EXISTS public.context_catchup_record_read();
 
 -- The cadence judgement (cadence.md 5.1), set-based so the tick and the
 -- heartbeat judge every job in one query. The one definition: the claim,
@@ -157,6 +160,55 @@ END $$;
 COMMENT ON FUNCTION public.context_cadence_status() IS
  'Status block cadence, owned by cadence slice K1 (cadence.md 9.A item 9). Due and waiting jobs from context_job_cadence, runs today, ceiling and pacing holds, lease takeovers, unplaced rows, rows not written as service_role, and the cadence_breach alarm.';
 
+-- 4. The batch: newest customer (not ours) row always included, then live
+-- waking rows (the same live non-status-only predicate as context_jobs_cadence)
+-- ahead of landed time so the rows that woke the job are always read, older
+-- rows while space remains; returned in time order. Exact rows (note a).
+CREATE OR REPLACE FUNCTION public.context_extraction_events(p_job_id uuid,p_limit integer DEFAULT 25) RETURNS SETOF public.business_events
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ WITH admitted AS (
+  SELECT public.automation_lane_enabled('extraction')
+   AND EXISTS(SELECT 1 FROM public.jobs j WHERE j.id=p_job_id AND public.context_job_extractable(j)) AS ok
+ ), unread AS MATERIALIZED (
+  SELECT u.* FROM public.context_unread_rows(ARRAY[p_job_id]) u WHERE (SELECT ok FROM admitted)
+ ), anchor AS (
+  SELECT e.id FROM unread u JOIN public.business_events e ON e.id=u.id
+  WHERE NOT public.context_event_is_ours(e)
+  ORDER BY greatest(e.context_captured_at,e.attributed_at) DESC NULLS LAST, e.id DESC LIMIT 1
+ ), live_key AS (
+  SELECT (pol.p->>'live_since')::timestamptz AS live_since, j.created_at
+  FROM (SELECT public.context_cadence_policy() AS p) pol
+  JOIN public.jobs j ON j.id=p_job_id
+ ), picked AS (
+  SELECT u.* FROM unread u CROSS JOIN live_key k
+  ORDER BY (u.id IN (SELECT id FROM anchor)) DESC,
+   (u.context_captured_at>=k.live_since AND coalesce(u.metadata->>'capture_mode','live')='live' AND u.metadata->>'written_as'='service_role'
+    AND NOT (coalesce(u.attribution_step,0) IN (3,4) AND coalesce(u.event_at,u.occurred_at)<k.created_at)
+    AND NOT public.context_event_status_only(u)) DESC,
+   greatest(u.context_captured_at,u.attributed_at) DESC NULLS LAST, u.id DESC
+  LIMIT greatest(0,least(coalesce(p_limit,25),25))
+ ) SELECT * FROM picked ORDER BY coalesce(event_at,occurred_at), id
+$$;
+
+-- The flags the worker passes to the model and the validator for a batch:
+-- ours (context_event_is_ours) and older_context (older than the age window,
+-- or older than the job's last completed read). Ids not on the job are ignored.
+CREATE OR REPLACE FUNCTION public.context_extraction_event_flags(p_job_id uuid,p_event_ids uuid[])
+RETURNS TABLE(event_id uuid, ours boolean, older_context boolean)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ WITH pol AS (SELECT public.context_cadence_policy() AS p),
+ last_read AS (SELECT max(r.started_at) AS at FROM public.context_extraction_runs r
+  WHERE r.job_id=p_job_id AND r.phase='extraction' AND r.status='done')
+ SELECT e.id, public.context_event_is_ours(e),
+  coalesce(coalesce(e.event_at,e.occurred_at)<now()-make_interval(days=>(pol.p->>'age_window_days')::integer)
+   OR coalesce(e.event_at,e.occurred_at)<(SELECT at FROM last_read),false)
+ FROM public.business_events e, pol
+ WHERE p_job_id IS NOT NULL AND e.job_id=p_job_id AND e.id=ANY(coalesce(p_event_ids,'{}'::uuid[]))
+ ORDER BY coalesce(e.event_at,e.occurred_at), e.id
+$$;
+
+DROP FUNCTION IF EXISTS public.context_catchup_pending_rows(uuid[]);
+
 DO $$
 DECLARE x record; live text;
 BEGIN
@@ -164,13 +216,17 @@ BEGIN
   ('public.context_jobs_cadence(uuid[])','71db787a8a80b5519b5a5c9b8d915d5c'),
   ('public.context_cadence_pool()','6943c7ed49e09cddc23a517255805fba'),
   ('public.context_extraction_candidates(integer)','0257dc0ea9c35a249b3b8adcb99a18d4'),
-  ('public.context_cadence_status()','04a99b46fbdf6b6ac830602da6a92c3d')) AS t(sig,md5) LOOP
+  ('public.context_cadence_status()','04a99b46fbdf6b6ac830602da6a92c3d'),
+  ('public.context_extraction_events(uuid,integer)','b808f4b6fb24515a337c149a6353edf8'),
+  ('public.context_extraction_event_flags(uuid,uuid[])','c384d748eca9b3b94ba6e54b26b781e5')) AS t(sig,md5) LOOP
   SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid=to_regprocedure(x.sig);
   IF live IS DISTINCT FROM x.md5 THEN RAISE EXCEPTION 'catch-up rollback: % is not K1''s body (%)',x.sig,live; END IF;
  END LOOP;
 END $$;
 
-REVOKE ALL ON FUNCTION public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status()
+REVOKE ALL ON FUNCTION public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status(),
+ public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[])
 FROM PUBLIC,anon,authenticated;
-GRANT EXECUTE ON FUNCTION public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status()
+GRANT EXECUTE ON FUNCTION public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status(),
+ public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[])
 TO service_role;
