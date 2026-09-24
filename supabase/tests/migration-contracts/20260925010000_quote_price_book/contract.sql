@@ -300,6 +300,17 @@ BEGIN
   IF n <> 2 THEN RAISE EXCEPTION 'one current row per allowance and band, got %', n; END IF;
 
   -- Line markup: default until a scoper overrides, never below cost.
+  -- Since stage 2 an override belongs to a real draft quote revision.
+  IF to_regclass('public.quote_v2_revisions') IS NOT NULL THEN
+    EXECUTE $q$
+      INSERT INTO public.jobs (id, org_id, status, type, job_number)
+      VALUES ('11111111-1111-4111-8111-1111111111aa', '00000000-0000-0000-0000-000000000001',
+        'draft', 'patio', 'PB-CONTRACT-1');
+      INSERT INTO public.quote_v2_revisions (id, job_id, revision_number, family, scope, prepared_by)
+      VALUES ('11111111-1111-4111-8111-111111111111', '11111111-1111-4111-8111-1111111111aa',
+        1, 'patio', '{}', 'contract')
+    $q$;
+  END IF;
   SELECT * INTO r FROM public.price_book_line_markup(
     '11111111-1111-4111-8111-111111111111', 'L1', 'patio');
   IF r.source <> 'default' OR r.markup_multiplier <> 1.35 OR r.default_status <> 'provisional' THEN

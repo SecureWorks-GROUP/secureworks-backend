@@ -52,6 +52,25 @@ function deps(over: Partial<PriceBookDeps> = {}): PriceBookDeps & {
       ),
     rpc: (fn, args) => {
       calls.push({ fn, args });
+      if (fn === "price_book_current_length_costs") {
+        return Promise.resolve({
+          data: [
+            {
+              per_length_mm: 5500,
+              cost_ex_gst: "27.2727",
+              cost_row_id: "c-5500",
+              status: "provisional",
+            },
+            {
+              per_length_mm: 6500,
+              cost_ex_gst: "26.5738",
+              cost_row_id: "c-6500",
+              status: "provisional",
+            },
+          ],
+          error: null,
+        });
+      }
       if (fn === "price_book_current_costs") {
         const keys = args.p_item_keys as string[] | null;
         return Promise.resolve({
@@ -229,8 +248,35 @@ Deno.test("cut: 6 m of 100x50 buys one 6.5 m length from the item's stock list",
   }]);
   assertEquals(body.stock_lengths_source, "price_book");
   assertEquals(body.rule_source, "price_book");
-  assertEquals(body.cost.per_lm_ex_gst, 26.5734);
+  // PB-9: the 6.5 m length costs its own invoiced $172.73.
+  assertEquals(body.cost.purchased_ex_gst, 172.73);
+  assertEquals(body.cost.lines[0].rate_basis, "length_rate");
+  assertEquals(body.cost.lines[0].cost_row_id, "c-6500");
   assertEquals(body.cost.waste_ex_gst, 13.29);
+});
+
+Deno.test("cut: PB-9 prices a 5.5 m length from its own rate, and an unpriced length has no total", async () => {
+  let res = await handlePriceBookRequest(
+    post("?action=cut", {
+      item_key: "steel-rhs-100x50x2",
+      pieces: [{ length_mm: 4800, qty: 2 }],
+    }, SERVER),
+    deps(),
+  );
+  let body = await res.json();
+  assertEquals(body.cost.purchased_ex_gst, 300);
+  assertEquals(body.cost.lines[0].each_ex_gst, 150);
+  res = await handlePriceBookRequest(
+    post("?action=cut", {
+      item_key: "steel-rhs-100x50x2",
+      pieces: [{ length_mm: 7000, qty: 1 }],
+    }, SERVER),
+    deps(),
+  );
+  body = await res.json();
+  assertEquals(res.status, 200);
+  assertEquals(body.cost.purchased_ex_gst, null);
+  assertEquals(body.cost.unpriced_lengths_mm, [8000]);
 });
 
 Deno.test("cut: no stock lengths and no rule recorded is a 409, not a guess", async () => {

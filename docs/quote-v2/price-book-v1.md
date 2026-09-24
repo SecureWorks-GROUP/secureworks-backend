@@ -32,7 +32,7 @@ markup of what we want."
 | `price_book_allowances` | job-family allowances: flashing by girth band per metre, per m2 of girth, fixings per m2, sundries per job |
 | `price_book_proposals`, `price_book_proposal_decisions` | a proposed change (old vs new, who proposed) and its decision |
 | `price_book_approvers` | who may approve, by scope (any, family, supplier, target). Seeded empty: who approves is an open owner call. |
-| `quote_line_markup_overrides` | the scoper's markup for one quote line, who set it and why. No foreign key until quote records land (stage 2). |
+| `quote_line_markup_overrides` | the scoper's markup for one quote line, who set it and why. Since stage 2 it belongs to a draft `quote_v2_revisions` row (foreign key, draft-only insert); see `quote-records-v1.md`. |
 
 Rules the database enforces:
 
@@ -72,7 +72,11 @@ captures the row it would replace. `price_book_decide_proposal(id, decision,
 decided_by)` approves, rejects or withdraws (withdraw: proposer only). Approval
 needs a matching active row in `price_book_approvers`, refuses a proposal whose
 current row changed since it was made (`price_book_proposal_stale`), and inserts
-the new value as a blessed row. Nothing is overwritten.
+the new value as a blessed row. Nothing is overwritten. Since stage 2 (PB-10)
+a decision locks the proposal's SUBJECT (`price_book_subject_lock_key`: item
+and supplier, family, or allowance band), so two proposals for one subject
+decided at once serialise and the second is refused as stale; the migration
+contract's `concurrent.sh` races two sessions to prove it.
 
 ## Default markups (seeded by the migration)
 
@@ -99,6 +103,12 @@ Proofs (`cut_to_order_test.ts`): Kiko slats 101 pieces nest into 27 bars of
 (500 mm waste costs $13.29 at $26.57/LM, leaving 497 mm usable offcut
 with 3 mm kerf); 4.8 m buys 5.5 m.
 
+Costing a plan (PB-9, stage 2) is `costCutPlanByLength`: every stock length
+bought is priced at the supplier's price for THAT length
+(`price_book_current_length_costs`), else its generic $/LM rate, else the
+length is reported unpriced and the plan has no total. One length costs
+round($/LM x metres, 2), the same rule as the SQL quote line cost.
+
 ## Read action: `price-book` edge function
 
 `supabase/functions/price-book/handler.ts`. Read-only. Server secrets and staff,
@@ -110,7 +120,7 @@ public `SW_API_KEY` are refused). Deploy with JWT verification on.
 | `GET ?action=current[&item_keys=a,b][&family=]` | current cost per item, counts by status, unknown keys named |
 | `GET ?action=markup&family=` | default markup |
 | `GET ?action=allowances[&family=]` | current allowances |
-| `POST ?action=cut {item_key, pieces, stock_lengths_mm?, rule?}` | order lengths and waste from the item's stock list and cut rule, costed when the item is priced per metre |
+| `POST ?action=cut {item_key, pieces, stock_lengths_mm?, rule?}` | order lengths and waste from the item's stock list and cut rule; for a per-metre item each bought length is costed at its own per-length rate |
 
 ## Import from the ten current stores
 
