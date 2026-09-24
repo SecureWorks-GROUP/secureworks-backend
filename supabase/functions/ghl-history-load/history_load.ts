@@ -4,7 +4,7 @@
 //
 // Captain's scope ruling, 24 Sep 2026: live jobs only (accepted, scheduled,
 // in progress, plus quotes sent in the last 60 days), never closed jobs; each
-// live job contact's GHL history is loaded from its first message forward; at
+// live job contact's GHL history is loaded back to its first message; at
 // most 100 jobs a day. Which jobs are live, which contacts are due and the
 // daily bound are decided in SQL (context_ghl_history_live_jobs and
 // context_ghl_history_due, migration 20260925031500), never here.
@@ -34,14 +34,18 @@
 //      T1); before a call row is written the load records its one legacy
 //      client.call_complete row, as every call writer does (ghl_call_pair.ts).
 //   5. Per contact, one ledger row (context_ghl_history_contacts): done,
-//      partial with a resume point (page or time budget, a stopping provider
-//      failure, or a conversation list that cannot be read to its end), or
-//      failed with a code (offered again on a later day).
+//      partial with a resume point (page/time budget, failed capture, or a
+//      stopping message-read failure), or failed with a code (offered again
+//      on a later day). A failed capture retains the page input cursor so
+//      retry cannot skip the unsaved row. A full conversation page without
+//      a cursor, or a nonempty message page claiming more without a cursor,
+//      never marks done.
 //
 // None of these rows wakes an extraction read (capture_mode backfill, X15).
 // The live ladder does not yet keep backfill rows from the model (X27); rows
-// it sends to review are counted pending_review, never moved here. Pure orchestration over injected reads and writes: no
-// model call, no clock but the one injected.
+// it sends to review are counted pending_review, never moved here.
+// Pure orchestration over injected reads and writes: no model call, no clock
+// but the one injected.
 
 import {
   buildGhlMessageRow,

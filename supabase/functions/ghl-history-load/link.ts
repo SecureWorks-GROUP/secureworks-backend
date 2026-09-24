@@ -6,7 +6,9 @@
 // Rules (bounded here and in SQL, migration 20260925031500):
 //   * only live jobs (context_ghl_history_live_jobs) whose ghl_contact_id is
 //     null or blank; never an overwrite (link_job_ghl_contact compares and
-//     sets, and reports already_linked instead);
+//     sets, and reports already_linked instead). Both judged phone/email keys
+//     are rechecked under the job lock; drift returns key_changed without
+//     a link or audit row, for a fresh search on a later run;
 //   * the job's client_phone and client_email keys (B0 context_phone_key,
 //     context_email_key; TS twins phoneKey, emailKey) are searched in GHL, and
 //     a returned contact counts only when its own phone or email has the SAME
@@ -16,7 +18,10 @@
 //     none or that same contact. ambiguous: several contacts, the phone and
 //     the email name different contacts, our records name another contact or
 //     several, or the GHL search could not be read to its end. none: no key,
-//     or no GHL contact carries the key. failed: the search could not be read;
+//     or no GHL contact carries the key. failed: the search could not be read.
+//     The provider adapter retains matches across up to five cursor pages;
+//     only explicit has_more=false proves exhaustion. An unfinished search
+//     remains ambiguous even if its returned matches look unique;
 //   * candidates come a keyset page at a time, by job id: each run starts
 //     after the last job the previous run of the same kind judged (its run
 //     row cursor), or after_job_id when given, and records where it stopped,

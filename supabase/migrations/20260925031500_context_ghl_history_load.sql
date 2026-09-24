@@ -484,7 +484,9 @@ COMMENT ON TABLE public.context_ghl_contact_links IS
  'M4 link action audit: one row per jobs.ghl_contact_id written (job, the old null or blank value, the new GHL contact, the key kind that matched, run, actor), and its reversal. Ids and codes only. Written only through link_job_ghl_contact() and reverse_ghl_contact_link(); service_role has SELECT only.';
 
 -- p_row keys: job_id, contact_id, key_kind (phone, email, phone_and_email),
--- run_id (a ghl_history_link run; a dry run never writes), actor.
+-- run_id (a ghl_history_link run; a dry run never writes), actor, and the
+-- judged phone_key/email_key snapshot (null allowed). Both keys must still
+-- match under the job lock; key_changed writes neither a link nor an audit row.
 CREATE OR REPLACE FUNCTION public.link_job_ghl_contact(p_row jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE pol jsonb:=public.context_ghl_history_policy(); v_job uuid; v_contact text; v_kind text; v_run uuid; v_actor text;
@@ -535,7 +537,7 @@ BEGIN
  RETURN jsonb_build_object('outcome','linked','job_id',v_job,'link_id',link_id);
 END $$;
 COMMENT ON FUNCTION public.link_job_ghl_contact(jsonb) IS
- 'M4 link action writer: sets jobs.ghl_contact_id on a live job only while it is null or blank (never an overwrite), with one context_ghl_contact_links audit row in the same transaction. Outcomes: linked, already_linked, not_live, job_missing, booking_draft_conflict, unique_conflict (nothing written for any but linked). Refusal codes: link_invalid, link_key_kind_invalid, link_actor_invalid, link_run_invalid.';
+ 'M4 link action writer: sets jobs.ghl_contact_id on a live job only while it is null or blank (never an overwrite), with one context_ghl_contact_links audit row in the same transaction. Outcomes: linked, already_linked, key_changed, not_live, job_missing, booking_draft_conflict, unique_conflict (nothing written for any but linked). Refusal codes: link_invalid, link_key_kind_invalid, link_actor_invalid, link_run_invalid.';
 
 -- Reverse one link: the old value goes back only while the job still carries
 -- the contact the link wrote. Evidence already placed by the ladder is not

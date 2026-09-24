@@ -14,7 +14,8 @@
 //                        action (link.ts), which runs first and puts a GHL
 //                        contact on live jobs that have none.
 //   dry_run              true unless it is exactly false. A dry run writes no
-//                        evidence, no ledger row and no link.
+//                        evidence, no contact ledger row and no link; it
+//                        does write its own context_capture_runs row.
 //   max_jobs             load: jobs to ask the due list for (1 to 100, default
 //                        20; the 100-jobs-a-day limit is enforced in SQL
 //                        whatever is asked). link: jobs to judge (default 500).
