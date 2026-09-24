@@ -914,3 +914,79 @@ Deno.test("history continuation keeps conversation identities despite provider r
   assertEquals(visited, ["A:first", "A:second", "B:first"]);
   assertEquals(searches, 1);
 });
+
+Deno.test("unfinished and unknown provider states retry until the call completes", async () => {
+  for (
+    const status of [
+      null,
+      "queued",
+      "initiated",
+      "ringing",
+      "in-progress",
+      "unknown-state",
+    ]
+  ) {
+    const item = {
+      ...N1.item,
+      meta: { call: { status, duration: 0 } },
+      status,
+    };
+    const w = withCall(world(), item, ok(N1.sentences));
+    const d = deps(w);
+    const call = due(N1_CALL_ITEM, { event_type: "client.call_initiated" });
+    const first = await processCall(call, "live", POLICY, d);
+    assertEquals(first.outcome, "not_ready");
+    assertEquals(w.fetches[0].result, "not_ready");
+    assertEquals(w.outcomes.get(call.call_message_id)?.outcome, "pending");
+    assertEquals(w.reads, ["message:" + N1.item.id]);
+    w.now += 5 * 60_000;
+    w.items.set(N1.item.id, N1.item);
+    assertEquals(
+      (await processCall(call, "live", POLICY, d)).outcome,
+      "awaiting_agreement",
+    );
+    w.now += 5 * 60_000;
+    const state = w.outcomes.get(call.call_message_id)!;
+    assertEquals(
+      (await processCall({ ...call, ...state }, "live", POLICY, d)).outcome,
+      "saved",
+    );
+  }
+});
+
+Deno.test("finished non-transcribable provider calls remain terminal", async () => {
+  for (
+    const status of ["no-answer", "busy", "failed", "canceled", "completed"]
+  ) {
+    const w = withCall(world(), {
+      ...N1.item,
+      meta: { call: { status, duration: 1 } },
+    }, ok(N1.sentences));
+    const step = await processCall(due(N1_CALL_ITEM), "live", POLICY, deps(w));
+    assertEquals(step.outcome, "not_expected");
+    assertEquals(w.fetches[0].result, "not_expected");
+    assertEquals(w.reads.length, 1);
+  }
+});
+
+Deno.test("record failures count as errors and make live and history runs partial", async () => {
+  for (const history of [false, true]) {
+    const w = history
+      ? n4Backfill()
+      : withCall(world(), N1.item, ok(N1.sentences));
+    w.outcomes.clear();
+    w.due = [due(N1_CALL_ITEM)];
+    const d = deps(w);
+    d.recordFetch = () => Promise.resolve({ error: "write_unavailable" });
+    const result = history
+      ? await runBackfill({ dryRun: false, after: null, maxContacts: 10 }, d)
+      : await runLiveFetch(d);
+    assert(result.outcome === "ran");
+    assertEquals(result.status, "partial");
+    assertEquals(result.error_code, "record_failed");
+    assert(result.counts.record_failed > 0);
+    assertEquals(result.counts.errors, result.counts.record_failed);
+    assertEquals(w.runs.at(-1)?.status, "partial");
+    assertEquals(w.runs.at(-1)?.error_code, "record_failed");
+  }
+});

@@ -235,17 +235,29 @@ export function providerCallEligible(
   duration: number | null,
   messageType: string | null,
   minSeconds: number,
-): { eligible: true } | { eligible: false; code: string } {
+): { eligible: true } | {
+  eligible: false;
+  code: string;
+  outcome: "not_ready" | "not_expected";
+} {
   const s = (status ?? "").toLowerCase();
   const t = (messageType ?? "").toUpperCase().replace(/^TYPE_/, "");
   if (s === "voicemail" || t === "VOICEMAIL") return { eligible: true };
   if (s === "completed") {
     if (duration === null || duration >= minSeconds) return { eligible: true };
-    return { eligible: false, code: "provider_too_short" };
+    return {
+      eligible: false,
+      code: "provider_too_short",
+      outcome: "not_expected",
+    };
   }
   return {
     eligible: false,
     code: `provider_status_${codePart(s || "none")}`,
+    outcome:
+      ["no-answer", "busy", "failed", "canceled", "cancelled"].includes(s)
+        ? "not_expected"
+        : "not_ready",
   };
 }
 
@@ -374,9 +386,9 @@ export async function processCall(
   );
   if (!eligible.eligible) {
     return record(
-      { result: "not_expected", code: eligible.code, ...provider },
+      { result: eligible.outcome, code: eligible.code, ...provider },
       {
-        outcome: "not_expected",
+        outcome: eligible.outcome,
         code: eligible.code,
         reads: 1,
       },
@@ -554,6 +566,7 @@ function tally(counts: Record<string, number>, step: CallStep): void {
       break;
     case "record_failed":
       counts.record_failed++;
+      counts.errors++;
       break;
     case "would_save":
       counts.would_save = (counts.would_save ?? 0) + 1;
@@ -632,6 +645,10 @@ export async function runLiveFetch(deps: FetchDeps): Promise<LiveResult> {
     errorCode = codePart(
       (error as { code?: string })?.code ?? "due_calls_unreadable",
     );
+  }
+  if (counts.record_failed > 0 && status !== "failed") {
+    status = "partial";
+    errorCode = "record_failed";
   }
   await deps.recordRun({
     run_id: runId,
@@ -936,7 +953,9 @@ export async function runBackfill(
             policy.min_call_seconds,
           );
           const txId = existing.get(`ghltx:${id}`) ?? null;
-          if (!eligible.eligible && !txId) {
+          if (
+            !eligible.eligible && eligible.outcome === "not_expected" && !txId
+          ) {
             report.code = eligible.code;
             counts.skipped_not_eligible++;
             continue;
@@ -1023,6 +1042,10 @@ export async function runBackfill(
     errorCode = codePart(
       (error as { code?: string })?.code ?? "backfill_read_failed",
     );
+  }
+  if (counts.record_failed > 0 && status !== "failed") {
+    status = "partial";
+    errorCode = "record_failed";
   }
   if (runId) {
     await deps.recordRun({
