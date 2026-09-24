@@ -1160,3 +1160,64 @@ Deno.test("a run with no failed save moves the watermark to the scan top", async
   assertEquals(result.watermark, new Date(T0).toISOString());
   assertEquals((db.runs[0].cursor as { retry_from: unknown }).retry_from, null);
 });
+
+Deno.test("a pending retry extends both floors beyond the 72-hour cap until saved", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const failedAt = new Date(T0 - POLICY.maxLookbackMs + MIN).toISOString();
+  quietConversation(ghl, "boundaryConversation", "boundaryText0001", failedAt);
+  seedCompleteScan(
+    db,
+    new Date(T0 - 7 * 24 * 60 * MIN).toISOString(),
+  );
+  db.failOnce.set("ghl:boundaryText0001", "57014");
+
+  const first = await runGhlMessageReconcile(deps(ghl, db));
+  assert(first.outcome === "ran");
+  assertEquals(first.status, "partial");
+  assertEquals(first.counts.window_capped, 1);
+  assertEquals(first.window.from, new Date(T0 - POLICY.maxLookbackMs).toISOString());
+  assertEquals(first.watermark, failedAt);
+  assertEquals(rowFor(db, "boundaryText0001"), undefined);
+
+  db.clock = T0 + 15 * MIN;
+  const second = await runGhlMessageReconcile(deps(ghl, db));
+  assert(second.outcome === "ran");
+  assertEquals(second.status, "succeeded");
+  assertEquals(second.counts.window_capped, 1);
+  assertEquals(second.counts.retry_window_extended, 1);
+  assertEquals(
+    second.window.from,
+    new Date(Date.parse(failedAt) - POLICY.overlapMs).toISOString(),
+  );
+  const retryCursor = db.runs[0].cursor as {
+    list_floor: string;
+    message_floor: string;
+  };
+  const retryFloor = new Date(
+    Date.parse(failedAt) - POLICY.overlapMs,
+  ).toISOString();
+  assertEquals(retryCursor.list_floor, retryFloor);
+  assertEquals(retryCursor.message_floor, retryFloor);
+  assertEquals(second.counts.inserted, 1);
+  assertEquals(second.counts.write_errors, 0);
+  assertEquals(second.watermark, new Date(T0 + 15 * MIN).toISOString());
+  assert(rowFor(db, "boundaryText0001"), "the failed message is saved");
+  assertEquals(
+    ghl.calls.filter((call) => call === "messages:boundaryConversation:top")
+      .length,
+    2,
+    "the conversation is read again without changing it",
+  );
+  assertEquals(
+    (db.runs[0].cursor as { retry_from: unknown }).retry_from,
+    null,
+    "a successful retry clears the pending cursor coordinate",
+  );
+  assertEquals(
+    db.rows.filter((row) => row.provider_message_id === "ghl:boundaryText0001")
+      .length,
+    1,
+    "the message is saved exactly once",
+  );
+});

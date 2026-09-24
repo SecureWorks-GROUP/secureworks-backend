@@ -28,12 +28,14 @@ live`). It never places a row; the ladder does on insert.
   margin so the write cannot be refused. A scan too big for one run (150
   conversations or 100 s) is continued by the next run. The `watermark` moves
   only when a scan completes. A failed save (writer `error`, e.g. `57014`)
-  records its message time in the cursor's `retry_from` (earliest wins, kept
-  across the runs of one scan), and the completed scan moves the watermark
-  only up to that time, so the next scan's floors sit below the message and it
-  is saved then, even if its conversation never changes again. The watermark
-  can therefore step back; it reads as lag until the message is saved. First run: 2 hours back. Longest look-back after
-  a pause: 72 hours (`window_capped`); older history is the M4 history load.
+  records its message time in the cursor's `retry_from` (earliest wins), and
+  the completed scan moves the watermark only up to that time. The next scan
+  extends both floors below the pending retry, even when that is older than 72
+  hours (`retry_window_extended`), and clears the coordinate after a complete
+  scan observes its successful retry. The watermark moves only when the scan
+  completes and can step back; it reads as lag until the message is saved.
+  First run: 2 hours back. Ordinary look-back after a pause is capped at 72 hours
+  (`window_capped`); older history is the M4 history load.
 - Run rows: `context_capture_runs` via `record_capture_run`, source
   `ghl_message_reconcile`; counts and codes only. `succeeded` = scan complete,
   no issue; `partial` = budget reached or a conversation unreadable or a write

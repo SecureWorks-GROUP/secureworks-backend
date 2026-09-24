@@ -21,17 +21,16 @@
 //                     (one GHL page usually covers it, so this costs little);
 //   * position        the last conversation fully read, as (last message time,
 //                     ids at that exact time), saved after every page;
-//   * retry_from      the earliest time of a message whose save failed in this
-//                     scan (null when none did), carried across the runs of
-//                     one scan.
+//   * retry_from      the earliest time of a message whose save failed, kept
+//                     until a complete scan successfully retries it.
 // A scan that cannot finish in one run (page or time budget) is continued by the
 // next run from its position, so a burst larger than one run drains over
 // several runs instead of re-reading the same newest page forever (review M12).
 // The watermark (top of the last complete scan) only moves when a scan
 // completes; a failed run holds both the position and the watermark (F6).
 // A scan that completes with a failed save moves the watermark only up to that
-// message's time (retry_from), so the next scan's floors sit below it and the
-// message is read and saved again, whether or not its conversation changes.
+// message's time (retry_from). The next scan extends both floors below that
+// time, even past the ordinary look-back cap, until the message is retried.
 //
 // When the item flag ghl_message_capture_v2 or the capture lane is off the run
 // is idle: no provider read, no run row (F8: it drains on re-enable, reading
@@ -184,6 +183,7 @@ const COUNT_KEYS = [
   "boundary_tie_widened",
   "boundary_tie_fallbacks",
   "window_capped",
+  "retry_window_extended",
   "scan_continued",
   "scan_completed",
   "cursor_reset",
@@ -383,6 +383,7 @@ export async function runGhlMessageReconcile(
     counts.scan_continued = 1;
   } else {
     const oldest = started - policy.maxLookbackMs;
+    const pendingRetryMs = previous ? ms(previous.retry_from) : null;
     let listFloor = (watermarkMs ?? started - policy.initialLookbackMs) -
       policy.overlapMs;
     let messageFloor = Math.min(
@@ -397,13 +398,19 @@ export async function runGhlMessageReconcile(
       messageFloor = oldest;
       counts.window_capped = 1;
     }
+    if (pendingRetryMs !== null) {
+      const retryFloor = pendingRetryMs - policy.overlapMs;
+      if (retryFloor < oldest) counts.retry_window_extended = 1;
+      listFloor = Math.min(listFloor, retryFloor);
+      messageFloor = Math.min(messageFloor, retryFloor);
+    }
     scan = {
       v: 1,
       scan_top: iso(started),
       list_floor: iso(listFloor),
       message_floor: iso(messageFloor),
       position: null,
-      retry_from: null,
+      retry_from: pendingRetryMs === null ? null : iso(pendingRetryMs),
       complete: false,
     };
   }
@@ -429,6 +436,13 @@ export async function runGhlMessageReconcile(
   // with no readable time pins the floor this scan read from, which still
   // lists its conversation and reads the message again.
   let retryFromMs = ms(scan.retry_from);
+  const pendingRetryMs = retryFromMs;
+  let pendingRetrySeen = false;
+  const isPendingRetry = (at: number | null) =>
+    pendingRetryMs !== null && (at === null || at === pendingRetryMs);
+  const retrySucceeded = (at: number | null) => {
+    if (isPendingRetry(at)) pendingRetrySeen = true;
+  };
   const failedSave = (at: number | null) => {
     const t = at ?? messageFloorMs;
     retryFromMs = retryFromMs === null ? t : Math.min(retryFromMs, t);
@@ -508,14 +522,17 @@ export async function runGhlMessageReconcile(
       for (const { row, at } of rows) {
         if (existing.has(String(row.provider_message_id))) {
           counts.duplicates++;
+          retrySucceeded(at);
           continue;
         }
         const out = await deps.capture(row);
         if (out.outcome === "inserted") {
           counts.inserted++;
           counts.webhook_misses++;
+          retrySucceeded(at);
         } else if (out.outcome === "duplicate") {
           counts.duplicates++;
+          retrySucceeded(at);
         } else if (out.outcome === "capture_disabled") {
           return { kind: "stop", code: "capture_disabled" };
         } else {
@@ -679,6 +696,10 @@ export async function runGhlMessageReconcile(
   const complete = scan.complete && !stop;
   if (!complete) scan.complete = false;
   counts.scan_completed = complete ? 1 : 0;
+  if (complete && pendingRetrySeen && counts.write_errors === 0) {
+    retryFromMs = null;
+    scan.retry_from = null;
+  }
   const watermark = complete
     ? iso(Math.min(ms(scan.scan_top)!, retryFromMs ?? Infinity))
     : watermarkMs === null
