@@ -77,7 +77,9 @@ export interface SourceRefs {
 
 /** The text of a `const NAME = { ... };` object literal, braces balanced. */
 export function objectLiteral(text: string, name: string): string | null {
-  const start = text.search(new RegExp(`(?:const|var|let)\\s+${name}\\s*=\\s*\\{`));
+  const start = text.search(
+    new RegExp(`(?:const|var|let)\\s+${name}\\s*=\\s*\\{`),
+  );
   if (start < 0) return null;
   const open = text.indexOf("{", start);
   let depth = 0;
@@ -115,7 +117,9 @@ export function numericEntries(body: string): Entry[] {
 }
 
 /** `'key': [1, 2, 3],` entries. */
-export function arrayEntries(body: string): { key: string; values: number[] }[] {
+export function arrayEntries(
+  body: string,
+): { key: string; values: number[] }[] {
   const out: { key: string; values: number[] }[] = [];
   const re = /(?:'([^']+)'|"([^"]+)"|([A-Za-z_$][\w$]*))\s*:\s*\[([\d,\s]+)\]/g;
   for (const m of body.matchAll(re)) {
@@ -158,7 +162,9 @@ export function parseCsv(text: string): Record<string, string>[] {
     if (row.some((f) => f !== "")) rows.push(row);
   }
   const [header, ...body] = rows;
-  return body.map((r) => Object.fromEntries(header.map((h, i) => [h.trim(), r[i] ?? ""])));
+  return body.map((r) =>
+    Object.fromEntries(header.map((h, i) => [h.trim(), r[i] ?? ""]))
+  );
 }
 
 /** SQL VALUES tuples `('a','b',1.00,NULL,...)` into string-or-null cells. */
@@ -219,11 +225,15 @@ export const FENCE_COST_UNITS: Record<string, string> = {
   delivery: "delivery",
 };
 
-export function fenceCostPrices(indexHtml: string, refs: SourceRefs): Observation[] {
+export function fenceCostPrices(
+  indexHtml: string,
+  refs: SourceRefs,
+): Observation[] {
   const body = objectLiteral(indexHtml, "COST_PRICES");
   if (!body) throw new Error("fence COST_PRICES not found");
   const header = indexHtml.slice(0, indexHtml.indexOf("const COST_PRICES"));
-  const updated = header.slice(-400).match(/Updated (20\d\d-\d\d-\d\d)/)?.[1] ?? null;
+  const updated = header.slice(-400).match(/Updated (20\d\d-\d\d-\d\d)/)?.[1] ??
+    null;
   return numericEntries(body).map((e) => {
     const dated = e.comment.match(DATE_RE)?.[1];
     const blessed = e.comment.match(/blessed (20\d\d-\d\d-\d\d)/)?.[1];
@@ -239,7 +249,8 @@ export function fenceCostPrices(indexHtml: string, refs: SourceRefs): Observatio
       supplier: /R&R/.test(e.comment) ? "R&R Fencing" : "unspecified",
       as_at: dated ?? updated,
       evidence_kind: "tool_constant",
-      evidence_ref: `fence-designer index.html COST_PRICES.${e.key} @${refs.fenceCommit}`,
+      evidence_ref:
+        `fence-designer index.html COST_PRICES.${e.key} @${refs.fenceCommit}`,
       note: estimated ? "the tool marks this estimated" : undefined,
       claimed_blessed: blessed,
     } satisfies Observation;
@@ -258,7 +269,10 @@ const FENCE_SELL_UNITS: Record<string, string> = {
   vegClearPrice: "job",
 };
 
-export function fenceSellDefaults(indexHtml: string, refs: SourceRefs): Observation[] {
+export function fenceSellDefaults(
+  indexHtml: string,
+  refs: SourceRefs,
+): Observation[] {
   const seen = new Map<string, number>();
   const per = indexHtml.match(/job\.pricePerMetre\s*\|\|\s*(\d+(?:\.\d+)?)/);
   if (per) seen.set("pricePerMetre", Number(per[1]));
@@ -276,16 +290,25 @@ export function fenceSellDefaults(indexHtml: string, refs: SourceRefs): Observat
     supplier: "n/a",
     as_at: null,
     evidence_kind: "tool_constant",
-    evidence_ref: `fence-designer index.html sell default ${key} @${refs.fenceCommit}`,
+    evidence_ref:
+      `fence-designer index.html sell default ${key} @${refs.fenceCommit}`,
     note: "sell price the customer sees; never back-computed into a cost",
   }));
 }
 
 // ── s03 fence business_rules.js (dead, reported only) ───────────────────
 
-export function fenceBusinessRules(js: string, refs: SourceRefs): Observation[] {
+export function fenceBusinessRules(
+  js: string,
+  refs: SourceRefs,
+): Observation[] {
   const out: Observation[] = [];
-  for (const [name, kind] of [["DEFAULT_RATES", "legacy_sell"], ["COST_PRICES", "cost"]] as const) {
+  for (
+    const [name, kind] of [["DEFAULT_RATES", "legacy_sell"], [
+      "COST_PRICES",
+      "cost",
+    ]] as const
+  ) {
     const body = objectLiteral(js, name);
     if (!body) continue;
     for (const e of numericEntries(body)) {
@@ -295,13 +318,19 @@ export function fenceBusinessRules(js: string, refs: SourceRefs): Observation[] 
         source_key: `${name}.${e.key}`,
         description: e.comment || e.key,
         family: "fencing",
-        source_unit: /_per_m2$/.test(e.key) ? "m2" : /_per_m$/.test(e.key) ? "lm" : "each",
+        source_unit: /_per_m2$/.test(e.key)
+          ? "m2"
+          : /_per_m$/.test(e.key)
+          ? "lm"
+          : "each",
         value: e.value,
         supplier: "unspecified",
         as_at: null,
         evidence_kind: "tool_constant",
-        evidence_ref: `fence-designer business_rules.js ${name}.${e.key} @${refs.fenceCommit}`,
-        excluded_reason: "dead store: business_rules.js is not loaded by the fence tool",
+        evidence_ref:
+          `fence-designer business_rules.js ${name}.${e.key} @${refs.fenceCommit}`,
+        excluded_reason:
+          "dead store: business_rules.js is not loaded by the fence tool",
       });
     }
   }
@@ -324,7 +353,19 @@ export function parseSeedRows(
   const out: Observation[] = [];
   for (const cells of sqlTuples(sql)) {
     // (scope_tool, category, item_key, description, unit, cost, sqm, price, code, source, notes)
-    const [tool, category, key, description, unit, cost, , price, code, , notes] = cells;
+    const [
+      tool,
+      category,
+      key,
+      description,
+      unit,
+      cost,
+      ,
+      price,
+      code,
+      ,
+      notes,
+    ] = cells;
     if (!tool || !key || !description || !unit) continue;
     const family: Family = tool === "fence-designer" ? "fencing" : "patio";
     const costN = cost == null ? null : Number(cost);
@@ -342,7 +383,10 @@ export function parseSeedRows(
       evidence_ref: evidenceRef(tool, key),
       note: notes ?? undefined,
     };
-    if (unit === "pct" || unit === "mm" || unit === "factor" || SEED_NOT_A_PRICE.has(key)) {
+    if (
+      unit === "pct" || unit === "mm" || unit === "factor" ||
+      SEED_NOT_A_PRICE.has(key)
+    ) {
       out.push({
         ...base,
         kind: key === "default-sell-markup" ? "markup" : "not_a_price",
@@ -353,7 +397,10 @@ export function parseSeedRows(
       });
       continue;
     }
-    if (/-sell$/.test(key) || key === "price-per-metre-default" || (costN == null && priceN != null)) {
+    if (
+      /-sell$/.test(key) || key === "price-per-metre-default" ||
+      (costN == null && priceN != null)
+    ) {
       out.push({ ...base, kind: "legacy_sell", value: priceN ?? costN });
       continue;
     }
@@ -363,18 +410,23 @@ export function parseSeedRows(
 }
 
 export function fenceParitySeed(sql: string, refs: SourceRefs): Observation[] {
-  const tag = sql.match(/seed-from-tool-hardcoded (20\d\d-\d\d-\d\d)/)?.[1] ?? "2026-06-11";
+  const tag = sql.match(/seed-from-tool-hardcoded (20\d\d-\d\d-\d\d)/)?.[1] ??
+    "2026-06-11";
   return parseSeedRows(
     sql,
     "s04_fence_parity_seed_sql",
-    (tool, key) => `fence-designer parity/seed_scope_tool_defaults.sql ${tool}/${key} @${refs.fenceCommit}`,
+    (tool, key) =>
+      `fence-designer parity/seed_scope_tool_defaults.sql ${tool}/${key} @${refs.fenceCommit}`,
     tag,
   );
 }
 
 // ── s05 patio hardcoded tables ──────────────────────────────────────────
 
-export function patioHardcoded(indexHtml: string, refs: SourceRefs): Observation[] {
+export function patioHardcoded(
+  indexHtml: string,
+  refs: SourceRefs,
+): Observation[] {
   const version = indexHtml.match(/RATES_VERSION\s*=\s*['"]([^'"]+)['"]/)?.[1];
   const asAt = version?.match(DATE_RE)?.[1] ?? "2026-06-13";
   const ref = (table: string, key: string) =>
@@ -467,15 +519,23 @@ export function patioHardcoded(indexHtml: string, refs: SourceRefs): Observation
   }
 
   const waste = objectLiteral(indexHtml, "STOCK_LENGTH_WASTE_CONFIG") ?? "";
-  for (const m of waste.matchAll(/'([\w-]+)':\s*\{\s*stock_lengths_mm:\s*(null|\[[\d,\s]+\])/g)) {
+  for (
+    const m of waste.matchAll(
+      /'([\w-]+)':\s*\{\s*stock_lengths_mm:\s*(null|\[[\d,\s]+\])/g,
+    )
+  ) {
     const lengths = m[2] === "null"
       ? null
-      : m[2].slice(1, -1).split(",").map((v) => Number(v.trim())).filter((v) => v > 0);
+      : m[2].slice(1, -1).split(",").map((v) => Number(v.trim())).filter((v) =>
+        v > 0
+      );
     out.push({
       store: "s05_patio_hardcoded",
       kind: "stock_lengths",
       source_key: `STOCK_LENGTH_WASTE_CONFIG.${m[1]}`,
-      description: `${m[1]} ${lengths ? "stock lengths" : "cut to length by the supplier"}`,
+      description: `${m[1]} ${
+        lengths ? "stock lengths" : "cut to length by the supplier"
+      }`,
       family: "patio",
       source_unit: "mm",
       value: null,
@@ -501,7 +561,8 @@ export function patioHardcoded(indexHtml: string, refs: SourceRefs): Observation
       supplier: "n/a",
       as_at: asAt,
       evidence_kind: "tool_constant",
-      evidence_ref: `patio-tool index.html DEFAULT_SELL_MARKUP @${refs.patioCommit}`,
+      evidence_ref:
+        `patio-tool index.html DEFAULT_SELL_MARKUP @${refs.patioCommit}`,
     });
   }
   return out;
@@ -517,8 +578,13 @@ export function patioDeviceCache(): Observation[] {
 
 // ── s07 patio engine/v1 rate snapshot (unused by the live tool) ─────────
 
-export function patioEngineSnapshot(ts: string, refs: SourceRefs): Observation[] {
-  const effective = ts.match(/CONFIRMED_EFFECTIVE\s*=\s*"(20\d\d-\d\d-\d\d)"/)?.[1] ?? "2026-08-10";
+export function patioEngineSnapshot(
+  ts: string,
+  refs: SourceRefs,
+): Observation[] {
+  const effective =
+    ts.match(/CONFIRMED_EFFECTIVE\s*=\s*"(20\d\d-\d\d-\d\d)"/)?.[1] ??
+      "2026-08-10";
   const out: Observation[] = [];
   for (const m of ts.matchAll(/\["([^"]+)",\s*(\d+),\s*"([a-z]+)"\]/g)) {
     const [, key, cents, unit] = m;
@@ -534,15 +600,20 @@ export function patioEngineSnapshot(ts: string, refs: SourceRefs): Observation[]
       supplier: "unspecified",
       as_at: effective,
       evidence_kind: "owner_stated",
-      evidence_ref: `patio-tool engine/v1/rate-snapshot.ts ${key} @${refs.patioCommit}`,
-      note: "owner-confirmed 2026-08-10; the live patio tool does not read this engine",
+      evidence_ref:
+        `patio-tool engine/v1/rate-snapshot.ts ${key} @${refs.patioCommit}`,
+      note:
+        "owner-confirmed 2026-08-10; the live patio tool does not read this engine",
     });
   }
   return out;
 }
 
 /** Policy scalars in engine/v1/pricing-model.ts: the confirmed 1.5 markup. */
-export function patioEnginePolicy(pricingModelTs: string, refs: SourceRefs): Observation[] {
+export function patioEnginePolicy(
+  pricingModelTs: string,
+  refs: SourceRefs,
+): Observation[] {
   const m = pricingModelTs.match(/materialMarkup:\s*(\d+(?:\.\d+)?)\s*,/);
   if (!m) return [];
   return [{
@@ -556,14 +627,19 @@ export function patioEnginePolicy(pricingModelTs: string, refs: SourceRefs): Obs
     supplier: "n/a",
     as_at: "2026-08-10",
     evidence_kind: "owner_stated",
-    evidence_ref: `patio-tool engine/v1/pricing-model.ts materialMarkup @${refs.patioCommit}`,
-    note: "confirmed 2026-08-10 in the engine; the live patio tool does not use the engine",
+    evidence_ref:
+      `patio-tool engine/v1/pricing-model.ts materialMarkup @${refs.patioCommit}`,
+    note:
+      "confirmed 2026-08-10 in the engine; the live patio tool does not use the engine",
   }];
 }
 
 // ── s08 scope_tool_defaults (live table; repo seed only) ────────────────
 
-export function scopeToolDefaultsRepoSeed(migrationSql: string, refs: SourceRefs): Observation[] {
+export function scopeToolDefaultsRepoSeed(
+  migrationSql: string,
+  refs: SourceRefs,
+): Observation[] {
   const out: Observation[] = [];
   for (const cells of sqlTuples(migrationSql)) {
     // (category, item_key, description, unit, cost, sqm, source)
@@ -580,7 +656,8 @@ export function scopeToolDefaultsRepoSeed(migrationSql: string, refs: SourceRefs
       supplier: "unspecified",
       as_at: "2026-03-20",
       evidence_kind: "tool_constant",
-      evidence_ref: `secureworks-backend supabase/migrations/20260320000006_scope_tool_defaults.sql ${key} @${refs.backendCommit}`,
+      evidence_ref:
+        `secureworks-backend supabase/migrations/20260320000006_scope_tool_defaults.sql ${key} @${refs.backendCommit}`,
       note: "repo seed only; the live table's current rows were not read",
     });
   }
@@ -600,7 +677,9 @@ export function materialPriceLedger(
       kind: "cost" as const,
       source_key: String(r.material_code ?? r.item_description ?? ""),
       description: String(r.item_description ?? ""),
-      family: String(r.material_category ?? "").includes("fenc") ? "fencing" : "patio",
+      family: String(r.material_category ?? "").includes("fenc")
+        ? "fencing"
+        : "patio",
       source_unit: String(r.unit ?? "each"),
       value: r.unit_price == null ? null : Number(r.unit_price),
       supplier: String(r.supplier_name ?? "unspecified"),
@@ -626,7 +705,8 @@ export function wikiSupplierCsv(
     const rawDesc = r.item_description ?? "";
     const unitRaw = (r.unit ?? "").trim();
     const value = Number(r.unit_cost_ex_gst);
-    const lengthM = unitRaw.match(/\((\d+(?:\.\d+)?)m (?:length|sheet)\)/i)?.[1];
+    const lengthM = unitRaw.match(/\((\d+(?:\.\d+)?)m (?:length|sheet)\)/i)
+      ?.[1];
     const isDelivery = DELIVERY_RE.test(rawDesc);
     // Delivery lines on supplier invoices carry client street addresses: the
     // description is replaced, never copied.
@@ -634,10 +714,18 @@ export function wikiSupplierCsv(
       ? `${r.supplier} delivery (address withheld)`
       : rawDesc.replace(/\s+/g, " ").trim();
     let excluded: string | undefined;
-    if (unitRaw === "line") excluded = "compound invoice line (several items in one amount)";
-    else if (/CUSTOM MADE|LABOUR AND MATERIAL|SWAP upcharge|refer to invoice/i.test(rawDesc)) {
+    if (unitRaw === "line") {
+      excluded = "compound invoice line (several items in one amount)";
+    } else if (
+      /CUSTOM MADE|LABOUR AND MATERIAL|SWAP upcharge|refer to invoice/i.test(
+        rawDesc,
+      )
+    ) {
       excluded = "one-off job line, not a catalogue item";
-    } else if (/never price/i.test(r.notes ?? "") && /group S|form-S/i.test(`${rawDesc} ${r.invoice_ref}`)) {
+    } else if (
+      /never price/i.test(r.notes ?? "") &&
+      /group S|form-S/i.test(`${rawDesc} ${r.invoice_ref}`)
+    ) {
       excluded = "the source says never price from this form rate";
     }
     const stock = Number(r.stock_length_mm);
@@ -646,7 +734,11 @@ export function wikiSupplierCsv(
       kind: "cost",
       source_key: r.item_key || `${fileName}:${rawDesc.slice(0, 60)}`,
       description,
-      family: stratcoFamily ? "stratco" : /r?nr-fencing/.test(fileName) ? "fencing" : "patio",
+      family: stratcoFamily
+        ? "stratco"
+        : /r?nr-fencing/.test(fileName)
+        ? "fencing"
+        : "patio",
       source_unit: lengthM ? "length" : unitRaw.toLowerCase(),
       value: Number.isFinite(value) ? value : null,
       supplier: r.supplier,
@@ -659,11 +751,15 @@ export function wikiSupplierCsv(
         : /sales order/i.test(r.invoice_ref ?? "")
         ? "purchase_order"
         : "invoice",
-      evidence_ref: `wiki research/supplier-pricing/${fileName} ${r.invoice_ref} @${refs.wikiCommit}`,
+      evidence_ref:
+        `wiki research/supplier-pricing/${fileName} ${r.invoice_ref} @${refs.wikiCommit}`,
       note: r.confidence ? `confidence ${r.confidence}` : undefined,
       per_length_mm: lengthM ? Math.round(Number(lengthM) * 1000) : undefined,
-      stock_lengths_mm: Number.isFinite(stock) && stock > 0 ? [stock] : undefined,
-      staged_for_blessing: /STAGED FOR MARNIN BLESSING|unblessed/i.test(r.notes ?? "") ||
+      stock_lengths_mm: Number.isFinite(stock) && stock > 0
+        ? [stock]
+        : undefined,
+      staged_for_blessing:
+        /STAGED FOR MARNIN BLESSING|unblessed/i.test(r.notes ?? "") ||
         (stratcoFamily && !r.blessed),
       excluded_reason: excluded,
     } satisfies Observation;

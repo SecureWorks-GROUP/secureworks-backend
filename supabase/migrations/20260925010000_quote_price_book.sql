@@ -18,8 +18,8 @@
 --   Blessing happens only by approving a proposed change, and the approver is
 --   whoever `price_book_approvers` lists for that scope (left empty on
 --   purpose: who approves is an open owner call).
--- * Private: RLS on, no anon or authenticated access. Tools and the terminal
---   read through the `price-book` edge function.
+-- * Private: RLS on, no anon or authenticated access. Future tool and terminal
+--   reads use the `price-book` edge function; integration is deferred.
 --
 -- Contract: docs/quote-v2/price-book-v1.md.
 SET LOCAL lock_timeout = '5s';

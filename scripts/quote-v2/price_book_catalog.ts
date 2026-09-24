@@ -49,7 +49,10 @@ export function normaliseUnit(raw: string): ItemUnit | null {
   const u = raw.trim().toLowerCase();
   if (["lm", "m", "mtr", "metre", "per lm"].includes(u)) return "lm";
   if (["m2", "sqm", "m²"].includes(u)) return "m2";
-  if (["each", "ea", "hole"].includes(u) || u.startsWith("ea ") && !u.includes("bag")) return "each";
+  if (
+    ["each", "ea", "hole"].includes(u) ||
+    u.startsWith("ea ") && !u.includes("bag")
+  ) return "each";
   if (u === "bag" || u === "ea (bag)") return "bag";
   if (u === "box") return "box";
   if (u === "pack") return "pack";
@@ -78,70 +81,299 @@ export function slug(text: string): string {
 
 // ── canonical items with more than one source ───────────────────────────
 
-const ITEMS: Record<string, Omit<CanonicalItem, "item_key" | "reconciled">> = {};
-function def(key: string, family: Family, category: string, unit: ItemUnit, description: string) {
+const ITEMS: Record<string, Omit<CanonicalItem, "item_key" | "reconciled">> =
+  {};
+function def(
+  key: string,
+  family: Family,
+  category: string,
+  unit: ItemUnit,
+  description: string,
+) {
   ITEMS[key] = { family, category, unit, description };
 }
 
 // Patio flashings, gutters and drainage.
-def("flashing-ridge-cap", "patio", "flashing", "lm", "Ridge cap flashing (family rate)");
-def("flashing-barge", "patio", "flashing", "lm", "Barge flashing (family rate)");
+def(
+  "flashing-ridge-cap",
+  "patio",
+  "flashing",
+  "lm",
+  "Ridge cap flashing (family rate)",
+);
+def(
+  "flashing-barge",
+  "patio",
+  "flashing",
+  "lm",
+  "Barge flashing (family rate)",
+);
 def("flashing-back", "patio", "flashing", "lm", "Back flashing (family rate)");
-def("flashing-gutter", "patio", "flashing", "lm", "Gutter flashing (family rate)");
+def(
+  "flashing-gutter",
+  "patio",
+  "flashing",
+  "lm",
+  "Gutter flashing (family rate)",
+);
 def("flashing-hip", "patio", "flashing", "lm", "Hip flashing (family rate)");
 def("gutter-patio", "patio", "gutter", "lm", "Patio gutter");
 def("gutter-box", "patio", "gutter", "lm", "Box gutter");
 def("downpipe-95x45", "patio", "gutter", "lm", "Downpipe 95x45");
 def("downpipe-clip-95x45", "patio", "gutter", "each", "Downpipe clip 95x45");
-def("downpipe-outlet-95x45", "patio", "gutter", "each", "Downpipe outlet (pop) 95x45");
-def("gutter-stop-end-patio", "patio", "gutter", "each", "Patio gutter stop end");
-def("gutter-clip-universal", "patio", "gutter", "each", "Gutter clip (universal)");
-def("infill-twinwall-10mm-700", "patio", "infill", "lm", "Twinwall polycarbonate infill 10 mm x 700");
-def("infill-twinwall-10mm-1050", "patio", "infill", "lm", "Twinwall polycarbonate infill 10 mm x 1050");
-def("roof-ampelite-solasafe-5rib", "patio", "roofing", "lm", "Ampelite Solasafe 5-rib polycarbonate");
+def(
+  "downpipe-outlet-95x45",
+  "patio",
+  "gutter",
+  "each",
+  "Downpipe outlet (pop) 95x45",
+);
+def(
+  "gutter-stop-end-patio",
+  "patio",
+  "gutter",
+  "each",
+  "Patio gutter stop end",
+);
+def(
+  "gutter-clip-universal",
+  "patio",
+  "gutter",
+  "each",
+  "Gutter clip (universal)",
+);
+def(
+  "infill-twinwall-10mm-700",
+  "patio",
+  "infill",
+  "lm",
+  "Twinwall polycarbonate infill 10 mm x 700",
+);
+def(
+  "infill-twinwall-10mm-1050",
+  "patio",
+  "infill",
+  "lm",
+  "Twinwall polycarbonate infill 10 mm x 1050",
+);
+def(
+  "roof-ampelite-solasafe-5rib",
+  "patio",
+  "roofing",
+  "lm",
+  "Ampelite Solasafe 5-rib polycarbonate",
+);
 def("riser-100x50", "patio", "riser", "each", "Riser 100x50");
 def("riser-76x38", "patio", "riser", "each", "Riser 76x38");
 def("riser-75x50", "patio", "riser", "each", "Riser 75x50");
 def("bracket-riser", "patio", "bracket", "each", "Riser bracket");
 def("bracket-rafter", "patio", "bracket", "each", "Rafter bracket");
 def("bracket-tubing", "patio", "bracket", "each", "Tubing bracket");
-def("truss-fabrication", "patio", "truss", "lm", "Gable truss fabrication per metre of truss width");
-def("truss-steel-76x38", "patio", "truss", "lm", "Gable truss steel 76x38 per metre");
-def("gable-truss-average", "patio", "truss", "each", "Gable truss, average standard truss");
+def(
+  "truss-fabrication",
+  "patio",
+  "truss",
+  "lm",
+  "Gable truss fabrication per metre of truss width",
+);
+def(
+  "truss-steel-76x38",
+  "patio",
+  "truss",
+  "lm",
+  "Gable truss steel 76x38 per metre",
+);
+def(
+  "gable-truss-average",
+  "patio",
+  "truss",
+  "each",
+  "Gable truss, average standard truss",
+);
 def("labour-trade", "patio", "labour", "hour", "Trade labour (cost to us)");
 def("labour-labourer", "patio", "labour", "hour", "Labourer (cost to us)");
-def("labour-roof-plumber", "patio", "labour", "day", "Roof plumber day (cost to us)");
-def("labour-trade-day", "patio", "labour", "day", "Skilled trade day (cost to us)");
-def("labour-labourer-day", "patio", "labour", "day", "Labourer day (cost to us)");
-def("labour-electrician-day", "patio", "labour", "day", "Electrician day (cost to us)");
+def(
+  "labour-roof-plumber",
+  "patio",
+  "labour",
+  "day",
+  "Roof plumber day (cost to us)",
+);
+def(
+  "labour-trade-day",
+  "patio",
+  "labour",
+  "day",
+  "Skilled trade day (cost to us)",
+);
+def(
+  "labour-labourer-day",
+  "patio",
+  "labour",
+  "day",
+  "Labourer day (cost to us)",
+);
+def(
+  "labour-electrician-day",
+  "patio",
+  "labour",
+  "day",
+  "Electrician day (cost to us)",
+);
 def("patio-delivery", "patio", "services", "job", "Patio delivery");
 def("purlin-c150", "patio", "steel", "lm", "C150 purlin");
 def("purlin-c200", "patio", "steel", "lm", "C200 purlin");
 // Shared consumable.
-def("concrete-kwikset-20kg", "misc", "concrete", "bag", "Kwikset rapid set concrete 20 kg bag");
+def(
+  "concrete-kwikset-20kg",
+  "misc",
+  "concrete",
+  "bag",
+  "Kwikset rapid set concrete 20 kg bag",
+);
 // Fencing.
-def("fence-panel-kit-h1800-w2380-post2400", "fencing", "panel", "each", "Colorbond panel H1800 x W2380 with 2400 posts");
-def("fence-panel-kit-h1800-w3150-post3000", "fencing", "panel", "each", "Colorbond panel H1800 x W3150 with 3000 posts");
-def("fence-post-shs-50x50x1.6-l2400", "fencing", "post", "each", "SHS post 50x50x1.6 L2400");
-def("fence-post-shs-50x50x1.6-l2700", "fencing", "post", "each", "SHS post 50x50x1.6 L2700");
-def("fence-post-shs-90x90x3.0-l1800", "fencing", "post", "each", "SHS post 90x90x3.0 L1800 (gate/corner)");
-def("fence-plinth-std-w2380", "fencing", "plinth", "each", "Retaining plinth standard W2380");
-def("fence-plinth-long-w3150", "fencing", "plinth", "each", "Retaining plinth long W3150");
-def("fence-plinth-install", "fencing", "labour", "each", "Plinth install labour");
-def("fence-labour-per-metre", "fencing", "labour", "lm", "Fence install labour per metre");
-def("fence-gate-kit-pedestrian", "fencing", "gate", "each", "Pedestrian gate kit");
-def("fence-gate-kit-double", "fencing", "gate", "each", "Double swing gate kit");
+def(
+  "fence-panel-kit-h1800-w2380-post2400",
+  "fencing",
+  "panel",
+  "each",
+  "Colorbond panel H1800 x W2380 with 2400 posts",
+);
+def(
+  "fence-panel-kit-h1800-w3150-post3000",
+  "fencing",
+  "panel",
+  "each",
+  "Colorbond panel H1800 x W3150 with 3000 posts",
+);
+def(
+  "fence-post-shs-50x50x1.6-l2400",
+  "fencing",
+  "post",
+  "each",
+  "SHS post 50x50x1.6 L2400",
+);
+def(
+  "fence-post-shs-50x50x1.6-l2700",
+  "fencing",
+  "post",
+  "each",
+  "SHS post 50x50x1.6 L2700",
+);
+def(
+  "fence-post-shs-90x90x3.0-l1800",
+  "fencing",
+  "post",
+  "each",
+  "SHS post 90x90x3.0 L1800 (gate/corner)",
+);
+def(
+  "fence-plinth-std-w2380",
+  "fencing",
+  "plinth",
+  "each",
+  "Retaining plinth standard W2380",
+);
+def(
+  "fence-plinth-long-w3150",
+  "fencing",
+  "plinth",
+  "each",
+  "Retaining plinth long W3150",
+);
+def(
+  "fence-plinth-install",
+  "fencing",
+  "labour",
+  "each",
+  "Plinth install labour",
+);
+def(
+  "fence-labour-per-metre",
+  "fencing",
+  "labour",
+  "lm",
+  "Fence install labour per metre",
+);
+def(
+  "fence-gate-kit-pedestrian",
+  "fencing",
+  "gate",
+  "each",
+  "Pedestrian gate kit",
+);
+def(
+  "fence-gate-kit-double",
+  "fencing",
+  "gate",
+  "each",
+  "Double swing gate kit",
+);
 def("fence-gate-post-90x90", "fencing", "gate", "each", "Gate post 90x90");
-def("fence-gate-labour-pedestrian", "fencing", "labour", "each", "Pedestrian gate install labour");
-def("fence-gate-labour-double", "fencing", "labour", "each", "Double gate install labour");
-def("fence-patio-tube-76x38-l3000", "fencing", "extension", "each", "Patio tube 76x38 RHS L3000");
+def(
+  "fence-gate-labour-pedestrian",
+  "fencing",
+  "labour",
+  "each",
+  "Pedestrian gate install labour",
+);
+def(
+  "fence-gate-labour-double",
+  "fencing",
+  "labour",
+  "each",
+  "Double gate install labour",
+);
+def(
+  "fence-patio-tube-76x38-l3000",
+  "fencing",
+  "extension",
+  "each",
+  "Patio tube 76x38 RHS L3000",
+);
 def("fence-tek-screws-box", "fencing", "consumable", "box", "Tek screws, box");
-def("fence-remove-hardie", "fencing", "removal", "lm", "Remove Hardie fence per metre (cost)");
-def("fence-remove-timber-lap", "fencing", "removal", "lm", "Remove timber lap fence per metre (cost)");
-def("fence-remove-colorbond", "fencing", "removal", "lm", "Remove Colorbond fence per metre (cost)");
-def("fence-remove-asbestos", "fencing", "removal", "lm", "Remove asbestos fence per metre (cost)");
-def("fence-veg-clear", "fencing", "site", "job", "Vegetation / site clear (cost)");
-def("fence-delivery-rr", "fencing", "delivery", "delivery", "R&R Fencing delivery");
+def(
+  "fence-remove-hardie",
+  "fencing",
+  "removal",
+  "lm",
+  "Remove Hardie fence per metre (cost)",
+);
+def(
+  "fence-remove-timber-lap",
+  "fencing",
+  "removal",
+  "lm",
+  "Remove timber lap fence per metre (cost)",
+);
+def(
+  "fence-remove-colorbond",
+  "fencing",
+  "removal",
+  "lm",
+  "Remove Colorbond fence per metre (cost)",
+);
+def(
+  "fence-remove-asbestos",
+  "fencing",
+  "removal",
+  "lm",
+  "Remove asbestos fence per metre (cost)",
+);
+def(
+  "fence-veg-clear",
+  "fencing",
+  "site",
+  "job",
+  "Vegetation / site clear (cost)",
+);
+def(
+  "fence-delivery-rr",
+  "fencing",
+  "delivery",
+  "delivery",
+  "R&R Fencing delivery",
+);
 
 // Tool key -> canonical, from the fence tool's own FENCE_COST_MAP (tool
 // COST_PRICES key -> seed item key). Panel kits are mapped only where a
@@ -275,7 +507,9 @@ const ROOF_ALIASES: Record<string, string> = {
 // ── steel ───────────────────────────────────────────────────────────────
 
 export function steelKey(text: string): string | null {
-  const m = text.replace(/×/g, "x").match(/(\d+)\s*x\s*(\d+)\s*x\s*(\d+(?:\.\d+)?)/i);
+  const m = text.replace(/×/g, "x").match(
+    /(\d+)\s*x\s*(\d+)\s*x\s*(\d+(?:\.\d+)?)/i,
+  );
   if (!m) return null;
   const [, a, b, t] = m;
   const type = a === b ? "shs" : "rhs";
@@ -284,7 +518,9 @@ export function steelKey(text: string): string | null {
 
 /** Posts and beams are cut one per stick; the rest nest (patio nestCuts use). */
 export function steelCutRule(key: string): CutRule {
-  return /^steel-(shs-90x90|rhs-100x50|rhs-150x50)/.test(key) ? "one_per_stick" : "nest";
+  return /^steel-(shs-90x90|rhs-100x50|rhs-150x50)/.test(key)
+    ? "one_per_stick"
+    : "nest";
 }
 
 function steelItem(key: string): CanonicalItem {
@@ -307,9 +543,13 @@ function canonical(key: string): CanonicalItem {
 
 function unreconciled(o: Observation, unit: ItemUnit): CanonicalItem {
   // Tool keys name the thing; supplier lines are named by their description.
-  const name = o.store === "s10_wiki_supplier_csv" || o.store === "s09_material_price_ledger"
+  const name = o.store === "s10_wiki_supplier_csv" ||
+      o.store === "s09_material_price_ledger"
     ? o.description
-    : o.source_key.split(/[:.]/).pop()!.replace(/([a-z])([A-Z0-9])/g, "$1-$2");
+    : o.source_key.split(/[:.]/).pop()!.replace(
+      /([a-z])([A-Z0-9])/g,
+      "$1-$2",
+    );
   return {
     item_key: `${o.family}-${slug(name || o.description)}`.slice(0, 110),
     family: o.family,
@@ -333,20 +573,31 @@ function lengthFromDescription(text: string): number | null {
 function convert(
   o: Observation,
   item: CanonicalItem,
-): { value: number | null; conversion?: string; per_length_mm?: number } | null {
+):
+  | { value: number | null; conversion?: string; per_length_mm?: number }
+  | null {
   if (o.value == null || o.value === 0) return { value: null };
   const from = normaliseUnit(o.source_unit);
   if (from === item.unit) return { value: o.value };
-  if (item.unit === "delivery" && (from === "job" || from === "each")) return { value: o.value };
-  if (item.unit === "bag" && from === "each" && /\bBAG\b/i.test(o.description)) return { value: o.value };
-  if (item.unit === "lm" && (from === "length" || from === "each" || from === "sheet")) {
+  if (item.unit === "delivery" && (from === "job" || from === "each")) {
+    return { value: o.value };
+  }
+  if (
+    item.unit === "bag" && from === "each" && /\bBAG\b/i.test(o.description)
+  ) return { value: o.value };
+  if (
+    item.unit === "lm" &&
+    (from === "length" || from === "each" || from === "sheet")
+  ) {
     const mm = o.per_length_mm ?? lengthFromDescription(o.description);
     if (!mm) return null;
     const perLm = Math.round((o.value / (mm / 1000)) * 10000) / 10000;
     return {
       value: perLm,
       per_length_mm: mm,
-      conversion: `$${o.value.toFixed(2)} per ${(mm / 1000).toFixed(mm % 100 ? 2 : 1)} m length = $${perLm.toFixed(2)}/LM`,
+      conversion: `$${o.value.toFixed(2)} per ${
+        (mm / 1000).toFixed(mm % 100 ? 2 : 1)
+      } m length = $${perLm.toFixed(2)}/LM`,
     };
   }
   return null;
@@ -372,7 +623,9 @@ function resolveKey(o: Observation): CanonicalItem | null {
       }
       const named = PATIO_NAMED[key];
       if (named) return canonical(named);
-      if (category === "roofing" && !/^(infill|gable)-/.test(key)) return roofItem(key);
+      if (category === "roofing" && !/^(infill|gable)-/.test(key)) {
+        return roofItem(key);
+      }
       return null;
     }
     case "s05_patio_hardcoded": {
@@ -382,7 +635,9 @@ function resolveKey(o: Observation): CanonicalItem | null {
         const s = steelKey(key);
         return s ? steelItem(s) : null;
       }
-      if (table === "RISER_PRICES") return PATIO_NAMED[key] ? canonical(PATIO_NAMED[key]) : null;
+      if (table === "RISER_PRICES") {
+        return PATIO_NAMED[key] ? canonical(PATIO_NAMED[key]) : null;
+      }
       if (table === "STOCK_LENGTH_WASTE_CONFIG") {
         const map: Record<string, string> = {
           "downpipe-95x45": "downpipe-95x45",
@@ -396,7 +651,10 @@ function resolveKey(o: Observation): CanonicalItem | null {
           const s = steelKey(key);
           return s ? steelItem(s) : null;
         }
-        if (/^(solarspan|stratco cgi|spanplus|trimdek|corrugated|spandek|laserlite|ampelite)/i.test(key)) {
+        if (
+          /^(solarspan|stratco cgi|spanplus|trimdek|corrugated|spandek|laserlite|ampelite)/i
+            .test(key)
+        ) {
           return roofItem(key);
         }
         const named = PATIO_NAMED[key.toLowerCase()];
@@ -418,7 +676,11 @@ function resolveKey(o: Observation): CanonicalItem | null {
         return {
           item_key: `stratco-${slug(sk)}`,
           family: "stratco",
-          category: /gate/.test(sk) ? "gate" : /slat/.test(sk) ? "slat" : "frame",
+          category: /gate/.test(sk)
+            ? "gate"
+            : /slat/.test(sk)
+            ? "slat"
+            : "frame",
           description: o.description,
           unit: normaliseUnit(o.source_unit) ?? "each",
           reconciled: true,
@@ -428,11 +690,20 @@ function resolveKey(o: Observation): CanonicalItem | null {
         const s = steelKey(o.description);
         return s ? steelItem(s) : null;
       }
-      if (/DELIVERY|delivery \(address withheld\)/i.test(o.description) && /R&R/.test(o.supplier)) {
+      if (
+        /DELIVERY|delivery \(address withheld\)/i.test(o.description) &&
+        /R&R/.test(o.supplier)
+      ) {
         return canonical("fence-delivery-rr");
       }
-      if (/COLORBOND PANEL H(\d+)mm X W(\d+)mm (?:INC|WITH) (\d+)mm POSTS/i.test(o.description)) {
-        const [, h, w, p] = o.description.match(/H(\d+)mm X W(\d+)mm (?:INC|WITH) (\d+)mm/i)!;
+      if (
+        /COLORBOND PANEL H(\d+)mm X W(\d+)mm (?:INC|WITH) (\d+)mm POSTS/i.test(
+          o.description,
+        )
+      ) {
+        const [, h, w, p] = o.description.match(
+          /H(\d+)mm X W(\d+)mm (?:INC|WITH) (\d+)mm/i,
+        )!;
         const key = `fence-panel-kit-h${h}-w${w}-post${p}`;
         return ITEMS[key] ? canonical(key) : {
           item_key: key,
@@ -443,29 +714,61 @@ function resolveKey(o: Observation): CanonicalItem | null {
           reconciled: true,
         };
       }
-      if (/PLINTH/i.test(o.description) && /W2380/i.test(o.description)) return canonical("fence-plinth-std-w2380");
-      if (/PLINTH/i.test(o.description) && /W3150/i.test(o.description)) return canonical("fence-plinth-long-w3150");
-      if (/SHS POST 50 X 50.*L2400/i.test(o.description)) return canonical("fence-post-shs-50x50x1.6-l2400");
-      if (/SHS POST 50 X 50.*L2700/i.test(o.description)) return canonical("fence-post-shs-50x50x1.6-l2700");
-      if (/SHS POST 90 X 90.*L1800/i.test(o.description)) return canonical("fence-post-shs-90x90x3.0-l1800");
-      if (/^CEMENT 20KG BAG ONLY- Rainproof Kwikset/i.test(o.description)) return canonical("concrete-kwikset-20kg");
-      if (/PATIO GUTTER Surfmist|GU10/i.test(`${o.description}`) && !/STOP END/i.test(o.description)) {
+      if (/PLINTH/i.test(o.description) && /W2380/i.test(o.description)) {
+        return canonical("fence-plinth-std-w2380");
+      }
+      if (/PLINTH/i.test(o.description) && /W3150/i.test(o.description)) {
+        return canonical("fence-plinth-long-w3150");
+      }
+      if (/SHS POST 50 X 50.*L2400/i.test(o.description)) {
+        return canonical("fence-post-shs-50x50x1.6-l2400");
+      }
+      if (/SHS POST 50 X 50.*L2700/i.test(o.description)) {
+        return canonical("fence-post-shs-50x50x1.6-l2700");
+      }
+      if (/SHS POST 90 X 90.*L1800/i.test(o.description)) {
+        return canonical("fence-post-shs-90x90x3.0-l1800");
+      }
+      if (/^CEMENT 20KG BAG ONLY- Rainproof Kwikset/i.test(o.description)) {
+        return canonical("concrete-kwikset-20kg");
+      }
+      if (
+        /PATIO GUTTER Surfmist|GU10/i.test(`${o.description}`) &&
+        !/STOP END/i.test(o.description)
+      ) {
         return canonical("gutter-patio");
       }
-      if (/DOWNPIPE - 1800mm|DOWNPIPE 95x45 1\.8m/i.test(o.description)) return canonical("downpipe-95x45");
-      if (/DOWNPIPE CLIP/i.test(o.description)) return canonical("downpipe-clip-95x45");
-      if (/DOWNPIPE POP|DOWNPIPE OUTLET/i.test(o.description)) return canonical("downpipe-outlet-95x45");
-      if (/PATIO GUTTER STOP END/i.test(o.description)) return canonical("gutter-stop-end-patio");
-      if (/UNIVERSAL GUTTER CLIP/i.test(o.description)) return canonical("gutter-clip-universal");
-      if (/TW-10-0700/i.test(o.description)) return canonical("infill-twinwall-10mm-700");
-      if (/Solasafe .*5Rib/i.test(o.description)) return canonical("roof-ampelite-solasafe-5rib");
+      if (/DOWNPIPE - 1800mm|DOWNPIPE 95x45 1\.8m/i.test(o.description)) {
+        return canonical("downpipe-95x45");
+      }
+      if (/DOWNPIPE CLIP/i.test(o.description)) {
+        return canonical("downpipe-clip-95x45");
+      }
+      if (/DOWNPIPE POP|DOWNPIPE OUTLET/i.test(o.description)) {
+        return canonical("downpipe-outlet-95x45");
+      }
+      if (/PATIO GUTTER STOP END/i.test(o.description)) {
+        return canonical("gutter-stop-end-patio");
+      }
+      if (/UNIVERSAL GUTTER CLIP/i.test(o.description)) {
+        return canonical("gutter-clip-universal");
+      }
+      if (/TW-10-0700/i.test(o.description)) {
+        return canonical("infill-twinwall-10mm-700");
+      }
+      if (/Solasafe .*5Rib/i.test(o.description)) {
+        return canonical("roof-ampelite-solasafe-5rib");
+      }
       const girth = flashingGirth(o);
       if (girth) {
         return {
           item_key: `flashing-girth-${girth.girth}-${girth.bends}-bend`,
           family: "patio",
           category: "flashing",
-          description: `Flashing 0.55, ${girth.girth} mm girth, ${girth.bends} bend${girth.bends > 1 ? "s" : ""}`,
+          description:
+            `Flashing 0.55, ${girth.girth} mm girth, ${girth.bends} bend${
+              girth.bends > 1 ? "s" : ""
+            }`,
           unit: "lm",
           reconciled: true,
         };
@@ -478,9 +781,14 @@ function resolveKey(o: Observation): CanonicalItem | null {
 }
 
 function roofItem(key: string): CanonicalItem {
-  let s = key.toLowerCase().replace(/^default-/, "").replace(/mm$/, "").replace(/[^a-z0-9]/g, "");
+  let s = key.toLowerCase().replace(/^default-/, "").replace(/mm$/, "").replace(
+    /[^a-z0-9]/g,
+    "",
+  );
   s = ROOF_ALIASES[s] ?? s;
-  if (s === "ampelitesolasafe5rib") return canonical("roof-ampelite-solasafe-5rib");
+  if (s === "ampelitesolasafe5rib") {
+    return canonical("roof-ampelite-solasafe-5rib");
+  }
   return {
     item_key: `roof-${s}`,
     family: "patio",
@@ -492,7 +800,9 @@ function roofItem(key: string): CanonicalItem {
 }
 
 /** Girth (mm) and bends from a flashing line, e.g. "FLASH 150 C WITH 2 B". */
-export function flashingGirth(o: Observation): { girth: number; bends: number } | null {
+export function flashingGirth(
+  o: Observation,
+): { girth: number; bends: number } | null {
   const cmi = o.description.match(/FLASH (\d+) C WITH (\d+) B/i);
   if (cmi) return { girth: Number(cmi[1]), bends: Number(cmi[2]) };
   const met = o.description.match(/(\d+)mm girth (\d+)-BEND FLASHING/i);
@@ -500,7 +810,9 @@ export function flashingGirth(o: Observation): { girth: number; bends: number } 
   return null;
 }
 
-export function resolveObservation(o: Observation): Resolution | { unresolved: string } {
+export function resolveObservation(
+  o: Observation,
+): Resolution | { unresolved: string } {
   const itemUnit = normaliseUnit(o.source_unit);
   const found = resolveKey(o);
   if (found) {
@@ -521,6 +833,8 @@ export function resolveObservation(o: Observation): Resolution | { unresolved: s
       conversion: `unit ${o.source_unit} does not convert to ${found.unit}`,
     };
   }
-  if (!itemUnit) return { unresolved: `unit ${o.source_unit} is not a price book unit` };
+  if (!itemUnit) {
+    return { unresolved: `unit ${o.source_unit} is not a price book unit` };
+  }
   return { item: unreconciled(o, itemUnit), value: o.value || null };
 }

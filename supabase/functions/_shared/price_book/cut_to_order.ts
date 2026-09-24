@@ -2,7 +2,7 @@
 //
 // Turns required lengths into the lengths we must BUY from a supplier's stock
 // list, and says how much of what we pay for never ends up on the job. Every
-// tool and the terminal price stock through this function; do not write a
+// future tool and terminal caller must price stock through this function; do not write a
 // second nesting routine.
 //
 // Ported from the patio tool's nestCuts / calculateStockRequired
@@ -11,7 +11,7 @@
 // - one_per_stick: each piece gets the smallest stock length that holds it
 //   (posts, beams). A piece longer than every stock length is a special order.
 // - nest: several pieces share one stock length, separated by the saw kerf
-//   (rafters, battens, slats). A single cut length reproduces nestCuts exactly:
+//   (rafters, battens, slats). A single cut length preserves nestCuts placement and bar counts:
 //   the smallest stock that holds one piece, switching to a longer stock only
 //   when that needs FEWER sticks. Mixed cut lengths are packed first-fit
 //   decreasing on each candidate stock length and the plan with the fewest
@@ -22,7 +22,8 @@
 //
 // Waste is what we pay for and do not install: bought length minus required
 // length. It therefore includes the saw kerf. Per-stick `offcut_mm` is the
-// usable remainder after cuts and kerf (the patio tool's "waste").
+// usable remainder after every cut's kerf, clamped to zero; nestCuts omits
+// the final kerf from its remainder.
 //
 // Pure: no database, clock or network.
 
@@ -95,10 +96,16 @@ function positiveInteger(value: unknown): boolean {
 
 function validate(req: CutRequest): { stock: number[]; kerf: number } {
   if (!CUT_RULES.includes(req.rule)) {
-    throw new CutToOrderError("cut_rule_unknown", `unknown cut rule ${req.rule}`);
+    throw new CutToOrderError(
+      "cut_rule_unknown",
+      `unknown cut rule ${req.rule}`,
+    );
   }
   if (!Array.isArray(req.pieces) || req.pieces.length === 0) {
-    throw new CutToOrderError("cut_pieces_missing", "at least one piece is required");
+    throw new CutToOrderError(
+      "cut_pieces_missing",
+      "at least one piece is required",
+    );
   }
   let pieceCount = 0;
   for (const piece of req.pieces) {
@@ -118,7 +125,10 @@ function validate(req: CutRequest): { stock: number[]; kerf: number } {
   }
   const kerf = req.kerf_mm ?? DEFAULT_KERF_MM;
   if (typeof kerf !== "number" || !Number.isFinite(kerf) || kerf < 0) {
-    throw new CutToOrderError("cut_kerf_invalid", "kerf_mm must be zero or more");
+    throw new CutToOrderError(
+      "cut_kerf_invalid",
+      "kerf_mm must be zero or more",
+    );
   }
   if (req.rule === "cut_to_size") return { stock: [], kerf };
   const stock = [...new Set(req.stock_lengths_mm ?? [])].sort((a, b) => a - b);
@@ -144,14 +154,22 @@ function stickUsed(cuts: number[], kerf: number): number {
   return cuts.reduce((a, b) => a + b, 0) + (cuts.length - 1) * kerf;
 }
 
-function usableOffcut(stockLength: number, cuts: number[], kerf: number): number {
+function usableOffcut(
+  stockLength: number,
+  cuts: number[],
+  kerf: number,
+): number {
   return cuts.length === 0
     ? stockLength
     : Math.max(0, stockLength - stickUsed(cuts, kerf) - kerf);
 }
 
 /** How many pieces of one length fit in a stick (nestCuts' loop). */
-function piecesPerStick(cut: number, stockLength: number, kerf: number): number {
+function piecesPerStick(
+  cut: number,
+  stockLength: number,
+  kerf: number,
+): number {
   let n = 0;
   let used = 0;
   while (used + cut <= stockLength) {
@@ -212,7 +230,11 @@ function firstFitDecreasing(
   }));
 }
 
-function nestMixed(lengths: number[], stock: number[], kerf: number): CutStick[] {
+function nestMixed(
+  lengths: number[],
+  stock: number[],
+  kerf: number,
+): CutStick[] {
   const longest = Math.max(...lengths);
   let best: CutStick[] | null = null;
   for (const stockLength of stock.filter((s) => s >= longest)) {
@@ -232,7 +254,10 @@ function nestMixed(lengths: number[], stock: number[], kerf: number): CutStick[]
 function orderFromSticks(sticks: CutStick[]): CutOrderLine[] {
   const counts = new Map<number, number>();
   for (const stick of sticks) {
-    counts.set(stick.stock_length_mm, (counts.get(stick.stock_length_mm) ?? 0) + 1);
+    counts.set(
+      stick.stock_length_mm,
+      (counts.get(stick.stock_length_mm) ?? 0) + 1,
+    );
   }
   return [...counts.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -258,7 +283,16 @@ export function cutToOrder(req: CutRequest): CutPlan {
       qty: p.qty,
       special_order: false,
     }));
-    return finish(req.rule, kerf, [], order, [], all.length, required, required);
+    return finish(
+      req.rule,
+      kerf,
+      [],
+      order,
+      [],
+      all.length,
+      required,
+      required,
+    );
   }
 
   const maxStock = stock[stock.length - 1];
@@ -271,7 +305,11 @@ export function cutToOrder(req: CutRequest): CutPlan {
     if (req.rule === "one_per_stick") {
       sticks = fits.map((len) => {
         const s = stock.find((x) => x >= len) as number;
-        return { stock_length_mm: s, cuts_mm: [len], offcut_mm: usableOffcut(s, [len], kerf) };
+        return {
+          stock_length_mm: s,
+          cuts_mm: [len],
+          offcut_mm: usableOffcut(s, [len], kerf),
+        };
       });
     } else if (new Set(fits).size === 1) {
       sticks = nestSingleLength(fits[0], fits.length, stock, kerf);
@@ -289,8 +327,8 @@ export function cutToOrder(req: CutRequest): CutPlan {
     })),
   ];
   const specialMm = special.reduce((a, b) => a + b, 0);
-  const purchased =
-    sticks.reduce((a, s) => a + s.stock_length_mm, 0) + specialMm;
+  const purchased = sticks.reduce((a, s) => a + s.stock_length_mm, 0) +
+    specialMm;
   return finish(
     req.rule,
     kerf,
@@ -341,9 +379,13 @@ export function costCutPlanPerLm(plan: CutPlan, costPerLmExGst: number): {
   special_order_priced_at_stock_rate: boolean;
 } {
   if (!Number.isFinite(costPerLmExGst) || costPerLmExGst <= 0) {
-    throw new CutToOrderError("cut_cost_invalid", "cost per metre must be above zero");
+    throw new CutToOrderError(
+      "cut_cost_invalid",
+      "cost per metre must be above zero",
+    );
   }
-  const cents = (mm: number) => Math.round((mm / 1000) * costPerLmExGst * 100) / 100;
+  const cents = (mm: number) =>
+    Math.round((mm / 1000) * costPerLmExGst * 100) / 100;
   return {
     purchased_ex_gst: cents(plan.purchased_mm),
     waste_ex_gst: cents(plan.waste_mm),

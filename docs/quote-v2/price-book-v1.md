@@ -8,7 +8,9 @@ Apply Before Edge Deploys" in `AGENTS.md`).
 ## What it is
 
 One database home for what materials and labour **cost us**, with full history,
-that every quoting tool and the terminal read. Owner, 24 Sep 2026: "I just want
+intended for every quoting tool and the terminal. Stage 1 provides the database,
+read endpoint and cut planner; tool/terminal integration and per-line markup
+writes are deliberately deferred to stages 2 to 5. Owner, 24 Sep 2026: "I just want
 the tools to capture the accurate pricing of the costs to us. And we can add the
 markup of what we want."
 
@@ -39,7 +41,9 @@ Rules the database enforces:
 - **No zero cost.** `cost_ex_gst > 0`. An item with no cost reads `unpriced`.
 - **Evidence on every row**, and a blessed row names who blessed it and when.
 - **Private.** RLS on; no `anon` or `authenticated` access; `service_role` may
-  read and append only.
+  read all tables and directly insert only provisional costs and proposals.
+  Blessed costs require `price_book_decide_proposal` and its approver check;
+  direct blessed inserts by `service_role` are refused.
 - A line markup below 1.0 (selling under cost) is refused.
 
 ## Which price is current
@@ -83,12 +87,17 @@ the new value as a blessed row. Nothing is overwritten.
 
 `supabase/functions/_shared/price_book/cut_to_order.ts` is the ONE function that
 turns required lengths into order lengths plus waste. Ported from the patio
-tool's `nestCuts` (commit `884a208`) and parity-tested against a verbatim copy.
-Waste is what we pay for and do not install (kerf included).
+tool's `nestCuts` (commit `884a208`), with piece placement and bar counts
+parity-tested against a verbatim copy. `offcut_mm` is the usable remainder
+after every cut's kerf, clamped to zero; the legacy fixture omits the final
+kerf from its remainder. `waste_mm` is bought length minus installed length
+(kerf included). Requests exceeding `MAX_CUT_PIECES` are refused before
+expansion with `cut_piece_count_exceeds_limit`.
 
 Proofs (`cut_to_order_test.ts`): Kiko slats 101 pieces nest into 27 bars of
 6100 mm at 4.1% waste; 6 m of 100x50 buys one 6.5 m length from 5500/6500/8000
-(the 0.5 m offcut costs $13.29 at $26.57/LM); 4.8 m buys 5.5 m.
+(500 mm waste costs $13.29 at $26.57/LM, leaving 497 mm usable offcut
+with 3 mm kerf); 4.8 m buys 5.5 m.
 
 ## Read action: `price-book` edge function
 
@@ -106,8 +115,10 @@ public `SW_API_KEY` are refused). Deploy with JWT verification on.
 ## Import from the ten current stores
 
 `scripts/quote-v2/price_book_import.ts`, dry run by default; `--apply` only to a
-localhost database. Extractors: `price_book_sources.ts`; which item an
-observation is about: `price_book_catalog.ts`; rows and the diff report:
+localhost database using a single-host `postgres://` or `postgresql://` URI
+with host `localhost` or `127.0.0.1` and no query parameters or fragment.
+The import clears inherited libpq settings before invoking `psql`. Extractors:
+`price_book_sources.ts`; which item an observation is about: `price_book_catalog.ts`; rows and the diff report:
 `price_book_plan.ts`. All rows load provisional; a source comment saying
 "blessed" is reported, not trusted. Delivery lines on supplier invoices carry
 client street addresses and are replaced, never copied. Local proof:

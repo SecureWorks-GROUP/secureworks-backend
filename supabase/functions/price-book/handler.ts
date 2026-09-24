@@ -1,6 +1,6 @@
 // Quote v2, stage 1: the price book read action. PROGRAM BRANCH ONLY.
 //
-// The one door every tool and the terminal use to read what materials cost
+// The read door for future tool and terminal integration: what materials cost
 // us. Read-only: it never writes a price, a proposal or a decision.
 //
 //   GET  ?action=current[&item_keys=a,b][&family=patio]
@@ -30,11 +30,11 @@
 
 import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import {
+  costCutPlanPerLm,
   CUT_RULES,
   type CutRule,
-  CutToOrderError,
-  costCutPlanPerLm,
   cutToOrder,
+  CutToOrderError,
 } from "../_shared/price_book/cut_to_order.ts";
 
 export const PRICE_BOOK_READ_ROLES = new Set([
@@ -45,7 +45,12 @@ export const PRICE_BOOK_READ_ROLES = new Set([
   "sales",
 ]);
 
-export const PRICE_BOOK_FAMILIES = new Set(["fencing", "patio", "stratco", "misc"]);
+export const PRICE_BOOK_FAMILIES = new Set([
+  "fencing",
+  "patio",
+  "stratco",
+  "misc",
+]);
 
 export interface RpcResult {
   data: unknown;
@@ -62,7 +67,8 @@ export interface PriceBookDeps {
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-api-key, content-type, apikey, x-client-info",
+  "Access-Control-Allow-Headers":
+    "authorization, x-api-key, content-type, apikey, x-client-info",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
@@ -94,26 +100,40 @@ export async function authorizePriceBookRead(
 
   const presents = (secret: string | null) =>
     !!secret && secret !== shared && (xApiKey === secret || bearer === secret);
-  if (presents(service) || presents(agent) || (bearer && isServiceRoleJwt(bearer))) {
+  if (
+    presents(service) || presents(agent) || (bearer && isServiceRoleJwt(bearer))
+  ) {
     return { ok: true, caller: "server", role: null };
   }
   if (!bearer || (shared && bearer === shared)) {
     return {
       ok: false,
-      response: refuse(401, "user_jwt_required", "A signed-in session is required."),
+      response: refuse(
+        401,
+        "user_jwt_required",
+        "A signed-in session is required.",
+      ),
     };
   }
   const role = await deps.userRole(bearer).catch(() => null);
   if (role === null) {
     return {
       ok: false,
-      response: refuse(401, "user_jwt_required", "A signed-in session is required."),
+      response: refuse(
+        401,
+        "user_jwt_required",
+        "A signed-in session is required.",
+      ),
     };
   }
   if (!PRICE_BOOK_READ_ROLES.has(role.toLowerCase())) {
     return {
       ok: false,
-      response: refuse(403, "operator_access_required", "Cost prices are internal."),
+      response: refuse(
+        403,
+        "operator_access_required",
+        "Cost prices are internal.",
+      ),
     };
   }
   return { ok: true, caller: "user", role };
@@ -147,7 +167,11 @@ async function currentRows(
   });
   if (error) {
     return {
-      response: refuse(502, "price_book_unreadable", "The price book could not be read."),
+      response: refuse(
+        502,
+        "price_book_unreadable",
+        "The price book could not be read.",
+      ),
     };
   }
   return { rows: (Array.isArray(data) ? data : []) as CurrentRow[] };
@@ -156,13 +180,19 @@ async function currentRows(
 async function actionCurrent(url: URL, deps: PriceBookDeps): Promise<Response> {
   const family = url.searchParams.get("family");
   if (family && !PRICE_BOOK_FAMILIES.has(family)) {
-    return refuse(400, "family_unknown", "family must be fencing, patio, stratco or misc.");
+    return refuse(
+      400,
+      "family_unknown",
+      "family must be fencing, patio, stratco or misc.",
+    );
   }
   const itemKeys = parseKeys(url.searchParams.get("item_keys"));
   const read = await currentRows(deps, itemKeys, family);
   if ("response" in read) return read.response;
   const counts = { blessed: 0, provisional: 0, unpriced: 0 };
-  for (const row of read.rows) counts[row.status] = (counts[row.status] ?? 0) + 1;
+  for (const row of read.rows) {
+    counts[row.status] = (counts[row.status] ?? 0) + 1;
+  }
   const found = new Set(read.rows.map((r) => r.item_key));
   return json({
     ok: true,
@@ -177,13 +207,21 @@ async function actionCurrent(url: URL, deps: PriceBookDeps): Promise<Response> {
 async function actionMarkup(url: URL, deps: PriceBookDeps): Promise<Response> {
   const family = url.searchParams.get("family");
   if (!family || !PRICE_BOOK_FAMILIES.has(family)) {
-    return refuse(400, "family_unknown", "family must be fencing, patio, stratco or misc.");
+    return refuse(
+      400,
+      "family_unknown",
+      "family must be fencing, patio, stratco or misc.",
+    );
   }
   const { data, error } = await deps.rpc("price_book_current_markup", {
     p_family: family,
   });
   if (error) {
-    return refuse(502, "price_book_unreadable", "The price book could not be read.");
+    return refuse(
+      502,
+      "price_book_unreadable",
+      "The price book could not be read.",
+    );
   }
   const row = Array.isArray(data) ? data[0] ?? null : null;
   return json({
@@ -193,16 +231,33 @@ async function actionMarkup(url: URL, deps: PriceBookDeps): Promise<Response> {
   });
 }
 
-async function actionAllowances(url: URL, deps: PriceBookDeps): Promise<Response> {
+async function actionAllowances(
+  url: URL,
+  deps: PriceBookDeps,
+): Promise<Response> {
   const family = url.searchParams.get("family");
   if (family && !PRICE_BOOK_FAMILIES.has(family)) {
-    return refuse(400, "family_unknown", "family must be fencing, patio, stratco or misc.");
+    return refuse(
+      400,
+      "family_unknown",
+      "family must be fencing, patio, stratco or misc.",
+    );
   }
-  const { data, error } = await deps.rpc("price_book_current_allowances", { p_family: family });
+  const { data, error } = await deps.rpc("price_book_current_allowances", {
+    p_family: family,
+  });
   if (error) {
-    return refuse(502, "price_book_unreadable", "The price book could not be read.");
+    return refuse(
+      502,
+      "price_book_unreadable",
+      "The price book could not be read.",
+    );
   }
-  return json({ ok: true, family, allowances: Array.isArray(data) ? data : [] });
+  return json({
+    ok: true,
+    family,
+    allowances: Array.isArray(data) ? data : [],
+  });
 }
 
 async function actionCut(req: Request, deps: PriceBookDeps): Promise<Response> {
@@ -217,15 +272,25 @@ async function actionCut(req: Request, deps: PriceBookDeps): Promise<Response> {
   const read = await currentRows(deps, [itemKey], null);
   if ("response" in read) return read.response;
   const item = read.rows[0];
-  if (!item) return refuse(404, "item_unknown", `No price book item ${itemKey}.`);
+  if (!item) {
+    return refuse(404, "item_unknown", `No price book item ${itemKey}.`);
+  }
 
   const statedRule = body.rule as CutRule | undefined;
   if (statedRule !== undefined && !CUT_RULES.includes(statedRule)) {
-    return refuse(400, "cut_rule_unknown", "rule must be one_per_stick, nest or cut_to_size.");
+    return refuse(
+      400,
+      "cut_rule_unknown",
+      "rule must be one_per_stick, nest or cut_to_size.",
+    );
   }
   const rule = statedRule ?? item.cut_rule;
   if (!rule) {
-    return refuse(409, "cut_rule_unknown_for_item", `${itemKey} has no cut rule; state one.`);
+    return refuse(
+      409,
+      "cut_rule_unknown_for_item",
+      `${itemKey} has no cut rule; state one.`,
+    );
   }
   const stock = Array.isArray(body.stock_lengths_mm)
     ? body.stock_lengths_mm as number[]
@@ -253,10 +318,14 @@ async function actionCut(req: Request, deps: PriceBookDeps): Promise<Response> {
       ok: true,
       item_key: itemKey,
       price_status: item.status,
-      stock_lengths_source: Array.isArray(body.stock_lengths_mm) ? "caller" : "price_book",
+      stock_lengths_source: Array.isArray(body.stock_lengths_mm)
+        ? "caller"
+        : "price_book",
       rule_source: statedRule ? "caller" : "price_book",
       plan,
-      cost: costPerLm ? { per_lm_ex_gst: costPerLm, ...costCutPlanPerLm(plan, costPerLm) } : null,
+      cost: costPerLm
+        ? { per_lm_ex_gst: costPerLm, ...costCutPlanPerLm(plan, costPerLm) }
+        : null,
     });
   } catch (e) {
     if (e instanceof CutToOrderError) return refuse(400, e.code, e.message);
@@ -275,11 +344,23 @@ export async function handlePriceBookRequest(
   const url = new URL(req.url);
   const action = url.searchParams.get("action") || "";
   try {
-    if (action === "current" && req.method === "GET") return await actionCurrent(url, deps);
-    if (action === "markup" && req.method === "GET") return await actionMarkup(url, deps);
-    if (action === "allowances" && req.method === "GET") return await actionAllowances(url, deps);
-    if (action === "cut" && req.method === "POST") return await actionCut(req, deps);
-    return refuse(400, "action_unknown", "Use GET current, GET markup, GET allowances or POST cut.");
+    if (action === "current" && req.method === "GET") {
+      return await actionCurrent(url, deps);
+    }
+    if (action === "markup" && req.method === "GET") {
+      return await actionMarkup(url, deps);
+    }
+    if (action === "allowances" && req.method === "GET") {
+      return await actionAllowances(url, deps);
+    }
+    if (action === "cut" && req.method === "POST") {
+      return await actionCut(req, deps);
+    }
+    return refuse(
+      400,
+      "action_unknown",
+      "Use GET current, GET markup, GET allowances or POST cut.",
+    );
   } catch (_) {
     return refuse(500, "price_book_error", "The price book read failed.");
   }

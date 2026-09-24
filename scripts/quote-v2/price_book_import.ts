@@ -32,7 +32,12 @@ import {
   type SourceRefs,
   wikiSupplierCsv,
 } from "./price_book_sources.ts";
-import { buildPlan, planSql, renderDiff, summarise } from "./price_book_plan.ts";
+import {
+  buildPlan,
+  planSql,
+  renderDiff,
+  summarise,
+} from "./price_book_plan.ts";
 
 export const WIKI_CSVS = [
   "ampelite.csv",
@@ -51,9 +56,12 @@ function flag(args: string[], name: string): string | undefined {
 /** Only a disposable local database may receive an import. */
 export function assertLocalDatabase(url: string | undefined): string {
   if (!url) throw new Error("--apply needs --db-url");
-  const localUri = /^postgres(?:ql)?:\/\/(?:[^/?#@]+@)?(?:127\.0\.0\.1|localhost)(?::\d+)?\/[^/?#]+$/;
+  const localUri =
+    /^postgres(?:ql)?:\/\/(?:[^/?#@]+@)?(?:127\.0\.0\.1|localhost)(?::\d+)?\/[^/?#]+$/;
   if (!localUri.test(url)) {
-    throw new Error("--db-url must be a localhost database; this import never writes anywhere else");
+    throw new Error(
+      "--db-url must be a localhost database; this import never writes anywhere else",
+    );
   }
   return url;
 }
@@ -73,7 +81,9 @@ export async function readObservations(dirs: {
   wiki: string;
   backend: string;
   ledgerJson?: string;
-}): Promise<{ observations: Observation[]; refs: SourceRefs; notObserved: string[] }> {
+}): Promise<
+  { observations: Observation[]; refs: SourceRefs; notObserved: string[] }
+> {
   const refs: SourceRefs = {
     fenceCommit: await gitHead(dirs.fence),
     patioCommit: await gitHead(dirs.patio),
@@ -87,25 +97,44 @@ export async function readObservations(dirs: {
     ...fenceCostPrices(fenceIndex, refs),
     ...fenceSellDefaults(fenceIndex, refs),
     ...fenceBusinessRules(read(`${dirs.fence}/business_rules.js`), refs),
-    ...fenceParitySeed(read(`${dirs.fence}/parity/seed_scope_tool_defaults.sql`), refs),
+    ...fenceParitySeed(
+      read(`${dirs.fence}/parity/seed_scope_tool_defaults.sql`),
+      refs,
+    ),
     ...patioHardcoded(patioIndex, refs),
     ...patioDeviceCache(),
-    ...patioEngineSnapshot(read(`${dirs.patio}/engine/v1/rate-snapshot.ts`), refs),
-    ...patioEnginePolicy(read(`${dirs.patio}/engine/v1/pricing-model.ts`), refs),
+    ...patioEngineSnapshot(
+      read(`${dirs.patio}/engine/v1/rate-snapshot.ts`),
+      refs,
+    ),
+    ...patioEnginePolicy(
+      read(`${dirs.patio}/engine/v1/pricing-model.ts`),
+      refs,
+    ),
     ...scopeToolDefaultsRepoSeed(
-      read(`${dirs.backend}/supabase/migrations/20260320000006_scope_tool_defaults.sql`),
+      read(
+        `${dirs.backend}/supabase/migrations/20260320000006_scope_tool_defaults.sql`,
+      ),
       refs,
     ),
   ];
   for (const f of WIKI_CSVS) {
-    observations.push(...wikiSupplierCsv(f, read(`${dirs.wiki}/research/supplier-pricing/${f}`), refs));
+    observations.push(
+      ...wikiSupplierCsv(
+        f,
+        read(`${dirs.wiki}/research/supplier-pricing/${f}`),
+        refs,
+      ),
+    );
   }
   const notObserved = [
     "6 patio per-device cache: lives in each iPad's browser storage; no server copy exists.",
     "8 scope_tool_defaults (live table): current rows need a production read; only the repo seed and the fence parity seed (store 4) were read.",
   ];
   if (dirs.ledgerJson) {
-    observations.push(...materialPriceLedger(JSON.parse(read(dirs.ledgerJson))));
+    observations.push(
+      ...materialPriceLedger(JSON.parse(read(dirs.ledgerJson))),
+    );
   } else {
     notObserved.push(
       "9 material_price_ledger (live): needs a production read; pass an operator export with --ledger-json.",
@@ -145,7 +174,13 @@ async function main(args: string[]) {
   const diffOut = flag(args, "--diff-out");
   if (diffOut) Deno.writeTextFileSync(diffOut, diff);
 
-  console.log(JSON.stringify({ mode: apply ? "apply" : "dry_run", refs, summary: summarise(plan) }, null, 2));
+  console.log(
+    JSON.stringify(
+      { mode: apply ? "apply" : "dry_run", refs, summary: summarise(plan) },
+      null,
+      2,
+    ),
+  );
 
   if (apply && dbUrl) {
     const tmp = Deno.makeTempFileSync({ suffix: ".sql" });
