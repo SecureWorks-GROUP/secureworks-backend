@@ -561,8 +561,32 @@ function n4Backfill(partial: Partial<World> = {}): World {
   return w;
 }
 
-Deno.test("backfill dry run (the default): reads GHL, reports each call, writes nothing at all, even with the flag off", async () => {
+Deno.test("backfill dry run with the fetch flag off: lists the calls it would fetch, reads no transcript and writes nothing", async () => {
   const w = n4Backfill({ flag: false });
+  const result = await runBackfill(
+    { dryRun: true, after: null, maxContacts: 10 },
+    deps(w),
+  );
+  assert(result.outcome === "ran");
+  assertEquals(
+    result.calls.map((c) => [c.call_message_id, c.call_row, c.outcome]),
+    [
+      ["MeVPH47LXDbgcvPUAkjY", "would_write", "would_fetch"],
+      ["Ag9DKkqpfsadWkJS8jst", "would_write", "would_fetch"],
+    ],
+  );
+  assertEquals(result.counts.would_fetch, 2);
+  assertEquals(
+    w.reads.filter((r) =>
+      !r.startsWith("conversations:") && !r.startsWith("messages:")
+    ),
+    [],
+  );
+  assertEquals([w.captured, w.fetches, w.runs], [[], [], []]);
+});
+
+Deno.test("backfill dry run (the default) with the flag on: reads GHL, reports each call, writes nothing at all", async () => {
+  const w = n4Backfill();
   const result = await runBackfill(
     { dryRun: true, after: null, maxContacts: 10 },
     deps(w),

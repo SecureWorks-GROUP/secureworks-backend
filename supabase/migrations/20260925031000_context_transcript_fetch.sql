@@ -15,8 +15,9 @@
 --     nothing for PUBLIC, anon or authenticated; service_role may only read it.
 --  4. record_call_transcript_fetch(jsonb): the table's one writer. The backoff
 --     lives here, not in the caller: a not-ready or failed read waits 2 min,
---     5 min, 15 min, 1 h, 6 h, 24 h; after the sixth attempt the outcome is
---     terminal (not_returned for "no transcript yet", failed:<code> for a
+--     5 min, 15 min, 1 h, 6 h, 24 h (six waits after the first six reads);
+--     the read after the last wait that still fails is terminal
+--     (not_returned for "no transcript yet", failed:<code> for a
 --     provider or save error). A history-load read of a call older than 48 h
 --     that finds no transcript is terminal at once (GHL will not produce one
 --     later). A terminal outcome is never reopened. Terminal records older
@@ -90,9 +91,9 @@ BEGIN
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.context_business_minutes(timestamptz,timestamptz)',ARRAY['510dbec36291c25aa1887ade89e2ca4e'],false),
   ('public.automation_lane_enabled(text)',ARRAY['818a13be854748e2d272bdd648c88b59'],false),
-  ('public.context_transcript_capture_policy()',ARRAY['506131e9d53ac73e352dabd556fca8f9'],true),
+  ('public.context_transcript_capture_policy()',ARRAY['45cb788bf9b15bbe1815b629cc7ce050'],true),
   ('public.context_transcript_fetch_flag()',ARRAY['3cae5d15d6b1c00c4d94739fcf3b8744'],true),
-  ('public.record_call_transcript_fetch(jsonb)',ARRAY['34c03e802d3c6fd4c63118b739bda054'],true),
+  ('public.record_call_transcript_fetch(jsonb)',ARRAY['fb5cd8aa09d37e6e72b90928e1e36cd8'],true),
   ('public.context_call_transcript_eligible(text,text,jsonb)',ARRAY['cd3cb55ab8fa9359b744d3626f14ec6c'],true),
   ('public.context_transcript_due_calls(integer)',ARRAY['8dc5c214c9f28497259d13e2d3627440'],true),
   ('public.context_transcript_backfill_contacts(text,integer)',ARRAY['4ac8914b5a6a01b32f10807fe9903e51'],true),
@@ -143,7 +144,8 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   -- Eligibility: a completed call of at least this many seconds (or with no
   -- duration recorded), or a voicemail.
   'min_call_seconds',5,
-  -- Backoff after a not-ready or failed read; terminal after the last step.
+  -- Backoff after a not-ready or failed read; the read after the last wait
+  -- that fails again is terminal.
   'backoff_minutes',jsonb_build_array(2,5,15,60,360,1440),
   -- Agreement rule (review M10): a call younger than this at read time is saved
   -- only when two reads at least agreement_minutes apart return the same words.
@@ -266,7 +268,8 @@ BEGIN
  IF jsonb_typeof(p->'provider_duration_seconds')='number' AND (p->>'provider_duration_seconds')::numeric>=0 THEN
   r.provider_duration_seconds:=(p->>'provider_duration_seconds')::numeric;
  END IF;
- max_attempts:=jsonb_array_length(steps);
+ -- Every wait is used: six waits, so the seventh failed read is terminal.
+ max_attempts:=jsonb_array_length(steps)+1;
 
  IF res='saved' THEN
   r.outcome:='saved'; r.transcript_event_id:=tx; r.next_at:=NULL; r.finished_at:=now_time; r.last_code:='saved';
@@ -314,7 +317,7 @@ BEGIN
   'state',r.outcome,'attempts',r.attempts,'next_at',r.next_at,'purged',purged);
 END $$;
 COMMENT ON FUNCTION public.record_call_transcript_fetch(jsonb) IS
- 'The one writer of call_transcript_fetches (transcripts slice T2). result: saved | not_ready | awaiting_agreement | error | not_expected. Owns the backoff (2m, 5m, 15m, 1h, 6h, 24h, then terminal not_returned or failed:<code>); a terminal record is never reopened. Refusal codes: transcript_fetch_invalid, _call_invalid, _mode_invalid, _result_invalid, _code_invalid, _code_required, _call_not_found, _transcript_not_found.';
+ 'The one writer of call_transcript_fetches (transcripts slice T2). result: saved | not_ready | awaiting_agreement | error | not_expected. Owns the backoff (waits of 2m, 5m, 15m, 1h, 6h, 24h; the read after the last wait that fails again is terminal not_returned or failed:<code>); a terminal record is never reopened. Refusal codes: transcript_fetch_invalid, _call_invalid, _mode_invalid, _result_invalid, _code_invalid, _code_required, _call_not_found, _transcript_not_found.';
 
 -- 5. Eligibility from the stored call row.
 CREATE OR REPLACE FUNCTION public.context_call_transcript_eligible(p_event_type text,p_provider_message_id text,p_payload jsonb) RETURNS boolean
