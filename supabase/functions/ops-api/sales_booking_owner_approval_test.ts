@@ -1388,3 +1388,28 @@ Deno.test("owner visits and offers enforce GHL blocked slots and unreadable inpu
     }
   }
 });
+
+Deno.test("travel retains the authoritative suburb when its name occurs in the street", async () => {
+  for (const step of ["calendar", "message"] as const) {
+    const { deps: d } = deps({
+      contact: { ...michael(), address1: "12 Scarborough Beach Road" },
+      suburb: "Scarborough",
+      ghlEvents: [{
+        id: "ev-neighbor",
+        startTime: "2026-09-25T08:00:00+08:00",
+        endTime: "2026-09-25T08:30:00+08:00",
+        assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+        contactId: "another-lead",
+        address: "Scarborough",
+      }],
+    });
+    const result = await call(d, {
+      owner_input: input(step, step === "message" ? { offer: FRI } : {}),
+      dry_run: true,
+    });
+    assert("dry_run" in result);
+    if (step === "calendar") {
+      assertEquals(result.snapshot.content.address, "12 Scarborough Beach Road");
+    }
+  }
+});

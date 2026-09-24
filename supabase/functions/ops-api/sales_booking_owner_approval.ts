@@ -712,11 +712,11 @@ export async function salesBookingOwnerApprovalAction(args: {
   // Build the exact content. Identity and route come from server truth only.
   let content: BookingObject;
   let visit: CheckedVisit | null = null;
-  let visitLocation: string | null = ownerSiteAddress(
-    lead.contact,
-    lead.suburb,
-    lead.job_site,
-  )?.address ?? lead.suburb;
+  const travelStreet = ownerStreetLine(lead.contact.address1) ??
+    ownerStreetLine(lead.job_site?.address);
+  const visitLocation = travelStreet
+    ? `${travelStreet}, ${lead.suburb}`
+    : lead.suburb;
   if (input.step === "message") {
     const t = input.text;
     if (typeof t !== "string" || !t.trim() || t.length > MAX_TEXT) {
@@ -757,7 +757,6 @@ export async function salesBookingOwnerApprovalAction(args: {
     const site = ownerSiteAddress(lead.contact, lead.suburb, lead.job_site);
     if (!site) refuse("contact_suburb_missing");
     const address = site.address;
-    visitLocation = address;
     checks.address_street_source = site.street_source;
     content = {
       provider: "ghl",
