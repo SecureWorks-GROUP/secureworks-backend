@@ -263,20 +263,19 @@ function arrivalWindowsWithTravelStatus(
 ): { windows: ArrivalWindow[]; travel_unknown: boolean } {
   const windowMinutes = STRATCO_BOOKING_RULEBOOK.window_min_minutes;
   const onSite = ownerVisitTiming(0, windowMinutes)!.end;
-  const items = [...busy]
+  const bands = busy.filter((item) => item.source === "protected_band");
+  const clearOfBands = (start: number) =>
+    !bands.some((band) => start < band.end && band.start < start + onSite);
+  const items = busy.filter((item) => item.source !== "protected_band")
     .sort((a, b) => a.start - b.start || a.end - b.end);
   const out: ArrivalWindow[] = [];
   let travelUnknown = false;
   let prev: Busy | null = null;
-  const travel = (from: string | null, to: string | null, exempt: boolean) =>
-    exempt
-      ? { minutes: 0, basis: "protected_band_buffer" }
-      : salesBookingTravelMinutes(from, to);
   const neighboringTravel = (neighbors: Busy[], preceding: boolean) => {
     const estimates = neighbors.map((item) =>
       preceding
-        ? travel(item.location, location, item.travel_exempt)
-        : travel(location, item.location, item.travel_exempt)
+        ? salesBookingTravelMinutes(item.location, location)
+        : salesBookingTravelMinutes(location, item.location)
     );
     return estimates.find((estimate) => estimate.minutes === null) ??
       estimates.reduce((largest, estimate) =>
@@ -302,7 +301,12 @@ function arrivalWindowsWithTravelStatus(
         ? next.start - ((after?.minutes ?? 0) * MINUTE) - onSite
         : dayEnd - onSite;
       const possibleTo = floor5(Math.min(possibleLatest, dayEnd - onSite));
-      if (possibleTo >= possibleFrom) travelUnknown = true;
+      for (let start = possibleFrom; start <= possibleTo; start += 5 * MINUTE) {
+        if (clearOfBands(start)) {
+          travelUnknown = true;
+          break;
+        }
+      }
       return;
     }
     const from = ceil5(Math.max(
@@ -316,6 +320,7 @@ function arrivalWindowsWithTravelStatus(
     const to = floor5(Math.min(latest, dayEnd - onSite));
     if (to < from) return;
     for (let start = from; start <= to; start += 5 * MINUTE) {
+      if (!clearOfBands(start)) continue;
       const timing = ownerVisitTiming(start, windowMinutes)!;
       out.push({
         from_iso: perthIso(start),

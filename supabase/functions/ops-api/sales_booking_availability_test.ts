@@ -741,3 +741,29 @@ Deno.test("own owner approvals remain busy and count toward case capacity", () =
     }
   }
 });
+
+Deno.test("protected bands constrain overlap without masking real travel neighbors", () => {
+  for (const address of [null, "Hillarys"]) {
+    const result = computeSalesBookingAvailability(input({
+      events: ok([{
+        id: "after-band",
+        startTime: "2026-09-29T17:00:00+08:00",
+        endTime: "2026-09-29T18:00:00+08:00",
+        address,
+      }]),
+    }));
+    const day = result.case_free_times["opp:a"].days.find((d: { date: string }) =>
+      d.date === "2026-09-29");
+    if (address === null) {
+      assertEquals(day.state, "travel_unknown");
+      assertEquals(day.arrival_windows, []);
+    } else {
+      assertEquals(day.state, "open");
+      assertEquals(windows(day), [["08:00", "11:00"]]);
+      for (const w of day.arrival_windows) {
+        assert(Date.parse(w.end_iso) <= Date.parse("2026-09-29T12:30:00+08:00"));
+        assertEquals(w.travel_after_minutes, 15);
+      }
+    }
+  }
+});
