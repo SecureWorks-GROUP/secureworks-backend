@@ -392,6 +392,8 @@ import { readJobFreshness } from './job_freshness.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
+import { dispatch as dispatchSalesBooking, SalesBookingError, supabaseBookingDb } from './sales_booking.ts'
+import { sendBookingSms, writeBookingCalendar } from './sales_booking_providers.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -12680,6 +12682,38 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // ── Debt picture (DEBT COLLECTION desk, design accepted 11 Sep 2026) ──
       // Classification data behind the Clear Debt screen. Writes the desk's own
       // columns on xero_invoices and payment_chase_logs only; never GHL, never Xero.
+      case 'sales_booking_read':
+      case 'sales_booking_policy':
+      case 'sales_booking_draft':
+      case 'sales_booking_assess':
+      case 'sales_booking_archive':
+      case 'sales_booking_restore':
+      case 'sales_booking_approve':
+      case 'sales_booking_confirm':
+      case 'sales_booking_on_event':
+      case 'sales_booking_reconcile':
+      case 'sales_booking_runner': {
+        try {
+          const params: Record<string, string> = {}
+          url.searchParams.forEach((v, k) => { params[k] = v })
+          if (!_opsApiStaffOperatorRole(authUser?.role) && authMode !== 'api_key') {
+            return json({ error: 'Staff operator role required', code: 'operator_forbidden' }, 403)
+          }
+          const orgId = authMode === 'jwt' ? String(authUser?.orgId || '') : DEFAULT_ORG_ID
+          if (!orgId) return json({ error: 'Organisation required', code: 'org_required' }, 403)
+          const actor = { org_id: orgId, user_id: String(authUser?.id || 'server'), role: String(authUser?.role || 'admin') }
+          const heldAdapters = {
+            listOpportunities: async () => ({ items: [], next: null, complete: false }),
+            calendarEvents: async () => ({ ok: false, events: [], coverage: { operational_leave: 'not_read' } }),
+            sendSms: sendBookingSms,
+            writeCalendar: writeBookingCalendar,
+          }
+          return json(await dispatchSalesBooking(action, params, body || {}, heldAdapters, supabaseBookingDb(client), req.method, actor))
+        } catch (error) {
+          if (error instanceof SalesBookingError) return json({ error: error.message, code: error.code, ok: false }, error.status)
+          throw error
+        }
+      }
       case 'list_debt_picture':
       case 'upsert_debt_picture':
       case 'add_debt_note':
