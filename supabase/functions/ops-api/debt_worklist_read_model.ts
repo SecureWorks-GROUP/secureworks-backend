@@ -25,7 +25,9 @@
 // The timeline adds what that merge leaves out (payment_chase_logs, invoice
 // events and Xero payments, captured Luna facts, and GHL messages and notes
 // held by a verified Xero/GHL contact_matches pair) and removes the same
-// message seen twice. A signed-in caller from another org is refused first.
+// message seen twice. Unverified legacy inbox matcher guesses are omitted and
+// counted on the email source. A signed-in caller from another org is refused
+// first.
 //
 // Honesty rules: a source that could not be read is a fault on the row it
 // touches, never an empty list or a zero; every summary count names its
@@ -1672,6 +1674,7 @@ export async function debtWorklist(
     let timeline: any;
     let mergedTimelineEntries: TimelineEntry[] = [];
     let timelineSourcesComplete = false;
+    const unconfirmedEmailProviderIds = new Set<string>();
     const conversationFaults: string[] = [];
     {
       const bounds = TIMELINE_BOUNDS[timelineMode];
@@ -1696,6 +1699,14 @@ export async function debtWorklist(
           );
         }
         for (const m of conv.messages) {
+          if (m.source_system === "inbox") {
+            const providerId = str(m.provider_message_id);
+            const sourceRef = str(m.source_ref) ?? str(m.id);
+            unconfirmedEmailProviderIds.add(
+              providerId ?? `inbox:${sourceRef ?? jobId}`,
+            );
+            continue;
+          }
           const providerId = str(m.provider_message_id);
           raw.push(
             entryFromConversation(
@@ -1804,6 +1815,7 @@ export async function debtWorklist(
         !(ghlCacheFault && contactIds.length) &&
         !(ghlJobCacheFault && ghlJobCaches.some((c) => c.used_by_conversation_read)) &&
         perJobCapHit.length === 0 && factsCapHit.length === 0 &&
+        unconfirmedEmailProviderIds.size === 0 &&
         unverifiedCandidates.length === 0;
       timeline = {
         scope: "open_invoices",
@@ -2015,11 +2027,15 @@ export async function debtWorklist(
         recovery_action: emailUnreadable
           ? "Retry the read; if it keeps failing, CIO checks the job link, inbox and business event reads"
           : "CIO email capture (EM1): capture Outlook Sent Items and inbound mail as stored events",
+        unconfirmed_matches: unconfirmedEmailProviderIds.size,
         messages_shown: countIn((e) =>
           e.channel === "email" && e.kind !== "invoice_event"
         ),
         note:
-          `${STORED_COPIES_NOTE}; no email capture health is published, so there is no last success time`,
+          `${STORED_COPIES_NOTE}; no email capture health is published, so there is no last success time` +
+          (unconfirmedEmailProviderIds.size
+            ? `; ${unconfirmedEmailProviderIds.size} possible email${unconfirmedEmailProviderIds.size === 1 ? " was" : "s were"} not shown because their match is unconfirmed`
+            : ""),
       },
       notes: {
         status: notesUnreadable ? "unreadable" : "read",

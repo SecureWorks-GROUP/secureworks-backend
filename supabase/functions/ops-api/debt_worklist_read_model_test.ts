@@ -1239,12 +1239,16 @@ Deno.test("capped chase and invoice-event reads keep timeline incomplete", async
   );
 });
 
-Deno.test("legacy inbox copies stay outside job and invoice scopes", async () => {
-  const inboxMessage = (eventCopy: unknown, id: string) => ({
+Deno.test("unconfirmed inbox guesses stay out of timeline and last contact", async () => {
+  const inboxMessage = (
+    eventCopy: unknown,
+    id: string,
+    providerMessageId = `graph:${id}`,
+  ) => ({
     id,
     source_system: "inbox",
     source_ref: id,
-    provider_message_id: `graph:${id}`,
+    provider_message_id: providerMessageId,
     channel: "email",
     direction: "inbound",
     occurred_at: "2026-09-18T02:00:00Z",
@@ -1264,22 +1268,28 @@ Deno.test("legacy inbox copies stay outside job and invoice scopes", async () =>
     deps(
       fakeClient(unitTables()),
       conversationStub({
-        [JOB_A]: eventCopies.map(([name, eventCopy]) =>
-          inboxMessage(eventCopy, `${name}-email`)
-        ),
+        [JOB_A]: [
+          ...eventCopies.map(([name, eventCopy]) =>
+            inboxMessage(eventCopy, `${name}-email`)
+          ),
+          inboxMessage(undefined, "duplicate-email", "graph:unknown-email"),
+        ],
       }).fn,
     ),
   );
-  const entries = out.debtors[0].timeline.entries.filter((entry: any) =>
+  const debtor = out.debtors[0];
+  const entries = debtor.timeline.entries.filter((entry: any) =>
     entry.source === "inbox"
   );
-  assertEquals(entries.length, eventCopies.length);
-  for (const entry of entries) {
-    assertEquals(entry.job_id, null);
-    assertEquals(entry.invoice_ids, []);
-    assertEquals(entry.invoice_scope, "unplaced");
-    assertEquals(entry.label, "unplaced, matched by the old guess");
-  }
+  assertEquals(entries.length, 0);
+  assertEquals(debtor.sources.email.unconfirmed_matches, eventCopies.length);
+  assert(
+    debtor.sources.email.note.includes(
+      "5 possible emails were not shown because their match is unconfirmed",
+    ),
+  );
+  assert(debtor.last_contact.last?.source !== "inbox");
+  assertEquals(debtor.timeline.complete, false);
 });
 
 Deno.test("inbox event-copy faults make email source unreadable", async () => {
