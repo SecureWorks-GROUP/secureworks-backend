@@ -208,6 +208,8 @@ BEGIN
  THEN RAISE EXCEPTION 's-m1 effective_from from the fence key'; END IF;
  -- nb-1 carries no epoch: the job's creation.
  IF (SELECT effective_from FROM public.job_contacts WHERE id=(school->>'job_contact_id')::uuid)<>'2026-04-10 02:00:00+00' THEN RAISE EXCEPTION 's-m1 nb-1 effective_from'; END IF;
+ -- A neighbour inserted with no portions has an unknown share: never 0, never the column default 50.
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(school->>'job_contact_id')::uuid) IS NOT NULL THEN RAISE EXCEPTION 's-m1 neighbour share without portions'; END IF;
  -- With three neighbours and no portions the owner's share is unknown, never
  -- the whole job; the first neighbour's receipt says so.
  IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS NOT NULL THEN RAISE EXCEPTION 's-m1 owner kept the whole job beside neighbours'; END IF;

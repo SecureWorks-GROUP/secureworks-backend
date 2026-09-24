@@ -163,7 +163,7 @@ BEGIN
   ('public.job_party_email_key(text)',ARRAY['670df0b3697061286a48f63ecc261e70'],true),
   ('public.job_party_receipt(uuid,uuid,text,text,text,text,uuid,jsonb,jsonb,jsonb)',ARRAY['49c6aa92c24dd47585d8acdd8f78e12b'],true),
   ('public.job_party_reconsider(public.job_contacts,text)',ARRAY['5dd79285ad333d7221d82839a7c659ac'],true),
-  ('public.upsert_job_party(uuid,text,jsonb,text,uuid)',ARRAY['ac80dae384812c2f026b6e69b4df2701'],true),
+  ('public.upsert_job_party(uuid,text,jsonb,text,uuid)',ARRAY['702a0357b5386e7929637fa92c46cef6'],true),
   ('public.set_job_party_ids(uuid,text,text,text,text,text)',ARRAY['468ba14f0f8dce6ed92bd592ba48b801'],true),
   ('public.job_contacts_owner_mirror()',ARRAY['42e95ad1c5ecae48fc4f799ba0babf94'],true),
   ('public.context_contact_parties_at(text,timestamptz)',ARRAY['a78d5a40dfc528f9b47cc6e902216168'],true),
@@ -429,7 +429,7 @@ END $$;
 --                                    shares come from portions (rule 5):
 --                                    share = portion_inc / total; value =
 --                                    portion_ex, else portion_inc / 1.1;
---                                    no portions: a neighbour 0, the owner
+--                                    no portions: a neighbour null, the owner
 --                                    100 while no neighbour is active, else
 --                                    null
 --   status                           'active' or 'removed' (soft removal)
@@ -563,7 +563,7 @@ BEGIN
   INSERT INTO public.job_contacts(job_id,contact_label,client_name,client_phone,client_email,site_address,ghl_contact_id,xero_contact_id,
    share_percentage,quote_value_ex_gst,assigned_runs,is_primary,status,contact_type,party_role,source_party_key,effective_from,party_flags)
   VALUES(p_job_id,letter,in_name,in_phone,in_email,in_addr,in_ghl,in_xero,
-   coalesce(share,CASE WHEN NOT is_owner THEN 0 WHEN NOT EXISTS (SELECT 1 FROM public.job_contacts o WHERE o.job_id=p_job_id
+   coalesce(share,CASE WHEN NOT is_owner THEN NULL WHEN NOT EXISTS (SELECT 1 FROM public.job_contacts o WHERE o.job_id=p_job_id
     AND o.is_primary IS NOT TRUE AND o.status IS DISTINCT FROM 'removed') THEN 100 END),coalesce(qv,0),CASE WHEN jsonb_typeof(f->'assigned_runs')='array' THEN f->'assigned_runs' END,
    is_owner,CASE WHEN f->>'status'='removed' THEN 'removed' ELSE 'active' END,
    CASE WHEN is_owner THEN 'primary' ELSE 'neighbour_'||lower(letter) END,
@@ -673,7 +673,7 @@ BEGIN
   'status',nw.status,'flags',to_jsonb(nw.party_flags),'flags_raised',to_jsonb(flags_raised),'replaced_job_contact_id',replaced,'reconsider',recon);
 END $$;
 COMMENT ON FUNCTION public.upsert_job_party(uuid,text,jsonb,text,uuid) IS
- 'The one party writer (sites.md section 2). Keyed on (job_id, source_party_key), never the letter; letters assigned once and never reused; soft removal; a reused key on an anchored party with a disagreeing identity retires it and inserts <key>#<n> (the same name words with a corrected phone or email update in place, recorded as identity_correction); a neighbour''s ids are written on insert only; the owner (primary) mirrors jobs one way (null never over a set id: owner_id_divergence; jobs wins otherwise); shares from portions (an owner with no portions holds 100 only while no neighbour is active, else null); one job_party_events receipt per call. Refusals: party_job_required, party_actor_required, party_key_invalid, party_field_unknown, party_field_invalid, party_role_invalid, owner_fields_follow_job, party_job_not_found, party_portion_exceeds_total, party_adopt_ambiguous, party_name_required, party_letters_exhausted.';
+ 'The one party writer (sites.md section 2). Keyed on (job_id, source_party_key), never the letter; letters assigned once and never reused; soft removal; a reused key on an anchored party with a disagreeing identity retires it and inserts <key>#<n> (the same name words with a corrected phone or email update in place, recorded as identity_correction); a neighbour''s ids are written on insert only; the owner (primary) mirrors jobs one way (null never over a set id: owner_id_divergence; jobs wins otherwise); shares from portions (a neighbour with no portions is null; an owner with no portions holds 100 only while no neighbour is active, else null); one job_party_events receipt per call. Refusals: party_job_required, party_actor_required, party_key_invalid, party_field_unknown, party_field_invalid, party_role_invalid, owner_fields_follow_job, party_job_not_found, party_portion_exceeds_total, party_adopt_ambiguous, party_name_required, party_letters_exhausted.';
 
 -- 7. The only way a neighbour party's contact ids change.
 -- p_match_basis: phone, email, both, staff, accept, invoice, backfill; or, for
