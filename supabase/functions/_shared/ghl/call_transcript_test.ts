@@ -151,9 +151,15 @@ Deno.test("a transcript over 64 KB is cut at a sentence boundary with a stated m
   assertEquals(t.wordCount, 800 * 3);
 });
 
-Deno.test("one sentence alone over the limit is kept only as far as fits", async () => {
+Deno.test("one sentence alone over the limit stores only the truncation marker", async () => {
   const huge = sentencesFromRuns([[1, 1]], 0, 1, () => "y ".repeat(40000));
   const t = await flat(huge);
   assertEquals(t.cut, true);
+  assertEquals(t.sentencesKept, 0);
+  assertEquals(t.turns, []);
+  assertEquals(
+    t.text,
+    "[Transcript cut here by capture: longer than 64 KB. 0 of 1 sentences kept.]",
+  );
   assert(new TextEncoder().encode(t.text).length < 64 * 1024 + 200);
 });

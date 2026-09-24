@@ -1,10 +1,14 @@
 // Slice T2: the fetcher's HTTP door. Service role only; the history load is a
 // dry run unless the caller says dry_run: false; ids and codes only out.
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   ghlGet,
   handleFetch,
   type HandlerDeps,
+  liveDeps,
   type Runners,
 } from "./handler.ts";
 import type { BackfillRequest } from "./fetch.ts";
@@ -181,4 +185,61 @@ Deno.test("ghlGet never follows a redirect, never reads an error body, and repor
   });
   assertEquals(calls[0].redirect, "error");
   assertEquals(new Headers(calls[0].headers).get("version"), "v3");
+});
+
+Deno.test("history adapters refuse unresolved pagination and accept explicit exhaustion", async () => {
+  const locationId = "location123";
+  const contactId = "contact123";
+  const conversationId = "conversation123";
+  let answer: unknown = {};
+  const d = liveDeps({
+    env: (key) => key === "GHL_LOCATION_ID" ? locationId : "token",
+    createSupabase: () => ({}),
+    fetch: (input) => {
+      const path = new URL(String(input)).pathname;
+      const body = path.endsWith("/contacts/" + contactId)
+        ? { contact: { id: contactId, locationId } }
+        : path.endsWith("/conversations/" + conversationId)
+        ? { conversation: { id: conversationId, contactId, locationId } }
+        : path.endsWith("/conversations/messages/message123")
+        ? {
+          message: { id: "message123", conversationId, contactId, locationId },
+        }
+        : answer;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200 }),
+      );
+    },
+  });
+  for (const nextPage of [true, undefined]) {
+    answer = { messages: { messages: [], nextPage } };
+    await assertRejects(
+      () => d.listMessages(contactId, conversationId),
+      Error,
+      "pagination_unresolved",
+    );
+  }
+  answer = {
+    messages: { messages: [], nextPage: true, lastMessageId: "message123" },
+  };
+  await assertRejects(
+    () => d.listMessages(contactId, conversationId, "message123"),
+    Error,
+    "pagination_unresolved",
+  );
+  answer = { messages: { messages: [], nextPage: false } };
+  assertEquals((await d.listMessages(contactId, conversationId)).next, null);
+  answer = {
+    conversations: Array.from(
+      { length: 50 },
+      () => ({ id: conversationId, contactId, locationId }),
+    ),
+  };
+  await assertRejects(
+    () => d.listConversations(contactId),
+    Error,
+    "pagination_unresolved",
+  );
+  answer = { conversations: [] };
+  assertEquals((await d.listConversations(contactId)).next, null);
 });

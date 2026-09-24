@@ -273,17 +273,24 @@ export function liveDeps(deps: HandlerDeps): BackfillDeps {
         | Record<string, unknown>
         | null
         | undefined;
+      const nextPage = typeof next?.start_after_date === "string" ||
+          typeof next?.start_after_date === "number"
+        ? String(next.start_after_date)
+        : null;
+      if (
+        result.pagination?.has_more !== false &&
+        (!nextPage || nextPage === startAfterDate)
+      ) {
+        throw Object.assign(new Error("pagination_unresolved"), {
+          code: "pagination_unresolved",
+        });
+      }
       return {
         conversations: (result.data.conversations ?? []) as Record<
           string,
           unknown
         >[],
-        next: result.pagination?.has_more === false
-          ? null
-          : typeof next?.start_after_date === "string" ||
-              typeof next?.start_after_date === "number"
-          ? String(next.start_after_date)
-          : null,
+        next: result.pagination?.has_more === false ? null : nextPage,
       };
     },
     async listMessages(contactId, conversationId, lastMessageId) {
@@ -299,13 +306,20 @@ export function liveDeps(deps: HandlerDeps): BackfillDeps {
         | Record<string, unknown>
         | null
         | undefined;
+      const nextPage = typeof next?.last_message_id === "string"
+        ? String(next.last_message_id)
+        : null;
+      if (
+        result.pagination?.has_more !== false &&
+        (!nextPage || nextPage === lastMessageId)
+      ) {
+        throw Object.assign(new Error("pagination_unresolved"), {
+          code: "pagination_unresolved",
+        });
+      }
       return {
         messages: (container.messages ?? []) as Record<string, unknown>[],
-        next: result.pagination?.has_more === false
-          ? null
-          : typeof next?.last_message_id === "string"
-          ? next.last_message_id
-          : null,
+        next: result.pagination?.has_more === false ? null : nextPage,
       };
     },
     async existingRows(keys) {
@@ -417,8 +431,13 @@ export async function handleFetch(
       cursor != null && (
         typeof cursor !== "object" || typeof cursor.contact_id !== "string" ||
         !GHL_ID.test(cursor.contact_id) ||
-        !Number.isSafeInteger(cursor.conversation_index) ||
-        cursor.conversation_index < 0 ||
+        !(cursor.conversation_ids === null ||
+          (Array.isArray(cursor.conversation_ids) &&
+            cursor.conversation_ids.length <= 50 &&
+            cursor.conversation_ids.every((id) =>
+              typeof id === "string" && GHL_ID.test(id)
+            ))) ||
+        (cursor.message_page !== null && !cursor.conversation_ids?.length) ||
         ![cursor.conversation_page, cursor.message_page].every((v) =>
           v === null ||
           (typeof v === "string" && v.length > 0 && v.length <= 4096)
