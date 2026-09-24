@@ -816,6 +816,7 @@ Deno.test("engine path through the approval route is unchanged and never reads o
       readThread: untouched,
       readGhlDirectory: untouched,
       readGhlEvents: untouched,
+      readGhlBlockedSlots: untouched,
       readOutlook: untouched,
       readSystemOfferRecords: untouched,
     },

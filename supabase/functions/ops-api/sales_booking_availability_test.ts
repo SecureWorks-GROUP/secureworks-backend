@@ -10,13 +10,19 @@ import {
   type SalesBookingAvailabilityDeps,
 } from "./sales_booking_availability.ts";
 import { emptyBookingFlow } from "./sales_booking_confirmation.ts";
-import { checkOwnerVisitRules, type GhlDirectory } from "./sales_booking_owner_approval.ts";
+import {
+  checkOwnerVisitRules,
+  type GhlDirectory,
+} from "./sales_booking_owner_approval.ts";
 import type {
   SalesBookingCase,
   SalesBookingDiaryEntry,
   SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
-import { salesBookingSuburbPoint, salesBookingTravelMinutes } from "./sales_booking_travel.ts";
+import {
+  salesBookingSuburbPoint,
+  salesBookingTravelMinutes,
+} from "./sales_booking_travel.ts";
 
 // Thu 24 Sep 2026 10:00 Perth. The week read is the next one: Tue 29 Sep
 // (protected band 13:00-15:30) and Fri 2 Oct.
@@ -618,12 +624,15 @@ Deno.test("a throwing reader is a named reason on the banner, never an exception
 
 Deno.test("an unreadable offer census withholds generic and case free times", async () => {
   const { deps } = liveDeps({
-    readSystemOfferRecords: () => Promise.reject(new Error("ledger unavailable")),
+    readSystemOfferRecords: () =>
+      Promise.reject(new Error("ledger unavailable")),
   });
   const after = await applySalesBookingAvailability(readResponse(), deps);
   assertEquals(after.booking_flow!.calendar_read.state, "read");
-  assertEquals(after.booking_flow!.commitments_read.reason,
-    "system_offers_unreadable: ledger unavailable");
+  assertEquals(
+    after.booking_flow!.commitments_read.reason,
+    "system_offers_unreadable: ledger unavailable",
+  );
   assertEquals(after.booking_flow!.free_times, null);
   assertEquals(after.cases[0].free_times, null);
 });
@@ -632,32 +641,60 @@ Deno.test("travel retains neighboring visits outside working hours", () => {
   const result = computeSalesBookingAvailability(input({
     cases: [lead("opp:a", "c-a", "Canning Vale")],
     events: ok([
-      { id: "before", startTime: "2026-10-02T07:00:00+08:00", endTime: "2026-10-02T08:00:00+08:00", address: "Two Rocks" },
-      { id: "after", startTime: "2026-10-02T16:30:00+08:00", endTime: "2026-10-02T17:30:00+08:00", address: "Two Rocks" },
+      {
+        id: "before",
+        startTime: "2026-10-02T07:00:00+08:00",
+        endTime: "2026-10-02T08:00:00+08:00",
+        address: "Two Rocks",
+      },
+      {
+        id: "after",
+        startTime: "2026-10-02T16:30:00+08:00",
+        endTime: "2026-10-02T17:30:00+08:00",
+        address: "Two Rocks",
+      },
     ]),
   }));
-  const day = result.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02");
-  const travel = salesBookingTravelMinutes("Two Rocks", "Canning Vale").minutes!;
+  const day = result.case_free_times["opp:a"].days.find((d: { date: string }) =>
+    d.date === "2026-10-02"
+  );
+  const travel = salesBookingTravelMinutes("Two Rocks", "Canning Vale")
+    .minutes!;
   assert(travel > 0);
   assert(day.arrival_windows.length > 0);
-  assertEquals(Date.parse(day.arrival_windows[0].from_iso),
-    Date.parse("2026-10-02T08:00:00+08:00") + travel * 60000);
-  assertEquals(Date.parse(day.arrival_windows.at(-1).end_iso),
-    Date.parse("2026-10-02T16:30:00+08:00") - travel * 60000);
+  assertEquals(
+    Date.parse(day.arrival_windows[0].from_iso),
+    Date.parse("2026-10-02T08:00:00+08:00") + travel * 60000,
+  );
+  assertEquals(
+    Date.parse(day.arrival_windows.at(-1).end_iso),
+    Date.parse("2026-10-02T16:30:00+08:00") - travel * 60000,
+  );
 });
 
 Deno.test("street names cannot establish the booking locality", () => {
-  for (const address of [
-    "12 Scarborough Beach Road, Osborne Park",
-    "12 Scarborough Beach Road Osborne Park WA 6017",
-    "12 Scarborough Beach Road",
-  ]) assertEquals(salesBookingSuburbPoint(address), null);
-  assertEquals(salesBookingSuburbPoint("12 Scarborough Beach Road, Duncraig WA 6023")?.suburb, "duncraig");
+  for (
+    const address of [
+      "12 Scarborough Beach Road, Osborne Park",
+      "12 Scarborough Beach Road Osborne Park WA 6017",
+      "12 Scarborough Beach Road",
+    ]
+  ) assertEquals(salesBookingSuburbPoint(address), null);
+  assertEquals(
+    salesBookingSuburbPoint("12 Scarborough Beach Road, Duncraig WA 6023")
+      ?.suburb,
+    "duncraig",
+  );
 });
 
 Deno.test("every advertised empty-Friday arrival window passes owner rules", () => {
   const r = computeSalesBookingAvailability(input());
-  const days = [friday(r), r.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02")];
+  const days = [
+    friday(r),
+    r.case_free_times["opp:a"].days.find((d: { date: string }) =>
+      d.date === "2026-10-02"
+    ),
+  ];
   for (const day of days) {
     assert(day.arrival_windows.length > 0);
     for (const w of day.arrival_windows) {
@@ -677,26 +714,58 @@ Deno.test("tied neighbors require every location and the largest travel gap", ()
     for (const distantLocation of [null, "Two Rocks"]) {
       for (const reverse of [false, true]) {
         const events = [
-          { id: "near", startTime: side === "before" ? "2026-10-02T10:00:00+08:00" : "2026-10-02T12:00:00+08:00", endTime: side === "before" ? "2026-10-02T11:00:00+08:00" : "2026-10-02T13:00:00+08:00", address: "Canning Vale" },
-          { id: "other", startTime: side === "before" ? "2026-10-02T09:00:00+08:00" : "2026-10-02T12:00:00+08:00",
-            endTime: side === "before" ? "2026-10-02T11:00:00+08:00" : "2026-10-02T14:00:00+08:00", address: distantLocation },
+          {
+            id: "near",
+            startTime: side === "before"
+              ? "2026-10-02T10:00:00+08:00"
+              : "2026-10-02T12:00:00+08:00",
+            endTime: side === "before"
+              ? "2026-10-02T11:00:00+08:00"
+              : "2026-10-02T13:00:00+08:00",
+            address: "Canning Vale",
+          },
+          {
+            id: "other",
+            startTime: side === "before"
+              ? "2026-10-02T09:00:00+08:00"
+              : "2026-10-02T12:00:00+08:00",
+            endTime: side === "before"
+              ? "2026-10-02T11:00:00+08:00"
+              : "2026-10-02T14:00:00+08:00",
+            address: distantLocation,
+          },
         ];
         const result = computeSalesBookingAvailability(input({
           cases: [lead("opp:a", "c-a", "Canning Vale")],
           events: ok(reverse ? events.reverse() : events),
         }));
-        const day = result.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02");
-        const boundary = Date.parse(side === "before" ? "2026-10-02T11:00:00+08:00" : "2026-10-02T12:00:00+08:00");
-        const affected = day.arrival_windows.filter((w: { from_iso: string; end_iso: string }) =>
-          side === "before" ? Date.parse(w.from_iso) >= boundary : Date.parse(w.end_iso) <= boundary);
+        const day = result.case_free_times["opp:a"].days.find((
+          d: { date: string },
+        ) => d.date === "2026-10-02");
+        const boundary = Date.parse(
+          side === "before"
+            ? "2026-10-02T11:00:00+08:00"
+            : "2026-10-02T12:00:00+08:00",
+        );
+        const affected = day.arrival_windows.filter((
+          w: { from_iso: string; end_iso: string },
+        ) =>
+          side === "before"
+            ? Date.parse(w.from_iso) >= boundary
+            : Date.parse(w.end_iso) <= boundary
+        );
         if (distantLocation === null) assertEquals(affected, []);
         else {
           assert(affected.length > 0);
-          const required = salesBookingTravelMinutes("Two Rocks", "Canning Vale").minutes! * 60000;
+          const required =
+            salesBookingTravelMinutes("Two Rocks", "Canning Vale").minutes! *
+            60000;
           for (const window of affected) {
-            assert(side === "before"
-              ? Date.parse(window.from_iso) >= boundary + required
-              : Date.parse(window.end_iso) <= boundary - required);
+            assert(
+              side === "before"
+                ? Date.parse(window.from_iso) >= boundary + required
+                : Date.parse(window.end_iso) <= boundary - required,
+            );
           }
         }
       }
@@ -716,17 +785,27 @@ Deno.test("own owner approvals remain busy and count toward case capacity", () =
         }))),
         census: ok({
           offers: [{
-            contact_id: "c-a", source, binding_hash: "own-hold",
+            contact_id: "c-a",
+            source,
+            binding_hash: "own-hold",
             start_iso: "2026-10-02T09:00:00+08:00",
             end_iso: "2026-10-02T10:30:00+08:00",
           }],
-          booked: {}, unverified_texts: [], unsettled_messages: [],
+          booked: {},
+          unverified_texts: [],
+          unsettled_messages: [],
         }),
       }));
-      const day = result.case_free_times["opp:a"].days.find((d: { date: string }) => d.date === "2026-10-02");
+      const day = result.case_free_times["opp:a"].days.find((
+        d: { date: string },
+      ) => d.date === "2026-10-02");
       if (source === "system_text") {
         assertEquals(day.state, "open");
-        assert(day.arrival_windows.some((w: { from_iso: string }) => w.from_iso === "2026-10-02T09:30:00+08:00"));
+        assert(
+          day.arrival_windows.some((w: { from_iso: string }) =>
+            w.from_iso === "2026-10-02T09:30:00+08:00"
+          ),
+        );
       } else if (count === 5) {
         assertEquals(day.state, "full");
         assertEquals(day.arrival_windows, []);
@@ -734,8 +813,10 @@ Deno.test("own owner approvals remain busy and count toward case capacity", () =
         assertEquals(day.state, "open");
         assert(day.arrival_windows.length > 0);
         for (const w of day.arrival_windows) {
-          assert(Date.parse(w.end_iso) <= Date.parse("2026-10-02T09:00:00+08:00") ||
-            Date.parse(w.from_iso) >= Date.parse("2026-10-02T10:30:00+08:00"));
+          assert(
+            Date.parse(w.end_iso) <= Date.parse("2026-10-02T09:00:00+08:00") ||
+              Date.parse(w.from_iso) >= Date.parse("2026-10-02T10:30:00+08:00"),
+          );
         }
       }
     }
@@ -752,8 +833,9 @@ Deno.test("protected bands constrain overlap without masking real travel neighbo
         address,
       }]),
     }));
-    const day = result.case_free_times["opp:a"].days.find((d: { date: string }) =>
-      d.date === "2026-09-29");
+    const day = result.case_free_times["opp:a"].days.find((
+      d: { date: string },
+    ) => d.date === "2026-09-29");
     if (address === null) {
       assertEquals(day.state, "travel_unknown");
       assertEquals(day.arrival_windows, []);
@@ -761,7 +843,9 @@ Deno.test("protected bands constrain overlap without masking real travel neighbo
       assertEquals(day.state, "open");
       assertEquals(windows(day), [["08:00", "11:00"]]);
       for (const w of day.arrival_windows) {
-        assert(Date.parse(w.end_iso) <= Date.parse("2026-09-29T12:30:00+08:00"));
+        assert(
+          Date.parse(w.end_iso) <= Date.parse("2026-09-29T12:30:00+08:00"),
+        );
         assertEquals(w.travel_after_minutes, 15);
       }
     }
@@ -787,7 +871,10 @@ Deno.test("already booked cases have no arrival windows on their booked day", ()
     already_booked_that_day: true,
     arrival_windows: [],
   });
-  assert(days.find((d: { date: string }) => d.date === "2026-09-29").arrival_windows.length > 0);
+  assert(
+    days.find((d: { date: string }) => d.date === "2026-09-29").arrival_windows
+      .length > 0,
+  );
   const other = result.case_free_times["opp:b"].days.find(
     (d: { date: string }) => d.date === "2026-10-02",
   );
