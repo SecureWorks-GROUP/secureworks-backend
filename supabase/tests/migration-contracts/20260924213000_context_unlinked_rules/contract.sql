@@ -98,6 +98,28 @@ END $$;
 -- B. Flag on.
 UPDATE public.feature_flags SET enabled=true,updated_at=now() WHERE flag_name='context_unlinked_rules_v1';
 
+DO $$
+DECLARE e public.business_events; expected_reason text;
+BEGIN
+ UPDATE public.automation_switches SET attribution=false WHERE id=1;
+ INSERT INTO public.business_events(id,event_type,source,channel,direction,event_at,payload)
+ VALUES('d4e00000-0000-4000-8000-000000000048','client.email_in','monitor-inbox','email','inbound','2026-09-21Z',
+  '{"from":"unmatched.p4@example.net","subject":"A general question","body":"No job reference or customer details."}')
+ RETURNING * INTO e;
+ IF e.attribution_status<>'admin_bucket' OR e.metadata->>'bucket_reason' IS NULL
+  OR e.metadata->>'bucket_reason' IS DISTINCT FROM public.context_bucket_reason(e)
+ THEN RAISE EXCEPTION 'bucket reason with attribution lane off: got % %',e.attribution_status,e.metadata; END IF;
+ UPDATE public.business_events be SET metadata=jsonb_set(coalesce(be.metadata,'{}'::jsonb),'{bucket_reason}','"stale"'::jsonb)
+ WHERE be.id=e.id;
+ SELECT be.* INTO e FROM public.business_events be WHERE be.id=e.id;
+ expected_reason:=public.context_bucket_reason(e);
+ e:=public.resolve_context_attribution(e,true,true);
+ IF e.attribution_status<>'admin_bucket' OR e.metadata->>'bucket_reason' IS NULL
+  OR e.metadata->>'bucket_reason'='stale' OR e.metadata->>'bucket_reason' IS DISTINCT FROM expected_reason
+ THEN RAISE EXCEPTION 'bucket reason replacement with attribution lane off: got %',e.metadata; END IF;
+ UPDATE public.automation_switches SET attribution=true WHERE id=1;
+END $$;
+
 -- Finding 6 / N1: identity read from payload.from; the contact recovered from
 -- the job's client email; single_open, rule identity_email. No thread binding
 -- from a guess.
@@ -142,6 +164,20 @@ BEGIN
   '{"from":"admin@secureworkswa.com.au","subject":"Re: RFI - BC26/1697","body":"Documents attached."}') RETURNING * INTO e;
  IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-000000000701' OR e.attribution_status<>'thread'
  THEN RAISE EXCEPTION 'E5: the reply must follow by thread, got % %',e.attribution_status,e.job_id; END IF;
+END $$;
+
+DO $$
+DECLARE e public.business_events;
+BEGIN
+ INSERT INTO public.jobs(id,org_id,job_number,status,type,site_address,created_at,completed_at,archived,metadata)
+ VALUES('d4000000-0000-4000-8000-000000000994',gen_random_uuid(),'SWP-99094','invoiced','patio',
+  '99 Old Road, Yokine WA 6060','2025-10-01Z','2026-01-01Z',false,'{}');
+ INSERT INTO public.business_events(event_type,source,channel,direction,event_at,payload)
+ VALUES('client.email_in','monitor-inbox','email','inbound','2026-09-23Z',
+  '{"from":"Development@council.example","subject":"RFI for 99 Old Road Yokine","body":"Please provide the plan."}')
+ RETURNING * INTO e;
+ IF e.job_id IS NOT NULL OR e.attribution_status='content_ref'
+ THEN RAISE EXCEPTION 'invoiced site older than 60 days must not place, got % % %',e.attribution_status,e.job_id,e.metadata; END IF;
 END $$;
 
 -- N3 / E6 / E18: "20A Beenan" against the stored "20 Beenan Cl": loose only.
@@ -344,9 +380,10 @@ END $$;
 
 -- N9: an internal digest naming seven jobs and SWP-261009 (no such job):
 -- bucket, multi_ref_many, with ref_not_found. Never linked to one of them.
--- N22: SWG-20260713-BE is still one exact token.
+-- N22 / N21: a P1a step-1 result made with the flag off is re-scanned when
+-- P4 is enabled; only the insert-time writer binding remains custody.
 DO $$
-DECLARE e public.business_events;
+DECLARE e public.business_events; p jsonb;
 BEGIN
  INSERT INTO public.business_events(event_type,source,channel,direction,occurred_at,event_at,payload)
  VALUES('client.email_out','monitor-inbox','email','outbound','2026-09-22 09:07:36Z','2026-09-22 09:07:36Z',
@@ -355,14 +392,26 @@ BEGIN
  IF e.job_id IS NOT NULL OR e.attribution_status<>'admin_bucket' OR e.metadata->>'bucket_reason'<>'multi_ref_many'
   OR e.metadata->'ref_not_found'<>'["SWP-261009"]'::jsonb OR jsonb_array_length(e.metadata->'ref_job_ids')<>7
  THEN RAISE EXCEPTION 'N9: must bucket as multi_ref_many with SWP-261009 not found, got % %',e.attribution_status,e.metadata; END IF;
+ UPDATE public.feature_flags SET enabled=false WHERE flag_name='context_unlinked_rules_v1';
  INSERT INTO public.business_events(payload) VALUES('{"body":"Re: SWG-20260713-BE install"}') RETURNING * INTO e;
- IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-000020260713' OR e.attribution_status<>'direct' OR e.match_method<>'ladder_ref'
- THEN RAISE EXCEPTION 'N22: must stay direct by the exact token, got % %',e.attribution_status,e.job_id; END IF;
- -- N21's premise: a ladder-made step-1 link is not custody, so a re-decision
- -- runs step 1 again (it holds the job as a hint, then finds it again).
+ IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-000020260713' OR e.attribution_status<>'direct' OR e.match_method<>'direct_job_id'
+  OR e.metadata ? 'source_job_binding'
+ THEN RAISE EXCEPTION 'N21 premise: flag-off P1a must have a ladder-made step-1 link, got % % %',e.attribution_status,e.match_method,e.metadata; END IF;
+ UPDATE public.feature_flags SET enabled=true WHERE flag_name='context_unlinked_rules_v1';
+ p:=public.context_attribution_preview(e.id,true);
+ IF p->'decided'->>'job_number'<>'SWG-20260713-BE' OR p->'decided'->>'placement_rule'<>'direct_ref'
+  OR p->'decided'->>'match_method'<>'ladder_ref'
+ THEN RAISE EXCEPTION 'N21 preview: P1a placement must be reference-scanned, got %',p; END IF;
  e:=public.resolve_context_attribution(e,true,true);
- IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-000020260713' OR e.match_method<>'ladder_ref' OR e.metadata ? 'source_job_binding'
- THEN RAISE EXCEPTION 'N21: a ladder_ref row re-decided as custody, got % %',e.match_method,e.metadata; END IF;
+ IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-000020260713' OR e.match_method<>'ladder_ref'
+  OR e.metadata->>'placement_rule'<>'direct_ref' OR e.metadata ? 'source_job_binding'
+ THEN RAISE EXCEPTION 'N21: a P1a link must be re-decided as ladder_ref, got % % %',e.match_method,e.metadata,e.job_id; END IF;
+ INSERT INTO public.business_events(source,payload,job_id,match_method)
+ VALUES('writer-custody','{"body":"Writer verified this job"}','d4000000-0000-4000-8000-000020260713','direct_job_id') RETURNING * INTO e;
+ IF e.job_id IS DISTINCT FROM 'd4000000-0000-4000-8000-000020260713' OR e.attribution_status<>'direct'
+  OR e.match_method<>'direct_job_id' OR e.metadata->'source_job_binding'->>'job_id'<>e.job_id::text
+  OR e.metadata->>'placement_rule'<>'custody'
+ THEN RAISE EXCEPTION 'writer custody: an insert-time binding must remain custody, got % % %',e.match_method,e.metadata,e.job_id; END IF;
 END $$;
 
 -- N23: rows written with the public key are never placed and never woken; a

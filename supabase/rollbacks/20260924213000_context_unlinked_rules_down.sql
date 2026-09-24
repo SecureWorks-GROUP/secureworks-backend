@@ -1,13 +1,14 @@
--- Down for 20260924213000 (P4): restore the two live production bodies byte
--- for byte and drop P4's functions. Rows placed, rested or stamped under P4
--- keep what they have; event_threads keeps its retirement columns and rows
--- (P1a's ladder does not read them), and the flag row stays (off or on, it
--- is read by nothing once P4's functions are gone). Rolling back is also
--- possible without this file: turn feature_flags.context_unlinked_rules_v1 off.
+-- Down for 20260924213000 (P4): disable P4, restore the two live production
+-- bodies byte for byte, and drop P4's functions. Rows placed, rested or stamped
+-- under P4 keep what they have; event_threads keeps its retirement columns and
+-- rows (P1a's ladder does not read them), and the flag row stays off.
 --   resolve_context_attribution(business_events)  md5(prosrc) fe50f14f4ab28d4d6c9dbb70bc85e7df (P1a)
 --   attribute_business_event()                    md5(prosrc) 7c1b8ffeeed8829288ee42c30e4314e5 (K1)
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
+
+UPDATE public.feature_flags SET enabled=false,updated_at=clock_timestamp()
+WHERE flag_name='context_unlinked_rules_v1';
 
 -- Refuse to overwrite a later change: each body must be P4's (or already the
 -- restored live body, for a repeated rollback).
@@ -16,7 +17,7 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.resolve_context_attribution(public.business_events)',ARRAY['32365101d23dde1695707a0bddff640b','fe50f14f4ab28d4d6c9dbb70bc85e7df']),
-  ('public.attribute_business_event()',ARRAY['8cc435a72090c636707cb947b19e1e12','7c1b8ffeeed8829288ee42c30e4314e5'])
+  ('public.attribute_business_event()',ARRAY['d0036a1bc36f4b2a779f4a8b192cd687','7c1b8ffeeed8829288ee42c30e4314e5'])
  ) AS t(sig,accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
   IF live IS NULL OR NOT live=ANY(x.accepted) THEN problems:=problems||format('%s md5 %s',x.sig,coalesce(live,'<missing>')); END IF;

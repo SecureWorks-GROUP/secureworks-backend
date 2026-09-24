@@ -144,7 +144,7 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: live pre-image, or this migration's body.
   ('public.resolve_context_attribution(public.business_events)',ARRAY['fe50f14f4ab28d4d6c9dbb70bc85e7df','32365101d23dde1695707a0bddff640b']),
-  ('public.attribute_business_event()',ARRAY['7c1b8ffeeed8829288ee42c30e4314e5','8cc435a72090c636707cb947b19e1e12']),
+  ('public.attribute_business_event()',ARRAY['7c1b8ffeeed8829288ee42c30e4314e5','d0036a1bc36f4b2a779f4a8b192cd687']),
   -- Read, not replaced: must be the merged bodies these rules were written against.
   ('public.context_contact_job_timeline(text,timestamp with time zone)',ARRAY['2bc8e76f14fda242eb6e4d414e93fefa']),
   ('public.context_event_is_ghl(public.business_events)',ARRAY['6bd4046317c4530a67ae38b0d7052cf4']),
@@ -225,11 +225,11 @@ BEGIN
  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='public.event_threads'::regclass AND conname='event_threads_retired_shape') THEN
   ALTER TABLE public.event_threads ADD CONSTRAINT event_threads_retired_shape CHECK (
    (retired_at IS NULL AND retired_reason IS NULL AND retired_conflict_job_id IS NULL)
-   OR (retired_at IS NOT NULL AND retired_reason IN ('conflict','guess_binding')));
+   OR (retired_at IS NOT NULL AND retired_reason='conflict'));
  END IF;
 END $$;
 COMMENT ON COLUMN public.event_threads.retired_at IS
- 'P4: set when the binding stops placing rows: a conflicting job for the same key (retired_reason conflict, the other job in retired_conflict_job_id) or a guess-made binding retired by the logged run (guess_binding). A retired key is never re-bound; rows quoting it rest unplaced with both jobs. Reversible by clearing the three columns.';
+ 'P4: set when a conflicting job reuses the same key; retired_conflict_job_id records the other job. A retired key is never re-bound; rows quoting it rest unplaced with both jobs. Reversible by clearing the three columns.';
 
 -- 1. The flag. Fails closed: no table, no row, or an error is off.
 CREATE OR REPLACE FUNCTION public.context_unlinked_rules_enabled() RETURNS boolean
@@ -553,7 +553,7 @@ CREATE OR REPLACE FUNCTION public.resolve_context_attribution(e public.business_
 RETURNS public.business_events
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE
- rules_on boolean; lane_on boolean; words text; subj text; prior_status text; source_method text; writer text;
+ rules_on boolean; words text; subj text; prior_status text; source_method text; writer text;
  v_at timestamptz; is_ghl boolean; v_mode text; ek text; pk text; contact text; n_contacts int; by_key text;
  toks text[]; ref_ids uuid[]; found_toks text[]; unfound text[]; cand uuid; rule text; custody boolean:=false;
  b public.event_threads; sk text; order_toks text[]; tok text; live_ids uuid[]; retired_ids uuid[];
@@ -574,25 +574,23 @@ BEGIN
   BEGIN
    prior_status:=e.attribution_status;
    source_method:=e.match_method;
-   -- A row P1a placed keeps its writer's method only in source_job_binding
-   -- (P1a stamps every direct row direct_job_id): read it from there, so a
-   -- monitor-inbox custody row filed before P4 is still re-scanned.
-   IF e.job_id IS NOT NULL AND source_method IN ('direct_job_id','direct_reference','manual')
-    AND e.metadata->'source_job_binding'->>'job_id'=e.job_id::text
-    AND e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
-    source_method:=e.metadata->'source_job_binding'->>'match_method';
-   END IF;
-   -- Custody binding, as P1a: record it, restore it, or strip a job given with
-   -- no allowed method down to a hint.
-   IF e.job_id IS NOT NULL AND source_method IN ('direct_job_id','direct_reference','manual') THEN
-    e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('source_job_binding',jsonb_build_object('job_id',e.job_id,'match_method',source_method));
-   ELSIF e.job_id IS NULL AND e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
+   IF e.job_id IS NOT NULL THEN
+    IF e.metadata->'source_job_binding'->>'job_id'=e.job_id::text
+     AND e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
+     source_method:=e.metadata->'source_job_binding'->>'match_method';
+    ELSE
+     e.metadata:=coalesce(e.metadata,'{}'::jsonb)-'source_job_binding';
+     e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
+     e.job_id:=NULL;
+     source_method:=NULL;
+    END IF;
+   ELSIF e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
     SELECT id INTO e.job_id FROM public.jobs WHERE id::text=e.metadata->'source_job_binding'->>'job_id';
-    source_method:=e.metadata->'source_job_binding'->>'match_method';
-   END IF;
-   IF e.job_id IS NOT NULL AND coalesce(source_method,'none') NOT IN ('direct_job_id','direct_reference','manual') THEN
-    e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
-    e.job_id:=NULL;
+    IF FOUND THEN source_method:=e.metadata->'source_job_binding'->>'match_method';
+    ELSE e.metadata:=e.metadata-'source_job_binding'; source_method:=NULL;
+    END IF;
+   ELSE
+    e.metadata:=coalesce(e.metadata,'{}'::jsonb)-'source_job_binding';
    END IF;
    e.attribution_checked_at:=clock_timestamp();
    words:=public.context_bucket_text(e);
@@ -801,7 +799,8 @@ BEGIN
        AND EXISTS (SELECT 1 FROM unnest(loose_keys) l WHERE strpos(lower(j.site_address),substring(l from ' (.*)$'))>0)
        AND coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
        AND coalesce(j.created_at,'-infinity'::timestamptz)<=v_at
-       AND (NOT (j.status::text IN ('cancelled','archived','lost','closed','complete','completed') OR coalesce(j.archived,false))
+       AND (NOT (j.status::text IN ('cancelled','archived','lost','closed','complete','completed') OR coalesce(j.archived,false)
+         OR (j.status::text='invoiced' AND j.completed_at IS NOT NULL))
         OR coalesce(j.completed_at,j.updated_at,'-infinity'::timestamptz)>=v_at-interval '60 days'))
      SELECT array_agg(DISTINCT n.id ORDER BY n.id) FILTER (WHERE n.k=ANY(coalesce(exact_keys,'{}'))),
       array_agg(DISTINCT n.id ORDER BY n.id) FILTER (WHERE n.lk && loose_keys)
@@ -861,15 +860,17 @@ BEGIN
      FOREACH tok IN ARRAY order_toks LOOP
       SELECT * INTO b FROM public.event_threads WHERE thread_key='supplier_ref:'||sk||':'||tok;
       IF NOT FOUND THEN
-       IF p_preview THEN bindings:=bindings||jsonb_build_array(jsonb_build_object('key','supplier_ref:'||sk||':'||tok,'job_id',cand));
-       ELSE INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES('supplier_ref:'||sk||':'||tok,cand,'ladder',e.id) ON CONFLICT DO NOTHING;
+       IF p_preview THEN
+        bindings:=bindings||jsonb_build_array(jsonb_build_object('key','supplier_ref:'||sk||':'||tok,'job_id',cand));
+       ELSE
+        INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES('supplier_ref:'||sk||':'||tok,cand,'ladder',e.id) ON CONFLICT DO NOTHING;
+        SELECT * INTO b FROM public.event_threads WHERE thread_key='supplier_ref:'||sk||':'||tok;
        END IF;
-      ELSIF b.retired_at IS NULL AND b.job_id<>cand THEN
+      END IF;
+      IF NOT p_preview AND FOUND AND b.retired_at IS NULL AND b.job_id<>cand THEN
        -- The same order number named for two jobs: retire it (Review M3).
-       IF NOT p_preview THEN
-        UPDATE public.event_threads SET retired_at=clock_timestamp(),retired_reason='conflict',retired_conflict_job_id=cand
-        WHERE thread_key='supplier_ref:'||sk||':'||tok AND retired_at IS NULL;
-       END IF;
+       UPDATE public.event_threads SET retired_at=clock_timestamp(),retired_reason='conflict',retired_conflict_job_id=cand
+       WHERE thread_key='supplier_ref:'||sk||':'||tok AND retired_at IS NULL;
        conflicts:=conflicts||to_jsonb('supplier_ref:'||sk||':'||tok);
       END IF;
      END LOOP;
@@ -895,13 +896,7 @@ BEGIN
  END IF;
  -- Always: why a bucket row is unlinked (metadata only, never a placement).
  IF e.attribution_status='admin_bucket' AND NOT (coalesce(e.metadata,'{}'::jsonb) ? 'bucket_reason') THEN
-  BEGIN
-   lane_on:=public.automation_lane_enabled('attribution');
-   IF lane_on THEN
-    e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('bucket_reason',public.context_bucket_reason(e));
-   END IF;
-  EXCEPTION WHEN OTHERS THEN NULL;
-  END;
+  e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('bucket_reason',public.context_bucket_reason(e));
  END IF;
  RETURN e;
 END $$;
@@ -948,13 +943,19 @@ COMMENT ON FUNCTION public.context_attribution_preview(uuid,boolean) IS
 -- or the ladder did can change it).
 CREATE OR REPLACE FUNCTION public.attribute_business_event() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE request_role text;
 BEGIN
   IF NEW.context_captured_at IS NULL THEN
     NEW.context_captured_at := clock_timestamp();
   END IF;
-  NEW.metadata := coalesce(NEW.metadata, '{}'::jsonb) || jsonb_build_object('written_as', public.context_request_role());
+  request_role:=public.context_request_role();
+  NEW.metadata:=coalesce(NEW.metadata,'{}'::jsonb)-'source_job_binding';
+  IF request_role='service_role' AND NEW.job_id IS NOT NULL AND NEW.match_method IN ('direct_job_id','direct_reference','manual') THEN
+    NEW.metadata:=NEW.metadata||jsonb_build_object('source_job_binding',jsonb_build_object('job_id',NEW.job_id,'match_method',NEW.match_method));
+  END IF;
+  NEW.metadata := NEW.metadata || jsonb_build_object('written_as', request_role);
   NEW := public.resolve_context_attribution(NEW);
-  NEW.metadata := coalesce(NEW.metadata, '{}'::jsonb) || jsonb_build_object('written_as', public.context_request_role());
+  NEW.metadata := coalesce(NEW.metadata, '{}'::jsonb) || jsonb_build_object('written_as', request_role);
   RETURN NEW;
 END $$;
 
