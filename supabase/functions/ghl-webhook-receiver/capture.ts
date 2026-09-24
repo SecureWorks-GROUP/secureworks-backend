@@ -27,13 +27,8 @@
 // the contact's newest conversation, so the call arrives once, through the builder,
 // as client.call_logged under ghl:<GHL message id> (callCompletedDoorbell).
 //
-// CustomerReplied (a GHL workflow post: trigger Customer Replied, channel SMS)
-// is the same doorbell for inbound texts, so a reply reaches the evidence table
-// within seconds instead of at the next reconciler run. The post carries the
-// contact only (no GHL message id, usually no conversation id) and writes
-// nothing from its body; the targeted read saves each message under
-// ghl:<GHL message id>, the reconciler's own key, so a text is saved once.
-// Flag off, nothing is written (customerRepliedDoorbell).
+// CustomerReplied uses the same contact-only doorbell, with no legacy write.
+// Workflow setup and recovery: docs/context/ghl-message-reconcile.md.
 //
 // Nothing here logs message text, names, numbers or addresses: ids and codes.
 // ════════════════════════════════════════════════════════════
@@ -399,7 +394,7 @@ async function contactDoorbell(
 
 /**
  * CallCompleted while live capture is on (slice T1): a doorbell. The call item
- * (and any other missing item) is saved as client.call_logged by the read.
+ * is saved as client.call_logged; other items keep their own builder mapping.
  */
 export function callCompletedDoorbell(
   client: Db,
