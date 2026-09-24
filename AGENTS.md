@@ -3854,7 +3854,11 @@ never machine-checked and never guessed.
 Only `sales_booking_book` / `sales_booking_send` act on an approval
 (`docs/sales-booking-executor.md`): dry run unless their switch is exactly
 `true` and a captain pressed, re-checked at the press, idempotent on the
-approval hash. The GHL writer refuses any real write that lacks that
+approval hash. Sender identity, current lead ownership, supported approval
+profiles and migration ordering are owned by
+`docs/sales-booking-confirmation-api.md` and `docs/sales-booking-executor.md`;
+`sales_booking_sender.ts` is the canonical people mapping. The GHL writer
+refuses any real write that lacks that
 executor's per-press claim, not just an approval
 (`docs/ghl-calendar-appointment-write.md`). After GHL holds the booking the
 executor writes its Outlook mirror (keyed on the GHL appointment id). One

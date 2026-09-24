@@ -81,6 +81,15 @@ complete when the result set ends. Until then the merged partial is served
 with `full_population: false` and an honest gap. No background job, no new
 table. Thread-facts and roster persist are the only writes on the read
 path. No GHL mutation, no calendar create, no send.
+Before projecting a cached candidate, the read fetches its current GHL
+assignee and pipeline. A candidate now owned by someone else is withheld;
+an unassigned candidate follows its current pipeline's owner. Failed or
+budget-limited ownership reads withhold the affected candidates and report a
+coverage gap. Enumeration rows and the resume cursor are retained unchanged,
+so a partial ownership read cannot discard scan progress. Freshly enumerated
+rows use the ownership returned by that live GHL search. Approval and send
+also recheck current ownership.
+
 `send_hold: true` and `policy.{activation,send,calendar_write}: 'held'`
 are constants the view renders; they are not the enforcement.
 
@@ -105,9 +114,9 @@ Remaining 429s are `coverage.remaining_429_count`.
 
 | Param | Default | Notes |
 |---|---|---|
-| `resource` | `nithin` | `nithin` (patio) or `marnin` (fencing/Stratco). Anything else is a 400. |
+| `resource` | `nithin` | `nithin` (patio), `marnin` (fencing/Stratco) or `khairo` (fencing). A row is on a person's list only when its current GHL assignee is that person, or it is unassigned in the pipeline whose unassigned leads are theirs (Marnin: fencing/Stratco, Nithin: patio; never Khairo). GHL user ids live in `sales_booking_sender.ts`. Anything else is a 400. |
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
-| `scoper_user_id` | the resource's own | Overrides the diary read only (GHL plus Outlook when that scoper has a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`), and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
+| `scoper_user_id` | the resource's own | Overrides the diary read only (GHL plus Outlook when that scoper has a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`), and only when it matches a v1 scoper (Nithin / Marnin / Khairo). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
 | `thread_limit` | 200 (max 250) | Newest-activity-first cap on thread reads, spent on scoped rows only. |
 | `thread_budget_ms` | 18000 | Wall-clock cap on the thread sweep, also clipped to the remaining whole-read budget. |
@@ -336,8 +345,8 @@ Nithin's recorded work address was absent from that roster
 `read_ok` with `mapped_by: name`, `reason: ghl_user_mapped_by_name`, and
 `calendar_email` set to the live GHL email. Zero or several name matches stay
 unread with `ghl_user_unmapped` — never first-match-wins. Khairo is on the
-email map with `ghl_user_id` null and is not a `SALES_BOOKING_RESOURCES`
-booking resource. Dedicated-calendar ids live on
+email map with `ghl_user_id` null and, since 2026-09-24, is a
+`SALES_BOOKING_RESOURCES` booking resource for texts from his own line. Dedicated-calendar ids live on
 `SALES_BOOKING_SCOPER_CALENDARS` (calendar-read paragraph above), not on
 this map. User ids stay null-pinned; this table records emails only.
 

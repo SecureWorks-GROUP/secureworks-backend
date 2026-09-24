@@ -118,7 +118,9 @@ merged UI `approvalSnapshot()` object, including schema, step, case/contact,
 resource/scoper/week, model id/profile, complete pack revision, content hash and
 channel content. Calendar content includes provider, calendar and assigned user,
 event start/end, arrival window, title and address. Message content includes
-exact template bytes, sender, recipient and `variant:"template"`.
+exact template bytes, sender, recipient and `variant:"template"`. An approved
+text whose sender is not the visit person's own line refuses
+`sender_not_scoper_line` and records nothing (`sales_booking_sender.ts`).
 
 `content_hash` (both preview `content_hash` and routing `message_sha256`) is
 SHA-256 of UTF-8 canonical JSON of that snapshot **excluding `content_hash`**.
@@ -131,8 +133,9 @@ week values shown by the UI. No trimming, newline conversion or rewording.
 The handler uses the existing allow-listed captain JWT policy
 (`SALES_BOOKING_CAPTAIN_EMAILS`) and requires a verified user ID. Request actor
 fields are ignored. API keys, routine callers and other JWTs cannot approve.
-Only the Stratco/Marnin profile is supported. One request names exactly one step;
-neither channel can trigger or grant the other.
+Message approvals support Marnin, Nithin and Khairo; calendar approvals remain
+Stratco/Marnin only. One request names exactly one step; neither channel can
+trigger or grant the other.
 
 Before recording, the handler re-reads the current workspace and compares the
 entire snapshot semantically, verifies the computed hash and proposal expiry.
@@ -189,9 +192,25 @@ The engine path is unchanged and keeps working. Code:
 `supabase/functions/ops-api/sales_booking_owner_approval.ts`; tests:
 `sales_booking_owner_approval_test.ts`.
 
-Stratco (resource `marnin`, profile `fencing-stratco-marnin`) only. Same
-`sales_booking_approvals` table, same 15-minute life, same captain-only rule,
-same executor. `binding_hash` is the `approval_id` the executor takes.
+Texts: Marnin's Stratco leads (`marnin`, `fencing-stratco-marnin`), Nithin's
+patio leads (`nithin`, `patio-nithin`) and Khairo's own fencing leads
+(`khairo`, `fencing-khairo`), each sent from that person's line. Visits and
+offered slots: Stratco only (`stratco_profile_required` otherwise). The engine
+path follows the same split. Same `sales_booking_approvals` table, same
+15-minute life, same captain-only rule, same executor. `binding_hash` is the
+`approval_id` the executor takes. Each case's `owner_booking.steps` names
+what it can take (`["message","calendar"]` on Stratco, `["message"]` else).
+
+Whose lead it is: the opportunity's current GHL assignee, read live at every
+approval (both routes, including the owner preview) and again at send. A lead
+assigned to Nithin or Khairo is only theirs; one assigned to Marnin, or
+unassigned in the Stratco pipeline, is Marnin's; an unassigned patio lead is
+Nithin's. Otherwise `lead_assigned_to_someone_else`; an unreadable assignee
+refuses `opportunity_assignment_unreadable`. The people, their GHL users and
+lines are one table, `sales_booking_sender.ts`. The approvals table accepts
+`marnin`, `nithin` and `khairo` from migration
+`20260924230000_sales_booking_approvals_people` (apply before the matching
+`ops-api`).
 
 ### Two presses: preview, then decide
 
@@ -234,7 +253,9 @@ refusal without running the calendar checks.
 
 Common fields: `step` (`"message"` or `"calendar"`), `case_id` (the case
 `id`), `contact_id` (GHL contact id), `week_start` (the screen's Monday),
-optional `resource` (must be `"marnin"`), `prepared_at` (decide only).
+optional `resource` (`"marnin"` by default, `"nithin"` or `"khairo"` for a
+text with no `offer`; anyone else is `booking_profile_required`),
+`prepared_at` (decide only).
 
 - **Message:** `text` (the exact text the owner wrote or edited, 1..1600
   characters, bytes kept exactly; no em or en dashes), optional `offer`
@@ -253,9 +274,10 @@ optional `resource` (must be `"marnin"`), `prepared_at` (decide only).
 `content_hash` is `bookingContentHash` (canonical JSON of the snapshot less
 `content_hash`), exactly as on the engine path.
 
-- Message `content`: `{text, sender:"+61489267776", recipient, variant:"owner",
-  offer}`. `recipient` is the GHL contact's current phone as E.164, read at the
-  press; `sender` is always the 776 line.
+- Message `content`: `{text, sender, recipient, variant:"owner", offer}`.
+  `recipient` is the GHL contact's current phone as E.164, read at the press;
+  `sender` is the visit person's own line from `sales_booking_sender.ts`
+  (Stratco is Marnin, so `+61489267776`), also returned as `checks.sender`.
 - Calendar `content`: `{provider:"ghl", calendar_id:"dEQKVKHthsjSYaen1fiE",
   assigned_user_id:"3S20LGVTjsVYy9vTJ9wM", start_iso:<window start>,
   end_iso:<visit end>, window_start_iso, window_end_iso,
@@ -272,10 +294,11 @@ Refusals are HTTP 409 unless shown (400 for a malformed request) with body
 Request and identity: `sales_booking_approval_write requires POST` (405),
 `invalid_dry_run`, `stamp_write_requires_captain` (403),
 `approval_actor_required` (403), `invalid_owner_input`,
-`stratco_profile_required`, `invalid_independent_approval`,
+`booking_profile_required`, `stratco_profile_required`,
+`invalid_independent_approval`,
 `refusal_reason_required`, `owner_prepared_at_required`,
 `owner_content_hash_required`, `booking_case_identity_ambiguous` (the contact
-must be exactly one case on the Stratco roster for that week and its case id
+must be exactly one case on the requested resource's roster for that week and its case id
 must match), `owner_preview_expired`, `contact_unreadable`.
 
 Content: `owner_message_text_required`, `owner_message_text_has_dash`,
@@ -331,7 +354,7 @@ GHL, Outlook, the thread and the recipient at its own press.
 ### What the read returns
 
 `sales_booking_read` adds `booking_flow.owner_approval_write:
-"owner-authored-v1"` (null off the Stratco resource), `booking_flow.owner_rulebook`,
+"owner-authored-v1"` for Marnin, Nithin and Khairo, `booking_flow.owner_rulebook`,
 and `hand_sent_texts` / `hand_sent_texts_note`. Each case carries
 `owner_booking`:
 

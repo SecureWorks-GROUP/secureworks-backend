@@ -5298,6 +5298,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const overlay = await loadSalesBookingPackOverlay(client, resource, assembled.week_start)
               return applySalesBookingPackOverlay(assembled, overlay)
             },
+            // Whose lead it is, read live from GHL at approval.
+            readOpportunityOwnership: createSalesBookingExecuteDeps(client).readOpportunityOwnership,
             // Owner-authored approvals (owner_input body): reads only.
             owner: createOwnerApprovalDeps(client),
           }))
