@@ -1080,7 +1080,7 @@ Deno.test("a failed save is retried by the next run and saved exactly once, thou
   assertEquals(db.rows.length, 2);
 });
 
-Deno.test("a failed save in an early run of a scan still holds the watermark when a later run completes the scan", async () => {
+Deno.test("an unfinished scan rewinds to retry a failed save before continuing", async () => {
   const ghl = new FakeGhl();
   const db = new FakeDb();
   const failedAt = new Date(T0 - 40 * MIN).toISOString();
@@ -1124,9 +1124,9 @@ Deno.test("a failed save in an early run of a scan still holds the watermark whe
   assert(second.outcome === "ran");
   assertEquals(second.counts.scan_continued, 1);
   assertEquals(second.counts.write_errors, 0);
-  assertEquals(second.counts.scan_completed, 1);
-  assertEquals(second.watermark, failedAt);
-  assertEquals(rowFor(db, "earlyText000000"), undefined);
+  assertEquals(second.counts.scan_completed, 0);
+  assertEquals(second.watermark, new Date(T0 - 15 * MIN).toISOString());
+  assert(rowFor(db, "earlyText000000"), "the failed text is retried");
 
   db.clock = T0 + 30 * MIN;
   let next = await runGhlMessageReconcile(deps(ghl, db), small);
@@ -1220,4 +1220,66 @@ Deno.test("a pending retry extends both floors beyond the 72-hour cap until save
     1,
     "the message is saved exactly once",
   );
+});
+
+Deno.test("an unreadable retry conversation stays pending when a peer at its timestamp saves", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const failedAt = new Date(T0 - 40 * MIN).toISOString();
+  quietConversation(ghl, "zRetryConversation", "retryText000001", failedAt);
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  db.failOnce.set("ghl:retryText000001", "57014");
+
+  const first = await runGhlMessageReconcile(deps(ghl, db));
+  assert(first.outcome === "ran");
+  assertEquals(first.counts.write_errors, 1);
+  assertEquals(first.counts.scan_completed, 1);
+  assertEquals(first.watermark, failedAt);
+
+  ghl.failMessagesFor.set("zRetryConversation", {
+    code: "record_read_failed",
+    status: 400,
+  });
+  quietConversation(ghl, "aPeerConversation", "peerText000001", failedAt);
+  db.clock = T0 + 15 * MIN;
+
+  const unreadableRetry = await runGhlMessageReconcile(deps(ghl, db));
+  assert(unreadableRetry.outcome === "ran");
+  assertEquals(unreadableRetry.status, "partial");
+  assertEquals(unreadableRetry.counts.inserted, 1);
+  assertEquals(unreadableRetry.counts.conversations_unreadable, 1);
+  assertEquals(unreadableRetry.counts.scan_completed, 0);
+  assertEquals(unreadableRetry.watermark, failedAt);
+  assert(rowFor(db, "peerText000001"), "the peer message is saved");
+  assertEquals(rowFor(db, "retryText000001"), undefined);
+  assertEquals(
+    (db.runs[0].cursor as { retry_from: string }).retry_from,
+    failedAt,
+  );
+  assertEquals(
+    (db.runs[0].cursor as { position: { ids: string[] } }).position.ids,
+    ["aPeerConversation"],
+    "the cursor stays before the unreadable retry conversation",
+  );
+
+  ghl.failMessagesFor.delete("zRetryConversation");
+  db.clock = T0 + 30 * MIN;
+  const cleanRetry = await runGhlMessageReconcile(deps(ghl, db));
+  assert(cleanRetry.outcome === "ran");
+  assertEquals(cleanRetry.status, "succeeded");
+  assertEquals(cleanRetry.counts.inserted, 1);
+  assertEquals(cleanRetry.counts.write_errors, 0);
+  assertEquals(cleanRetry.watermark, new Date(T0 + 15 * MIN).toISOString());
+  assert(rowFor(db, "retryText000001"), "the failed text is finally saved");
+  assertEquals(
+    db.rows.filter((row) => row.provider_message_id === "ghl:retryText000001")
+      .length,
+    1,
+  );
+  assertEquals(
+    db.rows.filter((row) => row.provider_message_id === "ghl:peerText000001")
+      .length,
+    1,
+  );
+  assertEquals((db.runs[0].cursor as { retry_from: unknown }).retry_from, null);
 });

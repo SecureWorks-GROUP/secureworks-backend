@@ -334,6 +334,7 @@ function stopCode(f: ProviderFailure): string {
 type ConversationResult =
   | { kind: "done" }
   | { kind: "skipped"; code: string }
+  | { kind: "incomplete"; code: string }
   | { kind: "stop"; code: string };
 
 export async function runGhlMessageReconcile(
@@ -436,13 +437,6 @@ export async function runGhlMessageReconcile(
   // with no readable time pins the floor this scan read from, which still
   // lists its conversation and reads the message again.
   let retryFromMs = ms(scan.retry_from);
-  const pendingRetryMs = retryFromMs;
-  let pendingRetrySeen = false;
-  const isPendingRetry = (at: number | null) =>
-    pendingRetryMs !== null && (at === null || at === pendingRetryMs);
-  const retrySucceeded = (at: number | null) => {
-    if (isPendingRetry(at)) pendingRetrySeen = true;
-  };
   const failedSave = (at: number | null) => {
     const t = at ?? messageFloorMs;
     retryFromMs = retryFromMs === null ? t : Math.min(retryFromMs, t);
@@ -458,7 +452,9 @@ export async function runGhlMessageReconcile(
     for (let page = 0;; page++) {
       if (page >= policy.maxMessagePagesPerConversation) {
         counts.message_pages_capped++;
-        return { kind: "done" };
+        return retryFromMs === null
+          ? { kind: "done" }
+          : { kind: "incomplete", code: "message_pages_capped" };
       }
       let read;
       try {
@@ -522,17 +518,14 @@ export async function runGhlMessageReconcile(
       for (const { row, at } of rows) {
         if (existing.has(String(row.provider_message_id))) {
           counts.duplicates++;
-          retrySucceeded(at);
           continue;
         }
         const out = await deps.capture(row);
         if (out.outcome === "inserted") {
           counts.inserted++;
           counts.webhook_misses++;
-          retrySucceeded(at);
         } else if (out.outcome === "duplicate") {
           counts.duplicates++;
-          retrySucceeded(at);
         } else if (out.outcome === "capture_disabled") {
           return { kind: "stop", code: "capture_disabled" };
         } else {
@@ -547,7 +540,9 @@ export async function runGhlMessageReconcile(
       ) return { kind: "done" };
       if (!read.nextLastMessageId) {
         counts.message_cursor_missing++;
-        return { kind: "done" };
+        return retryFromMs === null
+          ? { kind: "done" }
+          : { kind: "incomplete", code: "message_cursor_missing" };
       }
       lastMessageId = read.nextLastMessageId;
     }
@@ -557,6 +552,8 @@ export async function runGhlMessageReconcile(
   let stop: string | null = null;
   let position = scan.position;
   let processed = 0;
+  let failurePositionCaptured = false;
+  let failedPosition: ScanState["position"] = null;
   // A page can hold only ids already read when many conversations share the
   // boundary millisecond (GHL has no tie-break cursor). Step 1 re-reads the
   // boundary with the largest page GHL allows; step 2, only if that is still
@@ -643,14 +640,29 @@ export async function runGhlMessageReconcile(
           counts.backlog_more = page.hasMore === false ? 0 : 1;
           break scanLoop;
         }
+        const writeErrorsBefore = counts.write_errors;
         const result = await readConversation(conversation);
+        if (counts.write_errors > writeErrorsBefore &&
+          !failurePositionCaptured) {
+          failedPosition = position;
+          failurePositionCaptured = true;
+        }
         if (result.kind === "stop") {
           stop = result.code;
+          break scanLoop;
+        }
+        if (result.kind === "incomplete") {
+          issue(`retry_history_incomplete:${result.code}`);
+          scan.complete = false;
           break scanLoop;
         }
         if (result.kind === "skipped") {
           counts.conversations_unreadable++;
           issue(`conversation_unreadable:${result.code}`);
+          if (retryFromMs !== null) {
+            scan.complete = false;
+            break scanLoop;
+          }
         } else {
           counts.conversations_read++;
         }
@@ -672,7 +684,7 @@ export async function runGhlMessageReconcile(
       ) {
         tieStep = 2;
       }
-      scan.position = position;
+      scan.position = failurePositionCaptured ? failedPosition : position;
       if (!list.length || page.hasMore === false) {
         scan.complete = true;
         break;
@@ -690,13 +702,27 @@ export async function runGhlMessageReconcile(
     // with its code; the position saved so far is kept.
     stop = safeCode(providerFailure(error).code ?? "run_error");
   }
+  if (!scan.complete && failurePositionCaptured) position = failedPosition;
+  if (
+    !scan.complete && failurePositionCaptured && retryFromMs !== null &&
+    (counts.conversations_unreadable > 0 ||
+      counts.message_pages_capped > 0 ||
+      counts.message_cursor_missing > 0 ||
+      counts.boundary_tie_fallbacks > 0)
+  ) position = null;
   scan.position = position;
 
   // 4. Finish the run row.
   const complete = scan.complete && !stop;
   if (!complete) scan.complete = false;
   counts.scan_completed = complete ? 1 : 0;
-  if (complete && pendingRetrySeen && counts.write_errors === 0) {
+  if (
+    complete && retryFromMs !== null && counts.write_errors === 0 &&
+    counts.conversations_unreadable === 0 &&
+    counts.message_pages_capped === 0 &&
+    counts.message_cursor_missing === 0 &&
+    counts.boundary_tie_fallbacks === 0
+  ) {
     retryFromMs = null;
     scan.retry_from = null;
   }
