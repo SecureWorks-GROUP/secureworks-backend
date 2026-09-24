@@ -199,10 +199,16 @@ export async function handleGhlOAuthCallback(
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return await finish("exchange_invalid_response");
   }
-  // Read only the two ids; the tokens go out of scope with `body` unread.
   const rec = body as Record<string, unknown>;
-  companyId = safeId(rec.companyId);
   const installedLocation = safeId(rec.locationId);
+  if (
+    typeof rec.access_token !== "string" ||
+    rec.access_token.trim().length === 0 ||
+    !installedLocation
+  ) {
+    return await finish("exchange_invalid_response");
+  }
+  companyId = safeId(rec.companyId);
   if (installedLocation !== expectedLocation) {
     return await finish("location_mismatch");
   }

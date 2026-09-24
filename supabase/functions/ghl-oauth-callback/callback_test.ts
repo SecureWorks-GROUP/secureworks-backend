@@ -220,6 +220,36 @@ for (const body of ["not json", "null", "[]", '"invalid"']) {
 }
 
 for (
+  const [name, body] of Object.entries({
+    empty: {},
+    missing_token: { locationId: LOCATION },
+    empty_token: { access_token: "", locationId: LOCATION },
+    blank_token: { access_token: "   ", locationId: LOCATION },
+    non_string_token: { access_token: 123, locationId: LOCATION },
+    missing_location: { access_token: ACCESS_TOKEN },
+    invalid_location: { access_token: ACCESS_TOKEN, locationId: "<foreign>" },
+    non_string_location: { access_token: ACCESS_TOKEN, locationId: 123 },
+  })
+) {
+  Deno.test(`invalid token response: ${name} writes no receipt`, async () => {
+    const h = harness({
+      respond: () => Response.json(body),
+    });
+    const { result: res, lines } = await captureConsole(() =>
+      handleGhlOAuthCallback(callbackRequest(), h.deps)
+    );
+    assertEquals(res.status, 502);
+    assertStringIncludes(
+      await assertNoSecrets(res, h.receipts, lines),
+      "Error code: exchange_invalid_response",
+    );
+    assertEquals(h.receipts, []);
+    assertEquals(lines.length, 1);
+    assertStringIncludes(lines[0], "exchange_invalid_response");
+  });
+}
+
+for (
   const name of [
     "GHL_APP_CLIENT_ID",
     "GHL_APP_CLIENT_SECRET",
