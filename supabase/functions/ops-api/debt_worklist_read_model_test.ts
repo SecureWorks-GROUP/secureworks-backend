@@ -1198,6 +1198,27 @@ Deno.test("conversation business-event faults make GHL source unreadable", async
   );
 });
 
+Deno.test("conversation job-read faults make GHL source unreadable", async () => {
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(
+      fakeClient(unitTables()),
+      conversationStub(
+        { [JOB_A]: JOB_A_MESSAGES },
+        { [JOB_A]: ["jobs: unavailable"] },
+      ).fn,
+    ),
+  );
+  const debtor = out.debtors[0];
+  assertEquals(debtor.sources.ghl.status, "unreadable");
+  assertEquals(debtor.sources.ghl.complete, false);
+  assertEquals(debtor.sources.ghl.last_success_at, null);
+  assertEquals(debtor.timeline.complete, false);
+  assert(
+    debtor.faults.some((fault: any) => fault.detail.includes("jobs:")),
+  );
+});
+
 Deno.test("capped chase and invoice-event reads keep timeline incomplete", async () => {
   const tables = unitTables();
   tables.payment_chase_logs = Array.from({ length: 20_001 }, (_, index) => ({
@@ -1290,6 +1311,59 @@ Deno.test("unconfirmed inbox guesses stay out of timeline and last contact", asy
   );
   assert(debtor.last_contact.last?.source !== "inbox");
   assertEquals(debtor.timeline.complete, false);
+});
+
+Deno.test("verified email copies are excluded from unconfirmed inbox count", async () => {
+  const tables = unitTables();
+  tables.contact_matches = [{
+    id: "verified-contact-route",
+    org_id: ORG,
+    xero_contact_id: "xc-1",
+    ghl_contact_id: "ghl-a",
+    job_id: JOB_A,
+    email: "payer-xc-1@example.test",
+    phone: null,
+  }];
+  tables.business_events.push({
+    id: "verified-graph-email",
+    contact_id: "ghl-a",
+    event_type: "client.email_in",
+    occurred_at: "2026-09-18T02:00:00Z",
+    channel: "email",
+    direction: "inbound",
+    provider_message_id: "graph:overlap-email",
+    privacy_classification: "staff_only",
+    source: "monitor-inbox",
+    payload: { body: "Verified contact email" },
+  });
+  const out: any = await debtWorklist(
+    new URLSearchParams({ debtor: "xero:xc-1", timeline: "full" }),
+    deps(
+      fakeClient(tables),
+      conversationStub({
+        [JOB_A]: [{
+          id: "legacy-overlap-email",
+          source_system: "inbox",
+          source_ref: "legacy-overlap-email",
+          provider_message_id: "graph:overlap-email",
+          channel: "email",
+          direction: "inbound",
+          occurred_at: "2026-09-18T02:00:00Z",
+          preview: "Old matcher copy",
+        }],
+      }).fn,
+    ),
+  );
+  const debtor = out.debtors[0];
+  const entries = debtor.timeline.entries.filter((entry: any) =>
+    entry.provider_id === "graph:overlap-email"
+  );
+  assertEquals(entries.length, 1);
+  assertEquals(entries[0].source, "business_events");
+  assertEquals(entries[0].preview, "Verified contact email");
+  assertEquals(debtor.sources.email.unconfirmed_matches, 0);
+  assertEquals(debtor.timeline.sources_complete, true);
+  assertEquals(debtor.timeline.complete, true);
 });
 
 Deno.test("inbox event-copy faults make email source unreadable", async () => {

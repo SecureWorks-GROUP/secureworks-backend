@@ -1763,6 +1763,14 @@ export async function debtWorklist(
           );
         }
       }
+      const representedEmailProviderIds = new Set(
+        raw.filter((entry) => entry.provider === "outlook")
+          .map((entry) => entry.provider_id)
+          .filter((providerId): providerId is string => Boolean(providerId)),
+      );
+      for (const providerId of representedEmailProviderIds) {
+        unconfirmedEmailProviderIds.delete(providerId);
+      }
       const factsCapHit = linkedJobs.filter((j) => factsCapJobs.has(j)).map((
         j,
       ) => jobs.get(j)?.job_number ?? j);
@@ -1948,7 +1956,8 @@ export async function debtWorklist(
       Boolean(contactMessagesFault && contactOnlyGhl.length) ||
       Boolean(contactEventsFault && (debtorGhlContactIds.get(key)?.length ?? 0)) ||
       Boolean(convFaultBy("ghl_cache")) ||
-      Boolean(convFaultBy("business_events"));
+      Boolean(convFaultBy("business_events")) ||
+      Boolean(convFaultBy("jobs"));
     const ghlStale = !ghlUnreadable && (
       ghlContacts.some((c) => c.stale) ||
       ghlJobCaches.some((c) => c.used_by_conversation_read && c.stale === true)
