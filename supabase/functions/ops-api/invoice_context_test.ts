@@ -846,6 +846,61 @@ Deno.test("contact resolver ignores uncorroborated contact matches", async () =>
   assertEquals(phoneCorroborated.get("contact-route")?.status, "linked");
 });
 
+Deno.test("contact route is unreadable instead of unique at the candidate page ceiling", async () => {
+  const t = baseTables();
+  const inv = t.xero_invoices[0];
+  inv.job_id = null;
+  inv.job_number = null;
+  inv.xero_contact_id = "xc-overflow";
+  inv.raw_json = {
+    Contact: {
+      ContactID: "xc-overflow",
+      EmailAddress: "payer@example.test",
+    },
+  };
+  t.jobs = [
+    {
+      id: JOB1,
+      org_id: ORG,
+      job_number: "SWF-261901",
+      status: "scheduled",
+      ghl_contact_id: null,
+    },
+    {
+      id: JOB2,
+      org_id: ORG,
+      job_number: "SWF-261902",
+      status: "scheduled",
+      ghl_contact_id: null,
+    },
+  ];
+  t.contact_matches = Array.from({ length: 20_000 }, (_, index) => ({
+    id: `match-${String(index).padStart(5, "0")}`,
+    org_id: ORG,
+    xero_contact_id: "xc-overflow",
+    ghl_contact_id: null,
+    job_id: JOB1,
+    email: "payer@example.test",
+    phone: null,
+  }));
+  t.contact_matches.push({
+    id: "match-zz-overflow",
+    org_id: ORG,
+    xero_contact_id: "xc-overflow",
+    ghl_contact_id: null,
+    job_id: JOB2,
+    email: "payer@example.test",
+    phone: null,
+  });
+  const out = await invoiceContext(
+    new URLSearchParams({ invoice: "INV-1419" }),
+    deps(t),
+  );
+  assertEquals(out.link.status, "none");
+  assertEquals(out.sources.job_link.ok, false);
+  assertStringIncludes(out.sources.job_link.error, "page ceiling");
+});
+
 Deno.test("contact route requires this invoice's own Xero ContactID", async () => {
   const t = baseTables();
   const jobId = "a0000000-0000-4000-8000-000000000077";

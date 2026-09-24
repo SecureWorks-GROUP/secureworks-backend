@@ -68,7 +68,6 @@ type TimelineMode = keyof typeof TIMELINE_BOUNDS;
 // A chase-log SMS and the provider's copy of it are one message when the text
 // matches and they are this close in time.
 const SAME_SMS_WINDOW_MS = 15 * 60_000;
-const CONFIRMED_INBOX_EVENT_COPY_STATES: ReadonlySet<string> = new Set();
 // The v1 default GHL conversation cache freshness threshold.
 export const GHL_CACHE_STALE_HOURS = 24;
 
@@ -276,10 +275,10 @@ export function entryFromConversation(
     ? "outlook"
     : "secureworks";
   const channel = str(m.channel);
-  const inboxPlacementVerified = source === "inbox" &&
-    typeof m.event_copy === "string" &&
-    CONFIRMED_INBOX_EVENT_COPY_STATES.has(m.event_copy);
-  const unplacedInbox = source === "inbox" && !inboxPlacementVerified;
+  const privacyClassification = str(m.privacy_classification);
+  const withheld = privacyClassification === "restricted_pii" ||
+    privacyClassification === "audio_unredacted";
+  const unplacedInbox = source === "inbox";
   const kind = channel === "note" && source === "job_events"
     ? "job_note"
     : channel === "note"
@@ -294,16 +293,18 @@ export function entryFromConversation(
     at: str(m.occurred_at),
     at_precision: "time",
     direction: str(m.direction) ?? "unknown",
-    author: str(m.author),
+    author: withheld ? null : str(m.author),
     source,
     source_ref: str(m.source_ref),
-    subject: str(m.subject),
-    preview: String(m.preview ?? m.body ?? "").slice(0, 500),
+    subject: withheld ? null : str(m.subject),
+    preview: withheld ? "" : String(m.preview ?? m.body ?? "").slice(0, 500),
     job_id: unplacedInbox ? null : jobId,
     invoice_ids: unplacedInbox ? [] : [...jobInvoiceIds],
     invoice_scope: unplacedInbox ? "unplaced" : "job",
     seen_in: [source],
-    label: unplacedInbox
+    label: withheld
+      ? `content withheld: ${privacyClassification}`
+      : unplacedInbox
       ? "unplaced, matched by the old guess"
       : str(m.label),
   };
@@ -317,10 +318,30 @@ export function entryFromGhlContactEvent(
   const payload = row.payload ?? {};
   const providerId = str(row.provider_message_id);
   const jobId = str(row.job_id);
-  const restricted = row.privacy_classification === "restricted_pii";
-  const channel = str(row.channel) ?? str(payload.channel) ?? "note";
-  const isNote = channel === "note";
-  const body = restricted
+  const eventType = str(row.event_type) ?? "";
+  const privacyClassification = str(row.privacy_classification);
+  const withheld = privacyClassification === "restricted_pii" ||
+    privacyClassification === "audio_unredacted";
+  const isNote = eventType === "ghl.note_added" ||
+    eventType === "ghl.internal_comment";
+  const eventChannel = eventType === "client.reply" ||
+      eventType.includes(".sms_")
+    ? "sms"
+    : eventType.includes(".email_")
+    ? "email"
+    : isNote
+    ? "note"
+    : null;
+  const channel = eventChannel ?? str(row.channel) ?? str(payload.channel) ??
+    "note";
+  const eventDirection = isNote
+    ? "internal"
+    : eventType === "client.reply" || eventType.endsWith("_in")
+    ? "inbound"
+    : eventType.endsWith("_out")
+    ? "outbound"
+    : null;
+  const body = withheld
     ? ""
     : String(
       payload.body ?? payload.text ?? payload.message ?? payload.note_text ??
@@ -334,22 +355,21 @@ export function entryFromGhlContactEvent(
     provider_id: providerId,
     at: str(row.occurred_at),
     at_precision: "time",
-    direction: isNote
-      ? "internal"
-      : str(row.direction) ?? str(payload.direction) ?? "unknown",
-    author: restricted
+    direction: eventDirection ?? str(row.direction) ??
+      str(payload.direction) ?? "unknown",
+    author: withheld
       ? null
       : str(payload.added_by) ?? str(payload.sent_by_user) ??
         str(payload.from),
     source: "business_events",
     source_ref: str(row.id),
     subject: null,
-    preview: restricted ? "" : body.slice(0, 500),
+    preview: withheld ? "" : body.slice(0, 500),
     job_id: jobId,
     invoice_ids: jobId ? [...(jobInvoiceIds ?? [])] : [...debtorInvoiceIds],
     invoice_scope: jobId ? "job" : "debtor",
     seen_in: ["business_events"],
-    label: restricted ? "content withheld: restricted_pii" : null,
+    label: withheld ? `content withheld: ${privacyClassification}` : null,
   };
 }
 

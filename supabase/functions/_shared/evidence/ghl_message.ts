@@ -28,6 +28,7 @@ export const GHL_CAPTURED_MESSAGE_EVENT_TYPES = [
   "client.reply",
   "client.email_in",
   "client.email_out",
+  "client.sms_in",
   "client.sms_out",
   "ghl.note_added",
   "ghl.internal_comment",

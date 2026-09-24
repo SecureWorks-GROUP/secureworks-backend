@@ -51,7 +51,6 @@ type Mode = keyof typeof MODE_BOUNDS;
 // coverage count and the door's conversation agree on what "a message" is.
 const MESSAGE_EVENT_TYPES = [
   ...GHL_CAPTURED_MESSAGE_EVENT_TYPES,
-  "client.sms_in",
   "client.call_complete",
   "client.message_in",
   "supplier.email_in",
@@ -360,13 +359,21 @@ export async function resolveJobLinks(
   const allContactJobIds = new Set<string>();
   const allGhlIds = new Set<string>();
   for (const ids of chunk([...wantContacts])) {
-    let query = client.from("contact_matches")
-      .select("xero_contact_id, ghl_contact_id, job_id, email, phone").in(
-        "xero_contact_id",
-        ids,
-      );
-    if (orgId !== undefined) query = query.eq("org_id", orgId);
-    const rows = unwrap(await query);
+    const rows = await pageThrough(
+      "contact_matches",
+      () => {
+        let query = client.from("contact_matches")
+          .select("xero_contact_id, ghl_contact_id, job_id, email, phone").in(
+            "xero_contact_id",
+            ids,
+          );
+        if (orgId !== undefined) query = query.eq("org_id", orgId);
+        return query;
+      },
+      [],
+      "id",
+      true,
+    );
     for (const m of rows || []) {
       if (!m.xero_contact_id) continue;
       for (const inv of invoicesByContact.get(m.xero_contact_id) ?? []) {

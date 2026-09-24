@@ -703,6 +703,7 @@ Deno.test("contact-level GHL messages and notes retain direction and scope", asy
     ["client.reply", "sms", "inbound"],
     ["client.email_in", "email", "inbound"],
     ["client.email_out", "email", "outbound"],
+    ["client.sms_in", "sms", "inbound"],
     ["client.sms_out", "sms", "outbound"],
     ["ghl.note_added", "note", "internal"],
     ["ghl.internal_comment", "note", "internal"],
@@ -713,13 +714,12 @@ Deno.test("contact-level GHL messages and notes retain direction and scope", asy
     job_id: null,
     event_type: eventType,
     occurred_at: `2026-09-23T0${index}:00:00Z`,
-    channel,
-    direction,
+    channel: eventType === "client.sms_in" ? null : channel,
+    direction: eventType === "client.sms_in" ? null : direction,
     provider_message_id: `ghl:contact-event-${index}`,
     payload: {
       body: `Captured ${eventType}`,
-      channel,
-      direction,
+      ...(eventType === "client.sms_in" ? {} : { channel, direction }),
       added_by: "operator-1",
     },
   }));
@@ -786,6 +786,32 @@ Deno.test("restricted contact events keep metadata but withhold content", async 
   assertEquals(entry.preview, "");
   assertEquals(entry.subject, null);
   assertEquals(entry.label, "content withheld: restricted_pii");
+});
+
+Deno.test("protected job conversation content is withheld in the debt timeline", () => {
+  const entry = entryFromConversation({
+    id: "restricted-call",
+    source_system: "business_events",
+    source_ref: "event-1",
+    provider_message_id: "ghl:call-1",
+    privacy_classification: "audio_unredacted",
+    channel: "call",
+    direction: "inbound",
+    occurred_at: "2026-09-23T01:00:00Z",
+    author: "Private caller",
+    subject: "Private subject",
+    body: "Private call transcript",
+    preview: "Private call preview",
+  }, JOB_A, [INV(1)]);
+  assertEquals(entry.provider, "ghl");
+  assertEquals(entry.provider_id, "ghl:call-1");
+  assertEquals(entry.at, "2026-09-23T01:00:00Z");
+  assertEquals(entry.direction, "inbound");
+  assertEquals(entry.source, "business_events");
+  assertEquals(entry.author, null);
+  assertEquals(entry.preview, "");
+  assertEquals(entry.subject, null);
+  assertEquals(entry.label, "content withheld: audio_unredacted");
 });
 
 Deno.test("contact event provider follows its Graph provider id", async () => {
@@ -886,7 +912,7 @@ Deno.test("capped chase and invoice-event reads keep timeline incomplete", async
   );
 });
 
-Deno.test("unconfirmed inbox copies stay outside job and invoice scopes", async () => {
+Deno.test("legacy inbox copies stay outside job and invoice scopes", async () => {
   const inboxMessage = (eventCopy: unknown, id: string) => ({
     id,
     source_system: "inbox",
@@ -2121,7 +2147,18 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
       occurred_at: "2026-09-03T00:00:00Z",
       direction: "internal",
       provider_message_id: "ghlnote:note-1:2026-09-03T00:00:00Z",
+      privacy_classification: "restricted_pii",
       payload: { direction: "internal", body: "Staff contact note" },
+    }, {
+      id: "sms-in-captured",
+      job_id: jobId,
+      event_type: "client.sms_in",
+      source: "ghl-webhook-receiver",
+      occurred_at: "2026-09-03T12:00:00Z",
+      direction: null,
+      provider_message_id: "ghl:sms-in-1",
+      privacy_classification: "staff_only",
+      payload: { body: "Customer reply" },
     }, {
       id: "comment-captured",
       job_id: jobId,
@@ -2139,6 +2176,7 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   });
   assertEquals("read_faults" in plain, false);
   assert(plain.messages.every((m: any) => !("provider_message_id" in m)));
+  assert(plain.messages.every((m: any) => !("privacy_classification" in m)));
 
   const failing = fakeClient(
     tables,
@@ -2165,8 +2203,9 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   const inbox = clean.messages.find((m: any) => m.source_system === "inbox");
   assertEquals(inbox.provider_message_id, "graph:G1");
   const note = clean.messages.find((m: any) =>
-    m.channel === "note" && m.source_system === "business_events"
+    m.provider_message_id === "ghlnote:note-1:2026-09-03T00:00:00Z"
   );
+  assertEquals(note.privacy_classification, "restricted_pii");
   assertEquals(note.channel, "note");
   assertEquals(note.direction, "internal");
   const internalComment = clean.messages.find((m: any) =>
@@ -2174,6 +2213,12 @@ Deno.test("getJobConversation: report_faults names failed sources and adds provi
   );
   assertEquals(internalComment.channel, "note");
   assertEquals(internalComment.direction, "internal");
+  const inboundSms = clean.messages.find((m: any) =>
+    m.provider_message_id === "ghl:sms-in-1"
+  );
+  assertEquals(inboundSms.channel, "sms");
+  assertEquals(inboundSms.direction, "inbound");
+  assertEquals(inboundSms.privacy_classification, "staff_only");
 });
 
 Deno.test("getJobConversation reports an unreadable unlinked-rules flag and keeps its fallback", async () => {
