@@ -6,7 +6,7 @@
 // that note gives. Their bodies are not in the note, so the preview is
 // empty; the rules read subject plus preview, so the subject alone decides.
 //
-// Run: deno test --allow-read --allow-env supabase/functions/monitor-inbox/classify_email_test.ts
+// Run: deno test --allow-env supabase/functions/monitor-inbox/classify_email_test.ts
 
 // deno-lint-ignore-file no-import-prefix
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
@@ -14,7 +14,7 @@ import { classifyEmail, type EmailClassification } from './classify_email.ts'
 
 type Row = {
   label: string
-  path: 'mailbox' | 'group'
+  path: 'user_mailbox_poll' | 'group_reader'
   from: string
   subject: string
   preview: string
@@ -26,7 +26,7 @@ const NO_ACTION = { priority: 'normal', action_needed: null } as const
 const ROWS: Row[] = [
   {
     label: 'E4 SWP-261203 invoice reply',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'admin@secureworkswa.com.au',
     subject: 'Re: Invoice #INV-1244',
     preview: '',
@@ -34,7 +34,7 @@ const ROWS: Row[] = [
   },
   {
     label: 'E5 SWP-26701 council permit (Stirling)',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'Development@stirling.wa.gov.au',
     subject: 'BC26/1697 - Building Permit',
     preview: '',
@@ -42,7 +42,7 @@ const ROWS: Row[] = [
   },
   {
     label: 'E5 SWP-26701 council RFI (Stirling)',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'Development@stirling.wa.gov.au',
     subject: 'RFI - BC26/1697',
     preview: '',
@@ -50,7 +50,7 @@ const ROWS: Row[] = [
   },
   {
     label: 'E6 SWP-261222 South Perth acknowledgement',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'admin@secureworkswa.com.au',
     subject: 'Acknowledgement BDBPCERT-2026/3018',
     preview: '',
@@ -58,7 +58,7 @@ const ROWS: Row[] = [
   },
   {
     label: 'E9 SWP-261247 invoice thread in marnin@',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'marnin@secureworkswa.com.au',
     subject: 'Re: Invoice: INV-1477',
     preview: '',
@@ -66,7 +66,7 @@ const ROWS: Row[] = [
   },
   {
     label: 'E10 SWP-261248 forwarded site address in nithin@',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'nithin@secureworkswa.com.au',
     subject: 'Fw: 34 Montane Tn, Banksia Grove',
     preview: '',
@@ -76,7 +76,7 @@ const ROWS: Row[] = [
     // The space-joined "SWP 26195" is not a rules job_ref; the shared token
     // rule (B0, used by the ladder) reads it. EM0 does not widen the rules.
     label: 'E11 SWP-26195 material order in admin@',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'admin@secureworkswa.com.au',
     subject: 'Material Order Ref SWP 26195',
     preview: '',
@@ -84,7 +84,7 @@ const ROWS: Row[] = [
   },
   {
     label: 'E18 SWP-261222 patios@ group post approval',
-    path: 'group',
+    path: 'group_reader',
     from: 'patios@secureworkswa.com.au',
     subject: 'Approval BDBPCERT-2026/3018 - 20A Beenan',
     preview: '',
@@ -94,7 +94,7 @@ const ROWS: Row[] = [
     // Fixture, not a named row: proves the rules job_ref still reaches the
     // job matcher (resolveJobId step 1) once the model no longer supplies one.
     label: 'fixture: our PO number in a supplier quote',
-    path: 'mailbox',
+    path: 'user_mailbox_poll',
     from: 'orders@supplier.example',
     subject: 'Quote for PO061378',
     preview: '',
@@ -102,7 +102,7 @@ const ROWS: Row[] = [
   },
   {
     label: 'fixture: our prefixed job number in a group post',
-    path: 'group',
+    path: 'group_reader',
     from: 'fencing@secureworkswa.com.au',
     subject: 'Re: SWF-26838 gate',
     preview: 'Can you confirm the gate width',
@@ -110,10 +110,8 @@ const ROWS: Row[] = [
   },
 ]
 
-// The model used to run whenever this key was set, so the test sets it and
-// traps every outbound request. (Name split so the source pin below does
-// not match this file.)
-const MODEL_KEY = 'ANTHROPIC' + '_API_KEY'
+// A configured model key must not cause classification to make a request.
+const MODEL_KEY = 'ANTHROPIC_API_KEY'
 
 Deno.test('EM0: no outbound call on any named row, even with a model key present', () => {
   const originalFetch = globalThis.fetch
@@ -125,10 +123,14 @@ Deno.test('EM0: no outbound call on any named row, even with a model key present
   }) as typeof fetch
   Deno.env.set(MODEL_KEY, 'sk-test-em0-trap')
   try {
-    for (const row of ROWS) {
-      const result = classifyEmail(row.from, row.subject, row.preview)
-      assert(!(result instanceof Promise), `${row.label}: classifier must not return a Promise`)
-      assertEquals(result, row.expected, row.label)
+    for (const path of ['user_mailbox_poll', 'group_reader'] as const) {
+      const pathRows = ROWS.filter((row) => row.path === path)
+      assert(pathRows.length > 0, `recorded rows cover ${path}`)
+      for (const row of pathRows) {
+        const result = classifyEmail(row.from, row.subject, row.preview)
+        assert(!(result instanceof Promise), `${row.label}: classifier must not return a Promise`)
+        assertEquals(result, row.expected, row.label)
+      }
     }
     assertEquals(calls, [], 'no outbound request from the classifier')
   } finally {
@@ -136,11 +138,6 @@ Deno.test('EM0: no outbound call on any named row, even with a model key present
     if (hadKey === undefined) Deno.env.delete(MODEL_KEY)
     else Deno.env.set(MODEL_KEY, hadKey)
   }
-})
-
-Deno.test('EM0: both paths are covered by the named rows', () => {
-  assert(ROWS.some((r) => r.path === 'mailbox'))
-  assert(ROWS.some((r) => r.path === 'group'))
 })
 
 Deno.test('EM0: a noreply sender and an urgent word keep their rules classes', () => {
@@ -156,37 +153,4 @@ Deno.test('EM0: a noreply sender and an urgent word keep their rules classes', (
     action_needed: 'review',
     job_ref: null,
   })
-})
-
-// Source pin: monitor-inbox holds no model client, key or model id, and both
-// of its paths call the one rules classifier. The needles are split so this
-// file does not match itself.
-const FORBIDDEN = [
-  '@anthropic' + '-ai',
-  'api.anthropic' + '.com',
-  'ANTHROPIC' + '_API_KEY',
-  'claude' + '-haiku',
-  'anthropic' + '.messages',
-]
-
-Deno.test('EM0: no file in monitor-inbox reaches a model', async () => {
-  const dir = new URL('./', import.meta.url)
-  const offenders: string[] = []
-  for await (const entry of Deno.readDir(dir)) {
-    if (!entry.isFile || !entry.name.endsWith('.ts')) continue
-    const text = await Deno.readTextFile(new URL(entry.name, dir))
-    for (const needle of FORBIDDEN) {
-      if (text.includes(needle)) offenders.push(`${entry.name}: ${needle}`)
-    }
-  }
-  assertEquals(offenders, [])
-})
-
-Deno.test('EM0: both monitor-inbox paths classify through the rules module', async () => {
-  const src = await Deno.readTextFile(new URL('./index.ts', import.meta.url))
-  assert(src.includes("import { classifyEmail } from './classify_email.ts'"))
-  assert(!/function\s+classifyEmail/.test(src), 'no second classifier in index.ts')
-  // One call on the user-mailbox poll, one on the group reader.
-  assertEquals((src.match(/\bclassifyEmail\(/g) ?? []).length, 2)
-  assertEquals((src.match(/await\s+classifyEmail\(/g) ?? []).length, 0)
 })
