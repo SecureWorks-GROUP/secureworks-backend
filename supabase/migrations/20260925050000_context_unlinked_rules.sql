@@ -128,7 +128,7 @@
 --   read as not unpaid); feature_flags(id, flag_name unique, enabled, description,
 --   updated_at), no context_unlinked_rules_v1 row; monitor-inbox sources
 --   monitor-inbox, monitor_inbox, monitor-inbox-group. The ledger held only
---   20260924201000 after 20260924183000. Version 20260925050000: 20260924213000
+--   20260924201000 after 20260924183000. Version 20260925050000: P4's first version
 --   is taken by the email slice EM1; this one is unused on main and on every
 --   open context branch (EM1, catch-up, T2, M4, S-M1).
 -- The guard refuses unless each replaced object is still that pre-image (or
@@ -802,12 +802,6 @@ BEGIN
       SELECT j.id, public.context_address_key(j.site_address) AS k, public.context_address_loose_keys(j.site_address) AS lk
       FROM public.jobs j
       WHERE j.site_address IS NOT NULL
-       -- Cheap prefilter, a strict superset of context_address_mentions: a
-       -- key's street-name letters always appear contiguously once every
-       -- character but a-z and 0-9 is stripped (apostrophes of any kind,
-       -- repeated spaces and punctuation included).
-       AND EXISTS (SELECT 1 FROM unnest(loose_keys) l WHERE strpos(regexp_replace(lower(j.site_address),'[^a-z0-9]','','g'),
-        regexp_replace(substring(l from ' (.*)$'),'[^a-z0-9]','','g'))>0)
        AND coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
        AND coalesce(j.created_at,'-infinity'::timestamptz)<=v_at
        AND (NOT (j.status::text IN ('cancelled','archived','lost','closed','complete','completed') OR coalesce(j.archived,false)
