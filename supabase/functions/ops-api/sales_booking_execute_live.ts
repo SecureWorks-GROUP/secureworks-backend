@@ -22,10 +22,10 @@ import type {
   OwnerApprovalDeps,
   OwnerApprovalReader,
 } from "./sales_booking_owner_approval.ts";
-import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 import {
   ghlRead,
   readJobSitesLive,
+  readSalesBookingOpportunityOwnership,
   readSalesBookingThreadMessages,
   SALES_BOOKING_GHL_USERS,
   salesBookingPublishedSuburb,
@@ -219,36 +219,7 @@ export function createSalesBookingExecuteDeps(
       const contact = await readContact(contactId);
       return typeof contact.phone === "string" ? contact.phone : null;
     },
-    async readOpportunityOwnership(
-      opportunityId,
-    ): Promise<SalesBookingOpportunityOwnership> {
-      const location = Deno.env.get("GHL_LOCATION_ID") || "";
-      if (!location) throw new Error("location_unconfigured");
-      const response = await ghlRead(
-        `/opportunities/${encodeURIComponent(opportunityId)}`,
-        { headers: { Version: "v3" } },
-      );
-      const opportunity = response?.opportunity as Obj | undefined;
-      if (
-        !opportunity || opportunity.id !== opportunityId ||
-        (typeof opportunity.locationId === "string" &&
-          opportunity.locationId !== location) ||
-        !Object.hasOwn(opportunity, "assignedTo") ||
-        typeof opportunity.pipelineId !== "string" ||
-        !opportunity.pipelineId.trim()
-      ) throw new Error("opportunity_assignment_unreadable");
-      if (opportunity.assignedTo === null || opportunity.assignedTo === "") {
-        return { assignedTo: null, pipelineId: opportunity.pipelineId };
-      }
-      if (
-        typeof opportunity.assignedTo !== "string" ||
-        !opportunity.assignedTo.trim()
-      ) throw new Error("opportunity_assignment_unreadable");
-      return {
-        assignedTo: opportunity.assignedTo,
-        pipelineId: opportunity.pipelineId,
-      };
-    },
+    readOpportunityOwnership: readSalesBookingOpportunityOwnership,
     async readOutlookLead({ contactId, opportunityId }) {
       const contact = await readContact(contactId);
       const jobSites = await readJobSitesLive(

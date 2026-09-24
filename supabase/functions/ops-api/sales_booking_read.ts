@@ -21,11 +21,11 @@ import {
 // docs/sales-booking-executor.md "What the read shows".
 //
 // ── NO SEND, NO GHL OR OUTLOOK WRITE ──
-// Page load may persist `sales_booking_packs` kind=thread_facts so the next
-// read can serve cached conversation state. The opportunity roster is always
-// read live so its assignee is current. No GHL mutation, calendar create or
-// send. Drafts, per-case `proposal`, and `pack.proposals` come from the latest
-// kind=pack row in the pack overlay after this read.
+// Page load may persist `sales_booking_packs` kind=thread_facts and kind=roster
+// so the next read can serve cached conversation state and the opportunity
+// enumeration. Those are the only writes. No GHL mutation, no calendar
+// create, no send. Drafts, per-case `proposal`, and `pack.proposals` come
+// from the latest kind=pack row in the pack overlay after this read.
 //
 // ── HONESTY CONTRACT (wiki skill `secureworks-scope-booking`) ──
 //  1. Full population, or an explicit `coverage.full_population:false` naming
@@ -66,6 +66,7 @@ import {
   SALES_BOOKING_SENDER_LINES,
   salesBookingLeadOwner,
   salesBookingLineLabel,
+  type SalesBookingOpportunityOwnership,
 } from "./sales_booking_sender.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
@@ -283,12 +284,14 @@ export const SALES_BOOKING_DEFAULT_THREAD_BUDGET_MS = 18_000;
 /** Whole-read wall clock covering roster paging, diary, contacts, and threads. */
 export const SALES_BOOKING_READ_BUDGET_MS = 25_000;
 export const SALES_BOOKING_THREAD_CACHE_MAX_AGE_MS = 6 * 3_600_000;
+export const SALES_BOOKING_ROSTER_CACHE_MAX_AGE_MS = 10 * 60_000;
 /** 1 attempt + 2 retries. Never more, even if a caller asks. */
 export const SALES_BOOKING_GHL_429_TRIES = 3;
 export const SALES_BOOKING_GHL_429_BASE_MS = 200;
 export const SALES_BOOKING_NOT_GIVEN = "not given";
 export const SALES_BOOKING_THREAD_FACTS_KIND = "thread_facts";
-/** Sentinel Monday so thread_facts reuse the packs table without a week grid. */
+export const SALES_BOOKING_ROSTER_KIND = "roster";
+/** Sentinel Monday so thread_facts and roster reuse the packs table without a week grid. */
 export const SALES_BOOKING_THREAD_FACTS_WEEK_START = "1970-01-05";
 
 // ════════════════════════════════════════════════════════════
@@ -1261,9 +1264,10 @@ export function salesBookingLeadBelongsTo(
     ? SALES_BOOKING_RESOURCES[resourceId]
     : null;
   if (!resource) return false;
-  const unassignedOwner = Object.values(SALES_BOOKING_RESOURCES).find((row) =>
-    row.pipeline_id === pipelineId && row.owns_unassigned
-  )?.resource_id ?? null;
+  const unassignedOwner =
+    Object.values(SALES_BOOKING_RESOURCES).find((row) =>
+      row.pipeline_id === pipelineId && row.owns_unassigned
+    )?.resource_id ?? null;
   return salesBookingLeadOwner(
     assignedTo,
     unassignedOwner,
@@ -1719,7 +1723,240 @@ export interface SalesBookingOpportunityScan {
   total: number | null;
   /** Non-null when the roster read failed or stopped short. */
   reason: string | null;
+  /** How this scan was obtained. Default live for callers that omit it. */
+  source?: "cache" | "live";
+  /** Age of the cached roster in ms; 0 when live; null when unknown. */
+  age_ms?: number | null;
   remaining_429_count?: number;
+  /** Next GHL search page. Set on an incomplete scan so the next read can resume. */
+  start_after?: string | number | null;
+  start_after_id?: string | null;
+}
+
+export interface SalesBookingCachedRoster {
+  opportunities: Record<string, unknown>[];
+  stages: Record<string, string>;
+  exhausted: boolean;
+  pages_scanned: number;
+  total: number | null;
+  reason: string | null;
+  read_at: string;
+  start_after?: string | number | null;
+  start_after_id?: string | null;
+}
+
+/** Cached roster is usable when younger than 10 minutes. */
+export function salesBookingRosterIsFresh(args: {
+  cachedReadAt: string | null | undefined;
+  nowMs: number;
+  maxAgeMs?: number;
+}): boolean {
+  const readAtMs = Date.parse(String(args.cachedReadAt || ""));
+  if (!Number.isFinite(readAtMs)) return false;
+  const maxAge = args.maxAgeMs ?? SALES_BOOKING_ROSTER_CACHE_MAX_AGE_MS;
+  return args.nowMs - readAtMs < maxAge;
+}
+
+export function parseSalesBookingRosterCache(
+  payload: unknown,
+): SalesBookingCachedRoster | null {
+  const body = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {};
+  const readAt = nonemptyText(body.read_at);
+  if (!readAt || !Number.isFinite(Date.parse(readAt))) return null;
+  const opportunities = Array.isArray(body.opportunities)
+    ? body.opportunities.filter((row) =>
+      !!row && typeof row === "object" && !Array.isArray(row)
+    ) as Record<string, unknown>[]
+    : [];
+  const stagesRaw = body.stages && typeof body.stages === "object" &&
+      !Array.isArray(body.stages)
+    ? body.stages as Record<string, unknown>
+    : {};
+  const stages: Record<string, string> = {};
+  for (const [id, name] of Object.entries(stagesRaw)) {
+    if (id) stages[id] = String(name ?? "");
+  }
+  return {
+    opportunities,
+    stages,
+    exhausted: body.exhausted === true,
+    pages_scanned: typeof body.pages_scanned === "number"
+      ? body.pages_scanned
+      : 0,
+    total: typeof body.total === "number" ? body.total : null,
+    reason: nonemptyText(body.reason),
+    read_at: new Date(Date.parse(readAt)).toISOString(),
+    start_after: rosterCursorValue(body.start_after),
+    start_after_id: nonemptyText(body.start_after_id),
+  };
+}
+
+function rosterCursorValue(value: unknown): string | number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return nonemptyText(value);
+}
+
+export function salesBookingRosterIsComplete(
+  roster:
+    | Pick<
+      SalesBookingCachedRoster,
+      "exhausted" | "reason"
+    >
+    | Pick<SalesBookingOpportunityScan, "exhausted" | "reason">
+    | null
+    | undefined,
+): boolean {
+  return !!roster && roster.exhausted === true && !roster.reason;
+}
+
+function rosterResumeCursor(
+  cached: SalesBookingCachedRoster | null,
+): { startAfter: string | number; startAfterId: string } | null {
+  if (!cached || salesBookingRosterIsComplete(cached)) return null;
+  const startAfter = rosterCursorValue(cached.start_after);
+  const startAfterId = nonemptyText(cached.start_after_id);
+  if (startAfter == null || !startAfterId) return null;
+  return { startAfter, startAfterId };
+}
+
+function mergeResumedRosterScan(
+  cached: SalesBookingCachedRoster,
+  live: SalesBookingOpportunityScan,
+): SalesBookingOpportunityScan {
+  const seen = new Set<string>();
+  const opportunities: Record<string, unknown>[] = [];
+  for (const row of [...cached.opportunities, ...live.opportunities]) {
+    const id = typeof row.id === "string" ? row.id : "";
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    opportunities.push(row);
+  }
+  const exhausted = live.exhausted === true;
+  return {
+    opportunities,
+    stages: { ...cached.stages, ...live.stages },
+    exhausted,
+    pages_scanned: (cached.pages_scanned || 0) + (live.pages_scanned || 0),
+    total: live.total ?? cached.total,
+    reason: live.reason,
+    source: "live",
+    age_ms: 0,
+    remaining_429_count: live.remaining_429_count ?? 0,
+    start_after: exhausted
+      ? null
+      : live.start_after ?? cached.start_after ?? null,
+    start_after_id: exhausted
+      ? null
+      : live.start_after_id ?? cached.start_after_id ?? null,
+  };
+}
+
+export function scanFromCachedRoster(
+  cached: SalesBookingCachedRoster,
+  nowMs: number,
+  extra: {
+    reason?: string | null;
+    remaining_429_count?: number;
+  } = {},
+): SalesBookingOpportunityScan {
+  const readAtMs = Date.parse(cached.read_at);
+  return {
+    opportunities: cached.opportunities,
+    stages: cached.stages,
+    exhausted: cached.exhausted,
+    pages_scanned: cached.pages_scanned,
+    total: cached.total,
+    reason: extra.reason !== undefined ? extra.reason : cached.reason,
+    source: "cache",
+    age_ms: Number.isFinite(readAtMs) ? Math.max(0, nowMs - readAtMs) : null,
+    remaining_429_count: extra.remaining_429_count ?? 0,
+    start_after: cached.start_after ?? null,
+    start_after_id: cached.start_after_id ?? null,
+  };
+}
+
+export function cachedRosterFromScan(
+  scan: SalesBookingOpportunityScan,
+  readAt: string,
+): SalesBookingCachedRoster {
+  return {
+    opportunities: scan.opportunities,
+    stages: scan.stages,
+    exhausted: scan.exhausted,
+    pages_scanned: scan.pages_scanned,
+    total: scan.total,
+    reason: scan.reason,
+    read_at: readAt,
+    start_after: scan.exhausted ? null : scan.start_after ?? null,
+    start_after_id: scan.exhausted ? null : scan.start_after_id ?? null,
+  };
+}
+
+function rosterScanLooksLike429(scan: SalesBookingOpportunityScan): boolean {
+  if ((scan.remaining_429_count ?? 0) > 0) return true;
+  return isSalesBookingGhl429({ message: scan.reason || "" });
+}
+
+/**
+ * Serve a fresh complete cached roster; otherwise live-refresh. A complete
+ * cache always beats an incomplete live result. An incomplete cache is
+ * resumed from its page cursor and persisted until the book is complete.
+ */
+export async function resolveSalesBookingRoster(args: {
+  cached: SalesBookingCachedRoster | null;
+  nowMs: number;
+  forceRefresh?: boolean;
+  live: (resume?: {
+    startAfter?: string | number | null;
+    startAfterId?: string | null;
+  }) => Promise<SalesBookingOpportunityScan>;
+}): Promise<{
+  scan: SalesBookingOpportunityScan;
+  shouldPersist: boolean;
+}> {
+  const cached = args.cached;
+  const cachedComplete = salesBookingRosterIsComplete(cached);
+  const fresh = cachedComplete && !!cached && !args.forceRefresh &&
+    salesBookingRosterIsFresh({
+      cachedReadAt: cached.read_at,
+      nowMs: args.nowMs,
+    });
+  if (fresh && cached) {
+    return {
+      scan: scanFromCachedRoster(cached, args.nowMs),
+      shouldPersist: false,
+    };
+  }
+  const resume = rosterResumeCursor(cached);
+  const live = await args.live(resume ?? undefined);
+  const liveScan: SalesBookingOpportunityScan = {
+    ...live,
+    source: "live",
+    age_ms: 0,
+    remaining_429_count: live.remaining_429_count ?? 0,
+  };
+  const merged = resume && cached
+    ? mergeResumedRosterScan(cached, liveScan)
+    : liveScan;
+  if (cachedComplete && cached && !salesBookingRosterIsComplete(merged)) {
+    const like429 = rosterScanLooksLike429(merged);
+    return {
+      scan: scanFromCachedRoster(cached, args.nowMs, {
+        reason: merged.reason ||
+          (like429 ? "GHL 429" : "incomplete live refresh"),
+        remaining_429_count: like429
+          ? Math.max(1, merged.remaining_429_count ?? 1)
+          : merged.remaining_429_count ?? 0,
+      }),
+      shouldPersist: false,
+    };
+  }
+  return {
+    scan: merged,
+    shouldPersist: true,
+  };
 }
 
 export interface SalesBookingDiaryScan {
@@ -1783,8 +2020,8 @@ export interface SalesBookingReadResponse {
     threads_unread: number;
     remaining_429_count: number;
     diary_read_ok: boolean;
-    roster_source: "live";
-    roster_age_ms: 0;
+    roster_source: "cache" | "live";
+    roster_age_ms: number | null;
   };
   cases: SalesBookingCase[];
   diary: SalesBookingDiaryEntry[];
@@ -1862,6 +2099,17 @@ export function assembleSalesBookingRead(input: {
   );
   if (opportunities.reason) {
     gaps.push(`Opportunity roster read degraded: ${opportunities.reason}`);
+  }
+  if (opportunities.source === "cache") {
+    const age = opportunities.age_ms;
+    const ageLabel = age == null
+      ? "unknown age"
+      : `${Math.round(age / 1000)}s old`;
+    gaps.push(
+      rosterScanLooksLike429(opportunities)
+        ? `Opportunity roster served from cache after GHL 429 (${ageLabel}).`
+        : `Opportunity roster served from cache (${ageLabel}).`,
+    );
   }
   gaps.push(
     diary.read_ok
@@ -1952,7 +2200,7 @@ export function assembleSalesBookingRead(input: {
       // whether the book is complete. `enumerated` is the scoped count, not
       // the whole CRM.
       full_population: opportunities.exhausted === true &&
-        !opportunities.reason,
+        (opportunities.source === "cache" || !opportunities.reason),
       enumerated: cases.length,
       total: opportunities.total,
       excluded_by_stage: input.excludedByStage ?? 0,
@@ -1969,8 +2217,9 @@ export function assembleSalesBookingRead(input: {
       remaining_429_count: (threads.remaining_429_count || 0) +
         (opportunities.remaining_429_count || 0),
       diary_read_ok: diaryReadOk,
-      roster_source: "live",
-      roster_age_ms: 0,
+      roster_source: opportunities.source === "cache" ? "cache" : "live",
+      roster_age_ms: opportunities.age_ms ??
+        (opportunities.source === "cache" ? null : 0),
     },
     cases,
     diary: mergeSalesBookingDiaryEntries(diary.entries, outlook.entries),
@@ -2031,7 +2280,7 @@ export interface SalesBookingReadParams {
   /** Whole-read wall clock. Capped at 25s. */
   read_budget_ms?: number;
   case_ids?: string[] | null;
-  /** Bypass thread-facts freshness. The opportunity roster is always live. */
+  /** Bypass thread-facts freshness and the 10-minute window on a complete roster. An incomplete roster always resumes from its cursor. */
   force_refresh?: boolean;
 }
 
@@ -2041,6 +2290,8 @@ export interface SalesBookingReadDependencies {
     args: {
       pipelineId: string;
       deadlineMs?: number;
+      startAfter?: string | number | null;
+      startAfterId?: string | null;
     },
   ): Promise<SalesBookingOpportunityScan>;
   /** One scoper's GHL calendar events for the week. Never throws. */
@@ -2083,6 +2334,10 @@ export interface SalesBookingReadDependencies {
   readJobSites?(
     ids: { opportunityIds: string[]; contactIds: string[] },
   ): Promise<Record<string, SalesBookingJobSiteFact>>;
+  readOpportunityOwnership?(
+    opportunityId: string,
+    opts: { deadlineMs: number },
+  ): Promise<SalesBookingOpportunityOwnership>;
   now(): Date;
   loadThreadFactsCache?(
     resourceId: string,
@@ -2090,6 +2345,13 @@ export interface SalesBookingReadDependencies {
   persistThreadFactsCache?(
     resourceId: string,
     facts: Record<string, SalesBookingCachedThreadFact>,
+  ): Promise<void>;
+  loadRosterCache?(
+    resourceId: string,
+  ): Promise<SalesBookingCachedRoster | null>;
+  persistRosterCache?(
+    resourceId: string,
+    roster: SalesBookingCachedRoster,
   ): Promise<void>;
   sleep?(ms: number): Promise<void>;
   random?(): number;
@@ -2372,8 +2634,40 @@ export async function salesBookingRead(
   const deadlineMs = startedAt + budgetMs;
   const forceRefresh = params.force_refresh === true;
 
-  const liveRoster = () =>
-    deps.readOpportunities({ pipelineId: resource.pipeline_id, deadlineMs });
+  let cachedRoster: SalesBookingCachedRoster | null = null;
+  try {
+    cachedRoster = deps.loadRosterCache
+      ? await deps.loadRosterCache(resource.resource_id)
+      : null;
+  } catch {
+    cachedRoster = null;
+  }
+
+  const liveRows = new Map<string, Record<string, unknown>>();
+  const liveRoster = async (
+    resume?: {
+      startAfter?: string | number | null;
+      startAfterId?: string | null;
+    },
+  ) => {
+    const scan = await deps.readOpportunities({
+      pipelineId: resource.pipeline_id,
+      deadlineMs,
+      startAfter: resume?.startAfter,
+      startAfterId: resume?.startAfterId,
+    });
+    for (const row of scan.opportunities) {
+      if (typeof row.id === "string") liveRows.set(row.id, row);
+    }
+    return scan;
+  };
+  const rosterFresh = !!cachedRoster &&
+    salesBookingRosterIsComplete(cachedRoster) &&
+    !forceRefresh &&
+    salesBookingRosterIsFresh({
+      cachedReadAt: cachedRoster.read_at,
+      nowMs: deps.now().getTime(),
+    });
 
   const outlookArgs = {
     resourceId: resource.resource_id,
@@ -2386,8 +2680,18 @@ export async function salesBookingRead(
     resource.resource_id,
     scoperUserId,
   );
-  const [roster, diary, outlook] = await Promise.all([
-    liveRoster(),
+  const [resolved, diary, outlook] = await Promise.all([
+    rosterFresh && cachedRoster
+      ? Promise.resolve({
+        scan: scanFromCachedRoster(cachedRoster, deps.now().getTime()),
+        shouldPersist: false,
+      })
+      : resolveSalesBookingRoster({
+        cached: cachedRoster,
+        nowMs: deps.now().getTime(),
+        forceRefresh,
+        live: liveRoster,
+      }),
     deps.readDiary({
       resourceId: resource.resource_id,
       scoperUserId,
@@ -2411,21 +2715,62 @@ export async function salesBookingRead(
       ),
   ]);
 
-  let opportunities: SalesBookingOpportunityScan = {
-    ...roster,
-    remaining_429_count: roster.remaining_429_count ?? 0,
-  };
-  const leadBelongsToResource = (raw: Record<string, unknown>) => {
-    const currentPipelineId = typeof raw.pipelineId === "string"
-      ? raw.pipelineId
-      : resource.pipeline_id;
-    return currentPipelineId === resource.pipeline_id &&
-      salesBookingLeadBelongsTo(
-        raw.assignedTo,
-        resource.resource_id,
-        currentPipelineId,
-      );
-  };
+  let opportunities = resolved.scan;
+  const ownedIds = new Set<string>();
+  const belongs = (ownership: SalesBookingOpportunityOwnership) =>
+    ownership.pipelineId === resource.pipeline_id &&
+    salesBookingLeadBelongsTo(
+      ownership.assignedTo,
+      resource.resource_id,
+      ownership.pipelineId,
+    );
+  const cachedCandidates = new Set<string>();
+  for (const raw of opportunities.opportunities) {
+    if (typeof raw.id !== "string" || !raw.id) continue;
+    const live = liveRows.get(raw.id);
+    if (live) {
+      if (
+        belongs({
+          assignedTo: live.assignedTo as string | null,
+          pipelineId: typeof live.pipelineId === "string"
+            ? live.pipelineId
+            : resource.pipeline_id,
+        })
+      ) ownedIds.add(raw.id);
+    } else if (
+      isSalesBookingScopeStage(
+        typeof raw.pipelineStageId === "string" ? raw.pipelineStageId : "",
+        resource.scope_stage_ids,
+      )
+    ) {
+      cachedCandidates.add(raw.id);
+    }
+  }
+  const candidates = [...cachedCandidates];
+  let ownershipUnread = 0;
+  let nextCandidate = 0;
+  await Promise.all(Array.from(
+    { length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, candidates.length) },
+    async () => {
+      while (nextCandidate < candidates.length) {
+        const id = candidates[nextCandidate++];
+        if (
+          !deps.readOpportunityOwnership || deps.now().getTime() >= deadlineMs
+        ) {
+          ownershipUnread++;
+          continue;
+        }
+        try {
+          const ownership = await deps.readOpportunityOwnership(id, {
+            deadlineMs,
+          });
+          if (belongs(ownership)) ownedIds.add(id);
+        } catch {
+          ownershipUnread++;
+        }
+      }
+    },
+  ));
   const scopedContactIds: string[] = [];
   const scopedOpportunityIds: string[] = [];
   for (const raw of opportunities.opportunities) {
@@ -2433,13 +2778,16 @@ export async function salesBookingRead(
       ? raw.pipelineStageId
       : "";
     if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) continue;
-    if (!leadBelongsToResource(raw)) continue;
+    if (!ownedIds.has(String(raw.id))) {
+      continue;
+    }
     const contactId = salesBookingContactId(raw);
     if (contactId) scopedContactIds.push(contactId);
     if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
   }
   let contactFacts: Record<string, SalesBookingContactFact> = {};
-  const hydrateLive = deps.readContacts &&
+  const hydrateLive = opportunities.source !== "cache" &&
+    deps.readContacts &&
     scopedContactIds.length > 0 &&
     deps.now().getTime() < deadlineMs;
   if (hydrateLive) {
@@ -2458,6 +2806,21 @@ export async function salesBookingRead(
         );
       }),
     };
+  }
+  if (
+    resolved.shouldPersist && deps.persistRosterCache
+  ) {
+    try {
+      await deps.persistRosterCache(
+        resource.resource_id,
+        cachedRosterFromScan(
+          opportunities,
+          deps.now().toISOString(),
+        ),
+      );
+    } catch {
+      // Cache write must not empty the board.
+    }
   }
   let jobSites: Record<string, SalesBookingJobSiteFact> = {};
   if (
@@ -2480,7 +2843,9 @@ export async function salesBookingRead(
   let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
     // Another person's lead in a shared pipeline is not on this list at all.
-    if (!leadBelongsToResource(raw)) continue;
+    if (!ownedIds.has(String(raw.id))) {
+      continue;
+    }
     const contactId = salesBookingContactId(raw);
     const opportunityId = typeof raw.id === "string" ? raw.id : "";
     const job = jobSites[opportunityId] ||
@@ -2513,7 +2878,7 @@ export async function salesBookingRead(
     params,
     deadlineMs,
   );
-  return assembleSalesBookingRead({
+  const response = assembleSalesBookingRead({
     resource,
     week,
     projectedCases: projected,
@@ -2523,6 +2888,13 @@ export async function salesBookingRead(
     threads,
     excludedByStage,
   });
+  if (ownershipUnread > 0) {
+    response.coverage.full_population = false;
+    response.coverage.gaps.push(
+      `${ownershipUnread} cached candidate(s) withheld because current opportunity ownership could not be read within the budget.`,
+    );
+  }
+  return response;
 }
 
 // ── Production wiring ────────────────────────────────────────
@@ -2535,6 +2907,48 @@ type GhlRetryHooks = {
   now?: () => Date;
   deadlineMs?: number;
 };
+
+export async function readSalesBookingOpportunityOwnership(
+  opportunityId: string,
+  retry: GhlRetryHooks = {},
+): Promise<SalesBookingOpportunityOwnership> {
+  const location = Deno.env.get("GHL_LOCATION_ID") || "";
+  if (!location) throw new Error("location_unconfigured");
+  const remainingMs = retry.deadlineMs == null
+    ? 10_000
+    : retry.deadlineMs - (retry.now?.() ?? new Date()).getTime();
+  if (remainingMs <= 0) throw new Error("time budget exhausted");
+  const response = await ghlRead(
+    `/opportunities/${encodeURIComponent(opportunityId)}`,
+    {
+      headers: { Version: "v3" },
+      signal: AbortSignal.timeout(Math.min(10_000, remainingMs)),
+    },
+    retry,
+  );
+  const opportunity = response?.opportunity as
+    | Record<string, unknown>
+    | undefined;
+  if (
+    !opportunity || opportunity.id !== opportunityId ||
+    (typeof opportunity.locationId === "string" &&
+      opportunity.locationId !== location) ||
+    !Object.hasOwn(opportunity, "assignedTo") ||
+    typeof opportunity.pipelineId !== "string" || !opportunity.pipelineId.trim()
+  ) throw new Error("opportunity_assignment_unreadable");
+  if (opportunity.assignedTo === null || opportunity.assignedTo === "") {
+    return { assignedTo: null, pipelineId: opportunity.pipelineId };
+  }
+  if (
+    typeof opportunity.assignedTo !== "string" || !opportunity.assignedTo.trim()
+  ) {
+    throw new Error("opportunity_assignment_unreadable");
+  }
+  return {
+    assignedTo: opportunity.assignedTo,
+    pipelineId: opportunity.pipelineId,
+  };
+}
 
 export async function ghlRead(
   path: string,
@@ -2685,13 +3099,15 @@ export async function readSalesBookingOpportunities(args: {
   locationId: string;
   now?: () => Date;
   deadlineMs?: number;
+  startAfter?: string | number | null;
+  startAfterId?: string | null;
 }): Promise<SalesBookingOpportunityScan> {
   const now = args.now ?? (() => new Date());
   const limit = SALES_BOOKING_OPPORTUNITY_PAGE_SIZE;
   const opportunities: Record<string, unknown>[] = [];
   const seen = new Set<string>();
-  let startAfter: string | number | null = null;
-  let startAfterId: string | null = null;
+  let startAfter: string | number | null = rosterCursorValue(args.startAfter);
+  let startAfterId: string | null = nonemptyText(args.startAfterId);
   let pages = 0;
   let total: number | null = null;
   let exhausted = false;
@@ -2797,13 +3213,21 @@ export async function readSalesBookingOpportunities(args: {
     pages_scanned: pages,
     total,
     reason,
+    source: "live",
+    age_ms: 0,
     remaining_429_count: remaining429,
+    start_after: exhausted ? null : startAfter,
+    start_after_id: exhausted ? null : startAfterId,
   };
 }
 
 async function readOpportunitiesLive(
   pipelineId: string,
   retry: GhlRetryHooks = {},
+  resume?: {
+    startAfter?: string | number | null;
+    startAfterId?: string | null;
+  },
 ): Promise<SalesBookingOpportunityScan> {
   const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
   return await readSalesBookingOpportunities({
@@ -2812,6 +3236,8 @@ async function readOpportunitiesLive(
     locationId,
     now: retry.now,
     deadlineMs: retry.deadlineMs,
+    startAfter: resume?.startAfter,
+    startAfterId: resume?.startAfterId,
   });
 }
 
@@ -3155,7 +3581,77 @@ async function persistThreadFactsCacheLive(
   }
 }
 
-/** Real readers for the dispatch. Thread-facts persistence is the only write. */
+async function loadRosterCacheLive(
+  client: SalesBookingReadClient,
+  resourceId: string,
+): Promise<SalesBookingCachedRoster | null> {
+  const { data, error } = await client
+    .from("sales_booking_packs")
+    .select("payload")
+    .eq("resource", resourceId)
+    .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
+    .eq("kind", SALES_BOOKING_ROSTER_KIND)
+    .order("as_of", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(error.message || "roster load failed");
+  }
+  if (!data) return null;
+  return parseSalesBookingRosterCache(
+    (data as { payload?: unknown }).payload,
+  );
+}
+
+function salesBookingRostersEqual(
+  left: SalesBookingCachedRoster | null,
+  right: SalesBookingCachedRoster,
+): boolean {
+  if (!left) return false;
+  const a = parseSalesBookingRosterCache(left);
+  const b = parseSalesBookingRosterCache(right);
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** One latest roster row per resource at the weekless sentinel: abort on load error, skip when equal, prune only older as_of. */
+async function persistRosterCacheLive(
+  client: SalesBookingReadClient,
+  resourceId: string,
+  roster: SalesBookingCachedRoster,
+): Promise<void> {
+  let existing: SalesBookingCachedRoster | null;
+  try {
+    existing = await loadRosterCacheLive(client, resourceId);
+  } catch {
+    return;
+  }
+  if (salesBookingRostersEqual(existing, roster)) return;
+  const asOf = new Date().toISOString();
+  const { error } = await client.from("sales_booking_packs").upsert({
+    resource: resourceId,
+    week_start: SALES_BOOKING_THREAD_FACTS_WEEK_START,
+    kind: SALES_BOOKING_ROSTER_KIND,
+    as_of: asOf,
+    payload: roster,
+    published_by: "ops-api:roster",
+  }, { onConflict: "resource,week_start,kind,as_of" });
+  if (error) {
+    throw new Error(error.message || "roster persist failed");
+  }
+  const { error: pruneError } = await client
+    .from("sales_booking_packs")
+    .delete()
+    .eq("resource", resourceId)
+    .eq("week_start", SALES_BOOKING_THREAD_FACTS_WEEK_START)
+    .eq("kind", SALES_BOOKING_ROSTER_KIND)
+    .lt("as_of", asOf);
+  if (pruneError) {
+    throw new Error(pruneError.message || "roster prune failed");
+  }
+}
+
+/** Real readers for the dispatch. Cache persist is the only write. */
 export function createSalesBookingReadDependencies(
   client: SalesBookingReadClient,
 ): SalesBookingReadDependencies {
@@ -3163,9 +3659,14 @@ export function createSalesBookingReadDependencies(
     now: () => new Date(),
   };
   return {
-    readOpportunities: ({ pipelineId, deadlineMs }) => {
+    readOpportunities: (
+      { pipelineId, deadlineMs, startAfter, startAfterId },
+    ) => {
       retry.deadlineMs = deadlineMs;
-      return readOpportunitiesLive(pipelineId, retry);
+      return readOpportunitiesLive(pipelineId, retry, {
+        startAfter,
+        startAfterId,
+      });
     },
     readDiary: (
       { resourceId, scoperUserId, since, untilExclusive, deadlineMs },
@@ -3194,6 +3695,8 @@ export function createSalesBookingReadDependencies(
       if (deadlineMs != null) retry.deadlineMs = deadlineMs;
       return readThreadLive(contactId, retry);
     },
+    readOpportunityOwnership: (id, { deadlineMs }) =>
+      readSalesBookingOpportunityOwnership(id, { ...retry, deadlineMs }),
     readContacts: (contactIds, opts) => {
       if (opts?.deadlineMs != null) retry.deadlineMs = opts.deadlineMs;
       return readContactsLive(contactIds, retry);
@@ -3205,6 +3708,9 @@ export function createSalesBookingReadDependencies(
       loadThreadFactsCacheLive(client, resourceId),
     persistThreadFactsCache: (resourceId, facts) =>
       persistThreadFactsCacheLive(client, resourceId, facts),
+    loadRosterCache: (resourceId) => loadRosterCacheLive(client, resourceId),
+    persistRosterCache: (resourceId, roster) =>
+      persistRosterCacheLive(client, resourceId, roster),
   };
 }
 
