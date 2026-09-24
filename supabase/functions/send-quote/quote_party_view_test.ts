@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts"
 import {
   currentQuoteForParty,
+  quoteRunAcceptanceDecision,
   everyQuotePartyAccepted,
   normaliseQuoteRunLabel,
   otherPartyRunDocumentIdsToRetire,
@@ -366,4 +367,88 @@ Deno.test("a neighbour's retired link greets the neighbour, never the job client
   assertEquals(quotePartyGreetingName({ job_contact_id: "n", job_contacts: { client_name: "Fiona" }, jobs: { client_name: "Stephen" } }), "Fiona")
   assertEquals(quotePartyGreetingName({ job_contact_id: "n", job_contacts: null, jobs: { client_name: "Stephen" } }), "")
   assertEquals(quotePartyGreetingName({ job_contact_id: null, jobs: { client_name: "Stephen" } }), "Stephen")
+})
+
+Deno.test('current party decisions agree across view, accept, status and deposits', () => {
+  const early = '2026-09-01T00:00:00Z'
+  const late = '2026-09-02T00:00:00Z'
+  const make = (id: string, overrides: Partial<QuotePartyDocument> = {}) =>
+    doc(id, { run_label: 'RHS', job_contact_id: 'client', sent_at: early, ...overrides, created_at: overrides.created_at ?? early })
+  const cases = [
+    {
+      name: 'tied versions use sent time before creation',
+      docs: [make('old', { created_at: late }), make('new', { sent_at: late })],
+      current: 'new', view: 'forward', acceptable: false,
+    },
+    {
+      name: 'tied versions without sent times use creation',
+      docs: [make('old', { sent_at: null, accepted_at: early }), make('new', { sent_at: null, created_at: late, accepted_at: late })],
+      current: 'new', view: 'forward', acceptable: false,
+    },
+    {
+      name: 'a sent timestamp outranks missing sent time',
+      docs: [make('old', { sent_at: null, created_at: late, accepted_at: early }), make('new')],
+      current: 'new', view: 'forward', acceptable: false,
+    },
+    {
+      name: 'older accepted client and newly accepting neighbour cannot unlock deposits',
+      docs: [
+        make('old', { accepted_at: early }),
+        make('new', { sent_at: late }),
+        make('neighbour', { job_contact_id: 'neighbour', accepted_at: late }),
+      ],
+      current: 'new', view: 'forward', acceptable: false,
+    },
+    {
+      name: 'same-send whole-quote options stay acceptable',
+      docs: [make('old', { run_label: null, accepted_at: early }), make('new', { run_label: null })],
+      current: 'old', view: 'options', acceptable: true,
+    },
+    {
+      name: 'blank labels share null identity',
+      docs: [make('old', { run_label: '  ' }), make('new', { run_label: null })],
+      current: 'old', view: 'options', acceptable: true,
+    },
+    {
+      name: 'nonblank padded labels remain separate parties',
+      docs: [make('old', { run_label: ' RHS ' }), make('new', { sent_at: late })],
+      current: 'old', view: 'single', acceptable: true,
+    },
+    {
+      name: 'retired links resolve only their own current party',
+      docs: [
+        make('old', { superseded_at: late }),
+        make('new'),
+        make('other', { job_contact_id: 'neighbour', version: 10 }),
+      ],
+      current: 'new', view: 'forward', acceptable: false,
+    },
+  ]
+  for (const scenario of cases) {
+    const linked = scenario.docs[0]
+    assertEquals(currentQuoteForParty(scenario.docs, linked)?.id, scenario.current, scenario.name)
+    assertEquals(quoteViewDecision(linked, scenario.docs).kind, scenario.view, scenario.name)
+    assertEquals(quoteDocumentAcceptable(linked, scenario.docs), scenario.acceptable, scenario.name)
+    const acceptances = scenario.docs.filter((document) => document.accepted_at).map((document) => ({
+      job_document_id: document.id,
+      job_contact_id: document.job_contact_id ?? null,
+      run_label: document.run_label ?? null,
+      status: 'accepted',
+      accepted_at: document.accepted_at,
+    }))
+    const decision = quoteRunAcceptanceDecision(scenario.docs, acceptances, 'RHS', 'neighbour')
+    assertEquals(decision.depositAcceptances, [], scenario.name)
+    assertEquals(decision.jobStatus === 'accepted', ['same-send whole-quote options stay acceptable', 'tied versions without sent times use creation'].includes(scenario.name), scenario.name)
+    if (scenario.name === 'older accepted client and newly accepting neighbour cannot unlock deposits') {
+      const acceptedDocs = scenario.docs.map((document) =>
+        document.id === 'new' ? { ...document, accepted_at: late } : document
+      )
+      const completed = quoteRunAcceptanceDecision(acceptedDocs, [...acceptances, {
+        job_document_id: 'new', job_contact_id: 'client', run_label: 'RHS',
+        status: 'accepted', accepted_at: late,
+      }], 'RHS', 'neighbour')
+      assertEquals(completed.jobStatus, 'accepted')
+      assertEquals(completed.depositAcceptances.map((row) => row.job_document_id).sort(), ['neighbour', 'new'])
+    }
+  }
 })

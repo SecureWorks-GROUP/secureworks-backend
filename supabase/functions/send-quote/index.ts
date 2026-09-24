@@ -34,6 +34,8 @@ import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
   currentQuoteForParty,
+  QUOTE_PARTY_DOCUMENT_COLUMNS,
+  quoteRunAcceptanceDecision,
   everyQuotePartyAccepted,
   normaliseQuoteRunLabel,
   quoteDocumentAcceptable,
@@ -1359,7 +1361,7 @@ serve(async (req: Request) => {
           // retired link must not open the client's quote.
           let liveQuery = sb
             .from('job_documents')
-            .select('id, share_token, job_contact_id, run_label, sent_to_client, sent_at, accepted_at, superseded_at, created_at, version')
+            .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', share_token')
             .eq('job_id', supDoc.job_id)
             .eq('type', 'quote')
             .eq('sent_to_client', true)
@@ -1396,7 +1398,7 @@ serve(async (req: Request) => {
       // party's document or Accept button (quote_party_view.ts).
       if (doc.job_id) {
         let siblingQuery = sb.from('job_documents')
-          .select('id, quote_number, pdf_url, html_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id, run_label, sent_to_client, sent_at, superseded_at, created_at, version')
+          .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', quote_number, pdf_url, html_url, share_token, data_snapshot_json')
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
@@ -1615,7 +1617,7 @@ serve(async (req: Request) => {
         // document (same job_contact_id + run_label). Older duplicate run links
         // for the same person must not accept again or mint a second deposit.
         let partyQuery = sb.from('job_documents')
-          .select('id, job_contact_id, run_label, sent_to_client, accepted_at, superseded_at, created_at, version')
+          .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('run_label', doc.run_label)
@@ -1800,24 +1802,31 @@ serve(async (req: Request) => {
         const run = findQuoteRun(pj, runLabel)
         const runName = run?.run_name || runLabel
 
-        // Check if both parties accepted this run
-        const { data: runAccepts } = await sb.from('run_acceptances')
-          .select('*')
-          .eq('job_id', doc.job_id)
-          .eq('run_label', runLabel)
-
-        // Check if this run has a neighbour
-        const { data: runItems } = await sb.from('run_line_items')
-          .select('job_contact_id')
-          .eq('job_id', doc.job_id)
-          .eq('run_label', runLabel)
-          .limit(1)
-        const runNeighbourId = runItems?.[0]?.job_contact_id || null
+        const [acceptancesRead, documentsRead, runItemsRead] = await Promise.all([
+          sb.from('run_acceptances')
+            .select('job_document_id, job_contact_id, run_label, status, accepted_at')
+            .eq('job_id', doc.job_id),
+          sb.from('job_documents')
+            .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
+            .eq('job_id', doc.job_id)
+            .eq('type', 'quote'),
+          sb.from('run_line_items')
+            .select('job_contact_id')
+            .eq('job_id', doc.job_id)
+            .eq('run_label', runLabel)
+            .limit(1),
+        ])
+        if (acceptancesRead.error || documentsRead.error || runItemsRead.error) {
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
+        const runNeighbourId = runItemsRead.data?.[0]?.job_contact_id || null
         const hasNeighbour = !!runNeighbourId
-
-        const allAccepted = hasNeighbour
-          ? (runAccepts || []).filter((ra: any) => ra.status === 'accepted').length >= 2
-          : (runAccepts || []).some((ra: any) => ra.status === 'accepted')
+        const { jobStatus, depositAcceptances } = quoteRunAcceptanceDecision(
+          documentsRead.data || [], acceptancesRead.data || [], runLabel, runNeighbourId,
+        )
+        const allAccepted = depositAcceptances.length > 0
 
         // Log acceptance event
         await insertCapturedEvidence(sb, {
@@ -1839,21 +1848,6 @@ serve(async (req: Request) => {
         }).then(() => {}, () => {})
 
         // Update overall job status
-        const { data: allRunAccepts } = await sb.from('run_acceptances')
-          .select('run_label, status')
-          .eq('job_id', doc.job_id)
-
-        const runLabels = [...new Set((allRunAccepts || []).map((ra: any) => ra.run_label))]
-        const allRunsFullyAccepted = runLabels.every(rl => {
-          const forRun = (allRunAccepts || []).filter((ra: any) => ra.run_label === rl)
-          return forRun.every((ra: any) => ra.status === 'accepted')
-        })
-        const anyDeclined = (allRunAccepts || []).some((ra: any) => ra.status === 'declined')
-        const anyAccepted = (allRunAccepts || []).some((ra: any) => ra.status === 'accepted')
-
-        const jobStatus = allRunsFullyAccepted ? 'accepted'
-          : (anyAccepted || anyDeclined) ? 'partially_accepted'
-          : 'quoted'
         await sb.from('jobs').update({ status: jobStatus, ...(jobStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}) }).eq('id', doc.job_id)
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost
@@ -1902,7 +1896,7 @@ serve(async (req: Request) => {
             .eq('job_id', doc.job_id)
             .eq('status', 'active')
 
-          for (const ra of (runAccepts || []).filter((r: any) => r.status === 'accepted')) {
+          for (const ra of depositAcceptances) {
             const contact = (contacts || []).find((c: any) => c.id === ra.job_contact_id)
             if (!contact) continue
 
@@ -1959,7 +1953,7 @@ serve(async (req: Request) => {
         if (isMultiContact) {
           const { data: allDocs } = await sb
             .from('job_documents')
-            .select('id, job_contact_id, run_label, accepted_at, superseded_at, sent_to_client, sent_at, send_claimed_at, created_at, version')
+            .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
             .eq('job_id', doc.job_id)
             .eq('type', 'quote')
             .is('superseded_at', null)

@@ -33,6 +33,55 @@ export type QuotePartyDocument = {
   version?: number | null
 }
 
+export const QUOTE_PARTY_DOCUMENT_COLUMNS = 'id, job_contact_id, run_label, sent_to_client, sent_at, send_claimed_at, accepted_at, declined_at, superseded_at, created_at, version'
+
+export type QuoteRunAcceptance = {
+  job_document_id: string | null
+  job_contact_id: string | null
+  run_label: string | null
+  status: string
+  accepted_at?: string | null
+}
+
+export function quoteRunAcceptanceDecision(
+  docs: QuotePartyDocument[],
+  acceptances: QuoteRunAcceptance[],
+  runLabel: string,
+  neighbourId: string | null,
+): { jobStatus: 'accepted' | 'partially_accepted' | 'quoted'; depositAcceptances: QuoteRunAcceptance[] } {
+  const currentAcceptances = acceptances.filter((acceptance) =>
+    currentQuoteForParty(docs, acceptance)?.id === acceptance.job_document_id
+  )
+  const qualifiedDocs = docs.map((document) => {
+    if (quotePartyKey(document).runLabel === null) return document
+    const acceptance = currentAcceptances.find((row) => row.job_document_id === document.id)
+    return {
+      ...document,
+      accepted_at: acceptance?.status === 'accepted' ? acceptance.accepted_at || document.accepted_at : null,
+      declined_at: acceptance?.status === 'declined' ? document.declined_at || 'declined' : null,
+    }
+  })
+  const runDocs = qualifiedDocs.filter((document) =>
+    quotePartyKey(document).runLabel === normaliseQuoteRunLabel(runLabel) && isLiveSent(document)
+  )
+  const runParties = new Set(runDocs.map((document) => JSON.stringify(quotePartyKey(document))))
+  const hasRequiredParties = neighbourId
+    ? runParties.size >= 2 && runDocs.some((document) => document.job_contact_id === neighbourId)
+    : runParties.size >= 1
+  const runAccepted = hasRequiredParties && everyQuotePartyAccepted(runDocs)
+  const anyDecision = qualifiedDocs.some((document) =>
+    isLiveSent(document) && (document.accepted_at || document.declined_at)
+  )
+  return {
+    jobStatus: everyQuotePartyAccepted(qualifiedDocs) ? 'accepted' : anyDecision ? 'partially_accepted' : 'quoted',
+    depositAcceptances: runAccepted
+      ? currentAcceptances.filter((row) =>
+        normaliseQuoteRunLabel(row.run_label) === normaliseQuoteRunLabel(runLabel) && row.status === 'accepted'
+      )
+      : [],
+  }
+}
+
 export type QuotePartyKey = {
   jobContactId: string | null
   runLabel: string | null
@@ -224,7 +273,7 @@ export async function retireOtherPublishedPartyRunDocuments(
   const keepIds = [...new Set((input.keepIds || []).filter((id) => typeof id === 'string' && id))]
   if (!keepIds.length) return { ok: true, retiredIds: [] }
   const { data, error } = await sb.from('job_documents')
-    .select('id, job_contact_id, run_label, sent_to_client, sent_at, send_claimed_at, accepted_at, superseded_at, created_at, version')
+    .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
     .eq('job_id', input.jobId)
     .eq('type', 'quote')
     .is('superseded_at', null)
