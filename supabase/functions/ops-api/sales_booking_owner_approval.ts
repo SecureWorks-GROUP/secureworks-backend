@@ -3,7 +3,7 @@
  * The owner writes or edits a text, or picks a visit (day, arrival window,
  * visit end), on the booking screen. `sales_booking_approval_write` with an
  * `owner_input` body builds the exact snapshot here from server truth (GHL
- * contact, the Stratco rulebook, the 776 line), checks it on the server at
+ * contact, the Stratco rulebook, the visit person's own line), checks it on the server at
  * the moment of the press, and records it in the same `sales_booking_approvals`
  * table the engine path uses. The executor (`sales_booking_book` /
  * `sales_booking_send`) reads either kind the same way and re-checks at its
@@ -37,6 +37,10 @@ import type {
   BookingStep,
 } from "./sales_booking_confirmation.ts";
 import { outlookClashes, type OutlookRead } from "./sales_booking_execute.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  salesBookingSenderFor,
+} from "./sales_booking_sender.ts";
 
 export const OWNER_APPROVAL_VERSION = "owner-authored-v1";
 const SCHEMA = "scope-booking-approval.v1";
@@ -79,10 +83,8 @@ export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
       label: "Stratco / Canning Vale",
     }),
   ]),
-  /** Same line as the executor's SALES_BOOKING_SEND_LINE. A literal, not an
-   * import: sales_booking_execute sits in an import cycle with this module
-   * and would not be initialised when this constant is built. */
-  sender: "+61489267776",
+  /** Marnin's own line; the one table is sales_booking_sender.ts. */
+  sender: SALES_BOOKING_SENDER_LINES.marnin.line,
   calendar: Object.freeze({
     provider: "ghl",
     calendar_id: "dEQKVKHthsjSYaen1fiE",
@@ -700,10 +702,23 @@ export async function salesBookingOwnerApprovalAction(args: {
     }
     const recipient = e164(lead.contact.phone);
     if (!recipient) refuse("contact_phone_missing");
+    // The text goes from the line of the person doing the visit; no fallback.
+    const who = salesBookingSenderFor({
+      scoper_user_id: response.resource.scoper_user_id,
+      resource: response.resource.resource_id,
+      profile: RULES.profile,
+    });
+    if (!who.ok) refuse(who.reason, who.detail);
+    checks.sender = {
+      line: who.sender.line,
+      person: who.sender.person,
+      name: who.sender.name,
+      source: who.sender.source,
+    };
     if (input.offer != null) visit = checkOwnerVisitRules(input.offer, now);
     content = {
       text: t,
-      sender: RULES.sender,
+      sender: who.sender.line,
       recipient,
       variant: "owner",
       offer: visit

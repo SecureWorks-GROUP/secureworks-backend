@@ -560,7 +560,7 @@ Deno.test("send re-checks the recipient, the sender line and the thread at the p
   const g = fakes([other], LIVE);
   assertEquals(
     reasonOf(await send(g, other.binding_hash)),
-    "sender_not_line_776",
+    "sender_not_scoper_line",
   );
   const h = fakes([msg], LIVE);
   h.setThread([{
@@ -889,4 +889,97 @@ Deno.test("Outlook event start and end are the GHL appointment start and end, ne
     dateTime: "2026-09-25T11:30:00",
     timeZone: "Australia/Perth",
   });
+});
+
+// ── Each person's texts go from their own line ────────────────────────────
+
+const NITHIN = {
+  resource: "nithin",
+  scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
+  profile: "patio-nithin",
+};
+const KHAIRO = {
+  resource: "khairo",
+  scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+  profile: "fencing-khairo",
+};
+
+Deno.test("send goes from the visit person's own line: Marnin 776, Nithin 774, Khairo 772", async () => {
+  const people: Array<[Obj, string]> = [
+    [{}, "+61489267776"],
+    [NITHIN, "+61489267774"],
+    [KHAIRO, "+61489267772"],
+  ];
+  for (const [person, line] of people) {
+    const msg = await approval(
+      "message",
+      { ...MESSAGE, sender: line },
+      {},
+      person,
+    );
+    const dry = fakes([msg]);
+    const preview = await send(dry, msg.binding_hash);
+    assertEquals(preview.status, "dry_run");
+    if (preview.status !== "dry_run") continue;
+    // The screen's preview names the from-number and whose line it is.
+    assertEquals(preview.would_send?.body.fromNumber, line);
+    assertEquals(preview.would_send?.sender.line, line);
+    assertEquals(dry.calls.sms.length, 0);
+
+    const live = fakes([msg], LIVE);
+    const sent = await send(live, msg.binding_hash);
+    assertEquals(sent.status, "sent");
+    assertEquals(live.calls.sms.length, 1);
+    assertEquals(live.calls.sms[0].fromNumber, line);
+  }
+});
+
+Deno.test("an approval made for one line never sends from another", async () => {
+  // Nithin's visit approved with Marnin's line: refused, nothing sent.
+  const wrong = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267776" },
+    {},
+    NITHIN,
+  );
+  const f = fakes([wrong], LIVE);
+  const res = await send(f, wrong.binding_hash);
+  assertEquals(reasonOf(res), "sender_not_scoper_line");
+  assertEquals(res.status === "refused" && res.detail, {
+    approved_sender: "+61489267776",
+    scoper_line: "+61489267774",
+    person: "nithin",
+  });
+  assertEquals(f.calls.sms.length, 0);
+
+  // The sender is inside the approval hash: editing it after approval breaks
+  // the binding before any send.
+  const marnin = await approval("message", MESSAGE);
+  const tampered: ExecutableApprovalRecord = structuredClone(marnin);
+  (tampered.snapshot as Obj).content.sender = "+61489267772";
+  const g = fakes([tampered], LIVE);
+  assertEquals(
+    reasonOf(await send(g, tampered.binding_hash)),
+    "content_hash_mismatch",
+  );
+  assertEquals(g.calls.sms.length, 0);
+});
+
+Deno.test("a lead with no named person, or an unknown one, refuses instead of falling back to 776", async () => {
+  const cases: Array<[Obj, string]> = [
+    [{ scoper_user_id: null }, "booking_scoper_unassigned"],
+    [{ scoper_user_id: "" }, "booking_scoper_unassigned"],
+    [
+      { scoper_user_id: "00000000-0000-0000-0000-000000000000" },
+      "booking_scoper_line_unknown",
+    ],
+    // Snapshot names Nithin as the person but Marnin's resource: ambiguous.
+    [{ scoper_user_id: NITHIN.scoper_user_id }, "booking_scoper_ambiguous"],
+  ];
+  for (const [person, reason] of cases) {
+    const msg = await approval("message", MESSAGE, {}, person);
+    const f = fakes([msg], LIVE);
+    assertEquals(reasonOf(await send(f, msg.binding_hash)), reason);
+    assertEquals(f.calls.sms.length, 0);
+  }
 });

@@ -118,7 +118,9 @@ merged UI `approvalSnapshot()` object, including schema, step, case/contact,
 resource/scoper/week, model id/profile, complete pack revision, content hash and
 channel content. Calendar content includes provider, calendar and assigned user,
 event start/end, arrival window, title and address. Message content includes
-exact template bytes, sender, recipient and `variant:"template"`.
+exact template bytes, sender, recipient and `variant:"template"`. An approved
+text whose sender is not the visit person's own line refuses
+`sender_not_scoper_line` and records nothing (`sales_booking_sender.ts`).
 
 `content_hash` (both preview `content_hash` and routing `message_sha256`) is
 SHA-256 of UTF-8 canonical JSON of that snapshot **excluding `content_hash`**.
@@ -253,9 +255,10 @@ optional `resource` (must be `"marnin"`), `prepared_at` (decide only).
 `content_hash` is `bookingContentHash` (canonical JSON of the snapshot less
 `content_hash`), exactly as on the engine path.
 
-- Message `content`: `{text, sender:"+61489267776", recipient, variant:"owner",
-  offer}`. `recipient` is the GHL contact's current phone as E.164, read at the
-  press; `sender` is always the 776 line.
+- Message `content`: `{text, sender, recipient, variant:"owner", offer}`.
+  `recipient` is the GHL contact's current phone as E.164, read at the press;
+  `sender` is the visit person's own line from `sales_booking_sender.ts`
+  (Stratco is Marnin, so `+61489267776`), also returned as `checks.sender`.
 - Calendar `content`: `{provider:"ghl", calendar_id:"dEQKVKHthsjSYaen1fiE",
   assigned_user_id:"3S20LGVTjsVYy9vTJ9wM", start_iso:<window start>,
   end_iso:<visit end>, window_start_iso, window_end_iso,

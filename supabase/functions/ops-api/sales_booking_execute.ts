@@ -37,6 +37,7 @@ import {
   type OutlookMirrorResult,
   type OutlookMirrorWriteOptions,
 } from "./sales_booking_outlook_mirror.ts";
+import { salesBookingSenderFor } from "./sales_booking_sender.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -45,8 +46,6 @@ export type ExecuteKind = "book" | "send";
 /** Env switches. Only the exact value "true" executes; anything else is dry run. */
 export const SALES_BOOKING_BOOK_EXECUTE_ENV = "SALES_BOOKING_BOOK_EXECUTE";
 export const SALES_BOOKING_SEND_EXECUTE_ENV = "SALES_BOOKING_SEND_EXECUTE";
-/** The Stratco booking line. Friday's texts all come from 776 (Group Ops). */
-export const SALES_BOOKING_SEND_LINE = "+61489267776";
 
 /** What the press did to the owner's Outlook calendar (Decision D2). */
 export type OutlookMirrorOutcome =
@@ -835,7 +834,18 @@ export async function salesBookingSendAction(args: {
     typeof text !== "string" || !text || typeof recipient !== "string" ||
     typeof contactId !== "string" || !contactId
   ) return refused("content_hash_mismatch");
-  if (sender !== SALES_BOOKING_SEND_LINE) return refused("sender_not_line_776");
+  // The text goes from the line of the person doing the visit, and only when
+  // the approved sender is that line. The sender sits inside the approval
+  // hash, so an approval for one line can never send from another.
+  const who = salesBookingSenderFor(loaded.snapshot);
+  if (!who.ok) return refused(who.reason, who.detail);
+  if (sender !== who.sender.line) {
+    return refused("sender_not_scoper_line", {
+      approved_sender: typeof sender === "string" ? sender : null,
+      scoper_line: who.sender.line,
+      person: who.sender.person,
+    });
+  }
 
   // The approved recipient must still be the contact's number in GHL.
   let phone: string | null;
@@ -859,8 +869,13 @@ export async function salesBookingSendAction(args: {
   const wouldSend = {
     method: "POST",
     path: "ghl-proxy?action=send_sms",
-    body: { contactId, message: text, fromNumber: sender },
+    body: { contactId, message: text, fromNumber: who.sender.line },
     recipient,
+    sender: {
+      line: who.sender.line,
+      person: who.sender.person,
+      name: who.sender.name,
+    },
   };
   if (!loaded.live) {
     return {

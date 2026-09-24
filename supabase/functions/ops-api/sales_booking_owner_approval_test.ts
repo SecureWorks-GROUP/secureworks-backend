@@ -28,10 +28,8 @@ import {
   salesBookingRead,
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
-import {
-  SALES_BOOKING_SEND_LINE,
-  salesBookingSendAction,
-} from "./sales_booking_execute.ts";
+import { salesBookingSendAction } from "./sales_booking_execute.ts";
+import { SALES_BOOKING_SENDER_LINES } from "./sales_booking_sender.ts";
 
 // Wed 23 Sep 2026, 10:00 Perth. Friday is 25 Sep.
 const NOW = new Date("2026-09-23T02:00:00Z");
@@ -257,6 +255,9 @@ Deno.test("owner message: an edited text is approved, bound to text, contact, 77
   );
   assertEquals(rows.length, 1);
   assertEquals(result.checks.hand_sent_texts, "not_machine_checked");
+  // The screen is told which line the text goes from, and whose it is.
+  assertEquals(result.checks.sender.line, "+61489267776");
+  assertEquals(result.checks.sender.person, "marnin");
   // The executor accepts it exactly like an engine approval.
   assertEquals(
     await approvalGateRefusal(record, "message", NOW, [
@@ -846,7 +847,10 @@ Deno.test("bookable dates skip today's passed Friday and non-Stratco days", () =
     ["2026-09-29", "2026-10-02"],
   );
   assertEquals(STRATCO_BOOKING_RULEBOOK.sender, "+61489267776");
-  assertEquals(STRATCO_BOOKING_RULEBOOK.sender, SALES_BOOKING_SEND_LINE);
+  assertEquals(
+    STRATCO_BOOKING_RULEBOOK.sender,
+    SALES_BOOKING_SENDER_LINES.marnin.line,
+  );
 });
 
 Deno.test("engine path still works when owner reads are wired, and never touches them", async () => {

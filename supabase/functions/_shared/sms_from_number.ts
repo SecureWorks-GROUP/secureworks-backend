@@ -10,15 +10,16 @@
 //
 // Used by ghl-proxy `send_sms` (the choke point every proxied SMS flows
 // through) and by ops-api `sendCommsMessageAction` (the one path that POSTs
-// to the GHL conversations API directly).
+// to the GHL conversations API directly). Scope-booking texts go from the
+// visit person's own line: ops-api/sales_booking_sender.ts owns that table.
 
 export const SMS_DEFAULT_FROM_NUMBER = '+61489267771' // SecureWorks Group Admin
 
 export const SMS_ALLOWED_FROM_NUMBERS = [
   '+61489267771', // SecureWorks Group Admin (ops default)
-  '+61489267772', // SecureWorks Fencing Sales
-  '+61489267774', // SecureWorks Patios (GHL location default)
-  '+61489267776', // SecureWorks Group Ops
+  '+61489267772', // SecureWorks Fencing Sales (Khairo's booking line)
+  '+61489267774', // SecureWorks Patios (GHL location default; Nithin's booking line)
+  '+61489267776', // SecureWorks Group Ops (Marnin's booking line)
   '+61489267778', // SecureWorks Fencing Mgmt
 ] as const
 

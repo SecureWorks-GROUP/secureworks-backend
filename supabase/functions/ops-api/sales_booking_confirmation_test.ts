@@ -86,7 +86,7 @@ const model = (): BookingObject => ({
     template_text: "Hi Sample, Friday 09:00 to 10:30.\nSecureWorks Group ",
     ai_proposed_text: null,
     routing: {
-      from_number: "+61400000001",
+      from_number: "+61489267776",
       to_number: "+61400000002",
       message_sha256: null,
     },
@@ -501,6 +501,20 @@ Deno.test("an exact-text approval needs no calendar operation, so a text with no
     Error,
     "exact_message_route_required",
   );
+  // A text on Marnin's visit must go from Marnin's own line, not another
+  // person's; nothing is recorded.
+  const h = await fixture(), third = memoryStore();
+  const hm = h.cases[0].booking_read_model!;
+  hm.message.routing.from_number = "+61489267772";
+  hm.message.routing.message_sha256 = await bookingContentHash(
+    bookingApprovalSnapshot(h, h.cases[0], "message"),
+  );
+  await assertRejects(
+    () => salesBookingApprovalWriteAction(request(h, third.store, "message")),
+    Error,
+    "sender_not_scoper_line",
+  );
+  assertEquals(third.records.size, 0);
 });
 
 Deno.test("approval read failure is explicit, while content changes hide old approvals", async () => {

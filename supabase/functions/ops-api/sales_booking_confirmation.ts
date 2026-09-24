@@ -24,6 +24,7 @@ import {
   type OwnerApprovalResult,
   salesBookingOwnerApprovalAction,
 } from "./sales_booking_owner_approval.ts";
+import { salesBookingSenderFor } from "./sales_booking_sender.ts";
 export {
   BOOKING_APPROVAL_TTL_MS,
   bookingContentHash,
@@ -615,6 +616,15 @@ export async function salesBookingApprovalWriteAction(args: {
       !/^\+[1-9]\d{7,14}$/.test(expected.content.sender) ||
       !/^\+[1-9]\d{7,14}$/.test(expected.content.recipient))
   ) fail("exact_message_route_required");
+  // An approved text must go from the visit person's own line; the executor
+  // re-checks this at the press.
+  if (decision === "approved" && snapshot.step === "message") {
+    const who = salesBookingSenderFor(expected);
+    if (!who.ok) fail(who.reason);
+    if (expected.content.sender !== who.sender.line) {
+      fail("sender_not_scoper_line");
+    }
+  }
   const record: BookingApprovalRecord = {
     binding_hash: await bookingHash(expected),
     step: snapshot.step,

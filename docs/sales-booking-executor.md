@@ -89,7 +89,16 @@ Both actions:
 
 `sales_booking_send` then:
 
-6. `sender_not_line_776` unless the approved sender is `+61489267776`.
+6. The text goes from the line of the person doing the visit (the approval
+   snapshot's `scoper_user_id`): Marnin `+61489267776`, Nithin
+   `+61489267774`, Khairo `+61489267772` (`sales_booking_sender.ts`, copied
+   from each wiki scope-booking profile). No person refuses
+   `booking_scoper_unassigned`, an unknown one `booking_scoper_line_unknown`,
+   a snapshot whose `resource`/`profile` names someone else
+   `booking_scoper_ambiguous`, and an approved sender that is not that
+   person's line `sender_not_scoper_line`. There is no fallback line. The
+   sender is inside the approval hash, so an approval for one line can never
+   send from another. `would_send.sender` names the line and whose it is.
 7. `recipient_changed` unless the contact's GHL phone is still the approved
    recipient.
 8. `text_already_in_thread` if the exact text was already sent since approval.
