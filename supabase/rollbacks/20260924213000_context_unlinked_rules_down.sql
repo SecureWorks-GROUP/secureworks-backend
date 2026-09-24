@@ -27,6 +27,9 @@ BEGIN
  END IF;
 END $guard$;
 
+UPDATE public.event_threads SET thread_key='retired:'||thread_key
+WHERE retired_at IS NOT NULL;
+
 -- The trigger first, so no insert reaches a dropped function.
 CREATE OR REPLACE FUNCTION public.attribute_business_event() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$

@@ -1,1 +1,0 @@
-/opt/homebrew/Cellar/postgresql@17/17.11/bin/postgres "-D" "/Users/marninstobbe/.no-mistakes/worktrees/2826e952695a/01M38WZZ4KY6V7HCVS6X334TC6/.p4-review-pg.MHDuY9/data" "-h" "127.0.0.1" "-p" "57535" "-k" "/tmp"
