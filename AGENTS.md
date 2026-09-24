@@ -3836,16 +3836,11 @@ never machine-checked and never guessed.
 Only `sales_booking_book` / `sales_booking_send` act on an approval
 (`docs/sales-booking-executor.md`): dry run unless their switch is exactly
 `true` and a captain pressed, re-checked at the press, idempotent on the
-approval hash. A booking text goes from the visit person's own line
-(`sales_booking_sender.ts`: Marnin 776, Nithin 774, Khairo 772, from their
-wiki scope-booking profiles); no person or another line refuses, never a
-776 fallback. Nithin and Khairo take text approvals only; visits stay
-Stratco. Whose lead it is = the opportunity's current GHL assignee (unassigned:
-Marnin on fencing/Stratco, Nithin on patio), checked at the read, at approval
-and again at send (`salesBookingLeadBelongsTo`); the one people table (app
-user, GHL user, line) is `sales_booking_sender.ts`. Apply
-`20260924230000_sales_booking_approvals_people.sql` before the matching
-`ops-api`, or Nithin/Khairo approvals fail the table's resource check. The GHL writer refuses any real write that lacks that
+approval hash. Sender identity, current lead ownership, supported approval
+profiles and migration ordering are owned by
+`docs/sales-booking-confirmation-api.md` and `docs/sales-booking-executor.md`;
+`sales_booking_sender.ts` is the canonical people mapping. The GHL writer
+refuses any real write that lacks that
 executor's per-press claim, not just an approval
 (`docs/ghl-calendar-appointment-write.md`). After GHL holds the booking the
 executor writes its Outlook mirror (keyed on the GHL appointment id). One

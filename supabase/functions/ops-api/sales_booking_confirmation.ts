@@ -519,8 +519,8 @@ export async function salesBookingApprovalWriteAction(args: {
     !obj(snapshot) || !["calendar", "message"].includes(snapshot.step) ||
     !["approved", "refused"].includes(decision)
   ) fail("invalid_independent_approval", 400);
-  // Each booking person approves on their own profile. A visit is still
-  // booked only on the Stratco profile; Nithin and Khairo approve texts.
+  // The owner approves texts for each booking person on their own profile.
+  // Calendar approvals remain restricted to the Stratco profile.
   const profile = resourceProfile(snapshot.resource);
   if (!profile || snapshot.profile !== profile) {
     fail("booking_profile_required", 400);

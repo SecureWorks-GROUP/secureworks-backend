@@ -298,7 +298,7 @@ Request and identity: `sales_booking_approval_write requires POST` (405),
 `invalid_independent_approval`,
 `refusal_reason_required`, `owner_prepared_at_required`,
 `owner_content_hash_required`, `booking_case_identity_ambiguous` (the contact
-must be exactly one case on the Stratco roster for that week and its case id
+must be exactly one case on the requested resource's roster for that week and its case id
 must match), `owner_preview_expired`, `contact_unreadable`.
 
 Content: `owner_message_text_required`, `owner_message_text_has_dash`,
