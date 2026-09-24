@@ -302,6 +302,13 @@ jobs:
             supabase/functions/ghl-webhook-receiver/receiver_customer_replied_test.ts \
             supabase/functions/ghl-webhook/message_webhook_test.ts
 
+      # OAuth callback contract: docs/project-knowledge/edge-functions.md.
+      # Stubbed fetch, no live installation.
+      - name: Test GHL app OAuth install callback
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/ghl-oauth-callback/callback_test.ts
+
       # Slice C1a: the shared GHL row builder, ghl-proxy send_sms through the one
       # writer capture_business_event, and the builder rows the PostgreSQL
       # contract feeds that writer.
