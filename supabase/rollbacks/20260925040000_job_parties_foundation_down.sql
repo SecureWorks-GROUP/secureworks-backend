@@ -9,7 +9,8 @@
 --
 -- Deliberately kept: RLS and the revokes on job_contacts (reopening the
 -- neighbours' names and phones to the public key is not a rollback; the
--- TRUNCATE hole stays closed), and the unique (job_id, contact_label) index
+-- TRUNCATE hole stays closed), the same revoke and security_invoker on view
+-- run_summary (it reads those names), and the unique (job_id, contact_label) index
 -- (the letters were unique before it, every legacy writer finds a party by
 -- its letter, and dropping it could only let a duplicate letter in).
 SET LOCAL lock_timeout = '5s';

@@ -45,6 +45,41 @@ ALTER TABLE public.jobs
  ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
  ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
+-- run_line_items and view run_summary as 20260324000001 defines them: owner
+-- postgres, no security_invoker, SELECT held by anon and authenticated as
+-- under Supabase defaults.
+CREATE TABLE IF NOT EXISTS public.run_line_items (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ org_id uuid NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+ job_id uuid NOT NULL REFERENCES public.jobs(id) ON DELETE CASCADE,
+ run_label text NOT NULL,
+ job_contact_id uuid REFERENCES public.job_contacts(id) ON DELETE SET NULL,
+ description text NOT NULL,
+ quantity numeric NOT NULL DEFAULT 1,
+ unit text,
+ unit_price_ex numeric(12,2) NOT NULL DEFAULT 0,
+ line_total_ex numeric(12,2) NOT NULL DEFAULT 0,
+ allocation text NOT NULL DEFAULT 'shared',
+ split_pct numeric(5,2) NOT NULL DEFAULT 50,
+ allocation_note text,
+ client_amount_ex numeric(12,2) NOT NULL DEFAULT 0,
+ neighbour_amount_ex numeric(12,2) NOT NULL DEFAULT 0,
+ sort_order integer DEFAULT 0
+);
+CREATE OR REPLACE VIEW public.run_summary AS
+SELECT rli.job_id,rli.run_label,rli.job_contact_id,jc.client_name AS neighbour_name,jc.site_address AS neighbour_address,
+ j.job_number,j.client_name AS client_name,j.site_address AS client_address,COUNT(*) AS item_count,
+ SUM(rli.line_total_ex) AS run_total_ex,SUM(rli.client_amount_ex) AS client_total_ex,SUM(rli.neighbour_amount_ex) AS neighbour_total_ex,
+ ROUND(SUM(rli.line_total_ex)*1.1,2) AS run_total_inc,ROUND(SUM(rli.client_amount_ex)*1.1,2) AS client_total_inc,
+ ROUND(SUM(rli.neighbour_amount_ex)*1.1,2) AS neighbour_total_inc
+FROM public.run_line_items rli
+JOIN public.jobs j ON j.id=rli.job_id
+LEFT JOIN public.job_contacts jc ON jc.id=rli.job_contact_id
+GROUP BY rli.job_id,rli.run_label,rli.job_contact_id,jc.client_name,jc.site_address,j.job_number,j.client_name,j.site_address;
+ALTER VIEW public.run_summary OWNER TO postgres;
+GRANT SELECT ON TABLE public.run_summary TO anon,authenticated,service_role;
+GRANT SELECT ON TABLE public.run_line_items,public.jobs TO service_role;
+
 ALTER TABLE public.xero_invoices
  ADD COLUMN IF NOT EXISTS job_contact_id uuid,
  ADD COLUMN IF NOT EXISTS xero_contact_id text,
@@ -83,6 +118,9 @@ VALUES
  ('5e5c0000-0000-4000-8000-00000000005b','1694c4a9-4641-4e74-ba8b-78b2e54b8d1d','neighbour_b','S5 Neighbour Party','0411 000 205','s5-neighbour@example.test',
   'Uki8zBjuAJSP5Em19ZsK','5995ed74-0000-4000-8000-000000000105','B',false,'active','2026-05-02 02:00:00+00','2026-05-02 02:00:00+00');
 
+INSERT INTO public.run_line_items(job_id,run_label,job_contact_id,description,line_total_ex,client_amount_ex,neighbour_amount_ex)
+VALUES('1694c4a9-4641-4e74-ba8b-78b2e54b8d1d','REAR','5e5c0000-0000-4000-8000-00000000005b','Rear fence',2000,1000,1000);
+
 -- Prove the fixtures leave exactly the pre-image the guard pins.
 DO $$
 DECLARE cols text;
@@ -95,6 +133,8 @@ BEGIN
  THEN RAISE EXCEPTION 's-m1 setup: job_contacts is not the live shape: %',cols; END IF;
  IF EXISTS (SELECT 1 FROM pg_index WHERE indrelid='public.job_contacts'::regclass AND indisunique AND NOT indisprimary)
  THEN RAISE EXCEPTION 's-m1 setup: job_contacts has a unique index production lacks'; END IF;
+ IF NOT has_table_privilege('anon','public.run_summary','SELECT') OR NOT has_table_privilege('authenticated','public.run_summary','SELECT')
+ THEN RAISE EXCEPTION 's-m1 setup: run_summary should be readable by the public key as live'; END IF;
  IF NOT has_table_privilege('anon','public.job_contacts','TRUNCATE') THEN RAISE EXCEPTION 's-m1 setup: anon should hold TRUNCATE as live'; END IF;
  IF EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name='job_parties_v1') THEN RAISE EXCEPTION 's-m1 setup: job_parties_v1 row exists'; END IF;
 END $$;

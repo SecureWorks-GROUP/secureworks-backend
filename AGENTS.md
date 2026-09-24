@@ -3874,11 +3874,14 @@ no row and so never read as booked or sent.
 one site job). Sites slice S-M1 (`20260925040000_job_parties_foundation.sql`)
 gave it one writer pair: `upsert_job_party(job, source_party_key, fields,
 actor)` and `set_job_party_ids(...)` (the only way a neighbour's GHL or Xero
-id changes). The key is the fence tool's neighbour id (`nb-1`,
+id changes; `upsert_job_party` writes them on insert only). The key is the fence tool's neighbour id (`nb-1`,
 `nb-<epoch ms>`), `primary` for the owner, `staff:<uuid>` for a staff-added
 payer; the letter A-Z is display only, assigned once, never reused. A reused
 key on an anchored party with a different identity retires the old party and
-inserts `<key>#<n>` instead of rewriting a person. The owner party mirrors
+inserts `<key>#<n>` instead of rewriting a person; the same name words are
+the same person, so a corrected phone or email updates in place. With no
+portions the owner's share is 100 only while no neighbour is active, else
+null. The owner party mirrors
 `jobs` one way (AFTER UPDATE trigger `job_contacts_owner_mirror`, only once
 the owner row is keyed `primary`): `jobs` owns the owner's contact, a null
 never overwrites a set id (flag `owner_id_divergence`). Every call writes one
@@ -3886,7 +3889,8 @@ ids-only `job_party_events` receipt. The four legacy writers (scope sync,
 `prepare_neighbour_quotes`, send-quote accept, invoice creation) still write
 directly until S-M2 moves them; do not add a fifth. The table is RLS-on with
 no policy and revoked from anon and authenticated (the live read found both
-held TRUNCATE, which RLS does not cover). Placement reconsideration after a
+held TRUNCATE, which RLS does not cover); view `run_summary`, which read
+its names past RLS, is revoked the same way and `security_invoker`. Placement reconsideration after a
 GHL link only runs while flag `job_parties_v1` is on. Contract and named-site
 tests: `supabase/tests/migration-contracts/20260925040000_job_parties_foundation`.
 
