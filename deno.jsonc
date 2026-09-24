@@ -4,7 +4,11 @@
     "test:approve-and-send": "deno test --no-check --allow-env --allow-net=127.0.0.1 supabase/functions/ops-api/approve_and_send_test.ts"
   },
   "fmt": {
-    "exclude": ["**/*.md", "supabase/functions/ops-api/index.ts"]
+    "exclude": [
+      "**/*.md",
+      "supabase/functions/ops-api/index.ts",
+      "supabase/functions/_shared/price_book/patio_nest_cuts_fixture.js"
+    ]
   },
   "lint": {
     "exclude": ["supabase/functions/ops-api/index.ts"]

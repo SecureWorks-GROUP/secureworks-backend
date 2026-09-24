@@ -5,8 +5,8 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   costCutPlanPerLm,
-  CutToOrderError,
   cutToOrder,
+  CutToOrderError,
 } from "./cut_to_order.ts";
 // @ts-ignore verbatim JS fixture
 import { nestCuts } from "./patio_nest_cuts_fixture.js";
@@ -39,7 +39,11 @@ Deno.test("Kiko slats: 101 pieces nest into 27 bars of 6100 mm at 4.1% waste", (
   assertEquals(plan.piece_count, 101);
   assertEquals(plan.required_mm, 158_020);
   assertEquals(plan.sticks.length, 27);
-  assertEquals(plan.order, [{ length_mm: 6100, qty: 27, special_order: false }]);
+  assertEquals(plan.order, [{
+    length_mm: 6100,
+    qty: 27,
+    special_order: false,
+  }]);
   assertEquals(plan.purchased_mm, 164_700);
   assertEquals(plan.waste_mm, 6_680);
   assertEquals(plan.waste_percent, 4.1);
@@ -142,7 +146,9 @@ Deno.test("bad input refuses with a code, never a guess", () => {
     return null;
   };
   assertEquals(
-    code(() => cutToOrder({ rule: "nest", pieces: [{ length_mm: 100, qty: 1 }] })),
+    code(() =>
+      cutToOrder({ rule: "nest", pieces: [{ length_mm: 100, qty: 1 }] })
+    ),
     "cut_stock_lengths_missing",
   );
   assertEquals(
@@ -210,7 +216,10 @@ Deno.test("parity: one cut length matches the patio tool's nestCuts on every sto
             legacy.sticks.map((s: any) => [s.stockLength, s.cuts.length]),
           );
           for (let j = 0; j < plan.sticks.length; j++) {
-            assertEquals(plan.sticks[j].offcut_mm, Math.max(0, legacy.sticks[j].waste - 3));
+            assertEquals(
+              plan.sticks[j].offcut_mm,
+              Math.max(0, legacy.sticks[j].waste - 3),
+            );
           }
         }
         compared++;

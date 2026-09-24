@@ -44,7 +44,11 @@ function deps(over: Partial<PriceBookDeps> = {}): PriceBookDeps & {
     env: (n) => ENV[n],
     userRole: (token) =>
       Promise.resolve(
-        token === "jwt-estimator" ? "estimator" : token === "jwt-trade" ? "trade" : null,
+        token === "jwt-estimator"
+          ? "estimator"
+          : token === "jwt-trade"
+          ? "trade"
+          : null,
       ),
     rpc: (fn, args) => {
       calls.push({ fn, args });
@@ -63,7 +67,14 @@ function deps(over: Partial<PriceBookDeps> = {}): PriceBookDeps & {
       }
       if (fn === "price_book_current_allowances") {
         return Promise.resolve({
-          data: [{ family: "patio", allowance_key: "flashing", basis: "per_lm_by_girth_band", girth_min_mm: 0, girth_max_mm: 100, cost_ex_gst: "5.4148" }],
+          data: [{
+            family: "patio",
+            allowance_key: "flashing",
+            basis: "per_lm_by_girth_band",
+            girth_min_mm: 0,
+            girth_max_mm: 100,
+            cost_ex_gst: "5.4148",
+          }],
           error: null,
         });
       }
@@ -96,7 +107,10 @@ Deno.test("no credentials, the public shared key, or no user session: 401", asyn
     { authorization: "Bearer not-a-user" },
   ];
   for (const headers of cases) {
-    const res = await handlePriceBookRequest(get("?action=current", headers), deps());
+    const res = await handlePriceBookRequest(
+      get("?action=current", headers),
+      deps(),
+    );
     assertEquals(res.status, 401);
     assertEquals((await res.json()).code, "user_jwt_required");
   }
@@ -120,7 +134,10 @@ Deno.test("server secrets and an estimator session may read", async () => {
     { authorization: "Bearer jwt-estimator" },
   ];
   for (const headers of cases) {
-    const res = await handlePriceBookRequest(get("?action=current", headers), deps());
+    const res = await handlePriceBookRequest(
+      get("?action=current", headers),
+      deps(),
+    );
     assertEquals(res.status, 200);
   }
 });
@@ -128,7 +145,10 @@ Deno.test("server secrets and an estimator session may read", async () => {
 Deno.test("current: counts by status and names unknown keys instead of guessing", async () => {
   const d = deps();
   const res = await handlePriceBookRequest(
-    get("?action=current&item_keys=steel-rhs-100x50x2,flashing-custom,nope", SERVER),
+    get(
+      "?action=current&item_keys=steel-rhs-100x50x2,flashing-custom,nope",
+      SERVER,
+    ),
     d,
   );
   const body = await res.json();
@@ -145,14 +165,22 @@ Deno.test("current: counts by status and names unknown keys instead of guessing"
 Deno.test("current: an unreadable price book is a 502, never an empty list", async () => {
   const res = await handlePriceBookRequest(
     get("?action=current", SERVER),
-    deps({ rpc: () => Promise.resolve({ data: null, error: { message: "down" } }) }),
+    deps({
+      rpc: () => Promise.resolve({ data: null, error: { message: "down" } }),
+    }),
   );
   assertEquals(res.status, 502);
   assertEquals((await res.json()).code, "price_book_unreadable");
 });
 
 Deno.test("current and markup refuse an unknown family", async () => {
-  for (const path of ["?action=current&family=decking", "?action=markup&family=decking", "?action=markup"]) {
+  for (
+    const path of [
+      "?action=current&family=decking",
+      "?action=markup&family=decking",
+      "?action=markup",
+    ]
+  ) {
     const res = await handlePriceBookRequest(get(path, SERVER), deps());
     assertEquals(res.status, 400);
   }
@@ -160,7 +188,10 @@ Deno.test("current and markup refuse an unknown family", async () => {
 
 Deno.test("markup: returns the family default", async () => {
   const d = deps();
-  const res = await handlePriceBookRequest(get("?action=markup&family=patio", SERVER), d);
+  const res = await handlePriceBookRequest(
+    get("?action=markup&family=patio", SERVER),
+    d,
+  );
   const body = await res.json();
   assertEquals(body.markup.value, 1.35);
   assertEquals(d.calls[0].args, { p_family: "patio" });
@@ -168,21 +199,34 @@ Deno.test("markup: returns the family default", async () => {
 
 Deno.test("allowances: returns the current rows for a family", async () => {
   const d = deps();
-  const res = await handlePriceBookRequest(get("?action=allowances&family=patio", SERVER), d);
+  const res = await handlePriceBookRequest(
+    get("?action=allowances&family=patio", SERVER),
+    d,
+  );
   const body = await res.json();
   assertEquals(res.status, 200);
   assertEquals(body.allowances[0].allowance_key, "flashing");
-  assertEquals(d.calls[0], { fn: "price_book_current_allowances", args: { p_family: "patio" } });
+  assertEquals(d.calls[0], {
+    fn: "price_book_current_allowances",
+    args: { p_family: "patio" },
+  });
 });
 
 Deno.test("cut: 6 m of 100x50 buys one 6.5 m length from the item's stock list", async () => {
   const res = await handlePriceBookRequest(
-    post("?action=cut", { item_key: "steel-rhs-100x50x2", pieces: [{ length_mm: 6000, qty: 1 }] }, SERVER),
+    post("?action=cut", {
+      item_key: "steel-rhs-100x50x2",
+      pieces: [{ length_mm: 6000, qty: 1 }],
+    }, SERVER),
     deps(),
   );
   const body = await res.json();
   assertEquals(res.status, 200);
-  assertEquals(body.plan.order, [{ length_mm: 6500, qty: 1, special_order: false }]);
+  assertEquals(body.plan.order, [{
+    length_mm: 6500,
+    qty: 1,
+    special_order: false,
+  }]);
   assertEquals(body.stock_lengths_source, "price_book");
   assertEquals(body.rule_source, "price_book");
   assertEquals(body.cost.per_lm_ex_gst, 26.5734);
@@ -191,19 +235,30 @@ Deno.test("cut: 6 m of 100x50 buys one 6.5 m length from the item's stock list",
 
 Deno.test("cut: no stock lengths and no rule recorded is a 409, not a guess", async () => {
   let res = await handlePriceBookRequest(
-    post("?action=cut", { item_key: "flashing-custom", pieces: [{ length_mm: 100, qty: 1 }] }, SERVER),
+    post("?action=cut", {
+      item_key: "flashing-custom",
+      pieces: [{ length_mm: 100, qty: 1 }],
+    }, SERVER),
     deps(),
   );
   assertEquals(res.status, 409);
   assertEquals((await res.json()).code, "cut_rule_unknown_for_item");
   res = await handlePriceBookRequest(
-    post("?action=cut", { item_key: "flashing-custom", rule: "nest", pieces: [{ length_mm: 100, qty: 1 }] }, SERVER),
+    post("?action=cut", {
+      item_key: "flashing-custom",
+      rule: "nest",
+      pieces: [{ length_mm: 100, qty: 1 }],
+    }, SERVER),
     deps(),
   );
   assertEquals(res.status, 409);
   assertEquals((await res.json()).code, "stock_lengths_unknown");
   res = await handlePriceBookRequest(
-    post("?action=cut", { item_key: "flashing-custom", rule: "cut_to_size", pieces: [{ length_mm: 7500, qty: 2 }] }, SERVER),
+    post("?action=cut", {
+      item_key: "flashing-custom",
+      rule: "cut_to_size",
+      pieces: [{ length_mm: 7500, qty: 2 }],
+    }, SERVER),
     deps(),
   );
   assertEquals(res.status, 200);
@@ -212,22 +267,50 @@ Deno.test("cut: no stock lengths and no rule recorded is a 409, not a guess", as
 
 Deno.test("cut: bad pieces, unknown rule and unknown item refuse with a code", async () => {
   const cases: [unknown, number, string][] = [
-    [{ item_key: "steel-rhs-100x50x2", pieces: [{ length_mm: -1, qty: 1 }] }, 400, "cut_piece_invalid"],
-    [{ item_key: "steel-rhs-100x50x2", rule: "guess", pieces: [{ length_mm: 1, qty: 1 }] }, 400, "cut_rule_unknown"],
-    [{ item_key: "nope", pieces: [{ length_mm: 1, qty: 1 }] }, 404, "item_unknown"],
+    [
+      { item_key: "steel-rhs-100x50x2", pieces: [{ length_mm: -1, qty: 1 }] },
+      400,
+      "cut_piece_invalid",
+    ],
+    [
+      {
+        item_key: "steel-rhs-100x50x2",
+        rule: "guess",
+        pieces: [{ length_mm: 1, qty: 1 }],
+      },
+      400,
+      "cut_rule_unknown",
+    ],
+    [
+      { item_key: "nope", pieces: [{ length_mm: 1, qty: 1 }] },
+      404,
+      "item_unknown",
+    ],
     [{ pieces: [] }, 400, "item_key_missing"],
   ];
   for (const [body, status, code] of cases) {
-    const res = await handlePriceBookRequest(post("?action=cut", body, SERVER), deps());
+    const res = await handlePriceBookRequest(
+      post("?action=cut", body, SERVER),
+      deps(),
+    );
     assertEquals(res.status, status);
     assertEquals((await res.json()).code, code);
   }
 });
 
 Deno.test("the read action has no write verbs", async () => {
-  for (const [method, path] of [["POST", "?action=current"], ["GET", "?action=cut"], ["POST", "?action=propose"]]) {
+  for (
+    const [method, path] of [["POST", "?action=current"], [
+      "GET",
+      "?action=cut",
+    ], ["POST", "?action=propose"]]
+  ) {
     const res = await handlePriceBookRequest(
-      new Request(`https://x.test/price-book${path}`, { method, headers: SERVER, body: method === "POST" ? "{}" : undefined }),
+      new Request(`https://x.test/price-book${path}`, {
+        method,
+        headers: SERVER,
+        body: method === "POST" ? "{}" : undefined,
+      }),
       deps(),
     );
     assertEquals(res.status, 400);

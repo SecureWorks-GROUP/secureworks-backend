@@ -1,6 +1,7 @@
 // VERBATIM copy of nestCuts from patio-tool index.html lines 25236-25343,
 // commit 884a208 (2026-08-10). Test fixture only: the parity test proves
 // cut_to_order.ts reproduces it. Never import this outside tests.
+// Excluded from deno fmt in deno.jsonc to preserve the verbatim source.
 // deno-lint-ignore-file
 export
 function nestCuts(cutLengthMm, qty, stockLengths, opts) {
