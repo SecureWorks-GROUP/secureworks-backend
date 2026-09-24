@@ -233,7 +233,9 @@ export function salesBookingSuburbPoint(value: unknown): SuburbPoint | null {
     .replace(/[,\s]+(?:WA|Western Australia)$/i, "");
   let locality = withoutRegion.split(",").at(-1)!.trim();
   if (/\d/.test(locality)) {
-    const street = locality.match(/^.*\b(?:street|st|road|rd|avenue|ave|drive|dr|way|court|ct|close|cl|crescent|cres|terrace|tce|parade|pde|place|pl|lane|ln)\s+(.+)$/i);
+    const street = locality.match(
+      /^.*\b(?:street|st|road|rd|avenue|ave|drive|dr|way|court|ct|close|cl|crescent|cres|terrace|tce|parade|pde|place|pl|lane|ln)\s+(.+)$/i,
+    );
     if (!street) return null;
     locality = street[1];
   }
@@ -265,7 +267,10 @@ export function salesBookingSuburbByUnambiguousContact(
   return result;
 }
 
-function normalizedSpecificAddress(value: unknown, suburb: string): string | null {
+function normalizedSpecificAddress(
+  value: unknown,
+  suburb: string,
+): string | null {
   if (typeof value !== "string" || !/\d/.test(value)) return null;
   const escapedSuburb = suburb.split(/\s+/).map((part) =>
     part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")

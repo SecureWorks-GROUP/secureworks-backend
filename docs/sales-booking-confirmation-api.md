@@ -40,28 +40,31 @@ pack revision, evidence, expiry, calendar preview, locked template and route.
 null. Existing arbitrary pack drafts are never promoted into locked templates.
 Missing validation checks remain null, never manufactured passes.
 
-The live server read (`docs/sales-booking-live-availability.md`) now replaces
-`calendar_read` and `commitments` below on every read and every approval
-press; a fresh engine census only adds holds.
+The final availability fields are owned by
+[live availability](sales-booking-live-availability.md): the server replaces
+pack-published `calendar_read` and `commitments` on every read and approval
+press. A fresh engine census may still add approval holds; it cannot replace
+the live read. The following describes the retained engine-pack input contract,
+not the freshness or source of the final screen fields.
 
-The envelope includes `resource.id` and `booking_flow` version
+The intermediate pack overlay (before the live replacement) includes `resource.id` and `booking_flow` version
 `booking-confirm.v1`, with `approval_write:"separate-v1"`. Each matched model
 may publish `validation.availability:{state,occupied_intervals,reason}` where
 state is `read`, `could_not_read`, or `not_configured`. A read requires an
 explicit interval array; each interval has `start`/`end` (or `start_iso`/`end_iso`)
 with offsets. The producer owns whole-person source coverage, including leave.
-The backend never promotes the GHL diary to that authority.
+These are engine-model validation inputs, not the final live screen availability.
 
 Models publish their complete prior-offer census as `prior_offers`. Each entry
 has `id` (or `slot_id`), `contact_id`, `state:offered|agreed`, and
-`start_iso`/`end_iso` (or `start`/`end`). These project to `booking_flow.commitments`.
+`start_iso`/`end_iso` (or `start`/`end`). These project to the intermediate overlay's `booking_flow.commitments`.
 A published empty array is a complete empty census; absence or malformed entries
 remain null with `commitments_read.state:"could_not_read"`. Only exact contact
 and opportunity matches in the current resource/profile contribute. Across
 matched models, occupied intervals are combined conservatively and commitment
 IDs deduplicate; conflicting entries refuse census completeness.
 
-Both projections carry `as_of` from the persisted pack's publish timestamp and
+Both intermediate pack projections carry `as_of` from the persisted pack's publish timestamp and
 `stale`. At any contributing model's expiry, state becomes `stale`, retaining
 the evidence for display. Missing/future publish time or missing expiry also
 holds freshness. `calendar_read.occupied_intervals` stays null when unavailable.

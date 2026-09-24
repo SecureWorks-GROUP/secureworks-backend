@@ -287,15 +287,16 @@ function arrivalWindowsWithTravelStatus(
       ? neighboringTravel(items.filter((item) => item.end === prev!.end), true)
       : { minutes: 0, basis: "day_start" };
     const after = next
-      ? neighboringTravel(items.filter((item) => item.start === next.start), false)
+      ? neighboringTravel(
+        items.filter((item) => item.start === next.start),
+        false,
+      )
       : null;
     if (before.minutes === null || after?.minutes === null) {
       const possibleFrom = ceil5(Math.max(
         dayStart,
         earliest + 1,
-        prev
-          ? prev.end + (before.minutes ?? 0) * MINUTE
-          : dayStart,
+        prev ? prev.end + (before.minutes ?? 0) * MINUTE : dayStart,
       ));
       const possibleLatest = next
         ? next.start - ((after?.minutes ?? 0) * MINUTE) - onSite
@@ -464,9 +465,9 @@ export function computeSalesBookingAvailability(
   } else if (input.outlook.state === "failed") {
     caveats.push(`outlook_unread: ${input.outlook.reason ?? "unknown"}`);
   }
-  const ghlEventIds = new Set(events.flatMap((e) =>
-    e.source === "ghl" && e.event_id ? [e.event_id] : []
-  ));
+  const ghlEventIds = new Set(
+    events.flatMap((e) => e.source === "ghl" && e.event_id ? [e.event_id] : []),
+  );
   const outlookUnverifiedCorrespondence = input.outlook.state === "read"
     ? input.outlook.entries.filter((o) =>
       o.source === "outlook" && o.blocks_capacity &&
@@ -606,9 +607,11 @@ export function computeSalesBookingAvailability(
         known: salesBookingSuburbPoint(row.suburb) !== null,
       },
       days: days.map((d) => {
-        if (d._busy.some((b) =>
-          b.source === "ghl" && b.contact_id === row.contact_id
-        )) {
+        if (
+          d._busy.some((b) =>
+            b.source === "ghl" && b.contact_id === row.contact_id
+          )
+        ) {
           return {
             date: d.date,
             state: "already_booked",
@@ -703,7 +706,9 @@ export function computeSalesBookingAvailability(
         ...d
       }) => d),
     },
-    case_free_times: outlookMalformedDropped || commitments === null ? {} : caseFree,
+    case_free_times: outlookMalformedDropped || commitments === null
+      ? {}
+      : caseFree,
   };
 }
 

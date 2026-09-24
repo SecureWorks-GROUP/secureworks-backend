@@ -72,9 +72,12 @@ send path for their leads, so its own census is complete and empty).
 
 A visit is **30 minutes on site** (owner, 24 Sep 2026), plus **travel between
 consecutive visits** from their locations. No travel from home before the
-first visit. An arrival window `{from_iso, to_iso}` is every arrival time at
-which the visit fits: after the previous booking ends plus travel from it, and
-finished, plus travel to the next booking, before that one starts. Day rules
+first visit. Each advertised arrival window has `from_iso` and `to_iso`
+exactly 60 minutes apart, plus `end_iso` 30 minutes after the latest arrival.
+Windows start on a five-minute grid; the entire window plus on-site duration
+must fit within working hours and clear travel to adjacent visits. Approval
+accepts 60–90-minute arrival windows; exact-time bookings are not permitted.
+The read and approval share `ownerVisitTiming` for these durations. Day rules
 are each person's profile (Marnin Tue/Fri 08:00 to 16:30, max 6, Tue 13:00 to
 15:30 Stratco band with its fixed 30 minutes either side; Nithin Mon from
 12:00, Tue, Thu, Fri, max 5; Khairo Mon to Fri, max 6).
@@ -84,6 +87,19 @@ The owner press (`sales_booking_owner_approval.ts`) applies the same rule:
 gap covers the computed travel. It refuses a neighboring event or offer when
 either location cannot be placed.
 
+Approval checks overlap against every busy interval and calculates travel only
+against the immediately preceding and following intervals across GHL appointments,
+GHL blocked slots, Outlook and open offers. Protected bands retain their fixed
+buffer as overlap constraints but never replace real travel neighbours. The owner press re-reads blocked slots
+for that person and day; failed or malformed reads refuse as
+`ghl_blocked_slots_unreadable`. Availability retains neighboring visits outside
+working hours for travel while keeping arrival windows within working hours. An unreadable offer census preserves `calendar_read.state: read`
+and names its failure in `commitments_read`, while withholding both free-time outputs.
+
+When neighboring intervals tie on their end or start, every tied location
+constrains travel. The largest known travel gap applies; any unknown location
+withholds that gap's arrival windows.
+
 ### Travel estimate (`straight-line-v3`)
 
 No routing API key is configured and none was added.
@@ -92,19 +108,22 @@ No routing API key is configured and none was added.
 Examples: Duncraig to Hillarys 15, Duncraig to Canning Vale 50.
 
 Different suburbs use the median geocoded `jobs.site_lat/site_lng` point per
-suburb in production (177 suburbs, read-only SELECT 24 Sep 2026). Two different
+suburb in the dated production snapshot recorded by `PERTH_SUBURB_POINTS`. Two different
 visits in the same known suburb use a 15-minute minimum. Identical numbered
 addresses use the location formula, which gives the 5-minute floor. Contact-based
 event and offer locations are used only when every loaded case for that contact
 agrees on one suburb. A location that cannot be placed has no travel estimate:
 affected arrival gaps are withheld, and owner approval waits until both
 locations resolve. Outlook events use their location display name for the same
-calculation.
+calculation. Address parsing matches the locality portion only; a suburb
+name in the street cannot establish the location. Owner approval builds its
+travel destination from the street plus the published lead suburb without
+changing the snapshot address.
 
 The day state is `travel_unknown` when an on-site visit could fit if travel
 were known, but every remaining candidate window depends on an unknown travel
-gap. `no_time_left` means there is no remaining 30-minute on-site gap even
-without travel. Each case derives its state and windows using that case's own
+gap. `no_time_left` means no permitted arrival window plus on-site duration
+fits, without an unresolved travel gap that could make one available. Each case derives its state and windows using that case's own
 suburb, so a generic day with unknown travel can still have an `open` case row.
 
 ## Measured on 24 Sep 2026 (read-only)
@@ -114,7 +133,7 @@ suburb, so a generic day with unknown travel can still have an `open` case row.
   "Khairo Pomare's Personal Calendar" (`NAS4UlY4ztBUG1qe750B`) and
   "SW Fencing Scope Calendar" (`i6j9vaCy6c94n3i93cir`).
 - Marnin, 21 Sep to 3 Oct: GHL returned **0** events; his Outlook had **8**
-  busy blocks. So GHL is not showing his Outlook today, and the read's
+  busy blocks. This appointment read did not establish native-sync correspondence; the read's
   `calendar_read.outlook.unverified_correspondence` counts Outlook events whose correspondence is unverified. The custom marker
   proves only this system's GHL-to-Outlook copies; native GHL sync does not supply it.
 - Production behaviour of the new read, including the blocked-slots call,
@@ -122,10 +141,12 @@ suburb, so a generic day with unknown travel can still have an `open` case row.
 
 ## Owner clicks
 
-The banner clears when this change deploys. To make Marnin's GHL calendar
+After deployment, a successful live calendar read clears the banner; a failed
+read retains a named refusal. To make Marnin's GHL calendar
 contain the Outlook conflicts required by the intended setup, the owner must
 connect Outlook and set it as the conflict calendar for STRATCO FENCING.
-Today GHL has 0 of his 8 Outlook blocks. The current server read separately
+The dated appointment read found no matching GHL events, which alone does not
+prove whether native conflict-calendar sync is configured. The current server read separately
 counts those Outlook blocks for Marnin, but that does not connect or populate
 his GHL calendar:
 
@@ -136,7 +157,8 @@ his GHL calendar:
    STRATCO FENCING. The unverified-correspondence count cannot certify native
    sync success or failure and need not fall to zero after connection.
 
-Nithin and Khairo already have GHL calendars; no click for them.
+The dated directory read found calendars for Nithin and Khairo. Their Outlook
+conflict-calendar connections were not established by that read.
 
 ## Follow-ups
 
@@ -146,21 +168,3 @@ Nithin and Khairo already have GHL calendars; no click for them.
 - Khairo is on the screen's switch but is not a `sales_booking_read` resource
   (400). Adding him needs a decision on which leads are his.
 - Wiki profile `fencing-stratco-marnin.json` still says `visit_minutes: 60`.
-
-Approval checks overlap against every busy interval and calculates travel only
-against the immediately preceding and following intervals across GHL appointments,
-GHL blocked slots, Outlook and open offers. The owner press re-reads blocked slots
-for that person and day; failed or malformed reads refuse as
-`ghl_blocked_slots_unreadable`. Availability retains neighboring visits outside
-working hours for travel while keeping arrival windows within working hours. An unreadable offer census preserves `calendar_read.state: read`
-and names its failure in `commitments_read`, while withholding both free-time outputs.
-
-Each advertised arrival window has `from_iso` and `to_iso` exactly 60 minutes
-apart, plus `end_iso` 30 minutes after the latest arrival. Windows start on a
-five-minute grid and include travel clearance on both sides. Approval continues
-to accept 60–90-minute arrival windows; exact-time bookings are not permitted.
-The read and approval share `ownerVisitTiming` for window and on-site duration.
-
-When neighboring intervals tie on their end or start, every tied location
-constrains travel. The largest known travel gap applies; any unknown location
-withholds that gap's arrival windows.

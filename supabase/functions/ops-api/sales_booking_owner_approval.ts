@@ -935,10 +935,14 @@ async function checkOwnerVisitAvailability(
     );
     for (const calendarId of calendarIds) {
       batches.push(
-        await deps.readGhlEvents({
-          calendarId,
-          userId: RULES.calendar.assigned_user_id,
-        }, dayStart, dayEnd),
+        await deps.readGhlEvents(
+          {
+            calendarId,
+            userId: RULES.calendar.assigned_user_id,
+          },
+          dayStart,
+          dayEnd,
+        ),
       );
     }
   } catch {
@@ -947,9 +951,13 @@ async function checkOwnerVisitAvailability(
   const events = ghlBusyEvents(batches.flat());
   let blocked: BookingObject[];
   try {
-    blocked = ghlBusyEvents(await deps.readGhlBlockedSlots(
-      RULES.calendar.assigned_user_id, dayStart, dayEnd,
-    ));
+    blocked = ghlBusyEvents(
+      await deps.readGhlBlockedSlots(
+        RULES.calendar.assigned_user_id,
+        dayStart,
+        dayEnd,
+      ),
+    );
   } catch {
     refuse("ghl_blocked_slots_unreadable");
   }
@@ -1034,9 +1042,7 @@ async function checkOwnerVisitAvailability(
         itemStart,
         itemEnd,
       ),
-      travel_minutes: itemEnd <= visit.start
-        ? before.minutes
-        : after.minutes,
+      travel_minutes: itemEnd <= visit.start ? before.minutes : after.minutes,
     };
   };
   const eventLocation = (e: BookingObject) =>
