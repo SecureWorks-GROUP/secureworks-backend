@@ -54,7 +54,46 @@ BEGIN
   IF has_function_privilege('service_role',f,'EXECUTE') THEN RAISE EXCEPTION 's-m1 private helper % granted',f; END IF;
  END LOOP;
  IF NOT has_function_privilege('service_role','public.upsert_job_party(uuid,text,jsonb,text,uuid)','EXECUTE') THEN RAISE EXCEPTION 's-m1 writer not granted'; END IF;
+ -- run_summary reads job_contacts names past RLS: closed to the public key and
+ -- logins, and it follows the caller's rights.
+ FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
+  IF has_table_privilege(r,'public.run_summary','SELECT') THEN RAISE EXCEPTION 's-m1 % can read run_summary',r; END IF;
+ END LOOP;
+ IF NOT EXISTS (SELECT 1 FROM pg_class WHERE oid='public.run_summary'::regclass AND 'security_invoker=true'=ANY(reloptions))
+ THEN RAISE EXCEPTION 's-m1 run_summary is not security_invoker'; END IF;
 END $$;
+
+-- run_summary, behaviourally: the public key and a login are refused; the
+-- staff path (service_role) still reads it.
+BEGIN;
+SET LOCAL ROLE anon;
+DO $$
+BEGIN
+ PERFORM 1 FROM public.run_summary;
+ RAISE EXCEPTION 's-m1 anon read run_summary';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+RESET ROLE;
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+ PERFORM 1 FROM public.run_summary;
+ RAISE EXCEPTION 's-m1 authenticated read run_summary';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+RESET ROLE;
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE service_role;
+DO $$
+BEGIN
+ IF (SELECT count(*) FROM public.run_summary WHERE job_id='1694c4a9-4641-4e74-ba8b-78b2e54b8d1d' AND run_label='REAR')<>1
+ THEN RAISE EXCEPTION 's-m1 service_role cannot read run_summary'; END IF;
+END $$;
+RESET ROLE;
+ROLLBACK;
 
 -- The TRUNCATE hole, behaviourally: the public key could empty the table
 -- before (setup proves the grant); now it is refused.
@@ -152,13 +191,15 @@ DO $$
 DECLARE o jsonb; school jsonb; aaron jsonb; raj jsonb; staff jsonb; r record; j uuid:='68e2e301-aa3a-4d5d-9924-d907643e1cba';
 BEGIN
  o:=public.upsert_job_party(j,'primary','{}'::jsonb,'contract');
+ -- Alone on the job with no portions, the owner holds the whole job.
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS DISTINCT FROM 100 THEN RAISE EXCEPTION 's-m1 lone owner share'; END IF;
  school:=public.upsert_job_party(j,'nb-1','{"client_name":"S1 Other Payer","client_phone":"0000000000","client_email":"s1-payer@example.test","ghl_contact_id":"uKFOBB1LDs21QjqLzJPw"}','contract');
  aaron:=public.upsert_job_party(j,'nb-1781145678212','{"client_name":"S1 Neighbour Two","client_email":"s1-n2@example.test","site_address":"17 Clarke Road"}','contract');
  raj:=public.upsert_job_party(j,'nb-1781145686085','{"client_name":"S1 Neighbour Three","ghl_contact_id":"218UWy5aDT6PSgaCm5hq","site_address":"17a Clarke Road"}','contract');
  IF o->>'outcome'<>'party_inserted' OR o->>'label'<>'A' OR school->>'label'<>'B' OR aaron->>'label'<>'C' OR raj->>'label'<>'D'
  THEN RAISE EXCEPTION 's-m1 letters % % % %',o,school,aaron,raj; END IF;
  SELECT * INTO r FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid;
- -- The owner comes from jobs, role owner, is_primary, whole share (no neighbours given portions).
+ -- The owner comes from jobs, role owner, is_primary.
  IF r.client_name<>'S1 Owner Party' OR r.ghl_contact_id<>'eUujDpEfZlwnQXHcmJHN' OR r.xero_contact_id<>'a03ae102-0000-4000-8000-000000000101'
   OR r.party_role<>'owner' OR r.is_primary IS NOT TRUE OR r.contact_type<>'primary' OR r.effective_from<>'2026-04-10 02:00:00+00'
  THEN RAISE EXCEPTION 's-m1 owner row %',to_jsonb(r); END IF;
@@ -167,6 +208,14 @@ BEGIN
  THEN RAISE EXCEPTION 's-m1 effective_from from the fence key'; END IF;
  -- nb-1 carries no epoch: the job's creation.
  IF (SELECT effective_from FROM public.job_contacts WHERE id=(school->>'job_contact_id')::uuid)<>'2026-04-10 02:00:00+00' THEN RAISE EXCEPTION 's-m1 nb-1 effective_from'; END IF;
+ -- With three neighbours and no portions the owner's share is unknown, never
+ -- the whole job; the first neighbour's receipt says so.
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS NOT NULL THEN RAISE EXCEPTION 's-m1 owner kept the whole job beside neighbours'; END IF;
+ IF NOT EXISTS (SELECT 1 FROM public.job_party_events WHERE job_contact_id=(school->>'job_contact_id')::uuid AND detail->>'owner_share_unknown'=o->>'job_contact_id')
+ THEN RAISE EXCEPTION 's-m1 owner share change not in the receipt'; END IF;
+ -- A later owner save with no portions keeps it unknown.
+ PERFORM public.upsert_job_party(j,'primary','{}'::jsonb,'contract');
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS NOT NULL THEN RAISE EXCEPTION 's-m1 owner share restored to 100'; END IF;
  -- A placeholder phone (Ishwar's 0000000000) never becomes a key and is flagged.
  SELECT * INTO r FROM public.job_contacts WHERE id=(school->>'job_contact_id')::uuid;
  IF r.phone_last9 IS NOT NULL OR NOT 'placeholder_phone'=ANY(r.party_flags) THEN RAISE EXCEPTION 's-m1 placeholder phone %',to_jsonb(r); END IF;
@@ -183,9 +232,17 @@ BEGIN
  THEN RAISE EXCEPTION 's-m1 restore'; END IF;
  -- A repeat with nothing new is unchanged; one receipt per call, ids and codes only.
  IF public.upsert_job_party(j,'nb-1781145686085','{"client_name":"S1 Neighbour Three"}','contract')->>'outcome'<>'party_unchanged' THEN RAISE EXCEPTION 's-m1 unchanged'; END IF;
- IF (SELECT count(*) FROM public.job_party_events WHERE job_id=j)<>8 THEN RAISE EXCEPTION 's-m1 receipts %',(SELECT count(*) FROM public.job_party_events WHERE job_id=j); END IF;
+ IF (SELECT count(*) FROM public.job_party_events WHERE job_id=j)<>9 THEN RAISE EXCEPTION 's-m1 receipts %',(SELECT count(*) FROM public.job_party_events WHERE job_id=j); END IF;
  IF EXISTS (SELECT 1 FROM public.job_party_events WHERE job_id=j AND (before::text ~* 'S1 |example\.test|0411|0000000000' OR after::text ~* 'S1 |example\.test|0411|0000000000' OR detail::text ~* 'S1 |example\.test|0411'))
  THEN RAISE EXCEPTION 's-m1 a receipt carries a name, email or phone'; END IF;
+ -- An existing neighbour's ids never change through the writer: an id passed
+ -- for a party with none leaves it empty (set_job_party_ids is the only way).
+ aaron:=public.upsert_job_party(j,'nb-1781145678212','{"client_name":"S1 Neighbour Two","ghl_contact_id":"fxAaronGhl","xero_contact_id":"fxAaronXero"}','contract');
+ SELECT * INTO r FROM public.job_contacts WHERE id=(aaron->>'job_contact_id')::uuid;
+ IF r.ghl_contact_id IS NOT NULL OR r.xero_contact_id IS NOT NULL OR aaron->>'outcome'<>'party_unchanged' OR aaron#>>'{reconsider}' IS NOT NULL
+ THEN RAISE EXCEPTION 's-m1 upsert changed an existing neighbour''s ids % %',aaron,to_jsonb(r); END IF;
+ IF NOT EXISTS (SELECT 1 FROM public.job_party_events WHERE job_contact_id=r.id AND detail->'ids_not_applied'='["ghl_contact_id","xero_contact_id"]'::jsonb)
+ THEN RAISE EXCEPTION 's-m1 ignored ids not recorded'; END IF;
  -- Contract refusals.
  BEGIN PERFORM public.upsert_job_party(j,'primary','{"client_name":"x"}','contract'); RAISE EXCEPTION 'no refusal';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM<>'owner_fields_follow_job' THEN RAISE; END IF; END;
@@ -227,6 +284,31 @@ BEGIN
  -- A party with no ids, documents, invoices or acceptances is updated in place.
  a:=public.upsert_job_party(j,'nb-1','{"client_name":"S5 Corrected Name","client_phone":"0433 000 111","client_email":"s5-corrected@example.test"}','contract');
  IF a->>'job_contact_id'<>b->>'job_contact_id' OR a->>'outcome'<>'party_updated' THEN RAISE EXCEPTION 's-m1 unanchored party not updated in place %',a; END IF;
+END $$;
+ROLLBACK;
+
+-- 4b. The same neighbour with a corrected phone (S4 SWF-261209: one digit
+-- off) is the same person: updated in place, ids kept, correction recorded.
+BEGIN;
+INSERT INTO public.jobs(id,org_id,status,type,job_number,client_name,client_phone,ghl_contact_id,xero_contact_id,site_address,site_suburb,archived,created_at)
+SELECT id,'00000000-0000-0000-0000-000000000001',status,'fencing',job_number,client_name,client_phone,ghl,xero,site_address,site_suburb,status='archived',created_at FROM sm1_jobs;
+DO $$
+DECLARE a jsonb; b jsonb; r record; e record; j uuid:='d633c895-7e10-4198-8e42-a3aeae475698';
+BEGIN
+ a:=public.upsert_job_party(j,'nb-1','{"client_name":"S4 Neighbour Party","client_phone":"+61 412 424 035","ghl_contact_id":"fxS4NeighbourGhl"}','contract');
+ b:=public.upsert_job_party(j,'nb-1','{"client_name":"S4 Neighbour Party","client_phone":"+61 412 424 036"}','contract');
+ IF b->>'outcome'<>'party_updated' OR b->>'job_contact_id'<>a->>'job_contact_id' OR b->>'source_party_key'<>'nb-1' OR b->>'label'<>a->>'label'
+ THEN RAISE EXCEPTION 's-m1 S4 corrected phone split the person %',b; END IF;
+ SELECT * INTO r FROM public.job_contacts WHERE id=(a->>'job_contact_id')::uuid;
+ IF r.status<>'active' OR r.ghl_contact_id<>'fxS4NeighbourGhl' OR r.phone_last9<>'412424036' THEN RAISE EXCEPTION 's-m1 S4 party %',to_jsonb(r); END IF;
+ IF (SELECT count(*) FROM public.job_contacts WHERE job_id=j)<>1 THEN RAISE EXCEPTION 's-m1 S4 a second party was inserted'; END IF;
+ SELECT * INTO e FROM public.job_party_events WHERE job_contact_id=r.id ORDER BY created_at DESC,id DESC LIMIT 1;
+ IF e.change<>'party_updated' OR e.detail#>>'{identity_correction,0,key}'<>'phone' OR e.detail#>>'{identity_correction,0,method}'<>'same_name'
+  OR e.detail#>>'{identity_correction,0,old}'=e.detail#>>'{identity_correction,0,new}' OR e.detail::text ~ '41242403|0412'
+ THEN RAISE EXCEPTION 's-m1 S4 correction receipt %',to_jsonb(e); END IF;
+ -- A different name and a different phone on the same key is someone else.
+ b:=public.upsert_job_party(j,'nb-1','{"client_name":"Someone Else Entirely","client_phone":"0433 111 222"}','contract');
+ IF b->>'outcome'<>'party_replaced' OR b->>'source_party_key'<>'nb-1#2' THEN RAISE EXCEPTION 's-m1 S4 other person not replaced %',b; END IF;
 END $$;
 ROLLBACK;
 
@@ -432,7 +514,10 @@ INSERT INTO public.business_events(id,event_type,source,channel,direction,occurr
  ('5e2e0000-0000-4000-8000-000000000002','client.sms_in','ghl-webhook-receiver','sms','inbound','2026-09-11 02:00:00+00','2026-09-11 02:00:00+00','Hs5b2slTC4DFGyLFRVkb','{"body":"Otto Quill said he will pay his share."}'),
  ('5e2e0000-0000-4000-8000-000000000003','client.sms_in','ghl-webhook-receiver','sms','inbound','2026-09-11 03:00:00+00','2026-09-11 03:00:00+00','Hs5b2slTC4DFGyLFRVkb','{"body":"Otto from 1/378 is fine with it."}'),
  ('5e2e0000-0000-4000-8000-000000000004','client.sms_in','ghl-webhook-receiver','sms','inbound','2026-09-11 04:00:00+00','2026-09-11 04:00:00+00','TmrZbGpqRWqpqtHyCtAv','{"body":"The post near the corner, that would be 378a."}'),
- ('5e2e0000-0000-4000-8000-000000000005','client.sms_in','ghl-webhook-receiver','sms','inbound','2026-09-11 05:00:00+00','2026-09-11 05:00:00+00','fxSharedGhl','{"body":"Checking in about the fence, paid $500 on 21/9."}');
+ ('5e2e0000-0000-4000-8000-000000000005','client.sms_in','ghl-webhook-receiver','sms','inbound','2026-09-11 05:00:00+00','2026-09-11 05:00:00+00','fxSharedGhl','{"body":"Checking in about the fence, paid $500 on 21/9."}'),
+ -- System rows on the same job are not messages.
+ ('5e2e0000-0000-4000-8000-000000000006','job.status_changed','ops-api','status','system','2026-09-12 01:00:00+00','2026-09-12 01:00:00+00',NULL,'{"changes":{"status":{"to":"invoiced"}}}'),
+ ('5e2e0000-0000-4000-8000-000000000007','quote.sent','send-quote',NULL,NULL,'2026-09-12 02:00:00+00','2026-09-12 02:00:00+00','Hs5b2slTC4DFGyLFRVkb','{"document_id":"fx"}');
 UPDATE public.business_events SET job_id='ad84e193-83b8-446b-bafd-d720b9d9d204' WHERE id::text LIKE '5e2e0000-%';
 DO $$
 DECLARE r record;
@@ -456,6 +541,9 @@ BEGIN
  IF r.party_match<>'ambiguous' OR cardinality(r.ambiguous_job_contact_ids)<>2 OR r.job_contact_id IS NOT NULL OR r.mentions_unmatched<>'{}'
  THEN RAISE EXCEPTION 's-m1 shared identity %',to_jsonb(r); END IF;
  IF (SELECT count(*) FROM public.context_job_event_parties('ad84e193-83b8-446b-bafd-d720b9d9d204'))<>5 THEN RAISE EXCEPTION 's-m1 row count'; END IF;
+ IF EXISTS (SELECT 1 FROM public.context_job_event_parties('ad84e193-83b8-446b-bafd-d720b9d9d204')
+   WHERE event_id IN ('5e2e0000-0000-4000-8000-000000000006','5e2e0000-0000-4000-8000-000000000007'))
+ THEN RAISE EXCEPTION 's-m1 status change or quote.sent returned as a message'; END IF;
 END $$;
 ROLLBACK;
 

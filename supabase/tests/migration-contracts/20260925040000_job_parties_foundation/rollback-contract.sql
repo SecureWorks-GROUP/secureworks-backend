@@ -15,6 +15,8 @@ BEGIN
  THEN RAISE EXCEPTION 's-m1 rollback: empty columns kept'; END IF;
  IF has_table_privilege('anon','public.job_contacts','TRUNCATE') OR has_table_privilege('authenticated','public.job_contacts','SELECT')
  THEN RAISE EXCEPTION 's-m1 rollback reopened job_contacts to the public key'; END IF;
+ IF has_table_privilege('anon','public.run_summary','SELECT') OR has_table_privilege('authenticated','public.run_summary','SELECT')
+ THEN RAISE EXCEPTION 's-m1 rollback reopened run_summary to the public key'; END IF;
  IF (SELECT count(*) FROM public.job_contacts WHERE job_id='1694c4a9-4641-4e74-ba8b-78b2e54b8d1d')<>2 THEN RAISE EXCEPTION 's-m1 rollback lost rows'; END IF;
  -- The composer still reads the null block.
  IF public.context_pipeline_status()->'parties'<>'null'::jsonb THEN RAISE EXCEPTION 's-m1 rollback composer'; END IF;
