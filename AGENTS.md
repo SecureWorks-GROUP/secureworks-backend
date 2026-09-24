@@ -633,6 +633,18 @@ rest the row as `unplaced`, attribution asks are recorded per row with backoff
 and capped at 60 of the 400 daily calls (`20260924060000`). Contract and the
 three-argument call (no outcome argument): `docs/context/a1-attribution-attempts.md`.
 
+## The Luna Door Is The Only Keyless Way To The Extraction Path
+
+`ops-api?action=luna_door` (`luna_door.ts`) lets a reader with no database key
+run the Luna worker's extraction calls: `OPS_AGENT_SERVER_KEY` only (never the
+browser-distributed `SW_API_KEY`), a required `luna-local:` actor, and a closed
+op list where each op is one fixed rpc or select equal to the worker's own.
+Caps, leases and the custody write stay in the SQL functions; the door only
+adds the pass-lease and tick bound before a claim and the held-run check before
+a job read. Never add an op that takes a table, column, filter or rpc name from
+the caller, and never expose the attribution phase. Contract and op list:
+`docs/context/luna-door.md`.
+
 ## Placement Keys Are One Rule In Two Languages; Never Index `jobs` On A Revoked Function
 
 `20260924183000_context_unlinked_census.sql` (slice B0) owns the placement

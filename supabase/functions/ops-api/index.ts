@@ -1200,6 +1200,7 @@ import {
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
+import { LUNA_DOOR_ACTION, LunaDoorError, authorizeLunaDoor, runLunaDoor, supabaseLunaDoorDb } from './luna_door.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -4979,6 +4980,37 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     auditAction = action
     console.log(opsApiRequestLogLine(action, req.method, requestActor))
     recordOpsApiActorMissing(sb, authMode, requestActor)
+
+    // ── Luna door (docs/context/luna-door.md) ──
+    // The local context reader's only way to the extraction path. Checked and
+    // dispatched here, before any other branch, so no other credential class
+    // or handler can ever serve it: OPS_AGENT_SERVER_KEY alone, a trusted
+    // `luna-local:` actor, POST, and a closed op list of fixed database calls.
+    if (action === LUNA_DOOR_ACTION) {
+      try {
+        authorizeLunaDoor({
+          method: req.method,
+          credential: {
+            xApiKey,
+            bearerToken,
+            agentServerKey,
+            sharedKey: validKey,
+            serviceKey,
+            routineKey,
+          },
+          actor: requestActor,
+        })
+        let lunaBody: unknown = null
+        try { lunaBody = await req.json() } catch { lunaBody = null }
+        return json(await runLunaDoor(supabaseLunaDoorDb(sb()), lunaBody))
+      } catch (error) {
+        if (error instanceof LunaDoorError) {
+          console.log(`[ops-api] luna_door refused actor=${requestActor.actor} status=${error.status} code=${error.code}`)
+          return json({ error: error.message, code: error.code }, error.status)
+        }
+        throw error
+      }
+    }
 
     if (authMode === 'agent_read') {
       // ── Scoped headless agent READ allow-list ──
