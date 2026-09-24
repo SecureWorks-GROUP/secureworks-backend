@@ -63,7 +63,14 @@ import {
 } from "../ghl-proxy/calendar_events.ts";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
 import {
+  applySalesBookingScopeAppointments,
+  readSalesBookingScopeCalendars,
+  type SalesBookingScopeAppointment,
+  type SalesBookingScopeCalendarReader,
+} from "./sales_booking_scope_appointment.ts";
+import {
   SALES_BOOKING_SENDER_LINES,
+  salesBookingLeadIsStratco,
   salesBookingLeadOwner,
   salesBookingLineLabel,
   type SalesBookingOpportunityOwnership,
@@ -125,13 +132,14 @@ export interface SalesBookingResource {
    */
   scope_stage_ids: readonly string[];
   /**
-   * Whether an unassigned lead in this pipeline is this person's. A lead is
-   * on a person's list only when its current GHL assignee is that person, or
-   * it is unassigned and this is true (`salesBookingLeadBelongsTo`). Khairo
-   * and Stratco share the fencing pipeline, so a lead never shows on the
-   * wrong person's list and never gets a text from the wrong line.
+   * Which unassigned leads in this pipeline are this person's: `all`, only
+   * Stratco ones, or only the non-Stratco ones. A lead is on a person's list
+   * only when its current GHL assignee is that person, or it is unassigned
+   * and this admits it (`salesBookingLeadBelongsTo`). Khairo and Stratco
+   * share the fencing pipeline, so a lead never shows on the wrong person's
+   * list and never gets a text from the wrong line.
    */
-  owns_unassigned: boolean;
+  owns_unassigned: "all" | "stratco" | "not_stratco";
 }
 
 /**
@@ -178,7 +186,7 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "9b9e5313-8e0e-4ed6-8654-d50413b99885", // Scope Complete / Quote to be Sent
     ],
     // An unassigned patio lead is Nithin's.
-    owns_unassigned: true,
+    owns_unassigned: "all",
   },
   marnin: {
     resource_id: "marnin",
@@ -201,8 +209,9 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
-    // An unassigned fencing (Stratco) lead is Marnin's.
-    owns_unassigned: true,
+    // An unassigned Stratco fencing lead is Marnin's (owner 2026-09-24:
+    // "all stratco fencing is mine").
+    owns_unassigned: "stratco",
   },
   khairo: {
     resource_id: "khairo",
@@ -223,8 +232,9 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
-    // Only leads GHL assigns to him; an unassigned fencing lead is Stratco's.
-    owns_unassigned: false,
+    // Every unassigned fencing lead that is not Stratco (owner 2026-09-24:
+    // "khairo is all normal fencing"), plus leads GHL assigns to him.
+    owns_unassigned: "not_stratco",
   },
 };
 
@@ -817,6 +827,12 @@ export interface SalesBookingCase {
   /** Latest engine pack row for this opportunity, or null when no pack matched. */
   proposal: SalesBookingCaseProposal | null;
   stamp_state: SalesBookingStampState;
+  /**
+   * The lead's live future scope visit in ANY booking person's GHL calendar,
+   * else null (sales_booking_scope_appointment.ts). Present means booked with
+   * that person: off every to-contact list. Absent when the check did not run.
+   */
+  scope_appointment?: SalesBookingScopeAppointment | null;
 }
 
 /** A contact whose "name" is really a phone number is an unnamed enquiry. */
@@ -1253,14 +1269,16 @@ export function projectSalesBookingCase(
 
 /**
  * Whether an opportunity with this GHL assignee is `resourceId`'s lead: its
- * assignee is that person, or it is unassigned in a pipeline whose unassigned
- * leads are theirs. The read list, both approval routes and the send check
- * all ask this one question.
+ * assignee is that person, or it is unassigned and that person owns the
+ * pipeline's unassigned leads of its kind (Stratco fencing Marnin, other
+ * fencing Khairo, patio Nithin). The read list, both approval routes and the
+ * send check all ask this one question.
  */
 export function salesBookingLeadBelongsTo(
   assignedTo: unknown,
   resourceId: string,
   pipelineId: string,
+  stratco: boolean,
 ): boolean {
   const resource = Object.hasOwn(SALES_BOOKING_RESOURCES, resourceId)
     ? SALES_BOOKING_RESOURCES[resourceId]
@@ -1268,7 +1286,9 @@ export function salesBookingLeadBelongsTo(
   if (!resource) return false;
   const unassignedOwner =
     Object.values(SALES_BOOKING_RESOURCES).find((row) =>
-      row.pipeline_id === pipelineId && row.owns_unassigned
+      row.pipeline_id === pipelineId &&
+      (row.owns_unassigned === "all" ||
+        row.owns_unassigned === (stratco ? "stratco" : "not_stratco"))
     )?.resource_id ?? null;
   return salesBookingLeadOwner(
     assignedTo,
@@ -1999,6 +2019,9 @@ export interface SalesBookingReadResponse {
     calendar: SalesBookingCalendarOverlay;
   };
   booking_flow?: BookingObject;
+  /** Contact id -> live future scope visit in any booking person's GHL
+   * calendar (sales_booking_scope_appointment.ts). Absent when not checked. */
+  scope_appointments?: Record<string, SalesBookingScopeAppointment>;
   booked_visits?: BookingObject[] | null;
   visit_outcomes?: import("./visit_outcomes.ts").VisitOutcome[] | null;
   coverage: {
@@ -2340,6 +2363,8 @@ export interface SalesBookingReadDependencies {
     opportunityId: string,
     opts: { deadlineMs: number },
   ): Promise<SalesBookingOpportunityOwnership>;
+  /** One booking person's GHL calendar, for the booked-elsewhere check. */
+  readScopeCalendar?: SalesBookingScopeCalendarReader;
   now(): Date;
   loadThreadFactsCache?(
     resourceId: string,
@@ -2682,6 +2707,15 @@ export async function salesBookingRead(
     resource.resource_id,
     scoperUserId,
   );
+  // Booked-elsewhere check: every booking person's GHL calendar, read beside
+  // the roster and diary so it costs no extra wall clock.
+  const scopeCalendars = deps.readScopeCalendar
+    ? readSalesBookingScopeCalendars({
+      read: deps.readScopeCalendar,
+      nowMs: deps.now().getTime(),
+      deadlineMs,
+    })
+    : null;
   const [resolved, diary, outlook] = await Promise.all([
     rosterFresh && cachedRoster
       ? Promise.resolve({
@@ -2725,6 +2759,7 @@ export async function salesBookingRead(
       ownership.assignedTo,
       resource.resource_id,
       ownership.pipelineId,
+      ownership.stratco,
     );
   const cachedCandidates = new Set<string>();
   for (const raw of opportunities.opportunities) {
@@ -2737,6 +2772,7 @@ export async function salesBookingRead(
           pipelineId: typeof live.pipelineId === "string"
             ? live.pipelineId
             : resource.pipeline_id,
+          stratco: salesBookingLeadIsStratco(live),
         })
       ) ownedIds.add(raw.id);
     } else if (
@@ -2890,6 +2926,15 @@ export async function salesBookingRead(
     threads,
     excludedByStage,
   });
+  if (scopeCalendars) {
+    const booked = applySalesBookingScopeAppointments(
+      response.cases,
+      await scopeCalendars,
+      deps.now().getTime(),
+    );
+    response.scope_appointments = booked.by_contact;
+    response.coverage.gaps.push(...booked.gaps);
+  }
   if (ownershipUnread > 0) {
     response.coverage.full_population = false;
     response.coverage.gaps.push(
@@ -2938,8 +2983,9 @@ export async function readSalesBookingOpportunityOwnership(
     !Object.hasOwn(opportunity, "assignedTo") ||
     typeof opportunity.pipelineId !== "string" || !opportunity.pipelineId.trim()
   ) throw new Error("opportunity_assignment_unreadable");
+  const stratco = salesBookingLeadIsStratco(opportunity);
   if (opportunity.assignedTo === null || opportunity.assignedTo === "") {
-    return { assignedTo: null, pipelineId: opportunity.pipelineId };
+    return { assignedTo: null, pipelineId: opportunity.pipelineId, stratco };
   }
   if (
     typeof opportunity.assignedTo !== "string" || !opportunity.assignedTo.trim()
@@ -2949,6 +2995,7 @@ export async function readSalesBookingOpportunityOwnership(
   return {
     assignedTo: opportunity.assignedTo,
     pipelineId: opportunity.pipelineId,
+    stratco,
   };
 }
 
@@ -3699,6 +3746,22 @@ export function createSalesBookingReadDependencies(
     },
     readOpportunityOwnership: (id, { deadlineMs }) =>
       readSalesBookingOpportunityOwnership(id, { ...retry, deadlineMs }),
+    readScopeCalendar: ({ ghlUserId, startMs, endMs, deadlineMs }) =>
+      fetchGhlCalendarEvents({
+        ghlGet: (path) =>
+          ghlRead(path, {
+            signal: AbortSignal.timeout(
+              Math.max(
+                1,
+                Math.min(10_000, (deadlineMs ?? Infinity) - Date.now()),
+              ),
+            ),
+          }, { ...retry, deadlineMs }),
+        locationId: Deno.env.get("GHL_LOCATION_ID") || "",
+        userId: ghlUserId,
+        startMs,
+        endMs,
+      }),
     readContacts: (contactIds, opts) => {
       if (opts?.deadlineMs != null) retry.deadlineMs = opts.deadlineMs;
       return readContactsLive(contactIds, retry);

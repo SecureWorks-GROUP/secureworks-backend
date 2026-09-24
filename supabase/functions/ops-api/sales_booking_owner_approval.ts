@@ -747,6 +747,7 @@ export async function salesBookingOwnerApprovalAction(args: {
         ownership.assignedTo,
         input.resource,
         ownership.pipelineId,
+        ownership.stratco,
       )
     ) {
       refuse("lead_assigned_to_someone_else", {

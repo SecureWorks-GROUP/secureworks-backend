@@ -210,9 +210,9 @@ what it can take (`["message","calendar"]` on Stratco, `["message"]` else).
 
 Whose lead it is: the opportunity's current GHL assignee, read live at every
 approval (both routes, including the owner preview) and again at send. A lead
-assigned to Nithin or Khairo is only theirs; one assigned to Marnin, or
-unassigned in the Stratco pipeline, is Marnin's; an unassigned patio lead is
-Nithin's. Otherwise `lead_assigned_to_someone_else`; an unreadable assignee
+assigned to someone is only theirs. Unassigned, a Stratco fencing lead is
+Marnin's, any other fencing lead Khairo's, a patio lead Nithin's
+(`salesBookingLeadBelongsTo`, owner 2026-09-24). Otherwise `lead_assigned_to_someone_else`; an unreadable assignee
 refuses `opportunity_assignment_unreadable`. The people, their GHL users and
 lines are one table, `sales_booking_sender.ts`. The approvals table accepts
 `marnin`, `nithin` and `khairo` from migration

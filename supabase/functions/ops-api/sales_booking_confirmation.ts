@@ -709,6 +709,7 @@ export async function assertLeadBelongsToResource(
       ownership.assignedTo,
       resource,
       ownership.pipelineId,
+      ownership.stratco,
     )
   ) {
     fail("lead_assigned_to_someone_else");
