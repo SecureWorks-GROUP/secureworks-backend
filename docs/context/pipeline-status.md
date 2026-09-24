@@ -64,13 +64,16 @@ alarms only while the flag is on (missing or unreadable reads as off).
 `quiet` stays the measured fact; the alarm needs `quiet` and no exemption.
 Both lists are in the policy (`retired_sources`, `flag_gated_sources`).
 
-`ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`):
+`ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`, with
+the retry projection follow-up `20260924210000_context_ghl_retry_status.sql`):
 the item flag `ghl_message_capture_v2` (a missing row reads off) and the
 capture lane; GHL webhooks in 24 h by outcome and by auth and mode, last
 webhook and last app webhook, unresolved ids (from the receiver's ids-only
 `webhook_log` receipts); the reconciler's last run, last finished
 (`succeeded` or `partial`) run, watermark, backlog, webhook misses and write
 errors in 24 h (from `context_capture_runs`, source `ghl_message_reconcile`).
+The latest run's pending retry coordinate is `reconciler.retry_from`; it stays
+visible until a complete retry read clears it.
 Alarms: `ghl_webhooks_quiet` (no app webhook for 120 business minutes) and
 `ghl_reconcile_stale` (no finished `succeeded` or `partial` run for 45
 minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high`
@@ -194,6 +197,8 @@ the same fixtures, and pins `ready_jobs` to the candidates count),
 (K1 cadence block, due rule, and ready-job count),
 `supabase/tests/migration-contracts/20260924133000_context_ghl_message_reconcile`
 (C1d `ghl_capture` block, item flag, cron, and lane list), and
+`supabase/tests/migration-contracts/20260924210000_context_ghl_retry_status`
+(the latest retry coordinate in the reconciler status block and composer), and
 `supabase/tests/migration-contracts/20260924152100_context_status_f1b`
 (F1b composer stubs, `window_end_id`, and the freshness source swap).
 Deno: `supabase/functions/ops-api/context_pipeline_test.ts`.
