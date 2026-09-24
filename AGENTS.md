@@ -3881,7 +3881,7 @@ key on an anchored party with a different identity retires the old party and
 inserts `<key>#<n>` instead of rewriting a person; the same name words are
 the same person, so a corrected phone or email updates in place. With no
 portions the owner's share is 100 only while no neighbour is active, else
-null. The owner party mirrors
+null; a neighbour's is null, never 0 or the column default 50. The owner party mirrors
 `jobs` one way (AFTER UPDATE trigger `job_contacts_owner_mirror`, only once
 the owner row is keyed `primary`): `jobs` owns the owner's contact, a null
 never overwrites a set id (flag `owner_id_divergence`). Every call writes one
