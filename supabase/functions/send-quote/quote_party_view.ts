@@ -62,17 +62,14 @@ export function quoteRunAcceptanceDecision(
     }
   })
   const runDocs = qualifiedDocs.filter((document) =>
-    quotePartyKey(document).runLabel === normaliseQuoteRunLabel(runLabel) && isLiveSent(document)
+    quotePartyKey(document).runLabel === normaliseQuoteRunLabel(runLabel)
   )
   const runParties = new Set(runDocs.map((document) => JSON.stringify(quotePartyKey(document))))
   const hasRequiredParties = neighbourId
     ? runParties.size >= 2 && runDocs.some((document) => document.job_contact_id === neighbourId)
     : runParties.size >= 1
   const runAccepted = hasRequiredParties && everyQuotePartyAccepted(runDocs)
-  const requiredPartiesAccepted = acceptances.every((acceptance) =>
-    !!currentQuoteForParty(qualifiedDocs, acceptance)?.accepted_at
-  )
-  const jobAccepted = runAccepted && requiredPartiesAccepted && everyQuotePartyAccepted(qualifiedDocs)
+  const jobAccepted = runAccepted && everyQuotePartyAccepted(qualifiedDocs, acceptances)
   const anyDecision = qualifiedDocs.some((document) =>
     isLiveSent(document) && (document.accepted_at || document.declined_at)
   )
@@ -180,17 +177,25 @@ export function quoteDocumentAcceptable(
   jobLiveDocs: QuotePartyDocument[],
 ): boolean {
   if (quoteDocumentIsSuperseded(doc)) return false
-  if (quotePartyKey(doc).runLabel === null) return true
+  if (quotePartyKey(doc).runLabel === null) {
+    return !(jobLiveDocs || []).some((other) =>
+      other.id !== doc.id && sameQuoteParty(other, doc) && isLiveSent(other) && !!other.accepted_at
+    )
+  }
   const current = currentQuoteForParty([doc, ...(jobLiveDocs || [])], doc)
   return !current || current.id === doc.id
 }
 
 export function everyQuotePartyAccepted(
   docs: QuotePartyDocument[],
+  requiredParties: Array<{ job_contact_id?: string | null; run_label?: string | null }> = [],
 ): boolean {
   const byParty = new Map<string, QuotePartyDocument[]>()
+  for (const party of requiredParties) {
+    byParty.set(JSON.stringify(quotePartyKey(party)), [])
+  }
   for (const d of docs || []) {
-    if (quoteDocumentIsSuperseded(d) || !quoteDocumentHasClientSend(d)) continue
+    if (quoteDocumentIsSuperseded(d)) continue
     const party = JSON.stringify(quotePartyKey(d))
     const partyDocs = byParty.get(party) || []
     partyDocs.push(d)
@@ -198,10 +203,11 @@ export function everyQuotePartyAccepted(
   }
   if (byParty.size === 0) return false
   for (const partyDocs of byParty.values()) {
+    if (!partyDocs.length) return false
     if (quotePartyKey(partyDocs[0]).runLabel !== null) {
       const current = currentQuoteForParty(partyDocs, partyDocs[0])
       if (!current?.accepted_at) return false
-    } else if (!partyDocs.some((d) => d.accepted_at)) {
+    } else if (!partyDocs.some((d) => isLiveSent(d) && d.accepted_at)) {
       return false
     }
   }

@@ -413,6 +413,30 @@ Deno.test('current party decisions agree across view, accept, status and deposit
       current: 'old', view: 'single', acceptable: true,
     },
     {
+      name: 'R9 whole quote with unpublished neighbour cannot complete the job',
+      docs: [
+        make('old', { run_label: null }),
+        make('neighbour', { run_label: null, job_contact_id: 'neighbour', sent_to_client: false, sent_at: null }),
+      ],
+      current: 'old', view: 'single', acceptable: true, acceptedAfterWrite: false,
+    },
+    {
+      name: 'R10 replacement is acceptable after accepted predecessor retires',
+      docs: [
+        make('new', { run_label: null, sent_at: late }),
+        make('old', { run_label: null, accepted_at: early, superseded_at: late }),
+      ],
+      current: 'new', view: 'single', acceptable: true, acceptedAfterWrite: true,
+    },
+    {
+      name: 'R10 live accepted alternative still blocks competing option',
+      docs: [
+        make('old', { run_label: null }),
+        make('new', { run_label: null, accepted_at: early, sent_at: late }),
+      ],
+      current: 'new', view: 'options', acceptable: false,
+    },
+    {
       name: 'same-send whole-quote options stay acceptable',
       docs: [make('old', { run_label: null, accepted_at: early }), make('new', { run_label: null })],
       current: 'old', view: 'options', acceptable: true,
@@ -442,6 +466,12 @@ Deno.test('current party decisions agree across view, accept, status and deposit
     assertEquals(currentQuoteForParty(scenario.docs, linked)?.id, scenario.current, scenario.name)
     assertEquals(quoteViewDecision(linked, scenario.docs).kind, scenario.view, scenario.name)
     assertEquals(quoteDocumentAcceptable(linked, scenario.docs), scenario.acceptable, scenario.name)
+    if ('acceptedAfterWrite' in scenario) {
+      const afterWrite = scenario.docs.map((document) =>
+        document.id === linked.id ? { ...document, accepted_at: late } : document
+      )
+      assertEquals(everyQuotePartyAccepted(afterWrite), scenario.acceptedAfterWrite, scenario.name)
+    }
     const acceptances = scenario.docs.map((document) => ({
       job_document_id: document.id,
       job_contact_id: document.job_contact_id ?? null,

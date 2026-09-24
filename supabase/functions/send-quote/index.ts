@@ -1645,17 +1645,23 @@ serve(async (req: Request) => {
         // Sibling options for the SAME recipient: match job_contact_id null-to-null
         // so we never read another contact's / neighbour's options.
         let siblingQuery = sb.from('job_documents')
-          .select('id, accepted_at')
+          .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .is('run_label', null)
           .neq('id', doc.id)
           .not('accepted_at', 'is', null)
+          .is('superseded_at', null)
         siblingQuery = doc.job_contact_id
           ? siblingQuery.eq('job_contact_id', doc.job_contact_id)
           : siblingQuery.is('job_contact_id', null)
-        const { data: acceptedSiblings } = await siblingQuery.limit(1)
-        if (acceptedSiblings && acceptedSiblings.length > 0) {
+        const { data: acceptedSiblings, error: acceptedSiblingsError } = await siblingQuery
+        if (acceptedSiblingsError) {
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
+        if (!quoteDocumentAcceptable(doc, acceptedSiblings || [])) {
           return new Response(
             errorPage('This option is no longer available — another option was already accepted.'),
             { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
@@ -1948,22 +1954,19 @@ serve(async (req: Request) => {
           .eq('job_id', doc.job_id)
 
         const isMultiContact = allContacts && allContacts.length > 1
-        let newStatus = 'accepted'
-
-        if (isMultiContact) {
-          const { data: allDocs } = await sb
-            .from('job_documents')
+        const [documentsRead, requiredPartiesRead] = await Promise.all([
+          sb.from('job_documents')
             .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
             .eq('job_id', doc.job_id)
-            .eq('type', 'quote')
-            .is('superseded_at', null)
-
-          if (everyQuotePartyAccepted(allDocs || [])) {
-            newStatus = 'accepted' // all contacts accepted
-          } else {
-            newStatus = 'partially_accepted' // some still pending
-          }
-        }
+            .eq('type', 'quote'),
+          sb.from('run_acceptances')
+            .select('job_contact_id, run_label')
+            .eq('job_id', doc.job_id),
+        ])
+        const newStatus = !documentsRead.error && !requiredPartiesRead.error &&
+            everyQuotePartyAccepted(documentsRead.data || [], requiredPartiesRead.data || [])
+          ? 'accepted'
+          : 'partially_accepted'
 
         await sb
           .from('jobs')
