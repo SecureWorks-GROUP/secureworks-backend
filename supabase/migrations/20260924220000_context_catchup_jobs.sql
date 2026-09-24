@@ -72,8 +72,9 @@ BEGIN
   ('public.context_cadence_status()',ARRAY['04a99b46fbdf6b6ac830602da6a92c3d','552d7971757d43624ec3667e3dc1fb99'],false),
   ('public.context_extraction_events(uuid,integer)',ARRAY['b808f4b6fb24515a337c149a6353edf8','68f6da2aac47cae91aa62a0420402d74'],false),
   ('public.context_extraction_event_flags(uuid,uuid[])',ARRAY['c384d748eca9b3b94ba6e54b26b781e5','5aedb3e5a7aa3286145079032e8e22f8'],false),
-  ('public.context_catchup_request(boolean)',ARRAY['00e528957da6f35f40b478db61dddaca','0c2ee37eb1cf37ee854210cc1d71871a'],true),
-  ('public.context_catchup_pending_rows(uuid[])',ARRAY['a0e09f635eff10a48fa51b40aef5bafd'],true),
+  ('public.context_catchup_request(boolean)',ARRAY['00e528957da6f35f40b478db61dddaca','0c2ee37eb1cf37ee854210cc1d71871a','3f9c8bfc00eec691d4fa2d88b2f98430'],true),
+  ('public.context_catchup_eligible_rows(uuid[])',ARRAY['d028f0366b62e828b43edb7bd650828b'],true),
+  ('public.context_catchup_pending_rows(uuid[])',ARRAY['a0e09f635eff10a48fa51b40aef5bafd','153a4a0e10b566445a029f0785c096ff'],true),
   ('public.context_catchup_record_read()',ARRAY['5420a6486bee3e03501200008aca6053'],true),
   ('public.context_catchup_mark_done()',ARRAY['f52e823ab347b0983bb561bcb951514d'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
@@ -122,19 +123,25 @@ ALTER TABLE public.context_catchup_reads ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.context_catchup_reads FROM PUBLIC,anon,authenticated;
 GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE public.context_catchup_reads TO service_role;
 
--- The rows a listed, not-yet-done job still has to read: the unread
--- definition (context_unread_rows) without its receipt clause, with the
--- catch-up read record in its place.
-CREATE OR REPLACE FUNCTION public.context_catchup_pending_rows(p_job_ids uuid[]) RETURNS SETOF public.business_events
+CREATE OR REPLACE FUNCTION public.context_catchup_eligible_rows(p_job_ids uuid[]) RETURNS SETOF public.business_events
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT e.* FROM public.business_events e
- JOIN public.context_catchup_jobs c ON c.job_id=e.job_id AND c.done_at IS NULL
  WHERE e.job_id=ANY(p_job_ids)
   AND public.context_linked_status(e.attribution_status)
   AND e.context_captured_at IS NOT NULL
   AND coalesce(e.metadata->>'written_as','service_role')='service_role'
   AND btrim(public.context_event_text(e))<>''
-  AND NOT EXISTS(SELECT 1 FROM public.context_catchup_reads r WHERE r.job_id=e.job_id AND r.event_id=e.id)
+$$;
+COMMENT ON FUNCTION public.context_catchup_eligible_rows(uuid[]) IS
+ 'Catch-up: readable, placed, worded business events eligible for a full read. Service role only.';
+
+-- The rows a listed, not-yet-done job still has to read, minus its catch-up
+-- read record.
+CREATE OR REPLACE FUNCTION public.context_catchup_pending_rows(p_job_ids uuid[]) RETURNS SETOF public.business_events
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ SELECT e.* FROM public.context_catchup_eligible_rows(p_job_ids) e
+ JOIN public.context_catchup_jobs c ON c.job_id=e.job_id AND c.done_at IS NULL
+ WHERE NOT EXISTS(SELECT 1 FROM public.context_catchup_reads r WHERE r.job_id=e.job_id AND r.event_id=e.id)
 $$;
 COMMENT ON FUNCTION public.context_catchup_pending_rows(uuid[]) IS
  'Catch-up: rows on listed, not-yet-done jobs that no catch-up read has covered, earlier receipts or not. Service role only.';
@@ -178,10 +185,7 @@ BEGIN
   WHERE j.status IN ('accepted','scheduled','in_progress') OR (j.status='quoted' AND j.quoted_at>=now()-interval '60 days')
  ), facts AS (
   SELECT l.*,
-   EXISTS(SELECT 1 FROM public.business_events e WHERE e.job_id=l.id AND public.context_linked_status(e.attribution_status)
-    AND e.context_captured_at IS NOT NULL
-    AND coalesce(e.metadata->>'written_as','service_role')='service_role'
-    AND btrim(public.context_event_text(e))<>'') AS has_evidence,
+   EXISTS(SELECT 1 FROM public.context_catchup_eligible_rows(ARRAY[l.id])) AS has_evidence,
    (SELECT max(r.finished_at) FROM public.context_extraction_runs r WHERE r.job_id=l.id AND r.phase='extraction' AND r.status='done') AS last_read,
    EXISTS(SELECT 1 FROM public.context_unread_rows(ARRAY[l.id])) AS has_unread
   FROM live l
@@ -462,10 +466,10 @@ COMMENT ON FUNCTION public.context_cadence_status() IS
 
 -- 8. Grants: service role only.
 REVOKE ALL ON FUNCTION public.context_catchup_request(boolean),public.context_catchup_mark_done(),public.context_catchup_record_read(),
- public.context_catchup_pending_rows(uuid[]),public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[]),
+ public.context_catchup_eligible_rows(uuid[]),public.context_catchup_pending_rows(uuid[]),public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[]),
  public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status()
 FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_catchup_request(boolean),
- public.context_catchup_pending_rows(uuid[]),public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[]),
+ public.context_catchup_eligible_rows(uuid[]),public.context_catchup_pending_rows(uuid[]),public.context_extraction_events(uuid,integer),public.context_extraction_event_flags(uuid,uuid[]),
  public.context_jobs_cadence(uuid[]),public.context_cadence_pool(),public.context_extraction_candidates(integer),public.context_cadence_status()
 TO service_role;

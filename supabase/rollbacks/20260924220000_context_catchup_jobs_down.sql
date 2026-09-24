@@ -1,8 +1,8 @@
 -- Down migration for 20260924220000_context_catchup_jobs.
 --
 -- Restores the four replaced functions to K1's bodies (20260924030000), byte
--- for byte (md5 checked at the end), and drops the catch-up writer, the
--- pending-rows read and both triggers. Kept on purpose (no data is lost):
+-- for byte (md5 checked at the end), and drops the catch-up writer, its row
+-- readers and both triggers. Kept on purpose (no data is lost):
 -- public.context_catchup_jobs and public.context_catchup_reads with their
 -- rows, the record of which jobs were listed, which rows were read and when.
 -- Nothing reads it after this rollback, and a re-apply resumes from it.
@@ -208,6 +208,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
 $$;
 
 DROP FUNCTION IF EXISTS public.context_catchup_pending_rows(uuid[]);
+DROP FUNCTION IF EXISTS public.context_catchup_eligible_rows(uuid[]);
 
 DO $$
 DECLARE x record; live text;

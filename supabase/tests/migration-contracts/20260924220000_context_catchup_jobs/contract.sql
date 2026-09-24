@@ -62,7 +62,7 @@ CREATE FUNCTION pg_temp.cu_today() RETURNS date LANGUAGE sql AS $$ SELECT (now()
 DO $$
 DECLARE f regprocedure; t regclass;
 BEGIN
- FOREACH f IN ARRAY ARRAY['public.context_catchup_request(boolean)','public.context_catchup_pending_rows(uuid[])','public.context_jobs_cadence(uuid[])','public.context_cadence_pool()',
+ FOREACH f IN ARRAY ARRAY['public.context_catchup_request(boolean)','public.context_catchup_eligible_rows(uuid[])','public.context_catchup_pending_rows(uuid[])','public.context_jobs_cadence(uuid[])','public.context_cadence_pool()',
   'public.context_extraction_candidates(integer)','public.context_extraction_events(uuid,integer)','public.context_extraction_event_flags(uuid,uuid[])',
   'public.context_cadence_status()']::regprocedure[] LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') OR NOT has_function_privilege('service_role',f,'EXECUTE')
@@ -172,6 +172,11 @@ BEGIN
  IF (w->'written'->>'added')::int<>0 OR (w->'written'->>'priority_raised')::int<>1 OR (w->'written'->>'already_done')::int<>1 OR (w->'written'->>'already_listed')::int<2
   OR (SELECT priority FROM public.context_catchup_jobs WHERE job_id=b)<>1 OR (SELECT done_at FROM public.context_catchup_jobs WHERE job_id=a) IS NULL
  THEN RAISE EXCEPTION 'catch-up second write %',w; END IF;
+ PERFORM pg_temp.cu_list(uncaptured,2);
+ PERFORM pg_temp.cu_list(untrusted,2);
+ IF EXISTS(SELECT 1 FROM public.context_catchup_eligible_rows(ARRAY[uncaptured,untrusted]))
+  OR EXISTS(SELECT 1 FROM public.context_catchup_pending_rows(ARRAY[uncaptured,untrusted]))
+ THEN RAISE EXCEPTION 'catch-up row readers accepted evidence outside the shared eligibility set'; END IF;
 END $$;
 ROLLBACK;
 

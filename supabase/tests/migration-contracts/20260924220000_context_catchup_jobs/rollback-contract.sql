@@ -7,9 +7,10 @@ DECLARE j uuid:=gen_random_uuid(); e uuid;
 BEGIN
  IF to_regprocedure('public.context_catchup_request(boolean)') IS NOT NULL OR to_regprocedure('public.context_catchup_mark_done()') IS NOT NULL
   OR to_regprocedure('public.context_catchup_record_read()') IS NOT NULL OR to_regprocedure('public.context_catchup_pending_rows(uuid[])') IS NOT NULL
+  OR to_regprocedure('public.context_catchup_eligible_rows(uuid[])') IS NOT NULL
   OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.context_extraction_runs'::regclass AND tgname='context_catchup_mark_done')
   OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.context_extraction_event_receipts'::regclass AND tgname='context_catchup_record_read')
- THEN RAISE EXCEPTION 'catch-up rollback left the writer, the pending read or a trigger'; END IF;
+ THEN RAISE EXCEPTION 'catch-up rollback left its writer, row readers or a trigger'; END IF;
  IF to_regclass('public.context_catchup_jobs') IS NULL OR to_regclass('public.context_catchup_reads') IS NULL
  THEN RAISE EXCEPTION 'catch-up rollback dropped the list or the read record'; END IF;
  IF public.context_cadence_status() ? 'catchup' THEN RAISE EXCEPTION 'catch-up rollback status still has the block'; END IF;
