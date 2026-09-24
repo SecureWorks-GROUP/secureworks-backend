@@ -20,6 +20,7 @@ import {
 
 export type QuotePartyDocument = {
   id: string
+  data_snapshot_json?: { run?: { run_label?: string | null } } | null
   job_contact_id?: string | null
   run_label?: string | null
   share_token?: string | null
@@ -33,7 +34,16 @@ export type QuotePartyDocument = {
   version?: number | null
 }
 
-export const QUOTE_PARTY_DOCUMENT_COLUMNS = 'id, job_contact_id, run_label, sent_to_client, sent_at, send_claimed_at, accepted_at, declined_at, superseded_at, created_at, version'
+export const QUOTE_PARTY_DOCUMENT_COLUMNS = 'id, job_contact_id, run_label, sent_to_client, sent_at, send_claimed_at, accepted_at, declined_at, superseded_at, created_at, version, data_snapshot_json'
+
+export function quoteDocumentRunLabel(doc: {
+  run_label?: string | null
+  data_snapshot_json?: { run?: { run_label?: string | null } } | null
+}): string | null {
+  const sourceLabel = doc.data_snapshot_json?.run?.run_label
+  if (typeof sourceLabel === 'string') return sourceLabel
+  return normaliseQuoteRunLabel(doc.run_label)
+}
 
 export type QuoteRunAcceptance = {
   job_document_id: string | null
@@ -53,7 +63,7 @@ export function quoteRunAcceptanceDecision(
     currentQuoteForParty(docs, acceptance)?.id === acceptance.job_document_id
   )
   const qualifiedDocs = docs.map((document) => {
-    if (quotePartyKey(document).runLabel === null) return document
+    if (quoteDocumentRunLabel(document) === null) return document
     const acceptance = currentAcceptances.find((row) => row.job_document_id === document.id)
     return {
       ...document,
@@ -152,10 +162,9 @@ export function quoteViewDecision(
   doc: QuotePartyDocument,
   jobLiveDocs: QuotePartyDocument[],
 ): QuoteViewDecision {
-  const key = quotePartyKey(doc)
   const partyDocs = [doc, ...(jobLiveDocs || []).filter((d) => d && d.id !== doc.id)]
     .filter((d) => sameQuoteParty(d, doc) && isLiveSent(d))
-  if (key.runLabel !== null) {
+  if (quoteDocumentRunLabel(doc) !== null) {
     const current = currentQuoteForParty(partyDocs, doc)
     if (current && current.id !== doc.id) return { kind: 'forward', current }
     return { kind: 'single' }
@@ -177,7 +186,7 @@ export function quoteDocumentAcceptable(
   jobLiveDocs: QuotePartyDocument[],
 ): boolean {
   if (quoteDocumentIsSuperseded(doc)) return false
-  if (quotePartyKey(doc).runLabel === null) {
+  if (quoteDocumentRunLabel(doc) === null) {
     return !(jobLiveDocs || []).some((other) =>
       other.id !== doc.id && sameQuoteParty(other, doc) && isLiveSent(other) && !!other.accepted_at
     )
@@ -204,7 +213,7 @@ export function everyQuotePartyAccepted(
   if (byParty.size === 0) return false
   for (const partyDocs of byParty.values()) {
     if (!partyDocs.length) return false
-    if (quotePartyKey(partyDocs[0]).runLabel !== null) {
+    if (partyDocs.some((document) => quoteDocumentRunLabel(document) !== null)) {
       const current = currentQuoteForParty(partyDocs, partyDocs[0])
       if (!current?.accepted_at) return false
     } else if (!partyDocs.some((d) => isLiveSent(d) && d.accepted_at)) {

@@ -39,6 +39,7 @@ import {
   everyQuotePartyAccepted,
   normaliseQuoteRunLabel,
   quoteDocumentAcceptable,
+  quoteDocumentRunLabel,
   quotePartyGreetingName,
   quoteViewRetryPage,
   quoteViewDecision,
@@ -1392,13 +1393,15 @@ serve(async (req: Request) => {
           .eq('id', doc.id)
       }
 
+      const sourceRunLabel = quoteDocumentRunLabel(doc)
+
       // Same-party siblings only. A link belongs to one party (job_contact_id,
       // run_label): it may show that party's A/B options, or forward an older
       // run duplicate to the party's current document, but never another
       // party's document or Accept button (quote_party_view.ts).
       if (doc.job_id) {
         let siblingQuery = sb.from('job_documents')
-          .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', quote_number, pdf_url, html_url, share_token, data_snapshot_json')
+          .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', quote_number, pdf_url, html_url, share_token')
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
@@ -1448,7 +1451,7 @@ serve(async (req: Request) => {
       }
 
       // Per-run fencing quote page (multi-neighbour)
-      if (doc.run_label && doc.jobs?.type === 'fencing') {
+      if (sourceRunLabel !== null && doc.jobs?.type === 'fencing') {
         // Load full job data for pricing_json
         const { data: fullJob } = await sb.from('jobs')
           .select('*, job_contacts(*)')
@@ -1457,7 +1460,7 @@ serve(async (req: Request) => {
 
         if (fullJob?.pricing_json?.runs) {
           const pj = typeof fullJob.pricing_json === 'string' ? JSON.parse(fullJob.pricing_json) : fullJob.pricing_json
-          const run = findQuoteRun(pj, doc.run_label)
+          const run = findQuoteRun(pj, sourceRunLabel)
           if (run) {
             // Determine viewer type: client or neighbour (based on job_contact_id)
             const isNeighbour = doc.job_contact_id && fullJob.job_contacts?.some(
@@ -1596,6 +1599,8 @@ serve(async (req: Request) => {
 
       if (error || !doc) return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
 
+      const sourceRunLabel = quoteDocumentRunLabel(doc)
+
       if (doc.accepted_at) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
       if (doc.declined_at) return jsonResponse({ error: 'Already declined' }, 400, corsHeaders)
 
@@ -1612,7 +1617,7 @@ serve(async (req: Request) => {
           { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
         )
       }
-      if (doc.job_id && doc.run_label) {
+      if (doc.job_id && sourceRunLabel !== null) {
         // A fence-run link is acceptable only when it is its party's CURRENT
         // document (same job_contact_id + run_label). Older duplicate run links
         // for the same person must not accept again or mint a second deposit.
@@ -1620,9 +1625,11 @@ serve(async (req: Request) => {
           .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
-          .eq('run_label', doc.run_label)
           .eq('sent_to_client', true)
           .is('superseded_at', null)
+        partyQuery = doc.run_label == null
+          ? partyQuery.is('run_label', null)
+          : partyQuery.eq('run_label', doc.run_label)
         partyQuery = doc.job_contact_id
           ? partyQuery.eq('job_contact_id', doc.job_contact_id)
           : partyQuery.is('job_contact_id', null)
@@ -1641,7 +1648,7 @@ serve(async (req: Request) => {
           )
         }
       }
-      if (doc.job_id && !doc.run_label) {
+      if (doc.job_id && sourceRunLabel === null) {
         // Sibling options for the SAME recipient: match job_contact_id null-to-null
         // so we never read another contact's / neighbour's options.
         let siblingQuery = sb.from('job_documents')
@@ -1683,7 +1690,7 @@ serve(async (req: Request) => {
       // so a primary client's accept does NOT supersede a NEIGHBOUR's quote
       // (different job_contact_id). run_label docs (per-run fencing) are never
       // touched — their lifecycle is the run state machine below.
-      if (doc.job_id && !doc.run_label) {
+      if (doc.job_id && sourceRunLabel === null) {
         let supersedeQuery = sb.from('job_documents')
           .update({ superseded_at: new Date().toISOString() })
           .eq('job_id', doc.job_id)
@@ -1785,8 +1792,8 @@ serve(async (req: Request) => {
       }
 
       // ── PER-RUN ACCEPTANCE (multi-neighbour fencing) ──
-      if (doc.run_label && doc.job_id) {
-        const runLabel = doc.run_label
+      if (sourceRunLabel !== null && doc.job_id) {
+        const runLabel = sourceRunLabel
         const contactId = doc.job_contact_id
 
         // Update run_acceptances

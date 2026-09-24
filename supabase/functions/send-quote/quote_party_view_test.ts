@@ -7,6 +7,7 @@ import {
   otherPartyRunDocumentIdsToRetire,
   type QuotePartyDocument,
   quoteDocumentAcceptable,
+  quoteDocumentRunLabel,
   quotePartyGreetingName,
   quotePartyKey,
   quoteViewDecision,
@@ -551,4 +552,45 @@ Deno.test('send-runs label table persists and links documents, acceptances and l
     assertEquals(findQuoteRun({ runs: [sourceRun] }, document.run_label), sourceRun)
     assertEquals(quoteRunDepositAmount(findQuoteRun({ runs: [sourceRun] }, document.run_label), true, 50), 100)
   }
+})
+
+Deno.test('snapshot routing keeps blank-labelled documents in the run view and acceptance flow', () => {
+  for (const label of ['', '   ', ' RHS ']) {
+    const run = { run_label: label, totals: { client_share_inc: 200, neighbour_share_inc: 100 } }
+    const client = doc('client', {
+      created_at: '2026-09-24T00:00:00Z',
+      job_contact_id: 'client', run_label: normaliseQuoteRunLabel(label),
+      data_snapshot_json: { run },
+    })
+    const neighbour = { ...client, id: 'neighbour', job_contact_id: 'neighbour' }
+    const sourceLabel = quoteDocumentRunLabel(client)
+    assertEquals(sourceLabel, label)
+    assertEquals(quoteViewDecision(client, [client, neighbour]).kind, 'single')
+    assertEquals(findQuoteRun({ runs: [run] }, sourceLabel), run)
+    assert(quoteDocumentAcceptable(client, [client, neighbour]))
+    const acceptedClient = { ...client, accepted_at: '2026-09-25T00:00:00Z' }
+    const acceptance = {
+      job_document_id: client.id, job_contact_id: client.job_contact_id!,
+      run_label: sourceLabel, status: 'accepted', accepted_at: acceptedClient.accepted_at,
+    }
+    const waiting = quoteRunAcceptanceDecision([acceptedClient, neighbour], [acceptance, {
+      job_document_id: neighbour.id, job_contact_id: neighbour.job_contact_id,
+      run_label: label, status: 'pending',
+    }], sourceLabel!, neighbour.job_contact_id)
+    assertEquals(waiting.jobStatus, 'partially_accepted')
+    assertEquals(waiting.depositAcceptances, [])
+    const completed = quoteRunAcceptanceDecision([acceptedClient, {
+      ...neighbour, accepted_at: acceptedClient.accepted_at,
+    }], [acceptance, {
+      job_document_id: neighbour.id, job_contact_id: neighbour.job_contact_id,
+      run_label: label, status: 'accepted', accepted_at: acceptedClient.accepted_at,
+    }], sourceLabel!, neighbour.job_contact_id)
+    assertEquals(completed.jobStatus, 'accepted')
+    assertEquals(completed.depositAcceptances.length, 2)
+    assert(completed.depositAcceptances.every((row) => row.run_label === label))
+    const replacement = { ...client, id: 'replacement', version: 2 }
+    assertEquals(quoteViewDecision(client, [client, replacement]).kind, 'forward')
+    assert(!quoteDocumentAcceptable(client, [client, replacement]))
+  }
+  assertEquals(quoteDocumentRunLabel({ run_label: null }), null)
 })
