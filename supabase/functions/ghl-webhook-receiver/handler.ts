@@ -13,7 +13,8 @@ import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // writes nothing itself and reads the caller's conversation, so the call is
 // saved once as client.call_logged through the builder. CustomerReplied (a GHL
 // workflow post for an inbound text) is the same doorbell behind the same flag;
-// off, it writes nothing. The other legacy
+// off, it writes nothing. UserReplied (a staff reply) is that doorbell too, and
+// reads the post's conversation id when it names one. The other legacy
 // workflow posts (AppointmentCreated, NoteAdded, ContactStageChanged) keep
 // their existing rows until their own slices replace them. The receiver never
 // picks a job: the database ladder
@@ -45,6 +46,7 @@ import {
   customerRepliedDoorbell,
   isCapturedEventType,
   messageCaptureEnabled,
+  userRepliedDoorbell,
 } from "./capture.ts";
 import { GHL_RECORD_EVENT_TYPES } from "../_shared/evidence/ghl_message.ts";
 import {
@@ -368,6 +370,7 @@ const SUPPORTED_TYPES: string[] = [
   ...GHL_RECORD_EVENT_TYPES,
   "CallCompleted",
   "CustomerReplied",
+  "UserReplied",
   "AppointmentCreated",
   "NoteAdded",
   "ContactStageChanged",
@@ -686,24 +689,21 @@ export async function handleGhlWebhook(
     // ── CallCompleted while live capture is on: a doorbell only (slice T1) ──
     // Off, missing or unreadable, the legacy client.call_complete row below is
     // written as today, so calls reach the job read before live capture.
-    // CustomerReplied is always a doorbell and has no legacy row: flag off, it
-    // writes nothing (capture_disabled, flag_off).
+    // CustomerReplied and UserReplied are always doorbells and have no legacy
+    // row: flag off, they write nothing (capture_disabled, flag_off).
     if (
-      type === "CustomerReplied" ||
+      type === "CustomerReplied" || type === "UserReplied" ||
       (type === "CallCompleted" && await messageCaptureEnabled(supabase))
     ) {
+      const doorbellDeps = { env: deps.env, fetch: fetchImpl };
       const rung = type === "CustomerReplied"
-        ? await customerRepliedDoorbell(supabase, body, {
-          env: deps.env,
-          fetch: fetchImpl,
-        })
-        : await callCompletedDoorbell(supabase, body, {
-          env: deps.env,
-          fetch: fetchImpl,
-        });
+        ? await customerRepliedDoorbell(supabase, body, doorbellDeps)
+        : type === "UserReplied"
+        ? await userRepliedDoorbell(supabase, body, doorbellDeps)
+        : await callCompletedDoorbell(supabase, body, doorbellDeps);
       console.log(
         `[ghl-webhook-receiver] ${
-          type === "CustomerReplied" ? "Reply" : "Call"
+          type === "CallCompleted" ? "Call" : "Reply"
         } doorbell: outcome=${rung.outcome} reason=${
           rung.reason ?? "none"
         } read=${rung.targeted?.status ?? "none"} inserted=${

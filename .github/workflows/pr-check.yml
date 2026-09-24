@@ -292,6 +292,8 @@ jobs:
       # doorbell (targeted read, calls saved as client.call_logged) with it on.
       # CustomerReplied: the GHL workflow post for an inbound text is the same
       # doorbell, and a reconciler pass after it writes nothing new.
+      # UserReplied: the staff-reply workflow post is that doorbell too, reading
+      # the post's conversation id when it names one.
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
@@ -300,6 +302,7 @@ jobs:
             supabase/functions/ghl-webhook-receiver/receiver_c1c_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_t1_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_customer_replied_test.ts \
+            supabase/functions/ghl-webhook-receiver/receiver_user_replied_test.ts \
             supabase/functions/ghl-webhook/message_webhook_test.ts
 
       # Slice C1a: the shared GHL row builder, ghl-proxy send_sms through the one

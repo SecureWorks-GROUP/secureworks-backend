@@ -28,6 +28,9 @@
 // as client.call_logged under ghl:<GHL message id> (callCompletedDoorbell).
 //
 // CustomerReplied uses the same contact-only doorbell, with no legacy write.
+// UserReplied (a staff reply) is the same doorbell, except that a conversation
+// id in the post names the conversation to read; the provider read refuses one
+// that does not belong to the post's contact.
 // Workflow setup and recovery: docs/context/ghl-message-reconcile.md.
 //
 // Nothing here logs message text, names, numbers or addresses: ids and codes.
@@ -301,7 +304,8 @@ export async function targetedConversationRead(
 
 /**
  * The contact's newest GHL conversation, for a post that names the contact
- * only (GHL workflow posts: CallCompleted, CustomerReplied). Never throws.
+ * only (GHL workflow posts: CallCompleted, CustomerReplied, UserReplied).
+ * Never throws.
  */
 async function newestConversationId(
   contactId: string,
@@ -339,12 +343,13 @@ async function newestConversationId(
 }
 
 /**
- * A workflow post that names the contact only: a doorbell. The post writes
- * nothing itself; one targeted read of the contact's newest conversation saves
- * every missing item through the builder and writer. The post's conversation
- * id is ignored. When the read cannot run, the 15-minute reconciler covers it.
- * The caller has authenticated the post, checked the capture lane and read the
- * flag on. Never throws.
+ * A workflow post that names the contact: a doorbell. The post writes nothing
+ * itself; one targeted read of the contact's newest conversation saves every
+ * missing item through the builder and writer. The post's conversation id is
+ * ignored unless `bodyConversation` is set (UserReplied), when a present one is
+ * read directly (the provider read binds it to the contact). When the read
+ * cannot run, the 15-minute reconciler covers it. The caller has authenticated
+ * the post, checked the capture lane and read the flag on. Never throws.
  */
 async function contactDoorbell(
   client: Db,
@@ -353,12 +358,16 @@ async function contactDoorbell(
     env: (name: string) => string | undefined;
     fetch: typeof fetch;
   },
-  rungReason: "call_doorbell" | "reply_doorbell",
+  rungReason: "call_doorbell" | "reply_doorbell" | "user_reply_doorbell",
+  bodyConversation = false,
 ): Promise<CaptureResult> {
   const contactId = safeId(body.contactId);
-  const newest = contactId
-    ? await newestConversationId(contactId, deps)
-    : { id: null, code: null };
+  const named = bodyConversation ? safeId(body.conversationId) : null;
+  const newest = !contactId
+    ? { id: null, code: null }
+    : named
+    ? { id: named, code: null }
+    : await newestConversationId(contactId, deps);
   const conversationId = newest.id;
   const targeted = conversationId
     ? await targetedConversationRead(
@@ -409,9 +418,10 @@ export function callCompletedDoorbell(
 
 /**
  * CustomerReplied (GHL workflow, trigger Customer Replied on SMS): the same
- * doorbell as CallCompleted. Flag off, nothing is written and the receipt says
- * capture_disabled (flag_off); the reconciler catches up once it is on. Never
- * throws.
+ * doorbell as CallCompleted. UserReplied (trigger User Replied, a staff reply)
+ * is the same doorbell, reading the post's conversation id when present. Flag
+ * off, nothing is written and the receipt says capture_disabled (flag_off);
+ * the reconciler catches up once it is on. Never throws.
  */
 export async function customerRepliedDoorbell(
   client: Db,
@@ -420,6 +430,31 @@ export async function customerRepliedDoorbell(
     env: (name: string) => string | undefined;
     fetch: typeof fetch;
   },
+): Promise<CaptureResult> {
+  return await replyDoorbell(client, body, deps, "reply_doorbell", false);
+}
+
+/** UserReplied (GHL workflow, trigger User Replied): see customerRepliedDoorbell. */
+export async function userRepliedDoorbell(
+  client: Db,
+  body: Record<string, unknown>,
+  deps: {
+    env: (name: string) => string | undefined;
+    fetch: typeof fetch;
+  },
+): Promise<CaptureResult> {
+  return await replyDoorbell(client, body, deps, "user_reply_doorbell", true);
+}
+
+async function replyDoorbell(
+  client: Db,
+  body: Record<string, unknown>,
+  deps: {
+    env: (name: string) => string | undefined;
+    fetch: typeof fetch;
+  },
+  rungReason: "reply_doorbell" | "user_reply_doorbell",
+  bodyConversation: boolean,
 ): Promise<CaptureResult> {
   if (!(await messageCaptureEnabled(client))) {
     return {
@@ -432,7 +467,13 @@ export async function customerRepliedDoorbell(
       httpStatus: 200,
     };
   }
-  return await contactDoorbell(client, body, deps, "reply_doorbell");
+  return await contactDoorbell(
+    client,
+    body,
+    deps,
+    rungReason,
+    bodyConversation,
+  );
 }
 
 /** Whether live GHL capture is switched on for this item (fail closed). */

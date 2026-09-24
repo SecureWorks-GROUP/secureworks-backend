@@ -3687,7 +3687,7 @@ posts with no write. Tests: `receiver_c1c_test.ts`, `ghl-webhook/message_webhook
 proof and builder-row parity: migration contract
 `20260924130000_ghl_webhook_receipts`.
 
-The `CallCompleted` and `CustomerReplied` workflow doorbells, SMS workflow
+The `CallCompleted`, `CustomerReplied` and `UserReplied` workflow doorbells, SMS workflow
 setup, flag behavior, call mapping and recovery contract are owned by
 [`docs/context/ghl-message-reconcile.md`](docs/context/ghl-message-reconcile.md).
 
