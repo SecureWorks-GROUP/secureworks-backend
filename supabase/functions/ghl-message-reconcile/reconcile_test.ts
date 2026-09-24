@@ -955,6 +955,38 @@ Deno.test("a same-millisecond burst that would overflow the run cursor steps pas
   assertEquals(db.refusedCursors, 0);
 });
 
+Deno.test("a pending retry stays partial when boundary ties overflow the cursor", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const failedAt = new Date(T0 - 2 * MIN).toISOString();
+  for (let i = 0; i < 80; i++) {
+    const id = `retryTie${String(i).padStart(2, "0")}${"x".repeat(40)}`;
+    ghl.add({
+      id,
+      contactId: `${id}-c`,
+      messages: [msg(`${id}Text`, id, `${id}-c`, failedAt)],
+    });
+  }
+  seedCompleteScan(db, failedAt);
+  (db.runs[0].cursor as { retry_from?: string }).retry_from = failedAt;
+
+  const result = await runGhlMessageReconcile(deps(ghl, db), {
+    ...POLICY,
+    listPageLimit: 50,
+  });
+
+  assert(result.outcome === "ran");
+  assertEquals(result.counts.scan_completed, 1);
+  assert(result.counts.boundary_tie_fallbacks > 0);
+  assertEquals(result.status, "partial");
+  assertEquals(result.error_code, "retry_pending");
+  assertEquals(result.watermark, failedAt);
+  assertEquals(
+    (db.runs[0].cursor as { retry_from: string }).retry_from,
+    failedAt,
+  );
+});
+
 Deno.test("a same-millisecond blast of typical GHL ids drains without a refused jsonb cursor write", async () => {
   const ghl = new FakeGhl();
   const db = new FakeDb();
@@ -1176,7 +1208,10 @@ Deno.test("a pending retry extends both floors beyond the 72-hour cap until save
   assert(first.outcome === "ran");
   assertEquals(first.status, "partial");
   assertEquals(first.counts.window_capped, 1);
-  assertEquals(first.window.from, new Date(T0 - POLICY.maxLookbackMs).toISOString());
+  assertEquals(
+    first.window.from,
+    new Date(T0 - POLICY.maxLookbackMs).toISOString(),
+  );
   assertEquals(first.watermark, failedAt);
   assertEquals(rowFor(db, "boundaryText0001"), undefined);
 
@@ -1278,6 +1313,58 @@ Deno.test("an unreadable retry conversation stays pending when a peer at its tim
   );
   assertEquals(
     db.rows.filter((row) => row.provider_message_id === "ghl:peerText000001")
+      .length,
+    1,
+  );
+  assertEquals((db.runs[0].cursor as { retry_from: unknown }).retry_from, null);
+});
+
+Deno.test("a dateless retry conversation keeps the retry pending until it can be read", async () => {
+  const ghl = new FakeGhl();
+  const db = new FakeDb();
+  const failedAt = new Date(T0 - 40 * MIN).toISOString();
+  quietConversation(
+    ghl,
+    "datelessRetryConversation",
+    "datelessRetryText",
+    failedAt,
+  );
+  seedCompleteScan(db, new Date(T0 - 15 * MIN).toISOString());
+  db.failOnce.set("ghl:datelessRetryText", "57014");
+
+  const first = await runGhlMessageReconcile(deps(ghl, db));
+  assert(first.outcome === "ran");
+  assertEquals(first.status, "partial");
+  assertEquals(first.watermark, failedAt);
+  assertEquals(rowFor(db, "datelessRetryText"), undefined);
+
+  ghl.conversations.get("datelessRetryConversation")!.lastMessageDate = null;
+  db.clock = T0 + 15 * MIN;
+  const datelessRetry = await runGhlMessageReconcile(deps(ghl, db));
+  assert(datelessRetry.outcome === "ran");
+  assertEquals(datelessRetry.counts.conversations_no_date, 1);
+  assertEquals(datelessRetry.counts.scan_completed, 1);
+  assertEquals(datelessRetry.status, "partial");
+  assertEquals(datelessRetry.error_code, "retry_pending");
+  assertEquals(datelessRetry.watermark, failedAt);
+  assertEquals(rowFor(db, "datelessRetryText"), undefined);
+  assertEquals(
+    (db.runs[0].cursor as { retry_from: string }).retry_from,
+    failedAt,
+  );
+
+  ghl.conversations.get("datelessRetryConversation")!.lastMessageDate = Date
+    .parse(failedAt);
+  db.clock = T0 + 30 * MIN;
+  const cleanRetry = await runGhlMessageReconcile(deps(ghl, db));
+  assert(cleanRetry.outcome === "ran");
+  assertEquals(cleanRetry.status, "succeeded");
+  assertEquals(cleanRetry.error_code, null);
+  assertEquals(cleanRetry.counts.inserted, 1);
+  assertEquals(cleanRetry.watermark, new Date(T0 + 30 * MIN).toISOString());
+  assert(rowFor(db, "datelessRetryText"));
+  assertEquals(
+    db.rows.filter((row) => row.provider_message_id === "ghl:datelessRetryText")
       .length,
     1,
   );

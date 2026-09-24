@@ -190,6 +190,28 @@ const COUNT_KEYS = [
 ] as const;
 type CountKey = typeof COUNT_KEYS[number];
 
+const INCOMPLETE_READ_COUNT_KEYS = [
+  "conversations_no_date",
+  "conversations_unreadable",
+  "message_pages_capped",
+  "message_cursor_missing",
+  "write_errors",
+  "precheck_errors",
+  "skipped_no_id",
+  "skipped_no_contact",
+  "skipped_no_direction",
+  "backlog_conversations",
+  "backlog_more",
+  "boundary_tie_fallbacks",
+  "cursor_reset",
+] as const;
+
+export function readWasComplete(
+  counts: Readonly<Record<string, number>>,
+): boolean {
+  return INCOMPLETE_READ_COUNT_KEYS.every((key) => counts[key] === 0);
+}
+
 function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
@@ -642,8 +664,10 @@ export async function runGhlMessageReconcile(
         }
         const writeErrorsBefore = counts.write_errors;
         const result = await readConversation(conversation);
-        if (counts.write_errors > writeErrorsBefore &&
-          !failurePositionCaptured) {
+        if (
+          counts.write_errors > writeErrorsBefore &&
+          !failurePositionCaptured
+        ) {
           failedPosition = position;
           failurePositionCaptured = true;
         }
@@ -717,21 +741,20 @@ export async function runGhlMessageReconcile(
   if (!complete) scan.complete = false;
   counts.scan_completed = complete ? 1 : 0;
   if (
-    complete && retryFromMs !== null && counts.write_errors === 0 &&
-    counts.conversations_unreadable === 0 &&
-    counts.message_pages_capped === 0 &&
-    counts.message_cursor_missing === 0 &&
-    counts.boundary_tie_fallbacks === 0
+    complete && retryFromMs !== null && readWasComplete(counts)
   ) {
     retryFromMs = null;
     scan.retry_from = null;
   }
+  if (retryFromMs !== null) issue("retry_pending");
   const watermark = complete
     ? iso(Math.min(ms(scan.scan_top)!, retryFromMs ?? Infinity))
     : watermarkMs === null
     ? null
     : iso(watermarkMs);
-  const status: "succeeded" | "partial" | "failed" = stop
+  const status: "succeeded" | "partial" | "failed" = retryFromMs !== null
+    ? "partial"
+    : stop
     ? "failed"
     : !complete || firstIssue
     ? "partial"
