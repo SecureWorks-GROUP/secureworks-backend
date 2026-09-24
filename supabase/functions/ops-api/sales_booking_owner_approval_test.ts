@@ -161,7 +161,7 @@ function deps(o: Overrides = {}) {
       Promise.resolve({
         assignedTo: o.resource === "khairo" ? "RgDWTnYL6zL3eJA6nLht" : null,
         pipelineId: SALES_BOOKING_RESOURCES[o.resource ?? "marnin"].pipeline_id,
-        stratco: true,
+        kind: "stratco" as const,
       }),
     readGhlDirectory: () => Promise.resolve(calendarDirectory()),
     readGhlEvents: (selector) => {
@@ -306,7 +306,7 @@ Deno.test("owner message: the executor dry-runs the owner's exact text from 776"
         Promise.resolve({
           assignedTo: null,
           pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
-          stratco: true,
+          kind: "stratco" as const,
         }),
       readOutlookLead: () => Promise.reject(new Error("unused")),
       mirrorToOutlook: () => Promise.reject(new Error("unused")),
@@ -1587,7 +1587,7 @@ Deno.test("owner message for Nithin and Khairo: approved through the gate, sent 
           Promise.resolve({
             assignedTo: ASSIGNEE[resource],
             pipelineId: SALES_BOOKING_RESOURCES[resource].pipeline_id,
-            stratco: true,
+            kind: "stratco" as const,
           }),
         readOutlookLead: () => Promise.reject(new Error("unused")),
         mirrorToOutlook: () => Promise.reject(new Error("unused")),
@@ -1630,7 +1630,7 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
       Promise.resolve({
         assignedTo: "RgDWTnYL6zL3eJA6nLht",
         pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
-        stratco: true,
+        kind: "stratco" as const,
       }),
   });
   await refusal(
@@ -1643,7 +1643,7 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
       Promise.resolve({
         assignedTo: null,
         pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
-        stratco: true,
+        kind: "stratco" as const,
       }),
   });
   await refusal(
@@ -1660,7 +1660,7 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
       Promise.resolve({
         assignedTo: null,
         pipelineId: SALES_BOOKING_RESOURCES.khairo.pipeline_id,
-        stratco: true,
+        kind: "stratco" as const,
       }),
   });
   await refusal(
@@ -1681,12 +1681,17 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
 });
 
 Deno.test("owner approval: unassigned fencing is Stratco Marnin's, other fencing Khairo's, and an assignee wins", async () => {
-  const owned = (assignedTo: string | null, stratco: boolean) => () =>
-    Promise.resolve({
-      assignedTo,
-      pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
-      stratco,
-    });
+  const owned =
+    (assignedTo: string | null, stratco: boolean | "unclear") => () =>
+      Promise.resolve({
+        assignedTo,
+        pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        kind: stratco === "unclear"
+          ? "unclear" as const
+          : stratco
+          ? "stratco" as const
+          : "normal" as const,
+      });
   // Unassigned, not Stratco: Khairo's screen takes it, Marnin's refuses.
   const k = deps({
     resource: "khairo",
@@ -1731,4 +1736,32 @@ Deno.test("owner approval: unassigned fencing is Stratco Marnin's, other fencing
     ),
     "lead_assigned_to_someone_else",
   );
+  // Owner unclear: refused by name on Marnin's route, not Khairo's lead.
+  await refusal(
+    call(deps({ readOpportunityOwnership: owned(null, "unclear") }).deps, {
+      owner_input: input("message"),
+      dry_run: true,
+    }),
+    "owner_unclear",
+  );
+  await refusal(
+    call(
+      deps({
+        resource: "khairo",
+        readOpportunityOwnership: owned(null, "unclear"),
+      }).deps,
+      {
+        owner_input: input("message", { resource: "khairo" }),
+        dry_run: true,
+      },
+    ),
+    "lead_assigned_to_someone_else",
+  );
+  const assignedUnclear = await call(
+    deps({
+      readOpportunityOwnership: owned("3S20LGVTjsVYy9vTJ9wM", "unclear"),
+    }).deps,
+    { owner_input: input("message"), dry_run: true },
+  );
+  assert("dry_run" in assignedUnclear && assignedUnclear.dry_run === true);
 });

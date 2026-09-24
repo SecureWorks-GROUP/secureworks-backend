@@ -1,5 +1,6 @@
 // deno-lint-ignore-file no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import type { SalesBookingLeadKind } from "./sales_booking_sender.ts";
 import {
   bookingContentHash,
   bookingHash,
@@ -143,7 +144,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     typeof initialResource === "string" ? initialResource : "marnin"
   ].pipeline_id;
   let opportunityAssignee: string | null = null;
-  let opportunityStratco = true;
+  let opportunityKind: SalesBookingLeadKind = "stratco";
   const jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
   let smsResponse: { status: number; body: Obj } = {
@@ -162,7 +163,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
       return Promise.resolve({
         assignedTo: opportunityAssignee,
         pipelineId: opportunityPipelineId,
-        stratco: opportunityStratco,
+        kind: opportunityKind,
       });
     },
     readOutlookLead: ({ contactId, opportunityId }) => {
@@ -271,8 +272,8 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     setOpportunityPipelineId: (id: string) => {
       opportunityPipelineId = id;
     },
-    setOpportunityStratco: (stratco: boolean) => {
-      opportunityStratco = stratco;
+    setOpportunityKind: (kind: SalesBookingLeadKind) => {
+      opportunityKind = kind;
     },
     setJobSite: (id: string, site: SalesBookingJobSiteFact) => {
       jobSites[id] = site;
@@ -439,11 +440,11 @@ Deno.test("send applies the unassigned fencing rule: Stratco is Marnin's, the re
 
   // Unassigned, not Stratco: Khairo's from 772, never Marnin's from 776.
   const k = fakes([khairo], LIVE);
-  k.setOpportunityStratco(false);
+  k.setOpportunityKind("normal");
   assertEquals(reasonOf(await send(k, khairo.binding_hash)), "sent");
   assertEquals(k.calls.sms.length, 1);
   const m = fakes([marnin], LIVE);
-  m.setOpportunityStratco(false);
+  m.setOpportunityKind("normal");
   assertEquals(
     reasonOf(await send(m, marnin.binding_hash)),
     "opportunity_assignee_changed",
@@ -453,17 +454,49 @@ Deno.test("send applies the unassigned fencing rule: Stratco is Marnin's, the re
   // An explicit assignee beats the rule: a non-Stratco lead assigned to
   // Marnin goes from 776 and never from Khairo's 772.
   const m2 = fakes([marnin], LIVE);
-  m2.setOpportunityStratco(false);
+  m2.setOpportunityKind("normal");
   m2.setOpportunityAssignee("3S20LGVTjsVYy9vTJ9wM");
   assertEquals(reasonOf(await send(m2, marnin.binding_hash)), "sent");
   const k2 = fakes([khairo], LIVE);
-  k2.setOpportunityStratco(false);
+  k2.setOpportunityKind("normal");
   k2.setOpportunityAssignee("3S20LGVTjsVYy9vTJ9wM");
   assertEquals(
     reasonOf(await send(k2, khairo.binding_hash)),
     "opportunity_assignee_changed",
   );
   assertEquals(k2.calls.sms, []);
+});
+
+Deno.test("send refuses an unassigned owner-unclear fencing lead from every line until it is assigned", async () => {
+  const khairo = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267772" },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const marnin = await approval("message", MESSAGE);
+  const m = fakes([marnin], LIVE);
+  m.setOpportunityKind("unclear");
+  assertEquals(reasonOf(await send(m, marnin.binding_hash)), "owner_unclear");
+  assertEquals(m.calls.sms, []);
+  assertEquals(m.calls.claims, 0);
+  const k = fakes([khairo], LIVE);
+  k.setOpportunityKind("unclear");
+  assertEquals(
+    reasonOf(await send(k, khairo.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(k.calls.sms, []);
+  // Once assigned in GHL it goes from the assignee's line.
+  const k2 = fakes([khairo], LIVE);
+  k2.setOpportunityKind("unclear");
+  k2.setOpportunityAssignee("RgDWTnYL6zL3eJA6nLht");
+  assertEquals(reasonOf(await send(k2, khairo.binding_hash)), "sent");
 });
 
 Deno.test("send refuses an unassigned Stratco lead moved to patio", async () => {

@@ -704,16 +704,9 @@ export async function assertLeadBelongsToResource(
   } catch {
     fail("opportunity_assignment_unreadable");
   }
-  if (
-    !salesBookingLeadBelongsTo(
-      ownership.assignedTo,
-      resource,
-      ownership.pipelineId,
-      ownership.stratco,
-    )
-  ) {
-    fail("lead_assigned_to_someone_else");
-  }
+  const belonging = salesBookingLeadBelongsTo(ownership, resource);
+  if (belonging === "no") fail("lead_assigned_to_someone_else");
+  if (belonging === "owner_unclear") fail("owner_unclear");
 }
 
 /** `sales_booking_approval_write`: an `owner_input` body is an

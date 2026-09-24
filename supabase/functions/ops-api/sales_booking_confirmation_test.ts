@@ -185,7 +185,7 @@ function request(
       Promise.resolve({
         assignedTo: assignee,
         pipelineId: response.resource.pipeline_id,
-        stratco: true,
+        kind: "stratco" as const,
       }),
     now: () => NOW,
     envGet,
@@ -1007,7 +1007,7 @@ Deno.test("engine approval: a Stratco lead now assigned to Khairo or Nithin is n
           Promise.resolve({
             assignedTo: null,
             pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
-            stratco: true,
+            kind: "stratco" as const,
           }),
       }),
     Error,

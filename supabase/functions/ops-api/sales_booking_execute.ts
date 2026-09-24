@@ -886,19 +886,16 @@ export async function salesBookingSendAction(args: {
   } catch {
     return refused("opportunity_assignment_unreadable");
   }
-  if (
-    !salesBookingLeadBelongsTo(
-      ownership.assignedTo,
-      who.sender.person,
-      ownership.pipelineId,
-      ownership.stratco,
-    )
-  ) {
+  const belonging = salesBookingLeadBelongsTo(ownership, who.sender.person);
+  if (belonging === "no") {
     return refused("opportunity_assignee_changed", {
       person: who.sender.person,
       current_assignee: ownership.assignedTo,
       current_pipeline_id: ownership.pipelineId,
     });
+  }
+  if (belonging === "owner_unclear") {
+    return refused("owner_unclear", { person: who.sender.person });
   }
 
   const wouldSend = {

@@ -103,9 +103,11 @@ Both actions:
    recipient.
    Then the opportunity's live GHL assignee must still make it that
    person's lead (`salesBookingLeadBelongsTo`): assigned to that person, or
-   unassigned where the rule gives it to them (Stratco fencing Marnin, other
-   fencing Khairo, patio Nithin). Otherwise
-   `opportunity_assignee_changed`; an unreadable assignee refuses
+   unassigned where the rule gives it to them (patio Nithin; fencing with a
+   Stratco signal Marnin, with a positive normal-lead signal Khairo,
+   `salesBookingLeadKind`). Otherwise `opportunity_assignee_changed`; an
+   unassigned fencing lead with neither signal refuses `owner_unclear` until
+   someone assigns it in GHL; an unreadable assignee refuses
    `opportunity_assignment_unreadable`. Nothing is sent.
 8. `text_already_in_thread` if the exact text was already sent since approval.
 9. Claim the send, call ghl-proxy `send_sms` with the exact text, settle.

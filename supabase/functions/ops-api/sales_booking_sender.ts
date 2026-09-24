@@ -17,11 +17,14 @@
  *
  * Whose lead is it (owner decision 2026-09-24, "khairo is all normal fencing
  * all stratco fencing is mine"): the opportunity's current GHL assignee always
- * wins. When nobody is assigned, a Stratco fencing lead
- * (`salesBookingLeadIsStratco`) is Marnin's, any other fencing lead is
- * Khairo's, and a patio lead is Nithin's. Anyone else's lead belongs to nobody
- * here. GHL user ids: Marnin's matches the Stratco calendar assignee,
- * Khairo's the user on his 772 replies, Nithin's is from that decision.
+ * wins. When nobody is assigned, a patio lead is Nithin's and a fencing lead
+ * goes by `salesBookingLeadKind`: any Stratco signal is Marnin's, a positive
+ * normal-lead signal is Khairo's, and neither is owner unclear (shown on
+ * Marnin's list, flagged, never approved or texted until it is assigned in
+ * GHL). A possible Stratco lead never reaches Khairo's line. Anyone else's
+ * lead belongs to nobody here. GHL user ids: Marnin's matches the Stratco
+ * calendar assignee, Khairo's the user on his 772 replies, Nithin's is from
+ * that decision.
  *
  * The person on an approval is its `scoper_user_id`. Its `resource` and
  * `profile`, when they name a known person, must name the same one. There is
@@ -46,10 +49,17 @@ export interface SalesBookingSenderPerson {
 export interface SalesBookingOpportunityOwnership {
   assignedTo: string | null;
   pipelineId: string;
-  /** `salesBookingLeadIsStratco` of the same opportunity read. Decides only
-   * an unassigned fencing lead: Stratco is Marnin's, anything else Khairo's. */
-  stratco: boolean;
+  /** `salesBookingLeadKind` of the same opportunity read. Decides only an
+   * unassigned fencing lead: Stratco Marnin, normal Khairo, unclear held. */
+  kind: SalesBookingLeadKind;
 }
+
+/** What an unassigned fencing lead is: see `salesBookingLeadKind`. */
+export type SalesBookingLeadKind = "stratco" | "normal" | "unclear";
+
+/** Plain label the screen shows on an owner-unclear lead. */
+export const SALES_BOOKING_OWNER_UNCLEAR_LABEL =
+  "Owner unclear, Stratco or normal?";
 
 export const SALES_BOOKING_SENDER_LINES: Readonly<
   Record<string, Readonly<SalesBookingSenderPerson>>
@@ -158,30 +168,98 @@ export function salesBookingLeadOwner(
   )?.person ?? null;
 }
 
+/** The STRATCO FENCING GHL calendar (wiki GO-LIVE.md; owner approval's
+ * `STRATCO_BOOKING_RULEBOOK.calendar` reads it from here). */
+export const SALES_BOOKING_STRATCO_CALENDAR_ID = "dEQKVKHthsjSYaen1fiE";
+
+/** Env naming the GHL custom field that carries the Stratco allocation ref. */
+export const SALES_BOOKING_STRATCO_ALLOCATION_FIELD_ENV =
+  "GHL_STRATCO_ALLOCATION_FIELD_ID";
+
 const STRATCO = /stratco/i;
+/** Sources that name a normal (non-Stratco) enquiry: the website form,
+ * Google, Facebook, a referral, or a phone-in on Khairo's own 772 line. */
+const NORMAL_SOURCE =
+  /\b(website|web ?form|web enquiry|google|facebook|referral|phone[- ]?in)\b|(\+?61|0)489 ?267 ?772/i;
+/** Tags GHL puts on a normal enquiry. */
+const NORMAL_TAGS = new Set([
+  "web - enquiry",
+  "answered-call",
+  "source:organic",
+]);
+
+const record = (v: unknown): Record<string, unknown> =>
+  v && typeof v === "object" && !Array.isArray(v)
+    ? v as Record<string, unknown>
+    : {};
+
+function customFieldSet(fields: unknown, fieldId: string): boolean {
+  if (!Array.isArray(fields)) return false;
+  return fields.some((raw) => {
+    const field = record(raw);
+    if (field.id !== fieldId) return false;
+    return [
+      field.value,
+      field.fieldValue,
+      field.fieldValueString,
+      field.field_value,
+    ].some((value) =>
+      (typeof value === "string" && value.trim() !== "") ||
+      (typeof value === "number" && Number.isFinite(value)) ||
+      (Array.isArray(value) && value.length > 0)
+    );
+  });
+}
+
+function stratcoAllocationFieldId(): string {
+  try {
+    return (Deno.env.get(SALES_BOOKING_STRATCO_ALLOCATION_FIELD_ENV) || "")
+      .trim();
+  } catch {
+    return "";
+  }
+}
 
 /**
- * Whether a GHL opportunity is a Stratco lead: a `stratco` tag (contact or
- * opportunity), or Stratco in the opportunity name, contact name or source.
- * The same signals as the wiki profile `fencing-stratco-marnin.json`
- * `match.require_any` (`stratco_tag`, `stratco_in_name`, `stratco_in_source`),
- * which `fencing-khairo.json` excludes. Its `allocation_join` (the Outlook
- * allocation email) is not readable here, so an allocated lead needs one of
- * these signals or an explicit GHL assignee.
+ * What a GHL fencing opportunity is, for an unassigned lead:
+ *  - `stratco`: a `stratco` tag (contact or opportunity), Stratco in the
+ *    opportunity name, contact name or source (wiki `fencing-stratco-marnin.json`
+ *    `match.require_any`), a non-empty Stratco allocation-ref custom field on
+ *    the opportunity or contact (field id from env
+ *    `GHL_STRATCO_ALLOCATION_FIELD_ID`, when set), or `stratcoCalendarBooked`:
+ *    the contact has an appointment on the STRATCO FENCING calendar.
+ *  - `normal`: none of those, and a known non-Stratco source or tag.
+ *  - `unclear`: neither. Held for someone to assign it in GHL.
+ * Any Stratco signal wins over a normal one.
  */
-export function salesBookingLeadIsStratco(opportunity: unknown): boolean {
-  if (!opportunity || typeof opportunity !== "object") return false;
-  const opp = opportunity as Record<string, unknown>;
-  const contact = opp.contact && typeof opp.contact === "object"
-    ? opp.contact as Record<string, unknown>
-    : {};
+export function salesBookingLeadKind(
+  opportunity: unknown,
+  signals: { stratcoCalendarBooked?: boolean } = {},
+): SalesBookingLeadKind {
+  const opp = record(opportunity);
+  const contact = record(opp.contact);
   const tags = [
     ...(Array.isArray(contact.tags) ? contact.tags : []),
     ...(Array.isArray(opp.tags) ? opp.tags : []),
-  ];
-  return [...tags, opp.name, contact.name, opp.source].some((value) =>
-    typeof value === "string" && STRATCO.test(value)
+  ].filter((tag): tag is string => typeof tag === "string");
+  const sources = [opp.source, contact.source].filter((v): v is string =>
+    typeof v === "string"
   );
+  const fieldId = stratcoAllocationFieldId();
+  if (
+    signals.stratcoCalendarBooked === true ||
+    [...tags, opp.name, contact.name, ...sources].some((value) =>
+      typeof value === "string" && STRATCO.test(value)
+    ) ||
+    (fieldId !== "" &&
+      (customFieldSet(opp.customFields, fieldId) ||
+        customFieldSet(contact.customFields, fieldId)))
+  ) return "stratco";
+  if (
+    sources.some((source) => NORMAL_SOURCE.test(source)) ||
+    tags.some((tag) => NORMAL_TAGS.has(tag.trim().toLowerCase()))
+  ) return "normal";
+  return "unclear";
 }
 
 /** The short line label the screen shows (`776`). */

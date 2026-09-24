@@ -1,8 +1,9 @@
 // deno-lint-ignore-file no-import-prefix
 // Owner 2026-09-24: "khairo is all normal fencing all stratco fencing is
-// mine." Unassigned Stratco fencing is Marnin's, other unassigned fencing is
-// Khairo's, unassigned patio is Nithin's, and an explicit GHL assignee always
-// wins. A lead already booked with a scoper shows as booked with them and
+// mine." Unassigned fencing with any Stratco signal is Marnin's, with a
+// positive normal-lead signal Khairo's, and with neither owner unclear (on
+// Marnin's list, flagged, never approved or texted); unassigned patio is
+// Nithin's, and an explicit GHL assignee always wins. A lead already booked with a scoper shows as booked with them and
 // leaves every to-contact list.
 import {
   assert,
@@ -18,7 +19,9 @@ import {
 } from "./sales_booking_read.ts";
 import {
   SALES_BOOKING_SENDER_LINES,
-  salesBookingLeadIsStratco,
+  SALES_BOOKING_STRATCO_CALENDAR_ID,
+  type SalesBookingLeadKind,
+  salesBookingLeadKind,
 } from "./sales_booking_sender.ts";
 import { assertLeadBelongsToResource } from "./sales_booking_confirmation.ts";
 import { applySalesBookingPackOverlay } from "./sales_booking_pack.ts";
@@ -112,81 +115,197 @@ function readDeps(
   };
 }
 
-Deno.test("Stratco is read from a tag, the name or the source, as the Stratco profile matches", () => {
-  assert(salesBookingLeadIsStratco({ contact: { tags: ["Stratco"] } }));
-  assert(salesBookingLeadIsStratco({ tags: ["stratco lead"] }));
-  assert(salesBookingLeadIsStratco({ name: "Sonia Stratco 231030" }));
-  assert(salesBookingLeadIsStratco({ contact: { name: "Sonia Stratco" } }));
-  assert(salesBookingLeadIsStratco({ source: "Stratco lead allocation" }));
-  // A plain website fencing enquiry (live shape, 23 Sep) is not Stratco.
+Deno.test("lead kind: any Stratco signal is Stratco, else a normal source or tag is normal, else unclear", () => {
   assertEquals(
-    salesBookingLeadIsStratco({
+    salesBookingLeadKind({ contact: { tags: ["Stratco"] } }),
+    "stratco",
+  );
+  assertEquals(salesBookingLeadKind({ tags: ["stratco lead"] }), "stratco");
+  assertEquals(
+    salesBookingLeadKind({ name: "Sonia Stratco 231030" }),
+    "stratco",
+  );
+  assertEquals(
+    salesBookingLeadKind({ contact: { name: "Sonia Stratco" } }),
+    "stratco",
+  );
+  assertEquals(
+    salesBookingLeadKind({ source: "Stratco lead allocation" }),
+    "stratco",
+  );
+  assertEquals(
+    salesBookingLeadKind({ source: "Website Enquiry" }, {
+      stratcoCalendarBooked: true,
+    }),
+    "stratco",
+  );
+  // A plain website fencing enquiry (live shape, 23 Sep) is normal.
+  assertEquals(
+    salesBookingLeadKind({
       name: "Bec",
       source: "Website Enquiry",
       contact: { tags: ["source:organic", "web - enquiry", "sw fencing"] },
     }),
-    false,
+    "normal",
   );
-  assertEquals(salesBookingLeadIsStratco(null), false);
+  assertEquals(salesBookingLeadKind({ source: "Google Ads" }), "normal");
+  assertEquals(salesBookingLeadKind({ source: "Facebook" }), "normal");
+  assertEquals(salesBookingLeadKind({ source: "Referral" }), "normal");
+  assertEquals(salesBookingLeadKind({ source: "Call +61489267772" }), "normal");
+  assertEquals(
+    salesBookingLeadKind({ contact: { tags: ["answered-call"] } }),
+    "normal",
+  );
+  // Stratco beats a normal signal.
+  assertEquals(
+    salesBookingLeadKind({ source: "Website Enquiry", tags: ["stratco"] }),
+    "stratco",
+  );
+  // Neither: owner unclear.
+  assertEquals(salesBookingLeadKind({ name: "New Enquiry" }), "unclear");
+  assertEquals(
+    salesBookingLeadKind({ contact: { tags: ["sw fencing"] } }),
+    "unclear",
+  );
+  assertEquals(salesBookingLeadKind(null), "unclear");
 });
 
-Deno.test("whose lead: the explicit assignee wins; unassigned is Stratco Marnin, other fencing Khairo, patio Nithin", () => {
-  const owners = (
+Deno.test("lead kind: the Stratco allocation-ref custom field counts only when its env id is set", () => {
+  const withField = {
+    source: "Website Enquiry",
+    customFields: [{ id: "alloc-field", fieldValueString: "SA-231030" }],
+  };
+  const onContact = {
+    contact: { customFields: [{ id: "alloc-field", value: "SA-1" }] },
+  };
+  const blank = {
+    source: "Website Enquiry",
+    customFields: [{ id: "alloc-field", fieldValueString: " " }],
+  };
+  const prior = Deno.env.get("GHL_STRATCO_ALLOCATION_FIELD_ID");
+  try {
+    Deno.env.delete("GHL_STRATCO_ALLOCATION_FIELD_ID");
+    assertEquals(salesBookingLeadKind(withField), "normal");
+    Deno.env.set("GHL_STRATCO_ALLOCATION_FIELD_ID", "alloc-field");
+    assertEquals(salesBookingLeadKind(withField), "stratco");
+    assertEquals(salesBookingLeadKind(onContact), "stratco");
+    assertEquals(salesBookingLeadKind(blank), "normal");
+  } finally {
+    if (prior === undefined) {
+      Deno.env.delete("GHL_STRATCO_ALLOCATION_FIELD_ID");
+    } else Deno.env.set("GHL_STRATCO_ALLOCATION_FIELD_ID", prior);
+  }
+});
+
+Deno.test("whose lead: the explicit assignee wins; unassigned is Stratco Marnin, normal fencing Khairo, unclear held on Marnin's, patio Nithin", () => {
+  const verdicts = (
     assignedTo: string | null,
     pipelineId: string,
-    stratco: boolean,
+    kind: SalesBookingLeadKind,
   ) =>
-    Object.keys(SALES_BOOKING_RESOURCES).filter((resource) =>
-      salesBookingLeadBelongsTo(assignedTo, resource, pipelineId, stratco)
+    Object.fromEntries(
+      Object.keys(SALES_BOOKING_RESOURCES).map((resource) => [
+        resource,
+        salesBookingLeadBelongsTo({ assignedTo, pipelineId, kind }, resource),
+      ]).filter(([, verdict]) => verdict !== "no"),
     );
-  assertEquals(owners(null, FENCING, true), ["marnin"]);
-  assertEquals(owners(null, FENCING, false), ["khairo"]);
-  assertEquals(owners(null, PATIO, false), ["nithin"]);
-  assertEquals(owners(null, PATIO, true), ["nithin"]);
-  // Explicit assignee overrides the rule in both directions.
-  assertEquals(owners(MARNIN, FENCING, false), ["marnin"]);
-  assertEquals(owners(KHAIRO, FENCING, true), ["khairo"]);
-  assertEquals(owners(NITHIN, FENCING, true), ["nithin"]);
+  assertEquals(verdicts(null, FENCING, "stratco"), { marnin: "yes" });
+  assertEquals(verdicts(null, FENCING, "normal"), { khairo: "yes" });
+  assertEquals(verdicts(null, FENCING, "unclear"), {
+    marnin: "owner_unclear",
+  });
+  assertEquals(verdicts(null, PATIO, "unclear"), { nithin: "yes" });
+  assertEquals(verdicts(null, PATIO, "stratco"), { nithin: "yes" });
+  // Explicit assignee overrides the rule in every direction.
+  assertEquals(verdicts(MARNIN, FENCING, "normal"), { marnin: "yes" });
+  assertEquals(verdicts(KHAIRO, FENCING, "stratco"), { khairo: "yes" });
+  assertEquals(verdicts(KHAIRO, FENCING, "unclear"), { khairo: "yes" });
+  assertEquals(verdicts(NITHIN, FENCING, "stratco"), { nithin: "yes" });
   // Someone who is not a booking person: nobody's here.
-  assertEquals(owners("someone-else", FENCING, true), []);
+  assertEquals(verdicts("someone-else", FENCING, "stratco"), {});
 });
 
-Deno.test("read: each person's list follows the rule, over the same fencing pipeline", async () => {
+Deno.test("read: each person's list follows the rule; owner unclear is flagged on Marnin's, never on Khairo's", async () => {
   const leads = [
     opp("stratco-unassigned", null, { source: "Stratco lead allocation" }),
     opp("plain-unassigned", null),
+    opp("unclear-unassigned", null, { source: "" }),
     opp("plain-assigned-marnin", MARNIN),
     opp("stratco-assigned-khairo", KHAIRO, { name: "Stratco lead" }),
+    opp("unclear-assigned-khairo", KHAIRO, { source: "" }),
   ];
-  const listed = async (resource: string) =>
+  const cases = async (resource: string) =>
     (await salesBookingRead(readDeps(leads), {
       resource,
       week_start: WEEK,
-    })).cases.map((row) => row.id).sort();
-  assertEquals(await listed("marnin"), [
+    })).cases.sort((a, b) => a.id.localeCompare(b.id));
+  const marnin = await cases("marnin");
+  assertEquals(marnin.map((row) => row.id), [
     "plain-assigned-marnin",
     "stratco-unassigned",
+    "unclear-unassigned",
   ]);
-  assertEquals(await listed("khairo"), [
+  assertEquals(
+    marnin.map((row) => [row.owner_unclear ?? false, row.owner_unclear_label]),
+    [
+      [false, undefined],
+      [false, undefined],
+      [true, "Owner unclear, Stratco or normal?"],
+    ],
+  );
+  const khairo = await cases("khairo");
+  assertEquals(khairo.map((row) => row.id), [
     "plain-unassigned",
     "stratco-assigned-khairo",
+    "unclear-assigned-khairo",
   ]);
+  assert(khairo.every((row) => !row.owner_unclear));
+});
+
+Deno.test("read: a normal lead booked on the STRATCO FENCING calendar is Marnin's, not Khairo's", async () => {
+  const leads = [opp("booked-stratco", null)];
+  const readScopeCalendar: SalesBookingReadDependencies["readScopeCalendar"] = (
+    { ghlUserId },
+  ) =>
+    Promise.resolve({
+      events: ghlUserId === MARNIN
+        ? [{
+          ...BASIL_VISIT,
+          id: "stratco-visit",
+          assignedUserId: MARNIN,
+          calendarId: SALES_BOOKING_STRATCO_CALENDAR_ID,
+          contactId: "contact-booked-stratco",
+        }]
+        : [],
+      failure: null,
+    });
+  const ids = async (resource: string) =>
+    (await salesBookingRead(readDeps(leads, { readScopeCalendar }), {
+      resource,
+      week_start: WEEK,
+    })).cases.map((row) => row.id);
+  assertEquals(await ids("marnin"), ["booked-stratco"]);
+  assertEquals(await ids("khairo"), []);
 });
 
 Deno.test("read: a cached lead's live ownership recheck uses the same rule", async () => {
   // Roster from cache: every candidate is re-read live, so the recheck's own
-  // Stratco signal decides an unassigned lead.
-  const stratco = new Map([["a", true], ["b", false]]);
+  // classification decides an unassigned lead.
+  const kinds = new Map<string, SalesBookingLeadKind>([
+    ["a", "stratco"],
+    ["b", "normal"],
+    ["c", "unclear"],
+  ]);
   const cachedDeps = () =>
     readDeps([], {
       loadRosterCache: () =>
         Promise.resolve({
           read_at: new Date(NOW.getTime() - 60_000).toISOString(),
-          opportunities: [opp("a", null), opp("b", null)],
+          opportunities: [opp("a", null), opp("b", null), opp("c", null)],
           stages: { [STAGE]: "New Lead" },
           exhausted: true,
           pages_scanned: 1,
-          total: 2,
+          total: 3,
           reason: null,
           next_start_after: null,
           next_start_after_id: null,
@@ -195,31 +314,45 @@ Deno.test("read: a cached lead's live ownership recheck uses the same rule", asy
         Promise.resolve({
           assignedTo: null,
           pipelineId: FENCING,
-          stratco: stratco.get(id) ?? false,
+          kind: kinds.get(id) ?? "unclear",
         }),
     });
-  const ids = async (resource: string) =>
+  const read = async (resource: string) =>
     (await salesBookingRead(cachedDeps(), {
       resource,
       week_start: WEEK,
-    })).cases.map((row) => row.id);
-  assertEquals(await ids("marnin"), ["a"]);
-  assertEquals(await ids("khairo"), ["b"]);
+    })).cases.sort((x, y) => x.id.localeCompare(y.id));
+  const marnin = await read("marnin");
+  assertEquals(marnin.map((row) => row.id), ["a", "c"]);
+  assertEquals(marnin.map((row) => row.owner_unclear ?? false), [false, true]);
+  assertEquals((await read("khairo")).map((row) => row.id), ["b"]);
 });
 
 Deno.test("approval: the live ownership check uses the same rule", async () => {
-  const read = (assignedTo: string | null, stratco: boolean) => () =>
-    Promise.resolve({ assignedTo, pipelineId: FENCING, stratco });
-  await assertLeadBelongsToResource(read(null, false), "opp-1", "khairo");
-  await assertLeadBelongsToResource(read(null, true), "opp-1", "marnin");
-  await assertLeadBelongsToResource(read(MARNIN, false), "opp-1", "marnin");
+  const read = (assignedTo: string | null, kind: SalesBookingLeadKind) => () =>
+    Promise.resolve({ assignedTo, pipelineId: FENCING, kind });
+  await assertLeadBelongsToResource(read(null, "normal"), "opp-1", "khairo");
+  await assertLeadBelongsToResource(read(null, "stratco"), "opp-1", "marnin");
+  await assertLeadBelongsToResource(read(MARNIN, "normal"), "opp-1", "marnin");
+  await assertLeadBelongsToResource(read(KHAIRO, "unclear"), "opp-1", "khairo");
   await assertRejects(
-    () => assertLeadBelongsToResource(read(null, false), "opp-1", "marnin"),
+    () => assertLeadBelongsToResource(read(null, "normal"), "opp-1", "marnin"),
     Error,
     "lead_assigned_to_someone_else",
   );
   await assertRejects(
-    () => assertLeadBelongsToResource(read(MARNIN, false), "opp-1", "khairo"),
+    () =>
+      assertLeadBelongsToResource(read(MARNIN, "normal"), "opp-1", "khairo"),
+    Error,
+    "lead_assigned_to_someone_else",
+  );
+  await assertRejects(
+    () => assertLeadBelongsToResource(read(null, "unclear"), "opp-1", "marnin"),
+    Error,
+    "owner_unclear",
+  );
+  await assertRejects(
+    () => assertLeadBelongsToResource(read(null, "unclear"), "opp-1", "khairo"),
     Error,
     "lead_assigned_to_someone_else",
   );
