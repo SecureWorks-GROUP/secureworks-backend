@@ -58,7 +58,6 @@ export interface HandlerDeps {
   // deno-lint-ignore no-explicit-any
   createSupabase(): any;
   fetch?: typeof fetch;
-  readProvider?: typeof readGhlProvider;
   waitUntil?(p: Promise<unknown>): void;
   now?(): number;
 }
@@ -260,19 +259,26 @@ export function liveLinkDeps(deps: HandlerDeps): LinkDeps {
       return data as LinkCandidate[];
     },
     async searchContacts(query, limit) {
-      const result = await (deps.readProvider ?? readGhlProvider)(
-        "list_ghl_contacts",
-        new URLSearchParams({ query, limit: String(limit) }),
-        { locationId, token, fetchFn: deps.fetch },
-      );
-      const contacts = (result.data.contacts ?? []) as Record<
-        string,
-        unknown
-      >[];
-      return {
-        contacts,
-        complete: result.pagination?.has_more === false,
-      };
+      const contacts: Record<string, unknown>[] = [];
+      const params = new URLSearchParams({ query, limit: String(limit) });
+      for (let page = 0; page < 5; page++) {
+        const result = await readGhlProvider(
+          "list_ghl_contacts",
+          params,
+          { locationId, token, fetchFn: deps.fetch },
+        );
+        contacts.push(
+          ...((result.data.contacts ?? []) as Record<string, unknown>[]),
+        );
+        if (result.pagination?.has_more === false) {
+          return { contacts, complete: true };
+        }
+        const cursor = result.pagination?.next_cursor;
+        if (!cursor?.start_after || !cursor.start_after_id) break;
+        params.set("start_after", String(cursor.start_after));
+        params.set("start_after_id", String(cursor.start_after_id));
+      }
+      return { contacts, complete: false };
     },
     async link(row): Promise<LinkWriteOutcome> {
       try {

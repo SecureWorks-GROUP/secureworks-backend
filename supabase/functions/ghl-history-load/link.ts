@@ -249,6 +249,7 @@ export async function judgeJob(
     found[kind] = contactsWithKey(answer.contacts, kind, key);
     if (!answer.complete) incomplete = true;
   }
+  if (incomplete) return { kind: "ambiguous", reason: "search_incomplete" };
   const all = new Set([...found.phone, ...found.email]);
   if (all.size > 1) {
     return {
@@ -258,7 +259,6 @@ export async function judgeJob(
         : "several_contacts",
     };
   }
-  if (incomplete) return { kind: "ambiguous", reason: "search_incomplete" };
   if (all.size === 0) return { kind: "none", reason: "not_in_ghl" };
   const contact = [...all][0];
   if (job.own_contact_id && job.own_contact_id !== contact) {

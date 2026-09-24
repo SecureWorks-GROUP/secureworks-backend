@@ -9,7 +9,6 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { readGhlProvider } from "../ghl-proxy/provider_reads.ts";
 import { handleHistoryLoad } from "./handler.ts";
 import { R21_CONTACT } from "./m4_fixtures.ts";
 import { R12_CONTACT, R12_CONVERSATION, R12_ITEM } from "./m4_fixtures.ts";
@@ -146,10 +145,30 @@ function ghlFetch(log: URL[], contactsTotal?: number) {
   }) as typeof fetch;
 }
 
-const exhaustedSearch: typeof readGhlProvider = async (...args) => {
-  const result = await readGhlProvider(...args);
-  return { ...result, pagination: { ...result.pagination!, has_more: false } };
-};
+function pagedContacts(log: URL[], pages: number, failPage = -1): typeof fetch {
+  return ((input: string | URL | Request) => {
+    const url = new URL(String(input));
+    log.push(url);
+    const page = Number(url.searchParams.get("startAfter") ?? 0);
+    if (page === failPage) {
+      return Promise.resolve(new Response("failed", { status: 400 }));
+    }
+    const body = page < pages
+      ? {
+        contacts: [{
+          id: page === 0 ? R21_CONTACT : `contact-${page}`,
+          locationId: "loc_secureworks",
+          phone: "+61412345678",
+        }],
+        meta: { startAfter: page + 1, startAfterId: `cursor-${page + 1}` },
+      }
+      : { contacts: [], meta: {} };
+    if (page > 0) {
+      assertEquals(url.searchParams.get("startAfterId"), `cursor-${page}`);
+    }
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+  }) as typeof fetch;
+}
 
 const post = (headers: Record<string, string> = {}, body?: unknown) =>
   new Request("https://edge.test/ghl-history-load", {
@@ -290,8 +309,7 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
     {
       env,
       createSupabase: () => sb,
-      fetch: ghlFetch(log, 1),
-      readProvider: exhaustedSearch,
+      fetch: pagedContacts(log, 1),
     },
   );
   const body = await res.json();
@@ -318,8 +336,7 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
     await (await handleHistoryLoad(post({}, { action: "link", wait: true }), {
       env,
       createSupabase: () => sb2,
-      fetch: ghlFetch([], 1),
-      readProvider: exhaustedSearch,
+      fetch: pagedContacts([], 1),
     })).json();
   assertEquals([dry.dry_run, dry.counts.certain, dry.counts.linked], [
     true,
@@ -361,4 +378,39 @@ Deno.test("wiring: a GHL contact search is complete only on an explicit end (rev
     { env, createSupabase: () => sb3, fetch: ghlFetch([], 2) },
   )).json();
   assertEquals([more.counts.ambiguous, more.counts.linked], [1, 0]);
+});
+
+Deno.test("contact linking retains all cursor pages and requires exhaustion within five reads", async () => {
+  for (
+    const [pages, reason, reads] of [[2, "several_contacts", 3], [
+      5,
+      "search_incomplete",
+      5,
+    ]] as const
+  ) {
+    const sb = fakeSupabase({});
+    const log: URL[] = [];
+    const result = await (await handleHistoryLoad(
+      post({}, { action: "link", dry_run: false, wait: true }),
+      { env, createSupabase: () => sb, fetch: pagedContacts(log, pages) },
+    )).json();
+    assertEquals(result.counts.ambiguous, 1);
+    assertEquals(result.counts[reason], 1);
+    assertEquals(result.counts.linked, 0);
+    assertEquals(log.length, reads);
+    assert(!sb.calls.some((c) => c.name === "link_job_ghl_contact"));
+  }
+});
+
+Deno.test("a later contact search page failure never links an earlier match", async () => {
+  const sb = fakeSupabase({});
+  const log: URL[] = [];
+  const result = await (await handleHistoryLoad(
+    post({}, { action: "link", dry_run: false, wait: true }),
+    { env, createSupabase: () => sb, fetch: pagedContacts(log, 2, 1) },
+  )).json();
+  assertEquals(result.counts.failed, 1);
+  assertEquals(result.counts.linked, 0);
+  assertEquals(log.length, 2);
+  assert(!sb.calls.some((c) => c.name === "link_job_ghl_contact"));
 });
