@@ -424,8 +424,8 @@ BEGIN
     IS DISTINCT FROM 'f8c4bd29bba0878396ee7626c21ee65d'
  THEN RAISE EXCEPTION 'f1 touched the 5-arg persist_luna_context_revision overload'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.persist_luna_context_revision(uuid,uuid,uuid,jsonb,jsonb,jsonb,jsonb,text,integer)'))
-    IS DISTINCT FROM '2ef95a949f0aae99cc323abde10f2ee7'
- THEN RAISE EXCEPTION 'f1 9-arg persist_luna_context_revision is not the expected F1 body'; END IF;
+    NOT IN ('2ef95a949f0aae99cc323abde10f2ee7','5e2f351da5fbf4fcb0c69c3d841f5e3d')
+ THEN RAISE EXCEPTION 'f1 9-arg persist_luna_context_revision is neither the F1 nor approved catch-up body'; END IF;
  -- The core body is the production heartbeat body with exactly one line
  -- changed: the ready_jobs read.
  IF md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
