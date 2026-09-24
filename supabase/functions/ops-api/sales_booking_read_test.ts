@@ -1433,6 +1433,7 @@ Deno.test("the deps object handed to the runner exposes no write members", async
       "now",
       "persistRosterCache",
       "persistThreadFactsCache",
+      "readContactStratcoBooked",
       "readContacts",
       "readDiary",
       "readJobSites",

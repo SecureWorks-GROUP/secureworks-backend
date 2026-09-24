@@ -19,7 +19,6 @@ import {
 } from "./sales_booking_read.ts";
 import {
   SALES_BOOKING_SENDER_LINES,
-  SALES_BOOKING_STRATCO_CALENDAR_ID,
   type SalesBookingLeadKind,
   salesBookingLeadKind,
 } from "./sales_booking_sender.ts";
@@ -110,6 +109,7 @@ function readDeps(
         calendar_email: "marnin@secureworkswa.com.au",
       }),
     readThread: () => Promise.resolve([] as SalesBookingMessage[]),
+    readContactStratcoBooked: () => Promise.resolve(false),
     now: () => NOW,
     ...extra,
   };
@@ -262,30 +262,57 @@ Deno.test("read: each person's list follows the rule; owner unclear is flagged o
   assert(khairo.every((row) => !row.owner_unclear));
 });
 
-Deno.test("read: a normal lead booked on the STRATCO FENCING calendar is Marnin's, not Khairo's", async () => {
-  const leads = [opp("booked-stratco", null)];
-  const readScopeCalendar: SalesBookingReadDependencies["readScopeCalendar"] = (
-    { ghlUserId },
-  ) =>
-    Promise.resolve({
-      events: ghlUserId === MARNIN
-        ? [{
-          ...BASIL_VISIT,
-          id: "stratco-visit",
-          assignedUserId: MARNIN,
-          calendarId: SALES_BOOKING_STRATCO_CALENDAR_ID,
-          contactId: "contact-booked-stratco",
-        }]
-        : [],
-      failure: null,
-    });
+Deno.test("read: a normal lead with any STRATCO FENCING appointment is Marnin's, not Khairo's", async () => {
+  const leads = [opp("booked-cal", null), opp("plain", null)];
+  const asked: string[] = [];
+  const readContactStratcoBooked: SalesBookingReadDependencies[
+    "readContactStratcoBooked"
+  ] = (contactId) => {
+    asked.push(contactId);
+    return Promise.resolve(contactId === "contact-booked-cal");
+  };
   const ids = async (resource: string) =>
-    (await salesBookingRead(readDeps(leads, { readScopeCalendar }), {
+    (await salesBookingRead(readDeps(leads, { readContactStratcoBooked }), {
       resource,
       week_start: WEEK,
     })).cases.map((row) => row.id);
-  assertEquals(await ids("marnin"), ["booked-stratco"]);
-  assertEquals(await ids("khairo"), []);
+  assertEquals(await ids("marnin"), ["booked-cal"]);
+  assertEquals(await ids("khairo"), ["plain"]);
+  assert(asked.includes("contact-booked-cal"));
+});
+
+Deno.test("read: when the STRATCO FENCING calendar cannot be read, a normal lead is owner unclear on Marnin's list, never Khairo's", async () => {
+  const leads = [
+    opp("plain", null),
+    opp("stratco", null, { source: "Stratco lead allocation" }),
+    opp("assigned-khairo", KHAIRO),
+  ];
+  for (
+    const unread of [
+      { readContactStratcoBooked: () => Promise.reject(new Error("GHL 500")) },
+      { readContactStratcoBooked: undefined },
+    ] as Partial<SalesBookingReadDependencies>[]
+  ) {
+    const read = async (resource: string) =>
+      await salesBookingRead(readDeps(leads, unread), {
+        resource,
+        week_start: WEEK,
+      });
+    const marnin = await read("marnin");
+    assertEquals(
+      marnin.cases.map((row) => [row.id, row.owner_unclear ?? false]).sort(),
+      [["plain", true], ["stratco", false]],
+    );
+    assert(
+      marnin.coverage.gaps.some((gap) =>
+        gap.includes("1 unassigned fencing lead(s) held as owner unclear")
+      ),
+    );
+    assertEquals(
+      (await read("khairo")).cases.map((row) => row.id),
+      ["assigned-khairo"],
+    );
+  }
 });
 
 Deno.test("read: a cached lead's live ownership recheck uses the same rule", async () => {
