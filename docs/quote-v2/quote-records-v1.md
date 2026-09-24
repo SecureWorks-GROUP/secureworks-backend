@@ -45,7 +45,8 @@ Cost (per unit, ex GST) comes from one of:
   supplier's price for THAT length, else its generic $/LM rate, else the line
   is refused `quote_line_unpriced`. The line records item, cost row, supplier,
   rate date, blessed or provisional, and which rate basis priced it.
-- `stated` (a named person and evidence), `tool` (a calculation id), or
+- `stated` (evidence; recorded as stated by the caller, never a name the
+  caller supplies), `tool` (a calculation id), or
   `none` (only with an owner-stated sell or adjustment; the owner's preview
   reads "no cost recorded", the party copy never shows it).
 
