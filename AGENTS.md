@@ -3874,3 +3874,10 @@ found by source pointer (every live copy has one), `graph:` provider key, or
 marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 `attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
+
+## Quote v2 Price Book Stores Cost, Never Sell (program branch)
+
+The program is not authorised for production carry-over. The price book stores
+cost to us, never sell rates or back-computed costs. Its stage boundaries,
+approval permissions, import restrictions and cut-to-order contract are owned
+by [`docs/quote-v2/price-book-v1.md`](docs/quote-v2/price-book-v1.md).
