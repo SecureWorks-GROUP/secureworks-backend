@@ -7,6 +7,10 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _resetFlagCache } from "../_shared/evidence/feature_flag.ts";
 import { handleGhlWebhook, type ReceiverDeps } from "./handler.ts";
+import {
+  legacyCallClient,
+  type StoredEvent,
+} from "../_shared/evidence/ghl_call_pair_test_support.ts";
 import { TEST_LOCATION_ID, TEST_WEBHOOK_SECRET } from "./named_rows_fixture.ts";
 
 // ── in-memory database ────────────────────────────────────
@@ -30,8 +34,15 @@ export interface DbOptions {
   insertError?: { code: string; message: string } | null;
   /** feature_flags rows by flag_name. Default: ghl_message_capture_v2 on. */
   flags?: Record<string, boolean>;
+  /** A feature flag read failure; callers must fail closed to the legacy path. */
+  flagReadError?: { code: string; message: string } | null;
   /** Overrides capture_business_event's answer for one row. */
   capture?: (row: Row) => { data: unknown; error: unknown };
+  /**
+   * Existing business_events rows the legacy call pairing reads (slice T1).
+   * Reads are answered by ghl_call_pair_test_support's filter; never written.
+   */
+  events?: StoredEvent[];
 }
 
 export interface RpcCall {
@@ -106,6 +117,43 @@ export function fakeDb(opts: DbOptions = {}) {
       });
     },
     from(table: string) {
+      // A business_events select is the legacy call pairing's read.
+      if (table === "business_events") {
+        const pairing = legacyCallClient(opts.events ?? []).client.from(table);
+        let writing = false;
+        const write = {
+          insert: (row: Row) => {
+            writing = true;
+            const op: Op = { table, kind: "insert", row, filters: [] };
+            ops.push(op);
+            return {
+              then: (
+                res: (v: unknown) => unknown,
+                rej?: (e: unknown) => unknown,
+              ) =>
+                Promise.resolve({ data: null, error: opts.insertError ?? null })
+                  .then(res, rej),
+            };
+          },
+        };
+        // deno-lint-ignore no-explicit-any
+        const both: any = {
+          ...write,
+          select: (...a: unknown[]) => (pairing.select(...a), both),
+          eq: (k: string, v: unknown) => (
+            ops.push({ table, kind: "select", filters: [[k, v]] }),
+              pairing.eq(k, v),
+              both
+          ),
+          or: (e: string) => (pairing.or(e), both),
+          limit: (n: number) => (pairing.limit(n), both),
+          then: (
+            res: (v: unknown) => unknown,
+            rej?: (e: unknown) => unknown,
+          ) => (writing ? Promise.resolve(null) : pairing).then(res, rej),
+        };
+        return both;
+      }
       const op: Op = { table, kind: "select", filters: [] };
       const result = () => {
         if (op.kind === "insert") {
@@ -117,6 +165,9 @@ export function fakeDb(opts: DbOptions = {}) {
         if (op.kind === "update") return { data: null, error: null };
         if (table === "jobs") return { data: opts.jobs ?? [], error: null };
         if (table === "feature_flags") {
+          if (opts.flagReadError) {
+            return { data: null, error: opts.flagReadError };
+          }
           const name = op.filters.find(([k]) => k === "flag_name")?.[1];
           return {
             data: [{ enabled: flags[String(name)] === true }],

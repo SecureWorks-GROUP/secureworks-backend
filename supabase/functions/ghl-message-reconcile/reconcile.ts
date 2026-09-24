@@ -20,12 +20,17 @@
 //                     messages back to the previous floor recovers what it held
 //                     (one GHL page usually covers it, so this costs little);
 //   * position        the last conversation fully read, as (last message time,
-//                     ids at that exact time), saved after every page.
+//                     ids at that exact time), saved after every page;
+//   * retry_from      the earliest time of a message whose save failed, kept
+//                     until a complete scan successfully retries it.
 // A scan that cannot finish in one run (page or time budget) is continued by the
 // next run from its position, so a burst larger than one run drains over
 // several runs instead of re-reading the same newest page forever (review M12).
 // The watermark (top of the last complete scan) only moves when a scan
 // completes; a failed run holds both the position and the watermark (F6).
+// A scan that completes with a failed save moves the watermark only up to that
+// message's time (retry_from). The next scan extends both floors below that
+// time, even past the ordinary look-back cap, until the message is retried.
 //
 // When the item flag ghl_message_capture_v2 or the capture lane is off the run
 // is idle: no provider read, no run row (F8: it drains on re-enable, reading
@@ -38,6 +43,7 @@ import {
   buildGhlMessageRow,
   type GhlMessageItem,
 } from "../_shared/evidence/ghl_message.ts";
+import type { LegacyCallPairOutcome } from "../_shared/evidence/ghl_call_pair.ts";
 
 /** context_capture_runs.source for this reconciler. */
 export const RUN_SOURCE = "ghl_message_reconcile";
@@ -89,6 +95,9 @@ export interface ScanState {
   list_floor: string;
   message_floor: string;
   position: { last_message_ms: number; ids: string[] } | null;
+  /** Earliest time of a message whose save failed in this scan. */
+  retry_from?: string | null;
+  incomplete_read: boolean;
   complete: boolean;
 }
 
@@ -134,6 +143,14 @@ export interface ReconcileDeps {
   existingKeys(keys: string[]): Promise<Set<string>>;
   /** capture_business_event(row). Never throws: a transport fault is outcome error. */
   capture(row: Record<string, unknown>): Promise<CaptureOutcome>;
+  /**
+   * For a call row: the row to write, with payload.legacy_event_id when exactly
+   * one legacy client.call_complete row of the contact sits around the call
+   * (_shared/evidence/ghl_call_pair.ts, slice T1). Never throws.
+   */
+  pairLegacyCall(
+    row: Record<string, unknown>,
+  ): Promise<{ row: Record<string, unknown>; outcome: LegacyCallPairOutcome }>;
 }
 
 export type ReconcileResult =
@@ -168,7 +185,13 @@ const COUNT_KEYS = [
   "skipped_no_id",
   "skipped_no_contact",
   "skipped_no_direction",
+  // Since slice T1 calls are saved as client.call_logged rows, so this stays 0;
+  // kept so every run row has the same count keys.
   "skipped_call",
+  // Slice T1: call rows that recorded their one legacy call row, and lookups
+  // that could not be read (the row is then written as normal).
+  "calls_paired_legacy",
+  "call_pair_unreadable",
   "skipped_activity",
   "skipped_unsupported_type",
   "backlog_conversations",
@@ -176,11 +199,34 @@ const COUNT_KEYS = [
   "boundary_tie_widened",
   "boundary_tie_fallbacks",
   "window_capped",
+  "retry_window_extended",
   "scan_continued",
   "scan_completed",
   "cursor_reset",
 ] as const;
 type CountKey = typeof COUNT_KEYS[number];
+
+const INCOMPLETE_READ_COUNT_KEYS = [
+  "conversations_no_date",
+  "conversations_unreadable",
+  "message_pages_capped",
+  "message_cursor_missing",
+  "write_errors",
+  "precheck_errors",
+  "skipped_no_id",
+  "skipped_no_contact",
+  "skipped_no_direction",
+  "backlog_conversations",
+  "backlog_more",
+  "boundary_tie_fallbacks",
+  "cursor_reset",
+] as const;
+
+export function readWasComplete(
+  counts: Readonly<Record<string, number>>,
+): boolean {
+  return INCOMPLETE_READ_COUNT_KEYS.every((key) => counts[key] === 0);
+}
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -272,12 +318,23 @@ export function parseScanState(cursor: unknown): ScanState | null {
     ) return null;
     position = { last_message_ms: at, ids: p.ids as string[] };
   }
+  let retryFrom: number | null = null;
+  if (c.retry_from !== null && c.retry_from !== undefined) {
+    retryFrom = ms(c.retry_from);
+    if (retryFrom === null) return null;
+  }
+  const incompleteRead = c.incomplete_read === undefined
+    ? false
+    : c.incomplete_read;
+  if (typeof incompleteRead !== "boolean") return null;
   return {
     v: 1,
     scan_top: iso(top),
     list_floor: iso(listFloor),
     message_floor: iso(messageFloor),
     position,
+    retry_from: retryFrom === null ? null : iso(retryFrom),
+    incomplete_read: incompleteRead,
     complete: c.complete,
   };
 }
@@ -320,6 +377,7 @@ function stopCode(f: ProviderFailure): string {
 type ConversationResult =
   | { kind: "done" }
   | { kind: "skipped"; code: string }
+  | { kind: "incomplete"; code: string }
   | { kind: "stop"; code: string };
 
 export async function runGhlMessageReconcile(
@@ -369,6 +427,7 @@ export async function runGhlMessageReconcile(
     counts.scan_continued = 1;
   } else {
     const oldest = started - policy.maxLookbackMs;
+    const pendingRetryMs = previous ? ms(previous.retry_from) : null;
     let listFloor = (watermarkMs ?? started - policy.initialLookbackMs) -
       policy.overlapMs;
     let messageFloor = Math.min(
@@ -383,15 +442,24 @@ export async function runGhlMessageReconcile(
       messageFloor = oldest;
       counts.window_capped = 1;
     }
+    if (pendingRetryMs !== null) {
+      const retryFloor = pendingRetryMs - policy.overlapMs;
+      if (retryFloor < oldest) counts.retry_window_extended = 1;
+      listFloor = Math.min(listFloor, retryFloor);
+      messageFloor = Math.min(messageFloor, retryFloor);
+    }
     scan = {
       v: 1,
       scan_top: iso(started),
       list_floor: iso(listFloor),
       message_floor: iso(messageFloor),
       position: null,
+      retry_from: pendingRetryMs === null ? null : iso(pendingRetryMs),
+      incomplete_read: false,
       complete: false,
     };
   }
+  scan.incomplete_read ||= !readWasComplete(counts);
   const listFloorMs = ms(scan.list_floor)!;
   const messageFloorMs = ms(scan.message_floor)!;
   const window = { from: scan.message_floor, to: scan.scan_top };
@@ -410,6 +478,15 @@ export async function runGhlMessageReconcile(
   const issue = (code: string) => {
     firstIssue ??= code;
   };
+  // A failed save pins the next scan's floors at or below its time. A message
+  // with no readable time pins the floor this scan read from, which still
+  // lists its conversation and reads the message again.
+  let retryFromMs = ms(scan.retry_from);
+  const failedSave = (at: number | null) => {
+    const t = at ?? messageFloorMs;
+    retryFromMs = retryFromMs === null ? t : Math.min(retryFromMs, t);
+    scan.retry_from = iso(retryFromMs);
+  };
 
   const readConversation = async (
     conversation: Record<string, unknown>,
@@ -420,7 +497,9 @@ export async function runGhlMessageReconcile(
     for (let page = 0;; page++) {
       if (page >= policy.maxMessagePagesPerConversation) {
         counts.message_pages_capped++;
-        return { kind: "done" };
+        return retryFromMs === null
+          ? { kind: "done" }
+          : { kind: "incomplete", code: "message_pages_capped" };
       }
       let read;
       try {
@@ -441,7 +520,7 @@ export async function runGhlMessageReconcile(
       counts.message_pages++;
       const items = read.messages;
       counts.items_seen += items.length;
-      const rows: Record<string, unknown>[] = [];
+      const rows: { row: Record<string, unknown>; at: number | null }[] = [];
       const keys = new Set<string>();
       let oldestOnPage: number | null = null;
       for (const item of items) {
@@ -469,7 +548,7 @@ export async function runGhlMessageReconcile(
         const key = String(built.row.provider_message_id);
         if (keys.has(key)) continue;
         keys.add(key);
-        rows.push(built.row);
+        rows.push({ row: built.row, at });
       }
       let existing = new Set<string>();
       if (rows.length) {
@@ -481,12 +560,21 @@ export async function runGhlMessageReconcile(
           counts.precheck_errors++;
         }
       }
-      for (const row of rows) {
+      for (const { row, at } of rows) {
         if (existing.has(String(row.provider_message_id))) {
           counts.duplicates++;
           continue;
         }
-        const out = await deps.capture(row);
+        let toWrite = row;
+        if (row.event_type === "client.call_logged") {
+          const paired = await deps.pairLegacyCall(row);
+          toWrite = paired.row;
+          if (paired.outcome === "paired") counts.calls_paired_legacy++;
+          else if (paired.outcome === "unreadable") {
+            counts.call_pair_unreadable++;
+          }
+        }
+        const out = await deps.capture(toWrite);
         if (out.outcome === "inserted") {
           counts.inserted++;
           counts.webhook_misses++;
@@ -497,6 +585,7 @@ export async function runGhlMessageReconcile(
         } else {
           counts.write_errors++;
           issue(`write_error:${safeCode(out.code, "unknown")}`);
+          failedSave(at);
         }
       }
       if (
@@ -505,7 +594,9 @@ export async function runGhlMessageReconcile(
       ) return { kind: "done" };
       if (!read.nextLastMessageId) {
         counts.message_cursor_missing++;
-        return { kind: "done" };
+        return retryFromMs === null
+          ? { kind: "done" }
+          : { kind: "incomplete", code: "message_cursor_missing" };
       }
       lastMessageId = read.nextLastMessageId;
     }
@@ -515,6 +606,8 @@ export async function runGhlMessageReconcile(
   let stop: string | null = null;
   let position = scan.position;
   let processed = 0;
+  let failurePositionCaptured = false;
+  let failedPosition: ScanState["position"] = null;
   // A page can hold only ids already read when many conversations share the
   // boundary millisecond (GHL has no tie-break cursor). Step 1 re-reads the
   // boundary with the largest page GHL allows; step 2, only if that is still
@@ -601,14 +694,31 @@ export async function runGhlMessageReconcile(
           counts.backlog_more = page.hasMore === false ? 0 : 1;
           break scanLoop;
         }
+        const writeErrorsBefore = counts.write_errors;
         const result = await readConversation(conversation);
+        if (
+          counts.write_errors > writeErrorsBefore &&
+          !failurePositionCaptured
+        ) {
+          failedPosition = position;
+          failurePositionCaptured = true;
+        }
         if (result.kind === "stop") {
           stop = result.code;
+          break scanLoop;
+        }
+        if (result.kind === "incomplete") {
+          issue(`retry_history_incomplete:${result.code}`);
+          scan.complete = false;
           break scanLoop;
         }
         if (result.kind === "skipped") {
           counts.conversations_unreadable++;
           issue(`conversation_unreadable:${result.code}`);
+          if (retryFromMs !== null) {
+            scan.complete = false;
+            break scanLoop;
+          }
         } else {
           counts.conversations_read++;
         }
@@ -630,12 +740,13 @@ export async function runGhlMessageReconcile(
       ) {
         tieStep = 2;
       }
-      scan.position = position;
+      scan.position = failurePositionCaptured ? failedPosition : position;
       if (!list.length || page.hasMore === false) {
         scan.complete = true;
         break;
       }
       // Save progress after every fully read page (review M12).
+      scan.incomplete_read ||= !readWasComplete(counts);
       await deps.recordRun({
         run_id: runId,
         source: RUN_SOURCE,
@@ -648,18 +759,37 @@ export async function runGhlMessageReconcile(
     // with its code; the position saved so far is kept.
     stop = safeCode(providerFailure(error).code ?? "run_error");
   }
+  if (!scan.complete && failurePositionCaptured) position = failedPosition;
+  if (
+    !scan.complete && failurePositionCaptured && retryFromMs !== null &&
+    (counts.conversations_unreadable > 0 ||
+      counts.message_pages_capped > 0 ||
+      counts.message_cursor_missing > 0 ||
+      counts.boundary_tie_fallbacks > 0)
+  ) position = null;
   scan.position = position;
 
   // 4. Finish the run row.
   const complete = scan.complete && !stop;
   if (!complete) scan.complete = false;
   counts.scan_completed = complete ? 1 : 0;
+  scan.incomplete_read ||= !readWasComplete(counts);
+  if (
+    complete && retryFromMs !== null && readWasComplete(counts) &&
+    !scan.incomplete_read
+  ) {
+    retryFromMs = null;
+    scan.retry_from = null;
+  }
+  if (retryFromMs !== null) issue("retry_pending");
   const watermark = complete
-    ? scan.scan_top
+    ? iso(Math.min(ms(scan.scan_top)!, retryFromMs ?? Infinity))
     : watermarkMs === null
     ? null
     : iso(watermarkMs);
-  const status: "succeeded" | "partial" | "failed" = stop
+  const status: "succeeded" | "partial" | "failed" = retryFromMs !== null
+    ? "partial"
+    : stop
     ? "failed"
     : !complete || firstIssue
     ? "partial"

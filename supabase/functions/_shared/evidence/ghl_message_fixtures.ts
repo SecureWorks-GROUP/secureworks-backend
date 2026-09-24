@@ -201,7 +201,94 @@ export const R32_EMAIL = {
   meta: { email: { messageIds: ["r32-email-message-id"] } },
 };
 
-/** A call and an activity item on a thread: not written by this path. */
+// ── Calls (slice T1; transcripts.md §10 N1 to N3) ──
+// Recorded read only on 24 Sep 2026 02:50Z (SecureSuite sw_list_ghl_messages)
+// from the SWP-26941 customer's only GHL conversation, the R9 contact. Every
+// field is the provider's own; the customer's number is replaced by the
+// placeholder +61400000000 (our 774 line is kept). Call items carry no body.
+const SWP_26941_CONTACT = "Oxqi7eCx2rGCsS0BXOH2";
+const SWP_26941_CONVERSATION = "3GOBTMJT1qEXkGwcodQK";
+const NITHIN_USER = "ERAycY7r6KZ8OA66WQCy";
+
+/** N1: 23 Sep 07:40Z, inbound to 774, answered, 109 s (the §7 trace call). */
+export const N1_CALL_ITEM = {
+  id: "6kn6WmrtfTMvhEJtmfeJ",
+  direction: "inbound",
+  status: "completed",
+  type: 1,
+  locationId: "13yKADzN94BRxX4hByYX",
+  contactId: SWP_26941_CONTACT,
+  conversationId: SWP_26941_CONVERSATION,
+  dateAdded: "2026-09-23T07:40:55.171Z",
+  dateUpdated: "2026-09-23T07:43:05.924Z",
+  userId: NITHIN_USER,
+  meta: { call: { duration: 109, status: "completed" } },
+  altId: "CAfcb0bf0b3d5308f16a6087ca116874a8",
+  from: "+61400000000",
+  to: "+61489267774",
+  messageType: "TYPE_CALL",
+};
+
+/** N2: 22 Sep 22:59Z, inbound voicemail to 774 (no duration from the provider). */
+export const N2_CALL_ITEM = {
+  id: "Py9PovOwc4I4vNkn9jXg",
+  direction: "inbound",
+  status: "voicemail",
+  type: 1,
+  locationId: "13yKADzN94BRxX4hByYX",
+  contactId: SWP_26941_CONTACT,
+  conversationId: SWP_26941_CONVERSATION,
+  dateAdded: "2026-09-22T22:59:20.907Z",
+  dateUpdated: "2026-09-22T23:00:01.982Z",
+  userId: NITHIN_USER,
+  meta: { call: { duration: null, status: "voicemail" } },
+  altId: "CA328d9bf74781d1cb8a8166ae38939924",
+  from: "+61400000000",
+  to: "+61489267774",
+  messageType: "TYPE_CALL",
+};
+
+/** N3: 21 Sep 23:16Z, outbound from 774 in the GHL app, 67 s. */
+export const N3_CALL_ITEM = {
+  id: "0Gct0u0TQNZox8DRAVLo",
+  direction: "outbound",
+  status: "completed",
+  type: 1,
+  locationId: "13yKADzN94BRxX4hByYX",
+  contactId: SWP_26941_CONTACT,
+  conversationId: SWP_26941_CONVERSATION,
+  dateAdded: "2026-09-21T23:16:29.130Z",
+  dateUpdated: "2026-09-21T23:17:52.879Z",
+  userId: NITHIN_USER,
+  source: "app",
+  meta: { call: { duration: 67, status: "completed" } },
+  altId: "CAe7fc92b16f2705949df9fb8bf806d99c",
+  from: "+61489267774",
+  to: "+61400000000",
+  messageType: "TYPE_CALL",
+};
+
+/** Same read: a 3 s outbound call on 31 Jul, too short to carry a transcript. */
+export const SHORT_CALL_ITEM = {
+  id: "heFD0jI7kzEenuByEnRs",
+  direction: "outbound",
+  status: "completed",
+  type: 1,
+  locationId: "13yKADzN94BRxX4hByYX",
+  contactId: SWP_26941_CONTACT,
+  conversationId: SWP_26941_CONVERSATION,
+  dateAdded: "2026-07-31T04:19:05.073Z",
+  dateUpdated: "2026-07-31T04:19:32.746Z",
+  userId: NITHIN_USER,
+  source: "app",
+  meta: { call: { duration: 3, status: "completed" } },
+  altId: "CAbed8de5cc7442f037604aacc3b0bd940",
+  from: "+61489267774",
+  to: "+61400000000",
+  messageType: "TYPE_CALL",
+};
+
+/** A call with nothing but its id, type, direction and time (placeholder, not recorded). */
 export const CALL_ITEM = {
   id: "callItemFixture01",
   messageType: "TYPE_CALL",

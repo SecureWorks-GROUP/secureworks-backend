@@ -288,12 +288,15 @@ jobs:
       # messages and the app's notes, tasks and appointments through the one
       # builder and writer behind ghl_message_capture_v2, the id-less targeted
       # read, ghl_webhook_receipts, and ghl-webhook's message branch removed.
+      # Slice T1: CallCompleted writes its legacy row with the flag off and is a
+      # doorbell (targeted read, calls saved as client.call_logged) with it on.
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ghl-webhook-receiver/receiver_auth_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_c1b_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_c1c_test.ts \
+            supabase/functions/ghl-webhook-receiver/receiver_t1_test.ts \
             supabase/functions/ghl-webhook/message_webhook_test.ts
 
       # Slice C1a: the shared GHL row builder, ghl-proxy send_sms through the one
@@ -304,6 +307,7 @@ jobs:
           deno test --allow-read --allow-env \
             supabase/functions/_shared/evidence/ghl_message_test.ts \
             supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts \
+            supabase/functions/_shared/evidence/ghl_call_pair_test.ts \
             supabase/functions/ghl-proxy/sms_capture_test.ts \
             supabase/functions/ghl-proxy/send_sms_response_test.ts
 

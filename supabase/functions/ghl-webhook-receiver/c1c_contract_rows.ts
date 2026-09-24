@@ -13,6 +13,9 @@ import {
   type GhlRecordEventType,
 } from "../_shared/evidence/ghl_message.ts";
 import {
+  N1_CALL_ITEM,
+  N2_CALL_ITEM,
+  N3_CALL_ITEM,
   R1_WEBHOOK,
   R25_NOTE_CREATE,
   R26_NOTE_CREATE,
@@ -63,6 +66,10 @@ export function c1cContractRows(): Record<string, Record<string, unknown>> {
     r30: record(R30_APPOINTMENT_UPDATE),
     r31_create: record(R31_APPOINTMENT_CREATE),
     r31_delete: record(R31_APPOINTMENT_DELETE),
+    // Slice T1: the call records the doorbell's targeted read saves.
+    n1: row(buildGhlMessageRow(N1_CALL_ITEM, ctx)),
+    n2: row(buildGhlMessageRow(N2_CALL_ITEM, ctx)),
+    n3: row(buildGhlMessageRow(N3_CALL_ITEM, ctx)),
   };
 }
 
