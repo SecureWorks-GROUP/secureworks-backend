@@ -173,6 +173,19 @@ Deno.test("T1 flag missing reads as off: the legacy row is still written (fail c
   assertEquals(captureRows(r).length, 0);
 });
 
+Deno.test("T1 unreadable flag reads as off: the legacy row is still written", async () => {
+  const r = await run(
+    await post(N1_CALL_COMPLETED, "secret"),
+    "enforce",
+    { flagReadError: { code: "57014", message: "statement timeout" } },
+  );
+  assertEquals(r.res.status, 200);
+  assertEquals(captureRows(r).length, 0);
+  assertEquals(evidenceRows(r).length, 1);
+  assertEquals(evidenceRows(r)[0].event_type, "client.call_complete");
+  assertFalse(r.fetches.some((f) => f.url.includes("leadconnectorhq")));
+});
+
 // ── flag on: a doorbell only ────────────────────────────────
 
 Deno.test("T1 flag on: N1's CallCompleted writes nothing itself; one targeted read saves N1 to N3 once each as client.call_logged", async () => {

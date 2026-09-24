@@ -34,6 +34,8 @@ export interface DbOptions {
   insertError?: { code: string; message: string } | null;
   /** feature_flags rows by flag_name. Default: ghl_message_capture_v2 on. */
   flags?: Record<string, boolean>;
+  /** A feature flag read failure; callers must fail closed to the legacy path. */
+  flagReadError?: { code: string; message: string } | null;
   /** Overrides capture_business_event's answer for one row. */
   capture?: (row: Row) => { data: unknown; error: unknown };
   /**
@@ -163,6 +165,9 @@ export function fakeDb(opts: DbOptions = {}) {
         if (op.kind === "update") return { data: null, error: null };
         if (table === "jobs") return { data: opts.jobs ?? [], error: null };
         if (table === "feature_flags") {
+          if (opts.flagReadError) {
+            return { data: null, error: opts.flagReadError };
+          }
           const name = op.filters.find(([k]) => k === "flag_name")?.[1];
           return {
             data: [{ enabled: flags[String(name)] === true }],

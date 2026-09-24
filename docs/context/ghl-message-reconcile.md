@@ -1,13 +1,35 @@
-# GHL message reconciler (context slice C1d)
+# GHL message and call capture (context slices C1c, C1d, T1)
 
 The safety net behind the GHL webhook (design `sms.md` §7 step 9). Every 15
 minutes pg_cron job `ghl-message-reconcile` (capture lane) calls
 `trigger_ghl_message_reconcile()`, which posts to edge function
 `ghl-message-reconcile` with the service key, only while feature flag
-`ghl_message_capture_v2` is on. The function reads GHL itself and saves any
-text the webhook missed through `_shared/evidence/ghl_message.ts` and
+`ghl_message_capture_v2` is on. The function reads GHL itself and saves missed
+messages and call items through `_shared/evidence/ghl_message.ts` and
 `capture_business_event` (source `ghl-message-reconcile`, `capture_mode:
 live`). It never places a row; the ladder does on insert.
+
+## Call items and the `CallCompleted` workflow (slice T1)
+
+The shared row builder maps GHL `TYPE_CALL`, voicemail and IVR call items to
+`client.call_logged` on channel `call`, keyed by `ghl:<message id>`. It keeps
+the provider's direction, status and duration, and stores no call words. A
+transcript is a separate event (T2).
+
+The legacy `CallCompleted` workflow branches on the same flag. When the flag is
+off, missing or unreadable, the receiver keeps writing its existing
+`client.call_complete` row. When the flag is on, the workflow post is a
+doorbell: the receiver reads the contact's newest conversation, ignores any
+conversation id in the workflow body, and saves the call item through the same
+builder and writer. The 15-minute reconciler is the recovery path when that
+immediate read misses the call. The flag is not enabled by this slice.
+
+Before writing a `client.call_logged` row, the receiver and reconciler look
+for a `client.call_complete` row for the same contact within the call's time
+window (120 seconds before call start through 120 seconds after its end). An
+exactly-one match is recorded as `payload.legacy_event_id`; zero or several
+matches leave the call row unpaired. Existing legacy rows are not edited or
+deleted.
 
 - Reads: `ghl-proxy` provider reads `list_recent_ghl_conversations`
   (location-wide, newest first by last message, `start_after_date` epoch ms)
