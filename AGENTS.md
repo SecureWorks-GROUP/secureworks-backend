@@ -3889,11 +3889,12 @@ A quote document's party is `(job_contact_id, run_label)`, null matching only
 null: the client, each neighbour and a whole-job quote are different parties.
 `send-quote/view` may show only that party's documents (same-party A/B options,
 or a forward from an older fence-run duplicate to the party's current one), and
-a retired link forwards only to the same party's current quote. Before this
-rule the page listed every live quote on the job with an Accept button each, so
-neighbours saw and could accept the client's quote (SWF-26646 had 18). Accept
-refuses a non-current run duplicate; "all accepted" counts current documents
-only. `/send` retires the party's earlier versions unless the caller passes
+a retired link forwards only to the same party's current quote; never list
+every live quote on the job. Accept refuses a non-current run duplicate; "all
+accepted" counts current documents only. Once any per-contact document exists,
+a job-wide document (contact null AND run label null) is not a required party
+for job acceptance and is not retired either; a contact-less RUN document (the
+client's `(null, 'RHS')`) still is required. `/send` retires the party's earlier versions unless the caller passes
 `supersede_prior: false`; `/send-runs` retires each published party's older run
 duplicates. Rules and tests: `send-quote/quote_party_view.ts`,
 `quote_party_view_test.ts`.
