@@ -445,13 +445,16 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
     end_iso: "2026-09-25T11:30:00+08:00",
     on_site_minutes: 30,
     travel: "computed_per_neighbour",
-    travel_model: "straight-line-v2",
+    travel_model: "straight-line-v3",
     travel_buffer_minutes: 30,
   });
   // Diary by user, then only the calendar the owner is on.
   assertEquals([...new Set(calls.filter((c) => c.startsWith("ghl:")))], [
     'ghl:{"userId":"3S20LGVTjsVYy9vTJ9wM"}',
-    'ghl:{"calendarId":"dEQKVKHthsjSYaen1fiE"}',
+    `ghl:${JSON.stringify({
+      calendarId: "dEQKVKHthsjSYaen1fiE",
+      userId: "3S20LGVTjsVYy9vTJ9wM",
+    })}`,
   ]);
   assert(calls.includes("outlook"));
   assertEquals(
@@ -505,12 +508,12 @@ Deno.test("owner calendar: the gap a GHL booking needs is travel from where it i
   assert(error.detail?.events[0].travel_minutes > 30);
 });
 
-Deno.test("owner approval requires a resolvable same-suburb travel location", async () => {
+Deno.test("owner approval applies the same-suburb travel minimum", async () => {
   const { deps: d, rows } = deps({
     ghlEvents: [{
       id: "ev-same-suburb",
       startTime: "2026-09-25T08:00:00+08:00",
-      endTime: "2026-09-25T08:30:00+08:00",
+      endTime: "2026-09-25T08:50:00+08:00",
       assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
       contactId: "someone-else",
       address: "1 Other St, Canning Vale",
@@ -518,9 +521,9 @@ Deno.test("owner approval requires a resolvable same-suburb travel location", as
   });
   const error = await refusal(
     call(d, { owner_input: input("calendar"), dry_run: true }),
-    "travel_location_unknown",
+    "ghl_calendar_clash",
   );
-  assertEquals(error.detail?.source, "ghl");
+  assertEquals(error.detail?.events[0].travel_minutes, 15);
   assertEquals(rows.length, 0);
 });
 
@@ -918,7 +921,7 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   ]);
   assertEquals(owner.rulebook.visit_minutes, 30);
   assert(!("on_site_minutes" in owner.rulebook));
-  assertEquals(owner.rulebook.travel.version, "straight-line-v2");
+  assertEquals(owner.rulebook.travel.version, "straight-line-v3");
   assertEquals(owner.rulebook.calendar.calendar_id, "dEQKVKHthsjSYaen1fiE");
   assertEquals(engine.engine_proposal, true);
   assertEquals(engine.engine_window.start, "2026-09-25T13:00:00+08:00");

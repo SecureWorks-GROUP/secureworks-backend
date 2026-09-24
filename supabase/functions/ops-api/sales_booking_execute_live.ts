@@ -332,8 +332,12 @@ export function createOwnerApprovalDeps(
         startTime: String(Date.parse(startIso)),
         endTime: String(Date.parse(endIso)),
       });
-      if ("userId" in selector) query.set("userId", selector.userId);
-      else query.set("calendarId", selector.calendarId);
+      if ("calendarId" in selector) {
+        query.set("calendarId", selector.calendarId);
+        query.set("userId", selector.userId);
+      } else {
+        query.set("userId", selector.userId);
+      }
       return ghlCompleteBody(
         await ghlRead(`/calendars/events?${query.toString()}`),
         "events",

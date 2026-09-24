@@ -24,7 +24,8 @@ After the pack overlay, for the person on screen:
    `RgDWTnYL6zL3eJA6nLht`). Their calendars are every active calendar that
    lists that user. STRATCO FENCING is round robin, so only rows assigned to
    the person count.
-2. GHL events for the week: the user-id window plus each of their calendars.
+2. GHL events for the week: the user-id window plus each confirmed-active
+   calendar assigned to that person, with both calendar and user filters.
    Other assignees and cancelled rows never block.
 3. GHL blocked-off time for the user (`/calendars/blocked-slots`).
 4. Outlook events the read already fetched for the diary (Marnin only) are
@@ -43,7 +44,7 @@ After the pack overlay, for the person on screen:
 | `calendar_read` | `state: read / could_not_read / not_configured`, `provider:"ghl"`, `source:"server_live_read"`, `reason`, `person`, `ghl_user_id`, `calendars`, `occupied_intervals`, `ghl_events`, `ghl_blocked_slots`, `outlook:{state,events,not_in_ghl}`, `caveats` |
 | `commitments` | Open offers `{id, contact_id, state:offered/agreed, start_iso, end_iso, source}`; `null` when the census could not be read (unknown, never an empty ledger) |
 | `commitments_read` | `read` or `could_not_read` with the reason |
-| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; intervals needing an unknown travel estimate are withheld |
+| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`, `travel_unknown`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; intervals needing an unknown travel estimate are withheld |
 
 Each case carries `free_times`: `location:{suburb, known}` and per day the
 `arrival_windows` for a visit to that lead's suburb, excluding that lead's own
@@ -75,7 +76,7 @@ The owner press (`sales_booking_owner_approval.ts`) applies the same rule:
 gap covers the computed travel. It refuses a neighboring event or offer when
 either location cannot be placed.
 
-### Travel estimate (`straight-line-v2`)
+### Travel estimate (`straight-line-v3`)
 
 No routing API key is configured and none was added.
 
@@ -83,14 +84,20 @@ No routing API key is configured and none was added.
 Examples: Duncraig to Hillarys 15, Duncraig to Canning Vale 50.
 
 Different suburbs use the median geocoded `jobs.site_lat/site_lng` point per
-suburb in production (177 suburbs, read-only SELECT 24 Sep 2026). A suburb
-centroid cannot estimate a trip between two different addresses in the same
-suburb, so that gap is unknown unless both location strings identify the same
-numbered address. Contact-based event and offer locations are used only when
-every loaded case for that contact agrees on one suburb. A location that cannot
-be placed has no travel estimate: affected arrival gaps are withheld, and owner
-approval waits until both locations resolve. Outlook events use their location
-display name for the same calculation.
+suburb in production (177 suburbs, read-only SELECT 24 Sep 2026). Two different
+visits in the same known suburb use a 15-minute minimum. Identical numbered
+addresses use the location formula, which gives the 5-minute floor. Contact-based
+event and offer locations are used only when every loaded case for that contact
+agrees on one suburb. A location that cannot be placed has no travel estimate:
+affected arrival gaps are withheld, and owner approval waits until both
+locations resolve. Outlook events use their location display name for the same
+calculation.
+
+The day state is `travel_unknown` when an on-site visit could fit if travel
+were known, but every remaining candidate window depends on an unknown travel
+gap. `no_time_left` means there is no remaining 30-minute on-site gap even
+without travel. Each case derives its state and windows using that case's own
+suburb, so a generic day with unknown travel can still have an `open` case row.
 
 ## Measured on 24 Sep 2026 (read-only)
 

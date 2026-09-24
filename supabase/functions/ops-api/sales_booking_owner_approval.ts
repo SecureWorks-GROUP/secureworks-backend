@@ -438,6 +438,7 @@ export function checkOwnerCalendarTarget(directory: GhlDirectory): string[] {
   }
   // Every calendar the owner is assigned to can hold one of his bookings.
   return directory.calendars.filter((c) =>
+    c.is_active === true &&
     c.assigned_user_ids.includes(target.assigned_user_id)
   ).map((c) => c.id);
 }
@@ -541,7 +542,7 @@ export interface OwnerApprovalDeps {
   readGhlDirectory(): Promise<GhlDirectory>;
   /** One complete GHL window read; throws when incomplete. */
   readGhlEvents(
-    selector: { userId: string } | { calendarId: string },
+    selector: { userId: string } | { calendarId: string; userId: string },
     startIso: string,
     endIso: string,
   ): Promise<BookingObject[]>;
@@ -918,7 +919,10 @@ async function checkOwnerVisitAvailability(
     );
     for (const calendarId of calendarIds) {
       batches.push(
-        await deps.readGhlEvents({ calendarId }, dayStart, dayEnd),
+        await deps.readGhlEvents({
+          calendarId,
+          userId: RULES.calendar.assigned_user_id,
+        }, dayStart, dayEnd),
       );
     }
   } catch {

@@ -12,12 +12,13 @@
  */
 
 export const SALES_BOOKING_TRAVEL_MODEL = Object.freeze({
-  version: "straight-line-v2",
+  version: "straight-line-v3",
   basis: "straight_line_distance_between_suburb_points",
   road_factor: 1.3,
   speed_kmh: 55,
   fixed_minutes: 5,
   round_up_to_minutes: 5,
+  same_suburb_minimum_minutes: 15,
   points_source:
     "median jobs.site_lat/site_lng per site_suburb, production, read 2026-09-24",
 });
@@ -304,7 +305,7 @@ function km(a: SuburbPoint, b: SuburbPoint): number {
 
 export interface TravelEstimate {
   minutes: number | null;
-  basis: "straight_line" | "unknown_location";
+  basis: "straight_line" | "same_suburb_minimum" | "unknown_location";
   km: number | null;
   from: string | null;
   to: string | null;
@@ -331,8 +332,8 @@ export function salesBookingTravelMinutes(
     const toAddress = normalizedSpecificAddress(to, b.suburb);
     if (!fromAddress || fromAddress !== toAddress) {
       return {
-        minutes: null,
-        basis: "unknown_location",
+        minutes: m.same_suburb_minimum_minutes,
+        basis: "same_suburb_minimum",
         km: null,
         from: a.suburb,
         to: b.suburb,

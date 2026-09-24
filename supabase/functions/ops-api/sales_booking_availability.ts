@@ -176,7 +176,7 @@ export function personGhlCalendars(
     };
   }
   const calendars = directory.calendars.filter((c) =>
-    c.is_active !== false && c.assigned_user_ids.includes(person.ghl_user_id)
+    c.is_active === true && c.assigned_user_ids.includes(person.ghl_user_id)
   ).map((c) => c.id);
   if (!calendars.length) {
     return { state: "not_configured", reason: "person_has_no_ghl_calendar" };
@@ -240,10 +240,27 @@ export function arrivalWindows(
   earliest: number,
   location: string | null,
 ): ArrivalWindow[] {
+  return arrivalWindowsWithTravelStatus(
+    busy,
+    dayStart,
+    dayEnd,
+    earliest,
+    location,
+  ).windows;
+}
+
+function arrivalWindowsWithTravelStatus(
+  busy: Busy[],
+  dayStart: number,
+  dayEnd: number,
+  earliest: number,
+  location: string | null,
+): { windows: ArrivalWindow[]; travel_unknown: boolean } {
   const onSite = SALES_BOOKING_ON_SITE_MINUTES * MINUTE;
   const items = busy.filter((b) => b.end > dayStart && b.start < dayEnd)
     .sort((a, b) => a.start - b.start || a.end - b.end);
   const out: ArrivalWindow[] = [];
+  let travelUnknown = false;
   let prev: Busy | null = null;
   const travel = (from: string | null, to: string | null, exempt: boolean) =>
     exempt
@@ -256,7 +273,21 @@ export function arrivalWindows(
     const after = next
       ? travel(location, next.location, next.travel_exempt)
       : null;
-    if (before.minutes === null || after?.minutes === null) return;
+    if (before.minutes === null || after?.minutes === null) {
+      const possibleFrom = ceil5(Math.max(
+        dayStart,
+        earliest,
+        prev
+          ? prev.end + (before.minutes ?? 0) * MINUTE
+          : dayStart,
+      ));
+      const possibleLatest = next
+        ? next.start - ((after?.minutes ?? 0) * MINUTE) - onSite
+        : dayEnd - onSite;
+      const possibleTo = floor5(Math.min(possibleLatest, dayEnd - onSite));
+      if (possibleTo >= possibleFrom) travelUnknown = true;
+      return;
+    }
     const from = ceil5(Math.max(
       dayStart,
       earliest,
@@ -282,7 +313,7 @@ export function arrivalWindows(
     if (!prev || item.end > prev.end) prev = item;
   }
   push(null);
-  return out;
+  return { windows: out, travel_unknown: travelUnknown };
 }
 
 function bookingDates(person: AvailabilityPerson, weekStart: string): string[] {
@@ -509,19 +540,22 @@ export function computeSalesBookingAvailability(
       : count >= person.max_per_day
       ? "full"
       : "open";
-    const windows = state === "open"
-      ? arrivalWindows(busy, dayStart, dayEnd, now, null)
-      : [];
+    const availability = state === "open"
+      ? arrivalWindowsWithTravelStatus(busy, dayStart, dayEnd, now, null)
+      : { windows: [], travel_unknown: false };
+    const dayState = state === "open" && !availability.windows.length
+      ? availability.travel_unknown ? "travel_unknown" : "no_time_left"
+      : state;
     return {
       date,
       weekday,
-      state: state === "open" && !windows.length ? "no_time_left" : state,
+      state: dayState,
       day_start: person.weekday_start[weekday] ?? person.day_start,
       day_end: person.day_end,
       booked: count,
       max_per_day: person.max_per_day,
       busy: busy.sort((a, b) => a.start - b.start).map(busySummary),
-      arrival_windows: windows,
+      arrival_windows: availability.windows,
       _busy: busy,
       _dayStart: dayStart,
       _dayEnd: dayEnd,
@@ -536,22 +570,32 @@ export function computeSalesBookingAvailability(
         suburb: row.suburb,
         known: salesBookingSuburbPoint(row.suburb) !== null,
       },
-      days: days.map((d) => ({
-        date: d.date,
-        state: d.state,
-        already_booked_that_day: d._busy.some((b) =>
-          b.source === "ghl" && b.contact_id === row.contact_id
-        ),
-        arrival_windows: d.state === "open" || d.state === "no_time_left"
-          ? arrivalWindows(
+      days: days.map((d) => {
+        const caseAvailability = d.state === "past" || d.state === "full"
+          ? { windows: [], travel_unknown: false }
+          : arrivalWindowsWithTravelStatus(
             d._busy.filter((b) => b.contact_id !== row.contact_id),
             d._dayStart,
             d._dayEnd,
             now,
             row.suburb,
-          )
-          : [],
-      })),
+          );
+        const state = caseAvailability.windows.length
+          ? "open"
+          : caseAvailability.travel_unknown
+          ? "travel_unknown"
+          : d.state === "past" || d.state === "full"
+          ? d.state
+          : "no_time_left";
+        return {
+          date: d.date,
+          state,
+          already_booked_that_day: d._busy.some((b) =>
+            b.source === "ghl" && b.contact_id === row.contact_id
+          ),
+          arrival_windows: caseAvailability.windows,
+        };
+      }),
     };
   }
 
@@ -604,7 +648,7 @@ export function computeSalesBookingAvailability(
 export interface SalesBookingAvailabilityDeps {
   readGhlDirectory(): Promise<GhlDirectory>;
   readGhlEvents(
-    selector: { userId: string } | { calendarId: string },
+    selector: { userId: string } | { calendarId: string; userId: string },
     startIso: string,
     endIso: string,
   ): Promise<BookingObject[]>;
@@ -661,7 +705,7 @@ export async function applySalesBookingAvailability(
         for (const calendarId of found.calendars) {
           batches.push(
             await deps.readGhlEvents(
-              { calendarId },
+              { calendarId, userId: person.ghl_user_id },
               week.since,
               week.until_exclusive,
             ),

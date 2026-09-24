@@ -10,6 +10,7 @@ import {
   type SalesBookingAvailabilityDeps,
 } from "./sales_booking_availability.ts";
 import { emptyBookingFlow } from "./sales_booking_confirmation.ts";
+import type { GhlDirectory } from "./sales_booking_owner_approval.ts";
 import type {
   SalesBookingCase,
   SalesBookingDiaryEntry,
@@ -28,7 +29,7 @@ const WEEK = {
 const MARNIN = "3S20LGVTjsVYy9vTJ9wM";
 const NITHIN = "ERAycY7r6KZ8OA66WQCy";
 
-const directory = (calendars = [
+const directory = (calendars: GhlDirectory["calendars"] = [
   {
     id: "dEQKVKHthsjSYaen1fiE",
     is_active: true,
@@ -101,13 +102,17 @@ Deno.test("travel: straight-line estimates require both locations", () => {
   const unknown = salesBookingTravelMinutes("Atlantis", "Hillarys");
   assertEquals([unknown.basis, unknown.minutes], ["unknown_location", null]);
   assertEquals(salesBookingTravelMinutes(null, "Hillarys").minutes, null);
-  assertEquals(salesBookingTravelMinutes("Hillarys", "Hillarys").minutes, null);
+  const sameSuburb = salesBookingTravelMinutes("Hillarys", "Hillarys");
+  assertEquals(
+    [sameSuburb.basis, sameSuburb.minutes],
+    ["same_suburb_minimum", 15],
+  );
   assertEquals(
     salesBookingTravelMinutes(
       "5 Somewhere Rd, Canning Vale WA 6155",
       "70 Other St, Canning Vale",
     ).minutes,
-    null,
+    15,
   );
   assertEquals(
     salesBookingTravelMinutes(
@@ -154,6 +159,7 @@ Deno.test("a visit fits 30 minutes on site plus travel to and from the neighbour
     d.date === "2026-10-02"
   );
   assertEquals(windows(own), [["08:00", "09:15"], ["11:15", "16:00"]]);
+  assertEquals(own.state, "open");
   assertEquals(own.arrival_windows[0].travel_after_minutes, 15);
   assertEquals(own.arrival_windows[1].travel_before_minutes, 15);
   assertEquals(r.calendar_read.ghl_events, 1);
@@ -171,11 +177,13 @@ Deno.test("an unlocated neighboring event withholds arrival windows", () => {
   }));
   assertEquals(r.calendar_read.state, "read");
   assertEquals(windows(friday(r)), []);
+  assertEquals(friday(r).state, "travel_unknown");
   const caseDay = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
   assert(caseDay);
   assertEquals(windows(caseDay), []);
+  assertEquals(caseDay.state, "travel_unknown");
 });
 
 Deno.test("a contact with cases in different suburbs cannot locate its event", () => {
@@ -227,7 +235,7 @@ Deno.test("other assignees and cancelled rows never block; blocked-off time does
 Deno.test("Outlook events already read for the diary are busy too, and ones missing from GHL are counted", () => {
   const entry: SalesBookingDiaryEntry = {
     event_id: "o1",
-    start: "2026-10-02T08:30:00+08:00",
+    start: "2026-10-02T08:00:00+08:00",
     end: "2026-10-02T16:30:00+08:00",
     title: "SecureWorks",
     kind: "busy",
@@ -341,6 +349,20 @@ Deno.test("a person with no GHL calendar is told plainly, for that person only",
   );
 });
 
+Deno.test("availability requires a confirmed-active GHL calendar", () => {
+  const r = computeSalesBookingAvailability(input({
+    directory: ok(directory([{
+      id: "dEQKVKHthsjSYaen1fiE",
+      is_active: null,
+      assigned_user_ids: [MARNIN],
+      assignments_returned: true,
+    }])),
+  }));
+  assertEquals(r.calendar_read.state, "not_configured");
+  assertEquals(r.calendar_read.reason, "person_has_no_ghl_calendar");
+  assertEquals(r.free_times, null);
+});
+
 Deno.test("open offers come from the census, block their slot, and drop once that lead is booked in GHL", () => {
   const census = ok({
     offers: [
@@ -367,7 +389,7 @@ Deno.test("open offers come from the census, block their slot, and drop once tha
     census,
     cases: [
       lead("opp:a", "c-a", "Hillarys"),
-      lead("opp:b", "c-b", "Duncraig"),
+      lead("opp:b", "c-b", "Hillarys"),
     ],
     events: ok([{
       id: "ev-booked",
@@ -381,7 +403,7 @@ Deno.test("open offers come from the census, block their slot, and drop once tha
     ["h1", "c-b", "offered"],
   ]);
   assertEquals(r.commitments_read.booked_in_ghl_dropped, 1);
-  // Duncraig to Hillarys: 15 minutes travel after the 11:00 offer ends.
+  // Different visits in Hillarys use the 15-minute minimum.
   const forA = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
     d.date === "2026-10-02"
   );
@@ -486,7 +508,7 @@ Deno.test("the live read replaces the hard-coded not-connected banner reason", a
   // User-id window, then each calendar the person is on, then blocked time.
   assertEquals(calls.slice(0, 3), [
     JSON.stringify({ userId: MARNIN }),
-    JSON.stringify({ calendarId: "dEQKVKHthsjSYaen1fiE" }),
+    JSON.stringify({ calendarId: "dEQKVKHthsjSYaen1fiE", userId: MARNIN }),
     `blocked:${MARNIN}`,
   ]);
   assertEquals(calls[3], "offers:2026-09-03T02:00:00.000Z");

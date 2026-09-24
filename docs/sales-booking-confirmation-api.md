@@ -312,9 +312,10 @@ thread).
 Availability, read at the press for the visit's whole Perth day (calendar
 step, and a message with an `offer`). The visit runs from window start to
 visit end; a neighbouring GHL booking or open offer needs a gap of the travel
-time between its location and the lead's suburb
-(`sales_booking_travel.ts`, `docs/sales-booking-live-availability.md`), and
-an Outlook event (which carries no location here) needs 30 minutes:
+time between its location and the lead's address
+(`sales_booking_travel.ts`, `docs/sales-booking-live-availability.md`). Outlook
+events use their location display name under the same rule; an unknown location
+refuses approval rather than using a fixed gap:
 `owner_calendar_unreadable`; `owner_calendar_unknown` (the STRATCO FENCING
 calendar must be active, list the owner's GHL user, and that user must be the
 one roster entry for marnin@secureworkswa.com.au); `ghl_calendar_unreadable`
@@ -352,7 +353,7 @@ and `hand_sent_texts` / `hand_sent_texts_note`. Each case carries
   "rulebook": {"days": ["Tue","Fri"], "bookable_dates": ["2026-09-25", "..."],
     "day_start": "08:00", "day_end": "16:30", "window_min_minutes": 60,
     "window_max_minutes": 90, "visit_minutes": 30, "travel_buffer_minutes": 30,
-    "travel": {"version": "straight-line-v2", ...},
+    "travel": {"version": "straight-line-v3", ...},
     "max_per_day": 6, "protected_bands": [...], "sender": "+61489267776",
     "calendar": {...}, "timezone": "Australia/Perth", "utc_offset": "+08:00"},
   "approvals": [{"approval_id", "step", "state", "reason",
