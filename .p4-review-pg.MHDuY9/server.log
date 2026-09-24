@@ -1,0 +1,41 @@
+2026-09-24 13:49:17.663 AWST [67878] LOG:  starting PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin24.6.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-09-24 13:49:17.664 AWST [67878] LOG:  listening on IPv4 address "127.0.0.1", port 57535
+2026-09-24 13:49:17.665 AWST [67878] LOG:  listening on Unix socket "/tmp/.s.PGSQL.57535"
+2026-09-24 13:49:17.669 AWST [67938] LOG:  database system was shut down at 2026-09-24 13:49:17 AWST
+2026-09-24 13:49:17.673 AWST [67878] LOG:  database system is ready to accept connections
+2026-09-24 13:49:18.752 AWST [69167] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:18.752 AWST [69167] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:19.749 AWST [70175] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:19.749 AWST [70175] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:19.839 AWST [70228] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:19.839 AWST [70228] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:19.915 AWST [70288] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:19.915 AWST [70288] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:20.399 AWST [70669] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:20.399 AWST [70669] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:20.698 AWST [70943] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:20.698 AWST [70943] WARNING:  SET LOCAL can only be used in transaction blocks
+2026-09-24 13:49:20.865 AWST [71114] ERROR:  conversion between UTF8 and SQL_ASCII is not supported at character 683
+2026-09-24 13:49:20.865 AWST [71114] STATEMENT:  CREATE TABLE public.visit_outcomes (
+	  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+	  booking_key text NOT NULL CHECK (length(btrim(booking_key)) BETWEEN 1 AND 300),
+	  appointment_id text,
+	  contact_id text NOT NULL CHECK (length(btrim(contact_id)) BETWEEN 1 AND 300),
+	  opportunity_id text,
+	  job_id uuid,
+	  scoper_user_id uuid NOT NULL,
+	  scoper_name text NOT NULL CHECK (length(btrim(scoper_name)) BETWEEN 1 AND 200),
+	  visit_start timestamptz NOT NULL CHECK (isfinite(visit_start)),
+	  outcome text NOT NULL CHECK (outcome IN ('happened', 'did_not_happen')),
+	  reason text,
+	  note text CHECK (char_length(note) <= 200 AND note !~ E'[\\n\\r\\t\\x01-\\x1f\\x7f]' AND note !~ U&'[\0085\2028\2029]'),
+	  quote_owed boolean NOT NULL,
+	  recorded_by_user_id uuid NOT NULL,
+	  recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+	  source text NOT NULL DEFAULT 'booking_screen' CHECK (source = 'booking_screen'),
+	  supersedes uuid UNIQUE REFERENCES public.visit_outcomes(id),
+	  CHECK ((outcome = 'happened' AND reason IS NULL) OR
+	    (outcome = 'did_not_happen' AND reason IS NOT NULL AND
+	      reason IN ('customer_not_home', 'we_did_not_attend', 'rescheduled'))),
+	  CHECK (supersedes IS DISTINCT FROM id)
+	);

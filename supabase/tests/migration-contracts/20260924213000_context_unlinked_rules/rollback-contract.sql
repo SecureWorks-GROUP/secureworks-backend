@@ -3,6 +3,8 @@
 \set ON_ERROR_STOP 1
 DO $$
 BEGIN
+ IF (SELECT count(*) FROM public.feature_flags WHERE flag_name='context_unlinked_rules_v1' AND NOT enabled)<>1 THEN
+  RAISE EXCEPTION 'p4 rollback: the flag must exist and be off'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)<>'fe50f14f4ab28d4d6c9dbb70bc85e7df'
  THEN RAISE EXCEPTION 'p4 rollback: the ladder is not the P1a body'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'7c1b8ffeeed8829288ee42c30e4314e5'
