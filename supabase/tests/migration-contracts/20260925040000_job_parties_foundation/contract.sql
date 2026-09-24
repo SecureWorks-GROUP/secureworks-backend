@@ -211,7 +211,8 @@ BEGIN
  -- With three neighbours and no portions the owner's share is unknown, never
  -- the whole job; the first neighbour's receipt says so.
  IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS NOT NULL THEN RAISE EXCEPTION 's-m1 owner kept the whole job beside neighbours'; END IF;
- IF NOT EXISTS (SELECT 1 FROM public.job_party_events WHERE job_contact_id=(school->>'job_contact_id')::uuid AND detail->>'owner_share_unknown'=o->>'job_contact_id')
+ IF NOT EXISTS (SELECT 1 FROM public.job_party_events WHERE job_contact_id=(school->>'job_contact_id')::uuid
+   AND detail->'owner_share'=jsonb_build_object('job_contact_id',o->>'job_contact_id','share_percentage',NULL))
  THEN RAISE EXCEPTION 's-m1 owner share change not in the receipt'; END IF;
  -- A later owner save with no portions keeps it unknown.
  PERFORM public.upsert_job_party(j,'primary','{}'::jsonb,'contract');
@@ -303,12 +304,37 @@ BEGIN
  IF r.status<>'active' OR r.ghl_contact_id<>'fxS4NeighbourGhl' OR r.phone_last9<>'412424036' THEN RAISE EXCEPTION 's-m1 S4 party %',to_jsonb(r); END IF;
  IF (SELECT count(*) FROM public.job_contacts WHERE job_id=j)<>1 THEN RAISE EXCEPTION 's-m1 S4 a second party was inserted'; END IF;
  SELECT * INTO e FROM public.job_party_events WHERE job_contact_id=r.id ORDER BY created_at DESC,id DESC LIMIT 1;
- IF e.change<>'party_updated' OR e.detail#>>'{identity_correction,0,key}'<>'phone' OR e.detail#>>'{identity_correction,0,method}'<>'same_name'
-  OR e.detail#>>'{identity_correction,0,old}'=e.detail#>>'{identity_correction,0,new}' OR e.detail::text ~ '41242403|0412'
+ IF e.change<>'party_updated' OR e.detail->'identity_correction'<>'[{"key":"phone","method":"same_name"}]'::jsonb
+  OR e.detail::text ~ '41242403|0412|[0-9a-f]{8}' OR e.detail::text ~* md5('412424035') OR e.detail::text ~* md5('412424036')
  THEN RAISE EXCEPTION 's-m1 S4 correction receipt %',to_jsonb(e); END IF;
  -- A different name and a different phone on the same key is someone else.
  b:=public.upsert_job_party(j,'nb-1','{"client_name":"Someone Else Entirely","client_phone":"0433 111 222"}','contract');
  IF b->>'outcome'<>'party_replaced' OR b->>'source_party_key'<>'nb-1#2' THEN RAISE EXCEPTION 's-m1 S4 other person not replaced %',b; END IF;
+END $$;
+ROLLBACK;
+
+-- 4c. The owner's share with no portions follows whether a neighbour is
+-- active: 100 alone, unknown beside a neighbour, 100 again once the last
+-- neighbour is soft-removed (S12 SWF-26025).
+BEGIN;
+INSERT INTO public.jobs(id,org_id,status,type,job_number,client_name,client_phone,ghl_contact_id,xero_contact_id,site_address,site_suburb,archived,created_at)
+SELECT id,'00000000-0000-0000-0000-000000000001',status,'fencing',job_number,client_name,client_phone,ghl,xero,site_address,site_suburb,status='archived',created_at FROM sm1_jobs;
+DO $$
+DECLARE o jsonb; n jsonb; j uuid:='5c120000-0000-4000-8000-000000026025';
+BEGIN
+ o:=public.upsert_job_party(j,'primary','{}'::jsonb,'contract');
+ n:=public.upsert_job_party(j,'nb-1','{"client_name":"S12 Neighbour Party"}','contract');
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS NOT NULL THEN RAISE EXCEPTION 's-m1 S12 owner whole beside a neighbour'; END IF;
+ PERFORM public.upsert_job_party(j,'nb-1','{"status":"removed"}','contract');
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS DISTINCT FROM 100 THEN RAISE EXCEPTION 's-m1 S12 owner not whole after the last neighbour left'; END IF;
+ IF NOT EXISTS (SELECT 1 FROM public.job_party_events WHERE job_contact_id=(n->>'job_contact_id')::uuid
+   AND detail->'owner_share'=jsonb_build_object('job_contact_id',o->>'job_contact_id','share_percentage',100)) THEN RAISE EXCEPTION 's-m1 S12 owner share receipt'; END IF;
+ PERFORM public.upsert_job_party(j,'nb-1','{"status":"active"}','contract');
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS NOT NULL THEN RAISE EXCEPTION 's-m1 S12 owner whole after restore'; END IF;
+ -- A neighbour removed outside the writer (a legacy path): the next owner save restores the whole share.
+ UPDATE public.job_contacts SET status='removed',removed_at=now() WHERE id=(n->>'job_contact_id')::uuid;
+ PERFORM public.upsert_job_party(j,'primary','{}'::jsonb,'contract');
+ IF (SELECT share_percentage FROM public.job_contacts WHERE id=(o->>'job_contact_id')::uuid) IS DISTINCT FROM 100 THEN RAISE EXCEPTION 's-m1 S12 owner save did not restore 100'; END IF;
 END $$;
 ROLLBACK;
 
