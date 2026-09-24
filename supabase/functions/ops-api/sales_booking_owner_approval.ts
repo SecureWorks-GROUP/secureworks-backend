@@ -699,7 +699,11 @@ export async function salesBookingOwnerApprovalAction(args: {
   // Build the exact content. Identity and route come from server truth only.
   let content: BookingObject;
   let visit: CheckedVisit | null = null;
-  let visitLocation: string | null = lead.suburb;
+  let visitLocation: string | null = ownerSiteAddress(
+    lead.contact,
+    lead.suburb,
+    lead.job_site,
+  )?.address ?? lead.suburb;
   if (input.step === "message") {
     const t = input.text;
     if (typeof t !== "string" || !t.trim() || t.length > MAX_TEXT) {

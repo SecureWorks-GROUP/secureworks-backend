@@ -30,7 +30,11 @@ After the pack overlay, for the person on screen:
 3. GHL blocked-off time for the user (`/calendars/blocked-slots`).
 4. Outlook events the read already fetched for the diary (Marnin only) are
    also busy. No new Outlook read. A failed Outlook read is a caveat, not a
-   block: GHL is the source, and the press still re-checks Outlook.
+   block: GHL is the source, and the press still re-checks Outlook. An Outlook
+   event is counted as mirrored only when its `mirror_of_ghl_event_id` matches
+   a GHL event id; time overlap or blocked time is not mirror proof. If the
+   diary read dropped malformed events, a named caveat is returned and free
+   times are withheld.
 5. Open offers: the same census the owner press uses
    (`systemOfferCensus`, `sales_booking_executions` claimed in the last 21
    days joined to their approvals, plus live owner approvals). An offer to a
@@ -44,11 +48,11 @@ After the pack overlay, for the person on screen:
 | `calendar_read` | `state: read / could_not_read / not_configured`, `provider:"ghl"`, `source:"server_live_read"`, `reason`, `person`, `ghl_user_id`, `calendars`, `occupied_intervals`, `ghl_events`, `ghl_blocked_slots`, `outlook:{state,events,not_in_ghl}`, `caveats` |
 | `commitments` | Open offers `{id, contact_id, state:offered/agreed, start_iso, end_iso, source}`; `null` when the census could not be read (unknown, never an empty ledger) |
 | `commitments_read` | `read` or `could_not_read` with the reason |
-| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`, `travel_unknown`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; intervals needing an unknown travel estimate are withheld |
+| `free_times` | The rule, and per bookable day: `state` (`open`, `full`, `past`, `no_time_left`, `travel_unknown`), `booked`, `busy[]`, `arrival_windows[]` for a lead of unknown location; null when the Outlook diary dropped malformed events |
 
-Each case carries `free_times`: `location:{suburb, known}` and per day the
-`arrival_windows` for a visit to that lead's suburb, excluding that lead's own
-offers.
+Each case carries `free_times` (null when the Outlook diary dropped malformed
+events): `location:{suburb, known}` and per day the `arrival_windows` for a visit
+to that lead's suburb, excluding that lead's own offers.
 
 ### Named reasons
 
@@ -56,7 +60,8 @@ offers.
 `ghl_calendar_assignments_unreadable`, `person_has_no_ghl_calendar`
 (`not_configured`), `ghl_events_unreadable: <why>`,
 `ghl_blocked_slots_unreadable: <why>`, `ghl_event_times_malformed`,
-`person_not_configured`, `travel_location_unknown`. Offers: `system_offers_unreadable: <why>`,
+`person_not_configured`, `travel_location_unknown`,
+`outlook_malformed_dropped: <count>` (free times withheld). Offers: `system_offers_unreadable: <why>`,
 `system_sends_no_offers_for_this_person` (Nithin, Khairo: this system has no
 send path for their leads, so its own census is complete and empty).
 

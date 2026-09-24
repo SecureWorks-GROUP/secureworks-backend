@@ -1014,6 +1014,24 @@ Deno.test("engine path still works when owner reads are wired, and never touches
   );
 });
 
+Deno.test("an owner message offer uses the full lead address for travel", async () => {
+  const { deps: d } = deps({
+    ghlEvents: [{
+      id: "ev-same-address",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:50:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "another-lead",
+      address: "12 Fictional Way, Canning Vale",
+    }],
+  });
+  const result = await call(d, {
+    owner_input: input("message", { offer: FRI }),
+    dry_run: true,
+  });
+  assert("dry_run" in result);
+});
+
 Deno.test("owner request shape refusals and a decision already recorded on the same content", async () => {
   const { deps: d, rows } = deps();
   await refusal(

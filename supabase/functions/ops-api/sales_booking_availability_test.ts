@@ -249,6 +249,12 @@ Deno.test("Outlook events already read for the diary are busy too, and ones miss
   };
   const r = computeSalesBookingAvailability(input({
     outlook: { state: "read", reason: null, entries: [entry] },
+    events: ok([{
+      id: "unrelated-ghl-event",
+      startTime: "2026-10-02T09:30:00+08:00",
+      endTime: "2026-10-02T10:30:00+08:00",
+      assignedUserId: MARNIN,
+    }]),
   }));
   assertEquals(friday(r).state, "no_time_left");
   assertEquals(r.calendar_read.outlook, {
@@ -256,6 +262,30 @@ Deno.test("Outlook events already read for the diary are busy too, and ones miss
     events: 1,
     not_in_ghl: 1,
   });
+  const mirrored = computeSalesBookingAvailability(input({
+    outlook: {
+      state: "read",
+      reason: null,
+      entries: [{ ...entry, mirror_of_ghl_event_id: "ghl-mirror" }],
+    },
+    events: ok([{
+      id: "ghl-mirror",
+      startTime: entry.start,
+      endTime: entry.end,
+      assignedUserId: MARNIN,
+    }]),
+  }));
+  assertEquals(mirrored.calendar_read.outlook.not_in_ghl, 0);
+  const blockedOnly = computeSalesBookingAvailability(input({
+    outlook: { state: "read", reason: null, entries: [entry] },
+    blocked: ok([{
+      id: "blocked-window",
+      startTime: entry.start,
+      endTime: entry.end,
+      assignedUserId: MARNIN,
+    }]),
+  }));
+  assertEquals(blockedOnly.calendar_read.outlook.not_in_ghl, 1);
   // A failed Outlook read is a named caveat; GHL is still the source.
   const failed = computeSalesBookingAvailability(input({
     outlook: {
@@ -428,6 +458,37 @@ Deno.test("an unreadable offer census keeps commitments null (unknown) while the
   );
 });
 
+Deno.test("case capacity excludes that lead's own open offer", () => {
+  const events = Array.from({ length: 5 }, (_, i) => ({
+    id: `visit-${i}`,
+    startTime: `2026-10-02T${String(9 + i).padStart(2, "0")}:00:00+08:00`,
+    endTime: `2026-10-02T${String(9 + i).padStart(2, "0")}:30:00+08:00`,
+    assignedUserId: MARNIN,
+    address: "5 Main St, Hillarys",
+  }));
+  const r = computeSalesBookingAvailability(input({
+    events: ok(events),
+    census: ok({
+      offers: [{
+        contact_id: "c-a",
+        start_iso: "2026-10-02T09:00:00+08:00",
+        end_iso: "2026-10-02T10:00:00+08:00",
+        source: "system_text" as const,
+        binding_hash: "own-offer",
+      }],
+      unverified_texts: [],
+      unsettled_messages: [],
+      booked: {},
+    }),
+  }));
+  assertEquals(friday(r).state, "full");
+  const ownDay = r.case_free_times["opp:a"].days.find((d: { date: string }) =>
+    d.date === "2026-10-02"
+  );
+  assertEquals(ownDay.state, "open");
+  assert(windows(ownDay).length > 0);
+});
+
 Deno.test("a day at its visit cap is full", () => {
   const events = Array.from({ length: 6 }, (_, i) => ({
     id: `ev-${i}`,
@@ -462,7 +523,12 @@ function readResponse(): SalesBookingReadResponse {
     diary: [],
     diary_read: {
       sources: {
-        outlook: { state: "read", read_ok: true, reason: null },
+        outlook: {
+          state: "read",
+          read_ok: true,
+          reason: null,
+          malformed_dropped: 0,
+        },
       },
     },
     cases: [lead("opp:a", "c-a", "Hillarys")],
@@ -512,6 +578,19 @@ Deno.test("the live read replaces the hard-coded not-connected banner reason", a
     `blocked:${MARNIN}`,
   ]);
   assertEquals(calls[3], "offers:2026-09-03T02:00:00.000Z");
+});
+
+Deno.test("a partial Outlook diary read names the gap and withholds free times", async () => {
+  const response = readResponse();
+  response.diary_read.sources.outlook.malformed_dropped = 1;
+  const { deps } = liveDeps();
+  const after = await applySalesBookingAvailability(response, deps);
+  assertEquals(after.booking_flow!.calendar_read.state, "read");
+  assertEquals(after.booking_flow!.calendar_read.caveats, [
+    "outlook_malformed_dropped: 1",
+  ]);
+  assertEquals(after.booking_flow!.free_times, null);
+  assertEquals(after.cases[0].free_times, null);
 });
 
 Deno.test("a throwing reader is a named reason on the banner, never an exception", async () => {

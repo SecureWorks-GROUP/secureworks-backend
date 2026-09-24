@@ -129,6 +129,7 @@ export interface AvailabilityInput {
     state: "read" | "failed" | "not_configured";
     reason: string | null;
     entries: SalesBookingDiaryEntry[];
+    malformed_dropped?: number;
   };
   census: GhlRead<SystemOfferCensus>;
   cases: SalesBookingCase[];
@@ -141,6 +142,7 @@ interface Busy {
   label: string | null;
   location: string | null;
   contact_id: string | null;
+  event_id?: string | null;
   /** Protected bands already carry their fixed travel buffer. */
   travel_exempt: boolean;
 }
@@ -214,6 +216,7 @@ function ghlBusy(
       label: text(row.title) || null,
       location: text(row.address) || null,
       contact_id: text(row.contactId) || null,
+      event_id: id || null,
       travel_exempt: false,
     });
   }
@@ -411,6 +414,14 @@ export function computeSalesBookingAvailability(
     return none("could_not_read", "ghl_event_times_malformed", identity);
   }
   const caveats: string[] = [];
+  const droppedOutlookCount = input.outlook.malformed_dropped ?? 0;
+  const outlookMalformedDropped = Number.isInteger(droppedOutlookCount) &&
+      droppedOutlookCount > 0
+    ? droppedOutlookCount
+    : 0;
+  if (outlookMalformedDropped) {
+    caveats.push(`outlook_malformed_dropped: ${outlookMalformedDropped}`);
+  }
   const outlook: Busy[] = [];
   if (input.outlook.state === "read") {
     for (const e of input.outlook.entries) {
@@ -430,11 +441,16 @@ export function computeSalesBookingAvailability(
   } else if (input.outlook.state === "failed") {
     caveats.push(`outlook_unread: ${input.outlook.reason ?? "unknown"}`);
   }
-  const ghlAll = [...events, ...blocked];
-  const outlookNotInGhl =
-    outlook.filter((o) =>
-      !ghlAll.some((g) => g.start < o.end && o.start < g.end)
-    ).length;
+  const ghlEventIds = new Set(events.flatMap((e) =>
+    e.source === "ghl" && e.event_id ? [e.event_id] : []
+  ));
+  const outlookNotInGhl = input.outlook.state === "read"
+    ? input.outlook.entries.filter((o) =>
+      o.source === "outlook" && o.blocks_capacity &&
+      (!o.mirror_of_ghl_event_id ||
+        !ghlEventIds.has(o.mirror_of_ghl_event_id))
+    ).length
+    : 0;
 
   const suburbByContact = salesBookingSuburbByUnambiguousContact(input.cases);
   for (const e of events) {
@@ -559,6 +575,8 @@ export function computeSalesBookingAvailability(
       _busy: busy,
       _dayStart: dayStart,
       _dayEnd: dayEnd,
+      _ghlCount: ghlCount,
+      _offeredContactIds: [...offeredContacts],
     };
   });
 
@@ -571,7 +589,16 @@ export function computeSalesBookingAvailability(
         known: salesBookingSuburbPoint(row.suburb) !== null,
       },
       days: days.map((d) => {
-        const caseAvailability = d.state === "past" || d.state === "full"
+        const caseCount = d._ghlCount + d._offeredContactIds.filter((id) =>
+          id !== row.contact_id
+        ).length;
+        const caseDayState = d.state === "past"
+          ? "past"
+          : caseCount >= d.max_per_day
+          ? "full"
+          : "open";
+        const caseAvailability = caseDayState === "past" ||
+            caseDayState === "full"
           ? { windows: [], travel_unknown: false }
           : arrivalWindowsWithTravelStatus(
             d._busy.filter((b) => b.contact_id !== row.contact_id),
@@ -584,8 +611,8 @@ export function computeSalesBookingAvailability(
           ? "open"
           : caseAvailability.travel_unknown
           ? "travel_unknown"
-          : d.state === "past" || d.state === "full"
-          ? d.state
+          : caseDayState === "past" || caseDayState === "full"
+          ? caseDayState
           : "no_time_left";
         return {
           date: d.date,
@@ -619,7 +646,7 @@ export function computeSalesBookingAvailability(
     },
     commitments,
     commitments_read: commitmentsRead,
-    free_times: {
+    free_times: outlookMalformedDropped ? null : {
       version: SALES_BOOKING_AVAILABILITY_VERSION,
       as_of: asOf,
       person: person.name,
@@ -639,9 +666,16 @@ export function computeSalesBookingAvailability(
         note: "Intervals needing travel to or from an unknown location are " +
           "withheld. Each case's free_times uses that lead's suburb.",
       },
-      days: days.map(({ _busy, _dayStart, _dayEnd, ...d }) => d),
+      days: days.map(({
+        _busy,
+        _dayStart,
+        _dayEnd,
+        _ghlCount,
+        _offeredContactIds,
+        ...d
+      }) => d),
     },
-    case_free_times: caseFree,
+    case_free_times: outlookMalformedDropped ? {} : caseFree,
   };
 }
 
@@ -746,6 +780,7 @@ export async function applySalesBookingAvailability(
       state: outlookSource?.state ?? "not_configured",
       reason: outlookSource?.reason ?? null,
       entries: (response.diary ?? []).filter((e) => e.source === "outlook"),
+      malformed_dropped: outlookSource?.malformed_dropped ?? 0,
     },
     census,
     cases: response.cases,
