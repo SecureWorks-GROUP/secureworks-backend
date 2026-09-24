@@ -456,6 +456,7 @@ Deno.test("trade MakeSafe board serves the make-safe card and never the repair c
       orgId: "fixture-org",
       role: "ops_manager",
       managedVerticals: ["makesafe"],
+      seeEverything: false,
     },
     { generatedAt: "2026-08-31T00:00:00Z" },
   );

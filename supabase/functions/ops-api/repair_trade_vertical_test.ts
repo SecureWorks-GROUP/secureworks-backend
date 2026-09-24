@@ -149,10 +149,11 @@ Deno.test("resolveManagerVisibility: manager of makesafe AND repair gets both po
   assertEquals(v.poolVerticals, ["makesafe", "repair"]);
 });
 
-Deno.test("resolveManagerVisibility: dispatcher does not implicitly gain the repair pool (matches fencing/patio/decking)", () => {
+Deno.test("resolveManagerVisibility: see-everything does not implicitly gain the repair pool (matches fencing/patio/decking)", () => {
   const admin = _resolveManagerVisibility({
     role: "admin",
     managedVerticals: [],
+    seeEverything: true,
   });
   assertEquals(admin.isDispatcher, true);
   assertEquals(admin.poolVerticals, ["makesafe"]);
@@ -360,10 +361,11 @@ Deno.test("access tier: a make-safe-only division manager does NOT get division_
       access: { orgId: ORG_A, managedVerticals: ["makesafe"] },
     },
   );
-  // Falls through to the make-safe open-report door (any signed-in trade may
-  // report on an open make-safe) rather than the full manager tier — the
-  // point being it is NOT "division_manager" any more.
-  assertEquals(d.tier, "makesafe_open");
+  // makesafe_open retired 2026-09-24: with no assignment on this job, an
+  // unrelated make-safe manager is refused outright rather than falling
+  // through to the (now-removed) open-report door — the point being it is
+  // NOT "division_manager" any more, and it is no longer "makesafe_open" either.
+  assertEquals(d.tier, "none");
   assertEquals(d.quoteVisible, false);
 });
 
@@ -802,8 +804,9 @@ async function poolFor(
   fx: PoolFixtures,
   recorded: PoolQuery[] = [],
   role = "lead_installer",
+  seeEverything = false,
 ) {
-  const vis = _resolveManagerVisibility({ role, managedVerticals: managed });
+  const vis = _resolveManagerVisibility({ role, managedVerticals: managed, seeEverything });
   const scope = _managerBoardVerticals({
     isDispatcher: vis.isDispatcher,
     mode: "all",
@@ -1026,6 +1029,7 @@ const CAL_HUGO: TradeAuthContext = {
   orgId: ORG_A,
   role: "lead_installer",
   managedVerticals: ["makesafe"],
+  seeEverything: false,
 };
 
 function calRow(
@@ -1173,6 +1177,7 @@ Deno.test("make-safe pool: a dispatcher still sees an unallocated repair-family 
   const dispatcherVis = _resolveManagerVisibility({
     role: "ops_manager",
     managedVerticals: [],
+    seeEverything: true,
   });
   assertEquals(dispatcherVis.isDispatcher, true);
   assertEquals(
@@ -1180,7 +1185,7 @@ Deno.test("make-safe pool: a dispatcher still sees an unallocated repair-family 
     false,
     "a pure dispatcher gains no repair pool",
   );
-  const dispatcherPool = await poolFor([], fx(), [], "ops_manager");
+  const dispatcherPool = await poolFor([], fx(), [], "ops_manager", true);
   assert(
     dispatcherPool.includes("job-ms-repair"),
     "Hugo-class dispatcher keeps SWMS-261319 in the make-safe pool",
@@ -1371,6 +1376,7 @@ const RITA_CTX: TradeAuthContext = {
   orgId: ORG_A,
   role: "lead_installer",
   managedVerticals: ["repair"],
+  seeEverything: false,
 };
 const HUGO_CTX: TradeAuthContext = {
   id: HUGO,
@@ -1378,6 +1384,7 @@ const HUGO_CTX: TradeAuthContext = {
   orgId: ORG_A,
   role: "lead_installer",
   managedVerticals: ["makesafe"],
+  seeEverything: false,
 };
 
 Deno.test("work-order invoice authz: the weekly lane and the single door agree on a repair-family job", async () => {

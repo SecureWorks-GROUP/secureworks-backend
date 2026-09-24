@@ -355,19 +355,25 @@ function seed(): Tables {
   };
 }
 
-const viewer = (id: string, role: string, managedVerticals: string[] = []) => ({
+const viewer = (
+  id: string,
+  role: string,
+  managedVerticals: string[] = [],
+  seeEverything = false,
+) => ({
   id,
   email: `${id}@example.test`,
   orgId: ORG_A,
   role,
   managedVerticals,
+  seeEverything,
 });
 
-const office = (role: string) =>
-  _resolveManagerVisibility({ role, managedVerticals: [] }).isDispatcher;
+const office = (seeEverything: boolean) =>
+  _resolveManagerVisibility({ role: "irrelevant", managedVerticals: [], seeEverything }).isDispatcher;
 
 async function detail(t: Tables, v: ReturnType<typeof viewer>) {
-  const isOffice = office(v.role);
+  const isOffice = office(v.seeEverything);
   return await _tradeJobDetailForTest(
     makeClient(t),
     new URLSearchParams({ jobId: JOB_FENCE }),
@@ -378,9 +384,30 @@ async function detail(t: Tables, v: ReturnType<typeof viewer>) {
 
 // ── The predicate itself ─────────────────────────────────────────────────────
 
-Deno.test("tier: office (admin / owner / ops_manager) is office everywhere and sees the quote", async () => {
+// Captain ruling 2026-09-24: Trade App office tier comes from the explicit
+// see-everything flag (users.trade_sees_all_jobs), never from role alone —
+// admin/owner/ops_manager is the Ops Dashboard staff-role set and is
+// unchanged there, but it no longer implies Trade App "office" by itself.
+Deno.test("tier: office (admin / owner / ops_manager) role ALONE no longer grants office — the see-everything flag is required", async () => {
   for (const role of ["admin", "owner", "ops_manager"]) {
     const isOffice = _resolveManagerVisibility({ role, managedVerticals: [] }).isDispatcher;
+    assertEquals(isOffice, false, role);
+    const d = await resolveTradeJobAccessTier(makeClient(seed()), JOB_FENCE, OFFICE, {
+      isOffice,
+      access: { orgId: ORG_A, managedVerticals: [] },
+    });
+    assertEquals(d.tier, "none", role);
+    assertEquals(d.quoteVisible, false, role);
+  }
+});
+
+Deno.test("tier: see-everything (Shaun/Marnin/Jan/Esther) is office everywhere and sees the quote, regardless of role", async () => {
+  for (const role of ["admin", "owner", "ops_manager", "crew", "lead_installer"]) {
+    const isOffice = _resolveManagerVisibility({
+      role,
+      managedVerticals: [],
+      seeEverything: true,
+    }).isDispatcher;
     assertEquals(isOffice, true, role);
     const d = await resolveTradeJobAccessTier(makeClient(seed()), JOB_FENCE, OFFICE, {
       isOffice,
@@ -481,12 +508,17 @@ Deno.test("tier: missing and tenant-mismatched jobs share the same generic 404",
   assertEquals((foreignRefusal as ApiError).status, 404);
 });
 
-Deno.test("tier: the MakeSafe field-report exception is preserved as its own tier and never sees the quote", async () => {
+// makesafe_open RETIRED 2026-09-24 (Captain ruling: "only hugo/ whoever
+// that's allocated a make safe from now on"). An unallocated trade with no
+// see-everything or make-safe category-manager standing is now refused
+// exactly like on any other vertical — the report door is gone.
+Deno.test("tier: the retired MakeSafe field-report exception now refuses an unallocated trade, same as any other vertical", async () => {
   const d = await resolveTradeJobAccessTier(makeClient(seed()), JOB_MS, STRANGER, {
     access: { orgId: ORG_A, managedVerticals: [] },
   });
-  assertEquals(d.tier, "makesafe_open");
+  assertEquals(d.tier, "none");
   assertEquals(d.quoteVisible, false);
+  assertEquals(d.reason, "not_assigned");
 });
 
 Deno.test("tier: the predicate never reads job_assignments.role", async () => {
@@ -1065,7 +1097,7 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   assertEquals(allocated.media[0].amount, undefined);
   assertEquals(JSON.stringify(allocated.notes).includes("9999"), false);
   assertEquals(allocated.media[0].notes, undefined);
-  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  const office = await detail(t, viewer(OFFICE, "ops_manager", [], true));
   assertEquals(office.notes[0].detail_json.text, "Client approved $9,999 excluding GST");
   assertEquals(office.notes[0].detail_json.message, "Charge $9,999 extra");
   assertEquals(office.notes[0].detail_json.amount, 9999);
@@ -1077,7 +1109,14 @@ Deno.test("trade_job_detail: allocated path money-sanitizes job event and media 
   );
 });
 
-Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO prose", async () => {
+// makesafe_open RETIRED 2026-09-24. An unallocated crew member with no
+// see-everything or make-safe category-manager standing is now refused
+// trade_job_detail outright on a make-safe job — there is no more open
+// report door to prove redaction through, so this proves the refusal itself;
+// the redaction assertions this test used to carry now live entirely on the
+// `allocated` case in "trade_job_detail: allocated strips MakeSafe billing
+// overlay" below.
+Deno.test("trade_job_detail: an unallocated crew member is refused on a make-safe job (no more open report door)", async () => {
   const t = seed();
   t.job_documents.push({
     id: "d-ms-wo",
@@ -1094,22 +1133,20 @@ Deno.test("trade_job_detail: makesafe_open drops priced WO PDFs and sanitizes WO
     scope_items: [{ description: "Make safe $850", quantity: 1, unit: "lot", rate: 85 }],
     status: "sent",
   });
-  const p = await _tradeJobDetailForTest(
-    makeClient(t),
-    new URLSearchParams({ jobId: JOB_MS }),
-    viewer(STRANGER, "crew") as any,
-    false,
+  await assertRejects(
+    () =>
+      _tradeJobDetailForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId: JOB_MS }),
+        viewer(STRANGER, "crew") as any,
+        false,
+      ),
+    Error,
+    "You are not assigned to this job",
   );
-  assertEquals(p.access_tier, "makesafe_open");
-  assertEquals(p.quote_visible, false);
-  assertEquals(p.documents.map((d: any) => d.id), []);
-  assertEquals(p.workOrderDocuments, []);
-  assertEquals(JSON.stringify(p).includes("ms-wo.pdf"), false);
-  assertEquals(p.workOrders[0].special_instructions, undefined);
-  assertEquals(p.workOrders[0].scope_items, [{ description: "Make safe", quantity: 1, unit: "lot" }]);
 });
 
-Deno.test("trade_job_detail: allocated and makesafe_open strip MakeSafe billing overlay", async () => {
+Deno.test("trade_job_detail: allocated strips MakeSafe billing overlay", async () => {
   const t = seed();
   t.jobs.find((j: any) => j.id === JOB_MS).notes = "Attend after hours.";
   t.makesafe_job_details = [{
@@ -1141,13 +1178,10 @@ Deno.test("trade_job_detail: allocated and makesafe_open strip MakeSafe billing 
     viewer(LEAD, "lead_installer") as any,
     false,
   );
-  const open = await _tradeJobDetailForTest(
-    makeClient(t),
-    new URLSearchParams({ jobId: JOB_MS }),
-    viewer(STRANGER, "crew") as any,
-    false,
-  );
-  for (const p of [allocated, open]) {
+  // makesafe_open retired 2026-09-24: an unallocated stranger is refused
+  // outright now, proven separately above — only the allocated tier's
+  // redaction is exercised here.
+  for (const p of [allocated]) {
     assertEquals(p.quote_visible, false);
     assertEquals(p.makesafe_details.invoice_notes, undefined);
     assertEquals(p.makesafe_details.billing_rules, undefined);
@@ -1165,7 +1199,7 @@ Deno.test("trade_job_detail: allocated and makesafe_open strip MakeSafe billing 
   const officeP = await _tradeJobDetailForTest(
     makeClient(t),
     new URLSearchParams({ jobId: JOB_MS }),
-    viewer(OFFICE, "ops_manager") as any,
+    viewer(OFFICE, "ops_manager", [], true) as any,
     true,
   );
   assertEquals(officeP.quote_visible, true);
@@ -1212,7 +1246,7 @@ Deno.test("trade_job_detail: allocated service reports drop money and keep hours
   assertEquals(allocated.serviceReports[0].notes, allocated.serviceReport.notes);
   assertEquals(JSON.stringify(allocated.serviceReport).includes("9999"), false);
   assertEquals(JSON.stringify(allocated.serviceReports).includes("8800"), false);
-  const officeP = await detail(t, viewer(OFFICE, "ops_manager"));
+  const officeP = await detail(t, viewer(OFFICE, "ops_manager", [], true));
   assertEquals(officeP.serviceReport.notes, "Installed rear run. Charge 1200 extra. Total 9999.");
   assertEquals(officeP.serviceReport.checklist_json.rate, 85);
   // billed_total / quoted_amount are not operational columns — the trade
@@ -1535,7 +1569,7 @@ Deno.test("trade_job_detail: allocated scopeSummary is built from the redacted n
   assertEquals(JSON.stringify(allocated.scopeSummary).includes("594"), false);
   assertEquals(allocated.scopeSummary.includes("Colorbond"), true);
   assertEquals(allocated.scopeSummary.includes("Monument"), true);
-  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  const office = await detail(t, viewer(OFFICE, "ops_manager", [], true));
   assertEquals(office.scopeSummary.includes("$9,999") || office.job.scope_json.job.material.includes("$9,999"), true);
   assertEquals(office.job.scope_json.job.quotedTotals, [594]);
 });
@@ -1582,7 +1616,7 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
   assertEquals(allocated.purchaseOrders[0].supplier_name, "Acme Sheets");
   assertEquals(JSON.stringify(allocated.purchaseOrders).includes("99.50"), false);
   assertEquals(JSON.stringify(allocated.purchaseOrders).includes("9999"), false);
-  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  const office = await detail(t, viewer(OFFICE, "ops_manager", [], true));
   assertEquals(office.quote_visible, true);
   assertEquals(office.purchaseOrders[0].line_items[0].description, "Sheets $99.50. Total 9999.");
   assertEquals(office.purchaseOrders[0].supplier_name, "Acme Sheets $99.50");
@@ -1602,16 +1636,19 @@ Deno.test("trade_job_detail: allocated PO line descriptions are money-sanitized;
     status: "sent",
     line_items: [{ description: "Sheets $99.50. Total 9999.", quantity: 12, unit_price: 99.5 }],
   }];
-  const open = await _tradeJobDetailForTest(
-    makeClient(t),
-    new URLSearchParams({ jobId: JOB_MS }),
-    viewer(STRANGER, "crew") as any,
-    false,
+  // makesafe_open retired 2026-09-24: an unallocated stranger no longer gets
+  // an open report door onto this make-safe job at all.
+  await assertRejects(
+    () =>
+      _tradeJobDetailForTest(
+        makeClient(t),
+        new URLSearchParams({ jobId: JOB_MS }),
+        viewer(STRANGER, "crew") as any,
+        false,
+      ),
+    Error,
+    "You are not assigned to this job",
   );
-  assertEquals(open.access_tier, "makesafe_open");
-  assertEquals(open.quote_visible, false);
-  assertEquals(open.purchaseOrders[0].line_items[0].description, "");
-  assertEquals(open.purchaseOrders[0].supplier_name, "Acme Sheets");
 });
 
 Deno.test("projectTradePurchaseOrders allocated lines keep only scalars; office may keep nested quantity", () => {
@@ -1681,7 +1718,7 @@ Deno.test("projectTradePurchaseOrders allocated drops money-shaped PO units; off
 });
 
 Deno.test("trade_job_detail: office gets the same as the manager", async () => {
-  const p = await detail(seed(), viewer(OFFICE, "ops_manager"));
+  const p = await detail(seed(), viewer(OFFICE, "ops_manager", [], true));
   assertEquals(p.access_tier, "office");
   assertEquals(p.quote_visible, true);
   assertEquals(p.job.scope_json._pricing_json.totalIncGST, 8800);
@@ -2436,12 +2473,15 @@ Deno.test("trade_labour_budget: the division manager passes (was refused by the 
   assertEquals(p.labour_budget, 3200);
 });
 
-// The shared tier predicate grants `makesafe_open` to ANY signed-in trade on ANY
-// make-safe job (it asks whether the job is a make-safe, never whether it is
-// open to this caller). That is right for the field-report doors and wrong here:
-// this response names every assigned crew member, their hours, their
-// trade_rates.hourly_rate and the cost derived from it.
-Deno.test("trade_labour_budget: the MakeSafe open-pool tier is refused — another trade's pay is not a report-door read", async () => {
+// makesafe_open is retired (Captain ruling 2026-09-24): the shared tier
+// predicate used to grant it to ANY signed-in trade on ANY make-safe job (it
+// asked whether the job is a make-safe, never whether it is open to this
+// caller) — a field-report door that this response, naming every assigned
+// crew member, their hours, their trade_rates.hourly_rate and the cost
+// derived from it, was never the right fit for. Now the predicate refuses an
+// unallocated caller outright, so there is no open-pool carve-out left to
+// prove here — only that the refusal still holds.
+Deno.test("trade_labour_budget: an unallocated stranger is refused — another trade's pay is not a report-door read", async () => {
   const t = seed();
   t.job_assignments.push({
     id: "a-ms-lead",
@@ -2456,11 +2496,13 @@ Deno.test("trade_labour_budget: the MakeSafe open-pool tier is refused — anoth
   t.trade_rates = [{ user_id: LEAD, hourly_rate: 95, effective_from: "2026-01-01", effective_to: null }];
   t.users = [{ id: LEAD, name: "Lead Installer" }];
 
-  // Control: the tier IS makesafe_open, so the refusal is the door's doing.
+  // Control: makesafe_open retired 2026-09-24 — the tier is now 'none'
+  // outright, so the refusal below is the tier predicate's doing directly,
+  // not a labour-budget-specific carve-out of a still-live open door.
   const tier = await resolveTradeJobAccessTier(makeClient(t), JOB_MS, STRANGER, {
     access: { orgId: ORG_A, managedVerticals: [] },
   });
-  assertEquals(tier.tier, "makesafe_open");
+  assertEquals(tier.tier, "none");
 
   await assertRejects(
     () =>
@@ -2626,7 +2668,7 @@ Deno.test("quote lines: the allocated trade sees every quote row and the quote's
 
 Deno.test("quote lines: office sees the same rows and the extract HTML prints them without money", async () => {
   const t = woodvaleSeed();
-  const office = await detail(t, viewer(OFFICE, "ops_manager"));
+  const office = await detail(t, viewer(OFFICE, "ops_manager", [], true));
   assertEquals(office.quote_packs[0].quote_lines.length, 6);
   // The late freeze from the office read wrote the pack; the extract now serves.
   const htmlRes = await _tradeQuoteExtractForTest(

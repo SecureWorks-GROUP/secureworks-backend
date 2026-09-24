@@ -157,6 +157,7 @@ function trade(id = TRADE, role = "lead_installer"): TradeAuthContext {
     orgId: ORG,
     role,
     managedVerticals: [],
+    seeEverything: false,
   };
 }
 

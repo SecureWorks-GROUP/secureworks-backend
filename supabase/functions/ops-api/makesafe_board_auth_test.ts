@@ -140,31 +140,60 @@ Deno.test("ordinary crew token gets 200 with allocated-only rows", () => {
   assertEquals(response.body.permissions.can_allocate, false);
 });
 
-Deno.test("Khairo production sales-role token gets fencing view-only", () => {
-  const response = tradeRoute("jwt", {
+// Retired 2026-09-24 (Captain ruling, "go A"): the role==='sales' /
+// managed_verticals 'fencing' fencing_view_only special case on this board is
+// gone — nothing live depended on it (no production user held role 'sales',
+// and trade.html never read fencing_view_only). A fencing category manager
+// with no make-safe standing now gets plain allocated_only, matching "let
+// them have access to history of the jobs they were allocated to" for every
+// category they don't manage. Khairo's actual post-migration profile is
+// managed_verticals=['fencing'], not role='sales' — this proves the shape
+// either way produces the same, now-uniform answer.
+Deno.test("a fencing-only manager (sales role or managed_verticals fencing) gets plain allocated_only on the make-safe board, not a special view-only shape", () => {
+  const bySalesRole = tradeRoute("jwt", {
     userId: "khairo",
     role: "sales",
     managedVerticals: [],
   });
-  assertEquals(response.status, 200);
-  assertEquals(response.body.rows, []);
-  assertEquals(response.body.permissions, {
-    visibility: "allocated_only",
-    sees_all_makesafes: false,
-    fencing_view_only: true,
-    can_allocate: false,
+  const byManagedVertical = tradeRoute("jwt", {
+    userId: "khairo",
+    role: "lead_installer",
+    managedVerticals: ["fencing"],
   });
+  for (const response of [bySalesRole, byManagedVertical]) {
+    assertEquals(response.status, 200);
+    assertEquals(response.body.rows, []);
+    assertEquals(response.body.permissions, {
+      visibility: "allocated_only",
+      sees_all_makesafes: false,
+      fencing_view_only: false,
+      can_allocate: false,
+    });
+  }
 });
 
-Deno.test("admin token gets Hugo-equivalent read access for verification", () => {
+Deno.test("role alone (admin) no longer grants make-safe board see-all — the see-everything flag is required", () => {
   const response = tradeRoute("jwt", {
     userId: "marnin",
     role: "admin",
     managedVerticals: [],
   });
   assertEquals(response.status, 200);
+  assertEquals(response.body.permissions.sees_all_makesafes, false);
+  assertEquals(response.body.rows, []);
+});
+
+Deno.test("see-everything (Shaun/Marnin/Jan/Esther) gets Hugo-equivalent read access, regardless of role", () => {
+  const response = tradeRoute("jwt", {
+    userId: "marnin",
+    role: "admin",
+    managedVerticals: [],
+    seeEverything: true,
+  });
+  assertEquals(response.status, 200);
   assertEquals(response.body.rows.length, ROWS.length);
   assertEquals(response.body.permissions.sees_all_makesafes, true);
+  assertEquals(response.body.permissions.can_allocate, true);
 });
 
 Deno.test("anonymous and master-key callers still get 403", () => {
@@ -185,19 +214,24 @@ Deno.test("unknown signed-in role fails closed with 403", () => {
   );
 });
 
+// The allow-list of roles permitted to REACH this endpoint at all is
+// unchanged (an authentication question). Which VISIBILITY each gets is no
+// longer role-shaped at all since the 2026-09-24 ruling: every listed role,
+// absent the explicit see-everything flag and with no managed vertical, gets
+// the same allocated_only answer — proven once here rather than per-role.
 Deno.test("the published trade projection role contract is exact and every listed role is recognized", () => {
-  const expected: Record<string, string> = {
-    admin: "all_makesafes",
-    owner: "all_makesafes",
-    ops_manager: "all_makesafes",
-    crew: "allocated_only",
-    estimator: "allocated_only",
-    installer: "allocated_only",
-    lead_installer: "allocated_only",
-    sales: "allocated_only",
-  };
-  assertEquals([...MAKESAFE_TRADE_PROJECTION_ROLES], Object.keys(expected));
-  for (const [role, visibility] of Object.entries(expected)) {
+  const roles = [
+    "admin",
+    "owner",
+    "ops_manager",
+    "crew",
+    "estimator",
+    "installer",
+    "lead_installer",
+    "sales",
+  ];
+  assertEquals([...MAKESAFE_TRADE_PROJECTION_ROLES], roles);
+  for (const role of roles) {
     const access = authorizeMakesafeTradeProjection("jwt", {
       userId: `user-${role}`,
       role,
@@ -205,7 +239,25 @@ Deno.test("the published trade projection role contract is exact and every liste
     });
     assertEquals(access.status, 200, role);
     if (access.ok) {
-      assertEquals(access.permissions.visibility, visibility, role);
+      assertEquals(
+        access.permissions.visibility,
+        "allocated_only",
+        `${role}: role alone no longer grants board see-all`,
+      );
+    }
+  }
+  // The see-everything flag grants all_makesafes for EVERY role on the
+  // allow-list, not just the traditional office roles.
+  for (const role of roles) {
+    const access = authorizeMakesafeTradeProjection("jwt", {
+      userId: `user-${role}`,
+      role,
+      managedVerticals: [],
+      seeEverything: true,
+    });
+    assertEquals(access.status, 200, role);
+    if (access.ok) {
+      assertEquals(access.permissions.visibility, "all_makesafes", role);
     }
   }
 });

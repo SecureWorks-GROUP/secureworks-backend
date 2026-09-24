@@ -260,6 +260,7 @@ Deno.test("submit_makesafe_report attributes a mixed-credential Trade request fr
     orgId: "org-test",
     role: "installer",
     managedVerticals: [],
+    seeEverything: false,
   });
   assertEquals(rows.job_service_reports[0].submitted_by, "hugo-user-id");
   assertEquals(rows.job_events[0].user_id, "hugo-user-id");
@@ -298,6 +299,7 @@ Deno.test("submit_makesafe_report JWT authority is tenant-scoped before report o
           orgId: "different-org",
           role: "installer",
           managedVerticals: [],
+          seeEverything: false,
         },
       ),
     Error,
@@ -390,7 +392,18 @@ Deno.test("submit_makesafe_report rejects final submit with fewer than 5 photos"
 });
 
 Deno.test("confirm_upload stamps a MakeSafe photo with the server current cycle", async () => {
-  const { client, rows } = makeSubmitClient(baseRows());
+  // makesafe_open retired 2026-09-24: this test exercises cycle-stamping, not
+  // access-tier behaviour, so the caller now needs a real assignment — the
+  // open-report door it used to ride is gone.
+  const { client, rows } = makeSubmitClient(baseRows({
+    job_assignments: [{
+      id: "assignment-trade-1",
+      job_id: "job-1",
+      user_id: "trade-1",
+      status: "scheduled",
+      role: "lead_installer",
+    }],
+  }));
 
   const result: any = await _confirmUploadForTest(
     client,

@@ -1,5 +1,17 @@
 # Trade app three-tier access model — gap map, fixes, and the live report (2026-08-17)
 
+**Superseded 2026-09-24** by an explicit per-person tier — see
+`docs/trade-all-means-all-v1.md`'s "Addendum (2026-09-24)". Tier 1 ("Office")
+below is no longer `users.role in admin/owner/ops_manager`; it is the new
+`users.trade_sees_all_jobs` flag, independent of role. Tier 2 ("Division
+manager") is unchanged in shape (`users.managed_verticals` contains the job's
+vertical) but is now the ONLY way a staff-role user (e.g. an `ops_manager`
+who is not on the see-everything list) gets anything beyond their own
+allocations on the Trade App — the office role itself no longer implies it.
+This document's diagnosis, gap table and per-surface "After" column remain an
+accurate historical record of the 2026-08-17 state; read them with that
+in mind, not as the current rule.
+
 Captain ruling (2026-08-17):
 
 > "Henry should be classed as the fencing division manager. He sees everything, he can do whatever he wants and he can allocate jobs. If a trade is allocated, they're either the lead or the crew. The lead and the crew should be able to see everything except the quote, and only Henry and the admin guys see the quote."
@@ -108,7 +120,7 @@ Legend: T1 office, T2 division manager (of the job's vertical), T3 allocated tra
 2. **`pricing_json.labourTotal` in `trade_labour_budget`.** Read as a component of the quote, so it no longer funds an allocated trade's budget (PO labour lines still do). If the Captain regards the labour budget as not-the-quote, drop the `quoteVisible` guard there.
 3. **`scope_json.pricing.labour.{trades,days,dayRate}` kept for allocated trades** (the app's existing "Labour Budget" card shows exactly this to installers; `sell` is stripped). If the Captain wants even that hidden, remove `labour` from `TRADE_SCOPE_LABOUR_KEEP_KEYS`.
 4. **MakeSafe open-pool exception kept.** Any signed-in trade may open/report an open MakeSafe before a named assignment exists (`makesafe_open` tier). The ruling says "if a trade is allocated…", so an unallocated trade on a make-safe is outside its letter; the exception is a deliberate, tested product flow (Hugo's intake), so it is kept and named as its own tier that never sees a quote. Removing it is the Captain's call.
-5. **`search_all_jobs` typed search reaches every tenant job for every trade** (and the empty-query All tab reaches every company job for Everyone-lens users) by the Captain's 2026-07-31 ruling. The 2026-08-17 ruling implies a plain trade should see only allocated jobs and a manager only their trade. Two rulings conflict; this PR changes nothing there and lists it for the Captain rather than silently reverting the earlier ruling. Note the feed select carries `notes` and `metadata`, not pricing.
+5. **RESOLVED 2026-09-24** (`docs/trade-all-means-all-v1.md` addendum): `search_all_jobs` typed search reaches every tenant job for every trade (and the empty-query All tab reaches every company job for Everyone-lens users) by the Captain's 2026-07-31 ruling. The 2026-08-17 ruling implied a plain trade should see only allocated jobs and a manager only their trade — the Captain's 2026-09-24 ruling resolves the conflict explicitly in favour of the three-tier model: see-everything keeps the whole tenant, a category manager is now bounded to their managed vertical(s) plus their own allocations, and everyone else is bounded to only their own allocations, server-side, on every path (not just the empty-query browse). Note the feed select carries `notes` and `metadata`, not pricing.
 6. **`pipeline` / `ops_summary` dropped from the lead_installer read exception** rather than vertical-scoped. Verified against the served `trade.html` (secureworks-ux `main`, 2026-08-17): neither action is called. If a manager surface needs a board read, it should be `my_jobs mode=all` (already vertical-scoped).
 7. **`crew_charges_on_my_jobs` / `review_crew_charge` / `list_pending_verifications` now need `is_lead`.** Until leads are designated (`set_job_lead`), these three show nothing / refuse. That is the ruled meaning of "lead"; the alternative (keep reading the worthless `role`) lets any crew member approve any other trade's invoice line.
 8. **`owner` added to the Trade dispatcher set.** Office tier is admin/owner/ops_manager everywhere; the Trade resolvers had `admin || ops_manager` only.

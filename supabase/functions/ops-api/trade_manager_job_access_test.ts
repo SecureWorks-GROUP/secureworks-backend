@@ -389,21 +389,28 @@ Deno.test("get_service_report CONTROL: an unassigned installer is still refused"
   );
 });
 
-// ── The MakeSafe field-report exception is untouched ────────────────────────
+// ── The MakeSafe field-report exception is RETIRED (Captain 2026-09-24) ─────
+// "only hugo/ whoever that's allocated a make safe from now on." An
+// unallocated trade with no see-everything or make-safe category-manager
+// standing no longer gets a report door onto an open MakeSafe.
 
-Deno.test("CONTROL: any trade may still read/write an open MakeSafe with no named assignment (unchanged exception)", async () => {
+Deno.test("CONTROL: an unallocated trade with no make-safe standing is now refused on an open MakeSafe (retired exception)", async () => {
   const note = await outcome(_addNoteForTest(
     makeClient(fixtures()),
     { jobId: "job-ms", userId: SONNY.id, text: "on site" },
     false,
     access(SONNY),
   ));
-  assertEquals(note, "passed");
-  const rep = await _getServiceReportForTest(
-    makeClient(fixtures()),
-    new URLSearchParams({ jobId: "job-ms" }),
-    SONNY.id,
-    access(SONNY),
+  assertEquals(note, "refused");
+  await assertRejects(
+    () =>
+      _getServiceReportForTest(
+        makeClient(fixtures()),
+        new URLSearchParams({ jobId: "job-ms" }),
+        SONNY.id,
+        access(SONNY),
+      ),
+    Error,
+    "not assigned",
   );
-  assertEquals(rep.report, null);
 });

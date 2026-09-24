@@ -180,6 +180,13 @@ function resolve(
     for (const plainOr of st.ors.filter((o) => o.referencedTable == null)) {
       rows = rows.filter((a) => matchAssignmentRecencyOr(a, plainOr.str));
     }
+    // search_all_jobs' allocated/category-manager scoping reads a flat
+    // job_id list only (no jobs embed at all) to build the caller's
+    // assignment-id restriction — does not require the job row to exist in
+    // this fixture set.
+    if (st.select === "job_id") {
+      return { data: page(rows.map((a) => ({ job_id: a.job_id })), st), error: null };
+    }
     // Inner join on jobs; a referenced-table or() constrains the parent rows.
     let joined = rows
       .map((a) => ({ a, job: fx.jobs.find((j) => j.id === a.job_id) }))
@@ -254,9 +261,13 @@ function resolve(
     if (st.inCol === "status" && st.inVals) {
       rows = rows.filter((j) => st.inVals!.includes(j.status));
     }
-    if (st.or && st.or.referencedTable == null) {
+    // Real PostgREST ANDs every chained filter, including several separate
+    // .or() calls on the same builder (search_all_jobs now issues one for the
+    // text query and, separately, one for a category manager's vertical
+    // scope) — apply every recorded plain or() clause, not just the last one.
+    for (const orFilter of st.ors.filter((o) => o.referencedTable == null)) {
       rows = rows.filter((j) =>
-        matchOr(j as unknown as Record<string, unknown>, st.or!.str)
+        matchOr(j as unknown as Record<string, unknown>, orFilter.str)
       );
     }
     if (st.notIn) {
@@ -418,6 +429,7 @@ function poolJobIds(g: any): string[] {
 const MARNIN = _resolveManagerVisibility({
   role: "admin",
   managedVerticals: ["makesafe", "fencing", "patio", "decking"],
+  seeEverything: true,
 });
 const HENRY = _resolveManagerVisibility({
   role: "lead_installer",
@@ -765,9 +777,10 @@ Deno.test("regression: an ordinary installer is untouched — own-only, still wi
   assertEquals(primary?.range, null, "and stays a single unpaged read");
 });
 
-// The manager branch's non-fencing lanes were deliberately left rolling by U2b.
-// Widening showAll must not have leaked into them.
-Deno.test("regression: a vertical manager's non-fencing lane keeps its rolling window", async () => {
+// Captain 2026-09-24: "full history... yes every app" — every managed vertical
+// now behaves like fencing always did. The manager branch's non-fencing lanes
+// used to be deliberately left rolling by U2b; that floor is retired.
+Deno.test("full history: a vertical manager's non-fencing lane (patio) is full-range, no rolling window", async () => {
   const nithin = _resolveManagerVisibility({
     role: "lead_installer",
     managedVerticals: ["patio"],
@@ -788,14 +801,18 @@ Deno.test("regression: a vertical manager's non-fencing lane keeps its rolling w
     managerScope,
     TENANT_A,
   );
-  const rolling = recorded.find((q) =>
+  const primary = recorded.find((q) =>
     q.table === "job_assignments" && q.or?.str === "type.eq.patio"
   );
   assertEquals(
-    typeof rolling?.gte.scheduled_date,
-    "string",
-    "patio manager lane is still 30-day windowed",
+    primary?.gte.scheduled_date,
+    undefined,
+    "no rolling-window floor is applied to a non-fencing managed vertical",
   );
+  assertEquals(primary?.range, [0, 999], "the lane is now paged like fencing");
+  // No second, upper-bounded backstop query either — full-range subsumes it.
+  const backstop = recorded.find((q) => q.table === "job_assignments" && q.lt.scheduled_date != null);
+  assertEquals(backstop, undefined, "the 180-day make-safe backstop never fires for a patio-only manager");
 });
 
 // ~169 active make-safes were on the Board but not in the Jobs list, because the
@@ -1032,7 +1049,7 @@ Deno.test("_resolveTradeJobFeedLens: who gets the whole company on an empty quer
 });
 
 function viewer(overrides: Partial<TradeAuthContext> = {}): TradeAuthContext {
-  return {
+  const merged = {
     id: "u-marnin",
     email: "marnin@example.com",
     orgId: TENANT_A,
@@ -1040,6 +1057,15 @@ function viewer(overrides: Partial<TradeAuthContext> = {}): TradeAuthContext {
     managedVerticals: ["makesafe", "fencing", "patio", "decking"],
     ...overrides,
   };
+  // Fixture-only convenience: the default (role: "admin") viewer models the
+  // pre-existing "Marnin" see-everything fixture used throughout this file.
+  // An explicit override wins; otherwise infer from the merged role so every
+  // pre-existing installer/lead_installer override stays correctly scoped.
+  // The production resolver no longer derives visibility from role at all —
+  // that's covered by manager_visibility_test.ts / trade_access_tier_test.ts.
+  const seeEverything = overrides.seeEverything ??
+    ["admin", "owner", "ops_manager"].includes(String(merged.role).toLowerCase());
+  return { ...merged, seeEverything };
 }
 
 // The heart of the ruling: 2,369 company jobs exist but only ~365 have any
@@ -1164,7 +1190,11 @@ Deno.test("All tab: the company feed stops at the tenant and drops void/duplicat
   );
 });
 
-Deno.test("All tab: a vertical manager browses every vertical, not just the one they manage", async () => {
+// Captain 2026-09-24: "All tab is limited. if it's not anyone i mentioned,
+// they will not see any other jobs but their own." search_all_jobs must give
+// the SAME answer as my_jobs for the same person — a fencing manager gets
+// fencing (+ their own out-of-vertical assignments), never the whole company.
+Deno.test("All tab: a category manager (fencing) browses ONLY their managed vertical, not every vertical", async () => {
   const res = await searchAllJobs(
     makeClient(catalogFixtures()),
     new URLSearchParams(),
@@ -1176,21 +1206,25 @@ Deno.test("All tab: a vertical manager browses every vertical, not just the one 
     false,
   );
   const types = new Set(res.jobs.map((j: { type: string }) => j.type));
+  const ids = res.jobs.map((j: { id: string }) => j.id).sort();
 
   assertEquals(res.lens, "company");
   assertEquals(
     types.has("patio"),
-    true,
-    "typed search always reached every vertical; browse now matches it",
+    false,
+    "search is filtered server-side to the manager's own category now",
   );
-  assertEquals(types.has("makesafe"), true);
+  assertEquals(types.has("makesafe"), false);
+  assertEquals(ids, ["job-assigned", "job-never-assigned"]);
 });
 
-// Scope item 3 again, on the other feed. Note what "unchanged" actually is:
-// this browse was never own-only — it has always merged the newest ACTIVE
-// company jobs with the viewer's own assignments. What crew must not gain is the
-// widening: the full history, including cancelled and archived work.
-Deno.test("All tab regression: ordinary crew keep the narrower active-jobs browse", async () => {
+// Scope item 4: search must be filtered server-side, never relying on a client
+// query-length minimum, and "everyone else" sees ONLY jobs they hold a
+// non-cancelled job_assignments row for — on every surface including search,
+// browse or typed. This used to merge the newest ACTIVE company jobs with the
+// viewer's own assignments regardless of allocation; that company-wide leak is
+// exactly what this ruling closes.
+Deno.test("All tab: ordinary crew see ONLY their own allocated jobs, never a company-wide browse", async () => {
   const recorded: RecordedQuery[] = [];
   const res = await searchAllJobs(
     makeClient(catalogFixtures(), recorded),
@@ -1201,11 +1235,15 @@ Deno.test("All tab regression: ordinary crew keep the narrower active-jobs brows
   const ids = res.jobs.map((j: { id: string }) => j.id).sort();
 
   assertEquals(res.lens, "assigned");
-  assertEquals(ids, ["job-assigned", "job-never-assigned", "job-quoted"]);
+  assertEquals(
+    ids,
+    ["job-assigned"],
+    "only the job they actually hold an assignment on — never job-never-assigned or job-quoted",
+  );
   assertEquals(
     ids.includes("job-archived"),
     false,
-    "crew do not gain the full history",
+    "and never a job they hold no assignment on at all",
   );
   assertEquals(ids.includes("job-cancelled"), false);
   const seed = recorded.find((q) => q.table === "job_assignments");
@@ -1216,9 +1254,18 @@ Deno.test("All tab regression: ordinary crew keep the narrower active-jobs brows
   );
   const browse = recorded.find((q) => q.table === "jobs" && !q.head);
   assertEquals(
+    browse?.inCol,
+    "id",
+    "the browse query is now hard-restricted to the caller's own assigned ids",
+  );
+  assertEquals(browse?.inVals, ["job-assigned"]);
+  // Status exclusion is now the same uniform, narrow set for everyone
+  // (hard deletes/duplicates/voids only) — "past and present" means every
+  // job status is visible on a job the caller is actually allocated to.
+  assertEquals(
     parseNotInSet(browse?.notIn || "").has("archived"),
-    true,
-    "and still filtered by the narrower assigned-browse status set",
+    false,
+    "an allocated trade's own archived job is no longer excluded by status",
   );
 });
 
