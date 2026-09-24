@@ -813,7 +813,7 @@ serve(async (req: Request) => {
           const retrySupersede = await supersedePriorPublishedQuoteDocuments(sb, {
             jobId: doc.job_id,
             currentDocumentId: doc.id,
-            currentVersion: doc.version || 1,
+            currentSentAt: doc.sent_at ?? null,
             jobContactId: doc.job_contact_id ?? null,
             runLabel: doc.run_label ?? null,
           })
@@ -1240,16 +1240,16 @@ serve(async (req: Request) => {
         // one /send publishes one document, so an older live document of the
         // same party is a revision. Only an explicit supersede_prior:false
         // keeps coexisting same-party option docs (sendRetiresPriorPartyQuotes).
-        // Scope key = (job_id, job_contact_id, run_label); only lower versions
-        // matched, so another party's quote is never retired. Uses the same
-        // durable-publication predicate as extract eligibility. A failed write
+        // Scope key = (job_id, job_contact_id, run_label); another party's
+        // quote is never retired. Uses the same durable-publication predicate
+        // as extract eligibility. A failed write
         // is loud (500) so a retry can finish supersession on the already_sent
         // path instead of leaving stale extracts current.
         if (sendRetiresPriorPartyQuotes(supersede_prior)) {
           const superseded = await supersedePriorPublishedQuoteDocuments(sb, {
             jobId: doc.job_id,
             currentDocumentId: doc.id,
-            currentVersion: doc.version || 1,
+            currentSentAt: sentAt,
             jobContactId: doc.job_contact_id ?? null,
             runLabel: doc.run_label ?? null,
             supersededByRevisionId: releasedRevisionId ?? null,
@@ -1347,7 +1347,7 @@ serve(async (req: Request) => {
           // retired link must not open the client's quote.
           let liveQuery = sb
             .from('job_documents')
-            .select('id, share_token, job_contact_id, run_label, sent_to_client, accepted_at, superseded_at, created_at, version')
+            .select('id, share_token, job_contact_id, run_label, sent_to_client, sent_at, accepted_at, superseded_at, created_at, version')
             .eq('job_id', supDoc.job_id)
             .eq('type', 'quote')
             .eq('sent_to_client', true)
@@ -1380,7 +1380,7 @@ serve(async (req: Request) => {
       // party's document or Accept button (quote_party_view.ts).
       if (doc.job_id) {
         let siblingQuery = sb.from('job_documents')
-          .select('id, quote_number, pdf_url, html_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id, run_label, sent_to_client, superseded_at, created_at, version')
+          .select('id, quote_number, pdf_url, html_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id, run_label, sent_to_client, sent_at, superseded_at, created_at, version')
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
@@ -1940,16 +1940,11 @@ serve(async (req: Request) => {
         let newStatus = 'accepted'
 
         if (isMultiContact) {
-          // Check how many contacts have accepted (via their job_documents)
-          // Count only CURRENT (unretired) documents, per contact: a contact is
-          // accepted when one of its current documents is accepted. Retired
-          // revisions no longer hold a fully accepted job at partially_accepted.
           const { data: allDocs } = await sb
             .from('job_documents')
-            .select('id, job_contact_id, accepted_at, superseded_at')
+            .select('id, job_contact_id, run_label, accepted_at, superseded_at, sent_to_client, sent_at, send_claimed_at')
             .eq('job_id', doc.job_id)
             .eq('type', 'quote')
-            .not('job_contact_id', 'is', null)
             .is('superseded_at', null)
 
           if (everyQuotePartyAccepted(allDocs || [])) {
@@ -2482,7 +2477,7 @@ serve(async (req: Request) => {
 
       try {
       const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
-        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
+        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, created_at, version, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
         .eq('job_id', job.id)
         .eq('type', 'quote')
         .is('superseded_at', null)

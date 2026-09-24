@@ -148,9 +148,29 @@ Deno.test("the newest run document shows its own run page, not an options page",
   assertEquals(quoteViewDecision(opened, liveSent(SWF_26646)).kind, "single")
 })
 
-Deno.test("a party that already accepted keeps its accepted run document as current", () => {
+Deno.test("a party's newest run document stays current after an older one was accepted", () => {
   const docs = SWF_26646.map((d) => d.id === "26646-c2" ? { ...d, accepted_at: "2026-06-20T00:00:00Z" } : d)
-  assertEquals(currentQuoteForParty(docs, { job_contact_id: "client", run_label: "RHS" })?.id, "26646-c2")
+  assertEquals(currentQuoteForParty(docs, { job_contact_id: "client", run_label: "RHS" })?.id, "26646-c8")
+})
+
+Deno.test("run party ordering uses version before sent and creation times", () => {
+  const docs = [
+    doc("newer-time-lower-version", {
+      job_contact_id: "client",
+      run_label: "RHS",
+      version: 1,
+      created_at: "2026-09-24T10:00:00Z",
+      sent_at: "2026-09-24T10:00:00Z",
+    }),
+    doc("higher-version", {
+      job_contact_id: "client",
+      run_label: "RHS",
+      version: 2,
+      created_at: "2026-09-24T09:00:00Z",
+      sent_at: "2026-09-24T09:00:00Z",
+    }),
+  ]
+  assertEquals(currentQuoteForParty(docs, { job_contact_id: "client", run_label: "RHS" })?.id, "higher-version")
 })
 
 Deno.test("same-party A/B options still show together; another party's never joins", () => {
@@ -186,12 +206,25 @@ Deno.test("all accepted counts current documents only: one revision no longer st
   assert(everyQuotePartyAccepted(docs))
 })
 
-Deno.test("all accepted stays false while a party has not accepted (SWF-261322: neighbour quote never sent)", () => {
+Deno.test("all accepted stays false while a current party has not accepted", () => {
   assert(!everyQuotePartyAccepted([
-    { job_contact_id: "client", accepted_at: "2026-09-03T00:00:00Z", superseded_at: null },
-    { job_contact_id: "neighbour", accepted_at: null, superseded_at: null },
+    { job_contact_id: "client", run_label: null, accepted_at: "2026-09-03T00:00:00Z", sent_to_client: true, superseded_at: null },
+    { job_contact_id: "neighbour", run_label: null, accepted_at: null, sent_to_client: true, sent_at: "2026-09-03T00:00:00Z", superseded_at: null },
   ]))
   assert(!everyQuotePartyAccepted([]))
+})
+
+Deno.test("all accepted counts a contact's separate current runs as separate parties", () => {
+  assert(!everyQuotePartyAccepted([
+    { job_contact_id: "client", run_label: "RHS", accepted_at: "2026-09-03T00:00:00Z", sent_to_client: true },
+    { job_contact_id: "client", run_label: "LHS", accepted_at: null, sent_to_client: true, sent_at: "2026-09-04T00:00:00Z" },
+  ]))
+  assert(everyQuotePartyAccepted([
+    { job_contact_id: "client", run_label: "RHS", accepted_at: "2026-09-03T00:00:00Z", sent_to_client: true },
+    { job_contact_id: "client", run_label: "LHS", accepted_at: "2026-09-04T00:00:00Z", sent_to_client: true },
+    { job_contact_id: null, run_label: null, accepted_at: "2026-09-05T00:00:00Z", sent_to_client: true },
+    { job_contact_id: null, run_label: "RHS", accepted_at: "2026-09-06T00:00:00Z", sent_to_client: true },
+  ]))
 })
 
 // ── Retirement on send ──────────────────────────────────────────────────────
@@ -210,7 +243,7 @@ Deno.test("send-runs retirement on SWF-26646 keeps one document per party and re
   assert(!retire.includes("26646-c8") && !retire.includes("26646-n8"))
 })
 
-Deno.test("send-runs retirement never touches another party, unsent drafts, accepted docs or whole-job docs", () => {
+Deno.test("send-runs retirement preserves another party, unsent drafts, and whole-job docs", () => {
   const rows = [
     doc("keep", { job_contact_id: "client", run_label: "LHS", created_at: "2026-09-15T10:16:18Z" }),
     doc("old", { job_contact_id: "client", run_label: "LHS", created_at: "2026-09-01T00:00:00Z" }),
@@ -219,8 +252,17 @@ Deno.test("send-runs retirement never touches another party, unsent drafts, acce
     doc("neighbour", { job_contact_id: "neighbour", run_label: "LHS", created_at: "2026-09-01T00:00:00Z" }),
     doc("whole", { created_at: "2026-09-01T00:00:00Z" }),
   ]
-  assertEquals(otherPartyRunDocumentIdsToRetire([rows[0]], rows), ["old"])
+  assertEquals(otherPartyRunDocumentIdsToRetire([rows[0]], rows), ["accepted", "old"])
   assertEquals(otherPartyRunDocumentIdsToRetire([rows[5]], rows), [])
+})
+
+Deno.test("send-runs retirement keeps the newest duplicate even when the requested row is older", () => {
+  const rows = [
+    doc("requested-older", { job_contact_id: "client", run_label: "RHS", version: 1, created_at: "2026-09-01T00:00:00Z" }),
+    doc("published-newest", { job_contact_id: "client", run_label: "RHS", version: 2, created_at: "2026-08-31T00:00:00Z" }),
+  ]
+  assertEquals(otherPartyRunDocumentIdsToRetire([rows[0]], rows), [])
+  assertEquals(otherPartyRunDocumentIdsToRetire([rows[1]], rows), ["requested-older"])
 })
 
 function fakeClient(rows: QuotePartyDocument[], opts: { readError?: string; writeError?: string } = {}) {

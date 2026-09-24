@@ -12,6 +12,12 @@
 // other document's token (live on SWF-26646, SWF-26333, SWF-261276,
 // SWF-26670, SWF-26760, 2026-09-24).
 
+import { compareQuoteDocumentsNewestFirst } from '../_shared/trade_quote_pack/quote_send_publication.ts'
+import {
+  quoteDocumentHasClientSend,
+  quoteDocumentIsSuperseded,
+} from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+
 export type QuotePartyDocument = {
   id: string
   job_contact_id?: string | null
@@ -19,6 +25,7 @@ export type QuotePartyDocument = {
   share_token?: string | null
   sent_to_client?: boolean | null
   sent_at?: string | null
+  send_claimed_at?: string | null
   accepted_at?: string | null
   declined_at?: string | null
   superseded_at?: string | null
@@ -55,32 +62,12 @@ export function sameQuoteParty(
   return left.jobContactId === right.jobContactId && left.runLabel === right.runLabel
 }
 
-function isRetired(doc: QuotePartyDocument): boolean {
-  return typeof doc.superseded_at === 'string' && doc.superseded_at.trim().length > 0
-}
-
 function isLiveSent(doc: QuotePartyDocument): boolean {
-  return doc.sent_to_client === true && !isRetired(doc)
-}
-
-function timeOf(value: string | null | undefined): number {
-  const t = typeof value === 'string' ? Date.parse(value) : NaN
-  return Number.isFinite(t) ? t : 0
-}
-
-/** Newest first: created_at, then version, then id (deterministic). */
-function newestFirst(a: QuotePartyDocument, b: QuotePartyDocument): number {
-  const byTime = timeOf(b.created_at) - timeOf(a.created_at)
-  if (byTime !== 0) return byTime
-  const byVersion = (b.version ?? 0) - (a.version ?? 0)
-  if (byVersion !== 0) return byVersion
-  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+  return quoteDocumentHasClientSend(doc) && !quoteDocumentIsSuperseded(doc)
 }
 
 /**
- * The party's current document: its newest live sent document. An accepted
- * document always wins, so a party that already accepted keeps seeing what
- * they accepted.
+ * The party's current document: its newest live sent document.
  */
 export function currentQuoteForParty(
   docs: QuotePartyDocument[],
@@ -88,9 +75,7 @@ export function currentQuoteForParty(
 ): QuotePartyDocument | null {
   const own = (docs || []).filter((d) => d && typeof d.id === 'string' && sameQuoteParty(d, party) && isLiveSent(d))
   if (!own.length) return null
-  const accepted = own.filter((d) => !!d.accepted_at).sort(newestFirst)
-  if (accepted.length) return accepted[0]
-  return own.sort(newestFirst)[0]
+  return own.sort(compareQuoteDocumentsNewestFirst)[0]
 }
 
 export type QuoteViewDecision =
@@ -136,58 +121,55 @@ export function quoteDocumentAcceptable(
   doc: QuotePartyDocument,
   jobLiveDocs: QuotePartyDocument[],
 ): boolean {
-  if (isRetired(doc)) return false
+  if (quoteDocumentIsSuperseded(doc)) return false
   if (quotePartyKey(doc).runLabel === null) return true
   const current = currentQuoteForParty([doc, ...(jobLiveDocs || [])], doc)
   return !current || current.id === doc.id
 }
 
-/**
- * Legacy per-contact acceptance: every contact with a current (unretired)
- * document has accepted one of its current documents. Retired revisions are
- * ignored, so one revision no longer leaves a fully accepted job stuck at
- * partially_accepted.
- */
 export function everyQuotePartyAccepted(
-  docs: Array<{ job_contact_id?: string | null; accepted_at?: string | null; superseded_at?: string | null }>,
+  docs: Array<{
+    job_contact_id?: string | null
+    run_label?: string | null
+    accepted_at?: string | null
+    superseded_at?: string | null
+    sent_to_client?: boolean | null
+    sent_at?: string | null
+    send_claimed_at?: string | null
+  }>,
 ): boolean {
-  const byContact = new Map<string, boolean>()
+  const byParty = new Map<string, boolean>()
   for (const d of docs || []) {
-    const contact = normalised(d?.job_contact_id)
-    if (!contact) continue
-    if (typeof d.superseded_at === 'string' && d.superseded_at.trim().length > 0) continue
-    byContact.set(contact, (byContact.get(contact) ?? false) || !!d.accepted_at)
+    if (quoteDocumentIsSuperseded(d) || !quoteDocumentHasClientSend(d)) continue
+    const party = JSON.stringify(quotePartyKey(d))
+    byParty.set(party, (byParty.get(party) ?? false) || !!d.accepted_at)
   }
-  if (byContact.size === 0) return false
-  for (const accepted of byContact.values()) {
+  if (byParty.size === 0) return false
+  for (const accepted of byParty.values()) {
     if (!accepted) return false
   }
   return true
 }
 
-/**
- * send-runs retirement: for each party whose document was just published or
- * reused, every other live published document of that same party (same job,
- * contact and run) is retired. Keeps exactly the kept document per party.
- * Unpublished drafts and other parties' documents are never touched.
- */
 export function otherPartyRunDocumentIdsToRetire(
   keep: Array<{ id: string; job_contact_id?: string | null; run_label?: string | null }>,
   jobDocs: QuotePartyDocument[],
 ): string[] {
   const keepIds = new Set((keep || []).map((d) => d.id))
-  const out = new Set<string>()
+  const keptParties = new Map<string, { party: { job_contact_id?: string | null; run_label?: string | null } }>()
   for (const kept of keep || []) {
     if (quotePartyKey(kept).runLabel === null) continue
-    for (const d of jobDocs || []) {
-      if (!d || keepIds.has(d.id)) continue
-      if (!sameQuoteParty(d, kept)) continue
-      if (isRetired(d)) continue
-      const published = d.sent_to_client === true || !!d.accepted_at ||
-        (d.sent_to_client !== false && typeof d.sent_at === 'string' && d.sent_at.length > 0)
-      if (!published) continue
-      if (d.accepted_at) continue
-      out.add(d.id)
+    keptParties.set(JSON.stringify(quotePartyKey(kept)), { party: kept })
+  }
+  const out = new Set<string>()
+  for (const { party } of keptParties.values()) {
+    const livePartyDocs = (jobDocs || []).filter((d) =>
+      d && sameQuoteParty(d, party) && isLiveSent(d)
+    )
+    const newest = currentQuoteForParty(livePartyDocs, party)
+    if (!newest || !keepIds.has(newest.id)) continue
+    for (const d of livePartyDocs) {
+      if (d.id !== newest.id) out.add(d.id)
     }
   }
   return [...out].sort()
@@ -234,7 +216,7 @@ export async function retireOtherPublishedPartyRunDocuments(
   const keepIds = [...new Set((input.keepIds || []).filter((id) => typeof id === 'string' && id))]
   if (!keepIds.length) return { ok: true, retiredIds: [] }
   const { data, error } = await sb.from('job_documents')
-    .select('id, job_contact_id, run_label, sent_to_client, sent_at, accepted_at, superseded_at')
+    .select('id, job_contact_id, run_label, sent_to_client, sent_at, send_claimed_at, accepted_at, superseded_at, created_at, version')
     .eq('job_id', input.jobId)
     .eq('type', 'quote')
     .is('superseded_at', null)
