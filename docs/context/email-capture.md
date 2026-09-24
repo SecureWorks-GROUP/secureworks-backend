@@ -60,7 +60,8 @@ EM1 adds `business_event_id` (the one evidence row this mailbox copy is, FK
 `ON DELETE SET NULL`), `provider_message_id` (`email:<internet id>` or
 `graph:<mailbox>:<immutable id>`) and `folder_kind` (`inbox`, `sent`,
 `deleted`, `other`, `group`). Only EM2's poller writes them; every existing row
-keeps nulls.
+keeps nulls in these three new columns. The existing `mailbox` column identifies
+which mailbox copy was seen; EM1 reuses it rather than adding another column.
 
 ## Run rows (contract for EM2 and EM3)
 
