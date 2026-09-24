@@ -45,3 +45,21 @@ BEGIN
 END
 $$;
 ROLLBACK;
+
+-- Re-applying the migration must never re-widen a person the separate
+-- approved data change has already narrowed, and must not error.
+BEGIN;
+UPDATE public.users SET trade_sees_all_jobs = false
+WHERE id = 'f5000000-0000-4000-8000-000000000003';
+\ir ../../../migrations/20260924230000_users_trade_sees_all_jobs.sql
+DO $$
+BEGIN
+  IF (SELECT trade_sees_all_jobs FROM public.users WHERE id = 'f5000000-0000-4000-8000-000000000003') THEN
+    RAISE EXCEPTION 'trade_sees_all_jobs contract: re-apply re-widened a narrowed ops_manager';
+  END IF;
+  IF NOT (SELECT trade_sees_all_jobs FROM public.users WHERE id = 'f5000000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'trade_sees_all_jobs contract: re-apply cleared an untouched admin';
+  END IF;
+END
+$$;
+ROLLBACK;
