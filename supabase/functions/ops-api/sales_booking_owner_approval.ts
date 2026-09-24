@@ -1,5 +1,10 @@
 /** Owner-authored booking approvals: no engine publish needed.
  *
+ * Marnin's Stratco leads take a text or a visit under the Stratco rulebook.
+ * Nithin's and Khairo's leads take a text only (no offered slot, no visit):
+ * their visits are not booked here. Every text goes from the visit person's
+ * own line (sales_booking_sender.ts).
+ *
  * The owner writes or edits a text, or picks a visit (day, arrival window,
  * visit end), on the booking screen. `sales_booking_approval_write` with an
  * `owner_input` body builds the exact snapshot here from server truth (GHL
@@ -557,6 +562,8 @@ export const HAND_SENT_TEXTS_NOTE =
   "Read the lead's thread for any time you offered by hand before approving.";
 
 type OwnerInput = {
+  /** Booking person whose lead this is; Marnin (Stratco) when omitted. */
+  resource: string;
   step: BookingStep;
   case_id: string;
   contact_id: string;
@@ -572,13 +579,21 @@ function parseOwnerInput(raw: unknown): OwnerInput {
     !obj(raw) || !["calendar", "message"].includes(raw.step) ||
     !text(raw.case_id) || !text(raw.contact_id) || !text(raw.week_start)
   ) refuse("invalid_owner_input", null, 400);
-  if (raw.resource !== undefined && raw.resource !== RULES.resource) {
-    refuse("stratco_profile_required", null, 400);
-  }
+  const resource = raw.resource === undefined ? RULES.resource : raw.resource;
+  if (
+    typeof resource !== "string" ||
+    !Object.hasOwn(SALES_BOOKING_SENDER_LINES, resource)
+  ) refuse("booking_profile_required", null, 400);
+  // Visits and offered slots follow the Stratco rulebook only.
+  if (
+    resource !== RULES.resource &&
+    (raw.step !== "message" || raw.offer != null)
+  ) refuse("stratco_profile_required", null, 400);
   if (raw.prepared_at != null && typeof raw.prepared_at !== "string") {
     refuse("invalid_owner_input", null, 400);
   }
   return {
+    resource,
     step: raw.step,
     case_id: raw.case_id,
     contact_id: raw.contact_id,
@@ -647,18 +662,19 @@ export async function salesBookingOwnerApprovalAction(args: {
     }
   }
 
-  const response = await deps.readWorkspace(RULES.resource, input.week_start);
+  const response = await deps.readWorkspace(input.resource, input.week_start);
   const now = (deps.now ?? (() => new Date()))(); // after slow reads
-  if (response.resource.resource_id !== RULES.resource) {
-    refuse("stratco_profile_required", null, 400);
+  if (response.resource.resource_id !== input.resource) {
+    refuse("booking_profile_required", null, 400);
   }
+  const profile = SALES_BOOKING_SENDER_LINES[input.resource].profile;
   const matches = response.cases.filter((r) =>
     r.contact_id === input.contact_id
   );
   const row: SalesBookingCase | undefined = matches[0];
   if (
     matches.length !== 1 || !row || row.id !== input.case_id ||
-    row.resource_id !== RULES.resource
+    row.resource_id !== input.resource
   ) refuse("booking_case_identity_ambiguous");
 
   const preparedAt = input.prepared_at ?? now.toISOString();
@@ -706,7 +722,7 @@ export async function salesBookingOwnerApprovalAction(args: {
     const who = salesBookingSenderFor({
       scoper_user_id: response.resource.scoper_user_id,
       resource: response.resource.resource_id,
-      profile: RULES.profile,
+      profile,
     });
     if (!who.ok) refuse(who.reason, who.detail);
     checks.sender = {
@@ -768,7 +784,7 @@ export async function salesBookingOwnerApprovalAction(args: {
     scoper_user_id: response.resource.scoper_user_id,
     week_start: response.week_start,
     id: `opp:${row.opportunity_id}`,
-    profile: RULES.profile,
+    profile,
     pack_revision: null,
     prepared_at: preparedAt,
     content_hash: null,
@@ -1072,6 +1088,8 @@ export function ownerRulebookView(now: Date): BookingObject {
 /** Live owner-authored approval rows, newest first, or throws. */
 export type OwnerApprovalReader = (
   sinceIso: string,
+  /** Booking person whose approvals to read; Marnin when omitted. */
+  resource?: string,
 ) => Promise<BookingApprovalRecord[]>;
 
 /** Adds `owner_booking` to every case and `owner_approval_write` to the flow. */
@@ -1082,12 +1100,18 @@ export async function applyOwnerBooking(
 ): Promise<SalesBookingReadResponse> {
   const result = structuredClone(response);
   const stratco = result.resource.resource_id === RULES.resource;
+  // Nithin and Khairo take owner-authored texts too (no visit, no slot).
+  const person = Object.hasOwn(
+    SALES_BOOKING_SENDER_LINES,
+    result.resource.resource_id,
+  );
   let approvals: BookingApprovalRecord[] | null = null;
   let readError: string | null = null;
-  if (stratco && readOwnerApprovals) {
+  if (person && readOwnerApprovals) {
     try {
       approvals = await readOwnerApprovals(
         new Date(now.getTime() - BOOKING_APPROVAL_TTL_MS).toISOString(),
+        result.resource.resource_id,
       );
     } catch {
       readError = "owner_approvals_unreadable";
@@ -1100,7 +1124,7 @@ export async function applyOwnerBooking(
   const rulebook = stratco ? ownerRulebookView(now) : null;
   result.booking_flow = {
     ...result.booking_flow,
-    owner_approval_write: stratco ? OWNER_APPROVAL_VERSION : null,
+    owner_approval_write: person ? OWNER_APPROVAL_VERSION : null,
     owner_rulebook: rulebook,
     hand_sent_texts: "not_machine_checked",
     hand_sent_texts_note: HAND_SENT_TEXTS_NOTE,
@@ -1110,7 +1134,7 @@ export async function applyOwnerBooking(
     const model = row.booking_read_model;
     const window = model?.proposal?.window;
     const engineProposal = !!model?.pack_revision && obj(model?.proposal);
-    const eligible = stratco && !!row.contact_id &&
+    const eligible = person && !!row.contact_id &&
       counts.get(row.contact_id) === 1;
     const live = approvals === null
       ? null
@@ -1138,9 +1162,11 @@ export async function applyOwnerBooking(
         eligible,
         reason: eligible
           ? null
-          : !stratco
-          ? "stratco_profile_required"
+          : !person
+          ? "booking_profile_required"
           : "booking_case_contact_ambiguous",
+        /** Which approvals this lead can take: a visit only on Stratco. */
+        steps: !eligible ? [] : stratco ? ["message", "calendar"] : ["message"],
         engine_proposal: engineProposal,
         engine_window: engineProposal && obj(window)
           ? { start: window.start ?? null, end: window.end ?? null }

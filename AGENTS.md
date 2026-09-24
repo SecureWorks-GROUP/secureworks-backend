@@ -3839,7 +3839,9 @@ Only `sales_booking_book` / `sales_booking_send` act on an approval
 approval hash. A booking text goes from the visit person's own line
 (`sales_booking_sender.ts`: Marnin 776, Nithin 774, Khairo 772, from their
 wiki scope-booking profiles); no person or another line refuses, never a
-776 fallback. The GHL writer refuses any real write that lacks that
+776 fallback. Nithin and Khairo take text approvals only; visits stay
+Stratco. Khairo shares the fencing pipeline, so his list is only the leads
+GHL assigns to him (`assigned_ghl_user_id`). The GHL writer refuses any real write that lacks that
 executor's per-press claim, not just an approval
 (`docs/ghl-calendar-appointment-write.md`). After GHL holds the booking the
 executor writes its Outlook mirror (keyed on the GHL appointment id). One

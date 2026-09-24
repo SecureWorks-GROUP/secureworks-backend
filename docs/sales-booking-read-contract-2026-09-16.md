@@ -105,7 +105,7 @@ Remaining 429s are `coverage.remaining_429_count`.
 
 | Param | Default | Notes |
 |---|---|---|
-| `resource` | `nithin` | `nithin` (patio) or `marnin` (fencing/Stratco). Anything else is a 400. |
+| `resource` | `nithin` | `nithin` (patio), `marnin` (fencing/Stratco) or `khairo` (fencing, only opportunities GHL assigns to his user `RgDWTnYL6zL3eJA6nLht`). Anything else is a 400. |
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
 | `scoper_user_id` | the resource's own | Overrides the diary read only (GHL plus Outlook when that scoper has a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`), and only when it matches a v1 scoper (Nithin / Marnin). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
@@ -336,8 +336,8 @@ Nithin's recorded work address was absent from that roster
 `read_ok` with `mapped_by: name`, `reason: ghl_user_mapped_by_name`, and
 `calendar_email` set to the live GHL email. Zero or several name matches stay
 unread with `ghl_user_unmapped` — never first-match-wins. Khairo is on the
-email map with `ghl_user_id` null and is not a `SALES_BOOKING_RESOURCES`
-booking resource. Dedicated-calendar ids live on
+email map with `ghl_user_id` null and, since 2026-09-24, is a
+`SALES_BOOKING_RESOURCES` booking resource for texts from his own line. Dedicated-calendar ids live on
 `SALES_BOOKING_SCOPER_CALENDARS` (calendar-read paragraph above), not on
 this map. User ids stay null-pinned; this table records emails only.
 

@@ -90,9 +90,9 @@ export const SALES_BOOKING_TEMPLATE_MARKERS: readonly string[] = [
  * without reading code. Flipping a default is a change here, not a UI change.
  */
 export const SALES_BOOKING_CAPTAIN_DEFAULTS = {
-  scopers: ["nithin", "marnin"] as const,
+  scopers: ["nithin", "marnin", "khairo"] as const,
   scopes_done_window: "this_week_plus_last",
-  sender_lines: { nithin: "774", marnin: "776" },
+  sender_lines: { nithin: "774", marnin: "776", khairo: "772" },
   stamp_board: "agent_driven_human_typed_later",
   recorded: "2026-09-16",
 } as const;
@@ -113,6 +113,13 @@ export interface SalesBookingResource {
    * `docs/sales-booking-read-contract-2026-09-16.md`.
    */
   scope_stage_ids: readonly string[];
+  /**
+   * When set, only opportunities GHL assigns to this user are this person's
+   * leads. Needed where two people share one pipeline (Khairo and Stratco
+   * both live in the fencing pipeline), so a lead never shows on the wrong
+   * person's list and so never gets a text from the wrong line.
+   */
+  assigned_ghl_user_id?: string;
 }
 
 /**
@@ -128,8 +135,10 @@ export interface SalesBookingCalendarOverlay {
 }
 
 /**
- * v1 roster. `nithin` is the patio pipeline on line 774; `marnin` is the
- * fencing (Stratco) profile on line 776.
+ * Roster. `nithin` is the patio pipeline on line 774; `marnin` is the
+ * fencing (Stratco) profile on line 776; `khairo` is his own assigned fencing
+ * leads on line 772 (owner ruling 2026-09-24: each person's texts from their
+ * own number; lines in sales_booking_sender.ts).
  *
  * The 776 value is the CAPTAIN'S RECORDED DEFAULT, not a guess: the UI doc
  * marks Marnin's line unresolved between 772 and 776 and forbids the browser
@@ -179,6 +188,28 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
   },
+  khairo: {
+    resource_id: "khairo",
+    lane: "fencing",
+    pipeline_id: "I9t8njpuR0Dm7B2NDcvI",
+    scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+    sender_line: "772",
+    sender_line_source: "wiki_fencing_khairo_profile_sms_from_number",
+    // Same visit/reply/quote stages as the Stratco profile: both profiles
+    // (fencing-khairo.json, fencing-stratco-marnin.json) list the one fencing
+    // pipeline's stages.
+    scope_stage_ids: [
+      "7f863a14-1d9f-4a18-b73c-0e1780390bd7", // New Lead (Replied/ Contacted)
+      "52c70bff-5cf3-447b-b891-03c30486aed8", // Call Answered (presentation not made)
+      "6b101809-a4f9-440d-ac4c-0be669b8173e", // Presentation Made (scope not booked)
+      "bfdba902-0a92-4a90-95a5-af27d7502a90", // Needs On Site Scope Urgently
+      "09eeb872-fa46-41fc-a96b-8a8d2bc12215", // Lead Closed (scope booked)
+      "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
+      "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
+    ],
+    // Khairo's GHL user (his 772 replies carry it). Only his assigned leads.
+    assigned_ghl_user_id: "RgDWTnYL6zL3eJA6nLht",
+  },
 };
 
 /**
@@ -186,8 +217,7 @@ export const SALES_BOOKING_RESOURCES: Readonly<
  * config. Do not embed a guessed id. User ids stay null; this table records
  * work addresses plus `roster_emails` aliases. Confirmation (any recorded
  * address, then unique name):
- * `docs/sales-booking-read-contract-2026-09-16.md`. Khairo's email is
- * recorded here for roster confirmation; he is not a booking resource.
+ * `docs/sales-booking-read-contract-2026-09-16.md`.
  */
 export const SALES_BOOKING_GHL_USERS: Readonly<
   Record<string, {
@@ -1207,6 +1237,16 @@ export function projectSalesBookingCase(
  * True when the opportunity is still in a stage that needs a visit, a reply
  * or a quote. Unknown or blank stage ids are out of scope (never the whole CRM).
  */
+/** Whether GHL assigns this opportunity to the resource's own person. A
+ * resource with no `assigned_ghl_user_id` owns every row of its pipeline. */
+export function isSalesBookingAssignedToResource(
+  raw: { assignedTo?: unknown },
+  resource: Pick<SalesBookingResource, "assigned_ghl_user_id">,
+): boolean {
+  return !resource.assigned_ghl_user_id ||
+    raw.assignedTo === resource.assigned_ghl_user_id;
+}
+
 export function isSalesBookingScopeStage(
   stageId: string | null | undefined,
   scopeStageIds: readonly string[],
@@ -1609,9 +1649,8 @@ export function mergeSalesBookingDiaryEntries(
 /**
  * Pick the GHL mapping for this calendar read. `scoper_user_id` may override
  * the resource the same way it used to override the Outlook mailbox: only a
- * known v1 booking resource (Nithin / Marnin) maps. Anyone else is unmapped
- * — never a guess. Khairo's email is on SALES_BOOKING_GHL_USERS for roster
- * confirmation; he is not a booking resource.
+ * known booking resource (Nithin / Marnin / Khairo) maps. Anyone else is
+ * unmapped — never a guess.
  */
 export function resolveSalesBookingGhlMapping(
   resourceId: string,
@@ -2643,6 +2682,7 @@ export async function salesBookingRead(
       ? raw.pipelineStageId
       : "";
     if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) continue;
+    if (!isSalesBookingAssignedToResource(raw, resource)) continue;
     const contactId = salesBookingContactId(raw);
     if (contactId) scopedContactIds.push(contactId);
     if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
@@ -2704,6 +2744,8 @@ export async function salesBookingRead(
   const seen = new Set<string>();
   let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
+    // Another person's lead in a shared pipeline is not on this list at all.
+    if (!isSalesBookingAssignedToResource(raw, resource)) continue;
     const contactId = salesBookingContactId(raw);
     const opportunityId = typeof raw.id === "string" ? raw.id : "";
     const job = jobSites[opportunityId] ||

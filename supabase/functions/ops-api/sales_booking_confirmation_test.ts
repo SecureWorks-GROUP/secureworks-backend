@@ -27,6 +27,7 @@ import {
   applySalesBookingPackOverlay,
   salesBookingPackPublishAction,
 } from "./sales_booking_pack.ts";
+import { approvalGateRefusal } from "../_shared/booking_approval_gate.ts";
 
 const NOW = new Date("2026-09-22T00:00:00Z");
 const auth = {
@@ -851,4 +852,102 @@ Deno.test("engine path through the approval route is unchanged and never reads o
     Error,
     "owner_input_requires_owner_path",
   );
+});
+
+// ── Nithin's and Khairo's texts through the real engine approval write ─────
+
+async function personFixture(resource: string, profile: string, line: string) {
+  const read = await salesBookingRead({
+    readOpportunities: () =>
+      Promise.resolve({
+        opportunities: [],
+        stages: {},
+        exhausted: true,
+        total: 0,
+        pages_scanned: 1,
+        reason: null,
+      }),
+    readDiary: () =>
+      Promise.resolve({
+        read_ok: false,
+        reason: "test",
+        entries: [],
+        malformed_dropped: 0,
+        calendar_email: null,
+        ghl_user_id: null,
+        mapped_by: null,
+        scoper_user_id: null,
+      }),
+    readThread: () => {
+      throw new Error("no thread call expected");
+    },
+    now: () => NOW,
+  }, { resource, week_start: "2026-09-21" });
+  read.cases = [
+    { ...row, resource_id: resource } as SalesBookingReadResponse["cases"][
+      number
+    ],
+  ];
+  const m = model();
+  m.profile = profile;
+  m.message.routing.from_number = line;
+  const response = applyBookingConfirmationModels(read, bundle(m));
+  const published = response.cases[0].booking_read_model!;
+  published.calendar_write.preview.content_hash = await bookingContentHash(
+    bookingApprovalSnapshot(response, response.cases[0], "calendar"),
+  );
+  published.message.routing.message_sha256 = await bookingContentHash(
+    bookingApprovalSnapshot(response, response.cases[0], "message"),
+  );
+  return response;
+}
+
+Deno.test("engine approval for Nithin and Khairo: a text on their own profile and line; a visit stays Stratco", async () => {
+  const people: Array<[string, string, string, string]> = [
+    [
+      "nithin",
+      "patio-nithin",
+      "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
+      "+61489267774",
+    ],
+    [
+      "khairo",
+      "fencing-khairo",
+      "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      "+61489267772",
+    ],
+  ];
+  for (const [resource, profile, scoperUserId, line] of people) {
+    const f = await personFixture(resource, profile, line);
+    const { store, records } = memoryStore();
+    const written = await salesBookingApprovalWriteAction(
+      request(f, store, "message"),
+    );
+    assertEquals(written.approval.resource, resource);
+    assertEquals(written.approval.snapshot.profile, profile);
+    assertEquals(written.approval.snapshot.scoper_user_id, scoperUserId);
+    assertEquals(written.approval.snapshot.content.sender, line);
+    assertEquals(
+      await approvalGateRefusal(written.approval, "message", NOW, [
+        auth.email,
+      ]),
+      null,
+    );
+    assertEquals(records.size, 1);
+    // No visit approval for either of them here.
+    await assertRejects(
+      () => salesBookingApprovalWriteAction(request(f, store, "calendar")),
+      Error,
+      "stratco_profile_required",
+    );
+    // Their lead approved with someone else's line records nothing.
+    const g = await personFixture(resource, profile, "+61489267776");
+    const other = memoryStore();
+    await assertRejects(
+      () => salesBookingApprovalWriteAction(request(g, other.store, "message")),
+      Error,
+      "sender_not_scoper_line",
+    );
+    assertEquals(other.records.size, 0);
+  }
 });

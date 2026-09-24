@@ -1146,9 +1146,44 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
   // Fencing and patio pipelines are never mixed.
   assert(marnin.resource.pipeline_id !== nithin.resource.pipeline_id);
 
-  assertEquals(SALES_BOOKING_RESOURCES.khairo, undefined);
+  // Khairo shares the fencing pipeline; his list is only the leads GHL
+  // assigns to him, so a Stratco lead never reaches his 772 line.
+  const fencingRows = [
+    opportunity({ id: "opp-stratco", assignedTo: "someone-else" }),
+    opportunity({
+      id: "opp-khairo",
+      assignedTo: "RgDWTnYL6zL3eJA6nLht",
+      contact: { id: "contact-k", name: "Kim Lead", city: "Joondalup" },
+    }),
+    opportunity({ id: "opp-unassigned" }),
+  ];
+  const shared = deps({
+    readOpportunities: () =>
+      Promise.resolve({
+        opportunities: fencingRows,
+        stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+        exhausted: true,
+        pages_scanned: 1,
+        total: fencingRows.length,
+        reason: null,
+      }),
+  });
+  const khairo = await salesBookingRead(shared, {
+    resource: "khairo",
+    week_start: WEEK,
+  });
+  assertEquals(khairo.resource.pipeline_id, marnin.resource.pipeline_id);
+  assertEquals(khairo.resource.sender_line, "772");
+  assertEquals(khairo.cases.map((c) => c.opportunity_id), ["opp-khairo"]);
+  // Marnin's list is unchanged: every scoped row of the pipeline.
+  const marninShared = await salesBookingRead(shared, {
+    resource: "marnin",
+    week_start: WEEK,
+  });
+  assertEquals(marninShared.cases.length, 3);
+
   await assertRejects(
-    () => salesBookingRead(deps(), { resource: "khairo", week_start: WEEK }),
+    () => salesBookingRead(deps(), { resource: "someone", week_start: WEEK }),
     SalesBookingRequestError,
   );
   const { users: khairoUsers } = usersFromGhlBody({

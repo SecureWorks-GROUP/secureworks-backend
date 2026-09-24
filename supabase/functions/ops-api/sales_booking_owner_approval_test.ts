@@ -342,7 +342,8 @@ Deno.test("owner message refusals: each rule is named and nothing is written", a
     ["contact_unreadable", {
       readLead: () => Promise.reject(new Error("down")),
     }, {}],
-    ["stratco_profile_required", { resource: "nithin" }, {}],
+    // The screen asked for Marnin's lead but the read is Nithin's list.
+    ["booking_profile_required", { resource: "nithin" }, {}],
   ];
   for (const [reason, over, extra] of cases) {
     const { deps: d, rows } = deps(over);
@@ -796,6 +797,7 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   const [owner, engine] = out.cases.map((c) => (c as any).owner_booking);
   assertEquals(owner.engine_proposal, false);
   assertEquals(owner.eligible, true);
+  assertEquals(owner.steps, ["message", "calendar"]);
   assertEquals(owner.approvals.length, 1);
   assertEquals(owner.approvals[0].approval_id, result.approval.binding_hash);
   assertEquals(owner.rulebook.days, ["Tue", "Fri"]);
@@ -829,15 +831,25 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   );
   // deno-lint-ignore no-explicit-any
   assertEquals((broken.cases[0] as any).owner_booking.approvals, null);
-  // Patio desk: the owner path is Stratco only.
+  // Patio desk: the owner writes a text for Nithin's lead, never a visit, and
+  // only Nithin's own approvals are read.
+  const asked: Array<string | undefined> = [];
   const patio = await applyOwnerBooking(
     await workspace([{}], "nithin"),
-    () => Promise.resolve([]),
+    (_since, resource) => {
+      asked.push(resource);
+      return Promise.resolve([]);
+    },
     NOW,
   );
-  assertEquals(patio.booking_flow?.owner_approval_write, null);
+  assertEquals(asked, ["nithin"]);
+  assertEquals(patio.booking_flow?.owner_approval_write, "owner-authored-v1");
+  assertEquals(patio.booking_flow?.owner_rulebook, null);
   // deno-lint-ignore no-explicit-any
-  assertEquals((patio.cases[0] as any).owner_booking.eligible, false);
+  const nithinCase = (patio.cases[0] as any).owner_booking;
+  assertEquals(nithinCase.eligible, true);
+  assertEquals(nithinCase.steps, ["message"]);
+  assertEquals(nithinCase.rulebook, null);
 });
 
 Deno.test("bookable dates skip today's passed Friday and non-Stratco days", () => {
@@ -915,7 +927,22 @@ Deno.test("owner request shape refusals and a decision already recorded on the s
   );
   await refusal(
     call(d, {
-      owner_input: input("message", { resource: "nithin" }),
+      owner_input: input("message", { resource: "someone-else" }),
+      dry_run: true,
+    }),
+    "booking_profile_required",
+  );
+  // A visit or an offered slot is the Stratco rulebook only.
+  await refusal(
+    call(d, {
+      owner_input: input("calendar", { resource: "nithin" }),
+      dry_run: true,
+    }),
+    "stratco_profile_required",
+  );
+  await refusal(
+    call(d, {
+      owner_input: input("message", { resource: "khairo", offer: FRI }),
       dry_run: true,
     }),
     "stratco_profile_required",
@@ -1144,4 +1171,103 @@ Deno.test("a live unexpired owner offer or visit blocks another lead on that slo
     dry_run: true,
   });
   assert("dry_run" in noSlotOk);
+});
+
+// ── Nithin's and Khairo's texts through the real approval gate ─────────────
+
+Deno.test("owner message for Nithin and Khairo: approved through the gate, sent from their own line", async () => {
+  const people: Array<[string, string, string, string]> = [
+    [
+      "nithin",
+      "patio-nithin",
+      "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
+      "+61489267774",
+    ],
+    [
+      "khairo",
+      "fencing-khairo",
+      "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      "+61489267772",
+    ],
+  ];
+  for (const [resource, profile, scoperUserId, line] of people) {
+    const { deps: d, rows } = deps({ resource });
+    const text =
+      `Hi Michael, ${resource} from SecureWorks. Does Thursday suit?`;
+    const result = await approve(
+      d,
+      input("message", { resource, text }),
+    );
+    assert("approval" in result);
+    const record = result.approval;
+    assertEquals(rows.length, 1);
+    assertEquals(record.resource, resource);
+    assertEquals(record.snapshot.profile, profile);
+    assertEquals(record.snapshot.scoper_user_id, scoperUserId);
+    assertEquals(record.snapshot.content, {
+      text,
+      sender: line,
+      recipient: "+61412345678",
+      variant: "owner",
+      offer: null,
+    });
+    assertEquals(result.checks.sender.line, line);
+    assertEquals(result.checks.sender.person, resource);
+    // The owner is still the only approver.
+    assertEquals(
+      await approvalGateRefusal(record, "message", NOW, [
+        "marnin@secureworkswa.com.au",
+      ]),
+      null,
+    );
+    assertEquals(
+      await approvalGateRefusal(record, "message", NOW, [
+        "someone@secureworkswa.com.au",
+      ]),
+      "approval_not_by_captain",
+    );
+    // A live press sends that exact text from that person's line, once.
+    const sms: BookingObject[] = [];
+    const ledger: BookingObject[] = [];
+    const sent = await salesBookingSendAction({
+      auth: auth as never,
+      body: { approval_id: record.binding_hash },
+      method: "POST",
+      deps: {
+        findApproval: () => Promise.resolve(record),
+        appointmentLedger: () => Promise.resolve(null),
+        readThread: () => Promise.resolve([]),
+        readOutlook: () => Promise.reject(new Error("unused")),
+        readContactPhone: () => Promise.resolve("0412 345 678"),
+        readOutlookLead: () => Promise.reject(new Error("unused")),
+        mirrorToOutlook: () => Promise.reject(new Error("unused")),
+        callAppointmentWriter: () => Promise.reject(new Error("unused")),
+        callSendSms: (body) => {
+          sms.push(body);
+          return Promise.resolve({
+            status: 200,
+            body: { success: true, messageId: `msg-${resource}` },
+          });
+        },
+        executions: {
+          get: () => Promise.resolve(null),
+          claim: (row) => {
+            ledger.push(row);
+            return Promise.resolve(true);
+          },
+          settle: () => Promise.resolve(),
+        },
+        envGet: (name: string) =>
+          name === "SALES_BOOKING_SEND_EXECUTE" ? "true" : undefined,
+        now: () => new Date(NOW.getTime() + 60_000),
+      },
+    });
+    assertEquals(sent.status, "sent");
+    assertEquals(sms, [{
+      contactId: CONTACT,
+      message: text,
+      fromNumber: line,
+    }]);
+    assertEquals(ledger.length, 1);
+  }
 });

@@ -191,9 +191,14 @@ The engine path is unchanged and keeps working. Code:
 `supabase/functions/ops-api/sales_booking_owner_approval.ts`; tests:
 `sales_booking_owner_approval_test.ts`.
 
-Stratco (resource `marnin`, profile `fencing-stratco-marnin`) only. Same
-`sales_booking_approvals` table, same 15-minute life, same captain-only rule,
-same executor. `binding_hash` is the `approval_id` the executor takes.
+Texts: Marnin's Stratco leads (`marnin`, `fencing-stratco-marnin`), Nithin's
+patio leads (`nithin`, `patio-nithin`) and Khairo's own fencing leads
+(`khairo`, `fencing-khairo`), each sent from that person's line. Visits and
+offered slots: Stratco only (`stratco_profile_required` otherwise). The engine
+path follows the same split. Same `sales_booking_approvals` table, same
+15-minute life, same captain-only rule, same executor. `binding_hash` is the
+`approval_id` the executor takes. Each case's `owner_booking.steps` names
+what it can take (`["message","calendar"]` on Stratco, `["message"]` else).
 
 ### Two presses: preview, then decide
 
@@ -236,7 +241,9 @@ refusal without running the calendar checks.
 
 Common fields: `step` (`"message"` or `"calendar"`), `case_id` (the case
 `id`), `contact_id` (GHL contact id), `week_start` (the screen's Monday),
-optional `resource` (must be `"marnin"`), `prepared_at` (decide only).
+optional `resource` (`"marnin"` by default, `"nithin"` or `"khairo"` for a
+text with no `offer`; anyone else is `booking_profile_required`),
+`prepared_at` (decide only).
 
 - **Message:** `text` (the exact text the owner wrote or edited, 1..1600
   characters, bytes kept exactly; no em or en dashes), optional `offer`
@@ -275,7 +282,8 @@ Refusals are HTTP 409 unless shown (400 for a malformed request) with body
 Request and identity: `sales_booking_approval_write requires POST` (405),
 `invalid_dry_run`, `stamp_write_requires_captain` (403),
 `approval_actor_required` (403), `invalid_owner_input`,
-`stratco_profile_required`, `invalid_independent_approval`,
+`booking_profile_required`, `stratco_profile_required`,
+`invalid_independent_approval`,
 `refusal_reason_required`, `owner_prepared_at_required`,
 `owner_content_hash_required`, `booking_case_identity_ambiguous` (the contact
 must be exactly one case on the Stratco roster for that week and its case id

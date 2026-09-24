@@ -24,7 +24,10 @@ import {
   type OwnerApprovalResult,
   salesBookingOwnerApprovalAction,
 } from "./sales_booking_owner_approval.ts";
-import { salesBookingSenderFor } from "./sales_booking_sender.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  salesBookingSenderFor,
+} from "./sales_booking_sender.ts";
 export {
   BOOKING_APPROVAL_TTL_MS,
   bookingContentHash,
@@ -37,6 +40,13 @@ export {
 export type BookingObject = Record<string, any>;
 export type BookingStep = "calendar" | "message";
 const PROFILE = "fencing-stratco-marnin";
+/** The engine profile for one booking person, or null for anyone else. */
+function resourceProfile(resourceId: unknown): string | null {
+  return typeof resourceId === "string" &&
+      Object.hasOwn(SALES_BOOKING_SENDER_LINES, resourceId)
+    ? SALES_BOOKING_SENDER_LINES[resourceId].profile
+    : null;
+}
 const SCHEMA = "scope-booking-lead.v1";
 const obj = (v: unknown): v is BookingObject =>
   !!v && typeof v === "object" && !Array.isArray(v);
@@ -219,7 +229,7 @@ function projectedModel(
     schema: SCHEMA,
     id: `opp:${row.opportunity_id}`,
     contact_id: row.contact_id,
-    profile: row.resource_id === "marnin" ? PROFILE : "patio-nithin",
+    profile: resourceProfile(row.resource_id),
     pack_revision: null,
     proposal: null,
   };
@@ -316,7 +326,7 @@ export function applyBookingConfirmationModels(
       opportunity(m.id) === row.opportunity_id &&
       m.contact_id === row.contact_id &&
       counts.get(row.contact_id) === 1 &&
-      m.profile === (row.resource_id === "marnin" ? PROFILE : "patio-nithin")
+      m.profile === resourceProfile(row.resource_id)
     )
   );
   return {
@@ -503,7 +513,13 @@ export async function salesBookingApprovalWriteAction(args: {
     !obj(snapshot) || !["calendar", "message"].includes(snapshot.step) ||
     !["approved", "refused"].includes(decision)
   ) fail("invalid_independent_approval", 400);
-  if (snapshot.resource !== "marnin" || snapshot.profile !== PROFILE) {
+  // Each booking person approves on their own profile. A visit is still
+  // booked only on the Stratco profile; Nithin and Khairo approve texts.
+  const profile = resourceProfile(snapshot.resource);
+  if (!profile || snapshot.profile !== profile) {
+    fail("booking_profile_required", 400);
+  }
+  if (snapshot.step === "calendar" && snapshot.profile !== PROFILE) {
     fail("stratco_profile_required", 400);
   }
   if (decision === "refused" && (!nonempty(reason) || reason.length > 1000)) {
@@ -525,7 +541,7 @@ export async function salesBookingApprovalWriteAction(args: {
   const model = row.booking_read_model;
   if (
     model.contact_id !== row.contact_id ||
-    opportunity(model.id) !== row.opportunity_id || model.profile !== PROFILE ||
+    opportunity(model.id) !== row.opportunity_id || model.profile !== profile ||
     !hashPattern.test(model.pack_revision ?? "")
   ) fail("current_booking_model_required");
   const expected = bookingApprovalSnapshot(response, row, snapshot.step);

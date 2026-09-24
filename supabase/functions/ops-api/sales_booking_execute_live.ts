@@ -366,14 +366,15 @@ export function createOwnerApprovalDeps(
   };
 }
 
-/** Owner-authored approval rows recorded since `sinceIso` (live ones are at
- * most 15 minutes old). Throws on a failed read, never returns a false []. */
+/** One person's owner-authored approval rows recorded since `sinceIso` (live
+ * ones are at most 15 minutes old). The offer census reads Marnin's, the only
+ * rows that can hold a slot. Throws on a failed read, never a false []. */
 export function ownerApprovalReader(client: Client): OwnerApprovalReader {
-  return async (sinceIso) => {
+  return async (sinceIso, resource = "marnin") => {
     const { data, error } = await client.from("sales_booking_approvals")
       .select(
         "binding_hash,step,resource,week_start,state,reason,snapshot,approved_by_user_id,approved_by_email,approved_at,expires_at",
-      ).eq("resource", "marnin").gte("approved_at", sinceIso)
+      ).eq("resource", resource).gte("approved_at", sinceIso)
       .filter("snapshot->>source", "eq", "owner")
       .order("approved_at", { ascending: false }).limit(1000);
     if (error || !Array.isArray(data)) throw new Error("unreadable");
