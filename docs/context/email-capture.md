@@ -79,18 +79,25 @@ Written only through `record_capture_run()` into `context_capture_runs`.
 ## Health: `email_capture` status block
 
 `context_email_capture_status()` (and `context_email_capture_status_at(p_now)`
-for a fixed clock) lists every source by `scope_label` with its latest poll,
-sweep and history health, and raises, only while the flag and the capture lane
-are on, for sources that are enabled and active. This staff-wide status omits
-mailbox addresses, source keys and mailbox privacy settings; those remain
-available only from the service-role mailbox table:
+for a fixed clock) is read by the staff-wide pipeline status, so it never
+names a mailbox. It reports `lines`: one per shared `scope_label` (admin,
+approvals, fencing, finance, patios, ses) and one combined `personal` line for
+the owner, sales, ops and other labels. Each line has counts (`sources`,
+`selected`, `pending_review`, `healthy`, `erroring`, `never_seen`) and
+`oldest_last_seen_at` (the oldest last successful poll among its selected
+sources). No address, source key, run-row name or privacy setting appears;
+those stay in the service-role table.
+
+Alarms are raised only while the flag and the capture lane are on, for
+selected sources (enabled and `active`), and are reported per line and key
+with the number of sources raising them, never which one:
 
 | Alarm | When |
 |---|---|
-| `email_source_error` | the last 2 finished polls failed (`failed_last_runs`), or no poll finished in 15 minutes (`no_recent_run`, not before 15 minutes after the flag or the source was switched on), or nothing is enabled (`no_polled_sources`) |
-| `email_backlog` | the last 3 finished polls all left pages behind |
-| `email_poll_missed` | the latest sweep that finished in the last 26 hours has `sweep_misses > 0` |
-| `sweep_incomplete` | from 03:00 Perth, no sweep started at or after 02:00 Perth succeeded (not expected on the night the flag or source was switched on) |
+| `email_source_error` | a source's last 2 finished polls failed (the line's distinct `error_codes` are listed) |
+| `email_backlog` | a source's last 3 finished polls all left pages behind |
+| `email_poll_missed` | a source's latest sweep that finished in the last 26 hours has `sweep_misses > 0` (summed per line) |
+| `sweep_incomplete` | from 03:00 Perth, a source has no sweep started at or after 02:00 Perth that succeeded (not expected on the night the flag or the source was switched on) |
 
-Thresholds are published in the block's `policy`
+Thresholds and the personal labels are published in the block's `policy`
 (`context_email_capture_policy()`, changed only by migration).

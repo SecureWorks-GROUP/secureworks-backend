@@ -22,7 +22,8 @@
 --     authenticated grants, which RLS blocks: that is the pre-image, not a
 --     recommendation);
 -- and drops EM1's functions, the receipts table and the three inbox_events
--- sighting columns, and deletes the email_capture_v2 flag row (off). The
+-- sighting columns, and deletes the email_capture_v2 flag row it created
+-- (while off). The
 -- monitor-inbox pin to its hard-coded list is code and is reverted by PR, not
 -- here; it is correct with or without this schema.
 SET LOCAL lock_timeout = '5s';
@@ -33,8 +34,8 @@ DECLARE x record; flag_on boolean:=false; sightings boolean:=false; receipts boo
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_email_capture_status()','39f700ff23752f161c2215ecc500ece8'),
-  ('public.context_email_capture_status_at(timestamptz)','071eeded3d84f3177c6578da97c00fb1'),
-  ('public.context_email_capture_policy()','ae811e23b69cc7ea382ca727d1b61b39'),
+  ('public.context_email_capture_status_at(timestamptz)','78aefd4a54766e3e4967373e46fb934a'),
+  ('public.context_email_capture_policy()','a7ebb664be0ffff255d7bc2481976054'),
   ('public.set_monitored_mailbox(text,boolean,text,text,text)','490a637f9ea0da6aae196e9ce1aeaf5d')) AS t(sig,md5) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(x.sig)) IS DISTINCT FROM x.md5
   THEN RAISE EXCEPTION 'em1_rollback_refused: % is not the EM1 body; roll back its owning slice first',x.sig; END IF;
@@ -73,14 +74,12 @@ ALTER TABLE public.monitored_mailboxes
  DROP CONSTRAINT IF EXISTS monitored_mailboxes_enabled_active,
  DROP CONSTRAINT IF EXISTS monitored_mailboxes_unknown_pending,
  DROP CONSTRAINT IF EXISTS monitored_mailboxes_user_rules,
- DROP CONSTRAINT IF EXISTS monitored_mailboxes_note,
  DROP CONSTRAINT IF EXISTS monitored_mailboxes_updated_by;
 ALTER TABLE public.monitored_mailboxes
  DROP COLUMN IF EXISTS source_key,
  DROP COLUMN IF EXISTS kind,
  DROP COLUMN IF EXISTS owner_privacy,
  DROP COLUMN IF EXISTS files_supplier_pdfs,
- DROP COLUMN IF EXISTS note,
  DROP COLUMN IF EXISTS updated_by;
 ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_scope_label_check
  CHECK (scope_label IN ('owner','admin','finance','sales','patios','fencing','ops','other'));
@@ -103,7 +102,9 @@ ALTER TABLE public.inbox_events
  DROP COLUMN IF EXISTS provider_message_id,
  DROP COLUMN IF EXISTS folder_kind;
 
-DELETE FROM public.feature_flags WHERE flag_name='email_capture_v2' AND enabled=false;
+-- Only the row this migration created (its description), and only while off.
+DELETE FROM public.feature_flags WHERE flag_name='email_capture_v2' AND enabled=false
+ AND description='Email capture v2 (email.md): the whole-mailbox Outlook poller reads monitored_mailboxes. Off: the old monitor-inbox path runs, pinned to its own list.';
 
 DO $$
 BEGIN

@@ -11,7 +11,7 @@
 --      draft (ledger 20260503063735), 17 columns, EMPTY, no seed, no trigger,
 --      view, function or cron reading it. EM1 owns it from here (INTEGRATION
 --      §2) and builds on it:
---        - adds source_key, kind, owner_privacy, files_supplier_pdfs, note,
+--        - adds source_key, kind, owner_privacy, files_supplier_pdfs,
 --          updated_by;
 --        - widens the scope_label rule with approvals (Plans and Approvals,
 --          council plans) and ses;
@@ -41,8 +41,9 @@
 --      (the one evidence row this mailbox copy is), provider_message_id (its
 --      'email:' key) and folder_kind. All null on every existing row; nothing
 --      writes them yet. The table keeps its service-role-only policy.
---   5. feature_flags row email_capture_v2, enabled = false (email.md P3).
---      Inserted only when absent; an existing row is left as it is.
+--   5. feature_flags row email_capture_v2, enabled = false (email.md P3). The
+--      guard requires it absent on a first apply; a re-apply leaves the row
+--      this migration created as it is.
 --   6. context_email_capture_policy() and context_email_capture_status(),
 --      replacing F1b's stub for status block email_capture. Per source: its
 --      poll, sweep and history run rows in context_capture_runs, and four
@@ -72,7 +73,8 @@
 -- function deploy. The contract runs that exact query and requires it to fail.
 --
 -- No switch is turned on. The only rows written are the seed into the empty
--- table and a missing email_capture_v2 flag row, inserted as off. No grant,
+-- table and the email_capture_v2 flag row, which must not exist yet and is
+-- inserted as off. No grant,
 -- policy or view is added for anon or authenticated; theirs are removed.
 --
 -- Built on the LIVE production definitions, read from production 24 Sep 2026
@@ -107,15 +109,15 @@ SET LOCAL statement_timeout = '60s';
 DO $guard$
 DECLARE problems text[]:='{}'; live text; x record; cols text; t text; reapply boolean; n bigint;
  draft_cols constant text:='id:uuid:t,org_id:uuid:f,email:text:t,display_name:text:f,scope_label:text:t,enabled:boolean:t,status:text:t,poll_interval_seconds:integer:t,privacy_classification:text:t,graph_subscription_id:text:f,graph_app_credential_id:text:f,last_polled_at:timestamp with time zone:f,last_message_at:timestamp with time zone:f,last_error:text:f,last_error_at:timestamp with time zone:f,created_at:timestamp with time zone:t,updated_at:timestamp with time zone:t';
- em1_cols constant text:='id:uuid:t,org_id:uuid:f,email:text:t,display_name:text:f,scope_label:text:t,enabled:boolean:t,status:text:t,poll_interval_seconds:integer:t,privacy_classification:text:t,graph_subscription_id:text:f,graph_app_credential_id:text:f,last_message_at:timestamp with time zone:f,last_error:text:f,last_error_at:timestamp with time zone:f,created_at:timestamp with time zone:t,updated_at:timestamp with time zone:t,source_key:text:t,kind:text:t,owner_privacy:boolean:t,files_supplier_pdfs:boolean:t,note:text:f,updated_by:text:t';
+ em1_cols constant text:='id:uuid:t,org_id:uuid:f,email:text:t,display_name:text:f,scope_label:text:t,enabled:boolean:t,status:text:t,poll_interval_seconds:integer:t,privacy_classification:text:t,graph_subscription_id:text:f,graph_app_credential_id:text:f,last_message_at:timestamp with time zone:f,last_error:text:f,last_error_at:timestamp with time zone:f,created_at:timestamp with time zone:t,updated_at:timestamp with time zone:t,source_key:text:t,kind:text:t,owner_privacy:boolean:t,files_supplier_pdfs:boolean:t,updated_by:text:t';
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: F1b's stub, or this migration's body.
   ('public.context_email_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','39f700ff23752f161c2215ecc500ece8'],false),
   -- New: absent, or already this migration's body.
-  ('public.context_email_capture_policy()',ARRAY['ae811e23b69cc7ea382ca727d1b61b39'],true),
+  ('public.context_email_capture_policy()',ARRAY['a7ebb664be0ffff255d7bc2481976054'],true),
   ('public.set_monitored_mailbox(text,boolean,text,text,text)',ARRAY['490a637f9ea0da6aae196e9ce1aeaf5d'],true),
-  ('public.context_email_capture_status_at(timestamptz)',ARRAY['071eeded3d84f3177c6578da97c00fb1'],true)
+  ('public.context_email_capture_status_at(timestamptz)',ARRAY['78aefd4a54766e3e4967373e46fb934a'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
@@ -142,6 +144,10 @@ BEGIN
    IF cols IS DISTINCT FROM (SELECT string_agg(c,',' ORDER BY split_part(c,':',1)) FROM unnest(string_to_array(draft_cols,',')) c) THEN problems:=problems||format('monitored_mailboxes columns are %s',cols); END IF;
    EXECUTE 'SELECT count(*) FROM public.monitored_mailboxes' INTO n;
    IF n<>0 THEN problems:=problems||format('monitored_mailboxes is not empty (%s rows); someone seeded it',n); END IF;
+   -- The flag is created off by this migration; on a first apply it must not
+   -- exist yet (production had no row), so it can never inherit an 'on'.
+   IF EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name='email_capture_v2')
+   THEN problems:=problems||'feature flag email_capture_v2 already exists; this migration creates it off'::text; END IF;
    -- The draft's checks, one per column, and its unique email.
    SELECT string_agg(a.attname,',' ORDER BY a.attname) INTO t FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey)
    WHERE c.conrelid='public.monitored_mailboxes'::regclass AND c.contype='c';
@@ -208,7 +214,6 @@ ALTER TABLE public.monitored_mailboxes
  ADD COLUMN IF NOT EXISTS kind text,
  ADD COLUMN IF NOT EXISTS owner_privacy boolean NOT NULL DEFAULT false,
  ADD COLUMN IF NOT EXISTS files_supplier_pdfs boolean NOT NULL DEFAULT false,
- ADD COLUMN IF NOT EXISTS note text,
  ADD COLUMN IF NOT EXISTS updated_by text;
 -- scope_label gains approvals (Plans and Approvals) and ses. The draft's check
 -- has a generated name, so it is found by its column.
@@ -242,27 +247,25 @@ ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_unknow
 -- The two per-mailbox rules apply to user mailboxes only.
 ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_user_rules;
 ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_user_rules CHECK (kind='user' OR NOT (owner_privacy OR files_supplier_pdfs));
-ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_note;
-ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_note CHECK (note IS NULL OR length(note) BETWEEN 1 AND 300);
 ALTER TABLE public.monitored_mailboxes DROP CONSTRAINT IF EXISTS monitored_mailboxes_updated_by;
 ALTER TABLE public.monitored_mailboxes ADD CONSTRAINT monitored_mailboxes_updated_by CHECK (updated_by ~ '^[A-Za-z0-9_.:@-]{1,128}$');
 
 -- The captain's list, 24 Sep 2026. Re-apply leaves existing rows untouched.
-INSERT INTO public.monitored_mailboxes(email,source_key,kind,enabled,status,scope_label,privacy_classification,owner_privacy,files_supplier_pdfs,note,updated_by) VALUES
- ('marnin@secureworkswa.com.au','marnin','user',true,'active','owner','restricted_pii',true,true,'Owner mailbox.','migration:20260924213000'),
- ('jan@secureworkswa.com.au','jan','user',true,'active','owner','restricted_pii',true,true,'Owner mailbox.','migration:20260924213000'),
- ('nithin@secureworkswa.com.au','nithin','user',true,'active','sales','restricted_pii',false,true,'Sales, patios.','migration:20260924213000'),
- ('shaun@secureworkswa.com.au','shaun','user',true,'active','ops','restricted_pii',false,true,'Operations.','migration:20260924213000'),
- ('admin@secureworkswa.com.au','admin','user',true,'active','admin','restricted_pii',false,true,'Shared admin mailbox.','migration:20260924213000'),
- ('khairo@secureworkswa.com.au','khairo','user',true,'active','sales','restricted_pii',false,false,'Sales, fencing. Not read by the old path. No PDF filing until private storage (F-EM6).','migration:20260924213000'),
- ('patios@secureworkswa.com.au','patios','group',true,'active','patios','staff_only',false,false,'Patios group.','migration:20260924213000'),
- ('fencing@secureworkswa.com.au','fencing','group',true,'active','fencing','staff_only',false,false,'Fencing group.','migration:20260924213000'),
- ('finance@secureworkswa.com.au','finance','group',true,'active','finance','staff_only',false,false,'Supplier bills, remittances and delivery disputes.','migration:20260924213000'),
- ('approvals@secureworkswa.com.au','approvals','group',true,'active','approvals','staff_only',false,false,'Plans and Approvals: council and certifier mail.','migration:20260924213000'),
- ('ses@secureworkswa.com.au','ses','group',true,'active','ses','staff_only',false,false,'SES make-safe intake group (captain 24 Sep). The make-safe intake pipeline keeps its own read.','migration:20260924213000'),
- ('info@secureworkswa.com.au','info','unknown',false,'pending_review','other','staff_only',false,false,'Named to customers; delivery not located (email.md P1).','migration:20260924213000'),
- ('sales@secureworkswa.com.au','sales','unknown',false,'pending_review','sales','staff_only',false,false,'Named to customers; delivery not located (email.md P1).','migration:20260924213000'),
- ('plans@secureworkswa.com.au','plans','unknown',false,'pending_review','approvals','staff_only',false,false,'Named to customers; may deliver to approvals@. Not located (email.md P1).','migration:20260924213000')
+INSERT INTO public.monitored_mailboxes(email,source_key,kind,enabled,status,scope_label,privacy_classification,owner_privacy,files_supplier_pdfs,updated_by) VALUES
+ ('marnin@secureworkswa.com.au','marnin','user',true,'active','owner','restricted_pii',true,true,'migration:20260924213000'),
+ ('jan@secureworkswa.com.au','jan','user',true,'active','owner','restricted_pii',true,true,'migration:20260924213000'),
+ ('nithin@secureworkswa.com.au','nithin','user',true,'active','sales','restricted_pii',false,true,'migration:20260924213000'),
+ ('shaun@secureworkswa.com.au','shaun','user',true,'active','ops','restricted_pii',false,true,'migration:20260924213000'),
+ ('admin@secureworkswa.com.au','admin','user',true,'active','admin','restricted_pii',false,true,'migration:20260924213000'),
+ ('khairo@secureworkswa.com.au','khairo','user',true,'active','sales','restricted_pii',false,false,'migration:20260924213000'),
+ ('patios@secureworkswa.com.au','patios','group',true,'active','patios','staff_only',false,false,'migration:20260924213000'),
+ ('fencing@secureworkswa.com.au','fencing','group',true,'active','fencing','staff_only',false,false,'migration:20260924213000'),
+ ('finance@secureworkswa.com.au','finance','group',true,'active','finance','staff_only',false,false,'migration:20260924213000'),
+ ('approvals@secureworkswa.com.au','approvals','group',true,'active','approvals','staff_only',false,false,'migration:20260924213000'),
+ ('ses@secureworkswa.com.au','ses','group',true,'active','ses','staff_only',false,false,'migration:20260924213000'),
+ ('info@secureworkswa.com.au','info','unknown',false,'pending_review','other','staff_only',false,false,'migration:20260924213000'),
+ ('sales@secureworkswa.com.au','sales','unknown',false,'pending_review','sales','staff_only',false,false,'migration:20260924213000'),
+ ('plans@secureworkswa.com.au','plans','unknown',false,'pending_review','approvals','staff_only',false,false,'migration:20260924213000')
 ON CONFLICT (email) DO NOTHING;
 ALTER TABLE public.monitored_mailboxes
  ALTER COLUMN source_key SET NOT NULL,
@@ -361,13 +364,15 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'timezone','Australia/Perth',
   -- Run-row names in context_capture_runs, per source_key.
   'run_sources',jsonb_build_object('poll','outlook_<source_key>','sweep','outlook_sweep_<source_key>','history','outlook_history_<source_key>'),
-  -- email_source_error: the last this many finished poll runs all failed ...
+  -- The block never names a personal mailbox: sources with these scope
+  -- labels are reported only as one combined line, 'personal'. Every other
+  -- label (shared mailboxes and groups) is one line per label.
+  'personal_scope_labels',jsonb_build_array('owner','sales','ops','other'),
+  -- email_source_error: the last this many finished poll runs all failed.
   'failed_runs_alarm',2,
-  -- ... or no poll run finished for this long (the poll runs every 5 minutes).
-  'no_run_alarm_minutes',15,
   -- email_backlog: the last this many finished poll runs all left pages behind.
   'backlog_runs_alarm',3,
-  -- sweep_incomplete: each polled source must finish a sweep started at or
+  -- sweep_incomplete: each selected source must finish a sweep started at or
   -- after 02:00 Perth, checked from 03:00 Perth.
   'sweep_local_time','02:00',
   'sweep_grace_minutes',60,
@@ -375,7 +380,7 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'sweep_miss_lookback_hours',26)
 $$;
 COMMENT ON FUNCTION public.context_email_capture_policy() IS
- 'Thresholds and run-row names for context_email_capture_status() (EM1). Changed only by migration.';
+ 'Thresholds, run-row names and the personal scope labels for context_email_capture_status() (EM1). Changed only by migration.';
 
 -- The block, judged at a stated time (tests pass a fixed clock; the composer
 -- goes through context_email_capture_status(), which passes now()).
@@ -387,19 +392,18 @@ DECLARE
  tz text:=policy->>'timezone';
  failed_n integer:=(policy->>'failed_runs_alarm')::integer;
  backlog_n integer:=(policy->>'backlog_runs_alarm')::integer;
- no_run interval:=make_interval(mins=>(policy->>'no_run_alarm_minutes')::integer);
  sweep_grace interval:=make_interval(mins=>(policy->>'sweep_grace_minutes')::integer);
  miss_lookback interval:=make_interval(hours=>(policy->>'sweep_miss_lookback_hours')::integer);
+ personal text[]:=ARRAY(SELECT jsonb_array_elements_text(policy->'personal_scope_labels'));
  flag_on boolean; flag_changed timestamptz; flag_state text:='present';
  lane_on boolean; alarms_active boolean;
  sweep_at timestamptz; sweep_due boolean;
- m record; poll jsonb; sweep jsonb; hist jsonb;
- poll_src text; sweep_src text; hist_src text;
- last_runs public.context_capture_runs[]; last_sweep public.context_capture_runs; last_hist public.context_capture_runs; miss_run public.context_capture_runs;
- recent_finish boolean; swept boolean; since timestamptz; polled boolean;
+ m record; line text; src_alarms jsonb;
+ poll_src text; sweep_src text;
+ last_runs public.context_capture_runs[]; last_sweep public.context_capture_runs; miss_run public.context_capture_runs;
+ swept boolean; since timestamptz; selected boolean; last_seen timestamptz;
  n_failed integer; n_backlog integer; misses bigint;
- sources jsonb:='[]'::jsonb; alarms jsonb:='[]'::jsonb;
- n_sources integer:=0; n_polled integer:=0; n_pending integer:=0;
+ per_source jsonb:='[]'::jsonb; lines jsonb; alarms jsonb;
 BEGIN
  -- Flag: fails closed (no table, no row or an error reads as off).
  BEGIN
@@ -417,73 +421,80 @@ BEGIN
  IF sweep_at>now_time THEN sweep_at:=((date_trunc('day',now_time AT TIME ZONE tz)-interval '1 day'+(policy->>'sweep_local_time')::time) AT TIME ZONE tz); END IF;
  sweep_due:=now_time>=sweep_at+sweep_grace;
 
- FOR m IN SELECT * FROM public.monitored_mailboxes ORDER BY array_position(ARRAY['user','group','unknown'],kind),email LOOP
-  n_sources:=n_sources+1;
-  polled:=m.enabled AND m.status='active';
-  IF polled THEN n_polled:=n_polled+1; END IF;
-  IF m.status='pending_review' THEN n_pending:=n_pending+1; END IF;
-  poll_src:='outlook_'||m.source_key; sweep_src:='outlook_sweep_'||m.source_key; hist_src:='outlook_history_'||m.source_key;
+ -- 1. Each source's health, kept inside this function: only the per-line
+ -- aggregate below leaves it.
+ FOR m IN SELECT * FROM public.monitored_mailboxes LOOP
+  line:=CASE WHEN m.scope_label=ANY(personal) THEN 'personal' ELSE m.scope_label END;
+  selected:=m.enabled AND m.status='active';
+  poll_src:='outlook_'||m.source_key; sweep_src:='outlook_sweep_'||m.source_key;
   SELECT coalesce(array_agg(c ORDER BY c.started_at DESC),'{}') INTO last_runs FROM (
    SELECT * FROM public.context_capture_runs r WHERE r.source=poll_src AND r.status<>'running' ORDER BY r.started_at DESC LIMIT greatest(failed_n,backlog_n)) c;
-  -- Bounded: judged on the latest finished poll only, never a scan of the source's history.
-  recent_finish:=coalesce((last_runs[1]).finished_at>=now_time-no_run,false);
   SELECT count(*) FILTER (WHERE u.status='failed') INTO n_failed FROM unnest(last_runs[1:failed_n]) u;
   SELECT count(*) FILTER (WHERE (u.cursor->>'backlog')='true') INTO n_backlog FROM unnest(last_runs[1:backlog_n]) u;
+  SELECT max(r.finished_at) INTO last_seen FROM public.context_capture_runs r WHERE r.source=poll_src AND r.status='succeeded';
   SELECT * INTO last_sweep FROM public.context_capture_runs r WHERE r.source=sweep_src ORDER BY r.started_at DESC LIMIT 1;
-  SELECT * INTO last_hist FROM public.context_capture_runs r WHERE r.source=hist_src ORDER BY r.started_at DESC LIMIT 1;
   swept:=EXISTS(SELECT 1 FROM public.context_capture_runs r WHERE r.source=sweep_src AND r.started_at>=sweep_at AND r.status='succeeded');
   -- The latest finished sweep inside the lookback: did it find mail the poll missed?
   SELECT * INTO miss_run FROM public.context_capture_runs r WHERE r.source=sweep_src AND r.status<>'running' AND r.finished_at>=now_time-miss_lookback
   ORDER BY r.started_at DESC LIMIT 1;
   misses:=CASE WHEN jsonb_typeof(miss_run.counts->'sweep_misses')='number' THEN (miss_run.counts->>'sweep_misses')::bigint ELSE 0 END;
-  -- Nothing is expected of a source before the flag, and its own enabling, have been in place.
+  -- A sweep is not expected on the night the flag or the source was switched on.
   since:=greatest(flag_changed,m.updated_at);
-  poll:=jsonb_build_object('last_started_at',(last_runs[1]).started_at,'last_finished_at',(last_runs[1]).finished_at,
-   'last_status',(last_runs[1]).status,'last_error_code',(last_runs[1]).error_code,
-   'last_succeeded_at',(SELECT max(r.finished_at) FROM public.context_capture_runs r WHERE r.source=poll_src AND r.status='succeeded'),
-   'failed_of_last',jsonb_build_object('runs',least(cardinality(last_runs),failed_n),'failed',n_failed),
-   'backlog_of_last',jsonb_build_object('runs',least(cardinality(last_runs),backlog_n),'backlog',n_backlog));
-  sweep:=jsonb_build_object('last_started_at',last_sweep.started_at,'last_status',last_sweep.status,
-   'last_error_code',last_sweep.error_code,'finished_since_last_0200',swept,'sweep_misses',misses);
-  hist:=jsonb_build_object('last_started_at',last_hist.started_at,'last_status',last_hist.status,'last_error_code',last_hist.error_code);
-  sources:=sources||jsonb_build_array(jsonb_build_object('scope_label',m.scope_label,'kind',m.kind,
-   'enabled',m.enabled,'status',m.status,'selected',polled,
-   'poll',poll,'sweep',sweep,'history',hist));
-  IF alarms_active AND polled THEN
-   IF (cardinality(last_runs)>=failed_n AND n_failed=failed_n) THEN
-    alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',(last_runs[failed_n]).started_at,
-     'scope_label',m.scope_label,'reason','failed_last_runs','error_code',(last_runs[1]).error_code,
-     'what_to_do','This mailbox failed its last polls. Check the Microsoft Graph credentials and the app''s permission on this mailbox or group.'));
-   ELSIF NOT recent_finish AND (since IS NULL OR since<=now_time-no_run) THEN
-    alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',coalesce((last_runs[1]).finished_at,since),
-     'scope_label',m.scope_label,'reason','no_recent_run',
-     'what_to_do','No poll of this mailbox has finished in the last 15 minutes. Check that the monitor-inbox cron job runs and that the function is not failing.'));
+  src_alarms:='[]'::jsonb;
+  IF alarms_active AND selected THEN
+   IF cardinality(last_runs)>=failed_n AND n_failed=failed_n THEN
+    src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','since',(last_runs[failed_n]).started_at,'error_code',(last_runs[1]).error_code));
    END IF;
    IF cardinality(last_runs)>=backlog_n AND n_backlog=backlog_n THEN
-    alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_backlog','severity','warning','since',(last_runs[backlog_n]).started_at,
-     'scope_label',m.scope_label,'what_to_do','This mailbox has had more mail than one poll reads for three polls running. It will catch up; if it does not, raise the page bound.'));
+    src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','email_backlog','since',(last_runs[backlog_n]).started_at));
    END IF;
    IF misses>0 THEN
-    alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_poll_missed','severity','warning','since',miss_run.started_at,
-     'scope_label',m.scope_label,'sweep_misses',misses,
-     'what_to_do','The nightly sweep found mail the 5-minute poll missed (now captured). Check the poll''s run rows for this mailbox.'));
+    src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','email_poll_missed','since',miss_run.started_at,'sweep_misses',misses));
    END IF;
    IF sweep_due AND NOT swept AND (since IS NULL OR since<sweep_at) THEN
-    alarms:=alarms||jsonb_build_array(jsonb_build_object('key','sweep_incomplete','severity','warning','since',sweep_at,
-     'scope_label',m.scope_label,'last_status',last_sweep.status,
-     'what_to_do','This mailbox did not finish its 02:00 sweep. Check the monitor-inbox-sweep cron job and this mailbox''s sweep run rows.'));
+    src_alarms:=src_alarms||jsonb_build_array(jsonb_build_object('key','sweep_incomplete','since',sweep_at,'last_status',last_sweep.status));
    END IF;
   END IF;
+  per_source:=per_source||jsonb_build_array(jsonb_build_object('line',line,'selected',selected,
+   'pending_review',m.status='pending_review','last_seen',last_seen,'alarms',src_alarms));
  END LOOP;
- IF alarms_active AND n_polled=0 THEN
-  alarms:=alarms||jsonb_build_array(jsonb_build_object('key','email_source_error','severity','warning','since',flag_changed,'scope_label',NULL,
-   'reason','no_polled_sources','what_to_do','Email capture is on but no mailbox is enabled. Enable the mailboxes with set_monitored_mailbox.'));
- END IF;
+
+ -- 2. One line per shared label, one combined 'personal' line: counts,
+ -- health and the oldest last-seen only.
+ SELECT coalesce(jsonb_agg(l ORDER BY (l->>'line')='personal',l->>'line'),'[]'::jsonb) INTO lines FROM (
+  SELECT jsonb_build_object('line',s->>'line','personal',(s->>'line')='personal',
+   'sources',count(*),
+   'selected',count(*) FILTER (WHERE (s->>'selected')::boolean),
+   'pending_review',count(*) FILTER (WHERE (s->>'pending_review')::boolean),
+   'healthy',count(*) FILTER (WHERE (s->>'selected')::boolean AND jsonb_array_length(s->'alarms')=0),
+   'erroring',count(*) FILTER (WHERE (s->>'selected')::boolean AND jsonb_array_length(s->'alarms')>0),
+   'never_seen',count(*) FILTER (WHERE (s->>'selected')::boolean AND s->'last_seen'='null'::jsonb),
+   'oldest_last_seen_at',min((s->>'last_seen')::timestamptz) FILTER (WHERE (s->>'selected')::boolean)) AS l
+  FROM jsonb_array_elements(per_source) s GROUP BY s->>'line') x;
+
+ -- 3. Alarms, one per line and key: how many of the line's sources raise it,
+ -- never which one.
+ SELECT coalesce(jsonb_agg(a ORDER BY a->>'line',a->>'key'),'[]'::jsonb) INTO alarms FROM (
+  SELECT jsonb_build_object('key',al->>'key','severity','warning','line',s->>'line','sources',count(*),
+   'since',min((al->>'since')::timestamptz))
+   ||CASE al->>'key'
+      WHEN 'email_source_error' THEN jsonb_build_object('error_codes',(SELECT jsonb_agg(DISTINCT c) FROM unnest(array_agg(al->>'error_code')) c WHERE c IS NOT NULL),
+       'what_to_do','Mailboxes on this line failed their last two polls. Check the Microsoft Graph credentials and the app''s permission on them.')
+      WHEN 'email_backlog' THEN jsonb_build_object('what_to_do','Mailboxes on this line have had more mail than one poll reads for three polls running. They will catch up; if not, raise the page bound.')
+      WHEN 'email_poll_missed' THEN jsonb_build_object('sweep_misses',sum((al->>'sweep_misses')::bigint),
+       'what_to_do','The nightly sweep found mail the 5-minute poll missed (now captured). Check the poll run rows for this line.')
+      ELSE jsonb_build_object('what_to_do','Mailboxes on this line did not finish their 02:00 sweep. Check the monitor-inbox-sweep cron job and the sweep run rows.')
+     END AS a
+  FROM jsonb_array_elements(per_source) s, jsonb_array_elements(s->'alarms') al
+  GROUP BY s->>'line',al->>'key') x;
+
  RETURN jsonb_build_object('as_of',now_time,
   'flag',jsonb_build_object('name',policy->>'flag','enabled',coalesce(flag_on,false),'updated_at',flag_changed,'state',flag_state),
   'capture_lane',lane_on,'alarms_active',alarms_active,'last_sweep_due_at',sweep_at,
-  'counts',jsonb_build_object('sources',n_sources,'selected',n_polled,'pending_review',n_pending),
-  'policy',policy,'sources',sources,'alarms',alarms);
+  'counts',jsonb_build_object('sources',jsonb_array_length(per_source),
+    'selected',(SELECT count(*) FROM jsonb_array_elements(per_source) s WHERE (s->>'selected')::boolean),
+    'pending_review',(SELECT count(*) FROM jsonb_array_elements(per_source) s WHERE (s->>'pending_review')::boolean)),
+  'policy',policy,'lines',lines,'alarms',alarms);
 END $$;
 COMMENT ON FUNCTION public.context_email_capture_status_at(timestamptz) IS
  'context_email_capture_status() judged at p_now (null = now()). For tests and diagnosis; same output shape.';
@@ -491,7 +502,7 @@ COMMENT ON FUNCTION public.context_email_capture_status_at(timestamptz) IS
 CREATE OR REPLACE FUNCTION public.context_email_capture_status() RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$ SELECT public.context_email_capture_status_at(now()) $$;
 COMMENT ON FUNCTION public.context_email_capture_status() IS
- 'Status block email_capture (EM1, replacing the F1b stub): every monitored_mailboxes source by scope_label with its poll, sweep and history health, and alarms email_source_error, email_poll_missed, email_backlog, sweep_incomplete, raised only while flag email_capture_v2 and the capture lane are on. No mailbox addresses, source keys or privacy settings.';
+ 'Status block email_capture (EM1, replacing the F1b stub): mailbox health as one line per shared scope label and one combined personal line (owner, sales, ops, other), with counts, the oldest last-seen and alarms email_source_error, email_poll_missed, email_backlog, sweep_incomplete per line, raised only while flag email_capture_v2 and the capture lane are on. Never names a mailbox: no addresses, source keys or privacy settings.';
 
 -- 6. Grants. No PUBLIC, anon or authenticated execute; service_role only.
 REVOKE ALL ON FUNCTION
