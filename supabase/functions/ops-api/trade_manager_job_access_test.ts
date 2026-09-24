@@ -107,7 +107,10 @@ function makeClient(tables: Tables) {
       select: () => api,
       order: () => api,
       eq: (c: string, v: any) => {
-        preds.push((r) => String((c === "is_ghost" ? r?.[c] ?? false : r?.[c]) ?? "") === String(v));
+        preds.push((r) =>
+          String((c === "is_ghost" ? r?.[c] ?? false : r?.[c]) ?? "") ===
+            String(v)
+        );
         return api;
       },
       neq: (c: string, v: any) => {

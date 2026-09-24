@@ -281,6 +281,12 @@ final) passes the same per-job tier gate (`resolveTradeJobAccessTier`, with the
 caller's see-everything flag as `isOffice`) before any write; the Ops Dashboard /
 routine / api-key path keeps its existing staff-role behaviour unchanged.
 
+Every other per-job Trade App door passes the same gate
+(`assertAssignedOrMakesafeAccess`): the three roof-report doors,
+`submit_service_report` (before either branch reads or writes),
+`create_trade_alert` when it names a job, and a trade-JWT `request_assistance`,
+whose requester is pinned to the caller rather than `body.requested_by`.
+
 A ghost watcher row (`job_assignments.is_ghost = true`, the ops-manager mirror
 written by `ghost_observer_mirror.ts`) is never an allocation: the per-job tier
 check and `search_all_jobs`' allocated set both exclude it.

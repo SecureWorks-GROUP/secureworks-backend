@@ -17,6 +17,9 @@ complete, put the 2 hours on their invoice, and we see it is done on our end".
   the real make-safe report still moves the card. Client flags are still ignored.
 - `roof_report_submitted` job event carries `report_type_job: boolean`.
 - `mark_makesafe_portal_report_done` is unchanged (still report-type only).
+- "Any make-safe" means any make-safe the caller holds a Trade App tier on:
+  since 2026-09-24 the three roof doors refuse tier `none` like every per-job
+  door (`docs/trade-all-means-all-v1.md`, 2026-09-24 addendum).
 
 ## `log_my_job_hours` (trade JWT)
 
@@ -26,9 +29,11 @@ job (in_progress > latest scheduled/confirmed > latest complete; observers and
 `makesafe_open` rows never qualify). The assignment becomes `complete`
 (`completed_at` stamped) and gets `scheduled_date = today AWST` when it had
 none, so `my_hours` lists it in the week. An assignment already stamped
-`invoiced_in` is refused (409). A make-safe where the caller has no assignment
-gets the same completing-trade binding `submit_makesafe_report` mints; any
-other job without an assignment is refused (the office allocates). Audit:
+`invoiced_in` is refused (409). The per-job tier gate runs first, so since
+2026-09-24 only a make-safe category manager can reach a make-safe with no
+assignment of their own; that caller gets the same completing-trade binding
+`submit_makesafe_report` mints. Any other job without an assignment is refused
+(the office allocates). Audit:
 `job_events.trade_hours_logged { assignment_id, hours, previous_hours, source }`.
 Response: `{ ok, hours, assignment: { id, status, scheduled_date, hours_worked, created }, week_ending }`.
 

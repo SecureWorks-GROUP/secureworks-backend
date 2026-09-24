@@ -806,7 +806,11 @@ async function poolFor(
   role = "lead_installer",
   seeEverything = false,
 ) {
-  const vis = _resolveManagerVisibility({ role, managedVerticals: managed, seeEverything });
+  const vis = _resolveManagerVisibility({
+    role,
+    managedVerticals: managed,
+    seeEverything,
+  });
   const scope = _managerBoardVerticals({
     isDispatcher: vis.isDispatcher,
     mode: "all",
