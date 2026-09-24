@@ -627,3 +627,82 @@ Deno.test("rule table (end-to-end): an allocated-only history of 60 jobs is read
   const allIds = new Set([...first.jobs, ...second.jobs].map((j: any) => j.id));
   assertEquals(allIds.size, 60, "every allocated job appears exactly once");
 });
+
+function categoryManagerClient(): any {
+  const jobs = [
+    { id: "cm-fence-1", org_id: ORG_A, type: "fencing", job_number: "SWF-10", client_name: "Alpha", status: "scheduled", created_at: "2026-09-01T00:00:00Z" },
+    { id: "cm-fence-2", org_id: ORG_A, type: "fencing", job_number: "SWF-11", client_name: "Bravo", status: "complete", created_at: "2026-08-01T00:00:00Z" },
+    { id: "cm-patio-own", org_id: ORG_A, type: "patio", job_number: "SWP-20", client_name: "Alpha", status: "complete", created_at: "2026-07-01T00:00:00Z" },
+    { id: "cm-patio-deleted", org_id: ORG_A, type: "patio", job_number: "SWP-21", client_name: "Alpha", status: "deleted", created_at: "2026-06-01T00:00:00Z" },
+    { id: "cm-patio-other", org_id: ORG_A, type: "patio", job_number: "SWP-22", client_name: "Alpha", status: "scheduled", created_at: "2026-05-01T00:00:00Z" },
+  ];
+  const assignments = [
+    { id: "cma-1", job_id: "cm-patio-own", user_id: "u-cm", is_ghost: false },
+    { id: "cma-2", job_id: "cm-patio-deleted", user_id: "u-cm", is_ghost: false },
+  ];
+  function builder(table: string) {
+    const eq: Record<string, unknown> = {};
+    let inVals: string[] | null = null;
+    let notIn: string[] = [];
+    const ors: string[] = [];
+    let range: [number, number] | null = null;
+    let head = false;
+    const b: any = {
+      select: (_s: string, opts?: { head?: boolean }) => { head = !!opts?.head; return b; },
+      eq: (k: string, v: unknown) => { eq[k] = v; return b; },
+      neq: () => b,
+      not: (k: string, op: string, v: string) => {
+        if (k === "status" && op === "in") notIn = [...v.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+        return b;
+      },
+      or: (s: string) => { ors.push(s); return b; },
+      order: () => b,
+      in: (_k: string, vals: string[]) => { inVals = vals; return b; },
+      range: (from: number, to: number) => { range = [from, to]; return b; },
+      then: (resolve: any) => {
+        if (table === "job_assignments") {
+          resolve({ data: assignments.filter((a) => a.user_id === eq.user_id && a.is_ghost === eq.is_ghost), error: null });
+          return;
+        }
+        if (table === "jobs") {
+          let rows = jobs.filter((j) => j.org_id === eq.org_id && !notIn.includes(j.status));
+          if (inVals) rows = rows.filter((j) => inVals!.includes(j.id));
+          for (const o of ors) {
+            const types = [...o.matchAll(/type\.eq\.(\w+)/g)].map((m) => m[1]);
+            const text = o.match(/client_name\.ilike\.%([^%]+)%/)?.[1];
+            if (types.length) rows = rows.filter((j) => types.includes(j.type));
+            if (text) rows = rows.filter((j) => j.client_name.toLowerCase().includes(text) || j.job_number.toLowerCase().includes(text));
+          }
+          rows.sort((a, c) => c.created_at.localeCompare(a.created_at));
+          if (head) { resolve({ data: null, count: rows.length, error: null }); return; }
+          if (range) rows = rows.slice(range[0], range[1] + 1);
+          resolve({ data: rows.map((j) => ({ ...j })), error: null });
+          return;
+        }
+        resolve({ data: [], error: null });
+      },
+    };
+    return b;
+  }
+  return { from: (table: string) => builder(table) };
+}
+
+const FENCING_CATEGORY_MANAGER = tradeAuth({ id: "u-cm", role: "ops_manager", managedVerticals: ["fencing"] });
+
+Deno.test("rule table (end-to-end): a category manager's own out-of-vertical allocation joins page one only, never a deleted job", async () => {
+  const client = categoryManagerClient();
+  const first = await searchAllJobs(client, new URLSearchParams("page_size=1"), FENCING_CATEGORY_MANAGER, false);
+  assertEquals(first.jobs.map((j: any) => j.id).sort(), ["cm-fence-1", "cm-patio-own"]);
+  assertEquals(first.total, 3);
+  assertEquals(first.next_offset, 1);
+
+  const second = await searchAllJobs(client, new URLSearchParams("page_size=1&offset=1"), FENCING_CATEGORY_MANAGER, false);
+  assertEquals(second.jobs.map((j: any) => j.id), ["cm-fence-2"], "the seed is not re-merged into later pages");
+  assertEquals(second.total, 3);
+  assertEquals(second.next_offset, null);
+});
+
+Deno.test("rule table (end-to-end): a category manager's typed search reaches their own out-of-vertical allocation, never a deleted or unallocated one", async () => {
+  const res = await searchAllJobs(categoryManagerClient(), new URLSearchParams("q=alpha"), FENCING_CATEGORY_MANAGER, false);
+  assertEquals(res.jobs.map((j: any) => j.id).sort(), ["cm-fence-1", "cm-patio-own"]);
+});

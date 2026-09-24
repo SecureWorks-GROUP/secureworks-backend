@@ -38556,9 +38556,15 @@ export async function searchAllJobs(
   const readAssignedJobChunks = async (
     buildChunk: (idChunk: string[]) => any,
   ): Promise<any[]> => {
-    const byId = new Map<string, any>()
+    const idChunks: string[][] = []
     for (let i = 0; i < assignedJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
-      const { data, error } = await buildChunk(assignedJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      idChunks.push(assignedJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+    }
+    const chunkResults = await Promise.all(
+      idChunks.map((idChunk) => _withBoundedFetchSlot(async () => await buildChunk(idChunk))),
+    )
+    const byId = new Map<string, any>()
+    for (const { data, error } of chunkResults as any[]) {
       if (error) throw error
       for (const row of data || []) {
         if (row?.id && !byId.has(String(row.id))) byId.set(String(row.id), row)
@@ -38571,16 +38577,6 @@ export async function searchAllJobs(
       const bId = String(b.id)
       return aId < bId ? -1 : aId > bId ? 1 : 0
     })
-  }
-
-  let seedJobs: any[] = []
-  if (isCategoryManager && assignedJobIds.length > 0) {
-    seedJobs = await readAssignedJobChunks((idChunk) =>
-      client.from('jobs')
-        .select(jobFeedSelect)
-        .eq('org_id', viewer.orgId)
-        .in('id', idChunk)
-    )
   }
 
   const assignedJobIdSet = new Set(assignedJobIds)
@@ -38614,12 +38610,20 @@ export async function searchAllJobs(
         `job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`,
       )
     }
-    if (isAllocatedOnly) {
-      jobQuery = jobQuery.in('id', idChunk || [])
+    if (idChunk) {
+      jobQuery = jobQuery.in('id', idChunk)
+    } else if (isAllocatedOnly) {
+      jobQuery = jobQuery.in('id', [])
     } else if (isCategoryManager) {
       jobQuery = jobQuery.or(_jobsTableVerticalFilter(managedVerticals))
     }
     return jobQuery
+  }
+
+  const readOwnOutOfVerticalJobs = async (): Promise<any[]> => {
+    if (!isCategoryManager || assignedJobIds.length === 0) return []
+    const rows = await readAssignedJobChunks((idChunk) => buildJobQuery(jobFeedSelect, undefined, idChunk))
+    return rows.filter((job: any) => !managedVerticals.includes(_jobVertical(job)))
   }
 
   if (q) {
@@ -38648,7 +38652,8 @@ export async function searchAllJobs(
     }
 
     const byId: Record<string, any> = {}
-    for (const job of [...(baseRows || []).filter(jobWithinVisibility), ...externalRefJobs]) {
+    const seedJobs = await readOwnOutOfVerticalJobs()
+    for (const job of [...(baseRows || []).filter(jobWithinVisibility), ...seedJobs, ...externalRefJobs]) {
       if (job?.id) byId[job.id] = job
     }
     const ranked = Object.values(byId).sort((a: any, b: any) => {
@@ -38708,9 +38713,10 @@ export async function searchAllJobs(
     allJobs = data || []
   }
 
+  const seedJobs = await readOwnOutOfVerticalJobs()
   // One job = one entry, keyed by job id — the captain's explicit condition.
   const byId: Record<string, any> = {}
-  for (const j of [...seedJobs, ...(allJobs || []).filter(jobWithinVisibility)]) {
+  for (const j of [...(offset === 0 ? seedJobs : []), ...(allJobs || []).filter(jobWithinVisibility)]) {
     if (j?.id) byId[j.id] = j
   }
 
@@ -38724,8 +38730,8 @@ export async function searchAllJobs(
 
   // `total` counts the paged job query only; the seed and external-ref merges
   // can push a page past it, so never report fewer rows than were sent.
-  const reportedTotal = total === null ? null : Math.max(total, jobs.length)
-  const hasMore = total !== null && offset + jobs.length < total
+  const reportedTotal = total === null ? null : Math.max(total + seedJobs.length, jobs.length)
+  const hasMore = total !== null && offset + allJobs.length < total
   return {
     jobs,
     lens,
