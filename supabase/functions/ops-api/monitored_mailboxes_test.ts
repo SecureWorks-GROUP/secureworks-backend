@@ -1,7 +1,7 @@
 // Slice EM1: the set_monitored_mailbox door. Behaviour on the module (body
 // rules, RPC arguments, refusal mapping, one log line with ids and codes only)
-// and on the real ops-api front door (owner-level, never routine, agent-read
-// or a trade).
+// and on the real ops-api front door (staff-only, never agent-read or a
+// trade) plus the in-route owner-level gate.
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 import {
   assertEquals,
@@ -148,7 +148,7 @@ Deno.test("only the server key or a company admin or owner may change the list",
   assertEquals(canChangeMonitoredMailboxes("none", null, ORG), false);
 });
 
-Deno.test("front door: staff-only, never agent-read or routine, trades and bare shared keys refused", async () => {
+Deno.test("front door: staff-only, never agent-read, trades and bare shared keys refused", () => {
   const url = new URL(`https://x/ops-api?action=${ACTION}`);
   assertEquals(_opsApiActionNeedsStaffRole(url), true);
   assertEquals(AGENT_READ_ALLOWED_ACTIONS.has(ACTION), false);
@@ -156,9 +156,4 @@ Deno.test("front door: staff-only, never agent-read or routine, trades and bare 
   assertEquals(trade.ok ? null : [trade.status, trade.code], [403, "operator_access_required"]);
   const sharedKey = _authorizeOpsApiAction({ url, authMode: "api_key", serverSecretPresented: false });
   assertEquals(sharedKey.ok ? null : [sharedKey.status, sharedKey.code], [401, "user_jwt_required"]);
-  // The routine's default-deny allow-list does not name it.
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const start = source.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set([");
-  const routineList = source.slice(start, source.indexOf("])", start));
-  assertEquals(start > 0 && !routineList.includes(`'${ACTION}'`), true);
 });

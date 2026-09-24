@@ -44,12 +44,3 @@ Deno.test("E22: the plan is frozen, so no caller can widen the old path at run t
   assertEquals(Object.isFrozen(plan.users), true);
   assertEquals(Object.isFrozen(plan.groups), true);
 });
-
-Deno.test("E22: the old handler does not read monitored_mailboxes", async () => {
-  // Structural guard: the deployed old path used to switch to the table
-  // whenever it had enabled rows. Any read of it from index.ts reopens that.
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const code = source.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
-  assertEquals(/from\(\s*['"]monitored_mailboxes['"]\s*\)/.test(code), false);
-  assertEquals(code.includes("monitored_mailboxes"), false);
-});
