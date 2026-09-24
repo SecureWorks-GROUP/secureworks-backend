@@ -143,6 +143,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     typeof initialResource === "string" ? initialResource : "marnin"
   ].pipeline_id;
   let opportunityAssignee: string | null = null;
+  let opportunityStratco = true;
   const jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
   let smsResponse: { status: number; body: Obj } = {
@@ -161,6 +162,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
       return Promise.resolve({
         assignedTo: opportunityAssignee,
         pipelineId: opportunityPipelineId,
+        stratco: opportunityStratco,
       });
     },
     readOutlookLead: ({ contactId, opportunityId }) => {
@@ -268,6 +270,9 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     },
     setOpportunityPipelineId: (id: string) => {
       opportunityPipelineId = id;
+    },
+    setOpportunityStratco: (stratco: boolean) => {
+      opportunityStratco = stratco;
     },
     setJobSite: (id: string, site: SalesBookingJobSiteFact) => {
       jobSites[id] = site;
@@ -416,6 +421,49 @@ Deno.test("send rechecks the lead's current GHL assignee for every person", asyn
     "opportunity_assignment_unreadable",
   );
   assertEquals(k.calls.sms, []);
+});
+
+Deno.test("send applies the unassigned fencing rule: Stratco is Marnin's, the rest Khairo's", async () => {
+  const khairo = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267772" },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const marnin = await approval("message", MESSAGE);
+
+  // Unassigned, not Stratco: Khairo's from 772, never Marnin's from 776.
+  const k = fakes([khairo], LIVE);
+  k.setOpportunityStratco(false);
+  assertEquals(reasonOf(await send(k, khairo.binding_hash)), "sent");
+  assertEquals(k.calls.sms.length, 1);
+  const m = fakes([marnin], LIVE);
+  m.setOpportunityStratco(false);
+  assertEquals(
+    reasonOf(await send(m, marnin.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(m.calls.sms, []);
+
+  // An explicit assignee beats the rule: a non-Stratco lead assigned to
+  // Marnin goes from 776 and never from Khairo's 772.
+  const m2 = fakes([marnin], LIVE);
+  m2.setOpportunityStratco(false);
+  m2.setOpportunityAssignee("3S20LGVTjsVYy9vTJ9wM");
+  assertEquals(reasonOf(await send(m2, marnin.binding_hash)), "sent");
+  const k2 = fakes([khairo], LIVE);
+  k2.setOpportunityStratco(false);
+  k2.setOpportunityAssignee("3S20LGVTjsVYy9vTJ9wM");
+  assertEquals(
+    reasonOf(await send(k2, khairo.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(k2.calls.sms, []);
 });
 
 Deno.test("send refuses an unassigned Stratco lead moved to patio", async () => {

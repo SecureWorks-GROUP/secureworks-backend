@@ -161,6 +161,7 @@ function deps(o: Overrides = {}) {
       Promise.resolve({
         assignedTo: o.resource === "khairo" ? "RgDWTnYL6zL3eJA6nLht" : null,
         pipelineId: SALES_BOOKING_RESOURCES[o.resource ?? "marnin"].pipeline_id,
+        stratco: true,
       }),
     readGhlDirectory: () => Promise.resolve(calendarDirectory()),
     readGhlEvents: (selector) => {
@@ -304,6 +305,7 @@ Deno.test("owner message: the executor dry-runs the owner's exact text from 776"
         Promise.resolve({
           assignedTo: null,
           pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+          stratco: true,
         }),
       readOutlookLead: () => Promise.reject(new Error("unused")),
       mirrorToOutlook: () => Promise.reject(new Error("unused")),
@@ -1265,6 +1267,7 @@ Deno.test("owner message for Nithin and Khairo: approved through the gate, sent 
           Promise.resolve({
             assignedTo: ASSIGNEE[resource],
             pipelineId: SALES_BOOKING_RESOURCES[resource].pipeline_id,
+            stratco: true,
           }),
         readOutlookLead: () => Promise.reject(new Error("unused")),
         mirrorToOutlook: () => Promise.reject(new Error("unused")),
@@ -1307,6 +1310,7 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
       Promise.resolve({
         assignedTo: "RgDWTnYL6zL3eJA6nLht",
         pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        stratco: true,
       }),
   });
   await refusal(
@@ -1319,6 +1323,7 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
       Promise.resolve({
         assignedTo: null,
         pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
+        stratco: true,
       }),
   });
   await refusal(
@@ -1335,6 +1340,7 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
       Promise.resolve({
         assignedTo: null,
         pipelineId: SALES_BOOKING_RESOURCES.khairo.pipeline_id,
+        stratco: true,
       }),
   });
   await refusal(
@@ -1351,5 +1357,58 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
   await refusal(
     call(u.deps, { owner_input: input("message"), dry_run: true }),
     "opportunity_assignment_unreadable",
+  );
+});
+
+Deno.test("owner approval: unassigned fencing is Stratco Marnin's, other fencing Khairo's, and an assignee wins", async () => {
+  const owned = (assignedTo: string | null, stratco: boolean) => () =>
+    Promise.resolve({
+      assignedTo,
+      pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+      stratco,
+    });
+  // Unassigned, not Stratco: Khairo's screen takes it, Marnin's refuses.
+  const k = deps({
+    resource: "khairo",
+    readOpportunityOwnership: owned(null, false),
+  });
+  const preview = await call(k.deps, {
+    owner_input: input("message", { resource: "khairo" }),
+    dry_run: true,
+  });
+  assert("dry_run" in preview && preview.dry_run === true);
+  await refusal(
+    call(deps({ readOpportunityOwnership: owned(null, false) }).deps, {
+      owner_input: input("message"),
+      dry_run: true,
+    }),
+    "lead_assigned_to_someone_else",
+  );
+  // Unassigned Stratco: Marnin's, never Khairo's.
+  const m = await call(
+    deps({ readOpportunityOwnership: owned(null, true) }).deps,
+    { owner_input: input("message"), dry_run: true },
+  );
+  assert("dry_run" in m && m.dry_run === true);
+  // An explicit assignee beats the rule both ways.
+  const assignedMarnin = await call(
+    deps({
+      readOpportunityOwnership: owned("3S20LGVTjsVYy9vTJ9wM", false),
+    }).deps,
+    { owner_input: input("message"), dry_run: true },
+  );
+  assert("dry_run" in assignedMarnin && assignedMarnin.dry_run === true);
+  await refusal(
+    call(
+      deps({
+        resource: "khairo",
+        readOpportunityOwnership: owned("3S20LGVTjsVYy9vTJ9wM", false),
+      }).deps,
+      {
+        owner_input: input("message", { resource: "khairo" }),
+        dry_run: true,
+      },
+    ),
+    "lead_assigned_to_someone_else",
   );
 });

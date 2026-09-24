@@ -50,6 +50,7 @@ import {
   SalesBookingRequestError,
   type SalesBookingStampState,
 } from "./sales_booking_read.ts";
+import { salesBookingBookedPackOffers } from "./sales_booking_scope_appointment.ts";
 
 export const SALES_BOOKING_PACK_KIND = "pack" as const;
 export const SALES_BOOKING_STAMP_KIND = "stamp" as const;
@@ -373,19 +374,53 @@ export function applySalesBookingPackOverlay(
     };
   });
 
+  const packProposals = overlay.pack
+    ? salesBookingPackProposalsMap(packPayload?.proposals, drafts)
+    : null;
+  // A pack offer for a lead already booked in a GHL calendar is listed as
+  // booked, never left for the screen to draw as someone to contact.
+  if (packProposals) {
+    const listed = new Set(cases.map((row) => row.opportunity_id));
+    for (
+      const { key, appointment } of salesBookingBookedPackOffers(
+        packProposals,
+        response.scope_appointments,
+        listed,
+      )
+    ) {
+      const lead = packProposals[key];
+      const opportunityId = lead.opportunity_id || key;
+      cases.push({
+        id: opportunityId,
+        resource_id: response.resource.resource_id,
+        opportunity_id: opportunityId,
+        contact_id: lead.contact_id,
+        suburb: lead.suburb || "not given",
+        job_type: "not given",
+        enquiry_at: null,
+        display_name: lead.name || "Enquiry",
+        status: "needs_decision",
+        tags: [],
+        stage_name: lead.stage,
+        pipeline_stage_id: null,
+        last_activity_at: null,
+        proposal: null,
+        stamp_state: salesBookingStampStateForCase(opportunityId, stamp),
+        scope_appointment: appointment,
+      });
+    }
+  }
+
   return applyBookingConfirmationModels({
     ...response,
     coverage: { ...response.coverage, gaps },
     cases,
     drafts,
-    pack: overlay.pack
+    pack: overlay.pack && packProposals
       ? {
         present: true,
         as_of: overlay.pack.as_of,
-        proposals: salesBookingPackProposalsMap(
-          packPayload?.proposals,
-          drafts,
-        ),
+        proposals: packProposals,
       }
       : emptySalesBookingPackView(),
     stamp: stamp && overlay.stamp

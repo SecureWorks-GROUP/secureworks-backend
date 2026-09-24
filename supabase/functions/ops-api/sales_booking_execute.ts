@@ -890,6 +890,7 @@ export async function salesBookingSendAction(args: {
       ownership.assignedTo,
       who.sender.person,
       ownership.pipelineId,
+      ownership.stratco,
     )
   ) {
     return refused("opportunity_assignee_changed", {

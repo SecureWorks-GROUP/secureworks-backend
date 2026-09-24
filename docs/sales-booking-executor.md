@@ -103,8 +103,8 @@ Both actions:
    recipient.
    Then the opportunity's live GHL assignee must still make it that
    person's lead (`salesBookingLeadBelongsTo`): assigned to that person, or
-   unassigned where their pipeline's unassigned leads are theirs (Marnin on
-   fencing/Stratco, Nithin on patio; never Khairo). Otherwise
+   unassigned where the rule gives it to them (Stratco fencing Marnin, other
+   fencing Khairo, patio Nithin). Otherwise
    `opportunity_assignee_changed`; an unreadable assignee refuses
    `opportunity_assignment_unreadable`. Nothing is sent.
 8. `text_already_in_thread` if the exact text was already sent since approval.

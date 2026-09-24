@@ -15,13 +15,13 @@
  * booking read's resources, the screen defaults, both approval routes and the
  * executor all derive from it; do not restate a line or id elsewhere.
  *
- * Whose lead is it: the opportunity's current GHL assignee (owner decision
- * 2026-09-24). A lead assigned to Nithin or Khairo is only ever theirs; a lead
- * assigned to Marnin, or unassigned in the Stratco (fencing) pipeline, is
- * Marnin's; an unassigned patio lead is Nithin's. Anyone else's lead belongs
- * to nobody here. GHL user ids: Marnin's matches the Stratco calendar
- * assignee, Khairo's the user on his 772 replies, Nithin's is from that
- * decision.
+ * Whose lead is it (owner decision 2026-09-24, "khairo is all normal fencing
+ * all stratco fencing is mine"): the opportunity's current GHL assignee always
+ * wins. When nobody is assigned, a Stratco fencing lead
+ * (`salesBookingLeadIsStratco`) is Marnin's, any other fencing lead is
+ * Khairo's, and a patio lead is Nithin's. Anyone else's lead belongs to nobody
+ * here. GHL user ids: Marnin's matches the Stratco calendar assignee,
+ * Khairo's the user on his 772 replies, Nithin's is from that decision.
  *
  * The person on an approval is its `scoper_user_id`. Its `resource` and
  * `profile`, when they name a known person, must name the same one. There is
@@ -46,6 +46,9 @@ export interface SalesBookingSenderPerson {
 export interface SalesBookingOpportunityOwnership {
   assignedTo: string | null;
   pipelineId: string;
+  /** `salesBookingLeadIsStratco` of the same opportunity read. Decides only
+   * an unassigned fencing lead: Stratco is Marnin's, anything else Khairo's. */
+  stratco: boolean;
 }
 
 export const SALES_BOOKING_SENDER_LINES: Readonly<
@@ -153,6 +156,32 @@ export function salesBookingLeadOwner(
   return Object.values(SALES_BOOKING_SENDER_LINES).find((p) =>
     p.ghl_user_id === assignedTo
   )?.person ?? null;
+}
+
+const STRATCO = /stratco/i;
+
+/**
+ * Whether a GHL opportunity is a Stratco lead: a `stratco` tag (contact or
+ * opportunity), or Stratco in the opportunity name, contact name or source.
+ * The same signals as the wiki profile `fencing-stratco-marnin.json`
+ * `match.require_any` (`stratco_tag`, `stratco_in_name`, `stratco_in_source`),
+ * which `fencing-khairo.json` excludes. Its `allocation_join` (the Outlook
+ * allocation email) is not readable here, so an allocated lead needs one of
+ * these signals or an explicit GHL assignee.
+ */
+export function salesBookingLeadIsStratco(opportunity: unknown): boolean {
+  if (!opportunity || typeof opportunity !== "object") return false;
+  const opp = opportunity as Record<string, unknown>;
+  const contact = opp.contact && typeof opp.contact === "object"
+    ? opp.contact as Record<string, unknown>
+    : {};
+  const tags = [
+    ...(Array.isArray(contact.tags) ? contact.tags : []),
+    ...(Array.isArray(opp.tags) ? opp.tags : []),
+  ];
+  return [...tags, opp.name, contact.name, opp.source].some((value) =>
+    typeof value === "string" && STRATCO.test(value)
+  );
 }
 
 /** The short line label the screen shows (`776`). */
