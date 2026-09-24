@@ -36,6 +36,7 @@ export const CUT_RULES: readonly CutRule[] = [
 
 /** The patio tool's saw allowance. */
 export const DEFAULT_KERF_MM = 3;
+export const MAX_CUT_PIECES = 1000;
 
 export interface CutPiece {
   length_mm: number;
@@ -89,7 +90,7 @@ export class CutToOrderError extends Error {
 }
 
 function positiveInteger(value: unknown): boolean {
-  return typeof value === "number" && Number.isInteger(value) && value > 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function validate(req: CutRequest): { stock: number[]; kerf: number } {
@@ -99,11 +100,19 @@ function validate(req: CutRequest): { stock: number[]; kerf: number } {
   if (!Array.isArray(req.pieces) || req.pieces.length === 0) {
     throw new CutToOrderError("cut_pieces_missing", "at least one piece is required");
   }
+  let pieceCount = 0;
   for (const piece of req.pieces) {
     if (!positiveInteger(piece?.length_mm) || !positiveInteger(piece?.qty)) {
       throw new CutToOrderError(
         "cut_piece_invalid",
         "every piece needs a whole positive length_mm and qty",
+      );
+    }
+    pieceCount += piece.qty;
+    if (pieceCount > MAX_CUT_PIECES) {
+      throw new CutToOrderError(
+        "cut_piece_count_exceeds_limit",
+        `at most ${MAX_CUT_PIECES} pieces can be planned at once`,
       );
     }
   }
@@ -133,6 +142,12 @@ function expand(pieces: CutPiece[]): number[] {
 function stickUsed(cuts: number[], kerf: number): number {
   if (cuts.length === 0) return 0;
   return cuts.reduce((a, b) => a + b, 0) + (cuts.length - 1) * kerf;
+}
+
+function usableOffcut(stockLength: number, cuts: number[], kerf: number): number {
+  return cuts.length === 0
+    ? stockLength
+    : Math.max(0, stockLength - stickUsed(cuts, kerf) - kerf);
 }
 
 /** How many pieces of one length fit in a stick (nestCuts' loop). */
@@ -169,7 +184,7 @@ function nestSingleLength(
     sticks.push({
       stock_length_mm: best,
       cuts_mm: cuts,
-      offcut_mm: best - stickUsed(cuts, kerf),
+      offcut_mm: usableOffcut(best, cuts, kerf),
     });
     remaining -= n;
   }
@@ -193,7 +208,7 @@ function firstFitDecreasing(
   return bins.map((cuts) => ({
     stock_length_mm: stockLength,
     cuts_mm: cuts,
-    offcut_mm: stockLength - stickUsed(cuts, kerf),
+    offcut_mm: usableOffcut(stockLength, cuts, kerf),
   }));
 }
 
@@ -256,7 +271,7 @@ export function cutToOrder(req: CutRequest): CutPlan {
     if (req.rule === "one_per_stick") {
       sticks = fits.map((len) => {
         const s = stock.find((x) => x >= len) as number;
-        return { stock_length_mm: s, cuts_mm: [len], offcut_mm: s - len };
+        return { stock_length_mm: s, cuts_mm: [len], offcut_mm: usableOffcut(s, [len], kerf) };
       });
     } else if (new Set(fits).size === 1) {
       sticks = nestSingleLength(fits[0], fits.length, stock, kerf);

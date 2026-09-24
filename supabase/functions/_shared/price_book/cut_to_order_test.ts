@@ -48,7 +48,7 @@ Deno.test("Kiko slats: 101 pieces nest into 27 bars of 6100 mm at 4.1% waste", (
     const used = stick.cuts_mm.reduce((a, b) => a + b, 0) +
       (stick.cuts_mm.length - 1) * 3;
     assertEquals(used <= 6100, true);
-    assertEquals(stick.offcut_mm, 6100 - used);
+    assertEquals(stick.offcut_mm, 6100 - used - 3);
   }
   // Every piece is cut exactly once.
   assertEquals(plan.sticks.flatMap((s) => s.cuts_mm).length, 101);
@@ -62,6 +62,7 @@ Deno.test("need 6 m of 100x50 buys one 6.5 m length from 5500/6500/8000", () => 
   });
   assertEquals(plan.order, [{ length_mm: 6500, qty: 1, special_order: false }]);
   assertEquals(plan.waste_mm, 500);
+  assertEquals(plan.sticks[0].offcut_mm, 497);
   // The 0.5 m offcut is paid for: $13.29 at $26.57/LM.
   const cost = costCutPlanPerLm(plan, 26.57);
   assertEquals(cost.waste_ex_gst, 13.29);
@@ -115,7 +116,7 @@ Deno.test("single cut length reproduces nestCuts: longer stock only when fewer s
   });
   assertEquals(plan.order, [{ length_mm: 6100, qty: 3, special_order: false }]);
   assertEquals(plan.sticks.map((s) => s.cuts_mm.length), [2, 2, 1]);
-  assertEquals(plan.sticks[0].offcut_mm, 6100 - 6003);
+  assertEquals(plan.sticks[0].offcut_mm, 6100 - 6006);
 });
 
 Deno.test("cut to size buys the pieces themselves and wastes nothing", () => {
@@ -170,8 +171,9 @@ Deno.test("bad input refuses with a code, never a guess", () => {
 });
 
 // Parity with the patio tool: a seeded sweep over every patio stock list,
-// single cut lengths and both modes the tool uses. Same stock length, same
-// stick count, same per-stick offcut.
+// single cut lengths and both modes the tool uses. Stock lengths, placements
+// and stick counts match; this contract subtracts the final cut's kerf from
+// each usable offcut while the patio tool's displayed waste does not.
 
 Deno.test("parity: one cut length matches the patio tool's nestCuts on every stock list", () => {
   const stockLists = [
@@ -203,14 +205,29 @@ Deno.test("parity: one cut length matches the patio tool's nestCuts on every sto
         } else {
           assertEquals(plan.sticks.length, legacy.totalSticks);
           assertEquals(
-            plan.sticks.map((s) => [s.stock_length_mm, s.cuts_mm.length, s.offcut_mm]),
+            plan.sticks.map((s) => [s.stock_length_mm, s.cuts_mm.length]),
             // deno-lint-ignore no-explicit-any
-            legacy.sticks.map((s: any) => [s.stockLength, s.cuts.length, s.waste]),
+            legacy.sticks.map((s: any) => [s.stockLength, s.cuts.length]),
           );
+          for (let j = 0; j < plan.sticks.length; j++) {
+            assertEquals(plan.sticks[j].offcut_mm, Math.max(0, legacy.sticks[j].waste - 3));
+          }
         }
         compared++;
       }
     }
   }
   assertEquals(compared, 2000);
+});
+
+Deno.test("piece count is bounded before expansion", () => {
+  assertThrows(
+    () =>
+      cutToOrder({
+        rule: "one_per_stick",
+        pieces: [{ length_mm: 100, qty: 1001 }],
+        stock_lengths_mm: [6000],
+      }),
+    CutToOrderError,
+  );
 });

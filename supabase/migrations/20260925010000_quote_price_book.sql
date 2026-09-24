@@ -306,10 +306,25 @@ BEGIN
       'CREATE TRIGGER %I BEFORE TRUNCATE ON public.%I FOR EACH STATEMENT EXECUTE FUNCTION public.price_book_refuse_mutation()',
       t || '_no_truncate', t);
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
-    EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC, anon, authenticated', t);
-    EXECUTE format('GRANT SELECT, INSERT ON public.%I TO service_role', t);
+    EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC, anon, authenticated, service_role', t);
+    EXECUTE format('GRANT SELECT ON public.%I TO service_role', t);
   END LOOP;
 END $$;
+
+GRANT INSERT ON public.price_book_costs, public.price_book_proposals TO service_role;
+
+CREATE OR REPLACE FUNCTION public.price_book_guard_cost_blessing()
+RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF current_user = 'service_role' AND NEW.provisional IS NOT TRUE THEN
+    RAISE EXCEPTION 'price_book_blessing_requires_proposal' USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER price_book_costs_guard_blessing
+  BEFORE INSERT ON public.price_book_costs
+  FOR EACH ROW EXECUTE FUNCTION public.price_book_guard_cost_blessing();
 
 -- ── Current reads ───────────────────────────────────────────────────────
 -- Current cost per item: the newest BLESSED row; with none blessed, the
@@ -514,7 +529,9 @@ RETURNS uuid LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
     WHEN 'cost' THEN (
       SELECT c.id FROM public.price_book_costs c
       WHERE c.item_key = p_subject->>'item_key' AND c.supplier = p_subject->>'supplier'
-      ORDER BY c.provisional, c.as_at DESC, c.recorded_at DESC, c.id LIMIT 1)
+      ORDER BY c.provisional,
+        CASE WHEN c.provisional THEN public.price_book_evidence_rank(c.evidence_kind) ELSE 0 END,
+        c.as_at DESC, c.per_length_mm DESC NULLS LAST, c.recorded_at DESC, c.id LIMIT 1)
     WHEN 'stock_lengths' THEN (
       SELECT s.id FROM public.price_book_stock_lengths s
       WHERE s.item_key = p_subject->>'item_key' AND s.supplier = p_subject->>'supplier'
@@ -535,7 +552,9 @@ RETURNS uuid LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
         AND a.basis = p_subject->>'basis'
         AND a.girth_min_mm IS NOT DISTINCT FROM (p_subject->>'girth_min_mm')::integer
         AND a.girth_max_mm IS NOT DISTINCT FROM (p_subject->>'girth_max_mm')::integer
-      ORDER BY a.provisional, a.as_at DESC, a.recorded_at DESC, a.id LIMIT 1)
+      ORDER BY a.provisional,
+        CASE WHEN a.provisional THEN public.price_book_evidence_rank(a.evidence_kind) ELSE 0 END,
+        a.as_at DESC, a.recorded_at DESC, a.id LIMIT 1)
   END
 $$;
 
@@ -582,7 +601,7 @@ CREATE OR REPLACE FUNCTION public.price_book_decide_proposal(
   p_note text DEFAULT NULL
 )
 RETURNS TABLE (proposal_id uuid, decision text, applied_row_id uuid)
-LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   p public.price_book_proposals%ROWTYPE;
   v jsonb;

@@ -7,12 +7,12 @@ DECLARE
   n integer;
   prop uuid;
   prop2 uuid;
+  ranked_prop uuid;
   inv_row uuid;
   blessed_row uuid;
+  ranked_invoice_old uuid;
   err text;
 BEGIN
-  -- Private: RLS on, no anon/authenticated access, service role reads and
-  -- appends but can never update or delete.
   FOREACH t IN ARRAY ARRAY[
     'price_book_items', 'price_book_costs', 'price_book_stock_lengths',
     'price_book_cut_rules', 'price_book_markup_rules', 'price_book_allowances',
@@ -27,8 +27,16 @@ BEGIN
        OR has_table_privilege('authenticated', 'public.' || t, 'INSERT') THEN
       RAISE EXCEPTION '% must not be readable or writable by browser roles', t;
     END IF;
-    IF NOT has_table_privilege('service_role', 'public.' || t, 'SELECT,INSERT') THEN
-      RAISE EXCEPTION '% must be readable and appendable by the service role', t;
+    IF NOT has_table_privilege('service_role', 'public.' || t, 'SELECT') THEN
+      RAISE EXCEPTION '% must be readable by the service role', t;
+    END IF;
+    IF t IN ('price_book_costs', 'price_book_proposals')
+       AND NOT has_table_privilege('service_role', 'public.' || t, 'INSERT') THEN
+      RAISE EXCEPTION '% must be appendable by the service role', t;
+    END IF;
+    IF t NOT IN ('price_book_costs', 'price_book_proposals')
+       AND has_table_privilege('service_role', 'public.' || t, 'INSERT') THEN
+      RAISE EXCEPTION '% must not be directly insertable by the service role', t;
     END IF;
     IF has_table_privilege('service_role', 'public.' || t, 'UPDATE')
        OR has_table_privilege('service_role', 'public.' || t, 'DELETE') THEN
@@ -173,6 +181,35 @@ BEGIN
   INSERT INTO public.price_book_approvers (scope_kind, scope_value, approver, active, recorded_by)
   VALUES ('family', 'fencing', 'fence-lead', true, 'contract'),
          ('family', 'patio', 'patio-lead', true, 'contract');
+
+  INSERT INTO public.price_book_items (item_key, family, category, description, unit, created_by)
+  VALUES ('evidence-ranked-cost', 'patio', 'steel', 'Evidence-ranked cost', 'lm', 'contract');
+  INSERT INTO public.price_book_costs (item_key, supplier, cost_ex_gst, as_at,
+    evidence_kind, evidence_ref, recorded_by)
+  VALUES ('evidence-ranked-cost', 'Ranked supplier', 30, '2026-09-20', 'tool_constant', 'tool', 'contract');
+  INSERT INTO public.price_book_costs (item_key, supplier, cost_ex_gst, as_at,
+    evidence_kind, evidence_ref, recorded_by)
+  VALUES ('evidence-ranked-cost', 'Ranked supplier', 25, '2026-03-09', 'invoice', 'INV A', 'contract')
+  RETURNING id INTO ranked_invoice_old;
+  ranked_prop := public.price_book_propose('cost',
+    jsonb_build_object('item_key', 'evidence-ranked-cost', 'supplier', 'Ranked supplier'),
+    jsonb_build_object('cost_ex_gst', 26, 'as_at', '2026-09-24',
+      'evidence_kind', 'invoice', 'evidence_ref', 'INV C'),
+    'new ranked invoice', 'INV C', 'scoper-a');
+  SELECT * INTO r FROM public.price_book_proposals WHERE id = ranked_prop;
+  IF r.old_row_id <> ranked_invoice_old THEN
+    RAISE EXCEPTION 'proposal must use the evidence-ranked invoice instead of the newer tool constant';
+  END IF;
+  INSERT INTO public.price_book_costs (item_key, supplier, cost_ex_gst, as_at,
+    evidence_kind, evidence_ref, recorded_by)
+  VALUES ('evidence-ranked-cost', 'Ranked supplier', 27, '2026-08-01', 'invoice', 'INV B', 'contract');
+  BEGIN
+    PERFORM public.price_book_decide_proposal(ranked_prop, 'approved', 'patio-lead');
+    RAISE EXCEPTION 'a proposal whose evidence-ranked row changed was applied';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE 'price_book_proposal_stale%' THEN RAISE; END IF;
+  END;
+
   BEGIN
     PERFORM public.price_book_decide_proposal(prop, 'approved', 'fence-lead');
     RAISE EXCEPTION 'an approver outside the scope was accepted';
@@ -299,4 +336,36 @@ BEGIN
     RAISE EXCEPTION 'margin 0.25 must read as multiplier 1.3333, got %', r.markup_multiplier;
   END IF;
 END $$;
+SET LOCAL ROLE service_role;
+DO $$
+DECLARE
+  proposal_id uuid;
+  applied_id uuid;
+BEGIN
+  INSERT INTO public.price_book_costs (item_key, supplier, cost_ex_gst, as_at,
+    evidence_kind, evidence_ref, recorded_by)
+  VALUES ('steel-rhs-100x50x2', 'Service-role provisional', 21, '2026-09-24',
+    'invoice', 'INV SERVICE', 'service_role');
+  BEGIN
+    INSERT INTO public.price_book_costs (item_key, supplier, cost_ex_gst, as_at,
+      evidence_kind, evidence_ref, provisional, blessed_by, blessed_at, recorded_by)
+    VALUES ('steel-rhs-100x50x2', 'Service-role direct blessing', 22, '2026-09-24',
+      'invoice', 'INV SERVICE BLESSED', false, 'patio-lead', now(), 'service_role');
+    RAISE EXCEPTION 'direct service-role blessing was accepted';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+
+  proposal_id := public.price_book_propose('cost',
+    jsonb_build_object('item_key', 'steel-rhs-100x50x2', 'supplier', 'Guarded supplier'),
+    jsonb_build_object('cost_ex_gst', 19, 'as_at', '2026-09-24',
+      'evidence_kind', 'invoice', 'evidence_ref', 'INV GUARDED'),
+    'guarded proposal', 'INV GUARDED', 'scoper-a');
+  SELECT applied_row_id INTO applied_id
+  FROM public.price_book_decide_proposal(proposal_id, 'approved', 'patio-lead');
+  IF applied_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM public.price_book_costs WHERE id = applied_id AND NOT provisional
+  ) THEN
+    RAISE EXCEPTION 'guarded decision did not create its blessed row';
+  END IF;
+END $$;
+RESET ROLE;
 ROLLBACK;

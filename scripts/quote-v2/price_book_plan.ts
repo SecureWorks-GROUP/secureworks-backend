@@ -19,7 +19,7 @@ import {
 } from "./price_book_catalog.ts";
 import type { EvidenceKind, Observation, StoreId } from "./price_book_sources.ts";
 
-export const IMPORT_VERSION = "quote-v2-price-book-import/v1";
+export const IMPORT_VERSION = "quote-v2-price-book-import/v2";
 
 export interface CostRow {
   item_key: string;
@@ -206,7 +206,17 @@ export function buildPlan(observations: Observation[]): ImportPlan {
           evidence_kind: o.evidence_kind,
           evidence_ref: o.evidence_ref,
           evidence_note: o.note ?? null,
-          fingerprint: fingerprint(["allowance", a.key, o.value, o.evidence_ref]),
+          fingerprint: fingerprint([
+            "allowance",
+            a.key,
+            a.basis,
+            null,
+            null,
+            o.value,
+            o.as_at,
+            o.evidence_kind,
+            o.evidence_ref,
+          ]),
         });
       }
       continue;
@@ -221,12 +231,21 @@ export function buildPlan(observations: Observation[]): ImportPlan {
 
     if (o.kind === "stock_lengths") {
       if (o.stock_lengths_mm?.length) {
-        const fp = fingerprint(["stock", r.item.item_key, o.supplier, o.stock_lengths_mm.join(","), o.evidence_ref]);
+        const stockAsAt = o.as_at ?? "2026-09-24";
+        const fp = fingerprint([
+          "stock",
+          r.item.item_key,
+          o.supplier,
+          o.stock_lengths_mm.join(","),
+          stockAsAt,
+          "tool_constant",
+          o.evidence_ref,
+        ]);
         stock.set(fp, {
           item_key: r.item.item_key,
           supplier: o.supplier,
           lengths_mm: o.stock_lengths_mm,
-          as_at: o.as_at ?? "2026-09-24",
+          as_at: stockAsAt,
           evidence_ref: o.evidence_ref,
           fingerprint: fp,
         });
@@ -275,7 +294,16 @@ export function buildPlan(observations: Observation[]): ImportPlan {
       o.claimed_blessed ? `source comment claims blessed ${o.claimed_blessed}; loaded provisional` : null,
       o.staged_for_blessing ? "source marks this staged for blessing" : null,
     ].filter(Boolean).join("; ");
-    const fp = fingerprint(["cost", r.item.item_key, o.supplier, r.value, o.as_at, o.evidence_ref]);
+    const fp = fingerprint([
+      "cost",
+      r.item.item_key,
+      o.supplier,
+      r.value,
+      r.per_length_mm ?? null,
+      o.as_at,
+      o.evidence_kind,
+      o.evidence_ref,
+    ]);
     costs.set(fp, {
       item_key: r.item.item_key,
       supplier: o.supplier,
@@ -293,7 +321,15 @@ export function buildPlan(observations: Observation[]): ImportPlan {
     // Stratco estimate rows carry their stock length and whether Stratco
     // cuts to size.
     if (o.family === "stratco" && o.stock_lengths_mm?.length) {
-      const sfp = fingerprint(["stock", r.item.item_key, o.supplier, o.stock_lengths_mm.join(","), o.evidence_ref]);
+      const sfp = fingerprint([
+        "stock",
+        r.item.item_key,
+        o.supplier,
+        o.stock_lengths_mm.join(","),
+        o.as_at,
+        "tool_constant",
+        o.evidence_ref,
+      ]);
       stock.set(sfp, {
         item_key: r.item.item_key,
         supplier: o.supplier,
@@ -344,7 +380,17 @@ export function buildPlan(observations: Observation[]): ImportPlan {
       evidence_kind: "invoice",
       evidence_ref: `mean of ${inBand.length} newest invoice/order rates in band`,
       evidence_note: refs,
-      fingerprint: fingerprint(["allowance", "flashing-band", lo, hi, mean, refs]),
+      fingerprint: fingerprint([
+        "allowance",
+        "flashing-band",
+        "per_lm_by_girth_band",
+        lo,
+        hi,
+        mean,
+        asAt,
+        "invoice",
+        refs,
+      ]),
     });
   }
   const familyAverage = observations.find((o) =>
@@ -363,7 +409,17 @@ export function buildPlan(observations: Observation[]): ImportPlan {
       evidence_kind: "tool_constant",
       evidence_ref: familyAverage.evidence_ref,
       evidence_note: "family average of 13 invoice lines across 3 suppliers (patio PR 102, 13 Jun)",
-      fingerprint: fingerprint(["allowance", "flashing-unknown-girth", familyAverage.value, familyAverage.evidence_ref]),
+      fingerprint: fingerprint([
+        "allowance",
+        "flashing-unknown-girth",
+        "per_lm",
+        null,
+        null,
+        familyAverage.value,
+        familyAverage.as_at,
+        familyAverage.evidence_kind,
+        familyAverage.evidence_ref,
+      ]),
     });
   }
 

@@ -111,6 +111,51 @@ Deno.test("tool constant and invoice for the same steel land on one item; the st
   assertEquals(plan.cuts.find((c) => c.item_key === "steel-rhs-100x50x2")?.rule, "one_per_stick");
 });
 
+Deno.test("cost fingerprint distinguishes length and evidence changes", () => {
+  const source = wikiSupplierCsv("bd-metals.csv", BD_CSV, REFS)[0];
+  const original = { ...source, evidence_ref: "same", as_at: "2026-03-09" };
+  const differentLength = { ...original, per_length_mm: 8000 };
+  const differentEvidence = { ...original, evidence_kind: "purchase_order" as const };
+  const plan = buildPlan([original, differentLength, differentEvidence]);
+  const matches = plan.costs.filter((c) => c.item_key === "steel-rhs-100x50x2");
+  assertEquals(matches.length, 3);
+  assertEquals(new Set(matches.map((c) => c.fingerprint)).size, 3);
+});
+
+Deno.test("stock and allowance fingerprints include selection dates and evidence", () => {
+  const stock = patioHardcoded(PATIO_HTML, REFS).find((o) =>
+    o.kind === "stock_lengths" && o.stock_lengths_mm?.length
+  )!;
+  const stockPlan = buildPlan([
+    stock,
+    { ...stock, as_at: "2026-06-14" },
+  ]);
+  assertEquals(new Set(stockPlan.stock.map((s) => s.fingerprint)).size, 2);
+
+  const allowanceSource = {
+    store: "s07_patio_engine_snapshot",
+    kind: "cost",
+    source_key: "fixings",
+    description: "Fixings",
+    family: "patio",
+    source_unit: "m2",
+    value: 7.25,
+    supplier: "CMI",
+    as_at: "2026-06-13",
+    evidence_kind: "tool_constant",
+    evidence_ref: "same",
+  } as const;
+  const allowancePlan = buildPlan([
+    allowanceSource,
+    { ...allowanceSource, evidence_kind: "invoice", evidence_ref: allowanceSource.evidence_ref },
+    { ...allowanceSource, as_at: "2026-06-14" },
+  ]);
+  assertEquals(
+    new Set(allowancePlan.allowances.map((a) => a.fingerprint)).size,
+    3,
+  );
+});
+
 Deno.test("a $0 sentinel creates an unpriced item and no cost row", () => {
   const plan = buildPlan(all());
   assertEquals(plan.items.some((i) => i.item_key === "steel-shs-65x65x2"), true);
@@ -192,6 +237,10 @@ Deno.test("--apply only ever targets a localhost database", () => {
     "postgresql://postgres@db.abcdefgh.supabase.co:5432/postgres",
     "postgresql://postgres@127.0.0.1.evil.example:5432/x",
     "postgresql://postgres@10.0.0.5:5432/x",
+    "postgresql://postgres@localhost:5432/postgres?host=remote.example",
+    "postgresql://postgres@localhost:5432/postgres?hostaddr=203.0.113.10",
+    "postgresql://postgres@localhost:5432/postgres?service=production",
+    "postgresql://localhost,remote.example/postgres",
   ]) {
     assertThrows(() => assertLocalDatabase(bad));
   }

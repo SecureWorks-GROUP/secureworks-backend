@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-env=HOME --allow-run=git,psql
+#!/usr/bin/env -S deno run --allow-read --allow-write --allow-env=HOME,PATH --allow-run=git,psql
 // Quote v2, stage 1: load the ten current price stores into the price book.
 //
 // DRY RUN BY DEFAULT. It reads the source files, prints what it would load,
@@ -6,7 +6,7 @@
 // writes to a database with --apply, and --apply refuses any database that is
 // not on localhost: this script never touches production.
 //
-//   deno run --allow-read --allow-write --allow-env=HOME --allow-run=git,psql \
+//   deno run --allow-read --allow-write --allow-env=HOME,PATH --allow-run=git,psql \
 //     scripts/quote-v2/price_book_import.ts [--diff-out price-diff.md] [--sql-out import.sql]
 //     [--apply --db-url postgresql://postgres@127.0.0.1:5432/scratch]
 //     [--fence-dir ~/Projects/fence-designer] [--patio-dir ~/Projects/patio-tool]
@@ -51,7 +51,8 @@ function flag(args: string[], name: string): string | undefined {
 /** Only a disposable local database may receive an import. */
 export function assertLocalDatabase(url: string | undefined): string {
   if (!url) throw new Error("--apply needs --db-url");
-  if (!/^postgres(ql)?:\/\/[^@/]*@(127\.0\.0\.1|localhost)(:\d+)?\//.test(url)) {
+  const localUri = /^postgres(?:ql)?:\/\/(?:[^/?#@]+@)?(?:127\.0\.0\.1|localhost)(?::\d+)?\/[^/?#]+$/;
+  if (!localUri.test(url)) {
     throw new Error("--db-url must be a localhost database; this import never writes anywhere else");
   }
   return url;
@@ -151,6 +152,11 @@ async function main(args: string[]) {
     Deno.writeTextFileSync(tmp, sql);
     const out = await new Deno.Command("psql", {
       args: [dbUrl, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", tmp],
+      clearEnv: true,
+      env: {
+        HOME: Deno.env.get("HOME") ?? "",
+        PATH: Deno.env.get("PATH") ?? "",
+      },
       stdout: "inherit",
       stderr: "inherit",
     }).output();
