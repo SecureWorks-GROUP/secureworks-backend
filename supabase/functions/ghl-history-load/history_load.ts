@@ -681,16 +681,12 @@ export async function runGhlHistoryLoad(
             const code = safeCode(saved.code, "unknown");
             counts.write_errors++;
             c.write_errors++;
-            // The lane went off mid-run: stop, resume here next time.
-            if (code === "attribution_disabled") {
-              return out("partial", code, {
-                v: 1,
-                done: resume.done,
-                conversation_id: conversationId,
-                last_message_id: lastMessageId ?? null,
-              }, code);
-            }
-            firstIssue ??= `write_error:${code}`;
+            return out("partial", code, {
+              v: 1,
+              done: resume.done,
+              conversation_id: conversationId,
+              last_message_id: lastMessageId ?? null,
+            }, code === "attribution_disabled" ? code : undefined);
           }
         }
 
@@ -698,7 +694,9 @@ export async function runGhlHistoryLoad(
         if (!read.nextLastMessageId) {
           counts.message_cursor_missing++;
           // Without a cursor the first message cannot be proved reached.
-          if (items.length >= policy.messagePageLimit) {
+          if (
+            read.hasMore === true || items.length >= policy.messagePageLimit
+          ) {
             return out("failed", "message_cursor_missing", null);
           }
           break;
@@ -711,7 +709,6 @@ export async function runGhlHistoryLoad(
       resume.conversation_id = null;
       resume.last_message_id = null;
     }
-    if (c.write_errors > 0) return out("partial", "write_errors", null);
     return out("done", null, null);
   };
 

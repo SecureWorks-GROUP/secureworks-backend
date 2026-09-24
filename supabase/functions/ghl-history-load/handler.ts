@@ -58,6 +58,7 @@ export interface HandlerDeps {
   // deno-lint-ignore no-explicit-any
   createSupabase(): any;
   fetch?: typeof fetch;
+  readProvider?: typeof readGhlProvider;
   waitUntil?(p: Promise<unknown>): void;
   now?(): number;
 }
@@ -259,7 +260,7 @@ export function liveLinkDeps(deps: HandlerDeps): LinkDeps {
       return data as LinkCandidate[];
     },
     async searchContacts(query, limit) {
-      const result = await readGhlProvider(
+      const result = await (deps.readProvider ?? readGhlProvider)(
         "list_ghl_contacts",
         new URLSearchParams({ query, limit: String(limit) }),
         { locationId, token, fetchFn: deps.fetch },
@@ -268,15 +269,9 @@ export function liveLinkDeps(deps: HandlerDeps): LinkDeps {
         string,
         unknown
       >[];
-      const total = (result.data.meta as Record<string, unknown> | undefined)
-        ?.total;
-      // Complete only on an explicit end: the read says there is no more, or
-      // GHL's own total says every match is on this page. A short page alone
-      // is not proof (review M4-7).
       return {
         contacts,
-        complete: result.pagination?.has_more === false ||
-          (typeof total === "number" && total <= contacts.length),
+        complete: result.pagination?.has_more === false,
       };
     },
     async link(row): Promise<LinkWriteOutcome> {

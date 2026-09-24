@@ -9,6 +9,7 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { readGhlProvider } from "../ghl-proxy/provider_reads.ts";
 import { handleHistoryLoad } from "./handler.ts";
 import { R21_CONTACT } from "./m4_fixtures.ts";
 import { R12_CONTACT, R12_CONVERSATION, R12_ITEM } from "./m4_fixtures.ts";
@@ -144,6 +145,11 @@ function ghlFetch(log: URL[], contactsTotal?: number) {
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
   }) as typeof fetch;
 }
+
+const exhaustedSearch: typeof readGhlProvider = async (...args) => {
+  const result = await readGhlProvider(...args);
+  return { ...result, pagination: { ...result.pagination!, has_more: false } };
+};
 
 const post = (headers: Record<string, string> = {}, body?: unknown) =>
   new Request("https://edge.test/ghl-history-load", {
@@ -281,7 +287,12 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
   const sb = fakeSupabase({});
   const res = await handleHistoryLoad(
     post({}, { action: "link", dry_run: false, wait: true }),
-    { env, createSupabase: () => sb, fetch: ghlFetch(log, 1) },
+    {
+      env,
+      createSupabase: () => sb,
+      fetch: ghlFetch(log, 1),
+      readProvider: exhaustedSearch,
+    },
   );
   const body = await res.json();
   assertEquals([
@@ -308,6 +319,7 @@ Deno.test("wiring: the link action searches GHL by key and writes only through l
       env,
       createSupabase: () => sb2,
       fetch: ghlFetch([], 1),
+      readProvider: exhaustedSearch,
     })).json();
   assertEquals([dry.dry_run, dry.counts.certain, dry.counts.linked], [
     true,
@@ -331,13 +343,17 @@ Deno.test("wiring: a GHL contact search is complete only on an explicit end (rev
     body.counts.linked,
   ], [1, 1, 0]);
   assert(!sb.calls.some((c) => c.name === "link_job_ghl_contact"));
-  // GHL's own total covering the page is an explicit end.
   const sb2 = fakeSupabase({});
   const done = await (await handleHistoryLoad(
     post({}, { action: "link", dry_run: false, wait: true }),
     { env, createSupabase: () => sb2, fetch: ghlFetch([], 1) },
   )).json();
-  assertEquals(done.counts.linked, 1);
+  assertEquals([
+    done.counts.ambiguous,
+    done.counts.search_incomplete,
+    done.counts.linked,
+  ], [1, 1, 0]);
+  assert(!sb2.calls.some((c) => c.name === "link_job_ghl_contact"));
   // A total larger than the page is not.
   const sb3 = fakeSupabase({});
   const more = await (await handleHistoryLoad(

@@ -673,3 +673,58 @@ Deno.test("the time budget leaves the remaining contacts for the next run", asyn
   // The reservation stands: the day counts both contacts' jobs, loaded or not.
   assertEquals(out.counts.jobs_covered, 2);
 });
+
+Deno.test("failed capture resumes the input page without skipping unsaved evidence", async () => {
+  const h = harness({ due: [contact(SHERIDAN_CONTACT)] });
+  h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  let attempts = 0;
+  h.deps.capture = (row) =>
+    Promise.resolve(
+      ++attempts === 4
+        ? { outcome: "error", code: "write_failed" }
+        : h.db.capture(row),
+    );
+  const policy = {
+    ...POLICY,
+    messagePageLimit: 2,
+    maxMessagePagesPerContact: 3,
+  };
+  await runGhlHistoryLoad(h.deps, real, policy);
+  const ledger = h.db.ledger.get(SHERIDAN_CONTACT)!;
+  assertEquals(ledger.status, "partial");
+  assertEquals(attempts, 4);
+  assertEquals(h.ghl.calls.filter((c) => c.startsWith("messages:")).length, 2);
+  const resume = ledger.resume as Record<string, unknown>;
+  assertEquals(resume.last_message_id, "4IupuRIcAf5w6SXa6o9y");
+  const next = harness({
+    due: [contact(SHERIDAN_CONTACT, 1, { prior_status: "partial", resume })],
+  });
+  next.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  for (const [k, v] of h.db.existing) next.db.existing.set(k, v);
+  await runGhlHistoryLoad(next.deps, real, policy);
+  assertEquals(next.db.ledger.get(SHERIDAN_CONTACT)!.status, "done");
+  assertEquals(next.db.existing.size, SHERIDAN_MESSAGES.length);
+  assertEquals(
+    next.ghl.calls.filter((c) => c.startsWith("messages:"))[0],
+    `messages:${SHERIDAN_CONVERSATION}:4IupuRIcAf5w6SXa6o9y`,
+  );
+});
+
+Deno.test("a short message page with more but no cursor never completes history", async () => {
+  const h = harness({ due: [contact(R12_CONTACT)] });
+  h.ghl.add(R12_CONTACT, R12_CONVERSATION, [R12_ITEM]);
+  h.deps.listMessages = () =>
+    Promise.resolve({
+      messages: [R12_ITEM],
+      hasMore: true,
+      nextLastMessageId: null,
+    });
+  const result = await runGhlHistoryLoad(h.deps, real);
+  assert(result.outcome === "ran");
+  assertEquals(result.counts.contacts_done, 0);
+  assertEquals(h.db.ledger.get(R12_CONTACT)!.status, "failed");
+  assertEquals(
+    h.db.ledger.get(R12_CONTACT)!.error_code,
+    "message_cursor_missing",
+  );
+});
