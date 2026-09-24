@@ -5299,7 +5299,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               return applySalesBookingPackOverlay(assembled, overlay)
             },
             // Whose lead it is, read live from GHL at approval.
-            readOpportunityAssignee: createSalesBookingExecuteDeps(client).readOpportunityAssignee,
+            readOpportunityOwnership: createSalesBookingExecuteDeps(client).readOpportunityOwnership,
             // Owner-authored approvals (owner_input body): reads only.
             owner: createOwnerApprovalDeps(client),
           }))

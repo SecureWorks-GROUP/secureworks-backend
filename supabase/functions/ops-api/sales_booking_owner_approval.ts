@@ -47,6 +47,7 @@ import {
   SALES_BOOKING_SENDER_LINES,
   salesBookingSenderFor,
 } from "./sales_booking_sender.ts";
+import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 
 export const OWNER_APPROVAL_VERSION = "owner-authored-v1";
 const SCHEMA = "scope-booking-approval.v1";
@@ -95,7 +96,7 @@ export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
     provider: "ghl",
     calendar_id: "dEQKVKHthsjSYaen1fiE",
     calendar_name: "STRATCO FENCING",
-    assigned_user_id: "3S20LGVTjsVYy9vTJ9wM",
+    assigned_user_id: SALES_BOOKING_SENDER_LINES.marnin.ghl_user_id,
     scoper_email: "marnin@secureworkswa.com.au",
   }),
 });
@@ -537,7 +538,9 @@ export interface OwnerApprovalDeps {
   }>;
   readThread(contactId: string): Promise<SalesBookingMessage[]>;
   /** The opportunity's current GHL assignee, read live; throws when unread. */
-  readOpportunityAssignee(opportunityId: string): Promise<string | null>;
+  readOpportunityOwnership(
+    opportunityId: string,
+  ): Promise<SalesBookingOpportunityOwnership>;
   /** Throws when either the calendars or the users read is incomplete. */
   readGhlDirectory(): Promise<GhlDirectory>;
   /** One complete GHL window read; throws when incomplete. */
@@ -709,17 +712,24 @@ export async function salesBookingOwnerApprovalAction(args: {
   // Whose lead is it, read live: a lead assigned to someone else never takes
   // this person's path or line.
   if (approving) {
-    let assignee: string | null;
+    let ownership: SalesBookingOpportunityOwnership;
     try {
       if (!row.opportunity_id) throw new Error("no opportunity");
-      assignee = await deps.readOpportunityAssignee(row.opportunity_id);
+      ownership = await deps.readOpportunityOwnership(row.opportunity_id);
     } catch {
       refuse("opportunity_assignment_unreadable");
     }
-    if (!salesBookingLeadBelongsTo(assignee, input.resource)) {
+    if (
+      !salesBookingLeadBelongsTo(
+        ownership.assignedTo,
+        input.resource,
+        ownership.pipelineId,
+      )
+    ) {
       refuse("lead_assigned_to_someone_else", {
         resource: input.resource,
-        current_assignee: assignee,
+        current_assignee: ownership.assignedTo,
+        current_pipeline_id: ownership.pipelineId,
       });
     }
   }

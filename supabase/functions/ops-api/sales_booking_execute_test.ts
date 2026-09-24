@@ -16,6 +16,7 @@ import {
 import {
   type SalesBookingJobSiteFact,
   type SalesBookingMessage,
+  SALES_BOOKING_RESOURCES,
   salesBookingPublishedSuburb,
 } from "./sales_booking_read.ts";
 import {
@@ -134,7 +135,13 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
   let thread: SalesBookingMessage[] = [];
   let outlook: OutlookEvent[] = [];
   let contact: Obj = { ...GHL_CONTACT };
-  // Unassigned: a Stratco (and patio) lead's default owner.
+  const initialSnapshot = records[0]?.snapshot;
+  const initialResource = initialSnapshot && typeof initialSnapshot === "object"
+    ? (initialSnapshot as Obj).resource
+    : null;
+  let opportunityPipelineId = SALES_BOOKING_RESOURCES[
+    typeof initialResource === "string" ? initialResource : "marnin"
+  ].pipeline_id;
   let opportunityAssignee: string | null = null;
   const jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
@@ -149,9 +156,12 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: outlook }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
-    readOpportunityAssignee: (id) => {
+    readOpportunityOwnership: (id) => {
       calls.assignmentReads.push(id);
-      return Promise.resolve(opportunityAssignee);
+      return Promise.resolve({
+        assignedTo: opportunityAssignee,
+        pipelineId: opportunityPipelineId,
+      });
     },
     readOutlookLead: ({ contactId, opportunityId }) => {
       calls.contactReads++;
@@ -255,6 +265,9 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     setContact: (c: Obj) => (contact = c),
     setOpportunityAssignee: (id: string | null) => {
       opportunityAssignee = id;
+    },
+    setOpportunityPipelineId: (id: string) => {
+      opportunityPipelineId = id;
     },
     setJobSite: (id: string, site: SalesBookingJobSiteFact) => {
       jobSites[id] = site;
@@ -397,12 +410,25 @@ Deno.test("send rechecks the lead's current GHL assignee for every person", asyn
   assertEquals(h.calls.sms, []);
   // An unreadable assignment is a refusal, never a send.
   const k = fakes([stratco], LIVE);
-  k.deps.readOpportunityAssignee = () => Promise.reject(new Error("down"));
+  k.deps.readOpportunityOwnership = () => Promise.reject(new Error("down"));
   assertEquals(
     reasonOf(await send(k, stratco.binding_hash)),
     "opportunity_assignment_unreadable",
   );
   assertEquals(k.calls.sms, []);
+});
+
+Deno.test("send refuses an unassigned Stratco lead moved to patio", async () => {
+  const stratco = await approval("message", MESSAGE);
+  const f = fakes([stratco], LIVE);
+  f.setOpportunityPipelineId(SALES_BOOKING_RESOURCES.nithin.pipeline_id);
+
+  assertEquals(
+    reasonOf(await send(f, stratco.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(f.calls.sms, []);
+  assertEquals(f.calls.claims, 0);
 });
 
 Deno.test("book re-checks the thread tail and Outlook at the press, naming the clash", async () => {

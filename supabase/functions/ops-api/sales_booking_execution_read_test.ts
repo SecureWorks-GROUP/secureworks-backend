@@ -15,7 +15,10 @@ import {
   applySalesBookingExecutions,
   EXECUTION_IN_PROGRESS_MS,
 } from "./sales_booking_execution_read.ts";
-import type { SalesBookingReadResponse } from "./sales_booking_read.ts";
+import {
+  SALES_BOOKING_RESOURCES,
+  type SalesBookingReadResponse,
+} from "./sales_booking_read.ts";
 import { applySalesBookingVisits } from "./sales_booking_visits.ts";
 
 type Obj = BookingObject;
@@ -598,7 +601,10 @@ function executorDeps(
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: [] }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
-    readOpportunityAssignee: () => Promise.resolve(null),
+    readOpportunityOwnership: () => Promise.resolve({
+      assignedTo: null,
+      pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+    }),
     readOutlookLead: () =>
       Promise.resolve({
         contact: {

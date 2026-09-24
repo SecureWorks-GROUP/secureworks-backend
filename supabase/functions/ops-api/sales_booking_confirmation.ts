@@ -29,6 +29,7 @@ import {
   SALES_BOOKING_SENDER_LINES,
   salesBookingSenderFor,
 } from "./sales_booking_sender.ts";
+import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 export {
   BOOKING_APPROVAL_TTL_MS,
   bookingContentHash,
@@ -40,7 +41,7 @@ export {
 // deno-lint-ignore no-explicit-any
 export type BookingObject = Record<string, any>;
 export type BookingStep = "calendar" | "message";
-const PROFILE = "fencing-stratco-marnin";
+const PROFILE = SALES_BOOKING_SENDER_LINES.marnin.profile;
 /** The engine profile for one booking person, or null for anyone else. */
 function resourceProfile(resourceId: unknown): string | null {
   return typeof resourceId === "string" &&
@@ -499,7 +500,9 @@ export async function salesBookingApprovalWriteAction(args: {
     week: string,
   ) => Promise<SalesBookingReadResponse>;
   /** The opportunity's current GHL assignee (live, not the cached roster). */
-  readOpportunityAssignee?: (opportunityId: string) => Promise<string | null>;
+  readOpportunityOwnership?: (
+    opportunityId: string,
+  ) => Promise<SalesBookingOpportunityOwnership>;
   now?: () => Date;
   envGet?: SalesBookingEnvGet;
 }): Promise<{ ok: true; approval: BookingApprovalRecord }> {
@@ -551,7 +554,7 @@ export async function salesBookingApprovalWriteAction(args: {
   // assigned to someone else never takes this person's path or line.
   if (decision === "approved") {
     await assertLeadBelongsToResource(
-      args.readOpportunityAssignee,
+      args.readOpportunityOwnership,
       row.opportunity_id,
       snapshot.resource,
     );
@@ -686,22 +689,28 @@ export async function salesBookingApprovalWriteAction(args: {
 /** Refuse unless the opportunity's live GHL assignee makes it `resource`'s
  * lead (sales_booking_read.ts `salesBookingLeadBelongsTo`). */
 export async function assertLeadBelongsToResource(
-  readOpportunityAssignee:
-    | ((opportunityId: string) => Promise<string | null>)
+  readOpportunityOwnership:
+    | ((opportunityId: string) => Promise<SalesBookingOpportunityOwnership>)
     | undefined,
   opportunityId: string | null | undefined,
   resource: string,
 ): Promise<void> {
-  if (!readOpportunityAssignee || !opportunityId) {
+  if (!readOpportunityOwnership || !opportunityId) {
     fail("opportunity_assignment_unreadable");
   }
-  let assignee: string | null;
+  let ownership: SalesBookingOpportunityOwnership;
   try {
-    assignee = await readOpportunityAssignee(opportunityId);
+    ownership = await readOpportunityOwnership(opportunityId);
   } catch {
     fail("opportunity_assignment_unreadable");
   }
-  if (!salesBookingLeadBelongsTo(assignee, resource)) {
+  if (
+    !salesBookingLeadBelongsTo(
+      ownership.assignedTo,
+      resource,
+      ownership.pipelineId,
+    )
+  ) {
     fail("lead_assigned_to_someone_else");
   }
 }

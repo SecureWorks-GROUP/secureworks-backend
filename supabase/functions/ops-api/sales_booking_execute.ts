@@ -39,6 +39,7 @@ import {
   type OutlookMirrorWriteOptions,
 } from "./sales_booking_outlook_mirror.ts";
 import { salesBookingSenderFor } from "./sales_booking_sender.ts";
+import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -158,7 +159,9 @@ export interface SalesBookingExecuteDeps {
     endIso: string,
   ): Promise<OutlookRead>;
   readContactPhone(contactId: string): Promise<string | null>;
-  readOpportunityAssignee(opportunityId: string): Promise<string | null>;
+  readOpportunityOwnership(
+    opportunityId: string,
+  ): Promise<SalesBookingOpportunityOwnership>;
   /** GHL contact plus the suburb the booking read publishes for this lead. */
   readOutlookLead(args: {
     contactId: string;
@@ -876,16 +879,23 @@ export async function salesBookingSendAction(args: {
       ? approvedId.slice(4)
       : "";
   if (!opportunityId) return refused("opportunity_identity_invalid");
-  let currentAssignee: string | null;
+  let ownership: SalesBookingOpportunityOwnership;
   try {
-    currentAssignee = await deps.readOpportunityAssignee(opportunityId);
+    ownership = await deps.readOpportunityOwnership(opportunityId);
   } catch {
     return refused("opportunity_assignment_unreadable");
   }
-  if (!salesBookingLeadBelongsTo(currentAssignee, who.sender.person)) {
+  if (
+    !salesBookingLeadBelongsTo(
+      ownership.assignedTo,
+      who.sender.person,
+      ownership.pipelineId,
+    )
+  ) {
     return refused("opportunity_assignee_changed", {
       person: who.sender.person,
-      current_assignee: currentAssignee,
+      current_assignee: ownership.assignedTo,
+      current_pipeline_id: ownership.pipelineId,
     });
   }
 

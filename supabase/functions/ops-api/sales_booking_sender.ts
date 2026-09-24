@@ -43,17 +43,14 @@ export interface SalesBookingSenderPerson {
   ghl_user_id: string;
 }
 
+export interface SalesBookingOpportunityOwnership {
+  assignedTo: string | null;
+  pipelineId: string;
+}
+
 export const SALES_BOOKING_SENDER_LINES: Readonly<
   Record<string, Readonly<SalesBookingSenderPerson>>
 > = Object.freeze({
-  marnin: Object.freeze({
-    person: "marnin",
-    name: "Marnin Stobbe",
-    scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
-    profile: "fencing-stratco-marnin",
-    line: "+61489267776",
-    ghl_user_id: "3S20LGVTjsVYy9vTJ9wM",
-  }),
   nithin: Object.freeze({
     person: "nithin",
     name: "Nithin Silas",
@@ -61,6 +58,14 @@ export const SALES_BOOKING_SENDER_LINES: Readonly<
     profile: "patio-nithin",
     line: "+61489267774",
     ghl_user_id: "ERAycY7r6KZ8OA66WQCy",
+  }),
+  marnin: Object.freeze({
+    person: "marnin",
+    name: "Marnin Stobbe",
+    scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
+    profile: "fencing-stratco-marnin",
+    line: "+61489267776",
+    ghl_user_id: "3S20LGVTjsVYy9vTJ9wM",
   }),
   khairo: Object.freeze({
     person: "khairo",
@@ -141,7 +146,7 @@ export function salesBookingLeadOwner(
   assignedTo: unknown,
   unassignedOwner: string | null,
 ): string | null {
-  if (assignedTo === null || assignedTo === undefined || assignedTo === "") {
+  if (assignedTo === null || assignedTo === "") {
     return unassignedOwner;
   }
   if (typeof assignedTo !== "string") return null;

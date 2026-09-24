@@ -26,6 +26,7 @@ import {
 } from "./sales_booking_owner_approval.ts";
 import {
   salesBookingRead,
+  SALES_BOOKING_RESOURCES,
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
 import { salesBookingSendAction } from "./sales_booking_execute.ts";
@@ -156,10 +157,10 @@ function deps(o: Overrides = {}) {
     readThread: () => Promise.resolve(o.thread ?? []),
     // The lead's live GHL assignee: unassigned (Stratco default), or the
     // person's own user for a Khairo list.
-    readOpportunityAssignee: () =>
-      Promise.resolve(
-        o.resource === "khairo" ? "RgDWTnYL6zL3eJA6nLht" : null,
-      ),
+    readOpportunityOwnership: () => Promise.resolve({
+      assignedTo: o.resource === "khairo" ? "RgDWTnYL6zL3eJA6nLht" : null,
+      pipelineId: SALES_BOOKING_RESOURCES[o.resource ?? "marnin"].pipeline_id,
+    }),
     readGhlDirectory: () => Promise.resolve(calendarDirectory()),
     readGhlEvents: (selector) => {
       calls.push(`ghl:${JSON.stringify(selector)}`);
@@ -298,7 +299,10 @@ Deno.test("owner message: the executor dry-runs the owner's exact text from 776"
       readOutlook: () => Promise.reject(new Error("unused")),
       readContactPhone: () => Promise.resolve("0412 345 678"),
       // An unassigned Stratco lead is Marnin's.
-      readOpportunityAssignee: () => Promise.resolve(null),
+      readOpportunityOwnership: () => Promise.resolve({
+        assignedTo: null,
+        pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+      }),
       readOutlookLead: () => Promise.reject(new Error("unused")),
       mirrorToOutlook: () => Promise.reject(new Error("unused")),
       callAppointmentWriter: () => Promise.reject(new Error("unused")),
@@ -1255,7 +1259,10 @@ Deno.test("owner message for Nithin and Khairo: approved through the gate, sent 
         readThread: () => Promise.resolve([]),
         readOutlook: () => Promise.reject(new Error("unused")),
         readContactPhone: () => Promise.resolve("0412 345 678"),
-        readOpportunityAssignee: () => Promise.resolve(ASSIGNEE[resource]),
+        readOpportunityOwnership: () => Promise.resolve({
+          assignedTo: ASSIGNEE[resource],
+          pipelineId: SALES_BOOKING_RESOURCES[resource].pipeline_id,
+        }),
         readOutlookLead: () => Promise.reject(new Error("unused")),
         mirrorToOutlook: () => Promise.reject(new Error("unused")),
         callAppointmentWriter: () => Promise.reject(new Error("unused")),
@@ -1293,17 +1300,36 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
   // Marnin's screen, but GHL now assigns the lead to Khairo: refused, nothing
   // recorded, both at preview and at the decision.
   const { deps: d, rows } = deps({
-    readOpportunityAssignee: () => Promise.resolve("RgDWTnYL6zL3eJA6nLht"),
+    readOpportunityOwnership: () => Promise.resolve({
+      assignedTo: "RgDWTnYL6zL3eJA6nLht",
+      pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+    }),
   });
   await refusal(
     call(d, { owner_input: input("message"), dry_run: true }),
     "lead_assigned_to_someone_else",
   );
   assertEquals(rows.length, 0);
+  const movedToPatio = deps({
+    readOpportunityOwnership: () => Promise.resolve({
+      assignedTo: null,
+      pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
+    }),
+  });
+  await refusal(
+    call(movedToPatio.deps, {
+      owner_input: input("message"),
+      dry_run: true,
+    }),
+    "lead_assigned_to_someone_else",
+  );
   // Khairo's screen on a lead that is not assigned to him.
   const k = deps({
     resource: "khairo",
-    readOpportunityAssignee: () => Promise.resolve(null),
+    readOpportunityOwnership: () => Promise.resolve({
+      assignedTo: null,
+      pipelineId: SALES_BOOKING_RESOURCES.khairo.pipeline_id,
+    }),
   });
   await refusal(
     call(k.deps, {
@@ -1314,7 +1340,7 @@ Deno.test("owner approval: a lead assigned to someone else never takes this pers
   );
   // An unreadable assignment refuses; it never guesses Marnin.
   const u = deps({
-    readOpportunityAssignee: () => Promise.reject(new Error("down")),
+    readOpportunityOwnership: () => Promise.reject(new Error("down")),
   });
   await refusal(
     call(u.deps, { owner_input: input("message"), dry_run: true }),

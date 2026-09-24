@@ -20,6 +20,7 @@ import {
   selectBookingModels,
 } from "./sales_booking_confirmation.ts";
 import {
+  SALES_BOOKING_RESOURCES,
   salesBookingRead,
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
@@ -180,7 +181,10 @@ function request(
       reason: null,
     } as BookingObject,
     readWorkspace: () => Promise.resolve(response),
-    readOpportunityAssignee: () => Promise.resolve(assignee),
+    readOpportunityOwnership: () => Promise.resolve({
+      assignedTo: assignee,
+      pipelineId: response.resource.pipeline_id,
+    }),
     now: () => NOW,
     envGet,
   };
@@ -836,7 +840,7 @@ Deno.test("engine path through the approval route is unchanged and never reads o
       readGhlEvents: untouched,
       readOutlook: untouched,
       readSystemOfferRecords: untouched,
-      readOpportunityAssignee: untouched,
+      readOpportunityOwnership: untouched,
     },
   });
   assert("approval" in written);
@@ -991,13 +995,26 @@ Deno.test("engine approval: a Stratco lead now assigned to Khairo or Nithin is n
     request(f, store, "message", "3S20LGVTjsVYy9vTJ9wM"),
   );
   assertEquals(written.approval.resource, "marnin");
+  const moved = await fixture(), movedStore = memoryStore();
+  await assertRejects(
+    () => salesBookingApprovalWriteAction({
+      ...request(moved, movedStore.store, "message"),
+      readOpportunityOwnership: () => Promise.resolve({
+        assignedTo: null,
+        pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
+      }),
+    }),
+    Error,
+    "lead_assigned_to_someone_else",
+  );
+  assertEquals(movedStore.records.size, 0);
   // Unreadable assignment refuses.
   const g = await fixture(), broken = memoryStore();
   await assertRejects(
     () =>
       salesBookingApprovalWriteAction({
         ...request(g, broken.store, "message"),
-        readOpportunityAssignee: () => Promise.reject(new Error("down")),
+        readOpportunityOwnership: () => Promise.reject(new Error("down")),
       }),
     Error,
     "opportunity_assignment_unreadable",

@@ -22,6 +22,7 @@ import type {
   OwnerApprovalDeps,
   OwnerApprovalReader,
 } from "./sales_booking_owner_approval.ts";
+import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 import {
   ghlRead,
   readJobSitesLive,
@@ -218,7 +219,9 @@ export function createSalesBookingExecuteDeps(
       const contact = await readContact(contactId);
       return typeof contact.phone === "string" ? contact.phone : null;
     },
-    async readOpportunityAssignee(opportunityId) {
+    async readOpportunityOwnership(
+      opportunityId,
+    ): Promise<SalesBookingOpportunityOwnership> {
       const location = Deno.env.get("GHL_LOCATION_ID") || "";
       if (!location) throw new Error("location_unconfigured");
       const response = await ghlRead(
@@ -230,14 +233,21 @@ export function createSalesBookingExecuteDeps(
         !opportunity || opportunity.id !== opportunityId ||
         (typeof opportunity.locationId === "string" &&
           opportunity.locationId !== location) ||
-        !Object.hasOwn(opportunity, "assignedTo")
+        !Object.hasOwn(opportunity, "assignedTo") ||
+        typeof opportunity.pipelineId !== "string" ||
+        !opportunity.pipelineId.trim()
       ) throw new Error("opportunity_assignment_unreadable");
-      if (opportunity.assignedTo === null) return null;
+      if (opportunity.assignedTo === null || opportunity.assignedTo === "") {
+        return { assignedTo: null, pipelineId: opportunity.pipelineId };
+      }
       if (
         typeof opportunity.assignedTo !== "string" ||
         !opportunity.assignedTo.trim()
       ) throw new Error("opportunity_assignment_unreadable");
-      return opportunity.assignedTo;
+      return {
+        assignedTo: opportunity.assignedTo,
+        pipelineId: opportunity.pipelineId,
+      };
     },
     async readOutlookLead({ contactId, opportunityId }) {
       const contact = await readContact(contactId);
@@ -314,7 +324,7 @@ export function createOwnerApprovalDeps(
       };
     },
     readThread: execute.readThread,
-    readOpportunityAssignee: execute.readOpportunityAssignee,
+    readOpportunityOwnership: execute.readOpportunityOwnership,
     readOutlook: readResourceOutlook,
     async readGhlDirectory() {
       const location = encodeURIComponent(locationId());
