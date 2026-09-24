@@ -51,12 +51,10 @@ A second workflow with trigger **User Replied** posts the same way, with custom
 data `type: "UserReplied"`, `contactId`, `locationId` and `conversationId`
 (`{{contact.id}}`, `{{location.id}}`, and the conversation id the trigger
 supplies). It is the same secret-checked doorbell behind the same flag and
-capture lane, with no legacy write, and writes nothing from the post body. The
-one difference: when the post names a conversation id, that conversation is read
-directly (newest 20); the provider read refuses a conversation that does not
-belong to the post's contact, so nothing is saved from it. Without one, the
-contact's newest conversation is read. Receipts carry reason
-`user_reply_doorbell`. Regression coverage: `receiver_user_replied_test.ts`.
+capture lane, with no legacy write, and writes nothing from the post body. It
+reads exactly what `CustomerReplied` reads: the contact's newest conversation
+(newest 20 messages). A `conversationId` in the post is ignored. Receipts carry
+reason `user_reply_doorbell`. Regression coverage: `receiver_user_replied_test.ts`.
 
 ## Call items and the `CallCompleted` workflow (slice T1)
 

@@ -13,8 +13,8 @@ import { automationLaneEnabled } from "../_shared/automation_switch.ts";
 // writes nothing itself and reads the caller's conversation, so the call is
 // saved once as client.call_logged through the builder. CustomerReplied (a GHL
 // workflow post for an inbound text) is the same doorbell behind the same flag;
-// off, it writes nothing. UserReplied (a staff reply) is that doorbell too, and
-// reads the post's conversation id when it names one. The other legacy
+// off, it writes nothing. UserReplied (a staff reply) is that doorbell too, on
+// the same contact-only read. The other legacy
 // workflow posts (AppointmentCreated, NoteAdded, ContactStageChanged) keep
 // their existing rows until their own slices replace them. The receiver never
 // picks a job: the database ladder

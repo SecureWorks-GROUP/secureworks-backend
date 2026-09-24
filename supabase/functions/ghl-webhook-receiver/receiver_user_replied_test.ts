@@ -3,9 +3,8 @@
 // secret. Like CustomerReplied it is a doorbell: nothing is written from its
 // body; one targeted read (newest 20) saves each message through the shared
 // builder and capture_business_event under ghl:<GHL message id>, behind flag
-// ghl_message_capture_v2. When the post names a conversation, that
-// conversation is read directly (the provider read refuses one that belongs to
-// another contact); otherwise the contact's newest conversation is read.
+// ghl_message_capture_v2. Exactly like CustomerReplied, the contact's newest
+// conversation is read; a conversationId in the post is ignored.
 // Driven through the real handler with the R10 items recorded read only from
 // GHL (ghl_message_fixtures.ts). No network, no live GHL, no production
 // credentials.
@@ -37,8 +36,6 @@ const CONTACT = R10_OUTBOUND.contactId;
 const CONVERSATION = R10_OUTBOUND.conversationId;
 /** A second, older conversation of the same contact (not the newest). */
 const OLDER_CONVERSATION = "r10-older-conversation";
-/** A conversation that belongs to someone else. */
-const FOREIGN_CONVERSATION = "foreign-conversation";
 
 /** R10's conversation: the customer's text and the staff reply to it. */
 const CONVERSATION_ITEMS = [R10_INBOUND, R10_OUTBOUND] as unknown as Row[];
@@ -55,9 +52,18 @@ const USER_REPLIED = {
 };
 const { conversationId: _omit, ...USER_REPLIED_NO_CONVERSATION } = USER_REPLIED;
 
+/** The newest-conversation read path every reply doorbell makes. */
+const NEWEST_READ = [
+  `/contacts/${CONTACT}`,
+  "/conversations/search",
+  `/contacts/${CONTACT}`,
+  `/conversations/${CONVERSATION}`,
+  `/conversations/${CONVERSATION}/messages`,
+];
+
 /**
  * GHL as the provider reads see it: the contact, whose newest conversation is
- * `newest`; that conversation's messages; and a foreign conversation.
+ * `newest`, and that conversation's messages.
  */
 function provider(newest: string) {
   const seen: string[] = [];
@@ -69,7 +75,6 @@ function provider(newest: string) {
   const owner: Record<string, string> = {
     [CONVERSATION]: CONTACT,
     [OLDER_CONVERSATION]: CONTACT,
-    [FOREIGN_CONVERSATION]: "someone-else",
   };
   const answer = (url: string): Response => {
     const u = new URL(url);
@@ -154,12 +159,14 @@ const captureRows = (r: Run) =>
     c.args?.p_row as Row
   );
 
-Deno.test("UserReplied naming a conversation reads that conversation directly and saves the staff reply under ghl:<id>", async () => {
+Deno.test("UserReplied ignores the post's conversation id, reads the contact's newest conversation and saves the staff reply under ghl:<id>", async () => {
   const store = new KeyedStore();
-  // The contact's newest conversation is another one: the named one must win.
-  const gh = provider(OLDER_CONVERSATION);
+  const gh = provider(CONVERSATION);
   const r = await run(
-    await post(USER_REPLIED, "secret"),
+    await post(
+      { ...USER_REPLIED, conversationId: OLDER_CONVERSATION },
+      "secret",
+    ),
     "enforce",
     { ...ON, capture: store.capture },
     TOKEN,
@@ -180,12 +187,11 @@ Deno.test("UserReplied naming a conversation reads that conversation directly an
   assertEquals(staff.job_id, null, "the ladder places the reply");
   assertEquals((staff.metadata as Row).capture_mode, "live");
 
-  assertFalse(gh.seen.includes("/conversations/search"), "no newest lookup");
-  assertEquals(gh.seen, [
-    `/contacts/${CONTACT}`,
-    `/conversations/${CONVERSATION}`,
-    `/conversations/${CONVERSATION}/messages`,
-  ]);
+  assertFalse(
+    gh.seen.some((p) => p.includes(OLDER_CONVERSATION)),
+    "the posted conversation id is never read",
+  );
+  assertEquals(gh.seen, NEWEST_READ);
   const g = ghlReceipt(r);
   assertEquals(g.event_type, "UserReplied");
   assertEquals(g.outcome, "skipped");
@@ -217,39 +223,8 @@ Deno.test("UserReplied without a conversation id reads the contact's newest conv
   );
   assertEquals(r.res.status, 200);
   assertEquals([...store.rows.keys()], [INBOUND_KEY, STAFF_KEY]);
-  assertEquals(gh.seen, [
-    `/contacts/${CONTACT}`,
-    "/conversations/search",
-    `/contacts/${CONTACT}`,
-    `/conversations/${CONVERSATION}`,
-    `/conversations/${CONVERSATION}/messages`,
-  ]);
+  assertEquals(gh.seen, NEWEST_READ);
   assertEquals(ghlReceipt(r).reason, "user_reply_doorbell");
-});
-
-Deno.test("UserReplied naming another contact's conversation saves nothing", async () => {
-  const store = new KeyedStore();
-  const gh = provider(CONVERSATION);
-  const r = await run(
-    await post(
-      { ...USER_REPLIED, conversationId: FOREIGN_CONVERSATION },
-      "secret",
-    ),
-    "enforce",
-    { ...ON, capture: store.capture },
-    TOKEN,
-    gh.answer,
-  );
-  assertEquals(r.res.status, 200);
-  assertEquals(store.rows.size, 0);
-  assertEquals(captureRows(r).length, 0);
-  assertFalse(
-    gh.seen.includes(`/conversations/${FOREIGN_CONVERSATION}/messages`),
-    "the foreign conversation's messages are never read",
-  );
-  const g = ghlReceipt(r);
-  assertEquals(g.targeted_read, "failed");
-  assertEquals(g.reason, "provider_contact_mismatch");
 });
 
 Deno.test("UserReplied twice for the same reply: the second post writes nothing new", async () => {
