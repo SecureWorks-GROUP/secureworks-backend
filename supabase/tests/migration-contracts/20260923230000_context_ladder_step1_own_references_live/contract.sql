@@ -113,11 +113,12 @@ ROLLBACK;
 
 -- Structure: the live body is this migration's (or a later registered ladder
 -- slice built on it: P1a 20260924140000 replaces steps 3 to 6 and keeps step 1
--- byte for byte), and no public role may call it.
+-- byte for byte; P4 20260925050000 makes it the entry that runs P1a's body
+-- while its rules flag is off), and no public role may call it.
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)
-  NOT IN ('acb80ebe792beeb7e5b537643bf9f184','fe50f14f4ab28d4d6c9dbb70bc85e7df') THEN RAISE EXCEPTION 'L1: ladder body is not the L1 body or a registered successor'; END IF;
+  NOT IN ('acb80ebe792beeb7e5b537643bf9f184','fe50f14f4ab28d4d6c9dbb70bc85e7df','32365101d23dde1695707a0bddff640b') THEN RAISE EXCEPTION 'L1: ladder body is not the L1 body or a registered successor'; END IF;
  IF has_function_privilege('anon','public.resolve_context_attribution(public.business_events)','EXECUTE')
   OR has_function_privilege('authenticated','public.resolve_context_attribution(public.business_events)','EXECUTE')
  THEN RAISE EXCEPTION 'L1: ladder callable by a public role'; END IF;

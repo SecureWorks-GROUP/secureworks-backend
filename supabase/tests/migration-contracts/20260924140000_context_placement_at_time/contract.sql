@@ -497,6 +497,12 @@ BEGIN
   IF NOT has_function_privilege('service_role',f,'EXECUTE') THEN RAISE EXCEPTION 'service_role cannot execute %',f; END IF;
  END LOOP;
 END $$;
+-- Re-apply is a no-op while P1a's ladder is live. A later registered ladder
+-- slice (P4 20260925050000) replaces the ladder entry; P1a's guard then refuses
+-- by design, so the re-apply runs only while P1a's body is the live one.
+SELECT md5(prosrc)='fe50f14f4ab28d4d6c9dbb70bc85e7df' AS p1a_body_live
+FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure \gset
+\if :p1a_body_live
 CREATE TEMP TABLE p1a_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND p.proname IN ('resolve_context_attribution','rerun_context_attribution','attribute_context_event_with_luna',
   'context_event_is_ghl','context_contact_job_timeline','context_contact_jobs_at');
@@ -508,3 +514,19 @@ BEGIN
  THEN RAISE EXCEPTION 'P1a re-apply changed a body'; END IF;
 END $$;
 DROP TABLE p1a_before;
+\else
+-- Superseded by P4: its entry runs P1a's body (context_ladder_p1a) while the
+-- rules flag is off; P4 also owns the two Luna write boundaries.
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_context_event_with_luna(uuid,uuid,numeric)'::regprocedure)<>'62ed28cbcf041d7cdcda298907a756fa'
+ THEN RAISE EXCEPTION 'P1a: unregistered Luna successor'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_context_event_with_luna(uuid,uuid,numeric,text)'::regprocedure)<>'11c9fb6fedce9cdd4a730e461d5a6fda'
+ THEN RAISE EXCEPTION 'P1a: unregistered Luna successor'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)
+  <>'32365101d23dde1695707a0bddff640b' THEN RAISE EXCEPTION 'P1a: ladder entry is neither P1a''s nor P4''s'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_jobs_at(text,timestamptz)'::regprocedure)<>'911811b617fa760f5ddf847fb1ab853d'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz)'::regprocedure)<>'2bc8e76f14fda242eb6e4d414e93fefa'
+ THEN RAISE EXCEPTION 'P1a: a later slice changed the two-argument candidate set'; END IF;
+END $$;
+\endif

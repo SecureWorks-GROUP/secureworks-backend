@@ -1,5 +1,9 @@
 -- Restore the legacy step 1 (any invoice number, holding job included). A later
--- registered ladder slice (P1a) is rolled back first, as its down requires.
+-- registered ladder slice (P4, then P1a) is rolled back first, as its down requires.
+SELECT to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)') IS NOT NULL AS p4_live \gset
+\if :p4_live
+\ir ../../../rollbacks/20260925050000_context_unlinked_rules_down.sql
+\endif
 SELECT to_regprocedure('public.context_contact_jobs_at(text,timestamptz)') IS NOT NULL AS p1a_live \gset
 \if :p1a_live
 \ir ../../../rollbacks/20260924140000_context_placement_at_time_down.sql
