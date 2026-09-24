@@ -46,7 +46,10 @@ BEGIN
     'public.quote_v2_prepare_send(uuid, jsonb, text, integer)',
     'public.quote_v2_approve_send(uuid, text, text)',
     'public.quote_v2_execute_send(uuid, text, text, boolean)',
-    'public.quote_v2_live_outbox_pending(uuid)']
+    'public.quote_v2_live_outbox_pending(uuid)',
+    'public.quote_v2_claim_delivery(uuid)',
+    'public.quote_v2_record_delivery(uuid, text, text, text)',
+    'public.quote_v2_issue_approved_party_link(uuid, uuid, text, text)']
   LOOP
     IF has_function_privilege('anon', f, 'EXECUTE') OR has_function_privilege('authenticated', f, 'EXECUTE')
        OR NOT has_function_privilege('service_role', f, 'EXECUTE') THEN
@@ -227,6 +230,19 @@ BEGIN
     'price_book_append_only', 'the outbox is append-only');
   PERFORM pg_temp.expect_refusal('DELETE FROM public.quote_v2_sends',
     'price_book_append_only', 'a send is never deleted');
+  PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_claim_delivery(%L)',
+    (again->'messages'->0->>'outbox_id')),
+    'quote_outbox_capture_never_delivers', 'a captured message is never claimed');
+
+  -- A hand-issued link is only for a party the owner stamped a send to.
+  IF public.quote_v2_issue_approved_party_link(
+       (SELECT v FROM ids WHERE k = 'rev')::uuid, (SELECT v FROM ids WHERE k = 'p_neighbour')::uuid,
+       h, 'marnin')->>'token' !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'the owner may reissue a link to a party his stamp covers';
+  END IF;
+  PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_issue_approved_party_link(%L, %L, %L, %L)',
+    (SELECT v FROM ids WHERE k = 'rev'), (SELECT v FROM ids WHERE k = 'p_client'), repeat('e', 64), 'marnin'),
+    'quote_link_not_approved', 'a link needs a stamped preview');
 END $$;
 
 -- ── Live previews and quotes that change ────────────────────────────────
@@ -242,6 +258,43 @@ BEGIN
   PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_execute_send(%L, %L, %L, false)',
     live->>'preview_id', live->>'preview_hash', 'khairo'),
     'quote_send_live_disabled', 'a live preview must not run where live delivery is off');
+  PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_issue_approved_party_link(%L, %L, %L, %L)',
+    rev, (SELECT v FROM ids WHERE k = 'p_client'),
+    public.quote_v2_prepare_send(rev, s, 'khairo')->>'preview_hash', 'marnin'),
+    'quote_link_not_approved', 'an unstamped preview covers no link');
+
+  -- Live delivery: each message is claimed once before any provider call.
+  DECLARE
+    sent jsonb := public.quote_v2_execute_send((live->>'preview_id')::uuid, live->>'preview_hash', 'khairo', true);
+    o1 uuid;
+    o2 uuid;
+  BEGIN
+    IF (SELECT count(*) FROM public.quote_v2_live_outbox_pending((sent->>'send_id')::uuid)) <> 3 THEN
+      RAISE EXCEPTION 'every live message starts unclaimed';
+    END IF;
+    o1 := (sent->'messages'->0->>'outbox_id')::uuid;
+    o2 := (sent->'messages'->1->>'outbox_id')::uuid;
+    IF NOT public.quote_v2_claim_delivery(o1) OR public.quote_v2_claim_delivery(o1) THEN
+      RAISE EXCEPTION 'a message is claimed by exactly one caller';
+    END IF;
+    IF (SELECT count(*) FROM public.quote_v2_live_outbox_pending((sent->>'send_id')::uuid)) <> 2 THEN
+      RAISE EXCEPTION 'a claimed message is never offered again';
+    END IF;
+    IF public.quote_v2_send_result((sent->>'send_id')::uuid)->'messages'->0->>'delivery' <> 'unknown' THEN
+      RAISE EXCEPTION 'a claim that never settled reads as unknown';
+    END IF;
+    PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_record_delivery(%L, %L)', o2, 'delivered'),
+      'quote_outbox_delivery_unclaimed', 'an outcome needs its claim');
+    PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_record_delivery(%L, %L)', o1, 'claimed'),
+      'quote_outbox_outcome_unknown', 'a claim is not an outcome');
+    PERFORM public.quote_v2_record_delivery(o1, 'unknown', NULL, 'SMS provider 503');
+    PERFORM pg_temp.expect_refusal(format('SELECT public.quote_v2_record_delivery(%L, %L)', o1, 'delivered'),
+      'quote_outbox_delivery_settled', 'an outcome is recorded once');
+    IF public.quote_v2_send_result((sent->>'send_id')::uuid)->'messages'->0->>'delivery' <> 'unknown'
+       OR public.quote_v2_claim_delivery(o1) THEN
+      RAISE EXCEPTION 'an unknown outcome is never retried';
+    END IF;
+  END;
 
   stale := public.quote_v2_prepare_send(rev, s, 'khairo');
   PERFORM public.quote_v2_approve_send((stale->>'preview_id')::uuid, stale->>'preview_hash', 'marnin');

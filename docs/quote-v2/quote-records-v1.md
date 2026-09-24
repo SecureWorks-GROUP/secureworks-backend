@@ -115,7 +115,8 @@ actor on a write is the signed-in user; a server caller must name
 | Call | Who |
 |---|---|
 | `GET ?t=<token>` party page; `POST ?action=accept` | the link holder |
-| `POST ?action=create_draft / set_line_markup / freeze / issue_link / revoke_link`, `GET ?action=revision / job_acceptance` | staff |
+| `POST ?action=create_draft / set_line_markup / freeze / revoke_link`, `GET ?action=revision / job_acceptance` | staff (a stated or adjustment sell: the owner's session only, see stage 3) |
+| `POST ?action=issue_link` | the owner's session, for a party a stamped send covers (stage 3) |
 
 The accept response never says whether the whole job is accepted (it would
 tell a neighbour whether the client has).

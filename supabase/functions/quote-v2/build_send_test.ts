@@ -693,3 +693,296 @@ Deno.test("handler render: staff get the party's PDF; the party page link serves
     await sha256Hex(staffPdf),
   );
 });
+
+// ── Owner-only sells, stamped links, claimed live delivery ─────────────
+const OWNER_SELL = {
+  basis: "stated",
+  kind: "owner",
+  unit_sell_ex_gst: 1,
+  stated_by: "marnin",
+  stated_at: "2020-01-01T00:00:00Z",
+};
+
+Deno.test("handler build: a stated or adjustment sell from anyone but the owner is refused before any write", async () => {
+  for (
+    const sell of [OWNER_SELL, {
+      basis: "adjustment",
+      amount_ex_gst: -500,
+      stated_by: "marnin",
+      stated_at: "2020-01-01T00:00:00Z",
+    }]
+  ) {
+    for (
+      const [auth, extra] of [
+        ["jwt-scoper", {}],
+        ["service-secret", { acting_for: "marnin" }],
+      ] as const
+    ) {
+      const d = deps();
+      const res = await handleQuoteV2Request(
+        post("?action=build", {
+          job_id: JOB,
+          ...extra,
+          ...scope([{
+            key: "fence",
+            description: "Fence",
+            qty: 22,
+            ...(sell.basis === "adjustment" ? { qty: undefined } : {}),
+            sell,
+            note: "n",
+          }]),
+        }, auth),
+        d,
+      );
+      assertEquals(res.status, 403);
+      assertEquals((await res.json()).code, "quote_sell_owner_only");
+      assert(!d.calls.some((c) => c.fn === "quote_v2_build_draft"));
+    }
+  }
+});
+
+Deno.test("handler build: the owner's stated sell is recorded as the owner's verified session, now", async () => {
+  const d = deps();
+  const before = Date.now();
+  const res = await handleQuoteV2Request(
+    post("?action=build", {
+      job_id: JOB,
+      ...scope([{
+        key: "fence",
+        description: "Fence",
+        qty: 22,
+        sell: OWNER_SELL,
+      }]),
+    }, "jwt-owner"),
+    d,
+  );
+  assertEquals(res.status, 200);
+  const payload = d.calls.find((c) => c.fn === "quote_v2_build_draft")!.args
+    .p_payload as { lines: { sell: Record<string, string | number> }[] };
+  const sell = payload.lines[0].sell;
+  assertEquals(sell.stated_by, "marnin@secureworkswa.com.au");
+  assertEquals(sell.unit_sell_ex_gst, 1);
+  assert(Date.parse(String(sell.stated_at)) >= before);
+});
+
+Deno.test("handler create_draft: a forged owner sell from a scoper is refused", async () => {
+  const d = deps();
+  const res = await handleQuoteV2Request(
+    post("?action=create_draft", {
+      job_id: JOB,
+      payload: {
+        family: "fencing",
+        parties: [CLIENT],
+        lines: [{
+          line_key: "fence",
+          description: "Fence",
+          qty: 22,
+          sell: OWNER_SELL,
+        }],
+      },
+    }, "jwt-scoper"),
+    d,
+  );
+  assertEquals(res.status, 403);
+  assertEquals((await res.json()).code, "quote_sell_owner_only");
+  assertEquals(d.calls.length, 0);
+});
+
+Deno.test("handler issue_link: only the owner, and only for a stamped preview", async () => {
+  const body = { revision_id: REV, party_id: PARTY, preview_hash: HASH };
+  for (
+    const [auth, extra] of [
+      ["jwt-scoper", {}],
+      ["service-secret", { acting_for: "marnin" }],
+    ] as const
+  ) {
+    const d = deps();
+    const res = await handleQuoteV2Request(
+      post("?action=issue_link", { ...body, ...extra }, auth),
+      d,
+    );
+    assertEquals(res.status, 403);
+    assertEquals((await res.json()).code, "owner_stamp_required");
+    assertEquals(d.calls.length, 0);
+  }
+  const missing = deps();
+  const noHash = await handleQuoteV2Request(
+    post(
+      "?action=issue_link",
+      { revision_id: REV, party_id: PARTY },
+      "jwt-owner",
+    ),
+    missing,
+  );
+  assertEquals(noHash.status, 400);
+  assertEquals(missing.calls.length, 0);
+  const d = deps();
+  const res = await handleQuoteV2Request(
+    post("?action=issue_link", body, "jwt-owner"),
+    d,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(d.calls, [{
+    fn: "quote_v2_issue_approved_party_link",
+    args: {
+      p_revision_id: REV,
+      p_party_id: PARTY,
+      p_preview_hash: HASH,
+      p_issued_by: "marnin@secureworkswa.com.au",
+    },
+  }]);
+});
+
+const LIVE_ENV = { ...STAGING, GHL_API_TOKEN: "ghl_test" };
+const liveRow = (id: string) => ({
+  id,
+  channel: "email" as const,
+  to_address: `${id}@example.test`,
+  to_name: null,
+  subject: "S",
+  body_text: "T",
+  body_html: "<p>T</p>",
+  ghl_contact_id: null,
+});
+
+/** A live send whose outbox rows share one claim ledger, as the database
+ * holds it across concurrent requests. */
+function liveDeps(
+  ledger: Map<string, string[]>,
+  opts: {
+    status?: number;
+    recordFails?: boolean;
+    rows?: string[];
+  } = {},
+) {
+  const d = deps(LIVE_ENV);
+  const rows = opts.rows ?? ["o1", "o2"];
+  const inner = d.rpc;
+  d.fetch = (() => {
+    d.fetched++;
+    return Promise.resolve(
+      new Response(JSON.stringify({ id: "em" }), {
+        status: opts.status ?? 200,
+      }),
+    );
+  }) as unknown as typeof fetch;
+  d.rpc = (fn: string, args: Record<string, unknown>) => {
+    if (fn === "quote_v2_execute_send") {
+      d.calls.push({ fn, args });
+      return Promise.resolve({
+        data: { send_id: "s1", adapter: "live" },
+        error: null,
+      });
+    }
+    if (fn === "quote_v2_live_outbox_pending") {
+      d.calls.push({ fn, args });
+      return Promise.resolve({
+        data: rows.filter((r) => !ledger.has(r)).map(liveRow),
+        error: null,
+      });
+    }
+    if (fn === "quote_v2_claim_delivery") {
+      d.calls.push({ fn, args });
+      const id = args.p_outbox_id as string;
+      if (ledger.has(id)) return Promise.resolve({ data: false, error: null });
+      ledger.set(id, ["claimed"]);
+      return Promise.resolve({ data: true, error: null });
+    }
+    if (fn === "quote_v2_record_delivery") {
+      d.calls.push({ fn, args });
+      if (opts.recordFails) {
+        return Promise.resolve({
+          data: null,
+          error: { message: "connection reset" },
+        });
+      }
+      ledger.get(args.p_outbox_id as string)!.push(args.p_outcome as string);
+      return Promise.resolve({ data: "d1", error: null });
+    }
+    return inner(fn, args);
+  };
+  return d;
+}
+const sendBody = { preview_id: PREVIEW, preview_hash: HASH };
+
+Deno.test("handler live send: each message is claimed before its provider call and delivered once", async () => {
+  const ledger = new Map<string, string[]>();
+  const d = liveDeps(ledger);
+  const res = await handleQuoteV2Request(
+    post("?action=send", sendBody, "jwt-scoper"),
+    d,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(d.fetched, 2);
+  assertEquals([...ledger.values()], [
+    ["claimed", "delivered"],
+    ["claimed", "delivered"],
+  ]);
+  const again = liveDeps(ledger);
+  await handleQuoteV2Request(
+    post("?action=send", sendBody, "jwt-scoper"),
+    again,
+  );
+  assertEquals(again.fetched, 0);
+});
+
+Deno.test("handler live send: two concurrent sends deliver each message once", async () => {
+  const ledger = new Map<string, string[]>();
+  const a = liveDeps(ledger);
+  const b = liveDeps(ledger);
+  await Promise.all([
+    handleQuoteV2Request(post("?action=send", sendBody, "jwt-scoper"), a),
+    handleQuoteV2Request(post("?action=send", sendBody, "jwt-scoper"), b),
+  ]);
+  assertEquals(a.fetched + b.fetched, 2);
+  assertEquals(
+    [...ledger.values()].map((v) => v.filter((o) => o === "delivered").length),
+    [1, 1],
+  );
+});
+
+Deno.test("handler live send: a failed record stops the send, and a replay delivers nothing", async () => {
+  const ledger = new Map<string, string[]>();
+  const d = liveDeps(ledger, { recordFails: true });
+  const res = await handleQuoteV2Request(
+    post("?action=send", sendBody, "jwt-scoper"),
+    d,
+  );
+  assertEquals(res.status, 502);
+  assertEquals((await res.json()).code, "quote_delivery_unrecorded");
+  assertEquals(d.fetched, 1);
+  assertEquals(ledger.has("o2"), false);
+  const replay = liveDeps(ledger, { rows: ["o1"] });
+  await handleQuoteV2Request(
+    post("?action=send", sendBody, "jwt-scoper"),
+    replay,
+  );
+  assertEquals(replay.fetched, 0);
+});
+
+Deno.test("handler live send: a provider 5xx is recorded unknown and never replayed", async () => {
+  const ledger = new Map<string, string[]>();
+  const d = liveDeps(ledger, { status: 503, rows: ["o1"] });
+  await handleQuoteV2Request(post("?action=send", sendBody, "jwt-scoper"), d);
+  assertEquals(ledger.get("o1"), ["claimed", "unknown"]);
+  const replay = liveDeps(ledger, { rows: ["o1"] });
+  await handleQuoteV2Request(
+    post("?action=send", sendBody, "jwt-scoper"),
+    replay,
+  );
+  assertEquals(replay.fetched, 0);
+});
+
+Deno.test("delivery: a provider refusal is failed; a provider 5xx may have delivered, so it is unknown", async () => {
+  const at = (status: number) =>
+    deliverLiveRow(liveRow("o1"), {
+      env: envOf(LIVE_ENV),
+      fetch: (() =>
+        Promise.resolve(
+          new Response("{}", { status }),
+        )) as unknown as typeof fetch,
+    });
+  assertEquals((await at(422)).outcome, "failed");
+  assertEquals((await at(500)).outcome, "unknown");
+  assertEquals((await at(502)).outcome, "unknown");
+});

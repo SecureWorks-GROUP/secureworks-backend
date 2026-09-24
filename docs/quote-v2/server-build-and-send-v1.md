@@ -33,7 +33,11 @@ An item is one of:
 Sell defaults to cost x markup. `markup: {multiplier, reason?}` is the
 scoper's markup for that item (every generated line), recorded with the
 signed-in caller as who set it; the family default applies otherwise. A
-tool never supplies a sell. To re-quote the same people, name their
+tool never supplies a sell: a `stated` or `adjustment` sell (on `build` or
+`create_draft`) is refused `quote_sell_owner_only` unless the caller is a
+verified session on `QUOTE_V2_SEND_APPROVER_EMAILS`, and its `stated_by` /
+`stated_at` are overwritten with that session's email and the time of the
+call. To re-quote the same people, name their
 `party_id`s so their old links forward to the new revision.
 
 ## Rendering
@@ -75,6 +79,11 @@ serves the PDF. Staff preview: `GET ?action=render&revision_id&party_id&format`.
    writes, links and delivers nothing. A quote that changed after the stamp
    refuses `quote_send_revision_changed`.
 
+Links come from the stamped send. `POST ?action=issue_link {revision_id,
+party_id, preview_hash}` re-issues one by hand only from an approver's own
+session (`owner_stamp_required` otherwise) and only for a party an approved
+preview of that revision covers (`quote_link_not_approved` otherwise).
+
 ## Delivery: capture by default
 
 A send's adapter is fixed in its preview, so the stamp says whether anything
@@ -85,9 +94,14 @@ is delivered.
 - `live`: Resend email (idempotency key per outbox row) and GHL SMS through
   `_shared/sms_from_number.ts`. Allowed only when `QUOTE_V2_ENVIRONMENT=staging`,
   `QUOTE_V2_LIVE_DELIVERY=staging-only-enabled` and `SUPABASE_URL` is not the
-  production project (`delivery.ts`). A timed-out provider call is recorded
-  `unknown` and never retried automatically. No part of this program sets
-  those flags.
+  production project (`delivery.ts`). No part of this program sets those
+  flags. Each message is claimed (`quote_v2_claim_delivery`, one claim per
+  outbox row, ever) before its provider call, then settled once as
+  `delivered`, `failed` (a provider refusal) or `unknown` (a thrown,
+  timed-out or 5xx call). A concurrent or retried send loses the claim and
+  delivers nothing; a claim that never settled reads `unknown`. Nothing is
+  retried automatically: a person reconciles `unknown` and `failed`. If an
+  outcome cannot be recorded the send stops (`quote_delivery_unrecorded`).
 
 The outbox holds the party's link in the body, so it is as private as sent
 mail: service role only, append-only.

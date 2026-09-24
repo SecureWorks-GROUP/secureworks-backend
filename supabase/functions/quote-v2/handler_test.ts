@@ -463,7 +463,7 @@ Deno.test("staff: a refusal from the quote rules is a 409 with its code", async 
   assertEquals(body.code, "quote_line_duplicate");
 });
 
-Deno.test("staff: reads and link actions route to their functions", async () => {
+Deno.test("staff: reads and link revocation route to their functions", async () => {
   const headers = { Authorization: "Bearer jwt-estimator" };
   const d = deps();
   await handleQuoteV2Request(
@@ -472,10 +472,6 @@ Deno.test("staff: reads and link actions route to their functions", async () => 
   );
   await handleQuoteV2Request(
     get(`?action=job_acceptance&job_id=${JOB}`, headers),
-    d,
-  );
-  await handleQuoteV2Request(
-    post("?action=issue_link", { revision_id: REV, party_id: JOB }, headers),
     d,
   );
   await handleQuoteV2Request(
@@ -489,7 +485,6 @@ Deno.test("staff: reads and link actions route to their functions", async () => 
   assertEquals(d.calls.map((c) => c.fn), [
     "quote_v2_staff_revision",
     "quote_v2_job_acceptance",
-    "quote_v2_issue_party_link",
     "quote_v2_revoke_party_link",
   ]);
   const res = await handleQuoteV2Request(

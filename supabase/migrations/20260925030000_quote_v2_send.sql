@@ -152,18 +152,23 @@ CREATE TABLE public.quote_v2_outbox (
 COMMENT ON TABLE public.quote_v2_outbox IS
   'Quote v2 outbox. Capture rows are never delivered; live rows are delivered once by the staging adapter.';
 
--- Delivery attempts for live rows only. 'unknown' (a timed-out provider call)
--- is never retried automatically: a person reconciles it.
+-- Delivery of live rows only. A row is 'claimed' ONCE, before any provider
+-- call, then settled ONCE as delivered, failed or unknown. A second or
+-- concurrent send finds the claim and delivers nothing; a claim that never
+-- settled reads as unknown. Nothing is retried automatically: a person
+-- reconciles an unknown or failed message.
 CREATE TABLE public.quote_v2_outbox_deliveries (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   outbox_id uuid NOT NULL REFERENCES public.quote_v2_outbox(id),
-  outcome text NOT NULL CHECK (outcome IN ('delivered', 'failed', 'unknown')),
+  outcome text NOT NULL CHECK (outcome IN ('claimed', 'delivered', 'failed', 'unknown')),
   provider_message_id text,
   detail text,
   recorded_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX quote_v2_outbox_deliveries_once
-  ON public.quote_v2_outbox_deliveries (outbox_id) WHERE outcome IN ('delivered', 'unknown');
+CREATE UNIQUE INDEX quote_v2_outbox_deliveries_claim_once
+  ON public.quote_v2_outbox_deliveries (outbox_id) WHERE outcome = 'claimed';
+CREATE UNIQUE INDEX quote_v2_outbox_deliveries_settle_once
+  ON public.quote_v2_outbox_deliveries (outbox_id) WHERE outcome <> 'claimed';
 
 DO $$
 DECLARE t text;
@@ -492,15 +497,18 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_
         'outbox_id', o.id, 'party_id', o.party_id, 'link_id', o.link_id,
         'channel', o.channel, 'to', o.to_address, 'adapter', o.adapter,
         'delivery', CASE WHEN o.adapter = 'capture' THEN 'captured'
-          ELSE coalesce((SELECT d.outcome FROM public.quote_v2_outbox_deliveries d
-            WHERE d.outbox_id = o.id ORDER BY d.recorded_at DESC LIMIT 1), 'pending') END)
+          ELSE coalesce(
+            (SELECT d.outcome FROM public.quote_v2_outbox_deliveries d
+             WHERE d.outbox_id = o.id AND d.outcome <> 'claimed'),
+            (SELECT 'unknown' FROM public.quote_v2_outbox_deliveries d
+             WHERE d.outbox_id = o.id AND d.outcome = 'claimed'),
+            'pending') END)
         ORDER BY o.created_at, o.channel, o.to_address)
       FROM public.quote_v2_outbox o WHERE o.send_id = s.id), '[]'::jsonb))
   FROM public.quote_v2_sends s WHERE s.id = p_send_id
 $$;
 
--- Live rows still owed one attempt: no delivery, and no ambiguous attempt.
--- Bodies are returned only to the delivering edge function, with the GHL
+-- Live rows never claimed: the only rows a send may still attempt. Bodies are returned only to the delivering edge function, with the GHL
 -- contact the stamped preview named for an SMS.
 CREATE OR REPLACE FUNCTION public.quote_v2_live_outbox_pending(p_send_id uuid)
 RETURNS SETOF jsonb
@@ -516,10 +524,30 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
       LIMIT 1))
   FROM public.quote_v2_outbox o
   WHERE o.send_id = p_send_id AND o.adapter = 'live'
-    AND NOT EXISTS (SELECT 1 FROM public.quote_v2_outbox_deliveries d
-                    WHERE d.outbox_id = o.id AND d.outcome IN ('delivered', 'unknown'))
+    AND NOT EXISTS (SELECT 1 FROM public.quote_v2_outbox_deliveries d WHERE d.outbox_id = o.id)
   ORDER BY o.created_at, o.channel, o.to_address
 $$;
+
+-- Claim one live row before its provider call. True for exactly one caller,
+-- ever; every other (concurrent, retried or replayed) caller gets false and
+-- must deliver nothing.
+CREATE OR REPLACE FUNCTION public.quote_v2_claim_delivery(p_outbox_id uuid)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  o public.quote_v2_outbox%ROWTYPE;
+BEGIN
+  SELECT * INTO o FROM public.quote_v2_outbox WHERE id = p_outbox_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'quote_outbox_missing: %', p_outbox_id;
+  END IF;
+  IF o.adapter = 'capture' THEN
+    RAISE EXCEPTION 'quote_outbox_capture_never_delivers: a captured message is never delivered';
+  END IF;
+  INSERT INTO public.quote_v2_outbox_deliveries (outbox_id, outcome)
+  VALUES (o.id, 'claimed')
+  ON CONFLICT (outbox_id) WHERE outcome = 'claimed' DO NOTHING;
+  RETURN FOUND;
+END $$;
 
 CREATE OR REPLACE FUNCTION public.quote_v2_record_delivery(
   p_outbox_id uuid,
@@ -539,10 +567,43 @@ BEGIN
   IF o.adapter = 'capture' THEN
     RAISE EXCEPTION 'quote_outbox_capture_never_delivers: a captured message is never delivered';
   END IF;
+  IF p_outcome IS NULL OR p_outcome NOT IN ('delivered', 'failed', 'unknown') THEN
+    RAISE EXCEPTION 'quote_outbox_outcome_unknown: %', p_outcome;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.quote_v2_outbox_deliveries d
+                 WHERE d.outbox_id = o.id AND d.outcome = 'claimed') THEN
+    RAISE EXCEPTION 'quote_outbox_delivery_unclaimed: a delivery is recorded only after its claim';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.quote_v2_outbox_deliveries d
+             WHERE d.outbox_id = o.id AND d.outcome <> 'claimed') THEN
+    RAISE EXCEPTION 'quote_outbox_delivery_settled: this message already has its outcome';
+  END IF;
   INSERT INTO public.quote_v2_outbox_deliveries (outbox_id, outcome, provider_message_id, detail)
   VALUES (o.id, p_outcome, nullif(btrim(p_provider_message_id), ''), left(p_detail, 500))
   RETURNING id INTO new_id;
   RETURN new_id;
+END $$;
+
+-- A party link minted by hand is only for a party the owner already stamped
+-- a send to: the preview hash must be approved, for this revision, and name
+-- this party. Otherwise links are minted only by the stamped send.
+CREATE OR REPLACE FUNCTION public.quote_v2_issue_approved_party_link(
+  p_revision_id uuid,
+  p_party_id uuid,
+  p_preview_hash text,
+  p_issued_by text
+)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM public.quote_v2_send_previews p
+    JOIN public.quote_v2_send_approvals a ON a.preview_id = p.id
+    WHERE p.preview_hash = p_preview_hash AND p.revision_id = p_revision_id
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(p.preview->'parties') pty
+                  WHERE pty->>'party_id' = p_party_id::text)) THEN
+    RAISE EXCEPTION 'quote_link_not_approved: no stamped send covers this party on this revision';
+  END IF;
+  RETURN public.quote_v2_issue_party_link(p_revision_id, p_party_id, p_issued_by);
 END $$;
 
 -- Staff read of a send preview and what happened to it. Never a token or body.
@@ -573,7 +634,9 @@ BEGIN
     'public.quote_v2_execute_send(uuid, text, text, boolean)',
     'public.quote_v2_send_result(uuid, boolean)',
     'public.quote_v2_live_outbox_pending(uuid)',
+    'public.quote_v2_claim_delivery(uuid)',
     'public.quote_v2_record_delivery(uuid, text, text, text)',
+    'public.quote_v2_issue_approved_party_link(uuid, uuid, text, text)',
     'public.quote_v2_send_status(uuid)']
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);

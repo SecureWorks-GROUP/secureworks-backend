@@ -18,7 +18,9 @@
 //   POST ?action=create_draft    {job_id, payload}        -> revision_id
 //   POST ?action=set_line_markup {revision_id, line_key, multiplier, reason?}
 //   POST ?action=freeze          {revision_id, valid_until}
-//   POST ?action=issue_link      {revision_id, party_id}  -> token, once
+//   POST ?action=issue_link      {revision_id, party_id, preview_hash}
+//        -> token, once; the owner's own session only, for a party a stamped
+//        send preview already covers (otherwise links come only from send)
 //   POST ?action=revoke_link     {link_id, reason}        -> count revoked;
 //        revokes EVERY link that party holds for the job, forwarding links too
 //   GET  ?action=revision&revision_id=
@@ -37,6 +39,8 @@
 //   GET  ?action=send_status&preview_id=
 // The actor on every write is the signed-in user; a server caller must name
 // who it acts for in `acting_for`. Callers never choose the actor otherwise.
+// A stated or adjustment sell is the owner's alone: only an approver's own
+// session may send one, and it is recorded as that approver, now.
 //
 // All money and state rules live in SQL (migration
 // 20260925020000_quote_v2_records.sql); this handler only routes and renders.
@@ -102,6 +106,59 @@ export function quoteSendApprovers(raw: string | undefined): string[] {
   const list = (raw ?? "").split(",").map((e) => e.trim().toLowerCase())
     .filter(Boolean);
   return list.length ? [...new Set(list)] : [DEFAULT_QUOTE_SEND_APPROVER];
+}
+
+function isApprover(
+  auth: { caller: "server" | "user"; email: string | null },
+  deps: QuoteV2Deps,
+): boolean {
+  return auth.caller === "user" && !!auth.email &&
+    quoteSendApprovers(deps.env("QUOTE_V2_SEND_APPROVER_EMAILS")).includes(
+      auth.email,
+    );
+}
+
+/** Stamp every stated or adjustment sell in a draft payload with the
+ * verified approver, or refuse when the caller is not one. */
+function ownerSells<P extends Record<string, unknown>>(
+  payload: P,
+  auth: { caller: "server" | "user"; email: string | null },
+  deps: QuoteV2Deps,
+): { payload: P } | { response: Response } {
+  const lines = payload.lines;
+  if (!Array.isArray(lines)) return { payload };
+  const at = new Date().toISOString();
+  const out = [];
+  for (const line of lines) {
+    const sell = line && typeof line === "object"
+      ? (line as Record<string, unknown>).sell
+      : undefined;
+    const basis = sell && typeof sell === "object"
+      ? (sell as Record<string, unknown>).basis
+      : undefined;
+    if (basis !== "stated" && basis !== "adjustment") {
+      out.push(line);
+      continue;
+    }
+    if (!isApprover(auth, deps)) {
+      return {
+        response: refuse(
+          403,
+          "quote_sell_owner_only",
+          "A stated or adjustment sell is the owner's, from their own session.",
+        ),
+      };
+    }
+    out.push({
+      ...(line as Record<string, unknown>),
+      sell: {
+        ...(sell as Record<string, unknown>),
+        stated_by: auth.email,
+        stated_at: at,
+      },
+    });
+  }
+  return { payload: { ...payload, lines: out } };
 }
 
 const CORS = {
@@ -443,9 +500,12 @@ async function staff(
           "job_id and payload are required.",
         );
       }
+      const payload = body.payload as Record<string, unknown>;
+      const owned = ownerSells(payload, auth, deps);
+      if ("response" in owned) return owned.response;
       return await callStaff(deps, "quote_v2_create_draft", {
         p_job_id: body.job_id,
-        p_payload: body.payload,
+        p_payload: owned.payload,
         p_prepared_by: actor,
       });
     }
@@ -487,16 +547,28 @@ async function staff(
       });
     }
     case "issue_link": {
-      if (!id("revision_id") || !id("party_id")) {
+      if (!isApprover(auth, deps)) {
+        return refuse(
+          403,
+          "owner_stamp_required",
+          "Only the owner can issue a quote link, from their own session.",
+        );
+      }
+      if (
+        !id("revision_id") || !id("party_id") ||
+        typeof body.preview_hash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(body.preview_hash)
+      ) {
         return refuse(
           400,
           "link_body_invalid",
-          "revision_id and party_id are required.",
+          "revision_id, party_id and the stamped preview_hash are required.",
         );
       }
-      return await callStaff(deps, "quote_v2_issue_party_link", {
+      return await callStaff(deps, "quote_v2_issue_approved_party_link", {
         p_revision_id: body.revision_id,
         p_party_id: body.party_id,
+        p_preview_hash: body.preview_hash,
         p_issued_by: actor,
       });
     }
@@ -517,7 +589,7 @@ async function staff(
       });
     }
     case "build":
-      return await buildAction(body, actor, deps);
+      return await buildAction(body, actor, auth, deps);
     case "prepare_send":
       return await prepareSendAction(body, actor, deps);
     case "approve_send":
@@ -564,6 +636,7 @@ function refusalFrom(error: { message: string }): Response {
 async function buildAction(
   body: Record<string, unknown>,
   actor: string,
+  auth: { caller: "server" | "user"; email: string | null },
   deps: QuoteV2Deps,
 ): Promise<Response> {
   const jobId = typeof body.job_id === "string" && UUID_RE.test(body.job_id)
@@ -605,9 +678,11 @@ async function buildAction(
     if (e instanceof ScopeBuildError) return refuse(409, e.code, e.message);
     throw e;
   }
+  const owned = ownerSells(plan.payload, auth, deps);
+  if ("response" in owned) return owned.response;
   const { data, error } = await deps.rpc("quote_v2_build_draft", {
     p_job_id: jobId,
-    p_payload: plan.payload,
+    p_payload: owned.payload,
     p_markups: plan.markups,
     p_actor: actor,
     p_valid_until: validUntil ?? null,
@@ -778,12 +853,7 @@ async function approveSendAction(
 ): Promise<Response> {
   // The stamp is a person, never a key: a server secret cannot approve, and
   // the session's verified email must be on the approver list.
-  if (
-    auth.caller !== "user" || !auth.email ||
-    !quoteSendApprovers(deps.env("QUOTE_V2_SEND_APPROVER_EMAILS")).includes(
-      auth.email,
-    )
-  ) {
+  if (!isApprover(auth, deps)) {
     return refuse(
       403,
       "owner_stamp_required",
@@ -838,16 +908,30 @@ async function sendAction(
   if (pending.error) return refusalFrom(pending.error);
   const doFetch = deps.fetch ?? fetch;
   for (const row of (pending.data ?? []) as LiveOutboxRow[]) {
+    // Claimed before the provider call: a concurrent or retried send that
+    // loses the claim delivers nothing.
+    const claim = await deps.rpc("quote_v2_claim_delivery", {
+      p_outbox_id: row.id,
+    });
+    if (claim.error) return refusalFrom(claim.error);
+    if (claim.data !== true) continue;
     const outcome = await deliverLiveRow(row, {
       env: deps.env,
       fetch: doFetch,
     });
-    await deps.rpc("quote_v2_record_delivery", {
+    const recorded = await deps.rpc("quote_v2_record_delivery", {
       p_outbox_id: row.id,
       p_outcome: outcome.outcome,
       p_provider_message_id: outcome.provider_message_id ?? null,
       p_detail: outcome.detail ?? null,
     });
+    if (recorded.error) {
+      return refuse(
+        502,
+        "quote_delivery_unrecorded",
+        "A message was attempted but its outcome could not be recorded; it reads as unknown and is never retried. Nothing more was sent.",
+      );
+    }
   }
   const after = await deps.rpc("quote_v2_send_result", {
     p_send_id: result.send_id,

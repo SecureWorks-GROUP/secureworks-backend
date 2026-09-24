@@ -61,9 +61,19 @@ export interface LiveDeliveryDeps {
   fetch: typeof fetch;
 }
 
-/** Deliver one live row once. A thrown or timed-out call is `unknown`, which
- * is never retried automatically (the email carries an idempotency key, the
- * SMS cannot). Only reached when liveDeliveryGate allowed the preview. */
+/** A provider refusal is `failed`; a provider 5xx may still have delivered,
+ * so it is `unknown`. */
+function refused(what: string, status: number): DeliveryOutcome {
+  return {
+    outcome: status >= 500 ? "unknown" : "failed",
+    detail: `${what} provider ${status}`,
+  };
+}
+
+/** Deliver one claimed live row once. A thrown, timed-out or 5xx call is
+ * `unknown`; no outcome is retried automatically (the email carries an
+ * idempotency key, the SMS cannot). Only reached when liveDeliveryGate allowed
+ * the preview and the row was claimed. */
 export async function deliverLiveRow(
   row: LiveOutboxRow,
   deps: LiveDeliveryDeps,
@@ -92,9 +102,7 @@ export async function deliverLiveRow(
           text: row.body_text,
         }),
       });
-      if (!res.ok) {
-        return { outcome: "failed", detail: `email provider ${res.status}` };
-      }
+      if (!res.ok) return refused("email", res.status);
       const body = await res.json().catch(() => ({}));
       return { outcome: "delivered", provider_message_id: body?.id ?? null };
     }
@@ -122,9 +130,7 @@ export async function deliverLiveRow(
         }),
       },
     );
-    if (!res.ok) {
-      return { outcome: "failed", detail: `SMS provider ${res.status}` };
-    }
+    if (!res.ok) return refused("SMS", res.status);
     const body = await res.json().catch(() => ({}));
     return {
       outcome: "delivered",

@@ -197,7 +197,9 @@ async function buildAndSend(
   const timings: Record<string, number> = {};
   const t0 = performance.now();
   let t = performance.now();
-  const built = await jsonCall("POST", "?action=build", "jwt-khairo", {
+  // The three real quotes carry the owner's stated sells, so the owner's own
+  // session builds them; a scoper sending one is refused below.
+  const built = await jsonCall("POST", "?action=build", "jwt-owner", {
     job_id: jobId,
     ...scope,
     valid_until: validUntil,
@@ -555,6 +557,58 @@ check(
   "an unstamped preview does not send",
   unstamped.status === 409 && unstamped.code === "quote_send_not_approved",
   unstamped,
+);
+const forged = await jsonCall("POST", "?action=build", "jwt-khairo", {
+  job_id: GWELUP_JOB,
+  ...GWELUP,
+  valid_until: validUntil,
+});
+check(
+  "a scoper cannot send the owner's stated sells",
+  forged.status === 403 && forged.code === "quote_sell_owner_only",
+  forged,
+);
+const gwLines = ((await rpc("quote_v2_staff_revision", {
+  p_revision_id: gw.revision.revision_id,
+  // deno-lint-ignore no-explicit-any
+})).data as any).lines as any[];
+check(
+  "the owner's stated sells are recorded as the owner's verified session",
+  gwLines.every((l) => l.sell_basis !== "stated" || l.sell_stated_by === OWNER),
+  gwLines.map((l) => [l.line_key, l.sell_basis, l.sell_stated_by]),
+);
+const linkBody = {
+  revision_id: gw.revision.revision_id,
+  party_id: gw.parties[0].party_id,
+  preview_hash: gw.preview.preview_hash,
+};
+const scoperLink = await jsonCall(
+  "POST",
+  "?action=issue_link",
+  "jwt-khairo",
+  linkBody,
+);
+const ownerLink = await jsonCall(
+  "POST",
+  "?action=issue_link",
+  "jwt-owner",
+  linkBody,
+);
+const unstampedLink = await jsonCall(
+  "POST",
+  "?action=issue_link",
+  "jwt-owner",
+  {
+    ...linkBody,
+    preview_hash: "0".repeat(64),
+  },
+);
+check(
+  "a hand-issued link is the owner's, for a party a stamped send covers",
+  scoperLink.status === 403 && ownerLink.status === 200 &&
+    unstampedLink.status === 409 &&
+    unstampedLink.code === "quote_link_not_approved",
+  { scoperLink, ownerLink: ownerLink.status, unstampedLink },
 );
 const live = await jsonCall("POST", "?action=prepare_send", "jwt-khairo", {
   revision_id: kikoRev,
