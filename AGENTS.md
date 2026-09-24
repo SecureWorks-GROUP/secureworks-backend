@@ -3737,7 +3737,10 @@ and every transcript read of the history mode (`mode: backfill`, dry run unless
 transcribes call rows already stored (M4's `ghl-history-load` writes the past
 ones); it lists no GHL conversation and writes no call row, and both modes go
 through the one selection `context_transcript_due_calls(limit, history)`, whose
-history side reuses M4's `context_ghl_history_live_jobs()`. Measured 24 Sep 2026: GHL sometimes leaves
+history side reuses M4's `context_ghl_history_live_jobs()`. History is
+finished only when `context_transcript_history_pending()` is zero (due or
+waiting); the history run answers `more: true` until then, and the live cron
+also retries due backfill-mode pending calls of any age. Measured 24 Sep 2026: GHL sometimes leaves
 `meta.call.duration` empty on an answered call that has a transcript, so
 "completed with no duration" is eligible; a no-answer call's transcription
 answers HTTP 400; the list read names our line by number but the single-item

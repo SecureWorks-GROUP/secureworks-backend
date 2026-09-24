@@ -18,9 +18,8 @@
 --     5 min, 15 min, 1 h, 6 h, 24 h (six waits after the first six reads);
 --     the read after the last wait that still fails is terminal
 --     (not_returned for "no transcript yet", failed:<code> for a
---     provider or save error). A history-load read of a call older than 48 h
---     that finds no transcript is terminal at once (GHL will not produce one
---     later). A terminal outcome is never reopened. Terminal records older
+--     provider or save error). History reads use the same seven reads and
+--     waits. A terminal outcome is never reopened. Terminal records older
 --     than 30 days are purged by the writer.
 --  5. context_call_transcript_eligible(): whether a call is worth asking for
 --     a transcript, decided from the stored provider status and duration at
@@ -34,7 +33,11 @@
 --     outcome and next try due, oldest first. A call whose ghltx: transcript
 --     row already exists is returned too, so a run that crashed after saving
 --     records `saved` next run with no provider call.
---       live (history false): event_at in the last 14 days (review M11);
+--       live (history false): event_at in the last 14 days (review M11),
+--         plus any history call whose backfill fetch record is pending and
+--         due now, so its agreeing second read and its backoff retries run
+--         on the cron without an operator (capture mode stays the call
+--         row's, backfill);
 --       history (true): the past calls of the jobs that are live now (the
 --       owner, 24 Sep: "for call transcripts i need all the evidence of past
 --       jobs as well", "i just need it for the jobs that are currently
@@ -42,11 +45,15 @@
 --       in M4's context_ghl_history_live_jobs() (the one live-job definition),
 --       with that contact's live job numbers. The past call rows themselves
 --       are written by M4's history load and live capture; T2 only
---       transcribes them. The two modes never select the same call.
---  7. (no seventh object: T2 has no history load of its own.)
+--       transcribes them.
+--  7. context_transcript_history_pending(): how many history calls (the
+--     calls the history selection covers) still have a pending fetch record,
+--     due now or waiting, and the earliest next try. History is finished only
+--     when this is zero; the history run reports more while it is not.
 --  8. context_transcript_capture_status() replaces the F1b stub (X22): last
 --     run, due, saved, pending, not returned, failed by code, coverage by
---     line, oldest pending, aged_out_unfetched_24h, and the four alarms
+--     line, oldest pending, aged_out_unfetched_24h, pending history calls
+--     and their next try (outside the 14-day counts), and the four alarms
 --     transcript_fetch_stale, transcript_fetch_failing,
 --     transcript_coverage_low and transcript_aged_out, raised only while the
 --     capture lane and the fetch flag are on. Counts and codes only.
@@ -72,7 +79,7 @@
 --   automation_lane_enabled(text)         md5(prosrc) 818a13be854748e2d272bdd648c88b59
 --   sw_service_key()                      present
 --   context_ghl_history_live_jobs()       md5(prosrc) 49eb23015b724a29058c11b2743954bf (M4, 20260925031500; read, not replaced)
---   the seven new functions: absent; call_transcript_fetches: absent;
+--   the eight new functions: absent; call_transcript_fetches: absent;
 --   cron job ghl-call-transcript-fetch: absent; flag ghl_call_transcript_fetch_v1: no row
 -- The guard refuses unless each is still that pre-image or already this
 -- migration's result (a re-apply).
@@ -89,18 +96,19 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record; cmd text; cols text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_transcript_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','fce1a8f610ddf41a26cb097e9bae1171'],false),
+  ('public.context_transcript_capture_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','909bb8d371b00f49eb80fabf715e176c'],false),
   ('public.automation_switch_cron_lanes()',ARRAY['459035de5d3f7f7af49c36f09d9be29e','4f80b88d5c5ef6a49a6677f1a76d6350'],false),
   ('public.capture_business_event(jsonb)',ARRAY['4819869e6dcc40d5cd19a7eba295392c'],false),
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.context_business_minutes(timestamptz,timestamptz)',ARRAY['510dbec36291c25aa1887ade89e2ca4e'],false),
   ('public.automation_lane_enabled(text)',ARRAY['818a13be854748e2d272bdd648c88b59'],false),
-  ('public.context_transcript_capture_policy()',ARRAY['2d446e84a410eff5ed3ca75936db6079'],true),
+  ('public.context_transcript_capture_policy()',ARRAY['aa063d0d61ee4e4f4b296d5f1cc61a1b'],true),
   ('public.context_transcript_fetch_flag()',ARRAY['3cae5d15d6b1c00c4d94739fcf3b8744'],true),
   ('public.record_call_transcript_fetch(jsonb)',ARRAY['5b87c8022ac3caa71c7903590cca76f1'],true),
   ('public.context_call_transcript_eligible(text,text,jsonb)',ARRAY['cd3cb55ab8fa9359b744d3626f14ec6c'],true),
   ('public.context_ghl_history_live_jobs()',ARRAY['49eb23015b724a29058c11b2743954bf'],false),
-  ('public.context_transcript_due_calls(integer,boolean)',ARRAY['154a9926c0531d265aa8465c7f8f2a05'],true),
+  ('public.context_transcript_due_calls(integer,boolean)',ARRAY['0418205a3ffaa398965001a4b4fc8115'],true),
+  ('public.context_transcript_history_pending()',ARRAY['87c5b235cfc4ae10d10fed033356e801'],true),
   ('public.trigger_ghl_call_transcript_fetch()',ARRAY['0ec1769f5f45dff78a5de49f319286a6'],true)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
@@ -147,7 +155,6 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   -- Agreement rule (review M10): a call younger than this at read time is saved
   -- only when two reads at least agreement_minutes apart return the same words.
   'agreement_minutes',5,
-  -- History load: a read of a call older than this that finds nothing is final.
   -- Terminal fetch records older than this are purged by the writer.
   'purge_days',30,
   -- Alarms.
@@ -344,7 +351,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
    AND e.provider_message_id LIKE 'ghl:%'
    AND CASE WHEN coalesce(p_history,false)
     THEN e.event_at <= now()-make_interval(days=>(policy.p->>'window_days')::integer) AND lv.contact IS NOT NULL
-    ELSE e.event_at > now()-make_interval(days=>(policy.p->>'window_days')::integer) AND e.event_at <= now() END
+    ELSE (e.event_at > now()-make_interval(days=>(policy.p->>'window_days')::integer) AND e.event_at <= now())
+     OR e.id IN (SELECT b.call_event_id FROM public.call_transcript_fetches b
+      WHERE b.mode='backfill' AND b.outcome='pending' AND b.next_at<=now()) END
  )
  SELECT c.id, c.msg, c.event_type, c.event_at, c.contact_id, c.conversation_key, c.direction,
   c.payload->>'call_status',
@@ -362,7 +371,22 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
  LIMIT greatest(1,least(coalesce(p_limit,40),200))
 $$;
 COMMENT ON FUNCTION public.context_transcript_due_calls(integer,boolean) IS
- 'Calls due a transcript fetch now (transcripts slice T2): GHL call rows eligible from their stored status and duration, with no terminal fetch record and the next try due, oldest first; live: the last 14 days; history: older, on a GHL contact of a job live now (M4 context_ghl_history_live_jobs), with its live job numbers. A call whose transcript row already exists is included so the fetcher records it saved.';
+ 'Calls due a transcript fetch now (transcripts slice T2): GHL call rows eligible from their stored status and duration, with no terminal fetch record and the next try due, oldest first; live: the last 14 days, plus history calls whose backfill fetch record is pending and due now; history: older, on a GHL contact of a job live now (M4 context_ghl_history_live_jobs), with its live job numbers. A call whose transcript row already exists is included so the fetcher records it saved.';
+
+-- 7. History calls still pending: the calls the history selection covers
+-- (older than the live window, on a GHL contact of a job live now) whose
+-- fetch record is pending, due now or waiting for its next try.
+CREATE OR REPLACE FUNCTION public.context_transcript_history_pending() RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+ SELECT jsonb_build_object('pending',count(*),'next_due_at',min(f.next_at))
+ FROM public.call_transcript_fetches f
+ JOIN public.business_events e ON e.id=f.call_event_id
+ WHERE f.outcome='pending'
+  AND e.event_at <= now()-make_interval(days=>(public.context_transcript_capture_policy()->>'window_days')::integer)
+  AND e.contact_id IN (SELECT l.ghl_contact_id FROM public.context_ghl_history_live_jobs() l WHERE l.ghl_contact_id IS NOT NULL)
+$$;
+COMMENT ON FUNCTION public.context_transcript_history_pending() IS
+ 'History calls (transcripts slice T2) still unfinished: {pending, next_due_at} over the pending fetch records of the calls context_transcript_due_calls(history) covers, due now or waiting. History is finished only when pending is 0.';
 
 -- 8. The transcript_capture status block.
 CREATE OR REPLACE FUNCTION public.context_transcript_capture_status() RETURNS jsonb
@@ -382,6 +406,7 @@ DECLARE
  outcomes_24h jsonb; failed_by_code jsonb; saved_24h jsonb; last_saved timestamptz;
  cov_total integer; cov_saved integer; cov_by_line jsonb; aged_out integer;
  alarms jsonb:='[]'::jsonb; since timestamptz; quiet integer;
+ history_pending jsonb:=public.context_transcript_history_pending();
 BEGIN
  -- Runs (context_capture_runs, written only through record_capture_run).
  SELECT jsonb_build_object('run_id',c.id,'status',c.status,'started_at',c.started_at,'finished_at',c.finished_at,
@@ -484,7 +509,8 @@ BEGIN
    'attempts_24h',attempts_24h,'errors_24h',errors_24h),
   'backfill',jsonb_build_object('last_run',backfill_last),
   'calls',jsonb_build_object('due_now',coalesce(due,0),'never_tried',coalesce(unfetched,0),'pending',coalesce(pending,0),
-   'oldest_pending_at',oldest_pending,'aged_out_unfetched_24h',coalesce(aged_out,0)),
+   'oldest_pending_at',oldest_pending,'aged_out_unfetched_24h',coalesce(aged_out,0),
+   'pending_history',coalesce((history_pending->>'pending')::integer,0),'next_history_due_at',history_pending->'next_due_at'),
   'outcomes_24h',outcomes_24h,'failed_by_code_24h',failed_by_code,'saved_rows_24h',saved_24h,'last_saved_at',last_saved,
   'coverage_24h',jsonb_build_object('eligible',coalesce(cov_total,0),'with_transcript',coalesce(cov_saved,0),'by_line',cov_by_line),
   -- A transcript placed on a different job from a direct tool call is the
@@ -493,7 +519,7 @@ BEGIN
   'alarms',alarms);
 END $$;
 COMMENT ON FUNCTION public.context_transcript_capture_status() IS
- 'Status block transcript_capture (transcripts slice T2): fetch flag, capture lane, the fetcher''s runs, calls due and pending, outcomes, coverage by line, aged-out calls, and the alarms transcript_fetch_stale, transcript_fetch_failing, transcript_coverage_low, transcript_aged_out. Counts and codes only, never words.';
+ 'Status block transcript_capture (transcripts slice T2): fetch flag, capture lane, the fetcher''s runs, calls due and pending, pending history calls, outcomes, coverage by line, aged-out calls, and the alarms transcript_fetch_stale, transcript_fetch_failing, transcript_coverage_low, transcript_aged_out. Counts and codes only, never words.';
 
 -- 9. The cron caller. Idle while the fetch flag is off: no HTTP call at all.
 CREATE OR REPLACE FUNCTION public.trigger_ghl_call_transcript_fetch() RETURNS void
@@ -546,11 +572,11 @@ END $cron$;
 -- 11. Grants. Service-side only.
 REVOKE ALL ON FUNCTION public.context_transcript_capture_policy(),public.context_transcript_fetch_flag(),
  public.record_call_transcript_fetch(jsonb),public.context_call_transcript_eligible(text,text,jsonb),
- public.context_transcript_due_calls(integer,boolean),
+ public.context_transcript_due_calls(integer,boolean),public.context_transcript_history_pending(),
  public.context_transcript_capture_status(),public.trigger_ghl_call_transcript_fetch() FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_transcript_capture_policy(),public.context_transcript_fetch_flag(),
  public.record_call_transcript_fetch(jsonb),public.context_call_transcript_eligible(text,text,jsonb),
- public.context_transcript_due_calls(integer,boolean),
+ public.context_transcript_due_calls(integer,boolean),public.context_transcript_history_pending(),
  public.context_transcript_capture_status() TO service_role;
 GRANT EXECUTE ON FUNCTION public.trigger_ghl_call_transcript_fetch() TO postgres;
 REVOKE ALL ON FUNCTION public.automation_switch_cron_lanes() FROM PUBLIC, anon, authenticated;

@@ -205,4 +205,30 @@ Deno.test("the history selection asks the one due-call selection in history mode
     Error,
     "history_calls_unreadable",
   );
+  await assertRejects(
+    () => failing.historyPending(),
+    Error,
+    "history_pending_unreadable",
+  );
+});
+
+Deno.test("the pending history count is read from the one database definition", async () => {
+  const asked: unknown[] = [];
+  const d = liveDeps({
+    env: () => undefined,
+    createSupabase: () => ({
+      rpc: (name: string, args: unknown) => {
+        asked.push([name, args]);
+        return Promise.resolve({
+          data: { pending: 3, next_due_at: "2026-09-24T05:05:00+00:00" },
+          error: null,
+        });
+      },
+    }),
+  });
+  assertEquals(await d.historyPending(), {
+    pending: 3,
+    next_due_at: "2026-09-24T05:05:00+00:00",
+  });
+  assertEquals(asked, [["context_transcript_history_pending", undefined]]);
 });

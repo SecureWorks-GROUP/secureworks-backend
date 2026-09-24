@@ -12,8 +12,9 @@
 //     foreground and returns the summary (ids, counts and codes only).
 //   * the history mode, by hand: {"mode": "backfill", "dry_run": true|false,
 //     "max_calls": 40}. Always foreground. dry_run defaults to true: only an
-//     explicit false writes. Run it again while it answers more: true, and
-//     again 5 minutes later so the agreement rule's second read can save.
+//     explicit false writes. It answers more: true while any history call is
+//     still pending (pending_history, next_due_at); the live cron takes their
+//     second agreeing read and retries, so run it again for new pages.
 //
 // GHL reads: the call item (API version 2021-07-28) and its transcription
 // (v3), each bound to our configured location; a provider error body is never
@@ -247,6 +248,25 @@ export function liveDeps(deps: HandlerDeps): BackfillDeps {
       }
       return (data ?? []) as DueCall[];
     },
+    async historyPending() {
+      const { data, error } = await supabase.rpc(
+        "context_transcript_history_pending",
+      );
+      if (
+        error || !data || typeof data !== "object" ||
+        typeof data.pending !== "number"
+      ) {
+        throw Object.assign(new Error("history_pending_unreadable"), {
+          code: "history_pending_unreadable",
+        });
+      }
+      return {
+        pending: data.pending,
+        next_due_at: typeof data.next_due_at === "string"
+          ? data.next_due_at
+          : null,
+      };
+    },
   };
 }
 
@@ -271,7 +291,9 @@ function logBackfill(result: BackfillResult): void {
         result.run_id ?? "-"
       } status=${result.status} error=${
         result.error_code ?? "-"
-      } selected=${c.selected} saved=${c.saved} awaiting=${c.awaiting_agreement} would_fetch=${c.would_fetch} more=${result.more}`,
+      } selected=${c.selected} saved=${c.saved} awaiting=${c.awaiting_agreement} would_fetch=${c.would_fetch} more=${result.more} pending_history=${
+        result.pending_history ?? "-"
+      }`,
     );
   } else {
     console.log(

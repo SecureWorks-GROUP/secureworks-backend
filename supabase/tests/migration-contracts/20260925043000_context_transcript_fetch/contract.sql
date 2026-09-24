@@ -29,14 +29,14 @@ DECLARE f regprocedure;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_transcript_capture_policy()','public.context_transcript_fetch_flag()',
   'public.record_call_transcript_fetch(jsonb)','public.context_call_transcript_eligible(text,text,jsonb)',
-  'public.context_transcript_due_calls(integer,boolean)',
+  'public.context_transcript_due_calls(integer,boolean)','public.context_transcript_history_pending()',
   'public.context_transcript_capture_status()','public.trigger_ghl_call_transcript_fetch()','public.automation_switch_cron_lanes()']::regprocedure[] LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') OR has_function_privilege('public',f,'EXECUTE')
   THEN RAISE EXCEPTION 't2 public execute on %',f; END IF;
   IF (SELECT proconfig FROM pg_proc WHERE oid=f) IS NULL THEN RAISE EXCEPTION 't2 % has no fixed search_path',f; END IF;
  END LOOP;
  FOREACH f IN ARRAY ARRAY['public.context_transcript_fetch_flag()','public.record_call_transcript_fetch(jsonb)',
-  'public.context_transcript_due_calls(integer,boolean)',
+  'public.context_transcript_due_calls(integer,boolean)','public.context_transcript_history_pending()',
   'public.context_transcript_capture_status()','public.trigger_ghl_call_transcript_fetch()']::regprocedure[] LOOP
   IF NOT (SELECT prosecdef FROM pg_proc WHERE oid=f) THEN RAISE EXCEPTION 't2 % must be SECURITY DEFINER',f; END IF;
  END LOOP;
@@ -305,6 +305,34 @@ BEGIN
   'result','awaiting_agreement','sentences',130,'digest',repeat('b',64)));
  SELECT string_agg(d.call_message_id,' ') INTO got FROM public.context_transcript_due_calls(40,true) d;
  IF got IS DISTINCT FROM 'Ag9DKkqpfsadWkJS8jst' THEN RAISE EXCEPTION 't2 history next_at %',got; END IF;
+ -- ...but history is not finished while it waits: it is counted, with its next try.
+ IF (public.context_transcript_history_pending()->>'pending')::integer<>1
+  OR (public.context_transcript_history_pending()->>'next_due_at')::timestamptz
+     IS DISTINCT FROM (SELECT next_at FROM public.call_transcript_fetches WHERE call_message_id='bJNGSorrVRMHxehZtQHT')
+ THEN RAISE EXCEPTION 't2 history pending %',public.context_transcript_history_pending(); END IF;
+ IF (SELECT s#>>'{calls,pending_history}' FROM public.context_transcript_capture_status() s)<>'1'
+  OR (SELECT s#>>'{calls,pending}' FROM public.context_transcript_capture_status() s)<>'0'
+ THEN RAISE EXCEPTION 't2 status pending history %',public.context_transcript_capture_status()->'calls'; END IF;
+ -- The live cron is not offered it early either.
+ SELECT string_agg(d.call_message_id,' ') INTO got FROM public.context_transcript_due_calls(40,false) d;
+ IF got IS DISTINCT FROM '6kn6WmrtfTMvhEJtmfeJ' THEN RAISE EXCEPTION 't2 live before history next_at %',got; END IF;
+ -- Once its next try is due, the live cron takes it too (oldest first), with
+ -- the call row's backfill capture mode; an old call with a LIVE-mode pending
+ -- record is still not the live run's.
+ UPDATE public.call_transcript_fetches SET next_at=now()-interval '1 minute' WHERE call_message_id='bJNGSorrVRMHxehZtQHT';
+ SELECT id INTO e FROM public.business_events WHERE provider_message_id='ghl:Ag9DKkqpfsadWkJS8jst';
+ PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','Ag9DKkqpfsadWkJS8jst','call_event_id',e,'result','not_ready','code','empty'));
+ UPDATE public.call_transcript_fetches SET next_at=now()-interval '1 minute' WHERE call_message_id='Ag9DKkqpfsadWkJS8jst';
+ UPDATE public.business_events SET metadata='{"capture_mode":"backfill"}' WHERE provider_message_id='ghl:bJNGSorrVRMHxehZtQHT';
+ SELECT string_agg(d.call_message_id||':'||d.capture_mode,' ' ORDER BY d.event_at) INTO got FROM public.context_transcript_due_calls(40,false) d;
+ IF got IS DISTINCT FROM 'bJNGSorrVRMHxehZtQHT:backfill 6kn6WmrtfTMvhEJtmfeJ:live' THEN RAISE EXCEPTION 't2 live retries due history %',got; END IF;
+ IF (public.context_transcript_history_pending()->>'pending')::integer<>2 THEN RAISE EXCEPTION 't2 history pending both %',public.context_transcript_history_pending(); END IF;
+ -- A finished history call is no longer pending.
+ PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','bJNGSorrVRMHxehZtQHT','call_event_id',
+  (SELECT id FROM public.business_events WHERE provider_message_id='ghl:bJNGSorrVRMHxehZtQHT'),'result','not_expected','code','provider_too_short'));
+ PERFORM pg_temp.t2_rec(jsonb_build_object('call_message_id','Ag9DKkqpfsadWkJS8jst','call_event_id',e,'result','not_expected','code','provider_too_short'));
+ IF public.context_transcript_history_pending()<>'{"pending":0,"next_due_at":null}'::jsonb
+ THEN RAISE EXCEPTION 't2 history finished %',public.context_transcript_history_pending(); END IF;
 END $$;
 ROLLBACK;
 
@@ -326,6 +354,7 @@ BEGIN
  IF s->'fetch_flag'<>'{"enabled":false,"state":"missing","updated_at":null}'::jsonb THEN RAISE EXCEPTION 't2 flag %',s->'fetch_flag'; END IF;
  IF s->'alarms'<>'[]'::jsonb THEN RAISE EXCEPTION 't2 flag off must raise no alarm %',s->'alarms'; END IF;
  IF s#>>'{calls,due_now}'<>'5' OR s#>>'{calls,never_tried}'<>'5' OR s#>>'{calls,aged_out_unfetched_24h}'<>'1'
+  OR s#>>'{calls,pending_history}'<>'0' OR s#>'{calls,next_history_due_at}'<>'null'::jsonb
  THEN RAISE EXCEPTION 't2 calls %',s->'calls'; END IF;
  IF s#>>'{coverage_24h,eligible}'<>'5' OR s#>>'{coverage_24h,with_transcript}'<>'1'
   OR s#>'{coverage_24h,by_line,772}'<>'{"eligible":1,"with_transcript":0}'::jsonb

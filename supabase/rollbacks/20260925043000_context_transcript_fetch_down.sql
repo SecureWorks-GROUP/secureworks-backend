@@ -23,7 +23,7 @@ BEGIN
  IF coalesce((public.context_transcript_fetch_flag()->>'enabled')::boolean,false) THEN
   RAISE EXCEPTION 't2_rollback_refused: feature flag ghl_call_transcript_fetch_v1 is on; turn it off first';
  END IF;
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_transcript_capture_status()')) NOT IN ('fce1a8f610ddf41a26cb097e9bae1171','155104bfb08b8b3c2f98bdec089d4ee4')
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_transcript_capture_status()')) NOT IN ('909bb8d371b00f49eb80fabf715e176c','155104bfb08b8b3c2f98bdec089d4ee4')
  THEN RAISE EXCEPTION 't2_rollback_refused: context_transcript_capture_status is no longer the T2 body; roll back its later owner first'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()')) NOT IN ('4f80b88d5c5ef6a49a6677f1a76d6350','459035de5d3f7f7af49c36f09d9be29e')
  THEN RAISE EXCEPTION 't2_rollback_refused: automation_switch_cron_lanes is no longer the T2 body; roll back its later owner first'; END IF;
@@ -55,6 +55,7 @@ AS $fn$
 $fn$;
 
 DROP FUNCTION IF EXISTS public.trigger_ghl_call_transcript_fetch();
+DROP FUNCTION IF EXISTS public.context_transcript_history_pending();
 DROP FUNCTION IF EXISTS public.context_transcript_due_calls(integer,boolean);
 DROP FUNCTION IF EXISTS public.context_call_transcript_eligible(text,text,jsonb);
 DROP FUNCTION IF EXISTS public.record_call_transcript_fetch(jsonb);

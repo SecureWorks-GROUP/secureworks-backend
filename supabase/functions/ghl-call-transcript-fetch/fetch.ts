@@ -12,7 +12,8 @@
 // Two modes over one per-call step (processCall):
 //
 //  * live (every 5 minutes, pg_cron): the calls due now, from
-//    context_transcript_due_calls (last 14 days, eligible from the stored
+//    context_transcript_due_calls (last 14 days, plus any history call whose
+//    backfill fetch record is pending and due, eligible from the stored
 //    status and duration, no terminal outcome, next try due, oldest first,
 //    40 a run). Idle, with no provider read and no run row, while the fetch
 //    flag ghl_call_transcript_fetch_v1 or the capture lane is off.
@@ -25,8 +26,8 @@
 //    reconciler); this mode only transcribes them. It takes the call rows of
 //    live-job contacts (M4's context_ghl_history_live_jobs, the one live-job
 //    definition) older than the live 14-day window, through the same
-//    selection as the live run (context_transcript_due_calls, history mode),
-//    so the two modes never contest a call. It lists no GHL conversation and
+//    selection as the live run (context_transcript_due_calls, history mode).
+//    It lists no GHL conversation and
 //    writes no call row. Every transcript it saves is capture mode backfill,
 //    so a past call never wakes an extraction read. dry_run is the default: a
 //    dry run writes nothing at all (no transcript, no fetch record, no run
@@ -34,8 +35,12 @@
 //    lists the calls it would fetch, would_fetch). A real run needs the fetch
 //    flag and the capture lane on, like the live fetcher: transcripts are the
 //    most sensitive rows (transcripts.md §13, G-ANON). The agreement rule and
-//    the backoff are the live ones, so a call is saved on a later history run
-//    once two reads agree; run it again until it reports nothing left.
+//    the backoff are the live ones, so a call is saved once two reads agree;
+//    the live cron also takes due pending history calls, so their second read
+//    and retries need no operator. History is finished only when no history
+//    call is pending at all (context_transcript_history_pending, due or
+//    waiting): the run reports more, pending_history and next_due_at until
+//    then.
 //
 // Per call (processCall):
 //  1. A call whose ghltx: row already exists (a crashed run, the other mode)
@@ -178,6 +183,14 @@ export interface FetchDeps {
 export interface BackfillDeps extends FetchDeps {
   /** context_transcript_due_calls in history mode. Throws when unreadable. */
   historyCalls(limit: number): Promise<DueCall[]>;
+  /** context_transcript_history_pending. Throws when unreadable. */
+  historyPending(): Promise<HistoryPending>;
+}
+
+/** History calls still unfinished: pending fetch records, due or waiting. */
+export interface HistoryPending {
+  pending: number;
+  next_due_at: string | null;
 }
 
 function text(value: unknown): string | null {
@@ -667,8 +680,16 @@ export type BackfillResult =
     run_id: string | null;
     status: "succeeded" | "partial" | "failed";
     error_code: string | null;
-    /** True when the selection filled the page: run again for the rest. */
+    /**
+     * True while history is unfinished: the selection filled the page, the
+     * run stopped early, or a history call is still pending (unknown counts
+     * as unfinished).
+     */
     more: boolean;
+    /** History calls with a pending fetch record after this run; null if unreadable. */
+    pending_history: number | null;
+    /** The earliest next try among them. */
+    next_due_at: string | null;
     counts: Record<string, number>;
     calls: BackfillCallReport[];
   };
@@ -759,6 +780,16 @@ export async function runBackfill(
     status = "partial";
     errorCode = "record_failed";
   }
+  let pending: HistoryPending | null = null;
+  try {
+    pending = await deps.historyPending();
+  } catch {
+    if (status !== "failed") {
+      status = "partial";
+      errorCode = errorCode ?? "history_pending_unreadable";
+    }
+  }
+  if (!pending || pending.pending > 0) more = true;
   if (runId) {
     await deps.recordRun({
       run_id: runId,
@@ -775,6 +806,8 @@ export async function runBackfill(
     status,
     error_code: errorCode,
     more,
+    pending_history: pending?.pending ?? null,
+    next_due_at: pending?.next_due_at ?? null,
     counts,
     calls,
   };

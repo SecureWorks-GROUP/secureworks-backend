@@ -164,6 +164,17 @@ function deps(w: World): BackfillDeps {
       return Promise.resolve({ outcome: record.result });
     },
     historyCalls: (limit) => Promise.resolve(w.history.slice(0, limit)),
+    historyPending: () => {
+      const waiting = w.history
+        .map((c) => w.outcomes.get(c.call_message_id))
+        .filter((o) => o?.outcome === "pending")
+        .map((o) => o!.next_at)
+        .sort();
+      return Promise.resolve({
+        pending: waiting.length,
+        next_due_at: waiting[0] ?? null,
+      });
+    },
   };
 }
 
@@ -691,6 +702,50 @@ Deno.test("history: a full page says more; the time budget stops early and says 
     true,
     1,
   ]);
+});
+
+Deno.test("history: 30 calls under the page size, every first read awaiting agreement, is not finished: more with the pending count and next try", async () => {
+  const w = history();
+  const call = w.history[0];
+  w.history = Array.from({ length: 30 }, (_, i) => {
+    const id = `histCall${String(i).padStart(4, "0")}`;
+    w.items.set(id, { ...N4.item, id });
+    w.transcripts.set(id, ok(N4.sentences));
+    return { ...call, call_message_id: id, call_event_id: `call-${id}` };
+  });
+  const result = await runBackfill({ dryRun: false, maxCalls: 40 }, deps(w));
+  assert(result.outcome === "ran");
+  assertEquals(result.counts.selected, 30);
+  assertEquals(result.counts.awaiting_agreement, 30);
+  assertEquals(result.counts.saved, 0);
+  assertEquals(
+    [result.more, result.pending_history, result.next_due_at],
+    [true, 30, new Date(w.now + 5 * 60_000).toISOString()],
+  );
+  // Once every history call is finished, the run says so.
+  w.history = [];
+  const done = await runBackfill({ dryRun: false, maxCalls: 40 }, deps(w));
+  assert(done.outcome === "ran");
+  assertEquals([done.more, done.pending_history, done.next_due_at], [
+    false,
+    0,
+    null,
+  ]);
+});
+
+Deno.test("history: an unreadable pending count is not finished", async () => {
+  const w = history({ flag: false });
+  const d = deps(w);
+  d.historyPending = () =>
+    Promise.reject(
+      Object.assign(new Error("x"), { code: "history_pending_unreadable" }),
+    );
+  const result = await runBackfill({ dryRun: true, maxCalls: 40 }, d);
+  assert(result.outcome === "ran");
+  assertEquals(
+    [result.status, result.error_code, result.more, result.pending_history],
+    ["partial", "history_pending_unreadable", true, null],
+  );
 });
 
 Deno.test("history: an unreadable selection fails the run with a code", async () => {
