@@ -51,16 +51,19 @@ Catch-up (`20260924220000`): `catchup` reports the one-time catch-up list
 (`context_catchup_jobs`, written only by the service-role
 `context_catchup_request(dry_run default true)`, which picks by rule: live jobs,
 meaning accepted, scheduled, in progress, or quoted in the last 60 days, not
-held, with placed worded evidence and no done read since `live_since`; priority
+held, with readable placed worded evidence (`context_captured_at` present and
+`written_as` service-role or absent) and no done read since `live_since`; priority
 1 when something is unread, else 2; the dry run returns the counts by priority,
 the exclusions and the job list without writing): `requested`, `done`,
 `remaining` (and per priority), `due_now`, `remaining_nothing_to_read` (listed
 but nothing to read), `oldest_requested_at` and `last_done_at`. A listed job gets one fresh full read: until it is done, its pending rows
-(`context_catchup_pending_rows`: every placed, worded row no catch-up read has
-covered, earlier receipts or not) make it due from its request time whatever
+(`context_catchup_pending_rows`: every readable, placed, worded row no catch-up
+read has covered, earlier receipts or not) make it due from its request time whatever
 `live_since` says, and they are its batch (never flagged older context). Every
-cap, cooldown and hold still applies, jobs due on live evidence are read first,
-and a job completes only when a `done` run leaves it nothing pending (a job with
+cap, cooldown and hold still applies. Live reads keep precedence over
+catch-up-only work; catch-up priority orders the catch-up-only work, and a live
+read of a listed job also counts as its catch-up read. A job completes only when a
+`done` run leaves it nothing pending (a job with
 more than one batch takes several runs). A job due only by catch-up never raises
 `cadence_breach`.
 

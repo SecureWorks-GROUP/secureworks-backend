@@ -12,9 +12,9 @@
 --                             writes (a BEFORE INSERT trigger, so a row that
 --                             already had a receipt is recorded too).
 --   context_catchup_pending_rows  a listed, not-yet-done job's rows still to
---                             read: every placed, worded, service-role row on
---                             the job that no catch-up read has covered,
---                             earlier receipts or not.
+--                             read: every readable, placed, worded row on the
+--                             job that no catch-up read has covered, earlier
+--                             receipts or not.
 --   context_catchup_request   the one writer of the list (service role),
 --                             chosen over a migration seed so the set is
 --                             measured at the moment it runs: live jobs with
@@ -29,9 +29,11 @@
 --                             the daily run limit, pacing (300 before 12:00)
 --                             and the 400-call cap apply unchanged.
 --   context_cadence_pool      listed, not-yet-done jobs join the pool.
---   context_extraction_candidates  jobs due on live evidence keep K1's order
---                             and come first; jobs due only by catch-up follow,
---                             priority 1 before 2. Same signature and cap.
+--   context_extraction_candidates  live reads keep precedence over
+--                             catch-up-only work; catch-up priority orders the
+--                             catch-up-only work; a live read of a listed job
+--                             also counts as its catch-up read. Same signature
+--                             and cap.
 --   context_extraction_events for a listed, not-yet-done job the batch is
 --                             drawn from its pending rows instead of its unread
 --                             rows; same 25-row batch, order and exact rows.
@@ -70,7 +72,7 @@ BEGIN
   ('public.context_cadence_status()',ARRAY['04a99b46fbdf6b6ac830602da6a92c3d','552d7971757d43624ec3667e3dc1fb99'],false),
   ('public.context_extraction_events(uuid,integer)',ARRAY['b808f4b6fb24515a337c149a6353edf8','68f6da2aac47cae91aa62a0420402d74'],false),
   ('public.context_extraction_event_flags(uuid,uuid[])',ARRAY['c384d748eca9b3b94ba6e54b26b781e5','5aedb3e5a7aa3286145079032e8e22f8'],false),
-  ('public.context_catchup_request(boolean)',ARRAY['00e528957da6f35f40b478db61dddaca'],true),
+  ('public.context_catchup_request(boolean)',ARRAY['00e528957da6f35f40b478db61dddaca','0c2ee37eb1cf37ee854210cc1d71871a'],true),
   ('public.context_catchup_pending_rows(uuid[])',ARRAY['a0e09f635eff10a48fa51b40aef5bafd'],true),
   ('public.context_catchup_record_read()',ARRAY['5420a6486bee3e03501200008aca6053'],true),
   ('public.context_catchup_mark_done()',ARRAY['f52e823ab347b0983bb561bcb951514d'],true)
@@ -155,8 +157,8 @@ CREATE TRIGGER context_catchup_record_read BEFORE INSERT ON public.context_extra
 --   live      status accepted, scheduled or in_progress (make-safe included),
 --             or quoted with quoted_at within the last 60 days; not a holding
 --             job (context_job_extractable);
---   evidence  at least one placed, worded business_events row on the job (a
---             row the extraction read could see);
+--   evidence  at least one readable, placed, worded business_events row on
+--             the job;
 --   stale     no extraction run finished done at or after live_since.
 -- Priority 1: something still unread (context_unread_rows, the one unread
 -- definition). Priority 2: the rest.
@@ -177,6 +179,8 @@ BEGIN
  ), facts AS (
   SELECT l.*,
    EXISTS(SELECT 1 FROM public.business_events e WHERE e.job_id=l.id AND public.context_linked_status(e.attribution_status)
+    AND e.context_captured_at IS NOT NULL
+    AND coalesce(e.metadata->>'written_as','service_role')='service_role'
     AND btrim(public.context_event_text(e))<>'') AS has_evidence,
    (SELECT max(r.finished_at) FROM public.context_extraction_runs r WHERE r.job_id=l.id AND r.phase='extraction' AND r.status='done') AS last_read,
    EXISTS(SELECT 1 FROM public.context_unread_rows(ARRAY[l.id])) AS has_unread
@@ -334,9 +338,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT c.job_id FROM public.context_catchup_jobs c WHERE c.done_at IS NULL
 $$;
 
--- 6. Due jobs, same signature: jobs due on live evidence first in K1's order
--- (fewest runs today, then oldest waking evidence); then jobs due only by
--- catch-up, priority 1 before 2, oldest unread first.
+-- 6. Live reads keep precedence over catch-up-only work. Catch-up priority
+-- orders the catch-up-only work; a live read of a listed job also counts as
+-- its catch-up read.
 CREATE OR REPLACE FUNCTION public.context_extraction_candidates(p_limit integer DEFAULT 400) RETURNS TABLE(job_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  WITH lane AS (SELECT public.automation_lane_enabled('extraction') AS enabled),

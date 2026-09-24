@@ -104,7 +104,8 @@ END $$;
 -- never lowers a priority, and leaves a done job done.
 BEGIN;
 DO $$
-DECLARE a uuid; b uuid; c uuid; i uuid; f uuid; h uuid; late uuid; r jsonb; w jsonb; mine jsonb; want jsonb;
+DECLARE a uuid; b uuid; c uuid; i uuid; f uuid; h uuid; uncaptured uuid; untrusted uuid;
+ r jsonb; w jsonb; mine jsonb; want jsonb;
 BEGIN
  PERFORM pg_temp.cu_policy();
  DELETE FROM public.context_catchup_jobs;
@@ -122,11 +123,25 @@ BEGIN
  -- live_since; not live; holding job.
  PERFORM pg_temp.cu_ev(pg_temp.cu_job('CU-OLDQUOTE','{}','quoted','fencing','90 days'),'client.sms_in','Old text','12 days');
  PERFORM pg_temp.cu_ev(pg_temp.cu_job('CU-EMPTY'),'job.status_changed','','12 days');
+ uncaptured:=pg_temp.cu_job('CU-UNCAPTURED');
+ PERFORM pg_temp.cu_ev(uncaptured,'client.sms_in','Worded but not captured','12 days');
+ UPDATE public.business_events SET context_captured_at=NULL WHERE job_id=uncaptured;
+ untrusted:=pg_temp.cu_job('CU-UNTRUSTED');
+ PERFORM pg_temp.cu_ev(untrusted,'client.sms_in','Worded but not service-written','12 days');
+ UPDATE public.business_events SET metadata=jsonb_set(coalesce(metadata,'{}'::jsonb),'{written_as}','"authenticated"'::jsonb,true)
+  WHERE job_id=untrusted;
  f:=pg_temp.cu_job('CU-FRESH'); PERFORM pg_temp.cu_ev(f,'client.sms_in','Old text','12 days'); PERFORM pg_temp.cu_read(f,'2 days');
  PERFORM pg_temp.cu_ev(pg_temp.cu_job('CU-DONEJOB','{}','completed'),'client.sms_in','Old text','12 days');
  h:=pg_temp.cu_job('CU-HELD','{"do_not_schedule":true}'); PERFORM pg_temp.cu_ev(h,'client.sms_in','Old text','12 days');
  IF (SELECT attribution_status FROM public.business_events WHERE job_id=(SELECT id FROM public.jobs WHERE job_number='CU-EMPTY'))<>'empty'
  THEN RAISE EXCEPTION 'catch-up fixture: wordless row has words'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.business_events e WHERE e.job_id=uncaptured
+   AND public.context_linked_status(e.attribution_status) AND e.context_captured_at IS NULL
+   AND btrim(public.context_event_text(e))<>'')
+  OR NOT EXISTS(SELECT 1 FROM public.business_events e WHERE e.job_id=untrusted
+   AND public.context_linked_status(e.attribution_status) AND e.context_captured_at IS NOT NULL
+   AND e.metadata->>'written_as'='authenticated' AND btrim(public.context_event_text(e))<>'')
+ THEN RAISE EXCEPTION 'catch-up fixture: expected ineligible rows with linked text'; END IF;
 
  r:=public.context_catchup_request();
  IF (r->>'dry_run')::boolean IS DISTINCT FROM true OR r->'written' IS DISTINCT FROM 'null'::jsonb OR EXISTS(SELECT 1 FROM public.context_catchup_jobs)
@@ -135,6 +150,8 @@ BEGIN
   FROM jsonb_array_elements(r->'jobs') x WHERE x->>'job_number' LIKE 'CU-%';
  want:='{"CU-A":1,"CU-B":2,"CU-C":1,"CU-I":1}';
  IF mine IS DISTINCT FROM want THEN RAISE EXCEPTION 'catch-up picked % want %',mine,want; END IF;
+ IF EXISTS(SELECT 1 FROM jsonb_array_elements(r->'jobs') x WHERE x->>'job_number' IN ('CU-UNCAPTURED','CU-UNTRUSTED'))
+ THEN RAISE EXCEPTION 'catch-up selected worded evidence the pending reader cannot read %',r; END IF;
  IF (r->>'candidates')::int<>jsonb_array_length(r->'jobs')
   OR (r->'by_priority'->>'1')::int+(r->'by_priority'->>'2')::int<>(r->>'candidates')::int
   OR r ? 'by_group' OR (r->'jobs'->0) ? 'group'
@@ -267,8 +284,9 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- 5. Order: jobs due on live evidence first in K1's order, then catch-up
--- priority 1, then priority 2.
+-- 5. Live reads keep precedence over catch-up-only work. Catch-up priority
+-- orders the catch-up-only work; a live read of a listed job also counts as
+-- its catch-up read.
 BEGIN;
 DO $$
 DECLARE p2 uuid; p1 uuid; live_job uuid; got uuid[];
