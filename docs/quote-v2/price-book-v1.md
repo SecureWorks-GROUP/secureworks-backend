@@ -26,7 +26,7 @@ markup of what we want."
 | `price_book_costs` | cost ex GST per item unit, supplier and code, the stock length it was for (`per_length_mm`), as-at date, evidence, provisional or blessed |
 | `price_book_stock_lengths` | lengths a supplier sells an item in (mm, ascending) |
 | `price_book_cut_rules` | `one_per_stick`, `nest` (with saw kerf) or `cut_to_size` |
-| `price_book_markup_rules` | family default (category null) or family + category: markup multiplier or margin |
+| `price_book_markup_rules` | one markup multiplier default per family |
 | `price_book_allowances` | job-family allowances: flashing by girth band per metre, per m2 of girth, fixings per m2, sundries per job |
 | `price_book_proposals`, `price_book_proposal_decisions` | a proposed change (old vs new, who proposed) and its decision |
 | `price_book_approvers` | who may approve, by scope (any, family, supplier, target). Seeded empty: who approves is an open owner call. |
@@ -57,7 +57,7 @@ A provisional row newer than the blessed current row is returned as
 evidence. Stock lengths follow the current cost's supplier when that supplier
 has a list.
 
-`price_book_current_markup(family, category?)`, `price_book_line_markup(...)`
+`price_book_current_markup(family)`, `price_book_line_markup(...)`
 (the line override, else the default, and which one it used) and
 `price_book_current_allowances(family?)` follow the same blessed-first rule.
 
@@ -99,7 +99,7 @@ public `SW_API_KEY` are refused). Deploy with JWT verification on.
 | Call | Returns |
 |---|---|
 | `GET ?action=current[&item_keys=a,b][&family=]` | current cost per item, counts by status, unknown keys named |
-| `GET ?action=markup&family=[&category=]` | default markup |
+| `GET ?action=markup&family=` | default markup |
 | `GET ?action=allowances[&family=]` | current allowances |
 | `POST ?action=cut {item_key, pieces, stock_lengths_mm?, rule?}` | order lengths and waste from the item's stock list and cut rule, costed when the item is priced per metre |
 

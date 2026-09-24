@@ -7,8 +7,8 @@
 //        Current cost per item: blessed, else strongest-evidence provisional,
 //        else `unpriced` (never a silent $0). Stock lengths and cut rule ride
 //        along. SQL: price_book_current_costs.
-//   GET  ?action=markup&family=patio[&category=steel]
-//        Default markup for a family (or family + category). SQL:
+//   GET  ?action=markup&family=patio
+//        Default markup for a family. SQL:
 //        price_book_current_markup. A scoper's per-line override lives on the
 //        quote line (quote_line_markup_overrides), read in a later stage.
 //   GET  ?action=allowances[&family=patio]
@@ -179,10 +179,8 @@ async function actionMarkup(url: URL, deps: PriceBookDeps): Promise<Response> {
   if (!family || !PRICE_BOOK_FAMILIES.has(family)) {
     return refuse(400, "family_unknown", "family must be fencing, patio, stratco or misc.");
   }
-  const category = url.searchParams.get("category") || null;
   const { data, error } = await deps.rpc("price_book_current_markup", {
     p_family: family,
-    p_category: category,
   });
   if (error) {
     return refuse(502, "price_book_unreadable", "The price book could not be read.");
@@ -191,7 +189,6 @@ async function actionMarkup(url: URL, deps: PriceBookDeps): Promise<Response> {
   return json({
     ok: true,
     family,
-    category,
     markup: row ?? { status: "unset", value: null },
   });
 }

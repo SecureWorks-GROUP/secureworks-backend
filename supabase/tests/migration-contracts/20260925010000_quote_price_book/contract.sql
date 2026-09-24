@@ -63,9 +63,9 @@ BEGIN
     RAISE EXCEPTION 'fencing default markup must be unset';
   END IF;
   BEGIN
-    INSERT INTO public.price_book_markup_rules (family, rule_kind, value, as_at,
+    INSERT INTO public.price_book_markup_rules (family, value, as_at,
       evidence_kind, evidence_ref, provisional, blessed_by, blessed_at, recorded_by)
-    VALUES ('fencing', 'markup_multiplier', NULL, '2026-09-24', 'owner_stated', 'x',
+    VALUES ('fencing', NULL, '2026-09-24', 'owner_stated', 'x',
       false, 'owner', now(), 'contract');
     RAISE EXCEPTION 'a blessed markup with no value was accepted';
   EXCEPTION WHEN check_violation THEN NULL; END;
@@ -301,16 +301,16 @@ BEGIN
 
   -- Line markup: default until a scoper overrides, never below cost.
   SELECT * INTO r FROM public.price_book_line_markup(
-    '11111111-1111-4111-8111-111111111111', 'L1', 'patio', 'steel');
+    '11111111-1111-4111-8111-111111111111', 'L1', 'patio');
   IF r.source <> 'default' OR r.markup_multiplier <> 1.35 OR r.default_status <> 'provisional' THEN
     RAISE EXCEPTION 'a line with no override must use the family default';
   END IF;
   INSERT INTO public.quote_line_markup_overrides (quote_revision_id, line_key, family,
-    category, markup_multiplier, default_multiplier_at_set, reason, set_by)
-  VALUES ('11111111-1111-4111-8111-111111111111', 'L1', 'patio', 'steel', 1.5, 1.35,
+    markup_multiplier, default_multiplier_at_set, reason, set_by)
+  VALUES ('11111111-1111-4111-8111-111111111111', 'L1', 'patio', 1.5, 1.35,
     'hard access', 'scoper-a');
   SELECT * INTO r FROM public.price_book_line_markup(
-    '11111111-1111-4111-8111-111111111111', 'L1', 'patio', 'steel');
+    '11111111-1111-4111-8111-111111111111', 'L1', 'patio');
   IF r.source <> 'line_override' OR r.markup_multiplier <> 1.5 OR r.set_by <> 'scoper-a' THEN
     RAISE EXCEPTION 'a line override must win and say who set it';
   END IF;
@@ -326,14 +326,19 @@ BEGIN
     RAISE EXCEPTION 'fencing with no default and no override must read unset';
   END IF;
 
-  -- Margin rules convert to a multiplier: 25% margin = x1.3333.
-  INSERT INTO public.price_book_markup_rules (family, category, rule_kind, value, as_at,
+  BEGIN
+    INSERT INTO public.price_book_markup_rules (family, value, as_at,
+      evidence_kind, evidence_ref, recorded_by)
+    VALUES ('misc', 0.25, '2026-09-24', 'owner_stated', 'contract', 'contract');
+    RAISE EXCEPTION 'a fractional margin was accepted as a multiplier';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+  INSERT INTO public.price_book_markup_rules (family, value, as_at,
     evidence_kind, evidence_ref, recorded_by)
-  VALUES ('misc', 'labour', 'margin', 0.25, '2026-09-24', 'owner_stated', 'contract', 'contract');
+  VALUES ('misc', 1.25, '2026-09-25', 'owner_stated', 'contract', 'contract');
   SELECT * INTO r FROM public.price_book_line_markup(
-    '33333333-3333-4333-8333-333333333333', 'L1', 'misc', 'labour');
-  IF r.markup_multiplier <> 1.3333 THEN
-    RAISE EXCEPTION 'margin 0.25 must read as multiplier 1.3333, got %', r.markup_multiplier;
+    '33333333-3333-4333-8333-333333333333', 'L1', 'misc');
+  IF r.markup_multiplier <> 1.25 OR r.source <> 'default' THEN
+    RAISE EXCEPTION 'family multiplier must be used directly, got %', r.markup_multiplier;
   END IF;
 END $$;
 SET LOCAL ROLE service_role;

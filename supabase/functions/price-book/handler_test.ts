@@ -57,7 +57,7 @@ function deps(over: Partial<PriceBookDeps> = {}): PriceBookDeps & {
       }
       if (fn === "price_book_current_markup") {
         return Promise.resolve({
-          data: [{ family: "patio", category: null, rule_kind: "markup_multiplier", value: 1.35, status: "provisional" }],
+          data: [{ family: "patio", value: 1.35, status: "provisional" }],
           error: null,
         });
       }
@@ -160,10 +160,10 @@ Deno.test("current and markup refuse an unknown family", async () => {
 
 Deno.test("markup: returns the family default", async () => {
   const d = deps();
-  const res = await handlePriceBookRequest(get("?action=markup&family=patio&category=steel", SERVER), d);
+  const res = await handlePriceBookRequest(get("?action=markup&family=patio", SERVER), d);
   const body = await res.json();
   assertEquals(body.markup.value, 1.35);
-  assertEquals(d.calls[0].args, { p_family: "patio", p_category: "steel" });
+  assertEquals(d.calls[0].args, { p_family: "patio" });
 });
 
 Deno.test("allowances: returns the current rows for a family", async () => {

@@ -181,13 +181,9 @@ COMMENT ON TABLE public.price_book_cut_rules IS
   'How an item is cut: one piece per stick, several nested per stick with a saw kerf, or cut to size by the supplier.';
 CREATE INDEX price_book_cut_rules_item_idx ON public.price_book_cut_rules (item_key, as_at DESC);
 
--- Markup is the sell layer on top of cost. category NULL is the family
--- default. value NULL means "not set yet" and is only allowed provisional.
 CREATE TABLE public.price_book_markup_rules (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   family text NOT NULL CHECK (family IN ('fencing', 'patio', 'stratco', 'misc')),
-  category text CHECK (category IS NULL OR public.price_book_is_slug(category)),
-  rule_kind text NOT NULL CHECK (rule_kind IN ('markup_multiplier', 'margin')),
   value numeric(8,4),
   as_at date NOT NULL,
   evidence_kind text NOT NULL CHECK (evidence_kind IN (
@@ -205,12 +201,10 @@ CREATE TABLE public.price_book_markup_rules (
   CHECK ((provisional AND blessed_by IS NULL AND blessed_at IS NULL)
       OR (NOT provisional AND btrim(coalesce(blessed_by, '')) <> '' AND blessed_at IS NOT NULL)),
   CHECK (value IS NOT NULL OR provisional),
-  CHECK (value IS NULL
-      OR (rule_kind = 'markup_multiplier' AND value >= 1)
-      OR (rule_kind = 'margin' AND value >= 0 AND value < 1))
+  CHECK (value IS NULL OR value >= 1)
 );
 COMMENT ON TABLE public.price_book_markup_rules IS
-  'Default markup per family (category NULL) or family+category. Scopers override per quote line in quote_line_markup_overrides.';
+  'Default markup multiplier per family. Scopers override per quote line in quote_line_markup_overrides.';
 
 -- Job-family allowances: things priced per job geometry, not per item.
 CREATE TABLE public.price_book_allowances (
@@ -279,7 +273,6 @@ CREATE TABLE public.quote_line_markup_overrides (
   quote_revision_id uuid NOT NULL,
   line_key text NOT NULL CHECK (btrim(line_key) <> ''),
   family text NOT NULL CHECK (family IN ('fencing', 'patio', 'stratco', 'misc')),
-  category text CHECK (category IS NULL OR public.price_book_is_slug(category)),
   markup_multiplier numeric(8,4) NOT NULL CHECK (markup_multiplier >= 1),
   default_multiplier_at_set numeric(8,4),
   reason text,
@@ -448,16 +441,11 @@ LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
   ORDER BY a.family, a.allowance_key, a.basis, a.girth_min_mm NULLS FIRST
 $$;
 
--- Current markup for a family and optional category: the category rule when
--- one exists, else the family default. Blessed beats provisional, then newest.
 CREATE OR REPLACE FUNCTION public.price_book_current_markup(
-  p_family text,
-  p_category text DEFAULT NULL
+  p_family text
 )
 RETURNS TABLE (
   family text,
-  category text,
-  rule_kind text,
   value numeric,
   status text,
   provisional boolean,
@@ -469,15 +457,14 @@ RETURNS TABLE (
   rule_row_id uuid
 )
 LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
-  SELECT m.family, m.category, m.rule_kind, m.value,
+  SELECT m.family, m.value,
     CASE WHEN m.value IS NULL THEN 'unset'
          WHEN m.provisional THEN 'provisional' ELSE 'blessed' END,
     m.provisional, m.blessed_by, m.blessed_at, m.as_at, m.evidence_ref,
     m.evidence_note, m.id
   FROM public.price_book_markup_rules m
   WHERE m.family = p_family
-    AND (m.category IS NULL OR m.category = p_category)
-  ORDER BY (m.category IS NOT NULL) DESC, m.provisional, m.as_at DESC,
+  ORDER BY m.provisional, m.as_at DESC,
     m.recorded_at DESC, m.id
   LIMIT 1
 $$;
@@ -487,8 +474,7 @@ $$;
 CREATE OR REPLACE FUNCTION public.price_book_line_markup(
   p_quote_revision_id uuid,
   p_line_key text,
-  p_family text,
-  p_category text DEFAULT NULL
+  p_family text
 )
 RETURNS TABLE (
   source text,
@@ -505,13 +491,11 @@ LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
     ORDER BY q.set_at DESC, q.id
     LIMIT 1
   ),
-  d AS (SELECT * FROM public.price_book_current_markup(p_family, p_category))
+  d AS (SELECT * FROM public.price_book_current_markup(p_family))
   SELECT
     CASE WHEN o.markup_multiplier IS NOT NULL THEN 'line_override'
          WHEN d.value IS NOT NULL THEN 'default' ELSE 'unset' END,
-    coalesce(o.markup_multiplier,
-      CASE WHEN d.rule_kind = 'markup_multiplier' THEN d.value
-           WHEN d.rule_kind = 'margin' THEN round(1 / (1 - d.value), 4) END),
+    coalesce(o.markup_multiplier, d.value),
     o.set_by, o.set_at, coalesce(d.status, 'unset')
   FROM (SELECT 1) one
   LEFT JOIN o ON true
@@ -543,7 +527,6 @@ RETURNS uuid LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
     WHEN 'markup_rule' THEN (
       SELECT m.id FROM public.price_book_markup_rules m
       WHERE m.family = p_subject->>'family'
-        AND m.category IS NOT DISTINCT FROM p_subject->>'category'
       ORDER BY m.provisional, m.as_at DESC, m.recorded_at DESC, m.id LIMIT 1)
     WHEN 'allowance' THEN (
       SELECT a.id FROM public.price_book_allowances a
@@ -691,10 +674,10 @@ BEGIN
         v->>'evidence_note', false, p_decided_by, now(), p_decided_by, p.id)
       RETURNING id INTO new_id;
     ELSIF p.target = 'markup_rule' THEN
-      INSERT INTO public.price_book_markup_rules (family, category, rule_kind, value, as_at,
+      INSERT INTO public.price_book_markup_rules (family, value, as_at,
         evidence_kind, evidence_ref, evidence_note, provisional, blessed_by, blessed_at,
         recorded_by, proposal_id)
-      VALUES (fam, s->>'category', v->>'rule_kind', (v->>'value')::numeric,
+      VALUES (fam, (v->>'value')::numeric,
         (v->>'as_at')::date, v->>'evidence_kind', coalesce(v->>'evidence_ref', p.evidence_ref),
         v->>'evidence_note', false, p_decided_by, now(), p_decided_by, p.id)
       RETURNING id INTO new_id;
@@ -719,16 +702,16 @@ BEGIN
 END $$;
 
 REVOKE ALL ON FUNCTION public.price_book_current_costs(text[], text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.price_book_current_markup(text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.price_book_current_markup(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.price_book_current_allowances(text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.price_book_line_markup(uuid, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.price_book_line_markup(uuid, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.price_book_subject_current_row(text, jsonb) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.price_book_decide_proposal(uuid, text, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.price_book_propose(text, jsonb, jsonb, text, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.price_book_current_costs(text[], text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.price_book_current_markup(text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.price_book_current_markup(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.price_book_current_allowances(text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.price_book_line_markup(uuid, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.price_book_line_markup(uuid, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.price_book_subject_current_row(text, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.price_book_decide_proposal(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.price_book_propose(text, jsonb, jsonb, text, text, text) TO service_role;
@@ -740,20 +723,20 @@ GRANT EXECUTE ON FUNCTION public.price_book_propose(text, jsonb, jsonb, text, te
 -- priced today by a sell rate per metre, so its markup waits for the owner and
 -- the cost book; nothing is back-computed from a sell rate.
 INSERT INTO public.price_book_markup_rules
-  (family, category, rule_kind, value, as_at, evidence_kind, evidence_ref,
+  (family, value, as_at, evidence_kind, evidence_ref,
    evidence_note, recorded_by, import_fingerprint)
 VALUES
-  ('patio', NULL, 'markup_multiplier', 1.35, '2026-06-13', 'tool_constant',
+  ('patio', 1.35, '2026-06-13', 'tool_constant',
    'patio-tool index.html DEFAULT_SELL_MARKUP @884a208',
    'Default for the patio lead to set. Engine snapshot 2026-08-10 said 1.5; SWP-26051 (April) used 1.25.',
    'quote-v2-migration', 'seed:markup:patio:default'),
-  ('stratco', NULL, 'markup_multiplier', 1.40, '2026-09-17', 'owner_stated',
+  ('stratco', 1.40, '2026-09-17', 'owner_stated',
    'Kiko slats quote 2026-09-17 (hold H4)',
    'Provisional until H4 is filed.', 'quote-v2-migration', 'seed:markup:stratco:default'),
-  ('fencing', NULL, 'markup_multiplier', NULL, '2026-09-24', 'tool_constant',
+  ('fencing', NULL, '2026-09-24', 'tool_constant',
    'fence-designer index.html prices by sell rate ($125/m default)',
    'Not set: fencing sells by an agreed rate per metre today. Owner to set markup once costs are reviewed.',
    'quote-v2-migration', 'seed:markup:fencing:default'),
-  ('misc', NULL, 'markup_multiplier', NULL, '2026-09-24', 'owner_stated',
+  ('misc', NULL, '2026-09-24', 'owner_stated',
    'no misc default recorded',
    'Not set.', 'quote-v2-migration', 'seed:markup:misc:default');
