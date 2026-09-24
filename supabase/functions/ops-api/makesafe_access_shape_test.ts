@@ -84,12 +84,21 @@ function makeAccessClient(job: any) {
   };
 }
 
-Deno.test("Unassigned MakeSafe report access is available to logged-in trades", async () => {
-  await _assertAssignedOrMakesafeAccessForTest(
-    makeAccessClient({ id: "job-ms", type: "makesafe", job_number: "SWMS-26600" }),
-    "job-ms",
-    "trade-user",
-    false,
+// makesafe_open RETIRED 2026-09-24 (Captain ruling: "only hugo/ whoever
+// that's allocated a make safe from now on"). An unassigned trade with no
+// see-everything or make-safe category-manager standing is now refused,
+// exactly like on any other vertical.
+Deno.test("Unassigned MakeSafe report access is refused for a logged-in trade with no make-safe standing", async () => {
+  await assertRejects(
+    () =>
+      _assertAssignedOrMakesafeAccessForTest(
+        makeAccessClient({ id: "job-ms", type: "makesafe", job_number: "SWMS-26600" }),
+        "job-ms",
+        "trade-user",
+        false,
+      ),
+    Error,
+    "You are not assigned to this job",
   );
 });
 

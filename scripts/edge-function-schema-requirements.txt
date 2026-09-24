@@ -502,3 +502,4 @@ ops-api|supabase/migrations/20260924201000_ops_api_actor_recording.sql|function|
 ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|table|monitored_mailboxes
 ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|table|monitored_mailbox_changes
 ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|function|set_monitored_mailbox
+ops-api|supabase/migrations/20260925040000_users_trade_sees_all_jobs.sql|column|users.trade_sees_all_jobs

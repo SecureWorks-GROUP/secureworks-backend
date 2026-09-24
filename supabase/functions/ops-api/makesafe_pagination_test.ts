@@ -657,6 +657,7 @@ Deno.test("F7: >163 allocated job ids chunk under IN_URL_BUDGET and return exact
       orgId: "fixture-org",
       role: "crew",
       managedVerticals: [],
+      seeEverything: false,
     },
   );
   const res: any = JSON.parse(await response.text());

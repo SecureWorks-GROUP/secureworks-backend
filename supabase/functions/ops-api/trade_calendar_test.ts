@@ -20,6 +20,7 @@ const HENRY: TradeAuthContext = {
   orgId: TENANT_A,
   role: "lead_installer",
   managedVerticals: ["fencing"],
+  seeEverything: false,
 };
 
 const ROWS = [

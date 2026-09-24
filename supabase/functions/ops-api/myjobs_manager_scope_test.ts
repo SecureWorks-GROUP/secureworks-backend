@@ -1078,6 +1078,7 @@ Deno.test("U2b-4 (regression): a dispatcher keeps the see-all path across every 
   const admin = _resolveManagerVisibility({
     role: "admin",
     managedVerticals: [],
+    seeEverything: true,
   });
   // Dispatcher board vertical scope is empty — they use showAll, not the widening.
   assertEquals(
@@ -1130,23 +1131,25 @@ Deno.test("U2b-4 (regression): a dispatcher keeps the see-all path across every 
   );
 });
 
-// ── FIX 1 (ship review): manager's Board must keep the 180-day make-safe backstop ──
-// Pre-U2b, a make-safe manager's mode:'all' took the personal path, which RAN the
-// B2 backstop. The widened manager path skipped it, so a >30-day make-safe
-// allocation vanished from `assignments` AND the open pool re-surfaced its job as
-// a false "available" card — double-allocation risk.
-Deno.test("FIX1: make-safe manager board runs the 180-day backstop vertical-wide — old allocation shows, not a false pool card", async () => {
-  const OLD_DATE = new Date(Date.now() + 8 * 3600 * 1000 - 60 * 86400 * 1000)
+// ── Captain 2026-09-24: manager's Board is full-range for every vertical, so
+// the 180-day make-safe backstop (and the 30-day rolling window it patched a
+// hole in) is retired — the PRIMARY manager-scope query is now unbounded, the
+// same full-range paged query fencing always used. A >180-day allocation
+// (older than the retired backstop would even have reached) still shows, with
+// no second "backstop" query issued at all.
+Deno.test("full-range manager board: a make-safe manager sees an allocation far older than the retired 180-day backstop, no second backstop query", async () => {
+  const ANCIENT_DATE = new Date(Date.now() + 8 * 3600 * 1000 - 400 * 86400 * 1000)
     .toISOString().slice(0, 10);
   const fx: Fixtures = {
     assignments: [
-      // Another crew's make-safe allocation, 60 days old (outside the 30-day window).
+      // Another crew's make-safe allocation, 400 days old — older than the
+      // retired 180-day backstop ever reached.
       {
         id: "a-old-ms",
         user_id: "u-crew",
         user_name: "Crew A",
         status: "scheduled",
-        scheduled_date: OLD_DATE,
+        scheduled_date: ANCIENT_DATE,
         job_id: "job-ms-old",
       },
     ],
@@ -1185,11 +1188,11 @@ Deno.test("FIX1: make-safe manager board runs the 180-day backstop vertical-wide
     managerScope,
   );
 
-  // The >30-day allocation (another crew's) IS on the board…
+  // The far-older-than-backstop allocation (another crew's) IS on the board…
   assertEquals(
     assignedJobIds(g).includes("job-ms-old"),
     true,
-    "backstop surfaces the old allocation on the manager board",
+    "full-range primary query surfaces the ancient allocation with no backstop",
   );
   // …and its job is NOT emitted as a false 'available' pool card; the truly-open one is.
   assertEquals(
@@ -1202,20 +1205,25 @@ Deno.test("FIX1: make-safe manager board runs the 180-day backstop vertical-wide
     true,
     "genuinely-open make-safe still pools",
   );
-  // Shape: the backstop query ran VERTICAL-WIDE (no user_id) over the same
-  // make-safe jobs filter, 180d..30d window.
+  // No second (backstop-shaped, upper-bounded) query is issued at all — the
+  // primary manager-scope query is the only job_assignments read.
   const backstop = recorded.find((q) =>
     q.table === "job_assignments" && q.lt != null
   );
-  assertEquals(
-    backstop?.eq.user_id,
-    undefined,
-    "manager backstop has no user_id filter",
+  assertEquals(backstop, undefined, "the 180-day backstop query is retired");
+  const primary = recorded.find((q) =>
+    q.table === "job_assignments" && q.refOr?.referencedTable === "jobs"
   );
   assertEquals(
-    backstop?.refOr?.str,
+    primary?.eq.user_id,
+    undefined,
+    "the full-range manager query has no user_id filter",
+  );
+  assertEquals(
+    primary?.refOr?.str,
     "type.eq.makesafe,job_number.ilike.SWMS-%",
   );
+  assertEquals(primary?.gte, null, "no rolling-window floor is applied");
 });
 
 // A single unbounded probe would hit PostgREST's 1000-row cap (job_assignments
@@ -1970,11 +1978,19 @@ Deno.test("a re-attended make-safe returns to the allocatable pool", async () =>
     true,
     "a re-attended visit releases the make-safe",
   );
+  // Captain 2026-09-24 (full history): the manager board is full-range now, so
+  // the ANCIENT closed visit that used to be excluded from every fetch purely
+  // by being older than the 180-day backstop is fetched too — it still shows
+  // once, as history, exactly like the in-window "redo" case below. It never
+  // duplicates as a second, false-live card: pool exclusion above is what
+  // proves the job is not falsely offered as available.
+  const reattendCards = nonPool(g).filter((a) => a.jobs?.id === "job-ms-reattend");
   assertEquals(
-    assignedJobIds(g).includes("job-ms-reattend"),
-    false,
-    "the closed visit is not re-rendered as a live card",
+    reattendCards.map((a) => a.id),
+    ["a-ms-done"],
+    "the ancient closed visit shows once, as history, never duplicated",
   );
+  assertEquals(reattendCards[0]?.status, "complete");
 
   // The common timing: the finished visit is still INSIDE the feed window, so
   // the de-dupe seed — not just the probe — has to honour the re-attend stamp.
@@ -2153,11 +2169,18 @@ Deno.test("an unrelated later write never strands a re-attended make-safe", asyn
     true,
     "the visit finished before the re-attend, so it is allocatable",
   );
+  // Captain 2026-09-24 (full history): now fetched via the unbounded manager
+  // query rather than excluded by the retired 180-day window, so it shows
+  // once, as history — matching every other closed/re-attended visit — and
+  // never as a duplicate/false-live card (pool inclusion above already proves
+  // release worked).
+  const invoicedCards = nonPool(g).filter((a) => a.jobs?.id === "job-ms-invoiced");
   assertEquals(
-    assignedJobIds(g).includes("job-ms-invoiced"),
-    false,
-    "and the released visit is not also rendered as a live card",
+    invoicedCards.map((a) => a.id),
+    ["a-ms-invoiced"],
+    "the released visit shows once, as history, never duplicated",
   );
+  assertEquals(invoicedCards[0]?.status, "complete");
 });
 
 // The stamp is the ONLY thing that releases a finished visit, so it must be read

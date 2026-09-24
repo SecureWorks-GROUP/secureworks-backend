@@ -292,6 +292,7 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
       // JWT claim deliberately lies; profile row is authoritative.
       role: "admin",
       managedVerticals: ["fencing", "patio"],
+      seeEverything: false,
     },
     "trade",
     {
@@ -403,6 +404,7 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
       orgId: "fixture-org",
       role: wrongVerticalViewer.role,
       managedVerticals: wrongVerticalViewer.managedVerticals,
+      seeEverything: false,
     },
     "trade",
   );
@@ -425,6 +427,7 @@ Deno.test("fixture: clean instruction reaches authorised manager Board L2", asyn
       orgId: "fixture-org",
       role: "unexpected_role",
       managedVerticals: ["makesafe"],
+      seeEverything: false,
     },
     "trade",
   );
@@ -456,6 +459,7 @@ Deno.test("outer handler: non-JWT modes fail for projection=trade before route",
     orgId: "fixture-org",
     role: "crew",
     managedVerticals: [] as string[],
+    seeEverything: false,
   };
 
   for (const mode of ["api_key", "routine", "none", "anonymous"] as const) {
@@ -529,6 +533,7 @@ Deno.test("outer handler: missing profile and JWT claim escalation", async () =>
           orgId: "fixture-org",
           role: "admin",
           managedVerticals: ["makesafe"],
+          seeEverything: false,
         },
         "trade",
       ),
@@ -546,6 +551,7 @@ Deno.test("outer handler: missing profile and JWT claim escalation", async () =>
       orgId: "fixture-org",
       role: "admin",
       managedVerticals: ["makesafe"],
+      seeEverything: false,
     },
     "trade",
   );
@@ -671,6 +677,7 @@ Deno.test("assigned-only: ordinary trade sees only cycle-bound makesafe assignme
       // Escalation attempt: JWT claims manager; profile is ordinary crew.
       role: "ops_manager",
       managedVerticals: ["makesafe"],
+      seeEverything: false,
     },
     "trade",
   );
@@ -779,6 +786,7 @@ Deno.test("assigned-only: empty assignment list is not how ordinary crew is test
       orgId: "fixture-org",
       role: "installer",
       managedVerticals: [],
+      seeEverything: false,
     },
   );
   const body = JSON.parse(await response.text());

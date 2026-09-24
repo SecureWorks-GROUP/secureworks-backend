@@ -21,6 +21,7 @@ const HENRY: TradeAuthContext = {
   orgId: ORG_ID,
   role: "lead_installer",
   managedVerticals: ["fencing"],
+  seeEverything: false,
 };
 
 type ResolverFixtures = {

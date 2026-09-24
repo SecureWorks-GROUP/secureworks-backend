@@ -671,6 +671,9 @@ export interface MakesafeBoardViewer {
   name?: string | null;
   role?: string | null;
   managedVerticals?: unknown;
+  // Explicit Trade App see-everything tier (users.trade_sees_all_jobs, Captain
+  // ruling 2026-09-24) — see resolveMakesafeTradeViewer.
+  seeEverything?: boolean | null;
 }
 
 export type MakesafeTradeProjectionAuthMode =
@@ -2050,36 +2053,39 @@ export function projectOpsMakesafeBoard(
   };
 }
 
-// Visibility is server-owned: it derives ONLY from role and managed_verticals,
-// never from a display name. A caller whose profile name happens to be "hugo"
-// or "jan" gets nothing extra — the authority lives in the record, not the label.
-//   - Full make-safe managers (Hugo via managed_verticals "makesafe", plus
-//     platform admins/owners/ops managers): see every make-safe AND may allocate.
-//   - View-only make-safe capability (e.g. Jan): sees every make-safe but is
-//     action-gated — can_allocate is always false. Provision via a
-//     "makesafe_view" / "makesafe_readonly" managed vertical (flagged for Marnin
-//     in the PR to flip to full "makesafe" if allocate rights are ever wanted).
-//   - Fencing viewers (managed_verticals "fencing", or the production sales
-//     role used by Khairo): make-safe view-only, no allocate, and no
-//     all-makesafe visibility. A sales profile that explicitly manages makesafe
-//     still takes the manager scope first (the current Nithin shape).
+// Visibility is server-owned: it derives ONLY from the explicit see-everything
+// tier and managed_verticals, never from role or a display name. A caller
+// whose profile name happens to be "hugo" or "jan" gets nothing extra — the
+// authority lives in the record, not the label.
+//
+// Captain ruling 2026-09-24 ("go A"): Trade App visibility (including this
+// board's trade projection) is decided by users.trade_sees_all_jobs plus
+// users.managed_verticals, never by users.role. `privileged`-by-role,
+// `makesafe_view` / `makesafe_readonly`, and the fencing/`sales` view-only
+// special case are RETIRED here — nothing live depended on them (no
+// production managed_verticals row carried `makesafe_view`/`makesafe_readonly`,
+// no production user held role `sales`, and `fencing_view_only` was never read
+// by the trade client). A fencing-only manager now gets plain `allocated_only`
+// make-safe visibility, matching "let them have access to history of the jobs
+// they were allocated to" for every category they don't manage.
+//   - See-everything (viewer.seeEverything) OR a make-safe category manager
+//     (managed_verticals contains "makesafe"): sees every make-safe AND may
+//     allocate.
+//   - Everyone else: allocated-only (only make-safe cards they hold a live
+//     assignment on), can_allocate false.
 export function resolveMakesafeTradeViewer(viewer: MakesafeBoardViewer) {
-  const role = String(viewer?.role || "").trim().toLowerCase();
   const managed = Array.isArray(viewer?.managedVerticals)
     ? viewer.managedVerticals.map((v) => String(v || "").trim().toLowerCase())
     : [];
-  const privileged = ["admin", "owner", "ops_manager"].includes(role);
-  const makesafeManager = privileged || managed.includes("makesafe");
-  const makesafeViewer = managed.includes("makesafe_view") ||
-    managed.includes("makesafe_readonly");
-  const fencingViewOnly = !makesafeManager &&
-    (managed.includes("fencing") || role === "sales");
-  const seesAll = makesafeManager || makesafeViewer;
+  const seeEverything = viewer?.seeEverything === true;
+  const makesafeManager = seeEverything || managed.includes("makesafe");
   return {
-    visibility: seesAll ? "all_makesafes" : "allocated_only",
-    sees_all_makesafes: seesAll,
-    fencing_view_only: fencingViewOnly,
-    can_allocate: makesafeManager && !fencingViewOnly,
+    visibility: makesafeManager ? "all_makesafes" : "allocated_only",
+    sees_all_makesafes: makesafeManager,
+    // Retired 2026-09-24 (see comment above) — kept in the payload shape only
+    // so an existing consumer reading this key never sees it disappear.
+    fencing_view_only: false,
+    can_allocate: makesafeManager,
   };
 }
 

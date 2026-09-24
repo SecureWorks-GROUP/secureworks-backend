@@ -32,9 +32,13 @@ date floor the manager branch did not. `myjobs_all_means_all_test.ts` guards it.
 - **Mine lens and ordinary crew.** The personal feed keeps its 30-day window (its
   shape changed on 2026-08-17, see the addendum below) and its single unpaged
   read; an installer's `mode=all` output is still byte-identical to `mode=mine`.
-  Crew keep the narrower active-jobs All-tab browse — they do not gain
-  cancelled/archived history.
-- **A vertical manager's non-fencing lanes** stay rolling-windowed (U2b).
+  As of the 2026-09-24 addendum below, crew's All-tab search is now restricted
+  to their own allocations only (never even the "active-jobs" browse this
+  section originally described — that was itself a company-wide leak; see the
+  addendum for the corrected shape).
+- **A vertical manager's non-fencing lanes** stayed rolling-windowed under U2b;
+  as of the 2026-09-24 addendum below every managed vertical is now full-range,
+  same as fencing.
 - **The open pool stays allocatable-gated.** The ruling is about *visibility*, and
   visibility is delivered by the complete job feed. Putting the 60
   `company_contact_required` make-safes (ops's own admin queue) into the lane that
@@ -141,8 +145,8 @@ Every vertical decision routes through `_jobVertical`:
 division manager gets the repair open pool, allocation rights, the lead
 control and the quote exactly like any other vertical, and a make-safe or
 fencing manager LOSES automatic access to a job the moment its family says
-repair (on a make-safe job they fall to `makesafe_open`, otherwise to
-`allocated` or `none`). Every `jobs` select that
+repair (they fall to `allocated` or `none`; the former `makesafe_open`
+fallback is retired, see the 2026-09-24 addendum). Every `jobs` select that
 feeds one of those calls selects `metadata` (`assertAssignmentMutationAuthz`,
 `allocateJob`, `getTradeJobForAccess`, `reopenMakesafe`, `cancelMakesafe`,
 `reattendMakesafe`, the `submit_work_order_invoice` work-order fetch and the
@@ -236,7 +240,217 @@ The server now returns everything; `trade.html` still has to render it.
    (`trade.html:13170-13182`). The server already serves them; this is a
    client-only change.
 
+## Addendum (2026-09-24): visibility is decided by an explicit tier, not by role — supersedes the 2026-07-31 search behaviour
+
+Captain ruling, 2026-09-24 ("go A"): office role (Ops Dashboard staff set)
+and Trade App job visibility are now two SEPARATE questions. Everyone keeps
+their existing office role for the Ops Dashboard and every other
+SecureWorks tool; only what the Trade App shows is decided by an explicit
+per-person tier — never by `OPS_API_STAFF_OPERATOR_ROLES` membership. This
+closed a real gap the 2026-07-31 "all means all" ruling had created: four of
+the named people (Nithin, Khairo, Hugo, and the un-named Esther) held the
+`ops_manager` staff role and so saw the WHOLE company on every Trade App
+surface, when only Esther was meant to.
+
+> "Shaun, Marnin, Jan and Esther see every job in every category, with full
+> history, including every new allocation." / "Henry and Khairo ought to have
+> the same access, all fencing jobs and full history of fencing jobs." /
+> "Nithin sees all patio jobs, with decking staying in his view, full
+> history." / "Hugo sees all make-safe jobs, full history... yes every app."
+> "only hugo/ whoever that's allocated a make safe from now on." / "All tab is
+> limited. if it's not anyone i mentioned, they will not see any other jobs
+> but their own." / "for everyone else... let them have access to history of
+> the jobs they were allocated to." / "if I were to schedule a job
+> specifically for [a see-everything person], all of those people will be
+> able to see the new allocations as well. And the newly allocated jobs, only
+> the people that's intended to see them will see them."
+
+### The rule table
+
+| Tier | Grant | Gets |
+|---|---|---|
+| **See-everything** | `users.trade_sees_all_jobs = true` (new column, migration `20260925040000`). Target membership: Shaun, Marnin, Jan, Esther (see "Rollout" below for how it gets there). | Every job, every category, full history, on every surface — including new allocations as they happen. |
+| **Category manager** | `users.managed_verticals` contains the job's vertical (`_jobVertical`), REGARDLESS OF ROLE. | Full history of every job in the managed categories, on every surface, plus their own allocations outside those categories (never narrower than their personal lane). |
+| **Everyone else** | default. | Only jobs they hold (or held) a non-cancelled, non-ghost `job_assignments` row for — past and present, on every surface **including search**. Never a company-wide or "active-jobs" browse. |
+
+Make-safe specifically: the `makesafe_open` field-report door (any
+signed-in trade could open/report an unassigned make-safe) is **retired**.
+Only see-everything or a make-safe category manager may open or allocate an
+unassigned make-safe job now. A Trade App `submit_makesafe_report` (draft or
+final) passes the same per-job tier gate (`resolveTradeJobAccessTier`, with the
+caller's see-everything flag as `isOffice`) before any write; the Ops Dashboard /
+routine / api-key path keeps its existing staff-role behaviour unchanged.
+
+Every other per-job Trade App door passes the same gate
+(`assertAssignedOrMakesafeAccess`): the three roof-report doors,
+`submit_service_report` (before either branch reads or writes),
+`create_trade_alert` when it names a job, and a trade-JWT `request_assistance`,
+whose requester is pinned to the caller rather than `body.requested_by`.
+
+A ghost watcher row (`job_assignments.is_ghost = true`, the ops-manager mirror
+written by `ghost_observer_mirror.ts`) is never an allocation: the per-job tier
+check and `search_all_jobs`' allocated set both exclude it.
+
+### What changed in code
+
+- **New column**: `users.trade_sees_all_jobs boolean not null default false`
+  (migration `20260925040000_users_trade_sees_all_jobs.sql`), read by
+  `authTrade()` into `TradeAuthContext.seeEverything`.
+- **`_resolveManagerVisibility`** (`index.ts`) — the one resolver `my_jobs`
+  (all modes), `trade_calendar`, `my_work_orders`, and `search_all_jobs`'s
+  lens/company-scope decision all share — now derives `isDispatcher` (kept as
+  the field name every call site already destructures; its meaning is now
+  "see-everything", not "staff role") from `input.seeEverything`, never from
+  `_opsApiStaffOperatorRole(role)`. `OPS_API_STAFF_OPERATOR_ROLES` itself, and
+  every OTHER gate that reads it (Ops Dashboard actions, `_resolveAllocationAuthz`,
+  pricing, admin surfaces), is completely unchanged.
+- **`resolveTradeJobAccessTier`** — `isOffice` is fed by the same
+  see-everything-derived flag at every call site. The `makesafe_open` branch
+  is removed: an unallocated caller with no see-everything/make-safe-manager
+  standing now falls through to `tier: 'none'` on a make-safe job exactly like
+  on any other vertical. The `'makesafe_open'` literal stays in the
+  `TradeJobAccessTier` type (and in every downstream money/quote guard that
+  compares against it) so those guards keep compiling; it can simply never be
+  produced again.
+- **`my_jobs`'s category-wide (`mode=all` for a category manager) branch** —
+  every managed vertical is now full-range and paged, exactly like fencing
+  always was (the old 30-day rolling window for non-fencing verticals, and
+  the 180-day make-safe backstop that patched a hole in it, are both retired
+  — a full-range primary query has no hole to patch). The **personal
+  (`mode=mine`) lane keeps its own, separately-ruled 30-day-ish recency
+  window** (Captain 2026-08-17, `_myJobsPersonalRecencyFilter`) — this ruling
+  named only "category-wide views" for the full-history change, so the
+  personal lane is deliberately out of scope here. If the Captain intends
+  the personal lane to also go full-range (closing the very literal reading
+  of "past and present... on every surface"), that is a named follow-up, not
+  silently folded into this change.
+- **`search_all_jobs`** — **supersedes the 2026-07-31 ruling's search
+  behaviour entirely.** That ruling's `company` lens had no vertical bound at
+  all ("typed search has always reached every vertical for every trade
+  user"), and its `assigned` lens for ordinary crew was unrestricted at the
+  DB level too — the client's 2-character search-box minimum was the *only*
+  thing standing between an ordinary installer and a company-wide result,
+  on every path including the empty-query browse. Both gaps are closed:
+  - A **see-everything** caller still gets the whole tenant, full history —
+    unchanged from 2026-07-31.
+  - A **category manager** is now restricted, server-side, to jobs in their
+    managed vertical(s) (`_jobsTableVerticalFilter`, the `jobs`-table
+    equivalent of `tradeCalendarVerticalFilter`) UNIONED with their own
+    personal assignments (so a one-off out-of-vertical allocation is never
+    hidden — matches `my_jobs`' personal lane).
+  - **Everyone else** is restricted, server-side, to their own assigned job
+    ids (the assignment read is paged to completion; the id filter is sent in
+    25-id chunks and merged, newest first, so a long history never overflows a
+    PostgREST URL) — every path (empty-query browse, typed search, and
+    the external-ref match) is filtered through the same
+    `jobWithinVisibility` gate, so a 1-character query can never leak a
+    company-wide result. This governs `.notIn` status exclusion too: the
+    narrower `_ASSIGNED_BROWSE_STATUS_EXCLUDE` set (which additionally hid an
+    allocated trade's own cancelled/lost/paid/closed jobs) is retired in
+    favour of the SAME broad `_GLOBAL_SEARCH_STATUS_EXCLUDE` (hard
+    deletes/duplicates/voids only) every tier now shares — "past and present"
+    means every job status too, not just every date, for a job the caller is
+    actually allocated to.
+  - This resolves ambiguity #5 in `docs/evidence/trade-access-model-2026-08-17.md`
+    (the standing conflict between the 2026-07-31 and 2026-08-17 rulings) in
+    favour of the 2026-08-17 three-tier model, generalised by this ruling's
+    explicit tier.
+- **The make-safe board's own resolver** (`resolveMakesafeTradeViewer`,
+  `makesafe_board_read_model.ts`) — `seeEverything` OR `managed_verticals`
+  contains `makesafe` now decides `sees_all_makesafes` / `can_allocate`.
+  **Retired**, because nothing live depended on them: the role-based
+  `privileged` check (admin/owner/ops_manager), the `makesafe_view` /
+  `makesafe_readonly` managed-vertical special case (no production row ever
+  carried either value), and the `fencing_view_only` special case for
+  `managed_verticals` containing `fencing` or `role === 'sales'` (no
+  production user held `role: 'sales'`, and `trade.html` never read
+  `fencing_view_only`). A fencing-only manager now gets plain
+  `allocated_only` on the make-safe board, matching "let them have access to
+  history of the jobs they were allocated to" for a category they don't
+  manage. `fencing_view_only` stays `false` in the payload shape only, so an
+  existing reader of that key never sees it disappear.
+
+### Tests
+
+`manager_visibility_test.ts`, `myjobs_all_means_all_test.ts`,
+`myjobs_manager_scope_test.ts`, `trade_access_tier_test.ts`,
+`trade_manager_job_access_test.ts`, `makesafe_board_auth_test.ts`,
+`makesafe_board_read_model_test.ts`, `repair_trade_vertical_test.ts`,
+`makesafe_access_shape_test.ts`, `makesafe_submit_report_test.ts` were all
+updated to the new model (every test asserting the OLD role-derived or
+company-wide behaviour was rewritten to assert the new one, never deleted
+outright — the retirement is proven, not just assumed).
+`trade_app_visibility_rules_test.ts` is the new, single contract test that
+pins the rule table itself across every named persona (see-everything, a
+fencing manager holding either an `ops_manager` or a `lead_installer` role,
+a patio+decking manager, a make-safe manager, and ordinary crew with a past
+AND a present allocation) against the shared decision primitives every
+surface routes through, plus end-to-end proof for `search_all_jobs` and
+`my_jobs`.
+
+### Rollout (two phases)
+
+**Phase 1 — the merge is invisible.** Migration
+`20260925040000_users_trade_sees_all_jobs.sql` adds the column AND, in the same
+apply, sets `trade_sees_all_jobs = true` for every existing user whose role is
+`admin`, `owner` or `ops_manager` (matched by role only, no names or ids). That is
+exactly the set that saw everything under the old role-derived code, so the
+moment the matching `ops-api` deploys nobody loses or gains Trade App visibility.
+The backfill runs only on the apply that creates the column, so it can never
+re-widen a Phase 2 narrowing. Contract:
+`supabase/tests/migration-contracts/20260925040000_users_trade_sees_all_jobs/`.
+
+**Phase 2 — the Captain's rules, a separate Marnin-approved data change, run any
+time after merge.** This is the moment visibility actually changes.
+
+Step 1, read-only: resolve each person's stable id once, by name, and confirm
+exactly one row per name with Marnin. Stop on any ambiguous or missing name.
+
+```sql
+select id, name, email, role, managed_verticals, trade_sees_all_jobs
+from public.users
+where name ilike any (array[
+  '%shaun%', '%marnin%', '%jan%', '%esther%',
+  '%khairo%', '%hugo%', '%nithin%', '%ryan%'
+])
+order by name;
+```
+
+Step 2, the writes, by id only:
+
+```sql
+-- See-everything: Shaun, Marnin, Jan, Esther. Already true from the Phase 1
+-- backfill (all four hold an admin/ops_manager role); this is a confirmation.
+update public.users set trade_sees_all_jobs = true
+where id in ('<shaun-id>', '<marnin-id>', '<jan-id>', '<esther-id>');
+
+-- Nithin, Khairo, Hugo: ops_manager role, so Phase 1 left them seeing
+-- everything. THIS edit is what narrows each of them to their category.
+update public.users set trade_sees_all_jobs = false
+where id in ('<nithin-id>', '<khairo-id>', '<hugo-id>');
+
+update public.users set managed_verticals = array['fencing']::text[]
+where id = '<khairo-id>';
+update public.users set managed_verticals = array['makesafe']::text[]
+where id = '<hugo-id>';
+update public.users set managed_verticals = array['patio', 'decking']::text[]
+where id = '<nithin-id>';
+
+-- Ryan: crew, managed_verticals [makesafe] -> []. NOT a no-op, and independent
+-- of the backfill: the moment this row is edited Ryan loses make-safe-wide
+-- visibility and allocation and becomes allocated-only ("Ryan is like
+-- everyone else").
+update public.users set managed_verticals = array[]::text[]
+where id = '<ryan-id>';
+```
+
+Step 3, verify with the Step 1 select.
+
 ## Deploy
 
-Code-only — no migration. Rides the next `ops-api` deploy through the standard
-captain-gated lane (`docs/project-knowledge/EDGE_DEPLOY_LANE.md`).
+The schema migration (`20260925040000_users_trade_sees_all_jobs.sql`) applies
+before the matching `ops-api` through the standard lane
+(`docs/project-knowledge/EDGE_DEPLOY_LANE.md`); its backfill makes that deploy
+change nobody's visibility. The Phase 2 data change above is a separate,
+explicitly approved step.
+

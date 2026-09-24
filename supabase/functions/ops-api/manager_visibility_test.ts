@@ -56,22 +56,56 @@ Deno.test("legacy make-safe-only manager (managed=['makesafe']) preserves Hugo b
   assertEquals(hugo.poolVerticals, ["makesafe"]);
 });
 
-Deno.test("dispatcher (admin) keeps see-all + make-safe pool, no fencing/patio pool", () => {
+// Captain ruling 2026-09-24: Trade App visibility is decided by the explicit
+// see-everything flag, never by role alone — an admin/ops_manager role with
+// seeEverything unset is NOT a dispatcher (that's what let Nithin/Khairo/Hugo/
+// Esther see the whole company before this ruling, since all four were staff
+// role but only Esther was meant to be see-everything).
+Deno.test("role alone (admin) no longer grants dispatcher/see-everything standing", () => {
   const admin = _resolveManagerVisibility({ role: "admin", managedVerticals: [] });
-  assertEquals(admin.isAdmin, true);
-  assertEquals(admin.isDispatcher, true);
-  assertEquals(admin.canSeeMakesafePool, true);
-  // Preserves the live behaviour: a dispatcher gets the make-safe pool ONLY
-  // (fencing/patio open pools are opt-in via managed_verticals, not implicit).
-  assertEquals(admin.poolVerticals, ["makesafe"]);
+  assertEquals(admin.isDispatcher, false);
+  assertEquals(admin.canSeeMakesafePool, false);
+  assertEquals(admin.poolVerticals, []);
 });
 
-Deno.test("dispatcher (ops_manager) is a dispatcher and gets the make-safe pool", () => {
+Deno.test("role alone (ops_manager) no longer grants dispatcher/see-everything standing", () => {
   const om = _resolveManagerVisibility({ role: "ops_manager", managedVerticals: [] });
+  assertEquals(om.isDispatcher, false);
+  assertEquals(om.canSeeMakesafePool, false);
+  assertEquals(om.poolVerticals, []);
+});
+
+Deno.test("see-everything (Shaun/Marnin/Jan/Esther) keeps see-all + make-safe pool, no fencing/patio pool", () => {
+  const seeEverything = _resolveManagerVisibility({
+    role: "admin",
+    managedVerticals: [],
+    seeEverything: true,
+  });
+  assertEquals(seeEverything.isAdmin, true);
+  assertEquals(seeEverything.isDispatcher, true);
+  assertEquals(seeEverything.canSeeMakesafePool, true);
+  // Preserves the live behaviour: see-everything gets the make-safe pool ONLY
+  // (fencing/patio open pools are opt-in via managed_verticals, not implicit).
+  assertEquals(seeEverything.poolVerticals, ["makesafe"]);
+});
+
+Deno.test("see-everything is role-independent: an ops_manager or a crew role both get it from the flag alone", () => {
+  const om = _resolveManagerVisibility({
+    role: "ops_manager",
+    managedVerticals: [],
+    seeEverything: true,
+  });
   assertEquals(om.isAdmin, false);
   assertEquals(om.isDispatcher, true);
   assertEquals(om.canSeeMakesafePool, true);
   assertEquals(om.poolVerticals, ["makesafe"]);
+
+  const crew = _resolveManagerVisibility({
+    role: "crew",
+    managedVerticals: [],
+    seeEverything: true,
+  });
+  assertEquals(crew.isDispatcher, true, "the flag, not the role, decides it");
 });
 
 Deno.test("manager of a non-makesafe vertical who ALSO manages makesafe gets both pools", () => {
