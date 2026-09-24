@@ -3874,3 +3874,16 @@ found by source pointer (every live copy has one), `graph:` provider key, or
 marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 `attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
+
+## Quote v2 Price Book Stores Cost, Never Sell (program branch)
+
+`program/quote-v2` only until the owner carries it over. The price book
+(`20260925010000_quote_price_book.sql`) holds COST to us with history: it is
+append-only (UPDATE/DELETE/TRUNCATE raise), a cost is never $0 (no row reads
+`unpriced`), every row carries evidence, and a price is blessed only by an
+approved proposal. Markup is a separate layer (family default, per-line
+override with who set it); never store a sell rate as a cost or back-compute
+one. Cut-to-order has ONE implementation, `_shared/price_book/cut_to_order.ts`
+(parity-tested against the patio tool's `nestCuts`). The ten-store import is
+dry-run by default and `--apply` refuses anything but localhost. Contract:
+`docs/quote-v2/price-book-v1.md`.

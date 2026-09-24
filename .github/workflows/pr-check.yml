@@ -336,6 +336,16 @@ jobs:
           deno test --allow-read \
             supabase/functions/_shared/request_actor_test.ts
 
+      # Quote v2 stage 1 (program branch): the shared cut-to-order function
+      # (with parity against the patio tool's nestCuts), the price-book read
+      # action and the ten-store import planner. Pure: no network, no DB.
+      - name: Test the quote v2 price book, cut-to-order and import planner
+        run: |
+          deno test --allow-read \
+            supabase/functions/_shared/price_book/ \
+            supabase/functions/price-book/ \
+            scripts/quote-v2/
+
       - name: Test shared Xero transport and uncertain outcomes
         run: |
           deno test --no-check --allow-read --allow-env \
