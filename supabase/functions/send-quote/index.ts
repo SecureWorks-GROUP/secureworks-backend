@@ -87,7 +87,7 @@ import {
   emitV2SealedEvent,
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
-import { findQuoteRun, quoteRunDepositAmount } from './quote_run.ts'
+import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -2585,13 +2585,12 @@ serve(async (req: Request) => {
           || fallback
       }
 
-      for (const sourceRun of runs) {
-        const run = { ...sourceRun, run_label: normaliseQuoteRunLabel(sourceRun?.run_label) }
-        const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(sourceRun.run_label)) : null
+      for (const run of runs) {
+        const neighbour = run.neighbour_id ? contacts.find((c: any) => !c.is_primary && c.assigned_runs?.includes?.(run.run_label)) : null
 
         // Client document for this run
-        const runPdfUrl = run_pdfs?.[sourceRun.run_label] || null
-        const clientKey = { runLabel: String(run.run_label || ''), jobContactId: primaryContact.id || null }
+        const runPdfUrl = run_pdfs?.[run.run_label] || null
+        const clientKey = { runLabel: normaliseQuoteRunLabel(run.run_label) || '', jobContactId: primaryContact.id || null }
         const clientResolution = resolveSendRunDocument(existingQuoteDocs, clientKey)
         let clientDoc: any = null
         if (clientResolution.action === 'use_published') {
@@ -2612,7 +2611,7 @@ serve(async (req: Request) => {
               party: 'client',
             }),
           )
-          const { data: insertedClient } = await sb.from('job_documents').insert({
+          const { data: insertedClient } = await persistSendRunRows(sb, 'job_documents', {
             job_id: job.id,
             type: 'quote',
             run_label: run.run_label,
@@ -2624,13 +2623,13 @@ serve(async (req: Request) => {
             data_snapshot_json: { run },
           }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
           clientDoc = insertedClient
-            ? { ...insertedClient, run_label: insertedClient.run_label || run.run_label, data_snapshot_json: insertedClient.data_snapshot_json || { run } }
+            ? { ...insertedClient, run_label: insertedClient.run_label, data_snapshot_json: insertedClient.data_snapshot_json || { run } }
             : null
           if (clientDoc) {
             rememberExisting({
               id: clientDoc.id,
               type: 'quote',
-              run_label: run.run_label,
+              run_label: normaliseQuoteRunLabel(run.run_label),
               job_contact_id: primaryContact.id || null,
               sent_to_client: false,
               sent_at: null,
@@ -2647,18 +2646,18 @@ serve(async (req: Request) => {
         }
 
         if (clientDoc) {
-          await sb.from('run_acceptances').upsert({
+          await persistSendRunRows(sb, 'run_acceptances', {
             job_id: job.id,
             job_contact_id: primaryContact.id || contacts[0]?.id,
             job_document_id: clientDoc.id,
             run_label: run.run_label,
             status: 'pending',
-          }, { onConflict: 'job_id,job_contact_id,run_label' }).then(() => {}, () => {})
+          }).then(() => {}, () => {})
         }
 
         // Neighbour document for this run (if neighbour exists)
         if (neighbour && neighbour.client_email) {
-          const neighbourKey = { runLabel: String(run.run_label || ''), jobContactId: neighbour.id || null }
+          const neighbourKey = { runLabel: normaliseQuoteRunLabel(run.run_label) || '', jobContactId: neighbour.id || null }
           const neighbourResolution = resolveSendRunDocument(existingQuoteDocs, neighbourKey)
           let nbDoc: any = null
           if (neighbourResolution.action === 'use_published') {
@@ -2678,7 +2677,7 @@ serve(async (req: Request) => {
                 party: 'neighbour',
               }),
             )
-            const { data: insertedNeighbour } = await sb.from('job_documents').insert({
+            const { data: insertedNeighbour } = await persistSendRunRows(sb, 'job_documents', {
               job_id: job.id,
               type: 'quote',
               run_label: run.run_label,
@@ -2690,13 +2689,13 @@ serve(async (req: Request) => {
               data_snapshot_json: { run },
             }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
             nbDoc = insertedNeighbour
-              ? { ...insertedNeighbour, run_label: insertedNeighbour.run_label || run.run_label, data_snapshot_json: insertedNeighbour.data_snapshot_json || { run } }
+              ? { ...insertedNeighbour, run_label: insertedNeighbour.run_label, data_snapshot_json: insertedNeighbour.data_snapshot_json || { run } }
               : null
             if (nbDoc) {
               rememberExisting({
                 id: nbDoc.id,
                 type: 'quote',
-                run_label: run.run_label,
+                run_label: normaliseQuoteRunLabel(run.run_label),
                 job_contact_id: neighbour.id,
                 sent_to_client: false,
                 sent_at: null,
@@ -2712,13 +2711,13 @@ serve(async (req: Request) => {
           }
 
           if (nbDoc) {
-            await sb.from('run_acceptances').upsert({
+            await persistSendRunRows(sb, 'run_acceptances', {
               job_id: job.id,
               job_contact_id: neighbour.id,
               job_document_id: nbDoc.id,
               run_label: run.run_label,
               status: 'pending',
-            }, { onConflict: 'job_id,job_contact_id,run_label' }).then(() => {}, () => {})
+            }).then(() => {}, () => {})
           }
         }
 
@@ -2743,7 +2742,7 @@ serve(async (req: Request) => {
         if (itemRows.length > 0) {
           // Clear existing items for this run, then insert fresh
           await sb.from('run_line_items').delete().eq('job_id', job.id).eq('run_label', run.run_label)
-          await sb.from('run_line_items').insert(itemRows)
+          await persistSendRunRows(sb, 'run_line_items', itemRows)
         }
       }
 

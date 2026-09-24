@@ -15,7 +15,7 @@ import {
   sameQuoteParty,
   sendRetiresPriorPartyQuotes,
 } from "./quote_party_view.ts"
-import { findQuoteRun, quoteRunDepositAmount } from "./quote_run.ts"
+import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from "./quote_run.ts"
 
 // ── Fixtures: the stored quote documents of five live fencing jobs, read
 // read-only with sw_list_job_documents on 2026-09-24. Ids and contacts are
@@ -505,5 +505,50 @@ Deno.test('current party decisions agree across view, accept, status and deposit
       assertEquals(otherRunPending.jobStatus, 'partially_accepted')
 
     }
+  }
+})
+
+Deno.test('send-runs label table persists and links documents, acceptances and line items', async () => {
+  for (const sourceLabel of ['   ', '', ' RHS ', 'RHS']) {
+    const stored = new Map<string, any[]>()
+    const sb = {
+      from(table: string) {
+        const write = (input: any) => {
+          const rows = Array.isArray(input) ? input : [input]
+          for (const row of rows) {
+            if (table !== 'job_documents' && row.run_label == null) {
+              throw new Error('run_label violates NOT NULL')
+            }
+          }
+          stored.set(table, structuredClone(rows))
+          return Promise.resolve({ data: rows, error: null })
+        }
+        return { insert: write, upsert: write }
+      },
+    }
+    const sourceRun = { run_label: sourceLabel, run_name: 'Right side', totals: { client_share_inc: 200 } }
+    await persistSendRunRows(sb, 'job_documents', {
+      id: 'quote', job_contact_id: 'client', run_label: sourceRun.run_label,
+      sent_to_client: true, sent_at: '2026-09-24T00:00:00Z',
+      data_snapshot_json: { run: sourceRun },
+    })
+    await persistSendRunRows(sb, 'run_acceptances', {
+      job_document_id: 'quote', job_contact_id: 'client', run_label: sourceRun.run_label, status: 'pending',
+    })
+    await persistSendRunRows(sb, 'run_line_items', [{
+      job_contact_id: 'client', run_label: sourceRun.run_label, description: 'Fence', quantity: 1,
+    }])
+    const document = stored.get('job_documents')![0]
+    const acceptance = stored.get('run_acceptances')![0]
+    const lineItem = stored.get('run_line_items')![0]
+    assertEquals(document.run_label, sourceLabel.trim() ? sourceLabel : null)
+    assertEquals(acceptance.run_label, sourceLabel)
+    assertEquals(lineItem.run_label, sourceLabel)
+    assertEquals(document.data_snapshot_json.run, sourceRun)
+    assert(sameQuoteParty(document, acceptance))
+    assert(sameQuoteParty(document, lineItem))
+    assertEquals(currentQuoteForParty([document], acceptance)?.id, acceptance.job_document_id)
+    assertEquals(findQuoteRun({ runs: [sourceRun] }, document.run_label), sourceRun)
+    assertEquals(quoteRunDepositAmount(findQuoteRun({ runs: [sourceRun] }, document.run_label), true, 50), 100)
   }
 })
