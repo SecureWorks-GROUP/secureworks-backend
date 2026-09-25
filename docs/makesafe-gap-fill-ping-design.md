@@ -78,7 +78,6 @@ Pick ONE channel:
 |---|---|---|
 | **pg_cron + pg_net → webhook** | A 1-2 min `pg_cron` job POSTs new unsent signal rows to a small webhook the captain's Claude Code environment polls/receives | webhook URL + shared HMAC secret (**new**) |
 | **Poll the queue** | The captain's Claude Code `/schedule` runs the queue every ~15 min; no push at all | none (this is just trigger b at a tighter cadence) |
-| **Telegram ping** | Reuse `sw_send_telegram_message` to ping a channel the captain watches, then trigger a sweep manually | existing Telegram token (owner-comms, not "drive Claude") |
 
 **Recommendation:** ship piece 1 (the durable signal) plus a **tightened poll**
 (trigger b at ~10-15 min) as the zero-secret path, and reserve the webhook relay
@@ -97,7 +96,7 @@ relay avoids all three.
 ## Explicit decision needed from the captain
 
 1. **Channel for the real-time push:** webhook relay (new secret), tightened poll
-   (no secret, recommended interim), or Telegram ping (existing secret)?
+   (no secret, recommended interim)?
 2. On that answer, implement piece 1 (durable signal) + the chosen relay. Piece 1
    is ~15 lines in `submit_makesafe_report` plus a `makesafe_report_ready_signals`
    table (or reuse `makesafe_notify_log` with a new dedup namespace); the relay is

@@ -136,7 +136,7 @@ for an authenticated call the front door refused. The count runs through
 `EdgeRuntime.waitUntil`, best-effort.
 
 Alarms are read by the CIO desk's scheduled check (INTEGRATION decision D-A),
-never Telegram.
+never pushed to a chat channel.
 
 ## F1 shared pieces
 

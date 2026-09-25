@@ -291,7 +291,7 @@ Deno.test("a binding that cannot be fully read is not partly trusted", async () 
   const good = await testBinding();
   const raw = JSON.stringify([
     good,
-    { ...good, channel: "telegram" }, // unsupported channel
+    { ...good, channel: "fax" }, // unsupported channel
     { ...good, sender_fingerprint: "not-a-hash" },
     { ...good, operator_user_id: "not-a-uuid" },
     { ...good, label: "" },
