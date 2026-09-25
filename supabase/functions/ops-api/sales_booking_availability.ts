@@ -20,10 +20,12 @@
  */
 import { bookingInstant } from "../_shared/booking_approval_gate.ts";
 import type { BookingObject } from "./sales_booking_confirmation.ts";
-import type {
-  SalesBookingCase,
-  SalesBookingDiaryEntry,
-  SalesBookingReadResponse,
+import {
+  SALES_BOOKING_OUTLOOK_MAILBOXES,
+  type SalesBookingCase,
+  type SalesBookingDiaryEntry,
+  salesBookingGhlStatusHoldsTime,
+  type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
 import {
   type GhlDirectory,
@@ -198,8 +200,7 @@ function ghlBusy(
   for (const row of rows) {
     const assignee = text(row.assignedUserId);
     if (assignee && assignee !== person.ghl_user_id) continue;
-    const status = text(row.appointmentStatus).toLowerCase();
-    if (status === "cancelled" || status === "invalid") continue;
+    if (!salesBookingGhlStatusHoldsTime(row.appointmentStatus)) continue;
     const id = text(row.id);
     if (id) {
       if (seen.has(`${source}:${id}`)) continue;
@@ -802,6 +803,8 @@ export async function applySalesBookingAvailability(
     })
     : { ok: false, reason: "not_applicable" };
   const outlookSource = response.diary_read?.sources?.outlook;
+  const outlookIsThisPerson = (outlookSource?.calendar_email ?? null) ===
+    (SALES_BOOKING_OUTLOOK_MAILBOXES[resource] ?? null);
   const computed = computeSalesBookingAvailability({
     resource,
     week,
@@ -809,12 +812,19 @@ export async function applySalesBookingAvailability(
     directory,
     events,
     blocked,
-    outlook: {
-      state: outlookSource?.state ?? "not_configured",
-      reason: outlookSource?.reason ?? null,
-      entries: (response.diary ?? []).filter((e) => e.source === "outlook"),
-      malformed_dropped: outlookSource?.malformed_dropped ?? 0,
-    },
+    outlook: outlookIsThisPerson
+      ? {
+        state: outlookSource?.state ?? "not_configured",
+        reason: outlookSource?.reason ?? null,
+        entries: (response.diary ?? []).filter((e) => e.source === "outlook"),
+        malformed_dropped: outlookSource?.malformed_dropped ?? 0,
+      }
+      : {
+        state: "failed",
+        reason: "outlook_calendar_not_this_person",
+        entries: [],
+        malformed_dropped: 0,
+      },
     census,
     cases: response.cases,
   });

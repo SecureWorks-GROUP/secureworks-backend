@@ -155,8 +155,9 @@ Additions:
   (`sales_booking_outlook_mirror.ts`) names its GHL appointment in
   `mirror_of_ghl_event_id`; both rows stay so each calendar shows event for
   event. An UNMARKED Outlook event that is GHL's own sync copy of a visit
-  (busy, not all-day, same start and end as a capacity-blocking GHL event of
-  the same person) is folded into that GHL row as
+  (busy, not all-day, same start and end as a GHL event of the same person
+  that availability counts as busy, i.e. not cancelled and not invalid) is
+  folded into that GHL row as
   `outlook_copy: {event_id, title}` and leaves the diary, so one visit shows
   and holds its time once (`foldSalesBookingOutlookCopies`; live case: Khairo,
   Tue 29 Sep 10:00-10:30, GHL blank title, Outlook "Fencing Complaint Basil

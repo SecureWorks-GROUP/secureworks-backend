@@ -32,7 +32,11 @@ After the pack overlay, for the person on screen:
    a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`: Nithin, Marnin, Khairo) are
    also busy. An unmarked exact-span copy of a GHL visit was already folded
    into that visit by the read, so it is neither a second busy block nor
-   counted in `unverified_correspondence`. No new Outlook read. A failed Outlook read is a caveat, not a
+   counted in `unverified_correspondence`. Only the resource person's own
+   mailbox counts: when the diary read another scoper's Outlook (the
+   `scoper_user_id` override), that Outlook is `failed` with
+   `outlook_calendar_not_this_person`, never busy or free time for this
+   person. No new Outlook read. A failed Outlook read is a caveat, not a
    block: GHL is the source, and the press still re-checks Outlook. An Outlook
    event is counted as mirrored only when its `mirror_of_ghl_event_id` matches
    a GHL event id; time overlap or blocked time is not mirror proof. If the

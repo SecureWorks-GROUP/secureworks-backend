@@ -1364,6 +1364,16 @@ export function perthDiaryInstant(value: unknown): string | null {
 export const perthGraphInstant = perthDiaryInstant;
 
 /**
+ * Whether a GHL appointment status holds the scoper's time for live
+ * availability: every status except `cancelled` and `invalid`. The one rule
+ * shared by availability's GHL busy list and the Outlook copy fold.
+ */
+export function salesBookingGhlStatusHoldsTime(status: unknown): boolean {
+  const s = typeof status === "string" ? status.trim().toLowerCase() : "";
+  return s !== "cancelled" && s !== "invalid";
+}
+
+/**
  * Project one GHL calendar event onto a diary entry.
  *
  * `kind` and `blocks_capacity` come from provider status only, never from
@@ -1688,13 +1698,14 @@ export async function readSalesBookingOutlookDiary(args: {
  *
  * An Outlook event is that copy only when it is `busy` (not leave, not
  * private), blocks capacity, is not all-day, carries no mirror marker, and
- * starts and ends at exactly the same instants as a capacity-blocking,
- * non-all-day GHL event of the same person's diary. It is folded into that GHL
- * row as `outlook_copy` and leaves the Outlook list. Each GHL row absorbs at
- * most one copy, so a second Outlook event on the same span still shows and
- * still blocks. Marked mirrors (`mirror_of_ghl_event_id`) keep their existing
- * two-row handling. A copy never adds time the GHL row does not already hold,
- * so folding it cannot free any capacity.
+ * starts and ends at exactly the same instants as a non-all-day GHL event of
+ * the same person's diary whose status availability counts as busy
+ * (`salesBookingGhlStatusHoldsTime`: not cancelled, not invalid). It is folded
+ * into that GHL row as `outlook_copy` and leaves the Outlook list. Each GHL row
+ * absorbs at most one copy, so a second Outlook event on the same span still
+ * shows and still blocks. Marked mirrors (`mirror_of_ghl_event_id`) keep their
+ * existing two-row handling. Because the GHL row it folds into already holds
+ * that exact time for availability, folding cannot free any capacity.
  */
 export function foldSalesBookingOutlookCopies(
   ghl: SalesBookingDiaryEntry[],
@@ -1710,7 +1721,10 @@ export function foldSalesBookingOutlookCopies(
     a.event_id.localeCompare(b.event_id);
   const open = new Map<string, SalesBookingDiaryEntry[]>();
   for (const g of [...ghl].sort(byEventId)) {
-    if (g.source !== DIARY_SOURCE_GHL || !g.blocks_capacity || g.is_all_day) {
+    if (
+      g.source !== DIARY_SOURCE_GHL || !g.blocks_capacity || g.is_all_day ||
+      !salesBookingGhlStatusHoldsTime(g.show_as)
+    ) {
       continue;
     }
     const key = span(g);

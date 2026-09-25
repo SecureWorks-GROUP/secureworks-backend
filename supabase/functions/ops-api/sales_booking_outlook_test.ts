@@ -632,6 +632,22 @@ Deno.test("only an exact-span, unmarked, busy Outlook event is a copy; everythin
     0,
   );
 
+  // An invalid GHL row is dropped by availability, so it absorbs nothing
+  // either: the Outlook copy stays and keeps holding the time.
+  const invalid = projectSalesBookingDiaryEntry({
+    id: "ghl-invalid",
+    startTime: "2026-09-29T10:00:00+08:00",
+    endTime: "2026-09-29T10:30:00+08:00",
+    appointmentStatus: "invalid",
+  })!;
+  assertEquals(invalid.blocks_capacity, true);
+  const copyOfInvalid = khairoOutlookCopy();
+  const notFolded = foldSalesBookingOutlookCopies([invalid], [copyOfInvalid]);
+  assertEquals(notFolded.folded, 0);
+  assertEquals(notFolded.ghl, [invalid]);
+  assertEquals(notFolded.outlook, [copyOfInvalid]);
+  assertEquals(notFolded.outlook[0].blocks_capacity, true);
+
   // One GHL visit absorbs one copy: a second event on the same span still
   // shows and still blocks.
   const two = foldSalesBookingOutlookCopies([ghl], [
