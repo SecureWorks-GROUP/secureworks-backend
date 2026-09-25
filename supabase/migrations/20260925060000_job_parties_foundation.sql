@@ -137,7 +137,7 @@
 -- migration's result (a re-apply). Anything else is a live change nobody
 -- read, and replacing it would silently revert it.
 --
--- Rollback: supabase/rollbacks/20260925040000_job_parties_foundation_down.sql
+-- Rollback: supabase/rollbacks/20260925060000_job_parties_foundation_down.sql
 -- restores the F1 stub byte for byte, drops the trigger, the new functions
 -- and, when they hold no row, the two new tables and the new columns. It
 -- keeps RLS and the revokes on job_contacts: reopening the neighbours' names

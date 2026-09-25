@@ -664,7 +664,7 @@ BEGIN;
 CREATE TEMP TABLE sm1_before AS SELECT p.oid::regprocedure::text AS sig,md5(p.prosrc) AS m FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND (p.proname LIKE 'job_party%' OR p.proname IN ('upsert_job_party','set_job_party_ids','job_contacts_owner_mirror',
   'context_contact_parties_at','context_job_event_parties','context_site_address','context_site_candidates','link_site_jobs','context_parties_status'));
-\ir ../../../migrations/20260925040000_job_parties_foundation.sql
+\ir ../../../migrations/20260925060000_job_parties_foundation.sql
 DO $$
 BEGIN
  IF EXISTS (SELECT 1 FROM sm1_before b WHERE b.m IS DISTINCT FROM (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(b.sig)))

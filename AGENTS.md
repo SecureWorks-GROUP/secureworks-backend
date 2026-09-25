@@ -3909,7 +3909,7 @@ no row and so never read as booked or sent.
 ## Parties On A Site Have One Writer, Keyed By Party, Never By Letter
 
 `job_contacts` is the party table (owner, neighbours, strata, other payers on
-one site job). Sites slice S-M1 (`20260925040000_job_parties_foundation.sql`)
+one site job). Sites slice S-M1 (`20260925060000_job_parties_foundation.sql`)
 gave it one writer pair: `upsert_job_party(job, source_party_key, fields,
 actor)` and `set_job_party_ids(...)` (the only way a neighbour's GHL or Xero
 id changes; `upsert_job_party` writes them on insert only). The key is the fence tool's neighbour id (`nb-1`,
@@ -3930,7 +3930,7 @@ no policy and revoked from anon and authenticated (the live read found both
 held TRUNCATE, which RLS does not cover); view `run_summary`, which read
 its names past RLS, is revoked the same way and `security_invoker`. Placement reconsideration after a
 GHL link only runs while flag `job_parties_v1` is on. Contract and named-site
-tests: `supabase/tests/migration-contracts/20260925040000_job_parties_foundation`.
+tests: `supabase/tests/migration-contracts/20260925060000_job_parties_foundation`.
 
 ## The Job Conversation Shows An Email Where The Ladder Put It
 
