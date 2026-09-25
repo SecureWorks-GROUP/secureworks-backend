@@ -24,6 +24,7 @@ import {
 } from "./sales_booking_sender.ts";
 import { assertLeadBelongsToResource } from "./sales_booking_confirmation.ts";
 import { applySalesBookingPackOverlay } from "./sales_booking_pack.ts";
+import { applySalesBookingAvailability } from "./sales_booking_availability.ts";
 import {
   applySalesBookingScopeAppointments,
   type SalesBookingScopeCalendarRead,
@@ -540,5 +541,36 @@ Deno.test("proof: Basil booked on Khairo's calendar is off Marnin's to-contact l
   assertEquals(
     withPack.scope_appointments?.[BASIL_CONTACT]?.owner_name,
     "Khairo",
+  );
+
+  // The live availability layer (applied after the read) keeps the flag.
+  const live = await applySalesBookingAvailability(withPack, {
+    readGhlDirectory: () =>
+      Promise.resolve({
+        calendars: [{
+          id: "dEQKVKHthsjSYaen1fiE",
+          is_active: true,
+          assigned_user_ids: [MARNIN],
+          assignments_returned: true,
+        }],
+        users: [{ id: MARNIN, email: "marnin@secureworkswa.com.au" }],
+      }),
+    readGhlEvents: () => Promise.resolve([]),
+    readGhlBlockedSlots: () => Promise.resolve([]),
+    readSystemOfferRecords: () =>
+      Promise.resolve({ executions: [], approvals: [] }),
+    now: () => NOW,
+  });
+  const liveRow = live.cases.find((c) =>
+    c.opportunity_id === "9XZmlVHcsQ0F8ExT3Smz"
+  )!;
+  assertEquals(liveRow.scope_appointment, row.scope_appointment);
+  assertEquals(
+    live.scope_appointments?.[BASIL_CONTACT]?.owner_name,
+    "Khairo",
+  );
+  assertEquals(
+    live.cases.map((c) => c.opportunity_id),
+    withPack.cases.map((c) => c.opportunity_id),
   );
 });
