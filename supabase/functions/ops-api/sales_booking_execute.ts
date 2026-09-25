@@ -886,6 +886,9 @@ export async function salesBookingSendAction(args: {
   } catch {
     return refused("opportunity_assignment_unreadable");
   }
+  if (ownership.kindUnread) {
+    return refused("opportunity_assignment_unreadable");
+  }
   const belonging = salesBookingLeadBelongsTo(ownership, who.sender.person);
   if (belonging === "no") {
     return refused("opportunity_assignee_changed", {

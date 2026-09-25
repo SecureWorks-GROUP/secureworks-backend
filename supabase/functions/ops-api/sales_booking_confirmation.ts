@@ -704,6 +704,7 @@ export async function assertLeadBelongsToResource(
   } catch {
     fail("opportunity_assignment_unreadable");
   }
+  if (ownership.kindUnread) fail("opportunity_assignment_unreadable");
   const belonging = salesBookingLeadBelongsTo(ownership, resource);
   if (belonging === "no") fail("lead_assigned_to_someone_else");
   if (belonging === "owner_unclear") fail("owner_unclear");

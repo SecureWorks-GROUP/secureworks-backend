@@ -499,6 +499,33 @@ Deno.test("send refuses an unassigned owner-unclear fencing lead from every line
   assertEquals(reasonOf(await send(k2, khairo.binding_hash)), "sent");
 });
 
+Deno.test("send refuses Khairo's lead as unreadable, never reassigned, when its contact or STRATCO calendar could not be read", async () => {
+  const khairo = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267772" },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const k = fakes([khairo], LIVE);
+  const read = k.deps.readOpportunityOwnership;
+  k.deps.readOpportunityOwnership = async (id) => ({
+    ...(await read(id)),
+    kind: "unclear",
+    kindUnread: true,
+  });
+  assertEquals(
+    reasonOf(await send(k, khairo.binding_hash)),
+    "opportunity_assignment_unreadable",
+  );
+  assertEquals(k.calls.sms, []);
+  assertEquals(k.calls.claims, 0);
+});
+
 Deno.test("send refuses an unassigned Stratco lead moved to patio", async () => {
   const stratco = await approval("message", MESSAGE);
   const f = fakes([stratco], LIVE);

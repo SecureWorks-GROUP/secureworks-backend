@@ -106,10 +106,11 @@ Both actions:
    unassigned where the rule gives it to them (patio Nithin; fencing with a
    Stratco signal Marnin, with a positive normal-lead signal Khairo,
    `salesBookingLeadKind`). Otherwise `opportunity_assignee_changed`; an
-   unassigned fencing lead with neither signal, or whose GHL contact or
-   STRATCO FENCING calendar cannot be read, refuses `owner_unclear` until
-   someone assigns it in GHL; an unreadable assignee refuses
-   `opportunity_assignment_unreadable`. Nothing is sent.
+   unassigned fencing lead with neither signal refuses `owner_unclear` on
+   Marnin's line until someone assigns it in GHL; an unreadable assignee, or
+   an unassigned fencing lead whose GHL contact or STRATCO FENCING calendar
+   cannot be read, refuses `opportunity_assignment_unreadable`. Nothing is
+   sent.
 8. `text_already_in_thread` if the exact text was already sent since approval.
 9. Claim the send, call ghl-proxy `send_sms` with the exact text, settle.
    An unclear provider answer settles `unknown` and refuses

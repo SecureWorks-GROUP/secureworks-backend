@@ -613,6 +613,25 @@ Deno.test("approval: the live ownership check uses the same rule", async () => {
     Error,
     "lead_assigned_to_someone_else",
   );
+  // Contact or STRATCO calendar unread: unreadable, never a reassignment.
+  for (const resource of ["khairo", "marnin"]) {
+    await assertRejects(
+      () =>
+        assertLeadBelongsToResource(
+          () =>
+            Promise.resolve({
+              assignedTo: null,
+              pipelineId: FENCING,
+              kind: "unclear",
+              kindUnread: true,
+            }),
+          "opp-1",
+          resource,
+        ),
+      Error,
+      "opportunity_assignment_unreadable",
+    );
+  }
 });
 
 Deno.test("booked elsewhere: Basil on Khairo's calendar Tue 29 Sep 10:00 is booked with Khairo", () => {

@@ -1764,4 +1764,23 @@ Deno.test("owner approval: unassigned fencing is Stratco Marnin's, other fencing
     { owner_input: input("message"), dry_run: true },
   );
   assert("dry_run" in assignedUnclear && assignedUnclear.dry_run === true);
+  // Contact or STRATCO calendar unread: unreadable, never a reassignment.
+  for (const resource of ["khairo", "marnin"]) {
+    await refusal(
+      call(
+        deps({
+          resource,
+          readOpportunityOwnership: () =>
+            Promise.resolve({
+              assignedTo: null,
+              pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+              kind: "unclear" as const,
+              kindUnread: true,
+            }),
+        }).deps,
+        { owner_input: input("message", { resource }), dry_run: true },
+      ),
+      "opportunity_assignment_unreadable",
+    );
+  }
 });

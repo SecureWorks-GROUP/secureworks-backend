@@ -743,6 +743,7 @@ export async function salesBookingOwnerApprovalAction(args: {
     } catch {
       refuse("opportunity_assignment_unreadable");
     }
+    if (ownership.kindUnread) refuse("opportunity_assignment_unreadable");
     const belonging = salesBookingLeadBelongsTo(ownership, input.resource);
     if (belonging === "no") {
       refuse("lead_assigned_to_someone_else", {
