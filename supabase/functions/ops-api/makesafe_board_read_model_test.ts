@@ -2354,6 +2354,9 @@ Deno.test("trade visibility is server-shaped: ordinary allocated-only, Hugo all,
   assertEquals(new Set(hugo.rows.map((r) => r.id)), new Set(["mine", "other"]));
   assertEquals(hugo.permissions.can_allocate, true);
 
+  // fencing_view_only retired 2026-09-24: a fencing-only manager with no
+  // make-safe standing gets plain allocated_only, not a special view-only
+  // shape.
   const khairo = projectTradeMakesafeBoard(rows, {
     userId: "khairo",
     name: "Khairo",
@@ -2361,7 +2364,7 @@ Deno.test("trade visibility is server-shaped: ordinary allocated-only, Hugo all,
     managedVerticals: ["fencing"],
   });
   assertEquals(khairo.rows, []);
-  assertEquals(khairo.permissions.fencing_view_only, true);
+  assertEquals(khairo.permissions.fencing_view_only, false);
   assertEquals(khairo.permissions.can_allocate, false);
 });
 

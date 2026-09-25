@@ -1,0 +1,3 @@
+context_email_capture_config_preimage_mismatch
+monitored_mailboxes is not empty (1 rows); someone seeded it
+feature flag email_capture_v2 already exists; this migration creates it off

@@ -62,6 +62,12 @@ import {
   type GhlLocationUser,
 } from "../ghl-proxy/calendar_events.ts";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  salesBookingLeadOwner,
+  salesBookingLineLabel,
+  type SalesBookingOpportunityOwnership,
+} from "./sales_booking_sender.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
 
@@ -90,9 +96,14 @@ export const SALES_BOOKING_TEMPLATE_MARKERS: readonly string[] = [
  * without reading code. Flipping a default is a change here, not a UI change.
  */
 export const SALES_BOOKING_CAPTAIN_DEFAULTS = {
-  scopers: ["nithin", "marnin"] as const,
+  scopers: Object.keys(SALES_BOOKING_SENDER_LINES),
   scopes_done_window: "this_week_plus_last",
-  sender_lines: { nithin: "774", marnin: "776" },
+  sender_lines: Object.fromEntries(
+    Object.keys(SALES_BOOKING_SENDER_LINES).map((person) => [
+      person,
+      salesBookingLineLabel(person),
+    ]),
+  ),
   stamp_board: "agent_driven_human_typed_later",
   recorded: "2026-09-16",
 } as const;
@@ -113,6 +124,14 @@ export interface SalesBookingResource {
    * `docs/sales-booking-read-contract-2026-09-16.md`.
    */
   scope_stage_ids: readonly string[];
+  /**
+   * Whether an unassigned lead in this pipeline is this person's. A lead is
+   * on a person's list only when its current GHL assignee is that person, or
+   * it is unassigned and this is true (`salesBookingLeadBelongsTo`). Khairo
+   * and Stratco share the fencing pipeline, so a lead never shows on the
+   * wrong person's list and never gets a text from the wrong line.
+   */
+  owns_unassigned: boolean;
 }
 
 /**
@@ -128,8 +147,10 @@ export interface SalesBookingCalendarOverlay {
 }
 
 /**
- * v1 roster. `nithin` is the patio pipeline on line 774; `marnin` is the
- * fencing (Stratco) profile on line 776.
+ * Roster. `nithin` is the patio pipeline on line 774; `marnin` is the
+ * fencing (Stratco) profile on line 776; `khairo` is his own assigned fencing
+ * leads on line 772 (owner ruling 2026-09-24: each person's texts from their
+ * own number; lines in sales_booking_sender.ts).
  *
  * The 776 value is the CAPTAIN'S RECORDED DEFAULT, not a guess: the UI doc
  * marks Marnin's line unresolved between 772 and 776 and forbids the browser
@@ -144,8 +165,8 @@ export const SALES_BOOKING_RESOURCES: Readonly<
     resource_id: "nithin",
     lane: "patio",
     pipeline_id: "OGZLpPPVWVarN94HL6af",
-    scoper_user_id: "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
-    sender_line: "774",
+    scoper_user_id: SALES_BOOKING_SENDER_LINES.nithin.scoper_user_id,
+    sender_line: salesBookingLineLabel("nithin"),
     sender_line_source: "patio_profile_source_backed",
     // patio-nithin.json visit/reply/quote: waiting on a reply, needs a visit,
     // scope booked, quote to send. Dropped Client Needs To Be Contacted
@@ -156,13 +177,15 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "1c312cc2-b6f6-4aad-b3c0-a4b14784a5c5", // Scope Booked
       "9b9e5313-8e0e-4ed6-8654-d50413b99885", // Scope Complete / Quote to be Sent
     ],
+    // An unassigned patio lead is Nithin's.
+    owns_unassigned: true,
   },
   marnin: {
     resource_id: "marnin",
     lane: "fencing",
     pipeline_id: "I9t8njpuR0Dm7B2NDcvI",
-    scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
-    sender_line: "776",
+    scoper_user_id: SALES_BOOKING_SENDER_LINES.marnin.scoper_user_id,
+    sender_line: salesBookingLineLabel("marnin"),
     sender_line_source: "captain_default_2026-09-16",
     // fencing-stratco-marnin.json visit/reply/quote: replied, presentation,
     // urgent visit, booked, scheduled, quote to send. Dropped:
@@ -178,6 +201,30 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
+    // An unassigned fencing (Stratco) lead is Marnin's.
+    owns_unassigned: true,
+  },
+  khairo: {
+    resource_id: "khairo",
+    lane: "fencing",
+    pipeline_id: "I9t8njpuR0Dm7B2NDcvI",
+    scoper_user_id: SALES_BOOKING_SENDER_LINES.khairo.scoper_user_id,
+    sender_line: salesBookingLineLabel("khairo"),
+    sender_line_source: "wiki_fencing_khairo_profile_sms_from_number",
+    // Same visit/reply/quote stages as the Stratco profile: both profiles
+    // (fencing-khairo.json, fencing-stratco-marnin.json) list the one fencing
+    // pipeline's stages.
+    scope_stage_ids: [
+      "7f863a14-1d9f-4a18-b73c-0e1780390bd7", // New Lead (Replied/ Contacted)
+      "52c70bff-5cf3-447b-b891-03c30486aed8", // Call Answered (presentation not made)
+      "6b101809-a4f9-440d-ac4c-0be669b8173e", // Presentation Made (scope not booked)
+      "bfdba902-0a92-4a90-95a5-af27d7502a90", // Needs On Site Scope Urgently
+      "09eeb872-fa46-41fc-a96b-8a8d2bc12215", // Lead Closed (scope booked)
+      "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
+      "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
+    ],
+    // Only leads GHL assigns to him; an unassigned fencing lead is Stratco's.
+    owns_unassigned: false,
   },
 };
 
@@ -186,8 +233,7 @@ export const SALES_BOOKING_RESOURCES: Readonly<
  * config. Do not embed a guessed id. User ids stay null; this table records
  * work addresses plus `roster_emails` aliases. Confirmation (any recorded
  * address, then unique name):
- * `docs/sales-booking-read-contract-2026-09-16.md`. Khairo's email is
- * recorded here for roster confirmation; he is not a booking resource.
+ * `docs/sales-booking-read-contract-2026-09-16.md`.
  */
 export const SALES_BOOKING_GHL_USERS: Readonly<
   Record<string, {
@@ -1206,6 +1252,31 @@ export function projectSalesBookingCase(
 }
 
 /**
+ * Whether an opportunity with this GHL assignee is `resourceId`'s lead: its
+ * assignee is that person, or it is unassigned in a pipeline whose unassigned
+ * leads are theirs. The read list, both approval routes and the send check
+ * all ask this one question.
+ */
+export function salesBookingLeadBelongsTo(
+  assignedTo: unknown,
+  resourceId: string,
+  pipelineId: string,
+): boolean {
+  const resource = Object.hasOwn(SALES_BOOKING_RESOURCES, resourceId)
+    ? SALES_BOOKING_RESOURCES[resourceId]
+    : null;
+  if (!resource) return false;
+  const unassignedOwner =
+    Object.values(SALES_BOOKING_RESOURCES).find((row) =>
+      row.pipeline_id === pipelineId && row.owns_unassigned
+    )?.resource_id ?? null;
+  return salesBookingLeadOwner(
+    assignedTo,
+    unassignedOwner,
+  ) === resourceId;
+}
+
+/**
  * True when the opportunity is still in a stage that needs a visit, a reply
  * or a quote. Unknown or blank stage ids are out of scope (never the whole CRM).
  */
@@ -1611,9 +1682,8 @@ export function mergeSalesBookingDiaryEntries(
 /**
  * Pick the GHL mapping for this calendar read. `scoper_user_id` may override
  * the resource the same way it used to override the Outlook mailbox: only a
- * known v1 booking resource (Nithin / Marnin) maps. Anyone else is unmapped
- * — never a guess. Khairo's email is on SALES_BOOKING_GHL_USERS for roster
- * confirmation; he is not a booking resource.
+ * known booking resource (Nithin / Marnin / Khairo) maps. Anyone else is
+ * unmapped — never a guess.
  */
 export function resolveSalesBookingGhlMapping(
   resourceId: string,
@@ -2266,6 +2336,10 @@ export interface SalesBookingReadDependencies {
   readJobSites?(
     ids: { opportunityIds: string[]; contactIds: string[] },
   ): Promise<Record<string, SalesBookingJobSiteFact>>;
+  readOpportunityOwnership?(
+    opportunityId: string,
+    opts: { deadlineMs: number },
+  ): Promise<SalesBookingOpportunityOwnership>;
   now(): Date;
   loadThreadFactsCache?(
     resourceId: string,
@@ -2571,18 +2645,24 @@ export async function salesBookingRead(
     cachedRoster = null;
   }
 
-  const liveRoster = (
+  const liveRows = new Map<string, Record<string, unknown>>();
+  const liveRoster = async (
     resume?: {
       startAfter?: string | number | null;
       startAfterId?: string | null;
     },
-  ) =>
-    deps.readOpportunities({
+  ) => {
+    const scan = await deps.readOpportunities({
       pipelineId: resource.pipeline_id,
       deadlineMs,
       startAfter: resume?.startAfter,
       startAfterId: resume?.startAfterId,
     });
+    for (const row of scan.opportunities) {
+      if (typeof row.id === "string") liveRows.set(row.id, row);
+    }
+    return scan;
+  };
   const rosterFresh = !!cachedRoster &&
     salesBookingRosterIsComplete(cachedRoster) &&
     !forceRefresh &&
@@ -2638,6 +2718,61 @@ export async function salesBookingRead(
   ]);
 
   let opportunities = resolved.scan;
+  const ownedIds = new Set<string>();
+  const belongs = (ownership: SalesBookingOpportunityOwnership) =>
+    ownership.pipelineId === resource.pipeline_id &&
+    salesBookingLeadBelongsTo(
+      ownership.assignedTo,
+      resource.resource_id,
+      ownership.pipelineId,
+    );
+  const cachedCandidates = new Set<string>();
+  for (const raw of opportunities.opportunities) {
+    if (typeof raw.id !== "string" || !raw.id) continue;
+    const live = liveRows.get(raw.id);
+    if (live) {
+      if (
+        belongs({
+          assignedTo: live.assignedTo as string | null,
+          pipelineId: typeof live.pipelineId === "string"
+            ? live.pipelineId
+            : resource.pipeline_id,
+        })
+      ) ownedIds.add(raw.id);
+    } else if (
+      isSalesBookingScopeStage(
+        typeof raw.pipelineStageId === "string" ? raw.pipelineStageId : "",
+        resource.scope_stage_ids,
+      )
+    ) {
+      cachedCandidates.add(raw.id);
+    }
+  }
+  const candidates = [...cachedCandidates];
+  let ownershipUnread = 0;
+  let nextCandidate = 0;
+  await Promise.all(Array.from(
+    { length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, candidates.length) },
+    async () => {
+      while (nextCandidate < candidates.length) {
+        const id = candidates[nextCandidate++];
+        if (
+          !deps.readOpportunityOwnership || deps.now().getTime() >= deadlineMs
+        ) {
+          ownershipUnread++;
+          continue;
+        }
+        try {
+          const ownership = await deps.readOpportunityOwnership(id, {
+            deadlineMs,
+          });
+          if (belongs(ownership)) ownedIds.add(id);
+        } catch {
+          ownershipUnread++;
+        }
+      }
+    },
+  ));
   const scopedContactIds: string[] = [];
   const scopedOpportunityIds: string[] = [];
   for (const raw of opportunities.opportunities) {
@@ -2645,6 +2780,9 @@ export async function salesBookingRead(
       ? raw.pipelineStageId
       : "";
     if (!isSalesBookingScopeStage(stageId, resource.scope_stage_ids)) continue;
+    if (!ownedIds.has(String(raw.id))) {
+      continue;
+    }
     const contactId = salesBookingContactId(raw);
     if (contactId) scopedContactIds.push(contactId);
     if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
@@ -2706,6 +2844,10 @@ export async function salesBookingRead(
   const seen = new Set<string>();
   let excludedByStage = 0;
   for (const raw of opportunities.opportunities) {
+    // Another person's lead in a shared pipeline is not on this list at all.
+    if (!ownedIds.has(String(raw.id))) {
+      continue;
+    }
     const contactId = salesBookingContactId(raw);
     const opportunityId = typeof raw.id === "string" ? raw.id : "";
     const job = jobSites[opportunityId] ||
@@ -2738,7 +2880,7 @@ export async function salesBookingRead(
     params,
     deadlineMs,
   );
-  return assembleSalesBookingRead({
+  const response = assembleSalesBookingRead({
     resource,
     week,
     projectedCases: projected,
@@ -2748,6 +2890,13 @@ export async function salesBookingRead(
     threads,
     excludedByStage,
   });
+  if (ownershipUnread > 0) {
+    response.coverage.full_population = false;
+    response.coverage.gaps.push(
+      `${ownershipUnread} cached candidate(s) withheld because current opportunity ownership could not be read within the budget.`,
+    );
+  }
+  return response;
 }
 
 // ── Production wiring ────────────────────────────────────────
@@ -2760,6 +2909,48 @@ type GhlRetryHooks = {
   now?: () => Date;
   deadlineMs?: number;
 };
+
+export async function readSalesBookingOpportunityOwnership(
+  opportunityId: string,
+  retry: GhlRetryHooks = {},
+): Promise<SalesBookingOpportunityOwnership> {
+  const location = Deno.env.get("GHL_LOCATION_ID") || "";
+  if (!location) throw new Error("location_unconfigured");
+  const remainingMs = retry.deadlineMs == null
+    ? 10_000
+    : retry.deadlineMs - (retry.now?.() ?? new Date()).getTime();
+  if (remainingMs <= 0) throw new Error("time budget exhausted");
+  const response = await ghlRead(
+    `/opportunities/${encodeURIComponent(opportunityId)}`,
+    {
+      headers: { Version: "v3" },
+      signal: AbortSignal.timeout(Math.min(10_000, remainingMs)),
+    },
+    retry,
+  );
+  const opportunity = response?.opportunity as
+    | Record<string, unknown>
+    | undefined;
+  if (
+    !opportunity || opportunity.id !== opportunityId ||
+    (typeof opportunity.locationId === "string" &&
+      opportunity.locationId !== location) ||
+    !Object.hasOwn(opportunity, "assignedTo") ||
+    typeof opportunity.pipelineId !== "string" || !opportunity.pipelineId.trim()
+  ) throw new Error("opportunity_assignment_unreadable");
+  if (opportunity.assignedTo === null || opportunity.assignedTo === "") {
+    return { assignedTo: null, pipelineId: opportunity.pipelineId };
+  }
+  if (
+    typeof opportunity.assignedTo !== "string" || !opportunity.assignedTo.trim()
+  ) {
+    throw new Error("opportunity_assignment_unreadable");
+  }
+  return {
+    assignedTo: opportunity.assignedTo,
+    pipelineId: opportunity.pipelineId,
+  };
+}
 
 export async function ghlRead(
   path: string,
@@ -3506,6 +3697,8 @@ export function createSalesBookingReadDependencies(
       if (deadlineMs != null) retry.deadlineMs = deadlineMs;
       return readThreadLive(contactId, retry);
     },
+    readOpportunityOwnership: (id, { deadlineMs }) =>
+      readSalesBookingOpportunityOwnership(id, { ...retry, deadlineMs }),
     readContacts: (contactIds, opts) => {
       if (opts?.deadlineMs != null) retry.deadlineMs = opts.deadlineMs;
       return readContactsLive(contactIds, retry);

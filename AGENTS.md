@@ -2623,12 +2623,31 @@ narrowing, diagnosis, and deployment caveats are owned by
 `docs/evidence/trade-crew-visibility-lead-2026-08-03.md`; consult it before
 changing `trade_job_detail`, `set_job_lead`, or the lead/schema gate.
 
-The Trade app is a THREE-TIER model (Captain 2026-08-17): office
-(`admin/owner/ops_manager`, everything), division manager
-(`users.managed_verticals` contains the job's vertical, everything in that
-trade incl. the quote, allocates, sets the lead), allocated trade
-(`job_assignments` row, `is_lead` true OR false with NO visibility difference,
-everything except the quote). TRD-4 (2026-09-06) keeps that money fence and
+The Trade app is a THREE-TIER model, RE-TIERED 2026-09-24 ("go A"): office role
+(Ops Dashboard staff set, `admin/owner/ops_manager`) and Trade App job
+visibility are now two separate questions. Tier boundaries:
+see-everything (`users.trade_sees_all_jobs`, a new explicit per-user column —
+NOT role — target membership Shaun/Marnin/Jan/Esther: everything, every
+category, full history, every surface; migration `20260925040000` backfills it
+for every existing admin/owner/ops_manager so the deploy narrows nobody, and a
+separate approved data change narrows the rest), division/category manager
+(`users.managed_verticals` contains the job's vertical, role-independent:
+everything in that trade incl. the quote, allocates, sets the lead, full
+history — no more rolling window for a non-fencing vertical), allocated trade
+(non-cancelled, non-ghost `job_assignments` row, `is_lead` true OR false with NO visibility difference,
+everything except the quote, past AND present, on every surface including
+`search_all_jobs` which is now filtered server-side). The pre-existing
+`makesafe_open` field-report exception (any signed-in trade could open an
+unassigned make-safe) is RETIRED: only see-everything or a make-safe category
+manager may open/allocate one now, and a Trade App `submit_makesafe_report`
+passes the same tier gate (the Ops/routine path keeps its staff-role check). Full rule table, the retired
+`fencing_view_only`/`makesafe_view`/`makesafe_readonly` make-safe-board
+special cases, and the corrected `search_all_jobs` server-side scoping (which
+supersedes the 2026-07-31 "all means all" search behaviour):
+`docs/trade-all-means-all-v1.md`'s 2026-09-24 addendum. `OPS_API_STAFF_OPERATOR_ROLES`
+and every OTHER gate that reads it (Ops Dashboard actions, allocation authz,
+pricing, admin surfaces) are completely unchanged by this — it is a
+Trade-App-visibility-only cut. TRD-4 (2026-09-06) keeps that money fence and
 adds the writing: allocated / `makesafe_open` see quote narrative, descriptions,
 and quote numbers, and never unit prices, totals, rates, or `$` fields — see
 `docs/evidence/trd-4-trade-quote-video-contract-2026-09-06.md`. TRD-6 is the
@@ -2666,11 +2685,14 @@ named containers) so an unknown money key (`lineTotalEx`, `gstAmount`,
 cap rather than returning it verbatim. Scope-media registration is HTTPS
 only; `trade_job_detail` fetches every `type:video` on a separate uncapped
 lane so the 200-row media page cannot hide a walkthrough; `data:video` on
-that read is ignored (no upload-on-read, no invented URL). `makesafe_open` is a REPORT door, never a payroll
-one: it admits ANY signed-in trade to ANY make-safe job, so
-`trade_labour_budget` (every crew member's `trade_rates.hourly_rate` and cost)
-refuses that tier via `tradeLabourCostVisibleForTier` at the door, not in the
-shared predicate. The personal
+that read is ignored (no upload-on-read, no invented URL). `makesafe_open` (RETIRED
+2026-09-24 — see above) was a REPORT door, never a payroll one: it admitted ANY
+signed-in trade to ANY make-safe job, so `trade_labour_budget` (every crew
+member's `trade_rates.hourly_rate` and cost) refused that tier via
+`tradeLabourCostVisibleForTier` at the door, not in the shared predicate. The
+literal stays in `TradeJobAccessTier` and every downstream guard that compares
+against it, so those guards keep compiling even though the resolver can no
+longer produce it. The personal
 `my_jobs` lane is window-overlap recent (`_myJobsPersonalRecencyFilter`), not a
 start-date floor. Gap table, the live-report diagnosis, the restrictively
 resolved ambiguities and the front-end half:
@@ -3691,6 +3713,16 @@ The `CallCompleted`, `CustomerReplied` and `UserReplied` workflow doorbells, SMS
 setup, flag behavior, call mapping and recovery contract are owned by
 [`docs/context/ghl-message-reconcile.md`](docs/context/ghl-message-reconcile.md).
 
+## GHL History Loads As Backfill Under A Reserved Daily Cap
+
+The manual M4 entry point and request contract are in
+[`ghl-history-load/handler.ts`](supabase/functions/ghl-history-load/handler.ts).
+Read the load invariants in `ghl-history-load/history_load.ts` and the exact-key
+linking contract in `ghl-history-load/link.ts` before running either action.
+The database policy, atomic daily reservation and link/reversal guards belong to
+`20260925031500_context_ghl_history_load.sql`; its behavioural contract is in
+`supabase/tests/migration-contracts/20260925031500_context_ghl_history_load/`.
+
 ## A pg_cron Bearer Is Not The Function's Service Key
 
 pg_cron triggers call edge functions with `Bearer <sw_service_key()>`, a
@@ -3801,7 +3833,7 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 See `docs/trade-quote-lines-and-completion-evidence-2026-09-08.md`. Quote packs carry the quote's own rows (`quote_lines`) and writing (`quote_notes`); legacy sent quotes on active jobs freeze on first trade read; fencing job invoices require completion photos + neighbour sign-off (`trade_completion_evidence.ts`, trade actions `complete_my_job` / `waive_neighbour_signoff`).
 
-See `docs/trade-roof-report-any-makesafe-hours-2026-09-08.md`. A trade may attach a SecureWorks letterhead roof report to ANY make-safe (`submit_roof_report`); the reporting checklist advances only on report-type jobs. `log_my_job_hours` puts the trade's hours on their own assignment for the job with one tap (replaces, quarter-hour, refuses `invoiced_in`).
+See `docs/trade-roof-report-any-makesafe-hours-2026-09-08.md`. A trade may attach a SecureWorks letterhead roof report to any make-safe it holds a Trade App tier on (`submit_roof_report`; the three roof doors refuse tier `none` like every per-job door, pinned end-to-end in `trade_app_visibility_rules_test.ts`); the reporting checklist advances only on report-type jobs. `log_my_job_hours` puts the trade's hours on their own assignment for the job with one tap (replaces, quarter-hour, refuses `invoiced_in`).
 
 See `docs/trade-my-money-gst-2026-09-08.md`. `my_money` gives a trade earned / paid / owed / super by month and FY; `trade_invoices.paid_at|amount_paid|xero_bill_status` are mirrored from Xero by `xero-sync/trade_bill_status.ts` (keyed on `xero_bill_id`, never on reference text). `update_trade_profile` merges `trade_details`; GST default is the profile flag, never browser storage.
 
@@ -3846,7 +3878,11 @@ never machine-checked and never guessed.
 Only `sales_booking_book` / `sales_booking_send` act on an approval
 (`docs/sales-booking-executor.md`): dry run unless their switch is exactly
 `true` and a captain pressed, re-checked at the press, idempotent on the
-approval hash. The GHL writer refuses any real write that lacks that
+approval hash. Sender identity, current lead ownership, supported approval
+profiles and migration ordering are owned by
+`docs/sales-booking-confirmation-api.md` and `docs/sales-booking-executor.md`;
+`sales_booking_sender.ts` is the canonical people mapping. The GHL writer
+refuses any real write that lacks that
 executor's per-press claim, not just an approval
 (`docs/ghl-calendar-appointment-write.md`). After GHL holds the booking the
 executor writes its Outlook mirror (keyed on the GHL appointment id). One
@@ -3884,3 +3920,11 @@ found by source pointer (every live copy has one), `graph:` provider key, or
 marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 `attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
+
+## Email Capture Sources Are Data; The Old Poller Is Pinned
+
+The old monitor-inbox path must poll only `monitor-inbox/legacy_mailboxes.ts`,
+never `monitored_mailboxes`, which belongs to the new poller. Source changes,
+access, run-row naming and health are owned by
+[`docs/context/email-capture.md`](docs/context/email-capture.md); the migration
+contract's E22 case pins the old-path boundary.

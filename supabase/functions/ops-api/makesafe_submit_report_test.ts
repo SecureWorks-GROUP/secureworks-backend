@@ -121,7 +121,9 @@ function makeSubmitClient(
     const b: any = {
       select: () => b,
       eq: (col: string, val: any) => {
-        preds.push((r) => r?.[col] === val);
+        preds.push((r) =>
+          (col === "is_ghost" ? r?.[col] ?? false : r?.[col]) === val
+        );
         return b;
       },
       neq: (col: string, val: any) => {
@@ -260,6 +262,7 @@ Deno.test("submit_makesafe_report attributes a mixed-credential Trade request fr
     orgId: "org-test",
     role: "installer",
     managedVerticals: [],
+    seeEverything: false,
   });
   assertEquals(rows.job_service_reports[0].submitted_by, "hugo-user-id");
   assertEquals(rows.job_events[0].user_id, "hugo-user-id");
@@ -298,6 +301,7 @@ Deno.test("submit_makesafe_report JWT authority is tenant-scoped before report o
           orgId: "different-org",
           role: "installer",
           managedVerticals: [],
+          seeEverything: false,
         },
       ),
     Error,
@@ -305,6 +309,109 @@ Deno.test("submit_makesafe_report JWT authority is tenant-scoped before report o
   );
   assertEquals(rows.job_service_reports.length, 0);
   assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report through the Trade App refuses an unallocated ops_manager who is neither see-everything nor a make-safe manager; the Ops path is unchanged", async () => {
+  const opsManager = {
+    id: "ops-manager-1",
+    email: "ops@example.test",
+    orgId: "org-test",
+    role: "ops_manager",
+    managedVerticals: ["fencing"],
+    seeEverything: false,
+  };
+  const trade = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _dispatchMakesafeReportForTest(
+        trade.client,
+        validBody(),
+        "jwt",
+        opsManager,
+        false,
+      ),
+    Error,
+    "not assigned",
+  );
+  assertEquals(trade.rows.job_service_reports.length, 0);
+  assertEquals(trade.rows.job_assignments.length, 0);
+
+  const ghostOnly = makeSubmitClient(baseRows({
+    job_assignments: [{
+      id: "ghost-1",
+      job_id: "job-1",
+      user_id: "ops-manager-1",
+      status: "scheduled",
+      is_ghost: true,
+    }],
+  }));
+  await assertRejects(
+    () =>
+      _dispatchMakesafeReportForTest(
+        ghostOnly.client,
+        validBody(),
+        "jwt",
+        opsManager,
+        false,
+      ),
+    Error,
+    "not assigned",
+  );
+  assertEquals(ghostOnly.rows.job_service_reports.length, 0);
+
+  const ops = makeSubmitClient(baseRows());
+  const result: any = await _dispatchMakesafeReportForTest(
+    ops.client,
+    validBody(),
+    "jwt",
+    opsManager,
+  );
+  assertEquals(result.ok, true);
+  assertEquals(ops.rows.job_service_reports[0].submitted_by, "ops-manager-1");
+});
+
+Deno.test("submit_makesafe_report through the Trade App admits an allocated trade and a make-safe manager", async () => {
+  const allocated = makeSubmitClient(baseRows({
+    job_assignments: [{
+      id: "assign-1",
+      job_id: "job-1",
+      user_id: "trade-1",
+      status: "scheduled",
+      is_ghost: false,
+    }],
+  }));
+  const allocatedResult: any = await _dispatchMakesafeReportForTest(
+    allocated.client,
+    validBody(),
+    "jwt",
+    {
+      id: "trade-1",
+      email: "trade@example.test",
+      orgId: "org-test",
+      role: "crew",
+      managedVerticals: [],
+      seeEverything: false,
+    },
+    false,
+  );
+  assertEquals(allocatedResult.ok, true);
+
+  const manager = makeSubmitClient(baseRows());
+  const managerResult: any = await _dispatchMakesafeReportForTest(
+    manager.client,
+    validBody(),
+    "jwt",
+    {
+      id: "hugo-user-id",
+      email: "hugo@example.test",
+      orgId: "org-test",
+      role: "ops_manager",
+      managedVerticals: ["makesafe"],
+      seeEverything: false,
+    },
+    false,
+  );
+  assertEquals(managerResult.ok, true);
 });
 
 Deno.test("submit_makesafe_report routine callers may save drafts but cannot finalize a trade report", async () => {
@@ -390,7 +497,18 @@ Deno.test("submit_makesafe_report rejects final submit with fewer than 5 photos"
 });
 
 Deno.test("confirm_upload stamps a MakeSafe photo with the server current cycle", async () => {
-  const { client, rows } = makeSubmitClient(baseRows());
+  // makesafe_open retired 2026-09-24: this test exercises cycle-stamping, not
+  // access-tier behaviour, so the caller now needs a real assignment — the
+  // open-report door it used to ride is gone.
+  const { client, rows } = makeSubmitClient(baseRows({
+    job_assignments: [{
+      id: "assignment-trade-1",
+      job_id: "job-1",
+      user_id: "trade-1",
+      status: "scheduled",
+      role: "lead_installer",
+    }],
+  }));
 
   const result: any = await _confirmUploadForTest(
     client,
@@ -1591,8 +1709,33 @@ Deno.test("submit_service_report delegates a live generic MakeSafe final into ac
   );
 });
 
-Deno.test("submit_service_report delegates MakeSafe drafts without assignment or final side effects", async () => {
+Deno.test("submit_service_report refuses an unallocated trade's MakeSafe report before any write", async () => {
   const { client, rows } = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _submitServiceReportForTest(client, {
+        job_id: "job-1",
+        userId: "trade-1",
+        checklist: [{ item: "final through generic caller" }],
+        notes: "final",
+        status: "submitted",
+      }, { orgId: "org-test", managedVerticals: [] }),
+    Error,
+    "You are not assigned to this job",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_events.length, 0);
+});
+
+Deno.test("submit_service_report delegates an allocated trade's MakeSafe draft without final side effects", async () => {
+  const assignment = {
+    id: "assignment-1",
+    job_id: "job-1",
+    user_id: "trade-1",
+    status: "scheduled",
+  };
+  const { client, rows } = makeSubmitClient(baseRows({ job_assignments: [assignment] }));
   const result: any = await _submitServiceReportForTest(client, {
     job_id: "job-1",
     userId: "trade-1",
@@ -1603,7 +1746,7 @@ Deno.test("submit_service_report delegates MakeSafe drafts without assignment or
 
   assertEquals(result.report.status, "draft");
   assertEquals(result.report.cycle_attribution, "bound");
-  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_assignments, [assignment]);
   assertEquals(rows.job_events.length, 0);
 });
 

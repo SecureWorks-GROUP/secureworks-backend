@@ -25,13 +25,12 @@ import {
   systemOfferCensus,
 } from "./sales_booking_owner_approval.ts";
 import {
+  SALES_BOOKING_RESOURCES,
   salesBookingRead,
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
-import {
-  SALES_BOOKING_SEND_LINE,
-  salesBookingSendAction,
-} from "./sales_booking_execute.ts";
+import { salesBookingSendAction } from "./sales_booking_execute.ts";
+import { SALES_BOOKING_SENDER_LINES } from "./sales_booking_sender.ts";
 
 // Wed 23 Sep 2026, 10:00 Perth. Friday is 25 Sep.
 const NOW = new Date("2026-09-23T02:00:00Z");
@@ -156,6 +155,13 @@ function deps(o: Overrides = {}) {
         job_site: o.jobSite ?? null,
       }),
     readThread: () => Promise.resolve(o.thread ?? []),
+    // The lead's live GHL assignee: unassigned (Stratco default), or the
+    // person's own user for a Khairo list.
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: o.resource === "khairo" ? "RgDWTnYL6zL3eJA6nLht" : null,
+        pipelineId: SALES_BOOKING_RESOURCES[o.resource ?? "marnin"].pipeline_id,
+      }),
     readGhlDirectory: () => Promise.resolve(calendarDirectory()),
     readGhlEvents: (selector) => {
       calls.push(`ghl:${JSON.stringify(selector)}`);
@@ -258,6 +264,9 @@ Deno.test("owner message: an edited text is approved, bound to text, contact, 77
   );
   assertEquals(rows.length, 1);
   assertEquals(result.checks.hand_sent_texts, "not_machine_checked");
+  // The screen is told which line the text goes from, and whose it is.
+  assertEquals(result.checks.sender.line, "+61489267776");
+  assertEquals(result.checks.sender.person, "marnin");
   // The executor accepts it exactly like an engine approval.
   assertEquals(
     await approvalGateRefusal(record, "message", NOW, [
@@ -291,6 +300,12 @@ Deno.test("owner message: the executor dry-runs the owner's exact text from 776"
       readThread: () => Promise.resolve([]),
       readOutlook: () => Promise.reject(new Error("unused")),
       readContactPhone: () => Promise.resolve("0412 345 678"),
+      // An unassigned Stratco lead is Marnin's.
+      readOpportunityOwnership: () =>
+        Promise.resolve({
+          assignedTo: null,
+          pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        }),
       readOutlookLead: () => Promise.reject(new Error("unused")),
       mirrorToOutlook: () => Promise.reject(new Error("unused")),
       callAppointmentWriter: () => Promise.reject(new Error("unused")),
@@ -342,7 +357,8 @@ Deno.test("owner message refusals: each rule is named and nothing is written", a
     ["contact_unreadable", {
       readLead: () => Promise.reject(new Error("down")),
     }, {}],
-    ["stratco_profile_required", { resource: "nithin" }, {}],
+    // The screen asked for Marnin's lead but the read is Nithin's list.
+    ["booking_profile_required", { resource: "nithin" }, {}],
   ];
   for (const [reason, over, extra] of cases) {
     const { deps: d, rows } = deps(over);
@@ -914,6 +930,7 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   const [owner, engine] = out.cases.map((c) => (c as any).owner_booking);
   assertEquals(owner.engine_proposal, false);
   assertEquals(owner.eligible, true);
+  assertEquals(owner.steps, ["message", "calendar"]);
   assertEquals(owner.approvals.length, 1);
   assertEquals(owner.approvals[0].approval_id, result.approval.binding_hash);
   assertEquals(owner.rulebook.days, ["Tue", "Fri"]);
@@ -949,15 +966,25 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   );
   // deno-lint-ignore no-explicit-any
   assertEquals((broken.cases[0] as any).owner_booking.approvals, null);
-  // Patio desk: the owner path is Stratco only.
+  // Patio desk: the owner writes a text for Nithin's lead, never a visit, and
+  // only Nithin's own approvals are read.
+  const asked: Array<string | undefined> = [];
   const patio = await applyOwnerBooking(
     await workspace([{}], "nithin"),
-    () => Promise.resolve([]),
+    (_since, resource) => {
+      asked.push(resource);
+      return Promise.resolve([]);
+    },
     NOW,
   );
-  assertEquals(patio.booking_flow?.owner_approval_write, null);
+  assertEquals(asked, ["nithin"]);
+  assertEquals(patio.booking_flow?.owner_approval_write, "owner-authored-v1");
+  assertEquals(patio.booking_flow?.owner_rulebook, null);
   // deno-lint-ignore no-explicit-any
-  assertEquals((patio.cases[0] as any).owner_booking.eligible, false);
+  const nithinCase = (patio.cases[0] as any).owner_booking;
+  assertEquals(nithinCase.eligible, true);
+  assertEquals(nithinCase.steps, ["message"]);
+  assertEquals(nithinCase.rulebook, null);
 });
 
 Deno.test("bookable dates skip today's passed Friday and non-Stratco days", () => {
@@ -967,7 +994,10 @@ Deno.test("bookable dates skip today's passed Friday and non-Stratco days", () =
     ["2026-09-29", "2026-10-02"],
   );
   assertEquals(STRATCO_BOOKING_RULEBOOK.sender, "+61489267776");
-  assertEquals(STRATCO_BOOKING_RULEBOOK.sender, SALES_BOOKING_SEND_LINE);
+  assertEquals(
+    STRATCO_BOOKING_RULEBOOK.sender,
+    SALES_BOOKING_SENDER_LINES.marnin.line,
+  );
 });
 
 Deno.test("engine path still works when owner reads are wired, and never touches them", async () => {
@@ -1050,7 +1080,22 @@ Deno.test("owner request shape refusals and a decision already recorded on the s
   );
   await refusal(
     call(d, {
-      owner_input: input("message", { resource: "nithin" }),
+      owner_input: input("message", { resource: "someone-else" }),
+      dry_run: true,
+    }),
+    "booking_profile_required",
+  );
+  // A visit or an offered slot is the Stratco rulebook only.
+  await refusal(
+    call(d, {
+      owner_input: input("calendar", { resource: "nithin" }),
+      dry_run: true,
+    }),
+    "stratco_profile_required",
+  );
+  await refusal(
+    call(d, {
+      owner_input: input("message", { resource: "khairo", offer: FRI }),
       dry_run: true,
     }),
     "stratco_profile_required",
@@ -1460,4 +1505,171 @@ Deno.test("travel retains the authoritative suburb when its name occurs in the s
       );
     }
   }
+});
+
+// ── Nithin's and Khairo's texts through the real approval gate ─────────────
+
+/** Each person's GHL user id: a lead assigned to it is that person's. */
+const ASSIGNEE: Record<string, string | null> = {
+  marnin: null,
+  nithin: "ERAycY7r6KZ8OA66WQCy",
+  khairo: "RgDWTnYL6zL3eJA6nLht",
+};
+
+Deno.test("owner message for Nithin and Khairo: approved through the gate, sent from their own line", async () => {
+  const people: Array<[string, string, string, string]> = [
+    [
+      "nithin",
+      "patio-nithin",
+      "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
+      "+61489267774",
+    ],
+    [
+      "khairo",
+      "fencing-khairo",
+      "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      "+61489267772",
+    ],
+  ];
+  for (const [resource, profile, scoperUserId, line] of people) {
+    const { deps: d, rows } = deps({ resource });
+    const text =
+      `Hi Michael, ${resource} from SecureWorks. Does Thursday suit?`;
+    const result = await approve(
+      d,
+      input("message", { resource, text }),
+    );
+    assert("approval" in result);
+    const record = result.approval;
+    assertEquals(rows.length, 1);
+    assertEquals(record.resource, resource);
+    assertEquals(record.snapshot.profile, profile);
+    assertEquals(record.snapshot.scoper_user_id, scoperUserId);
+    assertEquals(record.snapshot.content, {
+      text,
+      sender: line,
+      recipient: "+61412345678",
+      variant: "owner",
+      offer: null,
+    });
+    assertEquals(result.checks.sender.line, line);
+    assertEquals(result.checks.sender.person, resource);
+    assertEquals("source" in result.checks.sender, false);
+    // The owner is still the only approver.
+    assertEquals(
+      await approvalGateRefusal(record, "message", NOW, [
+        "marnin@secureworkswa.com.au",
+      ]),
+      null,
+    );
+    assertEquals(
+      await approvalGateRefusal(record, "message", NOW, [
+        "someone@secureworkswa.com.au",
+      ]),
+      "approval_not_by_captain",
+    );
+    // A live press sends that exact text from that person's line, once.
+    const sms: BookingObject[] = [];
+    const ledger: BookingObject[] = [];
+    const sent = await salesBookingSendAction({
+      auth: auth as never,
+      body: { approval_id: record.binding_hash },
+      method: "POST",
+      deps: {
+        findApproval: () => Promise.resolve(record),
+        appointmentLedger: () => Promise.resolve(null),
+        readThread: () => Promise.resolve([]),
+        readOutlook: () => Promise.reject(new Error("unused")),
+        readContactPhone: () => Promise.resolve("0412 345 678"),
+        readOpportunityOwnership: () =>
+          Promise.resolve({
+            assignedTo: ASSIGNEE[resource],
+            pipelineId: SALES_BOOKING_RESOURCES[resource].pipeline_id,
+          }),
+        readOutlookLead: () => Promise.reject(new Error("unused")),
+        mirrorToOutlook: () => Promise.reject(new Error("unused")),
+        callAppointmentWriter: () => Promise.reject(new Error("unused")),
+        callSendSms: (body) => {
+          sms.push(body);
+          return Promise.resolve({
+            status: 200,
+            body: { success: true, messageId: `msg-${resource}` },
+          });
+        },
+        executions: {
+          get: () => Promise.resolve(null),
+          claim: (row) => {
+            ledger.push(row);
+            return Promise.resolve(true);
+          },
+          settle: () => Promise.resolve(),
+        },
+        envGet: (name: string) =>
+          name === "SALES_BOOKING_SEND_EXECUTE" ? "true" : undefined,
+        now: () => new Date(NOW.getTime() + 60_000),
+      },
+    });
+    assertEquals(sent.status, "sent");
+    assertEquals(sms, [{
+      contactId: CONTACT,
+      message: text,
+      fromNumber: line,
+    }]);
+    assertEquals(ledger.length, 1);
+  }
+});
+
+Deno.test("owner approval: a lead assigned to someone else never takes this person's path", async () => {
+  // Marnin's screen, but GHL now assigns the lead to Khairo: refused, nothing
+  // recorded, both at preview and at the decision.
+  const { deps: d, rows } = deps({
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: "RgDWTnYL6zL3eJA6nLht",
+        pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+      }),
+  });
+  await refusal(
+    call(d, { owner_input: input("message"), dry_run: true }),
+    "lead_assigned_to_someone_else",
+  );
+  assertEquals(rows.length, 0);
+  const movedToPatio = deps({
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: null,
+        pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
+      }),
+  });
+  await refusal(
+    call(movedToPatio.deps, {
+      owner_input: input("message"),
+      dry_run: true,
+    }),
+    "lead_assigned_to_someone_else",
+  );
+  // Khairo's screen on a lead that is not assigned to him.
+  const k = deps({
+    resource: "khairo",
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: null,
+        pipelineId: SALES_BOOKING_RESOURCES.khairo.pipeline_id,
+      }),
+  });
+  await refusal(
+    call(k.deps, {
+      owner_input: input("message", { resource: "khairo" }),
+      dry_run: true,
+    }),
+    "lead_assigned_to_someone_else",
+  );
+  // An unreadable assignment refuses; it never guesses Marnin.
+  const u = deps({
+    readOpportunityOwnership: () => Promise.reject(new Error("down")),
+  });
+  await refusal(
+    call(u.deps, { owner_input: input("message"), dry_run: true }),
+    "opportunity_assignment_unreadable",
+  );
 });

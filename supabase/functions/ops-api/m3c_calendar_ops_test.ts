@@ -121,7 +121,7 @@ function calFeedClient(calRows: any[]) {
   function builder(table: string) {
     const b: any = {
       select: () => b,
-      or: (s: string) => { captured.or = s; return b; },
+      or: (s: string) => { if (table === "calendar_events") captured.or = s; return b; },
       lte: (col: string, val: string) => { if (table === "calendar_events" && captured.lteCol === undefined) { captured.lteCol = col; captured.lteVal = val; } return b; },
       gte: () => b, eq: () => b, neq: () => b, in: () => b,
       order: () => b,
@@ -151,4 +151,38 @@ Deno.test("U-O3(e): truncated flag is true exactly when the 500 cap is hit, fals
   const r2 = await calendarEvents(calFeedClient(full.slice(0, 3)).client, params("2026-07-08", "2026-07-14"));
   assertEquals((r2 as any).truncated, false, "3 rows -> not truncated");
   assertEquals((r2 as any).events.length, 3, "events pass through");
+});
+
+// ── Org events: holidays / company days ride the calendar feed as `orgEvents` ──
+Deno.test("orgEvents: calendarEvents returns org_events for the window so holiday badges render", async () => {
+  const holiday = { id: "h1", event_date: "2026-09-28", event_end: null, title: "King's Birthday (WA)", event_type: "public_holiday" };
+  const captured: { or?: string } = {};
+  const client = {
+    from: (table: string) => {
+      const b: any = {
+        select: () => b, eq: () => b, neq: () => b, in: () => b, gte: () => b, lte: () => b, order: () => b, limit: () => b,
+        or: (s: string) => { if (table === "org_events") captured.or = s; return b; },
+        then: (res: any, rej: any) => Promise.resolve({ data: table === "org_events" ? [holiday] : [], error: null }).then(res, rej),
+      };
+      return b;
+    },
+  };
+  const r: any = await calendarEvents(client, params("2026-09-28", "2026-10-04"));
+  assertEquals(r.orgEvents, [holiday]);
+  assert(captured.or!.includes("event_end.gte.2026-09-28"), "a multi-day company day overlapping the window is included");
+});
+
+Deno.test("orgEvents: an org_events read error leaves the calendar intact with an empty list", async () => {
+  const client = {
+    from: (table: string) => {
+      const b: any = {
+        select: () => b, eq: () => b, neq: () => b, in: () => b, gte: () => b, lte: () => b, order: () => b, limit: () => b, or: () => b,
+        then: (res: any, rej: any) => Promise.resolve(table === "org_events" ? { data: null, error: { message: "boom" } } : { data: [], error: null }).then(res, rej),
+      };
+      return b;
+    },
+  };
+  const r: any = await calendarEvents(client, params("2026-09-28", "2026-10-04"));
+  assertEquals(r.orgEvents, []);
+  assertEquals(r.events, []);
 });

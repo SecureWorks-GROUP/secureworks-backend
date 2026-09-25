@@ -28,6 +28,7 @@ import {
   messageTimestamp,
   SALES_BOOKING_NOT_GIVEN,
   SALES_BOOKING_OUTLOOK_MAILBOXES,
+  salesBookingLeadBelongsTo,
   type SalesBookingMessage,
 } from "./sales_booking_read.ts";
 import {
@@ -37,6 +38,8 @@ import {
   type OutlookMirrorResult,
   type OutlookMirrorWriteOptions,
 } from "./sales_booking_outlook_mirror.ts";
+import { salesBookingSenderFor } from "./sales_booking_sender.ts";
+import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 
 // deno-lint-ignore no-explicit-any
 type Obj = Record<string, any>;
@@ -45,8 +48,6 @@ export type ExecuteKind = "book" | "send";
 /** Env switches. Only the exact value "true" executes; anything else is dry run. */
 export const SALES_BOOKING_BOOK_EXECUTE_ENV = "SALES_BOOKING_BOOK_EXECUTE";
 export const SALES_BOOKING_SEND_EXECUTE_ENV = "SALES_BOOKING_SEND_EXECUTE";
-/** The Stratco booking line. Friday's texts all come from 776 (Group Ops). */
-export const SALES_BOOKING_SEND_LINE = "+61489267776";
 
 /** What the press did to the owner's Outlook calendar (Decision D2). */
 export type OutlookMirrorOutcome =
@@ -159,6 +160,9 @@ export interface SalesBookingExecuteDeps {
     endIso: string,
   ): Promise<OutlookRead>;
   readContactPhone(contactId: string): Promise<string | null>;
+  readOpportunityOwnership(
+    opportunityId: string,
+  ): Promise<SalesBookingOpportunityOwnership>;
   /** GHL contact plus the suburb the booking read publishes for this lead. */
   readOutlookLead(args: {
     contactId: string;
@@ -836,8 +840,18 @@ export async function salesBookingSendAction(args: {
     typeof text !== "string" || !text || typeof recipient !== "string" ||
     typeof contactId !== "string" || !contactId
   ) return refused("content_hash_mismatch");
-  if (sender !== SALES_BOOKING_SEND_LINE) return refused("sender_not_line_776");
-
+  // The text goes from the line of the person doing the visit, and only when
+  // the approved sender is that line. The sender sits inside the approval
+  // hash, so an approval for one line can never send from another.
+  const who = salesBookingSenderFor(loaded.snapshot);
+  if (!who.ok) return refused(who.reason, who.detail);
+  if (sender !== who.sender.line) {
+    return refused("sender_not_scoper_line", {
+      approved_sender: typeof sender === "string" ? sender : null,
+      scoper_line: who.sender.line,
+      person: who.sender.person,
+    });
+  }
   // The approved recipient must still be the contact's number in GHL.
   let phone: string | null;
   try {
@@ -857,11 +871,45 @@ export async function salesBookingSendAction(args: {
     )
   ) return refused("text_already_in_thread");
 
+  // The lead must still be this person's in GHL right now (its current
+  // assignee, or unassigned where their pipeline's unassigned leads are
+  // theirs). A lead moved to someone else never gets this person's line.
+  const approvedId = loaded.snapshot.id;
+  const opportunityId =
+    typeof approvedId === "string" && approvedId.startsWith("opp:")
+      ? approvedId.slice(4)
+      : "";
+  if (!opportunityId) return refused("opportunity_identity_invalid");
+  let ownership: SalesBookingOpportunityOwnership;
+  try {
+    ownership = await deps.readOpportunityOwnership(opportunityId);
+  } catch {
+    return refused("opportunity_assignment_unreadable");
+  }
+  if (
+    !salesBookingLeadBelongsTo(
+      ownership.assignedTo,
+      who.sender.person,
+      ownership.pipelineId,
+    )
+  ) {
+    return refused("opportunity_assignee_changed", {
+      person: who.sender.person,
+      current_assignee: ownership.assignedTo,
+      current_pipeline_id: ownership.pipelineId,
+    });
+  }
+
   const wouldSend = {
     method: "POST",
     path: "ghl-proxy?action=send_sms",
-    body: { contactId, message: text, fromNumber: sender },
+    body: { contactId, message: text, fromNumber: who.sender.line },
     recipient,
+    sender: {
+      line: who.sender.line,
+      person: who.sender.person,
+      name: who.sender.name,
+    },
   };
   if (!loaded.live) {
     return {
