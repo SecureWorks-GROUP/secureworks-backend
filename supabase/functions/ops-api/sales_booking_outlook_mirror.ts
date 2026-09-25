@@ -30,14 +30,26 @@
 // ── NO INVITATION ──
 // The event has no attendees and `responseRequested:false`, so creating it
 // sends no mail to anyone. The mailbox is a server constant per booking
-// resource (`SALES_BOOKING_OUTLOOK_MAILBOXES`), never caller-chosen.
+// resource (`SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES`), never caller-chosen.
 
 import {
   PERTH_TIMEZONE,
   SALES_BOOKING_GHL_MIRROR_PROPERTY_ID,
-  SALES_BOOKING_OUTLOOK_MAILBOXES,
 } from "./sales_booking_read.ts";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
+
+/**
+ * Booking resources whose Outlook calendar the mirror WRITES: Marnin only.
+ * Deliberately separate from, and narrower than, the diary READ map
+ * (`SALES_BOOKING_OUTLOOK_MAILBOXES`, every scoper since the 25 Sep 2026
+ * tenant-wide Calendars.Read consent). Widening who is read must never widen
+ * who is written; a new name here is its own decision.
+ */
+export const SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES: Readonly<
+  Record<string, string>
+> = {
+  marnin: "marnin@secureworkswa.com.au",
+};
 
 export const SALES_BOOKING_OUTLOOK_MIRROR_FLAG =
   "SALES_BOOKING_OUTLOOK_MIRROR_WRITE_ENABLED";
@@ -162,7 +174,7 @@ export function buildOutlookMirrorRequest(
   ok: false;
   reason: string;
 } {
-  const mailbox = SALES_BOOKING_OUTLOOK_MAILBOXES[input?.resource_id];
+  const mailbox = SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES[input?.resource_id];
   if (!mailbox) {
     return { ok: false, reason: "resource has no Outlook calendar configured" };
   }
@@ -288,7 +300,7 @@ export async function writeOutlookMirrorEvent(
     };
   }
 
-  const mailbox = SALES_BOOKING_OUTLOOK_MAILBOXES[input.resource_id];
+  const mailbox = SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES[input.resource_id];
   const ghlId = input.ghl_appointment_id;
   let existing: OutlookMirrorGraphResponse;
   try {

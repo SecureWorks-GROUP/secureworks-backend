@@ -850,6 +850,27 @@ Deno.test("a missing published suburb refuses before GHL; a GHL-only person book
   );
   assertEquals(g.calls.contactReads, 0);
   assertEquals(g.calls.outlookPosts.length, 0);
+
+  // Khairo's Outlook is READ into the booking week (25 Sep 2026), but the
+  // mirror still writes Marnin only: reading someone is not writing to them.
+  const khairo = await approval("calendar", CALENDAR, {}, {
+    resource: "khairo",
+    scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+    id: "opp:khairo-lead",
+    profile: "fencing-khairo",
+  });
+  const k = fakes([khairo], LIVE);
+  const khairoResult = await book(k, khairo.binding_hash);
+  assertEquals(
+    khairoResult.status === "booked" && khairoResult.outlook_mirror,
+    {
+      outlook: "not_applicable",
+      reason: "resource_has_no_outlook_calendar",
+      message:
+        "This person books in GHL only; there is no Outlook calendar to write.",
+    },
+  );
+  assertEquals(k.calls.outlookPosts.length, 0);
 });
 
 Deno.test("Outlook title uses the suburb the booking read publishes, including address1-is-suburb, job overlay, and St James", async () => {

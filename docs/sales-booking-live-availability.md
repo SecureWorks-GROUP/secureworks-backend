@@ -28,8 +28,11 @@ After the pack overlay, for the person on screen:
    calendar assigned to that person, with both calendar and user filters.
    Other assignees and cancelled rows never block.
 3. GHL blocked-off time for the user (`/calendars/blocked-slots`).
-4. Outlook events the read already fetched for the diary (Marnin only) are
-   also busy. No new Outlook read. A failed Outlook read is a caveat, not a
+4. Outlook events the read already fetched for the diary (every scoper with
+   a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`: Nithin, Marnin, Khairo) are
+   also busy. An unmarked exact-span copy of a GHL visit was already folded
+   into that visit by the read, so it is neither a second busy block nor
+   counted in `unverified_correspondence`. No new Outlook read. A failed Outlook read is a caveat, not a
    block: GHL is the source, and the press still re-checks Outlook. An Outlook
    event is counted as mirrored only when its `mirror_of_ghl_event_id` matches
    a GHL event id; time overlap or blocked time is not mirror proof. If the
@@ -158,7 +161,9 @@ his GHL calendar:
    sync success or failure and need not fall to zero after connection.
 
 The dated directory read found calendars for Nithin and Khairo. Their Outlook
-conflict-calendar connections were not established by that read.
+conflict-calendar connections were not established by that read. Since 25 Sep
+2026 the server reads their Outlook primary calendars directly into the diary
+(tenant-wide Calendars.Read consent), independent of any GHL connection.
 
 ## Follow-ups
 

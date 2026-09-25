@@ -139,8 +139,10 @@ Additions:
 
 - **`diary[]`** — the scoper's GHL calendar events for Mon..Sun of
   `week_start`, merged with that person's Outlook primary calendar when the
-  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (today: `marnin`;
-  decision D2, 23 Sep 2026). Each entry: `event_id`, `start`, `end` (ISO with
+  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (`marnin` since
+  decision D2, 23 Sep 2026; `nithin` and `khairo` since the 25 Sep 2026
+  tenant-wide Calendars.Read consent). That map is read only: the booking
+  writes Outlook for `SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES` alone (Marnin). Each entry: `event_id`, `start`, `end` (ISO with
   `+08:00`), `title`, `kind` (`busy` | `leave` | `personal`), `source`
   (`ghl` | `outlook`), plus `show_as`, `blocks_capacity`, `is_all_day`,
   `location`, `title_withheld`, `mirror_of_ghl_event_id`, and `booked_visit`
@@ -152,7 +154,15 @@ Additions:
   An Outlook event written by the booking mirror
   (`sales_booking_outlook_mirror.ts`) names its GHL appointment in
   `mirror_of_ghl_event_id`; both rows stay so each calendar shows event for
-  event.
+  event. An UNMARKED Outlook event that is GHL's own sync copy of a visit
+  (busy, not all-day, same start and end as a capacity-blocking GHL event of
+  the same person) is folded into that GHL row as
+  `outlook_copy: {event_id, title}` and leaves the diary, so one visit shows
+  and holds its time once (`foldSalesBookingOutlookCopies`; live case: Khairo,
+  Tue 29 Sep 10:00-10:30, GHL blank title, Outlook "Fencing Complaint Basil
+  Laing"). Each GHL row absorbs at most one copy.
+  `diary_read.sources.outlook.ghl_copies_folded` counts them; `event_count`
+  stays the raw Outlook count.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,

@@ -73,8 +73,8 @@ Both actions:
    (`_shared/graph_client.ts`, mailbox from `SALES_BOOKING_GHL_USERS`). Any busy
    event refuses `outlook_calendar_clash`, naming subject and times; a failed
    read refuses `outlook_unreadable`. Free and cancelled events never block.
-7. When the resource has an Outlook calendar
-   (`SALES_BOOKING_OUTLOOK_MAILBOXES`): published suburb and client name,
+7. When the resource is one the mirror writes
+   (`SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES`, Marnin only): published suburb and client name,
    before any GHL write (dry run included). Suburb is
    `salesBookingPublishedSuburb` (the same value the booking read publishes).
    Missing that value, a usable name, or the contact read refuses
@@ -136,7 +136,7 @@ the GHL contact; suburb is the one the booking read already publishes
 | `written` | Outlook holds the event (`outlook_event_id`). `reason: "already_mirrored"` when an earlier press wrote it. |
 | `dry_run` | Nothing written. `would_write` is the exact Graph request. `reason` is the press's dry-run reason (`api_key_press_is_dry_run`, `dry_run_requested`, `book_switch_off`, or `appointment_writer_flag_off`). A dry run names the GHL id as `pending_ghl_appointment_id`. |
 | `failed` | GHL is booked, Outlook is not. `reason` names why (`mirror_write_failed: outlook_create_http_403`, `mirror_outcome_unknown: ...`, `contact_unreadable`, ...). |
-| `not_applicable` | The resource has no Outlook calendar (`SALES_BOOKING_OUTLOOK_MAILBOXES`; GHL-only people such as Nithin). |
+| `not_applicable` | The booking does not write this resource's Outlook (`SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES` is Marnin only; Nithin and Khairo book in GHL only). Their Outlook is still READ into the diary (`SALES_BOOKING_OUTLOOK_MAILBOXES`); the read map never widens the write. |
 
 Every response carries a plain `message`. The booking always stands; the mirror
 never turns a booking into a refusal. **Retry:** pressing the same approval
