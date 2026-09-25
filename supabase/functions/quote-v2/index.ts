@@ -1,5 +1,7 @@
-// Quote v2 party link page, acceptance and staff actions. PROGRAM BRANCH
-// ONLY: not deployed until the owner carries the quote v2 program over.
+// Quote v2 party link page, acceptance, server build, rendering and the
+// owner-stamped send. PROGRAM BRANCH ONLY: not deployed until the owner
+// carries the quote v2 program over. Sends are captured, never delivered,
+// unless a staging-only gate is open (delivery.ts).
 // Deploy with --no-verify-jwt: customers open their link with no session.
 // Staff actions therefore never trust a JWT claim; handler.ts verifies the
 // session itself. Logic and contract live in handler.ts.
@@ -26,8 +28,10 @@ Deno.serve((req) =>
       return {
         role: typeof role === "string" ? role : "",
         actor: data.user.email || data.user.id,
+        email: data.user.email ?? null,
       };
     },
+    fetch: (input, init) => fetch(input, init),
     rpc: async (fn, args) => {
       const { data, error } = await sb.rpc(fn, args);
       return { data, error: error ? { message: error.message } : null };

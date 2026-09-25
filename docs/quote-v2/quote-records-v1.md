@@ -10,8 +10,10 @@ pay, and per-party totals computed once at freeze that sum to the job to the
 cent. Each party reaches it through their own link, which can only ever show
 and accept that party's own current revision. New tables and functions only:
 the legacy `send-quote` paths, `job_documents`, `job_contacts` and
-`quote_revisions` are untouched. Nothing sends, emails, or writes jobs, GHL or
-Xero; the branded page, sending and deposits are stage 3.
+`quote_revisions` are untouched. Nothing here sends, emails, or writes jobs,
+GHL or Xero. Stage 3 adds the server build, the branded page and PDF, and the
+stamped send: [`server-build-and-send-v1.md`](server-build-and-send-v1.md).
+Deposits are not built yet.
 
 Schema and every rule: `supabase/migrations/20260925020000_quote_v2_records.sql`.
 Executable proof: migration contract
@@ -43,7 +45,8 @@ Cost (per unit, ex GST) comes from one of:
   supplier's price for THAT length, else its generic $/LM rate, else the line
   is refused `quote_line_unpriced`. The line records item, cost row, supplier,
   rate date, blessed or provisional, and which rate basis priced it.
-- `stated` (a named person and evidence), `tool` (a calculation id), or
+- `stated` (evidence; recorded as stated by the caller, never a name the
+  caller supplies), `tool` (a calculation id), or
   `none` (only with an owner-stated sell or adjustment; the owner's preview
   reads "no cost recorded", the party copy never shows it).
 
@@ -113,7 +116,8 @@ actor on a write is the signed-in user; a server caller must name
 | Call | Who |
 |---|---|
 | `GET ?t=<token>` party page; `POST ?action=accept` | the link holder |
-| `POST ?action=create_draft / set_line_markup / freeze / issue_link / revoke_link`, `GET ?action=revision / job_acceptance` | staff |
+| `POST ?action=create_draft / set_line_markup / freeze / revoke_link`, `GET ?action=revision / job_acceptance` | staff (a stated or adjustment sell: the owner's session only, see stage 3) |
+| `POST ?action=issue_link` | the owner's session, for a party a stamped send covers (stage 3) |
 
 The accept response never says whether the whole job is accepted (it would
 tell a neighbour whether the client has).

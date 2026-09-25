@@ -57,8 +57,8 @@ async function sql(
 }
 
 const RPC_SQL: Record<string, (a: Record<string, unknown>) => string> = {
-  quote_v2_open_party_link: (a) =>
-    `select public.quote_v2_open_party_link(${lit(a.p_token)})`,
+  quote_v2_open_party_document: (a) =>
+    `select public.quote_v2_open_party_document(${lit(a.p_token)})`,
   quote_v2_accept: (a) =>
     `select public.quote_v2_accept(${lit(a.p_token)}, ${
       lit(a.p_revision_id)
@@ -134,20 +134,21 @@ const gwOld = await open("gwelup-client-rev1", "gwelup-client-old-link.html");
 check(
   "gwelup: the client's revision 1 link forwards to the client's revision 2",
   gwOld.status === 200 && gwOld.html.includes("This quote was updated") &&
-    gwOld.html.includes("Quote for Stephen") &&
+    gwOld.html.includes('<div class="who">Stephen</div>') &&
     gwOld.html.includes("revision 2") &&
-    !gwOld.html.includes("Quote for Fiona"),
+    !gwOld.html.includes('<div class="who">Fiona</div>'),
 );
 check(
   "gwelup: each party pays $2,381.50 of $4,763.00",
   gwOld.html.includes("$2,381.50") && gwOld.html.includes("$4,763.00") &&
-    gwOld.html.includes("you 50%, Fiona 50%"),
+    gwOld.html.includes("You pay 50%; Fiona pays 50%"),
 );
 const gwN = await open("gwelup-neighbour-rev2", "gwelup-neighbour.html");
 check(
   "gwelup: the neighbour's link shows the neighbour's own quote",
-  gwN.html.includes("Quote for Fiona") && gwN.html.includes("$2,381.50") &&
-    gwN.html.includes("you 50%, Stephen 50%"),
+  gwN.html.includes('<div class="who">Fiona</div>') &&
+    gwN.html.includes("$2,381.50") &&
+    gwN.html.includes("You pay 50%; Stephen pays 50%"),
 );
 const swp = await open("swp-26051-client", "swp-26051.html");
 check(

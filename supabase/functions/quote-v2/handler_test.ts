@@ -32,6 +32,7 @@ const STEPHEN: PartyQuoteView = {
     exclusions: ["Root removal: neighbour only, priced separately"],
   },
   valid_until: "2026-10-24",
+  issued_on: "2026-09-24",
   expired: false,
   job_total: { ex_gst: 4330, gst: 433, inc_gst: 4763 },
   party: {
@@ -111,7 +112,7 @@ function deps(
           error: { message: over.rpcError },
         });
       }
-      if (fn === "quote_v2_open_party_link") {
+      if (fn === "quote_v2_open_party_document") {
         return Promise.resolve({
           data: over.link ??
             { state: "current", link_revision_number: 1, quote: STEPHEN },
@@ -151,11 +152,11 @@ Deno.test("party page: shows only the party's own quote, with the job total and 
   const html = await res.text();
   assertEquals(res.status, 200);
   assertEquals(d.calls, [{
-    fn: "quote_v2_open_party_link",
+    fn: "quote_v2_open_party_document",
     args: { p_token: TOKEN },
   }]);
-  assertStringIncludes(html, "Quote for Stephen");
-  assertStringIncludes(html, "you 50%, Fiona 50%");
+  assertStringIncludes(html, '<div class="who">Stephen</div>');
+  assertStringIncludes(html, "You pay 50%; Fiona pays 50%");
   assertStringIncludes(html, "$4,763.00");
   assertStringIncludes(html, "$2,381.50");
   assertStringIncludes(html, `data-revision="${REV}"`);
@@ -230,7 +231,7 @@ Deno.test("party page: a replaced revision's link shows the same party's current
   assertEquals(res.status, 200);
   assertStringIncludes(html, "This quote was updated");
   assertStringIncludes(html, "revision 2");
-  assertStringIncludes(html, "Quote for Stephen");
+  assertStringIncludes(html, '<div class="who">Stephen</div>');
 });
 
 Deno.test("party page: no current quote, revoked and malformed links show nothing of the job", async () => {
@@ -462,7 +463,7 @@ Deno.test("staff: a refusal from the quote rules is a 409 with its code", async 
   assertEquals(body.code, "quote_line_duplicate");
 });
 
-Deno.test("staff: reads and link actions route to their functions", async () => {
+Deno.test("staff: reads and link revocation route to their functions", async () => {
   const headers = { Authorization: "Bearer jwt-estimator" };
   const d = deps();
   await handleQuoteV2Request(
@@ -471,10 +472,6 @@ Deno.test("staff: reads and link actions route to their functions", async () => 
   );
   await handleQuoteV2Request(
     get(`?action=job_acceptance&job_id=${JOB}`, headers),
-    d,
-  );
-  await handleQuoteV2Request(
-    post("?action=issue_link", { revision_id: REV, party_id: JOB }, headers),
     d,
   );
   await handleQuoteV2Request(
@@ -488,11 +485,10 @@ Deno.test("staff: reads and link actions route to their functions", async () => 
   assertEquals(d.calls.map((c) => c.fn), [
     "quote_v2_staff_revision",
     "quote_v2_job_acceptance",
-    "quote_v2_issue_party_link",
     "quote_v2_revoke_party_link",
   ]);
   const res = await handleQuoteV2Request(
-    post("?action=send", {}, headers),
+    post("?action=delete_quote", {}, headers),
     deps(),
   );
   assertEquals(res.status, 400);
