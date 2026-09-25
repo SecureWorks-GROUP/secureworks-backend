@@ -784,6 +784,8 @@ export function emptySalesBookingPackView(): SalesBookingPackView {
 
 export interface SalesBookingCase {
   booking_read_model?: BookingObject;
+  /** Arrival times a visit to this lead fits, per bookable day (sales_booking_availability.ts). */
+  free_times?: BookingObject | null;
   booked_visits?: BookingObject[] | null;
   /** Executor presses for this lead, newest first (sales_booking_execution_read.ts). Null when unreadable. */
   booking_executions?: BookingObject[] | null;

@@ -167,6 +167,7 @@ function deps(o: Overrides = {}) {
       calls.push(`ghl:${JSON.stringify(selector)}`);
       return Promise.resolve(o.ghlEvents ?? []);
     },
+    readGhlBlockedSlots: () => Promise.resolve([]),
     readOutlook: () => {
       calls.push("outlook");
       return Promise.resolve({
@@ -435,6 +436,7 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
       endTime: "2026-09-25T14:00:00+08:00",
       assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
       contactId: "someone-else",
+      address: "12 Fictional Way, Canning Vale",
     }],
   });
   const result = await approve(d, input("calendar"));
@@ -456,14 +458,22 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
   assertEquals(result.checks.ghl.events_that_day, 1);
   assertEquals(result.checks.day_count_with_this_visit, 2);
   assertEquals(result.checks.occupied, {
-    start_iso: "2026-09-25T08:30:00+08:00",
-    end_iso: "2026-09-25T12:00:00+08:00",
+    start_iso: "2026-09-25T09:00:00+08:00",
+    end_iso: "2026-09-25T11:30:00+08:00",
+    on_site_minutes: 30,
+    travel: "computed_per_neighbour",
+    travel_model: "straight-line-v3",
     travel_buffer_minutes: 30,
   });
   // Diary by user, then only the calendar the owner is on.
   assertEquals([...new Set(calls.filter((c) => c.startsWith("ghl:")))], [
     'ghl:{"userId":"3S20LGVTjsVYy9vTJ9wM"}',
-    'ghl:{"calendarId":"dEQKVKHthsjSYaen1fiE"}',
+    `ghl:${
+      JSON.stringify({
+        calendarId: "dEQKVKHthsjSYaen1fiE",
+        userId: "3S20LGVTjsVYy9vTJ9wM",
+      })
+    }`,
   ]);
   assert(calls.includes("outlook"));
   assertEquals(
@@ -483,12 +493,116 @@ Deno.test("owner calendar: Friday 09:00 passes every rule, GHL, Outlook and offe
   });
 });
 
+Deno.test("owner calendar: the gap a GHL booking needs is travel from where it is", async () => {
+  // The visit (Canning Vale) arrives from 09:00. A booking ending 08:30 in
+  // Canning Vale needs 5 minutes; the same booking in Two Rocks needs far more.
+  const near = deps({
+    ghlEvents: [{
+      id: "ev-near",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:30:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "someone-else",
+      address: "12 Fictional Way, Canning Vale",
+    }],
+  });
+  assert(
+    "dry_run" in
+      await call(near.deps, { owner_input: input("calendar"), dry_run: true }),
+  );
+  const far = deps({
+    ghlEvents: [{
+      id: "ev-far",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:30:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "someone-else",
+      address: "1 Other St, Two Rocks WA 6037",
+    }],
+  });
+  const error = await refusal(
+    call(far.deps, { owner_input: input("calendar"), dry_run: true }),
+    "ghl_calendar_clash",
+  );
+  assert(error.detail?.events[0].travel_minutes > 30);
+});
+
+Deno.test("owner approval applies the same-suburb travel minimum", async () => {
+  const { deps: d, rows } = deps({
+    ghlEvents: [{
+      id: "ev-same-suburb",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:50:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "someone-else",
+      address: "1 Other St, Canning Vale",
+    }],
+  });
+  const error = await refusal(
+    call(d, { owner_input: input("calendar"), dry_run: true }),
+    "ghl_calendar_clash",
+  );
+  assertEquals(error.detail?.events[0].travel_minutes, 15);
+  assertEquals(rows.length, 0);
+});
+
+Deno.test("owner approval does not borrow the last suburb for a multi-suburb contact", async () => {
+  const { deps: d, rows } = deps({
+    cases: [
+      { id: CASE, contact_id: CONTACT, suburb: "Canning Vale" },
+      {
+        id: "neighbor-two-rocks",
+        opportunity_id: "opp-two-rocks",
+        contact_id: "neighbor",
+        suburb: "Two Rocks",
+      },
+      {
+        id: "neighbor-duncraig",
+        opportunity_id: "opp-duncraig",
+        contact_id: "neighbor",
+        suburb: "Duncraig",
+      },
+    ],
+    ghlEvents: [{
+      id: "ev-ambiguous-contact",
+      startTime: "2026-09-25T12:30:00+08:00",
+      endTime: "2026-09-25T13:00:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "neighbor",
+    }],
+  });
+  const error = await refusal(
+    call(d, { owner_input: input("calendar"), dry_run: true }),
+    "travel_location_unknown",
+  );
+  assertEquals(error.detail?.source, "ghl");
+  assertEquals(rows.length, 0);
+});
+
+Deno.test("owner approval refuses an unlocated neighboring GHL event", async () => {
+  const { deps: d, rows } = deps({
+    ghlEvents: [{
+      id: "ev-unknown",
+      startTime: "2026-09-25T12:05:00+08:00",
+      endTime: "2026-09-25T13:00:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "outside-current-cases",
+    }],
+  });
+  const error = await refusal(
+    call(d, { owner_input: input("calendar"), dry_run: true }),
+    "travel_location_unknown",
+  );
+  assertEquals(error.detail?.source, "ghl");
+  assertEquals(rows.length, 0);
+});
+
 Deno.test("owner calendar: an Outlook event near the visit clashes and nothing is written", async () => {
   const { deps: d, rows } = deps({
-    // 11:45 is after the visit end but inside the 30-minute travel buffer.
     outlookEvents: [{
       id: "o1",
       subject: "Dentist",
+      location: "Two Rocks WA 6037",
       start: "2026-09-25T03:45:00Z",
       end: "2026-09-25T04:30:00Z",
       show_as: "busy",
@@ -556,7 +670,7 @@ Deno.test("owner calendar rulebook refusals are named", async () => {
       "owner_visit_window_not_inside_visit",
       v({ end_iso: "2026-09-25T10:00:00+08:00" }),
     ],
-    ["owner_visit_too_short", v({ end_iso: "2026-09-25T11:00:00+08:00" })],
+    ["owner_visit_too_short", v({ end_iso: "2026-09-25T10:45:00+08:00" })],
     ["owner_visit_outside_hours", {
       visit: {
         window_start_iso: "2026-09-25T07:30:00+08:00",
@@ -597,6 +711,7 @@ Deno.test("owner calendar: GHL, own-booking, offers, capacity, unknown target, u
     endTime: `2026-09-25T${e}:00+08:00`,
     assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
     contactId: "other",
+    address: "12 Fictional Way, Canning Vale",
     ...extra,
   });
   const offerExecution = (contact: string) => ({
@@ -621,7 +736,11 @@ Deno.test("owner calendar: GHL, own-booking, offers, capacity, unknown target, u
     },
   };
   const cases: Array<[string, Overrides]> = [
-    ["ghl_calendar_clash", { ghlEvents: [at("11:45", "12:30")] }],
+    ["ghl_calendar_clash", {
+      ghlEvents: [at("11:45", "12:30", {
+        address: "1 Test St, Duncraig WA 6023",
+      })],
+    }],
     ["contact_already_booked_that_day", {
       ghlEvents: [at("14:00", "15:00", { contactId: CONTACT })],
     }],
@@ -820,7 +939,9 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
     "2026-09-29",
     "2026-10-02",
   ]);
-  assertEquals(owner.rulebook.visit_minutes, 60);
+  assertEquals(owner.rulebook.visit_minutes, 30);
+  assert(!("on_site_minutes" in owner.rulebook));
+  assertEquals(owner.rulebook.travel.version, "straight-line-v3");
   assertEquals(owner.rulebook.calendar.calendar_id, "dEQKVKHthsjSYaen1fiE");
   assertEquals(engine.engine_proposal, true);
   assertEquals(engine.engine_window.start, "2026-09-25T13:00:00+08:00");
@@ -924,6 +1045,24 @@ Deno.test("engine path still works when owner reads are wired, and never touches
     Error,
     "owner_approval_unavailable",
   );
+});
+
+Deno.test("an owner message offer uses the full lead address for travel", async () => {
+  const { deps: d } = deps({
+    ghlEvents: [{
+      id: "ev-same-address",
+      startTime: "2026-09-25T08:00:00+08:00",
+      endTime: "2026-09-25T08:50:00+08:00",
+      assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+      contactId: "another-lead",
+      address: "12 Fictional Way, Canning Vale",
+    }],
+  });
+  const result = await call(d, {
+    owner_input: input("message", { offer: FRI }),
+    dry_run: true,
+  });
+  assert("dry_run" in result);
 });
 
 Deno.test("owner request shape refusals and a decision already recorded on the same content", async () => {
@@ -1185,6 +1324,187 @@ Deno.test("a live unexpired owner offer or visit blocks another lead on that slo
     dry_run: true,
   });
   assert("dry_run" in noSlotOk);
+});
+
+Deno.test("owner travel uses adjacent intervals across GHL and Outlook", async () => {
+  const at = (time: string) => `2026-09-25T${time}:00+08:00`;
+  for (const adjacentSource of ["ghl", "outlook"]) {
+    const near = [
+      {
+        start: at("08:30"),
+        end: at("08:50"),
+        location: "12 Fictional Way, Canning Vale",
+      },
+      {
+        start: at("11:40"),
+        end: at("12:00"),
+        location: "12 Fictional Way, Canning Vale",
+      },
+    ];
+    const remote = [
+      { start: at("07:00"), end: at("08:00"), location: null },
+      { start: at("13:00"), end: at("14:00"), location: null },
+    ];
+    const { deps: d } = deps({
+      ghlEvents: (adjacentSource === "ghl" ? near : remote).map((e, i) => ({
+        id: `ghl-${i}`,
+        startTime: e.start,
+        endTime: e.end,
+        address: e.location,
+      })),
+      outlookEvents: (adjacentSource === "outlook" ? near : remote).map((
+        e,
+        i,
+      ) => ({
+        id: `outlook-${i}`,
+        ...e,
+        show_as: "busy",
+        is_cancelled: false,
+      })),
+    });
+    assert(
+      "dry_run" in await call(d, {
+        owner_input: input("calendar"),
+        dry_run: true,
+      }),
+    );
+  }
+});
+
+Deno.test("owner overlap checks retain enclosing intervals before checking travel", async () => {
+  const { deps: d, rows } = deps({
+    ghlEvents: [{
+      id: "enclosing",
+      startTime: "2026-09-25T07:00:00+08:00",
+      endTime: "2026-09-25T12:00:00+08:00",
+    }, {
+      id: "earlier-unknown",
+      startTime: "2026-09-25T06:00:00+08:00",
+      endTime: "2026-09-25T06:30:00+08:00",
+    }],
+    outlookEvents: [{
+      id: "near",
+      start: "2026-09-25T08:30:00+08:00",
+      end: "2026-09-25T08:50:00+08:00",
+      location: "12 Fictional Way, Canning Vale",
+      show_as: "busy",
+    }],
+  });
+  const error = await refusal(
+    call(d, {
+      owner_input: input("calendar"),
+      dry_run: true,
+    }),
+    "ghl_calendar_clash",
+  );
+  assertEquals(error.detail?.events.length, 1);
+  assertEquals(error.detail?.events[0].travel_minutes, 0);
+  assertEquals(rows.length, 0);
+});
+
+Deno.test("an adjacent open offer supplies travel location after an unknown event", async () => {
+  const earlier = deps();
+  await approve(earlier.deps, input("message", { offer: FRI }));
+  const { deps: d } = deps({
+    cases: [
+      { id: CASE, contact_id: CONTACT, suburb: "Canning Vale" },
+      {
+        id: "opp:other",
+        opportunity_id: "other",
+        contact_id: "other-lead",
+        suburb: "Canning Vale",
+      },
+    ],
+    contact: { ...michael(), id: "other-lead" },
+    approvals: earlier.rows,
+    ghlEvents: [{
+      id: "unknown-early",
+      startTime: "2026-09-25T07:00:00+08:00",
+      endTime: "2026-09-25T08:00:00+08:00",
+    }],
+  });
+  assert(
+    "dry_run" in await call(d, {
+      owner_input: input("calendar", {
+        case_id: "opp:other",
+        contact_id: "other-lead",
+        visit: {
+          window_start_iso: "2026-09-25T14:00:00+08:00",
+          window_end_iso: "2026-09-25T15:30:00+08:00",
+          end_iso: "2026-09-25T16:00:00+08:00",
+        },
+      }),
+      dry_run: true,
+    }),
+  );
+});
+
+Deno.test("owner visits and offers enforce GHL blocked slots and unreadable input", async () => {
+  for (const step of ["calendar", "message"] as const) {
+    const request = {
+      owner_input: input(step, step === "message" ? { offer: FRI } : {}),
+      dry_run: true,
+    };
+    for (
+      const blocked of [
+        { startTime: FRI.window_start_iso, endTime: FRI.end_iso },
+        {
+          startTime: "2026-09-25T08:00:00+08:00",
+          endTime: "2026-09-25T08:30:00+08:00",
+          address: "Two Rocks",
+        },
+      ]
+    ) {
+      const { deps: d, rows } = deps({
+        readGhlBlockedSlots: (userId, start, end) => {
+          assertEquals(userId, "3S20LGVTjsVYy9vTJ9wM");
+          assertEquals(start, "2026-09-25T00:00:00+08:00");
+          assertEquals(end, "2026-09-26T00:00:00+08:00");
+          return Promise.resolve([{ id: "block", ...blocked }]);
+        },
+      });
+      await refusal(call(d, request), "ghl_calendar_clash");
+      assertEquals(rows.length, 0);
+    }
+    for (
+      const reader of [
+        () => Promise.reject(new Error("unavailable")),
+        () => Promise.resolve([{ startTime: "bad", endTime: "bad" }]),
+      ]
+    ) {
+      const { deps: d, rows } = deps({ readGhlBlockedSlots: reader });
+      await refusal(call(d, request), "ghl_blocked_slots_unreadable");
+      assertEquals(rows.length, 0);
+    }
+  }
+});
+
+Deno.test("travel retains the authoritative suburb when its name occurs in the street", async () => {
+  for (const step of ["calendar", "message"] as const) {
+    const { deps: d } = deps({
+      contact: { ...michael(), address1: "12 Scarborough Beach Road" },
+      suburb: "Scarborough",
+      ghlEvents: [{
+        id: "ev-neighbor",
+        startTime: "2026-09-25T08:00:00+08:00",
+        endTime: "2026-09-25T08:30:00+08:00",
+        assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+        contactId: "another-lead",
+        address: "Scarborough",
+      }],
+    });
+    const result = await call(d, {
+      owner_input: input(step, step === "message" ? { offer: FRI } : {}),
+      dry_run: true,
+    });
+    assert("dry_run" in result);
+    if (step === "calendar") {
+      assertEquals(
+        result.snapshot.content.address,
+        "12 Scarborough Beach Road",
+      );
+    }
+  }
 });
 
 // ── Nithin's and Khairo's texts through the real approval gate ─────────────

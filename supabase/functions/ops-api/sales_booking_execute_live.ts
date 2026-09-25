@@ -106,7 +106,7 @@ export async function readResourceOutlook(
   url.searchParams.set("endDateTime", endIso);
   url.searchParams.set(
     "$select",
-    "id,subject,start,end,showAs,isCancelled,isAllDay",
+    "id,subject,location,start,end,showAs,isCancelled,isAllDay",
   );
   url.searchParams.set("$top", "100");
   const events: OutlookEvent[] = [];
@@ -139,6 +139,9 @@ export async function readResourceOutlook(
       events.push({
         id: String(item?.id ?? ""),
         subject: typeof item?.subject === "string" ? item.subject : null,
+        location: typeof item?.location?.displayName === "string"
+          ? item.location.displayName
+          : null,
         start: utc(item?.start),
         end: utc(item?.end),
         show_as: typeof item?.showAs === "string" ? item.showAs : null,
@@ -326,14 +329,38 @@ export function createOwnerApprovalDeps(
       }));
       return { calendars, users };
     },
+    async readGhlBlockedSlots(userId, startIso, endIso) {
+      const locationId = Deno.env.get("GHL_LOCATION_ID") || "";
+      if (!locationId) throw new Error("location_unconfigured");
+      const query = new URLSearchParams({
+        locationId,
+        userId,
+        startTime: String(Date.parse(startIso)),
+        endTime: String(Date.parse(endIso)),
+      });
+      const body = await ghlRead(
+        `/calendars/blocked-slots?${query.toString()}`,
+      );
+      const rows = body?.events;
+      if (
+        !Array.isArray(rows) ||
+        !rows.every((r) => !!r && typeof r === "object" && !Array.isArray(r)) ||
+        body.nextPage || body.nextPageUrl || body.hasMore || body.error
+      ) throw new Error("ghl_blocked_slots_incomplete");
+      return rows as Obj[];
+    },
     async readGhlEvents(selector, startIso, endIso) {
       const query = new URLSearchParams({
         locationId: locationId(),
         startTime: String(Date.parse(startIso)),
         endTime: String(Date.parse(endIso)),
       });
-      if ("userId" in selector) query.set("userId", selector.userId);
-      else query.set("calendarId", selector.calendarId);
+      if ("calendarId" in selector) {
+        query.set("calendarId", selector.calendarId);
+        query.set("userId", selector.userId);
+      } else {
+        query.set("userId", selector.userId);
+      }
       return ghlCompleteBody(
         await ghlRead(`/calendars/events?${query.toString()}`),
         "events",

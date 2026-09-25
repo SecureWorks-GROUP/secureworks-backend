@@ -40,24 +40,31 @@ pack revision, evidence, expiry, calendar preview, locked template and route.
 null. Existing arbitrary pack drafts are never promoted into locked templates.
 Missing validation checks remain null, never manufactured passes.
 
-The envelope includes `resource.id` and `booking_flow` version
+The final availability fields are owned by
+[live availability](sales-booking-live-availability.md): the server replaces
+pack-published `calendar_read` and `commitments` on every read and approval
+press. A fresh engine census may still add approval holds; it cannot replace
+the live read. The following describes the retained engine-pack input contract,
+not the freshness or source of the final screen fields.
+
+The intermediate pack overlay (before the live replacement) includes `resource.id` and `booking_flow` version
 `booking-confirm.v1`, with `approval_write:"separate-v1"`. Each matched model
 may publish `validation.availability:{state,occupied_intervals,reason}` where
 state is `read`, `could_not_read`, or `not_configured`. A read requires an
 explicit interval array; each interval has `start`/`end` (or `start_iso`/`end_iso`)
 with offsets. The producer owns whole-person source coverage, including leave.
-The backend never promotes the GHL diary to that authority.
+These are engine-model validation inputs, not the final live screen availability.
 
 Models publish their complete prior-offer census as `prior_offers`. Each entry
 has `id` (or `slot_id`), `contact_id`, `state:offered|agreed`, and
-`start_iso`/`end_iso` (or `start`/`end`). These project to `booking_flow.commitments`.
+`start_iso`/`end_iso` (or `start`/`end`). These project to the intermediate overlay's `booking_flow.commitments`.
 A published empty array is a complete empty census; absence or malformed entries
 remain null with `commitments_read.state:"could_not_read"`. Only exact contact
 and opportunity matches in the current resource/profile contribute. Across
 matched models, occupied intervals are combined conservatively and commitment
 IDs deduplicate; conflicting entries refuse census completeness.
 
-Both projections carry `as_of` from the persisted pack's publish timestamp and
+Both intermediate pack projections carry `as_of` from the persisted pack's publish timestamp and
 `stale`. At any contributing model's expiry, state becomes `stale`, retaining
 the evidence for display. Missing/future publish time or missing expiry also
 holds freshness. `calendar_read.occupied_intervals` stays null when unavailable.
@@ -313,8 +320,8 @@ JSON `fencing-stratco-marnin.json` and the calendar target in its GO-LIVE.md):
 `owner_visit_not_future`, `owner_visit_spans_days`,
 `owner_visit_day_not_permitted` (Tue and Fri), `owner_visit_window_length`
 (60 to 90 minutes), `owner_visit_window_not_inside_visit`,
-`owner_visit_too_short` (visit ends at least 60 minutes after the latest
-arrival), `owner_visit_outside_hours` (window start at or after 08:00, visit
+`owner_visit_too_short` (visit ends at least 30 minutes after the latest
+arrival: 30 minutes on site, owner's rule of 24 Sep 2026), `owner_visit_outside_hours` (window start at or after 08:00, visit
 end by 16:30), `owner_visit_protected_band` (Tue 13:00 to 15:30 Stratco /
 Canning Vale, including the 30-minute travel buffer).
 
@@ -329,8 +336,12 @@ this lead is mid-press (calendar step); `text_already_in_thread` /
 thread).
 
 Availability, read at the press for the visit's whole Perth day (calendar
-step, and a message with an `offer`). The visit occupies window start minus
-30 minutes to visit end plus 30 minutes:
+step, and a message with an `offer`). The visit runs from window start to
+visit end; a neighbouring GHL booking or open offer needs a gap of the travel
+time between its location and the lead's address
+(`sales_booking_travel.ts`, `docs/sales-booking-live-availability.md`). Outlook
+events use their location display name under the same rule; an unknown location
+refuses approval rather than using a fixed gap:
 `owner_calendar_unreadable`; `owner_calendar_unknown` (the STRATCO FENCING
 calendar must be active, list the owner's GHL user, and that user must be the
 one roster entry for marnin@secureworkswa.com.au); `ghl_calendar_unreadable`
@@ -367,7 +378,8 @@ and `hand_sent_texts` / `hand_sent_texts_note`. Each case carries
   "engine_window": null,
   "rulebook": {"days": ["Tue","Fri"], "bookable_dates": ["2026-09-25", "..."],
     "day_start": "08:00", "day_end": "16:30", "window_min_minutes": 60,
-    "window_max_minutes": 90, "visit_minutes": 60, "travel_buffer_minutes": 30,
+    "window_max_minutes": 90, "visit_minutes": 30, "travel_buffer_minutes": 30,
+    "travel": {"version": "straight-line-v3", ...},
     "max_per_day": 6, "protected_bands": [...], "sender": "+61489267776",
     "calendar": {...}, "timezone": "Australia/Perth", "utc_offset": "+08:00"},
   "approvals": [{"approval_id", "step", "state", "reason",

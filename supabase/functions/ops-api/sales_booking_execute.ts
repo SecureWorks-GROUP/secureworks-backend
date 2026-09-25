@@ -108,6 +108,7 @@ export type ExecuteResult =
 export type OutlookEvent = {
   id: string;
   subject: string | null;
+  location?: string | null;
   start: string;
   end: string;
   show_as: string | null;

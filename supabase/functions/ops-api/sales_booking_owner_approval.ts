@@ -42,7 +42,13 @@ import type {
   BookingObject,
   BookingStep,
 } from "./sales_booking_confirmation.ts";
-import { outlookClashes, type OutlookRead } from "./sales_booking_execute.ts";
+import type { OutlookRead } from "./sales_booking_execute.ts";
+import {
+  SALES_BOOKING_ON_SITE_MINUTES,
+  SALES_BOOKING_TRAVEL_MODEL,
+  salesBookingSuburbByUnambiguousContact,
+  salesBookingTravelMinutes,
+} from "./sales_booking_travel.ts";
 import {
   SALES_BOOKING_SENDER_LINES,
   salesBookingSenderFor,
@@ -63,8 +69,10 @@ export const OWNER_OFFER_CENSUS_DAYS = 21;
 /** The Stratco rulebook. Values are the engine's own profile JSON (wiki
  * `harness/ops/skills/secureworks-scope-booking/profiles/fencing-stratco-marnin.json`,
  * commit 55421112) and the calendar target the owner confirmed in that
- * skill's GO-LIVE.md. The Python engine is no longer a runtime; this is its
- * rulebook. Change both together. */
+ * skill's GO-LIVE.md, except `visit_minutes`: the owner's 24 Sep 2026 rule
+ * is 30 minutes on site, with travel between visits computed from their
+ * locations (sales_booking_travel.ts) rather than a fixed buffer. The Python
+ * engine is no longer a runtime; this is its rulebook. Change both together. */
 export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
   profile: "fencing-stratco-marnin",
   resource: "marnin",
@@ -79,7 +87,8 @@ export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
   window_min_minutes: 60,
   window_max_minutes: 90,
   /** Visit length after latest arrival; the visit ends at or after this. */
-  visit_minutes: 60,
+  visit_minutes: SALES_BOOKING_ON_SITE_MINUTES,
+  /** Fixed buffer around a protected band. Visits use computed travel. */
   travel_buffer_minutes: 30,
   max_per_day: 6,
   protected_bands: Object.freeze([
@@ -174,6 +183,16 @@ type CheckedVisit = OwnerVisit & {
   date: string;
 };
 
+export function ownerVisitTiming(start: number, windowMinutes: number) {
+  if (
+    !Number.isFinite(windowMinutes) ||
+    windowMinutes < RULES.window_min_minutes ||
+    windowMinutes > RULES.window_max_minutes
+  ) return null;
+  const windowEnd = start + windowMinutes * 60_000;
+  return { windowEnd, end: windowEnd + RULES.visit_minutes * 60_000 };
+}
+
 /** Rulebook-only checks, in the order a refusal is reported. No reads. */
 export function checkOwnerVisitRules(
   visit: unknown,
@@ -201,10 +220,8 @@ export function checkOwnerVisitRules(
     refuse("owner_visit_day_not_permitted", { day, days: [...RULES.days] });
   }
   const windowMinutes = (windowEnd.ms - start.ms) / 60_000;
-  if (
-    windowMinutes < RULES.window_min_minutes ||
-    windowMinutes > RULES.window_max_minutes
-  ) {
+  const timing = ownerVisitTiming(start.ms, windowMinutes);
+  if (!timing) {
     refuse("owner_visit_window_length", {
       minutes: windowMinutes,
       min: RULES.window_min_minutes,
@@ -214,7 +231,7 @@ export function checkOwnerVisitRules(
   if (!(end.ms > windowEnd.ms)) {
     refuse("owner_visit_window_not_inside_visit");
   }
-  if (end.ms - windowEnd.ms < RULES.visit_minutes * 60_000) {
+  if (end.ms < timing.end) {
     refuse("owner_visit_too_short", {
       visit_minutes_after_latest_arrival: RULES.visit_minutes,
     });
@@ -438,6 +455,7 @@ export function checkOwnerCalendarTarget(directory: GhlDirectory): string[] {
   }
   // Every calendar the owner is assigned to can hold one of his bookings.
   return directory.calendars.filter((c) =>
+    c.is_active === true &&
     c.assigned_user_ids.includes(target.assigned_user_id)
   ).map((c) => c.id);
 }
@@ -545,7 +563,12 @@ export interface OwnerApprovalDeps {
   readGhlDirectory(): Promise<GhlDirectory>;
   /** One complete GHL window read; throws when incomplete. */
   readGhlEvents(
-    selector: { userId: string } | { calendarId: string },
+    selector: { userId: string } | { calendarId: string; userId: string },
+    startIso: string,
+    endIso: string,
+  ): Promise<BookingObject[]>;
+  readGhlBlockedSlots(
+    userId: string,
     startIso: string,
     endIso: string,
   ): Promise<BookingObject[]>;
@@ -737,6 +760,11 @@ export async function salesBookingOwnerApprovalAction(args: {
   // Build the exact content. Identity and route come from server truth only.
   let content: BookingObject;
   let visit: CheckedVisit | null = null;
+  const travelStreet = ownerStreetLine(lead.contact.address1) ??
+    ownerStreetLine(lead.job_site?.address);
+  const visitLocation = travelStreet
+    ? `${travelStreet}, ${lead.suburb}`
+    : lead.suburb;
   if (input.step === "message") {
     const t = input.text;
     if (typeof t !== "string" || !t.trim() || t.length > MAX_TEXT) {
@@ -881,7 +909,14 @@ export async function salesBookingOwnerApprovalAction(args: {
     if (visit) {
       Object.assign(
         checks,
-        await checkOwnerVisitAvailability(visit, row, census, deps),
+        await checkOwnerVisitAvailability(
+          visit,
+          row,
+          census,
+          deps,
+          response.cases,
+          visitLocation,
+        ),
       );
     }
   }
@@ -937,6 +972,8 @@ async function checkOwnerVisitAvailability(
   row: SalesBookingCase,
   census: SystemOfferCensus,
   deps: OwnerApprovalDeps,
+  workspaceCases: SalesBookingCase[],
+  visitLocation: string | null,
 ): Promise<BookingObject> {
   let directory: GhlDirectory;
   try {
@@ -958,33 +995,33 @@ async function checkOwnerVisitAvailability(
     );
     for (const calendarId of calendarIds) {
       batches.push(
-        await deps.readGhlEvents({ calendarId }, dayStart, dayEnd),
+        await deps.readGhlEvents(
+          {
+            calendarId,
+            userId: RULES.calendar.assigned_user_id,
+          },
+          dayStart,
+          dayEnd,
+        ),
       );
     }
   } catch {
     refuse("ghl_calendar_unreadable");
   }
   const events = ghlBusyEvents(batches.flat());
-  const own = events.filter((e) => e.contactId === row.contact_id);
-  if (own.length) {
-    refuse("contact_already_booked_that_day", {
-      events: own.map(eventSummary),
-    });
+  let blocked: BookingObject[];
+  try {
+    blocked = ghlBusyEvents(
+      await deps.readGhlBlockedSlots(
+        RULES.calendar.assigned_user_id,
+        dayStart,
+        dayEnd,
+      ),
+    );
+  } catch {
+    refuse("ghl_blocked_slots_unreadable");
   }
-  const ghlClashes = events.filter((e) =>
-    overlaps(
-      visit.occupiedStart,
-      visit.occupiedEnd,
-      bookingInstant(e.startTime),
-      bookingInstant(e.endTime),
-    )
-  );
-  if (ghlClashes.length) {
-    refuse("ghl_calendar_clash", {
-      travel_buffer_minutes: RULES.travel_buffer_minutes,
-      events: ghlClashes.map(eventSummary),
-    });
-  }
+
   let outlook: OutlookRead;
   try {
     outlook = await deps.readOutlook(RULES.resource, dayStart, dayEnd);
@@ -992,35 +1029,137 @@ async function checkOwnerVisitAvailability(
     outlook = { ok: false, reason: "outlook_read_failed" };
   }
   if (!outlook.ok) refuse("outlook_unreadable", { reason: outlook.reason });
-  const outlookHits = outlookClashes(
-    outlook.events,
-    new Date(visit.occupiedStart).toISOString(),
-    new Date(visit.occupiedEnd).toISOString(),
-  );
-  if (outlookHits.length) {
-    refuse("outlook_calendar_clash", {
-      mailbox: outlook.mailbox,
-      travel_buffer_minutes: RULES.travel_buffer_minutes,
-      events: outlookHits.map((e) => ({
-        subject: e.subject,
-        start: e.start,
-        end: e.end,
-      })),
-    });
-  }
   const others = census.offers.filter((o) => {
+    if (perthDate(bookingInstant(o.start_iso)) !== visit.date) return false;
     if (o.contact_id !== row.contact_id) return true;
     if (o.source !== "owner_approval") return false;
     return o.start_iso !== visit.window_start_iso ||
       o.end_iso !== visit.end_iso;
   });
+  const outlookBusy = outlook.events.filter((e) =>
+    !e.is_cancelled && e.show_as !== "free"
+  );
+  const intervals = [
+    ...[...events, ...blocked].map((e) => ({
+      start: bookingInstant(e.startTime),
+      end: bookingInstant(e.endTime),
+    })),
+    ...outlookBusy.map((e) => {
+      const start = bookingInstant(e.start), end = bookingInstant(e.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        refuse("outlook_unreadable", { reason: "event_times_malformed" });
+      }
+      return { start, end };
+    }),
+    ...others.map((o) => ({
+      start: bookingInstant(o.start_iso),
+      end: bookingInstant(o.end_iso),
+    })),
+  ];
+  const precedingEnd = Math.max(
+    ...intervals.filter((i) => i.end <= visit.start).map((i) => i.end),
+  );
+  const followingStart = Math.min(
+    ...intervals.filter((i) => i.start >= visit.end).map((i) => i.start),
+  );
+  const hasOverlap = intervals.some((i) =>
+    overlaps(visit.start, visit.end, i.start, i.end)
+  );
+  const suburbs = salesBookingSuburbByUnambiguousContact(workspaceCases);
+  const here = visitLocation;
+  // The gap a neighbouring booking needs: travel from it before the visit,
+  // travel to it after.
+  const needsGap = (
+    itemStart: number,
+    itemEnd: number,
+    location: string | null,
+    source: "ghl" | "ghl_blocked" | "outlook" | "system_offer",
+  ) => {
+    if (overlaps(visit.start, visit.end, itemStart, itemEnd)) {
+      return { clash: true, travel_minutes: 0 };
+    }
+    if (
+      hasOverlap ||
+      (itemEnd !== precedingEnd && itemStart !== followingStart)
+    ) return { clash: false, travel_minutes: 0 };
+    const before = salesBookingTravelMinutes(location, here);
+    const after = salesBookingTravelMinutes(here, location);
+    if (before.minutes === null || after.minutes === null) {
+      refuse("travel_location_unknown", {
+        source,
+        neighboring_location: location,
+        visit_location: here,
+        neighboring_start: Number.isFinite(itemStart)
+          ? perthIso(itemStart)
+          : null,
+        neighboring_end: Number.isFinite(itemEnd) ? perthIso(itemEnd) : null,
+      });
+    }
+    return {
+      clash: overlaps(
+        visit.start - before.minutes * 60_000,
+        visit.end + after.minutes * 60_000,
+        itemStart,
+        itemEnd,
+      ),
+      travel_minutes: itemEnd <= visit.start ? before.minutes : after.minutes,
+    };
+  };
+  const eventLocation = (e: BookingObject) =>
+    text(e.address) || suburbs.get(text(e.contactId)) || null;
+  const own = events.filter((e) => e.contactId === row.contact_id);
+  if (own.length) {
+    refuse("contact_already_booked_that_day", {
+      events: own.map(eventSummary),
+    });
+  }
+  let maxTravel = 0;
+  const ghlClashes = [
+    ...events.map((event) => ({ event, source: "ghl" as const })),
+    ...blocked.map((event) => ({ event, source: "ghl_blocked" as const })),
+  ].flatMap(({ event: e, source }) => {
+    const gap = needsGap(
+      bookingInstant(e.startTime),
+      bookingInstant(e.endTime),
+      eventLocation(e),
+      source,
+    );
+    if (!gap.clash) return [];
+    maxTravel = Math.max(maxTravel, gap.travel_minutes);
+    return [{ ...eventSummary(e), travel_minutes: gap.travel_minutes }];
+  });
+  if (ghlClashes.length) {
+    refuse("ghl_calendar_clash", {
+      travel_buffer_minutes: maxTravel,
+      travel_model: SALES_BOOKING_TRAVEL_MODEL.version,
+      events: ghlClashes,
+    });
+  }
+  const outlookHits = outlookBusy.flatMap((e) => {
+    const start = bookingInstant(e.start), end = bookingInstant(e.end);
+    const gap = needsGap(start, end, e.location ?? null, "outlook");
+    return gap.clash
+      ? [{
+        subject: e.subject,
+        start: e.start,
+        end: e.end,
+        travel_minutes: gap.travel_minutes,
+      }]
+      : [];
+  });
+  if (outlookHits.length) {
+    refuse("outlook_calendar_clash", {
+      mailbox: outlook.mailbox,
+      events: outlookHits,
+    });
+  }
   const offerClashes = others.filter((o) =>
-    overlaps(
-      visit.occupiedStart,
-      visit.occupiedEnd,
+    needsGap(
       bookingInstant(o.start_iso),
       bookingInstant(o.end_iso),
-    )
+      suburbs.get(o.contact_id) ?? null,
+      "system_offer",
+    ).clash
   );
   if (offerClashes.length) {
     refuse("system_offer_clash", {
@@ -1056,8 +1195,11 @@ async function checkOwnerVisitAvailability(
     },
     outlook: { mailbox: outlook.mailbox, clashes: 0 },
     occupied: {
-      start_iso: perthIso(visit.occupiedStart),
-      end_iso: perthIso(visit.occupiedEnd),
+      start_iso: perthIso(visit.start),
+      end_iso: perthIso(visit.end),
+      on_site_minutes: RULES.visit_minutes,
+      travel: "computed_per_neighbour",
+      travel_model: SALES_BOOKING_TRAVEL_MODEL.version,
       travel_buffer_minutes: RULES.travel_buffer_minutes,
     },
     day_count_with_this_visit: dayCount,
@@ -1107,6 +1249,7 @@ export function ownerRulebookView(now: Date): BookingObject {
     window_max_minutes: RULES.window_max_minutes,
     visit_minutes: RULES.visit_minutes,
     travel_buffer_minutes: RULES.travel_buffer_minutes,
+    travel: { ...SALES_BOOKING_TRAVEL_MODEL },
     max_per_day: RULES.max_per_day,
     protected_bands: RULES.protected_bands.map((b) => ({ ...b })),
     sender: RULES.sender,
