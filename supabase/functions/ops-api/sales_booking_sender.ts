@@ -52,6 +52,9 @@ export interface SalesBookingOpportunityOwnership {
   /** `salesBookingLeadKind` of the same opportunity read. Decides only an
    * unassigned fencing lead: Stratco Marnin, normal Khairo, unclear held. */
   kind: SalesBookingLeadKind;
+  /** The contact or STRATCO FENCING calendar read an unassigned fencing
+   * lead's `kind` needs failed, so it is held `unclear`. */
+  kindUnread?: boolean;
 }
 
 /** What an unassigned fencing lead is: see `salesBookingLeadKind`. */
@@ -230,30 +233,37 @@ function stratcoAllocationFieldId(): string {
  *    the contact has an appointment on the STRATCO FENCING calendar.
  *  - `normal`: none of those, and a known non-Stratco source or tag.
  *  - `unclear`: neither. Held for someone to assign it in GHL.
- * Any Stratco signal wins over a normal one.
+ * Any Stratco signal wins over a normal one. `contact` is the lead's own GHL
+ * contact read (GET /contacts/{id}); its tags, custom fields, name and source
+ * count like the opportunity's contact's, which search rows omit.
  */
 export function salesBookingLeadKind(
   opportunity: unknown,
-  signals: { stratcoCalendarBooked?: boolean } = {},
+  signals: { stratcoCalendarBooked?: boolean; contact?: unknown } = {},
 ): SalesBookingLeadKind {
   const opp = record(opportunity);
-  const contact = record(opp.contact);
+  const contacts = [record(opp.contact), record(signals.contact)];
   const tags = [
-    ...(Array.isArray(contact.tags) ? contact.tags : []),
+    ...contacts.flatMap((contact) =>
+      Array.isArray(contact.tags) ? contact.tags : []
+    ),
     ...(Array.isArray(opp.tags) ? opp.tags : []),
   ].filter((tag): tag is string => typeof tag === "string");
-  const sources = [opp.source, contact.source].filter((v): v is string =>
-    typeof v === "string"
-  );
+  const sources = [opp.source, ...contacts.map((contact) => contact.source)]
+    .filter((v): v is string => typeof v === "string");
   const fieldId = stratcoAllocationFieldId();
   if (
     signals.stratcoCalendarBooked === true ||
-    [...tags, opp.name, contact.name, ...sources].some((value) =>
-      typeof value === "string" && STRATCO.test(value)
-    ) ||
+    [
+      ...tags,
+      opp.name,
+      ...contacts.map((contact) => contact.name),
+      ...sources,
+    ].some((value) => typeof value === "string" && STRATCO.test(value)) ||
     (fieldId !== "" &&
-      (customFieldSet(opp.customFields, fieldId) ||
-        customFieldSet(contact.customFields, fieldId)))
+      [opp, ...contacts].some((holder) =>
+        customFieldSet(holder.customFields, fieldId)
+      ))
   ) return "stratco";
   if (
     sources.some((source) => NORMAL_SOURCE.test(source)) ||

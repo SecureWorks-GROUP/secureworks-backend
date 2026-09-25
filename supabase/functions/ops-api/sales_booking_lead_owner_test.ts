@@ -11,7 +11,10 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  readSalesBookingOpportunityOwnership,
+  resolveSalesBookingLeadKind,
   SALES_BOOKING_RESOURCES,
+  type SalesBookingContactFact,
   salesBookingLeadBelongsTo,
   type SalesBookingMessage,
   salesBookingRead,
@@ -110,6 +113,8 @@ function readDeps(
         calendar_email: "marnin@secureworkswa.com.au",
       }),
     readThread: () => Promise.resolve([] as SalesBookingMessage[]),
+    readContacts: (ids) =>
+      Promise.resolve(Object.fromEntries(ids.map((id) => [id, {}]))),
     readContactStratcoBooked: () => Promise.resolve(false),
     now: () => NOW,
     ...extra,
@@ -282,7 +287,7 @@ Deno.test("read: a normal lead with any STRATCO FENCING appointment is Marnin's,
   assert(asked.includes("contact-booked-cal"));
 });
 
-Deno.test("read: when the STRATCO FENCING calendar cannot be read, a normal lead is owner unclear on Marnin's list, never Khairo's", async () => {
+Deno.test("read: when the contact or STRATCO FENCING calendar cannot be read, a normal lead is owner unclear on Marnin's list, withheld from Khairo's", async () => {
   const leads = [
     opp("plain", null),
     opp("stratco", null, { source: "Stratco lead allocation" }),
@@ -292,6 +297,9 @@ Deno.test("read: when the STRATCO FENCING calendar cannot be read, a normal lead
     const unread of [
       { readContactStratcoBooked: () => Promise.reject(new Error("GHL 500")) },
       { readContactStratcoBooked: undefined },
+      { readContacts: () => Promise.reject(new Error("GHL 500")) },
+      { readContacts: () => Promise.resolve({}) },
+      { readContacts: undefined },
     ] as Partial<SalesBookingReadDependencies>[]
   ) {
     const read = async (resource: string) =>
@@ -309,10 +317,214 @@ Deno.test("read: when the STRATCO FENCING calendar cannot be read, a normal lead
         gap.includes("1 unassigned fencing lead(s) held as owner unclear")
       ),
     );
-    assertEquals(
-      (await read("khairo")).cases.map((row) => row.id),
-      ["assigned-khairo"],
+    assertEquals(marnin.coverage.full_population, true);
+    const khairo = await read("khairo");
+    assertEquals(khairo.cases.map((row) => row.id), ["assigned-khairo"]);
+    assertEquals(khairo.coverage.full_population, false);
+  }
+});
+
+Deno.test("read: an unassigned lead's kind counts its GHL contact read, which search rows omit", async () => {
+  // Search rows carry no contact tags. Lead A's only Stratco signal is a
+  // contact tag behind a Website source; lead B's only normal signal is an
+  // answered-call contact tag.
+  const leads = [
+    opp("contact-stratco", null, {
+      contact: { id: "c-stratco", name: "Lead A" },
+    }),
+    opp("contact-normal", null, {
+      source: "",
+      contact: { id: "c-normal", name: "Lead B" },
+    }),
+  ];
+  const facts: Record<string, SalesBookingContactFact> = {
+    "c-stratco": { tags: ["stratco"] },
+    "c-normal": { tags: ["answered-call"] },
+  };
+  let asked: string[] = [];
+  const readContacts: SalesBookingReadDependencies["readContacts"] = (
+    ids,
+  ) => {
+    asked.push(...ids);
+    return Promise.resolve(
+      Object.fromEntries(ids.map((id) => [id, facts[id]])),
     );
+  };
+  const read = async (resource: string) => {
+    asked = [];
+    return await salesBookingRead(readDeps(leads, { readContacts }), {
+      resource,
+      week_start: WEEK,
+    });
+  };
+  const marnin = await read("marnin");
+  assertEquals(marnin.cases.map((row) => [row.id, row.owner_unclear]), [
+    ["contact-stratco", undefined],
+  ]);
+  const khairo = await read("khairo");
+  assertEquals(khairo.cases.map((row) => [row.id, row.tags]), [
+    ["contact-normal", ["answered-call"]],
+  ]);
+  // Each contact is read once: the kind read is reused to hydrate the row.
+  assertEquals(asked.sort(), ["c-normal", "c-stratco"]);
+});
+
+Deno.test("read: an owner-unclear lead booked on the STRATCO FENCING calendar is Marnin's Stratco lead, as at approval", async () => {
+  const leads = [opp("unclear-booked", null, { source: "" })];
+  const deps = readDeps(leads, {
+    readContactStratcoBooked: () => Promise.resolve(true),
+  });
+  const marnin = await salesBookingRead(deps, {
+    resource: "marnin",
+    week_start: WEEK,
+  });
+  assertEquals(marnin.cases.map((row) => [row.id, row.owner_unclear]), [
+    ["unclear-booked", undefined],
+  ]);
+  assertEquals(
+    (await salesBookingRead(deps, { resource: "khairo", week_start: WEEK }))
+      .cases,
+    [],
+  );
+});
+
+Deno.test("lead kind resolver: contact and calendar are read together; a failed read never clears a lead for the normal line", async () => {
+  const lead = (source: string) => ({
+    id: "opp-1",
+    source,
+    contact: { id: "c-1", name: "Lead" },
+  });
+  const contact = (fact: SalesBookingContactFact | null) => () =>
+    fact ? Promise.resolve({ "c-1": fact }) : Promise.reject(new Error("500"));
+  const calendar = (booked: boolean | null) => () =>
+    booked === null
+      ? Promise.reject(new Error("500"))
+      : Promise.resolve(booked);
+  const resolve = async (
+    source: string,
+    fact: SalesBookingContactFact | null,
+    booked: boolean | null,
+  ) => {
+    const { kind, kindUnread } = await resolveSalesBookingLeadKind(
+      lead(source),
+      { readContacts: contact(fact), readStratcoBooked: calendar(booked) },
+    );
+    return [kind, kindUnread];
+  };
+  assertEquals(await resolve("Website Enquiry", {}, false), ["normal", false]);
+  assertEquals(await resolve("", { tags: ["web - enquiry"] }, false), [
+    "normal",
+    false,
+  ]);
+  assertEquals(await resolve("", {}, false), ["unclear", false]);
+  assertEquals(await resolve("Website Enquiry", { tags: ["Stratco"] }, null), [
+    "stratco",
+    false,
+  ]);
+  assertEquals(
+    await resolve("Website Enquiry", { source: "Stratco allocation" }, false),
+    ["stratco", false],
+  );
+  assertEquals(await resolve("Website Enquiry", null, true), [
+    "stratco",
+    false,
+  ]);
+  assertEquals(await resolve("Website Enquiry", null, false), [
+    "unclear",
+    true,
+  ]);
+  assertEquals(await resolve("Website Enquiry", {}, null), [
+    "unclear",
+    true,
+  ]);
+  assertEquals(
+    await resolveSalesBookingLeadKind(lead("Website Enquiry"), {}),
+    { kind: "unclear", kindUnread: true, contact: null },
+  );
+
+  // A Stratco lead on its face needs no reads.
+  let reads = 0;
+  const counted = {
+    readContacts: () => (reads++, Promise.resolve({})),
+    readStratcoBooked: () => (reads++, Promise.resolve(false)),
+  };
+  assertEquals(
+    (await resolveSalesBookingLeadKind(lead("Stratco"), counted)).kind,
+    "stratco",
+  );
+  assertEquals(reads, 0);
+
+  // The contact read only answers once the calendar read has started.
+  let calendarAsked!: () => void;
+  const started = new Promise<void>((resolve) => calendarAsked = resolve);
+  const together = await resolveSalesBookingLeadKind(lead("Website Enquiry"), {
+    readContacts: async () => {
+      await started;
+      return { "c-1": {} };
+    },
+    readStratcoBooked: () => {
+      calendarAsked();
+      return Promise.resolve(false);
+    },
+  });
+  assertEquals(together.kind, "normal");
+});
+
+Deno.test("approval ownership read: a contact tag makes an unassigned lead Stratco, and an unread STRATCO calendar holds it owner unclear instead of failing", async () => {
+  const env = ["GHL_API_TOKEN", "GHL_LOCATION_ID"].map((
+    name,
+  ) => [name, Deno.env.get(name)] as const);
+  const realFetch = globalThis.fetch;
+  let contactTags: string[] = [];
+  let calendarStatus = 200;
+  try {
+    Deno.env.set("GHL_API_TOKEN", "test-token");
+    Deno.env.set("GHL_LOCATION_ID", "loc-1");
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      const json = (status: number, body: unknown) =>
+        Promise.resolve(new Response(JSON.stringify(body), { status }));
+      if (path === "/opportunities/opp-1") {
+        return json(200, {
+          opportunity: {
+            id: "opp-1",
+            locationId: "loc-1",
+            assignedTo: null,
+            pipelineId: FENCING,
+            source: "Website Enquiry",
+            contact: { id: "c-1", name: "Lead" },
+          },
+        });
+      }
+      if (path === "/contacts/c-1") {
+        return json(200, { contact: { id: "c-1", tags: contactTags } });
+      }
+      if (path === "/contacts/c-1/appointments") {
+        return json(calendarStatus, { events: [] });
+      }
+      return json(404, {});
+    }) as typeof fetch;
+    const read = () => readSalesBookingOpportunityOwnership("opp-1");
+    assertEquals(await read(), {
+      assignedTo: null,
+      pipelineId: FENCING,
+      kind: "normal",
+      kindUnread: false,
+    });
+    contactTags = ["stratco"];
+    calendarStatus = 500;
+    assertEquals((await read()).kind, "stratco");
+    contactTags = [];
+    const held = await read();
+    assertEquals([held.kind, held.kindUnread], ["unclear", true]);
+    assertEquals(salesBookingLeadBelongsTo(held, "khairo"), "no");
+    assertEquals(salesBookingLeadBelongsTo(held, "marnin"), "owner_unclear");
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const [name, value] of env) {
+      if (value === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, value);
+    }
   }
 });
 
@@ -323,37 +535,54 @@ Deno.test("read: a cached lead's live ownership recheck uses the same rule", asy
     ["a", "stratco"],
     ["b", "normal"],
     ["c", "unclear"],
+    ["d", "unclear"],
   ]);
   const cachedDeps = () =>
     readDeps([], {
       loadRosterCache: () =>
         Promise.resolve({
           read_at: new Date(NOW.getTime() - 60_000).toISOString(),
-          opportunities: [opp("a", null), opp("b", null), opp("c", null)],
+          opportunities: [
+            opp("a", null),
+            opp("b", null),
+            opp("c", null),
+            opp("d", null),
+          ],
           stages: { [STAGE]: "New Lead" },
           exhausted: true,
           pages_scanned: 1,
-          total: 3,
+          total: 4,
           reason: null,
           next_start_after: null,
           next_start_after_id: null,
         } as never),
+      // "d": its contact or STRATCO calendar could not be read; the live
+      // path holds such a lead the same way.
       readOpportunityOwnership: (id) =>
         Promise.resolve({
           assignedTo: null,
           pipelineId: FENCING,
           kind: kinds.get(id) ?? "unclear",
+          kindUnread: id === "d",
         }),
     });
-  const read = async (resource: string) =>
-    (await salesBookingRead(cachedDeps(), {
-      resource,
-      week_start: WEEK,
-    })).cases.sort((x, y) => x.id.localeCompare(y.id));
+  const read = (resource: string) =>
+    salesBookingRead(cachedDeps(), { resource, week_start: WEEK });
+  const sorted = (cases: { id: string; owner_unclear?: boolean }[]) =>
+    cases.sort((x, y) => x.id.localeCompare(y.id));
   const marnin = await read("marnin");
-  assertEquals(marnin.map((row) => row.id), ["a", "c"]);
-  assertEquals(marnin.map((row) => row.owner_unclear ?? false), [false, true]);
-  assertEquals((await read("khairo")).map((row) => row.id), ["b"]);
+  assertEquals(
+    sorted(marnin.cases).map((row) => [row.id, row.owner_unclear ?? false]),
+    [["a", false], ["c", true], ["d", true]],
+  );
+  assert(
+    marnin.coverage.gaps.some((gap) =>
+      gap.includes("1 unassigned fencing lead(s) held as owner unclear")
+    ),
+  );
+  const khairo = await read("khairo");
+  assertEquals(sorted(khairo.cases).map((row) => row.id), ["b"]);
+  assertEquals(khairo.coverage.full_population, false);
 });
 
 Deno.test("approval: the live ownership check uses the same rule", async () => {
