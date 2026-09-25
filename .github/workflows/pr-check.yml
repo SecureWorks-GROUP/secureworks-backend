@@ -268,7 +268,7 @@ jobs:
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
-      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job commercial read, job freshness and actor recording
+      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job commercial read, job freshness, actor recording and monitored mailboxes
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
@@ -281,7 +281,8 @@ jobs:
             supabase/functions/ops-api/trade_variation_request_test.ts \
             supabase/functions/ops-api/context_unlinked_test.ts \
             supabase/functions/ops-api/actor_calls_test.ts \
-            supabase/functions/ops-api/actor_calls_handler_test.ts
+            supabase/functions/ops-api/actor_calls_handler_test.ts \
+            supabase/functions/ops-api/monitored_mailboxes_test.ts
 
       # Slice C1b: the GHL webhook receiver's two-proof auth (observe until
       # GHL_WEBHOOK_AUTH_MODE=enforce), ids-only webhook_log receipts and the
@@ -293,6 +294,8 @@ jobs:
       # doorbell (targeted read, calls saved as client.call_logged) with it on.
       # CustomerReplied: the GHL workflow post for an inbound text is the same
       # doorbell, and a reconciler pass after it writes nothing new.
+      # UserReplied: the staff-reply workflow post is that doorbell too; it
+      # ignores any posted conversation id and reads the newest conversation.
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
@@ -301,6 +304,7 @@ jobs:
             supabase/functions/ghl-webhook-receiver/receiver_c1c_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_t1_test.ts \
             supabase/functions/ghl-webhook-receiver/receiver_customer_replied_test.ts \
+            supabase/functions/ghl-webhook-receiver/receiver_user_replied_test.ts \
             supabase/functions/ghl-webhook/message_webhook_test.ts
 
       # Slice C1a: the shared GHL row builder, ghl-proxy send_sms through the one
@@ -321,6 +325,17 @@ jobs:
             supabase/functions/ghl-message-reconcile/reconcile_test.ts \
             supabase/functions/ghl-message-reconcile/handler_test.ts
 
+      # Slice M4: the one-off GHL history load for live-job contacts (dry run by
+      # default, backfill rows only, resume, the day's job count) and its link
+      # action (a GHL contact on live jobs with none, exact key match to one
+      # contact only), on the design's named rows.
+      - name: Test the GHL history load and link action
+        run: |
+          deno test --allow-read \
+            supabase/functions/ghl-history-load/history_load_test.ts \
+            supabase/functions/ghl-history-load/link_test.ts \
+            supabase/functions/ghl-history-load/handler_test.ts
+
       # Slice B0: the placement keys and token rule (TypeScript twin of the SQL
       # helpers) on the one fixture table, and proof that the migration
       # contract runs the SQL helpers on that same table.
@@ -336,6 +351,14 @@ jobs:
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/monitor-inbox/classify_email_test.ts
+
+      # Slice EM1: the old monitor-inbox path stays pinned to its own five
+      # mailboxes and two groups, and never reads monitored_mailboxes (the new
+      # poller's list, behind email_capture_v2). email.md review M14, row E22.
+      - name: Test the pinned old mailbox poll
+        run: |
+          deno test --allow-read \
+            supabase/functions/monitor-inbox/legacy_mailboxes_test.ts
 
       # Slice F-ACT: the one actor rule (verified user, else x-sw-actor on a
       # server-key call, else actor_missing; never refused).

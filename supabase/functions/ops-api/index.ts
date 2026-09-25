@@ -384,6 +384,7 @@ import {
 } from './ses_pack_build_doors.ts'
 import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.ts'
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
+import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
@@ -3234,6 +3235,12 @@ export type TradeAuthContext = {
   orgId: string
   role: string
   managedVerticals: string[]
+  // Explicit Trade App see-everything tier (users.trade_sees_all_jobs, Captain
+  // ruling 2026-09-24). This is the ONE input Trade App job visibility derives
+  // from for "sees everything, every vertical" — it is deliberately NOT
+  // OPS_API_STAFF_OPERATOR_ROLES membership. That staff-role set is unchanged
+  // and still governs every other (non-Trade-App) gate.
+  seeEverything: boolean
 }
 
 // Verify the Trade JWT and carry the server-owned authorization context used by
@@ -3248,7 +3255,7 @@ async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
   if (error || !user) throw new ApiError('Session expired — please log in again', 401)
   const { data: profile, error: profileError } = await client
     .from('users')
-    .select('org_id, role, managed_verticals')
+    .select('org_id, role, managed_verticals, trade_sees_all_jobs')
     .eq('id', user.id)
     .maybeSingle()
   // A failed lookup is an outage, not a deauthorization — surface it as 503 so a
@@ -3262,6 +3269,7 @@ async function authTrade(req: Request, client: any): Promise<TradeAuthContext> {
     orgId: String(profile.org_id),
     role: String(profile.role || 'unknown'),
     managedVerticals: _normalizeManagedVerticals(profile.managed_verticals),
+    seeEverything: profile.trade_sees_all_jobs === true,
   }
 }
 
@@ -4384,6 +4392,7 @@ async function dispatchMakesafeReport(
   body: any,
   authMode: 'api_key' | 'jwt' | 'routine',
   authUser: TradeAuthContext | null,
+  tradeAppIsOffice?: boolean,
 ) {
   const reportStatus = normalizeMakesafeReportStatus(body?.status)
   if (authMode === 'routine' && reportStatus !== 'draft') {
@@ -4392,15 +4401,24 @@ async function dispatchMakesafeReport(
       403,
     )
   }
+  const actor = _resolveMakesafeReportActor(authMode, authUser, body)
+  const access = authUser
+    ? { orgId: authUser.orgId, managedVerticals: authUser.managedVerticals }
+    : undefined
+  const isOffice = tradeAppIsOffice === undefined
+    ? _opsApiCallerIsStaffOperator(authMode, authUser)
+    : tradeAppIsOffice === true
+  if (tradeAppIsOffice !== undefined) {
+    const jobId = body?.job_id || body?.jobId
+    if (!jobId) throw new ApiError('job_id required', 400)
+    if (!actor) throw new ApiError('user_jwt_required', 401)
+    await assertAssignedOrMakesafeAccess(client, String(jobId), String(actor), isOffice, access)
+  }
   return submitMakesafeReport(client, {
     ...body,
     status: reportStatus,
-    userId: _resolveMakesafeReportActor(authMode, authUser, body),
-  }, authUser
-    ? { orgId: authUser.orgId, managedVerticals: authUser.managedVerticals }
-    : undefined, {
-    isOffice: _opsApiCallerIsStaffOperator(authMode, authUser),
-  })
+    userId: actor,
+  }, access, { isOffice })
 }
 
 // Trade Board route: always the production canonical loader. There is no
@@ -4416,7 +4434,7 @@ async function makesafeBoardTradeRoute(
   } = {},
 ) {
   const { data: profile, error: profileErr } = await client.from('users')
-    .select('id, name, role, managed_verticals')
+    .select('id, name, role, managed_verticals, trade_sees_all_jobs')
     .eq('id', authUser.id)
     .maybeSingle()
   if (profileErr || !profile) throw new ApiError('Trade profile not found', 403)
@@ -4426,6 +4444,7 @@ async function makesafeBoardTradeRoute(
     name: profile.name,
     role: profile.role,
     managedVerticals: profile.managed_verticals,
+    seeEverything: profile.trade_sees_all_jobs === true,
   }
   const access = authorizeMakesafeTradeProjection(authMode, viewer)
   if (!access.ok) return json({ error: access.error }, access.status)
@@ -4911,7 +4930,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // Carry the authenticated Trade authorization context from the server-owned
       // profile. Request params never determine tenant, role, or manager scope.
       const { data: profile } = await adminClient.from('users')
-        .select('org_id, role, managed_verticals')
+        .select('org_id, role, managed_verticals, trade_sees_all_jobs')
         .eq('id', user.id)
         .maybeSingle()
       authMode = 'jwt'
@@ -4921,6 +4940,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         orgId: String(profile?.org_id || ''),
         role: profile?.role || 'unknown',
         managedVerticals: _normalizeManagedVerticals(profile?.managed_verticals),
+        seeEverything: profile?.trade_sees_all_jobs === true,
       }
     } catch (_e) {
       return new Response(JSON.stringify({ error: 'Authentication failed' }), {
@@ -5298,6 +5318,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const overlay = await loadSalesBookingPackOverlay(client, resource, assembled.week_start)
               return applySalesBookingPackOverlay(assembled, overlay)
             },
+            // Whose lead it is, read live from GHL at approval.
+            readOpportunityOwnership: createSalesBookingExecuteDeps(client).readOpportunityOwnership,
             // Owner-authored approvals (owner_input body): reads only.
             owner: createOwnerApprovalDeps(client),
           }))
@@ -7246,6 +7268,22 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      // ── Email capture sources (slice EM1, email.md §13a): the one door that
+      // changes which Outlook mailboxes the new poller reads. Server key or a
+      // company admin/owner only; the actor is recorded on the row and its
+      // receipt. Adding or removing a source is a migration.
+      case 'set_monitored_mailbox': {
+        if (!canChangeMonitoredMailboxes(authMode, authUser, DEFAULT_ORG_ID)) {
+          return json({ error: 'An owner or admin session, or the privileged ops key, is required to change monitored mailboxes.', code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+        try {
+          return json(await setMonitoredMailbox(client, body, receiptActor(requestActor, authMode)))
+        } catch (error) {
+          if (error instanceof MonitoredMailboxError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       // ── Unlinked evidence (slice B0, adminbucket.md Trace C): census and
       // rows reads, staff front door, read-only, actor logged.
       case 'context_unlinked_census':
@@ -7516,8 +7554,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           authUser,
           req.method,
         )
-      case 'submit_makesafe_report':
-        return json(await dispatchMakesafeReport(client, body, authMode, authUser))
+      case 'submit_makesafe_report': {
+        const makesafeTradeAppIsOffice = authMode === 'jwt' && authUser &&
+            !_opsApiCallerIsStaffOperator(authMode, authUser)
+          ? _resolveManagerVisibility({
+            role: authUser.role,
+            managedVerticals: authUser.managedVerticals,
+            seeEverything: authUser.seeEverything,
+          }).isDispatcher
+          : undefined
+        return json(await dispatchMakesafeReport(client, body, authMode, authUser, makesafeTradeAppIsOffice))
+      }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       case 'read_xero_organisation':
       case 'read_xero_tracking_categories':
@@ -9820,7 +9867,23 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw new ApiError('job_id, requested_trade_id, and requested_dates[] required', 400)
         }
 
-        const requestedBy = body.requested_by || body.user_id
+        const raTradeCaller = authMode === 'jwt' && authUser && !_opsApiCallerIsStaffOperator(authMode, authUser)
+          ? authUser
+          : null
+        if (raTradeCaller) {
+          await assertAssignedOrMakesafeAccess(
+            client,
+            String(job_id),
+            raTradeCaller.id,
+            _resolveManagerVisibility({
+              role: raTradeCaller.role,
+              managedVerticals: raTradeCaller.managedVerticals,
+              seeEverything: raTradeCaller.seeEverything,
+            }).isDispatcher,
+            { orgId: raTradeCaller.orgId, managedVerticals: raTradeCaller.managedVerticals },
+          )
+        }
+        const requestedBy = raTradeCaller ? raTradeCaller.id : (body.requested_by || body.user_id)
         if (!requestedBy) throw new ApiError('requested_by (user_id) required', 400)
 
         // Verify job exists
@@ -9983,6 +10046,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const { isAdmin, isDispatcher, isMakesafeManager, poolVerticals, managedVerticals } = _resolveManagerVisibility({
           role: tradeUser.role,
           managedVerticals: tradeUser.managedVerticals,
+          seeEverything: tradeUser.seeEverything,
         })
         // ONE per-job access context for every trade job surface. trade_job_detail
         // and submit_service_report already honoured it (tenant + managed
@@ -10045,11 +10109,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               body?.job_id || body?.jobId
             let quoteVisible = false
             if (roofJobId) {
-              const decision = await resolveTradeJobAccessTier(
+              const decision = await assertAssignedOrMakesafeAccess(
                 client,
-                roofJobId,
+                String(roofJobId),
                 tradeUser.id,
-                { isOffice: isDispatcher, access: tradeJobAccess },
+                isDispatcher,
+                tradeJobAccess,
               )
               quoteVisible = decision.quoteVisible
             }
@@ -10057,9 +10122,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               return json(await getRoofReportTemplateForJob(client, roofJobId, { quoteVisible }))
             }
             if (action === 'save_roof_report') {
-              return json(await saveRoofReport(client, { ...body, userId: tradeUser.id }, { quoteVisible }))
+              return json(await saveRoofReport(client, { ...body, job_id: roofJobId, jobId: roofJobId, userId: tradeUser.id }, { quoteVisible }))
             }
-            return json(await submitRoofReport(client, { ...body, userId: tradeUser.id }, {}, { quoteVisible }))
+            return json(await submitRoofReport(client, { ...body, job_id: roofJobId, jobId: roofJobId, userId: tradeUser.id }, {}, { quoteVisible }))
           }
           case 'update_my_assignment': return json(await updateMyAssignment(client, body, tradeUser.id))
           case 'complete_my_job': return json(await tradeCompleteMyJob(client, body, tradeUser, tradeJobAccess))
@@ -10886,7 +10951,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             }
             return json({ success: true })
           }
-          case 'create_trade_alert': return json(await createTradeAlert(client, tradeUser.id, body))
+          case 'create_trade_alert': {
+            const alertJobId = body?.jobId || body?.job_id
+            if (alertJobId) {
+              await assertAssignedOrMakesafeAccess(client, String(alertJobId), tradeUser.id, isDispatcher, tradeJobAccess)
+            }
+            return json(await createTradeAlert(client, tradeUser.id, body))
+          }
           case 'trade_labour_budget': return json(await tradeLabourBudget(client, url.searchParams, tradeUser.id, isDispatcher, tradeJobAccess))
           case 'update_job_phase': return json(await updateJobPhase(client, body, tradeUser.id))
           case 'list_pending_verifications': return json(await listPendingVerifications(client, tradeUser.id, url.searchParams))
@@ -12651,7 +12722,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
 
           case 'submit_makesafe_report':
-            return json(await dispatchMakesafeReport(client, body, 'jwt', tradeUser))
+            return json(await dispatchMakesafeReport(client, body, 'jwt', tradeUser, isDispatcher))
         }
       }
 
@@ -13590,6 +13661,7 @@ export async function handleTradeCalendarAction(req: Request, client: any): Prom
   const { isDispatcher } = _resolveManagerVisibility({
     role: viewer.role,
     managedVerticals: viewer.managedVerticals,
+    seeEverything: viewer.seeEverything,
   })
   return json(await tradeCalendarEvents(client, url.searchParams, viewer, isDispatcher))
 }
@@ -14349,6 +14421,7 @@ export async function handleTradeWorkOrdersAction(req: Request, client: any): Pr
   const { isDispatcher } = _resolveManagerVisibility({
     role: viewer.role,
     managedVerticals: viewer.managedVerticals,
+    seeEverything: viewer.seeEverything,
   })
   return json(await tradeWorkOrders(client, url.searchParams, viewer, isDispatcher))
 }
@@ -14652,6 +14725,7 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
     { data: deliveriesByReq },
     { data: deliveriesByConfirmed },
     intelResult,
+    orgEventsResult,
   ] = await Promise.all([
     client.from('purchase_orders').select(poSelect)
       .eq('org_id', DEFAULT_ORG_ID).gte('delivery_date', from).lte('delivery_date', to)
@@ -14665,7 +14739,22 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
     uniqueJobIds.length > 0
       ? client.from('job_intelligence').select('*').in('job_id', uniqueJobIds)
       : Promise.resolve({ data: [] }),
+    // Public holidays and company days (Create > Event > "Holiday / Company Day").
+    // The dashboard and trade app read these as `orgEvents` to paint the day-header
+    // badge, but the feed never sent them, so every holiday was silently invisible.
+    // Same overlap rule as the assignments above, so a multi-day company day that
+    // starts before the window still shows.
+    client.from('org_events')
+      .select('id, event_date, event_end, title, event_type, description, visible_to_trades')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .lte('event_date', to)
+      .or(`event_end.gte.${from},and(event_end.is.null,event_date.gte.${from})`)
+      .order('event_date', { ascending: true }),
   ])
+
+  // A holiday lookup failure must never blank the calendar; the grid just
+  // renders without badges.
+  const orgEvents = orgEventsResult?.error ? [] : (orgEventsResult?.data || [])
 
   // Merge and deduplicate by id
   const deliveryMap = new Map<string, any>()
@@ -14719,7 +14808,7 @@ export async function calendarEvents(client: any, params: URLSearchParams) {
   // with no signal. Surface it so the FE can warn the user the view is partial.
   const truncated = (data?.length ?? 0) >= CAL_EVENT_LIMIT
 
-  return { events: lightEvents, deliveries: deliveries || [], readiness, truncated }
+  return { events: lightEvents, deliveries: deliveries || [], readiness, truncated, orgEvents }
 }
 
 // ── Pipeline pricing projection ─────────────────────────────────────────────
@@ -38059,20 +38148,29 @@ export type TradeJobAccessContext = {
   managedVerticals?: unknown
 }
 
-// ── Trade job access tier (Captain ruling 2026-08-17) ────────────────────────
+// ── Trade job access tier (Captain ruling 2026-08-17; makesafe_open retired
+// 2026-09-24) ─────────────────────────────────────────────────────────────
 // The ONE named decision for "what does this signed-in caller get on this job":
-//   office           admin / owner / ops_manager (or a privileged server key):
-//                    everything, everywhere.
+//   office           the explicit Trade App see-everything tier
+//                    (TradeAuthContext.seeEverything, users.trade_sees_all_jobs
+//                    — NOT users.role) or a privileged server key: everything,
+//                    everywhere.
 //   division_manager users.managed_verticals contains the job's vertical
 //                    (_jobVertical): everything on that job, quote included,
 //                    exactly like office WITHIN that trade.
 //   allocated        a non-cancelled job_assignments row for this user on this
 //                    job — lead (is_lead=true) or crew (is_lead=false), NO
 //                    difference: everything about the job EXCEPT the quote.
-//   makesafe_open    the pre-existing MakeSafe field-report exception: any
-//                    logged-in trade may open/report an open MakeSafe before a
-//                    named assignment exists. Treated as an allocated trade for
-//                    quote purposes (never sees the quote).
+//   makesafe_open    RETIRED 2026-09-24 (Captain ruling: "only hugo/ whoever
+//                    that's allocated a make safe from now on"). The resolver
+//                    below no longer ever returns this tier — an unallocated
+//                    trade with no see-everything/make-safe-manager standing
+//                    now falls straight through to 'none' on a make-safe job
+//                    exactly like on any other vertical. The literal is kept in
+//                    the type (and in every downstream `tier === 'makesafe_open'`
+//                    money/quote guard) only so those guards keep compiling and
+//                    keep treating a value that can no longer occur the same
+//                    conservative way an 'allocated' trade is treated.
 //   none             refused. A trade with no managed vertical and no
 //                    allocation sees nothing on the job; another tenant is
 //                    refused before any other question is asked.
@@ -38174,6 +38272,7 @@ export async function resolveTradeJobAccessTier(
     .eq('job_id', jobId)
     .eq('user_id', userId)
     .neq('status', 'cancelled')
+    .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
     .limit(1)
     .maybeSingle()
   if (assigned) {
@@ -38181,13 +38280,10 @@ export async function resolveTradeJobAccessTier(
   }
   if (!job) job = await getTradeJobForAccess(client, jobId)
   if (!job) return refuseMissingOrForeign()
-  // MakeSafe report fallback: any logged-in trade may open/report an open
-  // MakeSafe even before ops has created a named assignment. This keeps the
-  // field-report flow moving when the board/admin upload step is behind, while
-  // ordinary patio/fencing/decking jobs remain allocation-gated.
-  if (await isMakesafeAccessJobForClient(client, job)) {
-    return { tier: 'makesafe_open', quoteVisible: false, reason: 'makesafe_open', job }
-  }
+  // makesafe_open RETIRED 2026-09-24 (Captain ruling): an unallocated trade
+  // with no see-everything or make-safe category-manager standing no longer
+  // gets a report door onto a make-safe job it holds no assignment on — it
+  // refuses exactly like any other vertical. See the tier doc comment above.
   return { tier: 'none', quoteVisible: false, reason: 'not_assigned', job }
 }
 
@@ -38381,21 +38477,32 @@ function presentTradeJobFeedRow(job: any, quoteVisible: boolean): void {
 // Records that are operationally unsafe or noisy to surface at all: hard
 // deletes, voids and known duplicates. Deliberately NOT a visibility window —
 // cancelled, archived, lost, complete, invoiced and paid jobs all stay visible,
-// which is the point of the ruling. Keeping duplicates out is also what lets
-// "all" satisfy the captain's condition that one job renders as one card.
+// which is the point of the ruling, and it now applies uniformly to every
+// visibility tier (Captain ruling 2026-09-24: "past and present" for the
+// allocated-only tier means every job status too, not just every date).
 export const _GLOBAL_SEARCH_STATUS_EXCLUDE = '("deleted","duplicate","duplicated","void","voided")'
-export const _ASSIGNED_BROWSE_STATUS_EXCLUDE =
-  '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
 
-// Which set an empty-query All tab returns. The lens, not the role name, is the
-// authority: anyone the trade app already grants an Everyone view (a dispatcher,
-// or a vertical manager via managed_verticals) browses the whole tenant, and
-// everyone else keeps the pre-existing own-assignments browse. Ordinary crew are
-// untouched by the widening — scope item 3.
-//
-// The company lens is NOT bounded to a manager's managed verticals: typed search
-// has always reached every vertical for every trade user, so bounding browse
-// alone would make the deliberate lens narrower than the incidental one.
+// A SUPERSET filter over the `jobs` table's own columns: matches every row a
+// requested vertical could possibly mean. Mirrors tradeCalendarVerticalFilter
+// (calendar_events shape) and myJobs' internal vertical filter (job_assignments
+// embed shape) for the plain `jobs` table shape search_all_jobs reads. Over-
+// fetching here is harmless; the exact "repair wins" precedence is enforced
+// once, afterward, by the same _jobVertical classifier every other vertical
+// decision uses (see jobWithinVisibility below).
+export function _jobsTableVerticalFilter(verticals: string[]): string {
+  return verticals.flatMap((vertical) =>
+    vertical === 'makesafe'
+      ? ['type.eq.makesafe', 'job_number.ilike.SWMS-%']
+      : vertical === 'repair'
+      ? ['type.eq.repair', 'metadata->>ses_family.eq.repair', 'metadata->>makesafe_job_family.eq.repair']
+      : [`type.eq.${vertical}`]
+  ).join(',')
+}
+
+// Which set an empty-query All tab returns, and (for column-selection purposes
+// only) whether quote columns are worth selecting at all. The ACTUAL row-level
+// restriction for a non-see-everything caller is applied in searchAllJobs
+// itself, on every path, regardless of q — see jobWithinVisibility.
 export function _resolveTradeJobFeedLens(
   input: { isDispatcher: boolean; managedVerticals?: unknown; q?: string | null },
 ): { lens: 'search' | 'company' | 'assigned'; canSeeCompany: boolean } {
@@ -38406,6 +38513,17 @@ export function _resolveTradeJobFeedLens(
   return { lens: canSeeCompany ? 'company' : 'assigned', canSeeCompany }
 }
 
+// ── Captain ruling 2026-09-24 ────────────────────────────────────────────────
+// "All tab is limited. if it's not anyone i mentioned, they will not see any
+// other jobs but their own." The trade job feed used to have NO vertical or
+// assignment filter at all on the underlying `jobs` query — the client's
+// 2-character search-box minimum was the only thing standing between an
+// ordinary installer and a company-wide result set, and a category manager
+// (e.g. a fencing-only manager) got the WHOLE company on this surface even
+// though every other Trade App surface held them to their vertical. This is
+// the one shared, server-side row-set decision every path below (empty-query
+// browse, typed search, and the external-ref match) is filtered through, so
+// search can never answer differently than my_jobs for the same person.
 export async function searchAllJobs(
   client: any,
   params: URLSearchParams,
@@ -38439,40 +38557,121 @@ export async function searchAllJobs(
   const pageSize = Math.min(requestedPageSize, TRADE_JOB_FEED_PAGE_MAX)
   const offset = requestedOffset
 
-  // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
-  // set — it polluted results (a gibberish q returned ~6 rows from the trade's
-  // assigned list with no text filter).
-  let seedJobs: any[] = []
-  if (lens === 'assigned') {
-    const { data: assignedRows, error: assignedErr } = await client.from('job_assignments')
-      .select(`jobs:job_id(${jobFeedSelect})`)
-      .eq('user_id', viewer.id)
-    if (assignedErr) throw assignedErr
-    seedJobs = (assignedRows || [])
-      .map((r: any) => r.jobs)
-      .filter((j: any) =>
-        j && String(j.org_id || viewer.orgId) === String(viewer.orgId) &&
-        !['lost', 'cancelled', 'archived', 'deleted', 'paid', 'closed', 'duplicate', 'duplicated', 'void', 'voided']
-          .includes(String(j.status || '').toLowerCase())
-      )
+  const seeEverything = isDispatcher === true
+  const managedVerticals = _normalizeManagedVerticals(viewer.managedVerticals)
+  const isCategoryManager = !seeEverything && managedVerticals.length > 0
+  const isAllocatedOnly = !seeEverything && managedVerticals.length === 0
+
+  // The allocated-only visibility set is a non-cancelled job_assignments row,
+  // full stop — past and present, every job status. It is fetched once and
+  // used both as a hard DB-level restriction (isAllocatedOnly) and as one term
+  // of the exact JS-side gate every row (including an external-ref match)
+  // passes through below.
+  let assignedJobIds: string[] = []
+  if (isAllocatedOnly || isCategoryManager) {
+    const assignedRows = await readPagedRows(
+      (from, limit) =>
+        client.from('job_assignments')
+          .select('id, job_id')
+          .eq('user_id', viewer.id)
+          .neq('status', 'cancelled')
+          .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
+          .order('id', { ascending: true })
+          .range(from, from + limit - 1),
+      'search_all_jobs allocated set',
+    )
+    assignedJobIds = collectUniqueStringIds(assignedRows.map((r: any) => r.job_id))
   }
 
-  // Tenant is a boundary, not a display preference. This read was previously
-  // org-unscoped; widening it without closing that would hand another tenant's
-  // whole job table to any trade login here.
-  // supabase-js only exposes filters AFTER select(), so the shared filter set is
-  // applied to a freshly-selected builder rather than to a stored one.
-  const buildJobQuery = (columns: string, options?: { count: 'exact'; head: true }) => {
+  // No manager standing and no allocation at all: nothing to show, on any
+  // path — never fall through to an unrestricted company query.
+  if (isAllocatedOnly && assignedJobIds.length === 0) {
+    return {
+      jobs: [],
+      lens,
+      total: 0,
+      page_size: pageSize,
+      offset,
+      truncated: false,
+      next_offset: null,
+    }
+  }
+
+  // A category manager's OWN assignment can sit outside their managed
+  // vertical (a one-off allocation) — union it in exactly like my_jobs'
+  // personal lane does, so search is never narrower than that lane for the
+  // same person.
+  const readAssignedJobChunks = async (
+    buildChunk: (idChunk: string[]) => any,
+  ): Promise<any[]> => {
+    const idChunks: string[][] = []
+    for (let i = 0; i < assignedJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+      idChunks.push(assignedJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+    }
+    const chunkResults = await Promise.all(
+      idChunks.map((idChunk) => _withBoundedFetchSlot(async () => await buildChunk(idChunk))),
+    )
+    const byId = new Map<string, any>()
+    for (const { data, error } of chunkResults as any[]) {
+      if (error) throw error
+      for (const row of data || []) {
+        if (row?.id && !byId.has(String(row.id))) byId.set(String(row.id), row)
+      }
+    }
+    return [...byId.values()].sort((a: any, b: any) => {
+      const createdDiff = new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+      if (createdDiff !== 0) return createdDiff
+      const aId = String(a.id)
+      const bId = String(b.id)
+      return aId < bId ? -1 : aId > bId ? 1 : 0
+    })
+  }
+
+  const assignedJobIdSet = new Set(assignedJobIds)
+  // The ONE exact visibility gate every row (DB-fetched or external-ref
+  // matched) must pass before it can reach the response. The DB-level filters
+  // in buildJobQuery below are a narrowing optimisation, not the authority —
+  // this predicate is, matching the "superset DB filter + exact JS filter"
+  // pattern every other vertical-scoped surface in this file already uses.
+  const jobWithinVisibility = (job: any): boolean => {
+    if (!job?.id) return false
+    if (seeEverything) return true
+    if (assignedJobIdSet.has(String(job.id))) return true
+    if (isCategoryManager) return managedVerticals.includes(_jobVertical(job))
+    return false
+  }
+
+  // Tenant is a boundary, not a display preference. supabase-js only exposes
+  // filters AFTER select(), so the shared filter set is applied to a
+  // freshly-selected builder rather than to a stored one.
+  const buildJobQuery = (
+    columns: string,
+    options?: { count: 'exact'; head: true },
+    idChunk?: string[],
+  ) => {
     let jobQuery = (options ? client.from('jobs').select(columns, options) : client.from('jobs').select(columns))
       .eq('org_id', viewer.orgId)
-      .not('status', 'in', lens === 'assigned' ? _ASSIGNED_BROWSE_STATUS_EXCLUDE : _GLOBAL_SEARCH_STATUS_EXCLUDE)
+      .not('status', 'in', _GLOBAL_SEARCH_STATUS_EXCLUDE)
     if (q) {
       // Search covers job_number + client_name + site_suburb + site_address.
       jobQuery = jobQuery.or(
         `job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`,
       )
     }
+    if (idChunk) {
+      jobQuery = jobQuery.in('id', idChunk)
+    } else if (isAllocatedOnly) {
+      jobQuery = jobQuery.in('id', [])
+    } else if (isCategoryManager) {
+      jobQuery = jobQuery.or(_jobsTableVerticalFilter(managedVerticals))
+    }
     return jobQuery
+  }
+
+  const readOwnOutOfVerticalJobs = async (): Promise<any[]> => {
+    if (!isCategoryManager || assignedJobIds.length === 0) return []
+    const rows = await readAssignedJobChunks((idChunk) => buildJobQuery(jobFeedSelect, undefined, idChunk))
+    return rows.filter((job: any) => !managedVerticals.includes(_jobVertical(job)))
   }
 
   if (q) {
@@ -38484,16 +38683,25 @@ export async function searchAllJobs(
     )
     const externalRefJobs = Object.values(extRefMatches.byId).filter((job: any) =>
       /^[0-9a-f-]{36}$/i.test(String(job?.id || '')) &&
-      String(job?.org_id || viewer.orgId) === String(viewer.orgId)
+      String(job?.org_id || viewer.orgId) === String(viewer.orgId) &&
+      jobWithinVisibility(job)
     )
-    const { data: baseRows, error: baseErr } = await buildJobQuery(jobFeedSelect)
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: true })
-      .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
-    if (baseErr) throw baseErr
+    let baseRows: any[]
+    if (isAllocatedOnly) {
+      baseRows = (await readAssignedJobChunks((idChunk) => buildJobQuery(jobFeedSelect, undefined, idChunk)))
+        .slice(0, TRADE_JOB_SEARCH_RESULT_CAP + 1)
+    } else {
+      const { data, error: baseErr } = await buildJobQuery(jobFeedSelect)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
+      if (baseErr) throw baseErr
+      baseRows = data || []
+    }
 
     const byId: Record<string, any> = {}
-    for (const job of [...(baseRows || []), ...externalRefJobs]) {
+    const seedJobs = await readOwnOutOfVerticalJobs()
+    for (const job of [...(baseRows || []).filter(jobWithinVisibility), ...seedJobs, ...externalRefJobs]) {
       if (job?.id) byId[job.id] = job
     }
     const ranked = Object.values(byId).sort((a: any, b: any) => {
@@ -38525,26 +38733,38 @@ export async function searchAllJobs(
 
   // The total is read separately (head count) so the client can say "showing X
   // of Y" honestly instead of inferring completeness from a full page — the
-  // silent-truncation failure this whole change is about.
+  // silent-truncation failure this whole change is about. For a category
+  // manager this can slightly OVER-count (the superset vertical filter, the
+  // same imprecision every other vertical-scoped surface here accepts), never
+  // under-count.
   let total: number | null = null
-  try {
-    const countResult = await buildJobQuery('id', { count: 'exact', head: true })
-    if (countResult?.error) throw countResult.error
-    total = typeof countResult?.count === 'number' ? countResult.count : null
-  } catch (countErr: any) {
-    console.log('[ops-api] search_all_jobs count failed (non-blocking):', countErr?.message)
+  let allJobs: any[]
+  if (isAllocatedOnly) {
+    const allowedJobs = await readAssignedJobChunks((idChunk) => buildJobQuery(jobFeedSelect, undefined, idChunk))
+    total = allowedJobs.length
+    allJobs = allowedJobs.slice(offset, offset + pageSize)
+  } else {
+    try {
+      const countResult = await buildJobQuery('id', { count: 'exact', head: true })
+      if (countResult?.error) throw countResult.error
+      total = typeof countResult?.count === 'number' ? countResult.count : null
+    } catch (countErr: any) {
+      console.log('[ops-api] search_all_jobs count failed (non-blocking):', countErr?.message)
+    }
+
+    // created_at is not unique, so paging needs the id tiebreak for a total order.
+    const { data, error: allJobsErr } = await buildJobQuery(jobFeedSelect)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1)
+    if (allJobsErr) throw allJobsErr
+    allJobs = data || []
   }
 
-  // created_at is not unique, so paging needs the id tiebreak for a total order.
-  const { data: allJobs, error: allJobsErr } = await buildJobQuery(jobFeedSelect)
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: true })
-    .range(offset, offset + pageSize - 1)
-  if (allJobsErr) throw allJobsErr
-
+  const seedJobs = await readOwnOutOfVerticalJobs()
   // One job = one entry, keyed by job id — the captain's explicit condition.
   const byId: Record<string, any> = {}
-  for (const j of [...seedJobs, ...(allJobs || [])]) {
+  for (const j of [...(offset === 0 ? seedJobs : []), ...(allJobs || []).filter(jobWithinVisibility)]) {
     if (j?.id) byId[j.id] = j
   }
 
@@ -38556,10 +38776,10 @@ export async function searchAllJobs(
   // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
   for (const job of jobs) presentTradeJobFeedRow(job, jobQuoteVisible(job))
 
-  // `total` counts the paged job query only; the assigned seed and external-ref
-  // merges can push a page past it, so never report fewer rows than were sent.
-  const reportedTotal = total === null ? null : Math.max(total, jobs.length)
-  const hasMore = total !== null && offset + jobs.length < total
+  // `total` counts the paged job query only; the seed and external-ref merges
+  // can push a page past it, so never report fewer rows than were sent.
+  const reportedTotal = total === null ? null : Math.max(total + seedJobs.length, jobs.length)
+  const hasMore = total !== null && offset + allJobs.length < total
   return {
     jobs,
     lens,
@@ -38744,20 +38964,31 @@ export function _normalizeManagedVerticals(input: unknown): string[] {
   return out
 }
 
-// Pure resolver for trade-app manager visibility, generalised from
-// _resolveMakesafeVisibility to every vertical. Single source of truth used by
-// the trade route + unit tests.
-//  - Dispatcher (admin / ops_manager): unchanged see-all behaviour + make-safe
-//    pool. isMakesafeManager / canSeeMakesafePool preserve the exact make-safe
-//    semantics the live flag gave (Hugo keeps the pool via the backfill).
+// Pure resolver for trade-app manager visibility — the ONE visibility resolver
+// every Trade App job surface (my_jobs all modes, trade_calendar,
+// my_work_orders, search_all_jobs, and — via resolveTradeJobAccessTier's
+// isOffice — every per-job door) is required to share.
+//
+// Captain ruling 2026-09-24 ("go A"): Trade App job visibility is decided by
+// an explicit per-user see-everything flag plus users.managed_verticals, NEVER
+// by users.role. `_opsApiStaffOperatorRole` (OPS_API_STAFF_OPERATOR_ROLES) is
+// the Ops Dashboard staff-role gate and stays completely unchanged for every
+// OTHER surface (money, allocation authz, admin actions, pricing); it is
+// deliberately NOT read here anymore. Production had Nithin/Khairo/Hugo/Esther
+// all sitting in that staff-role set, which is why they used to see the whole
+// company on every Trade App surface even though only Esther was meant to.
+//  - See-everything (input.seeEverything, users.trade_sees_all_jobs): unchanged
+//    see-all behaviour + make-safe pool, exactly like the old "dispatcher"
+//    tier — isMakesafeManager / canSeeMakesafePool preserve the exact
+//    make-safe semantics the live flag gave.
 //  - Vertical manager (managed_verticals contains the vertical): gets that
-//    vertical's open pool unioned with their own assignments, WITHOUT dispatcher
-//    see-all.
+//    vertical's open pool unioned with their own assignments, WITHOUT
+//    see-everything.
 //  - poolVerticals: the set of verticals whose open pool myJobs should union in
-//    — every managed vertical, PLUS 'makesafe' for any dispatcher (so the
-//    dispatcher make-safe pool survives even with an empty managed list).
+//    — every managed vertical, PLUS 'makesafe' for a see-everything user (so
+//    the make-safe pool survives even with an empty managed list).
 export function _resolveManagerVisibility(
-  input: { role?: string | null; managedVerticals?: unknown },
+  input: { role?: string | null; managedVerticals?: unknown; seeEverything?: boolean | null },
 ): {
   isAdmin: boolean
   isDispatcher: boolean
@@ -38768,11 +38999,11 @@ export function _resolveManagerVisibility(
 } {
   const role = String(input?.role || '').toLowerCase()
   const isAdmin = role === 'admin'
-  // Office tier (Captain 2026-08-17): admin / owner / ops_manager see everything
-  // everywhere. The SAME set the front door and _resolveAllocationAuthz admit;
-  // `owner` was missing here, so the owner's Trade lens was narrower than an
-  // ops_manager's.
-  const isDispatcher = _opsApiStaffOperatorRole(role)
+  // "isDispatcher" is the field name every existing caller destructures — kept
+  // for a minimal-diff wiring across the dozens of Trade App call sites — but
+  // its MEANING is now "this caller is in the see-everything tier", not "this
+  // caller holds a staff role". See the function comment above.
+  const isDispatcher = input?.seeEverything === true
   const managedVerticals = _normalizeManagedVerticals(input?.managedVerticals)
   const isMakesafeManager = managedVerticals.includes('makesafe')
   const canSeeMakesafePool = isDispatcher || isMakesafeManager
@@ -39240,20 +39471,24 @@ export async function myJobs(
     // twice; de-duplicating by the canonical assignment id makes both safe.
     assignments = [...new Map(assignments.map((row: any) => [row.id, row])).values()]
   } else if (managerScope.length > 0) {
-    // ── Manager's Board (U2b): all in-vertical assignments across every crew ──
-    // A vertical manager (non-dispatcher) on mode:'all' sees the WHOLE vertical,
-    // so widen past this user's own rows to every assignment whose job's vertical
-    // is one they manage — regardless of user_id — using the admin select (which
-    // carries the crew user, needed for the board's lanes). Scope is strictly
-    // managerScope (their managed_verticals), matching allocate_job authz: a
-    // fencing manager gets fencing only, etc. Make-safe is matched by type OR an
-    // SWMS- job_number, mirroring _jobVertical + the open-pool query.
+    // ── Manager's Board (U2b, full-range since Captain 2026-09-24): all
+    // in-vertical assignments across every crew ──
+    // A vertical manager (non-see-everything) on mode:'all' sees the WHOLE
+    // vertical, so widen past this user's own rows to every assignment whose
+    // job's vertical is one they manage — regardless of user_id — using the
+    // admin select (which carries the crew user, needed for the board's
+    // lanes). Scope is strictly managerScope (their managed_verticals),
+    // matching allocate_job authz: a fencing manager gets fencing only, etc.
+    // Make-safe is matched by type OR an SWMS- job_number, mirroring
+    // _jobVertical + the open-pool query.
     //
-    // Fencing is the planning range: managers need every historic, future, and
-    // unscheduled allocation. Other verticals retain the existing rolling
-    // window/backstop behavior. Splitting the query preserves the conservative
-    // MakeSafe model while allowing mixed-vertical managers a complete fencing
-    // lane without widening their other lanes.
+    // Every managed vertical now runs FULL RANGE, paged — every category
+    // behaves like fencing always did (Captain 2026-09-24: "full history...
+    // yes every app"). The old 30-day rolling window for non-fencing
+    // verticals and its 180-day make-safe backstop are gone; there is nothing
+    // left for a backstop to cover once the primary query is already
+    // unbounded (mirroring the dispatcher/showAll branch above, which
+    // dropped its own 30-day floor for the same reason on 2026-07-31).
     //
     // Because the open pools below de-dupe
     // against this same (now vertical-wide) `assignments` set, jobs already
@@ -39270,51 +39505,35 @@ export async function myJobs(
         ? ['type.eq.repair', 'metadata->>ses_family.eq.repair', 'metadata->>makesafe_job_family.eq.repair']
         : [`type.eq.${v}`]
     ).join(',')
-    const rollingVerticals = managerScope.filter((vertical) => vertical !== 'fencing')
     assignments = []
     error = null
 
-    if (rollingVerticals.length > 0) {
-      const rolling = await client
+    const MANAGER_SCOPE_ASSIGNMENT_PAGE = 1000
+    let managerScopeOffset = 0
+    while (true) {
+      const pageResult = await client
         .from('job_assignments')
         .select(ASSIGNMENT_SELECT_ADMIN_INNER)
         .neq('status', 'cancelled')
         .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
-        .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
         .eq('jobs.org_id', orgId)
-        .or(verticalFilter(rollingVerticals), { referencedTable: 'jobs' })
+        .or(verticalFilter(managerScope), { referencedTable: 'jobs' })
         .order('scheduled_date', { ascending: true })
-      assignments.push(...(rolling.data || []))
-      error = rolling.error
-    }
-
-    if (!error && managerScope.includes('fencing')) {
-      const FENCING_ASSIGNMENT_PAGE = 1000
-      let offset = 0
-      while (true) {
-        const pageResult = await client
-          .from('job_assignments')
-          .select(ASSIGNMENT_SELECT_ADMIN_INNER)
-          .neq('status', 'cancelled')
-          .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
-          .eq('jobs.org_id', orgId)
-          .or(verticalFilter(['fencing']), { referencedTable: 'jobs' })
-          .order('scheduled_date', { ascending: true })
-          .order('id', { ascending: true })
-          .range(offset, offset + FENCING_ASSIGNMENT_PAGE - 1)
-        if (pageResult.error) {
-          error = pageResult.error
-          break
-        }
-        const pageRows = pageResult.data || []
-        assignments.push(...pageRows)
-        if (pageRows.length < FENCING_ASSIGNMENT_PAGE) break
-        offset += FENCING_ASSIGNMENT_PAGE
+        .order('id', { ascending: true })
+        .range(managerScopeOffset, managerScopeOffset + MANAGER_SCOPE_ASSIGNMENT_PAGE - 1)
+      if (pageResult.error) {
+        error = pageResult.error
+        break
       }
+      const pageRows = pageResult.data || []
+      assignments.push(...pageRows)
+      if (pageRows.length < MANAGER_SCOPE_ASSIGNMENT_PAGE) break
+      managerScopeOffset += MANAGER_SCOPE_ASSIGNMENT_PAGE
     }
 
-    // Mixed scopes can overlap only through malformed data, but de-duplicating
-    // by the canonical assignment id also makes retries/page boundaries safe.
+    // Page boundaries and retries are the only way the same row can arrive
+    // twice; de-duplicating by the canonical assignment id also makes both
+    // safe.
     assignments = [...new Map(assignments.map((row: any) => [row.id, row])).values()]
     // verticalFilter() above is a superset (a manager scoped to 'makesafe'
     // also matches every SWMS-numbered row); narrow to the exact vertical set
@@ -39371,28 +39590,22 @@ export async function myJobs(
           site_address, site_suburb, notes, job_number, metadata
         )
       `
-  // U2b + ship-review FIX 1: the personal path runs this backstop per-user; the
-  // manager's-Board path MUST run it too when the scope includes make-safe —
-  // pre-U2b a make-safe manager's mode:'all' took the personal path (backstop
-  // included), so skipping it here silently dropped >30-day make-safe
-  // assignments from `assignments` AND let the open pool below re-surface those
-  // jobs as false "available" cards (double-allocation risk). For a make-safe
-  // manager the SAME 180-day window runs VERTICAL-WIDE (no user_id filter,
-  // admin select so board lanes keep the crew user). Managers without
-  // 'makesafe' in scope (e.g. fencing) are unaffected — the backstop is
-  // make-safe-only by its jobs filter. Dispatchers still skip it, and now for a
-  // stronger reason than before: their feed above is full-range, so the 180-day
-  // window is a strict subset of what they already hold and a second query would
-  // only re-fetch rows the de-dupe would drop.
-  const runManagerMakesafeBackstop = managerScope.includes('makesafe')
-  if (!showAll && (managerScope.length === 0 || runManagerMakesafeBackstop)) {
+  // U2b + ship-review FIX 1, retired 2026-09-24 for the manager's-Board path:
+  // the manager's-Board query above is now full-range for EVERY managed
+  // vertical (not just fencing), so a 180-day backstop can only ever re-fetch
+  // rows the primary query already holds — the exact reasoning that already
+  // exempted a dispatcher/see-everything caller (their feed above is
+  // full-range too). Only the personal ('mine') path still runs this backstop:
+  // it alone keeps its pre-existing 30-day window (out of this change's
+  // scope — see the Captain ruling note above _myJobsPersonalRecencyFilter),
+  // so it alone still needs a bounded make-safe reach-back.
+  if (!showAll && managerScope.length === 0) {
     try {
       const existing30DayIds = new Set((assignments || []).map((a: any) => a.id))
-      let backstopQuery = client
+      const backstopQuery = client
         .from('job_assignments')
-        .select(runManagerMakesafeBackstop ? ASSIGNMENT_SELECT_ADMIN_INNER : ASSIGNMENT_SELECT_USER_MAKESAFE)
-      // Personal path stays scoped to this user; the manager path is vertical-wide.
-      if (!runManagerMakesafeBackstop) backstopQuery = backstopQuery.eq('user_id', userId)
+        .select(ASSIGNMENT_SELECT_USER_MAKESAFE)
+        .eq('user_id', userId)
       const resMakesafe = await backstopQuery
         .neq('status', 'cancelled')
         .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
@@ -42112,6 +42325,15 @@ async function submitServiceReport(
   const reportStatus = status || 'submitted'
   const uId = userId || user_id || null
 
+  // Verify user is assigned or holds a tier on this job, before any job read or
+  // write on either branch below (make-safe included).
+  // Fail closed: unknown viewer (no user, not office) never sees raw money.
+  let quoteVisible = isOffice
+  if (uId) {
+    const decision = await assertAssignedOrMakesafeAccess(client, jId, uId, isOffice, access)
+    quoteVisible = decision.quoteVisible
+  }
+
   // The deployed Trade UI still has a generic service-report caller. Route every
   // MakeSafe status through the dedicated authority seam so that caller remains
   // compatible without retaining a job-global/cycleless write path. Ordinary
@@ -42124,14 +42346,6 @@ async function submitServiceReport(
       userId: uId,
       status: reportStatus,
     }, access, { isOffice })
-  }
-
-  // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
-  // Fail closed: unknown viewer (no user, not office) never sees raw money.
-  let quoteVisible = isOffice
-  if (uId) {
-    const decision = await assertAssignedOrMakesafeAccess(client, jId, uId, isOffice, access)
-    quoteVisible = decision.quoteVisible
   }
 
   // Upload signature to storage if provided (instead of storing base64 in DB)

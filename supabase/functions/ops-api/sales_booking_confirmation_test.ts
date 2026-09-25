@@ -20,6 +20,7 @@ import {
   selectBookingModels,
 } from "./sales_booking_confirmation.ts";
 import {
+  SALES_BOOKING_RESOURCES,
   salesBookingRead,
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
@@ -27,6 +28,7 @@ import {
   applySalesBookingPackOverlay,
   salesBookingPackPublishAction,
 } from "./sales_booking_pack.ts";
+import { approvalGateRefusal } from "../_shared/booking_approval_gate.ts";
 
 const NOW = new Date("2026-09-22T00:00:00Z");
 const auth = {
@@ -86,7 +88,7 @@ const model = (): BookingObject => ({
     template_text: "Hi Sample, Friday 09:00 to 10:30.\nSecureWorks Group ",
     ai_proposed_text: null,
     routing: {
-      from_number: "+61400000001",
+      from_number: "+61489267776",
       to_number: "+61400000002",
       message_sha256: null,
     },
@@ -166,6 +168,8 @@ function request(
   response: SalesBookingReadResponse,
   store: BookingApprovalStore,
   step: "calendar" | "message" = "calendar",
+  // The lead's live GHL assignee; unassigned is Marnin's (Stratco default).
+  assignee: string | null = null,
 ) {
   return {
     store,
@@ -177,6 +181,11 @@ function request(
       reason: null,
     } as BookingObject,
     readWorkspace: () => Promise.resolve(response),
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: assignee,
+        pipelineId: response.resource.pipeline_id,
+      }),
     now: () => NOW,
     envGet,
   };
@@ -501,6 +510,20 @@ Deno.test("an exact-text approval needs no calendar operation, so a text with no
     Error,
     "exact_message_route_required",
   );
+  // A text on Marnin's visit must go from Marnin's own line, not another
+  // person's; nothing is recorded.
+  const h = await fixture(), third = memoryStore();
+  const hm = h.cases[0].booking_read_model!;
+  hm.message.routing.from_number = "+61489267772";
+  hm.message.routing.message_sha256 = await bookingContentHash(
+    bookingApprovalSnapshot(h, h.cases[0], "message"),
+  );
+  await assertRejects(
+    () => salesBookingApprovalWriteAction(request(h, third.store, "message")),
+    Error,
+    "sender_not_scoper_line",
+  );
+  assertEquals(third.records.size, 0);
 });
 
 Deno.test("approval read failure is explicit, while content changes hide old approvals", async () => {
@@ -818,6 +841,7 @@ Deno.test("engine path through the approval route is unchanged and never reads o
       readGhlEvents: untouched,
       readOutlook: untouched,
       readSystemOfferRecords: untouched,
+      readOpportunityOwnership: untouched,
     },
   });
   assert("approval" in written);
@@ -836,5 +860,166 @@ Deno.test("engine path through the approval route is unchanged and never reads o
       }),
     Error,
     "owner_input_requires_owner_path",
+  );
+});
+
+// ── Nithin's and Khairo's texts through the real engine approval write ─────
+
+async function personFixture(resource: string, profile: string, line: string) {
+  const read = await salesBookingRead({
+    readOpportunities: () =>
+      Promise.resolve({
+        opportunities: [],
+        stages: {},
+        exhausted: true,
+        total: 0,
+        pages_scanned: 1,
+        reason: null,
+      }),
+    readDiary: () =>
+      Promise.resolve({
+        read_ok: false,
+        reason: "test",
+        entries: [],
+        malformed_dropped: 0,
+        calendar_email: null,
+        ghl_user_id: null,
+        mapped_by: null,
+        scoper_user_id: null,
+      }),
+    readThread: () => {
+      throw new Error("no thread call expected");
+    },
+    now: () => NOW,
+  }, { resource, week_start: "2026-09-21" });
+  read.cases = [
+    { ...row, resource_id: resource } as SalesBookingReadResponse["cases"][
+      number
+    ],
+  ];
+  const m = model();
+  m.profile = profile;
+  m.message.routing.from_number = line;
+  const response = applyBookingConfirmationModels(read, bundle(m));
+  const published = response.cases[0].booking_read_model!;
+  published.calendar_write.preview.content_hash = await bookingContentHash(
+    bookingApprovalSnapshot(response, response.cases[0], "calendar"),
+  );
+  published.message.routing.message_sha256 = await bookingContentHash(
+    bookingApprovalSnapshot(response, response.cases[0], "message"),
+  );
+  return response;
+}
+
+Deno.test("engine approval for Nithin and Khairo: a text on their own profile and line; a visit stays Stratco", async () => {
+  const people: Array<[string, string, string, string, string]> = [
+    [
+      "nithin",
+      "patio-nithin",
+      "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73",
+      "+61489267774",
+      "ERAycY7r6KZ8OA66WQCy",
+    ],
+    [
+      "khairo",
+      "fencing-khairo",
+      "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      "+61489267772",
+      "RgDWTnYL6zL3eJA6nLht",
+    ],
+  ];
+  for (const [resource, profile, scoperUserId, line, ghlUser] of people) {
+    const f = await personFixture(resource, profile, line);
+    const { store, records } = memoryStore();
+    // Assigned to Marnin in GHL: never this person's lead.
+    await assertRejects(
+      () =>
+        salesBookingApprovalWriteAction(
+          request(f, store, "message", "3S20LGVTjsVYy9vTJ9wM"),
+        ),
+      Error,
+      "lead_assigned_to_someone_else",
+    );
+    assertEquals(records.size, 0);
+    const written = await salesBookingApprovalWriteAction(
+      request(f, store, "message", ghlUser),
+    );
+    assertEquals(written.approval.resource, resource);
+    assertEquals(written.approval.snapshot.profile, profile);
+    assertEquals(written.approval.snapshot.scoper_user_id, scoperUserId);
+    assertEquals(written.approval.snapshot.content.sender, line);
+    assertEquals(
+      await approvalGateRefusal(written.approval, "message", NOW, [
+        auth.email,
+      ]),
+      null,
+    );
+    assertEquals(records.size, 1);
+    // No visit approval for either of them here.
+    await assertRejects(
+      () =>
+        salesBookingApprovalWriteAction(
+          request(f, store, "calendar", ghlUser),
+        ),
+      Error,
+      "stratco_profile_required",
+    );
+    // Their lead approved with someone else's line records nothing.
+    const g = await personFixture(resource, profile, "+61489267776");
+    const other = memoryStore();
+    await assertRejects(
+      () =>
+        salesBookingApprovalWriteAction(
+          request(g, other.store, "message", ghlUser),
+        ),
+      Error,
+      "sender_not_scoper_line",
+    );
+    assertEquals(other.records.size, 0);
+  }
+});
+
+Deno.test("engine approval: a Stratco lead now assigned to Khairo or Nithin is not Marnin's", async () => {
+  for (const other of ["RgDWTnYL6zL3eJA6nLht", "ERAycY7r6KZ8OA66WQCy"]) {
+    const f = await fixture(), { store, records } = memoryStore();
+    await assertRejects(
+      () =>
+        salesBookingApprovalWriteAction(request(f, store, "message", other)),
+      Error,
+      "lead_assigned_to_someone_else",
+    );
+    assertEquals(records.size, 0);
+  }
+  // Assigned to Marnin himself is his.
+  const f = await fixture(), { store } = memoryStore();
+  const written = await salesBookingApprovalWriteAction(
+    request(f, store, "message", "3S20LGVTjsVYy9vTJ9wM"),
+  );
+  assertEquals(written.approval.resource, "marnin");
+  const moved = await fixture(), movedStore = memoryStore();
+  await assertRejects(
+    () =>
+      salesBookingApprovalWriteAction({
+        ...request(moved, movedStore.store, "message"),
+        readOpportunityOwnership: () =>
+          Promise.resolve({
+            assignedTo: null,
+            pipelineId: SALES_BOOKING_RESOURCES.nithin.pipeline_id,
+          }),
+      }),
+    Error,
+    "lead_assigned_to_someone_else",
+  );
+  assertEquals(movedStore.records.size, 0);
+  // Unreadable assignment refuses.
+  const g = await fixture(), broken = memoryStore();
+  await assertRejects(
+    () =>
+      salesBookingApprovalWriteAction({
+        ...request(g, broken.store, "message"),
+        readOpportunityOwnership: () => Promise.reject(new Error("down")),
+      }),
+    Error,
+    "opportunity_assignment_unreadable",
   );
 });

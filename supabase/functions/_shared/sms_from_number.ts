@@ -10,35 +10,36 @@
 //
 // Used by ghl-proxy `send_sms` (the choke point every proxied SMS flows
 // through) and by ops-api `sendCommsMessageAction` (the one path that POSTs
-// to the GHL conversations API directly).
+// to the GHL conversations API directly). Scope-booking texts go from the
+// visit person's own line: ops-api/sales_booking_sender.ts owns that table.
 
-export const SMS_DEFAULT_FROM_NUMBER = '+61489267771' // SecureWorks Group Admin
+export const SMS_DEFAULT_FROM_NUMBER = "+61489267771"; // SecureWorks Group Admin
 
 export const SMS_ALLOWED_FROM_NUMBERS = [
-  '+61489267771', // SecureWorks Group Admin (ops default)
-  '+61489267772', // SecureWorks Fencing Sales
-  '+61489267774', // SecureWorks Patios (GHL location default)
-  '+61489267776', // SecureWorks Group Ops
-  '+61489267778', // SecureWorks Fencing Mgmt
-] as const
+  "+61489267771", // SecureWorks Group Admin (ops default)
+  "+61489267772", // SecureWorks Fencing Sales (Khairo's booking line)
+  "+61489267774", // SecureWorks Patios (GHL location default; Nithin's booking line)
+  "+61489267776", // SecureWorks Group Ops (Marnin's booking line)
+  "+61489267778", // SecureWorks Fencing Mgmt
+] as const;
 
 export type ResolvedSmsFromNumber =
   | { ok: true; fromNumber: string }
-  | { ok: false; error: string }
+  | { ok: false; error: string };
 
 // Resolve the sender for one outbound SMS. No caller-supplied number (or a
 // blank one) lands on the +61489267771 default; an explicit number must be
 // on the allowlist — a typo or a foreign number would otherwise be silently
 // rejected by GHL.
 export function resolveSmsFromNumber(raw: unknown): ResolvedSmsFromNumber {
-  const normalized = String(raw ?? '').trim()
-  if (!normalized) return { ok: true, fromNumber: SMS_DEFAULT_FROM_NUMBER }
+  const normalized = String(raw ?? "").trim();
+  if (!normalized) return { ok: true, fromNumber: SMS_DEFAULT_FROM_NUMBER };
   if (!(SMS_ALLOWED_FROM_NUMBERS as readonly string[]).includes(normalized)) {
     return {
       ok: false,
       error:
         `Invalid fromNumber: ${normalized}. Must be a SecureWorks number in E.164 form (e.g. +61489267776).`,
-    }
+    };
   }
-  return { ok: true, fromNumber: normalized }
+  return { ok: true, fromNumber: normalized };
 }

@@ -15,7 +15,10 @@ import {
   applySalesBookingExecutions,
   EXECUTION_IN_PROGRESS_MS,
 } from "./sales_booking_execution_read.ts";
-import type { SalesBookingReadResponse } from "./sales_booking_read.ts";
+import {
+  SALES_BOOKING_RESOURCES,
+  type SalesBookingReadResponse,
+} from "./sales_booking_read.ts";
 import { applySalesBookingVisits } from "./sales_booking_visits.ts";
 
 type Obj = BookingObject;
@@ -54,7 +57,7 @@ async function approval(
     case_id: `opp:${contact}`,
     contact_id: contact,
     resource: "marnin",
-    scoper_user_id: "scoper-1",
+    scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
     week_start: "2026-09-21",
     id: `opp:${contact}`,
     profile: "fencing-stratco-marnin",
@@ -98,7 +101,10 @@ function lead(contact: string): Obj {
 
 function workspace(contacts: string[], diary: Obj[] = []) {
   return {
-    resource: { resource_id: "marnin", scoper_user_id: "scoper-1" },
+    resource: {
+      resource_id: "marnin",
+      scoper_user_id: "706c5258-70dd-483a-b36c-af6864b24498",
+    },
     week: {
       since: "2026-09-21T00:00:00+08:00",
       until_exclusive: "2026-09-28T00:00:00+08:00",
@@ -595,6 +601,11 @@ function executorDeps(
     readOutlook: () =>
       Promise.resolve({ ok: true, mailbox: CAPTAIN, events: [] }),
     readContactPhone: () => Promise.resolve("0400 000 002"),
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: null,
+        pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+      }),
     readOutlookLead: () =>
       Promise.resolve({
         contact: {

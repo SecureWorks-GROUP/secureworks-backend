@@ -354,6 +354,7 @@ Deno.test("v2 comparison is privileged and never exposed to routine or trade rea
       orgId: "org-1",
       role: "owner",
       managedVerticals: ["makesafe"],
+      seeEverything: false,
     },
     "trade",
     { contractVersion: "v2" },

@@ -45,6 +45,17 @@ path. This change does not enable the flag or create the GHL workflow.
 Regression coverage: `receiver_customer_replied_test.ts` in
 `supabase/functions/ghl-webhook-receiver/`.
 
+## Staff reply workflow (`UserReplied`)
+
+A second workflow with trigger **User Replied** posts the same way, with custom
+data `type: "UserReplied"`, `contactId`, `locationId` and `conversationId`
+(`{{contact.id}}`, `{{location.id}}`, and the conversation id the trigger
+supplies). It is the same secret-checked doorbell behind the same flag and
+capture lane, with no legacy write, and writes nothing from the post body. It
+reads exactly what `CustomerReplied` reads: the contact's newest conversation
+(newest 20 messages). A `conversationId` in the post is ignored. Receipts carry
+reason `user_reply_doorbell`. Regression coverage: `receiver_user_replied_test.ts`.
+
 ## Call items and the `CallCompleted` workflow (slice T1)
 
 The shared row builder maps GHL `TYPE_CALL`, voicemail and IVR call items to

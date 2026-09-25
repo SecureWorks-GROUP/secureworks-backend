@@ -73,6 +73,11 @@ import {
   usersFromGhlBody,
 } from "../ghl-proxy/calendar_events.ts";
 
+import {
+  SALES_BOOKING_SENDER_LINES,
+  salesBookingLineLabel,
+} from "./sales_booking_sender.ts";
+
 const NOW = new Date("2026-09-16T02:00:00.000Z"); // Wed 10:00 Perth
 const WEEK = "2026-09-14"; // Monday
 const MARNIN_SCOPE_STAGE = SALES_BOOKING_RESOURCES.marnin.scope_stage_ids[0];
@@ -92,6 +97,7 @@ function opportunity(
   return {
     id: "opp-1",
     name: "Jane Smith",
+    assignedTo: null,
     pipelineStageId: MARNIN_SCOPE_STAGE,
     status: "open",
     updatedAt: "2026-09-15T01:00:00.000Z",
@@ -161,6 +167,11 @@ function deps(
         entries: [],
         malformed_dropped: 0,
         calendar_email: "marnin@secureworkswa.com.au",
+      }),
+    readOpportunityOwnership: () =>
+      Promise.resolve({
+        assignedTo: null,
+        pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
       }),
     readThread: () => Promise.resolve([] as SalesBookingMessage[]),
     now: () => NOW,
@@ -1146,9 +1157,47 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
   // Fencing and patio pipelines are never mixed.
   assert(marnin.resource.pipeline_id !== nithin.resource.pipeline_id);
 
-  assertEquals(SALES_BOOKING_RESOURCES.khairo, undefined);
+  // Khairo shares the fencing pipeline; his list is only the leads GHL
+  // assigns to him, so a Stratco lead never reaches his 772 line.
+  const fencingRows = [
+    opportunity({ id: "opp-stratco", assignedTo: "someone-else" }),
+    opportunity({
+      id: "opp-khairo",
+      assignedTo: "RgDWTnYL6zL3eJA6nLht",
+      contact: { id: "contact-k", name: "Kim Lead", city: "Joondalup" },
+    }),
+    opportunity({ id: "opp-unassigned" }),
+  ];
+  const shared = deps({
+    readOpportunities: () =>
+      Promise.resolve({
+        opportunities: fencingRows,
+        stages: { [MARNIN_SCOPE_STAGE]: "New Lead" },
+        exhausted: true,
+        pages_scanned: 1,
+        total: fencingRows.length,
+        reason: null,
+      }),
+  });
+  const khairo = await salesBookingRead(shared, {
+    resource: "khairo",
+    week_start: WEEK,
+  });
+  assertEquals(khairo.resource.pipeline_id, marnin.resource.pipeline_id);
+  assertEquals(khairo.resource.sender_line, "772");
+  assertEquals(khairo.cases.map((c) => c.opportunity_id), ["opp-khairo"]);
+  // Marnin's list: his own and unassigned Stratco leads, never Khairo's or
+  // anyone else's.
+  const marninShared = await salesBookingRead(shared, {
+    resource: "marnin",
+    week_start: WEEK,
+  });
+  assertEquals(marninShared.cases.map((c) => c.opportunity_id), [
+    "opp-unassigned",
+  ]);
+
   await assertRejects(
-    () => salesBookingRead(deps(), { resource: "khairo", week_start: WEEK }),
+    () => salesBookingRead(deps(), { resource: "someone", week_start: WEEK }),
     SalesBookingRequestError,
   );
   const { users: khairoUsers } = usersFromGhlBody({
@@ -1210,6 +1259,22 @@ Deno.test("resource selects the lane's own pipeline and scoper; unknown refuses"
         week_start: "2026-09-15",
       }),
     SalesBookingRequestError,
+  );
+});
+
+Deno.test("screen defaults publish every canonical booking person and line", () => {
+  assertEquals(
+    SALES_BOOKING_CAPTAIN_DEFAULTS.scopers,
+    Object.keys(SALES_BOOKING_SENDER_LINES),
+  );
+  assertEquals(
+    SALES_BOOKING_CAPTAIN_DEFAULTS.sender_lines,
+    Object.fromEntries(
+      Object.keys(SALES_BOOKING_SENDER_LINES).map((person) => [
+        person,
+        salesBookingLineLabel(person),
+      ]),
+    ),
   );
 });
 
@@ -1369,6 +1434,7 @@ Deno.test("the deps object handed to the runner exposes no write members", async
       "readDiary",
       "readJobSites",
       "readOpportunities",
+      "readOpportunityOwnership",
       "readOutlookDiary",
       "readThread",
     ].sort(),
@@ -3241,4 +3307,176 @@ Deno.test("opportunity paging resumes from the stored cursor inside the deadline
   assertEquals(scan.opportunities[0]?.id, "opp-resume-0");
   assertEquals(scan.start_after, 3);
   assertEquals(scan.start_after_id, "c-199");
+});
+
+Deno.test("budget-cut reads persist the cursor, resume, and recheck cached ownership", async () => {
+  let nowMs = NOW.getTime();
+  let stored: SalesBookingCachedRoster | null = null;
+  const searches: Array<
+    { startAfter?: string | number | null; startAfterId?: string | null }
+  > = [];
+  const ownershipReads: string[] = [];
+  const d = deps({
+    now: () => new Date(nowMs),
+    loadRosterCache: () => Promise.resolve(stored),
+    persistRosterCache: (_resource, roster) => {
+      stored = structuredClone(roster);
+      return Promise.resolve();
+    },
+    readOpportunities: (args) => {
+      searches.push(args);
+      if (searches.length === 1) {
+        nowMs += SALES_BOOKING_READ_BUDGET_MS;
+        return Promise.resolve({
+          opportunities: [opportunity({ id: "early" })],
+          stages: {},
+          exhausted: false,
+          pages_scanned: 4,
+          total: 2,
+          reason: "time budget exhausted",
+          start_after: 4,
+          start_after_id: "cursor-400",
+        });
+      }
+      assertEquals(args.startAfter, 4);
+      assertEquals(args.startAfterId, "cursor-400");
+      return Promise.resolve({
+        opportunities: [opportunity({ id: "later" })],
+        stages: {},
+        exhausted: true,
+        pages_scanned: 1,
+        total: 2,
+        reason: null,
+      });
+    },
+    readOpportunityOwnership: (id) => {
+      ownershipReads.push(id);
+      return Promise.resolve({
+        assignedTo: SALES_BOOKING_SENDER_LINES.khairo.ghl_user_id,
+        pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+      });
+    },
+  });
+  const params = {
+    resource: "marnin",
+    week_start: WEEK,
+    include_thread_facts: false,
+  };
+  const first = await salesBookingRead(d, params);
+  assertEquals(first.coverage.full_population, false);
+  assertEquals(first.cases.map((r) => r.id), ["early"]);
+  nowMs += 1000;
+  const second = await salesBookingRead(d, params);
+  assertEquals(searches.length, 2);
+  assertEquals(ownershipReads, ["early"]);
+  assertEquals(second.cases.map((r) => r.id), ["later"]);
+  assertEquals(second.coverage.full_population, true);
+  const saved = await d.loadRosterCache!("marnin");
+  assertEquals(saved?.opportunities.map((r) => r.id), ["early", "later"]);
+  assertEquals(saved?.start_after, null);
+  assertEquals(saved?.exhausted, true);
+});
+
+Deno.test("cached ownership is checked in both directions, including pipeline changes", async () => {
+  const ownershipReads: string[] = [];
+  const d = deps({
+    loadRosterCache: () =>
+      Promise.resolve(cachedRoster({
+        opportunities: [
+          opportunity({
+            id: "moved-away",
+            assignedTo: SALES_BOOKING_SENDER_LINES.marnin.ghl_user_id,
+          }),
+          opportunity({
+            id: "moved-here",
+            assignedTo: SALES_BOOKING_SENDER_LINES.khairo.ghl_user_id,
+          }),
+          opportunity({ id: "patio-now", assignedTo: null }),
+          opportunity({ id: "unreadable" }),
+        ],
+      })),
+    readOpportunities: () =>
+      Promise.reject(new Error("fresh roster must stay cached")),
+    readOpportunityOwnership: (id) => {
+      ownershipReads.push(id);
+      if (id === "unreadable") {
+        return Promise.reject(new Error("GHL unavailable"));
+      }
+      return Promise.resolve({
+        assignedTo: id === "moved-away"
+          ? SALES_BOOKING_SENDER_LINES.khairo.ghl_user_id
+          : null,
+        pipelineId: id === "patio-now"
+          ? SALES_BOOKING_RESOURCES.nithin.pipeline_id
+          : SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+      });
+    },
+  });
+  const result = await salesBookingRead(d, {
+    resource: "marnin",
+    week_start: WEEK,
+    include_thread_facts: false,
+  });
+  assertEquals(ownershipReads.sort(), [
+    "moved-away",
+    "moved-here",
+    "patio-now",
+    "unreadable",
+  ]);
+  assertEquals(result.cases.map((r) => r.id), ["moved-here"]);
+  assertEquals(result.coverage.full_population, false);
+  assert(
+    result.coverage.gaps.some((g) =>
+      g.includes("1 cached candidate(s) withheld")
+    ),
+  );
+});
+
+Deno.test("an exhausted ownership budget withholds cached candidates without erasing progress", async () => {
+  let nowMs = NOW.getTime();
+  let stored = cachedRoster({
+    exhausted: false,
+    reason: "time budget exhausted",
+    start_after: 1,
+    start_after_id: "first",
+  });
+  let ownershipReads = 0;
+  const result = await salesBookingRead(
+    deps({
+      now: () => new Date(nowMs),
+      loadRosterCache: () => Promise.resolve(stored),
+      persistRosterCache: (_resource, row) => {
+        stored = row;
+        return Promise.resolve();
+      },
+      readOpportunities: () => {
+        nowMs += SALES_BOOKING_READ_BUDGET_MS;
+        return Promise.resolve({
+          opportunities: [opportunity({ id: "page-two" })],
+          stages: {},
+          exhausted: false,
+          pages_scanned: 1,
+          total: 3,
+          reason: "time budget exhausted",
+          start_after: 2,
+          start_after_id: "second",
+        });
+      },
+      readOpportunityOwnership: () => {
+        ownershipReads++;
+        return Promise.reject(new Error("must not read after budget"));
+      },
+    }),
+    { resource: "marnin", week_start: WEEK, include_thread_facts: false },
+  );
+  assertEquals(ownershipReads, 0);
+  assertEquals(result.cases.map((r) => r.id), ["page-two"]);
+  assertEquals(stored.start_after, 2);
+  assertEquals(stored.start_after_id, "second");
+  assertEquals(stored.opportunities.map((r) => r.id), ["opp-1", "page-two"]);
+  assert(
+    result.coverage.gaps.some((g) =>
+      g.includes("1 cached candidate(s) withheld")
+    ),
+  );
 });

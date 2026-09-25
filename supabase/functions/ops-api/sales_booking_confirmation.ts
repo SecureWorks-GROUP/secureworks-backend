@@ -2,9 +2,10 @@
  * This module has no provider or send capability. Contract:
  * docs/sales-booking-confirmation-api.md.
  */
-import type {
-  SalesBookingCase,
-  SalesBookingReadResponse,
+import {
+  type SalesBookingCase,
+  salesBookingLeadBelongsTo,
+  type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
 import {
   assertSalesBookingStampWriteAuth,
@@ -24,6 +25,11 @@ import {
   type OwnerApprovalResult,
   salesBookingOwnerApprovalAction,
 } from "./sales_booking_owner_approval.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  salesBookingSenderFor,
+} from "./sales_booking_sender.ts";
+import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 export {
   BOOKING_APPROVAL_TTL_MS,
   bookingContentHash,
@@ -35,7 +41,14 @@ export {
 // deno-lint-ignore no-explicit-any
 export type BookingObject = Record<string, any>;
 export type BookingStep = "calendar" | "message";
-const PROFILE = "fencing-stratco-marnin";
+const PROFILE = SALES_BOOKING_SENDER_LINES.marnin.profile;
+/** The engine profile for one booking person, or null for anyone else. */
+function resourceProfile(resourceId: unknown): string | null {
+  return typeof resourceId === "string" &&
+      Object.hasOwn(SALES_BOOKING_SENDER_LINES, resourceId)
+    ? SALES_BOOKING_SENDER_LINES[resourceId].profile
+    : null;
+}
 const SCHEMA = "scope-booking-lead.v1";
 const obj = (v: unknown): v is BookingObject =>
   !!v && typeof v === "object" && !Array.isArray(v);
@@ -218,7 +231,7 @@ function projectedModel(
     schema: SCHEMA,
     id: `opp:${row.opportunity_id}`,
     contact_id: row.contact_id,
-    profile: row.resource_id === "marnin" ? PROFILE : "patio-nithin",
+    profile: resourceProfile(row.resource_id),
     pack_revision: null,
     proposal: null,
   };
@@ -315,7 +328,7 @@ export function applyBookingConfirmationModels(
       opportunity(m.id) === row.opportunity_id &&
       m.contact_id === row.contact_id &&
       counts.get(row.contact_id) === 1 &&
-      m.profile === (row.resource_id === "marnin" ? PROFILE : "patio-nithin")
+      m.profile === resourceProfile(row.resource_id)
     )
   );
   return {
@@ -486,6 +499,10 @@ export async function salesBookingApprovalWriteAction(args: {
     resource: string,
     week: string,
   ) => Promise<SalesBookingReadResponse>;
+  /** The opportunity's current GHL assignee (live, not the cached roster). */
+  readOpportunityOwnership?: (
+    opportunityId: string,
+  ) => Promise<SalesBookingOpportunityOwnership>;
   now?: () => Date;
   envGet?: SalesBookingEnvGet;
 }): Promise<{ ok: true; approval: BookingApprovalRecord }> {
@@ -502,7 +519,13 @@ export async function salesBookingApprovalWriteAction(args: {
     !obj(snapshot) || !["calendar", "message"].includes(snapshot.step) ||
     !["approved", "refused"].includes(decision)
   ) fail("invalid_independent_approval", 400);
-  if (snapshot.resource !== "marnin" || snapshot.profile !== PROFILE) {
+  // The owner approves texts for each booking person on their own profile.
+  // Calendar approvals remain restricted to the Stratco profile.
+  const profile = resourceProfile(snapshot.resource);
+  if (!profile || snapshot.profile !== profile) {
+    fail("booking_profile_required", 400);
+  }
+  if (snapshot.step === "calendar" && snapshot.profile !== PROFILE) {
     fail("stratco_profile_required", 400);
   }
   if (decision === "refused" && (!nonempty(reason) || reason.length > 1000)) {
@@ -524,9 +547,18 @@ export async function salesBookingApprovalWriteAction(args: {
   const model = row.booking_read_model;
   if (
     model.contact_id !== row.contact_id ||
-    opportunity(model.id) !== row.opportunity_id || model.profile !== PROFILE ||
+    opportunity(model.id) !== row.opportunity_id || model.profile !== profile ||
     !hashPattern.test(model.pack_revision ?? "")
   ) fail("current_booking_model_required");
+  // The lead must be this person's in GHL right now, read live: a lead
+  // assigned to someone else never takes this person's path or line.
+  if (decision === "approved") {
+    await assertLeadBelongsToResource(
+      args.readOpportunityOwnership,
+      row.opportunity_id,
+      snapshot.resource,
+    );
+  }
   const expected = bookingApprovalSnapshot(response, row, snapshot.step);
   if (canonicalBookingJson(snapshot) !== canonicalBookingJson(expected)) {
     fail("approval_snapshot_changed");
@@ -615,6 +647,15 @@ export async function salesBookingApprovalWriteAction(args: {
       !/^\+[1-9]\d{7,14}$/.test(expected.content.sender) ||
       !/^\+[1-9]\d{7,14}$/.test(expected.content.recipient))
   ) fail("exact_message_route_required");
+  // An approved text must go from the visit person's own line; the executor
+  // re-checks this at the press.
+  if (decision === "approved" && snapshot.step === "message") {
+    const who = salesBookingSenderFor(expected);
+    if (!who.ok) fail(who.reason);
+    if (expected.content.sender !== who.sender.line) {
+      fail("sender_not_scoper_line");
+    }
+  }
   const record: BookingApprovalRecord = {
     binding_hash: await bookingHash(expected),
     step: snapshot.step,
@@ -643,6 +684,35 @@ export async function salesBookingApprovalWriteAction(args: {
     fail("approval_expired_requires_new_proposal");
   }
   return { ok: true, approval: written };
+}
+
+/** Refuse unless the opportunity's live GHL assignee makes it `resource`'s
+ * lead (sales_booking_read.ts `salesBookingLeadBelongsTo`). */
+export async function assertLeadBelongsToResource(
+  readOpportunityOwnership:
+    | ((opportunityId: string) => Promise<SalesBookingOpportunityOwnership>)
+    | undefined,
+  opportunityId: string | null | undefined,
+  resource: string,
+): Promise<void> {
+  if (!readOpportunityOwnership || !opportunityId) {
+    fail("opportunity_assignment_unreadable");
+  }
+  let ownership: SalesBookingOpportunityOwnership;
+  try {
+    ownership = await readOpportunityOwnership(opportunityId);
+  } catch {
+    fail("opportunity_assignment_unreadable");
+  }
+  if (
+    !salesBookingLeadBelongsTo(
+      ownership.assignedTo,
+      resource,
+      ownership.pipelineId,
+    )
+  ) {
+    fail("lead_assigned_to_someone_else");
+  }
 }
 
 /** `sales_booking_approval_write`: an `owner_input` body is an

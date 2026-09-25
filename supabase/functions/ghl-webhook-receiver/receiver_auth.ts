@@ -7,7 +7,7 @@
 //     Ed25519 signature in `X-GHL-Signature` over the RAW request body,
 //     verified against env GHL_WEBHOOK_PUBLIC_KEY, plus
 //     body.locationId === env GHL_LOCATION_ID.
-//   - Workflow events (CallCompleted, CustomerReplied, Voicemail,
+//   - Workflow events (CallCompleted, CustomerReplied, UserReplied, Voicemail,
 //     ContactStageChanged and the legacy workflow posts): the shared secret, the same header check as
 //     ghl-webhook (`X-Webhook-Secret`, or `Authorization` raw or Bearer),
 //     against env GHL_WEBHOOK_SECRET.
@@ -68,6 +68,7 @@ export const APP_SIGNED_EVENT_TYPES: ReadonlySet<string> = new Set([
 export const WORKFLOW_EVENT_TYPES: ReadonlySet<string> = new Set([
   "CallCompleted",
   "CustomerReplied",
+  "UserReplied",
   "Voicemail",
   "ContactStageChanged",
   "AppointmentCreated",

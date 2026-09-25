@@ -104,7 +104,7 @@ BEGIN;
 -- 1. Grants: the four stubs and every re-created function are service_role
 -- only; the stubs are SECURITY DEFINER with a fixed search_path.
 DO $$
-DECLARE f regprocedure;
+DECLARE f regprocedure; built jsonb;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_email_capture_status()','public.context_transcript_capture_status()','public.context_money_status()',
   'public.context_bucket_status()','public.context_pipeline_status()','public.record_capture_run(jsonb)',
@@ -115,6 +115,11 @@ BEGIN
  END LOOP;
  FOREACH f IN ARRAY ARRAY['public.context_email_capture_status()','public.context_transcript_capture_status()','public.context_money_status()',
   'public.context_bucket_status()']::regprocedure[] LOOP
+  -- Only while the stub stands (it returns null): an owning slice (the runner
+  -- applies every later migration first) replaces its own body and comment,
+  -- and its own contract checks its grants (EM1 built email_capture).
+  EXECUTE format('SELECT %s',f) INTO built;
+  CONTINUE WHEN built IS NOT NULL;
   IF (SELECT NOT prosecdef OR proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog'] FROM pg_proc WHERE oid=f)
   THEN RAISE EXCEPTION 'f1b stub % must be SECURITY DEFINER with search_path=pg_catalog',f; END IF;
   IF obj_description(f,'pg_proc') NOT LIKE 'F1b stub.%' THEN RAISE EXCEPTION 'f1b stub comment on %',f; END IF;
