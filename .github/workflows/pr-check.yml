@@ -336,14 +336,17 @@ jobs:
           deno test --allow-read \
             supabase/functions/_shared/request_actor_test.ts
 
-      # Quote v2 stage 1 (program branch): the shared cut-to-order function
-      # (with parity against the patio tool's nestCuts), the price-book read
-      # action and the ten-store import planner. Pure: no network, no DB.
-      - name: Test the quote v2 price book, cut-to-order and import planner
+      # Quote v2 (program branch): the shared cut-to-order function (with
+      # parity against the patio tool's nestCuts, and per-length costing), the
+      # price-book read action, the ten-store import planner, and the stage 2
+      # party link page, acceptance and staff actions. Pure: no network, no
+      # DB. The quote money rules are proved in the migration contracts.
+      - name: Test the quote v2 price book, cut-to-order, import planner and quote records
         run: |
           deno test --allow-read \
             supabase/functions/_shared/price_book/ \
             supabase/functions/price-book/ \
+            supabase/functions/quote-v2/ \
             scripts/quote-v2/
 
       - name: Test shared Xero transport and uncertain outcomes

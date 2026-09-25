@@ -18,7 +18,9 @@
 //        Required lengths to order lengths plus waste, through the ONE shared
 //        cut-to-order function, using the item's current stock lengths and cut
 //        rule unless the caller states them. When the item is costed per
-//        lineal metre the bought length is costed too.
+//        lineal metre every bought length is costed at the rate for THAT
+//        length (price_book_current_length_costs, PB-9), falling back to the
+//        supplier's generic $/LM rate, else reported unpriced.
 //
 // Who may read: cost prices are internal. Server callers (service role key or
 // service-role JWT, or OPS_AGENT_SERVER_KEY) and signed-in staff, estimator
@@ -30,7 +32,7 @@
 
 import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import {
-  costCutPlanPerLm,
+  costCutPlanByLength,
   CUT_RULES,
   type CutRule,
   cutToOrder,
@@ -311,9 +313,36 @@ async function actionCut(req: Request, deps: PriceBookDeps): Promise<Response> {
       stock_lengths_mm: stock,
       kerf_mm: kerf,
     });
-    const costPerLm = item.unit === "lm" && item.cost_ex_gst != null
-      ? Number(item.cost_ex_gst)
-      : null;
+    let cost = null;
+    if (item.unit === "lm" && item.status !== "unpriced") {
+      const rates = await deps.rpc("price_book_current_length_costs", {
+        p_item_keys: [itemKey],
+      });
+      if (rates.error) {
+        return refuse(
+          502,
+          "price_book_unreadable",
+          "The price book could not be read.",
+        );
+      }
+      const rows = (Array.isArray(rates.data) ? rates.data : []) as {
+        per_length_mm: number | null;
+        cost_ex_gst: number | string;
+        cost_row_id: string | null;
+        status: string | null;
+      }[];
+      cost = costCutPlanByLength(
+        plan,
+        rows.map((r) => ({
+          per_length_mm: r.per_length_mm == null
+            ? null
+            : Number(r.per_length_mm),
+          cost_ex_gst: Number(r.cost_ex_gst),
+          cost_row_id: r.cost_row_id,
+          status: r.status,
+        })),
+      );
+    }
     return json({
       ok: true,
       item_key: itemKey,
@@ -323,9 +352,7 @@ async function actionCut(req: Request, deps: PriceBookDeps): Promise<Response> {
         : "price_book",
       rule_source: statedRule ? "caller" : "price_book",
       plan,
-      cost: costPerLm
-        ? { per_lm_ex_gst: costPerLm, ...costCutPlanPerLm(plan, costPerLm) }
-        : null,
+      cost,
     });
   } catch (e) {
     if (e instanceof CutToOrderError) return refuse(400, e.code, e.message);

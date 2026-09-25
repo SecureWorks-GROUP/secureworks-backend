@@ -3881,3 +3881,9 @@ The program is not authorised for production carry-over. The price book stores
 cost to us, never sell rates or back-computed costs. Its stage boundaries,
 approval permissions, import restrictions and cut-to-order contract are owned
 by [`docs/quote-v2/price-book-v1.md`](docs/quote-v2/price-book-v1.md).
+Quote records (stage 2) are separate from the legacy `send-quote` tables: a
+frozen revision's party totals sum to the job to the cent and a party link
+shows only that party's current revision. The freeze in SQL is the only
+writer of prices and totals, and `quote-v2` runs without gateway JWT
+verification, so it never trusts a JWT claim. Contract:
+[`docs/quote-v2/quote-records-v1.md`](docs/quote-v2/quote-records-v1.md).

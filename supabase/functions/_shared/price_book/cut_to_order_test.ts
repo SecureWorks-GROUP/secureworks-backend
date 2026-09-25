@@ -4,7 +4,7 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  costCutPlanPerLm,
+  costCutPlanByLength,
   cutToOrder,
   CutToOrderError,
 } from "./cut_to_order.ts";
@@ -68,9 +68,59 @@ Deno.test("need 6 m of 100x50 buys one 6.5 m length from 5500/6500/8000", () => 
   assertEquals(plan.waste_mm, 500);
   assertEquals(plan.sticks[0].offcut_mm, 497);
   // The 0.5 m offcut is paid for: $13.29 at $26.57/LM.
-  const cost = costCutPlanPerLm(plan, 26.57);
+  const cost = costCutPlanByLength(plan, [{
+    per_length_mm: null,
+    cost_ex_gst: 26.57,
+  }]);
   assertEquals(cost.waste_ex_gst, 13.29);
   assertEquals(cost.purchased_ex_gst, 172.71);
+  assertEquals(cost.lines[0].rate_basis, "per_lm_rate");
+});
+
+// PB-9: whole stock lengths at the rate the supplier charges for THAT length.
+// BD Metals invoice 00022187: $172.73 per 6.5 m ($26.5738/LM) and $150.00 per
+// 5.5 m ($27.2727/LM). Pieces of 6 m and 4.8 m buy one of each.
+const BD_RATES = [
+  { per_length_mm: 6500, cost_ex_gst: 26.5738, cost_row_id: "c-6500" },
+  { per_length_mm: 5500, cost_ex_gst: 27.2727, cost_row_id: "c-5500" },
+];
+
+Deno.test("PB-9: each stock length is costed at its own per-length price", () => {
+  const plan = cutToOrder({
+    rule: "one_per_stick",
+    pieces: [{ length_mm: 6000, qty: 1 }, { length_mm: 4800, qty: 2 }],
+    stock_lengths_mm: RHS_100X50,
+  });
+  const cost = costCutPlanByLength(plan, BD_RATES);
+  assertEquals(
+    cost.lines.map((l) => [l.length_mm, l.qty, l.each_ex_gst, l.rate_basis]),
+    [
+      [5500, 2, 150.0, "length_rate"],
+      [6500, 1, 172.73, "length_rate"],
+    ],
+  );
+  // Two 5.5 m lengths at $150.00, not 11 m of the 6.5 m length's $26.57/LM
+  // ($292.31): the old headline-rate costing under-priced them by $7.69.
+  assertEquals(cost.purchased_ex_gst, 472.73);
+  assertEquals(cost.unpriced_lengths_mm, []);
+});
+
+Deno.test("PB-9: a length with no price is unpriced, never guessed from another length", () => {
+  const plan = cutToOrder({
+    rule: "one_per_stick",
+    pieces: [{ length_mm: 7000, qty: 1 }],
+    stock_lengths_mm: RHS_100X50,
+  });
+  const cost = costCutPlanByLength(plan, BD_RATES);
+  assertEquals(cost.purchased_ex_gst, null);
+  assertEquals(cost.waste_ex_gst, null);
+  assertEquals(cost.unpriced_lengths_mm, [8000]);
+  const withList = costCutPlanByLength(plan, [
+    ...BD_RATES,
+    { per_length_mm: null, cost_ex_gst: 28 },
+  ]);
+  assertEquals(withList.lines[0].each_ex_gst, 224);
+  assertEquals(withList.lines[0].rate_basis, "per_lm_rate");
 });
 
 Deno.test("need 4.8 m of 100x50 buys 5.5 m", () => {
@@ -103,10 +153,20 @@ Deno.test("a piece longer than every stock length is a special order", () => {
     { length_mm: 5500, qty: 1, special_order: false },
     { length_mm: 9000, qty: 2, special_order: true },
   ]);
-  assertEquals(
-    costCutPlanPerLm(plan, 26.57).special_order_priced_at_stock_rate,
-    true,
-  );
+  const cost = costCutPlanByLength(plan, [{
+    per_length_mm: null,
+    cost_ex_gst: 26.57,
+  }]);
+  assertEquals(cost.special_order_priced_at_stock_rate, true);
+  assertEquals(cost.lines[1], {
+    length_mm: 9000,
+    qty: 2,
+    special_order: true,
+    rate_basis: "per_lm_rate",
+    cost_row_id: null,
+    each_ex_gst: 239.13,
+    line_ex_gst: 478.26,
+  });
 });
 
 Deno.test("single cut length reproduces nestCuts: longer stock only when fewer sticks", () => {
@@ -169,9 +229,9 @@ Deno.test("bad input refuses with a code, never a guess", () => {
     "cut_rule_unknown",
   );
   assertThrows(() =>
-    costCutPlanPerLm(
+    costCutPlanByLength(
       cutToOrder({ rule: "cut_to_size", pieces: [{ length_mm: 1, qty: 1 }] }),
-      0,
+      [{ per_length_mm: null, cost_ex_gst: 0 }],
     )
   );
 });

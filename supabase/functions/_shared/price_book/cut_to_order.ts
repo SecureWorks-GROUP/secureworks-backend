@@ -369,26 +369,115 @@ function finish(
 }
 
 /**
- * Cost of what a plan BUYS, from a cost per lineal metre. Special orders are
- * priced at their cut length and flagged, because the supplier's special
- * order price is not the stock rate.
+ * One current rate for an item, per stock length (PB-9). `per_length_mm`
+ * null is the supplier's generic $/LM rate with no stated length. Read from
+ * `price_book_current_length_costs`.
  */
-export function costCutPlanPerLm(plan: CutPlan, costPerLmExGst: number): {
-  purchased_ex_gst: number;
-  waste_ex_gst: number;
+export interface LengthRate {
+  per_length_mm: number | null;
+  /** Cost ex GST per lineal metre, for that length. */
+  cost_ex_gst: number;
+  cost_row_id?: string | null;
+  status?: string | null;
+}
+
+export type LengthRateBasis = "length_rate" | "per_lm_rate";
+
+export interface CostedOrderLine extends CutOrderLine {
+  /** Which rate priced this length, or null when none did (unpriced). */
+  rate_basis: LengthRateBasis | null;
+  cost_row_id: string | null;
+  /** What one stock length of this size costs, ex GST. */
+  each_ex_gst: number | null;
+  line_ex_gst: number | null;
+}
+
+export interface CutPlanCost {
+  lines: CostedOrderLine[];
+  /** Whole stock lengths bought, ex GST; null when any length is unpriced. */
+  purchased_ex_gst: number | null;
+  /** The bought-but-not-installed share of that, ex GST. */
+  waste_ex_gst: number | null;
+  unpriced_lengths_mm: number[];
   special_order_priced_at_stock_rate: boolean;
-} {
-  if (!Number.isFinite(costPerLmExGst) || costPerLmExGst <= 0) {
-    throw new CutToOrderError(
-      "cut_cost_invalid",
-      "cost per metre must be above zero",
-    );
+}
+
+/**
+ * Cents for one length, exactly: the price book stores $/LM to 4 decimals and
+ * lengths are whole mm, so rate x mm is a whole number of 1/10,000,000 dollars.
+ * Rounded half up, like PostgreSQL round(numeric, 2) on a positive value.
+ */
+function lengthCents(costPerLm: number, lengthMm: number): number {
+  const rate4 = Math.round(costPerLm * 10_000);
+  const tenMillionths = rate4 * lengthMm;
+  return Math.floor((tenMillionths + 50_000) / 100_000);
+}
+
+/**
+ * Cost of what a plan BUYS: every stock length at the rate the supplier
+ * charges for THAT length (PB-9). A 5.5 m length is priced from the 5.5 m
+ * price, never from the 6.5 m length's cheaper $/LM. With no price for a
+ * length, the supplier's generic $/LM rate is used and named; with neither,
+ * the length is unpriced and the plan has no total. Same rule as the SQL
+ * `quote_v2_price_book_line_cost`: one length costs round(rate x metres, 2).
+ * Special orders are priced like any other length and flagged, because the
+ * supplier's special order price is not the stock rate.
+ */
+export function costCutPlanByLength(
+  plan: CutPlan,
+  rates: LengthRate[],
+): CutPlanCost {
+  for (const rate of rates) {
+    if (!Number.isFinite(rate.cost_ex_gst) || rate.cost_ex_gst <= 0) {
+      throw new CutToOrderError(
+        "cut_cost_invalid",
+        "cost per metre must be above zero",
+      );
+    }
   }
-  const cents = (mm: number) =>
-    Math.round((mm / 1000) * costPerLmExGst * 100) / 100;
+  const exact = new Map<number, LengthRate>();
+  let generic: LengthRate | null = null;
+  for (const rate of rates) {
+    if (rate.per_length_mm == null) generic ??= rate;
+    else if (!exact.has(rate.per_length_mm)) {
+      exact.set(rate.per_length_mm, rate);
+    }
+  }
+  const unpriced: number[] = [];
+  let totalCents = 0;
+  const lines = plan.order.map((line): CostedOrderLine => {
+    const hit = exact.get(line.length_mm);
+    const rate = hit ?? generic;
+    if (!rate) {
+      unpriced.push(line.length_mm);
+      return {
+        ...line,
+        rate_basis: null,
+        cost_row_id: null,
+        each_ex_gst: null,
+        line_ex_gst: null,
+      };
+    }
+    const eachCents = lengthCents(rate.cost_ex_gst, line.length_mm);
+    totalCents += eachCents * line.qty;
+    return {
+      ...line,
+      rate_basis: hit ? "length_rate" : "per_lm_rate",
+      cost_row_id: rate.cost_row_id ?? null,
+      each_ex_gst: eachCents / 100,
+      line_ex_gst: (eachCents * line.qty) / 100,
+    };
+  });
+  const priced = unpriced.length === 0;
   return {
-    purchased_ex_gst: cents(plan.purchased_mm),
-    waste_ex_gst: cents(plan.waste_mm),
+    lines,
+    purchased_ex_gst: priced ? totalCents / 100 : null,
+    waste_ex_gst: priced && plan.purchased_mm > 0
+      ? Math.round((totalCents * plan.waste_mm) / plan.purchased_mm) / 100
+      : priced
+      ? 0
+      : null,
+    unpriced_lengths_mm: unpriced,
     special_order_priced_at_stock_rate: plan.special_orders.length > 0,
   };
 }
