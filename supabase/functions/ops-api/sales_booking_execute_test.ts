@@ -844,8 +844,7 @@ Deno.test("a missing published suburb refuses before GHL; a GHL-only person book
     {
       outlook: "not_applicable",
       reason: "resource_has_no_outlook_calendar",
-      message:
-        "This person books in GHL only; there is no Outlook calendar to write.",
+      message: "This booking does not write this person's Outlook calendar.",
     },
   );
   assertEquals(g.calls.contactReads, 0);
@@ -866,8 +865,7 @@ Deno.test("a missing published suburb refuses before GHL; a GHL-only person book
     {
       outlook: "not_applicable",
       reason: "resource_has_no_outlook_calendar",
-      message:
-        "This person books in GHL only; there is no Outlook calendar to write.",
+      message: "This booking does not write this person's Outlook calendar.",
     },
   );
   assertEquals(k.calls.outlookPosts.length, 0);

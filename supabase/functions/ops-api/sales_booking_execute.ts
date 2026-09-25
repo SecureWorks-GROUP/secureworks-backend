@@ -70,7 +70,7 @@ export type OutlookMirrorOutcome =
     message: string;
   }
   | {
-    /** The resource has no Outlook calendar (GHL only, e.g. Nithin). */
+    /** The booking does not write this resource's Outlook (e.g. Nithin, Khairo). */
     outlook: "not_applicable";
     reason: "resource_has_no_outlook_calendar";
     message: string;
@@ -486,8 +486,7 @@ function mirrorsToOutlook(loaded: Loaded): boolean {
 const NOT_APPLICABLE: OutlookMirrorOutcome = {
   outlook: "not_applicable",
   reason: "resource_has_no_outlook_calendar",
-  message:
-    "This person books in GHL only; there is no Outlook calendar to write.",
+  message: "This booking does not write this person's Outlook calendar.",
 };
 
 const FAILED_AFTER_BOOKING = (reason: string): OutlookMirrorOutcome => ({
