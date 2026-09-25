@@ -33,6 +33,23 @@ import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outco
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
 import {
+  currentQuoteForParty,
+  QUOTE_PARTY_DOCUMENT_COLUMNS,
+  quoteRunAcceptanceDecision,
+  everyQuotePartyAccepted,
+  normaliseQuoteRunLabel,
+  quoteDocumentAcceptable,
+  quoteDocumentRunLabel,
+  quotePartyGreetingName,
+  quoteAcceptanceReadFailed,
+  type QuoteAcceptanceSnapshot,
+  quoteViewRetryPage,
+  quoteViewDecision,
+  withPendingAcceptance,
+  retireOtherPublishedPartyRunDocuments,
+  sendRetiresPriorPartyQuotes,
+} from './quote_party_view.ts'
+import {
   persistTradePackOnDocuments,
   persistTradePackWriteConfirmed,
   quoteDocumentHasClientSend,
@@ -74,6 +91,7 @@ import {
   emitV2SealedEvent,
   type V2AugmentationInput,
 } from '../_shared/release_packet/build_v2_augmentation.ts'
+import { findQuoteRun, persistSendRunRows, quoteRunDepositAmount } from './quote_run.ts'
 // T7 Loop 3 — atomic cutover: when evidence_capture_v1 is ON, every
 // safeBusinessEventInsert flows through recordEvidence (full envelope +
 // match_status + extraction enqueue). When OFF, legacy raw insert.
@@ -800,11 +818,11 @@ serve(async (req: Request) => {
       if (claimed.status !== 'claimed') {
         // Another call already claimed or published this document.
         console.log(`[send-quote] doc ${document_id} already sent/claimed — suppressing duplicate email`)
-        if (supersede_prior === true && doc.job_id && quoteDocumentHasClientSend(doc)) {
+        if (sendRetiresPriorPartyQuotes(supersede_prior) && doc.job_id && quoteDocumentHasClientSend(doc)) {
           const retrySupersede = await supersedePriorPublishedQuoteDocuments(sb, {
             jobId: doc.job_id,
             currentDocumentId: doc.id,
-            currentVersion: doc.version || 1,
+            currentSentAt: doc.sent_at ?? null,
             jobContactId: doc.job_contact_id ?? null,
             runLabel: doc.run_label ?? null,
           })
@@ -1227,18 +1245,20 @@ serve(async (req: Request) => {
 
         // (M4 G-B2) Supersede prior published quote versions so old client
         // links show the branded "quote was updated" page (see /view + G-B1)
-        // and stale frozen extracts leave allocated trades. Gated on
-        // supersede_prior:true — a plain or multi-option send must NOT
-        // supersede coexisting option docs. Scope key = (job_id,
-        // job_contact_id, run_label); only lower versions matched. Uses the
-        // same durable-publication predicate as extract eligibility. A
-        // failed write is loud (500) so a retry can finish supersession on
-        // the already_sent path instead of leaving stale extracts current.
-        if (supersede_prior === true) {
+        // and stale frozen extracts leave allocated trades. On by default:
+        // one /send publishes one document, so an older live document of the
+        // same party is a revision. Only an explicit supersede_prior:false
+        // keeps coexisting same-party option docs (sendRetiresPriorPartyQuotes).
+        // Scope key = (job_id, job_contact_id, run_label); another party's
+        // quote is never retired. Uses the same durable-publication predicate
+        // as extract eligibility. A failed write
+        // is loud (500) so a retry can finish supersession on the already_sent
+        // path instead of leaving stale extracts current.
+        if (sendRetiresPriorPartyQuotes(supersede_prior)) {
           const superseded = await supersedePriorPublishedQuoteDocuments(sb, {
             jobId: doc.job_id,
             currentDocumentId: doc.id,
-            currentVersion: doc.version || 1,
+            currentSentAt: sentAt,
             jobContactId: doc.job_contact_id ?? null,
             runLabel: doc.run_label ?? null,
             supersededByRevisionId: releasedRevisionId ?? null,
@@ -1301,11 +1321,16 @@ serve(async (req: Request) => {
       // Try job_documents first
       let { data: doc, error } = await sb
         .from('job_documents')
-        .select('*, jobs(client_name, site_suburb, type, status)')
+        .select('*, jobs(client_name, site_suburb, type, status), job_contacts(client_name)')
         .eq('share_token', token)
         .eq('sent_to_client', true)
         .is('superseded_at', null)
         .single()
+
+      if (error && error.code !== 'PGRST116') {
+        console.error('[send-quote/view] quote read failed:', error.message || String(error))
+        return await htmlResponse(quoteViewRetryPage())
+      }
 
       // Fallback: check job_variations table for variation acceptance links
       if (error || !doc) {
@@ -1323,27 +1348,42 @@ serve(async (req: Request) => {
         // (M4 G-B1) If the token points at a SUPERSEDED quote (client kept an old link
         // after a revision was sent), show a friendly "this quote was updated" page that
         // links to the current live quote — never a dead end, never a stale price.
-        const { data: supDoc } = await sb
+        const { data: supDoc, error: supDocError } = await sb
           .from('job_documents')
-          .select('id, job_id, superseded_at, jobs(client_name, type)')
+          .select('id, job_id, superseded_at, job_contact_id, run_label, jobs(client_name, type), job_contacts(client_name)')
           .eq('share_token', token)
           .eq('sent_to_client', true)
           .not('superseded_at', 'is', null)
           .maybeSingle()
+        if (supDocError) {
+          console.error('[send-quote/view] retired quote read failed:', supDocError.message || String(supDocError))
+          return await htmlResponse(quoteViewRetryPage())
+        }
         if (supDoc && supDoc.superseded_at) {
-          // Find the current live quote for the same job to link forward to.
-          const { data: liveDoc } = await sb
+          // Forward only to the SAME party's current quote (same job_contact_id
+          // and run_label). Never to another party's document: a neighbour's
+          // retired link must not open the client's quote.
+          let liveQuery = sb
             .from('job_documents')
-            .select('share_token')
+            .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', share_token')
             .eq('job_id', supDoc.job_id)
             .eq('type', 'quote')
             .eq('sent_to_client', true)
             .is('superseded_at', null)
-            .order('version', { ascending: false })
-            .limit(1)
-            .maybeSingle()
+          liveQuery = supDoc.job_contact_id
+            ? liveQuery.eq('job_contact_id', supDoc.job_contact_id)
+            : liveQuery.is('job_contact_id', null)
+          liveQuery = supDoc.run_label
+            ? liveQuery.eq('run_label', supDoc.run_label)
+            : liveQuery.is('run_label', null)
+          const { data: liveDocs, error: liveDocsError } = await liveQuery
+          if (liveDocsError) {
+            console.error('[send-quote/view] current quote read failed:', liveDocsError.message || String(liveDocsError))
+            return await htmlResponse(quoteViewRetryPage())
+          }
+          const liveDoc = currentQuoteForParty(liveDocs || [], supDoc)
           const currentUrl = liveDoc?.share_token ? `${url.origin}${url.pathname}?token=${liveDoc.share_token}` : null
-          return await htmlResponse(supersededQuotePage((supDoc.jobs as any)?.client_name || '', currentUrl))
+          return await htmlResponse(supersededQuotePage(quotePartyGreetingName(supDoc as any), currentUrl))
         }
 
         return await htmlResponse(errorPage('Quote not found or link has expired'))
@@ -1356,21 +1396,42 @@ serve(async (req: Request) => {
           .eq('id', doc.id)
       }
 
-      // Check for multi-option siblings (same job, different options)
+      const sourceRunLabel = quoteDocumentRunLabel(doc)
+
+      // Same-party siblings only. A link belongs to one party (job_contact_id,
+      // run_label): it may show that party's A/B options, or forward an older
+      // run duplicate to the party's current document, but never another
+      // party's document or Accept button (quote_party_view.ts).
       if (doc.job_id) {
-        const { data: siblings } = await sb.from('job_documents')
-          .select('id, quote_number, pdf_url, html_url, share_token, accepted_at, declined_at, data_snapshot_json, job_contact_id, run_label')
+        let siblingQuery = sb.from('job_documents')
+          .select(QUOTE_PARTY_DOCUMENT_COLUMNS + ', quote_number, pdf_url, html_url, share_token')
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .eq('sent_to_client', true)
           .is('superseded_at', null)
           .neq('id', doc.id)
-          .order('created_at')
+        siblingQuery = doc.job_contact_id
+          ? siblingQuery.eq('job_contact_id', doc.job_contact_id)
+          : siblingQuery.is('job_contact_id', null)
+        siblingQuery = doc.run_label
+          ? siblingQuery.eq('run_label', doc.run_label)
+          : siblingQuery.is('run_label', null)
+        const { data: siblings, error: siblingsError } = await siblingQuery.order('created_at')
+        if (siblingsError) {
+          console.error('[send-quote/view] sibling quote read failed:', siblingsError.message || String(siblingsError))
+          return await htmlResponse(quoteViewRetryPage())
+        }
 
-        if (siblings && siblings.length > 0) {
-          // Multi-option job — show option picker page
-          const allDocs = [doc, ...siblings]
-          return await htmlResponse(buildMultiOptionPage(allDocs, doc.jobs, token))
+        const viewDecision = quoteViewDecision(doc, siblings || [])
+        if (viewDecision.kind === 'forward') {
+          const currentUrl = viewDecision.current.share_token
+            ? `${url.origin}${url.pathname}?token=${viewDecision.current.share_token}`
+            : null
+          return await htmlResponse(supersededQuotePage(quotePartyGreetingName(doc as any), currentUrl))
+        }
+        if (viewDecision.kind === 'options') {
+          // Same-party options only — show option picker page
+          return await htmlResponse(buildMultiOptionPage(viewDecision.documents, doc.jobs, token))
         }
       }
 
@@ -1393,7 +1454,7 @@ serve(async (req: Request) => {
       }
 
       // Per-run fencing quote page (multi-neighbour)
-      if (doc.run_label && doc.jobs?.type === 'fencing') {
+      if (sourceRunLabel !== null && doc.jobs?.type === 'fencing') {
         // Load full job data for pricing_json
         const { data: fullJob } = await sb.from('jobs')
           .select('*, job_contacts(*)')
@@ -1402,7 +1463,7 @@ serve(async (req: Request) => {
 
         if (fullJob?.pricing_json?.runs) {
           const pj = typeof fullJob.pricing_json === 'string' ? JSON.parse(fullJob.pricing_json) : fullJob.pricing_json
-          const run = (pj.runs || []).find((r: any) => r.run_label === doc.run_label)
+          const run = findQuoteRun(pj, sourceRunLabel)
           if (run) {
             // Determine viewer type: client or neighbour (based on job_contact_id)
             const isNeighbour = doc.job_contact_id && fullJob.job_contacts?.some(
@@ -1541,6 +1602,8 @@ serve(async (req: Request) => {
 
       if (error || !doc) return jsonResponse({ error: 'Quote not found' }, 404, corsHeaders)
 
+      const sourceRunLabel = quoteDocumentRunLabel(doc)
+
       if (doc.accepted_at) return jsonResponse({ error: 'Already accepted' }, 400, corsHeaders)
       if (doc.declined_at) return jsonResponse({ error: 'Already declined' }, 400, corsHeaders)
 
@@ -1557,21 +1620,58 @@ serve(async (req: Request) => {
           { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
         )
       }
-      if (doc.job_id && !doc.run_label) {
+      if (doc.job_id && sourceRunLabel !== null) {
+        // A fence-run link is acceptable only when it is its party's CURRENT
+        // document (same job_contact_id + run_label). Older duplicate run links
+        // for the same person must not accept again or mint a second deposit.
+        let partyQuery = sb.from('job_documents')
+          .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
+          .eq('job_id', doc.job_id)
+          .eq('type', 'quote')
+          .eq('sent_to_client', true)
+          .is('superseded_at', null)
+        partyQuery = doc.run_label == null
+          ? partyQuery.is('run_label', null)
+          : partyQuery.eq('run_label', doc.run_label)
+        partyQuery = doc.job_contact_id
+          ? partyQuery.eq('job_contact_id', doc.job_contact_id)
+          : partyQuery.is('job_contact_id', null)
+        const { data: partyDocs, error: partyErr } = await partyQuery
+        if (partyErr) {
+          console.error('[accept] party current-document read failed:', partyErr.message)
+          return new Response(
+            errorPage('We could not confirm this quote right now. Please try again shortly.'),
+            { status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+          )
+        }
+        if (!quoteDocumentAcceptable(doc, partyDocs || [])) {
+          return new Response(
+            errorPage('This quote link is no longer current. Please open the latest quote we sent you.'),
+            { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
+          )
+        }
+      }
+      if (doc.job_id && sourceRunLabel === null) {
         // Sibling options for the SAME recipient: match job_contact_id null-to-null
         // so we never read another contact's / neighbour's options.
         let siblingQuery = sb.from('job_documents')
-          .select('id, accepted_at')
+          .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
           .eq('job_id', doc.job_id)
           .eq('type', 'quote')
           .is('run_label', null)
           .neq('id', doc.id)
           .not('accepted_at', 'is', null)
+          .is('superseded_at', null)
         siblingQuery = doc.job_contact_id
           ? siblingQuery.eq('job_contact_id', doc.job_contact_id)
           : siblingQuery.is('job_contact_id', null)
-        const { data: acceptedSiblings } = await siblingQuery.limit(1)
-        if (acceptedSiblings && acceptedSiblings.length > 0) {
+        const { data: acceptedSiblings, error: acceptedSiblingsError } = await siblingQuery
+        if (acceptedSiblingsError) {
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
+        if (!quoteDocumentAcceptable(doc, acceptedSiblings || [])) {
           return new Response(
             errorPage('This option is no longer available — another option was already accepted.'),
             { status: 200, headers: { ...corsHeaders, 'Content-Type': 'text/html' } },
@@ -1580,6 +1680,41 @@ serve(async (req: Request) => {
       }
 
       const acceptedAt = new Date().toISOString()
+
+      // Read everything the status and deposit decision needs BEFORE writing
+      // the acceptance (quoteAcceptanceReadFailed). A failed read writes
+      // nothing, so the customer's retry can still complete the acceptance.
+      let acceptanceSnapshot: QuoteAcceptanceSnapshot | null = null
+      if (doc.job_id) {
+        const [acceptancesRead, documentsRead, runItemsRead] = await Promise.all([
+          sb.from('run_acceptances')
+            .select('job_document_id, job_contact_id, run_label, status, accepted_at')
+            .eq('job_id', doc.job_id),
+          sb.from('job_documents')
+            .select(QUOTE_PARTY_DOCUMENT_COLUMNS)
+            .eq('job_id', doc.job_id)
+            .eq('type', 'quote'),
+          sourceRunLabel !== null
+            ? sb.from('run_line_items')
+              .select('job_contact_id')
+              .eq('job_id', doc.job_id)
+              .eq('run_label', sourceRunLabel)
+              .limit(1)
+            : Promise.resolve({ data: [], error: null }),
+        ])
+        if (quoteAcceptanceReadFailed([acceptancesRead, documentsRead, runItemsRead])) {
+          console.error('[accept] pre-acceptance read failed; nothing written')
+          return new Response(quoteViewRetryPage(), {
+            status: 503, headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+          })
+        }
+        acceptanceSnapshot = withPendingAcceptance({
+          documents: documentsRead.data || [],
+          acceptances: acceptancesRead.data || [],
+          runNeighbourId: (runItemsRead.data as Array<{ job_contact_id?: string | null }> | null)?.[0]?.job_contact_id || null,
+        }, doc, sourceRunLabel, acceptedAt)
+      }
+
       const { error: acceptError } = await sb
         .from('job_documents')
         .update({ accepted_at: acceptedAt })
@@ -1593,7 +1728,7 @@ serve(async (req: Request) => {
       // so a primary client's accept does NOT supersede a NEIGHBOUR's quote
       // (different job_contact_id). run_label docs (per-run fencing) are never
       // touched — their lifecycle is the run state machine below.
-      if (doc.job_id && !doc.run_label) {
+      if (doc.job_id && sourceRunLabel === null) {
         let supersedeQuery = sb.from('job_documents')
           .update({ superseded_at: new Date().toISOString() })
           .eq('job_id', doc.job_id)
@@ -1695,8 +1830,8 @@ serve(async (req: Request) => {
       }
 
       // ── PER-RUN ACCEPTANCE (multi-neighbour fencing) ──
-      if (doc.run_label && doc.job_id) {
-        const runLabel = doc.run_label
+      if (sourceRunLabel !== null && doc.job_id) {
+        const runLabel = sourceRunLabel
         const contactId = doc.job_contact_id
 
         // Update run_acceptances
@@ -1706,7 +1841,7 @@ serve(async (req: Request) => {
           job_document_id: doc.id,
           run_label: runLabel,
           status: 'accepted',
-          accepted_at: new Date().toISOString(),
+          accepted_at: acceptedAt,
         }, { onConflict: 'job_id,job_contact_id,run_label' })
 
         // Get job data
@@ -1715,27 +1850,16 @@ serve(async (req: Request) => {
           .eq('id', doc.job_id).single()
 
         const pj = typeof job?.pricing_json === 'string' ? JSON.parse(job.pricing_json) : (job?.pricing_json || {})
-        const run = (pj.runs || []).find((r: any) => r.run_label === runLabel)
+        const run = findQuoteRun(pj, runLabel)
         const runName = run?.run_name || runLabel
 
-        // Check if both parties accepted this run
-        const { data: runAccepts } = await sb.from('run_acceptances')
-          .select('*')
-          .eq('job_id', doc.job_id)
-          .eq('run_label', runLabel)
-
-        // Check if this run has a neighbour
-        const { data: runItems } = await sb.from('run_line_items')
-          .select('job_contact_id')
-          .eq('job_id', doc.job_id)
-          .eq('run_label', runLabel)
-          .limit(1)
-        const runNeighbourId = runItems?.[0]?.job_contact_id || null
+        const snapshot = acceptanceSnapshot!
+        const runNeighbourId = snapshot.runNeighbourId
         const hasNeighbour = !!runNeighbourId
-
-        const allAccepted = hasNeighbour
-          ? (runAccepts || []).filter((ra: any) => ra.status === 'accepted').length >= 2
-          : (runAccepts || []).some((ra: any) => ra.status === 'accepted')
+        const { jobStatus, depositAcceptances } = quoteRunAcceptanceDecision(
+          snapshot.documents, snapshot.acceptances, runLabel, runNeighbourId,
+        )
+        const allAccepted = depositAcceptances.length > 0
 
         // Log acceptance event
         await insertCapturedEvidence(sb, {
@@ -1757,21 +1881,6 @@ serve(async (req: Request) => {
         }).then(() => {}, () => {})
 
         // Update overall job status
-        const { data: allRunAccepts } = await sb.from('run_acceptances')
-          .select('run_label, status')
-          .eq('job_id', doc.job_id)
-
-        const runLabels = [...new Set((allRunAccepts || []).map((ra: any) => ra.run_label))]
-        const allRunsFullyAccepted = runLabels.every(rl => {
-          const forRun = (allRunAccepts || []).filter((ra: any) => ra.run_label === rl)
-          return forRun.every((ra: any) => ra.status === 'accepted')
-        })
-        const anyDeclined = (allRunAccepts || []).some((ra: any) => ra.status === 'declined')
-        const anyAccepted = (allRunAccepts || []).some((ra: any) => ra.status === 'accepted')
-
-        const jobStatus = allRunsFullyAccepted ? 'accepted'
-          : (anyAccepted || anyDeclined) ? 'partially_accepted'
-          : 'quoted'
         await sb.from('jobs').update({ status: jobStatus, ...(jobStatus === 'accepted' ? { accepted_at: new Date().toISOString() } : {}) }).eq('id', doc.job_id)
 
         // M1 profitability-job-costing (U2): pin the write-once expected-cost
@@ -1820,15 +1929,12 @@ serve(async (req: Request) => {
             .eq('job_id', doc.job_id)
             .eq('status', 'active')
 
-          for (const ra of (runAccepts || []).filter((r: any) => r.status === 'accepted')) {
+          for (const ra of depositAcceptances) {
             const contact = (contacts || []).find((c: any) => c.id === ra.job_contact_id)
             if (!contact) continue
 
             const isClient = contact.is_primary
-            const shareInc = isClient
-              ? (run?.totals?.client_share_inc || 0)
-              : (run?.totals?.neighbour_share_inc || 0)
-            const depositAmount = Math.round(shareInc * (depositPercent / 100) * 100) / 100
+            const depositAmount = quoteRunDepositAmount(run, isClient, depositPercent)
 
             if (depositAmount <= 0) continue
 
@@ -1875,26 +1981,10 @@ serve(async (req: Request) => {
           .eq('job_id', doc.job_id)
 
         const isMultiContact = allContacts && allContacts.length > 1
-        let newStatus = 'accepted'
-
-        if (isMultiContact) {
-          // Check how many contacts have accepted (via their job_documents)
-          const { data: allDocs } = await sb
-            .from('job_documents')
-            .select('id, job_contact_id, accepted_at')
-            .eq('job_id', doc.job_id)
-            .eq('type', 'quote')
-            .not('job_contact_id', 'is', null)
-
-          const totalContactDocs = allDocs?.length || 0
-          const acceptedDocs = allDocs?.filter((d: any) => d.accepted_at)?.length || 0
-
-          if (acceptedDocs >= totalContactDocs && totalContactDocs > 0) {
-            newStatus = 'accepted' // all contacts accepted
-          } else {
-            newStatus = 'partially_accepted' // some still pending
-          }
-        }
+        const snapshot = acceptanceSnapshot!
+        const newStatus = everyQuotePartyAccepted(snapshot.documents, snapshot.acceptances)
+          ? 'accepted'
+          : 'partially_accepted'
 
         await sb
           .from('jobs')
@@ -2419,7 +2509,7 @@ serve(async (req: Request) => {
 
       try {
       const { data: existingQuoteRows, error: existingQuoteError } = await sb.from('job_documents')
-        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
+        .select('id, type, run_label, job_contact_id, sent_to_client, sent_at, created_at, version, send_claimed_at, share_token, quote_number, superseded_at, accepted_at, data_snapshot_json')
         .eq('job_id', job.id)
         .eq('type', 'quote')
         .is('superseded_at', null)
@@ -2518,7 +2608,7 @@ serve(async (req: Request) => {
 
         // Client document for this run
         const runPdfUrl = run_pdfs?.[run.run_label] || null
-        const clientKey = { runLabel: String(run.run_label || ''), jobContactId: primaryContact.id || null }
+        const clientKey = { runLabel: normaliseQuoteRunLabel(run.run_label) || '', jobContactId: primaryContact.id || null }
         const clientResolution = resolveSendRunDocument(existingQuoteDocs, clientKey)
         let clientDoc: any = null
         if (clientResolution.action === 'use_published') {
@@ -2539,7 +2629,7 @@ serve(async (req: Request) => {
               party: 'client',
             }),
           )
-          const { data: insertedClient } = await sb.from('job_documents').insert({
+          const { data: insertedClient } = await persistSendRunRows(sb, 'job_documents', {
             job_id: job.id,
             type: 'quote',
             run_label: run.run_label,
@@ -2551,13 +2641,13 @@ serve(async (req: Request) => {
             data_snapshot_json: { run },
           }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
           clientDoc = insertedClient
-            ? { ...insertedClient, run_label: insertedClient.run_label || run.run_label, data_snapshot_json: insertedClient.data_snapshot_json || { run } }
+            ? { ...insertedClient, run_label: insertedClient.run_label, data_snapshot_json: insertedClient.data_snapshot_json || { run } }
             : null
           if (clientDoc) {
             rememberExisting({
               id: clientDoc.id,
               type: 'quote',
-              run_label: run.run_label,
+              run_label: normaliseQuoteRunLabel(run.run_label),
               job_contact_id: primaryContact.id || null,
               sent_to_client: false,
               sent_at: null,
@@ -2574,18 +2664,18 @@ serve(async (req: Request) => {
         }
 
         if (clientDoc) {
-          await sb.from('run_acceptances').upsert({
+          await persistSendRunRows(sb, 'run_acceptances', {
             job_id: job.id,
             job_contact_id: primaryContact.id || contacts[0]?.id,
             job_document_id: clientDoc.id,
             run_label: run.run_label,
             status: 'pending',
-          }, { onConflict: 'job_id,job_contact_id,run_label' }).then(() => {}, () => {})
+          }).then(() => {}, () => {})
         }
 
         // Neighbour document for this run (if neighbour exists)
         if (neighbour && neighbour.client_email) {
-          const neighbourKey = { runLabel: String(run.run_label || ''), jobContactId: neighbour.id || null }
+          const neighbourKey = { runLabel: normaliseQuoteRunLabel(run.run_label) || '', jobContactId: neighbour.id || null }
           const neighbourResolution = resolveSendRunDocument(existingQuoteDocs, neighbourKey)
           let nbDoc: any = null
           if (neighbourResolution.action === 'use_published') {
@@ -2605,7 +2695,7 @@ serve(async (req: Request) => {
                 party: 'neighbour',
               }),
             )
-            const { data: insertedNeighbour } = await sb.from('job_documents').insert({
+            const { data: insertedNeighbour } = await persistSendRunRows(sb, 'job_documents', {
               job_id: job.id,
               type: 'quote',
               run_label: run.run_label,
@@ -2617,13 +2707,13 @@ serve(async (req: Request) => {
               data_snapshot_json: { run },
             }).select('id, share_token, quote_number, run_label, data_snapshot_json').single()
             nbDoc = insertedNeighbour
-              ? { ...insertedNeighbour, run_label: insertedNeighbour.run_label || run.run_label, data_snapshot_json: insertedNeighbour.data_snapshot_json || { run } }
+              ? { ...insertedNeighbour, run_label: insertedNeighbour.run_label, data_snapshot_json: insertedNeighbour.data_snapshot_json || { run } }
               : null
             if (nbDoc) {
               rememberExisting({
                 id: nbDoc.id,
                 type: 'quote',
-                run_label: run.run_label,
+                run_label: normaliseQuoteRunLabel(run.run_label),
                 job_contact_id: neighbour.id,
                 sent_to_client: false,
                 sent_at: null,
@@ -2639,13 +2729,13 @@ serve(async (req: Request) => {
           }
 
           if (nbDoc) {
-            await sb.from('run_acceptances').upsert({
+            await persistSendRunRows(sb, 'run_acceptances', {
               job_id: job.id,
               job_contact_id: neighbour.id,
               job_document_id: nbDoc.id,
               run_label: run.run_label,
               status: 'pending',
-            }, { onConflict: 'job_id,job_contact_id,run_label' }).then(() => {}, () => {})
+            }).then(() => {}, () => {})
           }
         }
 
@@ -2670,7 +2760,7 @@ serve(async (req: Request) => {
         if (itemRows.length > 0) {
           // Clear existing items for this run, then insert fresh
           await sb.from('run_line_items').delete().eq('job_id', job.id).eq('run_label', run.run_label)
-          await sb.from('run_line_items').insert(itemRows)
+          await persistSendRunRows(sb, 'run_line_items', itemRows)
         }
       }
 
@@ -2700,7 +2790,7 @@ serve(async (req: Request) => {
       for (const [email, recipient] of Object.entries(emailsByRecipient)) {
         const runLinks = recipient.docs.map((doc: any, i: number) => {
           const run = recipient.runs[i]
-          return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label} - View &amp; Accept &rarr;</a>`
+          return `<a href="${viewBaseUrl}?token=${doc.share_token}" style="display:block;padding:12px 16px;margin:8px 0;background:#f8f9fa;border-radius:8px;border-left:3px solid #F15A29;text-decoration:none;color:#293C46;font-weight:600;">${run.run_name || run.run_label || 'Fence run'} - View &amp; Accept &rarr;</a>`
         }).join('')
 
         const emailHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
@@ -2732,11 +2822,11 @@ serve(async (req: Request) => {
           const attachments: any[] = []
           if (run_pdfs) {
             for (const run of recipient.runs) {
-              const pdfUrl = run_pdfs[run.run_label]
+              const pdfUrl = run_pdfs[run.run_label || '']
               if (pdfUrl) {
                 attachments.push({
                   path: pdfUrl,
-                  filename: `Quote_${job.job_number || 'SWF'}_${run.run_label}.pdf`,
+                  filename: `Quote_${job.job_number || 'SWF'}_${run.run_label || 'RUN'}.pdf`,
                 })
               }
             }
@@ -2956,6 +3046,31 @@ serve(async (req: Request) => {
           code: sendOutcome.code,
           emails_sent: emailsSent,
         }, sendOutcome.httpStatus, corsHeaders)
+      }
+
+      // Retire each party's older duplicate run documents, keeping only the
+      // document that is published for that party now. Old duplicate links
+      // then forward to the party's current quote instead of staying
+      // separately acceptable. A failed write is loud (500); the retry takes
+      // the already-published path and finishes the retirement.
+      {
+        const retired = await retireOtherPublishedPartyRunDocuments(sb, {
+          jobId: job.id,
+          keepIds: [
+            ...publishedDocIds,
+            ...publishedExistingDocs.map((d: any) => d?.id).filter((id: unknown) => typeof id === 'string'),
+          ],
+        })
+        if (!retired.ok) {
+          console.error('[send-quote] send-runs party retirement failed:', retired.error)
+          return jsonResponse({
+            error: 'Failed to supersede prior quote documents',
+            code: 'quote_supersede_failed',
+          }, 500, corsHeaders)
+        }
+        if (retired.retiredIds.length) {
+          console.log(`[send-quote] send-runs retired ${retired.retiredIds.length} older party run document(s) for job ${job.id}`)
+        }
       }
 
       // Per ADR 2026-04-27: 'quoted' = quote sent to the primary client.

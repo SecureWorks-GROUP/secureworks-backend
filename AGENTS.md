@@ -3921,6 +3921,22 @@ marked `event_copy: 'unknown'`. Evidence rows carry `attribution_status`,
 `attribution_step`, `placement_rule`. Module and tests:
 `job_conversation_inbox_copy.ts`, `job_conversation_inbox_copy_test.ts`.
 
+## A Customer Quote Link Belongs To One Party
+
+A quote document's party is `(job_contact_id, run_label)`, null matching only
+null: the client, each neighbour and a whole-job quote are different parties.
+`send-quote/view` may show only that party's documents (same-party A/B options,
+or a forward from an older fence-run duplicate to the party's current one), and
+a retired link forwards only to the same party's current quote; never list
+every live quote on the job. Accept refuses a non-current run duplicate; "all
+accepted" counts current documents only. Once any per-contact document exists,
+a job-wide document (contact null AND run label null) is not a required party
+for job acceptance and is not retired either; a contact-less RUN document (the
+client's `(null, 'RHS')`) still is required. `/send` retires the party's earlier versions unless the caller passes
+`supersede_prior: false`; `/send-runs` retires each published party's older run
+duplicates. Rules and tests: `send-quote/quote_party_view.ts`,
+`quote_party_view_test.ts`.
+
 ## Email Capture Sources Are Data; The Old Poller Is Pinned
 
 The old monitor-inbox path must poll only `monitor-inbox/legacy_mailboxes.ts`,

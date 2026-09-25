@@ -807,6 +807,8 @@ export type SendRunExistingDocument = {
   job_contact_id?: string | null
   sent_to_client?: boolean | null
   sent_at?: string | null
+  created_at?: string | null
+  version?: number | null
   send_claimed_at?: string | null
   share_token?: string | null
   quote_number?: string | null
@@ -832,6 +834,24 @@ function sameSendRunContact(
   return (left ?? null) === (right ?? null)
 }
 
+function quoteDocumentTime(value: string | null | undefined): number {
+  const time = typeof value === 'string' ? Date.parse(value) : NaN
+  return Number.isFinite(time) ? time : 0
+}
+
+export function compareQuoteDocumentsNewestFirst(
+  a: { id: string; version?: number | null; sent_at?: string | null; created_at?: string | null },
+  b: { id: string; version?: number | null; sent_at?: string | null; created_at?: string | null },
+): number {
+  const byVersion = (b.version ?? 0) - (a.version ?? 0)
+  if (byVersion !== 0) return byVersion
+  const bySentAt = quoteDocumentTime(b.sent_at) - quoteDocumentTime(a.sent_at)
+  if (bySentAt !== 0) return bySentAt
+  const byCreatedAt = quoteDocumentTime(b.created_at) - quoteDocumentTime(a.created_at)
+  if (byCreatedAt !== 0) return byCreatedAt
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+}
+
 export function sendRunDocumentIsSuperseded(
   doc: { superseded_at?: string | null } | null | undefined,
 ): boolean {
@@ -853,9 +873,9 @@ export function existingQuoteDocumentForRun(
     return sameSendRunContact(d.job_contact_id, key.jobContactId)
   })
   if (!matches.length) return null
-  const published = matches.find((d) => quoteSendIsPublished(d))
-  if (published) return { document: published, published: true }
-  return { document: matches[0], published: false }
+  const published = matches.filter((d) => quoteSendIsPublished(d)).sort(compareQuoteDocumentsNewestFirst)
+  if (published.length) return { document: published[0], published: true }
+  return { document: matches.sort(compareQuoteDocumentsNewestFirst)[0], published: false }
 }
 
 export function resolveSendRunDocument(
@@ -871,8 +891,8 @@ export function resolveSendRunDocument(
 export type PriorQuoteSupersedeCandidate = {
   id?: string | null
   sent_at?: string | null
-  sent_to_client?: boolean | null
   accepted_at?: string | null
+  sent_to_client?: boolean | null
   send_claimed_at?: string | null
   superseded_at?: string | null
 }
@@ -882,7 +902,10 @@ export type PriorQuoteSupersedeCandidate = {
  *  sent_to_client=false and in-flight claims stay current unpublished work. */
 export function priorPublishedQuoteIdsToSupersede(
   candidates: PriorQuoteSupersedeCandidate[],
+  currentSentAt: string | null | undefined,
 ): string[] {
+  const currentTime = quoteDocumentTime(currentSentAt)
+  if (!currentTime) return []
   return uniqueDocumentIds(
     (candidates || [])
       .filter((row) => {
@@ -893,7 +916,10 @@ export function priorPublishedQuoteIdsToSupersede(
           send_claimed_at: row.send_claimed_at,
           superseded_at: row.superseded_at,
         }
-        return quoteDocumentHasClientSend(publication) && !quoteDocumentIsSuperseded(publication)
+        const publishedTime = quoteDocumentTime(row.sent_at) || quoteDocumentTime(row.accepted_at)
+        return quoteDocumentHasClientSend(publication) &&
+          !quoteDocumentIsSuperseded(publication) &&
+          publishedTime > 0 && publishedTime < currentTime
       })
       .map((row) => row.id),
   )
@@ -904,7 +930,7 @@ export async function supersedePriorPublishedQuoteDocuments(
   input: {
     jobId: string
     currentDocumentId: string
-    currentVersion: number
+    currentSentAt: string | null
     jobContactId: string | null
     runLabel: string | null
     supersededByRevisionId?: string | null
@@ -913,11 +939,10 @@ export async function supersedePriorPublishedQuoteDocuments(
 ): Promise<{ ok: true; supersededIds: string[] } | { ok: false; error: string }> {
   let sel = sb
     .from('job_documents')
-    .select('id, version, sent_at, sent_to_client, accepted_at, send_claimed_at, superseded_at')
+    .select('id, sent_at, sent_to_client, accepted_at, send_claimed_at, superseded_at')
     .eq('job_id', input.jobId)
     .eq('type', 'quote')
     .is('superseded_at', null)
-    .lt('version', input.currentVersion)
     .neq('id', input.currentDocumentId)
   sel = input.jobContactId == null
     ? sel.is('job_contact_id', null)
@@ -930,7 +955,7 @@ export async function supersedePriorPublishedQuoteDocuments(
     console.error('[send-quote] G-B2 supersede-prior read failed:', claimErrorMessage(error))
     return { ok: false, error: claimErrorMessage(error) }
   }
-  const ids = priorPublishedQuoteIdsToSupersede(Array.isArray(data) ? data : [])
+  const ids = priorPublishedQuoteIdsToSupersede(Array.isArray(data) ? data : [], input.currentSentAt)
   if (!ids.length) return { ok: true, supersededIds: [] }
   const now = input.now || new Date()
   const { data: updated, error: updateError } = await sb

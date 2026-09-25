@@ -2163,6 +2163,56 @@ Deno.test("R8-002 superseded documents are not current published runs", () => {
   )
 })
 
+Deno.test("send-runs reuses the newest published duplicate for a party and run", () => {
+  const sameVersion = resolveSendRunDocument([
+    {
+      id: "older",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-01T00:00:00.000Z",
+      created_at: "2026-09-01T00:00:00.000Z",
+      version: 1,
+    },
+    {
+      id: "newest",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-02T00:00:00.000Z",
+      created_at: "2026-09-02T00:00:00.000Z",
+      version: 1,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(sameVersion.action, "use_published")
+  if (sameVersion.action === "use_published") assertEquals(sameVersion.document.id, "newest")
+
+  const byVersion = resolveSendRunDocument([
+    {
+      id: "newer-time-lower-version",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-03T00:00:00.000Z",
+      version: 1,
+    },
+    {
+      id: "higher-version",
+      type: "quote",
+      run_label: "REAR",
+      job_contact_id: "c-1",
+      sent_to_client: true,
+      sent_at: "2026-09-02T00:00:00.000Z",
+      version: 2,
+    },
+  ], { runLabel: "REAR", jobContactId: "c-1" })
+  assertEquals(byVersion.action, "use_published")
+  if (byVersion.action === "use_published") assertEquals(byVersion.document.id, "higher-version")
+})
+
 Deno.test("R9-001 supersession uses extract-durable publication, not sent_to_client alone", () => {
   assertEquals(priorPublishedQuoteIdsToSupersede([
     { id: "hist", sent_at: "2026-09-01T00:00:00.000Z" },
@@ -2171,7 +2221,57 @@ Deno.test("R9-001 supersession uses extract-durable publication, not sent_to_cli
     { id: "unsent", sent_to_client: false },
     { id: "inflight", sent_at: "2026-09-01T00:00:00.000Z", send_claimed_at: "2026-09-06T00:00:00.000Z" },
     { id: "already", sent_at: "2026-09-01T00:00:00.000Z", sent_to_client: true, superseded_at: "2026-09-06T00:00:00.000Z" },
-  ]).sort(), ["accepted", "flagged", "hist"])
+  ], "2026-09-06T00:00:00.000Z").sort(), ["accepted", "flagged", "hist"])
+})
+
+Deno.test("/send retirement uses publication time across equal versions and preserves same-send documents", () => {
+  assertEquals(priorPublishedQuoteIdsToSupersede([
+    { id: "older-version-one", sent_to_client: true, sent_at: "2026-09-24T09:59:00.000Z" },
+    { id: "same-send-option", sent_to_client: true, sent_at: "2026-09-24T10:00:00.000Z" },
+    { id: "later-publication", sent_to_client: true, sent_at: "2026-09-24T10:01:00.000Z" },
+    { id: "unpublished", sent_to_client: false, sent_at: null },
+  ], "2026-09-24T10:00:00.000Z"), ["older-version-one"])
+})
+
+Deno.test("/send supersession writes an earlier same-version quote, not same-send or later quotes", async () => {
+  const writes: string[][] = []
+  const rows = [
+    { id: "earlier-v1", sent_to_client: true, sent_at: "2026-09-24T09:59:00.000Z" },
+    { id: "same-send-v1", sent_to_client: true, sent_at: "2026-09-24T10:00:00.000Z" },
+    { id: "later-v3", sent_to_client: true, sent_at: "2026-09-24T10:01:00.000Z" },
+  ]
+  const sb = {
+    from: () => {
+      const state: { update?: unknown; ids?: string[] } = {}
+      const chain: Record<string, unknown> = {}
+      const self = () => chain
+      Object.assign(chain, {
+        select: self,
+        eq: self,
+        is: self,
+        neq: self,
+        in(_column: string, ids: string[]) { state.ids = ids; return chain },
+        update(payload: unknown) { state.update = payload; return chain },
+        then(resolve: (value: unknown) => void) {
+          if (state.update) {
+            writes.push(state.ids || [])
+            return resolve({ data: (state.ids || []).map((id) => ({ id })), error: null })
+          }
+          return resolve({ data: rows, error: null })
+        },
+      })
+      return chain
+    },
+  }
+  const result = await supersedePriorPublishedQuoteDocuments(sb, {
+    jobId: "job-1",
+    currentDocumentId: "current-v1",
+    currentSentAt: "2026-09-24T10:00:00.000Z",
+    jobContactId: "contact-1",
+    runLabel: null,
+  })
+  assertEquals(result, { ok: true, supersededIds: ["earlier-v1"] })
+  assertEquals(writes, [["earlier-v1"]])
 })
 
 Deno.test("R9-001 supersede write failure is loud, not a silent skip", async () => {
@@ -2181,7 +2281,6 @@ Deno.test("R9-001 supersede write failure is loud, not a silent skip", async () 
         const chain: Record<string, unknown> = {}
         chain.eq = () => chain
         chain.is = () => chain
-        chain.lt = () => chain
         chain.neq = () => chain
         chain.then = (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
           Promise.resolve({
@@ -2202,7 +2301,7 @@ Deno.test("R9-001 supersede write failure is loud, not a silent skip", async () 
   const result = await supersedePriorPublishedQuoteDocuments(sb, {
     jobId: "job-1",
     currentDocumentId: "doc-new",
-    currentVersion: 2,
+    currentSentAt: "2026-09-06T00:00:00.000Z",
     jobContactId: null,
     runLabel: null,
   })
