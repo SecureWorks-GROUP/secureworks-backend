@@ -686,8 +686,9 @@ export async function salesBookingApprovalWriteAction(args: {
   return { ok: true, approval: written };
 }
 
-/** Refuse unless the opportunity's live GHL assignee makes it `resource`'s
- * lead (sales_booking_read.ts `salesBookingLeadBelongsTo`). */
+/** Refuse unless the opportunity's live GHL ownership (assignee, or an
+ * unassigned lead's kind) makes it `resource`'s lead (sales_booking_read.ts
+ * `salesBookingLeadBelongsTo`). */
 export async function assertLeadBelongsToResource(
   readOpportunityOwnership:
     | ((opportunityId: string) => Promise<SalesBookingOpportunityOwnership>)

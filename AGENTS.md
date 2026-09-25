@@ -3884,12 +3884,11 @@ profiles and migration ordering are owned by
 `sales_booking_sender.ts` is the canonical people mapping. Whose lead is ONE
 function, `salesBookingLeadBelongsTo` (read list, both approvals, send
 recheck): explicit GHL assignee wins, else patio Nithin and fencing by
-`salesBookingLeadKind`: any Stratco signal (tag, name, source, the
-`GHL_STRATCO_ALLOCATION_FIELD_ID` custom field, a STRATCO FENCING calendar
-appointment) Marnin, a positive normal-lead signal Khairo, neither
-`owner_unclear` (on Marnin's list flagged, both approvals and send refuse
-`owner_unclear` until assigned in GHL). A possible Stratco lead never reaches
-Khairo's line; the ownership read must carry `kind`. A lead
+`salesBookingLeadKind` (Stratco Marnin, normal Khairo, neither held
+`owner_unclear` on Marnin's; signals owned by the confirmation doc). A
+possible Stratco lead never reaches Khairo's line; the ownership read must
+carry `kind`, and an unread kind refuses `opportunity_assignment_unreadable`,
+never a reassignment code. A lead
 booked in any scoper's GHL calendar carries `scope_appointment`
 (`sales_booking_scope_appointment.ts`), which is what takes it off every
 to-contact list on the screen. The GHL writer
