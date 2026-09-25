@@ -157,13 +157,15 @@ Additions:
   event. An UNMARKED Outlook event that is GHL's own sync copy of a visit
   (busy, not all-day, same start and end as a GHL event of the same person
   that availability counts as busy, i.e. not cancelled and not invalid) is
-  folded into that GHL row as
-  `outlook_copy: {event_id, title}` and leaves the diary, so one visit shows
-  and holds its time once (`foldSalesBookingOutlookCopies`; live case: Khairo,
+  folded into that GHL row as `outlook_copy` (the whole Outlook row) and
+  leaves the diary, so one visit shows once (`foldSalesBookingOutlookCopies`;
+  live case: Khairo,
   Tue 29 Sep 10:00-10:30, GHL blank title, Outlook "Fencing Complaint Basil
   Laing"). Each GHL row absorbs at most one copy.
   `diary_read.sources.outlook.ghl_copies_folded` counts them; `event_count`
-  stays the raw Outlook count.
+  stays the raw Outlook count. The fold is display only: live availability
+  restores each `outlook_copy` and counts it, with its own location, as the
+  owner press does.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,

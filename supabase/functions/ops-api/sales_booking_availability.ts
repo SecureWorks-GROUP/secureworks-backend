@@ -816,7 +816,9 @@ export async function applySalesBookingAvailability(
       ? {
         state: outlookSource?.state ?? "not_configured",
         reason: outlookSource?.reason ?? null,
-        entries: (response.diary ?? []).filter((e) => e.source === "outlook"),
+        entries: (response.diary ?? []).flatMap((e) =>
+          e.source === "outlook" ? [e] : e.outlook_copy ? [e.outlook_copy] : []
+        ),
         malformed_dropped: outlookSource?.malformed_dropped ?? 0,
       }
       : {

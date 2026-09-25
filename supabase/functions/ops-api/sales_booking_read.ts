@@ -1318,10 +1318,11 @@ export interface SalesBookingDiaryEntry {
   mirror_of_ghl_event_id: string | null;
   /**
    * GHL rows only, present only when set: the unmarked Outlook copy of this
-   * appointment (GHL's own calendar sync) that was folded into this row
-   * instead of shown as a second visit. See `foldSalesBookingOutlookCopies`.
+   * appointment (GHL's own calendar sync), folded into this row for display
+   * instead of shown as a second visit. The whole Outlook row, so availability
+   * still reads it. See `foldSalesBookingOutlookCopies`.
    */
-  outlook_copy?: { event_id: string; title: string | null };
+  outlook_copy?: SalesBookingDiaryEntry;
   /** Additive, set by sales_booking_visits.ts: the booked visit on this event (GHL id or Outlook mirror), else null. */
   booked_visit?: BookingObject | null;
 }
@@ -1704,8 +1705,10 @@ export async function readSalesBookingOutlookDiary(args: {
  * into that GHL row as `outlook_copy` and leaves the Outlook list. Each GHL row
  * absorbs at most one copy, so a second Outlook event on the same span still
  * shows and still blocks. Marked mirrors (`mirror_of_ghl_event_id`) keep their
- * existing two-row handling. Because the GHL row it folds into already holds
- * that exact time for availability, folding cannot free any capacity.
+ * existing two-row handling. The fold is for display only: availability reads
+ * the Outlook half with every `outlook_copy` restored, so the copy stays a busy
+ * block and a travel neighbour with its own location, exactly as the owner
+ * press reads Outlook raw. Folding frees neither capacity nor travel time.
  */
 export function foldSalesBookingOutlookCopies(
   ghl: SalesBookingDiaryEntry[],
@@ -1744,9 +1747,7 @@ export function foldSalesBookingOutlookCopies(
   return {
     ghl: ghl.map((g) => {
       const copy = copyOf.get(g);
-      return copy
-        ? { ...g, outlook_copy: { event_id: copy.event_id, title: copy.title } }
-        : g;
+      return copy ? { ...g, outlook_copy: copy } : g;
     }),
     outlook: outlook.filter((o) => !folded.has(o)),
     folded: copyOf.size,

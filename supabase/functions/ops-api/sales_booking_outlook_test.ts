@@ -540,10 +540,11 @@ Deno.test("Khairo: GHL's own Outlook copy of his visit shows once and holds the 
   assertEquals(folded.ghl.length, 1);
   assertEquals(folded.ghl[0].event_id, "ghl-khairo-0929");
   assertEquals(folded.ghl[0].title, null);
-  assertEquals(folded.ghl[0].outlook_copy, {
-    event_id: "ol-khairo-0929",
-    title: "Fencing Complaint Basil Laing",
-  });
+  assertEquals(folded.ghl[0].outlook_copy, copy);
+  assertEquals(
+    folded.ghl[0].outlook_copy?.title,
+    "Fencing Complaint Basil Laing",
+  );
 
   const payload = await salesBookingRead(
     readDeps({

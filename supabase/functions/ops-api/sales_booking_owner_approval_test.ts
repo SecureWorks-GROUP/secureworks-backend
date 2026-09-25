@@ -25,10 +25,13 @@ import {
   systemOfferCensus,
 } from "./sales_booking_owner_approval.ts";
 import {
+  projectSalesBookingDiaryEntry,
+  projectSalesBookingOutlookDiaryEntry,
   SALES_BOOKING_RESOURCES,
   salesBookingRead,
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
+import { applySalesBookingAvailability } from "./sales_booking_availability.ts";
 import { salesBookingSendAction } from "./sales_booking_execute.ts";
 import { SALES_BOOKING_SENDER_LINES } from "./sales_booking_sender.ts";
 
@@ -595,6 +598,132 @@ Deno.test("owner approval refuses an unlocated neighboring GHL event", async () 
   );
   assertEquals(error.detail?.source, "ghl");
   assertEquals(rows.length, 0);
+});
+
+Deno.test("a blank-address GHL visit and its folded Outlook copy: the screen offers only what the owner press accepts", async () => {
+  // Fri 25 Sep 10:00-10:30: a GHL visit with no address (its lead's suburb is
+  // known) and GHL's own unmarked Outlook copy of it, with no location.
+  const visitCases = [{ suburb: "Canning Vale" }, {
+    id: "opp:neighbour",
+    opportunity_id: "neighbour-opp",
+    contact_id: "neighbour",
+    suburb: "Canning Vale",
+  }];
+  const ghlVisit = {
+    id: "ghl-fri-1000",
+    title: "",
+    startTime: "2026-09-25T10:00:00+08:00",
+    endTime: "2026-09-25T10:30:00+08:00",
+    appointmentStatus: "confirmed",
+    assignedUserId: "3S20LGVTjsVYy9vTJ9wM",
+    contactId: "neighbour",
+  };
+  const outlookCopy = {
+    id: "ol-fri-1000",
+    subject: "Fence quote",
+    start: { dateTime: "2026-09-25T10:00:00.0000000" },
+    end: { dateTime: "2026-09-25T10:30:00.0000000" },
+    showAs: "busy",
+  };
+
+  const screen = async (withCopy: boolean) => {
+    const read = await salesBookingRead({
+      readOpportunities: () =>
+        Promise.resolve({
+          opportunities: [],
+          stages: {},
+          exhausted: true,
+          total: 0,
+          pages_scanned: 1,
+          reason: null,
+        }),
+      readDiary: () =>
+        Promise.resolve({
+          read_ok: true,
+          reason: null,
+          entries: [projectSalesBookingDiaryEntry(ghlVisit)!],
+          malformed_dropped: 0,
+          calendar_email: "marnin@secureworkswa.com.au",
+          ghl_user_id: "3S20LGVTjsVYy9vTJ9wM",
+          mapped_by: "email",
+          scoper_user_id: auth.userId,
+        }),
+      readOutlookDiary: () =>
+        Promise.resolve({
+          state: "read",
+          read_ok: true,
+          reason: null,
+          entries: withCopy
+            ? [projectSalesBookingOutlookDiaryEntry(outlookCopy)!]
+            : [],
+          malformed_dropped: 0,
+          calendar_email: "marnin@secureworkswa.com.au",
+        }),
+      readThread: () => {
+        throw new Error("no thread call expected");
+      },
+      now: () => NOW,
+    }, { resource: "marnin", week_start: "2026-09-21" });
+    read.cases = (await workspace(visitCases)).cases;
+    const friday = read.diary.filter((e) => e.start.startsWith("2026-09-25"));
+    assertEquals(friday.map((e) => e.event_id), ["ghl-fri-1000"]);
+    assertEquals(
+      friday[0].outlook_copy?.event_id,
+      withCopy ? "ol-fri-1000" : undefined,
+    );
+    const live = await applySalesBookingAvailability(read, {
+      readGhlDirectory: () => Promise.resolve(calendarDirectory()),
+      readGhlEvents: () => Promise.resolve([ghlVisit]),
+      readGhlBlockedSlots: () => Promise.resolve([]),
+      readSystemOfferRecords: () =>
+        Promise.resolve({ executions: [], approvals: [] }),
+      now: () => NOW,
+    });
+    return live.cases.find((c) => c.id === CASE)!.free_times!.days.find((
+      d: { date: string },
+    ) => d.date === "2026-09-25");
+  };
+  const press = (visit: BookingObject, withCopy: boolean) =>
+    call(
+      deps({
+        cases: visitCases,
+        ghlEvents: [ghlVisit],
+        outlookEvents: withCopy
+          ? [{
+            id: outlookCopy.id,
+            subject: outlookCopy.subject,
+            location: null,
+            start: "2026-09-25T10:00:00+08:00",
+            end: "2026-09-25T10:30:00+08:00",
+            show_as: "busy",
+            is_cancelled: false,
+          }]
+          : [],
+      }).deps,
+      { owner_input: input("calendar", { visit }), dry_run: true },
+    );
+
+  // Control, GHL only: the screen offers 10:45 after the visit and the press
+  // accepts it.
+  const ghlOnly = await screen(false);
+  const after = ghlOnly.arrival_windows.find((w: BookingObject) =>
+    w.from_iso >= "2026-09-25T10:30:00+08:00"
+  );
+  assertEquals(after.from_iso, "2026-09-25T10:45:00+08:00");
+  const visit = {
+    window_start_iso: after.from_iso,
+    window_end_iso: after.to_iso,
+    end_iso: after.end_iso,
+  };
+  assert("dry_run" in await press(visit, false));
+
+  // With the copy: the press refuses that visit on the copy's unknown
+  // location, and the screen no longer offers it.
+  const error = await refusal(press(visit, true), "travel_location_unknown");
+  assertEquals(error.detail?.source, "outlook");
+  const withCopy = await screen(true);
+  assertEquals(withCopy.state, "travel_unknown");
+  assertEquals(withCopy.arrival_windows, []);
 });
 
 Deno.test("owner calendar: an Outlook event near the visit clashes and nothing is written", async () => {

@@ -30,9 +30,11 @@ After the pack overlay, for the person on screen:
 3. GHL blocked-off time for the user (`/calendars/blocked-slots`).
 4. Outlook events the read already fetched for the diary (every scoper with
    a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`: Nithin, Marnin, Khairo) are
-   also busy. An unmarked exact-span copy of a GHL visit was already folded
-   into that visit by the read, so it is neither a second busy block nor
-   counted in `unverified_correspondence`. Only the resource person's own
+   also busy. An unmarked exact-span copy of a GHL visit that the read folded
+   into that visit for display (`outlook_copy`) is restored here: it stays a
+   busy block and a travel neighbour with its own location, exactly as the
+   owner press reads Outlook, and like any unmarked event it counts in
+   `unverified_correspondence`. Only the resource person's own
    mailbox counts: when the diary read another scoper's Outlook (the
    `scoper_user_id` override), that Outlook is `failed` with
    `outlook_calendar_not_this_person`, never busy or free time for this
