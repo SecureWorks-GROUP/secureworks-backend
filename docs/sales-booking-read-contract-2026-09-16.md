@@ -194,7 +194,7 @@ Additions:
   `outlook_calendar_http_403`), keeps the GHL rows that did read, and is never
   a free day. `sources.ghl` is `{read_ok, reason, event_count}`;
   `sources.outlook` is `{state: read | failed | not_configured, read_ok,
-  reason, calendar_email, event_count, malformed_dropped}`.
+  reason, calendar_email, event_count, malformed_dropped, ghl_copies_folded}`.
   `coverage.operational_leave` is `primary_outlook_calendar_only` when Outlook
   read, else `not_read`: leave in any other calendar is never read.
   `calendar_email` may be null; `ghl_user_id` is

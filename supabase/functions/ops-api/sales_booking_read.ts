@@ -1582,7 +1582,7 @@ export type SalesBookingGraphGet = (
 export const SALES_BOOKING_OUTLOOK_MAX_PAGES = 10;
 
 /**
- * The owner's Outlook primary calendar for the window, via Graph
+ * The scoper's Outlook primary calendar for the window, via Graph
  * `calendarView` (recurrences expanded). A failed, malformed or unfinished
  * read is a named failure with zero entries: never an empty, free week.
  * Never throws.
@@ -2095,7 +2095,7 @@ export interface SalesBookingReadResponse {
     /** Open roster rows left out because their GHL stage is past scope-needed. */
     excluded_by_stage: number;
     /**
-     * `primary_outlook_calendar_only` when the owner's Outlook primary calendar
+     * `primary_outlook_calendar_only` when the scoper's Outlook primary calendar
      * was read (its `oof` blocks show as leave); leave kept in any other
      * calendar is still unread. `not_read` otherwise.
      */
@@ -2396,7 +2396,7 @@ export interface SalesBookingReadDependencies {
     deadlineMs?: number;
   }): Promise<SalesBookingDiaryScan>;
   /**
-   * The owner's Outlook primary calendar for the week. Never throws. Absent
+   * The scoper's Outlook primary calendar for the week. Never throws. Absent
    * means no Outlook read is wired: a resource with a configured Outlook
    * mailbox then reads as `failed` (`outlook_reader_not_wired`), never covered.
    */
