@@ -1,0 +1,191 @@
+# Replaces .github/workflows/{pr-check,deploy-edge-functions,makesafe-intake-watchdog}.yml on GitLab.
+# Variables (masked, protected): SUPABASE_ACCESS_TOKEN, SW_API_KEY; optional OPS_API_BASE_URL.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+
+stages: [check, deploy]
+
+variables:
+  PROJECT_REF: kevgrhcjxspbxgovpmfl
+  GIT_DEPTH: "0"
+
+.mr_changes: &mr_changes
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    changes:
+      paths:
+        - "supabase/functions/**/*"
+        - "supabase/migrations/**/*"
+        - "supabase/tests/migration-contracts/**/*"
+        - "scripts/**/*"
+        - "tests/e2e/**/*"
+        - "data/**/*"
+        - "docs/**/*"
+        - "*.md"
+        - ".github/workflows/*"
+        - ".gitlab-ci.yml"
+
+deno-check:
+  stage: check
+  image: denoland/deno:debian
+  rules: *mr_changes
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git curl jq nodejs python3 >/dev/null
+  script:
+    - |
+      BASE_SHA="$CI_MERGE_REQUEST_DIFF_BASE_SHA"; HEAD_SHA="$CI_COMMIT_SHA"
+      { git diff --name-only --diff-filter=d "$BASE_SHA" "$HEAD_SHA" -- 'supabase/functions/*/index.ts'
+        git diff --name-only --diff-filter=d "$BASE_SHA" "$HEAD_SHA" -- 'supabase/functions/_shared/*.ts' 'supabase/functions/_shared/**/*.ts'; } | grep -v '^$' | sort -u > /tmp/changed_function_files.txt || true
+      if [ -s /tmp/changed_function_files.txt ]; then
+        while IFS= read -r f; do deno check "$f" || echo "advisory: $f failed deno check"; done < /tmp/changed_function_files.txt
+        while IFS= read -r f; do deno cache --no-check "$f"; done < /tmp/changed_function_files.txt
+      fi
+    - for s in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh; do [ ! -f "$s" ] || bash -n "$s"; done
+    - bash scripts/test/test-smoke-ops-api-action-surface.sh
+    - bash scripts/test/test-stamp-ops-api-build-metadata.sh
+    - bash scripts/test/test-edge-schema-preflight.sh
+    - bash scripts/test/test-apply-pending-migrations.sh
+    - deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
+    - deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
+    - deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read supabase/functions/ops-api/repair_intake_routing_test.ts supabase/functions/ops-api/repair_classifier_routing_test.ts supabase/functions/ops-api/repair_stage_write_test.ts supabase/functions/ops-api/insurance_repairs_board_test.ts supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
+    - bash scripts/test/test-deploy-edge-functions-workflow.sh
+    - deno test --allow-read --allow-env supabase/functions/send-outlook-email/outlook_action_behavior_test.ts supabase/functions/send-outlook-email/outlook_authorization_test.ts supabase/functions/send-outlook-email/ses_delivery_fence_test.ts supabase/functions/send-quote/xero_quote_outcome_test.ts supabase/functions/send-quote/send_runs_request_test.ts supabase/functions/send-quote/quote_party_view_test.ts supabase/functions/ghl-proxy/hardening_helpers_test.ts supabase/functions/ghl-proxy/provider_reads_test.ts supabase/functions/ghl-proxy/lead_search_test.ts supabase/functions/ghl-proxy/sms_sender_default_test.ts supabase/functions/ghl-proxy/calendar_events_test.ts supabase/functions/ghl-proxy/calendar_appointment_test.ts supabase/functions/ghl-proxy/calendar_appointment_release_test.ts supabase/functions/xero-sync/xero_invoice_reconciliation_test.ts supabase/functions/xero-sync/xero_age_test.ts supabase/functions/_shared/xero_cooldown_test.ts supabase/functions/ops-api/invoice_create_contract_test.ts supabase/functions/ops-api/ops_api_operator_auth_test.ts supabase/functions/ops-api/xero_accpay_books_test.ts supabase/functions/ops-api/xero_receivables_read_test.ts supabase/functions/ops-api/xero_attachment_test.ts supabase/functions/ops-api/xero_post_rate_limit_retry_test.ts supabase/functions/ops-api/read_job_record_test.ts supabase/functions/ops-api/ses_report_trigger_test.ts supabase/functions/ops-api/xero_bank_read_test.ts supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts supabase/functions/ops-api/sales_booking_read_test.ts supabase/functions/ops-api/sales_booking_outlook_test.ts supabase/functions/ops-api/sales_booking_pack_test.ts supabase/functions/ops-api/sales_booking_confirmation_test.ts supabase/functions/ops-api/sales_booking_execute_test.ts supabase/functions/ops-api/sales_booking_owner_approval_test.ts supabase/functions/ops-api/sales_booking_availability_test.ts supabase/functions/reporting-api/reporting_staff_gate_test.ts
+    - deno test --no-check --allow-read --allow-env supabase/functions/ops-api/context_visibility_test.ts supabase/functions/ops-api/proposed_sms_receipt_test.ts supabase/functions/ops-api/retired_booking_actions_test.ts supabase/functions/ops-api/invoice_context_test.ts supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts supabase/functions/ops-api/job_commercial_read_test.ts supabase/functions/ops-api/job_freshness_test.ts supabase/functions/ops-api/trade_variation_request_test.ts supabase/functions/ops-api/context_unlinked_test.ts supabase/functions/ops-api/actor_calls_test.ts supabase/functions/ops-api/actor_calls_handler_test.ts supabase/functions/ops-api/monitored_mailboxes_test.ts
+    - deno test --allow-read --allow-env supabase/functions/ghl-webhook-receiver/receiver_auth_test.ts supabase/functions/ghl-webhook-receiver/receiver_c1b_test.ts supabase/functions/ghl-webhook-receiver/receiver_c1c_test.ts supabase/functions/ghl-webhook-receiver/receiver_t1_test.ts supabase/functions/ghl-webhook-receiver/receiver_customer_replied_test.ts supabase/functions/ghl-webhook-receiver/receiver_user_replied_test.ts supabase/functions/ghl-webhook/message_webhook_test.ts
+    - deno test --allow-read --allow-env supabase/functions/_shared/evidence/ghl_message_test.ts supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts supabase/functions/_shared/evidence/ghl_call_pair_test.ts supabase/functions/ghl-proxy/sms_capture_test.ts supabase/functions/ghl-proxy/send_sms_response_test.ts
+    - deno test --allow-read supabase/functions/ghl-message-reconcile/reconcile_test.ts supabase/functions/ghl-message-reconcile/handler_test.ts
+    - deno test --allow-read supabase/functions/ghl-history-load/history_load_test.ts supabase/functions/ghl-history-load/link_test.ts supabase/functions/ghl-history-load/handler_test.ts
+    - deno test --allow-read supabase/functions/_shared/job_refs_test.ts supabase/functions/_shared/job_refs_contract_rows_test.ts
+    - deno test --allow-read --allow-env supabase/functions/monitor-inbox/classify_email_test.ts
+    - deno test --allow-read supabase/functions/monitor-inbox/legacy_mailboxes_test.ts
+    - deno test --allow-read supabase/functions/_shared/request_actor_test.ts
+    - deno test --no-check --allow-read --allow-env supabase/functions/xero-sync/xero_transport_test.ts
+
+migration-contracts:
+  stage: check
+  # Postgres runs inside the job so the script's localhost-only guard (run.sh:18-22) holds.
+  image: postgres:17
+  rules: *mr_changes
+  timeout: 15 minutes
+  variables:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: postgres
+    MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+    MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq python3 >/dev/null
+  script:
+    - (docker-entrypoint.sh postgres >/tmp/pg.log 2>&1 &)
+    - for i in $(seq 1 60); do pg_isready -h 127.0.0.1 -U postgres -d postgres && break; sleep 1; done
+    - bash supabase/tests/migration-contracts/run.sh
+
+ses-proof-harness:
+  stage: check
+  image: mcr.microsoft.com/playwright:v1.55.0-noble
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: { paths: ["tests/e2e/**/*"] }
+  before_script:
+    - curl -fsSL https://deno.land/install.sh | sh -s -- -y && export PATH="$HOME/.deno/bin:$PATH"
+  script:
+    - cd tests/e2e
+    - npm ci
+    - npm run typecheck:ses-proof
+    - SES_PROOF_RUN_ID=ci-safety-contract-$CI_PIPELINE_ID npm run test:ses-proof-safety
+    - SES_PROOF_RUN_ID=ci-fixture-$CI_PIPELINE_ID npm run proof:ses:fixture
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths: [artifacts/ses-reporting-proof/]
+
+deploy-edge-functions:
+  stage: deploy
+  image: ubuntu:24.04
+  resource_group: production-edge-deploy
+  environment: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push" && $CI_PROJECT_PATH == "secureworks-group1/secureworks-backend"
+      changes:
+        paths:
+          - "supabase/functions/**/*"
+          - "supabase/migrations/**/*"
+          - scripts/identify-edge-deploy-changes.sh
+          - scripts/apply-pending-migrations.sh
+          - scripts/migration-autoapply-exclusions.txt
+          - scripts/migration-autoapply-ledger-aliases.txt
+          - scripts/check-edge-schema-preflight.sh
+          - scripts/edge-function-schema-requirements.txt
+          - scripts/check-ops-api-source-actions.sh
+          - scripts/stamp-ops-api-build-metadata.sh
+          - scripts/smoke-ops-api-action-surface.sh
+          - scripts/_ops-api-required-actions.txt
+          # .gitlab-ci.yml is deliberately not listed: a CI-file-only change must
+          # never start a production deploy (GitHub listed its own workflow file).
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git curl jq ca-certificates postgresql-client nodejs python3 unzip >/dev/null
+    # apply-pending-migrations.sh also needs deno, as on GitHub's runner.
+    - curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null && export PATH="$HOME/.deno/bin:$PATH"
+    - curl -fsSL https://github.com/supabase/cli/releases/download/v2.105.0/supabase_linux_amd64.tar.gz | tar -xz -C /usr/local/bin supabase
+  script:
+    - export GITHUB_OUTPUT=/tmp/changed.env BEFORE_SHA="$CI_COMMIT_BEFORE_SHA" HEAD_SHA="$CI_COMMIT_SHA" EVENT_NAME=push
+    # An all-zero before SHA would make the detector select every function; refuse instead.
+    - |
+      if printf '%s' "$BEFORE_SHA" | grep -Eq '^0+$'; then echo "FAIL: no previous commit for this push; deploy by hand"; exit 1; fi
+    - bash scripts/identify-edge-deploy-changes.sh
+    # Values such as functions="ops-api send-quote" contain spaces, so export line by line rather than sourcing.
+    - while IFS='=' read -r k v; do [ -n "$k" ] && export "$k=$v"; done < /tmp/changed.env
+    - if [ -n "${functions:-}" ] || [ "${migrations_changed:-}" = true ]; then bash scripts/apply-pending-migrations.sh; fi
+    - if [ -n "${functions:-}" ]; then CHANGED_FUNCTIONS="$functions" bash scripts/check-edge-schema-preflight.sh; fi
+    - if [ "${verify_ops_api:-}" = true ]; then bash scripts/check-ops-api-source-actions.sh; fi
+    - |
+      for func in ${functions:-}; do
+        if [ "$func" = ops-api ]; then
+          OPS_API_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          bash scripts/stamp-ops-api-build-metadata.sh "$CI_COMMIT_SHA" "$OPS_API_DEPLOYED_AT"
+          export EXPECTED_OPS_API_COMMIT_SHA="$CI_COMMIT_SHA" EXPECTED_OPS_API_DEPLOYED_AT="$OPS_API_DEPLOYED_AT"
+        fi
+        JWT_FLAG=""
+        head -30 "supabase/functions/${func}/index.ts" 2>/dev/null | grep -q -- '--no-verify-jwt' && JWT_FLAG="--no-verify-jwt"
+        supabase functions deploy "$func" $JWT_FLAG --project-ref "$PROJECT_REF"
+      done
+    - |
+      if [ -n "${functions:-}" ]; then
+        sleep 5
+        smoke_ok=true
+        for func in $functions; do
+          case "$func" in ops-api|ghl-proxy|send-quote) ;; *) continue ;; esac
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://$PROJECT_REF.supabase.co/functions/v1/$func" || echo 000)
+          echo "$func smoke HTTP $code"
+          if [ "$code" -lt 200 ] || [ "$code" -ge 500 ]; then smoke_ok=false; fi
+        done
+        [ "$smoke_ok" = true ] || { echo "FAIL: one or more smoke tests failed"; exit 1; }
+      fi
+    - if [ "${verify_ops_api:-}" = true ]; then EXPECTED_COMMIT_SHA="${EXPECTED_OPS_API_COMMIT_SHA:-}" EXPECTED_DEPLOYED_AT="${EXPECTED_OPS_API_DEPLOYED_AT:-}" bash scripts/smoke-ops-api-action-surface.sh; fi
+
+makesafe-intake-watchdog:
+  stage: check
+  image: alpine:3.20
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  variables:
+    STALE_MINUTES: "30"
+  before_script:
+    - apk add --no-cache curl jq coreutils >/dev/null
+  script:
+    - |
+      test -n "$SW_API_KEY" || { echo "FAIL: SW_API_KEY not set"; exit 1; }
+    - URL="${OPS_API_BASE_URL:-https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api}?action=intake_health"
+    - |
+      HTTP_CODE=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 -H "x-api-key: $SW_API_KEY" "$URL" || echo 000)
+    - |
+      test "$HTTP_CODE" = 200 || { echo "FAIL: intake_health HTTP $HTTP_CODE"; head -c 2000 /tmp/health.json; exit 1; }
+    - |
+      LAST_SCAN=$(jq -r '.extraction.last_scan_at // empty' /tmp/health.json); test -n "$LAST_SCAN" || { echo "FAIL: no last_scan_at"; exit 1; }
+    - AGE_MIN=$(( ( $(date -u +%s) - $(date -u -d "$LAST_SCAN" +%s) ) / 60 )); echo "last scan ${AGE_MIN} min ago"
+    - |
+      test "$AGE_MIN" -le "$STALE_MINUTES" || { echo "FAIL: make-safe intake scan STALE (${AGE_MIN} min)"; exit 1; }
