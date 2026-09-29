@@ -24,6 +24,21 @@ import {
   sealedSesFenceCheckFailedRefusal,
   sealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
+import {
+  approvedSendSealSecret,
+  ApprovedSendRefusal,
+  auditQuietly,
+  readApprovalIdOnly,
+  supabaseApprovedSendStore,
+  supabaseAttachmentReader,
+} from '../_shared/approved_send.ts'
+import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
+import { resolveRequestActor } from '../_shared/request_actor.ts'
+import {
+  type ApprovedEmailDeps,
+  type Caller as ApprovedSendCaller,
+  sendApprovedEmail,
+} from './approved_send_email.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ||
@@ -1809,6 +1824,67 @@ export async function handleDraft(
 
 // ── Main Handler ──
 
+export function approvedEmailDeps(): ApprovedEmailDeps {
+  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  return {
+    store: supabaseApprovedSendStore(sb),
+    readAttachment: supabaseAttachmentReader(
+      sb,
+      async (jobId) => (await inspectSealedSesJob(sb, jobId)).sealed,
+    ),
+    resolveFrom: resolveSmsFromNumber,
+    sealSecret: approvedSendSealSecret(),
+    now: () => new Date(),
+    newId: () => crypto.randomUUID(),
+    graph: graphRequest,
+    verifyMailbox: verifyMailboxRoute,
+  }
+}
+
+/**
+ * The approved-send door of this function: {approval_id} only. Refusals before
+ * the claim leave the approval unused and are audited; the outcome of a
+ * claimed send is audited by sendApprovedEmail.
+ */
+export async function handleApprovedEmailRequest(
+  body: Record<string, unknown>,
+  caller: ApprovedSendCaller,
+  deps: ApprovedEmailDeps = approvedEmailDeps(),
+): Promise<Response> {
+  let approvalId: string | null = null
+  try {
+    approvalId = readApprovalIdOnly(body)
+    const result = await sendApprovedEmail(deps, approvalId, caller)
+    return json(result.body, result.status)
+  } catch (err) {
+    const refusal = err instanceof ApprovedSendRefusal
+      ? err
+      : err instanceof OutlookInputError
+      ? new ApprovedSendRefusal(400, err.code, err.message)
+      : err instanceof GraphProviderError
+      ? new ApprovedSendRefusal(
+        502,
+        'mailbox_unverified',
+        `The sending mailbox could not be verified, so nothing was sent (${err.message}).`,
+      )
+      : new ApprovedSendRefusal(
+        500,
+        'approved_send_error',
+        `The approved send stopped before anything was sent (${(err as Error).message}).`,
+      )
+    await auditQuietly(deps.store, {
+      approval_id: approvalId,
+      event: 'send_refused',
+      channel: 'email',
+      actor: caller.actor,
+      credential_class: caller.credentialClass,
+      code: refusal.code,
+      detail: { fact: refusal.fact, ...refusal.evidence },
+    })
+    return json({ ...refusal.toBody(), retry_safe: false }, refusal.status)
+  }
+}
+
 export async function handleOutlookRequest(req: Request): Promise<Response> {
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
@@ -1861,6 +1937,27 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
           'invalid_request',
           'Request body must be an object',
         )
+      }
+      // Approved send: a body carrying approval_id is the owner's recorded
+      // approval and nothing else. Every other body takes the unchanged path
+      // below. See ../_shared/approved_send.ts.
+      if (hasOwn(body, 'approval_id')) {
+        if (!opsAuthorized) {
+          return json(
+            { error: 'Operations credential required for this action' },
+            401,
+          )
+        }
+        const caller: ApprovedSendCaller = {
+          actor: resolveRequestActor({
+            headers: req.headers,
+            trustActorHeader: true,
+          }).actor,
+          credentialClass: serviceKey && suppliedCredential === serviceKey
+            ? 'service_role'
+            : 'ops_agent_server_key',
+        }
+        return await handleApprovedEmailRequest(body, caller)
       }
       if (
         (body.action === 'reply' || body.action === 'draft') && !opsAuthorized
