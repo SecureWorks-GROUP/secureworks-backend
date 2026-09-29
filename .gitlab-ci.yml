@@ -85,7 +85,7 @@ migration-contracts:
 
 ses-proof-harness:
   stage: check
-  image: mcr.microsoft.com/playwright:v1.55.0-noble
+  image: mcr.microsoft.com/playwright:v1.62.0-noble
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       changes: { paths: ["tests/e2e/**/*"] }
