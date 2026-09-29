@@ -33,7 +33,7 @@ deno-check:
   image: denoland/deno:debian
   rules: *mr_changes
   before_script:
-    - apt-get update -qq && apt-get install -y -qq git curl jq >/dev/null
+    - apt-get update -qq && apt-get install -y -qq git curl jq nodejs python3 >/dev/null
   script:
     - |
       BASE_SHA="$CI_MERGE_REQUEST_DIFF_BASE_SHA"; HEAD_SHA="$CI_COMMIT_SHA"
@@ -76,6 +76,8 @@ migration-contracts:
     POSTGRES_DB: postgres
     MIGRATION_CONTRACT_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
     MIGRATION_CONTRACT_DISPOSABLE_ACK: I-confirm-this-is-disposable-local-postgres
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq python3 >/dev/null
   script:
     - (docker-entrypoint.sh postgres >/tmp/pg.log 2>&1 &)
     - for i in $(seq 1 60); do pg_isready -h 127.0.0.1 -U postgres -d postgres && break; sleep 1; done
@@ -124,7 +126,9 @@ deploy-edge-functions:
           # .gitlab-ci.yml is deliberately not listed: a CI-file-only change must
           # never start a production deploy (GitHub listed its own workflow file).
   before_script:
-    - apt-get update -qq && apt-get install -y -qq git curl jq ca-certificates postgresql-client >/dev/null
+    - apt-get update -qq && apt-get install -y -qq git curl jq ca-certificates postgresql-client nodejs python3 unzip >/dev/null
+    # apply-pending-migrations.sh also needs deno, as on GitHub's runner.
+    - curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null && export PATH="$HOME/.deno/bin:$PATH"
     - curl -fsSL https://github.com/supabase/cli/releases/download/v2.105.0/supabase_linux_amd64.tar.gz | tar -xz -C /usr/local/bin supabase
   script:
     - export GITHUB_OUTPUT=/tmp/changed.env BEFORE_SHA="$CI_COMMIT_BEFORE_SHA" HEAD_SHA="$CI_COMMIT_SHA" EVENT_NAME=push
