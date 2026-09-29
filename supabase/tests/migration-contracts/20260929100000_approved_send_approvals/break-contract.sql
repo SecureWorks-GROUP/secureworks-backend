@@ -1,0 +1,1 @@
+DROP TRIGGER approved_send_approvals_guard ON public.approved_send_approvals;

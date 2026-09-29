@@ -386,6 +386,19 @@ import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
+import {
+  approvedSendSealSecret,
+  supabaseApprovedSendStore,
+  supabaseAttachmentReader,
+} from '../_shared/approved_send.ts'
+import { makeGhlCall } from '../_shared/approved_send_sms.ts'
+import {
+  approvedSendCredentialClass,
+  makeForwardEmail,
+  recordSendApprovalAction,
+  sendApprovalStatusAction,
+  sendApprovedAction,
+} from './approved_send_actions.ts'
 import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiActorMissing } from './actor_calls.ts'
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
@@ -9584,6 +9597,67 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             releaseXeroReader: makeSesReleaseXeroReader(client),
           },
         ))
+      // Approved sends (owner ruling 2026-09-29): the owner's recorded approval
+      // for one exact email or SMS. Rules: ../_shared/approved_send.ts. Not on
+      // ROUTINE_ALLOWED_ACTIONS; each door refuses every credential but the
+      // server secrets itself, and recording needs the recorder seat too.
+      case 'record_send_approval':
+      case 'send_approved':
+      case 'send_approval_status': {
+        const approvedSendClass = approvedSendCredentialClass({
+          authMode,
+          xApiKey,
+          bearerToken,
+          serviceKey,
+          agentServerKey,
+          sharedKey: validKey,
+          routineKey,
+        })
+        const approvedSendDeps = {
+          store: supabaseApprovedSendStore(client),
+          readAttachment: supabaseAttachmentReader(
+            client,
+            async (jobId: string) => (await inspectSealedSesJob(client, jobId)).sealed,
+          ),
+          resolveFrom: resolveSmsFromNumber,
+          sealSecret: approvedSendSealSecret(),
+          now: () => new Date(),
+          newId: () => crypto.randomUUID(),
+        }
+        if (action === 'send_approval_status') {
+          if (req.method !== 'GET') return json({ error: 'send_approval_status requires GET' }, 405)
+          const statusResult = await sendApprovalStatusAction(
+            approvedSendDeps,
+            url.searchParams.get('approval_id'),
+            approvedSendClass,
+          )
+          return json(statusResult.body, statusResult.status)
+        }
+        if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+        if (action === 'record_send_approval') {
+          const recorded = await recordSendApprovalAction(
+            approvedSendDeps,
+            {
+              credentialClass: approvedSendClass,
+              actor: requestActor.actor,
+              actorSource: requestActor.source,
+            },
+            body,
+          )
+          return json(recorded.body, recorded.status)
+        }
+        const sent = await sendApprovedAction(
+          {
+            ...approvedSendDeps,
+            ghl: makeGhlCall(GHL_API_TOKEN),
+            locationId: GHL_LOCATION_ID,
+            forwardEmail: makeForwardEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+          },
+          body,
+          { actor: requestActor.actor, credentialClass: approvedSendClass },
+        )
+        return json(sent.body, sent.status)
+      }
       // Ops-visibility ordinary Mail.Send to the work-order mailer (Captain
       // 2026-08-05). One job_id + kind (report|photo) per call so card one can
       // hard-stop before cards 2–4. Defaults dry_run:true — live send only with
