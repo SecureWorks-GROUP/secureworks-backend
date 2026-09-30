@@ -54,7 +54,7 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 //   ── Job Completion Package ──
 //   complete_job         — Mark job complete + GHL stage sync
 //   send_payment_link    — Get Xero online invoice URL + SMS to client (AUTHORISED invoices only — 409 otherwise)
-//   send_acceptance_invoice — Create AUTHORISED deposit invoice + send payment link in one call (Pay Now gated on chargeability)
+//   send_acceptance_invoice — Create AUTHORISED deposit invoice + email the Pay Now link in one call (gated on chargeability; no SMS)
 //   send_review_request  — SMS client with Google review link
 //
 //   ── Crew & Scheduling ──
@@ -393,6 +393,7 @@ import { readJobFreshness } from './job_freshness.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
+import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -12783,8 +12784,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'log_chase': return json(await logChase(client, body))
       case 'resolve_follow_up': return json(await resolveFollowUp(client, body))
       case 'send_chase_sms': return json(await sendChaseSms(client, body))
-      case 'trigger_chase_workflow': return json(await triggerChaseWorkflow(client, body))
-      case 'stop_chase_workflow': return json(await stopChaseWorkflow(client, body))
+      // Automated money messages are off (captain, 30 Sep 2026): debt_autotexts_off.ts.
+      case 'trigger_chase_workflow':
+      case 'stop_chase_workflow': {
+        const refusal = chaseWorkflowRefusal(action)
+        return json(refusal.body, refusal.status)
+      }
       case 'handle_payment_event': return json(await handlePaymentEvent(client, body))
       case 'trigger_xero_sync': return json(await triggerXeroSync())
       case 'ai_analyse_debt_client': return json(await aiAnalyseDebtClient(client, body))
@@ -52361,7 +52366,7 @@ async function sendPaymentLink(client: any, body: any) {
   }
 }
 
-// Acceptance-invoice charge gate. The branded "Pay Now" email/SMS may only go out
+// Acceptance-invoice charge gate. The branded "Pay Now" email may only go out
 // when the Xero invoice actually came back AUTHORISED AND we have a live OnlineInvoice
 // URL. A DRAFT status (or a missing URL) means the link is unpayable — emailing it
 // stranded clients with dead links (INV-0859/0687/0686). Pure so it can be unit-tested
@@ -52370,7 +52375,7 @@ export function _acceptanceInvoiceChargeable(xeroStatus: unknown, paymentUrl: un
   return xeroStatus === 'AUTHORISED' && typeof paymentUrl === 'string' && paymentUrl.length > 0
 }
 
-// ── send_acceptance_invoice: create deposit invoice + send payment link in one call ──
+// ── send_acceptance_invoice: create deposit invoice + email the payment link in one call ──
 // Used by: send-quote /accept (auto), sale.html button, ops dashboard
 async function sendAcceptanceInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
@@ -52521,7 +52526,6 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 
   // Get Xero online invoice URL for payment
   let paymentUrl = ''
-  let smsSent = false
   let brandedEmailSent = false
   try {
     const { accessToken, tenantId } = await getToken(client)
@@ -52658,42 +52662,8 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     }
   }
 
-  // Send SMS via GHL if requested and we have a payment URL
-  if (notifyClient && paymentUrl) {
-    try {
-      let smsContactId = job.ghl_contact_id
-      let smsFirstName = job.client_name?.split(' ')[0] || 'there'
-
-      if (body.job_contact_id) {
-        const { data: jc } = await client.from('job_contacts')
-          .select('ghl_contact_id, client_name')
-          .eq('id', body.job_contact_id)
-          .single()
-        if (jc?.ghl_contact_id) {
-          smsContactId = jc.ghl_contact_id
-          smsFirstName = jc.client_name?.split(' ')[0] || smsFirstName
-        }
-      }
-
-      if (smsContactId) {
-        const smsMessage = `Hi ${smsFirstName}, thanks for accepting your ${job.type || 'project'} quote! Your deposit invoice is ready.\n\nPay online here: ${paymentUrl}\n\nThanks,\nSecureWorks Group`
-
-        const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-        const smsResp = await fetch(ghlUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contactId: smsContactId,
-            message: smsMessage,
-          }),
-        })
-        const smsResult = await smsResp.json()
-        smsSent = smsResult.success || false
-      }
-    } catch (e) {
-      console.log('[send_acceptance_invoice] SMS failed (non-blocking):', (e as Error).message)
-    }
-  }
+  // No Pay Now text: automated money messages are off (captain, 30 Sep 2026;
+  // debt_autotexts_off.ts). The branded email above is the only client send.
 
   // Log combined event
   await client.from('job_events').insert({
@@ -52706,7 +52676,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
       deposit_percent: depositPercent,
       council_fees: councilFees,
       payment_url: paymentUrl,
-      sms_sent: smsSent,
+      sms_sent: false,
       branded_email_sent: brandedEmailSent,
     },
   })
@@ -52747,7 +52717,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     deposit_percent: depositPercent,
     council_fees: councilFees,
     payment_url: paymentUrl,
-    sms_sent: smsSent,
+    sms_sent: false,
     branded_email_sent: brandedEmailSent,
   }
 }
@@ -59330,8 +59300,8 @@ async function classifyInvoice(client: any, body: any) {
     chased_by: operator_email || null,
   })
 
-  // If genuine_debt and we have a GHL contact, trigger the chase workflow
-  // (caller should handle this via separate trigger_chase_workflow call from the UI)
+  // Classifying starts no chase: the GHL chase-overdue workflow is switched off
+  // (captain, 30 Sep 2026; debt_autotexts_off.ts).
 
   return { success: true, classification }
 }
@@ -59649,101 +59619,12 @@ async function sendChaseSms(client: any, body: any) {
   return { success: true, message_id: smsResult.messageId }
 }
 
-async function triggerChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id, overdue_amount, invoice_number, job_number, xero_invoice_id, job_id } = body
-  if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
-  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
-    client,
-    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
-    'trigger_chase_workflow',
-  )
-  if (resolved.job_id) {
-    await assertGhlContactMatchesResolvedJob(
-      client,
-      resolved.job_id,
-      ghl_contact_id,
-      'trigger_chase_workflow',
-    )
-  }
-
-  const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
-
-  // 1. Add chase-overdue tag to contact
-  const tagResp = await fetch(`${ghlBase}?action=add_contact_tag`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contactId: ghl_contact_id, tag: 'chase-overdue' }),
-  })
-  const tagResult = await tagResp.json()
-
-  // 2. Set custom fields with chase context (for GHL workflow SMS templates)
-  try {
-    await fetch(`${ghlBase}?action=update_contact_custom_fields`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contactId: ghl_contact_id,
-        customFields: {
-          overdue_amount: overdue_amount ? String(overdue_amount) : '',
-          overdue_invoice_number: invoice_number || '',
-          overdue_job_number: job_number || '',
-        },
-      }),
-    })
-  } catch (e) {
-    console.log('[ops-api] Custom field update failed (non-blocking):', e)
-  }
-
-  return { success: true, tag_added: tagResult.success }
-}
-
-async function stopChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id, xero_invoice_id, job_id } = body
-  if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
-  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
-    client,
-    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
-    'stop_chase_workflow',
-  )
-  if (resolved.job_id) {
-    await assertGhlContactMatchesResolvedJob(
-      client,
-      resolved.job_id,
-      ghl_contact_id,
-      'stop_chase_workflow',
-    )
-  }
-
-  const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
-
-  // 1. Remove chase-overdue tag
-  const tagResp = await fetch(`${ghlBase}?action=remove_contact_tag`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contactId: ghl_contact_id, tag: 'chase-overdue' }),
-  })
-  const tagResult = await tagResp.json()
-
-  // 2. Clear custom fields
-  try {
-    await fetch(`${ghlBase}?action=update_contact_custom_fields`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contactId: ghl_contact_id,
-        customFields: { overdue_amount: '', overdue_invoice_number: '', overdue_job_number: '' },
-      }),
-    })
-  } catch (e) {
-    console.log('[ops-api] Custom field clear failed (non-blocking):', e)
-  }
-
-  return { success: true, tag_removed: tagResult.success }
-}
-
 // ── Handle payment detection events ──
 // Called when xero sync detects an invoice has been paid (amount_due → 0).
-// Stops chase workflow, sends thank-you SMS, logs to payment_chase_logs.
+// Resolves open follow-ups and logs the payment to payment_chase_logs. It sends
+// no thank-you text and touches no GHL workflow: automated money messages are
+// off (captain, 30 Sep 2026; debt_autotexts_off.ts), and the
+// process-payment-events cron that drove it is unscheduled.
 async function handlePaymentEvent(client: any, body: any) {
   const { xero_contact_id, xero_invoice_id, invoice_number, contact_name, amount_paid, job_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
@@ -59786,10 +59667,10 @@ async function handlePaymentEvent(client: any, body: any) {
 
   const results: string[] = []
 
-  // 1. Resolve GHL contact from contact_matches
+  // 1. Resolve GHL contact from contact_matches (recorded on the log row only)
   let ghlContactId: string | null = null
   const { data: match } = await client.from('contact_matches')
-    .select('ghl_contact_id, phone')
+    .select('ghl_contact_id')
     .eq('xero_contact_id', verifiedXeroContactId)
     .limit(1)
     .maybeSingle()
@@ -59797,21 +59678,7 @@ async function handlePaymentEvent(client: any, body: any) {
     ghlContactId = match.ghl_contact_id
   }
 
-  // 2. Stop chase workflow if GHL contact exists
-  if (ghlContactId) {
-    try {
-      await stopChaseWorkflow(client, {
-        ghl_contact_id: ghlContactId,
-        xero_invoice_id,
-        job_id: verifiedJobId,
-      })
-      results.push('chase_stopped')
-    } catch (e) {
-      console.log(`[ops-api] stopChaseWorkflow failed for ${ghlContactId}:`, e)
-    }
-  }
-
-  // 3. Resolve any unresolved follow-ups for this invoice
+  // 2. Resolve any unresolved follow-ups for this invoice
   const { count: resolvedCount } = await client.from('payment_chase_logs')
     .update({ follow_up_resolved: true })
     .eq('xero_invoice_id', xero_invoice_id)
@@ -59821,7 +59688,7 @@ async function handlePaymentEvent(client: any, body: any) {
     results.push(`resolved_${resolvedCount}_followups`)
   }
 
-  // 4. Log payment received to chase logs
+  // 3. Log payment received to chase logs
   await client.from('payment_chase_logs').insert({
     xero_invoice_id,
     job_id: verifiedJobId,
@@ -59832,24 +59699,6 @@ async function handlePaymentEvent(client: any, body: any) {
     chased_by: 'system',
   })
   results.push('chase_log_created')
-
-  // 5. Send thank-you SMS if we have a GHL contact with a phone
-  if (ghlContactId && match?.phone) {
-    const firstName = (contact_name || '').split(' ')[0] || 'there'
-    const thankYouMsg = `Hi ${firstName}, we've received your payment of $${Math.round(Number(amount_paid) || 0).toLocaleString()} for invoice ${invoice_number}. Thank you! — SecureWorks`
-    try {
-      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      await fetch(ghlUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-        body: JSON.stringify({ contactId: ghlContactId, message: thankYouMsg }),
-      })
-      results.push('thank_you_sms_sent')
-    } catch (e) {
-      console.log(`[ops-api] Thank-you SMS failed for ${ghlContactId}:`, e)
-      results.push('thank_you_sms_failed')
-    }
-  }
 
   return { success: true, invoice_number, contact_name, actions: results }
 }
