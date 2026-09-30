@@ -100,6 +100,38 @@ checked it:
 - MLB INV-1456, which is in dispute;
 - INV-0080, which the desk notes say was overpaid.
 
+### Live check, 2026-09-30 13:36 Perth (captain asked for a connection check)
+
+Read-only, through `sw_list_xero_receivables` (2 pages) and
+`sw_debt_context_coverage`. These call the same `xero_receivables_read.ts`
+module that step 1 builds on.
+
+- **Xero read is sound.**
+  - Both pages came live with `cache_used: false`, ordered by InvoiceID.
+  - 118 unique invoices, no duplicates across pages, all AUTHORISED with
+    `AmountDue > 0`.
+  - `end_of_results_observed: true` on page 2.
+  - Quota left: 58 calls a minute, 2,167 a day.
+- **Open in Xero:** 118 invoices, $154,267.27.
+  - Since 29 Sep: INV-1608 (Emma Clarke, $600) was paid and dropped off.
+  - 7 invoices are new: 3 MLB ($1,170.40) and 4 "materials" invoices,
+    `SWP-...-MAT` / `MAT50`, totalling $42,170.79. Those 4 are INV-1616
+    ($22,094.22), INV-1618 ($8,750.01), INV-1619 ($3,932.06) and INV-1621
+    ($7,394.50).
+  - Every invoice common to both reads kept the same amount.
+- **Debt today** under the rules: 97 invoices, $88,046.15. The materials
+  invoices are excluded until open item 6 is ruled.
+- **Clear Debt's copy:** 112 invoices, $150,683.79.
+  - It holds all 7 new invoices, so the sync works, and every shared amount
+    matches to the cent.
+  - It still lacks the same 6 invoices, $3,583.48 (B7).
+- **Build notes for step 1:**
+  - `pagination.traversal_complete` stays `false` even on the final page. Stop
+    on `end_of_results_observed` / `has_more: false`.
+  - Pages are not a snapshot, so de-duplicate by InvoiceID.
+  - Page 1 is about 260 KB with full line items, so trim it server-side
+    before returning.
+
 Clear Debt's copy was missing 6 open invoices ($3,583.48), because they are
 wrongly marked DELETED. 4 of those are debt: INV-0938, INV-0352, INV-0704 and
 INV-0080. The desk reads Xero directly, so it sees them.
@@ -142,6 +174,9 @@ The rules are applied in order. They are the tested core of step 1.
      payment, meaning any PAID invoice on the job or `jobs.deposit_at` set.
      The one exception is INV-1477 (Perth Zoo), which the captain ruled is
      really a deposit.
+   - `MAT` / `MAT50` means a materials invoice (first seen 2026-09-30). It is
+     open item 6. Until that is ruled, treat it like `PROG`: debt only after
+     the job's first payment.
    - `VAR`, or the line "Extra Labour and Material" with no reference, means a
      variation. Debt.
    - `DEP`, or a line starting "Deposit", means a deposit. **Not debt.** The
@@ -216,7 +251,8 @@ The schedules:
 - **Builders:**
   - after 14 days, the invoice goes on a statement;
   - statements go every Monday while unpaid;
-  - proposed: a call at 30 days overdue (open item 3).
+  - Shaun calls any builder invoice 30 days past its due date (decided,
+    round 5).
 - **Deposits and before-work invoices:** one friendly reminder about the job.
   After 60 days with no payment, no reply and no job progress, the deposit
   goes on the weekly cancel list. Shaun approves the list, and the void
@@ -391,13 +427,15 @@ the captain rules otherwise:
 
 1. Rectification: count it, but no chase until the fix is done.
 2. The launch backlog starts at the friendly text.
-3. Builders: 14 days from the invoice date, Monday statements, a call at 30
-   days overdue, the same rule for all builders.
+3. Builders: 14 days from the invoice date, Monday statements, the same rule
+   for all builders. (The call at 30 days overdue is already decided.)
 4. Builder accounts emails are suggested from remittances; Shaun confirms.
 5. The unclear four stay out until checked. A half-of-quote invoice on a
    finished job counts once its other half is paid. The planning fee goes to
    the deposits list.
-6. Jan gets a morning text approved by Shaun; Shaun records the outcomes.
-7. Go-live is the normal GitHub route: reviewed PRs, merged on Shaun's
+6. Materials invoices (MAT / MAT50) are treated like progress claims: debt
+   once the job has had its first payment, otherwise the deposits list.
+7. Jan gets a morning text approved by Shaun; Shaun records the outcomes.
+8. Go-live is the normal GitHub route: reviewed PRs, merged on Shaun's
    approval, and the backend deploy lane. Sends only after step 0 and Shaun's
    go.

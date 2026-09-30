@@ -126,6 +126,14 @@ door.
 Reading: builders get 14 days, then a statement. Exactly when the 14 days
 start is still open (see below).
 
+**Builder call at 30 days (round 5, plan review in Lavish, 2026-09-30).**
+Written against the proposed "Call (proposal)" step on the builder schedule.
+
+> "`yes"
+
+Reading: any builder invoice 30 days past its due date also gets a call from
+Shaun, alongside the Monday statements.
+
 **Promises to pay (Q14, round 3).**
 
 > "yes as recommended (record amount + date; missed promise returns to top next day)"
@@ -184,17 +192,21 @@ The six are:
    is outstanding? (Count them, but send no chase until the fix is signed off.)
 2. **Clients already overdue on launch day.** (Everyone starts at the
    friendly text and moves one step a day.)
-3. **Builder 14-day clock.** (Count 14 days from the invoice date. Send a
-   statement every Monday. Call at 30 days overdue. The same rule applies to
-   every builder.)
+3. **Builder 14-day clock.** The call at 30 days overdue is decided (round
+   5). (Count the 14 days from the invoice date. Send a statement every
+   Monday. The same rule applies to every builder.)
 4. **Builder accounts email addresses.** (We suggest them from past
    remittances, and Shaun confirms.)
 5. **The four unclear invoices, $3,425.68.** (Keep them out until checked.
    An old "50% of quote" invoice on a finished job counts once its other half
    is paid. The planning fee goes on the deposits list.)
-6. **How Jan gets his list.** (A morning text to Jan, approved by Shaun.
+6. **"Materials" invoices (references ending MAT / MAT50), new on
+   2026-09-30:** INV-1616, INV-1618, INV-1619 and INV-1621, $42,170.79.
+   (Treat them like a progress claim: debt once the job has had its first
+   payment, otherwise the deposits list with one friendly reminder.)
+7. **How Jan gets his list.** (A morning text to Jan, approved by Shaun.
    Shaun records what Jan reports.)
-7. **How the desk goes live.** GitHub is back (captain, chat, 2026-09-30).
+8. **How the desk goes live.** GitHub is back (captain, chat, 2026-09-30).
    (The normal route: reviewed pull requests to the backend and the Ops
    dashboard, each merged on Shaun's approval. The backend deploy lane applies
    the database change first. The send button stays off until the switch-off
