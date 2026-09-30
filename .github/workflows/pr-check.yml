@@ -241,6 +241,16 @@ jobs:
             supabase/functions/ops-api/insurance_repairs_board_test.ts \
             supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
 
+      # Automated money messages are off (captain, 30 Sep 2026). Drives the
+      # real ops-api and daily-digest request handlers with every database,
+      # Xero and GHL call answered by a fetch spy. Same --no-check reason as
+      # above.
+      - name: Test automated money messages stay off
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ops-api/debt_autotexts_off_test.ts \
+            supabase/functions/daily-digest/deposit_autotexts_off_test.ts
+
       - name: Test edge deploy workflow classification
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh
