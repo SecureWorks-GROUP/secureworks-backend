@@ -500,6 +500,7 @@ import {
   XeroReceivablesReadError,
   createXeroReadGet,
 } from './xero_receivables_read.ts'
+import { createSupabaseDebtBookStore, DebtBookError, readDebtBook } from './debt_book.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
 import { insuranceReadAction } from './insurance_read_handlers.ts'
 import {
@@ -7602,6 +7603,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
           // The existing credential helper can include a provider error body in
           // its exception. Do not reflect or log credentials through this read door.
+          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
+        }
+      }
+      // ── Debt book (plan step 1, docs/debt-book/PLAN.md) ──
+      // Read-only: the open book live from Xero through xero_receivables_read.ts, the
+      // captain's rules (debt_book_rules.ts), and a copy-vs-Xero check. Writes nothing.
+      case 'debt_book': {
+        if (req.method !== 'GET') {
+          return json({ ok: false, error: 'debt_book requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+        }
+        try {
+          return json(await readDebtBook(client, url.searchParams, {
+            getToken,
+            xeroGet: xeroReadGet,
+            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
+          }))
+        } catch (error) {
+          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
+            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+          }
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
         }
       }
