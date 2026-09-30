@@ -2721,8 +2721,29 @@ function reqWithApiKey(key: string): Request {
 
 const FAKE_SERVICE_KEY = "injected-service-key-value-aaa"; // the env-injected one
 const FAKE_API_KEY = "sw-api-key-bbb";
+const FAKE_SECRET_KEY = "sb_secret_fx_monitor";
 
-Deno.test("auth [FIX]: a Bearer JWT with role=service_role is ACCEPTED (the pg_cron _sw_service_key() path)", () => {
+// The platform's answer for a legacy key: accepted while the legacy keys are on
+// and the token is genuine; rejected once they are switched off or it is forged.
+function authOpts(verdict: "accepted" | "rejected" | "unknown") {
+  const probed: string[] = [];
+  return {
+    probed,
+    options: {
+      env: (name: string) =>
+        ({
+          SUPABASE_SERVICE_ROLE_KEY: FAKE_SERVICE_KEY,
+          SUPABASE_SECRET_KEYS: JSON.stringify({ cron: FAKE_SECRET_KEY }),
+        } as Record<string, string>)[name],
+      probe: (token: string) => {
+        probed.push(token);
+        return Promise.resolve(verdict);
+      },
+    },
+  };
+}
+
+Deno.test("auth [FIX]: a Bearer JWT with role=service_role is ACCEPTED while the platform vouches for it (the pg_cron _sw_service_key() path)", async () => {
   // A cron-style service-role JWT whose raw value differs from the injected key.
   const cronJwt = fakeJwt({
     role: "service_role",
@@ -2734,59 +2755,89 @@ Deno.test("auth [FIX]: a Bearer JWT with role=service_role is ACCEPTED (the pg_c
     "fixture must NOT byte-equal the injected key",
   );
   assertEquals(_decodeJwtRole(cronJwt), "service_role");
-  assert(_isAuthorized(reqWithBearer(cronJwt), FAKE_SERVICE_KEY, FAKE_API_KEY));
+  const a = authOpts("accepted");
+  assert(await _isAuthorized(reqWithBearer(cronJwt), FAKE_API_KEY, a.options));
+  assertEquals(a.probed, [cronJwt]);
 });
 
-Deno.test("auth [FIX]: a Bearer JWT with role=anon is REJECTED", () => {
+Deno.test("auth [TRAP]: a forged role=service_role JWT is REJECTED once nothing but our code checks it", async () => {
+  // verify_jwt is off: the claim alone proves nothing, the platform must vouch.
+  const forged = fakeJwt({ role: "service_role" });
+  assertEquals(
+    await _isAuthorized(reqWithBearer(forged), FAKE_API_KEY, authOpts("rejected").options),
+    false,
+  );
+  assertEquals(
+    await _isAuthorized(reqWithBearer(forged), FAKE_API_KEY, authOpts("unknown").options),
+    false,
+  );
+});
+
+Deno.test("auth [FIX]: a Bearer JWT with role=anon is REJECTED", async () => {
   const anonJwt = fakeJwt({ role: "anon", iss: "supabase", ref: "proj" });
   assertEquals(_decodeJwtRole(anonJwt), "anon");
   assertEquals(
-    _isAuthorized(reqWithBearer(anonJwt), FAKE_SERVICE_KEY, FAKE_API_KEY),
+    await _isAuthorized(reqWithBearer(anonJwt), FAKE_API_KEY, authOpts("accepted").options),
     false,
   );
 });
 
-Deno.test("auth [FIX]: x-api-key === SW_API_KEY is ACCEPTED", () => {
+Deno.test("auth [FIX]: x-api-key === SW_API_KEY is ACCEPTED", async () => {
   assert(
-    _isAuthorized(reqWithApiKey(FAKE_API_KEY), FAKE_SERVICE_KEY, FAKE_API_KEY),
+    await _isAuthorized(reqWithApiKey(FAKE_API_KEY), FAKE_API_KEY, authOpts("rejected").options),
   );
 });
 
-Deno.test("auth [FIX]: a wrong x-api-key is REJECTED", () => {
+Deno.test("auth [FIX]: a wrong x-api-key is REJECTED", async () => {
   assertEquals(
-    _isAuthorized(reqWithApiKey("not-the-key"), FAKE_SERVICE_KEY, FAKE_API_KEY),
+    await _isAuthorized(reqWithApiKey("not-the-key"), FAKE_API_KEY, authOpts("accepted").options),
     false,
   );
 });
 
-Deno.test("auth [FIX]: a garbage (non-JWT) Bearer is REJECTED and decode returns null (no throw)", () => {
+Deno.test("auth [FIX]: a garbage (non-JWT) Bearer is REJECTED and decode returns null (no throw)", async () => {
   assertEquals(_decodeJwtRole("not.a.jwt"), null); // 3 parts but middle is not base64 JSON
   assertEquals(_decodeJwtRole("totally-garbage"), null); // not even 3 parts
   assertEquals(
-    _isAuthorized(
+    await _isAuthorized(
       reqWithBearer("totally-garbage"),
-      FAKE_SERVICE_KEY,
       FAKE_API_KEY,
+      authOpts("accepted").options,
     ),
     false,
   );
 });
 
-Deno.test("auth [FIX]: the exact injected service key as Bearer is still ACCEPTED (fast path kept)", () => {
+Deno.test("auth [FIX]: the exact injected service key as Bearer is still ACCEPTED while legacy keys are on", async () => {
   assert(
-    _isAuthorized(
+    await _isAuthorized(
       reqWithBearer(FAKE_SERVICE_KEY),
-      FAKE_SERVICE_KEY,
       FAKE_API_KEY,
+      authOpts("accepted").options,
     ),
   );
 });
 
-Deno.test("auth [FIX]: no credentials at all is REJECTED", () => {
+Deno.test("auth [STEP4]: the injected service key is REJECTED once the platform switches legacy keys off", async () => {
+  assertEquals(
+    await _isAuthorized(reqWithBearer(FAKE_SERVICE_KEY), FAKE_API_KEY, authOpts("rejected").options),
+    false,
+  );
+});
+
+Deno.test("auth [STEP4]: a new secret key in the apikey header is ACCEPTED", async () => {
+  const req = new Request("https://x/functions/v1/monitor-ses-makesafes", {
+    method: "POST",
+    headers: { apikey: FAKE_SECRET_KEY },
+  });
+  assert(await _isAuthorized(req, FAKE_API_KEY, authOpts("rejected").options));
+});
+
+Deno.test("auth [FIX]: no credentials at all is REJECTED", async () => {
   const bare = new Request("https://x/functions/v1/monitor-ses-makesafes", {
     method: "POST",
   });
-  assertEquals(_isAuthorized(bare, FAKE_SERVICE_KEY, FAKE_API_KEY), false);
+  assertEquals(await _isAuthorized(bare, FAKE_API_KEY, authOpts("accepted").options), false);
 });
 
 // ════════════════════════════════════════════════════════════

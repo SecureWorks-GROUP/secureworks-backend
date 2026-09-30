@@ -499,7 +499,7 @@ opposite, and the discriminator is per job, at the forge:
 - **Registered, never ran** — `gh-axi run list --branch <b>` returns a run, and
   the job has `steps: []`, `runner_name: ""`, and ~15m00s between `started_at`
   and `completed_at` with `conclusion: cancelled`. That 15 minutes is GitHub's
-  queue timeout, not a workflow timeout (`deno-check` sets no `timeout-minutes`) —
+  queue timeout, not a workflow timeout (this repo sets no `timeout-minutes`) —
   it is starvation. **`gh-axi run rerun <id> --failed` fixes it**, on the same
   head SHA, no new commit. Verified on PRs #629/#630: the re-run took a runner in
   under 2s and both jobs went green in ~35s.

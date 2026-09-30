@@ -14,7 +14,9 @@ import { sourceTime } from "../_shared/source_time.ts";
 //   2. Direct admin invoke (curl) for backfilling specific calls.
 //
 // Authorization:
-//   - service_role only (verify_jwt: true)
+//   - service_role only, checked in code (deployed --no-verify-jwt; runbook
+//     Step 4 D): a new sb_secret_ key, or a service-role JWT while Supabase
+//     still accepts it. See ../_shared/caller_gate.ts.
 //   - In addition: gated on `evidence_transcript_capture` feature flag.
 //     When flag is OFF, returns { ok: false, reason: 'flag_off' } and
 //     does nothing. Marnin flips the flag after the controlled proof
@@ -42,6 +44,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { authorizeServerCaller } from '../_shared/caller_gate.ts'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
@@ -90,6 +93,9 @@ async function sha256Hex(text: string): Promise<string> {
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405)
+  if (!(await authorizeServerCaller(req, { allowUserSession: false }))) {
+    return jsonResponse({ error: 'Unauthorized' }, 401)
+  }
 
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
   const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!

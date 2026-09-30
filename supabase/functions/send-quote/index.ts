@@ -29,6 +29,7 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createOrgConfigXeroCooldownStore, createXeroCooldownFetch, XeroCooldownError, xeroAppKey, xeroRateLimitDetails, xeroRateLimitError } from '../_shared/xero_cooldown.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { XeroQuoteWriteError, xeroQuoteFailureWarning } from './xero_quote_outcome.ts'
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
 import { buildMinimalReleaseManifest } from '../_shared/release_packet/build_minimal_manifest.ts'
@@ -710,7 +711,8 @@ serve(async (req: Request) => {
         path,
         corsHeaders,
         swApiKey: Deno.env.get('SW_API_KEY'),
-        serviceRoleKey: Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'),
+        // A new secret key, or the legacy key only while Supabase still accepts it.
+        serviceRoleKey: (await verifyServiceCredential(req.headers))?.token ?? null,
       })
       if (decided.kind === 'reject') return decided.response
       sendAuthMode = decided.mode

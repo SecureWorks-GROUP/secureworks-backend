@@ -1203,6 +1203,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -1388,7 +1389,12 @@ async function recordFinanceReviewEmail(
     const jobCostReportUrls: Record<string, string> = {}
     for (const l of flaggedLines) {
       if (l.jobId && !jobCostReportUrls[l.jobId]) {
-        jobCostReportUrls[l.jobId] = await buildCostReportLink(SUPABASE_URL, l.jobId)
+        try {
+          jobCostReportUrls[l.jobId] = await buildCostReportLink(SUPABASE_URL, l.jobId)
+        } catch (e) {
+          // No link secret configured: send the review without the link.
+          console.error('[finance-review] cost report link not minted:', (e as Error)?.message)
+        }
       }
     }
     const email = buildFinanceReviewEmail({
@@ -4046,9 +4052,14 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
 // REQUEST HANDLER
 // ════════════════════════════════════════════════════════════
 
+// `serviceKey` in the two helpers below is the service credential this request
+// presented and that verifyServiceCredential (../_shared/service_credential.ts)
+// accepted: a new sb_secret_ key, or the legacy key only while Supabase still
+// accepts it. Never the raw env value. A new secret key arrives as `apikey`.
 export function _resolveOpsApiAuthIntent(input: {
   xApiKey: string | null
   bearerToken: string | null
+  apiKeyHeader?: string | null
   validKey?: string | null
   serviceKey?: string | null
   routineKey?: string | null
@@ -4058,6 +4069,7 @@ export function _resolveOpsApiAuthIntent(input: {
   const {
     xApiKey,
     bearerToken,
+    apiKeyHeader,
     validKey,
     serviceKey,
     routineKey,
@@ -4067,7 +4079,7 @@ export function _resolveOpsApiAuthIntent(input: {
   // The service-role key is the existing non-browser server credential. Keep it
   // ahead of browser Bearer preference so an agent request cannot be downgraded
   // when an unrelated Authorization header is also present.
-  if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey)) return 'api_key'
+  if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey || apiKeyHeader === serviceKey)) return 'api_key'
   // Captain 2026-08-14: the distinct helper pass is a full inside pass, not
   // look-only. Classify it as the server api_key class so existing operator
   // handlers run. Collision with the public, routine, or service secret is
@@ -4300,12 +4312,13 @@ export function _opsApiCallerIsStaffOperator(
 export function _opsApiServerSecretPresented(input: {
   xApiKey: string | null
   bearerToken: string | null
+  apiKeyHeader?: string | null
   sharedKey?: string | null
   serviceKey?: string | null
   agentServerKey?: string | null
   routineKey?: string | null
 }): boolean {
-  const { xApiKey, bearerToken, sharedKey, serviceKey, agentServerKey, routineKey } = input
+  const { xApiKey, bearerToken, apiKeyHeader, sharedKey, serviceKey, agentServerKey, routineKey } = input
   const matches = (secret?: string | null) =>
     !!secret &&
     secret !== sharedKey &&
@@ -4313,6 +4326,7 @@ export function _opsApiServerSecretPresented(input: {
     (xApiKey === secret || bearerToken === secret)
   // Fail closed if the public/shared key and a server-only credential collide.
   if (matches(serviceKey)) return true
+  if (!!serviceKey && serviceKey !== sharedKey && serviceKey !== routineKey && apiKeyHeader === serviceKey) return true
   if (matches(agentServerKey) && agentServerKey !== serviceKey) return true
   return false
 }
@@ -4879,7 +4893,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   // may be UNSET until provisioned, so we only ever match it when it is non-empty;
   // an unset routine key can never classify any caller as routine.
   const validKey = Deno.env.get('SW_API_KEY')
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  // The service credential this request presented, if Supabase-issued and live
+  // (a new secret key, or the legacy key only while Supabase still accepts it).
+  const serviceKey = (await verifyServiceCredential(req.headers))?.token ?? null
+  const apiKeyHeader = req.headers.get('apikey')
   const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
   const routineKey = routineKeyEnv && routineKeyEnv.length > 0 ? routineKeyEnv : null
   const agentServerKeyEnv = Deno.env.get('OPS_AGENT_SERVER_KEY')
@@ -4897,6 +4914,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   const authIntent = _resolveOpsApiAuthIntent({
     xApiKey,
     bearerToken,
+    apiKeyHeader,
     validKey,
     serviceKey,
     routineKey,
@@ -4906,6 +4924,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   const serverSecretPresented = _opsApiServerSecretPresented({
     xApiKey,
     bearerToken,
+    apiKeyHeader,
     sharedKey: validKey,
     serviceKey,
     agentServerKey,
@@ -5225,7 +5244,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           salesPerformanceStore(performanceClient), action, req.method, url.searchParams, body, {
             mode: authMode,
             serviceRole: !!serviceKey && serviceKey !== validKey && serviceKey !== routineKey &&
-              serviceKey !== agentServerKey && (xApiKey === serviceKey || bearerToken === serviceKey),
+              serviceKey !== agentServerKey &&
+              (xApiKey === serviceKey || bearerToken === serviceKey || apiKeyHeader === serviceKey),
             staff: _opsApiCallerIsStaffOperator(authMode, authUser),
             orgId: authUser?.orgId,
             userId: authUser?.id,

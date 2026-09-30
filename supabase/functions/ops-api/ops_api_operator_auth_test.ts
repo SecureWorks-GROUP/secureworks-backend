@@ -1005,3 +1005,48 @@ Deno.test("sales performance actions retain the staff front door and no routine/
     assertEquals(LEAD_INSTALLER_READ_ACTIONS.has(action), false);
   }
 });
+
+Deno.test("a verified service credential in the apikey header is the server caller", () => {
+  const secret = "sb_secret_fx_verified";
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: secret,
+      validKey: "browser-shared-key",
+      serviceKey: secret,
+    }),
+    "api_key",
+  );
+  assertEquals(
+    _opsApiServerSecretPresented({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: secret,
+      sharedKey: "browser-shared-key",
+      serviceKey: secret,
+    }),
+    true,
+  );
+  // A browser's public apikey with no verified service credential is not.
+  assertEquals(
+    _opsApiServerSecretPresented({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: "sb_publishable_fixture",
+      sharedKey: "browser-shared-key",
+      serviceKey: null,
+    }),
+    false,
+  );
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: "sb_publishable_fixture",
+      validKey: "browser-shared-key",
+      serviceKey: null,
+    }),
+    "none",
+  );
+});

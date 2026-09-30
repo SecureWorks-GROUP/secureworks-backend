@@ -6,7 +6,10 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 // Handles Xero Custom Connection OAuth (client_credentials),
 // incremental invoice sync, P&L report sync, and contact matching.
 //
-// Deploy: supabase functions deploy xero-sync
+// Deploy: supabase functions deploy xero-sync --no-verify-jwt
+//   Callers are checked in code (runbook Step 4 D, ../_shared/caller_gate.ts):
+//   a service credential (cron's Vault key, other functions) or a signed-in
+//   user session. The public anon key alone no longer gets in.
 // Secrets: XERO_CLIENT_ID, XERO_CLIENT_SECRET
 //
 // Actions (via ?action= query param):
@@ -33,6 +36,7 @@ import { incrementalModifiedSince } from './sync_window.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { authorizeServerCaller } from '../_shared/caller_gate.ts'
 import {
   buildMaterialsFactRow,
   buildQueueRow,
@@ -182,6 +186,14 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
 
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
+  const callerAllowed = await authorizeServerCaller(req, {
+    allowUserSession: true,
+    isUserSession: async (jwt) => {
+      const { data, error } = await createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY).auth.getUser(jwt)
+      return !error && !!data?.user
+    },
+  })
+  if (!callerAllowed) return json({ error: 'Unauthorized' }, 401)
 
   const url = new URL(req.url)
   const action = url.searchParams.get('action') || ''

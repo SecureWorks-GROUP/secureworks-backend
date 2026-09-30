@@ -277,3 +277,55 @@ Deno.test("the daily digest sends no Pay Now deposit chaser and keeps the ops an
       }),
   );
 });
+
+// Runbook Step 4 (legacy service-role key removal) found the house-plans
+// reminders naming an undeclared SERVICE_ROLE_KEY. That threw before any send,
+// so no house-plans reminder has ever reached a client. Removing the undeclared
+// name must not quietly switch those client messages on; turning them on is a
+// separate decision.
+const PLANS_DAY5_JOB = "55555555-0000-4000-8000-000000000005";
+const PLANS_DAY8_JOB = "66666666-0000-4000-8000-000000000006";
+
+Deno.test("stale_followup sends no house-plans reminder to clients", async () => {
+  const handle = await handler();
+  const plansRow = (id: string, days: number, client_email: string | null) => ({
+    id: `cs-${id}`,
+    job_id: id,
+    created_at: daysAgo(days),
+    steps: [{ status: "pending" }],
+    jobs: {
+      job_number: "SWP-26000",
+      client_name: "Pat Plans",
+      client_phone: "+61400000002",
+      client_email,
+      site_address: "1 Test St",
+      type: "patio",
+    },
+  });
+  const rows: Rows = (url) => {
+    if (table(url) === "council_submissions") {
+      return [
+        plansRow(PLANS_DAY5_JOB, 5, null),
+        plansRow(PLANS_DAY8_JOB, 8, "pat@example.invalid"),
+      ];
+    }
+    return null;
+  };
+
+  await withEnv(
+    BASE_ENV,
+    () =>
+      withFetchSpy(rows, async (calls) => {
+        const res = await handle(serviceRequest("stale_followup"));
+        const body = await res.json();
+        assertEquals(res.status, 200, JSON.stringify(body));
+        assertEquals(body.plans_followups, 0);
+        assertEquals(
+          opsApiCalls(calls).filter((c) =>
+            String(c.body?.comms_trigger || "").startsWith("plans_reminder")
+          ),
+          [],
+        );
+      }),
+  );
+});

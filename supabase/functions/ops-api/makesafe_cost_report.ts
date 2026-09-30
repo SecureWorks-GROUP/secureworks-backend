@@ -37,12 +37,13 @@ function getEnv(name: string): string {
   return g.process?.env?.[name] || "";
 }
 
-// Secret for the link token. A dedicated MAKESAFE_REPORT_SECRET is preferred;
-// falls back to server-only keys that always exist so the link works out of the
-// box and can be hardened later by setting the dedicated secret.
+// Secret for the link token: a dedicated MAKESAFE_REPORT_SECRET, else SW_API_KEY.
+// Never the service-role key (it is being retired, runbook Step 4 in
+// docs/evidence/legacy-service-role-key-removal-2026-09-30.md, and links signed
+// with it would break when it changes). With neither set this returns "" and no
+// link is minted or accepted, rather than signing with a public constant.
 export function costReportSecret(): string {
-  return getEnv("MAKESAFE_REPORT_SECRET") || getEnv("SW_API_KEY") ||
-    getEnv("SUPABASE_SERVICE_ROLE_KEY") || "makesafe-cost-report-dev-secret";
+  return getEnv("MAKESAFE_REPORT_SECRET") || getEnv("SW_API_KEY") || "";
 }
 
 async function hmacHex(message: string, secret: string): Promise<string> {
@@ -64,6 +65,9 @@ export function costReportToken(
   jobId: string,
   secret: string = costReportSecret(),
 ): Promise<string> {
+  if (!secret) {
+    return Promise.reject(new Error("cost report link secret not configured: set MAKESAFE_REPORT_SECRET or SW_API_KEY"));
+  }
   return hmacHex(`${MAKESAFE_COST_REPORT_ACTION}:${jobId}`, secret);
 }
 
@@ -72,7 +76,7 @@ export async function verifyCostReportToken(
   token: string,
   secret: string = costReportSecret(),
 ): Promise<boolean> {
-  if (!jobId || !token) return false;
+  if (!jobId || !token || !secret) return false;
   const expected = await costReportToken(jobId, secret);
   if (expected.length !== token.length) return false;
   let diff = 0;
