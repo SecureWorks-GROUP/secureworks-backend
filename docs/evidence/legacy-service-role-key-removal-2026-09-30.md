@@ -80,9 +80,10 @@ change until Step 4 (below), when they all move together.
   never re-applied, are on no hash-pinned exclusion list, and ledger checksum
   drift is advisory. No test reads them.
 - `scripts/check-no-committed-service-keys.sh` fails when any tracked file holds
-  a JWT whose role is `service_role`, or an `sb_secret_` key. It runs on every
-  PR (`pr-check.yml`, with its own test) and works as a pre-commit hook with
-  `--cached`. It prints file, line and fingerprint, never the key.
+  a JWT whose role is `service_role`, or an `sb_secret_` key. It runs, with its
+  own test, on every PR that `pr-check.yml`'s `paths:` filter admits (which
+  includes the browser-key files Step G edits), and works as a pre-commit hook
+  with `--cached`. It prints file, line and fingerprint, never the key.
 - Git history still has the key and is deliberately not rewritten; rewriting
   history would disrupt every clone, and Step 4 makes the old copy worthless.
 
