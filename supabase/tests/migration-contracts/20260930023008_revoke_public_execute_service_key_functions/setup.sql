@@ -1,9 +1,9 @@
--- Minimal pre-migration surface: the Supabase API roles, a Vault stand-in, a
--- recording pg_net stand-in, the fail-closed accessor from 20260731081411 and
--- the nine functions in their production grant state (EXECUTE to PUBLIC plus
--- the anon/authenticated/service_role default-privilege grants).
+-- Minimal pre-migration surface: the Supabase API roles and the nine
+-- functions in their production grant state (EXECUTE to PUBLIC plus the
+-- anon/authenticated/service_role default-privilege grants). The Vault,
+-- pg_net and public.sw_service_key() stand-ins live in contract.sql inside a
+-- rolled-back transaction, because every case shares this database.
 -- This is test infrastructure, not a replacement for the production schema.
--- The Vault value is a fixture shaped like a JWT, not a key.
 
 DO $$
 DECLARE
@@ -17,63 +17,6 @@ BEGIN
 END $$;
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-
-CREATE SCHEMA vault;
-CREATE TABLE vault.decrypted_secrets (
-  name text PRIMARY KEY,
-  decrypted_secret text
-);
-INSERT INTO vault.decrypted_secrets (name, decrypted_secret)
-VALUES ('service_role_key', 'eyJmaXh0dXJl.bm90LWEta2V5.Y29udHJhY3Q');
-
-CREATE SCHEMA net;
-CREATE TABLE net.contract_calls (
-  id bigserial PRIMARY KEY,
-  url text NOT NULL,
-  headers jsonb NOT NULL,
-  body jsonb NOT NULL
-);
-CREATE FUNCTION net.http_post(
-  url text,
-  body jsonb DEFAULT '{}'::jsonb,
-  params jsonb DEFAULT '{}'::jsonb,
-  headers jsonb DEFAULT '{}'::jsonb,
-  timeout_milliseconds integer DEFAULT 5000
-) RETURNS bigint AS $$
-  INSERT INTO net.contract_calls (url, headers, body)
-  VALUES (url, headers, body)
-  RETURNING id;
-$$ LANGUAGE sql;
-
-CREATE OR REPLACE FUNCTION public.sw_service_key() RETURNS text AS $$
-DECLARE
-  v_key text;
-BEGIN
-  SELECT regexp_replace(decrypted_secret, '\s', '', 'g')
-    INTO v_key
-    FROM vault.decrypted_secrets
-   WHERE name = 'service_role_key'
-   LIMIT 1;
-
-  IF v_key IS NULL OR v_key = '' THEN
-    RAISE EXCEPTION
-      'sw_service_key: vault secret "service_role_key" is missing or empty';
-  END IF;
-
-  IF v_key !~ '^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$' THEN
-    RAISE EXCEPTION
-      'sw_service_key: vault secret "service_role_key" is not a well-formed JWT';
-  END IF;
-
-  RETURN v_key;
-END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER
-   SET search_path = public, pg_temp;
-
-REVOKE ALL ON FUNCTION public.sw_service_key() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.sw_service_key() FROM anon;
-REVOKE ALL ON FUNCTION public.sw_service_key() FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.sw_service_key() TO postgres;
 
 -- Production shape: a literal returned by an IMMUTABLE function.
 CREATE OR REPLACE FUNCTION public._sw_service_key() RETURNS text AS $$
