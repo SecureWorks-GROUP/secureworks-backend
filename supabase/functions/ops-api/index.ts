@@ -4056,12 +4056,15 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
 // presented and that verifyServiceCredential (../_shared/service_credential.ts)
 // accepted: a new sb_secret_ key, or the legacy key only while Supabase still
 // accepts it. Never the raw env value. A new secret key arrives as `apikey`.
+// `serviceKeyEnv` is the env SUPABASE_SERVICE_ROLE_KEY, used only so an agent
+// key that collides with it is refused.
 export function _resolveOpsApiAuthIntent(input: {
   xApiKey: string | null
   bearerToken: string | null
   apiKeyHeader?: string | null
   validKey?: string | null
   serviceKey?: string | null
+  serviceKeyEnv?: string | null
   routineKey?: string | null
   agentServerKey?: string | null
   preferBearerOverApiKey?: boolean
@@ -4072,6 +4075,7 @@ export function _resolveOpsApiAuthIntent(input: {
     apiKeyHeader,
     validKey,
     serviceKey,
+    serviceKeyEnv,
     routineKey,
     agentServerKey,
     preferBearerOverApiKey,
@@ -4087,7 +4091,8 @@ export function _resolveOpsApiAuthIntent(input: {
   const agentServerKeyIsDistinct = !!agentServerKey &&
     agentServerKey !== validKey &&
     agentServerKey !== routineKey &&
-    agentServerKey !== serviceKey
+    agentServerKey !== serviceKey &&
+    agentServerKey !== serviceKeyEnv
   if (
     agentServerKeyIsDistinct &&
     (xApiKey === agentServerKey || bearerToken === agentServerKey)
@@ -4315,10 +4320,11 @@ export function _opsApiServerSecretPresented(input: {
   apiKeyHeader?: string | null
   sharedKey?: string | null
   serviceKey?: string | null
+  serviceKeyEnv?: string | null
   agentServerKey?: string | null
   routineKey?: string | null
 }): boolean {
-  const { xApiKey, bearerToken, apiKeyHeader, sharedKey, serviceKey, agentServerKey, routineKey } = input
+  const { xApiKey, bearerToken, apiKeyHeader, sharedKey, serviceKey, serviceKeyEnv, agentServerKey, routineKey } = input
   const matches = (secret?: string | null) =>
     !!secret &&
     secret !== sharedKey &&
@@ -4327,7 +4333,7 @@ export function _opsApiServerSecretPresented(input: {
   // Fail closed if the public/shared key and a server-only credential collide.
   if (matches(serviceKey)) return true
   if (!!serviceKey && serviceKey !== sharedKey && serviceKey !== routineKey && apiKeyHeader === serviceKey) return true
-  if (matches(agentServerKey) && agentServerKey !== serviceKey) return true
+  if (matches(agentServerKey) && agentServerKey !== serviceKey && agentServerKey !== serviceKeyEnv) return true
   return false
 }
 
@@ -4896,6 +4902,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   // The service credential this request presented, if Supabase-issued and live
   // (a new secret key, or the legacy key only while Supabase still accepts it).
   const serviceKey = (await verifyServiceCredential(req.headers))?.token ?? null
+  const serviceKeyEnv = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || null
   const apiKeyHeader = req.headers.get('apikey')
   const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
   const routineKey = routineKeyEnv && routineKeyEnv.length > 0 ? routineKeyEnv : null
@@ -4917,6 +4924,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     apiKeyHeader,
     validKey,
     serviceKey,
+    serviceKeyEnv,
     routineKey,
     agentServerKey,
     preferBearerOverApiKey: preferBearerForSignedCaller,
@@ -4927,6 +4935,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
     apiKeyHeader,
     sharedKey: validKey,
     serviceKey,
+    serviceKeyEnv,
     agentServerKey,
     routineKey,
   })
@@ -5244,7 +5253,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           salesPerformanceStore(performanceClient), action, req.method, url.searchParams, body, {
             mode: authMode,
             serviceRole: !!serviceKey && serviceKey !== validKey && serviceKey !== routineKey &&
-              serviceKey !== agentServerKey &&
+              serviceKey !== agentServerKey && (!agentServerKey || agentServerKey !== serviceKeyEnv) &&
               (xApiKey === serviceKey || bearerToken === serviceKey || apiKeyHeader === serviceKey),
             staff: _opsApiCallerIsStaffOperator(authMode, authUser),
             orgId: authUser?.orgId,

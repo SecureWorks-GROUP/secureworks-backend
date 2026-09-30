@@ -411,13 +411,11 @@ jobs:
 
       # Legacy service-role key retirement, runbook Step 4
       # (docs/evidence/legacy-service-role-key-removal-2026-09-30.md): the one
-      # service-credential check and the in-code gate for functions that no
-      # longer rely on the platform's verify-JWT check.
+      # service-credential check and the functions that use it.
       - name: Test service credential verification
         run: |
           deno test --no-check --allow-read --allow-env --allow-net=127.0.0.1 \
             supabase/functions/_shared/service_credential_test.ts \
-            supabase/functions/_shared/caller_gate_test.ts \
             supabase/functions/ops-api/service_credential_handler_test.ts \
             supabase/functions/ops-api/makesafe_cost_report_test.ts
 
@@ -428,10 +426,11 @@ jobs:
   # order. See supabase/tests/migration-contracts/README.md.
   migration-contracts:
     runs-on: ubuntu-latest
-    # 10, not 5: each registered contract case can replay the whole stack
+    # 20, not 10: each registered contract case can replay the whole stack
     # (fail-closed, rollback and break proofs), and the suite now runs close to
-    # 5 minutes on a hosted runner. A passing suite was cancelled at the limit.
-    timeout-minutes: 10
+    # 10 minutes on a hosted runner. Passing suites were cancelled at the limit
+    # of 5 and then of 10.
+    timeout-minutes: 20
 
     services:
       postgres:

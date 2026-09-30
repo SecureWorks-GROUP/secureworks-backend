@@ -4,8 +4,7 @@
 // Aggregated reporting endpoints for the dashboard.
 // Called by the dashboard frontend (auth required).
 //
-// Deploy: supabase functions deploy reporting-api --no-verify-jwt
-//   Callers are checked in code below (runbook Step 4 D).
+// Deploy: supabase functions deploy reporting-api
 //
 // Actions (via ?action= query param):
 //   dashboard_summary   — Revenue, profit, margins, receivables for Reports tab

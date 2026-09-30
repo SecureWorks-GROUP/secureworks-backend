@@ -1,7 +1,6 @@
 import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // ════════════════════════════════════════════════════════════
 // MONITOR-SES-MAKESAFES — group-poll ingestion for the make-safe sync engine
-// Deploy: --no-verify-jwt. isAuthorized() checks every caller (runbook Step 4 D).
 // Mission: makesafe-live-truth-2026-06-14 (Phase 1: schema + ingestion + attachments)
 // ════════════════════════════════════════════════════════════
 //
@@ -86,8 +85,10 @@ function _setTestClientFactory(
 }
 
 // ── AUTH HELPERS ────────────────────────────────────────────────────────────
-// This function checks every caller itself; it does not rely on the platform's
-// "verify JWT" gateway check (runbook Step 4 D,
+// This function is deployed with verify_jwt ON: the Supabase gateway still
+// verifies any Bearer JWT's signature before our handler runs. The in-code check
+// below additionally confirms a legacy token with Supabase, so a legacy key stops
+// working here once the Captain switches legacy keys off (runbook Step 4,
 // docs/evidence/legacy-service-role-key-removal-2026-09-30.md).
 //
 // The pg_cron trigger (trigger_monitor_ses_makesafes -> _sw_service_key()) calls
@@ -2429,8 +2430,10 @@ async function handler(req: Request): Promise<Response> {
   };
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
-  // B1 — AUTH GUARD. This function authenticates every non-OPTIONS request itself;
-  // it does not depend on the platform "verify JWT" check. See isAuthorized().
+  // B1 — AUTH GUARD. verify_jwt is ON for this deploy, so the platform has already
+  // checked any Bearer JWT's signature; this in-code check additionally confirms a
+  // legacy token with Supabase and authorizes every non-OPTIONS request. See
+  // isAuthorized().
   if (!(await isAuthorized(req, SW_API_KEY))) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,

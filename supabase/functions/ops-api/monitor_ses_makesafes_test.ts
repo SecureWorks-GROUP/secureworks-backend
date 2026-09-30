@@ -2760,8 +2760,8 @@ Deno.test("auth [FIX]: a Bearer JWT with role=service_role is ACCEPTED while the
   assertEquals(a.probed, [cronJwt]);
 });
 
-Deno.test("auth [TRAP]: a forged role=service_role JWT is REJECTED once nothing but our code checks it", async () => {
-  // verify_jwt is off: the claim alone proves nothing, the platform must vouch.
+Deno.test("auth [TRAP]: a forged role=service_role JWT is REJECTED unless the platform vouches for it", async () => {
+  // The claim alone proves nothing; the platform must vouch for the exact token.
   const forged = fakeJwt({ role: "service_role" });
   assertEquals(
     await _isAuthorized(reqWithBearer(forged), FAKE_API_KEY, authOpts("rejected").options),

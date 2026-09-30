@@ -1050,3 +1050,46 @@ Deno.test("a verified service credential in the apikey header is the server call
     "none",
   );
 });
+
+Deno.test("an agent key equal to the env service-role key is refused once the platform stops vouching for it", () => {
+  const envServiceKey = "legacy-service-role-fixture";
+  for (const header of ["x-api-key", "authorization"] as const) {
+    const xApiKey = header === "x-api-key" ? envServiceKey : null;
+    const bearerToken = header === "authorization" ? envServiceKey : null;
+    assertEquals(
+      _resolveOpsApiAuthIntent({
+        xApiKey,
+        bearerToken,
+        validKey: "browser-shared-key",
+        serviceKey: null,
+        serviceKeyEnv: envServiceKey,
+        agentServerKey: envServiceKey,
+      }),
+      header === "authorization" ? "jwt" : "none",
+      header,
+    );
+    assertEquals(
+      _opsApiServerSecretPresented({
+        xApiKey,
+        bearerToken,
+        sharedKey: "browser-shared-key",
+        serviceKey: null,
+        serviceKeyEnv: envServiceKey,
+        agentServerKey: envServiceKey,
+      }),
+      false,
+      header,
+    );
+  }
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: "distinct-agent-key",
+      bearerToken: null,
+      validKey: "browser-shared-key",
+      serviceKey: null,
+      serviceKeyEnv: envServiceKey,
+      agentServerKey: "distinct-agent-key",
+    }),
+    "api_key",
+  );
+});

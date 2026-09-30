@@ -7,12 +7,10 @@ import { automationLaneEnabled } from '../_shared/automation_switch.ts'
 // Polls unread emails from monitored mailboxes via Microsoft Graph,
 // classifies by rules (no model call, slice EM0) and stores in inbox_events.
 //
-// Auth: deployed --no-verify-jwt; the handler checks callers itself (a verified
-// service credential or a signed-in user session; runbook Step 4 D).
+// Auth: SW_API_KEY header or Supabase service role
 // Graph: client_credentials flow (same as send-outlook-email)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { authorizeServerCaller } from '../_shared/caller_gate.ts'
 import { classifyEmail } from './classify_email.ts'
 // T7 Loop 3 — single capture choke point. Atomic cutover on
 // evidence_capture_v1 flag: when ON, recordEvidence runs (full envelope,
@@ -740,27 +738,13 @@ Deno.serve(async (req) => {
 
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
-  // Auth: deployed --no-verify-jwt, so callers are checked here (runbook Step 4
-  // D, ../_shared/caller_gate.ts). pg_cron calls with the Vault service-role
-  // JWT; a new sb_secret_ key or a signed-in user session also passes, as the
-  // gateway admitted them. A wrong explicit x-api-key is still refused by name.
+  // Auth: deployed with --no-verify-jwt so Supabase handles function-level auth.
+  // pg_cron calls come from within Supabase network with service key.
+  // Only reject if explicitly called with wrong API key (external abuse).
   const apiKey = req.headers.get('x-api-key') || ''
-  if (apiKey && apiKey !== SW_API_KEY && !apiKey.startsWith('sb_secret_')) {
+  const authHeader = req.headers.get('authorization') || ''
+  if (apiKey && apiKey !== SW_API_KEY) {
     return new Response(JSON.stringify({ error: 'Invalid API key' }), {
-      status: 401,
-      headers: { ...CORS, 'Content-Type': 'application/json' },
-    })
-  }
-  const callerAllowed = await authorizeServerCaller(req, {
-    allowUserSession: true,
-    isUserSession: async (jwt) => {
-      const { data, error } = await createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY).auth.getUser(jwt)
-      return !error && !!data?.user
-    },
-    credentialOptions: { legacyKeyEnvNames: ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_SERVICE_KEY'] },
-  })
-  if (!callerAllowed) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401,
       headers: { ...CORS, 'Content-Type': 'application/json' },
     })

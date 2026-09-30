@@ -7,8 +7,7 @@
 //   2. keywords   → google_ads_keywords
 //   3. landing_pages → google_ads_landing_pages
 //
-// Deploy: supabase functions deploy google-ads-ingest --no-verify-jwt
-//   The GOOGLE_ADS_INGEST_KEY check below is the whole gate (runbook Step 4 D).
+// Deploy: supabase functions deploy google-ads-ingest
 // Secret: GOOGLE_ADS_INGEST_KEY (shared key for auth)
 // ════════════════════════════════════════════════════════════
 

@@ -1,5 +1,3 @@
-// Deploy: --no-verify-jwt. The key check in the handler is the whole gate
-// (runbook Step 4 D, docs/evidence/legacy-service-role-key-removal-2026-09-30.md).
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
