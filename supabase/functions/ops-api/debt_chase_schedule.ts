@@ -26,6 +26,15 @@
 //     "says paid" hold the invoice for a check.
 //   - Holds from the book (check first, fix first) show with their reason and no step.
 //
+// Every item carries `held_step`. On a hold item (group "hold": a book hold, check first or
+// fix first, or an outcome hold, disputed or says paid) `step` stays null and `held_step`
+// is the step the payer would be on if not held: for a homeowner the next ladder step after
+// the last desk step (respecting the Jan start and the ladder end); for a builder
+// builder_call when an invoice is 30 days overdue and not yet called, else statement; for a
+// deposit deposit_reminder when it is overdue and not yet reminded. It is null when no step
+// applies (not yet due, no due date, already reminded), and null on every item that is not
+// a hold.
+//
 // Only the desk's own chase-log rows (those carrying a schedule step or an outcome code)
 // move the schedule. Older rows are history: that is what starts the launch backlog at the
 // friendly text.
@@ -223,6 +232,7 @@ export interface DebtMorningItem {
   }>;
   hold: "check_first" | "fix_first" | null;
   hold_reason: string | null;
+  held_step: DebtChaseStep | null;
   phone: string | null;
   email: string | null;
   promise: DebtChasePromise | null;
@@ -491,6 +501,7 @@ export function planDebtMorningList(
       step_label: string;
       hold?: DebtMorningItem["hold"];
       hold_reason?: string | null;
+      held_step?: DebtChaseStep | null;
       state?: ChaseState | null;
     },
   ) => {
@@ -518,6 +529,7 @@ export function planDebtMorningList(
       invoices: invoiceLines(invs),
       hold: fields.hold ?? null,
       hold_reason: fields.hold_reason ?? null,
+      held_step: fields.held_step ?? null,
       phone: contact.phone,
       email: contact.email,
       promise: fields.state?.promise ?? null,
@@ -551,6 +563,49 @@ export function planDebtMorningList(
       resumes_on: addDays(promise.date, 1),
     });
 
+  const ladder = DEBT_CHASE_SCHEDULES.homeowner.ladder;
+  const b = DEBT_CHASE_SCHEDULES.builder;
+  const homeownerNext = (overdue: DebtChaseBookInvoice[], s: ChaseState) => {
+    const startIndex = overdue.some((i) => i.start_step === "jan")
+      ? ladder.findIndex((l) => l.step === "jan_visit")
+      : 0;
+    const doneIndex = s.lastStep
+      ? ladder.findIndex((l) => l.step === s.lastStep!.step)
+      : -1;
+    const nextIndex = Math.min(
+      Math.max(doneIndex + 1, startIndex),
+      ladder.length - 1,
+    );
+    return { startIndex, nextIndex, next: ladder[nextIndex] };
+  };
+  const loggedStep = (i: DebtChaseBookInvoice, step: DebtChaseStep) =>
+    eventsFor([i]).some((e) => e.step === step);
+  const isOverdue = (i: DebtChaseBookInvoice) => (i.days_overdue ?? 0) > 0;
+  const callDue = (i: DebtChaseBookInvoice) =>
+    (i.days_overdue ?? 0) >= b.call_at_days_overdue &&
+    !loggedStep(i, "builder_call");
+
+  const heldStepFor = (invs: DebtChaseBookInvoice[]): DebtChaseStep | null => {
+    if (invs.every(isDeposit)) {
+      return invs.some((i) =>
+          isOverdue(i) && !loggedStep(i, "deposit_reminder")
+        )
+        ? "deposit_reminder"
+        : null;
+    }
+    const payer = invs[0].payer;
+    if (payer === "client") {
+      const overdue = invs.filter(isOverdue);
+      return overdue.length
+        ? homeownerNext(overdue, stateFor(overdue)).next.step
+        : null;
+    }
+    if (payer === "mlb" || payer === "aj" || payer === "other_builder") {
+      return invs.some(callDue) ? "builder_call" : "statement";
+    }
+    return null;
+  };
+
   const holdItem = (
     invs: DebtChaseBookInvoice[],
     kind: "check_first" | "fix_first",
@@ -565,6 +620,7 @@ export function planDebtMorningList(
       }: ${reason}`,
       hold: kind,
       hold_reason: reason,
+      held_step: heldStepFor(invs),
       state,
     });
 
@@ -600,10 +656,9 @@ export function planDebtMorningList(
   }
 
   // Homeowners: one ladder per payer.
-  const ladder = DEBT_CHASE_SCHEDULES.homeowner.ladder;
   const clientDebt = chaseable.filter((i) => i.payer === "client");
   for (const invs of groupBy(clientDebt, payerKey).values()) {
-    const overdue = invs.filter((i) => (i.days_overdue ?? 0) > 0);
+    const overdue = invs.filter(isOverdue);
     const noDue = invs.filter((i) => i.days_overdue === null);
     if (noDue.length && !overdue.length) wait(noDue, "no_due_date");
     if (!overdue.length) {
@@ -621,17 +676,7 @@ export function planDebtMorningList(
       pause(overdue, s.promise);
       continue;
     }
-    const startIndex = overdue.some((i) => i.start_step === "jan")
-      ? ladder.findIndex((l) => l.step === "jan_visit")
-      : 0;
-    const doneIndex = s.lastStep
-      ? ladder.findIndex((l) => l.step === s.lastStep!.step)
-      : -1;
-    const nextIndex = Math.min(
-      Math.max(doneIndex + 1, startIndex),
-      ladder.length - 1,
-    );
-    const next = ladder[nextIndex];
+    const { startIndex, nextIndex, next } = homeownerNext(overdue, s);
     if (s.promise?.status === "broken") {
       item(overdue, {
         group: "broken_promise",
@@ -662,7 +707,6 @@ export function planDebtMorningList(
   }
 
   // Builders: a Monday statement per payer, and a call per invoice at 30 days overdue.
-  const b = DEBT_CHASE_SCHEDULES.builder;
   const builderDebt = chaseable.filter((i) =>
     i.payer === "mlb" || i.payer === "aj" || i.payer === "other_builder"
   );
@@ -696,10 +740,7 @@ export function planDebtMorningList(
       ) {
         statement.push(i);
       } else tooYoung.push(i);
-      const called = eventsFor([i]).some((e) => e.step === "builder_call");
-      if ((i.days_overdue ?? 0) >= b.call_at_days_overdue && !called) {
-        calls.push(i);
-      }
+      if (callDue(i)) calls.push(i);
     }
     for (const [i, p] of openPromises) pause([i], p);
     if (broken.length) {
@@ -778,9 +819,8 @@ export function planDebtMorningList(
       if (why) {
         holdItem([i], "check_first", outcomeHoldReason(s, why), s);
       } else if (s.promise?.status === "open") pause([i], s.promise);
-      else if (eventsFor([i]).some((e) => e.step === "deposit_reminder")) {
-        wait([i], "reminder_sent");
-      } else if ((i.days_overdue ?? 0) > 0) due.push(i);
+      else if (loggedStep(i, "deposit_reminder")) wait([i], "reminder_sent");
+      else if (isOverdue(i)) due.push(i);
     }
     if (due.length) {
       item(due, {

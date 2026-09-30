@@ -238,6 +238,21 @@ Deno.test("debt_morning_list: Thursday's first list from the 29 Sep book matches
     ),
     true,
   );
+  // Each hold names the step its payer would be on if not held; no other item carries one.
+  const heldStep = (n: string) =>
+    holds.find((i) => i.invoices.some((x) => x.invoice_number === n))!
+      .held_step;
+  assertEquals(
+    ["INV-1456", "INV-1481", "INV-0597", "INV-1236", "INV-0080"].map(heldStep),
+    [
+      "statement",
+      "builder_call",
+      "builder_call",
+      "friendly_text",
+      "friendly_text",
+    ],
+  );
+  assert(list.items.every((i) => i.hold ? true : i.held_step === null));
   assert(list.items.every((i) => i.draft === null));
   assertEquals(new Set(list.items.map((i) => i.id)).size, list.items.length);
 
