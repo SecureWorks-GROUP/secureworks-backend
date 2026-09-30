@@ -283,8 +283,8 @@ The schedules:
 
 Clear Debt stays in the same place and keeps the same look. Changes:
 
-- **Header.** It shows debt by the captain's definition ($87,476 / 95,
-  $56,330 overdue) and a stamp: "Matches Xero, read HH:MM", or "differs by $X
+- **Header.** It shows debt by the captain's definition ($89,049 / 97,
+  $57,903 overdue) and a stamp: "Matches Xero, read HH:MM", or "differs by $X
   on N invoices". Beside it: open in Xero, not debt, check first, and waiting
   for Shaun. "Texts waiting for Marnin" goes.
 - **Tabs.** Today (the morning list, first) | Debt book | Promises | Jan |
@@ -363,9 +363,12 @@ sending is still worth reviewing on Thursday.
   - SMS goes through the existing `send_chase_sms` path, and notes through
     `add_debt_note`.
 - **Schema.** Make one additive migration on `payment_chase_logs`:
-  - `channel` (sms, email, call, visit, statement, letter);
+  - no new channel column: widen the existing `method` CHECK constraint to
+    add `visit`, `statement` and `letter`, so `method` stays the one channel
+    field that Clear Debt and `send_chase_sms` already use;
   - `direction`;
-  - `outcome_code`, a closed list;
+  - `outcome_code`, a closed list, beside the existing free-text `outcome`
+    column, which stays for notes and older rows;
   - `promised_amount` and `promised_date`;
   - `schedule_step`;
   - `approved_by_user_id`;

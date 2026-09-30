@@ -5,7 +5,7 @@ behind each word is noted in brackets where it helps.
 
 | Word | Meaning |
 |---|---|
-| **Debt** | Money owed to us for work that is done. It covers unpaid final invoices on finished jobs (including jobs in rectification), variations, part payments, and progress claims once the job has had its first payment. Deposits are never debt. See DECISIONS.md. |
+| **Debt** | Money owed to us for work that is done. It covers unpaid final invoices on finished jobs (including jobs in rectification), variations, part payments, and progress claims and materials invoices once the job has had its first payment. Deposits are never debt. See DECISIONS.md. |
 | **Open in Xero** | Every issued sales invoice that Xero says still has money owing. It includes deposits and before-work invoices, so it is bigger than debt. (`Type=ACCREC`, `Status=AUTHORISED`, `AmountDue > 0`.) |
 | **Overdue** | Past its due date and still unpaid. Days are counted using the Perth calendar date, and the due date itself is not overdue. |
 | **Final invoice** | The bill for what is left once the job is done. Its reference usually ends `FINBAL`, `FINAL` or `-BAL`. |
@@ -14,7 +14,7 @@ behind each word is noted in brackets where it helps.
 | **Variation** | Extra work agreed during the job. Its reference carries `VAR`. Debt. |
 | **Part payment** | Some of an invoice paid, some still owing. The owing part is debt. |
 | **Rectification** | Work is done but needs fixing before the client is happy. Its invoice is still debt. |
-| **Payer** | Who we chase for an invoice: the client, MLB, AJ or another builder. A builder with two Xero contact names (MLB, AJ) is one payer. |
+| **Payer** | Who we chase for an invoice: the client, MLB, AJ or another builder. A builder with two Xero contact names (AJ Building & Restoration and Insurebuild for AJ; Builderwest's two contacts) is one payer. For MLB only the "Major Loss Builders" contact counts: invoices on "ML Builders" are not MLB debt and are not chased (captain, round 4). |
 | **Builder** | An insurance builder who sends us work orders and pays our invoices: MLB (Major Loss Builders), AJ (AJ Building & Restoration), Emergency Trade Services, Builderwest and Western Building. Called "SES" in the code. |
 | **Make-safe, roof report, repair, assessment** | The kinds of builder work we invoice. |
 | **Xero** | Our accounting system, and the only truth for what is owed and what is paid. |
@@ -30,7 +30,7 @@ behind each word is noted in brackets where it helps.
 | **Chase log** | The record, against each invoice, of every text, call, visit, statement, promise and outcome. It also records who approved each one. (`payment_chase_logs`.) |
 | **Outcome** | What happened after a contact: no answer, spoke, promised, disputed or says paid. |
 | **Promise to pay** | A client's or builder's promise of an amount by a date. While it is open, there is no chasing. If it is missed, the invoice goes back to the top the next day. |
-| **Schedule / ladder** | The fixed chase steps. Homeowners: day 1 friendly text, day 2 firm text, day 3 call, day 7 Jan. Builders: a statement after 14 days. Deposits: one friendly reminder. |
+| **Schedule / ladder** | The fixed chase steps. Homeowners: day 1 friendly text, day 2 firm text, day 3 call, day 7 Jan. Builders: a statement after 14 days, then every Monday while unpaid, and a call at 30 days overdue. Deposits: one friendly reminder. |
 | **Jan** | The general manager. He visits clients who haven't paid by day 7. |
 | **Statement** | One email to a builder's accounts team that lists all their invoices 14 or more days old. It is logged as one chase covering many invoices. |
 | **Check first** | An invoice that Xero says is owed but our notes doubt, such as a duplicate or one disputed or rejected. It stays in the number but gets no draft until Shaun checks it. |
