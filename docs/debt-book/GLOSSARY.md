@@ -34,7 +34,7 @@ behind each word is noted in brackets where it helps.
 | **Jan** | The general manager. He visits clients who haven't paid by day 7. |
 | **Statement** | One email to a builder's accounts team that lists all their invoices 14 or more days old. It is logged as one chase covering many invoices. |
 | **Check first** | An invoice that Xero says is owed but our notes doubt, such as a duplicate or one disputed or rejected. It stays in the number but gets no draft until Shaun checks it. |
-| **Fix first** | Debt on a job still in rectification. It gets no chase until the fix is done (recommended; see DECISIONS.md). |
+| **Fix first** | Debt on a job still in rectification. It counts, but gets no chase until the fix is done (captain, round 6). |
 | **Deposits list** | Unpaid deposits and other before-work invoices, kept apart from debt. Each gets one friendly reminder. |
 | **Cancel list** | Once a week, the deposits with 60 days of no payment, no reply and no job progress. Shaun approves each void in one click, and the void happens in Xero. |
 | **Write-off** | Deciding a debt will not be collected. Only Shaun does it, in Xero, by voiding or crediting the invoice. |

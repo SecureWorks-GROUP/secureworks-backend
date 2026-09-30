@@ -10,9 +10,8 @@ Rules for this file:
 - Never edit a quote. If a ruling changes, add the new one with its date and
   mark the old one as superseded. Do not delete the old one.
 - The "Reading" line is ours. If it and the quote disagree, the quote wins.
-- Nothing listed under "Still open" is decided. Each item there carries our
-  recommendation, and the plan follows that recommendation until the
-  captain says otherwise.
+- Round 6 answered every call that was still open. Anything under "Left to
+  confirm" is a fact still to collect, not a decision.
 
 ## Decided
 
@@ -123,8 +122,8 @@ door.
 
 > "these ones they have a 10 day turnaround, give them 14 days. then a statement."
 
-Reading: builders get 14 days, then a statement. Exactly when the 14 days
-start is still open (see below).
+Reading: builders get 14 days, then a statement. The 14 days count from the
+invoice date (round 6).
 
 **Builder call at 30 days (round 5, plan review in Lavish, 2026-09-30).**
 Written against the proposed "Call (proposal)" step on the builder schedule.
@@ -186,28 +185,52 @@ The six are:
 - Check the exposed key (round 2): "yeah check it". This became a separate
   security task, not part of this plan.
 
-## Still open (our recommendation in brackets)
+## Round 6: every open call answered (Lavish page, 2026-09-30)
 
-1. **Rectification jobs.** They count as debt, but do we chase while the fix
-   is outstanding? (Count them, but send no chase until the fix is signed off.)
-2. **Clients already overdue on launch day.** (Everyone starts at the
-   friendly text and moves one step a day.)
-3. **Builder 14-day clock.** The call at 30 days overdue is decided (round
-   5). (Count the 14 days from the invoice date. Send a statement every
-   Monday. The same rule applies to every builder.)
-4. **Builder accounts email addresses.** (We suggest them from past
-   remittances, and Shaun confirms.)
-5. **The four unclear invoices, $3,425.68.** (Keep them out until checked.
-   An old "50% of quote" invoice on a finished job counts once its other half
-   is paid. The planning fee goes on the deposits list.)
-6. **"Materials" invoices (references ending MAT / MAT50), new on
-   2026-09-30:** INV-1616, INV-1618, INV-1619 and INV-1621, $42,170.79.
-   (Treat them like a progress claim: debt once the job has had its first
-   payment, otherwise the deposits list with one friendly reminder.)
-7. **How Jan gets his list.** (A morning text to Jan, approved by Shaun.
-   Shaun records what Jan reports.)
-8. **How the desk goes live.** GitHub is back (captain, chat, 2026-09-30).
-   (The normal route: reviewed pull requests to the backend and the Ops
-   dashboard, each merged on Shaun's approval. The backend deploy lane applies
-   the database change first. The send button stays off until the switch-off
-   and Shaun's go.)
+These are the captain's answers exactly as submitted. Each one picked an option
+from the page, sometimes with a note. His overall answer was "Change it first
+(see my notes)". The only change note was:
+
+> "make sure we're building on the most up to date one"
+
+This was written against the "Building on out-of-date code" risk. The plan
+now makes this step one of every task: refresh from GitHub, prove the base is
+newest before building and before merge, and check the deployed version
+before relying on anything live.
+
+1. **Rectification jobs.**
+   > "Count them, but no chase until the fix is done"
+2. **Clients already overdue on launch day.**
+   > "Everyone starts at the friendly text, one step a day"
+3. **Builder 14-day clock.**
+   > "14 days from invoice date, Monday statements, same for all builders"
+
+   The call at 30 days overdue was decided in round 5.
+4. **Builder accounts email addresses.** He picked "I'll give you the
+   addresses", with the note:
+   > "accounts@ajs.build - AJ
+   > accounts@mlbuilders.com.au - MLB"
+5. **The four unclear invoices.** No option picked; note only:
+   > "first 2 are Jan's list already; other 2 leave first."
+
+   Reading: INV-0034 (Dylan Mellvile) and INV-0267 (Nurhasien Ibrahim) are
+   debt, and already with Jan, so the desk starts them at the Jan step.
+   INV-0177 (Geoffrey Peddie) and INV-1486 (Ross Dunstan planning fee) are
+   left aside for now. They are not counted and not chased.
+6. **Materials invoices (MAT / MAT50).**
+   > "Like a progress claim: debt once the job has had its first payment, else deposits list"
+
+   All 4 open ones (INV-1616, INV-1618, INV-1619, INV-1621) had their job's
+   deposit paid (checked live, 2026-09-30), so all 4 count.
+7. **How Jan gets his list.** He picked "Morning text to Jan that I approve; I
+   record what he reports", with the note:
+   > "Yeap to Jan's phone number directly"
+8. **How the desk goes live.**
+   > "Normal GitHub route; I approve each merge; send button off until switch-off and my go"
+
+## Left to confirm during the build
+
+- The accounts email for Emergency Trade Services, Builderwest and Western
+  Building, before their first statement.
+- Jan's mobile number, read from staff records and shown to Shaun before the
+  first text.

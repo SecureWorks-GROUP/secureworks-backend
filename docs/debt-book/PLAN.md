@@ -37,19 +37,22 @@ rulings.
 | Figure | Invoices | Amount | Kind |
 |---|---:|---:|---|
 | Open in Xero | 112 | $111,526.08 | Exact (Xero's own figure) |
-| **Debt, by the captain's definition** | **95** | **$87,475.75** | Worked out |
-| of which overdue | 66 | $56,329.54 | Worked out |
-| Not debt | 17 | $24,050.33 | Worked out |
+| **Debt, by the captain's definition** | **97** | **$89,049.43** | Worked out |
+| of which overdue | 68 | $57,903.22 | Worked out |
+| Not debt | 15 | $22,476.65 | Worked out |
+
+Live on 2026-09-30 (see below), the debt is 103 invoices, $131,790.62. That
+includes $42,170.79 of new materials invoices, not due until 7 Oct.
 
 Debt by payer:
 
 | Payer | Invoices | Amount | Overdue |
 |---|---:|---:|---:|
-| Clients (patio, fencing) | 19 | $37,238.31 | $20,898.10 |
+| Clients (patio, fencing) | 21 | $38,811.99 | $22,471.78 |
 | MLB, the Major Loss Builders contact (make-safe, roof report, repair, assessment) | 63 | $43,316.90 | $29,122.50 |
 | AJ (make-safe) | 5 | $2,146.10 | $1,534.50 |
 | Other builders (Emergency Trade Services, Builderwest, Western Building) | 8 | $4,774.44 | $4,774.44 |
-| **Total** | **95** | **$87,475.75** | **$56,329.54** |
+| **Total** | **97** | **$89,049.43** | **$57,903.22** |
 
 Debt by age (days past the due date, Perth date):
 
@@ -59,7 +62,7 @@ Debt by age (days past the due date, Perth date):
 | 1 to 30 | $10,839.68 | $26,391.20 | $528.00 | – | $37,758.88 |
 | 31 to 60 | $3,497.24 | $1,332.10 | – | – | $4,829.34 |
 | 61 to 90 | $4,740.68 | $838.20 | – | – | $5,578.88 |
-| 90+ | $1,820.50 | $561.00 | $1,006.50 | $4,774.44 | $8,162.44 |
+| 90+ | $3,394.18 | $561.00 | $1,006.50 | $4,774.44 | $9,736.12 |
 
 How the figure moved from the 29 Sep report:
 
@@ -70,9 +73,10 @@ How the figure moved from the 29 Sep report:
 | + INV-0080, Chris Stacey variation (variations count) | +1 | +$231.00 |
 | − INV-1050, INV-1391 on the old "ML Builders" contact (only Major Loss Builders counts; round 4) | −2 | −$610.50 |
 | Perth Zoo INV-1477: labelled a progress claim, really a deposit (round 4) | 0 | $0.00 |
-| **Debt now** | **95** | **$87,475.75** |
+| + INV-0034, INV-0267: old "50% of quote" invoices already on Jan's list (round 6) | +2 | +$1,573.68 |
+| **Debt on the 29 Sep list** | **97** | **$89,049.43** |
 
-Not debt (17 invoices, $24,050.33):
+Not debt (15 invoices, $22,476.65):
 
 - **10 deposits, $19,662.15.**
   - INV-1601, INV-1602 and INV-1603 ($4,689.93) are deposits raised late to
@@ -87,9 +91,10 @@ Not debt (17 invoices, $24,050.33):
   INV-1391. The captain ruled that only the "Major Loss Builders" contact
   counts for MLB.
 - **The AJ test invoice INV-1240, $352.**
-- **4 unclear invoices, $3,425.68:** INV-0034, INV-0177 and INV-0267 are old
-  "% of quote" invoices, and INV-1486 is a planning fee. These are open item
-  5 in DECISIONS.md.
+- **2 invoices left aside for now, $1,852.00** (captain, round 6):
+  INV-0177 (Geoffrey Peddie, a "% of quote" invoice our notes say was paid by
+  bank transfer) and INV-1486 (Ross Dunstan planning fee). They are not
+  chased.
 
 Inside the debt, flagged "check first" (8 invoices, $4,169.44). Each is still
 owed in Xero, so it stays in the figure, but it gets no draft until Shaun has
@@ -119,8 +124,14 @@ module that step 1 builds on.
     ($22,094.22), INV-1618 ($8,750.01), INV-1619 ($3,932.06) and INV-1621
     ($7,394.50).
   - Every invoice common to both reads kept the same amount.
-- **Debt today** under the rules: 97 invoices, $88,046.15. The materials
-  invoices are excluded until open item 6 is ruled.
+- **Debt today** under the rules: 103 invoices, $131,790.62.
+  - That is the 29 Sep debt ($89,049.43), minus INV-1608 ($600), plus the
+    3 new MLB invoices ($1,170.40), plus the 4 materials invoices
+    ($42,170.79).
+  - The captain ruled materials invoices count once the job has had its
+    first payment (round 6). A live read showed all 4 jobs had
+    `deposit_at` set (SWP-26595 on 10 Aug, SWP-261160 on 21 Aug, SWP-26320
+    on 25 May, SWP-26195 on 15 May), so all 4 count.
 - **Clear Debt's copy:** 112 invoices, $150,683.79.
   - It holds all 7 new invoices, so the sync works, and every shared amount
     matches to the cent.
@@ -144,7 +155,9 @@ classified ($7,039.73: INV-0290, INV-1069, INV-1435, INV-1578). It also shows:
 - 5 finals the desk had classed "blocked by us", $6,703.75, which need a look
   first;
 - 5 rectification invoices, $6,923.62;
-- MLB, with 40 overdue invoices, $29,122.50.
+- MLB, with 40 overdue invoices, $29,122.50;
+- INV-0034 and INV-0267 ($1,573.68), which start at the Jan step because
+  they are already on Jan's list.
 
 Statuses may have changed since 29 Sep.
 
@@ -175,8 +188,8 @@ The rules are applied in order. They are the tested core of step 1.
      The one exception is INV-1477 (Perth Zoo), which the captain ruled is
      really a deposit.
    - `MAT` / `MAT50` means a materials invoice (first seen 2026-09-30). It is
-     open item 6. Until that is ruled, treat it like `PROG`: debt only after
-     the job's first payment.
+     treated like `PROG`: debt only after the job's first payment (captain,
+     round 6).
    - `VAR`, or the line "Extra Labour and Material" with no reference, means a
      variation. Debt.
    - `DEP`, or a line starting "Deposit", means a deposit. **Not debt.** The
@@ -189,10 +202,13 @@ The rules are applied in order. They are the tested core of step 1.
      kind correctly (captain, round 4).
    - `FINBAL`, `FINAL` or `-BAL`, or a line starting "Balance" or reading
      "Remaining quote amount", or `PRIVATE`, means a final invoice. Debt.
-   - `PLAN` means a planning fee. It is treated as a before-work invoice (open
-     item 5), not debt.
-   - An old "N% of quote" line with no token is unclear. It is shown on its
-     own list, not debt, until open item 5 is ruled.
+   - `PLAN` means a planning fee. Not debt.
+   - An old "N% of quote" line with no token is unclear, and is not debt by
+     default. The captain ruled the current four by name (round 6):
+     - INV-0034 and INV-0267 are debt, and start at the Jan step;
+     - INV-0177 and INV-1486 are left aside.
+
+     Keep these on the corrections list.
 5. **Finished job.** For client finals, the job status is `complete`,
    `invoiced`, `final_payment`, `archived` or `rectification`. A final on an
    unfinished job is shown as "check first", not dropped.
@@ -202,11 +218,12 @@ The rules are applied in order. They are the tested core of step 1.
    draft:
    - "check first": the doubt list above, plus any invoice the desk class marks
      `in_dispute`, `not_owed` or `blocked_by_us`;
-   - "fix first": the job is in rectification (open item 1).
+   - "fix first": the job is in rectification. It counts, but gets no chase
+     until the fix is done (captain, round 6).
 
 **Acceptance fixture.** Save the 29 Sep list of 112 invoices, with its job
-statuses, as a fixture. The rules must give exactly 95 invoices / $87,475.75,
-66 overdue / $56,329.54, and the payer and age tables above.
+statuses, as a fixture. The rules must give exactly 97 invoices / $89,049.43,
+68 overdue / $57,903.22, and the payer and age tables above.
 
 ## 4. The daily workflow
 
@@ -296,8 +313,8 @@ Firstmate backlog.
 | 2 | Morning list | The schedules as data, today's step per payer, holds | ~½ day | The Today list | Thursday |
 | 3 | Draft, approve, send, log | Drafts, approve with a last Xero check, send through `send_chase_sms`, one-tap call outcome, chase-log columns | ~1 day | Approve and send; sent history | Thursday (draft-only if step 0 is not done) |
 | 4 | New Clear Debt screen | The "after" screen in the real Clear Debt tab (secureworks-ux PR); the Today card links to it | ~½ day, in parallel | Ops dashboard, Financials, Clear Debt | Thursday |
-| 5 | Promises and Jan | A promise box, the broken-promise rule, the Jan tab, Jan's morning text (approved) | ~½ day | Promises and Jan tabs | Friday |
-| 6 | Builder statements | A Monday statement per builder, grouped by Xero contact (for MLB, Major Loss Builders only), through its own audited send route | 1–2 days | A statement preview to approve | Next week |
+| 5 | Promises and Jan | A promise box, the broken-promise rule, the Jan tab, Jan's morning text to his own phone (approved) | ~½ day | Promises and Jan tabs | Friday |
+| 6 | Builder statements | A Monday statement per builder, grouped by Xero contact (for MLB, Major Loss Builders only), to accounts@mlbuilders.com.au / accounts@ajs.build, through its own audited send route | 1–2 days | A statement preview to approve | Next week |
 | 7 | Deposits and weekly cancel list | The Deposits tab, one reminder, a 60-day cancel list | ~½ day | The Deposits tab | Next week |
 | 8 | Fix the copy and screen faults | B7 re-check of closed rows (or a nightly ID-set diff), B17, retire B8 | ~1 day | Clear Debt and desk agree to the cent | Next week |
 | 9 | Every number agrees | The Today card, Invoices tab, CEO pages, digest and AI tools read the debt book (B9 to B12) | 1–2 days | The same number everywhere | Later |
@@ -310,11 +327,24 @@ sending is still worth reviewing on Thursday.
 
 ### Technical notes for the workers
 
-- **Base.** The local clones were taken while GitHub was down and are stale.
-  This checkout's `main` (`bfd06cb0`) does not even contain
-  `ops-api/debt_picture.ts`. Every build task branches from current GitHub
-  `main` in both repos (backend and secureworks-ux), after the branches parked
-  in firstmate's `github-pending.md` have been pushed.
+- **Base: always the newest code** (captain, round 6: "make sure we're
+  building on the most up to date one"). The local clones were taken while
+  GitHub was down and are stale. This checkout's `main` (`bfd06cb0`) does not
+  even contain `ops-api/debt_picture.ts`. Before step 0:
+  - push the branches parked in firstmate's `github-pending.md`;
+  - refresh every local clone's `main` from GitHub `main`, in the backend and
+    in secureworks-ux.
+
+  Every task then does three checks:
+  1. It branches from freshly fetched `origin/main` and records that SHA.
+  2. Before asking for merge, it rebases and confirms with
+     `git merge-base --is-ancestor origin/main HEAD`.
+  3. Before relying on anything live, it checks the deployed version with
+     `ops-api?action=ops_api_version` and `git merge-base --is-ancestor`.
+
+  A branch built on a stale base is refused, not merged. This plan branch
+  itself was cut from the stale local `main`, so it must be rebased onto
+  GitHub `main` before it lands.
 - **Ship the normal way.** Changes ship as reviewed pull requests:
   - Backend changes merge to `main`. The Edge deploy workflow applies pending
     migrations first, then deploys the function (see "Migrations Apply Before
@@ -420,22 +450,33 @@ These come from debt-map-s1 section 7.
   never chased. If either is really owed, it needs moving to Major Loss
   Builders in Xero. AJ's two contacts still count as one payer.
 
-## 10. Still to decide
+## 10. Decided, and what is left to confirm
 
-See DECISIONS.md, "Still open". The plan follows each recommendation until
-the captain rules otherwise:
+All eight calls were answered on 2026-09-30 (round 6). They are recorded
+word for word in DECISIONS.md:
 
-1. Rectification: count it, but no chase until the fix is done.
-2. The launch backlog starts at the friendly text.
-3. Builders: 14 days from the invoice date, Monday statements, the same rule
-   for all builders. (The call at 30 days overdue is already decided.)
-4. Builder accounts emails are suggested from remittances; Shaun confirms.
-5. The unclear four stay out until checked. A half-of-quote invoice on a
-   finished job counts once its other half is paid. The planning fee goes to
-   the deposits list.
-6. Materials invoices (MAT / MAT50) are treated like progress claims: debt
-   once the job has had its first payment, otherwise the deposits list.
-7. Jan gets a morning text approved by Shaun; Shaun records the outcomes.
-8. Go-live is the normal GitHub route: reviewed PRs, merged on Shaun's
-   approval, and the backend deploy lane. Sends only after step 0 and Shaun's
-   go.
+1. Rectification: it counts, but gets no chase until the fix is done.
+2. The launch backlog starts at the friendly text, one step a day.
+3. Builders:
+   - 14 days from the invoice date;
+   - statements every Monday;
+   - the same rule for every builder;
+   - a call at 30 days overdue.
+4. Statement addresses: MLB `accounts@mlbuilders.com.au`, AJ
+   `accounts@ajs.build`.
+5. Unclear invoices:
+   - INV-0034 and INV-0267 are debt and already on Jan's list;
+   - INV-0177 and INV-1486 are left aside.
+6. Materials invoices are debt once the job has had its first payment.
+7. Jan gets a morning text to his own phone, approved by Shaun. Shaun records
+   what Jan reports.
+8. Go-live follows the normal GitHub route: reviewed PRs merged on Shaun's
+   approval, then the backend deploy lane. Sends only after step 0 and
+   Shaun's go.
+
+Left to confirm during the build:
+
+- the accounts email for Emergency Trade Services, Builderwest and Western
+  Building;
+- Jan's mobile number, read from staff records and shown to Shaun before the
+  first text.
