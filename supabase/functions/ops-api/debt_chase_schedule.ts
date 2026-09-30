@@ -12,13 +12,15 @@
 //     step a day. After Jan's visit the payer stays on Jan's list until paid.
 //   - Builders (MLB, AJ, other builders): each invoice goes on the Monday statement once it
 //     is 14 days past its invoice date, every Monday while unpaid; any invoice 30 days past
-//     its due date also gets one call from Shaun. An invoice with an open or broken promise
+//     its due date also gets one call from Shaun; a call logged before that day (such as a
+//     broken-promise call) does not count as it. An invoice with an open or broken promise
 //     stays on the statement; logging the statement does not clear a promise.
 //   - Builder and deposit items are per invoice: each invoice line carries its own promise,
 //     and the item's promise is set only when every line agrees. Homeowner items keep one
 //     payer-level promise and null lines.
-//   - Deposits and before-work invoices: one friendly reminder once overdue. The 60-day
-//     cancel list is plan step 7, not built here.
+//   - Deposits and before-work invoices: one friendly reminder once overdue. A missed promise
+//     returns at the top as a broken-promise reminder, even after the reminder was sent. The
+//     60-day cancel list is plan step 7, not built here.
 //   - Promises pause chasing until the promised date. The morning after it, the promise is
 //     kept when Xero shows the promised amount paid since the promise (the invoice's amount
 //     due at the promise less today's amount due covers the promised amount); the ladder
@@ -603,9 +605,14 @@ export function planDebtMorningList(
   const loggedStep = (i: DebtChaseBookInvoice, step: DebtChaseStep) =>
     eventsFor([i]).some((e) => e.step === step);
   const isOverdue = (i: DebtChaseBookInvoice) => (i.days_overdue ?? 0) > 0;
-  const callDue = (i: DebtChaseBookInvoice) =>
-    (i.days_overdue ?? 0) >= b.call_at_days_overdue &&
-    !loggedStep(i, "builder_call");
+  const callDue = (i: DebtChaseBookInvoice) => {
+    const days = i.days_overdue ?? 0;
+    if (days < b.call_at_days_overdue) return false;
+    const reachedOn = addDays(today, b.call_at_days_overdue - days);
+    return !eventsFor([i]).some((e) =>
+      e.step === "builder_call" && perthDay(e.at) >= reachedOn
+    );
+  };
 
   const heldStepFor = (invs: DebtChaseBookInvoice[]): DebtChaseStep | null => {
     if (invs.every(isDeposit)) {
@@ -833,14 +840,25 @@ export function planDebtMorningList(
   }
   for (const invs of groupBy(remindable, payerKey).values()) {
     const due: DebtChaseBookInvoice[] = [];
+    const broken: DebtChaseBookInvoice[] = [];
     for (const i of invs) {
       const s = stateFor([i]);
       const why = holdByOutcome(s);
       if (why) {
         holdItem([i], "check_first", outcomeHoldReason(s, why), s);
       } else if (s.promise?.status === "open") pause([i], s.promise);
+      else if (s.promise?.status === "broken") broken.push(i);
       else if (loggedStep(i, "deposit_reminder")) wait([i], "reminder_sent");
       else if (isOverdue(i)) due.push(i);
+    }
+    if (broken.length) {
+      item(broken, {
+        group: "broken_promise",
+        step: "deposit_reminder",
+        step_label:
+          `Promise broken: ${DEBT_CHASE_STEPS.deposit_reminder.label}`,
+        perInvoice: true,
+      });
     }
     if (due.length) {
       item(due, {

@@ -701,7 +701,7 @@ Deno.test("builders: Shaun calls at 30 days overdue, once per invoice, beside th
   );
   assertEquals(out.items[0].step_label, "30 days overdue: Shaun calls");
   const called = plan([late, early], [
-    ev(late, "2026-09-30", { step: "builder_call" }),
+    ev(late, THU, { step: "builder_call" }),
   ]);
   assertEquals(called.items, []);
 });
@@ -1194,20 +1194,122 @@ Deno.test("deposits: a reminder item's promise is per invoice, never merged", ()
       not_debt_reason: "deposit",
       ...over,
     });
-  const a = dep();
+  const a = dep({ amount_due: 500 });
   const b2 = dep();
   const out = plan([a, b2], [
     ev(a, "2026-09-25", {
       outcome: "promised",
-      promised_amount: 1000,
+      promised_amount: 500,
       promised_date: "2026-09-26",
+      amount_due_at_promise: 1000,
     }),
     ev(b2, "2026-09-29", { step: "friendly_text" }),
   ]);
   const reminder = out.items.find((i) => i.group === "deposit_reminder")!;
   assertEquals(reminder.invoices.map((x) => x.promise?.status ?? null), [
-    "broken",
+    "kept",
     null,
   ]);
   assertEquals(reminder.promise, null);
+});
+
+Deno.test("deposits: a missed promise returns at the top as a broken-promise reminder, sent or not", () => {
+  const notYet = deposit({ days_overdue: 6 });
+  const sent = deposit({ contact_id: "contact-b", contact_name: "Client B" });
+  const openOne = deposit({
+    contact_id: "contact-c",
+    contact_name: "Client C",
+  });
+  const promised = (d: DebtChaseBookInvoice, date: string) =>
+    ev(d, "2026-09-26", {
+      outcome: "promised",
+      promised_amount: 1000,
+      promised_date: date,
+      amount_due_at_promise: 1000,
+    });
+  const debt = inv({ contact_id: "contact-d", contact_name: "Client D" });
+  const out = plan([notYet, sent, openOne, debt], [
+    promised(notYet, "2026-09-28"),
+    ev(sent, "2026-09-25", { step: "deposit_reminder" }),
+    promised(sent, "2026-09-29"),
+    promised(openOne, "2026-10-02"),
+  ]);
+  assertEquals(
+    out.items.map((i) => [
+      i.group,
+      i.step,
+      i.step_label,
+      i.invoices.map((x) => x.invoice_number),
+    ]),
+    [
+      [
+        "broken_promise",
+        "deposit_reminder",
+        "Promise broken: One friendly reminder about the job",
+        [notYet.invoice_number],
+      ],
+      [
+        "broken_promise",
+        "deposit_reminder",
+        "Promise broken: One friendly reminder about the job",
+        [sent.invoice_number],
+      ],
+      ["text", "friendly_text", "Day 1: friendly text", [debt.invoice_number]],
+    ],
+  );
+  assertEquals(out.items[0].promise?.status, "broken");
+  assertEquals(out.paused.map((p) => p.invoices[0].invoice_number), [
+    openOne.invoice_number,
+  ]);
+  assertEquals(out.waiting, []);
+
+  // Once the broken-promise reminder is logged, it is the one reminder: nothing more.
+  const after = plan([sent], [
+    ev(sent, "2026-09-25", { step: "deposit_reminder" }),
+    promised(sent, "2026-09-29"),
+    ev(sent, THU, { step: "deposit_reminder" }),
+  ], "2026-10-02");
+  assertEquals(after.items, []);
+  assertEquals(after.waiting.map((w) => w.reason), ["reminder_sent"]);
+});
+
+Deno.test("builders: a call logged before 30 days overdue (a broken-promise call) is not the 30-day call", () => {
+  const brokenAt5 = builder({ invoice_date: "2026-08-01", days_overdue: 5 });
+  const events = [
+    ev(brokenAt5, "2026-09-20", {
+      outcome: "promised",
+      promised_amount: 1000,
+      promised_date: "2026-09-24",
+      amount_due_at_promise: 1000,
+    }),
+    ev(brokenAt5, "2026-09-26", { step: "builder_call" }),
+  ];
+  assertEquals(plan([brokenAt5], events).items, []);
+
+  // It reached 30 days overdue on Monday 10-26; on the Tuesday the earlier call does not count.
+  const at30 = { ...brokenAt5, days_overdue: 31 };
+  const day30 = "2026-10-27";
+  assertEquals(
+    plan([at30], events, day30).items.map((i) => [i.group, i.step]),
+    [["call", "builder_call"]],
+  );
+  assertEquals(
+    plan(
+      [{ ...at30, hold: "check_first", hold_reason: "doubt" }],
+      events,
+      day30,
+    )
+      .items.map((i) => i.held_step),
+    ["builder_call"],
+  );
+  // A call on the day it reached 30 days overdue, or after, is the 30-day call.
+  const calledOn30 = [
+    ...events,
+    ev(at30, "2026-10-26", { step: "builder_call" }),
+  ];
+  assertEquals(plan([at30], calledOn30, day30).items, []);
+  assertEquals(
+    plan([{ ...at30, days_overdue: 33 }], calledOn30, "2026-10-29").items,
+    [],
+  );
 });
