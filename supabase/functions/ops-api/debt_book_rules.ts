@@ -775,8 +775,8 @@ const num = (
   v: unknown,
 ) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
-// deno-lint-ignore no-explicit-any
 export function normaliseXeroInvoice(
+  // deno-lint-ignore no-explicit-any
   raw: Record<string, any>,
 ): DebtBookInvoice & { line_count: number } {
   const lines: unknown[] = Array.isArray(raw.LineItems) ? raw.LineItems : [];

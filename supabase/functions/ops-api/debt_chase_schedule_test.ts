@@ -56,6 +56,7 @@ function ev(
     outcome: null,
     promised_amount: null,
     promised_date: null,
+    amount_due_at_promise: null,
     by: "Shaun",
     ...over,
   };
@@ -278,6 +279,46 @@ Deno.test("a missed promise returns at the top the next morning, at the next ste
     date: "2026-09-30",
     status: "broken",
   });
+});
+
+Deno.test("homeowner: a promise paid in part as promised is kept, not broken; short or unrecorded is broken", () => {
+  const events = (a: DebtChaseBookInvoice, atPromise: number | null) => [
+    ev(a, "2026-09-28", { step: "friendly_text" }),
+    ev(a, "2026-09-29", { step: "firm_text" }),
+    ev(a, "2026-09-29", {
+      outcome: "promised",
+      promised_amount: 500,
+      promised_date: "2026-09-30",
+      amount_due_at_promise: atPromise,
+    }),
+  ];
+  // Promised $500 of $1,000 and paid it: $500 still due, so still open, but the promise held.
+  const paid = inv({ days_overdue: 10, amount_due: 500 });
+  const kept = plan([paid], events(paid, 1000));
+  assertEquals(kept.items.map((i) => [i.group, i.step, i.step_label]), [[
+    "call",
+    "call",
+    "Day 3: Shaun calls",
+  ]]);
+  assertEquals(kept.items[0].promise, {
+    amount: 500,
+    date: "2026-09-30",
+    status: "kept",
+  });
+
+  const shortPaid = inv({ days_overdue: 10, amount_due: 700 });
+  const short = plan([shortPaid], events(shortPaid, 1000));
+  assertEquals(short.items.map((i) => [i.group, i.step, i.promise?.status]), [
+    ["broken_promise", "call", "broken"],
+  ]);
+
+  // An older promise row never recorded the amount due: still open after the date is broken.
+  const unrecorded = inv({ days_overdue: 10, amount_due: 500 });
+  const fallback = plan([unrecorded], events(unrecorded, null));
+  assertEquals(
+    fallback.items.map((i) => [i.group, i.step, i.promise?.status]),
+    [["broken_promise", "call", "broken"]],
+  );
 });
 
 Deno.test("a step logged after a promise clears it: the ladder carries on", () => {
@@ -623,6 +664,48 @@ Deno.test("builders: an open promise pauses the invoice; a broken one comes back
   ]]);
 });
 
+Deno.test("builders: a promise paid as promised is kept and the statement carries on; short or unrecorded is broken", () => {
+  const events = (a: DebtChaseBookInvoice, atPromise: number | null) => [
+    ev(a, "2026-09-28", {
+      step: "builder_call",
+      outcome: "promised",
+      promised_amount: 100,
+      promised_date: "2026-09-30",
+      amount_due_at_promise: atPromise,
+    }),
+  ];
+  const paid = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 40,
+    amount_due: 100,
+  });
+  const kept = plan([paid], events(paid, 200), MON);
+  assertEquals(kept.items.map((i) => [i.group, i.step, i.promise?.status]), [
+    ["statement", "statement", "kept"],
+  ]);
+
+  const shortPaid = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 40,
+    amount_due: 150,
+  });
+  const short = plan([shortPaid], events(shortPaid, 200), MON);
+  assertEquals(short.items.map((i) => [i.group, i.step, i.promise?.status]), [
+    ["broken_promise", "builder_call", "broken"],
+  ]);
+
+  const unrecorded = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 40,
+    amount_due: 100,
+  });
+  const fallback = plan([unrecorded], events(unrecorded, null), MON);
+  assertEquals(
+    fallback.items.map((i) => [i.group, i.step, i.promise?.status]),
+    [["broken_promise", "builder_call", "broken"]],
+  );
+});
+
 // ── Deposits and before-work invoices ──
 
 function deposit(over: Partial<DebtChaseBookInvoice> = {}) {
@@ -778,6 +861,7 @@ Deno.test("chase log: only the desk's own rows drive the schedule; older rows ar
       outcome_code: "promised",
       promised_amount: "250.50",
       promised_date: "2026-10-03",
+      amount_due_at_promise: "1000.00",
       approved_by_user_id: "user-1",
     }),
     {
@@ -787,6 +871,7 @@ Deno.test("chase log: only the desk's own rows drive the schedule; older rows ar
       outcome: "promised",
       promised_amount: 250.5,
       promised_date: "2026-10-03",
+      amount_due_at_promise: 1000,
       by: "Shaun",
     },
   );

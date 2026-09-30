@@ -15,9 +15,15 @@
 //     its due date also gets one call from Shaun.
 //   - Deposits and before-work invoices: one friendly reminder once overdue. The 60-day
 //     cancel list is plan step 7, not built here.
-//   - Promises pause chasing until the promised date. The morning after it, if the invoice
-//     is still in the open book, it returns at the top marked "promise broken", at the next
-//     step. Disputed and "says paid" hold the invoice for a check.
+//   - Promises pause chasing until the promised date. The morning after it, the promise is
+//     kept when Xero shows the promised amount paid since the promise (the invoice's amount
+//     due at the promise less today's amount due covers the promised amount); the ladder
+//     then carries on as normal. Otherwise, unpaid or short, it returns at the top marked
+//     "promise broken", at the next step. A promise row without the amount due at the
+//     promise cannot show a part payment, so an invoice still open after the date is
+//     broken. Plan step 3 (logging) must add an amount_due_at_promise column to
+//     payment_chase_logs and stamp it from Xero when a promise is logged. Disputed and
+//     "says paid" hold the invoice for a check.
 //   - Holds from the book (check first, fix first) show with their reason and no step.
 //
 // Only the desk's own chase-log rows (those carrying a schedule step or an outcome code)
@@ -181,6 +187,8 @@ export interface DebtChaseEvent {
   outcome: DebtChaseOutcome | null;
   promised_amount: number | null;
   promised_date: string | null;
+  /** The invoice's amount due when the promise was logged; null on rows that never recorded it. */
+  amount_due_at_promise: number | null;
   by: string | null;
 }
 
@@ -267,7 +275,8 @@ function numberOrNull(v: unknown): number | null {
 
 /**
  * A payment_chase_logs row as a schedule event, or null when the row is not the desk's own.
- * Reads the desk columns (schedule_step, outcome_code, promised_amount, promised_date) when
+ * Reads the desk columns (schedule_step, outcome_code, promised_amount, promised_date,
+ * amount_due_at_promise) when
  * they are present; never guesses a step or outcome from free-text legacy columns.
  */
 export function debtChaseEventFromLogRow(
@@ -289,6 +298,7 @@ export function debtChaseEventFromLogRow(
     outcome,
     promised_amount: numberOrNull(row.promised_amount),
     promised_date: isoDateOrNull(row.promised_date),
+    amount_due_at_promise: numberOrNull(row.amount_due_at_promise),
     by: typeof row.chased_by === "string" && row.chased_by
       ? row.chased_by
       : null,
@@ -321,6 +331,8 @@ export function nextStatementDate(perthDate: string): string {
 
 // ── State from the log ──
 
+const cents = (n: number) => Math.round(Number(n || 0) * 100);
+
 interface ChaseState {
   lastStep: DebtChaseEvent | null;
   lastOutcome: DebtChaseEvent | null;
@@ -329,7 +341,24 @@ interface ChaseState {
   promise: DebtChasePromise | null;
 }
 
-function chaseState(events: DebtChaseEvent[], perthDate: string): ChaseState {
+function promiseKept(
+  p: DebtChaseEvent,
+  amountDueById: Map<string, number>,
+): boolean {
+  const now = amountDueById.get(p.xero_invoice_id.toLowerCase());
+  if (
+    p.promised_amount === null || p.amount_due_at_promise === null ||
+    now === undefined
+  ) return false;
+  return cents(p.amount_due_at_promise) - cents(now) >=
+    cents(p.promised_amount);
+}
+
+function chaseState(
+  events: DebtChaseEvent[],
+  perthDate: string,
+  amountDueById: Map<string, number>,
+): ChaseState {
   const sorted = [...events].sort((a, b) => a.at.localeCompare(b.at));
   let lastStep: DebtChaseEvent | null = null;
   let lastOutcome: DebtChaseEvent | null = null;
@@ -346,9 +375,11 @@ function chaseState(events: DebtChaseEvent[], perthDate: string): ChaseState {
     ? {
       amount: activeOutcome.promised_amount,
       date: activeOutcome.promised_date,
-      status: perthDate > activeOutcome.promised_date
-        ? "broken" as const
-        : "open" as const,
+      status: perthDate <= activeOutcome.promised_date
+        ? "open" as const
+        : promiseKept(activeOutcome, amountDueById)
+        ? "kept" as const
+        : "broken" as const,
     }
     : null;
   return { lastStep, lastOutcome, activeOutcome, promise };
@@ -365,8 +396,6 @@ function lastOutcomeOf(s: ChaseState): DebtMorningItem["last_outcome"] {
 }
 
 // ── Payers ──
-
-const cents = (n: number) => Math.round(Number(n || 0) * 100);
 
 function payerKey(inv: DebtChaseBookInvoice): string {
   if (inv.payer === "client") {
@@ -433,6 +462,11 @@ export function planDebtMorningList(
     invs.flatMap((i) =>
       eventsByInvoice.get(i.xero_invoice_id.toLowerCase()) || []
     );
+  const amountDueById = new Map(
+    invoices.map((i) => [i.xero_invoice_id.toLowerCase(), i.amount_due]),
+  );
+  const stateFor = (invs: DebtChaseBookInvoice[]) =>
+    chaseState(eventsFor(invs), today, amountDueById);
 
   const items: DebtMorningItem[] = [];
   const paused: DebtMorningPaused[] = [];
@@ -577,7 +611,7 @@ export function planDebtMorningList(
       if (notDue.length) wait(notDue, "not_due");
       continue;
     }
-    const s = chaseState(eventsFor(overdue), today);
+    const s = stateFor(overdue);
     const why = holdByOutcome(s);
     if (why) {
       holdItem(overdue, "check_first", outcomeHoldReason(s, why), s);
@@ -639,7 +673,7 @@ export function planDebtMorningList(
     const tooYoung: DebtChaseBookInvoice[] = [];
     const openPromises: Array<[DebtChaseBookInvoice, DebtChasePromise]> = [];
     for (const i of invs) {
-      const s = chaseState(eventsFor([i]), today);
+      const s = stateFor([i]);
       const why = holdByOutcome(s);
       if (why) {
         holdItem([i], "check_first", outcomeHoldReason(s, why), s);
@@ -673,7 +707,7 @@ export function planDebtMorningList(
         group: "broken_promise",
         step: "builder_call",
         step_label: `Promise broken: ${DEBT_CHASE_STEPS.builder_call.label}`,
-        state: chaseState(eventsFor(broken), today),
+        state: stateFor(broken),
       });
     }
     if (calls.length) {
@@ -681,7 +715,7 @@ export function planDebtMorningList(
         group: "call",
         step: "builder_call",
         step_label: DEBT_CHASE_STEPS.builder_call.label,
-        state: chaseState(eventsFor(calls), today),
+        state: stateFor(calls),
       });
     }
     if (statement.length) {
@@ -693,7 +727,7 @@ export function planDebtMorningList(
           group: "statement",
           step: "statement",
           step_label: DEBT_CHASE_STEPS.statement.label,
-          state: chaseState(eventsFor(statement), today),
+          state: stateFor(statement),
         });
       } else {
         wait(statement, sentToday ? "done_today" : "statement_not_due", {
@@ -739,7 +773,7 @@ export function planDebtMorningList(
   for (const invs of groupBy(remindable, payerKey).values()) {
     const due: DebtChaseBookInvoice[] = [];
     for (const i of invs) {
-      const s = chaseState(eventsFor([i]), today);
+      const s = stateFor([i]);
       const why = holdByOutcome(s);
       if (why) {
         holdItem([i], "check_first", outcomeHoldReason(s, why), s);
@@ -753,7 +787,7 @@ export function planDebtMorningList(
         group: "deposit_reminder",
         step: "deposit_reminder",
         step_label: DEBT_CHASE_STEPS.deposit_reminder.label,
-        state: chaseState(eventsFor(due), today),
+        state: stateFor(due),
       });
     }
   }

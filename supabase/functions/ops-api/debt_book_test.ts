@@ -11,6 +11,7 @@ import {
   DebtBookError,
   type DebtBookJobRecord,
   type DebtBookStore,
+  logDebtDeskFailure,
   readDebtBook,
 } from "./debt_book.ts";
 import {
@@ -518,6 +519,75 @@ Deno.test("debt_book links a job by the one job number in the reference when the
   ]);
 });
 
+Deno.test("debt_book: any money received on the job is a first payment, live from Xero (the INV-1601..1603 pattern)", async () => {
+  const client = (
+    n: number,
+    ref: string,
+    extra: Record<string, unknown> = {},
+  ) =>
+    rawInvoice(n, {
+      Contact: {
+        ContactID: "30000000-0000-4000-8000-000000000003",
+        Name: "A Client",
+      },
+      Reference: ref,
+      ...extra,
+    });
+  const x = xero((
+    p,
+  ) => (p === 1
+    ? [
+      // A deposit raised late to match a bank transfer: still AUTHORISED, nothing paid on it.
+      client(7001, "SWP-26010-DEP"),
+      // A materials invoice already part-paid in Xero.
+      client(7002, "SWP-26010-MAT50", {
+        Total: 500,
+        AmountDue: 300,
+        AmountPaid: 200,
+      }),
+      // A job whose part-paid deposit is the only money: its materials invoice is debt too.
+      client(7003, "SWP-26011-DEP", { AmountDue: 50, AmountPaid: 50 }),
+      client(7004, "SWP-26011-MAT50"),
+      // No money anywhere on this job: before the first payment.
+      client(7005, "SWP-26012-MAT50"),
+    ]
+    : [])
+  );
+  const jobs: DebtBookJobRecord[] = ["SWP-26010", "SWP-26011", "SWP-26012"]
+    .map((job_number) => ({
+      id: `j-${job_number}`,
+      job_number,
+      status: "processing",
+      deposit_at: null,
+    }));
+  const store = emptyStore({
+    jobsByNumbers: (numbers) =>
+      Promise.resolve(
+        jobs.filter((j) => numbers.includes(String(j.job_number))),
+      ),
+  });
+  const book = await readDebtBook({}, {}, withStore(x, store));
+  const by = (n: string) => book.invoices.find((i) => i.invoice_number === n)!;
+  assertEquals(
+    ["INV-7002", "INV-7004", "INV-7005"].map((n) => [
+      n,
+      by(n).kind,
+      by(n).job_first_payment,
+      by(n).is_debt,
+      by(n).not_debt_reason,
+    ]),
+    [
+      ["INV-7002", "materials", true, true, null],
+      ["INV-7004", "materials", true, true, null],
+      ["INV-7005", "materials", false, false, "before_first_payment"],
+    ],
+  );
+  assertEquals([by("INV-7001").kind, by("INV-7001").is_debt], [
+    "deposit",
+    false,
+  ]);
+});
+
 // ── The Supabase store: reads only, and a failed read stops the book ──
 
 function fakeSupabase(
@@ -531,7 +601,7 @@ function fakeSupabase(
     from(table: string) {
       const filters: Array<[string, unknown[]]> = [];
       const q: any = {};
-      for (const m of ["select", "eq", "in", "gt", "order", "range"]) {
+      for (const m of ["select", "eq", "in", "gt", "or", "order", "range"]) {
         q[m] = (...args: unknown[]) => {
           used.push(m);
           filters.push([m, args]);
@@ -612,7 +682,7 @@ Deno.test("debt_book through the Supabase store reads only, scoped to the org an
   assertEquals(book.invoices[0].desk_class, "genuine_debt");
   assert(
     used.every((m) =>
-      ["select", "eq", "in", "gt", "order", "range"].includes(m)
+      ["select", "eq", "in", "gt", "or", "order", "range"].includes(m)
     ),
   );
   for (const s of seen.filter((s) => s.table === "xero_invoices")) {
@@ -627,6 +697,78 @@ Deno.test("debt_book through the Supabase store reads only, scoped to the org an
       ),
     );
   }
+});
+
+Deno.test("debt_book through the Supabase store: a part-paid sibling invoice in our copy is a first payment", async () => {
+  const x = xero((
+    p,
+  ) => (p === 1
+    ? [
+      rawInvoice(1, {
+        Contact: { Name: "A Client" },
+        Reference: "SWP-26001-MAT50",
+      }),
+    ]
+    : [])
+  );
+  const { client } = fakeSupabase((table, filters) => {
+    if (table === "jobs") {
+      return {
+        data: [{
+          id: "j1",
+          job_number: "SWP-26001",
+          status: "processing",
+          deposit_at: null,
+        }],
+        error: null,
+      };
+    }
+    // Our copy holds an AUTHORISED deposit on j1 with money paid on it, and no PAID invoice.
+    const paidOrPartPaid = filters.some(([m, a]) =>
+      m === "or" && String(a[0]).split(",").includes("amount_paid.gt.0")
+    );
+    if (
+      table === "xero_invoices" && paidOrPartPaid &&
+      filters.some(([m, a]) => m === "in" && a[0] === "job_id")
+    ) {
+      return { data: [{ job_id: "j1" }], error: null };
+    }
+    return { data: [], error: null };
+  });
+  const book = await readDebtBook(
+    client,
+    {},
+    {
+      ...x.deps,
+      store: createSupabaseDebtBookStore(client, ORG),
+    } as unknown as DebtBookDeps,
+  );
+  assertEquals(
+    [
+      book.invoices[0].kind,
+      book.invoices[0].job_first_payment,
+      book.invoices[0].is_debt,
+    ],
+    ["materials", true, true],
+  );
+});
+
+Deno.test("an unexpected debt desk failure is logged by name and stack frame, never by its message", () => {
+  const logged: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => logged.push(args);
+  try {
+    const error = new TypeError("provider body: secret-token-value");
+    logDebtDeskFailure("debt_book", error);
+    logDebtDeskFailure("debt_morning_list", "not an error");
+  } finally {
+    console.error = original;
+  }
+  assertEquals(logged.length, 2);
+  const [first, second] = logged.map((args) => args.map(String).join(" "));
+  assert(first.startsWith("[debt_book] unexpected failure TypeError at "));
+  assert(!first.includes("secret-token-value"));
+  assertEquals(second, "[debt_morning_list] unexpected failure string ");
 });
 
 Deno.test("debt_book stops, rather than guessing, when a copy or job read returns an error", async () => {

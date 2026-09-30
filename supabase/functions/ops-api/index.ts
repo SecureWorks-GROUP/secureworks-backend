@@ -500,7 +500,7 @@ import {
   XeroReceivablesReadError,
   createXeroReadGet,
 } from './xero_receivables_read.ts'
-import { createSupabaseDebtBookStore, DebtBookError, readDebtBook } from './debt_book.ts'
+import { createSupabaseDebtBookStore, DebtBookError, logDebtDeskFailure, readDebtBook } from './debt_book.ts'
 import { createSupabaseDebtChaseLogStore, readDebtMorningList } from './debt_morning_list.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
 import { insuranceReadAction } from './insurance_read_handlers.ts'
@@ -7624,6 +7624,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
             return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
           }
+          logDebtDeskFailure('debt_book', error)
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
         }
       }
@@ -7645,6 +7646,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
             return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
           }
+          logDebtDeskFailure('debt_morning_list', error)
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
         }
       }
