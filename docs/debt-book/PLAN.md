@@ -37,27 +37,27 @@ rulings.
 | Figure | Invoices | Amount | Kind |
 |---|---:|---:|---|
 | Open in Xero | 112 | $111,526.08 | Exact (Xero's own figure) |
-| **Debt, by the captain's definition** | **97** | **$88,086.25** | Worked out |
-| of which overdue | 68 | $56,940.04 | Worked out |
-| Not debt | 15 | $23,439.83 | Worked out |
+| **Debt, by the captain's definition** | **95** | **$87,475.75** | Worked out |
+| of which overdue | 66 | $56,329.54 | Worked out |
+| Not debt | 17 | $24,050.33 | Worked out |
 
 Debt by payer:
 
 | Payer | Invoices | Amount | Overdue |
 |---|---:|---:|---:|
 | Clients (patio, fencing) | 19 | $37,238.31 | $20,898.10 |
-| MLB (make-safe, roof report, repair, assessment) | 65 | $43,927.40 | $29,733.00 |
+| MLB, the Major Loss Builders contact (make-safe, roof report, repair, assessment) | 63 | $43,316.90 | $29,122.50 |
 | AJ (make-safe) | 5 | $2,146.10 | $1,534.50 |
 | Other builders (Emergency Trade Services, Builderwest, Western Building) | 8 | $4,774.44 | $4,774.44 |
-| **Total** | **97** | **$88,086.25** | **$56,940.04** |
+| **Total** | **95** | **$87,475.75** | **$56,329.54** |
 
 Debt by age (days past the due date, Perth date):
 
 | Age | Clients | MLB | AJ | Other builders | All |
 |---|---:|---:|---:|---:|---:|
 | Not due yet | $16,340.21 | $14,194.40 | $611.60 | – | $31,146.21 |
-| 1 to 30 | $10,839.68 | $26,671.70 | $528.00 | – | $38,039.38 |
-| 31 to 60 | $3,497.24 | $1,662.10 | – | – | $5,159.34 |
+| 1 to 30 | $10,839.68 | $26,391.20 | $528.00 | – | $37,758.88 |
+| 31 to 60 | $3,497.24 | $1,332.10 | – | – | $4,829.34 |
 | 61 to 90 | $4,740.68 | $838.20 | – | – | $5,578.88 |
 | 90+ | $1,820.50 | $561.00 | $1,006.50 | $4,774.44 | $8,162.44 |
 
@@ -68,32 +68,36 @@ How the figure moved from the 29 Sep report:
 | 29 Sep report, first rules | 95 | $86,375.25 |
 | + INV-1011, part payment (Q16) | +1 | +$1,480.00 |
 | + INV-0080, Chris Stacey variation (variations count) | +1 | +$231.00 |
-| Perth Zoo INV-1477 progress claim: job has no first payment yet (Q9; checked live 30 Sep, work booked 19 Oct) | 0 | $0.00 |
-| **Debt now** | **97** | **$88,086.25** |
+| − INV-1050, INV-1391 on the old "ML Builders" contact (only Major Loss Builders counts; round 4) | −2 | −$610.50 |
+| Perth Zoo INV-1477: labelled a progress claim, really a deposit (round 4) | 0 | $0.00 |
+| **Debt now** | **95** | **$87,475.75** |
 
-Not debt (15 invoices, $23,439.83):
+Not debt (17 invoices, $24,050.33):
 
-- **9 deposits, $9,342.47.**
+- **10 deposits, $19,662.15.**
   - INV-1601, INV-1602 and INV-1603 ($4,689.93) are deposits raised late to
     match bank transfers already received (Q16).
   - INV-1119 ($2,052.88) is a likely duplicate.
   - INV-0560 ($53.14) is leftover cents.
-  - 4 are genuinely unpaid ($2,546.52): INV-1010, INV-1374, INV-1571 and
-    INV-1597.
-- **Perth Zoo progress claim INV-1477, $10,319.68.**
+  - 5 are genuinely unpaid ($12,866.20): INV-1010, INV-1374, INV-1571,
+    INV-1597, and Perth Zoo INV-1477 ($10,319.68). INV-1477 is labelled a
+    progress claim, but the captain ruled it a deposit. The work is booked
+    for 19 Oct, and the job had no payment when checked live on 30 Sep.
+- **2 invoices on the old "ML Builders" contact, $610.50:** INV-1050 and
+  INV-1391. The captain ruled that only the "Major Loss Builders" contact
+  counts for MLB.
 - **The AJ test invoice INV-1240, $352.**
 - **4 unclear invoices, $3,425.68:** INV-0034, INV-0177 and INV-0267 are old
   "% of quote" invoices, and INV-1486 is a planning fee. These are open item
   5 in DECISIONS.md.
 
-Inside the debt, flagged "check first" (10 invoices, $4,779.94). Each is still
+Inside the debt, flagged "check first" (8 invoices, $4,169.44). Each is still
 owed in Xero, so it stays in the figure, but it gets no draft until Shaun has
 checked it:
 
 - the Emergency Trade Services pairs INV-0938/INV-1481 and INV-1424/INV-1829;
 - Builderwest INV-0597 and INV-0702, which the builder rejected;
 - MLB INV-1456, which is in dispute;
-- INV-1050 and INV-1391, which are on the duplicate "ML Builders" contact;
 - INV-0080, which the desk notes say was overpaid.
 
 Clear Debt's copy was missing 6 open invoices ($3,583.48), because they are
@@ -108,7 +112,7 @@ classified ($7,039.73: INV-0290, INV-1069, INV-1435, INV-1578). It also shows:
 - 5 finals the desk had classed "blocked by us", $6,703.75, which need a look
   first;
 - 5 rectification invoices, $6,923.62;
-- MLB, with 42 overdue invoices, $29,733.
+- MLB, with 40 overdue invoices, $29,122.50.
 
 Statuses may have changed since 29 Sep.
 
@@ -119,7 +123,9 @@ The rules are applied in order. They are the tested core of step 1.
 1. **Scope.** A Xero sales invoice (ACCREC), status AUTHORISED, with
    `AmountDue > 0`, read live from Xero. The backend copy is never the source.
 2. **Payer.** The payer comes from the Xero contact:
-   - MLB is "Major Loss Builders" or "ML Builders";
+   - MLB is the "Major Loss Builders" contact only. Invoices on other MLB-like
+     contacts (such as "ML Builders") are not MLB debt and are not chased;
+     they are listed apart (round 4);
    - AJ is "AJ Building & Restoration" or "Insurebuild Pty Ltd WA (AJ Building
      & Restoration)";
    - other builders are Emergency Trade Services, Builderwest (both contacts)
@@ -134,12 +140,18 @@ The rules are applied in order. They are the tested core of step 1.
 4. **Client invoices.** The first rule that matches wins:
    - `PROG` means a progress claim. It is debt only if the job has had a first
      payment, meaning any PAID invoice on the job or `jobs.deposit_at` set.
+     The one exception is INV-1477 (Perth Zoo), which the captain ruled is
+     really a deposit.
    - `VAR`, or the line "Extra Labour and Material" with no reference, means a
      variation. Debt.
    - `DEP`, or a line starting "Deposit", means a deposit. **Not debt.** The
      one exception is a named part-payment override: INV-1011 is debt (Q16).
-     Keep overrides as a short list, each entry with its reason and the
-     decision it came from.
+   - **Labels can be wrong.** The kind comes from the reference and line text,
+     and two invoices are labelled wrongly (INV-1011, INV-1477). Keep the
+     captain's corrections as a short list, each entry with its reason and
+     the decision it came from. The real fix is at the source (step 10): the
+     tools that raise invoices, including the Xero MCP tools, must state the
+     kind correctly (captain, round 4).
    - `FINBAL`, `FINAL` or `-BAL`, or a line starting "Balance" or reading
      "Remaining quote amount", or `PRIVATE`, means a final invoice. Debt.
    - `PLAN` means a planning fee. It is treated as a before-work invoice (open
@@ -158,8 +170,8 @@ The rules are applied in order. They are the tested core of step 1.
    - "fix first": the job is in rectification (open item 1).
 
 **Acceptance fixture.** Save the 29 Sep list of 112 invoices, with its job
-statuses, as a fixture. The rules must give exactly 97 invoices / $88,086.25,
-68 overdue / $56,940.04, and the payer and age tables above.
+statuses, as a fixture. The rules must give exactly 95 invoices / $87,475.75,
+66 overdue / $56,329.54, and the payer and age tables above.
 
 ## 4. The daily workflow
 
@@ -218,8 +230,8 @@ The schedules:
 
 Clear Debt stays in the same place and keeps the same look. Changes:
 
-- **Header.** It shows debt by the captain's definition ($88,086 / 97,
-  $56,940 overdue) and a stamp: "Matches Xero, read HH:MM", or "differs by $X
+- **Header.** It shows debt by the captain's definition ($87,476 / 95,
+  $56,330 overdue) and a stamp: "Matches Xero, read HH:MM", or "differs by $X
   on N invoices". Beside it: open in Xero, not debt, check first, and waiting
   for Shaun. "Texts waiting for Marnin" goes.
 - **Tabs.** Today (the morning list, first) | Debt book | Promises | Jan |
@@ -249,10 +261,11 @@ Firstmate backlog.
 | 3 | Draft, approve, send, log | Drafts, approve with a last Xero check, send through `send_chase_sms`, one-tap call outcome, chase-log columns | ~1 day | Approve and send; sent history | Thursday (draft-only if step 0 is not done) |
 | 4 | New Clear Debt screen | The "after" screen in the real Clear Debt tab (secureworks-ux PR); the Today card links to it | ~½ day, in parallel | Ops dashboard, Financials, Clear Debt | Thursday |
 | 5 | Promises and Jan | A promise box, the broken-promise rule, the Jan tab, Jan's morning text (approved) | ~½ day | Promises and Jan tabs | Friday |
-| 6 | Builder statements | A Monday statement per builder, grouped by Xero contact, through its own audited send route | 1–2 days | A statement preview to approve | Next week |
+| 6 | Builder statements | A Monday statement per builder, grouped by Xero contact (for MLB, Major Loss Builders only), through its own audited send route | 1–2 days | A statement preview to approve | Next week |
 | 7 | Deposits and weekly cancel list | The Deposits tab, one reminder, a 60-day cancel list | ~½ day | The Deposits tab | Next week |
 | 8 | Fix the copy and screen faults | B7 re-check of closed rows (or a nightly ID-set diff), B17, retire B8 | ~1 day | Clear Debt and desk agree to the cent | Next week |
 | 9 | Every number agrees | The Today card, Invoices tab, CEO pages, digest and AI tools read the debt book (B9 to B12) | 1–2 days | The same number everywhere | Later |
+| 10 | Label invoices correctly at the source | The tools that raise invoices, including the Xero MCP tools, state the kind (deposit, progress claim, variation, final) correctly; the corrections list can then retire | 1–2 days, scoped when picked up | No more "says deposit but isn't" | Later (captain: "fix the xero mcp tools later") |
 
 Being honest about Thursday: steps 1 to 4 add up to about two days of work,
 done in parallel across two workers from Wednesday afternoon. If it slips,
@@ -366,8 +379,10 @@ These come from debt-map-s1 section 7.
   `credit balance is too low`. Mitigation: drafts do not depend on it.
 - **Thursday is tight.** Mitigation: the priority order in section 6, and
   draft-only if needed.
-- **Duplicate builder contacts in Xero** (MLB, AJ). Mitigation: group by
-  payer. The Xero clean-up is for Shaun or bookkeeping.
+- **Invoices on old builder contacts.** INV-1050 and INV-1391 ($610.50) sit
+  on "ML Builders", which the captain ruled irrelevant. They are left out and
+  never chased. If either is really owed, it needs moving to Major Loss
+  Builders in Xero. AJ's two contacts still count as one payer.
 
 ## 10. Still to decide
 
@@ -382,8 +397,7 @@ the captain rules otherwise:
 5. The unclear four stay out until checked. A half-of-quote invoice on a
    finished job counts once its other half is paid. The planning fee goes to
    the deposits list.
-6. Perth Zoo and other before-work invoices are treated like deposits.
-7. Jan gets a morning text approved by Shaun; Shaun records the outcomes.
-8. Go-live is the normal GitHub route: reviewed PRs, merged on Shaun's
+6. Jan gets a morning text approved by Shaun; Shaun records the outcomes.
+7. Go-live is the normal GitHub route: reviewed PRs, merged on Shaun's
    approval, and the backend deploy lane. Sends only after step 0 and Shaun's
    go.

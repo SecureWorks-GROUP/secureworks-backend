@@ -50,6 +50,30 @@ Reading: INV-1601 to INV-1603 are not debt. The deposit was paid by bank
 transfer, and the invoice exists only to match that payment in Xero.
 INV-1011 is a part payment, so it is debt.
 
+**Perth Zoo INV-1477 (round 4, plan review in Lavish, 2026-09-30).** The plan
+had called it a progress claim with no first payment yet.
+
+> "what the heck ? no no, this is a deposit. Just cause hte description says so, it's not."
+
+Reading: INV-1477 is a deposit, whatever its description says. It is not
+debt, and it goes on the deposits list.
+
+**Invoice labels (round 4).** This was written against the INV-1011 rule.
+
+> "we'll have to fix the xero mcp tools later. but they will need to specify it correctly."
+
+Reading: an invoice's kind (deposit, progress claim, variation, final) must
+be stated correctly by the tools that raise it. That fix comes later. Until
+then, the desk keeps a short list of the captain's corrections.
+
+**Which MLB invoices count (round 4).**
+
+> "MLB invoices concerned are Major Loss Builders (the xero contact) . Others are irrelevant"
+
+Reading: for MLB, only invoices on the "Major Loss Builders" Xero contact
+count. Invoices on other contacts, such as "ML Builders" (INV-1050 and
+INV-1391, $610.50), are left out of the debt and not chased.
+
 ### Where the truth lives
 
 **Xero against our copy (D2, round 1).**
@@ -168,12 +192,9 @@ The six are:
 5. **The four unclear invoices, $3,425.68.** (Keep them out until checked.
    An old "50% of quote" invoice on a finished job counts once its other half
    is paid. The planning fee goes on the deposits list.)
-6. **Perth Zoo INV-1477 and other invoices raised before the work starts.**
-   (Treat them like a deposit: put them on the deposits list with one
-   friendly reminder.)
-7. **How Jan gets his list.** (A morning text to Jan, approved by Shaun.
+6. **How Jan gets his list.** (A morning text to Jan, approved by Shaun.
    Shaun records what Jan reports.)
-8. **How the desk goes live.** GitHub is back (captain, chat, 2026-09-30).
+7. **How the desk goes live.** GitHub is back (captain, chat, 2026-09-30).
    (The normal route: reviewed pull requests to the backend and the Ops
    dashboard, each merged on Shaun's approval. The backend deploy lane applies
    the database change first. The send button stays off until the switch-off
