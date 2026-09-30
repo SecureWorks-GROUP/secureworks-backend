@@ -762,10 +762,10 @@ Deno.test("builders: an open promise pauses the invoice; a broken one comes back
       promised_date: "2026-09-30",
     }),
   ], MON);
-  assertEquals(broken.items.map((i) => [i.group, i.step]), [[
-    "broken_promise",
-    "builder_call",
-  ]]);
+  assertEquals(broken.items.map((i) => [i.group, i.step]), [
+    ["broken_promise", "builder_call"],
+    ["statement", "statement"],
+  ]);
 });
 
 Deno.test("builders: a promise paid as promised is kept and the statement carries on; short or unrecorded is broken", () => {
@@ -796,6 +796,7 @@ Deno.test("builders: a promise paid as promised is kept and the statement carrie
   const short = plan([shortPaid], events(shortPaid, 200), MON);
   assertEquals(short.items.map((i) => [i.group, i.step, i.promise?.status]), [
     ["broken_promise", "builder_call", "broken"],
+    ["statement", "statement", "broken"],
   ]);
 
   const unrecorded = builder({
@@ -806,7 +807,125 @@ Deno.test("builders: a promise paid as promised is kept and the statement carrie
   const fallback = plan([unrecorded], events(unrecorded, null), MON);
   assertEquals(
     fallback.items.map((i) => [i.group, i.step, i.promise?.status]),
-    [["broken_promise", "builder_call", "broken"]],
+    [
+      ["broken_promise", "builder_call", "broken"],
+      ["statement", "statement", "broken"],
+    ],
+  );
+});
+
+Deno.test("builders: an open promise stays on the Monday statement, marked promised by its date, and pauses the call", () => {
+  const promised = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 40,
+    amount_due: 300,
+  });
+  const other = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 10,
+    amount_due: 200,
+  });
+  const young = builder({ invoice_date: "2026-09-30", days_overdue: -5 });
+  const promiseRow = ev(promised, "2026-10-02", {
+    outcome: "promised",
+    promised_amount: 300,
+    promised_date: "2026-10-09",
+    amount_due_at_promise: 300,
+  });
+  const youngPromise = ev(young, "2026-10-02", {
+    outcome: "promised",
+    promised_amount: 1000,
+    promised_date: "2026-10-09",
+  });
+  const out = plan([promised, other, young], [promiseRow, youngPromise], MON);
+  assertEquals(out.items.map((i) => [i.group, i.step]), [
+    ["statement", "statement"],
+  ]);
+  const open = { amount: 300, date: "2026-10-09", status: "open" as const };
+  assertEquals(
+    out.items[0].invoices.map((x) => [x.invoice_number, x.promise]),
+    [[promised.invoice_number, open], [other.invoice_number, null]],
+  );
+  assertEquals(
+    out.paused.map((p) => p.invoices.map((x) => x.invoice_number)),
+    [[promised.invoice_number], [young.invoice_number]],
+  );
+  assertEquals(out.waiting, []);
+
+  // Logging the statement against every invoice it covers keeps the promise open.
+  const nextMon = "2026-10-12";
+  const sent = [promised, other].map((i) => ev(i, MON, { step: "statement" }));
+  const after = plan(
+    [promised, other],
+    [promiseRow, ...sent],
+    "2026-10-07",
+  );
+  assertEquals(after.paused.map((p) => p.promise.status), ["open"]);
+  assertEquals(after.items, []);
+  assertEquals(
+    plan([promised, other], [promiseRow, ...sent], nextMon).items.map((i) => [
+      i.group,
+      i.invoices.map((x) => [x.invoice_number, x.promise?.status ?? null]),
+    ]),
+    [
+      ["broken_promise", [[promised.invoice_number, null]]],
+      ["statement", [[promised.invoice_number, "broken"], [
+        other.invoice_number,
+        null,
+      ]]],
+    ],
+  );
+});
+
+Deno.test("builders: a broken promise stays on the Monday statement, marked broken, beside its broken-promise call", () => {
+  const a = builder({ invoice_date: "2026-09-01", days_overdue: 5 });
+  const b2 = builder({ invoice_date: "2026-09-01", days_overdue: 5 });
+  const out = plan([a, b2], [
+    ev(a, "2026-09-28", {
+      outcome: "promised",
+      promised_amount: 1000,
+      promised_date: "2026-10-02",
+      amount_due_at_promise: 1000,
+    }),
+  ], MON);
+  assertEquals(
+    out.items.map((i) => [
+      i.group,
+      i.step,
+      i.invoices.map((x) => [x.invoice_number, x.promise?.status ?? null]),
+    ]),
+    [
+      ["broken_promise", "builder_call", [[a.invoice_number, null]]],
+      ["statement", "statement", [[a.invoice_number, "broken"], [
+        b2.invoice_number,
+        null,
+      ]]],
+    ],
+  );
+  assertEquals(out.items[1].invoices[0].promise, {
+    amount: 1000,
+    date: "2026-10-02",
+    status: "broken",
+  });
+  assertEquals(out.paused, []);
+
+  // Not Monday: the broken promise is still called; the statement waits for Monday.
+  const tue = plan([a, b2], [
+    ev(a, "2026-09-28", {
+      outcome: "promised",
+      promised_amount: 1000,
+      promised_date: "2026-10-02",
+      amount_due_at_promise: 1000,
+    }),
+  ], "2026-10-06");
+  assertEquals(tue.items.map((i) => i.group), ["broken_promise"]);
+  assertEquals(
+    tue.waiting.map((w) => [w.reason, w.invoice_numbers, w.next_date]),
+    [[
+      "statement_not_due",
+      [a.invoice_number, b2.invoice_number].sort(),
+      "2026-10-12",
+    ]],
   );
 });
 
