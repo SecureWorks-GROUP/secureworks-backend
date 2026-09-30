@@ -173,7 +173,7 @@ jobs:
       - name: Shell syntax check on deploy scripts
         run: |
           # Verify shell scripts are syntactically valid
-          for script in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh; do
+          for script in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh; do
             if [ -f "$script" ]; then
               if bash -n "$script"; then
                 echo "✓ ${script}"
@@ -203,6 +203,14 @@ jobs:
       - name: Check visit outcome business records
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
+
+      # A service-role key committed in 2026-03 stayed live for six months.
+      # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
+      # it sits under.
+      - name: Refuse committed service keys
+        run: |
+          bash scripts/test/test-check-no-committed-service-keys.sh
+          bash scripts/check-no-committed-service-keys.sh
 
       - name: Check migration extension schema contract
         run: |
