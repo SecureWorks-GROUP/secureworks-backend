@@ -66,7 +66,10 @@ export interface DebtBookStore {
   openCopyRows(): Promise<DebtBookCopyRecord[]>;
   jobsByIds(ids: string[]): Promise<DebtBookJobRecord[]>;
   jobsByNumbers(numbers: string[]): Promise<DebtBookJobRecord[]>;
-  /** Job ids (from the given ones) that carry at least one PAID sales invoice in our copy. */
+  /**
+   * Job ids (from the given ones) that have received money in our copy: a PAID sales
+   * invoice, or any sales invoice with an amount paid.
+   */
   paidJobIds(jobIds: string[]): Promise<string[]>;
 }
 
@@ -86,6 +89,20 @@ const COPY_SELECT =
   "xero_invoice_id, invoice_number, status, amount_due, due_date, synced_at, job_id, debt_classification";
 const JOB_SELECT = "id, job_number, status, deposit_at";
 
+/**
+ * Logs an unexpected failure on a debt desk read by name and first stack frame only: a
+ * credential error's message can carry a provider body, so the message is never logged.
+ */
+export function logDebtDeskFailure(action: string, error: unknown) {
+  const name = error instanceof Error ? error.name : typeof error;
+  const frame = error instanceof Error
+    ? (error.stack ?? "").split("\n").map((l) => l.trim()).find((l) =>
+      l.startsWith("at ")
+    ) ?? ""
+    : "";
+  console.error(`[${action}] unexpected failure`, name, frame);
+}
+
 // deno-lint-ignore no-explicit-any
 function readFailed(what: string, error: any): never {
   // A PostgREST error comes back, it is not thrown. Emptiness here would change which
@@ -103,8 +120,8 @@ function readFailed(what: string, error: any): never {
   );
 }
 
-// deno-lint-ignore no-explicit-any
 export function createSupabaseDebtBookStore(
+  // deno-lint-ignore no-explicit-any
   client: any,
   orgId: string,
 ): DebtBookStore {
@@ -174,7 +191,8 @@ export function createSupabaseDebtBookStore(
         const { data, error } = await client.from("xero_invoices").select(
           "job_id",
         )
-          .eq("org_id", orgId).eq("invoice_type", "ACCREC").eq("status", "PAID")
+          .eq("org_id", orgId).eq("invoice_type", "ACCREC")
+          .or("status.eq.PAID,amount_paid.gt.0")
           .in("job_id", part);
         if (error) readFailed("paid invoices on jobs", error);
         for (const r of data || []) if (r?.job_id) out.add(String(r.job_id));
@@ -344,7 +362,7 @@ export async function readDebtBook(
     allJobIds.length ? await store.paidJobIds(allJobIds) : [],
   );
 
-  const rows = invoices.map((invoice) => {
+  const linked = invoices.map((invoice) => {
     const copyRow = copy.get(invoice.xero_invoice_id) ?? null;
     let jobRow: DebtBookJobRecord | null = null;
     let linkSource: DebtBookJobContext["link_source"] = null;
@@ -359,11 +377,22 @@ export async function readDebtBook(
         linkSource = "reference_job_number";
       }
     }
+    return { invoice, copyRow, jobRow, linkSource };
+  });
+  // "part payment counts ... after the first payment of a job, we can chase": money on any
+  // open invoice of the job, live from Xero, is a first payment too.
+  for (const { invoice, jobRow } of linked) {
+    if (jobRow && (invoice.amount_paid ?? 0) > 0) paid.add(String(jobRow.id));
+  }
+
+  const rows = linked.map(({ invoice, copyRow, jobRow, linkSource }) => {
     const job: DebtBookJobContext = {
       job_id: jobRow?.id ?? null,
       job_number: jobRow?.job_number ?? null,
       job_status: jobRow?.status ?? null,
-      first_payment: jobRow
+      first_payment: (invoice.amount_paid ?? 0) > 0
+        ? true
+        : jobRow
         ? (!!jobRow.deposit_at || paid.has(String(jobRow.id)))
         : null,
       link_source: linkSource,

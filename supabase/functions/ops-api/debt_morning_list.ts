@@ -78,9 +78,9 @@ export function createSupabaseDebtChaseLogStore(
       const out: Record<string, unknown>[] = [];
       for (const part of chunks(ids)) {
         for (let offset = 0;; offset += LOG_PAGE) {
-          // `*` on purpose: the desk columns (schedule_step, outcome_code, promised_*) arrive
-          // with plan step 3's additive migration, and a named column that is not there yet
-          // would 400 this read. The table carries no large blobs.
+          // `*` on purpose: the desk columns (schedule_step, outcome_code, promised_*,
+          // amount_due_at_promise) arrive with plan step 3's additive migration, and a named
+          // column that is not there yet would 400 this read. The table carries no large blobs.
           const { data, error } = await client.from("payment_chase_logs")
             .select("*")
             .eq("org_id", orgId)
