@@ -375,6 +375,110 @@ Deno.test("an undated promise does not pause chasing", () => {
 
 // ── Holds ──
 
+Deno.test("held_step: a held homeowner shows the ladder step they would be on, from the log, the Jan start and the ladder end", () => {
+  const disputed = inv({ days_overdue: 10 });
+  const afterCall = plan([disputed], [
+    ev(disputed, "2026-09-28", { step: "friendly_text" }),
+    ev(disputed, "2026-09-29", { step: "firm_text" }),
+    ev(disputed, "2026-09-30", { step: "call", outcome: "disputed" }),
+  ]);
+  assertEquals(
+    afterCall.items.map((i) => [i.group, i.step, i.hold, i.held_step]),
+    [["hold", null, "check_first", "jan_visit"]],
+  );
+
+  const fresh = plan([inv({ days_overdue: 5, hold: "fix_first" })]);
+  assertEquals(fresh.items.map((i) => [i.step, i.hold, i.held_step]), [
+    [null, "fix_first", "friendly_text"],
+  ]);
+
+  const jan = plan([
+    inv({ days_overdue: 5, hold: "check_first", start_step: "jan" }),
+  ]);
+  assertEquals(jan.items.map((i) => i.held_step), ["jan_visit"]);
+
+  const visited = inv({ days_overdue: 20, hold: "check_first" });
+  const end = plan([visited], [
+    ev(visited, "2026-09-25", { step: "jan_visit" }),
+  ]);
+  assertEquals(end.items.map((i) => i.held_step), ["jan_visit"]);
+
+  const notDue = plan([
+    inv({ days_overdue: -3, hold: "check_first" }),
+    inv({
+      days_overdue: null,
+      due_date: null,
+      hold: "check_first",
+      contact_id: "contact-b",
+      contact_name: "Client B",
+    }),
+  ]);
+  assertEquals(notDue.items.map((i) => [i.hold, i.held_step]), [
+    ["check_first", null],
+    ["check_first", null],
+  ]);
+});
+
+Deno.test("held_step: a held builder is on the call at 30 days overdue until called, else the statement", () => {
+  const old = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 40,
+    hold: "check_first",
+    hold_reason: "in dispute",
+  });
+  assertEquals(plan([old], [], MON).items.map((i) => [i.step, i.held_step]), [
+    [null, "builder_call"],
+  ]);
+  const called = plan(
+    [old],
+    [ev(old, "2026-09-28", { step: "builder_call" })],
+    MON,
+  );
+  assertEquals(called.items.map((i) => i.held_step), ["statement"]);
+
+  const young = builder({ days_overdue: 5 });
+  const says = plan([young], [
+    ev(young, "2026-09-30", { outcome: "says_paid" }),
+  ]);
+  assertEquals(says.items.map((i) => [i.group, i.step, i.held_step]), [
+    ["hold", null, "statement"],
+  ]);
+});
+
+Deno.test("held_step: a held deposit is on its reminder only while overdue and not yet reminded", () => {
+  const d = inv({
+    kind: "deposit",
+    is_debt: false,
+    not_debt_reason: "deposit",
+    days_overdue: 3,
+  });
+  const held = plan([d], [ev(d, "2026-09-30", { outcome: "disputed" })]);
+  assertEquals(held.items.map((i) => [i.group, i.step, i.held_step]), [
+    ["hold", null, "deposit_reminder"],
+  ]);
+  const reminded = plan([d], [
+    ev(d, "2026-09-29", { step: "deposit_reminder" }),
+    ev(d, "2026-09-30", { outcome: "disputed" }),
+  ]);
+  assertEquals(reminded.items.map((i) => [i.group, i.held_step]), [
+    ["hold", null],
+  ]);
+});
+
+Deno.test("held_step is null on every item that is not a hold", () => {
+  const a = inv({ days_overdue: 4 });
+  const out = plan(
+    [
+      a,
+      builder({ invoice_date: "2026-08-01", days_overdue: 40 }),
+    ],
+    [],
+    MON,
+  );
+  assert(out.items.length > 1);
+  assert(out.items.every((i) => i.hold === null && i.held_step === null));
+});
+
 Deno.test("holds show with their reason and no step: check first and fix first", () => {
   const check = inv({
     days_overdue: 20,
