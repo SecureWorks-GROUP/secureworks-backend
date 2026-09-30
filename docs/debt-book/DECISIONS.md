@@ -173,6 +173,8 @@ The six are:
    friendly reminder.)
 7. **How Jan gets his list.** (A morning text to Jan, approved by Shaun.
    Shaun records what Jan reports.)
-8. **How the desk goes live while GitHub is down.** (Firstmate applies each
-   change through the Supabase connection after Shaun has seen it. Sends
-   start only after the switch-off and Shaun's go.)
+8. **How the desk goes live.** GitHub is back (captain, chat, 2026-09-30).
+   (The normal route: reviewed pull requests to the backend and the Ops
+   dashboard, each merged on Shaun's approval. The backend deploy lane applies
+   the database change first. The send button stays off until the switch-off
+   and Shaun's go.)

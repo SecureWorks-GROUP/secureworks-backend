@@ -231,9 +231,10 @@ Clear Debt stays in the same place and keeps the same look. Changes:
   shows the newest time, the header overdue excludes holds, and no-due-date
   invoices get their own bucket.
 
-While GitHub is unavailable, the live Ops dashboard (GitHub Pages) cannot
-change. Until then the desk runs as its own page in the same style, signed in
-with the Ops login. It becomes the Clear Debt tab when GitHub returns (step 9).
+GitHub is back (captain, 2026-09-30), so these changes ship into the real
+Clear Debt tab from Thursday. They go through a reviewed secureworks-ux pull
+request, and GitHub Pages serves the result about 3 minutes after merge.
+There is no separate desk page.
 
 ## 6. Build steps, smallest first
 
@@ -246,13 +247,12 @@ Firstmate backlog.
 | 1 | Debt book read | A live Xero read plus the section 3 rules, per-invoice reasons, and a copy-vs-Xero diff | ~½ day | Headline, splits, a "why" per invoice | Thursday |
 | 2 | Morning list | The schedules as data, today's step per payer, holds | ~½ day | The Today list | Thursday |
 | 3 | Draft, approve, send, log | Drafts, approve with a last Xero check, send through `send_chase_sms`, one-tap call outcome, chase-log columns | ~1 day | Approve and send; sent history | Thursday (draft-only if step 0 is not done) |
-| 4 | Desk page | The "after" screen as its own page | ~½ day, in parallel | A link | Thursday |
+| 4 | New Clear Debt screen | The "after" screen in the real Clear Debt tab (secureworks-ux PR); the Today card links to it | ~½ day, in parallel | Ops dashboard, Financials, Clear Debt | Thursday |
 | 5 | Promises and Jan | A promise box, the broken-promise rule, the Jan tab, Jan's morning text (approved) | ~½ day | Promises and Jan tabs | Friday |
 | 6 | Builder statements | A Monday statement per builder, grouped by Xero contact, through its own audited send route | 1–2 days | A statement preview to approve | Next week |
 | 7 | Deposits and weekly cancel list | The Deposits tab, one reminder, a 60-day cancel list | ~½ day | The Deposits tab | Next week |
 | 8 | Fix the copy and screen faults | B7 re-check of closed rows (or a nightly ID-set diff), B17, retire B8 | ~1 day | Clear Debt and desk agree to the cent | Next week |
-| 9 | Move into the Ops dashboard | The desk becomes the Clear Debt tab; the Today card links to it | ~1 day | One place | When GitHub is back |
-| 10 | Every number agrees | The Today card, Invoices tab, CEO pages, digest and AI tools read the debt book (B9 to B12) | 1–2 days | The same number everywhere | Later |
+| 9 | Every number agrees | The Today card, Invoices tab, CEO pages, digest and AI tools read the debt book (B9 to B12) | 1–2 days | The same number everywhere | Later |
 
 Being honest about Thursday: steps 1 to 4 add up to about two days of work,
 done in parallel across two workers from Wednesday afternoon. If it slips,
@@ -261,21 +261,27 @@ sending is still worth reviewing on Thursday.
 
 ### Technical notes for the workers
 
-- **Base.** Local `main` (`bfd06cb0`) is 267 commits behind the newest known
-  backend, `origin/shaun/agent-skills-setup` @ `509ed121`, and does not even
-  contain `ops-api/debt_picture.ts`. The deployed ops-api version was not
-  observed. Build on a branch from `509ed121` plus the local security commits.
-  Never deploy `ops-api` from this checkout (see "Production Edge Deploy
-  Rule" and "Measure The Deployed Thing" in AGENTS.md).
-- **New function, not ops-api.** Put the desk in its own edge function,
-  `debt-desk` (for example `supabase/functions/debt-desk/`). Deploying it then
-  cannot overwrite `ops-api`.
-  - It reads Xero through the existing read-only receivables module
-    (`ops-api/xero_receivables_read.ts` at `509ed121`), imported, not copied.
-  - It sends only through already-live ops-api actions: `send_chase_sms` and
+- **Base.** The local clones were taken while GitHub was down and are stale.
+  This checkout's `main` (`bfd06cb0`) does not even contain
+  `ops-api/debt_picture.ts`. Every build task branches from current GitHub
+  `main` in both repos (backend and secureworks-ux), after the branches parked
+  in firstmate's `github-pending.md` have been pushed.
+- **Ship the normal way.** Changes ship as reviewed pull requests:
+  - Backend changes merge to `main`. The Edge deploy workflow applies pending
+    migrations first, then deploys the function (see "Migrations Apply Before
+    Edge Deploys" and "Production Edge Deploy Rule" in AGENTS.md).
+  - Nothing is deployed from a local checkout, and there is no
+    Supabase-connector apply.
+  - The UX change is a secureworks-ux PR, live on GitHub Pages after merge.
+  - `deno-check` is the one required check on the backend.
+- **Where the code lives.** The desk lives inside `ops-api` as its own modules,
+  following the `debt_picture.ts` pattern. It must not grow `index.ts` beyond
+  the action wiring.
+  - The pure logic is `debt_book_rules.ts` and `debt_chase_schedule.ts`, each
+    with a `_test.ts`.
+  - Xero reads go through the existing read-only `xero_receivables_read.ts`.
+  - SMS goes through the existing `send_chase_sms` path, and notes through
     `add_debt_note`.
-  - Pure logic lives in small modules (`debt_book_rules.ts`,
-    `debt_chase_schedule.ts`), each with a `_test.ts`.
 - **Schema.** Make one additive migration on `payment_chase_logs`:
   - `channel` (sms, email, call, visit, statement, letter);
   - `direction`;
@@ -289,10 +295,10 @@ sending is still worth reviewing on Thursday.
 
   Add row-level security to the table: it has none today, and debt-map-s1
   B19 notes this. Check the migration version against the live ledger
-  (`supabase_migrations.schema_migrations`) before applying, and apply it
-  before the function that selects the new columns. Firstmate applies both
-  through the Supabase connection after the captain has seen them (open
-  item 8).
+  (`supabase_migrations.schema_migrations`), because production carries
+  versions this repo lacks. Ship the migration in the same PR as the code
+  that selects its columns, or land it first. The deploy lane applies it
+  before the function.
 - **Last check.** One live `get_xero_receivable` per send. Remember the Xero
   limit of 60 calls a minute: a batch of about 20 sends is fine, but send in
   sequence, not fanned out.
@@ -334,19 +340,20 @@ These come from debt-map-s1 section 7.
 | B7 | The copy never re-checks rows it thinks are closed or deleted: 6 invoices, $3,583.48 | Step 1 works around it by reading Xero live; step 8 fixes it |
 | B8 | `mark_invoice_paid` writes our copy only | Step 8 (retire) |
 | B17 | Clear Debt display faults | The desk avoids them; step 8 fixes them |
-| B9–B12 | Other screens' overdue totals | Step 10 |
-| B13, B14 | Wrong or name-matched job links | After step 10. The desk shows the link it used |
+| B9–B12 | Other screens' overdue totals | Step 9 |
+| B13, B14 | Wrong or name-matched job links | After step 9. The desk shows the link it used |
 | B15 | `reconcile_payment` audit and bank-account faults | Later (payments are matched in Xero) |
 | B16, B18 | Health check; old CEO page auth | Later, outside this plan |
 | B19 | Committed service key | The separate security task (under way) |
 
 ## 9. Risks
 
-- **GitHub is down.** The live dashboard cannot change. Mitigation: a
-  separate desk page until step 9.
-- **The local code is behind production, and the deployed version is not
-  observed.** Mitigation: a new function slug, and send through live actions
-  only.
+- **Building on stale code.** The local clones predate GitHub's return.
+  Mitigation: branch from current GitHub `main`, and go live only through
+  reviewed PRs and the deploy lane.
+- **An unfinished desk in front of staff.** The new screen is in the real
+  dashboard from Thursday. Mitigation: the send button stays off until
+  step 0 is done and Shaun says go.
 - **Chasing someone who has already paid.** Mitigations:
   - the last Xero check before every send;
   - "says paid" as an outcome;
@@ -377,5 +384,6 @@ the captain rules otherwise:
    the deposits list.
 6. Perth Zoo and other before-work invoices are treated like deposits.
 7. Jan gets a morning text approved by Shaun; Shaun records the outcomes.
-8. Go-live goes through firstmate's Supabase connection after Shaun has seen
-   each change. Sends only after step 0 and Shaun's go.
+8. Go-live is the normal GitHub route: reviewed PRs, merged on Shaun's
+   approval, and the backend deploy lane. Sends only after step 0 and Shaun's
+   go.
