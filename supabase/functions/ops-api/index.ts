@@ -500,6 +500,7 @@ import {
   createXeroReadGet,
 } from './xero_receivables_read.ts'
 import { createSupabaseDebtBookStore, DebtBookError, readDebtBook } from './debt_book.ts'
+import { createSupabaseDebtChaseLogStore, readDebtMorningList } from './debt_morning_list.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
 import { insuranceReadAction } from './insurance_read_handlers.ts'
 import {
@@ -7617,6 +7618,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             getToken,
             xeroGet: xeroReadGet,
             store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
+          }))
+        } catch (error) {
+          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
+            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+          }
+          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
+        }
+      }
+      // ── Debt morning list (plan step 2, docs/debt-book/PLAN.md) ──
+      // Read-only: the debt book plus the chase log, worked into today's step per payer
+      // (debt_chase_schedule.ts). No drafts, no sending, no writes.
+      case 'debt_morning_list': {
+        if (req.method !== 'GET') {
+          return json({ ok: false, error: 'debt_morning_list requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+        }
+        try {
+          return json(await readDebtMorningList(client, url.searchParams, {
+            getToken,
+            xeroGet: xeroReadGet,
+            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
+            chaseLog: createSupabaseDebtChaseLogStore(client, DEFAULT_ORG_ID),
           }))
         } catch (error) {
           if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {

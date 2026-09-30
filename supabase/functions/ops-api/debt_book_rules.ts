@@ -12,7 +12,9 @@
 //      corrections (DEBT_BOOK_CORRECTIONS) override a wrong label;
 //   5. a client final on an unfinished job is "check first", never dropped;
 //   6. overdue means the Perth date is after the due date; no due date is its own bucket;
-//   7. holds keep an invoice in the figure but give it no chase draft.
+//   7. holds keep an invoice in the figure but give it no chase draft (check first: the named
+//      doubts and desk classes in_dispute, not_owed, blocked_by_us and bad_debt; fix first:
+//      rectification).
 
 export type DebtBookPayerKey =
   | "client"
@@ -292,11 +294,15 @@ export const DEBT_BOOK_FINISHED_JOB_STATUSES = [
   "archived",
   "rectification",
 ] as const;
-/** Clear Debt desk classes that put a debt invoice on "check first". */
+/**
+ * Clear Debt desk classes that put a debt invoice on "check first". bad_debt is held too:
+ * a write-off is only Shaun's, in Xero (Q15), so nothing chases it until he has checked it.
+ */
 export const DEBT_BOOK_HOLD_DESK_CLASSES = [
   "in_dispute",
   "not_owed",
   "blocked_by_us",
+  "bad_debt",
 ] as const;
 
 export interface DebtBookInvoice {
