@@ -217,7 +217,9 @@ The rules are applied in order. They are the tested core of step 1.
 7. **Holds.** A hold keeps the invoice in the figure but gives it no chase
    draft:
    - "check first": the doubt list above, plus any invoice the desk class marks
-     `in_dispute`, `not_owed` or `blocked_by_us`;
+     `in_dispute`, `not_owed`, `blocked_by_us` or `bad_debt`. A `bad_debt`
+     invoice is never chased; the desk suggests a write-off, which only Shaun
+     does, in Xero;
    - "fix first": the job is in rectification. It counts, but gets no chase
      until the fix is done (captain, round 6).
 
@@ -297,8 +299,9 @@ Clear Debt stays in the same place and keeps the same look. Changes:
   and the invoices all stay.
 - **Faults.** The B17 display faults go: ages use the Perth date, "refreshed"
   shows the newest time, disputed, not-owed and bad-debt invoices are no
-  longer counted in "overdue" unseen (they stay in it, and are also shown as
-  separate hold figures), and no-due-date invoices get their own bucket.
+  longer counted in "overdue" unseen (they stay in it, and are also shown
+  under the "check first" hold figure), and no-due-date invoices get their
+  own bucket.
 
 GitHub is back (captain, 2026-09-30), so these changes ship into the real
 Clear Debt tab from Thursday. They go through a reviewed secureworks-ux pull
