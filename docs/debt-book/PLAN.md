@@ -285,16 +285,20 @@ Clear Debt stays in the same place and keeps the same look. Changes:
 
 - **Header.** It shows debt by the captain's definition ($89,049 / 97,
   $57,903 overdue) and a stamp: "Matches Xero, read HH:MM", or "differs by $X
-  on N invoices". Beside it: open in Xero, not debt, check first, and waiting
-  for Shaun. "Texts waiting for Marnin" goes.
+  on N invoices". The overdue figure is the whole-debt overdue that matches
+  Xero, so it includes held invoices. Beside it: open in Xero, not debt,
+  "check first" and "fix first" (each hold shown as its own figure), and
+  waiting for Shaun. Held invoices get no chase draft on the morning list.
+  "Texts waiting for Marnin" goes.
 - **Tabs.** Today (the morning list, first) | Debt book | Promises | Jan |
   Deposits. The debt book tab holds the existing bar and payer groups.
 - **Payer card.** It gains outcome buttons (no answer, spoke, promised $ by
   date, disputed, says paid) and a promise box. Text, email, notes, the brief
   and the invoices all stay.
 - **Faults.** The B17 display faults go: ages use the Perth date, "refreshed"
-  shows the newest time, the header overdue excludes holds, and no-due-date
-  invoices get their own bucket.
+  shows the newest time, disputed, not-owed and bad-debt invoices are no
+  longer counted in "overdue" unseen (they stay in it, and are also shown as
+  separate hold figures), and no-due-date invoices get their own bucket.
 
 GitHub is back (captain, 2026-09-30), so these changes ship into the real
 Clear Debt tab from Thursday. They go through a reviewed secureworks-ux pull
@@ -365,7 +369,13 @@ sending is still worth reviewing on Thursday.
 - **Schema.** Make one additive migration on `payment_chase_logs`:
   - no new channel column: widen the existing `method` CHECK constraint to
     add `visit`, `statement` and `letter`, so `method` stays the one channel
-    field that Clear Debt and `send_chase_sms` already use;
+    field that Clear Debt and `send_chase_sms` already use. That means
+    dropping and re-adding `payment_chase_logs_method_check`, re-listing
+    every value from the LIVE `pg_constraint` definition (nine today, per
+    `20260911120000_debt_picture.sql`: call, sms, auto_sms, email, note,
+    status_change, personality_note, classification, proposal) plus the
+    three new ones. Never copy the older `20260326000001_clear_debt.sql`
+    list, which lacks classification and proposal;
   - `direction`;
   - `outcome_code`, a closed list, beside the existing free-text `outcome`
     column, which stays for notes and older rows;
