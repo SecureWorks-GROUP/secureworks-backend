@@ -868,7 +868,7 @@ Deno.test("builders: an open promise stays on the Monday statement, marked promi
       i.invoices.map((x) => [x.invoice_number, x.promise?.status ?? null]),
     ]),
     [
-      ["broken_promise", [[promised.invoice_number, null]]],
+      ["broken_promise", [[promised.invoice_number, "broken"]]],
       ["statement", [[promised.invoice_number, "broken"], [
         other.invoice_number,
         null,
@@ -895,7 +895,7 @@ Deno.test("builders: a broken promise stays on the Monday statement, marked brok
       i.invoices.map((x) => [x.invoice_number, x.promise?.status ?? null]),
     ]),
     [
-      ["broken_promise", "builder_call", [[a.invoice_number, null]]],
+      ["broken_promise", "builder_call", [[a.invoice_number, "broken"]]],
       ["statement", "statement", [[a.invoice_number, "broken"], [
         b2.invoice_number,
         null,
@@ -1109,4 +1109,105 @@ Deno.test("chase log: only the desk's own rows drive the schedule; older rows ar
     }),
     null,
   );
+});
+
+Deno.test("builders: a statement's promise is per invoice; the item's is set only when every line agrees", () => {
+  const a = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 10,
+    amount_due: 300,
+  });
+  const b2 = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 10,
+    amount_due: 200,
+  });
+  const promiseRow = ev(a, "2026-10-02", {
+    outcome: "promised",
+    promised_amount: 300,
+    promised_date: "2026-10-09",
+    amount_due_at_promise: 300,
+  });
+  const open = { amount: 300, date: "2026-10-09", status: "open" as const };
+
+  // One line promised, the other not: the whole statement is not promised.
+  const one = plan([a, b2], [promiseRow], MON);
+  assertEquals(one.items.map((i) => [i.group, i.amount]), [["statement", 500]]);
+  assertEquals(one.items[0].promise, null);
+  assertEquals(one.items[0].invoices.map((x) => x.promise), [open, null]);
+  assertEquals(one.items[0].last_outcome?.code, "promised");
+
+  // A call logged on the other invoice after the promise does not clear this one's.
+  const called = plan([a, b2], [
+    promiseRow,
+    ev(b2, "2026-10-03", { step: "builder_call" }),
+  ], MON);
+  assertEquals(called.items[0].promise, null);
+  assertEquals(called.items[0].invoices.map((x) => x.promise), [open, null]);
+  assertEquals(called.paused.map((p) => p.promise), [open]);
+
+  // Both lines promised alike: the item carries that promise.
+  const both = plan([a, b2], [
+    promiseRow,
+    ev(b2, "2026-10-02", {
+      outcome: "promised",
+      promised_amount: 300,
+      promised_date: "2026-10-09",
+      amount_due_at_promise: 200,
+    }),
+  ], MON);
+  assertEquals(both.items[0].promise, open);
+});
+
+Deno.test("builders: several broken promises are one call, each line keeping its own promise", () => {
+  const a = builder({ invoice_date: "2026-08-01", days_overdue: 10 });
+  const b2 = builder({ invoice_date: "2026-08-01", days_overdue: 10 });
+  const out = plan([a, b2], [
+    ev(a, "2026-09-25", {
+      outcome: "promised",
+      promised_amount: 1000,
+      promised_date: "2026-09-26",
+    }),
+    ev(b2, "2026-09-27", {
+      outcome: "promised",
+      promised_amount: 1000,
+      promised_date: "2026-09-28",
+    }),
+  ], "2026-10-06");
+  const broken = out.items.find((i) => i.group === "broken_promise")!;
+  assertEquals(
+    broken.invoices.map((x) => [x.promise?.date, x.promise?.status]),
+    [
+      ["2026-09-26", "broken"],
+      ["2026-09-28", "broken"],
+    ],
+  );
+  assertEquals(broken.promise, null);
+  assertEquals(broken.last_outcome?.at, "2026-09-27T01:00:00.000Z");
+});
+
+Deno.test("deposits: a reminder item's promise is per invoice, never merged", () => {
+  const dep = (over: Partial<DebtChaseBookInvoice> = {}) =>
+    inv({
+      is_debt: false,
+      kind: "deposit",
+      not_debt_reason: "deposit",
+      ...over,
+    });
+  const a = dep();
+  const b2 = dep();
+  const out = plan([a, b2], [
+    ev(a, "2026-09-25", {
+      outcome: "promised",
+      promised_amount: 1000,
+      promised_date: "2026-09-26",
+    }),
+    ev(b2, "2026-09-29", { step: "friendly_text" }),
+  ]);
+  const reminder = out.items.find((i) => i.group === "deposit_reminder")!;
+  assertEquals(reminder.invoices.map((x) => x.promise?.status ?? null), [
+    "broken",
+    null,
+  ]);
+  assertEquals(reminder.promise, null);
 });

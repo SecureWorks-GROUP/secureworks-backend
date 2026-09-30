@@ -13,8 +13,10 @@
 //   - Builders (MLB, AJ, other builders): each invoice goes on the Monday statement once it
 //     is 14 days past its invoice date, every Monday while unpaid; any invoice 30 days past
 //     its due date also gets one call from Shaun. An invoice with an open or broken promise
-//     stays on the statement, its line carrying that promise; logging the statement does not
-//     clear a promise.
+//     stays on the statement; logging the statement does not clear a promise.
+//   - Builder and deposit items are per invoice: each invoice line carries its own promise,
+//     and the item's promise is set only when every line agrees. Homeowner items keep one
+//     payer-level promise and null lines.
 //   - Deposits and before-work invoices: one friendly reminder once overdue. The 60-day
 //     cancel list is plan step 7, not built here.
 //   - Promises pause chasing until the promised date. The morning after it, the promise is
@@ -231,7 +233,7 @@ export interface DebtMorningItem {
     due_date: string | null;
     invoice_date: string | null;
     days_overdue: number | null;
-    /** On a statement line: the invoice's own open ("promised by") or broken promise. */
+    /** On a builder or deposit item: this invoice's own promise. Null on homeowner items. */
     promise: DebtChasePromise | null;
   }>;
   hold: "check_first" | "fix_first" | null;
@@ -436,7 +438,7 @@ const byNumber = (a: DebtChaseBookInvoice, b: DebtChaseBookInvoice) =>
 
 function invoiceLines(
   invoices: DebtChaseBookInvoice[],
-  promises?: Map<string, DebtChasePromise>,
+  promiseOf: (i: DebtChaseBookInvoice) => DebtChasePromise | null = () => null,
 ) {
   return [...invoices].sort(byNumber).map((i) => ({
     xero_invoice_id: i.xero_invoice_id,
@@ -445,7 +447,7 @@ function invoiceLines(
     due_date: i.due_date,
     invoice_date: i.invoice_date,
     days_overdue: i.days_overdue,
-    promise: promises?.get(i.xero_invoice_id) ?? null,
+    promise: promiseOf(i),
   }));
 }
 
@@ -511,10 +513,21 @@ export function planDebtMorningList(
       hold_reason?: string | null;
       held_step?: DebtChaseStep | null;
       state?: ChaseState | null;
-      promises?: Map<string, DebtChasePromise>;
+      perInvoice?: boolean;
     },
   ) => {
     const first = invs[0];
+    const lines = invoiceLines(
+      invs,
+      fields.perInvoice ? (i) => stateFor([i]).promise : undefined,
+    );
+    const agreed =
+      lines.every((l) =>
+          JSON.stringify(l.promise) === JSON.stringify(lines[0].promise)
+        )
+        ? lines[0].promise
+        : null;
+    const state = fields.perInvoice ? stateFor(invs) : fields.state;
     const key = payerKey(first);
     const contact = first.payer === "client"
       ? contactFor(invs)
@@ -535,14 +548,14 @@ export function planDebtMorningList(
       step_label: fields.step_label,
       amount: invs.reduce((a, i) => a + cents(i.amount_due), 0) / 100,
       days_overdue: maxDays(invs),
-      invoices: invoiceLines(invs, fields.promises),
+      invoices: lines,
       hold: fields.hold ?? null,
       hold_reason: fields.hold_reason ?? null,
       held_step: fields.held_step ?? null,
       phone: contact.phone,
       email: contact.email,
-      promise: fields.state?.promise ?? null,
-      last_outcome: fields.state ? lastOutcomeOf(fields.state) : null,
+      promise: fields.perInvoice ? agreed : state?.promise ?? null,
+      last_outcome: state ? lastOutcomeOf(state) : null,
       draft: null,
     });
   };
@@ -721,7 +734,6 @@ export function planDebtMorningList(
   );
   for (const invs of groupBy(builderDebt, payerKey).values()) {
     const statement: DebtChaseBookInvoice[] = [];
-    const statementPromises = new Map<string, DebtChasePromise>();
     const calls: DebtChaseBookInvoice[] = [];
     const broken: DebtChaseBookInvoice[] = [];
     const tooYoung: DebtChaseBookInvoice[] = [];
@@ -745,7 +757,6 @@ export function planDebtMorningList(
         ageFromInvoice >= b.statement_after_invoice_days
       ) {
         statement.push(i);
-        if (promise) statementPromises.set(i.xero_invoice_id, promise);
       } else if (!promise) tooYoung.push(i);
       if (promise?.status === "open") openPromises.push([i, promise]);
       else if (promise?.status === "broken") broken.push(i);
@@ -757,7 +768,7 @@ export function planDebtMorningList(
         group: "broken_promise",
         step: "builder_call",
         step_label: `Promise broken: ${DEBT_CHASE_STEPS.builder_call.label}`,
-        state: stateFor(broken),
+        perInvoice: true,
       });
     }
     if (calls.length) {
@@ -765,7 +776,7 @@ export function planDebtMorningList(
         group: "call",
         step: "builder_call",
         step_label: DEBT_CHASE_STEPS.builder_call.label,
-        state: stateFor(calls),
+        perInvoice: true,
       });
     }
     if (statement.length) {
@@ -777,8 +788,7 @@ export function planDebtMorningList(
           group: "statement",
           step: "statement",
           step_label: DEBT_CHASE_STEPS.statement.label,
-          state: stateFor(statement),
-          promises: statementPromises,
+          perInvoice: true,
         });
       } else {
         wait(statement, sentToday ? "done_today" : "statement_not_due", {
@@ -837,7 +847,7 @@ export function planDebtMorningList(
         group: "deposit_reminder",
         step: "deposit_reminder",
         step_label: DEBT_CHASE_STEPS.deposit_reminder.label,
-        state: stateFor(due),
+        perInvoice: true,
       });
     }
   }
