@@ -329,8 +329,11 @@ sending is still worth reviewing on Thursday.
 
 - **Base: always the newest code** (captain, round 6: "make sure we're
   building on the most up to date one"). The local clones were taken while
-  GitHub was down and are stale. This checkout's `main` (`bfd06cb0`) does not
-  even contain `ops-api/debt_picture.ts`. Before step 0:
+  GitHub was down and went stale: the old local `main` (`bfd06cb0`) did not
+  even contain `ops-api/debt_picture.ts`. This plan is checked against GitHub
+  `main` @ `de512e2c` (2026-09-30), where `debt_picture.ts`,
+  `xero_receivables_read.ts`, `send_chase_sms`, `add_debt_note` and
+  `ops_api_version` all exist. Before step 0:
   - push the branches parked in firstmate's `github-pending.md`;
   - refresh every local clone's `main` from GitHub `main`, in the backend and
     in secureworks-ux.
@@ -342,9 +345,7 @@ sending is still worth reviewing on Thursday.
   3. Before relying on anything live, it checks the deployed version with
      `ops-api?action=ops_api_version` and `git merge-base --is-ancestor`.
 
-  A branch built on a stale base is refused, not merged. This plan branch
-  itself was cut from the stale local `main`, so it must be rebased onto
-  GitHub `main` before it lands.
+  A branch built on a stale base is refused, not merged.
 - **Ship the normal way.** Changes ship as reviewed pull requests:
   - Backend changes merge to `main`. The Edge deploy workflow applies pending
     migrations first, then deploys the function (see "Migrations Apply Before
