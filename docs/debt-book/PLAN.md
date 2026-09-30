@@ -184,7 +184,9 @@ The rules are applied in order. They are the tested core of step 1.
    report, repair (supply, install or replace wording), otherwise make-safe.
 4. **Client invoices.** The first rule that matches wins:
    - `PROG` means a progress claim. It is debt only if the job has had a first
-     payment, meaning any PAID invoice on the job or `jobs.deposit_at` set.
+     payment, meaning any money received on the job: a PAID invoice, an
+     amount paid on any of its invoices (part payment counts, round 2), or
+     `jobs.deposit_at` set.
      The one exception is INV-1477 (Perth Zoo), which the captain ruled is
      really a deposit.
    - `MAT` / `MAT50` means a materials invoice (first seen 2026-09-30). It is
@@ -277,8 +279,10 @@ The schedules:
   goes on the weekly cancel list. Shaun approves the list, and the void
   happens in Xero.
 - **Promises:** a promise records an amount and a date, and pauses chasing.
+  A promised builder invoice still stays on the Monday statement, marked.
   The morning after the date, if Xero shows it unpaid or short, the invoice
-  goes to the top marked "promise broken", at the next step.
+  goes to the top marked "promise broken", at the next step. This holds for
+  deposits too.
 - **Write-offs:** only Shaun, in Xero. The desk may suggest one, never do one.
 
 ## 5. What changes on Clear Debt

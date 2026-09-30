@@ -36,10 +36,10 @@
 // fix first, or an outcome hold, disputed or says paid) `step` stays null and `held_step`
 // is the step the payer would be on if not held: for a homeowner the next ladder step after
 // the last desk step (respecting the Jan start and the ladder end); for a builder
-// builder_call when an invoice is 30 days overdue and not yet called, else statement; for a
-// deposit deposit_reminder when it is overdue and not yet reminded. It is null when no step
-// applies (not yet due, no due date, already reminded), and null on every item that is not
-// a hold.
+// builder_call when an invoice is 30 days overdue and not called since that day, else
+// statement; for a deposit deposit_reminder when it is overdue and not yet reminded. It is
+// null when no step applies (not yet due, no due date, already reminded), and null on
+// every item that is not a hold.
 //
 // Only the desk's own chase-log rows (those carrying a schedule step or an outcome code)
 // move the schedule. Older rows are history: that is what starts the launch backlog at the
