@@ -1,3 +1,4 @@
+// deno-fmt-ignore-file -- one invoice per line keeps the 112-row acceptance table reviewable.
 // Acceptance fixture: the Xero open receivables book of 29 Sep 2026, 15:19 Perth
 // (07:19 UTC), with each invoice's backend job status and Clear Debt copy class.
 //
