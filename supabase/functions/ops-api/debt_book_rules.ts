@@ -328,7 +328,10 @@ export interface DebtBookJobContext {
   job_id?: string | null;
   job_number: string | null;
   job_status: string | null;
-  /** true when the job has a PAID invoice or jobs.deposit_at; null when not known. */
+  /**
+   * true when the job has had any money: jobs.deposit_at, a PAID sales invoice, or an
+   * amount paid on this or any other sales invoice of the job; null when not known.
+   */
   first_payment: boolean | null;
   link_source: "copy_job_id" | "reference_job_number" | null;
   /** The Clear Debt desk class on our copy of the invoice (xero_invoices.debt_classification). */
