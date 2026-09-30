@@ -1,8 +1,9 @@
 -- Read-only pre-check for 20260930120000_cron_service_key_from_vault.sql.
 --
 -- Run each numbered query on its own (the Supabase SQL connector returns one
--- result set per call), as postgres, BEFORE applying the migration, and keep
--- the output: the post-check compares against it.
+-- result set per call), as postgres, BEFORE the merge to main that applies the
+-- migration through the deploy lane, and keep the output: the post-check
+-- compares against it.
 --
 -- Every query is a plain SELECT. No key is ever returned: JWT-shaped strings
 -- are replaced by <JWT> or reduced to a 6-hex sha256 fingerprint inside SQL,
@@ -14,7 +15,7 @@
 -- Vault key's own value. In production public.sw_service_key() only ever
 -- returns a JWT, so the JWT checks below cover both.
 --
--- Go / no-go: apply only when query 3 shows `rewrite` (or `absent` /
+-- Go / no-go: ask for the merge only when query 3 shows `rewrite` (or `absent` /
 -- `unchanged`) for all twelve jobs and query 4 returns no rows. Any `REFUSE`
 -- names the precondition the migration would fail on; it would change nothing.
 
@@ -77,7 +78,7 @@ facts AS (
     (SELECT bool_and(b[1] = p.vault_key)
        FROM regexp_matches(j.command, '''Bearer (' || p.jwt || ')''', 'g') b) AS bearer_sql_literals_match_vault,
     j.command ~ p.legacy_helper AS uses_legacy_helper,
-    regexp_replace(j.command, p.legacy_helper, '', 'g') ~ '_sw_service_key' AS legacy_helper_unrecognised,
+    regexp_replace(j.command, p.legacy_helper, '', 'g') ~* '_sw_service_key' AS legacy_helper_unrecognised,
     j.command ~ 'public\.sw_service_key\(\)' AS uses_vault_accessor,
     (j.username = current_user OR coalesce(p.is_superuser, false)) AS owner_can_alter,
     CASE WHEN j.username IS NOT NULL

@@ -98,4 +98,20 @@ fi
 run_check "$repo" --everything
 [[ "$STATUS" -eq 64 ]] || fail "unknown argument accepted: $OUTPUT"
 
+# 6. Only a clean "no match" passes: a git grep that fails, or exits 1 while
+#    still printing, is never read as a clean tree.
+run_check "$TMP_DIR"
+[[ "$STATUS" -eq 2 ]] || fail "git grep failure outside a repo was not refused: $OUTPUT"
+
+FAKE_BIN="$TMP_DIR/fake-bin"
+mkdir -p "$FAKE_BIN"
+printf '#!/usr/bin/env bash\necho "cron.sql:1:not-a-key"\nexit 1\n' > "$FAKE_BIN/git"
+chmod +x "$FAKE_BIN/git"
+repo="$(new_repo odd-status)"
+set +e
+OUTPUT=$(cd "$repo" && PATH="$FAKE_BIN:$PATH" bash "$CHECK" 2>&1)
+STATUS=$?
+set -e
+[[ "$STATUS" -eq 2 ]] || fail "git grep exit 1 with output was read as clean: $OUTPUT"
+
 echo "PASS test-check-no-committed-service-keys"

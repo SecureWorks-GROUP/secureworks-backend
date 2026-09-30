@@ -30,16 +30,16 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 set +e
-matches=$(git grep -I -n -o -E "${GREP_SCOPE[@]}" \
+matches=$(git grep -I -n -o -E ${GREP_SCOPE[@]+"${GREP_SCOPE[@]}"} \
   -e 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*' \
   -e 'sb_secret_[A-Za-z0-9_-]{16,}')
 status=$?
 set -e
-if [[ "$status" -eq 1 ]]; then
+if [[ "$status" -eq 1 && -z "$matches" ]]; then
   echo "OK service-key check: no committed server keys"
   exit 0
 fi
-[[ "$status" -eq 0 ]] || {
+[[ "$status" -eq 0 && -n "$matches" ]] || {
   echo "FAIL service-key check: git grep exited $status" >&2
   exit 2
 }

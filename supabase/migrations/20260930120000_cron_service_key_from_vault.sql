@@ -21,7 +21,8 @@
 --     jsonb_build_object, the shape the rollback writes) becomes
 --     'Bearer ' || public.sw_service_key().
 --   - A _sw_service_key() / public._sw_service_key() call becomes
---     public.sw_service_key().
+--     public.sw_service_key(). Any other spelling of _sw_service_key (quoted,
+--     upper case) is refused, never skipped.
 --
 -- This is a pure refactor of WHERE the key comes from, never WHICH key is sent:
 -- the migration refuses a job whose pasted key is not byte-identical to the
@@ -37,7 +38,9 @@
 -- Fail-closed: the whole migration is one DO block, so any refusal changes no
 -- job. No message it raises carries a command or a key.
 --
--- Run first: scripts/cron-service-key-precheck.sql (read-only).
+-- Merging to main applies this through the deploy lane
+-- (scripts/apply-pending-migrations.sh), so run the read-only pre-check
+-- scripts/cron-service-key-precheck.sql against production before the merge.
 -- Verify after: scripts/cron-service-key-postcheck.sql (read-only).
 -- Rollback: supabase/rollbacks/20260930120000_cron_service_key_from_vault_down.sql.
 
@@ -101,7 +104,7 @@ BEGIN
   LOOP
     IF j.command !~ c_jwt
        AND strpos(j.command, v_vault_key) = 0
-       AND j.command !~ c_legacy_helper THEN
+       AND j.command !~* '_sw_service_key' THEN
       RAISE NOTICE 'cron job % (id %) carries no pasted key and no legacy helper; left unchanged',
         j.jobname, j.jobid;
       CONTINUE;
@@ -165,7 +168,7 @@ BEGIN
       RAISE EXCEPTION 'cron job % (id %) still carries a pasted key in an unrecognised shape; rewrite it by hand',
         j.jobname, j.jobid;
     END IF;
-    IF v_cmd ~ '_sw_service_key' THEN
+    IF v_cmd ~* '_sw_service_key' THEN
       RAISE EXCEPTION 'cron job % (id %) still references _sw_service_key in an unrecognised shape; rewrite it by hand',
         j.jobname, j.jobid;
     END IF;

@@ -37,15 +37,23 @@ Vault holds: the requests on the wire stay byte-for-byte the same. It is covered
 by the migration contract under
 `supabase/tests/migration-contracts/20260930120000_cron_service_key_from_vault/`.
 
-Procedure (firstmate, through the Supabase connection):
+Merging this branch to `main` is what applies Step 2. The push to `main` runs
+the Deploy Edge Functions workflow, and `scripts/apply-pending-migrations.sh`
+applies every migration from the auto-apply baseline up that production's
+ledger does not have yet, this one included. Do not also apply it by hand.
 
-1. Run each query in `scripts/cron-service-key-precheck.sql` on its own and keep
-   the output. Go only if query 3 says `rewrite` (or `absent` / `unchanged`) for
-   all twelve jobs, query 4 returns nothing, query 2's fingerprint is `4595ba`
-   and query 1 shows `version_20260930120000_taken = false`.
-2. Apply the migration. If the connector records it under a different version,
-   rename the file and its contract directory to that version, as was done for
-   Step 1 (`bfd06cb0`).
+Procedure:
+
+1. Before asking the Captain to merge, firstmate runs each query in
+   `scripts/cron-service-key-precheck.sql` on its own against production
+   (read-only, through the Supabase connection) and keeps the output. Ask for
+   the merge only if query 3 says `rewrite` (or `absent` / `unchanged`) for all
+   twelve jobs, query 4 returns nothing, query 2's fingerprint is `4595ba` and
+   query 1 shows `version_20260930120000_taken = false`. On a no-go, do not
+   merge: a refusal in the deploy lane changes no job, but it fails that deploy
+   run and holds every later edge deploy until it is fixed.
+2. The Captain merges; the deploy lane applies the migration. Check that the
+   run's migration step passed.
 3. Run `scripts/cron-service-key-postcheck.sql` straight away (queries 1-2),
    then again after an hour (queries 3-4, with the apply time filled in).
 4. Only if the jobs fail because the Vault read fails in the cron worker, run

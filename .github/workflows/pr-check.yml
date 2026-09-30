@@ -69,6 +69,15 @@ on:
       # or data/-only PR. This subsumes the former single-file
       # 'docs/ses-reporting-proof-harness.md' entry.
       - "docs/**"
+      # The committed-service-key guard below scans every tracked file, but it
+      # only runs when this workflow fires. A PR that only swaps the browser
+      # apps' Supabase keys (legacy-key removal Step G) touches just these
+      # paths, so without them a pasted sb_secret_ key would merge unchecked.
+      # '*.html' is root-only, like '*.md' above.
+      - "supabase/config.js"
+      - "supabase/config.example.js"
+      - "tools/**"
+      - "*.html"
 
 permissions:
   contents: read
