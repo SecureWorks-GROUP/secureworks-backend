@@ -158,15 +158,24 @@ function validateParams(params: Params) {
   }
 }
 
+export const DEBT_BOOK_UNSTABLE_MESSAGE = 'Xero changed during the read, retrying next run'
+
+function pageIds(invoices: Array<Record<string, unknown>>): string {
+  return invoices.map((invoice) => String(invoice.InvoiceID).toLowerCase()).join(',')
+}
+
 /** Read every page of the open book, stopping only on Xero's end of results. */
-async function readOpenBook(client: unknown, deps: ReceivablesDeps) {
+async function readOpenBookOnce(client: unknown, deps: ReceivablesDeps) {
   const byId = new Map<string, Record<string, unknown>>()
   const pages: Array<Record<string, unknown>> = []
+  const idsByPage: string[] = []
   let duplicates = 0
   let tenant: string | null = null
+  const readPage = (page: number) => listXeroReceivables(client, { status: 'OUTSTANDING', page: String(page), page_size: String(PAGE_SIZE) }, deps)
   for (let page = 1; page <= MAX_PAGES; page++) {
-    const result = await listXeroReceivables(client, { status: 'OUTSTANDING', page: String(page), page_size: String(PAGE_SIZE) }, deps)
+    const result = await readPage(page)
     tenant = result.provenance.tenant_id
+    idsByPage.push(pageIds(result.invoices))
     for (const invoice of result.invoices) {
       const id = String(invoice.InvoiceID).toLowerCase()
       // Pages are live reads, not a snapshot: an invoice can appear on two pages.
@@ -183,10 +192,24 @@ async function readOpenBook(client: unknown, deps: ReceivablesDeps) {
     })
     // `traversal_complete` is always false on this reader; the end is an incomplete page.
     if (result.pagination.end_of_results_observed || !result.pagination.has_more) {
-      return { invoices: [...byId.values()], pages, duplicates, tenant }
+      // A row paid or created on an earlier page after it was read shifts every later row,
+      // so the next page silently skips one. Re-read every page but the last, one at a time:
+      // the same ids twice means nothing moved while the book was being read.
+      let stable = true
+      for (let check = 1; check < page && stable; check++) {
+        stable = pageIds((await readPage(check)).invoices) === idsByPage[check - 1]
+      }
+      return { invoices: [...byId.values()], pages, duplicates, tenant, stable }
     }
   }
   throw new DebtBookError(`Xero still had more invoices after ${MAX_PAGES} pages; the book was not read to the end`, 502, 'debt_book_traversal_incomplete', { pages })
+}
+
+/** Read the book, once more if Xero moved under the first read; a second move is flagged, never hidden. */
+async function readOpenBook(client: unknown, deps: ReceivablesDeps) {
+  const first = await readOpenBookOnce(client, deps)
+  if (first.stable) return { ...first, attempts: 1 }
+  return { ...(await readOpenBookOnce(client, deps)), attempts: 2 }
 }
 
 export async function readDebtBook(client: unknown, params: Params, deps: DebtBookDeps) {
@@ -256,6 +279,8 @@ export async function readDebtBook(client: unknown, params: Params, deps: DebtBo
     version: DEBT_BOOK_VERSION,
     read_at: perthTimestamp(readAt),
     perth_date: perth,
+    read_stable: book.stable,
+    read_warning: book.stable ? null : DEBT_BOOK_UNSTABLE_MESSAGE,
     copy_check: {
       matches: diff.matches,
       differs_by: diff.differing_amount,
@@ -316,6 +341,7 @@ export async function readDebtBook(client: unknown, params: Params, deps: DebtBo
       end_of_results_observed: true,
       invoice_count: invoices.length,
       duplicates_dropped: book.duplicates,
+      read_attempts: book.attempts,
       pages: book.pages,
     },
   }

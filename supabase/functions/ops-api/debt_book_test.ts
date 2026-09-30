@@ -111,7 +111,8 @@ function fixtureStore(): DebtBookStore {
 Deno.test('debt_book reads the 29 Sep book live from two Xero pages and gives the captain\'s figures', async () => {
   const x = xero(fixtureXeroPages())
   const book = await readDebtBook({}, new URLSearchParams({ action: 'debt_book' }), withStore(x, fixtureStore()))
-  assertEquals(x.calls.map((c) => c.params?.page), ['1', '2'])
+  assertEquals(x.calls.map((c) => c.params?.page), ['1', '2', '1'])
+  assertEquals([book.read_stable, book.read_warning, book.source.read_attempts], [true, null, 1])
   assertEquals(x.calls[0].path, '/Invoices')
   assertEquals(x.calls[0].params?.where, 'Type=="ACCREC" AND Status=="AUTHORISED" AND AmountDue>0')
   assertEquals(x.calls[0].params?.pageSize, '100')
@@ -164,7 +165,7 @@ Deno.test('debt_book follows full pages until Xero shows the end, and de-duplica
   const page2 = [rawInvoice(100, { AmountDue: 120 }), rawInvoice(101)]
   const x = xero((p) => (p === 1 ? page1 : p === 2 ? page2 : []))
   const book = await readDebtBook({}, {}, withStore(x, emptyStore()))
-  assertEquals(x.calls.length, 2)
+  assertEquals(x.calls.length, 3)
   assertEquals(book.source.invoice_count, 101)
   assertEquals(book.source.duplicates_dropped, 1)
   // The later read of a duplicated invoice wins.
@@ -174,8 +175,51 @@ Deno.test('debt_book follows full pages until Xero shows the end, and de-duplica
 Deno.test('debt_book reads one more page when the last page is exactly full, and stops on the empty one', async () => {
   const x = xero((p) => (p === 1 ? Array.from({ length: 100 }, (_, i) => rawInvoice(i + 1)) : []))
   const book = await readDebtBook({}, {}, withStore(x, emptyStore()))
-  assertEquals(x.calls.length, 2)
+  assertEquals(x.calls.map((c) => c.params?.page), ['1', '2', '1'])
   assertEquals(book.source.invoice_count, 100)
+})
+
+/** A live open book of invoices 1..`size`; `afterCall(n)` returns invoice numbers paid once the n-th read has answered. */
+function liveBook(size: number, afterCall: (call: number) => number[]) {
+  const paid = new Set<number>()
+  let call = 0
+  return xero((page) => {
+    const open = Array.from({ length: size }, (_, i) => i + 1).filter((n) => !paid.has(n))
+    const answer = open.slice((page - 1) * 100, page * 100).map((n) => rawInvoice(n))
+    for (const n of afterCall(++call)) paid.add(n)
+    return answer
+  })
+}
+
+Deno.test('debt_book checks a stable two-page book with one extra page-1 read and does not flag it', async () => {
+  const x = liveBook(102, () => [])
+  const book = await readDebtBook({}, {}, withStore(x, emptyStore()))
+  assertEquals(x.calls.map((c) => c.params?.page), ['1', '2', '1'])
+  assertEquals([book.read_stable, book.read_warning, book.source.read_attempts], [true, null, 1])
+  assertEquals(book.source.invoice_count, 102)
+})
+
+Deno.test('debt_book re-reads the book once when an invoice on page 1 is paid mid-read, so the shifted invoice is not lost', async () => {
+  // INV-5 is paid after page 1 is read: INV-101 moves up onto page 1 and the first pass never sees it.
+  const x = liveBook(102, (call) => (call === 1 ? [5] : []))
+  const book = await readDebtBook({}, {}, withStore(x, emptyStore()))
+  assertEquals(x.calls.map((c) => c.params?.page), ['1', '2', '1', '1', '2', '1'])
+  assertEquals([book.read_stable, book.read_warning, book.source.read_attempts], [true, null, 2])
+  const numbers = book.invoices.map((i) => i.invoice_number)
+  assert(numbers.includes('INV-101'))
+  assertEquals(numbers.includes('INV-5'), false)
+  assertEquals(book.source.invoice_count, 101)
+})
+
+Deno.test('debt_book flags, rather than hides or refuses, a book Xero keeps changing during both reads', async () => {
+  // Every page-2 read is followed by a payment on page 1.
+  let paidSoFar = 0
+  const x = liveBook(102, (call) => (call % 3 === 2 ? [++paidSoFar] : []))
+  const book = await readDebtBook({}, {}, withStore(x, emptyStore()))
+  assertEquals(x.calls.map((c) => c.params?.page), ['1', '2', '1', '1', '2', '1'])
+  assertEquals(book.ok, true)
+  assertEquals([book.read_stable, book.read_warning, book.source.read_attempts], [false, 'Xero changed during the read, retrying next run', 2])
+  assertEquals(book.source.invoice_count, 101)
 })
 
 Deno.test('debt_book refuses a book it could not read to the end', async () => {
