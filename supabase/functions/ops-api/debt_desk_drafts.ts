@@ -247,3 +247,36 @@ export async function attachDebtDrafts(
   }
   return { pay_links_read: linksRead };
 }
+
+/** Drafts sent on a Perth date: they leave the list once sent, so the screen can still show them. */
+export function debtSentOn(
+  logRows: Record<string, unknown>[],
+  perthDate: string,
+  describe: (
+    ids: string[],
+  ) => { payer_name: string | null; invoice_numbers: string[] },
+) {
+  const out = [];
+  for (const [draftId, state] of debtDraftStates(logRows)) {
+    const sent = state.decision?.kind === "sent" ? state.decision : null;
+    if (!sent) continue;
+    const day = new Date(Date.parse(sent.at) + 8 * 3600_000).toISOString()
+      .slice(0, 10);
+    if (day !== perthDate) continue;
+    const who = describe(sent.covers);
+    out.push({
+      draft_id: draftId,
+      payer_name: who.payer_name,
+      invoice_numbers: who.invoice_numbers,
+      step: draftId.slice(
+        draftId.lastIndexOf(":") + 1,
+        draftId.lastIndexOf("|"),
+      ),
+      text: sent.text,
+      at: sent.at,
+      by: sent.by,
+      provider_message_id: sent.provider_message_id,
+    });
+  }
+  return out.sort((a, z) => a.at.localeCompare(z.at));
+}

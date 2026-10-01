@@ -489,6 +489,7 @@ import {
   updateSupplierBill,
 } from './xero_accpay_books.ts'
 import {
+  getXeroOnlineInvoiceUrl,
   getXeroReceivable,
   listXeroBankTransactions,
   readXeroBankSummary,
@@ -502,6 +503,15 @@ import {
 } from './xero_receivables_read.ts'
 import { createSupabaseDebtBookStore, DebtBookError, logDebtDeskFailure, readDebtBook } from './debt_book.ts'
 import { createSupabaseDebtChaseLogStore, readDebtMorningList } from './debt_morning_list.ts'
+import {
+  createSupabaseDebtDeskStore,
+  debtDraftDecide,
+  debtDraftSend,
+  DebtDeskError,
+  debtLogOutcome,
+  debtPromises,
+  debtSendingEnabled,
+} from './debt_desk_actions.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
 import { insuranceReadAction } from './insurance_read_handlers.ts'
 import {
@@ -7670,6 +7680,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             xeroGet: xeroReadGet,
             store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
             chaseLog: createSupabaseDebtChaseLogStore(client, DEFAULT_ORG_ID),
+            payLink: (id) => getXeroOnlineInvoiceUrl(client, id, { getToken, xeroGet: xeroReadGet }),
           }))
         } catch (error) {
           if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
@@ -7677,6 +7688,40 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           }
           logDebtDeskFailure('debt_morning_list', error)
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
+        }
+      }
+      // ── Debt desk actions (plan step 3, docs/debt-book/PLAN.md; debt_desk_actions.ts) ──
+      // Approve or skip a draft, log a call or visit outcome, read promises, and send approved
+      // drafts. Writes go to payment_chase_logs only and name the signed-in user. Sending is
+      // off unless DEBT_SENDING_ENABLED is exactly "true".
+      case 'debt_draft_decide':
+      case 'debt_log_outcome':
+      case 'debt_draft_send':
+      case 'debt_promises': {
+        const wantMethod = action === 'debt_promises' ? 'GET' : 'POST'
+        if (req.method !== wantMethod) {
+          return json({ ok: false, error: `${action} requires ${wantMethod}`, code: 'METHOD_NOT_ALLOWED' }, 405)
+        }
+        const actor = authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null
+        const readXero = { getToken, xeroGet: xeroReadGet }
+        const deskDeps = {
+          store: createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID),
+          readInvoice: async (id: string) => (await getXeroReceivable(client, { xero_invoice_id: id }, readXero)).invoice,
+          sendSms: (smsBody: Record<string, unknown>) => sendChaseSms(client, smsBody),
+          sendingEnabled: debtSendingEnabled(),
+          readBook: () => readDebtBook(client, {}, { ...readXero, store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID) }),
+        }
+        try {
+          if (action === 'debt_promises') return json(await debtPromises(url.searchParams, deskDeps))
+          if (action === 'debt_draft_decide') return json(await debtDraftDecide(body, actor, deskDeps))
+          if (action === 'debt_log_outcome') return json(await debtLogOutcome(body, actor, deskDeps))
+          return json(await debtDraftSend(body, actor, deskDeps))
+        } catch (error) {
+          if (error instanceof DebtDeskError || error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
+            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+          }
+          logDebtDeskFailure(action, error)
+          return json({ ok: false, code: 'DEBT_DESK_FAILED', error: 'The debt desk could not complete this action' }, 502)
         }
       }
       case 'list_supplier_bills':

@@ -800,3 +800,49 @@ Deno.test("drafts: an approval, a skip and a refused send read back from the cha
       .items[0];
   assertEquals(stale.draft?.status, "pending");
 });
+
+Deno.test("drafts: a draft sent today leaves the list and shows under sent_today", async () => {
+  const { x, store } = oneClientBook();
+  const first = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore(),
+  } as unknown as DebtMorningListDeps);
+  const item = first.items[0];
+  const sent = {
+    id: "s1",
+    xero_invoice_id: idOf(1),
+    method: "sms",
+    schedule_step: "friendly_text",
+    outcome_code: "sent",
+    draft_id: item.draft!.id,
+    covers_invoice_ids: [idOf(1)],
+    provider_message_id: "msg-1",
+    approved_by_user_id: "20000000-0000-4000-8000-0000000000aa",
+    notes: "Hi Client, the approved text. Thanks, SecureWorks",
+    chased_by: "shaun@example.test",
+    created_at: "2026-09-30T23:40:00Z", // 07:40 Perth, Thursday
+  };
+  const yesterday = {
+    ...sent,
+    id: "s0",
+    draft_id: "2026-09-30:x:text:friendly_text|10000",
+    created_at: "2026-09-29T23:40:00Z",
+  };
+  const list = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([yesterday, sent]),
+  } as unknown as DebtMorningListDeps);
+  assertEquals(list.items, []);
+  assertEquals(list.sent_today, [{
+    draft_id: item.draft!.id,
+    payer_name: "Client 1",
+    invoice_numbers: ["INV-1"],
+    step: "friendly_text",
+    text: "Hi Client, the approved text. Thanks, SecureWorks",
+    at: "2026-09-30T23:40:00Z",
+    by: "shaun@example.test",
+    provider_message_id: "msg-1",
+  }]);
+});

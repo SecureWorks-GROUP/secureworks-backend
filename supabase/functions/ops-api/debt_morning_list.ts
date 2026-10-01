@@ -14,7 +14,7 @@
 
 import { type DebtBookDeps, DebtBookError, readDebtBook } from "./debt_book.ts";
 import { perthTimestamp } from "./debt_book_rules.ts";
-import { attachDebtDrafts } from "./debt_desk_drafts.ts";
+import { attachDebtDrafts, debtSentOn } from "./debt_desk_drafts.ts";
 import {
   DEBT_CHASE_GROUP_ORDER,
   DEBT_CHASE_NO_REMINDER,
@@ -188,6 +188,9 @@ export async function readDebtMorningList(
     contactsByJobId,
   });
 
+  const bookById = new Map(
+    book.invoices.map((i) => [i.xero_invoice_id.toLowerCase(), i]),
+  );
   const jobIdByInvoice = new Map(
     relevant.map((i) => [i.xero_invoice_id.toLowerCase(), i.job_id]),
   );
@@ -227,6 +230,13 @@ export async function readDebtMorningList(
       rows_read: rows.length,
       desk_rows: events.length,
     },
+    sent_today: debtSentOn(rows, book.perth_date, (ids) => {
+      const invs = ids.map((id) => bookById.get(id)).filter((i) => !!i);
+      return {
+        payer_name: invs[0]?.contact_name ?? null,
+        invoice_numbers: invs.map((i) => i!.invoice_number).sort(),
+      };
+    }),
     drafts: {
       drafted: plan.items.filter((i) => i.draft).length,
       pending: plan.items.filter((i) => i.draft?.status === "pending").length,
