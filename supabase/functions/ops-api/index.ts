@@ -510,6 +510,7 @@ import {
   debtDraftDecide,
   debtDraftSend,
   DebtDeskError,
+  DebtSendRefusedError,
   debtLogOutcome,
   debtSendingEnabled,
 } from './debt_desk_actions.ts'
@@ -7714,7 +7715,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const deskDeps = {
           store: deskStore,
           readInvoice: async (id: string) => (await getXeroReceivable(client, { xero_invoice_id: id }, { getToken, xeroGet: xeroReadGet })).invoice,
-          sendSms: (smsBody: Record<string, unknown>) => sendChaseSms(client, smsBody),
+          sendSms: async (smsBody: Record<string, unknown>) => {
+            try {
+              return await sendChaseSms(client, smsBody)
+            } catch (error) {
+              if (error instanceof ApiError || error instanceof SesActionError) throw new DebtSendRefusedError(error.message)
+              throw error
+            }
+          },
           sendingEnabled: debtSendingEnabled(),
           deskOwnerIds: () => debtDeskOwnerIds(deskStore),
         }

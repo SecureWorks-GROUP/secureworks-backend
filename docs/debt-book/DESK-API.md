@@ -125,7 +125,9 @@ provider_message_id, logged }`.
   `already_sending` and never reaches the client. Once the text goes, the
   claim becomes `sent`. If the provider fails, or the `sent` write fails, the
   claim stays (`send_not_confirmed`, or `sent: true, logged: false`), so the
-  draft is never texted twice.
+  draft is never texted twice. If `send_chase_sms`'s own guards refuse before
+  anything goes to GoHighLevel, the result is `send_refused_by_guard` with the
+  guard's reason; the claim stays then too.
 - The text goes only through the existing `send_chase_sms` path, to the GHL
   contact on the invoice's job. Each send and refusal is a
   `payment_chase_logs` row per covered invoice. A sent row carries

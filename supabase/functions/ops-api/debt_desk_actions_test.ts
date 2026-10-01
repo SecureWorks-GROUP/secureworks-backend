@@ -17,6 +17,7 @@ import {
   debtDraftSend,
   debtLogOutcome,
   debtSendingEnabled,
+  DebtSendRefusedError,
 } from "./debt_desk_actions.ts";
 import { debtDraftStates } from "./debt_desk_drafts.ts";
 import { debtNotes } from "./debt_picture.ts";
@@ -842,6 +843,33 @@ Deno.test("send: drafts go one at a time; a Xero rate limit stops the rest of th
       debtChaseEventFromLogRow(r) === null
     ),
   );
+
+  // A send_chase_sms guard refusal sent nothing: it is named as a refusal with the guard's
+  // own reason, and the claim still stays so the draft cannot text twice.
+  const store3 = await approvedStore();
+  const z = deps(store3, { sendingEnabled: true });
+  let calls = 0;
+  z.d.sendSms = () => {
+    calls += 1;
+    return Promise.reject(
+      new DebtSendRefusedError("GHL contact does not belong to this job"),
+    );
+  };
+  const res3 = await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, z.d);
+  assertEquals(res3.results[0].sent, false);
+  assertEquals(res3.results[0].code, "send_refused_by_guard");
+  assert(
+    String(res3.results[0].reason).startsWith(
+      "GHL contact does not belong to this job. No text was sent",
+    ),
+  );
+  assertEquals(
+    debtDraftStates(store3.rows).get(DRAFT)?.decision?.reason,
+    "send refused: GHL contact does not belong to this job",
+  );
+  const again3 = await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, z.d);
+  assertEquals(again3.results[0].code, "already_sending");
+  assertEquals(calls, 1);
 });
 
 /** A read-only PostgREST stand-in: eq, in and or filter; other modifiers pass through. */

@@ -38,7 +38,7 @@ import {
 export const DEBT_DESK_VERSION = "debt-desk/v1";
 /** The one switch. Sending stays off unless this is exactly "true" (captain: "my go"). */
 export const DEBT_SENDING_SWITCH = "DEBT_SENDING_ENABLED";
-/** Comma-separated user ids who may approve and send. Unset: the ops manager (Shaun). */
+/** Comma-separated user ids who may approve and send. Unset: the owner list in debt_desk_settings; never a role. */
 export const DEBT_DESK_OWNERS_SETTING = "DEBT_DESK_OWNER_USER_IDS";
 export const DEBT_SEND_BATCH_LIMIT = 20;
 
@@ -56,6 +56,14 @@ export class DebtDeskError extends Error {
   ) {
     super(message);
     this.name = "DebtDeskError";
+  }
+}
+
+/** send_chase_sms refused in its own guards, before any SMS was handed to GoHighLevel. */
+export class DebtSendRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DebtSendRefusedError";
   }
 }
 
@@ -818,10 +826,13 @@ export async function debtDraftSend(
         // The provider may have sent it before failing, so the claim stays: the draft never
         // texts twice. Tomorrow's list drafts the step again.
         const why = String((error as Error)?.message ?? error).slice(0, 300);
+        const refused = error instanceof DebtSendRefusedError;
         let logged = false;
         try {
           await deps.store.settleSend(draftId, ids, {
-            outcome: `send not confirmed: ${why}`,
+            outcome: refused
+              ? `send refused: ${why}`
+              : `send not confirmed: ${why}`,
           });
           logged = true;
         } catch (logError) {
@@ -834,9 +845,10 @@ export async function debtDraftSend(
         results.push({
           draft_id: draftId,
           sent: false,
-          code: "send_not_confirmed",
-          reason:
-            `${why}. The draft stays claimed so it cannot text twice; check the GoHighLevel conversation`,
+          code: refused ? "send_refused_by_guard" : "send_not_confirmed",
+          reason: refused
+            ? `${why}. No text was sent, and the draft stays claimed so it cannot text twice`
+            : `${why}. The draft stays claimed so it cannot text twice; check the GoHighLevel conversation`,
           logged,
         });
         continue;
