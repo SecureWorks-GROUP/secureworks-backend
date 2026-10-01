@@ -279,7 +279,7 @@ Deno.test("Jan's text: the legal-action words are checked only on what Shaun add
   );
   assertEquals([draft.approvable, draft.problem], [true, null]);
   assertEquals(janTextProblem(template, template), null);
-  // Untouched lines are never checked, however another line is edited, or deleted.
+  // Untouched lines are never checked, however another line is edited, deleted or moved.
   const lines = template.split("\n");
   for (
     const edited of [
@@ -287,6 +287,14 @@ Deno.test("Jan's text: the legal-action words are checked only on what Shaun add
       template.replace("Sam Example", "Sam Smith"),
       [...lines.slice(0, 3), ...lines.slice(4)].join("\n"),
       [lines[0], lines[3], lines[1], lines[2], lines[4]].join("\n"),
+      [lines[0], lines[3], lines[2], lines[1], lines[4]].join("\n"),
+      [
+        lines[0],
+        lines[3].replace("3. ", "1. "),
+        lines[2],
+        lines[1].replace("1. ", "3. "),
+        lines[4],
+      ].join("\n"),
       `${template}\nRing me after the first one.`,
     ]
   ) assertEquals(janTextProblem(edited, template), null, edited);
@@ -298,6 +306,11 @@ Deno.test("Jan's text: the legal-action words are checked only on what Shaun add
       template.replace("Thornlie:", "Thornlie, lawyer:"),
       template.replace("Jo Bloggs", "Jo Bloggs (court)"),
       template.replace("3 High Street", "3 High Court"),
+      template.replace(
+        lines[2],
+        `${lines[2]} Ask them about the court date.`,
+      ),
+      [lines[0], lines[3], `${lines[1]} We will sue.`, lines[4]].join("\n"),
     ]
   ) {
     assert(

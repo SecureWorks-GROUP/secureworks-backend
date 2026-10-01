@@ -146,9 +146,12 @@ Please tell Shaun how each visit goes. Thanks
   when empty, with an em dash or over that length. It goes to staff, not a
   client, so the legal-action words are not checked against the standard
   wording (the payer names and job sites it lists included: a street named
-  Court is an address). Shaun's text is compared word by word with
-  `template_text`, and only the words he added or changed are checked;
-  untouched lines are never checked, and a deleted line needs no check.
+  Court is an address). Shaun's text is compared with `template_text` line
+  by line: a line equal to any line of `template_text`, in any position (so a
+  reordered visit), is untouched and never checked; any other line is
+  compared word by word with the `template_text` line it shares most words
+  with, and only the words he added or changed there are checked. A deleted
+  line needs no check.
   `approvable` and `problem` run the same check on the text shown.
 - **Send** with `debt_draft_send`, as any draft: the same switch
   (`DEBT_SENDING_ENABLED`), the same "nothing logged since the approval" rule,

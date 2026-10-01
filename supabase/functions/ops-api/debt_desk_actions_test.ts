@@ -1655,6 +1655,12 @@ Deno.test("Jan's text: a street named Court on an untouched line approves; an ed
       template,
       template.replace("Jo Bloggs", "Jo Bloggs (back gate)"),
       [lines[0], lines[1], lines[3]].join("\n"),
+      [
+        lines[0],
+        lines[2].replace("2. ", "1. "),
+        lines[1].replace("1. ", "2. "),
+        lines[3],
+      ].join("\n"),
     ]
   ) {
     const store = memoryStore();
@@ -1668,6 +1674,7 @@ Deno.test("Jan's text: a street named Court on an untouched line approves; an ed
       `${template}\nTell them we will take them to court.`,
       template.replace("owing", "owing, or we sue"),
       template.replace("Jo Bloggs", "Jo Bloggs (court)"),
+      template.replace(lines[1], `${lines[1]} Mention the court date.`),
       "",
       template.replace("Armadale", "Armadale — rear"),
       `${template}${"x".repeat(1600)}`,

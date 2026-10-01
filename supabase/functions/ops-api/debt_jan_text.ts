@@ -21,8 +21,9 @@
 // Jan's text goes to a member of staff, not a client, so the words no chase message may carry
 // are not checked against the standard wording (its payers' names and job sites included: a
 // street named Court is an address, not a threat). They are checked on the words Shaun adds or
-// changes, found by comparing his text word by word with the standard wording; untouched and
-// deleted lines need no check.
+// changes, found line by line: a line equal to any line of the standard wording, in any
+// position, is untouched; any other line is compared word by word with the line it best
+// matches; a deleted line needs no check.
 //
 // Its chase-log rows carry no schedule step, so neither its approval nor its send moves any
 // payer's ladder: the visit itself is recorded by debt_log_outcome (schedule_step jan_visit),
@@ -214,25 +215,24 @@ export function janTextTemplateMatches(
     janIdTags(draftId)?.wording === fnv1a(template);
 }
 
-/** Where the words of `text` that are not in `template` are: a word-by-word diff. */
-function addedWords(text: string, template: string): Array<[number, number]> {
-  const words = (s: string) => [...s.matchAll(/\S+/g)];
-  const a = words(text);
-  const b = words(template);
+/** Where the words of `line` that are not in `original` are, and how many words they share. */
+function lineDiff(line: string, original: string) {
+  const a = [...line.matchAll(/\S+/g)];
+  const b = original.match(/\S+/g) ?? [];
   const kept = Array.from(
     { length: a.length + 1 },
     () => new Uint16Array(b.length + 1),
   );
   for (let i = a.length - 1; i >= 0; i--) {
     for (let j = b.length - 1; j >= 0; j--) {
-      kept[i][j] = a[i][0] === b[j][0]
+      kept[i][j] = a[i][0] === b[j]
         ? kept[i + 1][j + 1] + 1
         : Math.max(kept[i + 1][j], kept[i][j + 1]);
     }
   }
   const added: Array<[number, number]> = [];
   for (let i = 0, j = 0; i < a.length;) {
-    if (j < b.length && a[i][0] === b[j][0]) {
+    if (j < b.length && a[i][0] === b[j]) {
       i++;
       j++;
     } else if (j < b.length && kept[i][j + 1] >= kept[i + 1][j]) {
@@ -241,6 +241,28 @@ function addedWords(text: string, template: string): Array<[number, number]> {
       added.push([a[i].index!, a[i].index! + a[i][0].length]);
       i++;
     }
+  }
+  return { added, shared: kept[0][0] };
+}
+
+/**
+ * Where the words Shaun added or changed are, line by line: a line equal to any line of the
+ * standard wording is untouched, and any other line is compared word by word with the line of
+ * the standard wording it shares most words with.
+ */
+function addedWords(text: string, template: string): Array<[number, number]> {
+  const originals = template.split("\n");
+  const untouched = new Set(originals);
+  const added: Array<[number, number]> = [];
+  let at = 0;
+  for (const line of text.split("\n")) {
+    if (!untouched.has(line)) {
+      const best = originals.map((o) => lineDiff(line, o)).reduce((x, y) =>
+        y.shared > x.shared ? y : x
+      );
+      for (const [s, e] of best.added) added.push([at + s, at + e]);
+    }
+    at += line.length + 1;
   }
   return added;
 }
