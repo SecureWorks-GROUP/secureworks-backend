@@ -1092,9 +1092,9 @@ Deno.test("jan_text: today's Jan visits in one text to Jan's mobile, with the jo
     reads += 1;
     return Promise.resolve({
       phone: "+61411222333",
-      source: "setting" as const,
-      staff_user_id: null,
-      staff_name: null,
+      source: "staff" as const,
+      staff_user_id: "u-jan",
+      staff_name: "Jan Example",
       problem: null,
     });
   };

@@ -203,10 +203,14 @@ const NOT_ALLOWED: Array<[RegExp, string]> = [
   [/\bletter of demand\b/i, "a letter of demand"],
 ];
 
-/** Why a message text may not be approved, or null when it may. */
+/**
+ * Why a message text may not be approved, or null when it may. `words` is the part of the text
+ * the not-allowed words are checked on (default: all of it).
+ */
 export function debtDraftTextProblem(
   text: unknown,
   maxLength = DEBT_DRAFT_MAX_LENGTH,
+  words?: string,
 ): string | null {
   if (typeof text !== "string" || !text.trim()) return "The message is empty";
   if (/—/.test(text)) return "The message contains an em dash";
@@ -214,7 +218,7 @@ export function debtDraftTextProblem(
     return `The message is longer than ${maxLength} characters`;
   }
   for (const [re, what] of NOT_ALLOWED) {
-    if (re.test(text)) {
+    if (re.test(words ?? text)) {
       return `The message mentions ${what}: chase messages never mention legal action or credit reporting`;
     }
   }

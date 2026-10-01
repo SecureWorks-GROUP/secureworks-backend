@@ -297,9 +297,9 @@ The schedules:
   visits (name, site address when the job has one, invoice numbers, amount
   owing, days overdue), a broken promise at the Jan step included. Shaun
   approves it like any draft and it goes through the same guarded send, off
-  until Shaun's go. Jan's mobile is the `JAN_MOBILE` setting, else the one
-  staff record named Jan; when it cannot be found unambiguously the text says
-  "Jan's mobile not set" and cannot be approved. Shaun records what Jan
+  until Shaun's go. Jan's mobile is read only from the one staff record
+  named Jan; when it cannot be found unambiguously the text says "Jan's
+  mobile not set in staff records" and cannot be approved. Shaun records what Jan
   reports (visited and paid, promised, no one home, disputed), which moves
   the ladder like a call: no one home comes back to Jan the next morning,
   paid and disputed hold the invoice for a check, a promise pauses chasing.
@@ -546,6 +546,6 @@ Left to confirm during the build:
 
 - the accounts email for Emergency Trade Services, Builderwest and Western
   Building;
-- Jan's mobile number. The desk reads it (the `JAN_MOBILE` setting, else the
-  one staff record named Jan) and shows it on Jan's text before Shaun
-  approves; check it there before the first text.
+- Jan's mobile number. The desk reads it from the one staff record named
+  Jan and shows it on Jan's text before Shaun approves; check it there
+  before the first text.

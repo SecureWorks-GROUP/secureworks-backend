@@ -8,12 +8,12 @@ import { parseDebtDraftId } from "./debt_draft_templates.ts";
 import {
   buildJanText,
   createSupabaseJanStaffStore,
-  JAN_MOBILE_SETTING,
   JAN_TEXT_MAX_INVOICES,
   type JanMobile,
   janMorningText,
   janTextDraftId,
   janTextDraftIdMatches,
+  janTextProblem,
   normaliseAuMobile,
   readJanMobile,
   resolveJanMobile,
@@ -93,24 +93,16 @@ Deno.test("Jan's mobile: an Australian mobile in any common shape, nothing else"
   ) assertEquals(normaliseAuMobile(raw), null, String(raw));
 });
 
-Deno.test("Jan's mobile: from the one staff record named Jan; the setting overrides it", () => {
+Deno.test("Jan's mobile: only from the one staff record named Jan", () => {
   const staff = [
     { id: "u-jan", name: "Jan Example", phone: "0411 222 333" },
     { id: "u-2", name: "Janet Other", phone: "0499 999 999" },
     { id: "u-3", name: "Sam Jan", phone: "0488 888 888" },
   ];
-  assertEquals(resolveJanMobile(undefined, staff), SET);
-  assertEquals(resolveJanMobile("", staff), SET);
-  assertEquals(resolveJanMobile(" 0400 111 222 ", staff), {
-    phone: "+61400111222",
-    source: "setting",
-    staff_user_id: null,
-    staff_name: null,
-    problem: null,
-  });
+  assertEquals(resolveJanMobile(staff), SET);
   // Two records for the same person with one number is still one number.
   assertEquals(
-    resolveJanMobile(undefined, [
+    resolveJanMobile([
       ...staff,
       { id: "u-jan2", name: "jan", phone: "+61411222333" },
     ]).phone,
@@ -119,40 +111,38 @@ Deno.test("Jan's mobile: from the one staff record named Jan; the setting overri
 });
 
 Deno.test("Jan's mobile: not set when it cannot be found unambiguously, and says why", () => {
-  const notSet = (setting: string | undefined, staff: any[]) => {
-    const m = resolveJanMobile(setting, staff);
+  const notSet = (staff: any[]) => {
+    const m = resolveJanMobile(staff);
     assertEquals(m.phone, null);
     assertEquals(m.source, null);
-    assert(m.problem!.startsWith("Jan's mobile not set: "), m.problem!);
+    assert(
+      m.problem!.startsWith("Jan's mobile not set in staff records: "),
+      m.problem!,
+    );
     return m.problem!;
   };
-  assert(notSet(undefined, []).includes("no staff record is named Jan"));
+  assert(notSet([]).includes("no staff record is named Jan"));
   assert(
-    notSet(undefined, [{ id: "u", name: "Janet", phone: "0411222333" }])
+    notSet([{ id: "u", name: "Janet", phone: "0411222333" }])
       .includes("no staff record is named Jan"),
   );
   assert(
-    notSet(undefined, [{ id: "u", name: "Jan Example", phone: null }])
-      .includes("no Australian mobile"),
+    notSet([{ id: "u", name: "Jan Example", phone: null }])
+      .includes("add an Australian mobile"),
   );
   assert(
-    notSet(undefined, [{ id: "u", name: "Jan Example", phone: "08 9123 4567" }])
-      .includes("no Australian mobile"),
+    notSet([{ id: "u", name: "Jan Example", phone: "08 9123 4567" }])
+      .includes("add an Australian mobile"),
   );
   assert(
-    notSet(undefined, [
+    notSet([
       { id: "u1", name: "Jan One", phone: "0411222333" },
       { id: "u2", name: "Jan Two", phone: "0499999999" },
     ]).includes("2 staff records are named Jan"),
   );
-  // A set but unusable override never falls back to a guess.
-  assert(
-    notSet("08 9123 4567", [{ id: "u", name: "Jan", phone: "0411222333" }])
-      .includes(JAN_MOBILE_SETTING),
-  );
 });
 
-Deno.test("Jan's mobile: the staff read is org-scoped and read only when the setting is unset; a failed read is not set", async () => {
+Deno.test("Jan's mobile: the staff read is org-scoped; a failed read is not set", async () => {
   const calls: any[] = [];
   const client = {
     from(table: string) {
@@ -172,18 +162,12 @@ Deno.test("Jan's mobile: the staff read is org-scoped and read only when the set
     },
   };
   const store = createSupabaseJanStaffStore(client, "org-1");
-  assertEquals(await readJanMobile(store, () => undefined), SET);
+  assertEquals(await readJanMobile(store), SET);
   assertEquals(calls, [
     ["users", "select", "id, name, phone"],
     ["users", "eq", "org_id", "org-1"],
     ["users", "ilike", "name", "jan%"],
   ]);
-  calls.length = 0;
-  assertEquals(
-    (await readJanMobile(store, () => "0400111222")).phone,
-    "+61400111222",
-  );
-  assertEquals(calls, []);
 
   const failing = createSupabaseJanStaffStore({
     from: () => {
@@ -196,7 +180,7 @@ Deno.test("Jan's mobile: the staff read is org-scoped and read only when the set
       return q;
     },
   }, "org-1");
-  const m = await readJanMobile(failing, () => undefined);
+  const m = await readJanMobile(failing);
   assertEquals(m.phone, null);
   assert(m.problem!.includes("could not be read"));
 });
@@ -238,8 +222,14 @@ Deno.test("Jan's text: the draft id is today's, tied to Jan's number and the inv
     { xero_invoice_id: "A", amount_due: 100 },
     { xero_invoice_id: "B", amount_due: 50.5 },
   ];
-  const id = janTextDraftId(TODAY, JAN_PHONE, invoices);
-  assert(/^2026-10-01:jan-[0-9a-f]{8}:jan:jan_text\|10000,5050$/.test(id), id);
+  const words = "Hi Jan\n1. Alpha: INV-1, $150.50 owing.";
+  const id = janTextDraftId(TODAY, JAN_PHONE, invoices, words);
+  assert(
+    /^2026-10-01:jan-[0-9a-f]{8}-[0-9a-f]{8}:jan:jan_text\|10000,5050$/.test(
+      id,
+    ),
+    id,
+  );
   const parsed = parseDebtDraftId(id)!;
   assertEquals(parsed.step, "jan_text");
   assertEquals(parsed.group, "jan");
@@ -250,9 +240,87 @@ Deno.test("Jan's text: the draft id is today's, tied to Jan's number and the inv
   assert(!janTextDraftIdMatches(id, JAN_PHONE, ["B", "A"]));
   assert(!janTextDraftIdMatches(id, JAN_PHONE, ["A"]));
   assert(
-    janTextDraftId(TODAY, "+61400111222", invoices) !== id &&
-      janTextDraftId(TODAY, JAN_PHONE, [invoices[1], invoices[0]]) !== id,
+    janTextDraftId(TODAY, "+61400111222", invoices, words) !== id &&
+      janTextDraftId(TODAY, JAN_PHONE, [invoices[1], invoices[0]], words) !==
+        id,
   );
+  // Another listed name is another draft, still tied to the same number and list.
+  const renamed = janTextDraftId(
+    TODAY,
+    JAN_PHONE,
+    invoices,
+    "Hi Jan\n1. Bravo: INV-1, $150.50 owing.",
+  );
+  assert(renamed !== id);
+  assert(janTextDraftIdMatches(renamed, JAN_PHONE, ["A", "B"]));
+});
+
+Deno.test("Jan's text: the legal-action words are not checked against the names and sites it lists, only the rest", () => {
+  const a = item({ payer_name: "Courtney Legal Pty Ltd" });
+  const b = item({ payer_name: "Sam Example" });
+  const sites: Record<string, string> = {
+    [a.payer_name]: "7 Wattle Court, Thornlie",
+    [b.payer_name]: "2 Banksia\nCourt — Rear, Kelmscott",
+  };
+  const draft = buildJanText([a, b], [], {
+    perthDate: TODAY,
+    mobile: SET,
+    siteFor: (i) => sites[i.payer_name],
+  })!;
+  assert(
+    draft.text!.includes(
+      "1. Courtney Legal Pty Ltd, 7 Wattle Court, Thornlie: ",
+    ),
+  );
+  assert(
+    draft.text!.includes("2. Sam Example, 2 Banksia Court - Rear, Kelmscott: "),
+  );
+  assertEquals(draft.problem, null);
+  assertEquals(draft.approvable, true);
+  assertEquals(janTextProblem(draft.text, draft.id), null);
+  // What Shaun types is checked, wherever it is.
+  const lines = draft.text!.split("\n");
+  for (
+    const edited of [
+      `${draft.text}\nIf they do not pay, tell them we will take them to court.`,
+      draft.text!.replace("owing", "owing, mention a default listing"),
+      [
+        lines[0],
+        lines[1].replace("Thornlie", "Thornlie, lawyer"),
+        ...lines.slice(2),
+      ]
+        .join("\n"),
+    ]
+  ) assert(janTextProblem(edited, draft.id) !== null, edited);
+  // An edit to a listed name or site has the whole text checked.
+  assert(
+    janTextProblem(draft.text!.replace("Sam Example", "Sam Smith"), draft.id)!
+      .includes("mentions"),
+  );
+  // Empty, em dash and length still cover the whole text.
+  assert(janTextProblem("", draft.id) !== null);
+  assert(
+    janTextProblem(
+      draft.text!.replace("Thornlie", "Thornlie — rear"),
+      draft.id,
+    ) !== null,
+  );
+  assert(janTextProblem(`${draft.text}${"x".repeat(1600)}`, draft.id) !== null);
+});
+
+Deno.test("Jan's text: approvable and problem are the approve check on the text shown", () => {
+  const opts = { perthDate: TODAY, mobile: SET, siteFor: () => null };
+  const plain = buildJanText([item()], [], opts)!;
+  assertEquals(plain.problem, janTextProblem(plain.text, plain.id));
+  assertEquals(plain.approvable, true);
+  // A word outside the listed names (here an invoice number) is caught on the list, before
+  // Shaun presses approve, with the same words the approve step refuses with.
+  const odd = item();
+  odd.invoices[0].invoice_number = "COURT-1";
+  const draft = buildJanText([odd], [], opts)!;
+  assertEquals(draft.approvable, false);
+  assert(draft.problem!.includes("mentions court"), draft.problem!);
+  assertEquals(draft.problem, janTextProblem(draft.text, draft.id));
 });
 
 // ── The draft on the morning list ──
@@ -298,7 +366,12 @@ Deno.test("Jan's text: lists today's Jan visits, broken promises at the Jan step
   ]);
   assertEquals(
     draft.id,
-    janTextDraftId(TODAY, JAN_PHONE, [...broken.invoices, ...a.invoices]),
+    janTextDraftId(
+      TODAY,
+      JAN_PHONE,
+      [...broken.invoices, ...a.invoices],
+      draft.template_text!,
+    ),
   );
   assertEquals(draft.status, "pending");
   assertEquals(draft.text, draft.template_text);
@@ -320,12 +393,12 @@ Deno.test("Jan's text: lists today's Jan visits, broken promises at the Jan step
 Deno.test("Jan's text: with Jan's mobile not set the draft says so and cannot be approved", () => {
   const draft = buildJanText([item()], [], {
     perthDate: TODAY,
-    mobile: resolveJanMobile(undefined, []),
+    mobile: resolveJanMobile([]),
     siteFor: () => null,
   })!;
   assertEquals(draft.to_phone, null);
   assertEquals(draft.approvable, false);
-  assert(draft.problem!.startsWith("Jan's mobile not set"));
+  assert(draft.problem!.startsWith("Jan's mobile not set in staff records"));
   // The wording is still shown, so Shaun can see what Jan would get.
   assert(draft.text!.startsWith("Hi Jan, your visits for"));
 });
@@ -424,7 +497,12 @@ Deno.test("Jan's text: once sent today it stays the day's Jan text, even when an
   assertEquals(claimed.status, "sending");
   assertEquals(claimed.last_send?.outcome, "not_confirmed");
   // Yesterday's sent Jan text does not stand for today.
-  const yesterday = janTextDraftId("2026-09-30", JAN_PHONE, a.invoices);
+  const yesterday = janTextDraftId(
+    "2026-09-30",
+    JAN_PHONE,
+    a.invoices,
+    first.template_text!,
+  );
   const fresh = buildJanText(
     [a],
     row(yesterday, [a.invoices[0].xero_invoice_id], {

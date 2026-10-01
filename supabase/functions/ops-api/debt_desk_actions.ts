@@ -41,10 +41,10 @@ import {
   parseDebtDraftId,
 } from "./debt_draft_templates.ts";
 import {
-  JAN_TEXT_MAX_LENGTH,
   JAN_TEXT_STEP,
   type JanMobile,
   janTextDraftIdMatches,
+  janTextProblem,
 } from "./debt_jan_text.ts";
 
 export const DEBT_DESK_VERSION = "debt-desk/v1";
@@ -330,10 +330,9 @@ export async function debtDraftDecide(
   const text = typeof body.text === "string" ? body.text.trim() : "";
   const jan = draft.step === JAN_TEXT_STEP;
   if (decision === "approve") {
-    const problem = debtDraftTextProblem(
-      text,
-      jan ? JAN_TEXT_MAX_LENGTH : undefined,
-    );
+    const problem = jan
+      ? janTextProblem(text, draftId)
+      : debtDraftTextProblem(text);
     if (problem) {
       throw new DebtDeskError(problem, 400, "debt_draft_text_not_allowed");
     }

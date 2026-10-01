@@ -1408,14 +1408,15 @@ const JAN_NOT_SET: JanMobile = {
   source: null,
   staff_user_id: null,
   staff_name: null,
-  problem: "Jan's mobile not set: no staff record is named Jan",
+  problem:
+    "Jan's mobile not set in staff records: no staff record is named Jan",
 };
+const JAN_WORDS =
+  "Hi Jan, your visits for Thu 1 Oct 2026:\n1. Sam Example: INV-1 and INV-2, $150.00 owing, oldest 9 days overdue.\nPlease tell Shaun how each visit goes. Thanks";
 const JAN_TEXT_ID = janTextDraftId("2026-10-01", JAN_PHONE, [
   { xero_invoice_id: A, amount_due: 100 },
   { xero_invoice_id: B, amount_due: 50 },
-]);
-const JAN_WORDS =
-  "Hi Jan, your visits for Thu 1 Oct 2026:\n1. Sam Example: INV-1 and INV-2, $150.00 owing, oldest 9 days overdue.\nPlease tell Shaun how each visit goes. Thanks";
+], JAN_WORDS);
 
 function janDeps(
   store: DebtDeskStore,
@@ -1562,7 +1563,7 @@ Deno.test("Jan's text: approved by the desk owner only while Jan's mobile is set
     {
       draft_id: janTextDraftId("2026-10-01", "", [
         { xero_invoice_id: A, amount_due: 100 },
-      ]),
+      ], JAN_WORDS),
       decision: "skip",
       text: "",
       xero_invoice_ids: [A],
@@ -1571,6 +1572,97 @@ Deno.test("Jan's text: approved by the desk owner only while Jan's mobile is set
     janDeps(skipStore, { janMobile: () => Promise.resolve(JAN_NOT_SET) }).d,
   );
   assertEquals(skipStore.rows[0].outcome_code, "skipped");
+});
+
+function janVisitItem(invoiceNumber = "INV-1"): any {
+  return {
+    id: "2026-10-01:contact-a:jan:jan_visit",
+    payer_key: "contact-a",
+    payer_name: "Sam Example",
+    payer: "client",
+    group: "jan",
+    step: "jan_visit",
+    amount: 100,
+    days_overdue: 9,
+    invoices: [{
+      xero_invoice_id: A,
+      invoice_number: invoiceNumber,
+      amount_due: 100,
+    }],
+    hold: null,
+  };
+}
+
+const decideJan = (
+  store: DebtDeskStore,
+  draft: { id: string; xero_invoice_ids: string[] },
+  text: string,
+) =>
+  debtDraftDecide(
+    {
+      draft_id: draft.id,
+      decision: "approve",
+      text,
+      xero_invoice_ids: draft.xero_invoice_ids,
+    },
+    SHAUN,
+    janDeps(store).d,
+  );
+
+Deno.test("Jan's text: a street named Court approves as drafted; an edit adding a legal word is refused", async () => {
+  const draft = buildJanText([janVisitItem()], [], {
+    perthDate: "2026-10-01",
+    mobile: JAN_SET,
+    siteFor: () => "7 Wattle Court, Thornlie",
+  })!;
+  assert(draft.text!.includes("1. Sam Example, 7 Wattle Court, Thornlie: "));
+  assertEquals([draft.approvable, draft.problem], [true, null]);
+  const store = memoryStore();
+  const res = await decideJan(store, draft, draft.text!);
+  assertEquals(res.draft.status, "approved");
+  assertEquals(store.rows.length, 1);
+
+  for (
+    const edited of [
+      `${draft.text}\nTell them we will take them to court.`,
+      draft.text!.replace("owing", "owing, or we sue"),
+      draft.text!.replace("Sam Example", "Sam Example (court)"),
+    ]
+  ) {
+    const refusedStore = memoryStore();
+    const error = await assertRejects(
+      () => decideJan(refusedStore, draft, edited),
+      DebtDeskError,
+    );
+    assertEquals(error.code, "debt_draft_text_not_allowed", edited);
+    assertEquals(refusedStore.rows, []);
+  }
+});
+
+Deno.test("Jan's text: the list's approvable and problem are what the approve step says", async () => {
+  for (const number of ["INV-1", "COURT-1"]) {
+    const draft = buildJanText([janVisitItem(number)], [], {
+      perthDate: "2026-10-01",
+      mobile: JAN_SET,
+      siteFor: () => "7 Wattle Court, Thornlie",
+    })!;
+    assertEquals(draft.approvable, number === "INV-1", number);
+    const store = memoryStore();
+    if (draft.approvable) {
+      assertEquals(draft.problem, null);
+      assertEquals(
+        (await decideJan(store, draft, draft.text!)).draft.status,
+        "approved",
+      );
+    } else {
+      const error = await assertRejects(
+        () => decideJan(store, draft, draft.text!),
+        DebtDeskError,
+      );
+      assertEquals(error.message, draft.problem, number);
+      assertEquals(store.rows, []);
+    }
+  }
 });
 
 Deno.test("Jan's text: while sending is off it is refused and logged, with no Xero read and no SMS", async () => {

@@ -10,8 +10,8 @@
 //                       time, kept for the Perth day), and what Shaun decided. Approving and
 //                       sending are debt_desk_actions.ts. Plan step 5 adds `jan_text`: Jan's
 //                       one morning text listing today's Jan visits (debt_jan_text.ts), to
-//                       Jan's own mobile, which is read from the JAN_MOBILE setting or the
-//                       staff records only when there is a Jan text to show.
+//                       Jan's own mobile, which is read from the staff records only when
+//                       there is a Jan text to show.
 //
 // This module writes nothing: no database write, no Xero write, no message.
 

@@ -97,9 +97,9 @@ is null when there are none.
 
 ```json
 {
-  "id": "<perth date>:jan-<tag>:jan:jan_text|<amount due in cents per invoice>",
+  "id": "<perth date>:jan-<tag>-<names tag>:jan:jan_text|<amount due in cents per invoice>",
   "channel": "sms", "to": "jan", "step": "jan_text",
-  "to_phone": "+61411222333 or null", "mobile_source": "setting | staff | null",
+  "to_phone": "+61411222333 or null", "mobile_source": "staff | null",
   "visits": [{ "item_id": "...", "payer_key": "...", "payer_name": "...",
     "site": "12 Example Street, Exampleton or null", "invoice_numbers": ["INV-1"],
     "xero_invoice_ids": ["uuid"], "amount": 100, "days_overdue": 11,
@@ -123,24 +123,31 @@ Hi Jan, your visits for Thu 1 Oct 2026:
 Please tell Shaun how each visit goes. Thanks
 ```
 
-- **Jan's mobile.** The ops-api setting `JAN_MOBILE` when it is set (any
-  common Australian mobile shape, stored as +614XXXXXXXX); a set but unusable
-  value means not set, never a guess. Unset, the one staff record (`users`,
-  the org's) whose first name is exactly Jan; several such records count only
-  when they share one mobile. It is never written into the code. The list
-  reads it only when there is a Jan text to show, and shows it as `to_phone`
-  so Shaun sees the number before he approves.
+- **Jan's mobile.** Only from the staff records: the one staff record
+  (`users`, the org's) whose first name is exactly Jan, its phone read as an
+  Australian mobile (+614XXXXXXXX); several such records count only when they
+  share one mobile. It is never written into the code and there is no other
+  setting for it. The list reads it only when there is a Jan text to show,
+  and shows it as `to_phone` so Shaun sees the number before he approves.
 - **Not set.** When the mobile cannot be found unambiguously, `to_phone` is
-  null, `approvable` is false and `problem` starts "Jan's mobile not set" with
-  the reason. The wording is still shown. It cannot be approved
+  null, `approvable` is false and `problem` starts "Jan's mobile not set in
+  staff records" with the reason (or "Jan's mobile not set: the staff records
+  could not be read" when the read failed). The wording is still shown. It cannot be approved
   (`409 jan_mobile_not_set`); it can be skipped.
 - **Approve or skip** with `debt_draft_decide`, as any draft: the desk owner
   only, `xero_invoice_ids` set to `jan_text.xero_invoice_ids` in that order.
   The draft id's tag is a hash of Jan's number and those invoice ids, so an
   approval is tied to the number and the list Shaun saw: another number, or
   the invoices in another order, is refused `409 debt_draft_invoices_changed`.
-  A Jan text may be up to 1600 characters (a client text 1000), and passes the
-  same wording checks.
+  A Jan text may be up to 1600 characters (a client text 1000), and is refused
+  when empty, with an em dash or over that length. It goes to staff, not a
+  client, so the legal-action words are not checked against the payer names
+  and job sites it lists (a street named Court is an address): the names tag
+  in the draft id is a hash of those, and while every visit line's
+  "<n>. <payer, site>:" part is exactly as drafted, that part is left out of
+  the word check. Everything else, the standard wording and anything Shaun
+  types, is checked; an edit to a listed name or site has the whole text
+  checked. `approvable` and `problem` run the same check on the text shown.
 - **Send** with `debt_draft_send`, as any draft: the same switch
   (`DEBT_SENDING_ENABLED`), the same "nothing logged since the approval" rule,
   the same last Xero check of every covered invoice (Jan is never sent to a

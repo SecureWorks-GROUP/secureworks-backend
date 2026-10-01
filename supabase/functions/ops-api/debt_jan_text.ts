@@ -9,14 +9,19 @@
 // debt_draft_decide and it is sent through debt_draft_send (debt_desk_actions.ts): desk owner
 // only, the same durable claim, the same sending switch, logged per covered invoice.
 //
-// Jan's mobile comes from the JAN_MOBILE setting when it is set (a set but unusable value means
-// not set, never a guess), else from the one staff record (users) whose first name is Jan. When
-// it cannot be found unambiguously the draft says "Jan's mobile not set" and cannot be approved.
-// No number is ever written into the code.
+// Jan's mobile comes only from the one staff record (users) whose first name is Jan. When it
+// cannot be found unambiguously the draft says "Jan's mobile not set in staff records" and
+// cannot be approved. No number is ever written into the code.
 //
-// The draft id is `<perth date>:jan-<tag>:jan:jan_text|<cents per invoice>`, where the tag is a
-// short hash of Jan's number and the covered invoice ids in order. So an approval is tied to the
-// number and the list Shaun saw: a changed list or a changed number is a different draft.
+// The draft id is `<perth date>:jan-<tag>-<names tag>:jan:jan_text|<cents per invoice>`, where
+// the tag is a short hash of Jan's number and the covered invoice ids in order, and the names
+// tag a short hash of the names and sites the standard wording lists. So an approval is tied to
+// the number and the list Shaun saw: a changed list or a changed number is a different draft.
+//
+// Jan's text goes to a member of staff, not a client, so the words no chase message may carry
+// are not checked against the payers' names and the job sites it lists (a street named Court
+// is an address, not a threat). They are checked on everything else, the standard wording and
+// whatever Shaun types; a listed name or site passes only while it is exactly as drafted.
 //
 // Its chase-log rows carry no schedule step, so neither its approval nor its send moves any
 // payer's ladder: the visit itself is recorded by debt_log_outcome (schedule_step jan_visit),
@@ -31,11 +36,10 @@ import {
   type DebtDeskDraft,
   debtDraftId,
   debtDraftMoney,
+  debtDraftTextProblem,
   parseDebtDraftId,
 } from "./debt_draft_templates.ts";
 
-/** The ops-api setting that overrides the staff record (an Australian mobile). */
-export const JAN_MOBILE_SETTING = "JAN_MOBILE";
 export const JAN_TEXT_STEP = "jan_text" as const;
 /** Each covered invoice is re-read live before the send: keep it well inside Xero's 60 a minute. */
 export const JAN_TEXT_MAX_INVOICES = 30;
@@ -45,10 +49,10 @@ export const JAN_TEXT_MAX_LENGTH = 1600;
 export interface JanMobile {
   /** E.164, e.g. +61411222333; null when not set. */
   phone: string | null;
-  source: "setting" | "staff" | null;
+  source: "staff" | null;
   staff_user_id: string | null;
   staff_name: string | null;
-  /** "Jan's mobile not set: ..." when phone is null. */
+  /** "Jan's mobile not set ..." when phone is null. */
   problem: string | null;
 }
 
@@ -73,45 +77,26 @@ export function normaliseAuMobile(raw: unknown): string | null {
   return /^04\d{8}$/.test(digits) ? `+61${digits.slice(1)}` : null;
 }
 
-function notSet(why: string): JanMobile {
+function notSet(problem: string): JanMobile {
   return {
     phone: null,
     source: null,
     staff_user_id: null,
     staff_name: null,
-    problem: `Jan's mobile not set: ${why}`,
+    problem,
   };
 }
 
-const HOW_TO_SET =
-  `Add the mobile to Jan's staff record, or set ${JAN_MOBILE_SETTING}`;
+const NOT_IN_STAFF = "Jan's mobile not set in staff records";
 
 const firstName = (name: string | null) =>
   String(name ?? "").trim().split(/\s+/)[0].toLowerCase();
 
-/** Jan's mobile: the setting when set, else the one staff record named Jan. */
-export function resolveJanMobile(
-  setting: string | undefined,
-  staff: JanStaffRecord[],
-): JanMobile {
-  const configured = setting?.trim();
-  if (configured) {
-    const phone = normaliseAuMobile(configured);
-    return phone
-      ? {
-        phone,
-        source: "setting",
-        staff_user_id: null,
-        staff_name: null,
-        problem: null,
-      }
-      : notSet(
-        `${JAN_MOBILE_SETTING} is set but is not an Australian mobile number`,
-      );
-  }
+/** Jan's mobile: the one staff record named Jan. */
+export function resolveJanMobile(staff: JanStaffRecord[]): JanMobile {
   const jans = staff.filter((u) => firstName(u.name) === "jan");
   if (!jans.length) {
-    return notSet(`no staff record is named Jan. ${HOW_TO_SET}`);
+    return notSet(`${NOT_IN_STAFF}: no staff record is named Jan`);
   }
   const phones = new Set(jans.map((u) => normaliseAuMobile(u.phone)));
   if (phones.size === 1 && !phones.has(null)) {
@@ -126,10 +111,10 @@ export function resolveJanMobile(
   }
   return jans.length > 1
     ? notSet(
-      `${jans.length} staff records are named Jan, with different or missing mobiles. Set ${JAN_MOBILE_SETTING}`,
+      `${NOT_IN_STAFF}: ${jans.length} staff records are named Jan, with different or missing mobiles`,
     )
     : notSet(
-      `Jan's staff record has no Australian mobile number. ${HOW_TO_SET}`,
+      `${NOT_IN_STAFF}: add an Australian mobile to Jan's staff record`,
     );
 }
 
@@ -155,21 +140,18 @@ export function createSupabaseJanStaffStore(
   };
 }
 
-/** Jan's mobile, read now. Reads the staff records only when the setting is unset. */
-export async function readJanMobile(
-  store: JanStaffStore,
-  get: (name: string) => string | undefined = (name) => Deno.env.get(name),
-): Promise<JanMobile> {
-  const setting = get(JAN_MOBILE_SETTING);
-  if (setting?.trim()) return resolveJanMobile(setting, []);
+/** Jan's mobile, read now from the staff records. */
+export async function readJanMobile(store: JanStaffStore): Promise<JanMobile> {
   try {
-    return resolveJanMobile(undefined, await store.janStaff());
+    return resolveJanMobile(await store.janStaff());
   } catch (error) {
     console.error(
       "[debt_jan_text] staff records read failed",
       (error as Error)?.message ?? error,
     );
-    return notSet("the staff records could not be read. Try again shortly");
+    return notSet(
+      "Jan's mobile not set: the staff records could not be read. Try again shortly",
+    );
   }
 }
 
@@ -189,14 +171,39 @@ function janTextTag(phone: string, ids: string[]): string {
   return fnv1a(`${phone}|${ids.map((id) => id.toLowerCase()).join(",")}`);
 }
 
+// A visit line of the standard wording: "<n>. <payer, site>: <invoices>, <amount> owing...".
+const VISIT_LINE = /^(\d+\. )(.*)(: [^:]*)$/;
+
+/** The payer-and-site part of each visit line, in order. */
+function listedNames(text: string): string {
+  return text.split("\n").flatMap((line) => {
+    const m = VISIT_LINE.exec(line);
+    return m ? [m[2]] : [];
+  }).join("\n");
+}
+
+const JAN_ID_TAGS = /^jan-([0-9a-f]{8})-([0-9a-f]{8})$/;
+
+function janIdTags(draftId: string, count?: number) {
+  const parsed = parseDebtDraftId(draftId);
+  if (!parsed || parsed.step !== JAN_TEXT_STEP) return null;
+  if (count !== undefined && parsed.amounts.length !== count) return null;
+  const m = JAN_ID_TAGS.exec(parsed.item_id.split(":")[1] ?? "");
+  return m ? { list: m[1], names: m[2] } : null;
+}
+
+/** The draft id for Jan's text with this standard wording (`template`). */
 export function janTextDraftId(
   perthDate: string,
   phone: string,
   invoices: Array<{ xero_invoice_id: string; amount_due: number }>,
+  template: string,
 ): string {
   const tag = janTextTag(phone, invoices.map((i) => i.xero_invoice_id));
   return debtDraftId(
-    `${perthDate}:jan-${tag}:jan:${JAN_TEXT_STEP}`,
+    `${perthDate}:jan-${tag}-${
+      fnv1a(listedNames(template))
+    }:jan:${JAN_TEXT_STEP}`,
     invoices,
   );
 }
@@ -207,10 +214,27 @@ export function janTextDraftIdMatches(
   phone: string,
   ids: string[],
 ): boolean {
-  const parsed = parseDebtDraftId(draftId);
-  if (!parsed || parsed.step !== JAN_TEXT_STEP) return false;
-  if (parsed.amounts.length !== ids.length) return false;
-  return parsed.item_id.split(":")[1] === `jan-${janTextTag(phone, ids)}`;
+  return janIdTags(draftId, ids.length)?.list === janTextTag(phone, ids);
+}
+
+/**
+ * Why Jan's text may not be approved, or null when it may. Empty, em dash and length cover the
+ * whole text. The words no chase message may carry are checked on all of it but the payer
+ * names and sites the draft listed, and those are left out only while every visit line still
+ * names exactly what was drafted.
+ */
+export function janTextProblem(text: unknown, draftId: string): string | null {
+  const listed = typeof text === "string" &&
+    janIdTags(draftId)?.names === fnv1a(listedNames(text));
+  return debtDraftTextProblem(
+    text,
+    JAN_TEXT_MAX_LENGTH,
+    listed
+      ? (text as string).split("\n").map((line) =>
+        line.replace(VISIT_LINE, "$1$3")
+      ).join("\n")
+      : undefined,
+  );
 }
 
 // ── The wording ──
@@ -258,9 +282,9 @@ export function janMorningText(
   visits: JanTextVisitInput[],
 ): string {
   const lines = visits.map((v, k) => {
-    const who = [v.payer_name.trim(), v.site?.trim()].filter(Boolean).join(
-      ", ",
-    );
+    const who = [v.payer_name, v.site]
+      .map((s) => (s ?? "").replace(/\s+/g, " ").replace(/—/g, "-").trim())
+      .filter(Boolean).join(", ");
     const days = v.days_overdue !== null && v.days_overdue > 0
       ? `, ${v.invoices.length > 1 ? "oldest " : ""}${v.days_overdue} day${
         v.days_overdue === 1 ? "" : "s"
@@ -306,7 +330,7 @@ export interface JanTextDraft
   xero_invoice_ids: string[];
   /** False when Jan's mobile is not set, the list cannot be one text, or it was sent. */
   approvable: boolean;
-  /** Why it cannot be approved (for example "Jan's mobile not set: ..."). */
+  /** Why it cannot be approved (for example "Jan's mobile not set in staff records: ..."). */
   problem: string | null;
 }
 
@@ -377,7 +401,6 @@ export function buildJanText(
 
   if (!visits.length) return null;
   const invoices = janItems.flatMap((i) => i.invoices);
-  const id = janTextDraftId(opts.perthDate, opts.mobile.phone ?? "", invoices);
   const template = janMorningText(
     opts.perthDate,
     visits.map((v, k) => ({
@@ -387,6 +410,12 @@ export function buildJanText(
       amount: cents(v.amount) / 100,
       days_overdue: v.days_overdue,
     })),
+  );
+  const id = janTextDraftId(
+    opts.perthDate,
+    opts.mobile.phone ?? "",
+    invoices,
+    template,
   );
   const state = states.get(id);
   const decided = state?.decision ?? null;
@@ -399,7 +428,7 @@ export function buildJanText(
       ? `Jan's list covers ${invoices.length} invoices, more than the ${JAN_TEXT_MAX_INVOICES} one text can carry: log the visits already done, then read the list again`
       : template.length > JAN_TEXT_MAX_LENGTH
       ? `Jan's list is too long for one text (${template.length} characters, at most ${JAN_TEXT_MAX_LENGTH})`
-      : null);
+      : janTextProblem(text, id));
   return {
     id,
     channel: "sms",
