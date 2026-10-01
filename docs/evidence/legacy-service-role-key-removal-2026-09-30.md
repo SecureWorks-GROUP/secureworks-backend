@@ -219,10 +219,11 @@ what `deploy-edge-functions.yml` reads): `google-ads-ingest`, `monitor-inbox`,
 `xero-sync`. `xero-sync` and `transcribe-call` have no check of their own at
 all today, so each needs one before the flag goes off.
 
-**Trap:** `monitor-ses-makesafes/index.ts:98-133` accepts any token whose
-`role` claim reads `service_role` without checking its signature, trusting the
-platform check to have done so. Remove that path in the same change, before the
-flag goes off, or anyone can forge a token and pass.
+**Trap:** `monitor-ses-makesafes` used to accept any token whose `role` claim
+reads `service_role` without checking its signature, trusting the platform
+check to have done so. Since "Done in code" above, a claim counts only once the
+gateway answers 2xx for that exact token, so that path no longer depends on the
+flag; the precondition there still applies.
 
 Check: a call with no credentials gets 401 from each of the seven; a call with
 the new key in `apikey` succeeds.
@@ -235,8 +236,8 @@ ops-api, completion-pack), `ghl-proxy` (→ xero-sync), `ghl-webhook` (→ ops-a
 `ops-ai` (→ ops-api, reporting-api, ghl-proxy, send-quote), `ops-api` (→
 ghl-proxy, send-quote, reporting-api, transcribe-call, xero-sync),
 `receive-po-email` (→ ops-api), `send-outlook-email` (→ ghl-proxy), `send-quote`
-(→ ghl-proxy, ops-api), `xero-sync` (→ ops-api). Fix on the way:
-`daily-digest/index.ts:1605,1623` use an undeclared `SERVICE_ROLE_KEY` today.
+(→ ghl-proxy, ops-api), `xero-sync` (→ ops-api). The undeclared
+`SERVICE_ROLE_KEY` in `daily-digest` is already gone (see "Done in code").
 
 Check: the daily digest, CEO brief and a quote send run clean in the function
 logs.

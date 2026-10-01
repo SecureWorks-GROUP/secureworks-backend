@@ -1558,8 +1558,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
           const daysSinceCreation = Math.floor((Date.now() - new Date(cs.created_at).getTime()) / 86400000)
           const jobNum = cs.jobs?.job_number || ''
           const clientName = cs.jobs?.client_name || 'Client'
-          const firstName = clientName.split(' ')[0]
-          const address = cs.jobs?.site_address || ''
 
           if (daysSinceCreation >= 14) {
             // Day 14+: Red annotation for operations

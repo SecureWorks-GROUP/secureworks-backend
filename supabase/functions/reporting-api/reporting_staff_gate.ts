@@ -60,13 +60,22 @@ export function reportingApiServerSecretPresented(input: {
   serviceKey?: string | null;
   agentServerKey?: string | null;
 }): boolean {
-  const { xApiKey, bearerToken, apiKeyHeader, sharedKey, serviceKey, agentServerKey } = input;
+  const {
+    xApiKey,
+    bearerToken,
+    apiKeyHeader,
+    sharedKey,
+    serviceKey,
+    agentServerKey,
+  } = input;
   const matches = (secret?: string | null) =>
     !!secret &&
     secret !== sharedKey &&
     (xApiKey === secret || bearerToken === secret);
   if (matches(serviceKey)) return true;
-  if (!!serviceKey && serviceKey !== sharedKey && apiKeyHeader === serviceKey) return true;
+  if (!!serviceKey && serviceKey !== sharedKey && apiKeyHeader === serviceKey) {
+    return true;
+  }
   if (matches(agentServerKey) && agentServerKey !== serviceKey) return true;
   return false;
 }

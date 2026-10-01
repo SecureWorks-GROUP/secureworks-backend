@@ -2764,11 +2764,19 @@ Deno.test("auth [TRAP]: a forged role=service_role JWT is REJECTED unless the pl
   // The claim alone proves nothing; the platform must vouch for the exact token.
   const forged = fakeJwt({ role: "service_role" });
   assertEquals(
-    await _isAuthorized(reqWithBearer(forged), FAKE_API_KEY, authOpts("rejected").options),
+    await _isAuthorized(
+      reqWithBearer(forged),
+      FAKE_API_KEY,
+      authOpts("rejected").options,
+    ),
     false,
   );
   assertEquals(
-    await _isAuthorized(reqWithBearer(forged), FAKE_API_KEY, authOpts("unknown").options),
+    await _isAuthorized(
+      reqWithBearer(forged),
+      FAKE_API_KEY,
+      authOpts("unknown").options,
+    ),
     false,
   );
 });
@@ -2777,20 +2785,32 @@ Deno.test("auth [FIX]: a Bearer JWT with role=anon is REJECTED", async () => {
   const anonJwt = fakeJwt({ role: "anon", iss: "supabase", ref: "proj" });
   assertEquals(_decodeJwtRole(anonJwt), "anon");
   assertEquals(
-    await _isAuthorized(reqWithBearer(anonJwt), FAKE_API_KEY, authOpts("accepted").options),
+    await _isAuthorized(
+      reqWithBearer(anonJwt),
+      FAKE_API_KEY,
+      authOpts("accepted").options,
+    ),
     false,
   );
 });
 
 Deno.test("auth [FIX]: x-api-key === SW_API_KEY is ACCEPTED", async () => {
   assert(
-    await _isAuthorized(reqWithApiKey(FAKE_API_KEY), FAKE_API_KEY, authOpts("rejected").options),
+    await _isAuthorized(
+      reqWithApiKey(FAKE_API_KEY),
+      FAKE_API_KEY,
+      authOpts("rejected").options,
+    ),
   );
 });
 
 Deno.test("auth [FIX]: a wrong x-api-key is REJECTED", async () => {
   assertEquals(
-    await _isAuthorized(reqWithApiKey("not-the-key"), FAKE_API_KEY, authOpts("accepted").options),
+    await _isAuthorized(
+      reqWithApiKey("not-the-key"),
+      FAKE_API_KEY,
+      authOpts("accepted").options,
+    ),
     false,
   );
 });
@@ -2820,7 +2840,11 @@ Deno.test("auth [FIX]: the exact injected service key as Bearer is still ACCEPTE
 
 Deno.test("auth [STEP4]: the injected service key is REJECTED once the platform switches legacy keys off", async () => {
   assertEquals(
-    await _isAuthorized(reqWithBearer(FAKE_SERVICE_KEY), FAKE_API_KEY, authOpts("rejected").options),
+    await _isAuthorized(
+      reqWithBearer(FAKE_SERVICE_KEY),
+      FAKE_API_KEY,
+      authOpts("rejected").options,
+    ),
     false,
   );
 });
@@ -2837,7 +2861,10 @@ Deno.test("auth [FIX]: no credentials at all is REJECTED", async () => {
   const bare = new Request("https://x/functions/v1/monitor-ses-makesafes", {
     method: "POST",
   });
-  assertEquals(await _isAuthorized(bare, FAKE_API_KEY, authOpts("accepted").options), false);
+  assertEquals(
+    await _isAuthorized(bare, FAKE_API_KEY, authOpts("accepted").options),
+    false,
+  );
 });
 
 // ════════════════════════════════════════════════════════════
