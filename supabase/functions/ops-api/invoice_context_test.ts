@@ -424,7 +424,7 @@ function fakeClient(
       let range: { from: number; to: number } | null = null;
       let selected: Array<{ out: string; src: string }> | null = null;
       const q: any = {};
-      const chain = (fn: () => void) => (...args: any[]) => {
+      const chain = (fn: (...args: any[]) => unknown) => (...args: any[]) => {
         (fn as any)(...args);
         return q;
       };

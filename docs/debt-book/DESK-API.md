@@ -35,7 +35,7 @@ materials invoice before the job's first payment is not a deposit).
   "id": "<item id>|<amount due in cents per invoice, item order>",
   "channel": "sms", "to": "client | jan", "step": "friendly_text",
   "text": "the approved or sent text once decided, else the standard wording; see below for a skipped firm text",
-  "template_text": "the standard wording, or null on a decided firm text",
+  "template_text": "the standard wording; null on an approved, claimed or sent firm text, and on a skipped one with no link read that day",
   "status": "pending | approved | skipped | sending | sent",
   "edited": "true or false against the standard wording; null when it is not known",
   "pay_links": [{ "xero_invoice_id": "uuid", "invoice_number": "INV-1", "url": "https://in.xero.com/..." }],
@@ -48,12 +48,13 @@ Pay links are read one invoice at a time, at most 10 live Xero reads per list
 read, top of the list first. A link once read is kept for the rest of that
 Perth day in the ops-api instance's memory, so reading the list again after
 each approval spends no more Xero calls on it. A decided firm text (approved,
-skipped, claimed or sent) is not read live again, so its standard wording is
-not known: `template_text` and `edited` are null. An approved one keeps its
-links inside its text. A skipped one is worded from links already read that
-day, else shows its earlier approved text, and is `text: null` only when it
-has neither, so un-skipping it never spends a Xero read. A changed amount gives a
-new draft id, so an approval never carries over to a text it did not see.
+skipped, claimed or sent) is not read live again. An approved, claimed or sent
+one keeps its links inside its text, and its standard wording is not known:
+`template_text` and `edited` are null. A skipped one is worded from links
+already read that day (`template_text` and `pay_links` set), else shows its
+earlier approved text, and is `text: null` only when it has neither, so
+un-skipping it never spends a Xero read. A changed amount gives a new draft
+id, so an approval never carries over to a text it did not see.
 
 `sending` means a send claimed the draft and did not confirm it: the draft is
 never sent again that day, and `last_send.outcome: "not_confirmed"` carries
