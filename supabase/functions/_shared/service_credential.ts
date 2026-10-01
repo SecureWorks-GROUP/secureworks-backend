@@ -16,16 +16,23 @@
 // key is still valid, so it would go on accepting the leaked key after the
 // Captain deactivates the legacy keys in the dashboard. Before trusting a legacy
 // key this module asks the project's own API gateway (GET /auth/v1/settings with
-// the key as `apikey`). A 2xx means the platform still honours it; 401/403 means
-// the key is switched off or not genuine, and it is refused from then on.
+// the key as `apikey`). A 2xx is read as "the platform still honours it"; any
+// other 4xx except 408 and 429 is read as "switched off or not genuine", and the
+// key is refused from then on.
+//
+// NOT OBSERVED YET: what that endpoint actually returns in production for a live
+// legacy key, for the Vault cron key, for the injected key, and for a key after
+// the legacy keys are switched off. The mapping above is the design assumption,
+// not a measurement; the runbook makes measuring it a merge precondition.
 //
 // Verdicts are cached per token for LEGACY_PROBE_TTL_MS so the gateway sees at
 // most one probe per isolate per key per window. When the gateway cannot give an
-// answer (network error, timeout, 5xx), the last definite verdict stands. With no
-// definite verdict yet:
+// answer (network error, timeout, 5xx, 408, 429, no SUPABASE_URL), the last
+// definite verdict stands. With no definite verdict yet:
 //   - the exact injected key is accepted: it is a server secret, the caller
 //     cannot cause the outage, and the function's own database calls fail in the
-//     same outage anyway, so refusing would only add a second failure;
+//     same outage anyway, so refusing would only add a second failure (every
+//     cron and edge-to-edge caller would 401 on each gateway blip);
 //   - a token accepted only for its `role` claim is refused: a claim can be
 //     forged by anyone, and the platform's signature check is the only thing that
 //     makes it trustworthy.
@@ -164,7 +171,10 @@ export function createLegacyKeyProbe(deps: {
         await res.body?.cancel();
       } catch { /* body already consumed or absent */ }
       if (res.status >= 200 && res.status < 300) return "accepted";
-      if (res.status === 401 || res.status === 403) return "rejected";
+      if (
+        res.status >= 400 && res.status < 500 && res.status !== 408 &&
+        res.status !== 429
+      ) return "rejected";
       return "unknown";
     } catch {
       return "unknown";

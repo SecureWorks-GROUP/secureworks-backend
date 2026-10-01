@@ -87,17 +87,19 @@ function _setTestClientFactory(
 // ── AUTH HELPERS ────────────────────────────────────────────────────────────
 // This function is deployed with verify_jwt ON: the Supabase gateway still
 // verifies any Bearer JWT's signature before our handler runs. The in-code check
-// below additionally confirms a legacy token with Supabase, so a legacy key stops
-// working here once the Captain switches legacy keys off (runbook Step 4,
-// docs/evidence/legacy-service-role-key-removal-2026-09-30.md).
+// below additionally confirms a legacy token with Supabase, so a legacy key is
+// meant to stop working here once the Captain switches legacy keys off (runbook
+// Step 4, docs/evidence/legacy-service-role-key-removal-2026-09-30.md). What the
+// gateway answers for the cron key, the injected key and a switched-off key is
+// NOT OBSERVED YET; see service_credential.ts.
 //
 // The pg_cron trigger (trigger_monitor_ses_makesafes -> _sw_service_key()) calls
 // with `Authorization: Bearer <a service-role JWT>` that need not byte-equal the
 // injected SUPABASE_SERVICE_ROLE_KEY, so a legacy JWT is accepted on its `role`
 // claim too. A claim alone proves nothing (anyone can write one), so
 // verifyServiceCredential asks the project's API gateway whether it still honours
-// that exact token before trusting it: a forged token, or any legacy key after the
-// Captain switches legacy keys off, is refused. New `sb_secret_` keys from
+// that exact token before trusting it: a forged token is refused, and so is any
+// legacy key the gateway stops answering 2xx for. New `sb_secret_` keys from
 // SUPABASE_SECRET_KEYS are accepted in any server-caller header.
 
 // Authorize a request. Accept if ANY of:

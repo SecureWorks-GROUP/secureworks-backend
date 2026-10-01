@@ -139,22 +139,34 @@ check; the Captain does not need to act until step H.
 Each change is dual-accepting: it adds the new key and keeps the old path until
 step G, so each one can ship and be checked alone.
 
-**Done in code (branch `fm/sec-key-rotate-4`).** Nothing below changes what
-production accepts while the legacy keys are on.
+**Done in code (branch `fm/sec-key-rotate-4`).**
+
+**Not observed yet, and a merge precondition.** Everything below rests on what
+`GET /auth/v1/settings` returns when a key is sent as `apikey`: 2xx for a live
+legacy key, and a 4xx other than 408/429 once legacy keys are switched off.
+Nobody has measured that against production for a live legacy key, for the
+Vault cron key (`_sw_service_key()`), for the injected
+`SUPABASE_SERVICE_ROLE_KEY`, or for a switched-off key. This change must not
+merge until firstmate has measured, read-only from inside the database, what
+that endpoint returns for the Vault cron key and for the injected key. If the
+cron key does not come back 2xx, `monitor-ses-makesafes` refuses its own cron
+once this deploys. The switched-off-key answer can only be observed after K.
 
 - The fourteen exact-match caller checks listed under C now go through one
   module, `supabase/functions/_shared/service_credential.ts`. It accepts a new
   `sb_secret_` key from `SUPABASE_SECRET_KEYS` in `apikey`, `x-api-key` or
   `Authorization: Bearer`, and accepts the legacy key only while the project's
-  own API gateway still honours it (it asks `GET /auth/v1/settings` with the
-  key as `apikey`, cached five minutes per isolate). So step K on its own now
-  stops these fourteen functions accepting the legacy key, whatever
-  `SUPABASE_SERVICE_ROLE_KEY` still holds. If the gateway cannot answer, the
-  exact injected key keeps working (its own database calls fail in that outage
-  anyway) and a role-claim-only token is refused.
+  own API gateway answers 2xx for it (it asks `GET /auth/v1/settings` with the
+  key as `apikey`, cached five minutes per isolate). If the measurement above
+  holds, what production accepts while the legacy keys are on is unchanged, and
+  step K on its own stops these fourteen functions accepting the legacy key,
+  whatever `SUPABASE_SERVICE_ROLE_KEY` still holds. If the gateway cannot
+  answer (network error, timeout, 5xx, 408, 429), the exact injected key keeps
+  working (its own database calls fail in that outage anyway) and a
+  role-claim-only token is refused.
 - `monitor-ses-makesafes` (still deployed with verify-JWT on) no longer
-  trusts a `role` claim alone; a claim counts only once the gateway confirms
-  that exact token. No function's verify-JWT setting changes here.
+  trusts a `role` claim alone; a claim counts only once the gateway answers
+  2xx for that exact token (see the precondition above). No function's verify-JWT setting changes here.
 - `makesafe_cost_report.ts` signs links with `MAKESAFE_REPORT_SECRET`, else
   `SW_API_KEY`, never the service key; with neither set no link is minted or
   accepted. Production sets `SW_API_KEY`, so existing links keep working.
@@ -321,7 +333,7 @@ rollback file, which would otherwise paste whatever Vault holds into cron.
 | D without removing the `monitor-ses-makesafes` role shortcut | Anyone can forge a token and run that function |
 | K (deactivate) before C-H | All 22 edge functions lose database access, every cron job fails, Ops/Trade/fencing apps stop, operator scripts fail |
 | L (revoke) before K | Supabase refuses; the legacy keys must be off first |
-| L without I | The fourteen caller checks already refuse the legacy key once the gateway does; D's functions still need their own change; any read of `SUPABASE_SERVICE_ROLE_KEY` left elsewhere (admin clients, outbound calls) still breaks |
+| L without I | If the not-yet-observed gateway answer holds, the fourteen caller checks already refuse the legacy key once the gateway does; D's functions still need their own change; any read of `SUPABASE_SERVICE_ROLE_KEY` left elsewhere (admin clients, outbound calls) still breaks |
 | Revoke without waiting after a rotation | Signed-in users are signed out |
 | Changing the key before re-homing `makesafe_cost_report.ts`'s secret | Existing cost-report links stop working |
 

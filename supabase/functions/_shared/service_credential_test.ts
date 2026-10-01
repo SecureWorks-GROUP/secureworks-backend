@@ -293,12 +293,17 @@ Deno.test("probe asks the project's own gateway with the key as apikey", async (
   }]);
 });
 
-Deno.test("probe maps 401/403 to rejected and other failures to unknown", async () => {
+Deno.test("probe maps 4xx to rejected and indeterminate answers to unknown", async () => {
   for (
-    const [status, verdict] of [[401, "rejected"], [403, "rejected"], [
-      500,
-      "unknown",
-    ], [429, "unknown"]] as const
+    const [status, verdict] of [
+      [401, "rejected"],
+      [403, "rejected"],
+      [400, "rejected"],
+      [404, "rejected"],
+      [408, "unknown"],
+      [429, "unknown"],
+      [500, "unknown"],
+    ] as const
   ) {
     const probe = createLegacyKeyProbe({
       supabaseUrl: () => "https://p",
