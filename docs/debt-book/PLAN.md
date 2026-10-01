@@ -1,7 +1,7 @@
 # Debt book and chase desk: the plan
 
 **Written:** 2026-09-30. **For:** the captain (Shaun), and the workers who build it.
-**Status:** a plan only. Nothing is built, fixed or switched off yet.
+**Status:** approved 30 Sep; build in progress (steps 0-1 live; step 2 in this change; see the PRs).
 **Reviewed in Lavish:** this document matches the Lavish plan page shown to the
 captain. Plain words are explained in [GLOSSARY.md](GLOSSARY.md). The
 captain's rulings, word for word, are in [DECISIONS.md](DECISIONS.md).
