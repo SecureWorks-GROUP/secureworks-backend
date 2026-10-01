@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   createXeroReadGet,
+  getXeroOnlineInvoiceUrl,
   getXeroReceivable,
   listXeroReceivables,
   listXeroSettlementRecords,
@@ -1012,4 +1013,41 @@ Deno.test("credential and provider failures propagate instead of empty successfu
   }
   f.deps.getToken = () => Promise.reject(failure);
   assertStrictEquals(await assertRejects(operations[0]), failure);
+});
+
+Deno.test("online invoice read returns the one pay link Xero holds for that invoice", async () => {
+  const f = fixture({
+    OnlineInvoices: [{ OnlineInvoiceUrl: "https://in.xero.com/AbC123" }],
+  });
+  assertEquals(
+    await getXeroOnlineInvoiceUrl(noDatabase, ID.toUpperCase(), f.deps),
+    "https://in.xero.com/AbC123",
+  );
+  assertEquals(f.calls, [{
+    path: `/Invoices/${ID}/OnlineInvoice`,
+    tenant: TENANT,
+    params: undefined,
+  }]);
+});
+
+Deno.test("online invoice read refuses a missing, plain-http or unexpected link", async () => {
+  for (
+    const body of [
+      { OnlineInvoices: [] },
+      { OnlineInvoices: [{ OnlineInvoiceUrl: "http://in.xero.com/x" }] },
+      { OnlineInvoices: [{ OnlineInvoiceUrl: "" }] },
+      { Nothing: true },
+    ]
+  ) {
+    const f = fixture(body);
+    const error = await assertRejects(
+      () => getXeroOnlineInvoiceUrl(noDatabase, ID, f.deps),
+      XeroReceivablesReadError,
+    );
+    assertEquals(error.code, "XERO_ONLINE_INVOICE_MISSING");
+  }
+  await assertRejects(
+    () => getXeroOnlineInvoiceUrl(noDatabase, "not-a-uuid", fixture({}).deps),
+    XeroReceivablesReadError,
+  );
 });

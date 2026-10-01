@@ -16,6 +16,11 @@ import {
 } from "./debt_book_fixture_2026_09_29.ts";
 import { DEBT_CHASE_GROUP_ORDER } from "./debt_chase_schedule.ts";
 import {
+  DEBT_DRAFT_STEPS,
+  type DebtDraftStep,
+  debtDraftText,
+} from "./debt_draft_templates.ts";
+import {
   createSupabaseDebtChaseLogStore,
   type DebtChaseLogStore,
   type DebtMorningListDeps,
@@ -253,7 +258,28 @@ Deno.test("debt_morning_list: Thursday's first list from the 29 Sep book matches
     ],
   );
   assert(list.items.every((i) => i.hold ? true : i.held_step === null));
-  assert(list.items.every((i) => i.draft === null));
+  // Drafts (plan step 3): every chaseable text, Jan visit and deposit reminder carries a
+  // pending draft in the standard wording; calls, statements and holds carry none.
+  for (const i of list.items) {
+    const drafted = !i.hold &&
+      DEBT_DRAFT_STEPS.includes(i.step as DebtDraftStep);
+    assertEquals(!!i.draft, drafted, `${i.id} draft`);
+    if (!i.draft) continue;
+    assertEquals(i.draft.status, "pending");
+    assertEquals(i.draft.channel, "sms");
+    assertEquals(i.draft.to, i.step === "jan_visit" ? "jan" : "client");
+    assertEquals(i.draft.text, i.draft.template_text);
+    assert(i.draft.id.startsWith(`${i.id}|`));
+    assertEquals(i.draft_problem, null);
+  }
+  assert(list.items.some((i) => i.draft?.to === "jan"));
+  assertEquals(
+    list.items.filter((i) => i.group === "text").every((i) =>
+      i.draft?.text.startsWith("Hi ") &&
+      i.draft.text.includes(i.invoices[0].invoice_number)
+    ),
+    true,
+  );
   assertEquals(new Set(list.items.map((i) => i.id)).size, list.items.length);
 
   // Group order, then amount.
@@ -527,7 +553,7 @@ Deno.test("chase-log store: every column, org-scoped, chunked by 50 ids and page
   }]);
   const jobCall = calls.find((c) => c.table === "jobs")!;
   assertEquals(jobCall.filters.find(([m]) => m === "select")?.[1], [
-    "id, client_phone, client_email",
+    "id, client_phone, client_email, site_address, site_suburb",
   ]);
   assert(
     used.every((m) => ["select", "eq", "in", "order", "range"].includes(m)),
@@ -580,4 +606,197 @@ Deno.test("debt_morning_list stops, rather than restarting every ladder, when th
       failing,
     );
   }
+});
+
+// ── Drafts (plan step 3) ──
+
+function oneClientBook(n = 1, amount = 100) {
+  const x = xeroDeps(
+    [raw(n, { AmountDue: amount, Total: amount })],
+    THURSDAY_7AM,
+  );
+  const store = bookStore({
+    copyRowsByXeroIds: () =>
+      Promise.resolve([{
+        xero_invoice_id: idOf(n),
+        invoice_number: `INV-${n}`,
+        status: "AUTHORISED",
+        amount_due: amount,
+        due_date: "2026-09-20",
+        synced_at: null,
+        job_id: "j1",
+        debt_classification: "genuine_debt",
+      }]),
+    jobsByIds: () =>
+      Promise.resolve([{
+        id: "j1",
+        job_number: "SWF-26001",
+        status: "complete",
+        deposit_at: "2026-08-01",
+      }]),
+  });
+  return { x, store };
+}
+const sentYesterday = (n: number, step = "friendly_text") => ({
+  id: `sent-${n}-${step}`,
+  xero_invoice_id: idOf(n),
+  method: "sms",
+  created_at: "2026-09-30T01:00:00Z",
+  schedule_step: step,
+  outcome_code: "sent",
+  draft_id: `2026-09-30:x:text:${step}|10000`,
+  chased_by: "shaun@example.test",
+});
+
+Deno.test("drafts: a firm text carries each invoice's Xero pay link, read once per invoice", async () => {
+  const { x, store } = oneClientBook();
+  const asked: string[] = [];
+  const list = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([sentYesterday(1)]),
+    payLink: (id: string) => {
+      asked.push(id);
+      return Promise.resolve(`https://in.xero.com/pay-${id.slice(-4)}`);
+    },
+  } as unknown as DebtMorningListDeps);
+  assertEquals(list.items.map((i) => i.step), ["firm_text"]);
+  const item = list.items[0];
+  assertEquals(asked, [idOf(1)]);
+  assertEquals(item.draft?.pay_links, [{
+    xero_invoice_id: idOf(1),
+    invoice_number: "INV-1",
+    url: "https://in.xero.com/pay-0001",
+  }]);
+  assertEquals(
+    item.draft?.text,
+    debtDraftText({
+      step: "firm_text",
+      payer_name: "Client 1",
+      invoices: item.invoices,
+      pay_links: { [idOf(1)]: "https://in.xero.com/pay-0001" },
+    }),
+  );
+  assertEquals(item.draft?.id, `${item.id}|10000`);
+});
+
+Deno.test("drafts: a firm text with no pay link has no draft, and says why", async () => {
+  for (
+    const [payLink, why] of [
+      [undefined, "No Xero pay link reader"],
+      [
+        () => Promise.reject(new Error("429 rate limited")),
+        "could not be read",
+      ],
+    ] as const
+  ) {
+    const { x, store } = oneClientBook();
+    const list = await readDebtMorningList({}, {}, {
+      ...x.deps,
+      store,
+      chaseLog: logStore([sentYesterday(1)]),
+      payLink,
+    } as unknown as DebtMorningListDeps);
+    assertEquals(list.items[0].draft, null);
+    assert(
+      list.items[0].draft_problem?.includes(why),
+      list.items[0].draft_problem!,
+    );
+  }
+});
+
+Deno.test("drafts: pay links are read one at a time, at most the limit per list", async () => {
+  const raws = [1, 2, 3].map((n) => raw(n));
+  const x = xeroDeps(raws, THURSDAY_7AM);
+  let inFlight = 0;
+  let most = 0;
+  const list = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store: bookStore(),
+    chaseLog: logStore([1, 2, 3].map((n) => sentYesterday(n))),
+    payLinkLimit: 2,
+    payLink: async (id: string) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 1));
+      inFlight -= 1;
+      return `https://in.xero.com/${id.slice(-1)}`;
+    },
+  } as unknown as DebtMorningListDeps);
+  assertEquals(most, 1);
+  assertEquals(list.items.filter((i) => i.draft).length, 2);
+  const capped = list.items.filter((i) => !i.draft);
+  assertEquals(capped.length, 1);
+  assert(capped[0].draft_problem?.includes("at most 2 pay links"));
+});
+
+Deno.test("drafts: an approval, a skip and a refused send read back from the chase log", async () => {
+  const { x, store } = oneClientBook();
+  const first = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore(),
+  } as unknown as DebtMorningListDeps);
+  const draftId = first.items[0].draft!.id;
+  assertEquals(first.items[0].draft?.status, "pending");
+
+  const decision = (over: Record<string, unknown>) => ({
+    xero_invoice_id: idOf(1),
+    method: "sms",
+    schedule_step: "friendly_text",
+    draft_id: draftId,
+    chased_by: "shaun@example.test",
+    ...over,
+  });
+  const approved = decision({
+    id: "a1",
+    created_at: "2026-09-30T23:10:00Z",
+    approved_by_user_id: "20000000-0000-4000-8000-0000000000aa",
+    outcome: "approved",
+    notes: "Hi Client, edited by Shaun. Thanks, SecureWorks",
+  });
+  const refused = decision({
+    id: "f1",
+    created_at: "2026-09-30T23:20:00Z",
+    outcome_code: "failed",
+    outcome: "refused: sending_off",
+    notes: "Sending is off until Shaun says start sending",
+  });
+  const skipped = decision({
+    id: "s1",
+    created_at: "2026-09-30T23:30:00Z",
+    outcome_code: "skipped",
+    outcome: "skipped",
+  });
+  const read = (rows: Record<string, unknown>[]) =>
+    readDebtMorningList({}, {}, {
+      ...x.deps,
+      store,
+      chaseLog: logStore(rows),
+    } as unknown as DebtMorningListDeps);
+
+  const a = (await read([approved, refused])).items[0];
+  assertEquals(a.step, "friendly_text"); // approval and refusal never move the ladder
+  assertEquals(a.draft?.status, "approved");
+  assertEquals(
+    a.draft?.text,
+    "Hi Client, edited by Shaun. Thanks, SecureWorks",
+  );
+  assertEquals(a.draft?.approved_by, "shaun@example.test");
+  assertEquals(a.draft?.edited, true);
+  assertEquals(a.draft?.last_send, {
+    at: "2026-09-30T23:20:00Z",
+    outcome: "failed",
+    reason: "Sending is off until Shaun says start sending",
+  });
+
+  const s = (await read([approved, refused, skipped])).items[0];
+  assertEquals(s.draft?.status, "skipped");
+  assertEquals(s.draft?.text, s.draft?.template_text);
+
+  // An approval of a different amount is a different draft: today's is still pending.
+  const stale =
+    (await read([{ ...approved, draft_id: `${first.items[0].id}|9999` }]))
+      .items[0];
+  assertEquals(stale.draft?.status, "pending");
 });

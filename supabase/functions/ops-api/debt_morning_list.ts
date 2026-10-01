@@ -4,13 +4,17 @@
 //
 //   debt_morning_list   reads the debt book live from Xero (debt_book.ts), the chase log
 //                       (payment_chase_logs) for the invoices that can be chased, and the
-//                       linked jobs' client phone and email, then works out today's step per
-//                       payer. No drafts and no sending: that is plan step 3.
+//                       linked jobs' client phone, email and site, then works out today's step
+//                       per payer. Plan step 3 adds each item's draft (debt_desk_drafts.ts):
+//                       the standard wording, a firm text's Xero pay links (read one at a
+//                       time), and what Shaun decided. Approving and sending are
+//                       debt_desk_actions.ts.
 //
 // This module writes nothing: no database write, no Xero write, no message.
 
 import { type DebtBookDeps, DebtBookError, readDebtBook } from "./debt_book.ts";
 import { perthTimestamp } from "./debt_book_rules.ts";
+import { attachDebtDrafts } from "./debt_desk_drafts.ts";
 import {
   DEBT_CHASE_GROUP_ORDER,
   DEBT_CHASE_NO_REMINDER,
@@ -32,17 +36,23 @@ const LOG_PAGE = 1000;
 export interface DebtChaseLogStore {
   /** Every chase-log row on the given Xero invoice ids, oldest first. */
   chaseLogRows(xeroInvoiceIds: string[]): Promise<Record<string, unknown>[]>;
-  jobContacts(
-    jobIds: string[],
-  ): Promise<
-    Array<
-      { id: string; client_phone: string | null; client_email: string | null }
-    >
-  >;
+  jobContacts(jobIds: string[]): Promise<DebtJobContact[]>;
+}
+
+export interface DebtJobContact {
+  id: string;
+  client_phone: string | null;
+  client_email: string | null;
+  site_address?: string | null;
+  site_suburb?: string | null;
 }
 
 export type DebtMorningListDeps = DebtBookDeps & {
   chaseLog: DebtChaseLogStore;
+  /** Reads one invoice's Xero OnlineInvoice URL for a firm text (read-only). */
+  payLink?: (xeroInvoiceId: string) => Promise<string>;
+  /** At most this many pay links per list read (default DEBT_PAY_LINK_LIMIT). */
+  payLinkLimit?: number;
 };
 
 function chunks<T>(xs: T[], size = IN_CHUNK): T[][] {
@@ -96,12 +106,10 @@ export function createSupabaseDebtChaseLogStore(
       return out;
     },
     async jobContacts(jobIds) {
-      const out: Array<
-        { id: string; client_phone: string | null; client_email: string | null }
-      > = [];
+      const out: DebtJobContact[] = [];
       for (const part of chunks(jobIds)) {
         const { data, error } = await client.from("jobs")
-          .select("id, client_phone, client_email")
+          .select("id, client_phone, client_email, site_address, site_suburb")
           .in("id", part);
         if (error) readFailed("job contacts", error);
         out.push(...(data || []));
@@ -109,6 +117,16 @@ export function createSupabaseDebtChaseLogStore(
       return out;
     },
   };
+}
+
+/** The job's site, with the suburb added only when the address does not already name it. */
+function siteWords(c: DebtJobContact | undefined): string | null {
+  const address = c?.site_address?.trim() || "";
+  const suburb = c?.site_suburb?.trim() || "";
+  if (!address) return suburb || null;
+  return suburb && !address.toLowerCase().includes(suburb.toLowerCase())
+    ? `${address}, ${suburb}`
+    : address;
 }
 
 type Params = URLSearchParams | Record<string, unknown>;
@@ -170,6 +188,23 @@ export async function readDebtMorningList(
     contactsByJobId,
   });
 
+  const jobIdByInvoice = new Map(
+    relevant.map((i) => [i.xero_invoice_id.toLowerCase(), i.job_id]),
+  );
+  const contactById = new Map(contacts.map((c) => [String(c.id), c]));
+  const drafts = await attachDebtDrafts(plan.items, rows, {
+    siteFor: (item) => {
+      for (const line of item.invoices) {
+        const jobId = jobIdByInvoice.get(line.xero_invoice_id.toLowerCase());
+        const site = jobId ? siteWords(contactById.get(String(jobId))) : null;
+        if (site) return site;
+      }
+      return null;
+    },
+    payLink: deps.payLink,
+    payLinkLimit: deps.payLinkLimit,
+  });
+
   return {
     ok: true,
     version: DEBT_MORNING_LIST_VERSION,
@@ -191,6 +226,12 @@ export async function readDebtMorningList(
     chase_log: {
       rows_read: rows.length,
       desk_rows: events.length,
+    },
+    drafts: {
+      drafted: plan.items.filter((i) => i.draft).length,
+      pending: plan.items.filter((i) => i.draft?.status === "pending").length,
+      not_drafted: plan.items.filter((i) => i.draft_problem).length,
+      pay_links_read: drafts.pay_links_read,
     },
     schedule: {
       schedules: DEBT_CHASE_SCHEDULES,

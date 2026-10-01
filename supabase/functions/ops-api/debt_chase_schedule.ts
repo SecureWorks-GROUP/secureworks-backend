@@ -46,6 +46,7 @@
 // friendly text.
 
 import { resolvePayer } from "./debt_book_rules.ts";
+import type { DebtDeskDraft } from "./debt_draft_templates.ts";
 
 export type DebtChaseStep =
   | "friendly_text"
@@ -202,8 +203,13 @@ export interface DebtChaseEvent {
   outcome: DebtChaseOutcome | null;
   promised_amount: number | null;
   promised_date: string | null;
-  /** The invoice's amount due when the promise was logged; null on rows that never recorded it. */
+  /**
+   * The amount due when the promise was logged; null on rows that never recorded it. With
+   * `covers`, it is the total due on every covered invoice.
+   */
   amount_due_at_promise: number | null;
+  /** Every invoice one message or promise covers (lower-case ids); null on single-invoice rows. */
+  covers: string[] | null;
   by: string | null;
 }
 
@@ -247,7 +253,10 @@ export interface DebtMorningItem {
   last_outcome:
     | { code: DebtChaseOutcome; at: string; by: string | null }
     | null;
-  draft: null;
+  /** Filled by the morning list (debt_desk_drafts.ts); null on calls, statements and holds. */
+  draft: DebtDeskDraft | null;
+  /** Why a step that is drafted has no draft today (a missing pay link). */
+  draft_problem: string | null;
 }
 
 export interface DebtMorningWaiting {
@@ -294,13 +303,23 @@ function numberOrNull(v: unknown): number | null {
 /**
  * A payment_chase_logs row as a schedule event, or null when the row is not the desk's own.
  * Reads the desk columns (schedule_step, outcome_code, promised_amount, promised_date,
- * amount_due_at_promise) when
- * they are present; never guesses a step or outcome from free-text legacy columns.
+ * amount_due_at_promise, covers_invoice_ids) when they are present; never guesses a step or
+ * outcome from free-text legacy columns.
+ *
+ * A draft's own decision rows (approved, skipped, a failed or refused send) carry the step the
+ * draft is for, but nothing was carried out, so they never move the ladder. A step counts when
+ * its message was sent (outcome_code "sent"), when a person logged what happened (a call
+ * outcome), or on a step row that belongs to no draft.
  */
 export function debtChaseEventFromLogRow(
   row: Record<string, unknown>,
 ): DebtChaseEvent | null {
-  const step = STEP_IDS.includes(row.schedule_step as DebtChaseStep)
+  const code = typeof row.outcome_code === "string" ? row.outcome_code : null;
+  const carriedOut = code === "sent" ||
+    DEBT_CHASE_OUTCOMES.includes(code as DebtChaseOutcome) ||
+    (code === null && !row.draft_id);
+  const step = carriedOut &&
+      STEP_IDS.includes(row.schedule_step as DebtChaseStep)
     ? row.schedule_step as DebtChaseStep
     : null;
   const outcome =
@@ -317,6 +336,10 @@ export function debtChaseEventFromLogRow(
     promised_amount: numberOrNull(row.promised_amount),
     promised_date: isoDateOrNull(row.promised_date),
     amount_due_at_promise: numberOrNull(row.amount_due_at_promise),
+    covers:
+      Array.isArray(row.covers_invoice_ids) && row.covers_invoice_ids.length
+        ? row.covers_invoice_ids.map((id) => String(id).toLowerCase())
+        : null,
     by: typeof row.chased_by === "string" && row.chased_by
       ? row.chased_by
       : null,
@@ -359,17 +382,37 @@ interface ChaseState {
   promise: DebtChasePromise | null;
 }
 
+/**
+ * Kept when Xero shows the promised amount paid since the promise: the amount due at the
+ * promise less today's amount due covers it. A promise covering several invoices compares their
+ * totals, and a covered invoice gone from the open book counts as nothing owing on it.
+ */
 function promiseKept(
   p: DebtChaseEvent,
   amountDueById: Map<string, number>,
 ): boolean {
-  const now = amountDueById.get(p.xero_invoice_id.toLowerCase());
-  if (
-    p.promised_amount === null || p.amount_due_at_promise === null ||
-    now === undefined
-  ) return false;
-  return cents(p.amount_due_at_promise) - cents(now) >=
-    cents(p.promised_amount);
+  if (p.promised_amount === null || p.amount_due_at_promise === null) {
+    return false;
+  }
+  let now: number;
+  if (p.covers) {
+    now = p.covers.reduce((a, id) => a + cents(amountDueById.get(id) ?? 0), 0);
+  } else {
+    const due = amountDueById.get(p.xero_invoice_id.toLowerCase());
+    if (due === undefined) return false;
+    now = cents(due);
+  }
+  return cents(p.amount_due_at_promise) - now >= cents(p.promised_amount);
+}
+
+/** A promise's status on a Perth date: open through its date, then kept or broken. */
+export function debtPromiseStatus(
+  p: DebtChaseEvent,
+  perthDate: string,
+  amountDueById: Map<string, number>,
+): DebtChasePromise["status"] {
+  if (p.promised_date && perthDate <= p.promised_date) return "open";
+  return promiseKept(p, amountDueById) ? "kept" : "broken";
 }
 
 function chaseState(
@@ -393,11 +436,7 @@ function chaseState(
     ? {
       amount: activeOutcome.promised_amount,
       date: activeOutcome.promised_date,
-      status: perthDate <= activeOutcome.promised_date
-        ? "open" as const
-        : promiseKept(activeOutcome, amountDueById)
-        ? "kept" as const
-        : "broken" as const,
+      status: debtPromiseStatus(activeOutcome, perthDate, amountDueById),
     }
     : null;
   return { lastStep, lastOutcome, activeOutcome, promise };
@@ -559,6 +598,7 @@ export function planDebtMorningList(
       promise: fields.perInvoice ? agreed : state?.promise ?? null,
       last_outcome: state ? lastOutcomeOf(state) : null,
       draft: null,
+      draft_problem: null,
     });
   };
 

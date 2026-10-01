@@ -57,6 +57,7 @@ function ev(
     promised_amount: null,
     promised_date: null,
     amount_due_at_promise: null,
+    covers: null,
     by: "Shaun",
     ...over,
   };
@@ -1095,6 +1096,7 @@ Deno.test("chase log: only the desk's own rows drive the schedule; older rows ar
       promised_amount: 250.5,
       promised_date: "2026-10-03",
       amount_due_at_promise: 1000,
+      covers: null,
       by: "Shaun",
     },
   );
@@ -1312,4 +1314,90 @@ Deno.test("builders: a call logged before 30 days overdue (a broken-promise call
     plan([{ ...at30, days_overdue: 33 }], calledOn30, "2026-10-29").items,
     [],
   );
+});
+
+// ── Plan step 3: desk decision rows and promises over several invoices ──
+
+Deno.test("chase log: a draft's approval, skip or refused send never moves the ladder; its send does", () => {
+  const row = (over: Record<string, unknown>) =>
+    debtChaseEventFromLogRow({
+      xero_invoice_id: "ABC",
+      method: "sms",
+      created_at: "2026-09-30T01:00:00Z",
+      chased_by: "shaun@example.test",
+      schedule_step: "friendly_text",
+      draft_id: "2026-09-30:contact-a:text:friendly_text|100000",
+      ...over,
+    });
+  // Approved, not sent (sending is off): not a step.
+  assertEquals(
+    row({ outcome_code: null, approved_by_user_id: "user-1" }),
+    null,
+  );
+  assertEquals(row({ outcome_code: "skipped" }), null);
+  assertEquals(
+    row({ outcome_code: "failed", outcome: "refused: sending_off" }),
+    null,
+  );
+  // The send stamps the step; "sent" is not a call outcome.
+  const sent = row({
+    outcome_code: "sent",
+    provider_message_id: "msg-1",
+    covers_invoice_ids: ["ABC", "DEF"],
+  });
+  assertEquals(sent?.step, "friendly_text");
+  assertEquals(sent?.outcome, null);
+  assertEquals(sent?.covers, ["abc", "def"]);
+  // A step row from before drafts (no draft id, no outcome code) still counts.
+  assertEquals(row({ draft_id: null })?.step, "friendly_text");
+
+  const a = inv({ days_overdue: 2 });
+  const approvedOnly = plan(
+    [a],
+    [
+      debtChaseEventFromLogRow({
+        xero_invoice_id: a.xero_invoice_id,
+        method: "sms",
+        created_at: "2026-09-30T01:00:00Z",
+        schedule_step: "friendly_text",
+        draft_id: "d1",
+        approved_by_user_id: "user-1",
+      }),
+    ].filter((e): e is DebtChaseEvent => e !== null),
+  );
+  assertEquals(approvedOnly.items.map((i) => i.step), ["friendly_text"]);
+  const sentYesterday = plan([a], [
+    ev(a, "2026-09-30", { step: "friendly_text" }),
+  ]);
+  assertEquals(sentYesterday.items.map((i) => i.step), ["firm_text"]);
+});
+
+Deno.test("a promise covering several invoices is judged on their total, not one invoice", () => {
+  const a = inv({ days_overdue: 10, amount_due: 500 });
+  const b = inv({ days_overdue: 10, amount_due: 1000 });
+  const promise = (x: DebtChaseBookInvoice) =>
+    ev(x, "2026-09-29", {
+      outcome: "promised",
+      promised_amount: 500,
+      promised_date: "2026-09-30",
+      amount_due_at_promise: 1500,
+      covers: [a.xero_invoice_id, b.xero_invoice_id],
+    });
+  // Nothing paid on either: broken, even though one invoice alone is below the total.
+  const unpaid = plan([a, b], [promise(a), promise(b)]);
+  assertEquals(unpaid.items.map((i) => [i.group, i.promise?.status]), [
+    ["broken_promise", "broken"],
+  ]);
+  // $200 off one and $300 off the other covers the $500 promised: kept.
+  const a2 = { ...a, amount_due: 300 };
+  const b2 = { ...b, amount_due: 700 };
+  const paid = plan([a2, b2], [promise(a2), promise(b2)]);
+  assertEquals(paid.items.map((i) => [i.group, i.promise?.status]), [
+    ["text", "kept"],
+  ]);
+  // One covered invoice paid off and gone from the book counts as nothing owing on it.
+  const gone = plan([b], [promise(b)]);
+  assertEquals(gone.items.map((i) => [i.group, i.promise?.status]), [
+    ["text", "kept"],
+  ]);
 });
