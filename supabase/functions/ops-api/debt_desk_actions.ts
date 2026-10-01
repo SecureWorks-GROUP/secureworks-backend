@@ -4,7 +4,8 @@
 //   debt_draft_decide  POST  approve (with the text, edited or not) or skip one morning-list
 //                            draft. Desk owner only. Records the owner's user id on an approval.
 //   debt_log_outcome   POST  what a call or Jan's visit achieved (no answer, spoke, promised,
-//                            disputed, says paid). Any signed-in staff user. A promise stamps
+//                            disputed, says paid; for Jan: no one home, visited and paid,
+//                            promised or disputed). Any signed-in staff user. A promise stamps
 //                            the covered invoices' amount due, read live from Xero, so a part
 //                            payment can keep it.
 //   debt_draft_send    POST  send approved drafts, one at a time. Desk owner only. Off until
@@ -13,6 +14,9 @@
 //                            each invoice is re-read live from Xero first, the draft is claimed
 //                            (a 'sending' row per invoice, unique per draft and invoice), and
 //                            the text goes only through the existing send_chase_sms path.
+//                            Jan's morning text (debt_jan_text.ts, plan step 5) goes the same
+//                            way, to Jan's own mobile through the staff SMS path, and only
+//                            while Jan's mobile is set and is the number it was approved for.
 //
 // The desk owner approves every message (captain: "shaun" owns the desk): the user ids in
 // DEBT_DESK_OWNER_USER_IDS when that secret is set, otherwise the owner list in
@@ -29,12 +33,20 @@ import {
   type DebtChaseEvent,
   debtChaseEventFromLogRow,
   type DebtChaseOutcome,
+  debtOutcomeLabel,
 } from "./debt_chase_schedule.ts";
 import { type DebtDraftDecision, debtDraftStates } from "./debt_desk_drafts.ts";
 import {
   debtDraftTextProblem,
   parseDebtDraftId,
 } from "./debt_draft_templates.ts";
+import {
+  JAN_TEXT_STEP,
+  type JanMobile,
+  janTextDraftIdMatches,
+  janTextProblem,
+  janTextTemplateMatches,
+} from "./debt_jan_text.ts";
 
 export const DEBT_DESK_VERSION = "debt-desk/v1";
 /** The one switch. Sending stays off unless this is exactly "true" (captain: "my go"). */
@@ -108,6 +120,22 @@ export interface DebtDeskDeps {
   sendSms?: (
     body: Record<string, unknown>,
   ) => Promise<{ success?: boolean; message_id?: string | null }>;
+  /** Jan's mobile, read now (debt_jan_text.ts readJanMobile). Absent: not set. */
+  janMobile?: () => Promise<JanMobile>;
+  /**
+   * The staff SMS path to one raw mobile (ghl-proxy send_sms with a phone), for Jan's text.
+   * Accepted only with a provider message id.
+   */
+  sendStaffSms?: (
+    phone: string,
+    message: string,
+  ) => Promise<
+    {
+      accepted: boolean;
+      messageId: string | null;
+      failureReason: string | null;
+    }
+  >;
   /** DEBT_SENDING_ENABLED is exactly "true". */
   sendingEnabled: boolean;
   /** The user ids who may approve and send (debtDeskOwnerIds). */
@@ -142,6 +170,18 @@ export async function debtDeskOwnerIds(
 }
 
 // ── Helpers ──
+
+const JAN_NOT_WIRED: JanMobile = {
+  phone: null,
+  source: null,
+  staff_user_id: null,
+  staff_name: null,
+  problem: "Jan's mobile not set: the desk cannot read it here",
+};
+
+async function janMobileOf(deps: DebtDeskDeps): Promise<JanMobile> {
+  return deps.janMobile ? await deps.janMobile() : JAN_NOT_WIRED;
+}
 
 const cents = (n: number) => Math.round(Number(n || 0) * 100);
 const money = (n: number) => `$${(cents(n) / 100).toFixed(2)}`;
@@ -260,7 +300,13 @@ export async function debtDraftDecide(
   const actor = requireActor(rawActor);
   await requireDeskOwner(actor, deps);
   const body = asBody(rawBody);
-  onlyKeys(body, ["draft_id", "decision", "text", "xero_invoice_ids"]);
+  onlyKeys(body, [
+    "draft_id",
+    "decision",
+    "text",
+    "xero_invoice_ids",
+    "template_text",
+  ]);
   const draft = parseDebtDraftId(body.draft_id);
   const draftId = String(body.draft_id);
   if (!draft) {
@@ -289,10 +335,42 @@ export async function debtDraftDecide(
     );
   }
   const text = typeof body.text === "string" ? body.text.trim() : "";
+  const jan = draft.step === JAN_TEXT_STEP;
+  if (!jan && body.template_text !== undefined) {
+    bad("template_text is only for Jan's text");
+  }
   if (decision === "approve") {
-    const problem = debtDraftTextProblem(text);
+    if (jan && !janTextTemplateMatches(draftId, body.template_text)) {
+      throw new DebtDeskError(
+        "Send Jan's text with its template_text from today's list: that is not the wording this draft was made from",
+        409,
+        "debt_draft_invoices_changed",
+      );
+    }
+    const problem = jan
+      ? janTextProblem(text, body.template_text as string)
+      : debtDraftTextProblem(text);
     if (problem) {
       throw new DebtDeskError(problem, 400, "debt_draft_text_not_allowed");
+    }
+  }
+  if (jan) {
+    // Jan's text is tied to the number and the list Shaun saw. It cannot be approved while
+    // Jan's mobile is not set; a skip needs no number.
+    const mobile = await janMobileOf(deps);
+    if (decision === "approve" && !mobile.phone) {
+      throw new DebtDeskError(
+        mobile.problem ?? "Jan's mobile not set",
+        409,
+        "jan_mobile_not_set",
+      );
+    }
+    if (!janTextDraftIdMatches(draftId, mobile.phone ?? "", ids)) {
+      throw new DebtDeskError(
+        "That Jan text was drafted for another mobile number or another list: read today's list again",
+        409,
+        "debt_draft_invoices_changed",
+      );
     }
   }
 
@@ -326,7 +404,8 @@ export async function debtDraftDecide(
     xero_invoice_id: id,
     method: "sms",
     direction: "outbound",
-    schedule_step: draft.step,
+    // Jan's text carries no step: it is not a step of any payer's ladder.
+    schedule_step: jan ? null : draft.step,
     draft_id: draftId,
     draft_amount: draft.amounts[k],
     covers_invoice_ids: ids,
@@ -346,6 +425,7 @@ export async function debtDraftDecide(
     draft: {
       id: draftId,
       channel: "sms" as const,
+      to: jan ? "jan" as const : "client" as const,
       step: draft.step,
       status: approve ? "approved" as const : "skipped" as const,
       text: text || null,
@@ -361,13 +441,6 @@ export async function debtDraftDecide(
 // ── debt_log_outcome ──
 
 const OUTCOME_STEPS = ["call", "builder_call", "jan_visit"] as const;
-const OUTCOME_LABELS: Record<DebtChaseOutcome, string> = {
-  no_answer: "No answer",
-  spoke: "Spoke",
-  promised: "Promised",
-  disputed: "Disputed",
-  says_paid: "Says paid",
-};
 
 function liveAmountDue(invoice: Record<string, unknown>) {
   const due = Number(invoice.AmountDue);
@@ -411,7 +484,9 @@ export async function debtLogOutcome(
   if (!DEBT_CHASE_OUTCOMES.includes(code)) {
     bad(`outcome_code must be one of ${DEBT_CHASE_OUTCOMES.join(", ")}`);
   }
-  const step = body.schedule_step ?? null;
+  const step = (body.schedule_step ?? null) as
+    | (typeof OUTCOME_STEPS)[number]
+    | null;
   if (step !== null && !(OUTCOME_STEPS as readonly unknown[]).includes(step)) {
     bad(
       `schedule_step must be one of ${
@@ -484,7 +559,7 @@ export async function debtLogOutcome(
     method,
     direction: "outbound",
     outcome_code: code,
-    outcome: OUTCOME_LABELS[code],
+    outcome: debtOutcomeLabel(code, step),
     notes: note,
     schedule_step: step,
     promised_amount: promise?.amount ?? null,
@@ -499,6 +574,7 @@ export async function debtLogOutcome(
     version: DEBT_DESK_VERSION,
     logged: {
       outcome_code: code,
+      label: debtOutcomeLabel(code, step),
       schedule_step: step,
       method,
       xero_invoice_ids: ids,
@@ -621,6 +697,9 @@ export async function debtDraftSend(
       }
     }
     const ids = approval?.covers ?? state?.rows[0]?.covers ?? [];
+    const jan = parsed.step === JAN_TEXT_STEP;
+    // Jan's text carries no step: it is not a step of any payer's ladder.
+    const rowStep = jan ? null : parsed.step;
 
     const refuse = async (refusal: Refusal) => {
       let logged = false;
@@ -630,7 +709,7 @@ export async function debtDraftSend(
             xero_invoice_id: id,
             method: "sms",
             direction: "outbound",
-            schedule_step: parsed.step,
+            schedule_step: rowStep,
             draft_id: draftId,
             draft_amount: perInvoice.get(id)?.draft_amount ?? null,
             covers_invoice_ids: ids,
@@ -701,12 +780,9 @@ export async function debtDraftSend(
       );
       continue;
     }
-    if (!CLIENT_TEXT_STEPS.includes(parsed.step)) {
+    if (!jan && !CLIENT_TEXT_STEPS.includes(parsed.step)) {
       await refuse(
-        new Refusal(
-          "jan_text_not_wired",
-          "Jan's text to his own phone is plan step 5 and is not wired yet",
-        ),
+        new Refusal("draft_unknown", "The desk does not send that step"),
       );
       continue;
     }
@@ -732,22 +808,48 @@ export async function debtDraftSend(
         );
         continue;
       }
-      const links = await deps.store.invoiceJobLinks(ids);
-      const jobId = links.find((l) =>
-        l.xero_invoice_id.toLowerCase() === ids[0]
-      )?.job_id ??
-        null;
-      const contact = jobId
-        ? (await deps.store.jobGhlContacts([jobId]))[0]?.ghl_contact_id ?? null
-        : null;
-      if (!jobId || !contact) {
-        await refuse(
-          new Refusal(
-            "no_contact",
-            "The invoice's job has no GoHighLevel contact to text",
-          ),
-        );
-        continue;
+      // Where it goes: the payer's GoHighLevel contact, or Jan's own mobile.
+      let jobId: string | null = null;
+      let contact: string | null = null;
+      let janPhone: string | null = null;
+      if (jan) {
+        const mobile = await janMobileOf(deps);
+        if (!mobile.phone) {
+          await refuse(
+            new Refusal(
+              "jan_mobile_not_set",
+              mobile.problem ?? "Jan's mobile not set",
+            ),
+          );
+          continue;
+        }
+        if (!janTextDraftIdMatches(draftId, mobile.phone, ids)) {
+          await refuse(
+            new Refusal(
+              "jan_mobile_changed",
+              "Jan's mobile is not the number this text was approved for: read the list and approve again",
+            ),
+          );
+          continue;
+        }
+        janPhone = mobile.phone;
+      } else {
+        const links = await deps.store.invoiceJobLinks(ids);
+        jobId = links.find((l) => l.xero_invoice_id.toLowerCase() === ids[0])
+          ?.job_id ?? null;
+        contact = jobId
+          ? (await deps.store.jobGhlContacts([jobId]))[0]?.ghl_contact_id ??
+            null
+          : null;
+        if (!jobId || !contact) {
+          await refuse(
+            new Refusal(
+              "no_contact",
+              "The invoice's job has no GoHighLevel contact to text",
+            ),
+          );
+          continue;
+        }
       }
 
       // The last check: one live Xero read per invoice, in sequence.
@@ -781,7 +883,13 @@ export async function debtDraftSend(
         await refuse(problem);
         continue;
       }
-      if (!deps.sendSms) throw new Error("send_chase_sms is not wired");
+      if (jan ? !deps.sendStaffSms : !deps.sendSms) {
+        throw new Error(
+          jan
+            ? "the staff SMS path is not wired"
+            : "send_chase_sms is not wired",
+        );
+      }
 
       // The claim: at most one sending-or-sent row per draft and invoice, so an overlapping
       // send of this draft is refused here and never reaches the client.
@@ -791,7 +899,7 @@ export async function debtDraftSend(
         ghl_contact_id: contact,
         method: "sms",
         direction: "outbound",
-        schedule_step: parsed.step,
+        schedule_step: rowStep,
         draft_id: draftId,
         draft_amount: perInvoice.get(id)?.draft_amount ?? null,
         covers_invoice_ids: ids,
@@ -814,15 +922,23 @@ export async function debtDraftSend(
 
       let messageId: string | null;
       try {
-        const sent = await deps.sendSms({
-          ghl_contact_id: contact,
-          job_id: jobId,
-          xero_invoice_id: ids[0],
-          message: approval.text,
-          operator_email: actor.email,
-        });
-        if (sent?.success === false) throw new Error("SMS send failed");
-        messageId = sent?.message_id ?? null;
+        if (janPhone) {
+          const sent = await deps.sendStaffSms!(janPhone, approval.text);
+          if (!sent?.accepted || !sent.messageId) {
+            throw new Error(sent?.failureReason || "SMS send failed");
+          }
+          messageId = sent.messageId;
+        } else {
+          const sent = await deps.sendSms!({
+            ghl_contact_id: contact,
+            job_id: jobId,
+            xero_invoice_id: ids[0],
+            message: approval.text,
+            operator_email: actor.email,
+          });
+          if (sent?.success === false) throw new Error("SMS send failed");
+          messageId = sent?.message_id ?? null;
+        }
       } catch (error) {
         // The provider may have sent it before failing, so the claim stays: the draft never
         // texts twice. Tomorrow's list drafts the step again.

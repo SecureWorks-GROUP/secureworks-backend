@@ -194,6 +194,7 @@ Deno.test("homeowner ladder on schedule: text, firm text, call, then Jan on day 
   ]]);
   assertEquals(day7.items[0].last_outcome, {
     code: "no_answer",
+    label: "No answer",
     at: "2026-09-30T01:00:00.000Z",
     by: "Shaun",
   });
@@ -1400,4 +1401,123 @@ Deno.test("a promise covering several invoices is judged on their total, not one
   assertEquals(gone.items.map((i) => [i.group, i.promise?.status]), [
     ["text", "kept"],
   ]);
+});
+
+// ── Plan step 5: Jan's visit outcomes and one row per promise ──
+
+Deno.test("Jan's visit outcomes move the ladder like a call: no one home comes back tomorrow", () => {
+  const a = inv({ days_overdue: 9 });
+  const visit = (outcome: DebtChaseEvent["outcome"], over = {}) => [
+    ev(a, THU, { step: "jan_visit", outcome, ...over }),
+  ];
+  // No one home: done for today, back on Jan's list tomorrow, worded as Jan reported it.
+  assertEquals(plan([a], visit("no_answer")).items, []);
+  const tomorrow = plan(
+    [{ ...a, days_overdue: 10 }],
+    visit("no_answer"),
+    "2026-10-02",
+  );
+  assertEquals(tomorrow.items.map((i) => [i.group, i.step]), [[
+    "jan",
+    "jan_visit",
+  ]]);
+  assertEquals(tomorrow.items[0].last_outcome?.label, "No one home");
+  // Promised to Jan: paused until the date, then back at the top at Jan's step if broken.
+  const promised = visit("promised", {
+    promised_amount: 1000,
+    promised_date: "2026-10-03",
+    amount_due_at_promise: 1000,
+  });
+  assertEquals(plan([a], promised, "2026-10-02").paused.length, 1);
+  const broken = plan([{ ...a, days_overdue: 13 }], promised, "2026-10-04");
+  assertEquals(broken.items.map((i) => [i.group, i.step, i.step_label]), [[
+    "broken_promise",
+    "jan_visit",
+    "Promise broken: Day 7: Jan visits",
+  ]]);
+  assertEquals(broken.items[0].last_outcome?.label, "Visited: promised");
+  // Paid and disputed hold the invoice for a check, in Jan's words.
+  const paid = plan([a], visit("says_paid"), "2026-10-02").items[0];
+  assertEquals([paid.hold, paid.hold_reason?.split(" (")[0]], [
+    "check_first",
+    "Jan reports paid: check Xero first",
+  ]);
+  assertEquals(paid.held_step, "jan_visit");
+  const disputed = plan([a], visit("disputed"), "2026-10-02").items[0];
+  assertEquals(
+    disputed.hold_reason?.split(" (")[0],
+    "the payer disputed it with Jan",
+  );
+});
+
+Deno.test("one promise covering several builder invoices pauses as one row, never once per invoice", () => {
+  const a = builder({
+    invoice_date: "2026-08-01",
+    days_overdue: 40,
+    amount_due: 300,
+  });
+  const b2 = builder({
+    invoice_date: "2026-08-02",
+    days_overdue: 39,
+    amount_due: 200,
+  });
+  const c = builder({
+    invoice_date: "2026-08-03",
+    days_overdue: 38,
+    amount_due: 100,
+  });
+  const promise = {
+    outcome: "promised" as const,
+    promised_amount: 500,
+    promised_date: "2026-10-03",
+    amount_due_at_promise: 500,
+    covers: [a.xero_invoice_id, b2.xero_invoice_id],
+  };
+  const out = plan([a, b2, c], [
+    ev(a, "2026-09-30", promise),
+    ev(b2, "2026-09-30", promise),
+    ev(c, "2026-09-30", {
+      outcome: "promised",
+      promised_amount: 100,
+      promised_date: "2026-10-03",
+      amount_due_at_promise: 100,
+      covers: [c.xero_invoice_id],
+    }),
+  ]);
+  assertEquals(
+    out.paused.map((
+      p,
+    ) => [p.invoices.map((i) => i.invoice_number), p.amount, p.promise.amount]),
+    [
+      [[a.invoice_number, b2.invoice_number], 500, 500],
+      [[c.invoice_number], 100, 100],
+    ],
+  );
+});
+
+Deno.test("one promise covering several deposits pauses as one row", () => {
+  const dep = (over: Partial<DebtChaseBookInvoice> = {}) =>
+    inv({
+      is_debt: false,
+      kind: "deposit",
+      not_debt_reason: "deposit",
+      ...over,
+    });
+  const a = dep({ amount_due: 400 });
+  const b2 = dep({ amount_due: 600 });
+  const promise = {
+    outcome: "promised" as const,
+    promised_amount: 1000,
+    promised_date: "2026-10-03",
+    amount_due_at_promise: 1000,
+    covers: [a.xero_invoice_id, b2.xero_invoice_id],
+  };
+  const out = plan([a, b2], [
+    ev(a, "2026-09-30", promise),
+    ev(b2, "2026-09-30", promise),
+  ]);
+  assertEquals(out.items, []);
+  assertEquals(out.paused.length, 1);
+  assertEquals(out.paused[0].amount, 1000);
+  assertEquals(out.paused[0].invoices.length, 2);
 });

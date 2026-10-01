@@ -483,6 +483,9 @@ function fakeClient(
             return (r) => r[c] === null || r[c] === undefined;
           }
           if (op === "eq") return (r) => String(r[c]) === v;
+          if (op === "not" && v === "is.null") {
+            return (r) => r[c] !== null && r[c] !== undefined;
+          }
           throw new Error(`fake or(): unsupported term ${t}`);
         };
         const terms = split(expr).map(term);
@@ -621,6 +624,7 @@ Deno.test("1b. desk approvals, skips, refusals and claims are not chases; a desk
     follow_up_resolved: false,
     chased_by: "shaun@example.test",
     draft_id: "2026-10-01:contact-a:text:friendly_text|10000",
+    schedule_step: "friendly_text",
     ...over,
   });
   t.payment_chase_logs.push(
@@ -659,6 +663,7 @@ Deno.test("1b. desk approvals, skips, refusals and claims are not chases; a desk
     }),
     desk({
       draft_id: null,
+      schedule_step: null,
       outcome: "SMS sent",
       chased_by: "shaun@example.test",
       created_at: "2026-09-10T00:04:01.000Z",
@@ -677,6 +682,7 @@ Deno.test("1b. desk approvals, skips, refusals and claims are not chases; a desk
   t.payment_chase_logs.push(
     desk({
       draft_id: "2026-10-02:contact-a:text:firm_text|5000,10000",
+      schedule_step: "firm_text",
       outcome_code: "sent",
       outcome: "sent",
       job_id: null,
@@ -689,6 +695,25 @@ Deno.test("1b. desk approvals, skips, refusals and claims are not chases; a desk
   );
   assertEquals(second.invoice.chase.count, 4);
   assertEquals(second.invoice.chase.last?.at, "2026-09-11T00:00:00.000Z");
+
+  // Jan's morning text (plan step 5) went to Jan, not the payer: it is not a chase. Its rows
+  // carry no step and no job.
+  t.payment_chase_logs.push(
+    desk({
+      draft_id: "2026-10-03:jan-0a1b2c3d:jan:jan_text|10000",
+      schedule_step: null,
+      outcome_code: "sent",
+      outcome: "sent",
+      job_id: null,
+      created_at: "2026-09-12T00:00:00.000Z",
+    }),
+  );
+  const jan = await invoiceContext(
+    new URLSearchParams({ invoice: "inv-1419" }),
+    deps(t),
+  );
+  assertEquals(jan.invoice.chase.count, 4);
+  assertEquals(jan.invoice.chase.last?.at, "2026-09-11T00:00:00.000Z");
 });
 
 Deno.test("1. a linked invoice returns the complete picture with no blockers", async () => {

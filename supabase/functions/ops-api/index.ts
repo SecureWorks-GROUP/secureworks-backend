@@ -515,6 +515,7 @@ import {
   debtSendingEnabled,
 } from './debt_desk_actions.ts'
 import { DEBT_CHASE_HISTORY_FILTER } from './debt_desk_drafts.ts'
+import { createSupabaseJanStaffStore, readJanMobile } from './debt_jan_text.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
 import { insuranceReadAction } from './insurance_read_handlers.ts'
 import {
@@ -7670,9 +7671,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
         }
       }
-      // ── Debt morning list (plan step 2, docs/debt-book/PLAN.md) ──
+      // ── Debt morning list (plan steps 2, 3 and 5, docs/debt-book/PLAN.md) ──
       // Read-only: the debt book plus the chase log, worked into today's step per payer
-      // (debt_chase_schedule.ts). No drafts, no sending, no writes.
+      // (debt_chase_schedule.ts), with each draft and Jan's morning text. No sending, no writes.
       case 'debt_morning_list': {
         if (req.method !== 'GET') {
           return json({ ok: false, error: 'debt_morning_list requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
@@ -7691,6 +7692,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 sendingEnabled: debtSendingEnabled(),
               },
             ),
+            janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
           }))
         } catch (error) {
           if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
@@ -7723,6 +7725,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               throw error
             }
           },
+          // Jan's morning text (plan step 5): to Jan's own mobile through the staff SMS path.
+          janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
+          sendStaffSms: (phone: string, message: string) => sendSmsViaGhlWithReceipt(phone, message, null),
           sendingEnabled: debtSendingEnabled(),
           deskOwnerIds: () => debtDeskOwnerIds(deskStore),
         }
