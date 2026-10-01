@@ -13,16 +13,18 @@
 //                          Xero check)
 //
 // One decision writes one row per covered invoice; rows at one instant are one decision. These
-// rows are the desk's, not chases: the older Clear Debt, job and invoice readers show only rows
-// with no draft id or a sent one (DEBT_CHASE_HISTORY_FILTER).
+// rows are the desk's state, not chase history: the older Clear Debt, job and invoice readers
+// show only rows with no draft id (DEBT_CHASE_HISTORY_FILTER). A desk send still appears there
+// once, as the "SMS sent" row send_chase_sms writes itself.
 //
 // A firm text needs each invoice's Xero OnlineInvoice pay link. Links are read only for drafts
 // still pending, one at a time (Xero allows 60 calls a minute and the book read already spent
 // two), at most `payLinkLimit` live reads per list, in list order so the top of the list is
 // drafted first. A link read once is kept for the rest of that Perth day (`payLinkCache`), so
 // reading the list again after each approval spends no more Xero calls on it. A decided firm
-// text keeps its links inside its approved text and is never read again. A draft whose link
-// could not be read is left out with a reason, never sent without its link.
+// text (approved, skipped, claimed or sent) is never read again: an approved one keeps its
+// links inside its text. A draft whose link could not be read is left out with a reason, never
+// sent without its link.
 
 import type { DebtMorningItem } from "./debt_chase_schedule.ts";
 import {
@@ -37,11 +39,10 @@ export const DEBT_PAY_LINK_LIMIT = 10;
 
 /**
  * PostgREST `.or()` filter for the older chase-history readers (Clear Debt, job_detail,
- * invoice_context, debt notes): a desk approval, skip, refusal or unconfirmed send is not a
- * chase, so only rows with no draft id, or a sent one, read as chases.
+ * invoice_context, debt notes): only rows with no draft id. A desk approval, skip, refusal or
+ * claim is not a chase, and a desk send is already there once as send_chase_sms's own row.
  */
-export const DEBT_CHASE_HISTORY_FILTER =
-  "draft_id.is.null,outcome_code.eq.sent";
+export const DEBT_CHASE_HISTORY_FILTER = "draft_id.is.null";
 
 /** Pay links read today, keyed `<perth date>|<xero invoice id>`; other days are dropped. */
 const PAY_LINK_CACHE = new Map<string, string>();
@@ -242,7 +243,7 @@ export async function attachDebtDrafts(
     let template: string | null = null;
     let payLinks: DebtDeskDraft["pay_links"] = null;
     if (step !== "firm_text") template = debtDraftText(input);
-    else if (!decided?.text) {
+    else if (!decided) {
       const links = await readLinks(item);
       if (typeof links === "string") {
         item.draft_problem = links;
@@ -257,9 +258,7 @@ export async function attachDebtDrafts(
     }
 
     const status = statusOf(decided);
-    const text = status !== "pending" && decided?.text
-      ? decided.text
-      : template!;
+    const text = decided?.text ?? template;
     const used = status === "approved" || status === "sending" ||
       status === "sent";
     item.draft = {

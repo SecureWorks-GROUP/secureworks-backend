@@ -590,7 +590,7 @@ function deps(
   };
 }
 
-Deno.test("1b. desk approvals, skips, refusals and unconfirmed sends are not chases; a desk send is", async () => {
+Deno.test("1b. desk approvals, skips, refusals and claims are not chases; a desk send counts once", async () => {
   const t = baseTables();
   const desk = (over: Record<string, unknown>) => ({
     xero_invoice_id: INV1,
@@ -627,11 +627,18 @@ Deno.test("1b. desk approvals, skips, refusals and unconfirmed sends are not cha
   assertEquals(before.invoice.chase.count, 2);
   assertEquals(before.invoice.chase.last?.at, "2026-09-09T00:00:00.000Z");
 
+  // A desk send: the claim becomes sent, and send_chase_sms writes its own row.
   t.payment_chase_logs.push(
     desk({
       outcome_code: "sent",
       outcome: "sent",
       created_at: "2026-09-10T00:04:00.000Z",
+    }),
+    desk({
+      draft_id: null,
+      outcome: "SMS sent",
+      chased_by: "shaun@example.test",
+      created_at: "2026-09-10T00:04:01.000Z",
     }),
   );
   const after = await invoiceContext(
@@ -639,7 +646,8 @@ Deno.test("1b. desk approvals, skips, refusals and unconfirmed sends are not cha
     deps(t),
   );
   assertEquals(after.invoice.chase.count, 3);
-  assertEquals(after.invoice.chase.last?.at, "2026-09-10T00:04:00.000Z");
+  assertEquals(after.invoice.chase.last?.at, "2026-09-10T00:04:01.000Z");
+  assertEquals(after.invoice.chase.last?.outcome, "SMS sent");
 });
 
 Deno.test("1. a linked invoice returns the complete picture with no blockers", async () => {

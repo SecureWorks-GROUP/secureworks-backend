@@ -275,8 +275,8 @@ Deno.test("debt_morning_list: Thursday's first list from the 29 Sep book matches
   assert(list.items.some((i) => i.draft?.to === "jan"));
   assertEquals(
     list.items.filter((i) => i.group === "text").every((i) =>
-      i.draft?.text.startsWith("Hi ") &&
-      i.draft.text.includes(i.invoices[0].invoice_number)
+      i.draft?.text?.startsWith("Hi ") &&
+      i.draft.text?.includes(i.invoices[0].invoice_number)
     ),
     true,
   );
@@ -759,7 +759,7 @@ Deno.test("drafts: a pay link read once is kept for the Perth day, and read agai
   cache.set(`2026-09-30|${idOf(1)}`, "https://in.xero.com/yesterday");
   const next = await read();
   assertEquals(asked, [idOf(1), idOf(1)]);
-  assert(next.items[0].draft?.text.includes("https://in.xero.com/pay-2"));
+  assert(next.items[0].draft?.text?.includes("https://in.xero.com/pay-2"));
   assertEquals([...cache.keys()], [`2026-10-01|${idOf(1)}`]);
 });
 
@@ -803,6 +803,50 @@ Deno.test("drafts: a decided firm text keeps its text, and its standard wording 
     "approved",
     approved.notes,
     null,
+    null,
+  ]);
+});
+
+Deno.test("drafts: a skipped firm text spends no Xero pay-link read", async () => {
+  const { x, store } = oneClientBook();
+  const first = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([sentYesterday(1)]),
+    payLinkCache: new Map(),
+    payLink: () => Promise.resolve("https://in.xero.com/pay"),
+  } as unknown as DebtMorningListDeps);
+  const skipped = {
+    id: "k1",
+    xero_invoice_id: idOf(1),
+    method: "sms",
+    schedule_step: "firm_text",
+    draft_id: first.items[0].draft!.id,
+    created_at: "2026-09-30T23:10:00Z",
+    outcome_code: "skipped",
+    outcome: "skipped",
+    notes: null,
+    chased_by: "shaun@example.test",
+  };
+  const asked: string[] = [];
+  const list = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([sentYesterday(1), skipped]),
+    payLinkCache: new Map(),
+    payLink: (id: string) => {
+      asked.push(id);
+      return Promise.resolve("https://in.xero.com/pay");
+    },
+  } as unknown as DebtMorningListDeps);
+  assertEquals(asked, []);
+  assertEquals(list.drafts.pay_links_read, 0);
+  const d = list.items[0].draft!;
+  assertEquals([d.status, d.text, d.template_text, d.edited, d.pay_links], [
+    "skipped",
+    null,
+    null,
+    false,
     null,
   ]);
 });

@@ -288,8 +288,11 @@ export interface DebtDeskDraft {
   /** client: the payer's phone through send_chase_sms; jan: Jan's own phone (plan step 5). */
   to: "client" | "jan";
   step: DebtDraftStep;
-  /** The text to show: the approved or sent text once decided, else the standard wording. */
-  text: string;
+  /**
+   * The text to show: the approved or sent text once decided, else the standard wording. Null
+   * on a skipped firm text with no text, whose pay links are not read.
+   */
+  text: string | null;
   /**
    * The standard wording for this draft. Null on a decided firm text: its pay links are not
    * read again, so its standard wording is not known.
