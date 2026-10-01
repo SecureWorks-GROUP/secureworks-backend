@@ -1444,6 +1444,7 @@ const approveJan = (store: DebtDeskStore, over: Partial<DebtDeskDeps> = {}) =>
     {
       draft_id: JAN_TEXT_ID,
       decision: "approve",
+      template_text: JAN_WORDS,
       text: JAN_WORDS,
       xero_invoice_ids: [A, B],
     },
@@ -1484,6 +1485,7 @@ Deno.test("Jan's text: approved by the desk owner only while Jan's mobile is set
           {
             draft_id: JAN_TEXT_ID,
             decision: "approve",
+            template_text: JAN_WORDS,
             text: JAN_WORDS,
             xero_invoice_ids: ids,
           },
@@ -1504,6 +1506,7 @@ Deno.test("Jan's text: approved by the desk owner only while Jan's mobile is set
           {
             draft_id: JAN_TEXT_ID,
             decision: "approve",
+            template_text: JAN_WORDS,
             text: JAN_WORDS,
             xero_invoice_ids: [A, B],
           },
@@ -1536,6 +1539,7 @@ Deno.test("Jan's text: approved by the desk owner only while Jan's mobile is set
     {
       draft_id: JAN_TEXT_ID,
       decision: "approve",
+      template_text: JAN_WORDS,
       text: long,
       xero_invoice_ids: [A, B],
     },
@@ -1548,6 +1552,7 @@ Deno.test("Jan's text: approved by the desk owner only while Jan's mobile is set
         {
           draft_id: JAN_TEXT_ID,
           decision: "approve",
+          template_text: JAN_WORDS,
           text: `Hi Jan, ${"x".repeat(1600)}`,
           xero_invoice_ids: [A, B],
         },
@@ -1574,18 +1579,22 @@ Deno.test("Jan's text: approved by the desk owner only while Jan's mobile is set
   assertEquals(skipStore.rows[0].outcome_code, "skipped");
 });
 
-function janVisitItem(invoiceNumber = "INV-1"): any {
+function janVisitItem(
+  payer: string,
+  xeroInvoiceId: string,
+  invoiceNumber: string,
+): any {
   return {
-    id: "2026-10-01:contact-a:jan:jan_visit",
-    payer_key: "contact-a",
-    payer_name: "Sam Example",
+    id: `2026-10-01:${payer}:jan:jan_visit`,
+    payer_key: payer,
+    payer_name: payer,
     payer: "client",
     group: "jan",
     step: "jan_visit",
     amount: 100,
     days_overdue: 9,
     invoices: [{
-      xero_invoice_id: A,
+      xero_invoice_id: xeroInvoiceId,
       invoice_number: invoiceNumber,
       amount_due: 100,
     }],
@@ -1593,76 +1602,147 @@ function janVisitItem(invoiceNumber = "INV-1"): any {
   };
 }
 
+const SITES: Record<string, string> = {
+  "Sam Example": "7 Wattle Court, Thornlie",
+  "Jo Bloggs": "3 High Street, Armadale",
+};
+
+function courtDraft() {
+  return buildJanText(
+    [
+      janVisitItem("Sam Example", A, "INV-1"),
+      janVisitItem("Jo Bloggs", B, "INV-2"),
+    ],
+    [],
+    {
+      perthDate: "2026-10-01",
+      mobile: JAN_SET,
+      siteFor: (i) => SITES[i.payer_name],
+    },
+  )!;
+}
+
 const decideJan = (
   store: DebtDeskStore,
-  draft: { id: string; xero_invoice_ids: string[] },
+  draft: {
+    id: string;
+    xero_invoice_ids: string[];
+    template_text: string | null;
+  },
   text: string,
+  wording: Record<string, unknown> = { template_text: draft.template_text },
 ) =>
   debtDraftDecide(
     {
       draft_id: draft.id,
       decision: "approve",
       text,
+      ...wording,
       xero_invoice_ids: draft.xero_invoice_ids,
     },
     SHAUN,
     janDeps(store).d,
   );
 
-Deno.test("Jan's text: a street named Court approves as drafted; an edit adding a legal word is refused", async () => {
-  const draft = buildJanText([janVisitItem()], [], {
-    perthDate: "2026-10-01",
-    mobile: JAN_SET,
-    siteFor: () => "7 Wattle Court, Thornlie",
-  })!;
-  assert(draft.text!.includes("1. Sam Example, 7 Wattle Court, Thornlie: "));
+Deno.test("Jan's text: a street named Court on an untouched line approves; an edit adding a legal word is refused", async () => {
+  const draft = courtDraft();
+  const template = draft.template_text!;
+  assert(template.includes("1. Sam Example, 7 Wattle Court, Thornlie: "));
   assertEquals([draft.approvable, draft.problem], [true, null]);
-  const store = memoryStore();
-  const res = await decideJan(store, draft, draft.text!);
-  assertEquals(res.draft.status, "approved");
-  assertEquals(store.rows.length, 1);
+  const lines = template.split("\n");
+  for (
+    const text of [
+      template,
+      template.replace("Jo Bloggs", "Jo Bloggs (back gate)"),
+      [lines[0], lines[1], lines[3]].join("\n"),
+    ]
+  ) {
+    const store = memoryStore();
+    const res = await decideJan(store, draft, text);
+    assertEquals(res.draft.status, "approved", text);
+    assertEquals(store.rows.map((r) => r.notes), [text, text]);
+  }
 
   for (
     const edited of [
-      `${draft.text}\nTell them we will take them to court.`,
-      draft.text!.replace("owing", "owing, or we sue"),
-      draft.text!.replace("Sam Example", "Sam Example (court)"),
+      `${template}\nTell them we will take them to court.`,
+      template.replace("owing", "owing, or we sue"),
+      template.replace("Jo Bloggs", "Jo Bloggs (court)"),
+      "",
+      template.replace("Armadale", "Armadale — rear"),
+      `${template}${"x".repeat(1600)}`,
     ]
   ) {
-    const refusedStore = memoryStore();
+    const store = memoryStore();
     const error = await assertRejects(
-      () => decideJan(refusedStore, draft, edited),
+      () => decideJan(store, draft, edited),
       DebtDeskError,
     );
     assertEquals(error.code, "debt_draft_text_not_allowed", edited);
-    assertEquals(refusedStore.rows, []);
+    assertEquals(store.rows, []);
   }
 });
 
+Deno.test("Jan's text: an approval carries the wording it was drafted from; only Jan's text takes one", async () => {
+  const draft = courtDraft();
+  for (
+    const wording of [
+      {},
+      { template_text: null },
+      { template_text: `${draft.template_text} ` },
+      { template_text: 7 },
+    ]
+  ) {
+    const store = memoryStore();
+    const error = await assertRejects(
+      () => decideJan(store, draft, draft.template_text!, wording),
+      DebtDeskError,
+    );
+    assertEquals(error.status, 409);
+    assertEquals(store.rows, []);
+  }
+  const store = memoryStore();
+  const error = await assertRejects(
+    () =>
+      debtDraftDecide(
+        {
+          draft_id: DRAFT,
+          decision: "approve",
+          text: "Hi Sam, a friendly reminder. Thanks, SecureWorks",
+          template_text: "Hi Sam",
+          xero_invoice_ids: [A, B],
+        },
+        SHAUN,
+        deps(store).d,
+      ),
+    DebtDeskError,
+  );
+  assertEquals([error.status, error.code], [400, "debt_desk_bad_request"]);
+});
+
 Deno.test("Jan's text: the list's approvable and problem are what the approve step says", async () => {
-  for (const number of ["INV-1", "COURT-1"]) {
-    const draft = buildJanText([janVisitItem(number)], [], {
+  const draft = courtDraft();
+  assertEquals([draft.approvable, draft.problem], [true, null]);
+  const store = memoryStore();
+  assertEquals(
+    (await decideJan(store, draft, draft.text!)).draft.status,
+    "approved",
+  );
+  // Read back after an approval, the list still says it may be approved.
+  const after = buildJanText(
+    [
+      janVisitItem("Sam Example", A, "INV-1"),
+      janVisitItem("Jo Bloggs", B, "INV-2"),
+    ],
+    store.rows,
+    {
       perthDate: "2026-10-01",
       mobile: JAN_SET,
-      siteFor: () => "7 Wattle Court, Thornlie",
-    })!;
-    assertEquals(draft.approvable, number === "INV-1", number);
-    const store = memoryStore();
-    if (draft.approvable) {
-      assertEquals(draft.problem, null);
-      assertEquals(
-        (await decideJan(store, draft, draft.text!)).draft.status,
-        "approved",
-      );
-    } else {
-      const error = await assertRejects(
-        () => decideJan(store, draft, draft.text!),
-        DebtDeskError,
-      );
-      assertEquals(error.message, draft.problem, number);
-      assertEquals(store.rows, []);
-    }
-  }
+      siteFor: (i) => SITES[i.payer_name],
+    },
+  )!;
+  assertEquals(after.status, "approved");
+  assertEquals([after.approvable, after.problem], [true, null]);
 });
 
 Deno.test("Jan's text: while sending is off it is refused and logged, with no Xero read and no SMS", async () => {

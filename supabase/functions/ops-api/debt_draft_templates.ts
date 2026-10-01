@@ -204,13 +204,13 @@ const NOT_ALLOWED: Array<[RegExp, string]> = [
 ];
 
 /**
- * Why a message text may not be approved, or null when it may. `words` is the part of the text
- * the not-allowed words are checked on (default: all of it).
+ * Why a message text may not be approved, or null when it may. `counts` says whether a
+ * not-allowed word found at [start, end) of the text counts (default: every one does).
  */
 export function debtDraftTextProblem(
   text: unknown,
   maxLength = DEBT_DRAFT_MAX_LENGTH,
-  words?: string,
+  counts: (start: number, end: number) => boolean = () => true,
 ): string | null {
   if (typeof text !== "string" || !text.trim()) return "The message is empty";
   if (/—/.test(text)) return "The message contains an em dash";
@@ -218,7 +218,8 @@ export function debtDraftTextProblem(
     return `The message is longer than ${maxLength} characters`;
   }
   for (const [re, what] of NOT_ALLOWED) {
-    if (re.test(words ?? text)) {
+    const found = [...text.matchAll(new RegExp(re.source, `${re.flags}g`))];
+    if (found.some((m) => counts(m.index!, m.index! + m[0].length))) {
       return `The message mentions ${what}: chase messages never mention legal action or credit reporting`;
     }
   }

@@ -14,6 +14,7 @@ import {
   janTextDraftId,
   janTextDraftIdMatches,
   janTextProblem,
+  janTextTemplateMatches,
   normaliseAuMobile,
   readJanMobile,
   resolveJanMobile,
@@ -244,7 +245,7 @@ Deno.test("Jan's text: the draft id is today's, tied to Jan's number and the inv
       janTextDraftId(TODAY, JAN_PHONE, [invoices[1], invoices[0]], words) !==
         id,
   );
-  // Another listed name is another draft, still tied to the same number and list.
+  // Other wording is another draft, still tied to the same number and list.
   const renamed = janTextDraftId(
     TODAY,
     JAN_PHONE,
@@ -255,72 +256,95 @@ Deno.test("Jan's text: the draft id is today's, tied to Jan's number and the inv
   assert(janTextDraftIdMatches(renamed, JAN_PHONE, ["A", "B"]));
 });
 
-Deno.test("Jan's text: the legal-action words are not checked against the names and sites it lists, only the rest", () => {
+Deno.test("Jan's text: the legal-action words are checked only on what Shaun adds or changes", () => {
   const a = item({ payer_name: "Courtney Legal Pty Ltd" });
   const b = item({ payer_name: "Sam Example" });
+  const c = item({ payer_name: "Jo Bloggs" });
   const sites: Record<string, string> = {
     [a.payer_name]: "7 Wattle Court, Thornlie",
     [b.payer_name]: "2 Banksia\nCourt — Rear, Kelmscott",
+    [c.payer_name]: "3 High Street, Armadale",
   };
-  const draft = buildJanText([a, b], [], {
+  const draft = buildJanText([a, b, c], [], {
     perthDate: TODAY,
     mobile: SET,
     siteFor: (i) => sites[i.payer_name],
   })!;
+  const template = draft.template_text!;
   assert(
-    draft.text!.includes(
-      "1. Courtney Legal Pty Ltd, 7 Wattle Court, Thornlie: ",
-    ),
+    template.includes("1. Courtney Legal Pty Ltd, 7 Wattle Court, Thornlie: "),
   );
   assert(
-    draft.text!.includes("2. Sam Example, 2 Banksia Court - Rear, Kelmscott: "),
+    template.includes("2. Sam Example, 2 Banksia Court - Rear, Kelmscott: "),
   );
-  assertEquals(draft.problem, null);
-  assertEquals(draft.approvable, true);
-  assertEquals(janTextProblem(draft.text, draft.id), null);
-  // What Shaun types is checked, wherever it is.
-  const lines = draft.text!.split("\n");
+  assertEquals([draft.approvable, draft.problem], [true, null]);
+  assertEquals(janTextProblem(template, template), null);
+  // Untouched lines are never checked, however another line is edited, or deleted.
+  const lines = template.split("\n");
   for (
     const edited of [
-      `${draft.text}\nIf they do not pay, tell them we will take them to court.`,
-      draft.text!.replace("owing", "owing, mention a default listing"),
-      [
-        lines[0],
-        lines[1].replace("Thornlie", "Thornlie, lawyer"),
-        ...lines.slice(2),
-      ]
-        .join("\n"),
+      template.replace("Jo Bloggs", "Jo Bloggs (back gate)"),
+      template.replace("Sam Example", "Sam Smith"),
+      [...lines.slice(0, 3), ...lines.slice(4)].join("\n"),
+      [lines[0], lines[3], lines[1], lines[2], lines[4]].join("\n"),
+      `${template}\nRing me after the first one.`,
     ]
-  ) assert(janTextProblem(edited, draft.id) !== null, edited);
-  // An edit to a listed name or site has the whole text checked.
-  assert(
-    janTextProblem(draft.text!.replace("Sam Example", "Sam Smith"), draft.id)!
-      .includes("mentions"),
-  );
+  ) assertEquals(janTextProblem(edited, template), null, edited);
+  // A legal word Shaun adds is refused, wherever he puts it.
+  for (
+    const edited of [
+      `${template}\nIf they do not pay, tell them we will take them to court.`,
+      template.replace("owing", "owing, mention a default listing"),
+      template.replace("Thornlie:", "Thornlie, lawyer:"),
+      template.replace("Jo Bloggs", "Jo Bloggs (court)"),
+      template.replace("3 High Street", "3 High Court"),
+    ]
+  ) {
+    assert(
+      janTextProblem(edited, template)?.includes("mentions"),
+      edited,
+    );
+  }
   // Empty, em dash and length still cover the whole text.
-  assert(janTextProblem("", draft.id) !== null);
-  assert(
-    janTextProblem(
-      draft.text!.replace("Thornlie", "Thornlie — rear"),
-      draft.id,
-    ) !== null,
+  assertEquals(janTextProblem("", template), "The message is empty");
+  assertEquals(
+    janTextProblem(template.replace("Armadale", "Armadale — rear"), template),
+    "The message contains an em dash",
   );
-  assert(janTextProblem(`${draft.text}${"x".repeat(1600)}`, draft.id) !== null);
+  assert(
+    janTextProblem(`${template}${"x".repeat(1600)}`, template)!.includes(
+      "longer than 1600",
+    ),
+  );
 });
 
 Deno.test("Jan's text: approvable and problem are the approve check on the text shown", () => {
   const opts = { perthDate: TODAY, mobile: SET, siteFor: () => null };
-  const plain = buildJanText([item()], [], opts)!;
-  assertEquals(plain.problem, janTextProblem(plain.text, plain.id));
-  assertEquals(plain.approvable, true);
-  // A word outside the listed names (here an invoice number) is caught on the list, before
-  // Shaun presses approve, with the same words the approve step refuses with.
-  const odd = item();
-  odd.invoices[0].invoice_number = "COURT-1";
-  const draft = buildJanText([odd], [], opts)!;
-  assertEquals(draft.approvable, false);
-  assert(draft.problem!.includes("mentions court"), draft.problem!);
-  assertEquals(draft.problem, janTextProblem(draft.text, draft.id));
+  const draft = buildJanText([item()], [], opts)!;
+  assertEquals(draft.problem, janTextProblem(draft.text, draft.template_text!));
+  assertEquals(draft.approvable, true);
+  // An approved edit reads back with the same check against the same wording.
+  const i = item();
+  const first = buildJanText([i], [], opts)!;
+  const words = `${first.template_text}\nThe Court one first.`;
+  const approved = buildJanText(
+    [i],
+    row(first.id, first.xero_invoice_ids, {
+      outcome_code: null,
+      outcome: "approved",
+      approved_by_user_id: "u-shaun",
+      notes: words,
+    }),
+    opts,
+  )!;
+  assertEquals(approved.status, "approved");
+  assertEquals(approved.text, words);
+  assertEquals(approved.problem, janTextProblem(words, first.template_text!));
+  assert(approved.problem!.includes("mentions court"));
+  assertEquals(approved.approvable, false);
+  assert(janTextTemplateMatches(draft.id, draft.template_text));
+  assert(!janTextTemplateMatches(draft.id, `${draft.template_text} `));
+  assert(!janTextTemplateMatches(draft.id, undefined));
 });
 
 // ── The draft on the morning list ──

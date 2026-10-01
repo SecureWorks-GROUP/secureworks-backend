@@ -45,6 +45,7 @@ import {
   type JanMobile,
   janTextDraftIdMatches,
   janTextProblem,
+  janTextTemplateMatches,
 } from "./debt_jan_text.ts";
 
 export const DEBT_DESK_VERSION = "debt-desk/v1";
@@ -299,7 +300,13 @@ export async function debtDraftDecide(
   const actor = requireActor(rawActor);
   await requireDeskOwner(actor, deps);
   const body = asBody(rawBody);
-  onlyKeys(body, ["draft_id", "decision", "text", "xero_invoice_ids"]);
+  onlyKeys(body, [
+    "draft_id",
+    "decision",
+    "text",
+    "xero_invoice_ids",
+    "template_text",
+  ]);
   const draft = parseDebtDraftId(body.draft_id);
   const draftId = String(body.draft_id);
   if (!draft) {
@@ -329,9 +336,19 @@ export async function debtDraftDecide(
   }
   const text = typeof body.text === "string" ? body.text.trim() : "";
   const jan = draft.step === JAN_TEXT_STEP;
+  if (!jan && body.template_text !== undefined) {
+    bad("template_text is only for Jan's text");
+  }
   if (decision === "approve") {
+    if (jan && !janTextTemplateMatches(draftId, body.template_text)) {
+      throw new DebtDeskError(
+        "Send Jan's text with its template_text from today's list: that is not the wording this draft was made from",
+        409,
+        "debt_draft_invoices_changed",
+      );
+    }
     const problem = jan
-      ? janTextProblem(text, draftId)
+      ? janTextProblem(text, body.template_text as string)
       : debtDraftTextProblem(text);
     if (problem) {
       throw new DebtDeskError(problem, 400, "debt_draft_text_not_allowed");

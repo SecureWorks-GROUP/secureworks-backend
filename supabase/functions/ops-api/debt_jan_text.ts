@@ -13,15 +13,16 @@
 // cannot be found unambiguously the draft says "Jan's mobile not set in staff records" and
 // cannot be approved. No number is ever written into the code.
 //
-// The draft id is `<perth date>:jan-<tag>-<names tag>:jan:jan_text|<cents per invoice>`, where
-// the tag is a short hash of Jan's number and the covered invoice ids in order, and the names
-// tag a short hash of the names and sites the standard wording lists. So an approval is tied to
-// the number and the list Shaun saw: a changed list or a changed number is a different draft.
+// The draft id is `<perth date>:jan-<tag>-<wording tag>:jan:jan_text|<cents per invoice>`,
+// where the tag is a short hash of Jan's number and the covered invoice ids in order, and the
+// wording tag a short hash of the standard wording. So an approval is tied to the number and
+// the list Shaun saw: a changed list or a changed number is a different draft.
 //
 // Jan's text goes to a member of staff, not a client, so the words no chase message may carry
-// are not checked against the payers' names and the job sites it lists (a street named Court
-// is an address, not a threat). They are checked on everything else, the standard wording and
-// whatever Shaun types; a listed name or site passes only while it is exactly as drafted.
+// are not checked against the standard wording (its payers' names and job sites included: a
+// street named Court is an address, not a threat). They are checked on the words Shaun adds or
+// changes, found by comparing his text word by word with the standard wording; untouched and
+// deleted lines need no check.
 //
 // Its chase-log rows carry no schedule step, so neither its approval nor its send moves any
 // payer's ladder: the visit itself is recorded by debt_log_outcome (schedule_step jan_visit),
@@ -171,17 +172,6 @@ function janTextTag(phone: string, ids: string[]): string {
   return fnv1a(`${phone}|${ids.map((id) => id.toLowerCase()).join(",")}`);
 }
 
-// A visit line of the standard wording: "<n>. <payer, site>: <invoices>, <amount> owing...".
-const VISIT_LINE = /^(\d+\. )(.*)(: [^:]*)$/;
-
-/** The payer-and-site part of each visit line, in order. */
-function listedNames(text: string): string {
-  return text.split("\n").flatMap((line) => {
-    const m = VISIT_LINE.exec(line);
-    return m ? [m[2]] : [];
-  }).join("\n");
-}
-
 const JAN_ID_TAGS = /^jan-([0-9a-f]{8})-([0-9a-f]{8})$/;
 
 function janIdTags(draftId: string, count?: number) {
@@ -189,7 +179,7 @@ function janIdTags(draftId: string, count?: number) {
   if (!parsed || parsed.step !== JAN_TEXT_STEP) return null;
   if (count !== undefined && parsed.amounts.length !== count) return null;
   const m = JAN_ID_TAGS.exec(parsed.item_id.split(":")[1] ?? "");
-  return m ? { list: m[1], names: m[2] } : null;
+  return m ? { list: m[1], wording: m[2] } : null;
 }
 
 /** The draft id for Jan's text with this standard wording (`template`). */
@@ -201,9 +191,7 @@ export function janTextDraftId(
 ): string {
   const tag = janTextTag(phone, invoices.map((i) => i.xero_invoice_id));
   return debtDraftId(
-    `${perthDate}:jan-${tag}-${
-      fnv1a(listedNames(template))
-    }:jan:${JAN_TEXT_STEP}`,
+    `${perthDate}:jan-${tag}-${fnv1a(template)}:jan:${JAN_TEXT_STEP}`,
     invoices,
   );
 }
@@ -217,23 +205,60 @@ export function janTextDraftIdMatches(
   return janIdTags(draftId, ids.length)?.list === janTextTag(phone, ids);
 }
 
+/** True when `template` is the standard wording the draft id was made for. */
+export function janTextTemplateMatches(
+  draftId: string,
+  template: unknown,
+): boolean {
+  return typeof template === "string" &&
+    janIdTags(draftId)?.wording === fnv1a(template);
+}
+
+/** Where the words of `text` that are not in `template` are: a word-by-word diff. */
+function addedWords(text: string, template: string): Array<[number, number]> {
+  const words = (s: string) => [...s.matchAll(/\S+/g)];
+  const a = words(text);
+  const b = words(template);
+  const kept = Array.from(
+    { length: a.length + 1 },
+    () => new Uint16Array(b.length + 1),
+  );
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      kept[i][j] = a[i][0] === b[j][0]
+        ? kept[i + 1][j + 1] + 1
+        : Math.max(kept[i + 1][j], kept[i][j + 1]);
+    }
+  }
+  const added: Array<[number, number]> = [];
+  for (let i = 0, j = 0; i < a.length;) {
+    if (j < b.length && a[i][0] === b[j][0]) {
+      i++;
+      j++;
+    } else if (j < b.length && kept[i][j + 1] >= kept[i + 1][j]) {
+      j++;
+    } else {
+      added.push([a[i].index!, a[i].index! + a[i][0].length]);
+      i++;
+    }
+  }
+  return added;
+}
+
 /**
  * Why Jan's text may not be approved, or null when it may. Empty, em dash and length cover the
- * whole text. The words no chase message may carry are checked on all of it but the payer
- * names and sites the draft listed, and those are left out only while every visit line still
- * names exactly what was drafted.
+ * whole text; the words no chase message may carry are checked only where Shaun's text adds or
+ * changes words of the standard wording (`template`).
  */
-export function janTextProblem(text: unknown, draftId: string): string | null {
-  const listed = typeof text === "string" &&
-    janIdTags(draftId)?.names === fnv1a(listedNames(text));
+export function janTextProblem(text: unknown, template: string): string | null {
+  if (typeof text !== "string" || text.length > JAN_TEXT_MAX_LENGTH) {
+    return debtDraftTextProblem(text, JAN_TEXT_MAX_LENGTH);
+  }
+  const added = addedWords(text, template);
   return debtDraftTextProblem(
     text,
     JAN_TEXT_MAX_LENGTH,
-    listed
-      ? (text as string).split("\n").map((line) =>
-        line.replace(VISIT_LINE, "$1$3")
-      ).join("\n")
-      : undefined,
+    (start, end) => added.some(([s, e]) => s < end && start < e),
   );
 }
 
@@ -428,7 +453,7 @@ export function buildJanText(
       ? `Jan's list covers ${invoices.length} invoices, more than the ${JAN_TEXT_MAX_INVOICES} one text can carry: log the visits already done, then read the list again`
       : template.length > JAN_TEXT_MAX_LENGTH
       ? `Jan's list is too long for one text (${template.length} characters, at most ${JAN_TEXT_MAX_LENGTH})`
-      : janTextProblem(text, id));
+      : janTextProblem(text, template));
   return {
     id,
     channel: "sms",

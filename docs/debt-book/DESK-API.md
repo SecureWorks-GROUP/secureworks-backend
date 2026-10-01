@@ -97,7 +97,7 @@ is null when there are none.
 
 ```json
 {
-  "id": "<perth date>:jan-<tag>-<names tag>:jan:jan_text|<amount due in cents per invoice>",
+  "id": "<perth date>:jan-<tag>-<wording tag>:jan:jan_text|<amount due in cents per invoice>",
   "channel": "sms", "to": "jan", "step": "jan_text",
   "to_phone": "+61411222333 or null", "mobile_source": "staff | null",
   "visits": [{ "item_id": "...", "payer_key": "...", "payer_name": "...",
@@ -136,18 +136,20 @@ Please tell Shaun how each visit goes. Thanks
   (`409 jan_mobile_not_set`); it can be skipped.
 - **Approve or skip** with `debt_draft_decide`, as any draft: the desk owner
   only, `xero_invoice_ids` set to `jan_text.xero_invoice_ids` in that order.
+  An approval also sends `template_text` set to `jan_text.template_text`.
   The draft id's tag is a hash of Jan's number and those invoice ids, so an
   approval is tied to the number and the list Shaun saw: another number, or
   the invoices in another order, is refused `409 debt_draft_invoices_changed`.
+  Its wording tag is a hash of the standard wording, so a `template_text`
+  that is missing or is not that wording is refused the same way.
   A Jan text may be up to 1600 characters (a client text 1000), and is refused
   when empty, with an em dash or over that length. It goes to staff, not a
-  client, so the legal-action words are not checked against the payer names
-  and job sites it lists (a street named Court is an address): the names tag
-  in the draft id is a hash of those, and while every visit line's
-  "<n>. <payer, site>:" part is exactly as drafted, that part is left out of
-  the word check. Everything else, the standard wording and anything Shaun
-  types, is checked; an edit to a listed name or site has the whole text
-  checked. `approvable` and `problem` run the same check on the text shown.
+  client, so the legal-action words are not checked against the standard
+  wording (the payer names and job sites it lists included: a street named
+  Court is an address). Shaun's text is compared word by word with
+  `template_text`, and only the words he added or changed are checked;
+  untouched lines are never checked, and a deleted line needs no check.
+  `approvable` and `problem` run the same check on the text shown.
 - **Send** with `debt_draft_send`, as any draft: the same switch
   (`DEBT_SENDING_ENABLED`), the same "nothing logged since the approval" rule,
   the same last Xero check of every covered invoice (Jan is never sent to a
@@ -170,7 +172,8 @@ Please tell Shaun how each visit goes. Thanks
 
 ## `debt_draft_decide` (POST)
 
-`{ draft_id, decision: "approve" | "skip", text, xero_invoice_ids }`, answered
+`{ draft_id, decision: "approve" | "skip", text, xero_invoice_ids }` (plus
+`template_text` when approving Jan's text, and only then), answered
 `{ ok, draft }`. `xero_invoice_ids` are the item's invoices in the item's
 order. An edit is an approval carrying the edited text. Refuses a draft from
 another day (`409 debt_draft_not_today`), one already sent
