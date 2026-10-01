@@ -105,7 +105,7 @@ is null when there are none.
     "xero_invoice_ids": ["uuid"], "amount": 100, "days_overdue": 11,
     "broken_promise": false }],
   "xero_invoice_ids": ["uuid", "..."],
-  "text": "...", "template_text": "...",
+  "text": "...", "template_text": "the standard wording; null once sent or claimed",
   "status": "pending | approved | skipped | sending | sent",
   "edited": false, "approved_by": "email", "approved_by_user_id": "uuid",
   "decided_at": "iso", "last_send": null,
@@ -134,6 +134,9 @@ Please tell Shaun how each visit goes. Thanks
   staff records" with the reason (or "Jan's mobile not set: the staff records
   could not be read" when the read failed). The wording is still shown. It cannot be approved
   (`409 jan_mobile_not_set`); it can be skipped.
+- **Too long for one text.** A list covering more than 30 invoices (each is
+  re-read live from Xero at the send), or whose standard wording is over 1600
+  characters, is shown with `approvable: false` and a `problem` saying so.
 - **Approve or skip** with `debt_draft_decide`, as any draft: the desk owner
   only, `xero_invoice_ids` set to `jan_text.xero_invoice_ids` in that order.
   An approval also sends `template_text` set to `jan_text.template_text`.
