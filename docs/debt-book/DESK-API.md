@@ -176,6 +176,11 @@ Please tell Shaun how each visit goes. Thanks
   narrowed to the payers still on the list), so recording Jan's reports never
   offers a second text.
 
+**Every desk write** refuses a field it does not know, except two the Ops
+dashboard sends: `operator_email` (added to every POST by `opsPost`) on all of
+them, and the morning list's `payer_key` on `debt_log_outcome`. Both are
+accepted and never read; who acted is the signed-in session only.
+
 ## `debt_draft_decide` (POST)
 
 `{ draft_id, decision: "approve" | "skip", text, xero_invoice_ids }` (plus

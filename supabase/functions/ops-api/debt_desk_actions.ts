@@ -258,9 +258,16 @@ async function requireDeskOwner(actor: DebtDeskActor, deps: DebtDeskDeps) {
   }
 }
 
+/**
+ * Fields every Ops dashboard POST carries whatever the action: `opsPost` (secureworks-ux
+ * ops.html) adds `operator_email`, the logged-in user's email, to every body. They are
+ * accepted and never read: who acted comes only from the verified session.
+ */
+const OPS_POST_ENVELOPE_FIELDS = ["action", "operator_email"];
+
 function onlyKeys(body: Record<string, unknown>, allowed: string[]) {
   for (const key of Object.keys(body)) {
-    if (key !== "action" && !allowed.includes(key)) {
+    if (!OPS_POST_ENVELOPE_FIELDS.includes(key) && !allowed.includes(key)) {
       bad(`Unsupported field: ${key}`);
     }
   }
@@ -471,6 +478,9 @@ export async function debtLogOutcome(
   const actor = requireActor(rawActor);
   const body = asBody(rawBody);
   onlyKeys(body, [
+    // The Clear Debt screen sends the morning list's payer_key with every outcome. It is
+    // accepted and never read: the rows are keyed on the Xero invoice ids alone.
+    "payer_key",
     "xero_invoice_ids",
     "outcome_code",
     "promised_amount",

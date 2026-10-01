@@ -1183,21 +1183,21 @@ Deno.test("send: refuses without a signed-in user and caps a batch at 20", async
   assertEquals(e3.code, "debt_desk_bad_request");
 });
 
-Deno.test("outcome: payer_key is not a field", async () => {
-  const error = await assertRejects(
-    () =>
-      debtLogOutcome(
-        {
-          payer_key: "contact-a",
-          xero_invoice_ids: [A],
-          outcome_code: "spoke",
-        },
-        SHAUN,
-        deps(memoryStore()).d,
-      ),
-    DebtDeskError,
+Deno.test("outcome: the screen's payer_key is accepted and never read", async () => {
+  const store = memoryStore();
+  const res = await debtLogOutcome(
+    {
+      payer_key: "someone-else",
+      xero_invoice_ids: [A],
+      outcome_code: "spoke",
+    },
+    SHAUN,
+    deps(store).d,
   );
-  assertEquals(error.code, "debt_desk_bad_request");
+  assertEquals(res.ok, true);
+  assertEquals(store.rows.length, 1);
+  assertEquals(store.rows[0].xero_invoice_id, A);
+  assert(!JSON.stringify(store.rows).includes("someone-else"));
 });
 
 // ── The Supabase store ──
@@ -2161,4 +2161,149 @@ Deno.test("promise, deposit: pauses the reminder; a missed one comes back at the
       .items,
     [],
   );
+});
+
+// ── The Ops dashboard's POST shape ──
+// opsPost (secureworks-ux ops.html) adds operator_email, the logged-in user's email, to every
+// POST body. The desk accepts it and never reads it: the actor is the verified session only.
+
+const OPERATOR_EMAIL = SHAUN.email;
+
+Deno.test("ops dashboard: every desk write succeeds with the exact body opsPost sends", async () => {
+  // Approve (and edit: the same call with the edited text).
+  {
+    const store = memoryStore();
+    const res = await debtDraftDecide(
+      {
+        draft_id: DRAFT,
+        decision: "approve",
+        text: "Hi Sam, a friendly reminder. Thanks, SecureWorks",
+        xero_invoice_ids: [A, B],
+        operator_email: OPERATOR_EMAIL,
+      },
+      SHAUN,
+      deps(store).d,
+    );
+    assertEquals(res.draft.status, "approved");
+  }
+  // Skip on Jan's morning text, as the Clear Debt screen sends it.
+  {
+    const store = memoryStore();
+    const res = await debtDraftDecide(
+      {
+        draft_id: JAN_TEXT_ID,
+        decision: "skip",
+        text: JAN_WORDS,
+        xero_invoice_ids: [A, B],
+        operator_email: OPERATOR_EMAIL,
+      },
+      SHAUN,
+      janDeps(store).d,
+    );
+    assertEquals(res.draft.status, "skipped");
+  }
+  // Log an outcome, with the screen's payer_key.
+  {
+    const store = memoryStore();
+    const res = await debtLogOutcome(
+      {
+        payer_key: "contact-a",
+        xero_invoice_ids: [A, B],
+        outcome_code: "no_answer",
+        channel: "call",
+        schedule_step: "call",
+        note: null,
+        operator_email: OPERATOR_EMAIL,
+      },
+      SHAUN,
+      deps(store).d,
+    );
+    assertEquals(res.logged.rows, 2);
+  }
+  // Send.
+  {
+    const store = await approvedStore();
+    const res = await debtDraftSend(
+      { draft_ids: [DRAFT], operator_email: OPERATOR_EMAIL },
+      SHAUN,
+      deps(store).d,
+    );
+    assertEquals(res.results[0].code, "sending_off");
+  }
+});
+
+Deno.test("ops dashboard: operator_email never changes who is recorded or who may approve", async () => {
+  // The owner's session with another user's email: recorded as the owner.
+  {
+    const store = memoryStore();
+    const res = await debtDraftDecide(
+      {
+        draft_id: DRAFT,
+        decision: "approve",
+        text: "Hi Sam, a friendly reminder. Thanks, SecureWorks",
+        xero_invoice_ids: [A, B],
+        operator_email: OTHER_STAFF.email,
+      },
+      SHAUN,
+      deps(store).d,
+    );
+    assertEquals(res.draft.approved_by_user_id, SHAUN.user_id);
+    for (const r of store.rows) {
+      assertEquals(r.approved_by_user_id, SHAUN.user_id);
+      assertEquals(r.chased_by, SHAUN.email);
+    }
+    assert(!JSON.stringify(store.rows).includes(OTHER_STAFF.email));
+  }
+  // Another staff session naming the owner's email: still not the owner.
+  {
+    const store = memoryStore();
+    const error = await assertRejects(
+      () =>
+        debtDraftDecide(
+          {
+            draft_id: DRAFT,
+            decision: "approve",
+            text: "Hi Sam, a friendly reminder. Thanks, SecureWorks",
+            xero_invoice_ids: [A, B],
+            operator_email: SHAUN.email,
+          },
+          OTHER_STAFF,
+          deps(store).d,
+        ),
+      DebtDeskError,
+    );
+    assertEquals(error.code, "debt_desk_owner_required");
+    assertEquals(store.rows, []);
+  }
+  // An outcome is logged as the session user, whatever email the body names.
+  {
+    const store = memoryStore();
+    await debtLogOutcome(
+      {
+        xero_invoice_ids: [A],
+        outcome_code: "spoke",
+        operator_email: SHAUN.email,
+      },
+      OTHER_STAFF,
+      deps(store).d,
+    );
+    assertEquals(store.rows[0].chased_by, OTHER_STAFF.email);
+  }
+  // No session: refused, even with an email in the body.
+  {
+    const error = await assertRejects(
+      () =>
+        debtLogOutcome(
+          {
+            xero_invoice_ids: [A],
+            outcome_code: "spoke",
+            operator_email: SHAUN.email,
+          },
+          null,
+          deps(memoryStore()).d,
+        ),
+      DebtDeskError,
+    );
+    assertEquals(error.code, "debt_desk_user_required");
+  }
 });
