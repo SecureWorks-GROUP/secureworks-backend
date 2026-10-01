@@ -18,6 +18,8 @@ import {
   debtSendingEnabled,
 } from "./debt_desk_actions.ts";
 import { debtDraftStates } from "./debt_desk_drafts.ts";
+import { debtNotes } from "./debt_picture.ts";
+import { listOverdueInvoices } from "./index.ts";
 import { debtChaseEventFromLogRow } from "./debt_chase_schedule.ts";
 import { XeroCooldownError } from "../_shared/xero_cooldown.ts";
 
@@ -839,6 +841,120 @@ Deno.test("send: drafts go one at a time; a Xero rate limit stops the rest of th
       debtChaseEventFromLogRow(r) === null
     ),
   );
+});
+
+/** A read-only PostgREST stand-in: eq, in and or filter; other modifiers pass through. */
+function tableClient(tables: Record<string, Record<string, unknown>[]>) {
+  const split = (text: string) => {
+    const out: string[] = [];
+    let depth = 0;
+    let cur = "";
+    for (const ch of text) {
+      if (ch === "(") depth += 1;
+      if (ch === ")") depth -= 1;
+      if (ch === "," && depth === 0) {
+        out.push(cur);
+        cur = "";
+      } else cur += ch;
+    }
+    out.push(cur);
+    return out;
+  };
+  const term = (t: string): (r: any) => boolean => {
+    const and = /^and\((.*)\)$/.exec(t);
+    if (and) {
+      const parts = split(and[1]).map(term);
+      return (r) => parts.every((f) => f(r));
+    }
+    const [c, op, ...rest] = t.split(".");
+    const v = rest.join(".");
+    if (op === "is" && v === "null") {
+      return (r) => r[c] === null || r[c] === undefined;
+    }
+    if (op === "eq") return (r) => String(r[c]) === v;
+    throw new Error(`unsupported or() term ${t}`);
+  };
+  return {
+    from(table: string) {
+      const filters: Array<(r: any) => boolean> = [];
+      const q: any = {};
+      for (const m of ["select", "gt", "lt", "not", "order", "limit"]) {
+        q[m] = () => q;
+      }
+      q.eq = (c: string, v: unknown) => {
+        filters.push((r) => r[c] === v);
+        return q;
+      };
+      q.in = (c: string, v: unknown[]) => {
+        filters.push((r) => v.includes(r[c]));
+        return q;
+      };
+      q.or = (expr: string) => {
+        const terms = split(expr).map(term);
+        filters.push((r) => terms.some((f) => f(r)));
+        return q;
+      };
+      q.then = (resolve: (v: unknown) => unknown) =>
+        Promise.resolve({
+          data: (tables[table] ?? []).filter((r) => filters.every((f) => f(r))),
+          error: null,
+        }).then(resolve);
+      return q;
+    },
+  };
+}
+
+Deno.test("send: a two-invoice desk send reads as one chase on each invoice in Clear Debt and the notes thread", async () => {
+  const store = await approvedStore();
+  const x = deps(store, { sendingEnabled: true });
+  // send_chase_sms logs its own row, on the first covered invoice only.
+  x.d.sendSms = (body) => {
+    store.rows.push({
+      id: "legacy",
+      created_at: "2026-10-01T01:00:30Z",
+      xero_invoice_id: body.xero_invoice_id,
+      job_id: body.job_id,
+      ghl_contact_id: body.ghl_contact_id,
+      method: "sms",
+      outcome: "SMS sent",
+      notes: body.message,
+      chased_by: body.operator_email,
+    });
+    return Promise.resolve({ success: true, message_id: "m1" });
+  };
+  const res = await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d);
+  assertEquals(res.sent, 1);
+  // A second press is refused, and a refusal is not a chase.
+  await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d);
+
+  const invoice = (id: string, n: string) => ({
+    xero_invoice_id: id,
+    xero_contact_id: "xc-1",
+    contact_name: "Sam Example",
+    invoice_number: n,
+    amount_due: 100,
+    due_date: "2026-09-20",
+    invoice_type: "ACCREC",
+    org_id: ORG,
+    status: "AUTHORISED",
+    job_id: "j1",
+  });
+  const client = tableClient({
+    xero_invoices: [invoice(A, "INV-1"), invoice(B, "INV-2")],
+    jobs: [{ id: "j1", job_number: "SWF-1", status: "complete" }],
+    payment_chase_logs: store.rows,
+  });
+  const overdue: any = await listOverdueInvoices(client);
+  const counts = Object.fromEntries(
+    overdue.clients[0].invoices.map((
+      i: any,
+    ) => [i.invoice_number, i.chase_log_count]),
+  );
+  assertEquals(counts, { "INV-1": 1, "INV-2": 1 });
+  for (const id of [A, B]) {
+    const thread = await debtNotes(client, id, null);
+    assertEquals(thread.length, 1, id);
+  }
 });
 
 Deno.test("send: two overlapping sends of one draft text the client once", async () => {

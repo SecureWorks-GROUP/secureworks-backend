@@ -807,41 +807,72 @@ Deno.test("drafts: a decided firm text keeps its text, and its standard wording 
   ]);
 });
 
-Deno.test("drafts: a skipped firm text spends no Xero pay-link read", async () => {
+Deno.test("drafts: a skipped firm text spends no live Xero read, and still shows its wording when it can", async () => {
   const { x, store } = oneClientBook();
+  const firstCache = new Map<string, string>();
   const first = await readDebtMorningList({}, {}, {
     ...x.deps,
     store,
     chaseLog: logStore([sentYesterday(1)]),
-    payLinkCache: new Map(),
+    payLinkCache: firstCache,
     payLink: () => Promise.resolve("https://in.xero.com/pay"),
   } as unknown as DebtMorningListDeps);
-  const skipped = {
-    id: "k1",
+  const pending = first.items[0].draft!;
+  const row = (over: Record<string, unknown>): Record<string, unknown> => ({
     xero_invoice_id: idOf(1),
     method: "sms",
     schedule_step: "firm_text",
-    draft_id: first.items[0].draft!.id,
+    draft_id: pending.id,
+    chased_by: "shaun@example.test",
+    ...over,
+  });
+  const skipped = row({
+    id: "k1",
     created_at: "2026-09-30T23:10:00Z",
     outcome_code: "skipped",
     outcome: "skipped",
     notes: null,
-    chased_by: "shaun@example.test",
-  };
+  });
+  const approved = row({
+    id: "a1",
+    created_at: "2026-09-30T23:05:00Z",
+    approved_by_user_id: "20000000-0000-4000-8000-0000000000aa",
+    outcome: "approved",
+    notes:
+      "Hi Client, the approved firm text https://in.xero.com/pay. Thanks, SecureWorks",
+  });
   const asked: string[] = [];
-  const list = await readDebtMorningList({}, {}, {
-    ...x.deps,
-    store,
-    chaseLog: logStore([sentYesterday(1), skipped]),
-    payLinkCache: new Map(),
-    payLink: (id: string) => {
-      asked.push(id);
-      return Promise.resolve("https://in.xero.com/pay");
-    },
-  } as unknown as DebtMorningListDeps);
-  assertEquals(asked, []);
-  assertEquals(list.drafts.pay_links_read, 0);
-  const d = list.items[0].draft!;
+  const read = (rows: Record<string, unknown>[], cache: Map<string, string>) =>
+    readDebtMorningList({}, {}, {
+      ...x.deps,
+      store,
+      chaseLog: logStore([sentYesterday(1), ...rows]),
+      payLinkCache: cache,
+      payLink: (id: string) => {
+        asked.push(id);
+        return Promise.resolve("https://in.xero.com/pay");
+      },
+    } as unknown as DebtMorningListDeps);
+
+  // Links already read today: the standard wording, from the cache only.
+  const cached = (await read([skipped], firstCache)).items[0].draft!;
+  assertEquals([cached.status, cached.text, cached.template_text], [
+    "skipped",
+    pending.template_text,
+    pending.template_text,
+  ]);
+  assertEquals(cached.pay_links, pending.pay_links);
+
+  // Nothing cached: the earlier approval's text, else nothing.
+  const reapproved = (await read([approved, skipped], new Map())).items[0]
+    .draft!;
+  assertEquals([reapproved.status, reapproved.text, reapproved.pay_links], [
+    "skipped",
+    approved.notes,
+    null,
+  ]);
+  const bare = await read([skipped], new Map());
+  const d = bare.items[0].draft!;
   assertEquals([d.status, d.text, d.template_text, d.edited, d.pay_links], [
     "skipped",
     null,
@@ -849,6 +880,8 @@ Deno.test("drafts: a skipped firm text spends no Xero pay-link read", async () =
     false,
     null,
   ]);
+  assertEquals(asked, []);
+  assertEquals(bare.drafts.pay_links_read, 0);
 });
 
 Deno.test("drafts: a claimed send shows as sending, never as re-sendable, and does not move the ladder", async () => {

@@ -34,7 +34,7 @@ materials invoice before the job's first payment is not a deposit).
 {
   "id": "<item id>|<amount due in cents per invoice, item order>",
   "channel": "sms", "to": "client | jan", "step": "friendly_text",
-  "text": "the approved or sent text once decided, else the standard wording; null on a skipped firm text",
+  "text": "the approved or sent text once decided, else the standard wording; see below for a skipped firm text",
   "template_text": "the standard wording, or null on a decided firm text",
   "status": "pending | approved | skipped | sending | sent",
   "edited": "true or false against the standard wording; null when it is not known",
@@ -48,9 +48,11 @@ Pay links are read one invoice at a time, at most 10 live Xero reads per list
 read, top of the list first. A link once read is kept for the rest of that
 Perth day in the ops-api instance's memory, so reading the list again after
 each approval spends no more Xero calls on it. A decided firm text (approved,
-skipped, claimed or sent) is not read again, so its standard wording is not
-known: `template_text` and `edited` are null. An approved one keeps its links
-inside its text; a skipped one has `text: null`. A changed amount gives a
+skipped, claimed or sent) is not read live again, so its standard wording is
+not known: `template_text` and `edited` are null. An approved one keeps its
+links inside its text. A skipped one is worded from links already read that
+day, else shows its earlier approved text, and is `text: null` only when it
+has neither, so un-skipping it never spends a Xero read. A changed amount gives a
 new draft id, so an approval never carries over to a text it did not see.
 
 `sending` means a send claimed the draft and did not confirm it: the draft is
@@ -119,7 +121,8 @@ provider_message_id, logged }`.
   `send_chase_sms` also writes its own older-style "SMS sent" row.
 - The older chase-history readers (Clear Debt's chase counts and recent
   chases, `job_detail`, `invoice_context` and the debt notes thread) show
-  only rows with no draft id. An invoice that was never texted never reads
-  as chased, and a desk send reads as one chase: send_chase_sms's own
-  "SMS sent" row, on the first covered invoice, as for any other
-  send_chase_sms text.
+  each invoice a desk send covers as chased once, and never an approval,
+  skip, refusal or claim. send_chase_sms logs the send with its own
+  "SMS sent" row on the first covered invoice; the desk's sent row there
+  carries the job id, as that row does, and is left out, while its sent rows
+  on the other covered invoices (no job id) are shown.

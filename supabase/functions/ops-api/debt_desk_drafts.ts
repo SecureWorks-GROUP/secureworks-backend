@@ -14,17 +14,18 @@
 //
 // One decision writes one row per covered invoice; rows at one instant are one decision. These
 // rows are the desk's state, not chase history: the older Clear Debt, job and invoice readers
-// show only rows with no draft id (DEBT_CHASE_HISTORY_FILTER). A desk send still appears there
-// once, as the "SMS sent" row send_chase_sms writes itself.
+// leave them out (DEBT_CHASE_HISTORY_FILTER). A desk send appears there once per covered
+// invoice: send_chase_sms's own "SMS sent" row on the first, the desk's sent row on the rest.
 //
 // A firm text needs each invoice's Xero OnlineInvoice pay link. Links are read only for drafts
 // still pending, one at a time (Xero allows 60 calls a minute and the book read already spent
 // two), at most `payLinkLimit` live reads per list, in list order so the top of the list is
 // drafted first. A link read once is kept for the rest of that Perth day (`payLinkCache`), so
 // reading the list again after each approval spends no more Xero calls on it. A decided firm
-// text (approved, skipped, claimed or sent) is never read again: an approved one keeps its
-// links inside its text. A draft whose link could not be read is left out with a reason, never
-// sent without its link.
+// text (approved, skipped, claimed or sent) is never read live again: an approved one keeps its
+// links inside its text, and a skipped one is worded from links already read today, else shows
+// its earlier approved text. A draft whose link could not be read is left out with a reason,
+// never sent without its link.
 
 import type { DebtMorningItem } from "./debt_chase_schedule.ts";
 import {
@@ -39,10 +40,14 @@ export const DEBT_PAY_LINK_LIMIT = 10;
 
 /**
  * PostgREST `.or()` filter for the older chase-history readers (Clear Debt, job_detail,
- * invoice_context, debt notes): only rows with no draft id. A desk approval, skip, refusal or
- * claim is not a chase, and a desk send is already there once as send_chase_sms's own row.
+ * invoice_context, debt notes), so every invoice a desk send covers reads as chased once. A
+ * desk approval, skip, refusal or claim is not a chase. send_chase_sms logs a desk send with its
+ * own row (no draft id) on the first covered invoice only; the desk's sent row there carries the
+ * job id, as that row does, and is left out. The desk's sent rows on the other covered invoices
+ * carry no job id and are shown.
  */
-export const DEBT_CHASE_HISTORY_FILTER = "draft_id.is.null";
+export const DEBT_CHASE_HISTORY_FILTER =
+  "draft_id.is.null,and(outcome_code.eq.sent,job_id.is.null)";
 
 /** Pay links read today, keyed `<perth date>|<xero invoice id>`; other days are dropped. */
 const PAY_LINK_CACHE = new Map<string, string>();
@@ -225,6 +230,15 @@ export async function attachDebtDrafts(
     }
     return links;
   };
+  const cachedLinks = (item: DebtMorningItem) => {
+    const links: Record<string, string> = {};
+    for (const i of item.invoices) {
+      const url = cache.get(today + i.xero_invoice_id);
+      if (!url) return null;
+      links[i.xero_invoice_id] = url;
+    }
+    return links;
+  };
 
   for (const item of items) {
     const step = item.step as DebtDraftStep | null;
@@ -243,22 +257,24 @@ export async function attachDebtDrafts(
     let template: string | null = null;
     let payLinks: DebtDeskDraft["pay_links"] = null;
     if (step !== "firm_text") template = debtDraftText(input);
-    else if (!decided) {
-      const links = await readLinks(item);
+    else if (!decided || decided.kind === "skipped") {
+      const links = decided ? cachedLinks(item) : await readLinks(item);
       if (typeof links === "string") {
         item.draft_problem = links;
         continue;
       }
-      payLinks = item.invoices.map((i) => ({
-        xero_invoice_id: i.xero_invoice_id,
-        invoice_number: i.invoice_number,
-        url: links[i.xero_invoice_id],
-      }));
-      template = debtDraftText({ ...input, pay_links: links });
+      if (links) {
+        payLinks = item.invoices.map((i) => ({
+          xero_invoice_id: i.xero_invoice_id,
+          invoice_number: i.invoice_number,
+          url: links[i.xero_invoice_id],
+        }));
+        template = debtDraftText({ ...input, pay_links: links });
+      }
     }
 
     const status = statusOf(decided);
-    const text = decided?.text ?? template;
+    const text = decided?.text ?? template ?? state?.approval?.text ?? null;
     const used = status === "approved" || status === "sending" ||
       status === "sent";
     item.draft = {

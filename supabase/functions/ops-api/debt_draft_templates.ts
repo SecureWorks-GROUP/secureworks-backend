@@ -289,13 +289,14 @@ export interface DebtDeskDraft {
   to: "client" | "jan";
   step: DebtDraftStep;
   /**
-   * The text to show: the approved or sent text once decided, else the standard wording. Null
-   * on a skipped firm text with no text, whose pay links are not read.
+   * The text to show: the approved or sent text once decided, else the standard wording. A
+   * skipped firm text is worded from pay links already read today, else shows its earlier
+   * approved text; null when it has neither.
    */
   text: string | null;
   /**
-   * The standard wording for this draft. Null on a decided firm text: its pay links are not
-   * read again, so its standard wording is not known.
+   * The standard wording for this draft. Null on a decided firm text whose pay links are not
+   * already read today: they are not read again, so its standard wording is not known.
    */
   template_text: string | null;
   /** sending: a send claimed the draft and has not been confirmed sent. */

@@ -456,15 +456,36 @@ function fakeClient(
         filters.push((r) => v.includes(r[c]))
       );
       q.or = chain((expr: string) => {
-        const terms = expr.split(",").map((t) => {
+        const split = (text: string) => {
+          const out: string[] = [];
+          let depth = 0;
+          let cur = "";
+          for (const ch of text) {
+            if (ch === "(") depth += 1;
+            if (ch === ")") depth -= 1;
+            if (ch === "," && depth === 0) {
+              out.push(cur);
+              cur = "";
+            } else cur += ch;
+          }
+          out.push(cur);
+          return out;
+        };
+        const term = (t: string): (r: any) => boolean => {
+          const and = /^and\((.*)\)$/.exec(t);
+          if (and) {
+            const parts = split(and[1]).map(term);
+            return (r) => parts.every((f) => f(r));
+          }
           const [c, op, ...rest] = t.split(".");
           const v = rest.join(".");
           if (op === "is" && v === "null") {
-            return (r: any) => r[c] === null || r[c] === undefined;
+            return (r) => r[c] === null || r[c] === undefined;
           }
-          if (op === "eq") return (r: any) => String(r[c]) === v;
+          if (op === "eq") return (r) => String(r[c]) === v;
           throw new Error(`fake or(): unsupported term ${t}`);
-        });
+        };
+        const terms = split(expr).map(term);
         filters.push((r) => terms.some((f) => f(r)));
       });
       q.ilike = chain((c: string, v: string) =>
@@ -627,11 +648,13 @@ Deno.test("1b. desk approvals, skips, refusals and claims are not chases; a desk
   assertEquals(before.invoice.chase.count, 2);
   assertEquals(before.invoice.chase.last?.at, "2026-09-09T00:00:00.000Z");
 
-  // A desk send: the claim becomes sent, and send_chase_sms writes its own row.
+  // A desk send on its first covered invoice: the claim becomes sent (carrying the job, as
+  // send_chase_sms's row does), and send_chase_sms writes its own row.
   t.payment_chase_logs.push(
     desk({
       outcome_code: "sent",
       outcome: "sent",
+      job_id: JOB1,
       created_at: "2026-09-10T00:04:00.000Z",
     }),
     desk({
@@ -648,6 +671,24 @@ Deno.test("1b. desk approvals, skips, refusals and claims are not chases; a desk
   assertEquals(after.invoice.chase.count, 3);
   assertEquals(after.invoice.chase.last?.at, "2026-09-10T00:04:01.000Z");
   assertEquals(after.invoice.chase.last?.outcome, "SMS sent");
+
+  // A second desk text that covers this invoice after another one: send_chase_sms logs the
+  // other invoice, so this invoice's own sent row (no job) is its one chase entry.
+  t.payment_chase_logs.push(
+    desk({
+      draft_id: "2026-10-02:contact-a:text:firm_text|5000,10000",
+      outcome_code: "sent",
+      outcome: "sent",
+      job_id: null,
+      created_at: "2026-09-11T00:00:00.000Z",
+    }),
+  );
+  const second = await invoiceContext(
+    new URLSearchParams({ invoice: "inv-1419" }),
+    deps(t),
+  );
+  assertEquals(second.invoice.chase.count, 4);
+  assertEquals(second.invoice.chase.last?.at, "2026-09-11T00:00:00.000Z");
 });
 
 Deno.test("1. a linked invoice returns the complete picture with no blockers", async () => {

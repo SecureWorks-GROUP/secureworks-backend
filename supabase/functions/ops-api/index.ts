@@ -59156,7 +59156,7 @@ async function getEmailInbox(client: any, params: URLSearchParams) {
 // CLEAR DEBT — Payment Chase & Collection
 // ════════════════════════════════════════════════════════════
 
-async function listOverdueInvoices(client: any) {
+export async function listOverdueInvoices(client: any) {
   const today = new Date().toISOString().slice(0, 10)
 
   // 1. Get all overdue ACCREC invoices
