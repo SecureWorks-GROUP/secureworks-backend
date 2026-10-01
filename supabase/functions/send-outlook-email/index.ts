@@ -1832,6 +1832,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
       (serviceCredential && serviceCredential.token !== validKey &&
         (!suppliedCredential || suppliedCredential === serviceCredential.token)) ||
       (suppliedCredential && opsAgentKey && opsAgentKey !== validKey &&
+        opsAgentKey !== Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') &&
         suppliedCredential === opsAgentKey),
     )
     const isAuthed = opsAuthorized || Boolean(validKey && suppliedCredential === validKey)
