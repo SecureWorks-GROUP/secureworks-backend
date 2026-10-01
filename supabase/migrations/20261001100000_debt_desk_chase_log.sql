@@ -42,7 +42,15 @@
 --    and a signed-in session read and write nothing directly; the Clear Debt
 --    screen already goes through ops-api.
 --
--- Re-applying is a no-op.
+-- 4. The desk owner (captain D5: "shaun" owns the desk and approves every
+--    message). public.debt_desk_settings is one row naming the users who may
+--    approve and send desk messages, seeded with Shaun's users.id
+--    (shaun@secureworkswa.com.au), which is the id ops-api records as
+--    approved_by_user_id for his signed-in session. ops-api reads it when the
+--    DEBT_DESK_OWNER_USER_IDS secret is not set, and never falls back to a
+--    role: an empty list means nobody can approve. Service role only.
+--
+-- Re-applying is a no-op, and keeps a changed owner list.
 
 ALTER TABLE public.payment_chase_logs DROP CONSTRAINT IF EXISTS payment_chase_logs_method_check;
 ALTER TABLE public.payment_chase_logs ADD CONSTRAINT payment_chase_logs_method_check
@@ -117,4 +125,26 @@ COMMENT ON COLUMN public.payment_chase_logs.draft_amount IS
 ALTER TABLE public.payment_chase_logs ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS payment_chase_logs_service_role_all ON public.payment_chase_logs;
 CREATE POLICY payment_chase_logs_service_role_all ON public.payment_chase_logs
+  FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE TABLE IF NOT EXISTS public.debt_desk_settings (
+  id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  owner_user_ids uuid[] NOT NULL DEFAULT '{}',
+  note text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO public.debt_desk_settings (id, owner_user_ids, note)
+VALUES (
+  1,
+  ARRAY['9913309f-35ae-4a71-8e1f-f704ecc526ea']::uuid[],
+  'Shaun (shaun@secureworkswa.com.au): the desk owner approves every message (DECISIONS.md D5)'
+)
+ON CONFLICT (id) DO NOTHING;
+
+COMMENT ON TABLE public.debt_desk_settings IS
+  'One row: the users (users.id) who may approve and send debt desk messages. Read by ops-api when DEBT_DESK_OWNER_USER_IDS is unset. Empty means nobody.';
+
+ALTER TABLE public.debt_desk_settings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS debt_desk_settings_service_role_all ON public.debt_desk_settings;
+CREATE POLICY debt_desk_settings_service_role_all ON public.debt_desk_settings
   FOR ALL TO service_role USING (true) WITH CHECK (true);

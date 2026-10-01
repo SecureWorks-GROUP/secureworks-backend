@@ -506,6 +506,7 @@ import { createSupabaseDebtChaseLogStore, readDebtMorningList } from './debt_mor
 import {
   createSupabaseDebtDeskStore,
   debtDeskOwnerIds,
+  debtDeskState,
   debtDraftDecide,
   debtDraftSend,
   DebtDeskError,
@@ -7682,6 +7683,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
             chaseLog: createSupabaseDebtChaseLogStore(client, DEFAULT_ORG_ID),
             payLink: (id) => getXeroOnlineInvoiceUrl(client, id, { getToken, xeroGet: xeroReadGet }),
+            desk: () => debtDeskState(
+              authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null,
+              {
+                deskOwnerIds: () => debtDeskOwnerIds(createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID)),
+                sendingEnabled: debtSendingEnabled(),
+              },
+            ),
           }))
         } catch (error) {
           if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {

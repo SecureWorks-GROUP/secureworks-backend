@@ -1037,3 +1037,25 @@ Deno.test("drafts: a draft sent today leaves the list and shows under sent_today
     provider_message_id: "msg-1",
   }]);
 });
+
+Deno.test("debt_morning_list carries the desk owner state it is given, else null", async () => {
+  const { x, store } = oneClientBook();
+  const base = { ...x.deps, store, chaseLog: logStore() };
+  const without = await readDebtMorningList(
+    {},
+    {},
+    base as unknown as DebtMorningListDeps,
+  );
+  assertEquals(without.desk, null);
+  const state = {
+    owner_set: false,
+    viewer_is_owner: false,
+    sending_enabled: false,
+    note: "Desk owner not set: nobody can approve or send",
+  };
+  const withDesk = await readDebtMorningList({}, {}, {
+    ...base,
+    desk: () => Promise.resolve(state),
+  } as unknown as DebtMorningListDeps);
+  assertEquals(withDesk.desk, state);
+});

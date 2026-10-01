@@ -424,8 +424,11 @@ sending is still worth reviewing on Thursday.
   than the draft says; an older credit note with the drafted balance still
   owing does not block the text.
 - **Who approves and sends.** Only the desk owner: the user ids in the
-  ops-api secret `DEBT_DESK_OWNER_USER_IDS`, or, unset, the ops manager
-  (Shaun). Any staff user may log a call or visit outcome.
+  ops-api secret `DEBT_DESK_OWNER_USER_IDS`, or, unset, the owner list in
+  `debt_desk_settings`, seeded with Shaun's `users.id`. Never a role (five
+  live users hold `ops_manager`). With no owner, nobody can approve or send
+  and the screen shows "desk owner not set". Any staff user may log a call or
+  visit outcome.
 - **Sending switch.** One server-side switch, `DEBT_SENDING_ENABLED`, off
   unless it is exactly `true`. While it is off every send attempt is refused
   and logged as refused. It is turned on only after step 0 is done and

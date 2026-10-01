@@ -16,9 +16,21 @@ The desk owner approves every message (captain: "shaun" owns the desk), so
 `debt_draft_decide` and `debt_draft_send` also refuse anyone else with
 `403 debt_desk_owner_required`. The owners are the user ids in the ops-api
 secret `DEBT_DESK_OWNER_USER_IDS` (comma-separated) when it is set; a set but
-unusable value means nobody. Unset, the owner is the ops manager (Shaun),
-found by `users.role = 'ops_manager'` at runtime. Any staff user may log an
-outcome.
+unusable value means nobody. Unset, the owners are the `owner_user_ids` of the
+one-row `debt_desk_settings` table, seeded by this change's migration with
+Shaun's `users.id` (`9913309f-35ae-4a71-8e1f-f704ecc526ea`,
+shaun@secureworkswa.com.au). That is the id ops-api reads from his signed-in
+session (`auth.getUser`; `users.id` is the auth user id), so it is the id the
+desk stores as `approved_by_user_id` for him. There is never a role fallback:
+several users hold `ops_manager`. With no owner, `debt_draft_decide` and
+`debt_draft_send` refuse everyone with `403 debt_desk_owner_not_set` ("Desk
+owner not set"). To change the owner, set the secret or update that row with
+the service role. Any staff user may log an outcome.
+
+`debt_morning_list` carries `desk`: `{ owner_set, viewer_is_owner,
+sending_enabled, note }` for the signed-in viewer. `owner_set: false` means
+the screen should say "desk owner not set"; `owner_set: null` means the
+owner could not be read.
 
 ## Drafts on the morning list
 

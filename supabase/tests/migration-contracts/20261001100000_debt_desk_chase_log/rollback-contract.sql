@@ -10,6 +10,9 @@ BEGIN
                 AND column_name IN ('outcome_code', 'schedule_step', 'draft_id', 'covers_invoice_ids')) THEN
     RAISE EXCEPTION 'rollback contract: desk columns are still there';
   END IF;
+  IF to_regclass('public.debt_desk_settings') IS NOT NULL THEN
+    RAISE EXCEPTION 'rollback contract: debt_desk_settings is still there';
+  END IF;
   IF position('visit' IN pg_get_constraintdef(
        (SELECT oid FROM pg_constraint WHERE conname = 'payment_chase_logs_method_check'))) > 0 THEN
     RAISE EXCEPTION 'rollback contract: the method CHECK still lists visit';

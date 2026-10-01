@@ -37,6 +37,7 @@ BEGIN
   END IF;
 END $$;
 
+DROP TABLE IF EXISTS public.debt_desk_settings;
 DROP POLICY IF EXISTS payment_chase_logs_service_role_all ON public.payment_chase_logs;
 ALTER TABLE public.payment_chase_logs DISABLE ROW LEVEL SECURITY;
 

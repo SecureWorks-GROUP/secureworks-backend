@@ -15,8 +15,9 @@
 //                            the text goes only through the existing send_chase_sms path.
 //
 // The desk owner approves every message (captain: "shaun" owns the desk): the user ids in
-// DEBT_DESK_OWNER_USER_IDS when that secret is set, otherwise the ops manager (Shaun),
-// resolved by role at runtime.
+// DEBT_DESK_OWNER_USER_IDS when that secret is set, otherwise the owner list in
+// debt_desk_settings (seeded with Shaun's users.id). Never a role: several users hold
+// ops_manager. With no owner, nobody can approve or send ("desk owner not set").
 //
 // Every write is a payment_chase_logs row per covered invoice (columns from
 // 20261001100000_debt_desk_chase_log.sql). Rows carrying a draft id but no "sent" never move
@@ -86,8 +87,8 @@ export interface DebtDeskStore {
   jobGhlContacts(
     jobIds: string[],
   ): Promise<Array<{ id: string; ghl_contact_id: string | null }>>;
-  /** The ops manager's user id (users.role = 'ops_manager', oldest first), or null. */
-  opsManagerUserId(): Promise<string | null>;
+  /** The owner list in debt_desk_settings (users.id values); empty when none is set. */
+  deskOwnerSetting(): Promise<string[]>;
 }
 
 export interface DebtDeskDeps {
@@ -114,10 +115,11 @@ export function debtSendingEnabled(
 
 /**
  * The desk owners. When DEBT_DESK_OWNER_USER_IDS is set, exactly its valid user ids (an
- * unusable value means nobody, never everybody); otherwise the ops manager (Shaun).
+ * unusable value means nobody, never everybody); otherwise the debt_desk_settings owner
+ * list. Never a role. Empty means nobody can approve or send.
  */
 export async function debtDeskOwnerIds(
-  store: Pick<DebtDeskStore, "opsManagerUserId">,
+  store: Pick<DebtDeskStore, "deskOwnerSetting">,
   get: (name: string) => string | undefined = (name) => Deno.env.get(name),
 ): Promise<string[]> {
   const setting = get(DEBT_DESK_OWNERS_SETTING)?.trim();
@@ -126,8 +128,8 @@ export async function debtDeskOwnerIds(
       id,
     ) => UUID.test(id));
   }
-  const opsManager = await store.opsManagerUserId();
-  return opsManager ? [opsManager.toLowerCase()] : [];
+  return (await store.deskOwnerSetting()).map((id) => String(id).toLowerCase())
+    .filter((id) => UUID.test(id));
 }
 
 // ── Helpers ──
@@ -156,8 +158,49 @@ function requireActor(actor: DebtDeskActor | null | undefined): DebtDeskActor {
   return { user_id: actor.user_id.toLowerCase(), email: actor.email ?? null };
 }
 
+/**
+ * The desk as the signed-in viewer sees it, for the morning list: whether an owner is named,
+ * whether this viewer is it, and whether sending is on. An unreadable owner setting reads as
+ * "not known" (owner_set null) and never as the viewer being the owner.
+ */
+export async function debtDeskState(
+  actor: DebtDeskActor | null | undefined,
+  deps: Pick<DebtDeskDeps, "deskOwnerIds" | "sendingEnabled">,
+) {
+  let owners: string[] | null = null;
+  try {
+    owners = await deps.deskOwnerIds();
+  } catch (error) {
+    console.error(
+      "[debt_desk] desk owner unreadable",
+      (error as Error)?.message ?? error,
+    );
+  }
+  const viewer = typeof actor?.user_id === "string"
+    ? actor.user_id.toLowerCase()
+    : null;
+  return {
+    owner_set: owners === null ? null : owners.length > 0,
+    viewer_is_owner: !!viewer && !!owners?.includes(viewer),
+    sending_enabled: deps.sendingEnabled,
+    note: owners === null
+      ? "The desk owner could not be read"
+      : owners.length
+      ? null
+      : "Desk owner not set: nobody can approve or send",
+  };
+}
+
 async function requireDeskOwner(actor: DebtDeskActor, deps: DebtDeskDeps) {
-  if (!(await deps.deskOwnerIds()).includes(actor.user_id)) {
+  const owners = await deps.deskOwnerIds();
+  if (!owners.length) {
+    throw new DebtDeskError(
+      "Desk owner not set: nobody can approve or send until the desk owner is named (DEBT_DESK_OWNER_USER_IDS or debt_desk_settings)",
+      403,
+      "debt_desk_owner_not_set",
+    );
+  }
+  if (!owners.includes(actor.user_id)) {
     throw new DebtDeskError(
       "Only the desk owner (Shaun) approves and sends debt messages",
       403,
@@ -968,12 +1011,14 @@ export function createSupabaseDebtDeskStore(
       }
       return out;
     },
-    async opsManagerUserId() {
-      const { data, error } = await client.from("users").select("id")
-        .eq("role", "ops_manager").order("created_at", { ascending: true })
-        .limit(1);
+    async deskOwnerSetting() {
+      // An unreadable setting stops the action: it never reads as "nobody" or "anybody".
+      const { data, error } = await client.from("debt_desk_settings")
+        .select("owner_user_ids").eq("id", 1).maybeSingle();
       if (error) readFailed("the desk owner", error);
-      return data?.[0]?.id ? String(data[0].id) : null;
+      return Array.isArray(data?.owner_user_ids)
+        ? data.owner_user_ids.map((id: unknown) => String(id))
+        : [];
     },
   };
 }

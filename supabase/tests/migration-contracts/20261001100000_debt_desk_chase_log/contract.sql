@@ -234,3 +234,59 @@ BEGIN
 END $$;
 
 ROLLBACK;
+
+-- 10. The desk owner: one row seeded with Shaun's users.id, service role only,
+--     and a re-apply keeps an owner list someone has since changed.
+DO $$
+BEGIN
+  IF (SELECT owner_user_ids FROM public.debt_desk_settings WHERE id = 1)
+     IS DISTINCT FROM ARRAY['9913309f-35ae-4a71-8e1f-f704ecc526ea']::uuid[] THEN
+    RAISE EXCEPTION 'contract: the desk owner is not seeded with Shaun''s users.id';
+  END IF;
+  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.debt_desk_settings'::regclass) THEN
+    RAISE EXCEPTION 'debt_desk_settings requires row-level security';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_policies
+              WHERE schemaname = 'public' AND tablename = 'debt_desk_settings'
+                AND NOT (roles = ARRAY['service_role']::name[])) THEN
+    RAISE EXCEPTION 'contract: a desk-settings policy reaches a role other than service_role';
+  END IF;
+  BEGIN
+    INSERT INTO public.debt_desk_settings (id) VALUES (2);
+    RAISE EXCEPTION 'contract: a second desk-settings row was accepted';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+END $$;
+
+BEGIN;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.debt_desk_settings TO anon, authenticated, service_role;
+SET LOCAL ROLE service_role;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM public.debt_desk_settings) <> 1 THEN
+    RAISE EXCEPTION 'contract: service_role cannot read the desk owner';
+  END IF;
+END $$;
+RESET ROLE;
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM public.debt_desk_settings) <> 0 THEN
+    RAISE EXCEPTION 'contract: a signed-in session can read the desk owner';
+  END IF;
+  UPDATE public.debt_desk_settings SET owner_user_ids = '{}' WHERE true;
+  IF FOUND THEN
+    RAISE EXCEPTION 'contract: a signed-in session can change the desk owner';
+  END IF;
+END $$;
+RESET ROLE;
+UPDATE public.debt_desk_settings SET owner_user_ids = '{}' WHERE id = 1;
+\ir ../../../migrations/20261001100000_debt_desk_chase_log.sql
+DO $$
+BEGIN
+  IF (SELECT owner_user_ids FROM public.debt_desk_settings WHERE id = 1) <> '{}'::uuid[] THEN
+    RAISE EXCEPTION 'contract: a re-apply overwrote a changed desk owner';
+  END IF;
+END $$;
+ROLLBACK;

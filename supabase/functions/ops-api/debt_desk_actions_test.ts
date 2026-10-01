@@ -11,6 +11,7 @@ import {
   type DebtDeskDeps,
   DebtDeskError,
   debtDeskOwnerIds,
+  debtDeskState,
   type DebtDeskStore,
   debtDraftDecide,
   debtDraftSend,
@@ -109,7 +110,7 @@ function memoryStore(seed: Record<string, unknown>[] = []) {
       Promise.resolve(
         ids.map((id) => ({ id, ghl_contact_id: "ghl-contact-1" })),
       ),
-    opsManagerUserId: () => Promise.resolve(SHAUN.user_id),
+    deskOwnerSetting: () => Promise.resolve([SHAUN.user_id]),
   };
   return store;
 }
@@ -1033,10 +1034,11 @@ Deno.test("desk owner: only the owner approves, skips and sends; any staff user 
   assertEquals(store.rows.at(-1)?.chased_by, OTHER_STAFF.email);
 });
 
-Deno.test("desk owner: the configured ids, else the ops manager; an unusable setting means nobody", async () => {
+Deno.test("desk owner: the secret, else the desk setting, never a role; an unusable value means nobody", async () => {
   const store = memoryStore();
   const env = (v: string | undefined) => (name: string) =>
     name === DEBT_DESK_OWNERS_SETTING ? v : undefined;
+  // Unset secret: the seeded desk setting (Shaun's users.id).
   assertEquals(await debtDeskOwnerIds(store, env(undefined)), [SHAUN.user_id]);
   assertEquals(await debtDeskOwnerIds(store, env("  ")), [SHAUN.user_id]);
   assertEquals(
@@ -1047,8 +1049,61 @@ Deno.test("desk owner: the configured ids, else the ops manager; an unusable set
     [OTHER_STAFF.user_id, SHAUN.user_id],
   );
   assertEquals(await debtDeskOwnerIds(store, env("shaun")), []);
-  store.opsManagerUserId = () => Promise.resolve(null);
+  // An empty or unusable setting is nobody; there is no role to fall back to.
+  store.deskOwnerSetting = () => Promise.resolve([]);
   assertEquals(await debtDeskOwnerIds(store, env(undefined)), []);
+  store.deskOwnerSetting = () => Promise.resolve(["not-a-uuid"]);
+  assertEquals(await debtDeskOwnerIds(store, env(undefined)), []);
+});
+
+Deno.test("desk owner not set: nobody can approve or send, and nothing is written", async () => {
+  const store = memoryStore();
+  const x = deps(store, {
+    sendingEnabled: true,
+    deskOwnerIds: () => Promise.resolve([]),
+  });
+  for (
+    const call of [
+      () =>
+        debtDraftDecide(
+          {
+            draft_id: DRAFT,
+            decision: "approve",
+            text: "Hi Sam. Thanks, SecureWorks",
+            xero_invoice_ids: [A, B],
+          },
+          SHAUN,
+          x.d,
+        ),
+      () => debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d),
+    ]
+  ) {
+    const error = await assertRejects(call, DebtDeskError);
+    assertEquals([error.status, error.code], [403, "debt_desk_owner_not_set"]);
+    assert(error.message.startsWith("Desk owner not set"));
+  }
+  assertEquals(store.rows, []);
+  assertEquals(x.reads, []);
+  assertEquals(x.sends, []);
+});
+
+Deno.test("store: the desk owner comes from the one debt_desk_settings row, and an unreadable setting stops the action", async () => {
+  const ok = fakeSupabase((table) =>
+    table === "debt_desk_settings"
+      ? { data: { owner_user_ids: [SHAUN.user_id] }, error: null }
+      : { data: null, error: null }
+  );
+  assertEquals(
+    await createSupabaseDebtDeskStore(ok.client, ORG).deskOwnerSetting(),
+    [SHAUN.user_id],
+  );
+  assertEquals(ok.log[0].table, "debt_desk_settings");
+  assertEquals(ok.log[0].calls.find(([m]) => m === "eq"), ["eq", ["id", 1]]);
+  const none = fakeSupabase(() => ({ data: null, error: null }));
+  assertEquals(
+    await createSupabaseDebtDeskStore(none.client, ORG).deskOwnerSetting(),
+    [],
+  );
 });
 
 Deno.test("send: refuses without a signed-in user and caps a batch at 20", async () => {
@@ -1115,6 +1170,7 @@ function fakeSupabase(
           "limit",
           "insert",
           "update",
+          "maybeSingle",
         ]
       ) {
         q[m] = (...args: unknown[]) => {
@@ -1168,7 +1224,7 @@ Deno.test("store: inserts are one org-scoped batch and a PostgREST error is a re
       "draftRows",
       "invoiceJobLinks",
       "jobGhlContacts",
-      "opsManagerUserId",
+      "deskOwnerSetting",
       "chaseLogRows",
     ] as const
   ) {
@@ -1240,4 +1296,46 @@ Deno.test("store: a claim is refused by the unique index, never by a silent succ
     DebtDeskError,
   );
   assertEquals(e2.code, "debt_desk_write_failed");
+});
+
+Deno.test("desk state: the morning list says whether an owner is set and whether the viewer is it", async () => {
+  const owners = (ids: string[] | Error) => () =>
+    ids instanceof Error ? Promise.reject(ids) : Promise.resolve(ids);
+  assertEquals(
+    await debtDeskState(SHAUN, {
+      deskOwnerIds: owners([SHAUN.user_id]),
+      sendingEnabled: false,
+    }),
+    {
+      owner_set: true,
+      viewer_is_owner: true,
+      sending_enabled: false,
+      note: null,
+    },
+  );
+  assertEquals(
+    (await debtDeskState(OTHER_STAFF, {
+      deskOwnerIds: owners([SHAUN.user_id]),
+      sendingEnabled: false,
+    }))
+      .viewer_is_owner,
+    false,
+  );
+  assertEquals(
+    await debtDeskState(SHAUN, {
+      deskOwnerIds: owners([]),
+      sendingEnabled: false,
+    }),
+    {
+      owner_set: false,
+      viewer_is_owner: false,
+      sending_enabled: false,
+      note: "Desk owner not set: nobody can approve or send",
+    },
+  );
+  const unread = await debtDeskState(SHAUN, {
+    deskOwnerIds: owners(new Error("read failed")),
+    sendingEnabled: false,
+  });
+  assertEquals([unread.owner_set, unread.viewer_is_owner], [null, false]);
 });

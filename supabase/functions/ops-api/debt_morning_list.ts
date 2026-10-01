@@ -55,6 +55,8 @@ export type DebtMorningListDeps = DebtBookDeps & {
   payLinkLimit?: number;
   /** Pay links already read today (default: the module's day cache, debt_desk_drafts.ts). */
   payLinkCache?: Map<string, string>;
+  /** The desk owner and sending state for the signed-in viewer (debtDeskState). */
+  desk?: () => Promise<Record<string, unknown>>;
 };
 
 function chunks<T>(xs: T[], size = IN_CHUNK): T[][] {
@@ -234,6 +236,9 @@ export async function readDebtMorningList(
       rows_read: rows.length,
       desk_rows: events.length,
     },
+    // Whether a desk owner is named and whether this viewer is it: with none, the screen
+    // shows "desk owner not set" and nobody can approve or send.
+    desk: deps.desk ? await deps.desk() : null,
     sent_today: debtSentOn(rows, book.perth_date, (ids) => {
       const invs = ids.map((id) => bookById.get(id)).filter((i) => !!i);
       return {
