@@ -21,7 +21,8 @@
 //
 // Every write is a payment_chase_logs row per covered invoice (columns from
 // 20261001100000_debt_desk_chase_log.sql). Rows carrying a draft id but no "sent" never move
-// the chase ladder (debtChaseEventFromLogRow). No action here writes to Xero, GHL or a job.
+// the chase ladder (debtChaseEventFromLogRow). Apart from the text debt_draft_send hands to
+// send_chase_sms, no action here writes to Xero, GHL or a job.
 
 import {
   DEBT_CHASE_OUTCOMES,
