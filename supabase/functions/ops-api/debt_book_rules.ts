@@ -12,7 +12,9 @@
 //      corrections (DEBT_BOOK_CORRECTIONS) override a wrong label;
 //   5. a client final on an unfinished job is "check first", never dropped;
 //   6. overdue means the Perth date is after the due date; no due date is its own bucket;
-//   7. holds keep an invoice in the figure but give it no chase draft.
+//   7. holds keep an invoice in the figure but give it no chase draft (check first: the named
+//      doubts and desk classes in_dispute, not_owed, blocked_by_us and bad_debt; fix first:
+//      rectification).
 
 export type DebtBookPayerKey =
   | "client"
@@ -292,11 +294,15 @@ export const DEBT_BOOK_FINISHED_JOB_STATUSES = [
   "archived",
   "rectification",
 ] as const;
-/** Clear Debt desk classes that put a debt invoice on "check first". */
+/**
+ * Clear Debt desk classes that put a debt invoice on "check first". bad_debt is held too:
+ * a write-off is only Shaun's, in Xero (Q15), so nothing chases it until he has checked it.
+ */
 export const DEBT_BOOK_HOLD_DESK_CLASSES = [
   "in_dispute",
   "not_owed",
   "blocked_by_us",
+  "bad_debt",
 ] as const;
 
 export interface DebtBookInvoice {
@@ -322,7 +328,10 @@ export interface DebtBookJobContext {
   job_id?: string | null;
   job_number: string | null;
   job_status: string | null;
-  /** true when the job has a PAID invoice or jobs.deposit_at; null when not known. */
+  /**
+   * true when the job has had any money: jobs.deposit_at, a PAID sales invoice, or an
+   * amount paid on this or any other sales invoice of the job; null when not known.
+   */
   first_payment: boolean | null;
   link_source: "copy_job_id" | "reference_job_number" | null;
   /** The Clear Debt desk class on our copy of the invoice (xero_invoices.debt_classification). */
@@ -769,8 +778,8 @@ const num = (
   v: unknown,
 ) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
-// deno-lint-ignore no-explicit-any
 export function normaliseXeroInvoice(
+  // deno-lint-ignore no-explicit-any
   raw: Record<string, any>,
 ): DebtBookInvoice & { line_count: number } {
   const lines: unknown[] = Array.isArray(raw.LineItems) ? raw.LineItems : [];

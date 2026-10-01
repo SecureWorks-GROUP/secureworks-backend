@@ -216,11 +216,14 @@ jobs:
       # Debt book (docs/debt-book/PLAN.md step 1): the captain's debt rules on the
       # 29 Sep acceptance book (97 invoices / $89,049.43, 68 overdue / $57,903.22),
       # and the read-only debt_book action over injected Xero pages and copy reads.
-      - name: Test the debt book rules and read
+      # Morning list (step 2): the chase schedules as data and today's step per payer.
+      - name: Test the debt book rules and read, and the morning list
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ops-api/debt_book_rules_test.ts \
-            supabase/functions/ops-api/debt_book_test.ts
+            supabase/functions/ops-api/debt_book_test.ts \
+            supabase/functions/ops-api/debt_chase_schedule_test.ts \
+            supabase/functions/ops-api/debt_morning_list_test.ts
 
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path

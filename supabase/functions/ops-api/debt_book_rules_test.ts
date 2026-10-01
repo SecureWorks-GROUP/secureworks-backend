@@ -778,13 +778,17 @@ Deno.test('no due date is its own bucket: never "not due", never 90+, never over
 
 // ── Rule 7: holds ──
 
-Deno.test("holds: desk classes in_dispute / not_owed / blocked_by_us are check first; rectification is fix first", () => {
-  for (const desk of ["in_dispute", "not_owed", "blocked_by_us"]) {
+Deno.test("holds: desk classes in_dispute / not_owed / blocked_by_us / bad_debt are check first; rectification is fix first", () => {
+  for (const desk of ["in_dispute", "not_owed", "blocked_by_us", "bad_debt"]) {
     const c = classify({}, { desk_class: desk });
     assertEquals(c.counts_as_debt, true, desk);
     assertEquals(c.hold?.kind, "check_first");
   }
   assertEquals(classify({}, { desk_class: "genuine_debt" }).hold, null);
+  assertEquals(
+    classify({}, { desk_class: "bad_debt" }).hold?.reasons[0].reason,
+    "the Clear Debt desk marks it bad debt",
+  );
   const rect = classify({}, {
     job_status: "rectification",
     desk_class: "blocked_by_us",
