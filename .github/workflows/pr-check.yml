@@ -412,6 +412,16 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/xero-sync/xero_transport_test.ts
 
+      # Legacy service-role key retirement, runbook Step 4
+      # (docs/evidence/legacy-service-role-key-removal-2026-09-30.md): the one
+      # service-credential check and the functions that use it.
+      - name: Test service credential verification
+        run: |
+          deno test --no-check --allow-read --allow-env --allow-net=127.0.0.1 \
+            supabase/functions/_shared/service_credential_test.ts \
+            supabase/functions/ops-api/service_credential_handler_test.ts \
+            supabase/functions/ops-api/makesafe_cost_report_test.ts
+
   # Execute migration behaviour against PostgreSQL, not a text parser. The
   # repository's historical migrations include Supabase-only schemas and live
   # baseline drift, so the contract registry supplies the narrow prerequisites

@@ -49,19 +49,33 @@ export function reportingApiActionNeedsStaffRole(action: string): boolean {
   return REPORTING_API_STAFF_ACTIONS.has(action);
 }
 
+// `serviceKey` is the service credential this request presented and that
+// verifyServiceCredential (../_shared/service_credential.ts) accepted, never the
+// raw env value. A new secret key arrives in the `apikey` header.
 export function reportingApiServerSecretPresented(input: {
   xApiKey: string | null;
   bearerToken: string | null;
+  apiKeyHeader?: string | null;
   sharedKey?: string | null;
   serviceKey?: string | null;
   agentServerKey?: string | null;
 }): boolean {
-  const { xApiKey, bearerToken, sharedKey, serviceKey, agentServerKey } = input;
+  const {
+    xApiKey,
+    bearerToken,
+    apiKeyHeader,
+    sharedKey,
+    serviceKey,
+    agentServerKey,
+  } = input;
   const matches = (secret?: string | null) =>
     !!secret &&
     secret !== sharedKey &&
     (xApiKey === secret || bearerToken === secret);
   if (matches(serviceKey)) return true;
+  if (!!serviceKey && serviceKey !== sharedKey && apiKeyHeader === serviceKey) {
+    return true;
+  }
   if (matches(agentServerKey) && agentServerKey !== serviceKey) return true;
   return false;
 }
@@ -97,6 +111,7 @@ export async function decideReportingStaffAuth(input: {
   action: string;
   xApiKey: string | null;
   bearerToken: string | null;
+  apiKeyHeader?: string | null;
   sharedKey?: string | null;
   serviceKey?: string | null;
   agentServerKey?: string | null;
@@ -108,6 +123,7 @@ export async function decideReportingStaffAuth(input: {
   const serverSecretPresented = reportingApiServerSecretPresented({
     xApiKey: input.xApiKey,
     bearerToken: input.bearerToken,
+    apiKeyHeader: input.apiKeyHeader,
     sharedKey: input.sharedKey,
     serviceKey: input.serviceKey,
     agentServerKey: input.agentServerKey,

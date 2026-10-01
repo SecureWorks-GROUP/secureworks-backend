@@ -4,6 +4,7 @@ import { assert, assertEquals, assertStringIncludes } from "https://deno.land/st
 import {
   assembleCostReport,
   buildCostReportLink,
+  costReportSecret,
   costReportToken,
   costReportUrl,
   renderCostReportError,
@@ -155,4 +156,32 @@ Deno.test("error page renders branded and escapes", () => {
   const html = renderCostReportError("This link is invalid or has expired.");
   assertStringIncludes(html, "This link is invalid or has expired.");
   assertStringIncludes(html, "SecureWorks Group");
+});
+
+// Legacy service-role key retirement (runbook Step 4 C): the link secret never
+// falls back to the service-role key, and with no secret configured the link is
+// refused rather than signed with a constant published in this repository.
+Deno.test("token secret: never the service-role key; unset fails closed", async () => {
+  const names = ["MAKESAFE_REPORT_SECRET", "SW_API_KEY", "SUPABASE_SERVICE_ROLE_KEY"];
+  const saved = new Map(names.map((n) => [n, Deno.env.get(n)]));
+  try {
+    Deno.env.delete("MAKESAFE_REPORT_SECRET");
+    Deno.env.delete("SW_API_KEY");
+    Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "legacy-service-role-fixture");
+    assertEquals(costReportSecret(), "");
+    const forged = await costReportToken(JOB, "makesafe-cost-report-dev-secret");
+    assertEquals(await verifyCostReportToken(JOB, forged), false);
+    const viaServiceKey = await costReportToken(JOB, "legacy-service-role-fixture");
+    assertEquals(await verifyCostReportToken(JOB, viaServiceKey), false);
+
+    Deno.env.set("SW_API_KEY", "shared-fixture");
+    assertEquals(costReportSecret(), "shared-fixture");
+    Deno.env.set("MAKESAFE_REPORT_SECRET", "dedicated-fixture");
+    assertEquals(costReportSecret(), "dedicated-fixture");
+  } finally {
+    for (const [n, v] of saved) {
+      if (v === undefined) Deno.env.delete(n);
+      else Deno.env.set(n, v);
+    }
+  }
 });

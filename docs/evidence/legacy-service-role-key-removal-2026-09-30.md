@@ -12,7 +12,7 @@ handed it out, is applied (`20260930023008`). This document covers the rest:
 | ---- | ---- | ----- |
 | 2 | Cron jobs read the key from Vault instead of carrying it | Migration ready, not applied |
 | 3 | Take the key out of the repository and stop it coming back | Done in the same branch |
-| 4 | Move to the new keys, switch the old ones off, revoke the old JWT secret | Runbook below; needs dashboard work and code |
+| 4 | Move to the new keys, switch the old ones off, revoke the old JWT secret | Caller checks (C, in part) done in code, see "Done in code" below; the rest needs dashboard work and code |
 
 Only Step 4 makes the leaked key useless. Steps 2 and 3 shrink where it lives
 so that Step 4 is one clean change instead of a hunt.
@@ -139,6 +139,49 @@ check; the Captain does not need to act until step H.
 Each change is dual-accepting: it adds the new key and keeps the old path until
 step G, so each one can ship and be checked alone.
 
+**Done in code (branch `fm/sec-key-rotate-4`).**
+
+**Not observed yet, and a merge precondition.** Everything below rests on what
+`GET /auth/v1/settings` returns when a key is sent as `apikey`: 2xx for a live
+legacy key, and a 4xx other than 408/429 once legacy keys are switched off.
+Nobody has measured that against production for a live legacy key, for the
+Vault cron key (`_sw_service_key()`), for the injected
+`SUPABASE_SERVICE_ROLE_KEY`, or for a switched-off key. This change must not
+merge until firstmate has measured, read-only from inside the database, what
+that endpoint returns for the Vault cron key and for the injected key. If the
+cron key does not come back 2xx, `monitor-ses-makesafes` refuses its own cron
+once this deploys. The switched-off-key answer can only be observed after K.
+
+- The fourteen exact-match caller checks listed under C now go through one
+  module, `supabase/functions/_shared/service_credential.ts`. It accepts a new
+  `sb_secret_` key from `SUPABASE_SECRET_KEYS` in `apikey`, `x-api-key` or
+  `Authorization: Bearer`, and accepts the legacy key only while the project's
+  own API gateway answers 2xx for it (it asks `GET /auth/v1/settings` with the
+  key as `apikey`, cached five minutes per isolate). If the measurement above
+  holds, what production accepts while the legacy keys are on is unchanged, and
+  step K on its own stops these fourteen functions accepting the legacy key,
+  whatever `SUPABASE_SERVICE_ROLE_KEY` still holds. If the gateway cannot
+  answer (network error, timeout, 5xx, 408, 429), the exact injected key keeps
+  working (its own database calls fail in that outage anyway) and a
+  role-claim-only token is refused.
+- `monitor-ses-makesafes` (still deployed with verify-JWT on) no longer
+  trusts a `role` claim alone; a claim counts only once the gateway answers
+  2xx for that exact token (see the precondition above). No function's verify-JWT setting changes here.
+- `makesafe_cost_report.ts` signs links with `MAKESAFE_REPORT_SECRET`, else
+  `SW_API_KEY`, never the service key; with neither set no link is minted or
+  accepted. Production sets `SW_API_KEY`, so existing links keep working.
+- The Railway fallback was already removed in #901
+  (`ops-api/secureworks_agent_bearer.ts`).
+- `daily-digest`'s undeclared `SERVICE_ROLE_KEY` (E) is gone. It sat in the
+  day-3 / day-7 house-plans client reminders and threw before any send, so none
+  has ever gone out. They stay off; switching them on is a separate decision.
+
+Not yet done: the admin client key in all 22 functions (below), D, E, F, H, I
+and M. `ghl-message-reconcile` and `ghl-history-load` (newer than this runbook)
+still accept the exact key or a role claim behind the platform's verify-JWT
+check; they need the same treatment as D before their cron caller moves to a
+secret key.
+
 **C. Edge functions accept the new secret key.**
 Read the admin key from `JSON.parse(Deno.env.get('SUPABASE_SECRET_KEYS'))[...]`
 instead of `SUPABASE_SERVICE_ROLE_KEY`, and let each server-caller check also
@@ -160,7 +203,7 @@ accept the `apikey` header when it equals a named secret key. Places:
 - `ops-api/makesafe_cost_report.ts:45` uses the service key as a fallback
   signing secret for cost-report links. Set `MAKESAFE_REPORT_SECRET` (or rely on
   `SW_API_KEY`) first, or every issued link breaks when the key changes.
-- `ops-api/index.ts:~47870` sends the service key to the external Railway agent
+- (Already removed in #901.) `ops-api/index.ts:~47870` sent the service key to the external Railway agent
   when `AGENT_BEARER_TOKEN` and `SW_API_KEY` are unset. Set one of those first.
 - Tests that pin the old variable: `ops-api/manual_dispatch_test.ts`,
   `makesafe_intake_recapture_test.ts`, `monitor_ses_makesafes_test.ts`,
@@ -176,10 +219,11 @@ what `deploy-edge-functions.yml` reads): `google-ads-ingest`, `monitor-inbox`,
 `xero-sync`. `xero-sync` and `transcribe-call` have no check of their own at
 all today, so each needs one before the flag goes off.
 
-**Trap:** `monitor-ses-makesafes/index.ts:98-133` accepts any token whose
-`role` claim reads `service_role` without checking its signature, trusting the
-platform check to have done so. Remove that path in the same change, before the
-flag goes off, or anyone can forge a token and pass.
+**Trap:** `monitor-ses-makesafes` used to accept any token whose `role` claim
+reads `service_role` without checking its signature, trusting the platform
+check to have done so. Since "Done in code" above, a claim counts only once the
+gateway answers 2xx for that exact token, so that path no longer depends on the
+flag; the precondition there still applies.
 
 Check: a call with no credentials gets 401 from each of the seven; a call with
 the new key in `apikey` succeeds.
@@ -192,8 +236,8 @@ ops-api, completion-pack), `ghl-proxy` (→ xero-sync), `ghl-webhook` (→ ops-a
 `ops-ai` (→ ops-api, reporting-api, ghl-proxy, send-quote), `ops-api` (→
 ghl-proxy, send-quote, reporting-api, transcribe-call, xero-sync),
 `receive-po-email` (→ ops-api), `send-outlook-email` (→ ghl-proxy), `send-quote`
-(→ ghl-proxy, ops-api), `xero-sync` (→ ops-api). Fix on the way:
-`daily-digest/index.ts:1605,1623` use an undeclared `SERVICE_ROLE_KEY` today.
+(→ ghl-proxy, ops-api), `xero-sync` (→ ops-api). The undeclared
+`SERVICE_ROLE_KEY` in `daily-digest` is already gone (see "Done in code").
 
 Check: the daily digest, CEO brief and a quote send run clean in the function
 logs.
@@ -290,7 +334,7 @@ rollback file, which would otherwise paste whatever Vault holds into cron.
 | D without removing the `monitor-ses-makesafes` role shortcut | Anyone can forge a token and run that function |
 | K (deactivate) before C-H | All 22 edge functions lose database access, every cron job fails, Ops/Trade/fencing apps stop, operator scripts fail |
 | L (revoke) before K | Supabase refuses; the legacy keys must be off first |
-| L without I | Functions that compare tokens as plain strings may still accept the leaked key |
+| L without I | If the not-yet-observed gateway answer holds, the fourteen caller checks already refuse the legacy key once the gateway does; D's functions still need their own change; any read of `SUPABASE_SERVICE_ROLE_KEY` left elsewhere (admin clients, outbound calls) still breaks |
 | Revoke without waiting after a rotation | Signed-in users are signed out |
 | Changing the key before re-homing `makesafe_cost_report.ts`'s secret | Existing cost-report links stop working |
 

@@ -15,6 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { logQueryErrors } from '../_shared/pgrest.ts'
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -1319,9 +1320,12 @@ export async function _dailyDigestRequestHandlerForTest(req: Request): Promise<R
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
   let isAuthed = false
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey || (agentServerKey && xApiKey === agentServerKey))) {
+  // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
+  if (await verifyServiceCredential(req.headers)) {
     isAuthed = true
-  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey || (agentServerKey && bearerToken === agentServerKey))) {
+  } else if (xApiKey && (xApiKey === validKey || (agentServerKey && xApiKey === agentServerKey))) {
+    isAuthed = true
+  } else if (bearerToken && (bearerToken === validKey || (agentServerKey && bearerToken === agentServerKey))) {
     isAuthed = true
   } else if (bearerToken) {
     try {
@@ -1554,8 +1558,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
           const daysSinceCreation = Math.floor((Date.now() - new Date(cs.created_at).getTime()) / 86400000)
           const jobNum = cs.jobs?.job_number || ''
           const clientName = cs.jobs?.client_name || 'Client'
-          const firstName = clientName.split(' ')[0]
-          const address = cs.jobs?.site_address || ''
 
           if (daysSinceCreation >= 14) {
             // Day 14+: Red annotation for operations
@@ -1577,48 +1579,14 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
               }).catch(() => {})
               plansFollowups++
             }
-          } else if (daysSinceCreation >= 7) {
-            // Day 7: Email reminder with upload link
-            const { count: sent7 } = await sb.from('email_events')
-              .select('id', { count: 'exact', head: true })
-              .eq('job_id', cs.job_id).eq('comms_trigger', 'plans_reminder_day7')
-            if ((sent7 || 0) === 0 && cs.jobs?.client_email) {
-              // Find share_token for upload link
-              const { data: doc } = await sb.from('job_documents').select('share_token').eq('job_id', cs.job_id).eq('type', 'quote').limit(1).maybeSingle()
-              const uploadUrl = doc?.share_token
-                ? `${SUPABASE_URL}/functions/v1/send-quote/upload-plans?token=${doc.share_token}&job=${cs.job_id}`
-                : 'plans@secureworkswa.com.au'
-
-              await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_client_update`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_ROLE_KEY}` },
-                body: JSON.stringify({
-                  job_id: cs.job_id,
-                  comms_trigger: 'plans_reminder_day7',
-                  channel: 'email',
-                  custom_message: `Hi ${firstName}, just a reminder — we still need your house plans to start the engineering and council approval for your patio at ${address}. Upload here: ${uploadUrl} or email them to plans@secureworkswa.com.au`,
-                }),
-              }).catch(() => {})
-              plansFollowups++
-            }
           } else if (daysSinceCreation >= 3) {
-            // Day 3: SMS reminder
-            const { count: sent3 } = await sb.from('email_events')
-              .select('id', { count: 'exact', head: true })
-              .eq('job_id', cs.job_id).eq('comms_trigger', 'plans_reminder_day3')
-            if ((sent3 || 0) === 0) {
-              await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_client_update`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_ROLE_KEY}` },
-                body: JSON.stringify({
-                  job_id: cs.job_id,
-                  comms_trigger: 'plans_reminder_day3',
-                  channel: 'sms',
-                  custom_message: `Hi ${firstName}, just a quick reminder — we need your house plans to get started on engineering for your patio at ${address}. You can email them to plans@secureworkswa.com.au. Happy to help if you're not sure where to find them!`,
-                }),
-              }).catch(() => {})
-              plansFollowups++
-            }
+            // Day 3 / day 7 client reminders (SMS, then email with an upload
+            // link) are NOT sent. They were written against an undeclared
+            // SERVICE_ROLE_KEY, which threw before any send, so no house-plans
+            // reminder has ever reached a client. Removing that name (legacy
+            // service-role key retirement, runbook Step 4) must not quietly
+            // switch customer messages on; doing so is a separate decision.
+            console.log(`[stale_followup] house-plans reminder not sent for ${jobNum}: client reminders are off`)
           }
         }
       } catch (e) {

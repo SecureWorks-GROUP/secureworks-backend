@@ -1006,3 +1006,91 @@ Deno.test("sales performance actions retain the staff front door and no routine/
     assertEquals(LEAD_INSTALLER_READ_ACTIONS.has(action), false);
   }
 });
+
+Deno.test("a verified service credential in the apikey header is the server caller", () => {
+  const secret = "sb_secret_fx_verified";
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: secret,
+      validKey: "browser-shared-key",
+      serviceKey: secret,
+    }),
+    "api_key",
+  );
+  assertEquals(
+    _opsApiServerSecretPresented({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: secret,
+      sharedKey: "browser-shared-key",
+      serviceKey: secret,
+    }),
+    true,
+  );
+  // A browser's public apikey with no verified service credential is not.
+  assertEquals(
+    _opsApiServerSecretPresented({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: "sb_publishable_fixture",
+      sharedKey: "browser-shared-key",
+      serviceKey: null,
+    }),
+    false,
+  );
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: "sb_publishable_fixture",
+      validKey: "browser-shared-key",
+      serviceKey: null,
+    }),
+    "none",
+  );
+});
+
+Deno.test("an agent key equal to the env service-role key is refused once the platform stops vouching for it", () => {
+  const envServiceKey = "legacy-service-role-fixture";
+  for (const header of ["x-api-key", "authorization"] as const) {
+    const xApiKey = header === "x-api-key" ? envServiceKey : null;
+    const bearerToken = header === "authorization" ? envServiceKey : null;
+    assertEquals(
+      _resolveOpsApiAuthIntent({
+        xApiKey,
+        bearerToken,
+        validKey: "browser-shared-key",
+        serviceKey: null,
+        serviceKeyEnv: envServiceKey,
+        agentServerKey: envServiceKey,
+      }),
+      header === "authorization" ? "jwt" : "none",
+      header,
+    );
+    assertEquals(
+      _opsApiServerSecretPresented({
+        xApiKey,
+        bearerToken,
+        sharedKey: "browser-shared-key",
+        serviceKey: null,
+        serviceKeyEnv: envServiceKey,
+        agentServerKey: envServiceKey,
+      }),
+      false,
+      header,
+    );
+  }
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: "distinct-agent-key",
+      bearerToken: null,
+      validKey: "browser-shared-key",
+      serviceKey: null,
+      serviceKeyEnv: envServiceKey,
+      agentServerKey: "distinct-agent-key",
+    }),
+    "api_key",
+  );
+});

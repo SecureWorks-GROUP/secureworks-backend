@@ -50,6 +50,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // discipline. Same source of truth used by the Xero PO push (ops-api/pushPOToXero)
 // so the canonical job ref + quote-back ask never drift between the two channels.
 import { canonicalJobRef, poEmailReferenceBanner } from '../_shared/po_reference.ts'
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -211,8 +212,9 @@ if (import.meta.main) serve(async (req: Request) => {
   // ── API Key Authentication ──
   const apiKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
   const validKey = Deno.env.get('SW_API_KEY')
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-  if (!apiKey || (apiKey !== validKey && apiKey !== serviceKey)) {
+  // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
+  const sharedKeyOk = !!apiKey && !!validKey && apiKey === validKey
+  if (!sharedKeyOk && !(await verifyServiceCredential(req.headers))) {
     return json({ error: 'Unauthorized' }, 401)
   }
 
