@@ -12,29 +12,49 @@ key passes the front door but is refused with `403 debt_desk_user_required`,
 because the desk records who approved and who logged. Trades and the agent key
 are refused at the door.
 
+The desk owner approves every message (captain: "shaun" owns the desk), so
+`debt_draft_decide` and `debt_draft_send` also refuse anyone else with
+`403 debt_desk_owner_required`. The owners are the user ids in the ops-api
+secret `DEBT_DESK_OWNER_USER_IDS` (comma-separated) when it is set; a set but
+unusable value means nobody. Unset, the owner is the ops manager (Shaun),
+found by `users.role = 'ops_manager'` at runtime. Any staff user may log an
+outcome.
+
 ## Drafts on the morning list
 
 `debt_morning_list` items at `friendly_text`, `firm_text`, `jan_visit` and
 `deposit_reminder` carry `draft`; calls, statements and holds carry
 `draft: null`. A firm text whose Xero pay link could not be read has
-`draft: null` and `draft_problem` says why.
+`draft: null` and `draft_problem` says why. Each item invoice carries its debt
+book `kind`; a deposit reminder says "deposit" only when every invoice is a
+deposit, and otherwise "the invoice for your job" (a progress claim or
+materials invoice before the job's first payment is not a deposit).
 
 ```json
 {
   "id": "<item id>|<amount due in cents per invoice, item order>",
   "channel": "sms", "to": "client | jan", "step": "friendly_text",
   "text": "the approved or sent text once decided, else the standard wording",
-  "template_text": "the standard wording",
-  "status": "pending | approved | skipped | sent", "edited": false,
+  "template_text": "the standard wording, or null on a decided firm text",
+  "status": "pending | approved | skipped | sending | sent",
+  "edited": "true or false against the standard wording; null when it is not known",
   "pay_links": [{ "xero_invoice_id": "uuid", "invoice_number": "INV-1", "url": "https://in.xero.com/..." }],
   "approved_by": "email", "approved_by_user_id": "uuid", "decided_at": "iso",
-  "last_send": { "at": "iso", "outcome": "failed", "reason": "Sending is off until Shaun says start sending" }
+  "last_send": { "at": "iso", "outcome": "failed | not_confirmed", "reason": "Sending is off until Shaun says start sending" }
 }
 ```
 
-Pay links are read one invoice at a time, at most 20 per list read, top of
-the list first. A changed amount gives a new draft id, so an approval never
-carries over to a text it did not see.
+Pay links are read one invoice at a time, at most 10 live Xero reads per list
+read, top of the list first. A link once read is kept for the rest of that
+Perth day in the ops-api instance's memory, so reading the list again after
+each approval spends no more Xero calls on it. A decided firm text keeps its
+links inside its approved text and is not read again, so its standard wording
+is not known: `template_text` and `edited` are null. A changed amount gives a
+new draft id, so an approval never carries over to a text it did not see.
+
+`sending` means a send claimed the draft and did not confirm it: the draft is
+never sent again that day, and `last_send.outcome: "not_confirmed"` carries
+the reason. Tomorrow's list drafts the step again.
 
 Once a draft is sent, its payer leaves today's list (the step is done), so the
 list also carries `sent_today`: `{ draft_id, payer_name, invoice_numbers,
@@ -47,28 +67,21 @@ Perth date.
 `{ ok, draft }`. `xero_invoice_ids` are the item's invoices in the item's
 order. An edit is an approval carrying the edited text. Refuses a draft from
 another day (`409 debt_draft_not_today`), one already sent
-(`409 debt_draft_already_sent`), and a text that is empty, has an em dash, is
+(`409 debt_draft_already_sent`) or claimed by a send
+(`409 debt_draft_sending`), and a text that is empty, has an em dash, is
 over 1000 characters, or mentions legal action, a lawyer, court, debt
 collection, credit reporting or a default (`400 debt_draft_text_not_allowed`).
 
 ## `debt_log_outcome` (POST)
 
-`{ payer_key, xero_invoice_ids, outcome_code, promised_amount, promised_date,
-note, channel: "call" | "visit", schedule_step: "call" | "builder_call" |
+`{ xero_invoice_ids, outcome_code, promised_amount, promised_date, note,
+channel: "call" | "visit", schedule_step: "call" | "builder_call" |
 "jan_visit" | null }`, answered `{ ok, logged }`. A `jan_visit` outcome is
 logged with method `visit`. A promise needs an amount and a date not before
 today; the desk reads each invoice live from Xero, refuses one that is not
 open or a promise above what is owed, and stores the total then due as
-`amount_due_at_promise`. `payer_key` is accepted and not stored.
-
-## `debt_promises` (GET)
-
-Every promise logged in the last 120 days: `invoice_numbers`, `payer_name`,
-`promised_amount`, `promised_date`, `amount_due_at_promise`,
-`amount_due_now`, `status` (`open`, `kept`, `broken`, against the live book),
-`current` (false once a later outcome or step replaced it), `logged_at`,
-`logged_by`, `note`. The screen builds its Promises tab from the morning list
-today and does not need this read.
+`amount_due_at_promise`. Promises show on the morning list (paused, and back
+at the top marked broken the morning after a missed date).
 
 ## `debt_draft_send` (POST)
 
@@ -80,17 +93,30 @@ provider_message_id, logged }`.
   exactly `true`, every draft is refused `sending_off` and logged as refused.
   No Xero read and no message happens. Switch it on only after step 0 is done
   and Shaun says start sending.
-- When on, drafts go one at a time. Each must be approved today, not skipped
-  or sent since, with nothing logged on its invoices since the approval.
-  Jan's text (`jan_text_not_wired`) waits for plan step 5.
+- When on, drafts go one at a time. Each must be approved today, not skipped,
+  claimed or sent since, with nothing logged on its invoices since the
+  approval. Jan's text (`jan_text_not_wired`) waits for plan step 5.
 - **Last check.** Each invoice is re-read live (`get_xero_receivable`). The
-  send is refused, with the reason, when Xero shows it `paid`, `voided`,
-  `credited`, not authorised, or `part_paid` below the amount the draft was
-  written against. A Xero rate limit stops the rest of the batch
+  send is refused, with the reason, when Xero shows it `paid` (nothing due),
+  `voided`, not authorised, or `part_paid` with less owing than the amount
+  the draft was written against, whether paid, part paid or credited since.
+  An older credit note with the drafted balance still owing does not block
+  the text. A Xero rate limit stops the rest of the batch
   (`last_check_unavailable`).
+- **Claim, then send.** Before the text goes, the draft is claimed: a
+  `sending` row per covered invoice, which a unique index allows once per
+  draft and invoice. An overlapping send of the same draft is refused
+  `already_sending` and never reaches the client. Once the text goes, the
+  claim becomes `sent`. If the provider fails, or the `sent` write fails, the
+  claim stays (`send_not_confirmed`, or `sent: true, logged: false`), so the
+  draft is never texted twice.
 - The text goes only through the existing `send_chase_sms` path, to the GHL
-  contact on the invoice's job. Each send, failure and refusal is a
+  contact on the invoice's job. Each send and refusal is a
   `payment_chase_logs` row per covered invoice. A sent row carries
   `outcome_code: sent`, the provider message id and the approver's user id,
-  and moves the chase ladder; approvals, skips and refusals never do.
+  and moves the chase ladder; approvals, skips, refusals and claims never do.
   `send_chase_sms` also writes its own older-style "SMS sent" row.
+- The older chase-history readers (Clear Debt's chase counts and recent
+  chases, `job_detail`, `invoice_context` and the debt notes thread) show
+  only rows with no draft id or a sent one, so an invoice that was never
+  texted never reads as chased.

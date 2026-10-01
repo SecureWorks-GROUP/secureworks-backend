@@ -114,12 +114,44 @@ Deno.test("Jan's text goes to Jan: who, what, where, and the client's phone when
 });
 
 Deno.test("deposit reminder: one friendly reminder about the job", () => {
+  const deposit = {
+    ...one,
+    step: "deposit_reminder" as const,
+    invoices: [{ ...one.invoices[0], kind: "deposit" }],
+  };
   assertEquals(
-    debtDraftText({ ...one, step: "deposit_reminder" }),
+    debtDraftText(deposit),
     "Hi Sam, a friendly reminder about the deposit for your job: invoice INV-1578 for $4,200.00 was due on 29 Sep 2026. " +
       "If you have already paid, thank you, and please ignore this message. " +
       "If you have any questions about the job, just reply to this text. Thanks, SecureWorks",
   );
+});
+
+Deno.test("deposit reminder: a progress claim, a materials invoice or an unknown kind is never called a deposit", () => {
+  for (const kind of ["progress_claim", "materials", null, undefined]) {
+    const text = debtDraftText({
+      ...one,
+      step: "deposit_reminder",
+      invoices: [{ ...one.invoices[0], kind }],
+    });
+    assert(!/deposit/i.test(text), `${kind}: ${text}`);
+    assert(
+      text.startsWith(
+        "Hi Sam, a friendly reminder about the invoice for your job: invoice INV-1578",
+      ),
+      text,
+    );
+  }
+  const mixed = debtDraftText({
+    ...two,
+    step: "deposit_reminder",
+    invoices: [
+      { ...two.invoices[0], kind: "deposit" },
+      { ...two.invoices[1], kind: "materials" },
+    ],
+  });
+  assert(!/deposit/i.test(mixed), mixed);
+  assert(mixed.includes("about the invoices for your job: invoices INV-1578"));
 });
 
 Deno.test("no draft threatens, invents or mentions legal action or credit reporting", () => {

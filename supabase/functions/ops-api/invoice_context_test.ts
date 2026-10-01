@@ -455,6 +455,18 @@ function fakeClient(
       q.in = chain((c: string, v: any[]) =>
         filters.push((r) => v.includes(r[c]))
       );
+      q.or = chain((expr: string) => {
+        const terms = expr.split(",").map((t) => {
+          const [c, op, ...rest] = t.split(".");
+          const v = rest.join(".");
+          if (op === "is" && v === "null") {
+            return (r: any) => r[c] === null || r[c] === undefined;
+          }
+          if (op === "eq") return (r: any) => String(r[c]) === v;
+          throw new Error(`fake or(): unsupported term ${t}`);
+        });
+        filters.push((r) => terms.some((f) => f(r)));
+      });
       q.ilike = chain((c: string, v: string) =>
         filters.push((r) =>
           String(r[c] ?? "").toLowerCase() === v.toLowerCase()
@@ -577,6 +589,58 @@ function deps(
     now: () => NOW,
   };
 }
+
+Deno.test("1b. desk approvals, skips, refusals and unconfirmed sends are not chases; a desk send is", async () => {
+  const t = baseTables();
+  const desk = (over: Record<string, unknown>) => ({
+    xero_invoice_id: INV1,
+    method: "sms",
+    notes: "Hi Sam, a friendly reminder. Thanks, SecureWorks",
+    follow_up_date: null,
+    follow_up_resolved: false,
+    chased_by: "shaun@example.test",
+    draft_id: "2026-10-01:contact-a:text:friendly_text|10000",
+    ...over,
+  });
+  t.payment_chase_logs.push(
+    desk({ outcome: "approved", created_at: "2026-09-10T00:00:00.000Z" }),
+    desk({
+      outcome_code: "skipped",
+      outcome: "skipped",
+      created_at: "2026-09-10T00:01:00.000Z",
+    }),
+    desk({
+      outcome_code: "failed",
+      outcome: "refused: sending_off",
+      created_at: "2026-09-10T00:02:00.000Z",
+    }),
+    desk({
+      outcome_code: "sending",
+      outcome: "sending",
+      created_at: "2026-09-10T00:03:00.000Z",
+    }),
+  );
+  const before = await invoiceContext(
+    new URLSearchParams({ invoice: "inv-1419" }),
+    deps(t),
+  );
+  assertEquals(before.invoice.chase.count, 2);
+  assertEquals(before.invoice.chase.last?.at, "2026-09-09T00:00:00.000Z");
+
+  t.payment_chase_logs.push(
+    desk({
+      outcome_code: "sent",
+      outcome: "sent",
+      created_at: "2026-09-10T00:04:00.000Z",
+    }),
+  );
+  const after = await invoiceContext(
+    new URLSearchParams({ invoice: "inv-1419" }),
+    deps(t),
+  );
+  assertEquals(after.invoice.chase.count, 3);
+  assertEquals(after.invoice.chase.last?.at, "2026-09-10T00:04:00.000Z");
+});
 
 Deno.test("1. a linked invoice returns the complete picture with no blockers", async () => {
   const t = baseTables();

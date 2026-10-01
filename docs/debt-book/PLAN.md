@@ -392,8 +392,11 @@ sending is still worth reviewing on Thursday.
     list, which lacks classification and proposal;
   - `direction`;
   - `outcome_code`, a closed list (no_answer, spoke, promised, disputed,
-    says_paid, sent, failed, skipped), beside the existing free-text
-    `outcome` column, which stays for notes and older rows;
+    says_paid, sending, sent, failed, skipped), beside the existing free-text
+    `outcome` column, which stays for notes and older rows. A send first
+    claims its draft with a `sending` row per invoice, which becomes `sent`;
+    a partial unique index allows one sending-or-sent row per draft and
+    invoice, so a draft never texts twice;
   - `promised_amount` and `promised_date`;
   - `amount_due_at_promise`, the amount due read live from Xero when a
     promise is logged, so a part payment can show the promise kept;
@@ -417,13 +420,20 @@ sending is still worth reviewing on Thursday.
   before the function.
 - **Last check.** One live `get_xero_receivable` per send. Remember the Xero
   limit of 60 calls a minute: a batch of about 20 sends is fine, but send in
-  sequence, not fanned out.
+  sequence, not fanned out. "Credited" means a credit that leaves less owing
+  than the draft says; an older credit note with the drafted balance still
+  owing does not block the text.
+- **Who approves and sends.** Only the desk owner: the user ids in the
+  ops-api secret `DEBT_DESK_OWNER_USER_IDS`, or, unset, the ops manager
+  (Shaun). Any staff user may log a call or visit outcome.
 - **Sending switch.** One server-side switch, `DEBT_SENDING_ENABLED`, off
   unless it is exactly `true`. While it is off every send attempt is refused
   and logged as refused. It is turned on only after step 0 is done and
   Shaun says start sending.
 - **Pay link.** Use Xero's OnlineInvoice URL, fetched per invoice. Do **not**
   use `send_payment_link`, which is broken (B1) and picks the newest invoice.
+  The morning list reads at most 10 links live per read and keeps each for
+  the Perth day, so re-reading the list does not spend the Xero limit.
 - **No paid AI.** Drafts are deterministic templates. The morning agent run
   (subscription Claude, as a scheduled routine) may add one context line and
   flags oddities. It never sends.

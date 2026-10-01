@@ -516,4 +516,5 @@ ops-api|supabase/migrations/20261001100000_debt_desk_chase_log.sql|column|paymen
 ops-api|supabase/migrations/20261001100000_debt_desk_chase_log.sql|column|payment_chase_logs.draft_id
 ops-api|supabase/migrations/20261001100000_debt_desk_chase_log.sql|column|payment_chase_logs.draft_amount
 ops-api|supabase/migrations/20261001100000_debt_desk_chase_log.sql|constraint|payment_chase_logs_outcome_code_check
+ops-api|supabase/migrations/20261001100000_debt_desk_chase_log.sql|index|idx_chase_logs_draft_send_claim
 ops-api|supabase/migrations/20261001100000_debt_desk_chase_log.sql|policy|payment_chase_logs.payment_chase_logs_service_role_all

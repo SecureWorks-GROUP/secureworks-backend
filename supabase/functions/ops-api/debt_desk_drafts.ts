@@ -7,16 +7,22 @@
 //
 //   outcome_code null      approved (approved_by_user_id set; notes holds the approved text)
 //   outcome_code skipped   skipped for today
-//   outcome_code sent      sent (notes holds the text that went)
-//   outcome_code failed    a send attempt that did not send: refused (sending off, the last
-//                          Xero check) or failed at the provider
+//   outcome_code sending   a send claimed the draft (notes holds the text); not yet confirmed
+//   outcome_code sent      sent: the sending row once the text went
+//   outcome_code failed    a send attempt refused before any claim (sending off, the last
+//                          Xero check)
 //
-// One decision writes one row per covered invoice; rows at one instant are one decision.
+// One decision writes one row per covered invoice; rows at one instant are one decision. These
+// rows are the desk's, not chases: the older Clear Debt, job and invoice readers show only rows
+// with no draft id or a sent one (DEBT_CHASE_HISTORY_FILTER).
 //
 // A firm text needs each invoice's Xero OnlineInvoice pay link. Links are read only for drafts
 // still pending, one at a time (Xero allows 60 calls a minute and the book read already spent
-// two), at most `payLinkLimit` per list, in list order so the top of the list is drafted first.
-// A draft whose link could not be read is left out with a reason, never sent without its link.
+// two), at most `payLinkLimit` live reads per list, in list order so the top of the list is
+// drafted first. A link read once is kept for the rest of that Perth day (`payLinkCache`), so
+// reading the list again after each approval spends no more Xero calls on it. A decided firm
+// text keeps its links inside its approved text and is never read again. A draft whose link
+// could not be read is left out with a reason, never sent without its link.
 
 import type { DebtMorningItem } from "./debt_chase_schedule.ts";
 import {
@@ -27,9 +33,25 @@ import {
   debtDraftText,
 } from "./debt_draft_templates.ts";
 
-export const DEBT_PAY_LINK_LIMIT = 20;
+export const DEBT_PAY_LINK_LIMIT = 10;
 
-export type DebtDraftDecisionKind = "approved" | "skipped" | "sent" | "failed";
+/**
+ * PostgREST `.or()` filter for the older chase-history readers (Clear Debt, job_detail,
+ * invoice_context, debt notes): a desk approval, skip, refusal or unconfirmed send is not a
+ * chase, so only rows with no draft id, or a sent one, read as chases.
+ */
+export const DEBT_CHASE_HISTORY_FILTER =
+  "draft_id.is.null,outcome_code.eq.sent";
+
+/** Pay links read today, keyed `<perth date>|<xero invoice id>`; other days are dropped. */
+const PAY_LINK_CACHE = new Map<string, string>();
+
+export type DebtDraftDecisionKind =
+  | "approved"
+  | "skipped"
+  | "sending"
+  | "sent"
+  | "failed";
 
 export interface DebtDraftDecision {
   draft_id: string;
@@ -38,7 +60,6 @@ export interface DebtDraftDecision {
   by: string | null;
   user_id: string | null;
   text: string | null;
-  edited: boolean;
   reason: string | null;
   xero_invoice_id: string;
   covers: string[];
@@ -58,6 +79,8 @@ export function debtDraftDecisionFromRow(
   const code = row.outcome_code ?? null;
   const kind: DebtDraftDecisionKind | null = code === "sent"
     ? "sent"
+    : code === "sending"
+    ? "sending"
     : code === "skipped"
     ? "skipped"
     : code === "failed"
@@ -78,8 +101,11 @@ export function debtDraftDecisionFromRow(
     by: str(row.chased_by),
     user_id: str(row.approved_by_user_id),
     text: kind === "failed" ? null : str(row.notes),
-    edited: /\bedited\b/.test(String(row.outcome ?? "")),
-    reason: kind === "failed" ? str(row.notes) ?? str(row.outcome) : null,
+    reason: kind === "failed"
+      ? str(row.notes) ?? str(row.outcome)
+      : kind === "sending" && str(row.outcome) !== "sending"
+      ? str(row.outcome)
+      : null,
     xero_invoice_id: xeroId,
     covers: Array.isArray(row.covers_invoice_ids) &&
         row.covers_invoice_ids.length
@@ -91,7 +117,10 @@ export function debtDraftDecisionFromRow(
 }
 
 export interface DebtDraftState {
-  /** The decision in force: a send is final; otherwise the newest approval or skip. */
+  /**
+   * The decision in force: a claimed or confirmed send is final; otherwise the newest approval
+   * or skip.
+   */
   decision: DebtDraftDecision | null;
   /** The newest approval, when the draft has one. */
   approval: DebtDraftDecision | null;
@@ -114,9 +143,8 @@ export function debtDraftStates(
     const s = out.get(d.draft_id) ??
       { decision: null, approval: null, lastFailure: null, rows: [] };
     s.rows.push(d);
-    if (s.decision?.kind !== "sent") {
-      if (d.kind === "sent") s.decision = d;
-      else if (d.kind === "approved" || d.kind === "skipped") s.decision = d;
+    if (s.decision?.kind !== "sent" && s.decision?.kind !== "sending") {
+      if (d.kind !== "failed") s.decision = d;
     }
     if (d.kind === "approved") {
       s.approval = d;
@@ -129,20 +157,18 @@ export function debtDraftStates(
 }
 
 const statusOf = (d: DebtDraftDecision | null): DebtDeskDraft["status"] =>
-  d?.kind === "sent"
-    ? "sent"
-    : d?.kind === "approved"
-    ? "approved"
-    : d?.kind === "skipped"
-    ? "skipped"
-    : "pending";
+  d && d.kind !== "failed" ? d.kind : "pending";
 
 export interface AttachDraftOptions {
+  /** Today's Perth date: the pay-link cache keeps only today's links. */
+  perthDate: string;
   /** The job's site address for the item's invoices (Jan's text). */
   siteFor: (item: DebtMorningItem) => string | null;
   /** Reads one invoice's Xero OnlineInvoice URL. Absent: firm texts get no draft. */
   payLink?: (xeroInvoiceId: string) => Promise<string>;
   payLinkLimit?: number;
+  /** Defaults to the module's day cache. */
+  payLinkCache?: Map<string, string>;
 }
 
 /** Puts today's draft on every item that has one. Writes nothing. */
@@ -153,6 +179,11 @@ export async function attachDebtDrafts(
 ): Promise<{ pay_links_read: number }> {
   const states = debtDraftStates(logRows);
   const limit = opts.payLinkLimit ?? DEBT_PAY_LINK_LIMIT;
+  const cache = opts.payLinkCache ?? PAY_LINK_CACHE;
+  const today = `${opts.perthDate}|`;
+  for (const key of [...cache.keys()]) {
+    if (!key.startsWith(today)) cache.delete(key);
+  }
   let linksRead = 0;
   let linkFailure: string | null = null;
 
@@ -165,11 +196,19 @@ export async function attachDebtDrafts(
     if (linkFailure) {
       return `Pay link not read: an earlier Xero read failed (${linkFailure})`;
     }
-    if (linksRead + item.invoices.length > limit) {
+    const unread = item.invoices.filter((i) =>
+      !cache.has(today + i.xero_invoice_id)
+    );
+    if (linksRead + unread.length > limit) {
       return `Pay link not read: the list reads at most ${limit} pay links at a time. Approve or skip the drafts above, then read the list again`;
     }
     const links: Record<string, string> = {};
     for (const i of item.invoices) {
+      const cached = cache.get(today + i.xero_invoice_id);
+      if (cached) {
+        links[i.xero_invoice_id] = cached;
+        continue;
+      }
       linksRead += 1;
       try {
         const url = await opts.payLink(i.xero_invoice_id);
@@ -177,6 +216,7 @@ export async function attachDebtDrafts(
           throw new Error("Xero returned no online invoice link");
         }
         links[i.xero_invoice_id] = url;
+        cache.set(today + i.xero_invoice_id, url);
       } catch (error) {
         linkFailure = String((error as Error)?.message ?? error).slice(0, 200);
         return `The pay link for ${i.invoice_number} could not be read from Xero: ${linkFailure}`;
@@ -220,18 +260,17 @@ export async function attachDebtDrafts(
     const text = status !== "pending" && decided?.text
       ? decided.text
       : template!;
+    const used = status === "approved" || status === "sending" ||
+      status === "sent";
     item.draft = {
       id,
       channel: "sms",
       to: step === "jan_visit" ? "jan" : "client",
       step,
       text,
-      template_text: template ?? text,
+      template_text: template,
       status,
-      // Against the standard wording when it is known; a decided firm text keeps the flag
-      // its approval recorded, because its pay links are not read again.
-      edited: (status === "approved" || status === "sent") &&
-        (template !== null ? text !== template : decided?.edited ?? false),
+      edited: !used ? false : template !== null ? text !== template : null,
       pay_links: payLinks,
       approved_by: state?.approval?.by ?? null,
       approved_by_user_id: state?.approval?.user_id ?? null,
@@ -242,6 +281,8 @@ export async function attachDebtDrafts(
           outcome: "failed",
           reason: state.lastFailure.reason,
         }
+        : status === "sending" && decided?.reason
+        ? { at: decided.at, outcome: "not_confirmed", reason: decided.reason }
         : null,
     };
   }

@@ -41,7 +41,7 @@ DROP POLICY IF EXISTS payment_chase_logs_service_role_all ON public.payment_chas
 ALTER TABLE public.payment_chase_logs DISABLE ROW LEVEL SECURITY;
 
 DROP INDEX IF EXISTS public.idx_chase_logs_draft;
-DROP INDEX IF EXISTS public.idx_chase_logs_promised;
+DROP INDEX IF EXISTS public.idx_chase_logs_draft_send_claim;
 ALTER TABLE public.payment_chase_logs
   DROP CONSTRAINT IF EXISTS payment_chase_logs_direction_check,
   DROP CONSTRAINT IF EXISTS payment_chase_logs_outcome_code_check,

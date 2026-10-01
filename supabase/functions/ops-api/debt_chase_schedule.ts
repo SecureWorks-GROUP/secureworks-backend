@@ -237,6 +237,8 @@ export interface DebtMorningItem {
   invoices: Array<{
     xero_invoice_id: string;
     invoice_number: string;
+    /** The debt book's kind (deposit, progress_claim, materials, final, ...). */
+    kind: string;
     amount_due: number;
     due_date: string | null;
     invoice_date: string | null;
@@ -406,7 +408,7 @@ function promiseKept(
 }
 
 /** A promise's status on a Perth date: open through its date, then kept or broken. */
-export function debtPromiseStatus(
+function debtPromiseStatus(
   p: DebtChaseEvent,
   perthDate: string,
   amountDueById: Map<string, number>,
@@ -484,6 +486,7 @@ function invoiceLines(
   return [...invoices].sort(byNumber).map((i) => ({
     xero_invoice_id: i.xero_invoice_id,
     invoice_number: i.invoice_number,
+    kind: i.kind,
     amount_due: i.amount_due,
     due_date: i.due_date,
     invoice_date: i.invoice_date,

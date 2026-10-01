@@ -2,17 +2,21 @@
 // secureworks-ux docs/clear-debt-desk.md. The captain's rulings: docs/debt-book/DECISIONS.md.
 //
 //   debt_draft_decide  POST  approve (with the text, edited or not) or skip one morning-list
-//                            draft. Records the signed-in user's id on an approval.
+//                            draft. Desk owner only. Records the owner's user id on an approval.
 //   debt_log_outcome   POST  what a call or Jan's visit achieved (no answer, spoke, promised,
-//                            disputed, says paid). A promise stamps the covered invoices'
-//                            amount due, read live from Xero, so a part payment can keep it.
-//   debt_promises      GET   every promise logged in the last 120 days, open, kept or broken
-//                            against the live book, and whether a later contact replaced it.
-//   debt_draft_send    POST  send approved drafts, one at a time. Off until Shaun says start
-//                            sending: DEBT_SENDING_ENABLED must be exactly "true". Every attempt
-//                            while off is refused and logged. When on, each invoice is re-read
-//                            live from Xero first, and the text goes only through the existing
-//                            send_chase_sms path.
+//                            disputed, says paid). Any signed-in staff user. A promise stamps
+//                            the covered invoices' amount due, read live from Xero, so a part
+//                            payment can keep it.
+//   debt_draft_send    POST  send approved drafts, one at a time. Desk owner only. Off until
+//                            Shaun says start sending: DEBT_SENDING_ENABLED must be exactly
+//                            "true". Every attempt while off is refused and logged. When on,
+//                            each invoice is re-read live from Xero first, the draft is claimed
+//                            (a 'sending' row per invoice, unique per draft and invoice), and
+//                            the text goes only through the existing send_chase_sms path.
+//
+// The desk owner approves every message (captain: "shaun" owns the desk): the user ids in
+// DEBT_DESK_OWNER_USER_IDS when that secret is set, otherwise the ops manager (Shaun),
+// resolved by role at runtime.
 //
 // Every write is a payment_chase_logs row per covered invoice (columns from
 // 20261001100000_debt_desk_chase_log.sql). Rows carrying a draft id but no "sent" never move
@@ -23,7 +27,6 @@ import {
   type DebtChaseEvent,
   debtChaseEventFromLogRow,
   type DebtChaseOutcome,
-  debtPromiseStatus,
 } from "./debt_chase_schedule.ts";
 import { type DebtDraftDecision, debtDraftStates } from "./debt_desk_drafts.ts";
 import {
@@ -32,11 +35,11 @@ import {
 } from "./debt_draft_templates.ts";
 
 export const DEBT_DESK_VERSION = "debt-desk/v1";
-export const DEBT_PROMISES_VERSION = "debt-promises/v1";
 /** The one switch. Sending stays off unless this is exactly "true" (captain: "my go"). */
 export const DEBT_SENDING_SWITCH = "DEBT_SENDING_ENABLED";
+/** Comma-separated user ids who may approve and send. Unset: the ops manager (Shaun). */
+export const DEBT_DESK_OWNERS_SETTING = "DEBT_DESK_OWNER_USER_IDS";
 export const DEBT_SEND_BATCH_LIMIT = 20;
-export const DEBT_PROMISE_LOOKBACK_DAYS = 120;
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -64,6 +67,17 @@ export interface DebtDeskActor {
 export interface DebtDeskStore {
   /** One insert of every row; a PostgREST error is thrown, never swallowed. */
   insertChaseRows(rows: Record<string, unknown>[]): Promise<void>;
+  /**
+   * Inserts a send's claim rows (outcome_code sending) in one statement. False when the
+   * draft is already claimed or sent on one of its invoices (the unique claim index).
+   */
+  claimSend(rows: Record<string, unknown>[]): Promise<boolean>;
+  /** Updates the draft's claim rows on these invoices; throws unless every one changed. */
+  settleSend(
+    draftId: string,
+    xeroInvoiceIds: string[],
+    patch: Record<string, unknown>,
+  ): Promise<void>;
   draftRows(draftId: string): Promise<Record<string, unknown>[]>;
   chaseLogRows(xeroInvoiceIds: string[]): Promise<Record<string, unknown>[]>;
   invoiceJobLinks(
@@ -72,18 +86,8 @@ export interface DebtDeskStore {
   jobGhlContacts(
     jobIds: string[],
   ): Promise<Array<{ id: string; ghl_contact_id: string | null }>>;
-  promiseRows(sinceIso: string): Promise<Record<string, unknown>[]>;
-}
-
-export interface DebtDeskBook {
-  perth_date: string;
-  read_at: string;
-  invoices: Array<{
-    xero_invoice_id: string;
-    invoice_number: string;
-    contact_name: string;
-    amount_due: number;
-  }>;
+  /** The ops manager's user id (users.role = 'ops_manager', oldest first), or null. */
+  opsManagerUserId(): Promise<string | null>;
 }
 
 export interface DebtDeskDeps {
@@ -96,8 +100,8 @@ export interface DebtDeskDeps {
   ) => Promise<{ success?: boolean; message_id?: string | null }>;
   /** DEBT_SENDING_ENABLED is exactly "true". */
   sendingEnabled: boolean;
-  /** The debt book read (debt_book.ts), for debt_promises. */
-  readBook?: () => Promise<DebtDeskBook>;
+  /** The user ids who may approve and send (debtDeskOwnerIds). */
+  deskOwnerIds: () => Promise<string[]>;
   now?: () => Date;
 }
 
@@ -106,6 +110,24 @@ export function debtSendingEnabled(
   get: (name: string) => string | undefined = (name) => Deno.env.get(name),
 ): boolean {
   return get(DEBT_SENDING_SWITCH) === "true";
+}
+
+/**
+ * The desk owners. When DEBT_DESK_OWNER_USER_IDS is set, exactly its valid user ids (an
+ * unusable value means nobody, never everybody); otherwise the ops manager (Shaun).
+ */
+export async function debtDeskOwnerIds(
+  store: Pick<DebtDeskStore, "opsManagerUserId">,
+  get: (name: string) => string | undefined = (name) => Deno.env.get(name),
+): Promise<string[]> {
+  const setting = get(DEBT_DESK_OWNERS_SETTING)?.trim();
+  if (setting) {
+    return setting.split(",").map((id) => id.trim().toLowerCase()).filter((
+      id,
+    ) => UUID.test(id));
+  }
+  const opsManager = await store.opsManagerUserId();
+  return opsManager ? [opsManager.toLowerCase()] : [];
 }
 
 // ── Helpers ──
@@ -132,6 +154,16 @@ function requireActor(actor: DebtDeskActor | null | undefined): DebtDeskActor {
     );
   }
   return { user_id: actor.user_id.toLowerCase(), email: actor.email ?? null };
+}
+
+async function requireDeskOwner(actor: DebtDeskActor, deps: DebtDeskDeps) {
+  if (!(await deps.deskOwnerIds()).includes(actor.user_id)) {
+    throw new DebtDeskError(
+      "Only the desk owner (Shaun) approves and sends debt messages",
+      403,
+      "debt_desk_owner_required",
+    );
+  }
 }
 
 function onlyKeys(body: Record<string, unknown>, allowed: string[]) {
@@ -174,6 +206,7 @@ export async function debtDraftDecide(
   deps: DebtDeskDeps,
 ) {
   const actor = requireActor(rawActor);
+  await requireDeskOwner(actor, deps);
   const body = asBody(rawBody);
   onlyKeys(body, ["draft_id", "decision", "text", "xero_invoice_ids"]);
   const draft = parseDebtDraftId(body.draft_id);
@@ -218,6 +251,13 @@ export async function debtDraftDecide(
       "That draft was already sent",
       409,
       "debt_draft_already_sent",
+    );
+  }
+  if (state?.decision?.kind === "sending") {
+    throw new DebtDeskError(
+      "That draft was claimed by a send that is not confirmed, so it cannot be decided again today",
+      409,
+      "debt_draft_sending",
     );
   }
   const earlier = state?.rows.find((r) => r.kind !== "failed");
@@ -306,7 +346,6 @@ export async function debtLogOutcome(
   const actor = requireActor(rawActor);
   const body = asBody(rawBody);
   onlyKeys(body, [
-    "payer_key",
     "xero_invoice_ids",
     "outcome_code",
     "promised_amount",
@@ -338,10 +377,6 @@ export async function debtLogOutcome(
     : typeof body.note === "string"
     ? body.note.trim().slice(0, 2000) || null
     : bad("note must be text");
-  if (
-    body.payer_key !== undefined && body.payer_key !== null &&
-    typeof body.payer_key !== "string"
-  ) bad("payer_key must be text");
 
   let promise: {
     amount: number;
@@ -424,108 +459,6 @@ export async function debtLogOutcome(
   };
 }
 
-// ── debt_promises ──
-
-export async function debtPromises(
-  params: URLSearchParams | Record<string, unknown>,
-  deps: DebtDeskDeps,
-) {
-  const keys = params instanceof URLSearchParams
-    ? [...params.keys()]
-    : Object.keys(params);
-  for (const key of keys) {
-    if (key !== "action") bad(`Unsupported parameter: ${key}`);
-  }
-  if (!deps.readBook) throw new Error("debt_promises needs the debt book read");
-  const book = await deps.readBook();
-  const today = book.perth_date;
-  const since = new Date(
-    Date.parse(`${today}T00:00:00+08:00`) -
-      DEBT_PROMISE_LOOKBACK_DAYS * 86_400_000,
-  ).toISOString();
-  const promiseRows = await deps.store.promiseRows(since);
-
-  const byId = new Map(
-    book.invoices.map((i) => [i.xero_invoice_id.toLowerCase(), i]),
-  );
-  const amountDueById = new Map(
-    book.invoices.map((i) => [i.xero_invoice_id.toLowerCase(), i.amount_due]),
-  );
-
-  // One promise is logged as one row per covered invoice: rows at one instant are one promise.
-  const groups = new Map<
-    string,
-    { event: DebtChaseEvent; row: Record<string, unknown> }
-  >();
-  for (const row of promiseRows) {
-    const event = debtChaseEventFromLogRow(row);
-    if (!event || event.outcome !== "promised" || !event.promised_date) {
-      continue;
-    }
-    const covers = event.covers ?? [event.xero_invoice_id];
-    const key = `${event.at}|${[...covers].sort().join(",")}`;
-    if (!groups.has(key)) groups.set(key, { event: { ...event, covers }, row });
-  }
-  const covered = [
-    ...new Set([...groups.values()].flatMap((g) => g.event.covers!)),
-  ];
-  const later = covered.length
-    ? (await deps.store.chaseLogRows(covered)).map(debtChaseEventFromLogRow)
-      .filter((e): e is DebtChaseEvent => e !== null)
-    : [];
-
-  const promises = [...groups.values()].map(({ event, row }) => {
-    const covers = event.covers!;
-    const current = !later.some((e) =>
-      covers.includes(e.xero_invoice_id) && e.at > event.at &&
-      (e.outcome !== null || e.step !== null)
-    );
-    const nowCents = covers.reduce(
-      (a, id) => a + cents(amountDueById.get(id) ?? 0),
-      0,
-    );
-    return {
-      xero_invoice_ids: covers,
-      invoice_numbers: covers.map((id) => byId.get(id)?.invoice_number ?? null),
-      payer_name: covers.map((id) =>
-        byId.get(id)?.contact_name
-      ).find(Boolean) ??
-        null,
-      promised_amount: event.promised_amount,
-      promised_date: event.promised_date,
-      amount_due_at_promise: event.amount_due_at_promise,
-      amount_due_now: nowCents / 100,
-      status: debtPromiseStatus(event, today, amountDueById),
-      current,
-      logged_at: event.at,
-      logged_by: event.by,
-      note: typeof row.notes === "string" ? row.notes : null,
-    };
-  });
-  const rank = { broken: 0, open: 1, kept: 2 } as const;
-  promises.sort((a, z) =>
-    Number(z.current) - Number(a.current) ||
-    rank[a.status] - rank[z.status] ||
-    String(a.promised_date).localeCompare(String(z.promised_date)) ||
-    z.logged_at.localeCompare(a.logged_at)
-  );
-  const currentOnes = promises.filter((p) => p.current);
-  return {
-    ok: true,
-    version: DEBT_PROMISES_VERSION,
-    perth_date: today,
-    read_at: book.read_at,
-    lookback_days: DEBT_PROMISE_LOOKBACK_DAYS,
-    promises,
-    summary: {
-      open: currentOnes.filter((p) => p.status === "open").length,
-      broken: currentOnes.filter((p) => p.status === "broken").length,
-      kept: currentOnes.filter((p) => p.status === "kept").length,
-      superseded: promises.length - currentOnes.length,
-    },
-  };
-}
-
 // ── debt_draft_send ──
 
 type SendResult = {
@@ -574,14 +507,6 @@ function lastCheckProblem(
       `Xero shows ${number} as ${status}, not an open invoice`,
     );
   }
-  const credited = Number(inv.AmountCredited ?? 0) > 0 ||
-    (Array.isArray(inv.CreditNotes) && inv.CreditNotes.length > 0);
-  if (credited) {
-    return new Refusal(
-      "credited",
-      `Xero shows a credit note on ${number}: check it before chasing`,
-    );
-  }
   if (draftAmount === null) {
     return new Refusal(
       "draft_amount_missing",
@@ -593,7 +518,7 @@ function lastCheckProblem(
       "part_paid",
       `Xero shows ${money(due)} owing on ${number}, less than the ${
         money(draftAmount)
-      } the text says: part paid since the draft`,
+      } the text says: paid, part paid or credited since the draft`,
     );
   }
   return null;
@@ -605,9 +530,10 @@ export async function debtDraftSend(
   deps: DebtDeskDeps,
 ) {
   const actor = requireActor(rawActor);
+  await requireDeskOwner(actor, deps);
   const body = asBody(rawBody);
-  onlyKeys(body, ["draft_ids", "draft_id"]);
-  const list = body.draft_ids ?? (body.draft_id ? [body.draft_id] : null);
+  onlyKeys(body, ["draft_ids"]);
+  const list = body.draft_ids;
   if (
     !Array.isArray(list) || !list.length ||
     list.length > DEBT_SEND_BATCH_LIMIT ||
@@ -691,6 +617,15 @@ export async function debtDraftSend(
     }
     if (state?.decision?.kind === "sent") {
       await refuse(new Refusal("already_sent", "That draft was already sent"));
+      continue;
+    }
+    if (state?.decision?.kind === "sending") {
+      await refuse(
+        new Refusal(
+          "already_sending",
+          "That draft was claimed by a send that is not confirmed, so it is not sent again",
+        ),
+      );
       continue;
     }
     if (!approval) {
@@ -796,6 +731,35 @@ export async function debtDraftSend(
       }
       if (!deps.sendSms) throw new Error("send_chase_sms is not wired");
 
+      // The claim: at most one sending-or-sent row per draft and invoice, so an overlapping
+      // send of this draft is refused here and never reaches the client.
+      const claimed = await deps.store.claimSend(ids.map((id) => ({
+        xero_invoice_id: id,
+        job_id: id === ids[0] ? jobId : null,
+        ghl_contact_id: contact,
+        method: "sms",
+        direction: "outbound",
+        schedule_step: parsed.step,
+        draft_id: draftId,
+        draft_amount: perInvoice.get(id)?.draft_amount ?? null,
+        covers_invoice_ids: ids,
+        outcome_code: "sending",
+        outcome: "sending",
+        notes: approval.text,
+        approved_by_user_id: approval.user_id,
+        chased_by: actor.email,
+        automated: false,
+      })));
+      if (!claimed) {
+        await refuse(
+          new Refusal(
+            "already_sending",
+            "Another send already claimed that draft, so it is not sent again",
+          ),
+        );
+        continue;
+      }
+
       let messageId: string | null;
       try {
         const sent = await deps.sendSms({
@@ -808,27 +772,18 @@ export async function debtDraftSend(
         if (sent?.success === false) throw new Error("SMS send failed");
         messageId = sent?.message_id ?? null;
       } catch (error) {
+        // The provider may have sent it before failing, so the claim stays: the draft never
+        // texts twice. Tomorrow's list drafts the step again.
         const why = String((error as Error)?.message ?? error).slice(0, 300);
         let logged = false;
         try {
-          await deps.store.insertChaseRows(ids.map((id) => ({
-            xero_invoice_id: id,
-            method: "sms",
-            direction: "outbound",
-            schedule_step: parsed.step,
-            draft_id: draftId,
-            draft_amount: perInvoice.get(id)?.draft_amount ?? null,
-            covers_invoice_ids: ids,
-            outcome_code: "failed",
-            outcome: "send failed",
-            notes: why,
-            chased_by: actor.email,
-            automated: false,
-          })));
+          await deps.store.settleSend(draftId, ids, {
+            outcome: `send not confirmed: ${why}`,
+          });
           logged = true;
         } catch (logError) {
           console.error(
-            "[debt_draft_send] failure not logged",
+            "[debt_draft_send] unconfirmed send not logged",
             draftId,
             logError,
           );
@@ -836,8 +791,9 @@ export async function debtDraftSend(
         results.push({
           draft_id: draftId,
           sent: false,
-          code: "send_failed",
-          reason: why,
+          code: "send_not_confirmed",
+          reason:
+            `${why}. The draft stays claimed so it cannot text twice; check the GoHighLevel conversation`,
           logged,
         });
         continue;
@@ -845,27 +801,14 @@ export async function debtDraftSend(
 
       let logged = false;
       try {
-        await deps.store.insertChaseRows(ids.map((id) => ({
-          xero_invoice_id: id,
-          job_id: id === ids[0] ? jobId : null,
-          ghl_contact_id: contact,
-          method: "sms",
-          direction: "outbound",
-          schedule_step: parsed.step,
-          draft_id: draftId,
-          draft_amount: perInvoice.get(id)?.draft_amount ?? null,
-          covers_invoice_ids: ids,
+        await deps.store.settleSend(draftId, ids, {
           outcome_code: "sent",
           outcome: "sent",
-          notes: approval.text,
           provider_message_id: messageId,
-          approved_by_user_id: approval.user_id,
-          chased_by: actor.email,
-          automated: false,
-        })));
+        });
         logged = true;
       } catch (error) {
-        // The text went; only the desk row is missing. Say so loudly rather than resend.
+        // The text went and the claim stays, so it is never sent again; only "sent" is missing.
         console.error(
           "[debt_draft_send] SENT BUT NOT LOGGED",
           draftId,
@@ -904,6 +847,20 @@ function chunks<T>(xs: T[], size = IN_CHUNK): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));
   return out;
+}
+
+// deno-lint-ignore no-explicit-any
+function writeFailed(error: any): never {
+  console.error(
+    "[debt_desk] chase-log write failed",
+    error?.code ?? "",
+    error?.message ?? error,
+  );
+  throw new DebtDeskError(
+    "The desk could not write the chase log",
+    502,
+    "debt_desk_write_failed",
+  );
 }
 
 // deno-lint-ignore no-explicit-any
@@ -952,17 +909,25 @@ export function createSupabaseDebtDeskStore(
       const { error } = await client.from("payment_chase_logs").insert(
         rows.map((r) => ({ ...r, org_id: orgId })),
       );
-      if (error) {
-        console.error(
-          "[debt_desk] chase-log write failed",
-          error?.code ?? "",
-          error?.message ?? error,
-        );
-        throw new DebtDeskError(
-          "The desk could not write the chase log",
-          502,
-          "debt_desk_write_failed",
-        );
+      if (error) writeFailed(error);
+    },
+    async claimSend(rows) {
+      const { error } = await client.from("payment_chase_logs").insert(
+        rows.map((r) => ({ ...r, org_id: orgId })),
+      );
+      if (!error) return true;
+      if (String(error?.code ?? "") === "23505") return false;
+      writeFailed(error);
+    },
+    async settleSend(draftId, ids, patch) {
+      const { data, error } = await client.from("payment_chase_logs")
+        .update(patch).eq("org_id", orgId).eq("draft_id", draftId)
+        .eq("outcome_code", "sending").in("xero_invoice_id", ids).select("id");
+      if (error) writeFailed(error);
+      if ((data || []).length !== ids.length) {
+        writeFailed({
+          message: `settled ${(data || []).length} of ${ids.length} claim rows`,
+        });
       }
     },
     draftRows: (draftId) =>
@@ -1003,10 +968,12 @@ export function createSupabaseDebtDeskStore(
       }
       return out;
     },
-    promiseRows: (sinceIso) =>
-      pagedLog(
-        (q) => q.eq("outcome_code", "promised").gte("created_at", sinceIso),
-        "promises",
-      ),
+    async opsManagerUserId() {
+      const { data, error } = await client.from("users").select("id")
+        .eq("role", "ops_manager").order("created_at", { ascending: true })
+        .limit(1);
+      if (error) readFailed("the desk owner", error);
+      return data?.[0]?.id ? String(data[0].id) : null;
+    },
   };
 }

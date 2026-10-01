@@ -10,7 +10,10 @@
 //   friendly_text     day 1, to the client
 //   firm_text         day 2, to the client, with each invoice's pay link
 //   jan_visit         day 7, to Jan (his own phone), naming who to visit and where
-//   deposit_reminder  the one friendly reminder about a deposit or before-work invoice
+//   deposit_reminder  the one friendly reminder about a deposit or before-work invoice; it
+//                     says "deposit" only when every invoice is a deposit, otherwise "the
+//                     invoice for your job" (a progress claim or materials invoice before the
+//                     job's first payment is not a deposit)
 //
 // The call steps carry no text (Shaun calls), and builder statements are plan step 6.
 //
@@ -41,6 +44,8 @@ export interface DebtDraftInvoice {
   amount_due: number;
   due_date: string | null;
   days_overdue: number | null;
+  /** The debt book's kind (deposit, progress_claim, materials, ...); absent when unknown. */
+  kind?: string | null;
 }
 
 export interface DebtDraftInput {
@@ -185,10 +190,16 @@ export function debtDraftText(input: DebtDraftInput): string {
       const phone = input.phone?.trim() ? ` Phone: ${input.phone.trim()}.` : "";
       return `Hi Jan, please visit ${input.payer_name.trim()} about ${about}.${site}${phone} Please tell Shaun how it goes.`;
     }
-    case "deposit_reminder":
-      return `Hi ${name}, a friendly reminder about the deposit for your job: ${what.text}${
+    case "deposit_reminder": {
+      const about = input.invoices.every((i) => i.kind === "deposit")
+        ? "the deposit"
+        : what.single
+        ? "the invoice"
+        : "the invoices";
+      return `Hi ${name}, a friendly reminder about ${about} for your job: ${what.text}${
         what.single ? "" : " now due"
       }. ${PAID_THANKS} If you have any questions about the job, just reply to this text. ${DEBT_DRAFT_SIGN_OFF}`;
+    }
   }
 }
 
@@ -279,11 +290,18 @@ export interface DebtDeskDraft {
   step: DebtDraftStep;
   /** The text to show: the approved or sent text once decided, else the standard wording. */
   text: string;
-  /** The standard wording for this draft. */
-  template_text: string;
-  status: "pending" | "approved" | "skipped" | "sent";
-  /** True when the approved or sent text differs from the standard wording. */
-  edited: boolean;
+  /**
+   * The standard wording for this draft. Null on a decided firm text: its pay links are not
+   * read again, so its standard wording is not known.
+   */
+  template_text: string | null;
+  /** sending: a send claimed the draft and has not been confirmed sent. */
+  status: "pending" | "approved" | "skipped" | "sending" | "sent";
+  /**
+   * True when the approved or sent text differs from the standard wording; null when the
+   * standard wording is not known (a decided firm text).
+   */
+  edited: boolean | null;
   /** Firm text only: the pay link read from Xero for each invoice. */
   pay_links:
     | Array<
@@ -293,6 +311,11 @@ export interface DebtDeskDraft {
   approved_by: string | null;
   approved_by_user_id: string | null;
   decided_at: string | null;
-  /** The last send attempt after the approval that did not send (refused or failed). */
-  last_send: { at: string; outcome: "failed"; reason: string | null } | null;
+  /**
+   * failed: the last send attempt after the approval that did not send (refused). A claimed
+   * send that could not be confirmed is not_confirmed: it stays claimed so it never texts twice.
+   */
+  last_send:
+    | { at: string; outcome: "failed" | "not_confirmed"; reason: string | null }
+    | null;
 }

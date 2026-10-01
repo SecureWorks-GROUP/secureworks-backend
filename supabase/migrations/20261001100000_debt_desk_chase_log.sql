@@ -30,6 +30,11 @@
 --                            belongs to
 --      draft_amount          the invoice's amount due that the draft was written
 --                            against; the send refuses when Xero shows less
+--    A send claims its draft first: one 'sending' row per covered invoice, which
+--    becomes 'sent' once the text goes. A partial unique index allows one
+--    sending-or-sent row per draft and invoice, so two overlapping sends of one
+--    draft cannot both text the client, and a send whose 'sent' write failed
+--    stays claimed rather than becoming sendable again.
 -- 3. Row-level security. The table had none (debt-map-s1 B19). Every reader
 --    and writer today is a server function on the service role (ops-api,
 --    daily-digest, reporting-api), which keeps full access through an explicit
@@ -69,7 +74,7 @@ ALTER TABLE public.payment_chase_logs DROP CONSTRAINT IF EXISTS payment_chase_lo
 ALTER TABLE public.payment_chase_logs ADD CONSTRAINT payment_chase_logs_outcome_code_check
   CHECK (outcome_code IS NULL OR outcome_code IN (
     'no_answer', 'spoke', 'promised', 'disputed', 'says_paid',
-    'sent', 'failed', 'skipped'
+    'sending', 'sent', 'failed', 'skipped'
   ));
 
 ALTER TABLE public.payment_chase_logs DROP CONSTRAINT IF EXISTS payment_chase_logs_schedule_step_check;
@@ -90,13 +95,14 @@ ALTER TABLE public.payment_chase_logs ADD CONSTRAINT payment_chase_logs_promise_
 
 CREATE INDEX IF NOT EXISTS idx_chase_logs_draft
   ON public.payment_chase_logs (draft_id) WHERE draft_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_chase_logs_promised
-  ON public.payment_chase_logs (created_at) WHERE outcome_code = 'promised';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chase_logs_draft_send_claim
+  ON public.payment_chase_logs (draft_id, xero_invoice_id)
+  WHERE outcome_code IN ('sending', 'sent');
 
 COMMENT ON COLUMN public.payment_chase_logs.method IS
   'The one channel field. call, sms, auto_sms (GHL workflow), email, note, status_change, personality_note, classification, proposal; visit (Jan at the door), statement (builder statement), letter.';
 COMMENT ON COLUMN public.payment_chase_logs.outcome_code IS
-  'Closed list: no_answer, spoke, promised, disputed, says_paid (what a contact achieved); sent, failed, skipped (what happened to a desk message). The free-text outcome column stays for notes and older rows.';
+  'Closed list: no_answer, spoke, promised, disputed, says_paid (what a contact achieved); sending (a send claimed, not yet confirmed), sent, failed, skipped (what happened to a desk message). The free-text outcome column stays for notes and older rows.';
 COMMENT ON COLUMN public.payment_chase_logs.amount_due_at_promise IS
   'Amount due on the covered invoices when the promise was logged, read live from Xero. The promise is kept when Xero shows that much less owing by the morning after the date.';
 COMMENT ON COLUMN public.payment_chase_logs.approved_by_user_id IS

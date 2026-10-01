@@ -6,14 +6,15 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   createSupabaseDebtDeskStore,
+  DEBT_DESK_OWNERS_SETTING,
   DEBT_SENDING_SWITCH,
   type DebtDeskDeps,
   DebtDeskError,
+  debtDeskOwnerIds,
   type DebtDeskStore,
   debtDraftDecide,
   debtDraftSend,
   debtLogOutcome,
-  debtPromises,
   debtSendingEnabled,
 } from "./debt_desk_actions.ts";
 import { debtDraftStates } from "./debt_desk_drafts.ts";
@@ -24,6 +25,11 @@ const ORG = "00000000-0000-0000-0000-000000000001";
 const SHAUN = {
   user_id: "20000000-0000-4000-8000-0000000000aa",
   email: "shaun@example.test",
+};
+/** Another staff user (an admin) who is not the desk owner. */
+const OTHER_STAFF = {
+  user_id: "20000000-0000-4000-8000-0000000000bb",
+  email: "admin@example.test",
 };
 const A = "aaaaaaaa-0000-4000-8000-000000000001";
 const B = "aaaaaaaa-0000-4000-8000-000000000002";
@@ -36,7 +42,20 @@ const JAN_DRAFT = "2026-10-01:contact-a:jan:jan_visit|10000";
 function memoryStore(seed: Record<string, unknown>[] = []) {
   const rows: Record<string, unknown>[] = [...seed];
   let clock = 0;
-  const store: DebtDeskStore & { rows: typeof rows; failInsert?: boolean } = {
+  const push = (next: Record<string, unknown>[]) => {
+    clock += 1;
+    const at = new Date(Date.parse(THU_9AM) + clock * 1000).toISOString();
+    for (const r of next) {
+      rows.push({ id: `r${rows.length + 1}`, created_at: at, ...r });
+    }
+  };
+  const claimed = (r: Record<string, unknown>) =>
+    r.outcome_code === "sending" || r.outcome_code === "sent";
+  const store: DebtDeskStore & {
+    rows: typeof rows;
+    failInsert?: boolean;
+    failSettleSent?: boolean;
+  } = {
     rows,
     insertChaseRows(next) {
       if ((store as any).failInsert) {
@@ -44,11 +63,37 @@ function memoryStore(seed: Record<string, unknown>[] = []) {
           new DebtDeskError("write failed", 502, "debt_desk_write_failed"),
         );
       }
-      clock += 1;
-      const at = new Date(Date.parse(THU_9AM) + clock * 1000).toISOString();
-      for (const r of next) {
-        rows.push({ id: `r${rows.length + 1}`, created_at: at, ...r });
+      push(next);
+      return Promise.resolve();
+    },
+    // The unique claim index: one sending-or-sent row per draft and invoice.
+    claimSend(next) {
+      const taken = next.some((n) =>
+        rows.some((r) =>
+          claimed(r) && r.draft_id === n.draft_id &&
+          r.xero_invoice_id === n.xero_invoice_id
+        )
+      );
+      if (taken) return Promise.resolve(false);
+      push(next);
+      return Promise.resolve(true);
+    },
+    settleSend(draftId, ids, patch) {
+      if (store.failSettleSent && patch.outcome_code === "sent") {
+        return Promise.reject(
+          new DebtDeskError("write failed", 502, "debt_desk_write_failed"),
+        );
       }
+      const hit = rows.filter((r) =>
+        r.draft_id === draftId && r.outcome_code === "sending" &&
+        ids.includes(String(r.xero_invoice_id))
+      );
+      if (hit.length !== ids.length) {
+        return Promise.reject(
+          new DebtDeskError("write failed", 502, "debt_desk_write_failed"),
+        );
+      }
+      for (const r of hit) Object.assign(r, patch);
       return Promise.resolve();
     },
     draftRows: (id) => Promise.resolve(rows.filter((r) => r.draft_id === id)),
@@ -62,8 +107,7 @@ function memoryStore(seed: Record<string, unknown>[] = []) {
       Promise.resolve(
         ids.map((id) => ({ id, ghl_contact_id: "ghl-contact-1" })),
       ),
-    promiseRows: () =>
-      Promise.resolve(rows.filter((r) => r.outcome_code === "promised")),
+    opsManagerUserId: () => Promise.resolve(SHAUN.user_id),
   };
   return store;
 }
@@ -92,6 +136,7 @@ function deps(
   const d: DebtDeskDeps = {
     store,
     sendingEnabled: false,
+    deskOwnerIds: () => Promise.resolve([SHAUN.user_id]),
     now: () => new Date(THU_9AM),
     readInvoice: (id) => {
       reads.push(id);
@@ -342,7 +387,6 @@ Deno.test("outcome: a call outcome is logged per invoice with its step; no Xero 
   const x = deps(store);
   const res = await debtLogOutcome(
     {
-      payer_key: "contact-a",
       xero_invoice_ids: [A, B],
       outcome_code: "no_answer",
       channel: "call",
@@ -377,7 +421,6 @@ Deno.test("outcome: Jan's visit is logged as a visit", async () => {
   const store = memoryStore();
   await debtLogOutcome(
     {
-      payer_key: "contact-a",
       xero_invoice_ids: [A],
       outcome_code: "spoke",
       channel: "call",
@@ -399,7 +442,6 @@ Deno.test("outcome: a promise stamps the amount due read live from Xero when it 
   });
   const res = await debtLogOutcome(
     {
-      payer_key: "contact-a",
       xero_invoice_ids: [A, B],
       outcome_code: "promised",
       promised_amount: 100,
@@ -436,7 +478,6 @@ Deno.test("outcome: a promise stamps the amount due read live from Xero when it 
 
 Deno.test("outcome: refuses a bad promise, a paid invoice, or an unreadable Xero, and writes nothing", async () => {
   const base = {
-    payer_key: "contact-a",
     xero_invoice_ids: [A],
     outcome_code: "promised",
     promised_amount: 50,
@@ -489,6 +530,23 @@ Deno.test("outcome: refuses a bad promise, a paid invoice, or an unreadable Xero
     );
     assertEquals(store.rows, []);
   }
+});
+
+Deno.test("send: an older credit note with the drafted balance still owing does not block the text", async () => {
+  const store = await approvedStore();
+  const x = deps(store, {
+    sendingEnabled: true,
+    invoices: {
+      [A]: xeroInvoice(A, {
+        AmountDue: 100,
+        AmountCredited: 25,
+        CreditNotes: [{ CreditNoteID: "c1" }],
+      }),
+    },
+  });
+  const res = await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d);
+  assertEquals(res.results[0].sent, true);
+  assertEquals(x.sends.length, 1);
 });
 
 // ── debt_draft_send ──
@@ -585,8 +643,9 @@ Deno.test("send: the last Xero check refuses paid, part-paid, voided and credite
     [{ AmountDue: 60, AmountPaid: 40 }, "part_paid"],
     [{ Status: "VOIDED" }, "voided"],
     [{ Status: "DELETED" }, "voided"],
-    [{ AmountCredited: 10, AmountDue: 90 }, "credited"],
-    [{ CreditNotes: [{ CreditNoteID: "c1" }] }, "credited"],
+    // Credited since the draft: the amount due fell below what the text says.
+    [{ AmountCredited: 10, AmountDue: 90 }, "part_paid"],
+    [{ AmountCredited: 100, AmountDue: 0 }, "paid"],
     [{ Status: "DRAFT" }, "not_authorised"],
   ];
   for (const [over, code] of cases) {
@@ -670,7 +729,6 @@ Deno.test("send: refuses an unapproved, skipped, stale, Jan or since-chased draf
     const store = await approvedStore();
     await debtLogOutcome(
       {
-        payer_key: "contact-a",
         xero_invoice_ids: [A],
         outcome_code: "disputed",
         channel: "call",
@@ -732,7 +790,8 @@ Deno.test("send: drafts go one at a time; a Xero rate limit stops the rest of th
   ]);
   assertEquals(most, 0);
 
-  // A provider failure is logged as failed and the batch carries on, one send at a time.
+  // A provider failure is not confirmed: the draft stays claimed, the batch carries on, one
+  // send at a time, and the failed draft is never sent again.
   const store2 = await approvedStore();
   await debtDraftDecide(
     {
@@ -758,13 +817,122 @@ Deno.test("send: drafts go one at a time; a Xero rate limit stops the rest of th
   const res2 = await debtDraftSend({ draft_ids: [DRAFT, other] }, SHAUN, y.d);
   assertEquals(res2.results.map((r) => [r.sent, r.code ?? null]), [[
     false,
-    "send_failed",
+    "send_not_confirmed",
   ], [true, null]]);
   assertEquals(most, 1);
   assertEquals(
-    store2.rows.filter((r) => r.outcome === "send failed").length,
+    store2.rows.filter((r) =>
+      r.outcome_code === "sending" &&
+      r.outcome === "send not confirmed: SMS send failed"
+    ).length,
     2,
   );
+  const state = debtDraftStates(store2.rows).get(DRAFT);
+  assertEquals(state?.decision?.kind, "sending");
+  assertEquals(state?.decision?.reason, "send not confirmed: SMS send failed");
+  const again = await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, y.d);
+  assertEquals(again.results[0].code, "already_sending");
+  assertEquals(n, 2);
+  // An unconfirmed claim never moves the ladder.
+  assert(
+    store2.rows.filter((r) => r.outcome_code === "sending").every((r) =>
+      debtChaseEventFromLogRow(r) === null
+    ),
+  );
+});
+
+Deno.test("send: two overlapping sends of one draft text the client once", async () => {
+  const store = await approvedStore();
+  const x = deps(store, { sendingEnabled: true });
+  const [one, two] = await Promise.all([
+    debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d),
+    debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d),
+  ]);
+  assertEquals(x.sends.length, 1);
+  assertEquals(
+    [one.results[0], two.results[0]].map((r) => r.code ?? "sent").sort(),
+    ["already_sending", "sent"],
+  );
+  assertEquals(store.rows.filter((r) => r.outcome_code === "sent").length, 2);
+});
+
+Deno.test("send: when the sent row cannot be written the draft stays claimed and is never re-sent", async () => {
+  const store = await approvedStore();
+  store.failSettleSent = true;
+  const x = deps(store, { sendingEnabled: true });
+  const res = await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d);
+  assertEquals(res.results[0], {
+    draft_id: DRAFT,
+    sent: true,
+    provider_message_id: "msg-1",
+    logged: false,
+  });
+  assertEquals(
+    debtDraftStates(store.rows).get(DRAFT)?.decision?.kind,
+    "sending",
+  );
+  store.failSettleSent = false;
+  const again = await debtDraftSend({ draft_ids: [DRAFT] }, SHAUN, x.d);
+  assertEquals(again.results[0].code, "already_sending");
+  assertEquals(x.sends.length, 1);
+  // Nor can the claimed draft be approved or skipped again.
+  const error = await assertRejects(() => approve(store), DebtDeskError);
+  assertEquals([error.status, error.code], [409, "debt_draft_sending"]);
+});
+
+Deno.test("desk owner: only the owner approves, skips and sends; any staff user logs an outcome", async () => {
+  const store = await approvedStore();
+  const d = deps(store, { sendingEnabled: true }).d;
+  for (
+    const call of [
+      () =>
+        debtDraftDecide(
+          {
+            draft_id: DRAFT,
+            decision: "skip",
+            text: "x",
+            xero_invoice_ids: [A, B],
+          },
+          OTHER_STAFF,
+          d,
+        ),
+      () => debtDraftSend({ draft_ids: [DRAFT] }, OTHER_STAFF, d),
+    ]
+  ) {
+    const error = await assertRejects(call, DebtDeskError);
+    assertEquals([error.status, error.code], [403, "debt_desk_owner_required"]);
+  }
+  const before = store.rows.length;
+  await debtLogOutcome(
+    {
+      xero_invoice_ids: [A],
+      outcome_code: "no_answer",
+      channel: "call",
+      schedule_step: "call",
+    },
+    OTHER_STAFF,
+    d,
+  );
+  assertEquals(store.rows.length, before + 1);
+  assertEquals(store.rows.at(-1)?.chased_by, OTHER_STAFF.email);
+});
+
+Deno.test("desk owner: the configured ids, else the ops manager; an unusable setting means nobody", async () => {
+  const store = memoryStore();
+  const env = (v: string | undefined) => (name: string) =>
+    name === DEBT_DESK_OWNERS_SETTING ? v : undefined;
+  assertEquals(await debtDeskOwnerIds(store, env(undefined)), [SHAUN.user_id]);
+  assertEquals(await debtDeskOwnerIds(store, env("  ")), [SHAUN.user_id]);
+  assertEquals(
+    await debtDeskOwnerIds(
+      store,
+      env(` ${OTHER_STAFF.user_id.toUpperCase()} , ${SHAUN.user_id}`),
+    ),
+    [OTHER_STAFF.user_id, SHAUN.user_id],
+  );
+  assertEquals(await debtDeskOwnerIds(store, env("shaun")), []);
+  store.opsManagerUserId = () => Promise.resolve(null);
+  assertEquals(await debtDeskOwnerIds(store, env(undefined)), []);
 });
 
 Deno.test("send: refuses without a signed-in user and caps a batch at 20", async () => {
@@ -784,128 +952,28 @@ Deno.test("send: refuses without a signed-in user and caps a batch at 20", async
     DebtDeskError,
   );
   assertEquals(e2.code, "debt_desk_bad_request");
+  const e3 = await assertRejects(
+    () => debtDraftSend({ draft_id: DRAFT }, SHAUN, deps(store).d),
+    DebtDeskError,
+  );
+  assertEquals(e3.code, "debt_desk_bad_request");
 });
 
-// ── debt_promises ──
-
-Deno.test("promises: open, kept and broken, judged against the live book", async () => {
-  const store = memoryStore();
-  const log = (
-    ids: string[],
-    amount: number,
-    date: string,
-    dueAtPromise: number,
-  ) =>
-    debtLogOutcome(
-      {
-        payer_key: "contact-a",
-        xero_invoice_ids: ids,
-        outcome_code: "promised",
-        promised_amount: amount,
-        promised_date: date,
-        channel: "call",
-        schedule_step: null,
-      },
-      SHAUN,
-      deps(store, {
-        invoices: Object.fromEntries(
-          ids.map((
-            id,
-          ) => [id, xeroInvoice(id, { AmountDue: dueAtPromise / ids.length })]),
-        ),
-      }).d,
-    );
-  await log([A], 40, "2026-10-01", 100);
-  await log([B], 50, "2026-10-01", 50);
-  // Read on Friday: A still owes 100 (broken); B is gone from the open book (kept).
-  const book = {
-    perth_date: "2026-10-02",
-    read_at: "2026-10-02T07:00:00+08:00",
-    invoices: [{
-      xero_invoice_id: A,
-      invoice_number: "INV-1",
-      contact_name: "Sam Example",
-      amount_due: 100,
-    }],
-  };
-  const res = await debtPromises(
-    {},
-    { ...deps(store).d, readBook: () => Promise.resolve(book) } as any,
-  );
-  assertEquals(res.perth_date, "2026-10-02");
-  assertEquals(
-    res.promises.map((
-      p: any,
-    ) => [p.invoice_numbers, p.status, p.amount_due_now, p.current]),
-    [
-      [["INV-1"], "broken", 100, true],
-      [[null], "kept", 0, true],
-    ],
-  );
-  assertEquals(res.summary, { open: 0, broken: 1, kept: 1, superseded: 0 });
-});
-
-Deno.test("promises: a later outcome supersedes an earlier promise", async () => {
-  const store = memoryStore();
-  const x = deps(store);
-  await debtLogOutcome(
-    {
-      payer_key: "p",
-      xero_invoice_ids: [A],
-      outcome_code: "promised",
-      promised_amount: 10,
-      promised_date: "2026-10-05",
-      channel: "call",
-      schedule_step: null,
-    },
-    SHAUN,
-    x.d,
-  );
-  await debtLogOutcome(
-    {
-      payer_key: "p",
-      xero_invoice_ids: [A],
-      outcome_code: "disputed",
-      channel: "call",
-      schedule_step: null,
-    },
-    SHAUN,
-    x.d,
-  );
-  const book = {
-    perth_date: "2026-10-01",
-    read_at: "x",
-    invoices: [{
-      xero_invoice_id: A,
-      invoice_number: "INV-1",
-      contact_name: "Sam",
-      amount_due: 100,
-    }],
-  };
-  const res = await debtPromises(
-    {},
-    { ...x.d, readBook: () => Promise.resolve(book) } as any,
-  );
-  assertEquals(res.promises.map((p: any) => [p.status, p.current]), [[
-    "open",
-    false,
-  ]]);
-  assertEquals(res.summary.superseded, 1);
-});
-
-Deno.test("promises: refuses unknown parameters", async () => {
+Deno.test("outcome: payer_key is not a field", async () => {
   const error = await assertRejects(
     () =>
-      debtPromises(
-        { days: "9" },
+      debtLogOutcome(
         {
-          ...deps(memoryStore()).d,
-          readBook: () => Promise.reject(new Error("no")),
-        } as any,
+          payer_key: "contact-a",
+          xero_invoice_ids: [A],
+          outcome_code: "spoke",
+        },
+        SHAUN,
+        deps(memoryStore()).d,
       ),
     DebtDeskError,
   );
-  assertEquals(error.status, 400);
+  assertEquals(error.code, "debt_desk_bad_request");
 });
 
 // ── The Supabase store ──
@@ -922,14 +990,23 @@ function fakeSupabase(
       const calls: Array<[string, unknown[]]> = [];
       const q: any = {};
       for (
-        const m of ["select", "eq", "in", "gte", "order", "range", "insert"]
+        const m of [
+          "select",
+          "eq",
+          "in",
+          "order",
+          "range",
+          "limit",
+          "insert",
+          "update",
+        ]
       ) {
         q[m] = (...args: unknown[]) => {
           calls.push([m, args]);
           return q;
         };
       }
-      for (const m of ["update", "upsert", "delete", "rpc"]) {
+      for (const m of ["upsert", "delete", "rpc"]) {
         q[m] = () => {
           throw new Error(`unexpected ${m}`);
         };
@@ -975,21 +1052,76 @@ Deno.test("store: inserts are one org-scoped batch and a PostgREST error is a re
       "draftRows",
       "invoiceJobLinks",
       "jobGhlContacts",
-      "promiseRows",
+      "opsManagerUserId",
       "chaseLogRows",
     ] as const
   ) {
     const e = await assertRejects(
       () =>
         (createSupabaseDebtDeskStore(bad.client, ORG) as any)[read](
-          read === "draftRows"
-            ? "d"
-            : read === "promiseRows"
-            ? "2026-01-01"
-            : ["x"],
+          read === "draftRows" ? "d" : ["x"],
         ),
       DebtDeskError,
     );
     assertEquals(e.code, "debt_desk_read_failed", read);
   }
+});
+
+Deno.test("store: a claim is refused by the unique index, never by a silent success, and a settle must change every claim row", async () => {
+  const taken = fakeSupabase(() => ({
+    data: null,
+    error: { code: "23505", message: "duplicate key" },
+  }));
+  assertEquals(
+    await createSupabaseDebtDeskStore(taken.client, ORG).claimSend([{
+      draft_id: "d",
+    }]),
+    false,
+  );
+  const ok = fakeSupabase(() => ({ data: null, error: null }));
+  assertEquals(
+    await createSupabaseDebtDeskStore(ok.client, ORG).claimSend([{
+      draft_id: "d",
+    }]),
+    true,
+  );
+  const broken = fakeSupabase(() => ({
+    data: null,
+    error: { code: "23514", message: "check violated" },
+  }));
+  const e1 = await assertRejects(
+    () =>
+      createSupabaseDebtDeskStore(broken.client, ORG).claimSend([{
+        draft_id: "d",
+      }]),
+    DebtDeskError,
+  );
+  assertEquals(e1.code, "debt_desk_write_failed");
+
+  const settled = fakeSupabase(() => ({
+    data: [{ id: "1" }, { id: "2" }],
+    error: null,
+  }));
+  await createSupabaseDebtDeskStore(settled.client, ORG).settleSend(
+    "d",
+    [A, B],
+    { outcome_code: "sent" },
+  );
+  assertEquals(settled.log[0].calls, [
+    ["update", [{ outcome_code: "sent" }]],
+    ["eq", ["org_id", ORG]],
+    ["eq", ["draft_id", "d"]],
+    ["eq", ["outcome_code", "sending"]],
+    ["in", ["xero_invoice_id", [A, B]]],
+    ["select", ["id"]],
+  ]);
+  const short = fakeSupabase(() => ({ data: [{ id: "1" }], error: null }));
+  const e2 = await assertRejects(
+    () =>
+      createSupabaseDebtDeskStore(short.client, ORG).settleSend("d", [A, B], {
+        outcome_code: "sent",
+      }),
+    DebtDeskError,
+  );
+  assertEquals(e2.code, "debt_desk_write_failed");
 });

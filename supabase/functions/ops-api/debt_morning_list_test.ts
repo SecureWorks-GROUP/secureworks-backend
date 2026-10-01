@@ -655,6 +655,7 @@ Deno.test("drafts: a firm text carries each invoice's Xero pay link, read once p
     ...x.deps,
     store,
     chaseLog: logStore([sentYesterday(1)]),
+    payLinkCache: new Map(),
     payLink: (id: string) => {
       asked.push(id);
       return Promise.resolve(`https://in.xero.com/pay-${id.slice(-4)}`);
@@ -696,6 +697,7 @@ Deno.test("drafts: a firm text with no pay link has no draft, and says why", asy
       store,
       chaseLog: logStore([sentYesterday(1)]),
       payLink,
+      payLinkCache: new Map(),
     } as unknown as DebtMorningListDeps);
     assertEquals(list.items[0].draft, null);
     assert(
@@ -715,6 +717,7 @@ Deno.test("drafts: pay links are read one at a time, at most the limit per list"
     store: bookStore(),
     chaseLog: logStore([1, 2, 3].map((n) => sentYesterday(n))),
     payLinkLimit: 2,
+    payLinkCache: new Map(),
     payLink: async (id: string) => {
       inFlight += 1;
       most = Math.max(most, inFlight);
@@ -728,6 +731,117 @@ Deno.test("drafts: pay links are read one at a time, at most the limit per list"
   const capped = list.items.filter((i) => !i.draft);
   assertEquals(capped.length, 1);
   assert(capped[0].draft_problem?.includes("at most 2 pay links"));
+});
+
+Deno.test("drafts: a pay link read once is kept for the Perth day, and read again the next day", async () => {
+  const { x, store } = oneClientBook();
+  const asked: string[] = [];
+  const cache = new Map<string, string>();
+  const read = () =>
+    readDebtMorningList({}, {}, {
+      ...x.deps,
+      store,
+      chaseLog: logStore([sentYesterday(1)]),
+      payLinkCache: cache,
+      payLink: (id: string) => {
+        asked.push(id);
+        return Promise.resolve(`https://in.xero.com/pay-${asked.length}`);
+      },
+    } as unknown as DebtMorningListDeps);
+  const first = await read();
+  const second = await read();
+  assertEquals(asked, [idOf(1)]);
+  assertEquals(second.drafts.pay_links_read, 0);
+  assertEquals(second.items[0].draft?.text, first.items[0].draft?.text);
+
+  // A link kept from an earlier day is dropped, so it is read again.
+  cache.clear();
+  cache.set(`2026-09-30|${idOf(1)}`, "https://in.xero.com/yesterday");
+  const next = await read();
+  assertEquals(asked, [idOf(1), idOf(1)]);
+  assert(next.items[0].draft?.text.includes("https://in.xero.com/pay-2"));
+  assertEquals([...cache.keys()], [`2026-10-01|${idOf(1)}`]);
+});
+
+Deno.test("drafts: a decided firm text keeps its text, and its standard wording is not claimed", async () => {
+  const { x, store } = oneClientBook();
+  const first = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([sentYesterday(1)]),
+    payLinkCache: new Map(),
+    payLink: () => Promise.resolve("https://in.xero.com/pay"),
+  } as unknown as DebtMorningListDeps);
+  const draft = first.items[0].draft!;
+  const approved = {
+    id: "a1",
+    xero_invoice_id: idOf(1),
+    method: "sms",
+    schedule_step: "firm_text",
+    draft_id: draft.id,
+    created_at: "2026-09-30T23:10:00Z",
+    approved_by_user_id: "20000000-0000-4000-8000-0000000000aa",
+    outcome: "approved",
+    notes:
+      "Hi Client, an edited firm text https://in.xero.com/pay. Thanks, SecureWorks",
+    chased_by: "shaun@example.test",
+  };
+  const asked: string[] = [];
+  const list = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([sentYesterday(1), approved]),
+    payLinkCache: new Map(),
+    payLink: (id: string) => {
+      asked.push(id);
+      return Promise.resolve("https://in.xero.com/pay");
+    },
+  } as unknown as DebtMorningListDeps);
+  const d = list.items[0].draft!;
+  assertEquals(asked, []);
+  assertEquals([d.status, d.text, d.template_text, d.edited], [
+    "approved",
+    approved.notes,
+    null,
+    null,
+  ]);
+});
+
+Deno.test("drafts: a claimed send shows as sending, never as re-sendable, and does not move the ladder", async () => {
+  const { x, store } = oneClientBook();
+  const first = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore(),
+  } as unknown as DebtMorningListDeps);
+  const item = first.items[0];
+  const claim = {
+    id: "c1",
+    xero_invoice_id: idOf(1),
+    method: "sms",
+    schedule_step: "friendly_text",
+    draft_id: item.draft!.id,
+    created_at: "2026-09-30T23:40:00Z",
+    outcome_code: "sending",
+    outcome: "send not confirmed: SMS send failed",
+    notes: "Hi Client, the approved text. Thanks, SecureWorks",
+    approved_by_user_id: "20000000-0000-4000-8000-0000000000aa",
+    chased_by: "shaun@example.test",
+  };
+  const list = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([claim]),
+  } as unknown as DebtMorningListDeps);
+  assertEquals(list.items.map((i) => i.step), ["friendly_text"]);
+  const d = list.items[0].draft!;
+  assertEquals([d.status, d.text], ["sending", claim.notes]);
+  assertEquals(d.last_send, {
+    at: claim.created_at,
+    outcome: "not_confirmed",
+    reason: "send not confirmed: SMS send failed",
+  });
+  assertEquals(list.sent_today, []);
 });
 
 Deno.test("drafts: an approval, a skip and a refused send read back from the chase log", async () => {

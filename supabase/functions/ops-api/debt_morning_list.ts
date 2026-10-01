@@ -7,8 +7,8 @@
 //                       linked jobs' client phone, email and site, then works out today's step
 //                       per payer. Plan step 3 adds each item's draft (debt_desk_drafts.ts):
 //                       the standard wording, a firm text's Xero pay links (read one at a
-//                       time), and what Shaun decided. Approving and sending are
-//                       debt_desk_actions.ts.
+//                       time, kept for the Perth day), and what Shaun decided. Approving and
+//                       sending are debt_desk_actions.ts.
 //
 // This module writes nothing: no database write, no Xero write, no message.
 
@@ -51,8 +51,10 @@ export type DebtMorningListDeps = DebtBookDeps & {
   chaseLog: DebtChaseLogStore;
   /** Reads one invoice's Xero OnlineInvoice URL for a firm text (read-only). */
   payLink?: (xeroInvoiceId: string) => Promise<string>;
-  /** At most this many pay links per list read (default DEBT_PAY_LINK_LIMIT). */
+  /** At most this many live pay-link reads per list read (default DEBT_PAY_LINK_LIMIT). */
   payLinkLimit?: number;
+  /** Pay links already read today (default: the module's day cache, debt_desk_drafts.ts). */
+  payLinkCache?: Map<string, string>;
 };
 
 function chunks<T>(xs: T[], size = IN_CHUNK): T[][] {
@@ -196,6 +198,7 @@ export async function readDebtMorningList(
   );
   const contactById = new Map(contacts.map((c) => [String(c.id), c]));
   const drafts = await attachDebtDrafts(plan.items, rows, {
+    perthDate: book.perth_date,
     siteFor: (item) => {
       for (const line of item.invoices) {
         const jobId = jobIdByInvoice.get(line.xero_invoice_id.toLowerCase());
@@ -206,6 +209,7 @@ export async function readDebtMorningList(
     },
     payLink: deps.payLink,
     payLinkLimit: deps.payLinkLimit,
+    payLinkCache: deps.payLinkCache,
   });
 
   return {

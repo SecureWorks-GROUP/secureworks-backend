@@ -92,6 +92,34 @@ VALUES ('desk-invoice', 'visit', 'jan_visit', 'no_answer'),
        ('desk-invoice', 'statement', 'statement', 'sent'),
        ('desk-invoice', 'letter', NULL, NULL);
 
+-- 4b. A send claims its draft: one sending-or-sent row per draft and invoice.
+--     A second claim, or a claim on a sent draft, is refused; refusals and
+--     failures stay writable.
+INSERT INTO public.payment_chase_logs (xero_invoice_id, method, outcome_code, draft_id)
+VALUES ('claim-invoice', 'sms', 'sending', 'claim-draft|100');
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.payment_chase_logs (xero_invoice_id, method, outcome_code, draft_id)
+    VALUES ('claim-invoice', 'sms', 'sending', 'claim-draft|100');
+    RAISE EXCEPTION 'contract: a second claim on one draft and invoice was accepted';
+  EXCEPTION WHEN unique_violation THEN
+    NULL;
+  END;
+  UPDATE public.payment_chase_logs SET outcome_code = 'sent'
+   WHERE xero_invoice_id = 'claim-invoice' AND draft_id = 'claim-draft|100';
+  BEGIN
+    INSERT INTO public.payment_chase_logs (xero_invoice_id, method, outcome_code, draft_id)
+    VALUES ('claim-invoice', 'sms', 'sending', 'claim-draft|100');
+    RAISE EXCEPTION 'contract: a claim on a sent draft was accepted';
+  EXCEPTION WHEN unique_violation THEN
+    NULL;
+  END;
+  INSERT INTO public.payment_chase_logs (xero_invoice_id, method, outcome_code, draft_id)
+  VALUES ('claim-invoice', 'sms', 'failed', 'claim-draft|100'),
+         ('claim-invoice-2', 'sms', 'sending', 'claim-draft|100');
+END $$;
+
 -- 5. The closed lists refuse anything else.
 DO $$
 DECLARE
