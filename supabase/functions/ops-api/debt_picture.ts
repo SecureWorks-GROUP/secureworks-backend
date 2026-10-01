@@ -11,6 +11,8 @@
 //   debt_note            add a note (with a tag) against an invoice and its job; returns the merged
 //                        thread (desk notes plus the job's own notes), newest first.
 
+import { DEBT_CHASE_HISTORY_FILTER } from './debt_desk_drafts.ts'
+
 export const DEBT_PICTURE_VERSION = 'debt-picture/v1'
 
 export const DEBT_CLASSES = ['unclassified', 'genuine_debt', 'blocked_by_us', 'in_dispute', 'bad_debt', 'not_owed'] as const
@@ -262,7 +264,7 @@ export async function debtNote(client: any, body: any) {
 export async function debtNotes(client: any, xeroInvoiceId: string, jobId: string | null) {
   const out: Array<{ at: string; who: string | null; tag: string | null; text: string; source: string }> = []
   const { data: logs, error: e1 } = await client.from('payment_chase_logs')
-    .select('created_at, chased_by, method, outcome, notes').eq('xero_invoice_id', xeroInvoiceId).order('created_at', { ascending: false }).limit(100)
+    .select('created_at, chased_by, method, outcome, notes').eq('xero_invoice_id', xeroInvoiceId).or(DEBT_CHASE_HISTORY_FILTER).order('created_at', { ascending: false }).limit(100)
   if (e1) throw e1
   for (const l of logs || []) out.push({ at: l.created_at, who: l.chased_by, tag: l.method === 'note' ? l.outcome : l.method, text: l.notes || l.outcome || '', source: 'debt' })
   if (jobId) {

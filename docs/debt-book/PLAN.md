@@ -1,7 +1,8 @@
 # Debt book and chase desk: the plan
 
 **Written:** 2026-09-30. **For:** the captain (Shaun), and the workers who build it.
-**Status:** approved 30 Sep; build in progress (steps 0-1 live; step 2 in this change; see the PRs).
+**Status:** approved 30 Sep; build in progress (steps 0-1 live; step 2 in
+review; step 3 in this change, with sending off; see the PRs).
 **Reviewed in Lavish:** this document matches the Lavish plan page shown to the
 captain. Plain words are explained in [GLOSSARY.md](GLOSSARY.md). The
 captain's rulings, word for word, are in [DECISIONS.md](DECISIONS.md).
@@ -184,9 +185,10 @@ The rules are applied in order. They are the tested core of step 1.
    report, repair (supply, install or replace wording), otherwise make-safe.
 4. **Client invoices.** The first rule that matches wins:
    - `PROG` means a progress claim. It is debt only if the job has had a first
-     payment, meaning any money received on the job: a PAID invoice, an
-     amount paid on any of its invoices (part payment counts, round 2), or
-     `jobs.deposit_at` set.
+     payment, meaning any money received on the job: `jobs.deposit_at` set,
+     any PAID sales invoice on the job, or an amount paid (`amount_paid > 0`)
+     on this invoice or any sibling sales invoice on the job (part payment
+     counts, round 2).
      The one exception is INV-1477 (Perth Zoo), which the captain ruled is
      really a deposit.
    - `MAT` / `MAT50` means a materials invoice (first seen 2026-09-30). It is
@@ -280,9 +282,14 @@ The schedules:
   happens in Xero.
 - **Promises:** a promise records an amount and a date, and pauses chasing.
   A promised builder invoice still stays on the Monday statement, marked.
-  The morning after the date, if Xero shows it unpaid or short, the invoice
-  goes to the top marked "promise broken", at the next step. This holds for
-  deposits too.
+  When the promise is logged, the desk reads the invoice live from Xero and
+  stores the amount then due (`amount_due_at_promise`; for a promise covering
+  several invoices, their total). The morning after the date, the promise is
+  kept when the amount paid since the promise covers the promised amount
+  (amount due at the promise less today's amount due, an invoice paid off
+  counting as nothing due). Otherwise, unpaid or short, the invoice goes to
+  the top marked "promise broken", at the next step. This holds for deposits
+  too.
 - **Write-offs:** only Shaun, in Xero. The desk may suggest one, never do one.
 
 ## 5. What changes on Clear Debt
@@ -384,14 +391,26 @@ sending is still worth reviewing on Thursday.
     three new ones. Never copy the older `20260326000001_clear_debt.sql`
     list, which lacks classification and proposal;
   - `direction`;
-  - `outcome_code`, a closed list, beside the existing free-text `outcome`
-    column, which stays for notes and older rows;
+  - `outcome_code`, a closed list (no_answer, spoke, promised, disputed,
+    says_paid, sending, sent, failed, skipped), beside the existing free-text
+    `outcome` column, which stays for notes and older rows. A send first
+    claims its draft with a `sending` row per invoice, which becomes `sent`;
+    a partial unique index allows one sending-or-sent row per draft and
+    invoice, so a draft never texts twice;
   - `promised_amount` and `promised_date`;
+  - `amount_due_at_promise`, the amount due read live from Xero when a
+    promise is logged, so a part payment can show the promise kept;
   - `schedule_step`;
   - `approved_by_user_id`;
-  - `automated`;
+  - `automated`, default false;
   - `provider_message_id`;
-  - `covers_invoice_ids text[]`, for statements.
+  - `covers_invoice_ids text[]`, for statements and for any message or
+    promise covering several invoices;
+  - `draft_id` and `draft_amount`, which tie each approval, skip, send or
+    refused send to its morning-list draft and the amount the draft was
+    written against, so the last check can refuse a part-paid invoice.
+
+  Built in `20261001100000_debt_desk_chase_log.sql`.
 
   Add row-level security to the table: it has none today, and debt-map-s1
   B19 notes this. Check the migration version against the live ledger
@@ -401,9 +420,23 @@ sending is still worth reviewing on Thursday.
   before the function.
 - **Last check.** One live `get_xero_receivable` per send. Remember the Xero
   limit of 60 calls a minute: a batch of about 20 sends is fine, but send in
-  sequence, not fanned out.
+  sequence, not fanned out. "Credited" means a credit that leaves less owing
+  than the draft says; an older credit note with the drafted balance still
+  owing does not block the text.
+- **Who approves and sends.** Only the desk owner: the user ids in the
+  ops-api secret `DEBT_DESK_OWNER_USER_IDS`, or, unset, the owner list in
+  `debt_desk_settings`, seeded with Shaun's `users.id`. Never a role (five
+  live users hold `ops_manager`). With no owner, nobody can approve or send
+  and the screen shows "desk owner not set". Any staff user may log a call or
+  visit outcome.
+- **Sending switch.** One server-side switch, `DEBT_SENDING_ENABLED`, off
+  unless it is exactly `true`. While it is off every send attempt is refused
+  and logged as refused. It is turned on only after step 0 is done and
+  Shaun says start sending.
 - **Pay link.** Use Xero's OnlineInvoice URL, fetched per invoice. Do **not**
   use `send_payment_link`, which is broken (B1) and picks the newest invoice.
+  The morning list reads at most 10 links live per read and keeps each for
+  the Perth day, so re-reading the list does not spend the Xero limit.
 - **No paid AI.** Drafts are deterministic templates. The morning agent run
   (subscription Claude, as a scheduled routine) may add one context line and
   flags oddities. It never sends.

@@ -1094,3 +1094,29 @@ Deno.test("an agent key equal to the env service-role key is refused once the pl
     "api_key",
   );
 });
+
+Deno.test("debt desk writes are staff or server only; trades and the agent key are refused", () => {
+  // The actions themselves then refuse any caller that is not a signed-in staff user
+  // (debt_desk_actions.ts requireActor), and approve and send refuse anyone but the desk
+  // owner (requireDeskOwner), so a server key can authorise but not approve.
+  for (const action of ["debt_draft_decide", "debt_log_outcome", "debt_draft_send"]) {
+    for (const authMode of ["none", "api_key"] as const) {
+      assertEquals(authorizationStatus({ action, authMode }), 401, action);
+    }
+    for (const role of ["admin", "owner", "ops_manager"]) {
+      assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200);
+    }
+    for (const role of ["crew", "installer", "lead_installer"]) {
+      assertEquals(
+        authorizationStatus({
+          action,
+          authMode: "jwt",
+          role,
+          managedVerticals: ["roofing"],
+        }),
+        403,
+      );
+    }
+    assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
+  }
+});
