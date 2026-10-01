@@ -1,7 +1,8 @@
 // Debt desk drafts on the morning list (plan step 3, docs/debt-book/PLAN.md section 4).
 //
 // The morning list (debt_morning_list.ts) works out today's step per payer; this module puts
-// the draft on each item that has one: the standard wording (debt_draft_templates.ts), and,
+// the client draft on each item that has one (Jan's visits are listed in Jan's one morning
+// text instead, debt_jan_text.ts): the standard wording (debt_draft_templates.ts), and,
 // once Shaun has decided, what he decided. Decisions live on payment_chase_logs as rows
 // carrying the draft's id (debt_desk_actions.ts writes them):
 //
@@ -44,10 +45,12 @@ export const DEBT_PAY_LINK_LIMIT = 10;
  * desk approval, skip, refusal or claim is not a chase. send_chase_sms logs a desk send with its
  * own row (no draft id) on the first covered invoice only; the desk's sent row there carries the
  * job id, as that row does, and is left out. The desk's sent rows on the other covered invoices
- * carry no job id and are shown.
+ * carry no job id and are shown. Jan's morning text (debt_jan_text.ts) goes to Jan, not the
+ * payer, so it is not a chase of the payer either: its rows carry no schedule step and are left
+ * out. Jan's visit is shown once Shaun logs what Jan reports.
  */
 export const DEBT_CHASE_HISTORY_FILTER =
-  "draft_id.is.null,and(outcome_code.eq.sent,job_id.is.null)";
+  "draft_id.is.null,and(outcome_code.eq.sent,job_id.is.null,schedule_step.not.is.null)";
 
 /** Pay links read today, keyed `<perth date>|<xero invoice id>`; other days are dropped. */
 const PAY_LINK_CACHE = new Map<string, string>();
@@ -168,8 +171,6 @@ const statusOf = (d: DebtDraftDecision | null): DebtDeskDraft["status"] =>
 export interface AttachDraftOptions {
   /** Today's Perth date: the pay-link cache keeps only today's links. */
   perthDate: string;
-  /** The job's site address for the item's invoices (Jan's text). */
-  siteFor: (item: DebtMorningItem) => string | null;
   /** Reads one invoice's Xero OnlineInvoice URL. Absent: firm texts get no draft. */
   payLink?: (xeroInvoiceId: string) => Promise<string>;
   payLinkLimit?: number;
@@ -250,8 +251,6 @@ export async function attachDebtDrafts(
       step,
       payer_name: item.payer_name,
       invoices: item.invoices,
-      site: step === "jan_visit" ? opts.siteFor(item) : null,
-      phone: step === "jan_visit" ? item.phone : null,
     };
 
     let template: string | null = null;
@@ -280,7 +279,7 @@ export async function attachDebtDrafts(
     item.draft = {
       id,
       channel: "sms",
-      to: step === "jan_visit" ? "jan" : "client",
+      to: "client",
       step,
       text,
       template_text: template,
@@ -320,14 +319,17 @@ export function debtSentOn(
       .slice(0, 10);
     if (day !== perthDate) continue;
     const who = describe(sent.covers);
+    const step = draftId.slice(
+      draftId.lastIndexOf(":") + 1,
+      draftId.lastIndexOf("|"),
+    );
     out.push({
       draft_id: draftId,
-      payer_name: who.payer_name,
+      // Jan's morning text went to Jan, covering several payers.
+      to: step === "jan_text" ? "jan" as const : "client" as const,
+      payer_name: step === "jan_text" ? "Jan" : who.payer_name,
       invoice_numbers: who.invoice_numbers,
-      step: draftId.slice(
-        draftId.lastIndexOf(":") + 1,
-        draftId.lastIndexOf("|"),
-      ),
+      step,
       text: sent.text,
       at: sent.at,
       by: sent.by,

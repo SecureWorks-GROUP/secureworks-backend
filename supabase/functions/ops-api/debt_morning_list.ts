@@ -8,7 +8,10 @@
 //                       per payer. Plan step 3 adds each item's draft (debt_desk_drafts.ts):
 //                       the standard wording, a firm text's Xero pay links (read one at a
 //                       time, kept for the Perth day), and what Shaun decided. Approving and
-//                       sending are debt_desk_actions.ts.
+//                       sending are debt_desk_actions.ts. Plan step 5 adds `jan_text`: Jan's
+//                       one morning text listing today's Jan visits (debt_jan_text.ts), to
+//                       Jan's own mobile, which is read from the JAN_MOBILE setting or the
+//                       staff records only when there is a Jan text to show.
 //
 // This module writes nothing: no database write, no Xero write, no message.
 
@@ -16,10 +19,17 @@ import { type DebtBookDeps, DebtBookError, readDebtBook } from "./debt_book.ts";
 import { perthTimestamp } from "./debt_book_rules.ts";
 import { attachDebtDrafts, debtSentOn } from "./debt_desk_drafts.ts";
 import {
+  buildJanText,
+  JAN_TEXT_STEP,
+  type JanMobile,
+} from "./debt_jan_text.ts";
+import {
   DEBT_CHASE_GROUP_ORDER,
   DEBT_CHASE_NO_REMINDER,
+  DEBT_CHASE_OUTCOME_LABELS,
   DEBT_CHASE_SCHEDULES,
   DEBT_CHASE_STEPS,
+  DEBT_JAN_VISIT_OUTCOMES,
   type DebtChaseContact,
   type DebtChaseEvent,
   debtChaseEventFromLogRow,
@@ -57,6 +67,8 @@ export type DebtMorningListDeps = DebtBookDeps & {
   payLinkCache?: Map<string, string>;
   /** The desk owner and sending state for the signed-in viewer (debtDeskState). */
   desk?: () => Promise<Record<string, unknown>>;
+  /** Jan's mobile, read now (debt_jan_text.ts readJanMobile). Absent: not set. */
+  janMobile?: () => Promise<JanMobile>;
 };
 
 function chunks<T>(xs: T[], size = IN_CHUNK): T[][] {
@@ -201,18 +213,38 @@ export async function readDebtMorningList(
   const contactById = new Map(contacts.map((c) => [String(c.id), c]));
   const drafts = await attachDebtDrafts(plan.items, rows, {
     perthDate: book.perth_date,
-    siteFor: (item) => {
-      for (const line of item.invoices) {
-        const jobId = jobIdByInvoice.get(line.xero_invoice_id.toLowerCase());
-        const site = jobId ? siteWords(contactById.get(String(jobId))) : null;
-        if (site) return site;
-      }
-      return null;
-    },
     payLink: deps.payLink,
     payLinkLimit: deps.payLinkLimit,
     payLinkCache: deps.payLinkCache,
   });
+
+  // Jan's morning text: Jan's mobile is read only when there is a Jan text to show.
+  const janToday = `${book.perth_date}:jan-`;
+  const janNeeded = plan.items.some((i) => !i.hold && i.step === "jan_visit") ||
+    rows.some((r) =>
+      String(r.draft_id ?? "").startsWith(janToday) &&
+      String(r.draft_id).includes(`:${JAN_TEXT_STEP}|`)
+    );
+  const janText = janNeeded
+    ? buildJanText(plan.items, rows, {
+      perthDate: book.perth_date,
+      mobile: deps.janMobile ? await deps.janMobile() : {
+        phone: null,
+        source: null,
+        staff_user_id: null,
+        staff_name: null,
+        problem: "Jan's mobile not set: the desk cannot read it here",
+      },
+      siteFor: (item) => {
+        for (const line of item.invoices) {
+          const jobId = jobIdByInvoice.get(line.xero_invoice_id.toLowerCase());
+          const site = jobId ? siteWords(contactById.get(String(jobId))) : null;
+          if (site) return site;
+        }
+        return null;
+      },
+    })
+    : null;
 
   return {
     ok: true,
@@ -239,6 +271,7 @@ export async function readDebtMorningList(
     // Whether a desk owner is named and whether this viewer is it: with none, the screen
     // shows "desk owner not set" and nobody can approve or send.
     desk: deps.desk ? await deps.desk() : null,
+    jan_text: janText,
     sent_today: debtSentOn(rows, book.perth_date, (ids) => {
       const invs = ids.map((id) => bookById.get(id)).filter((i) => !!i);
       return {
@@ -251,12 +284,15 @@ export async function readDebtMorningList(
       pending: plan.items.filter((i) => i.draft?.status === "pending").length,
       not_drafted: plan.items.filter((i) => i.draft_problem).length,
       pay_links_read: drafts.pay_links_read,
+      jan_text: janText?.status ?? null,
     },
     schedule: {
       schedules: DEBT_CHASE_SCHEDULES,
       steps: DEBT_CHASE_STEPS,
       group_order: DEBT_CHASE_GROUP_ORDER,
       no_reminder: DEBT_CHASE_NO_REMINDER,
+      outcomes: DEBT_CHASE_OUTCOME_LABELS,
+      jan_visit_outcomes: DEBT_JAN_VISIT_OUTCOMES,
     },
   };
 }

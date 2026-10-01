@@ -258,8 +258,9 @@ Deno.test("debt_morning_list: Thursday's first list from the 29 Sep book matches
     ],
   );
   assert(list.items.every((i) => i.hold ? true : i.held_step === null));
-  // Drafts (plan step 3): every chaseable text, Jan visit and deposit reminder carries a
-  // pending draft in the standard wording; calls, statements and holds carry none.
+  // Drafts (plan step 3): every chaseable text and deposit reminder carries a pending draft in
+  // the standard wording; calls, statements and holds carry none. Jan's visits carry none of
+  // their own: they are listed in Jan's one morning text (plan step 5).
   for (const i of list.items) {
     const drafted = !i.hold &&
       DEBT_DRAFT_STEPS.includes(i.step as DebtDraftStep);
@@ -267,12 +268,24 @@ Deno.test("debt_morning_list: Thursday's first list from the 29 Sep book matches
     if (!i.draft) continue;
     assertEquals(i.draft.status, "pending");
     assertEquals(i.draft.channel, "sms");
-    assertEquals(i.draft.to, i.step === "jan_visit" ? "jan" : "client");
+    assertEquals(i.draft.to, "client");
     assertEquals(i.draft.text, i.draft.template_text);
     assert(i.draft.id.startsWith(`${i.id}|`));
     assertEquals(i.draft_problem, null);
   }
-  assert(list.items.some((i) => i.draft?.to === "jan"));
+  assert(list.items.some((i) => i.step === "jan_visit" && i.draft === null));
+  // Jan's morning text lists both Jan payers. No Jan mobile reader is wired in this test, so
+  // it says Jan's mobile is not set and cannot be approved.
+  const jan = list.jan_text!;
+  assertEquals(
+    jan.visits.flatMap((v) => v.invoice_numbers).sort(),
+    ["INV-0034", "INV-0267", "INV-1069"],
+  );
+  assertEquals(jan.visits.length, 2);
+  assertEquals(jan.status, "pending");
+  assertEquals(jan.approvable, false);
+  assert(jan.problem!.startsWith("Jan's mobile not set"));
+  assertEquals(list.drafts.jan_text, "pending");
   assertEquals(
     list.items.filter((i) => i.group === "text").every((i) =>
       i.draft?.text?.startsWith("Hi ") &&
@@ -1028,6 +1041,7 @@ Deno.test("drafts: a draft sent today leaves the list and shows under sent_today
   assertEquals(list.items, []);
   assertEquals(list.sent_today, [{
     draft_id: item.draft!.id,
+    to: "client",
     payer_name: "Client 1",
     invoice_numbers: ["INV-1"],
     step: "friendly_text",
@@ -1058,4 +1072,75 @@ Deno.test("debt_morning_list carries the desk owner state it is given, else null
     desk: () => Promise.resolve(state),
   } as unknown as DebtMorningListDeps);
   assertEquals(withDesk.desk, state);
+});
+
+// ── Jan's morning text (plan step 5) ──
+
+Deno.test("jan_text: today's Jan visits in one text to Jan's mobile, with the job's site; the mobile is read only when needed", async () => {
+  const { x, store } = oneClientBook();
+  const called = {
+    id: "c1",
+    xero_invoice_id: idOf(1),
+    method: "call",
+    schedule_step: "call",
+    outcome_code: "no_answer",
+    created_at: "2026-09-25T01:00:00Z",
+    chased_by: "shaun@example.test",
+  };
+  let reads = 0;
+  const janMobile = () => {
+    reads += 1;
+    return Promise.resolve({
+      phone: "+61411222333",
+      source: "setting" as const,
+      staff_user_id: null,
+      staff_name: null,
+      problem: null,
+    });
+  };
+  const list = await readDebtMorningList({}, {}, {
+    ...x.deps,
+    store,
+    chaseLog: logStore([called], [{
+      id: "j1",
+      client_phone: "0400 000 000",
+      client_email: null,
+      site_address: "12 Example Street",
+      site_suburb: "Exampleton",
+    } as any]),
+    janMobile,
+  } as unknown as DebtMorningListDeps);
+  assertEquals(list.items.map((i) => [i.group, i.step, i.draft]), [[
+    "jan",
+    "jan_visit",
+    null,
+  ]]);
+  const jan = list.jan_text!;
+  assertEquals(reads, 1);
+  assertEquals(jan.to_phone, "+61411222333");
+  assertEquals(jan.approvable, true);
+  assertEquals(jan.xero_invoice_ids, [idOf(1)]);
+  assertEquals(
+    jan.text,
+    "Hi Jan, your visits for Thu 1 Oct 2026:\n" +
+      "1. Client 1, 12 Example Street, Exampleton: INV-1, $100.00 owing, 11 days overdue.\n" +
+      "Please tell Shaun how each visit goes. Thanks",
+  );
+  assertEquals(list.schedule.jan_visit_outcomes.map((o) => o.label), [
+    "Visited: paid",
+    "Visited: promised",
+    "No one home",
+    "Visited: disputed",
+  ]);
+
+  // No Jan visit today: no Jan text, and Jan's mobile is not read.
+  const { x: x2, store: store2 } = oneClientBook();
+  const quiet = await readDebtMorningList({}, {}, {
+    ...x2.deps,
+    store: store2,
+    chaseLog: logStore(),
+    janMobile,
+  } as unknown as DebtMorningListDeps);
+  assertEquals(quiet.jan_text, null);
+  assertEquals(reads, 1);
 });

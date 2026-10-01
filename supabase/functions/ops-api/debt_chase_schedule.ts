@@ -78,10 +78,50 @@ export const DEBT_CHASE_OUTCOMES: DebtChaseOutcome[] = [
   "says_paid",
 ];
 
+/** What each outcome is called on a call (and on any outcome logged without a step). */
+export const DEBT_CHASE_OUTCOME_LABELS: Record<DebtChaseOutcome, string> = {
+  no_answer: "No answer",
+  spoke: "Spoke",
+  promised: "Promised",
+  disputed: "Disputed",
+  says_paid: "Says paid",
+};
+
+/**
+ * What Jan reports from a visit (round 6, Q7: "I record what he reports"), as the outcome codes
+ * the ladder already reads, so a visit moves the ladder exactly like a call: no one home and
+ * spoke leave the payer on Jan's list for the next morning, promised pauses chasing until the
+ * date, disputed and paid hold the invoice for a check. The screen offers these four.
+ */
+export const DEBT_JAN_VISIT_OUTCOMES: ReadonlyArray<
+  { code: DebtChaseOutcome; label: string }
+> = [
+  { code: "says_paid", label: "Visited: paid" },
+  { code: "promised", label: "Visited: promised" },
+  { code: "no_answer", label: "No one home" },
+  { code: "disputed", label: "Visited: disputed" },
+];
+
+/** The words for an outcome logged at a step: Jan's wording on a Jan visit. */
+export function debtOutcomeLabel(
+  code: DebtChaseOutcome,
+  step: DebtChaseStep | null,
+): string {
+  if (step === "jan_visit") {
+    return DEBT_JAN_VISIT_OUTCOMES.find((o) => o.code === code)?.label ??
+      `Visited: ${DEBT_CHASE_OUTCOME_LABELS[code].toLowerCase()}`;
+  }
+  return DEBT_CHASE_OUTCOME_LABELS[code];
+}
+
 /** Outcomes that resolve the step for now: the ladder stops until someone checks. */
 const HOLDING_OUTCOMES: Partial<Record<DebtChaseOutcome, string>> = {
   disputed: "the payer disputed it",
   says_paid: "the payer says paid: check Xero first",
+};
+const JAN_HOLDING_OUTCOMES: Partial<Record<DebtChaseOutcome, string>> = {
+  disputed: "the payer disputed it with Jan",
+  says_paid: "Jan reports paid: check Xero first",
 };
 
 export const DEBT_CHASE_STEPS: Record<
@@ -252,8 +292,14 @@ export interface DebtMorningItem {
   phone: string | null;
   email: string | null;
   promise: DebtChasePromise | null;
+  /** The newest outcome; `label` is in Jan's words when it was a Jan visit. */
   last_outcome:
-    | { code: DebtChaseOutcome; at: string; by: string | null }
+    | {
+      code: DebtChaseOutcome;
+      label: string;
+      at: string;
+      by: string | null;
+    }
     | null;
   /** Filled by the morning list (debt_desk_drafts.ts); null on calls, statements and holds. */
   draft: DebtDeskDraft | null;
@@ -448,6 +494,7 @@ function lastOutcomeOf(s: ChaseState): DebtMorningItem["last_outcome"] {
   return s.lastOutcome
     ? {
       code: s.lastOutcome.outcome!,
+      label: debtOutcomeLabel(s.lastOutcome.outcome!, s.lastOutcome.step),
       at: s.lastOutcome.at,
       by: s.lastOutcome.by,
     }
@@ -629,6 +676,20 @@ export function planDebtMorningList(
       promise,
       resumes_on: addDays(promise.date, 1),
     });
+  // Builder and deposit promises are judged per invoice, but one promise logged against several
+  // invoices is one promise: it pauses as one row with all of its invoices, never once per
+  // invoice with the whole promised amount on each.
+  const pauseEach = (open: Array<[DebtChaseBookInvoice, ChaseState]>) => {
+    const byPromise = groupBy(open, ([i, s]) => {
+      const e = s.activeOutcome!;
+      return `${e.at}|${
+        (e.covers ?? [i.xero_invoice_id.toLowerCase()]).join(",")
+      }|${s.promise!.date}`;
+    });
+    for (const group of byPromise.values()) {
+      pause(group.map(([i]) => i), group[0][1].promise!);
+    }
+  };
 
   const ladder = DEBT_CHASE_SCHEDULES.homeowner.ladder;
   const b = DEBT_CHASE_SCHEDULES.builder;
@@ -698,7 +759,9 @@ export function planDebtMorningList(
 
   const holdByOutcome = (s: ChaseState) =>
     s.activeOutcome?.outcome
-      ? HOLDING_OUTCOMES[s.activeOutcome.outcome] ?? null
+      ? (s.activeOutcome.step === "jan_visit"
+        ? JAN_HOLDING_OUTCOMES
+        : HOLDING_OUTCOMES)[s.activeOutcome.outcome] ?? null
       : null;
   const outcomeHoldReason = (s: ChaseState, why: string) =>
     `${why} (${perthDay(s.activeOutcome!.at)}${
@@ -787,7 +850,7 @@ export function planDebtMorningList(
     const calls: DebtChaseBookInvoice[] = [];
     const broken: DebtChaseBookInvoice[] = [];
     const tooYoung: DebtChaseBookInvoice[] = [];
-    const openPromises: Array<[DebtChaseBookInvoice, DebtChasePromise]> = [];
+    const openPromises: Array<[DebtChaseBookInvoice, ChaseState]> = [];
     for (const i of invs) {
       const s = stateFor([i]);
       const why = holdByOutcome(s);
@@ -808,11 +871,11 @@ export function planDebtMorningList(
       ) {
         statement.push(i);
       } else if (!promise) tooYoung.push(i);
-      if (promise?.status === "open") openPromises.push([i, promise]);
+      if (promise?.status === "open") openPromises.push([i, s]);
       else if (promise?.status === "broken") broken.push(i);
       else if (callDue(i)) calls.push(i);
     }
-    for (const [i, p] of openPromises) pause([i], p);
+    pauseEach(openPromises);
     if (broken.length) {
       item(broken, {
         group: "broken_promise",
@@ -884,16 +947,18 @@ export function planDebtMorningList(
   for (const invs of groupBy(remindable, payerKey).values()) {
     const due: DebtChaseBookInvoice[] = [];
     const broken: DebtChaseBookInvoice[] = [];
+    const openPromises: Array<[DebtChaseBookInvoice, ChaseState]> = [];
     for (const i of invs) {
       const s = stateFor([i]);
       const why = holdByOutcome(s);
       if (why) {
         holdItem([i], "check_first", outcomeHoldReason(s, why), s);
-      } else if (s.promise?.status === "open") pause([i], s.promise);
+      } else if (s.promise?.status === "open") openPromises.push([i, s]);
       else if (s.promise?.status === "broken") broken.push(i);
       else if (loggedStep(i, "deposit_reminder")) wait([i], "reminder_sent");
       else if (isOverdue(i)) due.push(i);
     }
+    pauseEach(openPromises);
     if (broken.length) {
       item(broken, {
         group: "broken_promise",

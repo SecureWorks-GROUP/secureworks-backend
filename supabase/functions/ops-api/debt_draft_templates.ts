@@ -3,37 +3,40 @@
 //
 // Drafts are deterministic templates (no paid AI). Each one is filled only with facts the desk
 // already holds: the payer's name, the invoice numbers, the amounts due, the due dates, the
-// Xero online-invoice pay link (firm text only, fetched per invoice) and, for Jan, the job's
-// site and the client's phone. They never invent a fact, threaten, or mention legal action or
-// credit reporting; debtDraftTextProblem refuses an edited text that does.
+// Xero online-invoice pay link (firm text only, fetched per invoice). They never invent a fact,
+// threaten, or mention legal action or credit reporting; debtDraftTextProblem refuses an edited
+// text that does.
 //
 //   friendly_text     day 1, to the client
 //   firm_text         day 2, to the client, with each invoice's pay link
-//   jan_visit         day 7, to Jan (his own phone), naming who to visit and where
 //   deposit_reminder  the one friendly reminder about a deposit or before-work invoice; it
 //                     says "deposit" only when every invoice is a deposit, otherwise "the
 //                     invoice for your job" (a progress claim or materials invoice before the
 //                     job's first payment is not a deposit)
 //
-// The call steps carry no text (Shaun calls), and builder statements are plan step 6.
+// The call steps carry no text (Shaun calls), and builder statements are plan step 6. Day 7's
+// Jan visits carry no draft of their own: they are listed in Jan's one morning text
+// (debt_jan_text.ts, plan step 5), whose draft id this module also reads (step jan_text).
 //
 // A draft's id is its morning-list item id plus each invoice's amount due in cents, in the
 // item's invoice order: `<item id>|420000,15050`. The amounts are what the text says is owed,
 // so the last check before a send can refuse when Xero now shows less. A changed amount is a
 // different draft, so an approval never carries over to a text it did not see.
 
+/** The morning-list steps that carry a draft to the client, one per item. */
 export type DebtDraftStep =
   | "friendly_text"
   | "firm_text"
-  | "jan_visit"
   | "deposit_reminder";
 
 export const DEBT_DRAFT_STEPS: DebtDraftStep[] = [
   "friendly_text",
   "firm_text",
-  "jan_visit",
   "deposit_reminder",
 ];
+
+/** Every step a desk draft id can carry: the client steps and Jan's morning text. */
+export type DebtDraftIdStep = DebtDraftStep | "jan_text";
 
 export const DEBT_DRAFT_SIGN_OFF = "Thanks, SecureWorks";
 export const DEBT_DRAFT_MAX_LENGTH = 1000;
@@ -54,10 +57,6 @@ export interface DebtDraftInput {
   invoices: DebtDraftInvoice[];
   /** Firm text only: Xero OnlineInvoice URL per Xero invoice id. */
   pay_links?: Record<string, string>;
-  /** Jan only: the job's site address. */
-  site?: string | null;
-  /** Jan only: the client's phone. */
-  phone?: string | null;
 }
 
 const MONTHS = [
@@ -172,24 +171,6 @@ export function debtDraftText(input: DebtDraftInput): string {
         what.single ? " and is still unpaid." : " are still unpaid."
       } ${pay} If you have already paid, please reply to let us know. ${DEBT_DRAFT_SIGN_OFF}`;
     }
-    case "jan_visit": {
-      let about: string;
-      if (what.single) {
-        const i = input.invoices[0];
-        const due = dateWords(i.due_date);
-        const late = i.days_overdue && i.days_overdue > 0
-          ? ` (${i.days_overdue} day${i.days_overdue === 1 ? "" : "s"} overdue)`
-          : "";
-        about = `unpaid invoice ${i.invoice_number}, ${
-          debtDraftMoney(i.amount_due)
-        }${due ? `, due ${due}` : ""}${late}`;
-      } else {
-        about = `unpaid ${what.text.replace(/,$/, "")}`;
-      }
-      const site = input.site?.trim() ? ` Site: ${input.site.trim()}.` : "";
-      const phone = input.phone?.trim() ? ` Phone: ${input.phone.trim()}.` : "";
-      return `Hi Jan, please visit ${input.payer_name.trim()} about ${about}.${site}${phone} Please tell Shaun how it goes.`;
-    }
     case "deposit_reminder": {
       const about = input.invoices.every((i) => i.kind === "deposit")
         ? "the deposit"
@@ -223,11 +204,14 @@ const NOT_ALLOWED: Array<[RegExp, string]> = [
 ];
 
 /** Why a message text may not be approved, or null when it may. */
-export function debtDraftTextProblem(text: unknown): string | null {
+export function debtDraftTextProblem(
+  text: unknown,
+  maxLength = DEBT_DRAFT_MAX_LENGTH,
+): string | null {
   if (typeof text !== "string" || !text.trim()) return "The message is empty";
   if (/—/.test(text)) return "The message contains an em dash";
-  if (text.length > DEBT_DRAFT_MAX_LENGTH) {
-    return `The message is longer than ${DEBT_DRAFT_MAX_LENGTH} characters`;
+  if (text.length > maxLength) {
+    return `The message is longer than ${maxLength} characters`;
   }
   for (const [re, what] of NOT_ALLOWED) {
     if (re.test(text)) {
@@ -249,7 +233,7 @@ export interface ParsedDebtDraftId {
   item_id: string;
   perth_date: string;
   group: string;
-  step: DebtDraftStep;
+  step: DebtDraftIdStep;
   amounts: number[];
 }
 
@@ -270,8 +254,8 @@ export function parseDebtDraftId(id: unknown): ParsedDebtDraftId | null {
     !Number.isFinite(parsed) ||
     new Date(parsed).toISOString().slice(0, 10) !== perthDate
   ) return null;
-  const step = parts[parts.length - 1] as DebtDraftStep;
-  if (!DEBT_DRAFT_STEPS.includes(step)) return null;
+  const step = parts[parts.length - 1] as DebtDraftIdStep;
+  if (step !== "jan_text" && !DEBT_DRAFT_STEPS.includes(step)) return null;
   return {
     item_id: itemId,
     perth_date: perthDate,
@@ -285,8 +269,8 @@ export function parseDebtDraftId(id: unknown): ParsedDebtDraftId | null {
 export interface DebtDeskDraft {
   id: string;
   channel: "sms";
-  /** client: the payer's phone through send_chase_sms; jan: Jan's own phone (plan step 5). */
-  to: "client" | "jan";
+  /** The payer's phone through send_chase_sms (Jan's text is debt_jan_text.ts's JanTextDraft). */
+  to: "client";
   step: DebtDraftStep;
   /**
    * The text to show: the approved or sent text once decided, else the standard wording. A

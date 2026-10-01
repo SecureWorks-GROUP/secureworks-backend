@@ -1,8 +1,9 @@
 # Debt book and chase desk: the plan
 
 **Written:** 2026-09-30. **For:** the captain (Shaun), and the workers who build it.
-**Status:** approved 30 Sep; build in progress (steps 0-1 live; step 2 in
-review; step 3 in this change, with sending off; see the PRs).
+**Status:** approved 30 Sep; build in progress (steps 0-2 merged; step 3 in
+review; the step 4 screen merged in secureworks-ux; step 5 in this change,
+with sending off; see the PRs).
 **Reviewed in Lavish:** this document matches the Lavish plan page shown to the
 captain. Plain words are explained in [GLOSSARY.md](GLOSSARY.md). The
 captain's rulings, word for word, are in [DECISIONS.md](DECISIONS.md).
@@ -289,7 +290,20 @@ The schedules:
   (amount due at the promise less today's amount due, an invoice paid off
   counting as nothing due). Otherwise, unpaid or short, the invoice goes to
   the top marked "promise broken", at the next step. This holds for deposits
-  too.
+  too. One promise covering several invoices is one promise on the Promises
+  list, never one per invoice.
+- **Jan** (step 5; Q7: "Morning text to Jan that I approve; I record what he
+  reports"): one text a morning to Jan's own mobile, listing today's Jan
+  visits (name, site address when the job has one, invoice numbers, amount
+  owing, days overdue), a broken promise at the Jan step included. Shaun
+  approves it like any draft and it goes through the same guarded send, off
+  until Shaun's go. Jan's mobile is the `JAN_MOBILE` setting, else the one
+  staff record named Jan; when it cannot be found unambiguously the text says
+  "Jan's mobile not set" and cannot be approved. Shaun records what Jan
+  reports (visited and paid, promised, no one home, disputed), which moves
+  the ladder like a call: no one home comes back to Jan the next morning,
+  paid and disputed hold the invoice for a check, a promise pauses chasing.
+  Contract: [DESK-API.md](DESK-API.md).
 - **Write-offs:** only Shaun, in Xero. The desk may suggest one, never do one.
 
 ## 5. What changes on Clear Debt
@@ -331,7 +345,7 @@ Firstmate backlog.
 | 2 | Morning list | The schedules as data, today's step per payer, holds | ~½ day | The Today list | Thursday |
 | 3 | Draft, approve, send, log | Drafts, approve with a last Xero check, send through `send_chase_sms`, one-tap call outcome, chase-log columns | ~1 day | Approve and send; sent history | Thursday (draft-only if step 0 is not done) |
 | 4 | New Clear Debt screen | The "after" screen in the real Clear Debt tab (secureworks-ux PR); the Today card links to it | ~½ day, in parallel | Ops dashboard, Financials, Clear Debt | Thursday |
-| 5 | Promises and Jan | A promise box, the broken-promise rule, the Jan tab, Jan's morning text to his own phone (approved) | ~½ day | Promises and Jan tabs | Friday |
+| 5 | Promises and Jan | A promise box, the broken-promise rule, the Jan tab, Jan's morning text to his own phone (approved) | ~½ day | Promises and Jan tabs | Backend built 1 Oct (Jan's text, what Jan reports, promises tested end to end), sending off; screen changes listed in the PR |
 | 6 | Builder statements | A Monday statement per builder, grouped by Xero contact (for MLB, Major Loss Builders only), to accounts@mlbuilders.com.au / accounts@ajs.build, through its own audited send route | 1–2 days | A statement preview to approve | Next week |
 | 7 | Deposits and weekly cancel list | The Deposits tab, one reminder, a 60-day cancel list | ~½ day | The Deposits tab | Next week |
 | 8 | Fix the copy and screen faults | B7 re-check of closed rows (or a nightly ID-set diff), B17, retire B8 | ~1 day | Clear Debt and desk agree to the cent | Next week |
@@ -532,5 +546,6 @@ Left to confirm during the build:
 
 - the accounts email for Emergency Trade Services, Builderwest and Western
   Building;
-- Jan's mobile number, read from staff records and shown to Shaun before the
-  first text.
+- Jan's mobile number. The desk reads it (the `JAN_MOBILE` setting, else the
+  one staff record named Jan) and shows it on Jan's text before Shaun
+  approves; check it there before the first text.

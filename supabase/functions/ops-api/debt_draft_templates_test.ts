@@ -40,11 +40,10 @@ const two: DebtDraftInput = {
   ],
 };
 
-Deno.test("drafts: the four steps the desk drafts", () => {
+Deno.test("drafts: the three client steps the desk drafts", () => {
   assertEquals(DEBT_DRAFT_STEPS, [
     "friendly_text",
     "firm_text",
-    "jan_visit",
     "deposit_reminder",
   ]);
 });
@@ -95,21 +94,16 @@ Deno.test("firm text: carries each invoice's own Xero pay link, and refuses with
   );
 });
 
-Deno.test("Jan's text goes to Jan: who, what, where, and the client's phone when known", () => {
+Deno.test("Jan's visits carry no draft of their own: they are listed in Jan's morning text", () => {
+  assertEquals(DEBT_DRAFT_STEPS.includes("jan_visit" as never), false);
+  // Jan's morning text has its own draft id (debt_jan_text.ts), which the desk reads.
   assertEquals(
-    debtDraftText({
-      ...one,
-      step: "jan_visit",
-      site: "12 Example Street, Exampleton",
-      phone: "0400 000 000",
-    }),
-    "Hi Jan, please visit Sam Example about unpaid invoice INV-1578, $4,200.00, due 29 Sep 2026 (2 days overdue). " +
-      "Site: 12 Example Street, Exampleton. Phone: 0400 000 000. Please tell Shaun how it goes.",
+    parseDebtDraftId("2026-10-01:jan-0a1b2c3d:jan:jan_text|10000")?.step,
+    "jan_text",
   );
   assertEquals(
-    debtDraftText({ ...two, step: "jan_visit" }),
-    "Hi Jan, please visit Sam Example about unpaid invoices INV-1578 ($4,200.00, due 29 Sep 2026) and " +
-      "INV-1601 ($150.50, due 27 Sep 2026), $4,350.50 in total. Please tell Shaun how it goes.",
+    parseDebtDraftId("2026-10-01:contact-a:jan:jan_visit|10000"),
+    null,
   );
 });
 
