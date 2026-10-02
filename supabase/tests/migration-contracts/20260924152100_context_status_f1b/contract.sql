@@ -418,7 +418,7 @@ BEGIN
   ('public.context_business_minutes(timestamptz,timestamptz)','510dbec36291c25aa1887ade89e2ca4e'),
   ('public.context_in_business_hours(timestamptz)','70164e9d1d6aa636c4e9d54357396f16'),
   ('public.context_booking_capture_status()','155104bfb08b8b3c2f98bdec089d4ee4'),
-  -- The F1 stub, or sites S-M1's block (20260925060000, checked by its own
+  -- The F1 stub, or sites S-M1's block (20261002120000, checked by its own
   -- contract) once that later migration is in the stack.
   ('public.context_parties_status()',CASE WHEN to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL
     THEN '155104bfb08b8b3c2f98bdec089d4ee4' ELSE '98ca15b42682e9210ac4e6fe8d74ccd3' END)) AS t(sig,md5) LOOP

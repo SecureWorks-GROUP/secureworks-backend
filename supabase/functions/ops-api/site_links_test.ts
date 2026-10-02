@@ -2,7 +2,7 @@
 // RPC arguments with the actor, refusal mapping) and on the real ops-api front
 // door (staff only; not a trade or agent-read action). The SQL
 // writer's own behaviour on the named sites is in the migration contract
-// supabase/tests/migration-contracts/20260925060000_job_parties_foundation.
+// supabase/tests/migration-contracts/20261002120000_job_parties_foundation.
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 import {
   assertEquals,

@@ -1,4 +1,4 @@
--- Roll back T2 (20260925043000_context_transcript_fetch).
+-- Roll back T2 (20261002100000_context_transcript_fetch).
 --
 -- Turn feature flag ghl_call_transcript_fetch_v1 off first: this refuses while
 -- it is on. Then it unschedules the ghl-call-transcript-fetch cron job,

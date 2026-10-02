@@ -1,4 +1,4 @@
--- Rollback for 20260925060000_job_parties_foundation (sites S-M1).
+-- Rollback for 20261002120000_job_parties_foundation (sites S-M1).
 --
 -- Restores the F1 stub of context_parties_status() byte for byte (md5
 -- checked), drops the owner-mirror trigger and every function the migration

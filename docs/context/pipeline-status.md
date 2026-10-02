@@ -111,7 +111,7 @@ the receiver enforces auth; observe-mode `auth=missing` is counted, not
 alarmed). Thresholds: `context_ghl_capture_policy()`. The reconciler itself:
 [ghl-message-reconcile.md](ghl-message-reconcile.md).
 
-`transcript_capture` (T2, `20260925043000_context_transcript_fetch.sql`):
+`transcript_capture` (T2, `20261002100000_context_transcript_fetch.sql`):
 the fetch flag `ghl_call_transcript_fetch_v1` (missing or unreadable reads off)
 and the capture lane; the fetcher's last run, last finished run, runs, attempts
 and errors in 24 h (`context_capture_runs`, source `ghl_call_transcript`), and

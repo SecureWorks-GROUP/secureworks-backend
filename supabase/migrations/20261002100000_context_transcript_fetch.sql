@@ -84,7 +84,7 @@
 -- The guard refuses unless each is still that pre-image or already this
 -- migration's result (a re-apply).
 --
--- Rollback: supabase/rollbacks/20260925043000_context_transcript_fetch_down.sql
+-- Rollback: supabase/rollbacks/20261002100000_context_transcript_fetch_down.sql
 -- (unschedules the job, restores the stub and the three-row lane list, drops
 -- the new functions and the table). The edge function idles while the flag is
 -- off; turn the flag off before rolling back.

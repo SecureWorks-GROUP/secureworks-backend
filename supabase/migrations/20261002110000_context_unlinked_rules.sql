@@ -128,14 +128,14 @@
 --   read as not unpaid); feature_flags(id, flag_name unique, enabled, description,
 --   updated_at), no context_unlinked_rules_v1 row; monitor-inbox sources
 --   monitor-inbox, monitor_inbox, monitor-inbox-group. The ledger held only
---   20260924201000 after 20260924183000. Version 20260925050000: P4's first version
---   is taken by the email slice EM1; this one is unused on main and on every
---   open context branch (EM1, catch-up, T2, M4, S-M1).
+--   20260924201000 after 20260924183000. Version 20261002110000: renumbered on
+--   2 Oct 2026 (from 20260925050000) to sort after main's newest migration,
+--   20260929100000; T2 is 20261002100000 and S-M1 20261002120000.
 -- The guard refuses unless each replaced object is still that pre-image (or
 -- already this migration's body, for a re-apply), each read object is present,
 -- each new name is absent or already P4's (marked "P4:" in its comment), and
 -- every column read has the type listed.
--- Rollback: supabase/rollbacks/20260925050000_context_unlinked_rules_down.sql
+-- Rollback: supabase/rollbacks/20261002110000_context_unlinked_rules_down.sql
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 

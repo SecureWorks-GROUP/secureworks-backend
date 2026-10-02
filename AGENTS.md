@@ -665,7 +665,7 @@ track to stamp the hint with its time (a named follow-up, not B0).
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
-Since P4 (`20260925050000_context_unlinked_rules.sql`) every caller uses
+Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
 `resolve_context_attribution(e)`, a one-line entry into
 `resolve_context_attribution(e, p_preview, p_rules_on)`. With
 `feature_flags.context_unlinked_rules_v1` off (missing or unreadable = off) it
@@ -691,7 +691,7 @@ two-argument `context_contact_jobs_at` is unchanged and still serves the Luna
 guard and P1b; the rules use the keyed four-argument overload. Preview a
 stored row with `context_attribution_preview(event_id, rules_on)` (writes
 nothing) before trusting a rule change. Contract and named rows:
-`supabase/tests/migration-contracts/20260925050000_context_unlinked_rules/`.
+`supabase/tests/migration-contracts/20261002110000_context_unlinked_rules/`.
 
 ## Migrations Apply Before Edge Deploys
 
@@ -3775,7 +3775,7 @@ also retries due backfill-mode pending calls of any age. Measured 24 Sep 2026: G
 "completed with no duration" is eligible; a no-answer call's transcription
 answers HTTP 400; the list read names our line by number but the single-item
 read says "SecureWorks WA" for inbound calls. Tests: `fetch_test.ts`,
-`call_transcript_test.ts`, migration contract `20260925043000_context_transcript_fetch`.
+`call_transcript_test.ts`, migration contract `20261002100000_context_transcript_fetch`.
 
 ## A pg_cron Bearer Is Not The Function's Service Key
 
@@ -3963,7 +3963,7 @@ no row and so never read as booked or sent.
 ## Parties On A Site Have One Writer, Keyed By Party, Never By Letter
 
 `job_contacts` is the party table (owner, neighbours, strata, other payers on
-one site job). Sites slice S-M1 (`20260925060000_job_parties_foundation.sql`)
+one site job). Sites slice S-M1 (`20261002120000_job_parties_foundation.sql`)
 gave it one writer pair: `upsert_job_party(job, source_party_key, fields,
 actor)` and `set_job_party_ids(...)` (the only way a neighbour's GHL or Xero
 id changes; `upsert_job_party` writes them on insert only). The key is the fence tool's neighbour id (`nb-1`,
@@ -3984,7 +3984,7 @@ no policy and revoked from anon and authenticated (the live read found both
 held TRUNCATE, which RLS does not cover); view `run_summary`, which read
 its names past RLS, is revoked the same way and `security_invoker`. Placement reconsideration after a
 GHL link only runs while flag `job_parties_v1` is on. Contract and named-site
-tests: `supabase/tests/migration-contracts/20260925060000_job_parties_foundation`.
+tests: `supabase/tests/migration-contracts/20261002120000_job_parties_foundation`.
 
 ## The Job Conversation Shows An Email Where The Ladder Put It
 

@@ -677,7 +677,7 @@ BEGIN
 END $$;
 CREATE TEMP TABLE p4_retired_before AS SELECT * FROM public.event_threads WHERE retired_at IS NOT NULL;
 CREATE TEMP TABLE p4_thread_count AS SELECT count(*) AS n FROM public.event_threads;
-\ir ../../../rollbacks/20260925050000_context_unlinked_rules_down.sql
+\ir ../../../rollbacks/20261002110000_context_unlinked_rules_down.sql
 DO $$
 DECLARE e public.business_events;
 BEGIN
@@ -740,7 +740,7 @@ ROLLBACK;
 -- Re-apply is a no-op.
 CREATE TEMP TABLE p4_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p
  WHERE obj_description(p.oid,'pg_proc') LIKE 'P4:%' OR p.oid='public.attribute_business_event()'::regprocedure OR p.proname='attribute_context_event_with_luna';
-\ir ../../../migrations/20260925050000_context_unlinked_rules.sql
+\ir ../../../migrations/20261002110000_context_unlinked_rules.sql
 DO $$
 BEGIN
  IF (SELECT count(*) FROM p4_before)<>13 THEN RAISE EXCEPTION 'expected 13 P4 functions, got %',(SELECT count(*) FROM p4_before); END IF;
