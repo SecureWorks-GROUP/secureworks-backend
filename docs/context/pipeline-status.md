@@ -18,7 +18,7 @@ with identical values. The composer adds:
 | `booking_capture` | `context_booking_capture_status()` | dossier D3 | `null` |
 | `parties` | `context_parties_status()` | sites S-M1 | `null` |
 | `email_capture` | `context_email_capture_status()` | email EM1 | built |
-| `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | `null` (F1b stub) |
+| `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | built |
 | `money` | `context_money_status()` | money MN1 | `null` (F1b stub) |
 | `bucket` | `context_bucket_status()` | bucket B2 | `null` (F1b stub) |
 | `alarms` | every block's `alarms` array, each tagged with `block` | composer | `[]` |
@@ -110,6 +110,20 @@ minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high
 the receiver enforces auth; observe-mode `auth=missing` is counted, not
 alarmed). Thresholds: `context_ghl_capture_policy()`. The reconciler itself:
 [ghl-message-reconcile.md](ghl-message-reconcile.md).
+
+`transcript_capture` (T2, `20260925043000_context_transcript_fetch.sql`):
+the fetch flag `ghl_call_transcript_fetch_v1` (missing or unreadable reads off)
+and the capture lane; the fetcher's last run, last finished run, runs, attempts
+and errors in 24 h (`context_capture_runs`, source `ghl_call_transcript`), and
+the history run's last run (`ghl_call_transcript_backfill`); `calls`: due now,
+never tried, pending, oldest pending and `aged_out_unfetched_24h` inside the
+14-day window, plus `pending_history` and `next_history_due_at` outside it
+(`context_transcript_history_pending()`); fetch outcomes and failures by code in
+24 h, transcript rows saved in 24 h by capture mode, and `coverage_24h` by line
+(answered calls that ended 26 h to 2 h ago). Alarms, only while the lane and the
+flag are on: `transcript_fetch_stale`, `transcript_fetch_failing`,
+`transcript_coverage_low`, `transcript_aged_out`. Thresholds:
+`context_transcript_capture_policy()`. Counts and codes only, never words.
 
 `actor_missing` (F-ACT, `20260924201000_ops_api_actor_recording.sql`,
 INTEGRATION X31) is a core key, so it sits at the top level with the others:

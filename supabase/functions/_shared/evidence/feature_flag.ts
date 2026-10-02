@@ -28,7 +28,11 @@ export type EvidenceFlagKey =
   | "evidence_capture_v1"
   | "evidence_audio_capture"
   | "evidence_transcript_capture"
-  | "evidence_refs_strict_mode";
+  | "evidence_refs_strict_mode"
+  // The GHL call transcript fetcher (context slice T2). Its own flag, never
+  // evidence_transcript_capture (the retired Whisper path's): off until the
+  // milestone switch MS5-T, after the extended G-ANON check.
+  | "ghl_call_transcript_fetch_v1";
 
 /**
  * Returns true when the flag is ON. Default OFF on any error.

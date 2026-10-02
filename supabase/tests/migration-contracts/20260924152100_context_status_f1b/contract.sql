@@ -117,7 +117,8 @@ BEGIN
   'public.context_bucket_status()']::regprocedure[] LOOP
   -- Only while the stub stands (it returns null): an owning slice (the runner
   -- applies every later migration first) replaces its own body and comment,
-  -- and its own contract checks its grants (EM1 built email_capture).
+  -- and its own contract checks its grants (EM1 built email_capture, T2
+  -- transcript_capture).
   EXECUTE format('SELECT %s',f) INTO built;
   CONTINUE WHEN built IS NOT NULL;
   IF (SELECT NOT prosecdef OR proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog'] FROM pg_proc WHERE oid=f)
