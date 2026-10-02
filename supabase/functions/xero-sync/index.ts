@@ -1086,7 +1086,9 @@ export async function matchUnlinkedInvoices(client: any) {
           .eq('org_id', '00000000-0000-0000-0000-000000000001')
           .eq('legacy', false)
           .ilike('client_name', contactName)
-          .not('status', 'in', '("cancelled","lost")')
+          // A draft is a sales lead with no work: never a name-match home
+          // for money, and never a rival that blocks the real job's link.
+          .not('status', 'in', '("cancelled","lost","draft")')
           .order('created_at', { ascending: false })
           .limit(5)
 
