@@ -27,7 +27,6 @@ import {
   messageDirection,
   messageTimestamp,
   SALES_BOOKING_NOT_GIVEN,
-  SALES_BOOKING_OUTLOOK_MAILBOXES,
   salesBookingLeadBelongsTo,
   type SalesBookingMessage,
 } from "./sales_booking_read.ts";
@@ -37,6 +36,7 @@ import {
   type OutlookMirrorRequest,
   type OutlookMirrorResult,
   type OutlookMirrorWriteOptions,
+  SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES,
 } from "./sales_booking_outlook_mirror.ts";
 import { salesBookingSenderFor } from "./sales_booking_sender.ts";
 import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
@@ -70,7 +70,7 @@ export type OutlookMirrorOutcome =
     message: string;
   }
   | {
-    /** The resource has no Outlook calendar (GHL only, e.g. Nithin). */
+    /** The booking does not write this resource's Outlook (e.g. Nithin, Khairo). */
     outlook: "not_applicable";
     reason: "resource_has_no_outlook_calendar";
     message: string;
@@ -475,10 +475,10 @@ function planOutlookMirror(
   return { ok: true, plan: { input, request: built.request } };
 }
 
-/** Only resources with a configured Outlook calendar get a mirror. */
+/** Only resources the mirror may write (Marnin) get an Outlook copy. */
 function mirrorsToOutlook(loaded: Loaded): boolean {
   return Object.hasOwn(
-    SALES_BOOKING_OUTLOOK_MAILBOXES,
+    SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES,
     String(loaded.snapshot.resource ?? ""),
   );
 }
@@ -486,8 +486,7 @@ function mirrorsToOutlook(loaded: Loaded): boolean {
 const NOT_APPLICABLE: OutlookMirrorOutcome = {
   outlook: "not_applicable",
   reason: "resource_has_no_outlook_calendar",
-  message:
-    "This person books in GHL only; there is no Outlook calendar to write.",
+  message: "This booking does not write this person's Outlook calendar.",
 };
 
 const FAILED_AFTER_BOOKING = (reason: string): OutlookMirrorOutcome => ({

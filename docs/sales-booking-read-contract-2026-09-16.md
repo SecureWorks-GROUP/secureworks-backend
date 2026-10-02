@@ -139,8 +139,10 @@ Additions:
 
 - **`diary[]`** — the scoper's GHL calendar events for Mon..Sun of
   `week_start`, merged with that person's Outlook primary calendar when the
-  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (today: `marnin`;
-  decision D2, 23 Sep 2026). Each entry: `event_id`, `start`, `end` (ISO with
+  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (`marnin` since
+  decision D2, 23 Sep 2026; `nithin` and `khairo` since the 25 Sep 2026
+  tenant-wide Calendars.Read consent). That map is read only: the booking
+  writes Outlook for `SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES` alone (Marnin). Each entry: `event_id`, `start`, `end` (ISO with
   `+08:00`), `title`, `kind` (`busy` | `leave` | `personal`), `source`
   (`ghl` | `outlook`), plus `show_as`, `blocks_capacity`, `is_all_day`,
   `location`, `title_withheld`, `mirror_of_ghl_event_id`, and `booked_visit`
@@ -152,7 +154,18 @@ Additions:
   An Outlook event written by the booking mirror
   (`sales_booking_outlook_mirror.ts`) names its GHL appointment in
   `mirror_of_ghl_event_id`; both rows stay so each calendar shows event for
-  event.
+  event. An UNMARKED Outlook event that is GHL's own sync copy of a visit
+  (busy, not all-day, same start and end as a GHL event of the same person
+  that availability counts as busy, i.e. not cancelled and not invalid) is
+  folded into that GHL row as `outlook_copy` (the whole Outlook row) and
+  leaves the diary, so one visit shows once (`foldSalesBookingOutlookCopies`;
+  live case: Khairo,
+  Tue 29 Sep 10:00-10:30, GHL blank title, Outlook "Fencing Complaint Basil
+  Laing"). Each GHL row absorbs at most one copy.
+  `diary_read.sources.outlook.ghl_copies_folded` counts them; `event_count`
+  stays the raw Outlook count. The fold is display only: live availability
+  restores each `outlook_copy` and counts it, with its own location, as the
+  owner press does.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,
@@ -181,7 +194,7 @@ Additions:
   `outlook_calendar_http_403`), keeps the GHL rows that did read, and is never
   a free day. `sources.ghl` is `{read_ok, reason, event_count}`;
   `sources.outlook` is `{state: read | failed | not_configured, read_ok,
-  reason, calendar_email, event_count, malformed_dropped}`.
+  reason, calendar_email, event_count, malformed_dropped, ghl_copies_folded}`.
   `coverage.operational_leave` is `primary_outlook_calendar_only` when Outlook
   read, else `not_read`: leave in any other calendar is never read.
   `calendar_email` may be null; `ghl_user_id` is
