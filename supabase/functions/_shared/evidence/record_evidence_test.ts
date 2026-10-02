@@ -11,7 +11,6 @@ import {
   EvidenceCapture,
   BODY_PREVIEW_MAX,
   SAFE_SUMMARY_MAX,
-  EXTRACTOR_ELIGIBLE_CHANNELS,
 } from "./types.ts";
 import { resolveMatch } from "./match.ts";
 import {
@@ -520,8 +519,8 @@ Deno.test("recordEvidence: live insert path writes to business_events", async ()
   }, { org_id: "org-1" });
   assertEquals(r.spine_event_id, "spine-7");
   assertEquals(calls[0].table, "business_events");
-  // Notes are extractor-eligible -> queue insert too.
-  assertEquals(calls[1].table, "extraction_jobs");
+  // The retired v1 queue is never written; the live pass reads the spine row.
+  assertEquals(calls.length, 1);
 });
 
 Deno.test("recordEvidence: extraction NOT enqueued when match_status != matched", async () => {
@@ -538,25 +537,33 @@ Deno.test("recordEvidence: extraction NOT enqueued when match_status != matched"
   }, { org_id: "org-1" });
   assertEquals(r.spine_event_id, "spine-uuid-1");
   assertEquals(calls.length, 1, "no extraction enqueue for unmatched");
-  assertEquals(r.extraction_job_id, undefined);
 });
 
-Deno.test("recordEvidence: enqueueExtraction=false skips queue even when matched + eligible", async () => {
-  const { client, calls } = makeFakeSupabase();
-  const r = await recordEvidence(client, {
-    event_type: "client.email_in",
-    source: "monitor-inbox",
-    channel: "email",
-    direction: "inbound",
-    source_table: "inbox_events",
-    source_id: "evt-9",
-    job_id: "SWP-26090",
-    match_method: "direct_job_id",
-    enqueueExtraction: false,
-  }, { org_id: "org-1" });
-  assertEquals(r.spine_event_id, "spine-uuid-1");
-  assertEquals(calls.length, 1);
-  assertEquals(r.extraction_job_id, undefined);
+Deno.test("recordEvidence: matched evidence on every channel writes the spine row and no v1 queue row", async () => {
+  for (const channel of ["email", "note", "call", "sms"] as const) {
+    const { client, calls } = makeFakeSupabase({ spineId: `spine-${channel}` });
+    let extractionLaneReads = 0;
+    client.rpc = (_fn: string, args: { lane?: string }) => {
+      if (args?.lane === "extraction") extractionLaneReads++;
+      return Promise.resolve({ data: true, error: null });
+    };
+    const r = await recordEvidence(client, {
+      event_type: channel === "note" ? "note.added" : "client.email_in",
+      source: "test",
+      channel,
+      direction: channel === "note" ? "internal" : "inbound",
+      source_table: "inbox_events",
+      source_id: `evt-${channel}`,
+      job_id: "SWP-26090",
+      match_method: "direct_job_id",
+      body_preview: "Client wants an update",
+    }, { org_id: "org-1" });
+    assertEquals(r.spine_event_id, `spine-${channel}`);
+    assertEquals(r.spine_row.match_status, "matched");
+    assertEquals(calls.map((c) => c.table), ["business_events"]);
+    assertEquals("extraction_job_id" in r, false);
+    assertEquals(extractionLaneReads, 0, "no extraction lane read: nothing is enqueued");
+  }
 });
 
 Deno.test("recordEvidence: channel default privacy classifications", async () => {
@@ -664,11 +671,10 @@ Deno.test("recordEvidence: SWP-26090 fixture (T5 verification job)", async () =>
   assertEquals(r.spine_row.match_confidence, 0.99);
   assertEquals(r.evidence_ref.job_id, "SWP-26090");
   assertEquals(r.evidence_ref.thread_key, "<thread-id-xyz@graph>");
-  // matched + email channel + job_id present -> extraction enqueued.
-  assertEquals(calls.length, 2);
-  assertEquals(calls[1].table, "extraction_jobs");
-  const eqRow = calls[1].values as { metadata: { spine_event_id: string } };
-  assertEquals(eqRow.metadata.spine_event_id, "spine-swp-26090-1");
+  // matched + email channel + job_id present -> spine row only; the retired
+  // v1 queue is not written.
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].table, "business_events");
 });
 
 Deno.test("recordEvidence: flag OFF short-circuits to dry-run", async () => {
@@ -862,16 +868,6 @@ Deno.test("insert_proposal: strict accepts system exception with allowed reason"
   assert(inserts.some((i) => i.table === "ai_proposed_actions"));
 });
 
-Deno.test("EXTRACTOR_ELIGIBLE_CHANNELS is the conservative T5 Iter-5 allowlist", () => {
-  // Sanity: the allowlist must match T5 Iter-5's pre-flip recommendation
-  // (start with client.email_in + note.added). 'sms' is intentionally NOT
-  // here in Loop 1.
-  assertEquals(EXTRACTOR_ELIGIBLE_CHANNELS.includes("email"), true);
-  assertEquals(EXTRACTOR_ELIGIBLE_CHANNELS.includes("note"), true);
-  assertEquals(EXTRACTOR_ELIGIBLE_CHANNELS.includes("sms"), false);
-  assertEquals(EXTRACTOR_ELIGIBLE_CHANNELS.includes("audit"), false);
-});
-
 // ───────────────────────────────────────────────────────────────────────
 // Regression: canonical-event-drop bug (2026-05-02 stop-time review)
 // ───────────────────────────────────────────────────────────────────────
@@ -959,7 +955,7 @@ Deno.test("recordEvidence: high-confidence contact hint retained without binding
     match_method: "contact_id", match_confidence: 1,
     occurred_at: "2026-09-11T02:00:00.000Z", event_at: null,
     body_preview: "Please call about the other job",
-  }, { org_id: "test-org", extractor_eligible_channels: ["call"] });
+  }, { org_id: "test-org" });
   assertEquals(r.spine_row.job_id, null);
   assertEquals((calls[0].values as Record<string, unknown>).event_at, null);
   assertEquals((calls[0].values as Record<string, unknown>).occurred_at, "2026-09-11T02:00:00.000Z");

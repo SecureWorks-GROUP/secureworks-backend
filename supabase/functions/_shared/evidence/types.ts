@@ -76,19 +76,6 @@ export const SAFE_SUMMARY_MAX = 280;
 export const MATCH_CONFIDENCE_FLOOR = 0.60;
 
 /**
- * Channels that are extractor-eligible by default. The recordEvidence
- * helper enqueues an extraction_jobs row only when the channel is on this
- * allowlist AND a job_id is present AND match_status === 'matched'.
- *
- * Conservative by design (per T5 Iter-5 enqueuer recommendation): start
- * with email and notes; expand only after observing skipped/done rates.
- */
-export const EXTRACTOR_ELIGIBLE_CHANNELS: Channel[] = [
-  "email",
-  "note",
-];
-
-/**
  * Canonical EvidenceRef shape returned by recordEvidence and required on
  * every ai_proposed_actions.action_payload.evidence_refs[] entry.
  *
@@ -156,10 +143,6 @@ export interface EvidenceCapture {
   // Domain extras
   payload?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
-
-  // Extraction
-  enqueueExtraction?: boolean;                        // override default channel allowlist
-  extractor_priority?: number;                        // 1..9, lower = higher priority
 }
 
 export interface RecordEvidenceResult {
@@ -180,6 +163,5 @@ export interface RecordEvidenceResult {
   evidence_ref: EvidenceRef;
   body_pointer?: string;
   body_hash?: string;
-  extraction_job_id?: string;                          // when enqueued
   warnings: string[];                                  // non-fatal issues (preview truncated, etc.)
 }
