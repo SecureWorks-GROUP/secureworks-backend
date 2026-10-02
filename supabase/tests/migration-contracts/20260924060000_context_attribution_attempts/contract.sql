@@ -293,7 +293,7 @@ BEGIN;
 DO $$
 DECLARE ja uuid:=gen_random_uuid(); e public.business_events;
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.attribute_context_event_with_luna(uuid,uuid,numeric)')) NOT IN ('48eabf7e132092cd225ff5060ce58846','fde44559c43dcc770d1c42909f4adeaf')
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.attribute_context_event_with_luna(uuid,uuid,numeric)')) NOT IN ('48eabf7e132092cd225ff5060ce58846','fde44559c43dcc770d1c42909f4adeaf','62ed28cbcf041d7cdcda298907a756fa')
  THEN RAISE EXCEPTION 'legacy Luna function changed'; END IF;
  INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
  (ja,'00000000-0000-0000-0000-000000000001','quoted','fencing','A1-LEG-A','a1-leg'),

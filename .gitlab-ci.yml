@@ -58,6 +58,8 @@ deno-check:
     - deno test --allow-read --allow-env supabase/functions/_shared/evidence/ghl_message_test.ts supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts supabase/functions/_shared/evidence/ghl_call_pair_test.ts supabase/functions/ghl-proxy/sms_capture_test.ts supabase/functions/ghl-proxy/send_sms_response_test.ts
     - deno test --allow-read supabase/functions/ghl-message-reconcile/reconcile_test.ts supabase/functions/ghl-message-reconcile/handler_test.ts
     - deno test --allow-read supabase/functions/ghl-history-load/history_load_test.ts supabase/functions/ghl-history-load/link_test.ts supabase/functions/ghl-history-load/handler_test.ts
+    - deno test --allow-read --allow-env supabase/functions/_shared/ghl/call_transcript_test.ts supabase/functions/_shared/evidence/ghl_call_transcript_row_test.ts supabase/functions/ghl-call-transcript-fetch/fetch_test.ts supabase/functions/ghl-call-transcript-fetch/handler_test.ts
+    - deno test --no-check --allow-read --allow-env supabase/functions/ops-api/site_links_test.ts
     - deno test --allow-read supabase/functions/_shared/job_refs_test.ts supabase/functions/_shared/job_refs_contract_rows_test.ts
     - deno test --allow-read --allow-env supabase/functions/monitor-inbox/classify_email_test.ts
     - deno test --allow-read supabase/functions/monitor-inbox/legacy_mailboxes_test.ts supabase/functions/monitor-inbox/reader_handover_test.ts

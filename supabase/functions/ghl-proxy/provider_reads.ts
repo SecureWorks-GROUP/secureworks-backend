@@ -2,6 +2,8 @@
 // Versioned contracts: https://marketplace.gohighlevel.com/docs/2021-07-28/ghl/
 // Contacts GET is the documented 2023-02-21 compatibility endpoint (deprecated).
 // Opportunities use v3: https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity/
+import { readTranscriptSentences } from "../_shared/ghl/call_transcript.ts";
+
 type JsonObject = Record<string, unknown>;
 export const GHL_PROVIDER_READ_ACTIONS = [
   "read_ghl_location",
@@ -237,92 +239,6 @@ function boundId(row: JsonObject, id: string) {
       502,
     );
   }
-}
-
-// Diagnostic-only allowlist: no provider scalar values or arbitrary keys escape.
-// Kept inside the existing sanitized error message to avoid widening all errors.
-function transcriptShape(value: unknown): JsonObject {
-  let budget = 24;
-  const keys = [
-    "data",
-    "result",
-    "results",
-    "transcription",
-    "transcriptions",
-    "transcript",
-    "sentences",
-    "mediaChannel",
-    "sentenceIndex",
-    "startTime",
-    "endTime",
-    "confidence",
-  ];
-  function shape(input: unknown, depth: number): JsonObject {
-    if (--budget < 0) return { type: "omitted", bounded: true };
-    const type = input === null
-      ? "null"
-      : Array.isArray(input)
-      ? "array"
-      : typeof input;
-    if (type !== "object" && type !== "array") return { type };
-    if (depth >= 4) return { type, bounded: true };
-    if (Array.isArray(input)) {
-      return {
-        type,
-        length: Math.min(input.length, 10000),
-        ...(input.length > 10000 ? { length_capped: true } : {}),
-        items: input.slice(0, 2).map((item) => shape(item, depth + 1)),
-      };
-    }
-    const obj = object(input);
-    const fields: JsonObject = {};
-    for (const key of keys) {
-      if (Object.hasOwn(obj, key)) fields[key] = shape(obj[key], depth + 1);
-    }
-    return { type, fields };
-  }
-  return shape(value, 0);
-}
-
-function transcriptValidationReason(value: unknown): string | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return "sentence_not_object";
-  }
-  const sentence = object(value);
-  if (!Object.hasOwn(sentence, "transcript")) return "missing_field:transcript";
-  if (typeof sentence.transcript !== "string") return "invalid_type:transcript";
-  if (!sentence.transcript.trim()) return "empty_transcript";
-  for (
-    const key of [
-      "mediaChannel",
-      "sentenceIndex",
-      "startTime",
-      "endTime",
-      "confidence",
-    ]
-  ) {
-    // Live v3 responses can omit confidence. Preserve that absence rather than
-    // assigning a score; a supplied confidence must still pass validation.
-    if (key === "confidence" && !Object.hasOwn(sentence, key)) continue;
-    if (!Object.hasOwn(sentence, key)) return `missing_field:${key}`;
-    const number = sentence[key];
-    if (
-      !((typeof number === "number" ||
-        (typeof number === "string" && /^\d+(?:\.\d+)?$/.test(number))) &&
-        Number.isFinite(Number(number)) && Number(number) >= 0)
-    ) return `invalid_numeric:${key}`;
-  }
-  if (Number(sentence.endTime) < Number(sentence.startTime)) {
-    return "reversed_timing";
-  }
-  if (!Number.isInteger(Number(sentence.mediaChannel))) {
-    return "invalid_integer:mediaChannel";
-  }
-  if (!Number.isInteger(Number(sentence.sentenceIndex))) {
-    return "invalid_integer:sentenceIndex";
-  }
-  if (Number(sentence.confidence) > 1) return "invalid_range:confidence";
-  return null;
 }
 
 /**
@@ -933,24 +849,19 @@ export async function readGhlProvider(
     // The v3 docs show a sentence object and numeric strings. Accept an array
     // of those same sentences, but never guess undocumented wrapper shapes.
     const raw = await getJson(path, undefined, "v3");
-    const sentences = raw === null ? [] : Array.isArray(raw) ? raw : [raw];
-    for (const value of sentences) {
-      const reason = transcriptValidationReason(value);
-      if (reason) {
-        const diagnostic = {
-          reason,
-          shape: transcriptShape(raw),
-          invalid_sentence: transcriptShape(value),
-        };
-        throw new GhlProviderReadError(
-          "provider_response_invalid",
-          `GHL returned malformed transcript sentences; diagnostic=${
-            JSON.stringify(diagnostic)
-          }`,
-          502,
-        );
-      }
+    // One reader of GHL's transcript answer, shared with the transcript
+    // fetcher (slice T2): mediaChannel and speaker optional, all else strict.
+    const read = readTranscriptSentences(raw);
+    if (!read.ok) {
+      throw new GhlProviderReadError(
+        "provider_response_invalid",
+        `GHL returned malformed transcript sentences; diagnostic=${
+          JSON.stringify(read.diagnostic)
+        }`,
+        502,
+      );
     }
+    const sentences = read.sentences;
     return result(
       {
         message: data,
