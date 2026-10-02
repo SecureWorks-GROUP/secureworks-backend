@@ -24,6 +24,15 @@ BEGIN
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
   IF live IS NULL OR NOT live=ANY(x.accepted) THEN problems:=problems||format('%s md5 %s',x.sig,coalesce(live,'<missing>')); END IF;
  END LOOP;
+ -- The two ladder bodies this down drops: P4's, or already gone.
+ FOR x IN SELECT * FROM (VALUES
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)','e04d9e81649364b8e9acc38f14833ba2'),
+  ('public.context_ladder_p1a(public.business_events,boolean)','9ce621de1f295757e9ed83abdc2f3765')
+ ) AS t(sig,accepted) LOOP
+  live:=NULL;
+  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
+  IF live IS NOT NULL AND live<>x.accepted THEN problems:=problems||format('%s md5 %s',x.sig,live); END IF;
+ END LOOP;
  IF cardinality(problems)>0 THEN
   RAISE EXCEPTION 'context_unlinked_rules_rollback_mismatch: %; a later change must be rolled back first',array_to_string(problems,'; ');
  END IF;

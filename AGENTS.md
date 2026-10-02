@@ -669,9 +669,10 @@ Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
 `resolve_context_attribution(e)`, a one-line entry into
 `resolve_context_attribution(e, p_preview, p_rules_on)`. With
 `feature_flags.context_unlinked_rules_v1` off (missing or unreadable = off) it
-runs `context_ladder_p1a`, P1a's live body plus exactly two deviations, a
-preview guard and a `retired_at IS NULL` thread filter (the contract undoes
-both and proves the rest byte for byte); with it on, the P4 rules. A retired
+runs `context_ladder_p1a`, P1a's live body plus a preview guard, a
+`retired_at IS NULL` thread filter and step 1b (`20261003100000`, the row's own
+`payload.job_id`; the contracts undo each and prove the rest byte for byte);
+with it on, the P4 rules plus that step 1b. A retired
 binding never places on either path, and P4 also owns both
 `attribute_context_event_with_luna` overloads, which follow a thread only when
 it is live and bound to one of the row's candidates. P4's rollback deletes
@@ -679,8 +680,9 @@ nothing: it re-keys retired rows (`retired:` prefix) before restoring P1a.
 A later placement slice (P2, P3,
 P-T) replaces the rules body in the 3-argument function, never the frozen
 P1a copy, and must widen the successor md5 lists and the `\if` re-apply
-guards in the L1, P1a and P1b contracts, and roll P4 back first in L1's
-break-contract, exactly as P4 did for P1a.
+guards in the L1, P1a, P1b, P4 and L1b contracts, and roll L1b then P4 back
+first in L1's break-contract (P4's down now refuses while L1b's bodies are
+live), exactly as P4 did for P1a.
 
 The writer check reads `metadata.written_as`, which the insert trigger now
 stamps BEFORE the ladder as well as after: a writer-supplied value never
