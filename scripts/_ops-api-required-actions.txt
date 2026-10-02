@@ -275,6 +275,11 @@ sales_booking_send # probe=source-only
 # Thread-facts refresh (17 Sep 2026). POST re-reads GHL and persists
 # kind=thread_facts, so the live probe is source-only.
 sales_booking_threads_refresh # probe=source-only
+# Booking routes (2 Oct 2026): who books which lead, into which GHL calendar.
+# The read is a small table read with no provider call. A change is audited
+# and owner-only, so deploy recognition of the write stays source-only.
+sales_booking_routes_read
+sales_booking_routes_write # probe=source-only
 # Sales performance snapshots (service write; authenticated staff read/note)
 sales_performance_write # probe=source-only
 sales_performance_read # probe=source-only

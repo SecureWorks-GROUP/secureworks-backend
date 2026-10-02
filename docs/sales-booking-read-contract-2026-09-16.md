@@ -83,11 +83,13 @@ table. Thread-facts and roster persist are the only writes on the read
 path. No GHL mutation, no calendar create, no send.
 Before projecting a cached candidate, the read fetches its current GHL
 assignee and pipeline. A candidate now owned by someone else is withheld;
-an unassigned candidate follows its current pipeline's owner. Failed or
+an unassigned candidate follows the unassigned rule below. Failed or
 budget-limited ownership reads withhold the affected candidates and report a
 coverage gap. Enumeration rows and the resume cursor are retained unchanged,
 so a partial ownership read cannot discard scan progress. Freshly enumerated
-rows use the ownership returned by that live GHL search. Approval and send
+rows use the assignee and pipeline returned by that live GHL search; an
+unassigned fencing row's kind is still read as the `resource` rule below
+says. Approval and send
 also recheck current ownership.
 
 `send_hold: true` and `policy.{activation,send,calendar_write}: 'held'`
@@ -114,7 +116,7 @@ Remaining 429s are `coverage.remaining_429_count`.
 
 | Param | Default | Notes |
 |---|---|---|
-| `resource` | `nithin` | `nithin` (patio), `marnin` (fencing/Stratco) or `khairo` (fencing). A row is on a person's list only when its current GHL assignee is that person, or it is unassigned in the pipeline whose unassigned leads are theirs (Marnin: fencing/Stratco, Nithin: patio; never Khairo). GHL user ids live in `sales_booking_sender.ts`. Anything else is a 400. |
+| `resource` | `nithin` | `nithin` (patio), `marnin` (fencing/Stratco) or `khairo` (fencing). A row is on a person's list only when its current GHL assignee is that person, or it is unassigned and the first matching booking route names them (`docs/sales-booking-routes.md`; each row carries `booking_route`, and the response `routing`). With the seed routes: a patio lead is Nithin's; a fencing lead with any Stratco signal is Marnin's, with a positive normal-lead signal Khairo's (`salesBookingLeadKind`; the signals are listed in `docs/sales-booking-confirmation-api.md`), and with neither, or when its GHL contact or the STRATCO FENCING calendar could not be read (named in `coverage.gaps`; Khairo's read then reports `coverage.full_population: false`), is owner unclear: listed on Marnin's only, carrying `owner_unclear: true` and `owner_unclear_label` ("Owner unclear, Stratco or normal?"), never on Khairo's (owner 2026-09-24). The kind is read from the opportunity plus its GHL contact (tags, custom fields, source) and the STRATCO FENCING calendar, the same reads the approvals and send make (`resolveSalesBookingLeadKind`), for fresh and cached rows alike. GHL user ids live in `sales_booking_sender.ts`. Anything else is a 400. |
 | `week_start` | current Perth week | ISO date, MUST be a Monday. A non-Monday or an impossible date is a 400. |
 | `scoper_user_id` | the resource's own | Overrides the diary read only (GHL plus Outlook when that scoper has a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`), and only when it matches a v1 scoper (Nithin / Marnin / Khairo). The roster still comes from the resource's pipeline. An unknown uuid is `ghl_user_unmapped`, never a guessed GHL user. |
 | `include_thread_facts` | `true` | `false` skips every GHL thread read. |
@@ -139,8 +141,10 @@ Additions:
 
 - **`diary[]`** — the scoper's GHL calendar events for Mon..Sun of
   `week_start`, merged with that person's Outlook primary calendar when the
-  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (today: `marnin`;
-  decision D2, 23 Sep 2026). Each entry: `event_id`, `start`, `end` (ISO with
+  resource has one in `SALES_BOOKING_OUTLOOK_MAILBOXES` (`marnin` since
+  decision D2, 23 Sep 2026; `nithin` and `khairo` since the 25 Sep 2026
+  tenant-wide Calendars.Read consent). That map is read only: the booking
+  writes Outlook for `SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES` alone (Marnin). Each entry: `event_id`, `start`, `end` (ISO with
   `+08:00`), `title`, `kind` (`busy` | `leave` | `personal`), `source`
   (`ghl` | `outlook`), plus `show_as`, `blocks_capacity`, `is_all_day`,
   `location`, `title_withheld`, `mirror_of_ghl_event_id`, and `booked_visit`
@@ -152,7 +156,18 @@ Additions:
   An Outlook event written by the booking mirror
   (`sales_booking_outlook_mirror.ts`) names its GHL appointment in
   `mirror_of_ghl_event_id`; both rows stay so each calendar shows event for
-  event.
+  event. An UNMARKED Outlook event that is GHL's own sync copy of a visit
+  (busy, not all-day, same start and end as a GHL event of the same person
+  that availability counts as busy, i.e. not cancelled and not invalid) is
+  folded into that GHL row as `outlook_copy` (the whole Outlook row) and
+  leaves the diary, so one visit shows once (`foldSalesBookingOutlookCopies`;
+  live case: Khairo,
+  Tue 29 Sep 10:00-10:30, GHL blank title, Outlook "Fencing Complaint Basil
+  Laing"). Each GHL row absorbs at most one copy.
+  `diary_read.sources.outlook.ghl_copies_folded` counts them; `event_count`
+  stays the raw Outlook count. The fold is display only: live availability
+  restores each `outlook_copy` and counts it, with its own location, as the
+  owner press does.
 - **`thread_facts{}`** — keyed by case id: `last_inbound_at`,
   `last_human_outbound_at`, `last_outbound_at`, `quiet_window`, `quiet_hours`,
   `classification`, `read_ok`, `reason`, `message_count`,
@@ -181,7 +196,7 @@ Additions:
   `outlook_calendar_http_403`), keeps the GHL rows that did read, and is never
   a free day. `sources.ghl` is `{read_ok, reason, event_count}`;
   `sources.outlook` is `{state: read | failed | not_configured, read_ok,
-  reason, calendar_email, event_count, malformed_dropped}`.
+  reason, calendar_email, event_count, malformed_dropped, ghl_copies_folded}`.
   `coverage.operational_leave` is `primary_outlook_calendar_only` when Outlook
   read, else `not_read`: leave in any other calendar is never read.
   `calendar_email` may be null; `ghl_user_id` is
@@ -204,6 +219,16 @@ Additions:
   `docs/sales-booking-confirmation-api.md`. Per-case **`booking_executions`**
   and `booking_flow.execution_read` are the executor press overlay. Owner:
   `docs/sales-booking-executor.md` "What the read shows".
+- Per-case **`scope_appointment`** and top-level **`scope_appointments`**
+  (by GHL contact id) — booked elsewhere. When any booking person's GHL
+  calendar holds a live future appointment (next 60 days; not cancelled,
+  no-show, invalid or deleted) for the lead's contact, the case carries
+  `{start_iso, end_iso, owner_name, owner_resource_id, status, event_id}`,
+  else `null`. The Booking door files such a lead under Booked ("Booked with
+  Khairo, ...") and off To contact. A pack offer for a booked contact that is
+  not on this list is added as a booked case, so it never shows as someone to
+  contact. An unread calendar is a named coverage gap. Owner:
+  `supabase/functions/ops-api/sales_booking_scope_appointment.ts`.
 - **`pack`** — `{present, as_of, proposals}` for the latest
   `sales_booking_packs` row with `kind=pack`. Absent when the engine has not
   published this week (`present:false`, `as_of:null`, `proposals:{}`).

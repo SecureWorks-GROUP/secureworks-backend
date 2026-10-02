@@ -68,19 +68,27 @@ Both actions:
 
 `sales_booking_book` then:
 
-6. The owner's Outlook primary calendar for the approved window, read through
+6. The booking route, read from the routes table at the press
+   (`docs/sales-booking-routes.md`). A lead assigned in GHL must still be the
+   approved person's (`opportunity_assignee_changed`); the lead's route must
+   still name the approved person, calendar and GHL user
+   (`booking_route_changed` when the owner changed a rule since approving;
+   `booking_route_missing` and the other route reasons when no rule fits;
+   `booking_routes_unreadable` when the table cannot be read). Nothing is
+   written.
+7. The visit person's Outlook primary calendar for the approved window, read through
    Microsoft Graph `calendarView` with the mail app's existing credential
    (`_shared/graph_client.ts`, mailbox from `SALES_BOOKING_GHL_USERS`). Any busy
    event refuses `outlook_calendar_clash`, naming subject and times; a failed
    read refuses `outlook_unreadable`. Free and cancelled events never block.
-7. When the resource has an Outlook calendar
-   (`SALES_BOOKING_OUTLOOK_MAILBOXES`): published suburb and client name,
+8. When the resource is one the mirror writes
+   (`SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES`, Marnin only): published suburb and client name,
    before any GHL write (dry run included). Suburb is
    `salesBookingPublishedSuburb` (the same value the booking read publishes).
    Missing that value, a usable name, or the contact read refuses
    `suburb_not_given` / `client_name_not_given` / `contact_unreadable` and
    books nothing.
-8. A live press claims `sales_booking_executions` (`step=calendar`) and
+9. A live press claims `sales_booking_executions` (`step=calendar`) and
    passes `executorClaim` to the GHL writer
    (`ghl-proxy?action=create_calendar_appointment`), which re-reads the
    person's GHL diary plus every assigned calendar and refuses
@@ -103,10 +111,16 @@ Both actions:
    recipient.
    Then the opportunity's live GHL assignee must still make it that
    person's lead (`salesBookingLeadBelongsTo`): assigned to that person, or
-   unassigned where their pipeline's unassigned leads are theirs (Marnin on
-   fencing/Stratco, Nithin on patio; never Khairo). Otherwise
-   `opportunity_assignee_changed`; an unreadable assignee refuses
-   `opportunity_assignment_unreadable`. Nothing is sent.
+   unassigned where the first matching booking route names them (seed: patio
+   Nithin; fencing with a Stratco signal Marnin, with a positive normal-lead
+   signal Khairo, `salesBookingLeadKind`). Otherwise
+   `opportunity_assignee_changed`; an unassigned lead no route claims refuses
+   `owner_unclear` on the line of the person holding that trade's unrouted
+   leads until someone assigns it in GHL; an unreadable routes table refuses
+   `booking_routes_unreadable`; an unreadable assignee, or
+   an unassigned fencing lead whose GHL contact or STRATCO FENCING calendar
+   cannot be read, refuses `opportunity_assignment_unreadable`. Nothing is
+   sent.
 8. `text_already_in_thread` if the exact text was already sent since approval.
 9. Claim the send, call ghl-proxy `send_sms` with the exact text, settle.
    An unclear provider answer settles `unknown` and refuses
@@ -136,7 +150,7 @@ the GHL contact; suburb is the one the booking read already publishes
 | `written` | Outlook holds the event (`outlook_event_id`). `reason: "already_mirrored"` when an earlier press wrote it. |
 | `dry_run` | Nothing written. `would_write` is the exact Graph request. `reason` is the press's dry-run reason (`api_key_press_is_dry_run`, `dry_run_requested`, `book_switch_off`, or `appointment_writer_flag_off`). A dry run names the GHL id as `pending_ghl_appointment_id`. |
 | `failed` | GHL is booked, Outlook is not. `reason` names why (`mirror_write_failed: outlook_create_http_403`, `mirror_outcome_unknown: ...`, `contact_unreadable`, ...). |
-| `not_applicable` | The resource has no Outlook calendar (`SALES_BOOKING_OUTLOOK_MAILBOXES`; GHL-only people such as Nithin). |
+| `not_applicable` | The booking does not write this resource's Outlook (`SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES` is Marnin only; Nithin and Khairo book in GHL only). Their Outlook is still READ into the diary (`SALES_BOOKING_OUTLOOK_MAILBOXES`); the read map never widens the write. |
 
 Every response carries a plain `message`. The booking always stands; the mirror
 never turns a booking into a refusal. **Retry:** pressing the same approval

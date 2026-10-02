@@ -140,9 +140,11 @@ week values shown by the UI. No trimming, newline conversion or rewording.
 The handler uses the existing allow-listed captain JWT policy
 (`SALES_BOOKING_CAPTAIN_EMAILS`) and requires a verified user ID. Request actor
 fields are ignored. API keys, routine callers and other JWTs cannot approve.
-Message approvals support Marnin, Nithin and Khairo; calendar approvals remain
-Stratco/Marnin only. One request names exactly one step; neither channel can
-trigger or grant the other.
+Message and calendar approvals support Marnin, Nithin and Khairo. An approved
+engine calendar operation must name the calendar the lead's booking route
+books into, for that route's person (`booking_route_calendar_mismatch`
+otherwise; routes: `docs/sales-booking-routes.md`). One request names exactly
+one step; neither channel can trigger or grant the other.
 
 Before recording, the handler re-reads the current workspace and compares the
 entire snapshot semantically, verifies the computed hash and proposal expiry.
@@ -199,20 +201,38 @@ The engine path is unchanged and keeps working. Code:
 `supabase/functions/ops-api/sales_booking_owner_approval.ts`; tests:
 `sales_booking_owner_approval_test.ts`.
 
-Texts: Marnin's Stratco leads (`marnin`, `fencing-stratco-marnin`), Nithin's
-patio leads (`nithin`, `patio-nithin`) and Khairo's own fencing leads
-(`khairo`, `fencing-khairo`), each sent from that person's line. Visits and
-offered slots: Stratco only (`stratco_profile_required` otherwise). The engine
-path follows the same split. Same `sales_booking_approvals` table, same
+Texts and visits for Marnin (`marnin`, `fencing-stratco-marnin`), Nithin
+(`nithin`, `patio-nithin`) and Khairo (`khairo`, `fencing-khairo`), each text
+from that person's line and each visit under that person's own visit rules
+(`SALES_BOOKING_VISIT_RULEBOOKS`). A visit, or a text that offers one, goes
+into the GHL calendar the lead's booking route names, read from the routes
+table at the press (`docs/sales-booking-routes.md`); no route, no visit. The
+engine path follows the same split. Same `sales_booking_approvals` table, same
 15-minute life, same captain-only rule, same executor. `binding_hash` is the
 `approval_id` the executor takes. Each case's `owner_booking.steps` names
-what it can take (`["message","calendar"]` on Stratco, `["message"]` else).
+what it can take (`["message"]` when the list found no route for the lead,
+`["message","calendar"]` otherwise) and `owner_booking.route` the route the
+list read.
 
 Whose lead it is: the opportunity's current GHL assignee, read live at every
-approval (both routes, including the owner preview) and again at send. A lead
-assigned to Nithin or Khairo is only theirs; one assigned to Marnin, or
-unassigned in the Stratco pipeline, is Marnin's; an unassigned patio lead is
-Nithin's. Otherwise `lead_assigned_to_someone_else`; an unreadable assignee
+approval (both routes, including the owner preview) and again at send and at
+book. A lead assigned to someone is only theirs. Unassigned, it is the person
+the first matching booking route names (`docs/sales-booking-routes.md`); with
+the seed routes a patio lead is Nithin's and a fencing lead goes by
+`salesBookingLeadKind` (`sales_booking_sender.ts`):
+any Stratco signal (a `stratco` tag, Stratco in the opportunity name, contact
+name or source, a non-empty Stratco allocation-ref custom field when
+`GHL_STRATCO_ALLOCATION_FIELD_ID` is set, or an appointment on the STRATCO
+FENCING calendar) is Marnin's; a positive normal-lead signal (website,
+Google, Facebook, referral or phone-in source, or a `web - enquiry` /
+`answered-call` / `source:organic` tag) is Khairo's; neither is owner
+unclear, never Khairo's and refused `owner_unclear` on Marnin's until someone
+assigns it in GHL (`salesBookingLeadBelongsTo`, owner 2026-09-24). The
+signals are read from the opportunity, its GHL contact and that calendar, the
+same reads the booking list makes (`resolveSalesBookingLeadKind`); when the
+contact or calendar cannot be read, every approval refuses
+`opportunity_assignment_unreadable`. A possible Stratco lead
+never reaches Khairo's line. Otherwise `lead_assigned_to_someone_else`; an unreadable assignee
 refuses `opportunity_assignment_unreadable`. The people, their GHL users and
 lines are one table, `sales_booking_sender.ts`. The approvals table accepts
 `marnin`, `nithin` and `khairo` from migration
@@ -260,8 +280,8 @@ refusal without running the calendar checks.
 
 Common fields: `step` (`"message"` or `"calendar"`), `case_id` (the case
 `id`), `contact_id` (GHL contact id), `week_start` (the screen's Monday),
-optional `resource` (`"marnin"` by default, `"nithin"` or `"khairo"` for a
-text with no `offer`; anyone else is `booking_profile_required`),
+optional `resource` (`"marnin"` by default, `"nithin"` or `"khairo"`;
+anyone else is `booking_profile_required`),
 `prepared_at` (decide only).
 
 - **Message:** `text` (the exact text the owner wrote or edited, 1..1600
@@ -285,8 +305,9 @@ text with no `offer`; anyone else is `booking_profile_required`),
   `recipient` is the GHL contact's current phone as E.164, read at the press;
   `sender` is the visit person's own line from `sales_booking_sender.ts`
   (Stratco is Marnin, so `+61489267776`), also returned as `checks.sender`.
-- Calendar `content`: `{provider:"ghl", calendar_id:"dEQKVKHthsjSYaen1fiE",
-  assigned_user_id:"3S20LGVTjsVYy9vTJ9wM", start_iso:<window start>,
+- Calendar `content`: `{provider:"ghl", calendar_id:<the route's calendar,
+  e.g. "dEQKVKHthsjSYaen1fiE" for Stratco>, assigned_user_id:<the route
+  person's GHL user>, start_iso:<window start>,
   end_iso:<visit end>, window_start_iso, window_end_iso,
   title:"Scope visit: <name>", address:"<street>, <suburb>"}`. Name is the GHL
   contact's; street is the contact's address line, else the recorded job
@@ -301,8 +322,7 @@ Refusals are HTTP 409 unless shown (400 for a malformed request) with body
 Request and identity: `sales_booking_approval_write requires POST` (405),
 `invalid_dry_run`, `stamp_write_requires_captain` (403),
 `approval_actor_required` (403), `invalid_owner_input`,
-`booking_profile_required`, `stratco_profile_required`,
-`invalid_independent_approval`,
+`booking_profile_required`, `invalid_independent_approval`,
 `refusal_reason_required`, `owner_prepared_at_required`,
 `owner_content_hash_required`, `booking_case_identity_ambiguous` (the contact
 must be exactly one case on the requested resource's roster for that week and its case id
@@ -314,16 +334,26 @@ Content: `owner_message_text_required`, `owner_message_text_has_dash`,
 Unit/Apt/Shop or comma before the number still counts),
 `contact_suburb_missing`, `owner_snapshot_changed`.
 
-Rulebook (no reads; `STRATCO_BOOKING_RULEBOOK`, from the engine's profile
-JSON `fencing-stratco-marnin.json` and the calendar target in its GO-LIVE.md):
+Route (visit or offer; read at the press): `booking_routes_unreadable`,
+`booking_route_missing` (no rule matches the lead),
+`booking_route_lead_source_unread` / `booking_route_tags_unread` (a rule
+needs a fact that could not be read), `booking_route_other_person` (the
+lead's route names someone else). `detail.message` says it in plain words.
+
+Rulebook (no reads; the visit person's `SALES_BOOKING_VISIT_RULEBOOKS` entry:
+Marnin's is `STRATCO_BOOKING_RULEBOOK`, from the engine's profile JSON
+`fencing-stratco-marnin.json`; Khairo's and Nithin's are their wiki profiles'
+days and hours; the arrival window, on-site length and travel are shared):
 `owner_visit_required`, `owner_visit_times_invalid`,
 `owner_visit_not_future`, `owner_visit_spans_days`,
-`owner_visit_day_not_permitted` (Tue and Fri), `owner_visit_window_length`
+`owner_visit_day_not_permitted` (Marnin Tue and Fri; Khairo Mon to Fri;
+Nithin Mon, Tue, Thu, Fri), `owner_visit_window_length`
 (60 to 90 minutes), `owner_visit_window_not_inside_visit`,
 `owner_visit_too_short` (visit ends at least 30 minutes after the latest
-arrival: 30 minutes on site, owner's rule of 24 Sep 2026), `owner_visit_outside_hours` (window start at or after 08:00, visit
-end by 16:30), `owner_visit_protected_band` (Tue 13:00 to 15:30 Stratco /
-Canning Vale, including the 30-minute travel buffer).
+arrival: 30 minutes on site, owner's rule of 24 Sep 2026), `owner_visit_outside_hours` (window start at or after 08:00, 12:00 on
+Nithin's Mondays, visit end by 16:30), `owner_visit_protected_band` (Marnin:
+Tue 13:00 to 15:30 Stratco / Canning Vale, including the 30-minute travel
+buffer).
 
 Open offers and presses (both steps, read from `sales_booking_executions`
 claimed in the last 21 days joined to the approvals they ran, plus live
@@ -342,18 +372,20 @@ time between its location and the lead's address
 (`sales_booking_travel.ts`, `docs/sales-booking-live-availability.md`). Outlook
 events use their location display name under the same rule; an unknown location
 refuses approval rather than using a fixed gap:
-`owner_calendar_unreadable`; `owner_calendar_unknown` (the STRATCO FENCING
-calendar must be active, list the owner's GHL user, and that user must be the
-one roster entry for marnin@secureworkswa.com.au); `ghl_calendar_unreadable`
-(the owner's diary by user id plus every calendar he is on; any incomplete
-read); `contact_already_booked_that_day`; `ghl_calendar_clash` (other
-assignees and cancelled rows do not block); `outlook_unreadable`;
-`outlook_calendar_clash` (busy events on his Outlook primary calendar);
-`system_offer_clash` (a slot this system offered another lead in a sent text,
-a live unexpired owner approval, or a booking mid-press; this lead's own
-same slot, other offers to this same lead from a sent text, and offers to a
-lead since booked do not count); `daily_capacity_reached` (GHL events that
-day plus other leads offered that day plus this visit over 6).
+`owner_calendar_unreadable`; `owner_calendar_unknown` (the route's calendar
+must be active and list the visit person's GHL user, and every roster entry
+for that person's addresses must be that user); `ghl_calendar_unreadable`
+(the visit person's diary by user id plus every calendar they are on; any
+incomplete read); `contact_already_booked_that_day`; `ghl_calendar_clash`
+(other assignees and cancelled rows do not block); `outlook_unreadable`;
+`outlook_calendar_clash` (busy events on that person's Outlook primary
+calendar); `system_offer_clash` (a slot this system offered another lead for
+the same person in a sent text, a live unexpired owner approval, or a booking
+mid-press; this lead's own same slot, other offers to this same lead from a
+sent text, offers to a lead since booked and another person's offers do not
+count); `daily_capacity_reached` (GHL events that day plus other leads
+offered that day plus this visit over the person's daily cap: Marnin and
+Khairo 6, Nithin 5).
 
 Texts sent by hand outside this system cannot be checked by the machine. The
 path does not guess at them and does not block on them: every result carries

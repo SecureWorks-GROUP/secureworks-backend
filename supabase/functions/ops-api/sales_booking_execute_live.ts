@@ -18,6 +18,7 @@ import type {
   SalesBookingExecuteDeps,
 } from "./sales_booking_execute.ts";
 import { mirrorGhlAppointmentToOutlook } from "./sales_booking_outlook_mirror.ts";
+import { loadSalesBookingRoutes } from "./sales_booking_routes.ts";
 import type {
   OwnerApprovalDeps,
   OwnerApprovalReader,
@@ -222,7 +223,9 @@ export function createSalesBookingExecuteDeps(
       const contact = await readContact(contactId);
       return typeof contact.phone === "string" ? contact.phone : null;
     },
-    readOpportunityOwnership: readSalesBookingOpportunityOwnership,
+    readOpportunityOwnership: (opportunityId, options) =>
+      readSalesBookingOpportunityOwnership(opportunityId, {}, options),
+    readRoutes: () => loadSalesBookingRoutes(client),
     async readOutlookLead({ contactId, opportunityId }) {
       const contact = await readContact(contactId);
       const jobSites = await readJobSitesLive(
@@ -299,6 +302,7 @@ export function createOwnerApprovalDeps(
     },
     readThread: execute.readThread,
     readOpportunityOwnership: execute.readOpportunityOwnership,
+    readRoutes: execute.readRoutes,
     readOutlook: readResourceOutlook,
     async readGhlDirectory() {
       const location = encodeURIComponent(locationId());
@@ -390,21 +394,25 @@ export function createOwnerApprovalDeps(
         if (error || !Array.isArray(data)) throw new Error("unreadable");
         approvals.push(...data);
       }
-      approvals.push(...await ownerApprovalReader(client)(sinceIso));
+      approvals.push(...await ownerApprovalReader(client)(sinceIso, null));
       return { executions, approvals };
     },
   };
 }
 
 /** One person's owner-authored approval rows recorded since `sinceIso` (live
- * ones are at most 15 minutes old). The offer census reads Marnin's, the only
- * rows that can hold a slot. Throws on a failed read, never a false []. */
+ * ones are at most 15 minutes old), or every person's when `resource` is
+ * null: the offer census reads them all, since any booking person's visit
+ * or offer can hold a slot (each census offer names its person). Throws on
+ * a failed read, never a false []. */
 export function ownerApprovalReader(client: Client): OwnerApprovalReader {
   return async (sinceIso, resource = "marnin") => {
-    const { data, error } = await client.from("sales_booking_approvals")
+    let query = client.from("sales_booking_approvals")
       .select(
         "binding_hash,step,resource,week_start,state,reason,snapshot,approved_by_user_id,approved_by_email,approved_at,expires_at",
-      ).eq("resource", resource).gte("approved_at", sinceIso)
+      );
+    if (resource !== null) query = query.eq("resource", resource);
+    const { data, error } = await query.gte("approved_at", sinceIso)
       .filter("snapshot->>source", "eq", "owner")
       .order("approved_at", { ascending: false }).limit(1000);
     if (error || !Array.isArray(data)) throw new Error("unreadable");

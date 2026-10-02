@@ -436,6 +436,32 @@ ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sa
 ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.approved_at
 ops-api|supabase/migrations/20260922150000_sales_booking_approvals.sql|column|sales_booking_approvals.expires_at
 
+# Booking routes: the routes table every booking read, approval and press
+# reads, its audit, and the one audited write.
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|table|sales_booking_routes
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.id
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.position
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.enabled
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.label
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.match_trade
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.match_lead_source
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.match_tag
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.match_pipeline_id
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.person
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.calendar_id
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.calendar_name
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.updated_at
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_routes.updated_by_email
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|table|sales_booking_route_changes
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_route_changes.changed_at
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_route_changes.route_id
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_route_changes.op
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_route_changes.before
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_route_changes.after
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_route_changes.changed_by_email
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|column|sales_booking_route_changes.reason
+ops-api|supabase/migrations/20261002090000_sales_booking_routes.sql|function|sales_booking_route_write
+
 # Booking executor (sales_booking_book / sales_booking_send) and the writer claim gate.
 ops-api|supabase/migrations/20260923181500_sales_booking_executions.sql|table|sales_booking_executions
 ops-api|supabase/migrations/20260923181500_sales_booking_executions.sql|column|sales_booking_executions.binding_hash

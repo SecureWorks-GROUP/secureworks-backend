@@ -258,6 +258,7 @@ function readDeps(): SalesBookingReadDependencies {
         opportunities: [{
           id: "opp-1",
           assignedTo: null,
+          source: "Stratco lead allocation",
           name: "Jane Smith",
           pipelineStageId: marninScopeStage,
           updatedAt: "2026-09-15T01:00:00.000Z",
@@ -452,6 +453,7 @@ function twoOppReadDeps(): SalesBookingReadDependencies {
   const opp = (id: string, name: string) => ({
     id,
     assignedTo: null,
+    source: "Stratco lead allocation",
     name,
     pipelineStageId: stage,
     updatedAt: "2026-09-15T01:00:00.000Z",

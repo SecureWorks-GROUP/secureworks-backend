@@ -20,15 +20,19 @@ import {
   type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
 import { applySalesBookingVisits } from "./sales_booking_visits.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  SALES_BOOKING_STRATCO_CALENDAR_ID,
+} from "./sales_booking_sender.ts";
 
 type Obj = BookingObject;
 const NOW = new Date("2026-09-24T01:00:00Z");
 const CAPTAIN = "marnin@secureworkswa.com.au";
 const captain = { mode: "jwt" as const, email: CAPTAIN, userId: "u1" };
-const GHL_USER = "marnin-ghl";
+const GHL_USER = SALES_BOOKING_SENDER_LINES.marnin.ghl_user_id;
 const CALENDAR = {
   provider: "ghl",
-  calendar_id: "stratco-cal",
+  calendar_id: SALES_BOOKING_STRATCO_CALENDAR_ID,
   assigned_user_id: GHL_USER,
   start_iso: "2026-09-25T09:00:00+08:00",
   end_iso: "2026-09-25T10:30:00+08:00",
@@ -191,7 +195,7 @@ function writerRow(key: string, state: string, appointmentId?: string): Obj {
     result: state === "complete"
       ? {
         appointmentId,
-        calendarId: "stratco-cal",
+        calendarId: SALES_BOOKING_STRATCO_CALENDAR_ID,
         startTime: CALENDAR.start_iso,
         endTime: CALENDAR.end_iso,
       }
@@ -605,6 +609,7 @@ function executorDeps(
       Promise.resolve({
         assignedTo: null,
         pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        kind: "stratco" as const,
       }),
     readOutlookLead: () =>
       Promise.resolve({
