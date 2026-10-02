@@ -1,4 +1,4 @@
--- After the rollback: no reader object, no reader flag, C1d's lane list back
+-- After the rollback: no reader object, no reader flag, T2's lane list back
 -- byte for byte, the program flag (EM1's) untouched.
 DO $$
 BEGIN
@@ -9,6 +9,6 @@ BEGIN
  THEN RAISE EXCEPTION 'em2 rollback left a function'; END IF;
  IF EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name IN ('email_reader_v1','email_reader_schedule_v1')) THEN RAISE EXCEPTION 'em2 rollback left a flag row'; END IF;
  IF NOT EXISTS(SELECT 1 FROM public.feature_flags WHERE flag_name='email_capture_v2') THEN RAISE EXCEPTION 'em2 rollback removed EM1''s flag'; END IF;
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'459035de5d3f7f7af49c36f09d9be29e'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'4f80b88d5c5ef6a49a6677f1a76d6350'
  THEN RAISE EXCEPTION 'em2 rollback lanes body'; END IF;
 END $$;

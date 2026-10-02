@@ -3,8 +3,9 @@
 -- Refuses while email_reader_v1 or email_reader_schedule_v1 is on (turn them
 -- off first), and while the attachment ledger holds a row (its files are in
 -- the private bucket; move or delete them deliberately first). Then:
--- unschedules outlook-mail-poll and monitor-inbox-sweep, restores the C1d
--- automation_switch_cron_lanes() body (md5 459035de5d3f7f7af49c36f09d9be29e),
+-- unschedules outlook-mail-poll and monitor-inbox-sweep, restores the T2
+-- automation_switch_cron_lanes() body (20261002100000, md5
+-- 4f80b88d5c5ef6a49a6677f1a76d6350: C1d's rows plus ghl-call-transcript-fetch),
 -- drops the reader's functions and the ledger table, deletes the two flag
 -- rows, and removes the empty private bucket. Evidence rows the reader saved
 -- in business_events stay (they are ordinary evidence; the ladder placed
@@ -37,6 +38,7 @@ AS $fn$
     -- capture: pollers that write evidence rows into business_events
     ('monitor-inbox-poll', 'capture'),
     ('ghl-message-reconcile', 'capture'),
+    ('ghl-call-transcript-fetch', 'capture'),
     -- attribution: the contact match the ladder resolves a job through
     ('contact-matching',   'attribution')
   ) AS t(cron_jobname, lane);
@@ -61,6 +63,6 @@ BEGIN
   THEN RAISE EXCEPTION 'email_reader_rollback_refused: bucket context-email-attachments still holds files'; END IF;
   DELETE FROM storage.buckets WHERE id='context-email-attachments';
  END IF;
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()')) IS DISTINCT FROM '459035de5d3f7f7af49c36f09d9be29e'
- THEN RAISE EXCEPTION 'email_reader_rollback_check_failed: automation_switch_cron_lanes() differs from the C1d body'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()')) IS DISTINCT FROM '4f80b88d5c5ef6a49a6677f1a76d6350'
+ THEN RAISE EXCEPTION 'email_reader_rollback_check_failed: automation_switch_cron_lanes() differs from the T2 body'; END IF;
 END $$;

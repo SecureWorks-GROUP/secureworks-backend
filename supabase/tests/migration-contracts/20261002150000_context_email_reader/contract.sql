@@ -37,7 +37,7 @@ BEGIN
   OR has_function_privilege('service_role','public.trigger_context_email_sweep()','EXECUTE')
  THEN RAISE EXCEPTION 'em2 cron callers must not be callable by service_role'; END IF;
  IF (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
-    IS DISTINCT FROM ARRAY['contact-matching:attribution','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
+    IS DISTINCT FROM ARRAY['contact-matching:attribution','ghl-call-transcript-fetch:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
  THEN RAISE EXCEPTION 'em2 cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;

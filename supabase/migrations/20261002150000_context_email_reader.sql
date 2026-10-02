@@ -38,8 +38,9 @@
 -- authenticated. Every new or re-created function: fixed search_path,
 -- EXECUTE revoked from PUBLIC, anon, authenticated.
 --
--- Pre-image (production as merged on main, 2 Oct 2026):
---   automation_switch_cron_lanes()     md5(prosrc) 459035de5d3f7f7af49c36f09d9be29e (C1d body)
+-- Pre-image (production once T2, 20261002100000, has applied):
+--   automation_switch_cron_lanes()     md5(prosrc) 4f80b88d5c5ef6a49a6677f1a76d6350 (T2 body:
+--     C1d's three rows plus ghl-call-transcript-fetch, 20261002100000)
 --   capture_business_event(jsonb)      4819869e6dcc40d5cd19a7eba295392c (C1a)
 --   record_capture_run(jsonb)          db03c98a6da49f128595342f5a93f84c (F1b)
 --   context_ghl_history_live_jobs()    49eb23015b724a29058c11b2743954bf (M4)
@@ -60,7 +61,7 @@ DECLARE problems text[]:='{}'; live text; x record; cmd text; first_apply boolea
 BEGIN
  first_apply:=to_regclass('public.context_email_attachments') IS NULL;
  FOR x IN SELECT * FROM (VALUES
-  ('public.automation_switch_cron_lanes()',ARRAY['459035de5d3f7f7af49c36f09d9be29e','87924f4e035f492bbcb69d51c0a4611f'],false),
+  ('public.automation_switch_cron_lanes()',ARRAY['4f80b88d5c5ef6a49a6677f1a76d6350','5c1e0e526a74d5b4ad612792c7f076cc'],false),
   ('public.capture_business_event(jsonb)',ARRAY['4819869e6dcc40d5cd19a7eba295392c'],false),
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.context_ghl_history_live_jobs()',ARRAY['49eb23015b724a29058c11b2743954bf'],false)
@@ -243,6 +244,7 @@ AS $fn$
     -- capture: pollers that write evidence rows into business_events
     ('monitor-inbox-poll', 'capture'),
     ('ghl-message-reconcile', 'capture'),
+    ('ghl-call-transcript-fetch', 'capture'),
     ('outlook-mail-poll', 'capture'),
     ('monitor-inbox-sweep', 'capture'),
     -- attribution: the contact match the ladder resolves a job through

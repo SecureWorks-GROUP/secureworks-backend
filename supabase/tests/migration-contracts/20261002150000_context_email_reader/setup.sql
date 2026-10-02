@@ -1,7 +1,7 @@
 -- EM2/EM3 setup. Earlier registered fixtures supply business_events, jobs
 -- (with client_email and job_number), feature_flags (live shape),
 -- monitored_mailboxes (EM1), context_capture_runs and record_capture_run()
--- (F1b), capture_business_event() (C1a), automation_switch_cron_lanes() (C1d)
+-- (F1b), capture_business_event() (C1a), automation_switch_cron_lanes() (T2)
 -- and context_ghl_history_live_jobs() (M4).
 --
 -- Adds the one live table no earlier fixture creates: suppliers (its email
