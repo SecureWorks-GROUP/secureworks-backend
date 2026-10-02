@@ -849,6 +849,7 @@ import {
   salesBookingReadAction,
   SalesBookingRequestError,
 } from './sales_booking_read.ts'
+import { createBookingLeadDraftDeps, ensureBookingLeadDrafts } from './sales_booking_lead_drafts.ts'
 import {
   loadSalesBookingPackOverlay,
   applySalesBookingPackOverlay,
@@ -5296,11 +5297,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           // engine-only calendar_read before approvals and visits compose.
           const live = await applySalesBookingAvailability(
             applySalesBookingPackOverlay(assembled, overlay), createSalesBookingAvailabilityDeps(client))
-          return json(await applyOwnerBooking(await applySalesBookingVisits(client,
+          const composed = await applyOwnerBooking(await applySalesBookingVisits(client,
             await applySalesBookingExecutions(client,
               await applyBookingApprovals(live, bookingApprovalStore(client))),
             { visit_outcomes_from: sbParam('visit_outcomes_from'), visit_outcomes_to: sbParam('visit_outcomes_to') }),
-            ownerApprovalReader(client)))
+            ownerApprovalReader(client))
+          // Context A3: one draft job per listed lead with no job, behind
+          // booking_lead_draft_job_v1. Flag off: response unchanged.
+          const leadDrafts = await ensureBookingLeadDrafts(
+            createBookingLeadDraftDeps(client), assembled.resource.lane, assembled.cases)
+          return json(leadDrafts ? { ...composed, lead_draft_jobs: leadDrafts } : composed)
         } catch (e) {
           if (e instanceof SalesBookingRequestError) throw new ApiError(e.message, e.status)
           if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
@@ -38560,7 +38566,9 @@ function presentTradeJobFeedRow(job: any, quoteVisible: boolean): void {
 // which is the point of the ruling, and it now applies uniformly to every
 // visibility tier (Captain ruling 2026-09-24: "past and present" for the
 // allocated-only tier means every job status too, not just every date).
-export const _GLOBAL_SEARCH_STATUS_EXCLUDE = '("deleted","duplicate","duplicated","void","voided")'
+// `draft` is a pre-scope sales lead, not trade work (ghl-webhook form intake,
+// ghl-proxy create_job, ensure_booking_draft_job); the sales board shows it.
+export const _GLOBAL_SEARCH_STATUS_EXCLUDE = '("deleted","duplicate","duplicated","void","voided","draft")'
 
 // A SUPERSET filter over the `jobs` table's own columns: matches every row a
 // requested vertical could possibly mean. Mirrors tradeCalendarVerticalFilter
