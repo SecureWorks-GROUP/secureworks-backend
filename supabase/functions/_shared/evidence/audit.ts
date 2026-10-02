@@ -160,8 +160,6 @@ export async function recordMcpAudit(
         cost_usd: input.cost_usd ?? null,
         model: input.model ?? null,
       },
-      // Audit rows are NEVER extractor-eligible. Force off.
-      enqueueExtraction: false,
     }, {
       org_id: orgId,
       bypass_feature_flag: true,    // <-- audit is always-on
