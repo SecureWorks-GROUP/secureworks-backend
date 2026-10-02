@@ -1,4 +1,4 @@
--- Contract for 20261002150000_business_events_close_anon_read.
+-- Contract for 20261002190000_business_events_close_anon_read.
 -- 1. The public key (anon) cannot read business_events.
 -- 2. Signed-in office staff can; trades, estimator, roleless and unknown
 --    sessions read nothing.

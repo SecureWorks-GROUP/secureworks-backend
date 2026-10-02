@@ -52,7 +52,7 @@
 -- src/memory/retriever.ts) reads this table with SUPABASE_ANON_KEY and must
 -- move to a server key BEFORE this applies.
 --
--- Rollback: supabase/rollbacks/20261002150000_business_events_close_anon_read_down.sql
+-- Rollback: supabase/rollbacks/20261002190000_business_events_close_anon_read_down.sql
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';

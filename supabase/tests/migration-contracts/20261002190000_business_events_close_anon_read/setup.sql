@@ -1,4 +1,4 @@
--- Pre-migration state for 20261002150000_business_events_close_anon_read,
+-- Pre-migration state for 20261002190000_business_events_close_anon_read,
 -- shaped like production on 2 Oct 2026 (read-only check): row level security
 -- on, select_all for PUBLIC USING (true), anon and authenticated holding
 -- every table privilege.

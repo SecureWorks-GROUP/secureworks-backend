@@ -1,4 +1,4 @@
--- Rollback for 20261002150000_business_events_close_anon_read.sql.
+-- Rollback for 20261002190000_business_events_close_anon_read.sql.
 -- RE-OPENS the public-key read of every business_events row, SMS bodies
 -- included. Run it only to restore a caller the close broke, and only on the
 -- owner's word; prefer fixing the caller.
