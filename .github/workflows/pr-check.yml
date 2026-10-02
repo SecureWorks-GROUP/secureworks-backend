@@ -69,6 +69,15 @@ on:
       # or data/-only PR. This subsumes the former single-file
       # 'docs/ses-reporting-proof-harness.md' entry.
       - "docs/**"
+      # The committed-service-key guard below scans every tracked file, but it
+      # only runs when this workflow fires. A PR that only swaps the browser
+      # apps' Supabase keys (legacy-key removal Step G) touches just these
+      # paths, so without them a pasted sb_secret_ key would merge unchecked.
+      # '*.html' is root-only, like '*.md' above.
+      - "supabase/config.js"
+      - "supabase/config.example.js"
+      - "tools/**"
+      - "*.html"
 
 permissions:
   contents: read
@@ -173,7 +182,7 @@ jobs:
       - name: Shell syntax check on deploy scripts
         run: |
           # Verify shell scripts are syntactically valid
-          for script in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh; do
+          for script in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh; do
             if [ -f "$script" ]; then
               if bash -n "$script"; then
                 echo "✓ ${script}"
@@ -204,6 +213,30 @@ jobs:
         run: |
           deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
 
+      # Debt book (docs/debt-book/PLAN.md step 1): the captain's debt rules on the
+      # 29 Sep acceptance book (97 invoices / $89,049.43, 68 overdue / $57,903.22),
+      # and the read-only debt_book action over injected Xero pages and copy reads.
+      # Morning list (step 2): the chase schedules as data and today's step per payer.
+      # Drafts, approve, send, log (step 3): the draft templates, the desk actions with
+      # sending off by default, and the last Xero check before any send.
+      - name: Test the debt book rules and read, the morning list and the desk actions
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/ops-api/debt_book_rules_test.ts \
+            supabase/functions/ops-api/debt_book_test.ts \
+            supabase/functions/ops-api/debt_chase_schedule_test.ts \
+            supabase/functions/ops-api/debt_morning_list_test.ts \
+            supabase/functions/ops-api/debt_draft_templates_test.ts \
+            supabase/functions/ops-api/debt_desk_actions_test.ts
+
+      # A service-role key committed in 2026-03 stayed live for six months.
+      # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
+      # it sits under.
+      - name: Refuse committed service keys
+        run: |
+          bash scripts/test/test-check-no-committed-service-keys.sh
+          bash scripts/check-no-committed-service-keys.sh
+
       - name: Check migration extension schema contract
         run: |
           deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
@@ -223,6 +256,16 @@ jobs:
             supabase/functions/ops-api/repair_stage_write_test.ts \
             supabase/functions/ops-api/insurance_repairs_board_test.ts \
             supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
+
+      # Automated money messages are off (captain, 30 Sep 2026). Drives the
+      # real ops-api and daily-digest request handlers with every database,
+      # Xero and GHL call answered by a fetch spy. Same --no-check reason as
+      # above.
+      - name: Test automated money messages stay off
+        run: |
+          deno test --no-check --allow-read --allow-env \
+            supabase/functions/ops-api/debt_autotexts_off_test.ts \
+            supabase/functions/daily-digest/deposit_autotexts_off_test.ts
 
       - name: Test edge deploy workflow classification
         run: |
@@ -387,6 +430,16 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/xero-sync/xero_transport_test.ts
 
+      # Legacy service-role key retirement, runbook Step 4
+      # (docs/evidence/legacy-service-role-key-removal-2026-09-30.md): the one
+      # service-credential check and the functions that use it.
+      - name: Test service credential verification
+        run: |
+          deno test --no-check --allow-read --allow-env --allow-net=127.0.0.1 \
+            supabase/functions/_shared/service_credential_test.ts \
+            supabase/functions/ops-api/service_credential_handler_test.ts \
+            supabase/functions/ops-api/makesafe_cost_report_test.ts
+
   # Execute migration behaviour against PostgreSQL, not a text parser. The
   # repository's historical migrations include Supabase-only schemas and live
   # baseline drift, so the contract registry supplies the narrow prerequisites
@@ -394,10 +447,11 @@ jobs:
   # order. See supabase/tests/migration-contracts/README.md.
   migration-contracts:
     runs-on: ubuntu-latest
-    # 10, not 5: each registered contract case can replay the whole stack
+    # 20, not 10: each registered contract case can replay the whole stack
     # (fail-closed, rollback and break proofs), and the suite now runs close to
-    # 5 minutes on a hosted runner. A passing suite was cancelled at the limit.
-    timeout-minutes: 10
+    # 10 minutes on a hosted runner. Passing suites were cancelled at the limit
+    # of 5 and then of 10.
+    timeout-minutes: 20
 
     services:
       postgres:

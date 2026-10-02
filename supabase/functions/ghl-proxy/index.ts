@@ -107,6 +107,7 @@ import {
   rethrowIfGhlRateLimited,
   throwIfGhlResponseNotOk,
 } from './provider_reads.ts'
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import {
   ghlCalendarDirectoryAction,
   ghlCalendarEventsAction,
@@ -638,6 +639,7 @@ serve(async (req: Request) => {
 
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
   const validKey = Deno.env.get('SW_API_KEY')
+  // Env value, used only to refuse a colliding dedicated read key below.
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
   const xApiKey = req.headers.get('x-api-key')
   const authHeader = req.headers.get('authorization')
@@ -653,7 +655,14 @@ serve(async (req: Request) => {
   })
   const credential = dedicatedProviderRead
     ? { ok: true as const, mode: 'service_role' as const, bearerToken }
-    : classifyAuthCredential({ xApiKey, bearerToken, validKey, serviceKey })
+    : classifyAuthCredential({
+      xApiKey,
+      bearerToken,
+      apiKeyHeader: req.headers.get('apikey'),
+      validKey,
+      // A new secret key, or the legacy key only while Supabase still accepts it.
+      serviceKey: (await verifyServiceCredential(req.headers))?.token ?? null,
+    })
   if (!credential.ok) return json({ error: credential.error, code: credential.code }, credential.status)
   // Staged compatibility gate. Existing patio/decking browser clients still use
   // SW_API_KEY today, while the fence client has moved to a Supabase user JWT.

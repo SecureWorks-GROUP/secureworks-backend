@@ -239,6 +239,8 @@ export async function decideSendQuoteAuth(input: {
   path: string | undefined
   corsHeaders: Record<string, string>
   swApiKey: string | null | undefined
+  // The service credential this request presented and that
+  // verifyServiceCredential accepted, never the raw env value.
   serviceRoleKey: string | null | undefined
 }): Promise<SendQuoteAuthDecision> {
   const { req, sb, path, corsHeaders, swApiKey, serviceRoleKey } = input
@@ -249,7 +251,13 @@ export async function decideSendQuoteAuth(input: {
   const xApiKey = req.headers.get('x-api-key')
   const authHeader = req.headers.get('authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
+  const apiKeyHeader = req.headers.get('apikey')
 
+  // A new secret key arrives in the `apikey` header.
+  if (serviceRoleKey && apiKeyHeader === serviceRoleKey) {
+    logSendAuth({ path, authMode: 'api_key', user: null })
+    return { kind: 'allow', mode: 'api_key', user: null }
+  }
   if (xApiKey && (xApiKey === swApiKey || xApiKey === serviceRoleKey)) {
     logSendAuth({ path, authMode: 'api_key', user: null })
     return { kind: 'allow', mode: 'api_key', user: null }

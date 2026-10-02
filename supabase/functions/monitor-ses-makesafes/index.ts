@@ -28,6 +28,10 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.99.3";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
 import { decodeJwtRole } from "../_shared/service_role_jwt.ts";
+import {
+  type ServiceCredentialOptions,
+  verifyServiceCredential,
+} from "../_shared/service_credential.ts";
 
 // ── Graph GET with mid-scan token-expiry self-heal (intake item 12) ──────────
 // A poll/backfill captures `const token = await getGraphToken()` ONCE and then
@@ -81,43 +85,42 @@ function _setTestClientFactory(
 }
 
 // ── AUTH HELPERS ────────────────────────────────────────────────────────────
-// This function is deployed with verify_jwt ON: the Supabase gateway
-// cryptographically verifies the JWT signature BEFORE our handler runs. So when a
-// Bearer token reaches our code at all, its signature is already proven valid — we
-// only need to authorize on the *claims*, not re-verify the signature ourselves.
+// This function is deployed with verify_jwt ON: the Supabase gateway still
+// verifies any Bearer JWT's signature before our handler runs. The in-code check
+// below additionally confirms a legacy token with Supabase, so a legacy key is
+// meant to stop working here once the Captain switches legacy keys off (runbook
+// Step 4, docs/evidence/legacy-service-role-key-removal-2026-09-30.md). What the
+// gateway answers for the cron key, the injected key and a switched-off key is
+// NOT OBSERVED YET; see service_credential.ts.
 //
-// Why this matters: the pg_cron trigger (trigger_monitor_ses_makesafes ->
-// _sw_service_key()) calls us with `Authorization: Bearer <a valid service-role
-// JWT>`. That JWT is signature-valid but does NOT byte-equal the function's injected
-// SUPABASE_SERVICE_ROLE_KEY (the keys can be rotated/differ), so an exact-string
-// match silently 401s the CRON and the sync never runs. Authorizing on the decoded
-// `role` claim (== "service_role") lets the cron bearer through while still rejecting
-// an anon JWT (role == "anon").
-
-// decodeJwtRole lives in ../_shared/service_role_jwt.ts (shared with other
-// cron-called functions).
+// The pg_cron trigger (trigger_monitor_ses_makesafes -> _sw_service_key()) calls
+// with `Authorization: Bearer <a service-role JWT>` that need not byte-equal the
+// injected SUPABASE_SERVICE_ROLE_KEY, so a legacy JWT is accepted on its `role`
+// claim too. A claim alone proves nothing (anyone can write one), so
+// verifyServiceCredential asks the project's API gateway whether it still honours
+// that exact token before trusting it: a forged token is refused, and so is any
+// legacy key the gateway stops answering 2xx for. New `sb_secret_` keys from
+// SUPABASE_SECRET_KEYS are accepted in any server-caller header.
 
 // Authorize a request. Accept if ANY of:
 //   (a) x-api-key === expectedApiKey (manual ops invoke), OR
-//   (b) Bearer === expectedServiceKey (fast path: exact injected service key), OR
-//   (c) Bearer is a JWT whose decoded `role` claim === "service_role" (the pg_cron
-//       _sw_service_key() path — signature already verified by the gateway).
-// Everything else (anon JWT, garbage bearer, no creds) is rejected.
-function isAuthorized(
+//   (b) a verified service credential: a new secret key, or a legacy
+//       service-role JWT (the injected key, or the cron's role-claim JWT) while
+//       the platform still accepts it.
+// Everything else (anon JWT, forged claim, garbage bearer, no creds) is rejected.
+async function isAuthorized(
   req: Request,
-  expectedServiceKey: string,
   expectedApiKey: string,
-): boolean {
+  credentialOptions: ServiceCredentialOptions = {},
+): Promise<boolean> {
   const apiKey = req.headers.get("x-api-key") || "";
   if (!!expectedApiKey && apiKey === expectedApiKey) return true; // (a)
-
-  const authHeader = req.headers.get("authorization") || "";
-  const bearer = authHeader.toLowerCase().startsWith("bearer ")
-    ? authHeader.slice(7).trim()
-    : "";
-  if (!bearer) return false;
-  if (!!expectedServiceKey && bearer === expectedServiceKey) return true; // (b)
-  return decodeJwtRole(bearer) === "service_role"; // (c)
+  const credential = await verifyServiceCredential(req.headers, {
+    legacy: "service_role_claim",
+    legacyKeyEnvNames: ["SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY"],
+    ...credentialOptions,
+  });
+  return credential !== null; // (b)
 }
 
 const SES_GROUP_MAIL = "ses@secureworkswa.com.au";
@@ -2429,17 +2432,11 @@ async function handler(req: Request): Promise<Response> {
   };
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
-  // B1 — AUTH GUARD. This function authenticates every non-OPTIONS request itself.
-  // verify_jwt is ON for this deploy, so the Supabase gateway has ALREADY
-  // cryptographically verified any Bearer JWT's signature before we run — which means
-  // we authorize on the decoded `role` claim, NOT a brittle exact-string match.
-  // Accept if ANY of: x-api-key == SW_API_KEY (manual ops), Bearer == the injected
-  // service key (fast path), OR Bearer is a JWT with role == "service_role". That last
-  // clause is what lets the pg_cron _sw_service_key() bearer through: it is a
-  // signature-valid service-role JWT that does NOT byte-equal SUPABASE_SERVICE_ROLE_KEY
-  // (rotated/different value), so the old exact-match silently 401'd the cron and the
-  // sync never ran. An anon JWT (role == "anon") is still rejected. See isAuthorized().
-  if (!isAuthorized(req, SUPABASE_SERVICE_KEY, SW_API_KEY)) {
+  // B1 — AUTH GUARD. verify_jwt is ON for this deploy, so the platform has already
+  // checked any Bearer JWT's signature; this in-code check additionally confirms a
+  // legacy token with Supabase and authorizes every non-OPTIONS request. See
+  // isAuthorized().
+  if (!(await isAuthorized(req, SW_API_KEY))) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: { ...CORS, "Content-Type": "application/json" },

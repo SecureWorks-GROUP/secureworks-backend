@@ -1,3 +1,9 @@
+-- 2026-09-30: the service-role key pasted in this file (fingerprint 4595ba)
+-- was leaked by being committed. It is redacted here; the live jobs now read
+-- the key from Vault (20260930120000_cron_service_key_from_vault.sql), and
+-- the key itself is retired by rotation. This file predates the auto-apply
+-- baseline and is never re-applied. Do not paste a key back in.
+
 -- ════════════════════════════════════════════════════════════
 -- Cron: System health check every 30 minutes
 --
@@ -8,5 +14,5 @@
 -- ════════════════════════════════════════════════════════════
 
 SELECT cron.schedule('system-health-check', '*/30 * * * *',
-  $$SELECT net.http_post(url:='https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/system-health',headers:='{"Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtldmdyaGNqeHNwYnhnb3ZwbWZsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjM1NDEwNSwiZXhwIjoyMDg3OTMwMTA1fQ.rBAokSo0wBnIO7ZOnGmCGtWzvdKcumyLR2OD9-hG47U","Content-Type":"application/json"}'::jsonb,body:='{}'::jsonb);$$
+  $$SELECT net.http_post(url:='https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/system-health',headers:='{"Authorization":"Bearer REDACTED-legacy-service-role-key","Content-Type":"application/json"}'::jsonb,body:='{}'::jsonb);$$
 );

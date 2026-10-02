@@ -22,6 +22,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -55,8 +56,10 @@ serve(async (req) => {
   const xApiKey = req.headers.get('x-api-key')
   const authHeader = req.headers.get('authorization')
   const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-  const ok = (xApiKey && (xApiKey === validKey || xApiKey === SUPABASE_SERVICE_KEY))
-          || (bearer && (bearer === validKey || bearer === SUPABASE_SERVICE_KEY))
+  // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
+  const ok = (xApiKey && xApiKey === validKey)
+          || (bearer && bearer === validKey)
+          || !!(await verifyServiceCredential(req.headers))
   if (!ok) return json({ error: 'Unauthorized' }, 401)
 
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)

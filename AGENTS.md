@@ -26,17 +26,17 @@ Invariants (do not regress):
   `createDepositInvoice` (one authoritative place). Do NOT change `createInvoice`'s
   or `createDepositInvoice`'s global `DRAFT` default — make-safe / manual / MCP
   `create_deposit_invoice` paths intentionally create drafts for review.
-- The branded Pay Now email/SMS only goes out when the invoice actually came back
+- The branded Pay Now email only goes out when the invoice actually came back
   `AUTHORISED` AND the OnlineInvoice URL fetch succeeded (see
   `_acceptanceInvoiceChargeable`). On failure: no client email, a loud
   `acceptance_invoice_authorise_failed` job_event, and a `{ success:false }` return
   that the accept flow handles gracefully (acceptance is still confirmed to the
   client, just without a payment link).
-- The debt-followup chase cron (`daily-digest` "Unpaid Deposit Chasers") only acts
-  on `AUTHORISED` deposits (positive filter) — any non-AUTHORISED status means an
-  unpayable link, never chase. Likewise `sendPaymentLink` (ops-api
-  `send_payment_link`) throws a 409 for any non-AUTHORISED invoice, and the cron
-  only records "reminder sent" when the send actually succeeded.
+- The `daily-digest` "Unpaid Deposits" section only annotates `AUTHORISED`
+  deposits (positive filter) and sends nothing: automated money messages,
+  including the acceptance Pay Now SMS, are off (`ops-api/debt_autotexts_off.ts`).
+  `sendPaymentLink` (ops-api `send_payment_link`) throws a 409 for any
+  non-AUTHORISED invoice.
 
 ## Make-Safe Boards Share One Server Read Model
 
@@ -499,7 +499,7 @@ opposite, and the discriminator is per job, at the forge:
 - **Registered, never ran** — `gh-axi run list --branch <b>` returns a run, and
   the job has `steps: []`, `runner_name: ""`, and ~15m00s between `started_at`
   and `completed_at` with `conclusion: cancelled`. That 15 minutes is GitHub's
-  queue timeout, not a workflow timeout (this repo sets no `timeout-minutes`) —
+  queue timeout, not a workflow timeout (`deno-check` sets no `timeout-minutes`) —
   it is starvation. **`gh-axi run rerun <id> --failed` fixes it**, on the same
   head SHA, no new commit. Verified on PRs #629/#630: the re-run took a runner in
   under 2s and both jobs went green in ~35s.

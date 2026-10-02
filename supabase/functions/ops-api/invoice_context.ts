@@ -17,6 +17,7 @@
 // one door call per invoice.
 
 import { isLunaSubscriptionFact } from "./context_visibility.ts";
+import { DEBT_CHASE_HISTORY_FILTER } from "./debt_desk_drafts.ts";
 import {
   currentPriceIncGst,
   readJobQuotes,
@@ -1093,7 +1094,9 @@ export async function invoiceContext(
         await client.from("payment_chase_logs")
           .select(
             "method, outcome, notes, follow_up_date, follow_up_resolved, chased_by, created_at",
-          ).eq("xero_invoice_id", inv.xero_invoice_id).order("created_at", {
+          ).eq("xero_invoice_id", inv.xero_invoice_id).or(
+            DEBT_CHASE_HISTORY_FILTER,
+          ).order("created_at", {
             ascending: false,
           }).limit(50),
       ),

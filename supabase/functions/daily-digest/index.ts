@@ -15,6 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { logQueryErrors } from '../_shared/pgrest.ts'
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -1300,7 +1301,9 @@ async function generateFinancialSnapshot(sb: any) {
   return snapshot
 }
 
-serve(async (req: Request) => {
+// Exported so tests can drive the real request path; served only when run as
+// the entry module, the same shape as ops-api's _opsApiRequestHandlerForTest.
+export async function _dailyDigestRequestHandlerForTest(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
   // ── Dual Authentication: API Key (server-to-server) + JWT (browser) ──
@@ -1317,9 +1320,12 @@ serve(async (req: Request) => {
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
   let isAuthed = false
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey || (agentServerKey && xApiKey === agentServerKey))) {
+  // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
+  if (await verifyServiceCredential(req.headers)) {
     isAuthed = true
-  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey || (agentServerKey && bearerToken === agentServerKey))) {
+  } else if (xApiKey && (xApiKey === validKey || (agentServerKey && xApiKey === agentServerKey))) {
+    isAuthed = true
+  } else if (bearerToken && (bearerToken === validKey || (agentServerKey && bearerToken === agentServerKey))) {
     isAuthed = true
   } else if (bearerToken) {
     try {
@@ -1489,7 +1495,7 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
         }
       }
 
-      // Unpaid deposits: accepted > 3/7 days, deposit not paid
+      // Unpaid deposits: accepted > 3 days, deposit not paid; an ops annotation at day 7
       const { data: unpaidDeposits } = await sb.from('jobs')
         .select('id, job_number, client_name, type, pricing_json, accepted_at')
         .eq('status', 'accepted')
@@ -1525,23 +1531,10 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
             source_ref: `deposit_urgent_${job.id}`,
             priority: 90,
           }, { onConflict: 'source_ref' })
-        } else if (daysAccepted >= 3) {
-          // Day 3: send deposit reminder
-          try {
-            const OPS_API = SUPABASE_URL + '/functions/v1/ops-api'
-            await fetch(OPS_API, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-              body: JSON.stringify({
-                action: 'send_client_update',
-                job_id: job.id,
-                comms_trigger: 'deposit_paid',
-                channel: 'sms',
-                custom_message: `Hi ${job.client_name?.split(' ')[0]}, friendly reminder that your deposit is still outstanding. Once received we'll get your materials ordered. Pay online: secureworksgroup.app`,
-              }),
-            })
-          } catch (e) { console.log('[stale_followup] deposit reminder failed:', e) }
         }
+        // No day-3 deposit reminder: automated money messages are off (captain,
+        // 30 Sep 2026; ops-api/debt_autotexts_off.ts). Deposits are chased from
+        // the debt desk.
       }
 
       // ── House plans follow-up for patio council process ──
@@ -1565,8 +1558,6 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
           const daysSinceCreation = Math.floor((Date.now() - new Date(cs.created_at).getTime()) / 86400000)
           const jobNum = cs.jobs?.job_number || ''
           const clientName = cs.jobs?.client_name || 'Client'
-          const firstName = clientName.split(' ')[0]
-          const address = cs.jobs?.site_address || ''
 
           if (daysSinceCreation >= 14) {
             // Day 14+: Red annotation for operations
@@ -1588,48 +1579,14 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
               }).catch(() => {})
               plansFollowups++
             }
-          } else if (daysSinceCreation >= 7) {
-            // Day 7: Email reminder with upload link
-            const { count: sent7 } = await sb.from('email_events')
-              .select('id', { count: 'exact', head: true })
-              .eq('job_id', cs.job_id).eq('comms_trigger', 'plans_reminder_day7')
-            if ((sent7 || 0) === 0 && cs.jobs?.client_email) {
-              // Find share_token for upload link
-              const { data: doc } = await sb.from('job_documents').select('share_token').eq('job_id', cs.job_id).eq('type', 'quote').limit(1).maybeSingle()
-              const uploadUrl = doc?.share_token
-                ? `${SUPABASE_URL}/functions/v1/send-quote/upload-plans?token=${doc.share_token}&job=${cs.job_id}`
-                : 'plans@secureworkswa.com.au'
-
-              await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_client_update`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_ROLE_KEY}` },
-                body: JSON.stringify({
-                  job_id: cs.job_id,
-                  comms_trigger: 'plans_reminder_day7',
-                  channel: 'email',
-                  custom_message: `Hi ${firstName}, just a reminder — we still need your house plans to start the engineering and council approval for your patio at ${address}. Upload here: ${uploadUrl} or email them to plans@secureworkswa.com.au`,
-                }),
-              }).catch(() => {})
-              plansFollowups++
-            }
           } else if (daysSinceCreation >= 3) {
-            // Day 3: SMS reminder
-            const { count: sent3 } = await sb.from('email_events')
-              .select('id', { count: 'exact', head: true })
-              .eq('job_id', cs.job_id).eq('comms_trigger', 'plans_reminder_day3')
-            if ((sent3 || 0) === 0) {
-              await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_client_update`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_ROLE_KEY}` },
-                body: JSON.stringify({
-                  job_id: cs.job_id,
-                  comms_trigger: 'plans_reminder_day3',
-                  channel: 'sms',
-                  custom_message: `Hi ${firstName}, just a quick reminder — we need your house plans to get started on engineering for your patio at ${address}. You can email them to plans@secureworkswa.com.au. Happy to help if you're not sure where to find them!`,
-                }),
-              }).catch(() => {})
-              plansFollowups++
-            }
+            // Day 3 / day 7 client reminders (SMS, then email with an upload
+            // link) are NOT sent. They were written against an undeclared
+            // SERVICE_ROLE_KEY, which threw before any send, so no house-plans
+            // reminder has ever reached a client. Removing that name (legacy
+            // service-role key retirement, runbook Step 4) must not quietly
+            // switch customer messages on; doing so is a separate decision.
+            console.log(`[stale_followup] house-plans reminder not sent for ${jobNum}: client reminders are off`)
           }
         }
       } catch (e) {
@@ -1873,7 +1830,9 @@ Be direct. Use specific dollar amounts. No hedging. A CEO should read this in 30
     console.error('Daily digest error:', err)
     return json({ error: (err as Error).message }, 500)
   }
-})
+}
+
+if (import.meta.main) serve(_dailyDigestRequestHandlerForTest)
 
 
 // ════════════════════════════════════════════════════════════
@@ -3053,14 +3012,12 @@ async function createDailyAnnotations(sb: any, digest: any) {
     })
   }
 
-  // ── 4b. Unpaid Deposit Chasers (7/14 day tiers) ──
-  // Query deposit invoices that haven't been paid.
-  // HOTFIX (chase-cron mute): only chase AUTHORISED deposits. Any non-AUTHORISED
-  // status (DRAFT, SUBMITTED, etc.) means the Xero online link cannot take card
-  // payment, so chasing via send_payment_link would send the client a dead link —
-  // harmful. Only an AUTHORISED invoice is a real, payable client-facing
-  // receivable; anything else must not enter the chaser at all (neither the SMS
-  // reminder nor the "unpaid deposit" annotation). Acceptance deposits are
+  // ── 4b. Unpaid Deposits (7/14 day tiers) ──
+  // Ops annotations only. This section used to text the client a Pay Now link at
+  // 7-13 days; automated money messages are off (captain, 30 Sep 2026;
+  // ops-api/debt_autotexts_off.ts), so it sends nothing.
+  // Only AUTHORISED deposits are annotated: any other status (DRAFT, SUBMITTED,
+  // etc.) is not a payable client-facing receivable. Acceptance deposits are
   // AUTHORISED at creation now, so this only skips intentional drafts-for-review
   // + legacy drafts.
   const { data: unpaidDeposits } = await sb.from('xero_invoices')
@@ -3073,11 +3030,11 @@ async function createDailyAnnotations(sb: any, digest: any) {
   for (const dep of (unpaidDeposits || [])) {
     if (!dep.invoice_date) continue
     const daysSinceInvoice = Math.round((now.getTime() - new Date(dep.invoice_date).getTime()) / 86400000)
-    if (daysSinceInvoice < 7) continue // only chase after 7 days
+    if (daysSinceInvoice < 7) continue // only annotate after 7 days
 
     // Get job info for context
     const { data: depJob } = dep.job_id ? await sb.from('jobs')
-      .select('id, client_name, client_phone, ghl_contact_id, job_number')
+      .select('id, client_name, job_number')
       .eq('id', dep.job_id)
       .single() : { data: null }
 
@@ -3115,35 +3072,8 @@ async function createDailyAnnotations(sb: any, digest: any) {
         confidence: 0.9,
       })
     } else {
-      // 7-13 days: send SMS reminder via GHL + create annotation
-      let reminderSent = false
-      let reminderFailReason = 'no GHL contact on job'
-      if (depJob?.ghl_contact_id && dep.job_id) {
-        try {
-          // Use send_payment_link to get Xero URL + send SMS in one call
-          const linkResp = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=send_payment_link`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-            },
-            body: JSON.stringify({ job_id: dep.job_id }),
-          })
-          const linkResult = await linkResp.json().catch(() => null)
-          if (linkResp.ok && linkResult?.success) {
-            reminderSent = true
-            console.log(`[daily-digest] Deposit reminder sent to ${clientName} for ${dep.invoice_number}`)
-          } else {
-            reminderFailReason = linkResult?.error || `HTTP ${linkResp.status}`
-            console.log(`[daily-digest] Deposit reminder NOT sent for ${dep.invoice_number}: ${reminderFailReason}`)
-          }
-        } catch (e) {
-          reminderFailReason = (e as Error).message
-          console.log(`[daily-digest] Deposit reminder failed for ${dep.invoice_number}:`, reminderFailReason)
-        }
-      }
-
-      // Annotation for ops visibility
+      // 7-13 days: annotation only. No automatic reminder text: automated money
+      // messages are off (captain, 30 Sep 2026; ops-api/debt_autotexts_off.ts).
       await upsertAnn({
         org_id: DEFAULT_ORG_ID,
         entity_type: 'job',
@@ -3151,20 +3081,16 @@ async function createDailyAnnotations(sb: any, digest: any) {
         ui_location: 'job_money',
         annotation_type: 'unpaid_deposit',
         category: 'financial',
-        title: reminderSent
-          ? `Deposit reminder sent — $${depAmount.toLocaleString()} unpaid ${daysSinceInvoice}d`
-          : `Deposit unpaid ${daysSinceInvoice}d — $${depAmount.toLocaleString()}, reminder NOT sent`,
-        body: reminderSent
-          ? `${clientName}'s deposit invoice ${dep.invoice_number} is ${daysSinceInvoice} days old. SMS reminder sent automatically.`
-          : `${clientName}'s deposit invoice ${dep.invoice_number} is ${daysSinceInvoice} days old. SMS reminder NOT sent (${reminderFailReason}) — invoice may not be in a payable state or was already reminded recently. Chase manually if needed.`,
+        title: `Deposit unpaid ${daysSinceInvoice}d — $${depAmount.toLocaleString()}`,
+        body: `${clientName}'s deposit invoice ${dep.invoice_number} is ${daysSinceInvoice} days old. Automatic reminder texts are off; chase from Clear Debt if needed.`,
         structured_data: {
           xero_invoice_id: dep.xero_invoice_id,
           invoice_number: dep.invoice_number,
           days_since_invoice: daysSinceInvoice,
           amount_due: dep.amount_due,
           job_id: dep.job_id,
-          sms_reminder_sent: reminderSent,
-          ...(reminderSent ? {} : { sms_reminder_fail_reason: reminderFailReason }),
+          sms_reminder_sent: false,
+          auto_reminder: 'off',
         },
         response_type: 'choice',
         response_options: [

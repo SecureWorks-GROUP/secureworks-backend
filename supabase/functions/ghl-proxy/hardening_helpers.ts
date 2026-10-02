@@ -220,14 +220,18 @@ export function classifyScopeCasReread(incomingScopeHash: string, rereadScopeHas
   return rereadScopeHash === incomingScopeHash ? 'scope_concurrent_same_hash' : 'scope_hash_conflict'
 }
 
+// `serviceKey` is the service credential this request presented and that
+// verifyServiceCredential (../_shared/service_credential.ts) accepted, never the
+// raw env value. A new secret key arrives in the `apikey` header.
 export function classifyAuthCredential(args: {
   xApiKey: string | null
   bearerToken: string | null
+  apiKeyHeader?: string | null
   validKey: string | undefined
-  serviceKey: string | undefined
+  serviceKey: string | null | undefined
 }): AuthDecision {
-  const { xApiKey, bearerToken, validKey, serviceKey } = args
-  if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey)) {
+  const { xApiKey, bearerToken, apiKeyHeader, validKey, serviceKey } = args
+  if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey || apiKeyHeader === serviceKey)) {
     return { ok: true, mode: 'service_role', bearerToken }
   }
   if (validKey && (xApiKey === validKey || bearerToken === validKey)) {

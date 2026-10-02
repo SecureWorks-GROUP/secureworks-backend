@@ -16,6 +16,7 @@
 //   supabase functions deploy send-outlook-email --no-verify-jwt
 // ════════════════════════════════════════════════════════════
 
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
@@ -1890,7 +1891,6 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
 
     // Auth — same pattern as ghl-proxy
     const validKey = Deno.env.get('SW_API_KEY')
-    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
     const xApiKey = req.headers.get('x-api-key')
     const authHeader = req.headers.get('authorization')
     const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
@@ -1900,12 +1900,16 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
     if (xApiKey && bearerToken && xApiKey !== bearerToken) {
       return json({ error: 'Conflicting credentials' }, 401)
     }
+    // Service caller: a new secret key, or the legacy key only while Supabase
+    // still accepts it. Checked against the credential this request carries.
+    // An `apikey`-only caller has no x-api-key/Bearer to conflict with.
+    const serviceCredential = await verifyServiceCredential(req.headers)
     const opsAuthorized = Boolean(
-      suppliedCredential && (
-        (serviceKey && serviceKey !== validKey && suppliedCredential === serviceKey) ||
-        (opsAgentKey && opsAgentKey !== validKey &&
-          suppliedCredential === opsAgentKey)
-      ),
+      (serviceCredential && serviceCredential.token !== validKey &&
+        (!suppliedCredential || suppliedCredential === serviceCredential.token)) ||
+      (suppliedCredential && opsAgentKey && opsAgentKey !== validKey &&
+        opsAgentKey !== Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') &&
+        suppliedCredential === opsAgentKey),
     )
     const isAuthed = opsAuthorized || Boolean(validKey && suppliedCredential === validKey)
     if (!isAuthed) return json({ error: 'Unauthorized' }, 401)
