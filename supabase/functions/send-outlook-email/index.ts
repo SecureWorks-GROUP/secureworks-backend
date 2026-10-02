@@ -1904,9 +1904,12 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
     // still accepts it. Checked against the credential this request carries.
     // An `apikey`-only caller has no x-api-key/Bearer to conflict with.
     const serviceCredential = await verifyServiceCredential(req.headers)
+    const serviceAuthorized = Boolean(
+      serviceCredential && serviceCredential.token !== validKey &&
+        (!suppliedCredential || suppliedCredential === serviceCredential.token),
+    )
     const opsAuthorized = Boolean(
-      (serviceCredential && serviceCredential.token !== validKey &&
-        (!suppliedCredential || suppliedCredential === serviceCredential.token)) ||
+      serviceAuthorized ||
       (suppliedCredential && opsAgentKey && opsAgentKey !== validKey &&
         opsAgentKey !== Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') &&
         suppliedCredential === opsAgentKey),
@@ -1957,7 +1960,7 @@ export async function handleOutlookRequest(req: Request): Promise<Response> {
             headers: req.headers,
             trustActorHeader: true,
           }).actor,
-          credentialClass: serviceKey && suppliedCredential === serviceKey
+          credentialClass: serviceAuthorized
             ? 'service_role'
             : 'ops_agent_server_key',
         }
