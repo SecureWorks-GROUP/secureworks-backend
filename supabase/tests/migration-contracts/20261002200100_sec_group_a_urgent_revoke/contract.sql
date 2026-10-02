@@ -37,7 +37,7 @@ BEGIN
     END IF;
     IF NOT EXISTS (
       SELECT 1 FROM public.function_grant_snapshots s
-      WHERE s.migration = '20261002200100' AND s.signature = v_fn::text
+      WHERE s.migration = '20261002200100' AND to_regprocedure(s.signature) = v_fn
         AND EXISTS (SELECT 1 FROM aclexplode(s.proacl) a
                     WHERE a.grantee = 'anon'::regrole AND a.privilege_type = 'EXECUTE')
     ) THEN
@@ -103,7 +103,7 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- pg_cron runs as postgres: the cron command still runs.
+-- postgres (the owner, and the role every pg_cron job runs as) still runs it.
 BEGIN;
 SELECT public.deliver_proposed_actions();
 ROLLBACK;

@@ -7,8 +7,8 @@
 --     attachment through the send-outlook-email edge function. With the anon
 --     key anyone can send email as the company.
 --   * deliver_proposed_actions(): live-only. Posts pending AI proposals to the
---     telegram-bot edge function. Called only by pg_cron, which runs as
---     postgres.
+--     telegram-bot edge function. No caller at all: no cron job calls it
+--     (2 Oct read of all 34 jobs).
 -- No repository, edge function, browser page or agent calls either one with
 -- the anon key or a signed-in user session; pg_cron runs every job as
 -- postgres.
@@ -59,7 +59,7 @@ BEGIN
       CONTINUE;
     END IF;
     INSERT INTO public.function_grant_snapshots (migration, signature, owner_name, proacl)
-    SELECT '20261002200100', v_fn::text, p.proowner::regrole::text, p.proacl
+    SELECT '20261002200100', v_sig, p.proowner::regrole::text, p.proacl
     FROM pg_proc p
     WHERE p.oid = v_fn
     ON CONFLICT (migration, signature) DO NOTHING;
