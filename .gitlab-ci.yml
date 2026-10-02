@@ -43,12 +43,19 @@ deno-check:
         while IFS= read -r f; do deno check "$f" || echo "advisory: $f failed deno check"; done < /tmp/changed_function_files.txt
         while IFS= read -r f; do deno cache --no-check "$f"; done < /tmp/changed_function_files.txt
       fi
-    - for s in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh; do [ ! -f "$s" ] || bash -n "$s"; done
+    - for s in scripts/deploy-edge-function.sh scripts/stamp-ops-api-build-metadata.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh scripts/check-no-committed-service-keys.sh scripts/install-supabase-cli.sh scripts/check-supabase-cli.sh scripts/edge-catchup-deploy-set.sh; do [ ! -f "$s" ] || bash -n "$s"; done
     - bash scripts/test/test-smoke-ops-api-action-surface.sh
     - bash scripts/test/test-stamp-ops-api-build-metadata.sh
     - bash scripts/test/test-edge-schema-preflight.sh
     - bash scripts/test/test-apply-pending-migrations.sh
     - deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
+    # Ported from GitHub pr-check (30 Sep to 1 Oct): debt desk, committed-key
+    # guard, money messages off, service credential verification.
+    - deno test --allow-read --allow-env supabase/functions/ops-api/debt_book_rules_test.ts supabase/functions/ops-api/debt_book_test.ts supabase/functions/ops-api/debt_chase_schedule_test.ts supabase/functions/ops-api/debt_morning_list_test.ts supabase/functions/ops-api/debt_draft_templates_test.ts supabase/functions/ops-api/debt_desk_actions_test.ts
+    - bash scripts/test/test-check-no-committed-service-keys.sh
+    - bash scripts/check-no-committed-service-keys.sh
+    - deno test --no-check --allow-read --allow-env supabase/functions/ops-api/debt_autotexts_off_test.ts supabase/functions/daily-digest/deposit_autotexts_off_test.ts
+    - deno test --no-check --allow-read --allow-env --allow-net=127.0.0.1 supabase/functions/_shared/service_credential_test.ts supabase/functions/ops-api/service_credential_handler_test.ts supabase/functions/ops-api/makesafe_cost_report_test.ts
     - deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
     - deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read supabase/functions/ops-api/repair_intake_routing_test.ts supabase/functions/ops-api/repair_classifier_routing_test.ts supabase/functions/ops-api/repair_stage_write_test.ts supabase/functions/ops-api/insurance_repairs_board_test.ts supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
     - bash scripts/test/test-deploy-edge-functions-workflow.sh
@@ -74,7 +81,8 @@ migration-contracts:
   # Postgres runs inside the job so the script's localhost-only guard (run.sh:18-22) holds.
   image: postgres:17
   rules: *mr_changes
-  timeout: 15 minutes
+  # 20, as GitHub #945: each case can replay the whole stack.
+  timeout: 20 minutes
   variables:
     POSTGRES_USER: postgres
     POSTGRES_PASSWORD: postgres
@@ -87,6 +95,16 @@ migration-contracts:
     - (docker-entrypoint.sh postgres >/tmp/pg.log 2>&1 &)
     - for i in $(seq 1 60); do pg_isready -h 127.0.0.1 -U postgres -d postgres && break; sleep 1; done
     - bash supabase/tests/migration-contracts/run.sh
+
+supabase-cli:
+  stage: check
+  image: ubuntu:24.04
+  rules: *mr_changes
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
+  script:
+    # Same installer as the deploy jobs; fails unless a delegated command runs.
+    - bash scripts/install-supabase-cli.sh
 
 ses-proof-harness:
   stage: check
@@ -106,6 +124,46 @@ ses-proof-harness:
     when: always
     expire_in: 7 days
     paths: [artifacts/ses-reporting-proof/]
+
+.edge_deploy_before: &edge_deploy_before
+  - apt-get update -qq && apt-get install -y -qq git curl jq ca-certificates postgresql-client nodejs python3 unzip >/dev/null
+  # apply-pending-migrations.sh also needs deno, as on GitHub's runner.
+  - curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null && export PATH="$HOME/.deno/bin:$PATH"
+  # Whole tarball (supabase shim + supabase-go), checksum-verified, then proved
+  # to run a delegated command. Extracting only `supabase` broke #25/#26/#29.
+  - bash scripts/install-supabase-cli.sh
+
+# Shared by the normal deploy and the one-off catch-up. Expects `functions`,
+# `migrations_changed` and `verify_ops_api` already exported.
+.edge_deploy_steps: &edge_deploy_steps
+  - if [ -n "${functions:-}" ] || [ "${migrations_changed:-}" = true ]; then bash scripts/apply-pending-migrations.sh; fi
+  - if [ -n "${functions:-}" ]; then CHANGED_FUNCTIONS="$functions" bash scripts/check-edge-schema-preflight.sh; fi
+  - if [ "${verify_ops_api:-}" = true ]; then bash scripts/check-ops-api-source-actions.sh; fi
+  - |
+    for func in ${functions:-}; do
+      if [ "$func" = ops-api ]; then
+        OPS_API_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        bash scripts/stamp-ops-api-build-metadata.sh "$CI_COMMIT_SHA" "$OPS_API_DEPLOYED_AT"
+        export EXPECTED_OPS_API_COMMIT_SHA="$CI_COMMIT_SHA" EXPECTED_OPS_API_DEPLOYED_AT="$OPS_API_DEPLOYED_AT"
+      fi
+      JWT_FLAG=""
+      head -30 "supabase/functions/${func}/index.ts" 2>/dev/null | grep -q -- '--no-verify-jwt' && JWT_FLAG="--no-verify-jwt"
+      # --use-api: the runner has no Docker, so bundle server-side explicitly.
+      supabase functions deploy "$func" $JWT_FLAG --use-api --project-ref "$PROJECT_REF"
+    done
+  - |
+    if [ -n "${functions:-}" ]; then
+      sleep 5
+      smoke_ok=true
+      for func in $functions; do
+        case "$func" in ops-api|ghl-proxy|send-quote) ;; *) continue ;; esac
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://$PROJECT_REF.supabase.co/functions/v1/$func" || echo 000)
+        echo "$func smoke HTTP $code"
+        if [ "$code" -lt 200 ] || [ "$code" -ge 500 ]; then smoke_ok=false; fi
+      done
+      [ "$smoke_ok" = true ] || { echo "FAIL: one or more smoke tests failed"; exit 1; }
+    fi
+  - if [ "${verify_ops_api:-}" = true ]; then EXPECTED_COMMIT_SHA="${EXPECTED_OPS_API_COMMIT_SHA:-}" EXPECTED_DEPLOYED_AT="${EXPECTED_OPS_API_DEPLOYED_AT:-}" bash scripts/smoke-ops-api-action-surface.sh; fi
 
 deploy-edge-functions:
   stage: deploy
@@ -130,11 +188,7 @@ deploy-edge-functions:
           - scripts/_ops-api-required-actions.txt
           # .gitlab-ci.yml is deliberately not listed: a CI-file-only change must
           # never start a production deploy (GitHub listed its own workflow file).
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq git curl jq ca-certificates postgresql-client nodejs python3 unzip >/dev/null
-    # apply-pending-migrations.sh also needs deno, as on GitHub's runner.
-    - curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null && export PATH="$HOME/.deno/bin:$PATH"
-    - curl -fsSL https://github.com/supabase/cli/releases/download/v2.105.0/supabase_linux_amd64.tar.gz | tar -xz -C /usr/local/bin supabase
+  before_script: *edge_deploy_before
   script:
     - export GITHUB_OUTPUT=/tmp/changed.env BEFORE_SHA="$CI_COMMIT_BEFORE_SHA" HEAD_SHA="$CI_COMMIT_SHA" EVENT_NAME=push
     # An all-zero before SHA would make the detector select every function; refuse instead.
@@ -143,33 +197,37 @@ deploy-edge-functions:
     - bash scripts/identify-edge-deploy-changes.sh
     # Values such as functions="ops-api send-quote" contain spaces, so export line by line rather than sourcing.
     - while IFS='=' read -r k v; do [ -n "$k" ] && export "$k=$v"; done < /tmp/changed.env
-    - if [ -n "${functions:-}" ] || [ "${migrations_changed:-}" = true ]; then bash scripts/apply-pending-migrations.sh; fi
-    - if [ -n "${functions:-}" ]; then CHANGED_FUNCTIONS="$functions" bash scripts/check-edge-schema-preflight.sh; fi
-    - if [ "${verify_ops_api:-}" = true ]; then bash scripts/check-ops-api-source-actions.sh; fi
+    - *edge_deploy_steps
+
+# ONE-OFF catch-up deploy (Oct 2026). Remove with the follow-up MR once it is
+# proven. Pushes only deploy their own diff, so the functions that missed
+# deploys while the CLI install was broken, plus everything the GitHub runner
+# deployed from GitHub main (last 3e90cc81), never redeploy on their own.
+# Never runs by itself: a person presses play on main. Deploys every function
+# whose HEAD source differs from GitHub 3e90cc81 or GitLab 9282ad51, through
+# the same migration lane, schema preflight, ops-api build stamp and smokes.
+deploy-edge-functions-catchup:
+  stage: deploy
+  image: ubuntu:24.04
+  resource_group: production-edge-deploy
+  environment: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_PROJECT_PATH == "secureworks-group1/secureworks-backend"
+      when: manual
+      # A waiting manual job must not hold the merge pipeline as blocked.
+      allow_failure: true
+  variables:
+    CATCHUP_BASES: "3e90cc817131a457cb70d15ccc0e6de9a2630cd0 9282ad51af780557558d9c6cb4ea375cb739bf3a"
+  before_script: *edge_deploy_before
+  script:
+    - bash scripts/check-edge-deploy-guardrails.sh
+    - functions="$(bash scripts/edge-catchup-deploy-set.sh $CATCHUP_BASES)"
     - |
-      for func in ${functions:-}; do
-        if [ "$func" = ops-api ]; then
-          OPS_API_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bash scripts/stamp-ops-api-build-metadata.sh "$CI_COMMIT_SHA" "$OPS_API_DEPLOYED_AT"
-          export EXPECTED_OPS_API_COMMIT_SHA="$CI_COMMIT_SHA" EXPECTED_OPS_API_DEPLOYED_AT="$OPS_API_DEPLOYED_AT"
-        fi
-        JWT_FLAG=""
-        head -30 "supabase/functions/${func}/index.ts" 2>/dev/null | grep -q -- '--no-verify-jwt' && JWT_FLAG="--no-verify-jwt"
-        supabase functions deploy "$func" $JWT_FLAG --project-ref "$PROJECT_REF"
-      done
-    - |
-      if [ -n "${functions:-}" ]; then
-        sleep 5
-        smoke_ok=true
-        for func in $functions; do
-          case "$func" in ops-api|ghl-proxy|send-quote) ;; *) continue ;; esac
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://$PROJECT_REF.supabase.co/functions/v1/$func" || echo 000)
-          echo "$func smoke HTTP $code"
-          if [ "$code" -lt 200 ] || [ "$code" -ge 500 ]; then smoke_ok=false; fi
-        done
-        [ "$smoke_ok" = true ] || { echo "FAIL: one or more smoke tests failed"; exit 1; }
-      fi
-    - if [ "${verify_ops_api:-}" = true ]; then EXPECTED_COMMIT_SHA="${EXPECTED_OPS_API_COMMIT_SHA:-}" EXPECTED_DEPLOYED_AT="${EXPECTED_OPS_API_DEPLOYED_AT:-}" bash scripts/smoke-ops-api-action-surface.sh; fi
+      [ -n "$functions" ] || { echo "FAIL: catch-up set is empty; nothing to deploy"; exit 1; }
+      echo "Catch-up deploy set (HEAD $CI_COMMIT_SHA vs $CATCHUP_BASES): $functions"
+    - export functions migrations_changed=true
+    - case " $functions " in *" ops-api "*) export verify_ops_api=true ;; *) export verify_ops_api=false ;; esac
+    - *edge_deploy_steps
 
 makesafe-intake-watchdog:
   stage: check
