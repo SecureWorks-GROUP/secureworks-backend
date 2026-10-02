@@ -27,18 +27,27 @@ import {
   messageDirection,
   messageTimestamp,
   SALES_BOOKING_NOT_GIVEN,
-  SALES_BOOKING_OUTLOOK_MAILBOXES,
   salesBookingLeadBelongsTo,
   type SalesBookingMessage,
+  salesBookingRouteFor,
 } from "./sales_booking_read.ts";
+import {
+  SALES_BOOKING_ROUTE_MESSAGES,
+  SALES_BOOKING_SEED_ROUTES,
+  type SalesBookingRoute,
+} from "./sales_booking_routes.ts";
 import {
   buildOutlookMirrorRequest,
   type OutlookMirrorInput,
   type OutlookMirrorRequest,
   type OutlookMirrorResult,
   type OutlookMirrorWriteOptions,
+  SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES,
 } from "./sales_booking_outlook_mirror.ts";
-import { salesBookingSenderFor } from "./sales_booking_sender.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  salesBookingSenderFor,
+} from "./sales_booking_sender.ts";
 import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -70,7 +79,7 @@ export type OutlookMirrorOutcome =
     message: string;
   }
   | {
-    /** The resource has no Outlook calendar (GHL only, e.g. Nithin). */
+    /** The booking does not write this resource's Outlook (e.g. Nithin, Khairo). */
     outlook: "not_applicable";
     reason: "resource_has_no_outlook_calendar";
     message: string;
@@ -162,7 +171,11 @@ export interface SalesBookingExecuteDeps {
   readContactPhone(contactId: string): Promise<string | null>;
   readOpportunityOwnership(
     opportunityId: string,
+    options?: { routes: readonly SalesBookingRoute[]; forRoute: boolean },
   ): Promise<SalesBookingOpportunityOwnership>;
+  /** The booking routes table, read at the press; throws when unreadable.
+   * Absent (tests): the seed routes. */
+  readRoutes?(): Promise<SalesBookingRoute[]>;
   /** GHL contact plus the suburb the booking read publishes for this lead. */
   readOutlookLead(args: {
     contactId: string;
@@ -368,6 +381,92 @@ async function gate(
   return { messages };
 }
 
+async function readPressRoutes(
+  deps: SalesBookingExecuteDeps,
+): Promise<readonly SalesBookingRoute[] | null> {
+  if (!deps.readRoutes) return SALES_BOOKING_SEED_ROUTES;
+  try {
+    return await deps.readRoutes();
+  } catch {
+    return null;
+  }
+}
+
+function approvedOpportunityId(snapshot: Obj): string {
+  const approvedId = snapshot.id;
+  return typeof approvedId === "string" && approvedId.startsWith("opp:")
+    ? approvedId.slice(4)
+    : "";
+}
+
+/** At the book press: the lead is still this person's and its booking route,
+ * read from the routes table now, still books into the approved calendar
+ * for the approved person. A rule changed since approval refuses. */
+async function bookRouteRefusal(
+  loaded: Loaded,
+  appointment: ApprovedAppointment,
+  deps: SalesBookingExecuteDeps,
+): Promise<ExecuteResult | null> {
+  const person = String(loaded.snapshot.resource ?? "");
+  const opportunityId = approvedOpportunityId(loaded.snapshot);
+  if (!opportunityId) return refused("opportunity_identity_invalid");
+  const routes = await readPressRoutes(deps);
+  if (!routes) {
+    return refused("booking_routes_unreadable", {
+      message: SALES_BOOKING_ROUTE_MESSAGES.booking_routes_unreadable,
+    });
+  }
+  let ownership: SalesBookingOpportunityOwnership;
+  try {
+    ownership = await deps.readOpportunityOwnership(opportunityId, {
+      routes,
+      forRoute: true,
+    });
+  } catch {
+    return refused("opportunity_assignment_unreadable");
+  }
+  if (ownership.kindUnread) return refused("opportunity_assignment_unreadable");
+  // An assigned lead must still be this person's in GHL. An unassigned one is
+  // whoever its route names now, checked against the approval below.
+  const assigned = !(ownership.assignedTo === null ||
+    ownership.assignedTo === "");
+  if (
+    assigned && salesBookingLeadBelongsTo(ownership, person, routes) !== "yes"
+  ) {
+    return refused("opportunity_assignee_changed", {
+      person,
+      current_assignee: ownership.assignedTo,
+      current_pipeline_id: ownership.pipelineId,
+    });
+  }
+  const decision = salesBookingRouteFor(ownership, routes);
+  if (!decision.ok) {
+    return refused(decision.reason, {
+      person,
+      message: decision.message,
+      route_id: decision.route_id ?? null,
+    });
+  }
+  const route = decision.route;
+  if (
+    route.person !== person ||
+    route.calendar_id !== appointment.calendarId ||
+    SALES_BOOKING_SENDER_LINES[route.person]?.ghl_user_id !==
+      appointment.assignedUserId
+  ) {
+    return refused("booking_route_changed", {
+      approved_calendar_id: appointment.calendarId,
+      approved_person: person,
+      route_id: route.id,
+      route_calendar_id: route.calendar_id,
+      route_person: route.person,
+      message:
+        "The booking rule for this lead changed since you approved. Approve the visit again.",
+    });
+  }
+  return null;
+}
+
 type BookedCore = {
   appointment_id: string;
   replayed: boolean;
@@ -475,10 +574,10 @@ function planOutlookMirror(
   return { ok: true, plan: { input, request: built.request } };
 }
 
-/** Only resources with a configured Outlook calendar get a mirror. */
+/** Only resources the mirror may write (Marnin) get an Outlook copy. */
 function mirrorsToOutlook(loaded: Loaded): boolean {
   return Object.hasOwn(
-    SALES_BOOKING_OUTLOOK_MAILBOXES,
+    SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES,
     String(loaded.snapshot.resource ?? ""),
   );
 }
@@ -486,8 +585,7 @@ function mirrorsToOutlook(loaded: Loaded): boolean {
 const NOT_APPLICABLE: OutlookMirrorOutcome = {
   outlook: "not_applicable",
   reason: "resource_has_no_outlook_calendar",
-  message:
-    "This person books in GHL only; there is no Outlook calendar to write.",
+  message: "This booking does not write this person's Outlook calendar.",
 };
 
 const FAILED_AFTER_BOOKING = (reason: string): OutlookMirrorOutcome => ({
@@ -656,6 +754,8 @@ export async function salesBookingBookAction(args: {
   const gated = await gate(loaded, "calendar", deps);
   if ("refusal" in gated) return gated.refusal;
   if (!appointment) return refused("content_hash_mismatch");
+  const routeRefusal = await bookRouteRefusal(loaded, appointment, deps);
+  if (routeRefusal) return routeRefusal;
 
   const resource = loaded.snapshot.resource;
   let outlook: OutlookRead;
@@ -872,32 +972,42 @@ export async function salesBookingSendAction(args: {
   ) return refused("text_already_in_thread");
 
   // The lead must still be this person's in GHL right now (its current
-  // assignee, or unassigned where their pipeline's unassigned leads are
-  // theirs). A lead moved to someone else never gets this person's line.
-  const approvedId = loaded.snapshot.id;
-  const opportunityId =
-    typeof approvedId === "string" && approvedId.startsWith("opp:")
-      ? approvedId.slice(4)
-      : "";
+  // assignee, or unassigned where `salesBookingLeadBelongsTo` gives it to
+  // them). A lead moved to someone else never gets this person's line.
+  const opportunityId = approvedOpportunityId(loaded.snapshot);
   if (!opportunityId) return refused("opportunity_identity_invalid");
+  const routes = await readPressRoutes(deps);
+  if (!routes) {
+    return refused("booking_routes_unreadable", {
+      message: SALES_BOOKING_ROUTE_MESSAGES.booking_routes_unreadable,
+    });
+  }
   let ownership: SalesBookingOpportunityOwnership;
   try {
-    ownership = await deps.readOpportunityOwnership(opportunityId);
+    ownership = await deps.readOpportunityOwnership(opportunityId, {
+      routes,
+      forRoute: false,
+    });
   } catch {
     return refused("opportunity_assignment_unreadable");
   }
-  if (
-    !salesBookingLeadBelongsTo(
-      ownership.assignedTo,
-      who.sender.person,
-      ownership.pipelineId,
-    )
-  ) {
+  if (ownership.kindUnread) {
+    return refused("opportunity_assignment_unreadable");
+  }
+  const belonging = salesBookingLeadBelongsTo(
+    ownership,
+    who.sender.person,
+    routes,
+  );
+  if (belonging === "no") {
     return refused("opportunity_assignee_changed", {
       person: who.sender.person,
       current_assignee: ownership.assignedTo,
       current_pipeline_id: ownership.pipelineId,
     });
+  }
+  if (belonging === "owner_unclear") {
+    return refused("owner_unclear", { person: who.sender.person });
   }
 
   const wouldSend = {

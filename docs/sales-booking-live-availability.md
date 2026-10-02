@@ -28,8 +28,17 @@ After the pack overlay, for the person on screen:
    calendar assigned to that person, with both calendar and user filters.
    Other assignees and cancelled rows never block.
 3. GHL blocked-off time for the user (`/calendars/blocked-slots`).
-4. Outlook events the read already fetched for the diary (Marnin only) are
-   also busy. No new Outlook read. A failed Outlook read is a caveat, not a
+4. Outlook events the read already fetched for the diary (every scoper with
+   a mailbox in `SALES_BOOKING_OUTLOOK_MAILBOXES`: Nithin, Marnin, Khairo) are
+   also busy. An unmarked exact-span copy of a GHL visit that the read folded
+   into that visit for display (`outlook_copy`) is restored here: it stays a
+   busy block and a travel neighbour with its own location, exactly as the
+   owner press reads Outlook, and like any unmarked event it counts in
+   `unverified_correspondence`. Only the resource person's own
+   mailbox counts: when the diary read another scoper's Outlook (the
+   `scoper_user_id` override), that Outlook is `failed` with
+   `outlook_calendar_not_this_person`, never busy or free time for this
+   person. No new Outlook read. A failed Outlook read is a caveat, not a
    block: GHL is the source, and the press still re-checks Outlook. An Outlook
    event is counted as mirrored only when its `mirror_of_ghl_event_id` matches
    a GHL event id; time overlap or blocked time is not mirror proof. If the
@@ -37,7 +46,9 @@ After the pack overlay, for the person on screen:
    times are withheld.
 5. Open offers: the same census the owner press uses
    (`systemOfferCensus`, `sales_booking_executions` claimed in the last 21
-   days joined to their approvals, plus live owner approvals). Offers remain holds until the census drops them; an unrelated GHL
+   days joined to their approvals, plus every person's live owner approvals).
+   Only offers that hold this person's time count (each census offer names
+   its person; one that does not holds everyone's). Offers remain holds until the census drops them; an unrelated GHL
    appointment for the same contact does not remove a separate visit commitment. Hand-sent texts are not
    machine-checked and say so.
 
@@ -65,8 +76,9 @@ A case already booked in GHL that day has `state: already_booked`,
 `ghl_blocked_slots_unreadable: <why>`, `ghl_event_times_malformed`,
 `person_not_configured`, `travel_location_unknown`,
 `outlook_malformed_dropped: <count>` (free times withheld). Offers: `system_offers_unreadable: <why>`,
-`system_sends_no_offers_for_this_person` (Nithin, Khairo: this system has no
-send path for their leads, so its own census is complete and empty).
+`system_sends_no_offers_for_this_person` (a person this system has no send
+path for, so its own census is complete and empty; since 2 Oct 2026 Marnin,
+Nithin and Khairo all take offers, so none of them reads this).
 
 ## Slot rule
 
@@ -158,7 +170,9 @@ his GHL calendar:
    sync success or failure and need not fall to zero after connection.
 
 The dated directory read found calendars for Nithin and Khairo. Their Outlook
-conflict-calendar connections were not established by that read.
+conflict-calendar connections were not established by that read. Since 25 Sep
+2026 the server reads their Outlook primary calendars directly into the diary
+(tenant-wide Calendars.Read consent), independent of any GHL connection.
 
 ## Follow-ups
 
