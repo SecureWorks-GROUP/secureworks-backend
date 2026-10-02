@@ -2319,7 +2319,7 @@ async function matchInvoicesToJobs(sb: any) {
   // Get all jobs with contact details + job_number for reference matching
   const { data: jobs, error: jobErr } = await sb
     .from('jobs')
-    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number, type')
+    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number, type, status')
     .eq('org_id', DEFAULT_ORG_ID)
     .limit(5000)
 
@@ -2361,6 +2361,9 @@ async function matchInvoicesToJobs(sb: any) {
 
   for (const job of jobs) {
     if (!job.client_name) continue
+    // A draft is a sales lead with no work: a name match must never pick it
+    // (first match wins here). An explicit job-number reference still can.
+    if (job.status === 'draft') continue
     const n = norm(job.client_name)
     if (!nameMap[n]) nameMap[n] = job
 
