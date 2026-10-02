@@ -1,0 +1,776 @@
+// The email reader (context build plan slice EM2; design email.md §2, §7, §8,
+// §12). For each selected Outlook source (monitored_mailboxes: enabled and
+// status active) it reads inbound and sent mail with the new words of each
+// email and saves one evidence row per email through the one row builder
+// (_shared/evidence/outlook_mail.ts) and the one SQL writer
+// (public.capture_business_event). It never places an email on a job: the
+// database ladder does that on insert, as for every capture door. Attachments
+// go to the private attachment store (attachments.ts).
+//
+// Modes (one run row per source per call, in context_capture_runs through
+// record_capture_run, named as EM1's contract says):
+//   poll     new mail since the source's cursor        outlook_<key>
+//   sweep    re-read of the last 48 hours; inserts are
+//            mail the poll missed (counts.sweep_misses) outlook_sweep_<key>
+//   history  bounded backfill of [from, to), at most 60
+//            days back, capture_mode backfill, only mail
+//            touching a live job (captain ruling 24 Sep) outlook_history_<key>
+//
+// Cursor (email.md review M5): the pair (window_to, window_end_id) of the last
+// email fully processed, plus cursor.ids_at_end (hashes of the ids processed at
+// exactly window_to). A caught-up poll starts 10 minutes before window_to (a
+// harmless overlap: the key makes a re-read a duplicate). A poll that left
+// pages behind (cursor.backlog) starts exactly at window_to and skips what it
+// already processed there, so a burst drains over several runs instead of
+// re-reading the same page. A history run that was cut short resumes the
+// same way. The cursor never moves past an email that failed to save.
+//
+// Gates: feature flag email_reader_v1 (this reader's own switch, off by
+// default), email_capture_v2 (the email capture program's switch, EM1) and the
+// capture lane must all be on; otherwise the call is idle and reads nothing.
+//
+// Read only towards the mailbox: no send, reply, move, delete or mark-read
+// call exists in graph.ts. No model call. Logs and run rows carry codes and
+// counts only, never mail text or addresses.
+
+import {
+  buildOutlookMailRow,
+  type CaptureMode,
+  emailAddress,
+  type FolderKind,
+  isOurAddress,
+  ourReferences,
+  type OutlookMailItem,
+  type OutlookSource,
+} from "../_shared/evidence/outlook_mail.ts";
+import type { AttachmentResult } from "./attachments.ts";
+import type {
+  AttachmentHome,
+  FolderIds,
+  GroupConversation,
+  MessagePage,
+} from "./graph.ts";
+
+export const EVENT_SOURCE = "outlook-mail-capture";
+export const READER_FLAG = "email_reader_v1";
+export const PROGRAM_FLAG = "email_capture_v2";
+
+export type Mode = "poll" | "sweep" | "history";
+
+export const POLICY = {
+  pollOverlapMs: 10 * 60_000,
+  firstPollLookbackMs: 30 * 60_000,
+  pollPageSize: 25,
+  pollMaxPages: 4,
+  sweepWindowMs: 48 * 60 * 60_000,
+  bulkPageSize: 50,
+  bulkMaxPages: 40,
+  historyMaxDays: 60,
+  groupMaxConversations: { poll: 25, sweep: 200, history: 400 },
+  groupMaxPosts: { poll: 200, sweep: 2000, history: 2000 },
+  budgetMs: 120_000,
+  runningStaleMs: 10 * 60_000,
+  idsAtEndMax: 25,
+};
+
+export interface SourceRow {
+  email: string;
+  source_key: string;
+  kind: "user" | "group" | "unknown";
+  scope_label: string;
+  owner_privacy: boolean;
+}
+
+export interface RunRow {
+  id: string;
+  status: "running" | "succeeded" | "partial" | "failed";
+  started_at: string;
+  updated_at: string;
+  window_to: string | null;
+  window_end_id: string | null;
+  cursor: Record<string, unknown> | null;
+}
+
+export type CaptureOutcome =
+  | { outcome: "inserted"; id?: string; job_id?: string | null }
+  | { outcome: "duplicate"; id?: string; upgraded?: boolean }
+  | { outcome: "capture_disabled" }
+  | { outcome: "error"; code?: string };
+
+type ListedMessage = MessagePage["items"][number] & { skip?: boolean };
+
+export interface MailReads {
+  folderIds(mailbox: string): Promise<FolderIds>;
+  listMessages(
+    mailbox: string,
+    args: {
+      fromIso: string;
+      toIso?: string | null;
+      top: number;
+      next?: string | null;
+      lean?: boolean;
+    },
+  ): Promise<MessagePage>;
+  messageDetail(
+    mailbox: string,
+    graphId: string,
+  ): Promise<
+    { text: string | null; isHtml: boolean; headers: Record<string, string> }
+  >;
+  resolveGroupId(mail: string): Promise<string | null>;
+  listGroupConversations(
+    groupId: string,
+    next?: string | null,
+  ): Promise<{ items: GroupConversation[]; next: string | null }>;
+  listGroupThreads(
+    groupId: string,
+    conversationId: string,
+  ): Promise<Array<{ id: string; topic: string | null }>>;
+  listGroupPosts(
+    groupId: string,
+    threadId: string,
+    topic: string | null,
+  ): Promise<OutlookMailItem[]>;
+}
+
+export interface CaptureDeps {
+  /** Epoch milliseconds. */
+  now(): number;
+  flags(): Promise<{ reader: boolean; program: boolean }>;
+  captureLaneOn(): Promise<boolean>;
+  /** Selected sources: enabled and status active. */
+  sources(): Promise<SourceRow[]>;
+  supplierDomains(): Promise<Set<string>>;
+  jobClientEmails(): Promise<Set<string>>;
+  /** Live jobs (captain ruling 24 Sep): their job numbers (upper case) and client emails. */
+  historyScope(): Promise<
+    { jobNumbers: Set<string>; clientEmails: Set<string> }
+  >;
+  /** Newest runs of one run source first. Throws when unreadable. */
+  latestRuns(runSource: string, limit: number): Promise<RunRow[]>;
+  /** record_capture_run. Throws on refusal; returns the run id. */
+  recordRun(run: Record<string, unknown>): Promise<string>;
+  capture(row: Record<string, unknown>): Promise<CaptureOutcome>;
+  mail: MailReads;
+  storeAttachments(args: {
+    home: AttachmentHome;
+    providerMessageId: string;
+    businessEventId: string | null;
+    scopeLabel: string;
+  }): Promise<AttachmentResult>;
+  hash(text: string): Promise<string>;
+}
+
+export interface CaptureRequest {
+  mode: Mode;
+  /** One source_key; absent means every selected source. */
+  source?: string | null;
+  /** History window, ISO times. */
+  from?: string | null;
+  to?: string | null;
+}
+
+export interface SourceResult {
+  source_key: string;
+  run_source: string;
+  outcome: "ran" | "busy";
+  run_id?: string;
+  status?: RunRow["status"];
+  error_code?: string | null;
+  counts?: Record<string, number>;
+}
+
+export type CaptureResult =
+  | { outcome: "idle"; reason: string }
+  | { outcome: "refused"; code: string }
+  | {
+    outcome: "ran";
+    mode: Mode;
+    sources: SourceResult[];
+    not_reached: string[];
+  };
+
+export function runSourceName(mode: Mode, sourceKey: string): string {
+  return mode === "poll"
+    ? `outlook_${sourceKey}`
+    : mode === "sweep"
+    ? `outlook_sweep_${sourceKey}`
+    : `outlook_history_${sourceKey}`;
+}
+
+/** A provider or database failure's code, safe for a run row (lower case, ids only). */
+export function safeCode(e: unknown, fallback = "error"): string {
+  const c = (e as { code?: unknown } | null)?.code;
+  const s = typeof c === "string" ? c.toLowerCase() : "";
+  return /^[a-z0-9][a-z0-9_.:-]{0,100}$/.test(s) ? s : fallback;
+}
+
+function iso(ms: number): string {
+  return new Date(ms).toISOString();
+}
+
+function ms(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Order emails by (time, id), byte order on the id. */
+export function byTimeThenId(a: OutlookMailItem, b: OutlookMailItem): number {
+  const ta = ms(a.receivedAt) ?? 0;
+  const tb = ms(b.receivedAt) ?? 0;
+  if (ta !== tb) return ta - tb;
+  return a.graphId < b.graphId ? -1 : a.graphId > b.graphId ? 1 : 0;
+}
+
+interface StartPoint {
+  startMs: number;
+  /** Skip emails before this time, and those at it whose id hash is listed. */
+  skipBeforeMs: number | null;
+  skipIdsAt: Set<string>;
+  previousWindowTo: string | null;
+}
+
+function startFromRun(run: RunRow, overlapMs: number): StartPoint {
+  const to = ms(run.window_to)!;
+  const backlog = run.cursor?.backlog === true;
+  const ids = Array.isArray(run.cursor?.ids_at_end)
+    ? (run.cursor!.ids_at_end as unknown[]).filter((x): x is string =>
+      typeof x === "string"
+    )
+    : [];
+  return backlog
+    ? {
+      startMs: to,
+      skipBeforeMs: to,
+      skipIdsAt: new Set(ids),
+      previousWindowTo: run.window_to,
+    }
+    : {
+      startMs: to - overlapMs,
+      skipBeforeMs: null,
+      skipIdsAt: new Set(),
+      previousWindowTo: run.window_to,
+    };
+}
+
+class SourceStop extends Error {
+  constructor(readonly code: string, readonly status: "failed" | "partial") {
+    super(code);
+  }
+}
+
+/** The history window, refused when malformed, inverted, in the future or older than 60 days. */
+export function historyWindow(
+  req: CaptureRequest,
+  nowMs: number,
+): { fromMs: number; toMs: number } | null {
+  const from = ms(req.from);
+  const to = ms(req.to);
+  if (from === null || to === null || from >= to) return null;
+  if (to > nowMs) return null;
+  if (from < nowMs - POLICY.historyMaxDays * 86_400_000) return null;
+  return { fromMs: from, toMs: to };
+}
+
+export async function runOutlookCapture(
+  deps: CaptureDeps,
+  req: CaptureRequest,
+): Promise<CaptureResult> {
+  const began = deps.now();
+  if (!["poll", "sweep", "history"].includes(req.mode)) {
+    return { outcome: "refused", code: "mode_invalid" };
+  }
+  const flags = await deps.flags();
+  if (!flags.reader) return { outcome: "idle", reason: `${READER_FLAG}_off` };
+  if (!flags.program) return { outcome: "idle", reason: `${PROGRAM_FLAG}_off` };
+  if (!(await deps.captureLaneOn())) {
+    return { outcome: "idle", reason: "capture_lane_off" };
+  }
+
+  let window: { fromMs: number; toMs: number } | null = null;
+  if (req.mode === "history") {
+    window = historyWindow(req, began);
+    if (!window) return { outcome: "refused", code: "history_window_invalid" };
+    if (!req.source) {
+      return { outcome: "refused", code: "history_needs_source" };
+    }
+  }
+
+  let sources = (await deps.sources()).filter((s) =>
+    s.kind === "user" || s.kind === "group"
+  );
+  if (req.source) {
+    sources = sources.filter((s) => s.source_key === req.source);
+    if (sources.length === 0) {
+      return { outcome: "refused", code: "source_not_selected" };
+    }
+  }
+
+  const supplierDomains = await deps.supplierDomains();
+  const jobClientEmails = await deps.jobClientEmails();
+  const scope = req.mode === "history" ? await deps.historyScope() : null;
+
+  const results: SourceResult[] = [];
+  const notReached: string[] = [];
+  for (const s of sources) {
+    if (deps.now() - began > POLICY.budgetMs) {
+      notReached.push(s.source_key);
+      continue;
+    }
+    results.push(
+      await runSource(deps, req, s, {
+        began,
+        window,
+        supplierDomains,
+        jobClientEmails,
+        scope,
+      }),
+    );
+  }
+  return {
+    outcome: "ran",
+    mode: req.mode,
+    sources: results,
+    not_reached: notReached,
+  };
+}
+
+interface RunEnv {
+  began: number;
+  window: { fromMs: number; toMs: number } | null;
+  supplierDomains: Set<string>;
+  jobClientEmails: Set<string>;
+  scope: { jobNumbers: Set<string>; clientEmails: Set<string> } | null;
+}
+
+/** History keeps only mail touching a live job: an outside address that is a live job's client email, or a live job number named. */
+export function touchesLiveJob(
+  row: Record<string, unknown>,
+  scope: { jobNumbers: Set<string>; clientEmails: Set<string> },
+): boolean {
+  const p = row.payload as Record<string, unknown>;
+  const addrs = [
+    p.from,
+    ...(p.to as unknown[] ?? []),
+    ...(p.cc as unknown[] ?? []),
+  ]
+    .map((a) => emailAddress(String(a ?? "")))
+    .filter((a): a is string => !!a && !isOurAddress(a));
+  if (addrs.some((a) => scope.clientEmails.has(a))) return true;
+  const refs = ourReferences(String(p.body ?? "")).map((r) => r.toUpperCase());
+  return refs.some((r) =>
+    scope.jobNumbers.has(r) ||
+    scope.jobNumbers.has(r.replace(/^([A-Z]+)(\d)/, "$1-$2"))
+  );
+}
+
+async function runSource(
+  deps: CaptureDeps,
+  req: CaptureRequest,
+  s: SourceRow,
+  env: RunEnv,
+): Promise<SourceResult> {
+  const runSource = runSourceName(req.mode, s.source_key);
+  const nowMs = deps.now();
+  const recent = await deps.latestRuns(runSource, 10);
+  const running = recent.find((r) => r.status === "running");
+  if (running) {
+    if (nowMs - (ms(running.updated_at) ?? 0) < POLICY.runningStaleMs) {
+      return {
+        source_key: s.source_key,
+        run_source: runSource,
+        outcome: "busy",
+      };
+    }
+    // An abandoned run (worker stopped mid-run): close it so it never reads as running.
+    await deps.recordRun({
+      run_id: running.id,
+      source: runSource,
+      status: "failed",
+      error_code: "abandoned",
+    });
+  }
+
+  // Where to start, and what to skip at the start.
+  let start: StartPoint;
+  let endMs: number | null = null;
+  const historyKey = env.window
+    ? { history_from: iso(env.window.fromMs), history_to: iso(env.window.toMs) }
+    : null;
+  if (req.mode === "poll") {
+    const last = recent.find((r) => r.status !== "running" && r.window_to);
+    start = last ? startFromRun(last, POLICY.pollOverlapMs) : {
+      startMs: nowMs - POLICY.firstPollLookbackMs,
+      skipBeforeMs: null,
+      skipIdsAt: new Set(),
+      previousWindowTo: null,
+    };
+  } else if (req.mode === "sweep") {
+    start = {
+      startMs: nowMs - POLICY.sweepWindowMs,
+      skipBeforeMs: null,
+      skipIdsAt: new Set(),
+      previousWindowTo: null,
+    };
+    endMs = nowMs;
+  } else {
+    // Resume only when the newest run of this exact window did not finish it.
+    const newest = recent.find((r) =>
+      r.status !== "running" &&
+      r.cursor?.history_from === historyKey!.history_from &&
+      r.cursor?.history_to === historyKey!.history_to
+    );
+    const resume = newest && newest.status !== "succeeded" && newest.window_to
+      ? newest
+      : null;
+    start = resume
+      ? {
+        ...startFromRun({
+          ...resume,
+          cursor: { ...resume.cursor, backlog: true },
+        }, 0),
+      }
+      : {
+        startMs: env.window!.fromMs,
+        skipBeforeMs: null,
+        skipIdsAt: new Set(),
+        previousWindowTo: null,
+      };
+    endMs = env.window!.toMs;
+  }
+
+  const runId = await deps.recordRun({
+    source: runSource,
+    status: "running",
+    window_from: iso(start.startMs),
+  });
+  const counts: Record<string, number> = {
+    seen: 0,
+    inserted: 0,
+    duplicates: 0,
+    upgraded: 0,
+    skipped_noise: 0,
+    skipped_private: 0,
+    skipped_folder: 0,
+    skipped_no_sender: 0,
+    skipped_out_of_scope: 0,
+    skipped_before_cursor: 0,
+    no_internet_id: 0,
+    body_truncated: 0,
+    detail_reads: 0,
+    pages: 0,
+    attachments_stored: 0,
+    attachments_skipped: 0,
+    attachment_errors: 0,
+  };
+  if (req.mode === "sweep") counts.sweep_misses = 0;
+  const captureMode: CaptureMode = req.mode === "history" ? "backfill" : "live";
+  const source: OutlookSource = {
+    email: s.email,
+    sourceKey: s.source_key,
+    kind: s.kind as "user" | "group",
+    scopeLabel: s.scope_label,
+    ownerPrivacy: s.owner_privacy === true,
+  };
+
+  // Progress: the last email fully processed.
+  let lastMs: number | null = null;
+  let lastId: string | null = null;
+  let idsAtEnd: string[] = [];
+  let backlog = false;
+  let readComplete = true;
+  let stop: SourceStop | null = null;
+
+  const process = async (
+    item: ListedMessage | OutlookMailItem,
+    home: AttachmentHome,
+  ): Promise<void> => {
+    counts.seen++;
+    const t = ms(item.receivedAt) ?? 0;
+    if (start.skipBeforeMs !== null) {
+      if (t < start.skipBeforeMs) {
+        counts.skipped_before_cursor++;
+        return;
+      }
+      if (
+        t === start.skipBeforeMs &&
+        start.skipIdsAt.has(await deps.hash(item.graphId))
+      ) {
+        counts.skipped_before_cursor++;
+        return;
+      }
+    }
+    const advance = async () => {
+      const h = await deps.hash(item.graphId);
+      if (lastMs === t) idsAtEnd = [...idsAtEnd, h].slice(-POLICY.idsAtEndMax);
+      else idsAtEnd = [h];
+      lastMs = t;
+      lastId = item.graphId;
+    };
+    const listed = item as ListedMessage;
+    if (listed.skip) {
+      counts.skipped_folder++;
+      await advance();
+      return;
+    }
+    if (listed.detailRead === false) {
+      try {
+        const d = await deps.mail.messageDetail(s.email, item.graphId);
+        counts.detail_reads++;
+        item = {
+          ...item,
+          bodyText: d.text,
+          bodyIsHtml: d.isHtml,
+          headers: d.headers,
+        };
+      } catch (e) {
+        throw new SourceStop(safeCode(e, "graph_error"), "failed");
+      }
+    }
+    const built = buildOutlookMailRow(item, source, {
+      source: EVENT_SOURCE,
+      captureMode,
+      supplierDomains: env.supplierDomains,
+      jobClientEmails: env.jobClientEmails,
+    });
+    if (built.kind === "skip") {
+      if (built.reason === "skipped_noise") counts.skipped_noise++;
+      else if (built.reason === "skipped_private") counts.skipped_private++;
+      else counts.skipped_no_sender++;
+      await advance();
+      return;
+    }
+    if (env.scope && !touchesLiveJob(built.row, env.scope)) {
+      counts.skipped_out_of_scope++;
+      await advance();
+      return;
+    }
+    const payload = built.row.payload as Record<string, unknown>;
+    const out = await deps.capture(built.row);
+    if (out.outcome === "capture_disabled") {
+      throw new SourceStop("capture_disabled", "partial");
+    }
+    if (out.outcome === "error") {
+      throw new SourceStop(
+        `capture_${safeCode({ code: out.code }, "error")}`.slice(0, 110),
+        "failed",
+      );
+    }
+    if (out.outcome === "inserted") {
+      counts.inserted++;
+      if (req.mode === "sweep") counts.sweep_misses++;
+    } else {
+      counts.duplicates++;
+      if (out.upgraded) counts.upgraded++;
+    }
+    if ((built.row.metadata as Record<string, unknown>).no_internet_id) {
+      counts.no_internet_id++;
+    }
+    if (payload.body_truncated) counts.body_truncated++;
+    if (item.hasAttachments) {
+      const a = await deps.storeAttachments({
+        home,
+        providerMessageId: String(built.row.provider_message_id),
+        businessEventId: out.id ?? null,
+        scopeLabel: s.scope_label,
+      });
+      counts.attachments_stored += a.stored;
+      counts.attachments_skipped += a.skipped;
+      counts.attachment_errors += a.errors;
+    }
+    await advance();
+  };
+
+  const overBudget = () => deps.now() - env.began > POLICY.budgetMs;
+
+  try {
+    if (s.kind === "user") {
+      const folders = await deps.mail.folderIds(s.email).catch((e) => {
+        throw new SourceStop(safeCode(e, "graph_error"), "failed");
+      });
+      const skipFolders = new Set(
+        [folders.junk, folders.drafts, folders.outbox].filter((
+          x,
+        ): x is string => !!x),
+      );
+      const kindOf = (folderId: string | null | undefined): FolderKind =>
+        folderId && folderId === folders.sent
+          ? "sent"
+          : folderId && folderId === folders.deleted
+          ? "deleted"
+          : "inbox";
+      const pageSize = req.mode === "poll"
+        ? POLICY.pollPageSize
+        : POLICY.bulkPageSize;
+      const maxPages = req.mode === "poll"
+        ? POLICY.pollMaxPages
+        : POLICY.bulkMaxPages;
+      let next: string | null = null;
+      let lean = false;
+      for (let page = 0; page < maxPages; page++) {
+        if (overBudget()) {
+          backlog = true;
+          break;
+        }
+        let got: MessagePage;
+        try {
+          got = await deps.mail.listMessages(s.email, {
+            fromIso: iso(start.startMs),
+            toIso: endMs === null ? null : iso(endMs),
+            top: pageSize,
+            next,
+            lean,
+          });
+        } catch (e) {
+          // Graph may refuse uniqueBody or headers on a list call: read them per message instead.
+          if (!lean && page === 0 && safeCode(e) === "graph_400") {
+            lean = true;
+            page--;
+            continue;
+          }
+          throw new SourceStop(safeCode(e, "graph_error"), "failed");
+        }
+        counts.pages++;
+        const items = got.items.map((m) => ({
+          ...m,
+          folderKind: kindOf(m.parentFolderId),
+          skip: m.isDraft === true ||
+            (!!m.parentFolderId && skipFolders.has(m.parentFolderId)),
+        })).sort(byTimeThenId);
+        let cut = false;
+        for (let i = 0; i < items.length; i++) {
+          await process(items[i], {
+            kind: "message",
+            mailbox: s.email,
+            messageId: items[i].graphId,
+          });
+          if (i < items.length - 1 && overBudget()) {
+            cut = true;
+            break;
+          }
+        }
+        next = got.next;
+        if (cut) {
+          backlog = true;
+          break;
+        }
+        if (!next) break;
+        if (page === maxPages - 1) backlog = true;
+      }
+    } else {
+      const groupId = await deps.mail.resolveGroupId(s.email).catch((e) => {
+        throw new SourceStop(safeCode(e, "graph_error"), "failed");
+      });
+      if (!groupId) throw new SourceStop("group_not_found", "failed");
+      const maxConv = POLICY.groupMaxConversations[req.mode];
+      const maxPosts = POLICY.groupMaxPosts[req.mode];
+      const posts: Array<{ post: OutlookMailItem; threadId: string }> = [];
+      let conversations = 0;
+      let next: string | null = null;
+      try {
+        outer: for (let page = 0; page < 50; page++) {
+          const got = await deps.mail.listGroupConversations(groupId, next);
+          counts.pages++;
+          for (const c of got.items) {
+            const last = ms(c.lastDeliveredDateTime);
+            if (last !== null && last < start.startMs) break outer;
+            if (conversations >= maxConv || overBudget()) {
+              readComplete = false;
+              break outer;
+            }
+            conversations++;
+            for (const th of await deps.mail.listGroupThreads(groupId, c.id)) {
+              for (
+                const p of await deps.mail.listGroupPosts(
+                  groupId,
+                  th.id,
+                  th.topic,
+                )
+              ) {
+                const t = ms(p.receivedAt);
+                if (t === null || t < start.startMs) continue;
+                if (endMs !== null && t >= endMs) continue;
+                posts.push({ post: p, threadId: th.id });
+              }
+            }
+          }
+          next = got.next;
+          if (!next) break;
+        }
+      } catch (e) {
+        if (e instanceof SourceStop) throw e;
+        throw new SourceStop(safeCode(e, "graph_error"), "failed");
+      }
+      posts.sort((a, b) => byTimeThenId(a.post, b.post));
+      const take = posts.slice(0, maxPosts);
+      if (posts.length > take.length) backlog = true;
+      for (let i = 0; i < take.length; i++) {
+        await process(take[i].post, {
+          kind: "post",
+          groupId,
+          threadId: take[i].threadId,
+          postId: take[i].post.graphId,
+        });
+        if (i < take.length - 1 && overBudget()) {
+          backlog = true;
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    stop = e instanceof SourceStop
+      ? e
+      : new SourceStop(safeCode(e, "error"), "failed");
+  }
+
+  if (!readComplete) backlog = true;
+  // Where the cursor ends: the last email fully processed. A group read that
+  // could not list every changed conversation keeps the previous cursor, so
+  // the unread conversations are not jumped over.
+  let windowTo: string | null = null;
+  let windowEndId: string | null = null;
+  let cursorIds: string[] = [];
+  if (lastMs !== null && readComplete) {
+    windowTo = iso(lastMs);
+    windowEndId = lastId;
+    cursorIds = idsAtEnd;
+  } else if (start.previousWindowTo) {
+    windowTo = start.previousWindowTo;
+    cursorIds = [...start.skipIdsAt];
+  } else if (!stop && readComplete && req.mode === "poll") {
+    windowTo = iso(start.startMs);
+  }
+  const status: RunRow["status"] = stop
+    ? stop.status
+    : backlog && req.mode !== "poll"
+    ? "partial"
+    : "succeeded";
+  const finish: Record<string, unknown> = {
+    run_id: runId,
+    source: runSource,
+    status,
+    counts,
+    cursor: {
+      mode: req.mode,
+      backlog,
+      ids_at_end: cursorIds,
+      ...(historyKey ?? {}),
+    },
+    error_code: stop ? stop.code : null,
+  };
+  if (windowTo) {
+    finish.window_to = windowTo;
+    if (windowEndId) finish.window_end_id = windowEndId;
+  }
+  await deps.recordRun(finish);
+  return {
+    source_key: s.source_key,
+    run_source: runSource,
+    outcome: "ran",
+    run_id: runId,
+    status,
+    error_code: stop ? stop.code : null,
+    counts,
+  };
+}
