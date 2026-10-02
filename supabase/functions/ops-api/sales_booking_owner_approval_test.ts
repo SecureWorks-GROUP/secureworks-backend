@@ -1097,9 +1097,9 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   );
   // deno-lint-ignore no-explicit-any
   assertEquals((broken.cases[0] as any).owner_booking.approvals, null);
-  // Patio desk: the owner writes a text for Nithin's lead, never a visit, and
-  // only Nithin's own approvals are read.
-  const asked: Array<string | undefined> = [];
+  // Patio desk: the owner writes a text or a visit for Nithin's lead under
+  // Nithin's own rulebook, and only Nithin's own approvals are read.
+  const asked: Array<string | null | undefined> = [];
   const patio = await applyOwnerBooking(
     await workspace([{}], "nithin"),
     (_since, resource) => {
@@ -1110,12 +1110,22 @@ Deno.test("read: every lead says whether an engine proposal exists and carries t
   );
   assertEquals(asked, ["nithin"]);
   assertEquals(patio.booking_flow?.owner_approval_write, "owner-authored-v1");
-  assertEquals(patio.booking_flow?.owner_rulebook, null);
+  assertEquals(patio.booking_flow?.owner_rulebook?.profile, "patio-nithin");
+  assertEquals(patio.booking_flow?.owner_rulebook?.days, [
+    "Mon",
+    "Tue",
+    "Thu",
+    "Fri",
+  ]);
+  assertEquals(
+    patio.booking_flow?.owner_rulebook?.calendar?.calendar_id,
+    "RSQnT8cQdEE8azb5Chlq",
+  );
   // deno-lint-ignore no-explicit-any
   const nithinCase = (patio.cases[0] as any).owner_booking;
   assertEquals(nithinCase.eligible, true);
-  assertEquals(nithinCase.steps, ["message"]);
-  assertEquals(nithinCase.rulebook, null);
+  assertEquals(nithinCase.steps, ["message", "calendar"]);
+  assertEquals(nithinCase.rulebook?.sender, "+61489267774");
 });
 
 Deno.test("bookable dates skip today's passed Friday and non-Stratco days", () => {
@@ -1216,20 +1226,15 @@ Deno.test("owner request shape refusals and a decision already recorded on the s
     }),
     "booking_profile_required",
   );
-  // A visit or an offered slot is the Stratco rulebook only.
+  // A visit for another person is checked against that person's own
+  // workspace; this one is Marnin's (per-route visits:
+  // sales_booking_routes_test.ts).
   await refusal(
     call(d, {
       owner_input: input("calendar", { resource: "nithin" }),
       dry_run: true,
     }),
-    "stratco_profile_required",
-  );
-  await refusal(
-    call(d, {
-      owner_input: input("message", { resource: "khairo", offer: FRI }),
-      dry_run: true,
-    }),
-    "stratco_profile_required",
+    "booking_profile_required",
   );
   await refusal(
     call(d, { owner_input: input("message"), dry_run: "yes" }),

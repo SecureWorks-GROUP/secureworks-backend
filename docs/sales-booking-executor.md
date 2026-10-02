@@ -68,19 +68,27 @@ Both actions:
 
 `sales_booking_book` then:
 
-6. The owner's Outlook primary calendar for the approved window, read through
+6. The booking route, read from the routes table at the press
+   (`docs/sales-booking-routes.md`). A lead assigned in GHL must still be the
+   approved person's (`opportunity_assignee_changed`); the lead's route must
+   still name the approved person, calendar and GHL user
+   (`booking_route_changed` when the owner changed a rule since approving;
+   `booking_route_missing` and the other route reasons when no rule fits;
+   `booking_routes_unreadable` when the table cannot be read). Nothing is
+   written.
+7. The visit person's Outlook primary calendar for the approved window, read through
    Microsoft Graph `calendarView` with the mail app's existing credential
    (`_shared/graph_client.ts`, mailbox from `SALES_BOOKING_GHL_USERS`). Any busy
    event refuses `outlook_calendar_clash`, naming subject and times; a failed
    read refuses `outlook_unreadable`. Free and cancelled events never block.
-7. When the resource is one the mirror writes
+8. When the resource is one the mirror writes
    (`SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES`, Marnin only): published suburb and client name,
    before any GHL write (dry run included). Suburb is
    `salesBookingPublishedSuburb` (the same value the booking read publishes).
    Missing that value, a usable name, or the contact read refuses
    `suburb_not_given` / `client_name_not_given` / `contact_unreadable` and
    books nothing.
-8. A live press claims `sales_booking_executions` (`step=calendar`) and
+9. A live press claims `sales_booking_executions` (`step=calendar`) and
    passes `executorClaim` to the GHL writer
    (`ghl-proxy?action=create_calendar_appointment`), which re-reads the
    person's GHL diary plus every assigned calendar and refuses
@@ -103,11 +111,13 @@ Both actions:
    recipient.
    Then the opportunity's live GHL assignee must still make it that
    person's lead (`salesBookingLeadBelongsTo`): assigned to that person, or
-   unassigned where the rule gives it to them (patio Nithin; fencing with a
-   Stratco signal Marnin, with a positive normal-lead signal Khairo,
-   `salesBookingLeadKind`). Otherwise `opportunity_assignee_changed`; an
-   unassigned fencing lead with neither signal refuses `owner_unclear` on
-   Marnin's line until someone assigns it in GHL; an unreadable assignee, or
+   unassigned where the first matching booking route names them (seed: patio
+   Nithin; fencing with a Stratco signal Marnin, with a positive normal-lead
+   signal Khairo, `salesBookingLeadKind`). Otherwise
+   `opportunity_assignee_changed`; an unassigned lead no route claims refuses
+   `owner_unclear` on the line of the person holding that trade's unrouted
+   leads until someone assigns it in GHL; an unreadable routes table refuses
+   `booking_routes_unreadable`; an unreadable assignee, or
    an unassigned fencing lead whose GHL contact or STRATCO FENCING calendar
    cannot be read, refuses `opportunity_assignment_unreadable`. Nothing is
    sent.

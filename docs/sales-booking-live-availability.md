@@ -46,7 +46,9 @@ After the pack overlay, for the person on screen:
    times are withheld.
 5. Open offers: the same census the owner press uses
    (`systemOfferCensus`, `sales_booking_executions` claimed in the last 21
-   days joined to their approvals, plus live owner approvals). Offers remain holds until the census drops them; an unrelated GHL
+   days joined to their approvals, plus every person's live owner approvals).
+   Only offers that hold this person's time count (each census offer names
+   its person; one that does not holds everyone's). Offers remain holds until the census drops them; an unrelated GHL
    appointment for the same contact does not remove a separate visit commitment. Hand-sent texts are not
    machine-checked and say so.
 
@@ -74,8 +76,9 @@ A case already booked in GHL that day has `state: already_booked`,
 `ghl_blocked_slots_unreadable: <why>`, `ghl_event_times_malformed`,
 `person_not_configured`, `travel_location_unknown`,
 `outlook_malformed_dropped: <count>` (free times withheld). Offers: `system_offers_unreadable: <why>`,
-`system_sends_no_offers_for_this_person` (Nithin, Khairo: this system has no
-send path for their leads, so its own census is complete and empty).
+`system_sends_no_offers_for_this_person` (a person this system has no send
+path for, so its own census is complete and empty; since 2 Oct 2026 Marnin,
+Nithin and Khairo all take offers, so none of them reads this).
 
 ## Slot rule
 

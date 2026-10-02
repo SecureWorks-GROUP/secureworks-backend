@@ -55,6 +55,9 @@ export interface SalesBookingOpportunityOwnership {
   /** The contact or STRATCO FENCING calendar read an unassigned fencing
    * lead's `kind` needs failed, so it is held `unclear`. */
   kindUnread?: boolean;
+  /** GHL tags on the contact and opportunity, for a booking route that
+   * matches on a tag; absent or null when the contact was not read. */
+  tags?: string[] | null;
 }
 
 /** What an unassigned fencing lead is: see `salesBookingLeadKind`. */
@@ -270,6 +273,21 @@ export function salesBookingLeadKind(
     tags.some((tag) => NORMAL_TAGS.has(tag.trim().toLowerCase()))
   ) return "normal";
   return "unclear";
+}
+
+/** Every GHL tag on an opportunity, its embedded contact and its contact
+ * read, the same set `salesBookingLeadKind` reads. */
+export function salesBookingLeadTags(
+  opportunity: unknown,
+  contact?: unknown,
+): string[] {
+  const opp = record(opportunity);
+  return [
+    ...[record(opp.contact), record(contact)].flatMap((c) =>
+      Array.isArray(c.tags) ? c.tags : []
+    ),
+    ...(Array.isArray(opp.tags) ? opp.tags : []),
+  ].filter((tag): tag is string => typeof tag === "string");
 }
 
 /** The short line label the screen shows (`776`). */

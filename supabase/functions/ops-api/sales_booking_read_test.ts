@@ -1440,6 +1440,7 @@ Deno.test("the deps object handed to the runner exposes no write members", async
       "readOpportunities",
       "readOpportunityOwnership",
       "readOutlookDiary",
+      "readRoutes",
       "readScopeCalendar",
       "readThread",
     ].sort(),

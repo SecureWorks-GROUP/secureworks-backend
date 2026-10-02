@@ -6,7 +6,12 @@ import {
   type SalesBookingCase,
   salesBookingLeadBelongsTo,
   type SalesBookingReadResponse,
+  salesBookingRouteFor,
 } from "./sales_booking_read.ts";
+import {
+  SALES_BOOKING_SEED_ROUTES,
+  type SalesBookingRoute,
+} from "./sales_booking_routes.ts";
 import {
   assertSalesBookingStampWriteAuth,
   type SalesBookingEnvGet,
@@ -41,7 +46,6 @@ export {
 // deno-lint-ignore no-explicit-any
 export type BookingObject = Record<string, any>;
 export type BookingStep = "calendar" | "message";
-const PROFILE = SALES_BOOKING_SENDER_LINES.marnin.profile;
 /** The engine profile for one booking person, or null for anyone else. */
 function resourceProfile(resourceId: unknown): string | null {
   return typeof resourceId === "string" &&
@@ -500,9 +504,9 @@ export async function salesBookingApprovalWriteAction(args: {
     week: string,
   ) => Promise<SalesBookingReadResponse>;
   /** The opportunity's current GHL assignee (live, not the cached roster). */
-  readOpportunityOwnership?: (
-    opportunityId: string,
-  ) => Promise<SalesBookingOpportunityOwnership>;
+  readOpportunityOwnership?: OwnershipReader;
+  /** The booking routes table; absent (tests) means the seed routes. */
+  readRoutes?: () => Promise<SalesBookingRoute[]>;
   now?: () => Date;
   envGet?: SalesBookingEnvGet;
 }): Promise<{ ok: true; approval: BookingApprovalRecord }> {
@@ -519,14 +523,11 @@ export async function salesBookingApprovalWriteAction(args: {
     !obj(snapshot) || !["calendar", "message"].includes(snapshot.step) ||
     !["approved", "refused"].includes(decision)
   ) fail("invalid_independent_approval", 400);
-  // The owner approves texts for each booking person on their own profile.
-  // Calendar approvals remain restricted to the Stratco profile.
+  // The owner approves texts and visits for each booking person on their
+  // own profile; a visit must go into the lead's booking route.
   const profile = resourceProfile(snapshot.resource);
   if (!profile || snapshot.profile !== profile) {
     fail("booking_profile_required", 400);
-  }
-  if (snapshot.step === "calendar" && snapshot.profile !== PROFILE) {
-    fail("stratco_profile_required", 400);
   }
   if (decision === "refused" && (!nonempty(reason) || reason.length > 1000)) {
     fail("refusal_reason_required", 400);
@@ -552,17 +553,44 @@ export async function salesBookingApprovalWriteAction(args: {
   ) fail("current_booking_model_required");
   // The lead must be this person's in GHL right now, read live: a lead
   // assigned to someone else never takes this person's path or line.
+  let route: SalesBookingRoute | null = null;
   if (decision === "approved") {
-    await assertLeadBelongsToResource(
+    let routes: readonly SalesBookingRoute[];
+    try {
+      routes = args.readRoutes
+        ? await args.readRoutes()
+        : SALES_BOOKING_SEED_ROUTES;
+    } catch {
+      fail("booking_routes_unreadable");
+    }
+    const ownership = await assertLeadBelongsToResource(
       args.readOpportunityOwnership,
       row.opportunity_id,
       snapshot.resource,
+      routes,
+      snapshot.step === "calendar",
     );
+    if (snapshot.step === "calendar") {
+      const decided = salesBookingRouteFor(ownership, routes);
+      if (!decided.ok) fail(decided.reason);
+      if (decided.route.person !== snapshot.resource) {
+        fail("booking_route_other_person");
+      }
+      route = decided.route;
+    }
   }
   const expected = bookingApprovalSnapshot(response, row, snapshot.step);
   if (canonicalBookingJson(snapshot) !== canonicalBookingJson(expected)) {
     fail("approval_snapshot_changed");
   }
+  // An approved engine visit must go into the calendar the lead's route
+  // books into, for that route's person.
+  if (
+    decision === "approved" && snapshot.step === "calendar" &&
+    (!route || expected.content?.calendar_id !== route.calendar_id ||
+      expected.content?.assigned_user_id !==
+        SALES_BOOKING_SENDER_LINES[route.person]?.ghl_user_id)
+  ) fail("booking_route_calendar_mismatch");
   if (
     !hashPattern.test(snapshot.content_hash ?? "") ||
     await bookingContentHash(expected) !== snapshot.content_hash
@@ -689,26 +717,36 @@ export async function salesBookingApprovalWriteAction(args: {
 /** Refuse unless the opportunity's live GHL ownership (assignee, or an
  * unassigned lead's kind) makes it `resource`'s lead (sales_booking_read.ts
  * `salesBookingLeadBelongsTo`). */
+export type OwnershipReader = (
+  opportunityId: string,
+  options?: { routes: readonly SalesBookingRoute[]; forRoute: boolean },
+) => Promise<SalesBookingOpportunityOwnership>;
+
+/** The live ownership read, when it makes the lead `resource`'s. */
 export async function assertLeadBelongsToResource(
-  readOpportunityOwnership:
-    | ((opportunityId: string) => Promise<SalesBookingOpportunityOwnership>)
-    | undefined,
+  readOpportunityOwnership: OwnershipReader | undefined,
   opportunityId: string | null | undefined,
   resource: string,
-): Promise<void> {
+  routes: readonly SalesBookingRoute[] = SALES_BOOKING_SEED_ROUTES,
+  forRoute = false,
+): Promise<SalesBookingOpportunityOwnership> {
   if (!readOpportunityOwnership || !opportunityId) {
     fail("opportunity_assignment_unreadable");
   }
   let ownership: SalesBookingOpportunityOwnership;
   try {
-    ownership = await readOpportunityOwnership(opportunityId);
+    ownership = await readOpportunityOwnership(opportunityId, {
+      routes,
+      forRoute,
+    });
   } catch {
     fail("opportunity_assignment_unreadable");
   }
   if (ownership.kindUnread) fail("opportunity_assignment_unreadable");
-  const belonging = salesBookingLeadBelongsTo(ownership, resource);
+  const belonging = salesBookingLeadBelongsTo(ownership, resource, routes);
   if (belonging === "no") fail("lead_assigned_to_someone_else");
   if (belonging === "owner_unclear") fail("owner_unclear");
+  return ownership;
 }
 
 /** `sales_booking_approval_write`: an `owner_input` body is an

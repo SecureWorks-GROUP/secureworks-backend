@@ -29,9 +29,11 @@ import {
 } from "./sales_booking_read.ts";
 import {
   type GhlDirectory,
+  offerHoldsPersonTime,
   OWNER_OFFER_CENSUS_DAYS,
   ownerVisitTiming,
   perthIso,
+  SALES_BOOKING_VISIT_RULEBOOKS,
   STRATCO_BOOKING_RULEBOOK,
   type SystemOfferCensus,
   systemOfferCensus,
@@ -87,30 +89,33 @@ export const SALES_BOOKING_AVAILABILITY_PEOPLE: Readonly<
     system_offers: true,
     rules_source: STRATCO_BOOKING_RULEBOOK.source,
   },
+  // Nithin and Khairo: their own visit rulebooks (the approval reads the
+  // same ones). This system can now offer their visits too, so their open
+  // offers count.
   nithin: {
     name: "Nithin",
-    ghl_user_id: "ERAycY7r6KZ8OA66WQCy",
-    roster_emails: ["nithin@secureworkswa.com.au", "nithinsilas@outlook.com"],
-    days: ["Mon", "Tue", "Thu", "Fri"],
-    day_start: "08:00",
-    day_end: "16:30",
-    weekday_start: { Mon: "12:00" },
-    max_per_day: 5,
-    protected_bands: [],
-    system_offers: false,
+    ghl_user_id: SALES_BOOKING_VISIT_RULEBOOKS.nithin.assigned_user_id,
+    roster_emails: SALES_BOOKING_VISIT_RULEBOOKS.nithin.roster_emails,
+    days: SALES_BOOKING_VISIT_RULEBOOKS.nithin.days,
+    day_start: SALES_BOOKING_VISIT_RULEBOOKS.nithin.day_start,
+    day_end: SALES_BOOKING_VISIT_RULEBOOKS.nithin.day_end,
+    weekday_start: SALES_BOOKING_VISIT_RULEBOOKS.nithin.weekday_start,
+    max_per_day: SALES_BOOKING_VISIT_RULEBOOKS.nithin.max_per_day,
+    protected_bands: SALES_BOOKING_VISIT_RULEBOOKS.nithin.protected_bands,
+    system_offers: true,
     rules_source: "secureworks-wiki profiles/patio-nithin.json",
   },
   khairo: {
     name: "Khairo",
-    ghl_user_id: "RgDWTnYL6zL3eJA6nLht",
-    roster_emails: ["khairo@secureworkswa.com.au", "khairopomare@outlook.com"],
-    days: ["Mon", "Tue", "Wed", "Thu", "Fri"],
-    day_start: "08:00",
-    day_end: "16:30",
-    weekday_start: {},
-    max_per_day: 6,
-    protected_bands: [],
-    system_offers: false,
+    ghl_user_id: SALES_BOOKING_VISIT_RULEBOOKS.khairo.assigned_user_id,
+    roster_emails: SALES_BOOKING_VISIT_RULEBOOKS.khairo.roster_emails,
+    days: SALES_BOOKING_VISIT_RULEBOOKS.khairo.days,
+    day_start: SALES_BOOKING_VISIT_RULEBOOKS.khairo.day_start,
+    day_end: SALES_BOOKING_VISIT_RULEBOOKS.khairo.day_end,
+    weekday_start: SALES_BOOKING_VISIT_RULEBOOKS.khairo.weekday_start,
+    max_per_day: SALES_BOOKING_VISIT_RULEBOOKS.khairo.max_per_day,
+    protected_bands: SALES_BOOKING_VISIT_RULEBOOKS.khairo.protected_bands,
+    system_offers: true,
     rules_source: "secureworks-wiki profiles/fencing-khairo.json",
   },
 });
@@ -502,7 +507,11 @@ export function computeSalesBookingAvailability(
       `system_offers_unreadable: ${input.census.reason}`,
     );
   } else {
-    const live = input.census.value.offers;
+    // Only offers that hold this person's time (another person's offer is
+    // their own diary's business).
+    const live = input.census.value.offers.filter((o) =>
+      offerHoldsPersonTime(o, input.resource)
+    );
     commitments = live.map((o) => ({
       id: o.binding_hash,
       contact_id: o.contact_id,

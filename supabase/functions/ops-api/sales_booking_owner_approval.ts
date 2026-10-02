@@ -1,9 +1,12 @@
 /** Owner-authored booking approvals: no engine publish needed.
  *
- * Marnin's Stratco leads take a text or a visit under the Stratco rulebook.
- * Nithin's and Khairo's leads take a text only (no offered slot, no visit):
- * their visits are not booked here. Every text goes from the visit person's
- * own line (sales_booking_sender.ts).
+ * Every booking person's leads take a text or a visit under that person's
+ * own visit rulebook (`SALES_BOOKING_VISIT_RULEBOOKS`). A visit, or a text
+ * that offers a slot, needs the lead's booking route
+ * (sales_booking_routes.ts): the route names the person and the GHL calendar
+ * the visit is booked into, read from the routes table at the press. No
+ * route, no visit. Every text goes from the visit person's own line
+ * (sales_booking_sender.ts).
  *
  * The owner writes or edits a text, or picks a visit (day, arrival window,
  * visit end), on the booking screen. `sales_booking_approval_write` with an
@@ -55,6 +58,12 @@ import {
   salesBookingSenderFor,
 } from "./sales_booking_sender.ts";
 import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
+import {
+  SALES_BOOKING_ROUTE_MESSAGES,
+  SALES_BOOKING_SEED_ROUTES,
+  type SalesBookingRoute,
+} from "./sales_booking_routes.ts";
+import { salesBookingRouteFor } from "./sales_booking_read.ts";
 
 export const OWNER_APPROVAL_VERSION = "owner-authored-v1";
 const SCHEMA = "scope-booking-approval.v1";
@@ -110,7 +119,131 @@ export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
     scoper_email: "marnin@secureworkswa.com.au",
   }),
 });
-const RULES = STRATCO_BOOKING_RULEBOOK;
+
+/** One booking person's visit rules. Days and hours are each wiki profile's
+ * own (`secureworks-scope-booking/profiles/*.json`, read 24 Sep 2026); the
+ * arrival window, on-site length and travel are the owner's 24 Sep rule, the
+ * same for everyone. The calendar is not here: it is the lead's booking
+ * route. */
+export interface OwnerVisitRulebook {
+  profile: string;
+  resource: string;
+  source: string;
+  timezone: string;
+  utc_offset: string;
+  days: readonly string[];
+  day_start: string;
+  day_end: string;
+  /** A later first arrival on some weekdays (`Mon: "12:00"`). */
+  weekday_start: Readonly<Record<string, string>>;
+  window_min_minutes: number;
+  window_max_minutes: number;
+  visit_minutes: number;
+  travel_buffer_minutes: number;
+  max_per_day: number;
+  protected_bands: ReadonlyArray<
+    { weekday: string; start: string; end: string; label: string }
+  >;
+  sender: string;
+  /** GHL user the visit is booked for. */
+  assigned_user_id: string;
+  /** Addresses that name this person in the GHL user directory. */
+  roster_emails: readonly string[];
+}
+
+const SHARED_VISIT_RULES = {
+  timezone: STRATCO_BOOKING_RULEBOOK.timezone,
+  utc_offset: STRATCO_BOOKING_RULEBOOK.utc_offset,
+  window_min_minutes: STRATCO_BOOKING_RULEBOOK.window_min_minutes,
+  window_max_minutes: STRATCO_BOOKING_RULEBOOK.window_max_minutes,
+  visit_minutes: STRATCO_BOOKING_RULEBOOK.visit_minutes,
+  travel_buffer_minutes: STRATCO_BOOKING_RULEBOOK.travel_buffer_minutes,
+} as const;
+
+export const SALES_BOOKING_VISIT_RULEBOOKS: Readonly<
+  Record<string, Readonly<OwnerVisitRulebook>>
+> = Object.freeze({
+  marnin: Object.freeze({
+    ...SHARED_VISIT_RULES,
+    profile: STRATCO_BOOKING_RULEBOOK.profile,
+    resource: "marnin",
+    source: STRATCO_BOOKING_RULEBOOK.source,
+    days: STRATCO_BOOKING_RULEBOOK.days,
+    day_start: STRATCO_BOOKING_RULEBOOK.day_start,
+    day_end: STRATCO_BOOKING_RULEBOOK.day_end,
+    weekday_start: Object.freeze({}),
+    max_per_day: STRATCO_BOOKING_RULEBOOK.max_per_day,
+    protected_bands: STRATCO_BOOKING_RULEBOOK.protected_bands,
+    sender: SALES_BOOKING_SENDER_LINES.marnin.line,
+    assigned_user_id: SALES_BOOKING_SENDER_LINES.marnin.ghl_user_id,
+    roster_emails: Object.freeze([
+      STRATCO_BOOKING_RULEBOOK.calendar.scoper_email,
+    ]),
+  }),
+  khairo: Object.freeze({
+    ...SHARED_VISIT_RULES,
+    profile: SALES_BOOKING_SENDER_LINES.khairo.profile,
+    resource: "khairo",
+    source:
+      "secureworks-wiki harness/ops/skills/secureworks-scope-booking/profiles/fencing-khairo.json",
+    days: Object.freeze(["Mon", "Tue", "Wed", "Thu", "Fri"]),
+    day_start: "08:00",
+    day_end: "16:30",
+    weekday_start: Object.freeze({}),
+    max_per_day: 6,
+    protected_bands: Object.freeze([]),
+    sender: SALES_BOOKING_SENDER_LINES.khairo.line,
+    assigned_user_id: SALES_BOOKING_SENDER_LINES.khairo.ghl_user_id,
+    roster_emails: Object.freeze([
+      "khairo@secureworkswa.com.au",
+      "khairopomare@outlook.com",
+    ]),
+  }),
+  nithin: Object.freeze({
+    ...SHARED_VISIT_RULES,
+    profile: SALES_BOOKING_SENDER_LINES.nithin.profile,
+    resource: "nithin",
+    source:
+      "secureworks-wiki harness/ops/skills/secureworks-scope-booking/profiles/patio-nithin.json",
+    days: Object.freeze(["Mon", "Tue", "Thu", "Fri"]),
+    day_start: "08:00",
+    day_end: "16:30",
+    weekday_start: Object.freeze({ Mon: "12:00" }),
+    max_per_day: 5,
+    protected_bands: Object.freeze([]),
+    sender: SALES_BOOKING_SENDER_LINES.nithin.line,
+    assigned_user_id: SALES_BOOKING_SENDER_LINES.nithin.ghl_user_id,
+    roster_emails: Object.freeze([
+      "nithin@secureworkswa.com.au",
+      "nithinsilas@outlook.com",
+    ]),
+  }),
+});
+const MARNIN_RULES = SALES_BOOKING_VISIT_RULEBOOKS.marnin;
+/** The seed Stratco route: the default target for callers with no route. */
+const SALES_BOOKING_SEED_MARNIN = SALES_BOOKING_SEED_ROUTES[0];
+
+/** A visit's GHL target: the route's calendar, booked for its person. */
+export interface OwnerCalendarTarget {
+  calendar_id: string;
+  calendar_name: string | null;
+  route_id: string;
+  assigned_user_id: string;
+  roster_emails: readonly string[];
+}
+
+export function ownerCalendarTarget(
+  route: SalesBookingRoute,
+): OwnerCalendarTarget {
+  const rules = SALES_BOOKING_VISIT_RULEBOOKS[route.person];
+  return {
+    calendar_id: route.calendar_id,
+    calendar_name: route.calendar_name,
+    route_id: route.id,
+    assigned_user_id: rules.assigned_user_id,
+    roster_emails: rules.roster_emails,
+  };
+}
 
 /** A named refusal. `detail` goes back to the screen beside the reason.
  * Extends Error, not SalesBookingPackError: sales_booking_pack imports the
@@ -184,20 +317,26 @@ type CheckedVisit = OwnerVisit & {
   date: string;
 };
 
-export function ownerVisitTiming(start: number, windowMinutes: number) {
+export function ownerVisitTiming(
+  start: number,
+  windowMinutes: number,
+  rules: OwnerVisitRulebook = MARNIN_RULES,
+) {
   if (
     !Number.isFinite(windowMinutes) ||
-    windowMinutes < RULES.window_min_minutes ||
-    windowMinutes > RULES.window_max_minutes
+    windowMinutes < rules.window_min_minutes ||
+    windowMinutes > rules.window_max_minutes
   ) return null;
   const windowEnd = start + windowMinutes * 60_000;
-  return { windowEnd, end: windowEnd + RULES.visit_minutes * 60_000 };
+  return { windowEnd, end: windowEnd + rules.visit_minutes * 60_000 };
 }
 
-/** Rulebook-only checks, in the order a refusal is reported. No reads. */
+/** Rulebook-only checks, in the order a refusal is reported. No reads.
+ * `rules`: the visit person's own rulebook (Marnin's when omitted). */
 export function checkOwnerVisitRules(
   visit: unknown,
   now: Date,
+  rules: OwnerVisitRulebook = MARNIN_RULES,
 ): CheckedVisit {
   if (!obj(visit)) refuse("owner_visit_required", null, 400);
   const start = perthInstant(visit.window_start_iso);
@@ -217,16 +356,16 @@ export function checkOwnerVisitRules(
     refuse("owner_visit_spans_days");
   }
   const day = perthWeekday(start.ms);
-  if (!RULES.days.includes(day)) {
-    refuse("owner_visit_day_not_permitted", { day, days: [...RULES.days] });
+  if (!rules.days.includes(day)) {
+    refuse("owner_visit_day_not_permitted", { day, days: [...rules.days] });
   }
   const windowMinutes = (windowEnd.ms - start.ms) / 60_000;
-  const timing = ownerVisitTiming(start.ms, windowMinutes);
+  const timing = ownerVisitTiming(start.ms, windowMinutes, rules);
   if (!timing) {
     refuse("owner_visit_window_length", {
       minutes: windowMinutes,
-      min: RULES.window_min_minutes,
-      max: RULES.window_max_minutes,
+      min: rules.window_min_minutes,
+      max: rules.window_max_minutes,
     });
   }
   if (!(end.ms > windowEnd.ms)) {
@@ -234,21 +373,22 @@ export function checkOwnerVisitRules(
   }
   if (end.ms < timing.end) {
     refuse("owner_visit_too_short", {
-      visit_minutes_after_latest_arrival: RULES.visit_minutes,
+      visit_minutes_after_latest_arrival: rules.visit_minutes,
     });
   }
+  const dayStart = rules.weekday_start[day] ?? rules.day_start;
   if (
-    start.ms < atPerth(date, RULES.day_start) ||
-    end.ms > atPerth(date, RULES.day_end)
+    start.ms < atPerth(date, dayStart) ||
+    end.ms > atPerth(date, rules.day_end)
   ) {
     refuse("owner_visit_outside_hours", {
-      day_start: RULES.day_start,
-      day_end: RULES.day_end,
+      day_start: dayStart,
+      day_end: rules.day_end,
     });
   }
-  const gap = RULES.travel_buffer_minutes * 60_000;
+  const gap = rules.travel_buffer_minutes * 60_000;
   const occupiedStart = start.ms - gap, occupiedEnd = end.ms + gap;
-  for (const band of RULES.protected_bands) {
+  for (const band of rules.protected_bands) {
     if (band.weekday !== day) continue;
     if (
       overlaps(
@@ -280,6 +420,9 @@ export interface SystemOffer {
   end_iso: string;
   source: "system_text" | "booking_in_flight" | "owner_approval";
   binding_hash: string;
+  /** Booking person whose time the slot holds; null or absent when the
+   * record does not say (then it holds everyone's time). */
+  resource?: string | null;
 }
 export interface SystemOfferCensus {
   offers: SystemOffer[];
@@ -338,7 +481,23 @@ function ownerApprovalOffer(
     end_iso: finish.iso,
     source: "owner_approval",
     binding_hash: String(approval.binding_hash),
+    resource: approvalResource(approval),
   };
+}
+
+/** Whose time an approval's slot holds. */
+function approvalResource(approval: BookingObject | undefined): string | null {
+  const snap = obj(approval?.snapshot) ? approval!.snapshot : null;
+  const resource = text(approval?.resource) || text(snap?.resource);
+  return resource || null;
+}
+
+/** Whether a census offer holds this person's time. */
+export function offerHoldsPersonTime(
+  offer: SystemOffer,
+  resource: string,
+): boolean {
+  return offer.resource == null || offer.resource === resource;
 }
 
 /** Pure: executor press rows joined to the approvals they executed, plus
@@ -398,6 +557,7 @@ export function systemOfferCensus(
         end_iso: f.iso,
         source: "system_text",
         binding_hash: e.binding_hash,
+        resource: approvalResource(approval),
       });
     } else if (e.step === "calendar" && e.state === "claimed") {
       const claimed = bookingInstant(e.claimed_at);
@@ -411,6 +571,7 @@ export function systemOfferCensus(
         end_iso: String(content!.end_iso),
         source: "booking_in_flight",
         binding_hash: e.binding_hash,
+        resource: approvalResource(approval),
       });
     }
   }
@@ -437,24 +598,31 @@ export interface GhlDirectory {
   users: Array<{ id: string; email: string | null }>;
 }
 
-/** The rulebook target must be a live, active GHL calendar that holds the
- * owner's own GHL user, and that user must be his roster entry. */
-export function checkOwnerCalendarTarget(directory: GhlDirectory): string[] {
-  const target = RULES.calendar;
+/** The route's calendar must be a live, active GHL calendar that holds the
+ * visit person's own GHL user, and that user must be their roster entry.
+ * Marnin's Stratco target when omitted. */
+export function checkOwnerCalendarTarget(
+  directory: GhlDirectory,
+  target: OwnerCalendarTarget = ownerCalendarTarget(SALES_BOOKING_SEED_MARNIN),
+): string[] {
   const calendar = directory.calendars.find((c) => c.id === target.calendar_id);
-  const roster = directory.users.filter((u) => u.email === target.scoper_email);
+  const emails = new Set(target.roster_emails.map((e) => e.toLowerCase()));
+  const roster = directory.users.filter((u) =>
+    !!u.email && emails.has(u.email.toLowerCase())
+  );
   if (
     !calendar || calendar.is_active !== true ||
     !calendar.assignments_returned ||
     !calendar.assigned_user_ids.includes(target.assigned_user_id) ||
-    roster.length !== 1 || roster[0].id !== target.assigned_user_id
+    roster.length < 1 ||
+    roster.some((u) => u.id !== target.assigned_user_id)
   ) {
     refuse("owner_calendar_unknown", {
       calendar_id: target.calendar_id,
       assigned_user_id: target.assigned_user_id,
     });
   }
-  // Every calendar the owner is assigned to can hold one of his bookings.
+  // Every calendar the person is assigned to can hold one of their bookings.
   return directory.calendars.filter((c) =>
     c.is_active === true &&
     c.assigned_user_ids.includes(target.assigned_user_id)
@@ -463,13 +631,16 @@ export function checkOwnerCalendarTarget(directory: GhlDirectory): string[] {
 
 /** GHL events that hold the owner's time on the visit's day. Same filter as
  * the appointment writer: other assignees and cancelled rows do not block. */
-export function ghlBusyEvents(events: BookingObject[]): BookingObject[] {
+export function ghlBusyEvents(
+  events: BookingObject[],
+  assignedUserId: string = MARNIN_RULES.assigned_user_id,
+): BookingObject[] {
   const seen = new Set<string>();
   const out: BookingObject[] = [];
   for (const event of events) {
     if (
       event.assignedUserId &&
-      event.assignedUserId !== RULES.calendar.assigned_user_id
+      event.assignedUserId !== assignedUserId
     ) continue;
     if (["cancelled", "invalid"].includes(String(event.appointmentStatus))) {
       continue;
@@ -556,10 +727,16 @@ export interface OwnerApprovalDeps {
     job_site?: { address?: unknown; suburb?: unknown } | null;
   }>;
   readThread(contactId: string): Promise<SalesBookingMessage[]>;
-  /** The opportunity's current GHL assignee, read live; throws when unread. */
+  /** The opportunity's current GHL assignee, read live; throws when unread.
+   * `forRoute`: also read what its booking route needs (an assigned lead's
+   * source and tags), as for an unassigned one. */
   readOpportunityOwnership(
     opportunityId: string,
+    options?: { routes: readonly SalesBookingRoute[]; forRoute: boolean },
   ): Promise<SalesBookingOpportunityOwnership>;
+  /** The booking routes table, read at the press; throws when unreadable.
+   * Absent (tests): the seed routes. */
+  readRoutes?(): Promise<SalesBookingRoute[]>;
   /** Throws when either the calendars or the users read is incomplete. */
   readGhlDirectory(): Promise<GhlDirectory>;
   /** One complete GHL window read; throws when incomplete. */
@@ -592,7 +769,7 @@ export const HAND_SENT_TEXTS_NOTE =
   "Read the lead's thread for any time you offered by hand before approving.";
 
 type OwnerInput = {
-  /** Booking person whose lead this is; Marnin (Stratco) when omitted. */
+  /** Booking person whose lead this is; Marnin when omitted. */
   resource: string;
   step: BookingStep;
   case_id: string;
@@ -609,16 +786,12 @@ function parseOwnerInput(raw: unknown): OwnerInput {
     !obj(raw) || !["calendar", "message"].includes(raw.step) ||
     !text(raw.case_id) || !text(raw.contact_id) || !text(raw.week_start)
   ) refuse("invalid_owner_input", null, 400);
-  const resource = raw.resource === undefined ? RULES.resource : raw.resource;
+  const resource = raw.resource === undefined ? "marnin" : raw.resource;
   if (
     typeof resource !== "string" ||
-    !Object.hasOwn(SALES_BOOKING_SENDER_LINES, resource)
+    !Object.hasOwn(SALES_BOOKING_SENDER_LINES, resource) ||
+    !Object.hasOwn(SALES_BOOKING_VISIT_RULEBOOKS, resource)
   ) refuse("booking_profile_required", null, 400);
-  // Visits and offered slots follow the Stratco rulebook only.
-  if (
-    resource !== RULES.resource &&
-    (raw.step !== "message" || raw.offer != null)
-  ) refuse("stratco_profile_required", null, 400);
   if (raw.prepared_at != null && typeof raw.prepared_at !== "string") {
     refuse("invalid_owner_input", null, 400);
   }
@@ -727,32 +900,81 @@ export async function salesBookingOwnerApprovalAction(args: {
     refuse("booking_case_identity_ambiguous");
   }
 
+  const rules = SALES_BOOKING_VISIT_RULEBOOKS[input.resource];
   const checks: BookingObject = {
-    rulebook: RULES.source,
+    rulebook: rules.source,
     hand_sent_texts: "not_machine_checked",
     hand_sent_texts_note: HAND_SENT_TEXTS_NOTE,
   };
   const approving = dryRun || decision === "approved";
+  // A visit, or a text that offers one, is booked into the lead's route.
+  const needsRoute = input.step === "calendar" || input.offer != null;
+  let target: OwnerCalendarTarget | null = null;
   // Whose lead is it, read live: a lead assigned to someone else never takes
-  // this person's path or line.
-  if (approving) {
+  // this person's path or line. The routes table is read at the press.
+  if (approving || input.step === "calendar") {
+    let routes: readonly SalesBookingRoute[];
+    try {
+      routes = deps.readRoutes
+        ? await deps.readRoutes()
+        : SALES_BOOKING_SEED_ROUTES;
+    } catch {
+      refuse("booking_routes_unreadable", {
+        message: SALES_BOOKING_ROUTE_MESSAGES.booking_routes_unreadable,
+      });
+    }
     let ownership: SalesBookingOpportunityOwnership;
     try {
       if (!row.opportunity_id) throw new Error("no opportunity");
-      ownership = await deps.readOpportunityOwnership(row.opportunity_id);
+      ownership = await deps.readOpportunityOwnership(row.opportunity_id, {
+        routes,
+        forRoute: needsRoute,
+      });
     } catch {
       refuse("opportunity_assignment_unreadable");
     }
     if (ownership.kindUnread) refuse("opportunity_assignment_unreadable");
-    const belonging = salesBookingLeadBelongsTo(ownership, input.resource);
-    if (belonging === "no") {
+    if (needsRoute) {
+      const decision = salesBookingRouteFor(ownership, routes);
+      if (!decision.ok) {
+        refuse(decision.reason, {
+          resource: input.resource,
+          message: decision.message,
+          route_id: decision.route_id ?? null,
+        });
+      }
+      if (decision.route.person !== input.resource) {
+        refuse("booking_route_other_person", {
+          resource: input.resource,
+          route_id: decision.route.id,
+          route_person: decision.route.person,
+          message:
+            `This lead's booking rule gives it to ${decision.route.person}, not ${input.resource}.`,
+        });
+      }
+      target = ownerCalendarTarget(decision.route);
+      checks.route = {
+        route_id: decision.route.id,
+        person: decision.route.person,
+        calendar_id: decision.route.calendar_id,
+        calendar_name: decision.route.calendar_name,
+      };
+    }
+    const belonging = salesBookingLeadBelongsTo(
+      ownership,
+      input.resource,
+      routes,
+    );
+    // A refusal is recorded against the route; only an approval needs the
+    // lead to be this person's.
+    if (approving && belonging === "no") {
       refuse("lead_assigned_to_someone_else", {
         resource: input.resource,
         current_assignee: ownership.assignedTo,
         current_pipeline_id: ownership.pipelineId,
       });
     }
-    if (belonging === "owner_unclear") {
+    if (approving && belonging === "owner_unclear") {
       refuse("owner_unclear", { resource: input.resource });
     }
   }
@@ -788,7 +1010,9 @@ export async function salesBookingOwnerApprovalAction(args: {
       person: who.sender.person,
       name: who.sender.name,
     };
-    if (input.offer != null) visit = checkOwnerVisitRules(input.offer, now);
+    if (input.offer != null) {
+      visit = checkOwnerVisitRules(input.offer, now, rules);
+    }
     content = {
       text: t,
       sender: who.sender.line,
@@ -803,7 +1027,7 @@ export async function salesBookingOwnerApprovalAction(args: {
         : null,
     };
   } else {
-    visit = checkOwnerVisitRules(input.visit, now);
+    visit = checkOwnerVisitRules(input.visit, now, rules);
     const name = ownerClientName(lead.contact);
     if (!name) refuse("contact_name_missing");
     if (
@@ -818,10 +1042,11 @@ export async function salesBookingOwnerApprovalAction(args: {
     if (!site) refuse("contact_suburb_missing");
     const address = site.address;
     checks.address_street_source = site.street_source;
+    if (!target) refuse("booking_route_missing");
     content = {
       provider: "ghl",
-      calendar_id: RULES.calendar.calendar_id,
-      assigned_user_id: RULES.calendar.assigned_user_id,
+      calendar_id: target.calendar_id,
+      assigned_user_id: target.assigned_user_id,
       start_iso: visit.window_start_iso,
       end_iso: visit.end_iso,
       window_start_iso: visit.window_start_iso,
@@ -907,6 +1132,7 @@ export async function salesBookingOwnerApprovalAction(args: {
       checks.thread = { read: true, messages: messages.length };
     }
     if (visit) {
+      if (!target) refuse("booking_route_missing");
       Object.assign(
         checks,
         await checkOwnerVisitAvailability(
@@ -916,6 +1142,8 @@ export async function salesBookingOwnerApprovalAction(args: {
           deps,
           response.cases,
           visitLocation,
+          rules,
+          target,
         ),
       );
     }
@@ -974,6 +1202,8 @@ async function checkOwnerVisitAvailability(
   deps: OwnerApprovalDeps,
   workspaceCases: SalesBookingCase[],
   visitLocation: string | null,
+  rules: OwnerVisitRulebook,
+  target: OwnerCalendarTarget,
 ): Promise<BookingObject> {
   let directory: GhlDirectory;
   try {
@@ -981,14 +1211,14 @@ async function checkOwnerVisitAvailability(
   } catch {
     refuse("owner_calendar_unreadable");
   }
-  const calendarIds = checkOwnerCalendarTarget(directory);
+  const calendarIds = checkOwnerCalendarTarget(directory, target);
   const dayStart = `${visit.date}T00:00:00+08:00`;
   const dayEnd = perthIso(Date.parse(dayStart) + 86_400_000);
   const batches: BookingObject[][] = [];
   try {
     batches.push(
       await deps.readGhlEvents(
-        { userId: RULES.calendar.assigned_user_id },
+        { userId: target.assigned_user_id },
         dayStart,
         dayEnd,
       ),
@@ -998,7 +1228,7 @@ async function checkOwnerVisitAvailability(
         await deps.readGhlEvents(
           {
             calendarId,
-            userId: RULES.calendar.assigned_user_id,
+            userId: target.assigned_user_id,
           },
           dayStart,
           dayEnd,
@@ -1008,15 +1238,16 @@ async function checkOwnerVisitAvailability(
   } catch {
     refuse("ghl_calendar_unreadable");
   }
-  const events = ghlBusyEvents(batches.flat());
+  const events = ghlBusyEvents(batches.flat(), target.assigned_user_id);
   let blocked: BookingObject[];
   try {
     blocked = ghlBusyEvents(
       await deps.readGhlBlockedSlots(
-        RULES.calendar.assigned_user_id,
+        target.assigned_user_id,
         dayStart,
         dayEnd,
       ),
+      target.assigned_user_id,
     );
   } catch {
     refuse("ghl_blocked_slots_unreadable");
@@ -1024,12 +1255,13 @@ async function checkOwnerVisitAvailability(
 
   let outlook: OutlookRead;
   try {
-    outlook = await deps.readOutlook(RULES.resource, dayStart, dayEnd);
+    outlook = await deps.readOutlook(rules.resource, dayStart, dayEnd);
   } catch {
     outlook = { ok: false, reason: "outlook_read_failed" };
   }
   if (!outlook.ok) refuse("outlook_unreadable", { reason: outlook.reason });
   const others = census.offers.filter((o) => {
+    if (!offerHoldsPersonTime(o, rules.resource)) return false;
     if (perthDate(bookingInstant(o.start_iso)) !== visit.date) return false;
     if (o.contact_id !== row.contact_id) return true;
     if (o.source !== "owner_approval") return false;
@@ -1178,17 +1410,17 @@ async function checkOwnerVisitAvailability(
       .map((o) => o.contact_id),
   );
   const dayCount = events.length + offeredThatDay.size + 1;
-  if (dayCount > RULES.max_per_day) {
+  if (dayCount > rules.max_per_day) {
     refuse("daily_capacity_reached", {
       ghl_events: events.length,
       open_offers: offeredThatDay.size,
-      max_per_day: RULES.max_per_day,
+      max_per_day: rules.max_per_day,
     });
   }
   return {
     ghl: {
-      calendar_id: RULES.calendar.calendar_id,
-      assigned_user_id: RULES.calendar.assigned_user_id,
+      calendar_id: target.calendar_id,
+      assigned_user_id: target.assigned_user_id,
       calendars_read: calendarIds,
       events_that_day: events.length,
       clashes: 0,
@@ -1197,10 +1429,10 @@ async function checkOwnerVisitAvailability(
     occupied: {
       start_iso: perthIso(visit.start),
       end_iso: perthIso(visit.end),
-      on_site_minutes: RULES.visit_minutes,
+      on_site_minutes: rules.visit_minutes,
       travel: "computed_per_neighbour",
       travel_model: SALES_BOOKING_TRAVEL_MODEL.version,
-      travel_buffer_minutes: RULES.travel_buffer_minutes,
+      travel_buffer_minutes: rules.travel_buffer_minutes,
     },
     day_count_with_this_visit: dayCount,
     offer_clashes: 0,
@@ -1220,48 +1452,69 @@ function eventSummary(e: BookingObject) {
 // ── Read composition ──────────────────────────────────────────────────────
 
 /** Next permitted visit dates (Perth), for the owner's day choice. */
-export function ownerBookableDates(now: Date, horizonDays = 14): string[] {
+export function ownerBookableDates(
+  now: Date,
+  horizonDays = 14,
+  rules: OwnerVisitRulebook = MARNIN_RULES,
+): string[] {
   const out: string[] = [];
   const today = perthDate(now.getTime());
   for (let i = 0; i < horizonDays; i++) {
     const noon = Date.parse(`${today}T12:00:00+08:00`) + i * 86_400_000;
     const date = perthDate(noon);
-    if (!RULES.days.includes(perthWeekday(noon))) continue;
+    if (!rules.days.includes(perthWeekday(noon))) continue;
     // A day whose last possible arrival has passed is not offered.
-    const lastArrival = atPerth(date, RULES.day_end) -
-      RULES.visit_minutes * 60_000;
+    const lastArrival = atPerth(date, rules.day_end) -
+      rules.visit_minutes * 60_000;
     if (lastArrival > now.getTime()) out.push(date);
   }
   return out;
 }
 
-export function ownerRulebookView(now: Date): BookingObject {
+/** One person's visit rules as the screen shows them. `calendar`: the
+ * calendar their first enabled route books into, or null when no route names
+ * them (each lead's own route is on its `owner_booking.route`). */
+export function ownerRulebookView(
+  now: Date,
+  rules: OwnerVisitRulebook = MARNIN_RULES,
+  route: SalesBookingRoute | null = SALES_BOOKING_SEED_MARNIN,
+): BookingObject {
   return {
-    profile: RULES.profile,
-    source: RULES.source,
-    timezone: RULES.timezone,
-    utc_offset: RULES.utc_offset,
-    days: [...RULES.days],
-    bookable_dates: ownerBookableDates(now),
-    day_start: RULES.day_start,
-    day_end: RULES.day_end,
-    window_min_minutes: RULES.window_min_minutes,
-    window_max_minutes: RULES.window_max_minutes,
-    visit_minutes: RULES.visit_minutes,
-    travel_buffer_minutes: RULES.travel_buffer_minutes,
+    profile: rules.profile,
+    source: rules.source,
+    timezone: rules.timezone,
+    utc_offset: rules.utc_offset,
+    days: [...rules.days],
+    bookable_dates: ownerBookableDates(now, 14, rules),
+    day_start: rules.day_start,
+    day_end: rules.day_end,
+    weekday_start: { ...rules.weekday_start },
+    window_min_minutes: rules.window_min_minutes,
+    window_max_minutes: rules.window_max_minutes,
+    visit_minutes: rules.visit_minutes,
+    travel_buffer_minutes: rules.travel_buffer_minutes,
     travel: { ...SALES_BOOKING_TRAVEL_MODEL },
-    max_per_day: RULES.max_per_day,
-    protected_bands: RULES.protected_bands.map((b) => ({ ...b })),
-    sender: RULES.sender,
-    calendar: { ...RULES.calendar },
+    max_per_day: rules.max_per_day,
+    protected_bands: rules.protected_bands.map((b) => ({ ...b })),
+    sender: rules.sender,
+    calendar: route
+      ? {
+        provider: "ghl",
+        calendar_id: route.calendar_id,
+        calendar_name: route.calendar_name,
+        assigned_user_id: rules.assigned_user_id,
+        route_id: route.id,
+      }
+      : null,
   };
 }
 
 /** Live owner-authored approval rows, newest first, or throws. */
 export type OwnerApprovalReader = (
   sinceIso: string,
-  /** Booking person whose approvals to read; Marnin when omitted. */
-  resource?: string,
+  /** Booking person whose approvals to read; Marnin when omitted, every
+   * person when null. */
+  resource?: string | null,
 ) => Promise<BookingApprovalRecord[]>;
 
 /** Adds `owner_booking` to every case and `owner_approval_write` to the flow. */
@@ -1271,12 +1524,13 @@ export async function applyOwnerBooking(
   now = new Date(),
 ): Promise<SalesBookingReadResponse> {
   const result = structuredClone(response);
-  const stratco = result.resource.resource_id === RULES.resource;
-  // Nithin and Khairo take owner-authored texts too (no visit, no slot).
+  // Every booking person takes owner-authored texts and, where the lead has
+  // a booking route, visits under their own rulebook.
   const person = Object.hasOwn(
     SALES_BOOKING_SENDER_LINES,
     result.resource.resource_id,
-  );
+  ) &&
+    Object.hasOwn(SALES_BOOKING_VISIT_RULEBOOKS, result.resource.resource_id);
   let approvals: BookingApprovalRecord[] | null = null;
   let readError: string | null = null;
   if (person && readOwnerApprovals) {
@@ -1293,7 +1547,17 @@ export async function applyOwnerBooking(
   for (const row of result.cases) {
     counts.set(row.contact_id, (counts.get(row.contact_id) ?? 0) + 1);
   }
-  const rulebook = stratco ? ownerRulebookView(now) : null;
+  const routes = result.routing?.routes ?? SALES_BOOKING_SEED_ROUTES;
+  const personRoute =
+    routes.filter((r) => r.enabled && r.person === result.resource.resource_id)
+      .sort((a, b) => a.position - b.position)[0] ?? null;
+  const rulebook = person
+    ? ownerRulebookView(
+      now,
+      SALES_BOOKING_VISIT_RULEBOOKS[result.resource.resource_id],
+      personRoute,
+    )
+    : null;
   result.booking_flow = {
     ...result.booking_flow,
     owner_approval_write: person ? OWNER_APPROVAL_VERSION : null,
@@ -1337,8 +1601,15 @@ export async function applyOwnerBooking(
           : !person
           ? "booking_profile_required"
           : "booking_case_contact_ambiguous",
-        /** Which approvals this lead can take: a visit only on Stratco. */
-        steps: !eligible ? [] : stratco ? ["message", "calendar"] : ["message"],
+        /** Which approvals this lead can take: a visit only when the lead
+         * has a booking route (or its route is checked at approval). */
+        steps: !eligible
+          ? []
+          : row.booking_route?.state === "not_routed"
+          ? ["message"]
+          : ["message", "calendar"],
+        /** The lead's booking route, as the list read it. */
+        route: row.booking_route ?? null,
         engine_proposal: engineProposal,
         engine_window: engineProposal && obj(window)
           ? { start: window.start ?? null, end: window.end ?? null }

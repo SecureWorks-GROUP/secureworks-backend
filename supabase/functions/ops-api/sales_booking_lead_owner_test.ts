@@ -439,7 +439,7 @@ Deno.test("lead kind resolver: contact and calendar are read together; a failed 
   ]);
   assertEquals(
     await resolveSalesBookingLeadKind(lead("Website Enquiry"), {}),
-    { kind: "unclear", kindUnread: true, contact: null },
+    { kind: "unclear", kindUnread: true, contact: null, tags: null },
   );
 
   // A Stratco lead on its face needs no reads.
@@ -510,6 +510,7 @@ Deno.test("approval ownership read: a contact tag makes an unassigned lead Strat
       pipelineId: FENCING,
       kind: "normal",
       kindUnread: false,
+      tags: [],
     });
     contactTags = ["stratco"];
     calendarStatus = 500;

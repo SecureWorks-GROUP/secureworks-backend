@@ -72,8 +72,8 @@ const model = (): BookingObject => ({
     receipt: null,
     preview: {
       provider: "ghl",
-      calendar_id: "owner-calendar",
-      assigned_user_id: "owner-user",
+      calendar_id: "dEQKVKHthsjSYaen1fiE",
+      assigned_user_id: "3S20LGVTjsVYy9vTJ9wM",
       start: "2026-09-25T09:00:00+08:00",
       end: "2026-09-25T11:30:00+08:00",
       title: "Scope visit: Sample",
@@ -913,7 +913,7 @@ async function personFixture(resource: string, profile: string, line: string) {
   return response;
 }
 
-Deno.test("engine approval for Nithin and Khairo: a text on their own profile and line; a visit stays Stratco", async () => {
+Deno.test("engine approval for Nithin and Khairo: a text on their own profile and line; a visit only into their route's calendar", async () => {
   const people: Array<[string, string, string, string, string]> = [
     [
       "nithin",
@@ -957,14 +957,15 @@ Deno.test("engine approval for Nithin and Khairo: a text on their own profile an
       null,
     );
     assertEquals(records.size, 1);
-    // No visit approval for either of them here.
+    // A visit must go into their own route's calendar: an engine visit
+    // naming the STRATCO FENCING calendar is refused for either of them.
     await assertRejects(
       () =>
         salesBookingApprovalWriteAction(
           request(f, store, "calendar", ghlUser),
         ),
       Error,
-      "stratco_profile_required",
+      "booking_route_calendar_mismatch",
     );
     // Their lead approved with someone else's line records nothing.
     const g = await personFixture(resource, profile, "+61489267776");

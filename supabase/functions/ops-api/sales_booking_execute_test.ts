@@ -1,6 +1,10 @@
 // deno-lint-ignore-file no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import type { SalesBookingLeadKind } from "./sales_booking_sender.ts";
+import {
+  SALES_BOOKING_SENDER_LINES,
+  SALES_BOOKING_STRATCO_CALENDAR_ID,
+  type SalesBookingLeadKind,
+} from "./sales_booking_sender.ts";
 import {
   bookingContentHash,
   bookingHash,
@@ -68,8 +72,8 @@ async function approval(
 }
 const CALENDAR = {
   provider: "ghl",
-  calendar_id: "stratco-cal",
-  assigned_user_id: "marnin-ghl",
+  calendar_id: SALES_BOOKING_STRATCO_CALENDAR_ID,
+  assigned_user_id: SALES_BOOKING_SENDER_LINES.marnin.ghl_user_id,
   start_iso: "2026-09-25T09:00:00+08:00",
   end_iso: "2026-09-25T10:30:00+08:00",
   window_start_iso: "2026-09-25T09:00:00+08:00",
@@ -942,9 +946,18 @@ Deno.test("a missing published suburb refuses before GHL; a GHL-only person book
   assertEquals(f.calls.writer.length, 0);
   assertEquals(f.calls.claims, 0);
 
-  const patio = await approval("calendar", CALENDAR, {}, {
-    resource: "nithin",
-  });
+  const patio = await approval(
+    "calendar",
+    {
+      ...CALENDAR,
+      calendar_id: "RSQnT8cQdEE8azb5Chlq",
+      assigned_user_id: SALES_BOOKING_SENDER_LINES.nithin.ghl_user_id,
+    },
+    {},
+    {
+      resource: "nithin",
+    },
+  );
   const g = fakes([patio], LIVE);
   const result = await book(g, patio.binding_hash);
   assertEquals(
@@ -960,13 +973,23 @@ Deno.test("a missing published suburb refuses before GHL; a GHL-only person book
 
   // Khairo's Outlook is READ into the booking week (25 Sep 2026), but the
   // mirror still writes Marnin only: reading someone is not writing to them.
-  const khairo = await approval("calendar", CALENDAR, {}, {
-    resource: "khairo",
-    scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
-    id: "opp:khairo-lead",
-    profile: "fencing-khairo",
-  });
+  const khairo = await approval(
+    "calendar",
+    {
+      ...CALENDAR,
+      calendar_id: "i6j9vaCy6c94n3i93cir",
+      assigned_user_id: SALES_BOOKING_SENDER_LINES.khairo.ghl_user_id,
+    },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
   const k = fakes([khairo], LIVE);
+  k.setOpportunityKind("normal");
   const khairoResult = await book(k, khairo.binding_hash);
   assertEquals(
     khairoResult.status === "booked" && khairoResult.outlook_mirror,
