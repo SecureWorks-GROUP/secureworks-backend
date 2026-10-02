@@ -30,5 +30,7 @@ drafts/
 # Generated Python cache from the local sales reporting SQL proof.
 tests/sales-performance/__pycache__/
 
+.p4-review-pg.*
+
 # Personal local Claude settings; never committed.
 .claude/settings.local.json
