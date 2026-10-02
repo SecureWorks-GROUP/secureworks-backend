@@ -1,19 +1,19 @@
+// JWT flag: --no-verify-jwt (callers send a header key, not a Supabase JWT; live v156 runs verify_jwt false)
+// Only the service-role key is accepted; see auth.ts.
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { refuseUnlessServiceKey } from './auth.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
-const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 
 const BLOCKED_KEYWORDS = ['insert', 'update', 'delete', 'drop', 'alter', 'create', 'truncate', 'grant', 'revoke', 'exec', 'execute']
 const MAX_ROWS = 1000
 
 serve(async (req: Request) => {
-  // Auth check
-  const apiKey = req.headers.get('x-api-key') || ''
-  if (apiKey !== SW_API_KEY && apiKey !== SUPABASE_SERVICE_KEY) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })
-  }
+  // Auth check: service-role key only
+  const refused = refuseUnlessServiceKey(req, SUPABASE_SERVICE_KEY)
+  if (refused) return refused
 
   if (req.method === 'OPTIONS') {
     return new Response('ok', {
