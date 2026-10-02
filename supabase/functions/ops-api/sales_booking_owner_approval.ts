@@ -51,6 +51,7 @@ import {
 } from "./sales_booking_travel.ts";
 import {
   SALES_BOOKING_SENDER_LINES,
+  SALES_BOOKING_STRATCO_CALENDAR_ID,
   salesBookingSenderFor,
 } from "./sales_booking_sender.ts";
 import type { SalesBookingOpportunityOwnership } from "./sales_booking_sender.ts";
@@ -103,7 +104,7 @@ export const STRATCO_BOOKING_RULEBOOK = Object.freeze({
   sender: SALES_BOOKING_SENDER_LINES.marnin.line,
   calendar: Object.freeze({
     provider: "ghl",
-    calendar_id: "dEQKVKHthsjSYaen1fiE",
+    calendar_id: SALES_BOOKING_STRATCO_CALENDAR_ID,
     calendar_name: "STRATCO FENCING",
     assigned_user_id: SALES_BOOKING_SENDER_LINES.marnin.ghl_user_id,
     scoper_email: "marnin@secureworkswa.com.au",
@@ -742,18 +743,17 @@ export async function salesBookingOwnerApprovalAction(args: {
     } catch {
       refuse("opportunity_assignment_unreadable");
     }
-    if (
-      !salesBookingLeadBelongsTo(
-        ownership.assignedTo,
-        input.resource,
-        ownership.pipelineId,
-      )
-    ) {
+    if (ownership.kindUnread) refuse("opportunity_assignment_unreadable");
+    const belonging = salesBookingLeadBelongsTo(ownership, input.resource);
+    if (belonging === "no") {
       refuse("lead_assigned_to_someone_else", {
         resource: input.resource,
         current_assignee: ownership.assignedTo,
         current_pipeline_id: ownership.pipelineId,
       });
+    }
+    if (belonging === "owner_unclear") {
+      refuse("owner_unclear", { resource: input.resource });
     }
   }
 

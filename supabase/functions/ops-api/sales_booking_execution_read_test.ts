@@ -605,6 +605,7 @@ function executorDeps(
       Promise.resolve({
         assignedTo: null,
         pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        kind: "stratco" as const,
       }),
     readOutlookLead: () =>
       Promise.resolve({

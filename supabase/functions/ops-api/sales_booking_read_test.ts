@@ -98,6 +98,8 @@ function opportunity(
     id: "opp-1",
     name: "Jane Smith",
     assignedTo: null,
+    // Unassigned fencing leads are Marnin's only when Stratco.
+    source: "Stratco lead allocation",
     pipelineStageId: MARNIN_SCOPE_STAGE,
     status: "open",
     updatedAt: "2026-09-15T01:00:00.000Z",
@@ -172,6 +174,7 @@ function deps(
       Promise.resolve({
         assignedTo: null,
         pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        kind: "stratco" as const,
       }),
     readThread: () => Promise.resolve([] as SalesBookingMessage[]),
     now: () => NOW,
@@ -1430,12 +1433,14 @@ Deno.test("the deps object handed to the runner exposes no write members", async
       "now",
       "persistRosterCache",
       "persistThreadFactsCache",
+      "readContactStratcoBooked",
       "readContacts",
       "readDiary",
       "readJobSites",
       "readOpportunities",
       "readOpportunityOwnership",
       "readOutlookDiary",
+      "readScopeCalendar",
       "readThread",
     ].sort(),
   );
@@ -3354,6 +3359,7 @@ Deno.test("budget-cut reads persist the cursor, resume, and recheck cached owner
       return Promise.resolve({
         assignedTo: SALES_BOOKING_SENDER_LINES.khairo.ghl_user_id,
         pipelineId: SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        kind: "stratco" as const,
       });
     },
   });
@@ -3409,6 +3415,7 @@ Deno.test("cached ownership is checked in both directions, including pipeline ch
         pipelineId: id === "patio-now"
           ? SALES_BOOKING_RESOURCES.nithin.pipeline_id
           : SALES_BOOKING_RESOURCES.marnin.pipeline_id,
+        kind: "stratco" as const,
       });
     },
   });

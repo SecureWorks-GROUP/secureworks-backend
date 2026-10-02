@@ -686,8 +686,9 @@ export async function salesBookingApprovalWriteAction(args: {
   return { ok: true, approval: written };
 }
 
-/** Refuse unless the opportunity's live GHL assignee makes it `resource`'s
- * lead (sales_booking_read.ts `salesBookingLeadBelongsTo`). */
+/** Refuse unless the opportunity's live GHL ownership (assignee, or an
+ * unassigned lead's kind) makes it `resource`'s lead (sales_booking_read.ts
+ * `salesBookingLeadBelongsTo`). */
 export async function assertLeadBelongsToResource(
   readOpportunityOwnership:
     | ((opportunityId: string) => Promise<SalesBookingOpportunityOwnership>)
@@ -704,15 +705,10 @@ export async function assertLeadBelongsToResource(
   } catch {
     fail("opportunity_assignment_unreadable");
   }
-  if (
-    !salesBookingLeadBelongsTo(
-      ownership.assignedTo,
-      resource,
-      ownership.pipelineId,
-    )
-  ) {
-    fail("lead_assigned_to_someone_else");
-  }
+  if (ownership.kindUnread) fail("opportunity_assignment_unreadable");
+  const belonging = salesBookingLeadBelongsTo(ownership, resource);
+  if (belonging === "no") fail("lead_assigned_to_someone_else");
+  if (belonging === "owner_unclear") fail("owner_unclear");
 }
 
 /** `sales_booking_approval_write`: an `owner_input` body is an

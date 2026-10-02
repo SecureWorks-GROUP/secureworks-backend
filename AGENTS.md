@@ -3881,7 +3881,17 @@ Only `sales_booking_book` / `sales_booking_send` act on an approval
 approval hash. Sender identity, current lead ownership, supported approval
 profiles and migration ordering are owned by
 `docs/sales-booking-confirmation-api.md` and `docs/sales-booking-executor.md`;
-`sales_booking_sender.ts` is the canonical people mapping. The GHL writer
+`sales_booking_sender.ts` is the canonical people mapping. Whose lead is ONE
+function, `salesBookingLeadBelongsTo` (read list, both approvals, send
+recheck): explicit GHL assignee wins, else patio Nithin and fencing by
+`salesBookingLeadKind` (Stratco Marnin, normal Khairo, neither held
+`owner_unclear` on Marnin's; signals owned by the confirmation doc). A
+possible Stratco lead never reaches Khairo's line; the ownership read must
+carry `kind`, and an unread kind refuses `opportunity_assignment_unreadable`,
+never a reassignment code. A lead
+booked in any scoper's GHL calendar carries `scope_appointment`
+(`sales_booking_scope_appointment.ts`), which is what takes it off every
+to-contact list on the screen. The GHL writer
 refuses any real write that lacks that
 executor's per-press claim, not just an approval
 (`docs/ghl-calendar-appointment-write.md`). After GHL holds the booking the

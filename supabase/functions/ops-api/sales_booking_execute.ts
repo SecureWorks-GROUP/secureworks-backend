@@ -871,8 +871,8 @@ export async function salesBookingSendAction(args: {
   ) return refused("text_already_in_thread");
 
   // The lead must still be this person's in GHL right now (its current
-  // assignee, or unassigned where their pipeline's unassigned leads are
-  // theirs). A lead moved to someone else never gets this person's line.
+  // assignee, or unassigned where `salesBookingLeadBelongsTo` gives it to
+  // them). A lead moved to someone else never gets this person's line.
   const approvedId = loaded.snapshot.id;
   const opportunityId =
     typeof approvedId === "string" && approvedId.startsWith("opp:")
@@ -885,18 +885,19 @@ export async function salesBookingSendAction(args: {
   } catch {
     return refused("opportunity_assignment_unreadable");
   }
-  if (
-    !salesBookingLeadBelongsTo(
-      ownership.assignedTo,
-      who.sender.person,
-      ownership.pipelineId,
-    )
-  ) {
+  if (ownership.kindUnread) {
+    return refused("opportunity_assignment_unreadable");
+  }
+  const belonging = salesBookingLeadBelongsTo(ownership, who.sender.person);
+  if (belonging === "no") {
     return refused("opportunity_assignee_changed", {
       person: who.sender.person,
       current_assignee: ownership.assignedTo,
       current_pipeline_id: ownership.pipelineId,
     });
+  }
+  if (belonging === "owner_unclear") {
+    return refused("owner_unclear", { person: who.sender.person });
   }
 
   const wouldSend = {
