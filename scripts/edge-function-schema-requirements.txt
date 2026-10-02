@@ -518,3 +518,5 @@ ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|tabl
 ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|table|monitored_mailbox_changes
 ops-api|supabase/migrations/20260924213000_context_email_capture_config.sql|function|set_monitored_mailbox
 ops-api|supabase/migrations/20260925040000_users_trade_sees_all_jobs.sql|column|users.trade_sees_all_jobs
+ops-api|supabase/migrations/20260925060000_job_parties_foundation.sql|function|link_site_jobs
+ops-api|supabase/migrations/20260925060000_job_parties_foundation.sql|table|job_site_links
