@@ -1,4 +1,4 @@
--- Pre-migration state for 20261002150000_exec_sql_revoke_public.
+-- Pre-migration state for 20261002180000_exec_sql_revoke_public.
 -- A stand-in for the live-only public.exec_sql(text): SECURITY DEFINER, owned
 -- by the migrating superuser, with the body and grants the 2 Oct read-only
 -- production check found (EXECUTE held by PUBLIC, anon, authenticated).

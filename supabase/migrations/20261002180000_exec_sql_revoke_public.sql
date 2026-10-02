@@ -17,7 +17,7 @@
 --
 -- On a database without exec_sql (fresh migration-only provisioning) this is
 -- a no-op. Rollback, only on the owner's word:
--- supabase/rollbacks/20261002150000_exec_sql_revoke_public_down.sql.
+-- supabase/rollbacks/20261002180000_exec_sql_revoke_public_down.sql.
 
 DO $exec_sql_revoke$
 DECLARE

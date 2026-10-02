@@ -1,4 +1,4 @@
--- Rollback for 20261002150000_exec_sql_revoke_public.sql.
+-- Rollback for 20261002180000_exec_sql_revoke_public.sql.
 -- Run ONLY on the owner's explicit word: it reopens exec_sql to the public
 -- anon key, which can then read every table as postgres.
 --
