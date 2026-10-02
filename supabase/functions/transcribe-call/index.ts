@@ -6,7 +6,7 @@ import { sourceTime } from "../_shared/source_time.ts";
 // Receives a call recording URL, downloads the audio, stores it in the
 // evidence-audio bucket, calls OpenAI Whisper API for transcription,
 // and writes the transcript to the spine via recordEvidence with
-// channel='call'. Transcript then flows to extraction_jobs and JARVIS.
+// channel='call'. The live context pass reads it from business_events.
 //
 // Trigger paths:
 //   1. ghl-webhook-receiver CallCompleted handler invokes us with the
@@ -220,8 +220,9 @@ serve(async (req) => {
     return jsonResponse({ ok: false, reason: `whisper call threw: ${(e as Error).message}` }, 502)
   }
 
-  // 4. Write transcript via recordEvidence. channel='call'. The local
-  //    extractor_eligible_channels override lets it flow to extraction_jobs.
+  // 4. Write transcript via recordEvidence. channel='call'. No extraction
+  //    queue row: the v1 extractor was retired on 21 Sep 2026 and the live
+  //    context pass reads the spine row directly.
   const match_method: MatchMethod = input.job_match_method || 'none'
   const channel: Channel = 'call'
   const safe_summary = transcript_text.slice(0, 280).replace(/\s+/g, ' ').trim()
@@ -238,13 +239,8 @@ serve(async (req) => {
       // inbox_events, job_events, ghl_conversation_cache. The synthetic
       // 'transcribed_call' table doesn't exist; using business_events as
       // source means the extractor re-reads our own spine row's payload.
-      // We can't know spine_event_id before recordEvidence runs, so we
-      // suppress its built-in enqueue (enqueueExtraction:false) and do
-      // the enqueue manually below, pointing source_id at the just-
-      // returned spine_event_id.
       source_table: 'business_events',
-      source_id,                                                    // placeholder; replaced post-insert
-      enqueueExtraction: false,
+      source_id,
       job_id: input.job_id || null,
       contact_id: input.contact_id || null,
       entity_type: input.job_id ? 'job' : 'contact',
@@ -293,40 +289,11 @@ serve(async (req) => {
       bypass_feature_flag: true,                                    // we already gated on evidence_transcript_capture above
       storage_client: sb.storage,
     })
-    // Manual extraction_jobs enqueue with source pointing at the spine
-    // row that recordEvidence just inserted. Idempotent via the
-    // (source_table, source_id, extractor_version) unique key.
-    let extraction_job_id: string | null = null
-    if (result.spine_row.job_id && await automationLaneEnabled(sb, "capture") && await automationLaneEnabled(sb, "extraction")) {
-      const { data: enqueueData, error: enqueueErr } = await sb
-        .from('extraction_jobs')
-        .insert({
-          job_id: result.spine_row.job_id,
-          source_table: 'business_events',
-          source_id: result.spine_event_id,
-          source_event_type: 'call.transcript_completed',
-          extractor_version: 'context-fact-extractor:v1',
-          priority: 5,
-          status: 'pending',
-          metadata: {
-            spine_event_id: result.spine_event_id,
-            channel: 'call',
-            direction,
-            transcript_chars: transcript_text.length,
-            provider: 'openai-whisper',
-          },
-        })
-        .select('id')
-      if (enqueueErr) {
-        console.warn('[transcribe-call] manual extraction enqueue failed (non-fatal):', enqueueErr.message)
-      } else if (enqueueData && enqueueData.length > 0) {
-        extraction_job_id = enqueueData[0].id
-      }
-    }
     return jsonResponse({
       ok: true,
       spine_event_id: result.spine_event_id,
-      extraction_job_id,
+      // The retired v1 queue is no longer written; key kept for response shape.
+      extraction_job_id: null,
       match_status: result.spine_row.match_status,
       audio_pointer: `evidence-audio://${audioPath}`,
       transcript_chars: transcript_text.length,

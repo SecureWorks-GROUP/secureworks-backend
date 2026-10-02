@@ -442,7 +442,7 @@ export async function resolveJobLinks(
   return links;
 }
 
-// ── facts, queue, conversation counts (batched, for coverage) ───────────────
+// ── facts, live reads, conversation counts (batched, for coverage) ─────────
 
 async function factsCountByJob(
   deps: InvoiceContextDeps,
@@ -475,35 +475,35 @@ async function factsCountByJob(
   return { counts, status: read.status };
 }
 
-export interface QueueSummary {
-  pending: number;
-  processing: number;
-  done: number;
-  skipped: number;
-  failed: number;
-  dead_letter: number;
-  skip_reasons: string[];
-  errors: string[];
+// The live context pass (Luna v2) records one context_extraction_runs row per
+// job, day and phase. Its last finished extraction run is the only honest
+// answer to "has this job been read". The retired v1 queue (extraction_jobs)
+// has had no worker since 21 Sep 2026, so its rows say nothing about today.
+export interface LiveRead {
+  status: "done" | "failed";
+  run_date: string;
+  error: string | null;
+  at: string;
 }
 
-async function queueByJob(
+async function liveReadByJob(
   client: any,
   jobIds: string[],
   warnings: string[],
-): Promise<{ queues: Map<string, QueueSummary>; status: SourceStatus }> {
-  const queues = new Map<string, QueueSummary>();
-  const read = await safeRead("extraction_jobs", async () => {
+): Promise<{ reads: Map<string, LiveRead>; status: SourceStatus }> {
+  const reads = new Map<string, LiveRead>();
+  const read = await safeRead("context_extraction_runs", async () => {
     const rows: any[] = [];
     for (const ids of chunk(jobIds)) {
       rows.push(
         ...await pageThrough(
-          "extraction_jobs",
+          "context_extraction_runs",
           () =>
-            client.from("extraction_jobs")
-              .select("id, job_id, status, skip_reason, error").in(
-                "job_id",
-                ids,
-              ),
+            client.from("context_extraction_runs")
+              .select("id, job_id, run_date, status, error, started_at, finished_at")
+              .eq("phase", "extraction")
+              .in("status", ["done", "failed"])
+              .in("job_id", ids),
           warnings,
         ),
       );
@@ -511,59 +511,36 @@ async function queueByJob(
     return rows;
   });
   for (const row of read.data || []) {
-    const q = queues.get(row.job_id) ??
-      {
-        pending: 0,
-        processing: 0,
-        done: 0,
-        skipped: 0,
-        failed: 0,
-        dead_letter: 0,
-        skip_reasons: [],
-        errors: [],
-      };
-    if (row.status in q) (q as any)[row.status] += 1;
-    if (
-      row.skip_reason && !q.skip_reasons.includes(row.skip_reason) &&
-      q.skip_reasons.length < 5
-    ) q.skip_reasons.push(row.skip_reason);
-    if (
-      row.status === "dead_letter" && row.error &&
-      !q.errors.includes(row.error) && q.errors.length < 3
-    ) q.errors.push(String(row.error).slice(0, 120));
-    queues.set(row.job_id, q);
+    if (!row.job_id || !row.run_date) continue;
+    const at = String(row.finished_at ?? row.started_at ?? row.run_date);
+    const prior = reads.get(row.job_id);
+    const key = `${row.run_date}|${at}`;
+    if (prior && `${prior.run_date}|${prior.at}` >= key) continue;
+    reads.set(row.job_id, {
+      status: row.status === "failed" ? "failed" : "done",
+      run_date: String(row.run_date),
+      error: row.error ? String(row.error).slice(0, 160) : null,
+      at,
+    });
   }
-  return { queues, status: read.status };
+  return { reads, status: read.status };
 }
 
-export function queueDetail(
-  q: QueueSummary | undefined,
-  queueReadOk = true,
+export function liveReadDetail(
+  r: LiveRead | undefined,
+  readOk = true,
 ): string {
-  // A failed queue read is not evidence of an empty queue. Saying
-  // "never_enqueued" there would assert something we did not read.
-  if (!queueReadOk) return "unknown (queue unreadable)";
-  if (!q) return "never_enqueued";
-  const parts: string[] = [];
-  if (q.pending) parts.push(`pending:${q.pending}`);
-  if (q.processing) parts.push(`processing:${q.processing}`);
-  if (q.done) parts.push(`done:${q.done}`);
-  if (q.skipped) {
-    parts.push(
-      `skipped:${q.skipped}${
-        q.skip_reasons.length ? ` (${q.skip_reasons.join(", ")})` : ""
-      }`,
-    );
+  // A failed run-record read is not evidence the job was never read.
+  if (!readOk) {
+    return "unknown whether the live context pass has read this job (its run record could not be read)";
   }
-  if (q.failed) parts.push(`failed:${q.failed}`);
-  if (q.dead_letter) {
-    parts.push(
-      `dead_letter:${q.dead_letter}${
-        q.errors.length ? ` (${q.errors.join("; ")})` : ""
-      }`,
-    );
+  if (!r) return "never read by the live context pass";
+  if (r.status === "failed") {
+    return `last read by the live context pass on ${r.run_date} failed${
+      r.error ? ` with: ${r.error}` : ""
+    }`;
   }
-  return parts.join(", ") || "never_enqueued";
+  return `last read by the live context pass on ${r.run_date}`;
 }
 
 interface ConversationCounts {
@@ -869,8 +846,8 @@ export async function invoiceContext(
   let job: any = null;
   let facts: any[] = [];
   let conversation: any[] = [];
-  let queue: QueueSummary | undefined;
-  let queueOk = true;
+  let liveRead: LiveRead | undefined;
+  let liveReadOk = true;
   let otherOpen: any[] = [];
   // Conversation presence is decided by the same batched counter the coverage
   // read uses, so the door and the coverage table can never disagree about
@@ -899,7 +876,7 @@ export async function invoiceContext(
         council,
         factsRead,
         convRead,
-        queueRead,
+        liveReadRead,
         presenceRead,
         openRead,
       ] = await Promise.all([
@@ -952,7 +929,7 @@ export async function invoiceContext(
               limit: conversationLimit,
             })).messages || [],
         ),
-        queueByJob(client, [jobRow.id], warnings),
+        liveReadByJob(client, [jobRow.id], warnings),
         conversationCountsByJob(client, [{
           id: jobRow.id,
           ghl_contact_id: jobRow.ghl_contact_id ?? null,
@@ -990,7 +967,7 @@ export async function invoiceContext(
       };
       sources.facts = factsRead.status;
       sources.conversation = convRead.status;
-      sources.extraction_queue = queueRead.status;
+      sources.live_read = liveReadRead.status;
       sources.conversation_presence = presenceRead.status;
       sources.other_open_invoices = openRead.status;
       facts = (factsRead.data || []).filter((row: any) =>
@@ -1005,8 +982,8 @@ export async function invoiceContext(
         );
       }
       conversation = [...(convRead.data || [])].reverse();
-      queue = queueRead.queues.get(jobRow.id);
-      queueOk = queueRead.status.ok;
+      liveRead = liveReadRead.reads.get(jobRow.id);
+      liveReadOk = liveReadRead.status.ok;
       conversationPresenceOk = presenceRead.status.ok;
       const presence = presenceRead.counts.get(jobRow.id);
       clientMessageCount = presence
@@ -1174,9 +1151,9 @@ export async function invoiceContext(
     blockers.push({
       code: "facts_missing",
       owner: "CIO",
-      detail: `Luna has not extracted this job yet (queue status: ${
-        queueDetail(queue, queueOk)
-      })`,
+      detail: `No current facts for this job: ${
+        liveReadDetail(liveRead, liveReadOk)
+      }`,
     });
   }
   const clientMessages = conversation.filter((m: any) =>
@@ -1392,9 +1369,9 @@ export async function debtContextCoverage(
   const jobs = new Map<string, any>();
   for (const j of jobsRead.data || []) jobs.set(j.id, j);
 
-  const [facts, queues, conv] = await Promise.all([
+  const [facts, liveReads, conv] = await Promise.all([
     factsCountByJob(deps, linkedIds, warnings),
-    queueByJob(client, linkedIds, warnings),
+    liveReadByJob(client, linkedIds, warnings),
     conversationCountsByJob(
       client,
       linkedIds.map((id) => ({
@@ -1405,7 +1382,7 @@ export async function debtContextCoverage(
     ),
   ]);
   sources.facts = facts.status;
-  sources.extraction_queue = queues.status;
+  sources.live_read = liveReads.status;
   sources.conversation = conv.status;
 
   // Rule 1 holds on every row: a false flag always carries a blocker, and an
@@ -1512,8 +1489,8 @@ export async function debtContextCoverage(
         }
         : null,
       last_client_message_at: c?.last_client_message_at ?? null,
-      extraction_queue: jobId
-        ? queueDetail(queues.queues.get(jobId), queues.status.ok)
+      live_read: jobId
+        ? liveReadDetail(liveReads.reads.get(jobId), liveReads.status.ok)
         : null,
       xero_fresh: xeroFresh,
       blockers,

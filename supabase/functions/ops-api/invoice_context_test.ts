@@ -6,7 +6,8 @@
 //   1. A linked invoice returns job, current facts only, oldest-first conversation,
 //      chase, Xero payments and an empty blocker list when the picture is complete.
 //   2. Every missing piece is an owned blocker and a false coverage flag, never a blank:
-//      no job, ambiguous contact, no GHL contact, no facts (with queue detail), no
+//      no job, ambiguous contact, no GHL contact, no facts (with the live pass's
+//      last read of the job, never the retired v1 queue), no
 //      conversation, stale Xero cache.
 //   3. Link resolution order: stored job_id, stored job_number, job number in the
 //      reference, single job via the Xero contact; several jobs is ambiguous with candidates.
@@ -21,6 +22,9 @@
 //      the door never asserts "Luna has not extracted" after a failed read.
 //  10. The door and the coverage read agree, invoice for invoice, on every
 //      coverage flag and every blocker code.
+//  12. "No facts" is explained from the live pass's run record
+//      (context_extraction_runs): never read, last read on a date, or last read
+//      failed with its error. The retired v1 queue is never read or named.
 
 import {
   assert,
@@ -36,7 +40,7 @@ import {
   isDoorLunaFact,
   jobNumberFromReference,
   parseXeroDate,
-  queueDetail,
+  liveReadDetail,
 } from "./invoice_context.ts";
 import {
   isCurrentContextFact,
@@ -313,18 +317,58 @@ function baseTables(): Tables {
         _context_store: "job_temporary_context",
       },
     ],
+    // The retired v1 queue still holds rows nothing drains. The door must not
+    // read them: they would report a stale reason (this one is the real stale
+    // 2 Oct text) for a job the live pass handles elsewhere.
     extraction_jobs: [
-      {
-        job_id: JOB2,
-        status: "skipped",
-        skip_reason: "source_attribution_unproven",
-        error: null,
-      },
       {
         job_id: JOB2,
         status: "dead_letter",
         skip_reason: null,
-        error: "source_attribution_ambiguous",
+        error: "Your credit balance is too low to access the Anthropic API",
+      },
+    ],
+    context_extraction_runs: [
+      {
+        id: "r1",
+        job_id: JOB2,
+        run_date: "2026-09-08",
+        phase: "extraction",
+        status: "done",
+        error: null,
+        started_at: "2026-09-08T01:00:00.000Z",
+        finished_at: "2026-09-08T01:01:00.000Z",
+      },
+      {
+        id: "r2",
+        job_id: JOB2,
+        run_date: "2026-09-10",
+        phase: "extraction",
+        status: "failed",
+        error: "model output failed validation",
+        started_at: "2026-09-10T01:00:00.000Z",
+        finished_at: "2026-09-10T01:02:00.000Z",
+      },
+      // Not a read of the job: a later attribution run and a running lease.
+      {
+        id: "r3",
+        job_id: JOB2,
+        run_date: "2026-09-11",
+        phase: "attribution",
+        status: "done",
+        error: null,
+        started_at: "2026-09-11T01:00:00.000Z",
+        finished_at: "2026-09-11T01:00:30.000Z",
+      },
+      {
+        id: "r4",
+        job_id: JOB2,
+        run_date: "2026-09-11",
+        phase: "extraction",
+        status: "running",
+        error: null,
+        started_at: "2026-09-11T02:00:00.000Z",
+        finished_at: null,
       },
     ],
     payment_chase_logs: [
@@ -652,7 +696,7 @@ Deno.test("1. a linked invoice returns the complete picture with no blockers", a
   assertEquals(out.warnings, []);
 });
 
-Deno.test("2. reference job number links the job; missing facts and conversation are owned blockers with queue detail", async () => {
+Deno.test("2. reference job number links the job; missing facts and conversation are owned blockers with the live read", async () => {
   const t = baseTables();
   const out = await invoiceContext(
     new URLSearchParams({ xero_invoice_id: INV2 }),
@@ -670,11 +714,7 @@ Deno.test("2. reference job number links the job; missing facts and conversation
   ]);
   assertStringIncludes(
     out.blockers[1].detail,
-    "skipped:1 (source_attribution_unproven)",
-  );
-  assertStringIncludes(
-    out.blockers[1].detail,
-    "dead_letter:1 (source_attribution_ambiguous)",
+    "last read by the live context pass on 2026-09-10 failed with: model output failed validation",
   );
   assertEquals(out.coverage, {
     job_linked: true,
@@ -886,9 +926,10 @@ Deno.test("6. coverage counts the open population with the same rules", async ()
     "xero_stale",
   ]);
   assertEquals(
-    byNo["INV-1373"].extraction_queue,
-    "skipped:1 (source_attribution_unproven), dead_letter:1 (source_attribution_ambiguous)",
+    byNo["INV-1373"].live_read,
+    "last read by the live context pass on 2026-09-10 failed with: model output failed validation",
   );
+  assertEquals("extraction_queue" in byNo["INV-1373"], false);
   assertEquals(byNo["INV-1500"].link_status, "ambiguous");
   assertEquals(byNo["INV-1500"].candidates.length, 2);
   assertEquals(byNo["INV-1501"].blockers, ["no_contact", "no_job_linked"]);
@@ -918,7 +959,10 @@ Deno.test("helpers: Xero dates, reference job numbers, queue detail", () => {
     "SWP-261180",
   );
   assertEquals(jobNumberFromReference("MLB-24911", "INV-1419"), null);
-  assertEquals(queueDetail(undefined), "never_enqueued");
+  assertEquals(
+    liveReadDetail(undefined),
+    "never read by the live context pass",
+  );
 });
 
 Deno.test("luna_v2 stamps count as Luna; Haiku and instruction do not", async () => {
@@ -1158,17 +1202,24 @@ Deno.test("9. an unreadable source is an unreadable blocker, never a missing one
   assertStringIncludes(facts.blockers[0].detail, "is unknown");
   assertEquals(facts.coverage.facts_present, false);
 
-  // extraction queue down: queue detail is "unknown", never "never_enqueued" (L1)
+  // live run record down: the detail is "unknown", never "never read" (L1)
   const t2 = baseTables();
   t2.current_job_context_facts = [];
-  const queue = await invoiceContext(
+  const runs = await invoiceContext(
     new URLSearchParams({ invoice: "INV-1419" }),
-    deps(t2, new Set(["extraction_jobs"])),
+    deps(t2, new Set(["context_extraction_runs"])),
   );
-  const missing = queue.blockers.find((b) => b.code === "facts_missing")!;
-  assertStringIncludes(missing.detail, "unknown (queue unreadable)");
-  assertEquals(queueDetail(undefined, false), "unknown (queue unreadable)");
-  assertEquals(queueDetail(undefined, true), "never_enqueued");
+  const missing = runs.blockers.find((b) => b.code === "facts_missing")!;
+  assertStringIncludes(missing.detail, "unknown whether the live context pass");
+  assertEquals(runs.sources.live_read.ok, false);
+  assertEquals(
+    liveReadDetail(undefined, false).startsWith("unknown"),
+    true,
+  );
+  assertEquals(
+    liveReadDetail(undefined, true),
+    "never read by the live context pass",
+  );
 
   // message counts down: conversation_unreadable, and the flag is false
   const t3 = baseTables();
@@ -1298,4 +1349,89 @@ Deno.test("11. a job number that matches nothing is named in the blocker, not in
     ghost.blockers.find((x) => x.code === "no_job_linked")!.detail,
     "points at a job that does not exist",
   );
+});
+
+Deno.test("12. facts_missing names the live pass's last read, never the retired queue", async () => {
+  const door = async (runs: any[] | undefined) => {
+    const t = baseTables();
+    if (runs) t.context_extraction_runs = runs;
+    const d = deps(t);
+    const out = await invoiceContext(
+      new URLSearchParams({ invoice: "INV-1373" }),
+      d,
+    );
+    const b = out.blockers.find((x) => x.code === "facts_missing")!;
+    // The dead queue holds a stale credit error for this job; it must not leak.
+    assertEquals(d.client._calls.extraction_jobs, undefined);
+    assertEquals(/credit|queue|extract/i.test(b.detail), false);
+    assertEquals(out.sources.live_read.ok, true);
+    return b.detail;
+  };
+
+  // Latest finished extraction run failed: its date and error. A later
+  // attribution run and a still-running extraction are not reads.
+  assertEquals(
+    await door(undefined),
+    "No current facts for this job: last read by the live context pass on 2026-09-10 failed with: model output failed validation",
+  );
+
+  // Latest finished extraction run is done: its date.
+  assertEquals(
+    await door([{
+      id: "d1",
+      job_id: JOB2,
+      run_date: "2026-09-09",
+      phase: "extraction",
+      status: "failed",
+      error: "timeout",
+      started_at: "2026-09-09T01:00:00.000Z",
+      finished_at: "2026-09-09T01:05:00.000Z",
+    }, {
+      id: "d2",
+      job_id: JOB2,
+      run_date: "2026-09-11",
+      phase: "extraction",
+      status: "done",
+      error: null,
+      started_at: "2026-09-11T01:00:00.000Z",
+      finished_at: "2026-09-11T01:01:00.000Z",
+    }, {
+      id: "d3",
+      job_id: JOB2,
+      run_date: "2026-09-11",
+      phase: "extraction",
+      status: "skipped",
+      error: "lane paused",
+      started_at: "2026-09-11T03:00:00.000Z",
+      finished_at: "2026-09-11T03:00:01.000Z",
+    }]),
+    "No current facts for this job: last read by the live context pass on 2026-09-11",
+  );
+
+  // No finished extraction run for this job (another job's run does not count).
+  assertEquals(
+    await door([{
+      id: "o1",
+      job_id: JOB1,
+      run_date: "2026-09-11",
+      phase: "extraction",
+      status: "done",
+      error: null,
+      started_at: "2026-09-11T01:00:00.000Z",
+      finished_at: "2026-09-11T01:01:00.000Z",
+    }]),
+    "No current facts for this job: never read by the live context pass",
+  );
+
+  // The coverage read carries the same answer and never touches the queue.
+  const t = baseTables();
+  const d = deps(t);
+  const cov = await debtContextCoverage(new URLSearchParams(), d);
+  assertEquals(d.client._calls.extraction_jobs, undefined);
+  const row: any = cov.rows.find((r: any) => r.invoice_number === "INV-1373");
+  assertEquals(
+    row.live_read,
+    "last read by the live context pass on 2026-09-10 failed with: model output failed validation",
+  );
+  assertEquals(cov.sources.live_read.ok, true);
 });
