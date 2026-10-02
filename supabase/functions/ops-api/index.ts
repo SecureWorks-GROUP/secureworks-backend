@@ -7798,9 +7798,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // T7 Loop 9 — Controlled transcript ingest.
       // Admin/owner-only. Bypasses the global evidence_capture_v1 flag
       // because access is structurally controlled by role gate (parallel
-      // to agent_audit_log). Used for the JARVIS memory proof: WhisperFlow
-      // transcript text -> spine row -> extraction_jobs -> context_fact ->
-      // Job Brain -> JARVIS citation.
+      // to agent_audit_log). Writes the transcript to the evidence spine;
+      // the live context pass reads it from business_events.
       //
       // POST body: {
       //   job_id: string,                  required
@@ -42229,14 +42228,14 @@ async function ingestTranscript(
       {
         org_id: DEFAULT_ORG_ID,
         bypass_feature_flag: true,                       // structurally controlled (admin only)
-        extractor_eligible_channels: ['email', 'note', 'call'],   // local override; lets transcripts flow to extractor
         storage_client: client.storage,
       },
     )
     return {
       ok: true,
       spine_event_id: result.spine_event_id,
-      extraction_job_id: result.extraction_job_id ?? null,
+      // The retired v1 queue is no longer written; key kept for response shape.
+      extraction_job_id: null,
       body_pointer: result.body_pointer ?? null,
       match_status: result.spine_row.match_status,
       job_number: jobRow[0].job_number,

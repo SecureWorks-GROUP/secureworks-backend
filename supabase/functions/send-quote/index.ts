@@ -264,9 +264,7 @@ async function insertEmailEvent(sb: any, opts: {
 //   - channel      = 'quote'
 //   - direction    = 'outbound'
 //   - thread_key   = correlation_id when present
-// recordEvidence already enforces append-only and conditionally enqueues
-// extraction_jobs for client.email_in / note.added only — quote.sent stays
-// off the extraction allowlist.
+// recordEvidence already enforces append-only.
 async function safeBusinessEventInsert(
   sb: any,
   row: Record<string, any>,

@@ -1,5 +1,4 @@
 import { assertCaptureEnabled, insertCapturedEvidence } from "./capture_guard.ts";
-import { automationLaneEnabled } from "../automation_switch.ts";
 import { sourceTime } from "../source_time.ts";
 // T7 Loop 1 — recordEvidence: the T7 envelope capture helper
 //
@@ -13,7 +12,6 @@ import { sourceTime } from "../source_time.ts";
 //     retention class);
 //   - writes the body to Storage when present and records body_pointer + body_hash;
 //   - inserts the business_events row;
-//   - conditionally enqueues an extraction_jobs row;
 //   - returns the canonical EvidenceRef for downstream proposal writers.
 //
 // Failure mode: a spine insert failure does NOT block the raw write. The
@@ -24,7 +22,6 @@ import { sourceTime } from "../source_time.ts";
 import {
   BODY_PREVIEW_MAX,
   SAFE_SUMMARY_MAX,
-  EXTRACTOR_ELIGIBLE_CHANNELS,
   EvidenceCapture,
   RecordEvidenceResult,
   Channel,
@@ -55,22 +52,10 @@ export interface RecordEvidenceOptions {
 
   /**
    * When true, the helper computes everything (envelope, hash, would-be
-   * pointer) but does not insert into business_events or write to Storage
-   * or enqueue. Used by tests and migration backfill simulation.
+   * pointer) but does not insert into business_events or write to Storage.
+   * Used by tests and migration backfill simulation.
    */
   dry_run?: boolean;
-
-  /**
-   * Override the extractor channel allowlist. Default is
-   * EXTRACTOR_ELIGIBLE_CHANNELS from types.ts.
-   */
-  extractor_eligible_channels?: Channel[];
-
-  /**
-   * Extractor version tag for the extraction_jobs row. Defaults to
-   * 'context-fact-extractor:v1' to match T5 Iteration 4.
-   */
-  extractor_version?: string;
 
   /**
    * When true, skip the evidence_capture_v1 feature-flag check. Used by
@@ -88,8 +73,6 @@ export interface RecordEvidenceOptions {
   // deno-lint-ignore no-explicit-any
   storage_client?: any;
 }
-
-const DEFAULT_EXTRACTOR_VERSION = "context-fact-extractor:v1";
 
 export async function recordEvidence(
   supabase: SupabaseLike,
@@ -223,8 +206,7 @@ export async function recordEvidence(
   } else {
     // Real Supabase insert returns data:null unless we chain .select().
     // We need the inserted row's id + occurred_at so downstream consumers
-    // (evidence_ref, extraction_jobs.metadata.spine_event_id, source-table
-    // backref columns) point at a real row. Use .select('id, occurred_at')
+    // (evidence_ref, source-table backref columns) point at a real row. Use .select('id, occurred_at')
     // and read [0]; .single() would throw on the empty case which we
     // already handle below.
     await assertCaptureEnabled(supabase);
@@ -270,49 +252,10 @@ export async function recordEvidence(
     inserted_occurred_at = data[0].occurred_at ?? occurred_at;
   }
 
-  // Conditional extraction enqueue (Loop 8 wires real flow; Loop 1 only sets up the path).
-  let extraction_job_id: string | undefined;
-  const eligibleChannels = options.extractor_eligible_channels ?? EXTRACTOR_ELIGIBLE_CHANNELS;
-  const extractionEligible =
-    (capture.enqueueExtraction ?? eligibleChannels.includes(capture.channel)) &&
-    match.match_status === "matched" &&
-    match.job_id !== null;
-  if (extractionEligible && !effectiveDryRun &&
-      await automationLaneEnabled(supabase, "capture") &&
-      await automationLaneEnabled(supabase, "extraction")) {
-    const enqueueResult = await supabase.from("extraction_jobs")
-      .insert({
-        job_id: match.job_id,
-        source_table: "business_events",
-        source_id: spine_event_id,
-        source_event_type: capture.event_type,
-        extractor_version: options.extractor_version ?? DEFAULT_EXTRACTOR_VERSION,
-        priority: capture.extractor_priority ?? 5,
-        status: "pending",
-        metadata: {
-          spine_event_id,
-          occurred_at: inserted_occurred_at,
-          channel: capture.channel,
-          direction: capture.direction,
-          original_source_table: capture.source_table,
-          original_source_id: capture.source_id,
-        },
-      })
-      .select("id");
-    if (enqueueResult.error) {
-      // Enqueue failure is non-fatal; spine row is already in.
-      warnings.push(`extraction enqueue failed: ${enqueueResult.error.message}`);
-    } else {
-      const eqData = enqueueResult.data as Array<{ id: string }> | null;
-      if (eqData && eqData.length > 0) {
-        extraction_job_id = eqData[0].id;
-      }
-      // If select returned empty (e.g. ON CONFLICT DO NOTHING from the
-      // dedupe constraint) the enqueue is structurally idempotent —
-      // a queue row already exists for this (source_table, source_id,
-      // extractor_version). Not a warning.
-    }
-  }
+  // No extraction enqueue. The v1 extractor that drained extraction_jobs was
+  // retired on 21 Sep 2026; the live context pass finds this business_events
+  // row by itself (context_jobs_cadence). Writing a queue row here only made
+  // dead work that looked like work waiting to happen.
 
   // Return the EvidenceRef downstream writers can cite.
   const ref = makeEvidenceRef({
@@ -347,7 +290,6 @@ export async function recordEvidence(
     evidence_ref: ref,
     body_pointer,
     body_hash,
-    extraction_job_id,
     warnings,
   };
 }
