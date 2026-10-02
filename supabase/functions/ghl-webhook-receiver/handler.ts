@@ -982,7 +982,6 @@ export async function handleGhlWebhook(
     //   - Downloads audio from recording_url
     //   - Calls OpenAI Whisper API
     //   - Writes transcript via recordEvidence (channel='call')
-    //   - Enqueues to extraction_jobs → context_fact → JARVIS citation
     // We don't block the webhook response on this. Twilio/GHL recording URLs
     // can take 10-30s to finalise; we fork off, optionally do a short delayed
     // GHL lookup if the workflow body lacked a real recordingUrl, then invoke.

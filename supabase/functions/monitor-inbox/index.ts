@@ -492,8 +492,7 @@ async function processMailbox(
       // When ON, recordEvidence becomes the single canonical writer with
       // full envelope (source_table/source_id/direction/channel/
       // match_status/match_confidence/match_method/body_preview/
-      // privacy_classification/retention_class) and conditionally
-      // enqueues an extraction_jobs row.
+      // privacy_classification/retention_class).
       const t7Enabled = await isFlagOn(sb, 'evidence_capture_v1', DEFAULT_ORG_ID)
 
       // Legacy spine row shape — emitted either by the T7 fallback path
