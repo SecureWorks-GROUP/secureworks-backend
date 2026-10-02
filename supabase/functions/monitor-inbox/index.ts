@@ -19,6 +19,7 @@ import { classifyEmail } from './classify_email.ts'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { legacyPollPlan } from './legacy_mailboxes.ts'
+import { readerOwnsEvidence, readReaderFlags } from './reader_handover.ts'
 import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -241,6 +242,7 @@ async function processMailbox(
   sb: any,
   token: string,
   mailbox: string,
+  writeEvidence: boolean,
 ): Promise<{ processed: number }> {
   let processed = 0
 
@@ -454,7 +456,9 @@ async function processMailbox(
     const isNoise = ['newsletter', 'spam'].includes(classification.classification)
     // Context target: store the words even when triage is uncertain. Only
     // skip pure noise. "other" used to drop rows when Haiku was unpaid.
-    if (isSupplier || isClient || (!isNoise && classification.classification === 'other')) {
+    // Once the email reader owns email evidence (reader_handover.ts), this path
+    // keeps its inbox_events row (above) and writes no evidence row.
+    if (writeEvidence && (isSupplier || isClient || (!isNoise && classification.classification === 'other'))) {
       // For supplier emails without a job match, try PO number from subject
       let finalJobId = jobId
       if (!finalJobId && isSupplier) {
@@ -761,15 +765,19 @@ Deno.serve(async (req) => {
     // The old path polls its pinned list only (EM1, email.md review M14). The
     // monitored_mailboxes table is the new poller's list; reading it here would
     // poll khairo@ and group addresses as user mailboxes.
+    const handedOver = readerOwnsEvidence(await readReaderFlags(sb))
     for (const mailbox of MONITORED_MAILBOXES) {
-      const { processed } = await processMailbox(sb, token, mailbox)
+      const { processed } = await processMailbox(sb, token, mailbox, !handedOver)
       totalProcessed += processed
     }
 
     // R7: Group inboxes (patios@, fencing@) — Graph /groups path, not /users.
-    for (const groupMail of GROUP_MAILBOXES) {
-      const { processed } = await processGroupMailbox(sb, token, groupMail)
-      totalProcessed += processed
+    // Its only output is evidence rows, so it stops once the reader owns them.
+    if (!handedOver) {
+      for (const groupMail of GROUP_MAILBOXES) {
+        const { processed } = await processGroupMailbox(sb, token, groupMail)
+        totalProcessed += processed
+      }
     }
 
     const result = {
@@ -778,6 +786,7 @@ Deno.serve(async (req) => {
       notified: 0,
       mailboxes: MONITORED_MAILBOXES.length,
       mailbox_source: 'hard_coded',
+      evidence_writer: handedOver ? 'email_reader' : 'monitor_inbox',
       timestamp: new Date().toISOString(),
     }
 
