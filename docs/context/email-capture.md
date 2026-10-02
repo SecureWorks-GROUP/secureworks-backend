@@ -1,13 +1,16 @@
-# Email capture: sources, run rows and health (slice EM1)
+# Email capture: sources, reader, run rows and health (slices EM1, EM2, EM3)
 
 Design: `email.md` (context build plan, rank 4), slice EM1 of INTEGRATION.md
 Wave 3E. Migration `supabase/migrations/20260924213000_context_email_capture_config.sql`,
 rollback in `supabase/rollbacks/`, contract in
 `supabase/tests/migration-contracts/20260924213000_context_email_capture_config/`.
 
-EM1 builds configuration and health only. Flag `email_capture_v2` is off and
-no code reads mail differently. The new poller (`pollV2`, sweep and history
-modes) is EM2.
+EM1 built configuration and health. EM2 is the reader (edge function
+`outlook-mail-capture`) and EM3 its schedule, migration
+`supabase/migrations/20261002150000_context_email_reader.sql` (rollback in
+`supabase/rollbacks/`, contract in
+`supabase/tests/migration-contracts/20261002150000_context_email_reader/`).
+See "The reader" below.
 
 ## Sources: `monitored_mailboxes`
 
@@ -108,3 +111,45 @@ with the number of sources raising them, never which one:
 
 Thresholds and the personal labels are published in the block's `policy`
 (`context_email_capture_policy()`, changed only by migration).
+
+## The reader (EM2) and its schedule (EM3)
+
+Edge function `supabase/functions/outlook-mail-capture` (`capture.ts` the
+run, `graph.ts` the Graph reads, `attachments.ts` the attachment store,
+`handler.ts` the door). The one row builder is
+`supabase/functions/_shared/evidence/outlook_mail.ts`; rows are saved only
+through `capture_business_event` and placed by the database ladder. The reader
+only reads mail: every Graph call is a GET (`graph_test.ts` pins it); it never
+sends, replies, moves, deletes or marks mail read. No model call.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `email_capture_v2` (EM1) | created off | the program switch; the reader needs it on |
+| `email_reader_v1` | off | the reader reads mail only while on (with `email_capture_v2` and the capture lane) |
+| `email_reader_schedule_v1` | off | pg_cron `outlook-mail-poll` (every 5 minutes) and `monitor-inbox-sweep` (02:00 Perth) call the reader; the old monitor-inbox path stops writing its own email evidence rows and its group reader (it keeps writing `inbox_events`) |
+
+Modes (body `{"mode", "source", "from", "to", "wait"}`; callers: the service
+role, or the server key in `x-api-key`):
+
+| Mode | Reads | Run rows |
+|---|---|---|
+| `poll` | each selected source since its pair cursor (first run: 30 minutes back; caught up: 10 minutes overlap; backlog: exactly from the cursor) | `outlook_<key>` |
+| `sweep` | the last 48 hours of one or all sources; inserts count as `sweep_misses` | `outlook_sweep_<key>` |
+| `history` | one source, `[from, to)`, at most 60 days back, `capture_mode: backfill`, only mail that names a live job's number or involves a live job's client email (captain ruling 24 Sep 2026, via `context_email_history_scope()`); a run cut by its time budget resumes on the next call with the same window | `outlook_history_<key>` |
+
+User mailboxes are read whole (every folder, read or unread, Sent Items
+included; Junk, Drafts and Outbox skipped). Groups are read through
+conversations, threads and posts; a post's key comes from its internet message
+id property, so it and a member's copy are one row. One email is one row keyed
+`email:<internet message id>` however many mailboxes saw it.
+
+Attachments: file attachments up to 15 MB each, 10 files and 30 MB per email,
+go to the PRIVATE bucket `context-email-attachments`, one row each in
+`context_email_attachments` (service role only; `stored` or a `skipped_*`
+reason). Inline images, attached emails and links are recorded skipped. ses@
+attachments are not stored here (the make-safe intake stores them). No public
+URL and no `job_documents` row is made.
+
+Not yet built: `inbox_events` sighting rows (the old path still owns that table
+until the reader-move slice EM-R1), the tool-send row (EM-TOOL), the legacy
+upgrade pass of EM-M3 (b).

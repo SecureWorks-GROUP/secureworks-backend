@@ -45,9 +45,15 @@ BEGIN
   OR NOT (SELECT prosecdef FROM pg_proc WHERE oid='public.trigger_ghl_message_reconcile()'::regprocedure)
  THEN RAISE EXCEPTION 'c1d status and cron caller must be SECURITY DEFINER'; END IF;
  -- The capture lane owns the job; the other two jobs are unchanged.
- -- Containment, not equality: a later capture slice (T2) adds its own job.
+ -- Containment, not equality: later capture slices add their own jobs
+ -- (T2, 20261002100000: ghl-call-transcript-fetch; EM3, 20261002150000:
+ -- outlook-mail-poll and monitor-inbox-sweep, all capture); C1d's three rows
+ -- must stay as they are.
  IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
     @> ARRAY['contact-matching:attribution','ghl-message-reconcile:capture','monitor-inbox-poll:capture']
+  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname NOT IN
+    ('contact-matching','ghl-message-reconcile','monitor-inbox-poll','ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep'))
+  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep') AND l.lane<>'capture')
  THEN RAISE EXCEPTION 'c1d cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;
@@ -219,8 +225,12 @@ FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure \gset
 \if :c1d_writer_moved
 \ir ../20260924152100_context_status_f1b/f1_record_capture_run.sql
 \endif
--- The later retry-status migration owns a newer version of this status block.
--- Restore C1d before checking its re-apply, then put the follow-up back in order.
+-- The later retry-status migration owns a newer version of this status block,
+-- and the email reader (EM3) a newer cron lane list. Restore C1d before
+-- checking its re-apply, then put the retry-status follow-up back. The email
+-- reader is not re-applied here: it needs F1b's record_capture_run, which
+-- this block has rolled back to F1's (the whole block is rolled back).
+\ir ../../../rollbacks/20261002150000_context_email_reader_down.sql
 \ir ../../../rollbacks/20260924210000_context_ghl_retry_status_down.sql
 -- Likewise T2 (20261002100000) adds its own job to the lane list C1d pins.
 SELECT md5(prosrc)<>'459035de5d3f7f7af49c36f09d9be29e' AS c1d_lanes_moved

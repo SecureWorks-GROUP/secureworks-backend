@@ -63,7 +63,8 @@ deno-check:
     - deno test --no-check --allow-read --allow-env supabase/functions/ops-api/site_links_test.ts
     - deno test --allow-read supabase/functions/_shared/job_refs_test.ts supabase/functions/_shared/job_refs_contract_rows_test.ts
     - deno test --allow-read --allow-env supabase/functions/monitor-inbox/classify_email_test.ts
-    - deno test --allow-read supabase/functions/monitor-inbox/legacy_mailboxes_test.ts
+    - deno test --allow-read supabase/functions/monitor-inbox/legacy_mailboxes_test.ts supabase/functions/monitor-inbox/reader_handover_test.ts
+    - deno test --allow-read --allow-env supabase/functions/_shared/evidence/outlook_mail_test.ts supabase/functions/_shared/evidence/outlook_mail_contract_rows_test.ts supabase/functions/outlook-mail-capture/capture_test.ts supabase/functions/outlook-mail-capture/attachments_test.ts supabase/functions/outlook-mail-capture/graph_test.ts supabase/functions/outlook-mail-capture/handler_test.ts
     - deno test --allow-read supabase/functions/_shared/request_actor_test.ts
     - deno test --allow-read supabase/functions/sql-query/auth_test.ts
     - deno test --no-check --allow-read --allow-env supabase/functions/xero-sync/xero_transport_test.ts
