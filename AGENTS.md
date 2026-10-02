@@ -663,6 +663,36 @@ many re-stamps happened in the last 24 hours): the hint carries no time and
 every re-run re-checks bucket rows, so an exact count needs the placement
 track to stamp the hint with its time (a named follow-up, not B0).
 
+## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
+
+Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
+`resolve_context_attribution(e)`, a one-line entry into
+`resolve_context_attribution(e, p_preview, p_rules_on)`. With
+`feature_flags.context_unlinked_rules_v1` off (missing or unreadable = off) it
+runs `context_ladder_p1a`, P1a's live body plus exactly two deviations, a
+preview guard and a `retired_at IS NULL` thread filter (the contract undoes
+both and proves the rest byte for byte); with it on, the P4 rules. A retired
+binding never places on either path, and P4 also owns both
+`attribute_context_event_with_luna` overloads, which follow a thread only when
+it is live and bound to one of the row's candidates. P4's rollback deletes
+nothing: it re-keys retired rows (`retired:` prefix) before restoring P1a.
+A later placement slice (P2, P3,
+P-T) replaces the rules body in the 3-argument function, never the frozen
+P1a copy, and must widen the successor md5 lists and the `\if` re-apply
+guards in the L1, P1a and P1b contracts, and roll P4 back first in L1's
+break-contract, exactly as P4 did for P1a.
+
+The writer check reads `metadata.written_as`, which the insert trigger now
+stamps BEFORE the ladder as well as after: a writer-supplied value never
+survives. The email sender is read through `context_event_identity`
+(`payload.from` included); P1a's copy still reads `payload->>'email'` only,
+which is why email never matched a customer before the flag. P1a's
+two-argument `context_contact_jobs_at` is unchanged and still serves the Luna
+guard and P1b; the rules use the keyed four-argument overload. Preview a
+stored row with `context_attribution_preview(event_id, rules_on)` (writes
+nothing) before trusting a rule change. Contract and named rows:
+`supabase/tests/migration-contracts/20261002110000_context_unlinked_rules/`.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before
@@ -3723,6 +3753,30 @@ The database policy, atomic daily reservation and link/reversal guards belong to
 `20260925031500_context_ghl_history_load.sql`; its behavioural contract is in
 `supabase/tests/migration-contracts/20260925031500_context_ghl_history_load/`.
 
+A call's transcript has ONE writer, `ghl-call-transcript-fetch` (slice T2):
+row `call.transcript_completed`, source `ghl-call-transcript`, key
+`ghltx:<the call's GHL message id>`, `payload.ghl_call_id` pairing it to its
+call, words stored once in `payload.transcript` (`body_preview` its first 500
+characters, `safe_summary` never words), `speaker_roles: "not_given"` always.
+GHL's transcript answer is read only through `_shared/ghl/call_transcript.ts`
+(ghl-proxy uses it too; `mediaChannel` and `speaker` optional). The backoff
+and terminal outcomes live in the SQL writer `record_call_transcript_fetch`,
+never in TypeScript. Flag `ghl_call_transcript_fetch_v1` gates the live run
+and every transcript read of the history mode (`mode: backfill`, dry run unless
+`dry_run: false`, capture mode always `backfill`). The history mode only
+transcribes call rows already stored (M4's `ghl-history-load` writes the past
+ones); it lists no GHL conversation and writes no call row, and both modes go
+through the one selection `context_transcript_due_calls(limit, history)`, whose
+history side reuses M4's `context_ghl_history_live_jobs()`. History is
+finished only when `context_transcript_history_pending()` is zero (due or
+waiting); the history run answers `more: true` until then, and the live cron
+also retries due backfill-mode pending calls of any age. Measured 24 Sep 2026: GHL sometimes leaves
+`meta.call.duration` empty on an answered call that has a transcript, so
+"completed with no duration" is eligible; a no-answer call's transcription
+answers HTTP 400; the list read names our line by number but the single-item
+read says "SecureWorks WA" for inbound calls. Tests: `fetch_test.ts`,
+`call_transcript_test.ts`, migration contract `20261002100000_context_transcript_fetch`.
+
 ## A pg_cron Bearer Is Not The Function's Service Key
 
 pg_cron triggers call edge functions with `Bearer <sw_service_key()>`, a
@@ -3916,6 +3970,32 @@ no row and so never read as booked or sent.
 ## GHL appointment write safety
 
 `create_calendar_appointment` is disabled by default. Its caller, retry, notification and deployment contracts are in `docs/ghl-calendar-appointment-write.md`; the durable sending fence must never be cleared just because a provider window is empty; the only way out is the captain/service-role `release_calendar_appointment_request` (terminal `released` state, row kept, key never posts again). The server action owns the only appointment POST, while the agent-side tool lives in another repository.
+
+## Parties On A Site Have One Writer, Keyed By Party, Never By Letter
+
+`job_contacts` is the party table (owner, neighbours, strata, other payers on
+one site job). Sites slice S-M1 (`20261002120000_job_parties_foundation.sql`)
+gave it one writer pair: `upsert_job_party(job, source_party_key, fields,
+actor)` and `set_job_party_ids(...)` (the only way a neighbour's GHL or Xero
+id changes; `upsert_job_party` writes them on insert only). The key is the fence tool's neighbour id (`nb-1`,
+`nb-<epoch ms>`), `primary` for the owner, `staff:<uuid>` for a staff-added
+payer; the letter A-Z is display only, assigned once, never reused. A reused
+key on an anchored party with a different identity retires the old party and
+inserts `<key>#<n>` instead of rewriting a person; the same name words are
+the same person, so a corrected phone or email updates in place. With no
+portions the owner's share is 100 only while no neighbour is active, else
+null; a neighbour's is null, never 0 or the column default 50. The owner party mirrors
+`jobs` one way (AFTER UPDATE trigger `job_contacts_owner_mirror`, only once
+the owner row is keyed `primary`): `jobs` owns the owner's contact, a null
+never overwrites a set id (flag `owner_id_divergence`). Every call writes one
+ids-only `job_party_events` receipt. The four legacy writers (scope sync,
+`prepare_neighbour_quotes`, send-quote accept, invoice creation) still write
+directly until S-M2 moves them; do not add a fifth. The table is RLS-on with
+no policy and revoked from anon and authenticated (the live read found both
+held TRUNCATE, which RLS does not cover); view `run_summary`, which read
+its names past RLS, is revoked the same way and `security_invoker`. Placement reconsideration after a
+GHL link only runs while flag `job_parties_v1` is on. Contract and named-site
+tests: `supabase/tests/migration-contracts/20261002120000_job_parties_foundation`.
 
 ## The Job Conversation Shows An Email Where The Ladder Put It
 

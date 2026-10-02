@@ -844,7 +844,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Trade App see-everything tier read by authTrade.
                       ("20260925040000", "users_trade_sees_all_jobs"),
                       # Booking routes: who books which lead, which calendar.
-                      ("20261002090000", "sales_booking_routes")]:
+                      ("20261002090000", "sales_booking_routes"),
+                      # sites S-M1: the link_site_jobs door.
+                      ("20261002120000", "job_parties_foundation")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

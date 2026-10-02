@@ -340,6 +340,17 @@ jobs:
             supabase/functions/ghl-history-load/link_test.ts \
             supabase/functions/ghl-history-load/handler_test.ts
 
+      # Slice T2: the GHL call transcript fetcher (the one transcript reader,
+      # the transcript row, the fetcher's per-call rules, its live and history
+      # modes and its HTTP door) on the recorded call and transcript shapes.
+      - name: Test the GHL call transcript fetcher
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/ghl/call_transcript_test.ts \
+            supabase/functions/_shared/evidence/ghl_call_transcript_row_test.ts \
+            supabase/functions/ghl-call-transcript-fetch/fetch_test.ts \
+            supabase/functions/ghl-call-transcript-fetch/handler_test.ts
+
       # Slice B0: the placement keys and token rule (TypeScript twin of the SQL
       # helpers) on the one fixture table, and proof that the migration
       # contract runs the SQL helpers on that same table.
