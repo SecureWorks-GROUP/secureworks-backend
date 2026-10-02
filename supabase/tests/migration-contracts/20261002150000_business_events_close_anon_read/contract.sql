@@ -4,46 +4,82 @@
 --    sessions read nothing.
 -- 3. service_role is unaffected.
 -- 4. anon INSERT behaves as before for the patio tool's return=minimal post.
+-- 5. Neither the public key nor a signed-in session can empty the table:
+--    anon cannot TRUNCATE, UPDATE or DELETE; authenticated cannot TRUNCATE.
 
 -- 1. Shape --------------------------------------------------------------------
+-- Every failed check is collected and raised together, so the break contract
+-- can prove more than one of them at once.
 DO $$
+DECLARE
+  problems text[] := ARRAY[]::text[];
 BEGIN
   IF has_table_privilege('anon', 'public.business_events', 'SELECT')
      OR has_any_column_privilege('anon', 'public.business_events', 'SELECT') THEN
-    RAISE EXCEPTION 'be-close: anon still holds SELECT';
+    problems := array_append(problems, 'anon still holds SELECT'::text);
+  END IF;
+  IF has_table_privilege('anon', 'public.business_events', 'TRUNCATE') THEN
+    problems := array_append(problems, 'anon still holds TRUNCATE'::text);
+  END IF;
+  IF has_table_privilege('anon', 'public.business_events', 'UPDATE')
+     OR has_any_column_privilege('anon', 'public.business_events', 'UPDATE') THEN
+    problems := array_append(problems, 'anon still holds UPDATE'::text);
+  END IF;
+  IF has_table_privilege('anon', 'public.business_events', 'DELETE') THEN
+    problems := array_append(problems, 'anon still holds DELETE'::text);
+  END IF;
+  IF has_table_privilege('anon', 'public.business_events', 'REFERENCES')
+     OR has_any_column_privilege('anon', 'public.business_events', 'REFERENCES') THEN
+    problems := array_append(problems, 'anon still holds REFERENCES'::text);
+  END IF;
+  IF has_table_privilege('anon', 'public.business_events', 'TRIGGER') THEN
+    problems := array_append(problems, 'anon still holds TRIGGER'::text);
   END IF;
   IF NOT has_table_privilege('anon', 'public.business_events', 'INSERT') THEN
-    RAISE EXCEPTION 'be-close: anon lost INSERT (out of scope for this change)';
+    problems := array_append(problems, 'anon lost INSERT (out of scope for this change)'::text);
   END IF;
-  IF NOT has_table_privilege('authenticated', 'public.business_events', 'SELECT') THEN
-    RAISE EXCEPTION 'be-close: authenticated lost SELECT';
+  IF has_table_privilege('authenticated', 'public.business_events', 'TRUNCATE') THEN
+    problems := array_append(problems, 'authenticated still holds TRUNCATE'::text);
+  END IF;
+  IF has_table_privilege('authenticated', 'public.business_events', 'REFERENCES')
+     OR has_table_privilege('authenticated', 'public.business_events', 'TRIGGER') THEN
+    problems := array_append(problems, 'authenticated still holds REFERENCES or TRIGGER'::text);
+  END IF;
+  IF NOT has_table_privilege('authenticated', 'public.business_events', 'SELECT')
+     OR NOT has_table_privilege('authenticated', 'public.business_events', 'INSERT')
+     OR NOT has_table_privilege('authenticated', 'public.business_events', 'UPDATE')
+     OR NOT has_table_privilege('authenticated', 'public.business_events', 'DELETE') THEN
+    problems := array_append(problems, 'authenticated lost SELECT, INSERT, UPDATE or DELETE (out of scope)'::text);
   END IF;
   IF EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'business_events'
              AND policyname = 'select_all') THEN
-    RAISE EXCEPTION 'be-close: select_all still present';
+    problems := array_append(problems, 'select_all still present'::text);
   END IF;
   IF EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'business_events'
              AND cmd IN ('SELECT', 'ALL') AND roles && ARRAY['public', 'anon']::name[]) THEN
-    RAISE EXCEPTION 'be-close: a read policy still applies to anon or PUBLIC';
+    problems := array_append(problems, 'a read policy still applies to anon or PUBLIC'::text);
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'business_events'
                  AND policyname = 'business_events_staff_read' AND cmd = 'SELECT'
                  AND roles = ARRAY['authenticated']::name[]) THEN
-    RAISE EXCEPTION 'be-close: business_events_staff_read missing or not limited to authenticated';
+    problems := array_append(problems, 'business_events_staff_read missing or not limited to authenticated'::text);
   END IF;
   IF (SELECT count(*) FROM pg_policies WHERE schemaname = 'public' AND tablename = 'business_events'
       AND policyname IN ('insert_only', 'Allow scope decision inserts from tools') AND cmd = 'INSERT') <> 2 THEN
-    RAISE EXCEPTION 'be-close: the insert policies changed';
+    problems := array_append(problems, 'the insert policies changed'::text);
   END IF;
   IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.business_events'::regclass) THEN
-    RAISE EXCEPTION 'be-close: row level security is off';
+    problems := array_append(problems, 'row level security is off'::text);
   END IF;
   IF has_function_privilege('anon', 'public.business_events_staff_reader()', 'EXECUTE') THEN
-    RAISE EXCEPTION 'be-close: anon can execute the staff helper';
+    problems := array_append(problems, 'anon can execute the staff helper'::text);
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE oid = 'public.business_events_staff_reader()'::regprocedure
                  AND prosecdef AND proconfig @> ARRAY['search_path=""']) THEN
-    RAISE EXCEPTION 'be-close: staff helper is not SECURITY DEFINER with an empty search_path';
+    problems := array_append(problems, 'staff helper is not SECURITY DEFINER with an empty search_path'::text);
+  END IF;
+  IF cardinality(problems) > 0 THEN
+    RAISE EXCEPTION 'be-close: %', array_to_string(problems, '; ');
   END IF;
 END $$;
 
@@ -106,6 +142,48 @@ BEGIN
   END IF;
 END $$;
 ROLLBACK TO SAVEPOINT anon_insert;
+
+-- 2b2. anon cannot empty or change the table, even by a route row rules
+-- would not stop (TRUNCATE ignores row level security).
+SAVEPOINT anon_wipe;
+SET LOCAL ROLE anon;
+DO $$
+BEGIN
+  BEGIN
+    TRUNCATE public.business_events;
+    RAISE EXCEPTION 'be-close: anon truncated business_events';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    DELETE FROM public.business_events;
+    RAISE EXCEPTION 'be-close: anon ran DELETE on business_events';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    UPDATE public.business_events SET body_preview = 'x';
+    RAISE EXCEPTION 'be-close: anon ran UPDATE on business_events';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+RESET ROLE;
+ROLLBACK TO SAVEPOINT anon_wipe;
+
+-- 2b3. A signed-in staff session cannot truncate either.
+SAVEPOINT staff_wipe;
+SELECT set_config('request.jwt.claim.sub', 'be000000-0000-4000-8000-000000000001', true);
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  TRUNCATE public.business_events;
+  RAISE EXCEPTION 'be-close: signed-in admin truncated business_events';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+RESET ROLE;
+ROLLBACK TO SAVEPOINT staff_wipe;
+DO $$
+BEGIN
+  IF pg_temp.be_visible() <> 2 THEN RAISE EXCEPTION 'be-close: fixture rows went missing'; END IF;
+END $$;
 
 -- 2c. Signed-in sessions: staff see both rows; everyone else sees none.
 DO $$

@@ -1,10 +1,23 @@
 -- After the down migration the pre-change read surface is back exactly:
--- select_all for PUBLIC, anon SELECT, no staff policy or helper, insert
--- policies untouched.
+-- select_all for PUBLIC, anon SELECT and the other anon and authenticated
+-- table grants, no staff policy or helper, insert policies untouched.
 DO $$
 BEGIN
   IF NOT has_table_privilege('anon', 'public.business_events', 'SELECT') THEN
     RAISE EXCEPTION 'be-close rollback: anon SELECT not restored';
+  END IF;
+  IF NOT (has_table_privilege('anon', 'public.business_events', 'TRUNCATE')
+          AND has_table_privilege('anon', 'public.business_events', 'UPDATE')
+          AND has_table_privilege('anon', 'public.business_events', 'DELETE')
+          AND has_table_privilege('anon', 'public.business_events', 'REFERENCES')
+          AND has_table_privilege('anon', 'public.business_events', 'TRIGGER')
+          AND has_table_privilege('anon', 'public.business_events', 'INSERT')) THEN
+    RAISE EXCEPTION 'be-close rollback: anon table grants not restored';
+  END IF;
+  IF NOT (has_table_privilege('authenticated', 'public.business_events', 'TRUNCATE')
+          AND has_table_privilege('authenticated', 'public.business_events', 'REFERENCES')
+          AND has_table_privilege('authenticated', 'public.business_events', 'TRIGGER')) THEN
+    RAISE EXCEPTION 'be-close rollback: authenticated table grants not restored';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'business_events'
                  AND policyname = 'select_all' AND cmd = 'SELECT' AND roles = ARRAY['public']::name[]

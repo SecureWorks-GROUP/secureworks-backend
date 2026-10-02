@@ -6,7 +6,7 @@
 -- SELECT, the anon key printed in the Ops, Trade, Sale, fence and patio pages
 -- can read every row, including SMS bodies (payload / body_preview).
 --
--- What this changes (read side only):
+-- What this changes:
 --   1. Drops select_all.
 --   2. Adds business_events_staff_read: SELECT for signed-in office staff only
 --      (users.role admin, owner, ops_manager, sales, sales_manager), through a
@@ -18,6 +18,20 @@
 --   3. Revokes SELECT from anon (and PUBLIC). authenticated and service_role
 --      keep an explicit SELECT grant; service_role bypasses row rules and is
 --      unaffected.
+--   4. Revokes TRUNCATE, UPDATE, DELETE, REFERENCES and TRIGGER from anon
+--      (and PUBLIC), so the public key holds INSERT and nothing else here.
+--      Production grants anon every table privilege through Supabase's
+--      default privileges (read-only check, 2 Oct 2026). Row rules already
+--      stop anon UPDATE and DELETE (no policy allows them), but TRUNCATE
+--      ignores row rules entirely. No anon caller updates, deletes or
+--      truncates this table; the only INSERT trigger
+--      (attribute_business_event) is SECURITY DEFINER, so an anon insert
+--      never needs UPDATE.
+--   5. Revokes TRUNCATE, REFERENCES and TRIGGER from authenticated. No staff
+--      surface truncates, and REFERENCES / TRIGGER are only usable through
+--      DDL, which no signed-in surface can issue. authenticated keeps
+--      SELECT, INSERT, UPDATE and DELETE; UPDATE and DELETE stay inert
+--      under row rules (no policy) and are left for a separate item.
 --
 -- What this deliberately does NOT change:
 --   - INSERT: the insert_only policy (PUBLIC, WITH CHECK true) and
@@ -27,7 +41,9 @@
 --     that needs no SELECT privilege and no SELECT policy, so it keeps
 --     working. An INSERT that asks for the row back (return=representation)
 --     as anon is refused after this change; no caller does that.
---   - UPDATE, DELETE, TRUNCATE grants: unchanged (separate item).
+--   - Other routes to the same rows: the anon-callable _sw_service_key()
+--     (hands out the service-role key) and the live-only exec_sql (runs SQL
+--     as postgres) are separate items; this change does not close them.
 --   - The BEFORE INSERT attribution trigger: SECURITY DEFINER, unaffected.
 --
 -- Callers and the order they must move in: see the merge request
@@ -91,6 +107,11 @@ CREATE POLICY business_events_staff_read
 REVOKE SELECT ON TABLE public.business_events FROM PUBLIC, anon;
 GRANT SELECT ON TABLE public.business_events TO authenticated, service_role;
 
+REVOKE TRUNCATE, UPDATE, DELETE, REFERENCES, TRIGGER
+  ON TABLE public.business_events FROM PUBLIC, anon;
+REVOKE TRUNCATE, REFERENCES, TRIGGER
+  ON TABLE public.business_events FROM authenticated;
+
 DO $post$
 BEGIN
   IF has_table_privilege('anon', 'public.business_events', 'SELECT')
@@ -107,6 +128,13 @@ BEGIN
   END IF;
   IF NOT has_table_privilege('authenticated', 'public.business_events', 'SELECT') THEN
     RAISE EXCEPTION 'business_events_close_anon_read: authenticated lost SELECT';
+  END IF;
+  IF has_table_privilege('anon', 'public.business_events', 'TRUNCATE, UPDATE, DELETE, REFERENCES, TRIGGER')
+     OR has_any_column_privilege('anon', 'public.business_events', 'UPDATE, REFERENCES') THEN
+    RAISE EXCEPTION 'business_events_close_anon_read: anon still holds a privilege beyond INSERT';
+  END IF;
+  IF has_table_privilege('authenticated', 'public.business_events', 'TRUNCATE, REFERENCES, TRIGGER') THEN
+    RAISE EXCEPTION 'business_events_close_anon_read: authenticated still holds TRUNCATE, REFERENCES or TRIGGER';
   END IF;
 END
 $post$;

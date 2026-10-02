@@ -1,1 +1,3 @@
 be-close: anon still holds SELECT
+anon still holds TRUNCATE
+select_all still present

@@ -1,6 +1,7 @@
 -- Pre-migration state for 20261002150000_business_events_close_anon_read,
 -- shaped like production on 2 Oct 2026 (read-only check): row level security
--- on, select_all for PUBLIC USING (true), anon holding SELECT and INSERT.
+-- on, select_all for PUBLIC USING (true), anon and authenticated holding
+-- every table privilege.
 -- public.business_events and public.users already exist from earlier
 -- registered cases.
 
@@ -43,7 +44,9 @@ CREATE POLICY "Allow scope decision inserts from tools" ON public.business_event
   FOR INSERT TO anon WITH CHECK (event_type = 'scope.decision');
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-GRANT SELECT, INSERT ON public.business_events TO anon, authenticated;
+-- Production (2 Oct 2026 snapshot): anon and authenticated hold every table
+-- privilege through Supabase's default privileges, TRUNCATE included.
+GRANT ALL ON public.business_events TO anon, authenticated;
 GRANT SELECT, INSERT, UPDATE ON public.business_events TO service_role;
 GRANT SELECT ON public.users TO authenticated, service_role;
 -- Supabase grants sequence use to the API roles by default.
