@@ -63,11 +63,32 @@ import {
 } from "../ghl-proxy/calendar_events.ts";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
 import {
+  applySalesBookingScopeAppointments,
+  readSalesBookingScopeCalendars,
+  type SalesBookingScopeAppointment,
+  type SalesBookingScopeCalendarReader,
+} from "./sales_booking_scope_appointment.ts";
+import {
+  SALES_BOOKING_OWNER_UNCLEAR_LABEL,
   SALES_BOOKING_SENDER_LINES,
+  SALES_BOOKING_STRATCO_CALENDAR_ID,
+  type SalesBookingLeadKind,
+  salesBookingLeadKind,
   salesBookingLeadOwner,
+  salesBookingLeadTags,
   salesBookingLineLabel,
   type SalesBookingOpportunityOwnership,
 } from "./sales_booking_sender.ts";
+import {
+  loadSalesBookingRoutes,
+  resolveSalesBookingRoute,
+  SALES_BOOKING_ROUTE_MESSAGES,
+  SALES_BOOKING_SEED_ROUTES,
+  type SalesBookingRoute,
+  type SalesBookingRouteDecision,
+  salesBookingRoutesNeedLeadSource,
+  salesBookingRoutesNeedTags,
+} from "./sales_booking_routes.ts";
 
 export const SALES_BOOKING_API_VERSION = "sales-booking-api/v1";
 
@@ -125,13 +146,16 @@ export interface SalesBookingResource {
    */
   scope_stage_ids: readonly string[];
   /**
-   * Whether an unassigned lead in this pipeline is this person's. A lead is
-   * on a person's list only when its current GHL assignee is that person, or
-   * it is unassigned and this is true (`salesBookingLeadBelongsTo`). Khairo
-   * and Stratco share the fencing pipeline, so a lead never shows on the
-   * wrong person's list and never gets a text from the wrong line.
+   * Whose list shows this pipeline's unassigned leads that no booking route
+   * matches (sales_booking_routes.ts), flagged and never approved or texted
+   * until a rule or a GHL assignee claims them. Which unassigned leads are
+   * whose is the routes table, not this roster. A lead is on a person's list
+   * only when its current GHL assignee is that person, or it is unassigned
+   * and its route names them (`salesBookingLeadBelongsTo`). With the seed
+   * routes a possible Stratco lead never shows on Khairo's list and never
+   * gets a text from his line.
    */
-  owns_unassigned: boolean;
+  holds_unrouted: boolean;
 }
 
 /**
@@ -177,8 +201,8 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "1c312cc2-b6f6-4aad-b3c0-a4b14784a5c5", // Scope Booked
       "9b9e5313-8e0e-4ed6-8654-d50413b99885", // Scope Complete / Quote to be Sent
     ],
-    // An unassigned patio lead is Nithin's.
-    owns_unassigned: true,
+    // An unassigned patio lead no route claims shows here, flagged.
+    holds_unrouted: true,
   },
   marnin: {
     resource_id: "marnin",
@@ -201,8 +225,9 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
-    // An unassigned fencing (Stratco) lead is Marnin's.
-    owns_unassigned: true,
+    // An unassigned fencing lead no route claims (owner unclear, Stratco or
+    // normal?) shows here, flagged, and is held until assigned in GHL.
+    holds_unrouted: true,
   },
   khairo: {
     resource_id: "khairo",
@@ -223,8 +248,9 @@ export const SALES_BOOKING_RESOURCES: Readonly<
       "4dc3da8f-d713-4bd4-851c-8e89b6682a4e", // Scope Scheduled
       "418534d4-6356-4c20-a274-51fbb892c2fa", // Scope Complete
     ],
-    // Only leads GHL assigns to him; an unassigned fencing lead is Stratco's.
-    owns_unassigned: false,
+    // His unassigned leads are the ones a route gives him (seed: normal
+    // fencing, owner 2026-09-24), plus leads GHL assigns to him.
+    holds_unrouted: false,
   },
 };
 
@@ -817,6 +843,60 @@ export interface SalesBookingCase {
   /** Latest engine pack row for this opportunity, or null when no pack matched. */
   proposal: SalesBookingCaseProposal | null;
   stamp_state: SalesBookingStampState;
+  /**
+   * The lead's live future scope visit in ANY booking person's GHL calendar,
+   * else null (sales_booking_scope_appointment.ts). Present means booked with
+   * that person: off every to-contact list. Absent when the check did not run.
+   */
+  scope_appointment?: SalesBookingScopeAppointment | null;
+  /** Unassigned lead no booking route claims (seed: a fencing lead with
+   * neither a Stratco nor a normal-lead signal, or whose contact or STRATCO
+   * FENCING calendar could not be read): on the list of the person holding
+   * that pipeline's unrouted leads only, never approved or texted until
+   * assigned in GHL or claimed by a route. */
+  owner_unclear?: boolean;
+  /** `Owner unclear, Stratco or normal?` when `owner_unclear`. */
+  owner_unclear_label?: string;
+  /** Which booking route this lead takes (sales_booking_routes.ts). */
+  booking_route?: SalesBookingCaseRoute;
+}
+
+/** A lead's booking route as the list publishes it. `checked_at_approval`:
+ * an assigned lead whose route needs facts the list does not read; the
+ * approval reads them. */
+export interface SalesBookingCaseRoute {
+  state: "routed" | "not_routed" | "checked_at_approval";
+  route_id: string | null;
+  person: string | null;
+  calendar_id: string | null;
+  calendar_name: string | null;
+  reason: string | null;
+  message: string | null;
+}
+
+/** Publish one route decision on a case. */
+export function salesBookingCaseRoute(
+  decision: SalesBookingRouteDecision,
+): SalesBookingCaseRoute {
+  return decision.ok
+    ? {
+      state: "routed",
+      route_id: decision.route.id,
+      person: decision.route.person,
+      calendar_id: decision.route.calendar_id,
+      calendar_name: decision.route.calendar_name,
+      reason: null,
+      message: null,
+    }
+    : {
+      state: "not_routed",
+      route_id: decision.route_id ?? null,
+      person: null,
+      calendar_id: null,
+      calendar_name: null,
+      reason: decision.reason,
+      message: decision.message,
+    };
 }
 
 /** A contact whose "name" is really a phone number is an unnamed enquiry. */
@@ -1118,6 +1198,7 @@ export interface SalesBookingContactFact {
   tags?: unknown;
   customFields?: unknown;
   customData?: unknown;
+  source?: unknown;
 }
 
 /** Linked job site when GHL city/address is empty. Never invented. */
@@ -1202,6 +1283,7 @@ export function salesBookingContactFactFromGhl(
     tags: contact.tags,
     customFields: contact.customFields,
     customData: contact.customData,
+    source: contact.source,
   };
 }
 
@@ -1251,29 +1333,115 @@ export function projectSalesBookingCase(
   };
 }
 
+/** `yes`: `resourceId`'s lead. `owner_unclear`: shown on their list,
+ * flagged, but no approval or text until it is assigned in GHL or a route
+ * claims it. `no`: not theirs. */
+export type SalesBookingLeadBelonging = "yes" | "no" | "owner_unclear";
+
 /**
- * Whether an opportunity with this GHL assignee is `resourceId`'s lead: its
- * assignee is that person, or it is unassigned in a pipeline whose unassigned
- * leads are theirs. The read list, both approval routes and the send check
- * all ask this one question.
+ * Whether an opportunity is `resourceId`'s lead: its GHL assignee is that
+ * person, or it is unassigned and the first matching booking route names
+ * them (sales_booking_routes.ts). An unassigned lead no route claims, or
+ * whose route could not be decided (a fact unread), is held on the list of
+ * the person who holds that pipeline's unrouted leads. The read list, both
+ * approval routes and both presses all ask this one question. `routes`
+ * defaults to the seed only for callers with no table read (tests).
  */
 export function salesBookingLeadBelongsTo(
-  assignedTo: unknown,
+  ownership: SalesBookingOpportunityOwnership,
   resourceId: string,
+  routes: readonly SalesBookingRoute[] = SALES_BOOKING_SEED_ROUTES,
+): SalesBookingLeadBelonging {
+  if (!Object.hasOwn(SALES_BOOKING_RESOURCES, resourceId)) return "no";
+  const unassigned = ownership.assignedTo === null ||
+    ownership.assignedTo === "";
+  if (!unassigned) {
+    return salesBookingLeadOwner(ownership.assignedTo, null) === resourceId
+      ? "yes"
+      : "no";
+  }
+  const decision = salesBookingRouteFor(ownership, routes);
+  if (decision.ok) return decision.route.person === resourceId ? "yes" : "no";
+  const holder = SALES_BOOKING_RESOURCES[resourceId];
+  return holder.pipeline_id === ownership.pipelineId && holder.holds_unrouted
+    ? "owner_unclear"
+    : "no";
+}
+
+/** The booking route for one lead's live ownership read. */
+export function salesBookingRouteFor(
+  ownership: SalesBookingOpportunityOwnership,
+  routes: readonly SalesBookingRoute[],
+): SalesBookingRouteDecision {
+  return resolveSalesBookingRoute(routes, {
+    pipelineId: ownership.pipelineId,
+    assignedTo: ownership.assignedTo,
+    kind: ownership.kind,
+    kindUnread: ownership.kindUnread,
+    tags: ownership.tags ?? null,
+  });
+}
+
+/** Whether a lead in this pipeline needs its contact read to be routed. */
+function salesBookingPipelineSplitsByKind(
   pipelineId: string,
+  routes: readonly SalesBookingRoute[] = SALES_BOOKING_SEED_ROUTES,
 ): boolean {
-  const resource = Object.hasOwn(SALES_BOOKING_RESOURCES, resourceId)
-    ? SALES_BOOKING_RESOURCES[resourceId]
-    : null;
-  if (!resource) return false;
-  const unassignedOwner =
-    Object.values(SALES_BOOKING_RESOURCES).find((row) =>
-      row.pipeline_id === pipelineId && row.owns_unassigned
-    )?.resource_id ?? null;
-  return salesBookingLeadOwner(
-    assignedTo,
-    unassignedOwner,
-  ) === resourceId;
+  return salesBookingRoutesNeedLeadSource(routes, pipelineId) ||
+    salesBookingRoutesNeedTags(routes, pipelineId);
+}
+
+/**
+ * `kind` of an unassigned lead in a pipeline split by kind, read the same way
+ * for the list, both approvals and send: the opportunity, its GHL contact
+ * (search rows omit contact tags and custom fields) and the STRATCO FENCING
+ * calendar, the two reads side by side. A failed read never clears a lead for
+ * the normal line: unless a Stratco signal was seen it is held `unclear` with
+ * `kindUnread`. `contact` is the contact read, for reuse.
+ */
+export async function resolveSalesBookingLeadKind(
+  opportunity: Record<string, unknown>,
+  reads: {
+    readContacts?(
+      contactIds: string[],
+    ): Promise<Record<string, SalesBookingContactFact>>;
+    readStratcoBooked?(contactId: string): Promise<boolean>;
+  },
+  /** A booking route matches on a tag: read the contact even when the
+   * opportunity alone already says Stratco. */
+  options: { needTags?: boolean } = {},
+): Promise<{
+  kind: SalesBookingLeadKind;
+  kindUnread: boolean;
+  contact: SalesBookingContactFact | null;
+  /** Opportunity plus contact-read tags; null when the contact was unread. */
+  tags: string[] | null;
+}> {
+  if (!options.needTags && salesBookingLeadKind(opportunity) === "stratco") {
+    return { kind: "stratco", kindUnread: false, contact: null, tags: null };
+  }
+  const contactId = salesBookingContactId(opportunity);
+  const [contact, booked] = contactId
+    ? await Promise.all([
+      reads.readContacts?.([contactId]).then(
+        (facts) => facts[contactId] ?? null,
+        () => null,
+      ) ?? null,
+      reads.readStratcoBooked?.(contactId).catch(() => null) ?? null,
+    ])
+    : [null, null];
+  const kind = salesBookingLeadKind(opportunity, {
+    contact,
+    stratcoCalendarBooked: booked === true,
+  });
+  const kindUnread = kind !== "stratco" &&
+    (contact === null || booked === null);
+  return {
+    kind: kindUnread ? "unclear" : kind,
+    kindUnread,
+    contact,
+    tags: contact === null ? null : salesBookingLeadTags(opportunity, contact),
+  };
 }
 
 /**
@@ -1316,6 +1484,13 @@ export interface SalesBookingDiaryEntry {
    * Both rows stay on the diary so each calendar is shown event for event.
    */
   mirror_of_ghl_event_id: string | null;
+  /**
+   * GHL rows only, present only when set: the unmarked Outlook copy of this
+   * appointment (GHL's own calendar sync), folded into this row for display
+   * instead of shown as a second visit. The whole Outlook row, so availability
+   * still reads it. See `foldSalesBookingOutlookCopies`.
+   */
+  outlook_copy?: SalesBookingDiaryEntry;
   /** Additive, set by sales_booking_visits.ts: the booked visit on this event (GHL id or Outlook mirror), else null. */
   booked_visit?: BookingObject | null;
 }
@@ -1356,6 +1531,16 @@ export function perthDiaryInstant(value: unknown): string | null {
 
 /** @deprecated Use perthDiaryInstant. */
 export const perthGraphInstant = perthDiaryInstant;
+
+/**
+ * Whether a GHL appointment status holds the scoper's time for live
+ * availability: every status except `cancelled` and `invalid`. The one rule
+ * shared by availability's GHL busy list and the Outlook copy fold.
+ */
+export function salesBookingGhlStatusHoldsTime(status: unknown): boolean {
+  const s = typeof status === "string" ? status.trim().toLowerCase() : "";
+  return s !== "cancelled" && s !== "invalid";
+}
 
 /**
  * Project one GHL calendar event onto a diary entry.
@@ -1404,19 +1589,26 @@ export function projectSalesBookingDiaryEntry(
 }
 
 // ── Outlook (primary calendar) ─────────────────────────────
-// Decision D2 (23 Sep 2026): the booking screen shows the owner's Outlook
+// Decision D2 (23 Sep 2026): the booking screen shows each scoper's Outlook
 // events beside GHL, read through the mail app's existing Graph app-only
-// credential (`_shared/graph_client.ts`, Calendars.ReadWrite already granted).
-// No new permission. The mailbox is a server constant per booking resource,
-// never a caller-chosen address; a resource absent here has no Outlook read
-// and says so (`not_configured`), it is not silently treated as covered.
+// credential (`_shared/graph_client.ts`). Admin consent on 25 Sep 2026 gave
+// that app Calendars.Read for the whole tenant, so every scoper is read. The
+// mailbox is a server constant per booking resource, never a caller-chosen
+// address; a resource absent here has no Outlook read and says so
+// (`not_configured`), it is not silently treated as covered.
+//
+// READ ONLY. This map widens who is READ. Who the booking WRITES to in Outlook
+// is the separate, narrower `SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES`
+// (sales_booking_outlook_mirror.ts); never point a write at this map.
 
 /** Booking resources whose Outlook primary calendar is read into the diary. */
 export const SALES_BOOKING_OUTLOOK_MAILBOXES: Readonly<Record<string, string>> =
   {
-    // wiki fencing-stratco-marnin.json calendar_email; matches the stored
-    // scoper_preferences.work_calendar_email the desk read tool uses.
+    // Each matches the stored scoper_preferences.work_calendar_email the desk
+    // read tool uses (Marnin also: wiki fencing-stratco-marnin.json).
+    nithin: "nithin@secureworkswa.com.au",
     marnin: "marnin@secureworkswa.com.au",
+    khairo: "khairo@secureworkswa.com.au",
   };
 
 /**
@@ -1558,7 +1750,7 @@ export type SalesBookingGraphGet = (
 export const SALES_BOOKING_OUTLOOK_MAX_PAGES = 10;
 
 /**
- * The owner's Outlook primary calendar for the window, via Graph
+ * The scoper's Outlook primary calendar for the window, via Graph
  * `calendarView` (recurrences expanded). A failed, malformed or unfinished
  * read is a named failure with zero entries: never an empty, free week.
  * Never throws.
@@ -1664,6 +1856,69 @@ export async function readSalesBookingOutlookDiary(args: {
     entries,
     malformed_dropped: dropped,
     calendar_email: mailbox,
+  };
+}
+
+/**
+ * GHL's own calendar sync copies a scoper's GHL appointment into their Outlook
+ * with no SecureWorks marker (live: Khairo, GHL Tue 29 Sep 10:00-10:30 blank
+ * title, Outlook the same span "Fencing Complaint Basil Laing"). Shown as-is
+ * that is two visits and two busy blocks for one visit.
+ *
+ * An Outlook event is that copy only when it is `busy` (not leave, not
+ * private), blocks capacity, is not all-day, carries no mirror marker, and
+ * starts and ends at exactly the same instants as a non-all-day GHL event of
+ * the same person's diary whose status availability counts as busy
+ * (`salesBookingGhlStatusHoldsTime`: not cancelled, not invalid). It is folded
+ * into that GHL row as `outlook_copy` and leaves the Outlook list. Each GHL row
+ * absorbs at most one copy, so a second Outlook event on the same span still
+ * shows and still blocks. Marked mirrors (`mirror_of_ghl_event_id`) keep their
+ * existing two-row handling. The fold is for display only: availability reads
+ * the Outlook half with every `outlook_copy` restored, so the copy stays a busy
+ * block and a travel neighbour with its own location, exactly as the owner
+ * press reads Outlook raw. Folding frees neither capacity nor travel time.
+ */
+export function foldSalesBookingOutlookCopies(
+  ghl: SalesBookingDiaryEntry[],
+  outlook: SalesBookingDiaryEntry[],
+): {
+  ghl: SalesBookingDiaryEntry[];
+  outlook: SalesBookingDiaryEntry[];
+  folded: number;
+} {
+  const span = (e: SalesBookingDiaryEntry) =>
+    `${Date.parse(e.start)}|${Date.parse(e.end)}`;
+  const byEventId = (a: SalesBookingDiaryEntry, b: SalesBookingDiaryEntry) =>
+    a.event_id.localeCompare(b.event_id);
+  const open = new Map<string, SalesBookingDiaryEntry[]>();
+  for (const g of [...ghl].sort(byEventId)) {
+    if (
+      g.source !== DIARY_SOURCE_GHL || !g.blocks_capacity || g.is_all_day ||
+      !salesBookingGhlStatusHoldsTime(g.show_as)
+    ) {
+      continue;
+    }
+    const key = span(g);
+    open.set(key, [...(open.get(key) ?? []), g]);
+  }
+  const copyOf = new Map<SalesBookingDiaryEntry, SalesBookingDiaryEntry>();
+  const folded = new Set<SalesBookingDiaryEntry>();
+  for (const o of [...outlook].sort(byEventId)) {
+    const candidate = o.source === DIARY_SOURCE_OUTLOOK && o.kind === "busy" &&
+      o.blocks_capacity && !o.is_all_day && !o.mirror_of_ghl_event_id;
+    const target = candidate ? open.get(span(o))?.shift() : undefined;
+    if (target) {
+      copyOf.set(target, o);
+      folded.add(o);
+    }
+  }
+  return {
+    ghl: ghl.map((g) => {
+      const copy = copyOf.get(g);
+      return copy ? { ...g, outlook_copy: copy } : g;
+    }),
+    outlook: outlook.filter((o) => !folded.has(o)),
+    folded: copyOf.size,
   };
 }
 
@@ -1999,6 +2254,16 @@ export interface SalesBookingReadResponse {
     calendar: SalesBookingCalendarOverlay;
   };
   booking_flow?: BookingObject;
+  /** The booking routes this read used (sales_booking_routes.ts). */
+  routing?: {
+    ok: boolean;
+    reason: string | null;
+    message: string | null;
+    routes: SalesBookingRoute[];
+  };
+  /** Contact id -> live future scope visit in any booking person's GHL
+   * calendar (sales_booking_scope_appointment.ts). Absent when not checked. */
+  scope_appointments?: Record<string, SalesBookingScopeAppointment>;
   booked_visits?: BookingObject[] | null;
   visit_outcomes?: import("./visit_outcomes.ts").VisitOutcome[] | null;
   coverage: {
@@ -2008,7 +2273,7 @@ export interface SalesBookingReadResponse {
     /** Open roster rows left out because their GHL stage is past scope-needed. */
     excluded_by_stage: number;
     /**
-     * `primary_outlook_calendar_only` when the owner's Outlook primary calendar
+     * `primary_outlook_calendar_only` when the scoper's Outlook primary calendar
      * was read (its `oof` blocks show as leave); leave kept in any other
      * calendar is still unread. `not_read` otherwise.
      */
@@ -2045,6 +2310,8 @@ export interface SalesBookingReadResponse {
         calendar_email: string | null;
         event_count: number;
         malformed_dropped: number;
+        /** Unmarked Outlook copies of a GHL visit folded into that GHL row. */
+        ghl_copies_folded: number;
       };
     };
   };
@@ -2084,6 +2351,7 @@ export function assembleSalesBookingRead(input: {
   const outlook = input.outlook ?? outlookDiaryNotConfigured();
   const cases = input.projectedCases;
   const outlookConfigured = outlook.state !== "not_configured";
+  const folded = foldSalesBookingOutlookCopies(diary.entries, outlook.entries);
   // A configured Outlook calendar that failed makes the whole diary unread:
   // GHL-only rows would show the owner free when Outlook says he is not.
   const diaryReadOk = diary.read_ok && (!outlookConfigured || outlook.read_ok);
@@ -2224,7 +2492,7 @@ export function assembleSalesBookingRead(input: {
         (opportunities.source === "cache" ? null : 0),
     },
     cases,
-    diary: mergeSalesBookingDiaryEntries(diary.entries, outlook.entries),
+    diary: mergeSalesBookingDiaryEntries(folded.ghl, folded.outlook),
     diary_read: {
       read_ok: diaryReadOk,
       reason: diaryReason,
@@ -2245,6 +2513,7 @@ export function assembleSalesBookingRead(input: {
           calendar_email: outlook.calendar_email,
           event_count: outlook.entries.length,
           malformed_dropped: outlook.malformed_dropped,
+          ghl_copies_folded: folded.folded,
         },
       },
     },
@@ -2305,7 +2574,7 @@ export interface SalesBookingReadDependencies {
     deadlineMs?: number;
   }): Promise<SalesBookingDiaryScan>;
   /**
-   * The owner's Outlook primary calendar for the week. Never throws. Absent
+   * The scoper's Outlook primary calendar for the week. Never throws. Absent
    * means no Outlook read is wired: a resource with a configured Outlook
    * mailbox then reads as `failed` (`outlook_reader_not_wired`), never covered.
    */
@@ -2338,8 +2607,22 @@ export interface SalesBookingReadDependencies {
   ): Promise<Record<string, SalesBookingJobSiteFact>>;
   readOpportunityOwnership?(
     opportunityId: string,
-    opts: { deadlineMs: number },
+    opts: { deadlineMs: number; routes: readonly SalesBookingRoute[] },
   ): Promise<SalesBookingOpportunityOwnership>;
+  /** The booking routes table (sales_booking_routes.ts). Throws when
+   * unreadable: then no unassigned lead is routed (each is held, flagged)
+   * and nothing is bookable. Absent (tests): the seed routes. */
+  readRoutes?(): Promise<SalesBookingRoute[]>;
+  /** One booking person's GHL calendar, for the booked-elsewhere check. */
+  readScopeCalendar?: SalesBookingScopeCalendarReader;
+  /** Whether a contact has any appointment on the STRATCO FENCING calendar
+   * (`salesBookingContactHasStratcoAppointment`). Absent or failing, like
+   * `readContacts`, an unassigned fencing lead is held as owner unclear
+   * (`resolveSalesBookingLeadKind`). */
+  readContactStratcoBooked?(
+    contactId: string,
+    opts: { deadlineMs: number },
+  ): Promise<boolean>;
   now(): Date;
   loadThreadFactsCache?(
     resourceId: string,
@@ -2682,6 +2965,15 @@ export async function salesBookingRead(
     resource.resource_id,
     scoperUserId,
   );
+  // Booked-elsewhere check: every booking person's GHL calendar, read beside
+  // the roster and diary so it costs no extra wall clock.
+  const scopeCalendars = deps.readScopeCalendar
+    ? readSalesBookingScopeCalendars({
+      read: deps.readScopeCalendar,
+      nowMs: deps.now().getTime(),
+      deadlineMs,
+    })
+    : null;
   const [resolved, diary, outlook] = await Promise.all([
     rosterFresh && cachedRoster
       ? Promise.resolve({
@@ -2717,59 +3009,140 @@ export async function salesBookingRead(
       ),
   ]);
 
+  // The routes table decides whose unassigned leads are whose. Unreadable:
+  // no unassigned lead is routed (each is held, flagged) and none is
+  // bookable; assigned leads still follow their GHL assignee.
+  let routes: readonly SalesBookingRoute[] = SALES_BOOKING_SEED_ROUTES;
+  let routesError: string | null = null;
+  if (deps.readRoutes) {
+    try {
+      routes = await deps.readRoutes();
+    } catch (error) {
+      routes = [];
+      routesError = (error as Error)?.message || "booking_routes_unreadable";
+    }
+  }
   let opportunities = resolved.scan;
+  const ownershipById = new Map<string, SalesBookingOpportunityOwnership>();
   const ownedIds = new Set<string>();
-  const belongs = (ownership: SalesBookingOpportunityOwnership) =>
-    ownership.pipelineId === resource.pipeline_id &&
-    salesBookingLeadBelongsTo(
-      ownership.assignedTo,
+  const ownerUnclearIds = new Set<string>();
+  let kindUnread = 0;
+  let kindWithheld = 0;
+  const claim = (id: string, ownership: SalesBookingOpportunityOwnership) => {
+    if (ownership.pipelineId !== resource.pipeline_id) return;
+    if (ownership.kindUnread) kindUnread++;
+    const belonging = salesBookingLeadBelongsTo(
+      ownership,
       resource.resource_id,
-      ownership.pipelineId,
+      routes,
     );
+    if (belonging === "no") {
+      if (ownership.kindUnread) kindWithheld++;
+      return;
+    }
+    ownedIds.add(id);
+    ownershipById.set(id, ownership);
+    if (belonging === "owner_unclear") ownerUnclearIds.add(id);
+  };
   const cachedCandidates = new Set<string>();
+  const kindChecks: Array<{ id: string; row: Record<string, unknown> }> = [];
   for (const raw of opportunities.opportunities) {
     if (typeof raw.id !== "string" || !raw.id) continue;
     const live = liveRows.get(raw.id);
+    const scopeStage = isSalesBookingScopeStage(
+      typeof raw.pipelineStageId === "string" ? raw.pipelineStageId : "",
+      resource.scope_stage_ids,
+    );
     if (live) {
+      const ownership: SalesBookingOpportunityOwnership = {
+        assignedTo: live.assignedTo as string | null,
+        pipelineId: typeof live.pipelineId === "string"
+          ? live.pipelineId
+          : resource.pipeline_id,
+        kind: salesBookingLeadKind(live),
+        tags: salesBookingRoutesNeedTags(routes, resource.pipeline_id)
+          ? null
+          : salesBookingLeadTags(live),
+      };
+      // An unassigned lead whose route needs its source or tags is decided
+      // from its contact and the STRATCO FENCING calendar too, as at
+      // approval and send.
       if (
-        belongs({
-          assignedTo: live.assignedTo as string | null,
-          pipelineId: typeof live.pipelineId === "string"
-            ? live.pipelineId
-            : resource.pipeline_id,
-        })
-      ) ownedIds.add(raw.id);
-    } else if (
-      isSalesBookingScopeStage(
-        typeof raw.pipelineStageId === "string" ? raw.pipelineStageId : "",
-        resource.scope_stage_ids,
-      )
-    ) {
+        (ownership.assignedTo === null || ownership.assignedTo === "") &&
+        scopeStage &&
+        salesBookingPipelineSplitsByKind(ownership.pipelineId, routes)
+      ) {
+        kindChecks.push({ id: raw.id, row: live });
+      } else claim(raw.id, ownership);
+    } else if (scopeStage) {
       cachedCandidates.add(raw.id);
     }
   }
   const candidates = [...cachedCandidates];
   let ownershipUnread = 0;
-  let nextCandidate = 0;
+  const kindContactFacts: Record<string, SalesBookingContactFact> = {};
+  // One wave: live leads' kind reads beside cached leads' ownership reads.
+  const ownershipReads: Array<() => Promise<void>> = [
+    ...kindChecks.map(({ id, row }) => async () => {
+      const inBudget = deps.now().getTime() < deadlineMs;
+      const resolved = await resolveSalesBookingLeadKind(row, {
+        readContacts: inBudget && deps.readContacts
+          ? (ids) => deps.readContacts!(ids, { deadlineMs })
+          : undefined,
+        readStratcoBooked: inBudget && deps.readContactStratcoBooked
+          ? (contactId) =>
+            deps.readContactStratcoBooked!(contactId, { deadlineMs })
+          : undefined,
+      }, {
+        needTags: salesBookingRoutesNeedTags(
+          routes,
+          typeof row.pipelineId === "string"
+            ? row.pipelineId
+            : resource.pipeline_id,
+        ),
+      });
+      const contactId = salesBookingContactId(row);
+      if (contactId && resolved.contact) {
+        kindContactFacts[contactId] = resolved.contact;
+      }
+      claim(id, {
+        assignedTo: null,
+        pipelineId: typeof row.pipelineId === "string"
+          ? row.pipelineId
+          : resource.pipeline_id,
+        kind: resolved.kind,
+        kindUnread: resolved.kindUnread,
+        tags: resolved.tags,
+      });
+    }),
+    ...candidates.map((id) => async () => {
+      if (
+        !deps.readOpportunityOwnership || deps.now().getTime() >= deadlineMs
+      ) {
+        ownershipUnread++;
+        return;
+      }
+      try {
+        claim(
+          id,
+          await deps.readOpportunityOwnership(id, { deadlineMs, routes }),
+        );
+      } catch {
+        ownershipUnread++;
+      }
+    }),
+  ];
+  let nextOwnershipRead = 0;
   await Promise.all(Array.from(
-    { length: Math.min(SALES_BOOKING_THREAD_CONCURRENCY, candidates.length) },
+    {
+      length: Math.min(
+        SALES_BOOKING_THREAD_CONCURRENCY,
+        ownershipReads.length,
+      ),
+    },
     async () => {
-      while (nextCandidate < candidates.length) {
-        const id = candidates[nextCandidate++];
-        if (
-          !deps.readOpportunityOwnership || deps.now().getTime() >= deadlineMs
-        ) {
-          ownershipUnread++;
-          continue;
-        }
-        try {
-          const ownership = await deps.readOpportunityOwnership(id, {
-            deadlineMs,
-          });
-          if (belongs(ownership)) ownedIds.add(id);
-        } catch {
-          ownershipUnread++;
-        }
+      while (nextOwnershipRead < ownershipReads.length) {
+        await ownershipReads[nextOwnershipRead++]();
       }
     },
   ));
@@ -2787,16 +3160,24 @@ export async function salesBookingRead(
     if (contactId) scopedContactIds.push(contactId);
     if (typeof raw.id === "string" && raw.id) scopedOpportunityIds.push(raw.id);
   }
-  let contactFacts: Record<string, SalesBookingContactFact> = {};
+  const contactFacts: Record<string, SalesBookingContactFact> = {
+    ...kindContactFacts,
+  };
   const hydrateLive = opportunities.source !== "cache" &&
     deps.readContacts &&
     scopedContactIds.length > 0 &&
     deps.now().getTime() < deadlineMs;
   if (hydrateLive) {
-    try {
-      contactFacts = await deps.readContacts!(scopedContactIds, { deadlineMs });
-    } catch {
-      contactFacts = {};
+    const unhydrated = scopedContactIds.filter((id) => !contactFacts[id]);
+    if (unhydrated.length > 0) {
+      try {
+        Object.assign(
+          contactFacts,
+          await deps.readContacts!(unhydrated, { deadlineMs }),
+        );
+      } catch {
+        // Unread contacts stay "not given".
+      }
     }
     opportunities = {
       ...opportunities,
@@ -2840,6 +3221,37 @@ export async function salesBookingRead(
     }
   }
 
+  const caseRoute = (
+    ownership: SalesBookingOpportunityOwnership,
+  ): SalesBookingCaseRoute => {
+    if (routesError) {
+      return {
+        state: "not_routed",
+        route_id: null,
+        person: null,
+        calendar_id: null,
+        calendar_name: null,
+        reason: "booking_routes_unreadable",
+        message: SALES_BOOKING_ROUTE_MESSAGES.booking_routes_unreadable,
+      };
+    }
+    const assigned = !(ownership.assignedTo === null ||
+      ownership.assignedTo === "");
+    if (
+      assigned && salesBookingPipelineSplitsByKind(ownership.pipelineId, routes)
+    ) {
+      return {
+        state: "checked_at_approval",
+        route_id: null,
+        person: null,
+        calendar_id: null,
+        calendar_name: null,
+        reason: null,
+        message: "Its calendar is checked when you approve a visit.",
+      };
+    }
+    return salesBookingCaseRoute(salesBookingRouteFor(ownership, routes));
+  };
   const projected: SalesBookingCase[] = [];
   const seen = new Set<string>();
   let excludedByStage = 0;
@@ -2863,6 +3275,12 @@ export async function salesBookingRead(
     );
     if (!row || seen.has(row.id)) continue;
     seen.add(row.id);
+    if (ownerUnclearIds.has(opportunityId)) {
+      row.owner_unclear = true;
+      row.owner_unclear_label = SALES_BOOKING_OWNER_UNCLEAR_LABEL;
+    }
+    const ownership = ownershipById.get(opportunityId);
+    if (ownership) row.booking_route = caseRoute(ownership);
     const stageId = typeof raw.pipelineStageId === "string"
       ? raw.pipelineStageId
       : "";
@@ -2890,6 +3308,34 @@ export async function salesBookingRead(
     threads,
     excludedByStage,
   });
+  if (scopeCalendars) {
+    const booked = applySalesBookingScopeAppointments(
+      response.cases,
+      await scopeCalendars,
+      deps.now().getTime(),
+    );
+    response.scope_appointments = booked.by_contact;
+    response.coverage.gaps.push(...booked.gaps);
+  }
+  response.routing = {
+    ok: routesError === null,
+    reason: routesError === null ? null : "booking_routes_unreadable",
+    message: routesError === null
+      ? null
+      : SALES_BOOKING_ROUTE_MESSAGES.booking_routes_unreadable,
+    routes: routes.map((route) => ({ ...route })),
+  };
+  if (routesError) {
+    response.coverage.gaps.push(
+      "Booking rules could not be read: unassigned leads are held and nothing can be booked.",
+    );
+  }
+  if (kindUnread > 0) {
+    response.coverage.gaps.push(
+      `${kindUnread} unassigned fencing lead(s) held as owner unclear because their GHL contact or the STRATCO FENCING calendar could not be read.`,
+    );
+  }
+  if (kindWithheld > 0) response.coverage.full_population = false;
   if (ownershipUnread > 0) {
     response.coverage.full_population = false;
     response.coverage.gaps.push(
@@ -2910,10 +3356,16 @@ type GhlRetryHooks = {
   deadlineMs?: number;
 };
 
+/** `routes`: the booking routes in force; they decide which leads need their
+ * contact read. `forRoute`: an approval or a press needs the route of an
+ * ASSIGNED lead too (its calendar), so its source and tags are read as for
+ * an unassigned one. */
 export async function readSalesBookingOpportunityOwnership(
   opportunityId: string,
   retry: GhlRetryHooks = {},
+  options: { routes?: readonly SalesBookingRoute[]; forRoute?: boolean } = {},
 ): Promise<SalesBookingOpportunityOwnership> {
+  const routes = options.routes ?? SALES_BOOKING_SEED_ROUTES;
   const location = Deno.env.get("GHL_LOCATION_ID") || "";
   if (!location) throw new Error("location_unconfigured");
   const remainingMs = retry.deadlineMs == null
@@ -2938,18 +3390,66 @@ export async function readSalesBookingOpportunityOwnership(
     !Object.hasOwn(opportunity, "assignedTo") ||
     typeof opportunity.pipelineId !== "string" || !opportunity.pipelineId.trim()
   ) throw new Error("opportunity_assignment_unreadable");
-  if (opportunity.assignedTo === null || opportunity.assignedTo === "") {
-    return { assignedTo: null, pipelineId: opportunity.pipelineId };
-  }
+  const pipelineId = opportunity.pipelineId;
+  const unassigned = opportunity.assignedTo === null ||
+    opportunity.assignedTo === "";
   if (
-    typeof opportunity.assignedTo !== "string" || !opportunity.assignedTo.trim()
+    !unassigned &&
+    (typeof opportunity.assignedTo !== "string" ||
+      !opportunity.assignedTo.trim())
   ) {
     throw new Error("opportunity_assignment_unreadable");
   }
-  return {
-    assignedTo: opportunity.assignedTo,
-    pipelineId: opportunity.pipelineId,
-  };
+  const assignedTo = unassigned ? null : opportunity.assignedTo as string;
+  if (
+    (!unassigned && !options.forRoute) ||
+    !salesBookingPipelineSplitsByKind(pipelineId, routes)
+  ) {
+    return {
+      assignedTo,
+      pipelineId,
+      kind: salesBookingLeadKind(opportunity),
+      // Only the opportunity was read: never a full tag set for a tag rule.
+      tags: salesBookingRoutesNeedTags(routes, pipelineId)
+        ? null
+        : salesBookingLeadTags(opportunity),
+    };
+  }
+  const { kind, kindUnread, tags } = await resolveSalesBookingLeadKind(
+    opportunity,
+    {
+      readContacts: (ids) => readContactsLive(ids, retry),
+      readStratcoBooked: (contactId) =>
+        salesBookingContactHasStratcoAppointment(contactId, retry),
+    },
+    { needTags: salesBookingRoutesNeedTags(routes, pipelineId) },
+  );
+  return { assignedTo, pipelineId, kind, kindUnread, tags };
+}
+
+/** Whether a GHL contact has any appointment on the STRATCO FENCING calendar.
+ * Throws when it cannot be read. */
+export async function salesBookingContactHasStratcoAppointment(
+  contactId: string | null,
+  retry: GhlRetryHooks,
+): Promise<boolean> {
+  if (!contactId) throw new Error("contact_unreadable");
+  const remainingMs = retry.deadlineMs == null
+    ? 10_000
+    : retry.deadlineMs - (retry.now?.() ?? new Date()).getTime();
+  if (remainingMs <= 0) throw new Error("time budget exhausted");
+  const response = await ghlRead(
+    `/contacts/${encodeURIComponent(contactId)}/appointments`,
+    { signal: AbortSignal.timeout(Math.min(10_000, remainingMs)) },
+    retry,
+  );
+  if (!Array.isArray(response?.events)) throw new Error("contact_unreadable");
+  return response.events.some((event) =>
+    !!event && typeof event === "object" &&
+    (event as Record<string, unknown>).calendarId ===
+      SALES_BOOKING_STRATCO_CALENDAR_ID &&
+    (event as Record<string, unknown>).deleted !== true
+  );
 }
 
 export async function ghlRead(
@@ -3697,8 +4197,32 @@ export function createSalesBookingReadDependencies(
       if (deadlineMs != null) retry.deadlineMs = deadlineMs;
       return readThreadLive(contactId, retry);
     },
-    readOpportunityOwnership: (id, { deadlineMs }) =>
-      readSalesBookingOpportunityOwnership(id, { ...retry, deadlineMs }),
+    readOpportunityOwnership: (id, { deadlineMs, routes }) =>
+      readSalesBookingOpportunityOwnership(id, { ...retry, deadlineMs }, {
+        routes,
+      }),
+    readRoutes: () => loadSalesBookingRoutes(client),
+    readContactStratcoBooked: (contactId, { deadlineMs }) =>
+      salesBookingContactHasStratcoAppointment(contactId, {
+        ...retry,
+        deadlineMs,
+      }),
+    readScopeCalendar: ({ ghlUserId, startMs, endMs, deadlineMs }) =>
+      fetchGhlCalendarEvents({
+        ghlGet: (path) =>
+          ghlRead(path, {
+            signal: AbortSignal.timeout(
+              Math.max(
+                1,
+                Math.min(10_000, (deadlineMs ?? Infinity) - Date.now()),
+              ),
+            ),
+          }, { ...retry, deadlineMs }),
+        locationId: Deno.env.get("GHL_LOCATION_ID") || "",
+        userId: ghlUserId,
+        startMs,
+        endMs,
+      }),
     readContacts: (contactIds, opts) => {
       if (opts?.deadlineMs != null) retry.deadlineMs = opts.deadlineMs;
       return readContactsLive(contactIds, retry);

@@ -846,6 +846,7 @@ import { salesBookingBookAction, salesBookingSendAction } from './sales_booking_
 import { createOwnerApprovalDeps, createSalesBookingExecuteDeps, ownerApprovalReader } from './sales_booking_execute_live.ts'
 import { applyOwnerBooking, OwnerApprovalRefusal } from './sales_booking_owner_approval.ts'
 import { applySalesBookingAvailability, createSalesBookingAvailabilityDeps } from './sales_booking_availability.ts'
+import { createSalesBookingRoutesDeps, SalesBookingRoutesError, salesBookingRoutesReadAction, salesBookingRoutesWriteAction } from './sales_booking_routes_actions.ts'
 import {
   salesBookingReadAction,
   SalesBookingRequestError,
@@ -5374,6 +5375,29 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           ? await salesBookingBookAction(executeArgs)
           : await salesBookingSendAction(executeArgs)
         return json(executed, executed.status === 'refused' && executed.reason === 'press_requires_captain' ? 403 : 200)
+      }
+      case 'sales_booking_routes_read':
+      case 'sales_booking_routes_write': {
+        // Who books which lead, into which GHL calendar
+        // (docs/sales-booking-routes.md). Read: any caller the front door
+        // admits. Change: the owner's signed session only, audited.
+        try {
+          const routesDeps = createSalesBookingRoutesDeps(client)
+          return json(action === 'sales_booking_routes_read'
+            ? await salesBookingRoutesReadAction({ method: req.method, deps: routesDeps })
+            : await salesBookingRoutesWriteAction({
+              method: req.method,
+              auth: { mode: authMode, role: authUser?.role ?? null, userId: authUser?.id ?? null, email: authUser?.email ?? null },
+              body: body && typeof body === 'object' ? body : {},
+              deps: routesDeps,
+            }))
+        } catch (e) {
+          if (e instanceof SalesBookingRoutesError) {
+            throw new ApiError(e.message, e.status, { error: e.message, reason: e.message, detail: e.detail })
+          }
+          if (e instanceof SalesBookingPackError) throw new ApiError(e.message, e.status)
+          throw e
+        }
       }
       case 'sales_booking_stamp_read': {
         // Engine --apply-stamp reader. API key only.

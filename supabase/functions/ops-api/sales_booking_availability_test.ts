@@ -14,10 +14,12 @@ import {
   checkOwnerVisitRules,
   type GhlDirectory,
 } from "./sales_booking_owner_approval.ts";
-import type {
-  SalesBookingCase,
-  SalesBookingDiaryEntry,
-  SalesBookingReadResponse,
+import {
+  readSalesBookingOutlookDiary,
+  SALES_BOOKING_RESOURCES,
+  type SalesBookingCase,
+  type SalesBookingDiaryEntry,
+  type SalesBookingReadResponse,
 } from "./sales_booking_read.ts";
 import {
   salesBookingSuburbPoint,
@@ -543,6 +545,7 @@ function readResponse(): SalesBookingReadResponse {
           read_ok: true,
           reason: null,
           malformed_dropped: 0,
+          calendar_email: "marnin@secureworkswa.com.au",
         },
       },
     },
@@ -606,6 +609,83 @@ Deno.test("a partial Outlook diary read names the gap and withholds free times",
   ]);
   assertEquals(after.booking_flow!.free_times, null);
   assertEquals(after.cases[0].free_times, null);
+});
+
+Deno.test("resource=marnin with scoper_user_id=Nithin: Nithin's Outlook never becomes Marnin's busy or free time", async () => {
+  const outlookFor = async (scoperUserId: string) => {
+    const scan = await readSalesBookingOutlookDiary({
+      graphGet: () =>
+        Promise.resolve({
+          status: 200,
+          body: {
+            value: [{
+              id: "ol-all-friday",
+              subject: "Nithin site day",
+              start: { dateTime: "2026-10-02T08:00:00.0000000" },
+              end: { dateTime: "2026-10-02T16:30:00.0000000" },
+              showAs: "busy",
+            }],
+          },
+        }),
+      resourceId: "marnin",
+      scoperUserId,
+      since: WEEK.since,
+      untilExclusive: WEEK.until_exclusive,
+    });
+    const response = readResponse();
+    response.diary = scan.entries;
+    response.diary_read.sources.outlook = {
+      ...response.diary_read.sources.outlook,
+      state: scan.state,
+      reason: scan.reason,
+      calendar_email: scan.calendar_email,
+      malformed_dropped: scan.malformed_dropped,
+    };
+    return { scan, response };
+  };
+
+  const crossed = await outlookFor(
+    SALES_BOOKING_RESOURCES.nithin.scoper_user_id,
+  );
+  assertEquals(crossed.scan.calendar_email, "nithin@secureworkswa.com.au");
+  const after = await applySalesBookingAvailability(
+    crossed.response,
+    liveDeps().deps,
+  );
+  const read = after.booking_flow!.calendar_read;
+  assertEquals(read.state, "read");
+  assertEquals(read.outlook, {
+    state: "failed",
+    events: 0,
+    unverified_correspondence: 0,
+  });
+  assertEquals(read.caveats, [
+    "outlook_unread: outlook_calendar_not_this_person",
+  ]);
+  assert(
+    !read.occupied_intervals.some((i: { source: string }) =>
+      i.source === "outlook"
+    ),
+  );
+  const crossedFriday = after.booking_flow!.free_times.days.find((
+    d: { date: string },
+  ) => d.date === "2026-10-02");
+  assertEquals(crossedFriday.state, "open");
+
+  // Control: Marnin's own Outlook holding the same day does block it.
+  const own = await outlookFor(SALES_BOOKING_RESOURCES.marnin.scoper_user_id);
+  assertEquals(own.scan.calendar_email, "marnin@secureworkswa.com.au");
+  const ownAfter = await applySalesBookingAvailability(
+    own.response,
+    liveDeps().deps,
+  );
+  assertEquals(ownAfter.booking_flow!.calendar_read.outlook.state, "read");
+  assertEquals(ownAfter.booking_flow!.calendar_read.outlook.events, 1);
+  assertEquals(ownAfter.booking_flow!.calendar_read.caveats, []);
+  const ownFriday = ownAfter.booking_flow!.free_times.days.find((
+    d: { date: string },
+  ) => d.date === "2026-10-02");
+  assertEquals(ownFriday.state, "no_time_left");
 });
 
 Deno.test("a throwing reader is a named reason on the banner, never an exception", async () => {

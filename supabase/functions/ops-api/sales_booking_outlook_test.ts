@@ -21,11 +21,14 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  foldSalesBookingOutlookCopies,
   mergeSalesBookingDiaryEntries,
   projectSalesBookingDiaryEntry,
   projectSalesBookingOutlookDiaryEntry,
   readSalesBookingOutlookDiary,
+  resolveSalesBookingOutlookMailbox,
   SALES_BOOKING_GHL_MIRROR_PROPERTY_ID,
+  SALES_BOOKING_OUTLOOK_MAILBOXES,
   SALES_BOOKING_RESOURCES,
   type SalesBookingGraphGet,
   salesBookingRead,
@@ -37,6 +40,7 @@ import {
   type OutlookMirrorInput,
   outlookMirrorTransactionId,
   SALES_BOOKING_OUTLOOK_MIRROR_FLAG,
+  SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES,
   writeOutlookMirrorEvent,
 } from "./sales_booking_outlook_mirror.ts";
 
@@ -168,6 +172,7 @@ Deno.test("merged diary carries both calendars on one timeline, each event label
     calendar_email: MAILBOX,
     event_count: 1,
     malformed_dropped: 0,
+    ghl_copies_folded: 0,
   });
   assertEquals(payload.resource.calendar.ok, true);
   assert(
@@ -247,26 +252,96 @@ Deno.test("an Outlook reader that throws or is not wired is still a named failur
   );
 });
 
-Deno.test("a resource with no Outlook mailbox reads GHL only and is not called", async () => {
-  let called = false;
-  const payload = await salesBookingRead(
-    readDeps({
-      readOutlookDiary: () => {
-        called = true;
-        return Promise.reject(new Error("must not be called"));
+Deno.test("every booking resource reads its own Outlook; an unknown one is not_configured and never read", async () => {
+  // 25 Sep 2026: tenant-wide Calendars.Read consent. Each resource key is the
+  // one the read already uses, and the mailbox matches the person's stored
+  // scoper_preferences.work_calendar_email.
+  assertEquals(SALES_BOOKING_OUTLOOK_MAILBOXES, {
+    nithin: "nithin@secureworkswa.com.au",
+    marnin: "marnin@secureworkswa.com.au",
+    khairo: "khairo@secureworkswa.com.au",
+  });
+  for (
+    const [resourceId, mailbox] of Object.entries(
+      SALES_BOOKING_OUTLOOK_MAILBOXES,
+    )
+  ) {
+    const resource = SALES_BOOKING_RESOURCES[resourceId];
+    assert(resource, `${resourceId} is a booking resource`);
+    const graph = graphGetFrom([{
+      status: 200,
+      body: { value: [graphEvent({ id: `ol-${resourceId}` })] },
+    }]);
+    const scan = await readSalesBookingOutlookDiary({
+      graphGet: graph.get,
+      resourceId,
+      scoperUserId: resource.scoper_user_id,
+      since: "2026-09-21T00:00:00+08:00",
+      untilExclusive: "2026-09-28T00:00:00+08:00",
+    });
+    assertEquals(scan.state, "read", resourceId);
+    assertEquals(scan.calendar_email, mailbox);
+    assertEquals(scan.entries.map((e) => e.event_id), [`ol-${resourceId}`]);
+    assertStringIncludes(
+      graph.urls[0],
+      `/users/${encodeURIComponent(mailbox)}/calendarView`,
+    );
+
+    // Through the whole read: the Outlook half is called and merged.
+    let called: string | null = null;
+    const payload = await salesBookingRead(
+      readDeps({
+        readOutlookDiary: (args) => {
+          called = args.resourceId;
+          return Promise.resolve({
+            state: "read",
+            read_ok: true,
+            reason: null,
+            entries: [projectSalesBookingOutlookDiaryEntry(graphEvent())!],
+            malformed_dropped: 0,
+            calendar_email: mailbox,
+          });
+        },
+      }),
+      {
+        resource: resourceId,
+        week_start: FRIDAY_WEEK,
+        include_thread_facts: false,
       },
-    }),
-    {
-      resource: "nithin",
-      week_start: FRIDAY_WEEK,
-      include_thread_facts: false,
-    },
-  );
-  assertEquals(called, false);
-  assertEquals(payload.diary_read.read_ok, true);
-  assertEquals(payload.diary_read.source, "ghl");
-  assertEquals(payload.diary_read.sources.outlook.state, "not_configured");
+    );
+    assertEquals(called, resourceId);
+    assertEquals(payload.diary_read.source, "ghl+outlook");
+    assertEquals(payload.diary_read.sources.outlook.state, "read");
+    assertEquals(payload.diary_read.sources.outlook.calendar_email, mailbox);
+  }
   assertEquals(NITHIN.lane, "patio");
+
+  const graph = graphGetFrom([]);
+  const unknown = await readSalesBookingOutlookDiary({
+    graphGet: graph.get,
+    resourceId: "someone",
+    scoperUserId: "00000000-0000-4000-8000-000000000000",
+    since: "2026-09-21T00:00:00+08:00",
+    untilExclusive: "2026-09-28T00:00:00+08:00",
+  });
+  assertEquals(unknown.state, "not_configured");
+  assertEquals(unknown.calendar_email, null);
+  assertEquals(graph.urls, []);
+  assertEquals(
+    resolveSalesBookingOutlookMailbox(
+      "someone",
+      "00000000-0000-4000-8000-000000000000",
+    ),
+    null,
+  );
+  // A known resource asked for with someone else's scoper id is not read.
+  assertEquals(
+    resolveSalesBookingOutlookMailbox(
+      "khairo",
+      "00000000-0000-4000-8000-000000000000",
+    ),
+    null,
+  );
 });
 
 Deno.test("Outlook reader pages calendarView, keeps kinds from provider fields and labels mirrors", async () => {
@@ -428,7 +503,178 @@ Deno.test("merge orders by start, then source, then id", () => {
   );
 });
 
+// ── GHL's own sync copy (Khairo, 29 Sep 2026) ──────────────
+
+function khairoGhlVisit() {
+  // GHL, SW Fencing Scope calendar: Tue 29 Sep 10:00-10:30, title blank.
+  return projectSalesBookingDiaryEntry({
+    id: "ghl-khairo-0929",
+    title: "",
+    startTime: "2026-09-29T10:00:00+08:00",
+    endTime: "2026-09-29T10:30:00+08:00",
+    appointmentStatus: "confirmed",
+  })!;
+}
+
+function khairoOutlookCopy(overrides: Record<string, unknown> = {}) {
+  // Outlook, same span, no SecureWorks mirror marker.
+  return projectSalesBookingOutlookDiaryEntry(graphEvent({
+    id: "ol-khairo-0929",
+    subject: "Fencing Complaint Basil Laing",
+    start: { dateTime: "2026-09-29T10:00:00.0000000" },
+    end: { dateTime: "2026-09-29T10:30:00.0000000" },
+    location: { displayName: "" },
+    ...overrides,
+  }))!;
+}
+
+Deno.test("Khairo: GHL's own Outlook copy of his visit shows once and holds the time once", async () => {
+  const ghl = khairoGhlVisit();
+  const copy = khairoOutlookCopy();
+  assertEquals(ghl.title, null);
+  assertEquals(copy.mirror_of_ghl_event_id, null);
+
+  const folded = foldSalesBookingOutlookCopies([ghl], [copy]);
+  assertEquals(folded.folded, 1);
+  assertEquals(folded.outlook, []);
+  assertEquals(folded.ghl.length, 1);
+  assertEquals(folded.ghl[0].event_id, "ghl-khairo-0929");
+  assertEquals(folded.ghl[0].title, null);
+  assertEquals(folded.ghl[0].outlook_copy, copy);
+  assertEquals(
+    folded.ghl[0].outlook_copy?.title,
+    "Fencing Complaint Basil Laing",
+  );
+
+  const payload = await salesBookingRead(
+    readDeps({
+      readDiary: ({ scoperUserId }) =>
+        Promise.resolve({
+          read_ok: true,
+          reason: null,
+          entries: [ghl],
+          malformed_dropped: 0,
+          calendar_email: "khairo@secureworkswa.com.au",
+          ghl_user_id: "RgDWTnYL6zL3eJA6nLht",
+          mapped_by: "email",
+          scoper_user_id: scoperUserId,
+        }),
+      readOutlookDiary: () =>
+        Promise.resolve({
+          state: "read",
+          read_ok: true,
+          reason: null,
+          entries: [copy],
+          malformed_dropped: 0,
+          calendar_email: "khairo@secureworkswa.com.au",
+        }),
+    }),
+    {
+      resource: "khairo",
+      week_start: "2026-09-28",
+      include_thread_facts: false,
+    },
+  );
+  const onTuesday = payload.diary.filter((e) =>
+    e.start.startsWith("2026-09-29")
+  );
+  assertEquals(onTuesday.map((e) => [e.source, e.event_id]), [
+    ["ghl", "ghl-khairo-0929"],
+  ]);
+  assertEquals(
+    onTuesday.filter((e) => e.blocks_capacity).length,
+    1,
+    "the 30 minutes are held once",
+  );
+  assertEquals(payload.diary_read.sources.outlook.event_count, 1);
+  assertEquals(payload.diary_read.sources.outlook.ghl_copies_folded, 1);
+  assertEquals(payload.diary_read.read_ok, true);
+});
+
+Deno.test("only an exact-span, unmarked, busy Outlook event is a copy; everything else still shows and blocks", () => {
+  const ghl = khairoGhlVisit();
+  const keep = [
+    // Different end: overlap is not a copy.
+    khairoOutlookCopy({
+      id: "o-longer",
+      end: { dateTime: "2026-09-29T11:00:00" },
+    }),
+    // Leave on the same span stays leave.
+    khairoOutlookCopy({ id: "o-oof", showAs: "oof" }),
+    // Private stays private.
+    khairoOutlookCopy({ id: "o-private", sensitivity: "private" }),
+    // Free does not occupy anything and is not a copy.
+    khairoOutlookCopy({ id: "o-free", showAs: "free" }),
+    // This system's own marked mirror keeps its two-row handling.
+    khairoOutlookCopy({
+      id: "o-marked",
+      singleValueExtendedProperties: [{
+        id: SALES_BOOKING_GHL_MIRROR_PROPERTY_ID,
+        value: "ghl-khairo-0929",
+      }],
+    }),
+  ];
+  for (const o of keep) {
+    const folded = foldSalesBookingOutlookCopies([ghl], [o]);
+    assertEquals(folded.folded, 0, o.event_id);
+    assertEquals(folded.outlook, [o]);
+    assertEquals(folded.ghl, [ghl]);
+  }
+
+  // A cancelled GHL row holds no time, so it absorbs nothing.
+  const cancelled = projectSalesBookingDiaryEntry({
+    id: "ghl-cancelled",
+    startTime: "2026-09-29T10:00:00+08:00",
+    endTime: "2026-09-29T10:30:00+08:00",
+    appointmentStatus: "cancelled",
+  })!;
+  assertEquals(
+    foldSalesBookingOutlookCopies([cancelled], [khairoOutlookCopy()]).folded,
+    0,
+  );
+
+  // An invalid GHL row is dropped by availability, so it absorbs nothing
+  // either: the Outlook copy stays and keeps holding the time.
+  const invalid = projectSalesBookingDiaryEntry({
+    id: "ghl-invalid",
+    startTime: "2026-09-29T10:00:00+08:00",
+    endTime: "2026-09-29T10:30:00+08:00",
+    appointmentStatus: "invalid",
+  })!;
+  assertEquals(invalid.blocks_capacity, true);
+  const copyOfInvalid = khairoOutlookCopy();
+  const notFolded = foldSalesBookingOutlookCopies([invalid], [copyOfInvalid]);
+  assertEquals(notFolded.folded, 0);
+  assertEquals(notFolded.ghl, [invalid]);
+  assertEquals(notFolded.outlook, [copyOfInvalid]);
+  assertEquals(notFolded.outlook[0].blocks_capacity, true);
+
+  // One GHL visit absorbs one copy: a second event on the same span still
+  // shows and still blocks.
+  const two = foldSalesBookingOutlookCopies([ghl], [
+    khairoOutlookCopy({ id: "o-b" }),
+    khairoOutlookCopy({ id: "o-a" }),
+  ]);
+  assertEquals(two.folded, 1);
+  assertEquals(two.ghl[0].outlook_copy?.event_id, "o-a");
+  assertEquals(two.outlook.map((e) => e.event_id), ["o-b"]);
+  assertEquals(two.outlook[0].blocks_capacity, true);
+});
+
 // ── Mirror write ────────────────────────────────────────────
+
+Deno.test("the mirror writes Marnin only: widening the Outlook read widened no write", () => {
+  assertEquals(SALES_BOOKING_OUTLOOK_MIRROR_MAILBOXES, {
+    marnin: "marnin@secureworkswa.com.au",
+  });
+  for (const resource_id of ["nithin", "khairo"]) {
+    assert(resource_id in SALES_BOOKING_OUTLOOK_MAILBOXES, "read covers them");
+    assertEquals(buildOutlookMirrorRequest({ ...MIRROR_INPUT, resource_id }), {
+      ok: false,
+      reason: "resource has no Outlook calendar configured",
+    });
+  }
+});
 
 const MIRROR_INPUT: OutlookMirrorInput = {
   resource_id: "marnin",
@@ -615,6 +861,7 @@ Deno.test("mirror refuses bad input before any Graph call, whatever the switch",
   const outlook = fakeOutlook({ [SALES_BOOKING_OUTLOOK_MIRROR_FLAG]: "true" });
   const bad: Array<Partial<OutlookMirrorInput>> = [
     { resource_id: "nithin" },
+    { resource_id: "khairo" },
     { resource_id: "someone" },
     { ghl_appointment_id: "x' or 1 eq 1" },
     { client_name: "  " },

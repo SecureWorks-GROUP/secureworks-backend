@@ -1,6 +1,11 @@
 // deno-lint-ignore-file no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  SALES_BOOKING_SENDER_LINES,
+  SALES_BOOKING_STRATCO_CALENDAR_ID,
+  type SalesBookingLeadKind,
+} from "./sales_booking_sender.ts";
+import {
   bookingContentHash,
   bookingHash,
   type ExecutableApprovalRecord,
@@ -67,8 +72,8 @@ async function approval(
 }
 const CALENDAR = {
   provider: "ghl",
-  calendar_id: "stratco-cal",
-  assigned_user_id: "marnin-ghl",
+  calendar_id: SALES_BOOKING_STRATCO_CALENDAR_ID,
+  assigned_user_id: SALES_BOOKING_SENDER_LINES.marnin.ghl_user_id,
   start_iso: "2026-09-25T09:00:00+08:00",
   end_iso: "2026-09-25T10:30:00+08:00",
   window_start_iso: "2026-09-25T09:00:00+08:00",
@@ -143,6 +148,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     typeof initialResource === "string" ? initialResource : "marnin"
   ].pipeline_id;
   let opportunityAssignee: string | null = null;
+  let opportunityKind: SalesBookingLeadKind = "stratco";
   const jobSites: Record<string, SalesBookingJobSiteFact> = {};
   let writerFlagOn = true;
   let smsResponse: { status: number; body: Obj } = {
@@ -161,6 +167,7 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
       return Promise.resolve({
         assignedTo: opportunityAssignee,
         pipelineId: opportunityPipelineId,
+        kind: opportunityKind,
       });
     },
     readOutlookLead: ({ contactId, opportunityId }) => {
@@ -268,6 +275,9 @@ function fakes(records: ExecutableApprovalRecord[], env: Obj = {}) {
     },
     setOpportunityPipelineId: (id: string) => {
       opportunityPipelineId = id;
+    },
+    setOpportunityKind: (kind: SalesBookingLeadKind) => {
+      opportunityKind = kind;
     },
     setJobSite: (id: string, site: SalesBookingJobSiteFact) => {
       jobSites[id] = site;
@@ -416,6 +426,108 @@ Deno.test("send rechecks the lead's current GHL assignee for every person", asyn
     "opportunity_assignment_unreadable",
   );
   assertEquals(k.calls.sms, []);
+});
+
+Deno.test("send applies the unassigned fencing rule: Stratco is Marnin's, the rest Khairo's", async () => {
+  const khairo = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267772" },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const marnin = await approval("message", MESSAGE);
+
+  // Unassigned, not Stratco: Khairo's from 772, never Marnin's from 776.
+  const k = fakes([khairo], LIVE);
+  k.setOpportunityKind("normal");
+  assertEquals(reasonOf(await send(k, khairo.binding_hash)), "sent");
+  assertEquals(k.calls.sms.length, 1);
+  const m = fakes([marnin], LIVE);
+  m.setOpportunityKind("normal");
+  assertEquals(
+    reasonOf(await send(m, marnin.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(m.calls.sms, []);
+
+  // An explicit assignee beats the rule: a non-Stratco lead assigned to
+  // Marnin goes from 776 and never from Khairo's 772.
+  const m2 = fakes([marnin], LIVE);
+  m2.setOpportunityKind("normal");
+  m2.setOpportunityAssignee("3S20LGVTjsVYy9vTJ9wM");
+  assertEquals(reasonOf(await send(m2, marnin.binding_hash)), "sent");
+  const k2 = fakes([khairo], LIVE);
+  k2.setOpportunityKind("normal");
+  k2.setOpportunityAssignee("3S20LGVTjsVYy9vTJ9wM");
+  assertEquals(
+    reasonOf(await send(k2, khairo.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(k2.calls.sms, []);
+});
+
+Deno.test("send refuses an unassigned owner-unclear fencing lead from every line until it is assigned", async () => {
+  const khairo = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267772" },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const marnin = await approval("message", MESSAGE);
+  const m = fakes([marnin], LIVE);
+  m.setOpportunityKind("unclear");
+  assertEquals(reasonOf(await send(m, marnin.binding_hash)), "owner_unclear");
+  assertEquals(m.calls.sms, []);
+  assertEquals(m.calls.claims, 0);
+  const k = fakes([khairo], LIVE);
+  k.setOpportunityKind("unclear");
+  assertEquals(
+    reasonOf(await send(k, khairo.binding_hash)),
+    "opportunity_assignee_changed",
+  );
+  assertEquals(k.calls.sms, []);
+  // Once assigned in GHL it goes from the assignee's line.
+  const k2 = fakes([khairo], LIVE);
+  k2.setOpportunityKind("unclear");
+  k2.setOpportunityAssignee("RgDWTnYL6zL3eJA6nLht");
+  assertEquals(reasonOf(await send(k2, khairo.binding_hash)), "sent");
+});
+
+Deno.test("send refuses Khairo's lead as unreadable, never reassigned, when its contact or STRATCO calendar could not be read", async () => {
+  const khairo = await approval(
+    "message",
+    { ...MESSAGE, sender: "+61489267772" },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const k = fakes([khairo], LIVE);
+  const read = k.deps.readOpportunityOwnership;
+  k.deps.readOpportunityOwnership = async (id) => ({
+    ...(await read(id)),
+    kind: "unclear",
+    kindUnread: true,
+  });
+  assertEquals(
+    reasonOf(await send(k, khairo.binding_hash)),
+    "opportunity_assignment_unreadable",
+  );
+  assertEquals(k.calls.sms, []);
+  assertEquals(k.calls.claims, 0);
 });
 
 Deno.test("send refuses an unassigned Stratco lead moved to patio", async () => {
@@ -834,9 +946,18 @@ Deno.test("a missing published suburb refuses before GHL; a GHL-only person book
   assertEquals(f.calls.writer.length, 0);
   assertEquals(f.calls.claims, 0);
 
-  const patio = await approval("calendar", CALENDAR, {}, {
-    resource: "nithin",
-  });
+  const patio = await approval(
+    "calendar",
+    {
+      ...CALENDAR,
+      calendar_id: "RSQnT8cQdEE8azb5Chlq",
+      assigned_user_id: SALES_BOOKING_SENDER_LINES.nithin.ghl_user_id,
+    },
+    {},
+    {
+      resource: "nithin",
+    },
+  );
   const g = fakes([patio], LIVE);
   const result = await book(g, patio.binding_hash);
   assertEquals(
@@ -844,12 +965,41 @@ Deno.test("a missing published suburb refuses before GHL; a GHL-only person book
     {
       outlook: "not_applicable",
       reason: "resource_has_no_outlook_calendar",
-      message:
-        "This person books in GHL only; there is no Outlook calendar to write.",
+      message: "This booking does not write this person's Outlook calendar.",
     },
   );
   assertEquals(g.calls.contactReads, 0);
   assertEquals(g.calls.outlookPosts.length, 0);
+
+  // Khairo's Outlook is READ into the booking week (25 Sep 2026), but the
+  // mirror still writes Marnin only: reading someone is not writing to them.
+  const khairo = await approval(
+    "calendar",
+    {
+      ...CALENDAR,
+      calendar_id: "i6j9vaCy6c94n3i93cir",
+      assigned_user_id: SALES_BOOKING_SENDER_LINES.khairo.ghl_user_id,
+    },
+    {},
+    {
+      resource: "khairo",
+      scoper_user_id: "be6c2188-2b7b-49c7-b6e4-5b0d0deb6415",
+      id: "opp:khairo-lead",
+      profile: "fencing-khairo",
+    },
+  );
+  const k = fakes([khairo], LIVE);
+  k.setOpportunityKind("normal");
+  const khairoResult = await book(k, khairo.binding_hash);
+  assertEquals(
+    khairoResult.status === "booked" && khairoResult.outlook_mirror,
+    {
+      outlook: "not_applicable",
+      reason: "resource_has_no_outlook_calendar",
+      message: "This booking does not write this person's Outlook calendar.",
+    },
+  );
+  assertEquals(k.calls.outlookPosts.length, 0);
 });
 
 Deno.test("Outlook title uses the suburb the booking read publishes, including address1-is-suburb, job overlay, and St James", async () => {
