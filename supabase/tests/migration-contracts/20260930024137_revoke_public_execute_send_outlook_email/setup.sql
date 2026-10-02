@@ -85,12 +85,17 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- Stand-in for the production-only overload, which the migration can only
--- reach through its catalog sweep. Its real signature is not in the repo.
+-- reach through its catalog sweep. No migration defines it; the signature is
+-- the one the 2 Oct 2026 read-only production check recorded (see the
+-- 20261002200000_sec_group_a_revoke setup), so that later case finds this
+-- overload instead of adding a third.
 CREATE FUNCTION public.send_outlook_email(
-  p_to text,
+  p_from_email text,
+  p_to_email text,
   p_subject text,
   p_html_body text,
-  p_attachments jsonb
+  p_cc text,
+  p_attachment_urls jsonb
 ) RETURNS uuid AS $$ SELECT NULL::uuid $$ LANGUAGE sql SECURITY DEFINER;
 
 DO $$

@@ -52,7 +52,7 @@ EXCEPTION WHEN insufficient_privilege THEN
 END $$;
 DO $$
 BEGIN
-  PERFORM public.send_outlook_email('to@example.invalid', 'subject', '<p>body</p>', '[]'::jsonb);
+  PERFORM public.send_outlook_email('from@example.invalid', 'to@example.invalid', 'subject', '<p>body</p>', NULL, '[]'::jsonb);
   RAISE EXCEPTION 'contract: anon executed public.send_outlook_email(..., jsonb)';
 EXCEPTION WHEN insufficient_privilege THEN
   NULL;
@@ -70,7 +70,7 @@ EXCEPTION WHEN insufficient_privilege THEN
 END $$;
 DO $$
 BEGIN
-  PERFORM public.send_outlook_email('to@example.invalid', 'subject', '<p>body</p>', '[]'::jsonb);
+  PERFORM public.send_outlook_email('from@example.invalid', 'to@example.invalid', 'subject', '<p>body</p>', NULL, '[]'::jsonb);
   RAISE EXCEPTION 'contract: authenticated executed public.send_outlook_email(..., jsonb)';
 EXCEPTION WHEN insufficient_privilege THEN
   NULL;

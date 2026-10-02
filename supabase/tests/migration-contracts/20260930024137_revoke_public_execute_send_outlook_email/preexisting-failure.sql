@@ -10,5 +10,5 @@ BEGIN
   END IF;
 END $$;
 
-GRANT EXECUTE ON FUNCTION public.send_outlook_email(text, text, text, jsonb) TO contract_outlook_grantee;
+GRANT EXECUTE ON FUNCTION public.send_outlook_email(text, text, text, text, text, jsonb) TO contract_outlook_grantee;
 GRANT contract_outlook_grantee TO anon;
