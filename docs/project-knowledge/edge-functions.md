@@ -7,6 +7,34 @@ All in `supabase/functions/`. Deploy with:
 
 ## Functions
 
+### ghl-oauth-callback `--no-verify-jwt`
+
+The SecureWorks Live Feed Marketplace app redirects the installer to
+`${SUPABASE_URL}/functions/v1/ghl-oauth-callback` with `?code=`. Configure that
+exact public URL as the app's redirect URL. The callback requires edge secrets
+`GHL_APP_CLIENT_ID`, `GHL_APP_CLIENT_SECRET`, and `GHL_LOCATION_ID` for the
+intended sub-account, plus the platform's `SUPABASE_URL`.
+`SUPABASE_SERVICE_ROLE_KEY` is used only for the install receipt.
+
+The public GET exchanges the code using `Version: v3`. A successful response
+must contain a non-empty access token and an id-shaped `locationId`; only the
+configured location receives the installed confirmation page. Tokens are
+discarded, never persisted or returned. Existing API reads retain their private
+integration token; webhook delivery goes to `ghl-webhook-receiver`.
+
+Only a validated exchange attempts an ids-only `webhook_log` receipt under
+source `ghl_oauth`, event type `AppInstall`, receipt `ghl_app_install_v1`.
+Outcomes are `installed` or `location_mismatch`; the latter returns 403 and
+records a null location, never the foreign location id. Receipt failure does
+not change the page. Missing code/configuration, non-GET requests, and failed
+or malformed exchanges write no receipt and return an error-code page. Codes,
+tokens, client secrets and provider response bodies are never logged or
+returned. Install receipts do not count toward the webhook heartbeat.
+
+Implementation: `supabase/functions/ghl-oauth-callback/handler.ts`; local
+stubbed-exchange coverage: `callback_test.ts` in the same directory. These
+checks do not establish a completed live Marketplace installation.
+
 ### ghl-webhook
 - **Purpose**: Creates jobs from GHL form submissions, creates contact_matches for attribution
 - **Deploy**: `--no-verify-jwt` NO (has own auth)
