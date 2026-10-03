@@ -9319,6 +9319,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         // no U4 docket, leftover obligation, or live DRAFT. Voids/deletes a
         // current-cycle DRAFT if one is still live, then mints one bound
         // DRAFT at the locked figure. Never authorise, send, or email.
+        // Explicit post_release_disposition=second_invoice lets a helper key
+        // mint when the only live ACCREC is a different-family sibling.
         await assertNoSyntheticLivefireJobs(
           client,
           body.job_id ? [body.job_id] : [],
@@ -9333,6 +9335,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             actor: authUser?.email || body.actor || body.created_by ||
               'ses-captain-lock-reminter',
             commercial_quantity_override: body.commercial_quantity_override,
+            post_release_disposition: body.post_release_disposition || null,
           },
           makeDefaultCaptainLockRemintDeps({
             requireMintAuthority: requireSesInvoiceMintAuthority,
