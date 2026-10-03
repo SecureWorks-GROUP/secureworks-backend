@@ -475,6 +475,9 @@ function classifyPost(
   // evaded BOTH checks. Now bare/spaced/compact refs get a non-null ref + a row.
   const body = post.body?.content || null;
   const ref = extractRef(subject, body, prefixes);
+  const bodyPrefixedRefMatch = body
+    ? body.replace(/<[^>]+>/g, " ").match(buildSubjectRef(prefixes))
+    : null;
 
   if (matchedCompany) {
     return {
@@ -497,6 +500,18 @@ function classifyPost(
   }
   if (subjectKeyword) {
     return { include: true, reason: "subject_keyword", ref, company: null };
+  }
+  // A forwarded/relayed instruction can have a generic subject while the only
+  // builder reference sits in the body. extractRef already scans that body; use
+  // the result as an inclusion signal instead of calculating it and then
+  // discarding the source into an unreviewed classifier exclusion.
+  if (bodyPrefixedRefMatch) {
+    return {
+      include: true,
+      reason: "body_ref",
+      ref: normaliseRef(bodyPrefixedRefMatch[0], prefixes),
+      company: null,
+    };
   }
   return {
     include: false,
@@ -2025,8 +2040,7 @@ export interface IntakeScanOutcome {
 type IntakeSourceFate = "reason_coded_exception" | "deferred_next_run";
 
 async function recordIntakeSourceFates(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
   fate: IntakeSourceFate,
   reasonCode: string,
@@ -2105,8 +2119,7 @@ async function recordIntakeSourceFates(
 }
 
 async function recordIntakeSourceExceptions(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
   reasonCode: string,
   summary: string,
@@ -2123,8 +2136,7 @@ async function recordIntakeSourceExceptions(
 }
 
 async function recordIntakeHealthDegradation(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   reasonCode: string,
   nowIso = new Date().toISOString(),
 ): Promise<void> {
@@ -2236,8 +2248,7 @@ async function recordPdfExtractionHandoffFailure(
 }
 
 async function recordIntakeSourceDeferrals(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
   reasonCode: string,
   summary: string,
@@ -2254,8 +2265,7 @@ async function recordIntakeSourceDeferrals(
 }
 
 async function findIntakeSourcesWithoutCase(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
 ): Promise<IntakeHandoffSource[]> {
   const accounted = new Set<string>();
