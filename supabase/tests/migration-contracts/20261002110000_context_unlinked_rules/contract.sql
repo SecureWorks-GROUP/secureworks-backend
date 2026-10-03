@@ -677,6 +677,11 @@ BEGIN
 END $$;
 CREATE TEMP TABLE p4_retired_before AS SELECT * FROM public.event_threads WHERE retired_at IS NOT NULL;
 CREATE TEMP TABLE p4_thread_count AS SELECT count(*) AS n FROM public.event_threads;
+-- A registered successor (L1b 20261003100000) is rolled back first, as P4's down requires.
+SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1b:%' AS l1b_live \gset
+\if :l1b_live
+\ir ../../../rollbacks/20261003100000_context_ladder_payload_job_down.sql
+\endif
 \ir ../../../rollbacks/20261002110000_context_unlinked_rules_down.sql
 DO $$
 DECLARE e public.business_events;
@@ -722,8 +727,11 @@ BEGIN
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz)'::regprocedure)<>'2bc8e76f14fda242eb6e4d414e93fefa'
  THEN RAISE EXCEPTION 'p4: P1a''s two-argument candidate set changed'; END IF;
  -- P1a's ladder body moved verbatim: undoing the retirement filter and preview guard gives back
- -- P1a's live body byte for byte.
- IF md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
+ -- P1a's live body byte for byte. A registered successor (L1b 20261003100000,
+ -- step 1b) proves in its own contract that it is this body plus its step.
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)
+   <>'6a45c9ea9a68c8c5899fba45b44e18b5'
+  AND md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
    'WHERE thread_key=e.thread_key AND retired_at IS NULL;', 'WHERE thread_key=e.thread_key;'),
    E'   IF NOT p_preview THEN\n    INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,candidate,''ladder'',e.id) ON CONFLICT DO NOTHING;\n   END IF;\n   IF EXISTS (SELECT 1 FROM public.event_threads WHERE thread_key=e.thread_key AND job_id<>candidate) THEN',
    E'   INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,candidate,''ladder'',e.id) ON CONFLICT DO NOTHING;\n   IF NOT EXISTS (SELECT 1 FROM public.event_threads WHERE thread_key=e.thread_key AND job_id=candidate) THEN'))
@@ -737,7 +745,12 @@ ALTER TABLE public.feature_flags RENAME TO feature_flags_moved;
 DO $$ BEGIN IF public.context_unlinked_rules_enabled() THEN RAISE EXCEPTION 'p4: a missing flag table must read as off'; END IF; END $$;
 ROLLBACK;
 
--- Re-apply is a no-op.
+-- Re-apply is a no-op. It runs only while P4's ladder is live; a registered
+-- successor (L1b 20261003100000) marks its bodies L1b, so P4's guard refuses a
+-- re-apply over it instead of removing its step.
+SELECT md5(prosrc)='e04d9e81649364b8e9acc38f14833ba2' AS p4_ladder_live
+FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure \gset
+\if :p4_ladder_live
 CREATE TEMP TABLE p4_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5 FROM pg_proc p
  WHERE obj_description(p.oid,'pg_proc') LIKE 'P4:%' OR p.oid='public.attribute_business_event()'::regprocedure OR p.proname='attribute_context_event_with_luna';
 \ir ../../../migrations/20261002110000_context_unlinked_rules.sql
@@ -749,3 +762,4 @@ BEGIN
  IF (SELECT count(*) FROM public.feature_flags WHERE flag_name='context_unlinked_rules_v1')<>1 THEN RAISE EXCEPTION 'P4 re-apply duplicated the flag row'; END IF;
 END $$;
 DROP TABLE p4_before;
+\endif
