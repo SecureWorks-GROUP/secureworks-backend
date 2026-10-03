@@ -1,0 +1,2 @@
+cron job xero-suppliers-sync (id
+its inline Authorization header is not "Bearer <Vault service_role_key>"; refusing to change which key it sends

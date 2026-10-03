@@ -21,6 +21,7 @@ import {
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
 import { decideReportingStaffAuth } from './reporting_staff_gate.ts'
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -179,11 +180,15 @@ serve(async (req: Request) => {
   const xApiKey = req.headers.get('x-api-key')
   const authHeader = req.headers.get('authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
+  // Service caller: a new secret key, or the legacy key only while Supabase still accepts it.
+  const serviceCredential = await verifyServiceCredential(req.headers)
 
   let isAuthed = false
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey || (agentServerKey && xApiKey === agentServerKey))) {
+  if (serviceCredential) {
     isAuthed = true
-  } else if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey || (agentServerKey && bearerToken === agentServerKey))) {
+  } else if (xApiKey && (xApiKey === validKey || (agentServerKey && xApiKey === agentServerKey))) {
+    isAuthed = true
+  } else if (bearerToken && (bearerToken === validKey || (agentServerKey && bearerToken === agentServerKey))) {
     isAuthed = true
   } else if (bearerToken) {
     try {
@@ -208,8 +213,9 @@ serve(async (req: Request) => {
     action,
     xApiKey,
     bearerToken,
+    apiKeyHeader: req.headers.get('apikey'),
     sharedKey: validKey,
-    serviceKey,
+    serviceKey: serviceCredential?.token ?? null,
     agentServerKey,
     sb,
   })

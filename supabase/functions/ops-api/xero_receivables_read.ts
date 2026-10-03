@@ -536,6 +536,38 @@ export async function getXeroReceivable(
   return { ok: true, invoice, provenance };
 }
 
+/**
+ * The invoice's Xero online-invoice link: the page where the client can see and pay it. A
+ * read (GET /Invoices/{id}/OnlineInvoice), used for the debt desk's firm text, one invoice at a
+ * time. Never the newest invoice's link and never a guess: a missing link is an error.
+ */
+export async function getXeroOnlineInvoiceUrl(
+  client: unknown,
+  xeroInvoiceId: unknown,
+  deps: ReadDeps,
+): Promise<string> {
+  const id = uuid(xeroInvoiceId, "xero_invoice_id");
+  const { result } = await providerRead(
+    client,
+    deps,
+    `/Invoices/${id}/OnlineInvoice`,
+  );
+  const rows = rawRecord(result) && Array.isArray(result.OnlineInvoices)
+    ? result.OnlineInvoices
+    : [];
+  const url = rows.length === 1 && rawRecord(rows[0])
+    ? rows[0].OnlineInvoiceUrl
+    : null;
+  if (typeof url !== "string" || !/^https:\/\/\S+$/.test(url)) {
+    throw new XeroReceivablesReadError(
+      "Xero returned no online invoice link for this invoice",
+      502,
+      "XERO_ONLINE_INVOICE_MISSING",
+    );
+  }
+  return url;
+}
+
 const SETTLEMENTS = {
   payment: {
     collection: "Payments",
@@ -687,18 +719,27 @@ export async function listXeroSettlementRecords(
 // false, which is the closest provider fact available; a statement line with no
 // Xero transaction yet is invisible to this read and must be stated as such.
 
-const BANK_TRANSACTION_STATUSES = new Set(["UNRECONCILED", "ALL", "AUTHORISED", "DELETED"]);
+const BANK_TRANSACTION_STATUSES = new Set([
+  "UNRECONCILED",
+  "ALL",
+  "AUTHORISED",
+  "DELETED",
+]);
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function isoDate(value: unknown, field: string): string | null {
   if (value === undefined || value === null || value === "") return null;
-  const bad = () => new XeroReceivablesReadError(`${field} must be an ISO date (YYYY-MM-DD)`);
+  const bad = () =>
+    new XeroReceivablesReadError(`${field} must be an ISO date (YYYY-MM-DD)`);
   if (typeof value !== "string" || !ISO_DATE.test(value)) throw bad();
   // Shape alone accepts impossible days (2026-02-30, 2026-13-01): Date rolls
   // them forward silently. Round-trip the parsed date back to YYYY-MM-DD and
   // require it to equal the input, so only a real calendar date survives.
   const parsed = new Date(value + "T00:00:00Z");
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw bad();
+  if (
+    Number.isNaN(parsed.getTime()) ||
+    parsed.toISOString().slice(0, 10) !== value
+  ) throw bad();
   return value;
 }
 
@@ -712,22 +753,44 @@ export async function listXeroBankTransactions(
   params: Params,
   deps: ReadDeps,
 ) {
-  validateKeys(params, ["status", "bank_account_id", "date_from", "date_to", "page", "page_size"]);
+  validateKeys(params, [
+    "status",
+    "bank_account_id",
+    "date_from",
+    "date_to",
+    "page",
+    "page_size",
+  ]);
   const status = String(read(params, "status") ?? "UNRECONCILED").toUpperCase();
   if (!BANK_TRANSACTION_STATUSES.has(status)) {
-    throw new XeroReceivablesReadError(`status must be one of ${[...BANK_TRANSACTION_STATUSES].join(", ")}`);
+    throw new XeroReceivablesReadError(
+      `status must be one of ${[...BANK_TRANSACTION_STATUSES].join(", ")}`,
+    );
   }
   const page = positiveInteger(read(params, "page"), "page", 1, 1_000_000);
-  const pageSize = positiveInteger(read(params, "page_size"), "page_size", 100, 100);
+  const pageSize = positiveInteger(
+    read(params, "page_size"),
+    "page_size",
+    100,
+    100,
+  );
   const rawAccount = read(params, "bank_account_id");
-  const bankAccountId = rawAccount === undefined || rawAccount === null || rawAccount === "" ? null : uuid(rawAccount, "bank_account_id");
+  const bankAccountId =
+    rawAccount === undefined || rawAccount === null || rawAccount === ""
+      ? null
+      : uuid(rawAccount, "bank_account_id");
   const dateFrom = isoDate(read(params, "date_from"), "date_from");
   const dateTo = isoDate(read(params, "date_to"), "date_to");
-  if (dateFrom && dateTo && dateFrom > dateTo) throw new XeroReceivablesReadError("date_from must not be after date_to");
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    throw new XeroReceivablesReadError("date_from must not be after date_to");
+  }
   const where: string[] = [];
-  if (status === "UNRECONCILED") where.push("IsReconciled==false", 'Status=="AUTHORISED"');
-  else if (status !== "ALL") where.push(`Status=="${status}"`);
-  if (bankAccountId) where.push(`BankAccount.AccountID==Guid("${bankAccountId}")`);
+  if (status === "UNRECONCILED") {
+    where.push("IsReconciled==false", 'Status=="AUTHORISED"');
+  } else if (status !== "ALL") where.push(`Status=="${status}"`);
+  if (bankAccountId) {
+    where.push(`BankAccount.AccountID==Guid("${bankAccountId}")`);
+  }
   if (dateFrom) where.push(`Date>=${xeroDateTimeLiteral(dateFrom)}`);
   if (dateTo) where.push(`Date<=${xeroDateTimeLiteral(dateTo)}`);
   const query: Record<string, string> = {
@@ -736,23 +799,48 @@ export async function listXeroBankTransactions(
     order: "Date DESC",
   };
   if (where.length) query.where = where.join(" AND ");
-  const { result, provenance } = await providerRead(client, deps, "/BankTransactions", query);
+  const { result, provenance } = await providerRead(
+    client,
+    deps,
+    "/BankTransactions",
+    query,
+  );
   const rows = records(result, "BankTransactions");
   if (rows.length > pageSize) {
-    throw new XeroReceivablesReadError("Xero exceeded the requested page size", 502, "XERO_RESPONSE_INVALID");
+    throw new XeroReceivablesReadError(
+      "Xero exceeded the requested page size",
+      502,
+      "XERO_RESPONSE_INVALID",
+    );
   }
   const seen = new Set<string>();
   for (const row of rows) {
-    const id = typeof row.BankTransactionID === "string" ? row.BankTransactionID.toLowerCase() : "";
+    const id = typeof row.BankTransactionID === "string"
+      ? row.BankTransactionID.toLowerCase()
+      : "";
     if (!UUID.test(id) || seen.has(id)) {
-      throw new XeroReceivablesReadError("Xero page contains missing or duplicate bank transaction identities", 502, "XERO_RESPONSE_INVALID");
+      throw new XeroReceivablesReadError(
+        "Xero page contains missing or duplicate bank transaction identities",
+        502,
+        "XERO_RESPONSE_INVALID",
+      );
     }
     seen.add(id);
     if (status === "UNRECONCILED" && row.IsReconciled !== false) {
-      throw new XeroReceivablesReadError("Xero returned a reconciled transaction outside the requested filter", 502, "XERO_FILTER_MISMATCH");
+      throw new XeroReceivablesReadError(
+        "Xero returned a reconciled transaction outside the requested filter",
+        502,
+        "XERO_FILTER_MISMATCH",
+      );
     }
-    if ((status === "AUTHORISED" || status === "DELETED") && row.Status !== status) {
-      throw new XeroReceivablesReadError("Xero returned a transaction outside the requested status filter", 502, "XERO_FILTER_MISMATCH");
+    if (
+      (status === "AUTHORISED" || status === "DELETED") && row.Status !== status
+    ) {
+      throw new XeroReceivablesReadError(
+        "Xero returned a transaction outside the requested status filter",
+        502,
+        "XERO_FILTER_MISMATCH",
+      );
     }
   }
   // Matching inputs the BOOKKEEPING rules read, lifted beside the raw row so a
@@ -765,21 +853,43 @@ export async function listXeroBankTransactions(
     date: row.DateString ?? row.Date ?? null,
     total: typeof row.Total === "number" ? row.Total : null,
     sub_total: typeof row.SubTotal === "number" ? row.SubTotal : null,
-    currency_code: typeof row.CurrencyCode === "string" ? row.CurrencyCode : null,
+    currency_code: typeof row.CurrencyCode === "string"
+      ? row.CurrencyCode
+      : null,
     reference: typeof row.Reference === "string" ? row.Reference : null,
-    contact_name: rawRecord(row.Contact) && typeof row.Contact.Name === "string" ? row.Contact.Name : null,
-    contact_id: rawRecord(row.Contact) && typeof row.Contact.ContactID === "string" ? row.Contact.ContactID.toLowerCase() : null,
-    bank_account_id: rawRecord(row.BankAccount) && typeof row.BankAccount.AccountID === "string" ? row.BankAccount.AccountID.toLowerCase() : null,
-    bank_account_name: rawRecord(row.BankAccount) && typeof row.BankAccount.Name === "string" ? row.BankAccount.Name : null,
+    contact_name: rawRecord(row.Contact) && typeof row.Contact.Name === "string"
+      ? row.Contact.Name
+      : null,
+    contact_id:
+      rawRecord(row.Contact) && typeof row.Contact.ContactID === "string"
+        ? row.Contact.ContactID.toLowerCase()
+        : null,
+    bank_account_id: rawRecord(row.BankAccount) &&
+        typeof row.BankAccount.AccountID === "string"
+      ? row.BankAccount.AccountID.toLowerCase()
+      : null,
+    bank_account_name:
+      rawRecord(row.BankAccount) && typeof row.BankAccount.Name === "string"
+        ? row.BankAccount.Name
+        : null,
     line_item_descriptions: Array.isArray(row.LineItems)
-      ? row.LineItems.filter(rawRecord).map((li) => (typeof li.Description === "string" ? li.Description : "")).filter(Boolean)
+      ? row.LineItems.filter(rawRecord).map((
+        li,
+      ) => (typeof li.Description === "string" ? li.Description : "")).filter(
+        Boolean,
+      )
       : [],
     raw: row,
   }));
   return {
     ok: true,
     transactions,
-    filters: { status, bank_account_id: bankAccountId, date_from: dateFrom, date_to: dateTo },
+    filters: {
+      status,
+      bank_account_id: bankAccountId,
+      date_from: dateFrom,
+      date_to: dateTo,
+    },
     pagination: pagination(page, pageSize, rows.length),
     provenance,
     coverage: {
@@ -803,62 +913,111 @@ export async function readXeroBankSummary(
   validateKeys(params, ["date_from", "date_to"]);
   const dateFrom = isoDate(read(params, "date_from"), "date_from");
   const dateTo = isoDate(read(params, "date_to"), "date_to");
-  if (dateFrom && dateTo && dateFrom > dateTo) throw new XeroReceivablesReadError("date_from must not be after date_to");
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    throw new XeroReceivablesReadError("date_from must not be after date_to");
+  }
   const query: Record<string, string> = {};
   if (dateFrom) query.fromDate = dateFrom;
   if (dateTo) query.toDate = dateTo;
-  const { result, provenance } = await providerRead(client, deps, "/Reports/BankSummary", query);
+  const { result, provenance } = await providerRead(
+    client,
+    deps,
+    "/Reports/BankSummary",
+    query,
+  );
   const reports = records(result, "Reports");
   const report = reports[0];
   if (!report || report.ReportID !== "BankSummary") {
-    throw new XeroReceivablesReadError("Xero did not return the Bank Summary report", 502, "XERO_RESPONSE_INVALID");
+    throw new XeroReceivablesReadError(
+      "Xero did not return the Bank Summary report",
+      502,
+      "XERO_RESPONSE_INVALID",
+    );
   }
   // Flatten the report's row grid into one line per bank account. Column order
   // in Xero's Bank Summary: Bank Accounts, Opening Balance, Cash Received,
   // Cash Spent, FX Gain, Closing Balance (FX Gain absent when not applicable).
   const headerCells: string[] = [];
   const accounts: Array<Record<string, unknown>> = [];
-  const sections = Array.isArray(report.Rows) ? report.Rows.filter(rawRecord) : [];
+  const sections = Array.isArray(report.Rows)
+    ? report.Rows.filter(rawRecord)
+    : [];
   for (const section of sections) {
     const pushHeader = (candidate: Record<string, unknown>) => {
-      if (candidate.RowType !== "Header" || !Array.isArray(candidate.Cells) || headerCells.length) return;
-      for (const cell of candidate.Cells) headerCells.push(rawRecord(cell) && typeof cell.Value === "string" ? cell.Value : "");
+      if (
+        candidate.RowType !== "Header" || !Array.isArray(candidate.Cells) ||
+        headerCells.length
+      ) return;
+      for (const cell of candidate.Cells) {
+        headerCells.push(
+          rawRecord(cell) && typeof cell.Value === "string" ? cell.Value : "",
+        );
+      }
     };
     pushHeader(section);
-    const rows = Array.isArray(section.Rows) ? section.Rows.filter(rawRecord) : [];
+    const rows = Array.isArray(section.Rows)
+      ? section.Rows.filter(rawRecord)
+      : [];
     // Xero puts the header row at the top level in some payloads and inside the
     // section in others, so scan both before reading cells by column name.
     for (const row of rows) pushHeader(row);
     for (const row of rows) {
       if (row.RowType !== "Row" || !Array.isArray(row.Cells)) continue;
       const cells = row.Cells.filter(rawRecord);
-      const value = (i: number) => (cells[i] && typeof cells[i].Value === "string" ? cells[i].Value : null);
+      const value = (
+        i: number,
+      ) => (cells[i] && typeof cells[i].Value === "string"
+        ? cells[i].Value
+        : null);
       // An empty or whitespace-only cell is "no figure", not zero: Number("")
       // is 0 and would report a fabricated balance.
-      const number = (i: number) => { const v = value(i); if (v === null || v.trim() === "") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
-      const attrs = cells[0] && Array.isArray(cells[0].Attributes) ? cells[0].Attributes.filter(rawRecord) : [];
-      const accountId = attrs.find((a) => a.Id === "accountID" && typeof a.Value === "string")?.Value;
-      const byHeader = (name: string) => { const i = headerCells.indexOf(name); return i >= 0 ? number(i) : null; };
+      const number = (i: number) => {
+        const v = value(i);
+        if (v === null || v.trim() === "") return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const attrs = cells[0] && Array.isArray(cells[0].Attributes)
+        ? cells[0].Attributes.filter(rawRecord)
+        : [];
+      const accountId = attrs.find((a) =>
+        a.Id === "accountID" && typeof a.Value === "string"
+      )?.Value;
+      const byHeader = (name: string) => {
+        const i = headerCells.indexOf(name);
+        return i >= 0 ? number(i) : null;
+      };
       accounts.push({
         account_name: value(0),
-        account_id: typeof accountId === "string" ? accountId.toLowerCase() : null,
+        account_id: typeof accountId === "string"
+          ? accountId.toLowerCase()
+          : null,
         opening_balance: byHeader("Opening Balance"),
         cash_received: byHeader("Cash Received"),
         cash_spent: byHeader("Cash Spent"),
         closing_balance: byHeader("Closing Balance"),
-        raw_cells: cells.map((c) => (typeof c.Value === "string" ? c.Value : null)),
+        raw_cells: cells.map((
+          c,
+        ) => (typeof c.Value === "string" ? c.Value : null)),
       });
     }
   }
   return {
     ok: true,
-    report: { id: report.ReportID, name: report.ReportName ?? null, date: report.ReportDate ?? null, titles: report.ReportTitles ?? null, columns: headerCells },
+    report: {
+      id: report.ReportID,
+      name: report.ReportName ?? null,
+      date: report.ReportDate ?? null,
+      titles: report.ReportTitles ?? null,
+      columns: headerCells,
+    },
     accounts,
     filters: { date_from: dateFrom, date_to: dateTo },
     provenance,
     coverage: {
       source: "xero_reports_bank_summary",
-      note: "Closing balance is Xero's ledger balance for the bank account at the report date, not the bank's own statement balance. Unreconciled statement lines can make the two differ.",
+      note:
+        "Closing balance is Xero's ledger balance for the bank account at the report date, not the bank's own statement balance. Unreconciled statement lines can make the two differ.",
     },
   };
 }

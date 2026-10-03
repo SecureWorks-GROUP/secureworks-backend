@@ -54,7 +54,7 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 //   ── Job Completion Package ──
 //   complete_job         — Mark job complete + GHL stage sync
 //   send_payment_link    — Get Xero online invoice URL + SMS to client (AUTHORISED invoices only — 409 otherwise)
-//   send_acceptance_invoice — Create AUTHORISED deposit invoice + send payment link in one call (Pay Now gated on chargeability)
+//   send_acceptance_invoice — Create AUTHORISED deposit invoice + email the Pay Now link in one call (gated on chargeability; no SMS)
 //   send_review_request  — SMS client with Google review link
 //
 //   ── Crew & Scheduling ──
@@ -407,6 +407,7 @@ import { readJobFreshness } from './job_freshness.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
+import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
 import { matchSesMaterialDisplay } from './ses_material_display.ts'
 import {
   runSesTradeChase,
@@ -502,6 +503,7 @@ import {
   updateSupplierBill,
 } from './xero_accpay_books.ts'
 import {
+  getXeroOnlineInvoiceUrl,
   getXeroReceivable,
   listXeroBankTransactions,
   readXeroBankSummary,
@@ -513,6 +515,21 @@ import {
   XeroReceivablesReadError,
   createXeroReadGet,
 } from './xero_receivables_read.ts'
+import { createSupabaseDebtBookStore, DebtBookError, logDebtDeskFailure, readDebtBook } from './debt_book.ts'
+import { createSupabaseDebtChaseLogStore, readDebtMorningList } from './debt_morning_list.ts'
+import {
+  createSupabaseDebtDeskStore,
+  debtDeskOwnerIds,
+  debtDeskState,
+  debtDraftDecide,
+  debtDraftSend,
+  DebtDeskError,
+  DebtSendRefusedError,
+  debtLogOutcome,
+  debtSendingEnabled,
+} from './debt_desk_actions.ts'
+import { DEBT_CHASE_HISTORY_FILTER } from './debt_desk_drafts.ts'
+import { createSupabaseJanStaffStore, readJanMobile } from './debt_jan_text.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
 import { insuranceReadAction } from './insurance_read_handlers.ts'
 import {
@@ -1217,6 +1234,7 @@ import {
 // Wave 0 H4 (red-team) — the SAME canonical ref normaliser the reconciler uses, so
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
+import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -1402,7 +1420,12 @@ async function recordFinanceReviewEmail(
     const jobCostReportUrls: Record<string, string> = {}
     for (const l of flaggedLines) {
       if (l.jobId && !jobCostReportUrls[l.jobId]) {
-        jobCostReportUrls[l.jobId] = await buildCostReportLink(SUPABASE_URL, l.jobId)
+        try {
+          jobCostReportUrls[l.jobId] = await buildCostReportLink(SUPABASE_URL, l.jobId)
+        } catch (e) {
+          // No link secret configured: send the review without the link.
+          console.error('[finance-review] cost report link not minted:', (e as Error)?.message)
+        }
       }
     }
     const email = buildFinanceReviewEmail({
@@ -4060,11 +4083,19 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
 // REQUEST HANDLER
 // ════════════════════════════════════════════════════════════
 
+// `serviceKey` in the two helpers below is the service credential this request
+// presented and that verifyServiceCredential (../_shared/service_credential.ts)
+// accepted: a new sb_secret_ key, or the legacy key only while Supabase still
+// accepts it. Never the raw env value. A new secret key arrives as `apikey`.
+// `serviceKeyEnv` is the env SUPABASE_SERVICE_ROLE_KEY, used only so an agent
+// key that collides with it is refused.
 export function _resolveOpsApiAuthIntent(input: {
   xApiKey: string | null
   bearerToken: string | null
+  apiKeyHeader?: string | null
   validKey?: string | null
   serviceKey?: string | null
+  serviceKeyEnv?: string | null
   routineKey?: string | null
   agentServerKey?: string | null
   preferBearerOverApiKey?: boolean
@@ -4072,8 +4103,10 @@ export function _resolveOpsApiAuthIntent(input: {
   const {
     xApiKey,
     bearerToken,
+    apiKeyHeader,
     validKey,
     serviceKey,
+    serviceKeyEnv,
     routineKey,
     agentServerKey,
     preferBearerOverApiKey,
@@ -4081,7 +4114,7 @@ export function _resolveOpsApiAuthIntent(input: {
   // The service-role key is the existing non-browser server credential. Keep it
   // ahead of browser Bearer preference so an agent request cannot be downgraded
   // when an unrelated Authorization header is also present.
-  if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey)) return 'api_key'
+  if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey || apiKeyHeader === serviceKey)) return 'api_key'
   // Captain 2026-08-14: the distinct helper pass is a full inside pass, not
   // look-only. Classify it as the server api_key class so existing operator
   // handlers run. Collision with the public, routine, or service secret is
@@ -4089,7 +4122,8 @@ export function _resolveOpsApiAuthIntent(input: {
   const agentServerKeyIsDistinct = !!agentServerKey &&
     agentServerKey !== validKey &&
     agentServerKey !== routineKey &&
-    agentServerKey !== serviceKey
+    agentServerKey !== serviceKey &&
+    agentServerKey !== serviceKeyEnv
   if (
     agentServerKeyIsDistinct &&
     (xApiKey === agentServerKey || bearerToken === agentServerKey)
@@ -4314,12 +4348,14 @@ export function _opsApiCallerIsStaffOperator(
 export function _opsApiServerSecretPresented(input: {
   xApiKey: string | null
   bearerToken: string | null
+  apiKeyHeader?: string | null
   sharedKey?: string | null
   serviceKey?: string | null
+  serviceKeyEnv?: string | null
   agentServerKey?: string | null
   routineKey?: string | null
 }): boolean {
-  const { xApiKey, bearerToken, sharedKey, serviceKey, agentServerKey, routineKey } = input
+  const { xApiKey, bearerToken, apiKeyHeader, sharedKey, serviceKey, serviceKeyEnv, agentServerKey, routineKey } = input
   const matches = (secret?: string | null) =>
     !!secret &&
     secret !== sharedKey &&
@@ -4327,7 +4363,8 @@ export function _opsApiServerSecretPresented(input: {
     (xApiKey === secret || bearerToken === secret)
   // Fail closed if the public/shared key and a server-only credential collide.
   if (matches(serviceKey)) return true
-  if (matches(agentServerKey) && agentServerKey !== serviceKey) return true
+  if (!!serviceKey && serviceKey !== sharedKey && serviceKey !== routineKey && apiKeyHeader === serviceKey) return true
+  if (matches(agentServerKey) && agentServerKey !== serviceKey && agentServerKey !== serviceKeyEnv) return true
   return false
 }
 
@@ -4893,7 +4930,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   // may be UNSET until provisioned, so we only ever match it when it is non-empty;
   // an unset routine key can never classify any caller as routine.
   const validKey = Deno.env.get('SW_API_KEY')
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  // The service credential this request presented, if Supabase-issued and live
+  // (a new secret key, or the legacy key only while Supabase still accepts it).
+  const serviceKey = (await verifyServiceCredential(req.headers))?.token ?? null
+  const serviceKeyEnv = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || null
+  const apiKeyHeader = req.headers.get('apikey')
   const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
   const routineKey = routineKeyEnv && routineKeyEnv.length > 0 ? routineKeyEnv : null
   const agentServerKeyEnv = Deno.env.get('OPS_AGENT_SERVER_KEY')
@@ -4911,8 +4952,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   const authIntent = _resolveOpsApiAuthIntent({
     xApiKey,
     bearerToken,
+    apiKeyHeader,
     validKey,
     serviceKey,
+    serviceKeyEnv,
     routineKey,
     agentServerKey,
     preferBearerOverApiKey: preferBearerForSignedCaller,
@@ -4920,8 +4963,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
   const serverSecretPresented = _opsApiServerSecretPresented({
     xApiKey,
     bearerToken,
+    apiKeyHeader,
     sharedKey: validKey,
     serviceKey,
+    serviceKeyEnv,
     agentServerKey,
     routineKey,
   })
@@ -5239,7 +5284,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           salesPerformanceStore(performanceClient), action, req.method, url.searchParams, body, {
             mode: authMode,
             serviceRole: !!serviceKey && serviceKey !== validKey && serviceKey !== routineKey &&
-              serviceKey !== agentServerKey && (xApiKey === serviceKey || bearerToken === serviceKey),
+              serviceKey !== agentServerKey && (!agentServerKey || agentServerKey !== serviceKeyEnv) &&
+              (xApiKey === serviceKey || bearerToken === serviceKey || apiKeyHeader === serviceKey),
             staff: _opsApiCallerIsStaffOperator(authMode, authUser),
             orgId: authUser?.orgId,
             userId: authUser?.id,
@@ -7659,6 +7705,99 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           // The existing credential helper can include a provider error body in
           // its exception. Do not reflect or log credentials through this read door.
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
+        }
+      }
+      // ── Debt book (plan step 1, docs/debt-book/PLAN.md) ──
+      // Read-only: the open book live from Xero through xero_receivables_read.ts, the
+      // captain's rules (debt_book_rules.ts), and a copy-vs-Xero check. Writes nothing.
+      case 'debt_book': {
+        if (req.method !== 'GET') {
+          return json({ ok: false, error: 'debt_book requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+        }
+        try {
+          return json(await readDebtBook(client, url.searchParams, {
+            getToken,
+            xeroGet: xeroReadGet,
+            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
+          }))
+        } catch (error) {
+          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
+            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+          }
+          logDebtDeskFailure('debt_book', error)
+          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
+        }
+      }
+      // ── Debt morning list (plan steps 2, 3 and 5, docs/debt-book/PLAN.md) ──
+      // Read-only: the debt book plus the chase log, worked into today's step per payer
+      // (debt_chase_schedule.ts), with each draft and Jan's morning text. No sending, no writes.
+      case 'debt_morning_list': {
+        if (req.method !== 'GET') {
+          return json({ ok: false, error: 'debt_morning_list requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+        }
+        try {
+          return json(await readDebtMorningList(client, url.searchParams, {
+            getToken,
+            xeroGet: xeroReadGet,
+            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
+            chaseLog: createSupabaseDebtChaseLogStore(client, DEFAULT_ORG_ID),
+            payLink: (id) => getXeroOnlineInvoiceUrl(client, id, { getToken, xeroGet: xeroReadGet }),
+            desk: () => debtDeskState(
+              authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null,
+              {
+                deskOwnerIds: () => debtDeskOwnerIds(createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID)),
+                sendingEnabled: debtSendingEnabled(),
+              },
+            ),
+            janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
+          }))
+        } catch (error) {
+          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
+            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+          }
+          logDebtDeskFailure('debt_morning_list', error)
+          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
+        }
+      }
+      // ── Debt desk actions (plan step 3, docs/debt-book/PLAN.md; debt_desk_actions.ts) ──
+      // Approve or skip a draft and send approved drafts (desk owner only), and log a call or
+      // visit outcome (any staff user). Writes go to payment_chase_logs only and name the
+      // signed-in user. Sending is off unless DEBT_SENDING_ENABLED is exactly "true".
+      case 'debt_draft_decide':
+      case 'debt_log_outcome':
+      case 'debt_draft_send': {
+        if (req.method !== 'POST') {
+          return json({ ok: false, error: `${action} requires POST`, code: 'METHOD_NOT_ALLOWED' }, 405)
+        }
+        const actor = authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null
+        const deskStore = createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID)
+        const deskDeps = {
+          store: deskStore,
+          readInvoice: async (id: string) => (await getXeroReceivable(client, { xero_invoice_id: id }, { getToken, xeroGet: xeroReadGet })).invoice,
+          sendSms: async (smsBody: Record<string, unknown>) => {
+            try {
+              return await sendChaseSms(client, smsBody)
+            } catch (error) {
+              if (error instanceof ApiError || error instanceof SesActionError) throw new DebtSendRefusedError(error.message)
+              throw error
+            }
+          },
+          // Jan's morning text (plan step 5): to Jan's own mobile through the staff SMS path.
+          janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
+          sendStaffSms: (phone: string, message: string) => sendSmsViaGhlWithReceipt(phone, message, null),
+          sendingEnabled: debtSendingEnabled(),
+          deskOwnerIds: () => debtDeskOwnerIds(deskStore),
+        }
+        try {
+          if (action === 'debt_draft_decide') return json(await debtDraftDecide(body, actor, deskDeps))
+          if (action === 'debt_log_outcome') return json(await debtLogOutcome(body, actor, deskDeps))
+          return json(await debtDraftSend(body, actor, deskDeps))
+        } catch (error) {
+          if (error instanceof DebtDeskError) {
+            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
+          }
+          logDebtDeskFailure(action, error)
+          return json({ ok: false, code: 'DEBT_DESK_FAILED', error: 'The debt desk could not complete this action' }, 502)
         }
       }
       case 'list_supplier_bills':
@@ -12900,8 +13039,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'log_chase': return json(await logChase(client, body))
       case 'resolve_follow_up': return json(await resolveFollowUp(client, body))
       case 'send_chase_sms': return json(await sendChaseSms(client, body))
-      case 'trigger_chase_workflow': return json(await triggerChaseWorkflow(client, body))
-      case 'stop_chase_workflow': return json(await stopChaseWorkflow(client, body))
+      // Automated money messages are off (captain, 30 Sep 2026): debt_autotexts_off.ts.
+      case 'trigger_chase_workflow':
+      case 'stop_chase_workflow': {
+        const refusal = chaseWorkflowRefusal(action)
+        return json(refusal.body, refusal.status)
+      }
       case 'handle_payment_event': return json(await handlePaymentEvent(client, body))
       case 'trigger_xero_sync': return json(await triggerXeroSync())
       case 'ai_analyse_debt_client': return json(await aiAnalyseDebtClient(client, body))
@@ -15616,6 +15759,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     const { data: cl } = await client.from('payment_chase_logs')
       .select('id, xero_invoice_id, method, outcome, notes, follow_up_date, follow_up_resolved, chased_by, created_at')
       .in('xero_invoice_id', overdueInvIds)
+      .or(DEBT_CHASE_HISTORY_FILTER)
       .order('created_at', { ascending: false })
       .limit(10)
     chaseLogs = cl || []
@@ -52480,7 +52624,7 @@ async function sendPaymentLink(client: any, body: any) {
   }
 }
 
-// Acceptance-invoice charge gate. The branded "Pay Now" email/SMS may only go out
+// Acceptance-invoice charge gate. The branded "Pay Now" email may only go out
 // when the Xero invoice actually came back AUTHORISED AND we have a live OnlineInvoice
 // URL. A DRAFT status (or a missing URL) means the link is unpayable — emailing it
 // stranded clients with dead links (INV-0859/0687/0686). Pure so it can be unit-tested
@@ -52489,7 +52633,7 @@ export function _acceptanceInvoiceChargeable(xeroStatus: unknown, paymentUrl: un
   return xeroStatus === 'AUTHORISED' && typeof paymentUrl === 'string' && paymentUrl.length > 0
 }
 
-// ── send_acceptance_invoice: create deposit invoice + send payment link in one call ──
+// ── send_acceptance_invoice: create deposit invoice + email the payment link in one call ──
 // Used by: send-quote /accept (auto), sale.html button, ops dashboard
 async function sendAcceptanceInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
@@ -52640,7 +52784,6 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 
   // Get Xero online invoice URL for payment
   let paymentUrl = ''
-  let smsSent = false
   let brandedEmailSent = false
   try {
     const { accessToken, tenantId } = await getToken(client)
@@ -52777,42 +52920,8 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     }
   }
 
-  // Send SMS via GHL if requested and we have a payment URL
-  if (notifyClient && paymentUrl) {
-    try {
-      let smsContactId = job.ghl_contact_id
-      let smsFirstName = job.client_name?.split(' ')[0] || 'there'
-
-      if (body.job_contact_id) {
-        const { data: jc } = await client.from('job_contacts')
-          .select('ghl_contact_id, client_name')
-          .eq('id', body.job_contact_id)
-          .single()
-        if (jc?.ghl_contact_id) {
-          smsContactId = jc.ghl_contact_id
-          smsFirstName = jc.client_name?.split(' ')[0] || smsFirstName
-        }
-      }
-
-      if (smsContactId) {
-        const smsMessage = `Hi ${smsFirstName}, thanks for accepting your ${job.type || 'project'} quote! Your deposit invoice is ready.\n\nPay online here: ${paymentUrl}\n\nThanks,\nSecureWorks Group`
-
-        const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-        const smsResp = await fetch(ghlUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contactId: smsContactId,
-            message: smsMessage,
-          }),
-        })
-        const smsResult = await smsResp.json()
-        smsSent = smsResult.success || false
-      }
-    } catch (e) {
-      console.log('[send_acceptance_invoice] SMS failed (non-blocking):', (e as Error).message)
-    }
-  }
+  // No Pay Now text: automated money messages are off (captain, 30 Sep 2026;
+  // debt_autotexts_off.ts). The branded email above is the only client send.
 
   // Log combined event
   await client.from('job_events').insert({
@@ -52825,7 +52934,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
       deposit_percent: depositPercent,
       council_fees: councilFees,
       payment_url: paymentUrl,
-      sms_sent: smsSent,
+      sms_sent: false,
       branded_email_sent: brandedEmailSent,
     },
   })
@@ -52866,7 +52975,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     deposit_percent: depositPercent,
     council_fees: councilFees,
     payment_url: paymentUrl,
-    sms_sent: smsSent,
+    sms_sent: false,
     branded_email_sent: brandedEmailSent,
   }
 }
@@ -59187,7 +59296,7 @@ async function getEmailInbox(client: any, params: URLSearchParams) {
 // CLEAR DEBT — Payment Chase & Collection
 // ════════════════════════════════════════════════════════════
 
-async function listOverdueInvoices(client: any) {
+export async function listOverdueInvoices(client: any) {
   const today = new Date().toISOString().slice(0, 10)
 
   // 1. Get all overdue ACCREC invoices
@@ -59239,6 +59348,7 @@ async function listOverdueInvoices(client: any) {
     const { data: chaseLogs } = await client.from('payment_chase_logs')
       .select('id, xero_invoice_id, method, outcome, notes, follow_up_date, follow_up_resolved, chased_by, created_at')
       .in('xero_invoice_id', invoiceIds)
+      .or(DEBT_CHASE_HISTORY_FILTER)
       .order('created_at', { ascending: false })
       .limit(500)
     ;(chaseLogs || []).forEach((log: any) => {
@@ -59449,8 +59559,8 @@ async function classifyInvoice(client: any, body: any) {
     chased_by: operator_email || null,
   })
 
-  // If genuine_debt and we have a GHL contact, trigger the chase workflow
-  // (caller should handle this via separate trigger_chase_workflow call from the UI)
+  // Classifying starts no chase: the GHL chase-overdue workflow is switched off
+  // (captain, 30 Sep 2026; debt_autotexts_off.ts).
 
   return { success: true, classification }
 }
@@ -59768,101 +59878,12 @@ async function sendChaseSms(client: any, body: any) {
   return { success: true, message_id: smsResult.messageId }
 }
 
-async function triggerChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id, overdue_amount, invoice_number, job_number, xero_invoice_id, job_id } = body
-  if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
-  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
-    client,
-    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
-    'trigger_chase_workflow',
-  )
-  if (resolved.job_id) {
-    await assertGhlContactMatchesResolvedJob(
-      client,
-      resolved.job_id,
-      ghl_contact_id,
-      'trigger_chase_workflow',
-    )
-  }
-
-  const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
-
-  // 1. Add chase-overdue tag to contact
-  const tagResp = await fetch(`${ghlBase}?action=add_contact_tag`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contactId: ghl_contact_id, tag: 'chase-overdue' }),
-  })
-  const tagResult = await tagResp.json()
-
-  // 2. Set custom fields with chase context (for GHL workflow SMS templates)
-  try {
-    await fetch(`${ghlBase}?action=update_contact_custom_fields`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contactId: ghl_contact_id,
-        customFields: {
-          overdue_amount: overdue_amount ? String(overdue_amount) : '',
-          overdue_invoice_number: invoice_number || '',
-          overdue_job_number: job_number || '',
-        },
-      }),
-    })
-  } catch (e) {
-    console.log('[ops-api] Custom field update failed (non-blocking):', e)
-  }
-
-  return { success: true, tag_added: tagResult.success }
-}
-
-async function stopChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id, xero_invoice_id, job_id } = body
-  if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
-  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
-    client,
-    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
-    'stop_chase_workflow',
-  )
-  if (resolved.job_id) {
-    await assertGhlContactMatchesResolvedJob(
-      client,
-      resolved.job_id,
-      ghl_contact_id,
-      'stop_chase_workflow',
-    )
-  }
-
-  const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
-
-  // 1. Remove chase-overdue tag
-  const tagResp = await fetch(`${ghlBase}?action=remove_contact_tag`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contactId: ghl_contact_id, tag: 'chase-overdue' }),
-  })
-  const tagResult = await tagResp.json()
-
-  // 2. Clear custom fields
-  try {
-    await fetch(`${ghlBase}?action=update_contact_custom_fields`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contactId: ghl_contact_id,
-        customFields: { overdue_amount: '', overdue_invoice_number: '', overdue_job_number: '' },
-      }),
-    })
-  } catch (e) {
-    console.log('[ops-api] Custom field clear failed (non-blocking):', e)
-  }
-
-  return { success: true, tag_removed: tagResult.success }
-}
-
 // ── Handle payment detection events ──
 // Called when xero sync detects an invoice has been paid (amount_due → 0).
-// Stops chase workflow, sends thank-you SMS, logs to payment_chase_logs.
+// Resolves open follow-ups and logs the payment to payment_chase_logs. It sends
+// no thank-you text and touches no GHL workflow: automated money messages are
+// off (captain, 30 Sep 2026; debt_autotexts_off.ts), and the
+// process-payment-events cron that drove it is unscheduled.
 async function handlePaymentEvent(client: any, body: any) {
   const { xero_contact_id, xero_invoice_id, invoice_number, contact_name, amount_paid, job_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
@@ -59905,10 +59926,10 @@ async function handlePaymentEvent(client: any, body: any) {
 
   const results: string[] = []
 
-  // 1. Resolve GHL contact from contact_matches
+  // 1. Resolve GHL contact from contact_matches (recorded on the log row only)
   let ghlContactId: string | null = null
   const { data: match } = await client.from('contact_matches')
-    .select('ghl_contact_id, phone')
+    .select('ghl_contact_id')
     .eq('xero_contact_id', verifiedXeroContactId)
     .limit(1)
     .maybeSingle()
@@ -59916,21 +59937,7 @@ async function handlePaymentEvent(client: any, body: any) {
     ghlContactId = match.ghl_contact_id
   }
 
-  // 2. Stop chase workflow if GHL contact exists
-  if (ghlContactId) {
-    try {
-      await stopChaseWorkflow(client, {
-        ghl_contact_id: ghlContactId,
-        xero_invoice_id,
-        job_id: verifiedJobId,
-      })
-      results.push('chase_stopped')
-    } catch (e) {
-      console.log(`[ops-api] stopChaseWorkflow failed for ${ghlContactId}:`, e)
-    }
-  }
-
-  // 3. Resolve any unresolved follow-ups for this invoice
+  // 2. Resolve any unresolved follow-ups for this invoice
   const { count: resolvedCount } = await client.from('payment_chase_logs')
     .update({ follow_up_resolved: true })
     .eq('xero_invoice_id', xero_invoice_id)
@@ -59940,7 +59947,7 @@ async function handlePaymentEvent(client: any, body: any) {
     results.push(`resolved_${resolvedCount}_followups`)
   }
 
-  // 4. Log payment received to chase logs
+  // 3. Log payment received to chase logs
   await client.from('payment_chase_logs').insert({
     xero_invoice_id,
     job_id: verifiedJobId,
@@ -59951,24 +59958,6 @@ async function handlePaymentEvent(client: any, body: any) {
     chased_by: 'system',
   })
   results.push('chase_log_created')
-
-  // 5. Send thank-you SMS if we have a GHL contact with a phone
-  if (ghlContactId && match?.phone) {
-    const firstName = (contact_name || '').split(' ')[0] || 'there'
-    const thankYouMsg = `Hi ${firstName}, we've received your payment of $${Math.round(Number(amount_paid) || 0).toLocaleString()} for invoice ${invoice_number}. Thank you! — SecureWorks`
-    try {
-      const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      await fetch(ghlUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-        body: JSON.stringify({ contactId: ghlContactId, message: thankYouMsg }),
-      })
-      results.push('thank_you_sms_sent')
-    } catch (e) {
-      console.log(`[ops-api] Thank-you SMS failed for ${ghlContactId}:`, e)
-      results.push('thank_you_sms_failed')
-    }
-  }
 
   return { success: true, invoice_number, contact_name, actions: results }
 }

@@ -98,6 +98,8 @@ Deno.test("direct Xero evidence reads retain staff/server auth and refuse public
       "read_xero_settlement_record",
       "list_xero_bank_transactions",
       "read_xero_bank_summary",
+      "debt_book",
+      "debt_morning_list",
     ]
   ) {
     for (const authMode of ["none", "api_key"] as const) {
@@ -1002,5 +1004,119 @@ Deno.test("sales performance actions retain the staff front door and no routine/
     }
     assertEquals(AGENT_READ_ALLOWED_ACTIONS.has(action), false);
     assertEquals(LEAD_INSTALLER_READ_ACTIONS.has(action), false);
+  }
+});
+
+Deno.test("a verified service credential in the apikey header is the server caller", () => {
+  const secret = "sb_secret_fx_verified";
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: secret,
+      validKey: "browser-shared-key",
+      serviceKey: secret,
+    }),
+    "api_key",
+  );
+  assertEquals(
+    _opsApiServerSecretPresented({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: secret,
+      sharedKey: "browser-shared-key",
+      serviceKey: secret,
+    }),
+    true,
+  );
+  // A browser's public apikey with no verified service credential is not.
+  assertEquals(
+    _opsApiServerSecretPresented({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: "sb_publishable_fixture",
+      sharedKey: "browser-shared-key",
+      serviceKey: null,
+    }),
+    false,
+  );
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: null,
+      bearerToken: null,
+      apiKeyHeader: "sb_publishable_fixture",
+      validKey: "browser-shared-key",
+      serviceKey: null,
+    }),
+    "none",
+  );
+});
+
+Deno.test("an agent key equal to the env service-role key is refused once the platform stops vouching for it", () => {
+  const envServiceKey = "legacy-service-role-fixture";
+  for (const header of ["x-api-key", "authorization"] as const) {
+    const xApiKey = header === "x-api-key" ? envServiceKey : null;
+    const bearerToken = header === "authorization" ? envServiceKey : null;
+    assertEquals(
+      _resolveOpsApiAuthIntent({
+        xApiKey,
+        bearerToken,
+        validKey: "browser-shared-key",
+        serviceKey: null,
+        serviceKeyEnv: envServiceKey,
+        agentServerKey: envServiceKey,
+      }),
+      header === "authorization" ? "jwt" : "none",
+      header,
+    );
+    assertEquals(
+      _opsApiServerSecretPresented({
+        xApiKey,
+        bearerToken,
+        sharedKey: "browser-shared-key",
+        serviceKey: null,
+        serviceKeyEnv: envServiceKey,
+        agentServerKey: envServiceKey,
+      }),
+      false,
+      header,
+    );
+  }
+  assertEquals(
+    _resolveOpsApiAuthIntent({
+      xApiKey: "distinct-agent-key",
+      bearerToken: null,
+      validKey: "browser-shared-key",
+      serviceKey: null,
+      serviceKeyEnv: envServiceKey,
+      agentServerKey: "distinct-agent-key",
+    }),
+    "api_key",
+  );
+});
+
+Deno.test("debt desk writes are staff or server only; trades and the agent key are refused", () => {
+  // The actions themselves then refuse any caller that is not a signed-in staff user
+  // (debt_desk_actions.ts requireActor), and approve and send refuse anyone but the desk
+  // owner (requireDeskOwner), so a server key can authorise but not approve.
+  for (const action of ["debt_draft_decide", "debt_log_outcome", "debt_draft_send"]) {
+    for (const authMode of ["none", "api_key"] as const) {
+      assertEquals(authorizationStatus({ action, authMode }), 401, action);
+    }
+    for (const role of ["admin", "owner", "ops_manager"]) {
+      assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200);
+    }
+    for (const role of ["crew", "installer", "lead_installer"]) {
+      assertEquals(
+        authorizationStatus({
+          action,
+          authMode: "jwt",
+          role,
+          managedVerticals: ["roofing"],
+        }),
+        403,
+      );
+    }
+    assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
   }
 });
