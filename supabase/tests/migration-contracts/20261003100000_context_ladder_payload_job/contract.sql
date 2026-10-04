@@ -172,7 +172,7 @@ SELECT pg_temp.pj_cases(true);
 ROLLBACK;
 
 -- E. Structure. A registered successor (L1c 20261004200000, then L1d
--- 20261005090000, then L1e 20261005110000) proves in its own contract that its bodies are exactly the
+-- 20261005090000, then L1e 20261005170000) proves in its own contract that its bodies are exactly the
 -- previous ones plus or with its rules; while one is live the byte checks
 -- below are its, not these.
 SELECT coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') SIMILAR TO 'L1(c|d|e):%' AS l1c_live \gset

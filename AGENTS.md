@@ -678,7 +678,7 @@ replacing L1c's `20261004200000`: an outbound row marked
 `metadata.recipient_role` crew/staff, and one job reference on an outbound row
 to a known non-customer contact, stay ON that job as internal communication,
 labelled `metadata.audience` / `recipient_role`, never as the customer's
-message) and L1e (`20261005110000`: a service-role row naming a job with no
+message) and L1e (`20261005170000`: a service-role row naming a job with no
 `match_method` keeps it only on a row the reader never reads, rule
 `writer_job`; step 1b skips a `payload.job_id` its writer declared a guess);
 the contracts undo each and prove the rest byte for byte; with it on, the P4
