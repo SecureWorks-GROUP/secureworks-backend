@@ -24,7 +24,7 @@
 -- task); the guard refuses unless it is T2's or already this migration's.
 -- The new comment starts "T2b:", so it is easy to tell which body is live.
 --
--- Rollback: supabase/rollbacks/20261005011500_context_transcript_second_reads_first_down.sql
+-- Rollback: supabase/rollbacks/20261005100000_context_transcript_second_reads_first_down.sql
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 

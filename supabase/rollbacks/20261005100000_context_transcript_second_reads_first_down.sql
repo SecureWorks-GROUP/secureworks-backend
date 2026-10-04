@@ -1,4 +1,4 @@
--- Down for 20261005011500 (T2b): restore T2's context_transcript_due_calls
+-- Down for 20261005100000 (T2b): restore T2's context_transcript_due_calls
 -- (20261002100000) byte for byte, with T2's comment and grants: due calls
 -- oldest first again, a second read competing with every older never-read
 -- call. No row is touched.
