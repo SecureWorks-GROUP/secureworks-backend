@@ -127,10 +127,12 @@ Deno.test("GHL receipt adapter requires provider acceptance and message id witho
     });
     assertEquals(calls.length, 1);
     assertStringIncludes(calls[0].url, "action=send_sms");
+    // Every text through this adapter goes to our own people: marked staff by default.
     assertEquals(calls[0].body, {
       phone: "+61000000001",
       message: "Mocked Hugo message",
       fromNumber: "+61000000000",
+      recipientRole: "staff",
     });
   } finally {
     globalThis.fetch = originalFetch;

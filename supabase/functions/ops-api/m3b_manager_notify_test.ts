@@ -229,6 +229,8 @@ Deno.test("U2a: direct createMakesafeJob texts Hugo only (no dispatchers or phon
     );
     const body = JSON.parse(smsCalls(calls)[0].body);
     assert(body.message.includes("SWMS-27001"), "carries the job number");
+    assertEquals(body.recipientRole, "crew", "a manager's text, never a customer message");
+    assertEquals(body.aboutJobId, "new-job-1");
     assert(body.message.includes("12 Example St, Padbury"), "carries the site");
     assert(
       body.message.includes("MLB Insurance Building"),
@@ -346,6 +348,10 @@ Deno.test("U2b: fencing quoted -> order_confirmed texts Henry only", async () =>
     assert(body.message.includes("Job ready for crew"), "ready wording");
     assert(body.message.includes("SWF-100"));
     assert(body.message.includes("order_confirmed"));
+    // A manager's text, not the customer's: marked crew with the job it is about.
+    assertEquals(body.recipientRole, "crew");
+    assertEquals(body.aboutJobId, "job-1");
+    assertEquals(body.jobId, undefined);
     assertNoThirdPartySend(
       calls,
       "status transition makes no third-party outbound call",

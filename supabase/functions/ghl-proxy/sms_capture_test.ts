@@ -8,6 +8,7 @@ import {
 import {
   buildSendSmsEvidenceRow,
   type CaptureOutcome,
+  parseSendSmsRecipient,
   saveSendSmsEvidence,
   sendSmsJobCustody,
 } from "./sms_capture.ts";
@@ -175,4 +176,77 @@ Deno.test("a send answer with no message id writes nothing (no key, no row)", as
   });
   assertEquals(outcome, { outcome: "skipped", reason: "no_id" });
   assertEquals(client.calls.length, 0);
+});
+
+// Crew and staff texts (ladder L1c, 20261004200000): ops-api's internal texts
+// carry the job number in their words; marked here, the ladder keeps them off
+// every job so no reader takes them for a message to that job's customer.
+const CREW_JOB = "0b5e4f2c-6a1d-4c3e-9f8a-2d7b1e0c9a44";
+
+Deno.test("crew text: marked recipient_role crew with about_job_id, never a job link", () => {
+  const built = buildSendSmsEvidenceRow({
+    ...R5_INPUT,
+    jobId: null,
+    job: null,
+    recipientRole: "crew",
+    aboutJobId: CREW_JOB,
+  });
+  assert(built.kind === "row");
+  // deno-lint-ignore no-explicit-any
+  const r = built.row as Record<string, any>;
+  assertEquals([r.event_type, r.direction], ["client.sms_out", "outbound"]);
+  assertEquals([r.job_id, r.match_method], [null, "none"]);
+  assertEquals(r.metadata, {
+    capture_mode: "live",
+    recipient_role: "crew",
+    about_job_id: CREW_JOB,
+  });
+});
+
+Deno.test("crew text: even a verified job is not a link once the recipient is crew or staff", () => {
+  const built = buildSendSmsEvidenceRow({
+    ...R5_INPUT,
+    recipientRole: "staff",
+  });
+  assert(built.kind === "row");
+  // deno-lint-ignore no-explicit-any
+  const r = built.row as Record<string, any>;
+  assertEquals([r.job_id, r.match_method], [null, "none"]);
+  assertEquals(r.metadata, { capture_mode: "live", recipient_role: "staff" });
+});
+
+Deno.test("send_sms recipient: crew or staff only, job as aboutJobId, never beside jobId", () => {
+  assertEquals(parseSendSmsRecipient({}), {
+    ok: true,
+    recipientRole: null,
+    aboutJobId: null,
+  });
+  assertEquals(parseSendSmsRecipient({ jobId: R5.jobId }), {
+    ok: true,
+    recipientRole: null,
+    aboutJobId: null,
+  });
+  assertEquals(parseSendSmsRecipient({ recipientRole: "staff" }), {
+    ok: true,
+    recipientRole: "staff",
+    aboutJobId: null,
+  });
+  assertEquals(
+    parseSendSmsRecipient({
+      recipientRole: "crew",
+      aboutJobId: CREW_JOB.toUpperCase(),
+    }),
+    { ok: true, recipientRole: "crew", aboutJobId: CREW_JOB },
+  );
+  for (
+    const bad of [
+      { recipientRole: "customer" },
+      { recipientRole: "crew", jobId: R5.jobId },
+      { recipientRole: "crew", aboutJobId: "SWF-261469" },
+      { aboutJobId: CREW_JOB },
+    ]
+  ) {
+    const parsed = parseSendSmsRecipient(bad);
+    assertEquals(parsed.ok, false, JSON.stringify(bad));
+  }
 });

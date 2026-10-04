@@ -159,6 +159,12 @@ Deno.test("createAssignment (via allocateJob): new allocation sends plain-text S
       "SMS keeps the Open-in-Trade destination as a plain URL",
     );
     assert(!body.message.includes("<b>") && !body.message.includes("</b>"), "SMS body is plain text, no HTML");
+    // The text goes to an installer, not the customer: marked crew, with the job
+    // it is about, never as a customer-job link (no jobId), so the evidence row
+    // is never filed as a message to this job's customer.
+    assertEquals(body.recipientRole, "crew");
+    assertEquals(body.aboutJobId, "job-1");
+    assertEquals(body.jobId, undefined);
 
     assertNoThirdPartySend(calls, "allocation makes no third-party outbound call");
   } finally {
