@@ -404,6 +404,7 @@ import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiAc
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
+import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
@@ -16777,11 +16778,43 @@ async function assembleJobDossier(client: any, body: any) {
   // never an empty list that reads as "nothing quoted".
   // ── Freshness (context K4): how current the facts are, from the SQL
   // cadence judgement. A failed read is null with a code, never "fresh".
-  const [quotesRead, variationsRead, signOffRead, freshnessRead] = await Promise.all([
+  // ── State card inputs (state-card-v1): the newest stored brief, read on its
+  // own so a busy run cannot push it out of the bounded facts read, and the
+  // job's visit outcomes (by job, or by its contact when the row names no job).
+  const [quotesRead, variationsRead, signOffRead, freshnessRead, briefsRead, visitOutcomesRead] = await Promise.all([
     readJobQuotes(client, { id: jobId, client_email: jobRow.client_email ?? null }),
     readJobVariations(client, jobId),
     readScopeSignOff(client, jobId),
     readJobFreshness(client, jobId),
+    safeRead('job_brief', async () => {
+      const { data, error } = await client.from('current_job_context_facts')
+        .select('id, job_id, kind, value, provenance, correlation_id, created_at, updated_at, expires_at, _context_store')
+        .eq('job_id', jobId)
+        .eq('kind', 'job_brief')
+        .order('updated_at', { ascending: false })
+        .limit(5)
+      if (error) throw new Error(error.message)
+      return (data || []).filter((row: any) => isCurrentContextFact(row))
+    }),
+    safeRead('visit_outcomes', async () => {
+      const cols = 'id, job_id, contact_id, visit_start, outcome, reason, quote_owed, recorded_at, supersedes'
+      const byJob = await client.from('visit_outcomes').select(cols)
+        .eq('job_id', jobId).order('visit_start', { ascending: false }).limit(20)
+      if (byJob.error) throw new Error(byJob.error.message)
+      let byContact: any[] = []
+      if (ghlContactId) {
+        const res = await client.from('visit_outcomes').select(cols)
+          .eq('contact_id', ghlContactId).order('visit_start', { ascending: false }).limit(20)
+        if (res.error) throw new Error(res.error.message)
+        byContact = (res.data || []).filter((r: any) => !r.job_id || r.job_id === jobId)
+      }
+      const seen = new Set<string>()
+      return [...(byJob.data || []), ...byContact].filter((r: any) => {
+        if (!r?.id || seen.has(r.id)) return false
+        seen.add(r.id)
+        return true
+      })
+    }),
   ])
   sourceStatus.quotes = quotesRead.status
   sourceStatus.variations = variationsRead.status
@@ -16800,9 +16833,38 @@ async function assembleJobDossier(client: any, body: any) {
   if (factsRead.status.ok && currentFacts.length === 0) {
     warnings.push('facts: no current rows returned; historical or out-of-window evidence may still exist')
   }
-  warnings.push('transcripts: not yet implemented (M4 deferred — privacy/consent decision required)')
   warnings.push('reasoning/outcomes: Layer 7 schema not yet job-linked')
+  sourceStatus.brief = briefsRead.status
+  sourceStatus.visitOutcomes = visitOutcomesRead.status
   const diagnosticsOk = Object.values(sourceStatus).every((s) => s.ok)
+
+  // ── State card (state-card-v1): plain lines and an explicit not-known list,
+  // built only from the reads above. No model call, no write.
+  const state = buildJobStateCard({
+    now: nowIso,
+    job: jobRow,
+    quotes: quotesRead.quotes,
+    quotesOk: quotesRead.status.ok,
+    invoices: { ok: invoicesRead.status.ok, rows: invoicesRead.data },
+    assignments: { ok: assignmentsRead.status.ok, rows: assignmentsRead.data },
+    conversation: { ok: conversationRead.status.ok, rows: conversationRead.data },
+    facts: { ok: factsRead.status.ok, rows: currentFacts },
+    briefs: { ok: briefsRead.status.ok, rows: briefsRead.data },
+    visitOutcomes: { ok: visitOutcomesRead.status.ok, rows: visitOutcomesRead.data },
+    freshness: freshnessRead.freshness,
+    since,
+  })
+  // A stored job_brief's text is the brief's JSON. Callers that print a fact's
+  // value.text get the readable brief with its freshness instead; the stored
+  // JSON stays on value.raw_text.
+  const readableFacts = visibleFacts.map((row: any) => {
+    if (row?.kind !== 'job_brief' || typeof row?.value?.text !== 'string') return row
+    const rendered = row.id && row.id === state.brief.fact_id
+      ? state.brief
+      : stateCardBrief(row, jobRow, freshnessRead.freshness)
+    if (!rendered.text) return row
+    return { ...row, value: { ...row.value, text: rendered.text, raw_text: row.value.text } }
+  })
 
   // ── Evidence refs ──
   const evidenceRefs: { type: string; source_table: string; id: string }[] = []
@@ -16848,10 +16910,12 @@ async function assembleJobDossier(client: any, body: any) {
     scope,
     events: eventsRead.data,
     conversation: conversationAsc,
-    facts: visibleFacts,
+    facts: readableFacts,
     temporaryFacts,
     // How current `facts` are (context K4, cadence design section 4).
     freshness: freshnessRead.freshness,
+    // One honest state for the job, with what is not known (state-card-v1).
+    state,
     proposedActions: proposedRead.data,
     transcripts: [] as any[],
     reasoning: [] as any[],
@@ -16873,7 +16937,8 @@ async function assembleJobDossier(client: any, body: any) {
     _kind: 'job_dossier_v1',
     // 2 = operationalTruth.quotes / .variations and scope (context D1).
     // 3 = freshness (context K4).
-    sections_version: 3,
+    // 4 = state card (state-card-v1).
+    sections_version: 4,
     _ghlContactId: ghlContactId,
   }
 }

@@ -26,7 +26,7 @@
 //                   show on this job as 4 messages not yet placed.
 //   Section and status: the section is the SQL answer minus job_id, never
 //   re-rendered; sourceStatus.freshness is {ok, state, count, code} with count
-//   = newer items not yet read; sections_version is 3.
+//   = newer items not yet read; sections_version is 3 or later.
 //   Failures: an RPC error, a thrown call, a NULL answer, or an answer of the
 //   wrong shape or for another job leave the section null (never "fresh"),
 //   state failed with a code, and diagnostics.ok false.
@@ -217,7 +217,8 @@ Deno.test("K4 R6 SWP-261456: a draft with no evidence reads 0 newer items and no
     state: "ok",
     count: 0,
   });
-  assertEquals(d.sections_version, 3);
+  // The version literal is pinned by job_state_card_test.ts (the newest section).
+  assert(d.sections_version >= 3);
   assertEquals(client.writes, []);
   const calls = client.rpcs.filter((r) => r.fn === "context_job_freshness");
   assertEquals(calls, [{
