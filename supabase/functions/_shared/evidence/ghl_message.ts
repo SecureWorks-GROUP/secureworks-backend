@@ -76,6 +76,13 @@ export interface GhlMessageItem {
   } | null;
 }
 
+/**
+ * Who a text from one of our own tools went to when that person is not a
+ * customer: an installer (crew) or someone in the office (staff). Set only by
+ * the sending writer, which knows the recipient; never read off a provider item.
+ */
+export type RecipientRole = "crew" | "staff";
+
 export interface GhlCaptureContext {
   /** business_events.source for the row, e.g. "ghl-proxy". */
   source: string;
@@ -96,6 +103,15 @@ export interface GhlCaptureContext {
   bodyHash?: string | null;
   /** Calls placed by one of our tools: the actor who asked (INTEGRATION X31). */
   initiatedBy?: string | null;
+  /**
+   * Set by our own sending tools when an outbound text went to crew or staff,
+   * never to a customer. Recorded as metadata.recipient_role; the ladder then
+   * keeps the row off every job (automated, staff_recipient), so no reader takes
+   * it for a message to a customer. Any job id is ignored for such a row.
+   */
+  recipientRole?: RecipientRole | null;
+  /** The job a crew or staff text is about. Recorded as metadata.about_job_id, never as a placement. */
+  aboutJobId?: string | null;
 }
 
 export type GhlSkipReason =
@@ -251,8 +267,16 @@ export function buildGhlMessageRow(
     (Array.isArray(emailIds) && typeof emailIds[0] === "string"
       ? emailIds[0]
       : null);
-  const verifiedJobId = text(ctx.verifiedJobId);
-  const hintJobId = verifiedJobId ? null : text(ctx.unverifiedJobId);
+  // A text to crew or staff is never on a job: the job it is about stays in metadata.
+  const recipientRole = direction === "outbound" &&
+      (ctx.recipientRole === "crew" || ctx.recipientRole === "staff")
+    ? ctx.recipientRole
+    : null;
+  const aboutJobId = recipientRole ? text(ctx.aboutJobId) : null;
+  const verifiedJobId = recipientRole ? null : text(ctx.verifiedJobId);
+  const hintJobId = recipientRole || verifiedJobId
+    ? null
+    : text(ctx.unverifiedJobId);
 
   const payload: Record<string, unknown> = {
     ...(body
@@ -305,7 +329,15 @@ export function buildGhlMessageRow(
       privacy_classification: "staff_only",
       retention_class: "7y_audit",
       payload,
-      metadata: { capture_mode: ctx.captureMode },
+      metadata: {
+        capture_mode: ctx.captureMode,
+        ...(recipientRole
+          ? {
+            recipient_role: recipientRole,
+            ...(aboutJobId ? { about_job_id: aboutJobId } : {}),
+          }
+          : {}),
+      },
     },
   };
 }

@@ -605,3 +605,30 @@ Deno.test("T1: capture mode, a verified tool job id and the tool's actor are car
   assertEquals(hint.match_method, "none");
   assert(!("initiated_by" in hint.payload));
 });
+
+Deno.test("L1c: a text our tool sent to crew or staff carries recipient_role and about_job_id, never a job, and only outbound", () => {
+  const about = "0b5e4f2c-6a1d-4c3e-9f8a-2d7b1e0c9a44";
+  const crew = row(R4_LIST_ITEM, {
+    ...LIVE,
+    sentByKind: "our_tool",
+    recipientRole: "crew",
+    aboutJobId: about,
+    verifiedJobId: about,
+  });
+  assertEquals(crew.direction, "outbound");
+  assertEquals([crew.job_id, crew.match_method], [null, "none"]);
+  assertEquals(crew.metadata, {
+    capture_mode: "live",
+    recipient_role: "crew",
+    about_job_id: about,
+  });
+  // An inbound item is never marked: the customer's words stay theirs.
+  const inbound = row(R3_LIST_ITEM, {
+    ...LIVE,
+    recipientRole: "staff",
+    aboutJobId: about,
+  });
+  assertEquals(inbound.metadata, { capture_mode: "live" });
+  // No marker, no change.
+  assertEquals(row(R4_LIST_ITEM).metadata, { capture_mode: "live" });
+});

@@ -10,6 +10,7 @@
 import {
   buildGhlMessageRow,
   type GhlMessageBuild,
+  type RecipientRole,
 } from "../_shared/evidence/ghl_message.ts";
 
 export const SEND_SMS_EVIDENCE_SOURCE = "ghl-proxy";
@@ -43,6 +44,52 @@ export function sendSmsJobCustody(
   return { verifiedJobId: null, unverifiedJobId: named };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * A send_sms caller says a text goes to crew or staff (recipientRole) and,
+ * optionally, which job it is about (aboutJobId). Such a text is never linked
+ * to a job: jobId is the customer-job link (checked against the job's contact)
+ * and is refused beside recipientRole, and aboutJobId is refused without it.
+ */
+export function parseSendSmsRecipient(
+  body: { recipientRole?: unknown; aboutJobId?: unknown; jobId?: unknown },
+):
+  | { ok: true; recipientRole: RecipientRole | null; aboutJobId: string | null }
+  | { ok: false; error: string } {
+  const role = body.recipientRole;
+  const about = body.aboutJobId;
+  if (role === undefined || role === null || role === "") {
+    if (about !== undefined && about !== null && about !== "") {
+      return {
+        ok: false,
+        error: "aboutJobId needs recipientRole crew or staff",
+      };
+    }
+    return { ok: true, recipientRole: null, aboutJobId: null };
+  }
+  if (role !== "crew" && role !== "staff") {
+    return { ok: false, error: "recipientRole must be crew or staff" };
+  }
+  if (body.jobId !== undefined && body.jobId !== null && body.jobId !== "") {
+    return {
+      ok: false,
+      error: "a text to crew or staff names its job as aboutJobId, never jobId",
+    };
+  }
+  if (about === undefined || about === null || about === "") {
+    return { ok: true, recipientRole: role, aboutJobId: null };
+  }
+  if (typeof about !== "string" || !UUID.test(about.trim().toLowerCase())) {
+    return { ok: false, error: "aboutJobId must be a job id" };
+  }
+  return {
+    ok: true,
+    recipientRole: role,
+    aboutJobId: about.trim().toLowerCase(),
+  };
+}
+
 export interface SendSmsEvidenceInput {
   contactId: string;
   message: string;
@@ -53,13 +100,18 @@ export interface SendSmsEvidenceInput {
   // deno-lint-ignore no-explicit-any
   result: Record<string, any>;
   bodyHash?: string | null;
+  /** The text went to crew or staff, not a customer (parseSendSmsRecipient). */
+  recipientRole?: RecipientRole | null;
+  aboutJobId?: string | null;
 }
 
 /** The row for a text our tool just sent, built by the shared builder. */
 export function buildSendSmsEvidenceRow(
   input: SendSmsEvidenceInput,
 ): GhlMessageBuild {
-  const custody = sendSmsJobCustody(input.jobId, input.job, input.contactId);
+  const custody = input.recipientRole
+    ? { verifiedJobId: null, unverifiedJobId: null }
+    : sendSmsJobCustody(input.jobId, input.job, input.contactId);
   return buildGhlMessageRow({
     messageId: input.result?.messageId ?? input.result?.id ?? null,
     messageType: "SMS",
@@ -76,6 +128,8 @@ export function buildSendSmsEvidenceRow(
     ourNumber: input.fromNumber,
     sentByKind: "our_tool",
     bodyHash: input.bodyHash ?? null,
+    recipientRole: input.recipientRole ?? null,
+    aboutJobId: input.aboutJobId ?? null,
   });
 }
 

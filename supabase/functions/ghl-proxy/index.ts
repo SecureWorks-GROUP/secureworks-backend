@@ -50,7 +50,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // Outbound SMS evidence goes through sms_capture.ts (context slice C1a): the
 // shared GHL row builder and the one SQL writer capture_business_event.
 import { computeHash } from '../_shared/evidence/storage.ts'
-import { saveSendSmsEvidence } from './sms_capture.ts'
+import { parseSendSmsRecipient, saveSendSmsEvidence } from './sms_capture.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import {
   assignJobNumberWithNullCas,
@@ -4129,6 +4129,11 @@ serve(async (req: Request) => {
       const { message, jobId, userId, phone } = body
       if (!message) return json({ error: 'message required' }, 400)
       if (!contactId && !phone) return json({ error: 'contactId or phone required' }, 400)
+      // A text to crew or staff (an installer's assignment, a manager's ready
+      // text, an office alert) is marked so it is never filed as a message to
+      // a customer. Its job, if any, travels as aboutJobId, never jobId.
+      const recipient = parseSendSmsRecipient(body)
+      if (!recipient.ok) return json({ error: recipient.error }, 400)
 
       // A4 (make-safe alarms + arrival texts): resolve a RAW phone to a GHL contact
       // (find-or-create) so a send can target a bare E.164 number, not just an existing
@@ -4255,6 +4260,8 @@ serve(async (req: Request) => {
             job: namedJob,
             result,
             bodyHash: await computeHash(message),
+            recipientRole: recipient.recipientRole,
+            aboutJobId: recipient.aboutJobId,
           })
           evidenceOutcome = saved.outcome
         } catch { evidenceOutcome = 'error' }

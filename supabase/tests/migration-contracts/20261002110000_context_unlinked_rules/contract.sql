@@ -677,7 +677,11 @@ BEGIN
 END $$;
 CREATE TEMP TABLE p4_retired_before AS SELECT * FROM public.event_threads WHERE retired_at IS NOT NULL;
 CREATE TEMP TABLE p4_thread_count AS SELECT count(*) AS n FROM public.event_threads;
--- A registered successor (L1b 20261003100000) is rolled back first, as P4's down requires.
+-- Registered successors (L1c 20261004200000, then L1b 20261003100000) are rolled back first, as P4's down requires.
+SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1c:%' AS l1c_live \gset
+\if :l1c_live
+\ir ../../../rollbacks/20261004200000_context_ladder_non_customer_text_down.sql
+\endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1b:%' AS l1b_live \gset
 \if :l1b_live
 \ir ../../../rollbacks/20261003100000_context_ladder_payload_job_down.sql
@@ -728,9 +732,10 @@ BEGIN
  THEN RAISE EXCEPTION 'p4: P1a''s two-argument candidate set changed'; END IF;
  -- P1a's ladder body moved verbatim: undoing the retirement filter and preview guard gives back
  -- P1a's live body byte for byte. A registered successor (L1b 20261003100000,
- -- step 1b) proves in its own contract that it is this body plus its step.
+ -- step 1b) proves in its own contract that it is this body plus its step, and
+ -- its successor (L1c 20261004200000) that it is L1b's body plus its two rules.
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)
-   <>'6a45c9ea9a68c8c5899fba45b44e18b5'
+   NOT IN ('6a45c9ea9a68c8c5899fba45b44e18b5','b7d991654bd7d4f2a00136be29ad8fc9')
   AND md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
    'WHERE thread_key=e.thread_key AND retired_at IS NULL;', 'WHERE thread_key=e.thread_key;'),
    E'   IF NOT p_preview THEN\n    INSERT INTO public.event_threads(thread_key,job_id,bound_by,source_event_id) VALUES(e.thread_key,candidate,''ladder'',e.id) ON CONFLICT DO NOTHING;\n   END IF;\n   IF EXISTS (SELECT 1 FROM public.event_threads WHERE thread_key=e.thread_key AND job_id<>candidate) THEN',

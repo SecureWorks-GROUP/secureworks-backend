@@ -2518,6 +2518,19 @@ async function logBusinessEvent(client: any, event: {
   }
 }
 
+// Who an internal text goes to. Every caller of the two senders below texts
+// our own people (installers, managers, the office, alarm phones), never a
+// customer, so the default is staff. ghl-proxy records it on the evidence row
+// (metadata.recipient_role) and the attribution ladder then keeps the row off
+// every job, so no reader takes an assignment text for a message to the
+// customer whose job number it carries. A customer text must use the
+// contact-based send paths, never these.
+export type InternalSmsRecipient = {
+  role: 'crew' | 'staff'
+  /** The job the text is about, recorded as metadata.about_job_id, never as a job link. */
+  aboutJobId?: string | null
+}
+
 // A4 — SMS delivery glue. Sends one SMS to a RAW E.164 phone via the existing
 // ghl-proxy send_sms path (which now find-or-creates a contact from a bare `phone`).
 // Non-blocking: returns true on a delivered send, false otherwise. Never throws.
@@ -2525,6 +2538,7 @@ async function sendSmsViaGhlWithReceipt(
   phone: string,
   message: string,
   fromNumber?: string | null,
+  recipient: InternalSmsRecipient = { role: 'staff' },
 ): Promise<_HugoProviderResult> {
   const to = String(phone || '').trim()
   if (!to || !message) {
@@ -2543,7 +2557,13 @@ async function sendSmsViaGhlWithReceipt(
         'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
       },
       signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ phone: to, message, ...(fromNumber ? { fromNumber } : {}) }),
+      body: JSON.stringify({
+        phone: to,
+        message,
+        ...(fromNumber ? { fromNumber } : {}),
+        recipientRole: recipient.role,
+        ...(recipient.aboutJobId ? { aboutJobId: recipient.aboutJobId } : {}),
+      }),
     })
     const body = await resp.json().catch(async () => ({
       error: await resp.text().catch(() => '<unreadable>'),
@@ -2584,8 +2604,13 @@ async function sendSmsViaGhlWithReceipt(
   }
 }
 
-async function sendSmsViaGhl(phone: string, message: string, fromNumber?: string): Promise<boolean> {
-  const result = await sendSmsViaGhlWithReceipt(phone, message, fromNumber)
+async function sendSmsViaGhl(
+  phone: string,
+  message: string,
+  fromNumber?: string,
+  recipient: InternalSmsRecipient = { role: 'staff' },
+): Promise<boolean> {
+  const result = await sendSmsViaGhlWithReceipt(phone, message, fromNumber, recipient)
   // Preserve the legacy boolean callers' pre-existing HTTP-200 semantics. The
   // audited Hugo path calls the receipt adapter directly and requires a provider
   // message id before it records acceptance.
@@ -2625,7 +2650,7 @@ export const _REPAIR_POOL_READY_STATUSES = Array.from(new Set([
 // Shaun is no-texts by choice). Plain-text SMS via sendSmsViaGhl (which never
 // rejects); handed to EdgeRuntime.waitUntil when present (M3 convention) so
 // isolate teardown cannot kill an in-flight send. Never throws.
-async function notifyVerticalManagersSms(client: any, vertical: string, text: string): Promise<void> {
+async function notifyVerticalManagersSms(client: any, vertical: string, text: string, aboutJobId?: string | null): Promise<void> {
   try {
     const { data: managers } = await client.from('users')
       .select('id, name, phone, role, managed_verticals')
@@ -2637,7 +2662,7 @@ async function notifyVerticalManagersSms(client: any, vertical: string, text: st
       if (role === 'admin' || role === 'ops_manager') continue // dispatchers live on the board, managers get the text
       const phone = String(m?.phone || '').trim()
       if (!phone) continue
-      sends.push(sendSmsViaGhl(phone, text))
+      sends.push(sendSmsViaGhl(phone, text, undefined, { role: 'crew', aboutJobId: aboutJobId || null }))
     }
     if (!sends.length) return
     const all = Promise.all(sends).then(() => {}).catch(() => {})
@@ -18338,7 +18363,7 @@ async function createMakesafeJob(
       external_ref ? `Ref: ${external_ref}` : '',
       `Open in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${job.id}`,
     ].filter(Boolean).join('\n')
-    await notifyVerticalManagersSms(client, 'makesafe', msText)
+    await notifyVerticalManagersSms(client, 'makesafe', msText, job.id)
   }
 
   return {
@@ -33040,7 +33065,9 @@ export async function createAssignment(client: any, body: any) {
           // once the response returns. EdgeRuntime.waitUntil is the sanctioned
           // keep-alive; outside the edge runtime (tests, local) fall back to
           // awaiting — safe either way because sendSmsViaGhl never rejects.
-          const smsSend = sendSmsViaGhl(assignedUser.phone, text)
+          // Marked crew with the job it is about, so the evidence row is never
+          // filed as a message to this job's customer.
+          const smsSend = sendSmsViaGhl(assignedUser.phone, text, undefined, { role: 'crew', aboutJobId: jId })
           const edgeRuntime = (globalThis as any).EdgeRuntime
           if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
             edgeRuntime.waitUntil(smsSend)
@@ -33768,7 +33795,7 @@ async function updateJobStatus(client: any, body: any) {
         `Stage: ${status}`,
         `Open in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${jId}`,
       ].filter(Boolean).join('\n')
-      await notifyVerticalManagersSms(client, notifyVertical, readyText)
+      await notifyVerticalManagersSms(client, notifyVertical, readyText, jId)
     }
   } catch (e) {
     console.log('[ops-api] ready-transition manager notify failed (non-blocking):', (e as Error)?.message)
