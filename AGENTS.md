@@ -673,11 +673,13 @@ Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
 `feature_flags.context_unlinked_rules_v1` off (missing or unreadable = off) it
 runs `context_ladder_p1a`, P1a's live body plus a preview guard, a
 `retired_at IS NULL` thread filter, step 1b (`20261003100000`, the row's own
-`payload.job_id`) and L1c's two non-customer rules (`20261004200000`: an
-outbound row marked `metadata.recipient_role` crew/staff rests off every job;
-one job reference on an outbound row to a known non-customer contact stays
-unplaced); the contracts undo each and prove the rest byte for byte; with it
-on, the P4 rules plus step 1b and the L1c rules. A retired
+`payload.job_id`) and the two internal-text rules (L1d `20261005090000`,
+replacing L1c's `20261004200000`: an outbound row marked
+`metadata.recipient_role` crew/staff, and one job reference on an outbound row
+to a known non-customer contact, stay ON that job as internal communication,
+labelled `metadata.audience` / `recipient_role`, never as the customer's
+message); the contracts undo each and prove the rest byte for byte; with it
+on, the P4 rules plus step 1b and the L1d rules. A retired
 binding never places on either path, and P4 also owns both
 `attribute_context_event_with_luna` overloads, which follow a thread only when
 it is live and bound to one of the row's candidates. P4's rollback deletes
@@ -685,8 +687,8 @@ nothing: it re-keys retired rows (`retired:` prefix) before restoring P1a.
 A later placement slice (P2, P3,
 P-T) replaces the rules body in the 3-argument function, never the frozen
 P1a copy, and must widen the successor md5 lists and the `\if` re-apply
-guards in the L1, P1a, P1b, P4, L1b and L1c contracts, and roll L1c, L1b then
-P4 back first in L1's break-contract (each down refuses while a later body is
+guards in the L1, P1a, P1b, P4, L1b, L1c and L1d contracts, and roll L1d, L1c,
+L1b then P4 back first in L1's break-contract (each down refuses while a later body is
 live), exactly as P4 did for P1a.
 
 The writer check reads `metadata.written_as`, which the insert trigger now
