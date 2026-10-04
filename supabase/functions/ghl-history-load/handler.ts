@@ -3,16 +3,26 @@
 // request, wires the real reads and writes, and keeps the worker alive while
 // the run finishes.
 //
-// Caller: an operator or the L6 validator, by hand. There is no schedule. Only
+// Callers: the pg_cron job ghl-history-schedule every 15 minutes (action
+// "scheduled", migration 20261005190000, schedule slice B-2), and an operator
+// or the L6 validator by hand. Only
 // the service role is accepted (the exact SUPABASE_SERVICE_ROLE_KEY, or a JWT
 // whose role claim is exactly "service_role"), the same rule as the GHL
 // reconciler. The x-sw-actor header names who asked (F-ACT, audit only, never
-// refused); it is recorded on the run row's cursor and every ledger row.
+// refused); it is recorded on the run row's cursor and every ledger row. A
+// scheduled cycle always records the actor cron:ghl-history-schedule, the
+// name SQL's day limit reads to find the first scheduled run.
 //
 // Body (JSON, every key optional):
 //   action               "load" (default): the history load. "link": the link
 //                        action (link.ts), which runs first and puts a GHL
-//                        contact on live jobs that have none.
+//                        contact on live jobs that have none. "scheduled": one
+//                        cycle, always real: the link step on the jobs due a
+//                        try, then the load, then the jobs of every contact
+//                        whose history is now complete listed for reading
+//                        (context_ghl_history_request_reads), each step
+//                        idle when it has nothing due. "request_reads": that
+//                        last step alone (dry run unless dry_run is false).
 //   dry_run              true unless it is exactly false. A dry run writes no
 //                        evidence, no contact ledger row and no link; it
 //                        does write its own context_capture_runs row.
@@ -21,6 +31,8 @@
 //                        whatever is asked). link: jobs to judge (default 500).
 //   after_job_id         link: start after this job id instead of where the
 //                        previous link run stopped.
+//   due                  link: true judges only the jobs due a try
+//                        (context_ghl_history_link_due) instead of a page.
 //   wait                 true runs in the foreground and returns the summary
 //                        (counts, contact ids, codes); otherwise 202 and the
 //                        run continues in the background.
@@ -39,13 +51,16 @@ import {
   type DueList,
   type HistoryCaptureOutcome,
   type HistoryDeps,
+  type HistoryPolicy,
   type HistoryRequest,
   type HistoryResult,
   parseRequest,
+  POLICY,
   runGhlHistoryLoad,
   type RunRow,
 } from "./history_load.ts";
 import {
+  LINK_POLICY,
   type LinkCandidate,
   type LinkDeps,
   type LinkResult,
@@ -53,6 +68,24 @@ import {
   parseLinkRequest,
   runGhlContactLink,
 } from "./link.ts";
+
+/** The actor every scheduled cycle records (SQL's day limit reads it). */
+export const SCHEDULE_ACTOR = "cron:ghl-history-schedule";
+
+/**
+ * One scheduled cycle's sizes. The link step gets 40 s, the load the rest of
+ * about 130 s (never more than its own 100 s budget, never less than 30 s),
+ * well inside the edge worker's wall clock. 25 jobs a run: about 20 contacts
+ * fit the load's 100 s, and an unreached contact gives its quota back.
+ */
+export const SCHEDULE = {
+  linkMaxJobs: 100,
+  linkBudgetMs: 40_000,
+  loadMaxJobs: 25,
+  cycleBudgetMs: 130_000,
+  loadMinBudgetMs: 30_000,
+  readsLimit: 200,
+} as const;
 
 export interface HandlerDeps {
   env(name: string): string | undefined;
@@ -147,6 +180,13 @@ export function liveHistoryDeps(deps: HandlerDeps): HistoryDeps {
         p_max_jobs: maxJobs,
         p_actor: actor,
       });
+      if (
+        !error && data && typeof data === "object" &&
+        data.outcome === "nothing_due" && data.due &&
+        typeof data.due === "object"
+      ) {
+        return data;
+      }
       if (
         error || !data || typeof data !== "object" ||
         typeof data.run_id !== "string" ||
@@ -259,6 +299,22 @@ export function liveLinkDeps(deps: HandlerDeps): LinkDeps {
       }
       return data as LinkCandidate[];
     },
+    async dueCandidates(limit) {
+      const { data, error } = await supabase.rpc(
+        "context_ghl_history_link_due",
+        { p_limit: limit },
+      );
+      if (error || !Array.isArray(data)) {
+        throw refusal(error, "history_link_due_unreadable");
+      }
+      return data as LinkCandidate[];
+    },
+    async recordAttempt(row) {
+      const { error } = await supabase.rpc("record_ghl_link_attempt", {
+        p_row: row,
+      });
+      if (error) throw refusal(error, "history_link_attempt_write_failed");
+    },
     async searchContacts(query, limit) {
       const contacts: Record<string, unknown>[] = [];
       const params = new URLSearchParams({ query, limit: String(limit) });
@@ -298,6 +354,23 @@ export function liveLinkDeps(deps: HandlerDeps): LinkDeps {
   };
 }
 
+/** context_ghl_history_request_reads over one service-role client. */
+export async function requestHistoryReads(
+  deps: HandlerDeps,
+  dryRun: boolean,
+  limit: number = SCHEDULE.readsLimit,
+): Promise<Record<string, unknown>> {
+  const supabase = deps.createSupabase();
+  const { data, error } = await supabase.rpc(
+    "context_ghl_history_request_reads",
+    { p_dry_run: dryRun, p_limit: limit },
+  );
+  if (error || !data || typeof data !== "object") {
+    throw refusal(error, "history_request_reads_failed");
+  }
+  return data as Record<string, unknown>;
+}
+
 function logLink(result: LinkResult, actor: string): void {
   if (result.outcome === "ran") {
     const c = result.counts;
@@ -324,12 +397,101 @@ function logResult(result: HistoryResult, actor: string): void {
   }
 }
 
+type ErrorOutcome = { outcome: "error"; code: string };
+
+function failure(error: unknown): ErrorOutcome {
+  return {
+    outcome: "error",
+    code: error instanceof GhlProviderReadError ? error.code : code(error),
+  };
+}
+
+/**
+ * One scheduled cycle: link (due jobs only), then load, then list the jobs
+ * whose history is complete for reading. A step that fails is reported and
+ * the next still runs; each step idles on its own when nothing is due.
+ */
+export async function runScheduledCycle(
+  deps: HandlerDeps,
+  run: (
+    d: HistoryDeps,
+    r: HistoryRequest,
+    p?: Readonly<HistoryPolicy>,
+  ) => Promise<HistoryResult> = runGhlHistoryLoad,
+  runLink: typeof runGhlContactLink = runGhlContactLink,
+  reads: typeof requestHistoryReads = requestHistoryReads,
+): Promise<{
+  link: LinkResult | ErrorOutcome;
+  load: HistoryResult | ErrorOutcome;
+  reads: Record<string, unknown> | ErrorOutcome;
+}> {
+  const now = deps.now ?? (() => Date.now());
+  const started = now();
+  const actor = SCHEDULE_ACTOR;
+  let link: LinkResult | ErrorOutcome;
+  try {
+    link = await runLink(liveLinkDeps(deps), {
+      dryRun: false,
+      maxJobs: SCHEDULE.linkMaxJobs,
+      actor,
+      afterJobId: null,
+      due: true,
+    }, { ...LINK_POLICY, timeBudgetMs: SCHEDULE.linkBudgetMs });
+    logLink(link, actor);
+  } catch (error) {
+    link = failure(error);
+    console.error(
+      `[ghl-history-load] scheduled link failed code=${link.code}`,
+    );
+  }
+  const loadBudget = Math.min(
+    POLICY.timeBudgetMs,
+    Math.max(
+      SCHEDULE.loadMinBudgetMs,
+      SCHEDULE.cycleBudgetMs - (now() - started),
+    ),
+  );
+  let load: HistoryResult | ErrorOutcome;
+  try {
+    load = await run(liveHistoryDeps(deps), {
+      dryRun: false,
+      maxJobs: SCHEDULE.loadMaxJobs,
+      actor,
+    }, { ...POLICY, timeBudgetMs: loadBudget });
+    logResult(load, actor);
+  } catch (error) {
+    load = failure(error);
+    console.error(
+      `[ghl-history-load] scheduled load failed code=${load.code}`,
+    );
+  }
+  let listed: Record<string, unknown> | ErrorOutcome;
+  try {
+    listed = await reads(deps, false);
+    console.log(
+      `[ghl-history-load] scheduled reads contacts=${
+        listed.contacts_handled ?? 0
+      } jobs_listed=${listed.jobs_listed ?? 0}`,
+    );
+  } catch (error) {
+    listed = failure(error);
+    console.error(
+      `[ghl-history-load] scheduled reads failed code=${listed.code}`,
+    );
+  }
+  return { link, load, reads: listed };
+}
+
 export async function handleHistoryLoad(
   req: Request,
   deps: HandlerDeps,
-  run: (d: HistoryDeps, r: HistoryRequest) => Promise<HistoryResult> =
-    runGhlHistoryLoad,
+  run: (
+    d: HistoryDeps,
+    r: HistoryRequest,
+    p?: Readonly<HistoryPolicy>,
+  ) => Promise<HistoryResult> = runGhlHistoryLoad,
   runLink: typeof runGhlContactLink = runGhlContactLink,
+  reads: typeof requestHistoryReads = requestHistoryReads,
 ): Promise<Response> {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   const serviceKey = deps.env("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -354,8 +516,27 @@ export async function handleHistoryLoad(
     trustActorHeader: true,
   }).actor;
   const action = body.action === undefined ? "load" : body.action;
-  if (action !== "load" && action !== "link") {
+  if (
+    action !== "load" && action !== "link" && action !== "scheduled" &&
+    action !== "request_reads"
+  ) {
     return json({ error: "unknown_action" }, 400);
+  }
+  if (action === "scheduled") {
+    const cycle = runScheduledCycle(deps, run, runLink, reads);
+    if (body.wait === true || !deps.waitUntil) {
+      return json({ action, dry_run: false, ...(await cycle) });
+    }
+    deps.waitUntil(cycle);
+    return json({ accepted: true, action, dry_run: false }, 202);
+  }
+  if (action === "request_reads") {
+    const dryRun = body.dry_run !== false;
+    try {
+      return json({ action, ...(await reads(deps, dryRun)) });
+    } catch (error) {
+      return json({ action, dry_run: dryRun, ...failure(error) }, 500);
+    }
   }
   const request = action === "link"
     ? parseLinkRequest(body, actor)

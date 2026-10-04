@@ -36,8 +36,13 @@ BEGIN
  IF has_function_privilege('service_role','public.trigger_context_email_poll()','EXECUTE')
   OR has_function_privilege('service_role','public.trigger_context_email_sweep()','EXECUTE')
  THEN RAISE EXCEPTION 'em2 cron callers must not be callable by service_role'; END IF;
- IF (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
-    IS DISTINCT FROM ARRAY['contact-matching:attribution','ghl-call-transcript-fetch:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
+ -- Containment: a later capture slice adds its own job (B-2, 20261005190000:
+ -- ghl-history-schedule, capture); these six rows must stay as they are.
+ IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
+    @> ARRAY['contact-matching:attribution','ghl-call-transcript-fetch:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
+  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname NOT IN ('contact-matching','ghl-call-transcript-fetch',
+   'ghl-message-reconcile','monitor-inbox-poll','monitor-inbox-sweep','outlook-mail-poll','ghl-history-schedule'))
+  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname='ghl-history-schedule' AND l.lane<>'capture')
  THEN RAISE EXCEPTION 'em2 cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;
@@ -243,6 +248,14 @@ CREATE FUNCTION cron.alter_job(job_id bigint,schedule text DEFAULT NULL,command 
  UPDATE cron.job SET command=coalesce(alter_job.command,job.command) WHERE jobid=job_id
 $$;
 UPDATE public.feature_flags SET enabled=true WHERE flag_name='email_reader_v1';
+-- A later slice (B-2, 20261005190000) replaces the lane list; stand this
+-- migration's body back up (rolled back below) so its re-apply guard holds.
+\ir em3_cron_lanes.sql
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'5c1e0e526a74d5b4ad612792c7f076cc'
+ THEN RAISE EXCEPTION 'em2 em3_cron_lanes.sql is not the EM3 body'; END IF;
+END $$;
 \ir ../../../migrations/20261002150000_context_email_reader.sql
 \ir ../../../migrations/20261002150000_context_email_reader.sql
 DO $$
