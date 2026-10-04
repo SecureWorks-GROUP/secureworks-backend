@@ -17,6 +17,13 @@
 --      is private, the bodies are marked L1c so L1b's re-apply refuses, and a
 --      re-apply of this migration is a no-op.
 \set ON_ERROR_STOP 1
+-- A registered successor (L1d 20261005090000) replaces both rules: crew and
+-- staff texts stay on the job they are about as internal communication. While
+-- it is live these cases are its contract's, which also proves its bodies are
+-- exactly these with the two rules replaced.
+SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1d:%' AS l1d_live \gset
+\if :l1d_live
+\else
 
 CREATE FUNCTION pg_temp.ct_job(p_number text,p_contact text) RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE j uuid:=gen_random_uuid();
@@ -215,3 +222,4 @@ BEGIN
  THEN RAISE EXCEPTION 'l1c: re-apply changed a body or comment'; END IF;
 END $$;
 DROP TABLE l1c_before;
+\endif

@@ -106,11 +106,13 @@ export interface GhlCaptureContext {
   /**
    * Set by our own sending tools when an outbound text went to crew or staff,
    * never to a customer. Recorded as metadata.recipient_role; the ladder then
-   * keeps the row off every job (automated, staff_recipient), so no reader takes
-   * it for a message to a customer. Any job id is ignored for such a row.
+   * places the row on the job it is about as internal communication
+   * (placement_rule internal_recipient, metadata.audience internal), so no
+   * reader takes it for a message to a customer. Any job id is ignored for
+   * such a row: the ladder places it from metadata.about_job_id.
    */
   recipientRole?: RecipientRole | null;
-  /** The job a crew or staff text is about. Recorded as metadata.about_job_id, never as a placement. */
+  /** The job a crew or staff text is about. Recorded as metadata.about_job_id; the ladder places the row there as internal communication. */
   aboutJobId?: string | null;
 }
 
