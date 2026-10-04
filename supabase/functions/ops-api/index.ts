@@ -2521,13 +2521,14 @@ async function logBusinessEvent(client: any, event: {
 // Who an internal text goes to. Every caller of the two senders below texts
 // our own people (installers, managers, the office, alarm phones), never a
 // customer, so the default is staff. ghl-proxy records it on the evidence row
-// (metadata.recipient_role) and the attribution ladder then keeps the row off
-// every job, so no reader takes an assignment text for a message to the
-// customer whose job number it carries. A customer text must use the
-// contact-based send paths, never these.
+// (metadata.recipient_role) and the attribution ladder then places the row on
+// the job it is about as internal communication (metadata.audience internal),
+// so no reader takes an assignment text for a message to the customer whose
+// job number it carries. A customer text must use the contact-based send
+// paths, never these.
 export type InternalSmsRecipient = {
   role: 'crew' | 'staff'
-  /** The job the text is about, recorded as metadata.about_job_id, never as a job link. */
+  /** The job the text is about, recorded as metadata.about_job_id; the ladder places the row there as internal communication. */
   aboutJobId?: string | null
 }
 
