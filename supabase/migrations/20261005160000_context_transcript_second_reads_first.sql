@@ -1,22 +1,44 @@
--- Down for 20261005100000 (T2b): restore T2's context_transcript_due_calls
--- (20261002100000) byte for byte, with T2's comment and grants: due calls
--- oldest first again, a second read competing with every older never-read
--- call. No row is touched.
+-- T2b (context finish, 5 Oct 2026): call transcripts start saving on the next
+-- run, whatever the backlog.
+--
+-- Why (first live runs, 4 Oct 2026 22:36Z and 22:41Z: 40 calls selected each,
+-- 0 saved): a transcript saves only when two reads at least 5 minutes apart
+-- agree (review M10, unchanged here). context_transcript_due_calls ordered
+-- every due call by call time alone, so a call waiting for its agreeing second
+-- read competed for the 40 places with every never-read call older than it.
+-- On a backlog (198 calls at switch-on) a newer call's second read waited
+-- until every older call had been read once; the agreeing read, the one that
+-- saves, came last.
+--
+-- Changed: only the ORDER BY of context_transcript_due_calls. Due calls whose
+-- fetch record last read words and waits for agreement
+-- (last_code awaiting_agreement) come first, then the rest oldest first as
+-- before. What is due, the limit, the window, history mode, the columns and
+-- the agreement rule are unchanged. No row is written; no flag or switch
+-- changes. Voicemails GHL cannot transcribe end in the edge function
+-- (voicemail_no_transcript), not here.
+--
+-- Built on T2's body (20261002100000):
 --   context_transcript_due_calls(integer,boolean)  md5(prosrc) 74d87e872300c883676c6ed8a3188023
+-- Whether production still carries that body was not observed (read-only
+-- task); the guard refuses unless it is T2's or already this migration's.
+-- The new comment starts "T2b:", so it is easy to tell which body is live.
+--
+-- Rollback: supabase/rollbacks/20261005160000_context_transcript_second_reads_first_down.sql
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
--- Refuse to overwrite a later change: the body must be this migration's (or
--- already T2's, for a repeated rollback).
+-- 0. Pre-image guard.
 DO $guard$
 DECLARE live text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_transcript_due_calls(integer,boolean)');
- IF live IS NULL OR NOT live=ANY(ARRAY['4e67b697860f6206c30d1e107dd62677','74d87e872300c883676c6ed8a3188023']) THEN
-  RAISE EXCEPTION 'context_transcript_second_reads_first_rollback_mismatch: public.context_transcript_due_calls(integer,boolean) md5 %; a later change must be rolled back first',coalesce(live,'<missing>');
+ IF live IS NULL OR NOT live=ANY(ARRAY['74d87e872300c883676c6ed8a3188023','4e67b697860f6206c30d1e107dd62677']) THEN
+  RAISE EXCEPTION 'context_transcript_second_reads_first_preimage_mismatch: public.context_transcript_due_calls(integer,boolean) md5 %; read the live definition before replacing it',coalesce(live,'<missing>');
  END IF;
 END $guard$;
 
+-- 1. Calls due a fetch now: second reads first, then oldest first.
 CREATE OR REPLACE FUNCTION public.context_transcript_due_calls(p_limit integer DEFAULT 40,p_history boolean DEFAULT false)
 RETURNS TABLE (call_event_id uuid, call_message_id text, event_type text, event_at timestamptz, contact_id text,
  conversation_key text, direction text, call_status text, duration_seconds numeric, call_sid text, line text,
@@ -55,10 +77,14 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
  WHERE c.msg ~ '^[A-Za-z0-9_-]{6,64}$'
   AND (f.call_message_id IS NULL OR (f.outcome='pending' AND f.next_at<=now()))
   AND (tx.id IS NOT NULL OR public.context_call_transcript_eligible(c.event_type,c.provider_message_id,c.payload))
- ORDER BY c.event_at, c.id
+ -- T2b: a call waiting for its agreeing second read goes first, whatever the
+ -- backlog of calls never read; then oldest first.
+ ORDER BY CASE WHEN f.last_code='awaiting_agreement' THEN 0 ELSE 1 END, c.event_at, c.id
  LIMIT greatest(1,least(coalesce(p_limit,40),200))
 $$;
 COMMENT ON FUNCTION public.context_transcript_due_calls(integer,boolean) IS
- 'Calls due a transcript fetch now (transcripts slice T2): GHL call rows eligible from their stored status and duration, with no terminal fetch record and the next try due, oldest first; live: the last 14 days, plus history calls whose backfill fetch record is pending and due now; history: older, on a GHL contact of a job live now (M4 context_ghl_history_live_jobs), with its live job numbers. A call whose transcript row already exists is included so the fetcher records it saved. fetch_mode is the open fetch record''s mode; a backfill record is always saved as backfill.';
+ 'T2b: calls due a transcript fetch now (transcripts slice T2): GHL call rows eligible from their stored status and duration, with no terminal fetch record and the next try due; calls waiting for their agreeing second read (last_code awaiting_agreement) first, then oldest first; live: the last 14 days, plus history calls whose backfill fetch record is pending and due now; history: older, on a GHL contact of a job live now (M4 context_ghl_history_live_jobs), with its live job numbers. A call whose transcript row already exists is included so the fetcher records it saved. fetch_mode is the open fetch record''s mode; a backfill record is always saved as backfill.';
+
+-- 2. Grants, as T2 left them.
 REVOKE ALL ON FUNCTION public.context_transcript_due_calls(integer,boolean) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_transcript_due_calls(integer,boolean) TO service_role;
