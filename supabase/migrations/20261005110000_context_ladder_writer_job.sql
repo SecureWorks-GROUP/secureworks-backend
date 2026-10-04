@@ -73,7 +73,7 @@
 -- this migration's, for a re-apply). The two ladder bodies carry an "L1e:"
 -- comment, so a re-apply of L1d over them refuses rather than silently
 -- removing these rules.
--- Rollback: supabase/rollbacks/20261005100000_context_ladder_writer_job_down.sql
+-- Rollback: supabase/rollbacks/20261005110000_context_ladder_writer_job_down.sql
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
@@ -83,8 +83,8 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: the predecessor's body, or this migration's.
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['90c038b5f48677af4598e475e2583572','306b7360afe724ff9a8b7a00e28402d8'],false),
-  ('public.context_ladder_p1a(public.business_events,boolean)',ARRAY['e11321e9d986be1e83f05e95f3efc36c','043b314d1c2a6830bc94de5468aa135f'],false),
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['90c038b5f48677af4598e475e2583572','a9b163a19a804750dc48fe20eb2f6801'],false),
+  ('public.context_ladder_p1a(public.business_events,boolean)',ARRAY['e11321e9d986be1e83f05e95f3efc36c','cfcf68a7d83f9c76aa369398a1a4d76e'],false),
   ('public.context_payload_job_mismatch_rows()',ARRAY['3c7759191b5f51dfeaabab87ae2c4cdb','69d68f016116576e6b6c8c773de8752e'],false),
   -- New: absent, or already this migration's.
   ('public.context_event_writer_job(public.business_events)',ARRAY['cd36b092818e7607d114d1b3011b3bfd'],true),
@@ -128,7 +128,7 @@ LANGUAGE sql STABLE AS $$
   AND coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
 $$;
 COMMENT ON FUNCTION public.context_event_writer_job(public.business_events) IS
- 'L1e: the job a service-role writer (metadata.written_as) named on the row with no match_method (null or none), if it exists and is not holding; null otherwise (20261005100000). Kept by the ladder only on a row with no words, a system or audit row and an automated row. Private; read by the ladder.';
+ 'L1e: the job a service-role writer (metadata.written_as) named on the row with no match_method (null or none), if it exists and is not holding; null otherwise (20261005110000). Kept by the ladder only on a row with no words, a system or audit row and an automated row. Private; read by the ladder.';
 
 -- 2. Did the writer itself call its payload.job_id a guess? True for the
 -- Jarvis SMS cache backfill (source or payload.source ghl_sms_cache_backfill)
@@ -143,7 +143,7 @@ LANGUAGE sql IMMUTABLE AS $$
   false)
 $$;
 COMMENT ON FUNCTION public.context_payload_job_is_guess(public.business_events) IS
- 'L1e: true when the writer declared its payload.job_id a guess: source or payload.source ghl_sms_cache_backfill, or payload.attribution_hint naming the same job with a method other than direct_job_id, direct_reference or manual (20261005100000). Step 1b skips such a payload job; the payload-job repair never repoints onto it. Private; read by the ladder and the repair classifier.';
+ 'L1e: true when the writer declared its payload.job_id a guess: source or payload.source ghl_sms_cache_backfill, or payload.attribution_hint naming the same job with a method other than direct_job_id, direct_reference or manual (20261005110000). Step 1b skips such a payload job; the payload-job repair never repoints onto it. Private; read by the ladder and the repair classifier.';
 
 -- 3. Rules off: L1d's body plus the writer job and the guess check.
 CREATE OR REPLACE FUNCTION public.context_ladder_p1a(e public.business_events,p_preview boolean) RETURNS public.business_events
@@ -161,7 +161,7 @@ BEGIN
    source_method:=e.metadata->'source_job_binding'->>'match_method';
  END IF;
  IF e.job_id IS NOT NULL AND coalesce(source_method,'none') NOT IN ('direct_job_id','direct_reference','manual') THEN
-   -- L1e (20261005100000): a job the service role named without saying how
+   -- L1e (20261005110000): a job the service role named without saying how
    -- (no match_method) is kept for a row the reader never reads.
    writer_job:=public.context_event_writer_job(e);
    e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
@@ -213,7 +213,7 @@ BEGIN
  -- payload.job_id that is the exact id text of a job that is not holding is
  -- the candidate (direct, step 1); one that names no such job rests the row
  -- in the bucket (payload_job_unbindable), never on another job.
- -- L1e (20261005100000): a payload job its writer declared a guess (the SMS
+ -- L1e (20261005110000): a payload job its writer declared a guess (the SMS
  -- cache backfill's newest job of the contact) is not the source's own job;
  -- the row goes on to the reference and contact rules.
  IF candidate IS NULL AND public.context_payload_job_is_guess(e) THEN
@@ -337,7 +337,7 @@ EXCEPTION WHEN OTHERS THEN
  RETURN e;
 END $$;
 COMMENT ON FUNCTION public.context_ladder_p1a(public.business_events,boolean) IS
- 'L1e: P1a''s ladder (P4''s copy, run while context_unlinked_rules_v1 is off) as L1d left it (20261005090000: step 1b and the crew and staff rules) plus L1e (20261005100000): a service-role row naming a job with no match_method keeps it when it has no words, is a system row or is automated (placement_rule writer_job); a payload job its writer declared a guess (context_payload_job_is_guess) is skipped by step 1b (payload_job_guess). In preview it writes no thread binding. Private; call resolve_context_attribution.';
+ 'L1e: P1a''s ladder (P4''s copy, run while context_unlinked_rules_v1 is off) as L1d left it (20261005090000: step 1b and the crew and staff rules) plus L1e (20261005110000): a service-role row naming a job with no match_method keeps it when it has no words, is a system row or is automated (placement_rule writer_job); a payload job its writer declared a guess (context_payload_job_is_guess) is skipped by step 1b (payload_job_guess). In preview it writes no thread binding. Private; call resolve_context_attribution.';
 
 -- 4. Rules on: L1d's body plus F6, the writer job and the guess check.
 CREATE OR REPLACE FUNCTION public.resolve_context_attribution(e public.business_events,p_preview boolean,p_rules_on boolean)
@@ -375,7 +375,7 @@ BEGIN
      AND e.metadata->'source_job_binding'->>'match_method' IN ('direct_job_id','direct_reference','manual') THEN
      source_method:=e.metadata->'source_job_binding'->>'match_method';
     ELSE
-     -- L1e (20261005100000): a job the service role named without saying how
+     -- L1e (20261005110000): a job the service role named without saying how
      -- (no match_method) is kept for a row the reader never reads.
      writer_job:=public.context_event_writer_job(e);
      e.metadata:=coalesce(e.metadata,'{}'::jsonb)-'source_job_binding';
@@ -412,7 +412,7 @@ BEGIN
     e.metadata:=e.metadata||jsonb_build_object('bucket_reason','unverified_writer','placement_rule','unverified_writer');
     EXIT rules;
    END IF;
-   -- L1e (20261005100000): a row with no words, a system row and an automated
+   -- L1e (20261005110000): a row with no words, a system row and an automated
    -- row keep the job custody proved (as with the rules off) and the job the
    -- service role named; none of them is ever read.
    IF to_jsonb(e)->>'channel' IN ('system','audit') THEN e.attribution_status:='automated';
@@ -496,7 +496,7 @@ BEGIN
    -- rests the row in the bucket with bucket_reason payload_job_unbindable,
    -- never on another job: the revision store refuses a row whose payload
    -- names a job other than the one it sits on.
-   -- L1e (20261005100000): a payload job its writer declared a guess is not
+   -- L1e (20261005110000): a payload job its writer declared a guess is not
    -- the source's own job; the row goes on to the later rules.
    IF cand IS NULL AND public.context_payload_job_is_guess(e) THEN
     e.metadata:=e.metadata||jsonb_build_object('payload_job_guess',true);
@@ -768,7 +768,7 @@ BEGIN
  RETURN e;
 END $$;
 COMMENT ON FUNCTION public.resolve_context_attribution(public.business_events,boolean,boolean) IS
- 'L1e: the ladder (P4) as L1d left it (20261005090000: step 1b and the crew and staff rules) plus L1e (20261005100000). Rules off: P1a''s ladder with those and L1e. Rules on: writer check, a service-role outbound row marked recipient_role crew or staff handled by the L1d rule, a row with no words or an automated row keeps a custody job and the job a service-role writer named with no match_method (writer_job), custody with monitor-inbox re-scan, the source''s own payload job unless its writer declared it a guess (bindable: placed, rule payload_job; unbindable: bucket, payload_job_unbindable; guess: payload_job_guess, on to the later rules), identity (payload.from read), references (multi_ref unplaced; one job on an outbound row to a known contact who is not that job''s customer or party: the L1d rule), live thread and supplier order bindings, contact rules with keys and aftercare, exact or loose site address, bucket. Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
+ 'L1e: the ladder (P4) as L1d left it (20261005090000: step 1b and the crew and staff rules) plus L1e (20261005110000). Rules off: P1a''s ladder with those and L1e. Rules on: writer check, a service-role outbound row marked recipient_role crew or staff handled by the L1d rule, a row with no words or an automated row keeps a custody job and the job a service-role writer named with no match_method (writer_job), custody with monitor-inbox re-scan, the source''s own payload job unless its writer declared it a guess (bindable: placed, rule payload_job; unbindable: bucket, payload_job_unbindable; guess: payload_job_guess, on to the later rules), identity (payload.from read), references (multi_ref unplaced; one job on an outbound row to a known contact who is not that job''s customer or party: the L1d rule), live thread and supplier order bindings, contact rules with keys and aftercare, exact or loose site address, bucket. Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
 
 -- 5. The payload-job repair's classifier: a declared guess is its own class.
 CREATE OR REPLACE FUNCTION public.context_payload_job_mismatch_rows()
@@ -788,7 +788,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  WHERE b.job_id IS NOT NULL AND b.payload#>>'{job_id}' IS NOT NULL AND b.payload#>>'{job_id}'<>b.job_id::text
 $$;
 COMMENT ON FUNCTION public.context_payload_job_mismatch_rows() IS
- 'Rows the revision store refuses as payload_job_mismatch (job_id set, payload.job_id set and different), each classed repoint, payload_job_guess, payload_job_not_found, payload_job_holding, not_contact_rule or thread_bound_elsewhere (20261002170100; payload_job_guess 20261005100000: the writer declared its payload job a guess, never repointed). Read-only. Service role only.';
+ 'Rows the revision store refuses as payload_job_mismatch (job_id set, payload.job_id set and different), each classed repoint, payload_job_guess, payload_job_not_found, payload_job_holding, not_contact_rule or thread_bound_elsewhere (20261002170100; payload_job_guess 20261005110000: the writer declared its payload job a guess, never repointed). Read-only. Service role only.';
 
 -- Grants: the ladder bodies and both helpers private; the classifier for the
 -- service role, as before.

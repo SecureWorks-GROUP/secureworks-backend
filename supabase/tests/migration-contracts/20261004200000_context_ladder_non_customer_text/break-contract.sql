@@ -1,10 +1,10 @@
 -- Ship the ladder without the two rules (L1b's bodies, as before this
 -- migration): a crew assignment text is placed on the customer's job by its
 -- job number. The contract must catch it.
--- Registered successors (L1e 20261005100000, then L1d 20261005090000) are rolled back first, as L1c's down requires.
+-- Registered successors (L1e 20261005110000, then L1d 20261005090000) are rolled back first, as L1c's down requires.
 SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1e:%' AS l1e_live \gset
 \if :l1e_live
-\ir ../../../rollbacks/20261005100000_context_ladder_writer_job_down.sql
+\ir ../../../rollbacks/20261005110000_context_ladder_writer_job_down.sql
 \endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1d:%' AS l1d_live \gset
 \if :l1d_live

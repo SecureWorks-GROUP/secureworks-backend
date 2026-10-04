@@ -175,7 +175,7 @@ BEGIN;
 SELECT pg_temp.ct_cases(true);
 ROLLBACK;
 
--- E. Structure. A registered successor (L1e 20261005100000) proves in its own
+-- E. Structure. A registered successor (L1e 20261005110000) proves in its own
 -- contract that its ladder bodies are exactly these plus its edits; while it is
 -- live only the two helpers are checked here, and the re-apply is skipped
 -- (L1d's guard refuses to re-apply over L1e's bodies).

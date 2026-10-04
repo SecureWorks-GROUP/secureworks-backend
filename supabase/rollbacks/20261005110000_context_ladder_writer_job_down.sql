@@ -1,4 +1,4 @@
--- Down for 20261005100000 (ladder L1e): restore L1d's two ladder bodies (20261005090000)
+-- Down for 20261005110000 (ladder L1e): restore L1d's two ladder bodies (20261005090000)
 -- and the payload-job repair classifier (20261002170100) byte for byte, with
 -- their comments and grants, and drop the two helpers. Rows the new rules
 -- placed keep what they have; a later re-decision uses L1d's ladder again
@@ -15,8 +15,8 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['306b7360afe724ff9a8b7a00e28402d8','90c038b5f48677af4598e475e2583572'],false),
-  ('public.context_ladder_p1a(public.business_events,boolean)',ARRAY['043b314d1c2a6830bc94de5468aa135f','e11321e9d986be1e83f05e95f3efc36c'],false),
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['a9b163a19a804750dc48fe20eb2f6801','90c038b5f48677af4598e475e2583572'],false),
+  ('public.context_ladder_p1a(public.business_events,boolean)',ARRAY['cfcf68a7d83f9c76aa369398a1a4d76e','e11321e9d986be1e83f05e95f3efc36c'],false),
   ('public.context_payload_job_mismatch_rows()',ARRAY['69d68f016116576e6b6c8c773de8752e','3c7759191b5f51dfeaabab87ae2c4cdb'],false),
   ('public.context_event_writer_job(public.business_events)',ARRAY['cd36b092818e7607d114d1b3011b3bfd'],true),
   ('public.context_payload_job_is_guess(public.business_events)',ARRAY['1c87d88718cf014429170e3f1aaaa2aa'],true)

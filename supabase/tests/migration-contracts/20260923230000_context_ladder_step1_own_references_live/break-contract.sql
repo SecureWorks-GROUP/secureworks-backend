@@ -2,7 +2,7 @@
 -- registered ladder slice (L1e, then L1d, then L1c, then L1b, then P4, then P1a) is rolled back first, as its down requires.
 SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1e:%' AS l1e_live \gset
 \if :l1e_live
-\ir ../../../rollbacks/20261005100000_context_ladder_writer_job_down.sql
+\ir ../../../rollbacks/20261005110000_context_ladder_writer_job_down.sql
 \endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1d:%' AS l1d_live \gset
 \if :l1d_live

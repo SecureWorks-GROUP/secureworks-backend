@@ -17,7 +17,7 @@
 --      is private, the bodies are marked L1c so L1b's re-apply refuses, and a
 --      re-apply of this migration is a no-op.
 \set ON_ERROR_STOP 1
--- A registered successor (L1d 20261005090000, then L1e 20261005100000 on top) replaces both rules: crew and
+-- A registered successor (L1d 20261005090000, then L1e 20261005110000 on top) replaces both rules: crew and
 -- staff texts stay on the job they are about as internal communication. While
 -- it is live these cases are its contract's, which also proves its bodies are
 -- exactly these with the two rules replaced.

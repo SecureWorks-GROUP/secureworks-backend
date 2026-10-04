@@ -1,4 +1,4 @@
--- Ladder L1e contract (20261005100000). Every fixture write is rolled back.
+-- Ladder L1e contract (20261005110000). Every fixture write is rolled back.
 -- Ids, job numbers, contacts and text are synthetic.
 --
 -- Proves, with the rules flag off (as shipped) and on:
@@ -165,15 +165,15 @@ ROLLBACK;
 DO $$
 DECLARE f text; r text;
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'043b314d1c2a6830bc94de5468aa135f'
-  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)<>'306b7360afe724ff9a8b7a00e28402d8'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'cfcf68a7d83f9c76aa369398a1a4d76e'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)<>'a9b163a19a804750dc48fe20eb2f6801'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_mismatch_rows()'::regprocedure)<>'69d68f016116576e6b6c8c773de8752e'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_event_writer_job(public.business_events)'::regprocedure)<>'cd36b092818e7607d114d1b3011b3bfd'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_is_guess(public.business_events)'::regprocedure)<>'1c87d88718cf014429170e3f1aaaa2aa'
  THEN RAISE EXCEPTION 'l1e: a body is not this migration''s'; END IF;
  -- Undoing the L1e edits gives back L1d's bodies byte for byte.
  IF md5(replace(replace(replace(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
-$b$ -- L1e (20261005100000): a payload job its writer declared a guess (the SMS
+$b$ -- L1e (20261005110000): a payload job its writer declared a guess (the SMS
  -- cache backfill's newest job of the contact) is not the source's own job;
  -- the row goes on to the reference and contact rules.
  IF candidate IS NULL AND public.context_payload_job_is_guess(e) THEN
@@ -208,7 +208,7 @@ $b$ IF e.metadata ?| ARRAY['placement_rule','placement_contactless_job_ids','pla
   e.metadata:=e.metadata-'placement_rule'-'placement_contactless_job_ids'-'placement_guard_job_ids';
 $b$),
 $b$ IF e.job_id IS NOT NULL AND coalesce(source_method,'none') NOT IN ('direct_job_id','direct_reference','manual') THEN
-   -- L1e (20261005100000): a job the service role named without saying how
+   -- L1e (20261005110000): a job the service role named without saying how
    -- (no match_method) is kept for a row the reader never reads.
    writer_job:=public.context_event_writer_job(e);
    e.metadata:=$b$,
@@ -225,7 +225,7 @@ BEGIN
 $b$))<>'e11321e9d986be1e83f05e95f3efc36c'
  THEN RAISE EXCEPTION 'l1e: context_ladder_p1a is not L1d''s body plus the L1e edits'; END IF;
  IF md5(replace(replace(replace(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure),
-$b$   -- L1e (20261005100000): a payload job its writer declared a guess is not
+$b$   -- L1e (20261005110000): a payload job its writer declared a guess is not
    -- the source's own job; the row goes on to the later rules.
    IF cand IS NULL AND public.context_payload_job_is_guess(e) THEN
     e.metadata:=e.metadata||jsonb_build_object('payload_job_guess',true);
@@ -233,7 +233,7 @@ $b$   -- L1e (20261005100000): a payload job its writer declared a guess is not
 $b$,
 $b$   IF cand IS NULL AND e.payload#>>'{job_id}' IS NOT NULL THEN
 $b$),
-$b$   -- L1e (20261005100000): a row with no words, a system row and an automated
+$b$   -- L1e (20261005110000): a row with no words, a system row and an automated
    -- row keep the job custody proved (as with the rules off) and the job the
    -- service role named; none of them is ever read.
    IF to_jsonb(e)->>'channel' IN ('system','audit') THEN e.attribution_status:='automated';
@@ -256,7 +256,7 @@ $b$,
 $b$   THEN e.attribution_status:='automated'; e.job_id:=NULL; EXIT rules; END IF;
 $b$),
 $b$    ELSE
-     -- L1e (20261005100000): a job the service role named without saying how
+     -- L1e (20261005110000): a job the service role named without saying how
      -- (no match_method) is kept for a row the reader never reads.
      writer_job:=public.context_event_writer_job(e);
      e.metadata:=coalesce(e.metadata,'{}'::jsonb)-'source_job_binding';
@@ -302,7 +302,7 @@ END $$;
 CREATE TEMP TABLE l1e_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'
   AND p.proname IN ('context_ladder_p1a','resolve_context_attribution','context_event_writer_job','context_payload_job_is_guess','context_payload_job_mismatch_rows');
-\ir ../../../migrations/20261005100000_context_ladder_writer_job.sql
+\ir ../../../migrations/20261005110000_context_ladder_writer_job.sql
 DO $$
 BEGIN
  IF (SELECT count(*) FROM l1e_before)<>6 THEN RAISE EXCEPTION 'l1e: expected 6 functions, got %',(SELECT count(*) FROM l1e_before); END IF;
