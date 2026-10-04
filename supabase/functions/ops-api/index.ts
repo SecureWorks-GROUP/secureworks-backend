@@ -406,6 +406,8 @@ import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, 
 import { readJobFreshness } from './job_freshness.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
+import { businessEventConversationMessage, CONVERSATION_EVENT_SELECT, conversationRoleFields, DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles } from './job_conversation_party_roles.ts'
+import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
@@ -16386,6 +16388,8 @@ async function getJobConversation(client: any, body: any) {
         source_system: 'ghl_cache',
         source_ref: m.id || '',
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
+        // The CRM thread is read by the job's customer contact (party roles, B-6).
+        ...conversationRoleFields(customerThreadPartyRoles(m.direction || 'inbound')),
       })
     }
   } catch (e) {
@@ -16431,6 +16435,8 @@ async function getJobConversation(client: any, body: any) {
         placed_by: 'old_inbox_matcher',
         label,
         event_copy,
+        // The old inbox row records no role for its sender (party roles, B-6).
+        ...conversationRoleFields(readMessagePartyRoles({ party_roles: { sender_role: 'unknown', recipient_role: 'staff', counterpart_role: 'unknown', audience: 'unknown', basis: 'old_inbox_row' } })),
       })
     }
   } catch (e) {
@@ -16461,6 +16467,8 @@ async function getJobConversation(client: any, body: any) {
         subject: undefined,
         source_system: 'job_events',
         source_ref: r.id,
+        ...conversationRoleFields(staffNotePartyRoles()),
+        label: 'internal: staff',
       })
     }
   } catch (e) {
@@ -16478,9 +16486,12 @@ async function getJobConversation(client: any, body: any) {
     // attribution_status / attribution_step / placement_rule (context slice
     // R0): how the ladder placed the row, so a reader can see why it is on
     // this job. placement_rule is metadata.placement_rule (null until the
-    // placement rules that write it ship).
+    // placement rules that write it ship). Party roles (B-6): each message
+    // says who sent it and who received it; a crew or staff row is shown as
+    // "internal: crew" / "internal: staff" with direction internal, never as
+    // a message in the customer's thread (job_conversation_party_roles.ts).
     let q = client.from('business_events')
-      .select('id, event_type, source, occurred_at, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule')
+      .select(CONVERSATION_EVENT_SELECT)
       .eq('job_id', jobId)
       .in('event_type', messageEventTypes)
       .order('occurred_at', { ascending: false })
@@ -16488,33 +16499,7 @@ async function getJobConversation(client: any, body: any) {
     if (sinceFilter) q = q.gt('occurred_at', sinceFilter)
     const { data: bev, error: bevErr } = await q
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr.message)
-    for (const r of (bev || [])) {
-      const p: any = r.payload || {}
-      const channel: string = r.event_type.includes('sms') ? 'sms'
-        : r.event_type.includes('call') ? 'call'
-        : r.event_type.includes('note') ? 'note'
-        : 'email'
-      const direction: string = r.event_type.endsWith('_in') || r.event_type === 'client.reply' || r.event_type === 'ghl.note_added' || r.event_type === 'supplier.email_in'
-        ? 'inbound'
-        : 'outbound'
-      const body = String(p.body || p.text || p.message || p.note_preview || p.note_text || p.body_preview || '')
-      messages.push({
-        id: `bev:${r.id}`,
-        job_id: jobId,
-        channel,
-        direction,
-        occurred_at: r.occurred_at,
-        author: p.from || p.sender_name || p.added_by || null,
-        body,
-        preview: body.slice(0, 500),
-        subject: p.subject || null,
-        source_system: 'business_events',
-        source_ref: r.id,
-        attribution_status: r.attribution_status ?? null,
-        attribution_step: r.attribution_step ?? null,
-        placement_rule: r.placement_rule ?? null,
-      })
-    }
+    for (const r of (bev || [])) messages.push(businessEventConversationMessage(r, jobId))
   } catch (e) {
     console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
   }
@@ -16741,16 +16726,17 @@ async function assembleJobDossier(client: any, body: any) {
   sourceStatus.council = councilRead.status
 
   // ── Raw evidence: business_events ──
+  // Message rows carry who sent them and who received them (party roles, B-6).
   const eventsRead = await safeRead('business_events', async () => {
     let q = client.from('business_events')
-      .select('id, event_type, source, occurred_at, payload, correlation_id')
+      .select(DOSSIER_EVENT_SELECT)
       .eq('job_id', jobId)
       .order('occurred_at', { ascending: false })
       .limit(eventsLimit)
     if (since) q = q.gt('occurred_at', since)
     const { data, error } = await q
     if (error) throw new Error(error.message)
-    return data
+    return (data || []).map(dossierEventWithPartyRoles)
   })
   sourceStatus.businessEvents = eventsRead.status
 

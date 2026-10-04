@@ -337,9 +337,18 @@ const CHANNEL_WORDS: Record<string, string> = {
   email: "email",
 };
 
+// Party roles (B-6): who the other side was, when it was not the customer.
+const OTHER_PARTY_WORDS: Record<string, string> = {
+  supplier: "a supplier",
+  insurer_builder: "the insurer or builder",
+};
+
 function newestContactLine(messages: any[]): string | null {
+  // Crew and staff communication (audience internal) is never contact with
+  // the customer.
   const customer = messages.filter((m) =>
-    m && m.channel !== "note" && ms(m.occurred_at) !== null
+    m && m.channel !== "note" && m.audience !== "internal" &&
+    m.direction !== "internal" && ms(m.occurred_at) !== null
   );
   if (!customer.length) return null;
   customer.sort((a, b) =>
@@ -347,10 +356,13 @@ function newestContactLine(messages: any[]): string | null {
   );
   const m = customer[0];
   const channel = CHANNEL_WORDS[m.channel] || words(m.channel) || "message";
+  const other = m.direction === "outbound"
+    ? OTHER_PARTY_WORDS[m.recipient_role]
+    : OTHER_PARTY_WORDS[m.sender_role];
   const who = m.direction === "outbound"
-    ? "from us"
+    ? `from us${other ? ` to ${other}` : ""}`
     : m.direction === "inbound"
-    ? "from the customer"
+    ? `from ${other ?? "the customer"}`
     : "";
   const where = m.source_system === "ghl_cache"
     ? ", seen in the CRM thread (not linked to this job)"
