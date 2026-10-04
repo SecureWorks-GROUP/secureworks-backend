@@ -593,9 +593,11 @@ first apply time and rows captured before it never wake). The one judgement is
 `context_jobs_cadence(uuid[])`; the claim, candidates, freshness and status
 all read it, so never re-derive "due" elsewhere. The one exception to
 `live_since` is the catch-up list (`20260924220000`, `context_catchup_jobs`,
-written only by `context_catchup_request`): a listed job is due inside that same
-judgement until `done` runs have re-read every row (`context_catchup_reads`,
-receipts or not); field contract in `docs/context/pipeline-status.md`. The one unread definition is
+written by `context_catchup_request` and, one tier at a time,
+`context_catchup_request_backlog` (`20261004100000`)): a listed job is due inside
+that same judgement until `done` runs have re-read every row
+(`context_catchup_reads`, receipts or not; a row in mode `unread` reads only
+rows with no `luna_v2` receipt); field contract in `docs/context/pipeline-status.md`. The one unread definition is
 the inlinable `context_unread_rows(uuid[])` (no SET clause, on purpose). The
 BEFORE INSERT trigger stamps `metadata.written_as` from the request role and
 overwrites what the writer sent; only `service_role` rows wake a read or enter

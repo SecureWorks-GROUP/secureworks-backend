@@ -48,8 +48,10 @@ unplaced rows, rows not written as `service_role`, and `alarms`. Due is
 `context_jobs_cadence`; do not re-derive it here.
 
 Catch-up (`20260924220000`): `catchup` reports the one-time catch-up list
-(`context_catchup_jobs`, written only by the service-role
-`context_catchup_request(dry_run default true)`, which picks by rule: live jobs,
+(`context_catchup_jobs`, written by the service-role
+`context_catchup_request(dry_run default true)` and, since `20261004100000`, by
+the tiered backlog writer `context_catchup_request_backlog(tier, dry_run default
+true, limit)`, priorities 1 to 5, scope `backlog`; the original writer picks by rule: live jobs,
 meaning statuses `accepted`, `partially_accepted`, `scheduled`, `in_progress`,
 `processing`, `approvals`, `order_materials`, `schedule_install`,
 `awaiting_supplier`, `awaiting_deposit`, `final_payment`, or `rectification`,
@@ -61,7 +63,8 @@ the exclusions and the job list without writing): `requested`, `done`,
 `remaining` (and per priority), `due_now`, `remaining_nothing_to_read` (listed
 but nothing to read), `oldest_requested_at` and `last_done_at`. A listed job gets one fresh full read: until it is done, its pending rows
 (`context_catchup_pending_rows`: every readable, placed, worded row no catch-up
-read has covered, earlier receipts or not) make it due from its request time whatever
+read has covered, earlier receipts or not; in mode `unread` only rows with no
+`luna_v2` receipt for the job) make it due from its request time whatever
 `live_since` says, and they are its batch (never flagged older context).
 `persist_luna_context_revision` accepts a receipted source only while it is
 still pending for a listed, unfinished catch-up job; the normal run receipt
