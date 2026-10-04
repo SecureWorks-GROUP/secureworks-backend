@@ -1,4 +1,4 @@
--- Roll back gap plan B-1 (20261005150000_context_email_legacy_dedupe_and_history).
+-- Roll back gap plan B-1 (20261005180000_context_email_legacy_dedupe_and_history).
 --
 -- Refuses while email_reader_history_v1 is on (turn it off first). Then
 -- restores EM3's trigger_context_email_poll() byte for byte (20261002150000,

@@ -74,7 +74,7 @@
 -- set state='pending', posts=0, window_from=NULL, window_to=NULL,
 -- succeeded_at=NULL where source_key='<key>';
 --
--- Rollback: supabase/rollbacks/20261005150000_context_email_legacy_dedupe_and_history_down.sql.
+-- Rollback: supabase/rollbacks/20261005180000_context_email_legacy_dedupe_and_history_down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 

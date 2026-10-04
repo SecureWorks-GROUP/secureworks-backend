@@ -127,7 +127,7 @@ sends, replies, moves, deletes or marks mail read. No model call.
 | `email_capture_v2` (EM1) | created off | the program switch; the reader needs it on |
 | `email_reader_v1` | off | the reader reads mail only while on (with `email_capture_v2` and the capture lane) |
 | `email_reader_schedule_v1` | off | pg_cron `outlook-mail-poll` (every 5 minutes) and `monitor-inbox-sweep` (02:00 Perth) call the reader; the old monitor-inbox path stops writing its own email evidence rows and its group reader (it keeps writing `inbox_events`) |
-| `email_reader_history_v1` (B-1, `20261005150000`) | off | the 60-day history load below runs from the `outlook-mail-poll` tick; needs the three flags above |
+| `email_reader_history_v1` (B-1, `20261005180000`) | off | the 60-day history load below runs from the `outlook-mail-poll` tick; needs the three flags above |
 
 Modes (body `{"mode", "source", "from", "to", "wait"}`; callers: the service
 role, or the server key in `x-api-key`):
@@ -151,7 +151,7 @@ reason). Inline images, attached emails and links are recorded skipped. ses@
 attachments are not stored here (the make-safe intake stores them). No public
 URL and no `job_documents` row is made.
 
-Old-path copies (gap plan B-1, `20261005150000`): the old path's rows
+Old-path copies (gap plan B-1, `20261005180000`): the old path's rows
 (sources `monitor-inbox`, `monitor_inbox`, `monitor-inbox-group`, keys
 `graph:<id>` / `graph-group:<id>`) never collide with the reader's key. Before
 saving an inbound email the reader calls `context_email_legacy_copy(from,
