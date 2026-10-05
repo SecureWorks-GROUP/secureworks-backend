@@ -862,3 +862,135 @@ Deno.test("dossier: a failed freshness read never claims no messages are linked"
   );
   assertEquals(d.diagnostics.ok, false);
 });
+
+// Party roles (B-6, migration 20261005200000): a crew text on the job is
+// internal communication. The dossier shows it as "internal: crew" in the
+// conversation and the events, and the state card's newest contact is the
+// customer's reply, not the newer crew text.
+Deno.test("dossier: a crew text on the job is internal: crew and never the newest customer contact", async () => {
+  const t = jobTables();
+  t.business_events = [
+    {
+      id: "ev-crew",
+      job_id: JOB,
+      event_type: "client.sms_out",
+      source: "ghl-proxy",
+      occurred_at: "2026-10-04T06:00:00.000Z",
+      payload: { body: "New job assigned: SWF-STATE1 - Client" },
+      correlation_id: null,
+      attribution_status: "direct",
+      attribution_step: 1,
+      placement_rule: "internal_ref",
+      audience: "internal",
+      recipient_role: "crew",
+      party_roles: {
+        version: "party_roles_v1",
+        sender_role: "staff",
+        recipient_role: "crew",
+        counterpart_role: "crew",
+        basis: "ladder_internal",
+        audience: "internal",
+      },
+    },
+    {
+      id: "ev-cust",
+      job_id: JOB,
+      event_type: "client.sms_in",
+      source: "ghl-webhook-receiver",
+      occurred_at: "2026-10-04T02:00:00.000Z",
+      payload: { body: "Thanks, see you then" },
+      correlation_id: null,
+      attribution_status: "single_open",
+      attribution_step: 4,
+      placement_rule: null,
+      audience: null,
+      recipient_role: null,
+      party_roles: {
+        version: "party_roles_v1",
+        sender_role: "customer",
+        recipient_role: "staff",
+        counterpart_role: "customer",
+        basis: "job_customer",
+        audience: "customer",
+      },
+    },
+  ];
+  const client = fakeClient(t, freshness());
+  const d: any = await noNetwork(() =>
+    _assembleJobDossierForTest(client, { job_id: JOB })
+  );
+  assertContract(d);
+  const crew = d.conversation.find((m: any) => m.source_ref === "ev-crew");
+  assertEquals(
+    [
+      crew.direction,
+      crew.label,
+      crew.sender_role,
+      crew.recipient_role,
+      crew.audience,
+    ],
+    ["internal", "internal: crew", "staff", "crew", "internal"],
+  );
+  const cust = d.conversation.find((m: any) => m.source_ref === "ev-cust");
+  assertEquals([cust.direction, cust.sender_role, cust.recipient_role], [
+    "inbound",
+    "customer",
+    "staff",
+  ]);
+  const crewEvent = d.events.find((e: any) => e.id === "ev-crew");
+  assertEquals(
+    [crewEvent.label, crewEvent.recipient_role, crewEvent.internal],
+    ["internal: crew", "crew", true],
+  );
+  assert(
+    d.state.lines.includes(
+      "Newest contact with the customer: text from the customer on 4 Oct 2026.",
+    ),
+    `state lines: ${JSON.stringify(d.state.lines)}`,
+  );
+  assertEquals(client.writes, []);
+});
+
+Deno.test("state card: a supplier or builder is never the newest contact with the customer", () => {
+  const card = buildJobStateCard(baseInput({
+    conversation: {
+      ok: true,
+      rows: [
+        {
+          channel: "email",
+          direction: "inbound",
+          sender_role: "supplier",
+          recipient_role: "staff",
+          audience: "other_party",
+          occurred_at: "2026-10-04T02:00:00.000Z",
+          source_system: "business_events",
+        },
+        {
+          channel: "sms",
+          direction: "internal",
+          audience: "internal",
+          occurred_at: "2026-10-04T05:00:00.000Z",
+          source_system: "business_events",
+        },
+      ],
+    },
+  }));
+  const none =
+    "No contact with the customer seen for this job (only internal or other-party messages).";
+  assert(card.lines.includes(none), JSON.stringify(card.lines));
+  const out = buildJobStateCard(baseInput({
+    conversation: {
+      ok: true,
+      rows: [{
+        channel: "email",
+        direction: "outbound",
+        sender_role: "staff",
+        recipient_role: "insurer_builder",
+        audience: "other_party",
+        occurred_at: "2026-10-04T02:00:00.000Z",
+        source_system: "business_events",
+      }],
+    },
+  }));
+  assert(out.lines.includes(none), JSON.stringify(out.lines));
+});

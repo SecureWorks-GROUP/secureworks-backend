@@ -127,6 +127,7 @@ sends, replies, moves, deletes or marks mail read. No model call.
 | `email_capture_v2` (EM1) | created off | the program switch; the reader needs it on |
 | `email_reader_v1` | off | the reader reads mail only while on (with `email_capture_v2` and the capture lane) |
 | `email_reader_schedule_v1` | off | pg_cron `outlook-mail-poll` (every 5 minutes) and `monitor-inbox-sweep` (02:00 Perth) call the reader; the old monitor-inbox path stops writing its own email evidence rows and its group reader (it keeps writing `inbox_events`) |
+| `email_reader_history_v1` (B-1, `20261005180000`) | off | the 60-day history load below runs from the `outlook-mail-poll` tick; needs the three flags above |
 
 Modes (body `{"mode", "source", "from", "to", "wait"}`; callers: the service
 role, or the server key in `x-api-key`):
@@ -149,6 +150,30 @@ go to the PRIVATE bucket `context-email-attachments`, one row each in
 reason). Inline images, attached emails and links are recorded skipped. ses@
 attachments are not stored here (the make-safe intake stores them). No public
 URL and no `job_documents` row is made.
+
+Old-path copies (gap plan B-1, `20261005180000`): the old path's rows
+(sources `monitor-inbox`, `monitor_inbox`, `monitor-inbox-group`, keys
+`graph:<id>` / `graph-group:<id>`) never collide with the reader's key. Before
+saving an inbound email the reader calls `context_email_legacy_copy(from,
+received_at, subject)`: same sender (`payload.from`, lower case) and the same
+Graph received time, or within 2 minutes with the same non-empty subject
+(another mailbox's copy). A match is not saved again (`counts.skipped_legacy_copy`);
+its attachments still go to the private store, pointed at the old row. Our own
+outbound and internal mail is never skipped. An unreadable lookup fails the run
+and holds the cursor.
+
+History load (B-1): every 5 minutes, while `email_reader_history_v1` and the
+reader's flags are on, `trigger_context_email_poll()` runs one
+`trigger_context_email_history()` tick in its own subtransaction. The tick keeps
+one `context_email_history_plan` row per selected source with a window fixed at
+its first call (that minute less 59 days, to that minute), posts one `history`
+call for the first source not yet finished (none while its run is running),
+marks a source succeeded when the reader records a `succeeded` run for exactly
+that window, gives up after 288 calls, and posts nothing once every source is
+done. On each success it lists the loaded jobs for reading with
+`context_catchup_list_backfill('outlook-mail-capture', since, false, ...)`, the
+one re-list for history loads (backfill rows never wake a read). Status:
+`context_email_history_status()`.
 
 Not yet built: `inbox_events` sighting rows (the old path still owns that table
 until the reader-move slice EM-R1), the tool-send row (EM-TOOL), the legacy

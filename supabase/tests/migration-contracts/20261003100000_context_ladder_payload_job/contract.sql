@@ -172,18 +172,18 @@ SELECT pg_temp.pj_cases(true);
 ROLLBACK;
 
 -- E. Structure. A registered successor (L1c 20261004200000, then L1d
--- 20261005090000) proves in its own contract that its bodies are exactly the
+-- 20261005090000, then L1e 20261005170000) proves in its own contract that its bodies are exactly the
 -- previous ones plus or with its rules; while one is live the byte checks
 -- below are its, not these.
-SELECT coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') SIMILAR TO 'L1(c|d):%' AS l1c_live \gset
+SELECT coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') SIMILAR TO 'L1(c|d|e):%' AS l1c_live \gset
 DO $$
 DECLARE f text; r text;
 BEGIN
- IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d):%' AND ((SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'6a45c9ea9a68c8c5899fba45b44e18b5'
+ IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d|e):%' AND ((SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'6a45c9ea9a68c8c5899fba45b44e18b5'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)<>'a0205f1a17ae9866ca4c8e57ff2746e4')
  THEN RAISE EXCEPTION 'l1b: a ladder body is not this migration''s'; END IF;
  -- Undoing step 1b gives back P4's two bodies byte for byte.
- IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d):%' AND md5(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
+ IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d|e):%' AND md5(replace((SELECT prosrc FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure),
    $b$ -- 1b. The source's own job (20261003100000), as in the rules-on ladder: a
  -- payload.job_id that is the exact id text of a job that is not holding is
  -- the candidate (direct, step 1); one that names no such job rests the row
@@ -202,7 +202,7 @@ BEGIN
  END IF;
 $b$,''))<>'9ce621de1f295757e9ed83abdc2f3765'
  THEN RAISE EXCEPTION 'l1b: context_ladder_p1a is not P4''s body plus step 1b'; END IF;
- IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d):%' AND md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure),
+ IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d|e):%' AND md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure),
    $b$   -- 1b. The source's own job (20261003100000). A payload.job_id that is the
    -- exact id text of a job that is not holding places the row there (rule
    -- payload_job, a step-1 direct placement), whatever a contact rule would
@@ -232,8 +232,8 @@ $b$))<>'e04d9e81649364b8e9acc38f14833ba2'
  THEN RAISE EXCEPTION 'l1b: the ladder entry or insert trigger changed'; END IF;
  -- Marked L1b, not P4: P4's guard refuses to re-apply over them.
  FOREACH f IN ARRAY ARRAY['public.context_ladder_p1a(public.business_events,boolean)','public.resolve_context_attribution(public.business_events,boolean,boolean)'] LOOP
-  IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'L1b:%' AND coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d):%'
-  THEN RAISE EXCEPTION 'l1b: % is not marked L1b (or its successor L1c or L1d)',f; END IF;
+  IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'L1b:%' AND coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d|e):%'
+  THEN RAISE EXCEPTION 'l1b: % is not marked L1b (or a successor, L1c, L1d or L1e)',f; END IF;
   FOREACH r IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
    IF has_function_privilege(r,f,'EXECUTE') THEN RAISE EXCEPTION 'l1b: % can call private %',r,f; END IF;
   END LOOP;
@@ -246,7 +246,7 @@ $b$))<>'e04d9e81649364b8e9acc38f14833ba2'
 END $$;
 
 -- Re-apply is a no-op. It runs only while L1b's ladder is live; a registered
--- successor (L1c 20261004200000, then L1d) marks its bodies, so L1b's guard refuses a
+-- successor (L1c 20261004200000, then L1d, then L1e) marks its bodies, so L1b's guard refuses a
 -- re-apply over it instead of removing its rules.
 \if :l1c_live
 \else

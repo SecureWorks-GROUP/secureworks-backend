@@ -310,7 +310,8 @@ jobs:
             supabase/functions/ops-api/sales_booking_lead_owner_test.ts \
             supabase/functions/ops-api/sales_booking_execution_read_test.ts \
             supabase/functions/ops-api/sales_booking_routes_test.ts \
-            supabase/functions/reporting-api/reporting_staff_gate_test.ts
+            supabase/functions/reporting-api/reporting_staff_gate_test.ts \
+            supabase/functions/reporting-api/job_context_timeline_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
@@ -323,6 +324,7 @@ jobs:
             supabase/functions/ops-api/retired_booking_actions_test.ts \
             supabase/functions/ops-api/invoice_context_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \
+            supabase/functions/ops-api/job_conversation_party_roles_test.ts \
             supabase/functions/ops-api/job_commercial_read_test.ts \
             supabase/functions/ops-api/job_freshness_test.ts \
             supabase/functions/ops-api/job_state_card_test.ts \
@@ -365,6 +367,7 @@ jobs:
             supabase/functions/_shared/evidence/ghl_message_test.ts \
             supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts \
             supabase/functions/_shared/evidence/ghl_call_pair_test.ts \
+            supabase/functions/_shared/evidence/party_roles_test.ts \
             supabase/functions/ghl-proxy/sms_capture_test.ts \
             supabase/functions/ghl-proxy/send_sms_response_test.ts
 

@@ -407,6 +407,8 @@ import { readJobFreshness } from './job_freshness.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { businessEventTimelineMessage, emailCustomerParty, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
+import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
 import { chaseWorkflowRefusal } from './debt_autotexts_off.ts'
@@ -16393,7 +16395,8 @@ async function getJobConversation(client: any, body: any) {
         source_system: 'ghl_cache',
         source_ref: m.id || '',
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
-        // The CRM thread is read by the job's customer contact.
+        // The CRM thread is read by the job's customer contact (party roles, B-6).
+        ...conversationRoleFields(customerThreadPartyRoles(m.direction || 'inbound')),
         customer_party: true,
         who: (m.direction || 'inbound') === 'outbound' ? 'us to the customer' : 'the customer to us',
       })
@@ -16441,6 +16444,8 @@ async function getJobConversation(client: any, body: any) {
         placed_by: 'old_inbox_matcher',
         label,
         event_copy,
+        // The old inbox row records no role for its sender (party roles, B-6).
+        ...conversationRoleFields(readMessagePartyRoles({ party_roles: { sender_role: 'unknown', recipient_role: 'staff', counterpart_role: 'unknown', audience: 'unknown', basis: 'old_inbox_row' } })),
         customer_party: emailCustomerParty('inbound', r.from_email, null, customerAddresses),
       })
       const last = messages[messages.length - 1]
@@ -16474,6 +16479,8 @@ async function getJobConversation(client: any, body: any) {
         subject: undefined,
         source_system: 'job_events',
         source_ref: r.id,
+        ...conversationRoleFields(staffNotePartyRoles()),
+        label: 'internal: staff',
         who: 'staff note (internal)',
       })
     }
@@ -16759,16 +16766,17 @@ async function assembleJobDossier(client: any, body: any) {
   // ── Raw evidence: business_events ──
   // Newest by when each event happened, coalesce(event_at, occurred_at), not
   // by load time (job_conversation_timeline.ts). Each row's occurred_at is
-  // that time; loaded_at is when it was loaded.
+  // that time; loaded_at is when it was loaded. Message rows carry who sent
+  // them and who received them (party roles, B-6).
   const eventsRead = await safeRead('business_events', async () => {
     const { rows, error } = await readBusinessEventsBySourceTime(client, {
       jobId,
-      select: 'id, event_type, source, occurred_at, event_at, channel, direction, payload, correlation_id',
+      select: `${DOSSIER_EVENT_SELECT}, event_at, channel, direction`,
       limit: eventsLimit,
       since,
     })
     if (error) throw new Error(error)
-    return rows.map((r: any) => ({ ...r, occurred_at: eventSourceTime(r), loaded_at: r.occurred_at ?? null }))
+    return rows.map((r: any) => ({ ...dossierEventWithPartyRoles(r), occurred_at: eventSourceTime(r), loaded_at: r.occurred_at ?? null }))
   })
   sourceStatus.businessEvents = eventsRead.status
 

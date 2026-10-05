@@ -200,6 +200,15 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
         return { outcome: "error", code: "rpc_threw" };
       }
     },
+    async legacyCopy({ from, receivedAt, subject }) {
+      const { data, error } = await supabase.rpc("context_email_legacy_copy", {
+        p_from: from,
+        p_received_at: receivedAt,
+        p_subject: subject,
+      });
+      if (error) throw dbError("legacy_copy_unreadable");
+      return typeof data === "string" && data !== "" ? data : null;
+    },
     mail: {
       folderIds: (m) => graph.folderIds(g, m),
       listMessages: (m, a) => graph.listMessages(g, m, a),

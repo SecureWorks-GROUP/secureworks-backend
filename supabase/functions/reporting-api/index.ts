@@ -21,6 +21,7 @@ import {
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
 import { decideReportingStaffAuth } from './reporting_staff_gate.ts'
+import { businessEventTimelineItem, JOB_CONTEXT_EVENT_SELECT, latestCommsAt as latestCustomerCommsAt } from './job_context_timeline.ts'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -391,9 +392,10 @@ async function jobContext(sb: any, jobId: string) {
       .eq('job_id', jobId)
       .order('created_at', { ascending: false }).limit(10),
 
-    // 6. All business_events for this job (no event_type filter)
+    // 6. All business_events for this job (no event_type filter); message
+    //    rows carry who sent and received them (party roles, B-6)
     sb.from('business_events')
-      .select('event_type, source, payload, occurred_at')
+      .select(JOB_CONTEXT_EVENT_SELECT)
       .eq('job_id', jobId)
       .order('occurred_at', { ascending: false }).limit(30),
 
@@ -409,7 +411,7 @@ async function jobContext(sb: any, jobId: string) {
     ...(events.data || []).map((e: any) => ({ type: e.event_type, who: e.users?.name || 'System', when: e.created_at, detail: typeof e.detail_json === 'string' ? e.detail_json.slice(0, 200) : JSON.stringify(e.detail_json || {}).slice(0, 200), source: 'job_events' })),
     ...(emails.data || []).map((e: any) => ({ type: 'email_' + e.classification, who: e.from_name || e.from_email, when: e.received_at, detail: e.subject, source: 'inbox' })),
     ...(jarvisActions.data || []).map((e: any) => ({ type: e.event_type, who: 'JARVIS', when: e.created_at, detail: (e.message_content || '').slice(0, 200), source: 'jarvis' })),
-    ...(conversations.data || []).map((e: any) => ({ type: e.event_type, who: e.source || 'system', when: e.occurred_at, detail: (e.payload?.message || e.payload?.changes ? JSON.stringify(e.payload.changes || e.payload).slice(0, 200) : JSON.stringify(e.payload || {}).slice(0, 200)), source: 'business_events' })),
+    ...(conversations.data || []).map(businessEventTimelineItem),
   ].sort((a, b) => new Date(b.when).getTime() - new Date(a.when).getTime()).slice(0, 50)
 
   // Pins + derived latest timestamps for the JARVIS UI evidence strip
@@ -428,7 +430,8 @@ async function jobContext(sb: any, jobId: string) {
   const latestNoteAt = noteEvents[0]?.created_at || null
   const latestEventAt = (events.data || [])[0]?.created_at || null
   const latestEmailAt = (emails.data || [])[0]?.received_at || null
-  const latestCommsAt = (conversations.data || []).find((e: any) => ['sms_sent', 'client.email_in', 'supplier.email_in'].includes(e.event_type))?.occurred_at || null
+  // Crew and staff rows (audience internal) never count as customer comms.
+  const latestCommsAt = latestCustomerCommsAt(conversations.data || [])
 
   return {
     job: job.data,

@@ -25,6 +25,7 @@ import {
   type HistoryDeps,
   parseRequest,
   POLICY,
+  type Quota,
   RUN_SOURCE,
   runGhlHistoryLoad,
 } from "./history_load.ts";
@@ -120,6 +121,7 @@ class FakeDb {
           ? { counts: structuredClone(run.counts as Record<string, number>) }
           : {}),
         ...("error_code" in run ? { error_code: run.error_code } : {}),
+        ...("cursor" in run ? { cursor: structuredClone(run.cursor) } : {}),
       });
       this.events.push(
         `run:${r.status}:jobs_covered=${r.counts.jobs_covered ?? 0}`,
@@ -165,7 +167,12 @@ function contact(id: string, jobs = 1, extra: Partial<DueContact> = {}) {
 
 function dueOf(contacts: DueContact[]): DueList {
   const jobs = contacts.reduce((a, c) => a + c.jobs, 0);
+  const charged = contacts.reduce(
+    (a, c) => a + (c.charged_today ? 0 : c.jobs),
+    0,
+  );
   return {
+    jobs_charged: charged,
     daily_job_limit: 100,
     jobs_counted_today: 0,
     daily_remaining: 100,
@@ -223,14 +230,23 @@ function harness(opts: {
         Object.assign(live, { status: "failed", error_code: "run_abandoned" });
       }
       const due = dueOf(opts.due);
+      if (!due.contacts.length) {
+        return Promise.resolve({ outcome: "nothing_due" as const, due });
+      }
+      const cursor = { v: 1, actor, limit: { daily_job_limit: 100 } };
       const run_id = db.recordRun({
         source: RUN_SOURCE,
         status: "running",
-        cursor: { v: 1, actor },
-        counts: { jobs_covered: due.jobs_offered },
+        cursor,
+        counts: { jobs_covered: due.jobs_charged! },
       });
-      db.events.push(`reserve:jobs_covered=${due.jobs_offered}`);
-      return Promise.resolve({ outcome: "reserved" as const, run_id, due });
+      db.events.push(`reserve:jobs_covered=${due.jobs_charged}`);
+      return Promise.resolve({
+        outcome: "reserved" as const,
+        run_id,
+        due,
+        cursor,
+      });
     },
     recordContact: (row) => {
       db.ledger.set(String(row.contact_id), structuredClone(row));
@@ -670,8 +686,25 @@ Deno.test("the time budget leaves the remaining contacts for the next run", asyn
   assertEquals(out.status, "partial");
   assertEquals(out.counts.backlog_contacts, 1);
   assertEquals(h.db.ledger.has(SHERIDAN_CONTACT), false);
-  // The reservation stands: the day counts both contacts' jobs, loaded or not.
-  assertEquals(out.counts.jobs_covered, 2);
+  // B-2: the day is charged only for the contact the run reached; the one it
+  // never reached gives its job back.
+  assertEquals(out.counts.jobs_covered, 1);
+  assertEquals(out.quota, {
+    jobs_reserved: 2,
+    jobs_charged: 1,
+    jobs_refunded: 1,
+    contacts_unreached: 1,
+    rows_timeout_skipped: 0,
+    rows_given_up: 0,
+    rate_limited: false,
+  });
+  const run = h.db.runs[0];
+  assertEquals(run.counts.jobs_covered, 1);
+  assertEquals((run.cursor as Record<string, unknown>).quota, out.quota);
+  // The reservation's limit stays on the run row's cursor.
+  assertEquals((run.cursor as Record<string, unknown>).limit, {
+    daily_job_limit: 100,
+  });
 });
 
 Deno.test("failed capture resumes the input page without skipping unsaved evidence", async () => {
@@ -727,4 +760,162 @@ Deno.test("a short message page with more but no cursor never completes history"
     h.db.ledger.get(R12_CONTACT)!.error_code,
     "message_cursor_missing",
   );
+});
+
+Deno.test("B-2: a contact attempted earlier today costs nothing again; nothing due is an idle with no run row", async () => {
+  const h = harness({
+    due: [
+      contact(R12_CONTACT, 2, { prior_status: "partial", charged_today: true }),
+      contact(SHERIDAN_CONTACT, 1),
+    ],
+  });
+  h.ghl.add(R12_CONTACT, R12_CONVERSATION, [R12_ITEM]);
+  h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  const out = await runGhlHistoryLoad(h.deps, real);
+  assert(out.outcome === "ran");
+  assertEquals([out.quota.jobs_reserved, out.quota.jobs_charged], [1, 1]);
+  assertEquals(out.counts.jobs_covered, 1);
+  const idle = harness({ due: [] });
+  assertEquals(await runGhlHistoryLoad(idle.deps, real), {
+    outcome: "idle",
+    reason: "nothing_due",
+    daily_job_limit: 100,
+    daily_remaining: 100,
+    daily_limit_reached: false,
+    contacts_waiting: 0,
+  });
+  assertEquals(idle.db.runs.length, 0);
+  assertEquals(idle.ghl.calls.length, 0);
+});
+
+Deno.test("B-2: a GHL rate limit is recorded on the run's quota (SQL drops the day to 100 on it)", async () => {
+  const h = harness({ due: [contact(SHERIDAN_CONTACT), contact(R12_CONTACT)] });
+  h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  h.ghl.failMessagesFor.set(SHERIDAN_CONVERSATION, {
+    code: "provider_request_failed",
+    status: 429,
+    providerStatus: 429,
+  });
+  const out = await runGhlHistoryLoad(h.deps, real);
+  assert(out.outcome === "ran");
+  assertEquals(out.error_code, "ghl_rate_limited");
+  assertEquals(out.quota.rate_limited, true);
+  // The contact it stopped in was attempted (charged); the one after was not.
+  assertEquals([out.quota.jobs_charged, out.quota.jobs_refunded], [1, 1]);
+  assertEquals(
+    ((h.db.runs[0].cursor as Record<string, unknown>).quota as Quota)
+      .rate_limited,
+    true,
+  );
+});
+
+// One row the writer times out on (57014): R6's second page holds it.
+function timeoutOn(h: ReturnType<typeof harness>, keys: Set<string>) {
+  const capture = h.deps.capture;
+  h.deps.capture = (row) =>
+    keys.has(String(row.provider_message_id))
+      ? Promise.resolve({ outcome: "error", code: "57014" })
+      : capture(row);
+}
+
+Deno.test("B-2: a row that hits the statement timeout is skipped, its page kept and re-read on the next run; the run goes on", async () => {
+  const policy = { ...POLICY, messagePageLimit: 2 };
+  const heavy = "ghl:BIuigfV2iHxTTeFN8YG5";
+  const h = harness({ due: [contact(SHERIDAN_CONTACT), contact(R12_CONTACT)] });
+  h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  h.ghl.add(R12_CONTACT, R12_CONVERSATION, [R12_ITEM]);
+  timeoutOn(h, new Set([heavy]));
+  const out = await runGhlHistoryLoad(h.deps, real, policy);
+  assert(out.outcome === "ran");
+  // Every other row of the contact was saved, and the next contact loaded.
+  assertEquals(out.counts.inserted, 6);
+  assertEquals(out.quota.rows_timeout_skipped, 1);
+  assertEquals(h.db.ledger.get(R12_CONTACT)!.status, "done");
+  const led = h.db.ledger.get(SHERIDAN_CONTACT)!;
+  assertEquals([led.status, led.error_code], [
+    "partial",
+    "statement_timeout_retry",
+  ]);
+  const resume = led.resume as Record<string, unknown>;
+  assertEquals(resume.conversation_id, null);
+  assertEquals(resume.done, [SHERIDAN_CONVERSATION]);
+  assertEquals(resume.retry, [{
+    conversation_id: SHERIDAN_CONVERSATION,
+    last_message_id: "XPtcG3KZv34WWXdIOdKy",
+    tries: 0,
+  }]);
+  assertEquals((led.counts as Record<string, number>).timeout_skipped, 1);
+  assertEquals(out.status, "partial");
+
+  // Next run: the kept page is read again; the row now saves; done.
+  const next = harness({
+    due: [contact(SHERIDAN_CONTACT, 1, { prior_status: "partial", resume })],
+  });
+  next.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  for (const [k, v] of h.db.existing) next.db.existing.set(k, v);
+  const second = await runGhlHistoryLoad(next.deps, real, policy);
+  assert(second.outcome === "ran");
+  assertEquals(
+    next.ghl.calls.filter((c) => c.startsWith("messages:")),
+    [`messages:${SHERIDAN_CONVERSATION}:XPtcG3KZv34WWXdIOdKy`],
+  );
+  assertEquals(second.counts.inserted, 1);
+  assertEquals(next.db.ledger.get(SHERIDAN_CONTACT)!.status, "done");
+  assertEquals(next.db.ledger.get(SHERIDAN_CONTACT)!.resume, null);
+});
+
+Deno.test("B-2: a row that still times out after three runs is given up and counted; the contact completes", async () => {
+  const policy = { ...POLICY, messagePageLimit: 2 };
+  const heavy = "ghl:BIuigfV2iHxTTeFN8YG5";
+  let resume: unknown = {
+    v: 1,
+    done: [SHERIDAN_CONVERSATION],
+    conversation_id: null,
+    last_message_id: null,
+    retry: [{
+      conversation_id: SHERIDAN_CONVERSATION,
+      last_message_id: "XPtcG3KZv34WWXdIOdKy",
+      tries: 1,
+    }],
+  };
+  const statuses: string[] = [];
+  for (let run = 0; run < 2; run++) {
+    const h = harness({
+      due: [contact(SHERIDAN_CONTACT, 1, { prior_status: "partial", resume })],
+    });
+    h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+    timeoutOn(h, new Set([heavy]));
+    const out = await runGhlHistoryLoad(h.deps, real, policy);
+    assert(out.outcome === "ran");
+    const led = h.db.ledger.get(SHERIDAN_CONTACT)!;
+    statuses.push(`${led.status}:${led.error_code}:${out.quota.rows_given_up}`);
+    resume = led.resume;
+  }
+  assertEquals(statuses, [
+    "partial:statement_timeout_retry:0",
+    "done:rows_given_up_after_timeouts:1",
+  ]);
+});
+
+Deno.test("B-2: more than three timeouts in one contact stop that contact where it stood; the run goes on to the next", async () => {
+  const policy = { ...POLICY, messagePageLimit: 10 };
+  const h = harness({ due: [contact(SHERIDAN_CONTACT), contact(R12_CONTACT)] });
+  h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  h.ghl.add(R12_CONTACT, R12_CONVERSATION, [R12_ITEM]);
+  const capture = h.deps.capture;
+  h.deps.capture = (row) =>
+    String(row.provider_message_id) === `ghl:${R12_ITEM.id}`
+      ? capture(row)
+      : Promise.resolve({ outcome: "error", code: "57014" });
+  const out = await runGhlHistoryLoad(h.deps, real, policy);
+  assert(out.outcome === "ran");
+  const led = h.db.ledger.get(SHERIDAN_CONTACT)!;
+  assertEquals([led.status, led.error_code], ["partial", "statement_timeout"]);
+  // The page is read again from where it stood.
+  const resume = led.resume as Record<string, unknown>;
+  assertEquals(resume.conversation_id, SHERIDAN_CONVERSATION);
+  assertEquals(resume.last_message_id, null);
+  assertEquals(out.quota.rows_timeout_skipped, 4);
+  assertEquals(h.db.ledger.get(R12_CONTACT)!.status, "done");
+  assertEquals(out.error_code, "contact_partial:statement_timeout");
 });

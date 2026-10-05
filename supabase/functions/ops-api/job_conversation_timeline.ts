@@ -35,6 +35,11 @@ import {
   emailAddress,
   isOurAddress,
 } from "../_shared/evidence/outlook_mail.ts";
+import {
+  type MessagePartyRoles,
+  type PartyRole,
+  readMessagePartyRoles,
+} from "../_shared/evidence/party_roles.ts";
 
 /** Channels whose rows are messages. */
 export const MESSAGE_CHANNELS = [
@@ -69,7 +74,7 @@ export const MESSAGE_ROW_FILTER = `channel.in.(${
 
 /** The business_events columns a conversation message is built from. */
 export const TIMELINE_MESSAGE_COLUMNS =
-  "id, event_type, source, occurred_at, event_at, channel, direction, body_preview, provider_message_id, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, audience:metadata->>audience, recipient_role:metadata->>recipient_role";
+  "id, event_type, source, occurred_at, event_at, channel, direction, body_preview, provider_message_id, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, party_roles:metadata->party_roles, audience:metadata->>audience, recipient_role:metadata->>recipient_role";
 
 /** When the row happened: coalesce(event_at, occurred_at), as an ISO string. */
 export function eventSourceTime(row: any): string | null {
@@ -323,6 +328,36 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * Who sent a row and who received it (party roles, B-6): the database stamp,
+ * the ladder's internal label, and (for a hand-labelled row with no audience
+ * yet) a writer's metadata.recipient_role crew or staff on a text we sent.
+ */
+function rowPartyRoles(r: any, providerDirection: string): MessagePartyRoles {
+  const roles = readMessagePartyRoles({
+    party_roles: r?.party_roles ?? null,
+    audience: r?.audience ?? null,
+    recipient_role: r?.recipient_role ?? null,
+  });
+  const marked = String(r?.recipient_role ?? "");
+  if (
+    !roles.internal && INTERNAL_ROLES.has(marked) &&
+    providerDirection !== "inbound"
+  ) {
+    const role = marked as PartyRole;
+    return {
+      sender_role: "staff",
+      recipient_role: role,
+      counterpart_role: role,
+      audience: "internal",
+      internal: true,
+      label: `internal: ${role}`,
+      basis: "writer_recipient_role",
+    };
+  }
+  return roles;
+}
+
 /** One business_events row as a conversation message. */
 export function businessEventTimelineMessage(
   r: any,
@@ -331,7 +366,10 @@ export function businessEventTimelineMessage(
 ) {
   const p: any = r?.payload || {};
   const channel = messageChannel(r);
-  const direction = messageDirection(r);
+  const providerDirection = messageDirection(r);
+  const roles = rowPartyRoles(r, providerDirection);
+  // An internal row is never inbound or outbound customer traffic.
+  const direction = roles.internal ? "internal" : providerDirection;
   const transcript = str(p.transcript);
   const body = transcript ||
     str(p.body) || str(p.text) || str(p.message) || str(p.note_preview) ||
@@ -355,6 +393,7 @@ export function businessEventTimelineMessage(
     job_id: jobId,
     channel,
     direction,
+    provider_direction: providerDirection,
     // When it happened (event_at, else occurred_at); loaded_at is load time.
     occurred_at: eventSourceTime(r),
     loaded_at: r?.occurred_at ?? null,
@@ -368,8 +407,14 @@ export function businessEventTimelineMessage(
     attribution_status: r.attribution_status ?? null,
     attribution_step: r.attribution_step ?? null,
     placement_rule: r.placement_rule ?? null,
-    audience: r?.audience ?? null,
-    recipient_role: r?.recipient_role ?? null,
+    sender_role: roles.sender_role,
+    recipient_role: roles.recipient_role,
+    counterpart_role: roles.counterpart_role,
+    audience: roles.audience,
+    internal: roles.internal,
+    party_label: roles.label,
+    party_roles_basis: roles.basis,
+    ...(roles.internal ? { label: roles.label } : {}),
     customer_party: customerParty,
     ...(ownCopy ? { own_copy: true } : {}),
     ...(r?.event_type === "call.transcript_completed"
