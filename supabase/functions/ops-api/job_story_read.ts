@@ -73,7 +73,6 @@ export function sanitizedError(label: string, error: unknown): string {
     : label;
 }
 
-/** Optional yes/no flag from a request: true, 1 or yes; false, 0, no or absent. */
 export function parseUuid(value: unknown, name: string): string | null {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "string" || !UUID_RE.test(value)) {
