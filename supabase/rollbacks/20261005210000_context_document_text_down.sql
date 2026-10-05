@@ -2,10 +2,10 @@
 --
 -- Turn feature flag context_document_text_v1 off first: this refuses while it
 -- is on. Then it unschedules the context-document-text cron job, restores the
--- email reader body of automation_switch_cron_lanes() (20261002150000), and
+-- GHL history schedule body of automation_switch_cron_lanes() (20261005190000), and
 -- drops the functions B-5 added and context_document_texts (the read records:
 -- outcomes and counts only, no words). The restored lane list is checked by
--- md5 afterwards: 5c1e0e526a74d5b4ad612792c7f076cc.
+-- md5 afterwards: 8c99245789cadf661d4b6be1207f0887.
 -- No evidence is touched: document.text_extracted rows the reader saved stay
 -- in business_events, and so do their context_capture_runs rows. Refuses if a
 -- later slice has already replaced the lane list (roll that slice back
@@ -19,7 +19,7 @@ BEGIN
  IF coalesce((public.context_document_text_flag()->>'enabled')::boolean,false) THEN
   RAISE EXCEPTION 'b5_rollback_refused: feature flag context_document_text_v1 is on; turn it off first';
  END IF;
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()')) NOT IN ('665d984ef420f49677fd6ce904f827d5','5c1e0e526a74d5b4ad612792c7f076cc')
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()')) NOT IN ('99e6d70e80a79e548f2478b65fc6cd78','8c99245789cadf661d4b6be1207f0887')
  THEN RAISE EXCEPTION 'b5_rollback_refused: automation_switch_cron_lanes is no longer the B-5 body; roll back its later owner first'; END IF;
  IF to_regclass('cron.job') IS NOT NULL THEN
   PERFORM cron.unschedule(jobid) FROM cron.job WHERE jobname='context-document-text';
@@ -39,6 +39,7 @@ AS $fn$
     ('ghl-call-transcript-fetch', 'capture'),
     ('outlook-mail-poll', 'capture'),
     ('monitor-inbox-sweep', 'capture'),
+    ('ghl-history-schedule', 'capture'),
     -- attribution: the contact match the ladder resolves a job through
     ('contact-matching',   'attribution')
   ) AS t(cron_jobname, lane);
@@ -57,6 +58,6 @@ DROP FUNCTION IF EXISTS public.context_document_text_policy();
 
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()'))<>'5c1e0e526a74d5b4ad612792c7f076cc'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()'))<>'8c99245789cadf661d4b6be1207f0887'
  THEN RAISE EXCEPTION 'b5_rollback: automation_switch_cron_lanes not restored byte for byte'; END IF;
 END $$;

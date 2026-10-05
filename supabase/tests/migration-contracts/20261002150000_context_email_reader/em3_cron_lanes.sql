@@ -1,9 +1,6 @@
--- The email reader's automation_switch_cron_lanes(), byte for byte
--- (20261002150000, md5(prosrc) 5c1e0e526a74d5b4ad612792c7f076cc). Not a
--- migration. The email reader's contract re-applies its migration inside a
--- rolled-back transaction; B-5 (20261005210000) adds its own job to this
--- list, so that contract loads this file first to stand the email reader's
--- pre-image back up. B-5's contract checks the md5.
+-- The 20261002150000 (EM3) body of automation_switch_cron_lanes(), verbatim, so this
+-- contract can re-apply its migration after a later slice (B-2, 20261005190000)
+-- has replaced the lane list. md5(prosrc) 5c1e0e526a74d5b4ad612792c7f076cc.
 CREATE OR REPLACE FUNCTION public.automation_switch_cron_lanes()
 RETURNS TABLE (cron_jobname text, lane text)
 LANGUAGE sql

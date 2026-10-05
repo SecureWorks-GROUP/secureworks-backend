@@ -6,9 +6,10 @@
 -- (20250301000001) that the earlier fixtures never needed.
 ALTER TABLE public.job_documents ADD COLUMN IF NOT EXISTS pdf_url text;
 -- A check that the fixtures leave exactly production's pre-image of the one
--- function this migration replaces (the email reader body, 20261002150000).
+-- function this migration replaces (the GHL history schedule body,
+-- 20261005190000).
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()')) IS DISTINCT FROM '5c1e0e526a74d5b4ad612792c7f076cc'
- THEN RAISE EXCEPTION 'b5 setup: automation_switch_cron_lanes is not the email reader body'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.automation_switch_cron_lanes()')) IS DISTINCT FROM '8c99245789cadf661d4b6be1207f0887'
+ THEN RAISE EXCEPTION 'b5 setup: automation_switch_cron_lanes is not the 20261005190000 body'; END IF;
 END $$;

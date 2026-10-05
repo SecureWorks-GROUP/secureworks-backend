@@ -375,6 +375,10 @@ ghl-history-load|supabase/migrations/20260925031500_context_ghl_history_load.sql
 ghl-history-load|supabase/migrations/20260925031500_context_ghl_history_load.sql|table|context_ghl_contact_links
 ghl-history-load|supabase/migrations/20260924133000_context_ghl_message_reconcile.sql|function|context_ghl_item_flag
 ghl-history-load|supabase/migrations/20260924020000_context_status_foundation.sql|function|record_capture_run
+ghl-history-load|supabase/migrations/20261005190000_context_ghl_history_schedule.sql|function|context_ghl_history_link_due
+ghl-history-load|supabase/migrations/20261005190000_context_ghl_history_schedule.sql|function|record_ghl_link_attempt
+ghl-history-load|supabase/migrations/20261005190000_context_ghl_history_schedule.sql|function|context_ghl_history_request_reads
+ghl-history-load|supabase/migrations/20261005190000_context_ghl_history_schedule.sql|table|context_ghl_history_link_attempts
 
 # EM2: the email reader reads its flags, sources, helpers and run history,
 # records runs through the F1b run writer, saves emails through the C1a writer
@@ -588,3 +592,4 @@ context-document-text|supabase/migrations/20260924020000_context_status_foundati
 context-document-text|supabase/migrations/20260924020000_context_status_foundation.sql|function|record_capture_run
 context-document-text|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
 context-document-text|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
+context-document-text|supabase/migrations/20261005180000_context_email_legacy_dedupe_and_history.sql|function|context_catchup_list_backfill

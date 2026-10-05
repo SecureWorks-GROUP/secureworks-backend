@@ -61,7 +61,7 @@ BEGIN
  -- The capture lane owns the job; the earlier jobs keep their lanes.
  IF NOT EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() WHERE cron_jobname='context-document-text' AND lane='capture')
  THEN RAISE EXCEPTION 'b5 context-document-text is not a capture-lane job'; END IF;
- IF NOT (ARRAY['monitor-inbox-poll','ghl-message-reconcile','ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep']
+ IF NOT (ARRAY['monitor-inbox-poll','ghl-message-reconcile','ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep','ghl-history-schedule']
    <@ ARRAY(SELECT cron_jobname FROM public.automation_switch_cron_lanes() WHERE lane='capture'))
   OR NOT EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() WHERE cron_jobname='contact-matching' AND lane='attribution')
  THEN RAISE EXCEPTION 'b5 an earlier lane entry was lost'; END IF;
@@ -227,18 +227,20 @@ END $$;
 ROLLBACK;
 
 BEGIN;
--- 6. The file the email reader's contract uses to stand its lane list back up
--- is that body.
-\ir em3_cron_lanes.sql
+-- 5b. A history document row lists its job for reading through the one
+-- history re-list the edge function calls (B-1, context_catchup_list_backfill).
 DO $$
+DECLARE j uuid:=pg_temp.b5_job('SWF-9007','scheduled'); res jsonb;
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'5c1e0e526a74d5b4ad612792c7f076cc'
- THEN RAISE EXCEPTION 'b5 em3_cron_lanes.sql is not the email reader body'; END IF;
+ PERFORM pg_temp.b5_row(j,repeat('9a',32),'backfill');
+ res:=public.context_catchup_list_backfill('context-document-text',now()-interval '1 day',false,500,2);
+ IF NOT EXISTS(SELECT 1 FROM public.context_catchup_jobs c WHERE c.job_id=j AND c.done_at IS NULL)
+ THEN RAISE EXCEPTION 'b5 re-list: the job with a history document was not listed %',res; END IF;
 END $$;
 ROLLBACK;
 
 BEGIN;
--- 7. The schedule on a pg_cron stand-in: created gated, once, on a re-apply.
+-- 6. The schedule on a pg_cron stand-in: created gated, once, on a re-apply.
 CREATE SCHEMA IF NOT EXISTS cron;
 CREATE TABLE cron.job (jobid bigserial PRIMARY KEY,schedule text NOT NULL,command text NOT NULL,active boolean NOT NULL DEFAULT true,jobname text);
 CREATE FUNCTION cron.schedule(job_name text,schedule text,command text) RETURNS bigint LANGUAGE sql AS $$

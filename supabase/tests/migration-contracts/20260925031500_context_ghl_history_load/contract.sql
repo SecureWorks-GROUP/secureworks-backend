@@ -426,10 +426,12 @@ BEGIN
  PERFORM public.record_capture_run(jsonb_build_object('run_id',id1,'source','ghl_history_load','status','succeeded'));
  r2:=public.reserve_ghl_history_run(20,'m4-validator');
  IF r2#>>'{due,jobs_counted_today}'<>'1' OR r2#>>'{due,jobs_offered}'<>'2' THEN RAISE EXCEPTION 'm4 next reservation %',r2; END IF;
- -- A run left running past the window is abandoned, and its counted jobs stay counted.
+ -- A run left running past the window is abandoned. Since B-2 (20261005190000)
+ -- it keeps only the jobs of the contacts it recorded (none here), so the day
+ -- counts the first run's one job and the abandoned run's two come back.
  UPDATE public.context_capture_runs SET updated_at=now()-interval '11 minutes' WHERE id=(r2->>'run_id')::uuid;
  r:=public.reserve_ghl_history_run(20,'m4-validator');
- IF r->>'outcome'<>'reserved' OR r#>>'{due,jobs_counted_today}'<>'3'
+ IF r->>'outcome'<>'reserved' OR r#>>'{due,jobs_counted_today}'<>'1'
   OR (SELECT status<>'failed' OR error_code<>'run_abandoned' FROM public.context_capture_runs WHERE id=(r2->>'run_id')::uuid)
  THEN RAISE EXCEPTION 'm4 abandoned run %',r; END IF;
 END $$;

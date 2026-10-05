@@ -56,17 +56,20 @@
 -- re-created function: fixed search_path, EXECUTE revoked from PUBLIC, anon,
 -- authenticated.
 --
--- Replaces one function: automation_switch_cron_lanes() (the email reader body
--- of 20261002150000, md5 5c1e0e526a74d5b4ad612792c7f076cc, plus one row).
+-- Replaces one function: automation_switch_cron_lanes() (the GHL history
+-- schedule body of 20261005190000, md5 8c99245789cadf661d4b6be1207f0887,
+-- plus one row).
 -- Reads, never replaces: capture_business_event(jsonb) (C1a, called by the
 -- edge function), record_capture_run(jsonb) (F1b, called by the edge
 -- function), context_ghl_history_live_jobs() (M4), automation_lane_enabled
--- (text), context_linked_status(text), sw_service_key().
+-- (text), context_linked_status(text), sw_service_key(), and the one history
+-- re-list context_catchup_list_backfill (B-1, 20261005180000; called by the
+-- edge function).
 -- The guard refuses unless each is still that pre-image or already this
 -- migration's result (a re-apply).
 --
 -- Rollback: supabase/rollbacks/20261005210000_context_document_text_down.sql
--- (unschedules the job, restores the lane list, drops the new functions and
+-- (unschedules the job, restores the 20261005190000 lane list, drops the new functions and
 -- the table). Evidence rows already saved stay in business_events.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
@@ -76,7 +79,7 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record; cmd text; cols text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.automation_switch_cron_lanes()',ARRAY['5c1e0e526a74d5b4ad612792c7f076cc','665d984ef420f49677fd6ce904f827d5'],false),
+  ('public.automation_switch_cron_lanes()',ARRAY['8c99245789cadf661d4b6be1207f0887','99e6d70e80a79e548f2478b65fc6cd78'],false),
   ('public.capture_business_event(jsonb)',ARRAY['4819869e6dcc40d5cd19a7eba295392c'],false),
   ('public.record_capture_run(jsonb)',ARRAY['db03c98a6da49f128595342f5a93f84c'],false),
   ('public.context_ghl_history_live_jobs()',ARRAY['49eb23015b724a29058c11b2743954bf'],false),
@@ -89,6 +92,9 @@ BEGIN
  END LOOP;
  IF to_regprocedure('public.sw_service_key()') IS NULL THEN problems:=problems||'public.sw_service_key() missing'::text; END IF;
  IF to_regprocedure('public.context_linked_status(text)') IS NULL THEN problems:=problems||'public.context_linked_status(text) missing'::text; END IF;
+ -- The one history re-list the edge function calls for backfill rows (B-1).
+ IF to_regprocedure('public.context_catchup_list_backfill(text,timestamptz,boolean,integer,integer)') IS NULL
+ THEN problems:=problems||'public.context_catchup_list_backfill missing (apply 20261005180000 first)'::text; END IF;
  -- The source columns the reader selects (job_documents.pdf_url and
  -- storage_url are live columns; email attachments are the EM2 table).
  IF (SELECT count(*) FROM pg_attribute a WHERE a.attrelid=to_regclass('public.job_documents')
@@ -424,7 +430,7 @@ END $$;
 COMMENT ON FUNCTION public.trigger_context_document_text() IS
  'pg_cron context-document-text (every 10 minutes, capture lane): posts to the context-document-text edge function with the service key while feature flag context_document_text_v1 is on. Owned by gap plan B-5.';
 
--- 9. The capture lane owns the new job: the email reader body plus one row.
+-- 9. The capture lane owns the new job: the 20261005190000 body plus one row.
 CREATE OR REPLACE FUNCTION public.automation_switch_cron_lanes()
 RETURNS TABLE (cron_jobname text, lane text)
 LANGUAGE sql
@@ -438,6 +444,7 @@ AS $fn$
     ('ghl-call-transcript-fetch', 'capture'),
     ('outlook-mail-poll', 'capture'),
     ('monitor-inbox-sweep', 'capture'),
+    ('ghl-history-schedule', 'capture'),
     ('context-document-text', 'capture'),
     -- attribution: the contact match the ladder resolves a job through
     ('contact-matching',   'attribution')
