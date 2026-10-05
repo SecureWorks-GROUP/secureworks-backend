@@ -386,6 +386,7 @@ import { contextPipelineStatus, ContextPipelineError } from './context_pipeline.
 import { ContextUnlinkedError, contextUnlinkedCensus, contextUnlinkedRows } from './context_unlinked.ts'
 import { canChangeMonitoredMailboxes, MonitoredMailboxError, setMonitoredMailbox } from './monitored_mailboxes.ts'
 import { linkSiteJobs, SiteLinkError } from './site_links.ts'
+import { ledgerPersonEdit, LedgerPersonEditError } from './ledger_person_edit.ts'
 import { resolveRequestActor } from '../_shared/request_actor.ts'
 import {
   approvedSendSealSecret,
@@ -7441,6 +7442,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json(await linkSiteJobs(client, body, receiptActor(requestActor, authMode)))
         } catch (error) {
           if (error instanceof SiteLinkError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
+      // ── Ledger correction (job story v1, 20261006013000): a staff member
+      // closes, reopens, disputes or adds an item on a job's live ledger.
+      // Staff front door; the person is the verified session user, never a
+      // body field, so a server key call is refused (a correction needs a
+      // person). Not on the routine or agent-read lists.
+      case 'ledger_person_edit': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+        try {
+          return json(await ledgerPersonEdit(client, body, { authMode, userId: authMode === 'jwt' ? authUser?.id : null }))
+        } catch (error) {
+          if (error instanceof LedgerPersonEditError) return json({ error: error.message, code: error.code, ...error.detail }, error.status)
           throw error
         }
       }

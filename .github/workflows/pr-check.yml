@@ -316,7 +316,7 @@ jobs:
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
-      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline, the job commercial read, job freshness, the job state card, actor recording and monitored mailboxes
+      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline, the job commercial read, job freshness, the job state card, the ledger correction door, actor recording and monitored mailboxes
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
@@ -331,6 +331,7 @@ jobs:
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/trade_variation_request_test.ts \
             supabase/functions/ops-api/context_unlinked_test.ts \
+            supabase/functions/ops-api/ledger_person_edit_test.ts \
             supabase/functions/ops-api/actor_calls_test.ts \
             supabase/functions/ops-api/actor_calls_handler_test.ts \
             supabase/functions/ops-api/monitored_mailboxes_test.ts
