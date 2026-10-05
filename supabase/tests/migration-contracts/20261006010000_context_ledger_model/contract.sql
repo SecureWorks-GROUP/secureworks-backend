@@ -35,7 +35,7 @@ BEGIN
 END $c$;
 
 -- 2. Shape: one live and one building generation per job; malformed items refused.
-INSERT INTO public.jobs (id) VALUES ('00000000-0000-4000-8000-0000000000a1') ON CONFLICT DO NOTHING;
+INSERT INTO public.jobs (id, org_id, status, type) VALUES ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-0000-0000-000000000001', 'quoted', 'fencing') ON CONFLICT DO NOTHING;
 INSERT INTO public.context_ledger_generations (id, job_id, kind, status, reader, promoted_at)
 VALUES ('00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000a1', 'backfill', 'live', 'luna-ledger:v1', now());
 DO $c$
