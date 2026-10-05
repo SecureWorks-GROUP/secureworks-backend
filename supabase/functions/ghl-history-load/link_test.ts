@@ -63,6 +63,10 @@ function harness(
   const pages: (string | null)[] = [];
   const linked: Record<string, unknown>[] = [];
   const queries: string[] = [];
+  // record_ghl_link_attempt's ledger, and context_ghl_history_link_due over it
+  // (a job is due until it has an attempt other than failed; proven in SQL).
+  const attempts = new Map<string, Record<string, unknown>>();
+  const attemptFaults = new Set<string>();
   const deps: LinkDeps = {
     now: () => T0,
     latestRun: (source) =>
@@ -114,8 +118,26 @@ function harness(
         writes[String(row.job_id)] ?? { outcome: "linked", link_id: "l1" },
       );
     },
+    dueCandidates: (limit) =>
+      Promise.resolve(
+        candidates.filter((c) =>
+          !attempts.has(c.job_id) ||
+          attempts.get(c.job_id)!.verdict === "failed"
+        ).slice(0, limit),
+      ),
+    recordAttempt: (row) => {
+      if (attemptFaults.has(String(row.job_id))) {
+        return Promise.reject(
+          Object.assign(new Error("x"), {
+            code: "history_link_attempt_run_invalid",
+          }),
+        );
+      }
+      attempts.set(String(row.job_id), structuredClone(row));
+      return Promise.resolve();
+    },
   };
-  return { deps, runs, linked, queries, pages };
+  return { deps, runs, linked, queries, pages, attempts, attemptFaults };
 }
 
 const real = { dryRun: false, maxJobs: 500, actor: "m4-test" };
@@ -419,4 +441,97 @@ Deno.test("a rate limit keeps the cursor at the last job judged, so the next run
   const out = await runGhlContactLink(h.deps, { ...real, dryRun: true });
   assert(out.outcome === "ran");
   assertEquals([out.status, out.next_after_job_id], ["failed", jobs[0].job_id]);
+});
+
+Deno.test("B-2: every job a real run judges is recorded with its verdict and a reason code, never a key; a dry run records nothing", async () => {
+  const jobs = [
+    R21_JOB,
+    job("M4-N1", { job_id: "88888888-8888-4888-8888-000000000001" }),
+    job("M4-A1", {
+      job_id: "88888888-8888-4888-8888-000000000002",
+      phone_key: "400000001",
+    }),
+    job("M4-F1", {
+      job_id: "88888888-8888-4888-8888-000000000003",
+      phone_key: "400000041",
+    }),
+  ];
+  const directory = {
+    [phone("412345678")]: [{ id: R21_CONTACT, phone: "+61412345678" }],
+    "r21.placeholder@example.com": [],
+    [phone("400000001")]: [{ id: "twinContact00001", phone: "0400000001" }, {
+      id: "twinContact00002",
+      phone: "0400000001",
+    }],
+    [phone("400000041")]: failure("provider_request_failed", 502, 400),
+  };
+  const dry = harness(jobs, directory);
+  await runGhlContactLink(dry.deps, { ...real, dryRun: true });
+  assertEquals(dry.attempts.size, 0);
+  const h = harness(jobs, directory);
+  const out = await runGhlContactLink(h.deps, real);
+  assert(out.outcome === "ran");
+  assertEquals(out.counts.attempts_recorded, 4);
+  const got = Object.fromEntries(
+    [...h.attempts.values()].map((a) => [
+      jobs.find((j) => j.job_id === a.job_id)!.job_number,
+      `${a.verdict}:${a.reason}`,
+    ]),
+  );
+  assertEquals(got, {
+    [R21_JOB.job_number!]: "certain:linked",
+    "M4-N1": "none:no_keys",
+    "M4-A1": "ambiguous:several_contacts",
+    "M4-F1": "failed:provider_request_failed",
+  });
+  for (const a of h.attempts.values()) {
+    assertEquals(a.run_id, out.run_id);
+    assertEquals(a.actor, "m4-test");
+    assert(!JSON.stringify(a).includes("4000000"));
+  }
+});
+
+Deno.test("B-2 due mode: only jobs due a try, no run row when none is due, a failed write leaves the job due", async () => {
+  const jobs = [1, 2, 3].map((i) =>
+    job(`M4-D${i}`, {
+      job_id: `77777777-7777-4777-8777-00000000000${i}`,
+      phone_key: `40000007${i}`,
+    })
+  );
+  const h = harness(jobs, {
+    [phone("400000073")]: failure("provider_request_failed", 429, 429),
+  });
+  h.attemptFaults.add(jobs[1].job_id);
+  const due = { ...real, due: true };
+  assertEquals(parseLinkRequest({ due: true }, "a").due, true);
+  const first = await runGhlContactLink(h.deps, due);
+  assert(first.outcome === "ran");
+  // D1 tried (none); D2 tried but its record failed (counted, still due); the
+  // rate limit stops at D3 before it is tried.
+  assertEquals([first.status, first.error_code], [
+    "failed",
+    "ghl_rate_limited",
+  ]);
+  assertEquals(first.counts.attempts_recorded, 1);
+  assertEquals(first.counts.attempt_write_errors, 1);
+  assertEquals(first.next_after_job_id, null);
+  assertEquals((h.runs[0].cursor as Record<string, unknown>).mode, "due");
+  assertEquals(h.pages.length, 0); // never the keyset page
+  assertEquals([...h.attempts.keys()], [jobs[0].job_id]);
+  // Next run: D2 and D3 are still due.
+  h.attemptFaults.clear();
+  const second = await runGhlContactLink(h.deps, {
+    ...due,
+    maxJobs: 1,
+  });
+  assert(second.outcome === "ran");
+  assertEquals(second.none_job_numbers, ["M4-D2"]);
+  // Everything tried: the step idles and writes no run row.
+  h.attempts.set(jobs[2].job_id, { verdict: "none" });
+  const runs = h.runs.length;
+  assertEquals(await runGhlContactLink(h.deps, due), {
+    outcome: "idle",
+    reason: "nothing_due",
+  });
+  assertEquals(h.runs.length, runs);
 });
