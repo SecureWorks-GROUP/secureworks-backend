@@ -1,4 +1,4 @@
--- Rollback for 20261006012000_context_job_story.sql: drops the story functions.
+-- Rollback for 20261006014000_context_job_story.sql: drops the story functions.
 -- The record layer (20261006011000) and the ledger tables are left in place.
 -- Roll the ops-api read doors back first (they call these functions).
 SET LOCAL lock_timeout = '5s';

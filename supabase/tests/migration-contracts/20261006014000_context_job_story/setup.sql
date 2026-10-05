@@ -1,4 +1,4 @@
--- Prerequisites for 20261006012000_context_job_story (same as the record case,
+-- Prerequisites for 20261006014000_context_job_story (same as the record case,
 -- plus job_contacts): the live columns the
 -- record functions read that earlier registered setups do not create. Every
 -- statement is IF NOT EXISTS, so it is a no-op on a fuller schema and keeps the

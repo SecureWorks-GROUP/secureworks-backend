@@ -6,6 +6,8 @@
 -- (20261006011000) gives the record half; the ledger (20261006010000, written
 -- by the store 20261006013000) gives what the words add. This migration joins
 -- them into one jsonb read, code-assembled, every line cited. It stores nothing.
+-- It runs after the store (renumbered from 20261006012000 when the slices were
+-- joined), so it may read the store's functions.
 --
 --   context_job_story_assemble(job, record, ledger, meta, as_of, since)
 --        PURE: builds the job-story-v1 document from its four inputs and reads
@@ -35,19 +37,19 @@
 -- needs a rebuild.
 --
 -- Unchanged: every existing table, function and reader.
--- Rollback: supabase/rollbacks/20261006012000_context_job_story_down.sql.
+-- Rollback: supabase/rollbacks/20261006014000_context_job_story_down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
--- 0. Guard: the record layer and the ledger model exist; each function here is
--- absent or this migration's.
+-- 0. Guard: the record layer, the ledger model and the store's evidence read
+-- exist; each function here is absent or this migration's.
 DO $guard$
 DECLARE problems text[] := '{}'; f text;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_job_record_timeline(uuid[],timestamptz)','public.context_job_record_loops(uuid[],timestamptz)',
    'public.context_job_record_money(uuid[],timestamptz)','public.context_job_record_contact(uuid[],timestamptz)',
    'public.context_job_record_messages(uuid[],timestamptz)','public.context_job_record_legacy_mail(uuid[],timestamptz)',
-   'public.context_linked_status(text)',
+   'public.context_linked_status(text)','public.context_ledger_evidence_rows(uuid[],timestamptz)',
    'public.context_job_freshness(uuid)','public.context_source_freshness()','public.context_pipeline_status()',
    'public.context_document_text_status()','public.context_ghl_history_progress()','public.context_email_history_status()',
    'public.context_coverage()'] LOOP
@@ -64,7 +66,7 @@ BEGIN
    'public.context_client_story(uuid,timestamptz)','public.context_story_scorecard(timestamptz)',
    'public.context_story_scorecard_jobs(uuid,integer)'] LOOP
   IF to_regprocedure(f) IS NOT NULL AND coalesce(obj_description(to_regprocedure(f), 'pg_proc'), '')
-     NOT LIKE 'Job story (20261006012000)%' THEN
+     NOT LIKE 'Job story (20261006014000)%' THEN
    problems := problems || format('%s exists and is not this migration''s', f);
   END IF;
  END LOOP;
@@ -577,7 +579,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb, jsonb, timestamptz, timestamptz) IS
- 'Job story (20261006012000): the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions) and meta in; the cited story out. Inlinable (no SET). Service role only.';
+ 'Job story (20261006014000): the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions) and meta in; the cited story out. Inlinable (no SET). Service role only.';
 
 -- 2. Record facts the assembler needs in structured form.
 CREATE OR REPLACE FUNCTION public.context_job_story_facts(p_job_id uuid, p_as_of timestamptz DEFAULT now())
@@ -641,7 +643,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_facts(uuid, timestamptz) IS
- 'Job story (20261006012000): structured record facts for the story assembler: crew bookings (observer mirrors excluded), quote versions, make-safe report sent time, parties (job_contacts), and closing candidates (quote sent, invoice issued, payment, booking made, visit) keyed by the ledger about_key vocabulary. Service role only.';
+ 'Job story (20261006014000): structured record facts for the story assembler: crew bookings (observer mirrors excluded), quote versions, make-safe report sent time, parties (job_contacts), and closing candidates (quote sent, invoice issued, payment, booking made, visit) keyed by the ledger about_key vocabulary. Service role only.';
 
 -- 3. The ledger to show, with every citation re-checked.
 CREATE OR REPLACE FUNCTION public.context_job_story_ledger(p_job_id uuid, p_generation_id uuid DEFAULT NULL, p_as_of timestamptz DEFAULT now())
@@ -691,7 +693,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_ledger(uuid, uuid, timestamptz) IS
- 'Job story (20261006012000): the ledger generation the story shows (live, or the one asked for in any status) with its items and transitions; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
+ 'Job story (20261006014000): the ledger generation the story shows (live, or the one asked for in any status) with its items and transitions; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
 
 -- 4. Evidence lanes and freshness: what the story must say it does not know.
 CREATE OR REPLACE FUNCTION public.context_job_story_meta(p_job_id uuid, p_as_of timestamptz DEFAULT now())
@@ -736,7 +738,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_meta(uuid, timestamptz) IS
- 'Job story (20261006012000): evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start, freshness (unread rows, unplaced messages from the contact, contact missing) from context_job_freshness. Freshness is read as now. Service role only.';
+ 'Job story (20261006014000): evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start, freshness (unread rows, unplaced messages from the contact, contact missing) from context_job_freshness. Freshness is read as now. Service role only.';
 
 -- 5. The story read.
 CREATE OR REPLACE FUNCTION public.context_job_story(p_job_id uuid, p_as_of timestamptz DEFAULT now(),
@@ -764,7 +766,7 @@ AS $fn$
  WHERE EXISTS (SELECT 1 FROM public.jobs jb WHERE jb.id = p_job_id)
 $fn$;
 COMMENT ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz) IS
- 'Job story (20261006012000): job-story-v1 for one job: now line, money, loops, checks, timeline, phase notes, agreements, events, who, last exchange, handling, not known, changes since p_since, meta. Record parts from the job record layer, the live ledger generation (or p_generation_id in any status), every line cited. NULL for an unknown job. Service role only.';
+ 'Job story (20261006014000): job-story-v1 for one job: now line, money, loops, checks, timeline, phase notes, agreements, events, who, last exchange, handling, not known, changes since p_since, meta. Record parts from the job record layer, the live ledger generation (or p_generation_id in any status), every line cited. NULL for an unknown job. Service role only.';
 
 -- 6. The client story: every job of the same client (CRM contact, else exact
 -- client email; never a name), money and loops across them, past issues and
@@ -858,7 +860,7 @@ AS $fn$
  WHERE EXISTS (SELECT 1 FROM me)
 $fn$;
 COMMENT ON FUNCTION public.context_client_story(uuid, timestamptz) IS
- 'Job story (20261006012000): client-story-v1 for the client of one job: identity (CRM contact, else exact client email, never a name), every job of that client with phase, short now line and owing (full story for the newest 20), money across jobs, top 10 open loops, past issues and standing preferences or access constraints from live ledgers, other parties per job, and not_known. Service role only.';
+ 'Job story (20261006014000): client-story-v1 for the client of one job: identity (CRM contact, else exact client email, never a name), every job of that client with phase, short now line and owing (full story for the newest 20), money across jobs, top 10 open loops, past issues and standing preferences or access constraints from live ledgers, other parties per job, and not_known. Service role only.';
 
 -- 7. Scorecard, cheap rows: the owner's done definition rows 1 to 14 from the live
 -- status functions (called, never re-derived). Rows 11 to 13 need every live job's
@@ -965,7 +967,7 @@ AS $fn$
                                 'pages', ceil((SELECT count(*) FROM live) / 150.0)))
 $fn$;
 COMMENT ON FUNCTION public.context_story_scorecard(timestamptz) IS
- 'Job story (20261006012000): the owner''s done definition rows 1 to 14 (story-scorecard-v1) from the live status functions (context_source_freshness, context_pipeline_status, context_document_text_status, context_ghl_history_progress, context_email_history_status, context_coverage), called not re-derived. green null = not measurable in SQL, with the reason. Rows 11 to 13 are measured per job by context_story_scorecard_jobs. Live jobs = status not cancelled, draft, archived, complete, completed, lost; archived-flag live jobs counted separately. Service role only.';
+ 'Job story (20261006014000): the owner''s done definition rows 1 to 14 (story-scorecard-v1) from the live status functions (context_source_freshness, context_pipeline_status, context_document_text_status, context_ghl_history_progress, context_email_history_status, context_coverage), called not re-derived. green null = not measurable in SQL, with the reason. Rows 11 to 13 are measured per job by context_story_scorecard_jobs. Live jobs = status not cancelled, draft, archived, complete, completed, lost; archived-flag live jobs counted separately. Service role only.';
 
 -- 8. Scorecard, per-job rows (paged, under the 8 s API statement timeout).
 CREATE OR REPLACE FUNCTION public.context_story_scorecard_jobs(p_after uuid DEFAULT NULL, p_limit integer DEFAULT 150)
@@ -1003,7 +1005,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_story_scorecard_jobs(uuid, integer) IS
- 'Job story (20261006012000): per-job scorecard rows for done-definition rows 11 to 13, one page of live jobs ordered by id after p_after (at most 300): timeline rows and kinds, record loops, candidates and checks, live ledger items and phase notes, client identity. row11 green = timeline plus a live ledger with phase notes; row12 green = live ledger (promises and asks come from the words); row13 green = the job can be matched to its client. next = the cursor for the following page, null at the end. Service role only.';
+ 'Job story (20261006014000): per-job scorecard rows for done-definition rows 11 to 13, one page of live jobs ordered by id after p_after (at most 300): timeline rows and kinds, record loops, candidates and checks, live ledger items and phase notes, client identity. row11 green = timeline plus a live ledger with phase notes; row12 green = live ledger (promises and asks come from the words); row13 green = the job can be matched to its client. next = the cursor for the following page, null at the end. Service role only.';
 
 -- 9. Access: service role only.
 REVOKE ALL ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb, jsonb, timestamptz, timestamptz) FROM PUBLIC, anon, authenticated;

@@ -47,7 +47,7 @@
 -- are Perth dates written like "Wed 7 Oct". No em dashes in any text.
 -- Unchanged: every existing table, function and reader. Two indexes are added
 -- on inbox_events (section 1a). Nothing calls these functions until the story
--- (20261006012000) and the ops-api read doors do.
+-- (20261006014000) and the ops-api read doors do.
 -- Rollback: supabase/rollbacks/20261006011000_context_job_record_down.sql
 -- (drops the five functions and the two indexes; nothing else depends on them
 -- except the story, whose rollback runs first).

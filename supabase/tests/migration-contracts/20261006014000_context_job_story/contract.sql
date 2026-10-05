@@ -1,4 +1,4 @@
--- Contract for 20261006012000_context_job_story: the story is read-only and
+-- Contract for 20261006014000_context_job_story: the story is read-only and
 -- service-role only, and its rules hold on synthetic jobs: ledger items attach to
 -- record loops by about_key, an R5 candidate is promoted only by a reply-owed item
 -- and otherwise says why it is a check, closing evidence is never a closure, a stale
@@ -23,7 +23,7 @@ BEGIN
      OR NOT has_function_privilege('service_role', f, 'EXECUTE') THEN
    RAISE EXCEPTION 'story contract: % access wrong', f;
   END IF;
-  IF obj_description(to_regprocedure(f), 'pg_proc') NOT LIKE 'Job story (20261006012000)%' THEN
+  IF obj_description(to_regprocedure(f), 'pg_proc') NOT LIKE 'Job story (20261006014000)%' THEN
    RAISE EXCEPTION 'story contract: % comment does not name the slice', f;
   END IF;
  END LOOP;

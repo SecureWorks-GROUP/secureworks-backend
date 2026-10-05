@@ -2,7 +2,7 @@
 //
 // Job story read doors (story slice S2, contract section 5.4).
 //
-// The story is assembled in SQL (migration 20261006012000): record parts from
+// The story is assembled in SQL (migration 20261006014000): record parts from
 // the job record layer (20261006011000), the live ledger generation and the
 // gaps it must name, every line cited. This module only calls those read-only
 // functions and reports what failed:

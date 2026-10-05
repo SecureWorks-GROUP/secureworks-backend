@@ -4,7 +4,9 @@
 -- reads; the day's other calls are untouched), building generations are
 -- marked failed, and the generations keep their rows with no run. The ledger
 -- tables themselves (20261006010000) and every item and transition stay.
--- Refuses when a later migration has already replaced the admission.
+-- Refuses when a later migration has already replaced the admission, and
+-- while the job story (20261006014000) is installed: the story reads the
+-- store's evidence definition, so roll the story back first.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -14,6 +16,9 @@ BEGIN
  SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid = to_regprocedure('public.reserve_context_model_call(text,uuid,uuid)');
  IF live IS NULL OR live NOT IN ('16c53c869b8590dbc38be28abad17658', 'f50de57b906f28fc9b5b286821d64cb1') THEN
   RAISE EXCEPTION 'context_ledger_store_down_refused: reserve_context_model_call md5 % is a later body; roll that back first', coalesce(live, '<missing>');
+ END IF;
+ IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz)') IS NOT NULL THEN
+  RAISE EXCEPTION 'context_ledger_store_down_refused: roll back 20261006014000_context_job_story first';
  END IF;
 END $guard$;
 
