@@ -116,6 +116,8 @@ DROP FUNCTION IF EXISTS public.context_ledger_packet(uuid,timestamptz,timestampt
 DROP FUNCTION IF EXISTS public.context_ledger_claim(uuid,text,date);
 DROP FUNCTION IF EXISTS public.context_ledger_due(integer);
 DROP FUNCTION IF EXISTS public.context_ledger_judge(uuid[]);
+DROP FUNCTION IF EXISTS public.context_ledger_failures(uuid[]);
+DROP FUNCTION IF EXISTS public.context_ledger_budget();
 DROP FUNCTION IF EXISTS public.context_ledger_current_generation(uuid);
 DROP FUNCTION IF EXISTS public.context_ledger_evidence_rows(uuid[],timestamptz);
 DROP FUNCTION IF EXISTS public.context_ledger_row_admissible(public.business_events);

@@ -138,7 +138,8 @@ BEGIN
    'context_ledger_row_admissible','context_ledger_evidence_rows','context_ledger_current_generation',
    'context_ledger_judge','context_ledger_due','context_ledger_claim','context_ledger_packet','context_ledger_cite','context_ledger_check_item',
    'context_ledger_write','context_ledger_carry_forward','context_ledger_promote','context_ledger_finish',
-   'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow') LOOP
+   'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow','context_ledger_failures',
+   'context_ledger_budget') LOOP
   IF x.c NOT LIKE 'Context ledger store%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -252,6 +253,50 @@ GRANT EXECUTE ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) TO s
 COMMENT ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) IS
  'The one admission for every context model call (400 a Perth day). Attribution at most 60; vision within its share and daily cap (20261006001000); ledger (20261006013000) only while context_ledger_settings.mode is not off, under calls_per_day, and never inside its own live reserve (model_call_cap less context_ledger_settings.live_reserve_calls; before morning_until morning_cap less live_reserve_calls_morning), apart from the fact backlog''s context_cadence_settings. Outcomes reserved, paused, stale, cap, attribution_budget, vision_reserve, vision_budget, ledger_off, ledger_budget.';
 
+-- 2b. The ledger's budget as the admission would answer it, so a worker can
+-- hold before it claims instead of burning a claim on a refused call.
+CREATE OR REPLACE FUNCTION public.context_ledger_budget()
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE s public.context_ledger_settings; v_pol jsonb; v_now timestamptz := clock_timestamp(); v_local timestamp; v_date date;
+ v_total integer; v_max integer; v_ledger integer; r_cap integer; r_day integer; r_live integer; r_morning integer;
+ v_left integer; v_reason text; v_midnight timestamptz; v_resets timestamptz;
+BEGIN
+ v_local := v_now AT TIME ZONE 'Australia/Perth';
+ v_date := v_local::date;
+ v_midnight := (v_date + 1)::timestamp AT TIME ZONE 'Australia/Perth';
+ SELECT * INTO s FROM public.context_ledger_settings WHERE id;
+ -- The admission's own order: lane, the 400 cap, the switch, the ledger's
+ -- daily ceiling, its live reserve all day, then before morning_until.
+ IF NOT public.automation_lane_enabled('extraction') THEN
+  RETURN jsonb_build_object('mode', coalesce(s.mode, 'off'), 'lane_on', false, 'calls_left', 0, 'reason', 'lane_off', 'resets_at', NULL);
+ END IF;
+ v_pol := public.context_cadence_policy();
+ SELECT count(*)::integer, coalesce(max(m.ordinal), 0)::integer, (count(*) FILTER (WHERE m.phase = 'ledger'))::integer
+ INTO v_total, v_max, v_ledger FROM public.context_model_call_reservations m WHERE m.run_date = v_date;
+ r_cap := 400 - v_max;
+ IF r_cap <= 0 THEN
+  RETURN jsonb_build_object('mode', coalesce(s.mode, 'off'), 'lane_on', true, 'calls_left', 0, 'reason', 'cap', 'resets_at', v_midnight);
+ END IF;
+ IF s.id IS NULL OR s.mode = 'off' THEN
+  RETURN jsonb_build_object('mode', 'off', 'lane_on', true, 'calls_left', 0, 'reason', 'ledger_off', 'resets_at', NULL);
+ END IF;
+ r_day := s.calls_per_day - v_ledger;
+ r_live := ((v_pol ->> 'model_call_cap')::integer - s.live_reserve_calls) - v_total;
+ IF v_local::time < (v_pol ->> 'morning_until')::time THEN
+  r_morning := ((v_pol ->> 'morning_cap')::integer - s.live_reserve_calls_morning) - v_total;
+ END IF;
+ v_left := greatest(0, least(r_cap, r_day, r_live, coalesce(r_morning, r_cap)));
+ v_reason := CASE WHEN r_day <= 0 THEN 'ledger_calls_per_day' WHEN r_live <= 0 THEN 'live_reserve'
+  WHEN r_morning <= 0 THEN 'live_reserve_morning' END;
+ -- The line that binds resets with it: the morning line at morning_until,
+ -- every other line at the next Perth midnight.
+ v_resets := CASE WHEN r_morning IS NOT NULL AND r_morning <= least(r_cap, r_day, r_live)
+  THEN (v_date + (v_pol ->> 'morning_until')::time) AT TIME ZONE 'Australia/Perth' ELSE v_midnight END;
+ RETURN jsonb_build_object('mode', s.mode, 'lane_on', true, 'calls_left', v_left, 'reason', v_reason, 'resets_at', v_resets);
+END $$;
+COMMENT ON FUNCTION public.context_ledger_budget() IS
+ 'Context ledger store (20261006013000): the ledger''s budget now, as reserve_context_model_call''s ledger branch would answer: {mode, lane_on, calls_left, reason, resets_at}. calls_left is the smallest of what is left under the 400 cap, the ledger''s calls_per_day, its own live reserve line (model_call_cap less live_reserve_calls) and, before morning_until, its morning line (morning_cap less live_reserve_calls_morning). reason, when nothing is left, in the admission''s order: lane_off, cap, ledger_off, ledger_calls_per_day, live_reserve, live_reserve_morning; null while calls are left. resets_at: morning_until when the morning line binds, else the next Perth midnight; null when switched off. Service role only.';
+
 -- 3. Write receipts: one row per distinct write request, so a retried write
 -- returns its first answer and finish can count refusals.
 CREATE TABLE IF NOT EXISTS public.context_ledger_writes (
@@ -319,11 +364,25 @@ $$;
 COMMENT ON FUNCTION public.context_ledger_row_admissible(public.business_events) IS
  'Context ledger store (20261006013000): a business_events row the ledger reader may read and cite as evidence: placed and linked, admissible, written as service_role, worded, not status-only, a message kind.';
 
+-- The one verdict for promoting without a person: checks.passed, which
+-- finish computes (both sides' refusals at most 20% of what was proposed, the
+-- store's own at most 20%, a build with at least one item unless there was no
+-- evidence, and after an update the build's and that update's verdicts
+-- together). finish (both branches), context_ledger_promote_shadow, the judge
+-- and the scorecard read it here and nowhere else.
+CREATE OR REPLACE FUNCTION public.context_ledger_checks_pass(p_checks jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+ SELECT coalesce(p_checks OPERATOR(pg_catalog.->>) 'passed' OPERATOR(pg_catalog.=) 'true', false)
+$$;
+COMMENT ON FUNCTION public.context_ledger_checks_pass(jsonb) IS
+ 'Context ledger store (20261006013000): the one promotion verdict, a generation''s stored checks.passed (finish computes it from both sides'' refusals over what was proposed). Read by finish, context_ledger_promote_shadow, the judge and the scorecard. Service role only.';
+
 -- 5. The evidence of a set of jobs. One definition for due, packet and write.
 CREATE OR REPLACE FUNCTION public.context_ledger_evidence_rows(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, src_table text, src_id uuid, at timestamptz, landed_at timestamptz, channel text, kind text,
  direction text, sender_role text, recipient_role text, audience text, counterpart_role text, role_basis text,
- sender text, recipient text, ours boolean, automated boolean, subject text, body text, copy_of uuid)
+ sender text, recipient text, ours boolean, automated boolean, subject text, body text, placed_on text, has_transcript boolean,
+ copy_of uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  WITH j AS (
   SELECT jb.id, lower(nullif(btrim(jb.client_email), '')) AS cmail, nullif(btrim(jb.client_name), '') AS cname
@@ -350,20 +409,32 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
    (coalesce(e.payload ->> 'sent_by_kind', '') = 'workflow' OR public.context_internal_text_role(e) <> 'other') AS automated,
    nullif(btrim(e.payload ->> 'subject'), '') AS subject,
    public.context_event_text(e) AS body,
+   'this_job'::text AS placed_on,
+   -- A call log (not a transcript) says whether its transcript is on the job: the
+   -- transcript names the call's GHL message id in payload.ghl_call_id (and in its
+   -- key ghltx:<id>); the call row's key is ghl:<id>.
+   CASE WHEN e.event_type <> 'call.transcript_completed'
+         AND (e.channel = 'call' OR e.event_type IN ('client.call_logged', 'client.call_complete'))
+    THEN coalesce(e.provider_message_id LIKE 'ghl:%' AND EXISTS (SELECT 1 FROM public.business_events t
+     WHERE t.job_id = e.job_id AND t.event_type = 'call.transcript_completed' AND public.context_linked_status(t.attribution_status)
+      AND (t.payload ->> 'ghl_call_id' = substr(e.provider_message_id, 5)
+       OR t.provider_message_id = 'ghltx:' || substr(e.provider_message_id, 5))), false) END AS has_transcript,
    lower(nullif(btrim(coalesce(e.payload ->> 'from', e.payload ->> 'from_email')), '')) AS sender_key
   FROM j JOIN public.business_events e ON e.job_id = j.id
   WHERE public.context_ledger_row_admissible(e)
    AND coalesce(e.event_at, e.occurred_at) <= p_as_of
    AND greatest(coalesce(e.context_captured_at, e.recorded_at, e.occurred_at), e.attributed_at) <= p_as_of
  ), inbox_c AS (
-  -- Legacy mail: on the job, or from the client's own address.
+  -- Legacy mail placed on the job, or from the client's own address and placed
+  -- on no job. Mail the old matcher put on another job stays there: a repeat
+  -- customer's mail about one job never enters every job of theirs.
   SELECT j.id AS job_id, i.id, i.received_at, i.processed_at, i.subject, i.body_preview, i.from_email, i.from_name,
-   i.to_email, i.mailbox, i.graph_message_id, i.classification, j.cmail, j.cname
+   i.to_email, i.mailbox, i.graph_message_id, i.classification, j.cmail, j.cname, 'this_job'::text AS placed_on
   FROM j JOIN public.inbox_events i ON i.job_id = j.id
   UNION
   SELECT j.id, i.id, i.received_at, i.processed_at, i.subject, i.body_preview, i.from_email, i.from_name,
-   i.to_email, i.mailbox, i.graph_message_id, i.classification, j.cmail, j.cname
-  FROM j JOIN public.inbox_events i ON j.cmail IS NOT NULL AND lower(btrim(i.from_email)) = j.cmail
+   i.to_email, i.mailbox, i.graph_message_id, i.classification, j.cmail, j.cname, 'none'::text
+  FROM j JOIN public.inbox_events i ON j.cmail IS NOT NULL AND lower(btrim(i.from_email)) = j.cmail AND i.job_id IS NULL
  ), email_copy AS MATERIALIZED (
   -- Any email row with the same sender at the same instant is the same mail.
   SELECT DISTINCT coalesce(b.event_at, b.occurred_at) AS at,
@@ -388,6 +459,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
    false AS automated,
    nullif(btrim(c.subject), '') AS subject,
    coalesce(nullif(btrim(c.body_preview), ''), btrim(c.subject)) AS body,
+   c.placed_on, NULL::boolean AS has_transcript,
    lower(nullif(btrim(c.from_email), '')) AS sender_key
   FROM inbox_c c
   WHERE c.received_at IS NOT NULL AND c.received_at <= p_as_of
@@ -414,12 +486,13 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  )
  SELECT k.job_id, k.src_table, k.src_id, k.at, k.landed_at, k.channel, k.kind, k.direction, k.sender_role, k.recipient_role,
   k.audience, k.counterpart_role, k.role_basis, k.sender, k.recipient, k.ours, k.automated, k.subject, k.body,
+  k.placed_on, k.has_transcript,
   CASE WHEN k.prev_at IS NOT NULL AND k.at - k.prev_at <= interval '120 seconds' THEN k.prev_id END AS copy_of
  FROM keyed k
  ORDER BY k.job_id, k.at, k.src_id
 $$;
 COMMENT ON FUNCTION public.context_ledger_evidence_rows(uuid[], timestamptz) IS
- 'Context ledger store (20261006013000): the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail on the job or from the client''s address with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
+ 'Context ledger store (20261006013000): the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail placed on the job, or from the client''s address and placed on no job (placed_on this_job or none; mail placed on another job stays there), with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. has_transcript on a call log: its transcript (payload.ghl_call_id or key ghltx:<id> naming the call''s ghl:<id>) is on the job. copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
 
 -- 6. The job's current generation: the live one, else the newest shadow.
 CREATE OR REPLACE FUNCTION public.context_ledger_current_generation(p_job_id uuid) RETURNS uuid
@@ -430,6 +503,55 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
 $$;
 COMMENT ON FUNCTION public.context_ledger_current_generation(uuid) IS
  'Context ledger store (20261006013000): the job''s current ledger generation: the live one, else the newest shadow (shadow mode keeps one up to date without showing it). Service role only.';
+
+-- 6b. A job's failure record: consecutive failed ledger runs (a run that
+-- failed, or finished with checks_failed) since its newest success, the
+-- escalating backoff they earn (2 hours, 8 hours, until the next Perth day,
+-- then 7 days), and consecutive check-failed builds by the current reader
+-- (three in a row need a person). A released run (a stop: budget, switch,
+-- pause, rate limit, sign-in, worker stopping) never counts.
+CREATE OR REPLACE FUNCTION public.context_ledger_failures(p_job_ids uuid[])
+RETURNS TABLE(job_id uuid, failures integer, last_failure_at timestamptz, backoff_until timestamptz, failed_builds integer,
+ needs_person boolean)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+ WITH ids AS (SELECT DISTINCT x.id FROM unnest(p_job_ids) AS x(id) WHERE x.id IS NOT NULL),
+ s AS (SELECT (SELECT st.reader FROM public.context_ledger_settings st WHERE st.id) AS reader),
+ runs AS (  -- every ended ledger run that was not released, newest first
+  SELECT r.job_id, r.finished_at, (r.status = 'failed' OR coalesce(r.error, '') = 'checks_failed') AS failed,
+   row_number() OVER (PARTITION BY r.job_id ORDER BY r.finished_at DESC, r.id DESC) AS n
+  FROM public.context_extraction_runs r JOIN ids ON ids.id = r.job_id
+  WHERE r.phase = 'ledger' AND r.status IN ('done', 'failed') AND r.finished_at IS NOT NULL
+   AND coalesce(r.error, '') NOT LIKE 'released:%'
+ ),
+ streak AS (  -- the failures since the newest success
+  SELECT r.job_id, count(*)::integer AS failures, max(r.finished_at) AS last_failure_at
+  FROM runs r
+  WHERE r.failed AND r.n < coalesce((SELECT min(r2.n) FROM runs r2 WHERE r2.job_id = r.job_id AND NOT r2.failed), 2147483647)
+  GROUP BY r.job_id
+ ),
+ builds AS (  -- completed readings by the current reader, newest first (a failed or released build is not a reading)
+  SELECT g.job_id, (g.status = 'shadow' AND NOT public.context_ledger_checks_pass(g.checks)) AS check_failed,
+   row_number() OVER (PARTITION BY g.job_id ORDER BY g.finished_at DESC NULLS LAST, g.created_at DESC, g.id DESC) AS n
+  FROM public.context_ledger_generations g JOIN ids ON ids.id = g.job_id CROSS JOIN s
+  WHERE g.kind IN ('backfill', 'rebuild') AND g.status IN ('shadow', 'live', 'retired') AND g.reader = s.reader
+ ),
+ fb AS (
+  SELECT b.job_id, count(*)::integer AS failed_builds
+  FROM builds b
+  WHERE b.check_failed AND b.n < coalesce((SELECT min(b2.n) FROM builds b2 WHERE b2.job_id = b.job_id AND NOT b2.check_failed), 2147483647)
+  GROUP BY b.job_id
+ )
+ SELECT ids.id, coalesce(st.failures, 0), st.last_failure_at,
+  CASE WHEN st.failures IS NULL THEN NULL
+   WHEN st.failures = 1 THEN st.last_failure_at + interval '2 hours'
+   WHEN st.failures = 2 THEN st.last_failure_at + interval '8 hours'
+   WHEN st.failures = 3 THEN (date_trunc('day', st.last_failure_at AT TIME ZONE 'Australia/Perth') + interval '1 day') AT TIME ZONE 'Australia/Perth'
+   ELSE st.last_failure_at + interval '7 days' END,
+  coalesce(fb.failed_builds, 0), coalesce(fb.failed_builds, 0) >= 3
+ FROM ids LEFT JOIN streak st ON st.job_id = ids.id LEFT JOIN fb ON fb.job_id = ids.id
+$$;
+COMMENT ON FUNCTION public.context_ledger_failures(uuid[]) IS
+ 'Context ledger store (20261006013000): per job, consecutive failed ledger runs since the newest success (status failed, or done with error checks_failed; runs released with error released:<code> never count), the backoff they earn from the last one (1: 2 hours, 2: 8 hours, 3: the next Perth midnight, 4 or more: 7 days), and consecutive check-failed builds by the current settings reader (a shadow whose checks.passed is false; a live or retired reading breaks the run). needs_person when three in a row failed their checks. Read by the judge and the scorecard. Service role only.';
 
 -- 7. The judgement: is a job due a ledger read, what kind, and why.
 CREATE OR REPLACE FUNCTION public.context_ledger_judge(p_job_ids uuid[])
@@ -445,13 +567,16 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT jb.id, jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost') AS live_job,
    coalesce(jb.metadata ->> 'do_not_schedule', '') NOT IN ('true', '1') AS schedulable
   FROM public.jobs jb WHERE jb.id = ANY(p_job_ids)
+ ), er AS MATERIALIZED (
+  SELECT r.job_id, r.src_id, r.at, r.landed_at, r.copy_of
+  FROM public.context_ledger_evidence_rows(ARRAY(SELECT j.id FROM j WHERE j.live_job), now()) r
  ), ev AS (
-  SELECT r.job_id, max(r.landed_at) AS newest, count(*) FILTER (WHERE r.copy_of IS NULL)::integer AS n
-  FROM public.context_ledger_evidence_rows(ARRAY(SELECT j.id FROM j WHERE j.live_job), now()) r GROUP BY r.job_id
+  SELECT er.job_id, max(er.landed_at) AS newest, count(*) FILTER (WHERE er.copy_of IS NULL)::integer AS n FROM er GROUP BY er.job_id
  ), cur AS (
   SELECT j.id AS job_id, public.context_ledger_current_generation(j.id) AS gid FROM j
  ), g AS (
-  SELECT c.job_id, gen.id, gen.status, gen.reader, gen.evidence_until FROM cur c JOIN public.context_ledger_generations gen ON gen.id = c.gid
+  SELECT c.job_id, gen.id, gen.status, gen.reader, gen.evidence_until, gen.created_at, gen.checks
+  FROM cur c JOIN public.context_ledger_generations gen ON gen.id = c.gid
  ), moved AS (
   -- An item of the current generation citing a business_events row that is
   -- gone, on another job, or no longer admissible.
@@ -461,6 +586,28 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
    AND b.id = CASE WHEN c.cite ->> 'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (c.cite ->> 'id')::uuid END
   WHERE c.cite ->> 'table' = 'business_events'
    AND (b.id IS NULL OR b.job_id IS DISTINCT FROM i.job_id OR NOT public.context_event_source_admissible(b))
+ ), answered AS (
+  -- A newer passing reading by the current reader already answers a rebuild of
+  -- the live one (it waits for promotion); one that failed its checks answers
+  -- it only while the job backs off.
+  SELECT DISTINCT g.job_id FROM g CROSS JOIN s
+  JOIN public.context_ledger_generations n ON n.job_id = g.job_id AND n.status = 'shadow' AND n.reader = s.reader
+   AND n.created_at > g.created_at AND public.context_ledger_checks_pass(n.checks)
+  WHERE g.status = 'live'
+ ), fnew AS (
+  -- Where the unread evidence starts (the earliest row that landed after the reading).
+  SELECT DISTINCT ON (r.job_id) r.job_id, r.at, r.src_id
+  FROM er r JOIN g ON g.job_id = r.job_id
+  WHERE r.copy_of IS NULL AND g.evidence_until IS NOT NULL AND r.landed_at > g.evidence_until
+  ORDER BY r.job_id, r.at, r.src_id
+ ), late AS (
+  -- How much already-read evidence follows it (an update packet carries all of it).
+  SELECT f.job_id, f.at AS first_new_at,
+   (count(*) FILTER (WHERE r.copy_of IS NULL AND r.landed_at <= g.evidence_until AND (r.at, r.src_id) > (f.at, f.src_id)))::integer AS read_after
+  FROM fnew f JOIN g ON g.job_id = f.job_id JOIN er r ON r.job_id = f.job_id
+  GROUP BY f.job_id, f.at
+ ), fail AS (
+  SELECT f.* FROM public.context_ledger_failures(ARRAY(SELECT j.id FROM j)) f
  ), busy AS (
   SELECT j.id AS job_id,
    EXISTS (SELECT 1 FROM public.context_ledger_generations bg JOIN public.context_extraction_runs br ON br.id = bg.run_id
@@ -470,35 +617,38 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
      AND coalesce(br.lease_expires_at, br.finished_at, bg.updated_at) > now() - interval '2 hours'
      AND NOT (br.status = 'running' AND br.lease_expires_at > now())) AS building_lapsed_recent,
    EXISTS (SELECT 1 FROM public.context_extraction_runs r WHERE r.job_id = j.id AND r.phase = 'ledger'
-    AND r.status = 'running' AND r.lease_expires_at > now()) AS run_live,
-   EXISTS (SELECT 1 FROM public.context_ledger_generations fg WHERE fg.job_id = j.id AND fg.status = 'failed'
-    AND coalesce(fg.finished_at, fg.updated_at) > now() - interval '2 hours')
-   OR EXISTS (SELECT 1 FROM public.context_extraction_runs r WHERE r.job_id = j.id AND r.phase = 'ledger'
-    AND r.status = 'failed' AND r.finished_at > now() - interval '2 hours') AS backoff
+    AND r.status = 'running' AND r.lease_expires_at > now()) AS run_live
   FROM j
  ), judged AS (
   SELECT j.id AS job_id, ev.newest, coalesce(ev.n, 0) AS n, g.id AS gid,
-   CASE WHEN g.id IS NULL THEN 'backfill'
-    WHEN m.job_id IS NOT NULL OR g.reader IS DISTINCT FROM s.reader THEN 'rebuild'
-    WHEN g.evidence_until IS NULL OR g.evidence_until < ev.newest THEN 'update' END AS kind,
    CASE WHEN g.id IS NULL THEN 'never_read'
-    WHEN m.job_id IS NOT NULL THEN 'citation_moved'
-    WHEN g.reader IS DISTINCT FROM s.reader THEN 'reader_changed'
-    WHEN g.evidence_until IS NULL OR g.evidence_until < ev.newest THEN 'new_evidence' END AS reason,
+    WHEN g.status = 'shadow' AND NOT public.context_ledger_checks_pass(g.checks) THEN 'checks_failed'
+    WHEN m.job_id IS NOT NULL AND a.job_id IS NULL THEN 'citation_moved'
+    WHEN g.reader IS DISTINCT FROM s.reader AND a.job_id IS NULL THEN 'reader_changed'
+    WHEN g.evidence_until IS NULL OR g.evidence_until < ev.newest THEN
+     CASE WHEN lt.first_new_at < g.evidence_until - interval '14 days' OR lt.read_after > 150 THEN 'late_evidence'
+      ELSE 'new_evidence' END END AS reason,
    CASE WHEN s.mode = 'off' THEN 'ledger_off' WHEN NOT s.lane THEN 'lane_off'
     WHEN s.job_ids IS NOT NULL AND NOT (j.id = ANY(s.job_ids)) THEN 'not_in_rollout' WHEN NOT j.live_job THEN 'not_live'
     WHEN NOT j.schedulable THEN 'holding_job' WHEN coalesce(ev.n, 0) = 0 THEN 'no_evidence'
-    WHEN b.building_live OR b.run_live THEN 'busy' WHEN b.backoff OR b.building_lapsed_recent THEN 'backoff' END AS blocked
+    WHEN b.building_live OR b.run_live THEN 'busy'
+    WHEN f.needs_person THEN 'needs_person'
+    WHEN f.backoff_until > now() OR b.building_lapsed_recent THEN 'backoff' END AS blocked
   FROM j CROSS JOIN s LEFT JOIN ev ON ev.job_id = j.id LEFT JOIN g ON g.job_id = j.id
-  LEFT JOIN moved m ON m.job_id = j.id LEFT JOIN busy b ON b.job_id = j.id
+  LEFT JOIN moved m ON m.job_id = j.id LEFT JOIN answered a ON a.job_id = j.id LEFT JOIN late lt ON lt.job_id = j.id
+  LEFT JOIN fail f ON f.job_id = j.id LEFT JOIN busy b ON b.job_id = j.id
  )
- SELECT d.job_id, d.blocked IS NULL AND d.kind IS NOT NULL, d.kind, d.reason,
-  CASE d.reason WHEN 'citation_moved' THEN 1 WHEN 'new_evidence' THEN 1 WHEN 'never_read' THEN 2 WHEN 'reader_changed' THEN 3 END,
+ SELECT d.job_id, d.blocked IS NULL AND d.reason IS NOT NULL,
+  CASE WHEN d.reason IS NULL THEN NULL WHEN d.reason = 'never_read' THEN 'backfill' WHEN d.reason = 'new_evidence' THEN 'update'
+   ELSE 'rebuild' END,
+  d.reason,
+  CASE d.reason WHEN 'citation_moved' THEN 1 WHEN 'new_evidence' THEN 1 WHEN 'late_evidence' THEN 1 WHEN 'never_read' THEN 2
+   WHEN 'reader_changed' THEN 3 WHEN 'checks_failed' THEN 3 END,
   d.newest, d.n, d.gid, d.blocked
  FROM judged d
 $$;
 COMMENT ON FUNCTION public.context_ledger_judge(uuid[]) IS
- 'Context ledger store (20261006013000): the one ledger due judgement per job: kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed). Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), backoff (a failed generation or ledger run, or a lapsed building generation, in the last 2 hours). Service role only.';
+ 'Context ledger store (20261006013000): the one ledger due judgement per job: kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours). Service role only.';
 
 -- 8. Jobs due a ledger read now.
 CREATE OR REPLACE FUNCTION public.context_ledger_due(p_limit integer DEFAULT 20)
@@ -596,8 +746,10 @@ BEGIN
  FROM public.job_contacts c
  WHERE c.job_id = p_job_id AND c.removed_at IS NULL
   AND NOT (coalesce(c.is_primary, false) AND lower(coalesce(c.client_name, '')) = lower(coalesce(jb.client_name, '')));
- -- Evidence: copies left out; in update mode the rows that landed after
- -- p_since plus the six rows before the first of them.
+ -- Evidence: copies left out. In update mode: the rows that landed after
+ -- p_since; every already-read row after the earliest of them (so a late row,
+ -- such as old mail placed on the job today, is read with what followed it);
+ -- and the six rows before it. Each row says whether it was already read.
  WITH r AS (
   SELECT * FROM public.context_ledger_evidence_rows(ARRAY[p_job_id], v_as_of)
  ), u AS (
@@ -611,11 +763,13 @@ BEGIN
  ), sel AS (
   SELECT u.*, CASE WHEN u.kind IN ('call.transcript_completed', 'document.text_extracted') THEN 6000 ELSE 3000 END AS lim
   FROM u WHERE p_since IS NULL OR u.landed_at > p_since OR u.src_id IN (SELECT ctx.src_id FROM ctx)
+   OR EXISTS (SELECT 1 FROM firstnew f WHERE (u.at, u.src_id) > (f.at, f.src_id))
  )
  SELECT coalesce(jsonb_agg(jsonb_build_object('table', sel.src_table, 'id', sel.src_id, 'at', sel.at, 'recorded_at', sel.landed_at,
    'channel', sel.channel, 'kind', sel.kind, 'direction', sel.direction, 'sender_role', sel.sender_role,
    'recipient_role', sel.recipient_role, 'audience', sel.audience, 'counterpart_role', sel.counterpart_role,
    'role_basis', sel.role_basis, 'sender', sel.sender, 'recipient', sel.recipient, 'ours', sel.ours, 'automated', sel.automated, 'subject', sel.subject,
+   'already_read', p_since IS NOT NULL AND sel.landed_at <= p_since, 'placed_on', sel.placed_on, 'has_transcript', sel.has_transcript,
    'text', left(sel.body, sel.lim)) ORDER BY sel.at, sel.src_id), '[]'::jsonb),
   count(*)::integer, (count(*) FILTER (WHERE length(sel.body) > sel.lim))::integer,
   (SELECT max(r.landed_at) FROM r), (SELECT count(*) FILTER (WHERE r.copy_of IS NOT NULL) FROM r)::integer
@@ -639,7 +793,7 @@ BEGIN
   'since', p_since, 'as_of', v_as_of, 'open_items', v_open);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_packet(uuid, timestamptz, timestamptz) IS
- 'Context ledger store (20261006013000): ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties, evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items. With p_since: rows recorded after it plus the six before the first, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. Role fields are the stored party_roles stamp, never invented. Service role only.';
+ 'Context ledger store (20261006013000): ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties, evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise; each row with already_read, placed_on and, on a call log, has_transcript), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items (each with phase). With p_since: rows recorded after it, every already-read row after the earliest of them, and the six before it, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. The judge asks for a rebuild (late_evidence) instead when the earliest new row is more than 14 days older than evidence_until or more than 150 already-read rows follow it. Role fields are the stored party_roles stamp, never invented. Service role only.';
 
 -- 11. One citation: allowed table, a row on this job, a verbatim excerpt.
 -- Returns {ok, code, detail} on refusal, else the canonical citation and the
@@ -689,7 +843,7 @@ BEGIN
   SELECT x.id, x.job_id, x.from_email, x.subject, x.body_preview, x.received_at, x.graph_message_id, x.classification INTO i
   FROM public.inbox_events x WHERE x.id = v_id;
   IF i.id IS NULL THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_missing', 'detail', v_table || ':' || v_id); END IF;
-  IF NOT (i.job_id IS NOT DISTINCT FROM p_job_id OR (v_cmail IS NOT NULL AND lower(btrim(i.from_email)) = v_cmail)) THEN
+  IF NOT (i.job_id IS NOT DISTINCT FROM p_job_id OR (i.job_id IS NULL AND v_cmail IS NOT NULL AND lower(btrim(i.from_email)) = v_cmail)) THEN
    RETURN jsonb_build_object('ok', false, 'code', 'citation_off_job', 'detail', v_table || ':' || v_id);
   END IF;
   -- Same admission as the evidence: a mail with a business_events copy is cited by its copy.
@@ -741,7 +895,7 @@ BEGIN
   'record', v_record, 'worded', v_worded);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job and admissible (linked, not retracted); an inbox_events mail on the job or from the client''s address with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text. Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job and admissible (linked, not retracted); an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text. Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)
@@ -1152,22 +1306,6 @@ END $$;
 COMMENT ON FUNCTION public.context_ledger_carry_forward(uuid, uuid) IS
  'Context ledger store (20261006013000): copies every person-locked item of one generation into another (same item_key, written_by kept, a rule:carry_forward transition); a model item with the same key in the target is replaced. Skips items already carried unchanged. Called by finish (built) and promote. Service role only.';
 
--- 15a. The one rule for promoting without a person: the build passed its checks
--- (refused items at most 20% of written, and at least one item unless there was
--- no evidence; finish stores it as checks.store.pass) and, when the generation
--- has been updated since, its latest update refused at most 20% of what it wrote.
--- finish (both branches) and context_ledger_promote_shadow use this and nothing else.
-CREATE OR REPLACE FUNCTION public.context_ledger_checks_pass(p_checks jsonb) RETURNS boolean
-LANGUAGE sql IMMUTABLE AS $$
- SELECT coalesce((p_checks #>> '{store,pass}')::boolean, false)
-  AND (p_checks -> 'last_update' IS NULL
-   OR coalesce((p_checks #>> '{last_update,items_refused}')::numeric, 0)
-    <= 0.2 * greatest(coalesce((p_checks #>> '{last_update,items_accepted}')::numeric, 0)
-                      + coalesce((p_checks #>> '{last_update,items_refused}')::numeric, 0), 1))
-$$;
-COMMENT ON FUNCTION public.context_ledger_checks_pass(jsonb) IS
- 'Context ledger store (20261006013000): the one promotion rule over a generation''s stored checks: the build passed (checks.store.pass) and, after any update, the latest update refused at most 20% of the items it wrote (checks.last_update). Used by context_ledger_finish and context_ledger_promote_shadow. Service role only.';
-
 -- 15. Promote: shadow to live; the previous live retired after its people's
 -- corrections are carried across. Idempotent.
 CREATE OR REPLACE FUNCTION public.context_ledger_promote(p_generation_id uuid, p_by text)
@@ -1284,7 +1422,8 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_tem
 DECLARE r public.context_extraction_runs; g public.context_ledger_generations; m jsonb := coalesce(p_meta, '{}'::jsonb);
  v_until timestamptz; v_rows integer; v_chunks integer; v_calls integer; v_tokens integer; v_failure text; v_model text; v_sha text;
  v_acc integer; v_ref integer; v_items integer; v_rate numeric; v_pass boolean; v_store jsonb; v_promoted boolean := false;
- v_carried integer := 0; v_live uuid; v_mode text; v_build boolean; v_checks jsonb;
+ v_carried integer := 0; v_live uuid; v_mode text; v_build boolean; v_checks jsonb; v_proposed integer; v_local integer;
+ v_den integer; v_all_rate numeric; v_released boolean; v_code text;
 BEGIN
  IF p_run_id IS NULL OR p_lease_token IS NULL OR p_generation_id IS NULL OR p_outcome IS NULL
   OR p_outcome NOT IN ('built', 'updated', 'failed') OR jsonb_typeof(m) <> 'object' THEN
@@ -1314,71 +1453,93 @@ BEGIN
   v_chunks := greatest(0, coalesce((m ->> 'chunks')::integer, 0));
   v_calls := greatest(0, coalesce((m ->> 'calls')::integer, 0));
   v_tokens := greatest(0, coalesce((m ->> 'tokens_in')::integer, 0));
+  -- The reader's own count of what it proposed and what it refused before the
+  -- store saw it: the promotion verdict counts both sides' refusals.
+  v_proposed := greatest(0, coalesce((m #>> '{checks,proposed}')::integer, 0));
+  v_local := greatest(0, coalesce((m #>> '{checks,refused_local}')::integer, 0));
  EXCEPTION WHEN OTHERS THEN
   RETURN jsonb_build_object('outcome', 'refused', 'reason', 'invalid_meta', 'detail', left(SQLERRM, 200));
  END;
  v_model := left(nullif(btrim(m ->> 'model'), ''), 80);
  v_sha := CASE WHEN m ->> 'prompt_sha256' ~ '^[0-9a-f]{64}$' THEN m ->> 'prompt_sha256' END;
- v_failure := left(coalesce(nullif(btrim(m ->> 'failure'), ''), 'failed'), 200);
+ v_failure := left(coalesce(nullif(btrim(m ->> 'failure'), ''), 'failed'), 190);
  IF p_outcome <> 'failed' AND (v_until IS NULL OR v_until > now()) THEN
   RETURN jsonb_build_object('outcome', 'refused', 'reason', 'invalid_meta', 'detail', 'evidence_until is required and not in the future');
  END IF;
  IF p_outcome = 'failed' THEN
+  -- A stop is not a failure: the worker ran out of budget, was switched off,
+  -- paused, rate limited, logged out or stopped. The run and a building
+  -- generation are released and never count toward the backoff.
+  v_released := v_failure IN ('ledger_budget', 'model_cap', 'ledger_off', 'lane_off', 'paused', 'rate_limited',
+   'auth_required', 'worker_stopping');
+  v_code := CASE WHEN v_released THEN 'released:' || v_failure ELSE v_failure END;
   IF v_build THEN
-   UPDATE public.context_ledger_generations SET status = 'failed', failure = v_failure, finished_at = now(), updated_at = now(),
+   UPDATE public.context_ledger_generations SET status = 'failed', failure = v_code, finished_at = now(), updated_at = now(),
     model = coalesce(v_model, model), chunks = v_chunks, calls = v_calls WHERE id = g.id;
   END IF;
-  UPDATE public.context_extraction_runs SET status = 'failed', error = v_failure, finished_at = now(), tokens_in = v_tokens,
+  UPDATE public.context_extraction_runs SET status = 'failed', error = v_code, finished_at = now(), tokens_in = v_tokens,
    lease_expires_at = NULL WHERE id = r.id;
-  RETURN jsonb_build_object('outcome', 'failed', 'generation_status', CASE WHEN v_build THEN 'failed' ELSE g.status END, 'promoted', false);
+  RETURN jsonb_build_object('outcome', 'failed', 'released', v_released, 'generation_status', CASE WHEN v_build THEN 'failed' ELSE g.status END,
+   'promoted', false);
  END IF;
  SELECT coalesce(sum(w.items_accepted), 0), coalesce(sum(w.items_refused), 0) INTO v_acc, v_ref
  FROM public.context_ledger_writes w WHERE w.run_id = p_run_id AND w.generation_id = g.id;
  SELECT count(*) INTO v_items FROM public.context_ledger_items i WHERE i.generation_id = g.id;
  v_rate := CASE WHEN v_acc + v_ref = 0 THEN 0 ELSE trim_scale(round(v_ref::numeric / (v_acc + v_ref), 4)) END;
+ -- Refusals on both sides over everything proposed: the reader's local refusals
+ -- plus the store's, over the larger of what the reader proposed and what the
+ -- store saw.
+ v_den := greatest(v_proposed, v_acc + v_ref, 1);
+ v_all_rate := trim_scale(round((v_local + v_ref)::numeric / v_den, 4));
+ v_pass := (v_local + v_ref) <= 0.2 * v_den AND v_ref <= 0.2 * (v_acc + v_ref);
  IF p_outcome = 'updated' THEN
   IF g.evidence_until IS NOT NULL AND v_until < g.evidence_until THEN
    RETURN jsonb_build_object('outcome', 'refused', 'reason', 'evidence_until_backwards');
   END IF;
+  -- The one verdict: the build passed and this update is clean.
   UPDATE public.context_ledger_generations SET evidence_until = v_until, chunks = chunks + v_chunks, calls = calls + v_calls,
-   updated_at = now(), checks = checks || jsonb_build_object('last_update', jsonb_build_object('run_id', r.id, 'at', now(),
-    'items_accepted', v_acc, 'items_refused', v_ref, 'evidence_rows', v_rows, 'reader', m -> 'checks'))
+   updated_at = now(), checks = checks || jsonb_build_object(
+    'passed', coalesce((checks #>> '{store,pass}')::boolean, false) AND v_pass,
+    'last_update', jsonb_build_object('run_id', r.id, 'at', now(), 'items_accepted', v_acc, 'items_refused', v_ref,
+     'proposed', v_proposed, 'refused_local', v_local, 'refused_rate', v_rate, 'refusal_rate', v_all_rate,
+     'evidence_rows', v_rows, 'pass', v_pass, 'reader', m -> 'checks'))
   WHERE id = g.id RETURNING checks INTO v_checks;
   UPDATE public.context_extraction_runs SET status = 'done', finished_at = now(), events_in = v_rows, tokens_in = v_tokens,
-   facts_new = v_acc, error = NULL, lease_expires_at = NULL WHERE id = r.id;
+   facts_new = v_acc, error = CASE WHEN v_pass THEN NULL ELSE 'checks_failed' END, lease_expires_at = NULL WHERE id = r.id;
   -- A shadow kept current while the lane was in shadow is promoted on its
-  -- first update after the lane goes live, if its build passed the checks and
-  -- this update is clean (context_ledger_checks_pass over the stored checks).
+  -- first update after the lane goes live, if the verdict holds
+  -- (context_ledger_checks_pass reads checks.passed).
   SELECT st.mode INTO v_mode FROM public.context_ledger_settings st WHERE st.id;
   IF v_mode = 'live' AND g.status = 'shadow' AND public.context_ledger_checks_pass(v_checks) THEN
    PERFORM public.context_ledger_promote(g.id, 'rule:auto');
    v_promoted := true;
   END IF;
   RETURN jsonb_build_object('outcome', 'updated', 'generation_status', CASE WHEN v_promoted THEN 'live' ELSE g.status END,
-   'promoted', v_promoted, 'items_accepted', v_acc, 'items_refused', v_ref);
+   'promoted', v_promoted, 'items_accepted', v_acc, 'items_refused', v_ref, 'passed', (v_checks ->> 'passed')::boolean);
  END IF;
- -- built
- v_pass := v_rate <= 0.2 AND (v_items >= 1 OR v_rows = 0);
+ -- built: the verdict also needs at least one item unless there was no evidence.
+ v_pass := v_pass AND (v_items >= 1 OR v_rows = 0);
  v_store := jsonb_build_object('items', v_items, 'items_accepted', v_acc, 'items_refused', v_ref, 'refused_rate', v_rate,
-  'evidence_rows', v_rows, 'pass', v_pass);
+  'proposed', v_proposed, 'refused_local', v_local, 'refusal_rate', v_all_rate, 'evidence_rows', v_rows, 'pass', v_pass);
  UPDATE public.context_ledger_generations SET status = 'shadow', model = v_model, prompt_sha256 = v_sha, evidence_until = v_until,
   evidence_rows = v_rows, chunks = v_chunks, calls = v_calls, finished_at = now(), updated_at = now(),
-  checks = jsonb_build_object('store', v_store, 'reader', coalesce(m -> 'checks', 'null'::jsonb))
+  checks = jsonb_build_object('passed', v_pass, 'store', v_store, 'reader', coalesce(m -> 'checks', 'null'::jsonb))
  WHERE id = g.id RETURNING checks INTO v_checks;
  SELECT id INTO v_live FROM public.context_ledger_generations WHERE job_id = g.job_id AND status = 'live';
  IF v_live IS NOT NULL THEN v_carried := public.context_ledger_carry_forward(v_live, g.id); END IF;
+ -- A build that fails its checks counts toward the job's backoff.
  UPDATE public.context_extraction_runs SET status = 'done', finished_at = now(), events_in = v_rows, tokens_in = v_tokens,
-  facts_new = v_acc, error = NULL, lease_expires_at = NULL WHERE id = r.id;
+  facts_new = v_acc, error = CASE WHEN v_pass THEN NULL ELSE 'checks_failed' END, lease_expires_at = NULL WHERE id = r.id;
  SELECT st.mode INTO v_mode FROM public.context_ledger_settings st WHERE st.id;
  IF v_mode = 'live' AND public.context_ledger_checks_pass(v_checks) THEN
   PERFORM public.context_ledger_promote(g.id, 'rule:auto');
   v_promoted := true;
  END IF;
  RETURN jsonb_build_object('outcome', 'built', 'generation_status', CASE WHEN v_promoted THEN 'live' ELSE 'shadow' END,
-  'promoted', v_promoted, 'carried', v_carried, 'checks', v_store);
+  'promoted', v_promoted, 'carried', v_carried, 'passed', v_pass, 'checks', v_store);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_finish(uuid, uuid, uuid, text, jsonb) IS
- 'Context ledger store (20261006013000): closes a ledger run. built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and the checks passing (context_ledger_checks_pass: refused items at most 20% of written, and at least one item unless there was no evidence) it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow whose build passed is promoted on its first clean update once mode is live (the same rule over the stored checks). failed: a building generation fails with the reason; a live or shadow one is untouched. The run ends done or failed. A repeated finish of a closed run reports and changes nothing. Service role only.';
+ 'Context ledger store (20261006013000): closes a ledger run. The verdict counts both sides'' refusals: (p_meta.checks.refused_local + store refusals) / greatest(p_meta.checks.proposed, store accepted + refused, 1) at most 20%, the store''s own refusals at most 20% of what it saw, and for a build at least one item unless there was no evidence; it is stored as checks.passed (a build: its verdict; an update: the build''s and this update''s), and a run whose verdict fails is done with error checks_failed (it counts toward the backoff). built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and checks.passed it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow is promoted on its first update with checks.passed once mode is live. failed: a building generation fails with the reason; a live or shadow one is untouched. A stop (p_meta.failure ledger_budget, model_cap, ledger_off, lane_off, paused, rate_limited, auth_required or worker_stopping) is released, not failed: error and failure released:<code>, never counted toward the backoff. A repeated finish of a closed run reports and changes nothing. Service role only.';
 
 -- 17. A person's correction on the live ledger.
 CREATE OR REPLACE FUNCTION public.context_ledger_person_edit(p_job_id uuid, p_user_id uuid, p_action text, p_item_key text,
@@ -1451,7 +1612,8 @@ BEGIN
   'public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)','public.context_ledger_carry_forward(uuid,uuid)',
   'public.context_ledger_promote(uuid,text)','public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)',
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
-  'public.context_ledger_promote_shadow(text,uuid[],integer)'] LOOP
+  'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])',
+  'public.context_ledger_budget()'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;
