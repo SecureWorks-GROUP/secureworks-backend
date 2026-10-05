@@ -31,7 +31,7 @@ SELECT
  now() AS read_at;
 ROLLBACK;
 
--- 2. The plan, one row per source (tick md5 5bf1f3cb7390cd299c08488315d2a97e
+-- 2. The plan, one row per source (tick md5 e3bf7cccc57fbbd2f740565695321a66
 -- is W7's body; a71be49e6ccde7ffbb4a6fc96d27bfdd is B-1's).
 BEGIN READ ONLY;
 SELECT p.source_key, p.state, p.posts, p.window_from, p.window_to, p.last_run_status, p.last_posted_at,

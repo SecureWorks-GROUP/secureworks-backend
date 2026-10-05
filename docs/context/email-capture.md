@@ -180,7 +180,11 @@ moved when it succeeded or `counts.progressed > 0`. A source with 3 calls since
 its last move is `stalled` (reason: the last run's error code, `no_progress`,
 or `no_run`), with a database WARNING, and the next source is called at once;
 a stalled source is tried again 6 hours later, after pending and loading
-sources. There is no call limit (B-1's 288-call give-up is gone). The status
+sources. There is no call limit (B-1's 288-call give-up is gone). A source
+whose window ended more than 59 days ago (left loading or stalled that long) is
+given up as `window_expired` with a WARNING rather than called: nothing in its
+window is within the reader's 60-day limit any more, and a reset starts a fresh
+window. The status
 read lists every stalled or given-up source under `attention`, and `finished`
 is false while any source is stalled. A group mailbox's history is walked
 conversation by conversation, newest first, and every run records where it

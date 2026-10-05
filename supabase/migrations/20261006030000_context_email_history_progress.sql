@@ -35,6 +35,12 @@
 --         fresh calls. It never silently stops.
 --       * the fixed 288-call limit is gone: a source that keeps moving keeps
 --         loading until the reader finishes its window.
+--       * a source whose window ended more than 59 days ago (left loading or
+--         stalled that long) is given up as 'window_expired' instead of being
+--         called: the moved start would reach its end, nothing in it is
+--         within the reader's 60-day limit, and the plan's window check would
+--         otherwise fail the whole tick for every source. A reset starts a
+--         fresh window.
 --     Everything else is B-1's: the four flags, the lock, the plan rows, the
 --     window fixed at the first call and moved forward near the 60-day limit,
 --     waiting while a run is running, succeeded on a succeeded run of the
@@ -52,7 +58,7 @@
 --
 -- Replaces exactly two functions. Pre-images (md5 of prosrc):
 --   trigger_context_email_history()   a71be49e6ccde7ffbb4a6fc96d27bfdd (B-1, read live 6 Oct)
---                                     or 5bf1f3cb7390cd299c08488315d2a97e (this migration's, a re-apply)
+--                                     or e3bf7cccc57fbbd2f740565695321a66 (this migration's, a re-apply)
 --   context_email_history_status()    bd6e46c2ba40da0bcf7f714fd67b63a8 (B-1, read live 6 Oct)
 --                                     or 528c22d64509a47cf039859d09ae1447 (this migration's)
 -- The guard refuses otherwise, or when the plan table is missing.
@@ -75,7 +81,7 @@ BEGIN
   problems:=problems||'public.context_email_history_plan is missing (apply 20261005180000 first)'::text;
  END IF;
  FOR x IN SELECT * FROM (VALUES
-  ('public.trigger_context_email_history()',ARRAY['a71be49e6ccde7ffbb4a6fc96d27bfdd','5bf1f3cb7390cd299c08488315d2a97e']),
+  ('public.trigger_context_email_history()',ARRAY['a71be49e6ccde7ffbb4a6fc96d27bfdd','e3bf7cccc57fbbd2f740565695321a66']),
   ('public.context_email_history_status()',ARRAY['bd6e46c2ba40da0bcf7f714fd67b63a8','528c22d64509a47cf039859d09ae1447'])
  ) AS t(sig,accepted) LOOP
   live:=NULL;
@@ -185,6 +191,14 @@ BEGIN
   IF wf IS NULL OR wf<now()-interval '60 days'+interval '15 minutes' THEN
    wt:=coalesce(wt,nowm); wf:=nowm-interval '59 days';
   END IF;
+  -- W7: the window's end has passed the reader's 60-day limit (a source left
+  -- loading or stalled for 59 days): nothing in it can be read any more. Given
+  -- up as window_expired, in attention, and the next source is called.
+  IF wf>=wt THEN
+   UPDATE public.context_email_history_plan SET state='gave_up', gave_up_reason='window_expired', updated_at=now() WHERE source_key=p.source_key;
+   RAISE WARNING 'email_history_window_expired: source % window ended %',p.source_key,wt;
+   CONTINUE;
+  END IF;
   PERFORM net.http_post(
    url := 'https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/outlook-mail-capture',
    body := jsonb_build_object('mode','history','source',p.source_key,
@@ -207,7 +221,7 @@ BEGIN
   'stalled',(SELECT count(*) FROM public.context_email_history_plan WHERE state='stalled'));
 END $$;
 COMMENT ON FUNCTION public.trigger_context_email_history() IS
- 'Gap plan B-1 and W7 (20261006030000): one tick of the Outlook history load, run by trigger_context_email_poll() every 5 minutes while email_reader_v1, email_reader_schedule_v1, email_capture_v2 and email_reader_history_v1 are on. Judges each loading source''s newest finished run once (moved: succeeded or counts.progressed > 0); marks a source succeeded on a succeeded run for its window (then lists the loaded jobs for reading through context_catchup_list_backfill); sets a source stalled after 3 calls without a move (WARNING email_history_stalled) and tries it again 6 hours later; posts one {mode: history} call for the first unfinished source, pending and loading before stalled. No call limit.';
+ 'Gap plan B-1 and W7 (20261006030000): one tick of the Outlook history load, run by trigger_context_email_poll() every 5 minutes while email_reader_v1, email_reader_schedule_v1, email_capture_v2 and email_reader_history_v1 are on. Judges each loading source''s newest finished run once (moved: succeeded or counts.progressed > 0); marks a source succeeded on a succeeded run for its window (then lists the loaded jobs for reading through context_catchup_list_backfill); sets a source stalled after 3 calls without a move (WARNING email_history_stalled) and tries it again 6 hours later; gives up a source whose window ended more than 59 days ago (window_expired, WARNING email_history_window_expired); posts one {mode: history} call for the first unfinished source, pending and loading before stalled. No call limit.';
 
 -- 3. The plan as one read.
 CREATE OR REPLACE FUNCTION public.context_email_history_status() RETURNS jsonb

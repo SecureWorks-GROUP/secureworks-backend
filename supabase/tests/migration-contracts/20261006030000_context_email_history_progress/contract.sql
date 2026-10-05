@@ -180,6 +180,55 @@ BEGIN
   OR jsonb_array_length(s->'plan')<>cardinality(src) OR NOT (s->'plan'->0 ? 'posts_since_progress')
  THEN RAISE EXCEPTION 'w7 status %',s; END IF;
 END $$;
+
+-- 3b. A window whose end has passed the reader's 60-day limit. With no call
+-- limit, a source can stay loading or stalled (retried every 6 hours) for 59
+-- days; moving its start to 59 days back would then reach its fixed end and
+-- break the plan's window check, failing every tick for every source. It is
+-- given up as window_expired instead, and the next source is called.
+DO $$
+DECLARE o jsonb; s jsonb; src text[]; nowm timestamptz:=date_trunc('minute',now()); p record;
+BEGIN
+ SELECT array_agg(source_key ORDER BY source_key COLLATE "C") INTO src FROM public.monitored_mailboxes
+ WHERE enabled AND status='active' AND kind IN ('user','group');
+ UPDATE public.context_email_history_plan SET state='succeeded' WHERE state<>'succeeded';
+ -- src[6]: loading, its window ending exactly 59 days back (the first minute
+ -- the moved start meets the end).
+ UPDATE public.context_email_history_plan SET state='loading', posts=40, posts_since_progress=1,
+  window_from=nowm-interval '118 days', window_to=nowm-interval '59 days' WHERE source_key=src[6];
+ -- src[7]: a new mailbox, pending, behind it.
+ UPDATE public.context_email_history_plan SET state='pending', posts=0, posts_since_progress=0, window_from=NULL, window_to=NULL WHERE source_key=src[7];
+ -- src[2]: stalled and rested, its window ended 70 days ago.
+ UPDATE public.context_email_history_plan SET state='stalled', stalled_at=now()-interval '7 hours', stall_reason='group_not_found',
+  window_from=nowm-interval '129 days', window_to=nowm-interval '70 days' WHERE source_key=src[2];
+ -- src[8]: stalled and rested, its window ended 58 days ago: still in reach,
+ -- so it is retried on a moved start with its end kept.
+ UPDATE public.context_email_history_plan SET state='stalled', stalled_at=now()-interval '7 hours', stall_reason='no_progress', replans=0,
+  window_from=nowm-interval '117 days', window_to=nowm-interval '58 days' WHERE source_key=src[8];
+ DELETE FROM pg_temp.w7_posts;
+
+ o:=public.trigger_context_email_history();
+ IF (SELECT state||':'||gave_up_reason FROM public.context_email_history_plan WHERE source_key=src[6]) IS DISTINCT FROM 'gave_up:window_expired'
+ THEN RAISE EXCEPTION 'w7 expired loading window %',(SELECT row_to_json(x) FROM public.context_email_history_plan x WHERE source_key=src[6]); END IF;
+ IF o->>'outcome'<>'posted' OR o->>'source'<>src[7] OR (SELECT count(*) FROM pg_temp.w7_posts)<>1
+ THEN RAISE EXCEPTION 'w7 the next source was not called after an expired window %',o; END IF;
+
+ UPDATE public.context_email_history_plan SET state='succeeded' WHERE source_key=src[7];
+ DELETE FROM pg_temp.w7_posts;
+ o:=public.trigger_context_email_history();
+ IF (SELECT state||':'||gave_up_reason FROM public.context_email_history_plan WHERE source_key=src[2]) IS DISTINCT FROM 'gave_up:window_expired'
+ THEN RAISE EXCEPTION 'w7 expired stalled window %',(SELECT row_to_json(x) FROM public.context_email_history_plan x WHERE source_key=src[2]); END IF;
+ SELECT * INTO p FROM public.context_email_history_plan WHERE source_key=src[8];
+ IF o->>'outcome'<>'posted' OR o->>'source'<>src[8] OR NOT (o->>'retry')::boolean OR p.state<>'loading'
+  OR p.window_from<>nowm-interval '59 days' OR p.window_to<>nowm-interval '58 days' OR p.replans<>1
+  OR (SELECT body->>'to' FROM pg_temp.w7_posts)<>pg_temp.w7_iso(nowm-interval '58 days')
+ THEN RAISE EXCEPTION 'w7 a window still in reach was not retried on a moved start %, %',o,row_to_json(p); END IF;
+
+ s:=public.context_email_history_status();
+ IF (SELECT count(*) FROM jsonb_array_elements(s->'attention') x WHERE x->>'reason'='window_expired' AND x->>'state'='gave_up'
+   AND x->>'source_key' IN (src[2],src[6]))<>2
+ THEN RAISE EXCEPTION 'w7 expired windows not in attention %',s->'attention'; END IF;
+END $$;
 ROLLBACK;
 
 BEGIN;
@@ -205,7 +254,7 @@ ROLLBACK;
 -- caller is untouched.
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.trigger_context_email_history()'::regprocedure)<>'5bf1f3cb7390cd299c08488315d2a97e'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.trigger_context_email_history()'::regprocedure)<>'e3bf7cccc57fbbd2f740565695321a66'
   OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_email_history_status()'::regprocedure)<>'528c22d64509a47cf039859d09ae1447'
  THEN RAISE EXCEPTION 'w7 bodies differ from the md5s the guard accepts on a re-apply'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.trigger_context_email_poll()'::regprocedure)<>'1430e54e4443b839865d3b4874793e15'
