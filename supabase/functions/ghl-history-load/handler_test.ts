@@ -21,7 +21,9 @@ const env = (name: string) =>
     GHL_API_TOKEN: "fixture-only",
   } as Record<string, string>)[name];
 
-function fakeSupabase(state: { flag?: boolean; linkDue?: boolean }) {
+function fakeSupabase(
+  state: { flag?: boolean; linkDue?: boolean; copies?: unknown },
+) {
   const calls: { name: string; args?: any }[] = [];
   let runs = 0;
   const client = {
@@ -58,6 +60,28 @@ function fakeSupabase(state: { flag?: boolean; linkDue?: boolean }) {
               daily_limit_reached: false,
             },
           });
+        case "context_ghl_history_due":
+          return ok({
+            daily_job_limit: 100,
+            jobs_counted_today: 0,
+            daily_remaining: 100,
+            contacts: [{
+              contact_id: R12_CONTACT,
+              job_ids: ["j1"],
+              jobs: 1,
+              prior_status: null,
+              resume: null,
+              attempts: 0,
+            }],
+            jobs_offered: 1,
+            contacts_waiting: 0,
+            jobs_waiting: 0,
+            daily_limit_reached: false,
+          });
+        case "context_ghl_message_copies":
+          return state.copies === undefined
+            ? Promise.resolve({ data: null, error: { code: "57014" } })
+            : ok(state.copies);
         case "capture_ghl_history_event":
           return ok({
             outcome: "inserted",
@@ -519,4 +543,53 @@ Deno.test("B-2 wiring: nothing due to link makes no link run row; request_reads 
   assertEquals(sb2.calls.map((c) => c.name), [
     "context_ghl_history_request_reads",
   ]);
+});
+
+// Gap map W9: a dry run asks context_ghl_message_copies which new rows another
+// writer already saved, so it never reports them as would_insert; an
+// unreadable answer is counted and the row stays would_insert; a real run
+// never asks (capture_ghl_history_event answers duplicate itself).
+Deno.test("W9 wiring: a dry run asks context_ghl_message_copies for its new rows; a real run does not", async () => {
+  const key = `ghl:${R12_ITEM.id}`;
+  const sb = fakeSupabase({
+    copies: [{
+      provider_message_id: key,
+      id: "e-proxy",
+      job_id: null,
+      attribution_status: "direct",
+      source: "ghl-proxy",
+      copy_rule: "ghl_message_id",
+    }],
+  });
+  const res = await handleHistoryLoad(post({}, { wait: true }), {
+    env,
+    createSupabase: () => sb,
+    fetch: ghlFetch([]),
+  });
+  const body = await res.json();
+  assertEquals([body.outcome, body.dry_run], ["ran", true]);
+  assertEquals([body.counts.would_insert, body.counts.duplicates], [0, 1]);
+  const asked = sb.calls.find((c) => c.name === "context_ghl_message_copies")!;
+  assertEquals(
+    asked.args.p_rows.map((r: any) => r.provider_message_id),
+    [key],
+  );
+  assert(!sb.calls.some((c) => c.name === "capture_ghl_history_event"));
+
+  const unreadable = fakeSupabase({});
+  const u = await (await handleHistoryLoad(post({}, { wait: true }), {
+    env,
+    createSupabase: () => unreadable,
+    fetch: ghlFetch([]),
+  })).json();
+  assertEquals([u.counts.would_insert, u.counts.precheck_errors], [1, 1]);
+
+  const realSb = fakeSupabase({ copies: [] });
+  await handleHistoryLoad(post({}, { dry_run: false, wait: true }), {
+    env,
+    createSupabase: () => realSb,
+    fetch: ghlFetch([]),
+  });
+  assert(!realSb.calls.some((c) => c.name === "context_ghl_message_copies"));
+  assert(realSb.calls.some((c) => c.name === "capture_ghl_history_event"));
 });

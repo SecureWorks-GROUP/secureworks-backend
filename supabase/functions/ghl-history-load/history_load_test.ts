@@ -919,3 +919,80 @@ Deno.test("B-2: more than three timeouts in one contact stop that contact where 
   assertEquals(h.db.ledger.get(R12_CONTACT)!.status, "done");
   assertEquals(out.error_code, "contact_partial:statement_timeout");
 });
+
+// Gap map W9: a message another writer already saved (an older key-less row
+// naming the same GHL message id) is not saved again. The door answers
+// duplicate with copy_of_other_writer (proven in the SQL contract
+// 20261006031000); the load counts it as a duplicate and, per contact, in
+// duplicates_other_writer. A dry run asks the same question through copiesOf.
+Deno.test("W9: a message another writer saved is a duplicate, counted per contact, in real and dry runs", async () => {
+  const otherWriter = new Set([`ghl:${SHERIDAN_MESSAGES[0].id}`]);
+  const h = harness({ due: [contact(SHERIDAN_CONTACT)] });
+  h.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  const capture = h.deps.capture;
+  h.deps.capture = (row) =>
+    otherWriter.has(String(row.provider_message_id))
+      ? Promise.resolve({
+        outcome: "duplicate" as const,
+        id: "ev-proxy",
+        copy_of_other_writer: true,
+        copy_rule: "ghl_message_id",
+      })
+      : capture(row);
+  const out = await runGhlHistoryLoad(h.deps, real);
+  assert(out.outcome === "ran");
+  assertEquals(out.counts.inserted, 5);
+  assertEquals(out.counts.duplicates, 1);
+  assertEquals(out.counts.write_errors, 0);
+  assertEquals(h.db.saved.length, 5);
+  const counts = h.db.ledger.get(SHERIDAN_CONTACT)!.counts as Record<
+    string,
+    number
+  >;
+  assertEquals(counts.duplicates, 1);
+  assertEquals(counts.duplicates_other_writer, 1);
+  assertEquals(h.db.ledger.get(SHERIDAN_CONTACT)!.status, "done");
+  // The run's own counts stay within the writer's 40 keys.
+  assert(Object.keys(out.counts).length <= 40);
+
+  // Dry run: the same message is not reported as would_insert.
+  const d = harness({ due: [contact(SHERIDAN_CONTACT)] });
+  d.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  const asked: string[][] = [];
+  d.deps.copiesOf = (rows) => {
+    asked.push(rows.map((r) => String(r.provider_message_id)));
+    return Promise.resolve(
+      new Set(
+        rows.map((r) => String(r.provider_message_id)).filter((k) =>
+          otherWriter.has(k)
+        ),
+      ),
+    );
+  };
+  const dout = await runGhlHistoryLoad(d.deps, dry);
+  assert(dout.outcome === "ran");
+  assertEquals(dout.counts.would_insert, 5);
+  assertEquals(dout.counts.duplicates, 1);
+  assertEquals(d.db.saved.length, 0);
+  assertEquals(asked.flat().length, 6);
+
+  // An unreadable copies read in a dry run is counted and changes nothing else.
+  const f = harness({ due: [contact(SHERIDAN_CONTACT)] });
+  f.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  f.deps.copiesOf = () => Promise.reject(new Error("down"));
+  const fout = await runGhlHistoryLoad(f.deps, dry);
+  assert(fout.outcome === "ran");
+  assertEquals(fout.counts.would_insert, 6);
+  assertEquals(fout.counts.precheck_errors, 1);
+
+  // A real run never calls copiesOf (the door answers instead).
+  const r = harness({ due: [contact(SHERIDAN_CONTACT)] });
+  r.ghl.add(SHERIDAN_CONTACT, SHERIDAN_CONVERSATION, SHERIDAN_MESSAGES);
+  let called = 0;
+  r.deps.copiesOf = () => {
+    called++;
+    return Promise.resolve(new Set<string>());
+  };
+  await runGhlHistoryLoad(r.deps, real);
+  assertEquals(called, 0);
+});

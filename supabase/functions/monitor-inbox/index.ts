@@ -20,6 +20,7 @@ import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { legacyPollPlan } from './legacy_mailboxes.ts'
 import { readerOwnsEvidence, readReaderFlags } from './reader_handover.ts'
+import { findStoredCopy, supabaseCopyLookup } from './self_copy.ts'
 import type { Channel, Direction, MatchMethod } from '../_shared/evidence/types.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -251,7 +252,7 @@ async function processMailbox(
   const graphUrl = `https://graph.microsoft.com/v1.0/users/${mailbox}/mailFolders/inbox/messages` +
     `?$filter=isRead eq false and receivedDateTime ge ${fifteenMinsAgo}` +
     `&$top=20` +
-    `&$select=id,from,toRecipients,subject,bodyPreview,receivedDateTime,hasAttachments` +
+    `&$select=id,internetMessageId,from,toRecipients,subject,bodyPreview,receivedDateTime,hasAttachments` +
     `&$orderby=receivedDateTime desc`
 
   const resp = await fetch(graphUrl, {
@@ -459,6 +460,24 @@ async function processMailbox(
     // Once the email reader owns email evidence (reader_handover.ts), this path
     // keeps its inbox_events row (above) and writes no evidence row.
     if (writeEvidence && (isSupplier || isClient || (!isNoise && classification.classification === 'other'))) {
+      // One email, one evidence row (self_copy.ts): an email this path already
+      // saved from another of its mailboxes writes no second row. Its
+      // inbox_events row above is kept. An unreadable lookup writes as before.
+      const storedCopy = await findStoredCopy(supabaseCopyLookup(sb), {
+        internetMessageId: msg.internetMessageId || null,
+        from: fromEmail,
+        subject: subject.slice(0, 200),
+        bodyPreview,
+        receivedAt: receivedAt || null,
+        mailbox,
+      })
+      if (storedCopy.copy) {
+        console.log(`[monitor-inbox] evidence copy skipped: inbox_event=${inboxEventId} copy_of=${storedCopy.id} rule=${storedCopy.rule}`)
+        continue
+      }
+      if ('unreadable' in storedCopy && storedCopy.unreadable) {
+        console.log(`[monitor-inbox] evidence copy lookup unreadable; writing: inbox_event=${inboxEventId}`)
+      }
       // For supplier emails without a job match, try PO number from subject
       let finalJobId = jobId
       if (!finalJobId && isSupplier) {
@@ -519,6 +538,7 @@ async function processMailbox(
         mailbox,
         job_ref: classification.job_ref || null,
         automated: isNoise ? true : undefined,
+        internet_message_id: msg.internetMessageId || undefined,
       }
       if (finalJobId && !custodyJobId) {
         payload.attribution_hint = {

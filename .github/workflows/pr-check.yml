@@ -453,6 +453,16 @@ jobs:
           deno test --allow-read \
             supabase/functions/monitor-inbox/legacy_mailboxes_test.ts
 
+      # Gap map W9: one email sent to several of the old path's mailboxes is
+      # one evidence row (the same internet message id, or for rows saved
+      # before it was kept, the same sender, subject, words and time from
+      # another mailbox); an unreadable lookup writes as before.
+      - name: Test the old mail path writes one evidence row per email
+        run: |
+          deno test --allow-read \
+            supabase/functions/monitor-inbox/self_copy_test.ts \
+            supabase/functions/monitor-inbox/reader_handover_test.ts
+
       # Slice F-ACT: the one actor rule (verified user, else x-sw-actor on a
       # server-key call, else actor_missing; never refused).
       - name: Test the shared request actor rule
