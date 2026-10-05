@@ -316,7 +316,7 @@ jobs:
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
-      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline, the job commercial read, job freshness, the job state card, actor recording and monitored mailboxes
+      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline, the job commercial read, job freshness, the job state card, the job story doors, the ledger correction door, actor recording and monitored mailboxes
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
@@ -328,9 +328,11 @@ jobs:
             supabase/functions/ops-api/job_commercial_read_test.ts \
             supabase/functions/ops-api/job_freshness_test.ts \
             supabase/functions/ops-api/job_state_card_test.ts \
+            supabase/functions/ops-api/job_story_door_test.ts \
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/trade_variation_request_test.ts \
             supabase/functions/ops-api/context_unlinked_test.ts \
+            supabase/functions/ops-api/ledger_person_edit_test.ts \
             supabase/functions/ops-api/actor_calls_test.ts \
             supabase/functions/ops-api/actor_calls_handler_test.ts \
             supabase/functions/ops-api/monitored_mailboxes_test.ts
@@ -482,11 +484,13 @@ jobs:
   # order. See supabase/tests/migration-contracts/README.md.
   migration-contracts:
     runs-on: ubuntu-latest
-    # 20, not 10: each registered contract case can replay the whole stack
-    # (fail-closed, rollback and break proofs), and the suite now runs close to
-    # 10 minutes on a hosted runner. Passing suites were cancelled at the limit
-    # of 5 and then of 10.
-    timeout-minutes: 20
+    # 40, not 20: each registered contract case can replay the whole stack
+    # (fail-closed, rollback and break proofs). Passing suites were cancelled at
+    # the limit of 5, then of 10, then of 20: on 5 Oct 2026 main ran 12 to 19
+    # minutes, and job story v1 (four cases) was cancelled at 20 with every
+    # contract, rollback and fail-closed proof passed and 23 of 71 break proofs
+    # done (about 27 minutes in all on a hosted runner).
+    timeout-minutes: 40
 
     services:
       postgres:

@@ -101,6 +101,26 @@ if [[ "$action" == "sales_booking_read" || "$action" == "sales_booking_stamp_rea
   exit 0
 fi
 
+# Stands in for the job story doors (job_story_read.ts): parseUuid refuses a
+# job_id that is not a uuid, and parseInstant an as_of that is not a date-time,
+# before any job, story or scorecard read.
+if [[ "$action" == "job_story" || "$action" == "client_story" ]]; then
+  if printf '%s' "$url" | grep -q 'job_id=__deploy_probe__'; then
+    printf '%s\n' '{"error":"job_id must be a uuid","code":"invalid_job_id"}'
+  else
+    printf '%s\n' '{"version":"job-story-v1"}'
+  fi
+  exit 0
+fi
+if [[ "$action" == "context_story_scorecard" ]]; then
+  if printf '%s' "$url" | grep -q 'as_of=__deploy_probe__'; then
+    printf '%s\n' '{"error":"as_of must be an ISO date-time","code":"invalid_as_of"}'
+  else
+    printf '%s\n' '{"version":"story-scorecard-v1"}'
+  fi
+  exit 0
+fi
+
 case "$action" in
   trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
     printf '%s\n' '{"error":"Login required"}'
