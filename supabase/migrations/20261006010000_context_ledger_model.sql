@@ -26,8 +26,10 @@
 --   context_ledger_transitions  append-only history of every status change,
 --                               who made it (model, person or rule) and why.
 --   context_ledger_settings     one row: the ledger lane's mode (off, shadow,
---                               live) and its own daily call ceiling inside
---                               the shared 400. Seeded off with 0 calls.
+--                               live), its own daily call ceiling inside
+--                               the shared 400, and an optional rollout list
+--                               of jobs for a staged start. Seeded off with 0
+--                               calls and no list (every live job).
 --
 -- Writers come later (the store, 20261006013000) and must enforce custody:
 -- cited rows on this job, verbatim excerpts, the speaker of customer items is
@@ -166,12 +168,17 @@ CREATE TABLE IF NOT EXISTS public.context_ledger_settings (
  calls_per_day integer NOT NULL DEFAULT 0 CHECK (calls_per_day BETWEEN 0 AND 400),
  max_prompt_bytes integer NOT NULL DEFAULT 110000 CHECK (max_prompt_bytes BETWEEN 20000 AND 131072),
  reader text NOT NULL DEFAULT 'luna-ledger:v1' CHECK (length(reader) BETWEEN 1 AND 80),
+ job_ids uuid[] CONSTRAINT context_ledger_settings_job_ids_check CHECK (job_ids IS NULL
+  OR CASE WHEN coalesce(array_ndims(job_ids), 1) <> 1 THEN false
+          ELSE array_position(job_ids, NULL) IS NULL AND cardinality(job_ids) <= 500 END),
  updated_at timestamptz NOT NULL DEFAULT now(),
  updated_by text,
  note text
 );
 COMMENT ON TABLE public.context_ledger_settings IS
- 'Context ledger: the ledger lane''s switch (20261006010000). mode off = no reads; shadow = read jobs into shadow generations nobody is shown; live = promote passing generations and keep them current. calls_per_day is the lane''s own ceiling inside the shared 400 model calls a Perth day; the live reserve still applies. One row; seeded off with 0 calls. Service role only.';
+ 'Context ledger: the ledger lane''s switch (20261006010000). mode off = no reads; shadow = read jobs into shadow generations nobody is shown; live = promote passing generations and keep them current. calls_per_day is the lane''s own ceiling inside the shared 400 model calls a Perth day; the live reserve still applies. job_ids limits which jobs are read (NULL = every live job). One row; seeded off with 0 calls and no list. Service role only.';
+COMMENT ON COLUMN public.context_ledger_settings.job_ids IS
+ 'Context ledger: the staged rollout list (20261006010000). NULL = every live job may be read; otherwise only these jobs (at most 500, no null entries; an empty list = none). The store''s due judgement (20261006013000) blocks any other job as not_in_rollout, so it is never due and a claim for it answers not_due.';
 INSERT INTO public.context_ledger_settings (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
 
 -- 5. Access: service role only, read; writes only through the store functions.

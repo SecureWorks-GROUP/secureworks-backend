@@ -29,7 +29,9 @@
 --     inbox_events mail on the job or from the client's address that has no
 --     business_events copy. Copies of one message (same channel, direction,
 --     sender address and words within 120 seconds) are marked, never changed.
---  3. context_ledger_due(limit): jobs a ledger reader should read now.
+--  3. context_ledger_due(limit): jobs a ledger reader should read now. When
+--     context_ledger_settings.job_ids is set (a staged start), only those
+--     jobs: the judgement blocks every other job as not_in_rollout.
 --  4. context_ledger_claim(job, kind, run_date): a ledger run (phase ledger,
 --     30-minute lease) and, for a backfill or rebuild, a building generation.
 --  5. context_ledger_packet(job, since, as_of): everything the reader sees
@@ -101,6 +103,10 @@ BEGIN
    problems := problems || format('%s missing or not the ledger model''s (apply 20261006010000 first)', t);
   END IF;
  END LOOP;
+ IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.context_ledger_settings')
+   AND a.attname = 'job_ids' AND NOT a.attisdropped) THEN
+  problems := problems || 'public.context_ledger_settings.job_ids missing (the ledger model 20261006010000 with its rollout list)'::text;
+ END IF;
  IF to_regclass('public.context_cadence_settings') IS NULL THEN
   problems := problems || 'public.context_cadence_settings missing (apply 20261005233000 first)'::text;
  END IF;
@@ -430,6 +436,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  WITH s AS (
   SELECT coalesce((SELECT st.mode FROM public.context_ledger_settings st WHERE st.id), 'off') AS mode,
    (SELECT st.reader FROM public.context_ledger_settings st WHERE st.id) AS reader,
+   (SELECT st.job_ids FROM public.context_ledger_settings st WHERE st.id) AS job_ids,
    public.automation_lane_enabled('extraction') AS lane
  ), j AS (
   SELECT jb.id, jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost') AS live_job,
@@ -475,7 +482,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
     WHEN m.job_id IS NOT NULL THEN 'citation_moved'
     WHEN g.reader IS DISTINCT FROM s.reader THEN 'reader_changed'
     WHEN g.evidence_until IS NULL OR g.evidence_until < ev.newest THEN 'new_evidence' END AS reason,
-   CASE WHEN s.mode = 'off' THEN 'ledger_off' WHEN NOT s.lane THEN 'lane_off' WHEN NOT j.live_job THEN 'not_live'
+   CASE WHEN s.mode = 'off' THEN 'ledger_off' WHEN NOT s.lane THEN 'lane_off'
+    WHEN s.job_ids IS NOT NULL AND NOT (j.id = ANY(s.job_ids)) THEN 'not_in_rollout' WHEN NOT j.live_job THEN 'not_live'
     WHEN NOT j.schedulable THEN 'holding_job' WHEN coalesce(ev.n, 0) = 0 THEN 'no_evidence'
     WHEN b.building_live OR b.run_live THEN 'busy' WHEN b.backoff OR b.building_lapsed_recent THEN 'backoff' END AS blocked
   FROM j CROSS JOIN s LEFT JOIN ev ON ev.job_id = j.id LEFT JOIN g ON g.job_id = j.id
@@ -487,24 +495,26 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  FROM judged d
 $$;
 COMMENT ON FUNCTION public.context_ledger_judge(uuid[]) IS
- 'Context ledger store (20261006013000): the one ledger due judgement per job: kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed). Blocked: ledger_off, lane_off, not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), backoff (a failed generation or ledger run, or a lapsed building generation, in the last 2 hours). Service role only.';
+ 'Context ledger store (20261006013000): the one ledger due judgement per job: kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed). Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), backoff (a failed generation or ledger run, or a lapsed building generation, in the last 2 hours). Service role only.';
 
 -- 8. Jobs due a ledger read now.
 CREATE OR REPLACE FUNCTION public.context_ledger_due(p_limit integer DEFAULT 20)
 RETURNS TABLE(job_id uuid, kind text, reason text, priority integer, newest_evidence_at timestamptz)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+ WITH st AS (SELECT x.mode, x.job_ids FROM public.context_ledger_settings x WHERE x.id)
  SELECT d.job_id, d.kind, d.reason, d.priority, d.newest_evidence_at
  FROM public.context_ledger_judge(ARRAY(
-   SELECT jb.id FROM public.jobs jb
+   -- only jobs the judgement could find due: live, the lane on, in the rollout list
+   SELECT jb.id FROM public.jobs jb, st
    WHERE jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost')
-    AND coalesce((SELECT st.mode FROM public.context_ledger_settings st WHERE st.id), 'off') <> 'off'
-    AND public.automation_lane_enabled('extraction'))) d
+    AND st.mode <> 'off' AND public.automation_lane_enabled('extraction')
+    AND (st.job_ids IS NULL OR jb.id = ANY(st.job_ids)))) d
  WHERE d.due
  ORDER BY d.priority, d.newest_evidence_at DESC NULLS LAST, d.job_id
  LIMIT greatest(0, least(coalesce(p_limit, 20), 200))
 $$;
 COMMENT ON FUNCTION public.context_ledger_due(integer) IS
- 'Context ledger store (20261006013000): live jobs due a ledger read now (context_ledger_judge), new evidence and moved citations first, then never-read jobs newest evidence first, then reader changes. At most 200. Empty while context_ledger_settings.mode is off or the extraction lane is off. Service role only.';
+ 'Context ledger store (20261006013000): live jobs due a ledger read now (context_ledger_judge), new evidence and moved citations first, then never-read jobs newest evidence first, then reader changes. At most 200. Empty while context_ledger_settings.mode is off or the extraction lane is off; only jobs on settings.job_ids when that rollout list is set. Service role only.';
 
 -- 9. The claim: a ledger run, and for a backfill or rebuild a building generation.
 CREATE OR REPLACE FUNCTION public.context_ledger_claim(p_job_id uuid, p_kind text, p_run_date date)

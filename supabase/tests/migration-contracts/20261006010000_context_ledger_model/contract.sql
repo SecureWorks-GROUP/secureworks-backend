@@ -1,5 +1,6 @@
 -- Contract: 20261006010000_context_ledger_model. The ledger exists, is empty,
--- is service-role read-only, refuses malformed rows, and starts switched off.
+-- is service-role read-only, refuses malformed rows, and starts switched off
+-- with no rollout list (every live job).
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -115,6 +116,40 @@ BEGIN
  BEGIN
   UPDATE public.context_ledger_settings SET calls_per_day = 401;
   RAISE EXCEPTION 'ledger contract: calls_per_day above the 400 cap accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+END $c$;
+
+-- 4. The rollout list for a staged start: none by default (every live job), at
+-- most 500 jobs, never a null entry, one dimension.
+DO $c$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'context_ledger_settings'
+                AND column_name = 'job_ids' AND data_type = 'ARRAY' AND udt_name = '_uuid' AND is_nullable = 'YES'
+                AND column_default IS NULL) THEN
+  RAISE EXCEPTION 'ledger contract: settings.job_ids must be a nullable uuid[] with no default';
+ END IF;
+ IF (SELECT job_ids FROM public.context_ledger_settings) IS NOT NULL THEN
+  RAISE EXCEPTION 'ledger contract: the rollout list must start unset (NULL = every live job)';
+ END IF;
+ IF coalesce(col_description('public.context_ledger_settings'::regclass,
+     (SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = 'public.context_ledger_settings'::regclass AND a.attname = 'job_ids')), '')
+    NOT LIKE 'Context ledger: the staged rollout list%' THEN
+  RAISE EXCEPTION 'ledger contract: settings.job_ids carries no owner comment';
+ END IF;
+ UPDATE public.context_ledger_settings SET job_ids = ARRAY(SELECT gen_random_uuid() FROM generate_series(1, 500));
+ UPDATE public.context_ledger_settings SET job_ids = '{}';
+ UPDATE public.context_ledger_settings SET job_ids = NULL;
+ BEGIN
+  UPDATE public.context_ledger_settings SET job_ids = ARRAY[gen_random_uuid(), NULL];
+  RAISE EXCEPTION 'ledger contract: a null entry in the rollout list was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN
+  UPDATE public.context_ledger_settings SET job_ids = ARRAY(SELECT gen_random_uuid() FROM generate_series(1, 501));
+  RAISE EXCEPTION 'ledger contract: a rollout list over 500 jobs was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN
+  UPDATE public.context_ledger_settings SET job_ids = ARRAY[ARRAY[gen_random_uuid()], ARRAY[gen_random_uuid()]];
+  RAISE EXCEPTION 'ledger contract: a two-dimensional rollout list was accepted';
  EXCEPTION WHEN check_violation THEN NULL; END;
 END $c$;
 

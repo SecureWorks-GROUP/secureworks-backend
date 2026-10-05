@@ -12,7 +12,7 @@
 --  4. The fact pass cannot see a ledger run: cadence, freshness, status
 --     blocks, catch-up completion, the extraction claim and read flags are
 --     identical with ledger runs present; ledger calls count in the total.
---  5. Due judgement. 6. Claim. 7. Packet. 8. Write custody. 9. Finish,
+--  5. Due judgement (and the rollout list). 6. Claim. 7. Packet. 8. Write custody. 9. Finish,
 --     promote and carry-forward. 10. Person corrections.
 \set ON_ERROR_STOP on
 
@@ -463,7 +463,7 @@ ROLLBACK;
 BEGIN;
 DO $c$
 DECLARE a uuid; b uuid; b2 uuid; c uuid; d uuid; e uuid; f uuid; g uuid; h uuid; i uuid; s uuid; o uuid; m uuid; gid uuid;
- ev uuid; got text[]; r record;
+ ev uuid; got text[]; r record; cl jsonb;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  -- Leave only this section's jobs in view: earlier fixtures were rolled back.
@@ -521,6 +521,25 @@ BEGIN
  JOIN public.jobs jb ON jb.id = x.job_id WHERE jb.job_number LIKE 'SWF-920%';
  PERFORM pg_temp.lg_assert(got = ARRAY['SWF-92002','SWF-92012','SWF-92004','SWF-92001','SWF-92005','SWF-92006'], 'due order ' || array_to_string(got, ','));
  PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_due(2)) = 2, 'limit');
+ -- A staged start: with a rollout list only the listed job is due; an unlisted job that
+ -- would be due is blocked not_in_rollout, so the due list skips it and a claim is not_due.
+ UPDATE public.context_ledger_settings SET job_ids = ARRAY[a];
+ PERFORM pg_temp.lg_assert((SELECT r2.due AND r2.kind = 'backfill' AND r2.blocked_reason IS NULL FROM public.context_ledger_judge(ARRAY[a]) r2),
+  'a job on the rollout list stays due');
+ PERFORM pg_temp.lg_assert((SELECT NOT r2.due AND r2.kind = 'update' AND r2.blocked_reason = 'not_in_rollout' FROM public.context_ledger_judge(ARRAY[b]) r2),
+  'a job off the rollout list is blocked not_in_rollout');
+ SELECT array_agg(jb.job_number ORDER BY x.ord) INTO got
+ FROM public.context_ledger_due(200) WITH ORDINALITY x(job_id, kind, reason, priority, newest_evidence_at, ord)
+ JOIN public.jobs jb ON jb.id = x.job_id;
+ PERFORM pg_temp.lg_assert(got = ARRAY['SWF-92001'], 'due with a rollout list ' || coalesce(array_to_string(got, ','), '<none>'));
+ cl := public.context_ledger_claim(b, 'update', pg_temp.lg_today());
+ PERFORM pg_temp.lg_assert(cl ->> 'outcome' = 'not_due' AND cl ->> 'reason' = 'not_in_rollout', 'claim off the rollout list: ' || cl::text);
+ PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_extraction_runs WHERE job_id = b AND phase = 'ledger'), 'a refused claim made a run');
+ UPDATE public.context_ledger_settings SET job_ids = '{}';
+ PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_due(200)), 'an empty rollout list: nothing is due');
+ UPDATE public.context_ledger_settings SET job_ids = NULL;
+ PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_due(200) x JOIN public.jobs jb ON jb.id = x.job_id
+  WHERE jb.job_number LIKE 'SWF-920%') = 6, 'no rollout list: every live job again');
  PERFORM pg_temp.lg_mode('off', 0);
  PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_due(200)), 'mode off: the due list must be empty');
  PERFORM pg_temp.lg_mode('shadow', 50); PERFORM pg_temp.lg_lanes(true, true, false);
