@@ -40,6 +40,10 @@
 --                                          each only when no row for that invoice
 --                                          and kind exists (by key, or by event
 --                                          type on the invoice's entity rows).
+--                                          Raised is event type invoice.raised,
+--                                          not invoice.created: the daily
+--                                          digest counts invoice.created by
+--                                          write time as office decisions.
 --   context_xero_evidence_backfill(dry, limit)  writes the plan through
 --                                          capture_business_event: source
 --                                          xero-history, the invoice's job with
@@ -100,7 +104,7 @@ BEGIN
   -- New: absent, or already this migration's.
   ('public.context_xero_event_invoice(public.business_events)',ARRAY['e10753cc0a55962f00897ab0daa9dda5'],true),
   ('public.context_xero_paid_event_key(public.business_events)',ARRAY['689b60123b81312a722b47d4056376d4'],true),
-  ('public.context_xero_evidence_backfill_plan()',ARRAY['92507583692c528a5fb0fff3120c6655'],true),
+  ('public.context_xero_evidence_backfill_plan()',ARRAY['805f818bffd9af3b0ead62f5b5fb80ff'],true),
   ('public.context_xero_evidence_backfill(boolean,integer)',ARRAY['eb9a51fc91bb4341e4a56b4e65552aae'],true),
   ('public.context_xero_evidence_place(jsonb,boolean,timestamp with time zone,integer)',ARRAY['90950950f0b3b31ea09aa5106ddfb117'],true),
   ('public.context_xero_evidence_request_reads(boolean,integer)',ARRAY['1ec556309a42774ef87c8023b40c6cdd'],true),
@@ -199,7 +203,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
         ELSE 'mirror_created_at' END AS basis,
    coalesce(i.invoice_number,'with no number') AS num
   FROM inv i CROSS JOIN LATERAL (VALUES
-   ('raised','invoice.created',ARRAY['invoice.created']),
+   ('raised','invoice.raised',ARRAY['invoice.created','invoice.raised']),
    ('authorised','invoice.authorised',ARRAY['invoice.authorised']),
    ('paid','invoice.payment_received',ARRAY['invoice.paid','invoice.payment_received','invoice.manually_marked_paid'])
   ) v(kind,event_type,covers)
@@ -235,7 +239,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  ORDER BY k.job_number, k.invoice_number, k.id, array_position(ARRAY['raised','authorised','paid'],k.kind)
 $$;
 COMMENT ON FUNCTION public.context_xero_evidence_backfill_plan() IS
- 'Xero evidence (20261005230000): the raised, authorised and paid evidence rows missing for ACCREC invoices (DRAFT, SUBMITTED, AUTHORISED or PAID) on live jobs (status not cancelled, draft, archived, complete, completed or lost), one row per invoice and kind, each with the capture_business_event row it would write. A kind is missing when no row carries its key and no invoice entity row has its event type (paid: invoice.paid, invoice.payment_received or invoice.manually_marked_paid). Read only. Service role only.';
+ 'Xero evidence (20261005230000): the raised, authorised and paid evidence rows missing for ACCREC invoices (DRAFT, SUBMITTED, AUTHORISED or PAID) on live jobs (status not cancelled, draft, archived, complete, completed or lost), one row per invoice and kind, each with the capture_business_event row it would write. A kind is missing when no row carries its key and no invoice entity row has its event type (raised: invoice.created or invoice.raised; authorised: invoice.authorised; paid: invoice.paid, invoice.payment_received or invoice.manually_marked_paid). Backfilled raised rows are invoice.raised so the digest''s invoice.created count stays office decisions. Read only. Service role only.';
 
 -- 4. Write the plan through the one evidence writer.
 CREATE OR REPLACE FUNCTION public.context_xero_evidence_backfill(p_dry_run boolean DEFAULT true, p_limit integer DEFAULT 1000)

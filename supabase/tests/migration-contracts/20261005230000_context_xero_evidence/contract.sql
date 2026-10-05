@@ -138,7 +138,9 @@ BEGIN
  IF (SELECT b.body_preview FROM public.business_events b WHERE b.provider_message_id='xero:invoice:c5e-xid-3:raised')
    <>'Xero invoice INV-C5E3 raised as a draft: total $300.00 inc GST.'
   OR (SELECT b.event_at FROM public.business_events b WHERE b.provider_message_id='xero:invoice:c5e-xid-2:authorised')
-   <>'2026-09-20 00:00:00+08'::timestamptz THEN
+   <>'2026-09-20 00:00:00+08'::timestamptz
+  -- history is invoice.raised: the digest counts invoice.created as office decisions.
+  OR (SELECT b.event_type FROM public.business_events b WHERE b.provider_message_id='xero:invoice:c5e-xid-3:raised')<>'invoice.raised' THEN
   RAISE EXCEPTION 'xero_evidence_contract: backfill words or source time wrong';
  END IF;
 
