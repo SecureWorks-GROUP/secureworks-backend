@@ -228,7 +228,7 @@ AS $fn$
          NULL::boolean AS tic, NULL::text AS sbk, 'other'::text AS irole, true AS is_msg, false AS is_note,
          (ib.cmail IS NOT NULL AND lower(btrim(ib.from_email)) = ib.cmail) AS cust,
          false AS internal, false AS automated, false AS bad_call, false AS answered,
-         CASE WHEN ib.on_job THEN 'on_job' ELSE 'client_email' END AS placement
+         CASE WHEN ib.on_job THEN 'on_job' ELSE 'not_placed' END AS placement
   FROM ib
  )
  SELECT u.jid AS job_id, u.tbl AS source_table, u.sid AS source_id, u.at, u.event_type, u.source, u.channel, u.direction,
@@ -240,7 +240,7 @@ AS $fn$
  FROM (SELECT * FROM bel UNION ALL SELECT * FROM ibl) u
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) IS
- 'Job record (20261006011000): message-shaped business_events on the jobs (recorded at or before p_as_of) with the who-to-whom labels of the proof-set reference (customer_side = grade_ref is_customer_counterpart), plus legacy inbox_events mail on the job or from the client address with no business_events copy. Inlinable helper (no SET, not SECURITY DEFINER) read by the job record functions. Service role only.';
+ 'Job record (20261006011000): message-shaped business_events on the jobs (recorded at or before p_as_of) with the who-to-whom labels of the proof-set reference (customer_side = grade_ref is_customer_counterpart), plus legacy inbox_events mail placed on the job, or from the client address and placed on no job (placement not_placed), with no business_events copy. Inlinable helper (no SET, not SECURITY DEFINER) read by the job record functions. Service role only.';
 
 -- 2. Timeline: one row per record milestone, oldest first.
 CREATE OR REPLACE FUNCTION public.context_job_record_timeline(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
@@ -336,7 +336,8 @@ AS $fn$
   SELECT * FROM (
    SELECT DISTINCT ON (c.job_id) c.job_id, c.at, 'observed', 'first_contact',
           'First message with the customer on record (' || coalesce(c.channel, c.event_type) || ', '
-            || CASE WHEN c.direction = 'inbound' THEN 'from the customer' ELSE 'from us' END || ')',
+            || CASE WHEN c.direction = 'inbound' THEN 'from the customer' ELSE 'from us' END
+            || CASE WHEN c.placement = 'not_placed' THEN ', not placed on any job' ELSE '' END || ')',
           NULL::numeric, NULL::text, c.placement, c.source_table, c.source_id
    FROM msg c WHERE c.customer_side
    ORDER BY c.job_id, c.at, c.source_id) fc
@@ -1106,7 +1107,11 @@ AS $fn$
  WITH msg AS (
   SELECT m.*, jsonb_build_object('at', m.at, 'channel', m.channel, 'direction', m.direction, 'text', m.words,
                                  'table', m.source_table, 'id', m.source_id, 'automated', m.automated,
-                                 'event_type', m.event_type) AS doc,
+                                 'event_type', m.event_type,
+                                 -- legacy mail from the client's address that no job holds is shown as such
+                                 'placed_on', CASE WHEN m.placement = 'not_placed' THEN 'none' ELSE 'this_job' END)
+              || CASE WHEN m.placement = 'not_placed' THEN jsonb_build_object('placement_note', 'not placed on any job')
+                      ELSE '{}'::jsonb END AS doc,
          (m.channel = 'call' OR m.event_type IN ('client.call_logged', 'client.call_complete', 'call.transcript_completed')) AS is_call
   FROM public.context_job_record_messages(p_job_ids, p_as_of) m WHERE m.is_msg
  ),
@@ -1167,7 +1172,7 @@ AS $fn$
  WHERE jb.id = ANY (p_job_ids)
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_contact(uuid[], timestamptz) IS
- 'Job record (20261006011000): per job the last customer message, the last thing we told the customer (never automated; a newer automated send is attached as newer_automated), the last internal (crew or staff) message, the last calls each way, and reply statistics (customer texts and emails; a run of customer messages is answered by the first later message from us or answered call; automated texts never count). Each jsonb is {at, channel, direction, text (300 chars), table, id, automated}. Service role only.';
+ 'Job record (20261006011000): per job the last customer message, the last thing we told the customer (never automated; a newer automated send is attached as newer_automated), the last internal (crew or staff) message, the last calls each way, and reply statistics (customer texts and emails; a run of customer messages is answered by the first later message from us or answered call; automated texts never count). Each jsonb is {at, channel, direction, text (300 chars), table, id, automated, event_type, placed_on (this_job | none)}; legacy mail from the client''s address that no job holds has placed_on none and placement_note "not placed on any job". Service role only.';
 
 -- 6. Access: service role only.
 REVOKE ALL ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;

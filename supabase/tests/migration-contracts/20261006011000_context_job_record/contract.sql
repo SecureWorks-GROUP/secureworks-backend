@@ -239,6 +239,20 @@ BEGIN
  IF r.last_customer_message->>'id' <> 'aa000000-0000-4000-8000-000000000001' THEN
   RAISE EXCEPTION 'record contract: mail placed on another job leaked into job C: %', r.last_customer_message;
  END IF;
+ -- client-address mail that no job holds is labelled so, in the contact doc and the timeline
+ IF r.last_customer_message->>'placed_on' IS DISTINCT FROM 'none'
+    OR r.last_customer_message->>'placement_note' IS DISTINCT FROM 'not placed on any job' THEN
+  RAISE EXCEPTION 'record contract: unplaced mail must say it is not placed on any job: %', r.last_customer_message;
+ END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY[c], asof) t
+ WHERE t.kind = 'first_contact' AND t.source_id = 'aa000000-0000-4000-8000-000000000001'
+   AND t.what LIKE '%not placed on any job%' AND t.placement = 'not_placed';
+ IF n <> 1 THEN RAISE EXCEPTION 'record contract: the first contact from unplaced mail must say so'; END IF;
+ SELECT * INTO r FROM public.context_job_record_contact(ARRAY['a0000000-0000-4000-8000-00000000000e'::uuid], asof);
+ IF r.last_customer_message->>'id' <> 'aa000000-0000-4000-8000-000000000003' OR r.last_customer_message->>'placed_on' <> 'this_job'
+    OR r.last_customer_message ? 'placement_note' THEN
+  RAISE EXCEPTION 'record contract: mail placed on the job is this job''s, with no note: %', r.last_customer_message;
+ END IF;
  SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY[c], asof) t WHERE t.source_id = 'aa000000-0000-4000-8000-000000000003';
  IF n <> 0 THEN RAISE EXCEPTION 'record contract: mail placed on another job is in job C''s timeline'; END IF;
  SELECT count(*) INTO n FROM public.context_job_record_legacy_mail(ARRAY['a0000000-0000-4000-8000-00000000000e'::uuid], asof) m
