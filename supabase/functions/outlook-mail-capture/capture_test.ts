@@ -58,6 +58,11 @@ interface World {
   captured: Record<string, unknown>[];
   attachmentCalls: string[];
   captureFails?: string;
+  /** Old monitor-inbox rows: sender and Graph received time. */
+  legacy: Array<{ id: string; from: string; receivedAt: string }>;
+  legacyFails?: boolean;
+  legacyCalls: Array<{ from: string; receivedAt: string; subject: string }>;
+  attachmentEvents: Array<string | null>;
   listCalls: number;
   now: number;
   tick: number;
@@ -80,6 +85,9 @@ function world(partial: Partial<World> = {}): World {
     keys: new Map(),
     captured: [],
     attachmentCalls: [],
+    legacy: [],
+    legacyCalls: [],
+    attachmentEvents: [],
     listCalls: 0,
     now: NOW,
     tick: 0,
@@ -151,6 +159,18 @@ function deps(w: World): CaptureDeps {
       w.keys.set(key, id);
       return { outcome: "inserted", id };
     },
+    legacyCopy: async (args) => {
+      w.legacyCalls.push(args);
+      if (w.legacyFails) {
+        throw Object.assign(new Error("legacy_copy_unreadable"), {
+          code: "legacy_copy_unreadable",
+        });
+      }
+      return w.legacy.find((l) =>
+        l.from === args.from &&
+        Date.parse(l.receivedAt) === Date.parse(args.receivedAt)
+      )?.id ?? null;
+    },
     mail: {
       folderIds: async (mailbox) => {
         if (w.mailboxes[mailbox] === "refuse") {
@@ -213,6 +233,7 @@ function deps(w: World): CaptureDeps {
     },
     storeAttachments: async (args): Promise<AttachmentResult> => {
       w.attachmentCalls.push(args.providerMessageId);
+      w.attachmentEvents.push(args.businessEventId);
       return { stored: 1, skipped: 1, already: 0, errors: 0, error_code: null };
     },
     hash: async (t) => `h:${t}`,
@@ -659,4 +680,127 @@ Deno.test("an unknown or unselected source is refused; unknown-kind sources are 
   );
   const r = await runOutlookCapture(deps(w), { mode: "poll" });
   assert(r.outcome === "ran" && r.sources.length === 0);
+});
+
+Deno.test("an inbound email the old path already saved is skipped, not saved twice (gap plan B-1)", async () => {
+  const box: Msg[] = [
+    // The old path saved this one: same sender, same received time.
+    msg(1, "2026-10-02T05:50:00Z", {
+      from: "Pat Example <Pat.Example@Example.com>",
+    }),
+    // Same sender, another time: a new email.
+    msg(2, "2026-10-02T05:52:00Z"),
+    // Our reply at the old row's time: outbound, never checked.
+    {
+      ...E_SENT,
+      receivedAt: "2026-10-02T05:50:00Z",
+      sentAt: "2026-10-02T05:50:00Z",
+      parentFolderId: "F-sent",
+    },
+  ];
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    legacy: [{
+      id: "old-1",
+      from: "pat.example@example.com",
+      receivedAt: "2026-10-02T05:50:00Z",
+    }],
+  });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  const run = lastRun(w, "outlook_nithin");
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts!.skipped_legacy_copy, 1);
+  assertEquals(run.counts!.inserted, 2);
+  assertEquals(
+    w.captured.map((c) => c.provider_message_id),
+    ["email:sy4pr01mb0003@secureworkswa.com.au", "email:m2@mail.example.com"],
+  );
+  // Only the two inbound emails were looked up, by their bare lower-case sender and Graph time.
+  assertEquals(w.legacyCalls, [
+    {
+      from: "pat.example@example.com",
+      receivedAt: "2026-10-02T05:50:00Z",
+      subject: "Message 1",
+    },
+    {
+      from: "pat.example@example.com",
+      receivedAt: "2026-10-02T05:52:00Z",
+      subject: "Message 2",
+    },
+  ]);
+  // The skipped email still moves the cursor.
+  assertEquals(run.window_end_id, "G0002");
+});
+
+Deno.test("a skipped old-path copy's attachments go to the private store, pointed at the old row", async () => {
+  const box = [{
+    ...E_DIRECT,
+    receivedAt: "2026-10-02T05:50:00Z",
+    parentFolderId: "F-inbox",
+  }];
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    legacy: [{
+      id: "old-7",
+      from: "pat.example@example.com",
+      receivedAt: "2026-10-02T05:50:00Z",
+    }],
+  });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  const run = lastRun(w, "outlook_nithin");
+  assertEquals(run.counts!.skipped_legacy_copy, 1);
+  assertEquals(w.captured.length, 0);
+  assertEquals(w.attachmentCalls, ["email:em2-direct-0001@mail.example.com"]);
+  assertEquals(w.attachmentEvents, ["old-7"]);
+  assertEquals(run.counts!.attachments_stored, 1);
+});
+
+Deno.test("an unreadable old-path lookup fails the source and holds the cursor; nothing is saved past it", async () => {
+  const box = [msg(1, "2026-10-02T05:50:00Z"), msg(2, "2026-10-02T05:52:00Z")];
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    legacyFails: true,
+  });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  const run = lastRun(w, "outlook_nithin");
+  assertEquals(run.status, "failed");
+  assertEquals(run.error_code, "legacy_copy_unreadable");
+  assertEquals(w.captured.length, 0);
+  assertEquals(run.window_to, null);
+});
+
+Deno.test("history skips old-path copies too, so a 60-day load adds no duplicate", async () => {
+  const box = [
+    {
+      ...E_IDENTITY,
+      receivedAt: "2026-09-21T02:00:00Z",
+      parentFolderId: "F-inbox",
+    },
+    {
+      ...E_DIRECT,
+      receivedAt: "2026-09-20T02:00:00Z",
+      parentFolderId: "F-inbox",
+    },
+  ];
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    legacy: [{
+      id: "old-2",
+      from: "sam.sample@example.net",
+      receivedAt: "2026-09-21T02:00:00.000Z",
+    }],
+  });
+  await runOutlookCapture(deps(w), {
+    mode: "history",
+    source: "nithin",
+    from: "2026-09-15T00:00:00Z",
+    to: "2026-10-01T00:00:00Z",
+  });
+  const run = lastRun(w, "outlook_history_nithin");
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts!.skipped_legacy_copy, 1);
+  assertEquals(run.counts!.inserted, 1);
+  assertEquals(w.captured.map((c) => c.provider_message_id), [
+    "email:em2-direct-0001@mail.example.com",
+  ]);
 });

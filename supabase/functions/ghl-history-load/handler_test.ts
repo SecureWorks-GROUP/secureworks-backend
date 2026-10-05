@@ -21,7 +21,7 @@ const env = (name: string) =>
     GHL_API_TOKEN: "fixture-only",
   } as Record<string, string>)[name];
 
-function fakeSupabase(state: { flag?: boolean }) {
+function fakeSupabase(state: { flag?: boolean; linkDue?: boolean }) {
   const calls: { name: string; args?: any }[] = [];
   let runs = 0;
   const client = {
@@ -78,6 +78,26 @@ function fakeSupabase(state: { flag?: boolean }) {
           }]);
         case "link_job_ghl_contact":
           return ok({ outcome: "linked", link_id: "l1" });
+        case "record_ghl_link_attempt":
+          return ok({ outcome: "created" });
+        case "context_ghl_history_link_due":
+          return ok(
+            state.linkDue === false ? [] : [{
+              job_id: "44444444-4444-4444-8444-444444426168",
+              job_number: "SWF-26168",
+              tier: 3,
+              phone_key: "412345678",
+              email_key: null,
+              own_contact_id: null,
+              own_contacts: 0,
+            }],
+          );
+        case "context_ghl_history_request_reads":
+          return ok({
+            dry_run: args.p_dry_run,
+            contacts_handled: 1,
+            jobs_listed: 1,
+          });
       }
       return Promise.resolve({ data: null, error: { code: "42883" } });
     },
@@ -415,4 +435,88 @@ Deno.test("a later contact search page failure never links an earlier match", as
   assertEquals(result.counts.linked, 0);
   assertEquals(log.length, 2);
   assert(!sb.calls.some((c) => c.name === "link_job_ghl_contact"));
+});
+
+Deno.test("B-2 wiring: a scheduled cycle links the jobs due a try, loads, then hands completed contacts to the reader, always real, as the schedule's actor", async () => {
+  const log: URL[] = [];
+  const sb = fakeSupabase({});
+  // The caller's header never changes the actor SQL's day limit reads.
+  const res = await handleHistoryLoad(
+    post({ "x-sw-actor": "someone-else" }, { action: "scheduled", wait: true }),
+    {
+      env,
+      createSupabase: () => sb,
+      fetch: ((input: string | URL | Request) => {
+        const url = new URL(String(input));
+        return url.pathname === "/contacts/"
+          ? pagedContacts(log, 1)(input)
+          : ghlFetch(log)(input);
+      }) as typeof fetch,
+    },
+  );
+  const body = await res.json();
+  assertEquals(res.status, 200);
+  assertEquals([body.action, body.dry_run], ["scheduled", false]);
+  assertEquals(
+    [body.link.outcome, body.link.dry_run, body.link.counts.linked],
+    [
+      "ran",
+      false,
+      1,
+    ],
+  );
+  assertEquals([body.load.outcome, body.load.dry_run], ["ran", false]);
+  assertEquals(body.reads.jobs_listed, 1);
+  const names = sb.calls.map((c) => c.name);
+  const order = [
+    "context_ghl_history_link_due",
+    "record_ghl_link_attempt",
+    "reserve_ghl_history_run",
+    "context_ghl_history_request_reads",
+  ].map((n) => names.indexOf(n));
+  assert(
+    order.every((i, k) => i >= 0 && (k === 0 || i > order[k - 1])),
+    names.join(" "),
+  );
+  assert(!names.includes("context_ghl_history_link_candidates"));
+  assertEquals(
+    sb.calls.find((c) => c.name === "reserve_ghl_history_run")!.args,
+    { p_max_jobs: 25, p_actor: "cron:ghl-history-schedule" },
+  );
+  assertEquals(
+    sb.calls.find((c) => c.name === "record_ghl_link_attempt")!.args.p_row
+      .actor,
+    "cron:ghl-history-schedule",
+  );
+  assertEquals(
+    sb.calls.find((c) => c.name === "context_ghl_history_request_reads")!.args,
+    { p_dry_run: false, p_limit: 200 },
+  );
+});
+
+Deno.test("B-2 wiring: nothing due to link makes no link run row; request_reads alone is a dry run by default", async () => {
+  const sb = fakeSupabase({ linkDue: false });
+  const res = await handleHistoryLoad(
+    post({}, { action: "scheduled", wait: true }),
+    { env, createSupabase: () => sb, fetch: ghlFetch([]) },
+  );
+  const body = await res.json();
+  assertEquals(body.link, { outcome: "idle", reason: "nothing_due" });
+  const firstReserve = sb.calls.findIndex((c) =>
+    c.name === "reserve_ghl_history_run"
+  );
+  assert(
+    !sb.calls.slice(0, firstReserve).some((c) =>
+      c.name === "record_capture_run"
+    ),
+  );
+  const sb2 = fakeSupabase({});
+  const reads = await (await handleHistoryLoad(
+    post({}, { action: "request_reads" }),
+    { env, createSupabase: () => sb2 },
+  )).json();
+  assertEquals([reads.action, reads.dry_run], ["request_reads", true]);
+  assertEquals(sb2.calls.map((c) => c.name), [
+    "context_ghl_history_request_reads",
+  ]);
 });

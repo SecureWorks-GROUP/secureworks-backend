@@ -32,6 +32,15 @@
 //     the ambiguous, none and failed jobs (numbers only, no names). A real run
 //     (dry_run exactly false) writes each certain link with one audit row
 //     (context_ghl_contact_links), reversible by reverse_ghl_contact_link.
+//   * every job a real run judges gets one attempt row
+//     (context_ghl_history_link_attempts through record_ghl_link_attempt,
+//     schedule slice B-2, 20261005190000): the verdict and a short reason
+//     code, never a key. In due mode (the schedule's) the candidates are
+//     context_ghl_history_link_due: live jobs with no contact never tried, or
+//     whose last try failed before today, or whose none or ambiguous verdict is
+//     older than the retry window. With none due it writes no run row and
+//     idles, so a finished link step costs no GHL call. A live job with no
+//     GHL contact counts as done for the history load once it has been tried.
 //
 // Pure orchestration over injected reads and writes. No model call.
 
@@ -95,6 +104,10 @@ export interface LinkDeps {
   }>;
   /** link_job_ghl_contact(row). Never throws: a fault is outcome error. */
   link(row: Record<string, unknown>): Promise<LinkWriteOutcome>;
+  /** context_ghl_history_link_due(limit): jobs due a try. Throws when unreadable. */
+  dueCandidates(limit: number): Promise<LinkCandidate[]>;
+  /** record_ghl_link_attempt(row). Throws on a refusal. */
+  recordAttempt(row: Record<string, unknown>): Promise<void>;
 }
 
 export interface LinkRequest {
@@ -103,6 +116,8 @@ export interface LinkRequest {
   actor: string;
   /** Start after this job id instead of where the previous run stopped. */
   afterJobId?: string | null;
+  /** Judge only the jobs due a try (the schedule), not a keyset page. */
+  due?: boolean;
 }
 
 export type LinkVerdict =
@@ -125,6 +140,7 @@ export type LinkVerdict =
 
 export type LinkResult =
   | { outcome: "run_in_progress"; run_id: string }
+  | { outcome: "idle"; reason: "nothing_due" }
   | {
     outcome: "ran";
     run_id: string;
@@ -167,6 +183,8 @@ const COUNT_KEYS = [
   "link_conflicts",
   "link_errors",
   "backlog_jobs",
+  "attempts_recorded",
+  "attempt_write_errors",
 ] as const;
 type CountKey = typeof COUNT_KEYS[number];
 
@@ -303,7 +321,38 @@ export function parseLinkRequest(
     maxJobs: Math.min(Math.max(n, 1), policy.maxJobsCeiling),
     actor,
     afterJobId: after,
+    due: body.due === true,
   };
+}
+
+/** The attempt row's verdict and reason for one judged job. */
+function attemptOf(
+  verdict: LinkVerdict,
+  written: LinkWriteOutcome | null,
+): { verdict: "certain" | "ambiguous" | "none" | "failed"; reason: string } {
+  if (verdict.kind === "failed") {
+    return { verdict: "failed", reason: verdict.code };
+  }
+  if (verdict.kind !== "certain") {
+    return { verdict: verdict.kind, reason: verdict.reason };
+  }
+  if (!written) return { verdict: "certain", reason: "dry_run" };
+  if (
+    written.outcome === "booking_draft_conflict" ||
+    written.outcome === "unique_conflict"
+  ) {
+    return { verdict: "ambiguous", reason: written.outcome };
+  }
+  if (written.outcome === "key_changed" || written.outcome === "error") {
+    // Tried again on a later day with the job's current keys.
+    return {
+      verdict: "failed",
+      reason: written.outcome === "error"
+        ? `link_error:${safeCode(written.code, "unknown")}`
+        : "key_changed",
+    };
+  }
+  return { verdict: "certain", reason: written.outcome };
 }
 
 export async function runGhlContactLink(
@@ -314,12 +363,13 @@ export async function runGhlContactLink(
   const source = req.dryRun ? LINK_DRY_RUN_SOURCE : LINK_RUN_SOURCE;
   const started = deps.now();
   const latest = await deps.latestRun(source);
-  // Where the previous run of this kind stopped, unless the caller says.
-  const previousNext = latest && latest.status !== "running" &&
+  // Where the previous run of this kind stopped, unless the caller says. Due
+  // mode has no position: the due list itself is what is left.
+  const previousNext = !req.due && latest && latest.status !== "running" &&
       latest.cursor && typeof latest.cursor === "object"
     ? (latest.cursor as Record<string, unknown>).next_after
     : null;
-  const after = req.afterJobId ??
+  const after = req.due ? null : req.afterJobId ??
     (typeof previousNext === "string" ? previousNext : null);
   if (latest?.status === "running") {
     const updated = Date.parse(latest.updated_at) || 0;
@@ -334,6 +384,14 @@ export async function runGhlContactLink(
     });
   }
 
+  // Due mode reads its list first: with nothing due there is no run row.
+  let dueJobs: LinkCandidate[] | null = null;
+  if (req.due) {
+    dueJobs = await deps.dueCandidates(req.maxJobs);
+    if (!dueJobs.length) return { outcome: "idle", reason: "nothing_due" };
+  }
+  const mode = req.due ? "due" : "keyset";
+
   const counts = Object.fromEntries(COUNT_KEYS.map((k) => [k, 0])) as Record<
     CountKey,
     number
@@ -346,7 +404,7 @@ export async function runGhlContactLink(
     source,
     status: "running",
     window_to: new Date(started).toISOString(),
-    cursor: { v: 1, actor: req.actor, after, next_after: after },
+    cursor: { v: 1, actor: req.actor, mode, after, next_after: after },
     counts,
   });
 
@@ -360,16 +418,18 @@ export async function runGhlContactLink(
   let nextAfter: string | null = null;
 
   try {
-    const jobs = await deps.candidates(after, req.maxJobs);
+    const jobs = dueJobs ?? await deps.candidates(after, req.maxJobs);
     // A full page may have more after it; a short one reached the end.
     const fullPage = jobs.length >= req.maxJobs;
-    nextAfter = fullPage && jobs.length ? jobs[jobs.length - 1].job_id : null;
+    nextAfter = !req.due && fullPage && jobs.length
+      ? jobs[jobs.length - 1].job_id
+      : null;
     if (fullPage) counts.backlog_jobs = 1; // at least the next page
     for (let i = 0; i < jobs.length; i++) {
       const job = jobs[i];
       if (deps.now() - started >= policy.timeBudgetMs) {
         counts.backlog_jobs = Math.max(counts.backlog_jobs, jobs.length - i);
-        nextAfter = i > 0 ? jobs[i - 1].job_id : after;
+        nextAfter = req.due ? null : i > 0 ? jobs[i - 1].job_id : after;
         break;
       }
       counts.jobs_considered++;
@@ -381,27 +441,50 @@ export async function runGhlContactLink(
           stop = error.stopCode;
           counts.backlog_jobs = Math.max(counts.backlog_jobs, jobs.length - i);
           counts.jobs_considered--;
-          nextAfter = i > 0 ? jobs[i - 1].job_id : after;
+          nextAfter = req.due ? null : i > 0 ? jobs[i - 1].job_id : after;
           break;
         }
         throw error;
       }
+      const recordAttempt = async (written: LinkWriteOutcome | null) => {
+        if (req.dryRun) return;
+        const a = attemptOf(verdict, written);
+        try {
+          await deps.recordAttempt({
+            job_id: job.job_id,
+            run_id: runId,
+            verdict: a.verdict,
+            reason: a.reason,
+            actor: req.actor,
+          });
+          counts.attempts_recorded++;
+        } catch (error) {
+          // The job stays due and is tried again; counted, never hidden.
+          counts.attempt_write_errors++;
+          firstIssue ??= `attempt_write_failed:${
+            safeCode(providerFailure(error).code ?? "unknown")
+          }`;
+        }
+      };
       if (verdict.kind === "failed") {
         counts.failed++;
         failed.push(label(job));
         firstIssue ??= `search_failed:${verdict.code}`;
+        await recordAttempt(null);
         continue;
       }
       if (verdict.kind === "none") {
         counts.none++;
         counts[verdict.reason]++;
         none.push(label(job));
+        await recordAttempt(null);
         continue;
       }
       if (verdict.kind === "ambiguous") {
         counts.ambiguous++;
         counts[verdict.reason]++;
         ambiguous.push(label(job));
+        await recordAttempt(null);
         continue;
       }
       counts.certain++;
@@ -440,12 +523,19 @@ export async function runGhlContactLink(
         counts.link_errors++;
         firstIssue ??= `link_error:${safeCode(written.code, "unknown")}`;
       }
+      await recordAttempt(written);
       if (i % 10 === 9) {
         await deps.recordRun({
           run_id: runId,
           source,
           counts,
-          cursor: { v: 1, actor: req.actor, after, next_after: job.job_id },
+          cursor: {
+            v: 1,
+            actor: req.actor,
+            mode,
+            after,
+            next_after: req.due ? null : job.job_id,
+          },
         });
       }
     }
@@ -467,7 +557,7 @@ export async function runGhlContactLink(
     status,
     counts,
     error_code: errorCode,
-    cursor: { v: 1, actor: req.actor, after, next_after: nextAfter },
+    cursor: { v: 1, actor: req.actor, mode, after, next_after: nextAfter },
   });
   return {
     outcome: "ran",

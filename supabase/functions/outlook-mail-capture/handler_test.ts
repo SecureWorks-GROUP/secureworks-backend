@@ -229,3 +229,38 @@ Deno.test("live wiring: a flags read error reads as off", async () => {
   const d = liveCaptureDeps({ env, createSupabase: () => sb });
   assertEquals(await d.flags(), { reader: false, program: false });
 });
+
+Deno.test("live wiring: the old-path lookup calls context_email_legacy_copy and reads an id, null or a fault", async () => {
+  const sb = fakeSupabase({ reader: true, program: true });
+  const seen: unknown[] = [];
+  let reply: { data: unknown; error: unknown } = { data: "old-1", error: null };
+  sb.rpc = (name: string, args?: unknown) => {
+    seen.push({ name, args });
+    return Promise.resolve(reply) as any;
+  };
+  const d = liveCaptureDeps({ env, createSupabase: () => sb });
+  const q = {
+    from: "pat.example@example.com",
+    receivedAt: "2026-10-02T05:50:00Z",
+    subject: "Message 1",
+  };
+  assertEquals(await d.legacyCopy(q), "old-1");
+  assertEquals(seen, [{
+    name: "context_email_legacy_copy",
+    args: {
+      p_from: "pat.example@example.com",
+      p_received_at: "2026-10-02T05:50:00Z",
+      p_subject: "Message 1",
+    },
+  }]);
+  reply = { data: null, error: null };
+  assertEquals(await d.legacyCopy(q), null);
+  reply = { data: null, error: { code: "42883" } };
+  let code = "";
+  try {
+    await d.legacyCopy(q);
+  } catch (e) {
+    code = (e as { code?: string }).code ?? "";
+  }
+  assertEquals(code, "legacy_copy_unreadable");
+});

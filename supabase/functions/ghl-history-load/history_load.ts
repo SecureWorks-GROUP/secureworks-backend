@@ -22,8 +22,17 @@
 //   3. A real run starts with reserve_ghl_history_run, which under one lock
 //      refuses a second live run, closes an abandoned one, picks the due
 //      contacts and counts their jobs on the new run row before any work, so
-//      the day's 100 is strict and never shared by two runs. A dry run reads
-//      the same due list without reserving anything (one dry run at a time).
+//      the day's limit is strict and never shared by two runs. With nothing
+//      due it creates no run row and the load idles (nothing_due). The day is
+//      charged only for jobs actually loaded (schedule slice B-2,
+//      20261005190000): when the run ends, jobs_covered is set to the jobs of
+//      the contacts it attempted, so contacts it never reached give their
+//      quota back, and a contact already attempted today (a partial load
+//      resuming) costs nothing again the same day. A dry run reads the same
+//      due list without reserving anything (one dry run at a time).
+//      The day's limit is SQL's (context_ghl_history_day_limit): 250 jobs a
+//      day for 7 days from the first scheduled run, 100 after, and 100 from
+//      the first GHL rate limit on, recorded on the run row's cursor.
 //   4. For each due contact: every GHL conversation of the contact, every
 //      message page back to the first message. Each item goes through the one
 //      row builder (_shared/evidence/ghl_message.ts) with capture_mode
@@ -39,7 +48,13 @@
 //      on a later day). A failed capture retains the page input cursor so
 //      retry cannot skip the unsaved row. A full conversation page without
 //      a cursor, or a nonempty message page claiming more without a cursor,
-//      never marks done.
+//      never marks done. One row the writer cannot save inside the statement
+//      timeout (57014) never stops the contact or the run: the row is skipped,
+//      its page is kept on the resume point (retry) and re-read on a later run
+//      (the writer is idempotent), and after three runs that still time out
+//      the row is given up and counted. More than three timeouts in one
+//      contact in one run stop that contact where it stood (it resumes on the
+//      next run); the run goes on to the next contact.
 //
 // None of these rows wakes an extraction read (capture_mode backfill, X15).
 // The live ladder does not yet keep backfill rows from the model (X27); rows
@@ -80,6 +95,12 @@ export interface HistoryPolicy {
   runningStaleMs: number;
   /** A duplicate whose stored time is this far from GHL's is counted (M4a sizing). */
   timeDriftMs: number;
+  /** Pages kept on the resume point for rows that timed out (B-2). */
+  maxRetryPages: number;
+  /** Row timeouts in one contact in one run before the contact stops (B-2). */
+  maxRowTimeoutsPerContactRun: number;
+  /** Runs a timed-out page is re-read before its rows are given up (B-2). */
+  maxRowRetryRuns: number;
 }
 
 export const POLICY: Readonly<HistoryPolicy> = {
@@ -92,7 +113,13 @@ export const POLICY: Readonly<HistoryPolicy> = {
   timeBudgetMs: 100_000,
   runningStaleMs: 10 * 60_000,
   timeDriftMs: 60_000,
+  maxRetryPages: 10,
+  maxRowTimeoutsPerContactRun: 3,
+  maxRowRetryRuns: 3,
 };
+
+/** PostgreSQL's statement timeout: one heavy row, never a reason to stop. */
+export const STATEMENT_TIMEOUT_CODES: ReadonlySet<string> = new Set(["57014"]);
 
 /** The statuses that put a row on its job (F1's context_linked_status). */
 const LINKED = new Set([
@@ -112,6 +139,14 @@ export interface RunRow {
   cursor?: unknown;
 }
 
+export interface RetryPage {
+  conversation_id: string;
+  /** The GHL cursor the page was read with (null: the newest page). */
+  last_message_id: string | null;
+  /** Runs that re-read the page and still timed out. */
+  tries: number;
+}
+
 export interface Resume {
   v: 1;
   /** Conversations of this contact already read to their first message. */
@@ -119,6 +154,8 @@ export interface Resume {
   /** The conversation being read, and the GHL cursor of its next older page. */
   conversation_id: string | null;
   last_message_id: string | null;
+  /** Pages with rows the writer timed out on, re-read on a later run (B-2). */
+  retry?: RetryPage[];
 }
 
 export interface DueContact {
@@ -129,6 +166,8 @@ export interface DueContact {
   resume: unknown;
   attempts: number;
   oversized?: boolean;
+  /** Attempted earlier today, so already charged: costs nothing again today. */
+  charged_today?: boolean;
 }
 
 export interface DueList {
@@ -143,6 +182,10 @@ export interface DueList {
   jobs_invalid_contact_id?: number;
   contacts_over_daily_limit?: number;
   jobs_over_daily_limit?: number;
+  /** Jobs the offered contacts charge to today (charged_today ones are free). */
+  jobs_charged?: number;
+  /** context_ghl_history_day_limit's answer (limit, basis, boost window). */
+  limit?: Record<string, unknown>;
 }
 
 export type HistoryCaptureOutcome =
@@ -168,8 +211,14 @@ export interface HistoryDeps {
   due(maxJobs: number): Promise<DueList>;
   /** reserve_ghl_history_run (real runs). Throws on a refusal. */
   reserve(maxJobs: number, actor: string): Promise<
-    | { outcome: "reserved"; run_id: string; due: DueList }
+    | {
+      outcome: "reserved";
+      run_id: string;
+      due: DueList;
+      cursor?: Record<string, unknown>;
+    }
     | { outcome: "run_in_progress"; run_id: string }
+    | { outcome: "nothing_due"; due: DueList }
   >;
   /** record_ghl_history_contact. Throws on a refusal. */
   recordContact(row: Record<string, unknown>): Promise<void>;
@@ -228,6 +277,14 @@ export type HistoryResult =
       | "capture_lane_off"
       | "attribution_lane_off";
   }
+  | {
+    outcome: "idle";
+    reason: "nothing_due";
+    daily_job_limit: number;
+    daily_remaining: number;
+    daily_limit_reached: boolean;
+    contacts_waiting: number;
+  }
   | { outcome: "run_in_progress"; run_id: string }
   | {
     outcome: "ran";
@@ -237,7 +294,19 @@ export type HistoryResult =
     error_code: string | null;
     counts: Record<string, number>;
     contacts: ContactSummary[];
+    /** What the day was charged: reserved at the start, charged at the end. */
+    quota: Quota;
   };
+
+export interface Quota {
+  jobs_reserved: number;
+  jobs_charged: number;
+  jobs_refunded: number;
+  contacts_unreached: number;
+  rows_timeout_skipped: number;
+  rows_given_up: number;
+  rate_limited: boolean;
+}
 
 const COUNT_KEYS = [
   "dry_run",
@@ -300,6 +369,8 @@ const CONTACT_COUNT_KEYS = [
   "other_status",
   "write_errors",
   "skipped_call",
+  "timeout_skipped",
+  "timeout_given_up",
 ] as const;
 type ContactCountKey = typeof CONTACT_COUNT_KEYS[number];
 
@@ -348,11 +419,30 @@ export function parseResume(value: unknown): Resume {
     r.v !== 1 || !Array.isArray(r.done) ||
     !r.done.every((id) => typeof id === "string")
   ) return fresh;
+  const retry: RetryPage[] = [];
+  if (Array.isArray(r.retry)) {
+    for (const p of r.retry) {
+      if (!p || typeof p !== "object") continue;
+      const e = p as Record<string, unknown>;
+      const conversation = text(e.conversation_id);
+      if (!conversation) continue;
+      const tries = typeof e.tries === "number" && Number.isInteger(e.tries) &&
+          e.tries >= 0
+        ? e.tries
+        : 0;
+      retry.push({
+        conversation_id: conversation,
+        last_message_id: text(e.last_message_id),
+        tries,
+      });
+    }
+  }
   return {
     v: 1,
     done: r.done as string[],
     conversation_id: text(r.conversation_id),
     last_message_id: text(r.conversation_id) ? text(r.last_message_id) : null,
+    ...(retry.length ? { retry } : {}),
   };
 }
 
@@ -405,6 +495,7 @@ export async function runGhlHistoryLoad(
   // reserves them atomically; a dry run only reads them.
   let due: DueList;
   let runId: string | null = null;
+  let runCursor: Record<string, unknown> = { v: 1, actor: req.actor };
   if (req.dryRun) {
     const latest = await deps.latestRun(source);
     if (latest?.status === "running") {
@@ -423,9 +514,38 @@ export async function runGhlHistoryLoad(
   } else {
     const reserved = await deps.reserve(req.maxJobs, req.actor);
     if (reserved.outcome === "run_in_progress") return reserved;
+    if (reserved.outcome === "nothing_due") {
+      // Nothing to load now (every contact done, waiting for a later day, or
+      // today's limit spent): no run row, no GHL call.
+      return {
+        outcome: "idle",
+        reason: "nothing_due",
+        daily_job_limit: reserved.due.daily_job_limit,
+        daily_remaining: reserved.due.daily_remaining,
+        daily_limit_reached: reserved.due.daily_limit_reached,
+        contacts_waiting: reserved.due.contacts_waiting,
+      };
+    }
     due = reserved.due;
     runId = reserved.run_id;
+    if (reserved.cursor && typeof reserved.cursor === "object") {
+      runCursor = { ...reserved.cursor };
+    }
   }
+  // What each contact charges today: nothing on a dry run, nothing for a
+  // contact already attempted today (it was charged then), else its jobs.
+  const cost = (contact: DueContact) =>
+    req.dryRun || contact.charged_today ? 0 : contact.jobs;
+  const reservedJobs = req.dryRun
+    ? 0
+    : typeof due.jobs_charged === "number"
+    ? due.jobs_charged
+    : due.contacts.reduce((a, c) => a + cost(c), 0);
+  let chargedJobs = 0;
+  let pendingJobs = reservedJobs;
+  let rowsTimeoutSkipped = 0;
+  let rowsGivenUp = 0;
+
   const counts = Object.fromEntries(COUNT_KEYS.map((k) => [k, 0])) as Counts;
   counts.dry_run = req.dryRun ? 1 : 0;
   counts.daily_job_limit = due.daily_job_limit;
@@ -437,15 +557,16 @@ export async function runGhlHistoryLoad(
   counts.contacts_waiting = due.contacts_waiting;
   counts.jobs_invalid_contact_id = due.jobs_invalid_contact_id ?? 0;
   counts.contacts_over_daily_limit = due.contacts_over_daily_limit ?? 0;
-  // A real run's jobs were counted when it was reserved; they stay counted.
-  counts.jobs_covered = req.dryRun ? 0 : due.jobs_offered;
+  // While the run works its reservation stands (strict, never shared); at the
+  // end jobs_covered becomes the jobs it actually charged.
+  counts.jobs_covered = reservedJobs;
 
   if (runId === null) {
     runId = await deps.recordRun({
       source,
       status: "running",
       window_to: new Date(started).toISOString(),
-      cursor: { v: 1, actor: req.actor },
+      cursor: runCursor,
       counts,
     });
   } else {
@@ -464,25 +585,256 @@ export async function runGhlHistoryLoad(
       CONTACT_COUNT_KEYS.map((k) => [k, 0]),
     ) as Record<ContactCountKey, number>;
     const resume = parseResume(contact.resume);
+    const retry: RetryPage[] = (resume.retry ?? []).map((p) => ({ ...p }));
     let earliestMs: number | null = null;
     let latestMs: number | null = null;
     let pagesThisRun = 0;
+    let timeoutsThisRun = 0;
+    let givenUp = 0;
+    const point = (
+      conversationId: string | null,
+      lastMessageId: string | null,
+    ): Resume => ({
+      v: 1,
+      done: resume.done,
+      conversation_id: conversationId,
+      last_message_id: conversationId ? lastMessageId : null,
+      ...(retry.length ? { retry: retry.map((p) => ({ ...p })) } : {}),
+    });
     const out = (
       status: ContactOutcome["status"],
       errorCode: string | null,
-      point: Resume | null,
+      resumePoint: Resume | null,
       stopRun: string | null = null,
     ): ContactOutcome => ({
       status,
       errorCode,
-      resume: point,
+      resume: resumePoint,
       counts: c,
       earliestMs,
       latestMs,
       stopRun,
     });
 
-    // a. Every conversation of the contact, newest first.
+    // Build, pre-check and save one page of GHL items. A row the writer timed
+    // out on is skipped and counted (timedOut); any other refusal ends the
+    // contact where it stood (the page is read again on resume).
+    type PageSave =
+      | { kind: "ok"; timedOut: number }
+      | {
+        kind: "stop";
+        status: "partial";
+        code: string;
+        stopRun: string | null;
+      };
+    const savePage = async (
+      items: Record<string, unknown>[],
+    ): Promise<PageSave> => {
+      const rows: Record<string, unknown>[] = [];
+      const keys = new Set<string>();
+      for (const item of items) {
+        const at = ms(item.dateAdded);
+        if (at !== null) {
+          earliestMs = earliestMs === null ? at : Math.min(earliestMs, at);
+          latestMs = latestMs === null ? at : Math.max(latestMs, at);
+        }
+        const built = buildGhlMessageRow(item as GhlMessageItem, {
+          source: EVENT_SOURCE,
+          captureMode: "backfill",
+        });
+        if (built.kind === "skip") {
+          const key = (built.reason.startsWith("skipped_")
+            ? built.reason
+            : `skipped_${built.reason}`) as CountKey;
+          counts[key]++;
+          if (key === "skipped_call") {
+            c.skipped_call++;
+          }
+          continue;
+        }
+        const key = String(built.row.provider_message_id);
+        if (keys.has(key)) continue;
+        keys.add(key);
+        built.row.metadata = {
+          ...(built.row.metadata as Record<string, unknown>),
+          history_run_id: run,
+        };
+        rows.push(built.row);
+      }
+
+      let existing = new Map<string, string | null>();
+      if (rows.length) {
+        try {
+          existing = await deps.existingKeys([...keys]);
+        } catch {
+          // The writer is idempotent: an unreadable pre-check only costs
+          // extra writer calls. Counted, never hidden.
+          counts.precheck_errors++;
+        }
+      }
+      let timedOut = 0;
+      for (const row of rows) {
+        const key = String(row.provider_message_id);
+        if (existing.has(key)) {
+          counts.duplicates++;
+          c.duplicates++;
+          const stored = ms(existing.get(key));
+          const provider = ms(row.event_at);
+          if (
+            stored !== null && provider !== null &&
+            Math.abs(stored - provider) > policy.timeDriftMs
+          ) {
+            counts.existing_time_differs++;
+            c.existing_time_differs++;
+          }
+          continue;
+        }
+        if (req.dryRun) {
+          counts.would_insert++;
+          continue;
+        }
+        let toWrite = row;
+        if (row.event_type === "client.call_logged") {
+          const paired = await deps.pairLegacyCall(row);
+          toWrite = paired.row;
+          if (paired.outcome === "paired") counts.calls_paired_legacy++;
+          else if (paired.outcome === "unreadable") {
+            counts.call_pair_unreadable++;
+          }
+        }
+        const saved = await deps.capture(toWrite);
+        if (saved.outcome === "inserted") {
+          counts.inserted++;
+          c.inserted++;
+          const status = saved.attribution_status ?? null;
+          const bucket: ContactCountKey = status && LINKED.has(status)
+            ? "placed_on_job"
+            : status === "pending_luna"
+            ? "pending_review"
+            : status === "unplaced"
+            ? "unplaced"
+            : status === "admin_bucket"
+            ? "admin_bucket"
+            : "other_status";
+          counts[bucket]++;
+          c[bucket]++;
+        } else if (saved.outcome === "duplicate") {
+          counts.duplicates++;
+          c.duplicates++;
+        } else if (saved.outcome === "capture_disabled") {
+          return {
+            kind: "stop",
+            status: "partial",
+            code: "capture_disabled",
+            stopRun: "capture_disabled",
+          };
+        } else {
+          const code = safeCode(saved.code, "unknown");
+          counts.write_errors++;
+          c.write_errors++;
+          if (STATEMENT_TIMEOUT_CODES.has(code)) {
+            // One heavy row: skip it, keep its page for a later run.
+            timedOut++;
+            timeoutsThisRun++;
+            rowsTimeoutSkipped++;
+            c.timeout_skipped++;
+            if (timeoutsThisRun > policy.maxRowTimeoutsPerContactRun) {
+              return {
+                kind: "stop",
+                status: "partial",
+                code: "statement_timeout",
+                stopRun: null,
+              };
+            }
+            continue;
+          }
+          return {
+            kind: "stop",
+            status: "partial",
+            code,
+            stopRun: code === "attribution_disabled" ? code : null,
+          };
+        }
+      }
+      return { kind: "ok", timedOut };
+    };
+
+    // a. Pages kept from earlier runs for rows that timed out: read again
+    // (already-saved rows are duplicates), dropped once every row saves,
+    // given up after maxRowRetryRuns runs that still time out.
+    for (const page of [...retry]) {
+      if (deps.now() - started >= policy.timeBudgetMs) {
+        return out(
+          "partial",
+          null,
+          point(resume.conversation_id, resume.last_message_id),
+        );
+      }
+      const drop = () => retry.splice(retry.indexOf(page), 1);
+      if (page.tries >= policy.maxRowRetryRuns) {
+        // Stopped mid-page on its last try: given up without another read.
+        drop();
+        givenUp++;
+        rowsGivenUp++;
+        c.timeout_given_up++;
+        continue;
+      }
+      let read;
+      try {
+        read = await deps.listMessages({
+          contactId: contact.contact_id,
+          conversationId: page.conversation_id,
+          limit: policy.messagePageLimit,
+          lastMessageId: page.last_message_id ?? undefined,
+        });
+      } catch (error) {
+        const f = providerFailure(error);
+        if (failureStopsRun(f)) {
+          return out(
+            "partial",
+            stopCode(f),
+            point(resume.conversation_id, resume.last_message_id),
+            stopCode(f),
+          );
+        }
+        page.tries++;
+        if (page.tries >= policy.maxRowRetryRuns) {
+          drop();
+          givenUp++;
+          rowsGivenUp++;
+          c.timeout_given_up++;
+        }
+        continue;
+      }
+      pagesThisRun++;
+      counts.message_pages++;
+      c.message_pages++;
+      counts.items_seen += read.messages.length;
+      c.items_seen += read.messages.length;
+      const saved = await savePage(read.messages);
+      if (saved.kind === "stop") {
+        if (saved.code === "statement_timeout") page.tries++;
+        return out(
+          saved.status,
+          saved.code,
+          point(resume.conversation_id, resume.last_message_id),
+          saved.stopRun,
+        );
+      }
+      if (saved.timedOut === 0) {
+        drop();
+      } else {
+        page.tries++;
+        if (page.tries >= policy.maxRowRetryRuns) {
+          drop();
+          givenUp += saved.timedOut;
+          rowsGivenUp += saved.timedOut;
+          c.timeout_given_up += saved.timedOut;
+        }
+      }
+    }
+
+    // b. Every conversation of the contact, newest first.
     const conversations: string[] = [];
     let startAfterDate: string | undefined;
     for (let page = 0;; page++) {
@@ -498,11 +850,14 @@ export async function runGhlHistoryLoad(
         });
       } catch (error) {
         const f = providerFailure(error);
+        const keep = resume.done.length > 0 ||
+          resume.conversation_id !== null ||
+          retry.length > 0;
         if (failureStopsRun(f)) {
           return out(
-            resume.done.length || resume.conversation_id ? "partial" : "failed",
+            keep ? "partial" : "failed",
             stopCode(f),
-            resume.done.length || resume.conversation_id ? resume : null,
+            keep ? point(resume.conversation_id, resume.last_message_id) : null,
             stopCode(f),
           );
         }
@@ -523,7 +878,7 @@ export async function runGhlHistoryLoad(
       startAfterDate = list.nextStartAfterDate;
     }
 
-    // b. Each conversation back to its first message. A resumed load finishes
+    // c. Each conversation back to its first message. A resumed load finishes
     // the conversation it stopped in first, then the ones it has not read.
     const order = resume.conversation_id &&
         conversations.includes(resume.conversation_id)
@@ -545,12 +900,11 @@ export async function runGhlHistoryLoad(
           if (pagesThisRun >= policy.maxMessagePagesPerContact) {
             counts.message_pages_capped++;
           }
-          return out("partial", null, {
-            v: 1,
-            done: resume.done,
-            conversation_id: conversationId,
-            last_message_id: lastMessageId ?? null,
-          });
+          return out(
+            "partial",
+            null,
+            point(conversationId, lastMessageId ?? null),
+          );
         }
         let read;
         try {
@@ -562,14 +916,13 @@ export async function runGhlHistoryLoad(
           });
         } catch (error) {
           const f = providerFailure(error);
-          const point: Resume = {
-            v: 1,
-            done: resume.done,
-            conversation_id: conversationId,
-            last_message_id: lastMessageId ?? null,
-          };
           if (failureStopsRun(f)) {
-            return out("partial", stopCode(f), point, stopCode(f));
+            return out(
+              "partial",
+              stopCode(f),
+              point(conversationId, lastMessageId ?? null),
+              stopCode(f),
+            );
           }
           return out(
             "failed",
@@ -584,113 +937,34 @@ export async function runGhlHistoryLoad(
         counts.items_seen += items.length;
         c.items_seen += items.length;
 
-        const rows: Record<string, unknown>[] = [];
-        const keys = new Set<string>();
-        for (const item of items) {
-          const at = ms(item.dateAdded);
-          if (at !== null) {
-            earliestMs = earliestMs === null ? at : Math.min(earliestMs, at);
-            latestMs = latestMs === null ? at : Math.max(latestMs, at);
-          }
-          const built = buildGhlMessageRow(item as GhlMessageItem, {
-            source: EVENT_SOURCE,
-            captureMode: "backfill",
-          });
-          if (built.kind === "skip") {
-            const key = (built.reason.startsWith("skipped_")
-              ? built.reason
-              : `skipped_${built.reason}`) as CountKey;
-            counts[key]++;
-            if (key === "skipped_call") {
-              c.skipped_call++;
-            }
-            continue;
-          }
-          const key = String(built.row.provider_message_id);
-          if (keys.has(key)) continue;
-          keys.add(key);
-          built.row.metadata = {
-            ...(built.row.metadata as Record<string, unknown>),
-            history_run_id: run,
-          };
-          rows.push(built.row);
+        const saved = await savePage(items);
+        if (saved.kind === "stop") {
+          return out(
+            saved.status,
+            saved.code,
+            point(conversationId, lastMessageId ?? null),
+            saved.stopRun,
+          );
         }
-
-        let existing = new Map<string, string | null>();
-        if (rows.length) {
-          try {
-            existing = await deps.existingKeys([...keys]);
-          } catch {
-            // The writer is idempotent: an unreadable pre-check only costs
-            // extra writer calls. Counted, never hidden.
-            counts.precheck_errors++;
-          }
-        }
-        for (const row of rows) {
-          const key = String(row.provider_message_id);
-          if (existing.has(key)) {
-            counts.duplicates++;
-            c.duplicates++;
-            const stored = ms(existing.get(key));
-            const provider = ms(row.event_at);
-            if (
-              stored !== null && provider !== null &&
-              Math.abs(stored - provider) > policy.timeDriftMs
-            ) {
-              counts.existing_time_differs++;
-              c.existing_time_differs++;
+        if (saved.timedOut > 0) {
+          const already = retry.some((p) =>
+            p.conversation_id === conversationId &&
+            p.last_message_id === (lastMessageId ?? null)
+          );
+          if (!already) {
+            if (retry.length >= policy.maxRetryPages) {
+              // No room to remember the page: stop here so it is read again.
+              return out(
+                "partial",
+                "statement_timeout",
+                point(conversationId, lastMessageId ?? null),
+              );
             }
-            continue;
-          }
-          if (req.dryRun) {
-            counts.would_insert++;
-            continue;
-          }
-          let toWrite = row;
-          if (row.event_type === "client.call_logged") {
-            const paired = await deps.pairLegacyCall(row);
-            toWrite = paired.row;
-            if (paired.outcome === "paired") counts.calls_paired_legacy++;
-            else if (paired.outcome === "unreadable") {
-              counts.call_pair_unreadable++;
-            }
-          }
-          const saved = await deps.capture(toWrite);
-          if (saved.outcome === "inserted") {
-            counts.inserted++;
-            c.inserted++;
-            const status = saved.attribution_status ?? null;
-            const bucket: ContactCountKey = status && LINKED.has(status)
-              ? "placed_on_job"
-              : status === "pending_luna"
-              ? "pending_review"
-              : status === "unplaced"
-              ? "unplaced"
-              : status === "admin_bucket"
-              ? "admin_bucket"
-              : "other_status";
-            counts[bucket]++;
-            c[bucket]++;
-          } else if (saved.outcome === "duplicate") {
-            counts.duplicates++;
-            c.duplicates++;
-          } else if (saved.outcome === "capture_disabled") {
-            return out("partial", "capture_disabled", {
-              v: 1,
-              done: resume.done,
+            retry.push({
               conversation_id: conversationId,
               last_message_id: lastMessageId ?? null,
-            }, "capture_disabled");
-          } else {
-            const code = safeCode(saved.code, "unknown");
-            counts.write_errors++;
-            c.write_errors++;
-            return out("partial", code, {
-              v: 1,
-              done: resume.done,
-              conversation_id: conversationId,
-              last_message_id: lastMessageId ?? null,
-            }, code === "attribution_disabled" ? code : undefined);
+              tries: 0,
+            });
           }
         }
 
@@ -713,7 +987,11 @@ export async function runGhlHistoryLoad(
       resume.conversation_id = null;
       resume.last_message_id = null;
     }
-    return out("done", null, null);
+    // Every conversation read: done, unless timed-out pages still wait.
+    if (retry.length) {
+      return out("partial", "statement_timeout_retry", point(null, null));
+    }
+    return out("done", givenUp ? "rows_given_up_after_timeouts" : null, null);
   };
 
   try {
@@ -726,6 +1004,9 @@ export async function runGhlHistoryLoad(
       await deps.recordRun({ run_id: run, source, counts });
 
       const result = await loadContact(contact);
+      // Attempted: its GHL reads were spent, so its jobs are charged today.
+      chargedJobs += cost(contact);
+      pendingJobs -= cost(contact);
       counts[
         result.status === "done"
           ? "contacts_done"
@@ -781,11 +1062,23 @@ export async function runGhlHistoryLoad(
     ? "partial"
     : "succeeded";
   const errorCode = stop ?? firstIssue;
+  // The refund: the day is charged only for the contacts this run attempted.
+  counts.jobs_covered = chargedJobs;
+  const quota: Quota = {
+    jobs_reserved: reservedJobs,
+    jobs_charged: chargedJobs,
+    jobs_refunded: Math.max(0, pendingJobs),
+    contacts_unreached: due.contacts.length - outcomes.length,
+    rows_timeout_skipped: rowsTimeoutSkipped,
+    rows_given_up: rowsGivenUp,
+    rate_limited: (errorCode ?? "").includes("ghl_rate_limited"),
+  };
   await deps.recordRun({
     run_id: run,
     source,
     status,
     counts,
+    cursor: { ...runCursor, quota },
     error_code: errorCode,
   });
   return {
@@ -796,5 +1089,6 @@ export async function runGhlHistoryLoad(
     error_code: errorCode,
     counts,
     contacts: outcomes,
+    quota,
   };
 }

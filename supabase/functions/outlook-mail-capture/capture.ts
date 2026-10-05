@@ -25,6 +25,18 @@
 // re-reading the same page. A history run that was cut short resumes the
 // same way. The cursor never moves past an email that failed to save.
 //
+// Old-path copies (gap plan B-1): until the reader's schedule is on, the old
+// monitor-inbox path saved inbound inbox mail under its own keys (graph:<id>,
+// graph-group:<id>), which never collide with this reader's email:<id> key.
+// So before saving an inbound email the reader asks
+// context_email_legacy_copy for the old path's row of the same email (same
+// sender, same Graph receivedDateTime; or within 2 minutes with the same
+// subject, for another mailbox's copy). When one exists the email is not
+// saved again (counts.skipped_legacy_copy); its attachments still go to the
+// private store, pointed at the old row. Our own mail (outbound, internal) is
+// never skipped: its old copy is an inbox copy typed as inbound, the reader's
+// row is the correct one.
+//
 // Gates: feature flag email_reader_v1 (this reader's own switch, off by
 // default), email_capture_v2 (the email capture program's switch, EM1) and the
 // capture lane must all be on; otherwise the call is idle and reads nothing.
@@ -151,6 +163,12 @@ export interface CaptureDeps {
   /** record_capture_run. Throws on refusal; returns the run id. */
   recordRun(run: Record<string, unknown>): Promise<string>;
   capture(row: Record<string, unknown>): Promise<CaptureOutcome>;
+  /** The old monitor-inbox path's row for the same inbound email, or null. Throws when unreadable. */
+  legacyCopy(args: {
+    from: string;
+    receivedAt: string;
+    subject: string;
+  }): Promise<string | null>;
   mail: MailReads;
   storeAttachments(args: {
     home: AttachmentHome;
@@ -455,6 +473,7 @@ async function runSource(
     skipped_folder: 0,
     skipped_no_sender: 0,
     skipped_out_of_scope: 0,
+    skipped_legacy_copy: 0,
     skipped_before_cursor: 0,
     no_internet_id: 0,
     body_truncated: 0,
@@ -547,6 +566,37 @@ async function runSource(
       return;
     }
     const payload = built.row.payload as Record<string, unknown>;
+    if (
+      built.row.direction === "inbound" && item.receivedAt &&
+      item.folderKind !== "sent"
+    ) {
+      let legacyId: string | null;
+      try {
+        legacyId = await deps.legacyCopy({
+          from: String(payload.from),
+          receivedAt: item.receivedAt,
+          subject: String(payload.subject ?? ""),
+        });
+      } catch (e) {
+        throw new SourceStop(safeCode(e, "legacy_copy_unreadable"), "failed");
+      }
+      if (legacyId) {
+        counts.skipped_legacy_copy++;
+        if (item.hasAttachments) {
+          const a = await deps.storeAttachments({
+            home,
+            providerMessageId: String(built.row.provider_message_id),
+            businessEventId: legacyId,
+            scopeLabel: s.scope_label,
+          });
+          counts.attachments_stored += a.stored;
+          counts.attachments_skipped += a.skipped;
+          counts.attachment_errors += a.errors;
+        }
+        await advance();
+        return;
+      }
+    }
     const out = await deps.capture(built.row);
     if (out.outcome === "capture_disabled") {
       throw new SourceStop("capture_disabled", "partial");
