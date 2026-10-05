@@ -1,83 +1,20 @@
--- Ladder L1f: turning the rules on (P4, flag context_unlinked_rules_v1) never
--- takes a row off a job it already sits on for a reason only the rules-on path
--- has. Rules-on path only; the rules-off ladder and the flag are unchanged.
---
--- Why (P4 preview 5 Oct 2026 01:05Z, firstmate home
--- data/cio-ctx-linking/p4-preview.sql: 1,224 rows judged, 20 bad moves, flag
--- not flipped):
---   a. Patio tool scope.decision rows (no words) that the reviewed writer-key
---      relink put on their job (SWP-261514, SWP-261515) went to the bucket with
---      rule unverified_writer: the patio tool writes with the public key, and
---      the rules-on writer check runs before F6 (20261005170000), so F6 never
---      kept their job. The rules-off ladder keeps it.
---   b. Bucket rows placed single_open on a draft job (SWP-261511, SWP-261512,
---      SWP-261496) are correct, not changed here: a draft is the job card a
---      lead gets (ghl-webhook and ghl-proxy create_job create jobs as draft;
---      ensure_booking_draft_job, 20260921140000) and the ladder admits a draft
---      only when the customer has no other open job, on both paths. The
---      preview's not_live rule was too strict for drafts (fixed in the preview).
---   c. A call transcript placed single_open on its job (SWF-261098) went to
---      review (review_aftercare): the rules-on timeline counts a job in status
---      invoiced with a completion time as finished, the rules-off one does
---      not, so the rules-on contact step found no live job and sent the row
---      to aftercare review. The same difference, and the other rules-on review
---      reasons (a shared phone or email, a recently finished job, a retired
---      thread), can take any contact-rule row off its job.
---
--- Changed (rules on only):
---   1. Confirmed custody. A row whose writer is not the service role keeps a
---      custody job when the reader never reads it (system or audit channel, no
---      words, automated) and its source_job_binding carries via, which only a
---      reviewed service-role repair writes after the insert (writer_key_relink,
---      payload_job_id): the insert trigger strips any binding a writer sends,
---      the rules-off ladder stamps one without via, and no other role may
---      update a row. placement_rule confirmed_custody. A worded row from such a
---      writer is still held in the bucket (unverified_writer), and a public-key
---      or signed-in insert still pins nothing.
---   2. Held placement. A row a contact rule or Luna already put on a job
---      (status single_open, single_line or luna with match_method contact_id)
---      keeps that job when the contact step would send it to review or the
---      bucket, provided the job is one of the customer's own or contactless
---      jobs and no other of those is live at the message time (none is, or it
---      is the one; another contact's job that shares the phone or email does
---      not count). placement_rule held_placement,
---      metadata.placement_held_from names the rule it outranked, status and
---      confidence kept. A retired thread binding no longer sends such a row to
---      unplaced. With another live job (a new job: P1b's reconsideration) the
---      contact rules decide as before, so a new enquiry still reaches review.
--- Not changed: the rules-off ladder, the entry, the insert trigger, the
--- preview (context_attribution_preview), the timeline, Luna, P1b's
--- reconsideration and the flag. No row is written: rows change only when
--- inserted or re-decided.
---
--- Replaces (built on the body merged on main):
---   resolve_context_attribution(business_events,boolean,boolean)  L1e (20261005170000) md5(prosrc) d5af94a0f9320652116cc2b304021ab5
--- Read, not replaced (pinned by the guard): context_ladder_p1a(business_events,boolean) ce620833 (L1e),
---   resolve_context_attribution(business_events) 32365101 (P4), attribute_business_event() d0036a1b (P4),
---   context_contact_job_timeline(text,timestamptz,text,text) f98da204 (P4),
---   context_event_writer_job(business_events) cd36b092 and context_payload_job_is_guess(business_events) 1c87d887 (L1e),
---   context_bucket_text(business_events) 398e2123 (B0).
--- The guard refuses unless the replaced body is L1e's (or already this
--- migration's, for a re-apply). The body carries an "L1f:" comment, so L1e's
--- guard refuses to re-apply over it rather than silently removing these rules.
--- Rollback: supabase/rollbacks/20261005235000_context_ladder_held_placement_down.sql
+-- Down for 20261006003000 (ladder L1f): restore L1e's rules-on ladder body
+-- (20261005170000) byte for byte, with L1e's comment and grants. Rows the new
+-- rules kept keep what they have; a later rules-on re-decision uses L1e's
+-- ladder again (a confirmed-custody row from another writer would then go to
+-- the bucket, and a held row could go to review or the bucket again). The
+-- rules-off ladder is untouched by both.
+--   resolve_context_attribution(business_events,boolean,boolean)  md5(prosrc) d5af94a0f9320652116cc2b304021ab5
 SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '120s';
+SET LOCAL statement_timeout = '60s';
 
--- 0. Pre-image guard. Reports every problem at once.
+-- Refuse to overwrite a later change: the body must be this migration's (or
+-- already L1e's, for a repeated rollback).
 DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['d5af94a0f9320652116cc2b304021ab5', 'c88084c4fd9722c11851519fd232a21b'],false),
-  -- Read, not replaced.
-  ('public.context_ladder_p1a(public.business_events,boolean)',ARRAY['ce620833c851196a00eca328d9b7426a'],false),
-  ('public.resolve_context_attribution(public.business_events)',ARRAY['32365101d23dde1695707a0bddff640b'],false),
-  ('public.attribute_business_event()',ARRAY['d0036a1bc36f4b2a779f4a8b192cd687'],false),
-  ('public.context_contact_job_timeline(text,timestamptz,text,text)',ARRAY['f98da204718a4d5ac6395761a963ced4'],false),
-  ('public.context_event_writer_job(public.business_events)',ARRAY['cd36b092818e7607d114d1b3011b3bfd'],false),
-  ('public.context_payload_job_is_guess(public.business_events)',ARRAY['1c87d88718cf014429170e3f1aaaa2aa'],false),
-  ('public.context_bucket_text(public.business_events)',ARRAY['398e21232ca6eb425f882a39840c7b4a'],false)
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['c88084c4fd9722c11851519fd232a21b', 'd5af94a0f9320652116cc2b304021ab5'],false)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
@@ -85,11 +22,10 @@ BEGIN
   IF live IS NULL OR NOT live=ANY(x.accepted) THEN problems:=problems||format('%s md5 %s',x.sig,coalesce(live,'<missing>')); END IF;
  END LOOP;
  IF cardinality(problems)>0 THEN
-  RAISE EXCEPTION 'context_ladder_held_placement_preimage_mismatch: %; read the live definitions before replacing them',array_to_string(problems,'; ');
+  RAISE EXCEPTION 'context_ladder_held_placement_rollback_mismatch: %; a later change must be rolled back first',array_to_string(problems,'; ');
  END IF;
 END $guard$;
 
--- 1. Rules on: L1e's body plus confirmed custody and held placement.
 CREATE OR REPLACE FUNCTION public.resolve_context_attribution(e public.business_events,p_preview boolean,p_rules_on boolean)
 RETURNS public.business_events
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
@@ -104,9 +40,8 @@ DECLARE
  owned_keys constant text[]:=ARRAY['payload_job_guess','placement_rule','placement_contactless_job_ids','placement_guard_job_ids','placement_other_contact_job_ids',
   'bucket_reason','ref_not_found','ref_job_ids','identity_conflict','contact_recovered_by','writer_unknown','custody_rescan',
   'placement_site_keys','placement_retired_binding','placement_preview_bindings','supplier_ref_conflicts','aftercare_unpaid_job_ids',
-  'audience','recipient_role_source','placement_held_from'];
+  'audience','recipient_role_source'];
  writer_job uuid;
- held_job uuid; held_conf numeric; held_match_conf numeric; held_ok boolean:=false; all_ids uuid[]; own_live_ids uuid[];
 BEGIN
  rules_on:=coalesce(p_rules_on,public.context_unlinked_rules_enabled());
  p_preview:=coalesce(p_preview,false);
@@ -129,12 +64,6 @@ BEGIN
      -- L1e (20261005170000): a job the service role named without saying how
      -- (no match_method) is kept for a row the reader never reads.
      writer_job:=public.context_event_writer_job(e);
-     -- L1f (20261005235000): a job a contact rule or Luna already chose
-     -- (single_open, single_line or luna, match_method contact_id) is
-     -- remembered for the held placement at step 5.
-     IF prior_status IN ('single_open','single_line','luna') AND source_method='contact_id' THEN
-      held_job:=e.job_id; held_conf:=e.attribution_confidence; held_match_conf:=e.match_confidence;
-     END IF;
      e.metadata:=coalesce(e.metadata,'{}'::jsonb)-'source_job_binding';
      e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
      e.job_id:=NULL;
@@ -162,19 +91,6 @@ BEGIN
    IF writer IS NULL THEN
     e.metadata:=coalesce(e.metadata,'{}'::jsonb)||jsonb_build_object('writer_unknown',true);
    ELSIF writer<>'service_role' THEN
-    -- L1f (20261005235000): a row the reader never reads (system or audit,
-    -- no words, automated) keeps a custody job the service role confirmed
-    -- after the insert (source_job_binding.via, written only by a reviewed
-    -- service-role repair such as writer_key_relink: the insert trigger strips
-    -- any binding a writer sends, and no other role may update the row), as
-    -- with the rules off. Every worded row from this writer is still held.
-    IF e.job_id IS NOT NULL AND e.metadata->'source_job_binding' ? 'via'
-     AND (to_jsonb(e)->>'channel' IN ('system','audit') OR btrim(words)='' OR prior_status='automated'
-      OR e.payload->>'automated'='true' OR e.payload->>'auto_submitted' IN ('auto-generated','auto-replied')) THEN
-     e.attribution_status:=CASE WHEN to_jsonb(e)->>'channel' IN ('system','audit') THEN 'automated' WHEN btrim(words)='' THEN 'empty' ELSE 'automated' END;
-     e.metadata:=e.metadata||jsonb_build_object('placement_rule','confirmed_custody');
-     EXIT rules;
-    END IF;
     IF e.job_id IS NOT NULL THEN
      e.metadata:=e.metadata||jsonb_build_object('attribution_hint',jsonb_build_object('job_id',e.job_id,'match_method',source_method,'match_confidence',e.match_confidence));
      e.job_id:=NULL;
@@ -326,30 +242,19 @@ BEGIN
      coalesce(array_agg(t.job_id ORDER BY t.terminal_at DESC,t.job_id) FILTER (WHERE t.basis<>'key_other_contact' AND t.terminal AND t.unpaid_at
       AND t.created_at<=v_at),'{}'),
      coalesce(array_agg(t.job_id ORDER BY t.terminal_at DESC,t.job_id) FILTER (WHERE t.basis<>'key_other_contact' AND t.terminal AND NOT t.unpaid_at
-      AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '60 days'),'{}'),
-     coalesce(array_agg(t.job_id ORDER BY t.job_id) FILTER (WHERE t.basis<>'key_other_contact'),'{}'),
-     coalesce(array_agg(t.job_id ORDER BY t.job_id) FILTER (WHERE t.basis<>'key_other_contact' AND t.candidate),'{}')
-    INTO ids,line_ids,guard_ids,contactless_ids,other_ids,used_updated_at,unpaid_ids,window_ids,all_ids,own_live_ids
+      AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-interval '60 days'),'{}')
+    INTO ids,line_ids,guard_ids,contactless_ids,other_ids,used_updated_at,unpaid_ids,window_ids
     FROM public.context_contact_job_timeline(contact,v_at,pk,ek) t;
-    -- L1f (20261005235000): the held job is still the answer while it is one
-    -- of the customer's own or contactless jobs and no other of those is live
-    -- at the message time (none is, or it is the one). Another contact's job
-    -- that shares the phone or email is not the customer's job.
-    held_ok:=held_job IS NOT NULL AND held_job=ANY(all_ids)
-     AND (cardinality(own_live_ids)=0 OR own_live_ids=ARRAY[held_job]);
    END IF;
 
    -- 4. Thread: a live binding; with a known contact, only one of its jobs.
    IF cand IS NULL AND NOT is_ghl AND nullif(e.thread_key,'') IS NOT NULL THEN
     SELECT * INTO b FROM public.event_threads WHERE thread_key=e.thread_key;
     IF FOUND AND b.retired_at IS NOT NULL THEN
-     -- L1f (20261005235000): a held row goes on to step 5 and stays.
-     IF NOT held_ok THEN
-      e.attribution_status:='unplaced'; e.attribution_step:=2;
-      e.candidate_job_ids:=ARRAY(SELECT DISTINCT x FROM unnest(ARRAY[b.job_id,b.retired_conflict_job_id]) x WHERE x IS NOT NULL ORDER BY x);
-      e.metadata:=e.metadata||jsonb_build_object('placement_rule','thread_retired','placement_retired_binding',e.thread_key);
-      EXIT rules;
-     END IF;
+     e.attribution_status:='unplaced'; e.attribution_step:=2;
+     e.candidate_job_ids:=ARRAY(SELECT DISTINCT x FROM unnest(ARRAY[b.job_id,b.retired_conflict_job_id]) x WHERE x IS NOT NULL ORDER BY x);
+     e.metadata:=e.metadata||jsonb_build_object('placement_rule','thread_retired','placement_retired_binding',e.thread_key);
+     EXIT rules;
     ELSIF FOUND AND (contact IS NULL OR b.job_id=ANY(ids||unpaid_ids||window_ids)) THEN
      cand:=b.job_id; e.attribution_status:='thread'; e.attribution_step:=2; rule:='thread';
     END IF;
@@ -407,20 +312,6 @@ BEGIN
      IF cardinality(unpaid_ids)>0 THEN
       e.metadata:=e.metadata||jsonb_build_object('aftercare_unpaid_job_ids',to_jsonb(unpaid_ids));
      END IF;
-    END IF;
-    -- L1f (20261005235000): held placement. A row a contact rule or Luna
-    -- already put on a job keeps it when the rules above would send it to
-    -- review or the bucket and no other job of the customer (own or
-    -- contactless) is live at the message time: the rules-on reasons (an invoiced job counted finished,
-    -- aftercare, a shared phone or email, a recently finished job) never take
-    -- it off its job. With another live job (P1b's reconsideration after a
-    -- new job) the rules above decide as before. placement_held_from names
-    -- the rule it outranked.
-    IF cand IS NULL AND held_ok THEN
-     e.metadata:=e.metadata||jsonb_build_object('placement_held_from',coalesce(rule,CASE WHEN contact IS NULL THEN 'no_contact' ELSE 'no_candidate_at_time' END));
-     cand:=held_job; e.attribution_status:=prior_status;
-     e.attribution_step:=CASE prior_status WHEN 'single_open' THEN 3 WHEN 'single_line' THEN 4 ELSE 5 END;
-     rule:='held_placement'; review_ids:=NULL;
     END IF;
     IF review_ids IS NOT NULL THEN
      -- Rows loaded as history or re-links never go to the model (X27).
@@ -541,8 +432,8 @@ BEGIN
    IF jsonb_array_length(conflicts)>0 THEN e.metadata:=e.metadata||jsonb_build_object('supplier_ref_conflicts',conflicts); END IF;
    IF p_preview AND jsonb_array_length(bindings)>0 THEN e.metadata:=e.metadata||jsonb_build_object('placement_preview_bindings',bindings); END IF;
    e.metadata:=e.metadata||jsonb_build_object('placement_rule',rule);
-   e.attribution_confidence:=CASE WHEN rule='held_placement' THEN coalesce(held_conf,1) ELSE 1 END; e.attributed_at:=clock_timestamp();
-   e.match_status:='matched'; e.match_confidence:=CASE WHEN rule='held_placement' THEN coalesce(held_match_conf,1) ELSE 1 END;
+   e.attribution_confidence:=1; e.attributed_at:=clock_timestamp();
+   e.match_status:='matched'; e.match_confidence:=1;
    e.match_method:=CASE WHEN custody THEN source_method WHEN rule='payload_job' THEN 'direct_job_id' WHEN rule='direct_ref' THEN 'ladder_ref'
     WHEN e.attribution_status='content_ref' THEN 'content_ref' ELSE 'contact_id' END;
   EXCEPTION WHEN OTHERS THEN
@@ -563,8 +454,7 @@ BEGIN
  RETURN e;
 END $$;
 COMMENT ON FUNCTION public.resolve_context_attribution(public.business_events,boolean,boolean) IS
- 'L1f: the ladder (P4) as L1e left it (20261005170000) plus L1f (20261005235000), rules-on path only. Rules off: P1a''s ladder as L1e left it, unchanged. Rules on: writer check, except that a row the reader never reads (system or audit, no words, automated) keeps a custody job the service role confirmed after the insert (source_job_binding.via: confirmed_custody); a service-role outbound row marked recipient_role crew or staff handled by the L1d rule; a row with no words or an automated row keeps a custody job and the job a service-role writer named with no match_method (writer_job); custody with monitor-inbox re-scan; the source''s own payload job unless its writer declared it a guess; identity (payload.from read); references; live thread and supplier order bindings; contact rules with keys and aftercare, where a row a contact rule or Luna already put on a job keeps it while no other of the customer''s own or contactless jobs is live at the message time (held_placement, placement_held_from names the rule it outranked); exact or loose site address; bucket. Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
+ 'L1e: the ladder (P4) as L1d left it (20261005090000: step 1b and the crew and staff rules) plus L1e (20261005170000). Rules off: P1a''s ladder with those and L1e. Rules on: writer check, a service-role outbound row marked recipient_role crew or staff handled by the L1d rule, a row with no words or an automated row keeps a custody job and the job a service-role writer named with no match_method (writer_job), custody with monitor-inbox re-scan, the source''s own payload job unless its writer declared it a guess (bindable: placed, rule payload_job; unbindable: bucket, payload_job_unbindable; guess: payload_job_guess, on to the later rules), identity (payload.from read), references (multi_ref unplaced; one job on an outbound row to a known contact who is not that job''s customer or party: the L1d rule), live thread and supplier order bindings, contact rules with keys and aftercare, exact or loose site address, bucket. Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
 
--- Grants: the ladder body stays private.
 REVOKE ALL ON FUNCTION public.resolve_context_attribution(public.business_events,boolean,boolean)
 FROM PUBLIC,anon,authenticated,service_role;

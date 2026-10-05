@@ -1,4 +1,4 @@
--- Ladder L1f contract (20261005235000). Every fixture write is rolled back.
+-- Ladder L1f contract (20261006003000). Every fixture write is rolled back.
 -- Ids, job numbers, contacts, phones and text are synthetic.
 --
 -- Each class is decided with the rules flag off (as shipped) and on, through
@@ -250,7 +250,7 @@ $b$    ELSE
      -- L1e (20261005170000): a job the service role named without saying how
      -- (no match_method) is kept for a row the reader never reads.
      writer_job:=public.context_event_writer_job(e);
-     -- L1f (20261005235000): a job a contact rule or Luna already chose
+     -- L1f (20261006003000): a job a contact rule or Luna already chose
      -- (single_open, single_line or luna, match_method contact_id) is
      -- remembered for the held placement at step 5.
      IF prior_status IN ('single_open','single_line','luna') AND source_method='contact_id' THEN
@@ -263,7 +263,7 @@ $b$    ELSE
      writer_job:=public.context_event_writer_job(e);
 $b$),
 $b$   ELSIF writer<>'service_role' THEN
-    -- L1f (20261005235000): a row the reader never reads (system or audit,
+    -- L1f (20261006003000): a row the reader never reads (system or audit,
     -- no words, automated) keeps a custody job the service role confirmed
     -- after the insert (source_job_binding.via, written only by a reviewed
     -- service-role repair such as writer_key_relink: the insert trigger strips
@@ -284,7 +284,7 @@ $b$      AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-
      coalesce(array_agg(t.job_id ORDER BY t.job_id) FILTER (WHERE t.basis<>'key_other_contact' AND t.candidate),'{}')
     INTO ids,line_ids,guard_ids,contactless_ids,other_ids,used_updated_at,unpaid_ids,window_ids,all_ids,own_live_ids
     FROM public.context_contact_job_timeline(contact,v_at,pk,ek) t;
-    -- L1f (20261005235000): the held job is still the answer while it is one
+    -- L1f (20261006003000): the held job is still the answer while it is one
     -- of the customer's own or contactless jobs and no other of those is live
     -- at the message time (none is, or it is the one). Another contact's job
     -- that shares the phone or email is not the customer's job.
@@ -298,7 +298,7 @@ $b$      AND t.created_at<=v_at AND t.terminal_at<=v_at AND t.terminal_at>=v_at-
    END IF;
 $b$),
 $b$    IF FOUND AND b.retired_at IS NOT NULL THEN
-     -- L1f (20261005235000): a held row goes on to step 5 and stays.
+     -- L1f (20261006003000): a held row goes on to step 5 and stays.
      IF NOT held_ok THEN
       e.attribution_status:='unplaced'; e.attribution_step:=2;
       e.candidate_job_ids:=ARRAY(SELECT DISTINCT x FROM unnest(ARRAY[b.job_id,b.retired_conflict_job_id]) x WHERE x IS NOT NULL ORDER BY x);
@@ -315,7 +315,7 @@ $b$    IF FOUND AND b.retired_at IS NOT NULL THEN
 $b$      e.metadata:=e.metadata||jsonb_build_object('aftercare_unpaid_job_ids',to_jsonb(unpaid_ids));
      END IF;
     END IF;
-    -- L1f (20261005235000): held placement. A row a contact rule or Luna
+    -- L1f (20261006003000): held placement. A row a contact rule or Luna
     -- already put on a job keeps it when the rules above would send it to
     -- review or the bucket and no other job of the customer (own or
     -- contactless) is live at the message time: the rules-on reasons (an invoiced job counted finished,
@@ -367,7 +367,7 @@ END $$;
 -- Re-apply is a no-op.
 CREATE TEMP TABLE l1f_before AS SELECT md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p WHERE p.oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure;
-\ir ../../../migrations/20261005235000_context_ladder_held_placement.sql
+\ir ../../../migrations/20261006003000_context_ladder_held_placement.sql
 DO $$
 BEGIN
  IF EXISTS(SELECT 1 FROM l1f_before b, pg_proc p WHERE p.oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure

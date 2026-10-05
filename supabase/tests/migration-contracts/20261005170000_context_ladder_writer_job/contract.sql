@@ -162,7 +162,7 @@ SELECT pg_temp.wj_cases(true);
 ROLLBACK;
 
 -- H. Structure.
--- A registered successor (L1f 20261005235000) replaces the rules ladder and
+-- A registered successor (L1f 20261006003000) replaces the rules ladder and
 -- proves in its own contract that its body is exactly this one plus its edits;
 -- while it is live only the rules-off ladder, the helpers and the classifier
 -- are checked here, and the re-apply is skipped (L1e's guard refuses to
