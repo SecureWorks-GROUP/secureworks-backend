@@ -125,6 +125,14 @@ VALUES ('aa000000-0000-4000-8000-000000000001', NULL, 'Cust.C@example.test', 'Qu
         '2026-10-03 01:00Z', 'g-legacy-1', 'admin@example.test'),
        ('aa000000-0000-4000-8000-000000000002', NULL, 'cust.c@example.test', 'Automatic reply: away', 'I am away',
         '2026-10-04 01:00Z', 'g-legacy-2', 'admin@example.test');
+-- The same customer's mail that the old matcher placed on another of their jobs
+-- (job E) belongs to job E only, never to job C.
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('a0000000-0000-4000-8000-00000000000e', '00000000-0000-4000-8000-0000000000aa', 'SWF-T000E', 'quoted', 'fencing',
+        NULL, NULL, '{}', '2026-09-01 01:00Z');
+INSERT INTO public.inbox_events (id, job_id, from_email, subject, body_preview, received_at, graph_message_id, mailbox)
+VALUES ('aa000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-00000000000e', 'cust.c@example.test', 'About my other job',
+        'When does the other fence start?', '2026-10-05 01:00Z', 'g-legacy-3', 'admin@example.test');
 
 DO $behave$
 DECLARE
@@ -227,5 +235,14 @@ BEGIN
  END IF;
  SELECT * INTO r FROM public.context_job_record_contact(ARRAY[c], asof);
  IF r.last_customer_message->>'table' <> 'inbox_events' THEN RAISE EXCEPTION 'record contract: legacy inbox mail must count as the customer''s word'; END IF;
+ -- the customer's mail placed on their other job stays there
+ IF r.last_customer_message->>'id' <> 'aa000000-0000-4000-8000-000000000001' THEN
+  RAISE EXCEPTION 'record contract: mail placed on another job leaked into job C: %', r.last_customer_message;
+ END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY[c], asof) t WHERE t.source_id = 'aa000000-0000-4000-8000-000000000003';
+ IF n <> 0 THEN RAISE EXCEPTION 'record contract: mail placed on another job is in job C''s timeline'; END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_legacy_mail(ARRAY['a0000000-0000-4000-8000-00000000000e'::uuid], asof) m
+ WHERE m.id = 'aa000000-0000-4000-8000-000000000003' AND m.on_job;
+ IF n <> 1 THEN RAISE EXCEPTION 'record contract: job E keeps the mail placed on it'; END IF;
 END $behave$;
 ROLLBACK;

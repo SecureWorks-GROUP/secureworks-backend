@@ -116,7 +116,9 @@ AS $fn$
   UNION ALL
   SELECT j.id, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id, false
   FROM j JOIN public.inbox_events i ON lower(btrim(i.from_email)) = j.cmail
-  WHERE j.cmail IS NOT NULL AND i.job_id IS DISTINCT FROM j.id
+  -- from the client's address only when placed on no job: mail the old matcher
+  -- placed on another job stays there (a repeat customer's other jobs)
+  WHERE j.cmail IS NOT NULL AND i.job_id IS NULL
  )
  SELECT DISTINCT ON (x.jid, x.received_at) x.jid, x.cmail, x.id, x.received_at, x.subject, x.body_preview, x.from_email,
         x.graph_message_id, x.on_job
@@ -135,7 +137,7 @@ AS $fn$
  ORDER BY x.jid, x.received_at, x.on_job DESC, x.id
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) IS
- 'Job record (20261006011000): legacy inbox_events mail for the jobs: on the job or from the client address, no business_events copy, no business_events email on the job at the same instant, one row per received instant, auto-replies dropped. Inlinable helper read by context_job_record_messages and the story. Service role only.';
+ 'Job record (20261006011000): legacy inbox_events mail for the jobs: placed on the job, or from the client address and placed on no job (mail placed on another job stays there), no business_events copy, no business_events email on the job at the same instant, one row per received instant, auto-replies dropped. Inlinable helper read by context_job_record_messages and the story. Service role only.';
 
 -- 1. Messages helper. Inlinable on purpose (LANGUAGE sql, STABLE, no SET, not
 -- SECURITY DEFINER): the four record functions below call it inside their own
