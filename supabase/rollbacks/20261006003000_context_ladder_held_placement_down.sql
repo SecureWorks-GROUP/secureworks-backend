@@ -14,7 +14,7 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['c88084c4fd9722c11851519fd232a21b', 'd5af94a0f9320652116cc2b304021ab5'],false)
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['ccde73f557aaa90ee67718fdef43535d', 'd5af94a0f9320652116cc2b304021ab5'],false)
  ) AS t(sig,accepted,may_be_absent) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);

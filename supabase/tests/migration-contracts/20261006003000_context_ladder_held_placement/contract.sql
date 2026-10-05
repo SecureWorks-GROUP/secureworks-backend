@@ -233,7 +233,7 @@ ROLLBACK;
 DO $$
 DECLARE r text;
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)<>'c88084c4fd9722c11851519fd232a21b'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure)<>'ccde73f557aaa90ee67718fdef43535d'
  THEN RAISE EXCEPTION 'l1f: the rules ladder is not this migration''s'; END IF;
  -- Undoing the L1f edits gives back L1e's body byte for byte.
  IF md5(replace(replace(replace(replace(replace(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events,boolean,boolean)'::regprocedure),
