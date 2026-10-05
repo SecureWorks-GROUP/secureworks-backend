@@ -153,7 +153,8 @@ BEGIN
    'context_ledger_judge','context_ledger_due','context_ledger_claim','context_ledger_packet','context_ledger_cite','context_ledger_check_item',
    'context_ledger_write','context_ledger_carry_forward','context_ledger_promote','context_ledger_finish',
    'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow','context_ledger_failures',
-   'context_ledger_budget','context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer') LOOP
+   'context_ledger_budget','context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer',
+   'context_ledger_job_event_closes') LOOP
   IF x.c NOT LIKE 'Context ledger store%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -391,7 +392,8 @@ COMMENT ON FUNCTION public.context_ledger_row_admissible(public.business_events)
 -- a call row is stamped counterpart_role customer with basis job_customer; false
 -- when one exists without that stamp; null when no call row is linked, or the
 -- row is not a transcript. The citation check and the packet's call_customer
--- both read it here, so they cannot disagree.
+-- both read it here, so they cannot disagree. A plain helper (no SET, not a
+-- definer); its subquery keeps the planner from inlining it.
 CREATE OR REPLACE FUNCTION public.context_ledger_call_customer(e public.business_events) RETURNS boolean
 LANGUAGE sql STABLE AS $$
  SELECT CASE WHEN e.event_type OPERATOR(pg_catalog.=) 'call.transcript_completed' THEN
@@ -404,7 +406,27 @@ LANGUAGE sql STABLE AS $$
      CASE WHEN e.provider_message_id OPERATOR(pg_catalog.~~) 'ghltx:%' THEN pg_catalog.substr(e.provider_message_id, 7) END))) END
 $$;
 COMMENT ON FUNCTION public.context_ledger_call_customer(public.business_events) IS
- 'Context ledger store (20261006013000): whether a call transcript is the customer''s words, on its call''s stamp: true when the linked call row on the same job (ghl:<payload.ghl_call_id>, else ghl:<id> from the transcript''s own key ghltx:<id>) is stamped counterpart_role customer with basis job_customer, false when a linked call row exists without that stamp, null when none is linked or the row is not a transcript. Read by context_ledger_cite and the packet (call_customer). Inlinable helper. Service role only.';
+ 'Context ledger store (20261006013000): whether a call transcript is the customer''s words, on its call''s stamp: true when the linked call row on the same job (ghl:<payload.ghl_call_id>, else ghl:<id> from the transcript''s own key ghltx:<id>) is stamped counterpart_role customer with basis job_customer, false when a linked call row exists without that stamp, null when none is linked or the row is not a transcript. Read by context_ledger_cite and the packet (call_customer). A plain helper (no SET, not a definer, not inlined: it has a subquery). Service role only.';
+
+-- An app event (job_events) closes only the matter it records: a quote sent,
+-- an invoice sent or issued, a payment received, attendance (a crew clocking on
+-- or off, a trade report submitted). Crew-planning marks (a booking confirmed,
+-- acknowledged or moved) and everything else never close. The citation check
+-- and the write's transitions both read it here.
+CREATE OR REPLACE FUNCTION public.context_ledger_job_event_closes(p_event_type text, p_closes_on text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+ SELECT coalesce(CASE p_closes_on
+  WHEN 'quote_sent' THEN p_event_type OPERATOR(pg_catalog.=) 'quote_sent'
+  WHEN 'invoice_issued' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['invoice.emailed', 'acceptance_invoice_sent', 'payment_link_sent'])
+  WHEN 'payment' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['payment_received', 'payment_recorded'])
+  WHEN 'visit' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['clock.clock_on', 'clock.clock_off', 'makesafe_report_submitted',
+   'roof_report_submitted'])
+  WHEN 'work_done' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['clock.clock_on', 'clock.clock_off', 'makesafe_report_submitted',
+   'roof_report_submitted'])
+  END, false)
+$$;
+COMMENT ON FUNCTION public.context_ledger_job_event_closes(text, text) IS
+ 'Context ledger store (20261006013000): whether an app event (job_events.event_type) may close a matter with this closes_on: quote_sent by quote_sent; invoice_issued by invoice.emailed, acceptance_invoice_sent, payment_link_sent; payment by payment_received, payment_recorded; visit and work_done by clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted. Crew-planning marks (assignment_confirmed and the like) and every other event or closes_on: never. Inlinable helper. Service role only.';
 
 -- The one verdict for promoting without a person: checks.passed, which
 -- finish computes (both sides' refusals at most 20% of what was proposed, the
@@ -440,7 +462,8 @@ COMMENT ON FUNCTION public.context_ledger_backfill_open(smallint, smallint, time
 -- shared placement keys (context_email_key, context_phone_key: our own domains
 -- and lines never count), from the given addresses and numbers and the local
 -- copy of each CRM contact (contact_matches). Used only to decide whether our
--- message reached the customer; never words. Inlinable helper (no SET).
+-- message reached the customer; never words. A plain helper (no SET, not a
+-- definer); its subqueries keep the planner from inlining it.
 CREATE OR REPLACE FUNCTION public.context_ledger_party_keys(p_emails text[], p_phones text[], p_contacts text[]) RETURNS jsonb
 LANGUAGE sql STABLE AS $$
  SELECT jsonb_build_object(
@@ -456,7 +479,7 @@ LANGUAGE sql STABLE AS $$
     WHERE m.ghl_contact_id OPERATOR(pg_catalog.=) ANY (p_contacts)) k WHERE k.v IS NOT NULL), '[]'::jsonb))
 $$;
 COMMENT ON FUNCTION public.context_ledger_party_keys(text[], text[], text[]) IS
- 'Context ledger store (20261006013000): a party''s match keys for the packet: {emails: lower-case trimmed addresses, phones: last 9 digits}, through context_email_key and context_phone_key (our own domains and lines never count), from the given addresses, numbers and the local copy of each CRM contact (contact_matches). The reader uses them only to tell whether our message reached the customer and never prints them. Inlinable helper. Service role only.';
+ 'Context ledger store (20261006013000): a party''s match keys for the packet: {emails: lower-case trimmed addresses, phones: last 9 digits}, through context_email_key and context_phone_key (our own domains and lines never count), from the given addresses, numbers and the local copy of each CRM contact (contact_matches). The reader uses them only to tell whether our message reached the customer and never prints them. A plain helper (no SET, not a definer, not inlined: it has subqueries). Service role only.';
 
 -- 5. The evidence of a set of jobs. One definition for due, packet and write.
 CREATE OR REPLACE FUNCTION public.context_ledger_evidence_rows(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
@@ -971,7 +994,7 @@ DECLARE v_table text; v_id uuid; v_excerpt text; v_norm text; e public.business_
  v_cmail text; v_job uuid; v_found boolean; i record; v_ours boolean := false; v_customer boolean := false;
  v_call_note boolean := false; v_internal boolean := false; v_record boolean := false; v_worded boolean := false;
  v_subject text; v_body text; v_close_at timestamptz; v_automated boolean := false; v_made_at timestamptz;
- v_job_created timestamptz; v_repeat boolean;
+ v_job_created timestamptz; v_repeat boolean; v_kind text;
 BEGIN
  IF p_cite IS NULL OR jsonb_typeof(p_cite) <> 'object'
   OR EXISTS (SELECT 1 FROM jsonb_object_keys(p_cite) k WHERE k NOT IN ('table', 'id', 'excerpt'))
@@ -1082,9 +1105,15 @@ BEGIN
     true INTO v_job, v_at, v_close_at, v_made_at, v_found
    FROM public.job_assignments a WHERE a.id = v_id;
   ELSIF v_table = 'job_events' THEN
-   SELECT je.job_id, je.created_at, je.created_at, true INTO v_job, v_at, v_close_at, v_found FROM public.job_events je WHERE je.id = v_id;
+   -- an app event closes only what it records (context_ledger_job_event_closes, by kind)
+   SELECT je.job_id, je.created_at, je.created_at, je.event_type, true INTO v_job, v_at, v_close_at, v_kind, v_found
+   FROM public.job_events je WHERE je.id = v_id;
   ELSE
-   SELECT ee.job_id, coalesce(ee.sent_at, ee.created_at), coalesce(ee.sent_at, ee.created_at), true INTO v_job, v_at, v_close_at, v_found
+   -- a system email closes only once it went out: sent, delivered or accepted with
+   -- a sent time, timed then (a bounced, failed or queued email never closes)
+   SELECT ee.job_id, coalesce(ee.sent_at, ee.created_at),
+    CASE WHEN lower(coalesce(ee.status, '')) IN ('sent', 'delivered', 'accepted') THEN ee.sent_at END, ee.email_type, true
+   INTO v_job, v_at, v_close_at, v_kind, v_found
    FROM public.email_events ee WHERE ee.id = v_id;
   END IF;
   IF NOT coalesce(v_found, false) THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_missing', 'detail', v_table || ':' || v_id); END IF;
@@ -1109,11 +1138,11 @@ BEGIN
   END IF;
  END IF;
  RETURN jsonb_build_object('ok', true, 'cite', jsonb_build_object('table', v_table, 'id', v_id::text, 'excerpt', v_excerpt),
-  'at', v_at, 'close_at', v_close_at, 'made_at', v_made_at, 'customer_sender', v_customer, 'ours', v_ours, 'call_or_note', v_call_note,
+  'at', v_at, 'close_at', v_close_at, 'made_at', v_made_at, 'kind', v_kind, 'customer_sender', v_customer, 'ours', v_ours, 'call_or_note', v_call_note,
   'internal_text', v_internal, 'record', v_record, 'worded', v_worded, 'automated', v_automated);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; null when it cannot); made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; a system email (email_events): only sent, delivered or accepted with a sent time, at sent_at; an app event (job_events): its time, closing only the matter it records (context_ledger_job_event_closes on kind); null when it cannot); kind: an app event''s event_type or a system email''s email_type; made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)
@@ -1240,6 +1269,9 @@ BEGIN
   -- unattended booking; never the opening row itself; a request strictly after it.
   v_close_at := CASE WHEN chk #>> '{cite,table}' = 'job_assignments' AND (p_item ->> 'closes_on') = 'booking_made'
                      THEN (chk ->> 'made_at')::timestamptz ELSE (chk ->> 'close_at')::timestamptz END;
+  IF chk #>> '{cite,table}' = 'job_events' AND NOT public.context_ledger_job_event_closes(chk ->> 'kind', p_item ->> 'closes_on') THEN
+   v_close_at := NULL;
+  END IF;
   IF v_close_at IS NULL THEN
    RETURN jsonb_build_object('ok', false, 'code', 'closing_not_issued', 'detail', 'closed_by[' || n || '] ' || (chk #>> '{cite,table}'));
   END IF;
@@ -1481,6 +1513,9 @@ BEGIN
      IF chk #>> '{cite,table}' = 'job_assignments' AND li.closes_on = 'booking_made' THEN
       chk := chk || jsonb_build_object('close_at', chk -> 'made_at');
      END IF;
+     IF chk #>> '{cite,table}' = 'job_events' AND NOT public.context_ledger_job_event_closes(chk ->> 'kind', li.closes_on) THEN
+      chk := chk || jsonb_build_object('close_at', NULL::timestamptz);
+     END IF;
      IF chk ->> 'close_at' IS NULL THEN v_code := 'closing_not_issued'; v_detail := 'evidence[' || n || '] ' || (chk #>> '{cite,table}'); EXIT; END IF;
      IF li.opened_by @> jsonb_build_array(jsonb_build_object('table', chk #>> '{cite,table}', 'id', chk #>> '{cite,id}')) THEN
       v_code := 'closing_is_opening'; v_detail := 'evidence[' || n || ']'; EXIT;
@@ -1685,7 +1720,7 @@ DECLARE r public.context_extraction_runs; g public.context_ledger_generations; m
  v_until timestamptz; v_rows integer; v_chunks integer; v_calls integer; v_tokens integer; v_failure text; v_model text; v_sha text;
  v_acc integer; v_ref integer; v_items integer; v_rate numeric; v_pass boolean; v_store jsonb; v_promoted boolean := false;
  v_carried integer := 0; v_live uuid; v_mode text; v_build boolean; v_checks jsonb; v_proposed integer; v_local integer;
- v_den integer; v_all_rate numeric; v_released boolean; v_code text;
+ v_den integer; v_all_rate numeric; v_released boolean; v_code text; v_locked integer;
 BEGIN
  IF p_run_id IS NULL OR p_lease_token IS NULL OR p_generation_id IS NULL OR p_outcome IS NULL
   OR p_outcome NOT IN ('built', 'updated', 'failed') OR jsonb_typeof(m) <> 'object' THEN
@@ -1746,8 +1781,14 @@ BEGIN
   RETURN jsonb_build_object('outcome', 'failed', 'released', v_released, 'generation_status', CASE WHEN v_build THEN 'failed' ELSE g.status END,
    'promoted', false);
  END IF;
- SELECT coalesce(sum(w.items_accepted), 0), coalesce(sum(w.items_refused), 0) INTO v_acc, v_ref
+ SELECT coalesce(sum(w.items_accepted), 0), coalesce(sum(w.items_refused), 0),
+  coalesce(sum((SELECT count(*) FROM jsonb_array_elements(coalesce(w.result -> 'refused', '[]'::jsonb)) x
+                WHERE x ->> 'code' = 'person_locked')), 0)
+ INTO v_acc, v_ref, v_locked
  FROM public.context_ledger_writes w WHERE w.run_id = p_run_id AND w.generation_id = g.id;
+ -- A matter a person already settled, proposed again, is refused to keep the
+ -- person's word; it is not a reading fault, so it never counts against the verdict.
+ v_ref := greatest(v_ref - v_locked, 0);
  SELECT count(*) INTO v_items FROM public.context_ledger_items i WHERE i.generation_id = g.id;
  v_rate := CASE WHEN v_acc + v_ref = 0 THEN 0 ELSE trim_scale(round(v_ref::numeric / (v_acc + v_ref), 4)) END;
  -- Refusals on both sides over everything proposed: the reader's local refusals
@@ -1766,7 +1807,7 @@ BEGIN
     'passed', coalesce((checks #>> '{store,pass}')::boolean, false) AND v_pass,
     'last_update', jsonb_build_object('run_id', r.id, 'at', now(), 'items_accepted', v_acc, 'items_refused', v_ref,
      'proposed', v_proposed, 'refused_local', v_local, 'refused_rate', v_rate, 'refusal_rate', v_all_rate,
-     'evidence_rows', v_rows, 'pass', v_pass, 'reader', m -> 'checks'))
+     'refused_person_locked', v_locked, 'evidence_rows', v_rows, 'pass', v_pass, 'reader', m -> 'checks'))
   WHERE id = g.id RETURNING checks INTO v_checks;
   UPDATE public.context_extraction_runs SET status = 'done', finished_at = now(), events_in = v_rows, tokens_in = v_tokens,
    facts_new = v_acc, error = CASE WHEN v_pass THEN NULL ELSE 'checks_failed' END, lease_expires_at = NULL WHERE id = r.id;
@@ -1785,7 +1826,8 @@ BEGIN
  -- built: the verdict also needs at least one item unless there was no evidence.
  v_pass := v_pass AND (v_items >= 1 OR v_rows = 0);
  v_store := jsonb_build_object('items', v_items, 'items_accepted', v_acc, 'items_refused', v_ref, 'refused_rate', v_rate,
-  'proposed', v_proposed, 'refused_local', v_local, 'refusal_rate', v_all_rate, 'evidence_rows', v_rows, 'pass', v_pass);
+  'proposed', v_proposed, 'refused_local', v_local, 'refusal_rate', v_all_rate, 'refused_person_locked', v_locked,
+  'evidence_rows', v_rows, 'pass', v_pass);
  UPDATE public.context_ledger_generations SET status = 'shadow', model = v_model, prompt_sha256 = v_sha, evidence_until = v_until,
   evidence_rows = v_rows, chunks = v_chunks, calls = v_calls, finished_at = now(), updated_at = now(),
   checks = jsonb_build_object('passed', v_pass, 'store', v_store, 'reader', coalesce(m -> 'checks', 'null'::jsonb))
@@ -1879,7 +1921,8 @@ BEGIN
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])',
   'public.context_ledger_budget()','public.context_ledger_backfill_open(smallint,smallint,timestamptz)',
-  'public.context_ledger_party_keys(text[],text[],text[])', 'public.context_ledger_call_customer(public.business_events)'] LOOP
+  'public.context_ledger_party_keys(text[],text[],text[])', 'public.context_ledger_call_customer(public.business_events)',
+  'public.context_ledger_job_event_closes(text,text)'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;

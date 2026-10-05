@@ -563,6 +563,10 @@ AS $fn$
   WHERE je.job_id = ANY (p_job_ids) AND je.created_at <= p_as_of
     AND je.event_type IN ('assignment_created', 'assignment_deleted', 'assignment_removed', 'assignment_rescheduled',
                           'assignment_confirmed', 'assignment_status_changed', 'assignment_acknowledged')
+    -- a "move" to the same date is no booking change
+    AND NOT coalesce(je.event_type = 'assignment_rescheduled'
+             AND public.context_job_record_date(coalesce(je.detail_json->>'old_date', je.detail_json->>'from'))
+                 = public.context_job_record_date(coalesce(je.detail_json->>'new_date', je.detail_json->>'to', je.detail_json->>'date')), false)
   UNION ALL
   SELECT e.job_id, coalesce(e.event_at, e.occurred_at), 'observed',
          CASE WHEN e.event_type LIKE 'clock.%' THEN 'attendance' ELSE 'booking_change' END,
@@ -575,6 +579,12 @@ AS $fn$
   FROM public.business_events e
   WHERE e.job_id = ANY (p_job_ids) AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of
     AND (e.event_type LIKE 'schedule.%' OR e.event_type IN ('clock.clock_on', 'clock.clock_off'))
+    -- crew-planning marks are not booking changes: a lock, a status mark (old or
+    -- new status: confirmed, tentative, placeholder) and a reschedule to the same date
+    AND e.event_type <> 'schedule.locked'
+    AND NOT (e.event_type LIKE 'schedule.%' AND (e.payload ? 'old_status' OR e.payload ? 'new_status'))
+    AND NOT (e.event_type = 'schedule.rescheduled'
+             AND public.context_job_record_date(e.payload->>'old_date') IS NOT DISTINCT FROM public.context_job_record_date(e.payload->>'new_date'))
     AND NOT (e.event_type = 'schedule.assignment_deleted' AND EXISTS (
          SELECT 1 FROM public.job_events x WHERE x.job_id = e.job_id AND x.event_type = 'assignment_deleted'
            AND abs(extract(epoch FROM x.created_at - coalesce(e.event_at, e.occurred_at))) < 120))
@@ -704,7 +714,7 @@ AS $fn$
  ORDER BY m.job_id, m.at, m.kind, m.source_id
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) IS
- 'Job record (20261006011000): one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes, attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
+ 'Job record (20261006011000): one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes (never a crew-planning mark: a lock, a status mark, or a move to the same date), attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
 
 -- 3. Loops: record-closable loops and checks.
 CREATE OR REPLACE FUNCTION public.context_job_record_loops(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())

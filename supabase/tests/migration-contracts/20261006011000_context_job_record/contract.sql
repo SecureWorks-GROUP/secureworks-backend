@@ -190,6 +190,26 @@ VALUES ('aa000000-0000-4000-8000-000000000010', NULL, 'cust.h@example.test', 'Fe
 INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
 VALUES ('e0000000-0000-4000-8000-000000000014', 'a0000000-0000-4000-8000-000000000014', 'lead_installer', '2026-10-20', 'install', 'scheduled',
         'Crew Three', 'tentative', false, '2026-08-02 06:00Z');
+-- Job F also has crew-planning marks from the scheduler (a lock, status marks, a
+-- "reschedule" to the same date, in both tables) and one real move.
+INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, body_preview, occurred_at, recorded_at, event_at, attribution_status)
+VALUES ('b0000000-0000-4000-8000-0000000000f1', 'a0000000-0000-4000-8000-00000000000f', 'schedule.locked', 'crew-planning', 'status', NULL, 'ctF',
+        '{"new_status":"confirmed"}', '{}', NULL, '2026-09-15 01:00Z', '2026-09-15 01:00Z', '2026-09-15 01:00Z', 'direct'),
+       ('b0000000-0000-4000-8000-0000000000f2', 'a0000000-0000-4000-8000-00000000000f', 'schedule.status_changed', 'crew-planning', 'status', NULL, 'ctF',
+        '{"old_status":"tentative","new_status":"placeholder"}', '{}', NULL, '2026-09-15 02:00Z', '2026-09-15 02:00Z', '2026-09-15 02:00Z', 'direct'),
+       ('b0000000-0000-4000-8000-0000000000f3', 'a0000000-0000-4000-8000-00000000000f', 'schedule.rescheduled', 'crew-planning', 'status', NULL, 'ctF',
+        '{"old_date":"2026-09-20","new_date":"2026-09-20","old_status":"confirmed","new_status":"tentative"}', '{}', NULL,
+        '2026-09-15 03:00Z', '2026-09-15 03:00Z', '2026-09-15 03:00Z', 'direct'),
+       ('b0000000-0000-4000-8000-0000000000f4', 'a0000000-0000-4000-8000-00000000000f', 'schedule.rescheduled', 'crew-planning', 'status', NULL, 'ctF',
+        '{"old_date":"2026-09-18","new_date":"2026-09-20"}', '{}', NULL, '2026-09-15 04:00Z', '2026-09-15 04:00Z', '2026-09-15 04:00Z', 'direct'),
+       ('b0000000-0000-4000-8000-0000000000f5', 'a0000000-0000-4000-8000-00000000000f', 'schedule.rescheduled', 'crew-planning', 'status', NULL, 'ctF',
+        '{"old_date":"2026-09-20","new_date":"2026-09-20T00:00:00"}', '{}', NULL, '2026-09-15 05:00Z', '2026-09-15 05:00Z', '2026-09-15 05:00Z', 'direct'),
+       ('b0000000-0000-4000-8000-0000000000f6', 'a0000000-0000-4000-8000-00000000000f', 'schedule.locked', 'crew-planning', 'status', NULL, 'ctF',
+        '{}', '{}', NULL, '2026-09-15 06:00Z', '2026-09-15 06:00Z', '2026-09-15 06:00Z', 'direct');
+INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
+VALUES ('f0000000-0000-4000-8000-00000000001f', 'a0000000-0000-4000-8000-00000000000f', 'assignment_rescheduled',
+        '{"old_date":"2026-09-20","new_date":"2026-09-20"}', '2026-09-16 01:00Z');
+
 -- Job K: a booking for today whose status alone says complete.
 INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
 VALUES ('a0000000-0000-4000-8000-000000000015', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0015', 'scheduled', 'fencing',
@@ -402,6 +422,16 @@ BEGIN
  IF r.last_customer_message->>'id' IS DISTINCT FROM 'aa000000-0000-4000-8000-000000000015'
     OR r.last_customer_message->>'placement_note' IS DISTINCT FROM 'not placed on any job' THEN
   RAISE EXCEPTION 'record contract: a single job''s unplaced mail is its, labelled: %', r.last_customer_message;
+ END IF;
+ -- rev-backend P2-4: crew-planning marks are not booking changes (a lock, a status mark, a
+ -- move to the same date, in either table); a real move stays, worded as one
+ SELECT string_agg(t.source_id || '=' || t.what, ' | ' ORDER BY t.source_id) INTO got
+ FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof) t
+ WHERE t.source_id IN ('b0000000-0000-4000-8000-0000000000f1', 'b0000000-0000-4000-8000-0000000000f2', 'b0000000-0000-4000-8000-0000000000f3',
+                       'b0000000-0000-4000-8000-0000000000f4', 'b0000000-0000-4000-8000-0000000000f5', 'b0000000-0000-4000-8000-0000000000f6',
+                       'f0000000-0000-4000-8000-00000000001f');
+ IF got IS DISTINCT FROM 'b0000000-0000-4000-8000-0000000000f4=Booking rescheduled, Fri 18 Sep to Sun 20 Sep' THEN
+  RAISE EXCEPTION 'record contract: crew-planning marks and same-date moves are not booking changes: %', got;
  END IF;
  -- C5 is retired: a booking ahead still tentative in crew planning opens no check, and crew
  -- planning's confirmation is in no words (job J's and job B's bookings are tentative there)

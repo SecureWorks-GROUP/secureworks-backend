@@ -144,7 +144,7 @@ BEGIN
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])','public.context_ledger_budget()',
   'public.context_ledger_backfill_open(smallint,smallint,timestamptz)', 'public.context_ledger_party_keys(text[],text[],text[])',
-  'public.context_ledger_call_customer(public.business_events)',
+  'public.context_ledger_call_customer(public.business_events)', 'public.context_ledger_job_event_closes(text,text)',
   'public.reserve_context_model_call(text,uuid,uuid)'] LOOP
   PERFORM pg_temp.lg_assert(to_regprocedure(f) IS NOT NULL, f || ' missing');
   PERFORM pg_temp.lg_assert(NOT has_function_privilege('anon', f, 'EXECUTE') AND NOT has_function_privilege('authenticated', f, 'EXECUTE'),
@@ -160,7 +160,7 @@ BEGIN
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
-    'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer') THEN
+    'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -1117,6 +1117,10 @@ BEGIN
  fin := public.context_ledger_finish(run, tok, gen2, 'built', pg_temp.lg_meta());
  PERFORM pg_temp.lg_assert(fin ->> 'generation_status' = 'shadow' AND NOT (fin ->> 'promoted')::boolean AND (fin ->> 'carried')::integer = 1,
   'shadow mode builds without promoting, carrying the person''s item: ' || fin::text);
+ -- rev-backend P2-7: the two refusals keep a person's word; they are no reading fault
+ PERFORM pg_temp.lg_assert((fin ->> 'passed')::boolean AND (fin #>> '{checks,refused_person_locked}')::integer = 2
+  AND (fin #>> '{checks,items_refused}')::integer = 0,
+  'a person-settled matter proposed again never counts against the verdict: ' || fin::text);
  SELECT * INTO it FROM public.context_ledger_items WHERE generation_id = gen2 AND item_key = k1;
  PERFORM pg_temp.lg_assert(it.status = 'closed' AND it.person_locked AND it.written_by = 'model:luna-ledger:v1'
   AND it.closed_by -> 0 ->> 'table' = 'person', 'the person''s correction wins over the model''s re-reading');
@@ -2048,6 +2052,81 @@ BEGIN
   'a matter superseded by words dated ahead closes at the write: ' || res::text);
  PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_items WHERE job_id = w AND closed_at > now()),
   'no close time after now');
+END $c$;
+ROLLBACK;
+
+-- 24. Records that close only what they record (rev-backend P1-2b, P2-1): a system
+-- email closes once it went out (sent, delivered or accepted, with a sent time),
+-- timed at sent_at; bounced, failed or queued never close. An app event closes only
+-- the matter it records, never a crew-planning mark, in an item and in a transition.
+BEGIN;
+DO $c$
+DECLARE w uuid; r1 uuid; cl jsonb; res jsonb; exp record; k text;
+ ee_sent uuid := gen_random_uuid(); ee_bounced uuid := gen_random_uuid(); ee_failed uuid := gen_random_uuid();
+ je_quote uuid := gen_random_uuid(); je_inv uuid := gen_random_uuid(); je_pay uuid := gen_random_uuid();
+ je_clock uuid := gen_random_uuid(); je_confirm uuid := gen_random_uuid();
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ w := pg_temp.lg_job('SWF-99401');
+ r1 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Please send the quote, then the invoice, and book the install soon', '5 days', 'customer');
+ INSERT INTO public.email_events (id, email_type, job_id, recipient, subject, status, sent_at, created_at)
+ VALUES (ee_sent, 'quote', w, 'pat@example.test', 'Your quote', 'delivered', now() - interval '4 days', now() - interval '4 days'),
+        (ee_bounced, 'quote', w, 'pat@example.test', 'Your quote', 'bounced', now() - interval '4 days', now() - interval '4 days'),
+        (ee_failed, 'quote', w, 'pat@example.test', 'Your quote', 'failed', NULL, now() - interval '4 days');
+ INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
+ VALUES (je_quote, w, 'quote_sent', '{}', now() - interval '4 days'), (je_inv, w, 'invoice.emailed', '{}', now() - interval '3 days'),
+        (je_pay, w, 'payment_received', '{}', now() - interval '3 days'), (je_clock, w, 'clock.clock_on', '{}', now() - interval '2 days'),
+        (je_confirm, w, 'assignment_confirmed', '{}', now() - interval '2 days');
+ cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('email_sent', 'request', 'closed', 'customer', 'us', 'Quote by email', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(ee_sent, NULL, 'email_events'))),
+  pg_temp.lg_it('email_bounced', 'request', 'closed', 'customer', 'us', 'Quote by email, bounced', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(ee_bounced, NULL, 'email_events'))),
+  pg_temp.lg_it('email_failed', 'request', 'closed', 'customer', 'us', 'Quote by email, failed', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(ee_failed, NULL, 'email_events'))),
+  pg_temp.lg_it('ev_quote', 'request', 'closed', 'customer', 'us', 'Quote sent in the app', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(je_quote, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_quote_as_invoice', 'request', 'closed', 'customer', 'us', 'Invoice by a quote event', pg_temp.lg_cite(r1, 'then the invoice'),
+   jsonb_build_object('closes_on', 'invoice_issued', 'closed_by', pg_temp.lg_cite(je_quote, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_invoice', 'request', 'closed', 'customer', 'us', 'Invoice emailed', pg_temp.lg_cite(r1, 'then the invoice'),
+   jsonb_build_object('closes_on', 'invoice_issued', 'closed_by', pg_temp.lg_cite(je_inv, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_pay', 'request', 'closed', 'customer', 'us', 'Invoice paid', pg_temp.lg_cite(r1, 'then the invoice'),
+   jsonb_build_object('closes_on', 'payment', 'closed_by', pg_temp.lg_cite(je_pay, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_clock', 'request', 'closed', 'customer', 'us', 'Install attended', pg_temp.lg_cite(r1, 'book the install soon'),
+   jsonb_build_object('closes_on', 'visit', 'closed_by', pg_temp.lg_cite(je_clock, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_confirm', 'request', 'closed', 'customer', 'us', 'Install confirmed in crew planning', pg_temp.lg_cite(r1, 'book the install soon'),
+   jsonb_build_object('closes_on', 'visit', 'closed_by', pg_temp.lg_cite(je_confirm, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_no_closes_on', 'request', 'closed', 'customer', 'us', 'Quote event with no closes_on', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(je_quote, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_pay_as_quote', 'request', 'closed', 'customer', 'us', 'Quote by a payment event', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(je_pay, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_clock_as_pay', 'request', 'closed', 'customer', 'us', 'Paid by a clock event', pg_temp.lg_cite(r1, 'then the invoice'),
+   jsonb_build_object('closes_on', 'payment', 'closed_by', pg_temp.lg_cite(je_clock, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_clock_work', 'request', 'closed', 'customer', 'us', 'Install done', pg_temp.lg_cite(r1, 'book the install soon'),
+   jsonb_build_object('closes_on', 'work_done', 'closed_by', pg_temp.lg_cite(je_clock, NULL, 'job_events'))),
+  pg_temp.lg_it('open_visit', 'request', 'open', 'customer', 'us', 'Wants the install booked', pg_temp.lg_cite(r1, 'book the install soon'),
+   '{"closes_on":"visit"}')), '[]', 'luna-ledger:v1');
+ FOR exp IN SELECT * FROM (VALUES ('email_sent', NULL), ('email_bounced', 'closing_not_issued'), ('email_failed', 'closing_not_issued'),
+  ('ev_quote', NULL), ('ev_quote_as_invoice', 'closing_not_issued'), ('ev_invoice', NULL), ('ev_pay', NULL), ('ev_clock', NULL),
+  ('ev_confirm', 'closing_not_issued'), ('ev_no_closes_on', 'closing_not_issued'), ('ev_pay_as_quote', 'closing_not_issued'),
+  ('ev_clock_as_pay', 'closing_not_issued'), ('ev_clock_work', NULL), ('open_visit', NULL)) v(ref, code) LOOP
+  IF exp.code IS NULL THEN
+   PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, exp.ref), exp.ref || ' must be accepted: ' || coalesce(pg_temp.lg_code(res, exp.ref), '?'));
+  ELSE
+   PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, exp.ref) = exp.code AND NOT pg_temp.lg_accepted(res, exp.ref),
+    format('%s must be refused %s, got %s', exp.ref, exp.code, coalesce(pg_temp.lg_code(res, exp.ref), 'accepted')));
+  END IF;
+ END LOOP;
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'email_sent')) = now() - interval '4 days', 'a delivered email closes at its sent time');
+ -- the same in a transition: a crew-planning mark never closes, attendance does
+ k := pg_temp.lg_key(res, 'open_visit');
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, '[]', jsonb_build_array(
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(je_confirm, NULL, 'job_events')),
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(je_clock, NULL, 'job_events'))), 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert((res ->> 'transitions_accepted')::integer = 1 AND res -> 'transitions_refused' -> 0 ->> 'code' = 'closing_not_issued',
+  'a transition closes on attendance, never on a crew-planning mark: ' || res::text);
 END $c$;
 ROLLBACK;
 
