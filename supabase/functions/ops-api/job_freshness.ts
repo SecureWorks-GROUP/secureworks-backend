@@ -48,7 +48,8 @@ export interface JobFreshness {
   runs_today: number;
   /**
    * Why a read is held: lane_off, holding_job, daily_ceiling, retry_wait,
-   * model_cap, pacing_reserve (as the SQL judgement names it), or null.
+   * model_cap, pacing_reserve, backlog_budget (as the SQL judgement names it),
+   * or null.
    */
   blocked_reason: string | null;
   /** This customer's messages not yet placed on any job (context_unplaced_for_job). */
