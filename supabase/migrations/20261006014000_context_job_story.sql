@@ -684,7 +684,8 @@ AS $fn$
                             AND e.metadata->>'retracted_at' IS NULL AND coalesce(e.metadata->>'retracted', 'false') <> 'true' END,
             'customer', (e.metadata->'party_roles'->>'sender_role' = 'customer')))
     FROM jsonb_array_elements(i.opened_by || coalesce(i.closed_by, '[]'::jsonb)) c
-    LEFT JOIN public.business_events e ON c->>'table' = 'business_events' AND e.id::text = c->>'id') AS cited
+    LEFT JOIN public.business_events e ON c->>'table' = 'business_events'
+     AND e.id = CASE WHEN c->>'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (c->>'id')::uuid END) AS cited
   FROM public.context_ledger_items i JOIN g ON g.id = i.generation_id
  )
  SELECT jsonb_build_object(
@@ -820,7 +821,8 @@ AS $fn$
   FROM cj JOIN public.context_ledger_generations g ON g.job_id = cj.id AND g.status = 'live'
   JOIN public.context_ledger_items i ON i.generation_id = g.id
   WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(i.opened_by) c
-                    LEFT JOIN public.business_events e ON e.id::text = c->>'id'
+                    LEFT JOIN public.business_events e
+                      ON e.id = CASE WHEN c->>'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (c->>'id')::uuid END
                     WHERE c->>'table' = 'business_events'
                       AND (e.id IS NULL OR e.job_id IS DISTINCT FROM cj.id OR NOT public.context_linked_status(e.attribution_status)
                            OR e.metadata->>'retracted_at' IS NOT NULL))

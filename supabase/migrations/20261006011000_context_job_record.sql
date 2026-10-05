@@ -503,7 +503,9 @@ AS $fn$
                 || CASE WHEN je.detail_json->>'source' = 'ghost_auto_mirror' THEN ' (observer copy)' ELSE '' END
                 || coalesce((SELECT CASE WHEN a.scheduled_date::text <> je.detail_json->>'date'
                                          THEN '; now booked ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') END
-                             FROM public.job_assignments a WHERE a.id::text = je.detail_json->>'assignment_id'), '')
+                             FROM public.job_assignments a
+                             WHERE a.id = CASE WHEN je.detail_json->>'assignment_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                               THEN (je.detail_json->>'assignment_id')::uuid END), '')
            WHEN 'assignment_deleted' THEN 'Booking deleted' || coalesce(' (it was for '
                 || to_char(nullif(coalesce(je.detail_json->>'date', je.detail_json->>'scheduled_date'), '')::date, 'Dy FMDD Mon YYYY') || ')', '')
            WHEN 'assignment_removed' THEN 'Booking removed'
