@@ -2,7 +2,7 @@
 -- 20260924220000's cadence, K1's claim and the old status block, then the
 -- settings table is created again with its default row. A catch-up-only job
 -- is then due at 300 calls and the contract must catch it.
-\ir ../../../rollbacks/20261006002000_context_backlog_ceiling_down.sql
+\ir ../../../rollbacks/20261005233000_context_backlog_ceiling_down.sql
 CREATE TABLE public.context_cadence_settings (
  id boolean PRIMARY KEY DEFAULT true CHECK (id),
  live_reserve_calls_day integer NOT NULL DEFAULT 100 CHECK (live_reserve_calls_day>=0),

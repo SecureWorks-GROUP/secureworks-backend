@@ -43,14 +43,14 @@ Rules for the owning slices:
 stub. The composer is untouched. The block publishes `policy`, due and waiting
 job counts, `oldest_unread_landed_at`, `oldest_due_wait_minutes`,
 `cadence_breach` (a due job waited over 90 minutes with the extraction lane on
-and model budget left, or, since `20261006002000`, a job with live waking
+and model budget left, or, since `20261005233000`, a job with live waking
 evidence has been held by `model_cap`, `pacing_reserve` or `backlog_budget`
 for over 90 minutes past the time its evidence made it due; the alarm's `cause`
 is `worker`, `budget` or both), runs today, ceiling and pacing holds, lease
 takeovers, unplaced rows, rows not written as `service_role`, and `alarms`. Due
 is `context_jobs_cadence`; do not re-derive it here.
 
-Live reserve (`20261006002000`): `context_cadence_settings` (one row, service
+Live reserve (`20261005233000`): `context_cadence_settings` (one row, service
 role only, the desk tunes it) keeps model calls and reads back for live work:
 `live_reserve_calls_day` (100), `live_reserve_calls_morning` (100) and
 `live_reserve_reads_per_job` (2); a missing row reads as these defaults, all 0

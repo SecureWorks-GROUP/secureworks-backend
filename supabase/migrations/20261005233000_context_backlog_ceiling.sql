@@ -57,7 +57,7 @@
 -- public.context_cadence_status(), public.claim_context_extraction_run(uuid,date,text).
 -- Tune: UPDATE public.context_cadence_settings SET live_reserve_calls_day=..;
 -- all three set to 0 is the old behaviour. Rollback:
--- supabase/rollbacks/20261006002000_context_backlog_ceiling_down.sql.
+-- supabase/rollbacks/20261005233000_context_backlog_ceiling_down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS public.context_cadence_settings (
  note text
 );
 COMMENT ON TABLE public.context_cadence_settings IS
- 'Live reserve: model calls and reads kept back from catch-up and backlog reads (20261006002000). A catch-up-only job is not due (backlog_budget) once the Perth day''s calls reach model_call_cap minus live_reserve_calls_day, or before morning_until morning_cap minus live_reserve_calls_morning, or its reads today reach its run limit minus live_reserve_reads_per_job. One row; a missing row reads as 100, 100, 2; all 0 is the old shared pool. Service role only.';
+ 'Live reserve: model calls and reads kept back from catch-up and backlog reads (20261005233000). A catch-up-only job is not due (backlog_budget) once the Perth day''s calls reach model_call_cap minus live_reserve_calls_day, or before morning_until morning_cap minus live_reserve_calls_morning, or its reads today reach its run limit minus live_reserve_reads_per_job. One row; a missing row reads as 100, 100, 2; all 0 is the old shared pool. Service role only.';
 ALTER TABLE public.context_cadence_settings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.context_cadence_settings FROM PUBLIC,anon,authenticated;
 GRANT SELECT,INSERT,UPDATE ON TABLE public.context_cadence_settings TO service_role;
@@ -206,7 +206,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  FROM judged g
 $$;
 COMMENT ON FUNCTION public.context_jobs_cadence(uuid[]) IS
- 'K1: the one cadence judgement (cadence.md 5.1) for a set of jobs: due, blocked_reason, next_due_at and the facts behind them. Read by the claim, candidates, freshness and status. Catch-up (20260924220000): a listed, not-yet-done job with pending rows is due from its request time. Backlog ceiling (20261006002000): a catch-up-only job is held backlog_budget once the day''s calls reach the live reserve in context_cadence_settings or the job has used its reads less the per-job reserve.';
+ 'K1: the one cadence judgement (cadence.md 5.1) for a set of jobs: due, blocked_reason, next_due_at and the facts behind them. Read by the claim, candidates, freshness and status. Catch-up (20260924220000): a listed, not-yet-done job with pending rows is due from its request time. Backlog ceiling (20261005233000): a catch-up-only job is held backlog_budget once the day''s calls reach the live reserve in context_cadence_settings or the job has used its reads less the per-job reserve.';
 
 -- 3. The claim: K1's body plus one refusal (marked "backlog ceiling").
 CREATE OR REPLACE FUNCTION public.claim_context_extraction_run(p_job_id uuid,p_run_date date,p_phase text)
@@ -346,7 +346,7 @@ BEGIN
   'alarms',alarms);
 END $$;
 COMMENT ON FUNCTION public.context_cadence_status() IS
- 'Status block cadence, owned by cadence slice K1 (cadence.md 9.A item 9). Due and waiting jobs from context_job_cadence, runs today, ceiling and pacing holds, lease takeovers, unplaced rows, rows not written as service_role, the cadence_breach alarm (jobs due only by catch-up excluded), and the catch-up progress block (20260924220000). Since 20261006002000 cadence_breach also fires when a job with live waking evidence is held by model_cap, pacing_reserve or backlog_budget past breach_wait_min, and the block publishes the live reserve (read_reserve) and the held counts.';
+ 'Status block cadence, owned by cadence slice K1 (cadence.md 9.A item 9). Due and waiting jobs from context_job_cadence, runs today, ceiling and pacing holds, lease takeovers, unplaced rows, rows not written as service_role, the cadence_breach alarm (jobs due only by catch-up excluded), and the catch-up progress block (20260924220000). Since 20261005233000 cadence_breach also fires when a job with live waking evidence is held by model_cap, pacing_reserve or backlog_budget past breach_wait_min, and the block publishes the live reserve (read_reserve) and the held counts.';
 
 -- 5. Grants: service role only.
 REVOKE ALL ON FUNCTION public.context_jobs_cadence(uuid[]),public.context_cadence_status(),public.claim_context_extraction_run(uuid,date,text)

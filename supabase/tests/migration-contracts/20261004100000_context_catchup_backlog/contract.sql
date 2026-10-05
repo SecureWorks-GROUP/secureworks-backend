@@ -103,7 +103,7 @@ ROLLBACK;
 
 -- 2. Unchanged: the policy (every cap and live_since), the original writer and
 -- the cadence, candidates, batch, flags, done marker and status bodies. The
--- cadence and status also accept the backlog ceiling's bodies (20261006002000),
+-- cadence and status also accept the backlog ceiling's bodies (20261005233000),
 -- which the registered stack applies before this contract runs.
 DO $$
 DECLARE p jsonb:=public.context_cadence_policy(); x record; live text;

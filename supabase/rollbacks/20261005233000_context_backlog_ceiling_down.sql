@@ -1,4 +1,4 @@
--- Down migration for 20261006002000_context_backlog_ceiling.
+-- Down migration for 20261005233000_context_backlog_ceiling.
 --
 -- Restores context_jobs_cadence and context_cadence_status to
 -- 20260924220000's repository bodies and claim_context_extraction_run to K1's
