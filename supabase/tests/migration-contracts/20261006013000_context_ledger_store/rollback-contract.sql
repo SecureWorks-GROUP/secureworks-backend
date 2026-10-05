@@ -29,7 +29,7 @@ BEGIN
     'context_ledger_cite','context_ledger_check_item','context_ledger_write','context_ledger_carry_forward','context_ledger_promote',
     'context_ledger_finish','context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow','context_ledger_failures',
     'context_ledger_budget','context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer',
-    'context_ledger_job_event_closes'))
+    'context_ledger_job_event_closes','context_ledger_email_closes'))
   OR to_regclass('public.context_ledger_writes') IS NOT NULL
  THEN RAISE EXCEPTION 'ledger store rollback: store objects left behind'; END IF;
  IF to_regclass('public.context_ledger_items') IS NULL OR to_regclass('public.context_ledger_generations') IS NULL

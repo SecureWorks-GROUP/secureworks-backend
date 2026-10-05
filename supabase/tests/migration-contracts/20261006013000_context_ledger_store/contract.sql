@@ -145,6 +145,7 @@ BEGIN
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])','public.context_ledger_budget()',
   'public.context_ledger_backfill_open(smallint,smallint,timestamptz)', 'public.context_ledger_party_keys(text[],text[],text[])',
   'public.context_ledger_call_customer(public.business_events)', 'public.context_ledger_job_event_closes(text,text)',
+  'public.context_ledger_email_closes(text,text)',
   'public.reserve_context_model_call(text,uuid,uuid)'] LOOP
   PERFORM pg_temp.lg_assert(to_regprocedure(f) IS NOT NULL, f || ' missing');
   PERFORM pg_temp.lg_assert(NOT has_function_privilege('anon', f, 'EXECUTE') AND NOT has_function_privilege('authenticated', f, 'EXECUTE'),
@@ -160,7 +161,8 @@ BEGIN
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
-    'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes') THEN
+    'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes',
+    'context_ledger_email_closes') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -2064,7 +2066,8 @@ DO $c$
 DECLARE w uuid; r1 uuid; cl jsonb; res jsonb; exp record; k text;
  ee_sent uuid := gen_random_uuid(); ee_bounced uuid := gen_random_uuid(); ee_failed uuid := gen_random_uuid();
  je_quote uuid := gen_random_uuid(); je_inv uuid := gen_random_uuid(); je_pay uuid := gen_random_uuid();
- je_clock uuid := gen_random_uuid(); je_confirm uuid := gen_random_uuid();
+ je_clock uuid := gen_random_uuid(); je_confirm uuid := gen_random_uuid(); je_off uuid := gen_random_uuid();
+ ee_client uuid := gen_random_uuid(); ee_note uuid := gen_random_uuid();
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  w := pg_temp.lg_job('SWF-99401');
@@ -2072,11 +2075,13 @@ BEGIN
  INSERT INTO public.email_events (id, email_type, job_id, recipient, subject, status, sent_at, created_at)
  VALUES (ee_sent, 'quote', w, 'pat@example.test', 'Your quote', 'delivered', now() - interval '4 days', now() - interval '4 days'),
         (ee_bounced, 'quote', w, 'pat@example.test', 'Your quote', 'bounced', now() - interval '4 days', now() - interval '4 days'),
-        (ee_failed, 'quote', w, 'pat@example.test', 'Your quote', 'failed', NULL, now() - interval '4 days');
+        (ee_failed, 'quote', w, 'pat@example.test', 'Your quote', 'failed', NULL, now() - interval '4 days'),
+        (ee_client, 'client_email', w, 'pat@example.test', 'Re: your question', 'sent', now() - interval '4 days', now() - interval '4 days'),
+        (ee_note, 'notification', w, 'pat@example.test', 'Your invoice is ready', 'delivered', now() - interval '3 days', now() - interval '3 days');
  INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
  VALUES (je_quote, w, 'quote_sent', '{}', now() - interval '4 days'), (je_inv, w, 'invoice.emailed', '{}', now() - interval '3 days'),
         (je_pay, w, 'payment_received', '{}', now() - interval '3 days'), (je_clock, w, 'clock.clock_on', '{}', now() - interval '2 days'),
-        (je_confirm, w, 'assignment_confirmed', '{}', now() - interval '2 days');
+        (je_confirm, w, 'assignment_confirmed', '{}', now() - interval '2 days'), (je_off, w, 'clock.clock_off', '{}', now() - interval '2 days');
  cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
  res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
   pg_temp.lg_it('email_sent', 'request', 'closed', 'customer', 'us', 'Quote by email', pg_temp.lg_cite(r1, 'Please send the quote'),
@@ -2103,14 +2108,24 @@ BEGIN
    jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(je_pay, NULL, 'job_events'))),
   pg_temp.lg_it('ev_clock_as_pay', 'request', 'closed', 'customer', 'us', 'Paid by a clock event', pg_temp.lg_cite(r1, 'then the invoice'),
    jsonb_build_object('closes_on', 'payment', 'closed_by', pg_temp.lg_cite(je_clock, NULL, 'job_events'))),
-  pg_temp.lg_it('ev_clock_work', 'request', 'closed', 'customer', 'us', 'Install done', pg_temp.lg_cite(r1, 'book the install soon'),
+  pg_temp.lg_it('ev_clock_work', 'request', 'closed', 'customer', 'us', 'Install done on arrival', pg_temp.lg_cite(r1, 'book the install soon'),
    jsonb_build_object('closes_on', 'work_done', 'closed_by', pg_temp.lg_cite(je_clock, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_off_work', 'request', 'closed', 'customer', 'us', 'Install done, crew clocked off', pg_temp.lg_cite(r1, 'book the install soon'),
+   jsonb_build_object('closes_on', 'work_done', 'closed_by', pg_temp.lg_cite(je_off, NULL, 'job_events'))),
+  pg_temp.lg_it('email_quote_as_pay', 'request', 'closed', 'customer', 'us', 'Paid by a quote email', pg_temp.lg_cite(r1, 'then the invoice'),
+   jsonb_build_object('closes_on', 'payment', 'closed_by', pg_temp.lg_cite(ee_sent, NULL, 'email_events'))),
+  pg_temp.lg_it('email_note_as_invoice', 'request', 'closed', 'customer', 'us', 'Invoice by a notification', pg_temp.lg_cite(r1, 'then the invoice'),
+   jsonb_build_object('closes_on', 'invoice_issued', 'closed_by', pg_temp.lg_cite(ee_note, NULL, 'email_events'))),
+  pg_temp.lg_it('email_client_reply', 'request', 'closed', 'customer', 'us', 'Answered by our email', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'reply', 'closed_by', pg_temp.lg_cite(ee_client, NULL, 'email_events'))),
   pg_temp.lg_it('open_visit', 'request', 'open', 'customer', 'us', 'Wants the install booked', pg_temp.lg_cite(r1, 'book the install soon'),
    '{"closes_on":"visit"}')), '[]', 'luna-ledger:v1');
  FOR exp IN SELECT * FROM (VALUES ('email_sent', NULL), ('email_bounced', 'closing_not_issued'), ('email_failed', 'closing_not_issued'),
   ('ev_quote', NULL), ('ev_quote_as_invoice', 'closing_not_issued'), ('ev_invoice', NULL), ('ev_pay', NULL), ('ev_clock', NULL),
   ('ev_confirm', 'closing_not_issued'), ('ev_no_closes_on', 'closing_not_issued'), ('ev_pay_as_quote', 'closing_not_issued'),
-  ('ev_clock_as_pay', 'closing_not_issued'), ('ev_clock_work', NULL), ('open_visit', NULL)) v(ref, code) LOOP
+  ('ev_clock_as_pay', 'closing_not_issued'), ('ev_clock_work', 'closing_not_issued'), ('ev_off_work', NULL),
+  ('email_quote_as_pay', 'closing_not_issued'), ('email_note_as_invoice', 'closing_not_issued'), ('email_client_reply', NULL),
+  ('open_visit', NULL)) v(ref, code) LOOP
   IF exp.code IS NULL THEN
    PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, exp.ref), exp.ref || ' must be accepted: ' || coalesce(pg_temp.lg_code(res, exp.ref), '?'));
   ELSE
@@ -2127,6 +2142,78 @@ BEGIN
   jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(je_clock, NULL, 'job_events'))), 'luna-ledger:v1');
  PERFORM pg_temp.lg_assert((res ->> 'transitions_accepted')::integer = 1 AND res -> 'transitions_refused' -> 0 ->> 'code' = 'closing_not_issued',
   'a transition closes on attendance, never on a crew-planning mark: ' || res::text);
+END $c$;
+ROLLBACK;
+
+-- 25. A document our system emailed reached the customer only when one of its
+-- emails went out (rev-backend final pass on 8cb94879). The document and its app
+-- event ("quote sent", written when the send was tried) close no earlier than the
+-- first email sent, delivered or accepted, and never while every one bounced or
+-- failed. A document with no system email keeps its own time.
+BEGIN;
+DO $c$
+DECLARE w uuid; r1 uuid; cl jsonb; res jsonb; exp record; k text;
+ d_bounced uuid := gen_random_uuid(); d_resent uuid := gen_random_uuid(); d_plain uuid := gen_random_uuid(); d_failed uuid := gen_random_uuid();
+ d_viewed uuid := gen_random_uuid();
+ je_bounced uuid := gen_random_uuid(); je_resent uuid := gen_random_uuid(); je_failed uuid := gen_random_uuid();
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ w := pg_temp.lg_job('SWF-99402');
+ r1 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Please send the quote and the revised quote too', '6 days', 'customer');
+ INSERT INTO public.job_documents (id, job_id, type, version, created_at, sent_at)
+ VALUES (d_bounced, w, 'quote', 1, now() - interval '5 days', now() - interval '5 days'),
+        (d_resent, w, 'quote', 2, now() - interval '5 days', now() - interval '4 days'),
+        (d_plain, w, 'quote', 3, now() - interval '5 days', now() - interval '3 days'),
+        (d_failed, w, 'quote', 4, now() - interval '5 days', now() - interval '3 days'),
+        (d_viewed, w, 'quote', 5, now() - interval '5 days', now() - interval '3 days');
+ UPDATE public.job_documents SET viewed_at = now() - interval '2 days' WHERE id = d_viewed;
+ INSERT INTO public.email_events (email_type, job_id, recipient, subject, status, sent_at, created_at, metadata)
+ VALUES ('quote', w, 'pat@exmple.test', 'Your quote', 'bounced', now() - interval '5 days', now() - interval '5 days',
+         jsonb_build_object('document_id', d_bounced::text)),
+        ('quote', w, 'pat@exmple.test', 'Your quote', 'bounced', now() - interval '4 days', now() - interval '4 days',
+         jsonb_build_object('document_id', d_resent::text)),
+        ('quote', w, 'pat@example.test', 'Your quote', 'delivered', now() - interval '2 days', now() - interval '2 days',
+         jsonb_build_object('document_id', d_resent::text)),
+        ('quote', w, 'pat@example.test', 'Your quote', 'failed', NULL, now() - interval '3 days',
+         jsonb_build_object('document_id', d_failed::text)),
+        ('quote', w, 'pat@exmple.test', 'Your quote', 'bounced', now() - interval '3 days', now() - interval '3 days',
+         jsonb_build_object('document_id', d_viewed::text));
+ INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
+ VALUES (je_bounced, w, 'quote_sent', jsonb_build_object('document_id', d_bounced::text), now() - interval '5 days'),
+        (je_resent, w, 'quote_sent', jsonb_build_object('document_id', d_resent::text), now() - interval '4 days'),
+        (je_failed, w, 'quote_sent', jsonb_build_object('document_id', d_failed::text), now() - interval '3 days');
+ cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('doc_bounced', 'request', 'closed', 'customer', 'us', 'Quote document, its email bounced', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(d_bounced, NULL, 'job_documents'))),
+  pg_temp.lg_it('ev_bounced', 'request', 'closed', 'customer', 'us', 'Quote sent in the app, its email bounced', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(je_bounced, NULL, 'job_events'))),
+  pg_temp.lg_it('ev_failed', 'request', 'closed', 'customer', 'us', 'Quote sent in the app, its email failed', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(je_failed, NULL, 'job_events'))),
+  pg_temp.lg_it('doc_resent', 'request', 'closed', 'customer', 'us', 'Revised quote, bounced then delivered', pg_temp.lg_cite(r1, 'the revised quote too'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(d_resent, NULL, 'job_documents'))),
+  pg_temp.lg_it('ev_resent', 'request', 'closed', 'customer', 'us', 'Revised quote sent in the app, delivered later', pg_temp.lg_cite(r1, 'the revised quote too'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(je_resent, NULL, 'job_events'))),
+  pg_temp.lg_it('doc_plain', 'request', 'closed', 'customer', 'us', 'Quote document with no system email', pg_temp.lg_cite(r1, 'Please send the quote'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(d_plain, NULL, 'job_documents'))),
+  pg_temp.lg_it('doc_viewed', 'request', 'closed', 'customer', 'us', 'Quote bounced but the customer viewed it', pg_temp.lg_cite(r1, 'the revised quote too'),
+   jsonb_build_object('closes_on', 'quote_sent', 'closed_by', pg_temp.lg_cite(d_viewed, NULL, 'job_documents')))), '[]', 'luna-ledger:v1');
+ FOR exp IN SELECT * FROM (VALUES ('doc_bounced', 'closing_not_issued'), ('ev_bounced', 'closing_not_issued'), ('ev_failed', 'closing_not_issued'),
+  ('doc_resent', NULL), ('ev_resent', NULL), ('doc_plain', NULL), ('doc_viewed', NULL)) v(ref, code) LOOP
+  IF exp.code IS NULL THEN
+   PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, exp.ref), exp.ref || ' must be accepted: ' || coalesce(pg_temp.lg_code(res, exp.ref), '?'));
+  ELSE
+   PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, exp.ref) = exp.code AND NOT pg_temp.lg_accepted(res, exp.ref),
+    format('%s must be refused %s, got %s', exp.ref, exp.code, coalesce(pg_temp.lg_code(res, exp.ref), 'accepted')));
+  END IF;
+ END LOOP;
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'doc_resent')) = now() - interval '2 days'
+  AND (SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'ev_resent')) = now() - interval '2 days',
+  'a document bounced then delivered closes when the delivered email went out');
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'doc_plain')) = now() - interval '3 days', 'a document with no system email closes at its own sent time');
 END $c$;
 ROLLBACK;
 

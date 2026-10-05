@@ -191,7 +191,9 @@ INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment
 VALUES ('e0000000-0000-4000-8000-000000000014', 'a0000000-0000-4000-8000-000000000014', 'lead_installer', '2026-10-20', 'install', 'scheduled',
         'Crew Three', 'tentative', false, '2026-08-02 06:00Z');
 -- Job F also has crew-planning marks from the scheduler (a lock, status marks, a
--- "reschedule" to the same date, in both tables) and one real move.
+-- "reschedule" to the same date, in both tables) and two real moves: one in the
+-- crew-planning writer's own shape (it always adds old and new status), and one
+-- whose dates are in keys the timeline cannot read (kept, worded without dates).
 INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, body_preview, occurred_at, recorded_at, event_at, attribution_status)
 VALUES ('b0000000-0000-4000-8000-0000000000f1', 'a0000000-0000-4000-8000-00000000000f', 'schedule.locked', 'crew-planning', 'status', NULL, 'ctF',
         '{"new_status":"confirmed"}', '{}', NULL, '2026-09-15 01:00Z', '2026-09-15 01:00Z', '2026-09-15 01:00Z', 'direct'),
@@ -201,11 +203,14 @@ VALUES ('b0000000-0000-4000-8000-0000000000f1', 'a0000000-0000-4000-8000-0000000
         '{"old_date":"2026-09-20","new_date":"2026-09-20","old_status":"confirmed","new_status":"tentative"}', '{}', NULL,
         '2026-09-15 03:00Z', '2026-09-15 03:00Z', '2026-09-15 03:00Z', 'direct'),
        ('b0000000-0000-4000-8000-0000000000f4', 'a0000000-0000-4000-8000-00000000000f', 'schedule.rescheduled', 'crew-planning', 'status', NULL, 'ctF',
-        '{"old_date":"2026-09-18","new_date":"2026-09-20"}', '{}', NULL, '2026-09-15 04:00Z', '2026-09-15 04:00Z', '2026-09-15 04:00Z', 'direct'),
+        '{"old_date":"2026-09-18","new_date":"2026-09-20","old_status":"confirmed","new_status":"tentative","was_locked":true,"crew_name":"Crew F","scheduled_date":"2026-09-20"}',
+        '{}', NULL, '2026-09-15 04:00Z', '2026-09-15 04:00Z', '2026-09-15 04:00Z', 'direct'),
        ('b0000000-0000-4000-8000-0000000000f5', 'a0000000-0000-4000-8000-00000000000f', 'schedule.rescheduled', 'crew-planning', 'status', NULL, 'ctF',
         '{"old_date":"2026-09-20","new_date":"2026-09-20T00:00:00"}', '{}', NULL, '2026-09-15 05:00Z', '2026-09-15 05:00Z', '2026-09-15 05:00Z', 'direct'),
        ('b0000000-0000-4000-8000-0000000000f6', 'a0000000-0000-4000-8000-00000000000f', 'schedule.locked', 'crew-planning', 'status', NULL, 'ctF',
-        '{}', '{}', NULL, '2026-09-15 06:00Z', '2026-09-15 06:00Z', '2026-09-15 06:00Z', 'direct');
+        '{}', '{}', NULL, '2026-09-15 06:00Z', '2026-09-15 06:00Z', '2026-09-15 06:00Z', 'direct'),
+       ('b0000000-0000-4000-8000-0000000000f7', 'a0000000-0000-4000-8000-00000000000f', 'schedule.rescheduled', 'crew-planning', 'status', NULL, 'ctF',
+        '{"previous_scheduled_date":"2026-09-20","scheduled_date":"2026-09-22"}', '{}', NULL, '2026-09-15 07:00Z', '2026-09-15 07:00Z', '2026-09-15 07:00Z', 'direct');
 INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
 VALUES ('f0000000-0000-4000-8000-00000000001f', 'a0000000-0000-4000-8000-00000000000f', 'assignment_rescheduled',
         '{"old_date":"2026-09-20","new_date":"2026-09-20"}', '2026-09-16 01:00Z');
@@ -217,6 +222,25 @@ VALUES ('a0000000-0000-4000-8000-000000000015', '00000000-0000-4000-8000-0000000
 INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
 VALUES ('e0000000-0000-4000-8000-000000000015', 'a0000000-0000-4000-8000-000000000015', 'lead_installer', (now() AT TIME ZONE 'Australia/Perth')::date,
         'install', 'complete', 'Crew Four', NULL, false, now() - interval '2 days');
+
+-- Job G: a quote our system emailed whose every email bounced (not received), one
+-- bounced then delivered, and one bounced that the customer viewed anyway.
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('a0000000-0000-4000-8000-000000000016', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0016', 'scheduled', 'fencing',
+        'gee@example.test', 'ctG', '{}', '2026-09-01 01:00Z');
+INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at, viewed_at)
+VALUES ('d0000000-0000-4000-8000-000000000161', 'a0000000-0000-4000-8000-000000000016', 'quote', 'Q-G1', 1, '2026-09-02 01:00Z', '2026-09-02 01:00Z', NULL),
+       ('d0000000-0000-4000-8000-000000000162', 'a0000000-0000-4000-8000-000000000016', 'quote', 'Q-G2', 1, '2026-09-03 01:00Z', '2026-09-03 01:00Z', NULL),
+       ('d0000000-0000-4000-8000-000000000163', 'a0000000-0000-4000-8000-000000000016', 'quote', 'Q-G3', 1, '2026-09-04 01:00Z', '2026-09-04 01:00Z', '2026-09-05 01:00Z');
+INSERT INTO public.email_events (id, job_id, email_type, recipient, subject, status, sent_at, created_at, metadata)
+VALUES ('c0000000-0000-4000-8000-000000000161', 'a0000000-0000-4000-8000-000000000016', 'quote', 'gee@exmple.test', 'Your quote', 'bounced',
+        '2026-09-02 01:00Z', '2026-09-02 01:00Z', '{"document_id":"d0000000-0000-4000-8000-000000000161"}'),
+       ('c0000000-0000-4000-8000-000000000162', 'a0000000-0000-4000-8000-000000000016', 'quote', 'gee@exmple.test', 'Your quote', 'bounced',
+        '2026-09-03 01:00Z', '2026-09-03 01:00Z', '{"document_id":"d0000000-0000-4000-8000-000000000162"}'),
+       ('c0000000-0000-4000-8000-000000000164', 'a0000000-0000-4000-8000-000000000016', 'quote', 'gee@example.test', 'Your quote', 'delivered',
+        '2026-09-06 01:00Z', '2026-09-06 01:00Z', '{"document_id":"d0000000-0000-4000-8000-000000000162"}'),
+       ('c0000000-0000-4000-8000-000000000163', 'a0000000-0000-4000-8000-000000000016', 'quote', 'gee@exmple.test', 'Your quote', 'failed',
+        NULL, '2026-09-04 01:00Z', '{"document_id":"d0000000-0000-4000-8000-000000000163"}');
 
 DO $behave$
 DECLARE
@@ -321,7 +345,8 @@ BEGIN
         WHERE t.source_id = 'e0000000-0000-4000-8000-00000000000f' AND t.kind = 'attendance')
        IS DISTINCT FROM ('2026-09-21 00:00'::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second'
     OR EXISTS (SELECT 1 FROM public.context_job_record_timeline(ARRAY[a, b, c], asof) t
-               WHERE t.source_table NOT IN ('xero_invoices', 'job_documents', 'job_assignments') AND (t.state IS NOT NULL OR t.made_at IS NOT NULL)) THEN
+               WHERE (t.source_table NOT IN ('xero_invoices', 'job_documents', 'job_assignments', 'email_events') AND t.state IS NOT NULL)
+                  OR (t.source_table NOT IN ('xero_invoices', 'job_documents', 'job_assignments') AND t.made_at IS NOT NULL)) THEN
   RAISE EXCEPTION 'record contract: booking states, made_at or the status-only attendance time wrong';
  END IF;
  -- a status-only completion booked for today is attended now, never later today
@@ -429,8 +454,8 @@ BEGIN
  FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof) t
  WHERE t.source_id IN ('b0000000-0000-4000-8000-0000000000f1', 'b0000000-0000-4000-8000-0000000000f2', 'b0000000-0000-4000-8000-0000000000f3',
                        'b0000000-0000-4000-8000-0000000000f4', 'b0000000-0000-4000-8000-0000000000f5', 'b0000000-0000-4000-8000-0000000000f6',
-                       'f0000000-0000-4000-8000-00000000001f');
- IF got IS DISTINCT FROM 'b0000000-0000-4000-8000-0000000000f4=Booking rescheduled, Fri 18 Sep to Sun 20 Sep' THEN
+                       'b0000000-0000-4000-8000-0000000000f7', 'f0000000-0000-4000-8000-00000000001f');
+ IF got IS DISTINCT FROM 'b0000000-0000-4000-8000-0000000000f4=Booking rescheduled, Fri 18 Sep to Sun 20 Sep | b0000000-0000-4000-8000-0000000000f7=Booking rescheduled' THEN
   RAISE EXCEPTION 'record contract: crew-planning marks and same-date moves are not booking changes: %', got;
  END IF;
  -- C5 is retired: a booking ahead still tentative in crew planning opens no check, and crew
@@ -454,5 +479,28 @@ BEGIN
  WHERE (l.source_table = 'business_events' AND l.placement IS DISTINCT FROM 'on_job')
     OR (l.source_table NOT IN ('business_events', 'inbox_events') AND l.placement IS NOT NULL);
  IF n <> 0 THEN RAISE EXCEPTION 'record contract: a loop on a job message is on_job, a record loop has no placement'; END IF;
+
+ -- A document whose every email bounced or failed was not received: its rows say so
+ -- and its state is not_delivered, until an email of it goes out or the customer
+ -- views it. A system email line carries its own state.
+ SELECT string_agg(t.source_id || '=' || coalesce(t.state, '-'), ' | ' ORDER BY t.source_id COLLATE "C") INTO got
+ FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000016'::uuid], '2026-09-05 12:00Z') t
+ WHERE t.source_table IN ('job_documents', 'email_events') AND t.what NOT LIKE '%generated%';
+ IF got IS DISTINCT FROM 'c0000000-0000-4000-8000-000000000161=bounced | c0000000-0000-4000-8000-000000000162=bounced | '
+    || 'c0000000-0000-4000-8000-000000000163=failed | d0000000-0000-4000-8000-000000000161=not_delivered | '
+    || 'd0000000-0000-4000-8000-000000000162=not_delivered | d0000000-0000-4000-8000-000000000163=viewed | '
+    || 'd0000000-0000-4000-8000-000000000163=viewed' THEN
+  RAISE EXCEPTION 'record contract: undelivered documents and email states: %', got;
+ END IF;
+ IF (SELECT count(*) FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000016'::uuid], '2026-09-05 12:00Z') t
+     WHERE t.source_table = 'job_documents' AND t.what LIKE '% sent, but every email of it bounced or failed: not received%') <> 2
+    OR (SELECT count(*) FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000016'::uuid], asof) t
+     WHERE t.source_table = 'job_documents' AND t.what LIKE '%not received%') <> 1
+    OR (SELECT string_agg(DISTINCT t.state, ',') FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000016'::uuid], asof) t
+     WHERE t.source_id = 'd0000000-0000-4000-8000-000000000162') IS DISTINCT FROM 'sent'
+    OR (SELECT t.state FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000016'::uuid], asof) t
+     WHERE t.source_id = 'c0000000-0000-4000-8000-000000000164') IS DISTINCT FROM 'delivered' THEN
+  RAISE EXCEPTION 'record contract: a document bounced then delivered is sent once delivered';
+ END IF;
 END $behave$;
 ROLLBACK;

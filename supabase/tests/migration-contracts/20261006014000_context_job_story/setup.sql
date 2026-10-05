@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS public.email_events (id uuid PRIMARY KEY DEFAULT gen_
 ALTER TABLE public.email_events
  ADD COLUMN IF NOT EXISTS job_id uuid, ADD COLUMN IF NOT EXISTS email_type text, ADD COLUMN IF NOT EXISTS recipient text,
  ADD COLUMN IF NOT EXISTS subject text, ADD COLUMN IF NOT EXISTS status text, ADD COLUMN IF NOT EXISTS sent_at timestamptz,
- ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+ ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now(),
+ ADD COLUMN IF NOT EXISTS metadata jsonb DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.visit_outcomes (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.visit_outcomes

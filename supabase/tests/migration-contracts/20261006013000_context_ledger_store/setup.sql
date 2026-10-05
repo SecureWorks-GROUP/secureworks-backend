@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS public.email_events (
  subject text,
  status text,
  sent_at timestamptz,
+ metadata jsonb DEFAULT '{}'::jsonb,
  created_at timestamptz DEFAULT now()
 );
 DO $$

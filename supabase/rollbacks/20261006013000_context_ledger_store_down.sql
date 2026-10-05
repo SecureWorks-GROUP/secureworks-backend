@@ -137,6 +137,7 @@ DROP FUNCTION IF EXISTS public.context_ledger_current_generation(uuid);
 DROP FUNCTION IF EXISTS public.context_ledger_evidence_rows(uuid[],timestamptz);
 DROP FUNCTION IF EXISTS public.context_ledger_call_customer(public.business_events);
 DROP FUNCTION IF EXISTS public.context_ledger_job_event_closes(text, text);
+DROP FUNCTION IF EXISTS public.context_ledger_email_closes(text, text);
 DROP FUNCTION IF EXISTS public.context_ledger_row_admissible(public.business_events);
 DROP FUNCTION IF EXISTS public.context_ledger_message_kind(public.business_events);
 DROP FUNCTION IF EXISTS public.context_ledger_text_norm(text);

@@ -106,7 +106,10 @@ BEGIN
  -- The party details the packet reads (match keys and roles).
  FOREACH t IN ARRAY ARRAY['jobs.client_email', 'jobs.client_phone', 'job_contacts.client_email', 'job_contacts.client_phone',
    'job_contacts.ghl_contact_id', 'job_contacts.contact_type', 'job_contacts.share_percentage', 'job_contacts.amount_invoiced',
-   'contact_matches.ghl_contact_id', 'contact_matches.email', 'contact_matches.phone'] LOOP
+   'contact_matches.ghl_contact_id', 'contact_matches.email', 'contact_matches.phone',
+   -- a document's system emails (the citation check's sent rule)
+   'email_events.metadata', 'email_events.status', 'email_events.sent_at', 'job_events.detail_json',
+   'job_documents.viewed_at', 'job_documents.accepted_at', 'job_documents.declined_at'] LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || split_part(t, '.', 1))
     AND a.attname = split_part(t, '.', 2) AND NOT a.attisdropped) THEN
    problems := problems || format('public.%s missing', t);
@@ -154,7 +157,7 @@ BEGIN
    'context_ledger_write','context_ledger_carry_forward','context_ledger_promote','context_ledger_finish',
    'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow','context_ledger_failures',
    'context_ledger_budget','context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer',
-   'context_ledger_job_event_closes') LOOP
+   'context_ledger_job_event_closes','context_ledger_email_closes') LOOP
   IF x.c NOT LIKE 'Context ledger store%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -410,7 +413,8 @@ COMMENT ON FUNCTION public.context_ledger_call_customer(public.business_events) 
 
 -- An app event (job_events) closes only the matter it records: a quote sent,
 -- an invoice sent or issued, a payment received, attendance (a crew clocking on
--- or off, a trade report submitted). Crew-planning marks (a booking confirmed,
+-- or off, a trade report submitted; finished work only on clocking off or a
+-- make-safe report). Crew-planning marks (a booking confirmed,
 -- acknowledged or moved) and everything else never close. The citation check
 -- and the write's transitions both read it here.
 CREATE OR REPLACE FUNCTION public.context_ledger_job_event_closes(p_event_type text, p_closes_on text) RETURNS boolean
@@ -421,12 +425,25 @@ LANGUAGE sql IMMUTABLE AS $$
   WHEN 'payment' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['payment_received', 'payment_recorded'])
   WHEN 'visit' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['clock.clock_on', 'clock.clock_off', 'makesafe_report_submitted',
    'roof_report_submitted'])
-  WHEN 'work_done' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['clock.clock_on', 'clock.clock_off', 'makesafe_report_submitted',
-   'roof_report_submitted'])
+  WHEN 'work_done' THEN p_event_type OPERATOR(pg_catalog.=) ANY (ARRAY['clock.clock_off', 'makesafe_report_submitted'])
   END, false)
 $$;
 COMMENT ON FUNCTION public.context_ledger_job_event_closes(text, text) IS
- 'Context ledger store (20261006013000): whether an app event (job_events.event_type) may close a matter with this closes_on: quote_sent by quote_sent; invoice_issued by invoice.emailed, acceptance_invoice_sent, payment_link_sent; payment by payment_received, payment_recorded; visit and work_done by clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted. Crew-planning marks (assignment_confirmed and the like) and every other event or closes_on: never. Inlinable helper. Service role only.';
+ 'Context ledger store (20261006013000): whether an app event (job_events.event_type) may close a matter with this closes_on: quote_sent by quote_sent; invoice_issued by invoice.emailed, acceptance_invoice_sent, payment_link_sent; payment by payment_received, payment_recorded; visit by clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted; work_done only by clock.clock_off and makesafe_report_submitted (a crew arriving or an inspection report is not finished work). Crew-planning marks (assignment_confirmed and the like) and every other event or closes_on: never. Inlinable helper. Service role only.';
+
+-- A system email (email_events) closes only the matter it carries: a quote email
+-- a quote_sent, an invoice email an invoice_issued, our own email to the client a
+-- reply. Notifications, purchase orders and every other kind never close.
+CREATE OR REPLACE FUNCTION public.context_ledger_email_closes(p_email_type text, p_closes_on text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+ SELECT coalesce(CASE p_closes_on
+  WHEN 'quote_sent' THEN p_email_type OPERATOR(pg_catalog.=) 'quote'
+  WHEN 'invoice_issued' THEN p_email_type OPERATOR(pg_catalog.=) 'invoice'
+  WHEN 'reply' THEN p_email_type OPERATOR(pg_catalog.=) 'client_email'
+  END, false)
+$$;
+COMMENT ON FUNCTION public.context_ledger_email_closes(text, text) IS
+ 'Context ledger store (20261006013000): whether a system email (email_events.email_type) may close a matter with this closes_on: quote_sent by quote; invoice_issued by invoice; reply by client_email. notification, po and every other kind or closes_on: never. Inlinable helper. Service role only.';
 
 -- The one verdict for promoting without a person: checks.passed, which
 -- finish computes (both sides' refusals at most 20% of what was proposed, the
@@ -467,12 +484,12 @@ COMMENT ON FUNCTION public.context_ledger_backfill_open(smallint, smallint, time
 CREATE OR REPLACE FUNCTION public.context_ledger_party_keys(p_emails text[], p_phones text[], p_contacts text[]) RETURNS jsonb
 LANGUAGE sql STABLE AS $$
  SELECT jsonb_build_object(
-  'emails', coalesce((SELECT jsonb_agg(DISTINCT k.v ORDER BY k.v) FROM (
+  'emails', coalesce((SELECT jsonb_agg(DISTINCT k.v COLLATE "C" ORDER BY k.v COLLATE "C") FROM (
     SELECT public.context_email_key(x) AS v FROM unnest(p_emails) AS x
     UNION ALL
     SELECT public.context_email_key(m.email) FROM public.contact_matches m
     WHERE m.ghl_contact_id OPERATOR(pg_catalog.=) ANY (p_contacts)) k WHERE k.v IS NOT NULL), '[]'::jsonb),
-  'phones', coalesce((SELECT jsonb_agg(DISTINCT k.v ORDER BY k.v) FROM (
+  'phones', coalesce((SELECT jsonb_agg(DISTINCT k.v COLLATE "C" ORDER BY k.v COLLATE "C") FROM (
     SELECT public.context_phone_key(x) AS v FROM unnest(p_phones) AS x
     UNION ALL
     SELECT public.context_phone_key(m.phone) FROM public.contact_matches m
@@ -974,7 +991,7 @@ BEGIN
  END IF;
  SELECT coalesce(jsonb_agg(jsonb_build_object('item_key', i.item_key, 'item_type', i.item_type, 'status', i.status, 'what', i.what,
    'about_key', i.about_key, 'phase', i.phase, 'from_role', i.from_role, 'to_role', i.to_role, 'opened_at', i.opened_at,
-   'closes_on', i.closes_on, 'opened_by', i.opened_by, 'person_locked', i.person_locked) ORDER BY i.opened_at, i.item_key), '[]'::jsonb)
+   'closes_on', i.closes_on, 'opened_by', i.opened_by, 'person_locked', i.person_locked) ORDER BY i.opened_at, i.item_key COLLATE "C"), '[]'::jsonb)
  INTO v_open FROM public.context_ledger_items i
  WHERE v_gen IS NOT NULL AND i.generation_id = v_gen
   AND CASE WHEN p_since IS NOT NULL THEN i.status IN ('open', 'disputed', 'info') ELSE i.person_locked END;
@@ -994,7 +1011,7 @@ DECLARE v_table text; v_id uuid; v_excerpt text; v_norm text; e public.business_
  v_cmail text; v_job uuid; v_found boolean; i record; v_ours boolean := false; v_customer boolean := false;
  v_call_note boolean := false; v_internal boolean := false; v_record boolean := false; v_worded boolean := false;
  v_subject text; v_body text; v_close_at timestamptz; v_automated boolean := false; v_made_at timestamptz;
- v_job_created timestamptz; v_repeat boolean; v_kind text;
+ v_job_created timestamptz; v_repeat boolean; v_kind text; v_doc text;
 BEGIN
  IF p_cite IS NULL OR jsonb_typeof(p_cite) <> 'object'
   OR EXISTS (SELECT 1 FROM jsonb_object_keys(p_cite) k WHERE k NOT IN ('table', 'id', 'excerpt'))
@@ -1082,7 +1099,7 @@ BEGIN
   -- v_close_at: when the record can close an item; null when it cannot (a
   -- document never sent, an invoice not issued, a booking nobody attended)
   IF v_table = 'job_documents' THEN
-   SELECT d.job_id, coalesce(d.sent_at, d.created_at), d.sent_at, true INTO v_job, v_at, v_close_at, v_found
+   SELECT d.job_id, coalesce(d.sent_at, d.created_at), d.sent_at, d.id::text, true INTO v_job, v_at, v_close_at, v_doc, v_found
    FROM public.job_documents d WHERE d.id = v_id;
   ELSIF v_table = 'xero_invoices' THEN
    SELECT x.job_id, coalesce((x.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), x.created_at),
@@ -1106,7 +1123,8 @@ BEGIN
    FROM public.job_assignments a WHERE a.id = v_id;
   ELSIF v_table = 'job_events' THEN
    -- an app event closes only what it records (context_ledger_job_event_closes, by kind)
-   SELECT je.job_id, je.created_at, je.created_at, je.event_type, true INTO v_job, v_at, v_close_at, v_kind, v_found
+   SELECT je.job_id, je.created_at, je.created_at, je.event_type, nullif(btrim(je.detail_json ->> 'document_id'), ''), true
+   INTO v_job, v_at, v_close_at, v_kind, v_doc, v_found
    FROM public.job_events je WHERE je.id = v_id;
   ELSE
    -- a system email closes only once it went out: sent, delivered or accepted with
@@ -1117,6 +1135,24 @@ BEGIN
    FROM public.email_events ee WHERE ee.id = v_id;
   END IF;
   IF NOT coalesce(v_found, false) THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_missing', 'detail', v_table || ':' || v_id); END IF;
+  -- A document our system emailed (a quote, an invoice) reached the customer only
+  -- when one of its emails went out (sent, delivered or accepted, with a sent
+  -- time). The document and its app event ("quote sent", written when the send
+  -- was tried) close no earlier than the first such email, and never while every
+  -- one bounced or failed. A document with no system email keeps its own time,
+  -- and one the customer viewed, accepted or declined plainly reached them.
+  IF v_doc IS NOT NULL AND v_close_at IS NOT NULL
+   AND EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = v_doc)
+   AND NOT EXISTS (SELECT 1 FROM public.job_documents d WHERE d.id::text = v_doc
+     AND (d.viewed_at IS NOT NULL OR d.accepted_at IS NOT NULL OR d.declined_at IS NOT NULL)) THEN
+   v_close_at := greatest(v_close_at, (SELECT min(ee.sent_at) FROM public.email_events ee
+    WHERE ee.metadata ->> 'document_id' = v_doc
+     AND lower(coalesce(ee.status, '')) IN ('sent', 'delivered', 'accepted') AND ee.sent_at IS NOT NULL));
+   IF NOT EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = v_doc
+     AND lower(coalesce(ee.status, '')) IN ('sent', 'delivered', 'accepted') AND ee.sent_at IS NOT NULL) THEN
+    v_close_at := NULL;
+   END IF;
+  END IF;
   IF v_job IS DISTINCT FROM p_job_id THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_off_job', 'detail', v_table || ':' || v_id); END IF;
   IF v_at IS NULL THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible', 'detail', v_table || ':' || v_id); END IF;
  END IF;
@@ -1142,7 +1178,7 @@ BEGIN
   'internal_text', v_internal, 'record', v_record, 'worded', v_worded, 'automated', v_automated);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; a system email (email_events): only sent, delivered or accepted with a sent time, at sent_at; an app event (job_events): its time, closing only the matter it records (context_ledger_job_event_closes on kind); null when it cannot); kind: an app event''s event_type or a system email''s email_type; made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; a system email (email_events): only sent, delivered or accepted with a sent time, at sent_at; an app event (job_events): its time, closing only the matter it records (context_ledger_job_event_closes on kind); a document our system emailed (job_documents, or a job_events row naming its document_id): no earlier than its first email sent, delivered or accepted with a sent time, never while every one bounced or failed; a system email closes only its own matter (context_ledger_email_closes on kind); null when it cannot); kind: an app event''s event_type or a system email''s email_type; made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)
@@ -1161,7 +1197,7 @@ BEGIN
    'to_name','what','about_key','modality','phase','due_date','due_basis','opened_by','closed_by','closes_on','supersedes_key',
    'supersedes_ref','blocks','needs_reply','also_concerns')) THEN
   RETURN jsonb_build_object('ok', false, 'code', 'invalid_shape', 'detail', 'unknown field '
-   || (SELECT min(k) FROM jsonb_object_keys(p_item) k WHERE k NOT IN ('ref','item_type','status','from_role','from_name','to_role',
+   || (SELECT min(k COLLATE "C") FROM jsonb_object_keys(p_item) k WHERE k NOT IN ('ref','item_type','status','from_role','from_name','to_role',
    'to_name','what','about_key','modality','phase','due_date','due_basis','opened_by','closed_by','closes_on','supersedes_key',
    'supersedes_ref','blocks','needs_reply','also_concerns')));
  END IF;
@@ -1270,6 +1306,9 @@ BEGIN
   v_close_at := CASE WHEN chk #>> '{cite,table}' = 'job_assignments' AND (p_item ->> 'closes_on') = 'booking_made'
                      THEN (chk ->> 'made_at')::timestamptz ELSE (chk ->> 'close_at')::timestamptz END;
   IF chk #>> '{cite,table}' = 'job_events' AND NOT public.context_ledger_job_event_closes(chk ->> 'kind', p_item ->> 'closes_on') THEN
+   v_close_at := NULL;
+  END IF;
+  IF chk #>> '{cite,table}' = 'email_events' AND NOT public.context_ledger_email_closes(chk ->> 'kind', p_item ->> 'closes_on') THEN
    v_close_at := NULL;
   END IF;
   IF v_close_at IS NULL THEN
@@ -1516,6 +1555,9 @@ BEGIN
      IF chk #>> '{cite,table}' = 'job_events' AND NOT public.context_ledger_job_event_closes(chk ->> 'kind', li.closes_on) THEN
       chk := chk || jsonb_build_object('close_at', NULL::timestamptz);
      END IF;
+     IF chk #>> '{cite,table}' = 'email_events' AND NOT public.context_ledger_email_closes(chk ->> 'kind', li.closes_on) THEN
+      chk := chk || jsonb_build_object('close_at', NULL::timestamptz);
+     END IF;
      IF chk ->> 'close_at' IS NULL THEN v_code := 'closing_not_issued'; v_detail := 'evidence[' || n || '] ' || (chk #>> '{cite,table}'); EXIT; END IF;
      IF li.opened_by @> jsonb_build_array(jsonb_build_object('table', chk #>> '{cite,table}', 'id', chk #>> '{cite,id}')) THEN
       v_code := 'closing_is_opening'; v_detail := 'evidence[' || n || ']'; EXIT;
@@ -1579,7 +1621,7 @@ BEGIN
   IS DISTINCT FROM (SELECT g.job_id FROM public.context_ledger_generations g WHERE g.id = p_to) THEN
   RAISE EXCEPTION 'context_ledger_carry_forward_invalid';
  END IF;
- FOR s IN SELECT * FROM public.context_ledger_items i WHERE i.generation_id = p_from AND i.person_locked ORDER BY i.opened_at, i.item_key LOOP
+ FOR s IN SELECT * FROM public.context_ledger_items i WHERE i.generation_id = p_from AND i.person_locked ORDER BY i.opened_at, i.item_key COLLATE "C" LOOP
   SELECT * INTO t FROM public.context_ledger_items i WHERE i.generation_id = p_to AND i.item_key = s.item_key FOR UPDATE;
   IF t.id IS NOT NULL AND t.person_locked
    AND (t.status, t.what, t.closed_at, t.closed_by, t.written_by, t.opened_by)
@@ -1922,7 +1964,7 @@ BEGIN
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])',
   'public.context_ledger_budget()','public.context_ledger_backfill_open(smallint,smallint,timestamptz)',
   'public.context_ledger_party_keys(text[],text[],text[])', 'public.context_ledger_call_customer(public.business_events)',
-  'public.context_ledger_job_event_closes(text,text)'] LOOP
+  'public.context_ledger_job_event_closes(text,text)', 'public.context_ledger_email_closes(text,text)'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;

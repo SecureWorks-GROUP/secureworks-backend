@@ -401,6 +401,7 @@ AS $fn$
          CASE WHEN d.type = 'quote' THEN 'Quote ' ELSE initcap(replace(d.type, '_', ' ')) || ' ' END
            || coalesce(d.quote_number, 'without a number') || coalesce(' v' || d.version, '')
            || coalesce(' (' || d.run_label || ')', '') || ' ' || q.ev
+           || CASE WHEN q.ev = 'sent' AND de.undelivered THEN ', but every email of it bounced or failed: not received' ELSE '' END
            || CASE WHEN q.ev = 'sent' THEN coalesce(', value ' || to_char(v.value_inc_gst, 'FM$999,999,990.00') || ' inc GST',
                                                     ', value not recorded (' || coalesce(v.value_source, 'not a sent quote') || ')')
                    WHEN q.ev = 'accepted' THEN coalesce(', value ' || to_char(v.value_inc_gst, 'FM$999,999,990.00') || ' inc GST', '')
@@ -408,6 +409,12 @@ AS $fn$
          CASE WHEN q.ev IN ('sent', 'accepted') THEN v.value_inc_gst END, NULL, 'on_job', 'job_documents', d.id::text
   FROM public.job_documents d
   LEFT JOIN qv v ON v.job_id = d.job_id AND v.document_id = d.id
+  -- a document our system emailed, every email of it bounced or failed (as of the
+  -- replay instant), and the customer never viewed, accepted or declined it
+  CROSS JOIN LATERAL (SELECT (EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = d.id::text AND ee.created_at <= p_as_of)
+       AND NOT EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = d.id::text
+        AND lower(coalesce(ee.status, '')) IN ('sent', 'delivered', 'accepted') AND ee.sent_at IS NOT NULL AND ee.sent_at <= p_as_of)
+       AND NOT coalesce(d.viewed_at <= p_as_of OR d.accepted_at <= p_as_of OR d.declined_at <= p_as_of, false)) AS undelivered) de
   CROSS JOIN LATERAL (VALUES ('generated', d.created_at), ('sent', d.sent_at), ('viewed', d.viewed_at),
        ('accepted', d.accepted_at), ('declined', d.declined_at), ('superseded', d.superseded_at)) q(ev, at)
   WHERE d.job_id = ANY (p_job_ids) AND d.type ILIKE '%quote%' AND q.at IS NOT NULL AND q.at <= p_as_of
@@ -580,11 +587,15 @@ AS $fn$
   WHERE e.job_id = ANY (p_job_ids) AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of
     AND (e.event_type LIKE 'schedule.%' OR e.event_type IN ('clock.clock_on', 'clock.clock_off'))
     -- crew-planning marks are not booking changes: a lock, a status mark (old or
-    -- new status: confirmed, tentative, placeholder) and a reschedule to the same date
+    -- new status: confirmed, tentative, placeholder) and a reschedule to the same
+    -- date. A reschedule to another date is a real move and stays, whatever status
+    -- keys the crew-planning writer adds to it (it always writes old and new status).
     AND e.event_type <> 'schedule.locked'
-    AND NOT (e.event_type LIKE 'schedule.%' AND (e.payload ? 'old_status' OR e.payload ? 'new_status'))
-    AND NOT (e.event_type = 'schedule.rescheduled'
-             AND public.context_job_record_date(e.payload->>'old_date') IS NOT DISTINCT FROM public.context_job_record_date(e.payload->>'new_date'))
+    AND NOT (e.event_type LIKE 'schedule.%' AND (e.payload ? 'old_status' OR e.payload ? 'new_status')
+             AND NOT coalesce(e.event_type = 'schedule.rescheduled'
+                  AND public.context_job_record_date(e.payload->>'old_date') <> public.context_job_record_date(e.payload->>'new_date'), false))
+    AND NOT coalesce(e.event_type = 'schedule.rescheduled'
+             AND public.context_job_record_date(e.payload->>'old_date') = public.context_job_record_date(e.payload->>'new_date'), false)
     AND NOT (e.event_type = 'schedule.assignment_deleted' AND EXISTS (
          SELECT 1 FROM public.job_events x WHERE x.job_id = e.job_id AND x.event_type = 'assignment_deleted'
            AND abs(extract(epoch FROM x.created_at - coalesce(e.event_at, e.occurred_at))) < 120))
@@ -680,10 +691,13 @@ AS $fn$
         replace(replace(m.what, chr(8212), ', '), chr(8211), '-') AS what, m.amount, m.party, m.placement,
         m.source_table, m.source_id,
         -- the state of the record the row cites, so no reader infers it from the words:
-        -- invoices draft | issued | paid | voided; documents generated | sent | viewed |
-        -- accepted | declined | superseded (as of p_as_of); crew bookings scheduled |
-        -- attended (started, completed, or a status-only completion) | cancelled (not
-        -- standing); every other row null. Crew planning's confirmation is never read.
+        -- invoices draft | issued | paid | voided; documents generated | sent |
+        -- not_delivered (every email of it bounced or failed, never viewed or answered) |
+        -- viewed | accepted | declined | superseded (as of p_as_of); system emails sent |
+        -- delivered | accepted (with a sent time) | not_sent | bounced | failed | queued;
+        -- crew bookings scheduled | attended (started, completed, or a status-only
+        -- completion) | cancelled (not standing); every other row null. Crew planning's
+        -- confirmation is never read.
         CASE m.source_table
          WHEN 'xero_invoices' THEN (SELECT CASE WHEN i.st = 'DRAFT' THEN 'draft' WHEN i.st = 'PAID' THEN 'paid'
                                                WHEN i.st IN ('VOIDED', 'DELETED') THEN 'voided'
@@ -691,10 +705,22 @@ AS $fn$
                                     FROM inv i WHERE i.id::text = m.source_id)
          WHEN 'job_documents' THEN (SELECT CASE WHEN d.accepted_at <= p_as_of THEN 'accepted' WHEN d.declined_at <= p_as_of THEN 'declined'
                                                WHEN d.superseded_at <= p_as_of THEN 'superseded' WHEN d.viewed_at <= p_as_of THEN 'viewed'
+                                               WHEN d.sent_at <= p_as_of AND (EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = d.id::text AND ee.created_at <= p_as_of)
+                                                       AND NOT EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = d.id::text
+                                                        AND lower(coalesce(ee.status, '')) IN ('sent', 'delivered', 'accepted') AND ee.sent_at IS NOT NULL AND ee.sent_at <= p_as_of)
+                                                       AND NOT coalesce(d.viewed_at <= p_as_of OR d.accepted_at <= p_as_of OR d.declined_at <= p_as_of, false)) THEN 'not_delivered'
                                                WHEN d.sent_at <= p_as_of THEN 'sent' ELSE 'generated' END
                                     FROM public.job_documents d
                                     WHERE d.id = CASE WHEN m.source_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                                                       THEN m.source_id::uuid END)
+         -- a system email: its status once it went out with a sent time, else not_sent
+         -- (bounced, failed and queued say so)
+         WHEN 'email_events' THEN (SELECT CASE WHEN lower(coalesce(ee.status, '')) IN ('sent', 'delivered', 'accepted')
+                                                THEN CASE WHEN ee.sent_at IS NOT NULL THEN lower(ee.status) ELSE 'not_sent' END
+                                               ELSE coalesce(nullif(lower(btrim(ee.status)), ''), 'unknown') END
+                                    FROM public.email_events ee
+                                    WHERE ee.id = CASE WHEN m.source_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                                       THEN m.source_id::uuid END)
          WHEN 'job_assignments' THEN (SELECT CASE WHEN a.mirror THEN NULL
                                                  WHEN a.completed_at <= p_as_of OR a.started_at <= p_as_of
                                                       OR (lower(coalesce(a.status, '')) IN ('complete', 'completed')
@@ -1137,7 +1163,7 @@ AS $fn$
   SELECT i.job_id, jsonb_agg(jsonb_build_object('id', i.id, 'number', i.invoice_number, 'reference', i.reference,
            'supplier', i.contact_name, 'status', i.st, 'total', i.total, 'paid', coalesce(i.amount_paid, 0),
            'owing', CASE WHEN i.st IN ('AUTHORISED', 'SUBMITTED') THEN coalesce(i.amount_due, 0) ELSE 0 END,
-           'invoice_date', i.invoice_date, 'due_date', i.due_date) ORDER BY i.invoice_date NULLS LAST, i.invoice_number) AS bills
+           'invoice_date', i.invoice_date, 'due_date', i.due_date) ORDER BY i.invoice_date NULLS LAST, i.invoice_number COLLATE "C", i.id) AS bills
   FROM inv i WHERE i.itype = 'ACCPAY' GROUP BY i.job_id
  ),
  party AS (
@@ -1152,7 +1178,7 @@ AS $fn$
          count(*) FILTER (WHERE s.st = 'DRAFT') AS drafts,
          sum(coalesce(s.total, 0)) FILTER (WHERE s.st = 'DRAFT') AS draft_total,
          jsonb_agg(s.doc || jsonb_build_object('paid', s.paid_amt, 'credited', s.credited_amt)
-                   ORDER BY s.invoice_date NULLS LAST, s.invoice_number) AS invoices
+                   ORDER BY s.invoice_date NULLS LAST, s.invoice_number COLLATE "C", s.id) AS invoices
   FROM sale s GROUP BY s.job_id, s.pkey
  ),
  rows_ AS (
@@ -1173,7 +1199,7 @@ AS $fn$
  FROM rows_ r JOIN jv ON jv.id = r.job_id
  LEFT JOIN issued iss ON iss.job_id = r.job_id
  LEFT JOIN bills b ON b.job_id = r.job_id
- ORDER BY r.job_id, r.owing DESC, r.party
+ ORDER BY r.job_id, r.owing DESC, r.party COLLATE "C", r.xcid COLLATE "C"
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_money(uuid[], timestamptz) IS
  'Job record (20261006011000): money per paying party (Xero ACCREC contact) per job: invoiced (issued), paid (Xero AmountPaid; payment dates from the raw Payments), credited (raw AmountCredited: credit notes, overpayments and prepayments applied; from the columns when the raw copy lags, flagged xero_detail_stale), owing, overdue, drafts, each invoice with payments and credits; plus one party-null row when there are no invoices. DELETED and VOIDED never count. ACCPAY bills are supplier_bills (money we owe). job_value is pricing_json.totalIncGST else jobs.quoted_value; not_yet_invoiced only after acceptance. Invoices are read as now. Service role only.';
