@@ -143,7 +143,7 @@ BEGIN
   'public.context_ledger_promote(uuid,text)','public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)',
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])','public.context_ledger_budget()',
-  'public.context_ledger_backfill_open(smallint,smallint,timestamptz)',
+  'public.context_ledger_backfill_open(smallint,smallint,timestamptz)', 'public.context_ledger_party_keys(text[],text[],text[])',
   'public.reserve_context_model_call(text,uuid,uuid)'] LOOP
   PERFORM pg_temp.lg_assert(to_regprocedure(f) IS NOT NULL, f || ' missing');
   PERFORM pg_temp.lg_assert(NOT has_function_privilege('anon', f, 'EXECUTE') AND NOT has_function_privilege('authenticated', f, 'EXECUTE'),
@@ -159,7 +159,7 @@ BEGIN
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
-    'context_ledger_backfill_open') THEN
+    'context_ledger_backfill_open','context_ledger_party_keys') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -765,6 +765,19 @@ BEGIN
   ->> 'code' = 'citation_off_job', 'the client''s mail placed on another job cannot be cited here');
  PERFORM pg_temp.lg_assert(pk -> 'job' ->> 'customer_contact_ref' = 'ghl-SWF-94001' AND pk -> 'parties' -> 0 ->> 'role' = 'customer'
   AND jsonb_array_length(pk -> 'open_items') = 0, 'job and parties');
+ -- Each party carries match keys (addresses lower-case and trimmed, phones' last 9
+ -- digits) from the job, its job_contacts row and its CRM contact's local copy; our
+ -- own addresses and lines never count. The owner row repeating the client joins it.
+ UPDATE public.jobs SET client_phone = '0412 345 678' WHERE id = p;
+ INSERT INTO public.contact_matches (ghl_contact_id, email, phone) VALUES ('ghl-SWF-94001', ' Pat.Work@Example.test ', '+61 412 345 678');
+ INSERT INTO public.job_contacts (job_id, client_name, contact_type, is_primary, client_email, client_phone, ghl_contact_id)
+ VALUES (p, 'Pat Example', 'primary', true, 'office@secureworkswa.com.au', '0499 888 777', NULL),
+        (p, 'Nell Neighbour', 'neighbour', false, 'Nell@Example.test', '08 9123 4567', 'ghl-nell');
+ pk := public.context_ledger_packet(p);
+ PERFORM pg_temp.lg_assert(jsonb_array_length(pk -> 'parties') = 2
+  AND pk -> 'parties' -> 0 -> 'match_keys' = '{"emails": ["pat.work@example.test", "pat@example.test"], "phones": ["412345678", "499888777"]}'::jsonb
+  AND pk -> 'parties' -> 1 -> 'match_keys' = '{"emails": ["nell@example.test"], "phones": ["891234567"]}'::jsonb,
+  'party match keys: ' || (pk -> 'parties')::text);
  -- as_of replays: nothing recorded after it.
  pk := public.context_ledger_packet(p, NULL, now() - interval '7 days 12 hours');
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 5, 'as_of replay rows: ' || (pk ->> 'evidence_rows'));

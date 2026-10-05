@@ -132,6 +132,7 @@ DROP FUNCTION IF EXISTS public.context_ledger_judge(uuid[]);
 DROP FUNCTION IF EXISTS public.context_ledger_failures(uuid[]);
 DROP FUNCTION IF EXISTS public.context_ledger_budget();
 DROP FUNCTION IF EXISTS public.context_ledger_backfill_open(smallint, smallint, timestamptz);
+DROP FUNCTION IF EXISTS public.context_ledger_party_keys(text[], text[], text[]);
 DROP FUNCTION IF EXISTS public.context_ledger_current_generation(uuid);
 DROP FUNCTION IF EXISTS public.context_ledger_evidence_rows(uuid[],timestamptz);
 DROP FUNCTION IF EXISTS public.context_ledger_row_admissible(public.business_events);

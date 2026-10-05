@@ -37,7 +37,8 @@
 --  4. context_ledger_claim(job, kind, run_date): a ledger run (phase ledger,
 --     30-minute lease) and, for a backfill or rebuild, a building generation.
 --  5. context_ledger_packet(job, since, as_of): everything the reader sees
---     except the record text (ledger-packet-v1).
+--     except the record text (ledger-packet-v1); each party carries
+--     match_keys (context_ledger_party_keys: emails, phones' last 9 digits).
 --  6. context_ledger_write(run, lease, generation, items, transitions,
 --     reader): the custody checks; accepted items are inserted whole, refused
 --     items are reported with a code, a repeated request returns its first
@@ -98,8 +99,17 @@ BEGIN
   'public.context_linked_status(text)',
   'public.context_supported_due_date(text,timestamptz)',
   'public.automation_lane_enabled(text)',
-  'public.context_cadence_policy()'] LOOP
+  'public.context_cadence_policy()',
+  'public.context_email_key(text)', 'public.context_phone_key(text)'] LOOP
   IF to_regprocedure(f) IS NULL THEN problems := problems || format('%s missing', f); END IF;
+ END LOOP;
+ -- The party contact details the packet's match keys read.
+ FOREACH t IN ARRAY ARRAY['jobs.client_email', 'jobs.client_phone', 'job_contacts.client_email', 'job_contacts.client_phone',
+   'job_contacts.ghl_contact_id', 'contact_matches.ghl_contact_id', 'contact_matches.email', 'contact_matches.phone'] LOOP
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || split_part(t, '.', 1))
+    AND a.attname = split_part(t, '.', 2) AND NOT a.attisdropped) THEN
+   problems := problems || format('public.%s missing', t);
+  END IF;
  END LOOP;
  -- The ledger model (20261006010000) and the live reserve settings (20261005233000).
  FOREACH t IN ARRAY ARRAY['public.context_ledger_generations','public.context_ledger_items',
@@ -142,7 +152,7 @@ BEGIN
    'context_ledger_judge','context_ledger_due','context_ledger_claim','context_ledger_packet','context_ledger_cite','context_ledger_check_item',
    'context_ledger_write','context_ledger_carry_forward','context_ledger_promote','context_ledger_finish',
    'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow','context_ledger_failures',
-   'context_ledger_budget','context_ledger_backfill_open') LOOP
+   'context_ledger_budget','context_ledger_backfill_open','context_ledger_party_keys') LOOP
   IF x.c NOT LIKE 'Context ledger store%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -401,6 +411,29 @@ LANGUAGE sql STABLE AS $$
 $$;
 COMMENT ON FUNCTION public.context_ledger_backfill_open(smallint, smallint, timestamptz) IS
  'Context ledger store (20261006013000): whether an instant is inside the ledger''s backfill hours (context_ledger_settings.backfill_from_hour inclusive to backfill_to_hour exclusive, Perth, wrapping midnight; both null = any time). Read by the judge and the budget. Service role only.';
+
+-- How the reader recognises a party in a message's to and from: its email
+-- addresses (lower-case, trimmed) and phone numbers (last 9 digits), through the
+-- shared placement keys (context_email_key, context_phone_key: our own domains
+-- and lines never count), from the given addresses and numbers and the local
+-- copy of each CRM contact (contact_matches). Used only to decide whether our
+-- message reached the customer; never words. Inlinable helper (no SET).
+CREATE OR REPLACE FUNCTION public.context_ledger_party_keys(p_emails text[], p_phones text[], p_contacts text[]) RETURNS jsonb
+LANGUAGE sql STABLE AS $$
+ SELECT jsonb_build_object(
+  'emails', coalesce((SELECT jsonb_agg(DISTINCT k.v ORDER BY k.v) FROM (
+    SELECT public.context_email_key(x) AS v FROM unnest(p_emails) AS x
+    UNION ALL
+    SELECT public.context_email_key(m.email) FROM public.contact_matches m
+    WHERE m.ghl_contact_id OPERATOR(pg_catalog.=) ANY (p_contacts)) k WHERE k.v IS NOT NULL), '[]'::jsonb),
+  'phones', coalesce((SELECT jsonb_agg(DISTINCT k.v ORDER BY k.v) FROM (
+    SELECT public.context_phone_key(x) AS v FROM unnest(p_phones) AS x
+    UNION ALL
+    SELECT public.context_phone_key(m.phone) FROM public.contact_matches m
+    WHERE m.ghl_contact_id OPERATOR(pg_catalog.=) ANY (p_contacts)) k WHERE k.v IS NOT NULL), '[]'::jsonb))
+$$;
+COMMENT ON FUNCTION public.context_ledger_party_keys(text[], text[], text[]) IS
+ 'Context ledger store (20261006013000): a party''s match keys for the packet: {emails: lower-case trimmed addresses, phones: last 9 digits}, through context_email_key and context_phone_key (our own domains and lines never count), from the given addresses, numbers and the local copy of each CRM contact (contact_matches). The reader uses them only to tell whether our message reached the customer and never prints them. Inlinable helper. Service role only.';
 
 -- 5. The evidence of a set of jobs. One definition for due, packet and write.
 CREATE OR REPLACE FUNCTION public.context_ledger_evidence_rows(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
@@ -813,22 +846,33 @@ COMMENT ON FUNCTION public.context_ledger_claim(uuid, text, date) IS
 CREATE OR REPLACE FUNCTION public.context_ledger_packet(p_job_id uuid, p_since timestamptz DEFAULT NULL, p_as_of timestamptz DEFAULT now())
 RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE jb record; v_job jsonb; v_parties jsonb; v_evidence jsonb; v_open jsonb; v_until timestamptz; v_rows integer;
- v_truncated integer; v_dups integer; v_as_of timestamptz; v_gen uuid;
+ v_truncated integer; v_dups integer; v_as_of timestamptz; v_gen uuid; v_pe text[]; v_pp text[]; v_pc text[];
 BEGIN
  v_as_of := coalesce(p_as_of, now());
  SELECT j.id, j.job_number, j.type::text AS type, j.status::text AS status, j.client_name, j.site_suburb, j.created_at,
-  nullif(btrim(j.ghl_contact_id), '') AS ghl_contact_id
+  nullif(btrim(j.ghl_contact_id), '') AS ghl_contact_id, j.client_email, j.client_phone
  INTO jb FROM public.jobs j WHERE j.id = p_job_id;
  IF jb.id IS NULL THEN RAISE EXCEPTION 'context_ledger_packet_job_not_found'; END IF;
  v_job := jsonb_build_object('id', jb.id, 'job_number', jb.job_number, 'type', jb.type, 'status', jb.status,
   'client_name', jb.client_name, 'site_suburb', jb.site_suburb, 'created_at', jb.created_at,
   'customer_contact_ref', jb.ghl_contact_id);
  -- Parties: the job's own client, then every other party on job_contacts
- -- (the owner row that repeats the job's client is not listed twice).
- SELECT jsonb_build_array(jsonb_build_object('name', jb.client_name, 'role', 'customer', 'contact_ref', jb.ghl_contact_id, 'label', 'job_client'))
+ -- (the owner row that repeats the job's client is not listed twice; its
+ -- contact details join the client's). Each carries match_keys, so the reader
+ -- can tell whether our message reached that party (never printed).
+ SELECT array_agg(c.client_email), array_agg(c.client_phone), array_agg(nullif(btrim(c.ghl_contact_id), ''))
+ INTO v_pe, v_pp, v_pc
+ FROM public.job_contacts c
+ WHERE c.job_id = p_job_id AND c.removed_at IS NULL
+  AND coalesce(c.is_primary, false) AND lower(coalesce(c.client_name, '')) = lower(coalesce(jb.client_name, ''));
+ SELECT jsonb_build_array(jsonb_build_object('name', jb.client_name, 'role', 'customer', 'contact_ref', jb.ghl_contact_id, 'label', 'job_client',
+   'match_keys', public.context_ledger_party_keys(ARRAY[jb.client_email] || v_pe, ARRAY[jb.client_phone] || v_pp,
+    ARRAY[jb.ghl_contact_id] || v_pc)))
   || coalesce(jsonb_agg(jsonb_build_object('name', c.client_name, 'role', 'customer',
    'contact_ref', coalesce(nullif(btrim(c.ghl_contact_id), ''), lower(nullif(btrim(c.client_email), ''))),
-   'label', coalesce(c.contact_label, c.contact_type)) ORDER BY c.is_primary DESC NULLS LAST, c.created_at, c.id), '[]'::jsonb)
+   'label', coalesce(c.contact_label, c.contact_type),
+   'match_keys', public.context_ledger_party_keys(ARRAY[c.client_email], ARRAY[c.client_phone], ARRAY[nullif(btrim(c.ghl_contact_id), '')]))
+   ORDER BY c.is_primary DESC NULLS LAST, c.created_at, c.id), '[]'::jsonb)
  INTO v_parties
  FROM public.job_contacts c
  WHERE c.job_id = p_job_id AND c.removed_at IS NULL
@@ -1800,7 +1844,8 @@ BEGIN
   'public.context_ledger_promote(uuid,text)','public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)',
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])',
-  'public.context_ledger_budget()','public.context_ledger_backfill_open(smallint,smallint,timestamptz)'] LOOP
+  'public.context_ledger_budget()','public.context_ledger_backfill_open(smallint,smallint,timestamptz)',
+  'public.context_ledger_party_keys(text[],text[],text[])'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;
