@@ -603,7 +603,7 @@ BEGIN;
 DO $c$
 DECLARE p uuid; other uuid; q uuid; pk jsonb; ev jsonb; ids uuid[]; want uuid[]; gl uuid; t timestamptz; k integer;
  p1 uuid; p2 uuid; p3 uuid; p4 uuid; p5 uuid; p6 uuid; p7 uuid; p8 uuid; p8b uuid; p8c uuid; p9 uuid; p10 uuid; p11 uuid; p12 uuid; p13 uuid;
- p14 uuid; i1 uuid; i1b uuid; i2 uuid; i3 uuid; i4 uuid; i5 uuid; i6 uuid; i7 uuid; be5 uuid;
+ p14 uuid; i1 uuid; i1b uuid; i2 uuid; i3 uuid; i4 uuid; i5 uuid; i6 uuid; i7 uuid; i8 uuid; be5 uuid;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  p := pg_temp.lg_job('SWF-94001', 'pat@example.test'); other := pg_temp.lg_job('SWF-94002');
@@ -639,6 +639,14 @@ BEGIN
  be5 := pg_temp.lg_ev(other, 'client.email_in', 'email', 'inbound', 'Same mail the reader also saved, full body', '2 days', 'customer', 'job_customer', '{"from":"pat@example.test"}');
  UPDATE public.business_events SET event_at = (SELECT received_at FROM public.inbox_events WHERE id = i5) WHERE id = be5;
  i6 := pg_temp.lg_inbox(p, 'pat@example.test', 'Automatic reply: away', 'I am away', '2 days');
+ -- An old-path copy names its inbox row only in its payload (no source pointer, another instant).
+ i8 := pg_temp.lg_inbox(p, 'pat@example.test', 'Old path', 'Named by an old-path copy', '10 days 12 hours', 'other');
+ PERFORM set_config('session_replication_role', 'replica', true);
+ INSERT INTO public.business_events (job_id, event_type, source, channel, direction, payload, metadata, occurred_at, event_at, attribution_status,
+  attribution_confidence)
+ VALUES (other, 'client.email_in', 'ghl-proxy', 'email', 'inbound', jsonb_build_object('body', 'Named by an old-path copy', 'inbox_events_id', i8::text),
+  '{"written_as":"service_role"}', now() - interval '10 days 11 hours', now() - interval '10 days 11 hours', 'direct', 1);
+ PERFORM set_config('session_replication_role', 'origin', true);
  i7 := pg_temp.lg_inbox(p, 'office@secureworkswa.com.au', 'Internal', 'Mail from our own office', '1 day', 'other');
  pk := public.context_ledger_packet(p);
  ev := pk -> 'evidence';
@@ -648,6 +656,8 @@ BEGIN
  PERFORM pg_temp.lg_assert(pk ->> 'version' = 'ledger-packet-v1' AND (pk ->> 'evidence_rows')::integer = 12
   AND (pk ->> 'truncated_rows')::integer = 2 AND (pk ->> 'duplicates_collapsed')::integer = 2, 'packet counts: ' || (pk - 'evidence')::text);
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_until')::timestamptz = (SELECT processed_at FROM public.inbox_events WHERE id = i7), 'evidence_until');
+ PERFORM pg_temp.lg_assert(public.context_ledger_cite(p, jsonb_build_object('table', 'inbox_events', 'id', i8::text, 'excerpt', 'Named by'))
+  ->> 'code' = 'citation_not_admissible', 'a mail with an old-path copy is cited by its copy, never itself');
  -- Caps: 6,000 for transcripts and document text, 3,000 otherwise.
  PERFORM pg_temp.lg_assert(length(ev -> 5 ->> 'text') = 6000 AND length(ev -> 6 ->> 'text') = 3000, 'text caps');
  -- Roles come from the stored stamp, never invented.

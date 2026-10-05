@@ -363,10 +363,6 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT j.id, i.id, i.received_at, i.processed_at, i.subject, i.body_preview, i.from_email, i.from_name,
    i.to_email, i.mailbox, i.graph_message_id, i.classification, j.cmail, j.cname
   FROM j JOIN public.inbox_events i ON j.cmail IS NOT NULL AND lower(btrim(i.from_email)) = j.cmail
- ), legacy_copy AS MATERIALIZED (
-  -- Old-path copies that name their inbox row only in the payload.
-  SELECT b.payload ->> 'inbox_events_id' AS inbox_id FROM public.business_events b
-  WHERE b.payload ? 'inbox_events_id' AND b.source_table IS NULL
  ), email_copy AS MATERIALIZED (
   -- Any email row with the same sender at the same instant is the same mail.
   SELECT DISTINCT coalesce(b.event_at, b.occurred_at) AS at,
@@ -401,7 +397,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
    -- No business_events copy anywhere: the copy's own placement decides.
    AND NOT EXISTS (SELECT 1 FROM public.business_events b WHERE b.source_table = 'inbox_events' AND b.source_id = c.id::text)
    AND NOT EXISTS (SELECT 1 FROM public.business_events b WHERE c.graph_message_id IS NOT NULL AND b.provider_message_id = 'graph:' || c.graph_message_id)
-   AND NOT EXISTS (SELECT 1 FROM legacy_copy l WHERE l.inbox_id = c.id::text)
+   -- An old-path copy names its inbox row only in the payload (containment, so
+   -- the payload index answers it instead of a scan of every business_events row).
+   AND NOT EXISTS (SELECT 1 FROM public.business_events b WHERE b.source_table IS NULL
+    AND b.payload @> jsonb_build_object('inbox_events_id', c.id::text))
    AND NOT EXISTS (SELECT 1 FROM email_copy m WHERE m.at = c.received_at AND m.sender = lower(btrim(c.from_email)))
  ), allrows AS (
   SELECT * FROM be UNION ALL SELECT * FROM inbox
@@ -698,8 +697,8 @@ BEGIN
    OR btrim(coalesce(i.subject, '') || coalesce(i.body_preview, '')) = ''
    OR EXISTS (SELECT 1 FROM public.business_events b WHERE b.source_table = 'inbox_events' AND b.source_id = i.id::text)
    OR EXISTS (SELECT 1 FROM public.business_events b WHERE i.graph_message_id IS NOT NULL AND b.provider_message_id = 'graph:' || i.graph_message_id)
-   OR EXISTS (SELECT 1 FROM public.business_events b WHERE b.payload ? 'inbox_events_id' AND b.source_table IS NULL
-    AND b.payload ->> 'inbox_events_id' = i.id::text)
+   OR EXISTS (SELECT 1 FROM public.business_events b WHERE b.source_table IS NULL
+    AND b.payload @> jsonb_build_object('inbox_events_id', i.id::text))
    OR EXISTS (SELECT 1 FROM public.business_events b WHERE b.channel = 'email' AND coalesce(b.event_at, b.occurred_at) = i.received_at
     AND lower(btrim(coalesce(b.payload ->> 'from', b.payload ->> 'from_email'))) = lower(btrim(i.from_email))) THEN
    RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible', 'detail', v_table || ':' || v_id);
