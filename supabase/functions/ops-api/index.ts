@@ -405,6 +405,7 @@ import { opsApiDeniedLogLine, opsApiRequestLogLine, receiptActor, recordOpsApiAc
 import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invoice_context.ts'
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
+import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { businessEventTimelineMessage, emailCustomerParty, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
@@ -7432,6 +7433,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      // ── Job story (story slice S2): the story of one job, its client's story,
+      // and the done-definition scorecard. Staff front door (the default for an
+      // action on no static, profile, routine or agent list), GET only,
+      // read-only SQL functions, nothing written.
+      case 'job_story':
+      case 'client_story':
+      case 'context_story_scorecard': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+        try {
+          return json(action === 'job_story'
+            ? await jobStoryAction(client, url.searchParams)
+            : action === 'client_story'
+              ? await clientStoryAction(client, url.searchParams)
+              : await storyScorecardAction(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof StoryReadError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       // ── Same-site links (sites slice S-M1): a person proposes, confirms or
       // rejects that two legacy job records are one site. Staff front door,
       // not on the routine or agent-read lists; actor recorded on the receipt.
@@ -8060,6 +8081,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               msg.startsWith('assemble_job_dossier could not resolve')) {
             return json({ error: msg }, 400)
           }
+          if (e instanceof StoryReadError) return json({ error: e.message, code: e.code }, e.status)
           throw e
         }
       }
@@ -16625,6 +16647,9 @@ const DOSSIER_MODE_BOUNDS = {
   full_job_review:  { conversation: 100, events: 200, facts: 50 },
   secure_sale_card: { conversation: 30,  events: 50,  facts: 24 },
   readiness_review: { conversation: 10,  events: 100, facts: 30 },
+  // Story slice S2: the job story and the client story (SQL-assembled, cited);
+  // the conversation, events and facts reads are skipped in this mode.
+  story:            { conversation: 0,   events: 0,   facts: 0 },
 } as const
 
 type DossierMode = keyof typeof DOSSIER_MODE_BOUNDS
@@ -16704,6 +16729,10 @@ async function assembleJobDossier(client: any, body: any) {
     const detail = jobReadError ? ` (${jobReadError})` : ''
     throw new Error(`assemble_job_dossier could not resolve job: ${inputJobId || inputJobNumber}${detail}`)
   }
+
+  // Mode story (story slice S2): the job story and the client story from the
+  // read-only SQL functions, instead of the heavy reads below.
+  if (mode === 'story') return await buildStoryDossier(client, jobRow, body)
 
   const jobId: string = jobRow.id
   const jobNumber: string = jobRow.job_number
@@ -17022,7 +17051,8 @@ async function assembleJobDossier(client: any, body: any) {
     // 2 = operationalTruth.quotes / .variations and scope (context D1).
     // 3 = freshness (context K4).
     // 4 = state card (state-card-v1).
-    sections_version: 4,
+    // 5 = mode story (job-story-v1 and client-story-v1, story slice S2).
+    sections_version: STORY_SECTIONS_VERSION,
     _ghlContactId: ghlContactId,
   }
 }
