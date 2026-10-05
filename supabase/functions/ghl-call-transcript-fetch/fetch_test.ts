@@ -356,6 +356,64 @@ Deno.test("N2 voicemail with no duration: fetched, saved, low signal", async () 
   assertEquals(w.fetches[0].provider_duration_seconds, null);
 });
 
+Deno.test("a voicemail GHL cannot transcribe ends at once: terminal not_expected voicemail_no_transcript, no retry, nothing saved", async () => {
+  for (
+    const answer of [
+      ok({ message: "No transcription" }),
+      ok({ data: N2.sentences }),
+      { ok: false, status: 400, code: "http_400" },
+    ] as ProviderRead[]
+  ) {
+    const w = withCall(world(), N2.item, answer);
+    w.now = Date.parse(N2.item.dateAdded) + hours(3);
+    w.due = [due({ ...N2.item, to: "+61489267774" })];
+    const run = await runLiveFetch(deps(w));
+    assert(run.outcome === "ran");
+    assertEquals(run.status, "succeeded");
+    assertEquals(run.counts.not_expected, 1);
+    assertEquals(run.counts.errors, 0);
+    assertEquals(run.calls[0].code, "voicemail_no_transcript");
+    assertEquals(w.fetches.length, 1);
+    assertEquals(w.fetches[0].result, "not_expected");
+    assertEquals(w.fetches[0].code, "voicemail_no_transcript");
+    assertEquals(w.fetches[0].provider_status, "voicemail");
+    assertEquals(w.captured, []);
+    assertEquals(w.outcomes.get(N2.item.id)?.outcome, "not_expected");
+  }
+});
+
+Deno.test("a voicemail whose transcription is not ready yet (404 or an empty list) still waits; a completed call's unreadable body is still an error", async () => {
+  for (
+    const [answer, code] of [
+      [ok([]), "empty"],
+      [{ ok: false, status: 404, code: "http_404" }, "transcript_not_found"],
+    ] as [ProviderRead, string][]
+  ) {
+    const w = withCall(world(), N2.item, answer);
+    w.now = Date.parse(N2.item.dateAdded) + hours(3);
+    const step = await processCall(
+      due({ ...N2.item, to: "+61489267774" }),
+      "live",
+      POLICY,
+      deps(w),
+    );
+    assertEquals(step.outcome, "not_ready");
+    assertEquals(w.fetches[0].code, code);
+  }
+  for (
+    const [answer, code] of [
+      [ok({ data: N1.sentences }), "provider_invalid"],
+      [{ ok: false, status: 400, code: "http_400" }, "http_400"],
+    ] as [ProviderRead, string][]
+  ) {
+    const w = withCall(world(), N1.item, answer);
+    w.now = Date.parse(N1.item.dateAdded) + hours(1);
+    const step = await processCall(due(N1_CALL_ITEM), "live", POLICY, deps(w));
+    assertEquals(step.outcome, "error");
+    assertEquals(step.code, code);
+  }
+});
+
 Deno.test("NODUR: completed with no duration recorded carries a transcript, and is fetched", async () => {
   const w = withCall(world(), NODUR.item, ok(NODUR.sentences));
   w.now = Date.parse(NODUR.item.dateAdded) + hours(5);
