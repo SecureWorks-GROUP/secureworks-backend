@@ -482,11 +482,13 @@ jobs:
   # order. See supabase/tests/migration-contracts/README.md.
   migration-contracts:
     runs-on: ubuntu-latest
-    # 20, not 10: each registered contract case can replay the whole stack
-    # (fail-closed, rollback and break proofs), and the suite now runs close to
-    # 10 minutes on a hosted runner. Passing suites were cancelled at the limit
-    # of 5 and then of 10.
-    timeout-minutes: 20
+    # 40, not 20: each registered contract case can replay the whole stack
+    # (fail-closed, rollback and break proofs). Passing suites were cancelled at
+    # the limit of 5, then of 10, then of 20: on 5 Oct 2026 main ran 12 to 19
+    # minutes, and job story v1 (four cases) was cancelled at 20 with every
+    # contract, rollback and fail-closed proof passed and 23 of 71 break proofs
+    # done (about 27 minutes in all on a hosted runner).
+    timeout-minutes: 40
 
     services:
       postgres:
