@@ -344,6 +344,17 @@ jobs:
       # doorbell, and a reconciler pass after it writes nothing new.
       # UserReplied: the staff-reply workflow post is that doorbell too; it
       # ignores any posted conversation id and reads the newest conversation.
+      # Gap plan B-4: invoice evidence on its job. The placement plan is the
+      # unique reference matcher's (never re-derived), xero-sync's recent-row
+      # step is off until its flag and writes nothing on a partial read, and
+      # ops-api's invoice writers name the invoice's own job.
+      - name: Test Xero invoice evidence placement
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/evidence/xero_invoice_evidence_plan_test.ts \
+            supabase/functions/xero-sync/invoice_evidence_place_test.ts \
+            supabase/functions/ops-api/invoice_evidence_writers_test.ts
+
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
