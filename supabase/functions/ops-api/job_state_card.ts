@@ -18,10 +18,14 @@
 //   { version: "state-card-v1", lines: string[], not_known: string[],
 //     brief: { present, written_at, stale, ... } }.
 // `brief` may carry more keys (text, fact_id, stale_reason); the three named
-// keys never change meaning within this version.
+// keys never change meaning within this version. `customer_contact` (job read
+// fix, 5 Oct 2026, additive) names the messages behind the newest-contact and
+// last-told lines: { newest, last_told }, each a message with its record id
+// and words, or null.
 
 import type { JobFreshness } from "./job_freshness.ts";
 import type { JobQuotes, QuoteDocumentView } from "./job_commercial_read.ts";
+import { countsAsCustomerContact } from "./job_conversation_timeline.ts";
 
 export const JOB_STATE_CARD_VERSION = "state-card-v1";
 
@@ -74,11 +78,33 @@ export interface StateCardBrief {
   text: string | null;
 }
 
+/** One message the card names, with its record id and words. */
+export interface StateCardMessage {
+  id: string | null;
+  source_system: string | null;
+  source_ref: string | null;
+  channel: string | null;
+  direction: string | null;
+  occurred_at: string | null;
+  who: string | null;
+  subject: string | null;
+  /** The words, cut at 2000 characters. */
+  body: string;
+}
+
 export interface JobStateCard {
   version: typeof JOB_STATE_CARD_VERSION;
   lines: string[];
   not_known: string[];
   brief: StateCardBrief;
+  /**
+   * The messages behind the newest-contact and last-told lines (additive):
+   * null when there is none or the messages could not be read.
+   */
+  customer_contact: {
+    newest: StateCardMessage | null;
+    last_told: StateCardMessage | null;
+  };
 }
 
 /** A read the dossier made: rows, and whether the read succeeded. */
@@ -107,6 +133,11 @@ export interface JobStateCardInput {
   assignments: StateCardRead<any>;
   /** The merged conversation the dossier returns (any order). */
   conversation: StateCardRead<any>;
+  /**
+   * The wider window of newest messages the dossier read (any order), for
+   * the newest contact and last-told lines; the conversation when absent.
+   */
+  contactWindow?: StateCardRead<any>;
   /** Current facts (visible and temporary), job_brief rows included or not. */
   facts: StateCardRead<any>;
   /** Current job_brief fact rows for this job (newest first is not required). */
@@ -337,29 +368,89 @@ const CHANNEL_WORDS: Record<string, string> = {
   email: "email",
 };
 
-function newestContactLine(messages: any[]): string | null {
+/** Contact with the customer, newest first by when it happened. */
+function customerContact(messages: any[]): any[] {
+  // Notes, crew and staff texts (internal), and email that is not to or from
+  // the customer are job communication, never contact with the customer
+  // (job_conversation_timeline.ts countsAsCustomerContact).
   const customer = messages.filter((m) =>
-    m && m.channel !== "note" && ms(m.occurred_at) !== null
+    countsAsCustomerContact(m) && ms(m.occurred_at) !== null
   );
-  if (!customer.length) return null;
   customer.sort((a, b) =>
     (ms(b.occurred_at) as number) - (ms(a.occurred_at) as number)
   );
-  const m = customer[0];
+  return customer;
+}
+
+function sourceWords(m: any): string {
+  return m.source_system === "ghl_cache"
+    ? ", seen in the CRM thread (not linked to this job)"
+    : m.source_system === "inbox"
+    ? ", from the old inbox match"
+    : m.source_system === "email_events"
+    ? ", sent by our system"
+    : "";
+}
+
+function newestContactLine(m: any | null): string | null {
+  if (!m) return null;
   const channel = CHANNEL_WORDS[m.channel] || words(m.channel) || "message";
   const who = m.direction === "outbound"
     ? "from us"
     : m.direction === "inbound"
     ? "from the customer"
     : "";
-  const where = m.source_system === "ghl_cache"
-    ? ", seen in the CRM thread (not linked to this job)"
-    : m.source_system === "inbox"
-    ? ", from the old inbox match"
-    : "";
-  return `Newest contact: ${channel}${who ? ` ${who}` : ""} on ${
-    perthDate(m.occurred_at)
-  }${where}.`;
+  return `Newest contact with the customer: ${channel}${
+    who ? ` ${who}` : ""
+  } on ${perthDate(m.occurred_at)}${sourceWords(m)}.`;
+}
+
+/** Words of a message for one line: whitespace folded, cut at 200 characters. */
+function quoted(value: unknown): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+}
+
+/**
+ * What we last told the customer: the newest message from us to the customer
+ * (text, email, chat), or the newest call with the customer that has a
+ * transcript, with its words.
+ */
+function lastToldMessage(messages: any[]): any | null {
+  return customerContact(messages).find((c) =>
+    c.channel === "call"
+      ? c.call_transcript === true
+      : c.direction === "outbound"
+  ) ?? null;
+}
+
+function cardMessage(m: any | null): StateCardMessage | null {
+  if (!m) return null;
+  const body = String(m.body || m.preview || "");
+  return {
+    id: m.id ? String(m.id) : null,
+    source_system: m.source_system ?? null,
+    source_ref: m.source_ref ? String(m.source_ref) : null,
+    channel: m.channel ?? null,
+    direction: m.direction ?? null,
+    occurred_at: m.occurred_at ?? null,
+    who: m.who ?? null,
+    subject: m.subject ?? null,
+    body: body.length > 2000 ? `${body.slice(0, 2000)}...` : body,
+  };
+}
+
+function lastToldLine(m: any | null): string {
+  if (!m) {
+    return "Last told the customer: nothing from us to the customer in the messages read.";
+  }
+  const channel = m.channel === "call"
+    ? "call (transcript)"
+    : CHANNEL_WORDS[m.channel] || words(m.channel) || "message";
+  const said = quoted(m.preview || m.body || m.subject);
+  return `Last told the customer: ${channel} on ${
+    perthDateTime(m.occurred_at)
+  }${sourceWords(m)}${said ? `: "${said}"` : ""}.`;
 }
 
 // ── brief ────────────────────────────────────────────────────────────────────
@@ -557,9 +648,29 @@ export function buildJobStateCard(input: JobStateCardInput): JobStateCard {
   if (input.invoices.ok) lines.push(invoiceLine(input.invoices.rows));
   else failed("invoices");
 
+  const customerContactMessages: JobStateCard["customer_contact"] = {
+    newest: null,
+    last_told: null,
+  };
   if (input.conversation.ok) {
-    const contact = newestContactLine(input.conversation.rows);
-    lines.push(contact ?? "No texts, calls or emails seen for this job.");
+    const window = input.contactWindow?.ok
+      ? input.contactWindow.rows
+      : input.conversation.rows;
+    const newest = customerContact(window)[0] ?? null;
+    const told = lastToldMessage(window);
+    customerContactMessages.newest = cardMessage(newest);
+    customerContactMessages.last_told = cardMessage(told);
+    const contact = newestContactLine(newest);
+    if (contact) {
+      lines.push(contact);
+      lines.push(lastToldLine(told));
+    } else {
+      lines.push(
+        window.some((m) => m && m.channel !== "note")
+          ? "No contact with the customer seen for this job (only internal or other-party messages)."
+          : "No texts, calls or emails seen for this job.",
+      );
+    }
   } else failed("messages");
 
   const briefRow = newestBriefRow([
@@ -643,5 +754,6 @@ export function buildJobStateCard(input: JobStateCardInput): JobStateCard {
     lines,
     not_known: notKnown,
     brief,
+    customer_contact: customerContactMessages,
   };
 }

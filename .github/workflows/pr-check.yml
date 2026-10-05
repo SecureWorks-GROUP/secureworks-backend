@@ -310,12 +310,13 @@ jobs:
             supabase/functions/ops-api/sales_booking_lead_owner_test.ts \
             supabase/functions/ops-api/sales_booking_execution_read_test.ts \
             supabase/functions/ops-api/sales_booking_routes_test.ts \
-            supabase/functions/reporting-api/reporting_staff_gate_test.ts
+            supabase/functions/reporting-api/reporting_staff_gate_test.ts \
+            supabase/functions/reporting-api/job_context_timeline_test.ts
 
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
-      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job commercial read, job freshness, the job state card, actor recording and monitored mailboxes
+      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline, the job commercial read, job freshness, the job state card, actor recording and monitored mailboxes
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
@@ -323,9 +324,11 @@ jobs:
             supabase/functions/ops-api/retired_booking_actions_test.ts \
             supabase/functions/ops-api/invoice_context_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \
+            supabase/functions/ops-api/job_conversation_party_roles_test.ts \
             supabase/functions/ops-api/job_commercial_read_test.ts \
             supabase/functions/ops-api/job_freshness_test.ts \
             supabase/functions/ops-api/job_state_card_test.ts \
+            supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/trade_variation_request_test.ts \
             supabase/functions/ops-api/context_unlinked_test.ts \
             supabase/functions/ops-api/actor_calls_test.ts \
@@ -344,6 +347,17 @@ jobs:
       # doorbell, and a reconciler pass after it writes nothing new.
       # UserReplied: the staff-reply workflow post is that doorbell too; it
       # ignores any posted conversation id and reads the newest conversation.
+      # Gap plan B-4: invoice evidence on its job. The placement plan is the
+      # unique reference matcher's (never re-derived), xero-sync's recent-row
+      # step is off until its flag and writes nothing on a partial read, and
+      # ops-api's invoice writers name the invoice's own job.
+      - name: Test Xero invoice evidence placement
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/evidence/xero_invoice_evidence_plan_test.ts \
+            supabase/functions/xero-sync/invoice_evidence_place_test.ts \
+            supabase/functions/ops-api/invoice_evidence_writers_test.ts
+
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \
@@ -364,6 +378,7 @@ jobs:
             supabase/functions/_shared/evidence/ghl_message_test.ts \
             supabase/functions/_shared/evidence/ghl_message_contract_rows_test.ts \
             supabase/functions/_shared/evidence/ghl_call_pair_test.ts \
+            supabase/functions/_shared/evidence/party_roles_test.ts \
             supabase/functions/ghl-proxy/sms_capture_test.ts \
             supabase/functions/ghl-proxy/send_sms_response_test.ts
 
@@ -394,6 +409,15 @@ jobs:
             supabase/functions/_shared/evidence/ghl_call_transcript_row_test.ts \
             supabase/functions/ghl-call-transcript-fetch/fetch_test.ts \
             supabase/functions/ghl-call-transcript-fetch/handler_test.ts
+
+      # Gap plan B-5: the document text reader (file kinds, own-storage-only
+      # reads, the text gate, the evidence row, a run and its HTTP door) on
+      # fake reads and writes; the PDF extractor is ops-api's, tested there.
+      - name: Test the document text reader
+        run: |
+          deno test --allow-read \
+            supabase/functions/context-document-text/read_test.ts \
+            supabase/functions/context-document-text/handler_test.ts
 
       # Slice B0: the placement keys and token rule (TypeScript twin of the SQL
       # helpers) on the one fixture table, and proof that the migration
