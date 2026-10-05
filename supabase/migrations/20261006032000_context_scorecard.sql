@@ -29,9 +29,14 @@
 --
 -- Live job = jobs.status not cancelled, draft, archived, complete, completed or
 -- lost (the definition's own words). p_as_of is the instant the card is measured
--- at: event windows, quiet times and ages run to it and rows captured after it
--- are left out. The status functions it calls (freshness, capture, history,
--- documents) and the live job list read the database as it is now.
+-- at: event windows, quiet times and ages run to it, and every business_events
+-- read, overall and per job, leaves out rows captured after it (so the card and
+-- its per-job pages agree). Everything else reads the database as it is now: the
+-- live job list, the status functions it calls (freshness, capture, history,
+-- documents), the misfile rows, Xero invoices, current facts and the brief
+-- (rows 7 and 8), the history runs' own state, and the ledger and story rows
+-- (11 to 13). So a past p_as_of is a replay of the evidence, not of the whole
+-- database.
 --
 -- Reads, never replaces: context_source_freshness, context_email_capture_status,
 -- context_ghl_capture_status, context_transcript_capture_status,
@@ -118,9 +123,14 @@ AS $fn$
    'crew_staff_texts', jsonb_build_object('label', 'crew or staff texts', 'ord', 10, 'warn_after', 660, 'alarm_after', 1320)), -- two working days
   -- Row 4 and the history_load_stalled alarm: a history load (a capture run
   -- source naming history or backfill, dry runs aside) whose last this-many
-  -- finished runs were all partial (more to do), added nothing and left the
+  -- finished runs were all partial (more to do), made no progress and left the
   -- cursor where it was.
   'history_stall_runs', 3,
+  -- Progress is any of these run counters above zero, whichever the load
+  -- writes: rows added or upgraded (the mail and CRM loads), contacts finished
+  -- (the CRM load), jobs linked or attempts recorded (the CRM link pass, which
+  -- keeps one cursor on every run, so its cursor never shows progress).
+  'history_progress_keys', jsonb_build_array('inserted', 'upgraded', 'contacts_done', 'linked', 'attempts_recorded'),
   -- Row 4: the cron job that keeps each history load running daily. null = no
   -- job is known for that load, which reads red until one exists.
   'history_schedules', jsonb_build_object('ghl', 'ghl-history-schedule', 'email', 'outlook-mail-poll', 'xero', NULL),
@@ -354,7 +364,7 @@ BEGIN
   'value', v_d || ' of ' || v_n || ' mailbox sources finished',
   'note', coalesce((SELECT string_agg(s.key || ' ' || s.value, ', ' ORDER BY s.key COLLATE "C") FROM jsonb_each_text(v_eh->'by_state') s), 'no plan')));
  SELECT count(DISTINCT x.job_id), count(DISTINCT x.job_id) FILTER (WHERE EXISTS (
-          SELECT 1 FROM public.business_events b WHERE b.job_id = x.job_id
+          SELECT 1 FROM public.business_events b WHERE b.job_id = x.job_id AND coalesce(b.context_captured_at, b.recorded_at) <= v_as_of
             AND (b.source LIKE 'xero%' OR b.event_type LIKE 'invoice.%' OR b.event_type LIKE 'payment.%')))
  INTO v_n, v_d
  FROM public.xero_invoices x
@@ -364,11 +374,13 @@ BEGIN
   'green', (v_pol->'history'->>'green_pct')::numeric, 'amber', (v_pol->'history'->>'amber_pct')::numeric, 'higher_is_better', true,
   'status', CASE WHEN v_n = 0 THEN 'green' END,
   'value', v_d || ' of ' || v_n || ' live jobs with a live Xero invoice carry Xero evidence', 'note', 'invoices not voided or deleted'));
- -- History loads that stopped moving: the last N finished runs all partial, nothing added, cursor unchanged.
+ -- History loads that stopped moving: the last N finished runs all partial, no progress counter above zero
+ -- (context_scorecard_policy().history_progress_keys), cursor unchanged.
  v_n := 0; v_missing := '{}';
  FOR v_x IN
   SELECT s.source, count(*) AS runs, bool_and(s.status = 'partial') AS all_partial,
-         sum(coalesce((s.counts->>'inserted')::integer, 0) + coalesce((s.counts->>'upgraded')::integer, 0)) AS added,
+         sum((SELECT coalesce(sum((s.counts->>k)::numeric), 0) FROM jsonb_array_elements_text(v_pol->'history_progress_keys') k
+              WHERE jsonb_typeof(s.counts->k) = 'number')) AS added,
          count(DISTINCT md5(coalesce(s.cursor::text, ''))) AS cursors, max(s.started_at) AS last_run, min(s.started_at) AS first_run
   FROM (SELECT c.source, c.status, c.counts, c.cursor, c.started_at,
                row_number() OVER (PARTITION BY c.source ORDER BY c.started_at DESC) AS rn
@@ -382,7 +394,7 @@ BEGIN
    v_n := v_n + 1; v_missing := v_missing || v_x.source::text;
    v_alarms := v_alarms || jsonb_build_array(jsonb_build_object('key', 'history_load_stalled', 'row', 4, 'source', v_x.source,
     'since', v_x.first_run, 'last_run_at', v_x.last_run, 'runs', v_x.runs,
-    'what_to_do', 'This history load ran ' || v_x.runs || ' times in a row without adding anything or moving its cursor, and still reports more to do. Check its run rows in context_capture_runs and the function''s logs.'));
+    'what_to_do', 'This history load ran ' || v_x.runs || ' times in a row without adding, linking or finishing anything or moving its cursor, and still reports more to do. Check its run rows in context_capture_runs and the function''s logs.'));
   END IF;
  END LOOP;
  v_lanes := v_lanes || jsonb_build_array(jsonb_build_object('row', 4, 'lane', 'history_loads_stalled',
@@ -466,8 +478,10 @@ BEGIN
 
  ---------------------------------------------------------------------------
  -- Row 7. Facts.
- SELECT count(*) FILTER (WHERE EXISTS (SELECT 1 FROM public.business_events b WHERE b.job_id = j.id)),
-        count(*) FILTER (WHERE EXISTS (SELECT 1 FROM public.business_events b WHERE b.job_id = j.id)
+ SELECT count(*) FILTER (WHERE EXISTS (SELECT 1 FROM public.business_events b WHERE b.job_id = j.id
+                                         AND coalesce(b.context_captured_at, b.recorded_at) <= v_as_of)),
+        count(*) FILTER (WHERE EXISTS (SELECT 1 FROM public.business_events b WHERE b.job_id = j.id
+                                         AND coalesce(b.context_captured_at, b.recorded_at) <= v_as_of)
                            AND EXISTS (SELECT 1 FROM public.current_job_context_facts f WHERE f.job_id = j.id AND f.kind <> 'job_brief'))
  INTO v_n, v_d FROM public.jobs j WHERE j.id = ANY (v_live);
  v_lanes := v_lanes || jsonb_build_array(jsonb_build_object('row', 7, 'lane', 'fact_coverage',
@@ -566,7 +580,7 @@ BEGIN
  FROM (SELECT j.id, j.created_at,
               min(coalesce(b.event_at, b.occurred_at)) FILTER (WHERE b.channel = 'email') AS first_email,
               min(coalesce(b.event_at, b.occurred_at)) FILTER (WHERE b.channel IN ('sms', 'call')) AS first_talk
-       FROM public.jobs j LEFT JOIN public.business_events b ON b.job_id = j.id
+       FROM public.jobs j LEFT JOIN public.business_events b ON b.job_id = j.id AND coalesce(b.context_captured_at, b.recorded_at) <= v_as_of
        WHERE j.id = ANY (v_live) GROUP BY j.id, j.created_at) s;
  v_lanes := v_lanes || jsonb_build_array(
   jsonb_build_object('row', 14, 'lane', 'email_depth',
@@ -652,7 +666,7 @@ BEGIN
 END
 $fn$;
 COMMENT ON FUNCTION public.context_scorecard(timestamptz) IS
- 'Context scorecard (20261006032000): the owner''s definition of done, rows 1 to 14 (context-scorecard-v1). Each row has lanes; each lane has status green, amber or red, the number, its unit and both thresholds (context_scorecard_policy); a row is its worst lane. Alarms: lane_quiet (a capture lane quiet past its threshold in Perth working hours) and history_load_stalled (no progress for 3 runs). Rows SQL cannot measure are red with the reason. Read only; service role only.';
+ 'Context scorecard (20261006032000): the owner''s definition of done, rows 1 to 14 (context-scorecard-v1). Each row has lanes; each lane has status green, amber or red, the number, its unit and both thresholds (context_scorecard_policy); a row is its worst lane. Alarms: lane_quiet (a capture lane quiet past its threshold in Perth working hours) and history_load_stalled (no progress for 3 runs). Rows SQL cannot measure are red with the reason. p_as_of cuts every business_events read (rows captured after it are left out); the job list, status functions, facts, Xero invoices and story rows read the database as it is now. Read only; service role only.';
 
 -- 4. Per job: one page of live jobs (ordered by id, as context_story_scorecard_jobs).
 CREATE OR REPLACE FUNCTION public.context_scorecard_jobs(p_after uuid DEFAULT NULL, p_limit integer DEFAULT 150,
@@ -792,7 +806,7 @@ BEGIN
 END
 $fn$;
 COMMENT ON FUNCTION public.context_scorecard_jobs(uuid, integer, timestamptz) IS
- 'Context scorecard (20261006032000): per-job rows of the done definition for one page of live jobs ordered by id after p_after (at most 300, default 150; the order and page of context_story_scorecard_jobs). Rows measured per job: 2 (both sides named), 4 (CRM history, Xero evidence), 6 (unread live and backlog items), 7 (current facts), 8 (brief), 11 to 13 (from context_story_scorecard_jobs), 14 (each lane reaches the job''s start). Each row green, amber or red; a job is its worst row. next = the cursor for the following page, null at the end. Read only; service role only.';
+ 'Context scorecard (20261006032000): per-job rows of the done definition for one page of live jobs ordered by id after p_after (at most 300, default 150; the order and page of context_story_scorecard_jobs). Rows measured per job: 2 (both sides named), 4 (CRM history, Xero evidence), 6 (unread live and backlog items), 7 (current facts), 8 (brief), 11 to 13 (from context_story_scorecard_jobs), 14 (each lane reaches the job''s start). Each row green, amber or red; a job is its worst row. p_as_of cuts the business_events reads; facts, Xero invoices and rows 11 to 13 read the database as it is now. next = the cursor for the following page, null at the end. Read only; service role only.';
 
 -- 5. Access: service role only. The policy and lane helpers are reached only
 -- through the two reads (they are pure; executing them shows no data).

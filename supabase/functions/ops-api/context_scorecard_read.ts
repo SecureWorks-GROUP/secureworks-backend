@@ -8,7 +8,10 @@
 // GET ops-api?action=context_scorecard&jobs=1     one page of live jobs graded
 //     per row (context_scorecard_jobs), from `after` (a job id), `limit`
 //     (1 to 300, default 150) jobs at a time; `next` is the following cursor.
-// Both take an optional `as_of` (an ISO instant, never in the future).
+// Both take an optional `as_of` (an ISO instant, never in the future). It
+// cuts the evidence: every business_events row captured after it is left out,
+// on the card and on the job pages alike. The job list, the status functions,
+// facts, Xero invoices and the story rows (11 to 13) are read as they are now.
 //
 // Staff front door, GET only. It calls two read-only SQL functions and writes
 // nothing; a failed read is an error with a code, never an empty card.

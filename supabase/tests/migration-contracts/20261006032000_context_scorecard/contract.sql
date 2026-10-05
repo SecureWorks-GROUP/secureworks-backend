@@ -168,7 +168,16 @@ VALUES
  -- a misfile: sitting on job one, naming job two.
  ('5ce00000-0000-4000-8000-00000000000d', '5c000000-0000-4000-8000-000000000001', 'ghl.internal_comment', 'ghl', 'note', 'internal',
   '{}', NULL, '{"job_id":"5c000000-0000-4000-8000-000000000002"}',
-  '2026-09-01 02:00Z', '2026-09-01 02:00Z', '2026-09-01 02:00Z', '2026-09-01 02:00Z', 'direct', NULL);
+  '2026-09-01 02:00Z', '2026-09-01 02:00Z', '2026-09-01 02:00Z', '2026-09-01 02:00Z', 'direct', NULL),
+ -- captured after the instant measured, on job two: an email from the job's first
+ -- week and a live Xero row. Neither may count on the card (rows 1, 4, 7, 14) or
+ -- on job two's page, so the card and its pages measure the same instant.
+ ('5ce00000-0000-4000-8000-00000000000e', '5c000000-0000-4000-8000-000000000002', 'client.email_in', 'outlook-mail-capture', 'email', 'inbound',
+  '{"capture_mode":"live","party_roles":{"sender_role":"customer","recipient_role":"staff","audience":"customer"}}', NULL, '{}',
+  '2026-10-06 05:10Z', '2026-10-06 05:10Z', '2026-10-06 05:10Z', '2026-09-02 02:00Z', 'direct', NULL),
+ ('5ce00000-0000-4000-8000-00000000000f', '5c000000-0000-4000-8000-000000000002', 'invoice.raised', 'xero-sync', 'invoice', 'internal',
+  '{"capture_mode":"live"}', NULL, '{}',
+  '2026-10-06 05:10Z', '2026-10-06 05:10Z', '2026-10-06 05:10Z', '2026-09-02 02:00Z', 'direct', NULL);
 
 -- Live Xero invoices on jobs one and two (only job one carries Xero evidence).
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, total, job_id)
@@ -178,7 +187,11 @@ VALUES ('00000000-0000-4000-8000-0000000000aa', 'sc-x-1', 'INV-SC1', 'ACCREC', '
 
 -- History runs: one load stuck (3 partial runs, nothing added, cursor unchanged),
 -- one moving (cursor changes), one finished (succeeded, nothing left), and a
--- dry run that looks stuck but is never a load.
+-- dry run that looks stuck but is never a load. The CRM link pass keeps one
+-- cursor on every run and counts its progress as linked or attempts_recorded;
+-- the CRM load counts contacts_done: three partial runs with the same cursor
+-- that link 4 jobs (production, 5 Oct 00:52 to 01:22Z), or finish contacts,
+-- are moving. A link pass that links and tries nothing for 3 runs is stuck.
 INSERT INTO public.context_capture_runs (source, status, started_at, updated_at, finished_at, cursor, counts)
 VALUES ('outlook_history_scfx', 'partial', '2026-10-06 03:20Z', '2026-10-06 03:22Z', '2026-10-06 03:22Z', '{"page":"p7"}', '{"inserted":0,"seen":40}'),
        ('outlook_history_scfx', 'partial', '2026-10-06 03:30Z', '2026-10-06 03:32Z', '2026-10-06 03:32Z', '{"page":"p7"}', '{"inserted":0,"seen":41}'),
@@ -191,7 +204,16 @@ VALUES ('outlook_history_scfx', 'partial', '2026-10-06 03:20Z', '2026-10-06 03:2
        ('ghl_history_load', 'succeeded', '2026-10-06 03:40Z', '2026-10-06 03:41Z', '2026-10-06 03:41Z', '{"c":1}', '{"inserted":0}'),
        ('outlook_history_scfx_dry', 'partial', '2026-10-06 03:20Z', '2026-10-06 03:22Z', '2026-10-06 03:22Z', '{"page":"p7"}', '{"inserted":0}'),
        ('outlook_history_scfx_dry', 'partial', '2026-10-06 03:30Z', '2026-10-06 03:32Z', '2026-10-06 03:32Z', '{"page":"p7"}', '{"inserted":0}'),
-       ('outlook_history_scfx_dry', 'partial', '2026-10-06 03:40Z', '2026-10-06 03:42Z', '2026-10-06 03:42Z', '{"page":"p7"}', '{"inserted":0}');
+       ('outlook_history_scfx_dry', 'partial', '2026-10-06 03:40Z', '2026-10-06 03:42Z', '2026-10-06 03:42Z', '{"page":"p7"}', '{"inserted":0}'),
+       ('ghl_history_link', 'partial', '2026-10-06 03:20Z', '2026-10-06 03:22Z', '2026-10-06 03:22Z', '{"after":null}', '{"linked":0,"jobs_considered":93,"backlog_jobs":7}'),
+       ('ghl_history_link', 'partial', '2026-10-06 03:30Z', '2026-10-06 03:32Z', '2026-10-06 03:32Z', '{"after":null}', '{"linked":0,"jobs_considered":100,"backlog_jobs":1}'),
+       ('ghl_history_link', 'partial', '2026-10-06 03:40Z', '2026-10-06 03:42Z', '2026-10-06 03:42Z', '{"after":null}', '{"linked":4,"jobs_considered":84,"backlog_jobs":16}'),
+       ('ghl_history_load_sccontacts', 'partial', '2026-10-06 03:20Z', '2026-10-06 03:22Z', '2026-10-06 03:22Z', '{"c":9}', '{"inserted":0,"contacts_done":2}'),
+       ('ghl_history_load_sccontacts', 'partial', '2026-10-06 03:30Z', '2026-10-06 03:32Z', '2026-10-06 03:32Z', '{"c":9}', '{"inserted":0,"contacts_done":0}'),
+       ('ghl_history_load_sccontacts', 'partial', '2026-10-06 03:40Z', '2026-10-06 03:42Z', '2026-10-06 03:42Z', '{"c":9}', '{"inserted":0,"contacts_done":0}'),
+       ('ghl_history_link_scstuck', 'partial', '2026-10-06 03:20Z', '2026-10-06 03:22Z', '2026-10-06 03:22Z', '{"after":null}', '{"linked":0,"attempts_recorded":0}'),
+       ('ghl_history_link_scstuck', 'partial', '2026-10-06 03:30Z', '2026-10-06 03:32Z', '2026-10-06 03:32Z', '{"after":null}', '{"linked":0,"attempts_recorded":0}'),
+       ('ghl_history_link_scstuck', 'partial', '2026-10-06 03:40Z', '2026-10-06 03:42Z', '2026-10-06 03:42Z', '{"after":null}', '{"linked":0,"attempts_recorded":0}');
 
 DO $card$
 DECLARE s jsonb := public.context_scorecard('2026-10-06 04:00Z'); s0 jsonb := (SELECT b.s FROM sc_before b); l jsonb; a text[];
@@ -250,9 +272,22 @@ BEGIN
  l := pg_temp.lane(s, 4, 'xero_history');
  IF (l->>'number')::numeric <> 50.0 OR l->>'status' <> 'amber' THEN RAISE EXCEPTION 'scorecard contract: Xero history wrong: %', l; END IF;
  SELECT array_agg(x->>'source' ORDER BY x->>'source' COLLATE "C") INTO a FROM jsonb_array_elements(s->'alarms') x WHERE x->>'key' = 'history_load_stalled';
- IF a IS DISTINCT FROM ARRAY['outlook_history_scfx'] THEN RAISE EXCEPTION 'scorecard contract: history_load_stalled wrong: %', a; END IF;
+ IF a IS DISTINCT FROM ARRAY['ghl_history_link_scstuck', 'outlook_history_scfx'] THEN
+  RAISE EXCEPTION 'scorecard contract: history_load_stalled wrong (a link pass that linked rows, or a load that finished contacts, is moving): %', a; END IF;
  l := pg_temp.lane(s, 4, 'history_loads_stalled');
- IF (l->>'number')::int <> 1 OR l->>'status' <> 'red' THEN RAISE EXCEPTION 'scorecard contract: stalled lane wrong: %', l; END IF;
+ IF (l->>'number')::int <> 2 OR l->>'status' <> 'red' THEN RAISE EXCEPTION 'scorecard contract: stalled lane wrong: %', l; END IF;
+ IF NOT (s->'policy'->'history_progress_keys' @> '["inserted","upgraded","contacts_done","linked","attempts_recorded"]'::jsonb) THEN
+  RAISE EXCEPTION 'scorecard contract: progress keys wrong: %', s->'policy'->'history_progress_keys'; END IF;
+
+ -- Rows 7 and 14 cut at the instant measured: job two's late email and Xero row never
+ -- count, so jobs one and three have evidence (+2, not +3) and only job one has email.
+ l := pg_temp.lane(s, 7, 'fact_coverage');
+ IF substring(l->>'value' FROM ' of ([0-9]+) ')::int - substring(pg_temp.lane(s0, 7, 'fact_coverage')->>'value' FROM ' of ([0-9]+) ')::int <> 2 THEN
+  RAISE EXCEPTION 'scorecard contract: a row captured after as_of counted as fact evidence: % (before: %)', l, pg_temp.lane(s0, 7, 'fact_coverage'); END IF;
+ l := pg_temp.lane(s, 14, 'email_depth');
+ IF substring(l->>'value' FROM '^([0-9]+) of')::int - substring(pg_temp.lane(s0, 14, 'email_depth')->>'value' FROM '^([0-9]+) of')::int <> 1
+    OR substring(l->>'value' FROM ' of ([0-9]+) ')::int - substring(pg_temp.lane(s0, 14, 'email_depth')->>'value' FROM ' of ([0-9]+) ')::int <> 1 THEN
+  RAISE EXCEPTION 'scorecard contract: a row captured after as_of counted toward history depth: % (before: %)', l, pg_temp.lane(s0, 14, 'email_depth'); END IF;
  IF pg_temp.lane(s, 4, 'history_schedules')->>'status' <> 'red' THEN RAISE EXCEPTION 'scorecard contract: a missing schedule read green'; END IF;
 
  -- Live jobs: the lost job is not live.
