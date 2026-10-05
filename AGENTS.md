@@ -589,7 +589,8 @@ migration lanes: `scripts/test-context-b1.sh`, `scripts/test-context-b3.sh`
 Extraction cadence (K1, `20260924030000`): when a job is read is decided in
 SQL from the evidence, never by a daily clock. Every number is in
 `context_cadence_policy()` (changed only by migration; `live_since` is the
-first apply time and rows captured before it never wake). The one judgement is
+first apply time and rows captured before it never wake), except the live
+reserve, which is in `context_cadence_settings`. The one judgement is
 `context_jobs_cadence(uuid[])`; the claim, candidates, freshness and status
 all read it, so never re-derive "due" elsewhere. The one exception to
 `live_since` is the catch-up list (`20260924220000`, `context_catchup_jobs`,

@@ -43,9 +43,26 @@ Rules for the owning slices:
 stub. The composer is untouched. The block publishes `policy`, due and waiting
 job counts, `oldest_unread_landed_at`, `oldest_due_wait_minutes`,
 `cadence_breach` (a due job waited over 90 minutes with the extraction lane on
-and model budget left), runs today, ceiling and pacing holds, lease takeovers,
-unplaced rows, rows not written as `service_role`, and `alarms`. Due is
-`context_jobs_cadence`; do not re-derive it here.
+and model budget left, or, since `20261006002000`, a job with live waking
+evidence has been held by `model_cap`, `pacing_reserve` or `backlog_budget`
+for over 90 minutes past the time its evidence made it due; the alarm's `cause`
+is `worker`, `budget` or both), runs today, ceiling and pacing holds, lease
+takeovers, unplaced rows, rows not written as `service_role`, and `alarms`. Due
+is `context_jobs_cadence`; do not re-derive it here.
+
+Live reserve (`20261006002000`): `context_cadence_settings` (one row, service
+role only, the desk tunes it) keeps model calls and reads back for live work:
+`live_reserve_calls_day` (100), `live_reserve_calls_morning` (100) and
+`live_reserve_reads_per_job` (2); a missing row reads as these defaults, all 0
+is the old shared pool. A catch-up-only job (listed, pending rows, no live
+waking evidence) is not due, `blocked_reason` `backlog_budget`, once the Perth
+day's calls reach `model_call_cap` less the day reserve (300), before
+`morning_until` `morning_cap` less the morning reserve (200), or its reads
+today reach its run limit less the per-job reserve (4); the claim refuses it
+with outcome `pacing`. The ceiling counts every call of the day and never reads
+`requested_at`, so no re-list gets past it. The block adds `read_reserve` (the
+reserve and both backlog ceilings), `backlog_budget_held_jobs`,
+`live_held_by_budget_jobs` and `oldest_held_wait_minutes`.
 
 Catch-up (`20260924220000`): `catchup` reports the one-time catch-up list
 (`context_catchup_jobs`, written by the service-role
