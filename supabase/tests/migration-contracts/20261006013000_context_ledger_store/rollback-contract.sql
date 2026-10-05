@@ -25,7 +25,7 @@ BEGIN
    AND p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_evidence_rows',
     'context_ledger_current_generation','context_ledger_judge','context_ledger_due','context_ledger_claim','context_ledger_packet',
     'context_ledger_cite','context_ledger_check_item','context_ledger_write','context_ledger_carry_forward','context_ledger_promote',
-    'context_ledger_finish','context_ledger_person_edit'))
+    'context_ledger_finish','context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow'))
   OR to_regclass('public.context_ledger_writes') IS NOT NULL
  THEN RAISE EXCEPTION 'ledger store rollback: store objects left behind'; END IF;
  IF to_regclass('public.context_ledger_items') IS NULL OR to_regclass('public.context_ledger_generations') IS NULL

@@ -44,7 +44,10 @@
 --     the run; built -> shadow, carries people's corrections forward, and
 --     promotes when the lane is live and the checks pass.
 --  8. context_ledger_promote(generation, by): shadow -> live, the previous
---     live -> retired, people's corrections carried forward.
+--     live -> retired, people's corrections carried forward. The one rule for
+--     promoting without a person is context_ledger_checks_pass.
+--     context_ledger_promote_shadow(by, jobs, limit): bulk go-live, each job's
+--     newest passing shadow promoted once the lane is live.
 --  9. context_ledger_person_edit(job, user, action, key, note, item): staff
 --     corrections on the live ledger (close, reopen, dispute, add); each one
 --     locks the item against the model.
@@ -133,7 +136,7 @@ BEGIN
    'context_ledger_row_admissible','context_ledger_evidence_rows','context_ledger_current_generation',
    'context_ledger_judge','context_ledger_due','context_ledger_claim','context_ledger_packet','context_ledger_cite','context_ledger_check_item',
    'context_ledger_write','context_ledger_carry_forward','context_ledger_promote','context_ledger_finish',
-   'context_ledger_person_edit') LOOP
+   'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow') LOOP
   IF x.c NOT LIKE 'Context ledger store%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -1149,6 +1152,22 @@ END $$;
 COMMENT ON FUNCTION public.context_ledger_carry_forward(uuid, uuid) IS
  'Context ledger store (20261006013000): copies every person-locked item of one generation into another (same item_key, written_by kept, a rule:carry_forward transition); a model item with the same key in the target is replaced. Skips items already carried unchanged. Called by finish (built) and promote. Service role only.';
 
+-- 15a. The one rule for promoting without a person: the build passed its checks
+-- (refused items at most 20% of written, and at least one item unless there was
+-- no evidence; finish stores it as checks.store.pass) and, when the generation
+-- has been updated since, its latest update refused at most 20% of what it wrote.
+-- finish (both branches) and context_ledger_promote_shadow use this and nothing else.
+CREATE OR REPLACE FUNCTION public.context_ledger_checks_pass(p_checks jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+ SELECT coalesce((p_checks #>> '{store,pass}')::boolean, false)
+  AND (p_checks -> 'last_update' IS NULL
+   OR coalesce((p_checks #>> '{last_update,items_refused}')::numeric, 0)
+    <= 0.2 * greatest(coalesce((p_checks #>> '{last_update,items_accepted}')::numeric, 0)
+                      + coalesce((p_checks #>> '{last_update,items_refused}')::numeric, 0), 1))
+$$;
+COMMENT ON FUNCTION public.context_ledger_checks_pass(jsonb) IS
+ 'Context ledger store (20261006013000): the one promotion rule over a generation''s stored checks: the build passed (checks.store.pass) and, after any update, the latest update refused at most 20% of the items it wrote (checks.last_update). Used by context_ledger_finish and context_ledger_promote_shadow. Service role only.';
+
 -- 15. Promote: shadow to live; the previous live retired after its people's
 -- corrections are carried across. Idempotent.
 CREATE OR REPLACE FUNCTION public.context_ledger_promote(p_generation_id uuid, p_by text)
@@ -1156,7 +1175,7 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_tem
 DECLARE g public.context_ledger_generations; prev public.context_ledger_generations; v_carried integer := 0;
 BEGIN
  IF p_generation_id IS NULL OR p_by IS NULL
-  OR p_by !~ '^(rule:auto|person:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
+  OR p_by !~ '^(rule:.{1,80}|person:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$' THEN
   RAISE EXCEPTION 'context_ledger_promote_invalid';
  END IF;
  IF p_by LIKE 'person:%' AND NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = substr(p_by, 8)::uuid
@@ -1178,7 +1197,85 @@ BEGIN
  RETURN jsonb_build_object('outcome', 'promoted', 'generation_id', g.id, 'retired_generation_id', prev.id, 'carried', v_carried);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_promote(uuid, text) IS
- 'Context ledger store (20261006013000): promotes a shadow generation to live; the job''s previous live generation is retired after its person-locked items are carried forward. Idempotent on a live generation. p_by is rule:auto or person:<user id> (an active staff user: admin, owner, ops_manager). Service role only.';
+ 'Context ledger store (20261006013000): promotes a shadow generation to live; the job''s previous live generation is retired after its person-locked items are carried forward. Idempotent on a live generation. p_by is rule:<name> (rule:auto from finish) or person:<user id> (an active staff user: admin, owner, ops_manager). Service role only.';
+
+-- 15b. Bulk go-live. A shadow is promoted by finish only on its next clean
+-- update, so when the owner switches the lane to live the shadows already
+-- built would wait for new evidence. This promotes each job's newest shadow
+-- now, under the same rule finish uses (context_ledger_checks_pass), through
+-- context_ledger_promote (people's corrections carried forward the same way).
+-- Only while the mode is live; a shadow older than the job's live generation,
+-- or off the rollout list, is never promoted. Bounded by p_limit; repeatable.
+CREATE OR REPLACE FUNCTION public.context_ledger_promote_shadow(p_by text, p_job_ids uuid[] DEFAULT NULL, p_limit integer DEFAULT 200)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_mode text; v_list uuid[]; v_limit integer := coalesce(p_limit, 200); x record; g public.context_ledger_generations;
+ lv public.context_ledger_generations; v jsonb; v_reason text; promoted jsonb := '[]'::jsonb; skipped jsonb := '[]'::jsonb;
+ v_eligible integer := 0; v_tried integer := 0;
+BEGIN
+ IF p_by IS NULL OR p_by !~ '^(person|rule):.{1,80}$'
+  OR (p_by LIKE 'person:%' AND p_by !~ '^person:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+  OR v_limit NOT BETWEEN 1 AND 1000 OR cardinality(p_job_ids) > 1000 THEN
+  RAISE EXCEPTION 'context_ledger_promote_shadow_invalid';
+ END IF;
+ IF p_by LIKE 'person:%' AND NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = substr(p_by, 8)::uuid
+   AND lower(coalesce(u.role, '')) IN ('admin', 'owner', 'ops_manager')) THEN
+  RETURN jsonb_build_object('outcome', 'refused', 'reason', 'not_staff');
+ END IF;
+ SELECT st.mode, st.job_ids INTO v_mode, v_list FROM public.context_ledger_settings st WHERE st.id;
+ IF v_mode IS DISTINCT FROM 'live' THEN
+  RETURN jsonb_build_object('outcome', 'refused', 'reason', 'not_live', 'mode', coalesce(v_mode, 'off'));
+ END IF;
+ FOR x IN
+  WITH sh AS (  -- each job's newest shadow
+   SELECT DISTINCT ON (s.job_id) s.id, s.job_id, s.checks, s.created_at
+   FROM public.context_ledger_generations s
+   WHERE s.status = 'shadow' AND (p_job_ids IS NULL OR s.job_id = ANY(p_job_ids))
+   ORDER BY s.job_id, s.created_at DESC, s.id DESC
+  )
+  SELECT sh.job_id, sh.id AS generation_id, sh.created_at,
+   CASE WHEN v_list IS NOT NULL AND NOT (sh.job_id = ANY(v_list)) THEN 'not_in_rollout'
+        WHEN l.id IS NOT NULL AND l.created_at >= sh.created_at THEN 'older_than_live'
+        WHEN NOT public.context_ledger_checks_pass(sh.checks) THEN 'checks_failed' END AS skip
+  FROM sh LEFT JOIN public.context_ledger_generations l ON l.job_id = sh.job_id AND l.status = 'live'
+  UNION ALL
+  SELECT DISTINCT r.job_id, NULL::uuid, NULL::timestamptz, 'no_shadow'
+  FROM unnest(p_job_ids) AS r(job_id)
+  WHERE r.job_id IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM public.context_ledger_generations s WHERE s.job_id = r.job_id AND s.status = 'shadow')
+  ORDER BY 4 NULLS FIRST, 3, 2, 1
+ LOOP
+  v_reason := x.skip;
+  IF v_reason IS NULL THEN
+   v_eligible := v_eligible + 1;
+   IF v_tried >= v_limit THEN CONTINUE; END IF;
+   v_tried := v_tried + 1;
+   -- Judge again under the row locks finish and promote take, so a reading
+   -- that changed since the scan is never promoted on a stale answer.
+   SELECT * INTO g FROM public.context_ledger_generations WHERE id = x.generation_id FOR UPDATE;
+   SELECT * INTO lv FROM public.context_ledger_generations WHERE job_id = x.job_id AND status = 'live' FOR UPDATE;
+   v_reason := CASE WHEN g.status IS DISTINCT FROM 'shadow' THEN 'not_shadow'
+                    WHEN lv.id IS NOT NULL AND lv.created_at >= g.created_at THEN 'older_than_live'
+                    WHEN NOT public.context_ledger_checks_pass(g.checks) THEN 'checks_failed' END;
+   IF v_reason IS NULL THEN
+    v := public.context_ledger_promote(g.id, p_by);
+    IF v ->> 'outcome' = 'promoted' AND NOT coalesce((v ->> 'already')::boolean, false) THEN
+     promoted := promoted || jsonb_build_array(jsonb_build_object('job_id', x.job_id, 'generation_id', g.id,
+      'retired_generation_id', v -> 'retired_generation_id', 'carried', coalesce((v ->> 'carried')::integer, 0)));
+     CONTINUE;
+    END IF;
+    v_reason := coalesce(v ->> 'reason', 'not_shadow');
+   END IF;
+  END IF;
+  skipped := skipped || jsonb_build_array(jsonb_build_object('job_id', x.job_id, 'generation_id', x.generation_id, 'reason', v_reason));
+ END LOOP;
+ RETURN jsonb_build_object('outcome', 'done', 'mode', v_mode, 'by', p_by, 'limit', v_limit,
+  'promoted', jsonb_array_length(promoted), 'skipped', jsonb_array_length(skipped), 'remaining', v_eligible - v_tried,
+  'skipped_reasons', coalesce((SELECT jsonb_object_agg(z.reason, z.n) FROM (SELECT k ->> 'reason' AS reason, count(*) AS n
+    FROM jsonb_array_elements(skipped) k GROUP BY 1) z), '{}'::jsonb),
+  'promoted_generations', promoted, 'skipped_generations', skipped);
+END $$;
+COMMENT ON FUNCTION public.context_ledger_promote_shadow(text, uuid[], integer) IS
+ 'Context ledger store (20261006013000): bulk go-live. Only while context_ledger_settings.mode is live (else refused not_live). For each job with a shadow generation (all, or only p_job_ids), its newest shadow is promoted through context_ledger_promote when context_ledger_checks_pass (the rule finish uses) holds; skipped with a reason otherwise: checks_failed, older_than_live (the job''s live generation is as new or newer), not_in_rollout (settings.job_ids is set and does not list the job), no_shadow (a listed job with no shadow), not_shadow (changed under the scan). Each candidate is judged again under row locks. p_by is person:<user id> (an active staff user, else refused not_staff) or rule:<name>, 1 to 80 characters after the prefix. At most p_limit (1 to 1000) promotions per call; remaining counts the eligible rest. Returns counts, reasons and ids, never message text. Service role only.';
 
 -- 16. Finish: close the run; built -> shadow (and promote when the lane is
 -- live and the checks pass), updated -> evidence_until moves, failed.
@@ -1187,7 +1284,7 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_tem
 DECLARE r public.context_extraction_runs; g public.context_ledger_generations; m jsonb := coalesce(p_meta, '{}'::jsonb);
  v_until timestamptz; v_rows integer; v_chunks integer; v_calls integer; v_tokens integer; v_failure text; v_model text; v_sha text;
  v_acc integer; v_ref integer; v_items integer; v_rate numeric; v_pass boolean; v_store jsonb; v_promoted boolean := false;
- v_carried integer := 0; v_live uuid; v_mode text; v_build boolean;
+ v_carried integer := 0; v_live uuid; v_mode text; v_build boolean; v_checks jsonb;
 BEGIN
  IF p_run_id IS NULL OR p_lease_token IS NULL OR p_generation_id IS NULL OR p_outcome IS NULL
   OR p_outcome NOT IN ('built', 'updated', 'failed') OR jsonb_typeof(m) <> 'object' THEN
@@ -1246,14 +1343,14 @@ BEGIN
   UPDATE public.context_ledger_generations SET evidence_until = v_until, chunks = chunks + v_chunks, calls = calls + v_calls,
    updated_at = now(), checks = checks || jsonb_build_object('last_update', jsonb_build_object('run_id', r.id, 'at', now(),
     'items_accepted', v_acc, 'items_refused', v_ref, 'evidence_rows', v_rows, 'reader', m -> 'checks'))
-  WHERE id = g.id;
+  WHERE id = g.id RETURNING checks INTO v_checks;
   UPDATE public.context_extraction_runs SET status = 'done', finished_at = now(), events_in = v_rows, tokens_in = v_tokens,
    facts_new = v_acc, error = NULL, lease_expires_at = NULL WHERE id = r.id;
   -- A shadow kept current while the lane was in shadow is promoted on its
-  -- first update after the lane goes live, if its build passed the checks.
+  -- first update after the lane goes live, if its build passed the checks and
+  -- this update is clean (context_ledger_checks_pass over the stored checks).
   SELECT st.mode INTO v_mode FROM public.context_ledger_settings st WHERE st.id;
-  IF v_mode = 'live' AND g.status = 'shadow' AND coalesce((g.checks #>> '{store,pass}')::boolean, false)
-   AND v_ref <= 0.2 * greatest(v_acc + v_ref, 1) THEN
+  IF v_mode = 'live' AND g.status = 'shadow' AND public.context_ledger_checks_pass(v_checks) THEN
    PERFORM public.context_ledger_promote(g.id, 'rule:auto');
    v_promoted := true;
   END IF;
@@ -1267,13 +1364,13 @@ BEGIN
  UPDATE public.context_ledger_generations SET status = 'shadow', model = v_model, prompt_sha256 = v_sha, evidence_until = v_until,
   evidence_rows = v_rows, chunks = v_chunks, calls = v_calls, finished_at = now(), updated_at = now(),
   checks = jsonb_build_object('store', v_store, 'reader', coalesce(m -> 'checks', 'null'::jsonb))
- WHERE id = g.id;
+ WHERE id = g.id RETURNING checks INTO v_checks;
  SELECT id INTO v_live FROM public.context_ledger_generations WHERE job_id = g.job_id AND status = 'live';
  IF v_live IS NOT NULL THEN v_carried := public.context_ledger_carry_forward(v_live, g.id); END IF;
  UPDATE public.context_extraction_runs SET status = 'done', finished_at = now(), events_in = v_rows, tokens_in = v_tokens,
   facts_new = v_acc, error = NULL, lease_expires_at = NULL WHERE id = r.id;
  SELECT st.mode INTO v_mode FROM public.context_ledger_settings st WHERE st.id;
- IF v_mode = 'live' AND v_pass THEN
+ IF v_mode = 'live' AND public.context_ledger_checks_pass(v_checks) THEN
   PERFORM public.context_ledger_promote(g.id, 'rule:auto');
   v_promoted := true;
  END IF;
@@ -1281,7 +1378,7 @@ BEGIN
   'promoted', v_promoted, 'carried', v_carried, 'checks', v_store);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_finish(uuid, uuid, uuid, text, jsonb) IS
- 'Context ledger store (20261006013000): closes a ledger run. built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and the checks passing (refused items at most 20% of written, and at least one item unless there was no evidence) it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow whose build passed is promoted on its first clean update once mode is live. failed: a building generation fails with the reason; a live or shadow one is untouched. The run ends done or failed. A repeated finish of a closed run reports and changes nothing. Service role only.';
+ 'Context ledger store (20261006013000): closes a ledger run. built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and the checks passing (context_ledger_checks_pass: refused items at most 20% of written, and at least one item unless there was no evidence) it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow whose build passed is promoted on its first clean update once mode is live (the same rule over the stored checks). failed: a building generation fails with the reason; a live or shadow one is untouched. The run ends done or failed. A repeated finish of a closed run reports and changes nothing. Service role only.';
 
 -- 17. A person's correction on the live ledger.
 CREATE OR REPLACE FUNCTION public.context_ledger_person_edit(p_job_id uuid, p_user_id uuid, p_action text, p_item_key text,
@@ -1353,7 +1450,8 @@ BEGIN
   'public.context_ledger_cite(uuid,jsonb)','public.context_ledger_check_item(uuid,jsonb,text,uuid,text)',
   'public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)','public.context_ledger_carry_forward(uuid,uuid)',
   'public.context_ledger_promote(uuid,text)','public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)',
-  'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)'] LOOP
+  'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
+  'public.context_ledger_promote_shadow(text,uuid[],integer)'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;

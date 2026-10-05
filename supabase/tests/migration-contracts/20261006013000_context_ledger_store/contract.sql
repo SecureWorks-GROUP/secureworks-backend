@@ -13,7 +13,7 @@
 --     blocks, catch-up completion, the extraction claim and read flags are
 --     identical with ledger runs present; ledger calls count in the total.
 --  5. Due judgement (and the rollout list). 6. Claim. 7. Packet. 8. Write custody. 9. Finish,
---     promote and carry-forward. 10. Person corrections.
+--     promote and carry-forward. 10. Person corrections. 11. Bulk go-live.
 \set ON_ERROR_STOP on
 
 CREATE FUNCTION pg_temp.lg_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
@@ -135,7 +135,8 @@ BEGIN
   'public.context_ledger_cite(uuid,jsonb)','public.context_ledger_check_item(uuid,jsonb,text,uuid,text)',
   'public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)','public.context_ledger_carry_forward(uuid,uuid)',
   'public.context_ledger_promote(uuid,text)','public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)',
-  'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.reserve_context_model_call(text,uuid,uuid)'] LOOP
+  'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
+  'public.context_ledger_promote_shadow(text,uuid[],integer)','public.reserve_context_model_call(text,uuid,uuid)'] LOOP
   PERFORM pg_temp.lg_assert(to_regprocedure(f) IS NOT NULL, f || ' missing');
   PERFORM pg_temp.lg_assert(NOT has_function_privilege('anon', f, 'EXECUTE') AND NOT has_function_privilege('authenticated', f, 'EXECUTE'),
    f || ' executable by anon or authenticated');
@@ -149,7 +150,7 @@ BEGIN
  -- Store functions run as definer with a fixed path; per-row helpers carry no SET (they inline).
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
-  IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible') THEN
+  IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -1063,7 +1064,103 @@ BEGIN
 END $c$;
 ROLLBACK;
 
--- 11. Last, so a behaviour break above is reported by its behaviour: the
+-- 11. Bulk go-live: once the lane is live, each job's newest shadow is promoted
+-- under the rule finish uses, people's corrections carried as promote carries
+-- them; never while the lane is not live, never an older reading over a newer
+-- live one, never off the rollout list, never by a trade.
+BEGIN;
+DO $c$
+DECLARE staff uuid; trade uuid; p1 uuid; p2 uuid; p3 uuid; p4 uuid; p5 uuid; p6 uuid; nx uuid; q1 uuid; q2 uuid;
+ g1 uuid; g2 uuid; g3 uuid; g4old uuid; g4 uuid; g5 uuid; g5live uuid; g6 uuid; gq1 uuid; gq2 uuid; e4 uuid; v jsonb; bad text;
+ k text := 'request:none:bbbbbbbbbbbb';
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true);
+ staff := pg_temp.lg_staff('owner'); trade := pg_temp.lg_staff('lead_installer');
+ -- The one rule (finish uses it too): the build passed, and the latest update, if any, refused at most 20%.
+ PERFORM pg_temp.lg_assert(public.context_ledger_checks_pass('{"store":{"pass":true}}'), 'rule: a passing build');
+ PERFORM pg_temp.lg_assert(NOT public.context_ledger_checks_pass('{"store":{"pass":false}}'), 'rule: a failing build');
+ PERFORM pg_temp.lg_assert(NOT public.context_ledger_checks_pass('{}'), 'rule: no checks');
+ PERFORM pg_temp.lg_assert(public.context_ledger_checks_pass('{"store":{"pass":true},"last_update":{"items_accepted":4,"items_refused":1}}'),
+  'rule: a clean update');
+ PERFORM pg_temp.lg_assert(NOT public.context_ledger_checks_pass('{"store":{"pass":true},"last_update":{"items_accepted":1,"items_refused":3}}'),
+  'rule: a dirty update');
+ PERFORM pg_temp.lg_assert(public.context_ledger_checks_pass('{"store":{"pass":true},"last_update":{"items_accepted":0,"items_refused":0}}'),
+  'rule: an update that wrote nothing');
+ -- p1 passing shadow; p2 failed build; p3 passing build, dirty latest update; p4 live reading with a
+ -- person's correction and a newer passing shadow; p5 passing shadow older than its live reading;
+ -- p6 passing shadow off the rollout list; nx no reading at all.
+ p1 := pg_temp.lg_job('SWF-98001'); g1 := pg_temp.lg_gen(p1, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '2 days');
+ p2 := pg_temp.lg_job('SWF-98002'); g2 := pg_temp.lg_gen(p2, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '2 days');
+ p3 := pg_temp.lg_job('SWF-98003'); g3 := pg_temp.lg_gen(p3, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '2 days');
+ p4 := pg_temp.lg_job('SWF-98004'); g4old := pg_temp.lg_gen(p4, 'live', now() - interval '5 days', 'luna-ledger:v1', '6 days');
+ e4 := pg_temp.lg_ev(p4, 'client.reply', 'sms', 'inbound', 'Please park on the street.', '7 days', 'customer');
+ PERFORM pg_temp.lg_item(g4old, k, 'open', e4, true, 'request', 'person:' || staff);
+ g4 := pg_temp.lg_gen(p4, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '2 days');
+ p5 := pg_temp.lg_job('SWF-98005'); g5 := pg_temp.lg_gen(p5, 'shadow', now() - interval '3 days', 'luna-ledger:v1', '4 days');
+ g5live := pg_temp.lg_gen(p5, 'live', now() - interval '1 day', 'luna-ledger:v1', '2 days');
+ p6 := pg_temp.lg_job('SWF-98006'); g6 := pg_temp.lg_gen(p6, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '2 days');
+ nx := pg_temp.lg_job('SWF-98007');
+ UPDATE public.context_ledger_generations SET checks = '{"store":{"pass":true}}' WHERE id IN (g1, g4, g5, g6);
+ UPDATE public.context_ledger_generations SET checks = '{"store":{"pass":false}}' WHERE id = g2;
+ UPDATE public.context_ledger_generations SET checks = '{"store":{"pass":true},"last_update":{"items_accepted":1,"items_refused":3}}' WHERE id = g3;
+ -- Refused unless the lane is live, refused for a trade, invalid for a malformed actor or limit.
+ PERFORM pg_temp.lg_mode('shadow', 50);
+ v := public.context_ledger_promote_shadow('rule:go-live');
+ PERFORM pg_temp.lg_assert(v = '{"outcome":"refused","reason":"not_live","mode":"shadow"}', 'shadow mode refuses: ' || v::text);
+ PERFORM pg_temp.lg_mode('off', 0);
+ PERFORM pg_temp.lg_assert(public.context_ledger_promote_shadow('rule:go-live') = '{"outcome":"refused","reason":"not_live","mode":"off"}', 'mode off refuses');
+ PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_generations WHERE id IN (g1, g2, g3, g4, g5, g6) AND status = 'shadow') = 6,
+  'a refusal promoted a reading');
+ PERFORM pg_temp.lg_mode('live', 50);
+ PERFORM pg_temp.lg_assert(public.context_ledger_promote_shadow('person:' || trade) = '{"outcome":"refused","reason":"not_staff"}', 'a trade cannot go live');
+ FOREACH bad IN ARRAY ARRAY['auto', 'rule:', 'person:not-a-uuid', 'model:luna-ledger:v1'] LOOP
+  BEGIN
+   PERFORM public.context_ledger_promote_shadow(bad);
+   RAISE EXCEPTION 'ledger store contract: promote_shadow accepted the actor %', bad;
+  EXCEPTION WHEN raise_exception THEN IF SQLERRM <> 'context_ledger_promote_shadow_invalid' THEN RAISE; END IF; END;
+ END LOOP;
+ BEGIN
+  PERFORM public.context_ledger_promote_shadow('rule:go-live', NULL, 0);
+  RAISE EXCEPTION 'ledger store contract: promote_shadow accepted a limit of 0';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM <> 'context_ledger_promote_shadow_invalid' THEN RAISE; END IF; END;
+ -- Go live with a rollout list that leaves p6 out.
+ UPDATE public.context_ledger_settings SET job_ids = ARRAY[p1, p2, p3, p4, p5];
+ v := public.context_ledger_promote_shadow('person:' || staff);
+ PERFORM pg_temp.lg_assert(v ->> 'outcome' = 'done' AND (v ->> 'promoted')::int = 2 AND (v ->> 'skipped')::int = 4 AND (v ->> 'remaining')::int = 0
+  AND v -> 'skipped_reasons' = '{"checks_failed":2,"older_than_live":1,"not_in_rollout":1}', 'go-live counts: ' || v::text);
+ PERFORM pg_temp.lg_assert((SELECT array_agg(x ->> 'generation_id' ORDER BY x ->> 'generation_id') FROM jsonb_array_elements(v -> 'promoted_generations') x)
+  = (SELECT array_agg(i::text ORDER BY i::text) FROM unnest(ARRAY[g1, g4]) i), 'the two passing shadows were promoted: ' || v::text);
+ PERFORM pg_temp.lg_assert((SELECT status = 'live' AND promoted_at IS NOT NULL AND checks ->> 'promoted_by' = 'person:' || staff
+  FROM public.context_ledger_generations WHERE id = g1), 'p1 live, promoted by the person');
+ PERFORM pg_temp.lg_assert((SELECT status FROM public.context_ledger_generations WHERE id = g4old) = 'retired'
+  AND (SELECT status FROM public.context_ledger_generations WHERE id = g4) = 'live', 'p4: the previous live reading retired');
+ PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM public.context_ledger_items WHERE generation_id = g4 AND item_key = k AND person_locked
+  AND written_by = 'person:' || staff) AND EXISTS (SELECT 1 FROM public.context_ledger_transitions t JOIN public.context_ledger_items i ON i.id = t.item_id
+  WHERE i.generation_id = g4 AND i.item_key = k AND t.by = 'rule:carry_forward'), 'p4: the person''s correction carried forward');
+ PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_generations WHERE id IN (g2, g3, g5, g6) AND status = 'shadow') = 4
+  AND (SELECT status FROM public.context_ledger_generations WHERE id = g5live) = 'live', 'skipped readings untouched');
+ v := public.context_ledger_promote_shadow('person:' || staff);
+ PERFORM pg_temp.lg_assert((v ->> 'promoted')::int = 0 AND (v ->> 'skipped')::int = 4, 'a repeat promotes nothing more: ' || v::text);
+ -- Named jobs and no rollout list: p6 goes live under the rule actor; a job with no shadow says so.
+ UPDATE public.context_ledger_settings SET job_ids = NULL;
+ v := public.context_ledger_promote_shadow('rule:go-live', ARRAY[p6, nx]);
+ PERFORM pg_temp.lg_assert((v ->> 'promoted')::int = 1 AND v -> 'skipped_reasons' = '{"no_shadow":1}'
+  AND v -> 'promoted_generations' -> 0 ->> 'generation_id' = g6::text
+  AND (SELECT checks ->> 'promoted_by' FROM public.context_ledger_generations WHERE id = g6) = 'rule:go-live', 'named jobs: ' || v::text);
+ -- The limit: oldest shadow first, the rest counted as remaining for the next call.
+ q1 := pg_temp.lg_job('SWF-98008'); gq1 := pg_temp.lg_gen(q1, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '3 days');
+ q2 := pg_temp.lg_job('SWF-98009'); gq2 := pg_temp.lg_gen(q2, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '2 days');
+ UPDATE public.context_ledger_generations SET checks = '{"store":{"pass":true}}' WHERE id IN (gq1, gq2);
+ v := public.context_ledger_promote_shadow('rule:go-live', NULL, 1);
+ PERFORM pg_temp.lg_assert((v ->> 'promoted')::int = 1 AND (v ->> 'remaining')::int = 1
+  AND v -> 'promoted_generations' -> 0 ->> 'generation_id' = gq1::text, 'limit 1, oldest first: ' || v::text);
+ v := public.context_ledger_promote_shadow('rule:go-live', NULL, 1);
+ PERFORM pg_temp.lg_assert((v ->> 'promoted')::int = 1 AND (v ->> 'remaining')::int = 0
+  AND v -> 'promoted_generations' -> 0 ->> 'generation_id' = gq2::text, 'limit 1, then the rest: ' || v::text);
+END $c$;
+ROLLBACK;
+
+-- 12. Last, so a behaviour break above is reported by its behaviour: the
 -- admission is exactly this migration's body.
 DO $c$ BEGIN
  PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)

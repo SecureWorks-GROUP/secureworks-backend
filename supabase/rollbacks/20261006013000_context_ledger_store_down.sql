@@ -103,9 +103,11 @@ BEGIN
  END IF;
 END $chk$;
 
+DROP FUNCTION IF EXISTS public.context_ledger_promote_shadow(text,uuid[],integer);
 DROP FUNCTION IF EXISTS public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb);
 DROP FUNCTION IF EXISTS public.context_ledger_finish(uuid,uuid,uuid,text,jsonb);
 DROP FUNCTION IF EXISTS public.context_ledger_promote(uuid,text);
+DROP FUNCTION IF EXISTS public.context_ledger_checks_pass(jsonb);
 DROP FUNCTION IF EXISTS public.context_ledger_carry_forward(uuid,uuid);
 DROP FUNCTION IF EXISTS public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text);
 DROP FUNCTION IF EXISTS public.context_ledger_check_item(uuid,jsonb,text,uuid,text);
