@@ -30,6 +30,7 @@ import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from 
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
+import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -922,6 +923,16 @@ async function syncInvoices(sb: any) {
   // ── Match unlinked invoices after sync ──
   const matchResult = await matchUnlinkedInvoices(sb)
 
+  // ── Invoice evidence onto its job (B-4): off until context_xero_evidence_place_v1 ──
+  // Moves only evidence rows; never links an invoice. A failure never breaks the sync.
+  let invoiceEvidence: unknown
+  try {
+    invoiceEvidence = await placeRecentInvoiceEvidence(sb)
+  } catch (e: any) {
+    invoiceEvidence = { ran: false, reason: 'error', error: (e as Error).message }
+    console.error('[xero-sync] Invoice evidence placement error:', (e as Error).message)
+  }
+
   // ── Materials-actuals ingestion (U3) — land supplier bills on jobs or queue ──
   const materialsResult = await ingestMaterialsActuals(sb)
 
@@ -981,11 +992,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep },
+    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep }
+  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence }
 }
 
 

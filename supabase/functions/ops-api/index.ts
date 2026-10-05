@@ -2454,6 +2454,9 @@ async function logBusinessEvent(client: any, event: {
   event_at?: string | null;
   channel?: string;
   direction?: string;
+  // A stable key for a row another writer may also write (the Xero history
+  // backfill writes xero:invoice:<InvoiceID>:raised too): one row, whoever is first.
+  provider_message_id?: string;
 }) {
   try {
     const payload = event.payload || {}
@@ -2513,8 +2516,10 @@ async function logBusinessEvent(client: any, event: {
         legacy_envelope_inferred: true,
       },
       schema_version: '1.0',
+      ...(event.provider_message_id ? { provider_message_id: event.provider_message_id } : {}),
     })
-    if (error) throw error
+    // 23505 on a keyed row: the same fact is already recorded.
+    if (error && !(event.provider_message_id && error.code === '23505')) throw error
   } catch (e) {
     // Non-blocking — log but don't fail the main operation
     console.log('[ops-api] business_events write failed (table may not exist yet):', (e as Error).message)
@@ -8567,7 +8572,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         await assertNoSyntheticLivefireInvoice(client, vid, 'void_invoice')
         // Capture previous status before voiding
         const { data: voidInvRecord } = await client.from('xero_invoices')
-          .select('invoice_number, total, status')
+          .select('invoice_number, total, status, job_id')
           .eq('xero_invoice_id', vid)
           .maybeSingle()
         const previousStatus = voidInvRecord?.status || 'UNKNOWN'
@@ -8583,6 +8588,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             source: 'ops-api/void_invoice',
             entity_type: 'invoice',
             entity_id: vid,
+            // The invoice's own job, so the row lands on it (no job: the Xero placement step).
+            ...(voidInvRecord?.job_id ? { job_id: voidInvRecord.job_id, match_method: 'direct_job_id' } : {}),
             payload: { invoice_number: voidInvRecord?.invoice_number, total: voidInvRecord?.total, previous_status: previousStatus },
           })
         } catch (_) { /* non-blocking */ }
@@ -36325,6 +36332,8 @@ async function markInvoicePaid(client: any, body: any) {
     source: 'ops-api/mark_invoice_paid',
     entity_type: 'invoice',
     entity_id: xero_invoice_id,
+    // The invoice's own job, so the row lands on it (no job: the Xero placement step).
+    ...(inv.job_id ? { job_id: inv.job_id, match_method: 'direct_job_id' } : {}),
     payload: { invoice_number: inv.invoice_number, amount, payment_date, manual: true },
   })
 
@@ -37679,8 +37688,10 @@ async function createDepositInvoice(client: any, body: any) {
     event_type: 'invoice.created',
     entity_type: 'invoice',
     entity_id: invoiceResult.xero_invoice_id || jId,
-    job_id: job.job_number || jId,
+    // job_id is a uuid column: the job number made every write fail (22P02).
+    job_id: jId,
     correlation_id: jId,
+    ...(invoiceResult.xero_invoice_id ? { provider_message_id: `xero:invoice:${invoiceResult.xero_invoice_id}:raised` } : {}),
     payload: {
       entity: { id: invoiceResult.xero_invoice_id, name: invoiceResult.invoice_number || '' },
       financial: { amount: totalInvoiceAmount, currency: 'AUD' },
@@ -53077,7 +53088,9 @@ async function sendAcceptanceInvoice(client: any, body: any) {
     entity_type: 'xero_invoice',
     entity_id: invoiceResult.xero_invoice_id || jId,
     correlation_id: jId,
-    job_id: job?.job_number || jId,
+    // job_id is a uuid column: the job number made every write fail (22P02).
+    job_id: jId,
+    ...(invoiceResult.xero_invoice_id ? { provider_message_id: `xero:invoice:${invoiceResult.xero_invoice_id}:raised` } : {}),
     payload: {
       invoice_number: invoiceResult.invoice_number,
       total: invoiceResult.deposit_amount,
