@@ -190,6 +190,13 @@ VALUES ('aa000000-0000-4000-8000-000000000010', NULL, 'cust.h@example.test', 'Fe
 INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
 VALUES ('e0000000-0000-4000-8000-000000000014', 'a0000000-0000-4000-8000-000000000014', 'lead_installer', '2026-10-20', 'install', 'scheduled',
         'Crew Three', 'confirmed', false, '2026-08-02 06:00Z');
+-- Job K: a booking for today whose status alone says complete.
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('a0000000-0000-4000-8000-000000000015', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0015', 'scheduled', 'fencing',
+        NULL, 'ctK', '{}', now() - interval '10 days');
+INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
+VALUES ('e0000000-0000-4000-8000-000000000015', 'a0000000-0000-4000-8000-000000000015', 'lead_installer', (now() AT TIME ZONE 'Australia/Perth')::date,
+        'install', 'complete', 'Crew Four', NULL, false, now() - interval '2 days');
 
 DO $behave$
 DECLARE
@@ -296,6 +303,13 @@ BEGIN
     OR EXISTS (SELECT 1 FROM public.context_job_record_timeline(ARRAY[a, b, c], asof) t
                WHERE t.source_table NOT IN ('xero_invoices', 'job_documents', 'job_assignments') AND (t.state IS NOT NULL OR t.made_at IS NOT NULL)) THEN
   RAISE EXCEPTION 'record contract: booking states, made_at or the status-only attendance time wrong';
+ END IF;
+ -- a status-only completion booked for today is attended now, never later today
+ IF (SELECT t.at FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000015'::uuid], now()) t WHERE t.kind = 'attendance')
+    IS DISTINCT FROM now()
+    OR (SELECT bool_and(t.state = 'attended') FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000015'::uuid], now()) t
+        WHERE t.source_table = 'job_assignments') IS NOT TRUE THEN
+  RAISE EXCEPTION 'record contract: a status-only completion today is attended now, never later today';
  END IF;
  -- replayed during its booked day, a status-only completion is not attended yet
  IF (SELECT bool_and(t.state = 'scheduled') FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], '2026-09-20 06:00Z') t

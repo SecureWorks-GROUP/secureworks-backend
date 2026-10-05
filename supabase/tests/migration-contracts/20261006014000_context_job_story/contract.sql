@@ -722,6 +722,22 @@ BEGIN
                  WHERE x->>'job_id' = a::text), true) THEN
   RAISE EXCEPTION 'story contract: three failed readings in a row must need a person, and only there: %', s;
  END IF;
+ -- a status-only completion on a booking for today: the visit closing and the
+ -- work-done time are now, never later today
+ INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+ VALUES ('a0000000-0000-4000-8000-000000000009', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0009', 'scheduled', 'fencing',
+         NULL, 'ctT', '{}', now() - interval '10 days');
+ INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
+ VALUES ('e0000000-0000-4000-8000-000000000091', 'a0000000-0000-4000-8000-000000000009', 'lead_installer',
+         (now() AT TIME ZONE 'Australia/Perth')::date, 'install', 'complete', 'Crew T', NULL, false, now() - interval '2 days');
+ t := public.context_job_story_facts('a0000000-0000-4000-8000-000000000009', now());
+ IF (SELECT (x->>'at')::timestamptz FROM jsonb_array_elements(t->'closing') x WHERE x->>'closes_on' = 'visit') IS DISTINCT FROM now() THEN
+  RAISE EXCEPTION 'story contract: a status-only completion today is a visit now, never later today: %', t->'closing';
+ END IF;
+ s := public.context_job_story('a0000000-0000-4000-8000-000000000009', now());
+ IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'phase_since' <> to_char((now() AT TIME ZONE 'Australia/Perth')::date, 'YYYY-MM-DD') THEN
+  RAISE EXCEPTION 'story contract: work done today by a status-only completion: %', s->'now';
+ END IF;
 END $story$;
 ROLLBACK;
 

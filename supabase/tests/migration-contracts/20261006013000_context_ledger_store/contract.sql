@@ -144,6 +144,7 @@ BEGIN
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])','public.context_ledger_budget()',
   'public.context_ledger_backfill_open(smallint,smallint,timestamptz)', 'public.context_ledger_party_keys(text[],text[],text[])',
+  'public.context_ledger_call_customer(public.business_events)',
   'public.reserve_context_model_call(text,uuid,uuid)'] LOOP
   PERFORM pg_temp.lg_assert(to_regprocedure(f) IS NOT NULL, f || ' missing');
   PERFORM pg_temp.lg_assert(NOT has_function_privilege('anon', f, 'EXECUTE') AND NOT has_function_privilege('authenticated', f, 'EXECUTE'),
@@ -159,7 +160,7 @@ BEGIN
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
-    'context_ledger_backfill_open','context_ledger_party_keys') THEN
+    'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -1815,6 +1816,7 @@ ROLLBACK;
 BEGIN;
 DO $c$
 DECLARE w uuid; a1 uuid; wf uuid; t1 uuid; c1 uuid; t2 uuid; c2 uuid; cl jsonb; res jsonb; d date; dtext text; exp record;
+ t3 uuid; t4 uuid; c4 uuid; t5 uuid; c5 uuid; pk jsonb; tx jsonb;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  w := pg_temp.lg_job('SWF-99001');
@@ -1855,6 +1857,33 @@ BEGIN
  END LOOP;
  PERFORM pg_temp.lg_assert((SELECT what FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
   AND item_key = pg_temp.lg_key(res, 'dash')) = 'Gate, painted black - soon', 'what keeps no dashes');
+ -- The packet tells the reader the same rule: each transcript row carries call_customer,
+ -- true on its call's customer stamp, false when its linked call lacks it, null when no
+ -- call row is linked; the citation check agrees on every one.
+ t3 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'No call row names this transcript', '20 hours', 'customer', 'job_customer',
+  '{"ghl_call_id":"CALLZ"}');
+ t4 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'Linked to its call by its own key only', '19 hours', NULL);
+ c4 := pg_temp.lg_ev(w, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 30 seconds', '19 hours 1 minute', 'customer');
+ t5 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'Its call row carries no stamp at all', '18 hours', 'customer', 'job_customer',
+  '{"ghl_call_id":"CALLV"}');
+ c5 := pg_temp.lg_ev(w, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 40 seconds', '18 hours 1 minute');
+ PERFORM set_config('session_replication_role', 'replica', true);
+ UPDATE public.business_events SET provider_message_id = 'ghltx:CALLW' WHERE id = t4;
+ UPDATE public.business_events SET provider_message_id = 'ghl:CALLW' WHERE id = c4;
+ UPDATE public.business_events SET provider_message_id = 'ghl:CALLV' WHERE id = c5;
+ PERFORM set_config('session_replication_role', 'origin', true);
+ pk := public.context_ledger_packet(w);
+ FOR exp IN SELECT * FROM (VALUES (t1, 'false', true), (t2, 'true', true), (t3, 'null', true), (t4, 'true', true), (t5, 'false', true),
+   (c2, 'null', false)) v(id, want, transcript) LOOP
+  SELECT x INTO tx FROM jsonb_array_elements(pk -> 'evidence') x WHERE (x ->> 'id')::uuid = exp.id;
+  PERFORM pg_temp.lg_assert(tx ? 'call_customer' AND tx -> 'call_customer' = exp.want::jsonb,
+   format('call_customer of %s: want %s, row %s', exp.id, exp.want, tx));
+  IF exp.transcript THEN
+   PERFORM pg_temp.lg_assert((public.context_ledger_cite(w, jsonb_build_object('table', 'business_events', 'id', exp.id::text,
+     'excerpt', tx ->> 'text')) ->> 'customer_sender')::boolean = (exp.want = 'true'),
+    format('the citation check and call_customer disagree on %s', exp.id));
+  END IF;
+ END LOOP;
 END $c$;
 ROLLBACK;
 
@@ -1866,7 +1895,7 @@ ROLLBACK;
 BEGIN;
 DO $c$
 DECLARE w uuid; r1 uuid; bt uuid := gen_random_uuid(); bx uuid := gen_random_uuid(); bs uuid := gen_random_uuid();
- bu uuid := gen_random_uuid(); cl jsonb; res jsonb; exp record; k text; d date;
+ bu uuid := gen_random_uuid(); bn uuid := gen_random_uuid(); cl jsonb; res jsonb; exp record; k text; d date;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  w := pg_temp.lg_job('SWF-99101');
@@ -1876,7 +1905,8 @@ BEGIN
  VALUES (bt, w, 'lead_installer', d + 10, 'scheduled', 'tentative', now() - interval '4 days', NULL, NULL),   -- standing, tentative in crew planning
         (bx, w, 'lead_installer', d + 11, 'declined', NULL, now() - interval '4 days', NULL, NULL),          -- not standing
         (bs, w, 'lead_installer', d, 'complete', NULL, now() - interval '4 days', NULL, NULL),               -- a status-only completion
-        (bu, w, 'lead_installer', d - 1, 'scheduled', NULL, now() - interval '4 days', NULL, NULL);          -- passed, nobody attended
+        (bu, w, 'lead_installer', d - 1, 'scheduled', NULL, now() - interval '4 days', NULL, NULL),          -- passed, nobody attended
+        (bn, w, 'lead_installer', pg_temp.lg_today(), 'complete', NULL, now() - interval '4 days', NULL, NULL); -- status-only, booked today
  cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
  res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
   pg_temp.lg_it('made_tentative', 'request', 'closed', 'customer', 'us', 'Asked to be booked in', pg_temp.lg_cite(r1, 'book us in for the fence'),
@@ -1888,9 +1918,11 @@ BEGIN
   pg_temp.lg_it('visit_status_only', 'request', 'closed', 'customer', 'us', 'Asked for the fence install', pg_temp.lg_cite(r1, 'for the fence install'),
    jsonb_build_object('closes_on', 'visit', 'closed_by', pg_temp.lg_cite(bs, NULL, 'job_assignments'))),
   pg_temp.lg_it('visit_passed', 'request', 'closed', 'customer', 'us', 'Asked for the work', pg_temp.lg_cite(r1, 'us in for the fence install'),
-   jsonb_build_object('closes_on', 'work_done', 'closed_by', pg_temp.lg_cite(bu, NULL, 'job_assignments')))), '[]', 'luna-ledger:v1');
+   jsonb_build_object('closes_on', 'work_done', 'closed_by', pg_temp.lg_cite(bu, NULL, 'job_assignments'))),
+  pg_temp.lg_it('visit_today', 'request', 'closed', 'customer', 'us', 'Asked for the fence', pg_temp.lg_cite(r1, 'book us in for the'),
+   jsonb_build_object('closes_on', 'work_done', 'closed_by', pg_temp.lg_cite(bn, NULL, 'job_assignments')))), '[]', 'luna-ledger:v1');
  FOR exp IN SELECT * FROM (VALUES ('made_tentative', NULL), ('made_declined', 'closing_not_issued'), ('visit_unattended', 'closing_not_issued'),
-  ('visit_status_only', NULL), ('visit_passed', 'closing_not_issued')) v(ref, code) LOOP
+  ('visit_status_only', NULL), ('visit_passed', 'closing_not_issued'), ('visit_today', NULL)) v(ref, code) LOOP
   IF exp.code IS NULL THEN
    PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, exp.ref), exp.ref || ' must be accepted: ' || coalesce(pg_temp.lg_code(res, exp.ref), '?'));
   ELSE
@@ -1903,6 +1935,9 @@ BEGIN
  PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
    AND item_key = pg_temp.lg_key(res, 'visit_status_only')) = ((d + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second',
   'a status-only completion closes at the end of its booked Perth day');
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'visit_today')) = now(),
+  'a status-only completion on a booking for today closes at the write, never later today');
  -- the same rules on a transition
  res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
   pg_temp.lg_it('open_booking', 'request', 'open', 'customer', 'us', 'Wants a booking date', pg_temp.lg_cite(r1, 'Please book us in for'),

@@ -152,7 +152,7 @@ BEGIN
    'context_ledger_judge','context_ledger_due','context_ledger_claim','context_ledger_packet','context_ledger_cite','context_ledger_check_item',
    'context_ledger_write','context_ledger_carry_forward','context_ledger_promote','context_ledger_finish',
    'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow','context_ledger_failures',
-   'context_ledger_budget','context_ledger_backfill_open','context_ledger_party_keys') LOOP
+   'context_ledger_budget','context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer') LOOP
   IF x.c NOT LIKE 'Context ledger store%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -383,6 +383,28 @@ $$;
 COMMENT ON FUNCTION public.context_ledger_row_admissible(public.business_events) IS
  'Context ledger store (20261006013000): a business_events row the ledger reader may read and cite as evidence: placed and linked, admissible, written as service_role, worded, not status-only, a message kind.';
 
+-- Whether a call transcript is the customer's words. A transcript holds both
+-- sides of a call, so it counts as the customer's only on its call's stamp: the
+-- non-transcript row on the same job keyed ghl:<id>, where <id> is the
+-- transcript's payload.ghl_call_id, else its own key ghltx:<id>. true when such
+-- a call row is stamped counterpart_role customer with basis job_customer; false
+-- when one exists without that stamp; null when no call row is linked, or the
+-- row is not a transcript. The citation check and the packet's call_customer
+-- both read it here, so they cannot disagree.
+CREATE OR REPLACE FUNCTION public.context_ledger_call_customer(e public.business_events) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+ SELECT CASE WHEN e.event_type OPERATOR(pg_catalog.=) 'call.transcript_completed' THEN
+  (SELECT pg_catalog.bool_or(coalesce(c.metadata OPERATOR(pg_catalog.#>>) '{party_roles,counterpart_role}' OPERATOR(pg_catalog.=) 'customer'
+     AND c.metadata OPERATOR(pg_catalog.#>>) '{party_roles,basis}' OPERATOR(pg_catalog.=) 'job_customer', false))
+   FROM public.business_events c
+   WHERE c.job_id OPERATOR(pg_catalog.=) e.job_id
+    AND c.event_type OPERATOR(pg_catalog.<>) 'call.transcript_completed'
+    AND c.provider_message_id OPERATOR(pg_catalog.=) ('ghl:' OPERATOR(pg_catalog.||) coalesce(e.payload OPERATOR(pg_catalog.->>) 'ghl_call_id',
+     CASE WHEN e.provider_message_id OPERATOR(pg_catalog.~~) 'ghltx:%' THEN pg_catalog.substr(e.provider_message_id, 7) END))) END
+$$;
+COMMENT ON FUNCTION public.context_ledger_call_customer(public.business_events) IS
+ 'Context ledger store (20261006013000): whether a call transcript is the customer''s words, on its call''s stamp: true when the linked call row on the same job (ghl:<payload.ghl_call_id>, else ghl:<id> from the transcript''s own key ghltx:<id>) is stamped counterpart_role customer with basis job_customer, false when a linked call row exists without that stamp, null when none is linked or the row is not a transcript. Read by context_ledger_cite and the packet (call_customer). Inlinable helper. Service role only.';
+
 -- The one verdict for promoting without a person: checks.passed, which
 -- finish computes (both sides' refusals at most 20% of what was proposed, the
 -- store's own at most 20%, a build with at least one item unless there was no
@@ -440,7 +462,7 @@ CREATE OR REPLACE FUNCTION public.context_ledger_evidence_rows(p_job_ids uuid[],
 RETURNS TABLE(job_id uuid, src_table text, src_id uuid, at timestamptz, landed_at timestamptz, channel text, kind text,
  direction text, sender_role text, recipient_role text, audience text, counterpart_role text, role_basis text,
  sender text, recipient text, ours boolean, automated boolean, subject text, body text, placed_on text, has_transcript boolean,
- copy_of uuid)
+ call_customer boolean, copy_of uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  WITH j AS (
   SELECT jb.id, lower(nullif(btrim(jb.client_email), '')) AS cmail, nullif(btrim(jb.client_name), '') AS cname, jb.created_at,
@@ -481,6 +503,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
      WHERE t.job_id = e.job_id AND t.event_type = 'call.transcript_completed' AND public.context_linked_status(t.attribution_status)
       AND (t.payload ->> 'ghl_call_id' = substr(e.provider_message_id, 5)
        OR t.provider_message_id = 'ghltx:' || substr(e.provider_message_id, 5))), false) END AS has_transcript,
+   -- A transcript says whether its call makes it the customer's words (the cite's rule).
+   public.context_ledger_call_customer(e) AS call_customer,
    lower(nullif(btrim(coalesce(e.payload ->> 'from', e.payload ->> 'from_email')), '')) AS sender_key
   FROM j JOIN public.business_events e ON e.job_id = j.id
   WHERE public.context_ledger_row_admissible(e)
@@ -525,7 +549,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
    false AS automated,
    nullif(btrim(c.subject), '') AS subject,
    coalesce(nullif(btrim(c.body_preview), ''), btrim(c.subject)) AS body,
-   c.placed_on, NULL::boolean AS has_transcript,
+   c.placed_on, NULL::boolean AS has_transcript, NULL::boolean AS call_customer,
    lower(nullif(btrim(c.from_email), '')) AS sender_key
   FROM inbox_c c
   WHERE c.received_at IS NOT NULL AND c.received_at <= p_as_of
@@ -552,13 +576,13 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  )
  SELECT k.job_id, k.src_table, k.src_id, k.at, k.landed_at, k.channel, k.kind, k.direction, k.sender_role, k.recipient_role,
   k.audience, k.counterpart_role, k.role_basis, k.sender, k.recipient, k.ours, k.automated, k.subject, k.body,
-  k.placed_on, k.has_transcript,
+  k.placed_on, k.has_transcript, k.call_customer,
   CASE WHEN k.prev_at IS NOT NULL AND k.at - k.prev_at <= interval '120 seconds' THEN k.prev_id END AS copy_of
  FROM keyed k
  ORDER BY k.job_id, k.at, k.src_id
 $$;
 COMMENT ON FUNCTION public.context_ledger_evidence_rows(uuid[], timestamptz) IS
- 'Context ledger store (20261006013000): the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail placed on the job, or from the client''s address and placed on no job (placed_on this_job or none; mail placed on another job stays there; unplaced mail only when the client has no other job by CRM contact or client email, and from 30 days before the job was created), with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. has_transcript on a call log: its transcript (payload.ghl_call_id or key ghltx:<id> naming the call''s ghl:<id>) is on the job. copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
+ 'Context ledger store (20261006013000): the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail placed on the job, or from the client''s address and placed on no job (placed_on this_job or none; mail placed on another job stays there; unplaced mail only when the client has no other job by CRM contact or client email, and from 30 days before the job was created), with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. has_transcript on a call log: its transcript (payload.ghl_call_id or key ghltx:<id> naming the call''s ghl:<id>) is on the job. call_customer on a transcript: context_ledger_call_customer (its call''s customer stamp, the citation check''s rule). copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
 
 -- 6. The job's current generation: the live one, else the newest shadow.
 CREATE OR REPLACE FUNCTION public.context_ledger_current_generation(p_job_id uuid) RETURNS uuid
@@ -901,6 +925,7 @@ BEGIN
    'recipient_role', sel.recipient_role, 'audience', sel.audience, 'counterpart_role', sel.counterpart_role,
    'role_basis', sel.role_basis, 'sender', sel.sender, 'recipient', sel.recipient, 'ours', sel.ours, 'automated', sel.automated, 'subject', sel.subject,
    'already_read', p_since IS NOT NULL AND sel.landed_at <= p_since, 'placed_on', sel.placed_on, 'has_transcript', sel.has_transcript,
+   'call_customer', sel.call_customer,
    'text', left(sel.body, sel.lim)) ORDER BY sel.at, sel.src_id), '[]'::jsonb),
   count(*)::integer, (count(*) FILTER (WHERE length(sel.body) > sel.lim))::integer,
   (SELECT max(r.landed_at) FROM r), (SELECT count(*) FILTER (WHERE r.copy_of IS NOT NULL) FROM r)::integer
@@ -924,7 +949,7 @@ BEGIN
   'since', p_since, 'as_of', v_as_of, 'open_items', v_open);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_packet(uuid, timestamptz, timestamptz) IS
- 'Context ledger store (20261006013000): ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties, evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise; each row with already_read, placed_on and, on a call log, has_transcript), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items (each with phase, closes_on and opened_by as stored). With p_since: rows recorded after it, every already-read row after the earliest of them, and the six before it, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. The judge asks for a rebuild (late_evidence) instead when the earliest new row is more than 14 days older than evidence_until or more than 150 already-read rows follow it. Role fields are the stored party_roles stamp, never invented. Service role only.';
+ 'Context ledger store (20261006013000): ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties (each with match_keys: emails, phones'' last 9 digits), evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise; each row with already_read, placed_on and, on a call log, has_transcript, call_customer on transcripts), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items (each with phase, closes_on and opened_by as stored). With p_since: rows recorded after it, every already-read row after the earliest of them, and the six before it, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. The judge asks for a rebuild (late_evidence) instead when the earliest new row is more than 14 days older than evidence_until or more than 150 already-read rows follow it. Role fields are the stored party_roles stamp, never invented. Service role only.';
 
 -- 11. One citation: allowed table, a row on this job, a verbatim excerpt.
 -- Returns {ok, code, detail} on refusal, else the canonical citation and the
@@ -971,11 +996,7 @@ BEGIN
   IF e.event_type = 'call.transcript_completed' THEN
    -- A transcript holds both sides' words: it counts as the customer's only on
    -- its call's stamp (the job's customer was the other party on that call).
-   v_customer := EXISTS (SELECT 1 FROM public.business_events c
-    WHERE c.job_id = e.job_id AND c.event_type <> 'call.transcript_completed'
-     AND c.provider_message_id = 'ghl:' || coalesce(e.payload ->> 'ghl_call_id',
-      CASE WHEN e.provider_message_id LIKE 'ghltx:%' THEN substr(e.provider_message_id, 7) END)
-     AND c.metadata #>> '{party_roles,counterpart_role}' = 'customer' AND c.metadata #>> '{party_roles,basis}' = 'job_customer');
+   v_customer := coalesce(public.context_ledger_call_customer(e), false);
   ELSE
    v_customer := (e.metadata #>> '{party_roles,sender_role}' = 'customer' AND e.metadata #>> '{party_roles,basis}' = 'job_customer')
     OR (NOT coalesce(e.metadata ? 'party_roles', false) AND e.event_type LIKE 'client.%' AND e.direction = 'inbound');
@@ -1036,14 +1057,15 @@ BEGIN
    INTO v_job, v_at, v_close_at, v_found FROM public.xero_invoices x WHERE x.id = v_id;
   ELSIF v_table = 'job_assignments' THEN
    -- a booking closes on attendance: completed_at, else started_at, else a
-   -- status-only completion at the end of its booked Perth day; it is made
+   -- status-only completion at the end of its booked Perth day, or at this
+   -- write's now while that is still ahead (never a close in the future); it is made
    -- (booking_made) while it stands, at its created time. Crew planning's
    -- confirmation is never read; an observer's mirror is never a booking.
    SELECT a.job_id, a.created_at,
     CASE WHEN coalesce(a.is_ghost, false) OR coalesce(a.role, '') = 'observer' THEN NULL
          ELSE coalesce(a.completed_at, a.started_at,
           CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
-               THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END) END,
+               THEN least(((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second', now()) END) END,
     CASE WHEN NOT (coalesce(a.is_ghost, false) OR coalesce(a.role, '') = 'observer')
           AND lower(coalesce(a.status, '')) NOT IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined') THEN a.created_at END,
     true INTO v_job, v_at, v_close_at, v_made_at, v_found
@@ -1080,7 +1102,7 @@ BEGIN
   'internal_text', v_internal, 'record', v_record, 'worded', v_worded, 'automated', v_automated);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day; null when it cannot); made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; null when it cannot); made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)
@@ -1845,7 +1867,7 @@ BEGIN
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])',
   'public.context_ledger_budget()','public.context_ledger_backfill_open(smallint,smallint,timestamptz)',
-  'public.context_ledger_party_keys(text[],text[],text[])'] LOOP
+  'public.context_ledger_party_keys(text[],text[],text[])', 'public.context_ledger_call_customer(public.business_events)'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;

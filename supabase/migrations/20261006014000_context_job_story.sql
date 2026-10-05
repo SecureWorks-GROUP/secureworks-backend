@@ -169,11 +169,11 @@ AS $fn$
  ev AS (
   SELECT
    -- attendance timed as a closing reads it: completed, else started, else (a
-   -- status-only completion) the end of the booked Perth day
+   -- status-only completion) the end of the booked Perth day, or now while that is ahead
    (SELECT CASE WHEN NOT bkn.ahead AND bkn.nb IS NOT NULL
                  AND (lower(coalesce(bkn.nb->>'status', '')) IN ('complete', 'completed') OR bkn.nb->>'completed_at' IS NOT NULL)
             THEN (SELECT max(coalesce(b.completed_at, b.started_at,
-                                      ((b.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second')) FROM bk b
+                                      least(((b.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second', now()))) FROM bk b
                   WHERE lower(coalesce(b.status, '')) IN ('complete', 'completed') OR b.completed_at IS NOT NULL) END FROM bkn) AS done_at,
    (SELECT bkn.ahead FROM bkn) AS bk_ahead,
    -- a passed booking nobody marked started or complete
@@ -727,7 +727,7 @@ AS $fn$
        AND lower(coalesce(a.status, '')) NOT IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined')
      UNION ALL
      -- a visit is attendance: completed_at, else started_at, else a status-only
-     -- completion at the end of the booked Perth day
+     -- completion at the end of the booked Perth day (now while that is ahead)
      SELECT jsonb_build_object('closes_on', 'visit', 'about_key', 'booking:' || a.scheduled_date,
             'at', v.at, 't', 'job_assignments', 'id', a.id,
             'what', CASE WHEN a.completed_at IS NOT NULL OR a.started_at IS NOT NULL
@@ -736,7 +736,7 @@ AS $fn$
      FROM public.job_assignments a
      CROSS JOIN LATERAL (SELECT coalesce(a.completed_at, a.started_at,
        CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
-            THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END) AS at) v
+            THEN least(((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second', now()) END) AS at) v
      WHERE a.job_id = p_job_id AND v.at <= p_as_of
        AND NOT coalesce(a.is_ghost, false) AND coalesce(a.role, '') <> 'observer'
   ) z), '[]'::jsonb)

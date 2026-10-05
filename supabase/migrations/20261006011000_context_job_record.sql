@@ -511,9 +511,10 @@ AS $fn$
   -- attendance: only started or complete counts
   UNION ALL
   SELECT a.job_id, coalesce(a.completed_at, a.started_at,
-           -- a status-only completion: the end of the booked Perth day
+           -- a status-only completion: the end of the booked Perth day, or now while
+           -- that is still ahead (the status already says it happened)
            CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
-                THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END,
+                THEN least(((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second', now()) END,
            (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth'), a.created_at),
          CASE WHEN a.completed_at IS NOT NULL OR a.started_at IS NOT NULL THEN 'observed' ELSE 'date_only' END, 'attendance',
          CASE WHEN a.completed_at IS NOT NULL THEN 'Crew marked complete'
@@ -528,7 +529,7 @@ AS $fn$
   WHERE NOT a.mirror AND (lower(coalesce(a.status, '')) IN ('complete', 'completed', 'in_progress') OR a.completed_at IS NOT NULL OR a.started_at IS NOT NULL)
     AND coalesce(a.completed_at, a.started_at,
           CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
-               THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END,
+               THEN least(((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second', now()) END,
           (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth'), a.created_at) <= p_as_of
   -- booking changes from the app timeline
   UNION ALL
@@ -689,9 +690,10 @@ AS $fn$
                                                  WHEN a.completed_at <= p_as_of OR a.started_at <= p_as_of
                                                       OR (lower(coalesce(a.status, '')) IN ('complete', 'completed')
                                                           AND a.completed_at IS NULL AND a.started_at IS NULL
-                                                          -- a status-only completion counts from the end of its booked day
-                                                          AND (a.scheduled_date IS NULL OR ((a.scheduled_date + 1)::timestamp
-                                                               AT TIME ZONE 'Australia/Perth') - interval '1 second' <= p_as_of)) THEN 'attended'
+                                                          -- a status-only completion counts from the end of its booked
+                                                          -- day, or from now while that is still ahead
+                                                          AND (a.scheduled_date IS NULL OR least(((a.scheduled_date + 1)::timestamp
+                                                               AT TIME ZONE 'Australia/Perth') - interval '1 second', now()) <= p_as_of)) THEN 'attended'
                                                  WHEN lower(coalesce(a.status, '')) IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined')
                                                  THEN 'cancelled'
                                                  ELSE 'scheduled' END
@@ -703,7 +705,7 @@ AS $fn$
  ORDER BY m.job_id, m.at, m.kind, m.source_id
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) IS
- 'Job record (20261006011000): one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes, attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
+ 'Job record (20261006011000): one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes, attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
 
 -- 3. Loops: record-closable loops and checks.
 CREATE OR REPLACE FUNCTION public.context_job_record_loops(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
