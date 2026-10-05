@@ -143,6 +143,7 @@ BEGIN
   'public.context_ledger_promote(uuid,text)','public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)',
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])','public.context_ledger_budget()',
+  'public.context_ledger_backfill_open(smallint,smallint,timestamptz)',
   'public.reserve_context_model_call(text,uuid,uuid)'] LOOP
   PERFORM pg_temp.lg_assert(to_regprocedure(f) IS NOT NULL, f || ' missing');
   PERFORM pg_temp.lg_assert(NOT has_function_privilege('anon', f, 'EXECUTE') AND NOT has_function_privilege('authenticated', f, 'EXECUTE'),
@@ -157,7 +158,8 @@ BEGIN
  -- Store functions run as definer with a fixed path; per-row helpers carry no SET (they inline).
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
-  IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass') THEN
+  IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
+    'context_ledger_backfill_open') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -872,7 +874,7 @@ BEGIN
    pg_temp.lg_cite(w1, 'Could you please send the quote for the rest of the fence'),
    jsonb_build_object('about_key', 'quote:rest-of-fence', 'closed_by', pg_temp.lg_cite(w6, 'got the quote'), 'closes_on', 'quote_sent',
     'blocks', 'quote', 'needs_reply', true, 'phase', 'quote')),
-  pg_temp.lg_it('ok_quote', 'claim', 'open', 'customer', 'us', 'Says the quote is urgent', pg_temp.lg_cite(w1, 'It''s urgent')),
+  pg_temp.lg_it('ok_quote', 'claim', 'open', 'customer', 'us', 'Says the quote is urgent', pg_temp.lg_cite(w1, 'It''s urgent.')),
   pg_temp.lg_it('ok_due', 'commitment', 'open', 'us', 'customer', 'Promised the quote by the stated day',
    pg_temp.lg_cite(w2, 'we will send it by ' || dtext), jsonb_build_object('due_date', d, 'due_basis', 'stated', 'about_key', 'quote:rest-of-fence')),
   pg_temp.lg_it('ok_inbox', 'request', 'open', 'customer', 'us', 'Asked for a gate price', pg_temp.lg_cite(iw, 'price a gate', 'inbox_events')),
@@ -899,20 +901,20 @@ BEGIN
   pg_temp.lg_it('closed_noev', 'request', 'closed', 'customer', 'us', 'x16', pg_temp.lg_cite(w1, 'Could you please')),
   pg_temp.lg_it('open_closedby', 'request', 'open', 'customer', 'us', 'x17', pg_temp.lg_cite(w1, 'Could you please'),
    jsonb_build_object('closed_by', pg_temp.lg_cite(w6, 'got the quote'))),
-  pg_temp.lg_it('dup_a', 'issue', 'open', 'customer', 'us', 'Same matter', pg_temp.lg_cite(w1, 'urgent')),
-  pg_temp.lg_it('dup_b', 'issue', 'open', 'customer', 'us', 'SAME MATTER', pg_temp.lg_cite(w1, 'quote')),
-  pg_temp.lg_it('twice', 'issue', 'open', 'customer', 'us', 'First use of the ref', pg_temp.lg_cite(w1, 'fence')),
-  pg_temp.lg_it('twice', 'issue', 'open', 'customer', 'us', 'Second use of the ref', pg_temp.lg_cite(w1, 'fence')),
+  pg_temp.lg_it('dup_a', 'issue', 'open', 'customer', 'us', 'Same matter', pg_temp.lg_cite(w1, 'the rest of the fence')),
+  pg_temp.lg_it('dup_b', 'issue', 'open', 'customer', 'us', 'SAME MATTER', pg_temp.lg_cite(w1, 'send the quote for')),
+  pg_temp.lg_it('twice', 'issue', 'open', 'customer', 'us', 'First use of the ref', pg_temp.lg_cite(w1, 'the rest of the fence')),
+  pg_temp.lg_it('twice', 'issue', 'open', 'customer', 'us', 'Second use of the ref', pg_temp.lg_cite(w1, 'the rest of the fence')),
   pg_temp.lg_it('bad_field', 'request', 'open', 'customer', 'us', 'x18', pg_temp.lg_cite(w1, 'quote'), jsonb_build_object('opened_at', now() - interval '30 days')),
   pg_temp.lg_it('bad_about', 'request', 'open', 'customer', 'us', 'x19', pg_temp.lg_cite(w1, 'quote'), '{"about_key":"invoice:INV 1619"}'),
   pg_temp.lg_it('bad_status', 'event', 'open', 'customer', 'us', 'x20', pg_temp.lg_cite(w1, 'quote')),
-  pg_temp.lg_it('agree_old', 'agreement', 'superseded', 'customer', 'us', 'Offered to wait for the quote', pg_temp.lg_cite(w1, 'quote'),
+  pg_temp.lg_it('agree_old', 'agreement', 'superseded', 'customer', 'us', 'Offered to wait for the quote', pg_temp.lg_cite(w1, 'send the quote for the rest'),
    '{"modality":"requested"}'),
   pg_temp.lg_it('agree_new', 'agreement', 'info', 'us', 'customer', 'Agreed to send the quote by the stated day', pg_temp.lg_cite(w2, 'Yes, we will send it'),
    '{"modality":"agreed","supersedes_ref":"agree_old"}'),
-  pg_temp.lg_it('orphan_sup', 'agreement', 'superseded', 'customer', 'us', 'x21', pg_temp.lg_cite(w1, 'fence'), '{"modality":"offered"}'),
-  pg_temp.lg_it('bad_ref', 'agreement', 'info', 'customer', 'us', 'x22', pg_temp.lg_cite(w1, 'fence'), '{"modality":"offered","supersedes_ref":"nobody"}'),
-  pg_temp.lg_it('chain', 'agreement', 'info', 'customer', 'us', 'x23', pg_temp.lg_cite(w1, 'fence'), '{"modality":"offered","supersedes_ref":"wrong_job"}'));
+  pg_temp.lg_it('orphan_sup', 'agreement', 'superseded', 'customer', 'us', 'x21', pg_temp.lg_cite(w1, 'the rest of the fence'), '{"modality":"offered"}'),
+  pg_temp.lg_it('bad_ref', 'agreement', 'info', 'customer', 'us', 'x22', pg_temp.lg_cite(w1, 'the rest of the fence'), '{"modality":"offered","supersedes_ref":"nobody"}'),
+  pg_temp.lg_it('chain', 'agreement', 'info', 'customer', 'us', 'x23', pg_temp.lg_cite(w1, 'the rest of the fence'), '{"modality":"offered","supersedes_ref":"wrong_job"}'));
  res := public.context_ledger_write(run, tok, gen, items, '[]', 'luna-ledger:v1');
  PERFORM pg_temp.lg_assert(res ->> 'outcome' = 'written', 'write outcome ' || res::text);
  FOR exp IN SELECT * FROM (VALUES ('ok_req', NULL), ('ok_quote', NULL), ('ok_due', NULL), ('ok_inbox', NULL), ('ok_record', NULL),
@@ -1057,11 +1059,18 @@ BEGIN
  -- The packet tells the rebuild about the person's item.
  PERFORM pg_temp.lg_assert((SELECT array_agg(x ->> 'item_key') FROM jsonb_array_elements(public.context_ledger_packet(f) -> 'open_items') x) = ARRAY[k1],
   'rebuild packet lists the person-locked item');
- -- The model writes the same matter again (still open in its reading).
+ -- The model writes the same matter again (still open in its reading): the
+ -- person corrected it, so the store refuses it (same type, same first citation),
+ -- reworded or not; a different matter from the same message still goes in.
  res := public.context_ledger_write(run, tok, gen2, jsonb_build_array(
   pg_temp.lg_it('a', 'constraint', 'open', 'customer', 'us', 'Side gate to be left unlocked on install day', pg_temp.lg_cite(e1, 'leave the side gate unlocked'),
+   '{"about_key":"access:side-gate"}'),
+  pg_temp.lg_it('b', 'constraint', 'open', 'customer', 'us', 'Customer wants the gate unlocked', pg_temp.lg_cite(e1, 'side gate unlocked on install day'),
+   '{"about_key":"access:side-gate"}'),
+  pg_temp.lg_it('c', 'request', 'open', 'customer', 'us', 'Asked us to leave the gate unlocked', pg_temp.lg_cite(e1, 'leave the side gate unlocked'),
    '{"about_key":"access:side-gate"}')), '[]', 'luna-ledger:v2');
- PERFORM pg_temp.lg_assert(pg_temp.lg_key(res, 'a') = k1, 'same key in the rebuild');
+ PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, 'a') = 'person_locked' AND pg_temp.lg_code(res, 'b') = 'person_locked'
+  AND pg_temp.lg_accepted(res, 'c'), 'a person-corrected matter is refused in a rebuild, reworded or not: ' || res::text);
  fin := public.context_ledger_finish(run, tok, gen2, 'built', pg_temp.lg_meta());
  PERFORM pg_temp.lg_assert(fin ->> 'generation_status' = 'shadow' AND NOT (fin ->> 'promoted')::boolean AND (fin ->> 'carried')::integer = 1,
   'shadow mode builds without promoting, carrying the person''s item: ' || fin::text);
@@ -1538,9 +1547,186 @@ BEGIN
 END $c$;
 ROLLBACK;
 
+-- 17. The rev-backend write checks: a quote is long enough to mean something
+-- (12 characters or 3 words, or the whole row); the speaker is whoever sent the
+-- first opening citation; only an issued or sent record closes, never the
+-- opening row, a request strictly after it; a person's correction is never
+-- written again; a person-locked item is never a rebuild reason; backfills
+-- and rebuilds keep to the backfill hours, updates never wait.
+BEGIN;
+DO $c$
+DECLARE w uuid; r1 uuid; r2 uuid; r3 uuid; r5 uuid; xd uuid := gen_random_uuid(); xa uuid := gen_random_uuid();
+ du uuid := gen_random_uuid(); ds uuid := gen_random_uuid(); b0 uuid := gen_random_uuid(); b1 uuid := gen_random_uuid();
+ cl jsonb; run uuid; tok uuid; gen uuid; res jsonb; exp record; k text; lg uuid; e uuid; o uuid; lr uuid; ltok uuid := gen_random_uuid();
+ h integer; jb uuid; ju uuid; jr uuid; b jsonb;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ w := pg_temp.lg_job('SWF-98701');
+ r1 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'ok', '3 days', 'customer');
+ r2 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Please do it soon, about the gate', '2 days', 'customer');
+ r3 := pg_temp.lg_ev(w, 'client.sms_out', 'sms', 'outbound', 'We will add the variation of $2,400 and start Monday', '2 days 1 hour', 'staff');
+ r5 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Sorted, thanks for that', '2 days', 'customer');
+ INSERT INTO public.xero_invoices (id, org_id, xero_invoice_id, invoice_type, job_id, invoice_number, status, created_at, updated_at)
+ VALUES (xd, '00000000-0000-0000-0000-000000000001', 'xi-' || xd, 'ACCREC', w, 'INV-9701', 'DRAFT', now() - interval '1 hour', now()),
+        (xa, '00000000-0000-0000-0000-000000000001', 'xi-' || xa, 'ACCREC', w, 'INV-9702', 'AUTHORISED', now() - interval '1 hour', now());
+ INSERT INTO public.job_documents (id, job_id, type, version, created_at, sent_at)
+ VALUES (du, w, 'quote', 1, now() - interval '1 hour', NULL), (ds, w, 'quote', 2, now() - interval '2 hours', now() - interval '1 hour');
+ INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, status, created_at, started_at, completed_at)
+ VALUES (b0, w, 'lead_installer', current_date - 1, 'scheduled', now() - interval '1 hour', NULL, NULL),
+        (b1, w, 'lead_installer', current_date - 1, 'complete', now() - interval '1 hour', now() - interval '50 minutes', now() - interval '40 minutes');
+ cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
+ run := (cl ->> 'run_id')::uuid; tok := (cl ->> 'lease_token')::uuid; gen := (cl ->> 'generation_id')::uuid;
+ res := public.context_ledger_write(run, tok, gen, jsonb_build_array(
+  pg_temp.lg_it('short', 'claim', 'open', 'customer', 'us', 'Says call', pg_temp.lg_cite(r2, 'soon')),
+  pg_temp.lg_it('whole', 'claim', 'open', 'customer', 'us', 'Said ok', pg_temp.lg_cite(r1, 'ok')),
+  pg_temp.lg_it('three_words', 'request', 'open', 'customer', 'us', 'Asked for it soon', pg_temp.lg_cite(r2, 'do it soon')),
+  pg_temp.lg_it('agreed_by_us', 'agreement', 'info', 'customer', 'us', 'Customer agreed to the $2,400 variation',
+   pg_temp.lg_cite(r3, 'the variation of $2,400') || pg_temp.lg_cite(r1, 'ok'), '{"modality":"agreed"}'),
+  pg_temp.lg_it('agreed_ok', 'agreement', 'info', 'customer', 'us', 'Customer said ok to the variation',
+   pg_temp.lg_cite(r1, 'ok') || pg_temp.lg_cite(r3, 'the variation of $2,400'), '{"modality":"agreed"}'),
+  pg_temp.lg_it('us_first', 'commitment', 'open', 'us', 'customer', 'Will start Monday',
+   pg_temp.lg_cite(r2, 'about the gate') || pg_temp.lg_cite(r3, 'start Monday')),
+  pg_temp.lg_it('close_draft', 'request', 'closed', 'customer', 'us', 'Wanted an invoice', pg_temp.lg_cite(r2, 'Please do it soon'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(xd, NULL, 'xero_invoices'))),
+  pg_temp.lg_it('close_auth', 'request', 'closed', 'customer', 'us', 'Wanted the invoice issued', pg_temp.lg_cite(r2, 'Please do it soon'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(xa, NULL, 'xero_invoices'))),
+  pg_temp.lg_it('close_unsent', 'request', 'closed', 'customer', 'us', 'Wanted a quote', pg_temp.lg_cite(r2, 'about the gate'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(du, NULL, 'job_documents'))),
+  pg_temp.lg_it('close_sent', 'request', 'closed', 'customer', 'us', 'Wanted the quote sent', pg_temp.lg_cite(r2, 'about the gate'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(ds, NULL, 'job_documents'))),
+  pg_temp.lg_it('close_unattended', 'commitment', 'closed', 'us', 'customer', 'Will start Monday', pg_temp.lg_cite(r3, 'start Monday'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(b0, NULL, 'job_assignments'))),
+  pg_temp.lg_it('close_attended', 'commitment', 'closed', 'us', 'customer', 'Will add the variation', pg_temp.lg_cite(r3, 'add the variation'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(b1, NULL, 'job_assignments'))),
+  pg_temp.lg_it('close_self', 'request', 'closed', 'customer', 'us', 'Asked and answered itself', pg_temp.lg_cite(r2, 'do it soon, about'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(r2, 'about the gate'))),
+  pg_temp.lg_it('close_same_instant', 'request', 'closed', 'customer', 'us', 'Closed at the very moment', pg_temp.lg_cite(r2, 'soon, about the gate'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(r5, 'Sorted, thanks'))),
+  pg_temp.lg_it('commit_same_instant', 'commitment', 'closed', 'customer', 'us', 'Kept at once', pg_temp.lg_cite(r2, 'it soon, about the gate'),
+   jsonb_build_object('closed_by', pg_temp.lg_cite(r5, 'Sorted, thanks')))), '[]', 'luna-ledger:v1');
+ FOR exp IN SELECT * FROM (VALUES ('short', 'excerpt_too_short'), ('whole', NULL), ('three_words', NULL),
+  ('agreed_by_us', 'speaker_not_customer'), ('agreed_ok', NULL), ('us_first', 'speaker_not_us'),
+  ('close_draft', 'closing_not_issued'), ('close_auth', NULL), ('close_unsent', 'closing_not_issued'), ('close_sent', NULL),
+  ('close_unattended', 'closing_not_issued'), ('close_attended', NULL), ('close_self', 'closing_is_opening'),
+  ('close_same_instant', 'closing_before_opening'), ('commit_same_instant', NULL)) v(ref, code) LOOP
+  IF exp.code IS NULL THEN
+   PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, exp.ref), exp.ref || ' must be accepted: ' || coalesce(pg_temp.lg_code(res, exp.ref), '?'));
+  ELSE
+   PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, exp.ref) = exp.code AND NOT pg_temp.lg_accepted(res, exp.ref),
+    format('%s must be refused %s, got %s', exp.ref, exp.code, coalesce(pg_temp.lg_code(res, exp.ref), 'accepted')));
+  END IF;
+ END LOOP;
+ -- A transition to closed follows the same rules.
+ k := pg_temp.lg_key(res, 'three_words');
+ res := public.context_ledger_write(run, tok, gen, '[]', jsonb_build_array(
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(xd, NULL, 'xero_invoices')),
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(r2, 'do it soon'))), 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert((SELECT array_agg(y.x ->> 'code' ORDER BY y.n) FROM jsonb_array_elements(res -> 'transitions_refused') WITH ORDINALITY y(x, n))
+  = ARRAY['closing_not_issued', 'closing_is_opening'], 'closing transitions: ' || (res -> 'transitions_refused')::text);
+
+ -- A person's correction on the live reading is never written again in an update,
+ -- reworded or not; another type, or the same about_key from another message, is
+ -- a different matter.
+ PERFORM pg_temp.lg_mode('live', 50);
+ o := pg_temp.lg_job('SWF-98702');
+ e := pg_temp.lg_ev(o, 'client.reply', 'sms', 'inbound', 'Please cancel the gate on this job', '5 days', 'customer');
+ r1 := pg_temp.lg_ev(o, 'client.reply', 'sms', 'inbound', 'Please also quote the gate again', '4 days', 'customer');
+ lg := pg_temp.lg_gen(o, 'live', now() - interval '3 days');
+ PERFORM pg_temp.lg_item(lg, 'request:quote:000000000001', 'disputed', e, true);
+ UPDATE public.context_ledger_items SET about_key = 'quote:gate' WHERE generation_id = lg;
+ lr := pg_temp.lg_run(o, 'ledger', 'running', '30 minutes', ltok);
+ res := public.context_ledger_write(lr, ltok, lg, jsonb_build_array(
+  pg_temp.lg_it('again', 'request', 'open', 'customer', 'us', 'Wants the gate cancelled', pg_temp.lg_cite(e, 'cancel the gate on this job'),
+   '{"about_key":"quote:gate"}'),
+  pg_temp.lg_it('other_type', 'claim', 'open', 'customer', 'us', 'Says the gate is cancelled', pg_temp.lg_cite(e, 'cancel the gate on this job')),
+  pg_temp.lg_it('same_about', 'request', 'open', 'customer', 'us', 'Asked for a new gate quote', pg_temp.lg_cite(r1, 'quote the gate again'),
+   '{"about_key":"quote:gate"}')), '[]', 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, 'again') = 'person_locked' AND pg_temp.lg_accepted(res, 'other_type')
+  AND pg_temp.lg_accepted(res, 'same_about'), 'person_locked in an update: ' || res::text);
+ -- A person-locked item's message moves to another job: no rebuild (it would carry
+ -- the item straight back); the story flags it for a person instead. The same
+ -- item unlocked is a rebuild.
+ o := pg_temp.lg_job('SWF-98703');
+ e := pg_temp.lg_ev(o, 'client.reply', 'sms', 'inbound', 'Please cancel the gate on this job', '5 days', 'customer');
+ lg := pg_temp.lg_gen(o, 'live', now() - interval '1 minute');
+ PERFORM pg_temp.lg_item(lg, 'request:none:000000000002', 'disputed', e, true);
+ PERFORM pg_temp.lg_move(e, pg_temp.lg_job('SWF-98707'));
+ PERFORM pg_temp.lg_assert((SELECT jd.reason IS DISTINCT FROM 'citation_moved' FROM public.context_ledger_judge(ARRAY[o]) jd),
+  'a person-locked item is never a rebuild reason');
+ UPDATE public.context_ledger_items SET person_locked = false WHERE generation_id = lg;
+ PERFORM pg_temp.lg_assert((SELECT jd.reason = 'citation_moved' FROM public.context_ledger_judge(ARRAY[o]) jd),
+  'the same item unlocked is a rebuild');
+
+ -- The backfill hours (Perth): a backfill or rebuild outside them waits, an update never does.
+ h := extract(hour FROM now() AT TIME ZONE 'Australia/Perth')::integer;
+ jb := pg_temp.lg_job('SWF-98704'); PERFORM pg_temp.lg_ev(jb, 'client.reply', 'sms', 'inbound', 'Hello there', '2 days', 'customer');
+ ju := pg_temp.lg_job('SWF-98705'); PERFORM pg_temp.lg_ev(ju, 'client.reply', 'sms', 'inbound', 'New message', '1 hour', 'customer');
+ PERFORM pg_temp.lg_gen(ju, 'live', now() - interval '1 day');
+ jr := pg_temp.lg_job('SWF-98706'); PERFORM pg_temp.lg_ev(jr, 'client.reply', 'sms', 'inbound', 'Hello there', '2 days', 'customer');
+ PERFORM pg_temp.lg_gen(jr, 'live', now() - interval '1 hour', 'luna-ledger:v0');
+ UPDATE public.context_ledger_settings SET backfill_from_hour = (h + 1) % 24, backfill_to_hour = (h + 2) % 24;
+ PERFORM pg_temp.lg_assert((SELECT bool_and(CASE jd.job_id WHEN jb THEN NOT jd.due AND jd.kind = 'backfill' AND jd.blocked_reason = 'outside_window'
+                                                        WHEN ju THEN jd.due AND jd.kind = 'update'
+                                                        ELSE NOT jd.due AND jd.kind = 'rebuild' AND jd.blocked_reason = 'outside_window' END)
+                            FROM public.context_ledger_judge(ARRAY[jb, ju, jr]) jd), 'outside the backfill hours');
+ cl := public.context_ledger_claim(jb, 'backfill', pg_temp.lg_today());
+ PERFORM pg_temp.lg_assert(cl ->> 'outcome' = 'not_due' AND cl ->> 'reason' = 'outside_window', 'claim outside the hours: ' || cl::text);
+ b := public.context_ledger_budget();
+ PERFORM pg_temp.lg_assert(b -> 'backfill_window' = jsonb_build_object('from_hour', (h + 1) % 24, 'to_hour', (h + 2) % 24, 'open', false),
+  'the budget shows the closed window: ' || b::text);
+ -- a window that wraps midnight and leaves out only this hour is still closed now
+ UPDATE public.context_ledger_settings SET backfill_from_hour = (h + 1) % 24, backfill_to_hour = h;
+ PERFORM pg_temp.lg_assert((SELECT jd.blocked_reason = 'outside_window' FROM public.context_ledger_judge(ARRAY[jb]) jd), 'wrapping window, closed hour');
+ -- a window that wraps midnight and holds this hour (every hour but the one before) is open
+ UPDATE public.context_ledger_settings SET backfill_from_hour = h, backfill_to_hour = (h + 23) % 24;
+ PERFORM pg_temp.lg_assert((SELECT jd.due AND jd.kind = 'backfill' FROM public.context_ledger_judge(ARRAY[jb]) jd), 'wrapping window, open hour');
+ -- inside the hours (this hour to the next, wrapping at 23): due
+ UPDATE public.context_ledger_settings SET backfill_from_hour = h, backfill_to_hour = (h + 1) % 24;
+ PERFORM pg_temp.lg_assert((SELECT jd.due AND jd.kind = 'backfill' FROM public.context_ledger_judge(ARRAY[jb]) jd)
+  AND (public.context_ledger_budget() #>> '{backfill_window,open}')::boolean, 'inside the backfill hours');
+ UPDATE public.context_ledger_settings SET backfill_from_hour = NULL, backfill_to_hour = NULL;
+ PERFORM pg_temp.lg_assert(public.context_ledger_budget() -> 'backfill_window' = '{"from_hour": null, "to_hour": null, "open": true}'::jsonb,
+  'no hours set: any time');
+END $c$;
+ROLLBACK;
+
+-- 16. Rollback order (rev-backend P1-8). The admission's ledger branch reads
+-- plain values, so no other phase depends on the ledger tables: with the
+-- settings table gone, attribution and extraction are still admitted.
+BEGIN;
+DO $c$
+DECLARE run uuid; tok uuid := gen_random_uuid(); j uuid; res jsonb;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true);
+ j := pg_temp.lg_job('SWF-98601');
+ run := pg_temp.lg_run(j, 'extraction', 'running', '30 minutes', tok);
+ DROP TABLE public.context_ledger_settings CASCADE;
+ -- a new pg_proc row makes this session compile the admission afresh, as a new
+ -- session would after a rollback (a compiled copy would hide a type dependency)
+ ALTER FUNCTION public.reserve_context_model_call(text, uuid, uuid) SET search_path = public, pg_temp;
+ res := public.reserve_context_model_call('attribution', NULL, NULL);
+ PERFORM pg_temp.lg_assert(res ->> 'outcome' IN ('reserved', 'attribution_budget'), 'attribution without the ledger table: ' || res::text);
+ res := public.reserve_context_model_call('extraction', run, tok);
+ PERFORM pg_temp.lg_assert(res ->> 'outcome' = 'reserved', 'extraction without the ledger table: ' || res::text);
+END $c$;
+ROLLBACK;
+-- The model's rollback refuses while the store is installed; nothing is dropped.
+-- (The receipts table goes first, so its foreign key cannot be what stops it.)
+\set ON_ERROR_STOP off
+BEGIN;
+DROP TABLE public.context_ledger_writes;
+\ir ../../../rollbacks/20261006010000_context_ledger_model_down.sql
+COMMIT;
+\set ON_ERROR_STOP on
+DO $c$ BEGIN
+ PERFORM pg_temp.lg_assert(to_regclass('public.context_ledger_settings') IS NOT NULL AND to_regclass('public.context_ledger_items') IS NOT NULL,
+  'the model rollback must refuse while the store is installed');
+ PERFORM pg_temp.lg_assert(to_regclass('public.context_ledger_writes') IS NOT NULL, 'the refused rollback changed nothing');
+END $c$;
+
 -- 15. Last, so a behaviour break above is reported by its behaviour: the
 -- admission is exactly this migration's body.
 DO $c$ BEGIN
  PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  = '1703202c9f194072ea031639004a5f06', 'reserve_context_model_call is not this migration''s body');
+  = '28545c710b6234b76ba25eb09093fa39', 'reserve_context_model_call is not this migration''s body');
 END $c$;

@@ -105,6 +105,88 @@ BEGIN
       WHERE k->>'what' LIKE 'Customer wrote last; the reader judged no reply is needed.%') THEN
   RAISE EXCEPTION 'story contract: a row the reader read is judged by it: % / %', s->'checks', s->'now';
  END IF;
+ -- rev-backend P1-5: what a person disputed (or a later item replaced) is not shown as fact.
+ s := public.context_job_story_assemble('{"id":"x","status":"accepted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb, '{}'::jsonb,
+        jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'evidence_until', '2026-10-05T00:00:00Z'),
+         'unread_rows', 0, 'unread_ids', '[]'::jsonb, 'read_ids', '[]'::jsonb, 'transitions', '[]'::jsonb, 'items', jsonb_build_array(
+          jsonb_build_object('item_key', 'event:none:1', 'item_type', 'event', 'status', 'disputed', 'from_role', 'customer', 'from_name', 'Dana Wrong',
+           'what', 'Materials were delivered to site', 'opened_at', '2026-10-01T01:00:00Z', 'cites_ok', true,
+           'opened_by', '[{"table":"business_events","id":"e1"}]'::jsonb),
+          jsonb_build_object('item_key', 'phase_note:none:2', 'item_type', 'phase_note', 'status', 'disputed', 'from_role', 'us', 'phase', 'install',
+           'what', 'Install finished early', 'opened_at', '2026-10-01T02:00:00Z', 'cites_ok', true, 'opened_by', '[{"table":"business_events","id":"e2"}]'::jsonb),
+          jsonb_build_object('item_key', 'event:none:3', 'item_type', 'event', 'status', 'info', 'from_role', 'customer', 'from_name', 'Pat Right',
+           'what', 'Gate measured', 'opened_at', '2026-10-02T01:00:00Z', 'cites_ok', true, 'opened_by', '[{"table":"business_events","id":"e3"}]'::jsonb))),
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF jsonb_array_length(s->'events') <> 1 OR s->'events'->0->>'what' <> 'Gate measured' OR jsonb_array_length(s->'phase_notes') <> 0
+    OR s::text LIKE '%Dana Wrong%' OR s->'who' @> '[{"name":"Pat Right"}]'::jsonb IS NOT TRUE THEN
+  RAISE EXCEPTION 'story contract: disputed items must not be shown as fact: % / % / %', s->'events', s->'phase_notes', s->'who';
+ END IF;
+ -- rev-backend P1-6: a record loop stays open while its rule fires; an attached item's
+ -- closing evidence does not close it (a part payment on an overdue invoice).
+ s := public.context_job_story_assemble('{"id":"x","status":"invoiced","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('loops', jsonb_build_array(jsonb_build_object('rule', 'R1_overdue', 'loop_key', 'R1_overdue:i1', 'shown_as', 'loop',
+          'owner', 'customer', 'counterparty', 'us', 'what', 'Invoice INV-1 overdue', 'opened_at', '2026-09-20T00:00:00Z',
+          'about_key', 'invoice:inv-1', 'source_table', 'xero_invoices', 'source_id', 'i1')),
+         'facts', jsonb_build_object('closing', jsonb_build_array(jsonb_build_object('closes_on', 'payment', 'about_key', 'invoice:inv-1',
+          'at', '2026-10-03T00:00:00Z', 't', 'xero_invoices', 'id', 'i1', 'what', 'Payment $1,000.00 received on INV-1')))),
+        jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'evidence_until', '2026-10-05T00:00:00Z'),
+         'unread_rows', 0, 'unread_ids', '[]'::jsonb, 'read_ids', '[]'::jsonb, 'transitions', '[]'::jsonb, 'items', jsonb_build_array(
+          jsonb_build_object('item_key', 'commitment:invoice:1', 'item_type', 'commitment', 'status', 'open', 'from_role', 'customer',
+           'what', 'Will pay in full', 'about_key', 'invoice:inv-1', 'closes_on', 'payment', 'opened_at', '2026-10-01T00:00:00Z', 'cites_ok', true,
+           'opened_by', '[{"table":"business_events","id":"e9","excerpt":"will pay in full"}]'::jsonb))),
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE l->>'source' = 'record' AND (l->>'status' <> 'open' OR l->'closing_evidence' <> 'null'::jsonb))
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' = 'R1_overdue:i1' AND l->>'status' = 'open') THEN
+  RAISE EXCEPTION 'story contract: a record loop must stay open while its rule fires: %', s->'loops';
+ END IF;
+ -- rev-backend P1-7: work is not complete while the newest passed booking has no
+ -- attendance, or while another booking is ahead.
+ s := public.context_job_story_assemble('{"id":"x","status":"scheduled","type":"fencing","created_at":"2026-08-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('facts', jsonb_build_object('bookings', jsonb_build_array(
+          jsonb_build_object('id', 'b1', 'scheduled_date', '2026-09-07', 'status', 'complete', 'completed_at', '2026-09-07T06:00:00Z'),
+          jsonb_build_object('id', 'b2', 'scheduled_date', '2026-09-21', 'status', 'scheduled')))),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'phase' <> 'install' OR position('attendance not recorded for Mon 21 Sep' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' LIKE '%Work complete%' THEN
+  RAISE EXCEPTION 'story contract: an unattended passed booking is not complete work: % / %', s->'now'->>'phase', s->'now'->>'line';
+ END IF;
+ s := public.context_job_story_assemble('{"id":"x","status":"scheduled","type":"fencing","created_at":"2026-08-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('facts', jsonb_build_object('bookings', jsonb_build_array(
+          jsonb_build_object('id', 'b1', 'scheduled_date', '2026-09-07', 'status', 'complete', 'completed_at', '2026-09-07T06:00:00Z'),
+          jsonb_build_object('id', 'b3', 'scheduled_date', '2026-10-20', 'status', 'scheduled', 'created_at', '2026-10-01T00:00:00Z')))),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'phase' IN ('complete', 'invoice', 'payment') OR s->'now'->>'line' LIKE '%Work complete%' THEN
+  RAISE EXCEPTION 'story contract: work is not complete while a booking is ahead: % / %', s->'now'->>'phase', s->'now'->>'line';
+ END IF;
+ s := public.context_job_story_assemble('{"id":"x","status":"scheduled","type":"fencing","created_at":"2026-08-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('facts', jsonb_build_object('bookings', jsonb_build_array(
+          jsonb_build_object('id', 'b1', 'scheduled_date', '2026-09-07', 'status', 'complete', 'completed_at', '2026-09-07T06:00:00Z')))),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'line' NOT LIKE 'Work complete since Mon 7 Sep%' THEN
+  RAISE EXCEPTION 'story contract: the newest booking attended and none ahead is complete work: %', s->'now'->>'line';
+ END IF;
+ -- a make-safe whose report went out is not complete while a booking is still ahead
+ s := public.context_job_story_assemble('{"id":"x","status":"processing","type":"makesafe","created_at":"2026-08-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('facts', jsonb_build_object('report_sent_at', '2026-10-03T00:00:00Z', 'bookings', jsonb_build_array(
+          jsonb_build_object('id', 'b3', 'scheduled_date', '2026-10-20', 'status', 'scheduled', 'created_at', '2026-10-01T00:00:00Z')))),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'phase' IN ('complete', 'invoice', 'payment') THEN
+  RAISE EXCEPTION 'story contract: a report sent with a booking ahead is not complete work: % / %', s->'now'->>'phase', s->'now'->>'line';
+ END IF;
+ -- rev-backend P1-4b: a staff correction whose message moved is for a person, not a rebuild.
+ s := public.context_job_story_assemble('{"id":"x","status":"accepted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb, '{}'::jsonb,
+        jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'evidence_until', '2026-10-05T00:00:00Z'),
+         'unread_rows', 0, 'unread_ids', '[]'::jsonb, 'read_ids', '[]'::jsonb, 'transitions', '[]'::jsonb, 'items', jsonb_build_array(
+          jsonb_build_object('item_key', 'request:none:1', 'item_type', 'request', 'status', 'disputed', 'from_role', 'customer',
+           'what', 'Cancel the gate', 'opened_at', '2026-10-01T00:00:00Z', 'cites_ok', false, 'person_locked', true,
+           'opened_by', '[{"table":"business_events","id":"e1"}]'::jsonb))),
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF (s->'meta'->'ledger'->>'needs_rebuild')::boolean OR (s->'meta'->'ledger'->>'stale')::boolean
+    OR (s->'meta'->'ledger'->>'hidden_items')::int <> 1
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE '1 staff correction cites a message that moved off this job; a person needs to check it.')
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE '%needs a rebuild%') THEN
+  RAISE EXCEPTION 'story contract: a moved staff correction is for a person: % / %', s->'meta'->'ledger', s->'not_known';
+ END IF;
  -- Invoicing words follow the money: an invoiced status with nothing left to invoice is "Invoiced".
  s := public.context_job_story_assemble('{"id":"x","status":"invoiced","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
         '{}'::jsonb, NULL, NULL, '2026-10-07 02:00Z', NULL);
@@ -460,6 +542,18 @@ BEGIN
  IF jsonb_array_length(s->'jobs') <> 2 OR s->>'next' IS NULL THEN RAISE EXCEPTION 'story contract: scorecard jobs paging wrong: %', s; END IF;
  IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'jobs') x WHERE jsonb_typeof(x->'ledger_needs_person') <> 'boolean') THEN
   RAISE EXCEPTION 'story contract: scorecard job rows must say whether the ledger needs a person: %', s;
+ END IF;
+ -- rev-backend P1-6: a payment closes only a cleared invoice (the payment that cleared it,
+ -- or the day Xero says it was fully paid); a part payment closes nothing
+ t := public.context_job_story_facts(a, asof);
+ IF (SELECT array_agg(x->>'about_key' ORDER BY x->>'about_key') FROM jsonb_array_elements(t->'closing') x WHERE x->>'closes_on' = 'payment')
+    IS DISTINCT FROM ARRAY['invoice:inv-9005'] THEN
+  RAISE EXCEPTION 'story contract: only a cleared invoice closes on payment: %', t->'closing';
+ END IF;
+ t := public.context_job_story_facts(b, asof);
+ IF (SELECT (x->>'at')::timestamptz FROM jsonb_array_elements(t->'closing') x WHERE x->>'closes_on' = 'payment' AND x->>'about_key' = 'invoice:inv-9006')
+    IS DISTINCT FROM ('2026-09-15 00:00'::timestamp AT TIME ZONE 'Australia/Perth') THEN
+  RAISE EXCEPTION 'story contract: a paid invoice with no payment list closes on its fully paid day: %', t->'closing';
  END IF;
  -- three readings in a row by the current reader failed their checks: that job, and only that job, needs a person
  INSERT INTO public.context_ledger_generations (job_id, kind, status, reader, evidence_until, created_at, finished_at, checks)

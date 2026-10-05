@@ -185,4 +185,40 @@ BEGIN
  EXCEPTION WHEN check_violation THEN NULL; END;
 END $c$;
 
+-- 6. The backfill hours: unset by default (any time), Perth hours 0 to 23, both
+-- or neither, never the same hour, a window may wrap midnight.
+DO $c$
+DECLARE c text;
+BEGIN
+ FOREACH c IN ARRAY ARRAY['backfill_from_hour', 'backfill_to_hour'] LOOP
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'context_ledger_settings'
+                 AND column_name = c AND data_type = 'smallint' AND is_nullable = 'YES' AND column_default IS NULL) THEN
+   RAISE EXCEPTION 'ledger contract: settings.% must be a nullable smallint with no default', c;
+  END IF;
+  IF coalesce(col_description('public.context_ledger_settings'::regclass,
+      (SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = 'public.context_ledger_settings'::regclass AND a.attname = c)), '')
+     NOT LIKE 'Context ledger: %backfill hours%' THEN
+   RAISE EXCEPTION 'ledger contract: settings.% carries no owner comment', c;
+  END IF;
+ END LOOP;
+ IF (SELECT backfill_from_hour IS NOT NULL OR backfill_to_hour IS NOT NULL FROM public.context_ledger_settings) THEN
+  RAISE EXCEPTION 'ledger contract: the backfill hours must start unset (any time)';
+ END IF;
+ UPDATE public.context_ledger_settings SET backfill_from_hour = 22, backfill_to_hour = 6;
+ UPDATE public.context_ledger_settings SET backfill_from_hour = 0, backfill_to_hour = 23;
+ UPDATE public.context_ledger_settings SET backfill_from_hour = NULL, backfill_to_hour = NULL;
+ BEGIN
+  UPDATE public.context_ledger_settings SET backfill_from_hour = 22;
+  RAISE EXCEPTION 'ledger contract: a backfill window with one end was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN
+  UPDATE public.context_ledger_settings SET backfill_from_hour = 5, backfill_to_hour = 5;
+  RAISE EXCEPTION 'ledger contract: an empty backfill window was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN
+  UPDATE public.context_ledger_settings SET backfill_from_hour = 24, backfill_to_hour = 6;
+  RAISE EXCEPTION 'ledger contract: a backfill hour of 24 was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+END $c$;
+
 ROLLBACK;

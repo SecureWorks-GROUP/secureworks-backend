@@ -137,7 +137,8 @@ AS $fn$
   FROM inp, LATERAL (
    SELECT coalesce(nullif(inp.led->>'status', ''), 'none') AS status, nullif(inp.led->'generation', 'null'::jsonb) AS gen,
           (inp.led->'generation'->>'evidence_until')::timestamptz AS evidence_until,
-          (SELECT count(*) FROM vis) AS items, (SELECT count(*) FROM li WHERE NOT coalesce(li.cites_ok, true)) AS hidden) x
+          (SELECT count(*) FROM vis) AS items, (SELECT count(*) FROM li WHERE NOT coalesce(li.cites_ok, true)) AS hidden,
+          (SELECT count(*) FROM li WHERE NOT coalesce(li.cites_ok, true) AND coalesce(li.person_locked, false)) AS hidden_locked) x
  ),
  -- money totals
  mt AS (
@@ -150,10 +151,25 @@ AS $fn$
   FROM mo
  ),
  -- evidence for the phase
+ -- the newest crew booking up to today, and whether one is still ahead: work is
+ -- done only when that booking is complete and nothing is ahead
+ bkn AS (
+  SELECT (SELECT to_jsonb(b) FROM bk b, inp WHERE b.scheduled_date <= inp.today AND coalesce(b.status, '') <> 'cancelled'
+          ORDER BY b.scheduled_date DESC, b.id DESC LIMIT 1) AS nb,
+         EXISTS (SELECT 1 FROM bk b, inp WHERE b.scheduled_date > inp.today AND coalesce(b.status, '') <> 'cancelled') AS ahead
+ ),
  ev AS (
   SELECT
-   (SELECT max(coalesce(b.completed_at, b.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth')) FROM bk b
-    WHERE b.status = 'complete' OR b.completed_at IS NOT NULL) AS done_at,
+   (SELECT CASE WHEN NOT bkn.ahead AND bkn.nb IS NOT NULL
+                 AND (bkn.nb->>'status' = 'complete' OR bkn.nb->>'completed_at' IS NOT NULL)
+            THEN (SELECT max(coalesce(b.completed_at, b.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth')) FROM bk b
+                  WHERE b.status = 'complete' OR b.completed_at IS NOT NULL) END FROM bkn) AS done_at,
+   (SELECT bkn.ahead FROM bkn) AS bk_ahead,
+   -- a passed booking nobody marked started or complete
+   (SELECT (bkn.nb->>'scheduled_date')::date FROM bkn, inp
+    WHERE bkn.nb IS NOT NULL AND (bkn.nb->>'scheduled_date')::date < inp.today
+      AND coalesce(bkn.nb->>'status', '') NOT IN ('complete', 'in_progress')
+      AND bkn.nb->>'completed_at' IS NULL AND bkn.nb->>'started_at' IS NULL) AS unattended_on,
    (SELECT min(coalesce(b.completed_at, b.started_at, b.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth')) FROM bk b
     WHERE b.status IN ('complete', 'in_progress') OR b.completed_at IS NOT NULL OR b.started_at IS NOT NULL) AS started_at,
    (inp.rec->'facts'->>'report_sent_at')::timestamptz AS report_sent_at,
@@ -178,7 +194,7 @@ AS $fn$
     WHEN 'completed' THEN 'complete' WHEN 'rectification' THEN 'rectification' WHEN 'lead' THEN 'enquiry' WHEN 'new' THEN 'enquiry'
     WHEN 'processing' THEN CASE WHEN ev.type = 'makesafe' THEN 'makesafe' ELSE 'other' END
     ELSE 'other' END AS status_phase,
-   coalesce(ev.done_at, ev.report_sent_at) AS work_done_at,
+   CASE WHEN ev.bk_ahead THEN NULL ELSE coalesce(ev.done_at, ev.report_sent_at) END AS work_done_at,
    (mt.owing > 0) AS owing, (coalesce(mt.nyi, 0) > 1) AS uninvoiced
   FROM ev, mt
  ),
@@ -187,6 +203,7 @@ AS $fn$
    CASE
     WHEN p.status_phase = 'rectification' THEN 'rectification'
     WHEN p.started_at IS NOT NULL AND p.next_bk IS NOT NULL THEN 'install'
+    WHEN p.unattended_on IS NOT NULL AND p.work_done_at IS NULL THEN 'install'
     WHEN p.work_done_at IS NOT NULL AND p.owing THEN 'payment'
     WHEN p.work_done_at IS NOT NULL AND p.uninvoiced THEN 'invoice'
     WHEN p.work_done_at IS NOT NULL THEN 'complete'
@@ -204,7 +221,7 @@ AS $fn$
  phs AS (
   SELECT ph.*,
    CASE
-    WHEN ph.phase = 'install' THEN ph.started_at
+    WHEN ph.phase = 'install' THEN coalesce(ph.started_at, ph.unattended_on::timestamp AT TIME ZONE 'Australia/Perth')
     WHEN ph.phase IN ('payment', 'invoice', 'complete') AND ph.work_done_at IS NOT NULL THEN ph.work_done_at
     WHEN ph.phase = 'scheduled' AND ph.next_bk IS NOT NULL
      THEN CASE WHEN ph.status_phase = 'scheduled' THEN coalesce(ph.status_at, (ph.next_bk->>'created_at')::timestamptz)
@@ -309,11 +326,11 @@ AS $fn$
          concat_ws('; ', g.why, (SELECT string_agg(n.what || coalesce(' ("' || left(n.excerpt, 160) || '")', ''), '; ' ORDER BY n.opened_at)
                                  FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key)) AS why,
          g.since, coalesce(g.due, (SELECT min(n.due_date) FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key)) AS due,
-         CASE WHEN EXISTS (SELECT 1 FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key WHERE n.closing IS NOT NULL)
-              THEN 'closing_evidence' ELSE 'open' END AS status,
+         -- the record rule still fires, so the loop is open: closing evidence is shown on ledger items only
+         'open'::text AS status,
          g.closes_when,
          (SELECT max(n.blocks) FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key WHERE n.blocks <> 'none') AS blocks,
-         (SELECT jsonb_agg(e) FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key, jsonb_array_elements(n.closing) e) AS closing_evidence,
+         NULL::jsonb AS closing_evidence,
          (SELECT jsonb_agg(DISTINCT c) FROM jsonb_array_elements(g.cites || coalesce((SELECT jsonb_agg(c2) FROM norm n
               JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key, jsonb_array_elements(n.cites) c2), '[]'::jsonb)) c) AS cites,
          g.about_key, g.amount,
@@ -400,7 +417,11 @@ AS $fn$
    || coalesce(' since ' || to_char((phs.phase_since_at AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon')
                || CASE WHEN extract(year FROM (phs.phase_since_at AT TIME ZONE 'Australia/Perth')) <> extract(year FROM phs.today)
                        THEN ' ' || extract(year FROM (phs.phase_since_at AT TIME ZONE 'Australia/Perth')) ELSE '' END, '') AS phase_words,
-   CASE WHEN nx.b IS NOT NULL THEN 'next visit ' || replace(coalesce(nx.b->>'assignment_type', 'visit'), '_', ' ') || ' booked ' || nx.day END AS next_words,
+   CASE WHEN nx.b IS NOT NULL THEN 'next visit ' || coalesce(replace(nx.b->>'assignment_type', '_', ' ') || ' ', '') || 'booked ' || nx.day END AS next_words,
+   CASE WHEN phs.phase = 'install' AND phs.unattended_on IS NOT NULL
+        THEN 'attendance not recorded for ' || to_char(phs.unattended_on, 'Dy FMDD Mon')
+             || CASE WHEN extract(year FROM phs.unattended_on) <> extract(year FROM phs.today) THEN ' ' || extract(year FROM phs.unattended_on) ELSE '' END
+   END AS att_words,
    (SELECT CASE WHEN t.owner = 'us' THEN 'we owe: ' WHEN t.owner = 'customer' THEN 'the customer owes: '
                 WHEN t.owner = 'third_party' THEN 'waiting on another party: ' ELSE 'open: ' END
            || left(regexp_replace(t.what, '\s+', ' ', 'g'), 140) FROM top t) AS top_words,
@@ -419,7 +440,7 @@ AS $fn$
  ),
  nowl AS (
   SELECT n.*, (SELECT string_agg(upper(left(x.s, 1)) || substr(x.s, 2), '. ' ORDER BY x.o) FROM (VALUES
-           (1, n.phase_words || coalesce(': ' || n.next_words, '')),
+           (1, n.phase_words || coalesce(': ' || n.next_words, '') || coalesce('; ' || n.att_words, '')),
            (2, nullif(concat_ws(', ', n.owing_words, n.draft_words, n.nyi_words), '')),
            (3, n.move_words || coalesce(', ' || n.top_words, '')),
            (4, n.wrote_words)) x(o, s) WHERE x.s IS NOT NULL) AS line0
@@ -464,9 +485,15 @@ AS $fn$
    (9, CASE WHEN led.status = 'none' THEN 'No reader has read this job''s messages yet, so promises, requests and agreements in the words are not shown.'
             WHEN led.status IN ('shadow', 'building') AND led.gen IS NULL THEN 'The reader''s ledger for this job is not live yet, so the words are not shown.' END,
        'The ledger is written by the reader and shown once live.'),
-   (10, CASE WHEN led.hidden > 0 THEN led.hidden || CASE WHEN led.hidden = 1 THEN ' reader item was' ELSE ' reader items were' END
+   (10, CASE WHEN led.hidden - led.hidden_locked > 0 THEN (led.hidden - led.hidden_locked)
+             || CASE WHEN led.hidden - led.hidden_locked = 1 THEN ' reader item was' ELSE ' reader items were' END
              || ' hidden because messages it cited moved off this job; the story needs a rebuild.' END,
         'A ledger item is shown only while every message it cites is still on this job.'),
+   (14, CASE WHEN led.hidden_locked > 0 THEN led.hidden_locked
+             || CASE WHEN led.hidden_locked = 1 THEN ' staff correction cites a message' ELSE ' staff corrections cite messages' END
+             || ' that moved off this job; a person needs to check '
+             || CASE WHEN led.hidden_locked = 1 THEN 'it.' ELSE 'them.' END END,
+        'A rebuild keeps staff corrections as they are, so only a person can fix this.'),
    (11, CASE WHEN coalesce((inp.meta->>'contact_missing')::boolean, false) THEN 'This job has no CRM contact, so texts and calls may not reach it.' END,
         'Texts and calls are placed by the CRM contact.'),
    (12, CASE WHEN led.status = 'shadow' AND led.gen IS NOT NULL THEN 'This story shows a shadow reading that is not live yet.' END,
@@ -490,8 +517,8 @@ AS $fn$
    FROM inp, jsonb_array_elements(coalesce(inp.rec->'facts'->'parties', '[]'::jsonb)) p WHERE nullif(btrim(p->>'name'), '') IS NOT NULL
    UNION ALL
    SELECT n.nm, n.rl, NULL, (SELECT jsonb_agg(jsonb_build_object('t', c->>'table', 'id', c->>'id')) FROM jsonb_array_elements(n.ob) c), 4
-   FROM (SELECT v.from_name AS nm, v.from_role AS rl, v.opened_by AS ob FROM vis v
-         UNION ALL SELECT v.to_name, v.to_role, v.opened_by FROM vis v) n
+   FROM (SELECT v.from_name AS nm, v.from_role AS rl, v.opened_by AS ob FROM vis v WHERE v.status NOT IN ('disputed', 'superseded', 'declined')
+         UNION ALL SELECT v.to_name, v.to_role, v.opened_by FROM vis v WHERE v.status NOT IN ('disputed', 'superseded', 'declined')) n
    WHERE nullif(btrim(n.nm), '') IS NOT NULL
   ) w ORDER BY lower(w.name), w.role, w.ord
  ),
@@ -565,14 +592,16 @@ AS $fn$
                          ORDER BY t.at, t.kind, t.source_id) FROM tlout t), '[]'::jsonb),
   'phase_notes', coalesce((SELECT jsonb_agg(jsonb_build_object('phase', v.phase, 'what', v.what,
                    'cites', (SELECT jsonb_agg(jsonb_build_object('t', c->>'table', 'id', c->>'id')) FROM jsonb_array_elements(v.opened_by) c))
-                   ORDER BY v.opened_at) FROM vis v WHERE v.item_type = 'phase_note'), '[]'::jsonb),
+                   ORDER BY v.opened_at) FROM vis v WHERE v.item_type = 'phase_note'
+                   AND v.status NOT IN ('disputed', 'superseded', 'declined')), '[]'::jsonb),
   'agreements', coalesce((SELECT jsonb_agg(jsonb_build_object('key', v.item_key, 'what', v.what, 'modality', v.modality, 'since', v.opened_at,
                   'status', v.status, 'supersedes', v.supersedes_key,
                   'cites', (SELECT jsonb_agg(jsonb_build_object('t', c->>'table', 'id', c->>'id')) FROM jsonb_array_elements(v.opened_by) c))
                   ORDER BY v.opened_at) FROM vis v WHERE v.item_type = 'agreement'), '[]'::jsonb),
   'events', coalesce((SELECT jsonb_agg(jsonb_build_object('key', v.item_key, 'what', v.what, 'at', v.opened_at,
               'cites', (SELECT jsonb_agg(jsonb_build_object('t', c->>'table', 'id', c->>'id')) FROM jsonb_array_elements(v.opened_by) c))
-              ORDER BY v.opened_at) FROM vis v WHERE v.item_type = 'event'), '[]'::jsonb),
+              ORDER BY v.opened_at) FROM vis v WHERE v.item_type = 'event'
+              AND v.status NOT IN ('disputed', 'superseded', 'declined')), '[]'::jsonb),
   'who', coalesce((SELECT jsonb_agg(jsonb_build_object('name', w.name, 'role', w.role, 'contact_ref', w.contact_ref, 'cites', w.cites)
                    ORDER BY w.ord, w.name) FROM who w), '[]'::jsonb),
   'last_exchange', (SELECT jsonb_build_object('customer_said', inp.rec->'contact'->'last_customer_message',
@@ -600,7 +629,8 @@ AS $fn$
   'meta', (SELECT jsonb_build_object(
              'ledger', jsonb_build_object('status', led.status, 'generation_id', led.gen->'id', 'evidence_until', led.gen->'evidence_until',
                          'reader', led.gen->'reader', 'items', led.items, 'hidden_items', led.hidden, 'unread_rows', led.unread,
-                         'needs_rebuild', led.hidden > 0, 'stale', led.hidden > 0 OR coalesce(led.unread, 0) > 0),
+                         'needs_rebuild', led.hidden - led.hidden_locked > 0,
+                         'stale', led.hidden - led.hidden_locked > 0 OR coalesce(led.unread, 0) > 0),
              'sources', coalesce(inp.meta->'sources', '{}'::jsonb), 'evidence_rows', coalesce((inp.meta->>'evidence_rows')::int, 0),
              'built_at', now())
            FROM inp, led)
@@ -647,13 +677,18 @@ AS $fn$
      WHERE x.job_id = p_job_id AND upper(coalesce(x.invoice_type, 'ACCREC')) = 'ACCREC'
        AND upper(coalesce(x.status, '')) IN ('AUTHORISED', 'SUBMITTED', 'PAID') AND coalesce(x.created_at, '-infinity'::timestamptz) <= p_as_of
      UNION ALL
+     -- a payment closes only when the invoice is cleared: the payment that cleared it
      SELECT jsonb_build_object('closes_on', 'payment', 'about_key', 'invoice:' || lower(coalesce(nullif(btrim(x.invoice_number), ''), 'id-' || left(x.id::text, 8))),
-            'at', to_timestamp(substring(p->>'Date' FROM '^/Date\((-?[0-9]+)')::numeric / 1000), 't', 'xero_invoices', 'id', x.id,
-            'what', 'Payment ' || to_char(nullif(p->>'Amount', '')::numeric, 'FM$999,999,990.00') || ' received on ' || coalesce(x.invoice_number, 'an invoice'))
+            'at', pc.at, 't', 'xero_invoices', 'id', x.id,
+            'what', 'Invoice ' || coalesce(x.invoice_number, 'without a number') || ' paid in full')
      FROM public.xero_invoices x
-     CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(x.raw_json->'Payments') = 'array' THEN x.raw_json->'Payments' ELSE '[]'::jsonb END) p
-     WHERE x.job_id = p_job_id AND upper(coalesce(x.invoice_type, 'ACCREC')) = 'ACCREC' AND p->>'Date' ~ '^/Date\(-?[0-9]+'
-       AND to_timestamp(substring(p->>'Date' FROM '^/Date\((-?[0-9]+)')::numeric / 1000) <= p_as_of
+     CROSS JOIN LATERAL (
+      SELECT coalesce(max(to_timestamp(substring(p->>'Date' FROM '^/Date\((-?[0-9]+)')::numeric / 1000)),
+                      x.fully_paid_on::timestamp AT TIME ZONE 'Australia/Perth') AS at
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(x.raw_json->'Payments') = 'array' THEN x.raw_json->'Payments' ELSE '[]'::jsonb END) p
+      WHERE p->>'Date' ~ '^/Date\(-?[0-9]+') pc
+     WHERE x.job_id = p_job_id AND upper(coalesce(x.invoice_type, 'ACCREC')) = 'ACCREC' AND upper(coalesce(x.status, '')) = 'PAID'
+       AND pc.at <= p_as_of
      UNION ALL
      SELECT jsonb_build_object('closes_on', 'booking_made', 'about_key', 'booking:' || a.scheduled_date, 'at', a.created_at,
             't', 'job_assignments', 'id', a.id, 'what', 'Booking made for ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY'))

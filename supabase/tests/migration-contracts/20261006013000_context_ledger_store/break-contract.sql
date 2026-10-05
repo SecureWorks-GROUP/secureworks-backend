@@ -5,7 +5,7 @@
 CREATE OR REPLACE FUNCTION public.reserve_context_model_call(p_phase text,p_run_id uuid,p_lease_token uuid)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE v_now timestamptz; v_date date; v_ordinal integer; v_id uuid; r public.context_extraction_runs;
- v_ledger public.context_ledger_settings; v_pol jsonb; v_calls integer; v_reserve_day integer; v_reserve_morning integer;
+ v_ledger_mode text; v_ledger_calls integer; v_pol jsonb; v_calls integer; v_reserve_day integer; v_reserve_morning integer;
 BEGIN
  IF p_phase IS NULL OR p_phase NOT IN ('attribution','extraction','bucket','vision','ledger')
  OR (p_run_id IS NULL) <> (p_lease_token IS NULL)
@@ -40,12 +40,12 @@ BEGIN
  -- and never inside the live reserve (the same line the catch-up backlog
  -- stops at, all day and before noon).
  IF p_phase='ledger' THEN
-  SELECT * INTO v_ledger FROM public.context_ledger_settings WHERE id;
-  IF v_ledger.id IS NULL OR v_ledger.mode='off' THEN RETURN jsonb_build_object('outcome','ledger_off'); END IF;
-  IF (SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=v_date AND phase='ledger')>=v_ledger.calls_per_day
-  THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','ledger_calls_per_day','run_date',v_date,'limit',v_ledger.calls_per_day); END IF;
+  SELECT st.mode, st.calls_per_day, st.live_reserve_calls, st.live_reserve_calls_morning
+  INTO v_ledger_mode, v_ledger_calls, v_reserve_day, v_reserve_morning FROM public.context_ledger_settings st WHERE st.id;
+  IF v_ledger_mode IS NULL OR v_ledger_mode='off' THEN RETURN jsonb_build_object('outcome','ledger_off'); END IF;
+  IF (SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=v_date AND phase='ledger')>=v_ledger_calls
+  THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','ledger_calls_per_day','run_date',v_date,'limit',v_ledger_calls); END IF;
   v_pol := public.context_cadence_policy();
-  v_reserve_day := v_ledger.live_reserve_calls; v_reserve_morning := v_ledger.live_reserve_calls_morning;
   SELECT count(*) INTO v_calls FROM public.context_model_call_reservations WHERE run_date=v_date;
  END IF;
  -- B-5b: vision only while the job reads keep their share, and within its own daily cap.

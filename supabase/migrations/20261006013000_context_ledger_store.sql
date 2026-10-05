@@ -81,7 +81,7 @@ BEGIN
  -- The one replaced function: the live vision body, or this migration's (re-apply).
  FOR x IN SELECT * FROM (VALUES
   ('public.reserve_context_model_call(text,uuid,uuid)',
-   ARRAY['f50de57b906f28fc9b5b286821d64cb1','1703202c9f194072ea031639004a5f06'])
+   ARRAY['f50de57b906f28fc9b5b286821d64cb1','28545c710b6234b76ba25eb09093fa39'])
  ) AS v(sig, accepted) LOOP
   live := NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
@@ -109,7 +109,7 @@ BEGIN
   END IF;
  END LOOP;
  -- The settings this store reads beyond the first cut: the rollout list and the ledger's own live reserve.
- FOREACH f IN ARRAY ARRAY['job_ids', 'live_reserve_calls', 'live_reserve_calls_morning'] LOOP
+ FOREACH f IN ARRAY ARRAY['job_ids', 'live_reserve_calls', 'live_reserve_calls_morning', 'backfill_from_hour', 'backfill_to_hour'] LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.context_ledger_settings')
     AND a.attname = f AND NOT a.attisdropped) THEN
    problems := problems || format('public.context_ledger_settings.%s missing (apply the ledger model 20261006010000 as it is now)', f);
@@ -139,7 +139,7 @@ BEGIN
    'context_ledger_judge','context_ledger_due','context_ledger_claim','context_ledger_packet','context_ledger_cite','context_ledger_check_item',
    'context_ledger_write','context_ledger_carry_forward','context_ledger_promote','context_ledger_finish',
    'context_ledger_person_edit','context_ledger_checks_pass','context_ledger_promote_shadow','context_ledger_failures',
-   'context_ledger_budget') LOOP
+   'context_ledger_budget','context_ledger_backfill_open') LOOP
   IF x.c NOT LIKE 'Context ledger store%' THEN
    problems := problems || format('%s exists and is not this migration''s', x.sig);
   END IF;
@@ -185,7 +185,7 @@ END $chk$;
 CREATE OR REPLACE FUNCTION public.reserve_context_model_call(p_phase text,p_run_id uuid,p_lease_token uuid)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
 DECLARE v_now timestamptz; v_date date; v_ordinal integer; v_id uuid; r public.context_extraction_runs;
- v_ledger public.context_ledger_settings; v_pol jsonb; v_calls integer; v_reserve_day integer; v_reserve_morning integer;
+ v_ledger_mode text; v_ledger_calls integer; v_pol jsonb; v_calls integer; v_reserve_day integer; v_reserve_morning integer;
 BEGIN
  IF p_phase IS NULL OR p_phase NOT IN ('attribution','extraction','bucket','vision','ledger')
  OR (p_run_id IS NULL) <> (p_lease_token IS NULL)
@@ -220,12 +220,13 @@ BEGIN
  -- and never inside its own live reserve (context_ledger_settings, all day and
  -- before noon), whatever reserve the fact backlog keeps.
  IF p_phase='ledger' THEN
-  SELECT * INTO v_ledger FROM public.context_ledger_settings WHERE id;
-  IF v_ledger.id IS NULL OR v_ledger.mode='off' THEN RETURN jsonb_build_object('outcome','ledger_off'); END IF;
-  IF (SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=v_date AND phase='ledger')>=v_ledger.calls_per_day
-  THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','ledger_calls_per_day','run_date',v_date,'limit',v_ledger.calls_per_day); END IF;
+  -- plain variables, read only here: no other phase depends on the ledger table
+  SELECT st.mode, st.calls_per_day, st.live_reserve_calls, st.live_reserve_calls_morning
+  INTO v_ledger_mode, v_ledger_calls, v_reserve_day, v_reserve_morning FROM public.context_ledger_settings st WHERE st.id;
+  IF v_ledger_mode IS NULL OR v_ledger_mode='off' THEN RETURN jsonb_build_object('outcome','ledger_off'); END IF;
+  IF (SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=v_date AND phase='ledger')>=v_ledger_calls
+  THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','ledger_calls_per_day','run_date',v_date,'limit',v_ledger_calls); END IF;
   v_pol := public.context_cadence_policy();
-  v_reserve_day := v_ledger.live_reserve_calls; v_reserve_morning := v_ledger.live_reserve_calls_morning;
   SELECT count(*) INTO v_calls FROM public.context_model_call_reservations WHERE run_date=v_date;
   IF v_calls>=(v_pol->>'model_call_cap')::integer-v_reserve_day
   THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','live_reserve','run_date',v_date,
@@ -259,26 +260,29 @@ CREATE OR REPLACE FUNCTION public.context_ledger_budget()
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE s public.context_ledger_settings; v_pol jsonb; v_now timestamptz := clock_timestamp(); v_local timestamp; v_date date;
  v_total integer; v_max integer; v_ledger integer; r_cap integer; r_day integer; r_live integer; r_morning integer;
- v_left integer; v_reason text; v_midnight timestamptz; v_resets timestamptz;
+ v_left integer; v_reason text; v_midnight timestamptz; v_resets timestamptz; v_window jsonb;
 BEGIN
  v_local := v_now AT TIME ZONE 'Australia/Perth';
  v_date := v_local::date;
  v_midnight := (v_date + 1)::timestamp AT TIME ZONE 'Australia/Perth';
  SELECT * INTO s FROM public.context_ledger_settings WHERE id;
+ -- the backfill hours: backfills and rebuilds wait outside them, updates never do
+ v_window := jsonb_build_object('backfill_window', jsonb_build_object('from_hour', s.backfill_from_hour, 'to_hour', s.backfill_to_hour,
+  'open', public.context_ledger_backfill_open(s.backfill_from_hour, s.backfill_to_hour, v_now)));
  -- The admission's own order: lane, the 400 cap, the switch, the ledger's
  -- daily ceiling, its live reserve all day, then before morning_until.
  IF NOT public.automation_lane_enabled('extraction') THEN
-  RETURN jsonb_build_object('mode', coalesce(s.mode, 'off'), 'lane_on', false, 'calls_left', 0, 'reason', 'lane_off', 'resets_at', NULL);
+  RETURN jsonb_build_object('mode', coalesce(s.mode, 'off'), 'lane_on', false, 'calls_left', 0, 'reason', 'lane_off', 'resets_at', NULL) || v_window;
  END IF;
  v_pol := public.context_cadence_policy();
  SELECT count(*)::integer, coalesce(max(m.ordinal), 0)::integer, (count(*) FILTER (WHERE m.phase = 'ledger'))::integer
  INTO v_total, v_max, v_ledger FROM public.context_model_call_reservations m WHERE m.run_date = v_date;
  r_cap := 400 - v_max;
  IF r_cap <= 0 THEN
-  RETURN jsonb_build_object('mode', coalesce(s.mode, 'off'), 'lane_on', true, 'calls_left', 0, 'reason', 'cap', 'resets_at', v_midnight);
+  RETURN jsonb_build_object('mode', coalesce(s.mode, 'off'), 'lane_on', true, 'calls_left', 0, 'reason', 'cap', 'resets_at', v_midnight) || v_window;
  END IF;
  IF s.id IS NULL OR s.mode = 'off' THEN
-  RETURN jsonb_build_object('mode', 'off', 'lane_on', true, 'calls_left', 0, 'reason', 'ledger_off', 'resets_at', NULL);
+  RETURN jsonb_build_object('mode', 'off', 'lane_on', true, 'calls_left', 0, 'reason', 'ledger_off', 'resets_at', NULL) || v_window;
  END IF;
  r_day := s.calls_per_day - v_ledger;
  r_live := ((v_pol ->> 'model_call_cap')::integer - s.live_reserve_calls) - v_total;
@@ -292,10 +296,10 @@ BEGIN
  -- every other line at the next Perth midnight.
  v_resets := CASE WHEN r_morning IS NOT NULL AND r_morning <= least(r_cap, r_day, r_live)
   THEN (v_date + (v_pol ->> 'morning_until')::time) AT TIME ZONE 'Australia/Perth' ELSE v_midnight END;
- RETURN jsonb_build_object('mode', s.mode, 'lane_on', true, 'calls_left', v_left, 'reason', v_reason, 'resets_at', v_resets);
+ RETURN jsonb_build_object('mode', s.mode, 'lane_on', true, 'calls_left', v_left, 'reason', v_reason, 'resets_at', v_resets) || v_window;
 END $$;
 COMMENT ON FUNCTION public.context_ledger_budget() IS
- 'Context ledger store (20261006013000): the ledger''s budget now, as reserve_context_model_call''s ledger branch would answer: {mode, lane_on, calls_left, reason, resets_at}. calls_left is the smallest of what is left under the 400 cap, the ledger''s calls_per_day, its own live reserve line (model_call_cap less live_reserve_calls) and, before morning_until, its morning line (morning_cap less live_reserve_calls_morning). reason, when nothing is left, in the admission''s order: lane_off, cap, ledger_off, ledger_calls_per_day, live_reserve, live_reserve_morning; null while calls are left. resets_at: morning_until when the morning line binds, else the next Perth midnight; null when switched off. Service role only.';
+ 'Context ledger store (20261006013000): the ledger''s budget now, as reserve_context_model_call''s ledger branch would answer: {mode, lane_on, calls_left, reason, resets_at}. calls_left is the smallest of what is left under the 400 cap, the ledger''s calls_per_day, its own live reserve line (model_call_cap less live_reserve_calls) and, before morning_until, its morning line (morning_cap less live_reserve_calls_morning). reason, when nothing is left, in the admission''s order: lane_off, cap, ledger_off, ledger_calls_per_day, live_reserve, live_reserve_morning; null while calls are left. resets_at: morning_until when the morning line binds, else the next Perth midnight; null when switched off. backfill_window: {from_hour, to_hour, open} (Perth; both null = any time): backfills and rebuilds wait outside it, updates never do. Service role only.';
 
 -- 3. Write receipts: one row per distinct write request, so a retried write
 -- returns its first answer and finish can count refusals.
@@ -376,6 +380,22 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 COMMENT ON FUNCTION public.context_ledger_checks_pass(jsonb) IS
  'Context ledger store (20261006013000): the one promotion verdict, a generation''s stored checks.passed (finish computes it from both sides'' refusals over what was proposed). Read by finish, context_ledger_promote_shadow, the judge and the scorecard. Service role only.';
+
+-- Whether an instant falls in the backfill hours (Perth): from_hour inclusive,
+-- to_hour exclusive, wrapping midnight when from_hour > to_hour; no hours set =
+-- any time. The judge holds backfills and rebuilds outside them; the budget
+-- shows them.
+CREATE OR REPLACE FUNCTION public.context_ledger_backfill_open(p_from smallint, p_to smallint, p_at timestamptz) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+ SELECT CASE WHEN p_from IS NULL OR p_to IS NULL THEN true
+  WHEN p_from OPERATOR(pg_catalog.<) p_to
+   THEN extract(hour FROM p_at AT TIME ZONE 'Australia/Perth') OPERATOR(pg_catalog.>=) p_from
+    AND extract(hour FROM p_at AT TIME ZONE 'Australia/Perth') OPERATOR(pg_catalog.<) p_to
+  ELSE extract(hour FROM p_at AT TIME ZONE 'Australia/Perth') OPERATOR(pg_catalog.>=) p_from
+    OR extract(hour FROM p_at AT TIME ZONE 'Australia/Perth') OPERATOR(pg_catalog.<) p_to END
+$$;
+COMMENT ON FUNCTION public.context_ledger_backfill_open(smallint, smallint, timestamptz) IS
+ 'Context ledger store (20261006013000): whether an instant is inside the ledger''s backfill hours (context_ledger_settings.backfill_from_hour inclusive to backfill_to_hour exclusive, Perth, wrapping midnight; both null = any time). Read by the judge and the budget. Service role only.';
 
 -- 5. The evidence of a set of jobs. One definition for due, packet and write.
 CREATE OR REPLACE FUNCTION public.context_ledger_evidence_rows(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
@@ -562,7 +582,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT coalesce((SELECT st.mode FROM public.context_ledger_settings st WHERE st.id), 'off') AS mode,
    (SELECT st.reader FROM public.context_ledger_settings st WHERE st.id) AS reader,
    (SELECT st.job_ids FROM public.context_ledger_settings st WHERE st.id) AS job_ids,
-   public.automation_lane_enabled('extraction') AS lane
+   public.automation_lane_enabled('extraction') AS lane,
+   public.context_ledger_backfill_open((SELECT st.backfill_from_hour FROM public.context_ledger_settings st WHERE st.id),
+    (SELECT st.backfill_to_hour FROM public.context_ledger_settings st WHERE st.id), now()) AS window_open
  ), j AS (
   SELECT jb.id, jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost') AS live_job,
    coalesce(jb.metadata ->> 'do_not_schedule', '') NOT IN ('true', '1') AS schedulable
@@ -579,8 +601,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   FROM cur c JOIN public.context_ledger_generations gen ON gen.id = c.gid
  ), moved AS (
   -- An item of the current generation citing a business_events row that is
-  -- gone, on another job, or no longer admissible.
-  SELECT DISTINCT i.job_id FROM g JOIN public.context_ledger_items i ON i.generation_id = g.id
+  -- gone, on another job, or no longer admissible. A person-locked item is
+  -- left out: a rebuild carries it straight back, so it waits for a person
+  -- (the story says so) instead of looping.
+  SELECT DISTINCT i.job_id FROM g JOIN public.context_ledger_items i ON i.generation_id = g.id AND NOT i.person_locked
   CROSS JOIN LATERAL jsonb_array_elements(i.opened_by || coalesce(i.closed_by, '[]'::jsonb)) c(cite)
   LEFT JOIN public.business_events b ON c.cite ->> 'table' = 'business_events'
    AND b.id = CASE WHEN c.cite ->> 'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (c.cite ->> 'id')::uuid END
@@ -638,17 +662,20 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   LEFT JOIN moved m ON m.job_id = j.id LEFT JOIN answered a ON a.job_id = j.id LEFT JOIN late lt ON lt.job_id = j.id
   LEFT JOIN fail f ON f.job_id = j.id LEFT JOIN busy b ON b.job_id = j.id
  )
- SELECT d.job_id, d.blocked IS NULL AND d.reason IS NOT NULL,
+ SELECT d.job_id, d.blk IS NULL AND d.reason IS NOT NULL,
   CASE WHEN d.reason IS NULL THEN NULL WHEN d.reason = 'never_read' THEN 'backfill' WHEN d.reason = 'new_evidence' THEN 'update'
    ELSE 'rebuild' END,
   d.reason,
   CASE d.reason WHEN 'citation_moved' THEN 1 WHEN 'new_evidence' THEN 1 WHEN 'late_evidence' THEN 1 WHEN 'never_read' THEN 2
    WHEN 'reader_changed' THEN 3 WHEN 'checks_failed' THEN 3 END,
-  d.newest, d.n, d.gid, d.blocked
- FROM judged d
+  d.newest, d.n, d.gid, d.blk
+ FROM (  -- backfills and rebuilds wait for the backfill hours; an update is never held
+  SELECT d0.*, coalesce(d0.blocked, CASE WHEN NOT s.window_open AND d0.reason IS NOT NULL AND d0.reason <> 'new_evidence'
+                                         THEN 'outside_window' END) AS blk
+  FROM judged d0 CROSS JOIN s) d
 $$;
 COMMENT ON FUNCTION public.context_ledger_judge(uuid[]) IS
- 'Context ledger store (20261006013000): the one ledger due judgement per job: kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours). Service role only.';
+ 'Context ledger store (20261006013000): the one ledger due judgement per job: kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours), outside_window (a backfill or rebuild outside the settings backfill hours; an update is never held). A person-locked item is never a moved citation (a rebuild would carry it back). Service role only.';
 
 -- 8. Jobs due a ledger read now.
 CREATE OR REPLACE FUNCTION public.context_ledger_due(p_limit integer DEFAULT 20)
@@ -803,6 +830,7 @@ RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public,
 DECLARE v_table text; v_id uuid; v_excerpt text; v_norm text; e public.business_events; v_text text; v_at timestamptz;
  v_cmail text; v_job uuid; v_found boolean; i record; v_ours boolean := false; v_customer boolean := false;
  v_call_note boolean := false; v_internal boolean := false; v_record boolean := false; v_worded boolean := false;
+ v_subject text; v_body text; v_close_at timestamptz;
 BEGIN
  IF p_cite IS NULL OR jsonb_typeof(p_cite) <> 'object'
   OR EXISTS (SELECT 1 FROM jsonb_object_keys(p_cite) k WHERE k NOT IN ('table', 'id', 'excerpt'))
@@ -828,9 +856,10 @@ BEGIN
   IF NOT public.context_event_source_admissible(e) THEN
    RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible', 'detail', v_table || ':' || v_id);
   END IF;
-  v_text := public.context_event_text(e);
-  v_worded := btrim(v_text) <> '';
-  v_text := concat_ws(' ', nullif(btrim(e.payload ->> 'subject'), ''), v_text);
+  v_body := public.context_event_text(e);
+  v_worded := btrim(v_body) <> '';
+  v_subject := nullif(btrim(e.payload ->> 'subject'), '');
+  v_text := concat_ws(' ', v_subject, v_body);
   v_at := coalesce(e.event_at, e.occurred_at);
   v_customer := (e.metadata #>> '{party_roles,sender_role}' = 'customer' AND e.metadata #>> '{party_roles,basis}' = 'job_customer')
    OR (NOT coalesce(e.metadata ? 'party_roles', false) AND e.event_type LIKE 'client.%' AND e.direction = 'inbound');
@@ -858,7 +887,8 @@ BEGIN
     AND lower(btrim(coalesce(b.payload ->> 'from', b.payload ->> 'from_email'))) = lower(btrim(i.from_email))) THEN
    RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible', 'detail', v_table || ':' || v_id);
   END IF;
-  v_text := concat_ws(' ', nullif(btrim(i.subject), ''), i.body_preview);
+  v_subject := nullif(btrim(i.subject), ''); v_body := i.body_preview;
+  v_text := concat_ws(' ', v_subject, v_body);
   v_worded := btrim(coalesce(v_text, '')) <> '';
   v_at := i.received_at;
   v_customer := v_cmail IS NOT NULL AND lower(btrim(i.from_email)) = v_cmail;
@@ -866,36 +896,52 @@ BEGIN
  ELSE
   -- A record row: on this job; its time is when the record was made or sent.
   v_record := true; v_ours := true;
+  -- v_close_at: when the record can close an item; null when it cannot (a
+  -- document never sent, an invoice not issued, a booking nobody attended)
   IF v_table = 'job_documents' THEN
-   SELECT d.job_id, coalesce(d.sent_at, d.created_at), true INTO v_job, v_at, v_found FROM public.job_documents d WHERE d.id = v_id;
+   SELECT d.job_id, coalesce(d.sent_at, d.created_at), d.sent_at, true INTO v_job, v_at, v_close_at, v_found
+   FROM public.job_documents d WHERE d.id = v_id;
   ELSIF v_table = 'xero_invoices' THEN
-   SELECT x.job_id, coalesce((x.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), x.created_at), true INTO v_job, v_at, v_found
-   FROM public.xero_invoices x WHERE x.id = v_id;
+   SELECT x.job_id, coalesce((x.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), x.created_at),
+    CASE WHEN upper(coalesce(x.status, '')) IN ('AUTHORISED', 'SUBMITTED', 'PAID')
+         THEN coalesce((x.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), x.created_at) END, true
+   INTO v_job, v_at, v_close_at, v_found FROM public.xero_invoices x WHERE x.id = v_id;
   ELSIF v_table = 'job_assignments' THEN
-   SELECT a.job_id, a.created_at, true INTO v_job, v_at, v_found FROM public.job_assignments a WHERE a.id = v_id;
+   SELECT a.job_id, a.created_at, coalesce(a.completed_at, a.started_at), true INTO v_job, v_at, v_close_at, v_found
+   FROM public.job_assignments a WHERE a.id = v_id;
   ELSIF v_table = 'job_events' THEN
-   SELECT je.job_id, je.created_at, true INTO v_job, v_at, v_found FROM public.job_events je WHERE je.id = v_id;
+   SELECT je.job_id, je.created_at, je.created_at, true INTO v_job, v_at, v_close_at, v_found FROM public.job_events je WHERE je.id = v_id;
   ELSE
-   SELECT ee.job_id, coalesce(ee.sent_at, ee.created_at), true INTO v_job, v_at, v_found FROM public.email_events ee WHERE ee.id = v_id;
+   SELECT ee.job_id, coalesce(ee.sent_at, ee.created_at), coalesce(ee.sent_at, ee.created_at), true INTO v_job, v_at, v_close_at, v_found
+   FROM public.email_events ee WHERE ee.id = v_id;
   END IF;
   IF NOT coalesce(v_found, false) THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_missing', 'detail', v_table || ':' || v_id); END IF;
   IF v_job IS DISTINCT FROM p_job_id THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_off_job', 'detail', v_table || ':' || v_id); END IF;
   IF v_at IS NULL THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible', 'detail', v_table || ':' || v_id); END IF;
  END IF;
  IF NOT v_record THEN
+  v_close_at := v_at;
   IF v_worded AND v_norm = '' THEN
    RETURN jsonb_build_object('ok', false, 'code', 'excerpt_required', 'detail', v_table || ':' || v_id);
   END IF;
   IF v_norm <> '' AND position(v_norm IN public.context_ledger_text_norm(v_text)) = 0 THEN
    RETURN jsonb_build_object('ok', false, 'code', 'excerpt_not_verbatim', 'detail', v_table || ':' || v_id);
   END IF;
+  -- A quote is at least 12 characters or 3 words, unless it is the whole row
+  -- (or its whole subject or body) because the row is shorter.
+  IF v_norm <> '' AND length(v_norm) < 12 AND coalesce(array_length(regexp_split_to_array(v_norm, '\s+'), 1), 0) < 3
+   AND v_norm IS DISTINCT FROM public.context_ledger_text_norm(v_text)
+   AND v_norm IS DISTINCT FROM public.context_ledger_text_norm(v_body)
+   AND v_norm IS DISTINCT FROM public.context_ledger_text_norm(v_subject) THEN
+   RETURN jsonb_build_object('ok', false, 'code', 'excerpt_too_short', 'detail', v_table || ':' || v_id);
+  END IF;
  END IF;
  RETURN jsonb_build_object('ok', true, 'cite', jsonb_build_object('table', v_table, 'id', v_id::text, 'excerpt', v_excerpt),
-  'at', v_at, 'customer_sender', v_customer, 'ours', v_ours, 'call_or_note', v_call_note, 'internal_text', v_internal,
-  'record', v_record, 'worded', v_worded);
+  'at', v_at, 'close_at', v_close_at, 'customer_sender', v_customer, 'ours', v_ours, 'call_or_note', v_call_note,
+  'internal_text', v_internal, 'record', v_record, 'worded', v_worded);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job and admissible (linked, not retracted); an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text. Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job and admissible (linked, not retracted); an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: completed_at or started_at; null when it cannot). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)
@@ -903,6 +949,7 @@ RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public,
 DECLARE v_type text; v_status text; v_from text; v_to text; v_what text; v_about text; v_due date; v_basis text;
  v_open jsonb := '[]'; v_close jsonb := '[]'; c jsonb; chk jsonb; n integer := 0; v_opened_at timestamptz; v_closed_at timestamptz;
  v_any_customer boolean := false; v_any_us boolean := false; v_any_external boolean := false; v_due_ok boolean := false;
+ v_first_customer boolean; v_first_us boolean; v_close_at timestamptz;
  v_key text; v_first text; v_facts jsonb := '[]'; f jsonb; v_supported date;
  roles constant text[] := ARRAY['us','crew','customer','supplier','insurer_builder','third_party','unknown'];
 BEGIN
@@ -995,6 +1042,10 @@ BEGIN
   v_open := v_open || jsonb_build_array(chk -> 'cite');
   v_facts := v_facts || jsonb_build_array(chk);
   v_opened_at := least(v_opened_at, (chk ->> 'at')::timestamptz);
+  IF n = 1 THEN  -- the speaker is whoever sent the first opening citation
+   v_first_customer := (chk ->> 'customer_sender')::boolean;
+   v_first_us := (chk ->> 'ours')::boolean OR (chk ->> 'call_or_note')::boolean OR (chk ->> 'record')::boolean;
+  END IF;
   v_any_customer := v_any_customer OR (chk ->> 'customer_sender')::boolean;
   v_any_us := v_any_us OR (chk ->> 'ours')::boolean OR (chk ->> 'call_or_note')::boolean OR (chk ->> 'record')::boolean;
   v_any_external := v_any_external OR NOT (chk ->> 'internal_text')::boolean;
@@ -1011,11 +1062,20 @@ BEGIN
   IF NOT (chk ->> 'ok')::boolean THEN
    RETURN jsonb_build_object('ok', false, 'code', chk ->> 'code', 'detail', 'closed_by[' || n || '] ' || coalesce(chk ->> 'detail', ''));
   END IF;
-  IF (chk ->> 'at')::timestamptz < v_opened_at THEN
+  -- Only an issued or sent record closes: no draft invoice, unsent document or
+  -- unattended booking; never the opening row itself; a request strictly after it.
+  v_close_at := (chk ->> 'close_at')::timestamptz;
+  IF v_close_at IS NULL THEN
+   RETURN jsonb_build_object('ok', false, 'code', 'closing_not_issued', 'detail', 'closed_by[' || n || '] ' || (chk #>> '{cite,table}'));
+  END IF;
+  IF v_open @> jsonb_build_array(jsonb_build_object('table', chk #>> '{cite,table}', 'id', chk #>> '{cite,id}')) THEN
+   RETURN jsonb_build_object('ok', false, 'code', 'closing_is_opening', 'detail', 'closed_by[' || n || ']');
+  END IF;
+  IF v_close_at < v_opened_at OR (v_type = 'request' AND v_close_at <= v_opened_at) THEN
    RETURN jsonb_build_object('ok', false, 'code', 'closing_before_opening', 'detail', 'closed_by[' || n || ']');
   END IF;
   v_close := v_close || jsonb_build_array(chk -> 'cite');
-  v_closed_at := greatest(v_closed_at, (chk ->> 'at')::timestamptz);
+  v_closed_at := greatest(v_closed_at, v_close_at);
  END LOOP;
  IF v_status IN ('closed','declined') AND jsonb_array_length(v_close) = 0 THEN
   RETURN jsonb_build_object('ok', false, 'code', 'closed_without_evidence', 'detail', v_status || ' needs closed_by');
@@ -1025,11 +1085,11 @@ BEGIN
  END IF;
  -- Who said it (the model only; a person's own item is their word).
  IF p_writer = 'model' THEN
-  IF v_from = 'customer' AND NOT v_any_customer THEN
-   RETURN jsonb_build_object('ok', false, 'code', 'speaker_not_customer', 'detail', 'no opening citation was sent by this job''s customer');
+  IF v_from = 'customer' AND NOT coalesce(v_first_customer, false) THEN
+   RETURN jsonb_build_object('ok', false, 'code', 'speaker_not_customer', 'detail', 'the first opening citation was not sent by this job''s customer');
   END IF;
-  IF v_from = 'us' AND NOT v_any_us THEN
-   RETURN jsonb_build_object('ok', false, 'code', 'speaker_not_us', 'detail', 'no opening citation is ours, a call, a note or a record');
+  IF v_from = 'us' AND NOT coalesce(v_first_us, false) THEN
+   RETURN jsonb_build_object('ok', false, 'code', 'speaker_not_us', 'detail', 'the first opening citation is not ours, a call, a note or a record');
   END IF;
   IF v_to = 'customer' AND NOT v_any_external THEN
    RETURN jsonb_build_object('ok', false, 'code', 'internal_to_customer', 'detail', 'every opening citation is a crew or staff internal text');
@@ -1062,7 +1122,7 @@ BEGIN
   'needs_reply', CASE WHEN jsonb_typeof(p_item -> 'needs_reply') = 'boolean' THEN (p_item ->> 'needs_reply')::boolean END, 'also_concerns', nullif(btrim(p_item ->> 'also_concerns'), '')));
 END $$;
 COMMENT ON FUNCTION public.context_ledger_check_item(uuid, jsonb, text, uuid, text) IS
- 'Context ledger store (20261006013000): checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it, every closing citation at or after the opening, speaker rules for the model (customer needs a citation the job''s customer sent; us needs ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it (context_supported_due_date). opened_at and closed_at come from the cited rows, never the input. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
+ 'Context ledger store (20261006013000): checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it; a closing citation must be able to close (close_at: no draft invoice, unsent document or unattended booking: closing_not_issued), may not be an opening citation (closing_is_opening) and is at or after the opening, strictly after for a request (closing_before_opening); speaker rules for the model on the first opening citation (customer: the job''s customer sent it; us: ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it (context_supported_due_date). opened_at and closed_at come from the cited rows, never the input. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
 
 -- 13. The write: custody for every item and transition.
 CREATE OR REPLACE FUNCTION public.context_ledger_write(p_run_id uuid, p_lease_token uuid, p_generation_id uuid,
@@ -1113,6 +1173,17 @@ BEGIN
    CONTINUE;
   END IF;
   v_cand := chk -> 'item';
+  -- A person's correction stands: the model may not write the same matter (same
+  -- type, same first opening citation) again, in an update or a rebuild.
+  IF EXISTS (SELECT 1 FROM public.context_ledger_items pl JOIN public.context_ledger_generations pg ON pg.id = pl.generation_id
+             WHERE pl.job_id = g.job_id AND pl.person_locked AND (pl.generation_id = g.id OR pg.status = 'live')
+               AND pl.item_type = v_cand ->> 'item_type'
+               AND pl.opened_by -> 0 ->> 'table' = v_cand -> 'opened_by' -> 0 ->> 'table'
+               AND pl.opened_by -> 0 ->> 'id' = v_cand -> 'opened_by' -> 0 ->> 'id') THEN
+   refused := refused || jsonb_build_array(jsonb_build_object('ref', v_cand ->> 'ref', 'code', 'person_locked',
+    'detail', 'a person corrected this matter'));
+   CONTINUE;
+  END IF;
   IF (v_cand ->> 'ref') = ANY(refs) THEN
    refused := refused || jsonb_build_array(jsonb_build_object('ref', v_cand ->> 'ref', 'code', 'duplicate_ref', 'detail', 'ref used twice in one write'));
    CONTINUE;
@@ -1229,9 +1300,21 @@ BEGIN
     n := n + 1;
     chk := public.context_ledger_cite(g.job_id, c);
     IF NOT (chk ->> 'ok')::boolean THEN v_code := chk ->> 'code'; v_detail := 'evidence[' || n || '] ' || coalesce(chk ->> 'detail', ''); EXIT; END IF;
-    IF (chk ->> 'at')::timestamptz < li.opened_at THEN v_code := 'evidence_older_than_item'; v_detail := 'evidence[' || n || ']'; EXIT; END IF;
+    IF tr ->> 'to_status' IN ('closed', 'declined') THEN
+     -- the same closing rules as an item's closed_by
+     IF chk ->> 'close_at' IS NULL THEN v_code := 'closing_not_issued'; v_detail := 'evidence[' || n || '] ' || (chk #>> '{cite,table}'); EXIT; END IF;
+     IF li.opened_by @> jsonb_build_array(jsonb_build_object('table', chk #>> '{cite,table}', 'id', chk #>> '{cite,id}')) THEN
+      v_code := 'closing_is_opening'; v_detail := 'evidence[' || n || ']'; EXIT;
+     END IF;
+     IF (chk ->> 'close_at')::timestamptz < li.opened_at OR (li.item_type = 'request' AND (chk ->> 'close_at')::timestamptz <= li.opened_at) THEN
+      v_code := 'evidence_older_than_item'; v_detail := 'evidence[' || n || ']'; EXIT;
+     END IF;
+     v_ev_at := greatest(v_ev_at, (chk ->> 'close_at')::timestamptz);
+    ELSE
+     IF (chk ->> 'at')::timestamptz < li.opened_at THEN v_code := 'evidence_older_than_item'; v_detail := 'evidence[' || n || ']'; EXIT; END IF;
+     v_ev_at := greatest(v_ev_at, (chk ->> 'at')::timestamptz);
+    END IF;
     v_ev := v_ev || jsonb_build_array(chk -> 'cite');
-    v_ev_at := greatest(v_ev_at, (chk ->> 'at')::timestamptz);
    END LOOP;
   END IF;
   IF v_code IS NULL AND tr ->> 'to_status' <> 'superseded' AND jsonb_array_length(v_ev) = 0 THEN
@@ -1268,7 +1351,7 @@ BEGIN
  RETURN v_result;
 END $$;
 COMMENT ON FUNCTION public.context_ledger_write(uuid, uuid, uuid, jsonb, jsonb, text) IS
- 'Context ledger store (20261006013000): writes a reader''s items and transitions into a generation under custody. The run must be a running ledger run holding its lease (else lease_lost), the lane on and the mode not off (else off), the generation this run''s building generation or, for an update run, the job''s current generation (else refused generation_mismatch), the reader the generation''s (reader_mismatch). Every item passes context_ledger_check_item, a fresh ref and item_key (duplicate_ref, duplicate_item), resolvable supersedes (supersedes_unresolved, superseded_without_replacement); accepted items are inserted whole with a transition, refused ones reported with a code. Transitions refuse person_locked, unknown_item, no_change, evidence_missing (every status but superseded needs evidence), evidence_older_than_item and any citation refusal. A repeated identical request in the same run returns its first answer (replayed true). written_by model:<reader>. Service role only.';
+ 'Context ledger store (20261006013000): writes a reader''s items and transitions into a generation under custody. The run must be a running ledger run holding its lease (else lease_lost), the lane on and the mode not off (else off), the generation this run''s building generation or, for an update run, the job''s current generation (else refused generation_mismatch), the reader the generation''s (reader_mismatch). Every item passes context_ledger_check_item, is not a person-corrected matter (person_locked: the same type and first opening citation as a person-locked item of this generation or the live one), a fresh ref and item_key (duplicate_ref, duplicate_item), resolvable supersedes (supersedes_unresolved, superseded_without_replacement); accepted items are inserted whole with a transition, refused ones reported with a code. Transitions refuse person_locked, unknown_item, no_change, evidence_missing (every status but superseded needs evidence), evidence_older_than_item, and for closed or declined closing_not_issued and closing_is_opening (the item''s closing rules), and any citation refusal. A repeated identical request in the same run returns its first answer (replayed true). written_by model:<reader>. Service role only.';
 
 -- 14. People's corrections follow the ledger: every person-locked item of one
 -- generation is copied into another (same key, written_by kept); a model item
@@ -1613,7 +1696,7 @@ BEGIN
   'public.context_ledger_promote(uuid,text)','public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)',
   'public.context_ledger_person_edit(uuid,uuid,text,text,text,jsonb)','public.context_ledger_checks_pass(jsonb)',
   'public.context_ledger_promote_shadow(text,uuid[],integer)','public.context_ledger_failures(uuid[])',
-  'public.context_ledger_budget()'] LOOP
+  'public.context_ledger_budget()','public.context_ledger_backfill_open(smallint,smallint,timestamptz)'] LOOP
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f);
   EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', f);
  END LOOP;

@@ -176,6 +176,10 @@ CREATE TABLE IF NOT EXISTS public.context_ledger_settings (
           ELSE array_position(job_ids, NULL) IS NULL AND cardinality(job_ids) <= 500 END),
  live_reserve_calls integer NOT NULL DEFAULT 100 CHECK (live_reserve_calls BETWEEN 0 AND 400),
  live_reserve_calls_morning integer NOT NULL DEFAULT 100 CHECK (live_reserve_calls_morning BETWEEN 0 AND 400),
+ backfill_from_hour smallint CHECK (backfill_from_hour BETWEEN 0 AND 23),
+ backfill_to_hour smallint CHECK (backfill_to_hour BETWEEN 0 AND 23),
+ CONSTRAINT context_ledger_settings_backfill_window_check CHECK ((backfill_from_hour IS NULL AND backfill_to_hour IS NULL)
+  OR (backfill_from_hour IS NOT NULL AND backfill_to_hour IS NOT NULL AND backfill_from_hour <> backfill_to_hour)),
  updated_at timestamptz NOT NULL DEFAULT now(),
  updated_by text,
  note text
@@ -188,6 +192,10 @@ COMMENT ON COLUMN public.context_ledger_settings.live_reserve_calls IS
  'Context ledger: calls the ledger always leaves free for live fact reads, all day (20261006010000). The ledger stops at model_call_cap less this, whatever the fact backlog''s own reserve (context_cadence_settings) is. 0 to 400; default 100.';
 COMMENT ON COLUMN public.context_ledger_settings.live_reserve_calls_morning IS
  'Context ledger: calls the ledger always leaves free for live fact reads before morning_until (20261006010000). Before then the ledger also stops at morning_cap less this. 0 to 400; default 100.';
+COMMENT ON COLUMN public.context_ledger_settings.backfill_from_hour IS
+ 'Context ledger: the start of the backfill hours (Perth, 0 to 23, inclusive), when backfills and rebuilds may run (20261006010000). Both null = any time; set both or neither; the window may wrap midnight (22 to 6). Updates are never held.';
+COMMENT ON COLUMN public.context_ledger_settings.backfill_to_hour IS
+ 'Context ledger: the end of the backfill hours (Perth, 0 to 23, exclusive) (20261006010000). Both null = any time; set both or neither; it differs from backfill_from_hour.';
 INSERT INTO public.context_ledger_settings (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
 
 -- 5. Access: service role only, read; writes only through the store functions.
