@@ -771,6 +771,7 @@ BEGIN
  PERFORM pg_temp.lg_item(gl, 'event:none:000000000003', 'info', p1, false, 'event');
  PERFORM pg_temp.lg_item(gl, 'request:none:000000000004', 'disputed', p1, true);
  UPDATE public.context_ledger_items SET phase = 'quote' WHERE generation_id = gl AND item_key = 'event:none:000000000003';
+ UPDATE public.context_ledger_items SET closes_on = 'reply' WHERE generation_id = gl AND item_key = 'request:none:000000000001';
  pk := public.context_ledger_packet(q, now() - interval '1 day');
  -- The late row (old mail placed on the job today) is read with every
  -- already-read row after it and the six before it; each row says whether the
@@ -783,10 +784,18 @@ BEGIN
   = ARRAY[true, true, true, true, true, true, false, true, true, true, false], 'already_read: ' || (pk -> 'evidence')::text);
  PERFORM pg_temp.lg_assert((SELECT array_agg(x ->> 'item_key' ORDER BY x ->> 'item_key') FROM jsonb_array_elements(pk -> 'open_items') x)
   = ARRAY['event:none:000000000003','request:none:000000000001','request:none:000000000004'], 'update open_items: open, disputed, in force');
- -- Each open item carries its phase (the reader caps phase notes per phase in an update).
- PERFORM pg_temp.lg_assert((SELECT bool_and(x ? 'phase') FROM jsonb_array_elements(pk -> 'open_items') x)
+ -- Each open item carries its phase (the reader caps phase notes per phase in an update),
+ -- its closes_on and its opening citations exactly as stored (a call log may close an
+ -- older item; a repeat of an older item is caught by its citations).
+ PERFORM pg_temp.lg_assert((SELECT bool_and(x ? 'phase' AND x ? 'closes_on' AND x ? 'opened_by') FROM jsonb_array_elements(pk -> 'open_items') x)
   AND (SELECT x ->> 'phase' FROM jsonb_array_elements(pk -> 'open_items') x WHERE x ->> 'item_key' = 'event:none:000000000003') = 'quote',
   'open_items carry phase: ' || (pk -> 'open_items')::text);
+ PERFORM pg_temp.lg_assert((SELECT bool_and(x -> 'opened_by' = i.opened_by AND (x -> 'closes_on') = to_jsonb(i.closes_on))
+   FROM jsonb_array_elements(pk -> 'open_items') x JOIN public.context_ledger_items i
+    ON i.item_key = x ->> 'item_key' AND i.generation_id = gl)
+  AND (SELECT x -> 'opened_by' -> 0 ? 'excerpt' AND x -> 'opened_by' -> 0 ->> 'table' = 'business_events' AND x ->> 'closes_on' = 'reply'
+       FROM jsonb_array_elements(pk -> 'open_items') x WHERE x ->> 'item_key' = 'request:none:000000000001'),
+  'open_items carry closes_on and opened_by as stored: ' || (pk -> 'open_items')::text);
  pk := public.context_ledger_packet(q);
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 12 AND jsonb_array_length(pk -> 'open_items') = 1
   AND pk -> 'open_items' -> 0 ->> 'item_key' = 'request:none:000000000004', 'a rebuild packet lists only person-locked items');
