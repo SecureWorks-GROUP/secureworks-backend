@@ -249,6 +249,13 @@ BEGIN
  IF t->>'key' <> 'R5_customer_wrote_last:b0000000-0000-4000-8000-000000000001' OR position('come Monday' IN t->>'why') = 0 THEN
   RAISE EXCEPTION 'story contract: R5 must be promoted to the top loop by the ledger request: %', t;
  END IF;
+ -- every loop names its object, so a reader can attach its items to it
+ IF t->>'about_key' IS DISTINCT FROM 'contact:customer-reply'
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE NOT l ? 'about_key')
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'R1_overdue:%' AND l->>'about_key' = 'invoice:inv-9001')
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE l->>'source' = 'ledger' AND l->>'about_key' = 'quote:rest-of-fence') THEN
+  RAISE EXCEPTION 'story contract: loops must carry about_key: %', s->'loops';
+ END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'request:%' OR l->>'key' LIKE 'claim:%';
  IF n <> 0 THEN RAISE EXCEPTION 'story contract: a ledger item about a record loop''s object was listed twice'; END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'R1_overdue:%' AND position('paid next week' IN l->>'why') > 0;

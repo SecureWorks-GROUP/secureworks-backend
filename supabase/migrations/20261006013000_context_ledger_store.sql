@@ -629,7 +629,7 @@ BEGIN
   SELECT g.id INTO v_gen FROM public.context_ledger_generations g WHERE g.job_id = p_job_id AND g.status = 'live';
  END IF;
  SELECT coalesce(jsonb_agg(jsonb_build_object('item_key', i.item_key, 'item_type', i.item_type, 'status', i.status, 'what', i.what,
-   'about_key', i.about_key, 'from_role', i.from_role, 'to_role', i.to_role, 'opened_at', i.opened_at,
+   'about_key', i.about_key, 'phase', i.phase, 'from_role', i.from_role, 'to_role', i.to_role, 'opened_at', i.opened_at,
    'person_locked', i.person_locked) ORDER BY i.opened_at, i.item_key), '[]'::jsonb)
  INTO v_open FROM public.context_ledger_items i
  WHERE v_gen IS NOT NULL AND i.generation_id = v_gen

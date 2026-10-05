@@ -718,12 +718,17 @@ BEGIN
  PERFORM pg_temp.lg_item(gl, 'request:none:000000000002', 'closed', p1);
  PERFORM pg_temp.lg_item(gl, 'event:none:000000000003', 'info', p1, false, 'event');
  PERFORM pg_temp.lg_item(gl, 'request:none:000000000004', 'disputed', p1, true);
+ UPDATE public.context_ledger_items SET phase = 'quote' WHERE generation_id = gl AND item_key = 'event:none:000000000003';
  pk := public.context_ledger_packet(q, now() - interval '1 day');
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 8, 'update window rows: ' || (pk ->> 'evidence_rows'));
  PERFORM pg_temp.lg_assert(pk -> 'evidence' -> 0 ->> 'text' = 'Old message 2' AND pk -> 'evidence' -> 6 ->> 'text' = 'Old message placed today'
   AND pk -> 'evidence' -> 7 ->> 'text' = 'New after the read', 'window starts six rows before the first new row');
  PERFORM pg_temp.lg_assert((SELECT array_agg(x ->> 'item_key' ORDER BY x ->> 'item_key') FROM jsonb_array_elements(pk -> 'open_items') x)
   = ARRAY['event:none:000000000003','request:none:000000000001','request:none:000000000004'], 'update open_items: open, disputed, in force');
+ -- Each open item carries its phase (the reader caps phase notes per phase in an update).
+ PERFORM pg_temp.lg_assert((SELECT bool_and(x ? 'phase') FROM jsonb_array_elements(pk -> 'open_items') x)
+  AND (SELECT x ->> 'phase' FROM jsonb_array_elements(pk -> 'open_items') x WHERE x ->> 'item_key' = 'event:none:000000000003') = 'quote',
+  'open_items carry phase: ' || (pk -> 'open_items')::text);
  pk := public.context_ledger_packet(q);
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 12 AND jsonb_array_length(pk -> 'open_items') = 1
   AND pk -> 'open_items' -> 0 ->> 'item_key' = 'request:none:000000000004', 'a rebuild packet lists only person-locked items');
