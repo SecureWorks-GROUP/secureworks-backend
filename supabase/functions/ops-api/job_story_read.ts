@@ -52,6 +52,22 @@ export function parseUuid(value: unknown, name: string): string | null {
   return value.toLowerCase();
 }
 
+/**
+ * A job number as an exact, case-insensitive ILIKE pattern: the LIKE
+ * wildcards `%` and `_` and the escape `\` are escaped. PostgREST also reads
+ * `*` as `%` and cannot escape it, so a number holding `*` is refused (no job
+ * number has one).
+ */
+export function exactJobNumberPattern(number: string): string {
+  if (number.includes("*")) {
+    throw new StoryReadError(
+      "invalid_job_number",
+      "job_number cannot contain *",
+    );
+  }
+  return number.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 /** One job by id, or by job number (case-insensitive, exact). */
 export async function resolveStoryJob(
   client: any,
@@ -69,12 +85,13 @@ export async function resolveStoryJob(
       "job_id or job_number is required",
     );
   }
+  // Refuse a number no exact pattern can express before touching the table.
+  const pattern = id ? null : exactJobNumberPattern(number!);
   const cols = "id, job_number, ghl_contact_id";
   const { data, error } = id
     ? await client.from("jobs").select(cols).eq("id", id).limit(1)
-    : await client.from("jobs").select(cols).ilike("job_number", number).limit(
-      1,
-    );
+    : await client.from("jobs").select(cols).ilike("job_number", pattern)
+      .limit(2);
   if (error) {
     throw new StoryReadError(
       "job_read_failed",
@@ -82,7 +99,23 @@ export async function resolveStoryJob(
       502,
     );
   }
-  const row = Array.isArray(data) ? data[0] : data;
+  const rows: any[] = Array.isArray(data) ? data : data ? [data] : [];
+  // By number, only an exact case-insensitive match counts, whatever the
+  // pattern matched; two would be ambiguous (job numbers are unique today).
+  const matches = id
+    ? rows.slice(0, 1)
+    : rows.filter((r) =>
+      typeof r?.job_number === "string" &&
+      r.job_number.toUpperCase() === number!.toUpperCase()
+    );
+  if (matches.length > 1) {
+    throw new StoryReadError(
+      "job_number_ambiguous",
+      `more than one job is numbered ${number}`,
+      409,
+    );
+  }
+  const row = matches[0];
   if (!row) {
     throw new StoryReadError("job_not_found", `no job ${id || number}`, 404);
   }

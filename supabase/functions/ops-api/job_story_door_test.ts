@@ -15,6 +15,7 @@ import {
 import {
   buildStoryDossier,
   clientStoryAction,
+  exactJobNumberPattern,
   jobStoryAction,
   readJobStory,
   STORY_SECTIONS_VERSION,
@@ -71,10 +72,25 @@ const CLIENT = {
   jobs: [{ job_id: JOB }, { job_id: "other" }],
 };
 
+/** SQL ILIKE as PostgREST runs it: `*` is `%`, a backslash escapes the next character. */
+function ilikeMatches(value: string, pattern: string): boolean {
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\" && i + 1 < pattern.length) {
+      re += pattern[++i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    } else if (ch === "%" || ch === "*") re += "[\\s\\S]*";
+    else if (ch === "_") re += "[\\s\\S]";
+    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`, "i").test(value);
+}
+
 function fakeClient(
   opts: { rpc?: Record<string, any>; failRpc?: Set<string>; jobs?: any[] } = {},
 ) {
   const reads: string[] = [];
+  const patterns: string[] = [];
   const rpcs: { fn: string; args: any }[] = [];
   const writes: string[] = [];
   const jobs = opts.jobs ?? [{
@@ -90,6 +106,7 @@ function fakeClient(
     reads,
     rpcs,
     writes,
+    patterns,
     rpc(fn: string, args: any) {
       rpcs.push({ fn, args });
       if (opts.failRpc?.has(fn)) {
@@ -117,13 +134,11 @@ function fakeClient(
       }
       q.select = () => q;
       q.eq = (c: string, v: any) => (filters.push((r) => r[c] === v), q);
-      q.ilike = (
-        c: string,
-        v: string,
-      ) => (filters.push((r) =>
-        String(r[c] ?? "").toLowerCase() === v.toLowerCase()
-      ),
-        q);
+      q.ilike = (c: string, v: string) => (
+        patterns.push(v),
+          filters.push((r) => ilikeMatches(String(r[c] ?? ""), v)),
+          q
+      );
       q.limit = (n: number) => ((lim = n), q);
       const rows = () => {
         const all = (table === "jobs" ? jobs : []).filter((r) =>
@@ -288,6 +303,76 @@ Deno.test("GET job_story resolves job_number, passes the options, and maps error
     StoryReadError,
   );
   assertEquals([failing.code, failing.status], ["rpc_failed", 502]);
+});
+
+Deno.test("job_number is matched exactly and case-insensitively: LIKE wildcards never pick another job", async () => {
+  const jobs = [
+    { id: JOB, job_number: "SWF-T0001", ghl_contact_id: "ctT" },
+    {
+      id: "a0000000-0000-4000-8000-000000000009",
+      job_number: "SWF 2614",
+      ghl_contact_id: null,
+    },
+  ];
+  const story = (n: string) =>
+    jobStoryAction(
+      fakeClient({ jobs, rpc: { context_job_story: STORY } }),
+      new URLSearchParams({ job_number: n }),
+    );
+  // Exact, any case, spaces kept: these resolve.
+  for (const n of ["SWF-T0001", "swf-t0001", " Swf-T0001 "]) {
+    assertEquals((await story(n) as any).version, "job-story-v1", n);
+  }
+  const spaced = fakeClient({ jobs, rpc: { context_job_story: STORY } });
+  await jobStoryAction(spaced, new URLSearchParams({ job_number: "swf 2614" }));
+  assertEquals(spaced.rpcs[0].args.p_job_id, jobs[1].id);
+  // Wildcards are escaped, so they match nothing (no job number holds one).
+  for (const n of ["SWF-T000_", "%", "SWF-%", "_WF-T0001", "SWF-T0001%"]) {
+    const client = fakeClient({ jobs, rpc: { context_job_story: STORY } });
+    const err = await assertRejects(
+      () => jobStoryAction(client, new URLSearchParams({ job_number: n })),
+      StoryReadError,
+    );
+    assertEquals([err.code, err.status], ["job_not_found", 404], n);
+    assertEquals(client.rpcs, [], n);
+  }
+  assertEquals(exactJobNumberPattern("SWF-T000_"), "SWF-T000\\_");
+  assertEquals(exactJobNumberPattern("50%\\"), "50\\%\\\\");
+  // PostgREST reads * as % and cannot escape it: refused before any read.
+  const star = fakeClient({ jobs });
+  const err = await assertRejects(
+    () =>
+      jobStoryAction(star, new URLSearchParams({ job_number: "SWF-T000*" })),
+    StoryReadError,
+  );
+  assertEquals([err.code, err.status], ["invalid_job_number", 400]);
+  assertEquals(star.reads, []);
+  // Whatever the database matched, only an exact number counts.
+  const loose = fakeClient({ jobs, rpc: { context_job_story: STORY } });
+  loose.from = (() => {
+    const q: any = {
+      select: () => q,
+      ilike: () => q,
+      limit: () => q,
+      then: (res: any, rej: any) =>
+        Promise.resolve({ data: [jobs[0]], error: null }).then(res, rej),
+    };
+    return q;
+  }) as any;
+  const e2 = await assertRejects(
+    () => jobStoryAction(loose, new URLSearchParams({ job_number: "SWF-T00" })),
+    StoryReadError,
+  );
+  assertEquals(e2.code, "job_not_found");
+  // client_story resolves the same way.
+  const c = fakeClient({ jobs, rpc: { context_client_story: CLIENT } });
+  const e3 = await assertRejects(
+    () =>
+      clientStoryAction(c, new URLSearchParams({ job_number: "SWF-T000_" })),
+    StoryReadError,
+  );
+  assertEquals(e3.code, "job_not_found");
+  assertEquals(c.patterns, ["SWF-T000\\_"]);
 });
 
 Deno.test("GET client_story returns client-story-v1 for the job", async () => {
