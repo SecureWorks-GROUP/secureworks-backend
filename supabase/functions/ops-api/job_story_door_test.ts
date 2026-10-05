@@ -407,3 +407,23 @@ Deno.test("the dispatch routes the three doors as GET-only reads", async () => {
     ),
   );
 });
+
+Deno.test("the deploy probes refuse before any read: a bad job_id or as_of reads nothing", async () => {
+  for (
+    const [door, params, code] of [
+      [jobStoryAction, "job_id=__deploy_probe__", "invalid_job_id"],
+      [clientStoryAction, "job_id=__deploy_probe__", "invalid_job_id"],
+      [storyScorecardAction, "as_of=__deploy_probe__", "invalid_as_of"],
+    ] as const
+  ) {
+    const client = fakeClient({ rpc: {} });
+    const err = await assertRejects(
+      () => noNetwork(() => (door as any)(client, new URLSearchParams(params))),
+      StoryReadError,
+    );
+    assertEquals((err as StoryReadError).code, code);
+    assertEquals((err as StoryReadError).status, 400);
+    assertEquals(client.reads, []);
+    assertEquals(client.rpcs, []);
+  }
+});

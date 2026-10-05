@@ -96,9 +96,11 @@ get_evidence_body
 
 # ── JARVIS canonical reader path (sw_job_context_v2) ──
 assemble_job_dossier
-job_story                 # probe=jwt-fail-closed
-client_story              # probe=jwt-fail-closed
-context_story_scorecard   # probe=jwt-fail-closed
+# Job story doors (story S2). Staff reads, so the API-key probe is admitted;
+# each probe names an invalid id or instant that refuses before any read.
+job_story                 # probe=bounded-refusal probe-args=job_id=__deploy_probe__
+client_story              # probe=bounded-refusal probe-args=job_id=__deploy_probe__
+context_story_scorecard   # probe=bounded-refusal probe-args=as_of=__deploy_probe__
 assemble_job_brain
 get_job_context_facts
 get_job_conversation
