@@ -119,7 +119,39 @@ BEGIN
  EXCEPTION WHEN check_violation THEN NULL; END;
 END $c$;
 
--- 4. The rollout list for a staged start: none by default (every live job), at
+-- 4. The ledger's own live reserve: 100 calls all day and 100 before noon by
+-- default (the line the ledger kept before), 0 to 400, commented.
+DO $c$
+DECLARE c text;
+BEGIN
+ FOREACH c IN ARRAY ARRAY['live_reserve_calls', 'live_reserve_calls_morning'] LOOP
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'context_ledger_settings'
+                 AND column_name = c AND data_type = 'integer' AND is_nullable = 'NO' AND column_default = '100') THEN
+   RAISE EXCEPTION 'ledger contract: settings.% must be integer NOT NULL DEFAULT 100', c;
+  END IF;
+  IF coalesce(col_description('public.context_ledger_settings'::regclass,
+      (SELECT a.attnum FROM pg_attribute a WHERE a.attrelid = 'public.context_ledger_settings'::regclass AND a.attname = c)), '')
+     NOT LIKE 'Context ledger: calls the ledger always leaves free for live fact reads%' THEN
+   RAISE EXCEPTION 'ledger contract: settings.% carries no owner comment', c;
+  END IF;
+ END LOOP;
+ IF (SELECT live_reserve_calls <> 100 OR live_reserve_calls_morning <> 100 FROM public.context_ledger_settings) THEN
+  RAISE EXCEPTION 'ledger contract: the seeded reserve must be 100 all day and 100 before noon';
+ END IF;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 0, live_reserve_calls_morning = 400;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 400, live_reserve_calls_morning = 0;
+ BEGIN
+  UPDATE public.context_ledger_settings SET live_reserve_calls = 401;
+  RAISE EXCEPTION 'ledger contract: a reserve above 400 was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN
+  UPDATE public.context_ledger_settings SET live_reserve_calls_morning = -1;
+  RAISE EXCEPTION 'ledger contract: a negative morning reserve was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 100, live_reserve_calls_morning = 100;
+END $c$;
+
+-- 5. The rollout list for a staged start: none by default (every live job), at
 -- most 500 jobs, never a null entry, one dimension.
 DO $c$
 BEGIN

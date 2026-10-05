@@ -14,7 +14,7 @@ DO $guard$
 DECLARE live text;
 BEGIN
  SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid = to_regprocedure('public.reserve_context_model_call(text,uuid,uuid)');
- IF live IS NULL OR live NOT IN ('16c53c869b8590dbc38be28abad17658', 'f50de57b906f28fc9b5b286821d64cb1') THEN
+ IF live IS NULL OR live NOT IN ('1703202c9f194072ea031639004a5f06', 'f50de57b906f28fc9b5b286821d64cb1') THEN
   RAISE EXCEPTION 'context_ledger_store_down_refused: reserve_context_model_call md5 % is a later body; roll that back first', coalesce(live, '<missing>');
  END IF;
  IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz)') IS NOT NULL THEN

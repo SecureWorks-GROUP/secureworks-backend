@@ -16,11 +16,13 @@
 --     vision slice) plus one block: a ledger call needs a running ledger run
 --     holding its lease (the existing stale rule), the extraction lane on,
 --     context_ledger_settings.mode not off (else ledger_off), fewer than
---     calls_per_day ledger calls today, and the day's calls below the live
---     reserve line the catch-up backlog already stops at: model_call_cap less
---     live_reserve_calls_day all day, and morning_cap less
---     live_reserve_calls_morning before morning_until (else ledger_budget).
---     Every other phase takes exactly the path it took before.
+--     calls_per_day ledger calls today, and the day's calls below the
+--     ledger's own live reserve line (context_ledger_settings, apart from the
+--     fact backlog's context_cadence_settings, so slowing the backlog never
+--     starves the ledger): model_call_cap less live_reserve_calls all day,
+--     and morning_cap less live_reserve_calls_morning before morning_until
+--     (else ledger_budget). Every other phase takes exactly the path it took
+--     before.
 --  2. context_ledger_evidence_rows(job ids, as_of): the admissible worded
 --     evidence of a set of jobs, one definition for the due list, the packet
 --     and the write. business_events on the job, linked, admissible, written
@@ -79,7 +81,7 @@ BEGIN
  -- The one replaced function: the live vision body, or this migration's (re-apply).
  FOR x IN SELECT * FROM (VALUES
   ('public.reserve_context_model_call(text,uuid,uuid)',
-   ARRAY['f50de57b906f28fc9b5b286821d64cb1','16c53c869b8590dbc38be28abad17658'])
+   ARRAY['f50de57b906f28fc9b5b286821d64cb1','1703202c9f194072ea031639004a5f06'])
  ) AS v(sig, accepted) LOOP
   live := NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
@@ -106,13 +108,13 @@ BEGIN
    problems := problems || format('%s missing or not the ledger model''s (apply 20261006010000 first)', t);
   END IF;
  END LOOP;
- IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.context_ledger_settings')
-   AND a.attname = 'job_ids' AND NOT a.attisdropped) THEN
-  problems := problems || 'public.context_ledger_settings.job_ids missing (the ledger model 20261006010000 with its rollout list)'::text;
- END IF;
- IF to_regclass('public.context_cadence_settings') IS NULL THEN
-  problems := problems || 'public.context_cadence_settings missing (apply 20261005233000 first)'::text;
- END IF;
+ -- The settings this store reads beyond the first cut: the rollout list and the ledger's own live reserve.
+ FOREACH f IN ARRAY ARRAY['job_ids', 'live_reserve_calls', 'live_reserve_calls_morning'] LOOP
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.context_ledger_settings')
+    AND a.attname = f AND NOT a.attisdropped) THEN
+   problems := problems || format('public.context_ledger_settings.%s missing (apply the ledger model 20261006010000 as it is now)', f);
+  END IF;
+ END LOOP;
  IF to_regclass('public.inbox_events') IS NULL OR to_regclass('public.users') IS NULL THEN
   problems := problems || 'public.inbox_events or public.users missing'::text;
  END IF;
@@ -214,16 +216,15 @@ BEGIN
    WHERE run_date=v_date AND phase='attribution')>=60
  THEN RETURN jsonb_build_object('outcome','attribution_budget','run_date',v_date,'limit',60); END IF;
  -- ledger: only while the lane is switched on, within its own daily ceiling,
- -- and never inside the live reserve (the same line the catch-up backlog
- -- stops at, all day and before noon).
+ -- and never inside its own live reserve (context_ledger_settings, all day and
+ -- before noon), whatever reserve the fact backlog keeps.
  IF p_phase='ledger' THEN
   SELECT * INTO v_ledger FROM public.context_ledger_settings WHERE id;
   IF v_ledger.id IS NULL OR v_ledger.mode='off' THEN RETURN jsonb_build_object('outcome','ledger_off'); END IF;
   IF (SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=v_date AND phase='ledger')>=v_ledger.calls_per_day
   THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','ledger_calls_per_day','run_date',v_date,'limit',v_ledger.calls_per_day); END IF;
   v_pol := public.context_cadence_policy();
-  SELECT coalesce(s.live_reserve_calls_day,100), coalesce(s.live_reserve_calls_morning,100) INTO v_reserve_day, v_reserve_morning
-  FROM (SELECT 1) one LEFT JOIN public.context_cadence_settings s ON s.id;
+  v_reserve_day := v_ledger.live_reserve_calls; v_reserve_morning := v_ledger.live_reserve_calls_morning;
   SELECT count(*) INTO v_calls FROM public.context_model_call_reservations WHERE run_date=v_date;
   IF v_calls>=(v_pol->>'model_call_cap')::integer-v_reserve_day
   THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','live_reserve','run_date',v_date,
@@ -249,7 +250,7 @@ END $$;
 REVOKE ALL ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) TO service_role;
 COMMENT ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) IS
- 'The one admission for every context model call (400 a Perth day). Attribution at most 60; vision within its share and daily cap (20261006001000); ledger (20261006013000) only while context_ledger_settings.mode is not off, under calls_per_day, and never inside the live reserve (model_call_cap less live_reserve_calls_day; before noon morning_cap less live_reserve_calls_morning). Outcomes reserved, paused, stale, cap, attribution_budget, vision_reserve, vision_budget, ledger_off, ledger_budget.';
+ 'The one admission for every context model call (400 a Perth day). Attribution at most 60; vision within its share and daily cap (20261006001000); ledger (20261006013000) only while context_ledger_settings.mode is not off, under calls_per_day, and never inside its own live reserve (model_call_cap less context_ledger_settings.live_reserve_calls; before morning_until morning_cap less live_reserve_calls_morning), apart from the fact backlog''s context_cadence_settings. Outcomes reserved, paused, stale, cap, attribution_budget, vision_reserve, vision_budget, ledger_off, ledger_budget.';
 
 -- 3. Write receipts: one row per distinct write request, so a retried write
 -- returns its first answer and finish can count refusals.

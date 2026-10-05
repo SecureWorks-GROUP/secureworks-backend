@@ -45,8 +45,7 @@ BEGIN
   IF (SELECT count(*) FROM public.context_model_call_reservations WHERE run_date=v_date AND phase='ledger')>=v_ledger.calls_per_day
   THEN RETURN jsonb_build_object('outcome','ledger_budget','reason','ledger_calls_per_day','run_date',v_date,'limit',v_ledger.calls_per_day); END IF;
   v_pol := public.context_cadence_policy();
-  SELECT coalesce(s.live_reserve_calls_day,100), coalesce(s.live_reserve_calls_morning,100) INTO v_reserve_day, v_reserve_morning
-  FROM (SELECT 1) one LEFT JOIN public.context_cadence_settings s ON s.id;
+  v_reserve_day := v_ledger.live_reserve_calls; v_reserve_morning := v_ledger.live_reserve_calls_morning;
   SELECT count(*) INTO v_calls FROM public.context_model_call_reservations WHERE run_date=v_date;
  END IF;
  -- B-5b: vision only while the job reads keep their share, and within its own daily cap.

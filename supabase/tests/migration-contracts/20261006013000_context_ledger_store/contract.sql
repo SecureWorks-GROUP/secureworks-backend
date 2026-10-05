@@ -290,6 +290,15 @@ BEGIN
  PERFORM pg_temp.lg_calls(200); PERFORM pg_temp.lg_all('vision ceiling passed', x, a);
  PERFORM pg_temp.lg_calls(0); PERFORM pg_temp.lg_calls_add(100, 'vision'); PERFORM pg_temp.lg_all('vision daily cap', x, a);
  PERFORM pg_temp.lg_calls(0); PERFORM pg_temp.lg_calls_add(250, 'ledger'); PERFORM pg_temp.lg_all('ledger spent past the live reserve', x, a);
+ -- The ledger's own reserve and the fact backlog's reserve, moved: the fact
+ -- phases answer exactly as before (neither body reads either for them).
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 0, live_reserve_calls_morning = 400;
+ PERFORM pg_temp.lg_calls(299); PERFORM pg_temp.lg_all('ledger reserve moved', x, a);
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 100, live_reserve_calls_morning = 100;
+ INSERT INTO public.context_cadence_settings (id, live_reserve_calls_day, live_reserve_calls_morning, live_reserve_reads_per_job)
+ VALUES (true, 300, 250, 2) ON CONFLICT (id) DO UPDATE SET live_reserve_calls_day = 300, live_reserve_calls_morning = 250;
+ PERFORM pg_temp.lg_calls(150); PERFORM pg_temp.lg_all('fact backlog reserve raised', x, a);
+ UPDATE public.context_cadence_settings SET live_reserve_calls_day = 100, live_reserve_calls_morning = 100;
  PERFORM pg_temp.lg_calls(0);
  -- Stale runs: expired lease, wrong token, wrong phase, finished, another day.
  xs := pg_temp.lg_run(j, 'extraction', 'running', '-1 minute');
@@ -310,7 +319,7 @@ BEGIN
  PERFORM pg_temp.lg_same('unknown phase', 'transcription', NULL, NULL);
  PERFORM pg_temp.lg_same('no phase', NULL, NULL, NULL);
  SELECT count(*) INTO n FROM lg_equiv;
- PERFORM pg_temp.lg_assert(n = 96, 'expected 96 equivalence cases, ran ' || n);
+ PERFORM pg_temp.lg_assert(n = 108, 'expected 108 equivalence cases, ran ' || n);
  -- The only new answer: the ledger phase, which the old body refused outright.
  PERFORM pg_temp.lg_assert(pg_temp.lg_try('before', 'ledger', lr, pg_temp.lg_token(lr)) = '{"error":"Invalid model call identity"}',
   'the pre-image must refuse the ledger phase');
@@ -322,8 +331,8 @@ END $c$;
 ROLLBACK;
 
 -- 3. The ledger's own admission: switched on, inside its ceiling, never in
--- the live reserve (the line the catch-up backlog stops at), all day and
--- before noon. pg_temp.lg_policy moves the morning boundary so both sides of
+-- its own live reserve (context_ledger_settings, not the fact backlog's
+-- context_cadence_settings), all day and before noon. pg_temp.lg_policy moves the morning boundary so both sides of
 -- noon are tested at any clock time.
 CREATE TABLE pg_temp.lg_base_policy AS SELECT public.context_cadence_policy() AS p;
 CREATE FUNCTION pg_temp.lg_policy(p_over jsonb) RETURNS void LANGUAGE plpgsql AS $$
@@ -361,19 +370,40 @@ BEGIN
  -- ...and the extraction pass still gets its reserve.
  PERFORM pg_temp.lg_assert(public.reserve_context_model_call('extraction', x, pg_temp.lg_token(x)) ->> 'outcome' = 'reserved',
   'extraction must still be admitted inside the live reserve');
- -- The desk's reserve is read from context_cadence_settings.
+ -- The fact backlog keeping more calls back (its reserve raised to 250, so it
+ -- stops at 150) does not move the ledger's line: the ledger still reserves
+ -- up to its own 300.
  INSERT INTO public.context_cadence_settings (id, live_reserve_calls_day, live_reserve_calls_morning, live_reserve_reads_per_job)
- VALUES (true, 50, 100, 2) ON CONFLICT (id) DO UPDATE SET live_reserve_calls_day = 50;
- PERFORM pg_temp.lg_assert(public.reserve_context_model_call('ledger', lr, tok) ->> 'outcome' = 'reserved', 'a 50-call reserve moves the line to 350');
- PERFORM pg_temp.lg_calls(350);
- PERFORM pg_temp.lg_assert(public.reserve_context_model_call('ledger', lr, tok) ->> 'reason' = 'live_reserve', 'line at 350');
- UPDATE public.context_cadence_settings SET live_reserve_calls_day = 100;
+ VALUES (true, 250, 250, 2) ON CONFLICT (id) DO UPDATE SET live_reserve_calls_day = 250, live_reserve_calls_morning = 250;
+ PERFORM pg_temp.lg_calls(299);
+ PERFORM pg_temp.lg_assert(public.reserve_context_model_call('ledger', lr, tok) ->> 'outcome' = 'reserved',
+  'a raised fact backlog reserve must not starve the ledger (call 300)');
+ r := public.reserve_context_model_call('ledger', lr, tok);
+ PERFORM pg_temp.lg_assert(r ->> 'reason' = 'live_reserve' AND (r ->> 'ceiling')::integer = 300, 'the ledger stops at its own line: ' || r::text);
+ UPDATE public.context_cadence_settings SET live_reserve_calls_day = 100, live_reserve_calls_morning = 100;
+ -- The ledger's own reserve stops it: 150 calls kept free moves its line to 250,
+ -- and an extraction read still gets in above it.
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 150;
+ PERFORM pg_temp.lg_calls(249);
+ PERFORM pg_temp.lg_assert(public.reserve_context_model_call('ledger', lr, tok) ->> 'outcome' = 'reserved', 'call 250 under a 150-call ledger reserve');
+ r := public.reserve_context_model_call('ledger', lr, tok);
+ PERFORM pg_temp.lg_assert(r ->> 'reason' = 'live_reserve' AND (r ->> 'ceiling')::integer = 250, 'the ledger''s own reserve stops it at 250: ' || r::text);
+ PERFORM pg_temp.lg_assert(public.reserve_context_model_call('extraction', x, pg_temp.lg_token(x)) ->> 'outcome' = 'reserved',
+  'extraction inside the ledger''s own reserve');
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 100;
  -- Before noon: morning_cap 300 less the morning reserve 100.
  PERFORM pg_temp.lg_policy('{"morning_until":"23:59:59.999"}');
  PERFORM pg_temp.lg_calls(199);
  PERFORM pg_temp.lg_assert(public.reserve_context_model_call('ledger', lr, tok) ->> 'outcome' = 'reserved', 'morning call 200');
  r := public.reserve_context_model_call('ledger', lr, tok);
  PERFORM pg_temp.lg_assert(r ->> 'reason' = 'live_reserve_morning' AND (r ->> 'ceiling')::integer = 200, 'morning reserve: ' || r::text);
+ -- The ledger's own morning reserve: 250 kept free before noon leaves it 50.
+ UPDATE public.context_ledger_settings SET live_reserve_calls_morning = 250;
+ PERFORM pg_temp.lg_calls(49);
+ PERFORM pg_temp.lg_assert(public.reserve_context_model_call('ledger', lr, tok) ->> 'outcome' = 'reserved', 'morning call 50');
+ r := public.reserve_context_model_call('ledger', lr, tok);
+ PERFORM pg_temp.lg_assert(r ->> 'reason' = 'live_reserve_morning' AND (r ->> 'ceiling')::integer = 50, 'the ledger''s own morning reserve: ' || r::text);
+ UPDATE public.context_ledger_settings SET live_reserve_calls_morning = 100;
  PERFORM pg_temp.lg_policy('{"morning_until":"00:00"}');
  PERFORM pg_temp.lg_assert(public.reserve_context_model_call('ledger', lr, tok) ->> 'outcome' = 'reserved', 'after noon the morning line is gone');
  -- Stale and identity: the run must be a running ledger run holding its lease.
@@ -1174,5 +1204,5 @@ ROLLBACK;
 -- admission is exactly this migration's body.
 DO $c$ BEGIN
  PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  = '16c53c869b8590dbc38be28abad17658', 'reserve_context_model_call is not this migration''s body');
+  = '1703202c9f194072ea031639004a5f06', 'reserve_context_model_call is not this migration''s body');
 END $c$;
