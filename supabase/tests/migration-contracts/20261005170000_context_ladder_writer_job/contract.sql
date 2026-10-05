@@ -162,6 +162,34 @@ SELECT pg_temp.wj_cases(true);
 ROLLBACK;
 
 -- H. Structure.
+-- A registered successor (L1f 20261005235000) replaces the rules ladder and
+-- proves in its own contract that its body is exactly this one plus its edits;
+-- while it is live only the rules-off ladder, the helpers and the classifier
+-- are checked here, and the re-apply is skipped (L1e's guard refuses to
+-- re-apply over L1f's body).
+SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1f:%' AS l1f_live \gset
+\if :l1f_live
+DO $$
+DECLARE f text; r text;
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_mismatch_rows()'::regprocedure)<>'69d68f016116576e6b6c8c773de8752e'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_event_writer_job(public.business_events)'::regprocedure)<>'cd36b092818e7607d114d1b3011b3bfd'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_payload_job_is_guess(public.business_events)'::regprocedure)<>'1c87d88718cf014429170e3f1aaaa2aa'
+ THEN RAISE EXCEPTION 'l1e: a body is not this migration''s'; END IF;
+ FOREACH f IN ARRAY ARRAY['public.context_ladder_p1a(public.business_events,boolean)',
+  'public.context_event_writer_job(public.business_events)','public.context_payload_job_is_guess(public.business_events)'] LOOP
+  IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'L1e:%' THEN RAISE EXCEPTION 'l1e: % is not marked L1e',f; END IF;
+  FOREACH r IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
+   IF has_function_privilege(r,f,'EXECUTE') THEN RAISE EXCEPTION 'l1e: % can call private %',r,f; END IF;
+  END LOOP;
+ END LOOP;
+ IF NOT has_function_privilege('service_role','public.context_payload_job_mismatch_rows()','EXECUTE')
+ THEN RAISE EXCEPTION 'l1e: the service role lost the classifier'; END IF;
+ IF (SELECT count(*) FROM public.feature_flags WHERE flag_name='context_unlinked_rules_v1' AND NOT enabled)<>1
+ THEN RAISE EXCEPTION 'l1e: the rules flag must stay off'; END IF;
+END $$;
+\else
 DO $$
 DECLARE f text; r text;
 BEGIN
@@ -311,3 +339,4 @@ BEGIN
  THEN RAISE EXCEPTION 'l1e: re-apply changed a body or comment'; END IF;
 END $$;
 DROP TABLE l1e_before;
+\endif

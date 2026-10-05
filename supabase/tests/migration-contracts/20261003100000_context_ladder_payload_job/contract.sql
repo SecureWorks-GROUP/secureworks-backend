@@ -232,8 +232,8 @@ $b$))<>'e04d9e81649364b8e9acc38f14833ba2'
  THEN RAISE EXCEPTION 'l1b: the ladder entry or insert trigger changed'; END IF;
  -- Marked L1b, not P4: P4's guard refuses to re-apply over them.
  FOREACH f IN ARRAY ARRAY['public.context_ladder_p1a(public.business_events,boolean)','public.resolve_context_attribution(public.business_events,boolean,boolean)'] LOOP
-  IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'L1b:%' AND coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d|e):%'
-  THEN RAISE EXCEPTION 'l1b: % is not marked L1b (or a successor, L1c, L1d or L1e)',f; END IF;
+  IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'L1b:%' AND coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT SIMILAR TO 'L1(c|d|e|f):%'
+  THEN RAISE EXCEPTION 'l1b: % is not marked L1b (or a successor, L1c, L1d, L1e or L1f)',f; END IF;
   FOREACH r IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
    IF has_function_privilege(r,f,'EXECUTE') THEN RAISE EXCEPTION 'l1b: % can call private %',r,f; END IF;
   END LOOP;
