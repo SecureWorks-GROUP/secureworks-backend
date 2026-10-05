@@ -406,7 +406,8 @@ import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, 
 import { readJobFreshness } from './job_freshness.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
-import { businessEventConversationMessage, CONVERSATION_EVENT_SELECT, conversationRoleFields, DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles } from './job_conversation_party_roles.ts'
+import { businessEventTimelineMessage, emailCustomerParty, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
 import { upsertDebtPicture, listDebtPicture, debtNote, debtNotes, debtProposalMark, DebtPictureError } from './debt_picture.ts'
@@ -16325,31 +16326,37 @@ async function getJobConversation(client: any, body: any) {
   let jobId: string | null = body?.job_id || null
   let jobNumber: string | null = body?.job_number || null
   let ghlContactId: string | null = null
+  let clientEmail: string | null = null
 
   if (!jobId && jobNumber) {
     const { data: found } = await client.from('jobs')
-      .select('id, job_number, ghl_contact_id')
+      .select('id, job_number, ghl_contact_id, client_email')
       .ilike('job_number', jobNumber)
       .limit(1)
     if (found?.[0]) {
       jobId = found[0].id
       jobNumber = found[0].job_number
       ghlContactId = found[0].ghl_contact_id || null
+      clientEmail = found[0].client_email || null
     }
   } else if (jobId) {
     const { data: jobRow } = await client.from('jobs')
-      .select('job_number, ghl_contact_id')
+      .select('job_number, ghl_contact_id, client_email')
       .eq('id', jobId)
       .maybeSingle()
     if (jobRow) {
       jobNumber = jobRow.job_number
       ghlContactId = jobRow.ghl_contact_id || null
+      clientEmail = jobRow.client_email || null
     }
   }
   if (!jobId) return { messages: [], summary: { count: 0, channels: {}, since, until: null } }
 
   const sinceFilter = since || null
   const messages: any[] = []
+  // The customer's addresses (the job's and its active parties'): an email
+  // counts as contact with the customer only when it is to or from one.
+  const customerAddresses = await readCustomerAddresses(client, jobId, clientEmail)
 
   // 1. GHL conversation cache (sms / email / call metadata) — by job_id first,
   //    falling back to contact_id if cache row was synced before job_id link.
@@ -16390,6 +16397,8 @@ async function getJobConversation(client: any, body: any) {
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
         // The CRM thread is read by the job's customer contact (party roles, B-6).
         ...conversationRoleFields(customerThreadPartyRoles(m.direction || 'inbound')),
+        customer_party: true,
+        who: (m.direction || 'inbound') === 'outbound' ? 'us to the customer' : 'the customer to us',
       })
     }
   } catch (e) {
@@ -16437,7 +16446,10 @@ async function getJobConversation(client: any, body: any) {
         event_copy,
         // The old inbox row records no role for its sender (party roles, B-6).
         ...conversationRoleFields(readMessagePartyRoles({ party_roles: { sender_role: 'unknown', recipient_role: 'staff', counterpart_role: 'unknown', audience: 'unknown', basis: 'old_inbox_row' } })),
+        customer_party: emailCustomerParty('inbound', r.from_email, null, customerAddresses),
       })
+      const last = messages[messages.length - 1]
+      last.who = whoToWhom(last)
     }
   } catch (e) {
     console.log('[ops-api] get_job_conversation inbox read failed:', (e as Error).message)
@@ -16469,39 +16481,60 @@ async function getJobConversation(client: any, body: any) {
         source_ref: r.id,
         ...conversationRoleFields(staffNotePartyRoles()),
         label: 'internal: staff',
+        who: 'staff note (internal)',
       })
     }
   } catch (e) {
     console.log('[ops-api] get_job_conversation job_events notes read failed:', (e as Error).message)
   }
 
-  // 4. business_events — message-shaped rows (sms/email/note/call).
+  // 4. business_events — message rows (texts, emails, calls, call transcripts,
+  //    notes), chosen by the row's channel column (event type for older rows),
+  //    newest by when they happened, coalesce(event_at, occurred_at), never by
+  //    load time: a history load stamps months of old messages with the day it
+  //    ran (job read fix, job_conversation_timeline.ts).
+  //    attribution_status / attribution_step / placement_rule (context slice
+  //    R0): how the ladder placed the row, so a reader can see why it is on
+  //    this job. placement_rule is metadata.placement_rule (null until the
+  //    placement rules that write it ship).
+  const eventMessages: any[] = []
   try {
-    const messageEventTypes = [
-      'client.reply', 'client.email_in', 'client.email_out',
-      'client.sms_in', 'client.sms_out',
-      'client.call_complete', 'client.message_in',
-      'supplier.email_in', 'ghl.note_added',
-    ]
-    // attribution_status / attribution_step / placement_rule (context slice
-    // R0): how the ladder placed the row, so a reader can see why it is on
-    // this job. placement_rule is metadata.placement_rule (null until the
-    // placement rules that write it ship). Party roles (B-6): each message
-    // says who sent it and who received it; a crew or staff row is shown as
-    // "internal: crew" / "internal: staff" with direction internal, never as
-    // a message in the customer's thread (job_conversation_party_roles.ts).
-    let q = client.from('business_events')
-      .select(CONVERSATION_EVENT_SELECT)
-      .eq('job_id', jobId)
-      .in('event_type', messageEventTypes)
-      .order('occurred_at', { ascending: false })
-      .limit(limit)
-    if (sinceFilter) q = q.gt('occurred_at', sinceFilter)
-    const { data: bev, error: bevErr } = await q
-    if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr.message)
-    for (const r of (bev || [])) messages.push(businessEventConversationMessage(r, jobId))
+    const { rows: bev, error: bevErr } = await readBusinessEventsBySourceTime(client, {
+      jobId,
+      select: TIMELINE_MESSAGE_COLUMNS,
+      limit,
+      since: sinceFilter,
+      messagesOnly: true,
+    })
+    if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
+    for (const r of bev) eventMessages.push(businessEventTimelineMessage(r, jobId, customerAddresses))
   } catch (e) {
     console.log('[ops-api] get_job_conversation business_events read failed:', (e as Error).message)
+  }
+  // A GHL message stored both in the CRM cache and as its business_events row
+  // shows once, as the row (it carries placement and labels).
+  const providerIds = new Set(eventMessages.map((m) => m.provider_message_id).filter(Boolean))
+  for (let k = messages.length - 1; k >= 0; k--) {
+    const m = messages[k]
+    if (m.source_system === 'ghl_cache' && m.source_ref && providerIds.has(`ghl:${m.source_ref}`)) messages.splice(k, 1)
+  }
+  messages.push(...eventMessages)
+
+  // 5. email_events — emails our system sent to the customer (quotes,
+  //    invoices, client updates). A copy already among the event rows shows once.
+  try {
+    let q = client.from('email_events')
+      .select('id, email_type, recipient, sender, subject, status, sent_at, created_at')
+      .eq('job_id', jobId)
+      .not('sent_at', 'is', null)
+      .order('sent_at', { ascending: false })
+      .limit(limit)
+    if (sinceFilter) q = q.gt('sent_at', sinceFilter)
+    const { data: sent, error: sentErr } = await q
+    if (sentErr) console.error('[ops-api] get_job_conversation email_events read failed:', sentErr.message)
+    messages.push(...sentCustomerEmailMessages(sent || [], jobId, customerAddresses, eventMessages))
+  } catch (e) {
+    console.log('[ops-api] get_job_conversation email_events read failed:', (e as Error).message)
   }
 
   // chat_logs (internal AI chat) is deliberately NOT a source. It is our own
@@ -16511,13 +16544,13 @@ async function getJobConversation(client: any, body: any) {
   // (23 Sep 2026). The invoice door keeps perSource.chat_logs at 0 so its
   // response keys do not change. Do not re-add it here.
 
-  messages.sort((a, b) => {
-    const ax = a.occurred_at || ''
-    const bx = b.occurred_at || ''
-    if (ax < bx) return 1
-    if (ax > bx) return -1
-    return 0
-  })
+  // Newest first by when each message happened (parsed, so mixed timestamp
+  // formats such as Z and +00:00 compare correctly).
+  const at = (m: any) => {
+    const t = Date.parse(String(m.occurred_at || ''))
+    return Number.isFinite(t) ? t : -Infinity
+  }
+  messages.sort((a, b) => at(b) - at(a))
   const sliced = messages.slice(0, limit)
 
   const channels: Record<string, number> = {}
@@ -16572,6 +16605,11 @@ const DOSSIER_MODE_BOUNDS = {
 } as const
 
 type DossierMode = keyof typeof DOSSIER_MODE_BOUNDS
+
+// How many newest messages the dossier reads to find the newest contact with
+// the customer and what we last told them (state card); the conversation it
+// returns stays bounded by the mode.
+const DOSSIER_CONTACT_WINDOW = 60
 
 function clampDossierLimit(requested: number | undefined, modeCap: number): number {
   if (typeof requested !== 'number' || !isFinite(requested) || requested <= 0) return modeCap
@@ -16726,29 +16764,39 @@ async function assembleJobDossier(client: any, body: any) {
   sourceStatus.council = councilRead.status
 
   // ── Raw evidence: business_events ──
-  // Message rows carry who sent them and who received them (party roles, B-6).
+  // Newest by when each event happened, coalesce(event_at, occurred_at), not
+  // by load time (job_conversation_timeline.ts). Each row's occurred_at is
+  // that time; loaded_at is when it was loaded. Message rows carry who sent
+  // them and who received them (party roles, B-6).
   const eventsRead = await safeRead('business_events', async () => {
-    let q = client.from('business_events')
-      .select(DOSSIER_EVENT_SELECT)
-      .eq('job_id', jobId)
-      .order('occurred_at', { ascending: false })
-      .limit(eventsLimit)
-    if (since) q = q.gt('occurred_at', since)
-    const { data, error } = await q
-    if (error) throw new Error(error.message)
-    return (data || []).map(dossierEventWithPartyRoles)
+    const { rows, error } = await readBusinessEventsBySourceTime(client, {
+      jobId,
+      select: `${DOSSIER_EVENT_SELECT}, event_at, channel, direction`,
+      limit: eventsLimit,
+      since,
+    })
+    if (error) throw new Error(error)
+    return rows.map((r: any) => ({ ...dossierEventWithPartyRoles(r), occurred_at: eventSourceTime(r), loaded_at: r.occurred_at ?? null }))
   })
   sourceStatus.businessEvents = eventsRead.status
 
-  // ── Conversation: 4-source merge (reuses getJobConversation internal helper) ──
+  // ── Conversation: source merge (reuses getJobConversation internal helper) ──
+  // Read a wider window than the conversation returns, so the state card can
+  // find the newest contact with the customer and what we last told them
+  // even when internal and supplier traffic fills the newest slots. The
+  // dossier still returns only the newest conversationLimit messages.
+  const contactWindow = Math.max(conversationLimit, DOSSIER_CONTACT_WINDOW)
   const conversationRead = await safeRead('conversation', async () => {
     const { messages } = await getJobConversation(client, {
       job_id: jobId,
-      limit: conversationLimit,
+      limit: contactWindow,
       since,
     })
     return messages || []
   })
+  const conversationWindow = conversationRead.data
+  conversationRead.data = conversationWindow.slice(0, conversationLimit)
+  conversationRead.status = { ...conversationRead.status, count: conversationRead.data.length }
   sourceStatus.conversation = conversationRead.status
   // Validator expects oldest-first; getJobConversation returns DESC.
   const conversationAsc = [...conversationRead.data].reverse()
@@ -16860,6 +16908,7 @@ async function assembleJobDossier(client: any, body: any) {
     invoices: { ok: invoicesRead.status.ok, rows: invoicesRead.data },
     assignments: { ok: assignmentsRead.status.ok, rows: assignmentsRead.data },
     conversation: { ok: conversationRead.status.ok, rows: conversationRead.data },
+    contactWindow: { ok: conversationRead.status.ok, rows: conversationWindow },
     facts: { ok: factsRead.status.ok, rows: currentFacts },
     briefs: { ok: briefsRead.status.ok, rows: briefsRead.data },
     visitOutcomes: { ok: visitOutcomesRead.status.ok, rows: visitOutcomesRead.data },

@@ -69,6 +69,15 @@ function client() {
         gt() {
           return q;
         },
+        is() {
+          return q;
+        },
+        not() {
+          return q;
+        },
+        or() {
+          return q;
+        },
         contains() {
           return q;
         },

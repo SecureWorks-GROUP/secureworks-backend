@@ -271,7 +271,12 @@ Deno.test("state card: facts and a current brief are reported, the brief is read
   );
   assert(
     card.lines.includes(
-      "Newest contact: text from the customer on 4 Oct 2026.",
+      "Newest contact with the customer: text from the customer on 4 Oct 2026.",
+    ),
+  );
+  assert(
+    card.lines.includes(
+      "Last told the customer: nothing from us to the customer in the messages read.",
     ),
   );
   assert(
@@ -939,14 +944,14 @@ Deno.test("dossier: a crew text on the job is internal: crew and never the newes
   );
   assert(
     d.state.lines.includes(
-      "Newest contact: text from the customer on 4 Oct 2026.",
+      "Newest contact with the customer: text from the customer on 4 Oct 2026.",
     ),
     `state lines: ${JSON.stringify(d.state.lines)}`,
   );
   assertEquals(client.writes, []);
 });
 
-Deno.test("state card: newest contact names a supplier or builder, never calls them the customer", () => {
+Deno.test("state card: a supplier or builder is never the newest contact with the customer", () => {
   const card = buildJobStateCard(baseInput({
     conversation: {
       ok: true,
@@ -970,10 +975,9 @@ Deno.test("state card: newest contact names a supplier or builder, never calls t
       ],
     },
   }));
-  assert(
-    card.lines.includes("Newest contact: email from a supplier on 4 Oct 2026."),
-    JSON.stringify(card.lines),
-  );
+  const none =
+    "No contact with the customer seen for this job (only internal or other-party messages).";
+  assert(card.lines.includes(none), JSON.stringify(card.lines));
   const out = buildJobStateCard(baseInput({
     conversation: {
       ok: true,
@@ -988,10 +992,5 @@ Deno.test("state card: newest contact names a supplier or builder, never calls t
       }],
     },
   }));
-  assert(
-    out.lines.includes(
-      "Newest contact: email from us to the insurer or builder on 4 Oct 2026.",
-    ),
-    JSON.stringify(out.lines),
-  );
+  assert(out.lines.includes(none), JSON.stringify(out.lines));
 });

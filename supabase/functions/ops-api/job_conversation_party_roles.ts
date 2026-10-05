@@ -15,6 +15,7 @@ import {
   type MessagePartyRoles,
   readMessagePartyRoles,
 } from "../_shared/evidence/party_roles.ts";
+import { businessEventTimelineMessage } from "./job_conversation_timeline.ts";
 
 /** The business_events columns the conversation reads, the role keys included. */
 export const CONVERSATION_EVENT_SELECT =
@@ -34,53 +35,14 @@ export function conversationRoleFields(roles: MessagePartyRoles) {
   };
 }
 
-/** One business_events row as a conversation message. */
+/**
+ * One business_events row as a conversation message, through the job read's
+ * one mapper (job_conversation_timeline.ts), which carries these role fields.
+ * Without the customer's addresses an email's customer_party is unknown.
+ */
 // deno-lint-ignore no-explicit-any
 export function businessEventConversationMessage(r: any, jobId: string) {
-  // deno-lint-ignore no-explicit-any
-  const p: any = r?.payload || {};
-  const eventType = String(r?.event_type || "");
-  const channel: string = eventType.includes("sms")
-    ? "sms"
-    : eventType.includes("call")
-    ? "call"
-    : eventType.includes("note")
-    ? "note"
-    : "email";
-  const providerDirection: string = eventType.endsWith("_in") ||
-      eventType === "client.reply" || eventType === "ghl.note_added" ||
-      eventType === "supplier.email_in"
-    ? "inbound"
-    : "outbound";
-  const roles = readMessagePartyRoles({
-    party_roles: r?.party_roles ?? null,
-    audience: r?.audience ?? null,
-    recipient_role: r?.recipient_role ?? null,
-  });
-  const body = String(
-    p.body || p.text || p.message || p.note_preview || p.note_text ||
-      p.body_preview || "",
-  );
-  return {
-    id: `bev:${r.id}`,
-    job_id: jobId,
-    channel,
-    // An internal row is never inbound or outbound customer traffic.
-    direction: roles.internal ? "internal" : providerDirection,
-    provider_direction: providerDirection,
-    occurred_at: r.occurred_at,
-    author: p.from || p.sender_name || p.added_by || null,
-    body,
-    preview: body.slice(0, 500),
-    subject: p.subject || null,
-    source_system: "business_events",
-    source_ref: r.id,
-    attribution_status: r.attribution_status ?? null,
-    attribution_step: r.attribution_step ?? null,
-    placement_rule: r.placement_rule ?? null,
-    ...conversationRoleFields(roles),
-    ...(roles.internal ? { label: roles.label } : {}),
-  };
+  return businessEventTimelineMessage(r, jobId, new Set());
 }
 
 /** The dossier's raw business_events columns, with the role keys aliased in. */
