@@ -2217,6 +2217,52 @@ BEGIN
 END $c$;
 ROLLBACK;
 
+-- 26. A payment closes only on a PAID invoice, at its paid day (Perth midnight, the
+-- timeline's paid line); an issued invoice not yet paid never closes a payment,
+-- though it closes invoice_issued; in an item and in a transition.
+BEGIN;
+DO $c$
+DECLARE w uuid; r1 uuid; cl jsonb; res jsonb; k text; paid_day date := pg_temp.lg_today() - 2;
+ x_auth uuid := gen_random_uuid(); x_paid uuid := gen_random_uuid(); x_nodate uuid := gen_random_uuid();
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ w := pg_temp.lg_job('SWF-99403');
+ r1 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'I will pay the deposit and the balance this week, send the invoice', '6 days', 'customer');
+ INSERT INTO public.xero_invoices (id, org_id, xero_invoice_id, invoice_type, job_id, invoice_number, status, invoice_date, fully_paid_on, created_at, updated_at)
+ VALUES (x_auth, '00000000-0000-0000-0000-000000000001', 'xi-' || x_auth, 'ACCREC', w, 'INV-9401', 'AUTHORISED', pg_temp.lg_today() - 5, NULL,
+         now() - interval '5 days', now()),
+        (x_paid, '00000000-0000-0000-0000-000000000001', 'xi-' || x_paid, 'ACCREC', w, 'INV-9402', 'PAID', pg_temp.lg_today() - 5, paid_day,
+         now() - interval '5 days', now()),
+        (x_nodate, '00000000-0000-0000-0000-000000000001', 'xi-' || x_nodate, 'ACCREC', w, 'INV-9403', 'PAID', pg_temp.lg_today() - 5, NULL,
+         now() - interval '5 days', now());
+ cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('pay_by_unpaid', 'request', 'closed', 'customer', 'us', 'Deposit by an unpaid invoice', pg_temp.lg_cite(r1, 'I will pay the deposit'),
+   jsonb_build_object('closes_on', 'payment', 'closed_by', pg_temp.lg_cite(x_auth, NULL, 'xero_invoices'))),
+  pg_temp.lg_it('pay_by_paid', 'request', 'closed', 'customer', 'us', 'Balance paid', pg_temp.lg_cite(r1, 'the balance this week'),
+   jsonb_build_object('closes_on', 'payment', 'closed_by', pg_temp.lg_cite(x_paid, NULL, 'xero_invoices'))),
+  pg_temp.lg_it('pay_no_date', 'request', 'closed', 'customer', 'us', 'Paid with no paid day', pg_temp.lg_cite(r1, 'the balance this week'),
+   jsonb_build_object('closes_on', 'payment', 'closed_by', pg_temp.lg_cite(x_nodate, NULL, 'xero_invoices'))),
+  pg_temp.lg_it('inv_by_auth', 'request', 'closed', 'customer', 'us', 'Invoice sent', pg_temp.lg_cite(r1, 'send the invoice'),
+   jsonb_build_object('closes_on', 'invoice_issued', 'closed_by', pg_temp.lg_cite(x_auth, NULL, 'xero_invoices'))),
+  pg_temp.lg_it('pay_open', 'request', 'open', 'customer', 'us', 'Deposit promised', pg_temp.lg_cite(r1, 'I will pay the deposit'),
+   '{"closes_on":"payment"}')), '[]', 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, 'pay_by_unpaid') = 'closing_not_issued' AND NOT pg_temp.lg_accepted(res, 'pay_by_unpaid'),
+  'an unpaid invoice never closes a payment: ' || res::text);
+ PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, 'pay_no_date') = 'closing_not_issued', 'a paid invoice with no paid day does not close a payment: ' || res::text);
+ PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, 'pay_by_paid') AND pg_temp.lg_accepted(res, 'inv_by_auth') AND pg_temp.lg_accepted(res, 'pay_open'),
+  'a paid invoice closes a payment; an issued one an invoice: ' || res::text);
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'pay_by_paid')) = (paid_day::timestamp AT TIME ZONE 'Australia/Perth'), 'a payment closes at its paid day');
+ k := pg_temp.lg_key(res, 'pay_open');
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, '[]', jsonb_build_array(
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(x_auth, NULL, 'xero_invoices')),
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(x_paid, NULL, 'xero_invoices'))), 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert((res ->> 'transitions_accepted')::integer = 1 AND res -> 'transitions_refused' -> 0 ->> 'code' = 'closing_not_issued',
+  'a transition closes a payment on a paid invoice only: ' || res::text);
+END $c$;
+ROLLBACK;
+
 -- 16. Rollback order (rev-backend P1-8). The admission's ledger branch reads
 -- plain values, so no other phase depends on the ledger tables: with the
 -- settings table gone, attribution and extraction are still admitted.
