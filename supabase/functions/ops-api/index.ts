@@ -33203,11 +33203,12 @@ export async function createAssignment(client: any, body: any) {
 
   // Ghost observer auto-mirror (Captain 2026-09-17): "repair works that are
   // scheduled need to be seen by Shaun as a ghost assignment too, just as any
-  // other job would." Applies to every job type — no vertical filtering. Only
-  // a genuine, dated, real-assignee crew row mirrors; an observer/ghost
-  // placeholder or a planning entry (meeting/reminder) never does, and the
-  // ops manager assigning HIMSELF needs no watcher row. Non-blocking: a
-  // mirror failure must never fail or delay the real assignment write.
+  // other job would." Shaun watches every job type; Nithin watches patio
+  // only (Captain 2026-10-05, see GHOST_WATCHERS). Only a genuine, dated,
+  // real-assignee crew row mirrors; an observer/ghost placeholder or a
+  // planning entry (meeting/reminder) never does, and a watcher assigned as
+  // real crew needs no watcher row. Non-blocking: a mirror failure must
+  // never fail or delay the real assignment write.
   try {
     if (isGenuineCrewAssignmentRow(data) && data?.user_id && data?.scheduled_date) {
       await ensureGhostObserverMirror(client, {
