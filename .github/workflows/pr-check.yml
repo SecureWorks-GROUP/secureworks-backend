@@ -358,6 +358,14 @@ jobs:
             supabase/functions/xero-sync/invoice_evidence_place_test.ts \
             supabase/functions/ops-api/invoice_evidence_writers_test.ts
 
+      # The email reader (EM2) and its group history walk (W7): cursor
+      # handling, the restart loop of 5 Oct 2026 and resume-where-it-stopped,
+      # over fake Graph reads and a fake run ledger. No network.
+      - name: Test the Outlook email reader
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/outlook-mail-capture/
+
       - name: Test GHL webhook receiver auth and receipts
         run: |
           deno test --allow-read --allow-env \

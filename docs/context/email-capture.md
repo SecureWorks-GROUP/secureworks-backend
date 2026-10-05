@@ -136,7 +136,7 @@ role, or the server key in `x-api-key`):
 |---|---|---|
 | `poll` | each selected source since its pair cursor (first run: 30 minutes back; caught up: 10 minutes overlap; backlog: exactly from the cursor) | `outlook_<key>` |
 | `sweep` | the last 48 hours of one or all sources; inserts count as `sweep_misses` | `outlook_sweep_<key>` |
-| `history` | one source, `[from, to)`, at most 60 days back, `capture_mode: backfill`, only mail that names a live job's number or involves a live job's client email (captain ruling 24 Sep 2026, via `context_email_history_scope()`); a run cut by its time budget resumes on the next call with the same window | `outlook_history_<key>` |
+| `history` | one source, `[from, to)`, at most 60 days back, `capture_mode: backfill`, only mail that names a live job's number or involves a live job's client email (captain ruling 24 Sep 2026, via `context_email_history_scope()`); a run cut by its time budget resumes on the next call with the same window end (`to`), a group by its conversation walk (W7) | `outlook_history_<key>` |
 
 User mailboxes are read whole (every folder, read or unread, Sent Items
 included; Junk, Drafts and Outbox skipped). Groups are read through
@@ -169,11 +169,29 @@ one `context_email_history_plan` row per selected source with a window fixed at
 its first call (that minute less 59 days, to that minute), posts one `history`
 call for the first source not yet finished (none while its run is running),
 marks a source succeeded when the reader records a `succeeded` run for exactly
-that window, gives up after 288 calls, and posts nothing once every source is
-done. On each success it lists the loaded jobs for reading with
+that window, and posts nothing once every source is done. On each success it
+lists the loaded jobs for reading with
 `context_catchup_list_backfill('outlook-mail-capture', since, false, ...)`, the
 one re-list for history loads (backfill rows never wake a read). Status:
 `context_email_history_status()`.
+
+Progress (W7, `20261006030000`): the tick judges each finished run once; a run
+moved when it succeeded or `counts.progressed > 0`. A source with 3 calls since
+its last move is `stalled` (reason: the last run's error code, `no_progress`,
+or `no_run`), with a database WARNING, and the next source is called at once;
+a stalled source is tried again 6 hours later, after pending and loading
+sources. There is no call limit (B-1's 288-call give-up is gone). The status
+read lists every stalled or given-up source under `attention`, and `finished`
+is false while any source is stalled. A group mailbox's history is walked
+conversation by conversation, newest first, and every run records where it
+stopped in `cursor.group`, so the next run continues there (see the header of
+`outlook-mail-capture/capture.ts`). Why: on 5 Oct 2026 the fencing group
+re-read its newest 400 conversations every 5 minutes for a day, saved nothing
+and held the eight mailboxes behind it. Read-only check:
+`scripts/context-email-history-check.sql`; after deploy, a fencing row that B-1
+gave up needs `scripts/context-email-history-fencing-reset.sql` (dry run;
+running it for real needs the owner's go), undo
+`scripts/context-email-history-fencing-reset-undo.sql`.
 
 Not yet built: `inbox_events` sighting rows (the old path still owns that table
 until the reader-move slice EM-R1), the tool-send row (EM-TOOL), the legacy
