@@ -102,6 +102,14 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 
 import { isCurrentContextFact } from './context_visibility.ts'
 import { dispatchProposedSmsWithReceipt } from './proposed_sms_receipt.ts'
+import {
+  addDays as recurrenceAddDays,
+  daysBetween as recurrenceDaysBetween,
+  expandRecurrenceDates,
+  isIsoDate as isRecurrenceIsoDate,
+  normaliseRecurrenceRule,
+  RecurrenceRuleError,
+} from './calendar_recurrence.ts'
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 // Pin the CDN dependency so CI import-resolution does not first resolve the
@@ -8070,6 +8078,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           assignmentId: body.assignmentId || body.assignment_id || body.id,
         })
         return json(await deleteAssignment(client, body))
+      }
+      // Recurring calendar series (ops.html "this / this and future / all"
+      // dialog). Same gate as a single assignment write; an org-event series
+      // (holidays / company days) is checked with no job, so only the
+      // dashboard key or a dispatcher role passes.
+      case 'delete_recurring_events':
+      case 'update_recurring_events': {
+        const isOrgEvent = String(body.event_type || '').toLowerCase() === 'org_event'
+        await assertAssignmentMutationAuthz(client, authMode, authUser, {
+          assignmentId: isOrgEvent ? null : (body.event_id || null),
+        })
+        return json(action === 'delete_recurring_events'
+          ? await deleteRecurringEvents(client, body)
+          : await updateRecurringEvents(client, body))
       }
       // Ghost observer auto-mirror backfill (Captain 2026-09-17): mirrors a
       // Shaun ghost onto every non-cancelled, non-ghost, genuine crew
@@ -17195,18 +17217,42 @@ async function createOrgEvent(client: any, body: any) {
   if (!title || !event_date || !event_type) throw new Error('title, event_date, and event_type required')
   if (!['public_holiday', 'company_day'].includes(event_type)) throw new Error('event_type must be public_holiday or company_day')
 
-  const { data, error } = await client.from('org_events').insert({
+  // "Repeat" in the Add Event modal: one org_events row per occurrence, all
+  // sharing a recurrence_group_id so the series can be edited/deleted as one.
+  const rule = parseRecurrenceRuleOr400(body.recurrence_rule ?? body.recurrenceRule)
+  if (!rule) {
+    const { data, error } = await client.from('org_events').insert({
+      org_id: DEFAULT_ORG_ID,
+      title,
+      event_date,
+      event_end: event_end || null,
+      event_type,
+      description: description || null,
+      visible_to_trades: visible_to_trades !== false,
+    }).select().single()
+
+    if (error) throw error
+    return data
+  }
+
+  const dates = expandRecurrenceOr400(event_date, rule)
+  const spanDays = event_end ? recurrenceDaysBetween(event_date, event_end) : null
+  if (spanDays !== null && spanDays < 0) throw new ApiError('event_end is before event_date', 400)
+  const groupId = crypto.randomUUID()
+  const rows = dates.map((d) => ({
     org_id: DEFAULT_ORG_ID,
     title,
-    event_date,
-    event_end: event_end || null,
+    event_date: d,
+    event_end: spanDays !== null ? recurrenceAddDays(d, spanDays) : null,
     event_type,
     description: description || null,
     visible_to_trades: visible_to_trades !== false,
-  }).select().single()
-
+    recurrence_group_id: groupId,
+    recurrence_rule: rule,
+  }))
+  const { data, error } = await client.from('org_events').insert(rows).select('id, event_date')
   if (error) throw error
-  return data
+  return { ...(data?.[0] || {}), recurrence_group_id: groupId, count: data?.length ?? rows.length }
 }
 
 async function deleteOrgEvent(client: any, body: any) {
@@ -32935,7 +32981,15 @@ export async function createAssignment(client: any, body: any) {
 
   const jId = jobId || job_id
   const sDate = scheduledDate || scheduled_date || date
-  if (!jId || !sDate) throw new Error('jobId and scheduledDate required')
+
+  // Calendar planning entries: an entry with no job (a meeting, "Team
+  // meeting", "Training day") or one that repeats. Neither is a crew
+  // allocation, so they take their own path: no SMS, no job status change,
+  // no GHL push. Everything below this line is the job allocation path.
+  if (!jId || wantsRecurrence(body.recurrence_rule ?? body.recurrenceRule)) {
+    return await createPlanningEntries(client, body)
+  }
+  if (!sDate) throw new Error('jobId and scheduledDate required')
 
   // CP1 fold-forward (calendar-overhaul Feature 2): a NEW assignment must carry
   // a REAL crew member. Trade myJobs filters .eq('user_id', userId), so a
@@ -33525,6 +33579,212 @@ export async function deleteAssignment(client: any, body: any) {
   }
 
   return { success: true }
+}
+
+// ── Calendar planning entries + recurring series ──────────────────────────
+// Meetings, reminders and job-less labels ("Team meeting") are planning
+// entries on the ops calendar, not crew allocations. The Add Event modal can
+// make them repeat; a series is one job_assignments row per occurrence, all
+// sharing a recurrence_group_id, and the "this / this and future / all"
+// dialog edits or deletes them through the two actions below.
+
+const PLANNING_ASSIGNMENT_TYPES = new Set(['meeting', 'reminder'])
+
+// True when the request asks for a repeat. A malformed rule also counts, so
+// it reaches createPlanningEntries and fails there with a clear 400 rather
+// than silently creating a single event.
+function wantsRecurrence(raw: unknown): boolean {
+  try { return normaliseRecurrenceRule(raw) !== null } catch { return true }
+}
+
+function parseRecurrenceRuleOr400(raw: unknown) {
+  try { return normaliseRecurrenceRule(raw) } catch (e) {
+    if (e instanceof RecurrenceRuleError) throw new ApiError(e.message, 400)
+    throw e
+  }
+}
+
+function expandRecurrenceOr400(startDate: string, rule: NonNullable<ReturnType<typeof normaliseRecurrenceRule>>): string[] {
+  let dates: string[]
+  try { dates = expandRecurrenceDates(startDate, rule) } catch (e) {
+    if (e instanceof RecurrenceRuleError) throw new ApiError(e.message, 400)
+    throw e
+  }
+  if (!dates.length) throw new ApiError('The repeat settings do not produce any dates', 400)
+  return dates
+}
+
+export async function createPlanningEntries(client: any, body: any) {
+  const jId = body.jobId || body.job_id || null
+  const sDate = body.scheduledDate || body.scheduled_date || body.date
+  const sEnd = body.scheduledEnd || body.scheduled_end || null
+  const type = String(body.assignmentType || body.assignment_type || 'meeting').toLowerCase()
+  const label = String(body.label || '').trim() || null
+  const userId = body.userId || body.user_id || null
+
+  if (!isRecurrenceIsoDate(sDate)) throw new ApiError('scheduledDate required (YYYY-MM-DD)', 400)
+  if (!jId && !label) throw new ApiError('A title is required for an event that is not linked to a job', 400)
+  // Same rule as the allocation path: only meetings/reminders may be
+  // name-only, because Trade myJobs filters on user_id.
+  if (!userId && !PLANNING_ASSIGNMENT_TYPES.has(type)) {
+    throw new ApiError('A real crew member is required (userId): name-only assignments are invisible in the Trade App. Pick a crew member from the list.', 400)
+  }
+
+  const rule = parseRecurrenceRuleOr400(body.recurrence_rule ?? body.recurrenceRule)
+  if (rule && !PLANNING_ASSIGNMENT_TYPES.has(type)) {
+    throw new ApiError('Only meetings and reminders can repeat. Book crew work day by day.', 400)
+  }
+  const dates = rule ? expandRecurrenceOr400(sDate, rule) : [sDate]
+
+  // A multi-day entry keeps the same length on every occurrence.
+  const spanDays = sEnd ? recurrenceDaysBetween(sDate, sEnd) : null
+  if (spanDays !== null && (!isRecurrenceIsoDate(sEnd) || spanDays < 0)) {
+    throw new ApiError('scheduledEnd must be a date on or after scheduledDate', 400)
+  }
+
+  const confStatus = body.confirmationStatus || body.confirmation_status || 'tentative'
+  const finalConfStatus = ['placeholder', 'tentative', 'confirmed'].includes(confStatus) ? confStatus : 'tentative'
+  const groupId = rule ? crypto.randomUUID() : null
+
+  const rows = dates.map((d) => ({
+    job_id: jId,
+    user_id: userId,
+    scheduled_date: d,
+    scheduled_end: spanDays !== null ? recurrenceAddDays(d, spanDays) : null,
+    start_time: body.startTime || body.start_time || null,
+    end_time: body.endTime || body.end_time || null,
+    role: body.role || 'lead_installer',
+    notes: body.notes || null,
+    assignment_type: type,
+    crew_name: body.crewName || body.crew_name || null,
+    label,
+    visible_to_trades: body.visible_to_trades === true,
+    status: 'scheduled',
+    confirmation_status: finalConfStatus,
+    recurrence_group_id: groupId,
+    recurrence_rule: rule,
+  }))
+
+  const { data, error } = await client.from('job_assignments').insert(rows).select()
+  if (error) throw error
+  const created = data || []
+  const first = created[0] || null
+
+  if (jId && first) {
+    await client.from('job_events').insert({
+      job_id: jId,
+      event_type: 'assignment_created',
+      detail_json: {
+        assignment_id: first.id, date: sDate, count: created.length,
+        recurrence_group_id: groupId, operator: body.operator_email || body.user_email || null,
+      },
+    })
+  }
+
+  logBusinessEvent(client, {
+    event_type: 'schedule.planning_entry_created',
+    entity_type: 'crew_assignment',
+    entity_id: first?.id || groupId || 'unknown',
+    ...(jId ? { job_id: jId } : {}),
+    payload: {
+      label, assignment_type: type, crew_name: first?.crew_name || null,
+      first_date: dates[0], last_date: dates[dates.length - 1], count: created.length,
+      recurrence_group_id: groupId, recurrence_rule: rule,
+    },
+    metadata: { operator: body.operator_email || body.user_email || null },
+  })
+
+  return { assignment: first, count: created.length, recurrence_group_id: groupId }
+}
+
+type RecurringScope = 'this' | 'this_and_future' | 'all'
+
+// Resolves which rows of a series a scoped edit/delete touches. Assignment
+// series are fenced to meetings/reminders: a recurrence_group_id can never
+// reach real crew work, even if one were somehow set on it.
+async function resolveRecurringTarget(client: any, body: any) {
+  const groupId = String(body.recurrence_group_id || '').trim()
+  const scope = String(body.scope || '').toLowerCase() as RecurringScope
+  const eventId = body.event_id ? String(body.event_id) : null
+  const isOrgEvent = String(body.event_type || 'assignment').toLowerCase() === 'org_event'
+  if (!groupId) throw new ApiError('recurrence_group_id required', 400)
+  if (!['this', 'this_and_future', 'all'].includes(scope)) {
+    throw new ApiError("scope must be 'this', 'this_and_future' or 'all'", 400)
+  }
+  if (scope !== 'all' && !eventId) throw new ApiError('event_id required for this scope', 400)
+
+  const table = isOrgEvent ? 'org_events' : 'job_assignments'
+  const dateCol = isOrgEvent ? 'event_date' : 'scheduled_date'
+
+  let anchor: any = null
+  if (eventId) {
+    const { data, error } = await client.from(table)
+      .select(`id, recurrence_group_id, ${dateCol}`).eq('id', eventId).maybeSingle()
+    if (error) throw error
+    if (!data) throw new ApiError('Event not found', 404)
+    if (String(data.recurrence_group_id || '') !== groupId) {
+      throw new ApiError('That event is not part of this series', 409)
+    }
+    anchor = data
+  }
+
+  const scopeQuery = (q: any) => {
+    q = q.eq('recurrence_group_id', groupId)
+    q = isOrgEvent ? q.eq('org_id', DEFAULT_ORG_ID) : q.in('assignment_type', [...PLANNING_ASSIGNMENT_TYPES])
+    if (scope === 'this') q = q.eq('id', eventId)
+    if (scope === 'this_and_future') q = q.gte(dateCol, anchor[dateCol])
+    return q
+  }
+  return { groupId, scope, eventId, isOrgEvent, table, scopeQuery }
+}
+
+export async function deleteRecurringEvents(client: any, body: any) {
+  const t = await resolveRecurringTarget(client, body)
+  const { data, error } = await t.scopeQuery(client.from(t.table).delete()).select('id')
+  if (error) throw error
+  const deleted = (data || []).length
+
+  logBusinessEvent(client, {
+    event_type: 'schedule.recurring_events_deleted',
+    entity_type: t.isOrgEvent ? 'org_event' : 'crew_assignment',
+    entity_id: t.eventId || t.groupId,
+    payload: { recurrence_group_id: t.groupId, scope: t.scope, deleted },
+    metadata: { operator: body.operator_email || body.user_email || null },
+  })
+  return { success: true, deleted }
+}
+
+// Fields a series edit may change. Dates are deliberately excluded: moving a
+// whole series is a delete + re-create, not a bulk shift.
+const RECURRING_ASSIGNMENT_EDITABLE = ['label', 'start_time', 'end_time', 'notes', 'visible_to_trades']
+const RECURRING_ORG_EVENT_EDITABLE = ['title', 'description', 'visible_to_trades']
+
+export async function updateRecurringEvents(client: any, body: any) {
+  const updates = body.updates && typeof body.updates === 'object' && !Array.isArray(body.updates) ? body.updates : {}
+  const isOrgEvent = String(body.event_type || 'assignment').toLowerCase() === 'org_event'
+  const allowed = isOrgEvent ? RECURRING_ORG_EVENT_EDITABLE : RECURRING_ASSIGNMENT_EDITABLE
+  const keys = Object.keys(updates)
+  if (!keys.length) throw new ApiError('updates required', 400)
+  const rejected = keys.filter((k) => !allowed.includes(k))
+  if (rejected.length) {
+    throw new ApiError(`Cannot change ${rejected.join(', ')} across a series. Allowed: ${allowed.join(', ')}`, 400)
+  }
+
+  const t = await resolveRecurringTarget(client, body)
+  const patch: Record<string, any> = {}
+  for (const k of keys) patch[k] = updates[k] === '' ? null : updates[k]
+  const { data, error } = await t.scopeQuery(client.from(t.table).update(patch)).select('id')
+  if (error) throw error
+  const updated = (data || []).length
+
+  logBusinessEvent(client, {
+    event_type: 'schedule.recurring_events_updated',
+    entity_type: t.isOrgEvent ? 'org_event' : 'crew_assignment',
+    entity_id: t.eventId || t.groupId,
+    payload: { recurrence_group_id: t.groupId, scope: t.scope, updated, changes: patch },
+    metadata: { operator: body.operator_email || body.user_email || null },
+  })
+  return { success: true, updated }
 }
 
 // ── Named lead installer ───────────────────────────────────────────────────
