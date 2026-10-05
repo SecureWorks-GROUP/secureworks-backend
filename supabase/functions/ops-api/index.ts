@@ -13908,6 +13908,12 @@ const CAL_LIGHT_COLUMNS = [
   // Lets the calendar Divisions filter recognise family-tagged repairs the same
   // way the Repairs board and make-safe board already do. See AGENTS.md.
   'job_family',
+  // label: the title of a job-less entry (meeting, reminder, "Team meeting").
+  // Without it every meeting renders as "Internal", and the Schedule view, which
+  // groups job-less entries by label + date, merges same-day meetings into one bar.
+  // recurrence_group_id: drives the series icon and the "this / future / all"
+  // dialog when a recurring meeting is edited or deleted.
+  'label', 'recurrence_group_id',
 ]
 
 export const TRADE_CALENDAR_SCHEMA = 'trade-calendar.v1'
