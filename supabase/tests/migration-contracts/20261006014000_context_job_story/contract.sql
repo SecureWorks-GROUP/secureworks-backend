@@ -66,6 +66,51 @@ BEGIN
     OR s->'meta'->'ledger'->'unread_rows' <> 'null'::jsonb THEN
   RAISE EXCEPTION 'story contract: an unshown shadow must read not live yet: % %', s->'not_known', s->'meta'->'ledger';
  END IF;
+ -- The launch state: the reader is off and the customer wrote last. The candidate
+ -- reaches the now line and whose move is unclear, never "Nothing open on record";
+ -- the phase words never say whose move it is.
+ s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('loops', jsonb_build_array(jsonb_build_object('rule', 'R5_customer_wrote_last', 'loop_key', 'R5_customer_wrote_last:e1',
+          'shown_as', 'candidate', 'owner', 'us', 'counterparty', 'customer', 'what', 'Customer texted and nothing went back',
+          'opened_at', '2026-10-01T01:00:00Z', 'about_key', 'contact:customer-reply', 'source_table', 'business_events',
+          'source_id', 'e1000000-0000-4000-8000-000000000001'))),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' <> 'unknown' OR position('The customer wrote last on Thu 1 Oct; not read yet' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' LIKE '%Nothing open on record%' OR s->'now'->>'line' LIKE '%waiting on the customer%'
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%') THEN
+  RAISE EXCEPTION 'story contract: with the reader off, customer wrote last must reach the now line: % / %', s->'now'->>'whose_move', s->'now'->>'line';
+ END IF;
+ -- A reading that never admitted the row (it is not in the read set) has not read it
+ -- either, even when its evidence_until is later.
+ s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('loops', jsonb_build_array(jsonb_build_object('rule', 'R5_customer_wrote_last', 'loop_key', 'R5_customer_wrote_last:e1',
+          'shown_as', 'candidate', 'owner', 'us', 'counterparty', 'customer', 'what', 'Customer texted and nothing went back',
+          'opened_at', '2026-10-01T01:00:00Z', 'about_key', 'contact:customer-reply', 'source_table', 'business_events',
+          'source_id', 'e1000000-0000-4000-8000-000000000001'))),
+        '{"status":"live","generation":{"id":"g1","evidence_until":"2026-10-05T00:00:00Z"},"items":[],"transitions":[],"unread_rows":0,"unread_ids":[],"read_ids":["e1000000-0000-4000-8000-000000000009"]}'::jsonb,
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' <> 'unknown' OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k
+      WHERE k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%') THEN
+  RAISE EXCEPTION 'story contract: a row outside the read set must never be called judged: % / %', s->'checks', s->'now';
+ END IF;
+ -- With the row in the read set the reader judged it: a check, not the now line.
+ s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('loops', jsonb_build_array(jsonb_build_object('rule', 'R5_customer_wrote_last', 'loop_key', 'R5_customer_wrote_last:e1',
+          'shown_as', 'candidate', 'owner', 'us', 'counterparty', 'customer', 'what', 'Customer texted and nothing went back',
+          'opened_at', '2026-10-01T01:00:00Z', 'about_key', 'contact:customer-reply', 'source_table', 'business_events',
+          'source_id', 'e1000000-0000-4000-8000-000000000001'))),
+        '{"status":"live","generation":{"id":"g1","evidence_until":"2026-10-05T00:00:00Z"},"items":[],"transitions":[],"unread_rows":0,"unread_ids":[],"read_ids":["e1000000-0000-4000-8000-000000000001"]}'::jsonb,
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' <> 'nobody' OR s->'now'->>'line' LIKE '%wrote last%' OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k
+      WHERE k->>'what' LIKE 'Customer wrote last; the reader judged no reply is needed.%') THEN
+  RAISE EXCEPTION 'story contract: a row the reader read is judged by it: % / %', s->'checks', s->'now';
+ END IF;
+ -- Invoicing words follow the money: an invoiced status with nothing left to invoice is "Invoiced".
+ s := public.context_job_story_assemble('{"id":"x","status":"invoiced","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+        '{}'::jsonb, NULL, NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'phase' <> 'invoice' OR s->'now'->>'line' NOT LIKE 'Invoiced%' OR s->'now'->>'line' LIKE '%not fully invoiced%' THEN
+  RAISE EXCEPTION 'story contract: invoiced status must not say not fully invoiced unless the money does: %', s->'now'->>'line';
+ END IF;
 END $pure$;
 BEGIN;
 SET LOCAL session_replication_role = replica;
@@ -320,7 +365,9 @@ BEGIN
   RAISE EXCEPTION 'story contract: record_only must carry no ledger: % / %', s->'meta'->'ledger', s->'loops';
  END IF;
 
- -- a shadow generation asked for by id: R5 is demoted because the reader saw it and wrote no request
+ -- a shadow generation asked for by id: R5 stays a candidate (no reply-owed item), and
+ -- since job A's messages are not ledger evidence (no attribution confidence) the
+ -- reading never read the customer's text: never "judged", and the now line says so
  s := public.context_job_story(a, asof, '9a000000-0000-4000-8000-000000000002');
  IF s->'meta'->'ledger'->>'status' <> 'shadow' OR s->'phase_notes'->0->>'what' <> 'Shadow reading note' THEN
   RAISE EXCEPTION 'story contract: p_generation_id must show that generation: %', s->'meta'->'ledger';
@@ -328,8 +375,11 @@ BEGIN
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'R5_%';
  IF n <> 0 THEN RAISE EXCEPTION 'story contract: R5 must stay a candidate without a reply-owed item'; END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'checks') k
- WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; the reader judged no reply is needed.%';
- IF n <> 1 THEN RAISE EXCEPTION 'story contract: demoted R5 must say the reader judged no reply needed: %', s->'checks'; END IF;
+ WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
+ IF n <> 1 THEN RAISE EXCEPTION 'story contract: a row the reading never read is never judged by it: %', s->'checks'; END IF;
+ IF position('The customer wrote last on Thu 1 Oct; not read yet' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story contract: the now line must say the customer wrote last: %', s->'now'->>'line';
+ END IF;
 
  -- changes since an instant: the ledger transition after it
  s := public.context_job_story(a, asof, NULL, '2026-10-04 12:00Z');
@@ -351,6 +401,11 @@ BEGIN
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'checks') k
  WHERE k->>'rule' = 'C11_customer_mail_unanswered' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: unread candidate must say not yet read: %', s->'checks'; END IF;
+ -- no reader: the unanswered mail reaches the now line, and nobody's move is never claimed
+ IF s->'now'->>'whose_move' NOT IN ('us', 'unknown') OR position('The customer wrote last on Sat 3 Oct; not read yet' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' LIKE '%Nothing open on record%' OR s->'now'->>'line' LIKE '%waiting on the customer%' THEN
+  RAISE EXCEPTION 'story contract: job C now line must carry the unanswered mail: % / %', s->'now'->>'whose_move', s->'now'->>'line';
+ END IF;
  IF public.context_job_story(gen_random_uuid(), asof) IS NOT NULL THEN RAISE EXCEPTION 'story contract: unknown job must give NULL'; END IF;
 
  -- Ledger freshness is the reader's own: one message landed after the live reading

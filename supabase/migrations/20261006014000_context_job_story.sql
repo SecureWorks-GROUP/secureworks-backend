@@ -128,10 +128,12 @@ AS $fn$
         person_locked boolean, cites_ok boolean, cited jsonb)
  ),
  vis AS MATERIALIZED (SELECT li.* FROM li WHERE coalesce(li.cites_ok, true)),
- led AS (  -- the generation shown (a JSON null generation is none) and what its reader has not read yet
+ led AS (  -- the generation shown (a JSON null generation is none), what its reader has not read yet,
+           -- and the customer rows it has read (a candidate is judged only when its row is one)
   SELECT x.*,
          CASE WHEN x.gen IS NOT NULL THEN (inp.led->>'unread_rows')::integer END AS unread,
-         CASE WHEN x.gen IS NOT NULL THEN coalesce(inp.led->'unread_ids', '[]'::jsonb) END AS unread_ids
+         CASE WHEN x.gen IS NOT NULL THEN coalesce(inp.led->'unread_ids', '[]'::jsonb) END AS unread_ids,
+         CASE WHEN x.gen IS NOT NULL THEN coalesce(inp.led->'read_ids', '[]'::jsonb) END AS read_ids
   FROM inp, LATERAL (
    SELECT coalesce(nullif(inp.led->>'status', ''), 'none') AS status, nullif(inp.led->'generation', 'null'::jsonb) AS gen,
           (inp.led->'generation'->>'evidence_until')::timestamptz AS evidence_until,
@@ -340,24 +342,32 @@ AS $fn$
            l.since NULLS LAST, l.key) AS rank
   FROM loops0 l, inp
  ),
+ -- unpromoted R5 / C11 candidates, and whether the reading shown has read the row
+ -- (the row is in its read set: admitted to its evidence and landed by its evidence_until)
+ wr AS (
+  SELECT c.*, (led.gen IS NOT NULL AND coalesce(led.read_ids ? c.source_id, false)) AS read_by_reader
+  FROM cand c, led WHERE c.promoted_by IS NULL
+ ),
+ -- the customer wrote last and nobody has read it yet: the now line and whose move say so
+ wl AS (SELECT max(w.opened_at) AS at FROM wr w WHERE NOT w.read_by_reader HAVING count(*) > 0),
  -- checks: record checks, plus candidates nobody promoted
  checks AS (
   SELECT r.rule, r.what, jsonb_build_array(jsonb_build_object('t', r.source_table, 'id', r.source_id)) AS cites, r.opened_at
   FROM rl r WHERE r.shown_as = 'check'
   UNION ALL
   SELECT c.rule,
-         CASE WHEN led.status IN ('live', 'shadow', 'building') AND led.evidence_until IS NOT NULL AND led.evidence_until >= c.opened_at
-                   AND led.gen IS NOT NULL AND NOT coalesce(led.unread_ids ? c.source_id, false)
+         CASE WHEN c.read_by_reader
               THEN 'Customer wrote last; the reader judged no reply is needed. ' || c.what
               ELSE 'Customer wrote last; not yet read by the reader. ' || c.what END,
          jsonb_build_array(jsonb_build_object('t', c.source_table, 'id', c.source_id)), c.opened_at
-  FROM cand c, led WHERE c.promoted_by IS NULL
+  FROM wr c
  ),
  top AS (SELECT l.* FROM loops l ORDER BY l.rank LIMIT 1),
- -- whose move
+ -- whose move: ours when we owe something; unclear while the customer wrote last unread
  wm AS (
   SELECT CASE
           WHEN EXISTS (SELECT 1 FROM loops l WHERE l.owner = 'us') THEN 'us'
+          WHEN EXISTS (SELECT 1 FROM wl) THEN 'unknown'
           WHEN EXISTS (SELECT 1 FROM loops l WHERE l.owner = 'customer') THEN 'customer'
           WHEN EXISTS (SELECT 1 FROM loops l WHERE l.owner = 'third_party') THEN 'third_party'
           WHEN EXISTS (SELECT 1 FROM loops l) THEN 'unknown'
@@ -374,12 +384,18 @@ AS $fn$
  ),
  nowp AS (
   SELECT phs.phase, phs.phase_since_at,
+   -- phase words say where the job is, never whose move it is (the move words do);
+   -- invoicing and payment words follow the money, not the status
    CASE phs.phase
-    WHEN 'enquiry' THEN 'New enquiry' WHEN 'scope' THEN 'Scoping' WHEN 'quote' THEN 'Quoted, waiting on the customer'
-    WHEN 'accepted' THEN 'Accepted' WHEN 'deposit' THEN 'Waiting on the deposit' WHEN 'approvals' THEN 'In approvals'
+    WHEN 'enquiry' THEN 'New enquiry' WHEN 'scope' THEN 'Scoping' WHEN 'quote' THEN 'Quoted'
+    WHEN 'accepted' THEN 'Accepted' WHEN 'deposit' THEN 'Deposit stage' WHEN 'approvals' THEN 'In approvals'
     WHEN 'materials' THEN 'Materials being ordered' WHEN 'scheduled' THEN 'Scheduled' WHEN 'install' THEN 'Install under way'
-    WHEN 'complete' THEN 'Work complete' WHEN 'invoice' THEN 'Work done, not fully invoiced'
-    WHEN 'payment' THEN 'Work done, payment owing' WHEN 'rectification' THEN 'In rectification'
+    WHEN 'complete' THEN 'Work complete'
+    WHEN 'invoice' THEN CASE WHEN phs.uninvoiced AND phs.work_done_at IS NOT NULL THEN 'Work done, not fully invoiced'
+                             WHEN phs.uninvoiced THEN 'Not fully invoiced' ELSE 'Invoiced' END
+    WHEN 'payment' THEN CASE WHEN phs.owing AND phs.work_done_at IS NOT NULL THEN 'Work done, payment owing'
+                             WHEN phs.owing THEN 'Payment owing' ELSE 'Final payment stage' END
+    WHEN 'rectification' THEN 'In rectification'
     WHEN 'makesafe' THEN 'Make-safe in progress' ELSE 'In progress' END
    || coalesce(' since ' || to_char((phs.phase_since_at AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon')
                || CASE WHEN extract(year FROM (phs.phase_since_at AT TIME ZONE 'Australia/Perth')) <> extract(year FROM phs.today)
@@ -394,14 +410,19 @@ AS $fn$
    CASE WHEN coalesce(mt.nyi, 0) > 1 THEN to_char(mt.nyi, 'FM$999,999,990.00') || ' not yet invoiced' END AS nyi_words,
    CASE wm.whose WHEN 'us' THEN 'Our move' WHEN 'customer' THEN 'The customer''s move'
         WHEN 'third_party' THEN 'Waiting on another party' WHEN 'unknown' THEN 'Whose move is unclear'
-        ELSE CASE WHEN nx.b IS NOT NULL THEN 'Nothing open until the visit' ELSE 'Nothing open on record' END END AS move_words
+        ELSE CASE WHEN nx.b IS NOT NULL THEN 'Nothing open until the visit' ELSE 'Nothing open on record' END END AS move_words,
+   (SELECT 'the customer wrote last on ' || to_char((wl.at AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon')
+           || CASE WHEN extract(year FROM (wl.at AT TIME ZONE 'Australia/Perth')) <> extract(year FROM phs.today)
+                   THEN ' ' || extract(year FROM (wl.at AT TIME ZONE 'Australia/Perth')) ELSE '' END
+           || '; not read yet' FROM wl) AS wrote_words
   FROM phs, nx, mt, wm
  ),
  nowl AS (
   SELECT n.*, (SELECT string_agg(upper(left(x.s, 1)) || substr(x.s, 2), '. ' ORDER BY x.o) FROM (VALUES
            (1, n.phase_words || coalesce(': ' || n.next_words, '')),
            (2, nullif(concat_ws(', ', n.owing_words, n.draft_words, n.nyi_words), '')),
-           (3, n.move_words || coalesce(', ' || n.top_words, ''))) x(o, s) WHERE x.s IS NOT NULL) AS line0
+           (3, n.move_words || coalesce(', ' || n.top_words, '')),
+           (4, n.wrote_words)) x(o, s) WHERE x.s IS NOT NULL) AS line0
   FROM nowp n
  ),
  nowline AS (
@@ -668,11 +689,14 @@ AS $fn$
   WHERE x.job_id = p_job_id AND x.status IN ('building', 'shadow') AND NOT EXISTS (SELECT 1 FROM g)
   ORDER BY x.created_at DESC LIMIT 1
  ),
- unread AS (  -- what the shown generation's reader has not read: the store's own evidence
-              -- that landed after its evidence_until (nothing is read when no generation
-              -- is shown); copies are listed by id but not counted as new messages
-  SELECT r.src_id, r.copy_of FROM g CROSS JOIN LATERAL public.context_ledger_evidence_rows(ARRAY[g.job_id], p_as_of) r
-  WHERE g.evidence_until IS NULL OR r.landed_at > g.evidence_until
+ evr AS MATERIALIZED (  -- the store's own evidence against the shown generation's evidence_until:
+                       -- read when it landed by then (nothing is read when no generation is shown)
+  SELECT r.src_id, r.copy_of, r.direction, (g.evidence_until IS NOT NULL AND r.landed_at <= g.evidence_until) AS was_read
+  FROM g CROSS JOIN LATERAL public.context_ledger_evidence_rows(ARRAY[g.job_id], p_as_of) r
+ ),
+ unread AS (  -- what the shown generation's reader has not read; copies are listed by id
+              -- but not counted as new messages
+  SELECT e.src_id, e.copy_of FROM evr e WHERE NOT e.was_read
  ),
  it AS (
   SELECT i.*,
@@ -705,11 +729,14 @@ AS $fn$
                  FROM public.context_ledger_transitions t JOIN public.context_ledger_items i ON i.id = t.item_id
                  JOIN g ON g.id = t.generation_id), '[]'::jsonb),
   'unread_rows', CASE WHEN EXISTS (SELECT 1 FROM g) THEN (SELECT count(*)::integer FROM unread u WHERE u.copy_of IS NULL) END,
-  'unread_ids', CASE WHEN EXISTS (SELECT 1 FROM g) THEN coalesce((SELECT jsonb_agg(u.src_id::text ORDER BY u.src_id) FROM unread u), '[]'::jsonb) END
+  'unread_ids', CASE WHEN EXISTS (SELECT 1 FROM g) THEN coalesce((SELECT jsonb_agg(u.src_id::text ORDER BY u.src_id) FROM unread u), '[]'::jsonb) END,
+  -- the inbound rows it has read: the story says the reader judged a customer message only for these
+  'read_ids', CASE WHEN EXISTS (SELECT 1 FROM g) THEN coalesce((SELECT jsonb_agg(e.src_id::text ORDER BY e.src_id) FROM evr e
+                    WHERE e.was_read AND e.direction = 'inbound'), '[]'::jsonb) END
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_ledger(uuid, uuid, timestamptz) IS
- 'Job story (20261006014000): the ledger generation the story shows (live, or the one asked for in any status) with its items and transitions; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; both null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
+ 'Job story (20261006014000): the ledger generation the story shows (live, or the one asked for in any status) with its items and transitions; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; read_ids: the inbound evidence rows it has read (landed by its evidence_until), so a customer message is called judged only when the reader read it; all three null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
 
 -- 4. Evidence lanes, unplaced messages and the CRM contact: what the story must
 -- say it does not know. How far the reader has read is the ledger's (3), never
