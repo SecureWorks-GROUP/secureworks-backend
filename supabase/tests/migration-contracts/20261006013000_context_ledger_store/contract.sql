@@ -673,7 +673,7 @@ ROLLBACK;
 -- 7. The packet: admission, copies, caps, roles, update window, open items.
 BEGIN;
 DO $c$
-DECLARE p uuid; other uuid; q uuid; pk jsonb; ev jsonb; ids uuid[]; want uuid[]; gl uuid; t timestamptz; k integer;
+DECLARE p uuid; other uuid; q uuid; u uuid; pk jsonb; ev jsonb; ids uuid[]; want uuid[]; gl uuid; t timestamptz; k integer;
  p1 uuid; p2 uuid; p3 uuid; p4 uuid; p5 uuid; p6 uuid; p7 uuid; p8 uuid; p8b uuid; p8c uuid; p9 uuid; p10 uuid; p11 uuid; p12 uuid; p13 uuid;
  p14 uuid; i1 uuid; i1b uuid; i2 uuid; i3 uuid; i4 uuid; i5 uuid; i6 uuid; i7 uuid; i8 uuid; be5 uuid;
 BEGIN
@@ -795,21 +795,34 @@ BEGIN
   RAISE EXCEPTION 'ledger store contract: a packet for a missing job';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM <> 'context_ledger_packet_job_not_found' THEN RAISE; END IF; END;
  -- A call log says whether its transcript is on the job: the transcript names
- -- the call's GHL message id in payload.ghl_call_id (the call row's key is ghl:<id>).
- q := pg_temp.lg_job('SWF-94004');
+ -- the call's GHL message id in payload.ghl_call_id, or in its key ghltx:<id>
+ -- (the call row's key is ghl:<id>). A transcript on another job does not count.
+ q := pg_temp.lg_job('SWF-94004'); u := pg_temp.lg_job('SWF-94005');
  ids := ARRAY[pg_temp.lg_ev(q, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 120 seconds', '3 days', 'customer'),
               pg_temp.lg_ev(q, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 60 seconds', '2 days', 'customer'),
               pg_temp.lg_ev(q, 'call.transcript_completed', 'call', 'inbound', 'Customer: the gate is fine now.', '2 days 23 hours', NULL,
-               'job_customer', jsonb_build_object('ghl_call_id', 'CALLONE'))];
+               'job_customer', jsonb_build_object('ghl_call_id', 'CALLONE')),
+              pg_temp.lg_ev(q, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 90 seconds', '1 day', 'customer'),
+              pg_temp.lg_ev(q, 'call.transcript_completed', 'call', 'inbound', 'Customer: the posts arrived.', '23 hours', NULL),
+              pg_temp.lg_ev(q, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 30 seconds', '12 hours', 'customer'),
+              pg_temp.lg_ev(u, 'call.transcript_completed', 'call', 'inbound', 'Customer: about the other job.', '11 hours', NULL,
+               'job_customer', jsonb_build_object('ghl_call_id', 'CALLFOUR'))];
  PERFORM set_config('session_replication_role', 'replica', true);
  UPDATE public.business_events SET provider_message_id = 'ghl:CALLONE' WHERE id = ids[1];
  UPDATE public.business_events SET provider_message_id = 'ghl:CALLTWO' WHERE id = ids[2];
+ UPDATE public.business_events SET provider_message_id = 'ghl:CALLTHREE' WHERE id = ids[4];
+ UPDATE public.business_events SET provider_message_id = 'ghltx:CALLTHREE' WHERE id = ids[5];
+ UPDATE public.business_events SET provider_message_id = 'ghl:CALLFOUR' WHERE id = ids[6];
  PERFORM set_config('session_replication_role', 'origin', true);
  pk := public.context_ledger_packet(q);
  PERFORM pg_temp.lg_assert((SELECT (x ->> 'has_transcript')::boolean FROM jsonb_array_elements(pk -> 'evidence') x WHERE (x ->> 'id')::uuid = ids[1])
   AND NOT (SELECT (x ->> 'has_transcript')::boolean FROM jsonb_array_elements(pk -> 'evidence') x WHERE (x ->> 'id')::uuid = ids[2])
   AND (SELECT x -> 'has_transcript' FROM jsonb_array_elements(pk -> 'evidence') x WHERE (x ->> 'id')::uuid = ids[3]) = 'null'::jsonb,
   'has_transcript on call logs only: ' || (pk -> 'evidence')::text);
+ PERFORM pg_temp.lg_assert((SELECT (x ->> 'has_transcript')::boolean FROM jsonb_array_elements(pk -> 'evidence') x WHERE (x ->> 'id')::uuid = ids[4]),
+  'a transcript keyed ghltx:<id> links its call: ' || (pk -> 'evidence')::text);
+ PERFORM pg_temp.lg_assert(NOT (SELECT (x ->> 'has_transcript')::boolean FROM jsonb_array_elements(pk -> 'evidence') x WHERE (x ->> 'id')::uuid = ids[6]),
+  'a transcript on another job does not count: ' || (pk -> 'evidence')::text);
 END $c$;
 ROLLBACK;
 
@@ -1342,6 +1355,46 @@ BEGIN
  PERFORM pg_temp.lg_assert((SELECT jd.blocked_reason = 'backoff' FROM public.context_ledger_judge(ARRAY[j]) jd), 'a failure backs off');
 END $c$;
 ROLLBACK;
+BEGIN;
+DO $c$
+DECLARE j uuid; e uuid; cl jsonb; res jsonb; fin jsonb; g uuid; run uuid; tok uuid := gen_random_uuid();
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('live', 50);
+ -- The store's own refusals still count on their own: a reader that says it
+ -- proposed 20 cannot dilute the 2 of 3 the store refused (combined 10%).
+ j := pg_temp.lg_job('SWF-98311'); e := pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
+ cl := public.context_ledger_claim(j, 'backfill', pg_temp.lg_today());
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('a', 'request', 'open', 'customer', 'us', 'Asked for a call', pg_temp.lg_cite(e, 'call me about the gate')),
+  pg_temp.lg_it('b', 'request', 'open', 'customer', 'us', 'Asked for a visit', pg_temp.lg_cite(e, 'come and look at the gate')),
+  pg_temp.lg_it('c', 'request', 'open', 'customer', 'us', 'Asked for a quote', pg_temp.lg_cite(e, 'send me a quote'))), '[]', 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, 'a') AND pg_temp.lg_code(res, 'b') IS NOT NULL AND pg_temp.lg_code(res, 'c') IS NOT NULL,
+  'fixture: one accepted, two refused: ' || res::text);
+ fin := public.context_ledger_finish((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, 'built',
+  pg_temp.lg_meta(1) || '{"checks":{"proposed":20,"refused_local":0}}');
+ PERFORM pg_temp.lg_assert(NOT (fin ->> 'passed')::boolean AND NOT (fin ->> 'promoted')::boolean
+  AND (fin #>> '{checks,refusal_rate}')::numeric = 0.1 AND (fin #>> '{checks,refused_rate}')::numeric = 0.6667,
+  'an inflated proposal count must not hide the store''s refusals: ' || fin::text);
+ -- A build that saw evidence must hold at least one item; with no evidence it need not.
+ j := pg_temp.lg_job('SWF-98312'); e := pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
+ cl := public.context_ledger_claim(j, 'backfill', pg_temp.lg_today());
+ fin := public.context_ledger_finish((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, 'built', pg_temp.lg_meta(1));
+ PERFORM pg_temp.lg_assert(NOT (fin ->> 'passed')::boolean AND NOT (fin ->> 'promoted')::boolean, 'evidence but no item fails: ' || fin::text);
+ j := pg_temp.lg_job('SWF-98313'); e := pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
+ cl := public.context_ledger_claim(j, 'backfill', pg_temp.lg_today());
+ fin := public.context_ledger_finish((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, 'built', pg_temp.lg_meta(0));
+ PERFORM pg_temp.lg_assert((fin ->> 'passed')::boolean, 'no evidence and no item passes: ' || fin::text);
+ -- A clean update never revives a build that failed its checks: still not
+ -- passed, not promoted in live mode.
+ j := pg_temp.lg_job('SWF-98314'); e := pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
+ g := pg_temp.lg_gen(j, 'shadow', now() - interval '1 day', 'luna-ledger:v1', '1 day', false);
+ run := pg_temp.lg_run(j, 'ledger', 'running', '30 minutes', tok);
+ fin := public.context_ledger_finish(run, tok, g, 'updated', pg_temp.lg_meta(1) || '{"checks":{"proposed":0,"refused_local":0}}');
+ PERFORM pg_temp.lg_assert(fin ->> 'outcome' = 'updated' AND NOT (fin ->> 'passed')::boolean AND NOT (fin ->> 'promoted')::boolean
+  AND (SELECT status = 'shadow' AND checks ->> 'passed' = 'false' AND checks #>> '{last_update,pass}' = 'true'
+       FROM public.context_ledger_generations WHERE id = g), 'a clean update keeps a failed build failed: ' || fin::text);
+END $c$;
+ROLLBACK;
 
 -- 13. No rebuild loops: the escalating backoff, needs_person after three
 -- check-failed builds, and a newer reading that answers a rebuild.
@@ -1437,7 +1490,7 @@ ROLLBACK;
 -- than 150 already-read rows, asks for a rebuild instead.
 BEGIN;
 DO $c$
-DECLARE j uuid; j2 uuid; j3 uuid; jd record; k integer;
+DECLARE j uuid; j2 uuid; j3 uuid; j4 uuid; jd record; k integer;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  -- Mail from 21 days before the reading, placed on the job an hour ago.
@@ -1459,13 +1512,20 @@ BEGIN
  DELETE FROM public.business_events WHERE job_id = j2 AND payload ->> 'body' = 'Read message 151';
  PERFORM pg_temp.lg_assert((SELECT jd2.kind = 'update' AND jd2.reason = 'new_evidence' FROM public.context_ledger_judge(ARRAY[j2]) jd2),
   'exactly 150 already-read rows: still an update');
- -- A late row inside 14 days with few rows after it is an ordinary update.
+ -- A late row inside 14 days (13.5 days before the reading) with few rows
+ -- after it is an ordinary update; 14.5 days before it is a rebuild.
  j3 := pg_temp.lg_job('SWF-98503');
  PERFORM pg_temp.lg_ev(j3, 'client.reply', 'sms', 'inbound', 'Read', '9 days', 'customer');
- PERFORM pg_temp.lg_ev(j3, 'client.reply', 'sms', 'inbound', 'Placed today', '10 days', 'customer', 'job_customer', '{}', '{}', 'direct', '1 hour');
+ PERFORM pg_temp.lg_ev(j3, 'client.reply', 'sms', 'inbound', 'Placed today', '14 days 12 hours', 'customer', 'job_customer', '{}', '{}', 'direct', '1 hour');
  PERFORM pg_temp.lg_gen(j3, 'live', now() - interval '1 day', 'luna-ledger:v1', '1 day');
  PERFORM pg_temp.lg_assert((SELECT jd2.kind = 'update' AND jd2.reason = 'new_evidence' FROM public.context_ledger_judge(ARRAY[j3]) jd2),
   'a late row inside 14 days is an update');
+ j4 := pg_temp.lg_job('SWF-98504');
+ PERFORM pg_temp.lg_ev(j4, 'client.reply', 'sms', 'inbound', 'Read', '9 days', 'customer');
+ PERFORM pg_temp.lg_ev(j4, 'client.reply', 'sms', 'inbound', 'Placed today', '15 days 12 hours', 'customer', 'job_customer', '{}', '{}', 'direct', '1 hour');
+ PERFORM pg_temp.lg_gen(j4, 'live', now() - interval '1 day', 'luna-ledger:v1', '1 day');
+ PERFORM pg_temp.lg_assert((SELECT jd2.kind = 'rebuild' AND jd2.reason = 'late_evidence' FROM public.context_ledger_judge(ARRAY[j4]) jd2),
+  'a late row just over 14 days is a rebuild');
 END $c$;
 ROLLBACK;
 

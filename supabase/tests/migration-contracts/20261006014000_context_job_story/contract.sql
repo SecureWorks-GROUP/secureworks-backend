@@ -406,5 +406,18 @@ BEGIN
  IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'jobs') x WHERE jsonb_typeof(x->'ledger_needs_person') <> 'boolean') THEN
   RAISE EXCEPTION 'story contract: scorecard job rows must say whether the ledger needs a person: %', s;
  END IF;
+ -- three readings in a row by the current reader failed their checks: that job, and only that job, needs a person
+ INSERT INTO public.context_ledger_generations (job_id, kind, status, reader, evidence_until, created_at, finished_at, checks)
+ SELECT 'a0000000-0000-4000-8000-000000000005', 'rebuild', 'shadow', 'luna-ledger:v1', '2026-10-03 00:00Z',
+        '2026-10-04 00:00Z'::timestamptz + g * interval '1 hour', '2026-10-04 00:10Z'::timestamptz + g * interval '1 hour',
+        '{"passed": false, "store": {"pass": false}}'
+ FROM generate_series(1, 3) g;
+ s := public.context_story_scorecard_jobs(NULL, 300);
+ IF NOT coalesce((SELECT (x->>'ledger_needs_person')::boolean FROM jsonb_array_elements(s->'jobs') x
+                  WHERE x->>'job_id' = 'a0000000-0000-4000-8000-000000000005'), false)
+    OR coalesce((SELECT (x->>'ledger_needs_person')::boolean FROM jsonb_array_elements(s->'jobs') x
+                 WHERE x->>'job_id' = a::text), true) THEN
+  RAISE EXCEPTION 'story contract: three failed readings in a row must need a person, and only there: %', s;
+ END IF;
 END $story$;
 ROLLBACK;
