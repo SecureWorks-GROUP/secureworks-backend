@@ -432,6 +432,14 @@ CREATE FUNCTION cron.alter_job(job_id bigint,schedule text DEFAULT NULL,command 
  username text DEFAULT NULL,active boolean DEFAULT NULL) RETURNS void LANGUAGE sql AS $$
  UPDATE cron.job SET command=coalesce(alter_job.command,job.command) WHERE jobid=job_id
 $$;
+-- A later slice (B-5, 20261005210000) replaces the lane list; stand this
+-- migration's body back up (rolled back below) so its re-apply guard holds.
+\ir b2_cron_lanes.sql
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'8c99245789cadf661d4b6be1207f0887'
+ THEN RAISE EXCEPTION 'b2 b2_cron_lanes.sql is not the B-2 body'; END IF;
+END $$;
 \ir ../../../migrations/20261005190000_context_ghl_history_schedule.sql
 \ir ../../../migrations/20261005190000_context_ghl_history_schedule.sql
 DO $$

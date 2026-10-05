@@ -399,6 +399,15 @@ jobs:
             supabase/functions/ghl-call-transcript-fetch/fetch_test.ts \
             supabase/functions/ghl-call-transcript-fetch/handler_test.ts
 
+      # Gap plan B-5: the document text reader (file kinds, own-storage-only
+      # reads, the text gate, the evidence row, a run and its HTTP door) on
+      # fake reads and writes; the PDF extractor is ops-api's, tested there.
+      - name: Test the document text reader
+        run: |
+          deno test --allow-read \
+            supabase/functions/context-document-text/read_test.ts \
+            supabase/functions/context-document-text/handler_test.ts
+
       # Slice B0: the placement keys and token rule (TypeScript twin of the SQL
       # helpers) on the one fixture table, and proof that the migration
       # contract runs the SQL helpers on that same table.
