@@ -1690,6 +1690,152 @@ BEGIN
 END $c$;
 ROLLBACK;
 
+-- 18. The due read stays cheap (rev-backend P2-1): the full evidence read runs
+-- only where it can change the judgement, and the judgement is the same.
+BEGIN;
+DO $c$
+DECLARE x uuid; y uuid; o uuid; i1 uuid; i2 uuid; c1 uuid; c2 uuid; jd record;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ o := pg_temp.lg_job('SWF-98801');
+ -- never read, and its only legacy mail has a business_events copy on another job: no evidence
+ x := pg_temp.lg_job('SWF-98802');
+ i1 := pg_temp.lg_inbox(x, 'pat@example.test', 'Gate', 'Please price the gate on the side.', '3 days');
+ c1 := pg_temp.lg_ev(o, 'client.email_in', 'email', 'inbound', 'Please price the gate on the side.', '3 days', 'customer');
+ -- a reading whose only newer legacy mail is such a copy: nothing new to read
+ y := pg_temp.lg_job('SWF-98803');
+ PERFORM pg_temp.lg_ev(y, 'client.reply', 'sms', 'inbound', 'Read message one', '5 days', 'customer');
+ PERFORM pg_temp.lg_gen(y, 'live', now() - interval '1 day');
+ i2 := pg_temp.lg_inbox(y, 'pat@example.test', 'Fence', 'When does the fence start?', '1 hour');
+ c2 := pg_temp.lg_ev(o, 'client.email_in', 'email', 'inbound', 'When does the fence start?', '1 hour', 'customer');
+ PERFORM set_config('session_replication_role', 'replica', true);
+ UPDATE public.business_events SET source_table = 'inbox_events', source_id = i1::text WHERE id = c1;
+ UPDATE public.business_events SET source_table = 'inbox_events', source_id = i2::text WHERE id = c2;
+ PERFORM set_config('session_replication_role', 'origin', true);
+ SELECT * INTO jd FROM public.context_ledger_judge(ARRAY[x]);
+ PERFORM pg_temp.lg_assert(NOT jd.due AND jd.blocked_reason = 'no_evidence' AND jd.evidence_rows = 0,
+  'legacy mail with a copy elsewhere is no evidence: ' || to_jsonb(jd)::text);
+ SELECT * INTO jd FROM public.context_ledger_judge(ARRAY[y]);
+ PERFORM pg_temp.lg_assert(NOT jd.due AND jd.reason IS NULL, 'a newer legacy copy is nothing new: ' || to_jsonb(jd)::text);
+ PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_due(50) d WHERE d.job_id IN (x, y)), 'due lists neither');
+END $c$;
+ROLLBACK;
+-- rev-backend P2-2, P2-3: a claim never takes the admission's lock (one claim at a
+-- time per job instead), says the instant to build the packet as of, and finish
+-- never records evidence past the claim.
+BEGIN;
+DO $c$
+DECLARE j uuid; g uuid; run uuid; tok uuid := gen_random_uuid(); fin jsonb; cl jsonb;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ PERFORM pg_temp.lg_assert((SELECT prosrc NOT LIKE '%pg_advisory_xact_lock(20260911%' AND prosrc LIKE '%pg_advisory_xact_lock(20261006, hashtext(p_job_id::text))%'
+  FROM pg_proc WHERE oid = 'public.context_ledger_claim(uuid,text,date)'::regprocedure), 'a claim locks its job, not every model call');
+ j := pg_temp.lg_job('SWF-98804');
+ PERFORM pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
+ cl := public.context_ledger_claim(j, 'backfill', pg_temp.lg_today());
+ PERFORM pg_temp.lg_assert((cl ->> 'evidence_as_of')::timestamptz = (SELECT started_at FROM public.context_extraction_runs WHERE id = (cl ->> 'run_id')::uuid),
+  'the claim names the instant to build the packet as of: ' || cl::text);
+ j := pg_temp.lg_job('SWF-98805');
+ PERFORM pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
+ g := pg_temp.lg_gen(j, 'shadow', now() - interval '1 day');
+ run := pg_temp.lg_run(j, 'ledger', 'running', '30 minutes', tok);   -- started three hours ago
+ fin := public.context_ledger_finish(run, tok, g, 'updated', pg_temp.lg_meta(1));   -- the reader says a minute ago
+ PERFORM pg_temp.lg_assert((fin ->> 'evidence_until')::timestamptz = (SELECT started_at FROM public.context_extraction_runs WHERE id = run)
+  AND (SELECT evidence_until FROM public.context_ledger_generations WHERE id = g) = (SELECT started_at FROM public.context_extraction_runs WHERE id = run),
+  'evidence_until is capped at the claim: ' || fin::text);
+END $c$;
+ROLLBACK;
+
+-- 19. The store rollback keeps the ledger's runs and calls, the audit of real
+-- model spend (rev-backend P2-11): the phase lists narrow NOT VALID around them,
+-- the admission loses the ledger comment, and the store re-applies on top.
+BEGIN;
+DO $c$
+DECLARE j uuid := pg_temp.lg_job('SWF-98901');
+BEGIN
+ PERFORM pg_temp.lg_run(j, 'ledger', 'done', '30 minutes');
+ PERFORM pg_temp.lg_run(j, 'ledger', 'running', '30 minutes');
+ PERFORM pg_temp.lg_calls_add(1, 'ledger');
+END $c$;
+-- (the story, when a full stack has it, goes first, as the store's rollback demands)
+\ir ../../../rollbacks/20261006014000_context_job_story_down.sql
+\ir ../../../rollbacks/20261006013000_context_ledger_store_down.sql
+DO $c$ BEGIN
+ PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_extraction_runs WHERE phase = 'ledger') = 2
+  AND (SELECT count(*) FROM public.context_model_call_reservations WHERE phase = 'ledger') >= 1, 'the rollback kept the ledger runs and calls');
+ PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_extraction_runs WHERE phase = 'ledger' AND status = 'running'),
+  'a running ledger run is closed');
+ PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND NOT convalidated
+   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text]))) NOT VALID$d$)
+  AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_model_call_reservations'::regclass AND NOT convalidated
+   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text]))) NOT VALID$d$),
+  'the phase lists narrow NOT VALID around the kept rows');
+ PERFORM pg_temp.lg_assert(obj_description('public.reserve_context_model_call(text,uuid,uuid)'::regprocedure, 'pg_proc') IS NULL,
+  'the admission is back without the ledger comment');
+ BEGIN
+  INSERT INTO public.context_model_call_reservations (run_date, ordinal, phase, reserved_at) VALUES (pg_temp.lg_today(), 999, 'ledger', now());
+  RAISE EXCEPTION 'ledger store contract: a new ledger call was accepted after the rollback';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+END $c$;
+\ir ../../../migrations/20261006013000_context_ledger_store.sql
+DO $c$ BEGIN
+ PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
+  = '28545c710b6234b76ba25eb09093fa39'
+  AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND convalidated
+   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'ledger'::text])))$d$),
+  'the store re-applies over its own rollback');
+END $c$;
+ROLLBACK;
+
+-- 20. Citations the evidence would not admit are refused (rev-backend P2-5); a
+-- due date never comes from an automated message; a transcript is the
+-- customer's only on its call's stamp (P2-17); no dashes in what (P2-13).
+BEGIN;
+DO $c$
+DECLARE w uuid; a1 uuid; wf uuid; t1 uuid; c1 uuid; t2 uuid; c2 uuid; cl jsonb; res jsonb; d date; dtext text; exp record;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ w := pg_temp.lg_job('SWF-99001');
+ d := ((now() - interval '2 days') AT TIME ZONE 'Australia/Perth')::date + 5;
+ dtext := to_char(d, 'FMDay FMDD FMMonth');
+ a1 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Customer says the gate is fine now', '3 days', 'customer', 'job_customer', '{}',
+  '{"written_as":"authenticated"}');
+ -- (a workflow text is not evidence at all; a workflow email is evidence, but automated)
+ wf := pg_temp.lg_ev(w, 'client.email_out', 'email', 'outbound', 'Reminder: we will be there by ' || dtext || '.', '2 days', 'staff', 'job_customer',
+  '{"sent_by_kind":"workflow"}');
+ t1 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'We can do the gate on Monday for you', '2 days', 'customer', 'job_customer',
+  '{"ghl_call_id":"CALLX"}');
+ c1 := pg_temp.lg_ev(w, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 60 seconds', '2 days 1 minute', 'supplier', 'supplier');
+ t2 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'Please come and fix the gate latch', '1 day', NULL, 'job_customer',
+  '{"ghl_call_id":"CALLY"}');
+ c2 := pg_temp.lg_ev(w, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 90 seconds', '1 day 1 minute', 'customer');
+ PERFORM set_config('session_replication_role', 'replica', true);
+ UPDATE public.business_events SET provider_message_id = 'ghl:CALLX' WHERE id = c1;
+ UPDATE public.business_events SET provider_message_id = 'ghl:CALLY' WHERE id = c2;
+ PERFORM set_config('session_replication_role', 'origin', true);
+ cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('auth_row', 'claim', 'open', 'customer', 'us', 'Says the gate is fine', pg_temp.lg_cite(a1, 'the gate is fine now')),
+  pg_temp.lg_it('wf_due', 'commitment', 'open', 'us', 'customer', 'Will be there by the day', pg_temp.lg_cite(wf, 'we will be there by ' || dtext),
+   jsonb_build_object('due_date', d, 'due_basis', 'stated')),
+  pg_temp.lg_it('tx_not_customer', 'request', 'open', 'customer', 'us', 'Asked for Monday', pg_temp.lg_cite(t1, 'do the gate on Monday')),
+  pg_temp.lg_it('tx_customer', 'request', 'open', 'customer', 'us', 'Asked for the latch to be fixed', pg_temp.lg_cite(t2, 'fix the gate latch')),
+  pg_temp.lg_it('dash', 'event', 'info', 'us', NULL, E'Gate \u2014 painted black \u2013 soon', pg_temp.lg_cite(c2, 'Provider status: completed'))),
+  '[]', 'luna-ledger:v1');
+ FOR exp IN SELECT * FROM (VALUES ('auth_row', 'citation_not_admissible'), ('wf_due', 'due_date_unsupported'),
+  ('tx_not_customer', 'speaker_not_customer'), ('tx_customer', NULL), ('dash', NULL)) v(ref, code) LOOP
+  IF exp.code IS NULL THEN
+   PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, exp.ref), exp.ref || ' must be accepted: ' || coalesce(pg_temp.lg_code(res, exp.ref), '?'));
+  ELSE
+   PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, exp.ref) = exp.code AND NOT pg_temp.lg_accepted(res, exp.ref),
+    format('%s must be refused %s, got %s', exp.ref, exp.code, coalesce(pg_temp.lg_code(res, exp.ref), 'accepted')));
+  END IF;
+ END LOOP;
+ PERFORM pg_temp.lg_assert((SELECT what FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+  AND item_key = pg_temp.lg_key(res, 'dash')) = 'Gate, painted black - soon', 'what keeps no dashes');
+END $c$;
+ROLLBACK;
+
 -- 16. Rollback order (rev-backend P1-8). The admission's ledger branch reads
 -- plain values, so no other phase depends on the ledger tables: with the
 -- settings table gone, attribution and extraction are still admitted.

@@ -7,7 +7,8 @@ BEGIN
     OR to_regprocedure('public.context_job_record_money(uuid[],timestamptz)') IS NOT NULL
     OR to_regprocedure('public.context_job_record_contact(uuid[],timestamptz)') IS NOT NULL
     OR to_regprocedure('public.context_job_record_messages(uuid[],timestamptz)') IS NOT NULL
-    OR to_regprocedure('public.context_job_record_legacy_mail(uuid[],timestamptz)') IS NOT NULL THEN
+    OR to_regprocedure('public.context_job_record_legacy_mail(uuid[],timestamptz)') IS NOT NULL
+    OR to_regprocedure('public.context_job_record_date(text)') IS NOT NULL THEN
   RAISE EXCEPTION 'record rollback contract: a record function survived the rollback';
  END IF;
  IF to_regclass('public.context_ledger_items') IS NULL THEN

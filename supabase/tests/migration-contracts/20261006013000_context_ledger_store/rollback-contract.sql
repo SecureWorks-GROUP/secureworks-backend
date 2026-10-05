@@ -15,6 +15,8 @@ BEGIN
   OR NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_model_call_reservations'::regclass AND contype = 'c'
    AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text])))$d$)
  THEN RAISE EXCEPTION 'ledger store rollback: phase checks not restored'; END IF;
+ IF obj_description('public.reserve_context_model_call(text,uuid,uuid)'::regprocedure, 'pg_proc') IS NOT NULL
+ THEN RAISE EXCEPTION 'ledger store rollback: the admission keeps the ledger comment (it had none)'; END IF;
  BEGIN
   r := public.reserve_context_model_call('ledger', gen_random_uuid(), gen_random_uuid());
   RAISE EXCEPTION 'ledger store rollback: the ledger phase is still admitted';

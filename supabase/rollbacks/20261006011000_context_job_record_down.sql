@@ -15,5 +15,6 @@ DROP FUNCTION IF EXISTS public.context_job_record_loops(uuid[], timestamptz);
 DROP FUNCTION IF EXISTS public.context_job_record_timeline(uuid[], timestamptz);
 DROP FUNCTION IF EXISTS public.context_job_record_messages(uuid[], timestamptz);
 DROP FUNCTION IF EXISTS public.context_job_record_legacy_mail(uuid[], timestamptz);
+DROP FUNCTION IF EXISTS public.context_job_record_date(text);
 DROP INDEX IF EXISTS public.inbox_events_from_email_record;
 DROP INDEX IF EXISTS public.inbox_events_job_id_record;

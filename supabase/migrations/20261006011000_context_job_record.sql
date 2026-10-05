@@ -74,7 +74,7 @@ BEGIN
   problems := problems || 'public.job_quote_values(uuid) is missing'::text;
  END IF;
  FOREACH f IN ARRAY ARRAY['public.context_job_record_messages(uuid[],timestamptz)',
-   'public.context_job_record_legacy_mail(uuid[],timestamptz)',
+   'public.context_job_record_legacy_mail(uuid[],timestamptz)','public.context_job_record_date(text)',
    'public.context_job_record_timeline(uuid[],timestamptz)','public.context_job_record_loops(uuid[],timestamptz)',
    'public.context_job_record_money(uuid[],timestamptz)','public.context_job_record_contact(uuid[],timestamptz)'] LOOP
   IF to_regprocedure(f) IS NOT NULL AND coalesce(obj_description(to_regprocedure(f), 'pg_proc'), '')
@@ -93,6 +93,19 @@ END $guard$;
 -- message read, measured read-only on production). Built-in expressions only.
 CREATE INDEX IF NOT EXISTS inbox_events_job_id_record ON public.inbox_events (job_id) WHERE job_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS inbox_events_from_email_record ON public.inbox_events (lower(btrim(from_email)));
+
+-- 1c. A date written in a payload or app event: a real yyyy-mm-dd (a time may
+-- follow), else null. One bad row never fails a story. Inlinable (no SET).
+CREATE OR REPLACE FUNCTION public.context_job_record_date(p text) RETURNS date
+LANGUAGE sql IMMUTABLE AS $fn$
+ SELECT CASE WHEN p OPERATOR(pg_catalog.~) '^(19|2[0-9])[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])([T ].*)?$'
+   AND pg_catalog.substr(p, 9, 2)::integer OPERATOR(pg_catalog.<=) pg_catalog.date_part('day',
+    pg_catalog.make_date(pg_catalog.substr(p, 1, 4)::integer, pg_catalog.substr(p, 6, 2)::integer, 1)
+     OPERATOR(pg_catalog.+) interval '1 month' OPERATOR(pg_catalog.-) interval '1 day')
+  THEN pg_catalog.substr(p, 1, 10)::date END
+$fn$;
+COMMENT ON FUNCTION public.context_job_record_date(text) IS
+ 'Job record (20261006011000): a payload or app-event date read safely: a real calendar yyyy-mm-dd (a time may follow), else null, so one bad row never fails a story. Inlinable helper. Service role only.';
 
 -- 1b. Legacy mail helper (inlinable): inbox_events mail on the job, or from the
 -- client's own address, with no business_events copy anywhere (the copy, where
@@ -485,7 +498,10 @@ AS $fn$
   UNION ALL
   SELECT a.job_id, coalesce(a.completed_at, a.started_at, (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth'), a.created_at),
          CASE WHEN a.completed_at IS NOT NULL OR a.started_at IS NOT NULL THEN 'observed' ELSE 'date_only' END, 'attendance',
-         'Crew ' || CASE WHEN a.status = 'complete' OR a.completed_at IS NOT NULL THEN 'marked complete' ELSE 'started' END
+         CASE WHEN a.completed_at IS NOT NULL THEN 'Crew marked complete'
+              WHEN a.status = 'complete' THEN 'Booking status complete (who and when not recorded)'
+              WHEN a.started_at IS NOT NULL THEN 'Crew started'
+              ELSE 'Booking status in progress (who and when not recorded)' END
            || ': ' || replace(coalesce(a.assignment_type, 'visit'), '_', ' ')
            || coalesce(' booked ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY'), ' (no booked date)')
            || coalesce(', ' || nullif(btrim(a.crew_name), ''), ''),
@@ -502,7 +518,7 @@ AS $fn$
               ELSE 'booking_change' END,
          CASE je.event_type
            WHEN 'assignment_created' THEN 'Booking made for '
-                || coalesce(to_char(nullif(je.detail_json->>'date', '')::date, 'Dy FMDD Mon YYYY'), 'a date not recorded')
+                || coalesce(to_char(public.context_job_record_date(je.detail_json->>'date'), 'Dy FMDD Mon YYYY'), 'a date not recorded')
                 || CASE WHEN je.detail_json->>'source' = 'ghost_auto_mirror' THEN ' (observer copy)' ELSE '' END
                 || coalesce((SELECT CASE WHEN a.scheduled_date::text <> je.detail_json->>'date'
                                          THEN '; now booked ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') END
@@ -510,13 +526,13 @@ AS $fn$
                              WHERE a.id = CASE WHEN je.detail_json->>'assignment_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                                                THEN (je.detail_json->>'assignment_id')::uuid END), '')
            WHEN 'assignment_deleted' THEN 'Booking deleted' || coalesce(' (it was for '
-                || to_char(nullif(coalesce(je.detail_json->>'date', je.detail_json->>'scheduled_date'), '')::date, 'Dy FMDD Mon YYYY') || ')', '')
+                || to_char(public.context_job_record_date(coalesce(je.detail_json->>'date', je.detail_json->>'scheduled_date')), 'Dy FMDD Mon YYYY') || ')', '')
            WHEN 'assignment_removed' THEN 'Booking removed'
            WHEN 'assignment_rescheduled' THEN 'Booking moved'
-                || coalesce(' from ' || to_char(nullif(coalesce(je.detail_json->>'old_date', je.detail_json->>'from'), '')::date, 'Dy FMDD Mon'), '')
-                || coalesce(' to ' || to_char(nullif(coalesce(je.detail_json->>'new_date', je.detail_json->>'to', je.detail_json->>'date'), '')::date, 'Dy FMDD Mon'), '')
+                || coalesce(' from ' || to_char(public.context_job_record_date(coalesce(je.detail_json->>'old_date', je.detail_json->>'from')), 'Dy FMDD Mon'), '')
+                || coalesce(' to ' || to_char(public.context_job_record_date(coalesce(je.detail_json->>'new_date', je.detail_json->>'to', je.detail_json->>'date')), 'Dy FMDD Mon'), '')
            WHEN 'assignment_confirmed' THEN 'Booking confirmed in crew planning'
-                || coalesce(' for ' || to_char(nullif(je.detail_json->>'scheduled_date', '')::date, 'Dy FMDD Mon'), '')
+                || coalesce(' for ' || to_char(public.context_job_record_date(je.detail_json->>'scheduled_date'), 'Dy FMDD Mon'), '')
                 || CASE WHEN je.detail_json->>'notify_client' = 'true' THEN ' (client notified)' ELSE '' END
            WHEN 'assignment_status_changed' THEN 'Crew marked the booking ' || replace(coalesce(je.detail_json->>'new_status', '?'), '_', ' ')
            WHEN 'assignment_acknowledged' THEN 'Crew acknowledged the booking'
@@ -532,8 +548,8 @@ AS $fn$
          CASE WHEN e.event_type = 'clock.clock_off' THEN 'Crew clocked off'
               WHEN e.event_type = 'clock.clock_on' THEN 'Crew clocked on'
               ELSE 'Booking ' || replace(replace(e.event_type, 'schedule.', ''), '_', ' ')
-                   || coalesce(', ' || to_char(nullif(e.payload->>'old_date', '')::date, 'Dy FMDD Mon') || ' to '
-                               || to_char(nullif(e.payload->>'new_date', '')::date, 'Dy FMDD Mon'), '') END,
+                   || coalesce(', ' || to_char(public.context_job_record_date(e.payload->>'old_date'), 'Dy FMDD Mon') || ' to '
+                               || to_char(public.context_job_record_date(e.payload->>'new_date'), 'Dy FMDD Mon'), '') END,
          NULL, NULL, 'on_job', 'business_events', e.id::text
   FROM public.business_events e
   WHERE e.job_id = ANY (p_job_ids) AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of
@@ -771,6 +787,7 @@ AS $fn$
          'booking:' || b.scheduled_date::text, 'The status moves on or a visit outcome is recorded'
   FROM (SELECT DISTINCT ON (a.job_id) a.* FROM asg a
         WHERE a.scheduled_date IS NOT NULL AND lower(coalesce(a.status, 'none')) NOT IN ('cancelled', 'deleted')
+          AND NOT a.mirror  -- an observer's mirror is not a crew visit
         ORDER BY a.job_id, a.scheduled_date DESC, a.created_at, a.id) b
   JOIN jv ON jv.id = b.job_id
   WHERE b.scheduled_date < jv.today AND jv.status IN ('scheduled', 'processing', 'accepted')
@@ -824,7 +841,8 @@ AS $fn$
            AND je.event_type IN ('makesafe_report_sent_at_derived', 'makesafe_pack_sent_at_derived', 'makesafe_portal_report_done')
          UNION ALL
          SELECT a.job_id, a.id::text, 'job_assignments', coalesce(a.completed_at, (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth')),
-                'the crew marked the ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') || ' booking complete'
+                CASE WHEN a.completed_at IS NOT NULL THEN 'the crew marked the ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') || ' booking complete'
+                     ELSE 'the ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') || ' booking status says complete (who and when not recorded)' END
          FROM asg a WHERE NOT a.mirror AND (a.status = 'complete' OR a.completed_at IS NOT NULL)
          UNION ALL
          SELECT i.job_id, i.id::text, 'xero_invoices', coalesce(i.invoice_date::timestamp AT TIME ZONE 'Australia/Perth', i.created_at),
@@ -1105,7 +1123,10 @@ RETURNS TABLE(job_id uuid, last_customer_message jsonb, last_to_customer jsonb, 
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
  WITH msg AS (
-  SELECT m.*, jsonb_build_object('at', m.at, 'channel', m.channel, 'direction', m.direction, 'text', m.words,
+  SELECT m.*, jsonb_build_object('at', m.at, 'channel', m.channel, 'direction', m.direction,
+                                 -- a transcript holds both sides of a call, speakers unlabelled
+                                 'text', CASE WHEN m.event_type = 'call.transcript_completed'
+                                              THEN 'Call (speakers not labelled): ' || coalesce(m.words, '') ELSE m.words END,
                                  'table', m.source_table, 'id', m.source_id, 'automated', m.automated,
                                  'event_type', m.event_type,
                                  -- legacy mail from the client's address that no job holds is shown as such
@@ -1172,15 +1193,17 @@ AS $fn$
  WHERE jb.id = ANY (p_job_ids)
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_contact(uuid[], timestamptz) IS
- 'Job record (20261006011000): per job the last customer message, the last thing we told the customer (never automated; a newer automated send is attached as newer_automated), the last internal (crew or staff) message, the last calls each way, and reply statistics (customer texts and emails; a run of customer messages is answered by the first later message from us or answered call; automated texts never count). Each jsonb is {at, channel, direction, text (300 chars), table, id, automated, event_type, placed_on (this_job | none)}; legacy mail from the client''s address that no job holds has placed_on none and placement_note "not placed on any job". Service role only.';
+ 'Job record (20261006011000): per job the last customer message, the last thing we told the customer (never automated; a newer automated send is attached as newer_automated), the last internal (crew or staff) message, the last calls each way, and reply statistics (customer texts and emails; a run of customer messages is answered by the first later message from us or answered call; automated texts never count). Each jsonb is {at, channel, direction, text (300 chars; a call transcript is prefixed "Call (speakers not labelled): "), table, id, automated, event_type, placed_on (this_job | none)}; legacy mail from the client''s address that no job holds has placed_on none and placement_note "not placed on any job". Service role only.';
 
 -- 6. Access: service role only.
+REVOKE ALL ON FUNCTION public.context_job_record_date(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_loops(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_money(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_contact(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.context_job_record_date(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) TO service_role;

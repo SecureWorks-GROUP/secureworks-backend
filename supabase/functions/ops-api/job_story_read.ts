@@ -32,8 +32,19 @@ export interface StorySourceStatus {
   error?: string;
 }
 
-/** Optional instant from a request: an ISO time string, or absent. */
-export function parseInstant(value: unknown, name: string): string | null {
+/** How far ahead of the clock an instant may be (clock skew), never more. */
+export const FUTURE_INSTANT_SLACK_MS = 5 * 60 * 1000;
+
+/**
+ * Optional instant from a request: an ISO time string, or absent. More than
+ * five minutes in the future is refused: the record would be read against a
+ * "today" that has not happened.
+ */
+export function parseInstant(
+  value: unknown,
+  name: string,
+  now: number = Date.now(),
+): string | null {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
     throw new StoryReadError(
@@ -41,7 +52,25 @@ export function parseInstant(value: unknown, name: string): string | null {
       `${name} must be an ISO date-time`,
     );
   }
+  if (Date.parse(value) > now + FUTURE_INSTANT_SLACK_MS) {
+    throw new StoryReadError(
+      `invalid_${name}`,
+      `${name} cannot be in the future`,
+    );
+  }
   return new Date(value).toISOString();
+}
+
+/**
+ * A database or PostgREST failure as the caller sees it: a fixed message and,
+ * when there is one, the SQLSTATE code. The raw text stays in the server log.
+ */
+export function sanitizedError(label: string, error: unknown): string {
+  console.error(`story door: ${label}:`, (error as any)?.message ?? error);
+  const code = (error as any)?.code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)
+    ? `${label} (${code})`
+    : label;
 }
 
 /** Optional yes/no flag from a request: true, 1 or yes; false, 0, no or absent. */
@@ -107,7 +136,7 @@ export async function resolveStoryJob(
   if (error) {
     throw new StoryReadError(
       "job_read_failed",
-      `job read failed: ${error.message}`,
+      sanitizedError("job read failed", error),
       502,
     );
   }
@@ -168,7 +197,13 @@ export async function readJobStory(
   try {
     const { data, error } = await client.rpc("context_job_story", args);
     if (error) {
-      return { story: null, status: failed("rpc_failed", error.message) };
+      return {
+        story: null,
+        status: failed(
+          "rpc_failed",
+          sanitizedError("story read failed", error),
+        ),
+      };
     }
     if (!data || typeof data !== "object") {
       return { story: null, status: failed("empty_payload") };
@@ -185,7 +220,10 @@ export async function readJobStory(
       },
     };
   } catch (e) {
-    return { story: null, status: failed("rpc_threw", (e as Error).message) };
+    return {
+      story: null,
+      status: failed("rpc_threw", sanitizedError("story read threw", e)),
+    };
   }
 }
 
@@ -199,7 +237,13 @@ export async function readClientStory(
   try {
     const { data, error } = await client.rpc("context_client_story", args);
     if (error) {
-      return { client: null, status: failed("rpc_failed", error.message) };
+      return {
+        client: null,
+        status: failed(
+          "rpc_failed",
+          sanitizedError("client story read failed", error),
+        ),
+      };
     }
     if (!data || typeof data !== "object") {
       return { client: null, status: failed("empty_payload") };
@@ -216,7 +260,10 @@ export async function readClientStory(
       },
     };
   } catch (e) {
-    return { client: null, status: failed("rpc_threw", (e as Error).message) };
+    return {
+      client: null,
+      status: failed("rpc_threw", sanitizedError("client story read threw", e)),
+    };
   }
 }
 
@@ -337,7 +384,11 @@ export async function storyScorecardAction(
     asOf ? { p_as_of: asOf } : {},
   );
   if (head.error) {
-    throw new StoryReadError("scorecard_failed", head.error.message, 502);
+    throw new StoryReadError(
+      "scorecard_failed",
+      sanitizedError("scorecard read failed", head.error),
+      502,
+    );
   }
   const card = head.data;
   if (
@@ -362,7 +413,7 @@ export async function storyScorecardAction(
     if (page.error) {
       throw new StoryReadError(
         "scorecard_jobs_failed",
-        page.error.message,
+        sanitizedError("scorecard jobs read failed", page.error),
         502,
       );
     }

@@ -121,7 +121,10 @@ AS $fn$
    AS c(closes_on text, about_key text, at timestamptz, t text, id text, what text)
  ),
  li AS MATERIALIZED (  -- ledger items of the generation shown, with the citation re-check result
-  SELECT i.* FROM inp, jsonb_to_recordset(coalesce(inp.led->'items', '[]'::jsonb))
+                       -- (what with em and en dashes replaced, as the store now writes it)
+  SELECT i.* FROM inp, jsonb_to_recordset((SELECT coalesce(jsonb_agg(x || jsonb_build_object('what',
+            btrim(replace(regexp_replace(x->>'what', '\s*' || chr(8212) || '\s*', ', ', 'g'), chr(8211), '-')))), '[]'::jsonb)
+          FROM jsonb_array_elements(coalesce(inp.led->'items', '[]'::jsonb)) x))
    AS i(item_key text, item_type text, status text, from_role text, from_name text, to_role text, to_name text, what text,
         about_key text, modality text, phase text, due_date date, opened_at timestamptz, opened_by jsonb, closed_at timestamptz,
         closed_by jsonb, closes_on text, supersedes_key text, blocks text, needs_reply boolean, written_by text,
@@ -496,8 +499,10 @@ AS $fn$
         'A rebuild keeps staff corrections as they are, so only a person can fix this.'),
    (11, CASE WHEN coalesce((inp.meta->>'contact_missing')::boolean, false) THEN 'This job has no CRM contact, so texts and calls may not reach it.' END,
         'Texts and calls are placed by the CRM contact.'),
-   (12, CASE WHEN led.status = 'shadow' AND led.gen IS NOT NULL THEN 'This story shows a shadow reading that is not live yet.' END,
-        'A shadow generation is checked before it is promoted.'),
+   (12, CASE WHEN led.status = 'shadow' AND led.gen IS NOT NULL THEN 'This story shows a shadow reading that is not live yet.'
+             WHEN led.gen IS NOT NULL AND led.gen->>'status' IN ('failed', 'retired', 'building')
+             THEN 'This story shows a ' || (led.gen->>'status') || ' reading, not the live one.' END,
+        'A shadow generation is checked before it is promoted; a failed, retired or unfinished one is never shown by default.'),
    (13, 'Phone calls that were not recorded are not here.', 'Only calls the phone system logged are captured.')
   ) x(ord, what, why)
   WHERE x.what IS NOT NULL
@@ -511,7 +516,8 @@ AS $fn$
    UNION ALL
    SELECT m.party, 'payer', m.xero_contact_id,
           (SELECT jsonb_agg(jsonb_build_object('t', 'xero_invoices', 'id', i->>'id')) FROM jsonb_array_elements(m.invoices) i), 2
-   FROM mo m WHERE m.party IS NOT NULL
+   FROM mo m WHERE m.party IS NOT NULL  -- a payer has an issued invoice; drafts alone make nobody a payer
+     AND (coalesce(m.invoiced, 0) > 0 OR coalesce(m.paid, 0) > 0 OR coalesce(m.credited, 0) > 0)
    UNION ALL
    SELECT p->>'name', coalesce(p->>'role', 'party'), p->>'contact_ref', jsonb_build_array(jsonb_build_object('t', 'job_contacts', 'id', p->>'id')), 3
    FROM inp, jsonb_array_elements(coalesce(inp.rec->'facts'->'parties', '[]'::jsonb)) p WHERE nullif(btrim(p->>'name'), '') IS NOT NULL
@@ -713,11 +719,12 @@ CREATE OR REPLACE FUNCTION public.context_job_story_ledger(p_job_id uuid, p_gene
 RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
- WITH g AS (
+ WITH g AS (  -- the generation asked for, else the one live at p_as_of (the newest promoted by then)
   SELECT x.* FROM public.context_ledger_generations x
   WHERE x.job_id = p_job_id
-    AND CASE WHEN p_generation_id IS NOT NULL THEN x.id = p_generation_id ELSE x.status = 'live' END
-  ORDER BY x.created_at DESC LIMIT 1
+    AND CASE WHEN p_generation_id IS NOT NULL THEN x.id = p_generation_id
+             ELSE x.status IN ('live', 'retired') AND x.promoted_at <= p_as_of END
+  ORDER BY x.promoted_at DESC NULLS LAST, x.created_at DESC LIMIT 1
  ),
  other AS (  -- with no generation to show, say whether one is being built or waits in shadow
   SELECT x.status FROM public.context_ledger_generations x
@@ -733,6 +740,12 @@ AS $fn$
               -- but not counted as new messages
   SELECT e.src_id, e.copy_of FROM evr e WHERE NOT e.was_read
  ),
+ it0 AS (  -- replay: items written by p_as_of, each with its status then
+  SELECT i.*, coalesce((SELECT t.to_status FROM public.context_ledger_transitions t WHERE t.item_id = i.id AND t.at <= p_as_of
+                         ORDER BY t.at DESC, t.id DESC LIMIT 1), i.status) AS status_then
+  FROM public.context_ledger_items i JOIN g ON g.id = i.generation_id
+  WHERE i.created_at <= p_as_of
+ ),
  it AS (
   SELECT i.*,
    (SELECT jsonb_agg(jsonb_build_object('table', c->>'table', 'id', c->>'id', 'excerpt', c->>'excerpt',
@@ -741,20 +754,23 @@ AS $fn$
                        ELSE e.id IS NOT NULL AND e.job_id = p_job_id AND public.context_linked_status(e.attribution_status)
                             AND e.metadata->>'retracted_at' IS NULL AND coalesce(e.metadata->>'retracted', 'false') <> 'true' END,
             'customer', (e.metadata->'party_roles'->>'sender_role' = 'customer')))
-    FROM jsonb_array_elements(i.opened_by || coalesce(i.closed_by, '[]'::jsonb)) c
+    FROM jsonb_array_elements(i.opened_by || CASE WHEN i.closed_at <= p_as_of THEN coalesce(i.closed_by, '[]'::jsonb) ELSE '[]'::jsonb END) c
     LEFT JOIN public.business_events e ON c->>'table' = 'business_events'
      AND e.id = CASE WHEN c->>'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (c->>'id')::uuid END) AS cited
-  FROM public.context_ledger_items i JOIN g ON g.id = i.generation_id
+  FROM it0 i
  )
  SELECT jsonb_build_object(
   'status', coalesce((SELECT g.status FROM g), (SELECT other.status FROM other), 'none'),
   'generation', (SELECT jsonb_build_object('id', g.id, 'status', g.status, 'kind', g.kind, 'reader', g.reader, 'model', g.model,
                   'evidence_until', g.evidence_until, 'evidence_rows', g.evidence_rows, 'created_at', g.created_at,
                   'promoted_at', g.promoted_at) FROM g),
-  'items', coalesce((SELECT jsonb_agg(jsonb_build_object('item_key', it.item_key, 'item_type', it.item_type, 'status', it.status,
+  'items', coalesce((SELECT jsonb_agg(jsonb_build_object('item_key', it.item_key, 'item_type', it.item_type, 'status', it.status_then,
               'from_role', it.from_role, 'from_name', it.from_name, 'to_role', it.to_role, 'to_name', it.to_name, 'what', it.what,
               'about_key', it.about_key, 'modality', it.modality, 'phase', it.phase, 'due_date', it.due_date, 'opened_at', it.opened_at,
-              'opened_by', it.opened_by, 'closed_at', it.closed_at, 'closed_by', it.closed_by, 'closes_on', it.closes_on,
+              'opened_by', it.opened_by,
+              'closed_at', CASE WHEN it.closed_at <= p_as_of AND it.status_then IN ('closed', 'declined', 'superseded') THEN it.closed_at END,
+              'closed_by', CASE WHEN it.closed_at <= p_as_of AND it.status_then IN ('closed', 'declined', 'superseded') THEN it.closed_by END,
+              'closes_on', it.closes_on,
               'supersedes_key', it.supersedes_key, 'blocks', it.blocks, 'needs_reply', it.needs_reply, 'written_by', it.written_by,
               'person_locked', it.person_locked, 'cited', it.cited,
               'cites_ok', NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(it.cited, '[]'::jsonb)) c WHERE NOT (c->>'ok')::boolean))
@@ -762,7 +778,7 @@ AS $fn$
   'transitions', coalesce((SELECT jsonb_agg(jsonb_build_object('item_key', i.item_key, 'from_status', t.from_status,
                    'to_status', t.to_status, 'at', t.at, 'by', t.by, 'reason', t.reason, 'evidence', t.evidence) ORDER BY t.at, t.id)
                  FROM public.context_ledger_transitions t JOIN public.context_ledger_items i ON i.id = t.item_id
-                 JOIN g ON g.id = t.generation_id), '[]'::jsonb),
+                 JOIN g ON g.id = t.generation_id WHERE t.at <= p_as_of), '[]'::jsonb),
   'unread_rows', CASE WHEN EXISTS (SELECT 1 FROM g) THEN (SELECT count(*)::integer FROM unread u WHERE u.copy_of IS NULL) END,
   'unread_ids', CASE WHEN EXISTS (SELECT 1 FROM g) THEN coalesce((SELECT jsonb_agg(u.src_id::text ORDER BY u.src_id) FROM unread u), '[]'::jsonb) END,
   -- the inbound rows it has read: the story says the reader judged a customer message only for these
@@ -771,7 +787,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_ledger(uuid, uuid, timestamptz) IS
- 'Job story (20261006014000): the ledger generation the story shows (live, or the one asked for in any status) with its items and transitions; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; read_ids: the inbound evidence rows it has read (landed by its evidence_until), so a customer message is called judged only when the reader read it; all three null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
+ 'Job story (20261006014000): the ledger generation the story shows (the one live at p_as_of, or the one asked for in any status) with the items written by p_as_of, each at its status then, and the transitions by then; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; read_ids: the inbound evidence rows it has read (landed by its evidence_until), so a customer message is called judged only when the reader read it; all three null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
 
 -- 4. Evidence lanes, unplaced messages and the CRM contact: what the story must
 -- say it does not know. How far the reader has read is the ledger's (3), never
@@ -789,8 +805,8 @@ AS $fn$
               WHEN x.event_type = 'document.text_extracted' THEN 'documents' END AS lane,
          coalesce(x.event_at, x.occurred_at) AS at
   FROM public.business_events x
+  -- the rows the record shows (every row on the job), so "no texts" never sits beside texts
   WHERE x.job_id = p_job_id AND coalesce(x.recorded_at, x.occurred_at) <= p_as_of
-    AND public.context_linked_status(x.attribution_status)
  ),
  l AS (SELECT e.lane, count(*) AS n, max(e.at) AS newest, min(e.at) AS oldest FROM e WHERE e.lane IS NOT NULL GROUP BY e.lane),
  lg AS (  -- legacy inbox mail the record layer reads counts as email
@@ -905,7 +921,14 @@ AS $fn$
            FROM cj LEFT JOIN st ON st.id = cj.id), '[]'::jsonb),
   'money', jsonb_build_object('owing', (SELECT coalesce(sum(m.owing), 0) FROM mon m), 'overdue', (SELECT coalesce(sum(m.overdue), 0) FROM mon m),
              'not_yet_invoiced', (SELECT coalesce(sum(x.nyi), 0) FROM (SELECT max(m.not_yet_invoiced) AS nyi FROM mon m GROUP BY m.job_id) x),
-             'parties', coalesce((SELECT jsonb_agg(DISTINCT m.party) FROM mon m WHERE m.party IS NOT NULL), '[]'::jsonb)),
+             'parties', coalesce((SELECT jsonb_agg(DISTINCT m.party) FROM mon m WHERE m.party IS NOT NULL), '[]'::jsonb),
+             -- each paying party on its own: a neighbour's debt is never the client's
+             'by_party', coalesce((SELECT jsonb_agg(jsonb_build_object('party', x.party, 'xero_contact_id', x.xero_contact_id,
+                            'owing', x.owing, 'overdue', x.overdue, 'job_numbers', x.jobs) ORDER BY x.owing DESC, x.party)
+                          FROM (SELECT m.party, m.xero_contact_id, sum(m.owing) AS owing, sum(m.overdue) AS overdue,
+                                       jsonb_agg(DISTINCT cj.job_number) AS jobs
+                                FROM mon m JOIN cj ON cj.id = m.job_id WHERE m.party IS NOT NULL
+                                GROUP BY m.party, m.xero_contact_id) x), '[]'::jsonb)),
   'open_loops', coalesce((SELECT jsonb_agg(x.o) FROM (
                    SELECT lp.loop || jsonb_build_object('job_number', lp.job_number) AS o FROM lp
                    ORDER BY (lp.loop->>'rank')::int, (lp.loop->>'since') LIMIT 10) x), '[]'::jsonb),
@@ -937,6 +960,10 @@ AS $fn$
                           'why', 'This job has no CRM contact.')
                    FROM ident i WHERE i.basis = 'client_email'
                    UNION ALL
+                   SELECT 5, jsonb_build_object('what', 'Owing and overdue add up every paying party on these jobs; money.by_party has each party on its own.',
+                          'why', 'Shared work can have more than one payer.')
+                   WHERE (SELECT count(DISTINCT coalesce(m.xero_contact_id, m.party)) FROM mon m WHERE m.party IS NOT NULL) > 1
+                   UNION ALL
                    SELECT 4, jsonb_build_object('what', 'Past issues and preferences come only from jobs whose ledger is live.',
                           'why', 'The reader has not read every job yet.')
                    WHERE EXISTS (SELECT 1 FROM cj WHERE NOT EXISTS (SELECT 1 FROM public.context_ledger_generations g WHERE g.job_id = cj.id AND g.status = 'live'))
@@ -945,7 +972,7 @@ AS $fn$
  WHERE EXISTS (SELECT 1 FROM me)
 $fn$;
 COMMENT ON FUNCTION public.context_client_story(uuid, timestamptz) IS
- 'Job story (20261006014000): client-story-v1 for the client of one job: identity (CRM contact, else exact client email, never a name), every job of that client with phase, short now line and owing (full story for the newest 20), money across jobs, top 10 open loops, past issues and standing preferences or access constraints from live ledgers, other parties per job, and not_known. Service role only.';
+ 'Job story (20261006014000): client-story-v1 for the client of one job: identity (CRM contact, else exact client email, never a name), every job of that client with phase, short now line and owing (full story for the newest 20), money across jobs (and by_party, each payer on its own), top 10 open loops, past issues and standing preferences or access constraints from live ledgers, other parties per job, and not_known. Service role only.';
 
 -- 7. Scorecard, cheap rows: the owner's done definition rows 1 to 14 from the live
 -- status functions (called, never re-derived). Rows 11 to 13 need every live job's

@@ -17,7 +17,9 @@ import {
   clientStoryAction,
   exactJobNumberPattern,
   jobStoryAction,
+  parseInstant,
   readJobStory,
+  sanitizedError,
   STORY_SECTIONS_VERSION,
   StoryReadError,
   storyScorecardAction,
@@ -200,19 +202,19 @@ Deno.test("dossier mode story passes as_of, since and generation_id; refuses a m
   await _assembleJobDossierForTest(client, {
     job_number: "swf-t0001",
     mode: "story",
-    as_of: "2026-10-07T02:00:00Z",
-    since: "2026-10-04T12:00:00Z",
+    as_of: "2026-10-04T02:00:00Z",
+    since: "2026-10-03T12:00:00Z",
     generation_id: GEN,
   });
   assertEquals(client.rpcs.find((r) => r.fn === "context_job_story")!.args, {
     p_job_id: JOB,
-    p_as_of: "2026-10-07T02:00:00.000Z",
+    p_as_of: "2026-10-04T02:00:00.000Z",
     p_generation_id: GEN,
-    p_since: "2026-10-04T12:00:00.000Z",
+    p_since: "2026-10-03T12:00:00.000Z",
   });
   assertEquals(client.rpcs.find((r) => r.fn === "context_client_story")!.args, {
     p_job_id: JOB,
-    p_as_of: "2026-10-07T02:00:00.000Z",
+    p_as_of: "2026-10-04T02:00:00.000Z",
   });
   const e = await assertRejects(
     () =>
@@ -325,6 +327,50 @@ Deno.test("GET job_story resolves job_number, passes the options, and maps error
     StoryReadError,
   );
   assertEquals([failing.code, failing.status], ["rpc_failed", 502]);
+  // The caller never sees the database's own words (they go to the server log).
+  assertEquals(failing.message.includes("unavailable"), false);
+});
+
+Deno.test("an instant more than five minutes ahead is refused; a few minutes of skew is not", () => {
+  const now = Date.parse("2026-10-05T10:00:00Z");
+  const e = (() => {
+    try {
+      parseInstant("2026-10-05T10:06:00Z", "as_of", now);
+    } catch (x) {
+      return x as StoryReadError;
+    }
+    return null;
+  })();
+  assertEquals([e?.code, e?.status], ["invalid_as_of", 400]);
+  assertEquals(
+    parseInstant("2026-10-05T10:04:00Z", "as_of", now),
+    "2026-10-05T10:04:00.000Z",
+  );
+  assertEquals(
+    parseInstant("2026-10-01T00:00:00Z", "since", now),
+    "2026-10-01T00:00:00.000Z",
+  );
+});
+
+Deno.test("failed reads carry a fixed message and the SQLSTATE, never the database text", async () => {
+  const client = fakeClient({ rpc: { context_client_story: CLIENT } });
+  client.rpc = (fn: string, args: any) => {
+    client.rpcs.push({ fn, args });
+    return Promise.resolve({
+      data: null,
+      error: {
+        message: 'relation "secret_table" does not exist',
+        code: "42P01",
+      },
+    });
+  };
+  const read = await readJobStory(client, { jobId: JOB });
+  assertEquals(read.status.code, "rpc_failed");
+  assertEquals(read.status.error, "story read failed (42P01)");
+  assertEquals(
+    sanitizedError("x", { message: "boom", code: "not a state" }),
+    "x",
+  );
 });
 
 Deno.test("job_number is matched exactly and case-insensitively: LIKE wildcards never pick another job", async () => {

@@ -118,16 +118,19 @@ BEGIN
  IF to_regclass('public.inbox_events') IS NULL OR to_regclass('public.users') IS NULL THEN
   problems := problems || 'public.inbox_events or public.users missing'::text;
  END IF;
- -- The two phase lists: as live, or already widened by this migration.
+ -- The two phase lists: as live, already widened by this migration, or narrowed
+ -- NOT VALID by its rollback (which keeps the ledger's runs and calls).
  SELECT string_agg(pg_get_constraintdef(c.oid), ' | ') INTO chk FROM pg_constraint c
  WHERE c.conrelid = 'public.context_extraction_runs'::regclass AND c.contype = 'c' AND pg_get_constraintdef(c.oid) LIKE '%phase = ANY%';
  IF chk IS DISTINCT FROM $c$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text])))$c$
+  AND chk IS DISTINCT FROM $c$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text]))) NOT VALID$c$
   AND chk IS DISTINCT FROM $c$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'ledger'::text])))$c$ THEN
   problems := problems || format('context_extraction_runs phase check is %s', coalesce(chk, '<missing>'));
  END IF;
  SELECT string_agg(pg_get_constraintdef(c.oid), ' | ') INTO chk FROM pg_constraint c
  WHERE c.conrelid = 'public.context_model_call_reservations'::regclass AND c.contype = 'c' AND pg_get_constraintdef(c.oid) LIKE '%phase = ANY%';
  IF chk IS DISTINCT FROM $c$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text])))$c$
+  AND chk IS DISTINCT FROM $c$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text]))) NOT VALID$c$
   AND chk IS DISTINCT FROM $c$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text])))$c$ THEN
   problems := problems || format('context_model_call_reservations phase check is %s', coalesce(chk, '<missing>'));
  END IF;
@@ -160,7 +163,8 @@ DECLARE c record;
 BEGIN
  FOR c IN SELECT conname FROM pg_constraint
   WHERE conrelid = 'public.context_extraction_runs'::regclass AND contype = 'c'
-   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text])))$d$ LOOP
+   AND pg_get_constraintdef(oid) IN ($d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text])))$d$,
+    $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text]))) NOT VALID$d$) LOOP
   EXECUTE format('ALTER TABLE public.context_extraction_runs DROP CONSTRAINT %I', c.conname);
  END LOOP;
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND contype = 'c'
@@ -170,7 +174,8 @@ BEGIN
  END IF;
  FOR c IN SELECT conname FROM pg_constraint
   WHERE conrelid = 'public.context_model_call_reservations'::regclass AND contype = 'c'
-   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text])))$d$ LOOP
+   AND pg_get_constraintdef(oid) IN ($d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text])))$d$,
+    $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text]))) NOT VALID$d$) LOOP
   EXECUTE format('ALTER TABLE public.context_model_call_reservations DROP CONSTRAINT %I', c.conname);
  END LOOP;
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_model_call_reservations'::regclass AND contype = 'c'
@@ -589,16 +594,53 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT jb.id, jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost') AS live_job,
    coalesce(jb.metadata ->> 'do_not_schedule', '') NOT IN ('true', '1') AS schedulable
   FROM public.jobs jb WHERE jb.id = ANY(p_job_ids)
- ), er AS MATERIALIZED (
-  SELECT r.job_id, r.src_id, r.at, r.landed_at, r.copy_of
-  FROM public.context_ledger_evidence_rows(ARRAY(SELECT j.id FROM j WHERE j.live_job), now()) r
- ), ev AS (
-  SELECT er.job_id, max(er.landed_at) AS newest, count(*) FILTER (WHERE er.copy_of IS NULL)::integer AS n FROM er GROUP BY er.job_id
  ), cur AS (
   SELECT j.id AS job_id, public.context_ledger_current_generation(j.id) AS gid FROM j
  ), g AS (
   SELECT c.job_id, gen.id, gen.status, gen.reader, gen.evidence_until, gen.created_at, gen.checks
   FROM cur c JOIN public.context_ledger_generations gen ON gen.id = c.gid
+ ), cbe AS (
+  -- The read every judgement can afford: the admitted business_events rows
+  -- exactly (count and newest landed time, no text compare, no copy grouping)...
+  SELECT e.job_id, count(*)::integer AS n,
+   max(greatest(coalesce(e.context_captured_at, e.recorded_at, e.occurred_at), e.attributed_at)) AS newest
+  FROM j JOIN public.business_events e ON e.job_id = j.id
+  WHERE j.live_job AND public.context_ledger_row_admissible(e) AND coalesce(e.event_at, e.occurred_at) <= now()
+   AND greatest(coalesce(e.context_captured_at, e.recorded_at, e.occurred_at), e.attributed_at) <= now()
+  GROUP BY e.job_id
+ ), cib AS (
+  -- ...and the legacy mail that could be evidence, before its copy checks (a superset).
+  SELECT x.job_id, count(*)::integer AS n, max(x.landed) AS newest FROM (
+   SELECT j.id AS job_id, coalesce(i.processed_at, i.received_at) AS landed
+   FROM j JOIN public.inbox_events i ON i.job_id = j.id WHERE j.live_job AND i.received_at <= now()
+   UNION ALL
+   SELECT j.id, coalesce(i.processed_at, i.received_at)
+   FROM j JOIN public.jobs jb ON jb.id = j.id
+   JOIN public.inbox_events i ON lower(btrim(i.from_email)) = lower(nullif(btrim(jb.client_email), '')) AND i.job_id IS NULL
+   WHERE j.live_job AND i.received_at <= now()) x
+  WHERE x.landed <= now()
+  GROUP BY x.job_id
+ ), need AS (
+  -- The full evidence read (text, copies) only where it can change the judgement:
+  -- a reading whose newest possible evidence is past its evidence_until, or a
+  -- never-read job whose only possible evidence is legacy mail.
+  SELECT j.id FROM j LEFT JOIN g ON g.job_id = j.id LEFT JOIN cbe ON cbe.job_id = j.id LEFT JOIN cib ON cib.job_id = j.id
+  WHERE j.live_job AND CASE WHEN g.id IS NULL THEN coalesce(cbe.n, 0) = 0 AND coalesce(cib.n, 0) > 0
+                            ELSE g.evidence_until IS NULL OR greatest(cbe.newest, cib.newest) > g.evidence_until END
+ ), er AS MATERIALIZED (
+  SELECT r.job_id, r.src_id, r.at, r.landed_at, r.copy_of
+  FROM public.context_ledger_evidence_rows(ARRAY(SELECT need.id FROM need), now()) r
+ ), ev AS (
+  -- Exact where read in full; elsewhere the cheap read gives the same judgement
+  -- (newest only ever overstates, by legacy copies, and stays at or before the
+  -- reading's evidence_until; a count above zero stays above zero).
+  SELECT j.id AS job_id,
+   CASE WHEN nd.id IS NOT NULL THEN (SELECT max(r.landed_at) FROM er r WHERE r.job_id = j.id)
+        ELSE greatest(cbe.newest, cib.newest) END AS newest,
+   CASE WHEN nd.id IS NOT NULL THEN (SELECT (count(*) FILTER (WHERE r.copy_of IS NULL))::integer FROM er r WHERE r.job_id = j.id)
+        ELSE coalesce(cbe.n, 0) + coalesce(cib.n, 0) END AS n
+  FROM j LEFT JOIN need nd ON nd.id = j.id LEFT JOIN cbe ON cbe.job_id = j.id LEFT JOIN cib ON cib.job_id = j.id
+  WHERE j.live_job
  ), moved AS (
   -- An item of the current generation citing a business_events row that is
   -- gone, on another job, or no longer admissible. A person-locked item is
@@ -675,7 +717,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   FROM judged d0 CROSS JOIN s) d
 $$;
 COMMENT ON FUNCTION public.context_ledger_judge(uuid[]) IS
- 'Context ledger store (20261006013000): the one ledger due judgement per job: kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours), outside_window (a backfill or rebuild outside the settings backfill hours; an update is never held). A person-locked item is never a moved citation (a rebuild would carry it back). Service role only.';
+ 'Context ledger store (20261006013000): the one ledger due judgement per job (the full evidence read only for a job whose reading may have newer evidence or whose only possible evidence is legacy mail; elsewhere a count and newest landed time of the admitted rows decide the same; evidence_rows is then that count): kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours), outside_window (a backfill or rebuild outside the settings backfill hours; an update is never held). A person-locked item is never a moved citation (a rebuild would carry it back). Service role only.';
 
 -- 8. Jobs due a ledger read now.
 CREATE OR REPLACE FUNCTION public.context_ledger_due(p_limit integer DEFAULT 20)
@@ -710,7 +752,8 @@ BEGIN
  IF s.id IS NULL OR s.mode = 'off' OR NOT public.automation_lane_enabled('extraction') THEN
   RETURN jsonb_build_object('outcome', 'off');
  END IF;
- PERFORM pg_advisory_xact_lock(20260911, 1);
+ -- One claim at a time per job (never the admission's lock, which every model call takes).
+ PERFORM pg_advisory_xact_lock(20261006, hashtext(p_job_id::text));
  -- A building generation whose run lost its lease is failed here (it would
  -- otherwise block the job for ever); the job then waits out the backoff.
  FOR x IN SELECT bg.id AS gid, br.id AS rid, br.status AS rstatus FROM public.context_ledger_generations bg
@@ -744,10 +787,12 @@ BEGIN
  RETURN jsonb_build_object('outcome', 'claimed', 'run_id', r.id, 'lease_token', r.lease_token,
   'lease_expires_at', r.lease_expires_at, 'generation_id', g.id, 'generation_status', g.status, 'kind', p_kind,
   'reason', d.reason, 'mode', s.mode, 'reader', g.reader, 'max_prompt_bytes', s.max_prompt_bytes,
-  'since', CASE WHEN p_kind = 'update' THEN g.evidence_until END);
+  'since', CASE WHEN p_kind = 'update' THEN g.evidence_until END,
+  -- build the packet as of the claim: finish never records evidence past it
+  'evidence_as_of', r.started_at);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_claim(uuid, text, date) IS
- 'Context ledger store (20261006013000): claims one ledger read of a job: a context_extraction_runs row (phase ledger, running, run_lease_min lease) and, for backfill or rebuild, a building generation with the settings reader; for update, the job''s current generation (since = its evidence_until). Outcomes claimed, busy, off (mode off or extraction lane off), not_due (the judgement disagrees with the asked kind). A building generation whose run lost its lease is failed first (lease_expired). Service role only.';
+ 'Context ledger store (20261006013000): claims one ledger read of a job: a context_extraction_runs row (phase ledger, running, run_lease_min lease) and, for backfill or rebuild, a building generation with the settings reader; for update, the job''s current generation (since = its evidence_until). Outcomes claimed (with evidence_as_of, the claim''s instant: build the packet as of it), busy, off (mode off or extraction lane off), not_due (the judgement disagrees with the asked kind). Claims serialise per job (an advisory lock on the job), never on the admission''s lock. A building generation whose run lost its lease is failed first (lease_expired). Service role only.';
 
 -- 10. The packet: everything the reader sees except the record text.
 CREATE OR REPLACE FUNCTION public.context_ledger_packet(p_job_id uuid, p_since timestamptz DEFAULT NULL, p_as_of timestamptz DEFAULT now())
@@ -830,7 +875,7 @@ RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public,
 DECLARE v_table text; v_id uuid; v_excerpt text; v_norm text; e public.business_events; v_text text; v_at timestamptz;
  v_cmail text; v_job uuid; v_found boolean; i record; v_ours boolean := false; v_customer boolean := false;
  v_call_note boolean := false; v_internal boolean := false; v_record boolean := false; v_worded boolean := false;
- v_subject text; v_body text; v_close_at timestamptz;
+ v_subject text; v_body text; v_close_at timestamptz; v_automated boolean := false;
 BEGIN
  IF p_cite IS NULL OR jsonb_typeof(p_cite) <> 'object'
   OR EXISTS (SELECT 1 FROM jsonb_object_keys(p_cite) k WHERE k NOT IN ('table', 'id', 'excerpt'))
@@ -853,7 +898,9 @@ BEGIN
   SELECT * INTO e FROM public.business_events b WHERE b.id = v_id;
   IF e.id IS NULL THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_missing', 'detail', v_table || ':' || v_id); END IF;
   IF e.job_id IS DISTINCT FROM p_job_id THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_off_job', 'detail', v_table || ':' || v_id); END IF;
-  IF NOT public.context_event_source_admissible(e) THEN
+  -- the same admission as the evidence: linked, not retracted, our own writer,
+  -- worded, a message (never a status-only or record-kind row)
+  IF NOT public.context_ledger_row_admissible(e) THEN
    RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible', 'detail', v_table || ':' || v_id);
   END IF;
   v_body := public.context_event_text(e);
@@ -861,8 +908,19 @@ BEGIN
   v_subject := nullif(btrim(e.payload ->> 'subject'), '');
   v_text := concat_ws(' ', v_subject, v_body);
   v_at := coalesce(e.event_at, e.occurred_at);
-  v_customer := (e.metadata #>> '{party_roles,sender_role}' = 'customer' AND e.metadata #>> '{party_roles,basis}' = 'job_customer')
-   OR (NOT coalesce(e.metadata ? 'party_roles', false) AND e.event_type LIKE 'client.%' AND e.direction = 'inbound');
+  IF e.event_type = 'call.transcript_completed' THEN
+   -- A transcript holds both sides' words: it counts as the customer's only on
+   -- its call's stamp (the job's customer was the other party on that call).
+   v_customer := EXISTS (SELECT 1 FROM public.business_events c
+    WHERE c.job_id = e.job_id AND c.event_type <> 'call.transcript_completed'
+     AND c.provider_message_id = 'ghl:' || coalesce(e.payload ->> 'ghl_call_id',
+      CASE WHEN e.provider_message_id LIKE 'ghltx:%' THEN substr(e.provider_message_id, 7) END)
+     AND c.metadata #>> '{party_roles,counterpart_role}' = 'customer' AND c.metadata #>> '{party_roles,basis}' = 'job_customer');
+  ELSE
+   v_customer := (e.metadata #>> '{party_roles,sender_role}' = 'customer' AND e.metadata #>> '{party_roles,basis}' = 'job_customer')
+    OR (NOT coalesce(e.metadata ? 'party_roles', false) AND e.event_type LIKE 'client.%' AND e.direction = 'inbound');
+  END IF;
+  v_automated := coalesce(e.payload ->> 'sent_by_kind', '') = 'workflow' OR public.context_internal_text_role(e) <> 'other';
   v_ours := public.context_event_is_ours(e);
   v_call_note := e.channel IN ('call', 'note') OR e.event_type IN ('call.transcript_completed', 'client.call_logged', 'note.added', 'ghl.internal_comment');
   v_internal := e.channel IN ('sms', 'email') AND (public.context_internal_text_role(e) <> 'other'
@@ -938,10 +996,10 @@ BEGIN
  END IF;
  RETURN jsonb_build_object('ok', true, 'cite', jsonb_build_object('table', v_table, 'id', v_id::text, 'excerpt', v_excerpt),
   'at', v_at, 'close_at', v_close_at, 'customer_sender', v_customer, 'ours', v_ours, 'call_or_note', v_call_note,
-  'internal_text', v_internal, 'record', v_record, 'worded', v_worded);
+  'internal_text', v_internal, 'record', v_record, 'worded', v_worded, 'automated', v_automated);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job and admissible (linked, not retracted); an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: completed_at or started_at; null when it cannot). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: completed_at or started_at; null when it cannot). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)
@@ -969,7 +1027,9 @@ BEGIN
   RETURN jsonb_build_object('ok', false, 'code', 'invalid_shape', 'detail', 'text fields must be strings or null');
  END IF;
  v_type := p_item ->> 'item_type'; v_status := p_item ->> 'status'; v_from := p_item ->> 'from_role';
- v_to := nullif(p_item ->> 'to_role', ''); v_what := btrim(coalesce(p_item ->> 'what', ''));
+ v_to := nullif(p_item ->> 'to_role', '');
+ -- the ledger's own words carry no em or en dashes (they reach outbound text)
+ v_what := btrim(replace(regexp_replace(coalesce(p_item ->> 'what', ''), '\s*' || chr(8212) || '\s*', ', ', 'g'), chr(8211), '-'));
  v_about := nullif(btrim(p_item ->> 'about_key'), ''); v_basis := coalesce(nullif(p_item ->> 'due_basis', ''), 'none');
  IF p_writer = 'model' AND coalesce(length(btrim(p_item ->> 'ref')), 0) NOT BETWEEN 1 AND 60 THEN
   RETURN jsonb_build_object('ok', false, 'code', 'invalid_shape', 'detail', 'ref is 1 to 60 characters');
@@ -1098,7 +1158,7 @@ BEGIN
  -- A due date only when an opening excerpt states it.
  IF v_due IS NOT NULL THEN
   FOR f IN SELECT x FROM jsonb_array_elements(v_facts) x LOOP
-   IF NOT (f ->> 'record')::boolean AND coalesce(f #>> '{cite,excerpt}', '') <> '' THEN
+   IF NOT (f ->> 'record')::boolean AND NOT coalesce((f ->> 'automated')::boolean, false) AND coalesce(f #>> '{cite,excerpt}', '') <> '' THEN
     BEGIN
      v_supported := public.context_supported_due_date(f #>> '{cite,excerpt}', (f ->> 'at')::timestamptz);
     EXCEPTION WHEN OTHERS THEN v_supported := NULL;
@@ -1122,7 +1182,7 @@ BEGIN
   'needs_reply', CASE WHEN jsonb_typeof(p_item -> 'needs_reply') = 'boolean' THEN (p_item ->> 'needs_reply')::boolean END, 'also_concerns', nullif(btrim(p_item ->> 'also_concerns'), '')));
 END $$;
 COMMENT ON FUNCTION public.context_ledger_check_item(uuid, jsonb, text, uuid, text) IS
- 'Context ledger store (20261006013000): checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it; a closing citation must be able to close (close_at: no draft invoice, unsent document or unattended booking: closing_not_issued), may not be an opening citation (closing_is_opening) and is at or after the opening, strictly after for a request (closing_before_opening); speaker rules for the model on the first opening citation (customer: the job''s customer sent it; us: ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it (context_supported_due_date). opened_at and closed_at come from the cited rows, never the input. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
+ 'Context ledger store (20261006013000): checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it; a closing citation must be able to close (close_at: no draft invoice, unsent document or unattended booking: closing_not_issued), may not be an opening citation (closing_is_opening) and is at or after the opening, strictly after for a request (closing_before_opening); speaker rules for the model on the first opening citation (customer: the job''s customer sent it; us: ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it and that message is not automated (context_supported_due_date); what has em and en dashes replaced. opened_at and closed_at come from the cited rows, never the input. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
 
 -- 13. The write: custody for every item and transition.
 CREATE OR REPLACE FUNCTION public.context_ledger_write(p_run_id uuid, p_lease_token uuid, p_generation_id uuid,
@@ -1549,6 +1609,8 @@ BEGIN
  IF p_outcome <> 'failed' AND (v_until IS NULL OR v_until > now()) THEN
   RETURN jsonb_build_object('outcome', 'refused', 'reason', 'invalid_meta', 'detail', 'evidence_until is required and not in the future');
  END IF;
+ -- The reader cannot have read what landed after its claim: cap at the claim's instant.
+ v_until := least(v_until, r.started_at);
  IF p_outcome = 'failed' THEN
   -- A stop is not a failure: the worker ran out of budget, was switched off,
   -- paused, rate limited, logged out or stopped. The run and a building
@@ -1598,7 +1660,8 @@ BEGIN
    v_promoted := true;
   END IF;
   RETURN jsonb_build_object('outcome', 'updated', 'generation_status', CASE WHEN v_promoted THEN 'live' ELSE g.status END,
-   'promoted', v_promoted, 'items_accepted', v_acc, 'items_refused', v_ref, 'passed', (v_checks ->> 'passed')::boolean);
+   'promoted', v_promoted, 'items_accepted', v_acc, 'items_refused', v_ref, 'passed', (v_checks ->> 'passed')::boolean,
+   'evidence_until', v_until);
  END IF;
  -- built: the verdict also needs at least one item unless there was no evidence.
  v_pass := v_pass AND (v_items >= 1 OR v_rows = 0);
@@ -1619,10 +1682,10 @@ BEGIN
   v_promoted := true;
  END IF;
  RETURN jsonb_build_object('outcome', 'built', 'generation_status', CASE WHEN v_promoted THEN 'live' ELSE 'shadow' END,
-  'promoted', v_promoted, 'carried', v_carried, 'passed', v_pass, 'checks', v_store);
+  'promoted', v_promoted, 'carried', v_carried, 'passed', v_pass, 'checks', v_store, 'evidence_until', v_until);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_finish(uuid, uuid, uuid, text, jsonb) IS
- 'Context ledger store (20261006013000): closes a ledger run. The verdict counts both sides'' refusals: (p_meta.checks.refused_local + store refusals) / greatest(p_meta.checks.proposed, store accepted + refused, 1) at most 20%, the store''s own refusals at most 20% of what it saw, and for a build at least one item unless there was no evidence; it is stored as checks.passed (a build: its verdict; an update: the build''s and this update''s), and a run whose verdict fails is done with error checks_failed (it counts toward the backoff). built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and checks.passed it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow is promoted on its first update with checks.passed once mode is live. failed: a building generation fails with the reason; a live or shadow one is untouched. A stop (p_meta.failure ledger_budget, model_cap, ledger_off, lane_off, paused, rate_limited, auth_required or worker_stopping) is released, not failed: error and failure released:<code>, never counted toward the backoff. A repeated finish of a closed run reports and changes nothing. Service role only.';
+ 'Context ledger store (20261006013000): closes a ledger run. evidence_until is capped at the claim''s instant (the run''s started_at) and returned. The verdict counts both sides'' refusals: (p_meta.checks.refused_local + store refusals) / greatest(p_meta.checks.proposed, store accepted + refused, 1) at most 20%, the store''s own refusals at most 20% of what it saw, and for a build at least one item unless there was no evidence; it is stored as checks.passed (a build: its verdict; an update: the build''s and this update''s), and a run whose verdict fails is done with error checks_failed (it counts toward the backoff). built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and checks.passed it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow is promoted on its first update with checks.passed once mode is live. failed: a building generation fails with the reason; a live or shadow one is untouched. A stop (p_meta.failure ledger_budget, model_cap, ledger_off, lane_off, paused, rate_limited, auth_required or worker_stopping) is released, not failed: error and failure released:<code>, never counted toward the backoff. A repeated finish of a closed run reports and changes nothing. Service role only.';
 
 -- 17. A person's correction on the live ledger.
 CREATE OR REPLACE FUNCTION public.context_ledger_person_edit(p_job_id uuid, p_user_id uuid, p_action text, p_item_key text,

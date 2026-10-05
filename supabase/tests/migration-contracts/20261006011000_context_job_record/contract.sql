@@ -45,6 +45,18 @@ BEGIN
  IF to_regclass('public.inbox_events_job_id_record') IS NULL OR to_regclass('public.inbox_events_from_email_record') IS NULL THEN
   RAISE EXCEPTION 'record contract: the inbox_events lookup indexes are missing';
  END IF;
+ -- rev-backend P2-16: a written date is read safely (one bad row never fails a story)
+ SELECT pr.prosecdef, pr.proconfig INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure('public.context_job_record_date(text)');
+ IF p IS NULL OR p.prosecdef OR p.proconfig IS NOT NULL OR has_function_privilege('anon', 'public.context_job_record_date(text)', 'EXECUTE') THEN
+  RAISE EXCEPTION 'record contract: the date helper must exist, stay inlinable and not be callable by anon';
+ END IF;
+ IF public.context_job_record_date('2026-09-21') <> '2026-09-21' OR public.context_job_record_date('2026-09-21T10:00:00Z') <> '2026-09-21'
+    OR public.context_job_record_date('2028-02-29') <> '2028-02-29'
+    OR public.context_job_record_date('2026-02-30') IS NOT NULL OR public.context_job_record_date('21/09/2026') IS NOT NULL
+    OR public.context_job_record_date('0000-01-01') IS NOT NULL OR public.context_job_record_date('') IS NOT NULL
+    OR public.context_job_record_date(NULL) IS NOT NULL OR public.context_job_record_date('2026-13-01') IS NOT NULL THEN
+  RAISE EXCEPTION 'record contract: the date helper must read real dates and nothing else';
+ END IF;
 END $shape$;
 
 -- 2. Behaviour on synthetic jobs.
@@ -108,10 +120,11 @@ VALUES ('d0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-0000000
        ('d0000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-000000000003', 'quote', 'Q-9003', 1,
         '2026-09-25 01:00Z', '2026-09-25 01:10Z', NULL);
 
--- Job B: a passed booking, an observer mirror of it, and a make-safe pack sent.
+-- Job B: a passed booking, an observer mirror left on a later day (R6 reads
+-- crew bookings only), and a make-safe pack sent.
 INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
 VALUES ('e0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000002', 'lead_installer', '2026-10-02', 'install', 'scheduled', 'Crew One', 'tentative', false, '2026-09-28 01:00Z'),
-       ('e0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000002', 'observer', '2026-10-01', 'install', 'scheduled', NULL, 'confirmed', true, '2026-09-28 01:00Z');
+       ('e0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000002', 'observer', '2026-10-03', 'install', 'scheduled', NULL, 'confirmed', true, '2026-09-28 01:00Z');
 INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
 VALUES ('f0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000002', 'makesafe_pack_sent_at_derived', '{}', '2026-10-03 01:00Z'),
        -- Job C: status ping-pong within ten minutes folds into one row
@@ -133,6 +146,21 @@ VALUES ('a0000000-0000-4000-8000-00000000000e', '00000000-0000-4000-8000-0000000
 INSERT INTO public.inbox_events (id, job_id, from_email, subject, body_preview, received_at, graph_message_id, mailbox)
 VALUES ('aa000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-00000000000e', 'cust.c@example.test', 'About my other job',
         'When does the other fence start?', '2026-10-05 01:00Z', 'g-legacy-3', 'admin@example.test');
+
+-- Job F: a booking whose status alone says complete, an app event with an
+-- impossible date, and a call transcript as the customer's last word.
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('a0000000-0000-4000-8000-00000000000f', '00000000-0000-4000-8000-0000000000aa', 'SWF-T000F', 'complete', 'fencing',
+        NULL, 'ctF', '{}', '2026-09-01 01:00Z');
+INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
+VALUES ('e0000000-0000-4000-8000-00000000000f', 'a0000000-0000-4000-8000-00000000000f', 'lead_installer', '2026-09-20', 'install', 'complete', 'Crew Two', 'confirmed', false, '2026-09-10 01:00Z');
+INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
+VALUES ('f0000000-0000-4000-8000-00000000000f', 'a0000000-0000-4000-8000-00000000000f', 'assignment_rescheduled',
+        '{"old_date":"2026-02-30","new_date":"2026-09-20"}', '2026-09-12 01:00Z');
+INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, body_preview, occurred_at, recorded_at, event_at, attribution_status)
+VALUES ('b0000000-0000-4000-8000-00000000000f', 'a0000000-0000-4000-8000-00000000000f', 'call.transcript_completed', 'ghl-call-transcript', 'call', 'inbound', 'ctF',
+        '{"transcript":"Hi, thanks for calling. Yes the gate is great."}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}', NULL,
+        '2026-09-25 01:00Z', '2026-09-25 01:00Z', '2026-09-25 01:00Z', 'direct');
 
 DO $behave$
 DECLARE
@@ -204,6 +232,20 @@ BEGIN
  IF got NOT LIKE 'Booking: install Fri 2 Oct 2026%' THEN RAISE EXCEPTION 'record contract: Perth weekday wrong: %', got; END IF;
  SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY[a], asof) t WHERE t.source_id = 'b0000000-0000-4000-8000-000000000005';
  IF n <> 0 THEN RAISE EXCEPTION 'record contract: a row recorded after the replay instant leaked'; END IF;
+ -- rev-backend P2-7: a status-only completion never says who or when; P2-16: an
+ -- impossible date in an app event reads as no date, and the timeline still reads
+ SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof) t
+ WHERE t.kind = 'attendance' AND t.what LIKE 'Booking status complete (who and when not recorded): install booked Sun 20 Sep 2026%';
+ IF n <> 1 THEN RAISE EXCEPTION 'record contract: a status-only completion must not say the crew marked it'; END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof) t
+ WHERE t.source_id = 'f0000000-0000-4000-8000-00000000000f' AND t.what = 'Booking moved to Sun 20 Sep';
+ IF n <> 1 THEN RAISE EXCEPTION 'record contract: an impossible date must read as no date'; END IF;
+ -- rev-backend P2-17: a transcript is a call with unlabelled speakers, not the customer's words
+ SELECT * INTO r FROM public.context_job_record_contact(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof);
+ IF r.last_customer_message->>'id' <> 'b0000000-0000-4000-8000-00000000000f'
+    OR r.last_customer_message->>'text' NOT LIKE 'Call (speakers not labelled): %' THEN
+  RAISE EXCEPTION 'record contract: a transcript must read as a call: %', r.last_customer_message;
+ END IF;
 
  -- money: per party, overpayment credited, stale raw copy flagged
  SELECT * INTO r FROM public.context_job_record_money(ARRAY[a], asof) m WHERE m.xero_contact_id = 'xc1';

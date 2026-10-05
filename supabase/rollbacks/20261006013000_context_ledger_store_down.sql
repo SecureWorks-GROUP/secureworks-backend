@@ -1,8 +1,9 @@
 -- Rollback of 20261006013000_context_ledger_store: the ledger store is
--- removed and the model call admission goes back to the 20261006001000 body.
--- Ledger reservations and ledger runs are deleted (they only ever held ledger
--- reads; the day's other calls are untouched), building generations are
--- marked failed, and the generations keep their rows with no run. The ledger
+-- removed and the model call admission goes back to the 20261006001000 body
+-- (and its comment, none). Ledger reservations and ledger runs stay: they are
+-- the audit of real model spend. Running ledger runs are closed, building
+-- generations are marked failed, and the phase lists narrow again, NOT VALID
+-- where ledger rows remain (no new ledger row; the old ones stay). The ledger
 -- tables themselves (20261006010000) and every item and transition stay.
 -- Refuses when a later migration has already replaced the admission, and
 -- while the job story (20261006014000) is installed: the story reads the
@@ -22,14 +23,13 @@ BEGIN
  END IF;
 END $guard$;
 
--- Ledger calls and runs leave the shared ledgers first, so the phase lists can narrow.
-DELETE FROM public.context_model_call_reservations WHERE phase = 'ledger';
+-- Ledger calls and runs stay (the audit of real model spend); nothing will
+-- finish a running one or a building generation again.
 UPDATE public.context_ledger_generations SET status = 'failed', failure = 'ledger_store_rolled_back', finished_at = coalesce(finished_at, now()),
  updated_at = now() WHERE status = 'building';
-UPDATE public.context_ledger_generations SET run_id = NULL
- WHERE run_id IN (SELECT id FROM public.context_extraction_runs WHERE phase = 'ledger');
+UPDATE public.context_extraction_runs SET status = 'failed', error = 'ledger_store_rolled_back', finished_at = coalesce(finished_at, now()),
+ lease_expires_at = NULL WHERE phase = 'ledger' AND status = 'running';
 DROP TABLE IF EXISTS public.context_ledger_writes;
-DELETE FROM public.context_extraction_runs WHERE phase = 'ledger';
 
 CREATE OR REPLACE FUNCTION public.reserve_context_model_call(p_phase text,p_run_id uuid,p_lease_token uuid)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
@@ -79,6 +79,7 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) TO service_role;
+COMMENT ON FUNCTION public.reserve_context_model_call(text,uuid,uuid) IS NULL;
 
 DO $chk$
 DECLARE c record;
@@ -88,18 +89,30 @@ BEGIN
   EXECUTE format('ALTER TABLE public.context_extraction_runs DROP CONSTRAINT %I', c.conname);
  END LOOP;
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND contype = 'c'
-   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text])))$d$) THEN
-  ALTER TABLE public.context_extraction_runs ADD CONSTRAINT context_extraction_runs_phase_check
-   CHECK (phase IN ('attribution','extraction','bucket'));
+   AND pg_get_constraintdef(oid) IN ($d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text])))$d$,
+    $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text]))) NOT VALID$d$)) THEN
+  IF EXISTS (SELECT 1 FROM public.context_extraction_runs WHERE phase = 'ledger') THEN
+   ALTER TABLE public.context_extraction_runs ADD CONSTRAINT context_extraction_runs_phase_check
+    CHECK (phase IN ('attribution','extraction','bucket')) NOT VALID;
+  ELSE
+   ALTER TABLE public.context_extraction_runs ADD CONSTRAINT context_extraction_runs_phase_check
+    CHECK (phase IN ('attribution','extraction','bucket'));
+  END IF;
  END IF;
  FOR c IN SELECT conname FROM pg_constraint WHERE conrelid = 'public.context_model_call_reservations'::regclass AND contype = 'c'
   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text])))$d$ LOOP
   EXECUTE format('ALTER TABLE public.context_model_call_reservations DROP CONSTRAINT %I', c.conname);
  END LOOP;
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_model_call_reservations'::regclass AND contype = 'c'
-   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text])))$d$) THEN
-  ALTER TABLE public.context_model_call_reservations ADD CONSTRAINT context_model_call_reservations_phase_check
-   CHECK (phase IN ('attribution','extraction','bucket','vision'));
+   AND pg_get_constraintdef(oid) IN ($d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text])))$d$,
+    $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text]))) NOT VALID$d$)) THEN
+  IF EXISTS (SELECT 1 FROM public.context_model_call_reservations WHERE phase = 'ledger') THEN
+   ALTER TABLE public.context_model_call_reservations ADD CONSTRAINT context_model_call_reservations_phase_check
+    CHECK (phase IN ('attribution','extraction','bucket','vision')) NOT VALID;
+  ELSE
+   ALTER TABLE public.context_model_call_reservations ADD CONSTRAINT context_model_call_reservations_phase_check
+    CHECK (phase IN ('attribution','extraction','bucket','vision'));
+  END IF;
  END IF;
 END $chk$;
 

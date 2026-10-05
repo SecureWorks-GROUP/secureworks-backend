@@ -187,6 +187,23 @@ BEGIN
     OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE '%needs a rebuild%') THEN
   RAISE EXCEPTION 'story contract: a moved staff correction is for a person: % / %', s->'meta'->'ledger', s->'not_known';
  END IF;
+ -- rev-backend P2-9: a party with only draft invoices is not a payer; P2-13: no dashes in ledger words
+ s := public.context_job_story_assemble('{"id":"x","status":"accepted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('money', jsonb_build_array(
+          jsonb_build_object('party', 'Draft Only', 'xero_contact_id', 'xd', 'invoiced', 0, 'paid', 0, 'credited', 0, 'owing', 0, 'overdue', 0,
+           'drafts', 1, 'draft_total', 500, 'invoices', '[{"id":"i1"}]'::jsonb),
+          jsonb_build_object('party', 'Real Payer', 'xero_contact_id', 'xr', 'invoiced', 1000, 'paid', 0, 'credited', 0, 'owing', 1000, 'overdue', 0,
+           'drafts', 0, 'draft_total', 0, 'invoices', '[{"id":"i2"}]'::jsonb))),
+        jsonb_build_object('status', 'live', 'generation', jsonb_build_object('id', 'g1', 'evidence_until', '2026-10-05T00:00:00Z'),
+         'unread_rows', 0, 'unread_ids', '[]'::jsonb, 'read_ids', '[]'::jsonb, 'transitions', '[]'::jsonb, 'items', jsonb_build_array(
+          jsonb_build_object('item_key', 'event:none:9', 'item_type', 'event', 'status', 'info', 'from_role', 'us',
+           'what', E'Gate fitted \u2014 posts set \u2013 done', 'opened_at', '2026-10-02T01:00:00Z', 'cites_ok', true,
+           'opened_by', '[{"table":"business_events","id":"e9"}]'::jsonb))),
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'who' @> '[{"name":"Draft Only"}]'::jsonb OR NOT s->'who' @> '[{"name":"Real Payer","role":"payer"}]'::jsonb
+    OR s->'events'->0->>'what' <> 'Gate fitted, posts set - done' THEN
+  RAISE EXCEPTION 'story contract: payers and dashes: % / %', s->'who', s->'events';
+ END IF;
  -- Invoicing words follow the money: an invoiced status with nothing left to invoice is "Invoiced".
  s := public.context_job_story_assemble('{"id":"x","status":"invoiced","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
         '{}'::jsonb, NULL, NULL, '2026-10-07 02:00Z', NULL);
@@ -334,6 +351,43 @@ VALUES
 INSERT INTO public.context_ledger_transitions (item_id, generation_id, job_id, from_status, to_status, at, by, reason)
 VALUES ('9b000000-0000-4000-8000-000000000001', '9a000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001',
         NULL, 'open', '2026-10-05 01:00Z', 'model:luna-ledger:v1', 'Opened from the customer text');
+-- every item written when its reading was built (a replay reads only what was written by then)
+UPDATE public.context_ledger_items i SET created_at = g.created_at FROM public.context_ledger_generations g
+WHERE g.id = i.generation_id AND i.job_id = 'a0000000-0000-4000-8000-000000000001';
+
+-- Job G: replay. An older reading (live until 4 Oct, then retired) and the live one;
+-- an item written 2 Oct and closed 4 Oct; an item written 5 Oct; a failed reading;
+-- and a text from us whose placement is not settled (on the job, not linked).
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('a0000000-0000-4000-8000-000000000007', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0007', 'accepted', 'fencing',
+        NULL, 'ctG', '{}', '2026-09-01 01:00Z');
+INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, occurred_at, recorded_at, event_at, attribution_status)
+VALUES ('b0000000-0000-4000-8000-000000000071', 'a0000000-0000-4000-8000-000000000007', 'client.sms_out', 'ghl', 'sms', 'outbound', 'ctG',
+        '{"body":"We will be there at eight"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+        '2026-10-02 01:00Z', '2026-10-02 01:00Z', '2026-10-02 01:00Z', 'pending_luna');
+INSERT INTO public.context_ledger_generations (id, job_id, kind, status, reader, evidence_until, promoted_at, created_at, failure)
+VALUES ('9a000000-0000-4000-8000-000000000071', 'a0000000-0000-4000-8000-000000000007', 'backfill', 'retired', 'luna-ledger:v1',
+        '2026-09-20 00:00Z', '2026-09-20 01:00Z', '2026-09-20 00:30Z', NULL),
+       ('9a000000-0000-4000-8000-000000000072', 'a0000000-0000-4000-8000-000000000007', 'rebuild', 'live', 'luna-ledger:v1',
+        '2026-10-04 00:00Z', '2026-10-04 01:00Z', '2026-10-02 00:30Z', NULL),
+       ('9a000000-0000-4000-8000-000000000073', 'a0000000-0000-4000-8000-000000000007', 'rebuild', 'failed', 'luna-ledger:v1',
+        NULL, NULL, '2026-10-05 00:30Z', 'model_timeout');
+INSERT INTO public.context_ledger_items (id, generation_id, job_id, item_key, item_type, status, from_role, to_role, what, about_key,
+  phase, opened_at, opened_by, closed_at, closed_by, closes_on, blocks, needs_reply, written_by, created_at)
+VALUES ('9b000000-0000-4000-8000-000000000071', '9a000000-0000-4000-8000-000000000072', 'a0000000-0000-4000-8000-000000000007',
+        'commitment:none:aaaaaaaaaa71', 'commitment', 'closed', 'us', 'customer', 'Be there at eight', NULL, 'install', '2026-10-02 01:00Z',
+        '[{"table":"business_events","id":"b0000000-0000-4000-8000-000000000071","excerpt":"We will be there at eight"}]',
+        '2026-10-04 02:00Z', '[{"table":"business_events","id":"b0000000-0000-4000-8000-000000000071","excerpt":"We will be there at eight"}]',
+        'visit', 'none', false, 'model:luna-ledger:v1', '2026-10-02 01:00Z'),
+       ('9b000000-0000-4000-8000-000000000072', '9a000000-0000-4000-8000-000000000072', 'a0000000-0000-4000-8000-000000000007',
+        'event:none:aaaaaaaaaa72', 'event', 'info', 'us', NULL, 'Materials delivered', NULL, 'install', '2026-10-02 01:00Z',
+        '[{"table":"business_events","id":"b0000000-0000-4000-8000-000000000071","excerpt":"We will be there at eight"}]',
+        NULL, NULL, 'none', 'none', false, 'model:luna-ledger:v1', '2026-10-05 01:00Z');
+INSERT INTO public.context_ledger_transitions (item_id, generation_id, job_id, from_status, to_status, at, by, reason)
+VALUES ('9b000000-0000-4000-8000-000000000071', '9a000000-0000-4000-8000-000000000072', 'a0000000-0000-4000-8000-000000000007',
+        NULL, 'open', '2026-10-02 01:00Z', 'model:luna-ledger:v1', 'written'),
+       ('9b000000-0000-4000-8000-000000000071', '9a000000-0000-4000-8000-000000000072', 'a0000000-0000-4000-8000-000000000007',
+        'open', 'closed', '2026-10-04 02:00Z', 'model:luna-ledger:v1', 'kept');
 
 -- Job D: a live reading up to 3 Oct. The customer's first text landed before it; a
 -- second text written on 2 Oct landed only on 4 Oct (captured late), with a copy one
@@ -554,6 +608,42 @@ BEGIN
  IF (SELECT (x->>'at')::timestamptz FROM jsonb_array_elements(t->'closing') x WHERE x->>'closes_on' = 'payment' AND x->>'about_key' = 'invoice:inv-9006')
     IS DISTINCT FROM ('2026-09-15 00:00'::timestamp AT TIME ZONE 'Australia/Perth') THEN
   RAISE EXCEPTION 'story contract: a paid invoice with no payment list closes on its fully paid day: %', t->'closing';
+ END IF;
+ -- rev-backend P2-10: a replay shows the reading live then, only the items written by
+ -- then, each at its status then, and only the transitions by then
+ t := public.context_job_story_ledger('a0000000-0000-4000-8000-000000000007', NULL, '2026-10-03 00:00Z');
+ IF t->'generation'->>'id' <> '9a000000-0000-4000-8000-000000000071' OR jsonb_array_length(t->'items') <> 0 THEN
+  RAISE EXCEPTION 'story contract: on 3 Oct the older reading was live: %', t->'generation';
+ END IF;
+ t := public.context_job_story_ledger('a0000000-0000-4000-8000-000000000007', '9a000000-0000-4000-8000-000000000072', '2026-10-03 00:00Z');
+ IF jsonb_array_length(t->'items') <> 1 OR t->'items'->0->>'status' <> 'open' OR t->'items'->0->'closed_at' <> 'null'::jsonb
+    OR jsonb_array_length(t->'transitions') <> 1 THEN
+  RAISE EXCEPTION 'story contract: replayed on 3 Oct the item was open and only one transition had happened: %', t;
+ END IF;
+ t := public.context_job_story_ledger('a0000000-0000-4000-8000-000000000007', NULL, asof);
+ IF t->'generation'->>'id' <> '9a000000-0000-4000-8000-000000000072' OR jsonb_array_length(t->'items') <> 2
+    OR (SELECT x->>'status' FROM jsonb_array_elements(t->'items') x WHERE x->>'item_key' = 'commitment:none:aaaaaaaaaa71') <> 'closed'
+    OR jsonb_array_length(t->'transitions') <> 2 THEN
+  RAISE EXCEPTION 'story contract: today the live reading shows both items and both transitions: %', t;
+ END IF;
+ -- a reading that is not live, shown on request, says so
+ s := public.context_job_story('a0000000-0000-4000-8000-000000000007', asof, '9a000000-0000-4000-8000-000000000073');
+ IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' = 'This story shows a failed reading, not the live one.') THEN
+  RAISE EXCEPTION 'story contract: a failed reading shown must say so: %', s->'not_known';
+ END IF;
+ -- rev-backend P2-8: the lanes count what the record shows (a text on the job whose
+ -- placement is not settled is still a text on record)
+ s := public.context_job_story('a0000000-0000-4000-8000-000000000007', asof);
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' = 'No texts are on record for this job.')
+    OR s->'last_exchange'->'we_told_customer'->>'id' <> 'b0000000-0000-4000-8000-000000000071' THEN
+  RAISE EXCEPTION 'story contract: lanes must count what the record shows: % / %', s->'not_known', s->'last_exchange';
+ END IF;
+ -- rev-backend P2-9: the client story keeps each paying party apart
+ s := public.context_client_story(a, asof);
+ IF jsonb_array_length(s->'money'->'by_party') <> 2
+    OR (SELECT (x->>'owing')::numeric FROM jsonb_array_elements(s->'money'->'by_party') x WHERE x->>'xero_contact_id' = 'xc1') <> 800
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE 'Owing and overdue add up every paying party%') THEN
+  RAISE EXCEPTION 'story contract: client money per party: % / %', s->'money', s->'not_known';
  END IF;
  -- three readings in a row by the current reader failed their checks: that job, and only that job, needs a person
  INSERT INTO public.context_ledger_generations (job_id, kind, status, reader, evidence_until, created_at, finished_at, checks)
