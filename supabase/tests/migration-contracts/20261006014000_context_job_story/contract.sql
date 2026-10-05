@@ -13,7 +13,7 @@ DO $shape$
 DECLARE f text; p record;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_job_story_facts(uuid,timestamptz)','public.context_job_story_ledger(uuid,uuid,timestamptz)',
-   'public.context_job_story_meta(uuid,timestamptz)','public.context_job_story(uuid,timestamptz,uuid,timestamptz)',
+   'public.context_job_story_meta(uuid,timestamptz)','public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)',
    'public.context_client_story(uuid,timestamptz)','public.context_story_scorecard(timestamptz)',
    'public.context_story_scorecard_jobs(uuid,integer)'] LOOP
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(f);
@@ -196,6 +196,10 @@ VALUES
   'phase_note:none:ffffffffffff', 'phase_note', 'info', 'us', NULL, NULL, NULL, 'Quote revised after the customer asked for a lower fence',
   NULL, NULL, 'quote', '2026-09-30 01:00Z',
   '[{"table":"business_events","id":"b0000000-0000-4000-8000-000000000006","excerpt":"I will send"}]', 'none', 'none', false, 'model:luna-ledger:v1'),
+ ('9b000000-0000-4000-8000-000000000008', '9a000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001',
+  'commitment:quote:q-9004:999999999999', 'commitment', 'open', 'us', 'Office', 'customer', 'Cust A', 'Send quote Q-9004',
+  'quote:q-9004', NULL, 'quote', '2026-09-30 01:00Z',
+  '[{"table":"business_events","id":"b0000000-0000-4000-8000-000000000006","excerpt":"I will send the quote"}]', 'quote_sent', 'none', false, 'model:luna-ledger:v1'),
  ('9b000000-0000-4000-8000-000000000007', '9a000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000001',
   'phase_note:none:111111111111', 'phase_note', 'info', 'us', NULL, NULL, NULL, 'Shadow reading note',
   NULL, NULL, 'quote', '2026-09-30 01:00Z',
@@ -260,10 +264,16 @@ BEGIN
  IF n <> 0 THEN RAISE EXCEPTION 'story contract: a ledger item about a record loop''s object was listed twice'; END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'R1_overdue:%' AND position('paid next week' IN l->>'why') > 0;
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: the invoice claim must attach to the overdue loop by about_key'; END IF;
- -- closing evidence is shown, never a closure
- SELECT l INTO t FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'commitment:quote:rest-of-fence:%';
+ -- closing evidence is shown, never a closure, and only for the exact object: the
+ -- quote Q-9004 sent after the promise closes the promise about quote:q-9004, never
+ -- the one about the not-yet-numbered quote:rest-of-fence
+ SELECT l INTO t FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'commitment:quote:q-9004:%';
  IF t->>'status' <> 'closing_evidence' OR t->'closing_evidence'->0->>'id' <> 'd0000000-0000-4000-8000-000000000004' THEN
   RAISE EXCEPTION 'story contract: quote sent after the promise must show as closing evidence: %', t;
+ END IF;
+ SELECT l INTO t FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'commitment:quote:rest-of-fence:%';
+ IF t->>'status' <> 'open' OR t->'closing_evidence' <> 'null'::jsonb THEN
+  RAISE EXCEPTION 'story contract: a slug must never match another quote by prefix: %', t;
  END IF;
  -- the item citing a row that moved to another job is hidden, counted and named
  IF (s->'meta'->'ledger'->>'hidden_items')::int <> 1 OR NOT (s->'meta'->'ledger'->>'stale')::boolean
@@ -293,12 +303,22 @@ BEGIN
   RAISE EXCEPTION 'story contract: money wrong: %', s->'money'->>'line';
  END IF;
  IF jsonb_array_length(s->'agreements') <> 1 OR jsonb_array_length(s->'phase_notes') <> 1
-    OR (s->'handling'->'commitments'->>'open')::int <> 1 THEN
+    OR (s->'handling'->'commitments'->>'open')::int <> 2 THEN
   RAISE EXCEPTION 'story contract: agreements, phase notes or commitments wrong';
  END IF;
  IF s->'changes' <> 'null'::jsonb THEN RAISE EXCEPTION 'story contract: changes must be null without p_since'; END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'timeline') x WHERE x->>'kind' = 'booking_mirror';
  IF n <> 0 THEN RAISE EXCEPTION 'story contract: observer mirrors do not belong in the story timeline'; END IF;
+
+ -- the records alone (for the reader's own prompt): no ledger anywhere, so R5 waits as a check
+ s := public.context_job_story(a, asof, NULL, NULL, true);
+ IF s->'meta'->'ledger'->>'status' <> 'none' OR (s->'meta'->'ledger'->>'items')::int <> 0
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE l->>'source' IN ('ledger', 'person'))
+    OR jsonb_array_length(s->'agreements') <> 0 OR jsonb_array_length(s->'phase_notes') <> 0 OR jsonb_array_length(s->'events') <> 0
+    OR s::text LIKE '%paid next week%' OR s::text LIKE '%painted black%' OR s::text LIKE '%Shadow reading note%'
+    OR s::text LIKE '%Send the quote for the rest%' OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'rule' = 'R5_customer_wrote_last') THEN
+  RAISE EXCEPTION 'story contract: record_only must carry no ledger: % / %', s->'meta'->'ledger', s->'loops';
+ END IF;
 
  -- a shadow generation asked for by id: R5 is demoted because the reader saw it and wrote no request
  s := public.context_job_story(a, asof, '9a000000-0000-4000-8000-000000000002');
@@ -383,5 +403,8 @@ BEGIN
  IF jsonb_array_length(s->'rows') <> 14 THEN RAISE EXCEPTION 'story contract: scorecard needs rows 1 to 14'; END IF;
  s := public.context_story_scorecard_jobs(NULL, 2);
  IF jsonb_array_length(s->'jobs') <> 2 OR s->>'next' IS NULL THEN RAISE EXCEPTION 'story contract: scorecard jobs paging wrong: %', s; END IF;
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'jobs') x WHERE jsonb_typeof(x->'ledger_needs_person') <> 'boolean') THEN
+  RAISE EXCEPTION 'story contract: scorecard job rows must say whether the ledger needs a person: %', s;
+ END IF;
 END $story$;
 ROLLBACK;

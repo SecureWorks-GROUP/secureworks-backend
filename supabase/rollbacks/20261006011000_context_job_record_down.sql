@@ -5,7 +5,7 @@
 SET LOCAL lock_timeout = '5s';
 DO $guard$
 BEGIN
- IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz)') IS NOT NULL THEN
+ IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)') IS NOT NULL THEN
   RAISE EXCEPTION 'context_job_record_down_refused: roll back 20261006014000_context_job_story first';
  END IF;
 END $guard$;

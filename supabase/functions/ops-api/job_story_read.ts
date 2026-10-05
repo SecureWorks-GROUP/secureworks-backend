@@ -44,6 +44,18 @@ export function parseInstant(value: unknown, name: string): string | null {
   return new Date(value).toISOString();
 }
 
+/** Optional yes/no flag from a request: true, 1 or yes; false, 0, no or absent. */
+export function parseFlag(value: unknown, name: string): boolean {
+  if (value === undefined || value === null || value === "") return false;
+  const v = typeof value === "boolean" ? String(value) : value;
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    if (t === "true" || t === "1" || t === "yes") return true;
+    if (t === "false" || t === "0" || t === "no") return false;
+  }
+  throw new StoryReadError(`invalid_${name}`, `${name} must be true or false`);
+}
+
 export function parseUuid(value: unknown, name: string): string | null {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "string" || !UUID_RE.test(value)) {
@@ -144,12 +156,15 @@ export async function readJobStory(
     asOf?: string | null;
     since?: string | null;
     generationId?: string | null;
+    recordOnly?: boolean;
   },
 ): Promise<{ story: any | null; status: StorySourceStatus }> {
   const args: Record<string, unknown> = { p_job_id: input.jobId };
   if (input.asOf) args.p_as_of = input.asOf;
   if (input.generationId) args.p_generation_id = input.generationId;
   if (input.since) args.p_since = input.since;
+  // The records alone (no ledger read), for the ledger reader's own prompt.
+  if (input.recordOnly) args.p_record_only = true;
   try {
     const { data, error } = await client.rpc("context_job_story", args);
     if (error) {
@@ -256,11 +271,15 @@ export async function buildStoryDossier(client: any, jobRow: any, body: any) {
   };
 }
 
-/** GET job_story: job_id or job_number, optional as_of, since, generation_id. */
+/**
+ * GET job_story: job_id or job_number, optional as_of, since, generation_id,
+ * record_only (the records alone, no ledger).
+ */
 export async function jobStoryAction(client: any, params: URLSearchParams) {
   const asOf = parseInstant(params.get("as_of"), "as_of");
   const since = parseInstant(params.get("since"), "since");
   const generationId = parseUuid(params.get("generation_id"), "generation_id");
+  const recordOnly = parseFlag(params.get("record_only"), "record_only");
   const job = await resolveStoryJob(client, {
     job_id: params.get("job_id"),
     job_number: params.get("job_number"),
@@ -270,6 +289,7 @@ export async function jobStoryAction(client: any, params: URLSearchParams) {
     asOf,
     since,
     generationId,
+    recordOnly,
   });
   if (!read.story) {
     throw new StoryReadError(
@@ -383,7 +403,10 @@ export async function storyScorecardAction(
         `${jobs.reduce((s, j) => s + (j?.candidates ?? 0), 0)} candidates, ` +
         `${
           jobs.reduce((s, j) => s + (j?.checks ?? 0), 0)
-        } checks across live jobs`,
+        } checks across live jobs; ` +
+        `${
+          count("ledger_needs_person")
+        } need a person (three ledger readings in a row failed their checks)`,
     },
     13: {
       green: complete && n > 0 ? count("row13_green") === n : null,

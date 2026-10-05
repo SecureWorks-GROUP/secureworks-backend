@@ -17,7 +17,7 @@ BEGIN
  IF live IS NULL OR live NOT IN ('1703202c9f194072ea031639004a5f06', 'f50de57b906f28fc9b5b286821d64cb1') THEN
   RAISE EXCEPTION 'context_ledger_store_down_refused: reserve_context_model_call md5 % is a later body; roll that back first', coalesce(live, '<missing>');
  END IF;
- IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz)') IS NOT NULL THEN
+ IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)') IS NOT NULL THEN
   RAISE EXCEPTION 'context_ledger_store_down_refused: roll back 20261006014000_context_job_story first';
  END IF;
 END $guard$;

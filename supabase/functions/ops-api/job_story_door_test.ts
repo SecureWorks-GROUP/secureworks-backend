@@ -294,6 +294,28 @@ Deno.test("GET job_story resolves job_number, passes the options, and maps error
     StoryReadError,
   );
   assertEquals(badGen.code, "invalid_generation_id");
+  // record_only: the records alone, for the ledger reader's own prompt.
+  const recordOnly = fakeClient({ rpc: { context_job_story: STORY } });
+  await jobStoryAction(
+    recordOnly,
+    new URLSearchParams(`job_id=${JOB}&record_only=true`),
+  );
+  assertEquals(recordOnly.rpcs[0].args, { p_job_id: JOB, p_record_only: true });
+  const notRecordOnly = fakeClient({ rpc: { context_job_story: STORY } });
+  await jobStoryAction(
+    notRecordOnly,
+    new URLSearchParams(`job_id=${JOB}&record_only=false`),
+  );
+  assertEquals(notRecordOnly.rpcs[0].args, { p_job_id: JOB });
+  const badFlag = await assertRejects(
+    () =>
+      jobStoryAction(
+        fakeClient(),
+        new URLSearchParams(`job_id=${JOB}&record_only=maybe`),
+      ),
+    StoryReadError,
+  );
+  assertEquals([badFlag.code, badFlag.status], ["invalid_record_only", 400]);
   const failing = await assertRejects(
     () =>
       jobStoryAction(
@@ -412,6 +434,7 @@ Deno.test("GET context_story_scorecard folds every per-job page into rows 11 to 
         row11_green: true,
         row12_green: true,
         row13_green: true,
+        ledger_needs_person: false,
       },
       {
         job_id: "j2",
@@ -423,6 +446,7 @@ Deno.test("GET context_story_scorecard folds every per-job page into rows 11 to 
         row11_green: false,
         row12_green: false,
         row13_green: true,
+        ledger_needs_person: true,
       },
     ],
     next: "j2",
@@ -471,7 +495,7 @@ Deno.test("GET context_story_scorecard folds every per-job page into rows 11 to 
   assertEquals(r(13).value, "2 of 3 live jobs can be matched to their client");
   assertEquals(
     r(12).detail,
-    "3 record loops, 1 candidates, 4 checks across live jobs",
+    "3 record loops, 1 candidates, 4 checks across live jobs; 1 need a person (three ledger readings in a row failed their checks)",
   );
   assertEquals(r(1).name, "r1");
   assertEquals(client.rpcs.map((x) => x.fn), [

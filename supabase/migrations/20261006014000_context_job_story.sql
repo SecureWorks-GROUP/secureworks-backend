@@ -33,8 +33,8 @@
 -- Rules the assembler keeps (contract section 5.1): the now line is built only
 -- from record facts and visible ledger items, Perth dates written like
 -- "Wed 7 Oct", no em dashes; phase comes from evidence and status together
--- (status lags); a ledger item about the same object as a record loop is
--- attached to it, not listed twice; an R5 "customer wrote last" candidate is a
+-- (status lags); a ledger item about the same object as a record loop (the
+-- exact about_key, never a prefix) is attached to it, not listed twice; an R5 "customer wrote last" candidate is a
 -- loop only when a visible ledger item says a reply is owed; closing evidence is
 -- shown as closing_evidence and never as closed; nothing closes on a clock; an
 -- item whose cited message moved off the job is hidden and the story says it
@@ -53,7 +53,7 @@ BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_job_record_timeline(uuid[],timestamptz)','public.context_job_record_loops(uuid[],timestamptz)',
    'public.context_job_record_money(uuid[],timestamptz)','public.context_job_record_contact(uuid[],timestamptz)',
    'public.context_job_record_messages(uuid[],timestamptz)','public.context_job_record_legacy_mail(uuid[],timestamptz)',
-   'public.context_linked_status(text)','public.context_ledger_evidence_rows(uuid[],timestamptz)',
+   'public.context_linked_status(text)','public.context_ledger_evidence_rows(uuid[],timestamptz)','public.context_ledger_failures(uuid[])',
    'public.context_unplaced_for_job(uuid)','public.context_source_freshness()','public.context_pipeline_status()',
    'public.context_document_text_status()','public.context_ghl_history_progress()','public.context_email_history_status()',
    'public.context_coverage()'] LOOP
@@ -66,7 +66,7 @@ BEGIN
  IF to_regclass('public.job_contacts') IS NULL THEN problems := problems || 'public.job_contacts is missing'::text; END IF;
  FOREACH f IN ARRAY ARRAY['public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)',
    'public.context_job_story_facts(uuid,timestamptz)','public.context_job_story_ledger(uuid,uuid,timestamptz)',
-   'public.context_job_story_meta(uuid,timestamptz)','public.context_job_story(uuid,timestamptz,uuid,timestamptz)',
+   'public.context_job_story_meta(uuid,timestamptz)','public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)',
    'public.context_client_story(uuid,timestamptz)','public.context_story_scorecard(timestamptz)',
    'public.context_story_scorecard_jobs(uuid,integer)'] LOOP
   IF to_regprocedure(f) IS NOT NULL AND coalesce(obj_description(to_regprocedure(f), 'pg_proc'), '')
@@ -288,9 +288,8 @@ AS $fn$
     FROM cc x
     WHERE l.closes_on IN ('quote_sent', 'invoice_issued', 'payment', 'booking_made', 'visit') AND x.closes_on = l.closes_on
       AND x.at > l.opened_at
-      AND (x.about_key = l.about_key
-           OR (split_part(x.about_key, ':', 1) = split_part(l.about_key, ':', 1)
-               AND l.about_key !~ '^(invoice:inv-[0-9]+|quote:q-[0-9]+|booking:[0-9]{4}-[0-9]{2}-[0-9]{2})$'))) AS closing
+      -- exact object only: a slug (quote:rear-fence) never matches some other quote by prefix
+      AND x.about_key = l.about_key) AS closing
   FROM lop l
  ),
  norm AS (  -- role words to the loop owner vocabulary
@@ -762,7 +761,7 @@ COMMENT ON FUNCTION public.context_job_story_meta(uuid, timestamptz) IS
 
 -- 5. The story read.
 CREATE OR REPLACE FUNCTION public.context_job_story(p_job_id uuid, p_as_of timestamptz DEFAULT now(),
- p_generation_id uuid DEFAULT NULL, p_since timestamptz DEFAULT NULL)
+ p_generation_id uuid DEFAULT NULL, p_since timestamptz DEFAULT NULL, p_record_only boolean DEFAULT false)
 RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
@@ -780,13 +779,16 @@ AS $fn$
              FROM public.context_job_record_money(ARRAY[p_job_id], p_as_of) m),
    'contact', (SELECT to_jsonb(c) FROM public.context_job_record_contact(ARRAY[p_job_id], p_as_of) c),
    'facts', public.context_job_story_facts(p_job_id, p_as_of)),
-  public.context_job_story_ledger(p_job_id, p_generation_id, p_as_of),
+  -- record_only: the records alone, for the reader's own prompt; the ledger is
+  -- not read, so no item, attachment or ledger word reaches the output.
+  CASE WHEN coalesce(p_record_only, false) THEN jsonb_build_object('status', 'none', 'items', '[]'::jsonb, 'transitions', '[]'::jsonb)
+       ELSE public.context_job_story_ledger(p_job_id, p_generation_id, p_as_of) END,
   public.context_job_story_meta(p_job_id, p_as_of),
   p_as_of, p_since)
  WHERE EXISTS (SELECT 1 FROM public.jobs jb WHERE jb.id = p_job_id)
 $fn$;
-COMMENT ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz) IS
- 'Job story (20261006014000): job-story-v1 for one job: now line, money, loops, checks, timeline, phase notes, agreements, events, who, last exchange, handling, not known, changes since p_since, meta. Record parts from the job record layer, the live ledger generation (or p_generation_id in any status), every line cited. NULL for an unknown job. Service role only.';
+COMMENT ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz, boolean) IS
+ 'Job story (20261006014000): job-story-v1 for one job: now line, money, loops, checks, timeline, phase notes, agreements, events, who, last exchange, handling, not known, changes since p_since, meta. Record parts from the job record layer, the live ledger generation (or p_generation_id in any status), every line cited. p_record_only: the records alone (the ledger is not read: status none, no ledger item, attachment or words anywhere), for the reader''s own prompt. NULL for an unknown job. Service role only.';
 
 -- 6. The client story: every job of the same client (CRM contact, else exact
 -- client email; never a name), money and loops across them, past issues and
@@ -1004,6 +1006,7 @@ AS $fn$
   ORDER BY jb.id LIMIT least(greatest(coalesce(p_limit, 150), 1), 300)
  ),
  ids AS (SELECT array_agg(pg.id) AS a FROM pg),
+ np AS (SELECT f.job_id, f.needs_person, f.failed_builds FROM public.context_ledger_failures((SELECT a FROM ids)) f),
  tl AS (SELECT t.job_id, count(*) AS n, count(DISTINCT t.kind) AS kinds FROM public.context_job_record_timeline((SELECT a FROM ids), now()) t GROUP BY t.job_id),
  lp AS (SELECT l.job_id, count(*) FILTER (WHERE l.shown_as = 'loop') AS loops, count(*) FILTER (WHERE l.shown_as = 'candidate') AS candidates,
                count(*) FILTER (WHERE l.shown_as = 'check') AS checks
@@ -1018,22 +1021,24 @@ AS $fn$
             'identity', pg.identity, 'timeline_rows', coalesce(tl.n, 0), 'timeline_kinds', coalesce(tl.kinds, 0),
             'record_loops', coalesce(lp.loops, 0), 'candidates', coalesce(lp.candidates, 0), 'checks', coalesce(lp.checks, 0),
             'ledger', coalesce(lg.status, 'none'), 'ledger_items', coalesce(lg.items, 0), 'phase_notes', coalesce(lg.phase_notes, 0),
+            'ledger_needs_person', coalesce(np.needs_person, false),
             'row11_green', coalesce(tl.n, 0) >= 2 AND lg.status = 'live' AND coalesce(lg.phase_notes, 0) > 0,
             'row12_green', lg.status = 'live',
             'row13_green', pg.identity) ORDER BY pg.id)
-          FROM pg LEFT JOIN tl ON tl.job_id = pg.id LEFT JOIN lp ON lp.job_id = pg.id LEFT JOIN lg ON lg.job_id = pg.id), '[]'::jsonb),
+          FROM pg LEFT JOIN tl ON tl.job_id = pg.id LEFT JOIN lp ON lp.job_id = pg.id LEFT JOIN lg ON lg.job_id = pg.id
+          LEFT JOIN np ON np.job_id = pg.id), '[]'::jsonb),
   'next', (SELECT CASE WHEN count(*) = least(greatest(coalesce(p_limit, 150), 1), 300) THEN max(pg.id::text) END FROM pg)
  )
 $fn$;
 COMMENT ON FUNCTION public.context_story_scorecard_jobs(uuid, integer) IS
- 'Job story (20261006014000): per-job scorecard rows for done-definition rows 11 to 13, one page of live jobs ordered by id after p_after (at most 300): timeline rows and kinds, record loops, candidates and checks, live ledger items and phase notes, client identity. row11 green = timeline plus a live ledger with phase notes; row12 green = live ledger (promises and asks come from the words); row13 green = the job can be matched to its client. next = the cursor for the following page, null at the end. Service role only.';
+ 'Job story (20261006014000): per-job scorecard rows for done-definition rows 11 to 13, one page of live jobs ordered by id after p_after (at most 300): timeline rows and kinds, record loops, candidates and checks, live ledger items and phase notes, client identity, and ledger_needs_person (three ledger builds in a row failed their checks: context_ledger_failures). row11 green = timeline plus a live ledger with phase notes; row12 green = live ledger (promises and asks come from the words); row13 green = the job can be matched to its client. next = the cursor for the following page, null at the end. Service role only.';
 
 -- 9. Access: service role only.
 REVOKE ALL ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb, jsonb, timestamptz, timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_story_facts(uuid, timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_story_ledger(uuid, uuid, timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_story_meta(uuid, timestamptz) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz, boolean) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_client_story(uuid, timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_story_scorecard(timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_story_scorecard_jobs(uuid, integer) FROM PUBLIC, anon, authenticated;
@@ -1041,7 +1046,7 @@ GRANT EXECUTE ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb,
 GRANT EXECUTE ON FUNCTION public.context_job_story_facts(uuid, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_story_ledger(uuid, uuid, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_story_meta(uuid, timestamptz) TO service_role;
-GRANT EXECUTE ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_client_story(uuid, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_story_scorecard(timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_story_scorecard_jobs(uuid, integer) TO service_role;
