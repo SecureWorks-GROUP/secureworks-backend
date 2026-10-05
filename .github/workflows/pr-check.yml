@@ -419,6 +419,16 @@ jobs:
             supabase/functions/context-document-text/read_test.ts \
             supabase/functions/context-document-text/handler_test.ts
 
+      # Gap plan B-5b: the vision reader's door (pictures out of scans and
+      # photos, what spends a model call and what does not, the answer as
+      # evidence, the HTTP modes) on fake reads and writes. No model.
+      - name: Test the document vision reader
+        run: |
+          deno test --allow-read \
+            supabase/functions/context-document-vision/images_test.ts \
+            supabase/functions/context-document-vision/vision_test.ts \
+            supabase/functions/context-document-vision/handler_test.ts
+
       # Slice B0: the placement keys and token rule (TypeScript twin of the SQL
       # helpers) on the one fixture table, and proof that the migration
       # contract runs the SQL helpers on that same table.
