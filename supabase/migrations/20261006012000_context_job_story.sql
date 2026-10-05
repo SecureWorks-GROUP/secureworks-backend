@@ -46,7 +46,8 @@ DECLARE problems text[] := '{}'; f text;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_job_record_timeline(uuid[],timestamptz)','public.context_job_record_loops(uuid[],timestamptz)',
    'public.context_job_record_money(uuid[],timestamptz)','public.context_job_record_contact(uuid[],timestamptz)',
-   'public.context_job_record_messages(uuid[],timestamptz)','public.context_linked_status(text)',
+   'public.context_job_record_messages(uuid[],timestamptz)','public.context_job_record_legacy_mail(uuid[],timestamptz)',
+   'public.context_linked_status(text)',
    'public.context_job_freshness(uuid)','public.context_source_freshness()','public.context_pipeline_status()',
    'public.context_document_text_status()','public.context_ghl_history_progress()','public.context_email_history_status()',
    'public.context_coverage()'] LOOP
@@ -711,8 +712,8 @@ AS $fn$
  ),
  l AS (SELECT e.lane, count(*) AS n, max(e.at) AS newest, min(e.at) AS oldest FROM e WHERE e.lane IS NOT NULL GROUP BY e.lane),
  lg AS (  -- legacy inbox mail the record layer reads counts as email
-  SELECT count(*) AS n, max(m.at) AS newest, min(m.at) AS oldest
-  FROM public.context_job_record_messages(ARRAY[p_job_id], p_as_of) m WHERE m.source_table = 'inbox_events'
+  SELECT count(*) AS n, max(m.received_at) AS newest, min(m.received_at) AS oldest
+  FROM public.context_job_record_legacy_mail(ARRAY[p_job_id], p_as_of) m
  ),
  f AS (SELECT public.context_job_freshness(p_job_id) AS f)
  SELECT jsonb_build_object(

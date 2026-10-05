@@ -45,11 +45,12 @@
 --
 -- Time is coalesce(event_at, occurred_at) for business_events. Dates in words
 -- are Perth dates written like "Wed 7 Oct". No em dashes in any text.
--- Unchanged: every existing table, function and reader. Nothing calls these
--- functions until the story (20261006012000) and the ops-api read doors do.
+-- Unchanged: every existing table, function and reader. Two indexes are added
+-- on inbox_events (section 1a). Nothing calls these functions until the story
+-- (20261006012000) and the ops-api read doors do.
 -- Rollback: supabase/rollbacks/20261006011000_context_job_record_down.sql
--- (drops the five functions; nothing else depends on them except the story,
--- whose rollback runs first).
+-- (drops the five functions and the two indexes; nothing else depends on them
+-- except the story, whose rollback runs first).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -73,6 +74,7 @@ BEGIN
   problems := problems || 'public.job_quote_values(uuid) is missing'::text;
  END IF;
  FOREACH f IN ARRAY ARRAY['public.context_job_record_messages(uuid[],timestamptz)',
+   'public.context_job_record_legacy_mail(uuid[],timestamptz)',
    'public.context_job_record_timeline(uuid[],timestamptz)','public.context_job_record_loops(uuid[],timestamptz)',
    'public.context_job_record_money(uuid[],timestamptz)','public.context_job_record_contact(uuid[],timestamptz)'] LOOP
   IF to_regprocedure(f) IS NOT NULL AND coalesce(obj_description(to_regprocedure(f), 'pg_proc'), '')
@@ -84,6 +86,56 @@ BEGIN
   RAISE EXCEPTION 'context_job_record_preimage_mismatch: %', array_to_string(problems, '; ');
  END IF;
 END $guard$;
+
+-- 1a. Two indexes on inbox_events (13.7k rows live, none on these columns): the
+-- legacy-mail read finds a job's mail by job_id and the client's mail by sender.
+-- Without them every story read scans the table twice (about 48 ms of a 53 ms
+-- message read, measured read-only on production). Built-in expressions only.
+CREATE INDEX IF NOT EXISTS inbox_events_job_id_record ON public.inbox_events (job_id) WHERE job_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS inbox_events_from_email_record ON public.inbox_events (lower(btrim(from_email)));
+
+-- 1b. Legacy mail helper (inlinable): inbox_events mail on the job, or from the
+-- client's own address, with no business_events copy anywhere (the copy, where
+-- it exists, is placed by the ladder and is what counts) and no business_events
+-- email on the job at the same instant; one row per received instant (the old
+-- path saved one copy per mailbox); auto-replies dropped. The messages helper
+-- and the story's evidence lanes both read it, so the rule lives once.
+CREATE OR REPLACE FUNCTION public.context_job_record_legacy_mail(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
+RETURNS TABLE(jid uuid, cmail text, id uuid, received_at timestamptz, subject text, body_preview text, from_email text,
+ graph_message_id text, on_job boolean)
+LANGUAGE sql STABLE
+AS $fn$
+ WITH j AS (
+  SELECT jb.id, lower(nullif(btrim(jb.client_email), '')) AS cmail
+  FROM public.jobs jb WHERE jb.id = ANY (p_job_ids)
+ ),
+ ibx AS (
+  SELECT j.id AS jid, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id,
+         (i.job_id = j.id) AS on_job
+  FROM j JOIN public.inbox_events i ON i.job_id = j.id
+  UNION ALL
+  SELECT j.id, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id, false
+  FROM j JOIN public.inbox_events i ON lower(btrim(i.from_email)) = j.cmail
+  WHERE j.cmail IS NOT NULL AND i.job_id IS DISTINCT FROM j.id
+ )
+ SELECT DISTINCT ON (x.jid, x.received_at) x.jid, x.cmail, x.id, x.received_at, x.subject, x.body_preview, x.from_email,
+        x.graph_message_id, x.on_job
+ FROM ibx x
+ WHERE x.received_at <= p_as_of
+   AND coalesce(x.subject, '') !~* '^(automatic reply|auto[- ]?reply|out of office)'
+   AND NOT EXISTS (SELECT 1 FROM public.business_events c
+                   WHERE c.source_table = 'inbox_events' AND c.source_id = x.id::text)
+   AND NOT EXISTS (SELECT 1 FROM public.business_events c
+                   WHERE x.graph_message_id IS NOT NULL AND c.provider_message_id = 'graph:' || x.graph_message_id)
+   AND NOT EXISTS (SELECT 1 FROM public.business_events c
+                   WHERE c.payload @> jsonb_build_object('inbox_events_id', x.id::text))
+   AND NOT EXISTS (SELECT 1 FROM public.business_events m
+                   WHERE m.job_id = x.jid AND m.channel = 'email' AND coalesce(m.event_at, m.occurred_at) = x.received_at
+                     AND coalesce(m.recorded_at, m.occurred_at) <= p_as_of)
+ ORDER BY x.jid, x.received_at, x.on_job DESC, x.id
+$fn$;
+COMMENT ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) IS
+ 'Job record (20261006011000): legacy inbox_events mail for the jobs: on the job or from the client address, no business_events copy, no business_events email on the job at the same instant, one row per received instant, auto-replies dropped. Inlinable helper read by context_job_record_messages and the story. Service role only.';
 
 -- 1. Messages helper. Inlinable on purpose (LANGUAGE sql, STABLE, no SET, not
 -- SECURITY DEFINER): the four record functions below call it inside their own
@@ -111,7 +163,8 @@ AS $fn$
   SELECT j.id AS jid, j.cmail, j.ccontact, e.id, coalesce(e.event_at, e.occurred_at) AS at, e.event_type, e.source,
          e.channel, e.direction, e.contact_id, e.payload, e.metadata,
          regexp_replace(public.context_event_text(e), '\s+', ' ', 'g') AS txt,
-         public.context_internal_text_role(e) AS irole,
+         -- crew and staff alerts are texts we send; inbound rows are never one
+         CASE WHEN e.direction = 'outbound' THEN public.context_internal_text_role(e) ELSE 'other' END AS irole,
          (e.channel IN ('sms', 'email', 'call')
           OR e.event_type IN ('client.sms_out', 'client.email_out', 'client.call_logged', 'client.call_complete',
                               'call.transcript_completed', 'client.reply', 'client.email_in', 'client.sms_in')) AS is_msg,
@@ -158,33 +211,7 @@ AS $fn$
          'on_job'::text AS placement
   FROM lab l
  ),
- -- legacy mail: on the job, or from the client's own address, with no
- -- business_events copy anywhere (the copy, where it exists, is placed by the
- -- ladder and is what counts); one row per received instant (the old path saved
- -- one copy per mailbox); auto-replies dropped
- ibx AS (
-  SELECT j.id AS jid, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id,
-         (i.job_id = j.id) AS on_job
-  FROM j JOIN public.inbox_events i ON i.job_id = j.id
-  UNION ALL
-  SELECT j.id, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id, false
-  FROM j JOIN public.inbox_events i ON lower(btrim(i.from_email)) = j.cmail
-  WHERE j.cmail IS NOT NULL AND i.job_id IS DISTINCT FROM j.id
- ),
- ib AS (
-  SELECT DISTINCT ON (x.jid, x.received_at) x.*
-  FROM ibx x
-  WHERE x.received_at <= p_as_of
-    AND coalesce(x.subject, '') !~* '^(automatic reply|auto[- ]?reply|out of office)'
-    AND NOT EXISTS (SELECT 1 FROM public.business_events c
-                    WHERE c.source_table = 'inbox_events' AND c.source_id = x.id::text)
-    AND NOT EXISTS (SELECT 1 FROM public.business_events c
-                    WHERE x.graph_message_id IS NOT NULL AND c.provider_message_id = 'graph:' || x.graph_message_id)
-    AND NOT EXISTS (SELECT 1 FROM public.business_events c
-                    WHERE c.payload @> jsonb_build_object('inbox_events_id', x.id::text))
-    AND NOT EXISTS (SELECT 1 FROM bel m WHERE m.jid = x.jid AND m.channel = 'email' AND m.at = x.received_at)
-  ORDER BY x.jid, x.received_at, x.on_job DESC, x.id
- ),
+ ib AS (SELECT * FROM public.context_job_record_legacy_mail(p_job_ids, p_as_of)),
  ibl AS (
   SELECT ib.jid, 'inbox_events'::text AS tbl, ib.id::text AS sid, ib.received_at AS at, 'inbox.email'::text AS event_type,
          'monitor-inbox legacy'::text AS source, 'email'::text AS channel,
@@ -1139,11 +1166,13 @@ COMMENT ON FUNCTION public.context_job_record_contact(uuid[], timestamptz) IS
  'Job record (20261006011000): per job the last customer message, the last thing we told the customer (never automated; a newer automated send is attached as newer_automated), the last internal (crew or staff) message, the last calls each way, and reply statistics (customer texts and emails; a run of customer messages is answered by the first later message from us or answered call; automated texts never count). Each jsonb is {at, channel, direction, text (300 chars), table, id, automated}. Service role only.';
 
 -- 6. Access: service role only.
+REVOKE ALL ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_loops(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_money(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_contact(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_loops(uuid[], timestamptz) TO service_role;

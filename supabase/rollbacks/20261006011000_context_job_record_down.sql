@@ -1,5 +1,5 @@
 -- Rollback for 20261006011000_context_job_record.sql: drops the five record
--- functions. Nothing else is touched (the migration created nothing else).
+-- functions and the two inbox_events indexes it added. Nothing else is touched.
 -- Refuses while the story (20261006012000) is installed: the story reads these
 -- functions, so roll the story back first.
 SET LOCAL lock_timeout = '5s';
@@ -14,3 +14,6 @@ DROP FUNCTION IF EXISTS public.context_job_record_money(uuid[], timestamptz);
 DROP FUNCTION IF EXISTS public.context_job_record_loops(uuid[], timestamptz);
 DROP FUNCTION IF EXISTS public.context_job_record_timeline(uuid[], timestamptz);
 DROP FUNCTION IF EXISTS public.context_job_record_messages(uuid[], timestamptz);
+DROP FUNCTION IF EXISTS public.context_job_record_legacy_mail(uuid[], timestamptz);
+DROP INDEX IF EXISTS public.inbox_events_from_email_record;
+DROP INDEX IF EXISTS public.inbox_events_job_id_record;

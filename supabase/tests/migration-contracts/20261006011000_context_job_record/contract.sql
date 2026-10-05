@@ -33,6 +33,18 @@ BEGIN
  IF has_function_privilege('anon', 'public.context_job_record_messages(uuid[],timestamptz)', 'EXECUTE') THEN
   RAISE EXCEPTION 'record contract: the messages helper is callable by anon';
  END IF;
+ SELECT pr.prosecdef, pr.proconfig INTO p FROM pg_proc pr
+ WHERE pr.oid = to_regprocedure('public.context_job_record_legacy_mail(uuid[],timestamptz)');
+ IF p IS NULL OR p.prosecdef OR p.proconfig IS NOT NULL THEN
+  RAISE EXCEPTION 'record contract: the legacy mail helper must exist and stay inlinable';
+ END IF;
+ IF has_function_privilege('anon', 'public.context_job_record_legacy_mail(uuid[],timestamptz)', 'EXECUTE')
+    OR has_function_privilege('authenticated', 'public.context_job_record_legacy_mail(uuid[],timestamptz)', 'EXECUTE') THEN
+  RAISE EXCEPTION 'record contract: the legacy mail helper is callable by anon or authenticated';
+ END IF;
+ IF to_regclass('public.inbox_events_job_id_record') IS NULL OR to_regclass('public.inbox_events_from_email_record') IS NULL THEN
+  RAISE EXCEPTION 'record contract: the inbox_events lookup indexes are missing';
+ END IF;
 END $shape$;
 
 -- 2. Behaviour on synthetic jobs.
