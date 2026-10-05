@@ -771,14 +771,34 @@ BEGIN
  -- own addresses and lines never count. The owner row repeating the client joins it.
  UPDATE public.jobs SET client_phone = '0412 345 678' WHERE id = p;
  INSERT INTO public.contact_matches (ghl_contact_id, email, phone) VALUES ('ghl-SWF-94001', ' Pat.Work@Example.test ', '+61 412 345 678');
- INSERT INTO public.job_contacts (job_id, client_name, contact_type, is_primary, client_email, client_phone, ghl_contact_id)
- VALUES (p, 'Pat Example', 'primary', true, 'office@secureworkswa.com.au', '0499 888 777', NULL),
-        (p, 'Nell Neighbour', 'neighbour', false, 'Nell@Example.test', '08 9123 4567', 'ghl-nell');
+ INSERT INTO public.job_contacts (job_id, client_name, contact_type, is_primary, client_email, client_phone, ghl_contact_id,
+  share_percentage, amount_invoiced)
+ VALUES (p, 'Pat Example', 'primary', true, 'office@secureworkswa.com.au', '0499 888 777', NULL, 50, 0),
+        (p, 'Nell Neighbour', 'neighbour', false, 'Nell@Example.test', '08 9123 4567', 'ghl-nell', 50, 0),
+        (p, 'Ned Neighbour', 'neighbour_b', false, NULL, NULL, NULL, NULL, 0),
+        (p, 'Nia Neighbour', 'neighbour_c', false, NULL, NULL, NULL, NULL, 120),
+        (p, 'Pat Senior', 'primary', false, NULL, NULL, NULL, NULL, 0),
+        (p, 'Sam Strata', 'strata', false, NULL, NULL, NULL, NULL, 0),
+        (p, 'No Type', '', false, NULL, NULL, NULL, NULL, 0);
  pk := public.context_ledger_packet(p);
- PERFORM pg_temp.lg_assert(jsonb_array_length(pk -> 'parties') = 2
+ PERFORM pg_temp.lg_assert(jsonb_array_length(pk -> 'parties') = 7
+  AND pk -> 'parties' -> 0 ->> 'label' = 'job_client'
   AND pk -> 'parties' -> 0 -> 'match_keys' = '{"emails": ["pat.work@example.test", "pat@example.test"], "phones": ["412345678", "499888777"]}'::jsonb
-  AND pk -> 'parties' -> 1 -> 'match_keys' = '{"emails": ["nell@example.test"], "phones": ["891234567"]}'::jsonb,
+  AND (SELECT x -> 'match_keys' FROM jsonb_array_elements(pk -> 'parties') x WHERE x ->> 'name' = 'Nell Neighbour')
+      = '{"emails": ["nell@example.test"], "phones": ["891234567"]}'::jsonb
+  AND (SELECT x -> 'match_keys' FROM jsonb_array_elements(pk -> 'parties') x WHERE x ->> 'name' = 'Ned Neighbour')
+      = '{"emails": [], "phones": []}'::jsonb,
   'party match keys: ' || (pk -> 'parties')::text);
+ -- Party roles: the job client and a primary contact are the customer; a neighbour is a
+ -- third party labelled neighbour (paying a share when its share or invoiced amount says
+ -- so), never the customer; any other keeps its contact_type, else unknown.
+ PERFORM pg_temp.lg_assert((SELECT jsonb_object_agg(x ->> 'name', x ->> 'role') FROM jsonb_array_elements(pk -> 'parties') x)
+  = '{"Pat Example": "customer", "Ned Neighbour": "third_party", "Nell Neighbour": "third_party", "Nia Neighbour": "third_party",
+      "Pat Senior": "customer", "Sam Strata": "strata", "No Type": "unknown"}'::jsonb
+  AND (SELECT jsonb_object_agg(x ->> 'name', x ->> 'label') FROM jsonb_array_elements(pk -> 'parties') x WHERE x ->> 'name' LIKE '%Neighbour')
+  = '{"Ned Neighbour": "neighbour", "Nell Neighbour": "neighbour, pays a share", "Nia Neighbour": "neighbour, pays a share"}'::jsonb
+  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(pk -> 'parties') x WHERE x ->> 'label' LIKE 'neighbour%' AND x ->> 'role' = 'customer'),
+  'party roles: ' || (pk -> 'parties')::text);
  -- as_of replays: nothing recorded after it.
  pk := public.context_ledger_packet(p, NULL, now() - interval '7 days 12 hours');
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 5, 'as_of replay rows: ' || (pk ->> 'evidence_rows'));
@@ -1979,6 +1999,55 @@ BEGIN
   AND public.context_ledger_cite(s1, pg_temp.lg_cite(mold, 'pool fences as well', 'inbox_events') -> 0) ->> 'code' = 'citation_not_admissible'
   AND (public.context_ledger_cite(s1, pg_temp.lg_cite(mnew, 'quote the front fence', 'inbox_events') -> 0) ->> 'ok')::boolean,
   'the citation check keeps the rule');
+END $c$;
+ROLLBACK;
+
+-- 23. Never a close time still to come: an invoice dated ahead or a document whose sent
+-- time is ahead closes an item at the write, through an item or a transition, and a
+-- person's close is the moment they close it.
+BEGIN;
+DO $c$
+DECLARE w uuid; r1 uuid; r2 uuid; rf uuid; xi uuid := gen_random_uuid(); jd uuid := gen_random_uuid(); cl jsonb; res jsonb; k text;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ w := pg_temp.lg_job('SWF-99301');
+ r1 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Please send the invoice and the quote for the gate', '5 days', 'customer');
+ INSERT INTO public.xero_invoices (id, org_id, xero_invoice_id, invoice_type, job_id, invoice_number, status, invoice_date, created_at, updated_at)
+ VALUES (xi, '00000000-0000-0000-0000-000000000001', 'xi-' || xi, 'ACCREC', w, 'INV-9301', 'AUTHORISED', pg_temp.lg_today() + 3,
+  now() - interval '1 day', now());
+ INSERT INTO public.job_documents (id, job_id, type, version, created_at, sent_at)
+ VALUES (jd, w, 'quote', 1, now() - interval '2 days', now() + interval '2 days');
+ cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('invoice_ahead', 'request', 'closed', 'customer', 'us', 'Asked for the invoice', pg_temp.lg_cite(r1, 'Please send the invoice'),
+   jsonb_build_object('closes_on', 'invoice_issued', 'closed_by', pg_temp.lg_cite(xi, NULL, 'xero_invoices'))),
+  pg_temp.lg_it('quote_open', 'request', 'open', 'customer', 'us', 'Asked for the gate quote', pg_temp.lg_cite(r1, 'the quote for the gate'),
+   '{"closes_on":"quote_sent"}')), '[]', 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, 'invoice_ahead') AND pg_temp.lg_accepted(res, 'quote_open'), 'items written: ' || res::text);
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'invoice_ahead')) = now(), 'an invoice dated ahead closes an item at the write');
+ k := pg_temp.lg_key(res, 'quote_open');
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, '[]', jsonb_build_array(
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(jd, NULL, 'job_documents'))), 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert((res ->> 'transitions_accepted')::integer = 1
+  AND (SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid AND item_key = k) = now(),
+  'a document sent ahead closes an item at the write: ' || res::text);
+ -- a matter superseded in the same write by one whose first words carry a time ahead
+ -- (a sender's clock) closes at the write too
+ r2 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Can you also quote a gate for the back fence', '4 days', 'customer');
+ rf := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Actually make it the side gate instead please', '-1 day', 'customer', 'job_customer',
+  '{}', '{}', 'direct', '1 hour');
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('gate_old', 'request', 'superseded', 'customer', 'us', 'Asked for a back gate quote', pg_temp.lg_cite(r2, 'quote a gate for the back fence'),
+   '{"closes_on":"quote_sent"}'),
+  pg_temp.lg_it('gate_new', 'request', 'open', 'customer', 'us', 'Asked for the side gate instead', pg_temp.lg_cite(rf, 'make it the side gate instead'),
+   '{"closes_on":"quote_sent","supersedes_ref":"gate_old"}')), '[]', 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, 'gate_old') AND pg_temp.lg_accepted(res, 'gate_new')
+  AND (SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+       AND item_key = pg_temp.lg_key(res, 'gate_old')) = now(),
+  'a matter superseded by words dated ahead closes at the write: ' || res::text);
+ PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_items WHERE job_id = w AND closed_at > now()),
+  'no close time after now');
 END $c$;
 ROLLBACK;
 

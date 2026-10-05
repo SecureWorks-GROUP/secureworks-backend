@@ -307,7 +307,7 @@ VALUES
 INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at)
 VALUES ('d0000000-0000-4000-8000-000000000004', 'a0000000-0000-4000-8000-000000000001', 'quote', 'Q-9004', 1, '2026-10-03 01:00Z', '2026-10-03 01:05Z');
 INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
-VALUES ('e0000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-000000000001', 'lead_installer', '2026-10-08', 'install', 'scheduled', 'Crew One', 'confirmed', false, '2026-10-02 01:00Z');
+VALUES ('e0000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-000000000001', 'lead_installer', '2026-10-08', 'install', 'scheduled', 'Crew One', 'tentative', false, '2026-10-02 01:00Z');
 INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
 VALUES ('a0000000-0000-4000-8000-000000000004', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0004', 'complete', 'fencing',
         NULL, 'ctA', '{}', '2026-06-01 01:00Z');
@@ -554,6 +554,17 @@ BEGIN
     OR s->'now'->>'line' LIKE '%Nothing open on record%' OR s->'now'->>'line' LIKE '%waiting on the customer%' THEN
   RAISE EXCEPTION 'story contract: job C now line must carry the unanswered mail: % / %', s->'now'->>'whose_move', s->'now'->>'line';
  END IF;
+ -- C5 is retired: job A's booking ahead is tentative in crew planning, and no check, line or
+ -- word of the story says so; the scorecard asks for dates asked for or offered, not crew planning
+ s := public.context_job_story(a, asof);
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'rule' LIKE 'C5%')
+    OR s::text ILIKE '%tentative%' OR s::text ILIKE '%crew planning:%' THEN
+  RAISE EXCEPTION 'story contract: crew planning''s tentative booking must not reach the story';
+ END IF;
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(public.context_story_scorecard(asof)->'rows') r WHERE r::text ILIKE '%unconfirmed%') THEN
+  RAISE EXCEPTION 'story contract: the scorecard must not ask for crew planning''s unconfirmed dates';
+ END IF;
+ s := public.context_job_story(c, asof);
  -- N5: the check quoting that mail says it is placed on no job
  IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'rule' = 'C11_customer_mail_unanswered'
                 AND k->>'what' LIKE '%(stored only in the old inbox, not placed on any job)%') THEN

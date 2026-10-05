@@ -504,8 +504,7 @@ AS $fn$
            || replace(coalesce(a.assignment_type, 'visit'), '_', ' ') || ' '
            || coalesce(to_char(a.scheduled_date, 'Dy FMDD Mon YYYY'), 'with no date set (shown when it was made)')
            || coalesce(' to ' || to_char(nullif(a.scheduled_end, a.scheduled_date), 'Dy FMDD Mon'), '')
-           || coalesce(', ' || nullif(btrim(a.crew_name), ''), '') || ', ' || coalesce(a.status, 'status not set')
-           || CASE WHEN a.confirmation_status IS NOT NULL THEN ' (crew planning: ' || a.confirmation_status || ')' ELSE '' END,
+           || coalesce(', ' || nullif(btrim(a.crew_name), ''), '') || ', ' || coalesce(a.status, 'status not set'),
          NULL, NULL, 'on_job', 'job_assignments', a.id::text
   FROM asg a
   -- attendance: only started or complete counts
@@ -755,7 +754,7 @@ AS $fn$
  acc AS (SELECT jv.id AS job_id, (jv.accepted_at IS NOT NULL OR EXISTS (SELECT 1 FROM qd WHERE qd.job_id = jv.id AND qd.accepted_at IS NOT NULL)) AS accepted FROM jv),
  asg AS (
   SELECT a.id, a.job_id, a.scheduled_date, a.status, a.created_at, a.updated_at, a.started_at, a.completed_at,
-         a.confirmation_status, a.crew_name, a.assignment_type,
+         a.crew_name, a.assignment_type,
          coalesce(a.is_ghost, false) OR coalesce(a.role, '') = 'observer' AS mirror
   FROM public.job_assignments a WHERE a.job_id = ANY (p_job_ids) AND a.created_at <= p_as_of
  ),
@@ -964,17 +963,8 @@ AS $fn$
                           AND (c.status = 'complete' OR c.completed_at IS NOT NULL))
         ORDER BY a.job_id, a.scheduled_date DESC, a.id) b
   UNION ALL
-  -- C5 future booking still tentative in crew planning (not a customer confirmation)
-  SELECT b.job_id, 'C5_tentative_booking', b.id::text, 'job_assignments', 'check', 'us', 'crew',
-         'Booking ' || to_char(b.scheduled_date, 'Dy FMDD Mon YYYY') || ' is still ' || b.confirmation_status || ' in crew planning',
-         'Crew planning status only; nothing records whether the customer confirmed the date',
-         b.created_at, b.scheduled_date, NULL::numeric, 'booking:' || b.scheduled_date::text,
-         'Crew planning marks it confirmed, or it is cancelled or passes'
-  FROM (SELECT DISTINCT ON (a.job_id) a.* FROM asg a JOIN jv ON jv.id = a.job_id
-        WHERE NOT a.mirror AND a.scheduled_date >= jv.today AND coalesce(a.status, '') NOT IN ('cancelled', 'complete')
-          AND a.confirmation_status IN ('tentative', 'placeholder')
-        ORDER BY a.job_id, a.scheduled_date, a.id) b
-  UNION ALL
+  -- (C5, a booking still tentative in crew planning, is retired: crew planning's
+  -- confirmation is its own default, never the customer's word, so nothing reads it)
   -- C6 the customer wrote after a future booking was made and it has not changed since
   SELECT b.job_id, 'C6_booking_after_customer_word', c.source_id, c.source_table, 'check', 'us', 'customer',
          'Booked ' || b.dates || '; the customer wrote ' || to_char(c.at AT TIME ZONE 'Australia/Perth', 'Dy FMDD Mon HH24:MI')
@@ -1061,7 +1051,7 @@ AS $fn$
  ORDER BY lp.job_id, lp.rule, lp.opened_at, lp.sid
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_loops(uuid[], timestamptz) IS
- 'Job record (20261006011000): record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C11 (a person''s look, never an obligation). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. placement says where a cited message sits (on_job, or not_placed: client mail the old inbox placed on no job, labelled in the words); null for a record row. Service role only.';
+ 'Job record (20261006011000): record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C4 and C6 to C11 (a person''s look, never an obligation; C5, crew planning''s tentative booking, is retired and crew planning''s confirmation is never read). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. placement says where a cited message sits (on_job, or not_placed: client mail the old inbox placed on no job, labelled in the words); null for a record row. Service role only.';
 
 -- 4. Money per paying party.
 CREATE OR REPLACE FUNCTION public.context_job_record_money(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())

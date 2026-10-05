@@ -189,7 +189,7 @@ VALUES ('aa000000-0000-4000-8000-000000000010', NULL, 'cust.h@example.test', 'Fe
         '2026-08-03 01:00Z', 'g-legacy-15', 'admin@example.test');
 INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
 VALUES ('e0000000-0000-4000-8000-000000000014', 'a0000000-0000-4000-8000-000000000014', 'lead_installer', '2026-10-20', 'install', 'scheduled',
-        'Crew Three', 'confirmed', false, '2026-08-02 06:00Z');
+        'Crew Three', 'tentative', false, '2026-08-02 06:00Z');
 -- Job K: a booking for today whose status alone says complete.
 INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
 VALUES ('a0000000-0000-4000-8000-000000000015', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0015', 'scheduled', 'fencing',
@@ -403,6 +403,14 @@ BEGIN
     OR r.last_customer_message->>'placement_note' IS DISTINCT FROM 'not placed on any job' THEN
   RAISE EXCEPTION 'record contract: a single job''s unplaced mail is its, labelled: %', r.last_customer_message;
  END IF;
+ -- C5 is retired: a booking ahead still tentative in crew planning opens no check, and crew
+ -- planning's confirmation is in no words (job J's and job B's bookings are tentative there)
+ SELECT count(*) INTO n FROM public.context_job_record_loops(ARRAY[a, b, c, 'a0000000-0000-4000-8000-000000000014'::uuid], asof) l
+ WHERE l.rule LIKE 'C5%' OR l.what ILIKE '%crew planning%' OR l.what ILIKE '%tentative%';
+ IF n <> 0 THEN RAISE EXCEPTION 'record contract: crew planning''s tentative booking must open no check'; END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY[b, 'a0000000-0000-4000-8000-000000000014'::uuid], asof) t
+ WHERE t.what ILIKE '%crew planning:%' OR t.what ILIKE '%tentative%';
+ IF n <> 0 THEN RAISE EXCEPTION 'record contract: crew planning''s confirmation must be in no timeline words'; END IF;
  -- N5: a candidate or check that quotes unplaced mail says so, in its words and its placement
  SELECT count(*) INTO n FROM public.context_job_record_loops(ARRAY[c], asof) l
  WHERE l.rule = 'C11_customer_mail_unanswered' AND l.placement = 'not_placed'

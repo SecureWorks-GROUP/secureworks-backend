@@ -103,9 +103,10 @@ BEGIN
   'public.context_email_key(text)', 'public.context_phone_key(text)'] LOOP
   IF to_regprocedure(f) IS NULL THEN problems := problems || format('%s missing', f); END IF;
  END LOOP;
- -- The party contact details the packet's match keys read.
+ -- The party details the packet reads (match keys and roles).
  FOREACH t IN ARRAY ARRAY['jobs.client_email', 'jobs.client_phone', 'job_contacts.client_email', 'job_contacts.client_phone',
-   'job_contacts.ghl_contact_id', 'contact_matches.ghl_contact_id', 'contact_matches.email', 'contact_matches.phone'] LOOP
+   'job_contacts.ghl_contact_id', 'job_contacts.contact_type', 'job_contacts.share_percentage', 'job_contacts.amount_invoiced',
+   'contact_matches.ghl_contact_id', 'contact_matches.email', 'contact_matches.phone'] LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || split_part(t, '.', 1))
     AND a.attname = split_part(t, '.', 2) AND NOT a.attisdropped) THEN
    problems := problems || format('public.%s missing', t);
@@ -892,9 +893,19 @@ BEGIN
  SELECT jsonb_build_array(jsonb_build_object('name', jb.client_name, 'role', 'customer', 'contact_ref', jb.ghl_contact_id, 'label', 'job_client',
    'match_keys', public.context_ledger_party_keys(ARRAY[jb.client_email] || v_pe, ARRAY[jb.client_phone] || v_pp,
     ARRAY[jb.ghl_contact_id] || v_pc)))
-  || coalesce(jsonb_agg(jsonb_build_object('name', c.client_name, 'role', 'customer',
+  -- A party's role: a neighbour (contact_type neighbour, neighbour_b and so on) is a
+  -- third party, never the customer, labelled neighbour (and "pays a share" when
+  -- its share or invoiced amount says so); the primary contact is the customer;
+  -- any other keeps its contact_type, else unknown.
+  || coalesce(jsonb_agg(jsonb_build_object('name', c.client_name,
+   'role', CASE WHEN lower(coalesce(c.contact_type, '')) LIKE 'neighbour%' THEN 'third_party'
+                WHEN coalesce(c.is_primary, false) OR lower(coalesce(c.contact_type, '')) = 'primary' THEN 'customer'
+                ELSE coalesce(nullif(btrim(c.contact_type), ''), 'unknown') END,
    'contact_ref', coalesce(nullif(btrim(c.ghl_contact_id), ''), lower(nullif(btrim(c.client_email), ''))),
-   'label', coalesce(c.contact_label, c.contact_type),
+   'label', CASE WHEN lower(coalesce(c.contact_type, '')) LIKE 'neighbour%'
+                 THEN 'neighbour' || CASE WHEN coalesce(c.share_percentage, 0) > 0 OR coalesce(c.amount_invoiced, 0) > 0
+                                          THEN ', pays a share' ELSE '' END
+                 ELSE coalesce(c.contact_label, c.contact_type) END,
    'match_keys', public.context_ledger_party_keys(ARRAY[c.client_email], ARRAY[c.client_phone], ARRAY[nullif(btrim(c.ghl_contact_id), '')]))
    ORDER BY c.is_primary DESC NULLS LAST, c.created_at, c.id), '[]'::jsonb)
  INTO v_parties
@@ -949,7 +960,7 @@ BEGIN
   'since', p_since, 'as_of', v_as_of, 'open_items', v_open);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_packet(uuid, timestamptz, timestamptz) IS
- 'Context ledger store (20261006013000): ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties (each with match_keys: emails, phones'' last 9 digits), evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise; each row with already_read, placed_on and, on a call log, has_transcript, call_customer on transcripts), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items (each with phase, closes_on and opened_by as stored). With p_since: rows recorded after it, every already-read row after the earliest of them, and the six before it, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. The judge asks for a rebuild (late_evidence) instead when the earliest new row is more than 14 days older than evidence_until or more than 150 already-read rows follow it. Role fields are the stored party_roles stamp, never invented. Service role only.';
+ 'Context ledger store (20261006013000): ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties (the job client and a primary contact role customer, a neighbour role third_party labelled neighbour, others their contact_type or unknown; each with match_keys: emails, phones'' last 9 digits), evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise; each row with already_read, placed_on and, on a call log, has_transcript, call_customer on transcripts), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items (each with phase, closes_on and opened_by as stored). With p_since: rows recorded after it, every already-read row after the earliest of them, and the six before it, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. The judge asks for a rebuild (late_evidence) instead when the earliest new row is more than 14 days older than evidence_until or more than 150 already-read rows follow it. Role fields are the stored party_roles stamp, never invented. Service role only.';
 
 -- 11. One citation: allowed table, a row on this job, a verbatim excerpt.
 -- Returns {ok, code, detail} on refusal, else the canonical citation and the
@@ -1280,13 +1291,14 @@ BEGIN
   'status', v_status, 'from_role', v_from, 'from_name', nullif(btrim(p_item ->> 'from_name'), ''), 'to_role', v_to,
   'to_name', nullif(btrim(p_item ->> 'to_name'), ''), 'what', v_what, 'about_key', v_about, 'modality', p_item ->> 'modality',
   'phase', p_item ->> 'phase', 'due_date', v_due, 'due_basis', v_basis, 'opened_at', v_opened_at, 'opened_by', v_open,
-  'closed_at', v_closed_at, 'closed_by', CASE WHEN jsonb_array_length(v_close) > 0 THEN v_close END,
+  -- never a close time still to come (a record dated ahead closes at the check)
+  'closed_at', CASE WHEN v_closed_at > now() THEN now() ELSE v_closed_at END, 'closed_by', CASE WHEN jsonb_array_length(v_close) > 0 THEN v_close END,
   'closes_on', p_item ->> 'closes_on', 'supersedes_key', nullif(btrim(p_item ->> 'supersedes_key'), ''),
   'supersedes_ref', nullif(btrim(p_item ->> 'supersedes_ref'), ''), 'blocks', p_item ->> 'blocks',
   'needs_reply', CASE WHEN jsonb_typeof(p_item -> 'needs_reply') = 'boolean' THEN (p_item ->> 'needs_reply')::boolean END, 'also_concerns', nullif(btrim(p_item ->> 'also_concerns'), '')));
 END $$;
 COMMENT ON FUNCTION public.context_ledger_check_item(uuid, jsonb, text, uuid, text) IS
- 'Context ledger store (20261006013000): checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it; a closing citation must be able to close (close_at: no draft invoice, unsent document or unattended booking: closing_not_issued), may not be an opening citation (closing_is_opening) and is at or after the opening, strictly after for a request (closing_before_opening); speaker rules for the model on the first opening citation (customer: the job''s customer sent it; us: ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it and that message is not automated (context_supported_due_date); what has em and en dashes replaced. opened_at and closed_at come from the cited rows, never the input. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
+ 'Context ledger store (20261006013000): checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it; a closing citation must be able to close (close_at: no draft invoice, unsent document or unattended booking: closing_not_issued), may not be an opening citation (closing_is_opening) and is at or after the opening, strictly after for a request (closing_before_opening); speaker rules for the model on the first opening citation (customer: the job''s customer sent it; us: ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it and that message is not automated (context_supported_due_date); what has em and en dashes replaced. opened_at and closed_at come from the cited rows, never the input, and closed_at is never later than now. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
 
 -- 13. The write: custody for every item and transition.
 CREATE OR REPLACE FUNCTION public.context_ledger_write(p_run_id uuid, p_lease_token uuid, p_generation_id uuid,
@@ -1404,7 +1416,7 @@ BEGIN
      IF v_rep_at < (cands[k] ->> 'opened_at')::timestamptz THEN
       cands[k] := cands[k] || jsonb_build_object('refused', 'closing_before_opening'); v_changed := true; CONTINUE;
      END IF;
-     cands[k] := cands[k] || jsonb_build_object('closed_at', v_rep_at);
+     cands[k] := cands[k] || jsonb_build_object('closed_at', CASE WHEN v_rep_at > now() THEN now() ELSE v_rep_at END);
     END IF;
    END IF;
   END LOOP;
@@ -1499,7 +1511,7 @@ BEGIN
    CONTINUE;
   END IF;
   UPDATE public.context_ledger_items SET status = tr ->> 'to_status',
-   closed_at = CASE WHEN tr ->> 'to_status' IN ('closed','declined','superseded') THEN v_ev_at END,
+   closed_at = CASE WHEN tr ->> 'to_status' IN ('closed','declined','superseded') THEN CASE WHEN v_ev_at > now() THEN now() ELSE v_ev_at END END,
    closed_by = CASE WHEN tr ->> 'to_status' IN ('closed','declined','superseded') AND jsonb_array_length(v_ev) > 0 THEN v_ev END,
    updated_at = now()
   WHERE id = li.id;
@@ -1843,7 +1855,7 @@ BEGIN
   RETURN jsonb_build_object('outcome', 'no_change', 'item_key', li.item_key, 'status', li.status, 'generation_id', g.id);
  END IF;
  UPDATE public.context_ledger_items SET status = v_to, person_locked = true, updated_at = now(),
-  closed_at = CASE WHEN v_to = 'closed' THEN greatest(now(), li.opened_at) END,
+  closed_at = CASE WHEN v_to = 'closed' THEN now() END,
   closed_by = CASE WHEN v_to = 'closed' THEN v_cite END
  WHERE id = li.id;
  INSERT INTO public.context_ledger_transitions (item_id, generation_id, job_id, from_status, to_status, by, evidence, reason)

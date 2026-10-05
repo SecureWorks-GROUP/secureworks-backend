@@ -1094,7 +1094,7 @@ AS $fn$
   SELECT 11, 'Job story', NULL, 'see per-job pages', 'every live job has a timeline, a cited summary per phase and a first line',
          'Measured per job by context_story_scorecard_jobs (paged); the ops-api door folds the pages into this row'
   UNION ALL
-  SELECT 12, 'Open loops', NULL, 'see per-job pages', 'every live job lists promises, unanswered asks, money owed and unconfirmed dates, each cited',
+  SELECT 12, 'Open loops', NULL, 'see per-job pages', 'every live job lists promises, unanswered asks, money owed and dates asked for or offered but not agreed, each cited',
          'Measured per job by context_story_scorecard_jobs (paged)'
   UNION ALL
   SELECT 13, 'Client view', NULL, 'see per-job pages', 'every client with a live job has one view across their jobs',
