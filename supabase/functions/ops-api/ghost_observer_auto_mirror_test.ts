@@ -284,6 +284,7 @@ function baseStore(): Store {
         id: OPS_MANAGER_ID,
         role: "ops_manager",
         name: "Shaun",
+        email: "shaun@secureworkswa.com.au",
         phone: null,
         created_at: "2025-01-01",
       },
@@ -816,9 +817,9 @@ Deno.test("applyGhostObserverBackfill: apply writes exactly one ghost per report
 
 // ── ensureGhostObserverMirror: direct unit coverage of the ops-manager gate ─
 
-Deno.test("ensureGhostObserverMirror: no-ops when no ops_manager user can be resolved", async () => {
+Deno.test("ensureGhostObserverMirror: no-ops when no watcher user can be resolved", async () => {
   const store = baseStore();
-  store.users = []; // nobody carries role='ops_manager'
+  store.users = []; // no user matches a GHOST_WATCHERS email
   store.jobs!.push({ id: "job-noone", type: "fencing" });
 
   const res = await ensureGhostObserverMirror(makeFakeClient(store), {
@@ -1826,4 +1827,247 @@ Deno.test("findGhostObserverBackfillCandidates: a NULL-status genuine crew row i
   );
   assertEquals(candidates.map((c) => c.scheduledDate), ["2026-12-11"]);
   assertEquals(candidates[0].durationDays, 2);
+});
+
+// ── Watcher scope (Captain 2026-10-05) ──────────────────────────────────────
+// Shaun watches every job; Nithin watches patio jobs only. Nithin's account is
+// deliberately the OLDER ops_manager here, because that is the live shape that
+// made the first version mirror every ghost onto him instead of Shaun.
+
+const NITHIN_ID = "5862cf1d-0a3b-4836-8fd1-d69f95aa2f73";
+
+function scopedStore(): Store {
+  const store = baseStore();
+  store.users!.unshift({
+    id: NITHIN_ID,
+    role: "ops_manager",
+    name: "Nithin",
+    email: "nithin@secureworkswa.com.au",
+    phone: null,
+    created_at: "2024-12-31",
+  });
+  store.users!.push({
+    id: "henry-ops",
+    role: "ops_manager",
+    name: "Henry",
+    email: "henry@example.com",
+    phone: null,
+    created_at: "2024-01-01",
+  });
+  return store;
+}
+
+function ghostsByUser(store: Store, jobId: string): string[] {
+  return (store.job_assignments || [])
+    .filter((r) => r.job_id === jobId && r.is_ghost === true)
+    .map((r) => String(r.user_id))
+    .sort();
+}
+
+for (
+  const { type, expected } of [
+    { type: "fencing", expected: [OPS_MANAGER_ID] },
+    { type: "makesafe", expected: [OPS_MANAGER_ID] },
+    { type: "repair", expected: [OPS_MANAGER_ID] },
+    { type: "patio", expected: [NITHIN_ID, OPS_MANAGER_ID].sort() },
+  ]
+) {
+  Deno.test(`watcher scope: a ${type} booking ghosts ${
+    type === "patio" ? "Shaun and Nithin" : "Shaun only"
+  }, never the oldest ops_manager`, async () => {
+    const unstub = stubFetch();
+    try {
+      const store = scopedStore();
+      store.jobs!.push({
+        id: `job-scope-${type}`,
+        type,
+        job_number: `SW-${type}`,
+        status: "scheduled",
+        metadata: {},
+      });
+      await createAssignment(makeFakeClient(store), {
+        jobId: `job-scope-${type}`,
+        userId: "inst-1",
+        scheduledDate: "2026-10-07",
+        crewName: "Hugo",
+      });
+      await flush();
+      assertEquals(ghostsByUser(store, `job-scope-${type}`), expected);
+    } finally {
+      unstub();
+    }
+  });
+}
+
+Deno.test("watcher scope: Nithin booked as real crew on a fencing job gets his real row only, and Shaun still gets a ghost", async () => {
+  const unstub = stubFetch();
+  try {
+    const store = scopedStore();
+    store.jobs!.push({
+      id: "job-nithin-fence",
+      type: "fencing",
+      job_number: "SWF-N1",
+      status: "scheduled",
+      metadata: {},
+    });
+    await createAssignment(makeFakeClient(store), {
+      jobId: "job-nithin-fence",
+      userId: NITHIN_ID,
+      scheduledDate: "2026-10-08",
+    });
+    await flush();
+    const nithinRows = store.job_assignments!.filter((r) =>
+      r.job_id === "job-nithin-fence" && r.user_id === NITHIN_ID
+    );
+    assertEquals(nithinRows.length, 1);
+    assertEquals(nithinRows[0].is_ghost === true, false);
+    assertEquals(ghostsByUser(store, "job-nithin-fence"), [OPS_MANAGER_ID]);
+  } finally {
+    unstub();
+  }
+});
+
+Deno.test("watcher scope: deleting the last crew row removes an out-of-scope ghost left from before the fix", async () => {
+  const unstub = stubFetch();
+  try {
+    const store = scopedStore();
+    store.jobs!.push({
+      id: "job-stale",
+      type: "fencing",
+      job_number: "SWF-STALE",
+      status: "scheduled",
+      metadata: {},
+    });
+    store.job_assignments = [
+      {
+        id: "crew-stale",
+        job_id: "job-stale",
+        user_id: "inst-1",
+        role: "lead_installer",
+        assignment_type: "install",
+        is_ghost: false,
+        status: "scheduled",
+        scheduled_date: "2026-10-09",
+      },
+      {
+        id: "ghost-stale-nithin",
+        job_id: "job-stale",
+        user_id: NITHIN_ID,
+        role: "observer",
+        assignment_type: "install",
+        is_ghost: true,
+        status: "scheduled",
+        scheduled_date: "2026-10-09",
+      },
+    ];
+    await deleteAssignment(makeFakeClient(store), { id: "crew-stale" });
+    await flush();
+    assertEquals(ghostsByUser(store, "job-stale"), []);
+  } finally {
+    unstub();
+  }
+});
+
+Deno.test("watcher scope: rescheduling a fencing crew row moves Shaun's ghost and never mints one for Nithin", async () => {
+  const store = scopedStore();
+  store.jobs!.push({
+    id: "job-move",
+    type: "fencing",
+    job_number: "SWF-MOVE",
+    status: "scheduled",
+    metadata: {},
+  });
+  store.job_assignments = [
+    {
+      id: "crew-move",
+      job_id: "job-move",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-10-12",
+    },
+    {
+      id: "ghost-move-shaun",
+      job_id: "job-move",
+      user_id: OPS_MANAGER_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "scheduled",
+      scheduled_date: "2026-10-10",
+    },
+    {
+      id: "ghost-move-nithin",
+      job_id: "job-move",
+      user_id: NITHIN_ID,
+      role: "observer",
+      assignment_type: "install",
+      is_ghost: true,
+      status: "scheduled",
+      scheduled_date: "2026-10-10",
+    },
+  ];
+  await reconcileGhostObserverMirrorOnReschedule(makeFakeClient(store), {
+    jobId: "job-move",
+    assignmentId: "crew-move",
+    oldDate: "2026-10-10",
+    newDate: "2026-10-12",
+    assigneeUserId: "inst-1",
+  });
+  const ghosts = store.job_assignments.filter((r) => r.is_ghost === true);
+  assertEquals(
+    ghosts.map((g) => `${g.user_id}@${g.scheduled_date}`),
+    [`${OPS_MANAGER_ID}@2026-10-12`],
+  );
+});
+
+Deno.test("watcher scope: backfill proposes Shaun on every job and Nithin on patio only", async () => {
+  const store = scopedStore();
+  store.jobs!.push(
+    { id: "job-bf-fence", type: "fencing", job_number: "SWF-BF", metadata: {} },
+    { id: "job-bf-patio", type: "patio", job_number: "SWP-BF", metadata: {} },
+  );
+  store.job_assignments = [
+    {
+      id: "a-bf-fence",
+      job_id: "job-bf-fence",
+      user_id: "inst-1",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-20",
+    },
+    {
+      id: "a-bf-patio",
+      job_id: "job-bf-patio",
+      user_id: "inst-2",
+      role: "lead_installer",
+      assignment_type: "install",
+      is_ghost: false,
+      status: "scheduled",
+      scheduled_date: "2026-11-21",
+    },
+  ];
+  const client = makeFakeClient(store);
+  const candidates = await findGhostObserverBackfillCandidates(client, {
+    today: "2026-10-05",
+  });
+  assertEquals(
+    candidates.map((c) => `${c.watcherId}@${c.jobId}`).sort(),
+    [
+      `${NITHIN_ID}@job-bf-patio`,
+      `${OPS_MANAGER_ID}@job-bf-fence`,
+      `${OPS_MANAGER_ID}@job-bf-patio`,
+    ].sort(),
+  );
+  const res = await applyGhostObserverBackfill(client, candidates);
+  assertEquals(res, { created: 3, failed: 0 });
+  assertEquals(ghostsByUser(store, "job-bf-fence"), [OPS_MANAGER_ID]);
+  assertEquals(
+    ghostsByUser(store, "job-bf-patio"),
+    [NITHIN_ID, OPS_MANAGER_ID].sort(),
+  );
 });
