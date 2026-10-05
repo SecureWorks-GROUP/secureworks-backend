@@ -410,7 +410,11 @@ RETURNS TABLE(job_id uuid, src_table text, src_id uuid, at timestamptz, landed_a
  copy_of uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  WITH j AS (
-  SELECT jb.id, lower(nullif(btrim(jb.client_email), '')) AS cmail, nullif(btrim(jb.client_name), '') AS cname
+  SELECT jb.id, lower(nullif(btrim(jb.client_email), '')) AS cmail, nullif(btrim(jb.client_name), '') AS cname, jb.created_at,
+   -- the client has another job (the same CRM contact or client email)
+   (EXISTS (SELECT 1 FROM public.jobs o WHERE o.ghl_contact_id = nullif(btrim(jb.ghl_contact_id), '') AND o.id <> jb.id)
+    OR EXISTS (SELECT 1 FROM public.jobs o WHERE o.client_email IS NOT NULL
+     AND lower(btrim(o.client_email)) = lower(nullif(btrim(jb.client_email), '')) AND o.id <> jb.id)) AS repeat_client
   FROM public.jobs jb WHERE jb.id = ANY(p_job_ids)
  ), be AS (
   SELECT e.job_id, 'business_events'::text AS src_table, e.id AS src_id,
@@ -452,7 +456,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  ), inbox_c AS (
   -- Legacy mail placed on the job, or from the client's own address and placed
   -- on no job. Mail the old matcher put on another job stays there: a repeat
-  -- customer's mail about one job never enters every job of theirs.
+  -- customer's mail about one job never enters every job of theirs. Unplaced
+  -- mail is evidence only when the client has no other job (else it may be that
+  -- job's), from 30 days before the job was created (the record layer's
+  -- context_job_record_legacy_mail keeps the same rule).
   SELECT j.id AS job_id, i.id, i.received_at, i.processed_at, i.subject, i.body_preview, i.from_email, i.from_name,
    i.to_email, i.mailbox, i.graph_message_id, i.classification, j.cmail, j.cname, 'this_job'::text AS placed_on
   FROM j JOIN public.inbox_events i ON i.job_id = j.id
@@ -460,6 +467,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT j.id, i.id, i.received_at, i.processed_at, i.subject, i.body_preview, i.from_email, i.from_name,
    i.to_email, i.mailbox, i.graph_message_id, i.classification, j.cmail, j.cname, 'none'::text
   FROM j JOIN public.inbox_events i ON j.cmail IS NOT NULL AND lower(btrim(i.from_email)) = j.cmail AND i.job_id IS NULL
+  WHERE NOT j.repeat_client AND i.received_at >= j.created_at - interval '30 days'
  ), email_copy AS MATERIALIZED (
   -- Any email row with the same sender at the same instant is the same mail.
   SELECT DISTINCT coalesce(b.event_at, b.occurred_at) AS at,
@@ -517,7 +525,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  ORDER BY k.job_id, k.at, k.src_id
 $$;
 COMMENT ON FUNCTION public.context_ledger_evidence_rows(uuid[], timestamptz) IS
- 'Context ledger store (20261006013000): the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail placed on the job, or from the client''s address and placed on no job (placed_on this_job or none; mail placed on another job stays there), with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. has_transcript on a call log: its transcript (payload.ghl_call_id or key ghltx:<id> naming the call''s ghl:<id>) is on the job. copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
+ 'Context ledger store (20261006013000): the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail placed on the job, or from the client''s address and placed on no job (placed_on this_job or none; mail placed on another job stays there; unplaced mail only when the client has no other job by CRM contact or client email, and from 30 days before the job was created), with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. has_transcript on a call log: its transcript (payload.ghl_call_id or key ghltx:<id> naming the call''s ghl:<id>) is on the job. copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
 
 -- 6. The job's current generation: the live one, else the newest shadow.
 CREATE OR REPLACE FUNCTION public.context_ledger_current_generation(p_job_id uuid) RETURNS uuid
@@ -617,7 +625,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
    SELECT j.id, coalesce(i.processed_at, i.received_at)
    FROM j JOIN public.jobs jb ON jb.id = j.id
    JOIN public.inbox_events i ON lower(btrim(i.from_email)) = lower(nullif(btrim(jb.client_email), '')) AND i.job_id IS NULL
-   WHERE j.live_job AND i.received_at <= now()) x
+   WHERE j.live_job AND i.received_at <= now() AND i.received_at >= jb.created_at - interval '30 days'
+    AND NOT (EXISTS (SELECT 1 FROM public.jobs o WHERE o.ghl_contact_id = nullif(btrim(jb.ghl_contact_id), '') AND o.id <> jb.id)
+    OR EXISTS (SELECT 1 FROM public.jobs o WHERE o.client_email IS NOT NULL
+     AND lower(btrim(o.client_email)) = lower(nullif(btrim(jb.client_email), '')) AND o.id <> jb.id))) x
   WHERE x.landed <= now()
   GROUP BY x.job_id
  ), need AS (
@@ -880,6 +891,7 @@ DECLARE v_table text; v_id uuid; v_excerpt text; v_norm text; e public.business_
  v_cmail text; v_job uuid; v_found boolean; i record; v_ours boolean := false; v_customer boolean := false;
  v_call_note boolean := false; v_internal boolean := false; v_record boolean := false; v_worded boolean := false;
  v_subject text; v_body text; v_close_at timestamptz; v_automated boolean := false; v_made_at timestamptz;
+ v_job_created timestamptz; v_repeat boolean;
 BEGIN
  IF p_cite IS NULL OR jsonb_typeof(p_cite) <> 'object'
   OR EXISTS (SELECT 1 FROM jsonb_object_keys(p_cite) k WHERE k NOT IN ('table', 'id', 'excerpt'))
@@ -930,12 +942,22 @@ BEGIN
   v_internal := e.channel IN ('sms', 'email') AND (public.context_internal_text_role(e) <> 'other'
    OR coalesce(e.metadata #>> '{party_roles,audience}', e.metadata ->> 'audience') = 'internal');
  ELSIF v_table = 'inbox_events' THEN
-  SELECT lower(nullif(btrim(j.client_email), '')) INTO v_cmail FROM public.jobs j WHERE j.id = p_job_id;
+  SELECT lower(nullif(btrim(jb.client_email), '')), jb.created_at, (EXISTS (SELECT 1 FROM public.jobs o WHERE o.ghl_contact_id = nullif(btrim(jb.ghl_contact_id), '') AND o.id <> jb.id)
+    OR EXISTS (SELECT 1 FROM public.jobs o WHERE o.client_email IS NOT NULL
+     AND lower(btrim(o.client_email)) = lower(nullif(btrim(jb.client_email), '')) AND o.id <> jb.id))
+  INTO v_cmail, v_job_created, v_repeat FROM public.jobs jb WHERE jb.id = p_job_id;
   SELECT x.id, x.job_id, x.from_email, x.subject, x.body_preview, x.received_at, x.graph_message_id, x.classification INTO i
   FROM public.inbox_events x WHERE x.id = v_id;
   IF i.id IS NULL THEN RETURN jsonb_build_object('ok', false, 'code', 'citation_missing', 'detail', v_table || ':' || v_id); END IF;
   IF NOT (i.job_id IS NOT DISTINCT FROM p_job_id OR (i.job_id IS NULL AND v_cmail IS NOT NULL AND lower(btrim(i.from_email)) = v_cmail)) THEN
    RETURN jsonb_build_object('ok', false, 'code', 'citation_off_job', 'detail', v_table || ':' || v_id);
+  END IF;
+  -- Unplaced mail as the evidence admits it: never when the client has another
+  -- job (it may be that job's), never from before 30 days ahead of the job.
+  IF i.job_id IS NULL AND (coalesce(v_repeat, false) OR i.received_at < v_job_created - interval '30 days') THEN
+   RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible',
+    'detail', v_table || ':' || v_id || ' is placed on no job and ' || CASE WHEN coalesce(v_repeat, false)
+     THEN 'the client has another job' ELSE 'is older than 30 days before the job' END);
   END IF;
   -- Same admission as the evidence: a mail with a business_events copy is cited by its copy.
   IF i.received_at IS NULL OR coalesce(i.classification, '') IN ('spam', 'newsletter')
@@ -1014,7 +1036,7 @@ BEGIN
   'internal_text', v_internal, 'record', v_record, 'worded', v_worded, 'automated', v_automated);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day; null when it cannot); made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day; null when it cannot); made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)

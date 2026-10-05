@@ -99,7 +99,7 @@ AS $fn$
  rl AS MATERIALIZED (
   SELECT l.* FROM inp, jsonb_to_recordset(coalesce(inp.rec->'loops', '[]'::jsonb))
    AS l(rule text, loop_key text, shown_as text, owner text, counterparty text, what text, why text, opened_at timestamptz,
-        due_date date, amount numeric, about_key text, closes_when text, source_table text, source_id text)
+        due_date date, amount numeric, about_key text, closes_when text, source_table text, source_id text, placement text)
  ),
  mo AS MATERIALIZED (
   SELECT m.* FROM inp, jsonb_to_recordset(coalesce(inp.rec->'money', '[]'::jsonb))
@@ -378,7 +378,9 @@ AS $fn$
   FROM cand c, led WHERE c.promoted_by IS NULL
  ),
  -- the customer wrote last and nobody has read it yet: the now line and whose move say so
- wl AS (SELECT max(w.opened_at) AS at FROM wr w WHERE NOT w.read_by_reader HAVING count(*) > 0),
+ -- the newest unread candidate, and where its message sits (mail the old inbox placed
+ -- on no job is said to be so)
+ wl AS (SELECT w.opened_at AS at, w.placement FROM wr w WHERE NOT w.read_by_reader ORDER BY w.opened_at DESC, w.source_id DESC LIMIT 1),
  -- checks: record checks, plus candidates nobody promoted
  checks AS (
   SELECT r.rule, r.what, jsonb_build_array(jsonb_build_object('t', r.source_table, 'id', r.source_id)) AS cites, r.opened_at
@@ -447,6 +449,7 @@ AS $fn$
    (SELECT 'the customer wrote last on ' || to_char((wl.at AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon')
            || CASE WHEN extract(year FROM (wl.at AT TIME ZONE 'Australia/Perth')) <> extract(year FROM phs.today)
                    THEN ' ' || extract(year FROM (wl.at AT TIME ZONE 'Australia/Perth')) ELSE '' END
+           || CASE WHEN wl.placement = 'not_placed' THEN ' (an email not placed on any job)' ELSE '' END
            || '; not read yet' FROM wl) AS wrote_words
   FROM phs, nx, mt, wm
  ),
@@ -491,6 +494,11 @@ AS $fn$
             THEN (inp.meta->'unplaced'->>'count') || CASE WHEN (inp.meta->'unplaced'->>'count')::int = 1 THEN ' message' ELSE ' messages' END
                  || ' from this customer are not placed on any job yet.' END,
        'They may belong to this job; they wait in the placement queue.'),
+   (7, CASE WHEN coalesce((inp.meta->'withheld_mail'->>'count')::int, 0) > 0
+            THEN (inp.meta->'withheld_mail'->>'count') || CASE WHEN (inp.meta->'withheld_mail'->>'count')::int = 1
+                 THEN ' email from this customer is not placed on any job; it may belong to another of their jobs.'
+                 ELSE ' emails from this customer are not placed on any job; they may belong to another of their jobs.' END END,
+       'This customer has more than one job, so mail the old inbox placed on no job is kept off each of them.'),
    (8, CASE WHEN EXISTS (SELECT 1 FROM rl r WHERE r.rule = 'C4_booking_attendance_unrecorded')
             THEN 'Attendance is not recorded for a booking that has passed.' END,
        'The crew did not mark it started or complete.'),
@@ -631,7 +639,7 @@ AS $fn$
                 'unanswered', coalesce((inp.rec->'contact'->>'unanswered')::int, 0),
                 'commitments', jsonb_build_object('kept', cm.kept, 'late', cm.late, 'open', cm.open_, 'overdue', cm.overdue))
                FROM inp, cm),
-  'not_known', coalesce((SELECT jsonb_agg(jsonb_build_object('what', k.what, 'why', k.why) ORDER BY k.ord) FROM nk k), '[]'::jsonb),
+  'not_known', coalesce((SELECT jsonb_agg(jsonb_build_object('what', k.what, 'why', k.why) ORDER BY k.ord, k.what) FROM nk k), '[]'::jsonb),
   'changes', (SELECT CASE WHEN inp.since IS NULL THEN NULL ELSE coalesce((SELECT jsonb_agg(x.o ORDER BY x.at) FROM (
                SELECT t.at, jsonb_build_object('at', t.at, 'kind', t.kind, 'what', t.what,
                       'cites', jsonb_build_array(jsonb_build_object('t', t.source_table, 'id', t.source_id))) AS o
@@ -832,9 +840,12 @@ AS $fn$
   WHERE x.job_id = p_job_id AND coalesce(x.recorded_at, x.occurred_at) <= p_as_of
  ),
  l AS (SELECT e.lane, count(*) AS n, max(e.at) AS newest, min(e.at) AS oldest FROM e WHERE e.lane IS NOT NULL GROUP BY e.lane),
+ lgm AS MATERIALIZED (SELECT m.received_at, m.placement FROM public.context_job_record_legacy_mail(ARRAY[p_job_id], p_as_of) m),
  lg AS (  -- legacy inbox mail the record layer reads counts as email
-  SELECT count(*) AS n, max(m.received_at) AS newest, min(m.received_at) AS oldest
-  FROM public.context_job_record_legacy_mail(ARRAY[p_job_id], p_as_of) m
+  SELECT count(*) AS n, max(m.received_at) AS newest, min(m.received_at) AS oldest FROM lgm m WHERE m.placement <> 'withheld'
+ ),
+ wh AS (  -- a repeat client's mail placed on no job: not this job's, said so
+  SELECT count(*) AS n, max(m.received_at) AS newest FROM lgm m WHERE m.placement = 'withheld'
  ),
  un AS (  -- this customer's messages not placed on any job yet that could be this job's
   SELECT count(*) AS n, max(coalesce(u.event_at, u.occurred_at)) AS newest FROM public.context_unplaced_for_job(p_job_id) u
@@ -854,11 +865,12 @@ AS $fn$
                                        UNION ALL SELECT lg.oldest FROM lg) z),
   'evidence_rows', (SELECT coalesce(sum(l.n), 0) FROM l) + (SELECT lg.n FROM lg),
   'unplaced', (SELECT jsonb_build_object('count', un.n, 'newest_at', un.newest) FROM un),
+  'withheld_mail', (SELECT jsonb_build_object('count', wh.n, 'newest_at', wh.newest) FROM wh),
   'contact_missing', coalesce((SELECT jb.contact_missing FROM jb), false)
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_meta(uuid, timestamptz) IS
- 'Job story (20261006014000): evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start, this customer''s unplaced messages (context_unplaced_for_job) and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
+ 'Job story (20261006014000): evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start, this customer''s unplaced messages (context_unplaced_for_job), the legacy mail withheld because the client has another job (withheld_mail: counted, never the job''s email), and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
 
 -- 5. The story read. An earlier draft of this slice had four arguments; it goes
 -- (the guard above refuses one that is not this slice's), so a call by name

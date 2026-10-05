@@ -162,6 +162,35 @@ VALUES ('b0000000-0000-4000-8000-00000000000f', 'a0000000-0000-4000-8000-0000000
         '{"transcript":"Hi, thanks for calling. Yes the gate is great."}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}', NULL,
         '2026-09-25 01:00Z', '2026-09-25 01:00Z', '2026-09-25 01:00Z', 'direct');
 
+-- rev-backend P0-1, refined: mail from the client's address that no job holds.
+-- Job H's client has another job (H2, the same CRM contact) and job I's client
+-- another (I2, the same client email): their unplaced mail may be that other
+-- job's, so it is withheld. Job J's client has only job J: its unplaced mail is
+-- its from 30 days before it was created (and a booking J made before it).
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('a0000000-0000-4000-8000-000000000010', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0010', 'quoted', 'fencing',
+        'cust.h@example.test', 'ctH', '{}', '2026-09-01 01:00Z'),
+       ('a0000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0011', 'complete', 'fencing',
+        NULL, 'ctH', '{}', '2025-03-01 01:00Z'),
+       ('a0000000-0000-4000-8000-000000000012', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0012', 'quoted', 'fencing',
+        'cust.i@example.test', NULL, '{}', '2026-09-01 01:00Z'),
+       ('a0000000-0000-4000-8000-000000000013', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0013', 'complete', 'fencing',
+        ' Cust.I@example.test ', 'ctI2', '{}', '2026-01-01 01:00Z'),
+       ('a0000000-0000-4000-8000-000000000014', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0014', 'quoted', 'fencing',
+        'cust.j@example.test', 'ctJ', '{}', '2026-09-01 01:00Z');
+INSERT INTO public.inbox_events (id, job_id, from_email, subject, body_preview, received_at, graph_message_id, mailbox)
+VALUES ('aa000000-0000-4000-8000-000000000010', NULL, 'cust.h@example.test', 'Fence question', 'Can you also fix the side gate?',
+        '2026-10-02 01:00Z', 'g-legacy-10', 'admin@example.test'),
+       ('aa000000-0000-4000-8000-000000000012', NULL, 'cust.i@example.test', 'Fence question', 'Is the colour still available?',
+        '2026-10-02 01:00Z', 'g-legacy-12', 'admin@example.test'),
+       ('aa000000-0000-4000-8000-000000000014', NULL, 'cust.j@example.test', 'Old enquiry', 'Do you do pool fences as well?',
+        '2026-07-31 01:00Z', 'g-legacy-14', 'admin@example.test'),
+       ('aa000000-0000-4000-8000-000000000015', NULL, 'cust.j@example.test', 'New enquiry', 'Can you quote the front fence?',
+        '2026-08-03 01:00Z', 'g-legacy-15', 'admin@example.test');
+INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
+VALUES ('e0000000-0000-4000-8000-000000000014', 'a0000000-0000-4000-8000-000000000014', 'lead_installer', '2026-10-20', 'install', 'scheduled',
+        'Crew Three', 'confirmed', false, '2026-08-02 06:00Z');
+
 DO $behave$
 DECLARE
  a uuid := 'a0000000-0000-4000-8000-000000000001'; b uuid := 'a0000000-0000-4000-8000-000000000002';
@@ -333,5 +362,45 @@ BEGIN
  SELECT count(*) INTO n FROM public.context_job_record_legacy_mail(ARRAY['a0000000-0000-4000-8000-00000000000e'::uuid], asof) m
  WHERE m.id = 'aa000000-0000-4000-8000-000000000003' AND m.on_job;
  IF n <> 1 THEN RAISE EXCEPTION 'record contract: job E keeps the mail placed on it'; END IF;
+ -- rev-backend P0-1, refined: a repeat client's unplaced mail is withheld (counted for
+ -- the story, never a message of the job); a single job's counts from 30 days before it
+ SELECT string_agg(m.id || '=' || m.placement, ',' ORDER BY m.id) INTO got
+ FROM public.context_job_record_legacy_mail(ARRAY['a0000000-0000-4000-8000-000000000010', 'a0000000-0000-4000-8000-000000000012',
+   'a0000000-0000-4000-8000-000000000014']::uuid[], asof) m;
+ IF got IS DISTINCT FROM 'aa000000-0000-4000-8000-000000000010=withheld,aa000000-0000-4000-8000-000000000012=withheld,'
+    || 'aa000000-0000-4000-8000-000000000015=not_placed' THEN
+  RAISE EXCEPTION 'record contract: unplaced mail is withheld for a repeat client, and a single job''s starts 30 days before it: %', got;
+ END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_messages(ARRAY['a0000000-0000-4000-8000-000000000010',
+   'a0000000-0000-4000-8000-000000000012']::uuid[], asof) m;
+ IF n <> 0 THEN RAISE EXCEPTION 'record contract: a repeat client''s unplaced mail is no message of the job'; END IF;
+ SELECT * INTO r FROM public.context_job_record_contact(ARRAY['a0000000-0000-4000-8000-000000000010'::uuid], asof);
+ IF r.last_customer_message IS NOT NULL THEN
+  RAISE EXCEPTION 'record contract: a repeat client''s unplaced mail is not the customer''s last word: %', r.last_customer_message;
+ END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-000000000010',
+   'a0000000-0000-4000-8000-000000000012']::uuid[], asof) t WHERE t.source_table = 'inbox_events';
+ IF n <> 0 THEN RAISE EXCEPTION 'record contract: a repeat client''s unplaced mail is not in the timeline'; END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_loops(ARRAY['a0000000-0000-4000-8000-000000000010',
+   'a0000000-0000-4000-8000-000000000012']::uuid[], asof) l WHERE l.source_table = 'inbox_events';
+ IF n <> 0 THEN RAISE EXCEPTION 'record contract: a repeat client''s unplaced mail opens no candidate'; END IF;
+ SELECT * INTO r FROM public.context_job_record_contact(ARRAY['a0000000-0000-4000-8000-000000000014'::uuid], asof);
+ IF r.last_customer_message->>'id' IS DISTINCT FROM 'aa000000-0000-4000-8000-000000000015'
+    OR r.last_customer_message->>'placement_note' IS DISTINCT FROM 'not placed on any job' THEN
+  RAISE EXCEPTION 'record contract: a single job''s unplaced mail is its, labelled: %', r.last_customer_message;
+ END IF;
+ -- N5: a candidate or check that quotes unplaced mail says so, in its words and its placement
+ SELECT count(*) INTO n FROM public.context_job_record_loops(ARRAY[c], asof) l
+ WHERE l.rule = 'C11_customer_mail_unanswered' AND l.placement = 'not_placed'
+   AND l.what LIKE 'Customer emailed % (stored only in the old inbox, not placed on any job) and nothing went to the customer since:%';
+ IF n <> 1 THEN RAISE EXCEPTION 'record contract: C11 on unplaced mail must say it is not placed on any job'; END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_loops(ARRAY['a0000000-0000-4000-8000-000000000014'::uuid], asof) l
+ WHERE l.rule = 'C6_booking_after_customer_word' AND l.placement = 'not_placed' AND l.source_id = 'aa000000-0000-4000-8000-000000000015'
+   AND l.what LIKE '%(an email not placed on any job) after it was made%';
+ IF n <> 1 THEN RAISE EXCEPTION 'record contract: C6 on unplaced mail must say it is not placed on any job'; END IF;
+ SELECT count(*) INTO n FROM public.context_job_record_loops(ARRAY[a, b, c], asof) l
+ WHERE (l.source_table = 'business_events' AND l.placement IS DISTINCT FROM 'on_job')
+    OR (l.source_table NOT IN ('business_events', 'inbox_events') AND l.placement IS NOT NULL);
+ IF n <> 0 THEN RAISE EXCEPTION 'record contract: a loop on a job message is on_job, a record loop has no placement'; END IF;
 END $behave$;
 ROLLBACK;

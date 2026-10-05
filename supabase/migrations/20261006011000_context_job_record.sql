@@ -113,28 +113,41 @@ COMMENT ON FUNCTION public.context_job_record_date(text) IS
 -- email on the job at the same instant; one row per received instant (the old
 -- path saved one copy per mailbox); auto-replies dropped. The messages helper
 -- and the story's evidence lanes both read it, so the rule lives once.
+-- Mail from the client's address that the old matcher placed on no job:
+--   - when the client has another job (the same CRM contact or the same client
+--     email) it may be that job's, so it is withheld (placement withheld):
+--     counted for the story, never a message of this job;
+--   - otherwise it is this job's from 30 days before the job was created
+--     (placement not_placed, labelled where shown); older mail is left out.
+-- The ledger store's evidence and citation check keep the same rule.
 CREATE OR REPLACE FUNCTION public.context_job_record_legacy_mail(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(jid uuid, cmail text, id uuid, received_at timestamptz, subject text, body_preview text, from_email text,
- graph_message_id text, on_job boolean)
+ graph_message_id text, on_job boolean, placement text)
 LANGUAGE sql STABLE
 AS $fn$
  WITH j AS (
-  SELECT jb.id, lower(nullif(btrim(jb.client_email), '')) AS cmail
+  SELECT jb.id, lower(nullif(btrim(jb.client_email), '')) AS cmail, jb.created_at,
+         -- (two lookups, each on its own jobs index: the CRM contact, the client email)
+         (EXISTS (SELECT 1 FROM public.jobs o WHERE o.ghl_contact_id = nullif(btrim(jb.ghl_contact_id), '') AND o.id <> jb.id)
+          OR EXISTS (SELECT 1 FROM public.jobs o WHERE o.client_email IS NOT NULL
+                     AND lower(btrim(o.client_email)) = lower(nullif(btrim(jb.client_email), '')) AND o.id <> jb.id)) AS repeat_client
   FROM public.jobs jb WHERE jb.id = ANY (p_job_ids)
  ),
  ibx AS (
   SELECT j.id AS jid, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id,
-         (i.job_id = j.id) AS on_job
+         (i.job_id = j.id) AS on_job, 'on_job'::text AS placement
   FROM j JOIN public.inbox_events i ON i.job_id = j.id
   UNION ALL
-  SELECT j.id, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id, false
+  SELECT j.id, j.cmail, i.id, i.received_at, i.subject, i.body_preview, i.from_email, i.graph_message_id, false,
+         CASE WHEN j.repeat_client THEN 'withheld' ELSE 'not_placed' END
   FROM j JOIN public.inbox_events i ON lower(btrim(i.from_email)) = j.cmail
   -- from the client's address only when placed on no job: mail the old matcher
   -- placed on another job stays there (a repeat customer's other jobs)
   WHERE j.cmail IS NOT NULL AND i.job_id IS NULL
+    AND (j.repeat_client OR i.received_at >= j.created_at - interval '30 days')
  )
  SELECT DISTINCT ON (x.jid, x.received_at) x.jid, x.cmail, x.id, x.received_at, x.subject, x.body_preview, x.from_email,
-        x.graph_message_id, x.on_job
+        x.graph_message_id, x.on_job, x.placement
  FROM ibx x
  WHERE x.received_at <= p_as_of
    AND coalesce(x.subject, '') !~* '^(automatic reply|auto[- ]?reply|out of office)'
@@ -150,7 +163,7 @@ AS $fn$
  ORDER BY x.jid, x.received_at, x.on_job DESC, x.id
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) IS
- 'Job record (20261006011000): legacy inbox_events mail for the jobs: placed on the job, or from the client address and placed on no job (mail placed on another job stays there), no business_events copy, no business_events email on the job at the same instant, one row per received instant, auto-replies dropped. Inlinable helper read by context_job_record_messages and the story. Service role only.';
+ 'Job record (20261006011000): legacy inbox_events mail for the jobs: placed on the job (placement on_job), or from the client address and placed on no job (mail placed on another job stays there): withheld when the client has another job (same CRM contact or client email), else not_placed from 30 days before the job was created; no business_events copy, no business_events email on the job at the same instant, one row per received instant, auto-replies dropped. Inlinable helper read by context_job_record_messages (withheld rows never) and the story. Service role only.';
 
 -- 1. Messages helper. Inlinable on purpose (LANGUAGE sql, STABLE, no SET, not
 -- SECURITY DEFINER): the four record functions below call it inside their own
@@ -226,7 +239,8 @@ AS $fn$
          'on_job'::text AS placement
   FROM lab l
  ),
- ib AS (SELECT * FROM public.context_job_record_legacy_mail(p_job_ids, p_as_of)),
+ -- legacy mail: a repeat client's mail placed on no job is withheld (it may be another job's)
+ ib AS (SELECT * FROM public.context_job_record_legacy_mail(p_job_ids, p_as_of) x WHERE x.placement <> 'withheld'),
  ibl AS (
   SELECT ib.jid, 'inbox_events'::text AS tbl, ib.id::text AS sid, ib.received_at AS at, 'inbox.email'::text AS event_type,
          'monitor-inbox legacy'::text AS source, 'email'::text AS channel,
@@ -241,7 +255,7 @@ AS $fn$
          NULL::boolean AS tic, NULL::text AS sbk, 'other'::text AS irole, true AS is_msg, false AS is_note,
          (ib.cmail IS NOT NULL AND lower(btrim(ib.from_email)) = ib.cmail) AS cust,
          false AS internal, false AS automated, false AS bad_call, false AS answered,
-         CASE WHEN ib.on_job THEN 'on_job' ELSE 'not_placed' END AS placement
+         ib.placement
   FROM ib
  )
  SELECT u.jid AS job_id, u.tbl AS source_table, u.sid AS source_id, u.at, u.event_type, u.source, u.channel, u.direction,
@@ -694,7 +708,8 @@ COMMENT ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) IS
 -- 3. Loops: record-closable loops and checks.
 CREATE OR REPLACE FUNCTION public.context_job_record_loops(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, rule text, loop_key text, shown_as text, owner text, counterparty text, what text, why text,
- opened_at timestamptz, due_date date, amount numeric, about_key text, closes_when text, source_table text, source_id text)
+ opened_at timestamptz, due_date date, amount numeric, about_key text, closes_when text, source_table text, source_id text,
+ placement text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
  WITH j AS (
@@ -961,6 +976,7 @@ AS $fn$
   -- C6 the customer wrote after a future booking was made and it has not changed since
   SELECT b.job_id, 'C6_booking_after_customer_word', c.source_id, c.source_table, 'check', 'us', 'customer',
          'Booked ' || b.dates || '; the customer wrote ' || to_char(c.at AT TIME ZONE 'Australia/Perth', 'Dy FMDD Mon HH24:MI')
+           || CASE WHEN c.placement = 'not_placed' THEN ' (an email not placed on any job)' ELSE '' END
            || ' after it was made and the booking has not changed since: "' || left(c.words, 160) || '"',
          'A person or the reader must judge whether the message objects to the date',
          c.at, b.first_date, NULL::numeric, 'booking:' || b.first_date::text,
@@ -1021,7 +1037,8 @@ AS $fn$
   -- C11 the customer's newest legacy-inbox email has no customer-facing reply after it (a candidate like R5)
   SELECT l.job_id, 'C11_customer_mail_unanswered', l.source_id, 'inbox_events', 'candidate', 'us', 'customer',
          'Customer emailed ' || to_char(l.at AT TIME ZONE 'Australia/Perth', 'Dy FMDD Mon HH24:MI')
-           || ' (stored only in the old inbox) and nothing went to the customer since: "' || left(l.words, 160) || '"',
+           || ' (stored only in the old inbox' || CASE WHEN l.placement = 'not_placed' THEN ', not placed on any job' ELSE '' END
+           || ') and nothing went to the customer since: "' || left(l.words, 160) || '"',
          'The email has no copy in the evidence rows, so the R5 rule cannot see it',
          l.at, NULL::date, NULL::numeric, 'contact:customer-reply', 'A text, email or call from us to the customer after it'
   FROM (SELECT DISTINCT ON (m.job_id) m.* FROM msg m
@@ -1031,12 +1048,18 @@ AS $fn$
  )
  SELECT lp.job_id, lp.rule, lp.rule || ':' || lp.sid AS loop_key, lp.shown_as, lp.owner, lp.counterparty,
         replace(replace(lp.what, chr(8212), ', '), chr(8211), '-') AS what, lp.why, lp.opened_at, lp.due AS due_date,
-        round(lp.amount, 2) AS amount, lp.about AS about_key, lp.closes_when, lp.tbl AS source_table, lp.sid AS source_id
+        round(lp.amount, 2) AS amount, lp.about AS about_key, lp.closes_when, lp.tbl AS source_table, lp.sid AS source_id,
+        -- where the cited message sits: on_job, or not_placed (mail from the client's
+        -- address the old inbox placed on no job); null for a record row
+        CASE WHEN lp.tbl = 'inbox_events'
+             THEN coalesce((SELECT m.placement FROM msg m WHERE m.job_id = lp.job_id AND m.source_table = 'inbox_events'
+                            AND m.source_id = lp.sid LIMIT 1), 'on_job')
+             WHEN lp.tbl = 'business_events' THEN 'on_job' END AS placement
  FROM lp
  ORDER BY lp.job_id, lp.rule, lp.opened_at, lp.sid
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_loops(uuid[], timestamptz) IS
- 'Job record (20261006011000): record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C11 (a person''s look, never an obligation). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. Service role only.';
+ 'Job record (20261006011000): record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C11 (a person''s look, never an obligation). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. placement says where a cited message sits (on_job, or not_placed: client mail the old inbox placed on no job, labelled in the words); null for a record row. Service role only.';
 
 -- 4. Money per paying party.
 CREATE OR REPLACE FUNCTION public.context_job_record_money(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())

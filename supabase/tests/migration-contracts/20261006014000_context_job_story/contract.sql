@@ -287,7 +287,11 @@ INSERT INTO public.inbox_events (id, job_id, from_email, subject, body_preview, 
 VALUES ('aa000000-0000-4000-8000-000000000001', NULL, 'Cust.C@example.test', 'Quote question', 'Does the price include the gate?',
         '2026-10-03 01:00Z', 'g-legacy-1', 'admin@example.test'),
        ('aa000000-0000-4000-8000-000000000002', NULL, 'cust.c@example.test', 'Automatic reply: away', 'I am away',
-        '2026-10-04 01:00Z', 'g-legacy-2', 'admin@example.test');
+        '2026-10-04 01:00Z', 'g-legacy-2', 'admin@example.test'),
+       -- job A's client has another job (A-4, the same CRM contact): their mail the old
+       -- inbox placed on no job may be that job's, so it is withheld from both
+       ('aa000000-0000-4000-8000-0000000000a1', NULL, 'cust.a@example.test', 'Another question', 'Can you also do the back fence?',
+        '2026-10-04 01:00Z', 'g-legacy-a1', 'admin@example.test');
 
 
 -- Story extras: a promise we made earlier, a quote sent after it, a row since moved to
@@ -545,9 +549,29 @@ BEGIN
  WHERE k->>'rule' = 'C11_customer_mail_unanswered' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: unread candidate must say not yet read: %', s->'checks'; END IF;
  -- no reader: the unanswered mail reaches the now line, and nobody's move is never claimed
- IF s->'now'->>'whose_move' NOT IN ('us', 'unknown') OR position('The customer wrote last on Sat 3 Oct; not read yet' IN s->'now'->>'line') = 0
+ IF s->'now'->>'whose_move' NOT IN ('us', 'unknown')
+    OR position('The customer wrote last on Sat 3 Oct (an email not placed on any job); not read yet' IN s->'now'->>'line') = 0
     OR s->'now'->>'line' LIKE '%Nothing open on record%' OR s->'now'->>'line' LIKE '%waiting on the customer%' THEN
   RAISE EXCEPTION 'story contract: job C now line must carry the unanswered mail: % / %', s->'now'->>'whose_move', s->'now'->>'line';
+ END IF;
+ -- N5: the check quoting that mail says it is placed on no job
+ IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'rule' = 'C11_customer_mail_unanswered'
+                AND k->>'what' LIKE '%(stored only in the old inbox, not placed on any job)%') THEN
+  RAISE EXCEPTION 'story contract: C11 on unplaced mail must say it is not placed on any job: %', s->'checks';
+ END IF;
+ -- rev-backend P0-1, refined: a repeat client's unplaced mail is no part of the job's
+ -- story (not its evidence, lanes, last word or timeline), and the story says it is withheld
+ s := public.context_job_story(a, asof);
+ IF position('aa000000-0000-4000-8000-0000000000a1' IN s::text) > 0 OR position('back fence' IN s::text) > 0
+    OR s->'meta'->'sources' ? 'legacy_inbox'
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' = 'No emails are on record for this job.')
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+                   WHERE k->>'what' = '1 email from this customer is not placed on any job; it may belong to another of their jobs.') THEN
+  RAISE EXCEPTION 'story contract: withheld mail must be named in not_known and nowhere else: %', s->'not_known';
+ END IF;
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(public.context_job_story(c, asof)->'not_known') k
+            WHERE k->>'what' LIKE '%may belong to another of their jobs%') THEN
+  RAISE EXCEPTION 'story contract: a single job''s unplaced mail is its own, not withheld';
  END IF;
  IF public.context_job_story(gen_random_uuid(), asof) IS NOT NULL THEN RAISE EXCEPTION 'story contract: unknown job must give NULL'; END IF;
 

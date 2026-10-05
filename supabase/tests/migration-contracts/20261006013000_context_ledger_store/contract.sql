@@ -1903,6 +1903,37 @@ BEGIN
 END $c$;
 ROLLBACK;
 
+-- 22. Unplaced client mail (rev-backend P0-1, refined): mail from the client's
+-- address that no job holds is evidence only when the client has no other job
+-- (by CRM contact or client email), and from 30 days before the job was made;
+-- the due read, the evidence and the citation check keep the one rule.
+BEGIN;
+DO $c$
+DECLARE rc uuid; rc2 uuid; re uuid; re2 uuid; s1 uuid; mrc uuid; mre uuid; mold uuid; mnew uuid;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ rc := pg_temp.lg_job('SWF-99201', 'rae@example.test'); rc2 := pg_temp.lg_job('SWF-99202');
+ UPDATE public.jobs SET ghl_contact_id = 'ghl-SWF-99201' WHERE id = rc2;   -- the same CRM contact
+ re := pg_temp.lg_job('SWF-99203', 'reg@example.test'); re2 := pg_temp.lg_job('SWF-99204', ' Reg@Example.test ');   -- the same client email
+ s1 := pg_temp.lg_job('SWF-99205', 'sol@example.test');   -- this client's only job, made 60 days ago
+ mrc := pg_temp.lg_inbox(NULL, 'rae@example.test', 'Gate', 'Can you also look at the side gate?', '3 days');
+ mre := pg_temp.lg_inbox(NULL, 'reg@example.test', 'Colour', 'Is the colour still available?', '3 days');
+ mold := pg_temp.lg_inbox(NULL, 'sol@example.test', 'Pool fence', 'Do you do pool fences as well?', '91 days');
+ mnew := pg_temp.lg_inbox(NULL, 'sol@example.test', 'Front fence', 'Can you quote the front fence?', '89 days');
+ PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_evidence_rows(ARRAY[rc, rc2, re, re2], now())),
+  'a repeat client''s unplaced mail is no job''s evidence');
+ PERFORM pg_temp.lg_assert((SELECT array_agg(e.src_id) FROM public.context_ledger_evidence_rows(ARRAY[s1], now()) e) = ARRAY[mnew],
+  'a single job''s unplaced mail is evidence from 30 days before it was made');
+ PERFORM pg_temp.lg_assert(NOT (SELECT j.due FROM public.context_ledger_judge(ARRAY[rc]) j)
+  AND (SELECT j.due AND j.kind = 'backfill' FROM public.context_ledger_judge(ARRAY[s1]) j), 'the due read keeps the rule');
+ PERFORM pg_temp.lg_assert(public.context_ledger_cite(rc, pg_temp.lg_cite(mrc, 'look at the side gate', 'inbox_events') -> 0) ->> 'code' = 'citation_not_admissible'
+  AND public.context_ledger_cite(re, pg_temp.lg_cite(mre, 'colour still available', 'inbox_events') -> 0) ->> 'code' = 'citation_not_admissible'
+  AND public.context_ledger_cite(s1, pg_temp.lg_cite(mold, 'pool fences as well', 'inbox_events') -> 0) ->> 'code' = 'citation_not_admissible'
+  AND (public.context_ledger_cite(s1, pg_temp.lg_cite(mnew, 'quote the front fence', 'inbox_events') -> 0) ->> 'ok')::boolean,
+  'the citation check keeps the rule');
+END $c$;
+ROLLBACK;
+
 -- 16. Rollback order (rev-backend P1-8). The admission's ledger branch reads
 -- plain values, so no other phase depends on the ledger tables: with the
 -- settings table gone, attribution and extraction are still admitted.
