@@ -175,7 +175,21 @@ BEGIN;
 SELECT pg_temp.ct_cases(true);
 ROLLBACK;
 
--- E. Structure.
+-- E. Structure. A registered successor (L1e 20261005170000) proves in its own
+-- contract that its ladder bodies are exactly these plus its edits; while it is
+-- live only the two helpers are checked here, and the re-apply is skipped
+-- (L1d's guard refuses to re-apply over L1e's bodies).
+SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1e:%' AS l1e_live \gset
+\if :l1e_live
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_text_role(public.business_events)'::regprocedure)<>'e7327d108966e2bcb9d2eb48e3086a55'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_internal_about_job(public.business_events)'::regprocedure)<>'aa53618f6c82998a821b8f7439c75e60'
+  OR coalesce(obj_description('public.context_internal_text_role(public.business_events)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1d:%'
+  OR coalesce(obj_description('public.context_internal_about_job(public.business_events)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1d:%'
+ THEN RAISE EXCEPTION 'l1d: a helper is not this migration''s'; END IF;
+END $$;
+\else
 DO $$
 DECLARE f text; r text;
 BEGIN
@@ -340,3 +354,4 @@ BEGIN
  THEN RAISE EXCEPTION 'l1d: re-apply changed a body or comment'; END IF;
 END $$;
 DROP TABLE l1d_before;
+\endif

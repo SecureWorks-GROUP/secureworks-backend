@@ -678,8 +678,12 @@ replacing L1c's `20261004200000`: an outbound row marked
 `metadata.recipient_role` crew/staff, and one job reference on an outbound row
 to a known non-customer contact, stay ON that job as internal communication,
 labelled `metadata.audience` / `recipient_role`, never as the customer's
-message); the contracts undo each and prove the rest byte for byte; with it
-on, the P4 rules plus step 1b and the L1d rules. A retired
+message) and L1e (`20261005170000`: a service-role row naming a job with no
+`match_method` keeps it only on a row the reader never reads, rule
+`writer_job`; step 1b skips a `payload.job_id` its writer declared a guess);
+the contracts undo each and prove the rest byte for byte; with it on, the P4
+rules plus step 1b, the L1d rules and L1e, under which a no-words or automated
+row also keeps its custody job. A retired
 binding never places on either path, and P4 also owns both
 `attribute_context_event_with_luna` overloads, which follow a thread only when
 it is live and bound to one of the row's candidates. P4's rollback deletes
@@ -687,8 +691,8 @@ nothing: it re-keys retired rows (`retired:` prefix) before restoring P1a.
 A later placement slice (P2, P3,
 P-T) replaces the rules body in the 3-argument function, never the frozen
 P1a copy, and must widen the successor md5 lists and the `\if` re-apply
-guards in the L1, P1a, P1b, P4, L1b, L1c and L1d contracts, and roll L1d, L1c,
-L1b then P4 back first in L1's break-contract (each down refuses while a later body is
+guards in the L1, P1a, P1b, P4, L1b, L1c, L1d and L1e contracts, and roll L1e,
+L1d, L1c, L1b then P4 back first in L1's break-contract (each down refuses while a later body is
 live), exactly as P4 did for P1a.
 
 The writer check reads `metadata.written_as`, which the insert trigger now
