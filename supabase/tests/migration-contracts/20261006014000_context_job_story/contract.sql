@@ -4,7 +4,9 @@
 -- and otherwise says why it is a check, closing evidence is never a closure, a stale
 -- citation hides its item and asks for a rebuild, crew and automated texts are never
 -- what we told the customer, Perth weekdays match their dates, money is per party,
--- a shadow generation shows only when asked, and changes start after p_since.
+-- a shadow generation shows only when asked, changes start after p_since, and how
+-- far the reader has read is the ledger's own count (rows that landed after the
+-- shown generation's evidence_until), never the fact pass's.
 -- Every fixture row is synthetic and rolled back; user triggers are off for it.
 
 DO $shape$
@@ -44,6 +46,25 @@ BEGIN
  IF s->'meta'->'ledger'->>'status' <> 'none' OR jsonb_array_length(s->'loops') <> 0 OR s->'now'->>'whose_move' <> 'nobody'
     OR s->'now'->>'phase' <> 'quote' THEN
   RAISE EXCEPTION 'story contract: empty assembly wrong: %', s->'now';
+ END IF;
+ -- meta.ledger carries the reader's own freshness; the fact pass's unread count is gone.
+ IF (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(s->'meta'->'ledger') k)
+    <> ARRAY['evidence_until','generation_id','hidden_items','items','needs_rebuild','reader','stale','status','unread_rows']
+    OR s->'meta'->'ledger'->'unread_rows' <> 'null'::jsonb OR (s->'meta'->'ledger'->>'stale')::boolean
+    OR (s->'meta'->'ledger'->>'needs_rebuild')::boolean OR s->'meta' ? 'unread_rows' THEN
+  RAISE EXCEPTION 'story contract: meta.ledger shape wrong: %', s->'meta';
+ END IF;
+ -- A shadow that is not shown (the ledger read gives a JSON null generation) is not
+ -- live yet; the story never claims to show it and counts nothing unread.
+ s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-10-01T00:00:00Z"}'::jsonb,
+        '{}'::jsonb, '{"status":"shadow","generation":null,"items":[],"transitions":[],"unread_rows":null,"unread_ids":null}'::jsonb,
+        '{"unread_rows":7}'::jsonb, '2026-10-07 02:00Z', NULL);
+ IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE '%ledger for this job is not live yet%')
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE 'This story shows a shadow reading%'
+                                                                          OR k->>'what' LIKE '%not been read by the reader yet.')
+    OR s->'meta'->'ledger'->>'status' <> 'shadow' OR s->'meta'->'ledger'->'generation_id' <> 'null'::jsonb
+    OR s->'meta'->'ledger'->'unread_rows' <> 'null'::jsonb THEN
+  RAISE EXCEPTION 'story contract: an unshown shadow must read not live yet: % %', s->'not_known', s->'meta'->'ledger';
  END IF;
 END $pure$;
 BEGIN;
@@ -183,6 +204,29 @@ INSERT INTO public.context_ledger_transitions (item_id, generation_id, job_id, f
 VALUES ('9b000000-0000-4000-8000-000000000001', '9a000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001',
         NULL, 'open', '2026-10-05 01:00Z', 'model:luna-ledger:v1', 'Opened from the customer text');
 
+-- Job D: a live reading up to 3 Oct. The customer's first text landed before it; a
+-- second text written on 2 Oct landed only on 4 Oct (captured late), with a copy one
+-- minute later. The reader has read one message and not the second; the copy is the
+-- same message. Admissible evidence rows (the store's definition), every time fixed.
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('a0000000-0000-4000-8000-000000000005', '00000000-0000-4000-8000-0000000000aa', 'SWF-T0005', 'accepted', 'fencing',
+        NULL, 'ctD', '{}', '2026-09-01 01:00Z');
+INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, occurred_at,
+  recorded_at, event_at, context_captured_at, attributed_at, attribution_status, attribution_confidence)
+VALUES
+ ('b0000000-0000-4000-8000-000000000011', 'a0000000-0000-4000-8000-000000000005', 'client.reply', 'ghl', 'sms', 'inbound', 'ctD',
+  '{"body":"When will the posts arrive?"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-10-01 01:00Z', '2026-10-01 01:00Z', '2026-10-01 01:00Z', '2026-10-01 01:00Z', '2026-10-01 01:00Z', 'direct', 1),
+ ('b0000000-0000-4000-8000-000000000012', 'a0000000-0000-4000-8000-000000000005', 'client.reply', 'ghl', 'sms', 'inbound', 'ctD',
+  '{"body":"Any news on the posts?"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-10-02 01:00Z', '2026-10-04 01:00Z', '2026-10-02 01:00Z', '2026-10-04 01:00Z', '2026-10-04 01:00Z', 'direct', 1),
+ ('b0000000-0000-4000-8000-000000000013', 'a0000000-0000-4000-8000-000000000005', 'client.reply', 'ghl', 'sms', 'inbound', 'ctD',
+  '{"body":"Any news on the posts?"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-10-02 01:01Z', '2026-10-04 01:01Z', '2026-10-02 01:01Z', '2026-10-04 01:01Z', '2026-10-04 01:01Z', 'direct', 1);
+INSERT INTO public.context_ledger_generations (id, job_id, kind, status, reader, evidence_until, promoted_at, created_at)
+VALUES ('9a000000-0000-4000-8000-000000000005', 'a0000000-0000-4000-8000-000000000005', 'backfill', 'live', 'luna-ledger:v1',
+        '2026-10-03 00:00Z', '2026-10-03 01:00Z', '2026-10-03 00:30Z');
+
 DO $story$
 DECLARE
  a uuid := 'a0000000-0000-4000-8000-000000000001'; b uuid := 'a0000000-0000-4000-8000-000000000002';
@@ -221,6 +265,14 @@ BEGIN
  END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE '%needs a rebuild%';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: not_known must say the story needs a rebuild'; END IF;
+ -- job A's messages are not ledger evidence (no attribution confidence), so its reader has nothing unread:
+ -- stale only because it needs a rebuild
+ IF (s->'meta'->'ledger'->>'unread_rows')::int IS DISTINCT FROM 0 OR NOT (s->'meta'->'ledger'->>'needs_rebuild')::boolean
+    OR s->'meta' ? 'unread_rows' THEN
+  RAISE EXCEPTION 'story contract: job A ledger freshness wrong: %', s->'meta'->'ledger';
+ END IF;
+ SELECT count(*) INTO n FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE '%not been read by the reader yet.';
+ IF n <> 0 THEN RAISE EXCEPTION 'story contract: nothing is unread on job A: %', s->'not_known'; END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' = 'Phone calls that were not recorded are not here.';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: not_known must always name unrecorded calls'; END IF;
  -- what we told the customer is never a crew alert or an automated text
@@ -273,6 +325,40 @@ BEGIN
  WHERE k->>'rule' = 'C11_customer_mail_unanswered' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: unread candidate must say not yet read: %', s->'checks'; END IF;
  IF public.context_job_story(gen_random_uuid(), asof) IS NOT NULL THEN RAISE EXCEPTION 'story contract: unknown job must give NULL'; END IF;
+
+ -- Ledger freshness is the reader's own: one message landed after the live reading
+ -- (its copy listed, not counted), so the story is stale without needing a rebuild,
+ -- says so, and does not claim the reader judged the late message.
+ s := public.context_job_story('a0000000-0000-4000-8000-000000000005', asof);
+ IF (s->'meta'->'ledger'->>'unread_rows')::int IS DISTINCT FROM 1 OR NOT (s->'meta'->'ledger'->>'stale')::boolean
+    OR (s->'meta'->'ledger'->>'needs_rebuild')::boolean OR (s->'meta'->'ledger'->>'hidden_items')::int <> 0
+    OR s->'meta'->'ledger'->>'evidence_until' IS NULL OR s->'meta' ? 'unread_rows' THEN
+  RAISE EXCEPTION 'story contract: job D ledger freshness wrong: %', s->'meta'->'ledger';
+ END IF;
+ SELECT count(*) INTO n FROM jsonb_array_elements(s->'not_known') k
+ WHERE k->>'what' = '1 newer message on this job has not been read by the reader yet.';
+ IF n <> 1 THEN RAISE EXCEPTION 'story contract: not_known must name the unread message: %', s->'not_known'; END IF;
+ SELECT count(*) INTO n FROM jsonb_array_elements(s->'checks') k
+ WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
+ IF n <> 1 THEN RAISE EXCEPTION 'story contract: a message the reader has not read is never judged by it: %', s->'checks'; END IF;
+ t := public.context_job_story_ledger('a0000000-0000-4000-8000-000000000005', NULL, asof);
+ IF t->'unread_ids' <> '["b0000000-0000-4000-8000-000000000012", "b0000000-0000-4000-8000-000000000013"]'::jsonb THEN
+  RAISE EXCEPTION 'story contract: unread ids wrong: %', t->'unread_ids';
+ END IF;
+ -- Replayed before the late message landed: nothing unread, not stale, and the
+ -- message the reader did read is judged by it.
+ s := public.context_job_story('a0000000-0000-4000-8000-000000000005', '2026-10-03 12:00Z');
+ IF (s->'meta'->'ledger'->>'unread_rows')::int IS DISTINCT FROM 0 OR (s->'meta'->'ledger'->>'stale')::boolean THEN
+  RAISE EXCEPTION 'story contract: job D before the late message wrong: %', s->'meta'->'ledger';
+ END IF;
+ SELECT count(*) INTO n FROM jsonb_array_elements(s->'checks') k
+ WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; the reader judged no reply is needed.%';
+ IF n <> 1 THEN RAISE EXCEPTION 'story contract: a message the reader read is judged by it: %', s->'checks'; END IF;
+ -- No generation shown: no unread count at all (not zero), and the reader is never asked.
+ t := public.context_job_story_ledger(b, NULL, asof);
+ IF t->'unread_rows' <> 'null'::jsonb OR t->'unread_ids' <> 'null'::jsonb OR t->'generation' <> 'null'::jsonb THEN
+  RAISE EXCEPTION 'story contract: no generation must give no unread count: %', t;
+ END IF;
 
  -- the client story: both jobs of the CRM contact, the standing preference, money across jobs
  s := public.context_client_story(a, asof);

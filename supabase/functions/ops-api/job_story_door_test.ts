@@ -43,7 +43,28 @@ const STORY = {
   not_known: [{
     what: "Phone calls that were not recorded are not here.",
     why: "",
+  }, {
+    what: "2 newer messages on this job have not been read by the reader yet.",
+    why: "The reader reads new evidence on its own schedule.",
   }],
+  // The ledger's own freshness (20261006014000): unread_rows counts what the
+  // shown generation's reader has not read; the fact pass's count is gone.
+  meta: {
+    ledger: {
+      status: "live",
+      generation_id: GEN,
+      evidence_until: "2026-10-05T00:00:00+00:00",
+      reader: "luna-ledger:v1",
+      items: 3,
+      hidden_items: 0,
+      unread_rows: 2,
+      needs_rebuild: false,
+      stale: true,
+    },
+    sources: {},
+    evidence_rows: 12,
+    built_at: "2026-10-07T02:00:00Z",
+  },
 };
 const CLIENT = {
   version: "client-story-v1",
@@ -223,6 +244,20 @@ Deno.test("GET job_story resolves job_number, passes the options, and maps error
     p_job_id: JOB,
     p_since: "2026-10-04T12:00:00.000Z",
   });
+  // The door passes the ledger freshness through as the SQL built it.
+  assertEquals(s.meta.ledger, STORY.meta.ledger);
+  assertEquals(Object.keys(s.meta.ledger).sort(), [
+    "evidence_until",
+    "generation_id",
+    "hidden_items",
+    "items",
+    "needs_rebuild",
+    "reader",
+    "stale",
+    "status",
+    "unread_rows",
+  ]);
+  assertEquals("unread_rows" in s.meta, false);
   assertEquals(client.writes, []);
   const missing = await assertRejects(
     () =>

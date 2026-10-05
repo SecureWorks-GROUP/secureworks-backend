@@ -7,7 +7,9 @@
 -- by the store 20261006013000) gives what the words add. This migration joins
 -- them into one jsonb read, code-assembled, every line cited. It stores nothing.
 -- It runs after the store (renumbered from 20261006012000 when the slices were
--- joined), so it may read the store's functions.
+-- joined): how far the reader has read a job is the store's own evidence
+-- definition, context_ledger_evidence_rows, never the fact pass's unread count
+-- (context_job_freshness says nothing about what the ledger reader has read).
 --
 --   context_job_story_assemble(job, record, ledger, meta, as_of, since)
 --        PURE: builds the job-story-v1 document from its four inputs and reads
@@ -17,9 +19,11 @@
 --        structured form (bookings, quotes, closing candidates, parties).
 --   context_job_story_ledger(job, generation, as_of)  the ledger to show: the
 --        live generation (or the one asked for), every item's citations
---        re-checked (on this job, linked, not retracted), and its transitions.
---   context_job_story_meta(job, as_of)       evidence lanes, freshness and
---        unplaced messages, for the gaps the story must name.
+--        re-checked (on this job, linked, not retracted), its transitions, and
+--        how many messages landed after that reading (its reader's own unread
+--        count, from the store's evidence definition).
+--   context_job_story_meta(job, as_of)       evidence lanes, unplaced messages
+--        and the CRM contact, for the gaps the story must name.
 --   context_job_story(job, as_of, generation, since)   the read: the four
 --        readers plus the record functions, then the assembler.
 --   context_client_story(job, as_of)         every job of the same client
@@ -50,7 +54,7 @@ BEGIN
    'public.context_job_record_money(uuid[],timestamptz)','public.context_job_record_contact(uuid[],timestamptz)',
    'public.context_job_record_messages(uuid[],timestamptz)','public.context_job_record_legacy_mail(uuid[],timestamptz)',
    'public.context_linked_status(text)','public.context_ledger_evidence_rows(uuid[],timestamptz)',
-   'public.context_job_freshness(uuid)','public.context_source_freshness()','public.context_pipeline_status()',
+   'public.context_unplaced_for_job(uuid)','public.context_source_freshness()','public.context_pipeline_status()',
    'public.context_document_text_status()','public.context_ghl_history_progress()','public.context_email_history_status()',
    'public.context_coverage()'] LOOP
   IF to_regprocedure(f) IS NULL THEN problems := problems || format('%s is missing', f); END IF;
@@ -124,11 +128,14 @@ AS $fn$
         person_locked boolean, cites_ok boolean, cited jsonb)
  ),
  vis AS MATERIALIZED (SELECT li.* FROM li WHERE coalesce(li.cites_ok, true)),
- led AS (
-  SELECT coalesce(nullif(inp.led->>'status', ''), 'none') AS status, inp.led->'generation' AS gen,
-         (inp.led->'generation'->>'evidence_until')::timestamptz AS evidence_until,
-         (SELECT count(*) FROM vis) AS items, (SELECT count(*) FROM li WHERE NOT coalesce(li.cites_ok, true)) AS hidden
-  FROM inp
+ led AS (  -- the generation shown (a JSON null generation is none) and what its reader has not read yet
+  SELECT x.*,
+         CASE WHEN x.gen IS NOT NULL THEN (inp.led->>'unread_rows')::integer END AS unread,
+         CASE WHEN x.gen IS NOT NULL THEN coalesce(inp.led->'unread_ids', '[]'::jsonb) END AS unread_ids
+  FROM inp, LATERAL (
+   SELECT coalesce(nullif(inp.led->>'status', ''), 'none') AS status, nullif(inp.led->'generation', 'null'::jsonb) AS gen,
+          (inp.led->'generation'->>'evidence_until')::timestamptz AS evidence_until,
+          (SELECT count(*) FROM vis) AS items, (SELECT count(*) FROM li WHERE NOT coalesce(li.cites_ok, true)) AS hidden) x
  ),
  -- money totals
  mt AS (
@@ -341,7 +348,7 @@ AS $fn$
   UNION ALL
   SELECT c.rule,
          CASE WHEN led.status IN ('live', 'shadow', 'building') AND led.evidence_until IS NOT NULL AND led.evidence_until >= c.opened_at
-                   AND led.gen IS NOT NULL
+                   AND led.gen IS NOT NULL AND NOT coalesce(led.unread_ids ? c.source_id, false)
               THEN 'Customer wrote last; the reader judged no reply is needed. ' || c.what
               ELSE 'Customer wrote last; not yet read by the reader. ' || c.what END,
          jsonb_build_array(jsonb_build_object('t', c.source_table, 'id', c.source_id)), c.opened_at
@@ -423,8 +430,8 @@ AS $fn$
             THEN 'Message history on record starts ' || to_char(((inp.meta->>'history_start')::timestamptz AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon YYYY')
                  || ', after the job began ' || to_char(((inp.job->>'created_at')::timestamptz AT TIME ZONE 'Australia/Perth')::date, 'Dy FMDD Mon YYYY') || '.' END,
        'Earlier messages were not captured.'),
-   (6, CASE WHEN coalesce((inp.meta->>'unread_rows')::int, 0) > 0
-            THEN (inp.meta->>'unread_rows') || CASE WHEN (inp.meta->>'unread_rows')::int = 1 THEN ' newer message has' ELSE ' newer messages have' END
+   (6, CASE WHEN led.gen IS NOT NULL AND coalesce(led.unread, 0) > 0
+            THEN led.unread || CASE WHEN led.unread = 1 THEN ' newer message on this job has' ELSE ' newer messages on this job have' END
                  || ' not been read by the reader yet.' END,
        'The reader reads new evidence on its own schedule.'),
    (7, CASE WHEN coalesce((inp.meta->'unplaced'->>'count')::int, 0) > 0
@@ -572,14 +579,15 @@ AS $fn$
               ) x), '[]'::jsonb) END FROM inp),
   'meta', (SELECT jsonb_build_object(
              'ledger', jsonb_build_object('status', led.status, 'generation_id', led.gen->'id', 'evidence_until', led.gen->'evidence_until',
-                         'reader', led.gen->'reader', 'items', led.items, 'hidden_items', led.hidden, 'stale', led.hidden > 0),
+                         'reader', led.gen->'reader', 'items', led.items, 'hidden_items', led.hidden, 'unread_rows', led.unread,
+                         'needs_rebuild', led.hidden > 0, 'stale', led.hidden > 0 OR coalesce(led.unread, 0) > 0),
              'sources', coalesce(inp.meta->'sources', '{}'::jsonb), 'evidence_rows', coalesce((inp.meta->>'evidence_rows')::int, 0),
-             'unread_rows', coalesce((inp.meta->>'unread_rows')::int, 0), 'built_at', now())
+             'built_at', now())
            FROM inp, led)
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb, jsonb, timestamptz, timestamptz) IS
- 'Job story (20261006014000): the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions) and meta in; the cited story out. Inlinable (no SET). Service role only.';
+ 'Job story (20261006014000): the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions, its reader''s unread rows) and meta in; the cited story out. meta.ledger = {status, generation_id, evidence_until, reader, items, hidden_items, unread_rows, needs_rebuild, stale}. Inlinable (no SET). Service role only.';
 
 -- 2. Record facts the assembler needs in structured form.
 CREATE OR REPLACE FUNCTION public.context_job_story_facts(p_job_id uuid, p_as_of timestamptz DEFAULT now())
@@ -661,6 +669,12 @@ AS $fn$
   WHERE x.job_id = p_job_id AND x.status IN ('building', 'shadow') AND NOT EXISTS (SELECT 1 FROM g)
   ORDER BY x.created_at DESC LIMIT 1
  ),
+ unread AS (  -- what the shown generation's reader has not read: the store's own evidence
+              -- that landed after its evidence_until (nothing is read when no generation
+              -- is shown); copies are listed by id but not counted as new messages
+  SELECT r.src_id, r.copy_of FROM g CROSS JOIN LATERAL public.context_ledger_evidence_rows(ARRAY[g.job_id], p_as_of) r
+  WHERE g.evidence_until IS NULL OR r.landed_at > g.evidence_until
+ ),
  it AS (
   SELECT i.*,
    (SELECT jsonb_agg(jsonb_build_object('table', c->>'table', 'id', c->>'id', 'excerpt', c->>'excerpt',
@@ -689,13 +703,17 @@ AS $fn$
   'transitions', coalesce((SELECT jsonb_agg(jsonb_build_object('item_key', i.item_key, 'from_status', t.from_status,
                    'to_status', t.to_status, 'at', t.at, 'by', t.by, 'reason', t.reason, 'evidence', t.evidence) ORDER BY t.at, t.id)
                  FROM public.context_ledger_transitions t JOIN public.context_ledger_items i ON i.id = t.item_id
-                 JOIN g ON g.id = t.generation_id), '[]'::jsonb)
+                 JOIN g ON g.id = t.generation_id), '[]'::jsonb),
+  'unread_rows', CASE WHEN EXISTS (SELECT 1 FROM g) THEN (SELECT count(*)::integer FROM unread u WHERE u.copy_of IS NULL) END,
+  'unread_ids', CASE WHEN EXISTS (SELECT 1 FROM g) THEN coalesce((SELECT jsonb_agg(u.src_id::text ORDER BY u.src_id) FROM unread u), '[]'::jsonb) END
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_ledger(uuid, uuid, timestamptz) IS
- 'Job story (20261006014000): the ledger generation the story shows (live, or the one asked for in any status) with its items and transitions; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
+ 'Job story (20261006014000): the ledger generation the story shows (live, or the one asked for in any status) with its items and transitions; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; both null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
 
--- 4. Evidence lanes and freshness: what the story must say it does not know.
+-- 4. Evidence lanes, unplaced messages and the CRM contact: what the story must
+-- say it does not know. How far the reader has read is the ledger's (3), never
+-- the fact pass's unread count.
 CREATE OR REPLACE FUNCTION public.context_job_story_meta(p_job_id uuid, p_as_of timestamptz DEFAULT now())
 RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
@@ -717,7 +735,10 @@ AS $fn$
   SELECT count(*) AS n, max(m.received_at) AS newest, min(m.received_at) AS oldest
   FROM public.context_job_record_legacy_mail(ARRAY[p_job_id], p_as_of) m
  ),
- f AS (SELECT public.context_job_freshness(p_job_id) AS f)
+ un AS (  -- this customer's messages not placed on any job yet that could be this job's
+  SELECT count(*) AS n, max(coalesce(u.event_at, u.occurred_at)) AS newest FROM public.context_unplaced_for_job(p_job_id) u
+ ),
+ jb AS (SELECT nullif(btrim(j.ghl_contact_id), '') IS NULL AS contact_missing FROM public.jobs j WHERE j.id = p_job_id)
  SELECT jsonb_build_object(
   'lanes', jsonb_build_object(
      'texts', coalesce((SELECT l.n FROM l WHERE l.lane = 'texts'), 0),
@@ -731,14 +752,12 @@ AS $fn$
   'history_start', (SELECT min(x) FROM (SELECT l.oldest AS x FROM l WHERE l.lane IN ('texts', 'emails', 'calls', 'transcripts')
                                        UNION ALL SELECT lg.oldest FROM lg) z),
   'evidence_rows', (SELECT coalesce(sum(l.n), 0) FROM l) + (SELECT lg.n FROM lg),
-  'unread_rows', coalesce(((SELECT f.f FROM f)->>'unread_count')::int, 0),
-  'unplaced', coalesce((SELECT f.f FROM f)->'unplaced_for_contact', '{}'::jsonb),
-  'contact_missing', coalesce(((SELECT f.f FROM f)->>'contact_missing')::boolean, false),
-  'freshness_line', (SELECT f.f FROM f)->>'line'
+  'unplaced', (SELECT jsonb_build_object('count', un.n, 'newest_at', un.newest) FROM un),
+  'contact_missing', coalesce((SELECT jb.contact_missing FROM jb), false)
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_meta(uuid, timestamptz) IS
- 'Job story (20261006014000): evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start, freshness (unread rows, unplaced messages from the contact, contact missing) from context_job_freshness. Freshness is read as now. Service role only.';
+ 'Job story (20261006014000): evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start, this customer''s unplaced messages (context_unplaced_for_job) and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
 
 -- 5. The story read.
 CREATE OR REPLACE FUNCTION public.context_job_story(p_job_id uuid, p_as_of timestamptz DEFAULT now(),
