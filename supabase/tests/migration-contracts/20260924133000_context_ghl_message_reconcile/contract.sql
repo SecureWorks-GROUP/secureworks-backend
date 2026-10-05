@@ -47,13 +47,14 @@ BEGIN
  -- The capture lane owns the job; the other two jobs are unchanged.
  -- Containment, not equality: later capture slices add their own jobs
  -- (T2, 20261002100000: ghl-call-transcript-fetch; EM3, 20261002150000:
- -- outlook-mail-poll and monitor-inbox-sweep, all capture); C1d's three rows
+ -- outlook-mail-poll and monitor-inbox-sweep; B-5, 20261005210000:
+ -- context-document-text, all capture); C1d's three rows
  -- must stay as they are.
  IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
     @> ARRAY['contact-matching:attribution','ghl-message-reconcile:capture','monitor-inbox-poll:capture']
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname NOT IN
-    ('contact-matching','ghl-message-reconcile','monitor-inbox-poll','ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep'))
-  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep') AND l.lane<>'capture')
+    ('contact-matching','ghl-message-reconcile','monitor-inbox-poll','ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep','context-document-text'))
+  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep','context-document-text') AND l.lane<>'capture')
  THEN RAISE EXCEPTION 'c1d cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;

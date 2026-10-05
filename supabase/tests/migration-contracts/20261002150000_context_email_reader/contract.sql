@@ -36,8 +36,11 @@ BEGIN
  IF has_function_privilege('service_role','public.trigger_context_email_poll()','EXECUTE')
   OR has_function_privilege('service_role','public.trigger_context_email_sweep()','EXECUTE')
  THEN RAISE EXCEPTION 'em2 cron callers must not be callable by service_role'; END IF;
- IF (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
-    IS DISTINCT FROM ARRAY['contact-matching:attribution','ghl-call-transcript-fetch:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
+ -- Containment, not equality: later capture slices add their own jobs
+ -- (B-5, 20261005210000: context-document-text); these six rows stay.
+ IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
+    @> ARRAY['contact-matching:attribution','ghl-call-transcript-fetch:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
+  OR (SELECT count(*) FROM public.automation_switch_cron_lanes() WHERE cron_jobname IN ('outlook-mail-poll','monitor-inbox-sweep'))<>2
  THEN RAISE EXCEPTION 'em2 cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;
@@ -243,6 +246,9 @@ CREATE FUNCTION cron.alter_job(job_id bigint,schedule text DEFAULT NULL,command 
  UPDATE cron.job SET command=coalesce(alter_job.command,job.command) WHERE jobid=job_id
 $$;
 UPDATE public.feature_flags SET enabled=true WHERE flag_name='email_reader_v1';
+-- B-5 (20261005210000) adds its job to the lane list: stand this migration's
+-- own lane body back up first, as T2's contract does for C1d.
+\ir ../20261005210000_context_document_text/em3_cron_lanes.sql
 \ir ../../../migrations/20261002150000_context_email_reader.sql
 \ir ../../../migrations/20261002150000_context_email_reader.sql
 DO $$
