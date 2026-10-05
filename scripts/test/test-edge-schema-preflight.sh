@@ -848,7 +848,12 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Booking routes: who books which lead, which calendar.
                       ("20261002090000", "sales_booking_routes"),
                       # sites S-M1: the link_site_jobs door.
-                      ("20261002120000", "job_parties_foundation")]:
+                      ("20261002120000", "job_parties_foundation"),
+                      # job story v1: the ledger_person_edit door.
+                      ("20261006013000", "context_ledger_store"),
+                      # job story v1: the job_story, client_story and
+                      # context_story_scorecard doors and dossier mode story.
+                      ("20261006014000", "context_job_story")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
