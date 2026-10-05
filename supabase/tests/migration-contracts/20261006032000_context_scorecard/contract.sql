@@ -236,8 +236,11 @@ BEGIN
  l := pg_temp.lane(s, 3, 'xero_and_quotes');
  IF (l->>'number')::numeric <> 50.0 OR l->>'status' <> 'red' THEN RAISE EXCEPTION 'scorecard contract: Xero and quote placement wrong: %', l; END IF;
  l := pg_temp.lane(s, 3, 'review_queue');
- IF (l->>'number')::numeric <> 25.0 OR l->>'status' <> 'red' OR l->>'value' NOT LIKE '1 of 4 unplaced items%' THEN
-  RAISE EXCEPTION 'scorecard contract: review queue wrong: %', l; END IF;
+ -- Earlier contracts may leave queue rows behind, so the fixtures are read as a change: +1 of +4.
+ IF (substring(l->>'value' FROM '^([0-9]+) of')::int - substring(pg_temp.lane(s0, 3, 'review_queue')->>'value' FROM '^([0-9]+) of')::int) <> 1
+    OR (substring(l->>'value' FROM ' of ([0-9]+) ')::int - substring(pg_temp.lane(s0, 3, 'review_queue')->>'value' FROM ' of ([0-9]+) ')::int) <> 4
+    OR l->>'unit' <> '% of unplaced items with a candidate job' THEN
+  RAISE EXCEPTION 'scorecard contract: review queue wrong: % (before: %)', l, pg_temp.lane(s0, 3, 'review_queue'); END IF;
  IF (pg_temp.lane(s, 3, 'known_misfiles')->>'number')::int <> (pg_temp.lane(s0, 3, 'known_misfiles')->>'number')::int + 1
     OR pg_temp.lane(s, 3, 'known_misfiles')->>'status' <> 'red' THEN
   RAISE EXCEPTION 'scorecard contract: the misfile was not counted: %', pg_temp.lane(s, 3, 'known_misfiles'); END IF;
