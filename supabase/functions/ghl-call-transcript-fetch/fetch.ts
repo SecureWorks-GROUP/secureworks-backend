@@ -14,8 +14,8 @@
 //  * live (every 5 minutes, pg_cron): the calls due now, from
 //    context_transcript_due_calls (last 14 days, plus any history call whose
 //    backfill fetch record is pending and due, eligible from the stored
-//    status and duration, no terminal outcome, next try due, oldest first,
-//    40 a run). Idle, with no provider read and no run row, while the fetch
+//    status and duration, no terminal outcome, next try due, 40 a run;
+//    calls waiting for their agreeing second read first, then oldest first). Idle, with no provider read and no run row, while the fetch
 //    flag ghl_call_transcript_fetch_v1 or the capture lane is off.
 //
 //  * history (backfill, run by hand): the owner asked for the past calls of
@@ -52,7 +52,9 @@
 //     is HTTP 400, read 24 Sep 2026).
 //  3. GET the transcription (v3) and read it through the one reader
 //     _shared/ghl/call_transcript.ts. An empty list or a 404 is not ready yet;
-//     any other failure is an error with its code. The backoff and when an
+//     a voicemail answered with HTTP 400 or an unreadable body is terminal
+//     not_expected voicemail_no_transcript at once; any other failure is an
+//     error with its code. The backoff and when an
 //     outcome becomes terminal are the database writer's
 //     (record_call_transcript_fetch), never this file's.
 //  4. Agreement rule (review M10): every read, live or history, saves only
@@ -216,6 +218,23 @@ function codePart(value: string): string {
     .slice(0, 40) || "unknown";
 }
 
+/** Whether GHL's own status or message type says the call is a voicemail. */
+export function providerVoicemail(
+  status: string | null,
+  messageType: string | null,
+): boolean {
+  return (status ?? "").toLowerCase() === "voicemail" ||
+    (messageType ?? "").toUpperCase().replace(/^TYPE_/, "") === "VOICEMAIL";
+}
+
+/**
+ * A voicemail GHL answered with no usable transcription: the transcription
+ * read refused (HTTP 400, as for a no-answer call) or returned a body that is
+ * not a sentence list. Seen live 4 Oct 2026: 7 voicemails retried as
+ * provider_invalid. Ends terminal on the first such read, never retried.
+ */
+export const VOICEMAIL_NO_TRANSCRIPT = "voicemail_no_transcript";
+
 /**
  * Whether a call, by the provider's own status and duration, can carry a
  * transcript. The same rule as the database's context_call_transcript_eligible:
@@ -233,8 +252,7 @@ export function providerCallEligible(
   outcome: "not_ready" | "not_expected";
 } {
   const s = (status ?? "").toLowerCase();
-  const t = (messageType ?? "").toUpperCase().replace(/^TYPE_/, "");
-  if (s === "voicemail" || t === "VOICEMAIL") return { eligible: true };
+  if (providerVoicemail(status, messageType)) return { eligible: true };
   if (s === "completed") {
     if (duration === null || duration >= minSeconds) return { eligible: true };
     return {
@@ -387,8 +405,16 @@ export async function processCall(
     );
   }
 
-  // 3. The transcription.
+  // 3. The transcription. A voicemail with no usable transcription ends at
+  // once (VOICEMAIL_NO_TRANSCRIPT); a 404 or an empty list is still not ready.
+  const voicemail = providerVoicemail(finalStatus, text(item.messageType));
+  const noVoicemailTranscript = () =>
+    record(
+      { result: "not_expected", code: VOICEMAIL_NO_TRANSCRIPT, ...provider },
+      { outcome: "not_expected", code: VOICEMAIL_NO_TRANSCRIPT, reads: 2 },
+    );
   const tx = await deps.readTranscription(call.call_message_id);
+  if (!tx.ok && voicemail && tx.status === 400) return noVoicemailTranscript();
   if (!tx.ok) {
     const notReady = tx.status === 404;
     const code = notReady
@@ -407,6 +433,7 @@ export async function processCall(
     );
   }
   const read = readTranscriptSentences(tx.body);
+  if (!read.ok && voicemail) return noVoicemailTranscript();
   if (!read.ok) {
     return record({ result: "error", code: "provider_invalid", ...provider }, {
       outcome: "error",
