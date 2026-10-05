@@ -271,7 +271,12 @@ Deno.test("state card: facts and a current brief are reported, the brief is read
   );
   assert(
     card.lines.includes(
-      "Newest contact: text from the customer on 4 Oct 2026.",
+      "Newest contact with the customer: text from the customer on 4 Oct 2026.",
+    ),
+  );
+  assert(
+    card.lines.includes(
+      "Last told the customer: nothing from us to the customer in the messages read.",
     ),
   );
   assert(
