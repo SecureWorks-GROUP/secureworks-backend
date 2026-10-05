@@ -120,7 +120,7 @@ BEGIN
 END $c$;
 
 -- 4. The ledger's own live reserve: 100 calls all day and 100 before noon by
--- default (the line the ledger kept before), 0 to 400, commented.
+-- default (the line the ledger kept before), 50 to 400 (never below 50), commented.
 DO $c$
 DECLARE c text;
 BEGIN
@@ -138,8 +138,16 @@ BEGIN
  IF (SELECT live_reserve_calls <> 100 OR live_reserve_calls_morning <> 100 FROM public.context_ledger_settings) THEN
   RAISE EXCEPTION 'ledger contract: the seeded reserve must be 100 all day and 100 before noon';
  END IF;
- UPDATE public.context_ledger_settings SET live_reserve_calls = 0, live_reserve_calls_morning = 400;
- UPDATE public.context_ledger_settings SET live_reserve_calls = 400, live_reserve_calls_morning = 0;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 50, live_reserve_calls_morning = 400;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 400, live_reserve_calls_morning = 50;
+ BEGIN
+  UPDATE public.context_ledger_settings SET live_reserve_calls = 49;
+  RAISE EXCEPTION 'ledger contract: a reserve below 50 was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN
+  UPDATE public.context_ledger_settings SET live_reserve_calls_morning = 0;
+  RAISE EXCEPTION 'ledger contract: a morning reserve of 0 was accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
  BEGIN
   UPDATE public.context_ledger_settings SET live_reserve_calls = 401;
   RAISE EXCEPTION 'ledger contract: a reserve above 400 was accepted';

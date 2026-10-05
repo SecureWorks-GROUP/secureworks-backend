@@ -258,7 +258,7 @@ COMMENT ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) IS
 -- 2. Timeline: one row per record milestone, oldest first.
 CREATE OR REPLACE FUNCTION public.context_job_record_timeline(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, at timestamptz, perth_date date, time_basis text, kind text, what text, amount numeric,
- party text, placement text, source_table text, source_id text)
+ party text, placement text, source_table text, source_id text, state text, made_at timestamptz)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
  WITH j AS (
@@ -496,10 +496,14 @@ AS $fn$
   FROM asg a
   -- attendance: only started or complete counts
   UNION ALL
-  SELECT a.job_id, coalesce(a.completed_at, a.started_at, (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth'), a.created_at),
+  SELECT a.job_id, coalesce(a.completed_at, a.started_at,
+           -- a status-only completion: the end of the booked Perth day
+           CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
+                THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END,
+           (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth'), a.created_at),
          CASE WHEN a.completed_at IS NOT NULL OR a.started_at IS NOT NULL THEN 'observed' ELSE 'date_only' END, 'attendance',
          CASE WHEN a.completed_at IS NOT NULL THEN 'Crew marked complete'
-              WHEN a.status = 'complete' THEN 'Booking status complete (who and when not recorded)'
+              WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') THEN 'Booking status complete (who and when not recorded)'
               WHEN a.started_at IS NOT NULL THEN 'Crew started'
               ELSE 'Booking status in progress (who and when not recorded)' END
            || ': ' || replace(coalesce(a.assignment_type, 'visit'), '_', ' ')
@@ -507,8 +511,11 @@ AS $fn$
            || coalesce(', ' || nullif(btrim(a.crew_name), ''), ''),
          NULL, NULL, 'on_job', 'job_assignments', a.id::text
   FROM asg a
-  WHERE NOT a.mirror AND (a.status IN ('complete', 'in_progress') OR a.completed_at IS NOT NULL OR a.started_at IS NOT NULL)
-    AND coalesce(a.completed_at, a.started_at, (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth'), a.created_at) <= p_as_of
+  WHERE NOT a.mirror AND (lower(coalesce(a.status, '')) IN ('complete', 'completed', 'in_progress') OR a.completed_at IS NOT NULL OR a.started_at IS NOT NULL)
+    AND coalesce(a.completed_at, a.started_at,
+          CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
+               THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END,
+          (a.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth'), a.created_at) <= p_as_of
   -- booking changes from the app timeline
   UNION ALL
   SELECT je.job_id, je.created_at, 'observed',
@@ -647,12 +654,42 @@ AS $fn$
  )
  SELECT m.job_id, m.at, (m.at AT TIME ZONE 'Australia/Perth')::date AS perth_date, m.time_basis, m.kind,
         replace(replace(m.what, chr(8212), ', '), chr(8211), '-') AS what, m.amount, m.party, m.placement,
-        m.source_table, m.source_id
+        m.source_table, m.source_id,
+        -- the state of the record the row cites, so no reader infers it from the words:
+        -- invoices draft | issued | paid | voided; documents generated | sent | viewed |
+        -- accepted | declined | superseded (as of p_as_of); crew bookings scheduled |
+        -- attended (started, completed, or a status-only completion) | cancelled (not
+        -- standing); every other row null. Crew planning's confirmation is never read.
+        CASE m.source_table
+         WHEN 'xero_invoices' THEN (SELECT CASE WHEN i.st = 'DRAFT' THEN 'draft' WHEN i.st = 'PAID' THEN 'paid'
+                                               WHEN i.st IN ('VOIDED', 'DELETED') THEN 'voided'
+                                               WHEN i.st IN ('AUTHORISED', 'SUBMITTED') THEN 'issued' END
+                                    FROM inv i WHERE i.id::text = m.source_id)
+         WHEN 'job_documents' THEN (SELECT CASE WHEN d.accepted_at <= p_as_of THEN 'accepted' WHEN d.declined_at <= p_as_of THEN 'declined'
+                                               WHEN d.superseded_at <= p_as_of THEN 'superseded' WHEN d.viewed_at <= p_as_of THEN 'viewed'
+                                               WHEN d.sent_at <= p_as_of THEN 'sent' ELSE 'generated' END
+                                    FROM public.job_documents d
+                                    WHERE d.id = CASE WHEN m.source_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                                      THEN m.source_id::uuid END)
+         WHEN 'job_assignments' THEN (SELECT CASE WHEN a.mirror THEN NULL
+                                                 WHEN a.completed_at <= p_as_of OR a.started_at <= p_as_of
+                                                      OR (lower(coalesce(a.status, '')) IN ('complete', 'completed')
+                                                          AND a.completed_at IS NULL AND a.started_at IS NULL
+                                                          -- a status-only completion counts from the end of its booked day
+                                                          AND (a.scheduled_date IS NULL OR ((a.scheduled_date + 1)::timestamp
+                                                               AT TIME ZONE 'Australia/Perth') - interval '1 second' <= p_as_of)) THEN 'attended'
+                                                 WHEN lower(coalesce(a.status, '')) IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined')
+                                                 THEN 'cancelled'
+                                                 ELSE 'scheduled' END
+                                      FROM asg a WHERE a.id::text = m.source_id)
+        END AS state,
+        CASE WHEN m.source_table = 'job_assignments' THEN (SELECT a.created_at FROM asg a WHERE a.id::text = m.source_id AND NOT a.mirror) END
+         AS made_at
  FROM m WHERE m.at IS NOT NULL
  ORDER BY m.job_id, m.at, m.kind, m.source_id
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) IS
- 'Job record (20261006011000): one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes, attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
+ 'Job record (20261006011000): one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes, attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
 
 -- 3. Loops: record-closable loops and checks.
 CREATE OR REPLACE FUNCTION public.context_job_record_loops(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())

@@ -240,6 +240,39 @@ BEGIN
  SELECT count(*) INTO n FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof) t
  WHERE t.source_id = 'f0000000-0000-4000-8000-00000000000f' AND t.what = 'Booking moved to Sun 20 Sep';
  IF n <> 1 THEN RAISE EXCEPTION 'record contract: an impossible date must read as no date'; END IF;
+ -- Each timeline row says the state of the record it cites (and a booking when it was
+ -- made), so no reader infers it from the words.
+ IF (SELECT array_agg(DISTINCT t.source_id || '=' || coalesce(t.state, '-') ORDER BY t.source_id || '=' || coalesce(t.state, '-'))
+     FROM public.context_job_record_timeline(ARRAY[a], asof) t WHERE t.source_table = 'xero_invoices')
+    IS DISTINCT FROM ARRAY['c0000000-0000-4000-8000-000000000001=issued', 'c0000000-0000-4000-8000-000000000002=voided',
+                           'c0000000-0000-4000-8000-000000000003=draft', 'c0000000-0000-4000-8000-000000000004=issued',
+                           'c0000000-0000-4000-8000-000000000005=paid'] THEN
+  RAISE EXCEPTION 'record contract: invoice states wrong: %', (SELECT array_agg(t.source_id || '=' || coalesce(t.state, '-'))
+   FROM public.context_job_record_timeline(ARRAY[a], asof) t WHERE t.source_table = 'xero_invoices');
+ END IF;
+ IF (SELECT bool_and(t.state = 'accepted') FROM public.context_job_record_timeline(ARRAY[a], asof) t WHERE t.source_id = 'd0000000-0000-4000-8000-000000000001')
+    IS NOT TRUE
+    OR (SELECT bool_and(t.state = 'sent') FROM public.context_job_record_timeline(ARRAY[a], '2026-09-11 00:00Z') t
+        WHERE t.source_id = 'd0000000-0000-4000-8000-000000000001') IS NOT TRUE THEN
+  RAISE EXCEPTION 'record contract: a document''s state is its state as of the replay instant';
+ END IF;
+ IF (SELECT t.state || '/' || t.made_at FROM public.context_job_record_timeline(ARRAY[b], asof) t WHERE t.kind = 'booking')
+    IS DISTINCT FROM 'scheduled/' || '2026-09-28 01:00Z'::timestamptz
+    OR EXISTS (SELECT 1 FROM public.context_job_record_timeline(ARRAY[b], asof) t WHERE t.kind = 'booking_mirror' AND (t.state IS NOT NULL OR t.made_at IS NOT NULL))
+    OR (SELECT count(*) FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof) t
+        WHERE t.source_id = 'e0000000-0000-4000-8000-00000000000f' AND t.state = 'attended' AND t.made_at = '2026-09-10 01:00Z') <> 2
+    OR (SELECT t.at FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof) t
+        WHERE t.source_id = 'e0000000-0000-4000-8000-00000000000f' AND t.kind = 'attendance')
+       IS DISTINCT FROM ('2026-09-21 00:00'::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second'
+    OR EXISTS (SELECT 1 FROM public.context_job_record_timeline(ARRAY[a, b, c], asof) t
+               WHERE t.source_table NOT IN ('xero_invoices', 'job_documents', 'job_assignments') AND (t.state IS NOT NULL OR t.made_at IS NOT NULL)) THEN
+  RAISE EXCEPTION 'record contract: booking states, made_at or the status-only attendance time wrong';
+ END IF;
+ -- replayed during its booked day, a status-only completion is not attended yet
+ IF (SELECT bool_and(t.state = 'scheduled') FROM public.context_job_record_timeline(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], '2026-09-20 06:00Z') t
+     WHERE t.source_id = 'e0000000-0000-4000-8000-00000000000f') IS NOT TRUE THEN
+  RAISE EXCEPTION 'record contract: a status-only completion is attended from the end of its booked day';
+ END IF;
  -- rev-backend P2-17: a transcript is a call with unlabelled speakers, not the customer's words
  SELECT * INTO r FROM public.context_job_record_contact(ARRAY['a0000000-0000-4000-8000-00000000000f'::uuid], asof);
  IF r.last_customer_message->>'id' <> 'b0000000-0000-4000-8000-00000000000f'

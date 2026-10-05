@@ -296,28 +296,14 @@ Deno.test("GET job_story resolves job_number, passes the options, and maps error
     StoryReadError,
   );
   assertEquals(badGen.code, "invalid_generation_id");
-  // record_only: the records alone, for the ledger reader's own prompt.
+  // The records alone are for the ledger reader's own prompt (an RPC
+  // argument): the staff door never forwards record_only.
   const recordOnly = fakeClient({ rpc: { context_job_story: STORY } });
   await jobStoryAction(
     recordOnly,
     new URLSearchParams(`job_id=${JOB}&record_only=true`),
   );
-  assertEquals(recordOnly.rpcs[0].args, { p_job_id: JOB, p_record_only: true });
-  const notRecordOnly = fakeClient({ rpc: { context_job_story: STORY } });
-  await jobStoryAction(
-    notRecordOnly,
-    new URLSearchParams(`job_id=${JOB}&record_only=false`),
-  );
-  assertEquals(notRecordOnly.rpcs[0].args, { p_job_id: JOB });
-  const badFlag = await assertRejects(
-    () =>
-      jobStoryAction(
-        fakeClient(),
-        new URLSearchParams(`job_id=${JOB}&record_only=maybe`),
-      ),
-    StoryReadError,
-  );
-  assertEquals([badFlag.code, badFlag.status], ["invalid_record_only", 400]);
+  assertEquals(recordOnly.rpcs[0].args, { p_job_id: JOB });
   const failing = await assertRejects(
     () =>
       jobStoryAction(

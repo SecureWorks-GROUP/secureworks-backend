@@ -383,6 +383,10 @@ VALUES ('9b000000-0000-4000-8000-000000000071', '9a000000-0000-4000-8000-0000000
         'event:none:aaaaaaaaaa72', 'event', 'info', 'us', NULL, 'Materials delivered', NULL, 'install', '2026-10-02 01:00Z',
         '[{"table":"business_events","id":"b0000000-0000-4000-8000-000000000071","excerpt":"We will be there at eight"}]',
         NULL, NULL, 'none', 'none', false, 'model:luna-ledger:v1', '2026-10-05 01:00Z');
+-- Job G bookings: a status-only completion (attended), and a declined booking (not standing)
+INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, assignment_type, status, crew_name, confirmation_status, is_ghost, created_at)
+VALUES ('e0000000-0000-4000-8000-000000000071', 'a0000000-0000-4000-8000-000000000007', 'lead_installer', '2026-10-01', 'install', 'complete', 'Crew G', 'tentative', false, '2026-09-25 01:00Z'),
+       ('e0000000-0000-4000-8000-000000000072', 'a0000000-0000-4000-8000-000000000007', 'lead_installer', '2026-10-09', 'install', 'declined', 'Crew G', NULL, false, '2026-09-26 01:00Z');
 INSERT INTO public.context_ledger_transitions (item_id, generation_id, job_id, from_status, to_status, at, by, reason)
 VALUES ('9b000000-0000-4000-8000-000000000071', '9a000000-0000-4000-8000-000000000072', 'a0000000-0000-4000-8000-000000000007',
         NULL, 'open', '2026-10-02 01:00Z', 'model:luna-ledger:v1', 'written'),
@@ -491,9 +495,12 @@ BEGIN
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'timeline') x WHERE x->>'kind' = 'booking_mirror';
  IF n <> 0 THEN RAISE EXCEPTION 'story contract: observer mirrors do not belong in the story timeline'; END IF;
 
- -- the records alone (for the reader's own prompt): no ledger anywhere, so R5 waits as a check
+ -- the records alone (for the reader's own prompt): no ledger anywhere, so R5 waits as a check;
+ -- the ledger is omitted, not missing, so nothing says no reader has read the job (rev-backend N3)
  s := public.context_job_story(a, asof, NULL, NULL, true);
- IF s->'meta'->'ledger'->>'status' <> 'none' OR (s->'meta'->'ledger'->>'items')::int <> 0
+ IF s->'meta'->'ledger'->>'status' <> 'omitted' OR (s->'meta'->'ledger'->>'items')::int <> 0
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+               WHERE k->>'what' LIKE 'No reader has read this job%' OR k->>'what' LIKE 'The reader''s ledger for this job is not live yet%')
     OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE l->>'source' IN ('ledger', 'person'))
     OR jsonb_array_length(s->'agreements') <> 0 OR jsonb_array_length(s->'phase_notes') <> 0 OR jsonb_array_length(s->'events') <> 0
     OR s::text LIKE '%paid next week%' OR s::text LIKE '%painted black%' OR s::text LIKE '%Shadow reading note%'
@@ -631,6 +638,39 @@ BEGIN
  IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' = 'This story shows a failed reading, not the live one.') THEN
   RAISE EXCEPTION 'story contract: a failed reading shown must say so: %', s->'not_known';
  END IF;
+ -- the booking ruling in the closing candidates: a standing booking is made at its created
+ -- time (a declined one never is); a status-only completion is a visit at the end of its day
+ t := public.context_job_story_facts('a0000000-0000-4000-8000-000000000007', asof);
+ IF (SELECT array_agg(x->>'closes_on' || ':' || (x->>'id') ORDER BY x->>'closes_on', x->>'id') FROM jsonb_array_elements(t->'closing') x
+     WHERE x->>'t' = 'job_assignments')
+    IS DISTINCT FROM ARRAY['booking_made:e0000000-0000-4000-8000-000000000071', 'visit:e0000000-0000-4000-8000-000000000071']
+    OR (SELECT (x->>'at')::timestamptz FROM jsonb_array_elements(t->'closing') x WHERE x->>'closes_on' = 'visit')
+       IS DISTINCT FROM ('2026-10-02 00:00'::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' THEN
+  RAISE EXCEPTION 'story contract: booking closing candidates wrong: %', t->'closing';
+ END IF;
+ -- every timeline line names its record, the record's state and a booking's made time,
+ -- the same with the records alone
+ s := public.context_job_story('a0000000-0000-4000-8000-000000000007', asof);
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'timeline') x WHERE NOT (x ? 'source_table' AND x ? 'source_id' AND x ? 'state' AND x ? 'made_at'))
+    OR (SELECT array_agg(DISTINCT x->>'state') FROM jsonb_array_elements(s->'timeline') x WHERE x->>'source_id' = 'e0000000-0000-4000-8000-000000000071')
+       IS DISTINCT FROM ARRAY['attended']
+    OR (SELECT array_agg(DISTINCT x->>'state') FROM jsonb_array_elements(s->'timeline') x WHERE x->>'source_id' = 'e0000000-0000-4000-8000-000000000072')
+       IS DISTINCT FROM ARRAY['cancelled']
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'timeline') x
+                   WHERE x->>'source_id' = 'e0000000-0000-4000-8000-000000000071' AND (x->>'made_at')::timestamptz = '2026-09-25 01:00Z') THEN
+  RAISE EXCEPTION 'story contract: timeline lines must carry source, state and made_at: %', s->'timeline';
+ END IF;
+ -- the booking ruling in the words: a declined booking ahead does not stand, so it is
+ -- neither the next visit nor work still to come; the status-only completion before it is
+ IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'phase_since' <> '2026-10-01' OR s->'now'->'next' <> 'null'::jsonb
+    OR position('9 Oct' IN s->'now'->>'line') > 0 THEN
+  RAISE EXCEPTION 'story contract: only a standing booking is a visit to come: %', s->'now';
+ END IF;
+ s := public.context_job_story(a, asof, NULL, NULL, true);
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'timeline') x WHERE NOT (x ? 'state' AND x ? 'made_at' AND x ? 'source_table'))
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'timeline') x WHERE x->>'source_table' = 'xero_invoices' AND x->>'state' = 'issued') THEN
+  RAISE EXCEPTION 'story contract: record_only timeline lines must carry the state too';
+ END IF;
  -- rev-backend P2-8: the lanes count what the record shows (a text on the job whose
  -- placement is not settled is still a text on record)
  s := public.context_job_story('a0000000-0000-4000-8000-000000000007', asof);
@@ -660,3 +700,32 @@ BEGIN
  END IF;
 END $story$;
 ROLLBACK;
+
+-- rev-backend N4: an earlier draft's four-argument read goes when the story
+-- applies, so a call by argument names finds one read; one that is not this
+-- slice's is refused and left alone.
+BEGIN;
+CREATE FUNCTION public.context_job_story(p_job_id uuid, p_as_of timestamptz, p_generation_id uuid, p_since timestamptz)
+RETURNS jsonb LANGUAGE sql AS $f$ SELECT NULL::jsonb $f$;
+COMMENT ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz) IS 'Job story (20261006014000): an earlier four-argument draft';
+\ir ../../../migrations/20261006014000_context_job_story.sql
+DO $c$ BEGIN
+ IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz)') IS NOT NULL
+    OR (SELECT count(*) FROM pg_proc WHERE proname = 'context_job_story' AND pronamespace = 'public'::regnamespace) <> 1 THEN
+  RAISE EXCEPTION 'story contract: the four-argument draft must go, so a call by name finds one read';
+ END IF;
+END $c$;
+ROLLBACK;
+CREATE FUNCTION public.context_job_story(p_job_id uuid, p_as_of timestamptz, p_generation_id uuid, p_since timestamptz)
+RETURNS jsonb LANGUAGE sql AS $f$ SELECT NULL::jsonb $f$;
+\set ON_ERROR_STOP off
+BEGIN;
+\ir ../../../migrations/20261006014000_context_job_story.sql
+COMMIT;
+\set ON_ERROR_STOP on
+DO $c$ BEGIN
+ IF to_regprocedure('public.context_job_story(uuid,timestamptz,uuid,timestamptz)') IS NULL THEN
+  RAISE EXCEPTION 'story contract: a four-argument read that is not this slice''s must be refused, never dropped';
+ END IF;
+END $c$;
+DROP FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz);

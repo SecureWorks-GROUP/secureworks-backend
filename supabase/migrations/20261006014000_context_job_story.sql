@@ -67,6 +67,7 @@ BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)',
    'public.context_job_story_facts(uuid,timestamptz)','public.context_job_story_ledger(uuid,uuid,timestamptz)',
    'public.context_job_story_meta(uuid,timestamptz)','public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)',
+   'public.context_job_story(uuid,timestamptz,uuid,timestamptz)',
    'public.context_client_story(uuid,timestamptz)','public.context_story_scorecard(timestamptz)',
    'public.context_story_scorecard_jobs(uuid,integer)'] LOOP
   IF to_regprocedure(f) IS NOT NULL AND coalesce(obj_description(to_regprocedure(f), 'pg_proc'), '')
@@ -93,7 +94,7 @@ AS $fn$
  tl AS MATERIALIZED (
   SELECT t.* FROM inp, jsonb_to_recordset(coalesce(inp.rec->'timeline', '[]'::jsonb))
    AS t(at timestamptz, perth_date date, time_basis text, kind text, what text, amount numeric, party text, placement text,
-        source_table text, source_id text)
+        source_table text, source_id text, state text, made_at timestamptz)
  ),
  rl AS MATERIALIZED (
   SELECT l.* FROM inp, jsonb_to_recordset(coalesce(inp.rec->'loops', '[]'::jsonb))
@@ -154,29 +155,37 @@ AS $fn$
   FROM mo
  ),
  -- evidence for the phase
- -- the newest crew booking up to today, and whether one is still ahead: work is
- -- done only when that booking is complete and nothing is ahead
+ -- the newest standing crew booking up to today, and whether one is still ahead:
+ -- work is done only when that booking is complete and nothing is ahead (a booking
+ -- stands unless cancelled, deleted, draft, disputed or declined; crew planning's
+ -- confirmation is never read)
  bkn AS (
-  SELECT (SELECT to_jsonb(b) FROM bk b, inp WHERE b.scheduled_date <= inp.today AND coalesce(b.status, '') <> 'cancelled'
+  SELECT (SELECT to_jsonb(b) FROM bk b, inp WHERE b.scheduled_date <= inp.today
+            AND lower(coalesce(b.status, '')) NOT IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined')
           ORDER BY b.scheduled_date DESC, b.id DESC LIMIT 1) AS nb,
-         EXISTS (SELECT 1 FROM bk b, inp WHERE b.scheduled_date > inp.today AND coalesce(b.status, '') <> 'cancelled') AS ahead
+         EXISTS (SELECT 1 FROM bk b, inp WHERE b.scheduled_date > inp.today
+                   AND lower(coalesce(b.status, '')) NOT IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined')) AS ahead
  ),
  ev AS (
   SELECT
+   -- attendance timed as a closing reads it: completed, else started, else (a
+   -- status-only completion) the end of the booked Perth day
    (SELECT CASE WHEN NOT bkn.ahead AND bkn.nb IS NOT NULL
-                 AND (bkn.nb->>'status' = 'complete' OR bkn.nb->>'completed_at' IS NOT NULL)
-            THEN (SELECT max(coalesce(b.completed_at, b.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth')) FROM bk b
-                  WHERE b.status = 'complete' OR b.completed_at IS NOT NULL) END FROM bkn) AS done_at,
+                 AND (lower(coalesce(bkn.nb->>'status', '')) IN ('complete', 'completed') OR bkn.nb->>'completed_at' IS NOT NULL)
+            THEN (SELECT max(coalesce(b.completed_at, b.started_at,
+                                      ((b.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second')) FROM bk b
+                  WHERE lower(coalesce(b.status, '')) IN ('complete', 'completed') OR b.completed_at IS NOT NULL) END FROM bkn) AS done_at,
    (SELECT bkn.ahead FROM bkn) AS bk_ahead,
    -- a passed booking nobody marked started or complete
    (SELECT (bkn.nb->>'scheduled_date')::date FROM bkn, inp
     WHERE bkn.nb IS NOT NULL AND (bkn.nb->>'scheduled_date')::date < inp.today
-      AND coalesce(bkn.nb->>'status', '') NOT IN ('complete', 'in_progress')
+      AND lower(coalesce(bkn.nb->>'status', '')) NOT IN ('complete', 'completed', 'in_progress')
       AND bkn.nb->>'completed_at' IS NULL AND bkn.nb->>'started_at' IS NULL) AS unattended_on,
    (SELECT min(coalesce(b.completed_at, b.started_at, b.scheduled_date::timestamp AT TIME ZONE 'Australia/Perth')) FROM bk b
     WHERE b.status IN ('complete', 'in_progress') OR b.completed_at IS NOT NULL OR b.started_at IS NOT NULL) AS started_at,
    (inp.rec->'facts'->>'report_sent_at')::timestamptz AS report_sent_at,
-   (SELECT to_jsonb(b) FROM bk b WHERE b.scheduled_date >= inp.today AND coalesce(b.status, '') NOT IN ('cancelled', 'complete')
+   (SELECT to_jsonb(b) FROM bk b WHERE b.scheduled_date >= inp.today
+      AND lower(coalesce(b.status, '')) NOT IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined', 'complete', 'completed')
     ORDER BY b.scheduled_date, b.id LIMIT 1) AS next_bk,
    (SELECT min(q.accepted_at) FROM qd q) AS accepted_at,
    (SELECT min(q.sent_at) FROM qd q) AS first_sent,
@@ -593,8 +602,12 @@ AS $fn$
              'closing_evidence', l.closing_evidence, 'cites', l.cites, 'rank', l.rank) ORDER BY l.rank) FROM loops l), '[]'::jsonb),
   'checks', coalesce((SELECT jsonb_agg(jsonb_build_object('rule', c.rule, 'what', c.what, 'cites', c.cites) ORDER BY c.opened_at, c.rule)
                       FROM checks c), '[]'::jsonb),
+  -- each line names its record and that record's state (and a booking when it was made),
+  -- so nothing downstream reads them from the words
   'timeline', coalesce((SELECT jsonb_agg(jsonb_build_object('at', t.at, 'date', t.perth_date, 'kind', t.kind, 'what', t.what,
-                         'amount', t.amount, 'phase', t.phase, 'cites', jsonb_build_array(jsonb_build_object('t', t.source_table, 'id', t.source_id)))
+                         'amount', t.amount, 'phase', t.phase, 'source_table', t.source_table, 'source_id', t.source_id,
+                         'state', t.state, 'made_at', t.made_at,
+                         'cites', jsonb_build_array(jsonb_build_object('t', t.source_table, 'id', t.source_id)))
                          ORDER BY t.at, t.kind, t.source_id) FROM tlout t), '[]'::jsonb),
   'phase_notes', coalesce((SELECT jsonb_agg(jsonb_build_object('phase', v.phase, 'what', v.what,
                    'cites', (SELECT jsonb_agg(jsonb_build_object('t', c->>'table', 'id', c->>'id')) FROM jsonb_array_elements(v.opened_by) c))
@@ -696,17 +709,27 @@ AS $fn$
      WHERE x.job_id = p_job_id AND upper(coalesce(x.invoice_type, 'ACCREC')) = 'ACCREC' AND upper(coalesce(x.status, '')) = 'PAID'
        AND pc.at <= p_as_of
      UNION ALL
+     -- a booking is made while it stands (not cancelled, deleted, draft, disputed or
+     -- declined; crew planning's confirmation is never read), at its created time
      SELECT jsonb_build_object('closes_on', 'booking_made', 'about_key', 'booking:' || a.scheduled_date, 'at', a.created_at,
             't', 'job_assignments', 'id', a.id, 'what', 'Booking made for ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY'))
      FROM public.job_assignments a
      WHERE a.job_id = p_job_id AND a.created_at <= p_as_of AND a.scheduled_date IS NOT NULL
-       AND NOT coalesce(a.is_ghost, false) AND coalesce(a.role, '') <> 'observer' AND coalesce(a.status, '') <> 'cancelled'
+       AND NOT coalesce(a.is_ghost, false) AND coalesce(a.role, '') <> 'observer'
+       AND lower(coalesce(a.status, '')) NOT IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined')
      UNION ALL
+     -- a visit is attendance: completed_at, else started_at, else a status-only
+     -- completion at the end of the booked Perth day
      SELECT jsonb_build_object('closes_on', 'visit', 'about_key', 'booking:' || a.scheduled_date,
-            'at', coalesce(a.completed_at, a.started_at), 't', 'job_assignments', 'id', a.id,
-            'what', 'Crew recorded the ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') || ' visit')
+            'at', v.at, 't', 'job_assignments', 'id', a.id,
+            'what', CASE WHEN a.completed_at IS NOT NULL OR a.started_at IS NOT NULL
+                         THEN 'Crew recorded the ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') || ' visit'
+                         ELSE 'Booking status complete for ' || to_char(a.scheduled_date, 'Dy FMDD Mon YYYY') || ' (who and when not recorded)' END)
      FROM public.job_assignments a
-     WHERE a.job_id = p_job_id AND coalesce(a.completed_at, a.started_at) <= p_as_of
+     CROSS JOIN LATERAL (SELECT coalesce(a.completed_at, a.started_at,
+       CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
+            THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END) AS at) v
+     WHERE a.job_id = p_job_id AND v.at <= p_as_of
        AND NOT coalesce(a.is_ghost, false) AND coalesce(a.role, '') <> 'observer'
   ) z), '[]'::jsonb)
  )
@@ -837,7 +860,10 @@ $fn$;
 COMMENT ON FUNCTION public.context_job_story_meta(uuid, timestamptz) IS
  'Job story (20261006014000): evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start, this customer''s unplaced messages (context_unplaced_for_job) and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
 
--- 5. The story read.
+-- 5. The story read. An earlier draft of this slice had four arguments; it goes
+-- (the guard above refuses one that is not this slice's), so a call by name
+-- never finds two candidates.
+DROP FUNCTION IF EXISTS public.context_job_story(uuid, timestamptz, uuid, timestamptz);
 CREATE OR REPLACE FUNCTION public.context_job_story(p_job_id uuid, p_as_of timestamptz DEFAULT now(),
  p_generation_id uuid DEFAULT NULL, p_since timestamptz DEFAULT NULL, p_record_only boolean DEFAULT false)
 RETURNS jsonb
@@ -859,14 +885,14 @@ AS $fn$
    'facts', public.context_job_story_facts(p_job_id, p_as_of)),
   -- record_only: the records alone, for the reader's own prompt; the ledger is
   -- not read, so no item, attachment or ledger word reaches the output.
-  CASE WHEN coalesce(p_record_only, false) THEN jsonb_build_object('status', 'none', 'items', '[]'::jsonb, 'transitions', '[]'::jsonb)
+  CASE WHEN coalesce(p_record_only, false) THEN jsonb_build_object('status', 'omitted', 'items', '[]'::jsonb, 'transitions', '[]'::jsonb)
        ELSE public.context_job_story_ledger(p_job_id, p_generation_id, p_as_of) END,
   public.context_job_story_meta(p_job_id, p_as_of),
   p_as_of, p_since)
  WHERE EXISTS (SELECT 1 FROM public.jobs jb WHERE jb.id = p_job_id)
 $fn$;
 COMMENT ON FUNCTION public.context_job_story(uuid, timestamptz, uuid, timestamptz, boolean) IS
- 'Job story (20261006014000): job-story-v1 for one job: now line, money, loops, checks, timeline, phase notes, agreements, events, who, last exchange, handling, not known, changes since p_since, meta. Record parts from the job record layer, the live ledger generation (or p_generation_id in any status), every line cited. p_record_only: the records alone (the ledger is not read: status none, no ledger item, attachment or words anywhere), for the reader''s own prompt. NULL for an unknown job. Service role only.';
+ 'Job story (20261006014000): job-story-v1 for one job: now line, money, loops, checks, timeline, phase notes, agreements, events, who, last exchange, handling, not known, changes since p_since, meta. Record parts from the job record layer, the live ledger generation (or p_generation_id in any status), every line cited. p_record_only: the records alone (the ledger is not read: meta.ledger.status omitted, no not_known line about the reader, no ledger item, attachment or words anywhere), for the reader''s own prompt; RPC only, never a door parameter. NULL for an unknown job. Service role only.';
 
 -- 6. The client story: every job of the same client (CRM contact, else exact
 -- client email; never a name), money and loops across them, past issues and

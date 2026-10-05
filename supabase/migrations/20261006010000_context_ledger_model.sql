@@ -174,8 +174,8 @@ CREATE TABLE IF NOT EXISTS public.context_ledger_settings (
  job_ids uuid[] CONSTRAINT context_ledger_settings_job_ids_check CHECK (job_ids IS NULL
   OR CASE WHEN coalesce(array_ndims(job_ids), 1) <> 1 THEN false
           ELSE array_position(job_ids, NULL) IS NULL AND cardinality(job_ids) <= 500 END),
- live_reserve_calls integer NOT NULL DEFAULT 100 CHECK (live_reserve_calls BETWEEN 0 AND 400),
- live_reserve_calls_morning integer NOT NULL DEFAULT 100 CHECK (live_reserve_calls_morning BETWEEN 0 AND 400),
+ live_reserve_calls integer NOT NULL DEFAULT 100 CHECK (live_reserve_calls BETWEEN 50 AND 400),
+ live_reserve_calls_morning integer NOT NULL DEFAULT 100 CHECK (live_reserve_calls_morning BETWEEN 50 AND 400),
  backfill_from_hour smallint CHECK (backfill_from_hour BETWEEN 0 AND 23),
  backfill_to_hour smallint CHECK (backfill_to_hour BETWEEN 0 AND 23),
  CONSTRAINT context_ledger_settings_backfill_window_check CHECK ((backfill_from_hour IS NULL AND backfill_to_hour IS NULL)
@@ -189,9 +189,9 @@ COMMENT ON TABLE public.context_ledger_settings IS
 COMMENT ON COLUMN public.context_ledger_settings.job_ids IS
  'Context ledger: the staged rollout list (20261006010000). NULL = every live job may be read; otherwise only these jobs (at most 500, no null entries; an empty list = none). The store''s due judgement (20261006013000) blocks any other job as not_in_rollout, so it is never due and a claim for it answers not_due.';
 COMMENT ON COLUMN public.context_ledger_settings.live_reserve_calls IS
- 'Context ledger: calls the ledger always leaves free for live fact reads, all day (20261006010000). The ledger stops at model_call_cap less this, whatever the fact backlog''s own reserve (context_cadence_settings) is. 0 to 400; default 100.';
+ 'Context ledger: calls the ledger always leaves free for live fact reads, all day (20261006010000). The ledger stops at model_call_cap less this, whatever the fact backlog''s own reserve (context_cadence_settings) is. 50 to 400 (never below 50); default 100.';
 COMMENT ON COLUMN public.context_ledger_settings.live_reserve_calls_morning IS
- 'Context ledger: calls the ledger always leaves free for live fact reads before morning_until (20261006010000). Before then the ledger also stops at morning_cap less this. 0 to 400; default 100.';
+ 'Context ledger: calls the ledger always leaves free for live fact reads before morning_until (20261006010000). Before then the ledger also stops at morning_cap less this. 50 to 400 (never below 50); default 100.';
 COMMENT ON COLUMN public.context_ledger_settings.backfill_from_hour IS
  'Context ledger: the start of the backfill hours (Perth, 0 to 23, inclusive), when backfills and rebuilds may run (20261006010000). Both null = any time; set both or neither; the window may wrap midnight (22 to 6). Updates are never held.';
 COMMENT ON COLUMN public.context_ledger_settings.backfill_to_hour IS

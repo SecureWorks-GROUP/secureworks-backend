@@ -767,6 +767,10 @@ BEGIN
    WHERE id = x.rid;
   END IF;
  END LOOP;
+ -- Any other ledger run of the job that lost its lease (a crashed update) closes
+ -- the same way, so it counts toward the backoff instead of hanging as running.
+ UPDATE public.context_extraction_runs SET status = 'failed', error = 'lease_expired', finished_at = now(), lease_expires_at = NULL
+ WHERE job_id = p_job_id AND phase = 'ledger' AND status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= now());
  SELECT * INTO d FROM public.context_ledger_judge(ARRAY[p_job_id]);
  IF d.job_id IS NULL THEN RAISE EXCEPTION 'context_ledger_claim_invalid'; END IF;
  IF d.blocked_reason = 'busy' THEN RETURN jsonb_build_object('outcome', 'busy'); END IF;
@@ -792,7 +796,7 @@ BEGIN
   'evidence_as_of', r.started_at);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_claim(uuid, text, date) IS
- 'Context ledger store (20261006013000): claims one ledger read of a job: a context_extraction_runs row (phase ledger, running, run_lease_min lease) and, for backfill or rebuild, a building generation with the settings reader; for update, the job''s current generation (since = its evidence_until). Outcomes claimed (with evidence_as_of, the claim''s instant: build the packet as of it), busy, off (mode off or extraction lane off), not_due (the judgement disagrees with the asked kind). Claims serialise per job (an advisory lock on the job), never on the admission''s lock. A building generation whose run lost its lease is failed first (lease_expired). Service role only.';
+ 'Context ledger store (20261006013000): claims one ledger read of a job: a context_extraction_runs row (phase ledger, running, run_lease_min lease) and, for backfill or rebuild, a building generation with the settings reader; for update, the job''s current generation (since = its evidence_until). Outcomes claimed (with evidence_as_of, the claim''s instant: build the packet as of it), busy, off (mode off or extraction lane off), not_due (the judgement disagrees with the asked kind). Claims serialise per job (an advisory lock on the job), never on the admission''s lock. A building generation whose run lost its lease is failed first, and any ledger run of the job that lost its lease (a crashed update) is closed failed (lease_expired): it counts toward the backoff. Service role only.';
 
 -- 10. The packet: everything the reader sees except the record text.
 CREATE OR REPLACE FUNCTION public.context_ledger_packet(p_job_id uuid, p_since timestamptz DEFAULT NULL, p_as_of timestamptz DEFAULT now())
@@ -875,7 +879,7 @@ RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public,
 DECLARE v_table text; v_id uuid; v_excerpt text; v_norm text; e public.business_events; v_text text; v_at timestamptz;
  v_cmail text; v_job uuid; v_found boolean; i record; v_ours boolean := false; v_customer boolean := false;
  v_call_note boolean := false; v_internal boolean := false; v_record boolean := false; v_worded boolean := false;
- v_subject text; v_body text; v_close_at timestamptz; v_automated boolean := false;
+ v_subject text; v_body text; v_close_at timestamptz; v_automated boolean := false; v_made_at timestamptz;
 BEGIN
  IF p_cite IS NULL OR jsonb_typeof(p_cite) <> 'object'
   OR EXISTS (SELECT 1 FROM jsonb_object_keys(p_cite) k WHERE k NOT IN ('table', 'id', 'excerpt'))
@@ -965,7 +969,18 @@ BEGIN
          THEN coalesce((x.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), x.created_at) END, true
    INTO v_job, v_at, v_close_at, v_found FROM public.xero_invoices x WHERE x.id = v_id;
   ELSIF v_table = 'job_assignments' THEN
-   SELECT a.job_id, a.created_at, coalesce(a.completed_at, a.started_at), true INTO v_job, v_at, v_close_at, v_found
+   -- a booking closes on attendance: completed_at, else started_at, else a
+   -- status-only completion at the end of its booked Perth day; it is made
+   -- (booking_made) while it stands, at its created time. Crew planning's
+   -- confirmation is never read; an observer's mirror is never a booking.
+   SELECT a.job_id, a.created_at,
+    CASE WHEN coalesce(a.is_ghost, false) OR coalesce(a.role, '') = 'observer' THEN NULL
+         ELSE coalesce(a.completed_at, a.started_at,
+          CASE WHEN lower(coalesce(a.status, '')) IN ('complete', 'completed') AND a.scheduled_date IS NOT NULL
+               THEN ((a.scheduled_date + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second' END) END,
+    CASE WHEN NOT (coalesce(a.is_ghost, false) OR coalesce(a.role, '') = 'observer')
+          AND lower(coalesce(a.status, '')) NOT IN ('cancelled', 'deleted', 'draft', 'disputed', 'declined') THEN a.created_at END,
+    true INTO v_job, v_at, v_close_at, v_made_at, v_found
    FROM public.job_assignments a WHERE a.id = v_id;
   ELSIF v_table = 'job_events' THEN
    SELECT je.job_id, je.created_at, je.created_at, true INTO v_job, v_at, v_close_at, v_found FROM public.job_events je WHERE je.id = v_id;
@@ -995,11 +1010,11 @@ BEGIN
   END IF;
  END IF;
  RETURN jsonb_build_object('ok', true, 'cite', jsonb_build_object('table', v_table, 'id', v_id::text, 'excerpt', v_excerpt),
-  'at', v_at, 'close_at', v_close_at, 'customer_sender', v_customer, 'ours', v_ours, 'call_or_note', v_call_note,
+  'at', v_at, 'close_at', v_close_at, 'made_at', v_made_at, 'customer_sender', v_customer, 'ours', v_ours, 'call_or_note', v_call_note,
   'internal_text', v_internal, 'record', v_record, 'worded', v_worded, 'automated', v_automated);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: completed_at or started_at; null when it cannot). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
+ 'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID; a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day; null when it cannot); made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- 12. One item: shape, citations, speaker, times, due date and key.
 CREATE OR REPLACE FUNCTION public.context_ledger_check_item(p_job_id uuid, p_item jsonb, p_writer text, p_person uuid DEFAULT NULL, p_note text DEFAULT NULL)
@@ -1124,7 +1139,8 @@ BEGIN
   END IF;
   -- Only an issued or sent record closes: no draft invoice, unsent document or
   -- unattended booking; never the opening row itself; a request strictly after it.
-  v_close_at := (chk ->> 'close_at')::timestamptz;
+  v_close_at := CASE WHEN chk #>> '{cite,table}' = 'job_assignments' AND (p_item ->> 'closes_on') = 'booking_made'
+                     THEN (chk ->> 'made_at')::timestamptz ELSE (chk ->> 'close_at')::timestamptz END;
   IF v_close_at IS NULL THEN
    RETURN jsonb_build_object('ok', false, 'code', 'closing_not_issued', 'detail', 'closed_by[' || n || '] ' || (chk #>> '{cite,table}'));
   END IF;
@@ -1361,7 +1377,10 @@ BEGIN
     chk := public.context_ledger_cite(g.job_id, c);
     IF NOT (chk ->> 'ok')::boolean THEN v_code := chk ->> 'code'; v_detail := 'evidence[' || n || '] ' || coalesce(chk ->> 'detail', ''); EXIT; END IF;
     IF tr ->> 'to_status' IN ('closed', 'declined') THEN
-     -- the same closing rules as an item's closed_by
+     -- the same closing rules as an item's closed_by (a booking_made item closes on a made booking)
+     IF chk #>> '{cite,table}' = 'job_assignments' AND li.closes_on = 'booking_made' THEN
+      chk := chk || jsonb_build_object('close_at', chk -> 'made_at');
+     END IF;
      IF chk ->> 'close_at' IS NULL THEN v_code := 'closing_not_issued'; v_detail := 'evidence[' || n || '] ' || (chk #>> '{cite,table}'); EXIT; END IF;
      IF li.opened_by @> jsonb_build_array(jsonb_build_object('table', chk #>> '{cite,table}', 'id', chk #>> '{cite,id}')) THEN
       v_code := 'closing_is_opening'; v_detail := 'evidence[' || n || ']'; EXIT;

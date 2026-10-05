@@ -301,7 +301,7 @@ BEGIN
  PERFORM pg_temp.lg_calls(0); PERFORM pg_temp.lg_calls_add(250, 'ledger'); PERFORM pg_temp.lg_all('ledger spent past the live reserve', x, a);
  -- The ledger's own reserve and the fact backlog's reserve, moved: the fact
  -- phases answer exactly as before (neither body reads either for them).
- UPDATE public.context_ledger_settings SET live_reserve_calls = 0, live_reserve_calls_morning = 400;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 50, live_reserve_calls_morning = 400;
  PERFORM pg_temp.lg_calls(299); PERFORM pg_temp.lg_all('ledger reserve moved', x, a);
  UPDATE public.context_ledger_settings SET live_reserve_calls = 100, live_reserve_calls_morning = 100;
  INSERT INTO public.context_cadence_settings (id, live_reserve_calls_day, live_reserve_calls_morning, live_reserve_reads_per_job)
@@ -669,6 +669,15 @@ BEGIN
   AND (r ->> 'since')::timestamptz = (SELECT evidence_until FROM public.context_ledger_generations WHERE id = gl), 'update claim: ' || r::text);
  PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_generations WHERE job_id = b) = 1, 'update made a generation');
  PERFORM pg_temp.lg_assert(public.context_ledger_claim(b, 'update', pg_temp.lg_today()) = '{"outcome":"busy"}', 'a running update run is busy');
+ -- A crashed update (its run lost its lease) is closed at the next claim and
+ -- counts toward the backoff; the live reading it was updating stays (rev-backend N1).
+ UPDATE public.context_extraction_runs SET lease_expires_at = now() - interval '1 minute' WHERE id = (r ->> 'run_id')::uuid;
+ r2 := public.context_ledger_claim(b, 'update', pg_temp.lg_today());
+ PERFORM pg_temp.lg_assert(r2 ->> 'outcome' = 'not_due' AND r2 ->> 'reason' = 'backoff', 'a lapsed update backs off: ' || r2::text);
+ PERFORM pg_temp.lg_assert((SELECT status = 'failed' AND error = 'lease_expired' AND lease_expires_at IS NULL AND finished_at IS NOT NULL
+   FROM public.context_extraction_runs WHERE id = (r ->> 'run_id')::uuid)
+  AND (SELECT f.failures FROM public.context_ledger_failures(ARRAY[b]) f) = 1
+  AND (SELECT status FROM public.context_ledger_generations WHERE id = gl) = 'live', 'a lapsed update run is failed and counted, the live reading kept');
 END $c$;
 ROLLBACK;
 
@@ -1833,6 +1842,64 @@ BEGIN
  END LOOP;
  PERFORM pg_temp.lg_assert((SELECT what FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
   AND item_key = pg_temp.lg_key(res, 'dash')) = 'Gate, painted black - soon', 'what keeps no dashes');
+END $c$;
+ROLLBACK;
+
+-- 21. The booking ruling: crew planning's confirmation is never read; a booking
+-- stands unless cancelled, deleted, draft, disputed or declined; a booking_made
+-- item closes on a standing booking at its created time; anything else closes on
+-- attendance: completed_at, else started_at, else a status-only completion at the
+-- end of the booked Perth day.
+BEGIN;
+DO $c$
+DECLARE w uuid; r1 uuid; bt uuid := gen_random_uuid(); bx uuid := gen_random_uuid(); bs uuid := gen_random_uuid();
+ bu uuid := gen_random_uuid(); cl jsonb; res jsonb; exp record; k text; d date;
+BEGIN
+ PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
+ w := pg_temp.lg_job('SWF-99101');
+ r1 := pg_temp.lg_ev(w, 'client.reply', 'sms', 'inbound', 'Please book us in for the fence install', '5 days', 'customer');
+ d := ((now() - interval '3 days') AT TIME ZONE 'Australia/Perth')::date;
+ INSERT INTO public.job_assignments (id, job_id, role, scheduled_date, status, confirmation_status, created_at, started_at, completed_at)
+ VALUES (bt, w, 'lead_installer', d + 10, 'scheduled', 'tentative', now() - interval '4 days', NULL, NULL),   -- standing, tentative in crew planning
+        (bx, w, 'lead_installer', d + 11, 'declined', NULL, now() - interval '4 days', NULL, NULL),          -- not standing
+        (bs, w, 'lead_installer', d, 'complete', NULL, now() - interval '4 days', NULL, NULL),               -- a status-only completion
+        (bu, w, 'lead_installer', d - 1, 'scheduled', NULL, now() - interval '4 days', NULL, NULL);          -- passed, nobody attended
+ cl := public.context_ledger_claim(w, 'backfill', pg_temp.lg_today());
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('made_tentative', 'request', 'closed', 'customer', 'us', 'Asked to be booked in', pg_temp.lg_cite(r1, 'book us in for the fence'),
+   jsonb_build_object('closes_on', 'booking_made', 'closed_by', pg_temp.lg_cite(bt, NULL, 'job_assignments'))),
+  pg_temp.lg_it('made_declined', 'request', 'closed', 'customer', 'us', 'Asked for a booking', pg_temp.lg_cite(r1, 'book us in for the fence'),
+   jsonb_build_object('closes_on', 'booking_made', 'closed_by', pg_temp.lg_cite(bx, NULL, 'job_assignments'))),
+  pg_temp.lg_it('visit_unattended', 'request', 'closed', 'customer', 'us', 'Asked for the install', pg_temp.lg_cite(r1, 'Please book us in'),
+   jsonb_build_object('closes_on', 'visit', 'closed_by', pg_temp.lg_cite(bt, NULL, 'job_assignments'))),
+  pg_temp.lg_it('visit_status_only', 'request', 'closed', 'customer', 'us', 'Asked for the fence install', pg_temp.lg_cite(r1, 'for the fence install'),
+   jsonb_build_object('closes_on', 'visit', 'closed_by', pg_temp.lg_cite(bs, NULL, 'job_assignments'))),
+  pg_temp.lg_it('visit_passed', 'request', 'closed', 'customer', 'us', 'Asked for the work', pg_temp.lg_cite(r1, 'us in for the fence install'),
+   jsonb_build_object('closes_on', 'work_done', 'closed_by', pg_temp.lg_cite(bu, NULL, 'job_assignments')))), '[]', 'luna-ledger:v1');
+ FOR exp IN SELECT * FROM (VALUES ('made_tentative', NULL), ('made_declined', 'closing_not_issued'), ('visit_unattended', 'closing_not_issued'),
+  ('visit_status_only', NULL), ('visit_passed', 'closing_not_issued')) v(ref, code) LOOP
+  IF exp.code IS NULL THEN
+   PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, exp.ref), exp.ref || ' must be accepted: ' || coalesce(pg_temp.lg_code(res, exp.ref), '?'));
+  ELSE
+   PERFORM pg_temp.lg_assert(pg_temp.lg_code(res, exp.ref) = exp.code AND NOT pg_temp.lg_accepted(res, exp.ref),
+    format('%s must be refused %s, got %s', exp.ref, exp.code, coalesce(pg_temp.lg_code(res, exp.ref), 'accepted')));
+  END IF;
+ END LOOP;
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'made_tentative')) = now() - interval '4 days', 'a made booking closes at its created time');
+ PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
+   AND item_key = pg_temp.lg_key(res, 'visit_status_only')) = ((d + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second',
+  'a status-only completion closes at the end of its booked Perth day');
+ -- the same rules on a transition
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, jsonb_build_array(
+  pg_temp.lg_it('open_booking', 'request', 'open', 'customer', 'us', 'Wants a booking date', pg_temp.lg_cite(r1, 'Please book us in for'),
+   '{"closes_on":"booking_made"}')), '[]', 'luna-ledger:v1');
+ k := pg_temp.lg_key(res, 'open_booking');
+ res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, '[]', jsonb_build_array(
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(bx, NULL, 'job_assignments')),
+  jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(bt, NULL, 'job_assignments'))), 'luna-ledger:v1');
+ PERFORM pg_temp.lg_assert((res ->> 'transitions_accepted')::integer = 1 AND res -> 'transitions_refused' -> 0 ->> 'code' = 'closing_not_issued',
+  'a booking_made transition closes on a standing booking only: ' || res::text);
 END $c$;
 ROLLBACK;
 
