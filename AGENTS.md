@@ -674,6 +674,27 @@ many re-stamps happened in the last 24 hours): the hint carries no time and
 every re-run re-checks bucket rows, so an exact count needs the placement
 track to stamp the hint with its time (a named follow-up, not B0).
 
+## The Job Story Sorts Text In C Order
+
+Production's collation is ICU `en-US` (letters compared without case first,
+`_` and `-` before digits), CI's Postgres is glibc `en_US` (spaces and
+punctuation ignored) and the Jarvis reader compares code units, so one text
+sort reads three ways.
+In the record layer and the story (`20261006011000`, `20261006014000`, fixed
+in `20261006033000`) every text sort or tiebreak that reaches the output says
+`COLLATE "C"`, with a full tiebreak where rows can tie; a new one must too, and
+its contract asserts the C order on names that differ by case. An aggregate
+with `DISTINCT` needs the same `COLLATE "C"` on its argument and its `ORDER BY`;
+`jsonb_agg(DISTINCT <jsonb>)` orders strings in the database collation (no
+`COLLATE` reaches inside jsonb), so dedupe in a subquery and order by the text
+fields. A body that replaces one of these functions keeps its slice name first
+in its comment (`Job record (20261006011000)...`, `Job story (20261006014000)...`):
+the 972 contracts and the story's re-apply guard read it. A timeline line
+citing `job_events` has the event type as its `state` when the ledger store
+lets that type close a matter (`not_delivered` when it names a document nobody
+received), so a reader applies `context_ledger_job_event_closes` to the state,
+never to the words.
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses

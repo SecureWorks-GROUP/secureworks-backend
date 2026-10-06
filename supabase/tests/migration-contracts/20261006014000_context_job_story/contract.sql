@@ -48,7 +48,7 @@ BEGIN
   RAISE EXCEPTION 'story contract: empty assembly wrong: %', s->'now';
  END IF;
  -- meta.ledger carries the reader's own freshness; the fact pass's unread count is gone.
- IF (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(s->'meta'->'ledger') k)
+ IF (SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(s->'meta'->'ledger') k)
     <> ARRAY['evidence_until','generation_id','hidden_items','items','needs_rebuild','reader','stale','status','unread_rows']
     OR s->'meta'->'ledger'->'unread_rows' <> 'null'::jsonb OR (s->'meta'->'ledger'->>'stale')::boolean
     OR (s->'meta'->'ledger'->>'needs_rebuild')::boolean OR s->'meta' ? 'unread_rows' THEN
@@ -676,7 +676,7 @@ BEGIN
  -- the booking ruling in the closing candidates: a standing booking is made at its created
  -- time (a declined one never is); a status-only completion is a visit at the end of its day
  t := public.context_job_story_facts('a0000000-0000-4000-8000-000000000007', asof);
- IF (SELECT array_agg(x->>'closes_on' || ':' || (x->>'id') ORDER BY x->>'closes_on', x->>'id') FROM jsonb_array_elements(t->'closing') x
+ IF (SELECT array_agg(x->>'closes_on' || ':' || (x->>'id') ORDER BY x->>'closes_on' COLLATE "C", x->>'id' COLLATE "C") FROM jsonb_array_elements(t->'closing') x
      WHERE x->>'t' = 'job_assignments')
     IS DISTINCT FROM ARRAY['booking_made:e0000000-0000-4000-8000-000000000071', 'visit:e0000000-0000-4000-8000-000000000071']
     OR (SELECT (x->>'at')::timestamptz FROM jsonb_array_elements(t->'closing') x WHERE x->>'closes_on' = 'visit')
