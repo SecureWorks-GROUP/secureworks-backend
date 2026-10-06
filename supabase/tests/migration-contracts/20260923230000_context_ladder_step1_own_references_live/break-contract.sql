@@ -1,5 +1,9 @@
 -- Restore the legacy step 1 (any invoice number, holding job included). A later
--- registered ladder slice (L1f, then L1e, then L1d, then L1c, then L1b, then P4, then P1a) is rolled back first, as its down requires.
+-- registered ladder slice (L1g, then L1f, then L1e, then L1d, then L1c, then L1b, then P4, then P1a) is rolled back first, as its down requires.
+SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1g:%' AS l1g_live \gset
+\if :l1g_live
+\ir ../../../rollbacks/20261006035000_context_ladder_held_live_job_down.sql
+\endif
 SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1f:%' AS l1f_live \gset
 \if :l1f_live
 \ir ../../../rollbacks/20261006020000_context_ladder_held_placement_down.sql
