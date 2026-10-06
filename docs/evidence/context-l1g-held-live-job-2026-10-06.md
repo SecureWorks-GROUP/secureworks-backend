@@ -50,16 +50,23 @@ customer also had three other jobs live on 2 Jun (hence `review_several`
 without the reference). The rules-on placement is right; the preview's
 `not_live_job` test counts it because it reads the job's status today.
 
-- Of the newest 1,800 bucket rows, the rules-on ladder places 20 on jobs that
-  are closed today: all 20 were live at their message time, none finished
-  before it.
+- Every bucket row of the last 30 days (3,744, read 02:25Z): the rules-on
+  ladder places 74 on jobs that are closed today; for 60 of them the job was
+  live at the message time. Of the 14 whose job had finished before the
+  message, 6 follow an email thread bound to the archived placeholder job
+  SWF-PDF-BUCKET (a real defect, outside this change: a live thread binding
+  to a placeholder job); the other 8 are exact references that belong where
+  they land (6 internal crew texts naming SWF-261343 two minutes after it was
+  archived, 2 emails about invoice INV-1205 of the finished make-safe
+  SWMS-261174). None of the 14 is in the preview's current sample (all are
+  older than its newest 600).
 - Of 748 stored reference placements (`source_job_binding` `direct_reference`),
   313 sit on jobs archived after their message and 6 on jobs finished before
   it; all 6 are supplier material-order or clearance emails for that job.
 - So "send a reference to a job that is not live to review" would be worse,
   not better: judged by today's status it rejects correct history; judged at
-  the message time it touches almost nothing and that is correct too. L1g does
-  not change references.
+  the message time it still rejects invoice and material-order mail about
+  finished work. L1g does not change references.
 
 ## L1g
 
