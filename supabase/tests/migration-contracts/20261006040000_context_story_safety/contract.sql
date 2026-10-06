@@ -47,6 +47,16 @@
 -- Fifth review (each fails on the 53c15c39 bodies): this customer's CRM texts placed on no job
 -- that were loaded later from the CRM's cache are at the CRM's own time, and never theirs from
 -- before the job's lead window, in R7's contact since the quote and the line's contact facts.
+-- Sixth review (each fails on the 729d928b bodies unless marked a promise kept): a CRM value
+-- nothing backs (C2 kind 9) and an invoice on no job to the job's own Xero contact or on a
+-- duplicate record (C2 kind 8) leave R8 with no amount, never our move, and the debt on no
+-- job is named in the line, the money and the client story; R8 waits while the job is in
+-- rectification or reopened work is not finished again; a CRM time is kept when a sync writes
+-- the cache over, and a text whose time was never kept is time unknown; a reading of every row
+-- is no all-clear over the customer's newer message off the job; R7 is a check past quoted or
+-- once the work is done, counts contact of any attribution status and on the customer's other
+-- jobs, and is a check when their later job at the same address is accepted; a missed call on
+-- no job is R4; a draft whose stage split invoices already reach is a check.
 -- Every fixture row is synthetic and rolled back; user triggers are off for it.
 
 -- 0. Shape and access.
@@ -105,6 +115,35 @@ BEGIN
   RAISE EXCEPTION 'story safety contract: the copy read must find each copy key by an index, never a payload look-up per mail: %', src;
  END IF;
 END $copyshape$;
+
+-- 4 (shape, sixth review). The CRM's own time of each message the conversation cache holds is
+-- kept where no sync writes it over: a table (RLS on, no anon or authenticated access) filled
+-- by a trigger on each cache write (after insert, or an update of the messages), its function
+-- a definer with a pinned search_path, service role only.
+DO $keepshape$
+DECLARE p record; t record;
+BEGIN
+ SELECT c.relrowsecurity AS rls, obj_description(c.oid, 'pg_class') AS cmt INTO t FROM pg_class c WHERE c.oid = to_regclass('public.context_crm_message_times');
+ IF t IS NULL OR NOT t.rls OR coalesce(t.cmt, '') NOT LIKE 'Story safety (20261006040000)%'
+    OR has_table_privilege('anon', 'public.context_crm_message_times', 'SELECT') OR has_table_privilege('authenticated', 'public.context_crm_message_times', 'SELECT')
+    OR has_table_privilege('anon', 'public.context_crm_message_times', 'INSERT') OR has_table_privilege('authenticated', 'public.context_crm_message_times', 'INSERT')
+    OR NOT has_table_privilege('service_role', 'public.context_crm_message_times', 'SELECT') THEN
+  RAISE EXCEPTION 'story safety contract: the CRM message times table must exist, RLS on, service role only: %', to_jsonb(t);
+ END IF;
+ SELECT pr.prosecdef, pr.proconfig, obj_description(pr.oid, 'pg_proc') AS cmt INTO p FROM pg_proc pr
+ WHERE pr.oid = to_regprocedure('public.context_crm_message_times_keep()');
+ IF p IS NULL OR NOT p.prosecdef OR p.proconfig IS DISTINCT FROM ARRAY['search_path=public, pg_temp']
+    OR coalesce(p.cmt, '') NOT LIKE 'Story safety (20261006040000)%'
+    OR has_function_privilege('anon', 'public.context_crm_message_times_keep()', 'EXECUTE')
+    OR has_function_privilege('authenticated', 'public.context_crm_message_times_keep()', 'EXECUTE') THEN
+  RAISE EXCEPTION 'story safety contract: the trigger function keeping CRM times must be a service-role definer: %', to_jsonb(p);
+ END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_trigger tg WHERE tg.tgrelid = 'public.ghl_conversation_cache'::regclass AND tg.tgname = 'context_crm_message_times_keep'
+                AND tg.tgfoid = to_regprocedure('public.context_crm_message_times_keep()') AND tg.tgenabled = 'O'
+                AND pg_get_triggerdef(tg.oid) LIKE '%AFTER INSERT OR UPDATE OF messages ON public.ghl_conversation_cache FOR EACH ROW%') THEN
+  RAISE EXCEPTION 'story safety contract: every conversation cache write must keep the CRM times (trigger missing)';
+ END IF;
+END $keepshape$;
 
 -- 1. No false all-clear (pure assembler). With no live reading of the words, nothing
 -- open on record is never nobody's move: the line leads with "Whose move is unclear:",
@@ -352,6 +391,89 @@ BEGIN
   RAISE EXCEPTION 'story safety contract: the item the line names is cut at a word: %', s->'now'->>'line';
  END IF;
 END $held$;
+
+-- Sixth review (pure assembler). 1: a reading that has read every row on the job gives no
+-- all-clear while the customer's newest message is off the job (placed on no job yet, or their
+-- withheld mail): it was never the reading's to read, so whose move is unclear and the line
+-- names it, where it sits, unchecked; an off-job message older than the job's own newest
+-- customer message leaves the all-clear standing. 3: the final invoice (R8) is not due while
+-- the job is in rectification, or while work recorded finished was opened again (a status
+-- change into rectification, a make-safe re-attend) with nothing recording it finished since,
+-- and never our move then; once a record says it is finished again it is due. 1: a quote
+-- waiting (R7) is a check once the work is done, never a wait on the customer.
+DO $sixthpure$
+DECLARE s jsonb; l jsonb;
+ contact constant jsonb := '{"last_customer_message":{"at":"2026-07-01T01:00:00Z","channel":"sms","direction":"inbound","table":"business_events","id":"e1","placed_on":"this_job"},
+   "last_to_customer":{"at":"2026-07-02T01:00:00Z","channel":"sms","direction":"outbound","table":"business_events","id":"e2","placed_on":"this_job"}}';
+ shadow constant jsonb := '{"status":"shadow","generation":{"id":"g1","status":"shadow","evidence_until":"2026-07-03T00:00:00Z"},"items":[],"transitions":[],"unread_rows":0,"unread_ids":[],"read_ids":["e1"]}';
+ accepted constant jsonb := '{"id":"x","status":"accepted","type":"fencing","created_at":"2026-06-20T00:00:00Z"}';
+ r8 constant jsonb := jsonb_build_object('rule', 'R8_not_yet_invoiced', 'loop_key', 'R8_not_yet_invoiced:j1', 'shown_as', 'loop', 'owner', 'us', 'counterparty', 'customer',
+   'what', 'Job value $7,920.00 (pricing_json.totalIncGST); issued invoices $5,940.00; $1,980.00 not yet invoiced',
+   'opened_at', '2026-06-17T08:33:00Z', 'amount', 1980, 'about_key', 'payment:final', 'source_table', 'jobs', 'source_id', 'j1');
+ r7 constant jsonb := jsonb_build_object('rule', 'R7_quote_waiting', 'loop_key', 'R7_quote_waiting:q1', 'shown_as', 'loop', 'owner', 'customer', 'counterparty', 'us',
+   'what', 'Quote Q-1 v1 sent Wed 5 Aug 2026 (63 days), not viewed; no answer and no customer message since',
+   'opened_at', '2026-08-05T01:10:00Z', 'about_key', 'quote:q-1', 'source_table', 'job_documents', 'source_id', 'q1');
+ done constant jsonb := '{"at":"2026-07-22T01:00:00Z","t":"job_events","id":"p1","what":"Completion pack generated"}';
+BEGIN
+ s := public.context_job_story_assemble(accepted, jsonb_build_object('contact', contact), shadow,
+        '{"unplaced":{"count":2,"newest_customer_at":"2026-10-05T01:00:00Z","newest_reply_at":"2026-10-05T02:00:00Z"}}', '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'unknown' OR s->'now'->>'line' LIKE '%Nothing open%'
+    OR position('Whose move is unclear: no record item is open and the reader found nothing open in the job''s own messages, but the customer''s newest message, '
+                || 'Mon 5 Oct (not placed on any job), is off the job and not yet checked by the reader' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: a reading of every row on the job is no all-clear over the customer''s newer message off the job: %', s->'now';
+ END IF;
+ s := public.context_job_story_assemble(accepted, jsonb_build_object('contact', contact), shadow,
+        '{"withheld_mail":{"count":1,"newest_at":"2026-10-03T01:00:00Z"}}', '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'unknown'
+    OR position('the customer''s newest message, Sat 3 Oct (an email not placed on any job; it may be about another of their jobs), is off the job and not yet checked by the reader'
+                IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: a reading of every row on the job is no all-clear over the customer''s newer withheld mail: %', s->'now';
+ END IF;
+ -- (promise kept) an off-job message older than the job's own newest customer message: the
+ -- reading's all-clear stands
+ s := public.context_job_story_assemble(accepted, jsonb_build_object('contact', contact), shadow,
+        '{"unplaced":{"count":1,"newest_customer_at":"2026-06-25T01:00:00Z"}}', '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'nobody' OR position('Nothing open on record' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: an older message off the job leaves a full reading''s all-clear standing: %', s->'now';
+ END IF;
+ -- 3: completion pack 22 Jul, the job in rectification now (SWP-26354 class)
+ s := public.context_job_story_assemble('{"id":"x","status":"rectification","type":"patio","created_at":"2026-05-21T00:00:00Z"}'::jsonb,
+        jsonb_build_object('contact', contact, 'loops', jsonb_build_array(r8), 'facts', jsonb_build_object('completion', done)), NULL, NULL, '2026-10-07 02:00Z', NULL);
+ SELECT x INTO l FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R8_not_yet_invoiced';
+ IF l->>'status' IS DISTINCT FROM 'not_due' OR l->>'why' NOT LIKE '%the job is in rectification, so the final invoice is not the next move until the work is finished again%'
+    OR s->'now'->>'whose_move' = 'us' OR s->'now'->>'line' LIKE '%we owe%' OR s->'now'->>'line' LIKE '%not yet invoiced%' THEN
+  RAISE EXCEPTION 'story safety contract: the final invoice is not due while the job is in rectification: % / %', s->'now', l;
+ END IF;
+ -- 3: reopened by a status change into rectification after the completion pack, rework
+ -- scheduled since, nothing recording it finished again
+ s := public.context_job_story_assemble('{"id":"x","status":"scheduled","type":"patio","created_at":"2026-05-21T00:00:00Z"}'::jsonb,
+        jsonb_build_object('contact', contact, 'loops', jsonb_build_array(r8), 'facts', jsonb_build_object('completion', done,
+          'reopened', '{"at":"2026-08-19T02:00:00Z","t":"job_events","id":"r1","what":"Status set to rectification","completed_since":null}'::jsonb)),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ SELECT x INTO l FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R8_not_yet_invoiced';
+ IF l->>'status' IS DISTINCT FROM 'not_due' OR s->'now'->>'whose_move' = 'us' OR s->'now'->>'line' LIKE '%we owe%'
+    OR l->>'why' NOT LIKE '%the work was opened again after it was recorded finished (status set to rectification Wed 19 Aug) and nothing records it finished since%' THEN
+  RAISE EXCEPTION 'story safety contract: the final invoice waits while reopened work is not finished again: % / %', s->'now', l;
+ END IF;
+ -- (promise kept) finished again since the reopening: due, and our move
+ s := public.context_job_story_assemble('{"id":"x","status":"invoiced","type":"patio","created_at":"2026-05-21T00:00:00Z"}'::jsonb,
+        jsonb_build_object('contact', contact, 'loops', jsonb_build_array(r8), 'facts', jsonb_build_object('completion', done,
+          'reopened', '{"at":"2026-08-19T02:00:00Z","t":"job_events","id":"r1","what":"Status set to rectification","completed_since":"2026-09-01T02:00:00Z"}'::jsonb)),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ SELECT x INTO l FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R8_not_yet_invoiced';
+ IF l->>'status' IS DISTINCT FROM 'open' OR s->'now'->>'whose_move' IS DISTINCT FROM 'us' THEN
+  RAISE EXCEPTION 'story safety contract: finished again since it was reopened, the final invoice is due: % / %', s->'now', l;
+ END IF;
+ -- 1: a quote waiting once the work is done (status quoted, a completion record): a check
+ s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-07-30T00:00:00Z"}'::jsonb,
+        jsonb_build_object('contact', contact, 'loops', jsonb_build_array(r7), 'facts', jsonb_build_object('completion', '{"at":"2026-08-12T03:00:00Z","t":"job_events","id":"p2","what":"Completion pack generated"}'::jsonb)),
+        NULL, NULL, '2026-10-07 02:00Z', NULL);
+ IF EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R7_quote_waiting')
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') x WHERE x->>'rule' = 'R7_quote_waiting' AND x->>'what' LIKE 'Quote Q-1 v1 sent%')
+    OR s->'now'->>'whose_move' = 'customer' OR s->'now'->>'line' LIKE '%waiting on the customer%' THEN
+  RAISE EXCEPTION 'story safety contract: a quote waiting is a check once the work is done: % / %', s->'now', s->'checks';
+ END IF;
+END $sixthpure$;
 
 BEGIN;
 SET LOCAL session_replication_role = replica;
@@ -1611,9 +1733,463 @@ BEGIN
   RAISE EXCEPTION 'story safety contract: texts placed on no job from before the lead window are counted, never the newest of either side: %', s->'unplaced';
  END IF;
 END $cached$;
+
+-- Sixth review fixtures (each fails on the 729d928b bodies unless said to be a promise kept).
+-- Money: E1 (bda6e1de class) has no job number invoices could name (a CRM import's), a value set from the CRM ($1,000.00, source
+-- ghl) and no quote; its own invoice is paid ($704.00) and the rest of the quote is billed to
+-- its own Xero contact on an invoice placed on no job, still owing; work done (invoiced 20 Apr).
+-- E2 and E2b: a CRM value, and the $1,000.00 placeholder with no source, nothing behind either.
+-- E3: a scoping-tool value, the rest billed to its own contact on an invoice placed on no job that
+-- names nothing. E4: the same with a contact billed on builder work (still a check of the value,
+-- never named as this job's debt). D1, D2, D3 (SWP-25005 class): D2, an archived duplicate record
+-- (same client, same kind, same site), holds the invoices; D3 is the client's job of another
+-- kind at the same site. R1 (SWP-26354 class): completion pack, invoiced, back in rectification;
+-- R2: reopened by a rectification, rework scheduled since; R3: reopened and invoiced again.
+-- Who and when: T1, a backfilled text whose cache row was written over after the cache held it;
+-- T2, one whose CRM time was never kept. Words: N1 (SWF-261111 class), invoiced, its quote
+-- never answered on the record, the customer's answered call after it placed on no job with
+-- no attribution status. M1, M2 (SWF-261506 and SWF-261509 class): one customer's two quoted
+-- jobs, their missed call after ours placed on no job between them; M3, M4: the same with our
+-- text after it, placed on M4. Q1, Q2, Q3 (SWF-26403, SWF-26404 and SWF-26498 class): two
+-- quotes waiting and the customer's later combined job at the same address, accepted, with
+-- their email on it. S1 (SWF-261423 class): a full deposit draft while the deposit is issued as
+-- two split invoices.
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_name, client_email, ghl_contact_id, xero_contact_id, pricing_json,
+  accepted_at, completed_at, created_at, site_address)
+VALUES
+ ('40000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-0000000000aa', 'GHL-IMPORT-0101', 'invoiced', 'fencing', 'CRM Value Client',
+  NULL, 'ct40e1', 'x40-e1', '{"source":"ghl","totalExGST":909.09,"totalIncGST":1000}', '2025-10-21 04:19Z', NULL, '2025-10-21 04:19Z', NULL),
+ ('40000000-0000-4000-8000-000000000102', '00000000-0000-4000-8000-0000000000aa', 'SWF-94102', 'in_progress', 'fencing', 'Placeholder Client',
+  NULL, 'ct40e2', NULL, '{"source":"ghl","totalExGST":909.09,"totalIncGST":1000}', '2025-10-02 03:39Z', NULL, '2025-10-02 03:39Z', NULL),
+ ('40000000-0000-4000-8000-000000000103', '00000000-0000-4000-8000-0000000000aa', 'SWF-94103', 'in_progress', 'fencing', 'Placeholder Two',
+  NULL, 'ct40e2b', NULL, '{"totalIncGST":1000}', '2026-02-19 02:25Z', NULL, '2026-02-19 02:25Z', NULL),
+ ('40000000-0000-4000-8000-000000000104', '00000000-0000-4000-8000-0000000000aa', 'SWF-94104', 'invoiced', 'fencing', 'Own Contact Client',
+  NULL, 'ct40e3', 'x40-e3', '{"source":"scoping_tool","totalIncGST":2000}', '2026-05-01 01:00Z', NULL, '2026-05-01 01:00Z', NULL),
+ ('40000000-0000-4000-8000-000000000105', '00000000-0000-4000-8000-0000000000aa', 'SWF-94105', 'invoiced', 'fencing', 'Builder Paid Client',
+  NULL, 'ct40e4', 'x40-ms81', '{"source":"scoping_tool","totalIncGST":2000}', '2026-05-01 01:00Z', NULL, '2026-05-01 01:00Z', NULL),
+ ('40000000-0000-4000-8000-000000000124', '00000000-0000-4000-8000-0000000000aa', 'SWP-94124', 'invoiced', 'patio', 'Duplicate Client',
+  NULL, 'ct40dd', NULL, '{"source":"scoping_tool","totalIncGST":12735.02}', '2025-11-16 10:04Z', NULL, '2025-11-16 10:04Z', '12 Example Street'),
+ ('40000000-0000-4000-8000-000000000125', '00000000-0000-4000-8000-0000000000aa', 'SWP-94125', 'archived', 'patio', 'Duplicate Client',
+  NULL, 'ct40dd', 'x40-dd', '{"source":"ghl","totalIncGST":14048.33}', '2025-11-17 07:35Z', NULL, '2025-11-17 07:35Z', '12 Example Street'),
+ ('40000000-0000-4000-8000-000000000126', '00000000-0000-4000-8000-0000000000aa', 'SWF-94126', 'archived', 'fencing', 'Duplicate Client',
+  NULL, 'ct40dd', 'x40-dd', '{}', NULL, NULL, '2025-12-01 01:00Z', '12 Example Street'),
+ ('40000000-0000-4000-8000-000000000127', '00000000-0000-4000-8000-0000000000aa', 'SWP-94127', 'rectification', 'patio', 'Review Client',
+  NULL, 'ct40r1', 'x40-r1', '{"source":"scoping_tool","totalIncGST":7920}', '2026-06-17 08:33Z', NULL, '2026-05-21 13:06Z', NULL),
+ ('40000000-0000-4000-8000-000000000128', '00000000-0000-4000-8000-0000000000aa', 'SWP-94128', 'scheduled', 'patio', 'Rework Client',
+  NULL, 'ct40r2', 'x40-r2', '{"source":"scoping_tool","totalIncGST":7920}', '2026-06-17 08:33Z', NULL, '2026-05-21 13:06Z', NULL),
+ ('40000000-0000-4000-8000-000000000129', '00000000-0000-4000-8000-0000000000aa', 'SWP-94129', 'invoiced', 'patio', 'Done Again Client',
+  NULL, 'ct40r3', 'x40-r3', '{"source":"scoping_tool","totalIncGST":7920}', '2026-06-17 08:33Z', NULL, '2026-05-21 13:06Z', NULL),
+ ('40000000-0000-4000-8000-000000000113', '00000000-0000-4000-8000-0000000000aa', 'SWF-94113', 'quoted', 'fencing', 'Kept Time Client',
+  NULL, 'ct40t1', NULL, '{}', NULL, NULL, '2026-06-01 01:00Z', NULL),
+ ('40000000-0000-4000-8000-000000000114', '00000000-0000-4000-8000-0000000000aa', 'SWF-94114', 'quoted', 'fencing', 'Lost Time Client',
+  NULL, 'ct40t2', NULL, '{}', NULL, NULL, '2026-08-20 01:00Z', NULL),
+ ('40000000-0000-4000-8000-000000000115', '00000000-0000-4000-8000-0000000000aa', 'SWF-94115', 'invoiced', 'fencing', 'Phone Yes Client',
+  NULL, 'ct40n1', NULL, '{}', NULL, NULL, '2026-07-30 04:44Z', NULL),
+ ('40000000-0000-4000-8000-000000000116', '00000000-0000-4000-8000-0000000000aa', 'SWF-94116', 'quoted', 'fencing', 'Two Quotes Client',
+  NULL, 'ct40m1', NULL, '{}', NULL, NULL, '2026-10-01 00:54Z', NULL),
+ ('40000000-0000-4000-8000-000000000117', '00000000-0000-4000-8000-0000000000aa', 'SWF-94117', 'quoted', 'fencing', 'Two Quotes Client',
+  NULL, 'ct40m1', NULL, '{}', NULL, NULL, '2026-10-01 07:38Z', NULL),
+ ('40000000-0000-4000-8000-000000000118', '00000000-0000-4000-8000-0000000000aa', 'SWF-94118', 'quoted', 'fencing', 'Called Back Client',
+  NULL, 'ct40m2', NULL, '{}', NULL, NULL, '2026-10-01 00:54Z', NULL),
+ ('40000000-0000-4000-8000-000000000119', '00000000-0000-4000-8000-0000000000aa', 'SWF-94119', 'quoted', 'fencing', 'Called Back Client',
+  NULL, 'ct40m2', NULL, '{}', NULL, NULL, '2026-10-01 07:38Z', NULL),
+ ('40000000-0000-4000-8000-000000000120', '00000000-0000-4000-8000-0000000000aa', 'SWF-94120', 'quoted', 'fencing', 'Combined Client',
+  NULL, 'ct40q1', NULL, '{}', NULL, NULL, '2026-06-03 05:09Z', '7 Sample Road'),
+ ('40000000-0000-4000-8000-000000000121', '00000000-0000-4000-8000-0000000000aa', 'SWF-94121', 'quoted', 'fencing', 'Combined Client',
+  NULL, 'ct40q1', NULL, '{}', NULL, NULL, '2026-06-03 05:16Z', '7 Sample Road'),
+ ('40000000-0000-4000-8000-000000000122', '00000000-0000-4000-8000-0000000000aa', 'SWF-94122', 'archived', 'fencing', 'Combined Client',
+  NULL, 'ct40q1', NULL, '{}', '2026-06-30 05:13Z', NULL, '2026-06-05 23:24Z', '7 Sample Road'),
+ ('40000000-0000-4000-8000-000000000123', '00000000-0000-4000-8000-0000000000aa', 'SWF-94123', 'order_materials', 'fencing', 'Split Deposit Client',
+  NULL, 'ct40s1', NULL, '{"source":"scoping_tool","totalIncGST":4763}', '2026-09-20 01:00Z', NULL, '2026-09-15 09:41Z', NULL);
+INSERT INTO public.job_contacts (id, job_id, contact_type, client_name, xero_contact_id, is_primary, created_at)
+VALUES ('40d00000-0000-4000-8000-000000000623', '40000000-0000-4000-8000-000000000123', 'primary', 'Split Deposit Client', 'x40-s1c', true, '2026-09-15 09:41Z'),
+       ('40d00000-0000-4000-8000-000000000624', '40000000-0000-4000-8000-000000000123', 'neighbour_b', 'Neighbour S', 'x40-s1n', false, '2026-09-15 09:41Z');
+INSERT INTO public.xero_invoices (org_id, id, job_id, xero_invoice_id, xero_contact_id, contact_name, invoice_number, invoice_type, status, reference,
+  total, amount_due, amount_paid, invoice_date, due_date, fully_paid_on, line_items, raw_json, job_contact_id, created_at)
+VALUES
+ -- E1: its own invoice paid; the rest billed to its own contact, placed on no job, owing
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000601', '40000000-0000-4000-8000-000000000101', 'x6101', 'x40-e1', 'CRM Value Client',
+  'INV-6101', 'ACCREC', 'PAID', 'QT01417', 704.00, 0, 704.00, '2025-11-01', '2025-11-08', '2025-11-05',
+  '[{"Description":"Fence removal | 50% of quote QT01417","LineAmount":640,"TaxAmount":64}]', '{"Status":"PAID","Payments":[]}', NULL, '2025-11-01 01:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000602', NULL, 'x6102', 'x40-e1', 'CRM Value Client',
+  'INV-6102', 'ACCREC', 'AUTHORISED', 'QT01417', 704.00, 704.00, 0, '2026-02-28', '2026-03-14', NULL,
+  '[{"Description":"Fence removal | Remaining quote amount","LineAmount":640,"TaxAmount":64}]', '{"Status":"AUTHORISED","Payments":[]}', NULL, '2026-02-28 01:00Z'),
+ -- E3: its own invoice paid; the rest to its own contact on no job, naming nothing
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000631', '40000000-0000-4000-8000-000000000104', 'x6131', 'x40-e3', 'Own Contact Client',
+  'INV-6131', 'ACCREC', 'PAID', 'SWF-94104-A', 1000.00, 0, 1000.00, '2026-06-01', '2026-06-08', '2026-06-05',
+  '[{"Description":"Fence work","LineAmount":909.09,"TaxAmount":90.91}]', '{"Status":"PAID","Payments":[]}', NULL, '2026-06-01 01:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000632', NULL, 'x6132', 'x40-e3', 'Own Contact Client',
+  'INV-6132', 'ACCREC', 'AUTHORISED', 'QT2001', 1000.00, 1000.00, 0, '2026-09-01', '2026-09-30', NULL,
+  '[{"Description":"Remaining amount","LineAmount":909.09,"TaxAmount":90.91}]', '{"Status":"AUTHORISED","Payments":[]}', NULL, '2026-09-01 01:00Z'),
+ -- E4: the same, its contact billed on builder work (SWMS-94081)
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000641', '40000000-0000-4000-8000-000000000105', 'x6141', 'x40-ms81', 'MS Builder',
+  'INV-6141', 'ACCREC', 'PAID', 'SWF-94105-A', 1000.00, 0, 1000.00, '2026-06-01', '2026-06-08', '2026-06-05',
+  '[{"Description":"Fence work","LineAmount":909.09,"TaxAmount":90.91}]', '{"Status":"PAID","Payments":[]}', NULL, '2026-06-01 01:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000642', NULL, 'x6142', 'x40-ms81', 'MS Builder',
+  'INV-6142', 'ACCREC', 'AUTHORISED', 'QT2002', 1000.00, 1000.00, 0, '2026-09-01', '2026-09-30', NULL,
+  '[{"Description":"Remaining amount","LineAmount":909.09,"TaxAmount":90.91}]', '{"Status":"AUTHORISED","Payments":[]}', NULL, '2026-09-01 01:00Z'),
+ -- D2 (the duplicate record) holds the invoices naming the quote; D3, another kind, one of its own
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000651', '40000000-0000-4000-8000-000000000125', 'x6151', 'x40-dd', 'Duplicate Client',
+  'INV-6151', 'ACCREC', 'PAID', 'QT01356', 7032.22, 0, 7032.22, '2025-11-20', '2025-11-27', '2025-11-25',
+  '[{"Description":"Patio | 50% of quote QT01356","LineAmount":6392.93,"TaxAmount":639.29}]', '{"Status":"PAID","Payments":[]}', NULL, '2025-11-20 01:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000652', '40000000-0000-4000-8000-000000000125', 'x6152', 'x40-dd', 'Duplicate Client',
+  'INV-6152', 'ACCREC', 'PAID', 'QT01356', 7016.11, 0, 7016.11, '2026-05-10', '2026-05-17', '2026-05-12',
+  '[{"Description":"Patio | Remaining quote amount","LineAmount":6378.28,"TaxAmount":637.83}]', '{"Status":"PAID","Payments":[]}', NULL, '2026-05-10 01:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000653', '40000000-0000-4000-8000-000000000126', 'x6153', 'x40-dd', 'Duplicate Client',
+  'INV-6153', 'ACCREC', 'PAID', 'SWF-94126', 500.00, 0, 500.00, '2025-12-05', '2025-12-12', '2025-12-10',
+  '[{"Description":"Gate","LineAmount":454.55,"TaxAmount":45.45}]', '{"Status":"PAID","Payments":[]}', NULL, '2025-12-05 01:00Z'),
+ -- R1: a 50% deposit paid and a 25% progress invoice part paid, overdue; R2 and R3: the deposit paid
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000671', '40000000-0000-4000-8000-000000000127', 'x6171', 'x40-r1', 'Review Client',
+  'INV-6171', 'ACCREC', 'PAID', 'SWP-94127-DEP50', 3960.00, 0, 3960.00, '2026-06-17', '2026-06-24', '2026-06-20',
+  '[{"Description":"Deposit (50% of $7,920.00 inc GST)","LineAmount":3600,"TaxAmount":360}]', '{"Status":"PAID","Payments":[]}', NULL, '2026-06-17 09:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000672', '40000000-0000-4000-8000-000000000127', 'x6172', 'x40-r1', 'Review Client',
+  'INV-6172', 'ACCREC', 'AUTHORISED', 'SWP-94127-DEP25', 1980.00, 1480.00, 500.00, '2026-07-24', '2026-08-07', NULL,
+  '[{"Description":"Progress payment (25% of $7,920.00 inc GST)","LineAmount":1800,"TaxAmount":180}]', '{"Status":"AUTHORISED","Payments":[]}', NULL, '2026-07-24 02:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000681', '40000000-0000-4000-8000-000000000128', 'x6181', 'x40-r2', 'Rework Client',
+  'INV-6181', 'ACCREC', 'PAID', 'SWP-94128-DEP50', 3960.00, 0, 3960.00, '2026-06-17', '2026-06-24', '2026-06-20',
+  '[{"Description":"Deposit (50% of $7,920.00 inc GST)","LineAmount":3600,"TaxAmount":360}]', '{"Status":"PAID","Payments":[]}', NULL, '2026-06-17 09:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000691', '40000000-0000-4000-8000-000000000129', 'x6191', 'x40-r3', 'Done Again Client',
+  'INV-6191', 'ACCREC', 'PAID', 'SWP-94129-DEP50', 3960.00, 0, 3960.00, '2026-06-17', '2026-06-24', '2026-06-20',
+  '[{"Description":"Deposit (50% of $7,920.00 inc GST)","LineAmount":3600,"TaxAmount":360}]', '{"Status":"PAID","Payments":[]}', NULL, '2026-06-17 09:00Z'),
+ -- S1: the customer's 25% deposit overdue, the neighbour's 25% paid, the full 50% deposit a draft
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000623', '40000000-0000-4000-8000-000000000123', 'x6123a', 'x40-s1c', 'Split Deposit Client',
+  'INV-6123', 'ACCREC', 'AUTHORISED', 'SWF-94123-DEP25', 1190.75, 1190.75, 0, '2026-09-24', '2026-10-01', NULL,
+  NULL, '{"Status":"AUTHORISED","Payments":[]}', '40d00000-0000-4000-8000-000000000623', '2026-09-24 01:00Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000624', '40000000-0000-4000-8000-000000000123', 'x6123b', 'x40-s1n', 'Neighbour S',
+  'INV-6124', 'ACCREC', 'PAID', 'SWF-94123-B-DEP25', 1190.75, 0, 1190.75, '2026-09-24', '2026-10-01', '2026-10-05',
+  NULL, '{"Status":"PAID","Payments":[]}', '40d00000-0000-4000-8000-000000000624', '2026-09-24 01:05Z'),
+ ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000625', '40000000-0000-4000-8000-000000000123', 'x6123c', 'x40-s1c', 'Split Deposit Client',
+  'INV-6125', 'ACCREC', 'DRAFT', 'SWF-94123-DEP50', 2381.50, 2381.50, 0, '2026-10-01', '2026-10-08', NULL,
+  '[{"Description":"Deposit ($2,381.50 inc GST)","LineAmount":2165,"TaxAmount":216.5}]', '{"Status":"DRAFT","Payments":[]}', '40d00000-0000-4000-8000-000000000623', '2026-10-01 01:00Z');
+INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at, viewed_at, declined_at)
+VALUES ('40e00000-0000-4000-8000-000000000615', '40000000-0000-4000-8000-000000000115', 'quote', 'Q-6115', 1, '2026-08-05 01:00Z', '2026-08-05 01:10Z', NULL, NULL),
+       ('40e00000-0000-4000-8000-000000000616', '40000000-0000-4000-8000-000000000116', 'quote', 'Q-6116', 1, '2026-10-02 01:00Z', '2026-10-02 01:10Z', NULL, NULL),
+       ('40e00000-0000-4000-8000-000000000617', '40000000-0000-4000-8000-000000000117', 'quote', 'Q-6117', 1, '2026-10-02 01:00Z', '2026-10-02 01:20Z', NULL, NULL),
+       ('40e00000-0000-4000-8000-000000000620', '40000000-0000-4000-8000-000000000120', 'quote', 'Q-6120', 1, '2026-06-03 05:50Z', '2026-06-03 06:00Z', '2026-06-04 01:00Z', NULL),
+       ('40e00000-0000-4000-8000-000000000621', '40000000-0000-4000-8000-000000000121', 'quote', 'Q-6121', 1, '2026-06-03 06:00Z', '2026-06-03 06:10Z', '2026-06-04 01:00Z', NULL);
+INSERT INTO public.job_events (id, job_id, event_type, detail_json, created_at)
+VALUES ('40200000-0000-4000-8000-000000000601', '40000000-0000-4000-8000-000000000101', 'status_changed', '{"new_status":"invoiced","old_status":"in_progress"}', '2026-04-20 02:00Z'),
+       ('40200000-0000-4000-8000-000000000604', '40000000-0000-4000-8000-000000000104', 'status_changed', '{"new_status":"invoiced","old_status":"in_progress"}', '2026-09-01 02:00Z'),
+       ('40200000-0000-4000-8000-000000000605', '40000000-0000-4000-8000-000000000105', 'status_changed', '{"new_status":"invoiced","old_status":"in_progress"}', '2026-09-01 02:00Z'),
+       ('40200000-0000-4000-8000-000000000624', '40000000-0000-4000-8000-000000000124', 'status_changed', '{"new_status":"invoiced","old_status":"in_progress"}', '2026-05-13 02:00Z'),
+       ('40200000-0000-4000-8000-000000000671', '40000000-0000-4000-8000-000000000127', 'completion_pack_generated', '{}', '2026-07-22 03:00Z'),
+       ('40200000-0000-4000-8000-000000000672', '40000000-0000-4000-8000-000000000127', 'status_changed', '{"new_status":"invoiced","old_status":"in_progress"}', '2026-07-24 02:00Z'),
+       ('40200000-0000-4000-8000-000000000673', '40000000-0000-4000-8000-000000000127', 'status_changed', '{"new_status":"rectification","old_status":"invoiced"}', '2026-08-19 02:00Z'),
+       ('40200000-0000-4000-8000-000000000681', '40000000-0000-4000-8000-000000000128', 'completion_pack_generated', '{}', '2026-07-22 03:00Z'),
+       ('40200000-0000-4000-8000-000000000683', '40000000-0000-4000-8000-000000000128', 'status_changed', '{"new_status":"rectification","old_status":"in_progress"}', '2026-08-19 02:00Z'),
+       ('40200000-0000-4000-8000-000000000684', '40000000-0000-4000-8000-000000000128', 'status_changed', '{"new_status":"scheduled","old_status":"rectification"}', '2026-08-25 02:00Z'),
+       ('40200000-0000-4000-8000-000000000691', '40000000-0000-4000-8000-000000000129', 'completion_pack_generated', '{}', '2026-07-22 03:00Z'),
+       ('40200000-0000-4000-8000-000000000693', '40000000-0000-4000-8000-000000000129', 'status_changed', '{"new_status":"rectification","old_status":"in_progress"}', '2026-08-19 02:00Z'),
+       ('40200000-0000-4000-8000-000000000694', '40000000-0000-4000-8000-000000000129', 'status_changed', '{"new_status":"invoiced","old_status":"rectification"}', '2026-09-01 02:00Z'),
+       ('40200000-0000-4000-8000-000000000615', '40000000-0000-4000-8000-000000000115', 'completion_pack_generated', '{}', '2026-08-12 03:00Z'),
+       ('40200000-0000-4000-8000-000000000616', '40000000-0000-4000-8000-000000000115', 'status_changed', '{"new_status":"invoiced","old_status":"in_progress"}', '2026-08-20 02:00Z');
+-- T1: the cache held the text's CRM time, then a sync wrote its row over with 30 newer messages
+-- (written with the triggers on, as the cache's writers write it)
+SET LOCAL session_replication_role = origin;
+INSERT INTO public.ghl_conversation_cache (contact_id, job_id, messages, synced_at)
+VALUES ('ct40t1', NULL, '[{"id":"m40-t1","timestamp":"2026-06-15T02:00:00.000Z","direction":"inbound"}]', '2026-06-20 01:00Z');
+UPDATE public.ghl_conversation_cache
+SET messages = (SELECT jsonb_agg(jsonb_build_object('id', 'm40-t1x' || g, 'timestamp', '2026-09-' || lpad((g % 28 + 1)::text, 2, '0') || 'T01:00:00.000Z',
+                                                    'direction', 'inbound') ORDER BY g) FROM generate_series(1, 30) g),
+    synced_at = '2026-09-29 01:00Z'
+WHERE contact_id = 'ct40t1';
+SET LOCAL session_replication_role = replica;
+INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, occurred_at, recorded_at, event_at,
+  context_captured_at, attribution_status, attribution_confidence, candidate_job_ids, provider_message_id)
+VALUES
+ -- T1: loaded on 16 Sep from the cache; the CRM sent it on 15 Jun
+ ('40b00000-0000-4000-8000-000000000601', '40000000-0000-4000-8000-000000000113', 'client.reply', 'ghl_sms_cache_backfill', 'sms', 'inbound', 'ct40t1',
+  '{"body":"Can you come Tuesday?","ghl_message_id":"m40-t1"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-09-16 01:00Z', '2026-09-16 01:00Z', '2026-09-16 01:00Z', '2026-09-16 01:00Z', 'single_open', 1, NULL, 'ghl:m40-t1'),
+ -- T2: our text on 9 Sep; their text loaded on 17 Sep from a cache that no longer holds it, its CRM time never kept
+ ('40b00000-0000-4000-8000-000000000603', '40000000-0000-4000-8000-000000000114', 'client.sms_out', 'ghl', 'sms', 'outbound', 'ct40t2',
+  '{"body":"Your quote is on its way"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+  '2026-09-09 01:00Z', '2026-09-09 01:00Z', '2026-09-09 01:00Z', '2026-09-09 01:00Z', 'direct', 1, NULL, NULL),
+ ('40b00000-0000-4000-8000-000000000602', '40000000-0000-4000-8000-000000000114', 'client.reply', 'ghl_sms_cache_backfill', 'sms', 'inbound', 'ct40t2',
+  '{"body":"Words of an unknown day","ghl_message_id":"m40-t2"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-09-17 01:00Z', '2026-09-17 01:00Z', '2026-09-17 01:00Z', '2026-09-17 01:00Z', 'single_open', 1, NULL, 'ghl:m40-t2'),
+ -- N1: the customer's answered call after the quote, placed on no job, no attribution status
+ ('40b00000-0000-4000-8000-000000000611', NULL, 'client.call_complete', 'ghl-webhook-receiver', 'call', 'inbound', 'ct40n1',
+  '{"body":"Call. Provider status: completed. Duration: 300 seconds","call_status":"completed"}',
+  '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-08-05 05:00Z', '2026-08-05 05:00Z', '2026-08-05 05:00Z', '2026-08-05 05:00Z', NULL, NULL, NULL, NULL),
+ -- M1, M2: our call and text on M1, then their call that rang out, waiting placement between M1 and M2
+ ('40b00000-0000-4000-8000-000000000616', '40000000-0000-4000-8000-000000000116', 'client.call_complete', 'ghl-webhook-receiver', 'call', 'outbound', 'ct40m1',
+  '{"body":"Call. Provider status: completed. Duration: 283 seconds","call_status":"completed"}',
+  '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+  '2026-10-05 03:38Z', '2026-10-05 03:38Z', '2026-10-05 03:38Z', '2026-10-05 03:38Z', 'direct', 1, NULL, NULL),
+ ('40b00000-0000-4000-8000-000000000617', '40000000-0000-4000-8000-000000000116', 'client.sms_out', 'ghl', 'sms', 'outbound', 'ct40m1',
+  '{"body":"Sorry we missed you, call when you can"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+  '2026-10-05 03:53Z', '2026-10-05 03:53Z', '2026-10-05 03:53Z', '2026-10-05 03:53Z', 'direct', 1, NULL, NULL),
+ ('40b00000-0000-4000-8000-000000000618', NULL, 'client.call_complete', 'ghl-webhook-receiver', 'call', 'inbound', 'ct40m1',
+  '{"body":"Call. Provider status: ringing. Duration: 0 seconds","call_status":"ringing"}',
+  '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-10-05 03:56Z', '2026-10-05 03:56Z', '2026-10-05 03:56Z', '2026-10-05 03:56Z', 'pending_luna', NULL,
+  ARRAY['40000000-0000-4000-8000-000000000116', '40000000-0000-4000-8000-000000000117']::uuid[], NULL),
+ -- M3, M4: their call that rang out, then our text to them, placed on M4
+ ('40b00000-0000-4000-8000-000000000619', NULL, 'client.call_complete', 'ghl-webhook-receiver', 'call', 'inbound', 'ct40m2',
+  '{"body":"Call. Provider status: ringing. Duration: 0 seconds","call_status":"ringing"}',
+  '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-10-05 03:56Z', '2026-10-05 03:56Z', '2026-10-05 03:56Z', '2026-10-05 03:56Z', 'pending_luna', NULL,
+  ARRAY['40000000-0000-4000-8000-000000000118', '40000000-0000-4000-8000-000000000119']::uuid[], NULL),
+ ('40b00000-0000-4000-8000-000000000620', '40000000-0000-4000-8000-000000000119', 'client.sms_out', 'ghl', 'sms', 'outbound', 'ct40m2',
+  '{"body":"We saw your call, ringing you back shortly"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+  '2026-10-05 04:30Z', '2026-10-05 04:30Z', '2026-10-05 04:30Z', '2026-10-05 04:30Z', 'direct', 1, NULL, NULL),
+ -- Q3: the customer's email on their combined job, paying its deposit
+ ('40b00000-0000-4000-8000-000000000622', '40000000-0000-4000-8000-000000000122', 'client.email_in', 'outlook-mail-capture', 'email', 'inbound', 'ct40q1',
+  '{"body":"Deposit paid for the whole fence, thanks","from":"combined@example.test","subject":"Deposit"}',
+  '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-06-30 02:00Z', '2026-06-30 02:00Z', '2026-06-30 02:00Z', '2026-06-30 02:00Z', 'direct', 1, NULL, NULL);
+
+-- 3 (sixth review). A value set from the CRM (pricing_json.source ghl, or the import's $1,000.00
+-- placeholder) that no quote backs is a check of the value (C2 kind 9); an invoice placed on no
+-- job addressed to the job's own Xero contact (C2 kind 8, so a job with no number is read too),
+-- or on the client's duplicate record (another job of the same kind at the same site address),
+-- may bill the job. R8 then states no amount and is never our move; the money line and the first
+-- line name what the job's own contact owes on the invoice placed on no job, never "owing $0.00"
+-- over it, and the client story counts it in what the client owes.
+DO $sixthmoney$
+DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; got text; r record; l jsonb;
+ e1 constant uuid := '40000000-0000-4000-8000-000000000101';
+BEGIN
+ SELECT string_agg((c->>'kind') || ':' || right(c->>'id', 3), ',' ORDER BY (c->>'kind')::int, c->>'id') INTO got
+ FROM public.context_job_record_value(ARRAY[e1], asof) v, jsonb_array_elements(v.checks) c;
+ IF got IS DISTINCT FROM '8:602,9:101' THEN
+  RAISE EXCEPTION 'story safety contract: a CRM value with the rest billed to the job''s own contact on no job is checked both ways (kinds 8 and 9): %', got;
+ END IF;
+ SELECT string_agg(l.what, ' | ' ORDER BY l.source_id) INTO got
+ FROM public.context_job_record_loops(ARRAY[e1], asof) l WHERE l.rule = 'C2_value_mismatch';
+ IF got IS DISTINCT FROM 'The job value $1,000.00 (pricing_json.totalIncGST) was set from the CRM (pricing_json.source ghl) and no quote on the job backs it | '
+                         || 'Invoice INV-6102 ($704.00, authorised, $704.00 owing) is addressed to this job''s Xero contact but is placed on no job; '
+                         || 'this job''s own issued invoices total $704.00 against the job value $1,000.00 (pricing_json.totalIncGST)' THEN
+  RAISE EXCEPTION 'story safety contract: C2 names the invoice on no job and the CRM value: %', got;
+ END IF;
+ s := public.context_job_story(e1, asof);
+ SELECT x INTO l FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R8_not_yet_invoiced';
+ IF l->>'status' IS DISTINCT FROM 'unconfirmed' OR s->'now'->>'whose_move' = 'us' OR s->'now'->>'line' LIKE '%we owe%'
+    OR s->'now'->>'line' LIKE '%not yet invoiced%' OR s->'now'->>'line' LIKE '%296%'
+    OR position('Owing on an invoice placed on no job (addressed to this job''s Xero contact): INV-6102 $704.00 overdue since Sat 14 Mar (207 days)' IN s->'now'->>'line') = 0
+    OR position('owing $0.00; the job value is unconfirmed (check C2), so what is left to invoice is not known; owing on an invoice placed on no job '
+                || '(addressed to this job''s Xero contact): INV-6102 $704.00 overdue since Sat 14 Mar (207 days).' IN s->'money'->>'line') = 0
+    OR s->'money'->'placed_on_no_job'->0->>'number' IS DISTINCT FROM 'INV-6102' OR (s->'money'->'placed_on_no_job'->0->>'owing')::numeric IS DISTINCT FROM 704.00
+    OR NOT coalesce((s->'money'->'not_yet_invoiced'->>'unconfirmed')::boolean, false) THEN
+  RAISE EXCEPTION 'story safety contract: the false $296 is never our move and the $704 owing on no job is named: % / % / %', s->'now', s->'money', l;
+ END IF;
+ s := public.context_client_story(e1, asof);
+ IF (s->'money'->>'owing')::numeric IS DISTINCT FROM 704.00 OR (s->'money'->>'overdue')::numeric IS DISTINCT FROM 704.00
+    OR (s->'money'->>'not_yet_invoiced')::numeric IS DISTINCT FROM 0 OR s->'money'->'placed_on_no_job'->0->>'invoices' IS DISTINCT FROM 'INV-6102'
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+                   WHERE k->>'what' = 'Owing includes $704.00 on invoices addressed to this client''s Xero contact that are placed on no job (INV-6102).') THEN
+  RAISE EXCEPTION 'story safety contract: the client owes what their own contact owes on an invoice placed on no job: % / %', s->'money', s->'not_known';
+ END IF;
+ -- E2, E2b: a CRM value and the $1,000.00 placeholder, nothing behind either: no amount stated
+ SELECT string_agg(right(l.job_id::text, 3) || '=' || l.what, ' | ' ORDER BY l.job_id) INTO got
+ FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000102', '40000000-0000-4000-8000-000000000103']::uuid[], asof) l
+ WHERE l.rule = 'C2_value_mismatch';
+ IF got IS DISTINCT FROM '102=The job value $1,000.00 (pricing_json.totalIncGST) was set from the CRM (pricing_json.source ghl) and no quote on the job backs it | '
+                         || '103=The job value $1,000.00 (pricing_json.totalIncGST) is $1,000.00, the CRM import''s placeholder and no quote on the job backs it' THEN
+  RAISE EXCEPTION 'story safety contract: a CRM value nothing backs is a check of the value: %', got;
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000102', asof);
+ IF s->'money'->>'line' LIKE '%of the job value not yet invoiced%' OR s->'money'->'not_yet_invoiced'->>'amount' IS NOT NULL
+    OR position('the job value is unconfirmed (check C2), so what is left to invoice is not known' IN s->'money'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: a CRM value''s gap is never stated as not yet invoiced: %', s->'money';
+ END IF;
+ -- E3: the rest billed to its own contact on an invoice placed on no job that names nothing
+ SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000104'::uuid], asof) l WHERE l.rule = 'C2_value_mismatch';
+ IF r.what IS DISTINCT FROM 'Invoice INV-6132 ($1,000.00, authorised, $1,000.00 owing) is addressed to this job''s Xero contact but is placed on no job; '
+                            || 'this job''s own issued invoices total $1,000.00 against the job value $2,000.00 (pricing_json.totalIncGST)' THEN
+  RAISE EXCEPTION 'story safety contract: an invoice to the job''s own contact on no job is a check of the value: %', row_to_json(r);
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000104', asof);
+ IF s->'now'->>'whose_move' = 'us' OR s->'now'->>'line' LIKE '%we owe%' OR s->'now'->>'line' LIKE '%not yet invoiced%'
+    OR position('INV-6132 $1,000.00 overdue since Wed 30 Sep (7 days)' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: billed to its own contact on no job, the rest is never our move to bill: %', s->'now';
+ END IF;
+ -- E4: the contact is billed on builder work: still a check of the value, but never this
+ -- job's debt in the story nor the client's
+ SELECT string_agg((c->>'kind') || ':' || right(c->>'id', 3), ',' ORDER BY (c->>'kind')::int, c->>'id') INTO got
+ FROM public.context_job_record_value(ARRAY['40000000-0000-4000-8000-000000000105'::uuid], asof) v, jsonb_array_elements(v.checks) c;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000105', asof);
+ IF got IS DISTINCT FROM '8:642' OR s->'now'->>'line' LIKE '%placed on no job (addressed%' OR jsonb_array_length(s->'money'->'placed_on_no_job') <> 0
+    OR s->'now'->>'whose_move' = 'us' THEN
+  RAISE EXCEPTION 'story safety contract: a builder-billed contact''s invoice on no job checks the value but is never named this job''s debt: % / %', got, s->'now';
+ END IF;
+ s := public.context_client_story('40000000-0000-4000-8000-000000000105', asof);
+ IF (s->'money'->>'owing')::numeric <> 0 OR jsonb_array_length(s->'money'->'placed_on_no_job') <> 0 THEN
+  RAISE EXCEPTION 'story safety contract: a builder''s invoice on no job is never the homeowner''s debt: %', s->'money';
+ END IF;
+ -- D1: its work billed and paid on its duplicate record D2 (same client, same kind, same site);
+ -- D3, the client's job of another kind at the same site, never ties
+ SELECT string_agg((c->>'kind') || ':' || right(c->>'id', 3), ',' ORDER BY (c->>'kind')::int, c->>'id') INTO got
+ FROM public.context_job_record_value(ARRAY['40000000-0000-4000-8000-000000000124'::uuid], asof) v, jsonb_array_elements(v.checks) c;
+ SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000124'::uuid], asof) l
+ WHERE l.rule = 'C2_value_mismatch' AND l.source_id = '40c00000-0000-4000-8000-000000000651';
+ IF got IS DISTINCT FROM '8:651,8:652'
+    OR r.what IS DISTINCT FROM 'Invoice INV-6151 ($7,032.22, paid) is on job SWP-94125, this client''s other job of this kind at the same site address; '
+                               || 'this job''s own issued invoices total $0.00 against the job value $12,735.02 (pricing_json.totalIncGST)' THEN
+  RAISE EXCEPTION 'story safety contract: a duplicate record''s invoices check the value: % / %', got, row_to_json(r);
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000124', asof);
+ IF s->'now'->>'whose_move' = 'us' OR s->'now'->>'line' LIKE '%we owe%' OR s->'now'->>'line' LIKE '%not yet invoiced%'
+    OR s->'money'->>'line' LIKE '%of the job value not yet invoiced%' THEN
+  RAISE EXCEPTION 'story safety contract: billed and paid on its duplicate record, the job is never billed again: % / %', s->'now', s->'money';
+ END IF;
+END $sixthmoney$;
+
+-- 3 (sixth review). R8 is not due while the job is in rectification (SWP-26354 class: a
+-- completion pack, invoiced, then back in rectification), nor while work recorded finished was
+-- opened again by a rectification and nothing records it finished since (rework scheduled), and
+-- it never makes the move ours then; finished again since (invoiced), it is due.
+DO $sixthrect$
+DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; l jsonb;
+BEGIN
+ s := public.context_job_story('40000000-0000-4000-8000-000000000127', asof);
+ SELECT x INTO l FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R8_not_yet_invoiced';
+ IF l->>'status' IS DISTINCT FROM 'not_due' OR s->'now'->>'whose_move' = 'us' OR s->'now'->>'line' LIKE '%we owe%'
+    OR s->'now'->>'line' LIKE '%not yet invoiced%' OR s->'now'->>'line' NOT LIKE 'In rectification since Wed 19 Aug%'
+    OR l->>'why' NOT LIKE '%the job is in rectification, so the final invoice is not the next move until the work is finished again%' THEN
+  RAISE EXCEPTION 'story safety contract: in rectification the final invoice is not due and never our move: % / %', s->'now', l;
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000128', asof);
+ SELECT x INTO l FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R8_not_yet_invoiced';
+ IF l->>'status' IS DISTINCT FROM 'not_due' OR s->'now'->>'whose_move' = 'us' OR s->'now'->>'line' LIKE '%we owe%'
+    OR l->>'why' NOT LIKE '%the work was opened again after it was recorded finished (status set to rectification Wed 19 Aug) and nothing records it finished since%' THEN
+  RAISE EXCEPTION 'story safety contract: reopened by a rectification and not finished since, the final invoice is not due: % / %', s->'now', l;
+ END IF;
+ -- (promise kept) invoiced again after the rectification: due, our move
+ s := public.context_job_story('40000000-0000-4000-8000-000000000129', asof);
+ SELECT x INTO l FROM jsonb_array_elements(s->'loops') x WHERE x->>'rule' = 'R8_not_yet_invoiced';
+ IF l->>'status' IS DISTINCT FROM 'open' OR s->'now'->>'whose_move' IS DISTINCT FROM 'us' THEN
+  RAISE EXCEPTION 'story safety contract: finished again since the rectification, the final invoice is due: % / %', s->'now', l;
+ END IF;
+END $sixthrect$;
+
+-- 4 (sixth review). A backfilled text keeps the CRM's time once a sync has written its cache row
+-- over (T1: the time was kept when the cache held it); one whose CRM time was never kept (T2) is
+-- time unknown, never its load time: never the customer's side or words, never the reader's
+-- evidence, never citable, named in not_known.
+DO $sixthtime$
+DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; r record; chk jsonb; got text;
+ t1 constant uuid := '40000000-0000-4000-8000-000000000113'; t2 constant uuid := '40000000-0000-4000-8000-000000000114';
+BEGIN
+ SELECT m.at, m.placement, m.customer_side INTO r FROM public.context_job_record_messages(ARRAY[t1], asof) m
+ WHERE m.source_id = '40b00000-0000-4000-8000-000000000601';
+ IF r.at IS DISTINCT FROM '2026-06-15 02:00Z'::timestamptz OR r.placement IS DISTINCT FROM 'on_job' OR NOT coalesce(r.customer_side, false)
+    OR public.context_job_record_crm_time('ghl_sms_cache_backfill', 'ct40t1', 'm40-t1', t1) IS DISTINCT FROM '2026-06-15 02:00Z'::timestamptz THEN
+  RAISE EXCEPTION 'story safety contract: a text keeps the CRM''s time after its cache row is written over: %', row_to_json(r);
+ END IF;
+ SELECT m.at, m.placement, m.customer_side INTO r FROM public.context_job_record_messages(ARRAY[t2], asof) m
+ WHERE m.source_id = '40b00000-0000-4000-8000-000000000602';
+ IF r.placement IS DISTINCT FROM 'time_unknown' OR coalesce(r.customer_side, true) THEN
+  RAISE EXCEPTION 'story safety contract: a text whose CRM time is no longer kept is never the customer''s side: %', row_to_json(r);
+ END IF;
+ s := public.context_job_story(t2, asof);
+ IF s->'last_exchange'->'customer_said' <> 'null'::jsonb OR s->'now'->>'line' LIKE '%wrote last%'
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'rule' = 'R5_customer_wrote_last')
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+                   WHERE k->>'what' = '1 text on this job was loaded from the CRM''s cache and the CRM''s own time for it is no longer kept; it is not read as this customer''s words.')
+    OR (s->'meta'->'sources'->>'texts')::timestamptz IS DISTINCT FROM '2026-09-09 01:00Z'::timestamptz THEN
+  RAISE EXCEPTION 'story safety contract: a text of unknown time is never the customer''s last word, said so: % / % / %', s->'last_exchange', s->'now'->>'line', s->'not_known';
+ END IF;
+ SELECT string_agg(e.src_id::text, ',' ORDER BY e.src_id) INTO got FROM public.context_ledger_evidence_rows(ARRAY[t2], asof) e;
+ chk := public.context_ledger_cite(t2, '{"table":"business_events","id":"40b00000-0000-4000-8000-000000000602","excerpt":"Words of an unknown day"}');
+ IF got IS DISTINCT FROM '40b00000-0000-4000-8000-000000000603' OR coalesce((chk->>'ok')::boolean, true) OR chk->>'code' IS DISTINCT FROM 'citation_not_admissible' THEN
+  RAISE EXCEPTION 'story safety contract: a text of unknown time is never the reader''s evidence nor citable: % / %', got, chk;
+ END IF;
+END $sixthtime$;
+
+-- 1 (sixth review). The customer's newest message off the job is no all-clear for a reading that
+-- read every row on it (fixture P, a shadow asked for by id: the customer's 5 Oct request text is
+-- placed on no job). R7 is a check once the job is past quoted, and the customer's contact since
+-- the quote counts their rows placed on no job whatever their attribution status (N1: their
+-- answered call, attribution status null) and their rows on their other jobs (Q1: their email on
+-- the combined job Q3), and a quote their later accepted job of the same kind at the same site
+-- address may replace is a check. Their missed call placed on no job with nothing from us since
+-- is our move on each job it may be about (M1, M2); never once we wrote to them after it on any
+-- job (M3, M4). A full deposit draft whose stage the issued split invoices already reach is a
+-- check naming them, never our move (S1).
+DO $sixthwords$
+DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; r record; gs uuid; x uuid;
+BEGIN
+ UPDATE public.business_events SET context_captured_at = recorded_at
+ WHERE id IN ('40b00000-0000-4000-8000-000000000175', '40b00000-0000-4000-8000-000000000176');
+ INSERT INTO public.context_ledger_generations (job_id, kind, status, reader, evidence_until, created_at, finished_at, updated_at, checks)
+ VALUES ('40000000-0000-4000-8000-000000000073', 'backfill', 'shadow', 'luna-ledger:v1', '2026-07-03 00:00Z', '2026-07-03 00:00Z',
+         '2026-07-03 00:10Z', '2026-07-03 00:10Z', '{"passed": true, "store": {"pass": true}}')
+ RETURNING id INTO gs;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000073', asof, gs);
+ IF (s->'meta'->'ledger'->>'unread_rows')::int IS DISTINCT FROM 0 OR s->'now'->>'whose_move' IS DISTINCT FROM 'unknown' OR s->'now'->>'line' LIKE '%Nothing open%'
+    OR position('the customer''s newest message, Mon 5 Oct (not placed on any job), is off the job and not yet checked by the reader' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: a shadow that read every row on the job is no all-clear over the customer''s newer message off it: % / %',
+   s->'now', s->'meta'->'ledger';
+ END IF;
+ -- N1
+ SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000115'::uuid], asof) l WHERE l.rule = 'R7_quote_waiting';
+ IF r.shown_as IS DISTINCT FROM 'check'
+    OR r.what IS DISTINCT FROM 'Quote Q-6115 v1 sent Wed 5 Aug 2026 (63 days), not viewed; no answer recorded, but the customer was in touch since: '
+                               || 'an answered call Wed 5 Aug 2026 (not placed on any job)' THEN
+  RAISE EXCEPTION 'story safety contract: past quoted, a quote waiting is a check naming the customer''s call since: %', row_to_json(r);
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000115', asof);
+ IF s->'now'->>'whose_move' = 'customer' OR s->'now'->>'line' LIKE '%waiting on the customer%'
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'loops') l WHERE l->>'rule' = 'R7_quote_waiting')
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'rule' = 'R7_quote_waiting') THEN
+  RAISE EXCEPTION 'story safety contract: an invoiced job never waits on the customer for its quote: %', s->'now';
+ END IF;
+ s := public.context_job_story_meta('40000000-0000-4000-8000-000000000115', asof);
+ IF (s->'unplaced'->>'newest_customer_at')::timestamptz IS DISTINCT FROM '2026-08-05 05:00Z'::timestamptz THEN
+  RAISE EXCEPTION 'story safety contract: the customer''s answered call placed on no job with no attribution status is their newest message: %', s->'unplaced';
+ END IF;
+ -- Q1
+ SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000120'::uuid], asof) l WHERE l.rule = 'R7_quote_waiting';
+ IF r.shown_as IS DISTINCT FROM 'check'
+    OR r.what IS DISTINCT FROM 'Quote Q-6120 v1 sent Wed 3 Jun 2026 (125 days), viewed; no answer recorded, but the customer was in touch since: '
+                               || 'an email Tue 30 Jun 2026 (on job SWF-94122); job SWF-94122 for this customer at the same site address was accepted '
+                               || 'Tue 30 Jun 2026 and may replace this quote' THEN
+  RAISE EXCEPTION 'story safety contract: a quote the customer''s later accepted job at the address may replace is a check: %', row_to_json(r);
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000120', asof);
+ IF s->'now'->>'whose_move' = 'customer' OR s->'now'->>'line' LIKE '%waiting on the customer%' THEN
+  RAISE EXCEPTION 'story safety contract: a duplicate quote answered by a combined job never waits on the customer: %', s->'now';
+ END IF;
+ -- M1, M2
+ FOREACH x IN ARRAY ARRAY['40000000-0000-4000-8000-000000000116', '40000000-0000-4000-8000-000000000117']::uuid[] LOOP
+  s := public.context_job_story(x, asof);
+  SELECT l.placement INTO r FROM public.context_job_record_loops(ARRAY[x], asof) l WHERE l.rule = 'R4_missed_call';
+  IF s->'now'->>'whose_move' IS DISTINCT FROM 'us' OR r.placement IS DISTINCT FROM 'not_placed'
+     OR position('Our move, we owe: Missed call from the customer Mon 5 Oct 11:56 (not placed on any job); no call, text or email to the customer since'
+                 IN s->'now'->>'line') = 0 THEN
+   RAISE EXCEPTION 'story safety contract: the customer''s missed call placed on no job is our move: % / %', s->'now', row_to_json(r);
+  END IF;
+ END LOOP;
+ -- (promise kept) M3, M4: we wrote to them after it, on M4
+ FOREACH x IN ARRAY ARRAY['40000000-0000-4000-8000-000000000118', '40000000-0000-4000-8000-000000000119']::uuid[] LOOP
+  IF EXISTS (SELECT 1 FROM public.context_job_record_loops(ARRAY[x], asof) l WHERE l.rule = 'R4_missed_call') THEN
+   RAISE EXCEPTION 'story safety contract: a missed call we answered by text on any job is no move: %', x;
+  END IF;
+ END LOOP;
+ -- S1
+ SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000123'::uuid], asof) l WHERE l.rule = 'R3_draft';
+ IF r.shown_as IS DISTINCT FROM 'check'
+    OR r.what IS DISTINCT FROM 'Draft invoice INV-6125 $2,381.50 to Split Deposit Client not issued since Thu 1 Oct 2026; it may duplicate the issued deposit '
+                               || 'invoices INV-6123, INV-6124 on the same job reference ($2,381.50)' THEN
+  RAISE EXCEPTION 'story safety contract: a draft whose stage the split invoices already reach is a check naming them: %', row_to_json(r);
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000123', asof);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'customer' OR s->'now'->>'line' LIKE '%we owe%'
+    OR position('The customer''s move, the customer owes: INV-6123' IN s->'now'->>'line') = 0
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'now'->'blockers') b WHERE b->>'what' LIKE 'Draft invoice INV-6125%')
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'rule' = 'R3_draft' AND k->>'what' LIKE '%it may duplicate the issued deposit invoices%') THEN
+  RAISE EXCEPTION 'story safety contract: the split deposit leads, never the duplicate draft, which blocks nothing: % / %', s->'now', s->'checks';
+ END IF;
+END $sixthwords$;
 ROLLBACK;
 
--- 8. Re-applying the migration changes nothing (its guard accepts its own bodies).
+-- 8. Re-applying the migration changes nothing (its guard accepts its own bodies). (Sixth
+-- review) It keeps the CRM time of every message a cache row holds when it runs: a message
+-- written to the cache with the triggers off is kept by the apply, and its time stays after
+-- the cache row is gone.
 BEGIN;
 CREATE TEMP TABLE story_safety_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
@@ -1621,13 +2197,21 @@ CREATE TEMP TABLE story_safety_md5 AS
   'context_job_record_timeline', 'context_job_record_loops', 'context_job_record_money', 'context_job_record_contact', 'context_job_story_facts',
   'context_job_story_meta', 'context_job_story_assemble', 'context_client_story', 'context_ledger_evidence_rows', 'context_ledger_cite',
   'context_ledger_judge', 'context_job_record_crm_time', 'context_job_record_payer_role', 'context_job_record_bill_share', 'context_job_record_value',
-  'context_job_story_day', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies');
+  'context_job_story_day', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies', 'context_crm_message_times_keep');
+SET LOCAL session_replication_role = replica;
+INSERT INTO public.ghl_conversation_cache (contact_id, job_id, messages, synced_at)
+VALUES ('ct40snap', NULL, '[{"id":"m40-snap","timestamp":"2026-05-05T05:05:00.000Z","direction":"inbound"}]', '2026-05-06 01:00Z');
+SET LOCAL session_replication_role = origin;
 \ir ../../../migrations/20261006040000_context_story_safety.sql
+DELETE FROM public.ghl_conversation_cache WHERE contact_id = 'ct40snap';
 DO $again$
 BEGIN
- IF (SELECT count(*) FROM story_safety_md5) <> 20 OR EXISTS (SELECT 1 FROM story_safety_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
+ IF (SELECT count(*) FROM story_safety_md5) <> 21 OR EXISTS (SELECT 1 FROM story_safety_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
        WHERE md5(p.prosrc) IS DISTINCT FROM x.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM x.c) THEN
   RAISE EXCEPTION 'story safety contract: a re-apply must change nothing';
+ END IF;
+ IF public.context_job_record_crm_time('ghl_sms_cache_backfill', 'ct40snap', 'm40-snap', NULL) IS DISTINCT FROM '2026-05-05 05:05Z'::timestamptz THEN
+  RAISE EXCEPTION 'story safety contract: an apply keeps the CRM time of every message the cache holds then';
  END IF;
 END $again$;
 ROLLBACK;

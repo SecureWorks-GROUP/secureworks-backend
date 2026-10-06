@@ -705,11 +705,18 @@ about 0.8 ms and almost all find nothing. A CRM text loaded from the CRM's cache
 (`ghl_sms_cache_backfill`) is at its CRM time (`context_job_record_crm_time`) in
 the story (on the job or placed on no job), the reader's evidence and the citation
 check alike; one dated more than 30 days before the job was created is in none of
-them as the customer's words.
+them as the customer's words. The cache itself does not keep that time: it holds
+only a contact's newest messages and every sync writes the row over, so the time is
+kept in `context_crm_message_times` (trigger `context_crm_message_times_keep` on
+every cache write) and read from there first; its rollback keeps that table, since
+the times are kept nowhere else. A backfilled text whose time was never kept is time
+unknown, never its load time, and is never the customer's words, evidence or a
+citation.
 A story loop's `status` is `open` or `closing_evidence` when it is a move;
-`not_due` (R8 before the work is done) and `unconfirmed` (R8 whose amount a C2
-check leaves unknown) are never a move, the first line's item or a reason for
-whose move.
+`not_due` (R8 before the work is done, while the job is in rectification, or while
+work reopened after it was recorded finished is not finished again) and
+`unconfirmed` (R8 whose amount a C2 check leaves unknown) are never a move, the
+first line's item or a reason for whose move.
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 

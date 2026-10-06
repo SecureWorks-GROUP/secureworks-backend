@@ -17,7 +17,9 @@
 --     is unknown. With no live reading handling.commitments is empty (null). A shadow
 --     reading counts as read only when the story is asked for it by id (the default
 --     view never shows one), so a grade reads the line its promotion gives; a building
---     or failed one never does.
+--     or failed one never does. Even a reading that has read every row on the job gives
+--     no all-clear while the customer's newest message is off the job (placed on no job
+--     yet, or withheld): the line names it, unchecked (sixth review).
 --  2. Mail dropped. An old-inbox email was dropped whenever its saved copy existed
 --     anywhere (220 emails on 42 live jobs: 144 copies unplaced, 76 on another job;
 --     82 from the customer's address). It is dropped only for a copy on the same
@@ -38,11 +40,16 @@
 --     for each record that disagrees with the job value (an invoice line's own base,
 --     also a line naming the job on an invoice placed elsewhere, a deposit's
 --     percentage, the newest sent quote, a final invoice issued below the value, a
---     value from a quote the app has no record of sending, an invoice placed on no
---     job or on another job that names the job while its own invoices fall short; the
---     two 972 checks unchanged), and then R8 says the value is unconfirmed and states
---     no amount. Before the work is done the final invoice (R8) is not due (loop
---     status not_due), and after it an unconfirmed one is held (status unconfirmed):
+--     value from a quote the app has no record of sending, an invoice placed elsewhere
+--     while the job's own invoices fall short: on no job or another job naming the job,
+--     on no job addressed to its own Xero contact, or on this client's other job of the
+--     same kind at the same site address (a duplicate record); a value set from the CRM,
+--     source ghl or the import's $1,000.00 placeholder, that no quote backs; the two 972
+--     checks unchanged), and then R8 says the value is unconfirmed and states no amount;
+--     what the job's own contact owes on an invoice placed on no job is named in the first
+--     line, the money and the client story. Before the work is done the final invoice (R8)
+--     is not due (loop status not_due), nor while the job is in rectification or reopened
+--     work is not finished again, and after it an unconfirmed one is held (status unconfirmed):
 --     either ranks last and never leads the first line or the move; the client story
 --     lists it after the loops due now. Overdue and due invoices (R1, R2, M1) are owed by whoever they are
 --     addressed to: the customer (the builder on builder work), else a neighbour or
@@ -53,14 +60,22 @@
 --     invoice never reads as the customer's beside our move). A quote waiting reads as
 --     waiting on the customer, never "the customer owes: Quote", and one the customer
 --     was in touch about since it was sent in a way that does not close it (an answered
---     call, old-inbox mail, a message placed on no job, withheld mail) leaves whose move
---     unclear and names that contact. A supplier bill whose lines name other jobs says
---     it is shared and gives this job's lines.
+--     call, old-inbox mail, a message placed on no job whatever its attribution status, one
+--     on their other job, withheld mail) leaves whose move unclear and names that contact;
+--     it is a loop only while the job is quoted, and a check once the work is done or a
+--     later job of theirs at the same address is accepted. A missed call of theirs placed
+--     on no job with nothing from us since is our move (R4). A draft whose stage issued
+--     split invoices already reach is a check, never our move. A supplier bill whose lines
+--     name other jobs says it is shared and gives this job's lines.
 --  4. Who and when. A CRM text loaded later from the CRM's cache (197 texts on 30
 --     live jobs, a median 7.8 days late; and 75 placed on no job yet that 22 live jobs
---     read as their customer's, up to 87 days late) is timed by the CRM's own time (the
---     conversation cache keeps it), in the story (on the job or placed on no job), the
---     reader's evidence and the citation check. A text the CRM dates more than 30 days
+--     read as their customer's, up to 87 days late) is timed by the CRM's own time, in the
+--     story (on the job or placed on no job), the reader's evidence and the citation check.
+--     The cache holds only a contact's newest messages and each sync writes its row over,
+--     so the time is kept when the cache holds it (context_crm_message_times, filled by a
+--     trigger on each cache write and once from every cache row here); a text whose CRM
+--     time was never kept is time unknown, never its load time: never the customer's,
+--     never the reader's evidence, never cited (sixth review). A text the CRM dates more than 30 days
 --     before the job was created (before its lead window) is never the customer's last
 --     word, first contact or contact since a quote, and is not the reader's evidence
 --     (left out of it, and refused as a citation; 15 texts on 1 live job). A text the
@@ -104,7 +119,9 @@
 -- Added helpers: context_job_record_crm_time, context_job_record_payer_role,
 --   context_job_record_bill_share, context_job_record_value, context_job_story_day,
 --   context_ledger_mail_rule_since (this migration's first apply time, written once),
---   context_ledger_mail_copies.
+--   context_ledger_mail_copies; and (sixth review) the table context_crm_message_times
+--   with its trigger context_crm_message_times_keep on ghl_conversation_cache (the one
+--   write path this migration adds: it never fails a cache write).
 -- Query shape: the same reads, plus the CRM cache for backfilled texts only (in the
 -- story, the reader's evidence and a citation of one), one read of the job's parties
 -- per invoice, and the job's makesafe details; the reader's evidence and the judge
@@ -115,9 +132,15 @@
 -- would fire); the loops and the story meta read this customer's messages placed on no
 -- job yet (context_unplaced_for_job, as not_known already did; the CRM cache for a
 -- backfilled text among them) and the loops their withheld mail; the story facts read the
--- job's make-safe stage and status history.
+-- job's make-safe stage and status history. Sixth review: the job value also reads, while
+-- R8 would fire, invoices on no job by the job's own Xero contact and this client's other
+-- jobs at the same site; the loops and the story meta read this customer's rows placed on no
+-- job whatever their attribution status (and the loops their rows on their other jobs), by
+-- the CRM contact index; the story meta reads invoices on no job by the job's own Xero
+-- contact; the CRM time reads context_crm_message_times first.
 -- Rollback: supabase/rollbacks/20261006040000_context_story_safety_down.sql (the
--- earlier bodies word for word; the helpers dropped).
+-- earlier bodies word for word; the helpers and the trigger dropped; the table of kept CRM
+-- times kept, rows and all, since nothing else holds them once the cache is written over).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -133,17 +156,17 @@ DECLARE problems text[] := '{}'; x record; live text; f text; t text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_job_record_legacy_mail(uuid[],timestamptz)', ARRAY['e2d1d12725fe4e544971f50f9fe16105', 'fd6cc9dade4cd2dd1582d354fa46a299']),
-  ('public.context_job_record_messages(uuid[],timestamptz)', ARRAY['805d8ae8acb9add8f6e3c4cc08813287', '12a13d01523660fa28f29d7f651cbe96']),
+  ('public.context_job_record_messages(uuid[],timestamptz)', ARRAY['805d8ae8acb9add8f6e3c4cc08813287', '9a7e7257af23c0a61375a947b895927f']),
   ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['f827ec9418fc843470e793c09a55612e', '0921f25dfb5a67ab04629d2977e9f0a6']),
-  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['47a6a646655f7110ff52be8e90846599', '62cc93efc2cbb35e92475db5b6aa189f']),
+  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['47a6a646655f7110ff52be8e90846599', '21cc2c3a6e7d0379f5baaab13c1e9a65']),
   ('public.context_job_record_money(uuid[],timestamptz)', ARRAY['33c032c9f111f74fbd7ad0e267bed33e', '152c423ec224be8d3ac48790b7d14cd6']),
   ('public.context_job_record_contact(uuid[],timestamptz)', ARRAY['698b3753ab5e1ffa6441a7ef6cbb13e5', '4b8d2c65d3ce03d71f2d0e24f4401471']),
-  ('public.context_job_story_facts(uuid,timestamptz)', ARRAY['98cc171009db7051a681ae3a28785518', '7c236da6444b0314c8d10e8813cbec41']),
-  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', '4c7bc9d3a4bf48a63b094a1031745254']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', 'f776a3fb68e58d3775fff2c8a739fea2']),
-  ('public.context_client_story(uuid,timestamptz)', ARRAY['cc4a2ce461deeb17653cd94b714bbf78', '60c46e30a1808e237b7973b8407a03fe']),
-  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '49c6c3f00a6f4dd9e187f9418a29a51a']),
-  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', 'a68c6d79f1463df5d20fbc51b3a58ca5']),
+  ('public.context_job_story_facts(uuid,timestamptz)', ARRAY['98cc171009db7051a681ae3a28785518', 'eefb06ac74932d26974411b5815ef088']),
+  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', '79723b6d704128731ae940e102df5bb5']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', '0d8517fbc571bdd04bfd4ea75d47a77e']),
+  ('public.context_client_story(uuid,timestamptz)', ARRAY['cc4a2ce461deeb17653cd94b714bbf78', 'a362a79d0ce92295f509f6e1b0f0ba66']),
+  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', 'b3430566eb6bac0655a9cfa4284d22c8']),
+  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', '954c80518722f62d190bd75b589065a3']),
   ('public.context_ledger_judge(uuid[])', ARRAY['1cabd1e254cdb11b26c61a992b8d9744', '511794bd25c94ca8f0e0f1bbbfbf03eb'])
  ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
@@ -152,14 +175,24 @@ BEGIN
   END IF;
  END LOOP;
  FOREACH f IN ARRAY ARRAY['public.context_job_record_crm_time(text,text,text,uuid)', 'public.context_job_record_payer_role(uuid,text,text,text,uuid)', 'public.context_job_record_bill_share(text,jsonb,text)', 'public.context_job_record_value(uuid[],timestamptz)', 'public.context_job_story_day(date,date)',
-   'public.context_ledger_mail_rule_since()', 'public.context_ledger_mail_copies(uuid[])'] LOOP
+   'public.context_ledger_mail_rule_since()', 'public.context_ledger_mail_copies(uuid[])', 'public.context_crm_message_times_keep()'] LOOP
   IF to_regprocedure(f) IS NOT NULL AND coalesce(obj_description(to_regprocedure(f), 'pg_proc'), '') NOT LIKE 'Story safety (20261006040000)%' THEN
    problems := problems || format('%s exists and is not this migration''s', f);
   END IF;
  END LOOP;
+ -- (sixth review) the table that keeps CRM message times, and its trigger on the cache: absent or ours
+ IF to_regclass('public.context_crm_message_times') IS NOT NULL
+    AND coalesce(obj_description(to_regclass('public.context_crm_message_times'), 'pg_class'), '') NOT LIKE 'Story safety (20261006040000)%' THEN
+  problems := problems || 'public.context_crm_message_times exists and is not this migration''s'::text;
+ END IF;
+ IF EXISTS (SELECT 1 FROM pg_trigger tg WHERE tg.tgrelid = to_regclass('public.ghl_conversation_cache') AND tg.tgname = 'context_crm_message_times_keep'
+              AND tg.tgfoid IS DISTINCT FROM to_regprocedure('public.context_crm_message_times_keep()')) THEN
+  problems := problems || 'trigger context_crm_message_times_keep on public.ghl_conversation_cache exists and is not this migration''s'::text;
+ END IF;
  FOREACH f IN ARRAY ARRAY['public.job_quote_values(uuid)', 'public.context_job_record_date(text)', 'public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)',
    'public.context_job_story_ledger(uuid,uuid,timestamptz)', 'public.context_ledger_row_admissible(public.business_events)',
-   'public.context_linked_status(text)', 'public.context_unplaced_for_job(uuid)'] LOOP
+   'public.context_linked_status(text)', 'public.context_unplaced_for_job(uuid)', 'public.context_address_key(text)',
+   'public.context_event_text(public.business_events)', 'public.context_internal_text_role(public.business_events)'] LOOP
   IF to_regprocedure(f) IS NULL THEN problems := problems || format('%s missing', f); END IF;
  END LOOP;
  FOREACH t IN ARRAY ARRAY['ghl_conversation_cache.contact_id', 'ghl_conversation_cache.messages', 'ghl_conversation_cache.synced_at',
@@ -168,7 +201,9 @@ BEGIN
    'job_contacts.xero_contact_id', 'job_contacts.removed_at', 'job_contacts.is_primary', 'job_contacts.contact_type',
    'business_events.provider_message_id', 'business_events.contact_id', 'job_events.detail_json', 'job_assignments.is_ghost',
    'job_assignments.role', 'inbox_events.graph_message_id', 'inbox_events.processed_at', 'business_events.attributed_at',
-   'business_events.context_captured_at', 'business_events.source_table', 'business_events.source_id'] LOOP
+   'business_events.context_captured_at', 'business_events.source_table', 'business_events.source_id',
+   'business_events.attribution_status', 'ghl_conversation_cache.id', 'jobs.site_address', 'jobs.metadata', 'jobs.pricing_json',
+   'xero_invoices.amount_due', 'xero_invoices.synced_at'] LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || split_part(t, '.', 1))
                  AND a.attname = split_part(t, '.', 2) AND NOT a.attisdropped) THEN
    problems := problems || format('public.%s missing', t);
@@ -181,19 +216,82 @@ BEGIN
 END $guard$;
 
 -- 1. The CRM's own time of a CRM text loaded later from its cache (source
--- ghl_sms_cache_backfill): the conversation cache keeps each message's own
--- timestamp; the loader stamped the load time instead. The message is found by its
--- CRM id in the cache row of the text's own contact, else a cache row of its job,
--- else any cache row (each id sits in one row; 28 of the 241 live rows carry no
--- contact). One bad cache row never fails a story (anything not a full ISO time
--- with a zone, or not a real date, reads as no time). Plain SQL with no SET (it has
--- subqueries, so it is not inlined); its callers ask only for backfilled rows.
+-- ghl_sms_cache_backfill): the loader stamped the load time instead. The conversation
+-- cache holds each message's own timestamp, but only for a contact's newest messages (about
+-- 30), and every sync writes its row over, so a text drops out of it (sixth review: 80 of
+-- the 1,181 backfilled texts had dropped out by 6 Oct). So the time is kept where no sync
+-- overwrites it:
+-- (a) context_crm_message_times: one row per CRM message id the cache has held, with its
+--     own time, filled now from every cache row and then by a trigger on each cache write
+--     (append only: a message keeps the first time seen; the trigger never fails the
+--     cache write, it only warns);
+-- (b) context_job_record_crm_time reads that first, then the cache: the message by its CRM
+--     id in the cache row of the text's own contact, else a cache row of its job, else any
+--     cache row (each id sits in one row; 28 of the 241 live rows carry no contact).
+-- A backfilled text whose CRM time is in neither is time unknown, never the load time: its
+-- callers keep it off the customer's side, out of the reader's evidence and the citations.
+-- One bad cache row never fails a story or a cache write (anything not a full ISO time
+-- with a zone, or not a real date, reads as no time).
+CREATE TABLE IF NOT EXISTS public.context_crm_message_times (
+ ghl_message_id text PRIMARY KEY,
+ contact_id text,
+ crm_at timestamptz NOT NULL,
+ kept_at timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE public.context_crm_message_times IS
+ 'Story safety (20261006040000), sixth review: the CRM''s own time of every CRM message the conversation cache (ghl_conversation_cache) has held, one row per CRM message id (crm_at, its contact, kept_at when first kept), so a CRM text loaded later from the cache keeps its CRM time after a sync writes the cache row over (the cache holds only a contact''s newest messages). Filled once from every cache row by this migration, then by the trigger context_crm_message_times_keep on each cache write; append only (a message keeps the first time seen). Read first by context_job_record_crm_time. RLS on, no policy; service role reads.';
+ALTER TABLE public.context_crm_message_times ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.context_crm_message_times FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.context_crm_message_times TO service_role;
+
+CREATE OR REPLACE FUNCTION public.context_crm_message_times_keep()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $fn$
+BEGIN
+ -- the cache write never fails for this: a message it cannot keep now is kept on a later write
+ BEGIN
+  INSERT INTO public.context_crm_message_times (ghl_message_id, contact_id, crm_at)
+  SELECT DISTINCT ON (btrim(m.v ->> 'id')) btrim(m.v ->> 'id'), NEW.contact_id, (m.v ->> 'timestamp')::timestamptz
+  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.messages) = 'array' THEN NEW.messages ELSE '[]'::jsonb END) AS m(v)
+  WHERE jsonb_typeof(m.v) = 'object' AND nullif(btrim(m.v ->> 'id'), '') IS NOT NULL
+    AND (m.v ->> 'timestamp') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]{1,6})?)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9])$'
+    AND public.context_job_record_date(m.v ->> 'timestamp') IS NOT NULL
+  ORDER BY btrim(m.v ->> 'id')
+  ON CONFLICT (ghl_message_id) DO NOTHING;
+ EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'context_crm_message_times_keep: % (%), the CRM times of contact % were not kept on this write', SQLERRM, SQLSTATE, NEW.contact_id;
+ END;
+ RETURN NULL;
+END
+$fn$;
+COMMENT ON FUNCTION public.context_crm_message_times_keep() IS
+ 'Story safety (20261006040000), sixth review: trigger on ghl_conversation_cache (after insert, or an update of messages): keeps each message''s CRM id and own time (a full ISO time with a zone on a real date) in context_crm_message_times, a message already kept untouched. Never fails the cache write: any error is a warning and the times are kept on a later write. Service role only.';
+CREATE OR REPLACE TRIGGER context_crm_message_times_keep
+ AFTER INSERT OR UPDATE OF messages ON public.ghl_conversation_cache
+ FOR EACH ROW EXECUTE FUNCTION public.context_crm_message_times_keep();
+
+-- What every cache row holds now (the texts still in it; a re-apply only adds new ones).
+INSERT INTO public.context_crm_message_times (ghl_message_id, contact_id, crm_at)
+SELECT DISTINCT ON (btrim(m.v ->> 'id')) btrim(m.v ->> 'id'), c.contact_id, (m.v ->> 'timestamp')::timestamptz
+FROM public.ghl_conversation_cache c
+CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.messages) = 'array' THEN c.messages ELSE '[]'::jsonb END) AS m(v)
+WHERE jsonb_typeof(m.v) = 'object' AND nullif(btrim(m.v ->> 'id'), '') IS NOT NULL
+  AND (m.v ->> 'timestamp') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]{1,6})?)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9])$'
+  AND public.context_job_record_date(m.v ->> 'timestamp') IS NOT NULL
+ORDER BY btrim(m.v ->> 'id'), c.synced_at DESC NULLS LAST, c.id
+ON CONFLICT (ghl_message_id) DO NOTHING;
+
+-- (b) The CRM time of one text. Plain SQL with no SET (it has subqueries, so it is not
+-- inlined); its callers ask only for backfilled rows.
 CREATE OR REPLACE FUNCTION public.context_job_record_crm_time(p_source text, p_contact_id text, p_message_id text, p_job_id uuid)
 RETURNS timestamptz
 LANGUAGE sql STABLE
 AS $fn$
  SELECT CASE WHEN p_source = 'ghl_sms_cache_backfill' AND nullif(btrim(p_message_id), '') IS NOT NULL THEN
   coalesce(
+   -- the time kept when the cache held it (sixth review), whatever the cache holds now
+   (SELECT k.crm_at FROM public.context_crm_message_times k WHERE k.ghl_message_id = btrim(p_message_id)),
    (SELECT (m.v ->> 'timestamp')::timestamptz
     FROM public.ghl_conversation_cache c
     CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.messages) = 'array' THEN c.messages ELSE '[]'::jsonb END) AS m(v)
@@ -217,7 +315,7 @@ AS $fn$
     ORDER BY c.synced_at DESC NULLS LAST, c.id LIMIT 1)) END
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_crm_time(text, text, text, uuid) IS
- 'Story safety (20261006040000): the CRM''s own time of a CRM text loaded later from its conversation cache (source ghl_sms_cache_backfill): the cache''s timestamp for that CRM message id, from the cache row of the text''s own contact, else a cache row of its job, else any cache row; null when none. Anything not a full ISO time with a zone on a real date reads as null, so one bad cache row never fails a story. Other sources: null. Read by context_job_record_messages, context_job_record_loops (this customer''s messages placed on no job), context_job_story_meta (the job''s lanes and its messages placed on no job), context_ledger_evidence_rows and context_ledger_cite. Service role only.';
+ 'Story safety (20261006040000): the CRM''s own time of a CRM text loaded later from its conversation cache (source ghl_sms_cache_backfill): the time kept for that CRM message id in context_crm_message_times (sixth review: kept when the cache held it, so a cache sync that writes the row over never loses it), else the cache''s timestamp for it, from the cache row of the text''s own contact, else a cache row of its job, else any cache row; null when none (its callers then treat the text as time unknown, never as the load time). Anything not a full ISO time with a zone on a real date reads as null, so one bad cache row never fails a story. Other sources: null. Read by context_job_record_messages, context_job_record_loops (this customer''s messages placed on no job or on their other jobs), context_job_story_meta (the job''s lanes and its messages placed on no job), context_ledger_evidence_rows and context_ledger_cite. Service role only.';
 
 -- 2. Who an invoice is addressed to, in the job's terms: builder work (make-safe,
 -- repair, insurance) is billed to the builder, the job's customer; else a party
@@ -289,10 +387,13 @@ COMMENT ON FUNCTION public.context_job_record_bill_share(text, jsonb, text) IS
 -- an invoice line's own base ("50% of $12,000.00", also a line naming this job on an
 -- invoice placed elsewhere), a deposit's percentage, the newest sent quote, a final
 -- invoice issued below the value, a value taken from a quote the app has no record of
--- sending, and an invoice placed elsewhere (on no job, or on another job) whose
--- reference or lines name this job while its own issued invoices fall short of the
--- value. Any check makes the value unconfirmed. Plain SQL with no SET, read inside the
--- definer record functions.
+-- sending, an invoice placed elsewhere while this job's own issued invoices fall short of
+-- the value (on no job or another job naming this job; sixth review: on no job addressed
+-- to this job's own Xero contact, or on this client's other job of the same kind at the
+-- same site address), and (sixth review) a value set from the CRM (pricing_json.source
+-- ghl, or the import's $1,000.00 placeholder) that no quote on the job backs. Any check
+-- makes the value unconfirmed. Plain SQL with no SET, read inside the definer record
+-- functions.
 CREATE OR REPLACE FUNCTION public.context_job_record_value(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, value numeric, value_basis text, accepted boolean, accepted_at timestamptz, accepted_by text,
  issued numeric, checks jsonb)
@@ -304,7 +405,12 @@ AS $fn$
          CASE WHEN jsonb_typeof(jb.pricing_json->'totalIncGST') = 'number' THEN (jb.pricing_json->>'totalIncGST')::numeric END AS price_inc,
          jb.quoted_value, jb.created_at,
          -- the job number as invoices name it (SW...-digits; another form names no job)
-         upper(substring(coalesce(jb.job_number, '') FROM '^(SW[A-Za-z]{0,4}-[0-9]+)')) AS jnum
+         upper(substring(coalesce(jb.job_number, '') FROM '^(SW[A-Za-z]{0,4}-[0-9]+)')) AS jnum,
+         -- (sixth review) where the value came from, the job's kind of work, its own Xero
+         -- contact, its client (CRM contact, client email) and its site
+         nullif(btrim(jb.pricing_json ->> 'source'), '') AS psrc, jb.type::text AS jtype,
+         nullif(btrim(jb.xero_contact_id), '') AS jxc, nullif(btrim(jb.ghl_contact_id), '') AS ccontact,
+         lower(nullif(btrim(jb.client_email), '')) AS cmail, jb.site_address
   FROM public.jobs jb WHERE jb.id = ANY (p_job_ids)
  ),
  jv AS (  -- job value exactly as the reference: price_inc, else quoted_value (zero counts as none)
@@ -360,34 +466,63 @@ AS $fn$
          CASE WHEN a.job_acc IS NOT NULL THEN 'job' WHEN a.quote_acc IS NOT NULL THEN 'quote' WHEN a.dep_acc IS NOT NULL THEN 'deposit' END AS acc_by
   FROM acc a
  ),
- -- (story safety, fourth review) customer invoices placed elsewhere, on no job or on another
- -- job, whose reference or lines name this job's number, recorded by p_as_of and made no
- -- earlier than 30 days before the job: read only while this job's own issued invoices fall
- -- short of its accepted value (when R8 would fire), so a job billed elsewhere never reads
- -- "not yet invoiced" as fact. base: a line naming this job that says it is a share
- -- ("50% of $748.01").
+ -- (story safety, fourth and sixth review) customer invoices placed elsewhere that may bill
+ -- this job, recorded by p_as_of and made no earlier than 30 days before the job, read only
+ -- while this job's own issued invoices fall short of its accepted value (when R8 would
+ -- fire), so a job billed elsewhere never reads "not yet invoiced" as fact. Each is tied to
+ -- the job one way (the first that holds):
+ --  names: on no job or another job, its reference or lines name this job's number (base: a
+ --         line naming this job that says it is a share, "50% of $748.01");
+ --  contact (sixth review): on no job and addressed to this job's own Xero contact (the job's,
+ --         or one on its own invoices), so a job with no number is read too (bda6e1de, the rest
+ --         of its quote billed to its own contact on an invoice never placed on it); never on
+ --         builder work, where every job's contact is the builder (there an invoice must name
+ --         the job);
+ --  site (sixth review): on this client's other job (CRM contact or client email) of the same
+ --         kind at the same site address, a duplicate record of it (SWP-25005's work billed and
+ --         paid on SWP-26041, its invoices naming the quote, never the job).
+ w AS (SELECT v.* FROM v WHERE v.accepted AND v.value IS NOT NULL AND v.value - coalesce(v.issued, 0) > 1),
+ wx AS (  -- this job's own Xero contacts
+  SELECT DISTINCT w.id AS job_id, z.x
+  FROM w CROSS JOIN LATERAL (SELECT w.jxc AS x UNION SELECT s.xc FROM si s WHERE s.job_id = w.id) z
+  WHERE z.x IS NOT NULL AND w.jtype NOT IN ('makesafe', 'repair', 'insurance')
+ ),
+ ws AS (  -- this client's other jobs of the same kind at the same site address
+  SELECT w.id AS job_id, o.id AS other_id
+  FROM w JOIN public.jobs o ON o.id <> w.id AND o.type::text = w.jtype
+   AND ((w.ccontact IS NOT NULL AND o.ghl_contact_id = w.ccontact)
+        OR (w.cmail IS NOT NULL AND o.client_email IS NOT NULL AND lower(btrim(o.client_email)) = w.cmail))
+  WHERE public.context_address_key(o.site_address) = public.context_address_key(w.site_address)
+     OR nullif(lower(regexp_replace(coalesce(o.site_address, ''), '[^a-zA-Z0-9]+', '', 'g')), '')
+        = nullif(lower(regexp_replace(coalesce(w.site_address, ''), '[^a-zA-Z0-9]+', '', 'g')), '')
+ ),
  ex AS (
-  SELECT w.id AS job_id, x.id, x.invoice_number, upper(coalesce(x.status, '')) AS st, x.total,
-         coalesce((x.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), x.created_at) AS at,
-         (SELECT o.job_number FROM public.jobs o WHERE o.id = x.job_id) AS on_job, nm.base
-  FROM (SELECT v.* FROM v WHERE v.accepted AND v.value IS NOT NULL AND v.value - coalesce(v.issued, 0) > 1 AND v.jnum IS NOT NULL) w
-  CROSS JOIN LATERAL (
-   SELECT x.* FROM public.xero_invoices x
-   WHERE x.job_id IS DISTINCT FROM w.id AND upper(coalesce(x.invoice_type, 'ACCREC')) = 'ACCREC'
-     AND upper(coalesce(x.status, '')) IN ('DRAFT', 'AUTHORISED', 'SUBMITTED', 'PAID')
-     AND coalesce(x.created_at, x.synced_at, '-infinity'::timestamptz) <= p_as_of
-     AND coalesce(x.created_at, x.synced_at, '-infinity'::timestamptz) >= w.created_at - interval '30 days') x
-  CROSS JOIN LATERAL (
-   SELECT bool_or(true) AS names,
-          (array_agg(replace((regexp_match(t.d, '[0-9]{1,3}(?:\.[0-9]+)?% of \$([0-9][0-9,]*(?:\.[0-9]{1,2})?)'))[1], ',', '')::numeric ORDER BY t.o)
-            FILTER (WHERE t.d ~ '[0-9]{1,3}(\.[0-9]+)?% of \$[0-9]'))[1] AS base
-   FROM (SELECT x.reference AS d, 0 AS o
-         UNION ALL
-         SELECT li ->> 'Description', 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(x.line_items) = 'array' THEN x.line_items ELSE '[]'::jsonb END) li) t
-   -- the whole job number, never a longer one it begins (SWF-2699 is not SWF-26997)
-   WHERE strpos(upper(t.d), w.jnum) > 0
-     AND EXISTS (SELECT 1 FROM regexp_matches(t.d, '(SW[A-Z]{0,4}-[0-9]+)', 'gi') r WHERE upper(r[1]) = w.jnum)) nm
-  WHERE nm.names
+  SELECT y.* FROM (
+   SELECT w.id AS job_id, x.id, x.invoice_number, upper(coalesce(x.status, '')) AS st, x.total, x.amount_due,
+          coalesce((x.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), x.created_at) AS at,
+          (SELECT o.job_number FROM public.jobs o WHERE o.id = x.job_id) AS on_job, nm.base,
+          CASE WHEN nm.names THEN 'names'
+               WHEN x.job_id IS NULL AND EXISTS (SELECT 1 FROM wx WHERE wx.job_id = w.id AND wx.x = nullif(btrim(x.xero_contact_id), '')) THEN 'contact'
+               WHEN EXISTS (SELECT 1 FROM ws WHERE ws.job_id = w.id AND ws.other_id = x.job_id) THEN 'site' END AS tie
+   FROM w
+   CROSS JOIN LATERAL (
+    SELECT x.* FROM public.xero_invoices x
+    WHERE x.job_id IS DISTINCT FROM w.id AND upper(coalesce(x.invoice_type, 'ACCREC')) = 'ACCREC'
+      AND upper(coalesce(x.status, '')) IN ('DRAFT', 'AUTHORISED', 'SUBMITTED', 'PAID')
+      AND coalesce(x.created_at, x.synced_at, '-infinity'::timestamptz) <= p_as_of
+      AND coalesce(x.created_at, x.synced_at, '-infinity'::timestamptz) >= w.created_at - interval '30 days') x
+   CROSS JOIN LATERAL (
+    SELECT bool_or(true) AS names,
+           (array_agg(replace((regexp_match(t.d, '[0-9]{1,3}(?:\.[0-9]+)?% of \$([0-9][0-9,]*(?:\.[0-9]{1,2})?)'))[1], ',', '')::numeric ORDER BY t.o)
+             FILTER (WHERE t.d ~ '[0-9]{1,3}(\.[0-9]+)?% of \$[0-9]'))[1] AS base
+    FROM (SELECT x.reference AS d, 0 AS o
+          UNION ALL
+          SELECT li ->> 'Description', 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(x.line_items) = 'array' THEN x.line_items ELSE '[]'::jsonb END) li) t
+    -- the whole job number, never a longer one it begins (SWF-2699 is not SWF-26997)
+    WHERE w.jnum IS NOT NULL AND strpos(upper(t.d), w.jnum) > 0
+      AND EXISTS (SELECT 1 FROM regexp_matches(t.d, '(SW[A-Z]{0,4}-[0-9]+)', 'gi') r WHERE upper(r[1]) = w.jnum)) nm
+  ) y
+  WHERE y.tie IS NOT NULL
  ),
  c AS (
   -- (972) an accepted quote's value differs from the job value
@@ -480,17 +615,42 @@ AS $fn$
   JOIN v ON v.id = q.job_id
   WHERE v.accepted AND v.value IS NOT NULL AND NOT EXISTS (SELECT 1 FROM qd s WHERE s.job_id = q.job_id AND s.sent_at IS NOT NULL)
   UNION ALL
-  -- (story safety, fourth review) an invoice placed on no job or on another job names this
-  -- job while its own issued invoices fall short of the value: it may bill this job, so
-  -- what is left to invoice is not known (SWF-26997's builder invoice placed on no job;
-  -- SWF-26368's remainder billed on a sibling job)
+  -- (story safety, fourth and sixth review) an invoice placed elsewhere ties to this job
+  -- (ex: it names the job, is on no job addressed to the job's own Xero contact, or is on
+  -- this client's other job of the same kind at the same site address) while its own issued
+  -- invoices fall short of the value: it may bill this job, so what is left to invoice is
+  -- not known (SWF-26997's builder invoice placed on no job; SWF-26368's remainder billed on
+  -- a sibling job; bda6e1de's remainder to its own contact on no job; SWP-25005 billed on
+  -- its duplicate record SWP-26041)
   SELECT e.job_id, 8, jsonb_build_object('table', 'xero_invoices', 'id', e.id::text, 'at', e.at, 'amount', e.total,
           'what', CASE WHEN e.st = 'DRAFT' THEN 'Draft invoice ' ELSE 'Invoice ' END || coalesce(e.invoice_number, 'without a number')
-                  || ' (' || to_char(coalesce(e.total, 0), 'FM$999,999,990.00') || ', ' || lower(e.st) || ') names this job but is placed '
-                  || coalesce('on job ' || e.on_job, 'on no job') || '; this job''s own issued invoices total '
+                  || ' (' || to_char(coalesce(e.total, 0), 'FM$999,999,990.00') || ', ' || lower(e.st)
+                  || CASE e.tie
+                      WHEN 'names' THEN ') names this job but is placed ' || coalesce('on job ' || e.on_job, 'on no job')
+                      WHEN 'contact' THEN CASE WHEN e.st IN ('AUTHORISED', 'SUBMITTED') AND coalesce(e.amount_due, 0) > 0
+                                               THEN ', ' || to_char(e.amount_due, 'FM$999,999,990.00') || ' owing' ELSE '' END
+                                          || ') is addressed to this job''s Xero contact but is placed on no job'
+                      ELSE ') is on job ' || coalesce(e.on_job, 'without a number')
+                           || ', this client''s other job of this kind at the same site address' END
+                  || '; this job''s own issued invoices total '
                   || to_char(coalesce(v.issued, 0), 'FM$999,999,990.00') || ' against the job value ' || to_char(v.value, 'FM$999,999,990.00')
                   || ' (' || v.basis || ')')
   FROM ex e JOIN v ON v.id = e.job_id
+  UNION ALL
+  -- (story safety, sixth review) the value was set from the CRM (pricing_json.source ghl: an
+  -- opportunity's value; $1,000.00 is the import's placeholder, 477 jobs carry it) and nothing
+  -- on the job backs it, no quote and no issued invoice line naming it as its base: what is
+  -- left to invoice is not known (bda6e1de: a $1,000.00 value, the rest of a real quote billed
+  -- elsewhere)
+  SELECT w.id, 9, jsonb_build_object('table', 'jobs', 'id', w.id::text, 'at', w.created_at, 'amount', NULL,
+          'what', 'The job value ' || to_char(w.value, 'FM$999,999,990.00') || ' (' || w.basis || ') '
+                  || CASE WHEN w.psrc = 'ghl' THEN 'was set from the CRM (pricing_json.source ghl)'
+                          ELSE 'is $1,000.00, the CRM import''s placeholder' END
+                  || ' and no quote on the job backs it')
+  FROM w
+  WHERE (w.psrc = 'ghl' OR w.value = 1000)
+    AND NOT EXISTS (SELECT 1 FROM qd q WHERE q.job_id = w.id)
+    AND NOT EXISTS (SELECT 1 FROM si s WHERE s.job_id = w.id AND s.base IS NOT NULL AND abs(s.base - w.value) <= 1)
  )
  SELECT v.id AS job_id, v.value, v.basis AS value_basis, v.accepted, v.acc_at AS accepted_at, v.acc_by AS accepted_by,
         coalesce(v.issued, 0) AS issued,
@@ -499,7 +659,7 @@ AS $fn$
  FROM v
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_value(uuid[], timestamptz) IS
- 'Story safety (20261006040000): per job the value (pricing_json.totalIncGST, else jobs.quoted_value; zero is none), whether it is accepted (the job row''s acceptance, an accepted quote, or a paid deposit invoice: reference DEP<n>, a line about a deposit or the job''s deposit invoice, PAID or with a payment, by p_as_of), when and by which, the issued customer invoices, and checks: each way the records disagree with the value (kind 1 the accepted quote and kind 2 invoices above the value, as 972 had them; on an accepted job also kind 3 an invoice line''s own base, or a line naming this job on an invoice placed on no job or on another job, kind 4 a deposit''s percentage with one paying contact, kind 5 the newest sent quote still standing, kind 6 a final invoice issued below the value, kind 7 a value from a quote the app has no record of sending, worded so: it may have gone another way, kind 8 a customer invoice (draft or issued) placed on no job or on another job whose reference or lines name this job''s number while its own issued invoices fall short of the value), each {table, id, at, amount, what, kind}. Any check makes the value unconfirmed. Read by the record loops (R8, C2) and the money rows. Service role only.';
+ 'Story safety (20261006040000): per job the value (pricing_json.totalIncGST, else jobs.quoted_value; zero is none), whether it is accepted (the job row''s acceptance, an accepted quote, or a paid deposit invoice: reference DEP<n>, a line about a deposit or the job''s deposit invoice, PAID or with a payment, by p_as_of), when and by which, the issued customer invoices, and checks: each way the records disagree with the value (kind 1 the accepted quote and kind 2 invoices above the value, as 972 had them; on an accepted job also kind 3 an invoice line''s own base, or a line naming this job on an invoice placed on no job or on another job, kind 4 a deposit''s percentage with one paying contact, kind 5 the newest sent quote still standing, kind 6 a final invoice issued below the value, kind 7 a value from a quote the app has no record of sending, worded so: it may have gone another way, kind 8 a customer invoice (draft or issued) placed elsewhere while this job''s own issued invoices fall short of the value: on no job or another job whose reference or lines name this job''s number, or (sixth review) on no job addressed to this job''s own Xero contact (the job''s, or one on its own invoices; never on builder work, where every job''s contact is the builder), or on this client''s other job (CRM contact or client email) of the same kind at the same site address; kind 9 (sixth review) a value set from the CRM, pricing_json.source ghl or the import''s $1,000.00 placeholder, that no quote on the job and no issued invoice line naming it as its base backs, while the issued invoices fall short of it), each {table, id, at, amount, what, kind}. Any check makes the value unconfirmed. Read by the record loops (R8, C2) and the money rows. Service role only.';
 
 -- 5. A Perth day in words, like the story's other dates ("Wed 7 Oct"; the year
 -- added when it is not the current one). Pure.
@@ -580,9 +740,11 @@ AS $fn$
  ev AS (
   -- a CRM text loaded later from the CRM's cache is timed by the CRM's own message
   -- time (story safety, 20261006040000); one the CRM dates more than 30 days before
-  -- the job was created is from before the job's lead window (before_job)
+  -- the job was created is from before the job's lead window (before_job); one whose CRM
+  -- time is no longer known is time unknown (sixth review: never the load time)
   SELECT j.id AS jid, j.cmail, j.ccontact, e.id, coalesce(ct.crm_at, e.event_at, e.occurred_at) AS at,
-         coalesce(ct.crm_at < j.created_at - interval '30 days', false) AS before_job, e.event_type, e.source,
+         coalesce(ct.crm_at < j.created_at - interval '30 days', false) AS before_job,
+         (e.source = 'ghl_sms_cache_backfill' AND ct.crm_at IS NULL) AS time_unknown, e.event_type, e.source,
          e.channel, e.direction, e.contact_id, e.payload, e.metadata,
          regexp_replace(public.context_event_text(e), '\s+', ' ', 'g') AS txt,
          -- crew and staff alerts are texts we send; inbound rows are never one
@@ -626,8 +788,9 @@ AS $fn$
   SELECT l.jid, 'business_events'::text AS tbl, l.id::text AS sid, l.at, l.event_type, l.source, l.channel, l.direction,
          left(l.txt, 300) AS words, l.cp, l.sr, l.aud, l.rr, l.ijc, l.fic, l.tic, l.sbk, l.irole, l.is_msg, l.is_note,
          -- a text from before the job's lead window is never this customer's side: the CRM
-         -- contact may have been another person's then (story safety, 20261006040000)
-         (NOT l.before_job AND (l.is_msg AND CASE WHEN l.rr IS NOT NULL THEN false
+         -- contact may have been another person's then (story safety, 20261006040000); nor one
+         -- whose time is unknown (sixth review: it may be from before the lead window too)
+         (NOT l.before_job AND NOT l.time_unknown AND (l.is_msg AND CASE WHEN l.rr IS NOT NULL THEN false
                             WHEN l.cp IS NOT NULL THEN l.cp = 'customer'
                             ELSE coalesce(l.ijc, false) OR coalesce(l.fic, false) OR coalesce(l.tic, false) END)) AS cust,
          (l.rr IN ('crew', 'staff') OR l.aud = 'internal' OR l.irole <> 'other' OR l.cp IN ('crew', 'staff')
@@ -639,7 +802,7 @@ AS $fn$
           AND (l.event_type = 'call.transcript_completed'
                OR lower(coalesce(l.payload->>'call_status', substring(l.txt FROM 'Provider status: ([A-Za-z_-]+)'), ''))
                   IN ('completed', 'answered'))) AS answered,
-         CASE WHEN l.before_job THEN 'before_job' ELSE 'on_job' END AS placement
+         CASE WHEN l.before_job THEN 'before_job' WHEN l.time_unknown THEN 'time_unknown' ELSE 'on_job' END AS placement
   FROM lab l
  ),
  -- legacy mail: a repeat client's mail placed on no job is withheld (it may be another job's)
@@ -670,7 +833,7 @@ AS $fn$
  FROM (SELECT * FROM bel UNION ALL SELECT * FROM ibl) u
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) IS
- 'Job record (20261006011000), story safety (20261006040000): a CRM text loaded later from the CRM''s cache (source ghl_sms_cache_backfill) is timed by the CRM''s own message time (context_job_record_crm_time), not the load time; one the CRM dates more than 30 days before the job was created is history from before the job''s lead window: placement before_job, never the customer''s side, so it is never the customer''s last word, first contact or a candidate. Earlier: message-shaped business_events on the jobs (recorded at or before p_as_of) with the who-to-whom labels of the proof-set reference (customer_side = grade_ref is_customer_counterpart), plus legacy inbox_events mail placed on the job, or from the client address and placed on no job (placement not_placed), with no business_events copy. Since 20261006031000 a row marked as a copy of another (metadata.duplicate_of) is left out, so the timeline, loops and contact counts never count one message twice. Inlinable helper (no SET, not SECURITY DEFINER) read by the job record functions. Service role only.';
+ 'Job record (20261006011000), story safety (20261006040000): a CRM text loaded later from the CRM''s cache (source ghl_sms_cache_backfill) is timed by the CRM''s own message time (context_job_record_crm_time), not the load time; one the CRM dates more than 30 days before the job was created is history from before the job''s lead window: placement before_job, never the customer''s side, so it is never the customer''s last word, first contact or a candidate; (sixth review) one whose CRM time is no longer known (neither kept nor in the cache) is placement time_unknown, its at the load time it carries, never the customer''s side either. Earlier: message-shaped business_events on the jobs (recorded at or before p_as_of) with the who-to-whom labels of the proof-set reference (customer_side = grade_ref is_customer_counterpart), plus legacy inbox_events mail placed on the job, or from the client address and placed on no job (placement not_placed), with no business_events copy. Since 20261006031000 a row marked as a copy of another (metadata.duplicate_of) is left out, so the timeline, loops and contact counts never count one message twice. Inlinable helper (no SET, not SECURITY DEFINER) read by the job record functions. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_job_record_timeline(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, at timestamptz, perth_date date, time_basis text, kind text, what text, amount numeric,
@@ -1274,7 +1437,7 @@ AS $fn$
          nullif(btrim(jb.ghl_contact_id), '') AS ccontact, nullif(btrim(jb.xero_contact_id), '') AS jxc,
          CASE WHEN jb.accepted_at <= p_as_of THEN jb.accepted_at END AS accepted_at,
          CASE WHEN jsonb_typeof(jb.pricing_json->'totalIncGST') = 'number' THEN (jb.pricing_json->>'totalIncGST')::numeric END AS price_inc,
-         jb.quoted_value, jb.created_at,
+         jb.quoted_value, jb.created_at, jb.site_address,
          (p_as_of AT TIME ZONE 'Australia/Perth')::date AS today
   FROM public.jobs jb WHERE jb.id = ANY (p_job_ids)
  ),
@@ -1288,16 +1451,58 @@ AS $fn$
  bm AS (SELECT * FROM msg WHERE msg.source_table = 'business_events' AND msg.is_msg),
  outs AS (SELECT * FROM bm WHERE bm.direction = 'outbound' AND bm.customer_side AND coalesce(bm.sent_by_kind, '') <> 'workflow'),
  ins AS (SELECT * FROM bm WHERE bm.direction = 'inbound' AND bm.customer_side AND bm.channel IN ('sms', 'email')),
- -- (story safety, fourth review) the customer in touch by any other way the record knows: an
- -- answered call of theirs on the job, their email from the old inbox (on the job, or from
- -- their address on no job), a message of theirs placed on no job yet (the placement
- -- queue's candidates for this job, context_unplaced_for_job, recorded by p_as_of), or
- -- their mail withheld because they have another job. A text or email of theirs on the job
- -- closes R7 (ins); one of these after the quote leaves whose move unclear. A CRM text
- -- placed on no job that was loaded later from the CRM's cache is at the CRM's own time, and
- -- one the CRM dates more than 30 days before the job was created is never theirs, as the
- -- job's own texts are read (context_job_record_messages): a text they sent before the quote
- -- is never contact since it, however late it was loaded.
+ -- (story safety, sixth review) what this customer sent off this job, recorded by p_as_of and
+ -- no copy of another, each at its CRM time when it is a CRM text loaded later from the cache
+ -- (never one whose CRM time is no longer known, nor one the CRM dates more than 30 days
+ -- before the job was created, as the job's own texts are read: context_job_record_messages):
+ --  placed on no job (placed null): the placement queue's rows that could be this job's,
+ --  their admin-bucket rows and rows on a holding job (context_unplaced_for_job), and every
+ --  other row of their CRM contact placed on no job whatever the ladder made of it
+ --  (attribution status null or empty, which no queue holds: SWF-261111's answered call
+ --  after the quote);
+ --  placed on their other jobs (the same CRM contact; placed: that job's number).
+ offr AS (
+  SELECT o.job_id, o.id, o.placed, o.queued, o.event_type, o.channel, o.contact_id, coalesce(ct.crm_at, o.event_at, o.occurred_at) AS at,
+         coalesce(o.metadata #>> '{party_roles,sender_role}', o.metadata #>> '{party_roles,counterpart_role}',
+                  CASE WHEN o.event_type LIKE 'client.%' THEN 'customer' END) AS srole,
+         lower(coalesce(o.payload ->> 'call_status', substring(o.call_text FROM 'Provider status: ([A-Za-z_-]+)'), '')) AS call_status,
+         (o.channel = 'call' OR o.event_type IN ('client.call_logged', 'client.call_complete', 'call.transcript_completed')) AS is_call
+  FROM (
+   SELECT j.id AS job_id, j.created_at AS job_created, NULL::text AS placed, true AS queued, u.id, u.event_type, u.channel, u.contact_id, u.source,
+          u.payload, u.metadata, u.provider_message_id, u.event_at, u.occurred_at, u.recorded_at,
+          CASE WHEN u.channel = 'call' OR u.event_type LIKE '%call%' THEN public.context_event_text(u) END AS call_text
+   FROM j CROSS JOIN LATERAL public.context_unplaced_for_job(j.id) u
+   WHERE u.direction = 'inbound'
+   UNION ALL
+   SELECT j.id, j.created_at, NULL::text, false, e.id, e.event_type, e.channel, e.contact_id, e.source,
+          e.payload, e.metadata, e.provider_message_id, e.event_at, e.occurred_at, e.recorded_at,
+          CASE WHEN e.channel = 'call' OR e.event_type LIKE '%call%' THEN public.context_event_text(e) END
+   FROM j JOIN public.business_events e ON j.ccontact IS NOT NULL AND e.contact_id = j.ccontact AND e.job_id IS NULL
+   WHERE e.direction = 'inbound' AND coalesce(e.attribution_status, '') NOT IN ('pending_luna', 'unplaced', 'admin_bucket', 'automated')
+   UNION ALL
+   SELECT j.id, j.created_at, coalesce(oj.job_number, 'without a number'), false, e.id, e.event_type, e.channel, e.contact_id, e.source,
+          e.payload, e.metadata, e.provider_message_id, e.event_at, e.occurred_at, e.recorded_at,
+          CASE WHEN e.channel = 'call' OR e.event_type LIKE '%call%' THEN public.context_event_text(e) END
+   FROM j JOIN public.business_events e ON j.ccontact IS NOT NULL AND e.contact_id = j.ccontact AND e.job_id IS NOT NULL AND e.job_id <> j.id
+   JOIN public.jobs oj ON oj.id = e.job_id
+   WHERE e.direction = 'inbound' AND coalesce(oj.metadata ->> 'do_not_schedule', '') NOT IN ('true', '1')
+  ) o
+  CROSS JOIN LATERAL (SELECT CASE WHEN o.source = 'ghl_sms_cache_backfill'
+                                  THEN public.context_job_record_crm_time(o.source, o.contact_id,
+                                         coalesce(nullif(btrim(o.payload ->> 'ghl_message_id'), ''), substring(o.provider_message_id FROM '^ghl:(.+)$')), o.job_id)
+                             END AS crm_at) ct
+  WHERE o.metadata #>> '{duplicate_of}' IS NULL AND coalesce(o.recorded_at, o.occurred_at) <= p_as_of
+    AND coalesce(ct.crm_at, o.event_at, o.occurred_at) <= p_as_of
+    AND NOT (o.source = 'ghl_sms_cache_backfill' AND ct.crm_at IS NULL)
+    AND NOT coalesce(ct.crm_at < o.job_created - interval '30 days', false)
+ ),
+ -- (story safety, fourth and sixth review) the customer in touch by any other way the record
+ -- knows: an answered call of theirs on the job, their email from the old inbox (on the job,
+ -- or from their address on no job), a text, email or answered call of theirs off this job
+ -- (offr: placed on no job, named so, or on their other job, named by its number), or their
+ -- mail withheld because they have another job. A text or email of theirs on the job closes
+ -- R7 (ins); one of these after the quote leaves whose move unclear. A CRM text they sent
+ -- before the quote is never contact since it, however late it was loaded.
  tch AS (
   SELECT m.job_id, m.at, CASE WHEN m.source_table = 'inbox_events' THEN 'an email' ELSE 'an answered call' END AS what,
          CASE WHEN m.placement = 'not_placed' THEN 'not placed on any job' WHEN m.source_table = 'inbox_events' THEN 'from the old inbox' END AS note
@@ -1306,23 +1511,12 @@ AS $fn$
     AND (m.source_table = 'inbox_events'
          OR (m.call_answered AND (m.channel = 'call' OR m.event_type IN ('client.call_logged', 'client.call_complete', 'call.transcript_completed'))))
   UNION ALL
-  SELECT j.id, coalesce(ct.crm_at, u.event_at, u.occurred_at),
-         CASE WHEN u.channel = 'sms' THEN 'a text' WHEN u.channel = 'email' THEN 'an email' ELSE 'an answered call' END, 'not placed on any job'
-  FROM j CROSS JOIN LATERAL public.context_unplaced_for_job(j.id) u
-  CROSS JOIN LATERAL (SELECT CASE WHEN u.source = 'ghl_sms_cache_backfill'
-                                  THEN public.context_job_record_crm_time(u.source, u.contact_id,
-                                         coalesce(nullif(btrim(u.payload ->> 'ghl_message_id'), ''), substring(u.provider_message_id FROM '^ghl:(.+)$')), u.job_id)
-                             END AS crm_at) ct
-  WHERE u.direction = 'inbound' AND u.metadata #>> '{duplicate_of}' IS NULL
-    AND coalesce(u.recorded_at, u.occurred_at) <= p_as_of AND coalesce(ct.crm_at, u.event_at, u.occurred_at) <= p_as_of
-    AND NOT coalesce(ct.crm_at < j.created_at - interval '30 days', false)
-    AND coalesce(u.metadata #>> '{party_roles,sender_role}', u.metadata #>> '{party_roles,counterpart_role}',
-                 CASE WHEN u.event_type LIKE 'client.%' THEN 'customer' END) = 'customer'
-    AND (u.channel IN ('sms', 'email')
-         OR ((u.channel = 'call' OR u.event_type IN ('client.call_logged', 'client.call_complete', 'call.transcript_completed'))
-             AND (u.event_type = 'call.transcript_completed'
-                  OR lower(coalesce(u.payload ->> 'call_status', substring(public.context_event_text(u) FROM 'Provider status: ([A-Za-z_-]+)'), ''))
-                     IN ('completed', 'answered'))))
+  SELECT o.job_id, o.at, CASE WHEN o.channel = 'sms' THEN 'a text' WHEN o.channel = 'email' THEN 'an email' ELSE 'an answered call' END,
+         CASE WHEN o.placed IS NULL THEN 'not placed on any job' ELSE 'on job ' || o.placed END
+  FROM offr o
+  WHERE o.srole = 'customer'
+    AND (o.channel IN ('sms', 'email')
+         OR (o.is_call AND (o.event_type = 'call.transcript_completed' OR o.call_status IN ('completed', 'answered'))))
   UNION ALL
   SELECT w.jid, w.received_at, 'an email', 'not placed on any job; it may be about another of their jobs'
   FROM public.context_job_record_legacy_mail(p_job_ids, p_as_of) w WHERE w.placement = 'withheld'
@@ -1406,18 +1600,42 @@ AS $fn$
   FROM sales i JOIN jv ON jv.id = i.job_id
   WHERE i.st IN ('AUTHORISED', 'SUBMITTED') AND coalesce(i.amount_due, 0) > 0 AND (i.due_date IS NULL OR i.due_date >= jv.today)
   UNION ALL
-  -- R3 draft not issued (reference rule)
-  SELECT i.job_id, 'R3_draft', i.id::text, 'xero_invoices', 'loop', 'us', 'customer',
+  -- R3 draft not issued (reference rule). (Story safety, sixth review) When the job's issued
+  -- invoices for the same stage of the same job reference (its stem, SWF-261423, and the
+  -- stage its suffix names: DEP a deposit, FIN, BAL or FINBAL the final) already reach the
+  -- draft's amount, the stage is billed (a deposit split between two payers, SWF-261423's
+  -- DEP25 and B-DEP25 against the full DEP50 draft): issuing the draft would bill it twice,
+  -- so it is a check naming them, never our move
+  SELECT i.job_id, 'R3_draft', i.id::text, 'xero_invoices', CASE WHEN dup.n IS NOT NULL THEN 'check' ELSE 'loop' END, 'us', 'customer',
          'Draft invoice ' || coalesce(i.invoice_number, 'without a number') || ' ' || to_char(i.total, 'FM$999,999,990.00') || ' to '
            || coalesce(i.contact_name, 'an unnamed contact') || ' not issued since ' || to_char(i.invoice_date, 'Dy FMDD Mon YYYY')
            || coalesce(' (' || (SELECT string_agg(coalesce(o.invoice_number, 'unnumbered') || ' ' || lower(o.st), ', '
                                                   ORDER BY o.invoice_number COLLATE "C", o.id)
                                 FROM sales o WHERE o.job_id = i.job_id AND o.id <> i.id AND o.reference = i.reference)
-                       || ' on the same reference)', ''),
-         'A draft in Xero cannot be paid; it is more than a day old',
+                       || ' on the same reference)', '')
+           || coalesce('; it may duplicate the issued ' || CASE WHEN dup.n IS NULL THEN NULL WHEN ds.stage = 'DEP' THEN 'deposit' ELSE 'final' END || ' invoice'
+                       || CASE WHEN dup.n > 1 THEN 's ' ELSE ' ' END || dup.nums || ' on the same job reference ('
+                       || to_char(dup.total, 'FM$999,999,990.00') || ')', ''),
+         'A draft in Xero cannot be paid; it is more than a day old'
+           || CASE WHEN dup.n IS NOT NULL THEN '; issued invoices for the same stage of the same job reference already reach its amount, '
+                                                || 'so issuing it may bill that stage twice' ELSE '' END,
          (i.invoice_date::timestamp AT TIME ZONE 'Australia/Perth'), NULL::date, i.total, i.about,
          'Approved (issued), voided or deleted in Xero'
   FROM sales i
+  -- the job reference's stem and the stage its suffix names
+  CROSS JOIN LATERAL (SELECT upper(substring(coalesce(i.reference, '') FROM '^(SW[A-Za-z]{0,4}-[0-9]+)')) AS stem,
+                             CASE WHEN upper(coalesce(i.reference, '')) ~ '-DEP[0-9]{0,3}(-[A-Z])?$' THEN 'DEP'
+                                  WHEN upper(coalesce(i.reference, '')) ~ '-(FINBAL|FIN|BAL)[0-9]{0,3}(-[A-Z])?$' THEN 'FIN' END AS stage) ds
+  LEFT JOIN LATERAL (
+   SELECT count(*) AS n, sum(coalesce(o.total, 0)) AS total,
+          string_agg(coalesce(o.invoice_number, 'unnumbered'), ', ' ORDER BY o.invoice_number COLLATE "C", o.id) AS nums
+   FROM sales o
+   WHERE ds.stem IS NOT NULL AND ds.stage IS NOT NULL
+     AND o.job_id = i.job_id AND o.id <> i.id AND o.st IN ('AUTHORISED', 'SUBMITTED', 'PAID')
+     AND upper(substring(coalesce(o.reference, '') FROM '^(SW[A-Za-z]{0,4}-[0-9]+)')) = ds.stem
+     AND CASE WHEN upper(coalesce(o.reference, '')) ~ '-DEP[0-9]{0,3}(-[A-Z])?$' THEN 'DEP'
+              WHEN upper(coalesce(o.reference, '')) ~ '-(FINBAL|FIN|BAL)[0-9]{0,3}(-[A-Z])?$' THEN 'FIN' END = ds.stage
+   HAVING count(*) > 0 AND sum(coalesce(o.total, 0)) >= coalesce(i.total, 0) - 1) dup ON true
   WHERE i.st = 'DRAFT' AND i.invoice_date IS NOT NULL
     AND extract(epoch FROM p_as_of - (i.invoice_date::timestamp AT TIME ZONE 'Australia/Perth')) > 86400
   UNION ALL
@@ -1430,6 +1648,30 @@ AS $fn$
   FROM bm c
   WHERE c.direction = 'inbound' AND c.channel = 'call' AND c.is_job_contact IS TRUE AND c.bad_call
     AND NOT EXISTS (SELECT 1 FROM outs o WHERE o.job_id = c.job_id AND o.at > c.at)
+  UNION ALL
+  -- (story safety, sixth review) R4 for this customer's missed call placed on no job that the
+  -- placement queue offers this job (offr queued: its candidates, their admin bucket, a holding
+  -- job), from the job's lead window on, when no call, text or email went to them after it (on
+  -- this job, on any other or on none) and they did not get through since (SWF-261506 and
+  -- SWF-261509: the customer's call after ours rang out, pending placement between the two jobs)
+  SELECT o.job_id, 'R4_missed_call', o.id::text, 'business_events', 'loop', 'us', 'customer',
+         'Missed call from the customer ' || to_char(o.at AT TIME ZONE 'Australia/Perth', 'Dy FMDD Mon HH24:MI')
+           || ' (not placed on any job); no call, text or email to the customer since',
+         'The call record shows it was not answered (' || coalesce(nullif(o.call_status, ''), 'missed') || ')',
+         o.at, NULL::date, NULL::numeric, 'contact:missed-call', 'A call, text or email from us to the customer after it'
+  FROM offr o JOIN j ON j.id = o.job_id
+  WHERE o.placed IS NULL AND o.queued AND o.is_call AND o.channel = 'call' AND o.contact_id = j.ccontact
+    AND o.call_status IN ('no-answer', 'ringing', 'busy', 'missed', 'voicemail', 'canceled', 'cancelled')
+    AND o.at >= j.created_at - interval '30 days'
+    AND NOT EXISTS (SELECT 1 FROM outs x WHERE x.job_id = o.job_id AND x.at > o.at)
+    AND NOT EXISTS (SELECT 1 FROM public.business_events x
+                    WHERE x.contact_id = j.ccontact AND x.direction = 'outbound' AND coalesce(x.recorded_at, x.occurred_at) <= p_as_of
+                      AND coalesce(x.event_at, x.occurred_at) > o.at AND coalesce(x.event_at, x.occurred_at) <= p_as_of
+                      AND (x.channel IN ('sms', 'email', 'call') OR x.event_type IN ('client.sms_out', 'client.email_out', 'client.call_logged', 'client.call_complete'))
+                      AND coalesce(x.payload ->> 'sent_by_kind', '') <> 'workflow' AND public.context_internal_text_role(x) = 'other')
+    AND NOT EXISTS (SELECT 1 FROM offr y WHERE y.job_id = o.job_id AND y.is_call AND y.at > o.at
+                      AND (y.event_type = 'call.transcript_completed' OR y.call_status IN ('completed', 'answered')))
+    AND NOT EXISTS (SELECT 1 FROM msg y WHERE y.job_id = o.job_id AND y.direction = 'inbound' AND y.call_answered AND y.at > o.at)
   UNION ALL
   -- R5 customer wrote last (reference rule; a candidate until a reader says a reply is owed)
   SELECT l.job_id, 'R5_customer_wrote_last', l.source_id, 'business_events', 'candidate', 'us', 'customer',
@@ -1464,9 +1706,15 @@ AS $fn$
   -- was in touch after it in a way that does not close it (tch: an answered call, old-inbox
   -- mail, a message placed on no job, withheld mail), it may be answered: whose move is
   -- unclear (owner unknown) and the words name that newest contact; "no customer message
-  -- since" is said only when there is none anywhere.
+  -- since" is said only when there is none anywhere. (Sixth review) It is a loop only while
+  -- the job is quoted (or earlier): once its status is past quoted (SWF-261111, invoiced,
+  -- the customer's answered call after the quote placed on no job) it is a check, never a
+  -- wait on the customer; and so is a quote this customer's later job of the same kind at the same site
+  -- address may replace, once that job is accepted (SWF-26403 and SWF-26404, both halves
+  -- accepted together as SWF-26498, built and paid). The customer's contact since may be on
+  -- their other job (offr), named by its number.
   SELECT q.job_id, 'R7_quote_waiting', q.id::text, 'job_documents',
-         CASE WHEN acc.accepted THEN 'check' ELSE 'loop' END,
+         CASE WHEN acc.accepted OR jv.status NOT IN ('quoted', 'lead', 'new', 'draft') OR lj.job_number IS NOT NULL THEN 'check' ELSE 'loop' END,
          CASE WHEN de.undelivered THEN 'us' WHEN h.at IS NOT NULL THEN 'unknown' ELSE 'customer' END, CASE WHEN de.undelivered THEN 'customer' WHEN h.at IS NOT NULL THEN 'unknown' ELSE 'us' END,
          'Quote ' || coalesce(q.quote_number, 'without a number') || coalesce(' v' || q.version, '') || ' sent '
            || to_char(q.sent_at AT TIME ZONE 'Australia/Perth', 'Dy FMDD Mon YYYY') || ' ('
@@ -1476,11 +1724,19 @@ AS $fn$
                    WHEN h.at IS NOT NULL THEN CASE WHEN q.viewed_at IS NOT NULL THEN ', viewed' ELSE ', not viewed' END
                                             || '; no answer recorded, but the customer was in touch since: ' || h.words
                    WHEN q.viewed_at IS NOT NULL THEN ', viewed; no answer and no customer message since'
-                   ELSE ', not viewed; no answer and no customer message since' END,
+                   ELSE ', not viewed; no answer and no customer message since' END
+           || coalesce('; job ' || lj.job_number || ' for this customer at the same site address was accepted'
+                       || coalesce(' ' || to_char(lj.acc_at AT TIME ZONE 'Australia/Perth', 'Dy FMDD Mon YYYY'), '')
+                       || ' and may replace this quote', ''),
          CASE WHEN de.undelivered THEN 'Every email of the newest sent quote bounced or failed and the customer never viewed it, so it was not received'
               WHEN h.at IS NOT NULL THEN 'Newest sent quote not accepted, declined or superseded, sent more than 7 days ago; the customer was in touch '
                                          || 'after it (no text or email of theirs on the job), so it may already be answered: whose move is unclear'
-              ELSE 'Newest sent quote not accepted, declined or superseded, sent more than 7 days ago' END,
+              ELSE 'Newest sent quote not accepted, declined or superseded, sent more than 7 days ago' END
+           || CASE WHEN lj.job_number IS NOT NULL
+                   THEN '; this customer''s later job of the same kind at the same site address is accepted, so this quote may be replaced by it: a check'
+                   WHEN NOT acc.accepted AND jv.status NOT IN ('quoted', 'lead', 'new', 'draft')
+                   THEN '; the job''s status (' || replace(jv.status, '_', ' ') || ') is past quoted, so the quote is a check, never a wait on the customer'
+                   ELSE '' END,
          q.sent_at, NULL::date, NULL::numeric,
          'quote:' || lower(coalesce(nullif(btrim(q.quote_number), ''), 'doc-' || left(q.id::text, 8))),
          -- not received ends when an email of it goes out or the customer views it; the
@@ -1491,6 +1747,22 @@ AS $fn$
   FROM (SELECT DISTINCT ON (d.job_id) d.* FROM qd d WHERE d.sent_at IS NOT NULL
         ORDER BY d.job_id, d.sent_at DESC, d.created_at, d.id) q
   JOIN acc ON acc.job_id = q.job_id
+  JOIN jv ON jv.id = q.job_id
+  -- (sixth review) this customer's later job of the same kind at the same site address,
+  -- accepted (its acceptance, or a status past quoted) by p_as_of
+  LEFT JOIN LATERAL (
+   SELECT coalesce(o.job_number, 'without a number') AS job_number, CASE WHEN o.accepted_at <= p_as_of THEN o.accepted_at END AS acc_at
+   FROM public.jobs o
+   WHERE jv.ccontact IS NOT NULL AND o.ghl_contact_id = jv.ccontact AND o.id <> q.job_id AND o.type::text = jv.type
+     AND o.created_at > q.sent_at AND o.created_at <= p_as_of
+     AND (o.accepted_at <= p_as_of
+          OR o.status::text IN ('accepted', 'partially_accepted', 'awaiting_deposit', 'deposit', 'approvals', 'order_materials', 'awaiting_supplier',
+                                'schedule_install', 'scheduled', 'in_progress', 'processing', 'invoiced', 'final_payment', 'get_review', 'complete',
+                                'completed', 'rectification'))
+     AND (public.context_address_key(o.site_address) = public.context_address_key(jv.site_address)
+          OR nullif(lower(regexp_replace(coalesce(o.site_address, ''), '[^a-zA-Z0-9]+', '', 'g')), '')
+             = nullif(lower(regexp_replace(coalesce(jv.site_address, ''), '[^a-zA-Z0-9]+', '', 'g')), ''))
+   ORDER BY o.created_at, o.id LIMIT 1) lj ON true
   CROSS JOIN LATERAL (SELECT (EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = q.id::text AND ee.created_at <= p_as_of)
        AND NOT EXISTS (SELECT 1 FROM public.email_events ee WHERE ee.metadata ->> 'document_id' = q.id::text
         AND lower(coalesce(ee.status, '')) IN ('sent', 'delivered', 'accepted') AND ee.sent_at IS NOT NULL AND ee.sent_at <= p_as_of)
@@ -1701,16 +1973,19 @@ AS $fn$
         replace(replace(lp.what, chr(8212), ', '), chr(8211), '-') AS what, lp.why, lp.opened_at, lp.due AS due_date,
         round(lp.amount, 2) AS amount, lp.about AS about_key, lp.closes_when, lp.tbl AS source_table, lp.sid AS source_id,
         -- where the cited message sits: on_job, or not_placed (mail from the client's
-        -- address the old inbox placed on no job); null for a record row
+        -- address the old inbox placed on no job; sixth review: a missed call placed on no
+        -- job); null for a record row
         CASE WHEN lp.tbl = 'inbox_events'
              THEN coalesce((SELECT m.placement FROM msg m WHERE m.job_id = lp.job_id AND m.source_table = 'inbox_events'
                             AND m.source_id = lp.sid LIMIT 1), 'on_job')
+             WHEN lp.tbl = 'business_events' AND lp.rule = 'R4_missed_call'
+                  AND EXISTS (SELECT 1 FROM offr o WHERE o.job_id = lp.job_id AND o.id::text = lp.sid AND o.placed IS NULL) THEN 'not_placed'
              WHEN lp.tbl = 'business_events' THEN 'on_job' END AS placement
  FROM lp
  ORDER BY lp.job_id, lp.rule COLLATE "C", lp.opened_at, lp.sid COLLATE "C"
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_loops(uuid[], timestamptz) IS
- 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): a paid deposit invoice counts as acceptance (R8, and R7 turns check); R7 on a quote the customer was in touch about since it was sent in a way that does not close it (an answered call of theirs on the job, their old-inbox mail, a message of theirs placed on no job yet, their mail withheld because they have another job) is owned by nobody known (owner and counterparty unknown: it may be answered) and names that newest contact, and "no customer message since" is said only when there is none anywhere (a CRM text of theirs placed on no job that was loaded later from the CRM''s cache is at the CRM''s own time, context_job_record_crm_time, and one the CRM dates more than 30 days before the job was created is never theirs, as the job''s own texts are read, so a text sent before the quote is never contact since it however late it was loaded); C2 is one check per record that disagrees with the job value (context_job_record_value: the accepted quote, invoices above the value, and on an accepted job an invoice line''s own base, also a line naming this job on an invoice placed elsewhere, a deposit''s percentage, the newest sent quote, a final invoice below the value, a value from a quote the app has no record of sending, an invoice placed on no job or on another job that names this job), and then R8 says the value is unconfirmed and carries no amount; R1, R2 and M1 are owed by whoever the invoice is addressed to (context_job_record_payer_role): the customer (the builder on builder work), else another party (owner third_party), named with its role; C11 on a mail brought back from the old inbox (its saved copy sits on another job or on no job, recorded by p_as_of) says where that copy sits, never "stored only in the old inbox". Earlier, story fixes: C6 names the booked days in date order, each once; R7 on a quote whose every email bounced or failed and the customer never viewed it reads not received and is ours (owner us), not the customer''s answer, and its closes_when says when not received ends (an email of it goes out or the customer views it) and then when the loop closes; text sorts and tiebreaks in C (byte) order. Earlier: record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C4 and C6 to C11 (a person''s look, never an obligation; C5, crew planning''s tentative booking, is retired and crew planning''s confirmation is never read). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. placement says where a cited message sits (on_job, or not_placed: client mail the old inbox placed on no job, labelled in the words); null for a record row. Service role only.';
+ 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (sixth review) R7 is a loop only while the job is quoted or earlier: once its status is past quoted, or this customer''s later job of the same kind at the same site address is accepted (it may replace the quote, named), it is a check; the customer''s contact since the quote also counts what they sent off the job: every row of their CRM contact placed on no job whatever its attribution status, and their rows on their other jobs (named "on job X"); R4 also fires for their missed call placed on no job that the placement queue offers this job (its candidates, their admin bucket, a holding job; placement not_placed), from the job''s lead window on, when no call, text or email went to them after it on any job or none and they did not get through since; R3 is a check, never our move, when the job''s issued invoices for the same stage of the same job reference (stem and DEP or FIN suffix) already reach the draft''s amount (named: it may duplicate them); a CRM text whose CRM time is no longer known is never the customer''s. Earlier: a paid deposit invoice counts as acceptance (R8, and R7 turns check); R7 on a quote the customer was in touch about since it was sent in a way that does not close it (an answered call of theirs on the job, their old-inbox mail, a message of theirs placed on no job yet, their mail withheld because they have another job) is owned by nobody known (owner and counterparty unknown: it may be answered) and names that newest contact, and "no customer message since" is said only when there is none anywhere (a CRM text of theirs placed on no job that was loaded later from the CRM''s cache is at the CRM''s own time, context_job_record_crm_time, and one the CRM dates more than 30 days before the job was created is never theirs, as the job''s own texts are read, so a text sent before the quote is never contact since it however late it was loaded); C2 is one check per record that disagrees with the job value (context_job_record_value: the accepted quote, invoices above the value, and on an accepted job an invoice line''s own base, also a line naming this job on an invoice placed elsewhere, a deposit''s percentage, the newest sent quote, a final invoice below the value, a value from a quote the app has no record of sending, an invoice placed on no job or on another job that names this job), and then R8 says the value is unconfirmed and carries no amount; R1, R2 and M1 are owed by whoever the invoice is addressed to (context_job_record_payer_role): the customer (the builder on builder work), else another party (owner third_party), named with its role; C11 on a mail brought back from the old inbox (its saved copy sits on another job or on no job, recorded by p_as_of) says where that copy sits, never "stored only in the old inbox". Earlier, story fixes: C6 names the booked days in date order, each once; R7 on a quote whose every email bounced or failed and the customer never viewed it reads not received and is ours (owner us), not the customer''s answer, and its closes_when says when not received ends (an email of it goes out or the customer views it) and then when the loop closes; text sorts and tiebreaks in C (byte) order. Earlier: record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C4 and C6 to C11 (a person''s look, never an obligation; C5, crew planning''s tentative booking, is retired and crew planning''s confirmation is never read). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. placement says where a cited message sits (on_job, or not_placed: client mail the old inbox placed on no job, labelled in the words); null for a record row. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_job_record_money(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, party text, xero_contact_id text, invoiced numeric, paid numeric, credited numeric, owing numeric,
@@ -1921,6 +2196,68 @@ CREATE OR REPLACE FUNCTION public.context_job_story_facts(p_job_id uuid, p_as_of
 RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
+ -- (story safety, sixth review) every record that the work is finished, as 'completion' reads
+ -- them, and the latest time the work was opened again: a status change into rectification or
+ -- a make-safe re-attend (with the first record since, if any), so the story holds the final
+ -- invoice while reopened work is not finished again (SWP-26354: completion pack 22 Jul,
+ -- invoiced 24 Jul, back in rectification 19 Aug, the last 25% not invoiced)
+ WITH cmp AS (
+  SELECT je.created_at AS at, 'job_events'::text AS t, je.id::text AS id, 'Completion pack generated'::text AS what
+  FROM public.job_events je
+  WHERE je.job_id = p_job_id AND je.event_type = 'completion_pack_generated' AND je.created_at <= p_as_of
+  UNION ALL
+  SELECT coalesce(e.event_at, e.occurred_at), 'business_events', e.id::text,
+         CASE WHEN e.event_type = 'job.completed' THEN 'Job marked completed' ELSE 'Job completed and invoiced' END
+  FROM public.business_events e
+  WHERE e.job_id = p_job_id AND e.event_type IN ('job.completed', 'invoice.completed_and_invoiced')
+    AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of
+  UNION ALL
+  SELECT je.created_at, 'job_events', je.id::text,
+         CASE WHEN je.event_type = 'makesafe_substatus_changed' THEN 'Make-safe stage set to complete'
+              ELSE 'Make-safe pack recorded as sent (staff note)' END
+  FROM public.job_events je JOIN public.jobs jb ON jb.id = je.job_id
+  WHERE je.job_id = p_job_id AND je.created_at <= p_as_of AND jb.type::text IN ('makesafe', 'repair', 'insurance')
+    AND ((je.event_type = 'makesafe_substatus_changed' AND je.detail_json ->> 'substatus' = 'complete')
+         OR (je.event_type = 'note' AND coalesce(je.detail_json ->> 'text', '') ~ '^\s*MAKESAFE_PACK_SENT'))
+  UNION ALL
+  SELECT h.at, h.t, h.id, 'Status set to ' || replace(h.to_s, '_', ' ') || ' (the app''s status history)'
+  FROM (SELECT je.created_at AS at, 'job_events'::text AS t, je.id::text AS id,
+               coalesce(je.detail_json ->> 'new_status', je.detail_json ->> 'to', je.detail_json ->> 'status') AS to_s
+        FROM public.job_events je
+        WHERE je.job_id = p_job_id AND je.event_type IN ('status_changed', 'status_change') AND je.created_at <= p_as_of
+        UNION ALL
+        SELECT coalesce(e.event_at, e.occurred_at), 'business_events', e.id::text, e.payload -> 'changes' -> 'status' ->> 'to'
+        FROM public.business_events e
+        WHERE e.job_id = p_job_id AND e.event_type = 'job.status_changed' AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of) h
+  WHERE h.to_s IN ('complete', 'completed', 'get_review', 'final_payment', 'invoiced')
+    AND NOT EXISTS (SELECT 1 FROM public.jobs jb WHERE jb.id = p_job_id AND jb.status::text = 'rectification')
+    AND NOT EXISTS (SELECT 1 FROM public.job_events w
+                    WHERE w.job_id = p_job_id AND w.event_type IN ('status_changed', 'status_change') AND w.created_at <= p_as_of
+                      AND w.created_at > h.at
+                      AND coalesce(w.detail_json ->> 'new_status', w.detail_json ->> 'to', w.detail_json ->> 'status')
+                          IN ('scheduled', 'schedule_install', 'in_progress', 'processing', 'order_materials', 'awaiting_supplier'))
+    AND NOT EXISTS (SELECT 1 FROM public.business_events w
+                    WHERE w.job_id = p_job_id AND w.event_type = 'job.status_changed' AND coalesce(w.recorded_at, w.occurred_at) <= p_as_of
+                      AND coalesce(w.event_at, w.occurred_at) > h.at
+                      AND w.payload -> 'changes' -> 'status' ->> 'to'
+                          IN ('scheduled', 'schedule_install', 'in_progress', 'processing', 'order_materials', 'awaiting_supplier'))
+ ),
+ reo AS (
+  SELECT r.at, r.t, r.id, r.what FROM (
+   SELECT x.created_at AS at, 'job_events'::text AS t, x.id::text AS id,
+          CASE WHEN x.event_type = 'makesafe_reattend' THEN 'Make-safe re-attend' ELSE 'Status set to rectification' END AS what
+   FROM public.job_events x
+   WHERE x.job_id = p_job_id AND x.created_at <= p_as_of
+     AND (x.event_type = 'makesafe_reattend'
+          OR (x.event_type IN ('status_changed', 'status_change')
+              AND coalesce(x.detail_json ->> 'new_status', x.detail_json ->> 'to', x.detail_json ->> 'status') = 'rectification'))
+   UNION ALL
+   SELECT coalesce(e.event_at, e.occurred_at), 'business_events', e.id::text, 'Status set to rectification'
+   FROM public.business_events e
+   WHERE e.job_id = p_job_id AND e.event_type = 'job.status_changed' AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of
+     AND e.payload -> 'changes' -> 'status' ->> 'to' = 'rectification') r
+  ORDER BY r.at DESC, r.t COLLATE "C" DESC, r.id COLLATE "C" DESC LIMIT 1
+ )
  SELECT jsonb_build_object(
   'bookings', coalesce((SELECT jsonb_agg(jsonb_build_object('id', a.id, 'scheduled_date', a.scheduled_date, 'status', a.status,
                 'assignment_type', a.assignment_type, 'crew_name', a.crew_name, 'created_at', a.created_at,
@@ -1953,49 +2290,15 @@ AS $fn$
   -- note staff wrote; and a status change into a completion status in the app's history
   -- with no later change back into scheduled or install work (while the job is not in
   -- rectification now). After a make-safe re-attend only a record since it counts.
-  'completion', (SELECT jsonb_build_object('at', z.at, 't', z.t, 'id', z.id, 'what', z.what) FROM (
-     SELECT je.created_at AS at, 'job_events'::text AS t, je.id::text AS id, 'Completion pack generated'::text AS what
-     FROM public.job_events je
-     WHERE je.job_id = p_job_id AND je.event_type = 'completion_pack_generated' AND je.created_at <= p_as_of
-     UNION ALL
-     SELECT coalesce(e.event_at, e.occurred_at), 'business_events', e.id::text,
-            CASE WHEN e.event_type = 'job.completed' THEN 'Job marked completed' ELSE 'Job completed and invoiced' END
-     FROM public.business_events e
-     WHERE e.job_id = p_job_id AND e.event_type IN ('job.completed', 'invoice.completed_and_invoiced')
-       AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of
-     UNION ALL
-     SELECT je.created_at, 'job_events', je.id::text,
-            CASE WHEN je.event_type = 'makesafe_substatus_changed' THEN 'Make-safe stage set to complete'
-                 ELSE 'Make-safe pack recorded as sent (staff note)' END
-     FROM public.job_events je JOIN public.jobs jb ON jb.id = je.job_id
-     WHERE je.job_id = p_job_id AND je.created_at <= p_as_of AND jb.type::text IN ('makesafe', 'repair', 'insurance')
-       AND ((je.event_type = 'makesafe_substatus_changed' AND je.detail_json ->> 'substatus' = 'complete')
-            OR (je.event_type = 'note' AND coalesce(je.detail_json ->> 'text', '') ~ '^\s*MAKESAFE_PACK_SENT'))
-     UNION ALL
-     SELECT h.at, h.t, h.id, 'Status set to ' || replace(h.to_s, '_', ' ') || ' (the app''s status history)'
-     FROM (SELECT je.created_at AS at, 'job_events'::text AS t, je.id::text AS id,
-                  coalesce(je.detail_json ->> 'new_status', je.detail_json ->> 'to', je.detail_json ->> 'status') AS to_s
-           FROM public.job_events je
-           WHERE je.job_id = p_job_id AND je.event_type IN ('status_changed', 'status_change') AND je.created_at <= p_as_of
-           UNION ALL
-           SELECT coalesce(e.event_at, e.occurred_at), 'business_events', e.id::text, e.payload -> 'changes' -> 'status' ->> 'to'
-           FROM public.business_events e
-           WHERE e.job_id = p_job_id AND e.event_type = 'job.status_changed' AND coalesce(e.recorded_at, e.occurred_at) <= p_as_of) h
-     WHERE h.to_s IN ('complete', 'completed', 'get_review', 'final_payment', 'invoiced')
-       AND NOT EXISTS (SELECT 1 FROM public.jobs jb WHERE jb.id = p_job_id AND jb.status::text = 'rectification')
-       AND NOT EXISTS (SELECT 1 FROM public.job_events w
-                       WHERE w.job_id = p_job_id AND w.event_type IN ('status_changed', 'status_change') AND w.created_at <= p_as_of
-                         AND w.created_at > h.at
-                         AND coalesce(w.detail_json ->> 'new_status', w.detail_json ->> 'to', w.detail_json ->> 'status')
-                             IN ('scheduled', 'schedule_install', 'in_progress', 'processing', 'order_materials', 'awaiting_supplier'))
-       AND NOT EXISTS (SELECT 1 FROM public.business_events w
-                       WHERE w.job_id = p_job_id AND w.event_type = 'job.status_changed' AND coalesce(w.recorded_at, w.occurred_at) <= p_as_of
-                         AND coalesce(w.event_at, w.occurred_at) > h.at
-                         AND w.payload -> 'changes' -> 'status' ->> 'to'
-                             IN ('scheduled', 'schedule_install', 'in_progress', 'processing', 'order_materials', 'awaiting_supplier'))) z
+  'completion', (SELECT jsonb_build_object('at', z.at, 't', z.t, 'id', z.id, 'what', z.what) FROM cmp z
    WHERE z.at > coalesce((SELECT max(r.created_at) FROM public.job_events r
                           WHERE r.job_id = p_job_id AND r.event_type = 'makesafe_reattend' AND r.created_at <= p_as_of), '-infinity'::timestamptz)
    ORDER BY z.at, z.t COLLATE "C", z.id COLLATE "C" LIMIT 1),
+  -- (sixth review) the latest time the work was opened again (a status change into
+  -- rectification, or a make-safe re-attend) and the first record since that it is finished
+  -- (completed_since; null while it is not): {at, t, id, what, completed_since}
+  'reopened', (SELECT jsonb_build_object('at', reo.at, 't', reo.t, 'id', reo.id, 'what', reo.what,
+                 'completed_since', (SELECT min(z.at) FROM cmp z WHERE z.at > reo.at)) FROM reo),
   'status_completed_at', (SELECT CASE WHEN jb.completed_at <= p_as_of THEN jb.completed_at END FROM public.jobs jb WHERE jb.id = p_job_id),
   'builder', (SELECT nullif(btrim(d.requesting_company_name), '') FROM public.makesafe_job_details d JOIN public.jobs jb ON jb.id = d.job_id
               WHERE d.job_id = p_job_id AND jb.type::text IN ('makesafe', 'repair', 'insurance')
@@ -2055,13 +2358,14 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_facts(uuid, timestamptz) IS
- 'Job story (20261006014000), story safety (20261006040000): also completion (the first record that the work is finished: a completion pack, the job marked completed, or completed and invoiced; on builder work also the make-safe stage set to complete and the pack-sent note staff wrote (MAKESAFE_PACK_SENT); and a status change into a completion status in the app''s history with no later change back into scheduled or install work, while the job is not in rectification now; after a make-safe re-attend only a record since it counts; {at, t, id, what}), status_completed_at (the job row''s completed stamp) and builder (on make-safe, repair and insurance work, the builder the make-safe details name); report_sent_at also reads the pack-sent note on builder work, and after a re-attend only a send since it. Earlier: structured record facts for the story assembler: crew bookings (observer mirrors excluded), quote versions, make-safe report sent time, parties (job_contacts), and closing candidates (quote sent, invoice issued, payment, booking made, visit) keyed by the ledger about_key vocabulary. Service role only.';
+ 'Job story (20261006014000), story safety (20261006040000): also completion (the first record that the work is finished: a completion pack, the job marked completed, or completed and invoiced; on builder work also the make-safe stage set to complete and the pack-sent note staff wrote (MAKESAFE_PACK_SENT); and a status change into a completion status in the app''s history with no later change back into scheduled or install work, while the job is not in rectification now; after a make-safe re-attend only a record since it counts; {at, t, id, what}), (sixth review) reopened (the latest time the work was opened again: a status change into rectification or a make-safe re-attend, {at, t, id, what, completed_since}: the first completion record since it, null while there is none), status_completed_at (the job row''s completed stamp) and builder (on make-safe, repair and insurance work, the builder the make-safe details name); report_sent_at also reads the pack-sent note on builder work, and after a re-attend only a send since it. Earlier: structured record facts for the story assembler: crew bookings (observer mirrors excluded), quote versions, make-safe report sent time, parties (job_contacts), and closing candidates (quote sent, invoice issued, payment, booking made, visit) keyed by the ledger about_key vocabulary. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_job_story_meta(p_job_id uuid, p_as_of timestamptz DEFAULT now())
 RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $fn$
- WITH jb0 AS (SELECT j.created_at FROM public.jobs j WHERE j.id = p_job_id),
+ WITH jb0 AS (SELECT j.created_at, nullif(btrim(j.ghl_contact_id), '') AS contact, nullif(btrim(j.xero_contact_id), '') AS jxc,
+                     j.type::text AS jtype FROM public.jobs j WHERE j.id = p_job_id),
  e AS (
   SELECT CASE WHEN x.event_type = 'call.transcript_completed' THEN 'transcripts'
               WHEN x.channel = 'sms' OR x.event_type IN ('client.reply', 'client.sms_in', 'client.sms_out') THEN 'texts'
@@ -2070,9 +2374,12 @@ AS $fn$
               WHEN x.event_type IN ('note.added', 'ghl.internal_comment') OR x.channel = 'note' THEN 'notes'
               WHEN x.event_type = 'document.text_extracted' THEN 'documents' END AS lane,
          -- a CRM text loaded later is timed by the CRM's own time; one from before the job's
-         -- lead window is not this job's history (story safety, 20261006040000)
+         -- lead window is not this job's history (story safety, 20261006040000); one whose CRM
+         -- time is no longer known is time unknown (sixth review): counted, never a newest or
+         -- oldest time
          coalesce(ct.crm_at, x.event_at, x.occurred_at) AS at,
-         coalesce(ct.crm_at < (SELECT jb0.created_at FROM jb0) - interval '30 days', false) AS before_job
+         coalesce(ct.crm_at < (SELECT jb0.created_at FROM jb0) - interval '30 days', false) AS before_job,
+         (x.source = 'ghl_sms_cache_backfill' AND ct.crm_at IS NULL) AS time_unknown
   FROM public.business_events x
   CROSS JOIN LATERAL (SELECT CASE WHEN x.source = 'ghl_sms_cache_backfill'
                                   THEN public.context_job_record_crm_time(x.source, x.contact_id,
@@ -2083,9 +2390,10 @@ AS $fn$
   WHERE x.job_id = p_job_id AND coalesce(x.recorded_at, x.occurred_at) <= p_as_of
     AND x.metadata #>> '{duplicate_of}' IS NULL
  ),
- l AS (SELECT e.lane, count(*) AS n, max(e.at) FILTER (WHERE NOT e.before_job) AS newest,
-              min(e.at) FILTER (WHERE NOT e.before_job) AS oldest FROM e WHERE e.lane IS NOT NULL GROUP BY e.lane),
+ l AS (SELECT e.lane, count(*) AS n, max(e.at) FILTER (WHERE NOT e.before_job AND NOT e.time_unknown) AS newest,
+              min(e.at) FILTER (WHERE NOT e.before_job AND NOT e.time_unknown) AS oldest FROM e WHERE e.lane IS NOT NULL GROUP BY e.lane),
  bj AS (SELECT count(*) AS n, max(e.at) AS newest FROM e WHERE e.before_job),
+ tu AS (SELECT count(*) AS n FROM e WHERE e.time_unknown),
  lgm AS MATERIALIZED (SELECT m.id, m.graph_message_id, m.received_at, m.placement
                       FROM public.context_job_record_legacy_mail(ARRAY[p_job_id], p_as_of) m),
  lg AS (  -- legacy inbox mail the record layer reads counts as email
@@ -2108,38 +2416,83 @@ AS $fn$
  wh AS (  -- a repeat client's mail placed on no job: not this job's, said so
   SELECT count(*) AS n, max(m.received_at) AS newest FROM lgm m WHERE m.placement = 'withheld'
  ),
- un AS (  -- this customer's messages not placed on any job yet that could be this job's
-  SELECT count(*) AS n, max(ut.at) FILTER (WHERE NOT ut.before_job) AS newest,
+ -- this customer's messages not placed on any job yet that could be this job's (the placement
+ -- queue's: counted) and (sixth review) every other row of their CRM contact placed on no job,
+ -- whatever the ladder made of it (attribution status null or empty: no queue holds it, so it is
+ -- never counted, but the newest each way is named)
+ uo AS (
+  SELECT u.id, u.job_id, u.contact_id, u.source, u.provider_message_id, u.payload, u.metadata, u.direction, u.channel, u.event_type,
+         u.event_at, u.occurred_at, u.recorded_at, true AS queued,
+         lower(coalesce(u.payload ->> 'call_status', substring(public.context_event_text(u) FROM 'Provider status: ([A-Za-z_-]+)'), '')) AS call_status,
+         public.context_internal_text_role(u) AS irole
+  FROM public.context_unplaced_for_job(p_job_id) u
+  UNION ALL
+  SELECT x.id, x.job_id, x.contact_id, x.source, x.provider_message_id, x.payload, x.metadata, x.direction, x.channel, x.event_type,
+         x.event_at, x.occurred_at, x.recorded_at, false,
+         lower(coalesce(x.payload ->> 'call_status', substring(public.context_event_text(x) FROM 'Provider status: ([A-Za-z_-]+)'), '')),
+         public.context_internal_text_role(x)
+  FROM public.business_events x
+  WHERE x.contact_id = (SELECT jb0.contact FROM jb0) AND x.job_id IS NULL
+    AND coalesce(x.attribution_status, '') NOT IN ('pending_luna', 'unplaced', 'admin_bucket', 'automated')
+ ),
+ un AS (
+  SELECT count(*) FILTER (WHERE u.queued) AS n, max(ut.at) FILTER (WHERE u.queued AND NOT ut.before_job AND NOT ut.time_unknown) AS newest,
          -- (story safety, fourth review) as of p_as_of, the newest from the customer (a text or
          -- email, or a call answered or transcribed) and the newest we sent them that was not
          -- automated, so the line never says there is no customer message while one waits here
          max(ut.at) FILTER (
-          WHERE NOT ut.before_job AND u.direction = 'inbound' AND u.metadata #>> '{duplicate_of}' IS NULL
+          WHERE NOT ut.before_job AND NOT ut.time_unknown AND u.direction = 'inbound' AND u.metadata #>> '{duplicate_of}' IS NULL
             AND coalesce(u.recorded_at, u.occurred_at) <= p_as_of AND ut.at <= p_as_of
             AND coalesce(u.metadata #>> '{party_roles,sender_role}', u.metadata #>> '{party_roles,counterpart_role}',
                          CASE WHEN u.event_type LIKE 'client.%' THEN 'customer' END) = 'customer'
             AND (u.channel IN ('sms', 'email')
                  OR ((u.channel = 'call' OR u.event_type IN ('client.call_logged', 'client.call_complete', 'call.transcript_completed'))
-                     AND (u.event_type = 'call.transcript_completed'
-                          OR lower(coalesce(u.payload ->> 'call_status', substring(public.context_event_text(u) FROM 'Provider status: ([A-Za-z_-]+)'), ''))
-                             IN ('completed', 'answered'))))) AS newest_in,
+                     AND (u.event_type = 'call.transcript_completed' OR u.call_status IN ('completed', 'answered'))))) AS newest_in,
          max(ut.at) FILTER (
-          WHERE NOT ut.before_job AND u.direction = 'outbound' AND u.metadata #>> '{duplicate_of}' IS NULL
+          WHERE NOT ut.before_job AND NOT ut.time_unknown AND u.direction = 'outbound' AND u.metadata #>> '{duplicate_of}' IS NULL
             AND coalesce(u.recorded_at, u.occurred_at) <= p_as_of AND ut.at <= p_as_of
             AND coalesce(u.metadata #>> '{party_roles,counterpart_role}', u.metadata #>> '{party_roles,recipient_role}',
                          CASE WHEN u.event_type LIKE 'client.%' THEN 'customer' END) = 'customer'
             AND (u.channel IN ('sms', 'email', 'call') OR u.event_type IN ('client.sms_out', 'client.email_out', 'client.call_logged', 'client.call_complete'))
-            AND coalesce(u.payload ->> 'sent_by_kind', '') <> 'workflow' AND public.context_internal_text_role(u) = 'other') AS newest_out
-  FROM public.context_unplaced_for_job(p_job_id) u
+            AND coalesce(u.payload ->> 'sent_by_kind', '') <> 'workflow' AND u.irole = 'other') AS newest_out
+  FROM uo u
   -- a CRM text loaded later from the CRM's cache is at the CRM's own time, and one the CRM
   -- dates more than 30 days before the job was created is not this job's history (as the
-  -- lanes read the job's own): counted, never the newest of either side
+  -- lanes read the job's own), nor one whose CRM time is no longer known (sixth review):
+  -- counted, never the newest of either side
   CROSS JOIN LATERAL (SELECT CASE WHEN u.source = 'ghl_sms_cache_backfill'
                                   THEN public.context_job_record_crm_time(u.source, u.contact_id,
                                          coalesce(nullif(btrim(u.payload ->> 'ghl_message_id'), ''), substring(u.provider_message_id FROM '^ghl:(.+)$')), u.job_id)
                              END AS crm_at) ct
   CROSS JOIN LATERAL (SELECT coalesce(ct.crm_at, u.event_at, u.occurred_at) AS at,
-                             coalesce(ct.crm_at < (SELECT jb0.created_at FROM jb0) - interval '30 days', false) AS before_job) ut
+                             coalesce(ct.crm_at < (SELECT jb0.created_at FROM jb0) - interval '30 days', false) AS before_job,
+                             (u.source = 'ghl_sms_cache_backfill' AND ct.crm_at IS NULL) AS time_unknown) ut
+ ),
+ -- (sixth review) customer invoices placed on no job addressed to this job's own Xero contact
+ -- (the job's, or one on its own invoices; never on builder work, nor a contact billed on
+ -- builder work, whose invoices are the builder's), still owing, recorded by p_as_of and made
+ -- no earlier than 30 days before the job: the story names each, so it never says "owing
+ -- $0.00" over a debt of this job's client that sits on no job (bda6e1de's INV-0290)
+ jx AS (
+  SELECT DISTINCT z.x FROM (SELECT jb0.jxc AS x FROM jb0
+                            UNION ALL
+                            SELECT nullif(btrim(i.xero_contact_id), '') FROM public.xero_invoices i
+                            WHERE i.job_id = p_job_id AND upper(coalesce(i.invoice_type, 'ACCREC')) = 'ACCREC'
+                              AND upper(coalesce(i.status, '')) NOT IN ('DELETED', 'VOIDED')
+                              AND coalesce(i.created_at, i.synced_at, '-infinity'::timestamptz) <= p_as_of) z
+  WHERE z.x IS NOT NULL AND (SELECT jb0.jtype FROM jb0) NOT IN ('makesafe', 'repair', 'insurance')
+    AND NOT EXISTS (SELECT 1 FROM public.xero_invoices b JOIN public.jobs bj ON bj.id = b.job_id
+                    WHERE b.xero_contact_id = z.x AND bj.type::text IN ('makesafe', 'repair', 'insurance'))
+ ),
+ ui AS (
+  SELECT i.id, i.invoice_number, i.contact_name, i.amount_due, i.due_date,
+         CASE WHEN i.due_date < (p_as_of AT TIME ZONE 'Australia/Perth')::date
+              THEN (p_as_of AT TIME ZONE 'Australia/Perth')::date - i.due_date END AS days_overdue
+  FROM public.xero_invoices i
+  WHERE i.job_id IS NULL AND i.xero_contact_id IN (SELECT jx.x FROM jx)
+    AND upper(coalesce(i.invoice_type, 'ACCREC')) = 'ACCREC' AND upper(coalesce(i.status, '')) IN ('AUTHORISED', 'SUBMITTED')
+    AND coalesce(i.amount_due, 0) > 0 AND coalesce(i.created_at, i.synced_at, '-infinity'::timestamptz) <= p_as_of
+    AND coalesce(i.created_at, i.synced_at, '-infinity'::timestamptz) >= (SELECT jb0.created_at FROM jb0) - interval '30 days'
  ),
  jb AS (SELECT nullif(btrim(j.ghl_contact_id), '') IS NULL AS contact_missing FROM public.jobs j WHERE j.id = p_job_id)
  SELECT jsonb_build_object(
@@ -2160,11 +2513,17 @@ AS $fn$
   'withheld_mail', (SELECT jsonb_build_object('count', wh.n, 'newest_at', wh.newest) FROM wh),
   'mail_copy_elsewhere', (SELECT jsonb_build_object('count', ce.n) FROM ce),
   'before_job_texts', (SELECT jsonb_build_object('count', bj.n, 'newest_at', bj.newest) FROM bj),
+  'time_unknown_texts', (SELECT jsonb_build_object('count', tu.n) FROM tu),
+  'unplaced_invoices', (SELECT jsonb_build_object('count', count(*), 'owing', coalesce(sum(ui.amount_due), 0),
+                                 'items', coalesce(jsonb_agg(jsonb_build_object('id', ui.id, 'number', ui.invoice_number, 'party', ui.contact_name,
+                                                   'owing', ui.amount_due, 'due_date', ui.due_date, 'days_overdue', ui.days_overdue)
+                                                   ORDER BY ui.due_date NULLS LAST, ui.invoice_number COLLATE "C", ui.id), '[]'::jsonb))
+                        FROM ui),
   'contact_missing', coalesce((SELECT jb.contact_missing FROM jb), false)
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_meta(uuid, timestamptz) IS
- 'Job story (20261006014000), story safety (20261006040000): unplaced also gives newest_customer_at (the newest of this customer''s messages not placed on any job, as of p_as_of: a text or email, or a call answered or transcribed) and newest_reply_at (the newest we sent them there, never automated), so the story''s line never says there is no customer message while one waits unplaced; times a CRM text loaded later by the CRM''s own time (context_job_record_crm_time), on the job and placed on no job alike; history start, each lane''s newest and oldest and the unplaced newest_at, newest_customer_at and newest_reply_at leave out texts dated before the job''s lead window (still counted: on the job in before_job_texts {count, newest_at}, placed on no job in unplaced.count, the placement queue''s); mail_copy_elsewhere {count}: the legacy mail the record shows (context_job_record_legacy_mail, never withheld) that has a saved copy recorded by p_as_of, which then sits on another job or on no job (shown from the old inbox), so the count is the mail the story shows. Earlier: evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start (rows marked as a copy of another, metadata.duplicate_of, are not counted, 20261006031000), this customer''s unplaced messages (context_unplaced_for_job), the legacy mail withheld because the client has another job (withheld_mail: counted, never the job''s email), and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
+ 'Job story (20261006014000), story safety (20261006040000): (sixth review) unplaced''s newest_customer_at and newest_reply_at also read every other row of this customer''s CRM contact placed on no job, whatever the ladder made of it (attribution status null or empty: never in the placement queue, so never in unplaced.count or newest_at); a CRM text whose CRM time is no longer known is time unknown: counted in time_unknown_texts {count} (on the job), never a lane''s or the unplaced newest or oldest time; unplaced_invoices {count, owing, items: [{id, number, party, owing, due_date, days_overdue}]}: the customer invoices placed on no job addressed to this job''s own Xero contact (the job''s, or one on its own invoices; never on builder work, nor a contact billed on builder work), still owing, recorded by p_as_of and made no earlier than 30 days before the job. Earlier: unplaced also gives newest_customer_at (the newest of this customer''s messages not placed on any job, as of p_as_of: a text or email, or a call answered or transcribed) and newest_reply_at (the newest we sent them there, never automated), so the story''s line never says there is no customer message while one waits unplaced; times a CRM text loaded later by the CRM''s own time (context_job_record_crm_time), on the job and placed on no job alike; history start, each lane''s newest and oldest and the unplaced newest_at, newest_customer_at and newest_reply_at leave out texts dated before the job''s lead window (still counted: on the job in before_job_texts {count, newest_at}, placed on no job in unplaced.count, the placement queue''s); mail_copy_elsewhere {count}: the legacy mail the record shows (context_job_record_legacy_mail, never withheld) that has a saved copy recorded by p_as_of, which then sits on another job or on no job (shown from the old inbox), so the count is the mail the story shows. Earlier: evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start (rows marked as a copy of another, metadata.duplicate_of, are not counted, 20261006031000), this customer''s unplaced messages (context_unplaced_for_job), the legacy mail withheld because the client has another job (withheld_mail: counted, never the job''s email), and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_job_story_assemble(p_job jsonb, p_record jsonb, p_ledger jsonb, p_meta jsonb,
  p_as_of timestamptz, p_since timestamptz DEFAULT NULL)
@@ -2265,6 +2624,26 @@ AS $fn$
   FROM mo m CROSS JOIN LATERAL jsonb_array_elements(coalesce(m.invoices, '[]'::jsonb)) i
   WHERE m.party IS NOT NULL AND jsonb_typeof(i -> 'owing') = 'number' AND (i ->> 'owing')::numeric > 0
  ),
+ -- (sixth review) customer invoices placed on no job addressed to this job's own Xero contact,
+ -- still owing (meta unplaced_invoices), and the words that name them in the first line and
+ -- the money line
+ uinv AS (
+  SELECT i ->> 'id' AS id, i ->> 'number' AS num, (i ->> 'owing')::numeric AS owing, (i ->> 'due_date')::date AS due,
+         (i ->> 'days_overdue')::integer AS days, x.o
+  FROM inp, jsonb_array_elements(coalesce(inp.meta -> 'unplaced_invoices' -> 'items', '[]'::jsonb)) WITH ORDINALITY x(i, o)
+  WHERE jsonb_typeof(i -> 'owing') = 'number' AND (i ->> 'owing')::numeric > 0
+ ),
+ uw AS (
+  SELECT 'owing on ' || CASE WHEN count(*) = 1 THEN 'an invoice' ELSE 'invoices' END
+         || ' placed on no job (addressed to this job''s Xero contact): '
+         || string_agg(coalesce(u.num, 'an invoice without a number') || ' ' || to_char(u.owing, 'FM$999,999,990.00')
+                       || CASE WHEN u.days IS NOT NULL AND u.due IS NOT NULL
+                               THEN ' overdue since ' || public.context_job_story_day(u.due, inp.today) || ' (' || u.days || ' days)'
+                               WHEN u.due IS NOT NULL THEN ' due ' || public.context_job_story_day(u.due, inp.today)
+                               ELSE ', no due date in Xero' END, '; ' ORDER BY u.o) AS words
+  FROM uinv u, inp
+  GROUP BY inp.today
+ ),
  -- a record disagrees with the job value (check C2): no amount left to invoice is stated as fact
  unconf AS (
   SELECT EXISTS (SELECT 1 FROM rl WHERE rl.rule = 'C2_value_mismatch') AS on_,
@@ -2348,10 +2727,18 @@ AS $fn$
     WHEN 'completed' THEN 'complete' WHEN 'rectification' THEN 'rectification' WHEN 'lead' THEN 'enquiry' WHEN 'new' THEN 'enquiry'
     WHEN 'processing' THEN CASE WHEN ev.type = 'makesafe' THEN 'makesafe' ELSE 'other' END
     ELSE 'other' END AS status_phase,
-   CASE WHEN ev.bk_ahead THEN NULL ELSE ev.completed_at END AS work_done_at,
+   -- (sixth review) a job in rectification now has its work open again, whatever records
+   -- say it was finished before: the final invoice is not due (SWP-26354)
+   CASE WHEN ev.bk_ahead OR ev.status = 'rectification' THEN NULL ELSE ev.completed_at END AS work_done_at,
    (mt.owing > 0) AS owing, (coalesce(mt.nyi, 0) > 1) AS uninvoiced,
    -- R8 fired but the job value is unconfirmed: what is left to invoice is not known
-   (SELECT unconf.on_ AND unconf.r8 FROM unconf) AS uninv_unconf
+   (SELECT unconf.on_ AND unconf.r8 FROM unconf) AS uninv_unconf,
+   -- (sixth review) the work was opened again (a status change into rectification, or a
+   -- make-safe re-attend) after it was recorded finished, and nothing records it finished
+   -- since: the final invoice waits for that work (facts.reopened)
+   (SELECT r FROM inp, LATERAL (SELECT inp.rec -> 'facts' -> 'reopened' AS r) x
+    WHERE r IS NOT NULL AND jsonb_typeof(r) = 'object' AND (r ->> 'completed_since') IS NULL
+      AND (r ->> 'at')::timestamptz > CASE WHEN ev.bk_ahead OR ev.status = 'rectification' THEN NULL ELSE ev.completed_at END) AS reopened
   FROM ev, mt
  ),
  ph AS (
@@ -2401,11 +2788,13 @@ AS $fn$
                ORDER BY v.opened_at, v.item_key COLLATE "C" LIMIT 1) AS promoted_by
   FROM rl r WHERE r.shown_as = 'candidate'
  ),
- -- record loops shown as loops, merged per object (about_key), with promoted candidates
+ -- record loops shown as loops, merged per object (about_key), with promoted candidates. (Sixth
+ -- review) A quote waiting (R7) is never a loop once the work is done: it is a check (checks)
  rec AS (
   SELECT r.rule, r.loop_key, r.owner, r.counterparty, r.what, r.why, r.opened_at, r.due_date, r.amount, r.about_key, r.closes_when,
          r.source_table, r.source_id, NULL::text AS promoted_by
   FROM rl r WHERE r.shown_as = 'loop'
+    AND NOT (r.rule = 'R7_quote_waiting' AND (SELECT ph0.work_done_at IS NOT NULL FROM ph0))
   UNION ALL
   SELECT c.rule, c.loop_key, c.owner, c.counterparty, c.what, c.why, c.opened_at, c.due_date, c.amount, c.about_key, c.closes_when,
          c.source_table, c.source_id, c.promoted_by
@@ -2484,8 +2873,17 @@ AS $fn$
          concat_ws('; ', g.why, (SELECT string_agg(n.what || coalesce(' ("' || left(n.excerpt, 160) || '")', ''), '; ' ORDER BY n.opened_at, n.item_key COLLATE "C")
                                  FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key),
                    -- the balance falls due when the work is finished: until then it is never the next move
-                   CASE WHEN g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL FROM ph0)
+                   -- (sixth review) and while the work is open again: in rectification now, or
+                   -- reopened (a status change into rectification, a make-safe re-attend) after it
+                   -- was recorded finished, with no record it is finished since
+                   CASE WHEN g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL AND ph0.status = 'rectification' FROM ph0)
+                        THEN 'the job is in rectification, so the final invoice is not the next move until the work is finished again'
+                        WHEN g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL FROM ph0)
                         THEN 'the final invoice falls due when the work is finished, so it is not the next move yet'
+                        WHEN g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.reopened IS NOT NULL FROM ph0)
+                        THEN (SELECT 'the work was opened again after it was recorded finished (' || lower(ph0.reopened ->> 'what') || ' '
+                                     || public.context_job_story_day(((ph0.reopened ->> 'at')::timestamptz AT TIME ZONE 'Australia/Perth')::date, ph0.today)
+                                     || ') and nothing records it finished since, so the final invoice is not the next move yet' FROM ph0)
                         -- (fourth review) with the job value unconfirmed (check C2, no amount) what is
                         -- left to invoice is not known, so it is a check of the value, never a move
                         WHEN g.rule = 'R8_not_yet_invoiced' AND g.amount IS NULL
@@ -2495,7 +2893,7 @@ AS $fn$
          -- ledger items only. A final invoice before the work is done is not due yet; after
          -- it, with the job value unconfirmed (no amount), it is unconfirmed (story safety,
          -- fourth review): neither is ever the move, the first line's item or a loop due now.
-         CASE WHEN g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL FROM ph0) THEN 'not_due'
+         CASE WHEN g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL OR ph0.reopened IS NOT NULL FROM ph0) THEN 'not_due'
               WHEN g.rule = 'R8_not_yet_invoiced' AND g.amount IS NULL THEN 'unconfirmed' ELSE 'open' END AS status,
          g.closes_when,
          (SELECT max(n.blocks) FROM norm n JOIN att a ON a.item_key = n.item_key AND a.loop_about = g.about_key WHERE n.blocks <> 'none') AS blocks,
@@ -2506,9 +2904,9 @@ AS $fn$
          g.about_key, g.amount,
          (g.rule IN ('R4_missed_call', 'R5_customer_wrote_last', 'C11_customer_mail_unanswered')) AS customer_waiting,
          (g.rule IN ('R1_overdue', 'M1_money_due', 'R2_part_paid', 'R3_draft', 'R8_not_yet_invoiced')) AS money,
-         (g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL FROM ph0)) AS not_due,
+         (g.rule = 'R8_not_yet_invoiced' AND (SELECT ph0.work_done_at IS NULL OR ph0.reopened IS NOT NULL FROM ph0)) AS not_due,
          -- held: not the move now (not due yet, or unconfirmed)
-         (g.rule = 'R8_not_yet_invoiced' AND ((SELECT ph0.work_done_at IS NULL FROM ph0) OR g.amount IS NULL)) AS held
+         (g.rule = 'R8_not_yet_invoiced' AND ((SELECT ph0.work_done_at IS NULL OR ph0.reopened IS NOT NULL FROM ph0) OR g.amount IS NULL)) AS held
   FROM recg g
   UNION ALL
   -- ledger loops not attached to a record loop
@@ -2546,10 +2944,12 @@ AS $fn$
  -- on no job is said to be so)
  wl AS (SELECT w.opened_at AS at, w.placement, w.what, w.source_id FROM wr w WHERE NOT w.read_by_reader
         ORDER BY w.opened_at DESC, w.source_id COLLATE "C" DESC LIMIT 1),
- -- checks: record checks, plus candidates nobody promoted
+ -- checks: record checks (and, sixth review, a quote waiting once the work is done), plus
+ -- candidates nobody promoted
  checks AS (
   SELECT r.rule, r.what, jsonb_build_array(jsonb_build_object('t', r.source_table, 'id', r.source_id)) AS cites, r.opened_at
   FROM rl r WHERE r.shown_as = 'check'
+     OR (r.shown_as = 'loop' AND r.rule = 'R7_quote_waiting' AND (SELECT ph0.work_done_at IS NOT NULL FROM ph0))
   UNION ALL
   SELECT c.rule,
          CASE WHEN c.read_by_reader
@@ -2559,9 +2959,22 @@ AS $fn$
          jsonb_build_array(jsonb_build_object('t', c.source_table, 'id', c.source_id)), c.opened_at
   FROM wr c
  ),
+ -- (sixth review) the customer's newest message is off the job (placed on no job yet, or their
+ -- mail withheld because they have another job) and newer than every customer message on it:
+ -- no reading has checked it (a reading reads only the job's own rows), so even one that has
+ -- read every row on the job gives no all-clear over it (fixture P, SWF-261305)
+ ofj AS (
+  SELECT x.at, x.note FROM inp, LATERAL (VALUES
+    ((inp.meta->'unplaced'->>'newest_customer_at')::timestamptz, ' (not placed on any job)', 1),
+    ((inp.meta->'withheld_mail'->>'newest_at')::timestamptz, ' (an email not placed on any job; it may be about another of their jobs)', 2)
+  ) x(at, note, o)
+  WHERE x.at IS NOT NULL AND x.at > coalesce((inp.rec->'contact'->'last_customer_message'->>'at')::timestamptz, '-infinity'::timestamptz)
+  ORDER BY x.at DESC, x.o LIMIT 1
+ ),
  -- whose move: ours when we owe something due now; unclear while the customer wrote last
  -- unread; and until a live reading has read every row on the job, nothing open on
- -- record is never nobody's move (story safety, 20261006040000)
+ -- record is never nobody's move (story safety, 20261006040000), nor while the customer's
+ -- newest message is off the job (sixth review)
  wm AS (
   SELECT CASE
           WHEN EXISTS (SELECT 1 FROM loops l WHERE l.owner = 'us' AND NOT l.held) THEN 'us'
@@ -2574,6 +2987,7 @@ AS $fn$
           WHEN EXISTS (SELECT 1 FROM loops l WHERE l.owner = 'third_party' AND NOT l.held) THEN 'third_party'
           WHEN EXISTS (SELECT 1 FROM loops l WHERE NOT l.held) THEN 'unknown'
           WHEN NOT (SELECT led.words_read FROM led) THEN 'unknown'
+          WHEN EXISTS (SELECT 1 FROM ofj) THEN 'unknown'
           ELSE 'nobody' END AS whose
  ),
  -- the top loop is the first one due now (a final invoice before the work is finished, or
@@ -2695,6 +3109,10 @@ AS $fn$
                                            FROM oi WHERE oi.o <= 3)
                                   || CASE WHEN (SELECT count(*) FROM oi) > 3 THEN '; and ' || ((SELECT count(*) FROM oi) - 3) || ' more' ELSE '' END, '') END
    END AS owing_words,
+   -- (sixth review) what this job's own Xero contact owes on an invoice placed on no job (meta
+   -- unplaced_invoices), each by number and due date, so a debt the job never received is
+   -- never hidden behind its own invoices showing nothing owing (bda6e1de's INV-0290)
+   (SELECT uw.words FROM uw) AS elsewhere_words,
    CASE WHEN mt.drafts > 0 THEN mt.drafts || CASE WHEN mt.drafts = 1 THEN ' draft invoice' ELSE ' draft invoices' END || ' not issued' END AS draft_words,
    -- what is left to invoice is named only once the work is done, and only when the job
    -- value is confirmed
@@ -2721,6 +3139,15 @@ AS $fn$
                                               THEN 'no customer message and no reply from us on record' || coalesce(cw.auto, '')
                                               ELSE coalesce(cw.cm, 'no customer message on record') || ', '
                                                    || coalesce(cw.rp, 'no reply from us on record' || coalesce(cw.auto, '')) END
+                                 -- (sixth review) a reading that read every row on the job found
+                                 -- nothing open, but the customer's newest message is off the job
+                                 -- and was never its to read: named, where it sits, unchecked
+                                 WHEN led.words_read AND NOT EXISTS (SELECT 1 FROM loops l WHERE NOT l.held) AND NOT EXISTS (SELECT 1 FROM wl)
+                                      AND EXISTS (SELECT 1 FROM ofj)
+                                 THEN 'Whose move is unclear: no record item is ' || CASE WHEN EXISTS (SELECT 1 FROM loops l WHERE l.not_due) THEN 'due yet' ELSE 'open' END
+                                      || ' and the reader found nothing open in the job''s own messages, but the customer''s newest message, '
+                                      || (SELECT public.context_job_story_day((o.at AT TIME ZONE 'Australia/Perth')::date, phs.today) || o.note FROM ofj o)
+                                      || ', is off the job and not yet checked by the reader'
                                  ELSE 'Whose move is unclear' END
         ELSE CASE WHEN nx.b IS NOT NULL THEN 'Nothing open until the visit' ELSE 'Nothing open on record' END END AS move_words,
    (SELECT 'the customer wrote last on ' || public.context_job_story_day((wl.at AT TIME ZONE 'Australia/Perth')::date, phs.today)
@@ -2749,7 +3176,7 @@ AS $fn$
  nowl AS (
   SELECT n.*, (SELECT string_agg(upper(left(x.s, 1)) || substr(x.s, 2), '. ' ORDER BY x.o) FROM (VALUES
            (1, n.phase_words || coalesce(': ' || n.next_words, '') || coalesce('; ' || n.att_words, '')),
-           (2, nullif(concat_ws(', ', n.owing_words, n.draft_words, n.nyi_words), '')),
+           (2, nullif(concat_ws(', ', n.owing_words, n.elsewhere_words, n.draft_words, n.nyi_words), '')),
            (3, n.move_words || coalesce(', ' || n.top_words, '')),
            (4, n.decline_words),
            (5, n.wrote_words),
@@ -2766,7 +3193,9 @@ AS $fn$
   SELECT l.what, l.cites, l.rank AS o, l.key AS k FROM loops l WHERE l.blocks IS NOT NULL
   UNION ALL
   SELECT r.what, jsonb_build_array(jsonb_build_object('t', r.source_table, 'id', r.source_id)), NULL::bigint, r.loop_key
-  FROM rl r WHERE r.rule = 'R3_draft'
+  -- (sixth review) a draft that may duplicate issued invoices of its stage (R3 shown as a
+  -- check) blocks nothing: it is never our move
+  FROM rl r WHERE r.rule = 'R3_draft' AND r.shown_as IS DISTINCT FROM 'check'
  ),
  -- not known
  nk AS (
@@ -2801,6 +3230,11 @@ AS $fn$
                  THEN ' email on this job is shown from the old inbox: its saved copy is on another job or on no job yet.'
                  ELSE ' emails on this job are shown from the old inbox: their saved copies are on another job or on no job yet.' END END,
        'The saved copy decides where an email belongs once a person moves it; until then the old inbox row stands in for it.'),
+   (7, CASE WHEN coalesce((inp.meta->'time_unknown_texts'->>'count')::int, 0) > 0
+            THEN (inp.meta->'time_unknown_texts'->>'count') || CASE WHEN (inp.meta->'time_unknown_texts'->>'count')::int = 1
+                 THEN ' text on this job was loaded from the CRM''s cache and the CRM''s own time for it is no longer kept; it is not read as this customer''s words.'
+                 ELSE ' texts on this job were loaded from the CRM''s cache and the CRM''s own time for them is no longer kept; they are not read as this customer''s words.' END END,
+       'The cache keeps only each contact''s newest messages; a text that dropped out before its time was kept has only its load time, which may be weeks late.'),
    (7, CASE WHEN coalesce((inp.meta->'before_job_texts'->>'count')::int, 0) > 0
             THEN (inp.meta->'before_job_texts'->>'count') || CASE WHEN (inp.meta->'before_job_texts'->>'count')::int = 1
                  THEN ' text on this job is dated by the CRM more than 30 days before the job was created; it is not read as this customer''s words.'
@@ -2909,8 +3343,16 @@ AS $fn$
                      || CASE WHEN coalesce(mt.nyi, 0) > 1 THEN '; ' || to_char(mt.nyi, 'FM$999,999,990.00') || ' of the job value not yet invoiced'
                              WHEN unconf.on_ AND unconf.r8 THEN '; the job value is unconfirmed (check C2), so what is left to invoice is not known'
                              ELSE '' END
-                     || CASE WHEN mt.parties > 1 THEN '; ' || mt.parties || ' paying parties' ELSE '' END || '.',
+                     || CASE WHEN mt.parties > 1 THEN '; ' || mt.parties || ' paying parties' ELSE '' END
+                     -- (sixth review) never "owing $0.00" alone over a debt of this job's Xero
+                     -- contact that sits on an invoice placed on no job
+                     || coalesce('; ' || (SELECT uw.words FROM uw), '') || '.',
              'job_value', jsonb_build_object('amount', mt.job_value, 'basis', mt.job_value_basis),
+             -- (sixth review) the invoices placed on no job addressed to this job's own Xero
+             -- contact, still owing; never in owing above (they are not on this job)
+             'placed_on_no_job', coalesce((SELECT jsonb_agg(jsonb_build_object('number', u.num, 'owing', u.owing, 'due_date', u.due,
+                                   'days_overdue', u.days, 'cites', jsonb_build_array(jsonb_build_object('t', 'xero_invoices', 'id', u.id)))
+                                   ORDER BY u.o) FROM uinv u), '[]'::jsonb),
              'parties', coalesce((SELECT jsonb_agg(jsonb_build_object('party', m.party, 'xero_contact_id', m.xero_contact_id,
                           'invoiced', m.invoiced, 'paid', m.paid, 'credited', m.credited, 'owing', m.owing, 'overdue', m.overdue,
                           'oldest_overdue_due', m.oldest_overdue_due, 'drafts', m.drafts, 'draft_total', m.draft_total,
@@ -2989,7 +3431,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb, jsonb, timestamptz, timestamptz) IS
- 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): until a finished reading shown (live or retired, or a shadow the story shows only when asked for it by id, so a grade reads the line a promotion gives; never a building or failed one) has read every row on the job (none unread), nothing open on record is never nobody''s move: whose_move unknown, the first line says "Whose move is unclear:" first, then that no record item is open (or due yet) and the messages are not yet checked for promises or requests (a reading that lags: how many newer messages, calls, notes or documents, ours included, it has not checked), with the newest customer message and our last reply, of the job''s own, this customer''s messages placed on no job yet and their withheld mail, naming where the newest sits (with neither anywhere it says so and claims nothing unchecked); with no finished reading handling.commitments is null, and only a finished reading judges a customer message; work is done only on a completion status, a completion record (facts.completion) or a report pack sent, never because the newest booking is complete; a final invoice (R8) before the work is done is not due (loop status not_due), and after it with the job value unconfirmed (C2, no amount) it is unconfirmed (status unconfirmed): either ranks last and is never the move or the first line''s item; a value another record disagrees with (C2) states no amount left to invoice; a quote the customer was in touch about since it was sent, in a way that does not close it (R7 owner unknown), makes whose move unclear and is the item the first line names; the first line''s item is cut at a word (200 characters); the customer''s unread words are "not yet checked by the reader"; the first line names each invoice owing with its due date, who owes it ("owed by") with their role whenever a neighbour or another payer owes it (whatever the move: its payer role, else its R1, R2 or M1 loop''s owner), and each payer when more than one owes, a passed booking with no attendance, a quote declined and the newest unread customer words (R5, C11, C6); the first line names the top loop of the party whose move it is, never another party''s (the customer''s move never names a neighbour''s invoice); a quote waiting reads as waiting on the customer; another party''s invoice reads as another payer owing; on builder work the builder is the customer and the homeowner the insured; not_known names mail shown from the old inbox and texts dated before the job. Earlier, story fixes: every text sort and tiebreak that reaches the output is in C (byte) order (who, money parties, loops and their rank, cites, checks, timeline, phase notes, agreements, events, not known, changes, blockers), so the story reads the same on every server whatever the input order. Earlier: the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions, its reader''s unread rows) and meta in; the cited story out. meta.ledger = {status, generation_id, evidence_until, reader, items, hidden_items, unread_rows, needs_rebuild, stale}. Inlinable (no SET). Service role only.';
+ 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (sixth review) a job in rectification now has no work done (the final invoice is not due, said so), and the final invoice is not due either while work recorded finished was opened again since (facts.reopened: a status change into rectification or a make-safe re-attend, nothing recording it finished since); a quote waiting (R7) is a check once the work is done; a reading that has read every row on the job gives no all-clear while the customer''s newest message is off the job (meta unplaced newest_customer_at or withheld_mail newest_at newer than every customer message on the job): whose move is unknown and the line names that message, where it sits, and that the reader has not checked it; the first line and the money line name what this job''s own Xero contact owes on invoices placed on no job (meta unplaced_invoices; money.placed_on_no_job), never counting them in owing; not_known names texts whose CRM time is no longer kept. Earlier: until a finished reading shown (live or retired, or a shadow the story shows only when asked for it by id, so a grade reads the line a promotion gives; never a building or failed one) has read every row on the job (none unread), nothing open on record is never nobody''s move: whose_move unknown, the first line says "Whose move is unclear:" first, then that no record item is open (or due yet) and the messages are not yet checked for promises or requests (a reading that lags: how many newer messages, calls, notes or documents, ours included, it has not checked), with the newest customer message and our last reply, of the job''s own, this customer''s messages placed on no job yet and their withheld mail, naming where the newest sits (with neither anywhere it says so and claims nothing unchecked); with no finished reading handling.commitments is null, and only a finished reading judges a customer message; work is done only on a completion status, a completion record (facts.completion) or a report pack sent, never because the newest booking is complete; a final invoice (R8) before the work is done is not due (loop status not_due), and after it with the job value unconfirmed (C2, no amount) it is unconfirmed (status unconfirmed): either ranks last and is never the move or the first line''s item; a value another record disagrees with (C2) states no amount left to invoice; a quote the customer was in touch about since it was sent, in a way that does not close it (R7 owner unknown), makes whose move unclear and is the item the first line names; the first line''s item is cut at a word (200 characters); the customer''s unread words are "not yet checked by the reader"; the first line names each invoice owing with its due date, who owes it ("owed by") with their role whenever a neighbour or another payer owes it (whatever the move: its payer role, else its R1, R2 or M1 loop''s owner), and each payer when more than one owes, a passed booking with no attendance, a quote declined and the newest unread customer words (R5, C11, C6); the first line names the top loop of the party whose move it is, never another party''s (the customer''s move never names a neighbour''s invoice); a quote waiting reads as waiting on the customer; another party''s invoice reads as another payer owing; on builder work the builder is the customer and the homeowner the insured; not_known names mail shown from the old inbox and texts dated before the job. Earlier, story fixes: every text sort and tiebreak that reaches the output is in C (byte) order (who, money parties, loops and their rank, cites, checks, timeline, phase notes, agreements, events, not known, changes, blockers), so the story reads the same on every server whatever the input order. Earlier: the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions, its reader''s unread rows) and meta in; the cited story out. meta.ledger = {status, generation_id, evidence_until, reader, items, hidden_items, unread_rows, needs_rebuild, stale}. Inlinable (no SET). Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_client_story(p_job_id uuid, p_as_of timestamptz DEFAULT now())
 RETURNS jsonb
@@ -3072,6 +3514,24 @@ AS $fn$
     AND coalesce(i.created_at, i.synced_at, '-infinity'::timestamptz) <= p_as_of
   GROUP BY i.job_id, jb.job_number, nullif(btrim(i.xero_contact_id), ''), i.contact_name
  ),
+ -- (story safety, sixth review) and what that Xero contact still owes on invoices placed on no
+ -- job (bda6e1de's INV-0290: the rest of its quote, billed to the client's own contact and never
+ -- placed on the job): the client's debt all the same, in owing and overdue, listed in
+ -- money.placed_on_no_job and named in not_known; never a contact billed on builder work
+ xn AS (
+  SELECT nullif(btrim(i.xero_contact_id), '') AS xero_contact_id, i.contact_name AS party,
+         sum(coalesce(i.amount_due, 0)) AS owing,
+         sum(CASE WHEN i.due_date < (p_as_of AT TIME ZONE 'Australia/Perth')::date THEN coalesce(i.amount_due, 0) ELSE 0 END) AS overdue,
+         string_agg(coalesce(i.invoice_number, 'an invoice without a number'), ', ' ORDER BY i.invoice_number COLLATE "C", i.id) AS numbers,
+         jsonb_agg(jsonb_build_object('t', 'xero_invoices', 'id', i.id) ORDER BY i.invoice_date NULLS LAST, i.id) AS cites
+  FROM public.xero_invoices i
+  WHERE i.job_id IS NULL AND i.xero_contact_id IN (SELECT cxc.x FROM cxc)
+    AND upper(coalesce(i.invoice_type, 'ACCREC')) = 'ACCREC' AND upper(coalesce(i.status, '')) IN ('AUTHORISED', 'SUBMITTED')
+    AND coalesce(i.amount_due, 0) > 0 AND coalesce(i.created_at, i.synced_at, '-infinity'::timestamptz) <= p_as_of
+    AND NOT EXISTS (SELECT 1 FROM public.xero_invoices b JOIN public.jobs bj ON bj.id = b.job_id
+                    WHERE b.xero_contact_id = i.xero_contact_id AND bj.type::text IN ('makesafe', 'repair', 'insurance'))
+  GROUP BY nullif(btrim(i.xero_contact_id), ''), i.contact_name
+ ),
  lp AS (
   SELECT cj.job_number, l AS loop FROM st JOIN cj ON cj.id = st.id, jsonb_array_elements(st.s->'loops') l
  ),
@@ -3102,15 +3562,22 @@ AS $fn$
              'cites', jsonb_build_array(jsonb_build_object('t', 'jobs', 'id', cj.id))) ORDER BY cj.created_at DESC, cj.id)
            FROM cj LEFT JOIN st ON st.id = cj.id), '[]'::jsonb),
   -- (fourth review) owing and overdue are what the client owes: the invoices addressed to them
-  -- on their jobs, and what their own Xero contact owes as a payer on another client's job;
-  -- what others owe on their jobs is owed_by_others, never in the client's total
-  'money', jsonb_build_object('owing', (SELECT coalesce(sum(x.owing), 0) FROM mi x WHERE x.own) + (SELECT coalesce(sum(x.owing), 0) FROM xo x),
-             'overdue', (SELECT coalesce(sum(x.overdue), 0) FROM mi x WHERE x.own) + (SELECT coalesce(sum(x.overdue), 0) FROM xo x),
+  -- on their jobs, and what their own Xero contact owes as a payer on another client's job
+  -- (sixth review: or on an invoice placed on no job); what others owe on their jobs is
+  -- owed_by_others, never in the client's total
+  'money', jsonb_build_object('owing', (SELECT coalesce(sum(x.owing), 0) FROM mi x WHERE x.own) + (SELECT coalesce(sum(x.owing), 0) FROM xo x)
+                                       + (SELECT coalesce(sum(x.owing), 0) FROM xn x),
+             'overdue', (SELECT coalesce(sum(x.overdue), 0) FROM mi x WHERE x.own) + (SELECT coalesce(sum(x.overdue), 0) FROM xo x)
+                        + (SELECT coalesce(sum(x.overdue), 0) FROM xn x),
+             'placed_on_no_job', coalesce((SELECT jsonb_agg(jsonb_build_object('party', x.party, 'xero_contact_id', x.xero_contact_id,
+                                   'owing', x.owing, 'overdue', x.overdue, 'invoices', x.numbers, 'cites', x.cites)
+                                   ORDER BY x.owing DESC, x.party COLLATE "C", x.xero_contact_id COLLATE "C") FROM xn x), '[]'::jsonb),
              'owed_by_others', jsonb_build_object('owing', (SELECT coalesce(sum(x.owing), 0) FROM mi x WHERE NOT x.own),
                                                   'overdue', (SELECT coalesce(sum(x.overdue), 0) FROM mi x WHERE NOT x.own)),
              'not_yet_invoiced', (SELECT coalesce(sum(x.nyi), 0) FROM (SELECT max(m.not_yet_invoiced) AS nyi FROM mon m GROUP BY m.job_id) x),
              'parties', coalesce((SELECT jsonb_agg(DISTINCT p.party COLLATE "C" ORDER BY p.party COLLATE "C")
-                                  FROM (SELECT m.party FROM mon m WHERE m.party IS NOT NULL UNION ALL SELECT x.party FROM xo x WHERE x.party IS NOT NULL) p),
+                                  FROM (SELECT m.party FROM mon m WHERE m.party IS NOT NULL UNION ALL SELECT x.party FROM xo x WHERE x.party IS NOT NULL
+                                        UNION ALL SELECT x.party FROM xn x WHERE x.party IS NOT NULL) p),
                                  '[]'::jsonb),
              -- each paying party on its own: a neighbour's debt is never the client's; the client's
              -- own Xero contact owing on someone else's job counts here, that job named
@@ -3183,6 +3650,13 @@ AS $fn$
                           'why', 'The same Xero contact pays on that job; money.other_jobs names it.')
                    WHERE (SELECT coalesce(sum(x.owing), 0) FROM xo x) > 0
                    UNION ALL
+                   -- (sixth review) what their own Xero contact owes on invoices placed on no job
+                   SELECT 6, jsonb_build_object('what', 'Owing includes ' || to_char((SELECT sum(x.owing) FROM xn x), 'FM$999,999,990.00')
+                          || ' on invoices addressed to this client''s Xero contact that are placed on no job ('
+                          || (SELECT string_agg(x.numbers, ', ' ORDER BY x.numbers COLLATE "C") FROM xn x) || ').',
+                          'why', 'An invoice reaches a job only when it is placed on it; money.placed_on_no_job names it.')
+                   WHERE (SELECT coalesce(sum(x.owing), 0) FROM xn x) > 0
+                   UNION ALL
                    SELECT 4, jsonb_build_object('what', 'Past issues and preferences come only from jobs whose ledger is live.',
                           'why', 'The reader has not read every job yet.')
                    WHERE EXISTS (SELECT 1 FROM cj WHERE NOT EXISTS (SELECT 1 FROM public.context_ledger_generations g WHERE g.job_id = cj.id AND g.status = 'live'))
@@ -3191,7 +3665,7 @@ AS $fn$
  WHERE EXISTS (SELECT 1 FROM me)
 $fn$;
 COMMENT ON FUNCTION public.context_client_story(uuid, timestamptz) IS
- 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): money.owing and money.overdue, and each job''s owing and overdue, are what the client owes: only the invoices on their jobs addressed to them (payer role customer, never the builder''s on builder work, a neighbour''s or another payer''s; those are money.owed_by_others {owing, overdue} and each job''s owed_by_others, named in not_known), plus their own Xero contact as a payer elsewhere; open loops list a loop not due yet (status not_due: a final invoice before the work is done, or unconfirmed: one whose amount the job value cannot confirm) after every loop due now; money also counts what the client''s own Xero contact (on their private jobs: the job''s contact, the primary party''s, or a job''s only paying contact when every invoice to it names it as the client and it is billed on no builder work; never a neighbour''s, never on builder work) still owes on other clients'' private jobs, as a payer there (only invoices still owing; never on builder work, where every invoice is the builder''s): in owing, overdue, parties and by_party, listed in money.other_jobs and named in not_known. Earlier, story fixes: parties, paying parties, job numbers, open loops (by rank, since as a time, job number, key), past issues, preferences and other parties sort in C (byte) order with full tiebreaks. Earlier: client-story-v1 for the client of one job: identity (CRM contact, else exact client email, never a name), every job of that client with phase, short now line and owing (full story for the newest 20), money across jobs (and by_party, each payer on its own), top 10 open loops, past issues and standing preferences or access constraints from live ledgers, other parties per job, and not_known. Service role only.';
+ 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (sixth review) money.owing and money.overdue also count what the client''s own Xero contact still owes on invoices placed on no job (never a contact billed on builder work), listed in money.placed_on_no_job {party, xero_contact_id, owing, overdue, invoices, cites} and named in not_known. Earlier: money.owing and money.overdue, and each job''s owing and overdue, are what the client owes: only the invoices on their jobs addressed to them (payer role customer, never the builder''s on builder work, a neighbour''s or another payer''s; those are money.owed_by_others {owing, overdue} and each job''s owed_by_others, named in not_known), plus their own Xero contact as a payer elsewhere; open loops list a loop not due yet (status not_due: a final invoice before the work is done, or unconfirmed: one whose amount the job value cannot confirm) after every loop due now; money also counts what the client''s own Xero contact (on their private jobs: the job''s contact, the primary party''s, or a job''s only paying contact when every invoice to it names it as the client and it is billed on no builder work; never a neighbour''s, never on builder work) still owes on other clients'' private jobs, as a payer there (only invoices still owing; never on builder work, where every invoice is the builder''s): in owing, overdue, parties and by_party, listed in money.other_jobs and named in not_known. Earlier, story fixes: parties, paying parties, job numbers, open loops (by rank, since as a time, job number, key), past issues, preferences and other parties sort in C (byte) order with full tiebreaks. Earlier: client-story-v1 for the client of one job: identity (CRM contact, else exact client email, never a name), every job of that client with phase, short now line and owing (full story for the newest 20), money across jobs (and by_party, each payer on its own), top 10 open loops, past issues and standing preferences or access constraints from live ledgers, other parties per job, and not_known. Service role only.';
 
 -- 8. The ledger store's evidence and citation check: a mail is left out only for a copy on the same job.
 -- When a mail this rule brings back joined a job's evidence: not before this migration's
@@ -3340,8 +3814,11 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
    AND greatest(coalesce(e.context_captured_at, e.recorded_at, e.occurred_at), e.attributed_at) <= p_as_of
    -- one the CRM dates more than 30 days before the job was created is from before the
    -- job's lead window: the CRM contact may have been another person's then, so it is not
-   -- this job's evidence (the story never reads it as the customer's either)
+   -- this job's evidence (the story never reads it as the customer's either); nor one whose
+   -- CRM time is no longer known (sixth review: it may be from before the lead window, and
+   -- its load time is not when it was sent)
    AND NOT coalesce(ct.crm_at < j.created_at - interval '30 days', false)
+   AND NOT (e.source = 'ghl_sms_cache_backfill' AND ct.crm_at IS NULL)
  ), inbox_c AS (
   -- Legacy mail placed on the job, or from the client's own address and placed
   -- on no job. Mail the old matcher put on another job stays there: a repeat
@@ -3427,7 +3904,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  ORDER BY k.job_id, k.at, k.src_id
 $$;
 COMMENT ON FUNCTION public.context_ledger_evidence_rows(uuid[], timestamptz) IS
- 'Context ledger store (20261006013000), story safety (20261006040000): a CRM text loaded later from the CRM''s cache (source ghl_sms_cache_backfill) is at the CRM''s own time (context_job_record_crm_time, as the story times it; landed_at stays its load), and one the CRM dates more than 30 days before the job was created (before its lead window) is left out: it is not this job''s evidence. A legacy mail is left out only for a business_events copy on the same job (source pointer, graph key, payload inbox_events_id, or an email from the same sender at the same instant); a copy unplaced or on another job no longer hides it, so each email reaches the job''s reader once. Such a mail is in the evidence from its own landing, but its landed_at is when it joined the job''s evidence: no earlier than this rule''s first apply and its copies'' landing where they sit (context_ledger_mail_copies), so a reading built before then never counts it as read. Earlier: the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail placed on the job, or from the client''s address and placed on no job (placed_on this_job or none; mail placed on another job stays there; unplaced mail only when the client has no other job by CRM contact or client email, and from 30 days before the job was created), with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. has_transcript on a call log: its transcript (payload.ghl_call_id or key ghltx:<id> naming the call''s ghl:<id>) is on the job. call_customer on a transcript: context_ledger_call_customer (its call''s customer stamp, the citation check''s rule). copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
+ 'Context ledger store (20261006013000), story safety (20261006040000): a CRM text loaded later from the CRM''s cache (source ghl_sms_cache_backfill) is at the CRM''s own time (context_job_record_crm_time, as the story times it; landed_at stays its load), and one the CRM dates more than 30 days before the job was created (before its lead window) is left out: it is not this job''s evidence; (sixth review) so is one whose CRM time is no longer kept (its load time is not when it was sent). A legacy mail is left out only for a business_events copy on the same job (source pointer, graph key, payload inbox_events_id, or an email from the same sender at the same instant); a copy unplaced or on another job no longer hides it, so each email reaches the job''s reader once. Such a mail is in the evidence from its own landing, but its landed_at is when it joined the job''s evidence: no earlier than this rule''s first apply and its copies'' landing where they sit (context_ledger_mail_copies), so a reading built before then never counts it as read. Earlier: the admissible worded evidence of the given jobs as of an instant, oldest first: business_events rows passing context_ledger_row_admissible, plus legacy inbox_events mail placed on the job, or from the client''s address and placed on no job (placed_on this_job or none; mail placed on another job stays there; unplaced mail only when the client has no other job by CRM contact or client email, and from 30 days before the job was created), with no business_events copy (source pointer, graph key, payload inbox_events_id, or the same sender at the same instant), spam, newsletters and auto-replies left out. has_transcript on a call log: its transcript (payload.ghl_call_id or key ghltx:<id> naming the call''s ghl:<id>) is on the job. call_customer on a transcript: context_ledger_call_customer (its call''s customer stamp, the citation check''s rule). copy_of names the earlier row when this row is a copy (same channel, direction, sender address and words within 120 seconds); nothing is changed. Placement is read as it is now. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_ledger_cite(p_job_id uuid, p_cite jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
@@ -3470,15 +3947,20 @@ BEGIN
   v_at := coalesce(e.event_at, e.occurred_at);
   -- a CRM text loaded later from the CRM's cache is at the CRM's own time, as the evidence
   -- times it; one the CRM dates more than 30 days before the job was created is not this
-  -- job's evidence (the evidence leaves it out), so it is not cited (story safety, 20261006040000)
+  -- job's evidence (the evidence leaves it out), so it is not cited (story safety, 20261006040000),
+  -- nor one whose CRM time is no longer known (sixth review: the evidence leaves it out too)
   IF e.source = 'ghl_sms_cache_backfill' THEN
    v_crm_at := public.context_job_record_crm_time(e.source, e.contact_id,
     coalesce(nullif(btrim(e.payload ->> 'ghl_message_id'), ''), substring(e.provider_message_id FROM '^ghl:(.+)$')), e.job_id);
+   IF v_crm_at IS NULL THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible',
+     'detail', v_table || ':' || v_id || ' was loaded from the CRM''s cache and its CRM time is no longer kept');
+   END IF;
    IF v_crm_at < (SELECT jb.created_at FROM public.jobs jb WHERE jb.id = p_job_id) - interval '30 days' THEN
     RETURN jsonb_build_object('ok', false, 'code', 'citation_not_admissible',
      'detail', v_table || ':' || v_id || ' is dated by the CRM more than 30 days before the job was created');
    END IF;
-   v_at := coalesce(v_crm_at, v_at);
+   v_at := v_crm_at;
   END IF;
   IF e.event_type = 'call.transcript_completed' THEN
    -- A transcript holds both sides' words: it counts as the customer's only on
@@ -3621,7 +4103,7 @@ BEGIN
   'internal_text', v_internal, 'record', v_record, 'worded', v_worded, 'automated', v_automated);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
- 'Context ledger store (20261006013000), story safety (20261006040000): an inbox_events mail is refused for a business_events copy only when the copy is on this job (as the evidence reads it), so every mail citation accepted before is still accepted and a mail whose copy sits unplaced or on another job can now be cited. A CRM text loaded later from the CRM''s cache (source ghl_sms_cache_backfill) is at the CRM''s own time (context_job_record_crm_time, as the evidence times it), and one the CRM dates more than 30 days before the job was created is refused (citation_not_admissible), as the evidence leaves it out. Earlier: checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID, and a payment only PAID, at its paid day (paid_at); a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; a system email (email_events): only sent, delivered or accepted with a sent time, at sent_at; an app event (job_events): its time, closing only the matter it records (context_ledger_job_event_closes on kind); a document our system emailed (job_documents, or a job_events row naming its document_id): no earlier than its first email sent, delivered or accepted with a sent time, never while every one bounced or failed; a system email closes only its own matter (context_ledger_email_closes on kind); null when it cannot); kind: an app event''s event_type or a system email''s email_type; made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
+ 'Context ledger store (20261006013000), story safety (20261006040000): an inbox_events mail is refused for a business_events copy only when the copy is on this job (as the evidence reads it), so every mail citation accepted before is still accepted and a mail whose copy sits unplaced or on another job can now be cited. A CRM text loaded later from the CRM''s cache (source ghl_sms_cache_backfill) is at the CRM''s own time (context_job_record_crm_time, as the evidence times it), and one the CRM dates more than 30 days before the job was created is refused (citation_not_admissible), as the evidence leaves it out; (sixth review) so is one whose CRM time is no longer kept (neither in context_crm_message_times nor the cache). Earlier: checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID, and a payment only PAID, at its paid day (paid_at); a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; a system email (email_events): only sent, delivered or accepted with a sent time, at sent_at; an app event (job_events): its time, closing only the matter it records (context_ledger_job_event_closes on kind); a document our system emailed (job_documents, or a job_events row naming its document_id): no earlier than its first email sent, delivered or accepted with a sent time, never while every one bounced or failed; a system email closes only its own matter (context_ledger_email_closes on kind); null when it cannot); kind: an app event''s event_type or a system email''s email_type; made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
 -- (c) The judge: its quick read (the legacy mail that could be evidence, before the full
 -- read) times each mail as the full read does, so a job whose reading predates a mail
@@ -3807,6 +4289,7 @@ REVOKE ALL ON FUNCTION public.context_job_record_payer_role(uuid, text, text, te
 REVOKE ALL ON FUNCTION public.context_job_record_bill_share(text, jsonb, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_record_value(uuid[], timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.context_job_story_day(date, date) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.context_crm_message_times_keep() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.context_job_record_legacy_mail(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_messages(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) TO service_role;
@@ -3827,3 +4310,4 @@ GRANT EXECUTE ON FUNCTION public.context_job_record_payer_role(uuid, text, text,
 GRANT EXECUTE ON FUNCTION public.context_job_record_bill_share(text, jsonb, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_record_value(uuid[], timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_story_day(date, date) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_crm_message_times_keep() TO service_role;
