@@ -7,8 +7,12 @@
 // found it and a short surname ("Ng" is inside a thousand names and emails)
 // pushed the job asked about out of the list. Pins:
 //   Closed     with include_closed=true, lost, cancelled and draft jobs come
-//              too, after the open ones, marked by their status; legacy rows
-//              and test records stay out, as before.
+//              too, after the open ones, marked by their status; old-system
+//              (legacy) rows come last, marked legacy (include_legacy); test
+//              records stay out, as before.
+//   Phone      a phone is found by its digits however it is stored (with or
+//              without spaces, +61 or 0, brackets), on the job and on its
+//              contacts.
 //   Words      whole-word matches of the client's or a contact's name, the
 //              suburb, the job number and invoice references are read on
 //              their own, so a short surname is never crowded out; regex
@@ -158,16 +162,20 @@ const search = (params: Record<string, string>, reads?: string[]) =>
   _searchJobsForTest(fakeClient(tables(), reads), new URLSearchParams(params)) as Promise<any>;
 const ids = (answer: any) => answer.results.map((r: any) => r.id);
 
-Deno.test("include_closed: lost, cancelled and draft jobs come after the open ones, marked by status; legacy rows and test records stay out", async () => {
+Deno.test("include_closed: lost, cancelled and draft jobs come after the open ones, marked by status; old-system rows last, marked legacy; test records stay out", async () => {
   const answer = await search({ q: "Sample", include_closed: "true" });
   assertEquals(answer.include_closed, true);
+  assertEquals(answer.include_legacy, true);
   assertEquals(answer.capped, false);
   assertEquals(answer.words_capped, false);
   const got = ids(answer);
-  // Open first (the client, then the contact's job), then the closed and draft ones.
+  // Open first (the client, then the contact's job), then the closed and draft ones, then the old-system row.
   assertEquals(got.slice(0, 3).sort(), [id(1), id(6), id(9)].sort());
-  assertEquals(got.slice(3).sort(), [id(2), id(3)].sort());
-  assert(!got.includes(id(5)), "a legacy row is never a match");
+  assertEquals(got.slice(3, 5).sort(), [id(2), id(3)].sort());
+  assertEquals(got[5], id(5), "an old-system (legacy) row comes last");
+  assertEquals(got.length, 6);
+  assertEquals(answer.results[5].legacy, true);
+  assert(answer.results.slice(0, 5).every((r: any) => r.legacy === false), "every other row says it is not legacy");
   assert(!got.includes(id(8)), "a test record is never a match");
   const contact = answer.results.find((r: any) => r.id === id(6));
   assertEquals(contact.match_source, "Contact: Kim Sample (neighbour)");
@@ -199,5 +207,36 @@ Deno.test("without include_closed the search is exactly as before: open jobs onl
   assertEquals(short.results.length, 15);
   assert(!ids(short).includes(id(7)), "as before, the dashboard's list stops at the newest 15");
   assertEquals(await search({ q: "S" }), { results: [] });
-  assertEquals(await search({ q: "S", include_closed: "true" }), { results: [], include_closed: true, capped: false, words_capped: false });
+  assertEquals(await search({ q: "S", include_closed: "true" }), { results: [], include_closed: true, include_legacy: true, capped: false, words_capped: false });
+});
+
+Deno.test("include_closed: a phone is found by its digits however it is stored, on the job and its contacts, old-system rows last", async () => {
+  const phones: Tables = {
+    jobs: [
+      job(20, { client_name: "Jo Rectify", client_phone: "+61412345678", status: "rectification" }),
+      job(21, { client_name: "Jo Draft", client_phone: "0412 345 678", status: "draft" }),
+      job(22, { client_name: "Jo Spaced", client_phone: "+61 412 345 678", status: "quoted" }),
+      job(23, { client_name: "Jo Grouped", client_phone: "04 1234 5678", status: "accepted" }),
+      job(24, { client_name: "Jo Landline", client_phone: "(08) 9123 4567", status: "quoted" }),
+      job(25, { client_name: "Jo Legacy", client_phone: "0412345678", status: "cancelled", legacy: true }),
+      job(26, { client_name: "Jo Other", client_phone: "0498 765 432", status: "quoted" }),
+      job(27, { client_name: "Jo Neighbour", client_phone: null, status: "quoted" }),
+    ],
+    job_contacts: [{ job_id: id(27), status: "active", client_name: "Kim Next", contact_label: "neighbour", client_email: null, client_phone: "+61 412 345 678" }],
+    xero_invoices: [],
+    makesafe_job_details: [],
+  };
+  const find = async (q: string) => await _searchJobsForTest(fakeClient(phones), new URLSearchParams({ q, include_closed: "true" })) as any;
+  for (const q of ["0412345678", "0412 345 678", "+61 412 345 678", "+61412345678", "61412345678"]) {
+    const answer = await find(q);
+    const got = ids(answer);
+    assertEquals(got.slice(0, 4).sort(), [id(22), id(23), id(27)].concat(id(20)).sort(), q);
+    assertEquals(got.slice(4, 5), [id(21)], `${q}: the draft after the open ones`);
+    assertEquals(got.slice(5), [id(25)], `${q}: the old-system row last`);
+    assertEquals(answer.results.find((r: any) => r.id === id(27)).match_source, "Contact: Kim Next (neighbour)", q);
+    assertEquals(answer.capped, false, q);
+  }
+  for (const q of ["08 9123 4567", "0891234567", "+61 8 9123 4567", "9123 4567"]) assertEquals(ids(await find(q)), [id(24)], q);
+  // Words that are not a phone are not read as one.
+  assertEquals(ids(await find("12 Long Rd")), []);
 });

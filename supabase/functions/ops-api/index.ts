@@ -17118,8 +17118,9 @@ async function assembleJobDossier(client: any, body: any) {
 async function searchJobs(client: any, params: URLSearchParams) {
   const q = (params.get('q') || '').trim()
   // include_closed (ask the story, 6 Oct 2026): Jarvis's sw_job_story reads
-  // lost, cancelled and draft jobs too, with whole-word name reads and a capped
-  // flag (search_jobs_closed.ts). Without it the search below is unchanged.
+  // lost, cancelled and draft jobs and old-system (legacy) records too, with
+  // whole-word name reads, a phone read by its digits and a capped flag
+  // (search_jobs_closed.ts). Without it the search below is unchanged.
   if (['true', '1'].includes((params.get('include_closed') || '').toLowerCase())) {
     return await searchJobsIncludingClosed(client, q, { orgId: DEFAULT_ORG_ID, isTestRecord })
   }
