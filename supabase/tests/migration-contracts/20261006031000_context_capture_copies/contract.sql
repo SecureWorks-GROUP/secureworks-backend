@@ -21,15 +21,23 @@ BEGIN
 END $$;
 -- An older writer's row with no ghl: key (as ghl-proxy and the ops-api
 -- backfill saved them before keying). p_gid goes in payload.ghl_message_id,
--- p_mid in payload.message_id; either may be null.
+-- p_mid in payload.message_id; either may be null. Written as stored (no
+-- trigger), so each placement and read state can be set exactly: by default
+-- placed direct on a job of its own, captured, written as service_role, so
+-- the readers read it. p_status admin_bucket or null puts it on no job.
 CREATE FUNCTION pg_temp.cc_legacy(p_contact text,p_dir text,p_body text,p_at timestamptz,p_gid text,p_mid text DEFAULT NULL,
- p_source text DEFAULT 'ghl-proxy') RETURNS uuid LANGUAGE plpgsql AS $$
-DECLARE new_id uuid;
+ p_source text DEFAULT 'ghl-proxy',p_status text DEFAULT 'direct',p_channel text DEFAULT 'sms',p_meta jsonb DEFAULT '{}',
+ p_captured boolean DEFAULT true) RETURNS uuid LANGUAGE plpgsql SET session_replication_role=replica AS $$
+DECLARE new_id uuid:=gen_random_uuid(); j uuid; placed boolean:=coalesce(public.context_linked_status(p_status),false);
 BEGIN
- INSERT INTO public.business_events(event_type,source,entity_type,entity_id,contact_id,direction,channel,payload,occurred_at,event_at)
-  VALUES(CASE p_dir WHEN 'inbound' THEN 'client.reply' ELSE 'client.sms_out' END,p_source,'contact',p_contact,p_contact,p_dir,'sms',
-   jsonb_strip_nulls(jsonb_build_object('body',p_body,'ghl_message_id',p_gid,'message_id',p_mid,'ghl_contact_id',p_contact)),p_at,p_at)
-  RETURNING id INTO new_id;
+ IF placed THEN j:=pg_temp.cc_job('CC-L-'||left(new_id::text,8)); END IF;
+ INSERT INTO public.business_events(id,job_id,event_type,source,entity_type,entity_id,contact_id,direction,channel,payload,metadata,
+  occurred_at,event_at,recorded_at,context_captured_at,attribution_status,attribution_step,attribution_confidence,attributed_at,match_method)
+  VALUES(new_id,j,CASE p_dir WHEN 'inbound' THEN 'client.reply' ELSE 'client.sms_out' END,p_source,'contact',p_contact,p_contact,p_dir,p_channel,
+   jsonb_strip_nulls(jsonb_build_object('body',p_body,'ghl_message_id',p_gid,'message_id',p_mid,'ghl_contact_id',p_contact)),
+   jsonb_build_object('written_as','service_role')||p_meta,p_at,p_at,p_at,CASE WHEN p_captured THEN p_at END,
+   p_status,CASE WHEN placed THEN 1 END,CASE WHEN placed THEN 1 END,CASE WHEN placed THEN p_at END,
+   CASE WHEN placed THEN 'direct_job_id' ELSE 'none' END);
  RETURN new_id;
 END $$;
 -- A history row as _shared/evidence/ghl_message.ts builds it. p_body null is
@@ -54,7 +62,8 @@ DO $$
 DECLARE f regprocedure;
 BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_event_source_admissible(public.business_events)','public.context_ghl_message_copies(jsonb)',
-  'public.capture_ghl_history_event(jsonb)']::regprocedure[] LOOP
+  'public.capture_ghl_history_event(jsonb)','public.context_job_record_messages(uuid[],timestamptz)',
+  'public.context_job_story_meta(uuid,timestamptz)']::regprocedure[] LOOP
   IF has_function_privilege('anon',f,'EXECUTE') OR has_function_privilege('authenticated',f,'EXECUTE') OR has_function_privilege('public',f,'EXECUTE')
    OR NOT has_function_privilege('service_role',f,'EXECUTE')
   THEN RAISE EXCEPTION 'capture copies grants on %',f; END IF;
@@ -65,6 +74,11 @@ BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_ghl_message_copies(jsonb)','public.capture_ghl_history_event(jsonb)']::regprocedure[] LOOP
   IF (SELECT proconfig IS NULL OR NOT prosecdef FROM pg_proc WHERE oid=f) THEN RAISE EXCEPTION 'capture copies: % must be a definer with a fixed search_path',f; END IF;
  END LOOP;
+ -- The record messages helper stays inlinable (invoker SQL, no SET); the story meta stays a definer.
+ IF (SELECT proconfig IS NOT NULL OR prosecdef FROM pg_proc WHERE oid='public.context_job_record_messages(uuid[],timestamptz)'::regprocedure)
+ THEN RAISE EXCEPTION 'capture copies: context_job_record_messages must stay invoker SQL with no SET'; END IF;
+ IF (SELECT proconfig IS NULL OR NOT prosecdef FROM pg_proc WHERE oid='public.context_job_story_meta(uuid,timestamptz)'::regprocedure)
+ THEN RAISE EXCEPTION 'capture copies: context_job_story_meta must stay a definer with a fixed search_path'; END IF;
  IF NOT public.automation_lane_enabled('capture') OR NOT public.automation_lane_enabled('attribution') OR NOT public.automation_lane_enabled('extraction')
  THEN RAISE EXCEPTION 'capture copies fixture: a lane is off'; END IF;
 END $$;
@@ -123,6 +137,50 @@ BEGIN
  c1:=pg_temp.cc_legacy('CCcontact0000001','outbound','Two older copies.',t+interval '2 hours','CCgid00000000000003',NULL,'ghl-webhook-receiver');
  o:=public.capture_ghl_history_event(pg_temp.cc_row('CCgid00000000000003','CCcontact0000001','outbound','Two older copies.','2026-09-20T04:00:00Z'));
  IF o->>'id'<>c1::text OR o->>'stored_by'<>'ghl-webhook-receiver' THEN RAISE EXCEPTION 'C3: the oldest copy must be named, got %',o; END IF;
+END $$;
+ROLLBACK;
+
+-- 3b. An older row stands in only when the readers read it. A key-less row
+-- that names the GHL id but is on no job, in admin_bucket, with no status,
+-- with no channel, retracted, already marked as a copy, never captured, not
+-- written as service_role, or without words, is not a copy: the keyed row is
+-- saved (and placed by the ladder), so the message still reaches its job.
+BEGIN;
+DO $$
+DECLARE o jsonb; n integer; x record; tw uuid; t timestamptz:='2026-09-20T08:00:00Z'; i integer:=0;
+BEGIN
+ FOR x IN SELECT * FROM (VALUES
+  ('admin_bucket on no job','admin_bucket','sms','{}'::jsonb,true,'Older text, admin bucket.'),
+  ('no status on no job',NULL,'sms','{}'::jsonb,true,'Older text, no status.'),
+  ('pending_luna on no job','pending_luna','sms','{}'::jsonb,true,'Older text, pending review.'),
+  ('no channel','direct',NULL,'{}'::jsonb,true,'Older text, no channel.'),
+  ('another channel','direct','email','{}'::jsonb,true,'Older text, other channel.'),
+  ('retracted','direct','sms',jsonb_build_object('retracted_at','2026-09-25T00:00:00Z'),true,'Older text, retracted.'),
+  ('already a copy','direct','sms',jsonb_build_object('duplicate_of',gen_random_uuid()::text),true,'Older text, a copy.'),
+  ('never captured','direct','sms','{}'::jsonb,false,'Older text, not captured.'),
+  ('written as authenticated','direct','sms',jsonb_build_object('written_as','authenticated'),true,'Older text, authenticated.'),
+  ('no words','direct','sms','{}'::jsonb,true,NULL)
+ ) AS v(label,status,channel,meta,captured,body) LOOP
+  i:=i+1;
+  PERFORM pg_temp.cc_legacy('CCcontact000005'||i,'inbound',x.body,t+make_interval(mins=>i),'CCgidStand'||lpad(i::text,9,'0'),NULL,
+   'ghl_sms_cache_backfill',x.status,x.channel,x.meta,x.captured);
+  o:=public.capture_ghl_history_event(pg_temp.cc_row('CCgidStand'||lpad(i::text,9,'0'),'CCcontact000005'||i,'inbound',
+   'The real message '||i||'.',to_char((t+make_interval(mins=>i)) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')));
+  SELECT count(*) INTO n FROM public.business_events WHERE provider_message_id='ghl:CCgidStand'||lpad(i::text,9,'0');
+  IF o->>'outcome' IS DISTINCT FROM 'inserted' OR o ? 'copy_of_other_writer' OR n<>1 THEN
+   RAISE EXCEPTION 'S%: an older row that is % must not stand in; the keyed row must be saved, got % n=%',i,x.label,o,n;
+  END IF;
+ END LOOP;
+ -- The same rule on the words-and-time branch: an older key-less row with no
+ -- GHL id, the same words 2 s apart, in admin_bucket on no job, is not a copy.
+ PERFORM pg_temp.cc_legacy('CCcontact0000060','outbound','Same words, bucket.',t,NULL,NULL,'ghl-proxy','admin_bucket');
+ o:=public.capture_ghl_history_event(pg_temp.cc_row('CCgidStand900000001','CCcontact0000060','outbound','Same words, bucket.','2026-09-20T08:00:02Z'));
+ IF o->>'outcome' IS DISTINCT FROM 'inserted' THEN RAISE EXCEPTION 'S11: an unread same-words row must not stand in, got %',o; END IF;
+ -- When an unread twin and a read twin both exist, the read one is named.
+ PERFORM pg_temp.cc_legacy('CCcontact0000061','outbound','Two twins.',t,'CCgidStand900000002',NULL,'ghl_sms_cache_backfill','admin_bucket');
+ tw:=pg_temp.cc_legacy('CCcontact0000061','outbound','Two twins.',t+interval '1 second','CCgidStand900000002');
+ o:=public.capture_ghl_history_event(pg_temp.cc_row('CCgidStand900000002','CCcontact0000061','outbound','Two twins.','2026-09-20T08:00:00Z'));
+ IF o->>'outcome' IS DISTINCT FROM 'duplicate' OR o->>'id'<>tw::text THEN RAISE EXCEPTION 'S12: the read twin must be named, got %',o; END IF;
 END $$;
 ROLLBACK;
 
@@ -228,5 +286,49 @@ BEGIN
  IF o->>'outcome' IS DISTINCT FROM 'inserted' OR o->>'copy_check_error' IS DISTINCT FROM 'XX000'
   OR NOT EXISTS(SELECT 1 FROM public.business_events WHERE provider_message_id='ghl:CCgid00000000000041')
  THEN RAISE EXCEPTION 'F1: a copy-check fault must write the row and say so, got %',o; END IF;
+END $$;
+ROLLBACK;
+
+-- 8. The job record counts what the readers read: one customer text saved
+-- twice (the second marked as a copy) is one message in the record, one
+-- customer message in the contact counts and one text in the story's lanes.
+CREATE FUNCTION pg_temp.cc_text(p_job uuid,p_contact text,p_body text,p_at timestamptz) RETURNS uuid
+LANGUAGE plpgsql SET session_replication_role=replica AS $$
+DECLARE new_id uuid:=gen_random_uuid();
+BEGIN
+ INSERT INTO public.business_events(id,job_id,event_type,source,contact_id,direction,channel,payload,metadata,occurred_at,event_at,recorded_at,
+  context_captured_at,attribution_status,attribution_step,attribution_confidence,attributed_at,match_method)
+  VALUES(new_id,p_job,'client.reply','copies_contract',p_contact,'inbound','sms',jsonb_build_object('body',p_body),
+   jsonb_build_object('written_as','service_role'),p_at,p_at,p_at,p_at,'direct',1,1,p_at,'direct_job_id');
+ RETURN new_id;
+END $$;
+CREATE FUNCTION pg_temp.cc_mark(p_copy uuid,p_original uuid) RETURNS void
+LANGUAGE sql SET session_replication_role=replica AS $$
+ UPDATE public.business_events SET metadata=metadata||jsonb_build_object('duplicate_of',p_original::text) WHERE id=p_copy $$;
+BEGIN;
+DO $$
+DECLARE j uuid:=gen_random_uuid(); orig uuid; copy uuid; other uuid; n integer; cm integer; texts integer; t timestamptz:=now()-interval '3 days';
+BEGIN
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,metadata,created_at)
+  VALUES(j,'00000000-0000-0000-0000-000000000001','scheduled','fencing','CC-REC','CCcontactRecord01','{}',now()-interval '30 days');
+ orig:=pg_temp.cc_text(j,'CCcontactRecord01','Can you come Tuesday?',t);
+ copy:=pg_temp.cc_text(j,'CCcontactRecord01','Can you come Tuesday?',t+interval '1 second');
+ other:=pg_temp.cc_text(j,'CCcontactRecord01','Thanks, see you then.',t+interval '1 hour');
+ SELECT count(*) INTO n FROM public.context_job_record_messages(ARRAY[j]) m WHERE m.source_table='business_events';
+ SELECT c.customer_messages INTO cm FROM public.context_job_record_contact(ARRAY[j]) c;
+ texts:=(public.context_job_story_meta(j)->'lanes'->>'texts')::integer;
+ IF n<>3 OR cm<>3 OR texts<>3 THEN RAISE EXCEPTION 'R0 fixture: before marking expected 3 3 3, got % % %',n,cm,texts; END IF;
+ PERFORM pg_temp.cc_mark(copy,orig);
+ SELECT count(*) INTO n FROM public.context_job_record_messages(ARRAY[j]) m WHERE m.source_table='business_events';
+ IF n<>2 OR EXISTS(SELECT 1 FROM public.context_job_record_messages(ARRAY[j]) m WHERE m.source_id=copy::text)
+ THEN RAISE EXCEPTION 'R1: a marked copy must not be a message of the job, got %',n; END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.context_job_record_messages(ARRAY[j]) m WHERE m.source_id=orig::text)
+ THEN RAISE EXCEPTION 'R1: the original must stay'; END IF;
+ SELECT c.customer_messages INTO cm FROM public.context_job_record_contact(ARRAY[j]) c;
+ IF cm<>2 THEN RAISE EXCEPTION 'R2: the contact counts must count the message once, got %',cm; END IF;
+ texts:=(public.context_job_story_meta(j)->'lanes'->>'texts')::integer;
+ IF texts<>2 THEN RAISE EXCEPTION 'R3: the story lanes must count the text once, got %',texts; END IF;
+ IF EXISTS(SELECT 1 FROM public.context_job_record_timeline(ARRAY[j]) t WHERE t.source_id=copy::text)
+ THEN RAISE EXCEPTION 'R4: a marked copy must not be on the timeline'; END IF;
 END $$;
 ROLLBACK;

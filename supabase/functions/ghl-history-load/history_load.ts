@@ -41,10 +41,11 @@
 //      field: the placement-owned trigger places each row at its own GHL time.
 //      A message another writer already saved (an older key-less row naming
 //      the same GHL message id, or the same contact, words and time within
-//      5 seconds) is not saved again: the door answers duplicate with
-//      copy_of_other_writer, counted in duplicates and, per contact, in
-//      duplicates_other_writer (migration 20261006031000, gap map W9). A dry
-//      run asks the same question through copiesOf.
+//      5 seconds, that the readers read: placed on a job, admissible,
+//      captured, the same channel) is not saved again: the door answers
+//      duplicate with copy_of_other_writer, counted in duplicates and, per
+//      contact, in duplicates_other_writer (migration 20261006031000, gap map
+//      W9). A dry run asks the same question through copiesOf.
 //      Calls are saved as client.call_logged rows by the same builder (slice
 //      T1); before a call row is written the load records its one legacy
 //      client.call_complete row, as every call writer does (ghl_call_pair.ts).

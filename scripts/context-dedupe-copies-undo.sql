@@ -28,8 +28,8 @@ WHERE e.metadata -> 'duplicate_marked' ->> 'by' = 'context_dedupe_copies_2026100
 
 DO $undo$
 DECLARE
- -- The number of rows the marking committed (256 in the 6 Oct 2026 plan).
- expected_rows constant integer := 256;
+ -- The number of rows the marking committed (248 in the 6 Oct 2026 plan).
+ expected_rows constant integer := 248;
  n integer; cleared integer;
 BEGIN
  SELECT count(*) INTO n FROM dedupe_undo_before;

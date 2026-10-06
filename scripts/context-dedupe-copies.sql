@@ -7,7 +7,8 @@
 -- within 120 seconds. Read pair by pair on production on 6 Oct 2026 (read
 -- only), those 334 rows (of 5,557 worded message rows) on 77 live jobs are
 -- two kinds:
---   * 256 rows on 41 jobs are the SAME message saved twice. Proven by:
+--   * 256 rows on 41 jobs are the SAME message saved twice (248 of them are
+--     marked; see "Which row stays"). Proven by:
 --       same_ghl_message (66): both rows name the same GHL message id
 --         (ghl:<id> key, payload.ghl_message_id or payload.message_id): a
 --         key-less older writer (ghl-proxy before keying, ops-api
@@ -26,8 +27,15 @@
 -- The writer fixes (migration 20261006031000, monitor-inbox/self_copy.ts) stop
 -- new copies; this script marks the ones already saved.
 --
+-- Which row stays. A proven copy is marked only when its earlier partner can
+-- stand in for it: the readers read the partner at least as fully (it is
+-- admissible now, and captured when the copy is). Otherwise marking would
+-- hide the message from a reader, so the pair is left alone (reported as
+-- proven_left_unmarked). On 6 Oct 2026 that is 8 same_ghl_message pairs: an
+-- ops-api backfill row never captured, then the history load's captured row.
+--
 -- What marking does. Each copy row gets metadata.duplicate_of = the id of the
--- row it copies (the earliest proven partner, never itself a copy) and
+-- row it copies (the earliest proven stand-in partner, never itself a copy) and
 -- metadata.duplicate_marked = {by, rule, census, at}. Nothing else: no row is
 -- deleted, moved off its job, re-placed or re-worded; the original is untouched.
 -- Readers skip a marked row through context_event_source_admissible
@@ -37,7 +45,7 @@
 -- already points at a copy stays resolvable and current (4 current facts cite
 -- a copy today). One side effect, checked below: any metadata update re-runs
 -- the party roles trigger, which re-stamps party_roles to the current
--- classifier (version party_roles_v1 to v2 on about 246 of the 256 rows); the
+-- classifier (version party_roles_v1 to v2 on about 238 of the 248 rows); the
 -- dry run refuses if the stamp changes in anything but its version. The undo
 -- re-runs the same trigger, so it cannot put v1 back, and need not.
 --
@@ -46,13 +54,15 @@
 --           jobs, and to_mark / to_mark_jobs. These drift: every live-job
 --           status change and every new copy moves them. Before PART 2,
 --           copy to_mark and to_mark_jobs into the two constants at the top of
---           its DO block.
+--           its DO block. original_not_admissible_now must be 0.
 --   PART 2  guarded marking. As written it ends in ROLLBACK: a dry run that
 --           marks, checks and then throws the marks away. It refuses unless
 --           the plan is exactly the expected rows and jobs, migration
 --           20261006031000 is applied, no copy is already marked, every
---           original is on the copy's job and is not itself a copy, exactly
---           that many rows were updated, nothing but the mark changed, no
+--           original is on the copy's job, is not itself a copy and is still
+--           admissible (before and after marking, so a copy is never marked
+--           when its original is hidden), exactly that many rows were
+--           updated, nothing but the mark changed, no
 --           marked copy is admissible and every fact that was current stays
 --           current. Its last statement prints the after-census. To apply for
 --           real (owner's go only): change the final ROLLBACK to COMMIT and run
@@ -60,13 +70,14 @@
 --   UNDO    scripts/context-dedupe-copies-undo.sql removes exactly these
 --           marks (metadata.duplicate_marked.by = context_dedupe_copies_20261006).
 --
--- Measured on production with PART 1 (read only, 6 Oct 2026): 5,559 worded
--- message rows on live jobs; s9_copy_rows 334 on 77 jobs; to_mark 256 on 41
--- jobs (same_email_other_mailbox 187, same_ghl_message 66,
--- same_call_recording 3); original_is_copy 0; already marked 0; 5 of the
--- copies still unread; 244 read receipts and 4 current facts point at a copy
--- (both stay as they are); party_roles would change on 246 rows, all in the
--- version only. PART 2 has been run only on a disposable local database with
+-- Measured on production with PART 1 (read only, 6 Oct 2026, after the
+-- stand-in rule): 5,571 worded message rows on live jobs; s9_copy_rows 334 on
+-- 77 jobs; to_mark 248 on 41 jobs (same_email_other_mailbox 187,
+-- same_ghl_message 58, same_call_recording 3); proven_left_unmarked 8;
+-- original_is_copy 0; already marked 0; original_not_admissible_now 0; 3 of
+-- the copies still unread; 238 read receipts and 4 current facts point at a
+-- copy (both stay as they are); party_roles would change on 238 rows, all in
+-- the version only. PART 2 has been run only on a disposable local database with
 -- fixture rows of every kind (it marked the proven copies, left the rest,
 -- refused a wrong count and a second run, and the undo cleared it); it has
 -- never been run on production.
@@ -116,13 +127,24 @@ verdict AS (
   SELECT DISTINCT ON (copy_id) copy_id, job_id, channel, first_source, copy_source, rule
   FROM s9 ORDER BY copy_id, (rule LIKE 'not_copy:%'), original_t, original_id
 ),
-proven AS (SELECT copy_id FROM verdict WHERE rule NOT LIKE 'not_copy:%'),
+-- A proven pair whose earlier row can stand in for the later one: the
+-- readers read it at least as fully (admissible now, and captured when the
+-- later row is). Otherwise marking the later row would hide the message from
+-- a reader, so that pair is left alone.
+standin AS (
+  SELECT s.* FROM s9 s
+  JOIN public.business_events o ON o.id = s.original_id
+  JOIN public.business_events c ON c.id = s.copy_id
+  WHERE s.rule NOT LIKE 'not_copy:%' AND public.context_event_source_admissible(o)
+    AND (o.context_captured_at IS NOT NULL OR c.context_captured_at IS NULL)
+),
+proven AS (SELECT DISTINCT copy_id FROM standin),
 -- The row each proven copy is marked as a copy of: its earliest proven
--- partner that is not itself a proven copy.
+-- stand-in partner that is not itself a proven copy.
 plan AS (
   SELECT DISTINCT ON (s.copy_id) s.copy_id, s.original_id, s.job_id, s.rule,
    s.original_id IN (SELECT copy_id FROM proven) AS original_is_copy
-  FROM s9 s WHERE s.rule NOT LIKE 'not_copy:%'
+  FROM standin s
   ORDER BY s.copy_id, (s.original_id IN (SELECT copy_id FROM proven)), s.original_t, s.original_id
 )
 SELECT jsonb_build_object(
@@ -134,10 +156,14 @@ SELECT jsonb_build_object(
    FROM (SELECT first_source, copy_source, count(*) n FROM verdict GROUP BY 1, 2) x),
  'by_rule', (SELECT jsonb_object_agg(rule, n) FROM (SELECT rule, count(*) n FROM verdict GROUP BY 1) x),
  'to_mark', (SELECT count(*) FROM plan),
+ 'proven_left_unmarked', (SELECT count(*) FROM verdict v WHERE v.rule NOT LIKE 'not_copy:%'
+   AND v.copy_id NOT IN (SELECT copy_id FROM plan)),
  'to_mark_jobs', (SELECT count(DISTINCT job_id) FROM plan),
  'original_is_copy', (SELECT count(*) FROM plan WHERE original_is_copy),
  'already_marked_in_plan', (SELECT count(*) FROM public.business_events e JOIN plan p ON p.copy_id = e.id
    WHERE coalesce(e.metadata, '{}'::jsonb) ? 'duplicate_of'),
+ 'original_not_admissible_now', (SELECT count(*) FROM public.business_events o JOIN plan p ON p.original_id = o.id
+   WHERE NOT public.context_event_source_admissible(o)),
  'marked_by_this_script', (SELECT count(*) FROM public.business_events e
    WHERE e.metadata -> 'duplicate_marked' ->> 'by' = 'context_dedupe_copies_20261006'),
  'unread_copies_today', (SELECT count(*) FROM public.context_unread_rows(ARRAY(SELECT DISTINCT job_id FROM plan)) u
@@ -200,13 +226,24 @@ verdict AS (
   SELECT DISTINCT ON (copy_id) copy_id, job_id, channel, first_source, copy_source, rule
   FROM s9 ORDER BY copy_id, (rule LIKE 'not_copy:%'), original_t, original_id
 ),
-proven AS (SELECT copy_id FROM verdict WHERE rule NOT LIKE 'not_copy:%'),
+-- A proven pair whose earlier row can stand in for the later one: the
+-- readers read it at least as fully (admissible now, and captured when the
+-- later row is). Otherwise marking the later row would hide the message from
+-- a reader, so that pair is left alone.
+standin AS (
+  SELECT s.* FROM s9 s
+  JOIN public.business_events o ON o.id = s.original_id
+  JOIN public.business_events c ON c.id = s.copy_id
+  WHERE s.rule NOT LIKE 'not_copy:%' AND public.context_event_source_admissible(o)
+    AND (o.context_captured_at IS NOT NULL OR c.context_captured_at IS NULL)
+),
+proven AS (SELECT DISTINCT copy_id FROM standin),
 -- The row each proven copy is marked as a copy of: its earliest proven
--- partner that is not itself a proven copy.
+-- stand-in partner that is not itself a proven copy.
 plan AS (
   SELECT DISTINCT ON (s.copy_id) s.copy_id, s.original_id, s.job_id, s.rule,
    s.original_id IN (SELECT copy_id FROM proven) AS original_is_copy
-  FROM s9 s WHERE s.rule NOT LIKE 'not_copy:%'
+  FROM standin s
   ORDER BY s.copy_id, (s.original_id IN (SELECT copy_id FROM proven)), s.original_t, s.original_id
 )
 SELECT p.copy_id, p.original_id, p.job_id, p.rule, p.original_is_copy FROM plan p;
@@ -221,7 +258,7 @@ SELECT v.id FROM public.current_job_context_facts v WHERE v.source_event_ids && 
 DO $mark$
 DECLARE
  -- From PART 1 (to_mark, to_mark_jobs), read just before this run.
- expected_rows constant integer := 256;
+ expected_rows constant integer := 248;
  expected_jobs constant integer := 41;
  n integer; j integer; marked integer; bumped integer;
 BEGIN
@@ -243,6 +280,13 @@ BEGIN
  END IF;
  IF EXISTS (SELECT 1 FROM dedupe_before WHERE metadata ? 'duplicate_of' OR metadata ? 'duplicate_marked') THEN
   RAISE EXCEPTION 'dedupe_guard_marked: a planned copy is already marked';
+ END IF;
+ -- An original that is no longer read (retracted, or moved to a status that is
+ -- not linked since the census) cannot stand in: marking its copy would hide
+ -- the message from every reader. Refuse; re-run PART 1 after the repair.
+ IF EXISTS (SELECT 1 FROM dedupe_plan p JOIN public.business_events o ON o.id = p.original_id
+   WHERE NOT public.context_event_source_admissible(o)) THEN
+  RAISE EXCEPTION 'dedupe_guard_original_hidden: an original is not admissible now; marking its copy would hide the message';
  END IF;
 
  UPDATE public.business_events e
@@ -270,6 +314,10 @@ BEGIN
  IF EXISTS (SELECT 1 FROM public.business_events e JOIN dedupe_plan p ON p.copy_id = e.id
    WHERE public.context_event_source_admissible(e)) THEN
   RAISE EXCEPTION 'dedupe_guard_reader: a marked copy is still admissible';
+ END IF;
+ IF EXISTS (SELECT 1 FROM dedupe_plan p JOIN public.business_events o ON o.id = p.original_id
+   WHERE NOT public.context_event_source_admissible(o)) THEN
+  RAISE EXCEPTION 'dedupe_guard_original_hidden: after marking, an original is not admissible';
  END IF;
  IF (SELECT count(*) FROM public.current_job_context_facts v WHERE v.id IN (SELECT id FROM dedupe_facts_before))
    <> (SELECT count(*) FROM dedupe_facts_before) THEN
@@ -322,13 +370,24 @@ verdict AS (
   SELECT DISTINCT ON (copy_id) copy_id, job_id, channel, first_source, copy_source, rule
   FROM s9 ORDER BY copy_id, (rule LIKE 'not_copy:%'), original_t, original_id
 ),
-proven AS (SELECT copy_id FROM verdict WHERE rule NOT LIKE 'not_copy:%'),
+-- A proven pair whose earlier row can stand in for the later one: the
+-- readers read it at least as fully (admissible now, and captured when the
+-- later row is). Otherwise marking the later row would hide the message from
+-- a reader, so that pair is left alone.
+standin AS (
+  SELECT s.* FROM s9 s
+  JOIN public.business_events o ON o.id = s.original_id
+  JOIN public.business_events c ON c.id = s.copy_id
+  WHERE s.rule NOT LIKE 'not_copy:%' AND public.context_event_source_admissible(o)
+    AND (o.context_captured_at IS NOT NULL OR c.context_captured_at IS NULL)
+),
+proven AS (SELECT DISTINCT copy_id FROM standin),
 -- The row each proven copy is marked as a copy of: its earliest proven
--- partner that is not itself a proven copy.
+-- stand-in partner that is not itself a proven copy.
 plan AS (
   SELECT DISTINCT ON (s.copy_id) s.copy_id, s.original_id, s.job_id, s.rule,
    s.original_id IN (SELECT copy_id FROM proven) AS original_is_copy
-  FROM s9 s WHERE s.rule NOT LIKE 'not_copy:%'
+  FROM standin s
   ORDER BY s.copy_id, (s.original_id IN (SELECT copy_id FROM proven)), s.original_t, s.original_id
 )
 SELECT jsonb_build_object(
