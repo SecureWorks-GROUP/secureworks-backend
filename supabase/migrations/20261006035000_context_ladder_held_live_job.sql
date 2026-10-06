@@ -13,9 +13,11 @@
 --      job SWF-261521 was created at 06:00:43Z as a draft (6 minutes after the
 --      call, 5 minutes before the texts) and quoted at 07:29Z. When each row
 --      was placed (06:03 to 06:18Z) a draft beside a live job was not a
---      candidate, so single_open was right; P1b's reconsideration at the
---      draft's insert reopened nothing for the same reason, and nothing
---      reopens rows when a draft goes live. A re-decision now reads the
+--      candidate, so single_open was the rules' answer then; P1b's
+--      reconsideration at the draft's insert reopened nothing for the same
+--      reason, and nothing reopens rows when a draft goes live (a named gap,
+--      not closed here: whether the rows belong to the newer job is for a
+--      reopen to ask, never for a re-decision). A re-decision now reads the
 --      quoted job back to 30 days before its creation (its lead window) and
 --      finds two live jobs. L1f holds a row only while no other job of the
 --      customer is live, so it let all four go. The same shape across every
@@ -26,7 +28,11 @@
 --      move (5 on a canary test job, a draft beside live jobs, one of them
 --      naming another job in its words; 1 whose job now belongs to another
 --      contact; 1 history row stored on a job created three weeks after the
---      message, outside its lead window).
+--      message, outside its lead window). Re-measured 06:15Z: 4,076 rows,
+--      L1f 205, L1g the same 7; the 198 held are Luna's choices (45), rows
+--      filed before a second job card went from draft to live (102) and rows
+--      beside a job card with no contact that shares the message's phone or
+--      email, which the rules-off ladder cannot see (51).
 --   b. One bucket row (ghl-history-load, a text of 2 Jun 2026) names invoice
 --      INV-0482; the rules place it direct on SWP-26040, whose invoice it is
 --      (paid that day). The preview counts it not_live_job because SWP-26040

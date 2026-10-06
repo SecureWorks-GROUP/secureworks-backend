@@ -28,6 +28,13 @@
 --      ladder, the entry, the insert trigger, the timeline, the preview and
 --      P1b are untouched, the body is private and marked L1g, the flag stays
 --      off, and a re-apply is a no-op.
+--   G. A contactless job the rules-off ladder cannot see (6 Oct: 51 contact-
+--      rule rows of 3 customers in the last 30 days). The rules-off ladder
+--      reads only the own jobs' phone and email, so it places the text
+--      single_open on the own job; the rules also read the message's own
+--      phone, find a job card with no contact live as well, and keep the row
+--      where it is. A fresh text of the same shape still goes to review: the
+--      hold keeps a past decision, it never makes a new one.
 \set ON_ERROR_STOP 1
 
 CREATE FUNCTION pg_temp.hl_job(p_number text,p_contact text,p_status text,p_type text,p_created interval,p_completed interval DEFAULT NULL)
@@ -73,6 +80,35 @@ BEGIN
   OR p->'decided'->>'placement_rule' IS DISTINCT FROM r.metadata->>'placement_rule'
  THEN RAISE EXCEPTION 'l1g %: the preview and the re-decision disagree: % vs % % %',p_label,p->'decided',r.attribution_status,r.job_id,r.metadata->>'placement_rule'; END IF;
  RETURN r;
+END $$;
+
+-- G, on its own so a failing-first run can call it alone.
+CREATE FUNCTION pg_temp.hl_case_g() RETURNS void LANGUAGE plpgsql AS $$
+DECLARE ga uuid:=gen_random_uuid(); gb uuid:=gen_random_uuid(); e public.business_events; r public.business_events;
+BEGIN
+ PERFORM pg_temp.hl_flag(false);
+ -- The customer's own job carries one phone; a job card with no contact
+ -- carries the phone the texts come from.
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,client_phone,created_at) VALUES
+  (ga,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-993071','hl-sibling','0491 570 156',now()-interval '20 days'),
+  (gb,'00000000-0000-0000-0000-000000000001','scheduled','fencing','SWF-993072',NULL,'0491 570 157',now()-interval '10 days');
+ e:=pg_temp.hl_ev('ghl-message-reconcile','client.sms_in','{"body":"Running ten minutes late","phone":"0491 570 157"}','sms','inbound','hl-sibling',interval '2 days');
+ IF e.job_id IS DISTINCT FROM ga OR e.attribution_status<>'single_open'
+ THEN RAISE EXCEPTION 'l1g G: with the rules off the text must land single_open on the own job, got % %',e.attribution_status,e.job_id; END IF;
+ PERFORM pg_temp.hl_flag(true);
+ r:=pg_temp.hl_decide(e.id,'G');
+ IF r.job_id IS DISTINCT FROM ga OR r.attribution_status<>'single_open' OR r.match_method<>'contact_id'
+  OR r.metadata->>'placement_rule' IS DISTINCT FROM 'held_placement' OR r.metadata->>'placement_held_from' IS DISTINCT FROM 'review_several'
+ THEN RAISE EXCEPTION 'l1g G rules on: a row placed before the rules could see the contactless job must keep its job, got % % % %',
+  r.attribution_status,r.job_id,r.metadata->>'placement_rule',r.metadata->>'placement_held_from'; END IF;
+ -- Control: the same text decided fresh with the rules on goes to review
+ -- with both jobs; nothing was held for it.
+ e:=pg_temp.hl_ev('ghl-message-reconcile','client.sms_in','{"body":"Running ten minutes late","phone":"0491 570 157"}','sms','inbound','hl-sibling',interval '1 day');
+ IF e.job_id IS NOT NULL OR e.attribution_status<>'pending_luna' OR e.metadata->>'placement_rule' IS DISTINCT FROM 'review_several'
+  OR NOT (ga=ANY(e.candidate_job_ids)) OR NOT (gb=ANY(e.candidate_job_ids))
+ THEN RAISE EXCEPTION 'l1g G: a fresh text with both jobs live must go to review, got % % % %',
+  e.attribution_status,e.job_id,e.metadata->>'placement_rule',e.candidate_job_ids; END IF;
+ PERFORM pg_temp.hl_flag(false);
 END $$;
 
 CREATE FUNCTION pg_temp.hl_cases() RETURNS void LANGUAGE plpgsql AS $$
@@ -209,6 +245,9 @@ BEGIN
  -- That job was live at the message time (finished the next day).
  IF NOT EXISTS (SELECT 1 FROM public.context_contact_job_timeline('hl-history',now()-interval '120 days',NULL,NULL) t WHERE t.job_id=kj AND t.candidate)
  THEN RAISE EXCEPTION 'l1g E: the invoiced job must be live at the message time'; END IF;
+
+ ---------------------------------------------------------------- G. a contactless job the rules-off ladder cannot see
+ PERFORM pg_temp.hl_case_g();
  PERFORM pg_temp.hl_flag(false);
 END $$;
 
