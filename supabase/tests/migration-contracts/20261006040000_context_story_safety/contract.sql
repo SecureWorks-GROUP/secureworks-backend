@@ -44,6 +44,9 @@
 -- make-safe's stage set to complete or its pack-sent note finishes the work (and a status
 -- history entering complete); the customer's unread words are "not yet checked by the
 -- reader".
+-- Fifth review (each fails on the 53c15c39 bodies): this customer's CRM texts placed on no job
+-- that were loaded later from the CRM's cache are at the CRM's own time, and never theirs from
+-- before the job's lead window, in R7's contact since the quote and the line's contact facts.
 -- Every fixture row is synthetic and rolled back; user triggers are off for it.
 
 -- 0. Shape and access.
@@ -1509,6 +1512,105 @@ BEGIN
   RAISE EXCEPTION 'story safety contract: a homeowner never owes the builder''s invoice: % / %', s->'money', s->'not_known';
  END IF;
 END $clientowes$;
+
+-- Fifth review fixtures: this customer's CRM texts loaded later from the CRM's cache and placed
+-- on no job (SWMS-261403, SWF-261421 and SWF-261422 class). Z: their text the CRM dates 25 Aug,
+-- before the 1 Sep quote, loaded on 20 Sep after it (their last word on the job was 30 Aug, our
+-- reply 31 Aug). Y: nothing on the job; their text and our reply the CRM dates 25 and 26 Aug,
+-- both loaded on 20 Sep. L: texts each way the CRM dates in June, before the job's lead window
+-- (it was created 15 Sep), loaded on 20 Sep after its quote.
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_name, client_email, ghl_contact_id, xero_contact_id, pricing_json,
+  accepted_at, completed_at, created_at)
+VALUES
+ ('40000000-0000-4000-8000-000000000077', '00000000-0000-4000-8000-0000000000aa', 'SWF-94077', 'quoted', 'fencing', 'Cache Quote Client',
+  NULL, 'ct40zq', NULL, '{}', NULL, NULL, '2026-08-20 01:00Z'),
+ ('40000000-0000-4000-8000-000000000078', '00000000-0000-4000-8000-0000000000aa', 'SWF-94078', 'accepted', 'fencing', 'Cache Quiet Client',
+  NULL, 'ct40zy', NULL, '{}', NULL, NULL, '2026-08-20 01:00Z'),
+ ('40000000-0000-4000-8000-000000000079', '00000000-0000-4000-8000-0000000000aa', 'SWF-94079', 'quoted', 'fencing', 'Lead Window Client',
+  NULL, 'ct40zl', NULL, '{}', NULL, NULL, '2026-09-15 01:00Z');
+INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at, viewed_at, declined_at)
+VALUES ('40e00000-0000-4000-8000-000000000077', '40000000-0000-4000-8000-000000000077', 'quote', 'Q-4077', 1, '2026-09-01 01:00Z', '2026-09-01 01:10Z', NULL, NULL),
+       ('40e00000-0000-4000-8000-000000000079', '40000000-0000-4000-8000-000000000079', 'quote', 'Q-4079', 1, '2026-09-16 01:00Z', '2026-09-16 01:10Z', NULL, NULL);
+INSERT INTO public.ghl_conversation_cache (contact_id, job_id, messages, synced_at)
+VALUES ('ct40zq', NULL, '[{"id":"m40-77","timestamp":"2026-08-25T03:00:00.000Z","direction":"inbound"}]', '2026-09-20 01:00Z'),
+       ('ct40zy', NULL, '[{"id":"m40-78a","timestamp":"2026-08-25T03:00:00.000Z","direction":"inbound"},{"id":"m40-78b","timestamp":"2026-08-26T03:00:00.000Z","direction":"outbound"}]',
+        '2026-09-20 01:05Z'),
+       ('ct40zl', NULL, '[{"id":"m40-79a","timestamp":"2026-06-10T01:08:34.644Z","direction":"inbound"},{"id":"m40-79b","timestamp":"2026-06-09T06:09:12.277Z","direction":"outbound"}]',
+        '2026-09-20 01:05Z');
+INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, occurred_at, recorded_at, event_at,
+  attribution_status, attribution_confidence, candidate_job_ids, provider_message_id)
+VALUES
+ -- Z: their text and our reply on the job before the quote; a text the CRM dates 25 Aug, before
+ -- the quote, loaded on 20 Sep after it and placed on no job
+ ('40b00000-0000-4000-8000-000000000180', '40000000-0000-4000-8000-000000000077', 'client.reply', 'ghl', 'sms', 'inbound', 'ct40zq',
+  '{"body":"Please send the quote through"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-08-30 01:00Z', '2026-08-30 01:00Z', '2026-08-30 01:00Z', 'direct', 1, NULL, NULL),
+ ('40b00000-0000-4000-8000-000000000186', '40000000-0000-4000-8000-000000000077', 'client.sms_out', 'ghl', 'sms', 'outbound', 'ct40zq',
+  '{"body":"It will be with you on Tuesday"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+  '2026-08-31 01:00Z', '2026-08-31 01:00Z', '2026-08-31 01:00Z', 'direct', 1, NULL, NULL),
+ ('40b00000-0000-4000-8000-000000000181', NULL, 'client.reply', 'ghl_sms_cache_backfill', 'sms', 'inbound', 'ct40zq',
+  '{"body":"Is the quote coming?","ghl_message_id":"m40-77"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-09-20 01:00Z', '2026-09-20 01:00Z', '2026-09-20 01:00Z', 'unplaced', NULL, ARRAY['40000000-0000-4000-8000-000000000077'::uuid], 'ghl:m40-77'),
+ -- Y: nothing on the job; their text (CRM 25 Aug) and our reply (CRM 26 Aug), both loaded on 20 Sep and placed on no job
+ ('40b00000-0000-4000-8000-000000000182', NULL, 'client.reply', 'ghl_sms_cache_backfill', 'sms', 'inbound', 'ct40zy',
+  '{"body":"Can you come out next week?","ghl_message_id":"m40-78a"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-09-20 01:00Z', '2026-09-20 01:00Z', '2026-09-20 01:00Z', 'unplaced', NULL, ARRAY['40000000-0000-4000-8000-000000000078'::uuid], 'ghl:m40-78a'),
+ ('40b00000-0000-4000-8000-000000000183', NULL, 'client.sms_out', 'ghl_sms_cache_backfill', 'sms', 'outbound', 'ct40zy',
+  '{"body":"Yes, Tuesday suits","ghl_message_id":"m40-78b"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+  '2026-09-20 01:05Z', '2026-09-20 01:05Z', '2026-09-20 01:05Z', 'unplaced', NULL, ARRAY['40000000-0000-4000-8000-000000000078'::uuid], 'ghl:m40-78b'),
+ -- L: texts each way the CRM dates in June, before the job's lead window (it was created 15 Sep), loaded on 20 Sep after the quote, placed on no job
+ ('40b00000-0000-4000-8000-000000000184', NULL, 'client.reply', 'ghl_sms_cache_backfill', 'sms', 'inbound', 'ct40zl',
+  '{"body":"June words from someone else","ghl_message_id":"m40-79a"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-09-20 01:00Z', '2026-09-20 01:00Z', '2026-09-20 01:00Z', 'unplaced', NULL, ARRAY['40000000-0000-4000-8000-000000000079'::uuid], 'ghl:m40-79a'),
+ ('40b00000-0000-4000-8000-000000000185', NULL, 'client.sms_out', 'ghl_sms_cache_backfill', 'sms', 'outbound', 'ct40zl',
+  '{"body":"Our June text to someone","ghl_message_id":"m40-79b"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
+  '2026-09-20 01:05Z', '2026-09-20 01:05Z', '2026-09-20 01:05Z', 'unplaced', NULL, ARRAY['40000000-0000-4000-8000-000000000079'::uuid], 'ghl:m40-79b');
+
+-- 1 and 4 (fifth review). A CRM text placed on no job that was loaded later from the CRM's cache
+-- is at the CRM's own time in R7's contact since the quote and in the no-reader line's contact
+-- facts, as the job's own texts are: a text the customer sent before the quote is never contact
+-- since it, however late it was loaded (Z); the line names the days the CRM gives, never the load
+-- day (Y); a text from before the job's lead window is never the customer's newest message,
+-- contact since a quote or our last reply (L), though the placement queue still counts it.
+DO $cached$
+DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; r record;
+BEGIN
+ SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000077'::uuid], asof) l WHERE l.rule = 'R7_quote_waiting';
+ IF r.owner IS DISTINCT FROM 'customer' OR r.counterparty IS DISTINCT FROM 'us'
+    OR r.what IS DISTINCT FROM 'Quote Q-4077 v1 sent Tue 1 Sep 2026 (36 days), not viewed; no answer and no customer message since' THEN
+  RAISE EXCEPTION 'story safety contract: a text the customer sent before the quote is never contact since it, however late it was loaded: %', row_to_json(r);
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000077', asof);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'customer' OR s->'now'->>'line' LIKE '%in touch since%'
+    OR position('The customer''s move, waiting on the customer: Quote Q-4077 v1 sent Tue 1 Sep 2026 (36 days), not viewed; no answer and no customer message since'
+                IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: the first line never reads a text sent before the quote as contact since it: %', s->'now';
+ END IF;
+ s := public.context_job_story_meta('40000000-0000-4000-8000-000000000078', asof);
+ IF (s->'unplaced'->>'newest_customer_at')::timestamptz IS DISTINCT FROM '2026-08-25 03:00Z'
+    OR (s->'unplaced'->>'newest_reply_at')::timestamptz IS DISTINCT FROM '2026-08-26 03:00Z'
+    OR (s->'unplaced'->>'newest_at')::timestamptz IS DISTINCT FROM '2026-08-26 03:00Z' OR (s->'unplaced'->>'count')::int IS DISTINCT FROM 2 THEN
+  RAISE EXCEPTION 'story safety contract: the story meta times a CRM text placed on no job by the CRM''s own time: %', s->'unplaced';
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000078', asof);
+ IF position('newest customer message Tue 25 Aug (not placed on any job), our last reply Wed 26 Aug (not placed on any job)' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: the line names the days the CRM gives texts placed on no job, never the load day: %', s->'now'->>'line';
+ END IF;
+ SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000079'::uuid], asof) l WHERE l.rule = 'R7_quote_waiting';
+ IF r.owner IS DISTINCT FROM 'customer'
+    OR r.what IS DISTINCT FROM 'Quote Q-4079 v1 sent Wed 16 Sep 2026 (21 days), not viewed; no answer and no customer message since' THEN
+  RAISE EXCEPTION 'story safety contract: a text placed on no job from before the lead window is never contact since the quote: %', row_to_json(r);
+ END IF;
+ s := public.context_job_story('40000000-0000-4000-8000-000000000079', asof);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'customer' OR s->'now'->>'line' LIKE '%in touch since%' THEN
+  RAISE EXCEPTION 'story safety contract: the first line never reads a text from before the lead window as contact since the quote: %', s->'now';
+ END IF;
+ s := public.context_job_story_meta('40000000-0000-4000-8000-000000000079', asof);
+ IF s->'unplaced'->>'newest_customer_at' IS NOT NULL OR s->'unplaced'->>'newest_reply_at' IS NOT NULL OR s->'unplaced'->>'newest_at' IS NOT NULL
+    OR (s->'unplaced'->>'count')::int IS DISTINCT FROM 2 THEN
+  RAISE EXCEPTION 'story safety contract: texts placed on no job from before the lead window are counted, never the newest of either side: %', s->'unplaced';
+ END IF;
+END $cached$;
 ROLLBACK;
 
 -- 8. Re-applying the migration changes nothing (its guard accepts its own bodies).
