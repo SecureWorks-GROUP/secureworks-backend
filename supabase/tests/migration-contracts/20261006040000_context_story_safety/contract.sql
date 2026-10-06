@@ -3,12 +3,16 @@
 -- 20261006033000):
 --  0. Shape and access: twelve replaced bodies keep their flags, grants and slice
 --     names; five helpers, service role only.
---  1. No false all-clear while no live (promoted) reading has read the words.
+--  1. No false all-clear while no live (promoted) reading has read the words, nor
+--     while a live one has rows on the job it has not read yet; whose move and the
+--     item the first line names belong to the same party.
 --  2. An inbox email is dropped only for a saved copy on the same job: story, reader
 --     evidence and citation check; the citation check only widens.
 --  3. Money guards: a paid deposit is acceptance; C2 for each record that disagrees
 --     with the job value and R8 then unconfirmed; R8 never leads before the work is
---     done; overdue and due invoices owed by whoever they are addressed to; a quote
+--     done and its status says not_due (in the client story too, after the loops due
+--     now); overdue and due invoices owed by whoever they are addressed to, and the
+--     customer's move names the customer's invoice, never a neighbour's; a quote
 --     waits on the customer; a shared supplier bill says so with this job's share.
 --  4. Who and when: CRM time for backfilled texts; texts before the job's lead window
 --     are never the customer's; ghost and observer bookings are copies; work is done
@@ -63,9 +67,9 @@ END $shape$;
 -- open on record is never nobody's move: the line says no record item is open and the
 -- messages have not been read yet, with the newest customer message and our last
 -- reply; handling.commitments is empty. A shadow reading never counts as read; a live
--- one may still say nothing is open.
+-- one may still say nothing is open, but only once it has read every row on the job.
 DO $allclear$
-DECLARE s jsonb;
+DECLARE s jsonb; s2 jsonb;
  job constant jsonb := '{"id":"x","status":"quoted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}';
  contact constant jsonb := '{"last_customer_message":{"at":"2026-10-01T01:00:00Z","channel":"sms","direction":"inbound","table":"business_events","id":"e1","placed_on":"this_job"},
    "last_to_customer":{"at":"2026-10-02T01:00:00Z","channel":"sms","direction":"outbound","table":"business_events","id":"e2","placed_on":"this_job"}}';
@@ -88,6 +92,40 @@ BEGIN
  IF s->'now'->>'whose_move' <> 'nobody' OR position('Nothing open on record' IN s->'now'->>'line') = 0
     OR s->'handling'->'commitments' IS DISTINCT FROM '{"kept": 0, "late": 0, "open": 0, "overdue": 0}'::jsonb THEN
   RAISE EXCEPTION 'story safety contract: a live reading that found nothing open may say so: % / %', s->'now', s->'handling';
+ END IF;
+ -- A live reading that has not read every row on the job (here three newer rows, our
+ -- newest reply among them; or one) is no all-clear either: whose move is unknown and
+ -- the line says how many newer messages it has not read. What it did read still
+ -- counts (handling.commitments).
+ s := public.context_job_story_assemble(job, jsonb_build_object('contact', contact),
+        '{"status":"live","generation":{"id":"g1","evidence_until":"2026-10-01T12:00:00Z"},"items":[],"transitions":[],"unread_rows":3,"unread_ids":["e2","e4","e5"],"read_ids":["e1"]}',
+        NULL, '2026-10-07 02:00Z', NULL);
+ s2 := public.context_job_story_assemble(job, jsonb_build_object('contact', contact),
+        '{"status":"live","generation":{"id":"g1","evidence_until":"2026-10-01T12:00:00Z"},"items":[],"transitions":[],"unread_rows":1,"unread_ids":["e2"],"read_ids":["e1"]}',
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' <> 'unknown' OR s->'now'->>'line' LIKE '%Nothing open%'
+    OR position('No record item is open and 3 newer messages have not been read yet: newest customer message Thu 1 Oct, our last reply Fri 2 Oct' IN s->'now'->>'line') = 0
+    OR s->'handling'->'commitments' IS DISTINCT FROM '{"kept": 0, "late": 0, "open": 0, "overdue": 0}'::jsonb
+    OR s2->'now'->>'whose_move' <> 'unknown' OR position('No record item is open and 1 newer message has not been read yet:' IN s2->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: a live reading with rows it has not read is no all-clear: % / %', s->'now', s2->'now';
+ END IF;
+ -- Whose move and the item the line names belong to the same party: our move (a draft
+ -- not issued) names what we owe, never another payer's overdue invoice that ranks
+ -- above it (SWF-261423 class).
+ s := public.context_job_story_assemble('{"id":"x","status":"invoiced","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
+        jsonb_build_object('contact', contact, 'loops', jsonb_build_array(
+          jsonb_build_object('rule', 'R1_overdue', 'loop_key', 'R1_overdue:n1', 'shown_as', 'loop', 'owner', 'third_party', 'counterparty', 'us',
+           'what', 'INV-9 $100.00 overdue from N (a neighbour paying part of this job) since Tue 1 Sep 2026 (36 days)',
+           'opened_at', '2026-09-01T00:00:00Z', 'due_date', '2026-09-01', 'amount', 100, 'about_key', 'invoice:inv-9',
+           'source_table', 'xero_invoices', 'source_id', 'n1'),
+          jsonb_build_object('rule', 'R3_draft', 'loop_key', 'R3_draft:c1', 'shown_as', 'loop', 'owner', 'us', 'counterparty', 'customer',
+           'what', 'Draft invoice INV-10 $500.00 to C not issued since Thu 1 Oct 2026', 'opened_at', '2026-09-30T16:00:00Z', 'amount', 500,
+           'about_key', 'invoice:inv-10', 'source_table', 'xero_invoices', 'source_id', 'c1'))),
+        '{"status":"live","generation":{"id":"g1","evidence_until":"2026-10-05T00:00:00Z"},"items":[],"transitions":[],"unread_rows":0,"unread_ids":[],"read_ids":["e1"]}',
+        NULL, '2026-10-07 02:00Z', NULL);
+ IF s->'now'->>'whose_move' <> 'us' OR position('Our move, we owe: Draft invoice INV-10' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' LIKE '%another payer owes%' OR s->'now'->'next'->>'what' NOT LIKE 'Draft invoice INV-10%' THEN
+  RAISE EXCEPTION 'story safety contract: our move names what we owe, never another payer''s invoice: %', s->'now';
  END IF;
  -- only an automated text went to the customer: no reply from a person, the text named
  s := public.context_job_story_assemble(job, jsonb_build_object('contact', jsonb_build_object('last_customer_message', contact->'last_customer_message',
@@ -131,6 +169,9 @@ VALUES
   NULL, 'ct40v4', NULL, '{"totalIncGST": 15500}', '2026-07-05 01:00Z', '2026-09-30 01:00Z', '2026-07-01 01:00Z'),
  ('40000000-0000-4000-8000-000000000016', '00000000-0000-4000-8000-0000000000aa', 'SWF-T4016', 'accepted', 'fencing', 'Quote Client',
   NULL, 'ct40v5', NULL, '{"totalIncGST": 10406}', '2026-09-10 01:00Z', NULL, '2026-09-01 01:00Z'),
+ -- the deposit client's second job: a quote waiting on them (due now, unlike job 11's R8)
+ ('40000000-0000-4000-8000-000000000017', '00000000-0000-4000-8000-0000000000aa', 'SWF-T4017', 'quoted', 'fencing', 'Deposit Client',
+  NULL, 'ct40d', NULL, '{}', NULL, NULL, '2026-09-01 01:00Z'),
  -- payers
  ('40000000-0000-4000-8000-000000000021', '00000000-0000-4000-8000-0000000000aa', 'SWF-T4021', 'final_payment', 'fencing', 'Payer Client',
   NULL, 'ct40p1', 'x40-client', '{}', NULL, NULL, '2026-06-01 01:00Z'),
@@ -142,6 +183,8 @@ VALUES
   'wait@example.test', 'ct40q', NULL, '{}', NULL, NULL, '2026-09-01 01:00Z'),
  ('40000000-0000-4000-8000-000000000025', '00000000-0000-4000-8000-0000000000aa', 'SWP-94025', 'scheduled', 'patio', 'Bill Client',
   NULL, 'ct40sb', NULL, '{}', NULL, NULL, '2026-09-01 01:00Z'),
+ ('40000000-0000-4000-8000-000000000026', '00000000-0000-4000-8000-0000000000aa', 'SWF-T4026', 'invoiced', 'fencing', 'Client P6',
+  NULL, 'ct40p6', NULL, '{}', NULL, NULL, '2026-06-01 01:00Z'),
  -- who and when
  ('40000000-0000-4000-8000-000000000031', '00000000-0000-4000-8000-0000000000aa', 'SWF-T4031', 'quoted', 'fencing', 'Backfill Client',
   NULL, 'ct40b1', NULL, '{}', NULL, NULL, '2026-09-01 01:00Z'),
@@ -256,10 +299,14 @@ VALUES
  ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000053', '40000000-0000-4000-8000-000000000052', 'x4052b',
   'x40-c7a', 'Client Seven', 'INV-4053', 'ACCREC', 'AUTHORISED', 'SWF-T4052-B', 1850.40, 1850.40, 0, '2026-07-15', '2026-07-29', NULL,
   NULL, '{"Status":"AUTHORISED","Payments":[]}', NULL, '2026-07-15 01:00Z');
--- party link: client P2's primary party and a neighbour party, each invoiced
+-- party link: client P2's primary party and a neighbour party, each invoiced; the same
+-- for client P6, whose neighbour's invoice id sorts before the customer's (SWF-261209
+-- class: both due the same day)
 INSERT INTO public.job_contacts (id, job_id, contact_type, client_name, xero_contact_id, is_primary, created_at)
 VALUES ('40d00000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000022', 'primary', 'Client P2', 'x40-p2c', true, '2026-06-01 01:00Z'),
-       ('40d00000-0000-4000-8000-000000000002', '40000000-0000-4000-8000-000000000022', 'neighbour_b', 'Neighbour P2', 'x40-p2n', false, '2026-06-01 01:00Z');
+       ('40d00000-0000-4000-8000-000000000002', '40000000-0000-4000-8000-000000000022', 'neighbour_b', 'Neighbour P2', 'x40-p2n', false, '2026-06-01 01:00Z'),
+       ('40d00000-0000-4000-8000-000000000061', '40000000-0000-4000-8000-000000000026', 'primary', 'Client P6', 'x40-p6c', true, '2026-06-01 01:00Z'),
+       ('40d00000-0000-4000-8000-000000000062', '40000000-0000-4000-8000-000000000026', 'neighbour_b', 'Neighbour P6', 'x40-p6n', false, '2026-06-01 01:00Z');
 INSERT INTO public.xero_invoices (org_id, id, job_id, xero_invoice_id, xero_contact_id, contact_name, invoice_number, invoice_type, status, reference,
   total, amount_due, amount_paid, invoice_date, due_date, raw_json, job_contact_id, created_at)
 VALUES ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000031', '40000000-0000-4000-8000-000000000022', 'x4022a',
@@ -267,14 +314,22 @@ VALUES ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-0000000
         '{"Status":"AUTHORISED","Payments":[]}', '40d00000-0000-4000-8000-000000000001', '2026-10-01 01:00Z'),
        ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000032', '40000000-0000-4000-8000-000000000022', 'x4022b',
         'x40-p2n', 'Neighbour P2', 'INV-4032', 'ACCREC', 'AUTHORISED', 'SWF-T4022-B', 1351.63, 1351.63, 0, '2026-10-01', '2026-10-10',
-        '{"Status":"AUTHORISED","Payments":[]}', '40d00000-0000-4000-8000-000000000002', '2026-10-01 01:00Z');
+        '{"Status":"AUTHORISED","Payments":[]}', '40d00000-0000-4000-8000-000000000002', '2026-10-01 01:00Z'),
+       ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000026', '40000000-0000-4000-8000-000000000026', 'x4026n',
+        'x40-p6n', 'Neighbour P6', 'INV-4026', 'ACCREC', 'AUTHORISED', 'SWF-T4026-B', 1351.63, 1351.63, 0, '2026-10-01', '2026-10-10',
+        '{"Status":"AUTHORISED","Payments":[]}', '40d00000-0000-4000-8000-000000000062', '2026-10-01 01:00Z'),
+       ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000027', '40000000-0000-4000-8000-000000000026', 'x4026c',
+        'x40-p6c', 'Client P6', 'INV-4027', 'ACCREC', 'AUTHORISED', 'SWF-T4026-A', 1351.63, 1351.63, 0, '2026-10-01', '2026-10-10',
+        '{"Status":"AUTHORISED","Payments":[]}', '40d00000-0000-4000-8000-000000000061', '2026-10-01 01:00Z');
 INSERT INTO public.makesafe_job_details (job_id, requesting_company_name, created_at)
 VALUES ('40000000-0000-4000-8000-000000000023', 'Builder Co', '2026-09-01 01:00Z'),
        ('40000000-0000-4000-8000-000000000043', 'Make Safe Builder', '2026-09-20 01:00Z');
--- quotes: unsent only (V3); sent and valued, still standing (V5); waiting (Q); declined (F4)
+-- quotes: unsent only (V3); sent and valued, still standing (V5); waiting (Q, and the
+-- deposit client's second job); declined (F4)
 INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at, viewed_at, declined_at)
 VALUES ('40e00000-0000-4000-8000-000000000014', '40000000-0000-4000-8000-000000000014', 'quote', NULL, 1, '2026-07-02 01:00Z', NULL, NULL, NULL),
        ('40e00000-0000-4000-8000-000000000016', '40000000-0000-4000-8000-000000000016', 'quote', 'Q-4016', 4, '2026-09-05 01:00Z', '2026-09-05 01:10Z', NULL, NULL),
+       ('40e00000-0000-4000-8000-000000000017', '40000000-0000-4000-8000-000000000017', 'quote', 'Q-4017', 1, '2026-09-20 01:00Z', '2026-09-20 01:10Z', NULL, NULL),
        ('40e00000-0000-4000-8000-000000000024', '40000000-0000-4000-8000-000000000024', 'quote', 'Q-4024', 1, '2026-09-20 01:00Z', '2026-09-20 01:10Z', NULL, NULL),
        ('40e00000-0000-4000-8000-000000000044', '40000000-0000-4000-8000-000000000044', 'quote', 'Q-4044', 1, '2026-09-20 01:00Z', '2026-09-20 01:10Z', NULL, '2026-09-25 01:00Z');
 INSERT INTO public.quote_revisions (id, job_id, job_document_id, version, totals_snapshot_json, released_via, sent_at)
@@ -423,6 +478,20 @@ BEGIN
     OR s->'loops'->0->>'key' <> 'R8_not_yet_invoiced:40000000-0000-4000-8000-000000000011' THEN
   RAISE EXCEPTION 'story safety contract: before the work is done the final invoice never leads: % / %', s->'now', s->'loops';
  END IF;
+ -- It is the job's only loop, so it ranks first; its status says it is not due yet,
+ -- never open (an agent or reader reading the loops never sees it as a move).
+ IF s->'loops'->0->>'status' IS DISTINCT FROM 'not_due' OR (s->'loops'->0->>'rank')::int <> 1 THEN
+  RAISE EXCEPTION 'story safety contract: a final invoice before the work is done is not due, never open: %', s->'loops';
+ END IF;
+ -- The client story keeps that status and lists the loop after every loop due now on
+ -- the client's other jobs, whatever its rank on its own job (the quote waiting on
+ -- SWF-T4017 is newer, but due now).
+ s := public.context_client_story('40000000-0000-4000-8000-000000000011', asof);
+ IF (SELECT array_agg((l->>'job_number') || '=' || (l->>'rule') || '=' || (l->>'status') ORDER BY o)
+     FROM jsonb_array_elements(s->'open_loops') WITH ORDINALITY x(l, o))
+    IS DISTINCT FROM ARRAY['SWF-T4017=R7_quote_waiting=open', 'SWP-T4011=R8_not_yet_invoiced=not_due'] THEN
+  RAISE EXCEPTION 'story safety contract: the client story lists a loop not due after the loops due now: %', s->'open_loops';
+ END IF;
  -- Each record that disagrees with the job value is a C2 check, and R8 is then unconfirmed.
  SELECT string_agg(l.job_id::text || '=' || l.what, ' | ' ORDER BY l.job_id) INTO got
  FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000012', '40000000-0000-4000-8000-000000000013',
@@ -469,6 +538,17 @@ BEGIN
  s := public.context_job_story('40000000-0000-4000-8000-000000000022', asof);
  IF position('Owing $2,703.26: INV-4031 $1,351.63 from Client P2 due Sat 10 Oct; INV-4032 $1,351.63 from Neighbour P2 due Sat 10 Oct' IN s->'now'->>'line') = 0 THEN
   RAISE EXCEPTION 'story safety contract: the first line names both payers, each invoice and its due date: %', s->'now'->>'line';
+ END IF;
+ -- Whose move and the invoice the line names agree: the customer and a neighbour both
+ -- owe, due the same day, and the neighbour's invoice id sorts first. It is the
+ -- customer's move, and the line and the next item name the customer's invoice, never
+ -- the neighbour's.
+ s := public.context_job_story('40000000-0000-4000-8000-000000000026', asof);
+ IF s->'now'->>'whose_move' <> 'customer' OR position('The customer''s move, the customer owes: INV-4027 $1,351.63 owing from Client P6' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' LIKE '%another payer owes%'
+    OR NOT s->'now'->'next'->'cites' @> '[{"t": "xero_invoices", "id": "40c00000-0000-4000-8000-000000000027"}]'::jsonb
+    OR position('Owing $2,703.26: INV-4026 $1,351.63 from Neighbour P6 due Sat 10 Oct; INV-4027 $1,351.63 from Client P6 due Sat 10 Oct' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: the customer''s move names the customer''s invoice, never a neighbour''s: % / %', s->'now', s->'loops';
  END IF;
  s := public.context_job_story('40000000-0000-4000-8000-000000000023', asof);
  IF NOT s->'who' @> '[{"name":"Home Owner","role":"insured"},{"name":"Builder Co","role":"customer"}]'::jsonb
