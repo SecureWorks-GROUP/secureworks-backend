@@ -25,7 +25,10 @@
 --     not-received rule as the timeline and the ledger store, as of the replay
 --     instant. The rule still fires on the same quotes (the newest sent, at least
 --     8 days ago, unanswered), so the record loops match the proof-set reference
---     rule.
+--     rule. Its closes_when says when the not-received state ends (an email of it
+--     goes out or the customer views it: then it waits on the customer) and then
+--     when the loop closes (acceptance, decline, a newer version, a customer
+--     message), so nobody reads a delivered resend as the loop closing.
 --  4. The app events the ledger store lets close a matter
 --     (context_ledger_job_event_closes: quote_sent, invoice.emailed,
 --     acceptance_invoice_sent, payment_link_sent, payment_received,
@@ -37,7 +40,9 @@
 --     newest. An event naming a document whose every email bounced or failed,
 --     never viewed or answered, has state not_delivered: the store lets it close
 --     nothing. A crew clocking on or off is in job_events only (36 rows live, no
---     business_events copy), so it reaches the story for the first time.
+--     business_events copy), so it reaches the story for the first time. A
+--     folded clock-off line gives the day's net hours, every stint added (none
+--     when a stint has no hours), never the newest stint's alone.
 --
 -- Not changed: the ledger store's closing rules (context_ledger_*): the reader
 -- mirrors them exactly and a mismatch counts against the shadow gate; the proposal
@@ -68,8 +73,8 @@ DO $guard$
 DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['a8b34905f83ab30739b8cbc5cf268748', '4c37cd16c59ff7c29d162615407b7819']),
-  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['b872b6d0f55411280de1bd0c405771fb', 'e2976900d488c53501f76f26a1a0403c']),
+  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['a8b34905f83ab30739b8cbc5cf268748', 'f827ec9418fc843470e793c09a55612e']),
+  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['b872b6d0f55411280de1bd0c405771fb', '47a6a646655f7110ff52be8e90846599']),
   ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['4860fd81fb02905e0ae0ddccd64d0f1c', 'aab2d2eb593890b297f6d13a486f6aa0']),
   ('public.context_job_story_ledger(uuid,uuid,timestamptz)', ARRAY['3352950310073c33cc83f64bd80f60a9', '7754e292f957c722d0fa56a3001f8ffd']),
   ('public.context_client_story(uuid,timestamptz)', ARRAY['3f2cc15aa814f9b993a80e282d1fd65b', 'cc4a2ce461deeb17653cd94b714bbf78'])
@@ -194,7 +199,13 @@ AS $fn$
                             AND (d.viewed_at <= p_as_of OR d.accepted_at <= p_as_of OR d.declined_at <= p_as_of))) AS not_received
   FROM (SELECT DISTINCT ON (x.job_id, x.event_type, x.obj, x.day) x.*,
                count(*) OVER (PARTITION BY x.job_id, x.event_type, x.obj, x.day) AS n,
-               min(x.created_at) OVER (PARTITION BY x.job_id, x.event_type, x.obj, x.day) AS first_at
+               min(x.created_at) OVER (PARTITION BY x.job_id, x.event_type, x.obj, x.day) AS first_at,
+               -- a folded clock-off line gives the day's hours: the sum of every stint's net
+               -- hours, only when each stint folded into it carries them (else no hours)
+               sum(CASE WHEN jsonb_typeof(x.d -> 'net_hours') = 'number' THEN (x.d ->> 'net_hours')::numeric END)
+                OVER (PARTITION BY x.job_id, x.event_type, x.obj, x.day) AS net_sum,
+               count(*) FILTER (WHERE jsonb_typeof(x.d -> 'net_hours') = 'number')
+                OVER (PARTITION BY x.job_id, x.event_type, x.obj, x.day) AS net_n
         FROM ae0 x
         ORDER BY x.job_id, x.event_type, x.obj, x.day, x.created_at DESC, x.id DESC) g
  ),
@@ -558,8 +569,11 @@ AS $fn$
           WHEN 'payment_recorded' THEN 'App recorded a payment' || coalesce(' on invoice ' || nullif(btrim(e.d ->> 'invoice_number'), ''), '')
           WHEN 'clock.clock_on' THEN 'Crew clocked on' || coalesce(' for the ' || to_char(ca.scheduled_date, 'Dy FMDD Mon YYYY') || ' booking', '')
           WHEN 'clock.clock_off' THEN 'Crew clocked off' || coalesce(' for the ' || to_char(ca.scheduled_date, 'Dy FMDD Mon YYYY') || ' booking', '')
-               || CASE WHEN jsonb_typeof(e.d -> 'net_hours') = 'number'
-                       THEN ' (' || rtrim(to_char((e.d ->> 'net_hours')::numeric, 'FM999990.99'), '.') || ' hours net)' ELSE '' END
+               || CASE WHEN e.n = 1 AND jsonb_typeof(e.d -> 'net_hours') = 'number'
+                       THEN ' (' || rtrim(to_char((e.d ->> 'net_hours')::numeric, 'FM999990.99'), '.') || ' hours net)'
+                       WHEN e.n > 1 AND e.net_n = e.n
+                       THEN ' (' || rtrim(to_char(e.net_sum, 'FM999990.99'), '.') || ' hours net that day, all stints added)'
+                       ELSE '' END
           WHEN 'makesafe_report_submitted' THEN 'Trade make-safe report submitted'
           ELSE 'Trade roof report submitted' END
          || CASE WHEN e.n > 1 THEN '; recorded ' || e.n || ' times that day, first at '
@@ -663,7 +677,7 @@ AS $fn$
  ORDER BY m.job_id, m.at, m.kind COLLATE "C", m.source_id COLLATE "C", m.what COLLATE "C"
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) IS
- 'Job record (20261006011000), story fixes (20261006033000): app events the ledger store lets close a matter (quote_sent, invoice.emailed, acceptance_invoice_sent, payment_link_sent, payment_received, payment_recorded, clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted) are lines citing job_events, one per event type, matter and Perth day (the newest cited, the count named), each with state = its event_type, or not_delivered when it names a document whose every email bounced or failed and the customer never viewed or answered it; rows sort by time, then kind, source and words in C (byte) order. Earlier: one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes (never a crew-planning mark: a lock, a status mark, or a move to the same date), attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
+ 'Job record (20261006011000), story fixes (20261006033000): app events the ledger store lets close a matter (quote_sent, invoice.emailed, acceptance_invoice_sent, payment_link_sent, payment_received, payment_recorded, clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted) are lines citing job_events, one per event type, matter and Perth day (the newest cited, the count named; a folded clock-off gives the day''s net hours, every stint added, or none), each with state = its event_type, or not_delivered when it names a document whose every email bounced or failed and the customer never viewed or answered it; rows sort by time, then kind, source and words in C (byte) order. Earlier: one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes (never a crew-planning mark: a lock, a status mark, or a move to the same date), attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
 
 -- 2. The loops: C6 dates by date; R7 not received when every email bounced; one sort order.
 CREATE OR REPLACE FUNCTION public.context_job_record_loops(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
@@ -824,7 +838,10 @@ AS $fn$
               ELSE 'Newest sent quote not accepted, declined or superseded, sent more than 7 days ago' END,
          q.sent_at, NULL::date, NULL::numeric,
          'quote:' || lower(coalesce(nullif(btrim(q.quote_number), ''), 'doc-' || left(q.id::text, 8))),
-         CASE WHEN de.undelivered THEN 'An email of it goes out, the customer views or answers it, or a newer version'
+         -- not received ends when an email of it goes out or the customer views it; the
+         -- loop then waits on the customer and closes as any waiting quote does
+         CASE WHEN de.undelivered THEN 'Not received until an email of it goes out or the customer views it, then it waits on the customer; '
+                                       || 'closes on acceptance, decline, a newer version, or a customer message'
               ELSE 'Acceptance, decline, a newer version, or a customer message' END
   FROM (SELECT DISTINCT ON (d.job_id) d.* FROM qd d WHERE d.sent_at IS NOT NULL
         ORDER BY d.job_id, d.sent_at DESC, d.created_at, d.id) q
@@ -1024,7 +1041,7 @@ AS $fn$
  ORDER BY lp.job_id, lp.rule COLLATE "C", lp.opened_at, lp.sid COLLATE "C"
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_loops(uuid[], timestamptz) IS
- 'Job record (20261006011000), story fixes (20261006033000): C6 names the booked days in date order, each once; R7 on a quote whose every email bounced or failed and the customer never viewed it reads not received and is ours (owner us), not the customer''s answer; text sorts and tiebreaks in C (byte) order. Earlier: record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C4 and C6 to C11 (a person''s look, never an obligation; C5, crew planning''s tentative booking, is retired and crew planning''s confirmation is never read). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. placement says where a cited message sits (on_job, or not_placed: client mail the old inbox placed on no job, labelled in the words); null for a record row. Service role only.';
+ 'Job record (20261006011000), story fixes (20261006033000): C6 names the booked days in date order, each once; R7 on a quote whose every email bounced or failed and the customer never viewed it reads not received and is ours (owner us), not the customer''s answer, and its closes_when says when not received ends (an email of it goes out or the customer views it) and then when the loop closes; text sorts and tiebreaks in C (byte) order. Earlier: record-closable loops per job. R1_overdue, R2_part_paid, R3_draft, R4_missed_call, R5_customer_wrote_last, R6_booking_passed_status_unmoved, R7_quote_waiting, R8_not_yet_invoiced are exactly the proof-set reference rules (tests.md T2, grade_ref.py record_loops); M1_money_due; checks C1 to C4 and C6 to C11 (a person''s look, never an obligation; C5, crew planning''s tentative booking, is retired and crew planning''s confirmation is never read). shown_as loop|candidate|check. loop_key = rule:source_id. about_key per the ledger vocabulary. placement says where a cited message sits (on_job, or not_placed: client mail the old inbox placed on no job, labelled in the words); null for a record row. Service role only.';
 
 -- 3. The story assembler: one sort order for everything it outputs.
 CREATE OR REPLACE FUNCTION public.context_job_story_assemble(p_job jsonb, p_record jsonb, p_ledger jsonb, p_meta jsonb,

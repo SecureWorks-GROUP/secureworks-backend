@@ -3,14 +3,17 @@
 --     order, so the same story reads the same on every server (production, CI and
 --     the reader sort text three different ways).
 --  2. C6 names the booked days in date order, each once.
+--  2b. R3 lists the other invoices on the draft's reference in C order.
 --  3. R7 reads a quote whose every email bounced or failed (never viewed) as not
---     received and our move, never as waiting on the customer's answer.
+--     received and our move, never as waiting on the customer's answer; its
+--     closes_when says when not received ends, then when the loop closes.
 --  4. The app events the ledger store lets close a matter are timeline lines that
 --     cite job_events, each with its event_type as its state (not_delivered for a
---     document nobody received), one line per event type, matter and Perth day.
--- Each section fails on the 972 bodies (sections 1 on any server whose default
--- collation is not C, like CI's and production's). Every fixture row is synthetic
--- and rolled back; user triggers are off for it.
+--     document nobody received), one line per event type, matter and Perth day; a
+--     folded clock-off line gives the day's net hours, every stint added.
+-- Each section fails on the 972 bodies (sections 1 and 2b on any server whose
+-- default collation is not C, like CI's and production's). Every fixture row is
+-- synthetic and rolled back; user triggers are off for it.
 
 -- 0. Shape and access: the same five functions, flags and grants, each comment
 -- keeping its slice name first.
@@ -194,6 +197,33 @@ BEGIN
 END $c6$;
 ROLLBACK;
 
+-- 2b. R3 names the other invoices on the draft's reference in C (byte) order: two
+-- whose numbers differ only in case read "INV-4 ..., inv-3 ..." on every server (a
+-- server sorting in its own language order put "inv-3" first).
+BEGIN;
+SET LOCAL session_replication_role = replica;
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_email, ghl_contact_id, pricing_json, created_at)
+VALUES ('33000000-0000-4000-8000-000000000009', '00000000-0000-4000-8000-0000000000aa', 'SWF-T3309', 'invoiced', 'fencing',
+        NULL, 'ct33r3', '{}', '2026-09-01 01:00Z');
+INSERT INTO public.xero_invoices (org_id, id, job_id, xero_invoice_id, xero_contact_id, contact_name, invoice_number, invoice_type, status, reference,
+  total, amount_due, amount_paid, invoice_date, due_date, raw_json, created_at)
+VALUES ('00000000-0000-4000-8000-0000000000aa', '33a00000-0000-4000-8000-000000000091', '33000000-0000-4000-8000-000000000009', 'x3391',
+        'x33r3', 'Payer R3', 'INV-10', 'ACCREC', 'DRAFT', 'SWF-T3309-DEP50', 500, 500, 0, '2026-09-20', '2026-10-04', '{"Status":"DRAFT"}', '2026-09-20 01:00Z'),
+       ('00000000-0000-4000-8000-0000000000aa', '33a00000-0000-4000-8000-000000000092', '33000000-0000-4000-8000-000000000009', 'x3392',
+        'x33r3', 'Payer R3', 'inv-3', 'ACCREC', 'PAID', 'SWF-T3309-DEP50', 250, 0, 250, '2026-09-21', '2026-10-05', '{"Status":"PAID"}', '2026-09-21 01:00Z'),
+       ('00000000-0000-4000-8000-0000000000aa', '33a00000-0000-4000-8000-000000000093', '33000000-0000-4000-8000-000000000009', 'x3393',
+        'x33r3', 'Payer R3', 'INV-4', 'ACCREC', 'AUTHORISED', 'SWF-T3309-DEP50', 250, 250, 0, '2026-09-21', '2026-10-05', '{"Status":"AUTHORISED"}', '2026-09-21 01:00Z');
+DO $r3$
+DECLARE got text;
+BEGIN
+ SELECT l.what INTO got FROM public.context_job_record_loops(ARRAY['33000000-0000-4000-8000-000000000009'::uuid], '2026-10-07 02:00Z') l
+ WHERE l.rule = 'R3_draft';
+ IF got IS NULL OR position('(INV-4 authorised, inv-3 paid on the same reference)' IN got) = 0 THEN
+  RAISE EXCEPTION 'story fixes contract: R3 must list the same reference''s invoices in C order: %', got;
+ END IF;
+END $r3$;
+ROLLBACK;
+
 -- 3. R7: a quote whose every email bounced or failed, never viewed, was not
 -- received. It says so and is our move; a delivered one still waits on the
 -- customer's answer; one bounced then delivered later is not received until the
@@ -229,7 +259,11 @@ BEGIN
  WHERE l.rule = 'R7_quote_waiting';
  IF r.owner IS DISTINCT FROM 'us' OR r.counterparty IS DISTINCT FROM 'customer' OR r.shown_as IS DISTINCT FROM 'loop'
     OR r.what IS DISTINCT FROM 'Quote Q-3304 v1 sent Fri 25 Sep 2026 (12 days), but every email of it bounced or failed: not received; no customer message since'
-    OR r.why NOT LIKE '%so it was not received' OR r.closes_when NOT LIKE 'An email of it goes out%' OR r.about_key <> 'quote:q-3304' THEN
+    OR r.why NOT LIKE '%so it was not received' OR r.about_key <> 'quote:q-3304'
+    -- it says when not received ends, then when the loop closes (a delivered resend
+    -- ends not received; it does not close the loop)
+    OR r.closes_when IS DISTINCT FROM 'Not received until an email of it goes out or the customer views it, then it waits on the customer; '
+                                      || 'closes on acceptance, decline, a newer version, or a customer message' THEN
   RAISE EXCEPTION 'story fixes contract: a quote nobody received is our move, not the customer''s answer: %', row_to_json(r);
  END IF;
  SELECT * INTO r FROM public.context_job_record_loops(ARRAY['33000000-0000-4000-8000-000000000005'::uuid], '2026-10-07 02:00Z') l
@@ -246,7 +280,9 @@ BEGIN
  END IF;
  SELECT * INTO r FROM public.context_job_record_loops(ARRAY['33000000-0000-4000-8000-000000000006'::uuid], '2026-10-07 02:00Z') l
  WHERE l.rule = 'R7_quote_waiting';
- IF r.owner IS DISTINCT FROM 'customer' OR r.what LIKE '%not received%' THEN
+ IF r.owner IS DISTINCT FROM 'customer' OR r.what LIKE '%not received%'
+    OR r.loop_key IS DISTINCT FROM 'R7_quote_waiting:33d00000-0000-4000-8000-000000000061'
+    OR r.closes_when IS DISTINCT FROM 'Acceptance, decline, a newer version, or a customer message' THEN
   RAISE EXCEPTION 'story fixes contract: once an email of it was delivered the quote waits on the customer: %', row_to_json(r);
  END IF;
  -- the story: the not-received quote is our move, and the now line says so
@@ -314,7 +350,20 @@ VALUES ('33f00000-0000-4000-8000-000000000001', '33000000-0000-4000-8000-0000000
        ('33f00000-0000-4000-8000-000000000015', '33000000-0000-4000-8000-000000000007', 'payment_received',
         '{"invoice_number":"INV-3372","xero_invoice_id":"x3372","amount_paid":10}', '2026-10-08 01:00Z'),
        ('33f00000-0000-4000-8000-000000000016', '33000000-0000-4000-8000-000000000007', 'payment_recorded',
-        '{"invoice_number":"INV-3371"}', '2026-10-02 02:00Z');
+        '{"invoice_number":"INV-3371"}', '2026-10-02 02:00Z'),
+       -- three clock-offs on one day for one booking: one line with the day's hours, every
+       -- stint added (never the newest stint's alone); a day where one stint has no hours
+       -- gives none
+       ('33f00000-0000-4000-8000-000000000017', '33000000-0000-4000-8000-000000000007', 'clock.clock_off',
+        '{"assignment_id":"33e00000-0000-4000-8000-000000000071","event":"clock_off","net_hours":0.22}', '2026-10-02 01:00Z'),
+       ('33f00000-0000-4000-8000-000000000018', '33000000-0000-4000-8000-000000000007', 'clock.clock_off',
+        '{"assignment_id":"33e00000-0000-4000-8000-000000000071","event":"clock_off","net_hours":0.8}', '2026-10-02 03:00Z'),
+       ('33f00000-0000-4000-8000-000000000019', '33000000-0000-4000-8000-000000000007', 'clock.clock_off',
+        '{"assignment_id":"33e00000-0000-4000-8000-000000000071","event":"clock_off","net_hours":0.03}', '2026-10-02 05:00Z'),
+       ('33f00000-0000-4000-8000-000000000020', '33000000-0000-4000-8000-000000000007', 'clock.clock_off',
+        '{"assignment_id":"33e00000-0000-4000-8000-000000000071","event":"clock_off","net_hours":2}', '2026-10-03 01:00Z'),
+       ('33f00000-0000-4000-8000-000000000021', '33000000-0000-4000-8000-000000000007', 'clock.clock_off',
+        '{"assignment_id":"33e00000-0000-4000-8000-000000000071","event":"clock_off"}', '2026-10-03 03:00Z');
 DO $events$
 DECLARE j constant uuid := '33000000-0000-4000-8000-000000000007'; asof constant timestamptz := '2026-10-07 02:00Z';
  got text; s jsonb; ln record; chk jsonb;
@@ -324,12 +373,12 @@ BEGIN
  IF got IS DISTINCT FROM '01=quote=quote_sent 02=quote=not_delivered 03=invoice=acceptance_invoice_sent 04=invoice=invoice.emailed '
     || '07=invoice=payment_link_sent 08=invoice=payment_link_sent 09=attendance=clock.clock_on 10=attendance=clock.clock_off '
     || '11=payment=payment_received 12=makesafe=makesafe_report_submitted 13=makesafe=roof_report_submitted '
-    || '14=booking_change=- 16=payment=payment_recorded' THEN
+    || '14=booking_change=- 16=payment=payment_recorded 19=attendance=clock.clock_off 21=attendance=clock.clock_off' THEN
   RAISE EXCEPTION 'story fixes contract: app events on the timeline (kind and state per cited event) wrong: %', got;
  END IF;
  SELECT string_agg(right(t.source_id, 2) || ': ' || t.what, ' | ' ORDER BY t.source_id COLLATE "C") INTO got
  FROM public.context_job_record_timeline(ARRAY[j], asof) t
- WHERE t.source_table = 'job_events' AND right(t.source_id, 2) IN ('01', '02', '03', '04', '07', '08', '09', '10', '11', '12', '13', '16');
+ WHERE t.source_table = 'job_events' AND right(t.source_id, 2) IN ('01', '02', '03', '04', '07', '08', '09', '10', '11', '12', '13', '16', '19', '21');
  IF got IS DISTINCT FROM
     '01: App recorded quote Q-3371 v1 sent to the customer | '
     || '02: App recorded quote Q-3372 v1 sent to another address, but every email of it bounced or failed: not received | '
@@ -342,7 +391,9 @@ BEGIN
     || '11: App recorded invoice INV-3371 paid in full ($1,100.00, paid Fri 2 Oct 2026) | '
     || '12: Trade make-safe report submitted | '
     || '13: Trade roof report submitted | '
-    || '16: App recorded a payment on invoice INV-3371' THEN
+    || '16: App recorded a payment on invoice INV-3371 | '
+    || '19: Crew clocked off for the Thu 1 Oct 2026 booking (1.05 hours net that day, all stints added); recorded 3 times that day, first at 09:00 | '
+    || '21: Crew clocked off for the Thu 1 Oct 2026 booking; recorded 2 times that day, first at 09:00' THEN
   RAISE EXCEPTION 'story fixes contract: app event words wrong: %', got;
  END IF;
  -- replayed during the day of repeated sends: only the send by then, its own line
@@ -389,8 +440,8 @@ DO $again$
 DECLARE x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-   ('public.context_job_record_timeline(uuid[],timestamptz)', '4c37cd16c59ff7c29d162615407b7819'),
-   ('public.context_job_record_loops(uuid[],timestamptz)', 'e2976900d488c53501f76f26a1a0403c'),
+   ('public.context_job_record_timeline(uuid[],timestamptz)', 'f827ec9418fc843470e793c09a55612e'),
+   ('public.context_job_record_loops(uuid[],timestamptz)', '47a6a646655f7110ff52be8e90846599'),
    ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', 'aab2d2eb593890b297f6d13a486f6aa0'),
    ('public.context_job_story_ledger(uuid,uuid,timestamptz)', '7754e292f957c722d0fa56a3001f8ffd'),
    ('public.context_client_story(uuid,timestamptz)', 'cc4a2ce461deeb17653cd94b714bbf78')) v(sig, md5) LOOP

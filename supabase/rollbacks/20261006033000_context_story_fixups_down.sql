@@ -11,8 +11,8 @@ DO $guard$
 DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['a8b34905f83ab30739b8cbc5cf268748', '4c37cd16c59ff7c29d162615407b7819']),
-  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['b872b6d0f55411280de1bd0c405771fb', 'e2976900d488c53501f76f26a1a0403c']),
+  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['a8b34905f83ab30739b8cbc5cf268748', 'f827ec9418fc843470e793c09a55612e']),
+  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['b872b6d0f55411280de1bd0c405771fb', '47a6a646655f7110ff52be8e90846599']),
   ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['4860fd81fb02905e0ae0ddccd64d0f1c', 'aab2d2eb593890b297f6d13a486f6aa0']),
   ('public.context_job_story_ledger(uuid,uuid,timestamptz)', ARRAY['3352950310073c33cc83f64bd80f60a9', '7754e292f957c722d0fa56a3001f8ffd']),
   ('public.context_client_story(uuid,timestamptz)', ARRAY['3f2cc15aa814f9b993a80e282d1fd65b', 'cc4a2ce461deeb17653cd94b714bbf78'])
