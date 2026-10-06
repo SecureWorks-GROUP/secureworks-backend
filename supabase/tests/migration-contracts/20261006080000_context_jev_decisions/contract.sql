@@ -34,6 +34,13 @@ BEGIN
   OR (SELECT enabled FROM public.feature_flags WHERE flag_name = 'context_jev_shadow_v1') IS DISTINCT FROM false THEN
   RAISE EXCEPTION 'jev contract: the flag row is not exactly one row created off';
  END IF;
+ -- The switch itself says what comes before it is turned on: TypeSafe's written
+ -- answers to the data questions (or the owner's acceptance without them), then
+ -- the key. Once on, customer words go to a US vendor and cannot be recalled.
+ IF coalesce((SELECT description FROM public.feature_flags WHERE flag_name = 'context_jev_shadow_v1'), '')
+    NOT LIKE '%only after TypeSafe''s written answers to the data questions%' THEN
+  RAISE EXCEPTION 'jev contract: the flag does not say that TypeSafe''s data answers come before it is turned on';
+ END IF;
 END $$;
 
 -- 2. Access: service role reads and inserts the log and nothing else; anon and

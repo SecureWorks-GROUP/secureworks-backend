@@ -42,6 +42,11 @@
 --     daily cap holds across a restart. Service role only.
 --  4. feature_flags.context_jev_shadow_v1, created OFF. The worker asks Jev
 --     nothing while it is off or missing, or while TYPESAFE_API_KEY is unset.
+--     It is turned on only after TypeSafe's written answers to the data
+--     questions (retention, subcontractors, Australian privacy terms, breach
+--     liability), or the owner's explicit acceptance without them, and then
+--     the key: once on, message text, site addresses and internal notes go to
+--     TypeSafe in the United States and cannot be called back.
 --
 -- Retention: the rows hold no message words, names, phone numbers or emails.
 -- Keep 180 days. Nothing deletes them automatically; rows older than 180 days
@@ -235,8 +240,9 @@ REVOKE ALL ON FUNCTION public.context_jev_calls_today() FROM PUBLIC, anon, authe
 GRANT EXECUTE ON FUNCTION public.context_jev_agreement(timestamptz, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_jev_calls_today() TO service_role;
 
--- 5. The switch, created OFF. Turning it on needs the owner's word (docs/jev.md in secureworks-jarvis).
+-- 5. The switch, created OFF. Turning it on needs the owner's word, after the
+-- data answers and the key (docs/jev.md in secureworks-jarvis, "Turning it on").
 INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT 'context_jev_shadow_v1', false,
- 'Jev in shadow (20261006080000): the context worker asks Jev (TypeSafe, jev-1.13.0) beside today''s answer at placement, the ledger update gate and the ledger''s reply-owed candidates, and logs both in context_jev_decisions. Jev never changes a decision. Also needs TYPESAFE_API_KEY on the worker. Owner''s word to turn on.'
+ 'Jev in shadow (20261006080000): the context worker asks Jev (TypeSafe, jev-1.13.0) beside today''s answer at placement, the ledger update gate and the ledger''s reply-owed candidates, and logs both in context_jev_decisions. Jev never changes a decision. Turn on only after TypeSafe''s written answers to the data questions, or the owner''s explicit acceptance without them, and then TYPESAFE_API_KEY on the worker (docs/jev.md in secureworks-jarvis): once on, message text, site addresses and internal notes go to TypeSafe in the United States. Owner''s word to turn on.'
 WHERE NOT EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name = 'context_jev_shadow_v1');
