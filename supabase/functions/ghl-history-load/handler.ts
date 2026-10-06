@@ -261,6 +261,22 @@ export function liveHistoryDeps(deps: HandlerDeps): HistoryDeps {
       );
     },
     pairLegacyCall: (row) => pairLegacyCall(supabase, row),
+    async copiesOf(rows) {
+      const { data, error } = await supabase.rpc(
+        "context_ghl_message_copies",
+        { p_rows: rows },
+      );
+      if (error || !Array.isArray(data)) {
+        throw Object.assign(new Error("copies_precheck_failed"), {
+          code: "copies_precheck_failed",
+        });
+      }
+      return new Set(
+        (data as { provider_message_id?: unknown }[])
+          .map((r) => r?.provider_message_id)
+          .filter((k): k is string => typeof k === "string" && k !== ""),
+      );
+    },
     async capture(row): Promise<HistoryCaptureOutcome> {
       try {
         const { data, error } = await supabase.rpc(

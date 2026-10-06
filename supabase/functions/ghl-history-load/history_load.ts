@@ -39,6 +39,13 @@
 //      backfill, and is saved through capture_ghl_history_event (checks, then
 //      the one writer capture_business_event). The load writes no placement
 //      field: the placement-owned trigger places each row at its own GHL time.
+//      A message another writer already saved (an older key-less row naming
+//      the same GHL message id, or the same contact, words and time within
+//      5 seconds, that the readers read: placed on a job, admissible,
+//      captured, the same channel) is not saved again: the door answers
+//      duplicate with copy_of_other_writer, counted in duplicates and, per
+//      contact, in duplicates_other_writer (migration 20261006031000, gap map
+//      W9). A dry run asks the same question through copiesOf.
 //      Calls are saved as client.call_logged rows by the same builder (slice
 //      T1); before a call row is written the load records its one legacy
 //      client.call_complete row, as every call writer does (ghl_call_pair.ts).
@@ -195,7 +202,13 @@ export type HistoryCaptureOutcome =
     attribution_status?: string | null;
     rested?: string;
   }
-  | { outcome: "duplicate"; id?: string }
+  | {
+    outcome: "duplicate";
+    id?: string;
+    /** Another writer already saved this message (gap map W9). */
+    copy_of_other_writer?: boolean;
+    copy_rule?: string;
+  }
   | { outcome: "capture_disabled" }
   | { outcome: "error"; code?: string };
 
@@ -245,6 +258,14 @@ export interface HistoryDeps {
   existingKeys(keys: string[]): Promise<Map<string, string | null>>;
   /** capture_ghl_history_event(row). Never throws: a fault is outcome error. */
   capture(row: Record<string, unknown>): Promise<HistoryCaptureOutcome>;
+  /**
+   * Dry runs only: of these rows, the ones another writer already saved
+   * (context_ghl_message_copies), by provider_message_id. A real run needs no
+   * such read: capture_ghl_history_event answers duplicate for them. Throws
+   * when unreadable. Optional: without it a dry run counts them as
+   * would_insert, as before.
+   */
+  copiesOf?(rows: Record<string, unknown>[]): Promise<Set<string>>;
   /**
    * For a call row: the row to write, with payload.legacy_event_id when exactly
    * one legacy client.call_complete row of the contact sits around the call
@@ -371,6 +392,9 @@ const CONTACT_COUNT_KEYS = [
   "skipped_call",
   "timeout_skipped",
   "timeout_given_up",
+  // Gap map W9: messages another writer already saved (also counted in
+  // duplicates). The run counts stay at their 40 keys, the writer's limit.
+  "duplicates_other_writer",
 ] as const;
 type ContactCountKey = typeof CONTACT_COUNT_KEYS[number];
 
@@ -672,9 +696,30 @@ export async function runGhlHistoryLoad(
           counts.precheck_errors++;
         }
       }
+      // A dry run asks which new rows another writer already saved, so it
+      // reports what a real run would save (the real door skips them).
+      let copies = new Set<string>();
+      if (req.dryRun && deps.copiesOf) {
+        const fresh = rows.filter((r) =>
+          !existing.has(String(r.provider_message_id))
+        );
+        if (fresh.length) {
+          try {
+            copies = await deps.copiesOf(fresh);
+          } catch {
+            counts.precheck_errors++;
+          }
+        }
+      }
       let timedOut = 0;
       for (const row of rows) {
         const key = String(row.provider_message_id);
+        if (copies.has(key)) {
+          counts.duplicates++;
+          c.duplicates++;
+          c.duplicates_other_writer++;
+          continue;
+        }
         if (existing.has(key)) {
           counts.duplicates++;
           c.duplicates++;
@@ -721,6 +766,7 @@ export async function runGhlHistoryLoad(
         } else if (saved.outcome === "duplicate") {
           counts.duplicates++;
           c.duplicates++;
+          if (saved.copy_of_other_writer === true) c.duplicates_other_writer++;
         } else if (saved.outcome === "capture_disabled") {
           return {
             kind: "stop",

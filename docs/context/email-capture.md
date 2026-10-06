@@ -162,6 +162,17 @@ its attachments still go to the private store, pointed at the old row. Our own
 outbound and internal mail is never skipped. An unreadable lookup fails the run
 and holds the cursor.
 
+The old path's own copies (gap map W9, `monitor-inbox/self_copy.ts`): one email
+the old path reaches in several of its mailboxes is one evidence row. It keeps
+Graph's `internetMessageId` in `payload.internet_message_id` and, before saving,
+skips an email it already saved from another mailbox: the same internet message
+id, or, for rows saved before the id was kept, the same sender, subject, words
+and received time from another mailbox with no other id. The `inbox_events`
+row is still written; an unreadable lookup writes the evidence row as before.
+Copies saved before this are marked by `scripts/context-dedupe-copies.sql`
+(`metadata.duplicate_of`), which every reader skips through
+`context_event_source_admissible` (`20261006031000`).
+
 History load (B-1): every 5 minutes, while `email_reader_history_v1` and the
 reader's flags are on, `trigger_context_email_poll()` runs one
 `trigger_context_email_history()` tick in its own subtransaction. The tick keeps
