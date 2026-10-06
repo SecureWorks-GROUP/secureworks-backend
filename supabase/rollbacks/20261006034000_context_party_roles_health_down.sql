@@ -4,8 +4,10 @@
 -- migration replaced: sites S-M1's parties status block (20261002120000),
 -- the W11 scorecard lane rule (20261006032000) and the v2 party-role
 -- classifier (20261006000000). Rows the v3 classifier stamped keep their
--- stamp until something writes them again (then v2 stamps them); the undo of
--- the hand-run backfill is in scripts/context-party-roles-v3-backfill.sql.
+-- stamp until a writer updates one of the trigger's columns again (then v2
+-- stamps them); the undo of the hand-run backfill is
+-- scripts/context-party-roles-v3-backfill-undo.sql (it puts back the saved
+-- stamp on the rows that backfill touched, and only those).
 -- Writes no row, flag, cron job or grant beyond restoring the same grants.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
@@ -16,8 +18,8 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_parties_status()',ARRAY['5f01b621c22b3cb0840bf04eb32a338f','98ca15b42682e9210ac4e6fe8d74ccd3']),
-  ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)',ARRAY['5ee19b3bd8dcb1e0fef0eb5cf8534ceb','a7d601b8eaf03a5616df508e8a18b2d6']),
-  ('public.context_message_party_roles(public.business_events)',ARRAY['3594d653de1505275ae15c419381bbc3','8d5bb9cfa80a631ee39497282e54f967'])
+  ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)',ARRAY['2b51a7422882b6b1d77988fdd3860230','a7d601b8eaf03a5616df508e8a18b2d6']),
+  ('public.context_message_party_roles(public.business_events)',ARRAY['04f39b23d2e14868596d12efbcaffb6b','8d5bb9cfa80a631ee39497282e54f967'])
  ) AS t(sig,accepted) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);

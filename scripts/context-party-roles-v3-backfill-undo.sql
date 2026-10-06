@@ -4,7 +4,9 @@
 -- = context_party_roles_v3_backfill_20261006), the party_roles stamp it carried
 -- before (saved in metadata.party_roles_prior_v3), and removes the two backfill
 -- keys. No other column or metadata key changes. A row the backfill did not
--- touch is left alone.
+-- touch is left alone, including a row a writer re-stamped v3 on its own (an
+-- update to one of the trigger's columns): it carries no saved stamp, so a v3
+-- stamp alone never marks a row this undo can restore.
 --
 -- The live trigger would re-stamp party_roles on this very write, so it is
 -- disabled for this transaction only (ALTER TABLE takes a short lock on
@@ -33,8 +35,8 @@ FOR UPDATE OF e;
 
 DO $undo$
 DECLARE
- -- The number of rows the backfill committed (600 if it ran as measured on 6 Oct 2026).
- expected_rows constant integer := 600;
+ -- The number of rows the backfill committed (608 if it ran as measured on 6 Oct 2026).
+ expected_rows constant integer := 608;
  n integer; restored integer; moved integer; has_trigger boolean;
 BEGIN
  SELECT count(*) INTO n FROM pr3_undo_before;

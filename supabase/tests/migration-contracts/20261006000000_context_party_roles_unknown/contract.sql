@@ -232,13 +232,14 @@ BEGIN
 END $$;
 
 -- Re-apply is a no-op. A registered successor (v3, 20261006034000) replaces
--- the classifier; put v2 back first, inside this rolled-back block, through
--- that successor's own rollback.
+-- the classifier; whenever the live body is not v2's, stand v2's classifier
+-- back up first, inside this rolled-back block, and nothing else (a later
+-- change to any other function never reaches this check).
 BEGIN;
-SELECT coalesce(obj_description(to_regprocedure('public.context_message_party_roles(public.business_events)'),'pg_proc'),'')
- LIKE 'Party roles v3 (20261006034000):%' AS p2_v3_live \gset
-\if :p2_v3_live
-\ir ../../../rollbacks/20261006034000_context_party_roles_health_down.sql
+SELECT md5(prosrc)<>'8d5bb9cfa80a631ee39497282e54f967' AS p2_classifier_moved
+FROM pg_proc WHERE oid='public.context_message_party_roles(public.business_events)'::regprocedure \gset
+\if :p2_classifier_moved
+\ir ../20261006034000_context_party_roles_health/v2_message_party_roles.sql
 \endif
 CREATE TEMP TABLE p2_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'

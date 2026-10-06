@@ -8,15 +8,21 @@
 --
 -- What it fixes. Before the ladder's L1d rule (5 Oct 2026) our own crew and
 -- staff notification texts ("New job assigned:", "Job ready for crew:", "New
--- make-safe:", "New repair:" to crew; "Docs Ready: " and "SecureWorks: New
--- make-safe " to the office) were stamped from the contact they went to. Where
--- a crew member's or office person's GHL contact is also a job's client on
--- file, they read as messages to a customer; where the contact was unknown,
--- as unknown. The v3 classifier reads them as staff to crew or staff (basis
--- our_template, audience internal) for every new row; existing rows keep their
--- old stamp until something writes them again. This script re-stamps exactly
--- the rows whose roles or audience v3 would change. Rows that only gain the new
--- basis name (same roles, same audience) are left alone.
+-- make-safe:", "New repair:" to crew; "Docs Ready: ", "SecureWorks: New
+-- make-safe " and its roof report wording "SecureWorks: New roof report
+-- make-safe " to the office) were stamped from the contact they went to.
+-- Where a crew member's or office person's GHL contact is also a job's client
+-- on file, they read as messages to a customer; where the contact was
+-- unknown, as unknown. The v3 classifier reads them as staff to crew or staff
+-- (basis our_template, audience internal). The trigger stamps v3 on every new
+-- row and re-stamps a stored row whenever a writer updates one of its columns
+-- (job_id, contact_id, direction, metadata, payload, event_type, channel: a
+-- relink, a dedupe mark); every other stored row keeps its old stamp until
+-- this script. It re-stamps exactly the rows whose roles or audience v3 would
+-- change. Rows that only gain the new basis name (same roles, same audience)
+-- are left alone. A row a writer re-stamped before this script runs carries
+-- v3 without this run's keys: it is no longer a candidate, and the undo
+-- leaves it alone.
 --
 -- What the write does. On each row it writes two metadata keys:
 -- party_roles_prior_v3 = the stamp as it was (for the undo) and
@@ -30,37 +36,42 @@
 -- moved, re-read by the model or sent. The keys of the earlier v2 backfill
 -- (party_roles_prior, party_roles_v2_backfill) are left as they are.
 --
--- Measured on production (read only, 6 Oct 2026, about 09:00 Perth), with the
--- v3 rule emulated in SQL because the migration was not applied yet: 600 rows,
--- all from ghl-proxy, all captured between 6 Jul and 23 Sep 2026, none on a
--- live job (166 on one cancelled job, 3 on one archived job, 431 on no job).
--- By the scorecard's lane:
---   crew_staff_texts  358 rows: 196 customer -> crew, 83 unknown -> crew
---                     (no_match), 26 unknown -> crew (conflict), 53 staff ->
---                     crew (a contact's later staff marker);
---   texts             242 rows: 166 customer -> staff (job_customer, the
---                     cancelled job), 76 customer -> staff (any_job_customer).
--- 109 of them carry the earlier v2 backfill's keys (left as they are). The
--- 30-day who-to-whom shares on the scorecard do not move (the crew lane is
--- graded on labels since 4 Oct, and the texts-lane rows already counted as
--- known); what changes is that 438 of our own notifications stop reading as
--- messages to a customer and 109 stop reading as unknown.
+-- Measured on production (read only, 6 Oct 2026, Perth afternoon), with the
+-- v3 rule emulated in SQL because the migration was not applied yet: 608
+-- rows, all from ghl-proxy, all captured between 6 Jul and 23 Sep 2026, none
+-- on a live job (166 on one cancelled job, 5 on one archived job, 437 on no
+-- job). All 608 are in the scorecard's crew and staff lane once the migration
+-- is applied (its lane rule reads our templates as the classifier does):
+--   to crew   358 rows: 196 customer -> crew (any_job_customer), 83 unknown
+--             -> crew (no_match), 26 unknown -> crew (conflict), 53 staff ->
+--             crew (a contact's later staff marker);
+--   to staff  250 rows: 166 customer -> staff (job_customer, the cancelled
+--             job), 76 customer -> staff (any_job_customer), and the 8 roof
+--             report make-safe alerts (4 customer -> staff, 4 unknown ->
+--             staff).
+-- 113 of them carry the earlier v2 backfill's keys (left as they are). Row 2
+-- of the scorecard does not move: the crew lane is graded on rows captured
+-- since 4 Oct, and none of these is in the texts lane any more. What changes
+-- is that 442 of our own notifications stop reading as messages to a
+-- customer and 113 stop reading as unknown.
 --
 -- How to run (production: read only first, a write only with the owner's go).
 --   PART 1  read-only census. Must show the migration live and the candidate
---           count by lane and old -> new (about 600 today; it only shrinks,
---           because new rows are stamped by v3 as they arrive). Copy
---           this_batch into expected_rows in PART 2 (it is capped at
---           batch_size).
+--           count by lane and old -> new (about 608 today; it only shrinks,
+--           because new rows are stamped by v3 as they arrive and a row a
+--           writer updates is re-stamped by v3 then). Copy this_batch into
+--           expected_rows in PART 2 (it is capped at batch_size).
 --   PART 2  guarded re-stamp of one batch, newest first. As written it ends
 --           in ROLLBACK: a dry run that re-stamps, checks and throws it away.
 --           It refuses unless v3 and the trigger are live, the batch is
---           exactly expected_rows, every row comes out stamped v3 with basis
---           our_template and audience internal and the old stamp saved, and
---           nothing but party_roles and the two backfill keys moved. Its last
---           statement prints the batch's before -> after by lane. To apply
---           (owner's go only): change the final ROLLBACK to COMMIT and run
---           PART 2 once; repeat PART 1 and PART 2 until PART 1 reports 0.
+--           exactly expected_rows (a writer re-stamping a candidate between
+--           PART 1 and PART 2 makes it refuse: re-run PART 1), every row
+--           comes out stamped v3 with basis our_template and audience
+--           internal and the old stamp saved, and nothing but party_roles and
+--           the two backfill keys moved. Its last statement prints the
+--           batch's before -> after by lane. To apply (owner's go only):
+--           change the final ROLLBACK to COMMIT and run PART 2 once; repeat
+--           PART 1 and PART 2 until PART 1 reports 0.
 --   UNDO    scripts/context-party-roles-v3-backfill-undo.sql puts back the
 --           saved stamp on every row this run id touched.
 
@@ -79,12 +90,14 @@ SELECT
 
 -- 1. The candidates by lane and old -> new.
 WITH tmpl AS MATERIALIZED (
- -- Our crew and staff templates on texts (the cheap filter runs first).
+ -- Our crew and staff templates on texts, the roof report make-safe alert
+ -- included as v3 reads it (the cheap filter runs first).
  SELECT e.id FROM public.business_events e
  WHERE e.metadata ? 'party_roles'
   AND (e.channel='sms' OR (e.channel IS NULL AND e.event_type IN ('client.sms_out','sms_sent')))
   AND NOT (e.metadata ? 'party_roles_v3_backfill')
-  AND public.context_internal_text_role(e) IN ('crew','staff')
+  AND (public.context_internal_text_role(e) IN ('crew','staff')
+   OR btrim(public.context_event_text(e)) ~ '^SecureWorks: New roof report make-safe ')
 ), cand AS MATERIALIZED (
  SELECT e.id, e.job_id, e.source, coalesce(e.context_captured_at,e.recorded_at) AS cap,
   public.context_scorecard_lane_of(e.event_type,e.source,e.channel,e.direction,e.body_preview,e.metadata) AS lane,
@@ -99,7 +112,9 @@ FROM cand
 WHERE (old_pr->>'sender_role',old_pr->>'recipient_role',old_pr->>'counterpart_role',old_pr->>'audience')
   IS DISTINCT FROM (new_pr->>'sender_role',new_pr->>'recipient_role',new_pr->>'counterpart_role',new_pr->>'audience')
 GROUP BY 1,2,3,4,5,6
-ORDER BY lane COLLATE "C", count(*) DESC, (old_pr->>'basis') COLLATE "C";
+ORDER BY lane COLLATE "C", count(*) DESC, (old_pr->>'basis') COLLATE "C", source COLLATE "C",
+ ((old_pr->>'sender_role')||' -> '||(old_pr->>'recipient_role')) COLLATE "C",
+ ((new_pr->>'sender_role')||' -> '||(new_pr->>'recipient_role')) COLLATE "C", (new_pr->>'basis') COLLATE "C";
 
 -- 2. How many remain, and the next batch (copy this_batch into PART 2).
 WITH tmpl AS MATERIALIZED (
@@ -107,7 +122,8 @@ WITH tmpl AS MATERIALIZED (
  WHERE e.metadata ? 'party_roles'
   AND (e.channel='sms' OR (e.channel IS NULL AND e.event_type IN ('client.sms_out','sms_sent')))
   AND NOT (e.metadata ? 'party_roles_v3_backfill')
-  AND public.context_internal_text_role(e) IN ('crew','staff')
+  AND (public.context_internal_text_role(e) IN ('crew','staff')
+   OR btrim(public.context_event_text(e)) ~ '^SecureWorks: New roof report make-safe ')
 ), cand AS MATERIALIZED (
  SELECT e.metadata->'party_roles' AS old_pr, public.context_message_party_roles(e) AS new_pr
  FROM public.business_events e JOIN tmpl ON tmpl.id=e.id
@@ -140,7 +156,8 @@ WITH tmpl AS MATERIALIZED (
  WHERE e.metadata ? 'party_roles'
   AND (e.channel='sms' OR (e.channel IS NULL AND e.event_type IN ('client.sms_out','sms_sent')))
   AND NOT (e.metadata ? 'party_roles_v3_backfill')
-  AND public.context_internal_text_role(e) IN ('crew','staff')
+  AND (public.context_internal_text_role(e) IN ('crew','staff')
+   OR btrim(public.context_event_text(e)) ~ '^SecureWorks: New roof report make-safe ')
 ), cand AS MATERIALIZED (
  SELECT e.id, public.context_message_party_roles(e) AS new_pr FROM public.business_events e JOIN tmpl ON tmpl.id=e.id
 )
@@ -157,8 +174,8 @@ FOR UPDATE OF e;
 
 DO $count$
 DECLARE
- -- The this_batch figure PART 1 printed (600 on 6 Oct 2026). The write refuses on any other count.
- expected_rows constant integer := 600;
+ -- The this_batch figure PART 1 printed (608 on 6 Oct 2026). The write refuses on any other count.
+ expected_rows constant integer := 608;
  n integer;
 BEGIN
  SELECT count(*) INTO n FROM pr3_batch;
@@ -207,5 +224,8 @@ SELECT b.lane, (b.metadata_before->'party_roles'->>'sender_role')||' -> '||(b.me
  (e.metadata->'party_roles'->>'sender_role')||' -> '||(e.metadata->'party_roles'->>'recipient_role') AS new_pair,
  e.metadata->'party_roles'->>'basis' AS new_basis, count(*) AS rows
 FROM public.business_events e JOIN pr3_batch b ON b.id=e.id
-GROUP BY 1,2,3,4,5 ORDER BY b.lane COLLATE "C", count(*) DESC, (b.metadata_before->'party_roles'->>'basis') COLLATE "C";
+GROUP BY 1,2,3,4,5 ORDER BY b.lane COLLATE "C", count(*) DESC, (b.metadata_before->'party_roles'->>'basis') COLLATE "C",
+ ((b.metadata_before->'party_roles'->>'sender_role')||' -> '||(b.metadata_before->'party_roles'->>'recipient_role')) COLLATE "C",
+ ((e.metadata->'party_roles'->>'sender_role')||' -> '||(e.metadata->'party_roles'->>'recipient_role')) COLLATE "C",
+ (e.metadata->'party_roles'->>'basis') COLLATE "C";
 ROLLBACK;

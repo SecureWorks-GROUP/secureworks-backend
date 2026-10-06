@@ -660,14 +660,15 @@ ROLLBACK;
 
 -- 12. Re-apply: the guard accepts its own result and a second run changes
 -- nothing (same bodies, same rows, no duplicate objects). A later slice
--- (20261006034000, party roles health) replaced the parties status block; put
--- this migration's body back first, inside this rolled-back block, through
--- that slice's own rollback.
+-- (20261006034000, party roles health) replaced the parties status block;
+-- whenever the live body is not this migration's, stand this migration's body
+-- back up first, inside this rolled-back block, and nothing else (a later
+-- change to any other function never reaches this check).
 BEGIN;
-SELECT coalesce(obj_description(to_regprocedure('public.context_parties_status()'),'pg_proc'),'')
- LIKE '%Since 20261006034000%' AS sm1_status_moved \gset
+SELECT md5(prosrc)<>'98ca15b42682e9210ac4e6fe8d74ccd3' AS sm1_status_moved
+FROM pg_proc WHERE oid='public.context_parties_status()'::regprocedure \gset
 \if :sm1_status_moved
-\ir ../../../rollbacks/20261006034000_context_party_roles_health_down.sql
+\ir ../20261006034000_context_party_roles_health/sm1_parties_status.sql
 \endif
 CREATE TEMP TABLE sm1_before AS SELECT p.oid::regprocedure::text AS sig,md5(p.prosrc) AS m FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND (p.proname LIKE 'job_party%' OR p.proname IN ('upsert_job_party','set_job_party_ids','job_contacts_owner_mirror',

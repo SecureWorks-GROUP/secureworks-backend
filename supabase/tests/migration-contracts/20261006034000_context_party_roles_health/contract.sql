@@ -10,21 +10,34 @@
 --      a patio job or a job with a party row does not count. The heartbeat
 --      composes the block with no status_block_failed alarm.
 --   B. The scorecard lane rule: L1d's recipient_role other (or a key with no
---      value) is a text; recipient_role crew or staff and our crew templates
---      are crew or staff texts.
+--      value) is a text; recipient_role crew or staff is a crew or staff text,
+--      and so is an outbound text in one of our crew or staff templates, read
+--      as the classifier reads one: context_internal_text_role's crew and
+--      office templates (leading spaces trimmed, a text written with no
+--      channel included) and the roof report make-safe alert. The same words
+--      inbound, in an email or on the make-safe intake's arrival log row are
+--      not a crew text, and near misses are texts. On every sample the lane
+--      agrees with context_internal_text_role.
 --   C. The classifier, v3, through the real insert trigger (the ladder runs
 --      first): our crew and staff templates on an outbound text read staff to
 --      crew or staff (basis our_template, audience internal) when the contact
 --      is this job's customer, another job's customer, nobody we know, and on
---      a text written with no channel; L1d's own label is still copied first;
---      the same words inbound or in an email change nothing; an ordinary text
+--      a text written with no channel; so does the roof report make-safe
+--      alert, like its sibling; L1d's own label is still copied first; the
+--      same words inbound or in an email change nothing; an ordinary text
 --      reads as before; every row is stamped party_roles_v3; the classifier
---      writes no ladder-owned key.
+--      writes no ladder-owned key; and the lane rule and the classifier agree
+--      on every fixture row (a message is in the crew lane exactly when the
+--      classifier reads it as ours to crew or staff).
 --   D. Structure: bodies, comments, grants, the inlinable lane helper, the
 --      definer status block, the untouched trigger and helpers.
 --   E. A re-apply is a no-op.
+--   F. The two pinned bodies the earlier contracts stand back up
+--      (sm1_parties_status.sql for S-M1's re-apply, v2_message_party_roles.sql
+--      for v2's) are S-M1's and v2's bodies and comments byte for byte, and
+--      loading them moves no other function.
 -- A to C run in one block that names every failing fix at once, so the break
--- proof (the down migration applied) shows all three fail before the fix.
+-- proof (the down migration applied) shows every fix fail before the fix.
 \set ON_ERROR_STOP 1
 
 CREATE FUNCTION pg_temp.ph_job(p_number text,p_type text,p_status text,p_contact text,p_pricing jsonb,p_email text DEFAULT NULL)
@@ -36,15 +49,17 @@ BEGIN
  RETURN j;
 END $$;
 
--- One row through the real insert trigger.
+-- One row through the real insert trigger, with the words in body_preview as
+-- the writers store them (the scorecard's lane rule reads body_preview).
 CREATE FUNCTION pg_temp.ph_ev(p_channel text,p_direction text,p_event text,p_contact text,p_payload jsonb,p_meta jsonb DEFAULT '{}'::jsonb)
 RETURNS public.business_events LANGUAGE plpgsql AS $$
 DECLARE e public.business_events;
 BEGIN
  INSERT INTO public.business_events(contact_id,entity_type,entity_id,direction,channel,event_type,source,
-  provider_message_id,payload,metadata,occurred_at,event_at)
+  provider_message_id,payload,metadata,occurred_at,event_at,body_preview)
   VALUES(p_contact,'contact',coalesce(p_contact,'none'),p_direction,p_channel,p_event,'party_roles_health_contract',
-   'ph:'||replace(gen_random_uuid()::text,'-',''),p_payload,p_meta||'{"capture_mode":"live"}',now()-interval '1 day',now()-interval '1 day')
+   'ph:'||replace(gen_random_uuid()::text,'-',''),p_payload,p_meta||'{"capture_mode":"live"}',now()-interval '1 day',now()-interval '1 day',
+   left(coalesce(p_payload->>'body',p_payload->>'text',p_payload->>'message'),500))
   RETURNING * INTO e;
  RETURN e;
 END $$;
@@ -69,7 +84,7 @@ $$;
 BEGIN;
 DO $$
 DECLARE
- problems text[]:='{}'; miss text[]; base int; got int; s jsonb; c jsonb; j1 uuid; j2 uuid; jh uuid; e public.business_events; k text;
+ problems text[]:='{}'; miss text[]; base int; got int; s jsonb; c jsonb; j1 uuid; j2 uuid; jh uuid; e public.business_events; k text; t record;
 BEGIN
  -- A. The parties status block.
  BEGIN
@@ -106,10 +121,38 @@ BEGIN
   miss:=miss||'a recipient_role key with no value must be a text'::text; END IF;
  IF public.context_scorecard_lane_of('client.sms_out','ghl-proxy','sms','outbound','Can you call me?','{"recipient_role":"crew","audience":"internal"}') IS DISTINCT FROM 'crew_staff_texts' THEN
   miss:=miss||'a crew marker must be a crew or staff text'::text; END IF;
- IF public.context_scorecard_lane_of('client.sms_out','ghl-proxy','sms','outbound','Docs Ready: SWF-1','{"recipient_role":"staff"}') IS DISTINCT FROM 'crew_staff_texts' THEN
+ IF public.context_scorecard_lane_of('client.sms_out','ghl-proxy','sms','outbound','Call the office','{"recipient_role":"staff"}') IS DISTINCT FROM 'crew_staff_texts' THEN
   miss:=miss||'a staff marker must be a crew or staff text'::text; END IF;
  IF public.context_scorecard_lane_of('client.sms_out','ghl-proxy','sms','outbound','New repair: SWR-1','{}') IS DISTINCT FROM 'crew_staff_texts' THEN
   miss:=miss||'our crew template must be a crew or staff text'::text; END IF;
+ -- Our templates by their words, with no marker: the lane must read them as
+ -- the classifier does (an outbound text, context_internal_text_role's
+ -- templates or the roof report make-safe alert) and agree with
+ -- context_internal_text_role on every sample.
+ FOR t IN SELECT * FROM (VALUES
+   ('an office alert (Docs Ready)','Docs Ready: SWF-993001 pack is ready','sms','outbound','client.sms_out','crew_staff_texts'),
+   ('an office make-safe alert','SecureWorks: New make-safe MLB-990001: 9 Fixture Rd, Fixtureville (Fixture Builders)','sms','outbound','client.sms_out','crew_staff_texts'),
+   ('the roof report make-safe alert','SecureWorks: New roof report make-safe MLB-990002: 8 Fixture Rd (Fixture Builders)','sms','outbound','client.sms_out','crew_staff_texts'),
+   ('a crew template after spaces','  Job ready for crew: SWF-993001','sms','outbound','client.sms_out','crew_staff_texts'),
+   ('an office alert written with no channel','Docs Ready: SWF-993001 pack is ready',NULL,NULL,'client.sms_out','crew_staff_texts'),
+   ('a crew template inbound','New job assigned: SWF-993001 - Fixture Client','sms','inbound','client.reply','texts'),
+   ('a crew template in an email','New job assigned: SWF-993001 - Fixture Client','email','outbound','client.email_out','emails_out'),
+   ('the intake''s arrival log row','SecureWorks: New make-safe MLB-990001: 9 Fixture Rd',NULL,NULL,'makesafe.arrival_notified',NULL),
+   ('a near miss (no colon)','Docs Ready SWF-993001','sms','outbound','client.sms_out','texts'),
+   ('a near miss (alert with nothing after it)','SecureWorks: New make-safe','sms','outbound','client.sms_out','texts'),
+   ('a near miss (a reply quoting a template)','Re: New job assigned: SWF-993001','sms','outbound','client.sms_out','texts'),
+   ('an ordinary text','Hi, we are booked in for Tuesday','sms','outbound','client.sms_out','texts')
+  ) AS v(what,words,ch,dir,et,want) LOOP
+  k:=public.context_scorecard_lane_of(t.et,'ghl-proxy',t.ch,t.dir,t.words,'{}');
+  IF k IS DISTINCT FROM t.want THEN miss:=miss||format('%s must be in lane %s, got %s',t.what,coalesce(t.want,'none'),coalesce(k,'none')); END IF;
+  -- Agreement with L1d's template reading on the same row, for outbound texts.
+  IF t.dir='outbound' AND (t.ch='sms' OR t.ch IS NULL)
+   AND (k='crew_staff_texts') IS DISTINCT FROM (public.context_internal_text_role(jsonb_populate_record(NULL::public.business_events,
+     jsonb_build_object('payload',jsonb_build_object('body',t.words),'body_preview',t.words,'channel',t.ch,'direction',t.dir,'event_type',t.et)))
+     IN ('crew','staff') OR btrim(t.words) ~ '^SecureWorks: New roof report make-safe ') THEN
+   miss:=miss||format('%s: the lane must agree with context_internal_text_role',t.what);
+  END IF;
+ END LOOP;
  IF cardinality(miss)>0 THEN problems:=problems||('lane rule not fixed: '||array_to_string(miss,', ')); END IF;
 
  -- C. The classifier, v3.
@@ -134,6 +177,16 @@ BEGIN
   -- An older writer that left channel and direction empty.
   e:=pg_temp.ph_ev(NULL,NULL,'client.sms_out','ph-crewcust',pg_temp.ph_words('Docs Ready: SWF-993001 pack is ready'));
   k:=pg_temp.ph_roles('an office alert with no channel',e,'staff','staff','our_template','internal');
+  IF k<>'' THEN miss:=miss||k; END IF;
+  -- The roof report wording of the office make-safe alert (one template in
+  -- ops-api's makesafe_notify.ts) reads like its sibling, whoever the contact is.
+  e:=pg_temp.ph_ev('sms','outbound','client.sms_out','ph-cust2',
+   pg_temp.ph_words('SecureWorks: New roof report make-safe MLB-990001: 9 Fixture Rd, Fixtureville (Fixture Builders)'));
+  k:=pg_temp.ph_roles('a roof report make-safe alert to a customer''s contact',e,'staff','staff','our_template','internal');
+  IF k<>'' THEN miss:=miss||k; END IF;
+  e:=pg_temp.ph_ev('sms','outbound','client.sms_out','ph-roofnobody',
+   pg_temp.ph_words('SecureWorks: New roof report make-safe MLB-990002: 8 Fixture Rd (Fixture Builders)'));
+  k:=pg_temp.ph_roles('a roof report make-safe alert to an unknown contact',e,'staff','staff','our_template','internal');
   IF k<>'' THEN miss:=miss||k; END IF;
   IF cardinality(miss)>0 THEN problems:=problems||('template rule not fixed: '||array_to_string(miss,'; ')); END IF;
 
@@ -161,10 +214,26 @@ BEGIN
   IF e.metadata->'party_roles'->>'recipient_role' IS DISTINCT FROM 'customer' OR e.metadata->'party_roles'->>'basis'='our_template'
    OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM 'party_roles_v3' THEN
    miss:=miss||format('an ordinary text to the customer must read customer, got %s',e.metadata->'party_roles'); END IF;
+  -- The roof report wording inbound is the contact's own message.
+  e:=pg_temp.ph_ev('sms','inbound','client.reply','ph-cust2',pg_temp.ph_words('SecureWorks: New roof report make-safe MLB-990001: 9 Fixture Rd'));
+  IF e.metadata->'party_roles'->>'basis'='our_template' OR e.metadata->'party_roles'->>'sender_role'='staff'
+   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM 'party_roles_v3' THEN
+   miss:=miss||format('an inbound text in the roof alert''s words must read as the contact''s, got %s',e.metadata->'party_roles'); END IF;
   -- A non-message row carries none.
   e:=pg_temp.ph_ev('status','system','job.status_changed','ph-crewcust','{"to":"scheduled"}'::jsonb);
   IF e.metadata ? 'party_roles' THEN miss:=miss||format('a non-message row must carry no party roles, got %s',e.metadata); END IF;
   IF cardinality(miss)>0 THEN problems:=problems||('classifier regression: '||array_to_string(miss,'; ')); END IF;
+
+  -- The lane rule and the classifier agree on every fixture message: a row is
+  -- in the crew and staff lane exactly when the classifier reads it as ours to
+  -- crew or staff (L1d's label, a writer marker or our template).
+  SELECT string_agg(format('%s (lane %s, roles %s)',left(b.body_preview,40),coalesce(l.lane,'none'),b.metadata->'party_roles'),'; '
+    ORDER BY b.provider_message_id COLLATE "C",b.id) INTO k
+  FROM public.business_events b
+  CROSS JOIN LATERAL (SELECT public.context_scorecard_lane_of(b.event_type,b.source,b.channel,b.direction,b.body_preview,b.metadata) AS lane) l
+  WHERE b.source='party_roles_health_contract' AND b.metadata ? 'party_roles'
+   AND (l.lane='crew_staff_texts') IS DISTINCT FROM (b.metadata->'party_roles'->>'basis' IN ('our_template','ladder_internal','writer'));
+  IF k IS NOT NULL THEN problems:=problems||('lane rule not fixed: the lane and the classifier disagree on '||k); END IF;
  EXCEPTION WHEN OTHERS THEN
   problems:=problems||format('template rule not fixed: the fixtures failed with SQLSTATE %s (%s)',SQLSTATE,SQLERRM);
  END;
@@ -181,8 +250,8 @@ DECLARE p record; f text; r text;
 BEGIN
  FOR p IN SELECT * FROM (VALUES
   ('public.context_parties_status()','5f01b621c22b3cb0840bf04eb32a338f','Status block parties (sites.md section 8)%Since 20261006034000%'),
-  ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)','5ee19b3bd8dcb1e0fef0eb5cf8534ceb','Context scorecard (20261006032000)%Since 20261006034000%'),
-  ('public.context_message_party_roles(public.business_events)','3594d653de1505275ae15c419381bbc3','Party roles v3 (20261006034000):%')
+  ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)','2b51a7422882b6b1d77988fdd3860230','Context scorecard (20261006032000)%Since 20261006034000%'),
+  ('public.context_message_party_roles(public.business_events)','04f39b23d2e14868596d12efbcaffb6b','Party roles v3 (20261006034000):%')
  ) AS t(sig,md5,note) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(p.sig)) IS DISTINCT FROM p.md5 THEN
    RAISE EXCEPTION 'party roles health: % is not this migration''s body',p.sig; END IF;
@@ -235,5 +304,38 @@ BEGIN
  THEN RAISE EXCEPTION 'party roles health: a re-apply changed a body, comment or grant'; END IF;
  IF (SELECT count(*) FROM pg_trigger WHERE tgname='context_party_roles_business_event')<>1 THEN
   RAISE EXCEPTION 'party roles health: a re-apply duplicated the trigger'; END IF;
+END $$;
+ROLLBACK;
+
+-- F. The pinned bodies the earlier contracts stand back up: S-M1's re-apply
+-- loads sm1_parties_status.sql and v2's re-apply loads
+-- v2_message_party_roles.sql whenever the live body is not theirs. Each is
+-- that body and comment byte for byte, and loading them moves no other
+-- function, so a later change to one function never breaks a contract about
+-- another.
+BEGIN;
+CREATE TEMP TABLE ph_f_before AS SELECT p.oid, p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid,'pg_proc') AS note
+ FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public';
+\ir sm1_parties_status.sql
+\ir v2_message_party_roles.sql
+DO $$
+DECLARE moved text;
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_parties_status()'::regprocedure) IS DISTINCT FROM '98ca15b42682e9210ac4e6fe8d74ccd3'
+  OR coalesce(obj_description('public.context_parties_status()'::regprocedure,'pg_proc'),'')
+   NOT LIKE 'Status block parties (sites.md section 8), owned by sites S-M1:%Counts only, no names.' THEN
+  RAISE EXCEPTION 'party roles health: sm1_parties_status.sql is not S-M1''s parties block and comment'; END IF;
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_message_party_roles(public.business_events)'::regprocedure)
+   IS DISTINCT FROM '8d5bb9cfa80a631ee39497282e54f967'
+  OR coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+   NOT LIKE 'Party roles v2 (20261006000000):%Service role may call it to preview.' THEN
+  RAISE EXCEPTION 'party roles health: v2_message_party_roles.sql is not v2''s classifier and comment'; END IF;
+ SELECT string_agg(b.sig,', ' ORDER BY b.sig COLLATE "C",b.oid) INTO moved
+ FROM ph_f_before b LEFT JOIN pg_proc p ON p.oid=b.oid
+ WHERE b.oid NOT IN ('public.context_parties_status()'::regprocedure,'public.context_message_party_roles(public.business_events)'::regprocedure)
+  AND (p.oid IS NULL OR md5(p.prosrc) IS DISTINCT FROM b.m OR obj_description(p.oid,'pg_proc') IS DISTINCT FROM b.note);
+ IF moved IS NOT NULL THEN RAISE EXCEPTION 'party roles health: loading the pinned bodies moved %',moved; END IF;
+ IF (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')<>(SELECT count(*) FROM ph_f_before) THEN
+  RAISE EXCEPTION 'party roles health: loading the pinned bodies added or dropped a function'; END IF;
 END $$;
 ROLLBACK;

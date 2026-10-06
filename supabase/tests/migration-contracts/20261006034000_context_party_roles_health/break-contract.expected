@@ -1,3 +1,5 @@
 parties status not fixed: the block failed with SQLSTATE 22023
 lane rule not fixed: L1d's recipient_role other must be a text
+an office alert (Docs Ready) must be in lane crew_staff_texts, got texts
 template rule not fixed: a crew template to the job's customer contact must read staff to crew
+a roof report make-safe alert to a customer's contact must read staff to staff
