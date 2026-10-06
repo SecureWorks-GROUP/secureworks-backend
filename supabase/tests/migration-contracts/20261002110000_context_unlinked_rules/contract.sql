@@ -677,7 +677,11 @@ BEGIN
 END $$;
 CREATE TEMP TABLE p4_retired_before AS SELECT * FROM public.event_threads WHERE retired_at IS NOT NULL;
 CREATE TEMP TABLE p4_thread_count AS SELECT count(*) AS n FROM public.event_threads;
--- Registered successors (L1e 20261005170000, L1d 20261005090000, L1c 20261004200000, then L1b 20261003100000) are rolled back first, as P4's down requires.
+-- Registered successors (L1f 20261006020000, L1e 20261005170000, L1d 20261005090000, L1c 20261004200000, then L1b 20261003100000) are rolled back first, as P4's down requires.
+SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1f:%' AS l1f_live \gset
+\if :l1f_live
+\ir ../../../rollbacks/20261006020000_context_ladder_held_placement_down.sql
+\endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_ladder_p1a(public.business_events,boolean)'),'pg_proc'),'') LIKE 'L1e:%' AS l1e_live \gset
 \if :l1e_live
 \ir ../../../rollbacks/20261005170000_context_ladder_writer_job_down.sql
