@@ -693,8 +693,11 @@ the 972 contracts and the story's re-apply guard read it. A timeline line
 citing `job_events` has the event type as its `state` when the ledger store
 lets that type close a matter (`not_delivered` when it names a document nobody
 received), so a reader applies `context_ledger_job_event_closes` to the state,
-never to the words. An old-inbox mail kept on a job because its saved copy sits
-elsewhere joined that job's evidence no earlier than `20261006040000`'s first
+never to the words. An old-inbox mail stays on a job only while its saved copy sits
+on no job or on an archived or holding job; a copy on another live job decides
+where it belongs (the job conversation's rule R0), in the story, the reader's
+evidence and the citation check alike. One kept on a job because its saved copy
+sits elsewhere joined that job's evidence no earlier than `20261006040000`'s first
 apply and its copies' landing (`context_ledger_mail_copies`): take its time from
 `context_ledger_evidence_rows.landed_at`, never `processed_at`, or a reading
 built before then reads as having read it. `context_ledger_mail_copies` reads
@@ -711,7 +714,10 @@ kept in `context_crm_message_times` (trigger `context_crm_message_times_keep` on
 every cache write) and read from there first; its rollback keeps that table, since
 the times are kept nowhere else. A backfilled text whose time was never kept is time
 unknown, never its load time, and is never the customer's words, evidence or a
-citation.
+citation. On a job, a party-roles label naming another job's customer
+(`any_job_customer`) is no evidence of this job's customer (its own contact and
+client email decide), and mail from our own addresses (our domains, a person in
+`public.users`) is never the customer's (`context_job_record_messages.customer_side`).
 A story loop's `status` is `open` or `closing_evidence` when it is a move;
 `not_due` (R8 before the work is done, while the job is in rectification, or while
 work reopened after it was recorded finished is not finished again) and
