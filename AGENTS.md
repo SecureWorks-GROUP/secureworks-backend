@@ -2775,10 +2775,16 @@ migration; `boolean NOT NULL DEFAULT false` in production). Structural guard:
 `myjobs_ghost_rows_test.ts`; evidence:
 `docs/evidence/trade-feed-ghost-row-source-exclusion-2026-08-06.md`.
 
-**Every genuine, dated crew assignment auto-mirrors a ghost for the ops
-manager** (Captain 2026-09-17: "repair works that are scheduled need to be
-seen by Shaun as a ghost assignment too, just as any other job would"), across
-every job type — no vertical filtering. `ghost_observer_mirror.ts` is the one
+**Every genuine, dated crew assignment auto-mirrors a ghost for each watcher
+whose scope covers the job** (Captain 2026-09-17: "repair works that are
+scheduled need to be seen by Shaun as a ghost assignment too, just as any
+other job would"). Watchers are the `GHOST_WATCHERS` list, matched by email
+(Captain 2026-10-05): Shaun on every job type, Nithin on `jobs.type = 'patio'`
+only; on any other job Nithin appears only when allocated as real crew.
+Creation respects scope; cleanup does not, so any watcher's ghost on a date
+nobody works any more is removed. The first version picked "the oldest
+`users.role = 'ops_manager'`", which was Nithin, so every ghost meant for
+Shaun landed on him. Never infer a watcher from a role. `ghost_observer_mirror.ts` is the one
 module: `ensureGhostObserverMirror` (idempotent create, skipped when the ops
 manager is himself the real assignee), `reconcileGhostObserverMirrorOnReschedule`
 (moves the mirror, or leaves it when a sibling crew row still covers the old
@@ -2788,10 +2794,10 @@ departing row was the ops manager's own real assignment) are wired into `createA
 `deleteAssignment`, the make-safe submitter override
 (`overrideMakesafeAllocationToSubmitter`) and the legacy
 `approve_assignment_request` direct-insert writer — every place a real crew
-`job_assignments` row is written or cancelled. The ops
-manager is resolved by `users.role = 'ops_manager'` at runtime, never a
-hard-coded id. `backfill_ghost_observers` (api_key-only, dry-run unless
-`apply:true`) mirrors the pre-existing population dated today or later, paging
+`job_assignments` row is written or cancelled. Watcher user ids are
+resolved from their emails at runtime, never hard-coded. `backfill_ghost_observers` (api_key-only, dry-run unless
+`apply:true`) mirrors the pre-existing population dated today or later, one
+candidate per (watcher, span) within that watcher's scope, paging
 both reads past the 1000-row ceiling. This
 is a write-side invariant only; every read-side ghost exclusion above is
 unchanged. Tests: `ghost_observer_auto_mirror_test.ts`.
