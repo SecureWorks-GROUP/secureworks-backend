@@ -110,19 +110,23 @@ BEGIN
  EXCEPTION WHEN unique_violation THEN NULL; END;
 END $c$;
 
--- 3. Settings refuse an off-scale ceiling.
+-- 3. Settings refuse an off-scale ceiling: never above the day's cap
+-- (context_cadence_policy model_call_cap; 400 when this was written, 1,000
+-- since the call budget, 20261006060000, which moved the bound with it).
 DO $c$
+DECLARE cap integer := (public.context_cadence_policy() ->> 'model_call_cap')::integer;
 BEGIN
  BEGIN
-  UPDATE public.context_ledger_settings SET calls_per_day = 401;
-  RAISE EXCEPTION 'ledger contract: calls_per_day above the 400 cap accepted';
+  UPDATE public.context_ledger_settings SET calls_per_day = cap + 1;
+  RAISE EXCEPTION 'ledger contract: calls_per_day above the % cap accepted', cap;
  EXCEPTION WHEN check_violation THEN NULL; END;
 END $c$;
 
 -- 4. The ledger's own live reserve: 100 calls all day and 100 before noon by
--- default (the line the ledger kept before), 50 to 400 (never below 50), commented.
+-- default (the line the ledger kept before), 50 to the day's cap (never below
+-- 50; the cap was 400 when this was written, 1,000 since 20261006060000), commented.
 DO $c$
-DECLARE c text;
+DECLARE c text; cap integer := (public.context_cadence_policy() ->> 'model_call_cap')::integer;
 BEGIN
  FOREACH c IN ARRAY ARRAY['live_reserve_calls', 'live_reserve_calls_morning'] LOOP
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'context_ledger_settings'
@@ -138,8 +142,8 @@ BEGIN
  IF (SELECT live_reserve_calls <> 100 OR live_reserve_calls_morning <> 100 FROM public.context_ledger_settings) THEN
   RAISE EXCEPTION 'ledger contract: the seeded reserve must be 100 all day and 100 before noon';
  END IF;
- UPDATE public.context_ledger_settings SET live_reserve_calls = 50, live_reserve_calls_morning = 400;
- UPDATE public.context_ledger_settings SET live_reserve_calls = 400, live_reserve_calls_morning = 50;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = 50, live_reserve_calls_morning = cap;
+ UPDATE public.context_ledger_settings SET live_reserve_calls = cap, live_reserve_calls_morning = 50;
  BEGIN
   UPDATE public.context_ledger_settings SET live_reserve_calls = 49;
   RAISE EXCEPTION 'ledger contract: a reserve below 50 was accepted';
@@ -149,8 +153,8 @@ BEGIN
   RAISE EXCEPTION 'ledger contract: a morning reserve of 0 was accepted';
  EXCEPTION WHEN check_violation THEN NULL; END;
  BEGIN
-  UPDATE public.context_ledger_settings SET live_reserve_calls = 401;
-  RAISE EXCEPTION 'ledger contract: a reserve above 400 was accepted';
+  UPDATE public.context_ledger_settings SET live_reserve_calls = cap + 1;
+  RAISE EXCEPTION 'ledger contract: a reserve above % was accepted', cap;
  EXCEPTION WHEN check_violation THEN NULL; END;
  BEGIN
   UPDATE public.context_ledger_settings SET live_reserve_calls_morning = -1;

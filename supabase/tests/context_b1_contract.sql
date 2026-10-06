@@ -1,5 +1,17 @@
 \set ON_ERROR_STOP on
 BEGIN;
+-- The call budget (20261006060000) reads the day's cap and attribution's share
+-- from context_cadence_policy() (1,000 and 300 since 6 Oct 2026, proved by its
+-- own contract). This contract proves B1's fences at the numbers it was written
+-- for, so where the policy exists (K1 onwards) it is pinned to 400, 300 and 60
+-- for this transaction, which rolls back below. A B1-only database has no
+-- policy and its own 400.
+DO $pin$ BEGIN
+ IF to_regprocedure('public.context_cadence_policy()') IS NOT NULL THEN
+  EXECUTE format('CREATE OR REPLACE FUNCTION public.context_cadence_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+   public.context_cadence_policy()||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb);
+ END IF;
+END $pin$;
 CREATE SCHEMA cron;
 CREATE TABLE cron.job(jobid bigint PRIMARY KEY,jobname text,command text);
 CREATE FUNCTION cron.alter_job(job_id bigint,command text) RETURNS void LANGUAGE sql AS $$ UPDATE cron.job SET command=$2 WHERE jobid=$1 $$;

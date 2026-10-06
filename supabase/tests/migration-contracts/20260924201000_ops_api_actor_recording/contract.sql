@@ -46,11 +46,20 @@ END $$;
 -- 1. Shape, access and ownership.
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')) IS DISTINCT FROM 'e26a2d4387c9f642f473aa16caf4ab98'
+ -- F-ACT's body, or the call budget's (20261006060000), which reads the cap
+ -- from the policy in two places and is otherwise F-ACT's byte for byte.
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()'))
+    NOT IN ('e26a2d4387c9f642f473aa16caf4ab98','2b6b2c54daeae381cdeff7802d72df81')
+  OR md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+    '''run_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''run_cap'',400,'),
+    '''model_call_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''model_call_cap'',400,'))
+    IS DISTINCT FROM 'e26a2d4387c9f642f473aa16caf4ab98'
  THEN RAISE EXCEPTION 'f-act core body md5'; END IF;
- IF md5(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+ IF md5(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
     E'''coverage'',public.context_coverage(),\n  ''actor_missing'',public.context_actor_missing_status());',
-    E'''coverage'',public.context_coverage());'))
+    E'''coverage'',public.context_coverage());'),
+    '''run_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''run_cap'',400,'),
+    '''model_call_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''model_call_cap'',400,'))
     IS DISTINCT FROM '3df30c5ccf6db32c4782ba7859591b86'
  THEN RAISE EXCEPTION 'f-act core differs from F1''s body beyond the one actor_missing key'; END IF;
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_pipeline_status()')) IS DISTINCT FROM '9183a756c0d4b3881507656751c0d422'
@@ -139,7 +148,13 @@ ROLLBACK;
 
 BEGIN;
 -- 4. Every other heartbeat key is F1's value on the same rows, and an
--- unreadable counter cannot take the heartbeat down.
+-- unreadable counter cannot take the heartbeat down. The call budget
+-- (20261006060000) made model_call_cap and run_cap the policy's cap (1,000,
+-- proved by its own contract), so this transaction pins the policy to F1's 400.
+DO $pin$ BEGIN
+ EXECUTE format('CREATE OR REPLACE FUNCTION public.context_cadence_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+  public.context_cadence_policy()||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb);
+END $pin$;
 DO $$
 DECLARE core jsonb; f1 jsonb; composed jsonb;
 BEGIN
