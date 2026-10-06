@@ -43,8 +43,11 @@ DECLARE s jsonb;
 BEGIN
  s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-10-01T00:00:00Z"}'::jsonb,
                                         '{}'::jsonb, NULL, NULL, '2026-10-07 02:00Z', NULL);
- IF s->'meta'->'ledger'->>'status' <> 'none' OR jsonb_array_length(s->'loops') <> 0 OR s->'now'->>'whose_move' <> 'nobody'
-    OR s->'now'->>'phase' <> 'quote' THEN
+ -- (widened by story safety, 20261006040000: with no live reading nothing on record is
+ -- never an all-clear: whose move is unknown and the line says the messages are unread)
+ IF s->'meta'->'ledger'->>'status' <> 'none' OR jsonb_array_length(s->'loops') <> 0 OR s->'now'->>'whose_move' <> 'unknown'
+    OR s->'now'->>'phase' <> 'quote' OR s->'now'->>'line' LIKE '%Nothing open%'
+    OR position('No record item is open and the messages have not been read yet' IN s->'now'->>'line') = 0 THEN
   RAISE EXCEPTION 'story contract: empty assembly wrong: %', s->'now';
  END IF;
  -- meta.ledger carries the reader's own freshness; the fact pass's unread count is gone.
@@ -162,8 +165,12 @@ BEGIN
         jsonb_build_object('facts', jsonb_build_object('bookings', jsonb_build_array(
           jsonb_build_object('id', 'b1', 'scheduled_date', '2026-09-07', 'status', 'complete', 'completed_at', '2026-09-07T06:00:00Z')))),
         NULL, NULL, '2026-10-07 02:00Z', NULL);
- IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'line' NOT LIKE 'Work complete since Mon 7 Sep%' THEN
-  RAISE EXCEPTION 'story contract: the newest booking attended and none ahead is complete work: %', s->'now'->>'line';
+ -- (widened by story safety, 20261006040000: a booking marked complete with none ahead is
+ -- attendance, not finished work; only a completion status or record finishes the work)
+ IF s->'now'->>'phase' <> 'install' OR s->'now'->>'line' NOT LIKE 'Install under way since Mon 7 Sep%'
+    OR position('the Mon 7 Sep booking is marked complete; nothing records the job finished' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' LIKE '%Work complete%' THEN
+  RAISE EXCEPTION 'story contract: the newest booking attended and none ahead is attendance, not finished work: %', s->'now'->>'line';
  END IF;
  -- a make-safe whose report went out is not complete while a booking is still ahead
  s := public.context_job_story_assemble('{"id":"x","status":"processing","type":"makesafe","created_at":"2026-08-01T00:00:00Z"}'::jsonb,
@@ -697,7 +704,9 @@ BEGIN
  END IF;
  -- the booking ruling in the words: a declined booking ahead does not stand, so it is
  -- neither the next visit nor work still to come; the status-only completion before it is
- IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'phase_since' <> '2026-10-01' OR s->'now'->'next' <> 'null'::jsonb
+ -- (widened by story safety, 20261006040000: that completion is attendance, so the phase
+ -- is install, not complete: no completion status or record finishes the work)
+ IF s->'now'->>'phase' <> 'install' OR s->'now'->>'phase_since' <> '2026-10-01' OR s->'now'->'next' <> 'null'::jsonb
     OR position('9 Oct' IN s->'now'->>'line') > 0 THEN
   RAISE EXCEPTION 'story contract: only a standing booking is a visit to come: %', s->'now';
  END IF;
@@ -746,8 +755,9 @@ BEGIN
   RAISE EXCEPTION 'story contract: a status-only completion today is a visit now, never later today: %', t->'closing';
  END IF;
  s := public.context_job_story('a0000000-0000-4000-8000-000000000009', now());
- IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'phase_since' <> to_char((now() AT TIME ZONE 'Australia/Perth')::date, 'YYYY-MM-DD') THEN
-  RAISE EXCEPTION 'story contract: work done today by a status-only completion: %', s->'now';
+ -- (widened by story safety, 20261006040000: attended today, not finished work)
+ IF s->'now'->>'phase' <> 'install' OR s->'now'->>'phase_since' <> to_char((now() AT TIME ZONE 'Australia/Perth')::date, 'YYYY-MM-DD') THEN
+  RAISE EXCEPTION 'story contract: attended today by a status-only completion: %', s->'now';
  END IF;
 END $story$;
 ROLLBACK;

@@ -20,12 +20,13 @@
 DO $shape$
 DECLARE x record; p record;
 BEGIN
+ -- (a later slice that replaces a body names itself after these: story safety, 20261006040000)
  FOR x IN SELECT * FROM (VALUES
-   ('public.context_job_record_timeline(uuid[],timestamptz)', true, 'Job record (20261006011000), story fixes (20261006033000):%'),
-   ('public.context_job_record_loops(uuid[],timestamptz)', true, 'Job record (20261006011000), story fixes (20261006033000):%'),
-   ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', false, 'Job story (20261006014000), story fixes (20261006033000):%'),
-   ('public.context_job_story_ledger(uuid,uuid,timestamptz)', true, 'Job story (20261006014000), story fixes (20261006033000):%'),
-   ('public.context_client_story(uuid,timestamptz)', true, 'Job story (20261006014000), story fixes (20261006033000):%')
+   ('public.context_job_record_timeline(uuid[],timestamptz)', true, 'Job record (20261006011000), story fixes (20261006033000)%'),
+   ('public.context_job_record_loops(uuid[],timestamptz)', true, 'Job record (20261006011000), story fixes (20261006033000)%'),
+   ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', false, 'Job story (20261006014000), story fixes (20261006033000)%'),
+   ('public.context_job_story_ledger(uuid,uuid,timestamptz)', true, 'Job story (20261006014000), story fixes (20261006033000)%'),
+   ('public.context_client_story(uuid,timestamptz)', true, 'Job story (20261006014000), story fixes (20261006033000)%')
  ) v(sig, definer, cmt) LOOP
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(x.sig);
   IF p IS NULL THEN RAISE EXCEPTION 'story fixes contract: % missing', x.sig; END IF;
@@ -433,8 +434,15 @@ BEGIN
 END $events$;
 ROLLBACK;
 
--- 5. Re-applying the migration changes nothing (its guard accepts its own bodies).
+-- 5. Re-applying the migration changes nothing (its guard accepts its own bodies). When
+-- story safety (20261006040000) has replaced four of them since, it is rolled back first
+-- inside this transaction, so the re-apply starts from this migration's own bodies.
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%story safety (20261006040000)%' AS story_safety_live \gset
 BEGIN;
+\if :story_safety_live
+\ir ../../../rollbacks/20261006040000_context_story_safety_down.sql
+\endif
 \ir ../../../migrations/20261006033000_context_story_fixups.sql
 DO $again$
 DECLARE x record; live text;

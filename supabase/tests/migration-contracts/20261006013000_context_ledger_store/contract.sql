@@ -739,29 +739,35 @@ BEGIN
  pk := public.context_ledger_packet(p);
  ev := pk -> 'evidence';
  SELECT array_agg((x ->> 'id')::uuid ORDER BY o) INTO ids FROM jsonb_array_elements(ev) WITH ORDINALITY y(x, o);
- want := ARRAY[i1, p1, p2, i4, p5, p6, p7, p8, p8c, p12, p14, i7];
+ -- (widened by story safety, 20261006040000: a legacy mail whose copy sits on another job,
+ -- i2 by its source pointer, i8 by an old-path payload, i5 by sender and instant, is this
+ -- job's evidence: only a copy on the same job stands in for it)
+ want := ARRAY[i1, i2, i8, p1, p2, i4, p5, p6, p7, p8, p8c, p12, p14, i5, i7];
  PERFORM pg_temp.lg_assert(ids = want, format('evidence ids/order: got %s want %s', ids, want));
- PERFORM pg_temp.lg_assert(pk ->> 'version' = 'ledger-packet-v1' AND (pk ->> 'evidence_rows')::integer = 12
+ PERFORM pg_temp.lg_assert(pk ->> 'version' = 'ledger-packet-v1' AND (pk ->> 'evidence_rows')::integer = 15
   AND (pk ->> 'truncated_rows')::integer = 2 AND (pk ->> 'duplicates_collapsed')::integer = 2, 'packet counts: ' || (pk - 'evidence')::text);
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_until')::timestamptz = (SELECT processed_at FROM public.inbox_events WHERE id = i7), 'evidence_until');
- PERFORM pg_temp.lg_assert(public.context_ledger_cite(p, jsonb_build_object('table', 'inbox_events', 'id', i8::text, 'excerpt', 'Named by'))
-  ->> 'code' = 'citation_not_admissible', 'a mail with an old-path copy is cited by its copy, never itself');
+ -- (widened by story safety, 20261006040000: its old-path copy is on another job, so the
+ -- mail is this job's and the store accepts it; a copy on the same job still stands in,
+ -- proved in 20261006040000's contract)
+ PERFORM pg_temp.lg_assert((public.context_ledger_cite(p, jsonb_build_object('table', 'inbox_events', 'id', i8::text, 'excerpt', 'Named by an old-path copy'))
+  ->> 'ok')::boolean, 'a mail whose old-path copy sits on another job is cited on its own job');
  -- Caps: 6,000 for transcripts and document text, 3,000 otherwise.
- PERFORM pg_temp.lg_assert(length(ev -> 5 ->> 'text') = 6000 AND length(ev -> 6 ->> 'text') = 3000, 'text caps');
+ PERFORM pg_temp.lg_assert(length(ev -> 7 ->> 'text') = 6000 AND length(ev -> 8 ->> 'text') = 3000, 'text caps');
  -- Roles come from the stored stamp, never invented.
- PERFORM pg_temp.lg_assert(ev -> 1 ->> 'sender_role' = 'customer' AND ev -> 1 ->> 'role_basis' = 'job_customer' AND ev -> 1 ->> 'sender' = 'Pat Example'
-  AND ev -> 1 ->> 'ours' = 'false', 'customer text roles');
- PERFORM pg_temp.lg_assert(ev -> 2 ->> 'ours' = 'true' AND ev -> 2 ->> 'recipient_role' = 'customer' AND ev -> 2 ->> 'automated' = 'false', 'our text');
- PERFORM pg_temp.lg_assert(ev -> 4 -> 'sender_role' = 'null'::jsonb AND ev -> 4 ->> 'channel' = 'note', 'an unstamped note has no role');
- PERFORM pg_temp.lg_assert(ev -> 9 ->> 'automated' = 'true' AND ev -> 9 ->> 'sender_role' = 'crew', 'a crew alert text is automated');
- PERFORM pg_temp.lg_assert(ev -> 10 ->> 'role_basis' = 'any_job_customer', 'basis carried so the reader can tell this job''s customer');
+ PERFORM pg_temp.lg_assert(ev -> 3 ->> 'sender_role' = 'customer' AND ev -> 3 ->> 'role_basis' = 'job_customer' AND ev -> 3 ->> 'sender' = 'Pat Example'
+  AND ev -> 3 ->> 'ours' = 'false', 'customer text roles');
+ PERFORM pg_temp.lg_assert(ev -> 4 ->> 'ours' = 'true' AND ev -> 4 ->> 'recipient_role' = 'customer' AND ev -> 4 ->> 'automated' = 'false', 'our text');
+ PERFORM pg_temp.lg_assert(ev -> 6 -> 'sender_role' = 'null'::jsonb AND ev -> 6 ->> 'channel' = 'note', 'an unstamped note has no role');
+ PERFORM pg_temp.lg_assert(ev -> 11 ->> 'automated' = 'true' AND ev -> 11 ->> 'sender_role' = 'crew', 'a crew alert text is automated');
+ PERFORM pg_temp.lg_assert(ev -> 12 ->> 'role_basis' = 'any_job_customer', 'basis carried so the reader can tell this job''s customer');
  PERFORM pg_temp.lg_assert(ev -> 0 ->> 'table' = 'inbox_events' AND ev -> 0 ->> 'sender_role' = 'customer' AND ev -> 0 ->> 'role_basis' = 'client_email'
   AND ev -> 0 ->> 'subject' = 'Gate', 'legacy client mail');
- PERFORM pg_temp.lg_assert(ev -> 3 -> 'sender_role' = 'null'::jsonb AND ev -> 11 ->> 'ours' = 'true' AND ev -> 11 ->> 'sender_role' = 'staff', 'other legacy mail');
+ PERFORM pg_temp.lg_assert(ev -> 5 -> 'sender_role' = 'null'::jsonb AND ev -> 14 ->> 'ours' = 'true' AND ev -> 14 ->> 'sender_role' = 'staff', 'other legacy mail');
  -- Where each row is placed: legacy mail from the client's address on no job is
  -- placed nowhere; every other row is on this job. Nothing was already read.
- PERFORM pg_temp.lg_assert(ev -> 0 ->> 'placed_on' = 'none' AND ev -> 3 ->> 'placed_on' = 'this_job' AND ev -> 11 ->> 'placed_on' = 'this_job'
-  AND ev -> 1 ->> 'placed_on' = 'this_job' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(ev) x WHERE (x ->> 'already_read')::boolean),
+ PERFORM pg_temp.lg_assert(ev -> 0 ->> 'placed_on' = 'none' AND ev -> 5 ->> 'placed_on' = 'this_job' AND ev -> 14 ->> 'placed_on' = 'this_job'
+  AND ev -> 3 ->> 'placed_on' = 'this_job' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(ev) x WHERE (x ->> 'already_read')::boolean),
   'placed_on and already_read: ' || ev::text);
  PERFORM pg_temp.lg_assert(public.context_ledger_cite(p, jsonb_build_object('table', 'inbox_events', 'id',
   (SELECT i.id::text FROM public.inbox_events i WHERE i.job_id = other AND i.subject = 'Other job'), 'excerpt', 'About another job'))
@@ -803,7 +809,8 @@ BEGIN
   'party roles: ' || (pk -> 'parties')::text);
  -- as_of replays: nothing recorded after it.
  pk := public.context_ledger_packet(p, NULL, now() - interval '7 days 12 hours');
- PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 5, 'as_of replay rows: ' || (pk ->> 'evidence_rows'));
+ -- (widened by story safety: i2 and i8, whose copies sit on another job, are evidence too)
+ PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 7, 'as_of replay rows: ' || (pk ->> 'evidence_rows'));
  -- Update window: rows recorded after since, plus the six before the first.
  q := pg_temp.lg_job('SWF-94003');
  FOR k IN 1 .. 10 LOOP
@@ -1747,11 +1754,12 @@ DECLARE x uuid; y uuid; o uuid; i1 uuid; i2 uuid; c1 uuid; c2 uuid; jd record;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  o := pg_temp.lg_job('SWF-98801');
- -- never read, and its only legacy mail has a business_events copy on another job: no evidence
+ -- never read, and its only legacy mail has a business_events copy on another job (the
+ -- mail is still its evidence: story safety, 20261006040000)
  x := pg_temp.lg_job('SWF-98802');
  i1 := pg_temp.lg_inbox(x, 'pat@example.test', 'Gate', 'Please price the gate on the side.', '3 days');
  c1 := pg_temp.lg_ev(o, 'client.email_in', 'email', 'inbound', 'Please price the gate on the side.', '3 days', 'customer');
- -- a reading whose only newer legacy mail is such a copy: nothing new to read
+ -- a reading whose only newer legacy mail has such a copy: new to read
  y := pg_temp.lg_job('SWF-98803');
  PERFORM pg_temp.lg_ev(y, 'client.reply', 'sms', 'inbound', 'Read message one', '5 days', 'customer');
  PERFORM pg_temp.lg_gen(y, 'live', now() - interval '1 day');
@@ -1761,12 +1769,16 @@ BEGIN
  UPDATE public.business_events SET source_table = 'inbox_events', source_id = i1::text WHERE id = c1;
  UPDATE public.business_events SET source_table = 'inbox_events', source_id = i2::text WHERE id = c2;
  PERFORM set_config('session_replication_role', 'origin', true);
+ -- (widened by story safety, 20261006040000: a copy on another job no longer stands in
+ -- for the mail, so each job's own legacy mail is its evidence; the due read and the
+ -- judge still agree)
  SELECT * INTO jd FROM public.context_ledger_judge(ARRAY[x]);
- PERFORM pg_temp.lg_assert(NOT jd.due AND jd.blocked_reason = 'no_evidence' AND jd.evidence_rows = 0,
-  'legacy mail with a copy elsewhere is no evidence: ' || to_jsonb(jd)::text);
+ PERFORM pg_temp.lg_assert(jd.due AND jd.reason = 'never_read' AND jd.blocked_reason IS NULL AND jd.evidence_rows = 1,
+  'legacy mail whose copy sits on another job is this job''s evidence: ' || to_jsonb(jd)::text);
  SELECT * INTO jd FROM public.context_ledger_judge(ARRAY[y]);
- PERFORM pg_temp.lg_assert(NOT jd.due AND jd.reason IS NULL, 'a newer legacy copy is nothing new: ' || to_jsonb(jd)::text);
- PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_due(50) d WHERE d.job_id IN (x, y)), 'due lists neither');
+ PERFORM pg_temp.lg_assert(jd.due AND jd.reason = 'new_evidence' AND jd.evidence_rows = 2,
+  'that mail landing after the reading is new to read: ' || to_jsonb(jd)::text);
+ PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_due(50) d WHERE d.job_id IN (x, y)) = 2, 'due lists both, as the judge does');
 END $c$;
 ROLLBACK;
 -- rev-backend P2-2, P2-3: a claim never takes the admission's lock (one claim at a

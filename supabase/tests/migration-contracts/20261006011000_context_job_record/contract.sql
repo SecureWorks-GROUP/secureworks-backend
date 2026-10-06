@@ -387,7 +387,13 @@ BEGIN
 
  -- contact: automated and crew texts are never what we told the customer
  SELECT * INTO r FROM public.context_job_record_contact(ARRAY[a], asof);
- IF r.last_to_customer IS NOT NULL THEN RAISE EXCEPTION 'record contract: an automated or crew text counted as told the customer: %', r.last_to_customer; END IF;
+ -- (widened by story safety, 20261006040000: when only an automated text went to the
+ -- customer it is kept as newer_automated, marked only_automated, never dropped; it is
+ -- still never what a person told the customer, and a crew alert is never either)
+ IF r.last_to_customer ? 'id' OR NOT coalesce((r.last_to_customer->>'only_automated')::boolean, false)
+    OR r.last_to_customer->'newer_automated'->>'id' IS DISTINCT FROM 'b0000000-0000-4000-8000-000000000002' THEN
+  RAISE EXCEPTION 'record contract: an automated or crew text counted as told the customer: %', r.last_to_customer;
+ END IF;
  IF r.last_internal->>'id' <> 'b0000000-0000-4000-8000-000000000003' THEN RAISE EXCEPTION 'record contract: crew text must be the last internal message'; END IF;
  IF r.last_customer_message->>'id' <> 'b0000000-0000-4000-8000-000000000001' OR r.customer_messages <> 1 OR r.unanswered <> 1 OR r.replies <> 0 THEN
   RAISE EXCEPTION 'record contract: contact stats wrong: %', row_to_json(r);
