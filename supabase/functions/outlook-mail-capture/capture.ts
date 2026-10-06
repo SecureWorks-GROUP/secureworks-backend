@@ -12,6 +12,8 @@
 //   poll     new mail since the source's cursor        outlook_<key>
 //   sweep    re-read of the last 48 hours; inserts are
 //            mail the poll missed (counts.sweep_misses) outlook_sweep_<key>
+//            and when each was received
+//            (cursor.miss_received_at)
 //   history  bounded backfill of [from, to), at most 60
 //            days back, capture_mode backfill, only mail
 //            touching a live job (captain ruling 24 Sep) outlook_history_<key>
@@ -51,6 +53,19 @@
 // private store, pointed at the old row. Our own mail (outbound, internal) is
 // never skipped: its old copy is an inbox copy typed as inbound, the reader's
 // row is the correct one.
+//
+// Sweep misses (lanes health, 6 Oct 2026): the first nightly sweep after a
+// source is switched on re-reads 48 hours that began before the source's
+// first poll, so some of what it saves was never the poll's to read. The
+// sweep keeps counting every insert in counts.sweep_misses and records when
+// each was received in cursor.miss_received_at (the oldest
+// POLICY.sweepMissTimesMax, times only); the status
+// (context_email_capture_status_at, 20261006050000) leaves out mail older
+// than the source's first successful poll and counts the rest.
+//
+// Attachments: a poll handles an email's attachments once; the nightly sweep
+// and history runs check them again and retry recorded failures (recheck,
+// attachments.ts).
 //
 // Gates: feature flag email_reader_v1 (this reader's own switch, off by
 // default), email_capture_v2 (the email capture program's switch, EM1) and the
@@ -104,6 +119,8 @@ export const POLICY = {
   checkpointMs: 15_000,
   runningStaleMs: 10 * 60_000,
   idsAtEndMax: 25,
+  /** A sweep records the received time of at most this many misses (the oldest). */
+  sweepMissTimesMax: 100,
 };
 
 /**
@@ -263,6 +280,8 @@ export interface CaptureDeps {
     providerMessageId: string;
     businessEventId: string | null;
     scopeLabel: string;
+    /** The sweep and history runs: read the files again, retry failures. */
+    recheck: boolean;
   }): Promise<AttachmentResult>;
   hash(text: string): Promise<string>;
 }
@@ -606,6 +625,9 @@ async function runSource(
     ownerPrivacy: s.owner_privacy === true,
   };
 
+  // A sweep: when each email it had to save was received (epoch ms).
+  const missTimes: number[] = [];
+
   // Progress: the last email fully processed.
   let lastMs: number | null = null;
   let lastId: string | null = null;
@@ -642,6 +664,14 @@ async function runSource(
         ids_at_end: cursorIds,
         ...(historyKey ?? {}),
         ...(walk ? { group: walk } : {}),
+        ...(req.mode === "sweep"
+          ? {
+            miss_received_at: [...missTimes].sort((a, b) => a - b).slice(
+              0,
+              POLICY.sweepMissTimesMax,
+            ).map(iso),
+          }
+          : {}),
       },
     };
     if (windowTo) {
@@ -763,6 +793,7 @@ async function runSource(
             providerMessageId: String(built.row.provider_message_id),
             businessEventId: legacyId,
             scopeLabel: s.scope_label,
+            recheck: req.mode !== "poll",
           });
           counts.attachments_stored += a.stored;
           counts.attachments_skipped += a.skipped;
@@ -784,7 +815,12 @@ async function runSource(
     }
     if (out.outcome === "inserted") {
       counts.inserted++;
-      if (req.mode === "sweep") counts.sweep_misses++;
+      if (req.mode === "sweep") {
+        counts.sweep_misses++;
+        // An unreadable time is left off the list; the status counts it.
+        const at = ms(item.receivedAt);
+        if (at !== null) missTimes.push(at);
+      }
     } else {
       counts.duplicates++;
       if (out.upgraded) counts.upgraded++;
@@ -799,6 +835,7 @@ async function runSource(
         providerMessageId: String(built.row.provider_message_id),
         businessEventId: out.id ?? null,
         scopeLabel: s.scope_label,
+        recheck: req.mode !== "poll",
       });
       counts.attachments_stored += a.stored;
       counts.attachments_skipped += a.skipped;

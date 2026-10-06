@@ -79,7 +79,9 @@ Written only through `record_capture_run()` into `context_capture_runs`.
 - `succeeded`: the source finished. `partial`: cut short (time budget,
   throttling); the run did not finish. `failed`: an error, with `error_code`.
 - A poll with pages left sets `cursor.backlog = true`.
-- A sweep puts the messages the poll missed in `counts.sweep_misses`.
+- A sweep puts the messages the poll missed in `counts.sweep_misses`, and
+  when each was received in `cursor.miss_received_at` (the oldest 100; times
+  only).
 - The pair cursor is `(window_to, window_end_id)` (F1b).
 - Counts and codes only, never message text.
 
@@ -106,7 +108,7 @@ with the number of sources raising them, never which one:
 |---|---|
 | `email_source_error` | a source's last 2 finished polls failed (the line's distinct `error_codes` are listed) |
 | `email_backlog` | a source's last 3 finished polls all left pages behind |
-| `email_poll_missed` | a source's latest sweep that finished in the last 26 hours has `sweep_misses > 0` (summed per line) |
+| `email_poll_missed` | a source's latest sweep that finished in the last 26 hours saved mail received at or after the source's first successful poll (that poll's `window_from`), summed per line. Mail from before it was never the poll's to read (the first sweep after a switch-on re-reads 48 hours); misses past the sweep's list, or in a list that cannot be read, still count; a source with no successful poll raises none (lanes health, `20261006050000`) |
 | `sweep_incomplete` | from 03:00 Perth, a source has no sweep started at or after 02:00 Perth that succeeded (not expected on the night the flag or the source was switched on) |
 
 Thresholds and the personal labels are published in the block's `policy`
@@ -148,8 +150,18 @@ Attachments: file attachments up to 15 MB each, 10 files and 30 MB per email,
 go to the PRIVATE bucket `context-email-attachments`, one row each in
 `context_email_attachments` (service role only; `stored` or a `skipped_*`
 reason). Inline images, attached emails and links are recorded skipped. ses@
-attachments are not stored here (the make-safe intake stores them). No public
-URL and no `job_documents` row is made.
+attachments are not read at all (the make-safe intake stores them). No public
+URL and no `job_documents` row is made. A group post's attachments are read
+with the post (`$expand=attachments`, bytes included): Microsoft refuses the
+post's own attachments address to the reader's app login, which is why no group
+file was saved before lanes health (`20261006050000`). A group file sent
+without its bytes is `skipped_no_content`; a post read over 40 MB is refused
+(`attachment_post_too_large`). A failed list, download or upload is a `failed`
+row with its `error_code`, keyed sha-256 of `failed:` plus the attachment's key
+(or `failed:list`), written once: polls never retry it, the nightly sweep and
+history runs do, and a success writes the attachment's own row beside it. A
+group post whose email already has a row is read again only to retry an open
+failure.
 
 Old-path copies (gap plan B-1, `20261005180000`): the old path's rows
 (sources `monitor-inbox`, `monitor_inbox`, `monitor-inbox-group`, keys

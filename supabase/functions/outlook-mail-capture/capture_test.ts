@@ -65,6 +65,8 @@ interface World {
   /** Called before each conversation list page; may throw. */
   onConversationList?: () => void;
   attachmentEvents: Array<string | null>;
+  /** The recheck flag each storeAttachments call carried. */
+  attachmentRecheck: boolean[];
   listCalls: number;
   conversationPages: number;
   postReads: string[];
@@ -92,6 +94,7 @@ function world(partial: Partial<World> = {}): World {
     legacy: [],
     legacyCalls: [],
     attachmentEvents: [],
+    attachmentRecheck: [],
     listCalls: 0,
     conversationPages: 0,
     postReads: [],
@@ -252,6 +255,7 @@ function deps(w: World): CaptureDeps {
     storeAttachments: async (args): Promise<AttachmentResult> => {
       w.attachmentCalls.push(args.providerMessageId);
       w.attachmentEvents.push(args.businessEventId);
+      w.attachmentRecheck.push(args.recheck === true);
       return { stored: 1, skipped: 1, already: 0, errors: 0, error_code: null };
     },
     hash: async (t) => `h:${t}`,
@@ -511,6 +515,78 @@ Deno.test("sweep re-reads 48 hours; what the poll missed counts as sweep_misses"
   assertEquals(run.counts!.sweep_misses, 1);
   assertEquals(run.counts!.duplicates, 1);
   assertEquals(run.counts!.seen, 2);
+});
+
+// Lanes health (6 Oct 2026): the first nightly sweep after the reader was
+// switched on re-read 48 hours that began before the reader's first poll, and
+// the status counted that older mail as "missed by the poll". The sweep now
+// records when each email it had to save was received, so the status
+// (context_email_capture_status_at, 20261006050000) can leave out mail older
+// than the source's first successful poll. Times only, never mail text.
+// These tests read a shared mailbox source.
+const SHARED: SourceRow = {
+  email: "admin@secureworkswa.com.au",
+  source_key: "admin",
+  kind: "user",
+  scope_label: "admin",
+  owner_privacy: false,
+};
+const toShared = { to: [SHARED.email] };
+
+Deno.test("a sweep records when each email it had to save was received (cursor.miss_received_at)", async () => {
+  const box = [
+    msg(1, "2026-10-01T08:00:00Z", toShared),
+    msg(2, "2026-10-02T04:00:00Z", toShared),
+    msg(4, "2026-10-01T09:30:00.5Z", toShared),
+  ];
+  const w = world({ sources: [SHARED], mailboxes: { [SHARED.email]: box } });
+  w.keys.set("email:m2@mail.example.com", "ev-existing");
+  await runOutlookCapture(deps(w), { mode: "sweep", source: "admin" });
+  const run = lastRun(w, "outlook_sweep_admin");
+  assertEquals(run.counts!.sweep_misses, 2);
+  assertEquals(run.cursor!.miss_received_at, [
+    "2026-10-01T08:00:00.000Z",
+    "2026-10-01T09:30:00.500Z",
+  ]);
+  // A poll records no such list.
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  assertEquals(
+    "miss_received_at" in lastRun(w, "outlook_admin").cursor!,
+    false,
+  );
+});
+
+Deno.test("a sweep with more misses than the list holds keeps the oldest; the rest still count as misses", async () => {
+  const box = Array.from(
+    { length: POLICY.sweepMissTimesMax + 3 },
+    (_, i) =>
+      msg(
+        100 + i,
+        new Date(Date.parse("2026-10-01T08:00:00Z") + i * 60_000)
+          .toISOString(),
+        toShared,
+      ),
+  );
+  const w = world({ sources: [SHARED], mailboxes: { [SHARED.email]: box } });
+  await runOutlookCapture(deps(w), { mode: "sweep", source: "admin" });
+  const run = lastRun(w, "outlook_sweep_admin");
+  assertEquals(run.counts!.sweep_misses, POLICY.sweepMissTimesMax + 3);
+  const times = run.cursor!.miss_received_at as string[];
+  assertEquals(times.length, POLICY.sweepMissTimesMax);
+  assertEquals(times[0], "2026-10-01T08:00:00.000Z");
+});
+
+Deno.test("attachments: a poll handles an email's files once; the sweep and history runs recheck them", async () => {
+  const box = [{
+    ...E_DIRECT,
+    to: [SHARED.email],
+    receivedAt: "2026-10-02T05:50:00Z",
+    parentFolderId: "F-inbox",
+  }];
+  const w = world({ sources: [SHARED], mailboxes: { [SHARED.email]: box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  await runOutlookCapture(deps(w), { mode: "sweep", source: "admin" });
+  assertEquals(w.attachmentRecheck, [false, true]);
 });
 
 Deno.test("history: bounded window, backfill rows, live jobs only (captain ruling 24 Sep)", async () => {

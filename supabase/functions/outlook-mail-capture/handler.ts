@@ -19,6 +19,7 @@ import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import {
   ATTACHMENT_POLICY,
   type AttachmentLedgerRow,
+  type AttachmentStatus,
   sha256Hex,
   storeEmailAttachments,
 } from "./attachments.ts";
@@ -85,14 +86,22 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
   };
   const attachmentDeps = {
     list: (home: graph.AttachmentHome) => graph.listAttachments(g, home),
-    bytes: (home: graph.AttachmentHome, id: string, max: number) =>
-      graph.attachmentBytes(g, home, id, max),
+    bytes: (
+      home: graph.AttachmentHome,
+      attachment: graph.ListedAttachment,
+      max: number,
+    ) => graph.attachmentBytes(g, home, attachment, max),
     async existing(providerMessageId: string) {
       const { data, error } = await supabase.from("context_email_attachments")
-        .select("attachment_key").eq("provider_message_id", providerMessageId);
+        .select("attachment_key,status").eq(
+          "provider_message_id",
+          providerMessageId,
+        );
       if (error) throw dbError("attachment_ledger_unreadable");
-      return new Set<string>(
-        (data ?? []).map((r: { attachment_key: string }) => r.attachment_key),
+      return new Map<string, AttachmentStatus>(
+        (data ?? []).map((
+          r: { attachment_key: string; status: AttachmentStatus },
+        ) => [r.attachment_key, r.status]),
       );
     },
     async upload(path: string, bytes: Uint8Array, contentType: string) {
@@ -108,6 +117,9 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
         throw dbError("attachment_upload_failed");
       }
     },
+    // A row already at its key is left as it is (one row per attachment,
+    // and a recorded failure is written once). error_code is sent only on a
+    // failed row, so stored and skipped rows need no newer column.
     async record(row: AttachmentLedgerRow) {
       const { error } = await supabase.from("context_email_attachments")
         .upsert(row, {

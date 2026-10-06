@@ -112,6 +112,13 @@ first row, with its `flag` state (`present`, `missing`, `unreadable`) and
 alarms only while the flag is on (missing or unreadable reads as off).
 `quiet` stays the measured fact; the alarm needs `quiet` and no exemption.
 Both lists are in the policy (`retired_sources`, `flag_gated_sources`).
+Lanes health (`20261006050000`) retired the old email path's three writer
+names (`monitor-inbox`, `monitor-inbox-group`, `monitor_inbox`; replaced by
+`outlook-mail-capture` when the email reader took over on 5 Oct 2026) and
+`ghl_sms_cache_backfill` (replaced by `ghl-message-reconcile`), and added a
+third list, `action_log_sources`: a writer that logs actions people or agents
+took rather than capturing evidence (`mcp_agent`) is listed with
+`alarm_exempt: action_log` and never alarms. Sources are listed in byte order.
 
 `ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`, with
 the retry projection follow-up `20260924210000_context_ghl_retry_status.sql`):
@@ -123,7 +130,11 @@ webhook and last app webhook, unresolved ids (from the receiver's ids-only
 errors in 24 h (from `context_capture_runs`, source `ghl_message_reconcile`).
 The latest run's pending retry coordinate is `reconciler.retry_from`; it stays
 visible until a complete retry read clears it.
-Alarms: `ghl_webhooks_quiet` (no app webhook for 120 business minutes) and
+Alarms: `ghl_webhooks_quiet` (nothing from GHL for 120 business minutes: no
+app event and no `CallCompleted`, `CustomerReplied` or `UserReplied` workflow
+doorbell, policy `doorbell_event_types`, lanes health `20261006050000`;
+measured from `webhooks.last_lane_webhook_at`, while `last_app_webhook_at`
+still counts app events only) and
 `ghl_reconcile_stale` (no finished `succeeded` or `partial` run for 45
 minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high`
 (more than 5 in 24 h); `ghl_auth_missing` (critical: any post refused after
