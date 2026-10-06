@@ -20,7 +20,7 @@
 //   Failures         a source the dossier could not read is named in
 //                    not_known, never reported as "none".
 //   Dossier          `state` is top level with the shared contract keys,
-//                    sections_version is 4, the stale transcripts warning is
+//                    sections_version is 5 (4 added the state card, 5 the story mode), the stale transcripts warning is
 //                    gone, and the read stays read only.
 
 import {
@@ -665,7 +665,7 @@ function assertContract(d: any) {
       typeof d.state.brief.written_at === "string",
   );
   assertEquals(typeof d.state.brief.stale, "boolean");
-  assertEquals(d.sections_version, 4);
+  assertEquals(d.sections_version, 5);
   assert(
     !d.diagnostics.warnings.some((w: string) => w.startsWith("transcripts:")),
   );
