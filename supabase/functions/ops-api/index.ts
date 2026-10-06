@@ -417,6 +417,7 @@ import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryA
 import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
+import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
 import { businessEventTimelineMessage, conversationWindow, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
@@ -17116,6 +17117,12 @@ async function assembleJobDossier(client: any, body: any) {
 
 async function searchJobs(client: any, params: URLSearchParams) {
   const q = (params.get('q') || '').trim()
+  // include_closed (ask the story, 6 Oct 2026): Jarvis's sw_job_story reads
+  // lost, cancelled and draft jobs too, with whole-word name reads and a capped
+  // flag (search_jobs_closed.ts). Without it the search below is unchanged.
+  if (['true', '1'].includes((params.get('include_closed') || '').toLowerCase())) {
+    return await searchJobsIncludingClosed(client, q, { orgId: DEFAULT_ORG_ID, isTestRecord })
+  }
   if (!q || q.length < 2) return { results: [] }
 
   const term = `%${q}%`
@@ -60672,3 +60679,4 @@ export const _updateInvoiceForTest = updateInvoice
 export const _getJobContextFactsForTest = getJobContextFacts
 export const _assembleJobDossierForTest = assembleJobDossier
 export const _getJobConversationForTest = getJobConversation
+export const _searchJobsForTest = searchJobs
