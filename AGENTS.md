@@ -705,6 +705,10 @@ about 0.8 ms and almost all find nothing. A CRM text loaded from the CRM's cache
 (`ghl_sms_cache_backfill`) is at its CRM time (`context_job_record_crm_time`) in
 the story, the reader's evidence and the citation check alike; one dated more than
 30 days before the job was created is in none of them as the customer's words.
+A story loop's `status` is `open` or `closing_evidence` when it is a move;
+`not_due` (R8 before the work is done) and `unconfirmed` (R8 whose amount a C2
+check leaves unknown) are never a move, the first line's item or a reason for
+whose move.
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
