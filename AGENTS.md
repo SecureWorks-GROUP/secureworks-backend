@@ -624,13 +624,16 @@ Who-to-whom is `metadata.party_roles`, stamped only by the trigger
 `20261005200000`, v2 `20261006000000`, v3 `20261006034000`); it never places a
 row or writes a ladder-owned key. Rule order: L1d's label or a writer marker
 (copied), then our own crew and staff templates on an outbound text
-(`context_internal_text_role` plus the roof report make-safe alert, basis
-`our_template`), then the v1 and v2 key rules. The trigger stamps a row on
-insert and re-stamps it whenever a writer updates `job_id`, `contact_id`,
-`direction`, `metadata`, `payload`, `event_type` or `channel` (a relink, a
-dedupe mark), always with the live classifier; a row nobody writes keeps its
-stamp until a hand-run re-stamp: `scripts/context-party-roles-v3-backfill.sql`
-is the pattern (a metadata-only write so the trigger re-stamps; the undo
+(`context_internal_text_role`'s patterns read through `context_event_text`,
+plus the roof report make-safe alert to crew; basis `our_template`), then the
+v1 and v2 key rules. The classifier never calls `context_internal_text_role`
+or another ladder-private helper: the service role previews the classifier,
+and the `20261006034000` case calls it as `service_role` in a fresh session.
+The trigger stamps a row on insert and re-stamps it whenever a writer updates
+`job_id`, `contact_id`, `direction`, `metadata`, `payload`, `event_type` or
+`channel` (a relink, a dedupe mark), always with the live classifier; a row
+nobody writes keeps its stamp until a hand-run re-stamp:
+`scripts/context-party-roles-v3-backfill.sql` is the pattern (a metadata-only write so the trigger re-stamps; the undo
 restores the saved stamp with the trigger off). So a version stamp alone never
 proves a backfill ran; its run key does. A later change to one of
 `20261006034000`'s three functions (classifier, scorecard lane rule, parties

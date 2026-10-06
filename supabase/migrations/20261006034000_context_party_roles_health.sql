@@ -71,21 +71,27 @@
 --      tools carries the writer's crew marker).
 --   3. context_message_party_roles(e), v3: after rule 1 (L1d's label or a
 --      writer marker, copied, never re-decided) one new rule. An outbound
---      text in one of our own crew or staff templates
---      (context_internal_text_role, the same reading L1d uses: "New job
+--      text in one of our own crew or staff templates (the templates
+--      context_internal_text_role reads, the same reading L1d uses: "New job
 --      assigned:", "Job ready for crew:", "New make-safe:", "New repair:" to
 --      crew; "Docs Ready: " and "SecureWorks: New make-safe " to staff), or
 --      the roof report wording of that last alert ("SecureWorks: New roof
---      report make-safe ", which L1d's map does not name), went to crew or
---      staff, basis our_template, audience internal (or the ladder's audience
---      when it set one), whoever the contact is on file as. Every other v1
---      and v2 rule runs unchanged after it, stamped party_roles_v3.
---      The roof wording is the same alert: ops-api's makesafe_notify.ts
---      (buildArrivalMessage) writes both from one template, and the roof
---      recipients are the general recipients plus one more person. Production
---      (read only, all time): 8 roof alerts (6 to 16 Jul) to 2 contacts, both
---      of whom also receive our crew job texts; today 4 read staff to customer
---      and 4 staff to unknown. It reads staff, like its sibling.
+--      report make-safe ", which L1d's map does not name, to crew), went to
+--      crew or staff, basis our_template, audience internal (or the ladder's
+--      audience when it set one), whoever the contact is on file as. Every
+--      other v1 and v2 rule runs unchanged after it, stamped party_roles_v3.
+--      The rule reads the words through context_event_text with L1d's
+--      patterns and does not call context_internal_text_role: L1d keeps that
+--      helper private to the ladder (no service role grant), and the service
+--      role previews this classifier.
+--      The roof wording reads crew on evidence (production, read only): the
+--      one phone in makesafe_notify_settings.arrival_roof_phones resolves to
+--      a crew user through context_party_user_role (the classifier's own
+--      users rule); 8 roof alerts (6 to 16 Jul) went to 2 contacts who also
+--      receive our crew job texts; today 4 read staff to customer and 4 staff
+--      to unknown. The one phone in arrival_general_phones also resolves to a
+--      crew user, so L1d's staff reading of the sibling alert is L1d's to
+--      revisit; this migration does not change L1d's map.
 --
 -- Stamps. The trigger context_party_roles_business_event stamps a row on
 -- insert and re-stamps it whenever a writer updates job_id, contact_id,
@@ -108,7 +114,9 @@
 --   context_parties_status()                                   98ca15b42682e9210ac4e6fe8d74ccd3 (S-M1, 20261002120000)
 --   context_scorecard_lane_of(text,text,text,text,text,jsonb)  a7d601b8eaf03a5616df508e8a18b2d6 (W11, 20261006032000)
 --   context_message_party_roles(business_events)               8d5bb9cfa80a631ee39497282e54f967 (v2, 20261006000000)
--- Read, not replaced (pinned): context_internal_text_role (L1d),
+-- Read, not replaced (pinned): context_internal_text_role (L1d; rule 1b and
+--   the lane rule copy its template patterns, so a change to it must change
+--   them too),
 --   context_stamp_party_roles and its trigger, context_party_user_role,
 --   context_party_builder_address, context_party_supplier_key,
 --   context_party_key_roles, context_party_contact_roles.
@@ -130,7 +138,7 @@ BEGIN
   -- Replaced: the live body, or already this migration's.
   ('public.context_parties_status()',ARRAY['98ca15b42682e9210ac4e6fe8d74ccd3','5f01b621c22b3cb0840bf04eb32a338f']),
   ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)',ARRAY['a7d601b8eaf03a5616df508e8a18b2d6','2b51a7422882b6b1d77988fdd3860230']),
-  ('public.context_message_party_roles(public.business_events)',ARRAY['8d5bb9cfa80a631ee39497282e54f967','04f39b23d2e14868596d12efbcaffb6b']),
+  ('public.context_message_party_roles(public.business_events)',ARRAY['8d5bb9cfa80a631ee39497282e54f967','36ed4eac4ec8a1b2efd253da02add409']),
   -- Read, not replaced.
   ('public.context_internal_text_role(public.business_events)',ARRAY['e7327d108966e2bcb9d2eb48e3086a55']),
   ('public.context_stamp_party_roles()',ARRAY['de974f45ef3174e9391a3d31369df179']),
@@ -299,15 +307,22 @@ BEGIN
  END IF;
 
  -- 1b (v3). One of our own crew or staff templates on an outbound text
- -- (context_internal_text_role, the reading L1d uses: ops-api's crew job
- -- texts and the office alerts, plus the roof report wording of the office
- -- make-safe alert, which L1d's map does not name) went to crew or staff,
- -- whoever the contact is on file as: a crew member's or office person's
- -- contact can also be a job's customer. Before every customer rule; never
- -- re-decides rule 1. The scorecard's lane rule reads the same texts.
+ -- (the templates context_internal_text_role reads, the reading L1d uses:
+ -- ops-api's crew job texts to crew, the office alerts to staff; plus the
+ -- roof report wording of the office make-safe alert, which L1d's map does
+ -- not name, to crew: its recipients resolve to crew users) went to crew or
+ -- staff, whoever the contact is on file as: a crew member's or office
+ -- person's contact can also be a job's customer. Before every customer
+ -- rule; never re-decides rule 1. The words are read here through
+ -- context_event_text with L1d's patterns, not by calling
+ -- context_internal_text_role: that helper is private to the ladder (no
+ -- service role grant), and the service role previews this classifier. The
+ -- scorecard's lane rule reads the same texts.
  IF dir='outbound' AND (e.channel='sms' OR (e.channel IS NULL AND e.event_type IN ('client.sms_out','sms_sent'))) THEN
-  irole:=public.context_internal_text_role(e);
-  IF irole='other' AND btrim(public.context_event_text(e)) ~ '^SecureWorks: New roof report make-safe ' THEN irole:='staff'; END IF;
+  irole:=CASE
+   WHEN btrim(public.context_event_text(e)) ~ '^(New job assigned|Job ready for crew|New make-safe|New repair): ' THEN 'crew'
+   WHEN btrim(public.context_event_text(e)) ~ '^(Docs Ready: |SecureWorks: New make-safe )' THEN 'staff'
+   WHEN btrim(public.context_event_text(e)) ~ '^SecureWorks: New roof report make-safe ' THEN 'crew' END;
   IF irole IN ('crew','staff') THEN
    RETURN jsonb_build_object('version','party_roles_v3','sender_role','staff','recipient_role',irole,'counterpart_role',irole,
     'basis','our_template','audience',coalesce(nullif(e.metadata->>'audience',''),'internal'));
@@ -404,7 +419,7 @@ BEGIN
   || CASE WHEN conflict IS NOT NULL THEN jsonb_build_object('conflicting_roles',to_jsonb(conflict)) ELSE '{}'::jsonb END;
 END $$;
 COMMENT ON FUNCTION public.context_message_party_roles(public.business_events) IS
- 'Party roles v3 (20261006034000): for a message row (text, call, call transcript, email) {version, sender_role, recipient_role, counterpart_role, basis, audience[, conflicting_roles]}; roles customer, crew, staff, supplier, insurer_builder or unknown; our side is staff. L1d''s internal label and an undecided writer marker are copied, never re-decided; then an outbound text in one of our own crew or staff templates (context_internal_text_role, or the roof report make-safe alert, staff) went to crew or staff (basis our_template, audience internal) whoever the contact is on file as; then v1''s rules (20261005200000) and v2''s (20261006000000) run unchanged. Null for any other row. Computes; never places, never writes. Service role may call it to preview.';
+ 'Party roles v3 (20261006034000): for a message row (text, call, call transcript, email) {version, sender_role, recipient_role, counterpart_role, basis, audience[, conflicting_roles]}; roles customer, crew, staff, supplier, insurer_builder or unknown; our side is staff. L1d''s internal label and an undecided writer marker are copied, never re-decided; then an outbound text in one of our own crew or staff templates (context_internal_text_role''s patterns read through context_event_text, or the roof report make-safe alert, crew) went to crew or staff (basis our_template, audience internal) whoever the contact is on file as; then v1''s rules (20261005200000) and v2''s (20261006000000) run unchanged. Null for any other row. Computes; never places, never writes. Service role may call it to preview.';
 
 -- 4. Grants, as before: nothing reachable by the public key or a signed-in
 -- login; the service role may call each (the heartbeat, the scorecard and

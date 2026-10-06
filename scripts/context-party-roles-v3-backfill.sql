@@ -8,9 +8,10 @@
 --
 -- What it fixes. Before the ladder's L1d rule (5 Oct 2026) our own crew and
 -- staff notification texts ("New job assigned:", "Job ready for crew:", "New
--- make-safe:", "New repair:" to crew; "Docs Ready: ", "SecureWorks: New
--- make-safe " and its roof report wording "SecureWorks: New roof report
--- make-safe " to the office) were stamped from the contact they went to.
+-- make-safe:", "New repair:" to crew; "Docs Ready: " and "SecureWorks: New
+-- make-safe " to the office; the roof report wording "SecureWorks: New roof
+-- report make-safe " to crew, whose roof recipients resolve to crew users)
+-- were stamped from the contact they went to.
 -- Where a crew member's or office person's GHL contact is also a job's client
 -- on file, they read as messages to a customer; where the contact was
 -- unknown, as unknown. The v3 classifier reads them as staff to crew or staff
@@ -42,13 +43,12 @@
 -- on a live job (166 on one cancelled job, 5 on one archived job, 437 on no
 -- job). All 608 are in the scorecard's crew and staff lane once the migration
 -- is applied (its lane rule reads our templates as the classifier does):
---   to crew   358 rows: 196 customer -> crew (any_job_customer), 83 unknown
+--   to crew   366 rows: 196 customer -> crew (any_job_customer), 83 unknown
 --             -> crew (no_match), 26 unknown -> crew (conflict), 53 staff ->
---             crew (a contact's later staff marker);
---   to staff  250 rows: 166 customer -> staff (job_customer, the cancelled
---             job), 76 customer -> staff (any_job_customer), and the 8 roof
---             report make-safe alerts (4 customer -> staff, 4 unknown ->
---             staff).
+--             crew (a contact's later staff marker), and the 8 roof report
+--             make-safe alerts (4 customer -> crew, 4 unknown -> crew);
+--   to staff  242 rows: 166 customer -> staff (job_customer, the cancelled
+--             job), 76 customer -> staff (any_job_customer).
 -- 113 of them carry the earlier v2 backfill's keys (left as they are). Row 2
 -- of the scorecard does not move: the crew lane is graded on rows captured
 -- since 4 Oct, and none of these is in the texts lane any more. What changes

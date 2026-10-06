@@ -19,7 +19,7 @@ BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_parties_status()',ARRAY['5f01b621c22b3cb0840bf04eb32a338f','98ca15b42682e9210ac4e6fe8d74ccd3']),
   ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)',ARRAY['2b51a7422882b6b1d77988fdd3860230','a7d601b8eaf03a5616df508e8a18b2d6']),
-  ('public.context_message_party_roles(public.business_events)',ARRAY['04f39b23d2e14868596d12efbcaffb6b','8d5bb9cfa80a631ee39497282e54f967'])
+  ('public.context_message_party_roles(public.business_events)',ARRAY['36ed4eac4ec8a1b2efd253da02add409','8d5bb9cfa80a631ee39497282e54f967'])
  ) AS t(sig,accepted) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);

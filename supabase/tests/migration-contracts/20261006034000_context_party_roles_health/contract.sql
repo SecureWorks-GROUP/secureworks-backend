@@ -16,14 +16,17 @@
 --      office templates (leading spaces trimmed, a text written with no
 --      channel included) and the roof report make-safe alert. The same words
 --      inbound, in an email or on the make-safe intake's arrival log row are
---      not a crew text, and near misses are texts. On every sample the lane
---      agrees with context_internal_text_role.
+--      not a crew text, and near misses are texts. On every outbound text
+--      sample the lane and the classifier's rule 1b (which copy its patterns)
+--      agree with context_internal_text_role, run as postgres (the helper is
+--      private to the ladder).
 --   C. The classifier, v3, through the real insert trigger (the ladder runs
 --      first): our crew and staff templates on an outbound text read staff to
 --      crew or staff (basis our_template, audience internal) when the contact
 --      is this job's customer, another job's customer, nobody we know, and on
---      a text written with no channel; so does the roof report make-safe
---      alert, like its sibling; L1d's own label is still copied first; the
+--      a text written with no channel; the roof report make-safe alert reads
+--      staff to crew (its recipients are crew); L1d's own label is still
+--      copied first; the
 --      same words inbound or in an email change nothing; an ordinary text
 --      reads as before; every row is stamped party_roles_v3; the classifier
 --      writes no ladder-owned key; and the lane rule and the classifier agree
@@ -36,6 +39,12 @@
 --      (sm1_parties_status.sql for S-M1's re-apply, v2_message_party_roles.sql
 --      for v2's) are S-M1's and v2's bodies and comments byte for byte, and
 --      loading them moves no other function.
+--   G. The service role can preview the classifier, as its grant and comment
+--      promise: in a fresh session (no plan cached by postgres), as
+--      service_role, our crew, office and roof report templates on an outbound
+--      text read as ours. Rule 1b reads the words through context_event_text,
+--      which the service role may call, never through L1d's private
+--      context_internal_text_role, which it may not (SQLSTATE 42501).
 -- A to C run in one block that names every failing fix at once, so the break
 -- proof (the down migration applied) shows every fix fail before the fix.
 \set ON_ERROR_STOP 1
@@ -85,6 +94,7 @@ BEGIN;
 DO $$
 DECLARE
  problems text[]:='{}'; miss text[]; base int; got int; s jsonb; c jsonb; j1 uuid; j2 uuid; jh uuid; e public.business_events; k text; t record;
+ ev public.business_events; want text; r jsonb; agree text[]:='{}';
 BEGIN
  -- A. The parties status block.
  BEGIN
@@ -145,15 +155,32 @@ BEGIN
   ) AS v(what,words,ch,dir,et,want) LOOP
   k:=public.context_scorecard_lane_of(t.et,'ghl-proxy',t.ch,t.dir,t.words,'{}');
   IF k IS DISTINCT FROM t.want THEN miss:=miss||format('%s must be in lane %s, got %s',t.what,coalesce(t.want,'none'),coalesce(k,'none')); END IF;
-  -- Agreement with L1d's template reading on the same row, for outbound texts.
-  IF t.dir='outbound' AND (t.ch='sms' OR t.ch IS NULL)
-   AND (k='crew_staff_texts') IS DISTINCT FROM (public.context_internal_text_role(jsonb_populate_record(NULL::public.business_events,
-     jsonb_build_object('payload',jsonb_build_object('body',t.words),'body_preview',t.words,'channel',t.ch,'direction',t.dir,'event_type',t.et)))
-     IN ('crew','staff') OR btrim(t.words) ~ '^SecureWorks: New roof report make-safe ') THEN
-   miss:=miss||format('%s: the lane must agree with context_internal_text_role',t.what);
+  -- Agreement with L1d's template reading on the same row, for outbound
+  -- texts: the lane and the classifier's rule 1b both copy its patterns (the
+  -- roof report alert, which L1d does not name, is crew).
+  IF t.dir='outbound' AND (t.ch='sms' OR t.ch IS NULL) THEN
+   ev:=jsonb_populate_record(NULL::public.business_events,jsonb_build_object('payload',jsonb_build_object('body',t.words),
+    'body_preview',t.words,'channel',t.ch,'direction',t.dir,'event_type',t.et,'metadata','{}'::jsonb));
+   want:=CASE WHEN btrim(t.words) ~ '^SecureWorks: New roof report make-safe ' THEN 'crew' ELSE public.context_internal_text_role(ev) END;
+   IF (k='crew_staff_texts') IS DISTINCT FROM (want IN ('crew','staff')) THEN
+    miss:=miss||format('%s: the lane must agree with context_internal_text_role',t.what);
+   END IF;
+   BEGIN
+    r:=public.context_message_party_roles(ev);
+    IF (r->>'basis'='our_template') IS DISTINCT FROM (want IN ('crew','staff'))
+     OR (want IN ('crew','staff') AND (r->>'sender_role' IS DISTINCT FROM 'staff' OR r->>'recipient_role' IS DISTINCT FROM want)) THEN
+     agree:=agree||format('%s must read %s, got %s',t.what,
+      CASE WHEN want IN ('crew','staff') THEN 'staff to '||want||' (our_template)' ELSE 'by its contact, not our_template' END,coalesce(r::text,'none'));
+    END IF;
+   EXCEPTION WHEN OTHERS THEN
+    agree:=agree||format('%s failed with SQLSTATE %s (%s)',t.what,SQLSTATE,SQLERRM);
+   END;
   END IF;
  END LOOP;
  IF cardinality(miss)>0 THEN problems:=problems||('lane rule not fixed: '||array_to_string(miss,', ')); END IF;
+ IF cardinality(agree)>0 THEN
+  problems:=problems||('template rule not fixed: rule 1b must agree with context_internal_text_role: '||array_to_string(agree,', '));
+ END IF;
 
  -- C. The classifier, v3.
  BEGIN
@@ -178,15 +205,15 @@ BEGIN
   e:=pg_temp.ph_ev(NULL,NULL,'client.sms_out','ph-crewcust',pg_temp.ph_words('Docs Ready: SWF-993001 pack is ready'));
   k:=pg_temp.ph_roles('an office alert with no channel',e,'staff','staff','our_template','internal');
   IF k<>'' THEN miss:=miss||k; END IF;
-  -- The roof report wording of the office make-safe alert (one template in
-  -- ops-api's makesafe_notify.ts) reads like its sibling, whoever the contact is.
+  -- The roof report wording of the office make-safe alert goes to crew (the
+  -- roof recipients resolve to crew users), whoever the contact is.
   e:=pg_temp.ph_ev('sms','outbound','client.sms_out','ph-cust2',
    pg_temp.ph_words('SecureWorks: New roof report make-safe MLB-990001: 9 Fixture Rd, Fixtureville (Fixture Builders)'));
-  k:=pg_temp.ph_roles('a roof report make-safe alert to a customer''s contact',e,'staff','staff','our_template','internal');
+  k:=pg_temp.ph_roles('a roof report make-safe alert to a customer''s contact',e,'staff','crew','our_template','internal');
   IF k<>'' THEN miss:=miss||k; END IF;
   e:=pg_temp.ph_ev('sms','outbound','client.sms_out','ph-roofnobody',
    pg_temp.ph_words('SecureWorks: New roof report make-safe MLB-990002: 8 Fixture Rd (Fixture Builders)'));
-  k:=pg_temp.ph_roles('a roof report make-safe alert to an unknown contact',e,'staff','staff','our_template','internal');
+  k:=pg_temp.ph_roles('a roof report make-safe alert to an unknown contact',e,'staff','crew','our_template','internal');
   IF k<>'' THEN miss:=miss||k; END IF;
   IF cardinality(miss)>0 THEN problems:=problems||('template rule not fixed: '||array_to_string(miss,'; ')); END IF;
 
@@ -251,7 +278,7 @@ BEGIN
  FOR p IN SELECT * FROM (VALUES
   ('public.context_parties_status()','5f01b621c22b3cb0840bf04eb32a338f','Status block parties (sites.md section 8)%Since 20261006034000%'),
   ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)','2b51a7422882b6b1d77988fdd3860230','Context scorecard (20261006032000)%Since 20261006034000%'),
-  ('public.context_message_party_roles(public.business_events)','04f39b23d2e14868596d12efbcaffb6b','Party roles v3 (20261006034000):%')
+  ('public.context_message_party_roles(public.business_events)','36ed4eac4ec8a1b2efd253da02add409','Party roles v3 (20261006034000):%')
  ) AS t(sig,md5,note) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(p.sig)) IS DISTINCT FROM p.md5 THEN
    RAISE EXCEPTION 'party roles health: % is not this migration''s body',p.sig; END IF;
@@ -339,3 +366,34 @@ BEGIN
   RAISE EXCEPTION 'party roles health: loading the pinned bodies added or dropped a function'; END IF;
 END $$;
 ROLLBACK;
+
+-- G. The service role previews the classifier. A fresh session, so no plan
+-- postgres cached earlier hides a missing grant; the rows are built in memory
+-- (no table write, no table read: each returns at rule 1b).
+\c
+SET ROLE service_role;
+DO $$
+DECLARE t record; r jsonb; miss text[]:='{}';
+BEGIN
+ FOR t IN SELECT * FROM (VALUES
+   ('a crew template','New job assigned: SWF-993001 - Fixture Client','sms','outbound','client.sms_out','crew'),
+   ('an office alert','Docs Ready: SWF-993001 pack is ready','sms','outbound','client.sms_out','staff'),
+   ('an office alert written with no channel','SecureWorks: New make-safe MLB-990001: 9 Fixture Rd',NULL,NULL,'client.sms_out','staff'),
+   ('the roof report make-safe alert','SecureWorks: New roof report make-safe MLB-990002: 8 Fixture Rd','sms','outbound','client.sms_out','crew')
+  ) AS v(what,words,ch,dir,et,want) LOOP
+  BEGIN
+   r:=public.context_message_party_roles(jsonb_populate_record(NULL::public.business_events,jsonb_build_object(
+    'id',gen_random_uuid(),'contact_id','ph-preview','channel',t.ch,'direction',t.dir,'event_type',t.et,
+    'payload',jsonb_build_object('body',t.words),'body_preview',t.words,'metadata','{}'::jsonb)));
+   IF r->>'recipient_role' IS DISTINCT FROM t.want OR r->>'basis' IS DISTINCT FROM 'our_template' OR r->>'sender_role' IS DISTINCT FROM 'staff' THEN
+    miss:=miss||format('%s must read staff to %s (our_template), got %s',t.what,t.want,coalesce(r::text,'none'));
+   END IF;
+  EXCEPTION WHEN OTHERS THEN
+   miss:=miss||format('%s failed with SQLSTATE %s (%s)',t.what,SQLSTATE,SQLERRM);
+  END;
+ END LOOP;
+ IF cardinality(miss)>0 THEN
+  RAISE EXCEPTION 'party roles health contract: service role preview not fixed: %',array_to_string(miss,'; ');
+ END IF;
+END $$;
+RESET ROLE;
