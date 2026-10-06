@@ -1,8 +1,8 @@
--- After the down migration: the twelve bodies are the ones before 20261006040000, word
+-- After the down migration: the thirteen bodies are the ones before 20261006040000, word
 -- for word (972 and 975 md5s as production has them, 20261006033000's as its migration
 -- leaves them), with their comments, flags (SECURITY DEFINER or not, STABLE, the
--- search_path setting) and grants; the five helpers are gone. A second run of the down
--- changes nothing: everything is checked again after it.
+-- search_path setting) and grants; the seven helpers are gone (the first-apply time with
+-- them). A second run of the down changes nothing: everything is checked again after it.
 CREATE TEMP TABLE story_safety_before (sig text, md5 text, cmt text, definer boolean);
 INSERT INTO story_safety_before VALUES
  ('public.context_job_record_legacy_mail(uuid[],timestamptz)', 'e2d1d12725fe4e544971f50f9fe16105', 'Job record (20261006011000): legacy inbox_events mail%', false),
@@ -17,10 +17,12 @@ INSERT INTO story_safety_before VALUES
   'Job story (20261006014000), story fixes (20261006033000): every text sort%', false),
  ('public.context_client_story(uuid,timestamptz)', 'cc4a2ce461deeb17653cd94b714bbf78', 'Job story (20261006014000), story fixes (20261006033000): parties, paying parties%', true),
  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', '617cc62989572be3e0537e65bf21284c', 'Context ledger store (20261006013000): the admissible worded evidence%', true),
- ('public.context_ledger_cite(uuid,jsonb)', '25a55a28508d0b1df609e6fe4fb00661', 'Context ledger store (20261006013000): checks one {table, id, excerpt}%', true);
+ ('public.context_ledger_cite(uuid,jsonb)', '25a55a28508d0b1df609e6fe4fb00661', 'Context ledger store (20261006013000): checks one {table, id, excerpt}%', true),
+ ('public.context_ledger_judge(uuid[])', '1cabd1e254cdb11b26c61a992b8d9744', 'Context ledger store (20261006013000): the one ledger due judgement per job%', true);
 CREATE TEMP TABLE story_safety_helpers (sig text);
 INSERT INTO story_safety_helpers VALUES ('public.context_job_record_crm_time(text,text,text,uuid)'), ('public.context_job_record_payer_role(uuid,text,text,text,uuid)'),
- ('public.context_job_record_bill_share(text,jsonb,text)'), ('public.context_job_record_value(uuid[],timestamptz)'), ('public.context_job_story_day(date,date)');
+ ('public.context_job_record_bill_share(text,jsonb,text)'), ('public.context_job_record_value(uuid[],timestamptz)'), ('public.context_job_story_day(date,date)'),
+ ('public.context_ledger_mail_rule_since()'), ('public.context_ledger_mail_copies(uuid[])');
 CREATE FUNCTION pg_temp.story_safety_check(p_when text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE x record; p record;
 BEGIN

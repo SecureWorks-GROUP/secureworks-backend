@@ -1,7 +1,8 @@
--- Rollback for 20261006040000_context_story_safety.sql: puts back the twelve bodies
+-- Rollback for 20261006040000_context_story_safety.sql: puts back the thirteen bodies
 -- and comments it replaced, word for word (the 972 record layer, story and ledger
--- store bodies, PR 975's messages and story meta, and 20261006033000's timeline,
--- loops, assembler and client story), then drops the five helpers it added.
+-- store bodies, the judge among them, PR 975's messages and story meta, and
+-- 20261006033000's timeline, loops, assembler and client story), then drops the seven
+-- helpers it added (context_ledger_mail_rule_since with its first-apply time).
 -- Signatures, owners and grants never changed, so nothing else moves. Refuses unless
 -- each live body is this migration's or already the earlier one (a re-run is a
 -- no-op): a later change to one of them must be rolled back first.
@@ -19,10 +20,11 @@ BEGIN
   ('public.context_job_record_contact(uuid[],timestamptz)', ARRAY['698b3753ab5e1ffa6441a7ef6cbb13e5', '4b8d2c65d3ce03d71f2d0e24f4401471']),
   ('public.context_job_story_facts(uuid,timestamptz)', ARRAY['98cc171009db7051a681ae3a28785518', '2a1885fc9346df80ab5f8b32707dcbda']),
   ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', 'caf562d592639feb70471b24bf3b9c2f']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', '16008f518076037db9fc9664283be0e8']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', '7137f6c04391da14762137770d24253b']),
   ('public.context_client_story(uuid,timestamptz)', ARRAY['cc4a2ce461deeb17653cd94b714bbf78', '859efd6be7f27bb9447e089965e96afc']),
-  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '2fd54a765ba8d83a450d37dd0ce2ce1e']),
-  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', '584bf77b9c4c1698341035178d561f6f'])
+  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '1ce52bd1e627492daa88c2c58378af9a']),
+  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', '584bf77b9c4c1698341035178d561f6f']),
+  ('public.context_ledger_judge(uuid[])', ARRAY['1cabd1e254cdb11b26c61a992b8d9744', '82c13ce3c0617d626deeda635e341a3f'])
  ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
   IF live IS NULL OR NOT live = ANY (x.accepted) THEN
@@ -2445,7 +2447,152 @@ END $$;
 COMMENT ON FUNCTION public.context_ledger_cite(uuid, jsonb) IS
  'Context ledger store (20261006013000): checks one {table, id, excerpt} citation for a job: an allowed table; a business_events row on this job that is ledger evidence (context_ledger_row_admissible: linked, not retracted, written as service_role, worded, a message); a call transcript counts as the customer''s only when its call (ghl:<id>) is stamped with the job''s customer; an inbox_events mail placed on the job, or from the client''s address and placed on no job when the client has no other job and the mail is from 30 days before the job on, with no business_events copy; a record row (job_documents, xero_invoices, job_assignments, job_events, email_events) on this job. A worded evidence row needs an excerpt that, quotes straightened and whitespace collapsed, is in its subject and text, and is at least 12 characters or 3 words unless it is the whole row, subject or body. close_at: when the row can close an item (a worded row: its time; a document: sent_at; an invoice: only AUTHORISED, SUBMITTED or PAID, and a payment only PAID, at its paid day (paid_at); a booking: attendance, completed_at, else started_at, else a status-only completion at the end of its booked Perth day or, while that is ahead, now; a system email (email_events): only sent, delivered or accepted with a sent time, at sent_at; an app event (job_events): its time, closing only the matter it records (context_ledger_job_event_closes on kind); a document our system emailed (job_documents, or a job_events row naming its document_id): no earlier than its first email sent, delivered or accepted with a sent time, never while every one bounced or failed; a system email closes only its own matter (context_ledger_email_closes on kind); null when it cannot); kind: an app event''s event_type or a system email''s email_type; made_at: a standing booking''s created time (it closes a booking_made item; not standing = cancelled, deleted, draft, disputed, declined). Refusal codes citation_shape, citation_table_not_allowed, citation_missing, citation_off_job, citation_not_admissible, excerpt_required, excerpt_not_verbatim, excerpt_too_long, excerpt_too_short. Service role only.';
 
+CREATE OR REPLACE FUNCTION public.context_ledger_judge(p_job_ids uuid[])
+RETURNS TABLE(job_id uuid, due boolean, kind text, reason text, priority integer, newest_evidence_at timestamptz,
+ evidence_rows integer, generation_id uuid, blocked_reason text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+ WITH s AS (
+  SELECT coalesce((SELECT st.mode FROM public.context_ledger_settings st WHERE st.id), 'off') AS mode,
+   (SELECT st.reader FROM public.context_ledger_settings st WHERE st.id) AS reader,
+   (SELECT st.job_ids FROM public.context_ledger_settings st WHERE st.id) AS job_ids,
+   public.automation_lane_enabled('extraction') AS lane,
+   public.context_ledger_backfill_open((SELECT st.backfill_from_hour FROM public.context_ledger_settings st WHERE st.id),
+    (SELECT st.backfill_to_hour FROM public.context_ledger_settings st WHERE st.id), now()) AS window_open
+ ), j AS (
+  SELECT jb.id, jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost') AS live_job,
+   coalesce(jb.metadata ->> 'do_not_schedule', '') NOT IN ('true', '1') AS schedulable
+  FROM public.jobs jb WHERE jb.id = ANY(p_job_ids)
+ ), cur AS (
+  SELECT j.id AS job_id, public.context_ledger_current_generation(j.id) AS gid FROM j
+ ), g AS (
+  SELECT c.job_id, gen.id, gen.status, gen.reader, gen.evidence_until, gen.created_at, gen.checks
+  FROM cur c JOIN public.context_ledger_generations gen ON gen.id = c.gid
+ ), cbe AS (
+  -- The read every judgement can afford: the admitted business_events rows
+  -- exactly (count and newest landed time, no text compare, no copy grouping)...
+  SELECT e.job_id, count(*)::integer AS n,
+   max(greatest(coalesce(e.context_captured_at, e.recorded_at, e.occurred_at), e.attributed_at)) AS newest
+  FROM j JOIN public.business_events e ON e.job_id = j.id
+  WHERE j.live_job AND public.context_ledger_row_admissible(e) AND coalesce(e.event_at, e.occurred_at) <= now()
+   AND greatest(coalesce(e.context_captured_at, e.recorded_at, e.occurred_at), e.attributed_at) <= now()
+  GROUP BY e.job_id
+ ), cib AS (
+  -- ...and the legacy mail that could be evidence, before its copy checks (a superset).
+  SELECT x.job_id, count(*)::integer AS n, max(x.landed) AS newest FROM (
+   SELECT j.id AS job_id, coalesce(i.processed_at, i.received_at) AS landed
+   FROM j JOIN public.inbox_events i ON i.job_id = j.id WHERE j.live_job AND i.received_at <= now()
+   UNION ALL
+   SELECT j.id, coalesce(i.processed_at, i.received_at)
+   FROM j JOIN public.jobs jb ON jb.id = j.id
+   JOIN public.inbox_events i ON lower(btrim(i.from_email)) = lower(nullif(btrim(jb.client_email), '')) AND i.job_id IS NULL
+   WHERE j.live_job AND i.received_at <= now() AND i.received_at >= jb.created_at - interval '30 days'
+    AND NOT (EXISTS (SELECT 1 FROM public.jobs o WHERE o.ghl_contact_id = nullif(btrim(jb.ghl_contact_id), '') AND o.id <> jb.id)
+    OR EXISTS (SELECT 1 FROM public.jobs o WHERE o.client_email IS NOT NULL
+     AND lower(btrim(o.client_email)) = lower(nullif(btrim(jb.client_email), '')) AND o.id <> jb.id))) x
+  WHERE x.landed <= now()
+  GROUP BY x.job_id
+ ), need AS (
+  -- The full evidence read (text, copies) only where it can change the judgement:
+  -- a reading whose newest possible evidence is past its evidence_until, or a
+  -- never-read job whose only possible evidence is legacy mail.
+  SELECT j.id FROM j LEFT JOIN g ON g.job_id = j.id LEFT JOIN cbe ON cbe.job_id = j.id LEFT JOIN cib ON cib.job_id = j.id
+  WHERE j.live_job AND CASE WHEN g.id IS NULL THEN coalesce(cbe.n, 0) = 0 AND coalesce(cib.n, 0) > 0
+                            ELSE g.evidence_until IS NULL OR greatest(cbe.newest, cib.newest) > g.evidence_until END
+ ), er AS MATERIALIZED (
+  SELECT r.job_id, r.src_id, r.at, r.landed_at, r.copy_of
+  FROM public.context_ledger_evidence_rows(ARRAY(SELECT need.id FROM need), now()) r
+ ), ev AS (
+  -- Exact where read in full; elsewhere the cheap read gives the same judgement
+  -- (newest only ever overstates, by legacy copies, and stays at or before the
+  -- reading's evidence_until; a count above zero stays above zero).
+  SELECT j.id AS job_id,
+   CASE WHEN nd.id IS NOT NULL THEN (SELECT max(r.landed_at) FROM er r WHERE r.job_id = j.id)
+        ELSE greatest(cbe.newest, cib.newest) END AS newest,
+   CASE WHEN nd.id IS NOT NULL THEN (SELECT (count(*) FILTER (WHERE r.copy_of IS NULL))::integer FROM er r WHERE r.job_id = j.id)
+        ELSE coalesce(cbe.n, 0) + coalesce(cib.n, 0) END AS n
+  FROM j LEFT JOIN need nd ON nd.id = j.id LEFT JOIN cbe ON cbe.job_id = j.id LEFT JOIN cib ON cib.job_id = j.id
+  WHERE j.live_job
+ ), moved AS (
+  -- An item of the current generation citing a business_events row that is
+  -- gone, on another job, or no longer admissible. A person-locked item is
+  -- left out: a rebuild carries it straight back, so it waits for a person
+  -- (the story says so) instead of looping.
+  SELECT DISTINCT i.job_id FROM g JOIN public.context_ledger_items i ON i.generation_id = g.id AND NOT i.person_locked
+  CROSS JOIN LATERAL jsonb_array_elements(i.opened_by || coalesce(i.closed_by, '[]'::jsonb)) c(cite)
+  LEFT JOIN public.business_events b ON c.cite ->> 'table' = 'business_events'
+   AND b.id = CASE WHEN c.cite ->> 'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (c.cite ->> 'id')::uuid END
+  WHERE c.cite ->> 'table' = 'business_events'
+   AND (b.id IS NULL OR b.job_id IS DISTINCT FROM i.job_id OR NOT public.context_event_source_admissible(b))
+ ), answered AS (
+  -- A newer passing reading by the current reader already answers a rebuild of
+  -- the live one (it waits for promotion); one that failed its checks answers
+  -- it only while the job backs off.
+  SELECT DISTINCT g.job_id FROM g CROSS JOIN s
+  JOIN public.context_ledger_generations n ON n.job_id = g.job_id AND n.status = 'shadow' AND n.reader = s.reader
+   AND n.created_at > g.created_at AND public.context_ledger_checks_pass(n.checks)
+  WHERE g.status = 'live'
+ ), fnew AS (
+  -- Where the unread evidence starts (the earliest row that landed after the reading).
+  SELECT DISTINCT ON (r.job_id) r.job_id, r.at, r.src_id
+  FROM er r JOIN g ON g.job_id = r.job_id
+  WHERE r.copy_of IS NULL AND g.evidence_until IS NOT NULL AND r.landed_at > g.evidence_until
+  ORDER BY r.job_id, r.at, r.src_id
+ ), late AS (
+  -- How much already-read evidence follows it (an update packet carries all of it).
+  SELECT f.job_id, f.at AS first_new_at,
+   (count(*) FILTER (WHERE r.copy_of IS NULL AND r.landed_at <= g.evidence_until AND (r.at, r.src_id) > (f.at, f.src_id)))::integer AS read_after
+  FROM fnew f JOIN g ON g.job_id = f.job_id JOIN er r ON r.job_id = f.job_id
+  GROUP BY f.job_id, f.at
+ ), fail AS (
+  SELECT f.* FROM public.context_ledger_failures(ARRAY(SELECT j.id FROM j)) f
+ ), busy AS (
+  SELECT j.id AS job_id,
+   EXISTS (SELECT 1 FROM public.context_ledger_generations bg JOIN public.context_extraction_runs br ON br.id = bg.run_id
+    WHERE bg.job_id = j.id AND bg.status = 'building' AND br.status = 'running' AND br.lease_expires_at > now()) AS building_live,
+   EXISTS (SELECT 1 FROM public.context_ledger_generations bg LEFT JOIN public.context_extraction_runs br ON br.id = bg.run_id
+    WHERE bg.job_id = j.id AND bg.status = 'building'
+     AND coalesce(br.lease_expires_at, br.finished_at, bg.updated_at) > now() - interval '2 hours'
+     AND NOT (br.status = 'running' AND br.lease_expires_at > now())) AS building_lapsed_recent,
+   EXISTS (SELECT 1 FROM public.context_extraction_runs r WHERE r.job_id = j.id AND r.phase = 'ledger'
+    AND r.status = 'running' AND r.lease_expires_at > now()) AS run_live
+  FROM j
+ ), judged AS (
+  SELECT j.id AS job_id, ev.newest, coalesce(ev.n, 0) AS n, g.id AS gid,
+   CASE WHEN g.id IS NULL THEN 'never_read'
+    WHEN g.status = 'shadow' AND NOT public.context_ledger_checks_pass(g.checks) THEN 'checks_failed'
+    WHEN m.job_id IS NOT NULL AND a.job_id IS NULL THEN 'citation_moved'
+    WHEN g.reader IS DISTINCT FROM s.reader AND a.job_id IS NULL THEN 'reader_changed'
+    WHEN g.evidence_until IS NULL OR g.evidence_until < ev.newest THEN
+     CASE WHEN lt.first_new_at < g.evidence_until - interval '14 days' OR lt.read_after > 150 THEN 'late_evidence'
+      ELSE 'new_evidence' END END AS reason,
+   CASE WHEN s.mode = 'off' THEN 'ledger_off' WHEN NOT s.lane THEN 'lane_off'
+    WHEN s.job_ids IS NOT NULL AND NOT (j.id = ANY(s.job_ids)) THEN 'not_in_rollout' WHEN NOT j.live_job THEN 'not_live'
+    WHEN NOT j.schedulable THEN 'holding_job' WHEN coalesce(ev.n, 0) = 0 THEN 'no_evidence'
+    WHEN b.building_live OR b.run_live THEN 'busy'
+    WHEN f.needs_person THEN 'needs_person'
+    WHEN f.backoff_until > now() OR b.building_lapsed_recent THEN 'backoff' END AS blocked
+  FROM j CROSS JOIN s LEFT JOIN ev ON ev.job_id = j.id LEFT JOIN g ON g.job_id = j.id
+  LEFT JOIN moved m ON m.job_id = j.id LEFT JOIN answered a ON a.job_id = j.id LEFT JOIN late lt ON lt.job_id = j.id
+  LEFT JOIN fail f ON f.job_id = j.id LEFT JOIN busy b ON b.job_id = j.id
+ )
+ SELECT d.job_id, d.blk IS NULL AND d.reason IS NOT NULL,
+  CASE WHEN d.reason IS NULL THEN NULL WHEN d.reason = 'never_read' THEN 'backfill' WHEN d.reason = 'new_evidence' THEN 'update'
+   ELSE 'rebuild' END,
+  d.reason,
+  CASE d.reason WHEN 'citation_moved' THEN 1 WHEN 'new_evidence' THEN 1 WHEN 'late_evidence' THEN 1 WHEN 'never_read' THEN 2
+   WHEN 'reader_changed' THEN 3 WHEN 'checks_failed' THEN 3 END,
+  d.newest, d.n, d.gid, d.blk
+ FROM (  -- backfills and rebuilds wait for the backfill hours; an update is never held
+  SELECT d0.*, coalesce(d0.blocked, CASE WHEN NOT s.window_open AND d0.reason IS NOT NULL AND d0.reason <> 'new_evidence'
+                                         THEN 'outside_window' END) AS blk
+  FROM judged d0 CROSS JOIN s) d
+$$;
+COMMENT ON FUNCTION public.context_ledger_judge(uuid[]) IS
+ 'Context ledger store (20261006013000): the one ledger due judgement per job (the full evidence read only for a job whose reading may have newer evidence or whose only possible evidence is legacy mail; elsewhere a count and newest landed time of the admitted rows decide the same; evidence_rows is then that count): kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours), outside_window (a backfill or rebuild outside the settings backfill hours; an update is never held). A person-locked item is never a moved citation (a rebuild would carry it back). Service role only.';
+
 -- The helpers this migration added (nothing else reads them once the bodies above are back).
+DROP FUNCTION IF EXISTS public.context_ledger_mail_copies(uuid[]);
+DROP FUNCTION IF EXISTS public.context_ledger_mail_rule_since();
 DROP FUNCTION IF EXISTS public.context_job_record_crm_time(text, text, text, uuid);
 DROP FUNCTION IF EXISTS public.context_job_record_payer_role(uuid, text, text, text, uuid);
 DROP FUNCTION IF EXISTS public.context_job_record_bill_share(text, jsonb, text);

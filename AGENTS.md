@@ -693,7 +693,11 @@ the 972 contracts and the story's re-apply guard read it. A timeline line
 citing `job_events` has the event type as its `state` when the ledger store
 lets that type close a matter (`not_delivered` when it names a document nobody
 received), so a reader applies `context_ledger_job_event_closes` to the state,
-never to the words.
+never to the words. An old-inbox mail kept on a job because its saved copy sits
+elsewhere joined that job's evidence no earlier than `20261006040000`'s first
+apply and its copies' landing (`context_ledger_mail_copies`): take its time from
+`context_ledger_evidence_rows.landed_at`, never `processed_at`, or a reading
+built before then reads as having read it.
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
