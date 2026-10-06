@@ -594,6 +594,19 @@ import {
   type WeeklyInvoiceLine,
   type WeeklyWorkOrderInvoice,
 } from './trade_invoice_weekly.ts'
+import {
+  approveJobWorkOrder,
+  backfillJobWorkOrders,
+  createJobWorkOrder,
+  JobWorkOrderError,
+  listJobWorkOrders,
+  readJobWorkOrder,
+  reportWorkOrderVariation,
+  resolveWorkOrderApprover,
+  sendOutlookVariationEmail,
+  tradeJobWorkOrderRead,
+  updateJobWorkOrderDraft,
+} from './job_work_orders.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -4227,6 +4240,11 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // vertical-manager, or ownership authorization in their handlers.
   'trade_calendar',
   'my_work_orders',
+  // Job work orders (job_work_orders.ts): the trade read of the job's approved
+  // work order (no prices) and the variation report on the trade's own
+  // invoice. Both run authTrade + assertAssignedOrMakesafeAccess in the route.
+  'my_job_work_order',
+  'report_work_order_variation',
   'my_jobs',
   'trade_job_detail',
   'trade_quote_extract',
@@ -8038,7 +8056,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           orgId: DEFAULT_ORG_ID,
         }))
 
-      case 'list_work_orders': return json(await listWorkOrders(client, url.searchParams))
+      case 'list_work_orders':
+        if (url.searchParams.get('kind') === 'job') {
+          return json(await runJobWorkOrder(() => listJobWorkOrders(client, url.searchParams)))
+        }
+        return json(await listWorkOrders(client, url.searchParams))
+      case 'job_work_order':
+        return json(await runJobWorkOrder(() => readJobWorkOrder(client, {
+          jobId: url.searchParams.get('job_id') || url.searchParams.get('jobId'),
+          workOrderId: url.searchParams.get('work_order_id') || url.searchParams.get('id'),
+        })))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
       case 'ops_targets': return json(await opsTargets(client))
@@ -8358,9 +8385,39 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'update_po': return json(await updatePO(client, body))
       case 'push_po_to_xero': return json(await pushPOToXero(client, body))
       case 'email_po': return json(await emailPO(client, body))
-      case 'create_work_order': return json(await createWorkOrder(client, body))
-      case 'update_work_order': return json(await updateWorkOrder(client, body))
-      case 'send_work_order': return json(await sendWorkOrder(client, body))
+      case 'create_work_order':
+        if (body?.kind === 'job') return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
+        return json(await createWorkOrder(client, body))
+      case 'update_work_order':
+        if (await workOrderIsJobKind(client, body?.id)) {
+          return json(await runJobWorkOrder(() => updateJobWorkOrderDraft(client, body)))
+        }
+        return json(await updateWorkOrder(client, body))
+      case 'send_work_order':
+        if (await workOrderIsJobKind(client, body?.id || body?.work_order_id)) {
+          throw new ApiError('A job work order is approved, not sent. Use approve_work_order.', 409, {
+            error: 'A job work order is approved, not sent. Use approve_work_order.',
+            code: 'job_work_order_not_sendable',
+          })
+        }
+        return json(await sendWorkOrder(client, body))
+      // Shaun only: work_order_settings.approver_user_ids, checked here and
+      // again by the database. The approver is the signed-in user, or on a
+      // server-secret call the trusted x-sw-actor `user:<id>`.
+      case 'approve_work_order':
+        return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
+      // Dry run unless apply:true AND feature flag job_work_order_backfill_v1.
+      case 'backfill_job_work_orders': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: backfill_job_work_orders requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
+      }
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
       // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
@@ -10428,6 +10485,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return await handleTradeCalendarAction(req, client)
       case 'my_work_orders':
         return await handleTradeWorkOrdersAction(req, client)
+      case 'my_job_work_order':
+      case 'report_work_order_variation':
+        return await handleTradeJobWorkOrderAction(req, client, action, body)
       case 'my_jobs':
       case 'trade_job_detail':
       case 'trade_quote_extract':
@@ -10695,6 +10755,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
               .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
               .eq('id', work_order_id)
+              .neq('kind', 'job')
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
               .single()
@@ -14595,11 +14656,15 @@ export async function _resolveWeeklyWorkOrderInvoice(
   }
 
   const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
-    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+    .select('id, org_id, job_id, wo_number, kind, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
     .eq('org_id', tradeUser.orgId)
     .eq('jobs.org_id', tradeUser.orgId)
     .in('id', workOrderIds)
   if (workOrderErr) throw new Error('Failed to load weekly work orders: ' + workOrderErr.message)
+  // A job work order (job_work_orders.ts) is never a crew-pay invoice source.
+  if ((workOrders || []).some((row: any) => row.kind === 'job')) {
+    throw new ApiError('A job work order cannot be invoiced as a weekly job block', 422)
+  }
   if ((workOrders || []).length !== workOrderIds.length) {
     throw new ApiError('One or more weekly work orders were not found in your business', 404)
   }
@@ -14858,6 +14923,60 @@ async function readWorkOrderChargeRows(
   return rows
 }
 
+// ── Job work orders (job_work_orders.ts) ──
+// The module throws JobWorkOrderError; the serve() handler answers ApiError.
+async function runJobWorkOrder<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    if (e instanceof JobWorkOrderError) {
+      throw new ApiError(e.message, e.status, { error: e.message, code: e.code })
+    }
+    throw e
+  }
+}
+
+// Routes update/send by kind: a job work order never takes the crew paths.
+async function workOrderIsJobKind(client: any, id: unknown): Promise<boolean> {
+  if (typeof id !== 'string' || !id) return false
+  const { data, error } = await client.from('work_orders').select('kind').eq('id', id).maybeSingle()
+  if (error) throw new ApiError('The work order could not be read', 500)
+  return data?.kind === 'job'
+}
+
+// Trade doors for the job work order. Access is the ONE per-job tier decision
+// (assertAssignedOrMakesafeAccess); the variation also requires the caller's
+// own invoice, checked inside reportWorkOrderVariation.
+export async function handleTradeJobWorkOrderAction(
+  req: Request,
+  client: any,
+  action: string,
+  body: any,
+): Promise<Response> {
+  const tradeUser = await authTrade(req, client)
+  const access: TradeJobAccessContext = { orgId: tradeUser.orgId, managedVerticals: tradeUser.managedVerticals }
+  if (action === 'my_job_work_order') {
+    const jobId = new URL(req.url).searchParams.get('job_id') || ''
+    if (!jobId) throw new ApiError('job_id required', 400)
+    await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
+    return json(await runJobWorkOrder(() => tradeJobWorkOrderRead(client, jobId, tradeUser.id, {
+      scopeItems: (items) => redactTradeWorkOrderScopeItems(items) || [],
+      text: (value, key) => sanitizeTradeAllocatedStringLeaf(value, key),
+    })))
+  }
+  if (req.method !== 'POST') throw new ApiError('POST required', 405)
+  const jobId = String(body?.job_id || '')
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
+  const { data: me } = await client.from('users').select('name').eq('id', tradeUser.id).maybeSingle()
+  return json(await runJobWorkOrder(() => reportWorkOrderVariation(
+    client,
+    body,
+    { id: tradeUser.id, orgId: tradeUser.orgId, name: me?.name ?? null },
+    { sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY) },
+  )))
+}
+
 // Actual authenticated boundary for the Trade work-order selector. Authorization
 // comes exclusively from the JWT profile, matching trade_calendar and my_jobs.
 export async function handleTradeWorkOrdersAction(req: Request, client: any): Promise<Response> {
@@ -14939,6 +15058,7 @@ export async function tradeWorkOrders(
     let query = client
       .from('work_orders')
       .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+      .neq('kind', 'job')
       .eq('org_id', viewer.orgId)
       .eq('jobs.org_id', viewer.orgId)
       .not('status', 'in', '("cancelled","deleted")')
@@ -15572,7 +15692,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
-        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled')),
+        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').or('kind.eq.crew,status.eq.approved')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
@@ -16014,6 +16134,25 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     return rest
   })
 
+  // The job's own work order (job_work_orders.ts): additive, fencing and
+  // patio only. A failed read never fails the job detail.
+  let jobWorkOrder: any = null
+  if (job?.type === 'fencing' || job?.type === 'patio') {
+    try {
+      const jwo = await readJobWorkOrder(client, { jobId })
+      jobWorkOrder = {
+        work_order: jwo.work_order,
+        live_work_order_id: jwo.live_work_order?.id ?? null,
+        draft_work_order_id: jwo.draft_work_order?.id ?? null,
+        figures: jwo.figures,
+        invoice_count: jwo.invoices.length,
+        variation_count: jwo.variations.length,
+      }
+    } catch (e) {
+      console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
+      jobWorkOrder = { unreadable: true }
+    }
+  }
   return {
     job: jobLite,
     job_identity: _projectMakesafeJobIdentity({
@@ -16031,6 +16170,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     media: mediaRes.data || [],
     purchase_orders: posLite,
     work_orders: woRes.data || [],
+    job_work_order: jobWorkOrder,
     xero_project: xeroRes.data,
     invoices: invoicesLite,
     job_contacts: contactsRes.data || [],
@@ -34340,9 +34480,12 @@ async function updateJobStatus(client: any, body: any) {
     (async () => {
       try {
         // 1. Approve draft work orders for this job
+        // Crew work orders only: a job work order is approved by Shaun alone
+        // (job_work_orders.ts), never by job acceptance.
         const { data: draftWOs } = await client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
+          .neq('kind', 'job')
           .eq('status', 'draft')
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {

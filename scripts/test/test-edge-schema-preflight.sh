@@ -861,7 +861,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # quote builder actions (quote_builder_*).
                       ("20261009120000", "quote_builder_versions"),
                       # deterministic intake: the ambrose adapter's case inserts.
-                      ("20261012043000", "makesafe_intake_cases_admit_ambrose_adapter")]:
+                      ("20261012043000", "makesafe_intake_cases_admit_ambrose_adapter"),
+                      # Job work orders: one sealed work order per fencing
+                      # and patio job (job_work_orders.ts).
+                      ("20261006120000", "job_work_orders")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
