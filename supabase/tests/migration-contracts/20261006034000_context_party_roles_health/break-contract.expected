@@ -1,0 +1,3 @@
+parties status not fixed: the block failed with SQLSTATE 22023
+lane rule not fixed: L1d's recipient_role other must be a text
+template rule not fixed: a crew template to the job's customer contact must read staff to crew

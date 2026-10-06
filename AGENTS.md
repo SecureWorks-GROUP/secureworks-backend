@@ -613,6 +613,21 @@ Every threshold, including each capture lane's quiet limit in Perth working
 minutes and the 3-run history stall rule, lives only in
 `context_scorecard_policy()`; change it there by migration, never in a caller.
 A row SQL cannot measure stays red with the reason; never make it green in code.
+Its crew and staff lane is a row marked `metadata.recipient_role` crew or staff
+or one of our crew templates, never L1d's `other` (`20261006034000`).
+
+Who-to-whom is `metadata.party_roles`, stamped only by the trigger
+`context_party_roles_business_event` from `context_message_party_roles(e)`
+(v1 `20261005200000`, v2 `20261006000000`, v3 `20261006034000`); it never
+places a row or writes a ladder-owned key. Rule order: L1d's label or a writer
+marker (copied), then our own crew and staff templates on an outbound text
+(`context_internal_text_role`, basis `our_template`), then the v1 and v2 key
+rules. A later classifier replaces the whole body, bumps `version`, widens the
+version and comment checks in the v1 and v2 contracts and rolls itself back
+before v2's re-apply, as v3 did. Stored rows change only through a hand-run
+re-stamp: `scripts/context-party-roles-v3-backfill.sql` is the pattern (a
+metadata-only write so the trigger re-stamps; the undo restores the saved stamp
+with the trigger off).
 
 A new pg_cron job that writes evidence is scheduled already gated
 (`... WHERE public.automation_lane_enabled('<lane>')`) and added to

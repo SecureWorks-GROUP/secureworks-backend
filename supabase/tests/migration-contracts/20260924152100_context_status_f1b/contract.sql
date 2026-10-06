@@ -419,9 +419,12 @@ BEGIN
   ('public.context_in_business_hours(timestamptz)','70164e9d1d6aa636c4e9d54357396f16'),
   ('public.context_booking_capture_status()','155104bfb08b8b3c2f98bdec089d4ee4'),
   -- The F1 stub, or sites S-M1's block (20261002120000, checked by its own
-  -- contract) once that later migration is in the stack.
+  -- contract) once that later migration is in the stack, or the party roles
+  -- health fix of that block (20261006034000, checked by its own contract).
   ('public.context_parties_status()',CASE WHEN to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL
-    THEN '155104bfb08b8b3c2f98bdec089d4ee4' ELSE '98ca15b42682e9210ac4e6fe8d74ccd3' END)) AS t(sig,md5) LOOP
+    THEN '155104bfb08b8b3c2f98bdec089d4ee4'
+    WHEN coalesce(obj_description(to_regprocedure('public.context_parties_status()'),'pg_proc'),'') LIKE '%Since 20261006034000%'
+    THEN '5f01b621c22b3cb0840bf04eb32a338f' ELSE '98ca15b42682e9210ac4e6fe8d74ccd3' END)) AS t(sig,md5) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(x.sig)) IS DISTINCT FROM x.md5 THEN RAISE EXCEPTION 'f1b moved %',x.sig; END IF;
  END LOOP;
  IF to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL
