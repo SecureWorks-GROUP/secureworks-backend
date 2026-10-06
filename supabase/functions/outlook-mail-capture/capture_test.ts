@@ -62,8 +62,12 @@ interface World {
   legacy: Array<{ id: string; from: string; receivedAt: string }>;
   legacyFails?: boolean;
   legacyCalls: Array<{ from: string; receivedAt: string; subject: string }>;
+  /** Called before each conversation list page; may throw. */
+  onConversationList?: () => void;
   attachmentEvents: Array<string | null>;
   listCalls: number;
+  conversationPages: number;
+  postReads: string[];
   now: number;
   tick: number;
 }
@@ -89,6 +93,8 @@ function world(partial: Partial<World> = {}): World {
     legacyCalls: [],
     attachmentEvents: [],
     listCalls: 0,
+    conversationPages: 0,
+    postReads: [],
     now: NOW,
     tick: 0,
     ...partial,
@@ -140,9 +146,9 @@ function deps(w: World): CaptureDeps {
         status: "running",
         started_at: new Date(w.now + w.runs.length).toISOString(),
         updated_at: new Date(w.now).toISOString(),
-        window_to: null,
+        window_to: typeof run.window_to === "string" ? run.window_to : null,
         window_end_id: null,
-        cursor: null,
+        cursor: (run.cursor as Record<string, unknown> | undefined) ?? null,
       });
       return id;
     },
@@ -206,7 +212,11 @@ function deps(w: World): CaptureDeps {
         headers: {},
       }),
       resolveGroupId: async (mail) => w.groups[mail]?.id ?? null,
-      listGroupConversations: async (groupId) => {
+      // Graph's order (lastDeliveredDateTime desc), 25 a page, the next
+      // link an offset into the list as it stands when the page is read.
+      listGroupConversations: async (groupId, next) => {
+        w.conversationPages++;
+        w.onConversationList?.();
         const g = Object.values(w.groups).find((x) => x.id === groupId)!;
         const convs = [...new Set(g.posts.map((p) => p.conv))].map((id) => ({
           id,
@@ -214,9 +224,16 @@ function deps(w: World): CaptureDeps {
             p.post.receivedAt!
           ).sort().at(-1)!,
         })).sort((a, b) =>
-          b.lastDeliveredDateTime.localeCompare(a.lastDeliveredDateTime)
+          b.lastDeliveredDateTime.localeCompare(a.lastDeliveredDateTime) ||
+          (a.id < b.id ? -1 : 1)
         );
-        return { items: convs, next: null };
+        const offset = next ? Number(next.split("#")[1]) : 0;
+        return {
+          items: convs.slice(offset, offset + 25),
+          next: offset + 25 < convs.length
+            ? `https://graph.microsoft.com/v1.0/conversations#${offset + 25}`
+            : null,
+        };
       },
       listGroupThreads: async (groupId, conv) => {
         const g = Object.values(w.groups).find((x) => x.id === groupId)!;
@@ -227,6 +244,7 @@ function deps(w: World): CaptureDeps {
         ].map((id) => ({ id, topic: "Topic" }));
       },
       listGroupPosts: async (groupId, thread) => {
+        w.postReads.push(thread);
         const g = Object.values(w.groups).find((x) => x.id === groupId)!;
         return g.posts.filter((p) => p.thread === thread).map((p) => p.post);
       },
@@ -803,4 +821,253 @@ Deno.test("history skips old-path copies too, so a 60-day load adds no duplicate
   assertEquals(w.captured.map((c) => c.provider_message_id), [
     "email:em2-direct-0001@mail.example.com",
   ]);
+});
+
+// W7 (6 Oct 2026): the fencing group's history load re-read the same newest
+// 400 conversations every 5 minutes for a day. A group is listed newest
+// conversation first, the run stopped at 400 conversations (or the time
+// budget), saved no cursor (window_to null) and the next run started the
+// window again. These tests hold the walk that replaced it.
+
+const FENCING: SourceRow = {
+  email: "fencing@secureworkswa.com.au",
+  source_key: "fencing",
+  kind: "group",
+  scope_label: "fencing",
+  owner_privacy: false,
+};
+const FENCING_HISTORY = {
+  mode: "history" as const,
+  source: "fencing",
+  from: "2026-08-07T01:32:00.000Z",
+  to: "2026-10-01T00:00:00.000Z",
+};
+
+/** A group of `n` conversations, each with `perConv` posts from a live job's client, conversation i ending 2 hours before i-1. */
+function fencingGroup(n: number, perConv = 1) {
+  const posts: Array<{ conv: string; thread: string; post: OutlookMailItem }> =
+    [];
+  const top = Date.parse("2026-09-30T00:00:00Z");
+  for (let i = 0; i < n; i++) {
+    const conv = `C${String(i).padStart(3, "0")}`;
+    for (let k = 0; k < perConv; k++) {
+      const at = new Date(top - i * 7_200_000 - (perConv - 1 - k) * 60_000)
+        .toISOString();
+      posts.push({
+        conv,
+        thread: `T-${conv}`,
+        post: {
+          graphId: `P-${conv}-${k}`,
+          internetMessageId: `<${conv}-${k}@mail.example.org>`,
+          conversationId: conv,
+          subject: "Fence quote",
+          from: "sam.sample@example.net",
+          to: [],
+          receivedAt: at,
+          bodyText: `Post ${conv} ${k}`,
+          folderKind: "group",
+        },
+      });
+    }
+  }
+  return { id: "GRP-FENCING", posts };
+}
+
+function historyRuns(w: World) {
+  return w.runs.filter((r) => r.source === "outlook_history_fencing");
+}
+
+function walkOf(run: RunRow) {
+  return (run.cursor as Record<string, unknown>).group as Record<
+    string,
+    unknown
+  >;
+}
+
+Deno.test("W7: a group history larger than one run resumes where the last run stopped; nothing is read twice", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(450) },
+  });
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  const first = historyRuns(w)[0];
+  assertEquals(first.status, "partial");
+  assertEquals(first.counts!.conversations_read, 400);
+  assertEquals(first.counts!.progressed, 800); // 400 posts and 400 conversations
+  // The cursor is saved: the run names where it stopped.
+  assert(first.window_to !== null);
+  assertEquals(walkOf(first).before, first.window_to);
+  assertEquals(walkOf(first).before_ids, ["h:C399"]);
+
+  w.now += 5 * 60_000;
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  const second = historyRuns(w)[1];
+  assertEquals(second.status, "succeeded");
+  assertEquals(second.counts!.conversations_skipped, 400);
+  assertEquals(second.counts!.conversations_read, 50);
+  // Every post of the window saved once; the second run read only what was left.
+  assertEquals(w.keys.size, 450);
+  assertEquals(w.captured.length, 450);
+  assertEquals(new Set(w.postReads).size, 450);
+  assertEquals(w.postReads.length, 450);
+});
+
+Deno.test("W7: the old restart loop cannot recur: runs cut by the time budget each move on until the window is done", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(60, 3) },
+    tick: 1_000,
+  });
+  let runs = 0;
+  while (runs < 40) {
+    runs++;
+    await runOutlookCapture(deps(w), FENCING_HISTORY);
+    const run = historyRuns(w).at(-1)!;
+    assert(run.counts!.progressed > 0, `run ${runs} made no progress`);
+    if (run.status === "succeeded") break;
+    assertEquals(run.status, "partial");
+    assert(run.window_to !== null, `run ${runs} saved no cursor`);
+    w.now += 5 * 60_000;
+  }
+  assert(runs > 2, "the budget should cut the load into several runs");
+  assertEquals(historyRuns(w).at(-1)!.status, "succeeded");
+  assertEquals(w.keys.size, 180);
+  assertEquals(w.captured.length, 180); // no post saved twice
+});
+
+Deno.test("W7: a conversation cut part way resumes after its last saved post", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(1, 40) },
+    tick: 5_000,
+  });
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  const first = historyRuns(w)[0];
+  assertEquals(first.status, "partial");
+  const saved = first.counts!.inserted;
+  assert(saved > 0 && saved < 40);
+  assertEquals(walkOf(first).conv, "h:C000");
+  assertEquals(walkOf(first).before, null);
+  for (
+    let i = 0;
+    i < 20 && historyRuns(w).at(-1)!.status !== "succeeded";
+    i++
+  ) {
+    w.now += 5 * 60_000;
+    await runOutlookCapture(deps(w), FENCING_HISTORY);
+    assert(historyRuns(w).at(-1)!.counts!.progressed > 0);
+  }
+  assertEquals(historyRuns(w).at(-1)!.status, "succeeded");
+  assertEquals(w.keys.size, 40);
+  assertEquals(w.captured.length, 40);
+});
+
+Deno.test("W7: a conversation that gets new mail during the load is still read (top-up pass)", async () => {
+  const group = fencingGroup(450);
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": group },
+  });
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  // C430 is below the cursor, not read yet; a reply now moves it to the top.
+  group.posts.push({
+    conv: "C430",
+    thread: "T-C430",
+    post: {
+      ...group.posts.find((p) => p.conv === "C430")!.post,
+      graphId: "P-C430-reply",
+      internetMessageId: "<C430-reply@mail.example.org>",
+      receivedAt: new Date(w.now + 60_000).toISOString(),
+    },
+  });
+  w.now += 5 * 60_000;
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  const second = historyRuns(w)[1];
+  assertEquals(second.status, "succeeded");
+  assertEquals(walkOf(second).passes, 1);
+  // Its post inside the window is saved; the reply after the window is the poll's.
+  assert(w.keys.has("email:c430-0@mail.example.org"));
+  assert(!w.keys.has("email:c430-reply@mail.example.org"));
+  assertEquals(w.keys.size, 450);
+});
+
+Deno.test("W7: a window whose start the plan moved forward keeps its progress", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(450) },
+  });
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  w.now += 5 * 60_000;
+  await runOutlookCapture(deps(w), {
+    ...FENCING_HISTORY,
+    from: "2026-08-10T00:00:00.000Z",
+  });
+  const second = historyRuns(w)[1];
+  assertEquals(second.status, "succeeded");
+  assertEquals(second.counts!.conversations_skipped, 400);
+  assertEquals(w.captured.length, 450);
+});
+
+Deno.test("W7: a run that fails or is abandoned hands its cursor on; the next run does not start again", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(450) },
+  });
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  const reached = walkOf(historyRuns(w)[0]);
+
+  // A Graph fault on the next run: failed, no progress, the cursor kept.
+  w.now += 5 * 60_000;
+  w.onConversationList = () => {
+    // The running row already carries the cursor it started from.
+    assertEquals(walkOf(historyRuns(w).at(-1)!), reached);
+    throw new GraphReadError("graph_503", 503);
+  };
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  const failed = historyRuns(w)[1];
+  assertEquals(failed.status, "failed");
+  assertEquals(failed.error_code, "graph_503");
+  assertEquals(failed.counts!.progressed, 0);
+  assertEquals(walkOf(failed), reached);
+  assertEquals(failed.window_to, historyRuns(w)[0].window_to);
+
+  // A worker that stopped mid-run: closed as abandoned, its cursor kept.
+  w.onConversationList = undefined;
+  w.runs.push({
+    id: "run-stuck",
+    source: "outlook_history_fencing",
+    status: "running",
+    started_at: new Date(w.now + 1).toISOString(),
+    updated_at: new Date(w.now + 1).toISOString(),
+    window_to: failed.window_to,
+    window_end_id: null,
+    cursor: failed.cursor,
+  });
+  w.now += 15 * 60_000;
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  assertEquals(
+    w.runs.find((r) => r.id === "run-stuck")!.error_code,
+    "abandoned",
+  );
+  const last = historyRuns(w).at(-1)!;
+  assertEquals(last.status, "succeeded");
+  assertEquals(last.counts!.conversations_read, 50);
+  assertEquals(w.captured.length, 450);
+});
+
+Deno.test("W7: a long history run saves its cursor on its running row as it goes", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(300) },
+    tick: 1_000,
+  });
+  const seen: Array<string | null> = [];
+  w.onConversationList = () => {
+    const r = historyRuns(w).at(-1)!;
+    if (r.status === "running") seen.push(r.window_to);
+  };
+  await runOutlookCapture(deps(w), FENCING_HISTORY);
+  assertEquals(historyRuns(w)[0].status, "partial");
+  // The second page was listed after checkpoints moved the running row's cursor.
+  assert(seen.length >= 2 && seen.at(-1) !== null);
 });

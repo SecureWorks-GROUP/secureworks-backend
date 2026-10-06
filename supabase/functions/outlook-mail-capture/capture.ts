@@ -25,6 +25,21 @@
 // re-reading the same page. A history run that was cut short resumes the
 // same way. The cursor never moves past an email that failed to save.
 //
+// Group history (W7, 6 Oct 2026): a group is listed by conversation, newest
+// first, so a post-time cursor cannot say where a cut run stopped; the fencing
+// group re-read its newest 400 conversations every 5 minutes for a day. A
+// group history run walks the conversations instead and records the walk in
+// cursor.group (see GroupWalk): every run starts where the last one stopped,
+// a conversation cut part way resumes after its last saved post, and the
+// window is finished by a pass that sees every conversation in one run. Every
+// history run carries its cursor from the start (on its running row, saved
+// again every 15 seconds), so a failed or abandoned run hands it on, and a
+// run that has not moved yet gets a short grace past the time budget to move
+// once. counts.progressed says how far a run moved; the plan's tick
+// (trigger_context_email_history, 20261006030000) sets a source aside when
+// three calls in a row move nothing. A history window is named by its end
+// (history_to): the plan may move its start forward without losing progress.
+//
 // Old-path copies (gap plan B-1): until the reader's schedule is on, the old
 // monitor-inbox path saved inbound inbox mail under its own keys (graph:<id>,
 // graph-group:<id>), which never collide with this reader's email:<id> key.
@@ -80,10 +95,83 @@ export const POLICY = {
   historyMaxDays: 60,
   groupMaxConversations: { poll: 25, sweep: 200, history: 400 },
   groupMaxPosts: { poll: 200, sweep: 2000, history: 2000 },
+  /** Conversation list pages one group history run may page through (25 a page). */
+  groupHistoryMaxPages: 400,
   budgetMs: 120_000,
+  /** A history run that has not yet moved its cursor may run this much past the budget to move it once. */
+  progressGraceMs: 20_000,
+  /** A history run saves its cursor on its running row at most this often. */
+  checkpointMs: 15_000,
   runningStaleMs: 10 * 60_000,
   idsAtEndMax: 25,
 };
+
+/**
+ * The group history walk (W7, 6 Oct 2026). A group is listed as conversations,
+ * newest first by lastDeliveredDateTime, never by post time, so a post-time
+ * cursor cannot say where a cut run stopped. The walk records it instead:
+ * conversations last delivered after `before` (and those exactly at it whose
+ * id hash is in `before_ids`) are done in this pass; a conversation cut part
+ * way is `conv`, with its last post done (`conv_after`, `conv_ids`). A pass
+ * ends at `floor` (the window start). Conversations that received mail after
+ * the pass began (`pass_started`) may have moved above `before` unread, so a
+ * pass that took more than one run is followed by a top-up pass over just
+ * those; a pass that starts and ends in one run finishes the window.
+ * Every hash is deps.hash of a Graph id.
+ */
+export interface GroupWalk {
+  floor: string;
+  pass_started: string;
+  before: string | null;
+  before_ids: string[];
+  conv: string | null;
+  conv_after: string | null;
+  conv_ids: string[];
+  passes: number;
+}
+
+function strList(v: unknown): string[] {
+  return Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === "string")
+    : [];
+}
+
+/** A run cursor's group walk, or null when absent or malformed. */
+export function groupWalkFrom(cursor: unknown): GroupWalk | null {
+  const g = (cursor as { group?: unknown } | null)?.group as
+    | Record<string, unknown>
+    | undefined;
+  if (!g || typeof g !== "object") return null;
+  const floor = typeof g.floor === "string" && ms(g.floor) !== null
+    ? g.floor
+    : null;
+  const started = typeof g.pass_started === "string" &&
+      ms(g.pass_started) !== null
+    ? g.pass_started
+    : null;
+  if (!floor || !started) return null;
+  const before = typeof g.before === "string" && ms(g.before) !== null
+    ? g.before
+    : null;
+  const conv = typeof g.conv === "string" ? g.conv : null;
+  const convAfter = conv && typeof g.conv_after === "string" &&
+      ms(g.conv_after) !== null
+    ? g.conv_after
+    : null;
+  return {
+    floor,
+    pass_started: started,
+    before,
+    before_ids: before ? strList(g.before_ids) : [],
+    conv: convAfter ? conv : null,
+    conv_after: convAfter,
+    conv_ids: convAfter ? strList(g.conv_ids) : [],
+    passes: typeof g.passes === "number" && Number.isInteger(g.passes) &&
+        g.passes >= 0
+      ? g.passes
+      : 0,
+  };
+}
 
 export interface SourceRow {
   email: string;
@@ -408,11 +496,13 @@ async function runSource(
       status: "failed",
       error_code: "abandoned",
     });
+    running.status = "failed";
   }
 
   // Where to start, and what to skip at the start.
   let start: StartPoint;
   let endMs: number | null = null;
+  let resume: RunRow | null = null;
   const historyKey = env.window
     ? { history_from: iso(env.window.fromMs), history_to: iso(env.window.toMs) }
     : null;
@@ -433,36 +523,53 @@ async function runSource(
     };
     endMs = nowMs;
   } else {
-    // Resume only when the newest run of this exact window did not finish it.
+    // Resume from the newest finished run of this window unless it finished
+    // the window. The window is named by its end (history_to): the plan may
+    // move history_from forward when a long load nears the 60-day limit, and
+    // that must not throw the progress away. Every history run, whether
+    // succeeded, cut, failed or abandoned, carries the cursor it reached (or
+    // the one it started from), so the newest run is enough.
+    const fresh: StartPoint = {
+      startMs: env.window!.fromMs,
+      skipBeforeMs: null,
+      skipIdsAt: new Set(),
+      previousWindowTo: null,
+    };
     const newest = recent.find((r) =>
       r.status !== "running" &&
-      r.cursor?.history_from === historyKey!.history_from &&
       r.cursor?.history_to === historyKey!.history_to
     );
-    const resume = newest && newest.status !== "succeeded" && newest.window_to
-      ? newest
-      : null;
-    start = resume
-      ? {
-        ...startFromRun({
-          ...resume,
-          cursor: { ...resume.cursor, backlog: true },
-        }, 0),
-      }
-      : {
-        startMs: env.window!.fromMs,
-        skipBeforeMs: null,
-        skipIdsAt: new Set(),
-        previousWindowTo: null,
-      };
+    resume = newest && newest.status !== "succeeded" ? newest : null;
+    start = resume && resume.window_to && s.kind === "user"
+      ? startFromRun({
+        ...resume,
+        cursor: { ...resume.cursor, backlog: true },
+      }, 0)
+      : fresh;
+    // A cursor before a moved window start starts at the new start.
+    if (start.startMs < env.window!.fromMs) start = fresh;
     endMs = env.window!.toMs;
   }
 
-  const runId = await deps.recordRun({
-    source: runSource,
-    status: "running",
-    window_from: iso(start.startMs),
-  });
+  // A group's history walk: resumed from the cursor, or a new first pass.
+  const runStartIso = iso(nowMs);
+  let walk: GroupWalk | null = null;
+  if (req.mode === "history" && s.kind === "group") {
+    walk = (resume ? groupWalkFrom(resume.cursor) : null) ?? {
+      floor: iso(env.window!.fromMs),
+      pass_started: runStartIso,
+      before: null,
+      before_ids: [],
+      conv: null,
+      conv_after: null,
+      conv_ids: [],
+      passes: 0,
+    };
+    if (ms(walk.floor)! < env.window!.fromMs) {
+      walk = { ...walk, floor: iso(env.window!.fromMs) };
+    }
+  }
+
   const counts: Record<string, number> = {
     seen: 0,
     inserted: 0,
@@ -482,8 +589,14 @@ async function runSource(
     attachments_stored: 0,
     attachments_skipped: 0,
     attachment_errors: 0,
+    progressed: 0,
   };
   if (req.mode === "sweep") counts.sweep_misses = 0;
+  if (walk) {
+    counts.conversations_read = 0;
+    counts.conversations_skipped = 0;
+    counts.conversations_undated = 0;
+  }
   const captureMode: CaptureMode = req.mode === "history" ? "backfill" : "live";
   const source: OutlookSource = {
     email: s.email,
@@ -500,6 +613,67 @@ async function runSource(
   let backlog = false;
   let readComplete = true;
   let stop: SourceStop | null = null;
+
+  // Where the cursor stands now: the last email fully processed, or for a
+  // group history the walk. A group poll or sweep that could not list every
+  // changed conversation keeps the previous cursor, so the unread
+  // conversations are not jumped over.
+  const progressFields = (): Record<string, unknown> => {
+    let windowTo: string | null = null;
+    let windowEndId: string | null = null;
+    let cursorIds: string[] = [];
+    if (walk) {
+      const b = ms(walk.before);
+      if (b !== null && b >= start.startMs) windowTo = walk.before;
+    } else if (lastMs !== null && readComplete) {
+      windowTo = iso(lastMs);
+      windowEndId = lastId;
+      cursorIds = idsAtEnd;
+    } else if (start.previousWindowTo) {
+      windowTo = start.previousWindowTo;
+      cursorIds = [...start.skipIdsAt];
+    } else if (!stop && readComplete && req.mode === "poll") {
+      windowTo = iso(start.startMs);
+    }
+    const out: Record<string, unknown> = {
+      cursor: {
+        mode: req.mode,
+        backlog: backlog || !readComplete,
+        ids_at_end: cursorIds,
+        ...(historyKey ?? {}),
+        ...(walk ? { group: walk } : {}),
+      },
+    };
+    if (windowTo) {
+      out.window_to = windowTo;
+      if (windowEndId) out.window_end_id = windowEndId;
+    }
+    return out;
+  };
+
+  // A history run's running row carries its starting cursor from the first
+  // moment, so even a run the worker abandons hands it on.
+  const runId = await deps.recordRun({
+    source: runSource,
+    status: "running",
+    window_from: iso(start.startMs),
+    ...(req.mode === "history" ? progressFields() : {}),
+  });
+  let lastCheckpoint = nowMs;
+  // A long history run saves its cursor on its running row as it goes.
+  const checkpoint = async (): Promise<void> => {
+    if (req.mode !== "history") return;
+    const t = deps.now();
+    if (t - lastCheckpoint < POLICY.checkpointMs) return;
+    lastCheckpoint = t;
+    await deps.recordRun({
+      run_id: runId,
+      source: runSource,
+      status: "running",
+      counts: { ...counts },
+      ...progressFields(),
+    });
+  };
 
   const process = async (
     item: ListedMessage | OutlookMailItem,
@@ -526,6 +700,7 @@ async function runSource(
       else idsAtEnd = [h];
       lastMs = t;
       lastId = item.graphId;
+      counts.progressed++;
     };
     const listed = item as ListedMessage;
     if (listed.skip) {
@@ -632,7 +807,147 @@ async function runSource(
     await advance();
   };
 
-  const overBudget = () => deps.now() - env.began > POLICY.budgetMs;
+  // Past the time budget, a run stops. A history run that has not moved its
+  // cursor yet gets a short grace to move it once, so no run is wasted.
+  const overBudget = (): boolean => {
+    const spent = deps.now() - env.began;
+    if (spent <= POLICY.budgetMs) return false;
+    return req.mode !== "history" || counts.progressed > 0 ||
+      spent > POLICY.budgetMs + POLICY.progressGraceMs;
+  };
+
+  // One conversation of a group history walk: its posts inside the window,
+  // oldest first, after the cut point when it was cut before. True when
+  // finished (the walk moves past it), false when cut part way (the walk
+  // records the last post done).
+  const readConversation = async (
+    groupId: string,
+    c: GroupConversation,
+    last: number,
+    budget: { conversations: number; posts: number },
+  ): Promise<boolean> => {
+    const { fromMs, toMs } = env.window!;
+    const h = await deps.hash(c.id);
+    const posts: Array<{ post: OutlookMailItem; threadId: string }> = [];
+    for (const th of await deps.mail.listGroupThreads(groupId, c.id)) {
+      for (
+        const p of await deps.mail.listGroupPosts(groupId, th.id, th.topic)
+      ) {
+        const t = ms(p.receivedAt);
+        if (t === null || t < fromMs || t >= toMs) continue;
+        posts.push({ post: p, threadId: th.id });
+      }
+    }
+    posts.sort((a, b) => byTimeThenId(a.post, b.post));
+    const after = walk!.conv === h ? ms(walk!.conv_after) : null;
+    const doneAt = new Set(after !== null ? walk!.conv_ids : []);
+    for (const { post, threadId } of posts) {
+      const t = ms(post.receivedAt)!;
+      const ph = await deps.hash(post.graphId);
+      if (after !== null && (t < after || (t === after && doneAt.has(ph)))) {
+        counts.skipped_before_cursor++;
+        continue;
+      }
+      if (budget.posts <= 0 || overBudget()) return false;
+      await process(post, {
+        kind: "post",
+        groupId,
+        threadId,
+        postId: post.graphId,
+      });
+      budget.posts--;
+      const at = iso(t);
+      walk = {
+        ...walk!,
+        conv: h,
+        conv_after: at,
+        conv_ids: walk!.conv === h && walk!.conv_after === at
+          ? [...walk!.conv_ids, ph].slice(-POLICY.idsAtEndMax)
+          : [ph],
+      };
+    }
+    const before = ms(walk!.before);
+    walk = {
+      ...walk!,
+      before: iso(last),
+      before_ids: before === last
+        ? [...walk!.before_ids, h].slice(-POLICY.idsAtEndMax)
+        : [h],
+      conv: null,
+      conv_after: null,
+      conv_ids: [],
+    };
+    budget.conversations--;
+    counts.conversations_read++;
+    counts.progressed++;
+    return true;
+  };
+
+  // The group history walk (see GroupWalk). True when the window is finished.
+  const walkGroupHistory = async (groupId: string): Promise<boolean> => {
+    const budget = {
+      conversations: POLICY.groupMaxConversations.history,
+      posts: POLICY.groupMaxPosts.history,
+    };
+    for (;;) {
+      const floorMs = ms(walk!.floor)!;
+      let passDone = false;
+      let next: string | null = null;
+      list: for (let page = 0; page < POLICY.groupHistoryMaxPages; page++) {
+        if (overBudget()) return false;
+        const got = await deps.mail.listGroupConversations(groupId, next);
+        counts.pages++;
+        for (const c of got.items) {
+          const last = ms(c.lastDeliveredDateTime);
+          if (last === null) {
+            counts.conversations_undated++;
+            continue;
+          }
+          if (last < floorMs) {
+            passDone = true;
+            break list;
+          }
+          const before = ms(walk!.before);
+          if (
+            before !== null &&
+            (last > before ||
+              (last === before &&
+                walk!.before_ids.includes(await deps.hash(c.id))))
+          ) {
+            counts.conversations_skipped++;
+            continue;
+          }
+          if (
+            budget.conversations <= 0 || budget.posts <= 0 || overBudget()
+          ) return false;
+          if (!(await readConversation(groupId, c, last, budget))) {
+            return false;
+          }
+          await checkpoint();
+        }
+        next = got.next;
+        if (!next) {
+          passDone = true;
+          break;
+        }
+      }
+      if (!passDone) return false;
+      counts.progressed++;
+      // A pass begun in this run saw every conversation in one go: done.
+      if (walk!.pass_started === runStartIso) return true;
+      // Otherwise read once more what received mail since the pass began.
+      walk = {
+        floor: walk!.pass_started,
+        pass_started: runStartIso,
+        before: null,
+        before_ids: [],
+        conv: null,
+        conv_after: null,
+        conv_ids: [],
+        passes: walk!.passes + 1,
+      };
+    }
+  };
 
   try {
     if (s.kind === "user") {
@@ -707,6 +1022,18 @@ async function runSource(
         }
         if (!next) break;
         if (page === maxPages - 1) backlog = true;
+        await checkpoint();
+      }
+    } else if (walk) {
+      const groupId = await deps.mail.resolveGroupId(s.email).catch((e) => {
+        throw new SourceStop(safeCode(e, "graph_error"), "failed");
+      });
+      if (!groupId) throw new SourceStop("group_not_found", "failed");
+      try {
+        backlog = !(await walkGroupHistory(groupId));
+      } catch (e) {
+        if (e instanceof SourceStop) throw e;
+        throw new SourceStop(safeCode(e, "graph_error"), "failed");
       }
     } else {
       const groupId = await deps.mail.resolveGroupId(s.email).catch((e) => {
@@ -775,45 +1102,19 @@ async function runSource(
   }
 
   if (!readComplete) backlog = true;
-  // Where the cursor ends: the last email fully processed. A group read that
-  // could not list every changed conversation keeps the previous cursor, so
-  // the unread conversations are not jumped over.
-  let windowTo: string | null = null;
-  let windowEndId: string | null = null;
-  let cursorIds: string[] = [];
-  if (lastMs !== null && readComplete) {
-    windowTo = iso(lastMs);
-    windowEndId = lastId;
-    cursorIds = idsAtEnd;
-  } else if (start.previousWindowTo) {
-    windowTo = start.previousWindowTo;
-    cursorIds = [...start.skipIdsAt];
-  } else if (!stop && readComplete && req.mode === "poll") {
-    windowTo = iso(start.startMs);
-  }
   const status: RunRow["status"] = stop
     ? stop.status
     : backlog && req.mode !== "poll"
     ? "partial"
     : "succeeded";
-  const finish: Record<string, unknown> = {
+  await deps.recordRun({
     run_id: runId,
     source: runSource,
     status,
     counts,
-    cursor: {
-      mode: req.mode,
-      backlog,
-      ids_at_end: cursorIds,
-      ...(historyKey ?? {}),
-    },
     error_code: stop ? stop.code : null,
-  };
-  if (windowTo) {
-    finish.window_to = windowTo;
-    if (windowEndId) finish.window_end_id = windowEndId;
-  }
-  await deps.recordRun(finish);
+    ...progressFields(),
+  });
   return {
     source_key: s.source_key,
     run_source: runSource,

@@ -205,6 +205,13 @@ BEGIN
 END $$;
 ROLLBACK;
 
+-- W7 (20261006030000) replaced the tick's 288-call limit with its progress
+-- rules; its own contract proves the tick, so section 5 runs only while the
+-- tick is still this migration's body.
+SELECT coalesce(obj_description(to_regprocedure('public.trigger_context_email_history()'),'pg_proc'),'')
+ LIKE 'Gap plan B-1 and W7 (20261006030000):%' AS b1_w7_live \gset
+\if :b1_w7_live
+\else
 BEGIN;
 -- 5. The history tick, on stand-ins for net.http_post and the service key.
 CREATE SCHEMA IF NOT EXISTS net;
@@ -304,6 +311,7 @@ BEGIN
  THEN RAISE EXCEPTION 'b1 status %',s; END IF;
 END $$;
 ROLLBACK;
+\endif
 
 BEGIN;
 -- 6. The 5-minute poll caller: EM3's poll post first, then one history tick;
