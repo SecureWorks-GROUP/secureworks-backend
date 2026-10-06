@@ -730,14 +730,17 @@ BEGIN
  be5 := pg_temp.lg_ev(other, 'client.email_in', 'email', 'inbound', 'Same mail the reader also saved, full body', '2 days', 'customer', 'job_customer', '{"from":"pat@example.test"}');
  UPDATE public.business_events SET event_at = (SELECT received_at FROM public.inbox_events WHERE id = i5) WHERE id = be5;
  i6 := pg_temp.lg_inbox(p, 'pat@example.test', 'Automatic reply: away', 'I am away', '2 days');
- -- An old-path copy names its inbox row only in its payload (no source pointer, another instant).
+ -- An old-path copy names its inbox row only in its payload (no source pointer, no sender).
+ -- (story safety, 20261006040000: it is stamped at the mail's own instant, as its one writer,
+ -- monitor-inbox's legacy fallback, stamps it and where the copy read looks for it; it was an
+ -- hour later, which no writer does)
  i8 := pg_temp.lg_inbox(p, 'pat@example.test', 'Old path', 'Named by an old-path copy', '10 days 12 hours', 'other');
  PERFORM set_config('session_replication_role', 'replica', true);
  INSERT INTO public.business_events (job_id, event_type, source, channel, direction, payload, metadata, occurred_at, event_at, recorded_at,
   context_captured_at, attribution_status, attribution_confidence)
- VALUES (other, 'client.email_in', 'ghl-proxy', 'email', 'inbound', jsonb_build_object('body', 'Named by an old-path copy', 'inbox_events_id', i8::text),
-  '{"written_as":"service_role"}', now() - interval '10 days 11 hours', now() - interval '10 days 11 hours', now() - interval '10 days 11 hours',
-  now() - interval '10 days 11 hours', 'direct', 1);
+ SELECT other, 'client.email_in', 'ghl-proxy', 'email', 'inbound', jsonb_build_object('body', 'Named by an old-path copy', 'inbox_events_id', i8::text),
+  '{"written_as":"service_role"}', i.received_at, i.received_at, now() - interval '10 days 11 hours', now() - interval '10 days 11 hours', 'direct', 1
+ FROM public.inbox_events i WHERE i.id = i8;
  PERFORM set_config('session_replication_role', 'origin', true);
  i7 := pg_temp.lg_inbox(p, 'office@secureworkswa.com.au', 'Internal', 'Mail from our own office', '1 day', 'other');
  -- Mail from the client's address that the old matcher placed on another job stays there.

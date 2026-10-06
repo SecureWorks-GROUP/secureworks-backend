@@ -15,16 +15,16 @@ BEGIN
   ('public.context_job_record_legacy_mail(uuid[],timestamptz)', ARRAY['e2d1d12725fe4e544971f50f9fe16105', 'fd6cc9dade4cd2dd1582d354fa46a299']),
   ('public.context_job_record_messages(uuid[],timestamptz)', ARRAY['805d8ae8acb9add8f6e3c4cc08813287', '12a13d01523660fa28f29d7f651cbe96']),
   ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['f827ec9418fc843470e793c09a55612e', '0921f25dfb5a67ab04629d2977e9f0a6']),
-  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['47a6a646655f7110ff52be8e90846599', '3702a8b4d881a2047acbd06afc93d455']),
+  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['47a6a646655f7110ff52be8e90846599', '6cc5e7557456e96749f48cb1f4f27768']),
   ('public.context_job_record_money(uuid[],timestamptz)', ARRAY['33c032c9f111f74fbd7ad0e267bed33e', '152c423ec224be8d3ac48790b7d14cd6']),
   ('public.context_job_record_contact(uuid[],timestamptz)', ARRAY['698b3753ab5e1ffa6441a7ef6cbb13e5', '4b8d2c65d3ce03d71f2d0e24f4401471']),
   ('public.context_job_story_facts(uuid,timestamptz)', ARRAY['98cc171009db7051a681ae3a28785518', '2a1885fc9346df80ab5f8b32707dcbda']),
-  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', 'caf562d592639feb70471b24bf3b9c2f']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', '7137f6c04391da14762137770d24253b']),
-  ('public.context_client_story(uuid,timestamptz)', ARRAY['cc4a2ce461deeb17653cd94b714bbf78', '859efd6be7f27bb9447e089965e96afc']),
-  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '1ce52bd1e627492daa88c2c58378af9a']),
-  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', '584bf77b9c4c1698341035178d561f6f']),
-  ('public.context_ledger_judge(uuid[])', ARRAY['1cabd1e254cdb11b26c61a992b8d9744', '82c13ce3c0617d626deeda635e341a3f'])
+  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', '6eee4c331f66e34a7a95bc7f22dee866']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', 'dea819c658e7e1bf116979b50a1ac5d7']),
+  ('public.context_client_story(uuid,timestamptz)', ARRAY['cc4a2ce461deeb17653cd94b714bbf78', 'bed6fe4066f51c3eed6f60a88144eea1']),
+  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '49c6c3f00a6f4dd9e187f9418a29a51a']),
+  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', 'a68c6d79f1463df5d20fbc51b3a58ca5']),
+  ('public.context_ledger_judge(uuid[])', ARRAY['1cabd1e254cdb11b26c61a992b8d9744', '511794bd25c94ca8f0e0f1bbbfbf03eb'])
  ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
   IF live IS NULL OR NOT live = ANY (x.accepted) THEN

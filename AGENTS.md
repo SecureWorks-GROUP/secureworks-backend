@@ -697,7 +697,14 @@ never to the words. An old-inbox mail kept on a job because its saved copy sits
 elsewhere joined that job's evidence no earlier than `20261006040000`'s first
 apply and its copies' landing (`context_ledger_mail_copies`): take its time from
 `context_ledger_evidence_rows.landed_at`, never `processed_at`, or a reading
-built before then reads as having read it.
+built before then reads as having read it. `context_ledger_mail_copies` reads
+every copy key by an index (source pointer, graph key, sender at the mail's
+instant, payload key at the mail's instant); a read over many mails (the judge's)
+never takes a `payload @>` look-up per mail: the payload index answers each in
+about 0.8 ms and almost all find nothing. A CRM text loaded from the CRM's cache
+(`ghl_sms_cache_backfill`) is at its CRM time (`context_job_record_crm_time`) in
+the story, the reader's evidence and the citation check alike; one dated more than
+30 days before the job was created is in none of them as the customer's words.
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 

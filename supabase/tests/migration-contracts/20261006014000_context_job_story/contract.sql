@@ -44,10 +44,11 @@ BEGIN
  s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-10-01T00:00:00Z"}'::jsonb,
                                         '{}'::jsonb, NULL, NULL, '2026-10-07 02:00Z', NULL);
  -- (widened by story safety, 20261006040000: with no live reading nothing on record is
- -- never an all-clear: whose move is unknown and the line says the messages are unread)
+ -- never an all-clear: whose move is unknown and the line says so first; with no message
+ -- on record it says so and claims nothing unchecked)
  IF s->'meta'->'ledger'->>'status' <> 'none' OR jsonb_array_length(s->'loops') <> 0 OR s->'now'->>'whose_move' <> 'unknown'
     OR s->'now'->>'phase' <> 'quote' OR s->'now'->>'line' LIKE '%Nothing open%'
-    OR position('No record item is open and the messages have not been read yet' IN s->'now'->>'line') = 0 THEN
+    OR position('Whose move is unclear: no record item is open; no customer message and no reply from us on record' IN s->'now'->>'line') = 0 THEN
   RAISE EXCEPTION 'story contract: empty assembly wrong: %', s->'now';
  END IF;
  -- meta.ledger carries the reader's own freshness; the fact pass's unread count is gone.
