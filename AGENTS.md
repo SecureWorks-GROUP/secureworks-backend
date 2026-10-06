@@ -694,13 +694,20 @@ citing `job_events` has the event type as its `state` when the ledger store
 lets that type close a matter (`not_delivered` when it names a document nobody
 received), so a reader applies `context_ledger_job_event_closes` to the state,
 never to the words. An old-inbox mail stays on a job only while its saved copy sits
-on no job or on an archived or holding job; a copy on another live job decides
-where it belongs (the job conversation's rule R0), in the story, the reader's
-evidence and the citation check alike. One kept on a job because its saved copy
-sits elsewhere joined that job's evidence no earlier than `20261006040000`'s first
-apply and its copies' landing (`context_ledger_mail_copies`): take its time from
-`context_ledger_evidence_rows.landed_at`, never `processed_at`, or a reading
-built before then reads as having read it. `context_ledger_mail_copies` reads
+on no job or on a job that is not live (the judge's live set: never archived,
+complete, completed, cancelled, lost, a draft or holding); a copy on another live
+job decides where it belongs (the job conversation's rule R0), in the story, the
+reader's evidence and the citation check alike. One kept on a job because its saved
+copy sits elsewhere joined that job's evidence no earlier than `20261006040000`'s
+first apply, its copies' landing, the placement review taking a copy off a job and
+the last change of a non-live job holding a copy (`context_ledger_mail_copies`):
+take its time from `context_ledger_evidence_rows.landed_at`, never `processed_at`,
+or a reading built before then reads as having read it. A stored ledger citation is
+re-checked by the citation check's current rules in the story's ledger read and the
+judge (`context_job_story_ledger`, `citation_moved`); a reading with an item hidden
+is no all-clear. On builder work the job's CRM contact and client email are the
+insured's: their messages never change whose move on what the builder owes, and the
+line names them the insured's. `context_ledger_mail_copies` reads
 every copy key by an index (source pointer, graph key, sender at the mail's
 instant, payload key at the mail's instant); a read over many mails (the judge's)
 never takes a `payload @>` look-up per mail: the payload index answers each in

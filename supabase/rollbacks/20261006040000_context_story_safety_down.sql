@@ -1,7 +1,8 @@
--- Rollback for 20261006040000_context_story_safety.sql: puts back the thirteen bodies
+-- Rollback for 20261006040000_context_story_safety.sql: puts back the fourteen bodies
 -- and comments it replaced, word for word (the 972 record layer, story and ledger
 -- store bodies, the judge among them, PR 975's messages and story meta, and
--- 20261006033000's timeline, loops, assembler and client story), then drops the seven
+-- 20261006033000's timeline, loops, assembler, client story and (eighth review) ledger
+-- read), then drops the seven
 -- helpers it added (context_ledger_mail_rule_since with its first-apply time) and the
 -- trigger on ghl_conversation_cache that keeps CRM message times, with its function. The
 -- table context_crm_message_times that trigger filled is kept, rows and all: a CRM time in
@@ -16,19 +17,21 @@ DO $guard$
 DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_job_record_legacy_mail(uuid[],timestamptz)', ARRAY['e2d1d12725fe4e544971f50f9fe16105', '4da7c86a8190ef22f2fc9dfbff493aae']),
+  ('public.context_job_record_legacy_mail(uuid[],timestamptz)', ARRAY['e2d1d12725fe4e544971f50f9fe16105', '75004e606edc38a92d41994d40ea828d']),
   ('public.context_job_record_messages(uuid[],timestamptz)', ARRAY['805d8ae8acb9add8f6e3c4cc08813287', '4be90ba0880f757464646a86bde76e1a']),
   ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['f827ec9418fc843470e793c09a55612e', '0921f25dfb5a67ab04629d2977e9f0a6']),
-  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['47a6a646655f7110ff52be8e90846599', '28a282382ee2b09ad4ab32bdf6664905']),
+  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['47a6a646655f7110ff52be8e90846599', '21eef050dc79da65d01afc0d8325a38d']),
   ('public.context_job_record_money(uuid[],timestamptz)', ARRAY['33c032c9f111f74fbd7ad0e267bed33e', '152c423ec224be8d3ac48790b7d14cd6']),
   ('public.context_job_record_contact(uuid[],timestamptz)', ARRAY['698b3753ab5e1ffa6441a7ef6cbb13e5', '4b8d2c65d3ce03d71f2d0e24f4401471']),
   ('public.context_job_story_facts(uuid,timestamptz)', ARRAY['98cc171009db7051a681ae3a28785518', 'd0f9e33ac9a8cb3f91f2ea11ce907c46']),
-  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', '85074237ecb5472b4b08eaba81496584']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', 'ce81ec11ed0c9e2bf33974e2743fec48']),
+  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', 'f828e6012461412c4389c4044b76dee0']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', '8a4f210e03986dbb60c6f68892ce1ef9']),
   ('public.context_client_story(uuid,timestamptz)', ARRAY['cc4a2ce461deeb17653cd94b714bbf78', 'a362a79d0ce92295f509f6e1b0f0ba66']),
-  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '7c589a9a490c570adb3dc685d3d90d9c']),
-  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', 'dd1e0e7ee38550567c1e7aa53241a978']),
-  ('public.context_ledger_judge(uuid[])', ARRAY['1cabd1e254cdb11b26c61a992b8d9744', '511794bd25c94ca8f0e0f1bbbfbf03eb'])
+  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '2c3dbfef58572e08a630444692d61242']),
+  ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', 'c126255e2f405fa17341545146723fe0']),
+  ('public.context_ledger_judge(uuid[])', ARRAY['1cabd1e254cdb11b26c61a992b8d9744', '112cce8cf65ef4086483ee069ee294a5']),
+  -- (eighth review) the ledger read, put back as 20261006033000 left it
+  ('public.context_job_story_ledger(uuid,uuid,timestamptz)', ARRAY['7754e292f957c722d0fa56a3001f8ffd', '273c0612f9778905c18e86878402898f'])
  ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
   IF live IS NULL OR NOT live = ANY (x.accepted) THEN
@@ -2593,6 +2596,81 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
 $$;
 COMMENT ON FUNCTION public.context_ledger_judge(uuid[]) IS
  'Context ledger store (20261006013000): the one ledger due judgement per job (the full evidence read only for a job whose reading may have newer evidence or whose only possible evidence is legacy mail; elsewhere a count and newest landed time of the admitted rows decide the same; evidence_rows is then that count): kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours), outside_window (a backfill or rebuild outside the settings backfill hours; an update is never held). A person-locked item is never a moved citation (a rebuild would carry it back). Service role only.';
+
+-- (eighth review) The ledger read as 20261006033000 left it, word for word.
+CREATE OR REPLACE FUNCTION public.context_job_story_ledger(p_job_id uuid, p_generation_id uuid DEFAULT NULL, p_as_of timestamptz DEFAULT now())
+RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $fn$
+ WITH g AS (  -- the generation asked for, else the one live at p_as_of (the newest promoted by then)
+  SELECT x.* FROM public.context_ledger_generations x
+  WHERE x.job_id = p_job_id
+    AND CASE WHEN p_generation_id IS NOT NULL THEN x.id = p_generation_id
+             ELSE x.status IN ('live', 'retired') AND x.promoted_at <= p_as_of END
+  ORDER BY x.promoted_at DESC NULLS LAST, x.created_at DESC LIMIT 1
+ ),
+ other AS (  -- with no generation to show, say whether one is being built or waits in shadow
+  SELECT x.status FROM public.context_ledger_generations x
+  WHERE x.job_id = p_job_id AND x.status IN ('building', 'shadow') AND NOT EXISTS (SELECT 1 FROM g)
+  ORDER BY x.created_at DESC LIMIT 1
+ ),
+ evr AS MATERIALIZED (  -- the store's own evidence against the shown generation's evidence_until:
+                       -- read when it landed by then (nothing is read when no generation is shown)
+  SELECT r.src_id, r.copy_of, r.direction, (g.evidence_until IS NOT NULL AND r.landed_at <= g.evidence_until) AS was_read
+  FROM g CROSS JOIN LATERAL public.context_ledger_evidence_rows(ARRAY[g.job_id], p_as_of) r
+ ),
+ unread AS (  -- what the shown generation's reader has not read; copies are listed by id
+              -- but not counted as new messages
+  SELECT e.src_id, e.copy_of FROM evr e WHERE NOT e.was_read
+ ),
+ it0 AS (  -- replay: items written by p_as_of, each with its status then
+  SELECT i.*, coalesce((SELECT t.to_status FROM public.context_ledger_transitions t WHERE t.item_id = i.id AND t.at <= p_as_of
+                         ORDER BY t.at DESC, t.id DESC LIMIT 1), i.status) AS status_then
+  FROM public.context_ledger_items i JOIN g ON g.id = i.generation_id
+  WHERE i.created_at <= p_as_of
+ ),
+ it AS (
+  SELECT i.*,
+   (SELECT jsonb_agg(jsonb_build_object('table', c->>'table', 'id', c->>'id', 'excerpt', c->>'excerpt',
+            'at', coalesce(e.event_at, e.occurred_at),
+            'ok', CASE WHEN c->>'table' <> 'business_events' THEN true
+                       ELSE e.id IS NOT NULL AND e.job_id = p_job_id AND public.context_linked_status(e.attribution_status)
+                            AND e.metadata->>'retracted_at' IS NULL AND coalesce(e.metadata->>'retracted', 'false') <> 'true' END,
+            'customer', (e.metadata->'party_roles'->>'sender_role' = 'customer')))
+    FROM jsonb_array_elements(i.opened_by || CASE WHEN i.closed_at <= p_as_of THEN coalesce(i.closed_by, '[]'::jsonb) ELSE '[]'::jsonb END) c
+    LEFT JOIN public.business_events e ON c->>'table' = 'business_events'
+     AND e.id = CASE WHEN c->>'id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (c->>'id')::uuid END) AS cited
+  FROM it0 i
+ )
+ SELECT jsonb_build_object(
+  'status', coalesce((SELECT g.status FROM g), (SELECT other.status FROM other), 'none'),
+  'generation', (SELECT jsonb_build_object('id', g.id, 'status', g.status, 'kind', g.kind, 'reader', g.reader, 'model', g.model,
+                  'evidence_until', g.evidence_until, 'evidence_rows', g.evidence_rows, 'created_at', g.created_at,
+                  'promoted_at', g.promoted_at) FROM g),
+  'items', coalesce((SELECT jsonb_agg(jsonb_build_object('item_key', it.item_key, 'item_type', it.item_type, 'status', it.status_then,
+              'from_role', it.from_role, 'from_name', it.from_name, 'to_role', it.to_role, 'to_name', it.to_name, 'what', it.what,
+              'about_key', it.about_key, 'modality', it.modality, 'phase', it.phase, 'due_date', it.due_date, 'opened_at', it.opened_at,
+              'opened_by', it.opened_by,
+              'closed_at', CASE WHEN it.closed_at <= p_as_of AND it.status_then IN ('closed', 'declined', 'superseded') THEN it.closed_at END,
+              'closed_by', CASE WHEN it.closed_at <= p_as_of AND it.status_then IN ('closed', 'declined', 'superseded') THEN it.closed_by END,
+              'closes_on', it.closes_on,
+              'supersedes_key', it.supersedes_key, 'blocks', it.blocks, 'needs_reply', it.needs_reply, 'written_by', it.written_by,
+              'person_locked', it.person_locked, 'cited', it.cited,
+              'cites_ok', NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(it.cited, '[]'::jsonb)) c WHERE NOT (c->>'ok')::boolean))
+              ORDER BY it.opened_at, it.item_key COLLATE "C") FROM it), '[]'::jsonb),
+  'transitions', coalesce((SELECT jsonb_agg(jsonb_build_object('item_key', i.item_key, 'from_status', t.from_status,
+                   'to_status', t.to_status, 'at', t.at, 'by', t.by, 'reason', t.reason, 'evidence', t.evidence) ORDER BY t.at, t.id)
+                 FROM public.context_ledger_transitions t JOIN public.context_ledger_items i ON i.id = t.item_id
+                 JOIN g ON g.id = t.generation_id WHERE t.at <= p_as_of), '[]'::jsonb),
+  'unread_rows', CASE WHEN EXISTS (SELECT 1 FROM g) THEN (SELECT count(*)::integer FROM unread u WHERE u.copy_of IS NULL) END,
+  'unread_ids', CASE WHEN EXISTS (SELECT 1 FROM g) THEN coalesce((SELECT jsonb_agg(u.src_id::text ORDER BY u.src_id) FROM unread u), '[]'::jsonb) END,
+  -- the inbound rows it has read: the story says the reader judged a customer message only for these
+  'read_ids', CASE WHEN EXISTS (SELECT 1 FROM g) THEN coalesce((SELECT jsonb_agg(e.src_id::text ORDER BY e.src_id) FROM evr e
+                    WHERE e.was_read AND e.direction = 'inbound'), '[]'::jsonb) END
+ )
+$fn$;
+COMMENT ON FUNCTION public.context_job_story_ledger(uuid, uuid, timestamptz) IS
+ 'Job story (20261006014000), story fixes (20261006033000): items tie on opened_at by item_key in C (byte) order. Earlier: the ledger generation the story shows (the one live at p_as_of, or the one asked for in any status) with the items written by p_as_of, each at its status then, and the transitions by then; every business_events citation is re-checked (still on this job, linked, not retracted) and the item carries cites_ok. unread_rows: the store''s evidence (context_ledger_evidence_rows as of p_as_of, copies not counted) that landed after the shown generation''s evidence_until, so the story says how far its own reader has read; unread_ids: those rows and their copies by id; read_ids: the inbound evidence rows it has read (landed by its evidence_until), so a customer message is called judged only when the reader read it; all three null when no generation is shown. With no generation to show, status says building or shadow when one exists, else none. Service role only.';
 
 -- The helpers this migration added (nothing else reads them once the bodies above are back).
 DROP FUNCTION IF EXISTS public.context_ledger_mail_copies(uuid[]);

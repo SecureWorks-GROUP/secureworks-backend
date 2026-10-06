@@ -1,6 +1,6 @@
--- After the down migration: the thirteen bodies are the ones before 20261006040000, word
+-- After the down migration: the fourteen bodies are the ones before 20261006040000, word
 -- for word (972 and 975 md5s as production has them, 20261006033000's as its migration
--- leaves them), with their comments, flags (SECURITY DEFINER or not, STABLE, the
+-- leaves them; eighth review: its ledger read too), with their comments, flags (SECURITY DEFINER or not, STABLE, the
 -- search_path setting) and grants; the seven helpers are gone (the first-apply time with
 -- them), and (sixth review) so are the trigger that keeps CRM message times on the
 -- conversation cache and its function, while the table of kept CRM times stays, rows and all
@@ -23,7 +23,8 @@ INSERT INTO story_safety_before VALUES
  ('public.context_client_story(uuid,timestamptz)', 'cc4a2ce461deeb17653cd94b714bbf78', 'Job story (20261006014000), story fixes (20261006033000): parties, paying parties%', true),
  ('public.context_ledger_evidence_rows(uuid[],timestamptz)', '617cc62989572be3e0537e65bf21284c', 'Context ledger store (20261006013000): the admissible worded evidence%', true),
  ('public.context_ledger_cite(uuid,jsonb)', '25a55a28508d0b1df609e6fe4fb00661', 'Context ledger store (20261006013000): checks one {table, id, excerpt}%', true),
- ('public.context_ledger_judge(uuid[])', '1cabd1e254cdb11b26c61a992b8d9744', 'Context ledger store (20261006013000): the one ledger due judgement per job%', true);
+ ('public.context_ledger_judge(uuid[])', '1cabd1e254cdb11b26c61a992b8d9744', 'Context ledger store (20261006013000): the one ledger due judgement per job%', true),
+ ('public.context_job_story_ledger(uuid,uuid,timestamptz)', '7754e292f957c722d0fa56a3001f8ffd', 'Job story (20261006014000), story fixes (20261006033000): items tie%', true);
 CREATE TEMP TABLE story_safety_helpers (sig text);
 INSERT INTO story_safety_helpers VALUES ('public.context_job_record_crm_time(text,text,text,uuid)'), ('public.context_job_record_payer_role(uuid,text,text,text,uuid)'),
  ('public.context_job_record_bill_share(text,jsonb,text)'), ('public.context_job_record_value(uuid[],timestamptz)'), ('public.context_job_story_day(date,date)'),
