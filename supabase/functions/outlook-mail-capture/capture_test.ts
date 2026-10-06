@@ -21,6 +21,7 @@ import {
   runOutlookCapture,
   type RunRow,
   type SourceRow,
+  sweepMissList,
 } from "./capture.ts";
 import { GraphReadError } from "./graph.ts";
 
@@ -556,7 +557,12 @@ Deno.test("a sweep records when each email it had to save was received (cursor.m
   );
 });
 
-Deno.test("a sweep with more misses than the list holds keeps the oldest; the rest still count as misses", async () => {
+// Review round 3: the list kept the oldest 100, so when a busy mailbox is
+// switched on, mail past the list (the newer pre-poll mail) still counted as
+// missed by the poll. The list keeps the newest instead: every miss past it
+// is older than its oldest time, so the status can leave those out whenever
+// that oldest time is before the source's first poll.
+Deno.test("a sweep with more misses than the list holds keeps the newest; the rest are older than every listed time", async () => {
   const box = Array.from(
     { length: POLICY.sweepMissTimesMax + 3 },
     (_, i) =>
@@ -573,7 +579,31 @@ Deno.test("a sweep with more misses than the list holds keeps the oldest; the re
   assertEquals(run.counts!.sweep_misses, POLICY.sweepMissTimesMax + 3);
   const times = run.cursor!.miss_received_at as string[];
   assertEquals(times.length, POLICY.sweepMissTimesMax);
-  assertEquals(times[0], "2026-10-01T08:00:00.000Z");
+  // The three oldest (08:00, 08:01, 08:02) are past the list.
+  assertEquals(times[0], "2026-10-01T08:03:00.000Z");
+  assertEquals(times[times.length - 1], "2026-10-01T09:42:00.000Z");
+});
+
+Deno.test("the sweep's miss list: an unreadable time is listed as null (it always counts), then the newest times, oldest first", () => {
+  const t = (m: number) => Date.parse("2026-10-01T08:00:00Z") + m * 60_000;
+  assertEquals(sweepMissList([t(2), null, t(0), t(1)], 3), [
+    null,
+    "2026-10-01T08:01:00.000Z",
+    "2026-10-01T08:02:00.000Z",
+  ]);
+  // More unreadable times than the list holds: no time is listed, so the
+  // status cannot say the rest are older and counts them all.
+  assertEquals(sweepMissList([null, t(0), null, null], 2), [null, null]);
+  assertEquals(sweepMissList([t(5), t(4)], 3), [
+    "2026-10-01T08:04:00.000Z",
+    "2026-10-01T08:05:00.000Z",
+  ]);
+  assertEquals(sweepMissList([], 3), []);
+  assertEquals(
+    sweepMissList([t(1)]).length,
+    1,
+    "the default cap is POLICY.sweepMissTimesMax",
+  );
 });
 
 Deno.test("attachments: a poll handles an email's files once; the sweep and history runs recheck them", async () => {

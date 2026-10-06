@@ -1,11 +1,13 @@
 -- Roll back lanes health (20261006050000_context_lanes_health).
 --
--- Refuses while the attachment ledger holds a failed or skipped_no_content row
--- (neither holds a file; they are the reader's own notes. Delete them
--- deliberately first, knowing the reader before this change asks Microsoft
--- for those attachments again on every poll), or while any of the five
--- functions is neither this migration's body nor the one it replaced (a later
--- change owns it; roll that back first). Then restores the five pre-image
+-- Refuses while the attachment ledger holds a row whose status EM2's check
+-- cannot hold: failed, skipped_no_content or skipped_duplicate (none holds a
+-- file; they are the reader's own notes. Delete them deliberately first,
+-- knowing the reader before this change asks Microsoft for those
+-- attachments again on every poll, and stores a mailbox copy's files a
+-- second time), or while any of the five functions is neither this
+-- migration's body nor the one it replaced (a later change owns it; roll
+-- that back first). Then restores the five pre-image
 -- bodies byte for byte (md5 checked: F1b's freshness policy and freshness,
 -- EM1's email status, C1d's GHL policy, the retry-status GHL block), their
 -- comments, EM2's six-status check and table comment, and drops error_code
@@ -17,19 +19,20 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record; n bigint;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_source_freshness_policy()',ARRAY['9fa5eda472d13c07afa9701d83372f1b','455f0ec0a3f6c60477a68044db10a448']),
-  ('public.context_source_freshness()',ARRAY['52ace5e52f143486d1cae30144ecb985','b12cdb949edd17fbf636990c45c6345d']),
-  ('public.context_email_capture_status_at(timestamptz)',ARRAY['9dbe9e6dfbb94ce06789539301679841','78aefd4a54766e3e4967373e46fb934a']),
-  ('public.context_ghl_capture_policy()',ARRAY['0bc1a690b25375de97cab346d53e0068','4deabf30725e64f01f5778d2e853c344']),
-  ('public.context_ghl_capture_status()',ARRAY['07f8cd44cb45d0325577659559e83fc3','ecdec7c3bc7f09cb3ea23d35ac096cd2'])
+  ('public.context_source_freshness_policy()',ARRAY['0b131a763a53c21811465e04a66be539','455f0ec0a3f6c60477a68044db10a448']),
+  ('public.context_source_freshness()',ARRAY['474f94e13b3be83ffe7ce6c4f5b2d774','b12cdb949edd17fbf636990c45c6345d']),
+  ('public.context_email_capture_status_at(timestamptz)',ARRAY['ee6f8e5d57e41fe8c2691b59d4b51856','78aefd4a54766e3e4967373e46fb934a']),
+  ('public.context_ghl_capture_policy()',ARRAY['d803ce75d024366040936b4002d19b30','4deabf30725e64f01f5778d2e853c344']),
+  ('public.context_ghl_capture_status()',ARRAY['6c2648a6307b6f6e5a08f52fb45690d2','ecdec7c3bc7f09cb3ea23d35ac096cd2'])
  ) AS t(sig,accepted) LOOP
   live:=NULL;
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
   IF live IS NULL OR NOT live=ANY(x.accepted) THEN problems:=problems||format('%s md5 %s',x.sig,coalesce(live,'<missing>')); END IF;
  END LOOP;
  IF to_regclass('public.context_email_attachments') IS NOT NULL THEN
-  SELECT count(*) INTO n FROM public.context_email_attachments a WHERE a.status IN ('failed','skipped_no_content');
-  IF n>0 THEN problems:=problems||format('context_email_attachments holds %s failed or skipped_no_content rows (no file; delete them deliberately first)',n); END IF;
+  SELECT count(*) INTO n FROM public.context_email_attachments a
+  WHERE a.status NOT IN ('stored','skipped_inline','skipped_kind','skipped_too_large','skipped_message_cap','skipped_scope');
+  IF n>0 THEN problems:=problems||format('context_email_attachments holds %s failed, skipped_no_content or skipped_duplicate rows (no file; delete them deliberately first)',n); END IF;
  END IF;
  IF cardinality(problems)>0 THEN
   RAISE EXCEPTION 'context_lanes_health_rollback_refused: %',array_to_string(problems,'; ');

@@ -54,8 +54,39 @@ SELECT 'lanes rollback ran over a failed ledger row'::text::integer;
 ROLLBACK TO SAVEPOINT lanes_down;
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure)<>'07f8cd44cb45d0325577659559e83fc3'
-  OR (SELECT error_code FROM public.context_email_attachments WHERE provider_message_id='email:lanes-3@x.example')<>'graph_403'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure) IS DISTINCT FROM '6c2648a6307b6f6e5a08f52fb45690d2'
+  OR (SELECT error_code FROM public.context_email_attachments WHERE provider_message_id='email:lanes-3@x.example') IS DISTINCT FROM 'graph_403'
  THEN RAISE EXCEPTION 'lanes refused rollback changed something'; END IF;
+END $$;
+ROLLBACK;
+
+-- The same for a skipped_duplicate row (a mailbox copy's file, stored once
+-- under the other copy): EM2's six statuses cannot hold it either. It is the
+-- only row the six cannot hold here, so it alone is the refusal's reason.
+BEGIN;
+\ir ../../../migrations/20261006050000_context_lanes_health.sql
+INSERT INTO public.context_email_attachments(provider_message_id,attachment_key,status,sha256)
+ VALUES('email:lanes-4@x.example',repeat('f',64),'skipped_duplicate',repeat('a',64));
+DO $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM public.context_email_attachments WHERE status NOT IN
+   ('stored','skipped_inline','skipped_kind','skipped_too_large','skipped_message_cap','skipped_scope','skipped_duplicate'))
+ THEN RAISE EXCEPTION 'lanes rollback fixture: another newer-status row would also refuse the rollback'; END IF;
+END $$;
+SAVEPOINT lanes_down_duplicate;
+\echo 'lanes health: the errors below are the rollback refusing a skipped_duplicate row, as it must'
+\set ON_ERROR_STOP 0
+\ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
+\set ON_ERROR_STOP 1
+\if :ERROR
+\else
+SELECT 'lanes rollback ran over a skipped_duplicate ledger row'::text::integer;
+\endif
+ROLLBACK TO SAVEPOINT lanes_down_duplicate;
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure) IS DISTINCT FROM '6c2648a6307b6f6e5a08f52fb45690d2'
+  OR (SELECT status FROM public.context_email_attachments WHERE provider_message_id='email:lanes-4@x.example') IS DISTINCT FROM 'skipped_duplicate'
+ THEN RAISE EXCEPTION 'lanes refused rollback (skipped_duplicate) changed something'; END IF;
 END $$;
 ROLLBACK;

@@ -84,6 +84,8 @@ Deno.test("file names are made safe for a storage path", () => {
 function fakeDeps(state: {
   list: ListedAttachment[];
   existing?: string[];
+  /** The sha-256 of files another copy of the email already stored. */
+  storedHashes?: string[];
   bodies?: Record<
     string,
     Uint8Array | "too_large" | "fail" | "no_content"
@@ -107,6 +109,15 @@ function fakeDeps(state: {
         ),
         ...ledger.map((l) =>
           [l.attachment_key, l.status] as [string, AttachmentStatus]
+        ),
+      ]),
+    // The files stored for the email under any copy: the seeded hashes plus
+    // every stored row written.
+    storedHashes: async () =>
+      new Set<string>([
+        ...(state.storedHashes ?? []),
+        ...ledger.filter((l) => l.status === "stored" && l.sha256).map((l) =>
+          l.sha256!
         ),
       ]),
     bytes: async (_home, a, max) => {
@@ -347,7 +358,11 @@ Deno.test("a group post already in the ledger is not read again (its read carrie
     threadId: "T",
     postId: "P",
   };
-  const f = fakeDeps({ list: [file("a", 3), file("b", 3)] });
+  // Two different files (the same bytes would be one file stored once).
+  const f = fakeDeps({
+    list: [file("a", 3), file("b", 3)],
+    bodies: { a: new Uint8Array([1, 2, 3]), b: new Uint8Array([4, 5, 6]) },
+  });
   const args = {
     home: POST,
     providerMessageId: "email:p1@x.example",
@@ -406,6 +421,124 @@ Deno.test("a group post already in the ledger is not read again (its read carrie
   // Healed: the next sweep has nothing open and does not download it again.
   await storeEmailAttachments(g.deps, { ...args, recheck: true });
   assertEquals(g.lists, ["post", "post"]);
+});
+
+// Review round 3: polls read sources in source_key order, so a group
+// (fencing@, finance@) is read before the personal mailboxes. An email to the
+// group that also reached a member's own mailbox was stored twice: the
+// member's copy lists the same files under other attachment ids. A file whose
+// bytes (sha-256) are already stored for the same email is now recorded
+// skipped_duplicate with its hash, and never uploaded a second time.
+Deno.test("a file already stored for the email from another mailbox copy (same sha-256) is recorded skipped_duplicate, not stored again", async () => {
+  const A = new Uint8Array([1, 1]);
+  const B = new Uint8Array([2, 2]);
+  const C = new Uint8Array([3, 3]);
+  const POST: AttachmentHome = {
+    kind: "post",
+    groupId: "G",
+    threadId: "T",
+    postId: "P",
+  };
+  const f = fakeDeps({
+    list: [file("p-a", 2), file("p-b", 2)],
+    bodies: { "p-a": A, "p-b": B },
+  });
+  const email = "email:d1@x.example";
+  const first = await storeEmailAttachments(f.deps, {
+    home: POST,
+    providerMessageId: email,
+    businessEventId: "ev-5",
+    scopeLabel: "finance",
+  });
+  assertEquals(first.stored, 2);
+  assertEquals(f.uploads.length, 2);
+
+  // The member's copy: other attachment ids, two of the same files and one new.
+  f.deps.list = async () => [file("m-a", 2), file("m-b", 2), file("m-c", 2)];
+  const memberBodies: Record<string, Uint8Array> = {
+    "m-a": A,
+    "m-b": B,
+    "m-c": C,
+  };
+  f.deps.bytes = async (_home, a) => {
+    f.reads.push(a.id);
+    return memberBodies[a.id];
+  };
+  const copy = await storeEmailAttachments(f.deps, {
+    home: HOME,
+    providerMessageId: email,
+    businessEventId: "ev-5",
+    scopeLabel: "sales",
+  });
+  assertEquals(copy, {
+    stored: 1,
+    skipped: 2,
+    already: 0,
+    errors: 0,
+    error_code: null,
+  });
+  assertEquals(f.uploads.length, 3, "only the new file reaches the store");
+  const keyMA = await sha256Hex("m-a");
+  const dupes = f.ledger.filter((l) => l.status === "skipped_duplicate");
+  assertEquals(
+    dupes.map((l) => l.attachment_key).sort(),
+    [keyMA, await sha256Hex("m-b")].sort(),
+  );
+  for (const d of dupes) {
+    assertEquals(d.storage_path, null);
+    assertEquals(d.storage_bucket, null);
+    assertEquals(d.business_event_id, "ev-5");
+    assertEquals("error_code" in d, false);
+  }
+  // The skip row names the file it duplicates by its hash.
+  assertEquals(
+    dupes.find((l) => l.attachment_key === keyMA)!.sha256,
+    await sha256Hex(A),
+  );
+
+  // The member copy read again (poll overlap, sweep): nothing downloaded again.
+  const readsBefore = f.reads.length;
+  const again = await storeEmailAttachments(f.deps, {
+    home: HOME,
+    providerMessageId: email,
+    businessEventId: "ev-5",
+    scopeLabel: "sales",
+    recheck: true,
+  });
+  assertEquals(again.already, 3);
+  assertEquals(f.reads.length, readsBefore);
+
+  // The same file attached twice to one email is stored once.
+  const twice = fakeDeps({
+    list: [file("x1", 2), file("x2", 2)],
+    bodies: { x1: C, x2: C },
+  });
+  const r = await storeEmailAttachments(twice.deps, {
+    home: HOME,
+    providerMessageId: "email:d2@x.example",
+    businessEventId: null,
+    scopeLabel: "sales",
+  });
+  assertEquals([r.stored, r.skipped], [1, 1]);
+  assertEquals(twice.uploads.length, 1);
+  assertEquals(
+    twice.ledger.find((l) => l.status === "skipped_duplicate")!.attachment_key,
+    await sha256Hex("x2"),
+  );
+
+  // Another email's file with the same bytes is not this email's copy.
+  const other = fakeDeps({
+    list: [file("o1", 2)],
+    bodies: { o1: A },
+    storedHashes: [],
+  });
+  const o = await storeEmailAttachments(other.deps, {
+    home: HOME,
+    providerMessageId: "email:d3@x.example",
+    businessEventId: null,
+    scopeLabel: "sales",
+  });
+  assertEquals(o.stored, 1);
 });
 
 Deno.test("an open failure is one nothing has healed since", async () => {

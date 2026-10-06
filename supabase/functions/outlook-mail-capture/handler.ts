@@ -104,6 +104,21 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
         ) => [r.attachment_key, r.status]),
       );
     },
+    // The files stored for the email under any copy, so another copy's file
+    // with the same bytes is recorded skipped_duplicate, not stored twice.
+    async storedHashes(providerMessageId: string) {
+      const { data, error } = await supabase.from("context_email_attachments")
+        .select("sha256").eq("provider_message_id", providerMessageId).eq(
+          "status",
+          "stored",
+        );
+      if (error) throw dbError("attachment_ledger_unreadable");
+      return new Set<string>(
+        (data ?? []).map((r: { sha256: string | null }) => r.sha256).filter((
+          s: string | null,
+        ): s is string => typeof s === "string" && s !== ""),
+      );
+    },
     async upload(path: string, bytes: Uint8Array, contentType: string) {
       const { error } = await supabase.storage.from(ATTACHMENT_POLICY.bucket)
         .upload(path, bytes, { contentType, upsert: false });

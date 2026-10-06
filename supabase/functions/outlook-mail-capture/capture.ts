@@ -58,10 +58,13 @@
 // source is switched on re-reads 48 hours that began before the source's
 // first poll, so some of what it saves was never the poll's to read. The
 // sweep keeps counting every insert in counts.sweep_misses and records when
-// each was received in cursor.miss_received_at (the oldest
-// POLICY.sweepMissTimesMax, times only); the status
-// (context_email_capture_status_at, 20261006050000) leaves out mail older
-// than the source's first successful poll and counts the rest.
+// each was received in cursor.miss_received_at (the newest
+// POLICY.sweepMissTimesMax, times only, a null for a time it could not read;
+// sweepMissList); the status (context_email_capture_status_at,
+// 20261006050000) leaves out mail older than the source's first successful
+// poll and counts the rest. Keeping the newest means every miss past the list
+// is older than every listed one, so a busy mailbox's first sweep, all of it
+// from before its first poll, counts nothing.
 //
 // Attachments: a poll handles an email's attachments once; the nightly sweep
 // and history runs check them again and retry recorded failures (recheck,
@@ -119,7 +122,7 @@ export const POLICY = {
   checkpointMs: 15_000,
   runningStaleMs: 10 * 60_000,
   idsAtEndMax: 25,
-  /** A sweep records the received time of at most this many misses (the oldest). */
+  /** A sweep records the received time of at most this many misses (the newest). */
   sweepMissTimesMax: 100,
 };
 
@@ -338,6 +341,30 @@ function ms(value: string | null | undefined): number | null {
   if (!value) return null;
   const t = Date.parse(value);
   return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * A sweep's cursor.miss_received_at: a null for each miss whose received time
+ * could not be read (it always counts), then the newest readable times,
+ * oldest first, at most max entries in all. Every miss left off is older
+ * than the oldest listed time, so the status
+ * (context_email_capture_status_at, 20261006050000) can leave those out when
+ * that time is before the source's first poll, and counts them otherwise.
+ */
+export function sweepMissList(
+  times: Array<number | null>,
+  max: number = POLICY.sweepMissTimesMax,
+): Array<string | null> {
+  const unknown = times.filter((t) => t === null).length;
+  const nulls = Math.min(unknown, max);
+  const known = times.filter((t): t is number => t !== null).sort((a, b) =>
+    a - b
+  );
+  const room = max - nulls;
+  return [
+    ...Array.from({ length: nulls }, () => null),
+    ...(room > 0 ? known.slice(-room) : []).map(iso),
+  ];
 }
 
 /** Order emails by (time, id), byte order on the id. */
@@ -625,8 +652,9 @@ async function runSource(
     ownerPrivacy: s.owner_privacy === true,
   };
 
-  // A sweep: when each email it had to save was received (epoch ms).
-  const missTimes: number[] = [];
+  // A sweep: when each email it had to save was received (epoch ms; null
+  // when the time could not be read).
+  const missTimes: Array<number | null> = [];
 
   // Progress: the last email fully processed.
   let lastMs: number | null = null;
@@ -665,12 +693,7 @@ async function runSource(
         ...(historyKey ?? {}),
         ...(walk ? { group: walk } : {}),
         ...(req.mode === "sweep"
-          ? {
-            miss_received_at: [...missTimes].sort((a, b) => a - b).slice(
-              0,
-              POLICY.sweepMissTimesMax,
-            ).map(iso),
-          }
+          ? { miss_received_at: sweepMissList(missTimes) }
           : {}),
       },
     };
@@ -817,9 +840,8 @@ async function runSource(
       counts.inserted++;
       if (req.mode === "sweep") {
         counts.sweep_misses++;
-        // An unreadable time is left off the list; the status counts it.
-        const at = ms(item.receivedAt);
-        if (at !== null) missTimes.push(at);
+        // An unreadable time is listed as null; the status counts it.
+        missTimes.push(ms(item.receivedAt));
       }
     } else {
       counts.duplicates++;

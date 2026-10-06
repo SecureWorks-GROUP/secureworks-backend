@@ -96,9 +96,10 @@ BEGIN;
 INSERT INTO public.feature_flags(flag_name,enabled,updated_at) VALUES('ghl_message_capture_v2',true,now()-interval '4 days');
 SELECT pg_temp.c1d_receipt('InboundMessage','event_created','app_signature','observe',now()-interval '4 days');
 -- A workflow post today does not prove the app is sending. (Since lanes
--- health, 20261006050000, the CallCompleted, CustomerReplied and UserReplied
--- doorbells count as the lane's traffic for ghl_webhooks_quiet; its own
--- contract checks them. Any other workflow post still counts for nothing.)
+-- health, 20261006050000, ghl_webhooks_quiet judges the CallCompleted,
+-- CustomerReplied and UserReplied doorbells on their own two-business-day
+-- limit beside the app events; its own contract checks them. Any other
+-- workflow post still counts for nothing.)
 SELECT pg_temp.c1d_receipt('ContactStageChanged','event_created','workflow_secret','observe',now()-interval '5 minutes');
 -- The last successful run was an hour ago; the newest run failed (rate limit).
 SELECT pg_temp.c1d_run('succeeded','{"inserted":0,"webhook_misses":0}');
@@ -123,8 +124,12 @@ ROLLBACK;
 
 BEGIN;
 -- 5. Healthy: an app webhook a minute ago and a successful run 10 minutes ago.
+-- (Since lanes health, 20261006050000, ghl_webhooks_quiet also judges the
+-- workflow doorbells on their own two-business-day limit, so healthy GHL
+-- has posted one of those too.)
 INSERT INTO public.feature_flags(flag_name,enabled,updated_at) VALUES('ghl_message_capture_v2',true,now()-interval '4 days');
 SELECT pg_temp.c1d_receipt('InboundMessage','event_created','app_signature','observe',now()-interval '1 minute');
+SELECT pg_temp.c1d_receipt('CallCompleted','skipped','workflow_secret','observe',now()-interval '1 hour');
 SELECT pg_temp.c1d_run('partial','{"inserted":2,"webhook_misses":2,"backlog_conversations":4}');
 UPDATE public.context_capture_runs SET finished_at=now()-interval '10 minutes';
 DO $$

@@ -250,9 +250,10 @@ BEGIN
  PERFORM pg_temp.f1b_rows('f1b_backfill_only',quiet_at-interval '14 days',quiet_at,interval '10 minutes','backfill');
  old:=pg_temp.f1_context_source_freshness();
  snap:=public.context_source_freshness();
- -- Lanes health (20261006050000) adds a third list, action_log_sources,
- -- checked by its own contract.
- IF snap->'policy'<>(old->'policy') OR (snap->'policy')-'retired_sources'-'flag_gated_sources'-'action_log_sources'
+ -- Lanes health (20261006050000) adds two more lists, action_log_sources
+ -- and handover_sources (with its handover_flags note), checked by its own
+ -- contract.
+ IF snap->'policy'<>(old->'policy') OR (snap->'policy')-'retired_sources'-'flag_gated_sources'-'action_log_sources'-'handover_sources'-'handover_flags'
     <>'{"timezone":"Australia/Perth","business_days":"Mon-Sat","business_hours":"07:00-18:00","quiet_business_minutes":120,"normally_active_min_rows_per_business_hour":2.5,"rate_window_days":14,"lookback_days":60,"ignored_capture_modes":["backfill","relink"]}'::jsonb
  THEN RAISE EXCEPTION 'f1b policy changed beyond the two lists %',snap->'policy'; END IF;
  FOR o IN SELECT value FROM jsonb_array_elements(old->'sources') LOOP

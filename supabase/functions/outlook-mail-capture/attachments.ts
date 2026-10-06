@@ -18,12 +18,21 @@
 // refused every time).
 //
 // Idempotent: an attachment already in the ledger for this email is never read
-// again, so a re-read (poll overlap, sweep, a second mailbox copy) costs one
-// ledger read. A group post is read with every file's bytes (graph.ts), so once
-// the ledger holds any row for its email it is read again only by the sweep or
-// a history run (recheck), and only to retry a recorded failure. That also
-// keeps a post from storing the files a member's mailbox copy of the same email
-// already stored (its attachment ids differ).
+// again, so a re-read (poll overlap, sweep) costs one ledger read. A group post
+// is read with every file's bytes (graph.ts), so once the ledger holds any row
+// for its email it is read again only by the sweep or a history run
+// (recheck), and only to retry a recorded failure. A file whose row and whose
+// failure row both failed to write is therefore not retried for a group post
+// that has other rows (a user mailbox message lists its files again and
+// heals); the run counts it in attachment_errors.
+//
+// One file, one stored copy per email (review round 3, 6 Oct 2026). The same
+// email can reach a group and a member's own mailbox, and each copy lists its
+// files under different attachment ids; polls read sources in source_key
+// order, so either copy can come first. Before a file is uploaded its bytes
+// are hashed: a file whose sha-256 is already stored for the same email is
+// recorded skipped_duplicate (with that hash, no file) and not stored again.
+// The same file attached twice to one email is stored once the same way.
 //
 // Failures (lanes health, 6 Oct 2026). A failed list, download or upload used
 // to write nothing, so every poll tried again (finance@ failed 82 times in a
@@ -54,6 +63,7 @@ export type AttachmentStatus =
   | "skipped_message_cap"
   | "skipped_scope"
   | "skipped_no_content"
+  | "skipped_duplicate"
   | "failed";
 
 /** The ledger key of a refused attachment list: sha-256 of "failed:list". */
@@ -162,6 +172,8 @@ export interface AttachmentDeps {
   ): Promise<Uint8Array>;
   /** The ledger's rows for this email: attachment_key to status. */
   existing(providerMessageId: string): Promise<Map<string, AttachmentStatus>>;
+  /** The sha-256 of every file stored for this email, under any copy of it. */
+  storedHashes(providerMessageId: string): Promise<Set<string>>;
   /** Upload to the private bucket; an object already at the path counts as stored. */
   upload(path: string, bytes: Uint8Array, contentType: string): Promise<void>;
   /** One ledger row; a row already at its key is left as it is. */
@@ -275,6 +287,9 @@ export async function storeEmailAttachments(
     return result;
   }
   const emailKey = (await sha256Hex(args.providerMessageId)).slice(0, 32);
+  // The files already stored for this email (any copy), read once, when the
+  // first file's bytes are in hand.
+  let storedHashes: Set<string> | null = null;
   for (
     const { attachment, decision } of attachmentDecisions(
       list,
@@ -328,6 +343,20 @@ export async function storeEmailAttachments(
         }
         throw e;
       }
+      const sha = await sha256Hex(bytes);
+      // Already stored for this email (another mailbox copy, or the same
+      // file attached twice): recorded with its hash, never stored again.
+      storedHashes ??= await deps.storedHashes(args.providerMessageId);
+      if (storedHashes.has(sha)) {
+        await deps.record({
+          ...base,
+          size_bytes: bytes.byteLength,
+          sha256: sha,
+          status: "skipped_duplicate",
+        });
+        result.skipped++;
+        continue;
+      }
       const path = `${emailKey}/${key.slice(0, 32)}/${
         safeFileName(attachment.name)
       }`;
@@ -339,10 +368,11 @@ export async function storeEmailAttachments(
       await deps.record({
         ...base,
         size_bytes: bytes.byteLength,
-        sha256: await sha256Hex(bytes),
+        sha256: sha,
         storage_bucket: policy.bucket,
         storage_path: path,
       });
+      storedHashes.add(sha);
       result.stored++;
     } catch (e) {
       await recordFailure(failKey, attachment, fail(e), have);
