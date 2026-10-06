@@ -4258,6 +4258,20 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
+## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
+
+Since `20261006120000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
+older row: the per-trade crew-pay work order) or `job` (the one work order per
+fencing / patio job, draft then approved). An approved job work order is sealed
+by trigger: any update or delete raises, so a crew-path writer that touches it
+fails loudly. Every crew-pay read or write (`my_work_orders`,
+`submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
+`kind = 'crew'`; a new one must too. Only the users in
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role. Labour is
+stamped onto `trade_invoice_lines.job_work_order_id` by trigger at invoice
+submit; never set it from code. Variation emails and the draft backfill are
+behind flags seeded off. Contract and API: `docs/job-work-orders-v1.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

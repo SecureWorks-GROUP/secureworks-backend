@@ -113,6 +113,16 @@ if [[ "$action" == "job_story" || "$action" == "client_story" ]]; then
   fi
   exit 0
 fi
+# The job work order door (job_work_orders.ts readJobWorkOrder): requireUuid
+# refuses a job_id that is not a uuid before any job or work order read.
+if [[ "$action" == "job_work_order" ]]; then
+  if printf '%s' "$url" | grep -q 'job_id=__deploy_probe__'; then
+    printf '%s\n' '{"error":"job_id is required","code":"invalid_request"}'
+  else
+    printf '%s\n' '{"schema":"job-work-order.v1"}'
+  fi
+  exit 0
+fi
 if [[ "$action" == "context_story_scorecard" || "$action" == "context_scorecard" ]]; then
   if printf '%s' "$url" | grep -q 'as_of=__deploy_probe__'; then
     printf '%s\n' '{"error":"as_of must be an ISO date-time","code":"invalid_as_of"}'
@@ -123,7 +133,7 @@ if [[ "$action" == "context_story_scorecard" || "$action" == "context_scorecard"
 fi
 
 case "$action" in
-  trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
+  trade_calendar | my_jobs | my_work_orders | my_job_work_order | report_work_order_variation | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
     printf '%s\n' '{"error":"Login required"}'
     ;;
   *)
