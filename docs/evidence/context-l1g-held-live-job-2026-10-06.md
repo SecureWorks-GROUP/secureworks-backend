@@ -82,10 +82,11 @@ with L1f's body matches the live ladder row for row):
 | The 5 rows of the 01:04Z sample | 5 | 1 (`47a53cca`), 0 at message time |
 | Contact-rule rows (30 days) taken off their job | 191 of 4,004 | 7 of 4,004 |
 
-The 7 L1g still moves: 5 on a canary test job that is a draft beside live
-jobs, 1 whose job now belongs to another contact (`bfa54755`), 1 history row
-stored on a job created three weeks after the message, outside its lead window
-(`8f625619`). All three are cases where moving is the right answer.
+The 7 L1g still moves: 5 on a canary test job, a draft beside live jobs (one
+of the five names another job in its words), 1 whose job now belongs to another
+contact (`bfa54755`), 1 history row stored on a job created three weeks after
+the message, outside its lead window (`8f625619`). All three are cases where
+moving is the right answer.
 
 The at-message-time preview is `context-l1g-p4-preview-at-message-time.sql`
 beside this file: the desk's preview with one change (not_live_job judges the

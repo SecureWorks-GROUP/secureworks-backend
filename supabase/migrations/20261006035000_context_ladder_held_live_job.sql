@@ -23,9 +23,10 @@
 --      L1f's rules-on re-decision takes 191 off their job, among them 45 rows
 --      Luna had already placed (Luna is asked only when several jobs are live,
 --      so L1f could never hold one). L1g holds 184 of them; the other 7 still
---      move (5 on a canary test job that is a draft beside live jobs, 1 whose
---      job now belongs to another contact, 1 history row stored on a job
---      created three weeks after the message, outside its lead window).
+--      move (5 on a canary test job, a draft beside live jobs, one of them
+--      naming another job in its words; 1 whose job now belongs to another
+--      contact; 1 history row stored on a job created three weeks after the
+--      message, outside its lead window).
 --   b. One bucket row (ghl-history-load, a text of 2 Jun 2026) names invoice
 --      INV-0482; the rules place it direct on SWP-26040, whose invoice it is
 --      (paid that day). The preview counts it not_live_job because SWP-26040
