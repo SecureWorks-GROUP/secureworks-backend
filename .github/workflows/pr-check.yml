@@ -300,6 +300,7 @@ jobs:
             supabase/functions/ops-api/ses_report_trigger_test.ts \
             supabase/functions/ops-api/xero_bank_read_test.ts \
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
+            supabase/functions/ops-api/job_work_orders_test.ts \
             supabase/functions/ops-api/sales_booking_read_test.ts \
             supabase/functions/ops-api/sales_booking_outlook_test.ts \
             supabase/functions/ops-api/sales_booking_pack_test.ts \
