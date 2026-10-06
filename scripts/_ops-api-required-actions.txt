@@ -101,6 +101,8 @@ assemble_job_dossier
 job_story                 # probe=bounded-refusal probe-args=job_id=__deploy_probe__
 client_story              # probe=bounded-refusal probe-args=job_id=__deploy_probe__
 context_story_scorecard   # probe=bounded-refusal probe-args=as_of=__deploy_probe__
+# The context scorecard (W11): rows 1 to 14 and its per-job pages, same probe.
+context_scorecard         # probe=bounded-refusal probe-args=as_of=__deploy_probe__
 assemble_job_brain
 get_job_context_facts
 get_job_conversation

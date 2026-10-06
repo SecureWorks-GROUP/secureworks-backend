@@ -414,6 +414,7 @@ import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invo
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
+import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { businessEventTimelineMessage, emailCustomerParty, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
@@ -7444,9 +7445,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // ── Job story (story slice S2): the story of one job, its client's story,
       // and the done-definition scorecard. Staff front door (the default for an
       // action on no static, profile, routine or agent list), GET only,
-      // read-only SQL functions, nothing written.
+      // read-only SQL functions, nothing written. context_scorecard (W11,
+      // 20261006032000) is the whole rows 1 to 14 card and its per-job pages.
       case 'job_story':
       case 'client_story':
+      case 'context_scorecard':
       case 'context_story_scorecard': {
         if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
         if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
@@ -7455,7 +7458,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             ? await jobStoryAction(client, url.searchParams)
             : action === 'client_story'
               ? await clientStoryAction(client, url.searchParams)
-              : await storyScorecardAction(client, url.searchParams))
+              : action === 'context_scorecard'
+                ? await contextScorecardAction(client, url.searchParams)
+                : await storyScorecardAction(client, url.searchParams))
         } catch (error) {
           if (error instanceof StoryReadError) return json({ error: error.message, code: error.code }, error.status)
           throw error

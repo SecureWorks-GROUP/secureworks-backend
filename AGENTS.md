@@ -606,6 +606,14 @@ a batch. `context_extraction_events` returns exact rows because
 `persist_luna_context_revision` compares them byte for byte; per-row `ours` and
 `older_context` come from `context_extraction_event_flags`.
 
+The owner's definition of done (rows 1 to 14) is measured by
+`context_scorecard(as_of)` and, per live job, `context_scorecard_jobs(after,
+limit, as_of)` (`20261006032000`; staff door `ops-api?action=context_scorecard`).
+Every threshold, including each capture lane's quiet limit in Perth working
+minutes and the 3-run history stall rule, lives only in
+`context_scorecard_policy()`; change it there by migration, never in a caller.
+A row SQL cannot measure stays red with the reason; never make it green in code.
+
 A new pg_cron job that writes evidence is scheduled already gated
 (`... WHERE public.automation_lane_enabled('<lane>')`) and added to
 `automation_switch_cron_lanes()` in the same migration, so the switch's wrap and

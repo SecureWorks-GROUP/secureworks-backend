@@ -853,7 +853,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261006013000", "context_ledger_store"),
                       # job story v1: the job_story, client_story and
                       # context_story_scorecard doors and dossier mode story.
-                      ("20261006014000", "context_job_story")]:
+                      ("20261006014000", "context_job_story"),
+                      # W11: the context_scorecard door (rows 1 to 14, per job).
+                      ("20261006032000", "context_scorecard")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

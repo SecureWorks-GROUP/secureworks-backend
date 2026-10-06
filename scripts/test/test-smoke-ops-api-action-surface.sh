@@ -101,9 +101,10 @@ if [[ "$action" == "sales_booking_read" || "$action" == "sales_booking_stamp_rea
   exit 0
 fi
 
-# Stands in for the job story doors (job_story_read.ts): parseUuid refuses a
-# job_id that is not a uuid, and parseInstant an as_of that is not a date-time,
-# before any job, story or scorecard read.
+# Stands in for the job story doors (job_story_read.ts) and the context
+# scorecard door (context_scorecard_read.ts): parseUuid refuses a job_id that
+# is not a uuid, and parseInstant an as_of that is not a date-time, before any
+# job, story or scorecard read.
 if [[ "$action" == "job_story" || "$action" == "client_story" ]]; then
   if printf '%s' "$url" | grep -q 'job_id=__deploy_probe__'; then
     printf '%s\n' '{"error":"job_id must be a uuid","code":"invalid_job_id"}'
@@ -112,7 +113,7 @@ if [[ "$action" == "job_story" || "$action" == "client_story" ]]; then
   fi
   exit 0
 fi
-if [[ "$action" == "context_story_scorecard" ]]; then
+if [[ "$action" == "context_story_scorecard" || "$action" == "context_scorecard" ]]; then
   if printf '%s' "$url" | grep -q 'as_of=__deploy_probe__'; then
     printf '%s\n' '{"error":"as_of must be an ISO date-time","code":"invalid_as_of"}'
   else
