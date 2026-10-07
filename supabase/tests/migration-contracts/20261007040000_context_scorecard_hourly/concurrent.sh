@@ -7,8 +7,11 @@
 #     query: SET; SET; SELECT): each SET governs the SELECT after it. With the
 #     scorecard held behind a table lock, the command's own lock timeout, then
 #     its own statement timeout, cut the run, and each hour is stored as a
-#     failed run with its code instead of being lost. Both rows are deleted
-#     afterwards, so nothing outlives this script.
+#     failed run with its code instead of being lost. The status read then tells
+#     the hourly reader the check is failing (since when, which code, how many in
+#     a row), and the reader's receipt of that failure is kept as failing. Every
+#     row is deleted afterwards (receipts go with their runs), so nothing
+#     outlives this script.
 set -euo pipefail
 
 database_url=${CONTRACT_DATABASE_URL:-}
@@ -96,10 +99,20 @@ if [ "$status_lock" -ne 0 ] || [ "$status_statement" -ne 0 ]; then
 fi
 
 runs=$(q -c "SELECT coalesce(string_agg(status || ':' || coalesce(error_code, '-') || ':' || run_trigger, ',' ORDER BY id), '') FROM public.context_scorecard_runs")
-alerts=$(q -c "SELECT count(*) FROM public.ai_alerts WHERE alert_type = 'context_scorecard_red_rows'")
+report=$(q -c "SELECT concat_ws('|', s->'report'->>'kind', s->>'consecutive_failures', (s->'report'->>'run_id')::bigint = (SELECT max(id) FROM public.context_scorecard_runs), (s->'report'->>'failing_since')::timestamptz = (SELECT min(as_of) FROM public.context_scorecard_runs), s->'report'->>'message' LIKE 'Context system hourly check failing since % Perth on % (57014): 2 failed runs in a row. No good run is stored yet.', position('the newest run failed (57014), 2 in a row' IN s->'lane'->>'note') > 0) FROM (SELECT public.context_scorecard_run_status() AS s) x")
+receipt=$(q -c "SELECT public.context_scorecard_record_receipt('rayleigh', (SELECT id FROM public.context_scorecard_runs ORDER BY as_of DESC, id DESC LIMIT 1), '{}')->>'kind'")
 q -c "DELETE FROM public.context_scorecard_runs"
-if [ "$runs" != "failed:55P03:cron,failed:57014:cron" ] || [ "$alerts" != "0" ]; then
-  echo "error: expected two failed cron runs (55P03 then 57014) and no alert; got runs '${runs}' alerts '${alerts}'" >&2
+left=$(q -c "SELECT (SELECT count(*) FROM public.context_scorecard_runs) + (SELECT count(*) FROM public.context_scorecard_receipts)")
+if [ "$runs" != "failed:55P03:cron,failed:57014:cron" ]; then
+  echo "error: expected two failed cron runs (55P03 then 57014); got runs '${runs}'" >&2
+  exit 1
+fi
+if [ "$report" != "failing|2|t|t|t|t" ] || [ "$receipt" != "failing" ]; then
+  echo "error: the failing hours were not reported to the reader; got report '${report}' receipt '${receipt}'" >&2
+  exit 1
+fi
+if [ "$left" != "0" ]; then
+  echo "error: ${left} rows outlived the script" >&2
   exit 1
 fi
 echo "hourly scorecard concurrent sessions passed"
