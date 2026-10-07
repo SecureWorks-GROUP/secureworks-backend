@@ -23,21 +23,32 @@
 --     contact the job's own (jobs.ghl_contact_id), is the customer's call. Otherwise null, which the
 --     packet gives the reader as "unknown". The citation check (customer_sender), the evidence rows
 --     and the packet all read it here.
---  2. context_ledger_elsewhere_claim(what): whether an item's words say a row belongs to another
---     person, another job or a lead (labelled, marked, linked or filed as someone else's; a customer
---     of another job; another job or a lead; misfiled; belongs to, concerns or is about another job;
---     not from this job's customer). One case-insensitive pattern written so PostgreSQL (~*) and
---     JavaScript (new RegExp(pattern, 'i')) read it alike: the reader mirrors it.
---  3. context_ledger_row_elsewhere(job, table, id): whether a row's own placement or role basis says
---     it is someone else's, and why: role_basis:<basis> (its who-to-whom basis is set and is not
---     job_customer, no_match, no_contact or error), call_not_customer (a transcript whose call row on
---     this job is stamped otherwise), call_on_other_job (a transcript whose call row sits on another
---     job), sender_not_client (old-inbox mail from an address other than the job's client email),
---     names_other_job:<number> (its own words name another job's reference and none of this job's,
---     by the placement keys); else null. A record row never.
---  4. context_ledger_check_item refuses a model item whose words say a row belongs to another person,
---     job or lead unless one of its cited rows, opening or closing, is someone else's by (3): the new
---     refusal code elsewhere_unsupported. A person's own item is their word.
+--  2. context_ledger_elsewhere_claim(what): whether an item's words say a row is someone else's: its
+--     sender, caller or counterpart another person than this job's customer (from, or belonging to,
+--     another customer, client, contact, person, caller or lead, or someone else; a customer of
+--     another job; another job's customer; another job or a lead; not from this job's customer;
+--     someone other than this job's customer), or a label saying so (labelled, marked, linked,
+--     tagged, stamped, attributed, assigned, shown or listed as, from, to or with another person or
+--     someone else). A claim that a row or a thing concerns, is for or belongs to another job is not
+--     one: that is the reader's placement judgement, and the store reads no stamp as its support
+--     (second review, 8 Oct: 12 of the 13 such claims the first pattern refused on production were
+--     right). One case-insensitive pattern written so PostgreSQL (~*) and JavaScript
+--     (new RegExp(pattern, 'i')) read it alike: the reader mirrors it.
+--  3. context_ledger_row_elsewhere(job, table, id): whether a row is someone else's, and why:
+--     role_basis:<basis> (its own who-to-whom stamp names another job's customer or party or a lead:
+--     any_job_customer, any_job_party, lead and their contact_ forms), call_not_customer (a
+--     transcript whose call row on this job is stamped so), call_on_other_job (a transcript whose call
+--     row sits on another job), names_other_job:<number> (its own words name another job's reference
+--     and none of this job's, by the placement keys); else null. Never the customer's own words (the
+--     citation check's customer_sender), and never by a stamp naming our own people, a supplier, a
+--     builder, a council, a party on this job or nobody (an unknown caller); old-inbox mail only by
+--     its words (its sender is stamped nowhere); a record row never.
+--  4. context_ledger_check_item refuses a model item whose words make the claim (2) unless no cited
+--     row, opening or closing, is this job's customer's own words, every cited row that is not a
+--     record or our own text, email or note (a transcript holds both sides' words) is someone else's
+--     by its own stamp (3: role_basis or call_not_customer), and at least one is: the new refusal
+--     code elsewhere_unsupported. A placement reason names no person, and an extra citation never
+--     carries the claim. A person's own item is their word.
 --  5. The packet (still ledger-packet-v1, fields only added): each transcript's call_customer is true,
 --     false or "unknown", never a bare null; each evidence row carries elsewhere, (3)'s reason or
 --     null; and siblings (context_ledger_siblings): the same client's other jobs (the same CRM contact,
@@ -59,9 +70,14 @@
 --  - (1) 62 transcripts on 51 readings go from null to the customer's call; 1 transcript on 1
 --    reading reads "unknown". 83 items on 37 readings cite such a transcript; 48 of them (27
 --    readings) open on it with from_role unknown.
---  - (4) 30 items say a row belongs elsewhere: 8 stand on a cited row the rule accepts
---    (role_basis 4, names_other_job 2, call_on_other_job 1, sender_not_client 1); 22 items on 22
---    readings would be refused on a rebuild, the 4 unsafe lines among them.
+--  - (4) (8 Oct, about 02:00 Perth) 11 items on 11 readings say a row is someone else's: 10 would
+--    be refused on a rebuild, each citing the customer's own call (the 4 unsafe lines, 5 more label
+--    misreadings and 1 guess), and 1 stands on its own row's stamp (any_job_customer). The 19 items
+--    on 16 readings that say a row concerns or belongs to another job stand, the 12 the first rule
+--    refused among them. Over the 499 rollout jobs' evidence (copies left out), 34 of 6,631 rows on 32 jobs carry
+--    an elsewhere reason (27 names_other_job, 7 role_basis:any_job_customer), where the first rule
+--    tagged 868 (671 by role basis: our own people's rows, suppliers', builders', councils', parties
+--    on this job; 168 old-inbox mails not from the client's address; 28 by their words; 1 call).
 --  - (5) 214 readings are on a job with a sibling (306 links); on 185 a sibling has a quote sent or
 --    an invoice issued; 44 of those hold 83 open quote, invoice or payment items it may bear on.
 --    Over the 499 rollout jobs the section is 282 bytes on average (600 with a sibling, at most
@@ -96,7 +112,7 @@ BEGIN
  -- The four replaced bodies: the 20261006013000 bodies production runs, or this migration's (re-apply).
  FOR x IN SELECT * FROM (VALUES
   ('public.context_ledger_call_customer(public.business_events)', ARRAY['23f31463321396e3e5fde6329e32c60e', 'cd1cda0bb5bd1c5405001a1d6b670d5f']),
-  ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['52bd1db9fb4b75fedd6cbfc755e806b3', '76de45b9ee5c823593fb4b3fded873e3']),
+  ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['52bd1db9fb4b75fedd6cbfc755e806b3', '06e3e1cae99a50ec56308b74e7a1b03d']),
   ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['7afbf2bbe6d5688219e743fda88b5eb2', '6da1007ff2a6331219f4d98f85749ca7']),
   ('public.context_ledger_packet(uuid,timestamptz,timestamptz)', ARRAY['86bed4277fb61ce4679e5cd476001555', '423469bdff01ae4029c155f6c73c078d'])
  ) AS v(sig, accepted) LOOP
@@ -145,16 +161,18 @@ BEGIN
  END IF;
 END $guard$;
 
--- 1. Whether an item's words say a row belongs to another person, another job or a lead. One
--- pattern, read case-insensitively, written with nothing PostgreSQL (~*) and JavaScript
+-- 1. Whether an item's words say a row is someone else's: its sender, caller or counterpart another
+-- person than this job's customer, or a label saying so (second review, 8 Oct: a claim that a row
+-- concerns, is for or belongs to another job is the reader's placement judgement, not one of these).
+-- One pattern, read case-insensitively, written with nothing PostgreSQL (~*) and JavaScript
 -- (new RegExp(pattern, 'i')) read differently (no \m, \M, \y or \b; words are bounded by
 -- (^|[^a-z0-9]) and ([^a-z0-9]|$)), so a reader can mirror it character for character.
 CREATE OR REPLACE FUNCTION public.context_ledger_elsewhere_claim(p_what text) RETURNS boolean
 LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
- SELECT coalesce(p_what ~* '((^|[^a-z0-9])belong(s|ed|ing)?\s+(to|with)\s+((another|a\s+different|a\s+separate|the\s+wrong)|someone|somebody|that\s+(job|customer|client)|((the\s+)?(client|customer)[''’]?s\s+other|(their|his|her)\s+other))([^a-z0-9]|$))|((^|[^a-z0-9])(relates?|related|relating|concerns?|concerned|concerning|refers?|referring|(is|are|was|were|be|been|being)\s+(about|for|from)|comes?\s+from|came\s+from|meant\s+for|intended\s+for)\s+(to\s+)?((another|a\s+different|a\s+separate|the\s+wrong)|((the\s+)?(client|customer)[''’]?s\s+other|(their|his|her)\s+other))\s+(job|customer|client|contact|person|caller|lead|property|site)([^a-z0-9]|$))|((^|[^a-z0-9])(labell?ed|marked|linked|filed|stored|saved|logged|recorded|tagged|stamped|attributed|assigned|attached|placed|shown|listed)\s+(as\s+)?(coming\s+)?((from|to|on|against|under|with|for)\s+)?(a\s+customer\s+of\s+)?((another|a\s+different|a\s+separate|the\s+wrong)\s+(job|customer|client|contact|person|caller|lead|property|site)|(someone|somebody)\s+(other|else))([^a-z0-9]|$))|((^|[^a-z0-9])mis-?(filed|labell?ed|attributed|linked|addressed|directed)([^a-z0-9]|$))|((^|[^a-z0-9])(customer|client)\s+of\s+(another|a\s+different|the\s+wrong|an\s+other|other)\s+jobs?([^a-z0-9]|$))|((^|[^a-z0-9])(another|other)\s+job[''’]?s\s+(customer|client)([^a-z0-9]|$))|((^|[^a-z0-9])(another|other)\s+jobs?\s+or\s+(a\s+)?leads?([^a-z0-9]|$))|((^|[^a-z0-9])not\s+(from|to|with|by)\s+(this|the)\s+(job[''’]?s\s+)?(customer|client)([^a-z0-9''’]|$))|((^|[^a-z0-9])not\s+(this|the)\s+job[''’]?s\s+(customer|client)([^a-z0-9]|$))|((^|[^a-z0-9])(someone|somebody)\s+other\s+than\s+(this|the)\s+(job[''’]?s\s+)?(customer|client)([^a-z0-9]|$))', false)
+ SELECT coalesce(p_what ~* '((^|[^a-z0-9])belong(s|ed|ing)?\s+(to|with)\s+((another|a\s+different|a\s+separate|the\s+wrong)\s+(customer|client|contact|person|caller|lead)|someone|somebody|that\s+(customer|client))([^a-z0-9]|$))|((^|[^a-z0-9])((is|are|was|were|be|been|being)\s+from|comes?\s+from|came\s+from)\s+(another|a\s+different|a\s+separate|the\s+wrong)\s+(customer|client|contact|person|caller|lead)([^a-z0-9]|$))|((^|[^a-z0-9])(labell?ed|marked|linked|tagged|stamped|attributed|assigned|shown|listed)\s+(as\s+(coming\s+)?((from|to|with)\s+)?|(coming\s+)?(from|to|with)\s+)((another|a\s+different|a\s+separate|the\s+wrong)\s+(customer|client|contact|person|caller|lead)|(someone|somebody)\s+(other|else))([^a-z0-9]|$))|((^|[^a-z0-9])(customer|client)\s+of\s+(another|a\s+different|the\s+wrong|an\s+other|other)\s+jobs?([^a-z0-9]|$))|((^|[^a-z0-9])(another|other)\s+job[''’]?s\s+(customer|client)([^a-z0-9]|$))|((^|[^a-z0-9])(another|other)\s+jobs?\s+or\s+(a\s+)?leads?([^a-z0-9]|$))|((^|[^a-z0-9])not\s+(from|to|with|by)\s+(this|the)\s+(job[''’]?s\s+)?(customer|client)([^a-z0-9''’]|$))|((^|[^a-z0-9])not\s+(this|the)\s+job[''’]?s\s+(customer|client)([^a-z0-9]|$))|((^|[^a-z0-9])(someone|somebody)\s+other\s+than\s+(this|the)\s+(job[''’]?s\s+)?(customer|client)([^a-z0-9]|$))', false)
 $$;
 COMMENT ON FUNCTION public.context_ledger_elsewhere_claim(text) IS
- 'Ledger reader fixes (20261007150000): whether an item''s words say a row belongs to another person, another job or a lead: belongs to another job, someone, that job or the client''s other job; relates to, concerns, is about, is for or is from another (or a different, a separate, the wrong, the client''s other) job, customer, client, contact, person, caller, lead, property or site; labelled, marked, linked, filed, stored, saved, logged, recorded, tagged, stamped, attributed, assigned, attached, placed, shown or listed as from another job (or a customer of another job, someone other or else); misfiled, mislabelled, misattributed, mislinked, misaddressed, misdirected; a customer of another job; another job''s customer; another job or a lead; not from (to, with, by) this job''s customer; not this job''s customer; someone other than this customer. Case-insensitive; the pattern is written so PostgreSQL ~* and JavaScript new RegExp(pattern, ''i'') read it alike. context_ledger_check_item refuses such a model item (elsewhere_unsupported) unless a cited row is someone else''s by context_ledger_row_elsewhere. Service role only.';
+ 'Ledger reader fixes (20261007150000): whether an item''s words say a row is someone else''s, its sender, caller or counterpart another person than this job''s customer, or a label saying so: belongs to another (a different, a separate, the wrong) customer, client, contact, person, caller or lead, to someone or somebody, or to that customer; is, was or came from another such person; labelled, marked, linked, tagged, stamped, attributed, assigned, shown or listed as, from, to or with another such person or someone (somebody) other or else; a customer of another job; another job''s customer; another job or a lead; not from (to, with, by) this job''s customer; not this job''s customer; someone other than this customer. A claim that a row or a thing concerns, is for or belongs to another job is not one: it is the reader''s placement judgement (second review, 8 Oct). Case-insensitive; the pattern is written so PostgreSQL ~* and JavaScript new RegExp(pattern, ''i'') read it alike. context_ledger_check_item refuses such a model item (elsewhere_unsupported) when a cited row is this job''s customer''s own words, when a cited row that is not a record or our own text, email or note is not someone else''s by its own stamp (context_ledger_row_elsewhere: role_basis or call_not_customer), or when none is. Service role only.';
 
 -- 2. When a PAID invoice closes a payment item: at the end of its paid Perth day (the citation
 -- check's paid_at is that day's Perth midnight, never after now), never after now. A paid record is a
@@ -183,44 +201,54 @@ $$;
 COMMENT ON FUNCTION public.context_ledger_work_order_key(text) IS
  'Ledger reader fixes (20261007150000): the work order a make-safe external reference (makesafe_job_details.external_ref) names: its letters and digits in upper case after a trailing purchase order part that follows a digit is taken off, with MLB''s RR and MW scopes read as MLB (MLB-12345PO-67890, MLB-12345PO-RET14 and MLB-RR-12345 are MLB12345; AJBR 70001 is AJBR70001; PO20001 stays PO20001); null unless at least 5 characters with a digit. A grouping for the reader''s context only, never an identity: it places, bills and keys nothing. Read by context_ledger_siblings. Service role only.';
 
--- 4. Whether a row's own placement or role basis says it is someone else's, and why. The one rule
--- the citation check's item rule (elsewhere_unsupported) and the packet's per-row elsewhere read.
+-- 4. Whether a row is someone else's, and why: its own who-to-whom stamp (or its call row's on this
+-- job) names another job's customer or party or a lead, its call row sits on another job, or its own
+-- words name another job's reference and none of this job's. Never the customer's own words, and
+-- never by a stamp naming our own people, a supplier, a builder, a council, a party on this job or
+-- nobody (second review, 8 Oct: those are this job's people or an unknown, not someone else). The one
+-- rule the citation check's item rule (elsewhere_unsupported) and the packet's per-row elsewhere read.
 CREATE OR REPLACE FUNCTION public.context_ledger_row_elsewhere(p_job_id uuid, p_table text, p_id uuid) RETURNS text
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE e public.business_events; i record; v_cmail text; v_text text; v_basis text; v_call text; v_call_job uuid;
- v_other text; v_this boolean;
+ v_call_basis text; v_other text; v_this boolean;
+ -- the stamps naming someone other than this job's customer who is not one of this job's people:
+ -- another job's customer or party, or a lead (party roles v2 and v3, and their contact_ forms)
+ v_others constant text[] := ARRAY['any_job_customer', 'contact_any_job_customer', 'any_job_party', 'contact_any_job_party',
+  'lead', 'contact_lead'];
 BEGIN
  IF p_job_id IS NULL OR p_id IS NULL THEN RETURN NULL; END IF;
  IF p_table = 'business_events' THEN
   SELECT * INTO e FROM public.business_events b WHERE b.id = p_id;
   IF e.id IS NULL OR e.job_id IS DISTINCT FROM p_job_id THEN RETURN NULL; END IF;
-  -- its who-to-whom stamp names someone other than this job's customer: every basis but
-  -- job_customer and the ones that know nobody (no_match, no_contact, error)
   v_basis := e.metadata #>> '{party_roles,basis}';
-  IF v_basis IS NOT NULL AND v_basis NOT IN ('job_customer', 'no_match', 'no_contact', 'error') THEN
-   RETURN 'role_basis:' || left(v_basis, 40);
-  END IF;
   IF e.event_type = 'call.transcript_completed' THEN
-   -- a transcript whose call row on this job is stamped with someone else
-   IF public.context_ledger_call_customer(e) IS FALSE THEN RETURN 'call_not_customer'; END IF;
-   -- a transcript whose call row is placed on another job (one row holds a provider key)
+   -- the customer's own call is never someone else's (the citation check's customer_sender)
+   IF public.context_ledger_call_customer(e) THEN RETURN NULL; END IF;
    v_call := coalesce(nullif(btrim(e.payload ->> 'ghl_call_id'), ''),
     CASE WHEN e.provider_message_id LIKE 'ghltx:%' THEN substr(e.provider_message_id, 7) END);
    IF v_call IS NOT NULL THEN
-    SELECT c.job_id INTO v_call_job FROM public.business_events c
+    -- its call row (one row holds a provider key): where it sits and whom it is stamped with
+    SELECT c.job_id, c.metadata #>> '{party_roles,basis}' INTO v_call_job, v_call_basis FROM public.business_events c
     WHERE c.provider_message_id = 'ghl:' || v_call AND c.event_type <> 'call.transcript_completed';
-    IF v_call_job IS NOT NULL AND v_call_job <> p_job_id THEN RETURN 'call_on_other_job'; END IF;
    END IF;
+  ELSIF (e.metadata #>> '{party_roles,sender_role}' = 'customer' AND v_basis = 'job_customer')
+     OR (NOT coalesce(e.metadata ? 'party_roles', false) AND e.event_type LIKE 'client.%' AND e.direction = 'inbound') THEN
+   RETURN NULL;  -- the customer's own words (the citation check's customer_sender)
   END IF;
+  -- its own stamp names another job's customer or party, or a lead
+  IF v_basis = ANY(v_others) THEN RETURN 'role_basis:' || v_basis; END IF;
+  -- a transcript whose call row on this job is stamped so
+  IF v_call_job = p_job_id AND v_call_basis = ANY(v_others) THEN RETURN 'call_not_customer'; END IF;
+  -- a transcript whose call row sits on another job
+  IF v_call_job IS NOT NULL AND v_call_job <> p_job_id THEN RETURN 'call_on_other_job'; END IF;
   v_text := concat_ws(' ', e.payload ->> 'subject', public.context_event_text(e));
  ELSIF p_table = 'inbox_events' THEN
   SELECT x.from_email, x.subject, x.body_preview INTO i FROM public.inbox_events x WHERE x.id = p_id;
   IF NOT FOUND THEN RETURN NULL; END IF;
-  -- old-inbox mail from an address other than the job's client email
+  -- old-inbox mail from the job's client email is the customer's own; any other is someone else's
+  -- only by its own words (its sender is stamped nowhere)
   SELECT lower(nullif(btrim(j.client_email), '')) INTO v_cmail FROM public.jobs j WHERE j.id = p_job_id;
-  IF v_cmail IS NOT NULL AND nullif(btrim(i.from_email), '') IS NOT NULL AND lower(btrim(i.from_email)) <> v_cmail THEN
-   RETURN 'sender_not_client';
-  END IF;
+  IF v_cmail IS NOT NULL AND lower(btrim(i.from_email)) = v_cmail THEN RETURN NULL; END IF;
   v_text := concat_ws(' ', i.subject, i.body_preview);
  ELSE
   RETURN NULL;  -- a record row is this job's own record
@@ -234,7 +262,7 @@ BEGIN
  RETURN NULL;
 END $$;
 COMMENT ON FUNCTION public.context_ledger_row_elsewhere(uuid, text, uuid) IS
- 'Ledger reader fixes (20261007150000): whether a row''s own placement or role basis says it is someone else''s (another person, another job or a lead), and why; null when nothing about the row says so (a record row, or a business_events row that is not this job''s, never). role_basis:<basis> (a business_events row whose party_roles basis is set and is not job_customer, no_match, no_contact or error: another job''s customer or party, a lead, a supplier, a builder, a council, our own people); call_not_customer (a call transcript whose call row on this job is stamped with someone other than the job''s customer: context_ledger_call_customer false); call_on_other_job (a call transcript whose call row, ghl:<id>, sits on another job); sender_not_client (old-inbox mail from an address other than the job''s client email, when it has one); names_other_job:<job number> (its own words name another job''s reference and none of this job''s, by the placement keys context_job_ref_tokens and context_ref_jobs, C order). Read by context_ledger_check_item (an item saying a row belongs to someone else stands only on such a row: elsewhere_unsupported) and the packet (each evidence row''s elsewhere). Service role only.';
+ 'Ledger reader fixes (20261007150000): whether a row is someone else''s, and why; null when nothing about the row says so. role_basis:<basis> (a business_events row whose own party_roles stamp names another job''s customer or party or a lead: any_job_customer, any_job_party, lead, or their contact_ forms); call_not_customer (a call transcript whose call row on this job is stamped so); call_on_other_job (a call transcript whose call row, ghl:<id>, sits on another job); names_other_job:<job number> (its own words name another job''s reference and none of this job''s, by the placement keys context_job_ref_tokens and context_ref_jobs, C order). Never the customer''s own words (a transcript context_ledger_call_customer calls the customer''s, an inbound row stamped the job''s customer, an unstamped inbound client row, old-inbox mail from the job''s client email); never by a stamp naming our own people, a supplier, a builder, a council, a party on this job or nobody (second review, 8 Oct); old-inbox mail only by its words; a record row, or a business_events row that is not this job''s, never. Only role_basis and call_not_customer name a person: read by context_ledger_check_item (a claim that a row is someone else''s stands only on them: elsewhere_unsupported) and by the packet (each evidence row''s elsewhere). Service role only.';
 
 -- 5. The same client's and the same work order's other jobs, for the reader: what was quoted and
 -- billed there, so a quote sent or an invoice raised on the sibling never reads as missing here.
@@ -339,6 +367,7 @@ DECLARE v_type text; v_status text; v_from text; v_to text; v_what text; v_about
  v_any_customer boolean := false; v_any_us boolean := false; v_any_external boolean := false; v_due_ok boolean := false;
  v_first_customer boolean; v_first_us boolean; v_close_at timestamptz;
  v_key text; v_first text; v_facts jsonb := '[]'; f jsonb; v_supported date;
+ v_cfacts jsonb := '[]'; v_reason text; v_someone integer := 0;
  roles constant text[] := ARRAY['us','crew','customer','supplier','insurer_builder','third_party','unknown'];
 BEGIN
  IF p_item IS NULL OR jsonb_typeof(p_item) <> 'object' THEN
@@ -476,6 +505,7 @@ BEGIN
    RETURN jsonb_build_object('ok', false, 'code', 'closing_before_opening', 'detail', 'closed_by[' || n || ']');
   END IF;
   v_close := v_close || jsonb_build_array(chk -> 'cite');
+  v_cfacts := v_cfacts || jsonb_build_array(chk);
   v_closed_at := greatest(v_closed_at, v_close_at);
  END LOOP;
  IF v_status IN ('closed','declined') AND jsonb_array_length(v_close) = 0 THEN
@@ -495,15 +525,35 @@ BEGIN
   IF v_to = 'customer' AND NOT v_any_external THEN
    RETURN jsonb_build_object('ok', false, 'code', 'internal_to_customer', 'detail', 'every opening citation is a crew or staff internal text');
   END IF;
-  -- (ledger reader fixes, 20261007150000) An item that says a row belongs to another person, another
-  -- job or a lead stands only on a cited row (opening or closing) whose own placement or role basis
-  -- says it is someone else's (context_ledger_row_elsewhere): never on the reader's word alone, so
-  -- the customer's own call is never put on someone else.
-  IF public.context_ledger_elsewhere_claim(v_what)
-   AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(v_open || v_close) x
-                   WHERE public.context_ledger_row_elsewhere(p_job_id, x ->> 'table', (x ->> 'id')::uuid) IS NOT NULL) THEN
-   RETURN jsonb_build_object('ok', false, 'code', 'elsewhere_unsupported',
-    'detail', 'what says a row belongs to another person, job or lead; no cited row''s placement or role basis says so');
+  -- (ledger reader fixes, 20261007150000) An item whose words say a row is someone else's (its
+  -- sender, caller or counterpart another person than this job's customer, or a label saying so:
+  -- context_ledger_elsewhere_claim) stands only when no cited row, opening or closing, is this job's
+  -- customer's own words, every cited row that is not a record or our own text, email or note (a
+  -- call transcript holds both sides' words, so it is never ours alone) is someone else's by its own
+  -- stamp (context_ledger_row_elsewhere: role_basis or call_not_customer), and at least one is: never
+  -- on the reader's word or an extra citation, so the customer's own call is never put on someone
+  -- else; a placement reason (call_on_other_job, names_other_job) names no person. A claim that a
+  -- row concerns or belongs to another job is the reader's placement judgement (second review, 8 Oct).
+  IF public.context_ledger_elsewhere_claim(v_what) THEN
+   FOR f IN SELECT x FROM jsonb_array_elements(v_facts || v_cfacts) x LOOP
+    IF coalesce((f ->> 'customer_sender')::boolean, false) THEN
+     RETURN jsonb_build_object('ok', false, 'code', 'elsewhere_unsupported', 'detail', 'what says a row is someone else''s; '
+      || (f #>> '{cite,table}') || ':' || (f #>> '{cite,id}') || ' is this job''s customer''s own words');
+    END IF;
+    v_reason := public.context_ledger_row_elsewhere(p_job_id, f #>> '{cite,table}', (f #>> '{cite,id}')::uuid);
+    IF starts_with(coalesce(v_reason, ''), 'role_basis:') OR v_reason = 'call_not_customer' THEN
+     v_someone := v_someone + 1;
+    ELSIF NOT (coalesce((f ->> 'record')::boolean, false)
+      OR (coalesce((f ->> 'ours')::boolean, false) AND NOT EXISTS (SELECT 1 FROM public.business_events b
+       WHERE f #>> '{cite,table}' = 'business_events' AND b.id = (f #>> '{cite,id}')::uuid AND b.event_type = 'call.transcript_completed'))) THEN
+     RETURN jsonb_build_object('ok', false, 'code', 'elsewhere_unsupported', 'detail', 'what says a row is someone else''s; the stamp of '
+      || (f #>> '{cite,table}') || ':' || (f #>> '{cite,id}') || ' names no one else');
+    END IF;
+   END LOOP;
+   IF v_someone = 0 THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'elsewhere_unsupported',
+     'detail', 'what says a row is someone else''s; no cited row''s own stamp names another job''s customer or party or a lead');
+   END IF;
   END IF;
  END IF;
  -- A due date only when an opening excerpt states it.
@@ -534,7 +584,7 @@ BEGIN
   'needs_reply', CASE WHEN jsonb_typeof(p_item -> 'needs_reply') = 'boolean' THEN (p_item ->> 'needs_reply')::boolean END, 'also_concerns', nullif(btrim(p_item ->> 'also_concerns'), '')));
 END $$;
 COMMENT ON FUNCTION public.context_ledger_check_item(uuid, jsonb, text, uuid, text) IS
- 'Context ledger store (20261006013000), ledger reader fixes (20261007150000): a model item whose words say a row belongs to another person, another job or a lead (context_ledger_elsewhere_claim) is refused elsewhere_unsupported unless one of its cited rows, opening or closing, is someone else''s by its own placement or role basis (context_ledger_row_elsewhere); a person''s own item is their word. A PAID invoice closes a payment item (closes_on payment) at the end of its paid Perth day, never after now (context_ledger_paid_close_at), whatever the invoice''s date, so a request made the day it was paid is closed by it. Earlier: checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it; a closing citation must be able to close (close_at: no draft invoice, unsent document or unattended booking: closing_not_issued), may not be an opening citation (closing_is_opening) and is at or after the opening, strictly after for a request (closing_before_opening); speaker rules for the model on the first opening citation (customer: the job''s customer sent it; us: ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it and that message is not automated (context_supported_due_date); what has em and en dashes replaced. opened_at and closed_at come from the cited rows, never the input, and closed_at is never later than now. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
+ 'Context ledger store (20261006013000), ledger reader fixes (20261007150000): a model item whose words say a row is someone else''s (its sender, caller or counterpart another person than this job''s customer, or a label saying so: context_ledger_elsewhere_claim) is refused elsewhere_unsupported when a cited row, opening or closing, is this job''s customer''s own words (customer_sender), when a cited row that is not a record or our own text, email or note (a call transcript never counts as ours alone) is not someone else''s by its own stamp (context_ledger_row_elsewhere: role_basis or call_not_customer), or when none is; a claim that a row concerns or belongs to another job is the reader''s placement judgement and stands (second review, 8 Oct); a person''s own item is their word. A PAID invoice closes a payment item (closes_on payment) at the end of its paid Perth day, never after now (context_ledger_paid_close_at), whatever the invoice''s date, so a request made the day it was paid is closed by it. Earlier: checks one ledger item for a job and returns the row to insert or {ok false, code, detail}. Shape (types, roles, about_key vocabulary, modality, phase, status per type), every citation (context_ledger_cite), closed or declined needs closed_by and nothing open carries it; a closing citation must be able to close (close_at: no draft invoice, unsent document or unattended booking: closing_not_issued), may not be an opening citation (closing_is_opening) and is at or after the opening, strictly after for a request (closing_before_opening); speaker rules for the model on the first opening citation (customer: the job''s customer sent it; us: ours, a call, a note or a record; nothing only internal texts is to the customer), a due date only when an opening excerpt states it and that message is not automated (context_supported_due_date); what has em and en dashes replaced. opened_at and closed_at come from the cited rows, never the input, and closed_at is never later than now. item_key = type:about:first 12 hex of md5(first opening citation id || lower(what)). Service role only.';
 
 -- 8. The write: a transition's payment close at the end of the paid day (one line changed).
 CREATE OR REPLACE FUNCTION public.context_ledger_write(p_run_id uuid, p_lease_token uuid, p_generation_id uuid,
@@ -880,7 +930,7 @@ BEGIN
   'siblings', public.context_ledger_siblings(p_job_id, v_as_of));
 END $$;
 COMMENT ON FUNCTION public.context_ledger_packet(uuid, timestamptz, timestamptz) IS
- 'Context ledger store (20261006013000), ledger reader fixes (20261007150000): still ledger-packet-v1, with fields added: each transcript''s call_customer is true, false or the string unknown (neither its call row on this job nor its own stamp on the job''s contact decides), never a bare null; each evidence row carries elsewhere, the reason its own placement or role basis makes it someone else''s (context_ledger_row_elsewhere: role_basis:<basis>, call_not_customer, call_on_other_job, sender_not_client, names_other_job:<number>) or null, the rule the item check applies to an item that says a row belongs to another person, job or lead (elsewhere_unsupported); and siblings (context_ledger_siblings as of the packet''s as_of): the same client''s and the same work order''s other jobs with their quotes sent and invoices issued, context only. Earlier: ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties (the job client and a primary contact role customer, a neighbour role third_party labelled neighbour, others their contact_type or unknown; each with match_keys: emails, phones'' last 9 digits), evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise; each row with already_read, placed_on and, on a call log, has_transcript, call_customer on transcripts), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items (each with phase, closes_on and opened_by as stored). With p_since: rows recorded after it, every already-read row after the earliest of them, and the six before it, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. The judge asks for a rebuild (late_evidence) instead when the earliest new row is more than 14 days older than evidence_until or more than 150 already-read rows follow it. Role fields are the stored party_roles stamp, never invented. Service role only.';
+ 'Context ledger store (20261006013000), ledger reader fixes (20261007150000): still ledger-packet-v1, with fields added: each transcript''s call_customer is true, false or the string unknown (neither its call row on this job nor its own stamp on the job''s contact decides), never a bare null; each evidence row carries elsewhere, the reason it is someone else''s (context_ledger_row_elsewhere: role_basis:<basis> when its own stamp names another job''s customer or party or a lead, call_not_customer when its call row''s on this job does, call_on_other_job, names_other_job:<number>) or null, never on the customer''s own words or a stamp naming our own people, a supplier, a builder, a council, a party on this job or nobody (second review, 8 Oct); only role_basis and call_not_customer carry an item that says a row is someone else''s (elsewhere_unsupported); and siblings (context_ledger_siblings as of the packet''s as_of): the same client''s and the same work order''s other jobs with their quotes sent and invoices issued, context only. Earlier: ledger-packet-v1, the reader''s whole view of a job except the record text: job, parties (the job client and a primary contact role customer, a neighbour role third_party labelled neighbour, others their contact_type or unknown; each with match_keys: emails, phones'' last 9 digits), evidence (context_ledger_evidence_rows without copies, oldest first, text capped at 6,000 characters for transcripts and document text and 3,000 otherwise; each row with already_read, placed_on and, on a call log, has_transcript, call_customer on transcripts), evidence_until (newest recorded time seen), evidence_rows, truncated_rows, duplicates_collapsed, open_items (each with phase, closes_on and opened_by as stored). With p_since: rows recorded after it, every already-read row after the earliest of them, and the six before it, and the current generation''s open, disputed and in-force items; without: the live generation''s person-locked items. The judge asks for a rebuild (late_evidence) instead when the earliest new row is more than 14 days older than evidence_until or more than 150 already-read rows follow it. Role fields are the stored party_roles stamp, never invented. Service role only.';
 
 -- 10. Access: service role only (CREATE OR REPLACE keeps a replaced function's grants; said again).
 REVOKE ALL ON FUNCTION public.context_ledger_elsewhere_claim(text) FROM PUBLIC, anon, authenticated;

@@ -731,12 +731,16 @@ sit unplaced or on another job), the transcript's own stamp decides, the custome
 `job_customer` with the row's CRM contact the job's own. The packet gives every transcript
 `call_customer` true, false or `"unknown"`, never a bare null (both readers once read null
 as "not this job's customer" and put the customer's own calls on someone else). A model item
-whose words say a row belongs to another person, job or lead
-(`context_ledger_elsewhere_claim`, one engine-neutral pattern the reader mirrors) is refused
-`elsewhere_unsupported` unless a cited row's own placement or role basis says so
-(`context_ledger_row_elsewhere`; the packet carries the same reason on each row as
-`elsewhere`); widen the pattern and the row rule in the store, never in a caller. The packet's
-`siblings` section (`context_ledger_siblings`) is the same client's (CRM contact, or a client
+whose words say a row is someone else's, its sender or caller another person than this job's
+customer or a label saying so (`context_ledger_elsewhere_claim`, one engine-neutral pattern the
+reader mirrors), is refused `elsewhere_unsupported` when a cited row is the customer's own words,
+when a cited row that is not a record or our own text, email or note (a transcript never is) is
+not someone else's by its own stamp, or when none is (`context_ledger_row_elsewhere`: only a stamp
+naming another job's customer or party or a lead, never our own people, a supplier, a builder, a
+party on this job or an unknown caller; the packet carries the same reason on each row as
+`elsewhere`). A claim that a row concerns or belongs to another job is the reader's placement
+judgement and stands. Widen the pattern and the row rule in the store, never in a caller. The
+packet's `siblings` section (`context_ledger_siblings`) is the same client's (CRM contact, or a client
 email that is not ours) and the same work order's (`context_ledger_work_order_key`) other jobs,
 never by name, as context only: a sibling's rows are never this job's citations. A PAID invoice
 closes a payment item at the end of its paid Perth day (`context_ledger_paid_close_at`), in an

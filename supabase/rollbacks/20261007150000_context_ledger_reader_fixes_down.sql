@@ -12,7 +12,7 @@ DECLARE problems text[] := '{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_ledger_call_customer(public.business_events)', ARRAY['cd1cda0bb5bd1c5405001a1d6b670d5f', '23f31463321396e3e5fde6329e32c60e']),
-  ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['76de45b9ee5c823593fb4b3fded873e3', '52bd1db9fb4b75fedd6cbfc755e806b3']),
+  ('public.context_ledger_check_item(uuid,jsonb,text,uuid,text)', ARRAY['06e3e1cae99a50ec56308b74e7a1b03d', '52bd1db9fb4b75fedd6cbfc755e806b3']),
   ('public.context_ledger_write(uuid,uuid,uuid,jsonb,jsonb,text)', ARRAY['6da1007ff2a6331219f4d98f85749ca7', '7afbf2bbe6d5688219e743fda88b5eb2']),
   ('public.context_ledger_packet(uuid,timestamptz,timestamptz)', ARRAY['423469bdff01ae4029c155f6c73c078d', '86bed4277fb61ce4679e5cd476001555'])
  ) AS v(sig, accepted) LOOP
