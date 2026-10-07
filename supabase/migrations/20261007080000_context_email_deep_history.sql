@@ -96,9 +96,9 @@
 --
 -- No flag is turned on, no business_events row is written, no mail is read by
 -- this migration, and no grant, policy or view is added for anon or
--- authenticated. Every new function: fixed search_path (except the two
--- per-row helpers, which inline into their callers), EXECUTE revoked from
--- PUBLIC, anon and authenticated.
+-- authenticated. Every new function: fixed search_path (except the per-row
+-- helper context_email_deep_job_refs, which inlines into its callers),
+-- EXECUTE revoked from PUBLIC, anon and authenticated.
 --
 -- Rollback: supabase/rollbacks/20261007080000_context_email_deep_history_down.sql.
 SET LOCAL lock_timeout = '5s';
