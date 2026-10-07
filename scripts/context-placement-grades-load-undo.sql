@@ -17,7 +17,7 @@ SET LOCAL statement_timeout = '60s';
 
 DO $undo$
 DECLARE
- expected_sample_id constant text := 'placement-YYYYMMDDtHHMMSSz-n120-d30';
+ expected_sample_id constant text := 'placement-cf-YYYYMMDDtHHMMSSz-n120-d30';
  expected_rows constant integer := 120;
  n integer;
 BEGIN
@@ -29,5 +29,6 @@ BEGIN
  GET DIAGNOSTICS n = ROW_COUNT;
  IF n <> expected_rows THEN RAISE EXCEPTION 'placement_grades_load undo: removed % rows, expected %; refusing', n, expected_rows; END IF;
 END $undo$;
-SELECT * FROM public.context_placement_grades_newest(now());
+SELECT * FROM public.context_placement_grades_newest(now(), 'customer_facing')
+UNION ALL SELECT * FROM public.context_placement_grades_newest(now(), 'xero_and_quotes');
 ROLLBACK;

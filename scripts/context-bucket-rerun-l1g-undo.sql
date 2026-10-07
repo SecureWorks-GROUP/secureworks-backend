@@ -3,8 +3,11 @@
 -- Puts back, on every row the re-run touched (metadata.bucket_rerun.run =
 -- context_bucket_rerun_l1g_20261007), every column it wrote exactly as it was
 -- (saved in metadata.bucket_rerun.prior): job, contact, attribution and match
--- columns, candidates, event_at, the whole metadata object (party roles
--- included) and the two payload keys the ladder may touch. Then it removes
+-- columns, candidates, event_at, the whole metadata object (party roles, the
+-- relink stamp of a placed row and the copy marks of a marked copy included)
+-- and the two payload keys the ladder may touch. A row the re-run kept (a copy
+-- it marked, a row Luna had answered) gets its metadata back the same way; its
+-- columns never moved. Then it removes
 -- each thread binding a re-run decision made (bucket_rerun.bound, only while it
 -- is still that row's live binding to the job the re-run gave it) and clears
 -- the retirement of each binding a decision retired (bucket_rerun.retired, only

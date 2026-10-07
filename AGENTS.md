@@ -837,20 +837,36 @@ old messages on jobs archived since (L1g evidence:
 
 ## Right-Job Accuracy Is A Stored Graded Sample; A Holding Job Is Never A Job
 
-Row 3's right-job share is read only from `context_placement_grades_newest(as_of)`
-(`20261007070000`): the newest graded sample by draw instant, an unsure verdict
-never right, shares rounded down, no threshold inside (the bar is the scorecard
-policy's). Draw with `context_placement_sample` (ids only, stratified, one
-`sample_id` = one draw), grade from `context_placement_grade_card` (it never says
-how a row was placed), load with `scripts/context-placement-grades-load.sql`;
-the brief is `docs/context/placement-grading.md`. A job with
-`metadata.do_not_schedule` (today only SWF-PDF-BUCKET) is never a customer's job:
-every row on it is a misfile and every live thread binding to it misfiles the
-next email. `context_placement_misfile_plan()` re-decides such rows with the
-rules-on ladder in preview and moves one only when the ladder's own rule lands
-on the job its payload names; the repair, the thread retire (re-key, so neither
-ladder path follows it) and the rules-on bucket re-run are hand-run scripts
-proved by `scripts/test-context-placement-row3.sh`. Evidence:
+Row 3's right-job share is read only from
+`context_placement_grades_newest(as_of, population)` (`20261007070000`), one
+sample per population (`customer_facing`, `xero_and_quotes`): the newest by draw
+instant, a drawn item with no grade or an unsure verdict never right, shares
+rounded down, no threshold inside. Read `right_of_all` (least of the right
+shares x the lane's placed share at the draw), never the right share alone: row
+3 counts every item, and 95% right of 95% placed is 90.25%. The bar is the
+policy's: graded = drawn, drawn >= 100, `right_of_all` >= 0.95. Draw with
+`context_placement_sample` and save its output whole (its `draw_digest` covers
+the draw), grade from `context_placement_grade_card` (it never says how a row
+was placed), load with `scripts/context-placement-grades-load.sql`, which takes
+the saved draw and refuses a partial or edited one; brief:
+`docs/context/placement-grading.md`. A job with `metadata.do_not_schedule`
+(today only SWF-PDF-BUCKET) is never a customer's job: every row on it is a
+misfile and every live thread binding to it misfiles the next email.
+`context_placement_message_twin(e)` is the one copy check: another row holding
+the same GHL message (id, event type, words) that stands in (placed and read, or
+queued). A copy is marked `metadata.duplicate_of` (the 20261006031000
+convention), never made a second live copy. `context_placement_misfile_plan()`
+re-decides holding-job rows with the rules-on ladder in preview: duplicate
+(follows its twin, marked), move (only when the ladder's own rule lands on the
+job its payload names), review; a row that will not sit on its payload job has
+that guessed payload job set aside, so any candidate a reviewer picks is read
+and is no misfile. A re-placed old row is stamped `capture_mode` relink: with
+`live`, the Jarvis event listener reads a customer text whose `attributed_at`
+is new as fresh news and cancels every pending proposal and nudge on its job,
+and the cadence wakes a read. Never send a row with `metadata.luna_outcome`
+back to Luna outside a named reopen. The repair, the thread retire and the
+rules-on bucket re-run are hand-run scripts proved by
+`scripts/test-context-placement-row3.sh`. Evidence:
 `docs/evidence/context-placement-row3-2026-10-07.md`.
 
 ## Migrations Apply Before Edge Deploys
