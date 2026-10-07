@@ -37,13 +37,16 @@ BEGIN
   OR has_function_privilege('service_role','public.trigger_context_email_sweep()','EXECUTE')
  THEN RAISE EXCEPTION 'em2 cron callers must not be callable by service_role'; END IF;
  -- Containment: later capture slices add their own jobs (B-2, 20261005190000:
- -- ghl-history-schedule; B-5, 20261005210000: context-document-text, both
- -- capture); these six rows must stay as they are.
+ -- ghl-history-schedule; B-5, 20261005210000: context-document-text; history
+ -- daily, 20261007050000: xero-history-daily, all capture); these six rows
+ -- must stay as they are.
  IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
     @> ARRAY['contact-matching:attribution','ghl-call-transcript-fetch:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname NOT IN ('contact-matching','ghl-call-transcript-fetch',
-   'ghl-message-reconcile','monitor-inbox-poll','monitor-inbox-sweep','outlook-mail-poll','ghl-history-schedule','context-document-text'))
-  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-history-schedule','context-document-text') AND l.lane<>'capture')
+   'ghl-message-reconcile','monitor-inbox-poll','monitor-inbox-sweep','outlook-mail-poll','ghl-history-schedule','context-document-text',
+   'xero-history-daily'))
+  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-history-schedule','context-document-text',
+   'xero-history-daily') AND l.lane<>'capture')
  THEN RAISE EXCEPTION 'em2 cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;
@@ -252,6 +255,13 @@ UPDATE public.feature_flags SET enabled=true WHERE flag_name='email_reader_v1';
 -- A later slice (B-2, 20261005190000) replaces the lane list; stand this
 -- migration's body back up (rolled back below) so its re-apply guard holds.
 \ir em3_cron_lanes.sql
+-- History daily (20261007050000) widens M4's live-job list, which this
+-- migration's guard pins; stand M4's body back up the same way.
+SELECT md5(prosrc)<>'49eb23015b724a29058c11b2743954bf' AS em2_list_moved
+FROM pg_proc WHERE oid='public.context_ghl_history_live_jobs()'::regprocedure \gset
+\if :em2_list_moved
+\ir ../20261007050000_context_history_daily/m4_live_jobs.sql
+\endif
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'5c1e0e526a74d5b4ad612792c7f076cc'

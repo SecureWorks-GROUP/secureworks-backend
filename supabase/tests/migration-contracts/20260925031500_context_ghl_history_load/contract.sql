@@ -105,9 +105,11 @@ BEGIN
  END LOOP;
  PERFORM pg_temp.m4_job('M4-Q59-1','quoted','fencing','m4Quote59Contact01','2026-06-01Z',now()-interval '59 days');
  PERFORM pg_temp.m4_job('M4-DRQ-1','draft','fencing','m4DraftQuoteCont01','2026-06-01Z',now()-interval '3 days');
- -- Out: a quote sent 61 days ago, a quoted job with no sent quote, a draft with
- -- none, every closed status, an unknown status, archived, a holding job, no
- -- contact, a quote document never sent.
+ -- Out: a quote sent 61 days ago, a draft with none, every closed status, a
+ -- holding job. In since history daily (20261007050000), which adds every live
+ -- job the lead rule keeps monitored (owner, 7 Oct 2026): a quoted job whose
+ -- quote was never sent (no clock starts), invoiced, get_review and an unknown
+ -- status (live by the done definition, past quoted), and an archived flag.
  PERFORM pg_temp.m4_job('M4-Q61-1','quoted','fencing','m4Quote61Contact01','2026-06-01Z',now()-interval '61 days');
  PERFORM pg_temp.m4_job('M4-QNS-1','quoted','fencing','m4QuoteNoSend0001','2026-06-01Z');
  PERFORM pg_temp.m4_job('M4-DRF-1','draft','fencing','m4DraftContact001','2026-06-01Z');
@@ -126,17 +128,18 @@ BEGIN
  SELECT id,'quote',NULL,'unsent.pdf' FROM public.jobs WHERE job_number='M4-QNS-1';
  INSERT INTO public.job_documents(job_id,type,sent_at,file_name)
  SELECT id,'invoice',now()-interval '1 day','invoice.pdf' FROM public.jobs WHERE job_number='M4-DRF-1';
- SELECT array_agg(job_number ORDER BY job_number) INTO got FROM public.context_ghl_history_live_jobs() WHERE job_number LIKE 'M4-%';
+ SELECT array_agg(job_number ORDER BY job_number COLLATE "C") INTO got FROM public.context_ghl_history_live_jobs() WHERE job_number LIKE 'M4-%';
  -- Jobs with no contact are live too (the link action's list), with a null contact.
- want:=ARRAY['M4-ACC-1','M4-BLK-1','M4-DRQ-1','M4-INP-1','M4-NOC-1','M4-PAC-1','M4-Q59-1','M4-SCH-1','M4-ST-approvals','M4-ST-awaiting_deposit',
-  'M4-ST-awaiting_supplier','M4-ST-final_payment','M4-ST-order_materials','M4-ST-processing','M4-ST-rectification','M4-ST-schedule_install'];
+ want:=ARRAY['M4-ACC-1','M4-ARC-1','M4-BLK-1','M4-DRQ-1','M4-INP-1','M4-INV-1','M4-NOC-1','M4-ONH-1','M4-PAC-1','M4-Q59-1','M4-QNS-1',
+  'M4-REV-1','M4-SCH-1','M4-ST-approvals','M4-ST-awaiting_deposit','M4-ST-awaiting_supplier','M4-ST-final_payment','M4-ST-order_materials',
+  'M4-ST-processing','M4-ST-rectification','M4-ST-schedule_install'];
  IF got IS DISTINCT FROM want THEN RAISE EXCEPTION 'm4 scope: live jobs %, expected %',got,want; END IF;
  FOR j IN SELECT * FROM public.context_ghl_history_live_jobs() WHERE job_number LIKE 'M4-%' LOOP
-  IF j.live_basis<>(CASE WHEN j.job_number IN ('M4-Q59-1','M4-DRQ-1') THEN 'quote_sent' ELSE 'status' END)
+  IF j.live_basis<>(CASE WHEN j.job_number IN ('M4-Q59-1','M4-DRQ-1') THEN 'quote_sent' WHEN j.job_number='M4-QNS-1' THEN 'lead_monitored' ELSE 'status' END)
   THEN RAISE EXCEPTION 'm4 scope: % basis %',j.job_number,j.live_basis; END IF;
   IF (j.ghl_contact_id IS NULL)<>(j.job_number IN ('M4-NOC-1','M4-BLK-1')) THEN RAISE EXCEPTION 'm4 scope: % contact %',j.job_number,j.ghl_contact_id; END IF;
   IF j.tier<>(CASE WHEN j.job_number IN ('M4-INP-1','M4-ST-rectification') THEN 1 WHEN j.job_number IN ('M4-SCH-1','M4-ST-schedule_install') THEN 2
-   WHEN j.live_basis='quote_sent' THEN 4 ELSE 3 END) THEN RAISE EXCEPTION 'm4 scope: % tier %',j.job_number,j.tier; END IF;
+   WHEN j.live_basis IN ('quote_sent','lead_monitored') THEN 4 ELSE 3 END) THEN RAISE EXCEPTION 'm4 scope: % tier %',j.job_number,j.tier; END IF;
  END LOOP;
  -- The load never offers a job with no contact.
  IF public.context_ghl_history_due(100)::text ~ '"contact_id": null' THEN RAISE EXCEPTION 'm4 due offered a contactless job'; END IF;
