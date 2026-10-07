@@ -1,7 +1,9 @@
 -- B-2 behaviour contract (GHL history schedule). Every fixture write is rolled
 -- back. Job numbers start B2-; contact ids are synthetic GHL-shaped ids. Each
--- transaction first puts every other job out of scope (archived) and moves
--- every earlier history run a month back, so earlier contracts' fixtures never
+-- transaction first puts every other job out of scope (archived, and closed:
+-- since history daily, 20261007050000, the live-job list also takes a live job
+-- the lead rule keeps monitored whatever its archived flag) and moves every
+-- earlier history run a month back, so earlier contracts' fixtures never
 -- reach the due list, the day's count or the reading hand-over.
 --   1. Grants, hardening and the schedule's numbers.
 --   2. The day limit: base, boost from the first scheduled run, boost ended
@@ -19,6 +21,7 @@ CREATE FUNCTION pg_temp.b2_scope() RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
  UPDATE public.jobs SET archived=true WHERE job_number IS DISTINCT FROM NULL AND job_number NOT LIKE 'B2-%' AND NOT coalesce(archived,false);
  UPDATE public.jobs SET archived=true WHERE job_number IS NULL AND NOT coalesce(archived,false);
+ UPDATE public.jobs SET status='complete' WHERE (job_number IS NULL OR job_number NOT LIKE 'B2-%') AND status IS DISTINCT FROM 'complete';
  UPDATE public.context_capture_runs SET started_at=started_at-interval '31 days'
  WHERE source IN ('ghl_history_load','ghl_history_load_dry','ghl_history_link','ghl_history_link_dry');
  DELETE FROM public.context_ghl_history_contacts;
@@ -440,6 +443,13 @@ BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'8c99245789cadf661d4b6be1207f0887'
  THEN RAISE EXCEPTION 'b2 b2_cron_lanes.sql is not the B-2 body'; END IF;
 END $$;
+-- History daily (20261007050000) widens M4's live-job list, which this
+-- migration's guard pins; stand M4's body back up the same way.
+SELECT md5(prosrc)<>'49eb23015b724a29058c11b2743954bf' AS b2_list_moved
+FROM pg_proc WHERE oid='public.context_ghl_history_live_jobs()'::regprocedure \gset
+\if :b2_list_moved
+\ir ../20261007050000_context_history_daily/m4_live_jobs.sql
+\endif
 \ir ../../../migrations/20261005190000_context_ghl_history_schedule.sql
 \ir ../../../migrations/20261005190000_context_ghl_history_schedule.sql
 DO $$
