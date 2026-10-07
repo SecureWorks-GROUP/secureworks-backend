@@ -733,6 +733,68 @@ many re-stamps happened in the last 24 hours): the hint carries no time and
 every re-run re-checks bucket rows, so an exact count needs the placement
 track to stamp the hint with its time (a named follow-up, not B0).
 
+## The Job Story Sorts Text In C Order
+
+Production's collation is ICU `en-US` (letters compared without case first,
+`_` and `-` before digits), CI's Postgres is glibc `en_US` (spaces and
+punctuation ignored) and the Jarvis reader compares code units, so one text
+sort reads three ways.
+In the record layer and the story (`20261006011000`, `20261006014000`, fixed
+in `20261006033000`) every text sort or tiebreak that reaches the output says
+`COLLATE "C"`, with a full tiebreak where rows can tie; a new one must too, and
+its contract asserts the C order on names that differ by case. An aggregate
+with `DISTINCT` needs the same `COLLATE "C"` on its argument and its `ORDER BY`;
+`jsonb_agg(DISTINCT <jsonb>)` orders strings in the database collation (no
+`COLLATE` reaches inside jsonb), so dedupe in a subquery and order by the text
+fields. A body that replaces one of these functions keeps its slice name first
+in its comment (`Job record (20261006011000)...`, `Job story (20261006014000)...`):
+the 972 contracts and the story's re-apply guard read it. A timeline line
+citing `job_events` has the event type as its `state` when the ledger store
+lets that type close a matter (`not_delivered` when it names a document nobody
+received), so a reader applies `context_ledger_job_event_closes` to the state,
+never to the words. An old-inbox mail stays on a job only while its saved copy sits
+on no job or on a job that is not live (the judge's live set: never archived,
+complete, completed, cancelled, lost, a draft or holding); a copy on another live
+job decides where it belongs (the job conversation's rule R0), in the story, the
+reader's evidence and the citation check alike. One kept on a job because its saved
+copy sits elsewhere joined that job's evidence no earlier than `20261006040000`'s
+first apply, its copies' landing, the placement review taking a copy off a job and
+the last change of a non-live job holding a copy (`context_ledger_mail_copies`):
+take its time from `context_ledger_evidence_rows.landed_at`, never `processed_at`,
+or a reading built before then reads as having read it. A stored ledger citation is
+re-checked by the citation check's current rules in the story's ledger read and the
+judge (`context_job_story_ledger`, `citation_moved`); a reading with an item hidden
+is no all-clear. On builder work the job's CRM contact and client email are the
+insured's only when the make-safe details name the builder and none of the job's contact
+details (CRM contact, client phone, client email) sits on another client's job
+(`context_job_story_meta.contact_shared`); then their messages never change whose move on
+what the builder owes, and the line names them the insured's. Otherwise (a contact shared
+across clients is a builder's or an agent's) the line calls them the job contact's, they
+hold the move as the customer's do, and who never gives the insured that contact.
+`context_ledger_mail_copies` reads
+every copy key by an index (source pointer, graph key, sender at the mail's
+instant, payload key at the mail's instant); a read over many mails (the judge's)
+never takes a `payload @>` look-up per mail: the payload index answers each in
+about 0.8 ms and almost all find nothing. A CRM text loaded from the CRM's cache
+(`ghl_sms_cache_backfill`) is at its CRM time (`context_job_record_crm_time`) in
+the story (on the job or placed on no job), the reader's evidence and the citation
+check alike; one dated more than 30 days before the job was created is in none of
+them as the customer's words. The cache itself does not keep that time: it holds
+only a contact's newest messages and every sync writes the row over, so the time is
+kept in `context_crm_message_times` (trigger `context_crm_message_times_keep` on
+every cache write) and read from there first; its rollback keeps that table, since
+the times are kept nowhere else. A backfilled text whose time was never kept is time
+unknown, never its load time, and is never the customer's words, evidence or a
+citation. On a job, a party-roles label naming another job's customer
+(`any_job_customer`) is no evidence of this job's customer (its own contact and
+client email decide), and mail from our own addresses (our domains, a person in
+`public.users`) is never the customer's (`context_job_record_messages.customer_side`).
+A story loop's `status` is `open` or `closing_evidence` when it is a move;
+`not_due` (R8 before the work is done, while the job is in rectification, or while
+work reopened after it was recorded finished is not finished again) and
+`unconfirmed` (R8 whose amount a C2 check leaves unknown) are never a move, the
+first line's item or a reason for whose move.
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
