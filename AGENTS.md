@@ -645,35 +645,61 @@ rows per agent) and its alert tool lists them in the staff chats.
 
 Who-to-whom is `metadata.party_roles`, stamped only by the trigger
 `context_party_roles_business_event` from `context_message_party_roles(e)` (v1
-`20261005200000`, v2 `20261006000000`, v3 `20261006034000`); it never places a
-row or writes a ladder-owned key. Rule order: L1d's label or a writer marker
-(copied), then our own crew and staff templates on an outbound text
-(`context_internal_text_role`'s patterns read through `context_event_text`,
-plus the roof report make-safe alert to crew; basis `our_template`), then the
-v1 and v2 key rules. The classifier never calls `context_internal_text_role`
-or another ladder-private helper: the service role previews the classifier,
-and the `20261006034000` case calls it as `service_role` in a fresh session.
-The trigger stamps a row on insert and re-stamps it whenever a writer updates
-`job_id`, `contact_id`, `direction`, `metadata`, `payload`, `event_type` or
-`channel` (a relink, a dedupe mark), always with the live classifier; a row
-nobody writes keeps its stamp until a hand-run re-stamp:
-`scripts/context-party-roles-v3-backfill.sql` is the pattern (a metadata-only write so the trigger re-stamps; the undo
-restores the saved stamp with the trigger off). So a version stamp alone never
-proves a backfill ran; its run key does. A later change to one of
-`20261006034000`'s three functions (classifier, scorecard lane rule, parties
-status block) updates these contract touch points: v1's (`20261005200000`)
+`20261005200000`, v2 `20261006000000`, v3 `20261006034000`, v4
+`20261007060000`); it never places a row or writes a ladder-owned key. Rule
+order: L1d's label or a writer marker (copied), then our own crew and staff
+templates on an outbound text (`context_internal_text_role`'s patterns read
+through `context_event_text`, plus the roof report make-safe alert to crew;
+basis `our_template`), then the v1 and v2 key rules; where v2 collects
+signals, v4 adds records only, never a name: an open opportunity in the CRM
+rosters (`sales_booking_packs` kind `roster`; only on a row on no job, since an
+opportunity elsewhere says nothing of a job's customer), a gov.au domain (role
+`council`, basis `council` as in v3, the one Jev's later truth reads a
+council by), our material orders' addresses and domains, a Xero bill of a known
+supplier named in an inbound subject, a make-safe company's own invoice or
+report domain; one role only when every signal agrees. Last, a call
+transcript takes its call's roles, basis and audience when they differ
+(`from_call`), never over its own `job_customer` or `job_party` reading: from
+a call on the same job (or both on none), or from elsewhere only a
+non-customer reading and only when the transcript's own counterpart is
+unknown, so readers keyed on `job_customer` or `any_job_customer` read the two
+alike. The
+classifier never calls `context_internal_text_role` or another ladder-private
+helper: the service role previews the classifier, and the `20261006034000`
+and `20261007060000` cases call it as `service_role` in a fresh session. Row
+2's read is `context_party_roles_lanes(as_of, days)` (stored stamps per lane,
+unknowns by basis, customers with no job yet); it replaces no scorecard
+function. The trigger stamps a row on insert and re-stamps it whenever a
+writer updates `job_id`, `contact_id`, `direction`, `metadata`, `payload`,
+`event_type` or `channel` (a relink, a dedupe mark), always with the live
+classifier; a row nobody writes keeps its stamp until a hand-run re-stamp,
+`scripts/context-party-roles-v4-backfill.sql` (a metadata-only write so the
+trigger re-stamps, in three passes because the CRM rule reads other rows'
+crew stamps and a transcript reads its call's; it refuses a batch that lowers
+the live scorecard's row 3 unless the owner accepted that drop; the undo
+restores the saved stamp with the trigger off; the v3 one refuses once v4 is
+live). A re-stamp's shares are a one-time high: a new row is read once, at
+capture, often before a prospect's opportunity reaches the cached CRM roster
+(refreshed only when the sales booking page loads) or a supplier's Xero bill
+reaches our copy. So a version stamp alone never proves a backfill ran; its
+run key does. A later change to
+the classifier updates these contract touch points: v1's (`20261005200000`)
 version and comment checks and its re-apply skip; v2's (`20261006000000`)
-version and comment checks; F1b's md5 pin on the parties block
-(`20260924152100`); and the `20261006034000` case's md5 pins, re-apply and
-break proof (a change to a body that case only pins, such as L1d's
+version and comment checks; the `20261006034000` case's classifier pin (it
+accepts v4's md5), its re-apply (which stands v3 back up from
+`v3_message_party_roles.sql` in the `20261007060000` case) and its break proof
+(which runs v4's down first); and the `20261007060000` case's pins, re-apply
+and break proof. A change to `20261006034000`'s other two functions (scorecard
+lane rule, parties status block) also moves F1b's md5 pin on the parties block
+(`20260924152100`); a change to a body a case only pins, such as L1d's
 `context_internal_text_role`, stands the pinned body back up in its re-apply,
-as C1d does). That case's, W11's and S-M1's behaviour checks run against
-whatever body is live. S-M1's re-apply (block 12) and v2's re-apply stand back
-up only their own body, from `sm1_parties_status.sql` and
-`v2_message_party_roles.sql` in the `20261006034000` case, whenever the live
-body is not theirs, so a change to one function never breaks a contract about
-another; an earlier contract stands back up the one body it needs that way,
-never by running a later migration's whole down.
+as C1d does. Behaviour checks in the earlier cases (and W11's and S-M1's) run
+against whatever body is live. S-M1's, v2's and v3's re-applies stand back up
+only their own body (`sm1_parties_status.sql`, `v2_message_party_roles.sql`,
+`v3_message_party_roles.sql`) whenever the live body is not theirs, so a
+change to one function never breaks a contract about another; an earlier
+contract stands back up the one body it needs that way, never by running a
+later migration's whole down.
 
 A new pg_cron job that writes evidence is scheduled already gated
 (`... WHERE public.automation_lane_enabled('<lane>')`) and added to

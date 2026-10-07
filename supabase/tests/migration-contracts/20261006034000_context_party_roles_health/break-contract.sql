@@ -3,5 +3,8 @@
 -- the lane rule must count L1d's other as a crew text and our office alerts as
 -- texts again, and our crew and staff templates (the roof report make-safe
 -- alert among them) must read off the contact again. The contract must name
--- every one.
+-- every one. Its registered successor (v4, 20261007060000) replaced the
+-- classifier, and this down refuses while a later body is live, so v4's own
+-- down runs first.
+\ir ../../../rollbacks/20261007060000_context_party_roles_v4_down.sql
 \ir ../../../rollbacks/20261006034000_context_party_roles_health_down.sql

@@ -51,9 +51,13 @@ END $$;
 CREATE FUNCTION pg_temp.p2_is(what text,e public.business_events,p_sender text,p_recipient text,p_basis text,p_audience text) RETURNS void
 LANGUAGE plpgsql AS $$
 DECLARE r jsonb:=e.metadata->'party_roles';
- -- A registered successor (v3, 20261006034000) keeps every v2 decision these
- -- fixtures make and stamps its own version; it proves that in its own contract.
+ -- A registered successor (v3, 20261006034000; v4, 20261007060000) keeps
+ -- every v2 decision these fixtures make (v4 reads a council by its gov.au
+ -- domain, below) and stamps its own version; each proves that in its own
+ -- contract.
  v text:=CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+  LIKE 'Party roles v4 (20261007060000):%' THEN 'party_roles_v4'
+  WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
   LIKE 'Party roles v3 (20261006034000):%' THEN 'party_roles_v3' ELSE 'party_roles_v2' END;
 BEGIN
  IF r IS NULL OR r->>'version' IS DISTINCT FROM v OR r->>'sender_role' IS DISTINCT FROM p_sender
@@ -89,7 +93,13 @@ BEGIN
  e:=pg_temp.p2_on(pg_temp.p2_ev('sms','inbound','client.reply','p2-cust2',jsonb_build_object('body','Any update on mine?')),NULL);
  PERFORM pg_temp.p2_is('the customer of another job',e,'customer','staff','any_job_customer','customer');
  e:=pg_temp.p2_ev('email','inbound','client.email_in',NULL,jsonb_build_object('from','planning@fixture2.wa.gov.au','body','Approval'));
- PERFORM pg_temp.p2_is('a council',e,'unknown','staff','council','unknown');
+ -- v4 (20261007060000) gives a council its own role, basis council as before; v2 and v3 name it in the basis only.
+ IF coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+   LIKE 'Party roles v4 (20261007060000):%' THEN
+  PERFORM pg_temp.p2_is('a council',e,'council','staff','council','other_party');
+ ELSE
+  PERFORM pg_temp.p2_is('a council',e,'unknown','staff','council','unknown');
+ END IF;
  e:=pg_temp.p2_ev('email','inbound','client.email_in',NULL,jsonb_build_object('from','random.two@gmail.com','body','Hello'));
  PERFORM pg_temp.p2_is('a free-mail stranger',e,'unknown','staff','no_match','unknown');
  e:=pg_temp.p2_ev('email','inbound','client.email_in',NULL,jsonb_build_object('body','no sender at all'));
@@ -219,7 +229,8 @@ BEGIN
   'public.context_party_contact_roles(text)','public.context_message_party_roles(public.business_events)'] LOOP
   IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'Party roles v2 (20261006000000):%'
    AND NOT (f='public.context_message_party_roles(public.business_events)'
-    AND coalesce(obj_description(f::regprocedure,'pg_proc'),'') LIKE 'Party roles v3 (20261006034000):%')
+    AND (coalesce(obj_description(f::regprocedure,'pg_proc'),'') LIKE 'Party roles v3 (20261006034000):%'
+     OR coalesce(obj_description(f::regprocedure,'pg_proc'),'') LIKE 'Party roles v4 (20261007060000):%'))
   THEN RAISE EXCEPTION 'party roles v2: % is not marked',f; END IF;
   FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
    IF has_function_privilege(r,f,'EXECUTE') THEN RAISE EXCEPTION 'party roles v2: % can call private %',r,f; END IF;
@@ -231,10 +242,11 @@ BEGIN
  THEN RAISE EXCEPTION 'party roles v2: an index is missing'; END IF;
 END $$;
 
--- Re-apply is a no-op. A registered successor (v3, 20261006034000) replaces
--- the classifier; whenever the live body is not v2's, stand v2's classifier
--- back up first, inside this rolled-back block, and nothing else (a later
--- change to any other function never reaches this check).
+-- Re-apply is a no-op. A registered successor (v3, 20261006034000, or v4,
+-- 20261007060000) replaces the classifier; whenever the live body is not
+-- v2's, stand v2's classifier back up first, inside this rolled-back block,
+-- and nothing else (a later change to any other function never reaches this
+-- check).
 BEGIN;
 SELECT md5(prosrc)<>'8d5bb9cfa80a631ee39497282e54f967' AS p2_classifier_moved
 FROM pg_proc WHERE oid='public.context_message_party_roles(public.business_events)'::regprocedure \gset
