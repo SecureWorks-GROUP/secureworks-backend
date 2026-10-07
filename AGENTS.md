@@ -643,6 +643,28 @@ Never write these rows to `ai_alerts` without the owner's yes: Jarvis loads ever
 open red and amber `ai_alerts` row into every agent's memory (amber first, a few
 rows per agent) and its alert tool lists them in the staff chats.
 
+Rows 7, 8 and 9 (owner ruling 7 Oct 2026: the ledger items, the job story
+card, the agent test) read their graded samples from `context_grades`
+(`20261007090000`) through `context_grades_newest(as_of)` (always ledger,
+story, agent; a pass share is never rounded up; no bar lives there, the bars
+stay in `context_scorecard_policy()`), and row 7's catalogue lane reads
+`context_item_kinds()`, whose `accepted` is read live from the store's
+`item_type` check. A new ledger item kind therefore also publishes its meaning
+there, widens `context_grades_item_type` and updates that case's catalogue
+checks, in one migration. A unit passes only by `context_grade_passed`;
+verdicts are codes, counts and row ids (`context_grade_verdicts_problem`
+refuses words, and the answer key's loop ids, some of which carry a first
+name, are never stored) and carry every test of their kind, so an ungraded
+test never reads as passed. Row 8's lane reads the per-test counts in
+`tests` (T3 message, T4 and the unseen first lines have sample-wide bars),
+never `passed = units`. A sample counts as measured on the new reader, live,
+only when `readings.gated_on_live = units` and, for the agent test,
+`run.story_flag_on = units`: each T7 call records its run's story flag and
+ledger mode and the job's reading live at the run. A grade enters only through
+`scripts/context-grades-load.sql` and leaves only through its undo, both
+guarded and run with the owner's go; the service role may insert a grade but
+never change or delete one.
+
 Who-to-whom is `metadata.party_roles`, stamped only by the trigger
 `context_party_roles_business_event` from `context_message_party_roles(e)` (v1
 `20261005200000`, v2 `20261006000000`, v3 `20261006034000`, v4
