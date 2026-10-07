@@ -16,7 +16,11 @@ import type { AttachmentResult } from "./attachments.ts";
 import {
   type CaptureDeps,
   type CaptureOutcome,
+  type DeepGate,
+  type DeepScope,
+  deepWindow,
   historyWindow,
+  perthMonth,
   POLICY,
   runOutlookCapture,
   type RunRow,
@@ -73,6 +77,12 @@ interface World {
   postReads: string[];
   now: number;
   tick: number;
+  /** The deep load's gate (context_email_deep_enabled). */
+  deep: DeepGate;
+  /** The deep load's scope (context_email_deep_scope). */
+  deepScope: DeepScope;
+  /** The make-safe prefix set; null reads as unreadable. */
+  prefixes: string[] | null;
 }
 
 function world(partial: Partial<World> = {}): World {
@@ -101,6 +111,19 @@ function world(partial: Partial<World> = {}): World {
     postReads: [],
     now: NOW,
     tick: 0,
+    deep: {
+      enabled: true,
+      hardFloorMs: Date.parse("2024-12-31T16:00:00Z"),
+      userWindowMaxDays: 32,
+    },
+    deepScope: {
+      version: "email-deep-v1",
+      jobs: 0,
+      jobNumbers: new Map(),
+      clientEmails: new Map(),
+      builderRefs: new Map(),
+    },
+    prefixes: ["MLB", "AJBR", "MS"],
     ...partial,
   };
 }
@@ -118,6 +141,9 @@ function deps(w: World): CaptureDeps {
       jobNumbers: new Set(["SWP-990001"]),
       clientEmails: new Set(["sam.sample@example.net"]),
     }),
+    deepGate: async () => w.deep,
+    deepScope: async () => w.deepScope,
+    builderRefPrefixes: async () => w.prefixes,
     latestRuns: async (source, limit) =>
       w.runs.filter((r) => r.source === source).sort((a, b) =>
         b.started_at.localeCompare(a.started_at)
@@ -1176,4 +1202,344 @@ Deno.test("W7: a long history run saves its cursor on its running row as it goes
   assertEquals(historyRuns(w)[0].status, "partial");
   // The second page was listed after checkpoints moved the running row's cursor.
   assert(seen.length >= 2 && seen.at(-1) !== null);
+});
+
+// History depth PR B (7 Oct 2026): mode deep. One slice of a mailbox older
+// than the 60-day limit, kept only where it touches a monitored live job from
+// that job's lead-in on, every row marked history_tier deep; the counts-only
+// probe; builder references on every row.
+
+const DEEP_WINDOW = {
+  mode: "deep" as const,
+  source: "nithin",
+  from: "2026-05-01T00:00:00.000Z",
+  to: "2026-06-01T00:00:00.000Z",
+};
+
+function deepScope(p: {
+  jobNumbers?: Record<string, string>;
+  clientEmails?: Record<string, string>;
+  builderRefs?: Record<string, string>;
+}): DeepScope {
+  const m = (o?: Record<string, string>) =>
+    new Map(Object.entries(o ?? {}).map(([k, v]) => [k, Date.parse(v)]));
+  return {
+    version: "email-deep-v1",
+    jobs: 1,
+    jobNumbers: m(p.jobNumbers),
+    clientEmails: m(p.clientEmails),
+    builderRefs: m(p.builderRefs),
+  };
+}
+
+Deno.test("deep: idle while email_reader_deep_v1 is off; refused without a source, before the hard floor, over 32 days in a user mailbox, or in the future", async () => {
+  const box = [msg(1, "2026-05-10T02:00:00Z", { subject: "SWP-990001" })];
+  const off = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    deep: { ...world().deep, enabled: false },
+  });
+  assertEquals(await runOutlookCapture(deps(off), DEEP_WINDOW), {
+    outcome: "idle",
+    reason: "email_reader_deep_v1_off",
+  });
+  assertEquals(off.listCalls, 0);
+  assertEquals(off.runs.length, 0);
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
+  for (
+    const [patch, code] of [
+      [{ source: null }, "deep_needs_source"],
+      [{
+        from: "2024-12-31T15:59:59.000Z",
+        to: "2025-01-20T00:00:00.000Z",
+      }, "deep_window_before_floor"],
+      [{
+        from: "2026-04-01T00:00:00.000Z",
+        to: "2026-05-04T00:00:00.000Z",
+      }, "deep_window_too_long"],
+      [{
+        from: "2026-09-20T00:00:00.000Z",
+        to: "2026-10-09T00:00:00.000Z",
+      }, "deep_window_invalid"],
+      [{
+        from: "2026-06-01T00:00:00.000Z",
+        to: "2026-05-01T00:00:00.000Z",
+      }, "deep_window_invalid"],
+    ] as const
+  ) {
+    assertEquals(
+      await runOutlookCapture(deps(w), { ...DEEP_WINDOW, ...patch }),
+      { outcome: "refused", code },
+    );
+  }
+  assertEquals(w.listCalls, 0);
+  assertEquals(w.runs.length, 0);
+  // A group is walked in one window of any length; the probe spans any length.
+  const gate = world().deep;
+  const year = {
+    mode: "deep" as const,
+    from: "2025-03-01T00:00:00.000Z",
+    to: "2026-06-01T00:00:00.000Z",
+  };
+  assert(deepWindow(year, NOW, gate, "group").ok);
+  assertEquals(deepWindow(year, NOW, gate, "user"), {
+    ok: false,
+    code: "deep_window_too_long",
+  });
+  assert(deepWindow({ ...year, probe: true }, NOW, gate, "user").ok);
+});
+
+Deno.test("deep: keeps mail touching a monitored job from that job's lead-in on, by job number, builder reference and client email; older matches are skipped_before_job; rows are backfill and history_tier deep", async () => {
+  const box = [
+    msg(1, "2026-05-10T02:00:00Z", { subject: "Re: Patio quote SWP-990001" }),
+    msg(2, "2026-05-02T02:00:00Z", { subject: "SWP-990001 early" }), // before its job's lead-in
+    msg(3, "2026-05-20T02:00:00Z", { from: "sam.sample@example.net" }),
+    msg(4, "2026-05-10T03:00:00Z", { from: "sam.sample@example.net" }), // before the client's job's lead-in
+    msg(5, "2026-05-03T02:00:00Z", {
+      from: "claims@builder.example",
+      subject: "Claim MLB-26537 make safe",
+    }),
+    msg(6, "2026-05-04T02:00:00Z", {
+      from: "claims@builder.example",
+      subject: "Make Safe 67005",
+    }),
+    msg(7, "2026-05-05T02:00:00Z", {
+      from: "claims@builder.example",
+      bodyText: "Ref 67005 in the words only",
+    }), // a bare number in the words never counts
+    msg(8, "2026-05-06T02:00:00Z"), // nothing to do with a monitored job
+  ];
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    deepScope: deepScope({
+      jobNumbers: { "SWP-990001": "2026-05-05T00:00:00Z" },
+      clientEmails: { "sam.sample@example.net": "2026-05-15T00:00:00Z" },
+      builderRefs: {
+        "MLB-26537": "2026-05-01T00:00:00Z",
+        "67005": "2026-05-01T00:00:00Z",
+      },
+    }),
+  });
+  const r = await runOutlookCapture(deps(w), DEEP_WINDOW);
+  assert(r.outcome === "ran");
+  const run = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts!.inserted, 4);
+  assertEquals(run.counts!.kept_by_job_number, 1);
+  assertEquals(run.counts!.kept_by_client_email, 1);
+  assertEquals(run.counts!.kept_by_builder_ref, 2);
+  assertEquals(run.counts!.skipped_before_job, 2);
+  assertEquals(run.counts!.skipped_out_of_scope, 2);
+  assertEquals(w.captured.map((c) => c.provider_message_id), [
+    "email:m5@mail.example.com",
+    "email:m6@mail.example.com",
+    "email:m1@mail.example.com",
+    "email:m3@mail.example.com",
+  ]);
+  for (const c of w.captured) {
+    assertEquals(c.metadata, {
+      capture_mode: "backfill",
+      capture_path: "outlook_mail_v1",
+      history_tier: "deep",
+    });
+  }
+  assertEquals(
+    (w.captured[0].payload as Record<string, unknown>).builder_refs,
+    ["MLB-26537"],
+  );
+  assert(!("builder_refs" in (w.captured[1].payload as object)));
+  assertEquals(run.cursor, {
+    mode: "deep",
+    backlog: false,
+    ids_at_end: ["h:G0003"],
+    history_from: "2026-05-01T00:00:00.000Z",
+    history_to: "2026-06-01T00:00:00.000Z",
+    history_tier: "deep",
+  });
+  assertEquals(run.window_to, "2026-05-20T02:00:00.000Z");
+});
+
+Deno.test("deep: a user slice cut by the time budget resumes where it stopped; a window with the same end and an earlier start is read from its own start", async () => {
+  const box: Msg[] = [];
+  for (let i = 0; i < 6; i++) {
+    box.push(
+      msg(i, `2026-05-2${i}T02:00:00Z`, { subject: `SWP-990001 update ${i}` }),
+    );
+  }
+  box.push(msg(9, "2026-04-30T12:00:00Z", { subject: "SWP-990001 before" }));
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    tick: 30_000,
+    deepScope: deepScope({
+      jobNumbers: { "SWP-990001": "2026-04-01T00:00:00Z" },
+    }),
+  });
+  await runOutlookCapture(deps(w), DEEP_WINDOW);
+  const first = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(first.status, "partial");
+  const savedFirst = w.keys.size;
+  assert(savedFirst > 0 && savedFirst < 6);
+  // The same end, a day earlier start: not the first window's cursor.
+  w.tick = 0;
+  await runOutlookCapture(deps(w), {
+    ...DEEP_WINDOW,
+    from: "2026-04-30T00:00:00.000Z",
+  });
+  const wider = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(wider.status, "succeeded");
+  assertEquals(wider.counts!.skipped_before_cursor, 0);
+  assertEquals(wider.counts!.duplicates, savedFirst);
+  assertEquals(wider.counts!.inserted, 7 - savedFirst);
+  // The first window resumes from its own cursor.
+  w.tick = 30_000;
+  for (let i = 0; i < 6; i++) {
+    await runOutlookCapture(deps(w), DEEP_WINDOW);
+    if (lastRun(w, "outlook_deep_history_nithin").status === "succeeded") {
+      break;
+    }
+  }
+  const done = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(done.status, "succeeded");
+  assertEquals(
+    (done.cursor as Record<string, unknown>).history_from,
+    DEEP_WINDOW.from,
+  );
+  assertEquals(w.keys.size, 7);
+});
+
+Deno.test("deep: a group window is walked as W7's history and ends at the window's end", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
+    deepScope: deepScope({
+      clientEmails: { "sam.sample@example.net": "2026-01-01T00:00:00Z" },
+    }),
+  });
+  const req = {
+    mode: "deep" as const,
+    source: "fencing",
+    from: "2026-09-28T00:00:00.000Z",
+    to: "2026-09-29T12:00:00.000Z",
+  };
+  await runOutlookCapture(deps(w), req);
+  const run = lastRun(w, "outlook_deep_history_fencing");
+  assertEquals(run.status, "succeeded");
+  const expected = fencingGroup(30).posts.filter((p) => {
+    const t = Date.parse(p.post.receivedAt!);
+    return t >= Date.parse(req.from) && t < Date.parse(req.to);
+  }).length;
+  assert(expected > 0);
+  assertEquals(w.captured.length, expected);
+  assertEquals(run.counts!.kept_by_client_email, expected);
+  assert((run.cursor as Record<string, unknown>).group !== undefined);
+  assertEquals((run.cursor as Record<string, unknown>).history_tier, "deep");
+  assert(
+    w.captured.every((c) =>
+      Date.parse(String(c.event_at)) < Date.parse(req.to) &&
+      (c.metadata as Record<string, unknown>).history_tier === "deep"
+    ),
+  );
+  assert(historyRuns(w).length === 0); // never W7's run source
+});
+
+Deno.test("deep probe: counts by Perth month and folder kind, writes nothing, needs no deep flag", async () => {
+  const box: Msg[] = [
+    msg(1, "2025-03-10T02:00:00Z"),
+    msg(2, "2025-03-31T20:00:00Z", { parentFolderId: "F-sent" }), // 1 Apr in Perth
+    msg(3, "2025-04-02T02:00:00Z", { parentFolderId: "F-junk" }),
+    msg(4, "2025-04-03T02:00:00Z", { parentFolderId: "F-deleted" }),
+  ];
+  for (let i = 0; i < 120; i++) {
+    box.push(msg(100 + i, `2026-05-1${i % 10}T0${i % 9}:00:00Z`));
+  }
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    deep: { ...world().deep, enabled: false },
+  });
+  const r = await runOutlookCapture(deps(w), {
+    mode: "deep",
+    probe: true,
+    source: "nithin",
+    from: "2025-02-28T16:00:00.000Z",
+    to: "2026-06-01T00:00:00.000Z",
+  });
+  assert(r.outcome === "probe");
+  assertEquals(r.complete, true);
+  assertEquals(r.kind, "user");
+  assertEquals(r.months["2025-03"], { seen: 1, more: false });
+  assertEquals(r.months["2025-04"], { seen: 3, more: false });
+  assertEquals(r.months["2026-05"], { seen: 100, more: true });
+  assertEquals(r.months["2025-12"], { seen: 0, more: false });
+  assertEquals(Object.keys(r.months).length, 16);
+  assertEquals(Object.keys(r.months), Object.keys(r.months).sort());
+  assertEquals(r.folders, { inbox: 101, sent: 1, deleted: 1, skipped: 1 });
+  assertEquals(r.oldest_seen, "2025-03-10T02:00:00.000Z");
+  assertEquals(r.error_code, null);
+  // Nothing written: no evidence row, no run row, no attachment.
+  assertEquals(w.captured.length, 0);
+  assertEquals(w.runs.length, 0);
+  assertEquals(w.attachmentCalls.length, 0);
+  assertEquals(perthMonth(Date.parse("2025-03-31T20:00:00Z")), "2025-04");
+  // A probe is only a deep call.
+  assertEquals(
+    await runOutlookCapture(deps(w), { mode: "poll", probe: true }),
+    { outcome: "refused", code: "probe_needs_deep_mode" },
+  );
+});
+
+Deno.test("deep probe: a group counts conversations by the month they were last delivered, until one is older than the window", async () => {
+  const w = world({
+    sources: [FENCING],
+    groups: { "fencing@secureworkswa.com.au": fencingGroup(30) },
+    deep: { ...world().deep, enabled: false },
+  });
+  const r = await runOutlookCapture(deps(w), {
+    mode: "deep",
+    probe: true,
+    source: "fencing",
+    from: "2026-09-29T00:00:00.000Z",
+    to: "2026-10-01T00:00:00.000Z",
+  });
+  assert(r.outcome === "probe");
+  assertEquals(r.complete, true);
+  assertEquals(r.kind, "group");
+  // Conversation i was last delivered 2i hours before 30 Sep 00:00Z.
+  assertEquals(r.folders, { conversations: 13, undated: 0 });
+  assertEquals(r.months, { "2026-09": { seen: 13, more: false } });
+  assertEquals(w.postReads.length, 0);
+  assertEquals(w.captured.length, 0);
+  assertEquals(w.runs.length, 0);
+});
+
+Deno.test("every mode writes the builder references an email names; the prefix floor is used (and counted) when the company prefixes cannot be read", async () => {
+  const box = [
+    msg(1, "2026-10-02T05:50:00Z", {
+      subject: "MLB-26537PO-56922 make safe",
+      bodyText: "Please attend AJBR 67134 too.",
+    }),
+  ];
+  const w = world({ mailboxes: { "nithin@secureworkswa.com.au": box } });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  assertEquals(
+    (w.captured[0].payload as Record<string, unknown>).builder_refs,
+    ["MLB-26537", "PO-56922", "AJBR-67134"],
+  );
+  assert(!("history_tier" in (w.captured[0].metadata as object)));
+  assertEquals(
+    lastRun(w, "outlook_nithin").counts!.builder_ref_prefixes_floor_only,
+    undefined,
+  );
+  const unreadable = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    prefixes: null,
+  });
+  await runOutlookCapture(deps(unreadable), { mode: "poll" });
+  assertEquals(
+    (unreadable.captured[0].payload as Record<string, unknown>).builder_refs,
+    ["MLB-26537", "PO-56922", "AJBR-67134"],
+  );
+  assertEquals(
+    lastRun(unreadable, "outlook_nithin").counts!
+      .builder_ref_prefixes_floor_only,
+    1,
+  );
 });

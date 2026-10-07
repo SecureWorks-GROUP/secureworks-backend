@@ -17,6 +17,15 @@
 //   history  bounded backfill of [from, to), at most 60
 //            days back, capture_mode backfill, only mail
 //            touching a live job (captain ruling 24 Sep) outlook_history_<key>
+//   deep     the deep history load (history depth, 7
+//            Oct 2026): one slice [from, to) of any age
+//            back to the hard floor, as history, but only
+//            mail touching a monitored live job from 30
+//            days before that job's first record, and
+//            every row marked metadata.history_tier deep
+//                                                      outlook_deep_history_<key>
+//   deep with probe: true   counts only, by month (see runDeepProbe); no
+//            row of any kind is written                (none)
 //
 // Cursor (email.md review M5): the pair (window_to, window_end_id) of the last
 // email fully processed, plus cursor.ids_at_end (hashes of the ids processed at
@@ -70,6 +79,31 @@
 // and history runs check them again and retry recorded failures (recheck,
 // attachments.ts).
 //
+// The deep history load (history depth, 7 Oct 2026): the 60-day limit is this
+// reader's own rule, not Microsoft's. Mode deep reads one slice of a mailbox,
+// of any age back to the policy's hard floor, chosen by the plan's tick
+// (trigger_context_email_deep_history, 20261007080000), which walks each
+// mailbox backwards from its first live window: a user mailbox in slices of at
+// most 32 days, a group in one window walked conversation by conversation
+// exactly as W7's group history.
+// Everything else is the history path: the cursor, the resume (a deep window is
+// named by its start AND its end, because the plan can re-read a period with
+// the same end), the checkpoints, the grace, counts.progressed, backfill rows.
+// What it keeps is narrower than history: an email touching a monitored live
+// job (context_email_deep_scope: the job's number named, its client's email
+// among the outside addresses, or its builder's reference named), received on
+// or after 30 days before that job's first record (a key shared by several
+// jobs takes the earliest). Mail matching a key but older than every such job
+// is skipped (counts.skipped_before_job). Every deep row carries
+// metadata.history_tier deep, so AI placement never asks about it. The privacy,
+// noise, folder, draft and old-path copy rules are the same as every mode's.
+// It runs only while flag email_reader_deep_v1 is on (context_email_deep_enabled),
+// and never reads before the policy's hard floor.
+//
+// Builder references: every row of every mode carries payload.builder_refs
+// (_shared/makesafe_refs.ts builderRefTokens over the prefix set loaded once a
+// call), so the ladder can place a builder's email by its reference.
+//
 // Gates: feature flag email_reader_v1 (this reader's own switch, off by
 // default), email_capture_v2 (the email capture program's switch, EM1) and the
 // capture lane must all be on; otherwise the call is idle and reads nothing.
@@ -88,6 +122,10 @@ import {
   type OutlookMailItem,
   type OutlookSource,
 } from "../_shared/evidence/outlook_mail.ts";
+import {
+  builderRefTokens,
+  REF_PREFIX_FLOOR,
+} from "../_shared/makesafe_refs.ts";
 import type { AttachmentResult } from "./attachments.ts";
 import type {
   AttachmentHome,
@@ -99,8 +137,9 @@ import type {
 export const EVENT_SOURCE = "outlook-mail-capture";
 export const READER_FLAG = "email_reader_v1";
 export const PROGRAM_FLAG = "email_capture_v2";
+export const DEEP_FLAG = "email_reader_deep_v1";
 
-export type Mode = "poll" | "sweep" | "history";
+export type Mode = "poll" | "sweep" | "history" | "deep";
 
 export const POLICY = {
   pollOverlapMs: 10 * 60_000,
@@ -124,6 +163,10 @@ export const POLICY = {
   idsAtEndMax: 25,
   /** A sweep records the received time of at most this many misses (the newest). */
   sweepMissTimesMax: 100,
+  /** The longest deep window of a user mailbox when the gate does not say (the plan's slices are 31 days). */
+  deepUserWindowMaxDays: 32,
+  /** Lean pages (50 a page) the probe lists in each month of a user mailbox. */
+  probeMonthPages: 2,
 };
 
 /**
@@ -253,6 +296,30 @@ export interface MailReads {
   ): Promise<OutlookMailItem[]>;
 }
 
+/** The deep load's switch and bounds (context_email_deep_enabled). */
+export interface DeepGate {
+  /** Flag email_reader_deep_v1. The probe does not need it. */
+  enabled: boolean;
+  /** No deep window may start before this (epoch ms). */
+  hardFloorMs: number;
+  userWindowMaxDays: number;
+}
+
+/**
+ * What the deep load keeps (context_email_deep_scope): each key of a
+ * monitored live job, with the earliest time mail for it is kept (epoch ms,
+ * 30 days before the first record of the oldest job carrying the key). Job
+ * numbers upper case, client emails lower case, builder references as
+ * builderRefTokens gives them.
+ */
+export interface DeepScope {
+  version: string;
+  jobs: number;
+  jobNumbers: Map<string, number>;
+  clientEmails: Map<string, number>;
+  builderRefs: Map<string, number>;
+}
+
 export interface CaptureDeps {
   /** Epoch milliseconds. */
   now(): number;
@@ -266,6 +333,12 @@ export interface CaptureDeps {
   historyScope(): Promise<
     { jobNumbers: Set<string>; clientEmails: Set<string> }
   >;
+  /** The deep load's flag and bounds. Throws when unreadable. */
+  deepGate(): Promise<DeepGate>;
+  /** The monitored live jobs' keys and their earliest times. Throws when unreadable. */
+  deepScope(): Promise<DeepScope>;
+  /** The make-safe reference prefix set, or null when it cannot be read (the floor is used). */
+  builderRefPrefixes(): Promise<string[] | null>;
   /** Newest runs of one run source first. Throws when unreadable. */
   latestRuns(runSource: string, limit: number): Promise<RunRow[]>;
   /** record_capture_run. Throws on refusal; returns the run id. */
@@ -296,6 +369,33 @@ export interface CaptureRequest {
   /** History window, ISO times. */
   from?: string | null;
   to?: string | null;
+  /** Mode deep only: list the window and count by month, write nothing. */
+  probe?: boolean;
+}
+
+/**
+ * The deep probe's answer (go point G6): how much mail Graph gives for a
+ * window, by Perth month, so a person can see how far back a mailbox reaches
+ * before anything is saved. Counts and times only. A user mailbox lists at
+ * most POLICY.probeMonthPages pages (50 a page) of each month (`more`: there
+ * was more); a group counts conversations by the month they were last
+ * delivered.
+ */
+export interface ProbeResult {
+  outcome: "probe";
+  source_key: string;
+  kind: "user" | "group";
+  from: string;
+  to: string;
+  /** False when the time budget or an error stopped it. */
+  complete: boolean;
+  months: Record<string, { seen: number; more: boolean }>;
+  /** User mailbox: messages by folder kind (skipped = junk, drafts, outbox). Group: conversations. */
+  folders: Record<string, number>;
+  oldest_seen: string | null;
+  newest_seen: string | null;
+  reads: number;
+  error_code: string | null;
 }
 
 export interface SourceResult {
@@ -311,6 +411,7 @@ export interface SourceResult {
 export type CaptureResult =
   | { outcome: "idle"; reason: string }
   | { outcome: "refused"; code: string }
+  | ProbeResult
   | {
     outcome: "ran";
     mode: Mode;
@@ -323,7 +424,14 @@ export function runSourceName(mode: Mode, sourceKey: string): string {
     ? `outlook_${sourceKey}`
     : mode === "sweep"
     ? `outlook_sweep_${sourceKey}`
+    : mode === "deep"
+    ? `outlook_deep_history_${sourceKey}`
     : `outlook_history_${sourceKey}`;
+}
+
+/** History and deep runs share the history path: a fixed window, a resumable cursor, backfill rows. */
+function isHistoryLike(mode: Mode): boolean {
+  return mode === "history" || mode === "deep";
 }
 
 /** A provider or database failure's code, safe for a run row (lower case, ids only). */
@@ -425,13 +533,46 @@ export function historyWindow(
   return { fromMs: from, toMs: to };
 }
 
+/**
+ * A deep window: [from, to) not before the gate's hard floor, to not in the
+ * future, and a user mailbox's window at most the gate's longest (the plan's
+ * slices are 31 days); a group's window may be any length, because a group is
+ * walked conversation by conversation and reads every newer conversation
+ * anyway. The probe may span any length for either kind.
+ */
+export function deepWindow(
+  req: CaptureRequest,
+  nowMs: number,
+  gate: DeepGate,
+  kind: "user" | "group",
+): { ok: true; fromMs: number; toMs: number } | { ok: false; code: string } {
+  const from = ms(req.from);
+  const to = ms(req.to);
+  if (from === null || to === null || from >= to || to > nowMs) {
+    return { ok: false, code: "deep_window_invalid" };
+  }
+  if (!(from >= gate.hardFloorMs)) {
+    return { ok: false, code: "deep_window_before_floor" };
+  }
+  const maxDays = gate.userWindowMaxDays > 0
+    ? gate.userWindowMaxDays
+    : POLICY.deepUserWindowMaxDays;
+  if (!req.probe && kind === "user" && to - from > maxDays * 86_400_000) {
+    return { ok: false, code: "deep_window_too_long" };
+  }
+  return { ok: true, fromMs: from, toMs: to };
+}
+
 export async function runOutlookCapture(
   deps: CaptureDeps,
   req: CaptureRequest,
 ): Promise<CaptureResult> {
   const began = deps.now();
-  if (!["poll", "sweep", "history"].includes(req.mode)) {
+  if (!["poll", "sweep", "history", "deep"].includes(req.mode)) {
     return { outcome: "refused", code: "mode_invalid" };
+  }
+  if (req.probe && req.mode !== "deep") {
+    return { outcome: "refused", code: "probe_needs_deep_mode" };
   }
   const flags = await deps.flags();
   if (!flags.reader) return { outcome: "idle", reason: `${READER_FLAG}_off` };
@@ -448,6 +589,16 @@ export async function runOutlookCapture(
       return { outcome: "refused", code: "history_needs_source" };
     }
   }
+  let gate: DeepGate | null = null;
+  if (req.mode === "deep") {
+    if (!req.source) return { outcome: "refused", code: "deep_needs_source" };
+    gate = await deps.deepGate();
+    // The probe writes nothing and is how the owner sees how far a mailbox
+    // reaches before the load is switched on (go point G6).
+    if (!gate.enabled && !req.probe) {
+      return { outcome: "idle", reason: `${DEEP_FLAG}_off` };
+    }
+  }
 
   let sources = (await deps.sources()).filter((s) =>
     s.kind === "user" || s.kind === "group"
@@ -458,10 +609,19 @@ export async function runOutlookCapture(
       return { outcome: "refused", code: "source_not_selected" };
     }
   }
+  if (gate) {
+    const d = deepWindow(req, began, gate, sources[0].kind as "user" | "group");
+    if (!d.ok) return { outcome: "refused", code: d.code };
+    window = { fromMs: d.fromMs, toMs: d.toMs };
+    if (req.probe) return await runDeepProbe(deps, sources[0], window, began);
+  }
 
   const supplierDomains = await deps.supplierDomains();
   const jobClientEmails = await deps.jobClientEmails();
   const scope = req.mode === "history" ? await deps.historyScope() : null;
+  const deepScope = req.mode === "deep" ? await deps.deepScope() : null;
+  const loaded = await deps.builderRefPrefixes();
+  const prefixes = loaded ?? [...REF_PREFIX_FLOOR];
 
   const results: SourceResult[] = [];
   const notReached: string[] = [];
@@ -477,6 +637,9 @@ export async function runOutlookCapture(
         supplierDomains,
         jobClientEmails,
         scope,
+        deepScope,
+        prefixes,
+        prefixesFloorOnly: loaded === null,
       }),
     );
   }
@@ -494,6 +657,70 @@ interface RunEnv {
   supplierDomains: Set<string>;
   jobClientEmails: Set<string>;
   scope: { jobNumbers: Set<string>; clientEmails: Set<string> } | null;
+  deepScope: DeepScope | null;
+  /** The make-safe reference prefixes for payload.builder_refs and the deep scope. */
+  prefixes: readonly string[];
+  /** The company prefixes could not be read: the floor was used. */
+  prefixesFloorOnly: boolean;
+}
+
+export type DeepDecision =
+  | { keep: true; by: "job_number" | "builder_ref" | "client_email" }
+  | { keep: false; reason: "skipped_before_job" | "skipped_out_of_scope" };
+
+/**
+ * The deep load keeps an email touching a monitored live job: it names the
+ * job's number, or its builder's reference (the subject's bare 5-digit
+ * numbers count, extractRef's fallback order, never the words'), or one of
+ * its outside addresses is the job's client email; and it was received on or
+ * after that key's time (30 days before the first record of the oldest job
+ * carrying it). A key matched only by mail older than every such time is
+ * skipped_before_job; no key at all is skipped_out_of_scope. Pure.
+ */
+export function deepScopeDecision(
+  row: Record<string, unknown>,
+  atMs: number,
+  scope: DeepScope,
+  prefixes: readonly string[],
+): DeepDecision {
+  const p = row.payload as Record<string, unknown>;
+  const body = String(p.body ?? "");
+  let matched = false;
+  const at = (m: Map<string, number>, k: string): boolean => {
+    const from = m.get(k);
+    if (from === undefined) return false;
+    matched = true;
+    return atMs >= from;
+  };
+  for (const r of ourReferences(body).map((x) => x.toUpperCase())) {
+    if (
+      at(scope.jobNumbers, r) ||
+      at(scope.jobNumbers, r.replace(/^([A-Z]+)(\d)/, "$1-$2"))
+    ) return { keep: true, by: "job_number" };
+  }
+  const refs = new Set([
+    ...builderRefTokens(body, prefixes),
+    ...builderRefTokens(String(p.subject ?? ""), prefixes, {
+      bareNumeric: true,
+    }),
+  ]);
+  for (const r of refs) {
+    if (at(scope.builderRefs, r)) return { keep: true, by: "builder_ref" };
+  }
+  const addrs = [
+    p.from,
+    ...(p.to as unknown[] ?? []),
+    ...(p.cc as unknown[] ?? []),
+  ]
+    .map((a) => emailAddress(String(a ?? "")))
+    .filter((a): a is string => !!a && !isOurAddress(a));
+  for (const a of addrs) {
+    if (at(scope.clientEmails, a)) return { keep: true, by: "client_email" };
+  }
+  return {
+    keep: false,
+    reason: matched ? "skipped_before_job" : "skipped_out_of_scope",
+  };
 }
 
 /** History keeps only mail touching a live job: an outside address that is a live job's client email, or a live job number named. */
@@ -574,7 +801,10 @@ async function runSource(
     // move history_from forward when a long load nears the 60-day limit, and
     // that must not throw the progress away. Every history run, whether
     // succeeded, cut, failed or abandoned, carries the cursor it reached (or
-    // the one it started from), so the newest run is enough.
+    // the one it started from), so the newest run is enough. A deep window is
+    // named by its start too: the deep plan may read a period again with the
+    // same end and an earlier start (a job that joined later), and resuming a
+    // cursor from the narrower window would skip the start of the wider one.
     const fresh: StartPoint = {
       startMs: env.window!.fromMs,
       skipBeforeMs: null,
@@ -583,7 +813,9 @@ async function runSource(
     };
     const newest = recent.find((r) =>
       r.status !== "running" &&
-      r.cursor?.history_to === historyKey!.history_to
+      r.cursor?.history_to === historyKey!.history_to &&
+      (req.mode !== "deep" ||
+        r.cursor?.history_from === historyKey!.history_from)
     );
     resume = newest && newest.status !== "succeeded" ? newest : null;
     start = resume && resume.window_to && s.kind === "user"
@@ -600,7 +832,7 @@ async function runSource(
   // A group's history walk: resumed from the cursor, or a new first pass.
   const runStartIso = iso(nowMs);
   let walk: GroupWalk | null = null;
-  if (req.mode === "history" && s.kind === "group") {
+  if (isHistoryLike(req.mode) && s.kind === "group") {
     walk = (resume ? groupWalkFrom(resume.cursor) : null) ?? {
       floor: iso(env.window!.fromMs),
       pass_started: runStartIso,
@@ -638,12 +870,21 @@ async function runSource(
     progressed: 0,
   };
   if (req.mode === "sweep") counts.sweep_misses = 0;
+  if (req.mode === "deep") {
+    counts.kept_by_job_number = 0;
+    counts.kept_by_builder_ref = 0;
+    counts.kept_by_client_email = 0;
+    counts.skipped_before_job = 0;
+  }
+  if (env.prefixesFloorOnly) counts.builder_ref_prefixes_floor_only = 1;
   if (walk) {
     counts.conversations_read = 0;
     counts.conversations_skipped = 0;
     counts.conversations_undated = 0;
   }
-  const captureMode: CaptureMode = req.mode === "history" ? "backfill" : "live";
+  const captureMode: CaptureMode = isHistoryLike(req.mode)
+    ? "backfill"
+    : "live";
   const source: OutlookSource = {
     email: s.email,
     sourceKey: s.source_key,
@@ -691,6 +932,7 @@ async function runSource(
         backlog: backlog || !readComplete,
         ids_at_end: cursorIds,
         ...(historyKey ?? {}),
+        ...(req.mode === "deep" ? { history_tier: "deep" } : {}),
         ...(walk ? { group: walk } : {}),
         ...(req.mode === "sweep"
           ? { miss_received_at: sweepMissList(missTimes) }
@@ -710,12 +952,12 @@ async function runSource(
     source: runSource,
     status: "running",
     window_from: iso(start.startMs),
-    ...(req.mode === "history" ? progressFields() : {}),
+    ...(isHistoryLike(req.mode) ? progressFields() : {}),
   });
   let lastCheckpoint = nowMs;
   // A long history run saves its cursor on its running row as it goes.
   const checkpoint = async (): Promise<void> => {
-    if (req.mode !== "history") return;
+    if (!isHistoryLike(req.mode)) return;
     const t = deps.now();
     if (t - lastCheckpoint < POLICY.checkpointMs) return;
     lastCheckpoint = t;
@@ -780,6 +1022,8 @@ async function runSource(
       captureMode,
       supplierDomains: env.supplierDomains,
       jobClientEmails: env.jobClientEmails,
+      builderRefPrefixes: env.prefixes,
+      ...(req.mode === "deep" ? { historyTier: "deep" as const } : {}),
     });
     if (built.kind === "skip") {
       if (built.reason === "skipped_noise") counts.skipped_noise++;
@@ -792,6 +1036,15 @@ async function runSource(
       counts.skipped_out_of_scope++;
       await advance();
       return;
+    }
+    if (env.deepScope) {
+      const d = deepScopeDecision(built.row, t, env.deepScope, env.prefixes);
+      if (!d.keep) {
+        counts[d.reason]++;
+        await advance();
+        return;
+      }
+      counts[`kept_by_${d.by}`]++;
     }
     const payload = built.row.payload as Record<string, unknown>;
     if (
@@ -871,7 +1124,7 @@ async function runSource(
   const overBudget = (): boolean => {
     const spent = deps.now() - env.began;
     if (spent <= POLICY.budgetMs) return false;
-    return req.mode !== "history" || counts.progressed > 0 ||
+    return !isHistoryLike(req.mode) || counts.progressed > 0 ||
       spent > POLICY.budgetMs + POLICY.progressGraceMs;
   };
 
@@ -1099,8 +1352,10 @@ async function runSource(
         throw new SourceStop(safeCode(e, "graph_error"), "failed");
       });
       if (!groupId) throw new SourceStop("group_not_found", "failed");
-      const maxConv = POLICY.groupMaxConversations[req.mode];
-      const maxPosts = POLICY.groupMaxPosts[req.mode];
+      // Only a poll or a sweep reaches here: history and deep walk the group.
+      const liveMode = req.mode as "poll" | "sweep";
+      const maxConv = POLICY.groupMaxConversations[liveMode];
+      const maxPosts = POLICY.groupMaxPosts[liveMode];
       const posts: Array<{ post: OutlookMailItem; threadId: string }> = [];
       let conversations = 0;
       let next: string | null = null;
@@ -1182,5 +1437,173 @@ async function runSource(
     status,
     error_code: stop ? stop.code : null,
     counts,
+  };
+}
+
+const PERTH_OFFSET_MS = 8 * 3_600_000;
+
+/** The Perth month ("2026-07") an instant falls in. Perth keeps UTC+8 all year. */
+export function perthMonth(t: number): string {
+  return new Date(t + PERTH_OFFSET_MS).toISOString().slice(0, 7);
+}
+
+/** The Perth months a window covers, each clipped to the window, oldest first. */
+export function perthMonths(
+  fromMs: number,
+  toMs: number,
+): Array<{ label: string; startMs: number; endMs: number }> {
+  const out: Array<{ label: string; startMs: number; endMs: number }> = [];
+  const first = new Date(fromMs + PERTH_OFFSET_MS);
+  let y = first.getUTCFullYear();
+  let m = first.getUTCMonth();
+  for (;;) {
+    const start = Date.UTC(y, m, 1) - PERTH_OFFSET_MS;
+    const end = Date.UTC(y, m + 1, 1) - PERTH_OFFSET_MS;
+    if (start >= toMs) break;
+    out.push({
+      label: `${y}-${String(m + 1).padStart(2, "0")}`,
+      startMs: Math.max(fromMs, start),
+      endMs: Math.min(toMs, end),
+    });
+    m++;
+    if (m === 12) {
+      m = 0;
+      y++;
+    }
+  }
+  return out;
+}
+
+/**
+ * The deep probe (go point G6): how much mail Graph gives one mailbox for a
+ * window, by Perth month, before anything is saved. Read only: no evidence
+ * row, no run row, no attachment, no message body read (a user mailbox is
+ * listed lean, a group by its conversation list only). A user mailbox lists at
+ * most POLICY.probeMonthPages pages of each month, oldest month first; a group
+ * walks its conversations newest first until one was last delivered before the
+ * window. Stops at the time budget (complete false). Counts and times only.
+ */
+export async function runDeepProbe(
+  deps: CaptureDeps,
+  s: SourceRow,
+  window: { fromMs: number; toMs: number },
+  began: number,
+): Promise<ProbeResult> {
+  const kind = s.kind as "user" | "group";
+  const months: Record<string, { seen: number; more: boolean }> = {};
+  const folders: Record<string, number> = kind === "user"
+    ? { inbox: 0, sent: 0, deleted: 0, skipped: 0 }
+    : { conversations: 0, undated: 0 };
+  let oldest: number | null = null;
+  let newest: number | null = null;
+  let reads = 0;
+  let complete = false;
+  let errorCode: string | null = null;
+  const saw = (t: number | null) => {
+    if (t === null) return;
+    if (oldest === null || t < oldest) oldest = t;
+    if (newest === null || t > newest) newest = t;
+  };
+  const over = () => deps.now() - began > POLICY.budgetMs;
+  try {
+    if (kind === "user") {
+      const f = await deps.mail.folderIds(s.email);
+      reads++;
+      const skip = new Set(
+        [f.junk, f.drafts, f.outbox].filter((x): x is string => !!x),
+      );
+      let stopped = false;
+      for (const mo of perthMonths(window.fromMs, window.toMs)) {
+        if (over()) {
+          stopped = true;
+          break;
+        }
+        const entry = { seen: 0, more: false };
+        months[mo.label] = entry;
+        let next: string | null = null;
+        for (let page = 0; page < POLICY.probeMonthPages; page++) {
+          const got: MessagePage = await deps.mail.listMessages(s.email, {
+            fromIso: iso(mo.startMs),
+            toIso: iso(mo.endMs),
+            top: POLICY.bulkPageSize,
+            next,
+            lean: true,
+          });
+          reads++;
+          for (const m of got.items) {
+            entry.seen++;
+            const where = m.isDraft === true ||
+                (!!m.parentFolderId && skip.has(m.parentFolderId))
+              ? "skipped"
+              : m.parentFolderId && m.parentFolderId === f.sent
+              ? "sent"
+              : m.parentFolderId && m.parentFolderId === f.deleted
+              ? "deleted"
+              : "inbox";
+            folders[where]++;
+            saw(ms(m.receivedAt));
+          }
+          next = got.next;
+          if (!next) break;
+          if (page === POLICY.probeMonthPages - 1) entry.more = true;
+        }
+      }
+      complete = !stopped;
+    } else {
+      const groupId = await deps.mail.resolveGroupId(s.email);
+      reads++;
+      if (!groupId) {
+        errorCode = "group_not_found";
+      } else {
+        let next: string | null = null;
+        let done = false;
+        for (
+          let page = 0;
+          page < POLICY.groupHistoryMaxPages && !done && !over();
+          page++
+        ) {
+          const got = await deps.mail.listGroupConversations(groupId, next);
+          reads++;
+          for (const c of got.items) {
+            const t = ms(c.lastDeliveredDateTime);
+            if (t === null) {
+              folders.undated++;
+              continue;
+            }
+            if (t < window.fromMs) {
+              done = true;
+              break;
+            }
+            if (t >= window.toMs) continue;
+            const label = perthMonth(t);
+            (months[label] ??= { seen: 0, more: false }).seen++;
+            folders.conversations++;
+            saw(t);
+          }
+          next = got.next;
+          if (!next) done = true;
+        }
+        complete = done;
+      }
+    }
+  } catch (e) {
+    errorCode = safeCode(e, "graph_error");
+    complete = false;
+  }
+  const sorted: Record<string, { seen: number; more: boolean }> = {};
+  for (const k of Object.keys(months).sort()) sorted[k] = months[k];
+  return {
+    outcome: "probe",
+    source_key: s.source_key,
+    kind,
+    from: iso(window.fromMs),
+    to: iso(window.toMs),
+    complete,
+    months: sorted,
+    folders,
+    oldest_seen: oldest === null ? null : iso(oldest),
+    newest_seen: newest === null ? null : iso(newest),
+    reads,
+    error_code: errorCode,
   };
 }

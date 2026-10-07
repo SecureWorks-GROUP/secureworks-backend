@@ -395,6 +395,9 @@ outlook-mail-capture|supabase/migrations/20260924100000_context_capture_business
 # Lanes health: the reader records a failed attachment (status failed, with
 # its error_code) and a group file sent without its bytes (skipped_no_content).
 outlook-mail-capture|supabase/migrations/20261006050000_context_lanes_health.sql|column|context_email_attachments.error_code
+# History depth PR B: mode deep reads its gate and the monitored jobs' keys.
+outlook-mail-capture|supabase/migrations/20261007080000_context_email_deep_history.sql|function|context_email_deep_enabled
+outlook-mail-capture|supabase/migrations/20261007080000_context_email_deep_history.sql|function|context_email_deep_scope
 monitor-inbox|supabase/migrations/20261002150000_context_email_reader.sql|function|context_email_reader_flags
 
 # T2: the call transcript fetcher selects due calls (live, and history calls

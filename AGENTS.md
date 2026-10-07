@@ -4120,4 +4120,8 @@ The old monitor-inbox path must poll only `monitor-inbox/legacy_mailboxes.ts`,
 never `monitored_mailboxes`, which belongs to the new poller. Source changes,
 access, run-row naming and health are owned by
 [`docs/context/email-capture.md`](docs/context/email-capture.md); the migration
-contract's E22 case pins the old-path boundary.
+contract's E22 case pins the old-path boundary. That document also owns the
+deep history load (`20261007080000`, flag `email_reader_deep_v1`): its rows
+carry `metadata.history_tier` deep, which AI placement never asks about and
+which never moves a job's first record, and row 14 reads its reach through
+`context_email_history_reach` / `_reach_jobs`, never by re-deriving it.
