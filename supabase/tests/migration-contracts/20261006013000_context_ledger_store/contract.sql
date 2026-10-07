@@ -158,11 +158,14 @@ BEGIN
   END IF;
  END LOOP;
  -- Store functions run as definer with a fixed path; per-row helpers carry no SET (they inline).
+ -- (widened by story safety, 20261006040000: its two helpers of the legacy-mail rule,
+ -- context_ledger_mail_rule_since and context_ledger_mail_copies, are plain SQL with no SET
+ -- read inside the definer evidence and judge)
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
     'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes',
-    'context_ledger_email_closes') THEN
+    'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -729,10 +732,12 @@ BEGIN
  i1b := pg_temp.lg_inbox(NULL, 'pat@example.test', 'Gate', 'Legacy mail from the client address', '11 days 23 hours 59 minutes 30 seconds', 'client_reply', 'admin@secureworkswa.com.au');
  i2 := pg_temp.lg_inbox(p, 'pat@example.test', 'Copied', 'Has an evidence copy', '11 days');
  PERFORM set_config('session_replication_role', 'replica', true);
- INSERT INTO public.business_events (job_id, event_type, source, channel, direction, payload, metadata, occurred_at, event_at, attribution_status,
-  attribution_confidence, source_table, source_id)
+ -- (story safety, 20261006040000: each copy is stated as captured when it occurred, so
+ -- when the mail joined this job's evidence does not depend on the clock of the run)
+ INSERT INTO public.business_events (job_id, event_type, source, channel, direction, payload, metadata, occurred_at, event_at, recorded_at,
+  context_captured_at, attribution_status, attribution_confidence, source_table, source_id)
  VALUES (other, 'client.email_in', 'monitor-inbox', 'email', 'inbound', '{"body":"Has an evidence copy"}', '{"written_as":"service_role"}',
-  now() - interval '11 days', now() - interval '11 days', 'direct', 1, 'inbox_events', i2::text);
+  now() - interval '11 days', now() - interval '11 days', now() - interval '11 days', now() - interval '11 days', 'direct', 1, 'inbox_events', i2::text);
  PERFORM set_config('session_replication_role', 'origin', true);
  i3 := pg_temp.lg_inbox(p, 'pat@example.test', 'Win now', 'Spam text', '10 days', 'spam');
  i4 := pg_temp.lg_inbox(p, 'neighbour@example.test', 'Fence line', 'Mail on the job from someone else', '9 days', 'other');
@@ -740,13 +745,17 @@ BEGIN
  be5 := pg_temp.lg_ev(other, 'client.email_in', 'email', 'inbound', 'Same mail the reader also saved, full body', '2 days', 'customer', 'job_customer', '{"from":"pat@example.test"}');
  UPDATE public.business_events SET event_at = (SELECT received_at FROM public.inbox_events WHERE id = i5) WHERE id = be5;
  i6 := pg_temp.lg_inbox(p, 'pat@example.test', 'Automatic reply: away', 'I am away', '2 days');
- -- An old-path copy names its inbox row only in its payload (no source pointer, another instant).
+ -- An old-path copy names its inbox row only in its payload (no source pointer, no sender).
+ -- (story safety, 20261006040000: it is stamped at the mail's own instant, as its one writer,
+ -- monitor-inbox's legacy fallback, stamps it and where the copy read looks for it; it was an
+ -- hour later, which no writer does)
  i8 := pg_temp.lg_inbox(p, 'pat@example.test', 'Old path', 'Named by an old-path copy', '10 days 12 hours', 'other');
  PERFORM set_config('session_replication_role', 'replica', true);
- INSERT INTO public.business_events (job_id, event_type, source, channel, direction, payload, metadata, occurred_at, event_at, attribution_status,
-  attribution_confidence)
- VALUES (other, 'client.email_in', 'ghl-proxy', 'email', 'inbound', jsonb_build_object('body', 'Named by an old-path copy', 'inbox_events_id', i8::text),
-  '{"written_as":"service_role"}', now() - interval '10 days 11 hours', now() - interval '10 days 11 hours', 'direct', 1);
+ INSERT INTO public.business_events (job_id, event_type, source, channel, direction, payload, metadata, occurred_at, event_at, recorded_at,
+  context_captured_at, attribution_status, attribution_confidence)
+ SELECT other, 'client.email_in', 'ghl-proxy', 'email', 'inbound', jsonb_build_object('body', 'Named by an old-path copy', 'inbox_events_id', i8::text),
+  '{"written_as":"service_role"}', i.received_at, i.received_at, now() - interval '10 days 11 hours', now() - interval '10 days 11 hours', 'direct', 1
+ FROM public.inbox_events i WHERE i.id = i8;
  PERFORM set_config('session_replication_role', 'origin', true);
  i7 := pg_temp.lg_inbox(p, 'office@secureworkswa.com.au', 'Internal', 'Mail from our own office', '1 day', 'other');
  -- Mail from the client's address that the old matcher placed on another job stays there.
@@ -754,13 +763,25 @@ BEGIN
  pk := public.context_ledger_packet(p);
  ev := pk -> 'evidence';
  SELECT array_agg((x ->> 'id')::uuid ORDER BY o) INTO ids FROM jsonb_array_elements(ev) WITH ORDINALITY y(x, o);
- want := ARRAY[i1, p1, p2, i4, p5, p6, p7, p8, p8c, p12, p14, i7];
+ -- (story safety, 20261006040000, seventh review) a copy on another live job decides where a
+ -- legacy mail belongs, as the job conversation's rule R0 reads it (its source pointer, graph
+ -- key or payload pointer): i2 (by its source pointer) and i8 (by an old-path payload), whose
+ -- copies sit on the other job, are that job's, never this one's, as 972 had it. i5, whose copy
+ -- there is found only by sender and instant (a key R0 does not read), is kept; only a copy on
+ -- the same job stands in for it (a copy unplaced or on an archived or holding job keeps the
+ -- mail too, proved in 20261006040000's contract)
+ want := ARRAY[i1, p1, p2, i4, p5, p6, p7, p8, p8c, p12, p14, i5, i7];
  PERFORM pg_temp.lg_assert(ids = want, format('evidence ids/order: got %s want %s', ids, want));
- PERFORM pg_temp.lg_assert(pk ->> 'version' = 'ledger-packet-v1' AND (pk ->> 'evidence_rows')::integer = 12
+ PERFORM pg_temp.lg_assert(pk ->> 'version' = 'ledger-packet-v1' AND (pk ->> 'evidence_rows')::integer = 13
   AND (pk ->> 'truncated_rows')::integer = 2 AND (pk ->> 'duplicates_collapsed')::integer = 2, 'packet counts: ' || (pk - 'evidence')::text);
- PERFORM pg_temp.lg_assert((pk ->> 'evidence_until')::timestamptz = (SELECT processed_at FROM public.inbox_events WHERE id = i7), 'evidence_until');
+ -- (widened by story safety, 20261006040000: i5, kept although a copy of it sits on another
+ -- job, joined this job's evidence when that rule first applied, after i7 landed)
+ PERFORM pg_temp.lg_assert((pk ->> 'evidence_until')::timestamptz
+  = greatest((SELECT processed_at FROM public.inbox_events WHERE id = i7), public.context_ledger_mail_rule_since()), 'evidence_until');
+ -- (story safety, seventh review: its old-path copy is on another live job, which decides
+ -- where it belongs, so it is cited by that copy there, never itself here, as 972 had it)
  PERFORM pg_temp.lg_assert(public.context_ledger_cite(p, jsonb_build_object('table', 'inbox_events', 'id', i8::text, 'excerpt', 'Named by'))
-  ->> 'code' = 'citation_not_admissible', 'a mail with an old-path copy is cited by its copy, never itself');
+  ->> 'code' = 'citation_not_admissible', 'a mail whose old-path copy sits on another live job is cited by its copy, never itself');
  -- Caps: 6,000 for transcripts and document text, 3,000 otherwise.
  PERFORM pg_temp.lg_assert(length(ev -> 5 ->> 'text') = 6000 AND length(ev -> 6 ->> 'text') = 3000, 'text caps');
  -- Roles come from the stored stamp, never invented.
@@ -772,10 +793,10 @@ BEGIN
  PERFORM pg_temp.lg_assert(ev -> 10 ->> 'role_basis' = 'any_job_customer', 'basis carried so the reader can tell this job''s customer');
  PERFORM pg_temp.lg_assert(ev -> 0 ->> 'table' = 'inbox_events' AND ev -> 0 ->> 'sender_role' = 'customer' AND ev -> 0 ->> 'role_basis' = 'client_email'
   AND ev -> 0 ->> 'subject' = 'Gate', 'legacy client mail');
- PERFORM pg_temp.lg_assert(ev -> 3 -> 'sender_role' = 'null'::jsonb AND ev -> 11 ->> 'ours' = 'true' AND ev -> 11 ->> 'sender_role' = 'staff', 'other legacy mail');
+ PERFORM pg_temp.lg_assert(ev -> 3 -> 'sender_role' = 'null'::jsonb AND ev -> 12 ->> 'ours' = 'true' AND ev -> 12 ->> 'sender_role' = 'staff', 'other legacy mail');
  -- Where each row is placed: legacy mail from the client's address on no job is
  -- placed nowhere; every other row is on this job. Nothing was already read.
- PERFORM pg_temp.lg_assert(ev -> 0 ->> 'placed_on' = 'none' AND ev -> 3 ->> 'placed_on' = 'this_job' AND ev -> 11 ->> 'placed_on' = 'this_job'
+ PERFORM pg_temp.lg_assert(ev -> 0 ->> 'placed_on' = 'none' AND ev -> 3 ->> 'placed_on' = 'this_job' AND ev -> 12 ->> 'placed_on' = 'this_job'
   AND ev -> 1 ->> 'placed_on' = 'this_job' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(ev) x WHERE (x ->> 'already_read')::boolean),
   'placed_on and already_read: ' || ev::text);
  PERFORM pg_temp.lg_assert(public.context_ledger_cite(p, jsonb_build_object('table', 'inbox_events', 'id',
@@ -818,6 +839,8 @@ BEGIN
   'party roles: ' || (pk -> 'parties')::text);
  -- as_of replays: nothing recorded after it.
  pk := public.context_ledger_packet(p, NULL, now() - interval '7 days 12 hours');
+ -- (story safety, seventh review: i2 and i8, whose copies sit on another live job, are that
+ -- job's evidence, never this one's, as 972 had it)
  PERFORM pg_temp.lg_assert((pk ->> 'evidence_rows')::integer = 5, 'as_of replay rows: ' || (pk ->> 'evidence_rows'));
  -- Update window: rows recorded after since, plus the six before the first.
  q := pg_temp.lg_job('SWF-94003');
@@ -1762,11 +1785,12 @@ DECLARE x uuid; y uuid; o uuid; i1 uuid; i2 uuid; c1 uuid; c2 uuid; jd record;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  o := pg_temp.lg_job('SWF-98801');
- -- never read, and its only legacy mail has a business_events copy on another job: no evidence
+ -- never read, and its only legacy mail has a business_events copy on another live job, which
+ -- decides where it belongs (story safety, seventh review, as 972 had it): no evidence
  x := pg_temp.lg_job('SWF-98802');
  i1 := pg_temp.lg_inbox(x, 'pat@example.test', 'Gate', 'Please price the gate on the side.', '3 days');
  c1 := pg_temp.lg_ev(o, 'client.email_in', 'email', 'inbound', 'Please price the gate on the side.', '3 days', 'customer');
- -- a reading whose only newer legacy mail is such a copy: nothing new to read
+ -- a reading whose only newer legacy mail has such a copy: nothing new to read
  y := pg_temp.lg_job('SWF-98803');
  PERFORM pg_temp.lg_ev(y, 'client.reply', 'sms', 'inbound', 'Read message one', '5 days', 'customer');
  PERFORM pg_temp.lg_gen(y, 'live', now() - interval '1 day');
@@ -1776,11 +1800,15 @@ BEGIN
  UPDATE public.business_events SET source_table = 'inbox_events', source_id = i1::text WHERE id = c1;
  UPDATE public.business_events SET source_table = 'inbox_events', source_id = i2::text WHERE id = c2;
  PERFORM set_config('session_replication_role', 'origin', true);
+ -- (story safety, 20261006040000, seventh review: a copy on another live job decides where the
+ -- mail belongs, so it is neither job x's evidence nor new to job y's reading; the quick read
+ -- counts it, the full read leaves it out, and the due read and the judge still agree. A copy
+ -- unplaced or on an archived or holding job keeps the mail: 20261006040000's contract)
  SELECT * INTO jd FROM public.context_ledger_judge(ARRAY[x]);
  PERFORM pg_temp.lg_assert(NOT jd.due AND jd.blocked_reason = 'no_evidence' AND jd.evidence_rows = 0,
-  'legacy mail with a copy elsewhere is no evidence: ' || to_jsonb(jd)::text);
+  'legacy mail with a copy on another live job is no evidence: ' || to_jsonb(jd)::text);
  SELECT * INTO jd FROM public.context_ledger_judge(ARRAY[y]);
- PERFORM pg_temp.lg_assert(NOT jd.due AND jd.reason IS NULL, 'a newer legacy copy is nothing new: ' || to_jsonb(jd)::text);
+ PERFORM pg_temp.lg_assert(NOT jd.due AND jd.reason IS NULL, 'a newer legacy copy on another live job is nothing new: ' || to_jsonb(jd)::text);
  PERFORM pg_temp.lg_assert(NOT EXISTS (SELECT 1 FROM public.context_ledger_due(50) d WHERE d.job_id IN (x, y)), 'due lists neither');
 END $c$;
 ROLLBACK;
