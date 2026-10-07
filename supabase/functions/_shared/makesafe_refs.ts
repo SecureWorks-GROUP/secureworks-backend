@@ -290,6 +290,59 @@ export function canonicalCompanyDedupeKey(value: unknown): string {
   return key;
 }
 
+// ── builderRefTokens (context history depth, 7 Oct 2026) ─────────────────────
+// Every builder reference a text names, as canonical tokens, distinct, in the
+// order they first appear. The email reader writes them on each Outlook row
+// (payload.builder_refs) and its deep history load keeps an email that names a
+// monitored make-safe job's reference: the job side (the job's metadata refs)
+// and the mail side go through this one function, so they cannot drift.
+//   * "<PREFIX>-<digits>" for the prefix set (floor plus company prefixes):
+//     dashed, spaced and compact forms ("AJBR-67134", "AJBR 67134",
+//     "MS191190"), and the claim of a composite display ref
+//     ("MLB-26537PO-56922" gives MLB-26537). AJBR needs 5 digits (Ruling 13).
+//   * "MLB-<unit>-<digits>" for MLB's unit forms ("MLB-RR-24010").
+//   * "PO-<digits>" for a purchase order named as one ("PO-56922", "PO 56922",
+//     "PO#56922", and the PO of "MLB-26537PO-56922").
+//   * with bareNumeric, a bare run of 5 or more digits ("67005"): only for a
+//     job's own stored ref or an email SUBJECT (extractRef's fallback order),
+//     never an email body, where any 5-digit number would match.
+// Pure.
+export function builderRefTokens(
+  text: string | null | undefined,
+  prefixes: readonly string[] = REF_PREFIX_FLOOR,
+  opts: { bareNumeric?: boolean } = {},
+): string[] {
+  const s = canonicaliseRefTypos(String(text ?? ""));
+  if (!s) return [];
+  const found: Array<{ at: number; token: string }> = [];
+  const unit = /\bMLB\s*[- ]\s*((?!PO(?:\b|\s|[-#]))[A-Z]{2})\s*[- ]\s*(\d+)/gi;
+  for (const m of s.matchAll(unit)) {
+    found.push({
+      at: m.index ?? 0,
+      token: `MLB-${m[1].toUpperCase()}-${m[2]}`,
+    });
+  }
+  const alt = cleanPrefixes(prefixes).map(escapeRegExp).join("|");
+  const prefixed = new RegExp(`\\b(${alt})\\s*-?\\s*(\\d{4,})(?!\\d)`, "gi");
+  for (const m of s.matchAll(prefixed)) {
+    const p = m[1].toUpperCase();
+    if (p === "AJBR" && m[2].length < AJ_REF_MIN_DIGITS) continue;
+    found.push({ at: m.index ?? 0, token: `${p}-${m[2]}` });
+  }
+  for (const m of s.matchAll(/(?<![A-Z])PO[\s#._/-]*(\d{4,})(?!\d)/gi)) {
+    found.push({ at: m.index ?? 0, token: `PO-${m[1]}` });
+  }
+  if (opts.bareNumeric) {
+    for (const m of s.matchAll(/(?<![\w-])(\d{5,})(?![\w-])/g)) {
+      found.push({ at: m.index ?? 0, token: m[1] });
+    }
+  }
+  found.sort((a, b) => a.at - b.at);
+  const out: string[] = [];
+  for (const f of found) if (!out.includes(f.token)) out.push(f.token);
+  return out;
+}
+
 // ── extractRef (finding 1) ────────────────────────────────────────────────────
 // Extract a make-safe ref from the FULL subject, then the body as a fallback,
 // handling prefixed (AJBR-67200 / AJBR 67200 / AJBR67200 / MS191190),

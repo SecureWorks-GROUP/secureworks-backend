@@ -75,10 +75,11 @@ BEGIN
    NOT LIKE '%pg_advisory_xact_lock(20260924,22)%'
  THEN RAISE EXCEPTION 'b1 re-list does not take the catch-up lock'; END IF;
  -- No new cron job and the lane list is untouched (the tick rides outlook-mail-poll).
- -- ghl-history-schedule is B-2's own lane (20261005190000) and xero-history-daily
- -- history daily's (20261007050000), both registered after this one.
+ -- ghl-history-schedule is B-2's own lane (20261005190000), xero-history-daily
+ -- history daily's (20261007050000) and outlook-mail-deep-history the deep
+ -- load's (20261007080000), all registered after this one.
  IF EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() WHERE cron_jobname LIKE '%history%'
-   AND cron_jobname NOT IN ('ghl-history-schedule','xero-history-daily'))
+   AND cron_jobname NOT IN ('ghl-history-schedule','xero-history-daily','outlook-mail-deep-history'))
  THEN RAISE EXCEPTION 'b1 added a cron lane'; END IF;
 END $$;
 

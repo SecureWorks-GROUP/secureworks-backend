@@ -9,12 +9,24 @@
 // else is accepted: the service role (the exact SUPABASE_SERVICE_ROLE_KEY or a
 // JWT whose role claim is exactly service_role) or the exact server key.
 //
-// Body: {"mode": "poll" | "sweep" | "history", "source": "<source_key>",
-// "from": ISO, "to": ISO (history), "wait": true}. Default mode poll. The
+// Body: {"mode": "poll" | "sweep" | "history" | "deep", "source": "<source_key>",
+// "from": ISO, "to": ISO (history, deep), "slice": ISO (deep: the plan's slice
+// id, the time the slice was first posted), "wait": true}. Default mode poll. The
 // cron's HTTP call gives up after 5 seconds, so by default the run continues
 // in the background (EdgeRuntime.waitUntil) and the reply is 202; {"wait": true}
 // returns the run summary (codes and counts only).
+//
+// The deep probe (go point G6, history depth 7 Oct 2026): {"mode": "deep",
+// "probe": true, "source", "from", "to"} lists the window and answers counts by
+// month; it writes nothing, so it always waits for its answer. Its guarded
+// command is scripts/context-email-deep-probe.sh.
 
+import {
+  builderRefTokens,
+  loadRefPrefixes,
+  REF_PREFIX_FLOOR,
+  type RefPrefixClient,
+} from "../_shared/makesafe_refs.ts";
 import { isServiceRoleJwt } from "../_shared/service_role_jwt.ts";
 import {
   ATTACHMENT_POLICY,
@@ -28,6 +40,7 @@ import {
   type CaptureOutcome,
   type CaptureRequest,
   type CaptureResult,
+  type DeepScope,
   type Mode,
   runOutlookCapture,
   type RunRow,
@@ -67,6 +80,48 @@ function dbError(code: string): Error {
   return Object.assign(new Error(code), { code });
 }
 
+/** A {key: ISO time} object as a map of key to epoch ms; keys normalised by norm, the earliest time kept. */
+export function timeMap(
+  data: unknown,
+  norm: (key: string) => string[],
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!data || typeof data !== "object" || Array.isArray(data)) return out;
+  for (const [raw, v] of Object.entries(data as Record<string, unknown>)) {
+    const t = typeof v === "string" ? Date.parse(v) : NaN;
+    if (!Number.isFinite(t)) continue;
+    for (const k of norm(raw)) {
+      const had = out.get(k);
+      if (had === undefined || t < had) out.set(k, t);
+    }
+  }
+  return out;
+}
+
+/** context_email_deep_scope()'s answer as the reader's DeepScope; builder references through builderRefTokens. */
+export function deepScopeFrom(
+  data: Record<string, unknown>,
+  prefixes: readonly string[],
+): DeepScope {
+  const one = (f: (k: string) => string) => (k: string) => {
+    const v = f(k);
+    return v ? [v] : [];
+  };
+  return {
+    version: typeof data.version === "string" ? data.version : "",
+    jobs: typeof data.jobs === "number" ? data.jobs : 0,
+    jobNumbers: timeMap(data.job_numbers, one((k) => k.trim().toUpperCase())),
+    clientEmails: timeMap(
+      data.client_emails,
+      one((k) => k.trim().toLowerCase()),
+    ),
+    builderRefs: timeMap(
+      data.builder_refs,
+      (k) => builderRefTokens(k, prefixes, { bareNumeric: true }),
+    ),
+  };
+}
+
 function textSet(data: unknown): Set<string> {
   return new Set(
     (Array.isArray(data) ? data : []).filter((x): x is string =>
@@ -80,6 +135,10 @@ function textSet(data: unknown): Set<string> {
 export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
   const supabase = deps.createSupabase();
   const fetchFn = deps.fetch ?? fetch;
+  // The prefix set, read once per call (null when unreadable: the floor is used).
+  let prefixes: Promise<string[] | null> | null = null;
+  const loadPrefixes = () =>
+    prefixes ??= loadRefPrefixes(supabase as RefPrefixClient).catch(() => null);
   const g: graph.GraphDeps = {
     fetch: fetchFn,
     token: graph.graphTokenSource(deps.env, fetchFn),
@@ -191,6 +250,32 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
         clientEmails: textSet(data.client_emails),
       };
     },
+    async deepGate() {
+      const { data, error } = await supabase.rpc("context_email_deep_enabled");
+      if (error || !data || typeof data !== "object") {
+        throw dbError("deep_gate_unreadable");
+      }
+      const floor = Date.parse(String(data.hard_floor ?? ""));
+      if (!Number.isFinite(floor)) throw dbError("deep_gate_unreadable");
+      return {
+        enabled: data.enabled === true,
+        hardFloorMs: floor,
+        userWindowMaxDays: typeof data.user_window_max_days === "number"
+          ? data.user_window_max_days
+          : 0,
+      };
+    },
+    async deepScope() {
+      const { data, error } = await supabase.rpc("context_email_deep_scope");
+      if (error || !data || typeof data !== "object") {
+        throw dbError("deep_scope_unreadable");
+      }
+      return deepScopeFrom(
+        data as Record<string, unknown>,
+        (await loadPrefixes()) ?? [...REF_PREFIX_FLOOR],
+      );
+    },
+    builderRefPrefixes: () => loadPrefixes(),
     async latestRuns(runSource, limit) {
       const { data, error } = await supabase.from("context_capture_runs")
         .select(
@@ -252,6 +337,14 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
 }
 
 function logResult(result: CaptureResult): void {
+  if (result.outcome === "probe") {
+    console.log(
+      `[outlook-mail-capture] probe source=${result.source_key} complete=${result.complete} months=${
+        Object.keys(result.months).length
+      } reads=${result.reads} error=${result.error_code ?? "-"}`,
+    );
+    return;
+  }
   if (result.outcome !== "ran") {
     console.log(
       `[outlook-mail-capture] ${result.outcome} ${
@@ -279,7 +372,7 @@ function logResult(result: CaptureResult): void {
   }
 }
 
-const MODES: Mode[] = ["poll", "sweep", "history"];
+const MODES: Mode[] = ["poll", "sweep", "history", "deep"];
 
 export async function handleCapture(
   req: Request,
@@ -315,6 +408,8 @@ export async function handleCapture(
     source: typeof body.source === "string" ? body.source : null,
     from: typeof body.from === "string" ? body.from : null,
     to: typeof body.to === "string" ? body.to : null,
+    ...(body.probe === true ? { probe: true } : {}),
+    ...(typeof body.slice === "string" ? { slice: body.slice } : {}),
   };
 
   const execute = async (): Promise<
@@ -331,7 +426,8 @@ export async function handleCapture(
     }
   };
 
-  if (body.wait === true || !deps.waitUntil) {
+  // The probe saves nothing, so its answer is the only place its counts go.
+  if (body.wait === true || request.probe || !deps.waitUntil) {
     const result = await execute();
     const status = result.outcome === "error"
       ? 500

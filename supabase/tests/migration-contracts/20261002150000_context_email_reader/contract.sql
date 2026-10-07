@@ -38,15 +38,16 @@ BEGIN
  THEN RAISE EXCEPTION 'em2 cron callers must not be callable by service_role'; END IF;
  -- Containment: later capture slices add their own jobs (B-2, 20261005190000:
  -- ghl-history-schedule; B-5, 20261005210000: context-document-text; history
- -- daily, 20261007050000: xero-history-daily, all capture); these six rows
- -- must stay as they are.
+ -- daily, 20261007050000: xero-history-daily; history depth, 20261007080000:
+ -- outlook-mail-deep-history, all capture); these six rows must stay as
+ -- they are.
  IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
     @> ARRAY['contact-matching:attribution','ghl-call-transcript-fetch:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture','outlook-mail-poll:capture']
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname NOT IN ('contact-matching','ghl-call-transcript-fetch',
    'ghl-message-reconcile','monitor-inbox-poll','monitor-inbox-sweep','outlook-mail-poll','ghl-history-schedule','context-document-text',
-   'xero-history-daily'))
+   'xero-history-daily','outlook-mail-deep-history'))
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-history-schedule','context-document-text',
-   'xero-history-daily') AND l.lane<>'capture')
+   'xero-history-daily','outlook-mail-deep-history') AND l.lane<>'capture')
  THEN RAISE EXCEPTION 'em2 cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;

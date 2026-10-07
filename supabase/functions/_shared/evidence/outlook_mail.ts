@@ -24,10 +24,18 @@
 //     recipient), the key the placement ladder matches against a job.
 //   * attachments: names, types and sizes only on the row; the bytes are the
 //     reader's attachment ledger's business, never this row's.
+//   * payload.builder_refs (history depth, 7 Oct 2026): the builder
+//     references the subject and words name (claim, work order, PO), canonical
+//     through _shared/makesafe_refs.ts builderRefTokens, at most 10, present
+//     only when the reader passed its prefix set and the email names one, so a
+//     make-safe email can be placed by its builder's reference.
+//   * metadata.history_tier: "deep" on a row of the deep history load, which
+//     AI placement never asks about (secureworks-jarvis luna-context-worker).
 //
 // Pure: no I/O, no clock, no model call.
 
 import { jobRefTokens } from "../job_refs.ts";
+import { builderRefTokens } from "../makesafe_refs.ts";
 
 export type CaptureMode = "live" | "backfill" | "relink";
 export type FolderKind = "inbox" | "sent" | "deleted" | "other" | "group";
@@ -86,6 +94,10 @@ export interface OutlookCaptureContext {
   supplierDomains?: ReadonlySet<string>;
   /** Lower-case client emails of our jobs (owner-mailbox privacy rule). */
   jobClientEmails?: ReadonlySet<string>;
+  /** The make-safe reference prefixes (floor plus company prefixes); when given, payload.builder_refs is written. */
+  builderRefPrefixes?: readonly string[];
+  /** "deep" on a row of the deep history load (metadata.history_tier). */
+  historyTier?: "deep";
 }
 
 export type OutlookSkipReason =
@@ -102,6 +114,7 @@ export const BODY_MAX_CHARS = 20_000;
 export const PREVIEW_CHARS = 500;
 export const SUBJECT_MAX_CHARS = 200;
 export const ATTACHMENTS_ON_ROW = 10;
+export const BUILDER_REFS_ON_ROW = 10;
 
 const OUR_DOMAIN =
   /(^|\.)(secureworksgroup\.com\.au|secureworksgroup\.app|secureworkswa\.com\.au)$/;
@@ -355,6 +368,12 @@ export function buildOutlookMailRow(
     (tag ? `\nTo-tag: ${tag}` : "");
   const full = words ? `${head}\n\n${words}` : head;
   const refs = ourReferences(`${subject}\n${tag ?? ""}\n${words}`);
+  const builderRefs = ctx.builderRefPrefixes
+    ? builderRefTokens(`${subject}\n${words}`, ctx.builderRefPrefixes).slice(
+      0,
+      BUILDER_REFS_ON_ROW,
+    )
+    : [];
 
   let eventType: string;
   let direction: "inbound" | "outbound" | "internal";
@@ -432,6 +451,15 @@ export function buildOutlookMailRow(
     event_at_source: eventAt ? "provider" : "missing",
   };
   if (tag) payload.to_tag = tag;
+  if (builderRefs.length) payload.builder_refs = builderRefs;
+  const metadata: Record<string, unknown> = keyFromInternet
+    ? { capture_mode: ctx.captureMode, capture_path: "outlook_mail_v1" }
+    : {
+      capture_mode: ctx.captureMode,
+      capture_path: "outlook_mail_v1",
+      no_internet_id: true,
+    };
+  if (ctx.historyTier) metadata.history_tier = ctx.historyTier;
 
   return {
     kind: "row",
@@ -455,13 +483,7 @@ export function buildOutlookMailRow(
         : "staff_only",
       retention_class: "7y_audit",
       payload,
-      metadata: keyFromInternet
-        ? { capture_mode: ctx.captureMode, capture_path: "outlook_mail_v1" }
-        : {
-          capture_mode: ctx.captureMode,
-          capture_path: "outlook_mail_v1",
-          no_internet_id: true,
-        },
+      metadata,
     },
   };
 }

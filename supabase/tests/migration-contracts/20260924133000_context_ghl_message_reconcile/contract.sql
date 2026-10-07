@@ -49,15 +49,16 @@ BEGIN
  -- (T2, 20261002100000: ghl-call-transcript-fetch; EM3, 20261002150000:
  -- outlook-mail-poll and monitor-inbox-sweep; B-2, 20261005190000:
  -- ghl-history-schedule; B-5, 20261005210000: context-document-text; history
- -- daily, 20261007050000: xero-history-daily, all capture); C1d's three rows
- -- must stay as they are.
+ -- daily, 20261007050000: xero-history-daily; history depth, 20261007080000:
+ -- outlook-mail-deep-history, all capture); C1d's three rows must stay as
+ -- they are.
  IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
     @> ARRAY['contact-matching:attribution','ghl-message-reconcile:capture','monitor-inbox-poll:capture']
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname NOT IN
     ('contact-matching','ghl-message-reconcile','monitor-inbox-poll','ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep',
-     'ghl-history-schedule','context-document-text','xero-history-daily'))
+     'ghl-history-schedule','context-document-text','xero-history-daily','outlook-mail-deep-history'))
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep',
-     'ghl-history-schedule','context-document-text','xero-history-daily') AND l.lane<>'capture')
+     'ghl-history-schedule','context-document-text','xero-history-daily','outlook-mail-deep-history') AND l.lane<>'capture')
  THEN RAISE EXCEPTION 'c1d cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 ROLLBACK;

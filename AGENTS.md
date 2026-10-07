@@ -705,7 +705,13 @@ A new pg_cron job that writes evidence is scheduled already gated
 (`... WHERE public.automation_lane_enabled('<lane>')`) and added to
 `automation_switch_cron_lanes()` in the same migration, so the switch's wrap and
 unwrap know it; the GHL message reconciler (C1d) is the worked example:
-`docs/context/ghl-message-reconcile.md`.
+`docs/context/ghl-message-reconcile.md`. Two open slices that each add a row
+must not each pin the other's body away: build on every body that may be live
+(B-5's and any sibling slice's that may merge first, each plus your row),
+accept a list that already names your job (left alone), write the same combined
+body whichever of you applies second (one md5 in either merge order), and give
+each pre-image back in the rollback (`20261007080000` with `20261007050000` is
+the worked example).
 
 Attribution ladder step 1 matching is owned by
 `docs/context/b2-capture-attribution.md` (`20260923230000`). Each later ladder
@@ -4286,4 +4292,8 @@ The old monitor-inbox path must poll only `monitor-inbox/legacy_mailboxes.ts`,
 never `monitored_mailboxes`, which belongs to the new poller. Source changes,
 access, run-row naming and health are owned by
 [`docs/context/email-capture.md`](docs/context/email-capture.md); the migration
-contract's E22 case pins the old-path boundary.
+contract's E22 case pins the old-path boundary. That document also owns the
+deep history load (`20261007080000`, flag `email_reader_deep_v1`): its rows
+carry `metadata.history_tier` deep, which AI placement never asks about and
+which never moves a job's first record, and row 14 reads its reach through
+`context_email_history_reach` / `_reach_jobs`, never by re-deriving it.
