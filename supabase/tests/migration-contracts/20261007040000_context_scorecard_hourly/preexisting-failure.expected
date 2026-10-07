@@ -1,0 +1,3 @@
+context_scorecard_hourly_preimage_mismatch
+public.context_scorecard_run_status(timestamptz) exists and is not this migration's
+cron job context-scorecard-hourly exists with another schedule or command

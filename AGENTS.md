@@ -628,6 +628,17 @@ or an outbound text in one of our crew or staff templates, read exactly as the
 classifier's template rule reads one, never L1d's `other` (`20261006034000`).
 W11's guard checks only its comment prefix, which that lane rule keeps: build
 a scorecard change on the live lane body, never on W11's.
+The hourly run (`20261007040000`): pg_cron `context-scorecard-hourly` (minute 40
+UTC) calls `context_scorecard_record_run('cron')`, which stores every run in
+`context_scorecard_runs` (a failed, timed-out or unreadable scorecard is a failed
+run with its code, never a gap) and reports red rows as one open `ai_alerts` row
+(`alert_type` `context_scorecard_red_rows`); its numbers are in
+`context_scorecard_run_policy()`. Row 10's `hourly_run` lane is
+`context_scorecard_run_status(as_of)->'lane'`. Nothing pushes an alert to the
+owner today (Telegram is gone, `supabase_realtime` holds no tables, the digest's
+deliveries are off): `ai_alerts` reaches people only through Jarvis, its alert
+tool and every agent's memory context. daily-digest closes every open `ai_alerts`
+row on each full run, and the next hourly run raises the report again.
 
 Who-to-whom is `metadata.party_roles`, stamped only by the trigger
 `context_party_roles_business_event` from `context_message_party_roles(e)` (v1
