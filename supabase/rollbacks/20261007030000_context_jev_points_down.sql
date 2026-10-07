@@ -19,12 +19,12 @@ DO $guard$
 DECLARE problems text[] := '{}'; live text; x record;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_jev_agreement(timestamptz,timestamptz)');
- IF live IS DISTINCT FROM '1e9b518336002c0f60fc434ff1cfc0eb' THEN
+ IF live IS DISTINCT FROM 'acd1c143ca45f6458044719625b0f3bf' THEN
   problems := problems || format('public.context_jev_agreement md5 %s, expected 20261007030000''s', coalesce(live, '<missing>'));
  END IF;
  live := NULL;
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_jev_truth(public.context_jev_decisions)');
- IF live IS DISTINCT FROM '1836923ec47766225b950fa5365810b6' THEN
+ IF live IS DISTINCT FROM '520d338e6d920c3190614535bdaa5fe8' THEN
   problems := problems || format('public.context_jev_truth md5 %s, expected 20261007030000''s', coalesce(live, '<missing>'));
  END IF;
  FOR x IN SELECT * FROM (VALUES

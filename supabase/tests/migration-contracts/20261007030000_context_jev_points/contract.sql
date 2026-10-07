@@ -146,7 +146,20 @@ BEGIN
   ('0f000000-0000-4000-8000-0000000001a5', org, 'lost', 'patio', 'JP-5', NULL),
   ('0f000000-0000-4000-8000-0000000001a6', org, 'quoted', 'patio', 'JP-6', true),
   ('0f000000-0000-4000-8000-0000000001a7', org, 'draft', 'patio', 'JP-7', NULL),
-  ('0f000000-0000-4000-8000-0000000001a8', org, 'scheduled', 'fencing', 'JP-8', NULL);
+  ('0f000000-0000-4000-8000-0000000001a8', org, 'scheduled', 'fencing', 'JP-8', NULL),
+  ('0f000000-0000-4000-8000-0000000001a9', org, 'complete', 'fencing', 'JP-9', NULL),
+  ('0f000000-0000-4000-8000-0000000001aa', org, 'scheduled', 'fencing', 'JP-10', NULL),
+  ('0f000000-0000-4000-8000-0000000001ab', org, 'scheduled', 'fencing', 'JP-11', NULL),
+  ('0f000000-0000-4000-8000-0000000001ac', org, 'complete', 'fencing', 'JP-12', NULL),
+  ('0f000000-0000-4000-8000-0000000001ad', org, 'scheduled', 'fencing', 'JP-13', NULL),
+  ('0f000000-0000-4000-8000-0000000001ae', org, 'complete', 'fencing', 'JP-14', NULL),
+  ('0f000000-0000-4000-8000-0000000001af', org, 'complete', 'fencing', 'JP-15', NULL),
+  ('0f000000-0000-4000-8000-0000000001b0', org, 'scheduled', 'fencing', 'JP-16', NULL),
+  ('0f000000-0000-4000-8000-0000000001b1', org, 'scheduled', 'fencing', 'JP-17', NULL),
+  ('0f000000-0000-4000-8000-0000000001b2', org, 'scheduled', 'fencing', 'JP-18', NULL),
+  ('0f000000-0000-4000-8000-0000000001b3', org, 'complete', 'fencing', 'JP-19', NULL),
+  ('0f000000-0000-4000-8000-0000000001b4', org, 'scheduled', 'fencing', 'JP-20', NULL),
+  ('0f000000-0000-4000-8000-0000000001b5', org, 'scheduled', 'fencing', 'JP-21', NULL);
  INSERT INTO public.business_events (id, job_id, attribution_status, metadata) VALUES
   ('0f000000-0000-4000-8000-0000000002e1', NULL, 'admin_bucket', '{"party_roles":{"sender_role":"crew","basis":"users"}}'),
   ('0f000000-0000-4000-8000-0000000002e2', NULL, 'admin_bucket', '{"party_roles":{"sender_role":"staff","basis":"our_domain"}}'),
@@ -158,19 +171,60 @@ BEGIN
   ('0f000000-0000-4000-8000-0000000002e8', NULL, 'admin_bucket', '{"party_roles":{"sender_role":"insurer_builder","basis":"builder_company"}}'),
   ('0f000000-0000-4000-8000-0000000002e9', NULL, 'pending_luna', '{"party_roles":{"sender_role":"unknown","basis":"no_match"}}'),
   ('0f000000-0000-4000-8000-0000000002ea', NULL, NULL, '{}');
- INSERT INTO public.job_assignments (id, job_id, status, scheduled_date, started_at, completed_at, verified_at, is_ghost) VALUES
-  ('0f000000-0000-4000-8000-0000000003b1', '0f000000-0000-4000-8000-0000000001a1', 'complete', '2026-10-01', NULL, NULL, NULL, false),
-  ('0f000000-0000-4000-8000-0000000003b2', '0f000000-0000-4000-8000-0000000001a1', 'scheduled', '2026-10-02', '2026-10-02T00:30:00Z', NULL, NULL, false),
-  ('0f000000-0000-4000-8000-0000000003b3', '0f000000-0000-4000-8000-0000000001a1', 'cancelled', '2026-10-03', NULL, NULL, NULL, false),
-  ('0f000000-0000-4000-8000-0000000003b4', '0f000000-0000-4000-8000-0000000001a1', 'scheduled', '2026-10-04', NULL, NULL, NULL, false),
-  ('0f000000-0000-4000-8000-0000000003b5', '0f000000-0000-4000-8000-0000000001a8', 'scheduled', '2026-10-05', NULL, NULL, NULL, false),
-  ('0f000000-0000-4000-8000-0000000003b6', '0f000000-0000-4000-8000-0000000001a2', 'scheduled', '2026-10-05', NULL, NULL, NULL, false),
-  ('0f000000-0000-4000-8000-0000000003b7', '0f000000-0000-4000-8000-0000000001a1', 'scheduled', '2026-10-06', NULL, NULL, NULL, false),
-  ('0f000000-0000-4000-8000-0000000003b8', '0f000000-0000-4000-8000-0000000001a1', 'scheduled', '2026-10-06', NULL, NULL, '2026-10-06T09:00:00Z', false);
+ -- Emails from senders nobody knows, on no job, with the sender address the email readers keep (payload from).
+ INSERT INTO public.business_events (id, job_id, attribution_status, event_type, channel, direction, payload, metadata) VALUES
+  ('0f000000-0000-4000-8000-0000000002eb', NULL, 'admin_bucket', 'client.email_in', 'email', 'inbound', '{"from":"Robin Sample <robin.sample@gmail.com>"}',
+   '{"party_roles":{"sender_role":"unknown","basis":"no_match"}}'),
+  ('0f000000-0000-4000-8000-0000000002ec', NULL, 'admin_bucket', 'client.email_in', 'email', 'inbound', '{"from":"news@shop.example"}',
+   '{"party_roles":{"sender_role":"unknown","basis":"no_match"}}'),
+  ('0f000000-0000-4000-8000-0000000002ed', NULL, 'unplaced', 'client.email_in', 'email', 'inbound', '{"from":"orders@shop.example","sender_kind":"automated"}',
+   '{"party_roles":{"sender_role":"unknown","basis":"automated"}}'),
+  ('0f000000-0000-4000-8000-0000000002ee', NULL, 'admin_bucket', 'client.email_in', 'email', 'inbound', '{"from":"accounts@builder.example"}',
+   '{"party_roles":{"sender_role":"unknown","basis":"no_match"}}');
+ -- Booking deletions as ops-api records them: the business_events copy names the booking, the job event only its job and day.
+ INSERT INTO public.business_events (id, job_id, event_type, entity_type, entity_id, payload) VALUES
+  ('0f000000-0000-4000-8000-0000000002f1', '0f000000-0000-4000-8000-0000000001aa', 'schedule.assignment_deleted', 'crew_assignment',
+   '0f000000-0000-4000-8000-0000000003ba', '{"scheduled_date":"2026-10-05"}');
+ INSERT INTO public.job_events (id, job_id, event_type, detail_json) VALUES
+  ('0f000000-0000-4000-8000-0000000004e1', '0f000000-0000-4000-8000-0000000001ab', 'assignment_deleted', '{"date":"2026-10-05","user_id":"0f000000-0000-4000-8000-00000000f002"}'),
+  ('0f000000-0000-4000-8000-0000000004e2', '0f000000-0000-4000-8000-0000000001ab', 'assignment_deleted', '{"date":"2026-10-04","user_id":"0f000000-0000-4000-8000-00000000f002"}'),
+  ('0f000000-0000-4000-8000-0000000004e3', '0f000000-0000-4000-8000-0000000001b3', 'assignment_removed',
+   '{"removed_assignments":[{"id":"0f000000-0000-4000-8000-0000000003c7","scheduled_date":"2026-10-05"}]}'),
+  ('0f000000-0000-4000-8000-0000000004e4', '0f000000-0000-4000-8000-0000000001b4', 'assignment_removed', '{"removed_dates":["2026-10-05"]}');
+ INSERT INTO public.job_assignments (id, job_id, status, scheduled_date, scheduled_end, started_at, completed_at, verified_at, is_ghost, role) VALUES
+  ('0f000000-0000-4000-8000-0000000003b1', '0f000000-0000-4000-8000-0000000001a1', 'complete', '2026-10-01', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003b2', '0f000000-0000-4000-8000-0000000001a1', 'scheduled', '2026-10-02', NULL, '2026-10-02T00:30:00Z', NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003b3', '0f000000-0000-4000-8000-0000000001a1', 'cancelled', '2026-10-03', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003b4', '0f000000-0000-4000-8000-0000000001a1', 'scheduled', '2026-10-04', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003b5', '0f000000-0000-4000-8000-0000000001a8', 'scheduled', '2026-10-05', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003b6', '0f000000-0000-4000-8000-0000000001a2', 'scheduled', '2026-10-05', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003b7', '0f000000-0000-4000-8000-0000000001a1', 'scheduled', '2026-10-06', NULL, NULL, NULL, NULL, false, NULL),
+  -- Asked for 5 Oct, since moved to 8 Oct and completed there.
+  ('0f000000-0000-4000-8000-0000000003b9', '0f000000-0000-4000-8000-0000000001a9', 'complete', '2026-10-08', NULL, NULL, '2026-10-08T06:00:00Z', NULL, false, NULL),
+  -- Two crew booked for 5 Oct: the asked one moved to 9 Oct, the other completed on the day.
+  ('0f000000-0000-4000-8000-0000000003bd', '0f000000-0000-4000-8000-0000000001ad', 'scheduled', '2026-10-09', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003be', '0f000000-0000-4000-8000-0000000001ad', 'scheduled', '2026-10-05', NULL, NULL, '2026-10-05T07:00:00Z', NULL, false, NULL),
+  -- Two crew booked for 5 Oct: the asked one cancelled, the other still booked; the job is complete.
+  ('0f000000-0000-4000-8000-0000000003bf', '0f000000-0000-4000-8000-0000000001ae', 'cancelled', '2026-10-05', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003c0', '0f000000-0000-4000-8000-0000000001ae', 'scheduled', '2026-10-05', NULL, NULL, NULL, NULL, false, NULL),
+  -- Booked for 5 Oct with a later visit booked for 12 Oct; the job is complete.
+  ('0f000000-0000-4000-8000-0000000003c1', '0f000000-0000-4000-8000-0000000001af', 'scheduled', '2026-10-05', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003c2', '0f000000-0000-4000-8000-0000000001af', 'scheduled', '2026-10-12', NULL, NULL, NULL, NULL, false, NULL),
+  -- Asked for 5 Oct, moved to 7 Oct; only an observer copy (a ghost mirror) is left on the day, marked complete.
+  ('0f000000-0000-4000-8000-0000000003c3', '0f000000-0000-4000-8000-0000000001b0', 'scheduled', '2026-10-07', NULL, NULL, NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003c4', '0f000000-0000-4000-8000-0000000001b0', 'complete', '2026-10-05', NULL, NULL, NULL, NULL, true, 'observer'),
+  -- Asked for 5 Oct, moved to a 4 to 6 Oct span that covers the day, and started.
+  ('0f000000-0000-4000-8000-0000000003c5', '0f000000-0000-4000-8000-0000000001b1', 'scheduled', '2026-10-04', '2026-10-06', '2026-10-05T00:10:00Z', NULL, NULL, false, NULL),
+  ('0f000000-0000-4000-8000-0000000003c6', '0f000000-0000-4000-8000-0000000001b2', 'scheduled', '2026-10-06', NULL, NULL, NULL, '2026-10-06T09:00:00Z', false, NULL),
+  ('0f000000-0000-4000-8000-0000000003c9', '0f000000-0000-4000-8000-0000000001b5', 'scheduled', '2026-10-05', NULL, NULL, NULL, NULL, false, NULL);
  -- A scope outcome for b4's day says it happened; one for b5's job says it did not; none for b7's day (same job as b4).
- INSERT INTO public.visit_outcomes (booking_key, contact_id, job_id, scoper_user_id, scoper_name, visit_start, outcome, reason, quote_owed, recorded_by_user_id) VALUES
-  ('jp-1', 'jp-contact', '0f000000-0000-4000-8000-0000000001a1', org, 'Scoper', '2026-10-04T01:00:00Z', 'happened', NULL, false, org),
-  ('jp-2', 'jp-contact', '0f000000-0000-4000-8000-0000000001a8', org, 'Scoper', '2026-10-05T01:00:00Z', 'did_not_happen', 'customer_not_home', false, org);
+ -- c9's day was recorded as happened, then corrected (the correction supersedes it): it did not.
+ INSERT INTO public.visit_outcomes (id, booking_key, contact_id, job_id, scoper_user_id, scoper_name, visit_start, outcome, reason, quote_owed, recorded_by_user_id, supersedes) VALUES
+  ('0f000000-0000-4000-8000-0000000005a1', 'jp-1', 'jp-contact', '0f000000-0000-4000-8000-0000000001a1', org, 'Scoper', '2026-10-04T01:00:00Z', 'happened', NULL, false, org, NULL),
+  ('0f000000-0000-4000-8000-0000000005a2', 'jp-2', 'jp-contact', '0f000000-0000-4000-8000-0000000001a8', org, 'Scoper', '2026-10-05T01:00:00Z', 'did_not_happen', 'customer_not_home', false, org, NULL),
+  ('0f000000-0000-4000-8000-0000000005a3', 'jp-3', 'jp-contact', '0f000000-0000-4000-8000-0000000001b5', org, 'Scoper', '2026-10-05T01:00:00Z', 'happened', NULL, false, org, NULL),
+  ('0f000000-0000-4000-8000-0000000005a4', 'jp-3', 'jp-contact', '0f000000-0000-4000-8000-0000000001b5', org, 'Scoper', '2026-10-05T01:00:00Z', 'did_not_happen', 'we_did_not_attend', false, org,
+   '0f000000-0000-4000-8000-0000000005a3');
  PERFORM set_config('session_replication_role', 'origin', true);
 END $$;
 
@@ -191,16 +245,20 @@ BEGIN
   ('{"decision_point":"sender_role","row_id":"0f000000-0000-4000-8000-0000000002e5","jev_outcome":"customer"}', NULL, 'still unknown'),
   ('{"decision_point":"sender_role","row_id":"0f000000-0000-4000-8000-0000000002ea","jev_outcome":"customer"}', NULL, 'no stamp'),
   ('{"decision_point":"sender_role","row_id":"0f000000-0000-4000-8000-0000000002ff","jev_outcome":"customer"}', NULL, 'a message gone'),
-  -- email_triage: the stamp and the placement.
+  -- email_triage: the stamp first; where it names nobody, only what is known for sure.
   ('{"row_id":"0f000000-0000-4000-8000-0000000002e2"}', 'internal', 'our own staff'),
   ('{"row_id":"0f000000-0000-4000-8000-0000000002e7"}', 'supplier', 'a supplier'),
   ('{"row_id":"0f000000-0000-4000-8000-0000000002e8"}', 'insurer_builder', 'a builder'),
   ('{"row_id":"0f000000-0000-4000-8000-0000000002e4"}', 'council', 'a council'),
   ('{"row_id":"0f000000-0000-4000-8000-0000000002e3"}', 'customer_job', 'the customer'),
-  ('{"row_id":"0f000000-0000-4000-8000-0000000002e6"}', 'customer_job', 'an unknown sender placed on a job'),
-  ('{"row_id":"0f000000-0000-4000-8000-0000000002e5"}', 'none', 'nobody known, on no job'),
+  ('{"row_id":"0f000000-0000-4000-8000-0000000002e6"}', 'not_junk', 'a sender nobody knows on a job: not junk, who wrote it not known'),
+  ('{"row_id":"0f000000-0000-4000-8000-0000000002eb"}', 'not_junk', 'a sender nobody knows, from a free personal mail address'),
+  ('{"row_id":"0f000000-0000-4000-8000-0000000002ec"}', 'marketing_junk', 'a newsletter mailbox nobody knows'),
+  ('{"row_id":"0f000000-0000-4000-8000-0000000002ed"}', 'marketing_junk', 'a sender the email reader called automated'),
+  ('{"row_id":"0f000000-0000-4000-8000-0000000002ee"}', NULL, 'a business sender nobody knows, on no job: not known'),
+  ('{"row_id":"0f000000-0000-4000-8000-0000000002e5"}', NULL, 'nobody known, on no job, no address: not known'),
   ('{"row_id":"0f000000-0000-4000-8000-0000000002e9"}', NULL, 'still waiting for its placement'),
-  -- visit_happened: the booking as recorded now.
+  -- visit_happened: the job's crew bookings for the day asked, as recorded now.
   ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a1","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b1","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-01"}}', 'yes', 'marked complete'),
   ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a1","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b2","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-02"}}', 'yes', 'started'),
   ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a1","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b3","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-03"}}', 'no', 'cancelled'),
@@ -208,7 +266,19 @@ BEGIN
   ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a8","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b5","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'a visit outcome that day says it did not'),
   ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a2","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b6","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'yes', 'the job moved on to complete'),
   ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a1","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b7","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-06"}}', NULL, 'nothing recorded (another day''s outcome never counts)'),
-  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a1","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b8","jev_outcome":"yes","current_answer":{"booking_date":"not a date"}}', 'yes', 'verified (a bad stored date falls back to the booking''s own)'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001a9","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003b9","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'moved to another day and completed there'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001aa","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003ba","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'deleted, its deletion recorded'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001ab","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003bb","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'deleted, the job''s deletion event for that day'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001ac","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003bc","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', NULL, 'gone with no deletion recorded'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001ad","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003bd","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'yes', 'moved, another crew booking that day completed'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001ae","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003bf","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'yes', 'cancelled, another crew booking still on that day and the job moved on'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001af","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003c1","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', NULL, 'a later visit booked, so the job''s status says nothing of that day'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001b0","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003c3","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'moved, only an observer copy left on that day'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001b1","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003c5","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'yes', 'moved into a span covering that day, and started'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001b2","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003c6","jev_outcome":"yes","current_answer":{"booking_date":"not a date"}}', NULL, 'a bad stored date: the day asked is not known'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001b3","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003c7","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'removed, named on the job''s removal event'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001b4","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003c8","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'removed, that day on the job''s removal event'),
+  ('{"decision_point":"visit_happened","job_id":"0f000000-0000-4000-8000-0000000001b5","row_table":"job_assignments","row_id":"0f000000-0000-4000-8000-0000000003c9","jev_outcome":"yes","current_answer":{"booking_date":"2026-10-05"}}', 'no', 'a visit outcome corrected to did not happen'),
   -- lead_alive: the job's status now.
   ('{"decision_point":"lead_alive","job_id":"0f000000-0000-4000-8000-0000000001a4","jev_outcome":"alive"}', 'won', 'accepted'),
   ('{"decision_point":"lead_alive","job_id":"0f000000-0000-4000-8000-0000000001a2","jev_outcome":"alive"}', 'won', 'complete'),
@@ -251,12 +321,17 @@ BEGIN
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'sender_role', 'row_id', '0f000000-0000-4000-8000-0000000002e4', 'jev_outcome', 'unknown', 'jev_confidence', 0.60, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'sender_role', 'row_id', '0f000000-0000-4000-8000-0000000002e5', 'jev_outcome', 'other_party', 'jev_confidence', 0.40, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'sender_role', 'row_id', '0f000000-0000-4000-8000-0000000002e5', 'jev_outcome', NULL, 'jev_confidence', NULL, 'model', NULL, 'error_code', 'jev_http_529', 'attempts', 3, 'created_at', t0));
- -- visit_happened: V1 agreed; V2 said it happened when it did not (unsafe); V3 agreed no; V4 unsure; V5 no truth yet.
- PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', j1, 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b1', 'jev_outcome', 'yes', 'jev_confidence', 0.95, 'current_answer', '{"booking_date":"2026-10-01"}'::jsonb, 'created_at', t0));
- PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', j1, 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b3', 'jev_outcome', 'yes', 'jev_confidence', 0.9999, 'current_answer', '{"booking_date":"2026-10-03"}'::jsonb, 'created_at', t0));
+ -- visit_happened: V1 agreed; V2 said it happened when it was cancelled (unsafe); V3 agreed no; V4 unsure; V5 no truth yet;
+ -- V6 said it happened on a day its booking left (moved and completed on another day: unsafe); V7 said it did not (agreed);
+ -- V8 said it happened on a day its booking was deleted (unsafe).
+ PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001a1', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b1', 'jev_outcome', 'yes', 'jev_confidence', 0.95, 'current_answer', '{"booking_date":"2026-10-01"}'::jsonb, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001a1', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b3', 'jev_outcome', 'yes', 'jev_confidence', 0.9999, 'current_answer', '{"booking_date":"2026-10-03"}'::jsonb, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001a8', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b5', 'jev_outcome', 'no', 'jev_confidence', 0.80, 'current_answer', '{"booking_date":"2026-10-05"}'::jsonb, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001a2', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b6', 'jev_outcome', 'unsure', 'jev_confidence', 0.55, 'current_answer', '{"booking_date":"2026-10-05"}'::jsonb, 'created_at', t0));
- PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', j1, 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b7', 'jev_outcome', 'yes', 'jev_confidence', 0.30, 'current_answer', '{"booking_date":"2026-10-06"}'::jsonb, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001a1', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b7', 'jev_outcome', 'yes', 'jev_confidence', 0.30, 'current_answer', '{"booking_date":"2026-10-06"}'::jsonb, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001a9', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b9', 'jev_outcome', 'yes', 'jev_confidence', 0.97, 'current_answer', '{"booking_date":"2026-10-05"}'::jsonb, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001a9', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003b9', 'jev_outcome', 'no', 'jev_confidence', 0.92, 'current_answer', '{"booking_date":"2026-10-05"}'::jsonb, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'visit_happened', 'job_id', '0f000000-0000-4000-8000-0000000001aa', 'row_table', 'job_assignments', 'row_id', '0f000000-0000-4000-8000-0000000003ba', 'jev_outcome', 'yes', 'jev_confidence', 0.85, 'current_answer', '{"booking_date":"2026-10-05"}'::jsonb, 'created_at', t0));
  -- lead_alive: L1 alive and won; L2 declined but won (unsafe); L3 gone elsewhere and lost; L4 paused and won (agreed);
  -- L5 unsure and lost; L6 still quoted.
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'lead_alive', 'job_id', '0f000000-0000-4000-8000-0000000001a4', 'row_id', '0f000000-0000-4000-8000-0000000002e3', 'jev_outcome', 'alive', 'jev_confidence', 0.93, 'created_at', t0));
@@ -266,16 +341,21 @@ BEGIN
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'lead_alive', 'job_id', '0f000000-0000-4000-8000-0000000001a6', 'row_id', '0f000000-0000-4000-8000-0000000002e3', 'jev_outcome', 'unsure', 'jev_confidence', 0.60, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'lead_alive', 'job_id', '0f000000-0000-4000-8000-0000000001a3', 'row_id', '0f000000-0000-4000-8000-0000000002e3', 'jev_outcome', 'alive', 'jev_confidence', 0.20, 'created_at', t0));
  -- payment_wait: P1 nothing waits and the collector reminds; P2 nothing waits while the collector held on the
- -- customer's words (unsafe); P3 the same held for another reason (not unsafe); P4 paid and held; P5 asked for time
- -- while the collector reminds; P6 no verdict.
+ -- customer's words (unsafe); P3 the same held for another reason (a recent message, not what it says: not compared);
+ -- P4 paid and held on the customer's words; P5 asked for time while the collector reminds; P6 no verdict; P7 asked for
+ -- time beside a hold for another reason (not compared: never an agreement).
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'payment_wait', 'job_id', j1, 'row_table', 'xero_invoices', 'row_id', '0f000000-0000-4000-8000-0000000000c1', 'jev_outcome', 'none', 'jev_confidence', 0.94, 'current_outcome', 'remind', 'current_answer', '{"customer_held":false}'::jsonb, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'payment_wait', 'job_id', j1, 'row_table', 'xero_invoices', 'row_id', '0f000000-0000-4000-8000-0000000000c1', 'jev_outcome', 'none', 'jev_confidence', 0.92, 'current_outcome', 'hold', 'current_answer', '{"customer_held":true}'::jsonb, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'payment_wait', 'job_id', j1, 'row_table', 'xero_invoices', 'row_id', '0f000000-0000-4000-8000-0000000000c1', 'jev_outcome', 'none', 'jev_confidence', 0.91, 'current_outcome', 'hold', 'current_answer', '{"customer_held":false}'::jsonb, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'payment_wait', 'job_id', j1, 'row_table', 'xero_invoices', 'row_id', '0f000000-0000-4000-8000-0000000000c1', 'jev_outcome', 'paid', 'jev_confidence', 0.85, 'current_outcome', 'hold', 'current_answer', '{"customer_held":true}'::jsonb, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'payment_wait', 'job_id', j1, 'row_table', 'xero_invoices', 'row_id', '0f000000-0000-4000-8000-0000000000c1', 'jev_outcome', 'asked_for_time', 'jev_confidence', 0.75, 'current_outcome', 'remind', 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'payment_wait', 'job_id', j1, 'row_table', 'xero_invoices', 'row_id', '0f000000-0000-4000-8000-0000000000c1', 'jev_outcome', 'disputes', 'jev_confidence', 0.45, 'current_outcome', NULL, 'created_at', t0));
- -- email_triage: T1 internal; T2 marketing or junk and nobody known (agreed); T3 marketing or junk for the customer
- -- (unsafe); T4 a customer about a job; T5 a supplier for a builder; T6 a council; T7 waiting for its placement; T8 failed.
+ PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'payment_wait', 'job_id', j1, 'row_table', 'xero_invoices', 'row_id', '0f000000-0000-4000-8000-0000000000c1', 'jev_outcome', 'asked_for_time', 'jev_confidence', 0.88, 'current_outcome', 'hold', 'current_answer', '{"customer_held":false}'::jsonb, 'created_at', t0));
+ -- email_triage: T1 internal; T2 marketing or junk where nothing is known (not compared); T3 marketing or junk for the
+ -- customer (unsafe); T4 a customer about a job on a job's email from a sender nobody knows (not compared: who wrote it
+ -- is not known); T5 a supplier for a builder; T6 a council; T7 waiting for its placement; T8 failed; T9 marketing or
+ -- junk from a free personal mail address (unsafe); T10 a customer about a job from it (not compared); T11 marketing or
+ -- junk from a newsletter mailbox (agreed); T12 marketing or junk on a job's email from a sender nobody knows (unsafe).
  PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e2', 'jev_outcome', 'internal', 'jev_confidence', 0.97, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e5', 'jev_outcome', 'marketing_junk', 'jev_confidence', 0.95, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e3', 'jev_outcome', 'marketing_junk', 'jev_confidence', 0.93, 'created_at', t0));
@@ -284,6 +364,10 @@ BEGIN
  PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e4', 'jev_outcome', 'council', 'jev_confidence', 0.65, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e9', 'jev_outcome', 'customer_job', 'jev_confidence', 0.50, 'created_at', t0));
  PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e9', 'jev_outcome', NULL, 'jev_confidence', NULL, 'model', NULL, 'error_code', 'jev_timeout', 'attempts', 3, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002eb', 'jev_outcome', 'marketing_junk', 'jev_confidence', 0.96, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002eb', 'jev_outcome', 'customer_job', 'jev_confidence', 0.91, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002ec', 'jev_outcome', 'marketing_junk', 'jev_confidence', 0.99, 'created_at', t0));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e6', 'jev_outcome', 'marketing_junk', 'jev_confidence', 0.82, 'created_at', t0));
 
  SELECT jsonb_agg(jsonb_build_array(a.decision_point, a.confidence_band, a.answered, a.compared, a.agreed, a.agreement, a.unsafe, a.failed, a.pairs)
   ORDER BY n) INTO actual
@@ -309,9 +393,9 @@ BEGIN
   ["sender_role","0.80-0.90",1,1,0,0.0000,1,0,{"customer>supplier":1}],
   ["sender_role","0.50-0.80",1,1,0,0.0000,0,0,{"unknown>other_party":1}],
   ["sender_role","0.00-0.50",1,0,0,null,0,0,{}],
-  ["visit_happened","all",5,4,2,0.5000,1,0,{"yes>yes":1,"yes>no":1,"no>no":1,"unsure>yes":1}],
-  ["visit_happened","0.90-1.00",2,2,1,0.5000,1,0,{"yes>yes":1,"yes>no":1}],
-  ["visit_happened","0.80-0.90",1,1,1,1.0000,0,0,{"no>no":1}],
+  ["visit_happened","all",8,7,3,0.4286,3,0,{"yes>yes":1,"yes>no":3,"no>no":2,"unsure>yes":1}],
+  ["visit_happened","0.90-1.00",4,4,2,0.5000,2,0,{"yes>yes":1,"yes>no":2,"no>no":1}],
+  ["visit_happened","0.80-0.90",2,2,1,0.5000,1,0,{"no>no":1,"yes>no":1}],
   ["visit_happened","0.50-0.80",1,1,0,0.0000,0,0,{"unsure>yes":1}],
   ["visit_happened","0.00-0.50",1,0,0,null,0,0,{}],
   ["lead_alive","all",6,5,3,0.6000,1,0,{"alive>won":1,"declined>won":1,"gone_elsewhere>lost":1,"paused>won":1,"unsure>lost":1}],
@@ -319,14 +403,14 @@ BEGIN
   ["lead_alive","0.80-0.90",1,1,1,1.0000,0,0,{"gone_elsewhere>lost":1}],
   ["lead_alive","0.50-0.80",2,2,1,0.5000,0,0,{"paused>won":1,"unsure>lost":1}],
   ["lead_alive","0.00-0.50",1,0,0,null,0,0,{}],
-  ["payment_wait","all",6,5,2,0.4000,1,0,{"none>remind":1,"none>hold":2,"paid>hold":1,"asked_for_time>remind":1}],
-  ["payment_wait","0.90-1.00",3,3,1,0.3333,1,0,{"none>remind":1,"none>hold":2}],
-  ["payment_wait","0.80-0.90",1,1,1,1.0000,0,0,{"paid>hold":1}],
+  ["payment_wait","all",7,4,2,0.5000,1,0,{"none>remind":1,"none>hold":1,"paid>hold":1,"asked_for_time>remind":1}],
+  ["payment_wait","0.90-1.00",3,2,1,0.5000,1,0,{"none>remind":1,"none>hold":1}],
+  ["payment_wait","0.80-0.90",2,1,1,1.0000,0,0,{"paid>hold":1}],
   ["payment_wait","0.50-0.80",1,1,0,0.0000,0,0,{"asked_for_time>remind":1}],
   ["payment_wait","0.00-0.50",1,0,0,null,0,0,{}],
-  ["email_triage","all",7,6,4,0.6667,1,1,{"internal>internal":1,"marketing_junk>none":1,"marketing_junk>customer_job":1,"customer_job>customer_job":1,"supplier>insurer_builder":1,"council>council":1}],
-  ["email_triage","0.90-1.00",3,3,2,0.6667,1,0,{"internal>internal":1,"marketing_junk>none":1,"marketing_junk>customer_job":1}],
-  ["email_triage","0.80-0.90",2,2,1,0.5000,0,0,{"customer_job>customer_job":1,"supplier>insurer_builder":1}],
+  ["email_triage","all",11,7,3,0.4286,3,1,{"internal>internal":1,"marketing_junk>customer_job":1,"marketing_junk>not_junk":2,"marketing_junk>marketing_junk":1,"supplier>insurer_builder":1,"council>council":1}],
+  ["email_triage","0.90-1.00",6,4,2,0.5000,2,0,{"internal>internal":1,"marketing_junk>customer_job":1,"marketing_junk>not_junk":1,"marketing_junk>marketing_junk":1}],
+  ["email_triage","0.80-0.90",3,2,0,0.0000,1,0,{"supplier>insurer_builder":1,"marketing_junk>not_junk":1}],
   ["email_triage","0.50-0.80",2,1,1,1.0000,0,0,{"council>council":1}],
   ["email_triage","0.00-0.50",0,0,0,null,0,0,{}]
  ]'::jsonb;
@@ -338,7 +422,10 @@ BEGIN
   -- Named failures for the rules most worth protecting.
   IF actual->25->6 IS DISTINCT FROM expected->25->6 THEN RAISE EXCEPTION 'jev points contract: a lead Jev called dead that was won is not counted unsafe'; END IF;
   IF actual->30->6 IS DISTINCT FROM expected->30->6 THEN RAISE EXCEPTION 'jev points contract: a reminder Jev would send over the customer''s words is not counted unsafe'; END IF;
+  IF actual->30->3 IS DISTINCT FROM expected->30->3 THEN RAISE EXCEPTION 'jev points contract: a hold that rests on no customer words is compared with Jev'; END IF;
   IF actual->35->6 IS DISTINCT FROM expected->35->6 THEN RAISE EXCEPTION 'jev points contract: an email Jev would skip as junk is not counted unsafe'; END IF;
+  IF actual->35->8 IS DISTINCT FROM expected->35->8 THEN RAISE EXCEPTION 'jev points contract: an email is compared beyond what is known of it'; END IF;
+  IF actual->20->6 IS DISTINCT FROM expected->20->6 THEN RAISE EXCEPTION 'jev points contract: a visit Jev says happened on a day its booking left is not counted unsafe'; END IF;
   IF actual->0 IS DISTINCT FROM expected->0 OR actual->5 IS DISTINCT FROM expected->5 THEN RAISE EXCEPTION 'jev points contract: the first three points no longer read as before'; END IF;
   RAISE EXCEPTION 'jev points contract: the agreement read is wrong';
  END IF;
@@ -351,7 +438,7 @@ DO $$
 BEGIN
  PERFORM pg_temp.jp_records();
  -- A minute ago: the default window ends at now, exclusive.
- PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002e5', 'created_at', now() - interval '1 minute'));
+ PERFORM pg_temp.jp_insert(jsonb_build_object('row_id', '0f000000-0000-4000-8000-0000000002ec', 'created_at', now() - interval '1 minute'));
  PERFORM pg_temp.jp_insert(jsonb_build_object('decision_point', 'lead_alive', 'job_id', '0f000000-0000-4000-8000-0000000001a4', 'row_id', '0f000000-0000-4000-8000-0000000002e3',
   'jev_outcome', 'alive', 'created_at', now() - interval '1 minute'));
 END $$;
@@ -361,7 +448,7 @@ DECLARE n bigint;
 BEGIN
  SELECT a.compared INTO n FROM public.context_jev_agreement() a WHERE a.decision_point = 'lead_alive' AND a.confidence_band = 'all';
  IF n IS DISTINCT FROM 1::bigint THEN RAISE EXCEPTION 'jev points contract: the service role does not read the later truth (compared %)', n; END IF;
- IF (SELECT public.context_jev_truth(d) FROM public.context_jev_decisions d WHERE d.decision_point = 'email_triage') IS DISTINCT FROM 'none' THEN
+ IF (SELECT public.context_jev_truth(d) FROM public.context_jev_decisions d WHERE d.decision_point = 'email_triage') IS DISTINCT FROM 'marketing_junk' THEN
   RAISE EXCEPTION 'jev points contract: the service role does not read an email''s truth';
  END IF;
 END $$;

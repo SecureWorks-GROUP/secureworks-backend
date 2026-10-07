@@ -15,17 +15,27 @@
 --                   unknown: which party sent it. Compared later with the stamp
 --                   once it names the sender (the ladder or a person).
 --   visit_happened  a booking whose day passed with the status unmoved (the
---                   story's R6 loop): did the visit happen. Compared later with
---                   the attendance record or the status.
+--                   story's R6 loop): did the visit happen that day. Compared
+--                   later with the job's crew bookings for that day as they are
+--                   recorded when read: attended, all gone from the day (moved,
+--                   cancelled or deleted), a visit outcome, or the job moving on.
 --   lead_alive      a quote inside the quote planner's window with customer
 --                   words since: is the lead alive. Compared later with the
 --                   job's outcome.
 --   payment_wait    an overdue invoice the debt collector considers, with
 --                   customer words since it was issued: should a reminder wait.
 --                   Compared with the debt collector's own hold verdict, logged
---                   beside it as today's answer.
+--                   beside it as today's answer, but only where that verdict is
+--                   about what the customer wrote: a reminder, or a hold that
+--                   rests on the customer's words. A hold for any other reason
+--                   (the customer wrote recently, we wrote recently, low
+--                   confidence, an owner decision) is logged without a today's
+--                   answer and is not compared.
 --   email_triage    each incoming email before the full read: what it is.
---                   Compared later with its placement and party-role stamp.
+--                   Compared later with its party-role stamp; where the stamp
+--                   names nobody, only with what is known for sure: an
+--                   automatic or bulk sender is junk, and an email placed on a
+--                   job or sent from a free personal mail address is not.
 --
 -- Jev's answer never changes a decision; the worker writes nothing but this log.
 --
@@ -53,10 +63,11 @@
 --   body, md5 053b8b4a1b61dd2ba44a136ab1405ff5) and five checks of
 --   public.context_jev_decisions (20261006080000 definitions, md5 pinned below).
 -- Read, not replaced: context_job_record_date(text) (20261006011000),
---   context_linked_status(text).
--- New: public.context_jev_truth(public.context_jev_decisions) (md5 1836923ec47766225b950fa5365810b6).
+--   context_linked_status(text), context_sender_key(business_events) (P4,
+--   20261002110000: the whole address only on a free personal mail domain).
+-- New: public.context_jev_truth(public.context_jev_decisions) (md5 520d338e6d920c3190614535bdaa5fe8).
 -- This migration's own bodies, accepted on a re-apply: context_jev_agreement md5
---   1e9b518336002c0f60fc434ff1cfc0eb, and the five checks' md5s pinned in the guard.
+--   acd1c143ca45f6458044719625b0f3bf, and the five checks' md5s pinned in the guard.
 -- Writes no business row, schedules no cron job and adds no grant, policy or
 -- view for anon or authenticated.
 --
@@ -100,24 +111,31 @@ BEGIN
  END IF;
  live := NULL;
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_jev_agreement(timestamptz,timestamptz)');
- IF live IS NULL OR live NOT IN ('053b8b4a1b61dd2ba44a136ab1405ff5', '1e9b518336002c0f60fc434ff1cfc0eb') THEN
+ IF live IS NULL OR live NOT IN ('053b8b4a1b61dd2ba44a136ab1405ff5', 'acd1c143ca45f6458044719625b0f3bf') THEN
   problems := problems || format('public.context_jev_agreement(timestamptz,timestamptz) md5 %s, expected 20261006080000''s', coalesce(live, '<missing>'));
  END IF;
  live := NULL;
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_jev_truth(public.context_jev_decisions)');
- IF live IS NOT NULL AND live <> '1836923ec47766225b950fa5365810b6' THEN
+ IF live IS NOT NULL AND live <> '520d338e6d920c3190614535bdaa5fe8' THEN
   problems := problems || format('public.context_jev_truth(public.context_jev_decisions) md5 %s, not this migration''s', live);
  END IF;
- FOR x IN SELECT * FROM (VALUES ('public.context_job_record_date(text)'), ('public.context_linked_status(text)')) AS t(sig) LOOP
+ FOR x IN SELECT * FROM (VALUES ('public.context_job_record_date(text)'), ('public.context_linked_status(text)'),
+  ('public.context_sender_key(public.business_events)')) AS t(sig) LOOP
   IF to_regprocedure(x.sig) IS NULL THEN problems := problems || format('%s is missing', x.sig); END IF;
  END LOOP;
  FOR x IN SELECT * FROM (VALUES
-  ('business_events', 'metadata', 'jsonb'), ('business_events', 'job_id', 'uuid'), ('business_events', 'attribution_status', 'text'),
-  ('job_assignments', 'id', 'uuid'), ('job_assignments', 'status', 'text'), ('job_assignments', 'scheduled_date', 'date'),
+  ('business_events', 'metadata', 'jsonb'), ('business_events', 'payload', 'jsonb'), ('business_events', 'job_id', 'uuid'),
+  ('business_events', 'attribution_status', 'text'), ('business_events', 'event_type', 'text'), ('business_events', 'entity_type', 'text'),
+  ('business_events', 'entity_id', 'text'),
+  ('job_assignments', 'id', 'uuid'), ('job_assignments', 'job_id', 'uuid'), ('job_assignments', 'status', 'text'),
+  ('job_assignments', 'scheduled_date', 'date'), ('job_assignments', 'scheduled_end', 'date'), ('job_assignments', 'role', 'text'),
+  ('job_assignments', 'is_ghost', 'boolean'),
   ('job_assignments', 'started_at', 'timestamp with time zone'), ('job_assignments', 'completed_at', 'timestamp with time zone'),
   ('job_assignments', 'verified_at', 'timestamp with time zone'),
+  ('job_events', 'job_id', 'uuid'), ('job_events', 'event_type', 'text'), ('job_events', 'detail_json', 'jsonb'),
   ('jobs', 'id', 'uuid'), ('jobs', 'status', 'text'), ('jobs', 'archived', 'boolean'),
-  ('visit_outcomes', 'job_id', 'uuid'), ('visit_outcomes', 'outcome', 'text'), ('visit_outcomes', 'visit_start', 'timestamp with time zone')
+  ('visit_outcomes', 'id', 'uuid'), ('visit_outcomes', 'job_id', 'uuid'), ('visit_outcomes', 'outcome', 'text'),
+  ('visit_outcomes', 'visit_start', 'timestamp with time zone'), ('visit_outcomes', 'supersedes', 'uuid')
  ) AS c(tbl, col, typ) LOOP
   live := NULL;
   SELECT format_type(a.atttypid, a.atttypmod) INTO live FROM pg_attribute a
@@ -171,7 +189,8 @@ ALTER TABLE public.context_jev_decisions
   OR (decision_point = 'lead_alive' AND jev_outcome IN ('alive', 'declined', 'paused', 'gone_elsewhere', 'unsure'))
   OR (decision_point = 'payment_wait' AND jev_outcome IN ('paid', 'disputes', 'asked_for_time', 'none'))
   OR (decision_point = 'email_triage' AND jev_outcome IN ('customer_job', 'supplier', 'insurer_builder', 'council', 'internal', 'marketing_junk'))),
- -- Today's answer: payment_wait's is the debt collector's verdict; the other four new points are compared with the later truth, so none.
+ -- Today's answer: payment_wait's is the debt collector's verdict (the worker logs a hold that rests on no customer words with
+ -- none, the verdict kept in current_answer); the other four new points are compared with the later truth, so none.
  ADD CONSTRAINT context_jev_decisions_current_outcome CHECK (current_outcome IS NULL
   OR (decision_point = 'placement' AND current_outcome IN ('job', 'several', 'none'))
   OR (decision_point = 'ledger_update_gate' AND current_outcome IN ('change', 'no_change'))
@@ -185,17 +204,40 @@ COMMENT ON TABLE public.context_jev_decisions IS
 --   sender_role     the stamp once it names the sender: crew or staff is
 --                   crew_staff; customer, supplier, insurer_builder as stamped;
 --                   a council (still unknown, basis council) is other_party.
---   email_triage    the stamp and the placement: our crew or staff internal;
---                   supplier and insurer_builder as stamped; basis council
---                   council; a customer, or any sender with the email placed on
---                   a job, customer_job; a sender nobody knows with the email
---                   resting on no job (admin bucket, unplaced) none (Jev's
---                   marketing_junk agrees with it).
---   visit_happened  the booking as recorded now: started, completed or
---                   verified, or marked complete, yes; a visit outcome for that
---                   day says which; marked cancelled, deleted, declined or
---                   disputed, no; the job moved on to complete, invoiced, final
---                   payment or a review request, yes.
+--   email_triage    the stamp first: our crew or staff internal; supplier and
+--                   insurer_builder as stamped; basis council council; the
+--                   customer customer_job. Where the stamp names nobody (or
+--                   there is no stamp yet), only what is known for sure:
+--                   resting on no job (admin bucket, unplaced), an automatic or
+--                   bulk sender (the email reader's own call, payload
+--                   sender_kind or the stamp's basis automated, or one of the
+--                   reader's no-reply, notification or newsletter mailbox
+--                   names, outlook_mail.ts NO_REPLY_LOCAL) marketing_junk;
+--                   placed on a job, or resting on no job from a free personal
+--                   mail address (context_sender_key keeps the whole address
+--                   only on a free-mail domain), not_junk: a real sender whose
+--                   kind is not known, which judges a junk call only; anything
+--                   else not known. No person marks an email junk today, and
+--                   who wrote an email placed on a job is not known from the
+--                   placement, so neither is read as an answer.
+--   visit_happened  the job's crew bookings for the day asked
+--                   (current_answer.booking_date, the booking's date when it
+--                   was asked; unreadable, not known), as recorded now, observer
+--                   copies never counted: one still on that day started,
+--                   completed, verified or marked complete, yes; a visit
+--                   outcome for that day (the current one: a correction
+--                   supersedes it) says which; none left on that day (each
+--                   one there cancelled, deleted, declined or disputed, or the
+--                   asked booking moved to another day, or deleted with its
+--                   deletion recorded: business_events
+--                   schedule.assignment_deleted for it, job_events
+--                   assignment_deleted for the job and that day, or job_events
+--                   assignment_removed naming it or that day), no; the job moved
+--                   on to complete, invoiced, final payment or a review request
+--                   while a crew booking still sits on that day and none is
+--                   booked after it, yes. A booking's own record counts only
+--                   while it sits on the day asked: a booking moved and
+--                   completed on another day says nothing about this one.
 --   lead_alive      the job's status now: accepted or any later stage, won;
 --                   lost, cancelled or archived, lost; still quoted (or back to
 --                   draft), not known yet.
@@ -217,23 +259,56 @@ AS $fn$
                WHEN s.role IN ('supplier', 'insurer_builder') THEN s.role
                WHEN s.basis = 'council' THEN 'council'
                WHEN s.role = 'customer' THEN 'customer_job'
-               WHEN e.job_id IS NOT NULL AND public.context_linked_status(e.attribution_status) THEN 'customer_job'
-               WHEN e.job_id IS NULL AND e.attribution_status IN ('admin_bucket', 'unplaced') THEN 'none' END
+               WHEN e.job_id IS NOT NULL AND public.context_linked_status(e.attribution_status) THEN 'not_junk'
+               WHEN e.job_id IS NULL AND e.attribution_status IN ('admin_bucket', 'unplaced') THEN
+                CASE WHEN e.payload ->> 'sender_kind' = 'automated' OR s.basis = 'automated'
+                       OR split_part(s.addr, '@', 1) ~ '^(no[-_.]?reply|do[-_.]?not[-_.]?reply|donotreply|notifications?|notify|mailer[-_.]?daemon|postmaster|bounces?|alerts?|newsletter|news|marketing|info[-_.]?noreply)([-_.+].*)?$'
+                       THEN 'marketing_junk'
+                     WHEN position('@' IN coalesce(public.context_sender_key(e), '')) > 0 THEN 'not_junk' END END
    FROM public.business_events e
-   CROSS JOIN LATERAL (SELECT e.metadata #>> '{party_roles,sender_role}' AS role, e.metadata #>> '{party_roles,basis}' AS basis) s
+   CROSS JOIN LATERAL (SELECT e.metadata #>> '{party_roles,sender_role}' AS role, e.metadata #>> '{party_roles,basis}' AS basis,
+     CASE WHEN a.addr ~ '^[^@\s]+@[a-z0-9-]+(\.[a-z0-9-]+)+$' THEN a.addr END AS addr
+    FROM (SELECT lower(btrim(coalesce(substring(r.raw FROM '<([^<>]*)>'), r.raw, ''))) AS addr
+     FROM (SELECT coalesce(e.payload ->> 'from', e.payload ->> 'from_email', e.payload ->> 'sender', e.payload ->> 'email') AS raw) r) a) s
    WHERE e.id = d.row_id)
   WHEN 'visit_happened' THEN (
-   SELECT CASE WHEN a.started_at IS NOT NULL OR a.completed_at IS NOT NULL OR a.verified_at IS NOT NULL
-                 OR lower(coalesce(a.status, '')) IN ('complete', 'completed') THEN 'yes'
+   SELECT CASE WHEN v.day IS NULL THEN NULL
+               WHEN v.attended THEN 'yes'
                WHEN EXISTS (SELECT 1 FROM public.visit_outcomes o WHERE o.job_id = d.job_id AND o.outcome = 'happened'
-                 AND (o.visit_start AT TIME ZONE 'Australia/Perth')::date = b.day) THEN 'yes'
+                 AND (o.visit_start AT TIME ZONE 'Australia/Perth')::date = v.day
+                 AND NOT EXISTS (SELECT 1 FROM public.visit_outcomes c WHERE c.supersedes = o.id)) THEN 'yes'
                WHEN EXISTS (SELECT 1 FROM public.visit_outcomes o WHERE o.job_id = d.job_id AND o.outcome = 'did_not_happen'
-                 AND (o.visit_start AT TIME ZONE 'Australia/Perth')::date = b.day) THEN 'no'
-               WHEN lower(coalesce(a.status, '')) IN ('cancelled', 'deleted', 'declined', 'disputed') THEN 'no'
-               WHEN (SELECT j.status FROM public.jobs j WHERE j.id = d.job_id) IN ('complete', 'invoiced', 'final_payment', 'get_review') THEN 'yes' END
-   FROM public.job_assignments a
-   CROSS JOIN LATERAL (SELECT coalesce(public.context_job_record_date(d.current_answer ->> 'booking_date'), a.scheduled_date) AS day) b
-   WHERE a.id = d.row_id)
+                 AND (o.visit_start AT TIME ZONE 'Australia/Perth')::date = v.day
+                 AND NOT EXISTS (SELECT 1 FROM public.visit_outcomes c WHERE c.supersedes = o.id)) THEN 'no'
+               WHEN v.live_on_day = 0 AND (v.on_day > 0 OR v.asked_moved OR (NOT v.asked_kept AND v.deleted)) THEN 'no'
+               WHEN v.live_on_day > 0 AND NOT v.later
+                 AND (SELECT j.status FROM public.jobs j WHERE j.id = d.job_id) IN ('complete', 'invoiced', 'final_payment', 'get_review') THEN 'yes' END
+   FROM (
+    SELECT x.day,
+     count(*) FILTER (WHERE b.on_day) AS on_day,
+     count(*) FILTER (WHERE b.on_day AND b.live) AS live_on_day,
+     coalesce(bool_or(b.on_day AND b.attended), false) AS attended,
+     coalesce(bool_or(b.live AND b.scheduled_date > x.day), false) AS later,
+     coalesce(bool_or(b.id = d.row_id), false) AS asked_kept,
+     coalesce(bool_or(b.id = d.row_id AND NOT b.on_day), false) AS asked_moved,
+     EXISTS (SELECT 1 FROM public.business_events be WHERE be.entity_type = 'crew_assignment' AND be.entity_id = d.row_id::text
+       AND be.event_type = 'schedule.assignment_deleted')
+     OR EXISTS (SELECT 1 FROM public.job_events je WHERE je.job_id = d.job_id
+       AND ((je.event_type = 'assignment_deleted'
+             AND public.context_job_record_date(coalesce(je.detail_json ->> 'date', je.detail_json ->> 'scheduled_date')) = x.day)
+         OR (je.event_type = 'assignment_removed'
+             AND (je.detail_json -> 'removed_assignments' @> jsonb_build_array(jsonb_build_object('id', d.row_id::text))
+               OR je.detail_json -> 'removed_dates' @> jsonb_build_array(x.day::text))))) AS deleted
+    FROM (SELECT public.context_job_record_date(d.current_answer ->> 'booking_date') AS day) x
+    LEFT JOIN LATERAL (
+     SELECT a.id, a.scheduled_date,
+      a.scheduled_date <= x.day AND greatest(a.scheduled_date, a.scheduled_end) >= x.day AS on_day,
+      lower(coalesce(a.status, '')) NOT IN ('cancelled', 'deleted', 'declined', 'disputed') AS live,
+      a.started_at IS NOT NULL OR a.completed_at IS NOT NULL OR a.verified_at IS NOT NULL
+       OR lower(coalesce(a.status, '')) IN ('complete', 'completed') AS attended
+     FROM public.job_assignments a
+     WHERE a.job_id = d.job_id AND NOT (coalesce(a.is_ghost, false) OR coalesce(a.role, '') = 'observer')) b ON true
+    GROUP BY x.day) v)
   WHEN 'lead_alive' THEN (
    SELECT CASE WHEN j.status IN ('accepted', 'partially_accepted', 'awaiting_deposit', 'deposit', 'approvals', 'order_materials', 'awaiting_supplier',
                  'schedule_install', 'scheduled', 'in_progress', 'processing', 'complete', 'invoiced', 'final_payment', 'get_review', 'rectification') THEN 'won'
@@ -242,25 +317,33 @@ AS $fn$
  END
 $fn$;
 COMMENT ON FUNCTION public.context_jev_truth(public.context_jev_decisions) IS
- 'Context Jev points (20261007030000): read only. The later truth for a Jev shadow row whose today''s answer is not known when it is asked: sender_role (the party-roles stamp once it names the sender: crew_staff, customer, supplier, insurer_builder; basis council other_party), email_triage (the stamp and the placement: internal, supplier, insurer_builder, council, customer_job; none for a sender nobody knows resting on no job), visit_happened (the booking: started, completed, verified or complete yes; a visit outcome for that day; cancelled, deleted, declined or disputed no; the job moved on to complete, invoiced, final_payment or get_review yes), lead_alive (the job: accepted or later won; lost, cancelled or archived lost). Null while not known and for every other point. Read from the records as they are when asked. Service role only.';
+ 'Context Jev points (20261007030000): read only. The later truth for a Jev shadow row whose today''s answer is not known when it is asked: sender_role (the party-roles stamp once it names the sender: crew_staff, customer, supplier, insurer_builder; basis council other_party), email_triage (the stamp: internal, supplier, insurer_builder, council, customer_job; where it names nobody, on no job an automatic or bulk sender marketing_junk; placed on a job, or on no job from a free personal mail address, not_junk, a real sender of no known kind that judges a junk call only; else not known), visit_happened (the job''s crew bookings for the day asked, observer copies never: one still on that day started, completed, verified or complete yes; the current visit outcome for that day; none left on that day, every one there cancelled, deleted, declined or disputed, or the asked booking moved to another day or deleted with its deletion recorded, no; the job moved on to complete, invoiced, final_payment or get_review while a crew booking still sits on that day and none is booked after it yes), lead_alive (the job: accepted or later won; lost, cancelled or archived lost). Null while not known and for every other point. Read from the records as they are when asked. Service role only.';
 
 -- 3. Agreement by decision point and confidence band. The three earlier points
 -- read exactly as before. The five new points: payment_wait is compared with
 -- today's answer (the debt collector's verdict), the other four with the later
 -- truth; compared means that answer or truth is known now, so answered minus
--- compared is what still waits for it.
+-- compared is what still waits for it, or has none to wait for (payment_wait's
+-- holds for another reason; email_triage's non-junk answers on a real sender of
+-- no known kind, until a stamp names the sender).
+--   compared payment_wait: a reminder, or a hold that rests on the customer's
+--            own words (current_answer.customer_held: payment_unconfirmed,
+--            customer_waiting or hold), never a hold for another reason (the
+--            worker logs those with no today's answer; one logged with it is
+--            still not compared). email_triage: a not_junk truth (a real
+--            sender of no known kind) judges a junk call only, so it is
+--            compared only when Jev said marketing_junk.
 --   agreed   the same outcome, and: lead_alive alive or paused is won, declined
 --            or gone_elsewhere is lost; payment_wait none is remind and paid,
---            disputes or asked_for_time is hold; email_triage marketing_junk is
---            none.
+--            disputes or asked_for_time is hold.
 --   unsafe   what would have done harm had Jev decided: sender_role, Jev named
 --            the customer when the stamp names someone else, or someone else
 --            when it names the customer; visit_happened, Jev said it happened
 --            and it did not; lead_alive, Jev said declined or gone elsewhere
 --            and the job was won; payment_wait, Jev said nothing waits while
---            the debt collector held on the customer's words
---            (current_answer.customer_held); email_triage, Jev said marketing
---            or junk and the email was anything else.
+--            the debt collector held on the customer's words; email_triage,
+--            Jev said marketing or junk and the email was anything else, a real
+--            sender of no known kind included.
 CREATE OR REPLACE FUNCTION public.context_jev_agreement(p_since timestamptz DEFAULT NULL, p_until timestamptz DEFAULT NULL)
 RETURNS TABLE (decision_point text, confidence_band text, answered bigint, compared bigint, agreed bigint, agreement numeric,
  unsafe bigint, failed bigint, pairs jsonb)
@@ -271,19 +354,19 @@ AS $fn$
  ), rows_ AS MATERIALIZED (
   SELECT j.decision_point AS point, j.jev_outcome, j.jev_job_id, j.jev_confidence, j.current_job_id, j.error_code,
    CASE WHEN j.decision_point IN ('sender_role', 'visit_happened', 'lead_alive', 'email_triage') THEN public.context_jev_truth(j)
-        ELSE j.current_outcome END AS against,
-   (j.current_answer ->> 'customer_held') = 'true' AS customer_held
+        WHEN j.decision_point = 'payment_wait' AND j.current_outcome = 'hold' AND (j.current_answer ->> 'customer_held') IS DISTINCT FROM 'true' THEN NULL
+        ELSE j.current_outcome END AS against
   FROM public.context_jev_decisions j CROSS JOIN win
   WHERE j.created_at >= win.since_ AND j.created_at < win.until_
  ), d AS (
   SELECT r.point, r.jev_outcome, r.error_code,
    CASE WHEN r.jev_confidence IS NULL THEN NULL WHEN r.jev_confidence >= 0.9 THEN '0.90-1.00' WHEN r.jev_confidence >= 0.8 THEN '0.80-0.90'
         WHEN r.jev_confidence >= 0.5 THEN '0.50-0.80' ELSE '0.00-0.50' END AS band,
-   (r.jev_outcome IS NOT NULL AND r.against IS NOT NULL) AS is_compared,
+   (r.jev_outcome IS NOT NULL AND r.against IS NOT NULL
+    AND (r.point <> 'email_triage' OR r.against <> 'not_junk' OR r.jev_outcome = 'marketing_junk')) AS is_compared,
    CASE r.point
     WHEN 'lead_alive' THEN (r.jev_outcome IN ('alive', 'paused') AND r.against = 'won') OR (r.jev_outcome IN ('declined', 'gone_elsewhere') AND r.against = 'lost')
     WHEN 'payment_wait' THEN (r.jev_outcome = 'none' AND r.against = 'remind') OR (r.jev_outcome IN ('paid', 'disputes', 'asked_for_time') AND r.against = 'hold')
-    WHEN 'email_triage' THEN r.jev_outcome = r.against OR (r.jev_outcome = 'marketing_junk' AND r.against = 'none')
     ELSE (r.jev_outcome = r.against AND (r.jev_outcome <> 'job' OR r.jev_job_id = r.current_job_id)) END AS is_agreed,
    CASE r.point
     WHEN 'placement' THEN r.jev_outcome = 'job' AND (r.against <> 'job' OR r.jev_job_id <> r.current_job_id)
@@ -292,8 +375,8 @@ AS $fn$
     WHEN 'sender_role' THEN r.jev_outcome <> 'unknown' AND (r.jev_outcome = 'customer') <> (r.against = 'customer')
     WHEN 'visit_happened' THEN r.jev_outcome = 'yes' AND r.against = 'no'
     WHEN 'lead_alive' THEN r.jev_outcome IN ('declined', 'gone_elsewhere') AND r.against = 'won'
-    WHEN 'payment_wait' THEN r.jev_outcome = 'none' AND r.against = 'hold' AND r.customer_held
-    WHEN 'email_triage' THEN r.jev_outcome = 'marketing_junk' AND r.against <> 'none' END AS is_unsafe,
+    WHEN 'payment_wait' THEN r.jev_outcome = 'none' AND r.against = 'hold'
+    WHEN 'email_triage' THEN r.jev_outcome = 'marketing_junk' AND r.against <> 'marketing_junk' END AS is_unsafe,
    CASE WHEN r.point = 'placement' AND r.jev_outcome = 'job' AND r.against = 'job' AND r.jev_job_id <> r.current_job_id THEN 'job>other_job'
         ELSE r.jev_outcome || '>' || r.against END AS pair
   FROM rows_ r
@@ -324,7 +407,7 @@ AS $fn$
  ORDER BY c.point_rank, c.band_rank
 $fn$;
 COMMENT ON FUNCTION public.context_jev_agreement(timestamptz, timestamptz) IS
- 'Context Jev points (20261007030000): read only. Per decision point (placement, ledger_update_gate, ledger_reply_owed, sender_role, visit_happened, lead_alive, payment_wait, email_triage) and band of Jev''s confidence (all, 0.90-1.00, 0.80-0.90, 0.50-0.80, 0.00-0.50): answered, compared (today''s answer, or the later truth from context_jev_truth for sender_role, visit_happened, lead_alive and email_triage, is known), agreed, agreement (agreed / compared, null when none), unsafe (would have done harm had Jev decided), failed (band all: requests with no answer) and pairs ("jev>today or truth" counts) over created_at in [p_since, p_until), default the 14 days before now. The first three points read exactly as in 20261006080000. Service role only.';
+ 'Context Jev points (20261007030000): read only. Per decision point (placement, ledger_update_gate, ledger_reply_owed, sender_role, visit_happened, lead_alive, payment_wait, email_triage) and band of Jev''s confidence (all, 0.90-1.00, 0.80-0.90, 0.50-0.80, 0.00-0.50): answered, compared (today''s answer, or the later truth from context_jev_truth for sender_role, visit_happened, lead_alive and email_triage, is known; payment_wait compares only a reminder or a hold resting on the customer''s words, and email_triage''s not_junk only a junk call), agreed, agreement (agreed / compared, null when none), unsafe (would have done harm had Jev decided), failed (band all: requests with no answer) and pairs ("jev>today or truth" counts) over created_at in [p_since, p_until), default the 14 days before now. The first three points read exactly as in 20261006080000. Service role only.';
 
 -- 4. Access: service role only.
 REVOKE ALL ON FUNCTION public.context_jev_truth(public.context_jev_decisions) FROM PUBLIC, anon, authenticated;

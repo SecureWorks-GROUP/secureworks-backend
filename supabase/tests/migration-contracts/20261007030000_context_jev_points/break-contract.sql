@@ -11,19 +11,19 @@ AS $fn$
  ), rows_ AS MATERIALIZED (
   SELECT j.decision_point AS point, j.jev_outcome, j.jev_job_id, j.jev_confidence, j.current_job_id, j.error_code,
    CASE WHEN j.decision_point IN ('sender_role', 'visit_happened', 'lead_alive', 'email_triage') THEN public.context_jev_truth(j)
-        ELSE j.current_outcome END AS against,
-   (j.current_answer ->> 'customer_held') = 'true' AS customer_held
+        WHEN j.decision_point = 'payment_wait' AND j.current_outcome = 'hold' AND (j.current_answer ->> 'customer_held') IS DISTINCT FROM 'true' THEN NULL
+        ELSE j.current_outcome END AS against
   FROM public.context_jev_decisions j CROSS JOIN win
   WHERE j.created_at >= win.since_ AND j.created_at < win.until_
  ), d AS (
   SELECT r.point, r.jev_outcome, r.error_code,
    CASE WHEN r.jev_confidence IS NULL THEN NULL WHEN r.jev_confidence >= 0.9 THEN '0.90-1.00' WHEN r.jev_confidence >= 0.8 THEN '0.80-0.90'
         WHEN r.jev_confidence >= 0.5 THEN '0.50-0.80' ELSE '0.00-0.50' END AS band,
-   (r.jev_outcome IS NOT NULL AND r.against IS NOT NULL) AS is_compared,
+   (r.jev_outcome IS NOT NULL AND r.against IS NOT NULL
+    AND (r.point <> 'email_triage' OR r.against <> 'not_junk' OR r.jev_outcome = 'marketing_junk')) AS is_compared,
    CASE r.point
     WHEN 'lead_alive' THEN (r.jev_outcome IN ('alive', 'paused') AND r.against = 'won') OR (r.jev_outcome IN ('declined', 'gone_elsewhere') AND r.against = 'lost')
     WHEN 'payment_wait' THEN (r.jev_outcome = 'none' AND r.against = 'remind') OR (r.jev_outcome IN ('paid', 'disputes', 'asked_for_time') AND r.against = 'hold')
-    WHEN 'email_triage' THEN r.jev_outcome = r.against OR (r.jev_outcome = 'marketing_junk' AND r.against = 'none')
     ELSE (r.jev_outcome = r.against AND (r.jev_outcome <> 'job' OR r.jev_job_id = r.current_job_id)) END AS is_agreed,
    CASE r.point
     WHEN 'placement' THEN r.jev_outcome = 'job' AND (r.against <> 'job' OR r.jev_job_id <> r.current_job_id)
@@ -32,8 +32,8 @@ AS $fn$
     WHEN 'sender_role' THEN r.jev_outcome <> 'unknown' AND (r.jev_outcome = 'customer') <> (r.against = 'customer')
     WHEN 'visit_happened' THEN r.jev_outcome = 'yes' AND r.against = 'no'
     WHEN 'lead_alive' THEN false
-    WHEN 'payment_wait' THEN r.jev_outcome = 'none' AND r.against = 'hold' AND r.customer_held
-    WHEN 'email_triage' THEN r.jev_outcome = 'marketing_junk' AND r.against <> 'none' END AS is_unsafe,
+    WHEN 'payment_wait' THEN r.jev_outcome = 'none' AND r.against = 'hold'
+    WHEN 'email_triage' THEN r.jev_outcome = 'marketing_junk' AND r.against <> 'marketing_junk' END AS is_unsafe,
    CASE WHEN r.point = 'placement' AND r.jev_outcome = 'job' AND r.against = 'job' AND r.jev_job_id <> r.current_job_id THEN 'job>other_job'
         ELSE r.jev_outcome || '>' || r.against END AS pair
   FROM rows_ r
