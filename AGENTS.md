@@ -623,6 +623,43 @@ Every threshold, including each capture lane's quiet limit in Perth working
 minutes and the 3-run history stall rule, lives only in
 `context_scorecard_policy()`; change it there by migration, never in a caller.
 A row SQL cannot measure stays red with the reason; never make it green in code.
+Its crew and staff lane is a row marked `metadata.recipient_role` crew or staff
+or an outbound text in one of our crew or staff templates, read exactly as the
+classifier's template rule reads one, never L1d's `other` (`20261006034000`).
+W11's guard checks only its comment prefix, which that lane rule keeps: build
+a scorecard change on the live lane body, never on W11's.
+
+Who-to-whom is `metadata.party_roles`, stamped only by the trigger
+`context_party_roles_business_event` from `context_message_party_roles(e)` (v1
+`20261005200000`, v2 `20261006000000`, v3 `20261006034000`); it never places a
+row or writes a ladder-owned key. Rule order: L1d's label or a writer marker
+(copied), then our own crew and staff templates on an outbound text
+(`context_internal_text_role`'s patterns read through `context_event_text`,
+plus the roof report make-safe alert to crew; basis `our_template`), then the
+v1 and v2 key rules. The classifier never calls `context_internal_text_role`
+or another ladder-private helper: the service role previews the classifier,
+and the `20261006034000` case calls it as `service_role` in a fresh session.
+The trigger stamps a row on insert and re-stamps it whenever a writer updates
+`job_id`, `contact_id`, `direction`, `metadata`, `payload`, `event_type` or
+`channel` (a relink, a dedupe mark), always with the live classifier; a row
+nobody writes keeps its stamp until a hand-run re-stamp:
+`scripts/context-party-roles-v3-backfill.sql` is the pattern (a metadata-only write so the trigger re-stamps; the undo
+restores the saved stamp with the trigger off). So a version stamp alone never
+proves a backfill ran; its run key does. A later change to one of
+`20261006034000`'s three functions (classifier, scorecard lane rule, parties
+status block) updates these contract touch points: v1's (`20261005200000`)
+version and comment checks and its re-apply skip; v2's (`20261006000000`)
+version and comment checks; F1b's md5 pin on the parties block
+(`20260924152100`); and the `20261006034000` case's md5 pins, re-apply and
+break proof (a change to a body that case only pins, such as L1d's
+`context_internal_text_role`, stands the pinned body back up in its re-apply,
+as C1d does). That case's, W11's and S-M1's behaviour checks run against
+whatever body is live. S-M1's re-apply (block 12) and v2's re-apply stand back
+up only their own body, from `sm1_parties_status.sql` and
+`v2_message_party_roles.sql` in the `20261006034000` case, whenever the live
+body is not theirs, so a change to one function never breaks a contract about
+another; an earlier contract stands back up the one body it needs that way,
+never by running a later migration's whole down.
 
 A new pg_cron job that writes evidence is scheduled already gated
 (`... WHERE public.automation_lane_enabled('<lane>')`) and added to
