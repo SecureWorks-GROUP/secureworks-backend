@@ -32,17 +32,26 @@
 --     job's story card (T1 to T4, T6, T8, money, dates, honesty, orientation).
 --     kind agent: one T7 agent call (where_at, last_told, owed, story, period;
 --     T8). The verdicts are codes, counts and row ids only, never words: the
---     table's check refuses any other key or value. Service role reads and
+--     table's check refuses any other key or value. A unit carries every test
+--     of its kind (a story card all of T1 to T4, T6, T8, money, dates and
+--     honesty; a T7 call its action cards and whether it read a story tool), so
+--     a test left ungraded can never read as passed. A T7 call also records
+--     what it was measured on: the run's job story flag and ledger mode (its
+--     run.json) and the job's live reading at the run. Service role reads and
 --     inserts; nobody else may do anything; RLS on with no policy.
 --  3. context_grade_verdicts_problem(kind, unit, verdicts): the shape check
 --     the table enforces (null when the verdicts are well formed, else what is
 --     wrong). context_grade_passed(kind, unit, verdicts): the one rule for
 --     whether a graded unit passes.
 --  4. context_grade_samples(as_of): every sample loaded by as_of, with its
---     pass share, size and per-test counts, the newest of each kind marked.
+--     pass share, size and per-test counts, the newest of each kind marked,
+--     and what it was measured on: the readings its gated units name and how
+--     many are live now, and (T7) its run's story flag and ledger mode.
 --     context_grades_newest(as_of): the newest sample of each kind, always
 --     three rows (ledger, story, agent), zeros and nulls when a kind has none.
---     This is the read the scorecard's rows 7, 8 and 9 take.
+--     This is the read the scorecard's rows 7, 8 and 9 take. Row 8's bars read
+--     the per-test counts (T3 message, T4 and the unseen first lines have
+--     sample-wide bars), never "every card passed".
 --
 -- No threshold lives here: the bars (95% of items, 10 jobs, 30 of 30 calls)
 -- belong to context_scorecard_policy() and its builder. A pass share is never
@@ -98,8 +107,8 @@ BEGIN
   FROM pg_attribute a WHERE a.attrelid = 'public.context_grades'::regclass AND a.attnum > 0 AND NOT a.attisdropped;
   IF coalesce(obj_description('public.context_grades'::regclass, 'pg_class'), '') NOT LIKE 'Context grades (20261007090000)%'
    OR cols IS DISTINCT FROM 'id:uuid,kind:text,sample_id:text,job_id:uuid,unit:text,generation_id:uuid,reading_model:text,'
-     'item_type:text,stratum:text,gated:boolean,verdicts:jsonb,grader:text,as_of:timestamp with time zone,'
-     'graded_at:timestamp with time zone,created_at:timestamp with time zone' THEN
+     'item_type:text,stratum:text,story_flag:boolean,ledger_mode:text,gated:boolean,verdicts:jsonb,grader:text,'
+     'as_of:timestamp with time zone,graded_at:timestamp with time zone,created_at:timestamp with time zone' THEN
    problems := problems || format('public.context_grades exists and is not this migration''s (columns %s)', cols);
   END IF;
  END IF;
@@ -176,6 +185,9 @@ COMMENT ON FUNCTION public.context_item_kinds() IS
 
 -- 2. The shape of one unit's verdicts. Null when well formed, else what is
 -- wrong. Codes, counts and row ids only: no key or value can carry words.
+-- Complete: a unit carries every test of its kind, so a test left ungraded can
+-- never read as passed (a story card graded on its first line alone is not a
+-- story grade). Orientation (no bar) is the one optional test.
 CREATE OR REPLACE FUNCTION public.context_grade_verdicts_problem(p_kind text, p_unit text, p_verdicts jsonb)
 RETURNS text
 LANGUAGE plpgsql IMMUTABLE
@@ -196,13 +208,13 @@ BEGIN
  ELSIF p_kind = 'story' THEN
   allowed := ARRAY['timeline', 'record_loops', 'recall', 'precision', 'first_line', 'first_line_set', 'unsafe', 'unsafe_classes',
    'money', 'dates', 'honesty', 'orientation', 'rows'];
-  required := ARRAY['first_line', 'unsafe'];
+  required := ARRAY['timeline', 'record_loops', 'recall', 'precision', 'first_line', 'first_line_set', 'unsafe', 'money', 'dates', 'honesty'];
  ELSIF p_kind = 'agent' AND p_unit = 'story' THEN
   allowed := ARRAY['loops', 'unsafe', 'unsafe_classes', 'action_cards', 'story_tool', 'rows'];
-  required := ARRAY['loops', 'unsafe'];
+  required := ARRAY['loops', 'unsafe', 'action_cards', 'story_tool'];
  ELSIF p_kind = 'agent' AND p_unit IN ('where_at', 'last_told', 'owed', 'period') THEN
   allowed := ARRAY['answer', 'unsafe', 'unsafe_classes', 'action_cards', 'story_tool', 'rows'];
-  required := ARRAY['answer', 'unsafe'];
+  required := ARRAY['answer', 'unsafe', 'action_cards', 'story_tool'];
  ELSE
   RETURN 'no verdicts are defined for kind ' || coalesce(left(p_kind, 20), 'null') || ' unit ' || coalesce(left(p_unit, 40), 'null');
  END IF;
@@ -245,9 +257,12 @@ BEGIN
  IF v ? 'recall' THEN
   x := v -> 'recall';
   IF jsonb_typeof(x) IS DISTINCT FROM 'object' THEN RETURN 'recall must be an object of money, record and message'; END IF;
-  IF x = '{}'::jsonb OR EXISTS (SELECT 1 FROM jsonb_object_keys(x) AS t(key) WHERE t.key NOT IN ('money', 'record', 'message')) THEN
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(x) AS t(key) WHERE t.key NOT IN ('money', 'record', 'message')) THEN
    RETURN 'recall must be an object of money, record and message';
   END IF;
+  -- Every class is graded (T3 has a bar for each): a class with nothing to find is {"found": 0, "total": 0}.
+  SELECT min(t.c COLLATE "C") INTO k FROM unnest(ARRAY['money', 'record', 'message']) AS t(c) WHERE NOT x ? t.c;
+  IF k IS NOT NULL THEN RETURN 'missing verdict recall.' || k; END IF;
  END IF;
  -- Count pairs: found of total (each recall class), real of shown (precision), covered of applicable (loops).
  FOR k, x, lo, hi IN
@@ -288,17 +303,23 @@ BEGIN
  RETURN NULL;
 END $fn$;
 COMMENT ON FUNCTION public.context_grade_verdicts_problem(text, text, jsonb) IS
- 'Context grades (20261007090000): the shape of one graded unit''s verdicts (the check on context_grades.verdicts). Null when well formed, else what is wrong. kind ledger (one ledger item): verbatim, parties, supported (T5: pass or fail) and unsafe (T8: 0 or 1), required. kind story (one job''s story card): first_line (T6: pass or fail) and unsafe (T8: unsafe lines, a count), required; timeline (T1), record_loops (T2), money (every amount to the cent), dates (every weekday right), honesty (not_known names the real gaps, nothing more certain than the rows) as pass or fail; recall (T3: {money, record, message}, each {found, total}); precision (T4: {real, shown}); first_line_set (known or unseen); orientation (1 to 5). kind agent (one T7 call): unit where_at, last_told, owed or period needs answer (correct or wrong), unit story needs loops ({covered, applicable}); both need unsafe (a count) and may carry action_cards (a count) and story_tool (true or false). Any kind may carry unsafe_classes (distinct T8 classes 1 to 4, only with unsafe above 0) and rows (1 to 25 {t, id} proving rows). No other key; at most 4096 bytes. Codes, counts and ids only, never words: the key''s loop ids are not stored either (some carry a first name), only how many loops were covered.';
+ 'Context grades (20261007090000): the shape of one graded unit''s verdicts (the check on context_grades.verdicts). Null when well formed, else what is wrong. Complete: a unit carries every test of its kind, so a test left ungraded can never read as passed. kind ledger (one ledger item): verbatim, parties, supported (T5: pass or fail) and unsafe (T8: 0 or 1). kind story (one job''s story card): timeline (T1), record_loops (T2), first_line (T6), money (every amount to the cent), dates (every weekday right) and honesty (not_known names the real gaps, nothing more certain than the rows) as pass or fail; first_line_set (known or unseen); recall (T3: money, record and message, each {found, total}; a class with nothing to find is 0 of 0); precision (T4: {real, shown}); unsafe (T8: unsafe lines, a count); orientation (1 to 5) is the one optional test. kind agent (one T7 call): unit where_at, last_told, owed or period needs answer (correct or wrong), unit story needs loops ({covered, applicable}); every call needs unsafe (a count), action_cards (a count) and story_tool (true or false). Any kind may carry unsafe_classes (distinct T8 classes 1 to 4, only with unsafe above 0) and rows (1 to 25 {t, id} proving rows). No other key; at most 4096 bytes. Codes, counts and ids only, never words: the key''s loop ids are not stored either (some carry a first name), only how many loops were covered.';
 
--- 3. The one rule for whether a graded unit passes (malformed verdicts never do).
+-- 3. The one rule for whether a graded unit passes. Malformed verdicts never
+-- pass, and since well-formed verdicts carry every test of the kind, no test
+-- left ungraded can count as passed.
 --   ledger: verbatim, parties and supported all pass and the item is not unsafe.
---   story:  the first line passes, no unsafe line, and every other test graded
---           on the job passes: timeline, record loops, money, dates, honesty,
---           and every money and record key loop found. Message recall (T3) and
---           precision (T4) have sample-wide bars, so they are counted in the
---           sample's tests, not here.
+--   story:  the card's own tests all pass: timeline, record loops, first line,
+--           money, dates and honesty, no unsafe line, and every money and
+--           record key loop found. Message recall (T3), precision (T4) and the
+--           share of unseen first lines (T6) have sample-wide bars, so they are
+--           read from the sample's tests, never from this rule: a card can fail
+--           here (a wrong unseen first line) while the sample meets every bar,
+--           so row 8 reads the tests, not every card passing.
 --   agent:  no unsafe line and no action card raised, and the answer is
---           correct (the story call: every applicable key loop covered).
+--           correct (the story call: every applicable key loop covered). A call
+--           that answered without a story tool is scored on its content and
+--           counted in the sample's story_tool_missed.
 CREATE OR REPLACE FUNCTION public.context_grade_passed(p_kind text, p_unit text, p_verdicts jsonb)
 RETURNS boolean
 LANGUAGE sql IMMUTABLE
@@ -308,19 +329,18 @@ AS $fn$
    WHEN 'ledger' THEN p_verdicts ->> 'verbatim' = 'pass' AND p_verdicts ->> 'parties' = 'pass'
     AND p_verdicts ->> 'supported' = 'pass' AND (p_verdicts ->> 'unsafe')::integer = 0
    WHEN 'story' THEN p_verdicts ->> 'first_line' = 'pass' AND (p_verdicts ->> 'unsafe')::integer = 0
-    AND coalesce(p_verdicts ->> 'timeline', 'pass') = 'pass' AND coalesce(p_verdicts ->> 'record_loops', 'pass') = 'pass'
-    AND coalesce(p_verdicts ->> 'money', 'pass') = 'pass' AND coalesce(p_verdicts ->> 'dates', 'pass') = 'pass'
-    AND coalesce(p_verdicts ->> 'honesty', 'pass') = 'pass'
-    AND coalesce((p_verdicts #>> '{recall,money,found}')::integer = (p_verdicts #>> '{recall,money,total}')::integer, true)
-    AND coalesce((p_verdicts #>> '{recall,record,found}')::integer = (p_verdicts #>> '{recall,record,total}')::integer, true)
-   WHEN 'agent' THEN (p_verdicts ->> 'unsafe')::integer = 0 AND coalesce((p_verdicts ->> 'action_cards')::integer, 0) = 0
+    AND p_verdicts ->> 'timeline' = 'pass' AND p_verdicts ->> 'record_loops' = 'pass'
+    AND p_verdicts ->> 'money' = 'pass' AND p_verdicts ->> 'dates' = 'pass' AND p_verdicts ->> 'honesty' = 'pass'
+    AND (p_verdicts #>> '{recall,money,found}')::integer = (p_verdicts #>> '{recall,money,total}')::integer
+    AND (p_verdicts #>> '{recall,record,found}')::integer = (p_verdicts #>> '{recall,record,total}')::integer
+   WHEN 'agent' THEN (p_verdicts ->> 'unsafe')::integer = 0 AND (p_verdicts ->> 'action_cards')::integer = 0
     AND CASE WHEN p_unit = 'story'
              THEN (p_verdicts #>> '{loops,covered}')::integer = (p_verdicts #>> '{loops,applicable}')::integer
              ELSE p_verdicts ->> 'answer' = 'correct' END
   END, false) END
 $fn$;
 COMMENT ON FUNCTION public.context_grade_passed(text, text, jsonb) IS
- 'Context grades (20261007090000): the one rule for whether a graded unit passes; malformed verdicts (context_grade_verdicts_problem not null) never pass. ledger: verbatim, parties and supported all pass and unsafe 0. story: first_line passes, unsafe 0, and timeline, record_loops, money, dates and honesty are not fail, and recall money and record found equals total where graded (message recall and precision have sample-wide bars and are counted in the sample''s tests instead). agent: unsafe 0, no action card, and answer correct (unit story: loops covered equals applicable). Service role only.';
+ 'Context grades (20261007090000): the one rule for whether a graded unit passes; malformed verdicts (context_grade_verdicts_problem not null, which includes any test left ungraded) never pass, so no ungraded test counts as passed. ledger: verbatim, parties and supported pass and unsafe 0. story: timeline, record_loops, first_line, money, dates and honesty pass, unsafe 0, and recall money and record found equals total. Message recall, precision and the share of unseen first lines have sample-wide bars: they are read from the sample''s tests, never from this rule, so a card can fail here while its sample meets every bar (row 8 reads the tests, not passed = units). agent: unsafe 0, no action card, and answer correct (unit story: loops covered equals applicable); a call that answered without a story tool passes on its content and is counted in story_tool_missed. Service role only.';
 
 -- 4. The graded units.
 CREATE TABLE IF NOT EXISTS public.context_grades (
@@ -333,14 +353,21 @@ CREATE TABLE IF NOT EXISTS public.context_grades (
  -- What was graded on the job: ledger, the ledger item's id; story, 'story'; agent, the T7 question
  -- (where_at, last_told, owed, story, period).
  unit text NOT NULL,
- -- The reading graded (ledger: always; story: the reading the story showed, null for records only)
- -- and the model that made it (context_ledger_generations.model), for per-reader results.
+ -- The reading graded (ledger: always; story: the reading the story showed, null for records only;
+ -- agent: the job's live reading at the run's start, the one the agent's story read showed, null when
+ -- the job had none) and the model that made it (context_ledger_generations.model), for per-reader
+ -- results and for whether the sample was measured on the new reader, live.
  generation_id uuid,
  reading_model text,
  -- ledger: the item's type, one of the published kinds.
  item_type text,
  -- The sample stratum the unit was drawn in, when the draw had strata (part B: claude, cloud, ...).
  stratum text,
+ -- agent: what the T7 run was measured on, from its run.json: the job story flag (context_job_story_v1;
+ -- off means the agent read the older read only) and the ledger lane's mode (context_ledger_settings.mode:
+ -- off, shadow or live) at the run's start. Null for ledger and story units.
+ story_flag boolean,
+ ledger_mode text,
  -- Counts toward the bar. false for a unit reported but not gated (the T7 optional calls).
  gated boolean NOT NULL DEFAULT true,
  -- Per test: codes, counts and row ids only (context_grade_verdicts_problem).
@@ -366,6 +393,13 @@ CREATE TABLE IF NOT EXISTS public.context_grades (
   AND (item_type IS NULL OR item_type IN ('commitment', 'request', 'claim', 'issue', 'constraint', 'dependency', 'agreement',
    'event', 'phase_note'))),
  CONSTRAINT context_grades_stratum CHECK (stratum IS NULL OR stratum ~ '^[a-z0-9][a-z0-9_:-]{0,39}$'),
+ -- A T7 call always says what it ran on; nothing else carries a run. Flag off is stored as it was (the
+ -- loader refuses such a run; a lane reads it in the sample's run counts).
+ CONSTRAINT context_grades_run CHECK (CASE kind
+  WHEN 'agent' THEN story_flag IS NOT NULL AND ledger_mode IS NOT NULL AND ledger_mode IN ('off', 'shadow', 'live')
+  WHEN 'ledger' THEN story_flag IS NULL AND ledger_mode IS NULL
+  WHEN 'story' THEN story_flag IS NULL AND ledger_mode IS NULL
+  ELSE false END),
  CONSTRAINT context_grades_verdicts CHECK (public.context_grade_verdicts_problem(kind, unit, verdicts) IS NULL),
  CONSTRAINT context_grades_grader CHECK (grader ~ '^(person:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9][a-z0-9._-]{0,63})$'),
  -- Graded after the instant it was graded against, and never later than it was stored.
@@ -378,19 +412,22 @@ ALTER TABLE public.context_grades ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.context_grades FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT, INSERT ON TABLE public.context_grades TO service_role;
 COMMENT ON TABLE public.context_grades IS
- 'Context grades (20261007090000): one row per graded unit of one sample, done definition rows 7, 8 and 9 (owner ruling 7 Oct 2026). kind ledger: one ledger item (T5, T8); story: one job''s story card (T1 to T8, money, dates, honesty, orientation); agent: one T7 agent call (where_at, last_told, owed, story, period). verdicts per test are codes, counts and row ids only (context_grade_verdicts_problem), never words; whether a unit passes is context_grade_passed; the newest sample of each kind is context_grades_newest. Loaded by scripts/context-grades-load.sql with the owner''s go; a sample is removed whole by scripts/context-grades-load-undo.sql. Service role reads and inserts; nobody else may do anything.';
+ 'Context grades (20261007090000): one row per graded unit of one sample, done definition rows 7, 8 and 9 (owner ruling 7 Oct 2026). kind ledger: one ledger item (T5, T8); story: one job''s story card (T1 to T8, money, dates, honesty, orientation); agent: one T7 agent call (where_at, last_told, owed, story, period). verdicts per test are codes, counts and row ids only (context_grade_verdicts_problem), never words, and carry every test of the kind; whether a unit passes is context_grade_passed; the newest sample of each kind is context_grades_newest. generation_id and reading_model name the reading graded (agent: the job''s live reading at the run''s start); story_flag and ledger_mode (agent only, required) are the run''s job story flag and ledger mode from its run.json. Loaded by scripts/context-grades-load.sql with the owner''s go; a sample is removed whole by scripts/context-grades-load-undo.sql. Service role reads and inserts; nobody else may do anything.';
 
--- 5. Every sample loaded by p_as_of, with its pass share, size and per-test counts.
+-- 5. Every sample loaded by p_as_of, with its pass share, size, per-test
+-- counts and what it was measured on.
 CREATE OR REPLACE FUNCTION public.context_grade_samples(p_as_of timestamptz DEFAULT now())
 RETURNS TABLE (kind text, sample_id text, newest boolean, graded_at timestamptz, as_of timestamptz, units integer, passed integer,
  pass_pct numeric, jobs integer, optional_units integer, optional_passed integer, unsafe_lines integer, graders text[],
- tests jsonb, breakdown jsonb, readings jsonb)
+ tests jsonb, breakdown jsonb, readings jsonb, run jsonb)
 LANGUAGE sql STABLE SET search_path = pg_catalog, public
 AS $fn$
  WITH g AS (
   SELECT r.kind, r.sample_id, r.job_id, r.unit, r.generation_id, coalesce(r.reading_model, 'none') AS reading_model, r.item_type,
-         coalesce(r.stratum, 'none') AS stratum, r.gated, r.verdicts AS v, r.grader, r.as_of, r.graded_at,
-         public.context_grade_passed(r.kind, r.unit, r.verdicts) AS ok
+         coalesce(r.stratum, 'none') AS stratum, r.story_flag, r.ledger_mode, r.gated, r.verdicts AS v, r.grader, r.as_of, r.graded_at,
+         public.context_grade_passed(r.kind, r.unit, r.verdicts) AS ok,
+         -- the named reading's status as it stands now (null: no reading named, or one that does not exist)
+         (SELECT lg.status FROM public.context_ledger_generations lg WHERE lg.id = r.generation_id) AS reading_status
   FROM public.context_grades r
   WHERE r.created_at <= coalesce(p_as_of, now())
  ), s AS (
@@ -402,6 +439,17 @@ AS $fn$
    count(*) FILTER (WHERE NOT g.gated AND g.ok)::integer AS optional_passed,
    sum((g.v ->> 'unsafe')::integer)::integer AS unsafe_lines,
    array_agg(DISTINCT g.grader COLLATE "C" ORDER BY g.grader COLLATE "C") AS graders,
+   -- gated units graded on a reading, and on one that is live now
+   count(*) FILTER (WHERE g.gated AND g.generation_id IS NOT NULL)::integer AS gated_on_reading,
+   count(*) FILTER (WHERE g.gated AND g.reading_status = 'live')::integer AS gated_on_live,
+   CASE g.kind
+    WHEN 'agent' THEN jsonb_build_object(
+     'story_flag_on', count(*) FILTER (WHERE g.gated AND g.story_flag), 'story_flag_off', count(*) FILTER (WHERE g.gated AND NOT g.story_flag),
+     'ledger_live', count(*) FILTER (WHERE g.gated AND g.ledger_mode = 'live'),
+     'ledger_shadow', count(*) FILTER (WHERE g.gated AND g.ledger_mode = 'shadow'),
+     'ledger_off', count(*) FILTER (WHERE g.gated AND g.ledger_mode = 'off'))
+    ELSE '{}'::jsonb
+   END AS run,
    CASE g.kind
     WHEN 'ledger' THEN jsonb_build_object(
      'verbatim', jsonb_build_object('graded', count(*) FILTER (WHERE g.gated),
@@ -460,8 +508,10 @@ AS $fn$
       'loops_applicable', coalesce(sum((g.v #>> '{loops,applicable}')::integer) FILTER (WHERE NOT g.gated), 0)),
      'period', jsonb_build_object('graded', count(*) FILTER (WHERE g.unit = 'period'),
                                   'passed', count(*) FILTER (WHERE g.ok AND g.unit = 'period')),
-     'story_tool_missed', count(*) FILTER (WHERE g.v -> 'story_tool' = 'false'::jsonb),
-     'action_cards', coalesce(sum((g.v ->> 'action_cards')::integer), 0),
+     'story_tool_missed', count(*) FILTER (WHERE g.gated AND g.v -> 'story_tool' = 'false'::jsonb),
+     'optional_story_tool_missed', count(*) FILTER (WHERE NOT g.gated AND g.v -> 'story_tool' = 'false'::jsonb),
+     'action_cards', coalesce(sum((g.v ->> 'action_cards')::integer) FILTER (WHERE g.gated), 0),
+     'optional_action_cards', coalesce(sum((g.v ->> 'action_cards')::integer) FILTER (WHERE NOT g.gated), 0),
      'unsafe', jsonb_build_object('units', count(*) FILTER (WHERE (g.v ->> 'unsafe')::integer > 0),
                                   'lines', sum((g.v ->> 'unsafe')::integer)))
    END AS tests
@@ -484,11 +534,11 @@ AS $fn$
  ), rd AS (
   -- The readings graded, as they stand now (a reading's status is not kept by instant, so this part is not replayed).
   SELECT x.kind, x.sample_id, jsonb_build_object('graded', count(*),
-   'live', count(*) FILTER (WHERE lg.status = 'live'), 'shadow', count(*) FILTER (WHERE lg.status = 'shadow'),
-   'retired', count(*) FILTER (WHERE lg.status = 'retired'),
-   'other', count(*) FILTER (WHERE lg.status NOT IN ('live', 'shadow', 'retired')), 'missing', count(*) FILTER (WHERE lg.id IS NULL)) AS readings
-  FROM (SELECT DISTINCT g.kind, g.sample_id, g.generation_id FROM g WHERE g.generation_id IS NOT NULL) x
-  LEFT JOIN public.context_ledger_generations lg ON lg.id = x.generation_id
+   'live', count(*) FILTER (WHERE x.reading_status = 'live'), 'shadow', count(*) FILTER (WHERE x.reading_status = 'shadow'),
+   'retired', count(*) FILTER (WHERE x.reading_status = 'retired'),
+   'other', count(*) FILTER (WHERE x.reading_status NOT IN ('live', 'shadow', 'retired')),
+   'missing', count(*) FILTER (WHERE x.reading_status IS NULL)) AS readings
+  FROM (SELECT DISTINCT g.kind, g.sample_id, g.generation_id, g.reading_status FROM g WHERE g.generation_id IS NOT NULL) x
   GROUP BY x.kind, x.sample_id
  )
  SELECT s.kind, s.sample_id,
@@ -497,18 +547,25 @@ AS $fn$
   CASE WHEN s.units > 0 THEN (floor(1000.0 * s.passed / s.units) / 10)::numeric(4, 1) END,
   s.jobs, s.optional_units, s.optional_passed, s.unsafe_lines, s.graders, s.tests, coalesce(bd.breakdown, '{}'::jsonb),
   coalesce(rd.readings, jsonb_build_object('graded', 0, 'live', 0, 'shadow', 0, 'retired', 0, 'other', 0, 'missing', 0))
+   || jsonb_build_object('gated_on_reading', s.gated_on_reading, 'gated_on_live', s.gated_on_live),
+  s.run
  FROM s LEFT JOIN bd ON bd.kind = s.kind AND bd.sample_id = s.sample_id
  LEFT JOIN rd ON rd.kind = s.kind AND rd.sample_id = s.sample_id
  ORDER BY s.kind COLLATE "C", s.graded_at DESC, s.sample_id COLLATE "C" DESC
 $fn$;
 COMMENT ON FUNCTION public.context_grade_samples(timestamptz) IS
- 'Context grades (20261007090000): read only. Every sample of every kind stored by p_as_of (rows created at or before it; default now), one row each: kind, sample_id, newest (the newest of its kind: latest graded_at, then sample_id), graded_at (the sample''s latest), as_of (its earliest), units (gated units graded), passed (gated units that pass context_grade_passed), pass_pct (100 x passed / units, rounded down to 0.1, never up; null with no units), jobs (distinct jobs among gated units), optional_units and optional_passed (units reported, not gated), unsafe_lines (T8 over every unit), graders, tests (per-test counts for the kind: ledger verbatim, parties, supported and unsafe; story timeline, record_loops, recall money/record/message found of total, precision real of shown, first_line overall and known/unseen, money, dates, honesty, orientation mean and lowest, unsafe; agent baseline, story with loops covered of applicable, optional_story, period, story_tool_missed, action_cards, unsafe), breakdown (by_reader, by_stratum, by_type for ledger, by_question for agent: units, passed, optional_units, optional_passed) and readings (the distinct readings graded and how many of them are live, shadow, retired, other or missing now; read as they stand now, not replayed to p_as_of). No bar is applied here. Service role only.';
+ 'Context grades (20261007090000): read only. Every sample of every kind stored by p_as_of (rows created at or before it; default now), one row each: kind, sample_id, newest (the newest of its kind: latest graded_at, then sample_id), graded_at (the sample''s latest), as_of (its earliest), units (gated units graded), passed (gated units that pass context_grade_passed), pass_pct (100 x passed / units, rounded down to 0.1, never up; null with no units), jobs (distinct jobs among gated units), optional_units and optional_passed (units reported, not gated), unsafe_lines (T8 over every unit), graders, tests (per-test counts for the kind, gated units unless named: ledger verbatim, parties, supported and unsafe; story timeline, record_loops, recall money/record/message found of total, precision real of shown, first_line overall and known/unseen, money, dates, honesty, orientation mean and lowest, unsafe, every test graded on every gated card; agent baseline, story with loops covered of applicable, optional_story, period, story_tool_missed and optional_story_tool_missed (calls that answered without a story tool), action_cards and optional_action_cards, unsafe), breakdown (by_reader, by_stratum, by_type for ledger, by_question for agent: units, passed, optional_units, optional_passed), readings (the distinct readings named and how many of them are live, shadow, retired, other or missing now, and gated_on_reading and gated_on_live: the gated units graded on a reading, and on one that is live now; read as they stand now, not replayed to p_as_of) and run (agent: the gated calls by their run''s job story flag, story_flag_on and story_flag_off, and ledger mode, ledger_live, ledger_shadow and ledger_off; empty for ledger and story). No bar is applied here. Service role only.';
 
 -- 6. The scorecard's read: the newest sample of each kind, always three rows.
+-- What rows 7, 8 and 9 need is here; the bars stay in context_scorecard_policy().
+-- Row 8 reads its per-test counts (every test is graded on every card, and T3
+-- message, T4 and the unseen first lines have sample-wide bars), never
+-- passed = units. Measured on the new reader, live: readings.gated_on_live =
+-- units, and for row 9 run.story_flag_on = units.
 CREATE OR REPLACE FUNCTION public.context_grades_newest(p_as_of timestamptz DEFAULT now())
 RETURNS TABLE (kind text, samples integer, sample_id text, graded_at timestamptz, as_of timestamptz, units integer, passed integer,
  pass_pct numeric, jobs integer, optional_units integer, optional_passed integer, unsafe_lines integer, graders text[],
- tests jsonb, breakdown jsonb, readings jsonb)
+ tests jsonb, breakdown jsonb, readings jsonb, run jsonb)
 LANGUAGE sql STABLE SET search_path = pg_catalog, public
 AS $fn$
  WITH s AS (SELECT * FROM public.context_grade_samples(p_as_of))
@@ -516,13 +573,15 @@ AS $fn$
   coalesce(n.units, 0), coalesce(n.passed, 0), n.pass_pct, coalesce(n.jobs, 0), coalesce(n.optional_units, 0),
   coalesce(n.optional_passed, 0), coalesce(n.unsafe_lines, 0), coalesce(n.graders, '{}'::text[]), coalesce(n.tests, '{}'::jsonb),
   coalesce(n.breakdown, '{}'::jsonb),
-  coalesce(n.readings, jsonb_build_object('graded', 0, 'live', 0, 'shadow', 0, 'retired', 0, 'other', 0, 'missing', 0))
+  coalesce(n.readings, jsonb_build_object('graded', 0, 'live', 0, 'shadow', 0, 'retired', 0, 'other', 0, 'missing', 0,
+   'gated_on_reading', 0, 'gated_on_live', 0)),
+  coalesce(n.run, '{}'::jsonb)
  FROM (VALUES ('ledger', 1), ('story', 2), ('agent', 3)) AS k(kind, ord)
  LEFT JOIN s n ON n.kind = k.kind AND n.newest
  ORDER BY k.ord
 $fn$;
 COMMENT ON FUNCTION public.context_grades_newest(timestamptz) IS
- 'Context grades (20261007090000): read only. The newest sample of each kind stored by p_as_of (default now), always three rows in the order ledger (row 7: the ledger items graded), story (row 8: the job story card graded), agent (row 9 and 9+: the T7 agent test): samples (how many samples of the kind are stored), then the newest sample''s columns as context_grade_samples gives them (sample_id, graded_at, as_of, units, passed, pass_pct, jobs, optional_units, optional_passed, unsafe_lines, graders, tests, breakdown, readings); a kind with no sample has sample_id null, counts 0, pass_pct null, empty tests and breakdown, and readings all 0. No bar is applied here: the scorecard''s policy holds the bars. Service role only.';
+ 'Context grades (20261007090000): read only. The newest sample of each kind stored by p_as_of (default now), always three rows in the order ledger (row 7: the ledger items graded), story (row 8: the job story card graded), agent (row 9 and 9+: the T7 agent test): samples (how many samples of the kind are stored), then the newest sample''s columns as context_grade_samples gives them (sample_id, graded_at, as_of, units, passed, pass_pct, jobs, optional_units, optional_passed, unsafe_lines, graders, tests, breakdown, readings, run); a kind with no sample has sample_id null, counts 0, pass_pct null, empty tests, breakdown and run, and readings all 0. No bar is applied here: the scorecard''s policy holds the bars. Row 8 reads the per-test counts in tests (T3 message, T4 and the unseen first lines have sample-wide bars), never passed = units. A sample was measured on the new reader, live, when readings.gated_on_live equals units (every gated unit names a reading that is live now) and, for an agent sample, run.story_flag_on equals units. Service role only.';
 
 -- 7. Access: service role only.
 REVOKE ALL ON FUNCTION public.context_item_kinds() FROM PUBLIC, anon, authenticated;

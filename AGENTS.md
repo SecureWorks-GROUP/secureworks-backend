@@ -640,7 +640,13 @@ there, widens `context_grades_item_type` and updates that case's catalogue
 checks, in one migration. A unit passes only by `context_grade_passed`;
 verdicts are codes, counts and row ids (`context_grade_verdicts_problem`
 refuses words, and the answer key's loop ids, some of which carry a first
-name, are never stored). A grade enters only through
+name, are never stored) and carry every test of their kind, so an ungraded
+test never reads as passed. Row 8's lane reads the per-test counts in
+`tests` (T3 message, T4 and the unseen first lines have sample-wide bars),
+never `passed = units`. A sample counts as measured on the new reader, live,
+only when `readings.gated_on_live = units` and, for the agent test,
+`run.story_flag_on = units`: each T7 call records its run's story flag and
+ledger mode and the job's reading live at the run. A grade enters only through
 `scripts/context-grades-load.sql` and leaves only through its undo, both
 guarded and run with the owner's go; the service role may insert a grade but
 never change or delete one.
