@@ -26,7 +26,10 @@ BEGIN
      AND indexname IN ('context_jev_decisions_point_time', 'context_jev_decisions_time', 'context_jev_decisions_job', 'context_jev_decisions_row')) <> 4 THEN
   RAISE EXCEPTION 'jev contract: an index is missing';
  END IF;
- IF coalesce(obj_description(to_regprocedure('public.context_jev_agreement(timestamptz,timestamptz)'), 'pg_proc'), '') NOT LIKE 'Context Jev decisions (20261006080000)%'
+ -- A registered successor (20261007030000, the five watch points) replaces the agreement read with its own and keeps
+ -- these three points' answers; it proves that in its own contract.
+ IF (coalesce(obj_description(to_regprocedure('public.context_jev_agreement(timestamptz,timestamptz)'), 'pg_proc'), '') NOT LIKE 'Context Jev decisions (20261006080000)%'
+   AND coalesce(obj_description(to_regprocedure('public.context_jev_agreement(timestamptz,timestamptz)'), 'pg_proc'), '') NOT LIKE 'Context Jev points (20261007030000)%')
   OR coalesce(obj_description(to_regprocedure('public.context_jev_calls_today()'), 'pg_proc'), '') NOT LIKE 'Context Jev decisions (20261006080000)%' THEN
   RAISE EXCEPTION 'jev contract: a function is missing or not this migration''s';
  END IF;
@@ -236,7 +239,9 @@ BEGIN
 
  SELECT jsonb_agg(jsonb_build_array(a.decision_point, a.confidence_band, a.answered, a.compared, a.agreed, a.agreement, a.unsafe, a.failed, a.pairs)
   ORDER BY n) INTO actual
- FROM (SELECT x.*, row_number() OVER () AS n FROM public.context_jev_agreement(t0, t1) x) a;
+ -- This migration's three points only: a registered successor (20261007030000) lists five more after them.
+ FROM (SELECT x.*, row_number() OVER () AS n FROM public.context_jev_agreement(t0, t1) x
+       WHERE x.decision_point IN ('placement', 'ledger_update_gate', 'ledger_reply_owed')) a;
  expected := '[
   ["placement","all",7,6,3,0.5000,2,1,{"job>job":1,"job>none":1,"job>other_job":1,"none>job":1,"none>none":1,"several>several":1}],
   ["placement","0.90-1.00",4,3,1,0.3333,1,0,{"job>job":1,"job>other_job":1,"none>job":1}],
