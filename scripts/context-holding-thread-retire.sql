@@ -19,7 +19,11 @@
 -- so every email that follows one of them is misfiled: on a re-decision both
 -- ladders put such a row on the placeholder (L1g evidence, 6 Oct: 6 bucket rows
 -- of the last 30 days do exactly that), and 8 rows waiting in the bucket today
--- carry one of these thread keys.
+-- carry one of these thread keys. With the rules flag on (since 02:32Z on 7 Oct
+-- 2026) a new email on one of these threads from a sender the ladder cannot
+-- identify, naming no job, is placed on the placeholder at capture, and a
+-- bucket re-run (rerun_context_attribution, which reads the flag) would put
+-- those 8 there too: retire before either.
 --
 -- What the retire does. Each live binding to a holding job is re-keyed
 -- retired:holding_job:<its key> and marked retired (retired_at now,

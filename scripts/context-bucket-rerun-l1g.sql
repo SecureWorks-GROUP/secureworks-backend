@@ -11,16 +11,19 @@
 -- What the bucket is. The rows the scorecard's review_queue lane counts: no
 -- job, attribution_status admin_bucket, unplaced, pending_luna or review,
 -- captured (context_captured_at, else recorded_at) in the 30 days to the run's
--- instant. Today they were decided by the rules-off ladder (the flag
--- context_unlinked_rules_v1 is off), and nothing re-runs them on a schedule:
--- rerun_context_attribution reads the flag and re-runs admin_bucket rows only.
--- This script re-decides each one with the rules-on body
--- resolve_context_attribution(row, preview false, rules on), exactly the call
--- the flag would make, without turning the flag on. Rows with no status at all
--- (never attributed: 664 on 7 Oct) are not the bucket and are not re-run.
+-- instant. The flag context_unlinked_rules_v1 was turned on at 02:32Z on 7 Oct
+-- 2026, so a row captured since is decided by the rules-on ladder at capture,
+-- but every bucket row captured before then was decided with the rules off and
+-- nothing has re-decided it (read 7 Oct 06:20Z: 0 of the older admin_bucket
+-- rows re-checked since the flip): rerun_context_attribution re-runs
+-- admin_bucket rows only, and only when someone calls it. This script re-decides
+-- every bucket row with the rules-on body explicitly,
+-- resolve_context_attribution(row, preview false, rules on), whatever the flag
+-- says. Rows with no status at all (never attributed: 664 on 7 Oct) are not the
+-- bucket and are not re-run.
 --
--- What PART 1 measured, read only, as of 7 Oct 2026 04:00Z (L1g live, flag
--- off, the 50 holding-job bindings emulated as retired): 3,737 rows (2,727
+-- What PART 1 measured, read only, as of 7 Oct 2026 04:00Z (L1g live, flag on
+-- since 02:32Z, the 50 holding-job bindings emulated as retired): 3,737 rows (2,727
 -- admin_bucket, 656 pending_luna, 365 unplaced, 0 review). The rules place 605
 -- of them: 285 by exact site address, 163 single_open,
 -- 84 by a job reference, 37 by the sender's email, 26 internal references (our

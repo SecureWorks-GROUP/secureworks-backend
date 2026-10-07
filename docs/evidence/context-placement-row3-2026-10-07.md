@@ -1,9 +1,13 @@
 # Row 3, placement: what production holds, and what each script would change (7 Oct 2026)
 
-Production reads only (`BEGIN READ ONLY ... ROLLBACK`, 04:30 to 05:40Z), ids
-and counts only. Ladder L1g live, flag `context_unlinked_rules_v1` off,
-attribution lane on. Migration `20261007070000` was not applied, so its plan,
-sampler and re-run were emulated inline with the same SQL. No script was run.
+Production reads only (`BEGIN READ ONLY ... ROLLBACK`, 04:30 to 06:20Z), ids
+and counts only. Ladder L1g live, attribution lane on, flag
+`context_unlinked_rules_v1` on since 02:32Z on 7 Oct (rows captured since are
+placed by the rules-on ladder at capture; no older bucket row has been
+re-decided since: 0 of the older admin_bucket rows re-checked). Every
+measurement below calls the rules-on body explicitly. Migration
+`20261007070000` was not applied, so its plan, sampler and re-run were emulated
+inline with the same SQL. No script was run.
 
 ## The scorecard's row 3 today
 
