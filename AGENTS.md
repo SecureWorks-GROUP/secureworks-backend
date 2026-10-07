@@ -838,6 +838,36 @@ work reopened after it was recorded finished is not finished again) and
 `unconfirmed` (R8 whose amount a C2 check leaves unknown) are never a move, the
 first line's item or a reason for whose move.
 
+## A Lead Not Followed Up Has One Rule
+
+`context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`; null ids means
+every live job) and `context_lead_monitored(job, as_of)`, which returns that
+job's same row (`job_id`, `monitored`, `state`, ...; no row for an unknown job),
+are the owner's 7 Oct 2026 lead rule, the only one. A job still at `quoted` with
+a quote sent and no progress (no accepted quote, no Xero invoice or bill on the
+job that is not voided or deleted, whatever its type, no standing booking, no
+later status) stops being monitored 672 hours after the newer of its newest
+quote send (`job_documents` type `quote`, else `jobs.quoted_at`) and the
+customer's newest inbound text, email or call wherever the story finds it: on
+the job (`context_job_record_messages`), their old-inbox mail by address, their
+CRM contact's rows placed on no job (the placement queue, the admin bucket, a
+holding job) or on another job, and their mail by address with no CRM contact;
+never mail from one of our own addresses entered as the client's. It is
+monitored again the moment it progresses or the customer writes, and a quote
+never sent starts no clock. Both functions are SECURITY DEFINER (the record
+layer's crew and staff helper is not the service role's to call), service role
+only. The story reads it (R7's words end "Lead not followed up since <day>:
+...", the first line says so in place of whose move, `whose_move`
+`not_followed_up`, `now.monitored`), the ledger judge blocks such a lead
+(`lead_not_monitored`, so it is never on the due list and a claim answers
+`not_due`), and the scorecard reads the set function. Never re-derive the
+window, the progress list or the contact sources in a caller. A set-returning
+SQL helper called with a sub-select argument is never inlined and runs whole
+(the rule reads `context_job_record_messages(ARRAY[l.id], k.t)` per lead for
+that reason: 1.8 s against 13.5 s read one job at a time for every live job).
+The story fixes and story safety contracts roll this migration back first in
+their re-apply sections, as its own guard pins their bodies.
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses

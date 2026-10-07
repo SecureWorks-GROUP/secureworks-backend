@@ -1712,22 +1712,24 @@ VALUES
  ('00000000-0000-4000-8000-0000000000aa', '40c00000-0000-4000-8000-000000000191', '40000000-0000-4000-8000-000000000091', 'x4191', 'x40-bldb', 'Builder B',
   'INV-4191', 'ACCREC', 'AUTHORISED', 'SWR-94091', 2882.00, 2882.00, 0, '2026-10-01', '2026-10-12', NULL, NULL, '{"Status":"AUTHORISED","Payments":[]}', NULL, '2026-10-01 01:00Z');
 INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at, viewed_at, declined_at)
-VALUES ('40e00000-0000-4000-8000-000000000071', '40000000-0000-4000-8000-000000000071', 'quote', 'Q-4071', 1, '2026-07-20 01:00Z', '2026-07-20 01:10Z', '2026-07-21 01:00Z', NULL),
-       ('40e00000-0000-4000-8000-000000000072', '40000000-0000-4000-8000-000000000072', 'quote', 'Q-4072', 1, '2026-08-27 01:00Z', '2026-08-27 01:10Z', NULL, NULL);
+-- (lead cutoff, 20261007010000: both quotes, and the customer's messages on the job, inside the 4
+-- weeks a lead is followed up, so each is still a quote waiting)
+VALUES ('40e00000-0000-4000-8000-000000000071', '40000000-0000-4000-8000-000000000071', 'quote', 'Q-4071', 1, '2026-09-14 01:00Z', '2026-09-14 01:10Z', '2026-09-15 01:00Z', NULL),
+       ('40e00000-0000-4000-8000-000000000072', '40000000-0000-4000-8000-000000000072', 'quote', 'Q-4072', 1, '2026-09-17 01:00Z', '2026-09-17 01:10Z', NULL, NULL);
 INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, occurred_at, recorded_at, event_at,
   attribution_status, attribution_confidence, candidate_job_ids)
 VALUES
  -- C: the customer's answered call on the job a week after the quote
  ('40b00000-0000-4000-8000-000000000171', '40000000-0000-4000-8000-000000000071', 'client.call_logged', 'ghl', 'call', 'inbound', 'ct40cc',
   '{"body":"Call. Provider status: completed. Duration: 333 seconds","call_status":"completed"}',
-  '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}', '2026-07-27 01:00Z', '2026-07-27 01:00Z', '2026-07-27 01:00Z', 'direct', 1, NULL),
+  '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}', '2026-09-21 01:00Z', '2026-09-21 01:00Z', '2026-09-21 01:00Z', 'direct', 1, NULL),
  -- X: their text and our reply on the job before the quote; their text after it, placed on no job
  ('40b00000-0000-4000-8000-000000000172', '40000000-0000-4000-8000-000000000072', 'client.reply', 'ghl', 'sms', 'inbound', 'ct40tt',
   '{"body":"Can you quote the back fence?"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
-  '2026-08-26 01:00Z', '2026-08-26 01:00Z', '2026-08-26 01:00Z', 'direct', 1, NULL),
+  '2026-09-16 01:00Z', '2026-09-16 01:00Z', '2026-09-16 01:00Z', 'direct', 1, NULL),
  ('40b00000-0000-4000-8000-000000000173', '40000000-0000-4000-8000-000000000072', 'client.sms_out', 'ghl', 'sms', 'outbound', 'ct40tt',
   '{"body":"Yes, the quote is on its way"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
-  '2026-08-27 00:30Z', '2026-08-27 00:30Z', '2026-08-27 00:30Z', 'direct', 1, NULL),
+  '2026-09-17 00:30Z', '2026-09-17 00:30Z', '2026-09-17 00:30Z', 'direct', 1, NULL),
  ('40b00000-0000-4000-8000-000000000174', NULL, 'client.reply', 'ghl', 'sms', 'inbound', 'ct40tt',
   '{"body":"Can the price come down a little?"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
   '2026-09-24 01:00Z', '2026-09-24 01:00Z', '2026-09-24 01:00Z', 'unplaced', NULL, ARRAY['40000000-0000-4000-8000-000000000072'::uuid]),
@@ -1847,18 +1849,18 @@ DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; r record;
 BEGIN
  SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000071'::uuid], asof) l WHERE l.rule = 'R7_quote_waiting';
  IF r.owner IS DISTINCT FROM 'unknown' OR r.shown_as IS DISTINCT FROM 'loop'
-    OR r.what IS DISTINCT FROM 'Quote Q-4071 v1 sent Mon 20 Jul 2026 (79 days), viewed; no answer recorded, but the customer was in touch since: an answered call Mon 27 Jul 2026' THEN
+    OR r.what IS DISTINCT FROM 'Quote Q-4071 v1 sent Mon 14 Sep 2026 (23 days), viewed; no answer recorded, but the customer was in touch since: an answered call Mon 21 Sep 2026' THEN
   RAISE EXCEPTION 'story safety contract: a quote the customer rang about since is not waiting on them: %', row_to_json(r);
  END IF;
  s := public.context_job_story('40000000-0000-4000-8000-000000000071', asof);
  IF s->'now'->>'whose_move' <> 'unknown' OR s->'now'->>'line' LIKE '%waiting on the customer%' OR s->'now'->>'line' LIKE '%no customer message since%'
-    OR position('Whose move is unclear, open: Quote Q-4071 v1 sent Mon 20 Jul 2026 (79 days), viewed; no answer recorded, but the customer was in touch since: '
-                || 'an answered call Mon 27 Jul 2026' IN s->'now'->>'line') = 0 THEN
+    OR position('Whose move is unclear, open: Quote Q-4071 v1 sent Mon 14 Sep 2026 (23 days), viewed; no answer recorded, but the customer was in touch since: '
+                || 'an answered call Mon 21 Sep 2026' IN s->'now'->>'line') = 0 THEN
   RAISE EXCEPTION 'story safety contract: the first line names the customer''s contact since the quote: %', s->'now';
  END IF;
  SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000072'::uuid], asof) l WHERE l.rule = 'R7_quote_waiting';
  IF r.owner IS DISTINCT FROM 'unknown'
-    OR r.what IS DISTINCT FROM 'Quote Q-4072 v1 sent Thu 27 Aug 2026 (41 days), not viewed; no answer recorded, but the customer was in touch since: '
+    OR r.what IS DISTINCT FROM 'Quote Q-4072 v1 sent Thu 17 Sep 2026 (20 days), not viewed; no answer recorded, but the customer was in touch since: '
                                || 'a text Thu 24 Sep 2026 (not placed on any job)' THEN
   RAISE EXCEPTION 'story safety contract: a text placed on no job since the quote is the customer in touch: %', row_to_json(r);
  END IF;
@@ -1936,8 +1938,9 @@ END $clientowes$;
 
 -- Fifth review fixtures: this customer's CRM texts loaded later from the CRM's cache and placed
 -- on no job (SWMS-261403, SWF-261421 and SWF-261422 class). Z: their text the CRM dates 25 Aug,
--- before the 1 Sep quote, loaded on 20 Sep after it (their last word on the job was 30 Aug, our
--- reply 31 Aug). Y: nothing on the job; their text and our reply the CRM dates 25 and 26 Aug,
+-- before the 15 Sep quote, loaded on 20 Sep after it (their last word on the job was 13 Sep, our
+-- reply 14 Sep; the quote inside the 4 weeks a lead is followed up: lead cutoff,
+-- 20261007010000). Y: nothing on the job; their text and our reply the CRM dates 25 and 26 Aug,
 -- both loaded on 20 Sep. L: texts each way the CRM dates in June, before the job's lead window
 -- (it was created 15 Sep), loaded on 20 Sep after its quote.
 INSERT INTO public.jobs (id, org_id, job_number, status, type, client_name, client_email, ghl_contact_id, xero_contact_id, pricing_json,
@@ -1950,7 +1953,7 @@ VALUES
  ('40000000-0000-4000-8000-000000000079', '00000000-0000-4000-8000-0000000000aa', 'SWF-94079', 'quoted', 'fencing', 'Lead Window Client',
   NULL, 'ct40zl', NULL, '{}', NULL, NULL, '2026-09-15 01:00Z');
 INSERT INTO public.job_documents (id, job_id, type, quote_number, version, created_at, sent_at, viewed_at, declined_at)
-VALUES ('40e00000-0000-4000-8000-000000000077', '40000000-0000-4000-8000-000000000077', 'quote', 'Q-4077', 1, '2026-09-01 01:00Z', '2026-09-01 01:10Z', NULL, NULL),
+VALUES ('40e00000-0000-4000-8000-000000000077', '40000000-0000-4000-8000-000000000077', 'quote', 'Q-4077', 1, '2026-09-15 01:00Z', '2026-09-15 01:10Z', NULL, NULL),
        ('40e00000-0000-4000-8000-000000000079', '40000000-0000-4000-8000-000000000079', 'quote', 'Q-4079', 1, '2026-09-16 01:00Z', '2026-09-16 01:10Z', NULL, NULL);
 INSERT INTO public.ghl_conversation_cache (contact_id, job_id, messages, synced_at)
 VALUES ('ct40zq', NULL, '[{"id":"m40-77","timestamp":"2026-08-25T03:00:00.000Z","direction":"inbound"}]', '2026-09-20 01:00Z'),
@@ -1965,10 +1968,10 @@ VALUES
  -- the quote, loaded on 20 Sep after it and placed on no job
  ('40b00000-0000-4000-8000-000000000180', '40000000-0000-4000-8000-000000000077', 'client.reply', 'ghl', 'sms', 'inbound', 'ct40zq',
   '{"body":"Please send the quote through"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
-  '2026-08-30 01:00Z', '2026-08-30 01:00Z', '2026-08-30 01:00Z', 'direct', 1, NULL, NULL),
+  '2026-09-13 01:00Z', '2026-09-13 01:00Z', '2026-09-13 01:00Z', 'direct', 1, NULL, NULL),
  ('40b00000-0000-4000-8000-000000000186', '40000000-0000-4000-8000-000000000077', 'client.sms_out', 'ghl', 'sms', 'outbound', 'ct40zq',
   '{"body":"It will be with you on Tuesday"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"staff"}}',
-  '2026-08-31 01:00Z', '2026-08-31 01:00Z', '2026-08-31 01:00Z', 'direct', 1, NULL, NULL),
+  '2026-09-14 01:00Z', '2026-09-14 01:00Z', '2026-09-14 01:00Z', 'direct', 1, NULL, NULL),
  ('40b00000-0000-4000-8000-000000000181', NULL, 'client.reply', 'ghl_sms_cache_backfill', 'sms', 'inbound', 'ct40zq',
   '{"body":"Is the quote coming?","ghl_message_id":"m40-77"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
   '2026-09-20 01:00Z', '2026-09-20 01:00Z', '2026-09-20 01:00Z', 'unplaced', NULL, ARRAY['40000000-0000-4000-8000-000000000077'::uuid], 'ghl:m40-77'),
@@ -1998,12 +2001,12 @@ DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; r record;
 BEGIN
  SELECT * INTO r FROM public.context_job_record_loops(ARRAY['40000000-0000-4000-8000-000000000077'::uuid], asof) l WHERE l.rule = 'R7_quote_waiting';
  IF r.owner IS DISTINCT FROM 'customer' OR r.counterparty IS DISTINCT FROM 'us'
-    OR r.what IS DISTINCT FROM 'Quote Q-4077 v1 sent Tue 1 Sep 2026 (36 days), not viewed; no answer and no customer message since' THEN
+    OR r.what IS DISTINCT FROM 'Quote Q-4077 v1 sent Tue 15 Sep 2026 (22 days), not viewed; no answer and no customer message since' THEN
   RAISE EXCEPTION 'story safety contract: a text the customer sent before the quote is never contact since it, however late it was loaded: %', row_to_json(r);
  END IF;
  s := public.context_job_story('40000000-0000-4000-8000-000000000077', asof);
  IF s->'now'->>'whose_move' IS DISTINCT FROM 'customer' OR s->'now'->>'line' LIKE '%in touch since%'
-    OR position('The customer''s move, waiting on the customer: Quote Q-4077 v1 sent Tue 1 Sep 2026 (36 days), not viewed; no answer and no customer message since'
+    OR position('The customer''s move, waiting on the customer: Quote Q-4077 v1 sent Tue 15 Sep 2026 (22 days), not viewed; no answer and no customer message since'
                 IN s->'now'->>'line') = 0 THEN
   RAISE EXCEPTION 'story safety contract: the first line never reads a text sent before the quote as contact since it: %', s->'now';
  END IF;
@@ -2445,7 +2448,11 @@ BEGIN
  IF r.shown_as IS DISTINCT FROM 'check'
     OR r.what IS DISTINCT FROM 'Quote Q-6120 v1 sent Wed 3 Jun 2026 (125 days), viewed; no answer recorded, but the customer was in touch since: '
                                || 'an email Tue 30 Jun 2026 (on job SWF-94122); job SWF-94122 for this customer at the same site address was accepted '
-                               || 'Tue 30 Jun 2026 and may replace this quote' THEN
+                               || 'Tue 30 Jun 2026 and may replace this quote'
+                               -- (lead cutoff, 20261007010000: no progress on this lead itself, and 4 weeks after the
+                               -- customer's newest message, their email on SWF-94122 on 30 Jun, it is no longer
+                               -- followed up, said last)
+                               || '. Lead not followed up since Tue 28 Jul 2026: 4 weeks after the last quote or message with no progress' THEN
   RAISE EXCEPTION 'story safety contract: a quote the customer''s later accepted job at the address may replace is a check: %', row_to_json(r);
  END IF;
  s := public.context_job_story('40000000-0000-4000-8000-000000000120', asof);
@@ -3341,8 +3348,15 @@ ROLLBACK;
 -- 8. Re-applying the migration changes nothing (its guard accepts its own bodies). (Sixth
 -- review) It keeps the CRM time of every message a cache row holds when it runs: a message
 -- written to the cache with the triggers off is kept by the apply, and its time stays after
--- the cache row is gone.
+-- the cache row is gone. When the lead cutoff (20261007010000) has replaced three of these
+-- bodies since, it is rolled back first inside this transaction, so the re-apply starts from
+-- this migration's own bodies.
+SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
 BEGIN;
+\if :lead_cutoff_live
+\ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
+\endif
 CREATE TEMP TABLE story_safety_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_job_record_legacy_mail', 'context_job_record_messages',
