@@ -78,6 +78,14 @@
 -- call's voicemail transcript never answers it; the line's contact facts read the customer's rows
 -- on a bucket job, on their other jobs and by address with no CRM contact; a newer off-job message
 -- is named after "wrote last"; a reading with an item hidden is no all-clear.
+-- Ninth review, regression fixes (each fails on the bddb8494 bodies unless marked a promise kept): on
+-- builder work the job's contact is the insured's only when the make-safe details name the builder and
+-- none of the job's contact details (CRM contact, client phone, client email) sits on another client's
+-- job (meta contact_shared); a contact shared across clients (three builder jobs for three clients
+-- sharing one CRM contact, its call placed on one of them; two jobs sharing one phone) is the job
+-- contact on every line and in who, never "the insured", and its newer message holds the builder's
+-- move; with no builder named, or the meta silent, the line never says "the insured" either; a contact
+-- on the same household's other job at the same street stays the insured's (a promise kept).
 -- Every fixture row is synthetic and rolled back; user triggers are off for it.
 
 -- 0. Shape and access.
@@ -533,17 +541,22 @@ DECLARE s jsonb; asof constant timestamptz := '2026-10-07 02:00Z';
  vm constant jsonb := '{"last_customer_message":{"at":"2026-09-25T10:28:47Z","channel":"call","direction":"inbound","table":"business_events","id":"e11","placed_on":"this_job","event_type":"call.transcript_completed"},
    "last_to_customer":{"at":"2026-09-25T09:41:40Z","channel":"call","direction":"outbound","table":"business_events","id":"e12","placed_on":"this_job"}}';
  read9 constant jsonb := '{"status":"live","generation":{"id":"g1","status":"live","evidence_until":"2026-10-05T00:00:00Z"},"items":[],"transitions":[],"unread_rows":0,"unread_ids":[],"read_ids":["e9"]}';
+ -- (ninth review) the contact is the insured's: the make-safe details name the builder, and the
+ -- job's contact details sit on no other client's job
+ msf constant jsonb := '{"builder":"Builder Co"}';
+ own constant jsonb := '{"contact_shared":{"shared":false,"by":[],"other_jobs":0}}';
 BEGIN
  -- 1 (money): make-safe, the builder's invoice due 16 Oct, the insured's text off the job after it was raised
- s := public.context_job_story_assemble(ms, jsonb_build_object('loops', jsonb_build_array(m1b)), NULL,
-        '{"unplaced":{"count":1,"newest_customer_at":"2026-10-02T05:00:00Z"}}', asof, NULL);
+ s := public.context_job_story_assemble(ms, jsonb_build_object('loops', jsonb_build_array(m1b), 'facts', msf), NULL,
+        own || '{"unplaced":{"count":1,"newest_customer_at":"2026-10-02T05:00:00Z"}}', asof, NULL);
  IF s->'now'->>'whose_move' IS DISTINCT FROM 'customer'
     OR position('The customer''s move, the customer owes: INV-1642 $2,145.00 owing from Builder Co (the builder), due Fri 16 Oct 2026' IN s->'now'->>'line') = 0
     OR s->'now'->>'line' ~* 'newest message' THEN
   RAISE EXCEPTION 'story safety contract: the insured''s message off the job never makes the builder''s payment unclear: %', s->'now';
  END IF;
  -- ... and with nothing open on builder work the contact facts name it as the insured's
- s := public.context_job_story_assemble(ms, '{}'::jsonb, NULL, '{"unplaced":{"count":1,"newest_customer_at":"2026-10-02T05:00:00Z"}}', asof, NULL);
+ s := public.context_job_story_assemble(ms, jsonb_build_object('facts', msf), NULL,
+        own || '{"unplaced":{"count":1,"newest_customer_at":"2026-10-02T05:00:00Z"}}', asof, NULL);
  IF s->'now'->>'whose_move' IS DISTINCT FROM 'unknown'
     OR position('the insured''s newest message Fri 2 Oct (not placed on any job), no reply from us on record' IN s->'now'->>'line') = 0
     OR s->'now'->>'line' LIKE '%newest customer message%' THEN
@@ -583,7 +596,7 @@ BEGIN
  END IF;
  -- (a promise kept) builder work: the insured's text on the job never makes the builder's payment unclear
  s := public.context_job_story_assemble(ms, jsonb_build_object('contact', texted || '{"last_customer_message":{"at":"2026-10-03T01:00:00Z","channel":"sms","direction":"inbound","table":"business_events","id":"e9","placed_on":"this_job"}}'::jsonb,
-        'loops', jsonb_build_array(m1b)), NULL, NULL, asof, NULL);
+        'loops', jsonb_build_array(m1b), 'facts', msf), NULL, own, asof, NULL);
  IF s->'now'->>'whose_move' IS DISTINCT FROM 'customer' THEN
   RAISE EXCEPTION 'story safety contract: the insured''s message on the job never makes the builder''s payment unclear: %', s->'now';
  END IF;
@@ -655,8 +668,109 @@ BEGIN
  END IF;
 END $eighthpure$;
 
+-- Ninth review, regression fixes (pure assembler; each fails on the bddb8494 bodies unless marked a
+-- promise kept). On builder work the job's contact is the insured's only when the make-safe details
+-- name the builder and the meta says none of the job's contact details sits on another client's job
+-- (contact_shared). A contact shared across clients is a builder's or an agent's (SWR-261488,
+-- SWMS-261065 and SWMS-261163: one builder-side contact on three clients' jobs): the line calls its
+-- messages the job contact's, never the insured's, and its newer message may be the builder's own
+-- word on what the builder owes, so it holds the move as the customer's does; who never gives the
+-- insured that contact, and not_known says why. With no builder named (a repair job quoted to its
+-- client: SWF-261111) or the meta silent, the line never says "the insured" either.
+DO $ninthpure$
+DECLARE s jsonb; asof constant timestamptz := '2026-10-07 02:00Z';
+ ms constant jsonb := '{"id":"x","status":"processing","type":"makesafe","created_at":"2026-09-20T00:00:00Z"}';
+ rep constant jsonb := '{"id":"x","status":"schedule_install","type":"repair","created_at":"2026-08-26T00:00:00Z"}';
+ msf constant jsonb := '{"builder":"Builder Co"}';
+ shared constant jsonb := '{"contact_shared":{"shared":true,"by":["contact","phone"],"other_jobs":2}}';
+ own constant jsonb := '{"contact_shared":{"shared":false,"by":[],"other_jobs":0}}';
+ off constant jsonb := '{"unplaced":{"count":1,"newest_customer_at":"2026-10-02T05:00:00Z"}}';
+ m1b constant jsonb := jsonb_build_object('rule', 'M1_money_due', 'loop_key', 'M1_money_due:i1', 'shown_as', 'loop', 'owner', 'customer', 'counterparty', 'us',
+   'what', 'INV-1642 $2,145.00 owing from Builder Co (the builder), due Fri 16 Oct 2026', 'opened_at', '2026-10-01T16:00:00Z', 'due_date', '2026-10-16',
+   'amount', 2145, 'about_key', 'invoice:inv-1642', 'source_table', 'xero_invoices', 'source_id', 'i1');
+ -- the contact's text on the job after the builder's invoice, our reply before it
+ texted constant jsonb := '{"last_customer_message":{"at":"2026-10-03T01:00:00Z","channel":"sms","direction":"inbound","table":"business_events","id":"e9","placed_on":"this_job","event_type":"client.reply"},
+   "last_to_customer":{"at":"2026-10-01T03:00:00Z","channel":"sms","direction":"outbound","table":"business_events","id":"e10","placed_on":"this_job"}}';
+ r5 constant jsonb := jsonb_build_object('rule', 'R5_customer_wrote_last', 'loop_key', 'R5_customer_wrote_last:e1', 'shown_as', 'candidate', 'owner', 'us',
+   'counterparty', 'customer', 'what', 'Customer texted Wed 16 Sep 09:00 and nothing went to the customer since: "Any news on the roof?"',
+   'opened_at', '2026-09-16T01:00:00Z', 'about_key', 'contact:customer-reply', 'source_table', 'business_events', 'source_id', 'e1');
+BEGIN
+ -- the shared contact's text off the job after the builder's invoice: whose move is unclear, and it
+ -- is the job contact's message
+ s := public.context_job_story_assemble(ms, jsonb_build_object('loops', jsonb_build_array(m1b), 'facts', msf), NULL, shared || off, asof, NULL);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'unknown'
+    OR position('Whose move is unclear, the customer owes: INV-1642 $2,145.00 owing from Builder Co (the builder), due Fri 16 Oct 2026' IN s->'now'->>'line') = 0
+    OR position('The job contact''s newest message, Fri 2 Oct (not placed on any job), is off the job and not yet checked by the reader' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' ~* 'insured' THEN
+  RAISE EXCEPTION 'story safety contract: a contact shared across clients holds the builder''s move and is never the insured: %', s->'now';
+ END IF;
+ -- ... with nothing open, the contact facts name it the job contact's
+ s := public.context_job_story_assemble(ms, jsonb_build_object('facts', msf), NULL, shared || off, asof, NULL);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'unknown'
+    OR position('the job contact''s newest message Fri 2 Oct (not placed on any job), no reply from us on record' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' ~* 'insured' THEN
+  RAISE EXCEPTION 'story safety contract: a shared contact''s message is the job contact''s, never the insured''s: %', s->'now';
+ END IF;
+ -- ... its unread text on the job after the builder's invoice: whose move is unclear
+ s := public.context_job_story_assemble(ms, jsonb_build_object('contact', texted, 'loops', jsonb_build_array(m1b), 'facts', msf), NULL, shared, asof, NULL);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'unknown'
+    OR position('The job contact''s newest message, Sat 3 Oct (a text), is not yet checked by the reader; our last reply Thu 1 Oct' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' ~* 'insured' THEN
+  RAISE EXCEPTION 'story safety contract: a shared contact''s unread text on the job holds the builder''s move: %', s->'now';
+ END IF;
+ -- ... it wrote last: never "the insured wrote last"
+ s := public.context_job_story_assemble(ms, jsonb_build_object('loops', jsonb_build_array(r5), 'facts', msf,
+        'contact', '{"last_customer_message":{"at":"2026-09-16T01:00:00Z","channel":"sms","direction":"inbound","table":"business_events","id":"e1","placed_on":"this_job"}}'::jsonb),
+        NULL, shared, asof, NULL);
+ IF position('The job contact wrote last on Wed 16 Sep; not yet checked by the reader: "Any news on the roof?"' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' ~* 'insured' THEN
+  RAISE EXCEPTION 'story safety contract: a shared contact that wrote last is the job contact, never the insured: %', s->'now';
+ END IF;
+ -- ... who never gives the insured the shared contact, and not_known says why
+ s := public.context_job_story_assemble(ms || '{"client_name":"Home Owner","ghl_contact_id":"ct-shared"}'::jsonb, jsonb_build_object('facts', msf), NULL, shared, asof, NULL);
+ IF (SELECT w->'contact_ref' FROM jsonb_array_elements(s->'who') w WHERE w->>'name' = 'Home Owner' AND w->>'role' = 'insured') IS DISTINCT FROM 'null'::jsonb
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+                   WHERE k->>'what' = 'This job''s CRM contact and client phone are also on 2 jobs of other clients, so the messages the story names are not taken to be the '
+                                      || 'insured''s: the first line calls them the job contact''s.') THEN
+  RAISE EXCEPTION 'story safety contract: who never gives the insured a contact shared across clients, and not_known says so: % / %', s->'who', s->'not_known';
+ END IF;
+ s := public.context_job_story_assemble(ms, jsonb_build_object('facts', msf), NULL,
+        '{"contact_shared":{"shared":true,"by":["contact","email","phone"],"other_jobs":3}}', asof, NULL);
+ IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+                WHERE k->>'what' = 'This job''s CRM contact, client email and client phone are also on 3 jobs of other clients, so the messages the story names are not '
+                                   || 'taken to be the insured''s: the first line calls them the job contact''s.') THEN
+  RAISE EXCEPTION 'story safety contract: not_known names each contact detail on another client''s job: %', s->'not_known';
+ END IF;
+ -- no builder named (a repair job quoted to its client), or the meta silent: never the insured
+ s := public.context_job_story_assemble(rep, '{}'::jsonb, NULL, own || off, asof, NULL);
+ IF position('the job contact''s newest message Fri 2 Oct (not placed on any job)' IN s->'now'->>'line') = 0 OR s->'now'->>'line' ~* 'insured' THEN
+  RAISE EXCEPTION 'story safety contract: with no builder named the contact is never the insured: %', s->'now';
+ END IF;
+ s := public.context_job_story_assemble(ms, jsonb_build_object('facts', msf), NULL, off, asof, NULL);
+ IF position('the job contact''s newest message Fri 2 Oct (not placed on any job)' IN s->'now'->>'line') = 0 OR s->'now'->>'line' ~* 'insured' THEN
+  RAISE EXCEPTION 'story safety contract: with the meta silent on the contact it is never the insured: %', s->'now';
+ END IF;
+ -- (promises kept) the builder named and the contact the client's alone: the insured's, the builder's
+ -- move stands over their message off the job, and who gives them their contact
+ s := public.context_job_story_assemble(ms || '{"client_name":"Home Owner","ghl_contact_id":"ct-own"}'::jsonb,
+        jsonb_build_object('loops', jsonb_build_array(m1b), 'facts', msf), NULL, own || off, asof, NULL);
+ IF s->'now'->>'whose_move' IS DISTINCT FROM 'customer' OR s->'now'->>'line' ~* 'newest message'
+    OR NOT s->'who' @> '[{"name":"Home Owner","role":"insured","contact_ref":"ct-own"}]'::jsonb
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE '%another client''s job%' OR k->>'what' LIKE '%jobs of other clients%') THEN
+  RAISE EXCEPTION 'story safety contract: the client''s own contact is the insured''s and the builder''s move stands: % / %', s->'now', s->'who';
+ END IF;
+ s := public.context_job_story_assemble(ms, jsonb_build_object('facts', msf), NULL, own || off, asof, NULL);
+ IF position('the insured''s newest message Fri 2 Oct (not placed on any job)' IN s->'now'->>'line') = 0 THEN
+  RAISE EXCEPTION 'story safety contract: the client''s own contact''s message is the insured''s: %', s->'now';
+ END IF;
+END $ninthpure$;
+
 BEGIN;
 SET LOCAL session_replication_role = replica;
+-- The fixtures are read as of Wed 7 Oct 2026 10:00 Perth: a fixture row that names no capture
+-- time was captured the day they were written (6 Oct), never the day the suite runs, or every
+-- run after that instant would see those rows land after the instant measured (rolled back).
+ALTER TABLE public.business_events ALTER COLUMN context_captured_at SET DEFAULT '2026-10-06 12:00Z';
 
 -- Jobs. Org and dates fixed; the replay instant is Wed 7 Oct 2026 10:00 Perth.
 INSERT INTO public.jobs (id, org_id, job_number, status, type, client_name, client_email, ghl_contact_id, xero_contact_id, pricing_json,
@@ -3129,6 +3243,99 @@ BEGIN
   RAISE EXCEPTION 'story safety contract: a missed call''s voicemail transcript never answers it: %', s->'now';
  END IF;
 END $eighth$;
+
+-- Ninth review fixtures, regression fixes (each fails on the bddb8494 bodies unless said to be a
+-- promise kept). R1 to R3 (SWR-261488, SWMS-261065, SWMS-261163 class): three builder jobs for three
+-- clients at three sites, one CRM contact and one client phone (a builder's, linked by phone), the
+-- contact's answered call placed on R3. H1, H2 (SWMS-26547 class, a promise kept): one household's
+-- make-safe and fencing jobs at one street, the address written with and without its suburb, under
+-- two names. Q1, Q2: two contactless builder jobs for two clients with one client phone, the phone
+-- owner's text placed on neither (both are its candidates).
+INSERT INTO public.jobs (id, org_id, job_number, status, type, client_name, client_email, client_phone, ghl_contact_id, xero_contact_id, pricing_json,
+  accepted_at, completed_at, created_at, site_address, metadata, updated_at)
+VALUES
+ ('40000000-0000-4000-8000-000000000401', '00000000-0000-4000-8000-0000000000aa', 'SWR-94401', 'accepted', 'repair', 'Client Alpha One',
+  NULL, '0400 111 222', 'ct40rf', NULL, '{}', NULL, NULL, '2026-09-30 01:00Z', '1 Alpha Street, Perth WA 6000', '{}', '2026-09-30 01:00Z'),
+ ('40000000-0000-4000-8000-000000000402', '00000000-0000-4000-8000-0000000000aa', 'SWMS-94402', 'accepted', 'makesafe', 'Client Beta Two',
+  NULL, '0400111222', 'ct40rf', NULL, '{}', NULL, NULL, '2026-09-20 01:00Z', '2 Beta Road, Perth WA 6000', '{}', '2026-09-20 01:00Z'),
+ ('40000000-0000-4000-8000-000000000403', '00000000-0000-4000-8000-0000000000aa', 'SWMS-94403', 'processing', 'makesafe', 'Client Gamma Three',
+  NULL, '+61 400 111 222', 'ct40rf', NULL, '{}', NULL, NULL, '2026-09-25 01:00Z', '3 Gamma Avenue, Perth WA 6000', '{}', '2026-09-25 01:00Z'),
+ ('40000000-0000-4000-8000-000000000404', '00000000-0000-4000-8000-0000000000aa', 'SWMS-94404', 'processing', 'makesafe', 'Tony Sample',
+  NULL, '0400 333 444', 'ct40hh', NULL, '{}', NULL, NULL, '2026-09-25 01:00Z', '8 Sample Pass', '{}', '2026-09-25 01:00Z'),
+ ('40000000-0000-4000-8000-000000000405', '00000000-0000-4000-8000-0000000000aa', 'SWF-94405', 'quoted', 'fencing', 'Sarah Sample',
+  NULL, '0400 333 444', 'ct40hh', NULL, '{}', NULL, NULL, '2026-06-25 01:00Z', '8 Sample Pass, Kinross WA 6028, Australia', '{}', '2026-06-25 01:00Z'),
+ ('40000000-0000-4000-8000-000000000406', '00000000-0000-4000-8000-0000000000aa', 'SWMS-94406', 'processing', 'makesafe', 'Client Delta Four',
+  NULL, '0400 555 666', NULL, NULL, '{}', NULL, NULL, '2026-09-25 01:00Z', '4 Delta Lane, Perth WA 6000', '{}', '2026-09-25 01:00Z'),
+ ('40000000-0000-4000-8000-000000000407', '00000000-0000-4000-8000-0000000000aa', 'SWMS-94407', 'processing', 'makesafe', 'Client Echo Five',
+  NULL, '0400555666', NULL, NULL, '{}', NULL, NULL, '2026-09-26 01:00Z', '5 Echo Court, Perth WA 6000', '{}', '2026-09-26 01:00Z');
+INSERT INTO public.makesafe_job_details (job_id, requesting_company_name, created_at)
+VALUES ('40000000-0000-4000-8000-000000000401', 'Builder Four Zero', '2026-09-30 01:00Z'),
+       ('40000000-0000-4000-8000-000000000402', 'Builder Four Zero', '2026-09-20 01:00Z'),
+       ('40000000-0000-4000-8000-000000000403', 'Builder Four Zero', '2026-09-25 01:00Z'),
+       ('40000000-0000-4000-8000-000000000404', 'Builder Four Zero', '2026-09-25 01:00Z'),
+       ('40000000-0000-4000-8000-000000000406', 'Builder Four Zero', '2026-09-25 01:00Z'),
+       ('40000000-0000-4000-8000-000000000407', 'Builder Four Zero', '2026-09-26 01:00Z');
+INSERT INTO public.business_events (id, job_id, event_type, source, channel, direction, contact_id, payload, metadata, occurred_at, recorded_at, event_at,
+  context_captured_at, attribution_status, attribution_confidence, candidate_job_ids, provider_message_id)
+VALUES
+ -- R3: the shared contact's answered call, placed on R3
+ ('40b00000-0000-4000-8000-000000000901', '40000000-0000-4000-8000-000000000403', 'client.call_logged', 'ghl', 'call', 'inbound', 'ct40rf',
+  '{"body":"Call. Provider status: completed. Duration: 95 seconds","call_status":"completed"}',
+  '{"party_roles":{"counterpart_role":"customer","sender_role":"customer","basis":"job_customer"}}',
+  '2026-09-30 02:00Z', '2026-09-30 02:00Z', '2026-09-30 02:00Z', '2026-09-30 02:00Z', 'direct', 1, NULL, 'ghl:c40-901'),
+ -- H1: the household's text on the make-safe
+ ('40b00000-0000-4000-8000-000000000902', '40000000-0000-4000-8000-000000000404', 'client.reply', 'ghl', 'sms', 'inbound', 'ct40hh',
+  '{"body":"Is the tarp still holding?"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer","basis":"job_customer"}}',
+  '2026-10-01 01:00Z', '2026-10-01 01:00Z', '2026-10-01 01:00Z', '2026-10-01 01:00Z', 'direct', 1, NULL, NULL),
+ -- Q1, Q2: the phone owner's text, placed on neither
+ ('40b00000-0000-4000-8000-000000000903', NULL, 'client.reply', 'ghl', 'sms', 'inbound', 'ct40qq',
+  '{"body":"Can the crew start early tomorrow?"}', '{"party_roles":{"counterpart_role":"customer","sender_role":"customer"}}',
+  '2026-10-01 02:00Z', '2026-10-01 02:00Z', '2026-10-01 02:00Z', '2026-10-01 02:00Z', 'unplaced', NULL,
+  ARRAY['40000000-0000-4000-8000-000000000406', '40000000-0000-4000-8000-000000000407']::uuid[], NULL);
+
+-- A contact shared across clients is the job contact on every line and in who, never the insured, and
+-- not_known says why; the household's contact at one street stays the insured's (a promise kept).
+DO $ninth$
+DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; s jsonb; m jsonb; j uuid;
+BEGIN
+ FOREACH j IN ARRAY ARRAY['40000000-0000-4000-8000-000000000401', '40000000-0000-4000-8000-000000000402', '40000000-0000-4000-8000-000000000403']::uuid[] LOOP
+  m := public.context_job_story_meta(j, asof);
+  s := public.context_job_story(j, asof);
+  IF m->'contact_shared' IS DISTINCT FROM '{"shared": true, "by": ["contact", "phone"], "other_jobs": 2}'::jsonb
+     OR s->'now'->>'line' ~* 'insured'
+     OR position(CASE WHEN j = '40000000-0000-4000-8000-000000000403' THEN 'the job contact''s newest message Wed 30 Sep, no reply from us on record'
+                      ELSE 'the job contact''s newest message Wed 30 Sep (on job SWMS-94403), no reply from us on record' END IN s->'now'->>'line') = 0
+     OR (SELECT w->'contact_ref' FROM jsonb_array_elements(s->'who') w WHERE w->>'role' = 'insured') IS DISTINCT FROM 'null'::jsonb
+     OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+                    WHERE k->>'what' = 'This job''s CRM contact and client phone are also on 2 jobs of other clients, so the messages the story names are not taken to be the '
+                                       || 'insured''s: the first line calls them the job contact''s.') THEN
+   RAISE EXCEPTION 'story safety contract: a contact shared across three clients'' builder jobs is never the insured: % / % / % / %',
+    m->'contact_shared', s->'now'->>'line', s->'who', s->'not_known';
+  END IF;
+ END LOOP;
+ -- Q1: the shared phone's owner's text placed on no job is the job contact's
+ m := public.context_job_story_meta('40000000-0000-4000-8000-000000000406', asof);
+ s := public.context_job_story('40000000-0000-4000-8000-000000000406', asof);
+ IF m->'contact_shared' IS DISTINCT FROM '{"shared": true, "by": ["phone"], "other_jobs": 1}'::jsonb OR s->'now'->>'line' ~* 'insured'
+    OR position('the job contact''s newest message Thu 1 Oct (not placed on any job)' IN s->'now'->>'line') = 0
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k
+                   WHERE k->>'what' = 'This job''s client phone is also on another client''s job, so the messages the story names are not taken to be the insured''s: '
+                                      || 'the first line calls them the job contact''s.') THEN
+  RAISE EXCEPTION 'story safety contract: a client phone shared across clients'' builder jobs is never the insured''s: % / % / %', m->'contact_shared', s->'now'->>'line', s->'not_known';
+ END IF;
+ -- H1: the household's contact, also on its fencing job at the same street under another name, sits
+ -- on no other client's job ...
+ m := public.context_job_story_meta('40000000-0000-4000-8000-000000000404', asof);
+ s := public.context_job_story('40000000-0000-4000-8000-000000000404', asof);
+ IF m->'contact_shared' IS DISTINCT FROM '{"shared": false, "by": [], "other_jobs": 0}'::jsonb THEN
+  RAISE EXCEPTION 'story safety contract: one household''s contact at one street is on no other client''s job: %', m->'contact_shared';
+ END IF;
+ -- ... and stays the insured's (a promise kept)
+ IF position('The insured wrote last on Thu 1 Oct' IN s->'now'->>'line') = 0
+    OR NOT s->'who' @> '[{"name":"Tony Sample","role":"insured","contact_ref":"ct40hh"}]'::jsonb THEN
+  RAISE EXCEPTION 'story safety contract: one household''s contact at one street is the insured''s: % / %', s->'now'->>'line', s->'who';
+ END IF;
+END $ninth$;
 ROLLBACK;
 
 -- 8. Re-applying the migration changes nothing (its guard accepts its own bodies). (Sixth

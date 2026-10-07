@@ -24,7 +24,12 @@
 --     message is newer than the item: whose move is unclear and the line names both.
 --     (Eighth review) An off-job message changes the move only of what its sender owes: the
 --     customer's own items on private work, never a neighbour's, and never the builder's on
---     builder work, where the CRM contact is the insured (named "the insured" in the line).
+--     builder work while the CRM contact is the insured (named "the insured" in the line).
+--     (Ninth review) It is the insured's only when the make-safe details name the builder and
+--     none of the job's contact details (CRM contact, client phone, client email) sits on another
+--     client's job (meta contact_shared): a contact shared across clients is a builder's or an
+--     agent's (SWR-261488, SWMS-261065 and SWMS-261163 share one), so the line calls its
+--     messages the job contact's, and they hold the builder's move as the customer's do.
 --     On the job, the customer's newest message (a text, an email, an answered call or a
 --     call recording, a voicemail among them) that no finished reading has read makes whose
 --     move unclear over what they or another party owe from before it, named so. A reading
@@ -186,7 +191,9 @@
 -- the CRM contact index, and their emails with no CRM contact by the inbound mail sender index; the
 -- job value and the meta read the job's primary party (job_contacts by job); the copy read reads a
 -- copy's job (status, do not schedule, updated_at) by its key; the ledger read and the judge
--- re-check a stored citation's row by its key (inbox_events and its copies by index too).
+-- re-check a stored citation's row by its key (inbox_events and its copies by index too). Ninth
+-- review: the story meta reads the jobs that share this job's CRM contact, client phone or client
+-- email, by the jobs index on each (the phone's right 9 digits, the lowered email).
 -- Rollback: supabase/rollbacks/20261006040000_context_story_safety_down.sql (the
 -- earlier bodies word for word; the helpers and the trigger dropped; the table of kept CRM
 -- times kept, rows and all, since nothing else holds them once the cache is written over).
@@ -211,8 +218,8 @@ BEGIN
   ('public.context_job_record_money(uuid[],timestamptz)', ARRAY['33c032c9f111f74fbd7ad0e267bed33e', '152c423ec224be8d3ac48790b7d14cd6']),
   ('public.context_job_record_contact(uuid[],timestamptz)', ARRAY['698b3753ab5e1ffa6441a7ef6cbb13e5', '4b8d2c65d3ce03d71f2d0e24f4401471']),
   ('public.context_job_story_facts(uuid,timestamptz)', ARRAY['98cc171009db7051a681ae3a28785518', 'd0f9e33ac9a8cb3f91f2ea11ce907c46']),
-  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', 'f828e6012461412c4389c4044b76dee0']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', '8a4f210e03986dbb60c6f68892ce1ef9']),
+  ('public.context_job_story_meta(uuid,timestamptz)', ARRAY['e7bdb045dc47859e1c03096724737c0d', '184af6a89d7bc188878c545400f64e68']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['aab2d2eb593890b297f6d13a486f6aa0', '7b65d10aac4a4f898c71861707346690']),
   ('public.context_client_story(uuid,timestamptz)', ARRAY['cc4a2ce461deeb17653cd94b714bbf78', 'a362a79d0ce92295f509f6e1b0f0ba66']),
   ('public.context_ledger_evidence_rows(uuid[],timestamptz)', ARRAY['617cc62989572be3e0537e65bf21284c', '2c3dbfef58572e08a630444692d61242']),
   ('public.context_ledger_cite(uuid,jsonb)', ARRAY['25a55a28508d0b1df609e6fe4fb00661', 'c126255e2f405fa17341545146723fe0']),
@@ -243,7 +250,8 @@ BEGIN
  FOREACH f IN ARRAY ARRAY['public.job_quote_values(uuid)', 'public.context_job_record_date(text)', 'public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)',
    'public.context_job_story_ledger(uuid,uuid,timestamptz)', 'public.context_ledger_row_admissible(public.business_events)',
    'public.context_linked_status(text)', 'public.context_unplaced_for_job(uuid)', 'public.context_address_key(text)',
-   'public.context_event_text(public.business_events)', 'public.context_internal_text_role(public.business_events)'] LOOP
+   'public.context_event_text(public.business_events)', 'public.context_internal_text_role(public.business_events)',
+   'public.context_phone_key(text)', 'public.context_email_key(text)'] LOOP
   IF to_regprocedure(f) IS NULL THEN problems := problems || format('%s missing', f); END IF;
  END LOOP;
  FOREACH t IN ARRAY ARRAY['ghl_conversation_cache.contact_id', 'ghl_conversation_cache.messages', 'ghl_conversation_cache.synced_at',
@@ -254,7 +262,7 @@ BEGIN
    'job_assignments.role', 'inbox_events.graph_message_id', 'inbox_events.processed_at', 'business_events.attributed_at',
    'business_events.context_captured_at', 'business_events.source_table', 'business_events.source_id',
    'business_events.attribution_status', 'ghl_conversation_cache.id', 'jobs.site_address', 'jobs.metadata', 'jobs.pricing_json',
-   'xero_invoices.amount_due', 'xero_invoices.synced_at', 'users.email', 'jobs.updated_at'] LOOP
+   'xero_invoices.amount_due', 'xero_invoices.synced_at', 'users.email', 'jobs.updated_at', 'jobs.client_phone', 'jobs.client_name'] LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || split_part(t, '.', 1))
                  AND a.attname = split_part(t, '.', 2) AND NOT a.attisdropped) THEN
    problems := problems || format('public.%s missing', t);
@@ -2589,8 +2597,45 @@ AS $fn$
                      lower(nullif(btrim(j.client_email), '')) AS cmail,
                      (EXISTS (SELECT 1 FROM public.jobs o WHERE o.ghl_contact_id = nullif(btrim(j.ghl_contact_id), '') AND o.id <> j.id)
                       OR EXISTS (SELECT 1 FROM public.jobs o WHERE o.client_email IS NOT NULL
-                                 AND lower(btrim(o.client_email)) = lower(nullif(btrim(j.client_email), '')) AND o.id <> j.id)) AS repeat_client
+                                 AND lower(btrim(o.client_email)) = lower(nullif(btrim(j.client_email), '')) AND o.id <> j.id)) AS repeat_client,
+                     -- (ninth review) the client phone and email as placement keys, and who and where the
+                     -- client is (their name's words in C order, the site address's key, its letters and
+                     -- digits, and its street part before the first comma), for contact_shared below
+                     public.context_phone_key(j.client_phone) AS phone, public.context_email_key(j.client_email) AS email,
+                     (SELECT string_agg(w, ' ' ORDER BY w COLLATE "C") FROM regexp_split_to_table(lower(coalesce(j.client_name, '')), '[^a-z]+') w
+                      WHERE w <> '') AS nkey,
+                     public.context_address_key(j.site_address) AS akey,
+                     nullif(lower(regexp_replace(coalesce(j.site_address, ''), '[^a-zA-Z0-9]+', '', 'g')), '') AS atext,
+                     nullif(lower(regexp_replace(split_part(coalesce(j.site_address, ''), ',', 1), '[^a-zA-Z0-9]+', '', 'g')), '') AS astreet
               FROM public.jobs j WHERE j.id = p_job_id),
+ -- (ninth review) the jobs that share this job's contact details: its CRM contact, its client
+ -- phone or its client email (both by their placement keys), read by the jobs index on each and
+ -- confirmed by the key; and those of them that are another client's: no client name of the same
+ -- words, at no site address the same (by its key, its letters and digits, or its street part).
+ -- A contact on another client's job is shared across clients (a builder's or an agent's:
+ -- SWR-261488, SWMS-261065 and SWMS-261163 have three clients at three sites and one CRM contact,
+ -- linked by a builder-side phone), so it is never taken to be this job's insured's
+ -- (contact_shared; the assembler names its messages the job contact's)
+ cso AS (
+  SELECT 'contact'::text AS by_, o.id, o.client_name, o.site_address FROM public.jobs o, jb0
+  WHERE jb0.contact IS NOT NULL AND o.ghl_contact_id = jb0.contact AND o.id <> p_job_id
+  UNION ALL
+  SELECT 'phone', o.id, o.client_name, o.site_address FROM public.jobs o, jb0
+  WHERE jb0.phone IS NOT NULL AND o.client_phone IS NOT NULL AND right(regexp_replace(o.client_phone, '[^0-9]', '', 'g'), 9) = jb0.phone
+    AND public.context_phone_key(o.client_phone) = jb0.phone AND o.id <> p_job_id
+  UNION ALL
+  SELECT 'email', o.id, o.client_name, o.site_address FROM public.jobs o, jb0
+  WHERE jb0.email IS NOT NULL AND o.client_email IS NOT NULL AND lower(btrim(o.client_email)) = jb0.email
+    AND public.context_email_key(o.client_email) = jb0.email AND o.id <> p_job_id
+ ),
+ cs AS (
+  SELECT x.by_, x.id FROM cso x, jb0
+  WHERE NOT coalesce((SELECT string_agg(w, ' ' ORDER BY w COLLATE "C") FROM regexp_split_to_table(lower(coalesce(x.client_name, '')), '[^a-z]+') w
+                      WHERE w <> '') = jb0.nkey, false)
+    AND NOT coalesce(public.context_address_key(x.site_address) = jb0.akey, false)
+    AND NOT coalesce(nullif(lower(regexp_replace(coalesce(x.site_address, ''), '[^a-zA-Z0-9]+', '', 'g')), '') = jb0.atext, false)
+    AND NOT coalesce(nullif(lower(regexp_replace(split_part(coalesce(x.site_address, ''), ',', 1), '[^a-zA-Z0-9]+', '', 'g')), '') = jb0.astreet, false)
+ ),
  e AS (
   SELECT CASE WHEN x.event_type = 'call.transcript_completed' THEN 'transcripts'
               WHEN x.channel = 'sms' OR x.event_type IN ('client.reply', 'client.sms_in', 'client.sms_out') THEN 'texts'
@@ -2841,11 +2886,16 @@ AS $fn$
                                                    'owing', ui.amount_due, 'due_date', ui.due_date, 'days_overdue', ui.days_overdue)
                                                    ORDER BY ui.due_date NULLS LAST, ui.invoice_number COLLATE "C", ui.id), '[]'::jsonb))
                         FROM ui),
-  'contact_missing', coalesce((SELECT jb.contact_missing FROM jb), false)
+  'contact_missing', coalesce((SELECT jb.contact_missing FROM jb), false),
+  -- (ninth review) whether this job's contact details sit on another client's job: shared, by
+  -- which ('contact', 'email', 'phone', in C order) and on how many such jobs
+  'contact_shared', jsonb_build_object('shared', EXISTS (SELECT 1 FROM cs),
+                      'by', (SELECT coalesce(jsonb_agg(b.by_ ORDER BY b.by_ COLLATE "C"), '[]'::jsonb) FROM (SELECT DISTINCT cs.by_ FROM cs) b),
+                      'other_jobs', (SELECT count(DISTINCT cs.id) FROM cs))
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_meta(uuid, timestamptz) IS
- 'Job story (20261006014000), story safety (20261006040000): (eighth review) off_job {newest_customer_at, newest_customer_where, unchecked_customer_at, unchecked_customer_where, newest_reply_at, newest_reply_where}: this customer''s messages off this job outside the placement queue, from 30 days before the job was created: their CRM contact''s rows on another job (their other job, "on job X", or one no reader reads, a bucket: archived, complete, completed, cancelled, lost, a draft or holding, "on archived job X") and their email by the client''s address with no CRM contact placed on no job or on a bucket job (read as the old inbox''s mail is: from 30 days before the job, or whenever while the client has another job, then said to be maybe about another of their jobs), each timed as the job''s own rows are (a CRM text at its CRM time, never one whose time is unknown or before the lead window); unchecked_customer is the newest one not on a live job (no reader reads it); unplaced_invoices and its own contacts are the customer''s only: the job''s, its primary party''s, or one on its own invoices addressed to the customer (payer role customer), never a neighbour''s, the strata''s, another party''s or another payer''s, as the client story reads them; mail_copy_elsewhere counts a copy on any job that is not live (the judge''s live set). Earlier (sixth review) unplaced''s newest_customer_at and newest_reply_at also read every other row of this customer''s CRM contact placed on no job, whatever the ladder made of it (attribution status null or empty: never in the placement queue, so never in unplaced.count or newest_at); a CRM text whose CRM time is no longer known is time unknown: counted in time_unknown_texts {count} (on the job), never a lane''s or the unplaced newest or oldest time; unplaced_invoices {count, owing, items: [{id, number, party, owing, due_date, days_overdue}]}: the customer invoices placed on no job addressed to this job''s own Xero contact (the job''s, or one on its own invoices; never on builder work, nor a contact billed on builder work), still owing, recorded by p_as_of and made no earlier than 30 days before the job. Earlier: unplaced also gives newest_customer_at (the newest of this customer''s messages not placed on any job, as of p_as_of: a text or email, or a call answered or transcribed) and newest_reply_at (the newest we sent them there, never automated), so the story''s line never says there is no customer message while one waits unplaced; times a CRM text loaded later by the CRM''s own time (context_job_record_crm_time), on the job and placed on no job alike; history start, each lane''s newest and oldest and the unplaced newest_at, newest_customer_at and newest_reply_at leave out texts dated before the job''s lead window (still counted: on the job in before_job_texts {count, newest_at}, placed on no job in unplaced.count, the placement queue''s); mail_copy_elsewhere {count}: the legacy mail the record shows (context_job_record_legacy_mail, never withheld) that has a saved copy recorded by p_as_of, which then sits on no job or (seventh review) on an archived or holding job, never on a live one (shown from the old inbox), so the count is the mail the story shows. Earlier: evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start (rows marked as a copy of another, metadata.duplicate_of, are not counted, 20261006031000), this customer''s unplaced messages (context_unplaced_for_job), the legacy mail withheld because the client has another job (withheld_mail: counted, never the job''s email), and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
+ 'Job story (20261006014000), story safety (20261006040000): (ninth review) contact_shared {shared, by, other_jobs}: whether this job''s contact details sit on another client''s job: its CRM contact, its client phone or its client email (each by its placement key: context_phone_key, context_email_key) on a job whose client is someone else (no client name of the same words, at no site address the same by its key, its letters and digits or its street part before the first comma), by which (contact, email, phone) and on how many such jobs; such a contact is shared across clients (a builder''s or an agent''s), so the assembler never names its messages the insured''s. Earlier (eighth review) off_job {newest_customer_at, newest_customer_where, unchecked_customer_at, unchecked_customer_where, newest_reply_at, newest_reply_where}: this customer''s messages off this job outside the placement queue, from 30 days before the job was created: their CRM contact''s rows on another job (their other job, "on job X", or one no reader reads, a bucket: archived, complete, completed, cancelled, lost, a draft or holding, "on archived job X") and their email by the client''s address with no CRM contact placed on no job or on a bucket job (read as the old inbox''s mail is: from 30 days before the job, or whenever while the client has another job, then said to be maybe about another of their jobs), each timed as the job''s own rows are (a CRM text at its CRM time, never one whose time is unknown or before the lead window); unchecked_customer is the newest one not on a live job (no reader reads it); unplaced_invoices and its own contacts are the customer''s only: the job''s, its primary party''s, or one on its own invoices addressed to the customer (payer role customer), never a neighbour''s, the strata''s, another party''s or another payer''s, as the client story reads them; mail_copy_elsewhere counts a copy on any job that is not live (the judge''s live set). Earlier (sixth review) unplaced''s newest_customer_at and newest_reply_at also read every other row of this customer''s CRM contact placed on no job, whatever the ladder made of it (attribution status null or empty: never in the placement queue, so never in unplaced.count or newest_at); a CRM text whose CRM time is no longer known is time unknown: counted in time_unknown_texts {count} (on the job), never a lane''s or the unplaced newest or oldest time; unplaced_invoices {count, owing, items: [{id, number, party, owing, due_date, days_overdue}]}: the customer invoices placed on no job addressed to this job''s own Xero contact (the job''s, or one on its own invoices; never on builder work, nor a contact billed on builder work), still owing, recorded by p_as_of and made no earlier than 30 days before the job. Earlier: unplaced also gives newest_customer_at (the newest of this customer''s messages not placed on any job, as of p_as_of: a text or email, or a call answered or transcribed) and newest_reply_at (the newest we sent them there, never automated), so the story''s line never says there is no customer message while one waits unplaced; times a CRM text loaded later by the CRM''s own time (context_job_record_crm_time), on the job and placed on no job alike; history start, each lane''s newest and oldest and the unplaced newest_at, newest_customer_at and newest_reply_at leave out texts dated before the job''s lead window (still counted: on the job in before_job_texts {count, newest_at}, placed on no job in unplaced.count, the placement queue''s); mail_copy_elsewhere {count}: the legacy mail the record shows (context_job_record_legacy_mail, never withheld) that has a saved copy recorded by p_as_of, which then sits on no job or (seventh review) on an archived or holding job, never on a live one (shown from the old inbox), so the count is the mail the story shows. Earlier: evidence lanes on the job (linked rows only; counts and newest time per lane, legacy inbox mail counted as email), history start (rows marked as a copy of another, metadata.duplicate_of, are not counted, 20261006031000), this customer''s unplaced messages (context_unplaced_for_job), the legacy mail withheld because the client has another job (withheld_mail: counted, never the job''s email), and whether the job has a CRM contact. Unplaced messages are read as now. How far the reader has read comes from the ledger read, never the fact pass. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_job_story_assemble(p_job jsonb, p_record jsonb, p_ledger jsonb, p_meta jsonb,
  p_as_of timestamptz, p_since timestamptz DEFAULT NULL)
@@ -2853,14 +2903,26 @@ RETURNS jsonb
 LANGUAGE sql STABLE
 AS $fn$
  WITH inp AS MATERIALIZED (
+  SELECT x.*, CASE WHEN x.ins THEN 'the insured' WHEN x.bw THEN 'the job contact' ELSE 'the customer' END AS cust
+  FROM (
   SELECT p_job AS job, coalesce(p_record, '{}'::jsonb) AS rec, coalesce(p_ledger, '{}'::jsonb) AS led,
          coalesce(p_meta, '{}'::jsonb) AS meta, p_as_of AS as_of, (p_as_of AT TIME ZONE 'Australia/Perth')::date AS today,
          p_since AS since,
-         -- (eighth review) builder work: the builder is the customer and the job's CRM contact (and
-         -- client email) the insured, so the contact's messages are named the insured's and never
-         -- change whose move on what the builder owes
+         -- (eighth review) builder work: the builder is the customer
          coalesce(p_job ->> 'type' IN ('makesafe', 'repair', 'insurance'), false) AS bw,
-         CASE WHEN p_job ->> 'type' IN ('makesafe', 'repair', 'insurance') THEN 'the insured' ELSE 'the customer' END AS cust
+         -- (ninth review) and the job's CRM contact (and client email) the insured's only when the
+         -- make-safe details name the builder and the job's contact details sit on no other client's
+         -- job (meta contact_shared.shared false): then the contact's messages are named the insured's
+         -- and never change whose move on what the builder owes. A contact on another client's job is
+         -- shared across clients, a builder's or an agent's (SWR-261488, SWMS-261065 and SWMS-261163:
+         -- one builder-side contact on three clients' jobs), and with no builder named the client may
+         -- be the customer (SWF-261111, SWF-261314: quoted to the client); either way, or when the
+         -- meta does not say, the line calls its messages the job contact's and they may be about
+         -- what the builder owes, so they hold the move as the customer's do
+         (coalesce(p_job ->> 'type' IN ('makesafe', 'repair', 'insurance'), false)
+          AND nullif(btrim(p_record -> 'facts' ->> 'builder'), '') IS NOT NULL
+          AND coalesce((p_meta -> 'contact_shared' ->> 'shared')::boolean = false, false)) AS ins
+  ) x
  ),
  tl AS MATERIALIZED (
   SELECT t.* FROM inp, jsonb_to_recordset(coalesce(inp.rec->'timeline', '[]'::jsonb))
@@ -3324,12 +3386,13 @@ AS $fn$
  -- move is unclear and the line names it. One from before that loop opened leaves its move
  -- standing (a quote whose off-job rows predate it still waits on the customer). (Eighth review)
  -- Only what its sender owes: the customer's own items, never a neighbour's or another payer's,
- -- and never on builder work, where the sender (the CRM contact, the client email) is the insured
+ -- and never on builder work while the sender (the CRM contact, the client email) is the insured
  -- and the builder owes (SWMS-261441: the insured's thank-you text never makes the builder's
- -- payment unclear)
+ -- payment unclear); (ninth review) a contact shared across clients, or one the story cannot call
+ -- the insured's, may be the builder's own, so its newer message holds the builder's move
  ofl AS (
   SELECT o.at, o.note FROM ofj o, inp
-  WHERE NOT inp.bw
+  WHERE NOT inp.ins
     AND o.at > (SELECT l.since FROM loops l WHERE l.owner = 'customer' AND NOT l.held ORDER BY l.rank LIMIT 1)
  ),
  -- (eighth review) the customer's newest message on the job (a text, an email, an answered call or
@@ -3350,11 +3413,12 @@ AS $fn$
  ),
  -- ... and newer than the opening of the top loop the customer or another party owes on the job
  -- (an email placed on no job: what the customer owes, as off the job): whose move is unclear and
- -- the line names the message with our last reply, whatever we sent since. Never on builder work,
- -- where the contact's messages are the insured's and the builder owes
+ -- the line names the message with our last reply, whatever we sent since. Never on builder work
+ -- while the contact's messages are the insured's and the builder owes (ninth review: a contact
+ -- shared across clients, or one not the insured's, holds the builder's move as the customer's do)
  ojl AS (
   SELECT o.at, o.kind FROM ojc o, inp
-  WHERE NOT inp.bw
+  WHERE NOT inp.ins
     AND o.at > (SELECT l.since FROM loops l WHERE NOT l.held
                   AND (l.owner = 'customer' OR (l.owner = 'third_party' AND o.placed_on IS DISTINCT FROM 'none'))
                 ORDER BY l.rank LIMIT 1)
@@ -3408,9 +3472,11 @@ AS $fn$
  -- message, or names a stale one, while a newer one waits off the job. (Eighth review) Also
  -- theirs and ours on their other jobs ("on job X"), on a bucket or holding job, and their
  -- email by address with no CRM contact (meta off_job); on builder work the contact's messages
- -- are the insured's, and named so
+ -- are the insured's, and named so, only when the contact is the insured's (ninth review: else the
+ -- job contact's, never a person it may not be: SWR-261488's builder-side contact)
  cw AS (
-  SELECT CASE WHEN inp.bw THEN 'the insured''s newest message ' ELSE 'newest customer message ' END
+  SELECT CASE WHEN inp.ins THEN 'the insured''s newest message ' WHEN inp.bw THEN 'the job contact''s newest message '
+              ELSE 'newest customer message ' END
           || public.context_job_story_day((c.at AT TIME ZONE 'Australia/Perth')::date, phs.today) || c.note AS cm,
          'our last reply ' || public.context_job_story_day((r.at AT TIME ZONE 'Australia/Perth')::date, phs.today) || r.note AS rp,
          ' (an automated text went '
@@ -3688,6 +3754,19 @@ AS $fn$
         'A rebuild keeps staff corrections as they are, so only a person can fix this.'),
    (11, CASE WHEN coalesce((inp.meta->>'contact_missing')::boolean, false) THEN 'This job has no CRM contact, so texts and calls may not reach it.' END,
         'Texts and calls are placed by the CRM contact.'),
+   -- (ninth review) on builder work, contact details shared with another client's job: why the
+   -- line calls the contact's messages the job contact's, never the insured's
+   (11, CASE WHEN inp.bw AND coalesce((inp.meta->'contact_shared'->>'shared')::boolean, false)
+             THEN (SELECT 'This job''s ' || CASE WHEN cardinality(n.a) = 1 THEN n.a[1]
+                                                 ELSE array_to_string(n.a[1:cardinality(n.a) - 1], ', ') || ' and ' || n.a[cardinality(n.a)] END
+                          || CASE WHEN cardinality(n.a) > 1 THEN ' are' ELSE ' is' END
+                          || ' also on ' || CASE WHEN coalesce((inp.meta->'contact_shared'->>'other_jobs')::int, 0) > 1
+                                                 THEN (inp.meta->'contact_shared'->>'other_jobs') || ' jobs of other clients'
+                                                 ELSE 'another client''s job' END
+                          || ', so the messages the story names are not taken to be the insured''s: the first line calls them the job contact''s.'
+                   FROM (SELECT array_agg(CASE b.v WHEN 'contact' THEN 'CRM contact' WHEN 'phone' THEN 'client phone' ELSE 'client email' END ORDER BY b.o) AS a
+                         FROM jsonb_array_elements_text(coalesce(inp.meta->'contact_shared'->'by', '[]'::jsonb)) WITH ORDINALITY b(v, o)) n) END,
+        'A contact shared across clients is likely a builder''s or an agent''s, not the homeowner''s.'),
    (12, CASE WHEN led.status = 'shadow' AND led.gen IS NOT NULL THEN 'This story shows a shadow reading that is not live yet.'
              WHEN led.gen IS NOT NULL AND led.gen->>'status' IN ('failed', 'retired', 'building')
              THEN 'This story shows a ' || (led.gen->>'status') || ' reading, not the live one.' END,
@@ -3700,9 +3779,11 @@ AS $fn$
  who AS (
   SELECT DISTINCT ON (lower(w.name), w.role) w.name, w.role, w.contact_ref, w.cites, w.ord FROM (
    -- on builder work (make-safe, repair, insurance) the builder is the customer and the
-   -- homeowner the insured (story safety, 20261006040000)
+   -- homeowner the insured (story safety, 20261006040000); (ninth review) a CRM contact shared
+   -- with another client's job (meta contact_shared) is never given as the insured's own
    SELECT inp.job->>'client_name' AS name, CASE WHEN inp.job->>'type' IN ('makesafe', 'repair', 'insurance') THEN 'insured' ELSE 'customer' END AS role,
-          inp.job->>'ghl_contact_id' AS contact_ref, jsonb_build_array(jsonb_build_object('t', 'jobs', 'id', inp.job->>'id')) AS cites, 1 AS ord
+          CASE WHEN inp.bw AND coalesce((inp.meta->'contact_shared'->>'shared')::boolean, false) THEN NULL ELSE inp.job->>'ghl_contact_id' END AS contact_ref,
+          jsonb_build_array(jsonb_build_object('t', 'jobs', 'id', inp.job->>'id')) AS cites, 1 AS ord
    FROM inp WHERE nullif(btrim(inp.job->>'client_name'), '') IS NOT NULL
    UNION ALL
    SELECT m.party, CASE WHEN inp.job->>'type' IN ('makesafe', 'repair', 'insurance') THEN 'customer' ELSE 'payer' END, m.xero_contact_id,
@@ -3869,7 +3950,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_job_story_assemble(jsonb, jsonb, jsonb, jsonb, timestamptz, timestamptz) IS
- 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (eighth review) an off-job message changes the move only of what its sender owes: the customer''s own items on private work, never a neighbour''s or another payer''s, and never on builder work, where the job''s CRM contact and client email are the insured''s (the line names them "the insured") and the builder owes; the customer''s newest message on the job (a text, an email, an answered call or a call recording) that no finished reading has read makes whose move unclear over the top item they or another party owe from before it, named with our last reply; a reading with an item hidden gives no all-clear and says how many are hidden; the contact facts also take meta off_job (their rows on their other jobs and on bucket jobs, their email by address with no CRM contact), where each sits named; a newer message off the job is named after the customer wrote last; a draft shown as an R3 check is said in the first line and the money line to maybe duplicate issued invoices. Earlier (seventh review) whose move is unclear while the customer''s newest message is off the job and newer than the opening of the top item they or another party owe, and the line names that message, where it sits and that the reader has not checked it, with our last reply (one older than that item leaves its move standing); the phase reads a job the job value calls accepted (facts.accepted: the job row''s acceptance, an accepted quote or a paid deposit invoice) as at least accepted, since then, and processing on work other than a make-safe as accepted once it is; not_known says the mail shown from the old inbox has its saved copy on no job or on an archived or holding job (a copy on a live job takes the mail off this job). Earlier (sixth review) a job in rectification now has no work done (the final invoice is not due, said so), and the final invoice is not due either while work recorded finished was opened again since (facts.reopened: a status change into rectification or a make-safe re-attend, nothing recording it finished since); a quote waiting (R7) is a check once the work is done; a reading that has read every row on the job gives no all-clear while the customer''s newest message is off the job (meta unplaced newest_customer_at or withheld_mail newest_at newer than every customer message on the job): whose move is unknown and the line names that message, where it sits, and that the reader has not checked it; the first line and the money line name what this job''s own Xero contact owes on invoices placed on no job (meta unplaced_invoices; money.placed_on_no_job), never counting them in owing; not_known names texts whose CRM time is no longer kept. Earlier: until a finished reading shown (live or retired, or a shadow the story shows only when asked for it by id, so a grade reads the line a promotion gives; never a building or failed one) has read every row on the job (none unread), nothing open on record is never nobody''s move: whose_move unknown, the first line says "Whose move is unclear:" first, then that no record item is open (or due yet) and the messages are not yet checked for promises or requests (a reading that lags: how many newer messages, calls, notes or documents, ours included, it has not checked), with the newest customer message and our last reply, of the job''s own, this customer''s messages placed on no job yet and their withheld mail, naming where the newest sits (with neither anywhere it says so and claims nothing unchecked); with no finished reading handling.commitments is null, and only a finished reading judges a customer message; work is done only on a completion status, a completion record (facts.completion) or a report pack sent, never because the newest booking is complete; a final invoice (R8) before the work is done is not due (loop status not_due), and after it with the job value unconfirmed (C2, no amount) it is unconfirmed (status unconfirmed): either ranks last and is never the move or the first line''s item; a value another record disagrees with (C2) states no amount left to invoice; a quote the customer was in touch about since it was sent, in a way that does not close it (R7 owner unknown), makes whose move unclear and is the item the first line names; the first line''s item is cut at a word (200 characters); the customer''s unread words are "not yet checked by the reader"; the first line names each invoice owing with its due date, who owes it ("owed by") with their role whenever a neighbour or another payer owes it (whatever the move: its payer role, else its R1, R2 or M1 loop''s owner), and each payer when more than one owes, a passed booking with no attendance, a quote declined and the newest unread customer words (R5, C11, C6); the first line names the top loop of the party whose move it is, never another party''s (the customer''s move never names a neighbour''s invoice); a quote waiting reads as waiting on the customer; another party''s invoice reads as another payer owing; on builder work the builder is the customer and the homeowner the insured; not_known names mail shown from the old inbox and texts dated before the job. Earlier, story fixes: every text sort and tiebreak that reaches the output is in C (byte) order (who, money parties, loops and their rank, cites, checks, timeline, phase notes, agreements, events, not known, changes, blockers), so the story reads the same on every server whatever the input order. Earlier: the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions, its reader''s unread rows) and meta in; the cited story out. meta.ledger = {status, generation_id, evidence_until, reader, items, hidden_items, unread_rows, needs_rebuild, stale}. Inlinable (no SET). Service role only.';
+ 'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (ninth review) on builder work the job''s CRM contact and client email are the insured''s only when the make-safe details name the builder (facts.builder) and meta contact_shared says none of the job''s contact details (CRM contact, client phone, client email) sits on another client''s job; otherwise (a contact shared across clients, a builder''s or an agent''s, no builder named, or the meta silent) the line calls their messages the job contact''s ("the job contact''s newest message", "the job contact wrote last"), they hold the builder''s move as the customer''s messages do, who gives the insured no shared contact, and not_known says the contact details are on another client''s job. Earlier (eighth review) an off-job message changes the move only of what its sender owes: the customer''s own items on private work, never a neighbour''s or another payer''s, and never on builder work while the job''s CRM contact and client email are the insured''s (the line names them "the insured") and the builder owes; the customer''s newest message on the job (a text, an email, an answered call or a call recording) that no finished reading has read makes whose move unclear over the top item they or another party owe from before it, named with our last reply; a reading with an item hidden gives no all-clear and says how many are hidden; the contact facts also take meta off_job (their rows on their other jobs and on bucket jobs, their email by address with no CRM contact), where each sits named; a newer message off the job is named after the customer wrote last; a draft shown as an R3 check is said in the first line and the money line to maybe duplicate issued invoices. Earlier (seventh review) whose move is unclear while the customer''s newest message is off the job and newer than the opening of the top item they or another party owe, and the line names that message, where it sits and that the reader has not checked it, with our last reply (one older than that item leaves its move standing); the phase reads a job the job value calls accepted (facts.accepted: the job row''s acceptance, an accepted quote or a paid deposit invoice) as at least accepted, since then, and processing on work other than a make-safe as accepted once it is; not_known says the mail shown from the old inbox has its saved copy on no job or on an archived or holding job (a copy on a live job takes the mail off this job). Earlier (sixth review) a job in rectification now has no work done (the final invoice is not due, said so), and the final invoice is not due either while work recorded finished was opened again since (facts.reopened: a status change into rectification or a make-safe re-attend, nothing recording it finished since); a quote waiting (R7) is a check once the work is done; a reading that has read every row on the job gives no all-clear while the customer''s newest message is off the job (meta unplaced newest_customer_at or withheld_mail newest_at newer than every customer message on the job): whose move is unknown and the line names that message, where it sits, and that the reader has not checked it; the first line and the money line name what this job''s own Xero contact owes on invoices placed on no job (meta unplaced_invoices; money.placed_on_no_job), never counting them in owing; not_known names texts whose CRM time is no longer kept. Earlier: until a finished reading shown (live or retired, or a shadow the story shows only when asked for it by id, so a grade reads the line a promotion gives; never a building or failed one) has read every row on the job (none unread), nothing open on record is never nobody''s move: whose_move unknown, the first line says "Whose move is unclear:" first, then that no record item is open (or due yet) and the messages are not yet checked for promises or requests (a reading that lags: how many newer messages, calls, notes or documents, ours included, it has not checked), with the newest customer message and our last reply, of the job''s own, this customer''s messages placed on no job yet and their withheld mail, naming where the newest sits (with neither anywhere it says so and claims nothing unchecked); with no finished reading handling.commitments is null, and only a finished reading judges a customer message; work is done only on a completion status, a completion record (facts.completion) or a report pack sent, never because the newest booking is complete; a final invoice (R8) before the work is done is not due (loop status not_due), and after it with the job value unconfirmed (C2, no amount) it is unconfirmed (status unconfirmed): either ranks last and is never the move or the first line''s item; a value another record disagrees with (C2) states no amount left to invoice; a quote the customer was in touch about since it was sent, in a way that does not close it (R7 owner unknown), makes whose move unclear and is the item the first line names; the first line''s item is cut at a word (200 characters); the customer''s unread words are "not yet checked by the reader"; the first line names each invoice owing with its due date, who owes it ("owed by") with their role whenever a neighbour or another payer owes it (whatever the move: its payer role, else its R1, R2 or M1 loop''s owner), and each payer when more than one owes, a passed booking with no attendance, a quote declined and the newest unread customer words (R5, C11, C6); the first line names the top loop of the party whose move it is, never another party''s (the customer''s move never names a neighbour''s invoice); a quote waiting reads as waiting on the customer; another party''s invoice reads as another payer owing; on builder work the builder is the customer and the homeowner the insured; not_known names mail shown from the old inbox and texts dated before the job. Earlier, story fixes: every text sort and tiebreak that reaches the output is in C (byte) order (who, money parties, loops and their rank, cites, checks, timeline, phase notes, agreements, events, not known, changes, blockers), so the story reads the same on every server whatever the input order. Earlier: the pure assembler of job-story-v1. Reads no table: job header, record parts (timeline, loops, money, contact, facts), ledger (generation, items with citation re-check result, transitions, its reader''s unread rows) and meta in; the cited story out. meta.ledger = {status, generation_id, evidence_until, reader, items, hidden_items, unread_rows, needs_rebuild, stale}. Inlinable (no SET). Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_client_story(p_job_id uuid, p_as_of timestamptz DEFAULT now())
 RETURNS jsonb

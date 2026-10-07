@@ -706,8 +706,13 @@ or a reading built before then reads as having read it. A stored ledger citation
 re-checked by the citation check's current rules in the story's ledger read and the
 judge (`context_job_story_ledger`, `citation_moved`); a reading with an item hidden
 is no all-clear. On builder work the job's CRM contact and client email are the
-insured's: their messages never change whose move on what the builder owes, and the
-line names them the insured's. `context_ledger_mail_copies` reads
+insured's only when the make-safe details name the builder and none of the job's contact
+details (CRM contact, client phone, client email) sits on another client's job
+(`context_job_story_meta.contact_shared`); then their messages never change whose move on
+what the builder owes, and the line names them the insured's. Otherwise (a contact shared
+across clients is a builder's or an agent's) the line calls them the job contact's, they
+hold the move as the customer's do, and who never gives the insured that contact.
+`context_ledger_mail_copies` reads
 every copy key by an index (source pointer, graph key, sender at the mail's
 instant, payload key at the mail's instant); a read over many mails (the judge's)
 never takes a `payload @>` look-up per mail: the payload index answers each in
