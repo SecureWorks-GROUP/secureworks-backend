@@ -12,15 +12,20 @@
 --     on the job still decides first; the controls stay unknown; the packet gives true, false or
 --     "unknown" (never a bare null) and the citation check agrees; the customer's words may be
 --     from_role customer.
---  3. The elsewhere rule: the claim pattern (the graded words and their negatives), each row's
---     reason, the item check refusing the four graded claims (elsewhere_unsupported) and accepting
---     one a cited row's placement or role basis supports, a person's item, the packet's elsewhere.
+--  3. The elsewhere rule (second review, 8 Oct): the claim pattern (a row's sender or caller another
+--     person, or a label saying so: the graded words; a row about or belonging to another job is no
+--     such claim), each row's reason (another job's customer or party or a lead by its own stamp or
+--     its call row's, its call row on another job, its words naming another job only; never the
+--     customer's own words, our own people, a supplier, a party on this job or an unknown caller),
+--     the item check refusing the four graded claims and every extra-citation variant
+--     (elsewhere_unsupported), accepting a claim a cited row's own stamp carries and every placement
+--     claim, a person's item, the packet's elsewhere.
 --  4. Siblings: the two graded shapes (a quote sent on the client's other job; an invoice paid on
 --     the same work order's other job), never by name alone, never a holding job, never our own
 --     address, the same requesting company, as of the packet's instant, at most 8, the limits.
 --  5. The paid day: a request made the day its invoice was paid closes on it, in an item and in a
 --     transition, whatever the invoice's date; an earlier paid day and an unpaid invoice never; the
---     write reports elsewhere_unsupported.
+--     write reports elsewhere_unsupported and accepts a placement claim.
 --  6. Re-applying the migration changes nothing.
 \set ON_ERROR_STOP on
 
@@ -221,10 +226,15 @@ BEGIN
 END $c$;
 ROLLBACK;
 
--- 3. The elsewhere rule.
+-- 3. The elsewhere rule (second review, 8 Oct: only a claim that a row is someone else's, its sender
+-- or caller another person than this job's customer or a label saying so, is refused without a
+-- stamp; a claim that a row is about or belongs to another job is the reader's placement judgement
+-- and stands; a row is someone else's only by a stamp naming another job's customer or party or a
+-- lead, never our own people, a supplier, a builder, a party on this job or an unknown caller, and
+-- the customer's own words never are).
 BEGIN;
 DO $c$
-DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; pk jsonb; exp record; got text;
+DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; pk jsonb; got text;
  ja uuid := 'f1500000-0000-4000-8000-000000000011'; jo uuid := 'f1500000-0000-4000-8000-000000000012';
  jh uuid := 'f1500000-0000-4000-8000-000000000013';
  ta uuid := 'f15b0000-0000-4000-8000-000000000101'; t1 uuid := 'f15b0000-0000-4000-8000-000000000102';
@@ -232,8 +242,16 @@ DECLARE asof constant timestamptz := '2026-10-07 02:00Z'; pk jsonb; exp record; 
  c2 uuid := 'f15b0000-0000-4000-8000-000000000105'; d1 uuid := 'f15b0000-0000-4000-8000-000000000106';
  d2 uuid := 'f15b0000-0000-4000-8000-000000000107'; s1 uuid := 'f15b0000-0000-4000-8000-000000000108';
  tx1 uuid := 'f15b0000-0000-4000-8000-000000000109'; ah uuid := 'f15b0000-0000-4000-8000-000000000110';
+ c3 uuid := 'f15b0000-0000-4000-8000-000000000111'; t3 uuid := 'f15b0000-0000-4000-8000-000000000112';
+ c4 uuid := 'f15b0000-0000-4000-8000-000000000113'; t4 uuid := 'f15b0000-0000-4000-8000-000000000114';
+ c5 uuid := 'f15b0000-0000-4000-8000-000000000115'; t5 uuid := 'f15b0000-0000-4000-8000-000000000116';
+ sp uuid := 'f15b0000-0000-4000-8000-000000000117'; cw uuid := 'f15b0000-0000-4000-8000-000000000118';
+ nb uuid := 'f15b0000-0000-4000-8000-000000000119'; ld uuid := 'f15b0000-0000-4000-8000-000000000120';
+ cn uuid := 'f15b0000-0000-4000-8000-000000000121'; ou uuid := 'f15b0000-0000-4000-8000-000000000122';
+ nt uuid := 'f15b0000-0000-4000-8000-000000000123'; cm uuid := 'f15b0000-0000-4000-8000-000000000124';
+ c6 uuid := 'f15b0000-0000-4000-8000-000000000125'; t6 uuid := 'f15b0000-0000-4000-8000-000000000126';
  m1 uuid := 'f15a0000-0000-4000-8000-000000000101'; m2 uuid := 'f15a0000-0000-4000-8000-000000000102';
- x1 uuid := 'f15c0000-0000-4000-8000-000000000101';
+ m3 uuid := 'f15a0000-0000-4000-8000-000000000103'; x1 uuid := 'f15c0000-0000-4000-8000-000000000101';
 BEGIN
  PERFORM pg_temp.rf_job(ja, 'SWF-97011', 'rf-ct-g', 'g@example.test', '2026-08-01 00:00Z', 'scheduled');
  PERFORM pg_temp.rf_job(jo, 'SWF-97012', 'rf-ct-o', 'o@example.test', '2026-08-01 00:00Z', 'scheduled');
@@ -249,7 +267,7 @@ BEGIN
   '2026-09-04 00:59:00Z', pg_temp.rf_roles('supplier', 'supplier'), 'rf-ct-s', 'ghl', 'ghl:RFCALL31');
  PERFORM pg_temp.rf_ev(t2, ja, 'call.transcript_completed', 'call', 'inbound', 'The posts you ordered are in the yard now',
   '2026-09-04 01:00:00Z', NULL, 'rf-ct-s', 'ghl-call-transcript', 'ghltx:RFCALL31', '{"ghl_call_id":"RFCALL31"}');
- -- a transcript whose call row sits on another job
+ -- the customer's own transcript (its stamp on the job's contact) whose call row sits on another job
  PERFORM pg_temp.rf_ev(c2, jo, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 70 seconds',
   '2026-09-05 00:59:00Z', pg_temp.rf_roles('job_customer'), 'rf-ct-o', 'ghl', 'ghl:RFCALL32');
  PERFORM pg_temp.rf_ev(tx1, ja, 'call.transcript_completed', 'call', 'inbound', 'Please call me back about the colour of the gate',
@@ -262,102 +280,233 @@ BEGIN
  -- our staff's email (our domain)
  PERFORM pg_temp.rf_ev(s1, ja, 'client.email_in', 'email', 'inbound', 'Forwarding the council letter for the record',
   '2026-09-07 01:00:00Z', pg_temp.rf_roles('our_domain', 'staff'), NULL, 'monitor-inbox', NULL, '{"from":"staff@secureworkswa.com.au"}');
- -- a row on a holding job (another job's row is never this job's to judge)
+ -- a row on another job (another job's row is never this job's to judge)
  PERFORM pg_temp.rf_ev(ah, jh, 'client.reply', 'sms', 'inbound', 'Is the gate still coming', '2026-09-07 02:00:00Z',
   pg_temp.rf_roles('job_customer'), 'rf-ct-h');
- -- old-inbox mail: from another address, and from the client's own
+ -- a transcript (no stamp of its own) whose call row on this job names another job's customer
+ PERFORM pg_temp.rf_ev(c3, ja, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 65 seconds',
+  '2026-09-10 00:59:00Z', pg_temp.rf_roles('any_job_customer'), 'rf-ct-y', 'ghl', 'ghl:RFCALL33');
+ PERFORM pg_temp.rf_ev(t3, ja, 'call.transcript_completed', 'call', 'inbound', 'Hi it is about the fence quote for my place in town',
+  '2026-09-10 01:00:00Z', NULL, 'rf-ct-y', 'ghl-call-transcript', 'ghltx:RFCALL33', '{"ghl_call_id":"RFCALL33"}');
+ -- an unknown caller's transcript (no_match) whose call row sits on another job
+ PERFORM pg_temp.rf_ev(c4, jo, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 40 seconds',
+  '2026-09-11 00:59:00Z', pg_temp.rf_roles('job_customer'), 'rf-ct-o', 'ghl', 'ghl:RFCALL34');
+ PERFORM pg_temp.rf_ev(t4, ja, 'call.transcript_completed', 'call', 'inbound', 'Hello just calling back about the gate price',
+  '2026-09-11 01:00:00Z', pg_temp.rf_roles('no_match', 'unknown'), 'rf-ct-z', 'ghl-call-transcript', 'ghltx:RFCALL34', '{"ghl_call_id":"RFCALL34"}');
+ -- an unknown caller: its call row on this job is stamped no_match (it is no one else's)
+ PERFORM pg_temp.rf_ev(c5, ja, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 55 seconds',
+  '2026-09-12 00:59:00Z', pg_temp.rf_roles('no_match', 'unknown'), NULL, 'ghl', 'ghl:RFCALL35');
+ PERFORM pg_temp.rf_ev(t5, ja, 'call.transcript_completed', 'call', 'inbound', 'Yes it is me about the black slats again',
+  '2026-09-12 01:00:00Z', NULL, NULL, 'ghl-call-transcript', 'ghltx:RFCALL35', '{"ghl_call_id":"RFCALL35"}');
+ -- a supplier's email, a crew member's text, a neighbour on this job, a lead
+ PERFORM pg_temp.rf_ev(sp, ja, 'supplier.email_in', 'email', 'inbound', 'Your order of slats and posts is ready for collection',
+  '2026-09-13 01:00:00Z', pg_temp.rf_roles('supplier', 'supplier'), NULL, 'monitor-inbox', NULL, '{"from":"orders@supplier.example.test"}');
+ PERFORM pg_temp.rf_ev(cw, ja, 'client.sms_in', 'sms', 'inbound', 'On site now, the posts are going in this morning',
+  '2026-09-13 02:00:00Z', pg_temp.rf_roles('ladder_internal', 'crew'), 'rf-ct-crew');
+ PERFORM pg_temp.rf_ev(nb, ja, 'client.sms_in', 'sms', 'inbound', 'Happy to share the cost of the boundary fence with them',
+  '2026-09-13 03:00:00Z', pg_temp.rf_roles('job_party'), 'rf-ct-nb');
+ PERFORM pg_temp.rf_ev(ld, ja, 'client.sms_in', 'sms', 'inbound', 'Hi is this the fence company, I would like a quote please',
+  '2026-09-13 04:00:00Z', pg_temp.rf_roles('lead'), 'rf-ct-l');
+ -- the customer's own texts: one naming their other job's number only, one asking about materials for another job
+ PERFORM pg_temp.rf_ev(cn, ja, 'client.sms_in', 'sms', 'inbound', 'Is the SWF-97012 fence still going ahead next week?',
+  '2026-09-14 01:00:00Z', pg_temp.rf_roles('job_customer'), 'rf-ct-g');
+ PERFORM pg_temp.rf_ev(cm, ja, 'client.sms_in', 'sms', 'inbound', 'Can I collect the leftover sheets that were for my other job?',
+  '2026-09-14 02:00:00Z', pg_temp.rf_roles('job_customer'), 'rf-ct-g');
+ -- our own text naming another job's number only (sent here by mistake), and a staff note
+ PERFORM pg_temp.rf_ev(ou, ja, 'client.sms_out', 'sms', 'outbound', 'Hi, the deposit invoice for SWF-97012 is now due, thanks.',
+  '2026-09-14 03:00:00Z', pg_temp.rf_roles('job_customer', 'customer', 'outbound'), 'rf-ct-g');
+ PERFORM pg_temp.rf_ev(nt, ja, 'note.added', 'note', 'internal', 'The council email thread is filed against another job, not this one.',
+  '2026-09-14 04:00:00Z');
+ -- a transcript of our own outbound call whose call row is stamped no_match: both sides' words, never ours alone
+ PERFORM pg_temp.rf_ev(c6, ja, 'client.call_logged', 'call', 'outbound', 'Call. Provider status: completed. Duration: 80 seconds',
+  '2026-09-15 00:59:00Z', pg_temp.rf_roles('no_match', 'unknown', 'outbound'), NULL, 'ghl', 'ghl:RFCALL36');
+ PERFORM pg_temp.rf_ev(t6, ja, 'call.transcript_completed', 'call', 'outbound', 'Calling to confirm the install on Friday morning',
+  '2026-09-15 01:00:00Z', NULL, NULL, 'ghl-call-transcript', 'ghltx:RFCALL36', '{"ghl_call_id":"RFCALL36"}');
+ -- old-inbox mail: from another address, from the client's own, and from another address naming another job only
  PERFORM pg_temp.rf_inbox(m1, ja, 'agent@realty.example.test', 'Statement', 'Payment statement for the rental property', '2026-09-08 01:00:00Z');
  PERFORM pg_temp.rf_inbox(m2, ja, 'g@example.test', 'Gate colour', 'Black is fine for the gate thanks', '2026-09-08 02:00:00Z');
+ PERFORM pg_temp.rf_inbox(m3, ja, 'accounts@builder.example.test', 'Invoice query', 'Please re-issue the invoice for SWF-97012 to us',
+  '2026-09-08 03:00:00Z');
  INSERT INTO public.xero_invoices (id, org_id, xero_invoice_id, invoice_type, job_id, invoice_number, status, invoice_date, total, created_at, updated_at)
  VALUES (x1, '00000000-0000-0000-0000-000000000001', 'xi-rf-101', 'ACCREC', ja, 'INV-97101', 'AUTHORISED', '2026-09-09', 100, '2026-09-09 01:00Z', '2026-09-09 01:00Z');
 
- -- The claim pattern: the graded words (and the ways they are written) are claims; other
- -- mentions of another job or someone else are not.
- FOR exp IN SELECT * FROM (VALUES
+ -- The claim pattern: words saying a row's sender, caller or counterpart is another person than
+ -- this job's customer, or that a label says so, are claims (the graded words among them); words
+ -- saying a row or a thing is about, for or belongs to another job are not, nor is any other
+ -- mention of another job or someone else. Every mismatch is listed at once.
+ SELECT string_agg(format('%L reads %s', v.what, NOT v.want), '; ') INTO got
+ FROM (VALUES
    ('The call transcript is labelled as not from this job''s customer.', true),
    ('A second transcript of the call is linked to someone other than this job''s customer; it looks like a duplicate that was labelled wrongly.', true),
    ('The call transcript is marked as from another job or a lead, so it appears to belong to another job.', true),
    ('A call transcript is labelled as coming from a customer of another job or a lead.', true),
-   ('This email appears to belong to another job.', true),
-   ('These texts may relate to the client''s other job.', true),
-   ('The order confirmation was misfiled on this job.', true),
    ('The voicemail is from someone other than this customer.', true),
    ('The voicemail is not from this job’s customer.', true),
-   ('THIS ROW BELONGS TO ANOTHER JOB', true),
-   ('The quote appears to concern a different property.', true),
+   ('The caller is another job''s client.', true),
+   ('The call appears to be from a different customer.', true),
+   ('The text came from the wrong person.', true),
+   ('This voicemail belongs to someone else.', true),
+   ('THIS TEXT BELONGS TO ANOTHER CUSTOMER', true),
+   ('The text is labelled as from another customer.', true),
+   ('The email is linked to a different contact.', true),
+   ('The call is shown as coming from someone else.', true),
+   ('This email appears to belong to another job.', false),
+   ('These texts may relate to the client''s other job.', false),
+   ('This call relates to the client’s other job.', false),
+   ('The order confirmation was misfiled on this job.', false),
+   ('THIS ROW BELONGS TO ANOTHER JOB', false),
+   ('The quote appears to concern a different property.', false),
+   ('A staff note says the council email thread is filed against another job, not this one.', false),
+   ('The customer asked to collect the leftover sheets that were for another job.', false),
+   ('Our text appears to belong to another job; it was meant for a different customer.', false),
    ('The crew was booked on another job that day, so the infill waits.', false),
+   ('The crew was assigned to another job on Monday.', false),
    ('He needed to move on to another job after finishing.', false),
    ('They said they would get someone else if we cannot start soon.', false),
    ('They went with a cheaper quote from someone else.', false),
+   ('We were shown another customer''s fence as an example.', false),
    ('The work order names the tenants as other contacts.', false),
    ('The payment covered this job together with two other job references.', false),
    ('It is not the customer''s responsibility to remove the old fence.', false),
    ('The booking is recorded as not attended.', false),
    ('Our staff visited the site with another person.', false),
    ('The customer misplaced the gate key.', false),
-   ('The customer asked for the gate to be black.', false)) v(what, want) LOOP
-  PERFORM pg_temp.rf_assert(public.context_ledger_elsewhere_claim(exp.what) = exp.want,
-   format('the claim pattern reads %L as %s', exp.what, NOT exp.want));
- END LOOP;
+   ('The customer asked for the gate to be black.', false)) v(what, want)
+ WHERE public.context_ledger_elsewhere_claim(v.what) IS DISTINCT FROM v.want;
+ PERFORM pg_temp.rf_assert(got IS NULL, 'the claim pattern: ' || got);
  PERFORM pg_temp.rf_assert(NOT public.context_ledger_elsewhere_claim(NULL), 'no words are no claim');
 
- -- Each row's own placement or role basis, and why.
- FOR exp IN SELECT * FROM (VALUES
-   ('business_events', ta, NULL::text, 'the customer''s own transcript is nobody else''s'),
+ -- Each row's own stamp or placement, and why: another job's customer or party or a lead (its own
+ -- stamp, or its call row's on this job), its call row on another job, or its words naming another
+ -- job only. Never the customer's own words, our own people, a supplier, a party on this job or an
+ -- unknown caller; old-inbox mail only by its words.
+ SELECT string_agg(format('%s: elsewhere %s, want %s', v.why, coalesce(public.context_ledger_row_elsewhere(ja, v.t, v.id), '-'),
+   coalesce(v.want, '-')), '; ') INTO got
+ FROM (VALUES
+   ('business_events', ta, NULL::text, 'the customer''s own transcript'),
    ('business_events', t1, 'role_basis:any_job_customer', 'another job''s customer by its stamp'),
-   ('business_events', t2, 'call_not_customer', 'a transcript whose call row on this job is a supplier''s'),
-   ('business_events', tx1, 'call_on_other_job', 'a transcript whose call row sits on another job'),
+   ('business_events', t2, NULL, 'a transcript whose call row on this job is a supplier''s'),
+   ('business_events', tx1, NULL, 'the customer''s own transcript whose call row sits on another job'),
+   ('business_events', t3, 'call_not_customer', 'a transcript whose call row on this job is another job''s customer''s'),
+   ('business_events', t4, 'call_on_other_job', 'an unknown caller''s transcript whose call row sits on another job'),
+   ('business_events', t5, NULL, 'an unknown caller''s transcript (its call row stamped no_match)'),
+   ('business_events', t6, NULL, 'our own outbound call with an unknown counterpart'),
    ('business_events', d1, 'names_other_job:SWF-97012', 'words naming another job''s number only'),
    ('business_events', d2, NULL, 'words naming this job too'),
-   ('business_events', s1, 'role_basis:our_domain', 'our own staff'),
+   ('business_events', s1, NULL, 'our own staff'),
+   ('business_events', sp, NULL, 'a supplier'),
+   ('business_events', cw, NULL, 'our crew'),
+   ('business_events', nb, NULL, 'a party on this job'),
+   ('business_events', ld, 'role_basis:lead', 'a lead'),
+   ('business_events', cn, NULL, 'the customer''s own words naming their other job'),
+   ('business_events', ou, 'names_other_job:SWF-97012', 'our own text naming another job only'),
+   ('business_events', nt, NULL, 'a staff note'),
    ('business_events', ah, NULL, 'a row on another job is not this job''s to judge'),
-   ('inbox_events', m1, 'sender_not_client', 'old-inbox mail from another address'),
+   ('inbox_events', m1, NULL, 'old-inbox mail from another address'),
    ('inbox_events', m2, NULL, 'old-inbox mail from the client''s address'),
-   ('xero_invoices', x1, NULL, 'a record row is this job''s own')) v(t, id, want, why) LOOP
-  got := public.context_ledger_row_elsewhere(ja, exp.t, exp.id);
-  PERFORM pg_temp.rf_assert(got IS NOT DISTINCT FROM exp.want, format('%s: elsewhere %s, want %s', exp.why, got, exp.want));
- END LOOP;
+   ('inbox_events', m3, 'names_other_job:SWF-97012', 'old-inbox mail naming another job only'),
+   ('xero_invoices', x1, NULL, 'a record row is this job''s own')) v(t, id, want, why)
+ WHERE public.context_ledger_row_elsewhere(ja, v.t, v.id) IS DISTINCT FROM v.want;
+ PERFORM pg_temp.rf_assert(got IS NULL, 'row reasons: ' || got);
  -- The packet carries the same reason on each evidence row.
  pk := public.context_ledger_packet(ja, NULL, asof);
- PERFORM pg_temp.rf_assert(pg_temp.rf_row(pk, t1) ->> 'elsewhere' = 'role_basis:any_job_customer' AND pg_temp.rf_row(pk, ta) -> 'elsewhere' = 'null'::jsonb
-  AND pg_temp.rf_row(pk, tx1) ->> 'elsewhere' = 'call_on_other_job' AND pg_temp.rf_row(pk, m1) ->> 'elsewhere' = 'sender_not_client'
-  AND pg_temp.rf_row(pk, d1) ->> 'elsewhere' = 'names_other_job:SWF-97012' AND pg_temp.rf_row(pk, m2) -> 'elsewhere' = 'null'::jsonb,
-  'the packet gives each row its elsewhere: ' || (SELECT string_agg(x ->> 'id' || '=' || coalesce(x ->> 'elsewhere', '-'), ', ') FROM jsonb_array_elements(pk -> 'evidence') x));
+ SELECT string_agg(x ->> 'id' || '=' || coalesce(x ->> 'elsewhere', '-'), ', ' ORDER BY x ->> 'id') INTO got
+ FROM jsonb_array_elements(pk -> 'evidence') x
+ WHERE (x ->> 'elsewhere') IS DISTINCT FROM public.context_ledger_row_elsewhere(ja, x ->> 'table', (x ->> 'id')::uuid);
+ PERFORM pg_temp.rf_assert(got IS NULL AND pg_temp.rf_row(pk, t1) ->> 'elsewhere' = 'role_basis:any_job_customer'
+  AND pg_temp.rf_row(pk, ta) -> 'elsewhere' = 'null'::jsonb AND pg_temp.rf_row(pk, s1) -> 'elsewhere' = 'null'::jsonb
+  AND pg_temp.rf_row(pk, sp) -> 'elsewhere' = 'null'::jsonb AND pg_temp.rf_row(pk, m1) -> 'elsewhere' = 'null'::jsonb
+  AND pg_temp.rf_row(pk, d1) ->> 'elsewhere' = 'names_other_job:SWF-97012',
+  'the packet gives each row its elsewhere: ' || coalesce(got, (SELECT string_agg(x ->> 'id' || '=' || coalesce(x ->> 'elsewhere', '-'), ', ')
+   FROM jsonb_array_elements(pk -> 'evidence') x)));
 
- -- The item check: the four graded claims on the customer's own call are refused; a claim a cited
- -- row supports stands; anything else is unchanged.
- FOR exp IN SELECT * FROM (VALUES
-   ('event', 'info', 'The caller gave the go-ahead on the quote. The call transcript is labelled as not from this job''s customer.',
-    'business_events', ta, 'fine with the black colour', 'elsewhere_unsupported', 'SWP-26183 shape'),
-   ('issue', 'open', 'A second transcript of the call is linked to someone other than this job''s customer; it was labelled wrongly.',
-    'business_events', ta, 'fine with the black colour', 'elsewhere_unsupported', 'SWF-261486 shape'),
-   ('issue', 'open', 'A call transcript is labelled as coming from a customer of another job or a lead, so it appears to belong to another job.',
-    'business_events', ta, 'fine with the black colour', 'elsewhere_unsupported', 'SWP-261178 shape'),
-   ('issue', 'open', 'The call transcript is marked as from another job or a lead, so it appears to belong to another job.',
-    'business_events', ta, 'fine with the black colour', 'elsewhere_unsupported', 'SWF-261305 shape'),
-   ('issue', 'open', 'This call appears to belong to another job.', 'business_events', t1, 'about my quote for the front fence', 'ok',
-    'another job''s customer by its stamp'),
-   ('issue', 'open', 'The call record of this transcript is filed against another job.', 'business_events', tx1,
-    'call me back about the colour of the gate', 'ok', 'its call row sits on another job'),
-   ('issue', 'open', 'The order confirmation appears to belong to another job.', 'business_events', d1, 'Order confirmation 4711 reference',
-    'ok', 'it names another job''s number only'),
-   ('issue', 'open', 'This statement appears to belong to another job.', 'inbox_events', m1, 'Payment statement for the rental', 'ok',
-    'mail from another address'),
-   ('issue', 'open', 'This order confirmation appears to belong to another job.', 'business_events', d2, 'Order confirmation 4712 reference',
-    'elsewhere_unsupported', 'it names this job too'),
-   ('event', 'info', 'The customer chose black for the slats.', 'business_events', ta, 'fine with the black colour', 'ok', 'no claim'))
-   v(typ, st, what, tbl, cite, excerpt, want, why) LOOP
-  got := pg_temp.rf_check(ja, pg_temp.rf_item(exp.typ, exp.st, 'unknown', exp.what, pg_temp.rf_cite(exp.cite, exp.excerpt, exp.tbl)));
-  PERFORM pg_temp.rf_assert(got = exp.want, format('%s: the item check says %s, want %s', exp.why, got, exp.want));
- END LOOP;
- -- Any cited row counts: the customer's own transcript first, then a row another job's customer sent.
- PERFORM pg_temp.rf_assert(pg_temp.rf_check(ja, pg_temp.rf_item('issue', 'open', 'unknown', 'The second call appears to belong to another job.',
-   pg_temp.rf_cite(ta, 'fine with the black colour') || pg_temp.rf_cite(t1, 'about my quote for the front fence'))) = 'ok',
-  'a claim stands on any cited row that is someone else''s');
+ -- The item check on a claim that a row is someone else's: refused when a cited row is the
+ -- customer's own words, when a cited row that is not our own text, note or a record is not someone
+ -- else's by its own stamp, or when none is; extra citations never carry it. A claim that a row is
+ -- about or belongs to another job stands, whatever it cites. Every mismatch is listed at once.
+ SELECT string_agg(format('%s: the item check says %s, want %s', v.why, pg_temp.rf_check(ja, v.item), v.want), '; ') INTO got
+ FROM (VALUES
+   -- the four graded claims on the customer's own call
+   (pg_temp.rf_item('event', 'info', 'unknown', 'The caller gave the go-ahead on the quote. The call transcript is labelled as not from this job''s customer.',
+     pg_temp.rf_cite(ta, 'fine with the black colour')), 'elsewhere_unsupported', 'SWP-26183 shape'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'A second transcript of the call is linked to someone other than this job''s customer; it was labelled wrongly.',
+     pg_temp.rf_cite(ta, 'fine with the black colour')), 'elsewhere_unsupported', 'SWF-261486 shape'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'A call transcript is labelled as coming from a customer of another job or a lead, so it appears to belong to another job.',
+     pg_temp.rf_cite(ta, 'fine with the black colour')), 'elsewhere_unsupported', 'SWP-261178 shape'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The call transcript is marked as from another job or a lead, so it appears to belong to another job.',
+     pg_temp.rf_cite(ta, 'fine with the black colour')), 'elsewhere_unsupported', 'SWF-261305 shape'),
+   -- one extra citation never carries a claim on the customer's own call (review of 8 Oct, a and b)
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The call transcript is labelled as not from this job''s customer.',
+     pg_temp.rf_cite(ta, 'fine with the black colour') || pg_temp.rf_cite(s1, 'Forwarding the council letter')), 'elsewhere_unsupported',
+    'the customer''s own call with our staff''s email cited too'),
+   (pg_temp.rf_item('issue', 'closed', 'unknown', 'The call transcript is labelled as not from this job''s customer.',
+     pg_temp.rf_cite(ta, 'fine with the black colour'), jsonb_build_object('closed_by', pg_temp.rf_cite(sp, 'ready for collection'))),
+    'elsewhere_unsupported', 'the customer''s own call with a supplier''s email as its closing citation'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'One of these texts is from a customer of another job.',
+     pg_temp.rf_cite(t1, 'about my quote for the front fence') || pg_temp.rf_cite(cn, 'fence still going ahead next week')), 'elsewhere_unsupported',
+    'another job''s customer cited beside the customer''s own words'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The voicemail is from someone other than this job''s customer.',
+     pg_temp.rf_cite(t5, 'about the black slats again') || pg_temp.rf_cite(t1, 'about my quote for the front fence')), 'elsewhere_unsupported',
+    'an unknown caller beside a row that is someone else''s'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The call is from a customer of another job.',
+     pg_temp.rf_cite(t6, 'confirm the install on Friday') || pg_temp.rf_cite(t1, 'about my quote for the front fence')), 'elsewhere_unsupported',
+    'our own outbound call holds the other side''s words too'),
+   -- the claim on rows whose stamp names no one else, or on a placement fact only
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The caller is a customer of another job or a lead.', pg_temp.rf_cite(t5, 'about the black slats again')),
+    'elsewhere_unsupported', 'an unknown caller (its call row stamped no_match)'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The email is from someone other than this job''s customer.', pg_temp.rf_cite(s1, 'Forwarding the council letter')),
+    'elsewhere_unsupported', 'our own staff'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'This email is not from this job''s customer.', pg_temp.rf_cite(sp, 'ready for collection')),
+    'elsewhere_unsupported', 'a supplier'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'This text is not from this job''s customer.', pg_temp.rf_cite(cw, 'the posts are going in')),
+    'elsewhere_unsupported', 'our crew'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The text is from someone other than this job''s customer.', pg_temp.rf_cite(nb, 'share the cost of the boundary fence')),
+    'elsewhere_unsupported', 'a party on this job'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The document is from another job''s customer.', pg_temp.rf_cite(d1, 'Order confirmation 4711 reference')),
+    'elsewhere_unsupported', 'words naming another job are no person'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The call is from a customer of another job.', pg_temp.rf_cite(t4, 'calling back about the gate price')),
+    'elsewhere_unsupported', 'a call row on another job is no person'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'This email is not from this job''s customer.', pg_temp.rf_cite(m1, 'Payment statement for the rental', 'inbox_events')),
+    'elsewhere_unsupported', 'old-inbox mail from another address'),
+   -- the claim on a row whose own stamp names someone else stands
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'This call is from a customer of another job.', pg_temp.rf_cite(t1, 'about my quote for the front fence')),
+    'ok', 'another job''s customer by its stamp'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The voicemail greeting is from someone who is not this job''s customer and appears to belong to another job or lead.',
+     pg_temp.rf_cite(t1, 'about my quote for the front fence')), 'ok', 'SWF-261459 shape'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The caller is labelled as from another customer.', pg_temp.rf_cite(t3, 'fence quote for my place in town')),
+    'ok', 'its call row on this job names another job''s customer'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'A lead texted; they are not this job''s customer.', pg_temp.rf_cite(ld, 'is this the fence company')),
+    'ok', 'a lead'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'Another job''s customer called and we texted that we had their details mixed up.',
+     pg_temp.rf_cite(t1, 'about my quote for the front fence') || pg_temp.rf_cite(ou, 'the deposit invoice for SWF-97012')), 'ok',
+    'our own text needs no stamp beside it'),
+   -- a claim that a row is about or belongs to another job is the reader's placement judgement
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'This email appears to belong to another job.', pg_temp.rf_cite(m2, 'Black is fine for the gate', 'inbox_events')),
+    'ok', 'the client''s own email said to be about another job'),
+   (pg_temp.rf_item('request', 'open', 'customer', 'The customer asked to collect the leftover sheets that were for another job.',
+     pg_temp.rf_cite(cm, 'collect the leftover sheets')), 'ok', 'materials for another job (review of 8 Oct)'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'These texts may relate to the client''s other job.', pg_temp.rf_cite(cn, 'fence still going ahead next week')),
+    'ok', 'the client''s other job'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'A staff note says the council email thread is filed against another job, not this one.',
+     pg_temp.rf_cite(nt, 'filed against another job')), 'ok', 'a staff note'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'Our text about the deposit appears to belong to another job.',
+     pg_temp.rf_cite(ou, 'the deposit invoice for SWF-97012')), 'ok', 'our own misdirected text'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'This supplier message appears to belong to another job.', pg_temp.rf_cite(sp, 'ready for collection')),
+    'ok', 'a supplier''s email said to be about another job (no stamp is read as support either way)'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The order confirmation appears to belong to another job.', pg_temp.rf_cite(d1, 'Order confirmation 4711 reference')),
+    'ok', 'it names another job''s number'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'This order confirmation appears to belong to another job.', pg_temp.rf_cite(d2, 'Order confirmation 4712 reference')),
+    'ok', 'it names this job too'),
+   (pg_temp.rf_item('issue', 'open', 'unknown', 'The call record of this transcript is filed against another job.',
+     pg_temp.rf_cite(tx1, 'call me back about the colour of the gate')), 'ok', 'its call row sits on another job'),
+   (pg_temp.rf_item('event', 'info', 'unknown', 'The customer chose black for the slats.', pg_temp.rf_cite(ta, 'fine with the black colour')), 'ok', 'no claim'))
+   v(item, want, why)
+ WHERE pg_temp.rf_check(ja, v.item) IS DISTINCT FROM v.want;
+ PERFORM pg_temp.rf_assert(got IS NULL, 'the item check: ' || got);
  -- A person's own item is their word.
  PERFORM pg_temp.rf_assert((public.context_ledger_check_item(ja, jsonb_build_object('item_type', 'issue', 'status', 'open', 'from_role', 'us',
-   'what', 'This call appears to belong to another job.'), 'person', 'f15e0000-0000-4000-8000-000000000001', 'staff note') ->> 'ok')::boolean,
-  'a person''s item saying a row belongs to another job stands');
+   'what', 'This call is from a customer of another job.'), 'person', 'f15e0000-0000-4000-8000-000000000001', 'staff note') ->> 'ok')::boolean,
+  'a person''s item saying a row is someone else''s stands');
 END $c$;
 ROLLBACK;
 
@@ -553,10 +702,13 @@ BEGIN
   pg_temp.rf_item('request', 'open', 'us', 'We asked for the upfront payment before measuring and ordering.',
    pg_temp.rf_cite(r1, 'the upfront payment of $1,234.50 is received'), '{"closes_on":"payment","ref":"pay"}'),
   pg_temp.rf_item('issue', 'open', 'unknown', 'The call transcript is labelled as not from this job''s customer.',
-   pg_temp.rf_cite(t1, 'get the frame finished next week'), '{"ref":"label"}')), '[]', 'luna-ledger:v1');
+   pg_temp.rf_cite(t1, 'get the frame finished next week'), '{"ref":"label"}'),
+  pg_temp.rf_item('issue', 'open', 'unknown', 'Our reminder text appears to belong to another job.',
+   pg_temp.rf_cite(r2, 'the balance payment is now due'), '{"ref":"placed"}')), '[]', 'luna-ledger:v1');
  PERFORM pg_temp.rf_assert(EXISTS (SELECT 1 FROM jsonb_array_elements(res -> 'accepted') x WHERE x ->> 'ref' = 'pay')
-  AND EXISTS (SELECT 1 FROM jsonb_array_elements(res -> 'refused') x WHERE x ->> 'ref' = 'label' AND x ->> 'code' = 'elsewhere_unsupported'),
-  'the write accepts the payment request and refuses the claim on the customer''s own call: ' || res::text);
+  AND EXISTS (SELECT 1 FROM jsonb_array_elements(res -> 'refused') x WHERE x ->> 'ref' = 'label' AND x ->> 'code' = 'elsewhere_unsupported')
+  AND EXISTS (SELECT 1 FROM jsonb_array_elements(res -> 'accepted') x WHERE x ->> 'ref' = 'placed'),
+  'the write accepts the payment request and a placement claim, and refuses the claim on the customer''s own call: ' || res::text);
  k := (SELECT x ->> 'item_key' FROM jsonb_array_elements(res -> 'accepted') x WHERE x ->> 'ref' = 'pay');
  res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, '[]',
   jsonb_build_array(jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.rf_cite(xp, NULL, 'xero_invoices'))),
