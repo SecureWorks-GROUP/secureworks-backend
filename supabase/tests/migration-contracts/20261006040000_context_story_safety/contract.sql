@@ -2449,9 +2449,10 @@ BEGIN
     OR r.what IS DISTINCT FROM 'Quote Q-6120 v1 sent Wed 3 Jun 2026 (125 days), viewed; no answer recorded, but the customer was in touch since: '
                                || 'an email Tue 30 Jun 2026 (on job SWF-94122); job SWF-94122 for this customer at the same site address was accepted '
                                || 'Tue 30 Jun 2026 and may replace this quote'
-                               -- (lead cutoff, 20261007010000: no progress on this lead itself and nothing from the
-                               -- customer on it since the quote, so it is no longer followed up, said last)
-                               || '. Lead not followed up since Wed 1 Jul 2026: 4 weeks after the last quote or message with no progress' THEN
+                               -- (lead cutoff, 20261007010000: no progress on this lead itself, and 4 weeks after the
+                               -- customer's newest message, their email on SWF-94122 on 30 Jun, it is no longer
+                               -- followed up, said last)
+                               || '. Lead not followed up since Tue 28 Jul 2026: 4 weeks after the last quote or message with no progress' THEN
   RAISE EXCEPTION 'story safety contract: a quote the customer''s later accepted job at the address may replace is a check: %', row_to_json(r);
  END IF;
  s := public.context_job_story('40000000-0000-4000-8000-000000000120', asof);

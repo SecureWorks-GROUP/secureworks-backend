@@ -10,10 +10,10 @@ DO $guard$
 DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['21eef050dc79da65d01afc0d8325a38d', '20a71890d22417eef77dff240b42c07a']),
+  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['21eef050dc79da65d01afc0d8325a38d', '9e074113878161cb0ef257ec0e10f670']),
   ('public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)', ARRAY['8557a596bc5628f9823d398b54decdc3', '6ea32b33b81609c3c5838fd39cbfc129']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['7b65d10aac4a4f898c71861707346690', 'dfb75955f326b6d3d71de2212ecc7a06']),
-  ('public.context_ledger_judge(uuid[])', ARRAY['112cce8cf65ef4086483ee069ee294a5', '469c25208e17970e0912a41f6ea655a4'])
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['7b65d10aac4a4f898c71861707346690', 'b033f0a79e354567a87967d0efdf3a5c']),
+  ('public.context_ledger_judge(uuid[])', ARRAY['112cce8cf65ef4086483ee069ee294a5', 'eb359d521397c8be161bfef6421a35c9'])
  ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
   IF live IS NULL OR NOT live = ANY (x.accepted) THEN
