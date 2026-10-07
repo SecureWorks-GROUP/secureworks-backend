@@ -703,7 +703,14 @@ message) and L1e (`20261005170000`: a service-role row naming a job with no
 `writer_job`; step 1b skips a `payload.job_id` its writer declared a guess);
 the contracts undo each and prove the rest byte for byte; with it on, the P4
 rules plus step 1b, the L1d rules and L1e, under which a no-words or automated
-row also keeps its custody job. A retired
+row also keeps its custody job, and the held placement (L1f `20261006020000`,
+widened by L1g `20261006035000`): a row a contact rule or Luna already put on
+a job keeps it on a re-decision instead of going to review or the bucket while
+that job is still one of the customer's live jobs at the message time (or none
+is live, or it is one the review would offer), whatever newer job the customer
+has. A newer job reopens a placed row only through P1b at its insert, which
+moves contact-rule rows to review directly, never through the ladder; a draft
+that goes live later reopens nothing. A retired
 binding never places on either path, and P4 also owns both
 `attribute_context_event_with_luna` overloads, which follow a thread only when
 it is live and bound to one of the row's candidates. P4's rollback deletes
@@ -711,9 +718,9 @@ nothing: it re-keys retired rows (`retired:` prefix) before restoring P1a.
 A later placement slice (P2, P3,
 P-T) replaces the rules body in the 3-argument function, never the frozen
 P1a copy, and must widen the successor md5 lists and the `\if` re-apply
-guards in the L1, P1a, P1b, P4, L1b, L1c, L1d and L1e contracts, and roll L1e,
-L1d, L1c, L1b then P4 back first in L1's break-contract (each down refuses while a later body is
-live), exactly as P4 did for P1a.
+guards in the L1, P1a, P1b, P4, L1b, L1c, L1d, L1e, L1f and L1g contracts, and
+roll L1g, L1f, L1e, L1d, L1c, L1b then P4 back first in L1's break-contract
+(each down refuses while a later body is live), exactly as P4 did for P1a.
 
 The writer check reads `metadata.written_as`, which the insert trigger now
 stamps BEFORE the ladder as well as after: a writer-supplied value never
@@ -723,7 +730,10 @@ which is why email never matched a customer before the flag. P1a's
 two-argument `context_contact_jobs_at` is unchanged and still serves the Luna
 guard and P1b; the rules use the keyed four-argument overload. Preview a
 stored row with `context_attribution_preview(event_id, rules_on)` (writes
-nothing) before trusting a rule change. Contract and named rows:
+nothing) before trusting a rule change, and judge a placement by the job as
+it stood at the message time, never by its status today: history loads place
+old messages on jobs archived since (L1g evidence:
+`docs/evidence/context-l1g-held-live-job-2026-10-06.md`). Contract and named rows:
 `supabase/tests/migration-contracts/20261002110000_context_unlinked_rules/`.
 
 ## Migrations Apply Before Edge Deploys

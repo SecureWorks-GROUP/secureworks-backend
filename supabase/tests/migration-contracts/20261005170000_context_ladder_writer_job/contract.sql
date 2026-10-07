@@ -162,12 +162,12 @@ SELECT pg_temp.wj_cases(true);
 ROLLBACK;
 
 -- H. Structure.
--- A registered successor (L1f 20261006020000) replaces the rules ladder and
--- proves in its own contract that its body is exactly this one plus its edits;
--- while it is live only the rules-off ladder, the helpers and the classifier
--- are checked here, and the re-apply is skipped (L1e's guard refuses to
--- re-apply over L1f's body).
-SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1f:%' AS l1f_live \gset
+-- A registered successor (L1f 20261006020000, then L1g 20261006035000)
+-- replaces the rules ladder and proves in its own contract that its body is
+-- exactly its predecessor's plus its edits; while one is live only the
+-- rules-off ladder, the helpers and the classifier are checked here, and the
+-- re-apply is skipped (L1e's guard refuses to re-apply over a successor's body).
+SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') SIMILAR TO 'L1(f|g):%' AS l1f_live \gset
 \if :l1f_live
 DO $$
 DECLARE f text; r text;
