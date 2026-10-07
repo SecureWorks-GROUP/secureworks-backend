@@ -14,12 +14,15 @@
 --     hourly run, the email reach), no em or en dash; the jobs page is v2.
 --  3. Fixtures (fixed instant Wed 7 Oct 2026 12:00 Perth, 04:00Z): row by row,
 --     every new behaviour: the scope (a lead no longer followed up and a lost
---     job are out), row 2's stamps, row 3's prospects, misfiles and graded
---     samples, row 4's CRM read and the Xero cron, row 6 on the AI reader
---     (live, late, backlog, a shadow is never read), rows 7, 8 and 9's grades
---     (each green, then red on a newer failing sample), row 10's hourly run,
---     rows 11 to 13 on the monitored jobs, row 14's email reach; then the jobs
---     page: its scope, paging and every per-job row.
+--     job are out), row 2's stamps, row 3 (every customer message counts, a
+--     prospect's too, the same messages the placement grade's population and
+--     the review queue count; misfiles; graded samples), row 4's CRM read and
+--     the Xero cron, row 6 on the AI reader (live, late, backlog, a shadow is
+--     never read), rows 7, 8 and 9's grades (each green, then red on a newer
+--     failing sample; row 9 also red once the story switch is off now, or
+--     missing, after a passing sample), row 10's hourly run, rows 11 to 13 on
+--     the monitored jobs, row 14's email reach; then the jobs page: its scope,
+--     paging and every per-job row.
 --  4. Re-applying the migration changes nothing.
 -- Each fixture check sits in a savepoint that a run with ON_ERROR_STOP off (the
 -- failing-first run) rolls back to, so every section reports; with ON_ERROR_STOP
@@ -104,6 +107,8 @@ BEGIN
   AND (pol->'agent'->>'baseline_calls')::integer = 30 AND (pol->'agent'->>'story_calls')::integer = 10
   AND (pol->'agent'->>'story_flag_required')::boolean AND NOT (pol->'agent'->>'story_tool_missed_gates')::boolean
   AND NOT (pol->'agent'->>'ledger_mode_live_gates')::boolean, 'shape', 7, 'policy grade bars wrong');
+ PERFORM pg_temp.sc2_check(pol->'agent'->>'story_switch_flag' = 'context_job_story_v1', 'shape', 9,
+  'policy must name the story switch row 9 reads now (feature_flags.context_job_story_v1)');
  PERFORM pg_temp.sc2_check(NOT pol ? 'brief' AND NOT pol ? 'facts_coverage', 'shape', 8, 'the policy still carries the brief');
  PERFORM pg_temp.sc2_raise('shape');
 END $shape$;
@@ -161,7 +166,8 @@ ROLLBACK;
 -- 3. Fixtures: twelve monitored live jobs, a lead no longer followed up, a lost
 -- job and a holding job; messages in every graded state; ledger readings
 -- (live, retired, shadow); grades of every kind; a placement sample; the
--- hourly run and its receipt; a mailbox whose live floor reaches the jobs' starts.
+-- hourly run and its receipt; a mailbox whose live floor reaches the jobs'
+-- starts; the story switch on.
 BEGIN;
 SET LOCAL session_replication_role = replica;
 ALTER TABLE public.business_events ALTER COLUMN context_captured_at SET DEFAULT '2026-07-01 00:00Z',
@@ -365,11 +371,15 @@ SELECT max(r.id), 'rayleigh', '2026-10-07 03:45Z', 'all_clear', '{}' FROM public
 -- Row 14: one selected mailbox whose live reading reaches back before every fixture job's lead-in.
 INSERT INTO public.monitored_mailboxes (email, display_name, scope_label, enabled, status, source_key, kind, updated_by)
 VALUES ('sc2box@example.test', 'SC2 box', 'admin', true, 'active', 'sc2box', 'user', 'contract:sc2');
+-- Row 9: the story switch (feature_flags.context_job_story_v1) on now, as the agent test ran it.
+INSERT INTO public.feature_flags (flag_name, enabled, description, updated_at)
+VALUES ('context_job_story_v1', true, 'contract:sc2', '2026-07-01 00:00Z')
+ON CONFLICT (flag_name) DO UPDATE SET enabled = true, updated_at = '2026-07-01 00:00Z';
 
 SAVEPOINT sc2_card;
 DO $card$
 DECLARE s jsonb := public.context_scorecard('2026-10-07 04:00Z'); s0 jsonb := (SELECT b.s FROM sc2_before b); l jsonb; l0 jsonb;
- a integer[]; a0 integer[];
+ a integer[]; a0 integer[]; pr integer; pa integer;
 BEGIN
  -- Scope: twelve monitored live jobs; the lead no longer followed up is live but out.
  PERFORM pg_temp.sc2_check((s->>'live_jobs')::integer = 13 AND (s->>'monitored_jobs')::integer = 12 AND (s->>'leads_not_followed_up')::integer = 1,
@@ -384,15 +394,31 @@ BEGIN
   AND (substring(l->>'note' FROM '; ([0-9]+) stamped before'))::integer - (substring(l0->>'note' FROM '; ([0-9]+) stamped before'))::integer = 1,
   'card', 2, 'texts lane does not name the older stamps: ' || coalesce(l->>'note', 'no lane'));
 
- -- Row 3: a prospect with no job yet is left out of the customers; misfiles count the holding job; the graded samples.
+ -- Row 3: every customer message counts, a prospect's with no job yet too (the owner has not ruled
+ -- prospects out), so the customer-facing lane, the placement grade's population and the review
+ -- queue count the same messages; misfiles count the holding job; the graded samples.
  l := pg_temp.sc2_lane(s, 3, 'customer_facing'); l0 := pg_temp.sc2_lane(s0, 3, 'customer_facing');
  a := pg_temp.sc2_ab(l->>'value'); a0 := pg_temp.sc2_ab(l0->>'value');
- -- customers +9 (J01, J02, J03 x3, J04, the lead, the holding job and the bucket text; the prospect
- -- left out), on a job +8.
- PERFORM pg_temp.sc2_check(a[1] - a0[1] = 8 AND a[2] - a0[2] = 9 AND l->>'value' ~ '^[0-9]+ of [0-9]+ customer messages in 30 days are on a job$',
-  'card', 3, 'customer_facing wrong (a prospect with no job is not a customer to place): ' || coalesce(l->>'value', 'no lane'));
- PERFORM pg_temp.sc2_check((substring(l->>'note' FROM '; ([0-9]+) messages from prospects'))::integer
-  - (substring(l0->>'note' FROM '; ([0-9]+) messages from prospects'))::integer = 1, 'card', 3, 'customer_facing note wrong: ' || coalesce(l->>'note', ''));
+ -- customers +10 (J01, J02, J03 x3, J04, the lead, the holding job, the bucket text and the
+ -- prospect's text on no job), on a job +8.
+ PERFORM pg_temp.sc2_check(a[1] - a0[1] = 8 AND a[2] - a0[2] = 10 AND l->>'value' ~ '^[0-9]+ of [0-9]+ customer messages in 30 days are on a job$',
+  'card', 3, 'customer_facing wrong (a prospect''s message counts until the owner rules prospects out): ' || coalesce(l->>'value', 'no lane'));
+ -- The same messages as the placement grade's customer_facing population at the instant: its
+ -- placed items of all its items, the placed share right_job_customer_facing multiplies by.
+ SELECT max(p.population_rows), max(p.population_all) INTO pr, pa
+ FROM public.context_placement_sample('2026-10-07 04:00Z', 1, NULL, 30, 'customer_facing') p;
+ PERFORM pg_temp.sc2_check(a[1] = pr AND a[2] = pa, 'card', 3,
+  format('customer_facing reads %s of %s, the placement grade''s population %s of %s: row 3''s lanes must count the same customer messages',
+         a[1], a[2], pr, pa));
+ -- The note says how many of them are on no job and stamped as a prospect's or lead's (counted, never left out).
+ PERFORM pg_temp.sc2_check((substring(l->>'note' FROM '; ([0-9]+) of them are on no job and stamped as a prospect'))::integer
+  - (substring(l0->>'note' FROM '; ([0-9]+) of them are on no job and stamped as a prospect'))::integer = 1
+  AND l->>'note' LIKE '%still counted: the owner has not ruled prospects out%', 'card', 3, 'customer_facing note wrong: ' || coalesce(l->>'note', ''));
+ -- The review queue holds the prospect's text and the bucket text, neither with a candidate job.
+ l := pg_temp.sc2_lane(s, 3, 'review_queue'); l0 := pg_temp.sc2_lane(s0, 3, 'review_queue');
+ a := pg_temp.sc2_ab(l->>'value'); a0 := pg_temp.sc2_ab(l0->>'value');
+ PERFORM pg_temp.sc2_check(a[1] - a0[1] = 0 AND a[2] - a0[2] = 2, 'card', 3,
+  'review_queue must hold the prospect''s text and the bucket text: ' || coalesce(l->>'value', 'no lane'));
  l := pg_temp.sc2_lane(s, 3, 'known_misfiles'); l0 := pg_temp.sc2_lane(s0, 3, 'known_misfiles');
  PERFORM pg_temp.sc2_check((l->>'number')::integer - (l0->>'number')::integer = 3 AND l->>'status' = 'red'
   AND l->>'value' LIKE '%on a holding job%', 'card', 3, 'known_misfiles must count the payload misfile and both rows on the holding job: '
@@ -442,12 +468,15 @@ BEGIN
  l := pg_temp.sc2_lane(s, 8, 'answer_grade');
  PERFORM pg_temp.sc2_check(l->>'status' = 'green' AND (l->>'number')::integer = 0 AND l->>'note' LIKE 'every bar met%', 'card', 8,
   'answer_grade wrong: ' || coalesce(l::text, 'no lane'));
- -- Row 9 and 9+: 30 of 30 baseline answers and 10 of 10 story calls, story switch on, live readings.
+ -- Row 9 and 9+: 30 of 30 baseline answers and 10 of 10 story calls, story switch on at the run and
+ -- now, live readings; both notes name the switch as it is now.
  l := pg_temp.sc2_lane(s, 9, 'agent_test');
  PERFORM pg_temp.sc2_check(l->>'status' = 'green' AND (l->>'number')::numeric = 100 AND l->>'value' LIKE '30 of 30 baseline answers correct on 10 jobs%'
-  AND l->>'note' LIKE '%0 calls answered without a story tool (listed, not gated)%', 'card', 9, 'agent_test wrong: ' || coalesce(l::text, 'no lane'));
+  AND l->>'note' LIKE 'every bar met; 0 calls answered without a story tool (listed, not gated)%'
+  AND l->>'note' LIKE '%; story switch on now (feature_flags.context_job_story_v1)', 'card', 9, 'agent_test wrong: ' || coalesce(l::text, 'no lane'));
  l := pg_temp.sc2_lane(s, 9, 'story_test');
- PERFORM pg_temp.sc2_check(l->>'status' = 'green' AND l->>'value' = '10 of 10 story calls pass; loops covered 20 of 20', 'card', 9,
+ PERFORM pg_temp.sc2_check(l->>'status' = 'green' AND l->>'value' = '10 of 10 story calls pass; loops covered 20 of 20'
+  AND l->>'note' = 'every bar met; story switch on now (feature_flags.context_job_story_v1); row 9+', 'card', 9,
   'story_test wrong: ' || coalesce(l::text, 'no lane'));
 
  -- Row 10: the hourly run, read by Rayleigh.
@@ -528,6 +557,40 @@ END $failing$;
 ROLLBACK TO SAVEPOINT sc2_failing;
 \endif
 ROLLBACK TO SAVEPOINT failing_samples;
+
+-- Row 9: done means green and live. The passing agent test stays stored, the story switch goes
+-- off now (then its row goes missing, which is off too): rows 9 and 9+ read red, saying so.
+SAVEPOINT switch_off;
+UPDATE public.feature_flags SET enabled = false WHERE flag_name = 'context_job_story_v1';
+SAVEPOINT sc2_switch;
+DO $switch$
+DECLARE s jsonb; l jsonb; v text;
+BEGIN
+ FOREACH v IN ARRAY ARRAY['off', 'missing'] LOOP
+  IF v = 'missing' THEN DELETE FROM public.feature_flags WHERE flag_name = 'context_job_story_v1'; END IF;
+  s := public.context_scorecard('2026-10-07 04:00Z');
+  l := pg_temp.sc2_lane(s, 9, 'agent_test');
+  PERFORM pg_temp.sc2_check(l->>'status' = 'red' AND l->>'value' LIKE '30 of 30 baseline answers correct on 10 jobs%'
+   AND l->>'note' LIKE 'story switch off now (feature_flags.context_job_story_v1); 0 calls answered without a story tool%'
+   AND l->>'note' NOT LIKE '%switch on now%', 'switch', 9,
+   'switch ' || v || ': agent_test must read red with the story switch off now: ' || coalesce(l::text, 'no lane'));
+  l := pg_temp.sc2_lane(s, 9, 'story_test');
+  PERFORM pg_temp.sc2_check(l->>'status' = 'red' AND l->>'value' = '10 of 10 story calls pass; loops covered 20 of 20'
+   AND l->>'note' = 'story switch off now (feature_flags.context_job_story_v1); row 9+', 'switch', 9,
+   'switch ' || v || ': story_test must read red with the story switch off now: ' || coalesce(l::text, 'no lane'));
+  PERFORM pg_temp.sc2_check(pg_temp.sc2_row(s, 9)->>'status' = 'red' AND s->'summary'->'red_rows' @> '[9]'::jsonb
+   AND s->'summary'->'red_lanes' @> '["9:agent_test", "9:story_test"]'::jsonb, 'switch', 9,
+   'switch ' || v || ': row 9 must read red with the story switch off now');
+  -- Nothing else on the card reads the switch.
+  PERFORM pg_temp.sc2_check(pg_temp.sc2_row(s, 8)->>'status' = 'green' AND pg_temp.sc2_lane(s, 7, 'fact_grade')->>'status' = 'green',
+   'switch', 9, 'switch ' || v || ': rows 7 and 8 must not read the story switch');
+ END LOOP;
+ PERFORM pg_temp.sc2_raise('switch');
+END $switch$;
+\if :ERROR
+ROLLBACK TO SAVEPOINT sc2_switch;
+\endif
+ROLLBACK TO SAVEPOINT switch_off;
 
 -- Row 6: a reading live at the instant and retired since still counts as live then; a newer
 -- reading promoted after the instant does not.

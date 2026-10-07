@@ -22,11 +22,14 @@
 --   classifier's read (context_party_roles_lanes, 20261007060000): the same
 --   counts as before, with how many stamps are older than the live classifier.
 --   The crew and staff lane is unchanged.
---  Row 3. customer_facing leaves out the messages from prospects and leads with
---   no job yet that sit on no job (context_party_roles_lanes no_job_customers
---   minus no_job_customers_on_a_job): no job exists to place them on. The value
---   keeps its "<on a job> of <customers> ..." form (the v4 re-stamp script
---   compares it). known_misfiles counts every known misfile
+--  Row 3. customer_facing counts every customer message, a prospect's or a
+--   lead's with no job yet too: the owner has not ruled prospects out, and the
+--   right-job grade's population (its placed share) and the review queue count
+--   them, so row 3's lanes count the same messages. Its note says how many sit
+--   on no job stamped as a prospect's or lead's (context_party_roles_lanes
+--   no_job_customers minus no_job_customers_on_a_job), never left out. The
+--   value keeps its "<on a job> of <customers> ..." form (the v4 re-stamp
+--   script compares it). known_misfiles counts every known misfile
 --   (context_placement_misfile_counts, 20261007070000): rows whose own payload
 --   names another job, plus every row on a holding job, which is never a
 --   customer's job. right_job_accuracy is two lanes, one per population of the
@@ -53,7 +56,11 @@
 --   part of the job answer any more).
 --  Row 9. The newest agent grade: 30 baseline answers all correct on at least
 --   10 jobs with the story switch on, live readings and no unsafe line; 9+ the
---   story calls all pass.
+--   story calls all pass. Both also need the story switch
+--   (feature_flags.context_job_story_v1) on now: done means green and live, and
+--   a test run with the switch on proves nothing once it is off (the agents
+--   read the older read again), so both lanes read "story switch off now" and
+--   red while it is off or missing, and both notes name it as it is now.
 --  Row 10. hourly_run is context_scorecard_run_status(as_of)->'lane'
 --   (20261007040000), as it is.
 --  Rows 11 to 13. Unchanged rules, on the monitored live jobs; the live ledger
@@ -65,8 +72,9 @@
 -- Every share is rounded down to 0.1, never up, so no lane reads green by
 -- rounding; a failure share (lower is better) is rounded up. Every threshold
 -- is in context_scorecard_policy(). A lane SQL cannot measure stays red with the
--- reason. p_as_of cuts the evidence as in v1; the CRM history read and the
--- grades' reading status read the database as it is now (each says so).
+-- reason. p_as_of cuts the evidence as in v1; the CRM history read, the
+-- grades' reading status and the story switch read the database as it is now
+-- (each says so).
 --
 -- context_scorecard_jobs pages over the monitored live jobs in id order and
 -- grades rows 2, 4, 6, 11, 12, 13 and 14 for each; rows 7, 8 and 9 appear on
@@ -97,8 +105,9 @@
 -- every live job, about 1.4 s, so v2 no longer calls it), the lead rule, the
 -- hourly run status, the CRM history read and
 -- the Xero top-up status, the party roles read, the placement grades and
--- misfile counts, the email reach reads, the item kinds and grades, and the
--- ledger's evidence, checks and failures. Signatures, grants and the service
+-- misfile counts, the email reach reads, the item kinds and grades, the
+-- ledger's evidence, checks and failures, and the story switch row in
+-- feature_flags (row 9, as it is now). Signatures, grants and the service
 -- role only access stay.
 --
 -- Rollback: supabase/rollbacks/20261007120000_context_scorecard_v2_down.sql
@@ -113,8 +122,8 @@ DECLARE problems text[] := '{}'; x record; live text; f text;
 BEGIN
  -- Replaced: W11's live body, or this migration's (a re-apply).
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_scorecard_policy()', ARRAY['50ed8ccdac924097399359a9857f02a8', 'c878868c9d3779a6d3721b04211b8451']),
-  ('public.context_scorecard(timestamptz)', ARRAY['82574dfb65328d855ad87683a78ca9cd', '3c21b040cb4ab74d440e2090f27da7c9']),
+  ('public.context_scorecard_policy()', ARRAY['50ed8ccdac924097399359a9857f02a8', 'cf2438ff9b72b8aca9191b0dcf80c7b6']),
+  ('public.context_scorecard(timestamptz)', ARRAY['82574dfb65328d855ad87683a78ca9cd', '13f30d2cd4cafb4b6c30f1243b6f3195']),
   ('public.context_scorecard_jobs(uuid,integer,timestamptz)', ARRAY['6fd07f87b10ff8e0164f2daad98cce48', 'c0a2b2a18dfa2f6bc78f883911896d87'])
  ) AS t(sig, accepted) LOOP
   live := NULL;
@@ -167,7 +176,8 @@ BEGIN
   ('context_extraction_runs','started_at'),('context_extraction_runs','error'),
   ('context_grades','kind'),('context_grades','sample_id'),('context_grades','job_id'),('context_grades','unit'),
   ('context_grades','verdicts'),('context_grades','gated'),
-  ('context_capture_runs','source'),('context_email_history_plan','window_from'),('xero_invoices','job_id'),('feature_flags','flag_name')
+  ('context_capture_runs','source'),('context_email_history_plan','window_from'),('xero_invoices','job_id'),('feature_flags','flag_name'),
+  ('feature_flags','enabled')
  ) AS c(tbl, col) LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || x.tbl) AND a.attname = x.col
                  AND a.attnum > 0 AND NOT a.attisdropped) THEN
@@ -247,9 +257,12 @@ AS $fn$
    'card_tests', jsonb_build_array('timeline', 'record_loops', 'money', 'dates', 'honesty')),
   -- Row 9 and 9+: the agent test (T7). A call that answered without a story
   -- tool is listed, not gated (GRADE-PLAN part C), and the ledger mode at the
-  -- run is reported, not gated (the readings must be live).
+  -- run is reported, not gated (the readings must be live). The story switch
+  -- (the feature_flags row story_switch_flag names) must be on now as well as
+  -- at the run: done means green and live.
   'agent', jsonb_build_object('grade_kind', 'agent', 'min_jobs', 10, 'baseline_calls', 30, 'story_calls', 10,
-   'max_unsafe_lines', 0, 'story_flag_required', true, 'story_tool_missed_gates', false, 'ledger_mode_live_gates', false),
+   'max_unsafe_lines', 0, 'story_flag_required', true, 'story_switch_flag', 'context_job_story_v1',
+   'story_tool_missed_gates', false, 'ledger_mode_live_gates', false),
   -- Rows 11 to 13.
   'story', jsonb_build_object('green_pct', 95, 'amber_pct', 50, 'timeline_min_rows', 2),
   -- Row 14.
@@ -259,7 +272,7 @@ AS $fn$
  )
 $fn$;
 COMMENT ON FUNCTION public.context_scorecard_policy() IS
- 'Context scorecard v2 (20261007120000): every threshold the scorecard grades against, in one place: the scope (the live jobs the lead rule keeps monitored, owner 7 Oct 2026), lane quiet minutes in Perth working time, every percentage, the history stall rule and the cron jobs that keep history loads daily (xero-history-daily for Xero), the right-job grade (a whole sample of at least 100, right_of_all at least 95%), the reading rule on the AI reader (2 hours live, 24 hours backlog), and the bars of the ledger, story and agent grades. Changed only by migration.';
+ 'Context scorecard v2 (20261007120000): every threshold the scorecard grades against, in one place: the scope (the live jobs the lead rule keeps monitored, owner 7 Oct 2026), lane quiet minutes in Perth working time, every percentage, the history stall rule and the cron jobs that keep history loads daily (xero-history-daily for Xero), the right-job grade (a whole sample of at least 100, right_of_all at least 95%), the reading rule on the AI reader (2 hours live, 24 hours backlog), the bars of the ledger, story and agent grades, and the story switch row 9 needs on now (feature_flags.context_job_story_v1). Changed only by migration.';
 
 -- 2. The scorecard: rows 1 to 14, per lane, and the alarms.
 CREATE OR REPLACE FUNCTION public.context_scorecard(p_as_of timestamptz DEFAULT now())
@@ -283,6 +296,7 @@ DECLARE
  v_fresh jsonb; v_ecap jsonb; v_gcap jsonb; v_tcap jsonb; v_dt jsonb; v_vs jsonb; v_eh jsonb;
  v_crm jsonb; v_xd jsonb; v_mis jsonb; v_reach jsonb; v_run jsonb;
  v_keys text; v_missing text[]; v_rows jsonb; v_why text[];
+ v_switch text; v_switch_on boolean; -- row 9: the story switch's flag name, and whether it is on now
 BEGIN
  v_from := v_as_of - make_interval(days => (v_pol->>'window_days')::integer);
  -- The scope: the live jobs the lead rule keeps monitored at the instant.
@@ -384,24 +398,28 @@ BEGIN
   'note', 'counted from ' || (v_pol->>'crew_rule_since')));
 
  ---------------------------------------------------------------------------
- -- Row 3. Placement.
+ -- Row 3. Placement. Every customer message counts, a prospect's or a lead's
+ -- with no job yet too: the owner has not ruled prospects out, and the right-job
+ -- grade's population (its placed share) and the review queue count them, so
+ -- row 3's lanes count the same messages.
  SELECT coalesce(sum((v_ev->l->>'customer')::numeric), 0) AS cust, coalesce(sum((v_ev->l->>'customer_placed')::numeric), 0) AS cust_placed,
         coalesce(sum((v_ev->l->>'n')::numeric), 0) AS msgs, coalesce(sum((v_ev->l->>'placed')::numeric), 0) AS placed,
         coalesce(sum(greatest(coalesce((v_pr->l->>'no_job_customers')::numeric, 0)
                               - coalesce((v_pr->l->>'no_job_customers_on_a_job')::numeric, 0), 0)), 0) AS prospects
  INTO v_q FROM unnest(ARRAY['texts', 'calls', 'call_transcripts', 'emails_in', 'emails_out']) l;
- -- Prospects and leads with no job yet have no job to be placed on: left out of
- -- the customers (never more than the customer messages that are on no job).
+ -- How many of them sit on no job stamped as a prospect's or lead's: named in
+ -- the note, never left out (at most the customer messages on no job).
  v_m := least(v_q.prospects, greatest(v_q.cust - v_q.cust_placed, 0));
- v_n := v_q.cust - v_m;
+ v_n := v_q.cust;
  v_lanes := v_lanes || jsonb_build_array(jsonb_build_object('row', 3, 'lane', 'customer_facing',
   'number', CASE WHEN v_n = 0 THEN NULL ELSE trunc(100.0 * v_q.cust_placed / v_n, 1) END,
   'unit', '% of customer messages on a job', 'green', (v_pol->'placement'->>'green_pct')::numeric,
   'amber', (v_pol->'placement'->>'amber_pct')::numeric, 'higher_is_better', true,
   'status', CASE WHEN v_n = 0 THEN 'green' END,
   'value', v_q.cust_placed || ' of ' || v_n || ' customer messages in ' || (v_pol->>'window_days') || ' days are on a job',
-  'note', 'placed share, an upper bound on right-job accuracy; ' || v_m || ' messages from prospects or leads with no job yet left out '
-          || '(context_party_roles_lanes); all messages: ' || v_q.placed || ' of ' || v_q.msgs || ' on a job'));
+  'note', 'placed share, an upper bound on right-job accuracy, of every customer message (the placement grade''s customer_facing population '
+          || 'counts the same); ' || v_m || ' of them are on no job and stamped as a prospect''s or lead''s (context_party_roles_lanes), '
+          || 'still counted: the owner has not ruled prospects out; all messages: ' || v_q.placed || ' of ' || v_q.msgs || ' on a job'));
  v_n := coalesce((v_ev->'xero'->>'n')::numeric, 0) + coalesce((v_ev->'quotes'->>'n')::numeric, 0);
  v_d := coalesce((v_ev->'xero'->>'placed')::numeric, 0) + coalesce((v_ev->'quotes'->>'placed')::numeric, 0);
  v_lanes := v_lanes || jsonb_build_array(jsonb_build_object('row', 3, 'lane', 'xero_and_quotes',
@@ -727,9 +745,15 @@ BEGIN
           || '; the job story card (records plus the live ledger); context_grades_newest (readings as they stand now)'));
 
  ---------------------------------------------------------------------------
- -- Row 9. Agent use (and 9+, the story test): the T7 agent grade.
+ -- Row 9. Agent use (and 9+, the story test): the T7 agent grade, and the
+ -- story switch as it is now. Done means green and live: a test run with the
+ -- switch on proves nothing once it is off (the agents read the older read
+ -- again), so both lanes are red while it is off or its row is missing.
  SELECT * INTO v_g FROM public.context_grades_newest(v_as_of) g WHERE g.kind = v_pol->'agent'->>'grade_kind';
+ v_switch := v_pol->'agent'->>'story_switch_flag';
+ v_switch_on := EXISTS (SELECT 1 FROM public.feature_flags ff WHERE ff.flag_name = v_switch AND ff.enabled);
  v_why := '{}';
+ IF NOT v_switch_on THEN v_why := v_why || format('story switch off now (feature_flags.%s)', coalesce(v_switch, '?')); END IF;
  IF coalesce(v_g.samples, 0) = 0 OR coalesce(v_g.units, 0) = 0 THEN v_why := v_why || 'no graded agent test'::text;
  ELSE
   IF v_g.jobs < (v_pol->'agent'->>'min_jobs')::integer THEN v_why := v_why || format('%s jobs, at least %s needed', v_g.jobs, v_pol->'agent'->>'min_jobs'); END IF;
@@ -771,7 +795,8 @@ BEGIN
   'note', CASE WHEN cardinality(v_missing) > 0 THEN array_to_string(v_missing, '; ') ELSE 'every bar met' END
           || CASE WHEN coalesce(v_g.samples, 0) > 0 THEN '; ' || coalesce(v_g.tests->>'story_tool_missed', '0')
                   || ' calls answered without a story tool (listed, not gated); ledger mode at the run: live '
-                  || coalesce(v_g.run->>'ledger_live', '0') || ', shadow ' || coalesce(v_g.run->>'ledger_shadow', '0') ELSE '' END));
+                  || coalesce(v_g.run->>'ledger_live', '0') || ', shadow ' || coalesce(v_g.run->>'ledger_shadow', '0') ELSE '' END
+          || CASE WHEN v_switch_on THEN '; story switch on now (feature_flags.' || v_switch || ')' ELSE '' END));
  -- 9+: the story test.
  v_missing := v_why;
  IF coalesce(v_g.samples, 0) > 0 AND coalesce(v_g.units, 0) > 0 THEN
@@ -794,7 +819,8 @@ BEGIN
                 ELSE coalesce(v_g.tests->'story'->>'passed', '0') || ' of ' || coalesce(v_g.tests->'story'->>'graded', '0')
                      || ' story calls pass; loops covered ' || coalesce(v_g.tests->'story'->>'loops_covered', '0') || ' of '
                      || coalesce(v_g.tests->'story'->>'loops_applicable', '0') END,
-  'note', CASE WHEN cardinality(v_missing) > 0 THEN array_to_string(v_missing, '; ') ELSE 'every bar met' END || '; row 9+'));
+  'note', CASE WHEN cardinality(v_missing) > 0 THEN array_to_string(v_missing, '; ') ELSE 'every bar met' END
+          || CASE WHEN v_switch_on THEN '; story switch on now (feature_flags.' || v_switch || ')' ELSE '' END || '; row 9+'));
 
  ---------------------------------------------------------------------------
  -- Row 10. Health: this read, and the hourly run (its own lane, as it is).
@@ -924,7 +950,7 @@ BEGIN
   (6, 'Reading', 'every placed item on a monitored live job is read by its live AI reading (the job ledger) within 2 hours; the unread backlog is 0 each morning'),
   (7, 'Facts', 'a published catalogue of ledger item kinds; an independent grader passes at least 95% of ledger items on a 10-job sample, graded on live readings'),
   (8, 'Job answer', 'the job story card is correct on an independently graded 10-job sample: every bar of the story grade met, graded on live readings'),
-  (9, 'Agent use', 'with the story switch on, the agent answers where a job is at, what we last told the customer and what is owed for the 10-job test set (30 of 30); 9+: the story test covers every should-surface loop'),
+  (9, 'Agent use', 'with the story switch on, at the test run and now, the agent answers where a job is at, what we last told the customer and what is owed for the 10-job test set (30 of 30); 9+: the story test covers every should-surface loop'),
   (10, 'Health', 'one scorecard shows rows 1 to 9 per lane and per job; Rayleigh runs it hourly and reports only red rows'),
   (11, 'Job story', 'every monitored live job has a start-to-finish timeline with a cited summary per phase'),
   (12, 'Open loops', 'every monitored live job lists what is promised, asked, owed and unconfirmed, each with why and its source'),
@@ -964,7 +990,7 @@ BEGIN
 END
 $fn$;
 COMMENT ON FUNCTION public.context_scorecard(timestamptz) IS
- 'Context scorecard v2 (20261007120000): the owner''s definition of done, rows 1 to 14 (context-scorecard-v2), on the new AI reader (the job ledger) and the live jobs the lead rule keeps monitored (context_lead_monitored_jobs; live_jobs, monitored_jobs and leads_not_followed_up on the card). Each row has lanes; each lane has status green, amber or red, the number, its unit and both thresholds (context_scorecard_policy); a row is its worst lane; every share is rounded down. Row 2 reads the stored stamps through context_party_roles_lanes; row 3 adds the placement grade per population (right_job_customer_facing, right_job_xero_and_quotes) and counts rows on a holding job as known misfiles; row 4 reads context_history_crm_summary (done = loaded or tried with no CRM contact) and the Xero top-up; row 6 counts an item read only when the job''s live ledger reading has read it; rows 7, 8 and 9 read the item kinds and the newest ledger, story and agent grades; row 10 adds context_scorecard_run_status''s hourly_run lane; row 14 adds the email reach. Alarms: lane_quiet and history_load_stalled. Rows SQL cannot measure are red with the reason. p_as_of cuts every business_events read and the lead rule; the CRM history and Xero top-up reads, the status functions and the grades'' reading status read the database as it is now. Read only; service role only; statement_timeout 50 s for API callers.';
+ 'Context scorecard v2 (20261007120000): the owner''s definition of done, rows 1 to 14 (context-scorecard-v2), on the new AI reader (the job ledger) and the live jobs the lead rule keeps monitored (context_lead_monitored_jobs; live_jobs, monitored_jobs and leads_not_followed_up on the card). Each row has lanes; each lane has status green, amber or red, the number, its unit and both thresholds (context_scorecard_policy); a row is its worst lane; every share is rounded down. Row 2 reads the stored stamps through context_party_roles_lanes; row 3 counts every customer message, a prospect''s too (the owner has not ruled prospects out), adds the placement grade per population (right_job_customer_facing, right_job_xero_and_quotes) and counts rows on a holding job as known misfiles; row 4 reads context_history_crm_summary (done = loaded or tried with no CRM contact) and the Xero top-up; row 6 counts an item read only when the job''s live ledger reading has read it; rows 7, 8 and 9 read the item kinds and the newest ledger, story and agent grades, and row 9 also needs the story switch (feature_flags.context_job_story_v1) on now; row 10 adds context_scorecard_run_status''s hourly_run lane; row 14 adds the email reach. Alarms: lane_quiet and history_load_stalled. Rows SQL cannot measure are red with the reason. p_as_of cuts every business_events read and the lead rule; the CRM history and Xero top-up reads, the status functions, the grades'' reading status and the story switch read the database as it is now. Read only; service role only; statement_timeout 50 s for API callers.';
 
 -- 3. Per job: one page of the monitored live jobs, ordered by id.
 CREATE OR REPLACE FUNCTION public.context_scorecard_jobs(p_after uuid DEFAULT NULL, p_limit integer DEFAULT 150,

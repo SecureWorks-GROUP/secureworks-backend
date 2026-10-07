@@ -16,7 +16,7 @@ FROM pg_proc p
 WHERE p.oid IN ('public.context_scorecard_policy()'::regprocedure, 'public.context_scorecard(timestamptz)'::regprocedure,
                 'public.context_scorecard_jobs(uuid,integer,timestamptz)'::regprocedure)
 ORDER BY 1;
--- v2's md5: policy c878868c9d3779a6d3721b04211b8451, card 3c21b040cb4ab74d440e2090f27da7c9,
+-- v2's md5: policy cf2438ff9b72b8aca9191b0dcf80c7b6, card 13f30d2cd4cafb4b6c30f1243b6f3195,
 -- jobs c0a2b2a18dfa2f6bc78f883911896d87.
 WITH c AS (SELECT public.context_scorecard(now()) AS s, clock_timestamp() AS done_at)
 SELECT c.s->>'version' AS version, c.s->'scope' AS scope, c.s->'summary'->'red_rows' AS red_rows,

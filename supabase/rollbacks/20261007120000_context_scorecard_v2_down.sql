@@ -22,8 +22,8 @@ DO $guard$
 DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_scorecard_policy()', ARRAY['c878868c9d3779a6d3721b04211b8451', '50ed8ccdac924097399359a9857f02a8']),
-  ('public.context_scorecard(timestamptz)', ARRAY['3c21b040cb4ab74d440e2090f27da7c9', '82574dfb65328d855ad87683a78ca9cd']),
+  ('public.context_scorecard_policy()', ARRAY['cf2438ff9b72b8aca9191b0dcf80c7b6', '50ed8ccdac924097399359a9857f02a8']),
+  ('public.context_scorecard(timestamptz)', ARRAY['13f30d2cd4cafb4b6c30f1243b6f3195', '82574dfb65328d855ad87683a78ca9cd']),
   ('public.context_scorecard_jobs(uuid,integer,timestamptz)', ARRAY['c0a2b2a18dfa2f6bc78f883911896d87', '6fd07f87b10ff8e0164f2daad98cce48'])
  ) AS t(sig, accepted) LOOP
   live := NULL;

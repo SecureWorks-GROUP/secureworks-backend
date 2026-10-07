@@ -627,9 +627,13 @@ item is read once the job's live ledger reading's `evidence_until` covers its
 row reads its slice's own read, never a re-derivation: row 2
 `context_party_roles_lanes`, row 3 `context_placement_grades_newest` and
 `context_placement_misfile_counts` (a row on a holding job is a known
-misfile), row 4 `context_history_crm_summary` (done = loaded or tried with no
-CRM contact) and the Xero top-up, rows 7 to 9 `context_item_kinds` and
-`context_grades_newest`, row 10 `context_scorecard_run_status(as_of)->'lane'`
+misfile; every customer message counts, a prospect's with no job yet too,
+until the owner rules on prospects, so its lanes count what the placement
+grade's population counts), row 4 `context_history_crm_summary` (done = loaded
+or tried with no CRM contact) and the Xero top-up, rows 7 to 9
+`context_item_kinds` and `context_grades_newest` (row 9 also needs the story
+switch `feature_flags.context_job_story_v1` on now, not only at the test run:
+done means green and live), row 10 `context_scorecard_run_status(as_of)->'lane'`
 as it is, row 14 `context_email_history_reach`. Shares round down, never up.
 Both reads carry `statement_timeout = 50s`, which PostgREST hoists, so the
 door's 8 s role timeout does not cut the card. While a later body is live,
