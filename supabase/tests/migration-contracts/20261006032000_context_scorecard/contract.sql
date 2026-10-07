@@ -6,8 +6,20 @@
 -- for 3 runs raises history_load_stalled; and the per-job page grades each
 -- live job. Every fixture row is synthetic and rolled back; user triggers are
 -- off for it. The instant measured is Tue 6 Oct 2026 12:00 Perth (04:00Z).
+-- The scorecard v2 (20261007120000) replaces this migration's three bodies (the
+-- policy, the card and the jobs page; the lane rule is 20261006034000's). While
+-- a later body is live, each part below stands W11's bodies back up inside its
+-- own rolled-back transaction (w11_scorecard.sql, word for word), so this
+-- contract keeps proving what W11 promised, which is also what v2's rollback
+-- puts back.
+SELECT md5(prosrc) <> '82574dfb65328d855ad87683a78ca9cd' AS w11_card_moved
+FROM pg_proc WHERE oid = 'public.context_scorecard(timestamptz)'::regprocedure \gset
 
 -- 1. Shape and access.
+BEGIN;
+\if :w11_card_moved
+\ir w11_scorecard.sql
+\endif
 DO $shape$
 DECLARE f text; p record;
 BEGIN
@@ -67,9 +79,14 @@ BEGIN
   RAISE EXCEPTION 'scorecard contract: lane rule wrong';
  END IF;
 END $lanes$;
+ROLLBACK;
 
 -- 4. It answers inside a read-only transaction, with 14 rows of graded lanes.
-BEGIN READ ONLY;
+BEGIN;
+\if :w11_card_moved
+\ir w11_scorecard.sql
+\endif
+SET TRANSACTION READ ONLY;
 DO $ro$
 DECLARE s jsonb := public.context_scorecard('2026-10-06 04:00Z'); j jsonb := public.context_scorecard_jobs(NULL, 5, '2026-10-06 04:00Z');
 BEGIN
@@ -101,6 +118,9 @@ ROLLBACK;
 
 -- 5. Fixtures: three live jobs and one lost job, messages in every graded state.
 BEGIN;
+\if :w11_card_moved
+\ir w11_scorecard.sql
+\endif
 SET LOCAL session_replication_role = replica;
 
 CREATE TEMP TABLE sc_before ON COMMIT DROP AS SELECT public.context_scorecard('2026-10-06 04:00Z') AS s;

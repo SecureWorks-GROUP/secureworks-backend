@@ -511,7 +511,10 @@ jobs:
     # minutes, and job story v1 (four cases) was cancelled at 20 with every
     # contract, rollback and fail-closed proof passed and 23 of 71 break proofs
     # done (about 27 minutes in all on a hosted runner).
-    timeout-minutes: 40
+    # 90, not 40: the replays grow with every registered case. On 7 Oct 2026 a
+    # PR adding one case to main took 37 min 51 s here (PR 986), and the
+    # scorecard v2 PR carries eight more (the seven 7 Oct data sources and v2).
+    timeout-minutes: 90
 
     services:
       postgres:

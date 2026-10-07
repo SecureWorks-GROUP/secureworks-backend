@@ -790,8 +790,16 @@ END $$;
 ROLLBACK;
 
 -- 9. The rollback, inside a rolled-back transaction: unschedules, drops the
---    four functions and two tables, leaves the rest.
+--    four functions and two tables, leaves the rest. The rollback refuses while
+--    the scorecard reads the run status (the scorecard v2, 20261007120000, does),
+--    so a live body that reads it is first replaced by W11's, word for word
+--    (20261006032000's w11_scorecard.sql), inside this transaction.
+SELECT position('context_scorecard_run_status' IN prosrc) > 0 AS hourly_card_reads_status
+FROM pg_proc WHERE oid = 'public.context_scorecard(timestamptz)'::regprocedure \gset
 BEGIN;
+\if :hourly_card_reads_status
+\ir ../20261006032000_context_scorecard/w11_scorecard.sql
+\endif
 CREATE SCHEMA cron;
 CREATE TABLE cron.job (jobid bigserial PRIMARY KEY, schedule text NOT NULL, command text NOT NULL, active boolean NOT NULL DEFAULT true, jobname text);
 CREATE FUNCTION cron.unschedule(job_name text) RETURNS boolean LANGUAGE sql AS $$
