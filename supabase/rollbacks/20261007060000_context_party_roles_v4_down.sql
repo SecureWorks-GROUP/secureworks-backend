@@ -18,7 +18,7 @@ DO $guard$
 DECLARE live text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.context_message_party_roles(public.business_events)');
- IF live IS NULL OR live NOT IN ('54b2f8b4a0bc1810495a7e9186c623b4','36ed4eac4ec8a1b2efd253da02add409') THEN
+ IF live IS NULL OR live NOT IN ('1debd5c2b6dfbf2f4f22f291b893ec84','36ed4eac4ec8a1b2efd253da02add409') THEN
   RAISE EXCEPTION 'context_party_roles_v4 rollback: public.context_message_party_roles(public.business_events) md5 %; a later migration replaced it, roll that back first',
    coalesce(live,'<missing>');
  END IF;

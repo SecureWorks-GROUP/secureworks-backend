@@ -158,10 +158,10 @@ BEGIN
  e:=pg_temp.pr_ev('email','inbound','client.email_in',NULL,jsonb_build_object('from','noreply@notifications.primeeco.tech','body','Work order'));
  PERFORM pg_temp.pr_is('Prime',e,'insurer_builder','staff','builder_company','other_party');
  e:=pg_temp.pr_ev('email','inbound','client.email_in',NULL,jsonb_build_object('from','planning@fixture.wa.gov.au','body','Approval'));
- -- v4 (20261007060000) gives a council its own role; earlier versions name it in the basis only.
+ -- v4 (20261007060000) gives a council its own role, basis council as before; earlier versions name it in the basis only.
  IF coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
    LIKE 'Party roles v4 (20261007060000):%' THEN
-  PERFORM pg_temp.pr_is('a council',e,'council','staff','council_domain','other_party');
+  PERFORM pg_temp.pr_is('a council',e,'council','staff','council','other_party');
  ELSE
   PERFORM pg_temp.pr_is('a council',e,'unknown','staff','council','unknown');
  END IF;

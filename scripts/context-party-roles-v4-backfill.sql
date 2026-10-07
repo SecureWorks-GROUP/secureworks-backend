@@ -54,34 +54,34 @@
 -- that updates one of them meanwhile waits for it, so run it in the Perth
 -- evening.
 --
--- Measured on production (read only, 7 Oct 2026, Perth afternoon), with v4
--- emulated in SQL because the migration was not applied yet; message rows in
--- the scorecard's lanes:
---   captured in the last 30 days, 816 rows: texts 323 (318 to or from a
---   customer by an open opportunity; 5 to crew, writer_marked_contact),
---   calls 42 (41 open opportunity, 1 builder contact now conflict), call
---   transcripts 48 (47 open opportunity, 1 conflict), emails in 240 (81
---   supplier by our order address, 32 by its domain, 73 by a Xero bill, 46
---   councils, 8 builder domain), emails out 94 (64 supplier order address,
---   18 order domain, 8 councils, 1 prospect, 1 builder domain, 2
---   supplier_seen now conflict), crew and staff texts 69 (our_template);
---   captured earlier, 888 rows: call transcripts 190, crew and staff texts
---   538 (our_template), emails in 14, emails out 8, texts 138.
---   1,704 rows in all, 142 on a live job (supplier and council mail about a
---   job; a prospect is read only on a row on no job). Message rows outside
---   the scorecard's lanes (old call_complete rows, texts written with no
---   channel, make-safe reconcile mail) are candidates too when their reading
---   changes; PART 1 counts them exactly.
+-- Measured on production (read only, 7 Oct 2026), with v4 emulated in SQL
+-- because the migration was not applied yet; message rows in the
+-- scorecard's lanes:
+--   captured in the last 30 days (19:00 Perth read), 818 rows: texts 324
+--   (319 to or from a customer by an open opportunity; 5 to crew,
+--   writer_marked_contact), calls 45 (44 open opportunity, 1 now conflict),
+--   call transcripts 49 (48 open opportunity, 1 now conflict), emails in 244
+--   (84 supplier by our order address, 32 by its domain, 73 by a Xero bill,
+--   47 councils, 8 builder domain), emails out 96 (68 supplier order
+--   address, 18 order domain, 8 councils, 1 prospect, 1 builder domain),
+--   crew and staff texts 60 (our_template); 226 of them on a job (supplier,
+--   council and builder mail about a job, our crew texts; a prospect is read
+--   only on a row on no job). Captured earlier (13:55 Perth read), 888 rows:
+--   call transcripts 190, crew and staff texts 538 (our_template), emails in
+--   14, emails out 8, texts 138. Message rows outside the scorecard's lanes
+--   (old call_complete rows, texts written with no channel, make-safe
+--   reconcile mail) are candidates too when their reading changes; PART 1
+--   counts them exactly.
 -- After the full run the scorecard's row 2, 30 days by capture time, reads
--- (same read): texts 4,134 -> 4,456 of 4,666 (88.6% -> 95.5%), calls 1,195
--- -> 1,235 of 1,340 (89.2% -> 92.2%), call transcripts 278 -> 324 of 439
--- (63.3% -> 73.8%), emails in 1,441 -> 1,680 of 2,115 (68.1% -> 79.4%),
--- emails out 543 -> 633 of 685 (79.3% -> 92.4%), crew and staff texts 231 ->
--- 243 of 243 (95.1% -> 100%). 4 rows go from known to conflict (2 emails
--- out, 1 call, 1 transcript: the signals disagree).
--- It also moves row 3: 407 prospect messages, none on a job, become customer
--- messages with no job yet, so the customer-placed share reads 4,685 of
--- 6,557 (71.5%) instead of 4,685 of 6,150 (76.2%) until the scorecard leaves
+-- (19:00 read): texts 4,155 -> 4,478 of 4,690 (88.6% -> 95.5%), calls 1,201
+-- -> 1,244 of 1,354 (88.7% -> 91.9%), call transcripts 279 -> 326 of 442
+-- (63.1% -> 73.8%), emails in 1,457 -> 1,701 of 2,142 (68.0% -> 79.4%),
+-- emails out 548 -> 644 of 693 (79.1% -> 92.9%), crew and staff texts 222 ->
+-- 234 of 234 (94.9% -> 100%). 2 rows go from known to conflict (1 call, 1
+-- transcript: the signals disagree).
+-- It also moves row 3: 412 prospect messages, none on a job, become customer
+-- messages with no job yet, so the customer-placed share reads 4,719 of
+-- 6,593 (71.6%) instead of 4,719 of 6,182 (76.3%) until the scorecard leaves
 -- customers with no job out of that denominator
 -- (context_party_roles_lanes.no_job_customers counts them).
 --
@@ -214,7 +214,7 @@ FOR UPDATE OF e;
 DO $count$
 DECLARE
  -- The this_batch figure PART 1 printed (1000 for the first batch of 7 Oct
- -- 2026's 1,704 emulated lane rows plus the rows outside the lanes). The
+ -- 2026's 1,706 emulated lane rows plus the rows outside the lanes). The
  -- write refuses on any other count.
  expected_rows constant integer := 1000;
  n integer;

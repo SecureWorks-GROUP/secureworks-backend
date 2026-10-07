@@ -20,16 +20,20 @@
 --     otherwise (our own people, 5 suppliers, a builder), which is why the
 --     opportunity is one signal among the rest, never a decision on its own.
 --     The other 117 contacts are named by nothing we hold (capture-side).
---   * Why call transcripts sit at 63%: 161 of the 163 read exactly as their
---     call. 92 of the 326 live-writer transcripts (ghl-call-transcript) pair
---     to a call that is itself unknown: transcripts are made for the long
---     answered calls, and a first enquiry from a contact with no job yet is
---     one (94 of 331 calls with a transcript are unknown, 50 of 1,007
---     without). The old writer's 110 transcripts (transcribe-call, 10 to 24
---     Sep, a synthetic call id of contact and time) pair to client.call_complete
---     rows, which sit in no capture lane, so their calls' unknowns never show
---     in the calls lane (69 of 110 unknown). The transcripts follow their
---     calls: 52 of them have an open opportunity.
+--   * Why call transcripts sit at 63%: a transcript is unknown exactly when
+--     its call is. Read again at 19:00 Perth (442 transcripts in 30 days):
+--     every one reads as its call. The 340 live-writer transcripts
+--     (ghl-call-transcript) pair to their call row by payload.ghl_call_id;
+--     101 are unknown, each paired to a call that is itself unknown, from a
+--     GHL contact with no job. Transcripts are made for the long answered
+--     calls, and a first enquiry from a contact with no job yet is one: 101
+--     of 342 calls with a transcript are unknown (29.5%), 52 of 1,012 without
+--     (5.1%), and every unknown call is a contact with no job. The old
+--     writer's 102 transcripts in the window (transcribe-call, which stopped
+--     on 24 Sep) carry a synthetic call id that is no row's key; each has a
+--     call by the same contact within 10 minutes and reads as it (62
+--     unknown). They leave the 30-day window by late October. The prospect
+--     rule names 48 of the 163 unknown transcripts as a customer's.
 --   * Emails in 672: 296 from business domains, 164 from automated or
 --     platform senders, 92 posted by Xero, 75 from free-mail addresses, 45
 --     from gov.au. Our records name 113 of the business senders as
@@ -45,7 +49,12 @@
 --     staff forwarding it (34), never a customer. 8 come from a builder's
 --     domain in our records (the domain of a make-safe company's own invoice
 --     or report address). 45 are councils (gov.au, the email reader's own
---     council rule): a role, council, where v3 had only the basis.
+--     council rule): a role, council, where v3 had only the basis. The basis
+--     stays council, the one every reader keys a council on (v3's stamp, and
+--     Jev's later truth, 20261007030000: sender_role reads it as another
+--     party, email_triage as a council). Of the 30 days' 55 gov.au rows, 52
+--     are local councils and 3 a state or federal body (2 dbca.wa.gov.au, 1
+--     news.ato.gov.au), read council by that same reader rule.
 --   * Emails out 138: our material orders and replies to the same suppliers
 --     (81), councils (8), a builder (1), prospects (4).
 --   * Our own outbound email from our mailboxes: every such row already reads
@@ -73,7 +82,7 @@
 --      read any_job_customer that way since 20261006040000); 8 of the 30
 --      days' 415 prospect messages sit on such a job and keep their reading.
 --   b. context_party_domain_roles: a gov.au domain is a council (role
---      council, basis council_domain); an address one of our material orders
+--      council, basis council as in v3); an address one of our material orders
 --      went to is a supplier (supplier_order_address), and so is its domain
 --      or a subdomain of it unless it is free mail (supplier_order_domain);
 --      the domain of an active make-safe company's own invoice or report
@@ -100,24 +109,31 @@
 --      no stored transcript reads otherwise than its call today, so the rule
 --      moves no row now; it keeps the two together when a call's reading
 --      changes and the transcript's own rules cannot see why.
--- New role: council (audience other_party). Every row is stamped
--- party_roles_v4.
+-- New role: council (audience other_party, basis council). Every row is
+-- stamped party_roles_v4.
 --
--- Effect, emulated in SQL on production read only (a second read, 13:55
--- Perth, the scorecard's lanes, 30 days by capture time), once the hand-run
--- re-stamp below has run: texts 4,134 -> 4,456 of 4,666 (88.6% -> 95.5%),
--- calls 1,195 -> 1,235 of 1,340 (89.2% -> 92.2%), call transcripts 278 -> 324
--- of 439 (63.3% -> 73.8%), emails in 1,441 -> 1,680 of 2,115 (68.1% ->
--- 79.4%), emails out 543 -> 633 of 685 (79.3% -> 92.4%), crew and staff
--- texts 231 -> 243 of 243 (95.1% -> 100%: v3's templates, which no re-stamp
--- had reached). 4 rows go from known to conflict (2 emails out, 1 call, 1
--- transcript), where a new signal disagrees with an old one. Without the
--- re-stamp only new rows read v4. Row 3 (customer messages placed on a job)
--- moves too: 407 prospect messages, none on a job, become customer messages
--- with no job yet, so its share reads 4,685 of 6,557 (71.5%) instead of
--- 4,685 of 6,150 (76.2%) until the scorecard leaves customers with no job
--- out of that denominator; context_party_roles_lanes counts them
--- (no_job_customers).
+-- Effect, emulated in SQL on production read only (a third read, 19:00
+-- Perth, the scorecard's lanes, 30 days by capture time, the prospect rule
+-- on rows on no job only and a call's customer passed only to a transcript
+-- on the same job, as below), once the hand-run re-stamp below has run:
+-- texts 4,155 -> 4,478 of 4,690 (88.6% -> 95.5%), calls 1,201 -> 1,244 of
+-- 1,354 (88.7% -> 91.9%), call transcripts 279 -> 326 of 442 (63.1% ->
+-- 73.8%), emails in 1,457 -> 1,701 of 2,142 (68.0% -> 79.4%), emails out
+-- 548 -> 644 of 693 (79.1% -> 92.9%), crew and staff texts 222 -> 234 of 234
+-- (94.9% -> 100%: v3's templates, which no re-stamp had reached). 2 rows go
+-- from known to conflict (1 call, 1 transcript), where a new signal
+-- disagrees with an old one. A new row reads the same as a re-stamped one,
+-- so these are also the shares new rows read; without the re-stamp only new
+-- rows read v4. What stays unknown: texts 212, calls 110 and call
+-- transcripts 116, almost all GHL contacts on no job, in no lead list and
+-- with no open opportunity (53, 55 and 73 contacts); emails in 441 (342 from
+-- 111 business senders our records do not name, 76 free mail, 23 posted by
+-- Xero naming no live bill) and emails out 49. Row 3 (customer messages
+-- placed on a job) moves too: 412 prospect messages, none on a job, become
+-- customer messages with no job yet, so its share reads 4,719 of 6,593
+-- (71.6%) instead of 4,719 of 6,182 (76.3%) until the scorecard leaves
+-- customers with no job out of that denominator; context_party_roles_lanes
+-- counts them (no_job_customers).
 --
 -- New, private: the four helpers above, a partial index on our material
 -- orders (business_events_party_material_orders, the 65 outbound emails), and
@@ -164,7 +180,7 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: the live body, or already this migration's.
-  ('public.context_message_party_roles(public.business_events)',ARRAY['36ed4eac4ec8a1b2efd253da02add409','54b2f8b4a0bc1810495a7e9186c623b4']),
+  ('public.context_message_party_roles(public.business_events)',ARRAY['36ed4eac4ec8a1b2efd253da02add409','1debd5c2b6dfbf2f4f22f291b893ec84']),
   -- Read, not replaced.
   ('public.context_party_key_roles(text,text)',ARRAY['4da54e7c7107e927b350947697f440e7']),
   ('public.context_party_contact_roles(text)',ARRAY['8c1f5381cb41d2cdcb0f33b530cc3070']),
@@ -180,7 +196,7 @@ BEGIN
  -- New: absent, or already this migration's.
  FOR x IN SELECT * FROM (VALUES
   ('public.context_party_crm_roles(text,text,text,timestamp with time zone)','b5b0d82f9d9809cc7f6a7db6b1fde458'),
-  ('public.context_party_domain_roles(text)','b4b47ff755117eef8e1f450b015fbc10'),
+  ('public.context_party_domain_roles(text)','93624d7e20f4ab3f292a1b0e2a8777d9'),
   ('public.context_party_xero_bill(text)','2aef40c5509b118cee06a35cd951a64f'),
   ('public.context_party_call_roles(public.business_events)','12bef71b8f5a2d3f3c82fd890ed69acc'),
   ('public.context_party_roles_lanes(timestamp with time zone,integer)','ff6797dcd0d2788d01ac1ff21143a18a')
@@ -309,7 +325,7 @@ LANGUAGE sql STABLE AS $$
    AND coalesce(b.payload->>'subject','') ~* '^\s*material (order|quote request|order inquiry) ref\y'
    AND EXISTS (SELECT 1 FROM k)
  )
- SELECT 'council'::text,'council_domain'::text FROM k WHERE k.dom ~ '(^|\.)gov\.au$'
+ SELECT 'council'::text,'council'::text FROM k WHERE k.dom ~ '(^|\.)gov\.au$'
  UNION ALL
  SELECT 'supplier','supplier_order_address' FROM k WHERE EXISTS (SELECT 1 FROM orders o WHERE o.addr=k.addr)
  UNION ALL
@@ -327,7 +343,7 @@ LANGUAGE sql STABLE AS $$
    AND (k.dom=d.cdom OR k.dom LIKE '%.'||d.cdom))
 $$;
 COMMENT ON FUNCTION public.context_party_domain_roles(text) IS
- 'Party roles v4 (20261007060000): what our records say an email address is: council (a gov.au domain, basis council_domain), supplier (an address one of our material orders went to, supplier_order_address, or its non-free-mail domain or a subdomain, supplier_order_domain) or insurer_builder (the non-free-mail domain of an active make-safe company''s own invoice or report address, builder_domain). Rows, not a decision. Private; read by context_message_party_roles.';
+ 'Party roles v4 (20261007060000): what our records say an email address is: council (a gov.au domain, basis council, as v3 named it), supplier (an address one of our material orders went to, supplier_order_address, or its non-free-mail domain or a subdomain, supplier_order_domain) or insurer_builder (the non-free-mail domain of an active make-safe company''s own invoice or report address, builder_domain). Rows, not a decision. Private; read by context_message_party_roles.';
 
 -- 3. A Xero bill named in an email subject: a token of at least 5 letters
 -- and digits that is the number of a live bill (ACCPAY, not voided or
@@ -492,7 +508,7 @@ BEGIN
     (array_agg(s.r_basis ORDER BY array_position(ARRAY['any_job_party','lead','supplier_seen',
       'contact_our_domain','contact_users','contact_supplier','contact_builder_company','contact_supplier_seen',
       'contact_any_job_customer','contact_any_job_party','contact_lead',
-      'open_opportunity','supplier_order_address','supplier_order_domain','xero_bill','builder_domain','council_domain'],s.r_basis) NULLS LAST,
+      'open_opportunity','supplier_order_address','supplier_order_domain','xero_bill','builder_domain','council'],s.r_basis) NULLS LAST,
       s.r_basis COLLATE "C"))[1]
    INTO roles, cbasis
    FROM (

@@ -640,7 +640,8 @@ basis `our_template`), then the v1 and v2 key rules; where v2 collects
 signals, v4 adds records only, never a name: an open opportunity in the CRM
 rosters (`sales_booking_packs` kind `roster`; only on a row on no job, since an
 opportunity elsewhere says nothing of a job's customer), a gov.au domain (role
-`council`), our material orders' addresses and domains, a Xero bill of a known
+`council`, basis `council` as in v3, the one Jev's later truth reads a
+council by), our material orders' addresses and domains, a Xero bill of a known
 supplier named in an inbound subject, a make-safe company's own invoice or
 report domain; one role only when every signal agrees. Last, a call
 transcript takes its call's roles, basis and audience when they differ

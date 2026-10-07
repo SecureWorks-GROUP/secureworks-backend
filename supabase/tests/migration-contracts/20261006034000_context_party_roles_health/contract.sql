@@ -294,7 +294,7 @@ BEGIN
   -- (v4, 20261007060000, which pins its own body in its own contract).
   ('public.context_message_party_roles(public.business_events)',
    CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
-    LIKE 'Party roles v4 (20261007060000):%' THEN '54b2f8b4a0bc1810495a7e9186c623b4' ELSE '36ed4eac4ec8a1b2efd253da02add409' END,
+    LIKE 'Party roles v4 (20261007060000):%' THEN '1debd5c2b6dfbf2f4f22f291b893ec84' ELSE '36ed4eac4ec8a1b2efd253da02add409' END,
    CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
     LIKE 'Party roles v4 (20261007060000):%' THEN 'Party roles v4 (20261007060000):%' ELSE 'Party roles v3 (20261006034000):%' END)
  ) AS t(sig,md5,note) LOOP

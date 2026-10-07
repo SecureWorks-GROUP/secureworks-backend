@@ -16,7 +16,7 @@
 --      opportunity elsewhere says nothing of that job's customer). A job's
 --      customer with an opportunity reads as the job's customer, as before.
 --   B. Domains in our records. A gov.au domain is a council (council to
---      staff in, staff to council out, basis council_domain, audience
+--      staff in, staff to council out, basis council as in v3, audience
 --      other_party). Our own material order (subject "Material Order Ref",
 --      "Material Quote Request Ref" or "Material Order Inquiry Ref") reads
 --      staff to supplier, and so does every later email with the address it
@@ -59,6 +59,10 @@
 --      unknown ones by basis, the rows still stamped by an older classifier
 --      version, and the customers with no job yet (a prospect's text, call
 --      and the transcript that took the call's roles).
+--   K. A reader keyed on a council's basis reads v4's council as it read
+--      v3's: Jev's later truth (20261007030000), where it is live, reads a
+--      council's email, stamped by the live classifier, as another party at
+--      sender_role and as a council at email_triage.
 -- A to D run in one block that names every failing rule at once, so the
 -- break proof shows each v4 rule fail when it is unwired.
 \set ON_ERROR_STOP 1
@@ -211,11 +215,11 @@ BEGIN
  BEGIN
   miss:='{}';
   e:=pg_temp.p4_ev('email','inbound','client.email_in',NULL,jsonb_build_object('from','planning@fixture4.wa.gov.au','body','Approval'));
-  k:=pg_temp.p4_roles('a council email',e,'council','staff','council_domain','other_party');
+  k:=pg_temp.p4_roles('a council email',e,'council','staff','council','other_party');
   IF k<>'' THEN miss:=miss||k; END IF;
   e:=pg_temp.p4_ev('email','outbound','client.email_out',NULL,jsonb_build_object('email','approvals@fixture4.wa.gov.au',
    'to',jsonb_build_array('approvals@fixture4.wa.gov.au'),'subject','Building application','body','Attached'));
-  k:=pg_temp.p4_roles('an email to a council',e,'staff','council','council_domain','other_party');
+  k:=pg_temp.p4_roles('an email to a council',e,'staff','council','council','other_party');
   IF k<>'' THEN miss:=miss||k; END IF;
   IF cardinality(miss)>0 THEN problems:=problems||('council rule not built: '||array_to_string(miss,'; ')); END IF;
 
@@ -428,9 +432,9 @@ DO $$
 DECLARE p record; r text;
 BEGIN
  FOR p IN SELECT * FROM (VALUES
-  ('public.context_message_party_roles(public.business_events)','54b2f8b4a0bc1810495a7e9186c623b4','Party roles v4 (20261007060000):%Service role may call it to preview.'),
+  ('public.context_message_party_roles(public.business_events)','1debd5c2b6dfbf2f4f22f291b893ec84','Party roles v4 (20261007060000):%Service role may call it to preview.'),
   ('public.context_party_crm_roles(text,text,text,timestamp with time zone)','b5b0d82f9d9809cc7f6a7db6b1fde458','Party roles v4 (20261007060000):%'),
-  ('public.context_party_domain_roles(text)','b4b47ff755117eef8e1f450b015fbc10','Party roles v4 (20261007060000):%'),
+  ('public.context_party_domain_roles(text)','93624d7e20f4ab3f292a1b0e2a8777d9','Party roles v4 (20261007060000):%'),
   ('public.context_party_xero_bill(text)','2aef40c5509b118cee06a35cd951a64f','Party roles v4 (20261007060000):%'),
   ('public.context_party_call_roles(public.business_events)','12bef71b8f5a2d3f3c82fd890ed69acc','Party roles v4 (20261007060000):%'),
   ('public.context_party_roles_lanes(timestamp with time zone,integer)','ff6797dcd0d2788d01ac1ff21143a18a','Party roles v4 (20261007060000): row 2''s read for the scorecard.%')
@@ -560,6 +564,41 @@ BEGIN
 END $$;
 ROLLBACK;
 
+-- K. Readers keyed on a council's basis. Jev's later truth (20261007030000)
+-- reads a council by basis council (v3's stamp): sender_role answers
+-- other_party, email_triage answers council. v4 gives a council its own role
+-- and keeps that basis, so both read v4's stamp as they read v3's. Checked
+-- where the truth read is live (it is in the registered stack).
+BEGIN;
+DO $$
+DECLARE e public.business_events; d public.context_jev_decisions; got text; miss text[]:='{}';
+BEGIN
+ IF to_regprocedure('public.context_jev_truth(public.context_jev_decisions)') IS NULL THEN
+  RAISE NOTICE 'party roles v4 contract: no Jev truth read is live; section K has nothing to check';
+  RETURN;
+ END IF;
+ e:=pg_temp.p4_ev('email','inbound','client.email_in',NULL,jsonb_build_object('from','Planning <planning@p4k.wa.gov.au>','body','Approval'));
+ IF e.metadata->'party_roles'->>'sender_role' IS DISTINCT FROM 'council' OR e.metadata->'party_roles'->>'basis' IS DISTINCT FROM 'council' THEN
+  miss:=miss||format('a council email must be stamped council, basis council, got %s',e.metadata->'party_roles');
+ END IF;
+ d:=jsonb_populate_record(NULL::public.context_jev_decisions,jsonb_build_object('decision_point','sender_role','row_table','business_events',
+  'row_id',e.id,'requested_model','p4-contract'));
+ got:=public.context_jev_truth(d);
+ IF got IS DISTINCT FROM 'other_party' THEN
+  miss:=miss||format('Jev''s sender_role truth must read a council''s email as other_party, got %s',coalesce(got,'null'));
+ END IF;
+ d:=jsonb_populate_record(NULL::public.context_jev_decisions,jsonb_build_object('decision_point','email_triage','row_table','business_events',
+  'row_id',e.id,'requested_model','p4-contract'));
+ got:=public.context_jev_truth(d);
+ IF got IS DISTINCT FROM 'council' THEN
+  miss:=miss||format('Jev''s email_triage truth must read a council''s email as council, got %s',coalesce(got,'null'));
+ END IF;
+ IF cardinality(miss)>0 THEN
+  RAISE EXCEPTION 'party roles v4 contract: a council reads otherwise than v3''s: %',array_to_string(miss,'; ');
+ END IF;
+END $$;
+ROLLBACK;
+
 -- H. The pinned v3 body the 20261006034000 case stands back up for its
 -- re-apply: v3's classifier and comment byte for byte, and loading it moves
 -- no other function.
@@ -604,7 +643,7 @@ DECLARE t record; r jsonb; miss text[]:='{}';
 BEGIN
  FOR t IN SELECT * FROM (VALUES
    ('a text from a prospect','sms','inbound','client.reply','p4-preview',jsonb_build_object('body','Quote please'),'customer','open_opportunity'),
-   ('a council email','email','inbound','client.email_in',NULL,jsonb_build_object('from','planning@preview4.wa.gov.au','body','Approval'),'council','council_domain'),
+   ('a council email','email','inbound','client.email_in',NULL,jsonb_build_object('from','planning@preview4.wa.gov.au','body','Approval'),'council','council'),
    ('a supplier our order went to','email','inbound','client.email_in',NULL,jsonb_build_object('from','sales@previewsupply4.com.au','body','Confirmed'),'supplier','supplier_order_domain')
   ) AS v(what,ch,dir,et,contact,payload,want,basis) LOOP
   BEGIN
