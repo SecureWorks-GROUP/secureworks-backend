@@ -43,12 +43,16 @@ DECLARE s jsonb;
 BEGIN
  s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-10-01T00:00:00Z"}'::jsonb,
                                         '{}'::jsonb, NULL, NULL, '2026-10-07 02:00Z', NULL);
- IF s->'meta'->'ledger'->>'status' <> 'none' OR jsonb_array_length(s->'loops') <> 0 OR s->'now'->>'whose_move' <> 'nobody'
-    OR s->'now'->>'phase' <> 'quote' THEN
+ -- (widened by story safety, 20261006040000: with no live reading nothing on record is
+ -- never an all-clear: whose move is unknown and the line says so first; with no message
+ -- on record it says so and claims nothing unchecked)
+ IF s->'meta'->'ledger'->>'status' <> 'none' OR jsonb_array_length(s->'loops') <> 0 OR s->'now'->>'whose_move' <> 'unknown'
+    OR s->'now'->>'phase' <> 'quote' OR s->'now'->>'line' LIKE '%Nothing open%'
+    OR position('Whose move is unclear: no record item is open; no customer message and no reply from us on record' IN s->'now'->>'line') = 0 THEN
   RAISE EXCEPTION 'story contract: empty assembly wrong: %', s->'now';
  END IF;
  -- meta.ledger carries the reader's own freshness; the fact pass's unread count is gone.
- IF (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(s->'meta'->'ledger') k)
+ IF (SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(s->'meta'->'ledger') k)
     <> ARRAY['evidence_until','generation_id','hidden_items','items','needs_rebuild','reader','stale','status','unread_rows']
     OR s->'meta'->'ledger'->'unread_rows' <> 'null'::jsonb OR (s->'meta'->'ledger'->>'stale')::boolean
     OR (s->'meta'->'ledger'->>'needs_rebuild')::boolean OR s->'meta' ? 'unread_rows' THEN
@@ -68,16 +72,18 @@ BEGIN
  END IF;
  -- The launch state: the reader is off and the customer wrote last. The candidate
  -- reaches the now line and whose move is unclear, never "Nothing open on record";
- -- the phase words never say whose move it is.
+ -- the phase words never say whose move it is. (Widened by story safety,
+ -- 20261006040000, fourth review: the owner's words "not yet checked by the reader",
+ -- never "not read yet", here and wherever this contract reads them.)
  s := public.context_job_story_assemble('{"id":"x","status":"quoted","type":"fencing","created_at":"2026-09-01T00:00:00Z"}'::jsonb,
         jsonb_build_object('loops', jsonb_build_array(jsonb_build_object('rule', 'R5_customer_wrote_last', 'loop_key', 'R5_customer_wrote_last:e1',
           'shown_as', 'candidate', 'owner', 'us', 'counterparty', 'customer', 'what', 'Customer texted and nothing went back',
           'opened_at', '2026-10-01T01:00:00Z', 'about_key', 'contact:customer-reply', 'source_table', 'business_events',
           'source_id', 'e1000000-0000-4000-8000-000000000001'))),
         NULL, NULL, '2026-10-07 02:00Z', NULL);
- IF s->'now'->>'whose_move' <> 'unknown' OR position('The customer wrote last on Thu 1 Oct; not read yet' IN s->'now'->>'line') = 0
+ IF s->'now'->>'whose_move' <> 'unknown' OR position('The customer wrote last on Thu 1 Oct; not yet checked by the reader' IN s->'now'->>'line') = 0
     OR s->'now'->>'line' LIKE '%Nothing open on record%' OR s->'now'->>'line' LIKE '%waiting on the customer%'
-    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%') THEN
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k WHERE k->>'what' LIKE 'Customer wrote last; not yet checked by the reader.%') THEN
   RAISE EXCEPTION 'story contract: with the reader off, customer wrote last must reach the now line: % / %', s->'now'->>'whose_move', s->'now'->>'line';
  END IF;
  -- A reading that never admitted the row (it is not in the read set) has not read it
@@ -90,7 +96,7 @@ BEGIN
         '{"status":"live","generation":{"id":"g1","evidence_until":"2026-10-05T00:00:00Z"},"items":[],"transitions":[],"unread_rows":0,"unread_ids":[],"read_ids":["e1000000-0000-4000-8000-000000000009"]}'::jsonb,
         NULL, '2026-10-07 02:00Z', NULL);
  IF s->'now'->>'whose_move' <> 'unknown' OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'checks') k
-      WHERE k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%') THEN
+      WHERE k->>'what' LIKE 'Customer wrote last; not yet checked by the reader.%') THEN
   RAISE EXCEPTION 'story contract: a row outside the read set must never be called judged: % / %', s->'checks', s->'now';
  END IF;
  -- With the row in the read set the reader judged it: a check, not the now line.
@@ -162,8 +168,12 @@ BEGIN
         jsonb_build_object('facts', jsonb_build_object('bookings', jsonb_build_array(
           jsonb_build_object('id', 'b1', 'scheduled_date', '2026-09-07', 'status', 'complete', 'completed_at', '2026-09-07T06:00:00Z')))),
         NULL, NULL, '2026-10-07 02:00Z', NULL);
- IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'line' NOT LIKE 'Work complete since Mon 7 Sep%' THEN
-  RAISE EXCEPTION 'story contract: the newest booking attended and none ahead is complete work: %', s->'now'->>'line';
+ -- (widened by story safety, 20261006040000: a booking marked complete with none ahead is
+ -- attendance, not finished work; only a completion status or record finishes the work)
+ IF s->'now'->>'phase' <> 'install' OR s->'now'->>'line' NOT LIKE 'Install under way since Mon 7 Sep%'
+    OR position('the Mon 7 Sep booking is marked complete; nothing records the job finished' IN s->'now'->>'line') = 0
+    OR s->'now'->>'line' LIKE '%Work complete%' THEN
+  RAISE EXCEPTION 'story contract: the newest booking attended and none ahead is attendance, not finished work: %', s->'now'->>'line';
  END IF;
  -- a make-safe whose report went out is not complete while a booking is still ahead
  s := public.context_job_story_assemble('{"id":"x","status":"processing","type":"makesafe","created_at":"2026-08-01T00:00:00Z"}'::jsonb,
@@ -522,9 +532,9 @@ BEGIN
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'loops') l WHERE l->>'key' LIKE 'R5_%';
  IF n <> 0 THEN RAISE EXCEPTION 'story contract: R5 must stay a candidate without a reply-owed item'; END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'checks') k
- WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
+ WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; not yet checked by the reader.%';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: a row the reading never read is never judged by it: %', s->'checks'; END IF;
- IF position('The customer wrote last on Thu 1 Oct; not read yet' IN s->'now'->>'line') = 0 THEN
+ IF position('The customer wrote last on Thu 1 Oct; not yet checked by the reader' IN s->'now'->>'line') = 0 THEN
   RAISE EXCEPTION 'story contract: the now line must say the customer wrote last: %', s->'now'->>'line';
  END IF;
 
@@ -546,11 +556,11 @@ BEGIN
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: status lag check missing on job B'; END IF;
  s := public.context_job_story(c, asof);
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'checks') k
- WHERE k->>'rule' = 'C11_customer_mail_unanswered' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
+ WHERE k->>'rule' = 'C11_customer_mail_unanswered' AND k->>'what' LIKE 'Customer wrote last; not yet checked by the reader.%';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: unread candidate must say not yet read: %', s->'checks'; END IF;
  -- no reader: the unanswered mail reaches the now line, and nobody's move is never claimed
  IF s->'now'->>'whose_move' NOT IN ('us', 'unknown')
-    OR position('The customer wrote last on Sat 3 Oct (an email not placed on any job); not read yet' IN s->'now'->>'line') = 0
+    OR position('The customer wrote last on Sat 3 Oct (an email not placed on any job); not yet checked by the reader' IN s->'now'->>'line') = 0
     OR s->'now'->>'line' LIKE '%Nothing open on record%' OR s->'now'->>'line' LIKE '%waiting on the customer%' THEN
   RAISE EXCEPTION 'story contract: job C now line must carry the unanswered mail: % / %', s->'now'->>'whose_move', s->'now'->>'line';
  END IF;
@@ -599,7 +609,7 @@ BEGIN
  WHERE k->>'what' = '1 newer message on this job has not been read by the reader yet.';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: not_known must name the unread message: %', s->'not_known'; END IF;
  SELECT count(*) INTO n FROM jsonb_array_elements(s->'checks') k
- WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; not yet read by the reader.%';
+ WHERE k->>'rule' = 'R5_customer_wrote_last' AND k->>'what' LIKE 'Customer wrote last; not yet checked by the reader.%';
  IF n <> 1 THEN RAISE EXCEPTION 'story contract: a message the reader has not read is never judged by it: %', s->'checks'; END IF;
  t := public.context_job_story_ledger('a0000000-0000-4000-8000-000000000005', NULL, asof);
  IF t->'unread_ids' <> '["b0000000-0000-4000-8000-000000000012", "b0000000-0000-4000-8000-000000000013"]'::jsonb THEN
@@ -676,7 +686,7 @@ BEGIN
  -- the booking ruling in the closing candidates: a standing booking is made at its created
  -- time (a declined one never is); a status-only completion is a visit at the end of its day
  t := public.context_job_story_facts('a0000000-0000-4000-8000-000000000007', asof);
- IF (SELECT array_agg(x->>'closes_on' || ':' || (x->>'id') ORDER BY x->>'closes_on', x->>'id') FROM jsonb_array_elements(t->'closing') x
+ IF (SELECT array_agg(x->>'closes_on' || ':' || (x->>'id') ORDER BY x->>'closes_on' COLLATE "C", x->>'id' COLLATE "C") FROM jsonb_array_elements(t->'closing') x
      WHERE x->>'t' = 'job_assignments')
     IS DISTINCT FROM ARRAY['booking_made:e0000000-0000-4000-8000-000000000071', 'visit:e0000000-0000-4000-8000-000000000071']
     OR (SELECT (x->>'at')::timestamptz FROM jsonb_array_elements(t->'closing') x WHERE x->>'closes_on' = 'visit')
@@ -697,7 +707,9 @@ BEGIN
  END IF;
  -- the booking ruling in the words: a declined booking ahead does not stand, so it is
  -- neither the next visit nor work still to come; the status-only completion before it is
- IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'phase_since' <> '2026-10-01' OR s->'now'->'next' <> 'null'::jsonb
+ -- (widened by story safety, 20261006040000: that completion is attendance, so the phase
+ -- is install, not complete: no completion status or record finishes the work)
+ IF s->'now'->>'phase' <> 'install' OR s->'now'->>'phase_since' <> '2026-10-01' OR s->'now'->'next' <> 'null'::jsonb
     OR position('9 Oct' IN s->'now'->>'line') > 0 THEN
   RAISE EXCEPTION 'story contract: only a standing booking is a visit to come: %', s->'now';
  END IF;
@@ -713,11 +725,13 @@ BEGIN
     OR s->'last_exchange'->'we_told_customer'->>'id' <> 'b0000000-0000-4000-8000-000000000071' THEN
   RAISE EXCEPTION 'story contract: lanes must count what the record shows: % / %', s->'not_known', s->'last_exchange';
  END IF;
- -- rev-backend P2-9: the client story keeps each paying party apart
+ -- rev-backend P2-9: the client story keeps each paying party apart (widened by story
+ -- safety, 20261006040000, fourth review: owing is only what the client owes, so the note
+ -- says the total adds up every invoice addressed to them)
  s := public.context_client_story(a, asof);
  IF jsonb_array_length(s->'money'->'by_party') <> 2
     OR (SELECT (x->>'owing')::numeric FROM jsonb_array_elements(s->'money'->'by_party') x WHERE x->>'xero_contact_id' = 'xc1') <> 800
-    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE 'Owing and overdue add up every paying party%') THEN
+    OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s->'not_known') k WHERE k->>'what' LIKE 'Owing and overdue add up every invoice addressed to this client%') THEN
   RAISE EXCEPTION 'story contract: client money per party: % / %', s->'money', s->'not_known';
  END IF;
  -- three readings in a row by the current reader failed their checks: that job, and only that job, needs a person
@@ -746,8 +760,9 @@ BEGIN
   RAISE EXCEPTION 'story contract: a status-only completion today is a visit now, never later today: %', t->'closing';
  END IF;
  s := public.context_job_story('a0000000-0000-4000-8000-000000000009', now());
- IF s->'now'->>'phase' <> 'complete' OR s->'now'->>'phase_since' <> to_char((now() AT TIME ZONE 'Australia/Perth')::date, 'YYYY-MM-DD') THEN
-  RAISE EXCEPTION 'story contract: work done today by a status-only completion: %', s->'now';
+ -- (widened by story safety, 20261006040000: attended today, not finished work)
+ IF s->'now'->>'phase' <> 'install' OR s->'now'->>'phase_since' <> to_char((now() AT TIME ZONE 'Australia/Perth')::date, 'YYYY-MM-DD') THEN
+  RAISE EXCEPTION 'story contract: attended today by a status-only completion: %', s->'now';
  END IF;
 END $story$;
 ROLLBACK;
