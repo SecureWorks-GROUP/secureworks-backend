@@ -1,10 +1,11 @@
 -- Contract for 20261007010000_context_lead_cutoff: the owner's lead rule of 7 Oct 2026. A lead
 -- still at quoted with no progress stops being followed up 28 days after the newer of its newest
 -- quote send and the customer's newest text, email or call on the job, and comes back the moment it
--- progresses or the customer writes. Failing first: sections 1 and 2 read only bodies that exist
--- before this migration (the record loops, the story read, the judge, the due list and the claim)
--- and fail on them (break-contract.sql puts the earlier bodies back and expects section 1's first
--- check to fail); the rule's own functions are read after them.
+-- progresses or the customer writes. Failing first: section 1 runs first and, like section 2, reads
+-- only bodies that exist before this migration (the record loops and the story read; the judge,
+-- the due list and the claim), and each fails on the earlier bodies (break-contract.sql puts them
+-- back and expects section 1's first check to fail). The rule's own functions are read only after
+-- section 1.
 --  1. The story (fixed instant Wed 7 Oct 2026 10:00 Perth): R7 on a lead 29 days after its quote
 --     ends "Lead not followed up since <day>: 4 weeks after the last quote or message with no
 --     progress"; 27 days after is unchanged; the first line of a lead no longer followed up says so
