@@ -628,6 +628,20 @@ or an outbound text in one of our crew or staff templates, read exactly as the
 classifier's template rule reads one, never L1d's `other` (`20261006034000`).
 W11's guard checks only its comment prefix, which that lane rule keeps: build
 a scorecard change on the live lane body, never on W11's.
+The hourly run (`20261007040000`): pg_cron `context-scorecard-hourly` (minute 40
+UTC) calls `context_scorecard_record_run('cron')`, which stores every run in
+`context_scorecard_runs` (a failed, timed-out or unreadable scorecard is a failed
+run with its code, never a gap) and writes nothing else; its numbers are in
+`context_scorecard_run_policy()`. Red rows are reported only through
+`context_scorecard_run_status(as_of)`: its `report.message` is the one line the
+hourly reader passes on (red rows, a failing streak since when, or no run for 75
+minutes; null when nothing is red), and the reader then records
+`context_scorecard_record_receipt('rayleigh', report.run_id, report.red_rows)`.
+Row 10's `hourly_run` lane (`->'lane'`) is green only while a reader the policy
+names has a receipt under 75 minutes old, so pg_cron alone never makes it green.
+Never write these rows to `ai_alerts` without the owner's yes: Jarvis loads every
+open red and amber `ai_alerts` row into every agent's memory (amber first, a few
+rows per agent) and its alert tool lists them in the staff chats.
 
 Rows 7, 8 and 9 (owner ruling 7 Oct 2026: the ledger items, the job story
 card, the agent test) read their graded samples from `context_grades`
