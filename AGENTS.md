@@ -835,6 +835,24 @@ old messages on jobs archived since (L1g evidence:
 `docs/evidence/context-l1g-held-live-job-2026-10-06.md`). Contract and named rows:
 `supabase/tests/migration-contracts/20261002110000_context_unlinked_rules/`.
 
+## Right-Job Accuracy Is A Stored Graded Sample; A Holding Job Is Never A Job
+
+Row 3's right-job share is read only from `context_placement_grades_newest(as_of)`
+(`20261007070000`): the newest graded sample by draw instant, an unsure verdict
+never right, shares rounded down, no threshold inside (the bar is the scorecard
+policy's). Draw with `context_placement_sample` (ids only, stratified, one
+`sample_id` = one draw), grade from `context_placement_grade_card` (it never says
+how a row was placed), load with `scripts/context-placement-grades-load.sql`;
+the brief is `docs/context/placement-grading.md`. A job with
+`metadata.do_not_schedule` (today only SWF-PDF-BUCKET) is never a customer's job:
+every row on it is a misfile and every live thread binding to it misfiles the
+next email. `context_placement_misfile_plan()` re-decides such rows with the
+rules-on ladder in preview and moves one only when the ladder's own rule lands
+on the job its payload names; the repair, the thread retire (re-key, so neither
+ladder path follows it) and the rules-on bucket re-run are hand-run scripts
+proved by `scripts/test-context-placement-row3.sh`. Evidence:
+`docs/evidence/context-placement-row3-2026-10-07.md`.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before
