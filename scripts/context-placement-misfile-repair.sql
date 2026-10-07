@@ -34,9 +34,13 @@
 --           twin waits in the review queue). Never a second live copy: marked
 --           metadata.duplicate_of = the twin (the 20261006031000 convention,
 --           so no reader, the ledger or the story reads it again) and put where
---           its twin is: the twin's job, as the twin is placed there, or, while
---           the twin waits in the queue, no job and no queue status (the twin
---           is the queue's item; a second one would be reviewed twice).
+--           its twin is: the twin's job, with the twin's own placement labels,
+--           or, while the twin waits in the queue, no job and no queue status
+--           (the twin is the queue's item; a second one would be reviewed
+--           twice). A later reopen (P1b at a new job of the customer, a hand
+--           rerun_context_attribution) may re-decide such a copy: it stays
+--           marked, so it is never read, and with its guessed payload job set
+--           aside it is never a misfile.
 --   move    no other row holds it and the ladder independently places it, by
 --           its own rule, on the very job the payload names: two signals agree
 --           (measured: 12 rows, all single_open: the customer had exactly one
@@ -51,14 +55,14 @@
 --           queue: unplaced, with the ladder's candidates and the payload's job
 --           as candidate_job_ids. Never placed on a guess, and never sent to
 --           the model (capture_mode relink: X27).
--- A row that will not sit on the job its payload names (every review row, and
--- a duplicate whose twin sits elsewhere or waits) has that payload job SET
--- ASIDE: payload.job_id is removed (its value kept in
+-- Every review row and every copy has its payload job SET ASIDE:
+-- payload.job_id is removed (its value kept in
 -- metadata.placement_repaired.payload_job_set_aside and in prior, so the undo
 -- puts it back). The admission rule and the misfile classifier read a payload
 -- job only when it is there, so whichever candidate a reviewer later picks is
 -- read and is no misfile; with the guess kept, any pick but the guess would be
--- unreadable and a new known misfile.
+-- unreadable and a new known misfile. A copy keeps none either, so it is
+-- never a misfile wherever a later reopen puts it.
 -- Every repaired row is stamped capture_mode relink (its value before kept in
 -- capture_mode_before, so it never wakes a read or a Jarvis reaction on its own)
 -- and metadata.placement_repaired {rule, by, run, at, plan, from_job_id,
@@ -340,10 +344,11 @@ BEGIN
  WHERE p.plan = 'duplicate' AND NOT (public.context_event_source_admissible(t)
    OR (t.job_id IS NULL AND t.attribution_status IN ('admin_bucket', 'unplaced', 'pending_luna')));
  IF n <> 0 THEN RAISE EXCEPTION 'placement_misfile_repair: % copies would point at a twin that no longer stands in; refusing', n; END IF;
- -- A row that does not sit on its payload job carries no payload job, so a later pick is read and is no misfile.
+ -- A review row or a copy carries no payload job (a later pick is read and is no misfile), and a moved row sits
+ -- on the job its payload names.
  SELECT count(*) INTO n FROM public.business_events e JOIN mr_plan p ON p.event_id = e.id
- WHERE (e.payload ? 'job_id') AND e.job_id IS DISTINCT FROM p.payload_job_id;
- IF n <> 0 THEN RAISE EXCEPTION 'placement_misfile_repair: % rows off their payload job still carry it; refusing', n; END IF;
+ WHERE (e.payload ? 'job_id') AND (p.plan IN ('review', 'duplicate') OR e.job_id IS DISTINCT FROM p.payload_job_id);
+ IF n <> 0 THEN RAISE EXCEPTION 'placement_misfile_repair: % review rows or copies still carry their guessed payload job; refusing', n; END IF;
  -- The saved prior is exactly the row as it was.
  SELECT count(*) INTO n FROM public.business_events e JOIN mr_before b ON b.id = e.id
  WHERE e.metadata->'placement_repaired'->'prior'->'metadata' = coalesce(b.metadata, '{}'::jsonb)

@@ -260,7 +260,7 @@ expect_eq "SELECT string_agg(coalesce(job_id::text, '-') || ':' || attribution_s
 expect_eq "SELECT string_agg(coalesce(job_id::text, '-') || ':' || coalesce(attribution_status, '-') || ':' || (metadata->>'duplicate_of')
   || ':' || public.context_event_source_admissible(e)::text || ':' || (payload ? 'job_id')::text || ':' || (metadata->>'capture_mode'), ',' ORDER BY id)
   FROM public.business_events e WHERE id IN ('a7c00000-0000-4000-800a-000000000005', 'a7c00000-0000-4000-800a-000000000006')" \
-  "a7c00000-0000-4000-8000-0000000000b1:single_open:a7c00000-0000-4000-800e-000000000005:false:true:relink,-:-:a7c00000-0000-4000-800e-000000000006:false:false:relink" \
+  "a7c00000-0000-4000-8000-0000000000b1:single_open:a7c00000-0000-4000-800e-000000000005:false:false:relink,-:-:a7c00000-0000-4000-800e-000000000006:false:false:relink" \
   "a copy goes where its twin is, marked and never read: on the twin's job, or off every job and queue while the twin waits"
 expect_eq "SELECT (SELECT count(*) FROM public.context_job_record_messages(ARRAY['a7c00000-0000-4000-8000-0000000000b1'::uuid], '2031-03-20Z') m
    WHERE m.source_id IN ('a7c00000-0000-4000-800a-000000000005', 'a7c00000-0000-4000-800e-000000000005'))

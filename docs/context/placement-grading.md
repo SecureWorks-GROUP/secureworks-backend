@@ -168,9 +168,9 @@ correct a sample, unload it and load it again.
   `context_placement_misfile_plan()` (one ladder decision per row, for
   scripts). The 70 rows on the placeholder job SWF-PDF-BUCKET are repaired by
   `scripts/context-placement-misfile-repair.sql` (owner's go): 12 move, 18 go to
-  review with their guessed payload job set aside, 40 are copies of a text the
-  history load already saved and are marked as such
-  (`context_placement_message_twin`).
+  review, 40 are copies of a text the history load already saved and are marked
+  as such (`context_placement_message_twin`); review rows and copies have their
+  guessed payload job set aside.
 - The 50 live thread bindings to that placeholder are retired by
   `scripts/context-holding-thread-retire.sql`, before any bucket re-run.
 - The bucket re-run under the rules-on ladder is

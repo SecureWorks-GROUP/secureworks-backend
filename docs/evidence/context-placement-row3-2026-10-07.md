@@ -82,10 +82,10 @@ aside), and checked for a twin (`context_placement_message_twin`), 11:40Z:
 misfiles 70 to 0, 70 rows off the placeholder (1,038 to 968 on it), the review
 queue gains 18 rows each with a candidate, 12 rows become unread history on
 their jobs until read, and the 40 copies are never read. Every review row and
-every copy that does not sit on its payload job has that guessed payload job
-set aside (kept in `placement_repaired`), so a reviewer who picks any candidate
-places a row every reader reads; with the guess kept, any pick but the guess
-was unreadable and a new known misfile.
+every copy has its guessed payload job set aside (kept in
+`placement_repaired`), so a reviewer who picks any candidate places a row every
+reader reads, and a copy is no misfile wherever a later reopen puts it; with
+the guess kept, any pick but the guess was unreadable and a new known misfile.
 
 ## The 50 thread bindings
 
@@ -119,8 +119,8 @@ with the 50 bindings emulated as retired, in 10 chunks, 11:45 to 12:05Z:
 
 The model queue: 654 rows wait for Luna today; all 654 are history and leave
 the queue unplaced, never asked; 128 rows become first asks (none already
-answered), within the 300 attribution calls of the day's 1,000; the 129
-already answered stay as Luna left them (before this review all 257 would have
+answered), capped with every other attribution ask at 300 of the day's 1,000
+calls; the 129 already answered stay as Luna left them (before this review all 257 would have
 gone to Luna, 129 of them a second time).
 
 The Jarvis event listener (`src/automation/event-listener.ts` on main, last

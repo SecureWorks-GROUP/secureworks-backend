@@ -858,9 +858,9 @@ queued). A copy is marked `metadata.duplicate_of` (the 20261006031000
 convention), never made a second live copy. `context_placement_misfile_plan()`
 re-decides holding-job rows with the rules-on ladder in preview: duplicate
 (follows its twin, marked), move (only when the ladder's own rule lands on the
-job its payload names), review; a row that will not sit on its payload job has
-that guessed payload job set aside, so any candidate a reviewer picks is read
-and is no misfile. A re-placed old row is stamped `capture_mode` relink: with
+job its payload names), review; every review row and every copy has its
+guessed payload job set aside, so any candidate a reviewer picks is read and is
+no misfile. A re-placed old row is stamped `capture_mode` relink: with
 `live`, the Jarvis event listener reads a customer text whose `attributed_at`
 is new as fresh news and cancels every pending proposal and nudge on its job,
 and the cadence wakes a read. Never send a row with `metadata.luna_outcome`

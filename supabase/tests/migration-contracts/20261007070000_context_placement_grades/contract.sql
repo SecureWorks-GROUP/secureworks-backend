@@ -771,7 +771,7 @@ BEGIN
    '2:review:-:b2+b3:-:true:ctPGCb:unplaced:review_several,'
    '3:review:-:b4+b5:-:true:ctPGCc:single_open:single_open,'
    '4:leave_not_on_holding_job:-:-:-:false:ctPGCa:-:-,'
-   '5:duplicate:b1:-:05:false:ctPGCa:single_open:single_open,'
+   '5:duplicate:b1:-:05:true:ctPGCa:single_open:single_open,'
    '6:duplicate:-:-:06:true:ctPGCb:unplaced:review_several,'
    '7:review:-:b2+b3:-:true:ctPGCb:unplaced:review_several' THEN
   RAISE EXCEPTION 'placement contract: the misfile plan is %', got;

@@ -99,11 +99,11 @@
 --     live copy. move: the ladder places it, by its own rule, on the very job
 --     the payload names (two independent signals agree). review: anything
 --     else; it goes to the review queue unplaced with the ladder's candidates,
---     the job the ladder chose and the payload's job. A row that will not sit
---     on the job its payload names (review, or a duplicate whose twin sits
---     elsewhere or waits) has that payload job set aside (set_aside_payload_job),
---     so whichever candidate a reviewer later picks is read and is no
---     misfile. leave_not_on_holding_job and leave_error: never touched.
+--     the job the ladder chose and the payload's job. Every review row and
+--     every copy has its payload job set aside (set_aside_payload_job), so
+--     whichever candidate a reviewer later picks is read and is no misfile,
+--     and a copy is never one wherever a reopen puts it.
+--     leave_not_on_holding_job and leave_error: never touched.
 --     scripts/context-placement-misfile-repair.sql applies it with the owner's go.
 --  8. context_placement_misfile_counts(as_of): READ ONLY counts for the
 --     scorecard: payload mismatch rows (all, on a holding job, by class), rows
@@ -666,9 +666,9 @@ BEGIN
   ELSIF v_twin IS NOT NULL THEN
    -- The message is already saved by a row that stands in for this one: this row is its copy. It goes
    -- where its twin is (the twin's job, or no job while the twin waits in the queue), marked, never read.
-   plan := 'duplicate'; duplicate_of := v_twin;
+   -- A copy never keeps the backfill's guessed payload job: wherever a later reopen puts it, it is no misfile.
+   plan := 'duplicate'; duplicate_of := v_twin; set_aside_payload_job := true;
    to_job_id := CASE WHEN v_twin_state = 'placed' THEN v_twin_job END;
-   set_aside_payload_job := to_job_id IS NULL OR to_job_id IS DISTINCT FROM m.mto;
   ELSIF r.job_id IS NOT NULL AND r.job_id = m.mto AND public.context_linked_status(r.attribution_status) THEN
    plan := 'move'; to_job_id := r.job_id;
   ELSE
@@ -683,7 +683,7 @@ BEGIN
  END LOOP;
 END $fn$;
 COMMENT ON FUNCTION public.context_placement_misfile_plan() IS
- 'Context placement grades (20261007070000): read only (the ladder runs in preview). Every row of context_payload_job_mismatch_rows() with a plan. A row on a holding job (metadata.do_not_schedule) is re-decided by resolve_context_attribution(row, preview true, rules on) as it would read once repaired: contact_id from the row or its payload''s ghl_contact_id, no job, capture_mode relink, the payload''s job_id set aside. duplicate: its GHL message is already saved by a twin that stands in (context_placement_message_twin): duplicate_of names the twin, to_job_id is the twin''s job when it is placed and null while it waits in the queue (the copy then takes no queue status); move: the ladder places it, by a linked status, on the job the payload names (to_job_id); review: anything else (candidate_job_ids: the ladder''s candidates, the job it chose and the payload''s job, holding jobs left out); leave_not_on_holding_job and leave_error are never touched. set_aside_payload_job: the row will not sit on the job its payload names (review, or a duplicate whose twin sits elsewhere or waits), so the repair sets that payload job aside and any candidate a reviewer picks is read and is no misfile. decided carries the ladder''s answer and the twin (ids and codes). One ladder decision per row: for scripts, not for an hourly read. Applied by scripts/context-placement-misfile-repair.sql with the owner''s go. Service role only.';
+ 'Context placement grades (20261007070000): read only (the ladder runs in preview). Every row of context_payload_job_mismatch_rows() with a plan. A row on a holding job (metadata.do_not_schedule) is re-decided by resolve_context_attribution(row, preview true, rules on) as it would read once repaired: contact_id from the row or its payload''s ghl_contact_id, no job, capture_mode relink, the payload''s job_id set aside. duplicate: its GHL message is already saved by a twin that stands in (context_placement_message_twin): duplicate_of names the twin, to_job_id is the twin''s job when it is placed and null while it waits in the queue (the copy then takes no queue status); move: the ladder places it, by a linked status, on the job the payload names (to_job_id); review: anything else (candidate_job_ids: the ladder''s candidates, the job it chose and the payload''s job, holding jobs left out); leave_not_on_holding_job and leave_error are never touched. set_aside_payload_job: true for every review row and every copy: the repair sets that guessed payload job aside, so any candidate a reviewer picks is read and is no misfile, and a copy is never one wherever a reopen puts it. decided carries the ladder''s answer and the twin (ids and codes). One ladder decision per row: for scripts, not for an hourly read. Applied by scripts/context-placement-misfile-repair.sql with the owner''s go. Service role only.';
 
 -- 11. Counts for the scorecard's known misfiles. Cheap; read only.
 CREATE OR REPLACE FUNCTION public.context_placement_misfile_counts(p_as_of timestamptz DEFAULT now())

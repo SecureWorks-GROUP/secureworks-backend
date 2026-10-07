@@ -64,10 +64,11 @@
 -- as retired): 654 waiting, all 654 leave (history rows go to review
 -- unplaced, never asked); 128 rows are new asks, none already answered; the
 -- 129 Luna-answered rows the rules would have queued again are kept. Before
--- the Luna rule all 257 went to Luna. Attribution asks are capped at the
--- policy's attribution_calls_day (300 of the 1,000 a day, 20261006060000),
--- so the 128 first asks fit one day's attribution allowance. No other model
--- call is made: no read wakes (every placed row is history).
+-- the Luna rule all 257 went to Luna. Attribution asks are capped, with every
+-- other attribution ask, at the policy's attribution_calls_day (300 of the
+-- 1,000 a day, 20261006060000), so the 128 first asks spread over the days
+-- the cap allows. No other model call is made: no read wakes (every placed
+-- row is history).
 --
 -- What PART 1 measured, read only, 7 Oct 2026 11:45 to 12:05Z (window to 04:00Z,
 -- L1g live, flag on since 02:32Z, the 50 holding-job bindings emulated as
