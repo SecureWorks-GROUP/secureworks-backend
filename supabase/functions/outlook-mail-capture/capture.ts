@@ -88,7 +88,11 @@
 // exactly as W7's group history.
 // Everything else is the history path: the cursor, the resume (a deep window is
 // named by its start AND its end, because the plan can re-read a period with
-// the same end), the checkpoints, the grace, counts.progressed, backfill rows.
+// the same end, and by the plan's slice id: the tick sends `slice`, the time
+// the slice was first posted, kept on the run's cursor as deep_slice, so a cut
+// run is resumed only by a call for the same posting of the slice, never by a
+// later posting of the same window), the checkpoints, the grace,
+// counts.progressed, backfill rows.
 // What it keeps is narrower than history: an email touching a monitored live
 // job (context_email_deep_scope: the job's number named, its client's email
 // among the outside addresses, or its builder's reference named), received on
@@ -371,6 +375,12 @@ export interface CaptureRequest {
   to?: string | null;
   /** Mode deep only: list the window and count by month, write nothing. */
   probe?: boolean;
+  /**
+   * Mode deep only: the plan's slice id, the time the slice was first posted
+   * (ISO, milliseconds, UTC), kept on the run's cursor as deep_slice. A cut
+   * run is resumed only by a call that names the same slice.
+   */
+  slice?: string | null;
 }
 
 /**
@@ -432,6 +442,22 @@ export function runSourceName(mode: Mode, sourceKey: string): string {
 /** History and deep runs share the history path: a fixed window, a resumable cursor, backfill rows. */
 function isHistoryLike(mode: Mode): boolean {
   return mode === "history" || mode === "deep";
+}
+
+/** The plan's slice id: an ISO time to the millisecond in UTC, as the tick writes it. */
+export function isSliceId(v: unknown): v is string {
+  return typeof v === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v) &&
+    Number.isFinite(Date.parse(v)) &&
+    new Date(Date.parse(v)).toISOString() === v;
+}
+
+/** The slice id a deep run's cursor carries, or null. */
+function sliceOf(
+  cursor: Record<string, unknown> | null | undefined,
+): string | null {
+  const v = cursor?.deep_slice;
+  return typeof v === "string" ? v : null;
 }
 
 /** A provider or database failure's code, safe for a run row (lower case, ids only). */
@@ -573,6 +599,14 @@ export async function runOutlookCapture(
   }
   if (req.probe && req.mode !== "deep") {
     return { outcome: "refused", code: "probe_needs_deep_mode" };
+  }
+  if (req.slice !== undefined && req.slice !== null) {
+    if (req.mode !== "deep") {
+      return { outcome: "refused", code: "slice_needs_deep_mode" };
+    }
+    if (!isSliceId(req.slice)) {
+      return { outcome: "refused", code: "deep_slice_invalid" };
+    }
   }
   const flags = await deps.flags();
   if (!flags.reader) return { outcome: "idle", reason: `${READER_FLAG}_off` };
@@ -805,6 +839,10 @@ async function runSource(
     // named by its start too: the deep plan may read a period again with the
     // same end and an earlier start (a job that joined later), and resuming a
     // cursor from the narrower window would skip the start of the wider one.
+    // And by the plan's slice id: a later posting of the same window (a walk
+    // after a job's keys changed) reads for jobs the earlier one never
+    // searched for, so it starts at the window's start, never at the earlier
+    // posting's cursor.
     const fresh: StartPoint = {
       startMs: env.window!.fromMs,
       skipBeforeMs: null,
@@ -815,7 +853,8 @@ async function runSource(
       r.status !== "running" &&
       r.cursor?.history_to === historyKey!.history_to &&
       (req.mode !== "deep" ||
-        r.cursor?.history_from === historyKey!.history_from)
+        (r.cursor?.history_from === historyKey!.history_from &&
+          sliceOf(r.cursor) === (req.slice ?? null)))
     );
     resume = newest && newest.status !== "succeeded" ? newest : null;
     start = resume && resume.window_to && s.kind === "user"
@@ -932,7 +971,12 @@ async function runSource(
         backlog: backlog || !readComplete,
         ids_at_end: cursorIds,
         ...(historyKey ?? {}),
-        ...(req.mode === "deep" ? { history_tier: "deep" } : {}),
+        ...(req.mode === "deep"
+          ? {
+            history_tier: "deep",
+            ...(req.slice ? { deep_slice: req.slice } : {}),
+          }
+          : {}),
         ...(walk ? { group: walk } : {}),
         ...(req.mode === "sweep"
           ? { miss_received_at: sweepMissList(missTimes) }

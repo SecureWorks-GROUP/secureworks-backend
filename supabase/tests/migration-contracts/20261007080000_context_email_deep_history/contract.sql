@@ -1,39 +1,68 @@
 -- History depth PR B contract (20261007080000): the deep email load reads each
 -- mailbox backwards to the start of the oldest monitored live job and never
--- further, credits a job only for slices posted while it was a member, catches
--- up late joiners once a Perth day, keeps W7's progress rules, waits for the
+-- further, credits a job only for slices posted while it was a member, judges
+-- a slice only by a run of its own posting (the plan's slice id), catches up
+-- late joiners once a Perth day, keeps W7's progress rules, waits for the
 -- 60-day load and for its own running run, and answers the scorecard's two
--- reads. The lead rule is the owner's (7 Oct 2026) until context_lead_monitored
--- exists, then that function's. Every fixture is synthetic and rolled back;
--- user triggers are off for them; every time is relative to the transaction's
--- now(), so nothing depends on the wall clock. "Time passes" is written as
--- moving the recorded times back (pg_temp.dh_pass).
+-- reads. The lead rule is the owner's (7 Oct 2026) until the lead-rule slice
+-- (20261007010000) is on the database, then that slice's own function. Every
+-- fixture is synthetic and rolled back; user triggers are off for them; every
+-- time is relative to the transaction's now(), so nothing depends on the wall
+-- clock. "Time passes" is written as moving the recorded times back
+-- (pg_temp.dh_pass), the slice id a run carries among them.
 
 CREATE FUNCTION pg_temp.dh_iso(t timestamptz) RETURNS text LANGUAGE sql AS $$
  SELECT to_char(t AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') $$;
 
--- A finished deep run of a source's open slice, as the reader records one.
+-- A finished deep run of a source's open slice, as the reader records one: its
+-- cursor names the slice's window and the plan's slice id (the time the slice
+-- was first posted), as the tick's call carried them.
 CREATE FUNCTION pg_temp.dh_run(k text, st text, c jsonb, code text DEFAULT NULL) RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE p public.context_email_deep_plan; id uuid;
 BEGIN
  SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key=k;
- IF p.slice_from IS NULL THEN RAISE EXCEPTION 'dh_run: % has no open slice',k; END IF;
+ IF p.slice_from IS NULL OR p.slice_posted_at IS NULL THEN RAISE EXCEPTION 'dh_run: % has no posted slice',k; END IF;
  INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,finished_at,counts,error_code,cursor)
  VALUES('outlook_deep_history_'||k,st,clock_timestamp(),clock_timestamp(),clock_timestamp(),c,code,
   jsonb_build_object('mode','deep','backlog',st<>'succeeded','history_from',pg_temp.dh_iso(p.slice_from),
-   'history_to',pg_temp.dh_iso(p.slice_to),'history_tier','deep'))
+   'history_to',pg_temp.dh_iso(p.slice_to),'history_tier','deep','deep_slice',pg_temp.dh_iso(p.slice_posted_at)))
  RETURNING context_capture_runs.id INTO id;
  RETURN id;
 END $$;
 
--- Time passes: every time the load recorded moves back by d.
+-- Time passes: every time the load recorded moves back by d, the slice id on a
+-- deep run's cursor too (it is the time its slice was first posted).
 CREATE FUNCTION pg_temp.dh_pass(d interval) RETURNS void LANGUAGE sql AS $$
  UPDATE public.context_email_deep_members SET entered_at=entered_at-d, left_at=left_at-d, updated_at=updated_at-d;
  UPDATE public.context_email_deep_plan SET slice_posted_at=slice_posted_at-d, last_posted_at=last_posted_at-d,
   stalled_at=stalled_at-d, last_progress_at=last_progress_at-d, succeeded_at=succeeded_at-d;
- UPDATE public.context_capture_runs SET started_at=started_at-d, updated_at=updated_at-d, finished_at=finished_at-d
+ UPDATE public.context_capture_runs SET started_at=started_at-d, updated_at=updated_at-d, finished_at=finished_at-d,
+  cursor=CASE WHEN cursor ? 'deep_slice'
+   THEN jsonb_set(cursor,'{deep_slice}',to_jsonb(pg_temp.dh_iso((cursor->>'deep_slice')::timestamptz-d))) ELSE cursor END
  WHERE source LIKE 'outlook_deep_history_%';
 $$;
+
+-- The lead-rule slice (20261007010000) owns the rule once it is on a database:
+-- hide its two functions for the proofs of the owner's fallback rule, and stand
+-- them back up.
+CREATE FUNCTION pg_temp.dh_hide_lead_rule() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ IF to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)') IS NOT NULL THEN
+  ALTER FUNCTION public.context_lead_monitored_jobs(uuid[],timestamptz) RENAME TO dh_hidden_lead_monitored_jobs;
+ END IF;
+ IF to_regprocedure('public.context_lead_monitored(uuid,timestamptz)') IS NOT NULL THEN
+  ALTER FUNCTION public.context_lead_monitored(uuid,timestamptz) RENAME TO dh_hidden_lead_monitored;
+ END IF;
+END $$;
+CREATE FUNCTION pg_temp.dh_show_lead_rule() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ IF to_regprocedure('public.dh_hidden_lead_monitored_jobs(uuid[],timestamptz)') IS NOT NULL THEN
+  ALTER FUNCTION public.dh_hidden_lead_monitored_jobs(uuid[],timestamptz) RENAME TO context_lead_monitored_jobs;
+ END IF;
+ IF to_regprocedure('public.dh_hidden_lead_monitored(uuid,timestamptz)') IS NOT NULL THEN
+  ALTER FUNCTION public.dh_hidden_lead_monitored(uuid,timestamptz) RENAME TO context_lead_monitored;
+ END IF;
+END $$;
 
 -- 1. Shape and access.
 DO $$
@@ -201,14 +230,29 @@ INSERT INTO public.xero_invoices(id,org_id,xero_invoice_id,invoice_number,invoic
 SELECT 'd7ef0000-0000-4000-8000-000000000001','00000000-0000-4000-8000-0000000000aa','xero-dh-1','INV-DH1','ACCREC','DRAFT','d7e00000-0000-4000-8000-00000000000b',
  ((t0-interval '90 days') AT TIME ZONE 'Australia/Perth')::date FROM dh_t;
 
--- 3. The scope, on the owner's rule (no context_lead_monitored here).
+-- 3a. When the lead-rule slice (20261007010000) is on this stack, the scope
+-- reads its rule: lead_rule context_lead_monitored, and monitored exactly as
+-- context_lead_monitored_jobs answers, job for job.
+DO $$
+DECLARE f regprocedure:=to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'); d text[];
+BEGIN
+ IF f IS NOT NULL AND coalesce(obj_description(f,'pg_proc'),'') LIKE 'Lead cutoff (20261007010000)%' THEN
+  IF EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'context_lead_monitored') THEN
+   RAISE EXCEPTION 'deep contract: the lead-rule slice is on this stack and the scope does not read it %',
+    (SELECT array_agg(DISTINCT lead_rule) FROM public.context_email_deep_scope_jobs(now()));
+  END IF;
+  SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") INTO d
+  FROM public.context_email_deep_scope_jobs(now()) s FULL JOIN public.context_lead_monitored_jobs(NULL,now()) m ON m.job_id=s.job_id
+  WHERE s.monitored IS DISTINCT FROM m.monitored;
+  IF d IS NOT NULL THEN RAISE EXCEPTION 'deep contract: the scope and the lead rule disagree on %',d; END IF;
+ END IF;
+END $$;
+
+-- 3. The scope, on the owner's rule (the lead-rule slice hidden here).
 DO $$
 DECLARE t0 timestamptz:=(SELECT t0 FROM dh_t); r record; mon text[];
 BEGIN
- IF to_regprocedure('public.context_lead_monitored(uuid,timestamp with time zone)') IS NOT NULL THEN
-  -- The lead-rule slice is on this stack: hide it for the fallback proof.
-  ALTER FUNCTION public.context_lead_monitored(uuid,timestamp with time zone) RENAME TO dh_hidden_lead_monitored;
- END IF;
+ PERFORM pg_temp.dh_hide_lead_rule();
  SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
  IF mon<>ARRAY['SWF-DH01','SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12'] THEN
   RAISE EXCEPTION 'deep contract: monitored %',mon;
@@ -225,52 +269,90 @@ BEGIN
   IF r.job_number='SWF-DH02' AND (r.client_email_key<>'casey.two@example.test' OR r.job_number_key<>'SWF-DH02') THEN RAISE EXCEPTION 'deep contract: keys %',to_jsonb(r); END IF;
   IF r.job_number='SWMS-DH08' AND r.builder_refs<>ARRAY['MLB-26537','MLB-26537PO-56922','PO-56922'] THEN RAISE EXCEPTION 'deep contract: builder refs %',r.builder_refs; END IF;
  END LOOP;
- IF to_regprocedure('public.dh_hidden_lead_monitored(uuid,timestamp with time zone)') IS NOT NULL THEN
-  ALTER FUNCTION public.dh_hidden_lead_monitored(uuid,timestamp with time zone) RENAME TO context_lead_monitored;
- END IF;
+ PERFORM pg_temp.dh_show_lead_rule();
 END $$;
 
--- 3b. Once context_lead_monitored exists, the scope follows it (a stand-in here).
+-- 3b. Once the lead-rule slice is on the database the scope reads its rule.
+-- Stand-ins with that slice's exact signatures (20261007010000, PR 985 at
+-- de66b132): the set function context_lead_monitored_jobs(uuid[], timestamptz)
+-- RETURNS TABLE(job_id, job_number, monitored, state, quote_sent_at,
+-- customer_at, cutoff_at), every live job when the ids are null, and the
+-- boolean context_lead_monitored(uuid, timestamptz). They mark DH01 not
+-- monitored and DH03 monitored, the opposite of the owner's fallback rule, so
+-- only a scope that reads them passes. Once the real slice is on this stack,
+-- CREATE OR REPLACE refuses a stand-in whose shape differs from it, so a shape
+-- this load does not read fails here, never quietly on production.
 SAVEPOINT lead_rule;
-DROP FUNCTION IF EXISTS public.context_lead_monitored(uuid,timestamp with time zone);
-CREATE FUNCTION public.context_lead_monitored(p_job_id uuid,p_as_of timestamptz DEFAULT now())
-RETURNS TABLE(job_id uuid,monitored boolean,lead boolean,quote_first_sent_at timestamptz,cutoff_at timestamptz,progressed_at timestamptz)
+CREATE OR REPLACE FUNCTION public.context_lead_monitored_jobs(p_job_ids uuid[] DEFAULT NULL, p_as_of timestamptz DEFAULT now())
+RETURNS TABLE(job_id uuid, job_number text, monitored boolean, state text, quote_sent_at timestamptz, customer_at timestamptz,
+ cutoff_at timestamptz)
 LANGUAGE sql STABLE AS $$
- SELECT p_job_id, p_job_id<>'d7e00000-0000-4000-8000-000000000001'::uuid, true, NULL::timestamptz, NULL::timestamptz, NULL::timestamptz
+ SELECT jb.id, jb.job_number, jb.id<>'d7e00000-0000-4000-8000-000000000001'::uuid,
+  CASE WHEN jb.id='d7e00000-0000-4000-8000-000000000001'::uuid THEN 'not_followed_up' ELSE 'not_quoted' END,
+  NULL::timestamptz, NULL::timestamptz, NULL::timestamptz
+ FROM public.jobs jb
+ WHERE jb.id=ANY(p_job_ids)
+  OR (p_job_ids IS NULL AND jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost'))
+ ORDER BY jb.id
+$$;
+CREATE OR REPLACE FUNCTION public.context_lead_monitored(p_job_id uuid, p_as_of timestamptz DEFAULT now())
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT CASE WHEN EXISTS(SELECT 1 FROM public.jobs jb WHERE jb.id=p_job_id) THEN p_job_id<>'d7e00000-0000-4000-8000-000000000001'::uuid END
 $$;
 DO $$
 DECLARE mon text[];
 BEGIN
  SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
- IF mon<>ARRAY['SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH03','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
+ IF mon IS DISTINCT FROM ARRAY['SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH03','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
   OR EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'context_lead_monitored')
   OR public.context_email_deep_status()->>'lead_rule'<>'context_lead_monitored'
- THEN RAISE EXCEPTION 'deep contract: the scope does not follow context_lead_monitored %',mon; END IF;
+ THEN RAISE EXCEPTION 'deep contract: the scope does not follow the lead-rule slice''s set function %, %',mon,
+  (SELECT array_agg(DISTINCT lead_rule) FROM public.context_email_deep_scope_jobs(now())); END IF;
 END $$;
-ROLLBACK TO SAVEPOINT lead_rule;
--- 3c. A lead-rule function that does not answer as expected: the owner's rule
--- applies and lead_rule says so; nothing stops.
-SAVEPOINT lead_rule_odd;
-DROP FUNCTION IF EXISTS public.context_lead_monitored(uuid,timestamp with time zone);
-CREATE FUNCTION public.context_lead_monitored(p_job_id uuid,p_as_of timestamptz DEFAULT now())
-RETURNS TABLE(job_id uuid,is_monitored boolean) LANGUAGE sql STABLE AS $$ SELECT p_job_id, false $$;
+-- The boolean alone, with no set function, is read job by job to the same answer.
+ALTER FUNCTION public.context_lead_monitored_jobs(uuid[],timestamptz) RENAME TO dh_set_rule_away;
 DO $$
 DECLARE mon text[];
 BEGIN
  SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
- IF mon<>ARRAY['SWF-DH01','SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
+ IF mon IS DISTINCT FROM ARRAY['SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH03','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
+  OR EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'context_lead_monitored')
+ THEN RAISE EXCEPTION 'deep contract: the scope does not follow the lead-rule slice''s boolean %, %',mon,
+  (SELECT array_agg(DISTINCT lead_rule) FROM public.context_email_deep_scope_jobs(now())); END IF;
+END $$;
+ROLLBACK TO SAVEPOINT lead_rule;
+-- 3c. A lead rule that does not answer as expected: the owner's rule applies
+-- and lead_rule says so; nothing stops. First a set function of another shape
+-- (it names no monitored column)...
+SAVEPOINT lead_rule_odd;
+SELECT pg_temp.dh_hide_lead_rule();
+CREATE FUNCTION public.context_lead_monitored_jobs(p_job_ids uuid[] DEFAULT NULL, p_as_of timestamptz DEFAULT now())
+RETURNS TABLE(job_id uuid, is_monitored boolean) LANGUAGE sql STABLE AS $$ SELECT jb.id, false FROM public.jobs jb $$;
+DO $$
+DECLARE mon text[];
+BEGIN
+ SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
+ IF mon IS DISTINCT FROM ARRAY['SWF-DH01','SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
   OR EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'deep_fallback_lead_rule_unreadable')
   OR public.context_email_deep_status()->>'lead_rule'<>'deep_fallback_lead_rule_unreadable'
- THEN RAISE EXCEPTION 'deep contract: an unreadable lead rule %',mon; END IF;
+ THEN RAISE EXCEPTION 'deep contract: an unreadable lead rule (set) %',mon; END IF;
+END $$;
+-- ...then, with no set function, a one-job rule that is not a boolean (the
+-- shape the first version of this load read).
+DROP FUNCTION public.context_lead_monitored_jobs(uuid[],timestamptz);
+CREATE FUNCTION public.context_lead_monitored(p_job_id uuid, p_as_of timestamptz DEFAULT now())
+RETURNS TABLE(job_id uuid, monitored boolean) LANGUAGE sql STABLE AS $$ SELECT p_job_id, false $$;
+DO $$
+DECLARE mon text[];
+BEGIN
+ SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
+ IF mon IS DISTINCT FROM ARRAY['SWF-DH01','SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
+  OR EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'deep_fallback_lead_rule_unreadable')
+ THEN RAISE EXCEPTION 'deep contract: an unreadable lead rule (one job) %',mon; END IF;
 END $$;
 ROLLBACK TO SAVEPOINT lead_rule_odd;
 -- From here the owner's rule applies whatever this stack holds.
-DO $$
-BEGIN
- IF to_regprocedure('public.context_lead_monitored(uuid,timestamp with time zone)') IS NOT NULL THEN
-  ALTER FUNCTION public.context_lead_monitored(uuid,timestamp with time zone) RENAME TO dh_hidden_lead_monitored;
- END IF;
-END $$;
+SELECT pg_temp.dh_hide_lead_rule();
 
 -- 4. Idle until the four flags and the capture lane; the reader's scope is
 -- empty until the tick has members; the reach read is honest before any load.
@@ -334,8 +416,12 @@ BEGIN
  IF p.state<>'loading' OR p.slice_from<>lf-interval '31 days' OR p.slice_to<>lf OR p.slice_kind<>'deep' THEN RAISE EXCEPTION 'deep contract: a user slice %',to_jsonb(p); END IF;
  SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='shaun';
  IF p.state<>'pending' OR p.slice_from<>lf-interval '31 days' OR p.posts<>0 OR p.slice_posted_at IS NOT NULL THEN RAISE EXCEPTION 'deep contract: the third waits its turn %',to_jsonb(p); END IF;
+ -- The call names the slice's window and the plan's slice id: the time the
+ -- slice was first posted, so its run is told from any other posting's.
  SELECT body INTO b FROM pg_temp.dh_posts WHERE tick=4 AND body->>'source'='nithin';
- IF b<>jsonb_build_object('mode','deep','source','nithin','from',pg_temp.dh_iso(lf-interval '31 days'),'to',pg_temp.dh_iso(lf),'actor','cron:outlook-mail-deep-history')
+ IF b<>jsonb_build_object('mode','deep','source','nithin','from',pg_temp.dh_iso(lf-interval '31 days'),'to',pg_temp.dh_iso(lf),
+   'slice',(SELECT pg_temp.dh_iso(x.slice_posted_at) FROM public.context_email_deep_plan x WHERE x.source_key='nithin'),
+   'actor','cron:outlook-mail-deep-history')
   OR (SELECT headers->>'Authorization' FROM pg_temp.dh_posts WHERE tick=4 LIMIT 1)<>'Bearer eyJ.deep.fixture'
   OR (SELECT url FROM pg_temp.dh_posts WHERE tick=4 LIMIT 1)<>'https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/outlook-mail-capture'
  THEN RAISE EXCEPTION 'deep contract: call body %',b; END IF;
@@ -462,12 +548,7 @@ UPDATE public.monitored_mailboxes SET enabled=(source_key IN ('patios','nithin',
 UPDATE public.jobs SET status='completed';
 DELETE FROM public.context_capture_runs;
 DELETE FROM public.context_email_history_plan;
-DO $$
-BEGIN
- IF to_regprocedure('public.context_lead_monitored(uuid,timestamp with time zone)') IS NOT NULL THEN
-  ALTER FUNCTION public.context_lead_monitored(uuid,timestamp with time zone) RENAME TO dh_hidden_lead_monitored;
- END IF;
-END $$;
+SELECT pg_temp.dh_hide_lead_rule();
 CREATE TEMP TABLE dh_t AS SELECT date_trunc('second',now()) AS t0;
 INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,finished_at,window_from,window_to,counts,cursor)
 SELECT 'outlook_'||k,'succeeded',t0-interval '4 days',t0-interval '4 days',t0-interval '4 days',t0-interval '4 days',
@@ -550,7 +631,9 @@ BEGIN
  THEN RAISE EXCEPTION 'deep contract: a second walk the same Perth day %',(SELECT jsonb_agg(to_jsonb(x)) FROM public.context_email_deep_plan x); END IF;
  IF (SELECT status||':'||reason FROM public.context_email_history_reach_jobs(ARRAY['d7e00000-0000-4000-8000-0000000000e1'::uuid],now()))<>'loading:next_daily_walk'
  THEN RAISE EXCEPTION 'deep contract: late joiner reason'; END IF;
+ -- The next Perth day: its walk posts nithin's top window again, a new posting.
  UPDATE public.context_email_deep_plan SET walk_day=walk_day-1;
+ PERFORM pg_temp.dh_pass(interval '5 minutes');
  o:=pg_temp.dh_tick();
  SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='patios';
  IF p.slice_kind<>'catchup' OR p.slice_from<>t0-interval '40 days' OR p.slice_to<>lf OR p.state<>'loading' THEN RAISE EXCEPTION 'deep contract: catch-up %',to_jsonb(p); END IF;
@@ -608,6 +691,134 @@ END $$;
 ROLLBACK;
 
 BEGIN;
+-- 10b. A slice is judged only by a run of its own posting. After a finished
+-- walk a job's keys change, and the next Perth day's walk posts the same window
+-- as the first walk's top slice. The first walk's runs of that window never
+-- count for it, nor does any run that does not carry the plan's slice id: the
+-- job's reach moves only once a call for the new slice has read it. Until then
+-- the source waits for its own running call, and with no run at all it stalls
+-- loudly after three calls.
+SET LOCAL session_replication_role = replica;
+CREATE SCHEMA IF NOT EXISTS net;
+CREATE TABLE pg_temp.dh_posts(seq bigserial, tick integer, url text, body jsonb, headers jsonb, timeout_ms integer);
+CREATE TABLE pg_temp.dh_tick_no(n integer);
+INSERT INTO pg_temp.dh_tick_no VALUES (0);
+CREATE OR REPLACE FUNCTION net.http_post(url text,body jsonb DEFAULT '{}'::jsonb,params jsonb DEFAULT '{}'::jsonb,headers jsonb DEFAULT '{}'::jsonb,
+ timeout_milliseconds integer DEFAULT 5000) RETURNS bigint LANGUAGE sql AS $$
+ INSERT INTO pg_temp.dh_posts(tick,url,body,headers,timeout_ms) SELECT n,url,body,headers,timeout_milliseconds FROM pg_temp.dh_tick_no RETURNING seq
+$$;
+CREATE OR REPLACE FUNCTION public.sw_service_key() RETURNS text LANGUAGE sql AS $$ SELECT 'eyJ.deep.fixture'::text $$;
+CREATE FUNCTION pg_temp.dh_tick() RETURNS jsonb LANGUAGE plpgsql AS $$
+BEGIN
+ UPDATE pg_temp.dh_tick_no SET n=n+1;
+ RETURN public.trigger_context_email_deep_history();
+END $$;
+UPDATE public.feature_flags SET enabled=true WHERE flag_name IN ('email_reader_v1','email_reader_schedule_v1','email_capture_v2','email_reader_deep_v1');
+UPDATE public.monitored_mailboxes SET enabled=(source_key='nithin');
+UPDATE public.jobs SET status='completed';
+DELETE FROM public.context_capture_runs;
+DELETE FROM public.context_email_history_plan;
+SELECT pg_temp.dh_hide_lead_rule();
+CREATE TEMP TABLE dh_t AS SELECT date_trunc('second',now()) AS t0;
+INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,finished_at,window_from,window_to,counts,cursor)
+SELECT 'outlook_nithin','succeeded',t0-interval '4 days',t0-interval '4 days',t0-interval '4 days',t0-interval '4 days',
+ t0-interval '4 days'+interval '1 minute','{}','{"mode":"poll"}' FROM dh_t;
+INSERT INTO public.jobs(id,org_id,job_number,status,type,client_email,metadata,created_at)
+SELECT x.id::uuid,'00000000-0000-4000-8000-0000000000aa',x.jn,'processing','fencing',x.em,'{}',t0-x.age
+FROM dh_t, (VALUES
+ ('d7e00000-0000-4000-8000-000000000001','SWF-DH01','pat.one@example.test',interval '200 days'),
+ ('d7e00000-0000-4000-8000-000000000002','SWF-DH02',NULL,interval '100 days')
+) AS x(id,jn,em,age);
+DO $$
+DECLARE t0 timestamptz:=(SELECT t0 FROM dh_t); lf timestamptz; i integer; p record; o jsonb; b jsonb;
+BEGIN
+ lf:=t0-interval '4 days';
+ -- The first walk, every slice read.
+ FOR i IN 1..40 LOOP
+  o:=pg_temp.dh_tick();
+  EXIT WHEN NOT EXISTS(SELECT 1 FROM public.context_email_deep_plan WHERE state<>'succeeded');
+  FOR p IN SELECT * FROM public.context_email_deep_plan WHERE state='loading' LOOP
+   PERFORM pg_temp.dh_run(p.source_key,'succeeded','{"progressed":5}');
+  END LOOP;
+  PERFORM pg_temp.dh_pass(interval '5 minutes');
+ END LOOP;
+ SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='nithin';
+ IF p.state<>'succeeded' OR p.slices_done<>8 OR p.covered_from<>t0-interval '230 days'
+  OR (SELECT count(*) FROM public.context_capture_runs WHERE source='outlook_deep_history_nithin' AND status='succeeded'
+       AND cursor->>'history_from'=pg_temp.dh_iso(lf-interval '31 days') AND cursor->>'history_to'=pg_temp.dh_iso(lf))<>1
+ THEN RAISE EXCEPTION 'deep contract: the first walk %',to_jsonb(p); END IF;
+ -- DH02 gains a client email: its keys change and what was read for it is
+ -- dropped; the next Perth day's walk reads for it again from the top.
+ UPDATE public.jobs SET client_email='casey.new@example.test' WHERE id='d7e00000-0000-4000-8000-000000000002';
+ UPDATE public.context_email_deep_plan SET walk_day=walk_day-1;
+ PERFORM pg_temp.dh_pass(interval '5 minutes');
+ DELETE FROM pg_temp.dh_posts;
+ o:=pg_temp.dh_tick();
+ SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='nithin';
+ SELECT body INTO b FROM pg_temp.dh_posts WHERE body->>'source'='nithin';
+ IF p.state<>'loading' OR p.slice_kind<>'catchup' OR p.slice_from<>lf-interval '31 days' OR p.slice_to<>lf OR p.posts_since_progress<>1
+  OR b->>'slice' IS DISTINCT FROM pg_temp.dh_iso(p.slice_posted_at)
+  OR EXISTS(SELECT 1 FROM public.context_capture_runs WHERE source='outlook_deep_history_nithin' AND cursor->>'deep_slice'=b->>'slice')
+  OR EXISTS(SELECT 1 FROM public.context_email_deep_reach WHERE job_id='d7e00000-0000-4000-8000-000000000002')
+ THEN RAISE EXCEPTION 'deep contract: the catch-up posting %, %',to_jsonb(p),b; END IF;
+END $$;
+-- No run comes for the new slice (the call never reached the reader): the
+-- first walk's run of the same window never credits DH02, the slice count
+-- stays, and after three calls the source is stalled for want of a run.
+SAVEPOINT no_run;
+DO $$
+DECLARE i integer; p record;
+BEGIN
+ FOR i IN 1..4 LOOP
+  PERFORM pg_temp.dh_pass(interval '5 minutes');
+  PERFORM pg_temp.dh_tick();
+  IF EXISTS(SELECT 1 FROM public.context_email_deep_reach WHERE job_id='d7e00000-0000-4000-8000-000000000002')
+   OR (SELECT slices_done FROM public.context_email_deep_plan WHERE source_key='nithin')<>8
+  THEN RAISE EXCEPTION 'deep contract: a slice was credited by a run of another posting (tick %) %',i,
+   (SELECT jsonb_agg(to_jsonb(x)) FROM public.context_email_deep_reach x WHERE x.job_id='d7e00000-0000-4000-8000-000000000002'); END IF;
+ END LOOP;
+ SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='nithin';
+ IF p.state<>'stalled' OR p.stall_reason<>'no_run' OR p.posts<>9+2 THEN RAISE EXCEPTION 'deep contract: no run, no stall %',to_jsonb(p); END IF;
+ IF (SELECT status||':'||reason FROM public.context_email_history_reach_jobs(ARRAY['d7e00000-0000-4000-8000-000000000002'::uuid],now()))
+   <>'loading:mailbox_stalled'
+ THEN RAISE EXCEPTION 'deep contract: no-run reason %',
+  (SELECT to_jsonb(x) FROM public.context_email_history_reach_jobs(ARRAY['d7e00000-0000-4000-8000-000000000002'::uuid],now()) x); END IF;
+END $$;
+ROLLBACK TO SAVEPOINT no_run;
+-- The new slice's call is still running at the next tick, and a stray
+-- finished run of the same window names another slice: neither counts, and
+-- the source waits. When the slice's own call finishes, DH02 is credited.
+DO $$
+DECLARE p record; o jsonb; r uuid;
+BEGIN
+ SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='nithin';
+ INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,counts,cursor)
+ VALUES ('outlook_deep_history_nithin','running',clock_timestamp(),clock_timestamp(),'{}',
+  jsonb_build_object('mode','deep','backlog',true,'history_from',pg_temp.dh_iso(p.slice_from),'history_to',pg_temp.dh_iso(p.slice_to),
+   'history_tier','deep','deep_slice',pg_temp.dh_iso(p.slice_posted_at)))
+ RETURNING id INTO r;
+ INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,finished_at,counts,cursor)
+ VALUES ('outlook_deep_history_nithin','succeeded',clock_timestamp(),clock_timestamp(),clock_timestamp(),'{"progressed":9}',
+  jsonb_build_object('mode','deep','backlog',false,'history_from',pg_temp.dh_iso(p.slice_from),'history_to',pg_temp.dh_iso(p.slice_to),
+   'history_tier','deep','deep_slice',pg_temp.dh_iso(p.slice_posted_at-interval '1 day')));
+ o:=pg_temp.dh_tick();
+ SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='nithin';
+ IF p.slices_done<>8 OR p.state<>'loading' OR p.posts_since_progress<>1 OR p.last_run_id IS NOT DISTINCT FROM r
+  OR EXISTS(SELECT 1 FROM public.context_email_deep_reach WHERE job_id='d7e00000-0000-4000-8000-000000000002')
+  OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(o->'calls') c WHERE c->>'source'='nithin' AND c->>'outcome'='waiting')
+ THEN RAISE EXCEPTION 'deep contract: credited while the slice''s own call runs %, %',to_jsonb(p),o; END IF;
+ UPDATE public.context_capture_runs SET status='succeeded', finished_at=clock_timestamp(), counts='{"progressed":4}', updated_at=clock_timestamp()
+ WHERE id=r;
+ o:=pg_temp.dh_tick();
+ SELECT * INTO p FROM public.context_email_deep_plan WHERE source_key='nithin';
+ IF p.slices_done<>9 OR p.last_run_id IS DISTINCT FROM r
+  OR (SELECT reaches FROM public.context_email_deep_reach WHERE job_id='d7e00000-0000-4000-8000-000000000002' AND source_key='nithin')
+   IS DISTINCT FROM (SELECT t0 FROM dh_t)-interval '35 days'
+ THEN RAISE EXCEPTION 'deep contract: the slice''s own run did not credit it %',to_jsonb(p); END IF;
+END $$;
+ROLLBACK;
+
+BEGIN;
 -- 11. While the 60-day load of a mailbox is unfinished or running, the deep
 -- load never calls that mailbox; it goes on with the others.
 SET LOCAL session_replication_role = replica;
@@ -649,12 +860,52 @@ BEGIN
 END $$;
 ROLLBACK;
 
--- 12. The bodies are the ones the guard accepts on a re-apply.
+-- 12. The bodies are the ones the guard accepts on a re-apply: B-5's list plus
+-- this migration's row, or, when the history daily slice (20261007050000)
+-- applied first, that slice's list plus this migration's row.
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'250d7e9ec2ebecc7e83192a39b7da488'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)
+   <>(CASE WHEN to_regprocedure('public.context_history_daily_policy()') IS NULL THEN '250d7e9ec2ebecc7e83192a39b7da488'
+     ELSE '6498276b1eb16b527fb76dd2b0fa6d83' END)
  THEN RAISE EXCEPTION 'deep contract: the lane list differs from the md5 the guard accepts on a re-apply'; END IF;
 END $$;
+
+-- 12b. Merged after the history daily slice (20261007050000, PR 989), whose
+-- lane list is B-5's plus xero-history-daily: this migration adds its own row
+-- and keeps every row there (the md5 its guard accepts on a re-apply), a
+-- re-apply changes nothing, and its rollback gives that slice's body back byte
+-- for byte. Either merge order leaves both rows.
+BEGIN;
+\ir history_daily_cron_lanes.sql
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'81cbebf914f537b0b85870196cbd0f75'
+ THEN RAISE EXCEPTION 'deep contract: history_daily_cron_lanes.sql is not the 20261007050000 body'; END IF;
+END $$;
+\ir ../../../migrations/20261007080000_context_email_deep_history.sql
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'6498276b1eb16b527fb76dd2b0fa6d83'
+  OR (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname COLLATE "C") FROM public.automation_switch_cron_lanes())
+   IS DISTINCT FROM ARRAY['contact-matching:attribution','context-document-text:capture','ghl-call-transcript-fetch:capture',
+    'ghl-history-schedule:capture','ghl-message-reconcile:capture','monitor-inbox-poll:capture','monitor-inbox-sweep:capture',
+    'outlook-mail-deep-history:capture','outlook-mail-poll:capture','xero-history-daily:capture']
+ THEN RAISE EXCEPTION 'deep contract: after the history daily slice %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
+END $$;
+\ir ../../../migrations/20261007080000_context_email_deep_history.sql
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'6498276b1eb16b527fb76dd2b0fa6d83'
+ THEN RAISE EXCEPTION 'deep contract: a re-apply after the history daily slice changed the lane list'; END IF;
+END $$;
+\ir ../../../rollbacks/20261007080000_context_email_deep_history_down.sql
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'81cbebf914f537b0b85870196cbd0f75'
+ THEN RAISE EXCEPTION 'deep contract: the rollback did not give the history daily slice its lane list back'; END IF;
+END $$;
+ROLLBACK;
 
 -- 13. A re-apply changes nothing and keeps the owner's flag setting; on a
 -- pg_cron stand-in the job is created gated, once, and the switch's wrap sees

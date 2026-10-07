@@ -10,7 +10,8 @@
 // JWT whose role claim is exactly service_role) or the exact server key.
 //
 // Body: {"mode": "poll" | "sweep" | "history" | "deep", "source": "<source_key>",
-// "from": ISO, "to": ISO (history, deep), "wait": true}. Default mode poll. The
+// "from": ISO, "to": ISO (history, deep), "slice": ISO (deep: the plan's slice
+// id, the time the slice was first posted), "wait": true}. Default mode poll. The
 // cron's HTTP call gives up after 5 seconds, so by default the run continues
 // in the background (EdgeRuntime.waitUntil) and the reply is 202; {"wait": true}
 // returns the run summary (codes and counts only).
@@ -408,6 +409,7 @@ export async function handleCapture(
     from: typeof body.from === "string" ? body.from : null,
     to: typeof body.to === "string" ? body.to : null,
     ...(body.probe === true ? { probe: true } : {}),
+    ...(typeof body.slice === "string" ? { slice: body.slice } : {}),
   };
 
   const execute = async (): Promise<

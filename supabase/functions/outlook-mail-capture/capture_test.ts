@@ -1406,6 +1406,91 @@ Deno.test("deep: a user slice cut by the time budget resumes where it stopped; a
   assertEquals(w.keys.size, 7);
 });
 
+Deno.test("deep: the plan's slice id rides on the run's cursor, and a cut run is resumed only by a call for the same slice; another posting of the same window reads it from its own start", async () => {
+  const SLICE_A = "2026-10-01T05:00:00.000Z";
+  const SLICE_B = "2026-10-02T05:00:00.000Z";
+  const box: Msg[] = [];
+  for (let i = 0; i < 6; i++) {
+    box.push(
+      msg(i, `2026-05-2${i}T02:00:00Z`, { subject: `SWP-990001 update ${i}` }),
+    );
+  }
+  const w = world({
+    mailboxes: { "nithin@secureworkswa.com.au": box },
+    tick: 30_000,
+    deepScope: deepScope({
+      jobNumbers: { "SWP-990001": "2026-04-01T00:00:00Z" },
+    }),
+  });
+  // Slice A is cut by the time budget part way.
+  await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice: SLICE_A });
+  const a = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(a.status, "partial");
+  assertEquals((a.cursor as Record<string, unknown>).deep_slice, SLICE_A);
+  const savedA = w.keys.size;
+  assert(savedA > 0 && savedA < 6);
+  // The plan posts the same window again as a new slice (a re-walk after a
+  // key change): never resumed from slice A's cursor, read from its start.
+  w.tick = 0;
+  await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice: SLICE_B });
+  const b = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(b.status, "succeeded");
+  assertEquals((b.cursor as Record<string, unknown>).deep_slice, SLICE_B);
+  assertEquals(b.counts!.skipped_before_cursor, 0);
+  assertEquals(b.counts!.seen, 6);
+  assertEquals(b.counts!.duplicates, savedA);
+  assertEquals(b.counts!.inserted, 6 - savedA);
+  // A call for slice A again carries on from slice A's own cursor.
+  await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice: SLICE_A });
+  const again = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(again.status, "succeeded");
+  assertEquals((again.cursor as Record<string, unknown>).deep_slice, SLICE_A);
+  assert(again.counts!.skipped_before_cursor >= 1);
+  assert(again.counts!.seen < 6);
+  // A call that names no slice resumes neither.
+  await runOutlookCapture(deps(w), DEEP_WINDOW);
+  const none = lastRun(w, "outlook_deep_history_nithin");
+  assertEquals(none.counts!.skipped_before_cursor, 0);
+  assertEquals(none.counts!.seen, 6);
+  assert(!("deep_slice" in (none.cursor as Record<string, unknown>)));
+});
+
+Deno.test("deep: a slice id is the plan's ISO time or nothing, and only a deep call carries one", async () => {
+  const w = world({
+    mailboxes: {
+      "nithin@secureworkswa.com.au": [
+        msg(1, "2026-05-10T02:00:00Z", { subject: "SWP-990001" }),
+      ],
+    },
+  });
+  for (
+    const slice of [
+      "2026-10-01 05:00:00",
+      "2026-10-01T05:00:00Z",
+      "slice-1",
+      "",
+      "2026-13-01T05:00:00.000Z",
+    ]
+  ) {
+    assertEquals(
+      await runOutlookCapture(deps(w), { ...DEEP_WINDOW, slice }),
+      { outcome: "refused", code: "deep_slice_invalid" },
+    );
+  }
+  assertEquals(
+    await runOutlookCapture(deps(w), {
+      mode: "history",
+      source: "nithin",
+      from: "2026-09-01T00:00:00.000Z",
+      to: "2026-09-02T00:00:00.000Z",
+      slice: "2026-10-01T05:00:00.000Z",
+    }),
+    { outcome: "refused", code: "slice_needs_deep_mode" },
+  );
+  assertEquals(w.listCalls, 0);
+  assertEquals(w.runs.length, 0);
+});
+
 Deno.test("deep: a group window is walked as W7's history and ends at the window's end", async () => {
   const w = world({
     sources: [FENCING],

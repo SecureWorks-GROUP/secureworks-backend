@@ -29,10 +29,15 @@
 --     the lead rule used, its first record (the earliest of its created time,
 --     any row placed on it except a deep row, its first document and its
 --     first invoice date), its lead-in, and its keys (job number, client email,
---     builder references). Monitored follows context_lead_monitored(job,
---     as_of) when that function exists (the lead-rule slice owns the rule);
---     until then the owner's rule as stated above (lead_rule deep_fallback).
---     A deep row never moves a start, so the load cannot walk itself back.
+--     builder references). Monitored follows the lead-rule slice's own rule
+--     once it is on the database (20261007010000, PR 985): read once as a set,
+--     context_lead_monitored_jobs(NULL, as_of), else, with only its boolean
+--     context_lead_monitored(job, as_of), job by job; lead_rule
+--     context_lead_monitored. Until then the owner's rule as stated above
+--     (lead_rule deep_fallback); if the slice's function is there but does not
+--     answer in its shape, the owner's rule and lead_rule
+--     deep_fallback_lead_rule_unreadable. A deep row never moves a start, so
+--     the load cannot walk itself back.
 --  4. Tables, written only by the tick, service role SELECT only:
 --     context_email_deep_members (the monitored jobs and when each joined;
 --     a job whose keys change, or whose start moves earlier, joins again),
@@ -51,16 +56,21 @@
 --     reach of the jobs still short of their start and begins 31 days earlier
 --     or at the oldest start among the jobs it credits, whichever is later (a
 --     user mailbox), or at the oldest such start (a group, walked in one
---     window), so it never reads below the oldest monitored job's start. A slice's
---     succeeded run moves the reach of every job that was a member when the
---     slice was first posted and whose reach the slice joins. A job that joins
---     later is caught up by the next walk, which starts at most once a Perth
---     day. The W7 rules hold: a run judged once, moved = succeeded or
---     counts.progressed > 0, 3 calls without a move = stalled with a WARNING
---     and tried again 6 hours later, a source waits while its own run or the
---     60-day load of the same mailbox runs, up to 2 calls a tick to different
---     mailboxes, groups first. It never lists anything for the old fact
---     reader.
+--     window), so it never reads below the oldest monitored job's start. Each
+--     call names its slice (slice: the time the slice was first posted, ISO);
+--     the reader keeps that id on the run's cursor (deep_slice) and resumes
+--     only a run of the same slice, and the tick judges only a run of the same
+--     slice that started after it was posted, so a run of another posting of
+--     the same window (an earlier walk's, or a stray call's) never counts for
+--     it. A slice's succeeded run moves the reach of every job that was a
+--     member when the slice was first posted and whose reach the slice joins.
+--     A job that joins later is caught up by the next walk, which starts at
+--     most once a Perth day. The W7 rules hold: a run judged once, moved =
+--     succeeded or counts.progressed > 0, 3 calls without a move = stalled
+--     with a WARNING and tried again 6 hours later, a source waits while its
+--     own run or the 60-day load of the same mailbox runs, up to 2 calls a
+--     tick to different mailboxes, groups first. It never lists anything for
+--     the old fact reader.
 --  7. context_email_deep_status(): the load as one read for the desk.
 --  8. The scorecard's read (scorecard v2 reads these; nothing here touches
 --     context_scorecard or context_scorecard_jobs):
@@ -70,9 +80,13 @@
 --       not_monitored, the reason, and the per-mailbox reaches;
 --     context_email_history_reach(as_of): each mailbox's reach and whether it
 --       is finished, and the job counts by status (the row 14 lane).
---  9. automation_switch_cron_lanes(): B-5's body (20261005210000) plus one row,
+--  9. automation_switch_cron_lanes(): the live list plus one row,
 --     ('outlook-mail-deep-history','capture'), so the automation switch's wrap
---     and unwrap know the new job.
+--     and unwrap know the new job: B-5's body (20261005210000, production on
+--     7 Oct 2026) or, when the history daily slice (20261007050000, PR 989)
+--     merged first, that slice's body (B-5's plus xero-history-daily), each
+--     with every row it has kept; a list that already names the job is left
+--     alone. Either merge order ends with both rows.
 --
 -- Deep rows never go to AI placement: the reader marks every deep row
 -- metadata.history_tier deep, and the attribution worker never asks about such
@@ -81,12 +95,18 @@
 -- is unchanged.
 --
 -- Replaces one function: automation_switch_cron_lanes(), md5(prosrc)
--- 99e6d70e80a79e548f2478b65fc6cd78 (B-5, read live 7 Oct 2026) or
--- 250d7e9ec2ebecc7e83192a39b7da488 (this migration's, a re-apply). Called,
--- never replaced, so only their presence is checked: context_email_reader_flags,
--- automation_lane_enabled, sw_service_key, and W7's plan table. The guard
--- refuses otherwise, and when a new object exists that is not this
--- migration's, or the flag already exists on the first apply.
+-- 99e6d70e80a79e548f2478b65fc6cd78 (B-5, read live 7 Oct 2026),
+-- 81cbebf914f537b0b85870196cbd0f75 (the history daily slice, PR 989 at
+-- 446ab25e), or this migration's on either (a re-apply):
+-- 250d7e9ec2ebecc7e83192a39b7da488 and 6498276b1eb16b527fb76dd2b0fa6d83; any
+-- other list is accepted only when it already names outlook-mail-deep-history
+-- on the capture lane, and is then left alone. Called, never replaced, so only
+-- their presence is checked: context_email_reader_flags,
+-- automation_lane_enabled, sw_service_key, and W7's plan table. Read when
+-- present, never replaced: the lead-rule slice's context_lead_monitored_jobs
+-- and context_lead_monitored. The guard refuses otherwise, and when a new
+-- object exists that is not this migration's, or the flag already exists on
+-- the first apply.
 --
 -- After deploy (each needs the owner's go, in order): the counts-only probe
 -- (go point G6: scripts/context-email-deep-probe.sh, writes nothing), then
@@ -109,13 +129,18 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record; first_apply boolean; sig text; note text;
 BEGIN
  first_apply:=to_regclass('public.context_email_deep_plan') IS NULL;
- FOR x IN SELECT * FROM (VALUES
-  ('public.automation_switch_cron_lanes()',ARRAY['99e6d70e80a79e548f2478b65fc6cd78','250d7e9ec2ebecc7e83192a39b7da488'])
- ) AS t(sig,accepted) LOOP
-  live:=NULL;
-  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure(x.sig);
-  IF live IS NULL OR NOT live=ANY(x.accepted) THEN problems:=problems||format('%s md5 %s',x.sig,coalesce(live,'<missing>')); END IF;
- END LOOP;
+ -- The lane list: B-5's body, the history daily slice's, this migration's on
+ -- either, or any list that already names this migration's job on the capture
+ -- lane (then left alone).
+ live:=NULL;
+ SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid=to_regprocedure('public.automation_switch_cron_lanes()');
+ IF live IS NULL THEN
+  problems:=problems||'public.automation_switch_cron_lanes() md5 <missing>'::text;
+ ELSIF NOT live=ANY(ARRAY['99e6d70e80a79e548f2478b65fc6cd78','81cbebf914f537b0b85870196cbd0f75',
+   '250d7e9ec2ebecc7e83192a39b7da488','6498276b1eb16b527fb76dd2b0fa6d83'])
+  AND NOT EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname='outlook-mail-deep-history' AND l.lane='capture') THEN
+  problems:=problems||format('public.automation_switch_cron_lanes() md5 %s',live);
+ END IF;
  FOREACH sig IN ARRAY ARRAY['public.context_email_reader_flags()','public.automation_lane_enabled(text)','public.sw_service_key()'] LOOP
   IF to_regprocedure(sig) IS NULL THEN problems:=problems||format('%s is missing',sig); END IF;
  END LOOP;
@@ -179,7 +204,7 @@ LANGUAGE sql IMMUTABLE SET search_path=public,pg_temp AS $fn$
   'walks_per_perth_day',1)
 $fn$;
 COMMENT ON FUNCTION public.context_email_deep_policy() IS
- 'History depth (20261007080000): every number of the deep email history load, changed only by migration. live_excluded_statuses is the done definition''s live rule; lead_quiet_days and lead_not_progressed_statuses are the owner''s 7 Oct 2026 lead rule (the fallback while context_lead_monitored is absent); lead_in_days: a job''s email history starts that many days before its first record; hard_floor (1 Jan 2025 Perth): no deep window starts before it; user_slice_days: one slice of a user mailbox; calls_per_tick, stall_after_calls, stall_rest_hours: the W7 rules; walks_per_perth_day: a source starts a new walk at most once a Perth day.';
+ 'History depth (20261007080000): every number of the deep email history load, changed only by migration. live_excluded_statuses is the done definition''s live rule; lead_quiet_days and lead_not_progressed_statuses are the owner''s 7 Oct 2026 lead rule (the fallback while the lead-rule slice''s context_lead_monitored_jobs and context_lead_monitored are absent); lead_in_days: a job''s email history starts that many days before its first record; hard_floor (1 Jan 2025 Perth): no deep window starts before it; user_slice_days: one slice of a user mailbox; calls_per_tick, stall_after_calls, stall_rest_hours: the W7 rules; walks_per_perth_day: a source starts a new walk at most once a Perth day.';
 
 -- 3. The reader's gate: the flag and the bounds it checks every deep window against.
 CREATE OR REPLACE FUNCTION public.context_email_deep_enabled() RETURNS jsonb
@@ -241,15 +266,27 @@ DECLARE pol jsonb:=public.context_email_deep_policy(); t timestamptz:=coalesce(p
  lead_in interval:=make_interval(days=>(pol->>'lead_in_days')::integer);
  v_rule text:='deep_fallback'; v_off uuid[]:='{}';
 BEGIN
- -- The lead-rule slice owns the rule once it is on this database. Should its
- -- function not answer as expected, the owner's rule below applies and
- -- lead_rule says so (deep_fallback_lead_rule_unreadable), so the load and
- -- the scorecard's reads keep answering and the mismatch is in plain sight.
- IF to_regprocedure('public.context_lead_monitored(uuid,timestamp with time zone)') IS NOT NULL THEN
+ -- The lead-rule slice (20261007010000) owns the rule once it is on this
+ -- database: its set function context_lead_monitored_jobs(job ids, as_of)
+ -- (one row per live job when the ids are null: job_id, monitored, ...), read
+ -- once; else, with only its boolean context_lead_monitored(job, as_of), job
+ -- by job. Should the one that is there not answer in that shape, the owner's
+ -- rule below applies and lead_rule says so (deep_fallback_lead_rule_unreadable),
+ -- so the load and the scorecard's reads keep answering and the mismatch is
+ -- in plain sight.
+ IF to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamp with time zone)') IS NOT NULL THEN
+  BEGIN
+   EXECUTE 'SELECT coalesce(array_agg(m.job_id),''{}''::uuid[])
+     FROM public.context_lead_monitored_jobs(NULL::uuid[],$1) m WHERE m.monitored IS FALSE'
+   INTO v_off USING t;
+   v_rule:='context_lead_monitored';
+  EXCEPTION WHEN OTHERS THEN
+   v_rule:='deep_fallback_lead_rule_unreadable'; v_off:='{}';
+  END;
+ ELSIF to_regprocedure('public.context_lead_monitored(uuid,timestamp with time zone)') IS NOT NULL THEN
   BEGIN
    EXECUTE 'SELECT coalesce(array_agg(jb.id),''{}''::uuid[]) FROM public.jobs jb
-     CROSS JOIN LATERAL public.context_lead_monitored(jb.id,$1) lm
-     WHERE jb.status::text <> ALL ($2) AND lm.monitored IS FALSE'
+     WHERE jb.status::text <> ALL ($2) AND public.context_lead_monitored(jb.id,$1) IS FALSE'
    INTO v_off USING t, excl;
    v_rule:='context_lead_monitored';
   EXCEPTION WHEN OTHERS THEN
@@ -262,7 +299,7 @@ BEGIN
    jb.quoted_at, jb.accepted_at, jb.deposit_at, jb.approvals_at, jb.processing_at, jb.scheduled_at, jb.completed_at
   FROM public.jobs jb WHERE jb.status::text <> ALL (excl)
  ), lead AS (
-  -- The owner's rule (7 Oct 2026), while context_lead_monitored is absent: a
+  -- The owner's rule (7 Oct 2026), while the lead-rule slice is absent: a
   -- lead (nothing moved it past quoted by the instant) stops being monitored
   -- 28 days after the newer of its newest quote send and the customer's
   -- newest inbound message; a quote never sent starts no clock.
@@ -303,7 +340,7 @@ BEGIN
  FROM x;
 END $fn$;
 COMMENT ON FUNCTION public.context_email_deep_scope_jobs(timestamp with time zone) IS
- 'History depth (20261007080000): one row per live job (status not in context_email_deep_policy().live_excluded_statuses): monitored, lead_rule (context_lead_monitored when that function exists and answers, else deep_fallback, or deep_fallback_lead_rule_unreadable when it exists but does not answer: the owner''s 7 Oct 2026 rule, a lead with no progress stops being monitored 28 days after the newer of its newest quote send and the customer''s newest inbound message), job_started (the earliest of its created time, any business_events row placed on it except a deep row, its first document and its first invoice date), lead_in_from (30 days earlier), and its keys: job number (upper case), client email (lower case), builder references (context_email_deep_job_refs) and their md5. Service role only.';
+ 'History depth (20261007080000): one row per live job (status not in context_email_deep_policy().live_excluded_statuses): monitored, lead_rule (context_lead_monitored when the lead-rule slice, 20261007010000, is on the database and answers: its set function context_lead_monitored_jobs(NULL, as_of) read once, else its boolean context_lead_monitored(job, as_of) job by job; else deep_fallback, or deep_fallback_lead_rule_unreadable when one of them exists but does not answer in its shape: the owner''s 7 Oct 2026 rule, a lead with no progress stops being monitored 28 days after the newer of its newest quote send and the customer''s newest inbound message), job_started (the earliest of its created time, any business_events row placed on it except a deep row, its first document and its first invoice date), lead_in_from (30 days earlier), and its keys: job number (upper case), client email (lower case), builder references (context_email_deep_job_refs) and their md5. Service role only.';
 
 -- 7. The load's own tables. Written only by the tick; service role reads.
 CREATE TABLE IF NOT EXISTS public.context_email_deep_members (
@@ -480,8 +517,14 @@ BEGIN
   END IF;
 
   IF p.state IN ('loading','stalled') THEN
+   -- Only a run of this posting of the slice: it carries the slice's id (the
+   -- time the slice was first posted) and started after that. A run of the
+   -- same window from an earlier walk, or from a call nobody planned, never
+   -- counts for it.
    SELECT c.id, c.status, c.counts, c.error_code INTO r FROM public.context_capture_runs c
    WHERE c.source='outlook_deep_history_'||p.source_key AND c.status<>'running'
+    AND c.started_at>=p.slice_posted_at
+    AND c.cursor->>'deep_slice'=to_char(p.slice_posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     AND c.cursor->>'history_from'=to_char(p.slice_from AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     AND c.cursor->>'history_to'=to_char(p.slice_to AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
    ORDER BY c.started_at DESC LIMIT 1;
@@ -596,11 +639,14 @@ BEGIN
    v_calls_out:=v_calls_out||jsonb_build_array(jsonb_build_object('source',p.source_key,'outcome','waiting_near'));
    CONTINUE;
   END IF;
+  -- The call names its slice: the time it was first posted (this tick's, on
+  -- its first call), which the reader keeps on the run's cursor.
   PERFORM net.http_post(
    url := 'https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/outlook-mail-capture',
    body := jsonb_build_object('mode','deep','source',p.source_key,
     'from',to_char(p.slice_from AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     'to',to_char(p.slice_to AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'slice',to_char(coalesce(p.slice_posted_at,v_now) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     'actor','cron:outlook-mail-deep-history'),
    headers := jsonb_build_object('Authorization','Bearer '||public.sw_service_key(),'Content-Type','application/json'),
    timeout_milliseconds := 5000
@@ -622,7 +668,7 @@ BEGIN
   'stalled',(SELECT count(*) FROM public.context_email_deep_plan x WHERE x.state='stalled'));
 END $fn$;
 COMMENT ON FUNCTION public.trigger_context_email_deep_history() IS
- 'History depth (20261007080000): one tick of the deep email load, run by pg_cron outlook-mail-deep-history every 5 minutes behind the capture lane while email_reader_v1, email_reader_schedule_v1, email_capture_v2 and email_reader_deep_v1 are on. Keeps context_email_deep_members (the monitored live jobs); gives each selected source a plan row with its live floor; judges each open slice''s newest finished outlook_deep_history_<key> run once (moved: succeeded or counts.progressed > 0); on a succeeded run moves the reach of every job that was a member when the slice was first posted and whose reach the slice joins; plans the next slice from the highest gap (user mailbox 31 days, group one window, never below the oldest monitored job''s start); a finished source starts a new walk at most once a Perth day; 3 calls without a move stall a source (WARNING email_deep_stalled), tried again 6 hours later; waits while the source''s own run or its 60-day load runs; posts at most 2 {mode: deep} calls a tick, groups first. Lists nothing for the old fact reader.';
+ 'History depth (20261007080000): one tick of the deep email load, run by pg_cron outlook-mail-deep-history every 5 minutes behind the capture lane while email_reader_v1, email_reader_schedule_v1, email_capture_v2 and email_reader_deep_v1 are on. Keeps context_email_deep_members (the monitored live jobs); gives each selected source a plan row with its live floor; judges each open slice''s newest finished outlook_deep_history_<key> run of that posting once (its cursor carries the slice''s id, the time the slice was first posted, which each call sends as slice, and it started after that; a run of the same window from another posting never counts) (moved: succeeded or counts.progressed > 0); on a succeeded run moves the reach of every job that was a member when the slice was first posted and whose reach the slice joins; plans the next slice from the highest gap (user mailbox 31 days, group one window, never below the oldest monitored job''s start); a finished source starts a new walk at most once a Perth day; 3 calls without a move stall a source (WARNING email_deep_stalled), tried again 6 hours later; waits while the source''s own run or its 60-day load runs; posts at most 2 {mode: deep} calls a tick, groups first. Lists nothing for the old fact reader.';
 
 -- 10. The load as one read for the desk.
 CREATE OR REPLACE FUNCTION public.context_email_deep_status() RETURNS jsonb
@@ -758,7 +804,18 @@ $fn$;
 COMMENT ON FUNCTION public.context_email_history_reach(timestamp with time zone) IS
  'History depth (20261007080000): for scorecard v2, row 14. jobs: live, monitored and the monitored jobs by status of context_email_history_reach_jobs (reaches_start, loading, short, not_started, unknown_start); email_depth_pct (reaches_start of monitored); target_floor (the start of the oldest monitored job''s email history, to the second, not before the hard floor); mailboxes_selected and mailboxes_finished; mailboxes: one per selected mailbox: state, live_floor, covered_from, reaches (how far back its walk has read: covered_from, else the live floor), reaches_target, needing_jobs (monitored jobs it is still short for), finished (none), slices_done, posts, stall_reason, last_progress_at. Service role only.';
 
--- 13. The capture lane owns the new job: B-5's body (20261005210000) plus one row.
+-- 13. The capture lane owns the new job: the live list plus one row, every row
+-- it has kept. On B-5's body (20261005210000, production on 7 Oct 2026) the
+-- result is md5 250d7e9ec2ebecc7e83192a39b7da488; on the history daily slice's
+-- (20261007050000, PR 989: B-5's plus xero-history-daily), when that slice
+-- merged first, 6498276b1eb16b527fb76dd2b0fa6d83. A list that already names
+-- outlook-mail-deep-history (a re-apply) is left alone.
+DO $lanes$
+DECLARE live text;
+BEGIN
+ SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid='public.automation_switch_cron_lanes()'::regprocedure;
+ IF live='99e6d70e80a79e548f2478b65fc6cd78' THEN
+  EXECUTE $def$
 CREATE OR REPLACE FUNCTION public.automation_switch_cron_lanes()
 RETURNS TABLE (cron_jobname text, lane text)
 LANGUAGE sql
@@ -778,7 +835,39 @@ AS $fn$
     -- attribution: the contact match the ladder resolves a job through
     ('contact-matching',   'attribution')
   ) AS t(cron_jobname, lane);
-$fn$;
+$fn$
+$def$;
+ ELSIF live='81cbebf914f537b0b85870196cbd0f75' THEN
+  EXECUTE $def$
+CREATE OR REPLACE FUNCTION public.automation_switch_cron_lanes()
+RETURNS TABLE (cron_jobname text, lane text)
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $fn$
+  SELECT * FROM (VALUES
+    -- capture: pollers that write evidence rows into business_events
+    ('monitor-inbox-poll', 'capture'),
+    ('ghl-message-reconcile', 'capture'),
+    ('ghl-call-transcript-fetch', 'capture'),
+    ('outlook-mail-poll', 'capture'),
+    ('monitor-inbox-sweep', 'capture'),
+    ('ghl-history-schedule', 'capture'),
+    ('context-document-text', 'capture'),
+    ('xero-history-daily', 'capture'),
+    ('outlook-mail-deep-history', 'capture'),
+    -- attribution: the contact match the ladder resolves a job through
+    ('contact-matching',   'attribution')
+  ) AS t(cron_jobname, lane);
+$fn$
+$def$;
+ ELSE
+  RAISE NOTICE 'email deep history: automation_switch_cron_lanes() already names outlook-mail-deep-history; left alone';
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname='outlook-mail-deep-history' AND l.lane='capture') THEN
+  RAISE EXCEPTION 'email_deep_history_lanes_failed: automation_switch_cron_lanes() does not name outlook-mail-deep-history on the capture lane';
+ END IF;
+END $lanes$;
 
 -- Scheduled already gated, so the switch's wrap reports already_wrapped and its
 -- unwrap can remove the suffix. Skipped where pg_cron is absent (contract runner).

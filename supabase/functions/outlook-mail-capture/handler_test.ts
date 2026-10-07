@@ -311,19 +311,50 @@ Deno.test("deep: the mode passes through, and a probe always waits for its answe
     to: "2026-10-01T00:00:00.000Z",
     probe: true,
   }]);
-  // A deep load call from the tick runs in the background like any other.
+  // A deep load call from the tick runs in the background like any other,
+  // and the plan's slice id passes through as it was sent.
   const bg = await handleCapture(
     req({ authorization: `Bearer ${SERVICE}` }, {
       mode: "deep",
       source: "nithin",
       from: "2026-05-01T00:00:00.000Z",
       to: "2026-06-01T00:00:00.000Z",
+      slice: "2026-10-07T06:04:00.123Z",
+      actor: "cron:outlook-mail-deep-history",
     }),
     deps,
-    () => Promise.resolve(idle),
+    (_d: unknown, r: unknown) => {
+      seen.push(r);
+      return Promise.resolve(idle);
+    },
   );
   assertEquals(bg.status, 202);
   assertEquals(pending.length, 1);
+  await Promise.all(pending);
+  assertEquals(seen.at(-1), {
+    mode: "deep",
+    source: "nithin",
+    from: "2026-05-01T00:00:00.000Z",
+    to: "2026-06-01T00:00:00.000Z",
+    slice: "2026-10-07T06:04:00.123Z",
+  });
+  // Anything but text is not a slice id.
+  await handleCapture(
+    req({ authorization: `Bearer ${SERVICE}` }, {
+      wait: true,
+      mode: "deep",
+      source: "nithin",
+      from: "2026-05-01T00:00:00.000Z",
+      to: "2026-06-01T00:00:00.000Z",
+      slice: 12,
+    }),
+    deps,
+    (_d: unknown, r: unknown) => {
+      seen.push(r);
+      return Promise.resolve(idle);
+    },
+  );
+  assert(!("slice" in (seen.at(-1) as Record<string, unknown>)));
 });
 
 Deno.test("live wiring: the deep gate and scope read their RPCs; the prefix set is read once and reads as unreadable on a fault", async () => {

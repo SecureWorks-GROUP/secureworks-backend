@@ -16,7 +16,9 @@
 --   query 5: deep rows only ever placed by rule or left for review: the
 --            attribution worker has asked about none of them.
 --   query 6: each source's newest deep runs move (progressed > 0) and keep
---            mail by job number, builder reference or client email.
+--            mail by job number, builder reference or client email; slice_id
+--            is the posting each run belongs to (the tick judges a slice only
+--            by a run of its own posting).
 
 -- 1. The migration and the flags.
 BEGIN READ ONLY;
@@ -76,6 +78,7 @@ ROLLBACK;
 -- 6. Each source's newest deep runs.
 BEGIN READ ONLY;
 SELECT c.source, c.started_at, c.status, c.error_code, c.cursor->>'history_from' AS slice_from, c.cursor->>'history_to' AS slice_to,
+ c.cursor->>'deep_slice' AS slice_id,
  c.counts->'progressed' AS progressed, c.counts->'seen' AS seen, c.counts->'inserted' AS inserted, c.counts->'duplicates' AS duplicates,
  c.counts->'kept_by_job_number' AS by_job_number, c.counts->'kept_by_builder_ref' AS by_builder_ref,
  c.counts->'kept_by_client_email' AS by_client_email, c.counts->'skipped_before_job' AS before_job,

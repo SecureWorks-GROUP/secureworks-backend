@@ -1,10 +1,15 @@
--- After the down migration: B-5's lane list byte for byte, every object of the
--- deep load gone, the flag row gone, and W7's 60-day load untouched.
+-- After the down migration: the lane list this migration found, byte for byte
+-- (B-5's, or the history daily slice's when 20261007050000 is registered
+-- before this one; contract section 12b proves that order on its own), every
+-- object of the deep load gone, the flag row gone, and W7's 60-day load
+-- untouched.
 DO $$
 BEGIN
- IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)<>'99e6d70e80a79e548f2478b65fc6cd78'
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)
+   <>(CASE WHEN to_regprocedure('public.context_history_daily_policy()') IS NULL THEN '99e6d70e80a79e548f2478b65fc6cd78'
+     ELSE '81cbebf914f537b0b85870196cbd0f75' END)
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() WHERE cron_jobname='outlook-mail-deep-history')
- THEN RAISE EXCEPTION 'deep rollback: lane list'; END IF;
+ THEN RAISE EXCEPTION 'deep rollback: lane list %',(SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure); END IF;
  IF has_function_privilege('anon','public.automation_switch_cron_lanes()','EXECUTE')
   OR NOT has_function_privilege('service_role','public.automation_switch_cron_lanes()','EXECUTE')
  THEN RAISE EXCEPTION 'deep rollback: lane list grants'; END IF;

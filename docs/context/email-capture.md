@@ -133,15 +133,15 @@ sends, replies, moves, deletes or marks mail read. No model call.
 | `email_reader_history_v1` (B-1, `20261005180000`) | off | the 60-day history load below runs from the `outlook-mail-poll` tick; needs the three flags above |
 | `email_reader_deep_v1` (history depth, `20261007080000`) | off | the deep history load below runs from its own tick `outlook-mail-deep-history`; needs the three reader flags above; mode `deep` is refused while it is off (the probe is not) |
 
-Modes (body `{"mode", "source", "from", "to", "wait"}`; callers: the service
-role, or the server key in `x-api-key`):
+Modes (body `{"mode", "source", "from", "to", "slice", "wait"}`; callers: the
+service role, or the server key in `x-api-key`):
 
 | Mode | Reads | Run rows |
 |---|---|---|
 | `poll` | each selected source since its pair cursor (first run: 30 minutes back; caught up: 10 minutes overlap; backlog: exactly from the cursor) | `outlook_<key>` |
 | `sweep` | the last 48 hours of one or all sources; inserts count as `sweep_misses` | `outlook_sweep_<key>` |
 | `history` | one source, `[from, to)`, at most 60 days back, `capture_mode: backfill`, only mail that names a live job's number or involves a live job's client email (captain ruling 24 Sep 2026, via `context_email_history_scope()`); a run cut by its time budget resumes on the next call with the same window end (`to`), a group by its conversation walk (W7) | `outlook_history_<key>` |
-| `deep` | one source, one slice `[from, to)` of any age after the hard floor (1 Jan 2025 Perth): a user mailbox at most 32 days, a group any length (walked as W7's history); `capture_mode: backfill` and `metadata.history_tier: deep`; only mail touching a monitored live job (`context_email_deep_scope()`: its number named, its builder's reference named, or its client's email among the outside addresses) received on or after that key's time (30 days before the first record of the oldest job carrying it; older is `skipped_before_job`); resumes only a run of the exact same window (start and end) | `outlook_deep_history_<key>` |
+| `deep` | one source, one slice `[from, to)` of any age after the hard floor (1 Jan 2025 Perth): a user mailbox at most 32 days, a group any length (walked as W7's history); `capture_mode: backfill` and `metadata.history_tier: deep`; only mail touching a monitored live job (`context_email_deep_scope()`: its number named, its builder's reference named, or its client's email among the outside addresses) received on or after that key's time (30 days before the first record of the oldest job carrying it; older is `skipped_before_job`); `slice` is the plan's slice id (the time the slice was first posted, ISO to the millisecond, UTC; `deep_slice_invalid` otherwise, `slice_needs_deep_mode` on any other mode), kept on the run's cursor as `deep_slice`; resumes only a run of the same slice: the exact same window (start and end) and the same slice id, so a later posting of the same window starts at its own start | `outlook_deep_history_<key>` |
 | `deep` with `probe: true` | one source, any window after the hard floor: lists it lean and answers counts by Perth month and folder kind (a group: conversations by the month last delivered); writes nothing at all and needs no deep flag; `wait` is implied | none |
 
 User mailboxes are read whole (every folder, read or unread, Sent Items
@@ -247,17 +247,25 @@ reader's own rule, not Microsoft's. While `email_reader_deep_v1` and the reader'
 flags are on, `trigger_context_email_deep_history()` (pg_cron
 `outlook-mail-deep-history`, `4-59/5`, capture lane) keeps
 `context_email_deep_members` (the monitored live jobs:
-`context_email_deep_scope_jobs()`, which follows `context_lead_monitored` once
-the lead-rule slice is on the database and the owner's 7 Oct rule until then),
+`context_email_deep_scope_jobs()`, which reads the lead-rule slice's own rule
+once it is on the database, `context_lead_monitored_jobs(NULL, as_of)` once as a
+set, else its boolean `context_lead_monitored(job, as_of)` job by job, and the
+owner's 7 Oct rule until then; `lead_rule` says which, and
+`deep_fallback_lead_rule_unreadable` when the slice's function does not answer
+in its shape),
 gives each selected source a `context_email_deep_plan` row with its live floor
 (its first poll window, fixed once), and walks each mailbox backwards from the
 highest gap: a user slice ends at the latest reach of the jobs still short of
 their start and starts 31 days earlier or at the oldest start among the jobs it
 credits, whichever is later; a group is one window down to the oldest start
 still short. It never reads below the start of the oldest monitored job (its
-first record less 30 days). A succeeded slice moves `context_email_deep_reach`
-for every job that was a member when the slice was first posted and whose
-reach the slice joins; a job that joins later (or whose keys change, or whose
+first record less 30 days). Each call names its slice (`slice`, the time it was
+first posted), and a slice is judged only by a run of that posting: its cursor
+carries the same `deep_slice` and it started after the slice was posted, so an
+earlier walk's run of the same window, or a call nobody planned, never counts
+for it (no run at all: 3 calls, then stalled `no_run`). A succeeded slice moves
+`context_email_deep_reach` for every job that was a member when the slice was
+first posted and whose reach the slice joins; a job that joins later (or whose keys change, or whose
 start moves earlier) is read again by the next walk, which starts at most once
 a Perth day. W7's rules hold (a run judged once, 3 calls without a move stall
 with a WARNING, 6 hours' rest, no call limit); a source waits while its own run
