@@ -277,13 +277,16 @@ END $$;
 -- de66b132): the set function context_lead_monitored_jobs(uuid[], timestamptz)
 -- RETURNS TABLE(job_id, job_number, monitored, state, quote_sent_at,
 -- customer_at, cutoff_at), every live job when the ids are null, and the
--- boolean context_lead_monitored(uuid, timestamptz). They mark DH01 not
--- monitored and DH03 monitored, the opposite of the owner's fallback rule, so
--- only a scope that reads them passes. Once the real slice is on this stack,
--- CREATE OR REPLACE refuses a stand-in whose shape differs from it, so a shape
--- this load does not read fails here, never quietly on production.
+-- boolean context_lead_monitored(uuid, timestamptz); then that one-job read
+-- as the rule's row for the job (the same columns), the other shape it may
+-- take. They mark DH01 not monitored and DH03 monitored, the opposite of the
+-- owner's fallback rule, so only a scope that reads them passes. The real
+-- slice, when it is on this stack, is set aside for them: 3a proves the scope
+-- reads it as it is, so a shape this load does not read fails there, never
+-- quietly on production.
 SAVEPOINT lead_rule;
-CREATE OR REPLACE FUNCTION public.context_lead_monitored_jobs(p_job_ids uuid[] DEFAULT NULL, p_as_of timestamptz DEFAULT now())
+SELECT pg_temp.dh_hide_lead_rule();
+CREATE FUNCTION public.context_lead_monitored_jobs(p_job_ids uuid[] DEFAULT NULL, p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, job_number text, monitored boolean, state text, quote_sent_at timestamptz, customer_at timestamptz,
  cutoff_at timestamptz)
 LANGUAGE sql STABLE AS $$
@@ -295,7 +298,7 @@ LANGUAGE sql STABLE AS $$
   OR (p_job_ids IS NULL AND jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost'))
  ORDER BY jb.id
 $$;
-CREATE OR REPLACE FUNCTION public.context_lead_monitored(p_job_id uuid, p_as_of timestamptz DEFAULT now())
+CREATE FUNCTION public.context_lead_monitored(p_job_id uuid, p_as_of timestamptz DEFAULT now())
 RETURNS boolean LANGUAGE sql STABLE AS $$
  SELECT CASE WHEN EXISTS(SELECT 1 FROM public.jobs jb WHERE jb.id=p_job_id) THEN p_job_id<>'d7e00000-0000-4000-8000-000000000001'::uuid END
 $$;
@@ -320,6 +323,27 @@ BEGIN
  THEN RAISE EXCEPTION 'deep contract: the scope does not follow the lead-rule slice''s boolean %, %',mon,
   (SELECT array_agg(DISTINCT lead_rule) FROM public.context_email_deep_scope_jobs(now())); END IF;
 END $$;
+-- So is the one-job read as the rule's row for the job (none for an unknown job).
+DROP FUNCTION public.context_lead_monitored(uuid,timestamptz);
+CREATE FUNCTION public.context_lead_monitored(p_job_id uuid, p_as_of timestamptz DEFAULT now())
+RETURNS TABLE(job_id uuid, job_number text, monitored boolean, state text, quote_sent_at timestamptz, customer_at timestamptz,
+ cutoff_at timestamptz)
+LANGUAGE sql STABLE AS $$
+ SELECT jb.id, jb.job_number, jb.id<>'d7e00000-0000-4000-8000-000000000001'::uuid,
+  CASE WHEN jb.id='d7e00000-0000-4000-8000-000000000001'::uuid THEN 'not_followed_up' ELSE 'not_quoted' END,
+  NULL::timestamptz, NULL::timestamptz, NULL::timestamptz
+ FROM public.jobs jb WHERE jb.id=p_job_id
+$$;
+DO $$
+DECLARE mon text[];
+BEGIN
+ SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
+ IF mon IS DISTINCT FROM ARRAY['SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH03','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
+  OR EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'context_lead_monitored')
+  OR public.context_email_deep_status()->>'lead_rule'<>'context_lead_monitored'
+ THEN RAISE EXCEPTION 'deep contract: the scope does not follow the lead-rule slice''s one-job row %, %',mon,
+  (SELECT array_agg(DISTINCT lead_rule) FROM public.context_email_deep_scope_jobs(now())); END IF;
+END $$;
 ROLLBACK TO SAVEPOINT lead_rule;
 -- 3c. A lead rule that does not answer as expected: the owner's rule applies
 -- and lead_rule says so; nothing stops. First a set function of another shape
@@ -337,18 +361,30 @@ BEGIN
   OR public.context_email_deep_status()->>'lead_rule'<>'deep_fallback_lead_rule_unreadable'
  THEN RAISE EXCEPTION 'deep contract: an unreadable lead rule (set) %',mon; END IF;
 END $$;
--- ...then, with no set function, a one-job rule that is not a boolean (the
--- shape the first version of this load read).
+-- ...then, with no set function, a one-job rule that is neither a boolean nor
+-- a row with a monitored column: a row that names no monitored column, and a
+-- text.
 DROP FUNCTION public.context_lead_monitored_jobs(uuid[],timestamptz);
 CREATE FUNCTION public.context_lead_monitored(p_job_id uuid, p_as_of timestamptz DEFAULT now())
-RETURNS TABLE(job_id uuid, monitored boolean) LANGUAGE sql STABLE AS $$ SELECT p_job_id, false $$;
+RETURNS TABLE(job_id uuid, is_monitored boolean) LANGUAGE sql STABLE AS $$ SELECT p_job_id, false $$;
 DO $$
 DECLARE mon text[];
 BEGIN
  SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
  IF mon IS DISTINCT FROM ARRAY['SWF-DH01','SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
   OR EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'deep_fallback_lead_rule_unreadable')
- THEN RAISE EXCEPTION 'deep contract: an unreadable lead rule (one job) %',mon; END IF;
+ THEN RAISE EXCEPTION 'deep contract: an unreadable lead rule (one-job row) %',mon; END IF;
+END $$;
+DROP FUNCTION public.context_lead_monitored(uuid,timestamptz);
+CREATE FUNCTION public.context_lead_monitored(p_job_id uuid, p_as_of timestamptz DEFAULT now())
+RETURNS text LANGUAGE sql STABLE AS $$ SELECT 'no' $$;
+DO $$
+DECLARE mon text[];
+BEGIN
+ SELECT array_agg(s.job_number ORDER BY s.job_number COLLATE "C") FILTER (WHERE s.monitored) INTO mon FROM public.context_email_deep_scope_jobs(now()) s;
+ IF mon IS DISTINCT FROM ARRAY['SWF-DH01','SWF-DH02','SWF-DH09','SWF-DH10','SWF-DH11','SWMS-DH08','SWP-DH04','SWP-DH05','SWP-DH06','SWP-DH12']
+  OR EXISTS(SELECT 1 FROM public.context_email_deep_scope_jobs(now()) WHERE lead_rule<>'deep_fallback_lead_rule_unreadable')
+ THEN RAISE EXCEPTION 'deep contract: an unreadable lead rule (one-job text) %',mon; END IF;
 END $$;
 ROLLBACK TO SAVEPOINT lead_rule_odd;
 -- From here the owner's rule applies whatever this stack holds.
@@ -862,7 +898,8 @@ ROLLBACK;
 
 -- 12. The bodies are the ones the guard accepts on a re-apply: B-5's list plus
 -- this migration's row, or, when the history daily slice (20261007050000)
--- applied first, that slice's list plus this migration's row.
+-- applied first, that slice's list plus this migration's row (the body that
+-- slice writes when it applies second).
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)
@@ -873,9 +910,12 @@ END $$;
 
 -- 12b. Merged after the history daily slice (20261007050000, PR 989), whose
 -- lane list is B-5's plus xero-history-daily: this migration adds its own row
--- and keeps every row there (the md5 its guard accepts on a re-apply), a
--- re-apply changes nothing, and its rollback gives that slice's body back byte
--- for byte. Either merge order leaves both rows.
+-- after that slice's and keeps every row there, writing md5
+-- 6498276b1eb16b527fb76dd2b0fa6d83, the body that slice writes when it merges
+-- second (on this migration's 250d7e9e), so either merge order ends with one
+-- lane list naming both jobs. A re-apply changes nothing, and the rollback
+-- gives that slice's body back byte for byte (as it does when that slice
+-- merged second and wrote the same body).
 BEGIN;
 \ir history_daily_cron_lanes.sql
 DO $$

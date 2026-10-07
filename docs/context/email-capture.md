@@ -249,8 +249,9 @@ flags are on, `trigger_context_email_deep_history()` (pg_cron
 `context_email_deep_members` (the monitored live jobs:
 `context_email_deep_scope_jobs()`, which reads the lead-rule slice's own rule
 once it is on the database, `context_lead_monitored_jobs(NULL, as_of)` once as a
-set, else its boolean `context_lead_monitored(job, as_of)` job by job, and the
-owner's 7 Oct rule until then; `lead_rule` says which, and
+set, else its one-job read `context_lead_monitored(job, as_of)` job by job
+(a boolean, or the rule's row for the job), and the owner's 7 Oct rule until
+then; `lead_rule` says which, and
 `deep_fallback_lead_rule_unreadable` when the slice's function does not answer
 in its shape),
 gives each selected source a `context_email_deep_plan` row with its live floor

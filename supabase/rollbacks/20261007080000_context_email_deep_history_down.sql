@@ -3,14 +3,17 @@
 -- Refuses while email_reader_deep_v1 is on (turn it off first), and while
 -- automation_switch_cron_lanes() names outlook-mail-deep-history in a body
 -- that is not this migration's (a later slice built on it: roll that one back
--- first). Then: unschedules outlook-mail-deep-history, gives
--- automation_switch_cron_lanes() back the body this migration found, byte for
--- byte (B-5's, 20261005210000, md5 99e6d70e80a79e548f2478b65fc6cd78, from
--- this migration's 250d7e9ec2ebecc7e83192a39b7da488; or the history daily
--- slice's, 20261007050000, md5 81cbebf914f537b0b85870196cbd0f75, from this
--- migration's 6498276b1eb16b527fb76dd2b0fa6d83), leaves a list without this
--- migration's row alone, drops the deep load's functions and its three tables
--- (plan, reach, members), and deletes the flag row.
+-- first). Then: unschedules outlook-mail-deep-history, takes this
+-- migration's row out of automation_switch_cron_lanes(), leaving each body
+-- byte for byte as it is without it (B-5's, 20261005210000, md5
+-- 99e6d70e80a79e548f2478b65fc6cd78, from this migration's
+-- 250d7e9ec2ebecc7e83192a39b7da488; or the history daily slice's,
+-- 20261007050000, md5 81cbebf914f537b0b85870196cbd0f75, from
+-- 6498276b1eb16b527fb76dd2b0fa6d83, the body both slices write: this
+-- migration's on that slice's, and that slice's on this migration's, so this
+-- rollback runs whichever of the two merged second), leaves a list without
+-- this migration's row alone, drops the deep load's functions and its three
+-- tables (plan, reach, members), and deletes the flag row.
 --
 -- Deep rows already captured stay: they are ordinary evidence the ladder
 -- placed, and the job ledger may already have read and cited them. Retracting
@@ -40,9 +43,9 @@ BEGIN
  END IF;
 END $$;
 
--- The lane list this migration found, verbatim: B-5's (20261005210000) or the
--- history daily slice's (20261007050000); a list without this migration's row
--- is left alone.
+-- The lane list without this migration's row, verbatim: B-5's (20261005210000)
+-- or the history daily slice's (20261007050000); a list without this
+-- migration's row is left alone.
 DO $lanes$
 DECLARE live text; want text;
 BEGIN

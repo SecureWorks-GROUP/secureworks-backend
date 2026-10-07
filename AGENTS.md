@@ -668,8 +668,10 @@ unwrap know it; the GHL message reconciler (C1d) is the worked example:
 `docs/context/ghl-message-reconcile.md`. Two open slices that each add a row
 must not each pin the other's body away: build on every body that may be live
 (B-5's and any sibling slice's that may merge first, each plus your row),
-accept a list that already names your job (left alone), and give each pre-image
-back in the rollback (`20261007080000` is the worked example).
+accept a list that already names your job (left alone), write the same combined
+body whichever of you applies second (one md5 in either merge order), and give
+each pre-image back in the rollback (`20261007080000` with `20261007050000` is
+the worked example).
 
 Attribution ladder step 1 matching is owned by
 `docs/context/b2-capture-attribution.md` (`20260923230000`). Each later ladder

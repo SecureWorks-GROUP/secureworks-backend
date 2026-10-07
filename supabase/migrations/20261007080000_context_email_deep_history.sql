@@ -31,8 +31,9 @@
 --     first invoice date), its lead-in, and its keys (job number, client email,
 --     builder references). Monitored follows the lead-rule slice's own rule
 --     once it is on the database (20261007010000, PR 985): read once as a set,
---     context_lead_monitored_jobs(NULL, as_of), else, with only its boolean
---     context_lead_monitored(job, as_of), job by job; lead_rule
+--     context_lead_monitored_jobs(NULL, as_of), else, with only its one-job
+--     read context_lead_monitored(job, as_of) (its boolean, or the rule's row
+--     for the job: job_id, monitored, ...), job by job; lead_rule
 --     context_lead_monitored. Until then the owner's rule as stated above
 --     (lead_rule deep_fallback); if the slice's function is there but does not
 --     answer in its shape, the owner's rule and lead_rule
@@ -86,7 +87,10 @@
 --     7 Oct 2026) or, when the history daily slice (20261007050000, PR 989)
 --     merged first, that slice's body (B-5's plus xero-history-daily), each
 --     with every row it has kept; a list that already names the job is left
---     alone. Either merge order ends with both rows.
+--     alone. Either merge order ends with both rows in one body: on that
+--     slice's list this migration writes the body that slice writes on this
+--     migration's (md5 6498276b1eb16b527fb76dd2b0fa6d83), so the lane list is
+--     the same whichever of the two merges second.
 --
 -- Deep rows never go to AI placement: the reader marks every deep row
 -- metadata.history_tier deep, and the attribution worker never asks about such
@@ -98,7 +102,8 @@
 -- 99e6d70e80a79e548f2478b65fc6cd78 (B-5, read live 7 Oct 2026),
 -- 81cbebf914f537b0b85870196cbd0f75 (the history daily slice, PR 989 at
 -- 446ab25e), or this migration's on either (a re-apply):
--- 250d7e9ec2ebecc7e83192a39b7da488 and 6498276b1eb16b527fb76dd2b0fa6d83; any
+-- 250d7e9ec2ebecc7e83192a39b7da488 and 6498276b1eb16b527fb76dd2b0fa6d83 (the
+-- second is also the history daily slice's own body on this migration's); any
 -- other list is accepted only when it already names outlook-mail-deep-history
 -- on the capture lane, and is then left alone. Called, never replaced, so only
 -- their presence is checked: context_email_reader_flags,
@@ -269,11 +274,12 @@ BEGIN
  -- The lead-rule slice (20261007010000) owns the rule once it is on this
  -- database: its set function context_lead_monitored_jobs(job ids, as_of)
  -- (one row per live job when the ids are null: job_id, monitored, ...), read
- -- once; else, with only its boolean context_lead_monitored(job, as_of), job
- -- by job. Should the one that is there not answer in that shape, the owner's
- -- rule below applies and lead_rule says so (deep_fallback_lead_rule_unreadable),
- -- so the load and the scorecard's reads keep answering and the mismatch is
- -- in plain sight.
+ -- once; else, with only its one-job read context_lead_monitored(job, as_of),
+ -- job by job, in either of its shapes: a boolean, or the rule's row for the
+ -- job (job_id, monitored, ...). Should the one that is there not answer in
+ -- that shape, the owner's rule below applies and lead_rule says so
+ -- (deep_fallback_lead_rule_unreadable), so the load and the scorecard's reads
+ -- keep answering and the mismatch is in plain sight.
  IF to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamp with time zone)') IS NOT NULL THEN
   BEGIN
    EXECUTE 'SELECT coalesce(array_agg(m.job_id),''{}''::uuid[])
@@ -285,9 +291,16 @@ BEGIN
   END;
  ELSIF to_regprocedure('public.context_lead_monitored(uuid,timestamp with time zone)') IS NOT NULL THEN
   BEGIN
-   EXECUTE 'SELECT coalesce(array_agg(jb.id),''{}''::uuid[]) FROM public.jobs jb
-     WHERE jb.status::text <> ALL ($2) AND public.context_lead_monitored(jb.id,$1) IS FALSE'
-   INTO v_off USING t, excl;
+   IF (SELECT pr.proretset FROM pg_proc pr WHERE pr.oid=to_regprocedure('public.context_lead_monitored(uuid,timestamp with time zone)')) THEN
+    EXECUTE 'SELECT coalesce(array_agg(jb.id),''{}''::uuid[]) FROM public.jobs jb
+      WHERE jb.status::text <> ALL ($2)
+       AND EXISTS(SELECT 1 FROM public.context_lead_monitored(jb.id,$1) lm WHERE lm.monitored IS FALSE)'
+    INTO v_off USING t, excl;
+   ELSE
+    EXECUTE 'SELECT coalesce(array_agg(jb.id),''{}''::uuid[]) FROM public.jobs jb
+      WHERE jb.status::text <> ALL ($2) AND public.context_lead_monitored(jb.id,$1) IS FALSE'
+    INTO v_off USING t, excl;
+   END IF;
    v_rule:='context_lead_monitored';
   EXCEPTION WHEN OTHERS THEN
    v_rule:='deep_fallback_lead_rule_unreadable'; v_off:='{}';
@@ -340,7 +353,7 @@ BEGIN
  FROM x;
 END $fn$;
 COMMENT ON FUNCTION public.context_email_deep_scope_jobs(timestamp with time zone) IS
- 'History depth (20261007080000): one row per live job (status not in context_email_deep_policy().live_excluded_statuses): monitored, lead_rule (context_lead_monitored when the lead-rule slice, 20261007010000, is on the database and answers: its set function context_lead_monitored_jobs(NULL, as_of) read once, else its boolean context_lead_monitored(job, as_of) job by job; else deep_fallback, or deep_fallback_lead_rule_unreadable when one of them exists but does not answer in its shape: the owner''s 7 Oct 2026 rule, a lead with no progress stops being monitored 28 days after the newer of its newest quote send and the customer''s newest inbound message), job_started (the earliest of its created time, any business_events row placed on it except a deep row, its first document and its first invoice date), lead_in_from (30 days earlier), and its keys: job number (upper case), client email (lower case), builder references (context_email_deep_job_refs) and their md5. Service role only.';
+ 'History depth (20261007080000): one row per live job (status not in context_email_deep_policy().live_excluded_statuses): monitored, lead_rule (context_lead_monitored when the lead-rule slice, 20261007010000, is on the database and answers: its set function context_lead_monitored_jobs(NULL, as_of) read once, else its one-job read context_lead_monitored(job, as_of), a boolean or the rule''s row for the job, job by job; else deep_fallback, or deep_fallback_lead_rule_unreadable when one of them exists but does not answer in its shape: the owner''s 7 Oct 2026 rule, a lead with no progress stops being monitored 28 days after the newer of its newest quote send and the customer''s newest inbound message), job_started (the earliest of its created time, any business_events row placed on it except a deep row, its first document and its first invoice date), lead_in_from (30 days earlier), and its keys: job number (upper case), client email (lower case), builder references (context_email_deep_job_refs) and their md5. Service role only.';
 
 -- 7. The load's own tables. Written only by the tick; service role reads.
 CREATE TABLE IF NOT EXISTS public.context_email_deep_members (
@@ -808,13 +821,17 @@ COMMENT ON FUNCTION public.context_email_history_reach(timestamp with time zone)
 -- it has kept. On B-5's body (20261005210000, production on 7 Oct 2026) the
 -- result is md5 250d7e9ec2ebecc7e83192a39b7da488; on the history daily slice's
 -- (20261007050000, PR 989: B-5's plus xero-history-daily), when that slice
--- merged first, 6498276b1eb16b527fb76dd2b0fa6d83. A list that already names
--- outlook-mail-deep-history (a re-apply) is left alone.
+-- merged first, 6498276b1eb16b527fb76dd2b0fa6d83: that slice's
+-- xero-history-daily row, then this migration's, the very body that slice
+-- writes when it merges second (on 250d7e9e), so either order ends with one
+-- lane list. A list that already names outlook-mail-deep-history (a re-apply,
+-- or that slice applied on this one) is left alone.
 DO $lanes$
-DECLARE live text;
+DECLARE live text; want text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid='public.automation_switch_cron_lanes()'::regprocedure;
  IF live='99e6d70e80a79e548f2478b65fc6cd78' THEN
+  want:='250d7e9ec2ebecc7e83192a39b7da488';
   EXECUTE $def$
 CREATE OR REPLACE FUNCTION public.automation_switch_cron_lanes()
 RETURNS TABLE (cron_jobname text, lane text)
@@ -838,6 +855,7 @@ AS $fn$
 $fn$
 $def$;
  ELSIF live='81cbebf914f537b0b85870196cbd0f75' THEN
+  want:='6498276b1eb16b527fb76dd2b0fa6d83';
   EXECUTE $def$
 CREATE OR REPLACE FUNCTION public.automation_switch_cron_lanes()
 RETURNS TABLE (cron_jobname text, lane text)
@@ -866,6 +884,9 @@ $def$;
  END IF;
  IF NOT EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname='outlook-mail-deep-history' AND l.lane='capture') THEN
   RAISE EXCEPTION 'email_deep_history_lanes_failed: automation_switch_cron_lanes() does not name outlook-mail-deep-history on the capture lane';
+ END IF;
+ IF want IS NOT NULL AND (SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid='public.automation_switch_cron_lanes()'::regprocedure)<>want THEN
+  RAISE EXCEPTION 'email_deep_history_lanes_failed: automation_switch_cron_lanes() is not md5 %',want;
  END IF;
 END $lanes$;
 
