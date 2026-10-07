@@ -191,7 +191,7 @@ expect_eq "SELECT count(*) FROM public.event_threads t JOIN public.jobs j ON j.i
   WHERE t.retired_at IS NULL AND coalesce(j.metadata->>'do_not_schedule','') IN ('true','1')" "0" "no live binding points at the holding job"
 expect_eq "SELECT string_agg(thread_key, ',' ORDER BY thread_key COLLATE \"C\") FROM public.event_threads WHERE thread_key LIKE 'retired:holding_job:%'" \
   "retired:holding_job:outlook:pgc-hold-1,retired:holding_job:outlook:pgc-hold-2" "both holding bindings are re-keyed"
-expect_eq "SELECT retired_at FROM public.event_threads WHERE thread_key = 'outlook:pgc-hold-old'" "2031-01-21 10:00:00+08" \
+expect_eq "SELECT retired_at = '2031-01-21 02:00Z' FROM public.event_threads WHERE thread_key = 'outlook:pgc-hold-old'" "t" \
   "a binding retired before is untouched"
 S2=$(snapshot)
 
