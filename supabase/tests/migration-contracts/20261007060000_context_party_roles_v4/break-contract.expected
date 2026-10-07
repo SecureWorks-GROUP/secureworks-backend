@@ -1,0 +1,6 @@
+prospect rule not built: a text from a contact with an open opportunity must read customer to staff
+council rule not built: a council email must read council to staff
+supplier order rule not built: a reply from the address our order went to must read supplier to staff
+builder domain rule not built: an address at a builder's invoice domain must read insurer_builder to staff
+xero bill rule not built: an email naming a supplier's Xero bill must read supplier to staff
+transcript rule not built: the transcript of a crew call must read crew to staff

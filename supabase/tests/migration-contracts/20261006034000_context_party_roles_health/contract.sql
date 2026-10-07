@@ -28,13 +28,16 @@
 --      staff to crew (its recipients are crew); L1d's own label is still
 --      copied first; the
 --      same words inbound or in an email change nothing; an ordinary text
---      reads as before; every row is stamped party_roles_v3; the classifier
+--      reads as before; every row is stamped party_roles_v3 (v4 once its
+--      registered successor 20261007060000 is live); the classifier
 --      writes no ladder-owned key; and the lane rule and the classifier agree
 --      on every fixture row (a message is in the crew lane exactly when the
 --      classifier reads it as ours to crew or staff).
 --   D. Structure: bodies, comments, grants, the inlinable lane helper, the
---      definer status block, the untouched trigger and helpers.
---   E. A re-apply is a no-op.
+--      definer status block, the untouched trigger and helpers (the
+--      classifier's pin accepts its successor v4, 20261007060000).
+--   E. A re-apply is a no-op (over v3's own classifier, stood back up from
+--      v4's case when v4 is live).
 --   F. The two pinned bodies the earlier contracts stand back up
 --      (sm1_parties_status.sql for S-M1's re-apply, v2_message_party_roles.sql
 --      for v2's) are S-M1's and v2's bodies and comments byte for byte, and
@@ -78,13 +81,21 @@ CREATE FUNCTION pg_temp.ph_words(p_words text) RETURNS jsonb LANGUAGE sql IMMUTA
  SELECT jsonb_build_object('body',p_words,'text',p_words,'message',p_words)
 $$;
 
+-- The version the live classifier stamps: a registered successor (v4,
+-- 20261007060000) keeps every v3 decision these fixtures make and stamps its
+-- own version; it proves that in its own contract.
+CREATE FUNCTION pg_temp.ph_version() RETURNS text LANGUAGE sql STABLE AS $$
+ SELECT CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+  LIKE 'Party roles v4 (20261007060000):%' THEN 'party_roles_v4' ELSE 'party_roles_v3' END
+$$;
+
 -- '' when the row reads as expected, else what differs.
 CREATE FUNCTION pg_temp.ph_roles(what text,e public.business_events,p_sender text,p_recipient text,p_basis text,p_audience text)
 RETURNS text LANGUAGE sql STABLE AS $$
- SELECT CASE WHEN r IS NULL OR r->>'version' IS DISTINCT FROM 'party_roles_v3' OR r->>'sender_role' IS DISTINCT FROM p_sender
+ SELECT CASE WHEN r IS NULL OR r->>'version' IS DISTINCT FROM pg_temp.ph_version() OR r->>'sender_role' IS DISTINCT FROM p_sender
    OR r->>'recipient_role' IS DISTINCT FROM p_recipient OR r->>'counterpart_role' IS DISTINCT FROM CASE WHEN p_sender='staff' THEN p_recipient ELSE p_sender END
    OR r->>'basis' IS DISTINCT FROM p_basis OR r->>'audience' IS DISTINCT FROM p_audience
-  THEN format('%s must read %s to %s (basis %s, audience %s, party_roles_v3), got %s',what,p_sender,p_recipient,p_basis,p_audience,coalesce(r::text,'none'))
+  THEN format('%s must read %s to %s (basis %s, audience %s, %s), got %s',what,p_sender,p_recipient,p_basis,p_audience,pg_temp.ph_version(),coalesce(r::text,'none'))
   ELSE '' END
  FROM (SELECT e.metadata->'party_roles' AS r) x
 $$;
@@ -217,7 +228,8 @@ BEGIN
   IF k<>'' THEN miss:=miss||k; END IF;
   IF cardinality(miss)>0 THEN problems:=problems||('template rule not fixed: '||array_to_string(miss,'; ')); END IF;
 
-  -- Regression guards: everything else reads as v2 did (stamped v3).
+  -- Regression guards: everything else reads as v2 did (stamped v3, or the
+  -- live successor's version).
   miss:='{}';
   -- L1d's own label is copied first (contact not the job's customer, one reference).
   e:=pg_temp.ph_ev('sms','outbound','client.sms_out','ph-crew2',pg_temp.ph_words(E'New job assigned: SWF-993001 - Fixture Client\nSite: 3 Fixture St'));
@@ -228,23 +240,23 @@ BEGIN
   -- The same words inbound are the customer's own message.
   e:=pg_temp.ph_ev('sms','inbound','client.reply','ph-crewcust',pg_temp.ph_words('New job assigned: SWF-993001 - Fixture Client'));
   IF e.metadata->'party_roles'->>'counterpart_role' IS DISTINCT FROM 'customer' OR e.metadata->'party_roles'->>'basis'='our_template'
-   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM 'party_roles_v3' THEN
+   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM pg_temp.ph_version() THEN
    miss:=miss||format('an inbound text in our template words must read as the customer''s, got %s',e.metadata->'party_roles'); END IF;
   -- The same words in an email are not a text.
   e:=pg_temp.ph_ev('email','outbound','client.email_out',NULL,
    pg_temp.ph_words('New job assigned: SWF-993001 - Fixture Client')||'{"email":"crew.cust@example.test"}'::jsonb);
   IF e.metadata->'party_roles'->>'counterpart_role' IS DISTINCT FROM 'customer' OR e.metadata->'party_roles'->>'basis'='our_template'
-   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM 'party_roles_v3' THEN
+   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM pg_temp.ph_version() THEN
    miss:=miss||format('an email in our template words must read by its address, got %s',e.metadata->'party_roles'); END IF;
   -- An ordinary text to the job's customer.
   e:=pg_temp.ph_ev('sms','outbound','client.sms_out','ph-crewcust',pg_temp.ph_words('Hi, we are booked in for Tuesday'));
   IF e.metadata->'party_roles'->>'recipient_role' IS DISTINCT FROM 'customer' OR e.metadata->'party_roles'->>'basis'='our_template'
-   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM 'party_roles_v3' THEN
+   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM pg_temp.ph_version() THEN
    miss:=miss||format('an ordinary text to the customer must read customer, got %s',e.metadata->'party_roles'); END IF;
   -- The roof report wording inbound is the contact's own message.
   e:=pg_temp.ph_ev('sms','inbound','client.reply','ph-cust2',pg_temp.ph_words('SecureWorks: New roof report make-safe MLB-990001: 9 Fixture Rd'));
   IF e.metadata->'party_roles'->>'basis'='our_template' OR e.metadata->'party_roles'->>'sender_role'='staff'
-   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM 'party_roles_v3' THEN
+   OR e.metadata->'party_roles'->>'version' IS DISTINCT FROM pg_temp.ph_version() THEN
    miss:=miss||format('an inbound text in the roof alert''s words must read as the contact''s, got %s',e.metadata->'party_roles'); END IF;
   -- A non-message row carries none.
   e:=pg_temp.ph_ev('status','system','job.status_changed','ph-crewcust','{"to":"scheduled"}'::jsonb);
@@ -278,7 +290,13 @@ BEGIN
  FOR p IN SELECT * FROM (VALUES
   ('public.context_parties_status()','5f01b621c22b3cb0840bf04eb32a338f','Status block parties (sites.md section 8)%Since 20261006034000%'),
   ('public.context_scorecard_lane_of(text,text,text,text,text,jsonb)','2b51a7422882b6b1d77988fdd3860230','Context scorecard (20261006032000)%Since 20261006034000%'),
-  ('public.context_message_party_roles(public.business_events)','36ed4eac4ec8a1b2efd253da02add409','Party roles v3 (20261006034000):%')
+  -- The classifier: this migration's body, or its registered successor's
+  -- (v4, 20261007060000, which pins its own body in its own contract).
+  ('public.context_message_party_roles(public.business_events)',
+   CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+    LIKE 'Party roles v4 (20261007060000):%' THEN '54b2f8b4a0bc1810495a7e9186c623b4' ELSE '36ed4eac4ec8a1b2efd253da02add409' END,
+   CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+    LIKE 'Party roles v4 (20261007060000):%' THEN 'Party roles v4 (20261007060000):%' ELSE 'Party roles v3 (20261006034000):%' END)
  ) AS t(sig,md5,note) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(p.sig)) IS DISTINCT FROM p.md5 THEN
    RAISE EXCEPTION 'party roles health: % is not this migration''s body',p.sig; END IF;
@@ -318,8 +336,17 @@ BEGIN
   RAISE EXCEPTION 'party roles health: the party-role trigger changed'; END IF;
 END $$;
 
--- E. A re-apply is a no-op.
+-- E. A re-apply is a no-op. A registered successor (v4, 20261007060000)
+-- replaces the classifier; whenever the live body is not v3's, stand v3's
+-- classifier back up first, inside this rolled-back block, from the body that
+-- case pins (and nothing else), so this migration's guard sees the pre-image
+-- it was written for.
 BEGIN;
+SELECT md5(prosrc)<>'36ed4eac4ec8a1b2efd253da02add409' AS ph_classifier_moved
+FROM pg_proc WHERE oid='public.context_message_party_roles(public.business_events)'::regprocedure \gset
+\if :ph_classifier_moved
+\ir ../20261007060000_context_party_roles_v4/v3_message_party_roles.sql
+\endif
 CREATE TEMP TABLE ph_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid,'pg_proc') AS note, p.proacl::text AS acl
  FROM pg_proc p WHERE p.oid IN ('public.context_parties_status()'::regprocedure,
   'public.context_scorecard_lane_of(text,text,text,text,text,jsonb)'::regprocedure,'public.context_message_party_roles(public.business_events)'::regprocedure);
