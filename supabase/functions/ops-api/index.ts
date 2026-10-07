@@ -417,7 +417,8 @@ import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryA
 import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
-import { businessEventTimelineMessage, emailCustomerParty, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
+import { businessEventTimelineMessage, conversationWindow, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -8079,7 +8080,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       }
       case 'resolve_jobs': return json(await resolveJobs(client, body))
       case 'get_job_context_facts': return json(await getJobContextFacts(client, body))
-      case 'get_job_conversation': return json(await getJobConversation(client, body))
+      case 'get_job_conversation': {
+        // since and until (ask the story, 6 Oct 2026): a window that cannot be
+        // read is refused, never read as no window.
+        const asked = conversationWindow(body)
+        if (asked.error) return json({ error: asked.error, code: 'invalid_window' }, 400)
+        return json(await getJobConversation(client, body))
+      }
       case 'assemble_job_dossier':
       case 'assemble_job_brain': {
         try {
@@ -16394,11 +16401,15 @@ async function getJobContextFacts(client: any, body: any) {
 // Conversation reader for the Job Brain. 4-source merge into a normalized
 // Message[] shape so JARVIS / Secure Sale can read the per-job thread without
 // learning every source's column topology. Read-only, service-role bypass.
+// until (ask the story, 6 Oct 2026): with since, one period's messages, so a
+// question about August reads August even when later months hold more than
+// the limit; each source applies it and the merge checks it once more.
 async function getJobConversation(client: any, body: any) {
   const limit = typeof body?.limit === 'number' && body.limit > 0
     ? Math.min(body.limit, 200)
     : 50
   const since = typeof body?.since === 'string' && body.since ? body.since : null
+  const until = typeof body?.until === 'string' && body.until && Number.isFinite(Date.parse(body.until)) ? body.until : null
 
   // Resolve job_id (uuid) — accept job_id or job_number.
   let jobId: string | null = body?.job_id || null
@@ -16428,7 +16439,7 @@ async function getJobConversation(client: any, body: any) {
       clientEmail = jobRow.client_email || null
     }
   }
-  if (!jobId) return { messages: [], summary: { count: 0, channels: {}, since, until: null } }
+  if (!jobId) return { messages: [], summary: { count: 0, channels: {}, since, until: null, window: { since, until } } }
 
   const sinceFilter = since || null
   const messages: any[] = []
@@ -16458,6 +16469,7 @@ async function getJobConversation(client: any, body: any) {
     for (const m of ghlMsgs) {
       const ts = m.timestamp || ''
       if (sinceFilter && ts && ts < sinceFilter) continue
+      if (!happenedBy(ts, until)) continue
       const isCall = m.source === 'call_transcript' || /CALL|VOICEMAIL/i.test(String(m.type || ''))
       const channel = isCall ? 'call' : (String(m.type || '').toUpperCase().includes('EMAIL') ? 'email' : 'sms')
       messages.push({
@@ -16497,6 +16509,7 @@ async function getJobConversation(client: any, body: any) {
       .order('received_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('received_at', sinceFilter)
+    if (until) q = q.lte('received_at', until)
     const { data: inbox, error: inboxErr } = await q
     if (inboxErr) console.error('[ops-api] get_job_conversation inbox read failed:', inboxErr.message)
     const copyCheck = await readInboxEventCopies(client, inbox || [])
@@ -16542,6 +16555,7 @@ async function getJobConversation(client: any, body: any) {
       .order('created_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('created_at', sinceFilter)
+    if (until) q = q.lte('created_at', until)
     const { data: notes } = await q
     for (const r of (notes || [])) {
       const text = String(r?.detail_json?.text || '')
@@ -16582,6 +16596,7 @@ async function getJobConversation(client: any, body: any) {
       select: TIMELINE_MESSAGE_COLUMNS,
       limit,
       since: sinceFilter,
+      until,
       messagesOnly: true,
     })
     if (bevErr) console.error('[ops-api] get_job_conversation business_events read failed:', bevErr)
@@ -16608,6 +16623,7 @@ async function getJobConversation(client: any, body: any) {
       .order('sent_at', { ascending: false })
       .limit(limit)
     if (sinceFilter) q = q.gt('sent_at', sinceFilter)
+    if (until) q = q.lte('sent_at', until)
     const { data: sent, error: sentErr } = await q
     if (sentErr) console.error('[ops-api] get_job_conversation email_events read failed:', sentErr.message)
     messages.push(...sentCustomerEmailMessages(sent || [], jobId, customerAddresses, eventMessages))
@@ -16629,7 +16645,7 @@ async function getJobConversation(client: any, body: any) {
     return Number.isFinite(t) ? t : -Infinity
   }
   messages.sort((a, b) => at(b) - at(a))
-  const sliced = messages.slice(0, limit)
+  const sliced = messages.filter((m) => happenedBy(m.occurred_at, until)).slice(0, limit)
 
   const channels: Record<string, number> = {}
   for (const m of sliced) channels[m.channel] = (channels[m.channel] || 0) + 1
@@ -16642,6 +16658,9 @@ async function getJobConversation(client: any, body: any) {
     until: occurredTimes[occurredTimes.length - 1] || null,
     job_id: jobId,
     job_number: jobNumber,
+    // The window asked for (summary.since and summary.until are the oldest and
+    // newest message shown).
+    window: { since, until },
   }
   return { messages: sliced, summary }
 }
@@ -17098,6 +17117,13 @@ async function assembleJobDossier(client: any, body: any) {
 
 async function searchJobs(client: any, params: URLSearchParams) {
   const q = (params.get('q') || '').trim()
+  // include_closed (ask the story, 6 Oct 2026): Jarvis's sw_job_story reads
+  // lost, cancelled and draft jobs and old-system (legacy) records too, with
+  // whole-word name reads, a phone read by its digits and a capped flag
+  // (search_jobs_closed.ts). Without it the search below is unchanged.
+  if (['true', '1'].includes((params.get('include_closed') || '').toLowerCase())) {
+    return await searchJobsIncludingClosed(client, q, { orgId: DEFAULT_ORG_ID, isTestRecord })
+  }
   if (!q || q.length < 2) return { results: [] }
 
   const term = `%${q}%`
@@ -60654,3 +60680,4 @@ export const _updateInvoiceForTest = updateInvoice
 export const _getJobContextFactsForTest = getJobContextFacts
 export const _assembleJobDossierForTest = assembleJobDossier
 export const _getJobConversationForTest = getJobConversation
+export const _searchJobsForTest = searchJobs
