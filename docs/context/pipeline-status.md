@@ -134,6 +134,19 @@ first row, with its `flag` state (`present`, `missing`, `unreadable`) and
 alarms only while the flag is on (missing or unreadable reads as off).
 `quiet` stays the measured fact; the alarm needs `quiet` and no exemption.
 Both lists are in the policy (`retired_sources`, `flag_gated_sources`).
+Lanes health (`20261006050000`) retired `ghl_sms_cache_backfill` (replaced
+by `ghl-message-reconcile`) and added two lists. `handover_sources`: the old
+email path's three writer names (`monitor-inbox`, `monitor-inbox-group`,
+`monitor_inbox`; replaced by `outlook-mail-capture`) carry
+`alarm_exempt: handed_over` and a `handover` object (`replaced_by`,
+`handed_over`) only while `context_email_reader_flags()` reports `reader`,
+`schedule` and `program` all on, exactly when
+`monitor-inbox/reader_handover.ts` stops the old path's evidence rows (on
+since 5 Oct 2026); with any off, missing or unreadable the old path writes
+again and its names alarm like any capture source. `action_log_sources`: a
+writer that logs actions people or agents took rather than capturing
+evidence (`mcp_agent`) is listed with `alarm_exempt: action_log` and never
+alarms. Sources are listed in byte order.
 
 `ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`, with
 the retry projection follow-up `20260924210000_context_ghl_retry_status.sql`):
@@ -145,7 +158,16 @@ webhook and last app webhook, unresolved ids (from the receiver's ids-only
 errors in 24 h (from `context_capture_runs`, source `ghl_message_reconcile`).
 The latest run's pending retry coordinate is `reconciler.retry_from`; it stays
 visible until a complete retry read clears it.
-Alarms: `ghl_webhooks_quiet` (no app webhook for 120 business minutes) and
+Alarms: `ghl_webhooks_quiet` (lanes health `20261006050000`, two parts, each
+on its own limit: the `CallCompleted`, `CustomerReplied` and `UserReplied`
+workflow doorbells, policy `doorbell_event_types`, always judged, quiet for
+`doorbells_quiet_business_minutes` (1320, two business days: about 8 arrive a
+business day, but a Saturday with no call is normal) since
+`webhooks.last_doorbell_at`, or since the flag came on when none has arrived;
+and the GHL app events, judged only once the app has sent its first accepted
+event (`webhooks.app_armed`), quiet for `webhooks_quiet_business_minutes`
+(120). It rings when an armed part is quiet past its limit; `quiet_parts`
+names them and `parts` gives each one's since, quiet minutes and limit) and
 `ghl_reconcile_stale` (no finished `succeeded` or `partial` run for 45
 minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high`
 (more than 5 in 24 h); `ghl_auth_missing` (critical: any post refused after

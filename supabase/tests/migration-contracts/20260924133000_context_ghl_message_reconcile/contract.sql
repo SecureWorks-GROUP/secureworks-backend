@@ -95,8 +95,12 @@ BEGIN;
 -- (the reconciler stopped): ghl_webhooks_quiet and ghl_reconcile_stale.
 INSERT INTO public.feature_flags(flag_name,enabled,updated_at) VALUES('ghl_message_capture_v2',true,now()-interval '4 days');
 SELECT pg_temp.c1d_receipt('InboundMessage','event_created','app_signature','observe',now()-interval '4 days');
--- A workflow post today does not prove the app is sending.
-SELECT pg_temp.c1d_receipt('CallCompleted','event_created','workflow_secret','observe',now()-interval '5 minutes');
+-- A workflow post today does not prove the app is sending. (Since lanes
+-- health, 20261006050000, ghl_webhooks_quiet judges the CallCompleted,
+-- CustomerReplied and UserReplied doorbells on their own two-business-day
+-- limit beside the app events; its own contract checks them. Any other
+-- workflow post still counts for nothing.)
+SELECT pg_temp.c1d_receipt('ContactStageChanged','event_created','workflow_secret','observe',now()-interval '5 minutes');
 -- The last successful run was an hour ago; the newest run failed (rate limit).
 SELECT pg_temp.c1d_run('succeeded','{"inserted":0,"webhook_misses":0}');
 UPDATE public.context_capture_runs SET started_at=now()-interval '61 minutes',finished_at=now()-interval '60 minutes',updated_at=now()-interval '60 minutes';
@@ -120,8 +124,12 @@ ROLLBACK;
 
 BEGIN;
 -- 5. Healthy: an app webhook a minute ago and a successful run 10 minutes ago.
+-- (Since lanes health, 20261006050000, ghl_webhooks_quiet also judges the
+-- workflow doorbells on their own two-business-day limit, so healthy GHL
+-- has posted one of those too.)
 INSERT INTO public.feature_flags(flag_name,enabled,updated_at) VALUES('ghl_message_capture_v2',true,now()-interval '4 days');
 SELECT pg_temp.c1d_receipt('InboundMessage','event_created','app_signature','observe',now()-interval '1 minute');
+SELECT pg_temp.c1d_receipt('CallCompleted','skipped','workflow_secret','observe',now()-interval '1 hour');
 SELECT pg_temp.c1d_run('partial','{"inserted":2,"webhook_misses":2,"backlog_conversations":4}');
 UPDATE public.context_capture_runs SET finished_at=now()-interval '10 minutes';
 DO $$
@@ -233,6 +241,13 @@ FROM pg_proc WHERE oid='public.record_capture_run(jsonb)'::regprocedure \gset
 -- checking its re-apply, then put the retry-status follow-up back. The email
 -- reader is not re-applied here: it needs F1b's record_capture_run, which
 -- this block has rolled back to F1's (the whole block is rolled back).
+-- Lanes health (20261006050000) owns newer versions of the status block and
+-- the policy; stand the retry-status pair back up first.
+SELECT md5(prosrc)<>'ecdec7c3bc7f09cb3ea23d35ac096cd2' AS c1d_lanes_moved
+FROM pg_proc WHERE oid='public.context_ghl_capture_status()'::regprocedure \gset
+\if :c1d_lanes_moved
+\ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
+\endif
 \ir ../../../rollbacks/20261002150000_context_email_reader_down.sql
 \ir ../../../rollbacks/20260924210000_context_ghl_retry_status_down.sql
 -- Likewise T2 (20261002100000) adds its own job to the lane list C1d pins.

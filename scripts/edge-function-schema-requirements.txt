@@ -392,6 +392,9 @@ outlook-mail-capture|supabase/migrations/20261002150000_context_email_reader.sql
 outlook-mail-capture|supabase/migrations/20260924213000_context_email_capture_config.sql|column|monitored_mailboxes.source_key
 outlook-mail-capture|supabase/migrations/20260924020000_context_status_foundation.sql|function|record_capture_run
 outlook-mail-capture|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
+# Lanes health: the reader records a failed attachment (status failed, with
+# its error_code) and a group file sent without its bytes (skipped_no_content).
+outlook-mail-capture|supabase/migrations/20261006050000_context_lanes_health.sql|column|context_email_attachments.error_code
 monitor-inbox|supabase/migrations/20261002150000_context_email_reader.sql|function|context_email_reader_flags
 
 # T2: the call transcript fetcher selects due calls (live, and history calls
