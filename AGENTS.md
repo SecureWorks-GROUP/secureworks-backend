@@ -722,6 +722,27 @@ many re-stamps happened in the last 24 hours): the hint carries no time and
 every re-run re-checks bucket rows, so an exact count needs the placement
 track to stamp the hint with its time (a named follow-up, not B0).
 
+## The Ledger Store Says Whose Call A Transcript Is, And Never Takes The Reader's Word For Whose Row
+
+`context_ledger_call_customer` (`20261007150000`) is the one rule for whose words a call
+transcript holds: a call row on its job (`ghl:<id>`) decides first; with none (a
+transcribe-call transcript's `ghl_call_id` is `<contact>:<instant>`, and a call row may
+sit unplaced or on another job), the transcript's own stamp decides, the customer's only on
+`job_customer` with the row's CRM contact the job's own. The packet gives every transcript
+`call_customer` true, false or `"unknown"`, never a bare null (both readers once read null
+as "not this job's customer" and put the customer's own calls on someone else). A model item
+whose words say a row belongs to another person, job or lead
+(`context_ledger_elsewhere_claim`, one engine-neutral pattern the reader mirrors) is refused
+`elsewhere_unsupported` unless a cited row's own placement or role basis says so
+(`context_ledger_row_elsewhere`; the packet carries the same reason on each row as
+`elsewhere`); widen the pattern and the row rule in the store, never in a caller. The packet's
+`siblings` section (`context_ledger_siblings`) is the same client's (CRM contact, or a client
+email that is not ours) and the same work order's (`context_ledger_work_order_key`) other jobs,
+never by name, as context only: a sibling's rows are never this job's citations. A PAID invoice
+closes a payment item at the end of its paid Perth day (`context_ledger_paid_close_at`), in an
+item and in a transition alike. The packet stays `ledger-packet-v1` (the reader refuses any
+other version): add fields, never rename or retype one.
+
 ## The Job Story Sorts Text In C Order
 
 Production's collation is ICU `en-US` (letters compared without case first,
