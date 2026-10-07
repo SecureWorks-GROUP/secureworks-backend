@@ -110,7 +110,16 @@ ROLLBACK;
 
 -- 3. The shared budget: vision only on both lanes, under the ceiling, within
 -- its daily cap; the job reads keep their share; other phases unchanged.
+-- The call budget (20261006060000) moved these numbers to 1,000 calls, 300 for
+-- attribution and a vision ceiling of 500, proved by its own contract; this
+-- transaction pins the numbers B-5b was written for (400, 60, 200).
 BEGIN;
+DO $pin$ BEGIN
+ EXECUTE format('CREATE OR REPLACE FUNCTION public.context_cadence_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+  public.context_cadence_policy()||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb);
+ EXECUTE format('CREATE OR REPLACE FUNCTION public.context_document_vision_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+  public.context_document_vision_policy()||'{"shared_calls_ceiling":200}'::jsonb);
+END $pin$;
 DO $$
 DECLARE d date:=pg_temp.v_today(); r jsonb; n integer;
 BEGIN

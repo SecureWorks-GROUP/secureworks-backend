@@ -4,7 +4,12 @@
 -- capture and placement times, and each transaction moves live_since ten days
 -- back (pg_temp.k1_policy) so a row "captured 20 minutes ago" is live.
 
-CREATE TABLE pg_temp.k1_base_policy AS SELECT public.context_cadence_policy() AS p;
+-- The call budget (20261006060000) raised the day's cap, the morning cap and
+-- attribution's share (1,000, 750, 300; proved by its own contract). These
+-- sections prove the cadence rules at the numbers they were written for, so
+-- every pg_temp.k1_policy() call pins K1's 400, 300 and 60.
+CREATE TABLE pg_temp.k1_base_policy AS SELECT public.context_cadence_policy()
+ ||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb AS p;
 
 -- Replace the policy inside the current transaction (rolled back with it).
 CREATE FUNCTION pg_temp.k1_policy(p_over jsonb DEFAULT '{}'::jsonb) RETURNS void LANGUAGE plpgsql AS $$

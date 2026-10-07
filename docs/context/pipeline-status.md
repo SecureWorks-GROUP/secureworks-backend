@@ -56,13 +56,35 @@ role only, the desk tunes it) keeps model calls and reads back for live work:
 `live_reserve_reads_per_job` (2); a missing row reads as these defaults, all 0
 is the old shared pool. A catch-up-only job (listed, pending rows, no live
 waking evidence) is not due, `blocked_reason` `backlog_budget`, once the Perth
-day's calls reach `model_call_cap` less the day reserve (300), before
-`morning_until` `morning_cap` less the morning reserve (200), or its reads
-today reach its run limit less the per-job reserve (4); the claim refuses it
-with outcome `pacing`. The ceiling counts every call of the day and never reads
-`requested_at`, so no re-list gets past it. The block adds `read_reserve` (the
-reserve and both backlog ceilings), `backlog_budget_held_jobs`,
-`live_held_by_budget_jobs` and `oldest_held_wait_minutes`.
+day's calls reach `model_call_cap` less the day reserve (900 since the call
+budget below; 300 before it), before `morning_until` `morning_cap` less the
+morning reserve (650; 200 before), or its reads today reach its run limit less
+the per-job reserve (4); the claim refuses it with outcome `pacing`. The
+ceiling counts every call of the day and never reads `requested_at`, so no
+re-list gets past it. The block adds `read_reserve` (the reserve and both
+backlog ceilings), `backlog_budget_held_jobs`, `live_held_by_budget_jobs` and
+`oldest_held_wait_minutes`.
+
+Call budget (owner ruling, 6 Oct 2026; `20261006060000`): every model call
+(fact reads, AI placement, the ledger reader, document vision) takes one
+reservation from `reserve_context_model_call`, and the day's numbers live only
+in `context_cadence_policy()`: `model_call_cap` 1,000 (was 400),
+`morning_cap` 750 calls before 12:00 Perth (was 300; live reads pause there
+until noon), `attribution_calls_day` 300 for placement (was 60). Vision reads
+only while the day is under the vision policy's `shared_calls_ceiling`, 500
+(was 200). The live reserves did not change (`context_cadence_settings` 100
+and 100, `context_ledger_settings` 100 and 100), so catch-up, backlog and
+ledger reads stop at 900 calls (650 before noon) and live reads keep the rest.
+Readers take the numbers from the policy: the admission, the ledger's
+`context_ledger_budget()`, `context_document_vision_admission()`, the cadence
+judgement and this heartbeat, whose top-level `model_call_cap` and `run_cap`
+are the policy's cap. `context_model_call_reservations.ordinal` is bounded 1 to
+1,000 and the ledger's `calls_per_day` and reserves 0 or 50 to 1,000, so a
+larger budget needs those CHECKs moved in the same migration. The Luna worker
+(secureworks-jarvis) refuses a reservation numbered above its own
+`CONTEXT_DAILY_RUN_CAP` (1,000 since its call budget change), so a raise
+deploys the worker first. `ready_jobs` (at most 400 listed due jobs) is a
+list size, not the call budget.
 
 Catch-up (`20260924220000`): `catchup` reports the one-time catch-up list
 (`context_catchup_jobs`, written by the service-role

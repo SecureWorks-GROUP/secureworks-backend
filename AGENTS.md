@@ -571,7 +571,8 @@ The heartbeat hit the API statement timeout (57014, 8 s): never call
 `context_extraction_candidates` from it (the pre-K1 body detoasted
 `jobs.scope_json` per event, 15.5 s live); `ready_jobs` is
 `context_ready_jobs_count`, which K1 made a count of the due-rule candidates
-read (still capped at 400). Change both together. A per-row SQL helper must not
+read (still capped at 400 jobs: a list size, not the call budget). Change both
+together. A per-row SQL helper must not
 carry `SET search_path` (blocks inlining; schema-qualify operators instead),
 and a per-row predicate must not `to_jsonb()` a `business_events` or `jobs` row.
 Booking-lane context hangar (`20260921140000`): `context_contact_jobs` counts a
@@ -590,7 +591,16 @@ Extraction cadence (K1, `20260924030000`): when a job is read is decided in
 SQL from the evidence, never by a daily clock. Every number is in
 `context_cadence_policy()` (changed only by migration; `live_since` is the
 first apply time and rows captured before it never wake), except the live
-reserve, which is in `context_cadence_settings`. The one judgement is
+reserve, which is in `context_cadence_settings`. That includes the day's model
+call budget (owner ruling 6 Oct 2026, `20261006060000`: `model_call_cap` 1,000,
+`morning_cap` 750, `attribution_calls_day` 300; the vision ceiling, 500, is in
+`context_document_vision_policy()`). The admission, `context_ledger_budget`, the
+vision admission and the heartbeat read them there; never write a cap number
+into a reader again. Raising the cap also moves the `ordinal` CHECK on
+`context_model_call_reservations` and the `context_ledger_settings` bounds, and
+the Luna worker's `CONTEXT_DAILY_RUN_CAP` (secureworks-jarvis) first, because
+the worker refuses a reservation numbered above it. A replacement of the policy
+keeps `live_since`'s text: guard it with that text masked. The one judgement is
 `context_jobs_cadence(uuid[])`; the claim, candidates, freshness and status
 all read it, so never re-derive "due" elsewhere. The one exception to
 `live_since` is the catch-up list (`20260924220000`, `context_catchup_jobs`,
@@ -641,7 +651,8 @@ its body.
 
 Luna's answer carries an outcome (`job`, `several`, `undecided`); the last two
 rest the row as `unplaced`, attribution asks are recorded per row with backoff
-and capped at 60 of the 400 daily calls (`20260924060000`). Contract and the
+and capped at the policy's `attribution_calls_day` of the day's calls (60 of 400
+in `20260924060000`; 300 of 1,000 since `20261006060000`). Contract and the
 three-argument call (no outcome argument): `docs/context/a1-attribution-attempts.md`.
 
 ## Placement Keys Are One Rule In Two Languages; Never Index `jobs` On A Revoked Function

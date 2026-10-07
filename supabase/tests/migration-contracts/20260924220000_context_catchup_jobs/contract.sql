@@ -3,7 +3,12 @@
 -- (pg_temp.cu_policy), so a row captured 12 days ago is pre-go-live history
 -- that K1 alone never reads, and a row captured 20 minutes ago is live.
 
-CREATE TABLE pg_temp.cu_base_policy AS SELECT public.context_cadence_policy() AS p;
+-- The call budget (20261006060000) raised the day's cap, the morning cap and
+-- attribution's share (1,000, 750, 300; proved by its own contract). These
+-- sections prove the catch-up rules at the numbers they were written for, so
+-- every pg_temp.cu_policy() call pins K1's 400, 300 and 60.
+CREATE TABLE pg_temp.cu_base_policy AS SELECT public.context_cadence_policy()
+ ||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb AS p;
 
 CREATE FUNCTION pg_temp.cu_policy(p_over jsonb DEFAULT '{}'::jsonb) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
@@ -86,11 +91,15 @@ BEGIN
 END $$;
 
 -- 2. Caps are unchanged: the policy is K1's, every number and live_since
--- included (the migration never replaces the policy).
+-- included (the migration never replaces the policy). Once the call budget
+-- (20261006060000, its comment names it) is in the stack, the cap and the
+-- morning cap are its 1,000 and 750; every other number is still K1's.
 DO $$
 DECLARE p jsonb:=public.context_cadence_policy();
+ budget boolean:=coalesce(obj_description('public.context_cadence_policy()'::regprocedure,'pg_proc'),'') LIKE '%20261006060000%';
 BEGIN
- IF p->>'version'<>'k1-cadence-policy-v1' OR (p->>'model_call_cap')::int<>400 OR (p->>'morning_cap')::int<>300 OR p->>'morning_until'<>'12:00'
+ IF p->>'version'<>'k1-cadence-policy-v1' OR (p->>'model_call_cap')::int<>(CASE WHEN budget THEN 1000 ELSE 400 END)
+  OR (p->>'morning_cap')::int<>(CASE WHEN budget THEN 750 ELSE 300 END) OR p->>'morning_until'<>'12:00'
   OR (p->>'tick_max_jobs')::int<>10 OR (p->>'runs_per_job_day')::int<>6 OR (p->>'inbound_extra_runs')::int<>4
   OR (p->>'quiet_min')::int<>15 OR (p->>'ceiling_min')::int<>60 OR (p->>'cooldown_min')::int<>30
  THEN RAISE EXCEPTION 'catch-up policy numbers moved %',p; END IF;

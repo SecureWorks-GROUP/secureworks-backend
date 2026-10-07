@@ -227,7 +227,14 @@ END $$;
 ROLLBACK;
 
 -- 6. Attribution sub-budget: 60 of the day's 400 calls; other phases unaffected.
+-- The call budget (20261006060000) reads both numbers from
+-- context_cadence_policy() (300 of 1,000 since 6 Oct 2026, proved by its own
+-- contract), so this transaction pins the numbers A1 was written for.
 BEGIN;
+DO $pin$ BEGIN
+ EXECUTE format('CREATE OR REPLACE FUNCTION public.context_cadence_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+  public.context_cadence_policy()||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb);
+END $pin$;
 DO $$
 DECLARE d date:=(clock_timestamp() AT TIME ZONE 'Australia/Perth')::date; r jsonb; n integer;
 BEGIN
