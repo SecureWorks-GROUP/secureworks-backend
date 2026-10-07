@@ -23,7 +23,7 @@ DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   ('public.context_scorecard_policy()', ARRAY['c878868c9d3779a6d3721b04211b8451', '50ed8ccdac924097399359a9857f02a8']),
-  ('public.context_scorecard(timestamptz)', ARRAY['c77af743de0e05f3c39b3a803ce3d6d3', '82574dfb65328d855ad87683a78ca9cd']),
+  ('public.context_scorecard(timestamptz)', ARRAY['3c21b040cb4ab74d440e2090f27da7c9', '82574dfb65328d855ad87683a78ca9cd']),
   ('public.context_scorecard_jobs(uuid,integer,timestamptz)', ARRAY['c0a2b2a18dfa2f6bc78f883911896d87', '6fd07f87b10ff8e0164f2daad98cce48'])
  ) AS t(sig, accepted) LOOP
   live := NULL;

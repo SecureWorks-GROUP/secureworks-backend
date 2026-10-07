@@ -92,7 +92,10 @@
 --   context_scorecard(timestamptz)                     82574dfb65328d855ad87683a78ca9cd (W11)
 --   context_scorecard_jobs(uuid,integer,timestamptz)   6fd07f87b10ff8e0164f2daad98cce48 (W11)
 -- Read, never replaced: context_scorecard_lane_of (20261006034000's body),
--- every v1 read, the lead rule, the hourly run status, the CRM history read and
+-- every v1 read but context_ghl_history_progress (row 4 reads the CRM history
+-- read instead; since 20261007050000 the progress read runs the lead rule over
+-- every live job, about 1.4 s, so v2 no longer calls it), the lead rule, the
+-- hourly run status, the CRM history read and
 -- the Xero top-up status, the party roles read, the placement grades and
 -- misfile counts, the email reach reads, the item kinds and grades, and the
 -- ledger's evidence, checks and failures. Signatures, grants and the service
@@ -111,7 +114,7 @@ BEGIN
  -- Replaced: W11's live body, or this migration's (a re-apply).
  FOR x IN SELECT * FROM (VALUES
   ('public.context_scorecard_policy()', ARRAY['50ed8ccdac924097399359a9857f02a8', 'c878868c9d3779a6d3721b04211b8451']),
-  ('public.context_scorecard(timestamptz)', ARRAY['82574dfb65328d855ad87683a78ca9cd', 'c77af743de0e05f3c39b3a803ce3d6d3']),
+  ('public.context_scorecard(timestamptz)', ARRAY['82574dfb65328d855ad87683a78ca9cd', '3c21b040cb4ab74d440e2090f27da7c9']),
   ('public.context_scorecard_jobs(uuid,integer,timestamptz)', ARRAY['6fd07f87b10ff8e0164f2daad98cce48', 'c0a2b2a18dfa2f6bc78f883911896d87'])
  ) AS t(sig, accepted) LOOP
   live := NULL;
@@ -146,7 +149,7 @@ BEGIN
  FOREACH f IN ARRAY ARRAY['public.context_scorecard_lane_of(text,text,text,text,text,jsonb)',
    'public.context_source_freshness()','public.context_email_capture_status()','public.context_ghl_capture_status()',
    'public.context_transcript_capture_status()','public.context_document_text_status()','public.context_document_vision_status()',
-   'public.context_ghl_history_progress()','public.context_email_history_status()','public.context_payload_job_mismatch_rows()',
+   'public.context_email_history_status()','public.context_payload_job_mismatch_rows()',
    'public.context_business_minutes(timestamptz,timestamptz)','public.context_job_record_timeline(uuid[],timestamptz)',
    'public.context_job_record_loops(uuid[],timestamptz)','public.context_ledger_evidence_rows(uuid[],timestamptz)',
    'public.context_ledger_checks_pass(jsonb)','public.context_ledger_failures(uuid[])',
@@ -276,8 +279,8 @@ DECLARE
  v_ev jsonb;                      -- per-lane aggregates over the window
  v_pr jsonb;                      -- row 2: the stamps per message lane (context_party_roles_lanes)
  v_q record; v_r record; v_x record; v_g record; v_pg record; v_k record;
- v_newest timestamptz; v_quiet integer; v_n numeric; v_d numeric; v_m numeric; v_txt text; v_status text;
- v_fresh jsonb; v_ecap jsonb; v_gcap jsonb; v_tcap jsonb; v_dt jsonb; v_vs jsonb; v_gh jsonb; v_eh jsonb;
+ v_newest timestamptz; v_quiet integer; v_n numeric; v_d numeric; v_m numeric; v_txt text;
+ v_fresh jsonb; v_ecap jsonb; v_gcap jsonb; v_tcap jsonb; v_dt jsonb; v_vs jsonb; v_eh jsonb;
  v_crm jsonb; v_xd jsonb; v_mis jsonb; v_reach jsonb; v_run jsonb;
  v_keys text; v_missing text[]; v_rows jsonb; v_why text[];
 BEGIN
@@ -295,7 +298,6 @@ BEGIN
  v_tcap := public.context_transcript_capture_status();
  v_dt := public.context_document_text_status();
  v_vs := public.context_document_vision_status();
- v_gh := public.context_ghl_history_progress();
  v_eh := public.context_email_history_status();
 
  -- One pass over the window: per lane, the newest live item, the crew rule and placement.
