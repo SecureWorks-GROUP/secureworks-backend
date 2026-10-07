@@ -230,6 +230,32 @@ SELECT pg_temp.hp_cases();
 ROLLBACK;
 
 -- D. Structure.
+-- A registered successor (L1g 20261006035000) replaces the rules ladder and
+-- proves in its own contract that its body is exactly this one plus its
+-- edits; while it is live only the untouched functions, the grants and the
+-- flag are checked here, and the re-apply is skipped (L1f's guard refuses to
+-- re-apply over L1g's body).
+SELECT coalesce(obj_description(to_regprocedure('public.resolve_context_attribution(public.business_events,boolean,boolean)'),'pg_proc'),'') LIKE 'L1g:%' AS l1g_live \gset
+\if :l1g_live
+DO $$
+DECLARE r text;
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_ladder_p1a(public.business_events,boolean)'::regprocedure)<>'ce620833c851196a00eca328d9b7426a'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.resolve_context_attribution(public.business_events)'::regprocedure)<>'32365101d23dde1695707a0bddff640b'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.attribute_business_event()'::regprocedure)<>'d0036a1bc36f4b2a779f4a8b192cd687'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_contact_job_timeline(text,timestamptz,text,text)'::regprocedure)<>'f98da204718a4d5ac6395761a963ced4'
+  OR (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.context_attribution_preview(uuid,boolean)'::regprocedure)<>'4cd4ef761039f754138518a90531ecd2'
+ THEN RAISE EXCEPTION 'l1f: the rules-off ladder, the entry, the trigger, the timeline or the preview changed'; END IF;
+ IF coalesce(obj_description('public.context_ladder_p1a(public.business_events,boolean)'::regprocedure,'pg_proc'),'') NOT LIKE 'L1e:%'
+ THEN RAISE EXCEPTION 'l1f: the rules-off ladder must stay L1e'; END IF;
+ FOREACH r IN ARRAY ARRAY['anon','authenticated','service_role'] LOOP
+  IF has_function_privilege(r,'public.resolve_context_attribution(public.business_events,boolean,boolean)','EXECUTE')
+  THEN RAISE EXCEPTION 'l1f: % can call the private rules ladder',r; END IF;
+ END LOOP;
+ IF (SELECT count(*) FROM public.feature_flags WHERE flag_name='context_unlinked_rules_v1' AND NOT enabled)<>1
+ THEN RAISE EXCEPTION 'l1f: the rules flag must stay off'; END IF;
+END $$;
+\else
 DO $$
 DECLARE r text;
 BEGIN
@@ -375,3 +401,4 @@ BEGIN
  THEN RAISE EXCEPTION 'l1f: re-apply changed the body or comment'; END IF;
 END $$;
 DROP TABLE l1f_before;
+\endif

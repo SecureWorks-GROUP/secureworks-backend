@@ -97,11 +97,53 @@ export function bySourceTimeDesc(a: any, b: any): number {
 }
 
 /**
+ * A conversation window asked for by a caller (ask the story, 6 Oct 2026):
+ * since and until, each an ISO date-time or absent. since stays exclusive and
+ * until inclusive, on when each message happened. A value that is not a
+ * date-time, or an until before since, is an error to say back: read as no
+ * window it would answer a period question with the wrong messages.
+ */
+export function conversationWindow(
+  body: any,
+): { since: string | null; until: string | null; error: string | null } {
+  const read = (name: "since" | "until") => {
+    const v = body?.[name];
+    if (v === undefined || v === null || v === "") return { at: null, bad: false };
+    if (typeof v !== "string" || !Number.isFinite(Date.parse(v))) {
+      return { at: null, bad: true };
+    }
+    return { at: v, bad: false };
+  };
+  const since = read("since");
+  const until = read("until");
+  if (since.bad) {
+    return { since: null, until: null, error: "since must be an ISO date-time" };
+  }
+  if (until.bad) {
+    return { since: null, until: null, error: "until must be an ISO date-time" };
+  }
+  if (
+    since.at && until.at && Date.parse(until.at) < Date.parse(since.at)
+  ) {
+    return { since: null, until: null, error: "until is before since" };
+  }
+  return { since: since.at, until: until.at, error: null };
+}
+
+/** Whether a message happened by `until` (inclusive). No until, or no readable time, keeps it. */
+export function happenedBy(at: unknown, until: string | null): boolean {
+  if (!until) return true;
+  const t = typeof at === "string" ? Date.parse(at) : NaN;
+  return !Number.isFinite(t) || t <= Date.parse(until);
+}
+
+/**
  * The newest `limit` business_events rows on a job by source time
  * (coalesce(event_at, occurred_at)), exactly: the newest N of the rows that
  * carry event_at (ordered by it) merged with the newest N of the rows that do
  * not (ordered by occurred_at, their source time), then cut to N. `since`
- * applies to the source time. `select` must name event_at and occurred_at.
+ * (exclusive) and `until` (inclusive) apply to the source time. `select` must
+ * name event_at and occurred_at.
  */
 export async function readBusinessEventsBySourceTime(
   client: any,
@@ -110,6 +152,7 @@ export async function readBusinessEventsBySourceTime(
     select: string;
     limit: number;
     since?: string | null;
+    until?: string | null;
     messagesOnly?: boolean;
   },
 ): Promise<{ rows: any[]; error: string | null }> {
@@ -122,10 +165,12 @@ export async function readBusinessEventsBySourceTime(
     if (stamped) {
       q = q.not("event_at", "is", null);
       if (opts.since) q = q.gt("event_at", opts.since);
+      if (opts.until) q = q.lte("event_at", opts.until);
       q = q.order("event_at", { ascending: false });
     } else {
       q = q.is("event_at", null);
       if (opts.since) q = q.gt("occurred_at", opts.since);
+      if (opts.until) q = q.lte("occurred_at", opts.until);
       q = q.order("occurred_at", { ascending: false });
     }
     return q.order("id", { ascending: false }).limit(opts.limit);

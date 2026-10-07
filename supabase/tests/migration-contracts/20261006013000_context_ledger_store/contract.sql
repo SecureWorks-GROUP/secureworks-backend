@@ -280,6 +280,17 @@ BEGIN
 END $$;
 
 BEGIN;
+-- The call budget (20261006060000) reads the cap and attribution's share from
+-- context_cadence_policy() and raised the vision ceiling (1,000, 300 and 500,
+-- proved by its own contract). The matrix compares against the 20261006001000
+-- body, which carries 400 and 60 as literals, so this transaction pins the
+-- numbers that body was written for (400, 300, 60 and a vision ceiling of 200).
+DO $pin$ BEGIN
+ EXECUTE format('CREATE OR REPLACE FUNCTION public.context_cadence_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+  public.context_cadence_policy() || '{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb);
+ EXECUTE format('CREATE OR REPLACE FUNCTION public.context_document_vision_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+  public.context_document_vision_policy() || '{"shared_calls_ceiling":200}'::jsonb);
+END $pin$;
 DO $c$
 DECLARE j uuid := pg_temp.lg_job('SWF-91001'); x uuid; a uuid; xs uuid; xl uuid; xd uuid; xy uuid; lr uuid; n integer;
 BEGIN
@@ -349,7 +360,11 @@ ROLLBACK;
 -- its own live reserve (context_ledger_settings, not the fact backlog's
 -- context_cadence_settings), all day and before noon. pg_temp.lg_policy moves the morning boundary so both sides of
 -- noon are tested at any clock time.
-CREATE TABLE pg_temp.lg_base_policy AS SELECT public.context_cadence_policy() AS p;
+-- (the call budget, 20261006060000, raised the cap and morning cap to 1,000
+-- and 750 and proves the ledger's lines at 900 and 650 in its own contract;
+-- every pg_temp.lg_policy() call here pins the 400 and 300 these were written for)
+CREATE TABLE pg_temp.lg_base_policy AS SELECT public.context_cadence_policy()
+ || '{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb AS p;
 -- The budget preflight must answer what the admission would: calls left
 -- exactly when a ledger call would be reserved, and the same reason when not.
 CREATE FUNCTION pg_temp.lg_agree(p_label text, p_run uuid, p_tok uuid, p_left integer DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -1834,7 +1849,9 @@ BEGIN
  PERFORM pg_temp.lg_run(j, 'ledger', 'running', '30 minutes');
  PERFORM pg_temp.lg_calls_add(1, 'ledger');
 END $c$;
--- (the story, when a full stack has it, goes first, as the store's rollback demands)
+-- (the call budget and then the story, when a full stack has them, go first, as
+-- the store's rollback demands: the call budget replaced the admission)
+\ir ../../../rollbacks/20261006060000_context_call_budget_1000_down.sql
 \ir ../../../rollbacks/20261006014000_context_job_story_down.sql
 \ir ../../../rollbacks/20261006013000_context_ledger_store_down.sql
 DO $c$ BEGIN
@@ -2326,8 +2343,10 @@ DO $c$ BEGIN
 END $c$;
 
 -- 15. Last, so a behaviour break above is reported by its behaviour: the
--- admission is exactly this migration's body.
+-- admission is exactly this migration's body, or the call budget's
+-- (20261006060000: this body with the cap and attribution's share read from
+-- the policy, proved by its own contract).
 DO $c$ BEGIN
  PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  = '28545c710b6234b76ba25eb09093fa39', 'reserve_context_model_call is not this migration''s body');
+  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c'), 'reserve_context_model_call is not this migration''s body');
 END $c$;

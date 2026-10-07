@@ -56,13 +56,35 @@ role only, the desk tunes it) keeps model calls and reads back for live work:
 `live_reserve_reads_per_job` (2); a missing row reads as these defaults, all 0
 is the old shared pool. A catch-up-only job (listed, pending rows, no live
 waking evidence) is not due, `blocked_reason` `backlog_budget`, once the Perth
-day's calls reach `model_call_cap` less the day reserve (300), before
-`morning_until` `morning_cap` less the morning reserve (200), or its reads
-today reach its run limit less the per-job reserve (4); the claim refuses it
-with outcome `pacing`. The ceiling counts every call of the day and never reads
-`requested_at`, so no re-list gets past it. The block adds `read_reserve` (the
-reserve and both backlog ceilings), `backlog_budget_held_jobs`,
-`live_held_by_budget_jobs` and `oldest_held_wait_minutes`.
+day's calls reach `model_call_cap` less the day reserve (900 since the call
+budget below; 300 before it), before `morning_until` `morning_cap` less the
+morning reserve (650; 200 before), or its reads today reach its run limit less
+the per-job reserve (4); the claim refuses it with outcome `pacing`. The
+ceiling counts every call of the day and never reads `requested_at`, so no
+re-list gets past it. The block adds `read_reserve` (the reserve and both
+backlog ceilings), `backlog_budget_held_jobs`, `live_held_by_budget_jobs` and
+`oldest_held_wait_minutes`.
+
+Call budget (owner ruling, 6 Oct 2026; `20261006060000`): every model call
+(fact reads, AI placement, the ledger reader, document vision) takes one
+reservation from `reserve_context_model_call`, and the day's numbers live only
+in `context_cadence_policy()`: `model_call_cap` 1,000 (was 400),
+`morning_cap` 750 calls before 12:00 Perth (was 300; live reads pause there
+until noon), `attribution_calls_day` 300 for placement (was 60). Vision reads
+only while the day is under the vision policy's `shared_calls_ceiling`, 500
+(was 200). The live reserves did not change (`context_cadence_settings` 100
+and 100, `context_ledger_settings` 100 and 100), so catch-up, backlog and
+ledger reads stop at 900 calls (650 before noon) and live reads keep the rest.
+Readers take the numbers from the policy: the admission, the ledger's
+`context_ledger_budget()`, `context_document_vision_admission()`, the cadence
+judgement and this heartbeat, whose top-level `model_call_cap` and `run_cap`
+are the policy's cap. `context_model_call_reservations.ordinal` is bounded 1 to
+1,000 and the ledger's `calls_per_day` and reserves 0 or 50 to 1,000, so a
+larger budget needs those CHECKs moved in the same migration. The Luna worker
+(secureworks-jarvis) refuses a reservation numbered above its own
+`CONTEXT_DAILY_RUN_CAP` (1,000 since its call budget change), so a raise
+deploys the worker first. `ready_jobs` (at most 400 listed due jobs) is a
+list size, not the call budget.
 
 Catch-up (`20260924220000`): `catchup` reports the one-time catch-up list
 (`context_catchup_jobs`, written by the service-role
@@ -112,6 +134,19 @@ first row, with its `flag` state (`present`, `missing`, `unreadable`) and
 alarms only while the flag is on (missing or unreadable reads as off).
 `quiet` stays the measured fact; the alarm needs `quiet` and no exemption.
 Both lists are in the policy (`retired_sources`, `flag_gated_sources`).
+Lanes health (`20261006050000`) retired `ghl_sms_cache_backfill` (replaced
+by `ghl-message-reconcile`) and added two lists. `handover_sources`: the old
+email path's three writer names (`monitor-inbox`, `monitor-inbox-group`,
+`monitor_inbox`; replaced by `outlook-mail-capture`) carry
+`alarm_exempt: handed_over` and a `handover` object (`replaced_by`,
+`handed_over`) only while `context_email_reader_flags()` reports `reader`,
+`schedule` and `program` all on, exactly when
+`monitor-inbox/reader_handover.ts` stops the old path's evidence rows (on
+since 5 Oct 2026); with any off, missing or unreadable the old path writes
+again and its names alarm like any capture source. `action_log_sources`: a
+writer that logs actions people or agents took rather than capturing
+evidence (`mcp_agent`) is listed with `alarm_exempt: action_log` and never
+alarms. Sources are listed in byte order.
 
 `ghl_capture` (C1d, `20260924133000_context_ghl_message_reconcile.sql`, with
 the retry projection follow-up `20260924210000_context_ghl_retry_status.sql`):
@@ -123,7 +158,16 @@ webhook and last app webhook, unresolved ids (from the receiver's ids-only
 errors in 24 h (from `context_capture_runs`, source `ghl_message_reconcile`).
 The latest run's pending retry coordinate is `reconciler.retry_from`; it stays
 visible until a complete retry read clears it.
-Alarms: `ghl_webhooks_quiet` (no app webhook for 120 business minutes) and
+Alarms: `ghl_webhooks_quiet` (lanes health `20261006050000`, two parts, each
+on its own limit: the `CallCompleted`, `CustomerReplied` and `UserReplied`
+workflow doorbells, policy `doorbell_event_types`, always judged, quiet for
+`doorbells_quiet_business_minutes` (1320, two business days: about 8 arrive a
+business day, but a Saturday with no call is normal) since
+`webhooks.last_doorbell_at`, or since the flag came on when none has arrived;
+and the GHL app events, judged only once the app has sent its first accepted
+event (`webhooks.app_armed`), quiet for `webhooks_quiet_business_minutes`
+(120). It rings when an armed part is quiet past its limit; `quiet_parts`
+names them and `parts` gives each one's since, quiet minutes and limit) and
 `ghl_reconcile_stale` (no finished `succeeded` or `partial` run for 45
 minutes), both only while the lane and the flag are on; `ghl_webhook_misses_high`
 (more than 5 in 24 h); `ghl_auth_missing` (critical: any post refused after

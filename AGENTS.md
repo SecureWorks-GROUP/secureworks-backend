@@ -571,7 +571,8 @@ The heartbeat hit the API statement timeout (57014, 8 s): never call
 `context_extraction_candidates` from it (the pre-K1 body detoasted
 `jobs.scope_json` per event, 15.5 s live); `ready_jobs` is
 `context_ready_jobs_count`, which K1 made a count of the due-rule candidates
-read (still capped at 400). Change both together. A per-row SQL helper must not
+read (still capped at 400 jobs: a list size, not the call budget). Change both
+together. A per-row SQL helper must not
 carry `SET search_path` (blocks inlining; schema-qualify operators instead),
 and a per-row predicate must not `to_jsonb()` a `business_events` or `jobs` row.
 Booking-lane context hangar (`20260921140000`): `context_contact_jobs` counts a
@@ -590,7 +591,16 @@ Extraction cadence (K1, `20260924030000`): when a job is read is decided in
 SQL from the evidence, never by a daily clock. Every number is in
 `context_cadence_policy()` (changed only by migration; `live_since` is the
 first apply time and rows captured before it never wake), except the live
-reserve, which is in `context_cadence_settings`. The one judgement is
+reserve, which is in `context_cadence_settings`. That includes the day's model
+call budget (owner ruling 6 Oct 2026, `20261006060000`: `model_call_cap` 1,000,
+`morning_cap` 750, `attribution_calls_day` 300; the vision ceiling, 500, is in
+`context_document_vision_policy()`). The admission, `context_ledger_budget`, the
+vision admission and the heartbeat read them there; never write a cap number
+into a reader again. Raising the cap also moves the `ordinal` CHECK on
+`context_model_call_reservations` and the `context_ledger_settings` bounds, and
+the Luna worker's `CONTEXT_DAILY_RUN_CAP` (secureworks-jarvis) first, because
+the worker refuses a reservation numbered above it. A replacement of the policy
+keeps `live_since`'s text: guard it with that text masked. The one judgement is
 `context_jobs_cadence(uuid[])`; the claim, candidates, freshness and status
 all read it, so never re-derive "due" elsewhere. The one exception to
 `live_since` is the catch-up list (`20260924220000`, `context_catchup_jobs`,
@@ -613,6 +623,43 @@ Every threshold, including each capture lane's quiet limit in Perth working
 minutes and the 3-run history stall rule, lives only in
 `context_scorecard_policy()`; change it there by migration, never in a caller.
 A row SQL cannot measure stays red with the reason; never make it green in code.
+Its crew and staff lane is a row marked `metadata.recipient_role` crew or staff
+or an outbound text in one of our crew or staff templates, read exactly as the
+classifier's template rule reads one, never L1d's `other` (`20261006034000`).
+W11's guard checks only its comment prefix, which that lane rule keeps: build
+a scorecard change on the live lane body, never on W11's.
+
+Who-to-whom is `metadata.party_roles`, stamped only by the trigger
+`context_party_roles_business_event` from `context_message_party_roles(e)` (v1
+`20261005200000`, v2 `20261006000000`, v3 `20261006034000`); it never places a
+row or writes a ladder-owned key. Rule order: L1d's label or a writer marker
+(copied), then our own crew and staff templates on an outbound text
+(`context_internal_text_role`'s patterns read through `context_event_text`,
+plus the roof report make-safe alert to crew; basis `our_template`), then the
+v1 and v2 key rules. The classifier never calls `context_internal_text_role`
+or another ladder-private helper: the service role previews the classifier,
+and the `20261006034000` case calls it as `service_role` in a fresh session.
+The trigger stamps a row on insert and re-stamps it whenever a writer updates
+`job_id`, `contact_id`, `direction`, `metadata`, `payload`, `event_type` or
+`channel` (a relink, a dedupe mark), always with the live classifier; a row
+nobody writes keeps its stamp until a hand-run re-stamp:
+`scripts/context-party-roles-v3-backfill.sql` is the pattern (a metadata-only write so the trigger re-stamps; the undo
+restores the saved stamp with the trigger off). So a version stamp alone never
+proves a backfill ran; its run key does. A later change to one of
+`20261006034000`'s three functions (classifier, scorecard lane rule, parties
+status block) updates these contract touch points: v1's (`20261005200000`)
+version and comment checks and its re-apply skip; v2's (`20261006000000`)
+version and comment checks; F1b's md5 pin on the parties block
+(`20260924152100`); and the `20261006034000` case's md5 pins, re-apply and
+break proof (a change to a body that case only pins, such as L1d's
+`context_internal_text_role`, stands the pinned body back up in its re-apply,
+as C1d does). That case's, W11's and S-M1's behaviour checks run against
+whatever body is live. S-M1's re-apply (block 12) and v2's re-apply stand back
+up only their own body, from `sm1_parties_status.sql` and
+`v2_message_party_roles.sql` in the `20261006034000` case, whenever the live
+body is not theirs, so a change to one function never breaks a contract about
+another; an earlier contract stands back up the one body it needs that way,
+never by running a later migration's whole down.
 
 A new pg_cron job that writes evidence is scheduled already gated
 (`... WHERE public.automation_lane_enabled('<lane>')`) and added to
@@ -641,7 +688,8 @@ its body.
 
 Luna's answer carries an outcome (`job`, `several`, `undecided`); the last two
 rest the row as `unplaced`, attribution asks are recorded per row with backoff
-and capped at 60 of the 400 daily calls (`20260924060000`). Contract and the
+and capped at the policy's `attribution_calls_day` of the day's calls (60 of 400
+in `20260924060000`; 300 of 1,000 since `20261006060000`). Contract and the
 three-argument call (no outcome argument): `docs/context/a1-attribution-attempts.md`.
 
 ## Placement Keys Are One Rule In Two Languages; Never Index `jobs` On A Revoked Function
@@ -754,7 +802,14 @@ message) and L1e (`20261005170000`: a service-role row naming a job with no
 `writer_job`; step 1b skips a `payload.job_id` its writer declared a guess);
 the contracts undo each and prove the rest byte for byte; with it on, the P4
 rules plus step 1b, the L1d rules and L1e, under which a no-words or automated
-row also keeps its custody job. A retired
+row also keeps its custody job, and the held placement (L1f `20261006020000`,
+widened by L1g `20261006035000`): a row a contact rule or Luna already put on
+a job keeps it on a re-decision instead of going to review or the bucket while
+that job is still one of the customer's live jobs at the message time (or none
+is live, or it is one the review would offer), whatever newer job the customer
+has. A newer job reopens a placed row only through P1b at its insert, which
+moves contact-rule rows to review directly, never through the ladder; a draft
+that goes live later reopens nothing. A retired
 binding never places on either path, and P4 also owns both
 `attribute_context_event_with_luna` overloads, which follow a thread only when
 it is live and bound to one of the row's candidates. P4's rollback deletes
@@ -762,9 +817,9 @@ nothing: it re-keys retired rows (`retired:` prefix) before restoring P1a.
 A later placement slice (P2, P3,
 P-T) replaces the rules body in the 3-argument function, never the frozen
 P1a copy, and must widen the successor md5 lists and the `\if` re-apply
-guards in the L1, P1a, P1b, P4, L1b, L1c, L1d and L1e contracts, and roll L1e,
-L1d, L1c, L1b then P4 back first in L1's break-contract (each down refuses while a later body is
-live), exactly as P4 did for P1a.
+guards in the L1, P1a, P1b, P4, L1b, L1c, L1d, L1e, L1f and L1g contracts, and
+roll L1g, L1f, L1e, L1d, L1c, L1b then P4 back first in L1's break-contract
+(each down refuses while a later body is live), exactly as P4 did for P1a.
 
 The writer check reads `metadata.written_as`, which the insert trigger now
 stamps BEFORE the ladder as well as after: a writer-supplied value never
@@ -774,7 +829,10 @@ which is why email never matched a customer before the flag. P1a's
 two-argument `context_contact_jobs_at` is unchanged and still serves the Luna
 guard and P1b; the rules use the keyed four-argument overload. Preview a
 stored row with `context_attribution_preview(event_id, rules_on)` (writes
-nothing) before trusting a rule change. Contract and named rows:
+nothing) before trusting a rule change, and judge a placement by the job as
+it stood at the message time, never by its status today: history loads place
+old messages on jobs archived since (L1g evidence:
+`docs/evidence/context-l1g-held-live-job-2026-10-06.md`). Contract and named rows:
 `supabase/tests/migration-contracts/20261002110000_context_unlinked_rules/`.
 
 ## Migrations Apply Before Edge Deploys

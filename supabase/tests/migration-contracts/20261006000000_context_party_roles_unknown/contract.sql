@@ -51,8 +51,12 @@ END $$;
 CREATE FUNCTION pg_temp.p2_is(what text,e public.business_events,p_sender text,p_recipient text,p_basis text,p_audience text) RETURNS void
 LANGUAGE plpgsql AS $$
 DECLARE r jsonb:=e.metadata->'party_roles';
+ -- A registered successor (v3, 20261006034000) keeps every v2 decision these
+ -- fixtures make and stamps its own version; it proves that in its own contract.
+ v text:=CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+  LIKE 'Party roles v3 (20261006034000):%' THEN 'party_roles_v3' ELSE 'party_roles_v2' END;
 BEGIN
- IF r IS NULL OR r->>'version' IS DISTINCT FROM 'party_roles_v2' OR r->>'sender_role' IS DISTINCT FROM p_sender
+ IF r IS NULL OR r->>'version' IS DISTINCT FROM v OR r->>'sender_role' IS DISTINCT FROM p_sender
   OR r->>'recipient_role' IS DISTINCT FROM p_recipient OR r->>'basis' IS DISTINCT FROM p_basis OR r->>'audience' IS DISTINCT FROM p_audience
   OR (p_basis<>'conflict' AND r ? 'conflicting_roles')
  THEN RAISE EXCEPTION 'party roles v2: % must read % to % (basis %, audience %), got %',what,p_sender,p_recipient,p_basis,p_audience,r; END IF;
@@ -213,7 +217,10 @@ BEGIN
   RAISE EXCEPTION 'party roles v2: the party-role trigger changed'; END IF;
  FOREACH f IN ARRAY ARRAY['public.context_party_supplier_key(text,text)','public.context_party_key_roles(text,text)',
   'public.context_party_contact_roles(text)','public.context_message_party_roles(public.business_events)'] LOOP
-  IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'Party roles v2 (20261006000000):%' THEN RAISE EXCEPTION 'party roles v2: % is not marked',f; END IF;
+  IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'Party roles v2 (20261006000000):%'
+   AND NOT (f='public.context_message_party_roles(public.business_events)'
+    AND coalesce(obj_description(f::regprocedure,'pg_proc'),'') LIKE 'Party roles v3 (20261006034000):%')
+  THEN RAISE EXCEPTION 'party roles v2: % is not marked',f; END IF;
   FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
    IF has_function_privilege(r,f,'EXECUTE') THEN RAISE EXCEPTION 'party roles v2: % can call private %',r,f; END IF;
   END LOOP;
@@ -224,7 +231,16 @@ BEGIN
  THEN RAISE EXCEPTION 'party roles v2: an index is missing'; END IF;
 END $$;
 
--- Re-apply is a no-op.
+-- Re-apply is a no-op. A registered successor (v3, 20261006034000) replaces
+-- the classifier; whenever the live body is not v2's, stand v2's classifier
+-- back up first, inside this rolled-back block, and nothing else (a later
+-- change to any other function never reaches this check).
+BEGIN;
+SELECT md5(prosrc)<>'8d5bb9cfa80a631ee39497282e54f967' AS p2_classifier_moved
+FROM pg_proc WHERE oid='public.context_message_party_roles(public.business_events)'::regprocedure \gset
+\if :p2_classifier_moved
+\ir ../20261006034000_context_party_roles_health/v2_message_party_roles.sql
+\endif
 CREATE TEMP TABLE p2_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'
   AND p.proname IN ('context_party_supplier_key','context_party_key_roles','context_party_contact_roles','context_message_party_roles',
@@ -238,4 +254,4 @@ BEGIN
  THEN RAISE EXCEPTION 'party roles v2: re-apply changed a body or comment'; END IF;
  IF (SELECT count(*) FROM pg_trigger WHERE tgname='context_party_roles_business_event')<>1 THEN RAISE EXCEPTION 'party roles v2: re-apply duplicated the trigger'; END IF;
 END $$;
-DROP TABLE p2_before;
+ROLLBACK;

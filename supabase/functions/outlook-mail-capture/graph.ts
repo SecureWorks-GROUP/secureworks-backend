@@ -6,6 +6,14 @@
 // Every read asks for immutable ids and plain-text bodies. Errors are thrown
 // as GraphReadError with a code (graph_<http status>, graph_unreachable,
 // graph_bad_json); never the response text, which can carry mail content.
+//
+// Group post attachments (6 Oct 2026): Microsoft refuses a post's own
+// attachments address (/posts/{id}/attachments, and its /$value) to an
+// app-only login, so no group mailbox file was ever saved. A post's
+// attachments are read with the post itself, $expand=attachments, the route
+// monitor-ses-makesafes reads ses@ through; each file's bytes come back in
+// that one read (contentBytes). A file Microsoft sends without its bytes
+// cannot be fetched any other way with this login (attachment_no_content).
 
 import type {
   OutlookAttachmentMeta,
@@ -48,9 +56,49 @@ export interface MessagePage {
   next: string | null;
 }
 
+/** The body, refused with tooLargeCode once it passes maxBytes (declared or read). */
+async function readCapped(
+  resp: Response,
+  maxBytes: number,
+  tooLargeCode: string,
+): Promise<Uint8Array> {
+  const declared = Number(resp.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await resp.body?.cancel().catch(() => {});
+    throw new GraphReadError(tooLargeCode, resp.status);
+  }
+  if (!resp.body) return new Uint8Array(0);
+  const reader = resp.body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch {
+      throw new GraphReadError("graph_unreachable", resp.status);
+    }
+    if (chunk.done) break;
+    total += chunk.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new GraphReadError(tooLargeCode, resp.status);
+    }
+    parts.push(chunk.value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.byteLength;
+  }
+  return out;
+}
+
 async function getJson(
   deps: GraphDeps,
   url: string,
+  cap?: { maxBytes: number; code: string },
 ): Promise<Record<string, unknown>> {
   if (!url.startsWith(GRAPH + "/")) {
     throw new GraphReadError("graph_bad_url", null);
@@ -70,6 +118,14 @@ async function getJson(
   if (!resp.ok) {
     await resp.body?.cancel().catch(() => {});
     throw new GraphReadError(`graph_${resp.status}`, resp.status);
+  }
+  if (cap) {
+    const raw = await readCapped(resp, cap.maxBytes, cap.code);
+    try {
+      return JSON.parse(new TextDecoder().decode(raw));
+    } catch {
+      throw new GraphReadError("graph_bad_json", resp.status);
+    }
   }
   try {
     return await resp.json();
@@ -380,54 +436,119 @@ export type AttachmentHome =
   | { kind: "message"; mailbox: string; messageId: string }
   | { kind: "post"; groupId: string; threadId: string; postId: string };
 
-function attachmentsBase(home: AttachmentHome): string {
-  return home.kind === "message"
-    ? `${GRAPH}/users/${enc(home.mailbox)}/messages/${
-      enc(home.messageId)
-    }/attachments`
-    : `${GRAPH}/groups/${enc(home.groupId)}/threads/${
-      enc(home.threadId)
-    }/posts/${enc(home.postId)}/attachments`;
+/**
+ * An attachment as listed. For a group post the file's bytes come with the
+ * listing (base64 in content), or content is null when Microsoft left them out.
+ */
+export type ListedAttachment = OutlookAttachmentMeta & {
+  content?: string | null;
+};
+
+/**
+ * The most one group post read (the post with every attachment's bytes) may
+ * hold: the base64 of the 30 MB the reader stores per email. A bigger post is
+ * refused (attachment_post_too_large) before it is all held in memory, so one
+ * large post can never take the worker down.
+ */
+export const POST_READ_MAX_BYTES = 40 * 1024 * 1024;
+
+function attachmentMeta(a: Record<string, unknown>): ListedAttachment {
+  const t = String(a["@odata.type"] ?? "").toLowerCase();
+  return {
+    id: String(a.id ?? ""),
+    name: str(a.name),
+    contentType: str(a.contentType),
+    size: typeof a.size === "number" ? a.size : null,
+    isInline: a.isInline === true,
+    kind: t.endsWith("itemattachment")
+      ? "item"
+      : t.endsWith("referenceattachment")
+      ? "reference"
+      : "file",
+  };
 }
 
-/** Attachment names, types and sizes (no bytes). */
+/**
+ * Attachment names, types and sizes. A user message's list carries no bytes
+ * (attachmentBytes fetches each file); a group post is read once with its
+ * attachments expanded, bytes included, because its attachments address is
+ * refused to this login.
+ */
 export async function listAttachments(
   deps: GraphDeps,
   home: AttachmentHome,
-): Promise<OutlookAttachmentMeta[]> {
+): Promise<ListedAttachment[]> {
+  if (home.kind === "post") {
+    const p = await getJson(
+      deps,
+      `${GRAPH}/groups/${enc(home.groupId)}/threads/${
+        enc(home.threadId)
+      }/posts/${enc(home.postId)}?$expand=attachments`,
+      { maxBytes: POST_READ_MAX_BYTES, code: "attachment_post_too_large" },
+    );
+    return (Array.isArray(p.attachments) ? p.attachments : []).map(
+      (a: Record<string, unknown>) => ({
+        ...attachmentMeta(a),
+        content: typeof a.contentBytes === "string" && a.contentBytes !== ""
+          ? a.contentBytes
+          : null,
+      }),
+    ).filter((a: ListedAttachment) => a.id);
+  }
   const r = await getJson(
     deps,
-    `${attachmentsBase(home)}?$select=id,name,contentType,size,isInline`,
+    `${GRAPH}/users/${enc(home.mailbox)}/messages/${
+      enc(home.messageId)
+    }/attachments?$select=id,name,contentType,size,isInline`,
   );
-  return (Array.isArray(r.value) ? r.value : []).map(
-    (a: Record<string, unknown>) => {
-      const t = String(a["@odata.type"] ?? "").toLowerCase();
-      return {
-        id: String(a.id ?? ""),
-        name: str(a.name),
-        contentType: str(a.contentType),
-        size: typeof a.size === "number" ? a.size : null,
-        isInline: a.isInline === true,
-        kind: t.endsWith("itemattachment")
-          ? "item"
-          : t.endsWith("referenceattachment")
-          ? "reference"
-          : "file",
-      } as OutlookAttachmentMeta;
-    },
-  ).filter((a: OutlookAttachmentMeta) => a.id);
+  return (Array.isArray(r.value) ? r.value : []).map(attachmentMeta).filter((
+    a: ListedAttachment,
+  ) => a.id);
 }
 
-/** One file attachment's raw bytes, refused past maxBytes. */
-export function attachmentBytes(
+/** Base64 to bytes, refused past maxBytes before decoding. */
+function decodeContent(content: string, maxBytes: number): Uint8Array {
+  const clean = content.replace(/\s+/g, "");
+  const pad = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+  if (Math.floor(clean.length / 4) * 3 - pad > maxBytes) {
+    throw new GraphReadError("attachment_too_large", null);
+  }
+  let bin: string;
+  try {
+    bin = atob(clean);
+  } catch {
+    throw new GraphReadError("attachment_bad_content", null);
+  }
+  if (bin.length > maxBytes) {
+    throw new GraphReadError("attachment_too_large", null);
+  }
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * One file attachment's raw bytes, refused past maxBytes. A user message's
+ * file is fetched (its /$value); a group post's came with the listing, and one
+ * Microsoft sent without bytes is refused (attachment_no_content).
+ */
+export async function attachmentBytes(
   deps: GraphDeps,
   home: AttachmentHome,
-  attachmentId: string,
+  attachment: ListedAttachment,
   maxBytes: number,
 ): Promise<Uint8Array> {
-  return getBytes(
+  if (home.kind === "post") {
+    if (!attachment.content) {
+      throw new GraphReadError("attachment_no_content", null);
+    }
+    return decodeContent(attachment.content, maxBytes);
+  }
+  return await getBytes(
     deps,
-    `${attachmentsBase(home)}/${enc(attachmentId)}/$value`,
+    `${GRAPH}/users/${enc(home.mailbox)}/messages/${
+      enc(home.messageId)
+    }/attachments/${enc(attachment.id)}/$value`,
     maxBytes,
   );
 }

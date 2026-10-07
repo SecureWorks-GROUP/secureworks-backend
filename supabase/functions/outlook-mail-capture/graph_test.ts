@@ -92,13 +92,19 @@ Deno.test("every read is a GET to Graph asking for immutable ids and text bodies
     messageId: "M",
   });
   assertEquals(atts[0].kind, "item");
+  await graph.listAttachments(deps, {
+    kind: "post",
+    groupId: "G",
+    threadId: "T",
+    postId: "P",
+  });
   await graph.attachmentBytes(
     deps,
-    { kind: "post", groupId: "G", threadId: "T", postId: "P" },
-    "a",
+    { kind: "message", mailbox: "n@secureworkswa.com.au", messageId: "M" },
+    { id: "a" },
     10,
   );
-  assert(calls.length >= 14);
+  assert(calls.length >= 15);
   for (const c of calls) {
     assertEquals(c.method, "GET");
     assert(c.url.startsWith("https://graph.microsoft.com/v1.0/"), c.url);
@@ -157,14 +163,14 @@ Deno.test("an attachment larger than the limit is refused before or after downlo
     messageId: "M",
   };
   const e = await assertRejects(() =>
-    graph.attachmentBytes(big.deps, home, "a", 10)
+    graph.attachmentBytes(big.deps, home, { id: "a" }, 10)
   );
   assertEquals((e as graph.GraphReadError).code, "attachment_too_large");
   const lying = recorder(() =>
     new Response(new Uint8Array(20), { status: 200 })
   );
   const e2 = await assertRejects(() =>
-    graph.attachmentBytes(lying.deps, home, "a", 10)
+    graph.attachmentBytes(lying.deps, home, { id: "a" }, 10)
   );
   assertEquals((e2 as graph.GraphReadError).code, "attachment_too_large");
 });
@@ -204,4 +210,132 @@ Deno.test("the token request is the only POST, to Microsoft's login endpoint", a
   const missing = graph.graphTokenSource(() => undefined, fetch);
   const e = await assertRejects(() => missing());
   assertEquals((e as graph.GraphReadError).code, "graph_credentials_missing");
+});
+
+// Lanes health (6 Oct 2026): Microsoft refuses a group post's own attachments
+// address to an app-only login, so finance@, patios@, fencing@ and ses@ saved
+// no file at all. The post is read with $expand=attachments instead (the route
+// monitor-ses-makesafes already uses for ses@), and the file bytes come with it.
+const POST = {
+  kind: "post" as const,
+  groupId: "G",
+  threadId: "T",
+  postId: "P",
+};
+const b64 = (bytes: number[]) => btoa(String.fromCharCode(...bytes));
+
+function groupGraph(attachments: unknown[]) {
+  return recorder((url) => {
+    const path = new URL(url).pathname;
+    // What Microsoft does today for an app login: the post's own attachments
+    // address is refused.
+    if (/\/posts\/[^/]+\/attachments/.test(path)) {
+      return new Response("refused", { status: 403 });
+    }
+    if (path.endsWith("/groups/G/threads/T/posts/P")) {
+      return ok({ id: "P", attachments });
+    }
+    return new Response("unexpected", { status: 404 });
+  });
+}
+
+Deno.test("a group post's attachments are read with the post through $expand=attachments, never the refused attachments address", async () => {
+  const { deps, calls } = groupGraph([
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      id: "A1",
+      name: "invoice.pdf",
+      contentType: "application/pdf",
+      size: 3,
+      isInline: false,
+      contentBytes: b64([37, 80, 68]),
+    },
+    {
+      "@odata.type": "#microsoft.graph.itemAttachment",
+      id: "A2",
+      name: "fwd",
+      size: 10,
+    },
+  ]);
+  const listed = await graph.listAttachments(deps, POST);
+  assertEquals(listed.map((a) => [a.id, a.kind, a.name]), [
+    ["A1", "file", "invoice.pdf"],
+    ["A2", "item", "fwd"],
+  ]);
+  const bytes = await graph.attachmentBytes(deps, POST, listed[0], 10);
+  assertEquals([...bytes], [37, 80, 68]);
+  assertEquals(calls.length, 1); // one read of the post; the bytes came with it
+  assertEquals(
+    decodeURIComponent(calls[0].url),
+    "https://graph.microsoft.com/v1.0/groups/G/threads/T/posts/P?$expand=attachments",
+  );
+  assertEquals(calls[0].method, "GET");
+  assert(calls[0].prefer?.includes('IdType="ImmutableId"'));
+  for (const c of calls) {
+    assert(!/\/posts\/[^/?]+\/attachments/.test(c.url), c.url);
+  }
+});
+
+Deno.test("a group attachment sent without its bytes, or larger than the limit, is refused with a code; nothing is fetched again", async () => {
+  const { deps, calls } = groupGraph([
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      id: "BIG",
+      name: "plans.pdf",
+      contentType: "application/pdf",
+      size: 9_000_000,
+      isInline: false,
+    },
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      id: "TWENTY",
+      name: "photo.jpg",
+      contentType: "image/jpeg",
+      size: 20,
+      isInline: false,
+      contentBytes: b64(Array.from({ length: 20 }, (_, i) => i)),
+    },
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      id: "BAD",
+      name: "broken.pdf",
+      contentType: "application/pdf",
+      size: 3,
+      isInline: false,
+      contentBytes: "%%% not base64 %%%",
+    },
+  ]);
+  const [big, twenty, bad] = await graph.listAttachments(deps, POST);
+  const e1 = await assertRejects(() =>
+    graph.attachmentBytes(deps, POST, big, 15 * 1024 * 1024)
+  );
+  assertEquals((e1 as graph.GraphReadError).code, "attachment_no_content");
+  const e2 = await assertRejects(() =>
+    graph.attachmentBytes(deps, POST, twenty, 10)
+  );
+  assertEquals((e2 as graph.GraphReadError).code, "attachment_too_large");
+  const e3 = await assertRejects(() =>
+    graph.attachmentBytes(deps, POST, bad, 10)
+  );
+  assertEquals((e3 as graph.GraphReadError).code, "attachment_bad_content");
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("a group post read larger than the read limit is refused with a code, before it is all held in memory", async () => {
+  let sent = 0;
+  const { deps } = recorder(() =>
+    new Response(
+      new ReadableStream({
+        pull(c) {
+          // 60 MB in 1 MB chunks, no content-length header.
+          if (sent++ >= 60) return c.close();
+          c.enqueue(new Uint8Array(1024 * 1024).fill(97));
+        },
+      }),
+      { status: 200 },
+    )
+  );
+  const e = await assertRejects(() => graph.listAttachments(deps, POST));
+  assertEquals((e as graph.GraphReadError).code, "attachment_post_too_large");
+  assert(sent < 60, `read ${sent} MB before refusing`);
 });

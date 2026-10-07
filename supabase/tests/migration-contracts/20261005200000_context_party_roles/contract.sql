@@ -52,9 +52,12 @@ END $$;
 CREATE FUNCTION pg_temp.pr_is(what text,e public.business_events,p_sender text,p_recipient text,p_basis text,p_audience text) RETURNS void
 LANGUAGE plpgsql AS $$
 DECLARE r jsonb:=e.metadata->'party_roles';
- -- A registered successor (v2, 20261006000000) keeps every v1 decision and
- -- stamps its own version; it proves that in its own contract.
+ -- A registered successor (v2, 20261006000000; v3, 20261006034000) keeps
+ -- every v1 decision these fixtures make and stamps its own version; each
+ -- proves that in its own contract.
  v text:=CASE WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
+  LIKE 'Party roles v3 (20261006034000):%' THEN 'party_roles_v3'
+  WHEN coalesce(obj_description('public.context_message_party_roles(public.business_events)'::regprocedure,'pg_proc'),'')
   LIKE 'Party roles v2 (20261006000000):%' THEN 'party_roles_v2' ELSE 'party_roles_v1' END;
 BEGIN
  IF r IS NULL OR r->>'version' IS DISTINCT FROM v OR r->>'sender_role' IS DISTINCT FROM p_sender
@@ -216,7 +219,8 @@ BEGIN
   'public.context_message_party_roles(public.business_events)','public.context_stamp_party_roles()'] LOOP
   IF coalesce(obj_description(f::regprocedure,'pg_proc'),'') NOT LIKE 'Party roles (20261005200000):%'
    AND NOT (f='public.context_message_party_roles(public.business_events)'
-    AND coalesce(obj_description(f::regprocedure,'pg_proc'),'') LIKE 'Party roles v2 (20261006000000):%')
+    AND (coalesce(obj_description(f::regprocedure,'pg_proc'),'') LIKE 'Party roles v2 (20261006000000):%'
+     OR coalesce(obj_description(f::regprocedure,'pg_proc'),'') LIKE 'Party roles v3 (20261006034000):%'))
   THEN RAISE EXCEPTION 'party roles: % is not marked',f; END IF;
   FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
    IF has_function_privilege(r,f,'EXECUTE') THEN RAISE EXCEPTION 'party roles: % can call private %',r,f; END IF;
@@ -229,11 +233,14 @@ BEGIN
  THEN RAISE EXCEPTION 'party roles: an index is missing'; END IF;
 END $$;
 
--- Re-apply is a no-op. While the registered successor (v2, 20261006000000)
--- is live this migration's guard refuses to re-apply over v2's classifier,
--- so the re-apply is skipped here and v2's contract proves its own re-apply.
+-- Re-apply is a no-op. While a registered successor (v2, 20261006000000, or
+-- v3, 20261006034000) is live this migration's guard refuses to re-apply over
+-- its classifier, so the re-apply is skipped here and each successor's
+-- contract proves its own re-apply.
 SELECT coalesce(obj_description(to_regprocedure('public.context_message_party_roles(public.business_events)'),'pg_proc'),'')
- LIKE 'Party roles v2 (20261006000000):%' AS pr_v2_live \gset
+ LIKE 'Party roles v2 (20261006000000):%'
+ OR coalesce(obj_description(to_regprocedure('public.context_message_party_roles(public.business_events)'),'pg_proc'),'')
+ LIKE 'Party roles v3 (20261006034000):%' AS pr_v2_live \gset
 \if :pr_v2_live
 \else
 CREATE TEMP TABLE pr_before AS SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5, obj_description(p.oid,'pg_proc') AS note

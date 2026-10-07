@@ -154,7 +154,9 @@ BEGIN
  THEN RAISE EXCEPTION 'f1b transcribe-call must be listed, measured quiet and exempt as retired: %',src; END IF;
  IF snap->'alarms' @> '[{"source":"transcribe-call"}]'::jsonb OR public.context_pipeline_status()->'alarms' @> '[{"source":"transcribe-call"}]'::jsonb
  THEN RAISE EXCEPTION 'f1b transcribe-call alarmed after retirement %',snap->'alarms'; END IF;
- IF snap#>'{policy,retired_sources}'<>'[{"source":"transcribe-call","replaced_by":"ghl-call-transcript"}]'::jsonb
+ -- Containment, not equality: lanes health (20261006050000) retires more
+ -- writers in the same list and checks them in its own contract.
+ IF NOT snap#>'{policy,retired_sources}' @> '[{"source":"transcribe-call","replaced_by":"ghl-call-transcript"}]'::jsonb
  THEN RAISE EXCEPTION 'f1b retired sources not published %',snap->'policy'; END IF;
 END $$;
 ROLLBACK;
@@ -248,7 +250,10 @@ BEGIN
  PERFORM pg_temp.f1b_rows('f1b_backfill_only',quiet_at-interval '14 days',quiet_at,interval '10 minutes','backfill');
  old:=pg_temp.f1_context_source_freshness();
  snap:=public.context_source_freshness();
- IF snap->'policy'<>(old->'policy') OR (snap->'policy')-'retired_sources'-'flag_gated_sources'
+ -- Lanes health (20261006050000) adds two more lists, action_log_sources
+ -- and handover_sources (with its handover_flags note), checked by its own
+ -- contract.
+ IF snap->'policy'<>(old->'policy') OR (snap->'policy')-'retired_sources'-'flag_gated_sources'-'action_log_sources'-'handover_sources'-'handover_flags'
     <>'{"timezone":"Australia/Perth","business_days":"Mon-Sat","business_hours":"07:00-18:00","quiet_business_minutes":120,"normally_active_min_rows_per_business_hour":2.5,"rate_window_days":14,"lookback_days":60,"ignored_capture_modes":["backfill","relink"]}'::jsonb
  THEN RAISE EXCEPTION 'f1b policy changed beyond the two lists %',snap->'policy'; END IF;
  FOR o IN SELECT value FROM jsonb_array_elements(old->'sources') LOOP
@@ -412,16 +417,22 @@ DECLARE x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- F1's core body, or F-ACT's (same owner, 20260924201000: one key added,
-  -- checked by its own contract).
+  -- checked by its own contract), or the call budget's (20261006060000: the
+  -- cap read from the policy, checked by its own contract).
   ('public.context_core_status()',CASE WHEN to_regprocedure('public.context_actor_missing_status()') IS NULL
-    THEN '3df30c5ccf6db32c4782ba7859591b86' ELSE 'e26a2d4387c9f642f473aa16caf4ab98' END),
+    THEN '3df30c5ccf6db32c4782ba7859591b86'
+    WHEN position('context_cadence_policy' IN (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')))>0
+    THEN '2b6b2c54daeae381cdeff7802d72df81' ELSE 'e26a2d4387c9f642f473aa16caf4ab98' END),
   ('public.context_business_minutes(timestamptz,timestamptz)','510dbec36291c25aa1887ade89e2ca4e'),
   ('public.context_in_business_hours(timestamptz)','70164e9d1d6aa636c4e9d54357396f16'),
   ('public.context_booking_capture_status()','155104bfb08b8b3c2f98bdec089d4ee4'),
   -- The F1 stub, or sites S-M1's block (20261002120000, checked by its own
-  -- contract) once that later migration is in the stack.
+  -- contract) once that later migration is in the stack, or the party roles
+  -- health fix of that block (20261006034000, checked by its own contract).
   ('public.context_parties_status()',CASE WHEN to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL
-    THEN '155104bfb08b8b3c2f98bdec089d4ee4' ELSE '98ca15b42682e9210ac4e6fe8d74ccd3' END)) AS t(sig,md5) LOOP
+    THEN '155104bfb08b8b3c2f98bdec089d4ee4'
+    WHEN coalesce(obj_description(to_regprocedure('public.context_parties_status()'),'pg_proc'),'') LIKE '%Since 20261006034000%'
+    THEN '5f01b621c22b3cb0840bf04eb32a338f' ELSE '98ca15b42682e9210ac4e6fe8d74ccd3' END)) AS t(sig,md5) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(x.sig)) IS DISTINCT FROM x.md5 THEN RAISE EXCEPTION 'f1b moved %',x.sig; END IF;
  END LOOP;
  IF to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL

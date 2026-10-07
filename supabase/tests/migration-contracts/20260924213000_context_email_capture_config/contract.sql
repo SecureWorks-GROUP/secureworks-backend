@@ -377,6 +377,13 @@ END $$;
 BEGIN;
 UPDATE public.feature_flags SET enabled=true WHERE flag_name='email_capture_v2';
 SELECT public.set_monitored_mailbox('ses@secureworkswa.com.au',false,NULL,'owner paused ses@','workflow:test');
+-- Lanes health (20261006050000) replaces EM1's status_at body, which EM1's
+-- guard pins; stand EM1's body back up inside this rolled-back block.
+SELECT md5(prosrc)<>'78aefd4a54766e3e4967373e46fb934a' AS em1_status_moved
+FROM pg_proc WHERE oid='public.context_email_capture_status_at(timestamptz)'::regprocedure \gset
+\if :em1_status_moved
+\ir ../../../rollbacks/20261006050000_context_lanes_health_down.sql
+\endif
 \ir ../../../migrations/20260924213000_context_email_capture_config.sql
 DO $$
 BEGIN

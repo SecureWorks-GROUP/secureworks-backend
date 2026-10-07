@@ -48,6 +48,14 @@ BEGIN
 END $$;
 
 BEGIN;
+-- The call budget (20261006060000) made the core's model_call_cap and run_cap
+-- the policy's cap (1,000 since 6 Oct 2026, proved by its own contract). The
+-- comparisons below are against the 17 Sep body, so this transaction pins the
+-- policy's numbers to that body's 400 (rolled back below).
+DO $pin$ BEGIN
+ EXECUTE format('CREATE OR REPLACE FUNCTION public.context_cadence_policy() RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $b$ SELECT %L::jsonb $b$',
+  public.context_cadence_policy()||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb);
+END $pin$;
 
 -- 1. Grants: no PUBLIC, anon or authenticated execute on any callable context_*
 -- function or on record_capture_run; service_role holds every F1 function.
@@ -428,10 +436,13 @@ BEGIN
  THEN RAISE EXCEPTION 'f1 9-arg persist_luna_context_revision is neither the F1 nor approved catch-up body'; END IF;
  -- The core body is the production heartbeat body with exactly one line
  -- changed: the ready_jobs read.
- IF md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+ IF md5(replace(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
     ' ready:=public.context_ready_jobs_count(400);',' SELECT count(*) INTO ready FROM public.context_extraction_candidates(400);'),
     -- F-ACT's one added key (20260924201000), when that migration has run.
-    E',\n  ''actor_missing'',public.context_actor_missing_status());',');'))
+    E',\n  ''actor_missing'',public.context_actor_missing_status());',');'),
+    -- The call budget's two cap reads (20261006060000), when that migration has run.
+    '''run_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''run_cap'',400,'),
+    '''model_call_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''model_call_cap'',400,'))
     IS DISTINCT FROM '0fa6842cebf236e47b608a520c6c9fd1'
  THEN RAISE EXCEPTION 'f1 context_core_status() differs from the production heartbeat body beyond the ready_jobs read'; END IF;
  IF (SELECT count(*) FROM pg_proc WHERE proname='persist_luna_context_revision' AND pronamespace='public'::regnamespace)<>2

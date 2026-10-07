@@ -5,7 +5,12 @@
 -- fixture jobs behind, so tier assertions look only at BL- jobs and at count
 -- deltas.
 
-CREATE TABLE pg_temp.bl_base_policy AS SELECT public.context_cadence_policy() AS p;
+-- The call budget (20261006060000) raised the day's cap, the morning cap and
+-- attribution's share (1,000, 750, 300; proved by its own contract). These
+-- sections run at the numbers they were written for, so every
+-- pg_temp.bl_policy() call pins K1's 400, 300 and 60.
+CREATE TABLE pg_temp.bl_base_policy AS SELECT public.context_cadence_policy()
+ ||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb AS p;
 
 CREATE FUNCTION pg_temp.bl_policy() RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
@@ -105,11 +110,16 @@ ROLLBACK;
 -- the cadence, candidates, batch, flags, done marker and status bodies. The
 -- cadence and status also accept the backlog ceiling's bodies (20261005233000),
 -- which the registered stack applies before this contract runs.
+-- Once the call budget (20261006060000, its comment names it) is in the
+-- stack, the policy is the pre-image with that migration's three numbers.
 DO $$
 DECLARE p jsonb:=public.context_cadence_policy(); x record; live text;
+ budget boolean:=coalesce(obj_description('public.context_cadence_policy()'::regprocedure,'pg_proc'),'') LIKE '%20261006060000%';
 BEGIN
  IF p IS DISTINCT FROM (SELECT y.p FROM public.backlog_contract_policy_preimage y)
-  OR (p->>'model_call_cap')::int<>400 OR (p->>'morning_cap')::int<>300 OR (p->>'runs_per_job_day')::int<>6
+   ||(CASE WHEN budget THEN '{"model_call_cap":1000,"morning_cap":750,"attribution_calls_day":300}'::jsonb ELSE '{}'::jsonb END)
+  OR (p->>'model_call_cap')::int<>(CASE WHEN budget THEN 1000 ELSE 400 END)
+  OR (p->>'morning_cap')::int<>(CASE WHEN budget THEN 750 ELSE 300 END) OR (p->>'runs_per_job_day')::int<>6
  THEN RAISE EXCEPTION 'backlog moved the policy %',p; END IF;
  FOR x IN SELECT * FROM (VALUES
   ('public.context_catchup_request(boolean)','b12a7e9637f87d4345c03e4a604a4022'),

@@ -5,7 +5,13 @@
 -- ago is live waking evidence. The day's calls are set exactly with
 -- pg_temp.bc_calls, whatever earlier contracts left behind.
 
-CREATE TABLE pg_temp.bc_base_policy AS SELECT public.context_cadence_policy() AS p;
+-- The call budget (20261006060000) raised the day's cap, the morning cap and
+-- attribution's share (1,000, 750, 300; proved by its own contract, which
+-- also proves these ceilings at 900 and 650). These sections prove the
+-- ceiling at the numbers they were written for, so every pg_temp.bc_policy()
+-- call pins K1's 400, 300 and 60.
+CREATE TABLE pg_temp.bc_base_policy AS SELECT public.context_cadence_policy()
+ ||'{"model_call_cap":400,"morning_cap":300,"attribution_calls_day":60}'::jsonb AS p;
 
 CREATE FUNCTION pg_temp.bc_policy(p_over jsonb DEFAULT '{}'::jsonb) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
@@ -77,6 +83,8 @@ CREATE FUNCTION pg_temp.bc_midnight() RETURNS timestamptz LANGUAGE sql AS $$
 -- cap are untouched.
 DO $$
 DECLARE f regprocedure; s record; p jsonb:=public.context_cadence_policy();
+ -- the call budget (20261006060000, its comment names it) moves three numbers
+ budget boolean:=coalesce(obj_description('public.context_cadence_policy()'::regprocedure,'pg_proc'),'') LIKE '%20261006060000%';
 BEGIN
  SELECT * INTO s FROM public.context_cadence_settings;
  IF (SELECT count(*) FROM public.context_cadence_settings)<>1 OR s.live_reserve_calls_day<>100 OR s.live_reserve_calls_morning<>100 OR s.live_reserve_reads_per_job<>2
@@ -92,7 +100,9 @@ BEGIN
   THEN RAISE EXCEPTION 'backlog ceiling shape: % not security definer with a fixed search_path',f; END IF;
  END LOOP;
  IF p IS DISTINCT FROM (SELECT y.p FROM public.ceiling_contract_policy_preimage y)
-  OR (p->>'model_call_cap')::int<>400 OR (p->>'morning_cap')::int<>300 OR (p->>'runs_per_job_day')::int<>6
+   ||(CASE WHEN budget THEN '{"model_call_cap":1000,"morning_cap":750,"attribution_calls_day":300}'::jsonb ELSE '{}'::jsonb END)
+  OR (p->>'model_call_cap')::int<>(CASE WHEN budget THEN 1000 ELSE 400 END)
+  OR (p->>'morning_cap')::int<>(CASE WHEN budget THEN 750 ELSE 300 END) OR (p->>'runs_per_job_day')::int<>6
  THEN RAISE EXCEPTION 'backlog ceiling shape: policy moved %',p; END IF;
 END $$;
 
