@@ -85,6 +85,27 @@ BEGIN
  THEN RAISE EXCEPTION 'deep contract: lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;
 END $$;
 
+-- 2a. A source's live floor: its first poll window, or a whole nightly sweep
+-- that ran after the poll began and reaches further back; a sweep that ended
+-- before the poll began leaves a gap and never counts.
+BEGIN;
+DO $$
+DECLARE t0 timestamptz:=date_trunc('second',now());
+BEGIN
+ IF public.context_email_deep_live_floor('dhfloor') IS NOT NULL THEN RAISE EXCEPTION 'deep contract: a never-polled source has a floor'; END IF;
+ INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,finished_at,window_from,counts)
+ VALUES ('outlook_dhfloor','succeeded',t0-interval '3 days',t0-interval '3 days',t0-interval '3 days',t0-interval '3 days'-interval '30 minutes'+interval '0.4 seconds','{}'),
+        ('outlook_dhfloor','running',t0-interval '9 days',t0-interval '9 days',NULL,t0-interval '9 days','{}'),
+        ('outlook_sweep_dhfloor','succeeded',t0-interval '4 days',t0-interval '4 days',t0-interval '4 days',t0-interval '6 days','{}');
+ IF public.context_email_deep_live_floor('dhfloor')<>t0-interval '3 days'-interval '30 minutes'+interval '1 second'
+ THEN RAISE EXCEPTION 'deep contract: floor from the first poll %',public.context_email_deep_live_floor('dhfloor'); END IF;
+ INSERT INTO public.context_capture_runs(source,status,started_at,updated_at,finished_at,window_from,counts)
+ VALUES ('outlook_sweep_dhfloor','succeeded',t0-interval '2 days',t0-interval '2 days',t0-interval '2 days',t0-interval '4 days','{}');
+ IF public.context_email_deep_live_floor('dhfloor')<>t0-interval '4 days'
+ THEN RAISE EXCEPTION 'deep contract: floor from an overlapping sweep %',public.context_email_deep_live_floor('dhfloor'); END IF;
+END $$;
+ROLLBACK;
+
 -- 2. The numbers are the design's and the owner's.
 DO $$
 DECLARE p jsonb:=public.context_email_deep_policy(); g jsonb:=public.context_email_deep_enabled();

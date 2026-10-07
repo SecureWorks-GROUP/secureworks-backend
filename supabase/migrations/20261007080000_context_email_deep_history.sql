@@ -208,18 +208,26 @@ $fn$;
 COMMENT ON FUNCTION public.context_email_deep_job_refs(jsonb) IS
  'History depth (20261007080000): a job''s builder references as stored in jobs.metadata (builder_claim_ref, builder_po_number, builder_work_order_number, external_ref), upper case, at least 5 characters, distinct, byte order. The reader turns each into canonical tokens with _shared/makesafe_refs.ts builderRefTokens, the same function it reads an email with.';
 
--- 5. A source's live floor: the start of the reader's own first live window
--- (the earliest window_from of its poll runs and succeeded sweeps), raised to
--- the next whole second so it never claims a moment the reader did not read.
+-- 5. A source's live floor: the start of the reader's own live reading, read
+-- whole since: its first poll window (the poll walks on from its cursor), or
+-- earlier where a succeeded nightly sweep (a whole 48 hours) that ran after
+-- that poll window began reaches further back; raised to the next whole second
+-- so it never claims a moment the reader did not read. A sweep that ended
+-- before the poll began leaves a gap, so it never counts.
 CREATE OR REPLACE FUNCTION public.context_email_deep_live_floor(p_source_key text) RETURNS timestamptz
 LANGUAGE sql STABLE SET search_path=public,pg_temp AS $fn$
- SELECT CASE WHEN t IS NULL THEN NULL WHEN t=date_trunc('second',t) THEN t ELSE date_trunc('second',t)+interval '1 second' END
- FROM (SELECT least(
-   (SELECT min(c.window_from) FROM public.context_capture_runs c WHERE c.source='outlook_'||p_source_key AND c.status IN ('succeeded','partial')),
-   (SELECT min(c.window_from) FROM public.context_capture_runs c WHERE c.source='outlook_sweep_'||p_source_key AND c.status='succeeded')) AS t) x
+ WITH poll AS (
+  SELECT min(c.window_from) AS f FROM public.context_capture_runs c
+  WHERE c.source='outlook_'||p_source_key AND c.status IN ('succeeded','partial')
+ ), sweep AS (
+  SELECT min(c.window_from) AS f FROM public.context_capture_runs c, poll
+  WHERE c.source='outlook_sweep_'||p_source_key AND c.status='succeeded' AND poll.f IS NOT NULL AND c.started_at>=poll.f
+ )
+ SELECT CASE WHEN x.t IS NULL THEN NULL WHEN x.t=date_trunc('second',x.t) THEN x.t ELSE date_trunc('second',x.t)+interval '1 second' END
+ FROM (SELECT least(poll.f,sweep.f) AS t FROM poll, sweep) x
 $fn$;
 COMMENT ON FUNCTION public.context_email_deep_live_floor(text) IS
- 'History depth (20261007080000): the start of one source''s first live window (the earliest window_from of its outlook_<key> poll runs that succeeded or were cut, and of its succeeded outlook_<key>_sweep runs), rounded up to the whole second; null when the source was never polled. Everything after it is read live, whatever job it touches.';
+ 'History depth (20261007080000): the start of one source''s live reading, read whole since: the earliest window_from of its outlook_<key> poll runs that succeeded or were cut, or of a succeeded outlook_sweep_<key> run that started after that (a sweep that ended before the poll began leaves a gap and never counts), rounded up to the whole second; null when the source was never polled. Everything after it is read live, whatever job it touches.';
 
 -- 6. The live jobs, monitored or not, their first record and their keys.
 CREATE OR REPLACE FUNCTION public.context_email_deep_scope_jobs(p_as_of timestamptz DEFAULT now())
