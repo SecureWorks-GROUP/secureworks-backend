@@ -54,17 +54,19 @@
 --     transition (write): a request made the day it was paid is closed by that payment; a paid day
 --     before the request's day still never closes it.
 --
--- Read only on production (7 Oct 2026, about 21:00 Perth; 472 current readings, all shadow):
+-- Read only on production (8 Oct 2026, about 00:15 Perth; 472 current readings, all shadow, none
+-- changed since 7 Oct 20:32 Perth):
 --  - (1) 62 transcripts on 51 readings go from null to the customer's call; 1 transcript on 1
 --    reading reads "unknown". 83 items on 37 readings cite such a transcript; 48 of them (27
 --    readings) open on it with from_role unknown.
 --  - (4) 30 items say a row belongs elsewhere: 8 stand on a cited row the rule accepts
---    (role_basis 4, names_other_job 2, call_on_other_job 1, sender_not_client 1); 22 items on 21
+--    (role_basis 4, names_other_job 2, call_on_other_job 1, sender_not_client 1); 22 items on 22
 --    readings would be refused on a rebuild, the 4 unsafe lines among them.
---  - (5) 215 readings are on a job with a sibling (307 links); on 186 a sibling has a quote sent or
---    an invoice issued; 45 of those hold 85 open quote, invoice or payment items it may bear on.
---    Over the 499 rollout jobs the section is 281 bytes on average (596 with a sibling, at most
---    2,798; never more than 7 siblings) and its matching takes about 1 ms a job.
+--  - (5) 214 readings are on a job with a sibling (306 links); on 185 a sibling has a quote sent or
+--    an invoice issued; 44 of those hold 83 open quote, invoice or payment items it may bear on.
+--    Over the 499 rollout jobs the section is 282 bytes on average (600 with a sibling, at most
+--    2,798; never more than 7 siblings). Its work order match reads every make-safe detail row's
+--    key (622 rows, about 7 ms for a make-safe job's packet); the rest is by index.
 --  - (6) 67 open payment items on 45 readings; 5 on 3 readings have an invoice on the job paid the
 --    Perth day the item opened (each refused before); 12 more one paid on a later day.
 --
