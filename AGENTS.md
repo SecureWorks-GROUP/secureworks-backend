@@ -784,6 +784,26 @@ work reopened after it was recorded finished is not finished again) and
 `unconfirmed` (R8 whose amount a C2 check leaves unknown) are never a move, the
 first line's item or a reason for whose move.
 
+## A Lead Not Followed Up Has One Rule
+
+`context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`; null ids means
+every live job) and its boolean `context_lead_monitored(job, as_of)` are the
+owner's 7 Oct 2026 lead rule, the only one. A job still at `quoted` with a quote
+sent and no progress (no accepted quote, no customer invoice that is not voided
+or deleted, no standing booking, no later status) stops being monitored 672
+hours after the newer of its newest quote send (`job_documents` type `quote`,
+else `jobs.quoted_at`) and the customer's newest text, email or call on the job
+(`context_job_record_messages`: the customer's side, placed on the job); it is
+monitored again the moment it progresses or the customer writes on the job, and
+a quote never sent starts no clock. The story reads it (R7's words end "Lead not
+followed up since <day>: ...", the first line says so in place of whose move,
+`whose_move` `not_followed_up`, `now.monitored`), the ledger judge blocks such a
+lead (`lead_not_monitored`, so it is never on the due list and a claim answers
+`not_due`), and the scorecard reads the set function. Never re-derive the window
+or the progress list in a caller. The story fixes and story safety contracts
+roll this migration back first in their re-apply sections, as its own guard pins
+their bodies.
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
