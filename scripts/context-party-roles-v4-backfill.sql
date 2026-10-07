@@ -73,34 +73,62 @@
 --   reconcile mail) are candidates too when their reading changes; PART 1
 --   counts them exactly.
 -- After the full run the scorecard's row 2, 30 days by capture time, reads
--- (19:00 read): texts 4,155 -> 4,478 of 4,690 (88.6% -> 95.5%), calls 1,201
--- -> 1,244 of 1,354 (88.7% -> 91.9%), call transcripts 279 -> 326 of 442
--- (63.1% -> 73.8%), emails in 1,457 -> 1,701 of 2,142 (68.0% -> 79.4%),
--- emails out 548 -> 644 of 693 (79.1% -> 92.9%), crew and staff texts 222 ->
--- 234 of 234 (94.9% -> 100%). 2 rows go from known to conflict (1 call, 1
--- transcript: the signals disagree).
--- It also moves row 3: 412 prospect messages, none on a job, become customer
--- messages with no job yet, so the customer-placed share reads 4,719 of
--- 6,593 (71.6%) instead of 4,719 of 6,182 (76.3%) until the scorecard leaves
--- customers with no job out of that denominator
--- (context_party_roles_lanes.no_job_customers counts them).
+-- (a second read, 21:20 Perth): texts 4,153 -> 4,473 of 4,680 (88.7% ->
+-- 95.6%), calls 1,201 -> 1,244 of 1,354 (88.7% -> 91.9%), call transcripts
+-- 279 -> 326 of 442 (63.1% -> 73.8%), emails in 1,458 -> 1,702 of 2,144
+-- (68.0% -> 79.4%), emails out 544 -> 640 of 690 (78.8% -> 92.8%), crew and
+-- staff texts 222 -> 234 of 234 (94.9% -> 100%). 2 rows go from known to
+-- conflict (1 call, 1 transcript: the signals disagree).
+-- Those shares are a one-time high, not what the lanes keep. A new row is
+-- read when it is captured (and again only when a writer updates it), and
+-- two of v4's signals usually arrive after the message: a prospect's
+-- opportunity (13 texts, 11 calls and 5 transcripts of the window came
+-- before it was created, 80 texts, 5 calls and 10 transcripts less than a
+-- day after; the roster cache is refreshed only when the sales booking page
+-- loads) and a supplier's Xero bill (48 of the 84 bill emails came before
+-- the bill reached our Xero copy). Read at capture the window reads: texts
+-- 4,460 (95.3%) with a roster refreshed for every message and 4,380 (93.6%)
+-- with one a day old, so amber; calls 1,233 to 1,228 (91.1% to 90.7%); call
+-- transcripts 321 to 311 (72.6% to 70.4%); emails in 1,657 (77.3%); emails
+-- out 639 (92.6%); crew and staff texts 234 (100%). The re-stamped shares
+-- drift down to those over the 30 days after it, unless recent unknown rows
+-- are re-stamped on a schedule (behind its own switch, created off: a
+-- live-data change, the owner's yes) or the capture side changes (a roster
+-- refreshed on a schedule, the Xero bill sync run sooner after a bill email).
+-- It also moves row 3 (customer messages placed on a job, read from
+-- party_roles.audience): 410 prospect messages, none on a job, become
+-- customer messages with no job yet, so the live scorecard's row 3 reads
+-- 4,723 of 6,592 (71.6%) instead of 4,723 of 6,182 (76.4%) until the
+-- scorecard leaves customers with no job out of that denominator (scorecard
+-- v2: no_job_customers - no_job_customers_on_a_job from
+-- context_party_roles_lanes). PART 2 therefore refuses any batch that lowers
+-- row 3 as the live scorecard reads it, unless owner_accepts_row3_drop is set
+-- on the owner's yes: run the re-stamp together with or after that scorecard
+-- change, or with his yes to the drop. (The migration alone moves row 3 the
+-- same way, more slowly: new prospect messages read customer at capture,
+-- about 10 to 13 a day, so row 3 reads about 72 to 73% after 30 days.)
 --
 -- How to run (production: read only first, a write only with the owner's go).
 --   PART 1  read-only census. Must show the migration live, then the total
 --           candidates and this_batch on its first row, and the candidates by
---           lane and old -> new below it, then row 2 as stored now. Copy
---           this_batch into expected_rows in PART 2 (it is capped at 1000).
+--           lane and old -> new below it (row3_no_job: how many join row 3's
+--           customers with no job), then row 2 as stored now, then row 3 as
+--           the live scorecard reads it now. Copy this_batch into
+--           expected_rows in PART 2 (it is capped at 1000).
 --   PART 2  guarded re-stamp of one batch. As written it ends in ROLLBACK: a
 --           dry run that re-stamps, checks and throws it away. It refuses
 --           unless v4 and the trigger are live, the batch is exactly
 --           expected_rows (a writer re-stamping a candidate between PART 1
 --           and PART 2 makes it refuse: re-run PART 1), every row comes out
 --           stamped by the live classifier with its first stamp saved, the
---           ladder's audience is never overridden, and nothing but
---           party_roles and the two backfill keys moved. Its last statement
---           prints the batch's before -> after by lane. To apply (owner's go
---           only): change the final ROLLBACK to COMMIT and run PART 2 once;
---           repeat PART 1 and PART 2 until PART 1 reports 0.
+--           ladder's audience is never overridden, nothing but party_roles
+--           and the two backfill keys moved, and row 3 as the live scorecard
+--           reads it is not lowered (unless owner_accepts_row3_drop is set on
+--           the owner's yes; the refusal names row 3 before and after). It
+--           prints the batch's before -> after by lane, then row 3 before ->
+--           after. To apply (owner's go only): change the final ROLLBACK to
+--           COMMIT and run PART 2 once; repeat PART 1 and PART 2 until PART 1
+--           reports 0.
 --   UNDO    scripts/context-party-roles-v4-backfill-undo.sql puts back the
 --           saved stamp on every row this run id touched.
 
@@ -134,6 +162,10 @@ WITH msg AS MATERIALIZED (
  SELECT c.lane, c.job_id, c.cap, c.touched,
   (c.old_pr->>'sender_role')||' -> '||(c.old_pr->>'recipient_role') AS old_pair, c.old_pr->>'basis' AS old_basis,
   (c.new_pr->>'sender_role')||' -> '||(c.new_pr->>'recipient_role') AS new_pair, c.new_pr->>'basis' AS new_basis,
+  -- Joins row 3's customers (party_roles.audience customer, the five message
+  -- lanes, the scorecard's 30 days) with no job to be placed on.
+  (c.lane IN ('texts','calls','call_transcripts','emails_in','emails_out') AND c.cap>now()-interval '30 days' AND c.job_id IS NULL
+   AND c.new_pr->>'audience'='customer' AND c.old_pr->>'audience' IS DISTINCT FROM 'customer') AS row3_no_job,
   EXISTS (SELECT 1 FROM public.jobs j WHERE j.id=c.job_id
    AND j.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost') AND NOT coalesce(j.archived,false)) AS live_job
  FROM cand c
@@ -143,6 +175,7 @@ WITH msg AS MATERIALIZED (
 )
 SELECT CASE WHEN grouping(d.lane)=1 THEN '(all)' ELSE d.lane END AS lane, d.old_pair, d.old_basis, d.new_pair, d.new_basis,
  count(*) AS rows, CASE WHEN grouping(d.lane)=1 THEN least(count(*),1000) END AS this_batch,
+ count(*) FILTER (WHERE d.row3_no_job) AS row3_no_job,
  count(*) FILTER (WHERE d.touched) AS touched_before, count(*) FILTER (WHERE d.job_id IS NOT NULL) AS on_a_job,
  count(*) FILTER (WHERE d.live_job) AS on_a_live_job, min(d.cap)::date AS first_captured, max(d.cap)::date AS last_captured
 FROM d
@@ -152,6 +185,15 @@ ORDER BY grouping(d.lane) DESC, d.lane COLLATE "C", count(*) DESC, d.old_basis C
 
 -- 2. Row 2 as the scorecard reads it now (stored stamps), for the before.
 SELECT * FROM public.context_party_roles_lanes(now(),30);
+
+-- 3. Row 3 (customer messages placed on a job) as the live scorecard reads it
+-- now. Until the scorecard leaves customers with no job out of it, every
+-- row3_no_job row above lowers it, and PART 2 refuses such a batch unless
+-- owner_accepts_row3_drop is set on the owner's yes.
+SELECT l->>'value' AS row3_now, l->>'number' AS row3_pct, l->>'status' AS row3_status
+FROM jsonb_array_elements(public.context_scorecard(now())->'rows') r
+CROSS JOIN LATERAL jsonb_array_elements(r->'lanes') l
+WHERE r->>'row'='3' AND l->>'lane'='customer_facing';
 ROLLBACK;
 
 -- ============================================================================
@@ -225,6 +267,14 @@ BEGIN
  END IF;
 END $count$;
 
+-- Row 3 (customer messages placed on a job) as the live scorecard reads it
+-- before the write, at this transaction's own time (now() is when it began,
+-- so a row captured after that is in neither read).
+CREATE TEMP TABLE pr4_row3 ON COMMIT DROP AS
+SELECT 'before'::text AS at, (SELECT l FROM jsonb_array_elements(public.context_scorecard(now())->'rows') r
+  CROSS JOIN LATERAL jsonb_array_elements(r->'lanes') l
+  WHERE r->>'row'='3' AND l->>'lane'='customer_facing' LIMIT 1) AS lane;
+
 -- The write, in write order (a later statement sees an earlier one's
 -- stamps). A row an earlier batch touched keeps the first stamp it saved.
 UPDATE public.business_events e
@@ -284,4 +334,44 @@ GROUP BY 1,2,3,4,5,6 ORDER BY b.lane COLLATE "C", b.phase, count(*) DESC, (b.met
  ((b.metadata_before->'party_roles'->>'sender_role')||' -> '||(b.metadata_before->'party_roles'->>'recipient_role')) COLLATE "C",
  ((e.metadata->'party_roles'->>'sender_role')||' -> '||(e.metadata->'party_roles'->>'recipient_role')) COLLATE "C",
  (e.metadata->'party_roles'->>'basis') COLLATE "C";
+
+-- Row 3 after the write, as the live scorecard reads it in this transaction.
+INSERT INTO pr4_row3
+SELECT 'after', (SELECT l FROM jsonb_array_elements(public.context_scorecard(now())->'rows') r
+  CROSS JOIN LATERAL jsonb_array_elements(r->'lanes') l
+  WHERE r->>'row'='3' AND l->>'lane'='customer_facing' LIMIT 1);
+SELECT (SELECT lane->>'value' FROM pr4_row3 WHERE at='before') AS row3_before,
+ (SELECT lane->>'value' FROM pr4_row3 WHERE at='after') AS row3_after;
+
+DO $row3$
+DECLARE
+ -- Row 3 counts party_roles.audience customer messages and how many sit on a
+ -- job. A prospect has no job to be placed on, so until the scorecard leaves
+ -- customers with no job out of row 3 (scorecard v2: no_job_customers -
+ -- no_job_customers_on_a_job, context_party_roles_lanes), every prospect this
+ -- batch names lowers row 3 (7 Oct 2026, the whole re-stamp: 76.4% to
+ -- 71.6%). Set to true only on the owner's yes to that drop; otherwise run
+ -- this re-stamp together with or after that scorecard change.
+ owner_accepts_row3_drop constant boolean := false;
+ b jsonb; a jsonb; bm text[]; am text[]; lowered boolean;
+BEGIN
+ SELECT lane INTO b FROM pr4_row3 WHERE at='before';
+ SELECT lane INTO a FROM pr4_row3 WHERE at='after';
+ IF b IS NULL OR a IS NULL THEN
+  IF NOT owner_accepts_row3_drop THEN
+   RAISE EXCEPTION 'party_roles_v4_backfill: the live scorecard has no row 3 customer_facing lane to compare; refusing (read row 3 by hand; set owner_accepts_row3_drop only on the owner''s yes)';
+  END IF;
+  RETURN;
+ END IF;
+ -- Exact counts ("<on a job> of <customer messages> ..."), else the share.
+ bm:=regexp_match(coalesce(b->>'value',''),'^(\d+) of (\d+) ');
+ am:=regexp_match(coalesce(a->>'value',''),'^(\d+) of (\d+) ');
+ lowered:=CASE WHEN bm IS NOT NULL AND am IS NOT NULL
+  THEN am[1]::numeric*bm[2]::numeric < bm[1]::numeric*am[2]::numeric
+  ELSE coalesce((a->>'number')::numeric,0) < coalesce((b->>'number')::numeric,0) END;
+ IF lowered AND NOT owner_accepts_row3_drop THEN
+  RAISE EXCEPTION 'party_roles_v4_backfill: this batch lowers row 3 (customer messages placed on a job) from "%" to "%"; the live scorecard counts a customer with no job yet against placement: run the re-stamp together with or after the scorecard change that leaves them out, or set owner_accepts_row3_drop on the owner''s yes; refusing',
+   b->>'value',a->>'value';
+ END IF;
+END $row3$;
 ROLLBACK;

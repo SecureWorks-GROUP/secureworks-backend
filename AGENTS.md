@@ -645,8 +645,11 @@ council by), our material orders' addresses and domains, a Xero bill of a known
 supplier named in an inbound subject, a make-safe company's own invoice or
 report domain; one role only when every signal agrees. Last, a call
 transcript takes its call's roles, basis and audience when they differ
-(`from_call`; a customer only from a call on the same job, or both on none),
-so readers keyed on `job_customer` or `any_job_customer` read the two alike. The
+(`from_call`), never over its own `job_customer` or `job_party` reading: from
+a call on the same job (or both on none), or from elsewhere only a
+non-customer reading and only when the transcript's own counterpart is
+unknown, so readers keyed on `job_customer` or `any_job_customer` read the two
+alike. The
 classifier never calls `context_internal_text_role` or another ladder-private
 helper: the service role previews the classifier, and the `20261006034000`
 and `20261007060000` cases call it as `service_role` in a fresh session. Row
@@ -658,9 +661,13 @@ writer updates `job_id`, `contact_id`, `direction`, `metadata`, `payload`,
 classifier; a row nobody writes keeps its stamp until a hand-run re-stamp,
 `scripts/context-party-roles-v4-backfill.sql` (a metadata-only write so the
 trigger re-stamps, in three passes because the CRM rule reads other rows'
-crew stamps and a transcript reads its call's; the undo restores the saved
-stamp with the trigger off; the v3 one refuses once v4 is live). So a version
-stamp alone never proves a backfill ran; its run key does. A later change to
+crew stamps and a transcript reads its call's; it refuses a batch that lowers
+the live scorecard's row 3 unless the owner accepted that drop; the undo
+restores the saved stamp with the trigger off; the v3 one refuses once v4 is
+live). A re-stamp's shares are a one-time high: a new row is read at capture,
+usually before a prospect's opportunity or a supplier's Xero bill exists. So
+a version stamp alone never proves a backfill ran; its run key does. A later
+change to
 the classifier updates these contract touch points: v1's (`20261005200000`)
 version and comment checks and its re-apply skip; v2's (`20261006000000`)
 version and comment checks; the `20261006034000` case's classifier pin (it

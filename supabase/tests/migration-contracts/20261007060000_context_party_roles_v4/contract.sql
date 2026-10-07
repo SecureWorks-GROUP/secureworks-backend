@@ -31,14 +31,20 @@
 --      supplier and none of our users, no trade invoice pushed it, and the
 --      number is none we issued and none of our job references; the same
 --      number in an outbound email decides nothing.
---   D. A call transcript reads as its call: a transcript of a call our records
---      read as crew takes the call's roles and basis (users, from_call) though
---      its contact is the job's customer on file and the call sits on no job;
---      where the two agree it keeps its own basis (job_customer); a
---      transcript paired only by its ghltx: key pairs too; a transcript whose
---      call is unknown reads by its own rules; a call that reads a customer
---      passes it on only to a transcript on the same job (or both on none),
---      with its basis (any_job_customer stays any_job_customer).
+--   D. A call transcript reads as its call, but never over its own job's
+--      customer or a party on its job: the transcript, on the customer's own
+--      job, of a call the supplier list reads on no job reads customer
+--      (job_customer), as the same contact's text there does; so does a job
+--      party's (job_party) whose call reads crew. A transcript whose own
+--      counterpart is unknown (no match, or a conflict) takes a crew call's
+--      roles and basis (users, from_call) from another job or none, paired by
+--      payload.ghl_call_id or only by its ghltx: key; one that names someone
+--      (another job's customer) keeps its own reading of a call on another
+--      job, and takes the call's on the same job; where the two agree it
+--      keeps its own basis (job_customer); a transcript whose call is unknown
+--      reads by its own rules; a call that reads a customer passes it on
+--      only to a transcript on the same job (or both on none), with its basis
+--      (any_job_customer stays any_job_customer).
 --   E. Every v3 decision these fixtures make is unchanged, stamped v4: L1d's
 --      label and our crew templates first, the job's customer, a supplier by
 --      the supplier list, a builder by its company address, the customer of
@@ -309,36 +315,95 @@ BEGIN
   problems:=problems||format('xero bill rule not built: the fixtures failed with SQLSTATE %s (%s)',SQLSTATE,SQLERRM);
  END;
 
- -- D. A call transcript reads as its call.
+ -- D. A call transcript reads as its call, but never over its own job's
+ -- customer or a party on its job.
  BEGIN
   miss:='{}';
-  -- A crew member whose GHL contact is also job 2's customer on file: the
-  -- call carried the crew phone (users), the transcript only the contact.
-  j2:=pg_temp.p4_job('SWF-997002','p4-crewcust');
-  -- The call sits on no job (the ladder may place it on the contact's job;
-  -- it is taken off again), so the crew phone decides it.
-  c:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged','p4-crewcust',jsonb_build_object('phone','0499444111','call_status','completed'),
+  -- The job's customer on file, whose phone is also on the supplier list:
+  -- the call carried that phone and the ladder left it on no job, so the
+  -- supplier list reads it. Its transcript, on the customer's own job,
+  -- carried only the contact. v1 reads a job's own customer before the
+  -- supplier list, so the transcript reads customer (job_customer), as the
+  -- same contact's text on that job does, wherever the call sits.
+  j2:=pg_temp.p4_job('SWF-997002','p4-supcust');
+  INSERT INTO public.suppliers(id,name,email,phone) VALUES (gen_random_uuid(),'Fixture Supply Four Phone',NULL,'0412 444 777');
+  -- The ladder may place the call on the contact's job; it is taken off again.
+  c:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged','p4-supcust',jsonb_build_object('phone','0412444777','call_status','completed'),
    '{}'::jsonb,interval '2 hours','ghl:p4call1'),NULL);
-  k:=pg_temp.p4_roles('fixture: the crew member''s call',c,'crew','staff','users','internal');
+  k:=pg_temp.p4_roles('fixture: the call from a phone on the supplier list, on no job',c,'supplier','staff','supplier','other_party');
   IF k<>'' THEN miss:=miss||k; END IF;
-  e:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-crewcust',
-   jsonb_build_object('ghl_call_id','p4call1','transcript','Running late to site'),'{}'::jsonb,interval '1 hour','ghltx:p4call1'),j2);
+  e:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-supcust',
+   jsonb_build_object('ghl_call_id','p4call1','transcript','About my fence'),'{}'::jsonb,interval '1 hour','ghltx:p4call1'),j2);
+  k:=pg_temp.p4_roles('the transcript, on the customer''s own job, of a call the supplier list reads',e,'customer','staff','job_customer','customer');
+  IF k<>'' THEN miss:=miss||k;
+  ELSIF e.metadata->'party_roles' ? 'from_call' THEN
+   miss:=miss||format('a transcript of the job''s own customer keeps its own reading, got %s',e.metadata->'party_roles'); END IF;
+  e:=pg_temp.p4_on(pg_temp.p4_ev('sms','inbound','client.reply','p4-supcust',jsonb_build_object('body','Thanks')),j2);
+  k:=pg_temp.p4_roles('the same contact''s text on that job',e,'customer','staff','job_customer','customer');
+  IF k<>'' THEN miss:=miss||k; END IF;
+  -- A party on job 2 (job_contacts) whose call came from our crew's phone and
+  -- sits on no job: the transcript on job 2 keeps job_party.
+  INSERT INTO public.job_contacts(job_id,ghl_contact_id,contact_type) VALUES (j2,'p4-party','neighbour');
+  c:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged','p4-party',jsonb_build_object('phone','0499444111','call_status','completed'),
+   '{}'::jsonb,interval '2 hours','ghl:p4call9'),NULL);
+  k:=pg_temp.p4_roles('fixture: the job party''s call from our crew''s phone, on no job',c,'crew','staff','users','internal');
+  IF k<>'' THEN miss:=miss||k; END IF;
+  e:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-party',jsonb_build_object('ghl_call_id','p4call9','transcript','The side gate'),
+   '{}'::jsonb,interval '1 hour','ghltx:p4call9'),j2);
+  k:=pg_temp.p4_roles('the transcript, on the job, of a party on that job whose call our records read as crew',e,'customer','staff','job_party','customer');
+  IF k<>'' THEN miss:=miss||k;
+  ELSIF e.metadata->'party_roles' ? 'from_call' THEN
+   miss:=miss||format('a transcript of a party on its job keeps its own reading, got %s',e.metadata->'party_roles'); END IF;
+  -- Our crew's call on no job, and its transcript, paired by its ghltx: key
+  -- alone and written first, carrying only a contact our records do not
+  -- name, on job 1: the transcript's own counterpart is unknown, and crew
+  -- are crew on any job, so it reads as its call.
+  e:=pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-stranger',jsonb_build_object('transcript','Second part'),
+   '{}'::jsonb,interval '50 minutes','ghltx:p4call1b');
+  PERFORM pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged','p4-crewonly',jsonb_build_object('phone','0499444111'),
+   '{}'::jsonb,interval '3 hours','ghl:p4call1b'),NULL);
+  -- The transcript came first; a writer's later update re-stamps it.
+  UPDATE public.business_events SET job_id=j1 WHERE id=e.id RETURNING * INTO e;
   r:=e.metadata->'party_roles';
   IF r->>'version' IS DISTINCT FROM 'party_roles_v4' OR r->>'sender_role' IS DISTINCT FROM 'crew' OR r->>'recipient_role' IS DISTINCT FROM 'staff'
    OR r->>'counterpart_role' IS DISTINCT FROM 'crew' OR r->>'basis' IS DISTINCT FROM 'users' OR r->'from_call' IS DISTINCT FROM 'true'::jsonb
    OR r->>'audience' IS DISTINCT FROM 'internal' THEN
-   miss:=miss||format('the transcript of a crew call must read crew to staff (the call''s basis users, from_call, audience internal), got %s',r);
+   miss:=miss||format('the transcript of a crew call, its own counterpart unknown, must read crew to staff (the call''s basis users, from_call, audience internal), got %s',r);
   END IF;
-  -- Paired by the ghltx: key alone.
-  e:=pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-crewcust',jsonb_build_object('transcript','Second part'),
-   '{}'::jsonb,interval '50 minutes','ghltx:p4call1b');
-  PERFORM pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged','p4-crewcust',jsonb_build_object('phone','0499444111'),
-   '{}'::jsonb,interval '3 hours','ghl:p4call1b'),NULL);
-  -- The transcript came first; a writer's later update re-stamps it.
-  UPDATE public.business_events SET job_id=j2 WHERE id=e.id RETURNING * INTO e;
-  IF e.metadata->'party_roles'->'from_call' IS DISTINCT FROM 'true'::jsonb OR e.metadata->'party_roles'->>'basis' IS DISTINCT FROM 'users'
-   OR e.metadata->'party_roles'->>'sender_role' IS DISTINCT FROM 'crew' THEN
-   miss:=miss||format('a transcript paired by its ghltx: key must read as its call, got %s',e.metadata->'party_roles'); END IF;
+  -- A transcript whose own reading is a conflict (an open opportunity whose
+  -- roster contact's phone is our crew's), on no job, of a call our records
+  -- read as crew on job 1: a conflict names no one, so it reads as its call.
+  PERFORM pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged',NULL,jsonb_build_object('phone','0499444111','call_status','completed'),
+   '{}'::jsonb,interval '2 hours','ghl:p4call6'),j1);
+  e:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-crewopp',jsonb_build_object('ghl_call_id','p4call6','transcript','On my way'),
+   '{}'::jsonb,interval '1 hour','ghltx:p4call6'),NULL);
+  k:=pg_temp.p4_roles('the transcript, its own reading a conflict, of a crew call on another job',e,'crew','staff','users','internal');
+  IF k<>'' THEN miss:=miss||k;
+  ELSIF e.metadata->'party_roles'->'from_call' IS DISTINCT FROM 'true'::jsonb THEN
+   miss:=miss||format('a transcript that took its call''s reading is marked from_call, got %s',e.metadata->'party_roles'); END IF;
+  -- The customer of another job (any_job_customer), on no job, of a call our
+  -- records read as crew on job 1: the transcript names someone and the call
+  -- sits elsewhere, so it keeps its own reading.
+  PERFORM pg_temp.p4_job('SWF-997004','p4-cust4');
+  PERFORM pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged',NULL,jsonb_build_object('phone','0499444111','call_status','completed'),
+   '{}'::jsonb,interval '2 hours','ghl:p4call7'),j1);
+  e:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-cust4',jsonb_build_object('ghl_call_id','p4call7','transcript','Next week'),
+   '{}'::jsonb,interval '1 hour','ghltx:p4call7'),NULL);
+  k:=pg_temp.p4_roles('the transcript, on no job, of another job''s customer whose call our records read as crew on job 1',e,'customer','staff','any_job_customer','customer');
+  IF k<>'' THEN miss:=miss||k;
+  ELSIF e.metadata->'party_roles' ? 'from_call' THEN
+   miss:=miss||format('a transcript that names someone keeps its own reading of a call on another job, got %s',e.metadata->'party_roles'); END IF;
+  -- The same pair on the same job: they are the same people, so the
+  -- transcript reads as its call (v1 reads our users before another job's
+  -- customer).
+  PERFORM pg_temp.p4_on(pg_temp.p4_ev('call','inbound','client.call_logged',NULL,jsonb_build_object('phone','0499444111','call_status','completed'),
+   '{}'::jsonb,interval '2 hours','ghl:p4call8'),j1);
+  e:=pg_temp.p4_on(pg_temp.p4_ev('call','inbound','call.transcript_completed','p4-cust4',jsonb_build_object('ghl_call_id','p4call8','transcript','Gate code'),
+   '{}'::jsonb,interval '1 hour','ghltx:p4call8'),j1);
+  k:=pg_temp.p4_roles('the transcript, on the same job, of another job''s customer whose call our records read as crew',e,'crew','staff','users','internal');
+  IF k<>'' THEN miss:=miss||k;
+  ELSIF e.metadata->'party_roles'->'from_call' IS DISTINCT FROM 'true'::jsonb THEN
+   miss:=miss||format('a transcript that took its call''s reading is marked from_call, got %s',e.metadata->'party_roles'); END IF;
   -- Where call and transcript agree, the transcript keeps its own basis.
   c:=pg_temp.p4_on(pg_temp.p4_ev('call','outbound','client.call_logged','p4-cust',jsonb_build_object('call_status','completed'),
    '{}'::jsonb,interval '2 hours','ghl:p4call2'),j1);
@@ -432,11 +497,11 @@ DO $$
 DECLARE p record; r text;
 BEGIN
  FOR p IN SELECT * FROM (VALUES
-  ('public.context_message_party_roles(public.business_events)','1debd5c2b6dfbf2f4f22f291b893ec84','Party roles v4 (20261007060000):%Service role may call it to preview.'),
+  ('public.context_message_party_roles(public.business_events)','17a10cf9b9180a6380e8465d2dce503b','Party roles v4 (20261007060000):%Service role may call it to preview.'),
   ('public.context_party_crm_roles(text,text,text,timestamp with time zone)','b5b0d82f9d9809cc7f6a7db6b1fde458','Party roles v4 (20261007060000):%'),
   ('public.context_party_domain_roles(text)','93624d7e20f4ab3f292a1b0e2a8777d9','Party roles v4 (20261007060000):%'),
   ('public.context_party_xero_bill(text)','2aef40c5509b118cee06a35cd951a64f','Party roles v4 (20261007060000):%'),
-  ('public.context_party_call_roles(public.business_events)','12bef71b8f5a2d3f3c82fd890ed69acc','Party roles v4 (20261007060000):%'),
+  ('public.context_party_call_roles(public.business_events)','c71771892098899f2195b45605901729','Party roles v4 (20261007060000):%'),
   ('public.context_party_roles_lanes(timestamp with time zone,integer)','ff6797dcd0d2788d01ac1ff21143a18a','Party roles v4 (20261007060000): row 2''s read for the scorecard.%')
  ) AS t(sig,md5,note) LOOP
   IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(p.sig)) IS DISTINCT FROM p.md5 THEN

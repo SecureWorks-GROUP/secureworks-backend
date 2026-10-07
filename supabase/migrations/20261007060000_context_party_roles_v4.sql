@@ -98,42 +98,79 @@
 --      with a known counterpart and the transcript's own reading names other
 --      roles, the transcript takes the call's sender, recipient,
 --      counterpart, basis and audience, marked from_call (the ladder's own
---      audience on the transcript still wins). The call's basis is kept so
---      every reader reads the transcript as it reads the call (the job
---      record's any_job_customer rule, the ledger's job_customer). A call
---      that reads a customer passes it on only when it sits where the
---      transcript sits (the same job, or both on none): whose customer it is
---      depends on the job; crew, staff, a supplier, a builder or a council
---      are who they are on any job. Where the two agree the transcript keeps
---      its own basis. A transcript's own L1d label (rule 1) wins. Measured:
---      no stored transcript reads otherwise than its call today, so the rule
---      moves no row now; it keeps the two together when a call's reading
---      changes and the transcript's own rules cannot see why.
+--      audience on the transcript still wins). Never over the transcript's
+--      own job's customer or a party on its job (job_customer, job_party):
+--      v1 reads a job's own customer before our users, the supplier list or
+--      a builder, and where the ladder happened to put the call must not
+--      change that. A call that sits where the transcript sits (the same job,
+--      or both on none) passes its reading on. From elsewhere only crew,
+--      staff, a supplier, a builder or a council pass on (they are who they
+--      are on any job), and only to a transcript whose own counterpart is
+--      unknown (no match, no contact or a conflict); a call's customer never
+--      does (whose customer it is depends on the job). The call's basis is
+--      kept so every reader reads the transcript as it reads the call (the
+--      job record's any_job_customer rule, the ledger's job_customer). Where
+--      the two agree the transcript keeps its own basis. A transcript's own
+--      L1d label (rule 1) wins. Measured (21:20 Perth): 16 of the window's
+--      340 live-writer transcripts sit elsewhere than their call (9 on a job
+--      whose call is on none, 7 the other way) and 1 call with a transcript
+--      reads other than a customer; the rule moves no stored row now (none
+--      reads otherwise than its call), and keeps the two together when a
+--      call's reading changes and the transcript's own rules cannot see why.
 -- New role: council (audience other_party, basis council). Every row is
 -- stamped party_roles_v4.
 --
--- Effect, emulated in SQL on production read only (a third read, 19:00
--- Perth, the scorecard's lanes, 30 days by capture time, the prospect rule
--- on rows on no job only and a call's customer passed only to a transcript
--- on the same job, as below), once the hand-run re-stamp below has run:
--- texts 4,155 -> 4,478 of 4,690 (88.6% -> 95.5%), calls 1,201 -> 1,244 of
+-- Effect, emulated in SQL on production read only (a fourth read, 21:20
+-- Perth, the scorecard's lanes, 30 days by capture time, the rules as
+-- below). Once the hand-run re-stamp below has run, the stored stamps read:
+-- texts 4,153 -> 4,473 of 4,680 (88.7% -> 95.6%), calls 1,201 -> 1,244 of
 -- 1,354 (88.7% -> 91.9%), call transcripts 279 -> 326 of 442 (63.1% ->
--- 73.8%), emails in 1,457 -> 1,701 of 2,142 (68.0% -> 79.4%), emails out
--- 548 -> 644 of 693 (79.1% -> 92.9%), crew and staff texts 222 -> 234 of 234
+-- 73.8%), emails in 1,458 -> 1,702 of 2,144 (68.0% -> 79.4%), emails out
+-- 544 -> 640 of 690 (78.8% -> 92.8%), crew and staff texts 222 -> 234 of 234
 -- (94.9% -> 100%: v3's templates, which no re-stamp had reached). 2 rows go
 -- from known to conflict (1 call, 1 transcript), where a new signal
--- disagrees with an old one. A new row reads the same as a re-stamped one,
--- so these are also the shares new rows read; without the re-stamp only new
--- rows read v4. What stays unknown: texts 212, calls 110 and call
--- transcripts 116, almost all GHL contacts on no job, in no lead list and
--- with no open opportunity (53, 55 and 73 contacts); emails in 441 (342 from
--- 111 business senders our records do not name, 76 free mail, 23 posted by
--- Xero naming no live bill) and emails out 49. Row 3 (customer messages
--- placed on a job) moves too: 412 prospect messages, none on a job, become
--- customer messages with no job yet, so its share reads 4,719 of 6,593
--- (71.6%) instead of 4,719 of 6,182 (76.3%) until the scorecard leaves
--- customers with no job out of that denominator; context_party_roles_lanes
--- counts them (no_job_customers).
+-- disagrees with an old one.
+-- Those shares are a one-time high, not what the lanes keep. A new row is
+-- read once, when it is captured (and again only when a writer updates it),
+-- and two of v4's signals usually arrive after the message does:
+--   * A prospect's opportunity: 13 texts, 11 calls and 5 transcripts of the
+--     window came before their opportunity was created, and 80 texts, 5
+--     calls and 10 transcripts less than a day after it. The roster cache is
+--     refreshed only when the sales booking page loads, on no schedule (the
+--     fencing roster was last cached 6 Oct, the patio roster 25 Sep).
+--   * A supplier's Xero bill: for 48 of the 84 emails naming a live bill,
+--     the bill reached our Xero copy after the email was captured (28 within
+--     a day, 20 later).
+-- Read at capture, the window reads: texts 4,460 (95.3%) with a roster
+-- refreshed for every message and 4,380 (93.6%) with one a day old, so
+-- amber, not green; calls 1,233 to 1,228 (91.1% to 90.7%); call transcripts
+-- 321 to 311 (72.6% to 70.4%); emails in 1,657 (77.3%); emails out 639
+-- (92.6%); crew and staff texts 234 (100%). (Our material orders are in our
+-- records only since 5 Oct, so 70 of the window's 116 supplier emails that
+-- an order names came before any order; at capture with that history
+-- missing, emails in read 1,587, 74.0%. Going forward an order sent before a
+-- supplier's mail names it at capture.) The re-stamped shares drift down to
+-- those over the 30 days after the re-stamp. Holding them needs either a
+-- scheduled re-stamp of recent unknown rows (behind its own switch, created
+-- off: a live-data change, the owner's yes) or capture-side fixes (the
+-- roster refreshed on a schedule, the Xero bill sync run sooner after a
+-- bill email). What stays unknown after the re-stamp: texts 207, calls 110
+-- and call transcripts 116, almost all GHL contacts on no job, in no lead
+-- list and with no open opportunity (53, 56 and 83 contacts); emails in 442
+-- (343 from 111 business addresses our records do not name, 76 free mail,
+-- 23 posted by Xero naming no live bill) and emails out 50.
+-- Row 3 (customer messages placed on a job, read from party_roles.audience)
+-- moves too. A prospect is a customer with no job to be placed on: the
+-- re-stamp makes 410 prospect messages, none on a job, customer messages,
+-- so the live scorecard's row 3 reads 4,723 of 6,592 (71.6%) instead of
+-- 4,723 of 6,182 (76.4%) until the scorecard leaves customers with no job
+-- out of that denominator (scorecard v2: no_job_customers -
+-- no_job_customers_on_a_job, from context_party_roles_lanes). The re-stamp
+-- script refuses a batch that lowers row 3 as the live scorecard reads it,
+-- unless the owner has said yes to that drop. This migration alone moves
+-- row 3 the same way, more slowly: new prospect messages read customer at
+-- capture (about 10 to 13 a day, 286 to 381 over 30 days), so row 3 reads
+-- about 72 to 73% after 30 days unless scorecard v2 lands first.
 --
 -- New, private: the four helpers above, a partial index on our material
 -- orders (business_events_party_material_orders, the 65 outbound emails), and
@@ -149,7 +186,8 @@
 -- classifier, so new rows read v4 from this migration on; a stored row
 -- nobody writes keeps its stamp until the separate hand-run re-stamp,
 -- scripts/context-party-roles-v4-backfill.sql (dry run first, never run by
--- its author; its undo is scripts/context-party-roles-v4-backfill-undo.sql).
+-- its author, with or after scorecard v2 or the owner's yes to row 3's drop;
+-- its undo is scripts/context-party-roles-v4-backfill-undo.sql).
 -- A v4 stamp alone is not proof the backfill ran: its run key is. The v3
 -- backfill (scripts/context-party-roles-v3-backfill.sql, not run) refuses
 -- once v4 is live; the v4 backfill re-stamps its rows too.
@@ -180,7 +218,7 @@ DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
   -- Replaced: the live body, or already this migration's.
-  ('public.context_message_party_roles(public.business_events)',ARRAY['36ed4eac4ec8a1b2efd253da02add409','1debd5c2b6dfbf2f4f22f291b893ec84']),
+  ('public.context_message_party_roles(public.business_events)',ARRAY['36ed4eac4ec8a1b2efd253da02add409','17a10cf9b9180a6380e8465d2dce503b']),
   -- Read, not replaced.
   ('public.context_party_key_roles(text,text)',ARRAY['4da54e7c7107e927b350947697f440e7']),
   ('public.context_party_contact_roles(text)',ARRAY['8c1f5381cb41d2cdcb0f33b530cc3070']),
@@ -198,7 +236,7 @@ BEGIN
   ('public.context_party_crm_roles(text,text,text,timestamp with time zone)','b5b0d82f9d9809cc7f6a7db6b1fde458'),
   ('public.context_party_domain_roles(text)','93624d7e20f4ab3f292a1b0e2a8777d9'),
   ('public.context_party_xero_bill(text)','2aef40c5509b118cee06a35cd951a64f'),
-  ('public.context_party_call_roles(public.business_events)','12bef71b8f5a2d3f3c82fd890ed69acc'),
+  ('public.context_party_call_roles(public.business_events)','c71771892098899f2195b45605901729'),
   ('public.context_party_roles_lanes(timestamp with time zone,integer)','ff6797dcd0d2788d01ac1ff21143a18a')
  ) AS t(sig,accepted) LOOP
   live:=NULL;
@@ -368,27 +406,26 @@ $$;
 COMMENT ON FUNCTION public.context_party_xero_bill(text) IS
  'Party roles v4 (20261007060000): true when an email subject names the number of a live Xero bill (ACCPAY) of a known Xero supplier contact (public.suppliers), not one of our users, not a trade invoice bill, and not a number we issued or one of our job or PO references. Private; read by context_message_party_roles.';
 
--- 4. The stamp of the call a transcript is the words of: the call row keyed
+-- 4. The call a transcript is the words of: the call row keyed
 -- ghl:<payload.ghl_call_id> (the transcript writer's pairing, the same the
 -- story's context_ledger_call_customer reads), or ghl:<id> from the
--- transcript's own ghltx:<id> key. Null when there is none, and when the call
--- reads a customer but sits elsewhere than the transcript (another job, or
--- one of them on none): whose customer it is depends on the job. Crew,
--- staff, a supplier, a builder or a council are who they are on any job.
+-- transcript's own ghltx:<id> key (provider_message_id is unique, so at most
+-- one row). Rows, not a decision: {party_roles: the call's stamp, same_job:
+-- the call sits where the transcript sits (the same job, or both on none)},
+-- or null when there is no such call. Rule 11 decides what passes on.
 CREATE OR REPLACE FUNCTION public.context_party_call_roles(e public.business_events)
 RETURNS jsonb
 LANGUAGE sql STABLE AS $$
- SELECT c.metadata->'party_roles'
+ SELECT jsonb_build_object('party_roles',c.metadata->'party_roles','same_job',c.job_id IS NOT DISTINCT FROM e.job_id)
  FROM public.business_events c
  WHERE e.event_type='call.transcript_completed'
   AND c.provider_message_id='ghl:'||coalesce(nullif(btrim(e.payload->>'ghl_call_id'),''),
    CASE WHEN e.provider_message_id LIKE 'ghltx:%' THEN substr(e.provider_message_id,7) END)
   AND c.event_type<>'call.transcript_completed' AND c.id IS DISTINCT FROM e.id
-  AND (c.metadata->'party_roles'->>'counterpart_role' IS DISTINCT FROM 'customer' OR c.job_id IS NOT DISTINCT FROM e.job_id)
  LIMIT 1
 $$;
 COMMENT ON FUNCTION public.context_party_call_roles(public.business_events) IS
- 'Party roles v4 (20261007060000): the party_roles stamp of the call a call transcript is the words of (the row keyed ghl:<payload.ghl_call_id>, or ghl:<id> from the transcript''s ghltx:<id> key), or null: none, or the call reads a customer and sits elsewhere than the transcript (whose customer depends on the job). Private; read by context_message_party_roles.';
+ 'Party roles v4 (20261007060000): the call a call transcript is the words of (the row keyed ghl:<payload.ghl_call_id>, or ghl:<id> from the transcript''s ghltx:<id> key): {party_roles: the call''s stamp, same_job: the call sits where the transcript sits, the same job or both on none}, or null when there is none. Rows, not a decision. Private; read by context_message_party_roles.';
 
 -- 5. The party-role classifier, v4.
 CREATE OR REPLACE FUNCTION public.context_message_party_roles(e public.business_events) RETURNS jsonb
@@ -396,7 +433,7 @@ LANGUAGE plpgsql STABLE AS $$
 DECLARE
  dir text; cid text; raw_addr text; addr text; dom text; ek text; pk text; urole text;
  crole text; cbasis text; aud text; srole text; rrole text; to_first text; roles text[]; conflict text[]; irole text;
- res jsonb; call_pr jsonb;
+ res jsonb; call_x jsonb; call_pr jsonb;
 BEGIN
  -- Message rows only: texts, calls, call transcripts, emails (and the older
  -- event types that carry no channel).
@@ -560,18 +597,29 @@ BEGIN
  -- When its call row is stamped with a known counterpart and the
  -- transcript's own reading names other roles, it takes the call's roles,
  -- basis and audience, marked from_call (the ladder's own audience on the
- -- transcript still wins, as everywhere). A call that reads a customer
- -- passes it on only when it sits where the transcript sits (the same job,
- -- or both on none): whose customer it is depends on the job
- -- (context_party_call_roles). The call's basis is kept, so a reader that
- -- reads job_customer or any_job_customer reads the transcript as it reads
- -- the call. Where they agree the transcript keeps its own basis.
- IF e.event_type='call.transcript_completed' THEN
-  call_pr:=public.context_party_call_roles(e);
+ -- transcript still wins, as everywhere), but never over the transcript's
+ -- own job's customer or a party on its job (job_customer, job_party): v1
+ -- reads a job's own customer before our users, the supplier list or a
+ -- builder, and where the ladder happened to put the call must not change
+ -- that. The call passes on when it sits where the transcript sits (the
+ -- same job, or both on none: then both went through the same rules, and
+ -- the call's reading is what v1's order gives the same person). From
+ -- another job, or from none to a job, only crew, staff, a supplier, a
+ -- builder or a council pass on (they are who they are on any job), and
+ -- only to a transcript whose own counterpart is unknown (no match, no
+ -- contact or a conflict); a call's customer never does (whose customer it
+ -- is depends on the job). The call's basis is kept, so a reader that reads
+ -- job_customer or any_job_customer reads the transcript as it reads the
+ -- call. Where they agree the transcript keeps its own basis.
+ IF e.event_type='call.transcript_completed' AND coalesce(res->>'basis','') NOT IN ('job_customer','job_party') THEN
+  call_x:=public.context_party_call_roles(e);
+  call_pr:=call_x->'party_roles';
   IF jsonb_typeof(call_pr)='object' AND coalesce(call_pr->>'counterpart_role','unknown') NOT IN ('unknown','')
    AND coalesce(call_pr->>'sender_role','unknown') NOT IN ('unknown','') AND coalesce(call_pr->>'recipient_role','unknown') NOT IN ('unknown','')
    AND (res->>'sender_role',res->>'recipient_role',res->>'counterpart_role')
-    IS DISTINCT FROM (call_pr->>'sender_role',call_pr->>'recipient_role',call_pr->>'counterpart_role') THEN
+    IS DISTINCT FROM (call_pr->>'sender_role',call_pr->>'recipient_role',call_pr->>'counterpart_role')
+   AND (call_x->'same_job'='true'::jsonb
+    OR (call_pr->>'counterpart_role'<>'customer' AND coalesce(res->>'counterpart_role','unknown') IN ('unknown',''))) THEN
    res:=jsonb_build_object('version','party_roles_v4','sender_role',call_pr->>'sender_role','recipient_role',call_pr->>'recipient_role',
     'counterpart_role',call_pr->>'counterpart_role','basis',coalesce(nullif(call_pr->>'basis',''),'unknown'),'from_call',true,
     'audience',coalesce(nullif(e.metadata->>'audience',''),nullif(call_pr->>'audience',''),'unknown'));
@@ -580,7 +628,7 @@ BEGIN
  RETURN res;
 END $$;
 COMMENT ON FUNCTION public.context_message_party_roles(public.business_events) IS
- 'Party roles v4 (20261007060000): for a message row (text, call, call transcript, email) {version, sender_role, recipient_role, counterpart_role, basis, audience[, conflicting_roles][, from_call]}; roles customer, crew, staff, supplier, insurer_builder, council or unknown; our side is staff. L1d''s internal label and an undecided writer marker are copied, never re-decided; our own crew and staff templates on an outbound text read to crew or staff (basis our_template); then v1''s (20261005200000) and v2''s (20261006000000) rules run unchanged, and where v2 collects signals v4 adds what our records say: an open opportunity in the CRM rosters (customer, open_opportunity), a council by its gov.au domain, a supplier by our material orders or a Xero bill named in an inbound email, a builder by its company''s own invoice or report domain; one role only when every signal agrees. A prospect is read only on a row placed on no job. A call transcript reads as its call where the two differ (the call''s roles, basis and audience, from_call true; a call''s customer only from a call placed where the transcript is). Null for any other row. Computes; never places, never writes. Service role may call it to preview.';
+ 'Party roles v4 (20261007060000): for a message row (text, call, call transcript, email) {version, sender_role, recipient_role, counterpart_role, basis, audience[, conflicting_roles][, from_call]}; roles customer, crew, staff, supplier, insurer_builder, council or unknown; our side is staff. L1d''s internal label and an undecided writer marker are copied, never re-decided; our own crew and staff templates on an outbound text read to crew or staff (basis our_template); then v1''s (20261005200000) and v2''s (20261006000000) rules run unchanged, and where v2 collects signals v4 adds what our records say: an open opportunity in the CRM rosters (customer, open_opportunity), a council by its gov.au domain, a supplier by our material orders or a Xero bill named in an inbound email, a builder by its company''s own invoice or report domain; one role only when every signal agrees. A prospect is read only on a row placed on no job. A call transcript reads as its call where the two differ (the call''s roles, basis and audience, from_call true), never over its own job''s customer or a party on its job: from a call placed where the transcript is (the same job, or both on none), or, from elsewhere, only crew, staff, a supplier, a builder or a council and only to a transcript whose own counterpart is unknown. Null for any other row. Computes; never places, never writes. Service role may call it to preview.';
 
 -- 6. Row 2's read (who-to-whom), for the scorecard: per message lane, over
 -- the rows captured in the window (capture time, the scorecard's), how many
