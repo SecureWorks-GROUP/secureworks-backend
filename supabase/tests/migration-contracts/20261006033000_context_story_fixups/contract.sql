@@ -436,10 +436,18 @@ ROLLBACK;
 
 -- 5. Re-applying the migration changes nothing (its guard accepts its own bodies). When
 -- story safety (20261006040000) has replaced four of them since, it is rolled back first
--- inside this transaction, so the re-apply starts from this migration's own bodies.
+-- inside this transaction, so the re-apply starts from this migration's own bodies (and the
+-- lead cutoff, 20261007010000, before it).
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE '%story safety (20261006040000)%' AS story_safety_live \gset
+-- (and the lead cutoff, 20261007010000, which replaced three of story safety's bodies since, first
+-- of all: story safety's down refuses while a later body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
 BEGIN;
+\if :lead_cutoff_live
+\ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
+\endif
 \if :story_safety_live
 \ir ../../../rollbacks/20261006040000_context_story_safety_down.sql
 \endif
