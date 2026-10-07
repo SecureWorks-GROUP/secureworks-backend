@@ -264,3 +264,175 @@ Deno.test("live wiring: the old-path lookup calls context_email_legacy_copy and 
   }
   assertEquals(code, "legacy_copy_unreadable");
 });
+
+Deno.test("deep: the mode passes through, and a probe always waits for its answer (it writes nothing anywhere else)", async () => {
+  const seen: unknown[] = [];
+  const pending: Promise<unknown>[] = [];
+  const probe: CaptureResult = {
+    outcome: "probe",
+    source_key: "nithin",
+    kind: "user",
+    from: "2025-07-01T00:00:00.000Z",
+    to: "2026-10-01T00:00:00.000Z",
+    complete: true,
+    months: { "2025-07": { seen: 3, more: false } },
+    folders: { inbox: 3, sent: 0, deleted: 0, skipped: 0 },
+    oldest_seen: "2025-07-02T00:00:00.000Z",
+    newest_seen: "2025-07-03T00:00:00.000Z",
+    reads: 2,
+    error_code: null,
+  };
+  const deps = {
+    env,
+    createSupabase: () => fakeSupabase({ reader: true, program: true }),
+    waitUntil: (p: Promise<unknown>) => pending.push(p),
+  };
+  const res = await handleCapture(
+    req({ "x-api-key": SERVER }, {
+      mode: "deep",
+      probe: true,
+      source: "nithin",
+      from: "2025-07-01T00:00:00.000Z",
+      to: "2026-10-01T00:00:00.000Z",
+    }),
+    deps,
+    (_d: unknown, r: unknown) => {
+      seen.push(r);
+      return Promise.resolve(probe);
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), probe);
+  assertEquals(pending.length, 0);
+  assertEquals(seen, [{
+    mode: "deep",
+    source: "nithin",
+    from: "2025-07-01T00:00:00.000Z",
+    to: "2026-10-01T00:00:00.000Z",
+    probe: true,
+  }]);
+  // A deep load call from the tick runs in the background like any other,
+  // and the plan's slice id passes through as it was sent.
+  const bg = await handleCapture(
+    req({ authorization: `Bearer ${SERVICE}` }, {
+      mode: "deep",
+      source: "nithin",
+      from: "2026-05-01T00:00:00.000Z",
+      to: "2026-06-01T00:00:00.000Z",
+      slice: "2026-10-07T06:04:00.123Z",
+      actor: "cron:outlook-mail-deep-history",
+    }),
+    deps,
+    (_d: unknown, r: unknown) => {
+      seen.push(r);
+      return Promise.resolve(idle);
+    },
+  );
+  assertEquals(bg.status, 202);
+  assertEquals(pending.length, 1);
+  await Promise.all(pending);
+  assertEquals(seen.at(-1), {
+    mode: "deep",
+    source: "nithin",
+    from: "2026-05-01T00:00:00.000Z",
+    to: "2026-06-01T00:00:00.000Z",
+    slice: "2026-10-07T06:04:00.123Z",
+  });
+  // Anything but text is not a slice id.
+  await handleCapture(
+    req({ authorization: `Bearer ${SERVICE}` }, {
+      wait: true,
+      mode: "deep",
+      source: "nithin",
+      from: "2026-05-01T00:00:00.000Z",
+      to: "2026-06-01T00:00:00.000Z",
+      slice: 12,
+    }),
+    deps,
+    (_d: unknown, r: unknown) => {
+      seen.push(r);
+      return Promise.resolve(idle);
+    },
+  );
+  assert(!("slice" in (seen.at(-1) as Record<string, unknown>)));
+});
+
+Deno.test("live wiring: the deep gate and scope read their RPCs; the prefix set is read once and reads as unreadable on a fault", async () => {
+  const sb = fakeSupabase({ reader: true, program: true });
+  const seen: string[] = [];
+  let gate: { data: unknown; error: unknown } = {
+    data: {
+      enabled: true,
+      state: "present",
+      hard_floor: "2024-12-31T16:00:00.000Z",
+      user_window_max_days: 32,
+    },
+    error: null,
+  };
+  sb.rpc = (name: string) => {
+    seen.push(name);
+    if (name === "context_email_deep_enabled") {
+      return Promise.resolve(gate) as any;
+    }
+    if (name === "context_email_deep_scope") {
+      return Promise.resolve({
+        data: {
+          version: "email-deep-v1",
+          jobs: 1,
+          job_numbers: {},
+          client_emails: {},
+          builder_refs: { "KBA88123": "2026-01-01T00:00:00.000Z" },
+        },
+        error: null,
+      }) as any;
+    }
+    return Promise.resolve({ data: null, error: { code: "42883" } }) as any;
+  };
+  let reads = 0;
+  sb.from = (table: string) => {
+    seen.push(`from:${table}`);
+    const q: any = {
+      select: () => q,
+      eq: () => {
+        reads++;
+        return Promise.resolve({
+          data: [{ parsing_rules: { ref_prefixes: ["KBA"] } }],
+          error: null,
+        });
+      },
+    };
+    return q;
+  };
+  const d = liveCaptureDeps({ env, createSupabase: () => sb });
+  assertEquals(await d.deepGate(), {
+    enabled: true,
+    hardFloorMs: Date.parse("2024-12-31T16:00:00.000Z"),
+    userWindowMaxDays: 32,
+  });
+  const scope = await d.deepScope();
+  assertEquals([...scope.builderRefs.keys()], ["KBA-88123"]);
+  assertEquals(await d.builderRefPrefixes(), ["MLB", "AJBR", "MS", "KBA"]);
+  assertEquals(reads, 1);
+  gate = { data: null, error: { code: "42883" } };
+  let code = "";
+  try {
+    await d.deepGate();
+  } catch (e) {
+    code = (e as { code?: string }).code ?? "";
+  }
+  assertEquals(code, "deep_gate_unreadable");
+  // A prefix read fault: null, so the reader uses the floor and counts it.
+  const sb2 = fakeSupabase({ reader: true, program: true });
+  sb2.from = () => {
+    const q: any = {
+      select: () => q,
+      eq: () => Promise.resolve({ data: null, error: { message: "boom" } }),
+    };
+    return q;
+  };
+  assertEquals(
+    await liveCaptureDeps({ env, createSupabase: () => sb2 })
+      .builderRefPrefixes(),
+    null,
+  );
+});

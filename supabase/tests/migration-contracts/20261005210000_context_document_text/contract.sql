@@ -246,6 +246,20 @@ CREATE TABLE cron.job (jobid bigserial PRIMARY KEY,schedule text NOT NULL,comman
 CREATE FUNCTION cron.schedule(job_name text,schedule text,command text) RETURNS bigint LANGUAGE sql AS $$
  INSERT INTO cron.job(jobname,schedule,command) VALUES(job_name,schedule,command) RETURNING jobid
 $$;
+-- A later slice (history depth, 20261007080000) adds its own job to the lane
+-- list; stand this migration's body back up (rolled back below) so its
+-- re-apply guard holds.
+SELECT md5(prosrc) NOT IN ('8c99245789cadf661d4b6be1207f0887','99e6d70e80a79e548f2478b65fc6cd78') AS b5_lanes_moved
+FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure \gset
+\if :b5_lanes_moved
+\ir b5_cron_lanes.sql
+\endif
+DO $$
+BEGIN
+ IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)
+   NOT IN ('8c99245789cadf661d4b6be1207f0887','99e6d70e80a79e548f2478b65fc6cd78')
+ THEN RAISE EXCEPTION 'b5 b5_cron_lanes.sql is not the B-5 body'; END IF;
+END $$;
 \ir ../../../migrations/20261005210000_context_document_text.sql
 \ir ../../../migrations/20261005210000_context_document_text.sql
 DO $$
