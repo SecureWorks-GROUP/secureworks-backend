@@ -664,10 +664,11 @@ trigger re-stamps, in three passes because the CRM rule reads other rows'
 crew stamps and a transcript reads its call's; it refuses a batch that lowers
 the live scorecard's row 3 unless the owner accepted that drop; the undo
 restores the saved stamp with the trigger off; the v3 one refuses once v4 is
-live). A re-stamp's shares are a one-time high: a new row is read at capture,
-usually before a prospect's opportunity or a supplier's Xero bill exists. So
-a version stamp alone never proves a backfill ran; its run key does. A later
-change to
+live). A re-stamp's shares are a one-time high: a new row is read once, at
+capture, often before a prospect's opportunity reaches the cached CRM roster
+(refreshed only when the sales booking page loads) or a supplier's Xero bill
+reaches our copy. So a version stamp alone never proves a backfill ran; its
+run key does. A later change to
 the classifier updates these contract touch points: v1's (`20261005200000`)
 version and comment checks and its re-apply skip; v2's (`20261006000000`)
 version and comment checks; the `20261006034000` case's classifier pin (it

@@ -81,20 +81,22 @@
 -- conflict (1 call, 1 transcript: the signals disagree).
 -- Those shares are a one-time high, not what the lanes keep. A new row is
 -- read when it is captured (and again only when a writer updates it), and
--- two of v4's signals usually arrive after the message: a prospect's
--- opportunity (13 texts, 11 calls and 5 transcripts of the window came
--- before it was created, 80 texts, 5 calls and 10 transcripts less than a
--- day after; the roster cache is refreshed only when the sales booking page
--- loads) and a supplier's Xero bill (48 of the 84 bill emails came before
--- the bill reached our Xero copy). Read at capture the window reads: texts
--- 4,460 (95.3%) with a roster refreshed for every message and 4,380 (93.6%)
--- with one a day old, so amber; calls 1,233 to 1,228 (91.1% to 90.7%); call
--- transcripts 321 to 311 (72.6% to 70.4%); emails in 1,657 (77.3%); emails
--- out 639 (92.6%); crew and staff texts 234 (100%). The re-stamped shares
--- drift down to those over the 30 days after it, unless recent unknown rows
--- are re-stamped on a schedule (behind its own switch, created off: a
--- live-data change, the owner's yes) or the capture side changes (a roster
--- refreshed on a schedule, the Xero bill sync run sooner after a bill email).
+-- two of v4's signals often reach our records only after the message: a
+-- prospect's opportunity (13 texts, 11 calls and 5 transcripts of the window
+-- came before it was created, 80 texts, 5 calls and 10 transcripts less than
+-- a day after; the roster cache is refreshed only when the sales booking
+-- page loads) and a supplier's Xero bill (48 of the 84 bill emails came
+-- before the bill reached our Xero copy). Read at capture the window reads:
+-- texts 4,460 (95.3%) with a roster refreshed for every message, 4,380
+-- (93.6%) with one a day old, and fewer with the rosters as they are
+-- refreshed today (on no schedule), so amber; calls 1,233 to 1,228 (91.1% to
+-- 90.7%); call transcripts 321 to 311 (72.6% to 70.4%); emails in 1,657
+-- (77.3%); emails out 639 (92.6%); crew and staff texts 234 (100%). The
+-- re-stamped shares drift down to those over the 30 days after it, unless
+-- recent unknown rows are re-stamped on a schedule (behind its own switch,
+-- created off: a live-data change, the owner's yes) or the capture side
+-- changes (a roster refreshed on a schedule, the Xero bill sync run sooner
+-- after a bill email).
 -- It also moves row 3 (customer messages placed on a job, read from
 -- party_roles.audience): 410 prospect messages, none on a job, become
 -- customer messages with no job yet, so the live scorecard's row 3 reads

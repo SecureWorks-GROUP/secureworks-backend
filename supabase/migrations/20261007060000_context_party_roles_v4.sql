@@ -132,7 +132,7 @@
 -- disagrees with an old one.
 -- Those shares are a one-time high, not what the lanes keep. A new row is
 -- read once, when it is captured (and again only when a writer updates it),
--- and two of v4's signals usually arrive after the message does:
+-- and two of v4's signals often reach our records only after the message:
 --   * A prospect's opportunity: 13 texts, 11 calls and 5 transcripts of the
 --     window came before their opportunity was created, and 80 texts, 5
 --     calls and 10 transcripts less than a day after it. The roster cache is
@@ -142,8 +142,9 @@
 --     the bill reached our Xero copy after the email was captured (28 within
 --     a day, 20 later).
 -- Read at capture, the window reads: texts 4,460 (95.3%) with a roster
--- refreshed for every message and 4,380 (93.6%) with one a day old, so
--- amber, not green; calls 1,233 to 1,228 (91.1% to 90.7%); call transcripts
+-- refreshed for every message, 4,380 (93.6%) with one a day old, and fewer
+-- with the rosters as they are refreshed today (on no schedule), so amber,
+-- not green; calls 1,233 to 1,228 (91.1% to 90.7%); call transcripts
 -- 321 to 311 (72.6% to 70.4%); emails in 1,657 (77.3%); emails out 639
 -- (92.6%); crew and staff texts 234 (100%). (Our material orders are in our
 -- records only since 5 Oct, so 70 of the window's 116 supplier emails that
