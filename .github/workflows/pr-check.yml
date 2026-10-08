@@ -229,6 +229,18 @@ jobs:
             supabase/functions/ops-api/debt_draft_templates_test.ts \
             supabase/functions/ops-api/debt_desk_actions_test.ts
 
+      # Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md):
+      # the plain rules (scope, lane, kind, share, due dates, categories, steps with the
+      # weekend shift, templates, the bank-feed matcher), the Supabase store, and every
+      # debt_ws_ action over an in-memory store. Sending, the agent, auto-send and Jan's
+      # list are all proven off by default; every send runs the live Xero and bank checks.
+      - name: Test the Debt Workshop rules, store and actions
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/ops-api/debt_ws_rules_test.ts \
+            supabase/functions/ops-api/debt_ws_store_test.ts \
+            supabase/functions/ops-api/debt_ws_actions_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

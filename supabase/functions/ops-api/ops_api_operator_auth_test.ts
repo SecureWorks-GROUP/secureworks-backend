@@ -1120,3 +1120,49 @@ Deno.test("debt desk writes are staff or server only; trades and the agent key a
     assertEquals(scopedDispatchStatus(action, "agent_read"), 403);
   }
 });
+
+Deno.test("debt workshop actions are staff JWT or server secret only; trades and the agent read key are refused", () => {
+  // runDebtWsAction (debt_ws_actions.ts) then narrows each action: the owner for sends,
+  // statements, contacts and card moves, the server key for the Jan list cron.
+  for (
+    const action of [
+      "debt_ws_overview",
+      "debt_ws_job",
+      "debt_ws_document",
+      "debt_ws_note",
+      "debt_ws_decide",
+      "debt_ws_set_category",
+      "debt_ws_link_contact",
+      "debt_ws_statement_preview",
+      "debt_ws_statement_send",
+      "debt_ws_jan_list",
+      "debt_ws_jan_list_remove",
+      "debt_ws_jan_list_lock",
+      "debt_ws_jan_list_send",
+      "debt_ws_agent_queue",
+      "debt_ws_agent_submit",
+    ]
+  ) {
+    assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true, action);
+    assertEquals(_opsApiActionNeedsStaffRole(actionUrl(action)), true, action);
+    for (const authMode of ["none", "api_key"] as const) {
+      assertEquals(authorizationStatus({ action, authMode }), 401, action);
+    }
+    assertEquals(
+      authorizationStatus({ action, authMode: "api_key", serverSecretPresented: true }),
+      200,
+      action,
+    );
+    for (const role of ["admin", "owner", "ops_manager"]) {
+      assertEquals(authorizationStatus({ action, authMode: "jwt", role }), 200);
+    }
+    for (const role of ["crew", "installer", "lead_installer"]) {
+      assertEquals(
+        authorizationStatus({ action, authMode: "jwt", role, managedVerticals: ["roofing"] }),
+        403,
+        action,
+      );
+    }
+    assertEquals(scopedDispatchStatus(action, "agent_read"), 403, action);
+  }
+});

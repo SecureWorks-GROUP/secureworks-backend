@@ -546,6 +546,8 @@ import {
 } from './debt_desk_actions.ts'
 import { DEBT_CHASE_HISTORY_FILTER } from './debt_desk_drafts.ts'
 import { createSupabaseJanStaffStore, readJanMobile } from './debt_jan_text.ts'
+import { type DebtWsCaller, DebtWsSendRefusedError, runDebtWsAction } from './debt_ws_actions.ts'
+import { createDebtWsDeps } from './debt_ws_deps.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
 import { insuranceReadAction } from './insurance_read_handlers.ts'
 import {
@@ -7885,6 +7887,80 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           logDebtDeskFailure(action, error)
           return json({ ok: false, code: 'DEBT_DESK_FAILED', error: 'The debt desk could not complete this action' }, 502)
         }
+      }
+      // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
+      // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
+      // (runDebtWsAction checks the method, then staff / owner / server key per action).
+      // Nothing reaches a client unless env DEBT_WS_SENDING_ENABLED is exactly "true" AND
+      // debt_ws_settings.sending_enabled is on. Xero is read only here.
+      case 'debt_ws_overview':
+      case 'debt_ws_job':
+      case 'debt_ws_document':
+      case 'debt_ws_note':
+      case 'debt_ws_decide':
+      case 'debt_ws_set_category':
+      case 'debt_ws_link_contact':
+      case 'debt_ws_statement_preview':
+      case 'debt_ws_statement_send':
+      case 'debt_ws_jan_list':
+      case 'debt_ws_jan_list_remove':
+      case 'debt_ws_jan_list_lock':
+      case 'debt_ws_jan_list_send':
+      case 'debt_ws_agent_queue':
+      case 'debt_ws_agent_submit': {
+        const debtWsCaller: DebtWsCaller = authMode === 'jwt' && authUser
+          ? { kind: 'user', user_id: authUser.id, email: authUser.email || null, staff: _opsApiCallerIsStaffOperator(authMode, authUser) }
+          : authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' }
+          : { kind: 'none' }
+        const debtWs = await runDebtWsAction(action, req.method, url.searchParams, body, debtWsCaller, createDebtWsDeps({
+          client,
+          orgId: DEFAULT_ORG_ID,
+          getToken,
+          xeroGet: xeroReadGet,
+          // The one text path: 771, the SES fence and the contact/job match guard. A guard
+          // refusal (ApiError / SesActionError) means nothing was handed to GoHighLevel.
+          sendChaseSms: async (smsBody: Record<string, unknown>) => {
+            try {
+              return await sendChaseSms(client, smsBody)
+            } catch (error) {
+              if (error instanceof ApiError || error instanceof SesActionError) throw new DebtWsSendRefusedError(error.message)
+              throw error
+            }
+          },
+          // Jan's visit list: the same staff SMS path the old desk used for Jan's mobile.
+          sendStaffSms: (phone: string, message: string) => sendSmsViaGhlWithReceipt(phone, message, null),
+          getJobConversation: (convBody: Record<string, unknown>) => getJobConversation(client, convBody),
+          updateJobStatus: (statusBody: Record<string, unknown>) => updateJobStatus(client, statusBody),
+          // Company statements: HTML only through send-outlook-email (same auth as the
+          // invoice email above). No job_id, invoice id or attachment, so no PDF fence applies.
+          sendEmail: async (payload) => {
+            const resp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-api-key': SW_API_KEY },
+              body: JSON.stringify(payload),
+            })
+            const text = resp.ok ? null : (await resp.text().catch(() => '')).slice(0, 500)
+            return { ok: resp.ok, status: resp.status, error: text }
+          },
+          invoicePdf: (id: string) => getInvoicePdf(client, new URLSearchParams({ xero_invoice_id: id }), {
+            mode: authMode,
+            role: authUser?.role ?? null,
+          }),
+          searchContacts: async (q: string) => (await searchGHLContacts(client, new URLSearchParams({ q }))).contacts,
+          insuranceRead: (params: URLSearchParams) => insuranceReadAction({
+            from: (table: string) => (client as any).from(table),
+            storageProjectUrl: SUPABASE_URL,
+            storageBearerToken: SUPABASE_SERVICE_KEY,
+            defaultOrgId: DEFAULT_ORG_ID,
+          }, params, 'GET', {
+            mode: authMode,
+            orgId: authUser?.orgId,
+            role: authUser?.role,
+            serverSecretPresented,
+          }),
+        }))
+        return json(debtWs.body, debtWs.status)
       }
       case 'list_supplier_bills':
       case 'list_xero_bills': {

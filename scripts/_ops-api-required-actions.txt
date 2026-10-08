@@ -291,3 +291,21 @@ sales_booking_routes_write # probe=source-only
 sales_performance_write # probe=source-only
 sales_performance_read # probe=source-only
 sales_performance_note # probe=source-only
+# Debt Workshop (8 Oct 2026; docs/debt-workshop/README.md). Every action needs a staff
+# JWT or a server secret, so the shared-key GET probe is refused at authentication
+# before any read, send or write: jwt-fail-closed proves recognition safely.
+debt_ws_overview # probe=jwt-fail-closed
+debt_ws_job # probe=jwt-fail-closed
+debt_ws_document # probe=jwt-fail-closed
+debt_ws_note # probe=jwt-fail-closed
+debt_ws_decide # probe=jwt-fail-closed
+debt_ws_set_category # probe=jwt-fail-closed
+debt_ws_link_contact # probe=jwt-fail-closed
+debt_ws_statement_preview # probe=jwt-fail-closed
+debt_ws_statement_send # probe=jwt-fail-closed
+debt_ws_jan_list # probe=jwt-fail-closed
+debt_ws_jan_list_remove # probe=jwt-fail-closed
+debt_ws_jan_list_lock # probe=jwt-fail-closed
+debt_ws_jan_list_send # probe=jwt-fail-closed
+debt_ws_agent_queue # probe=jwt-fail-closed
+debt_ws_agent_submit # probe=jwt-fail-closed
