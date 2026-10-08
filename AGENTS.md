@@ -617,8 +617,27 @@ a batch. `context_extraction_events` returns exact rows because
 `older_context` come from `context_extraction_event_flags`.
 
 The owner's definition of done (rows 1 to 14) is measured by
-`context_scorecard(as_of)` and, per live job, `context_scorecard_jobs(after,
-limit, as_of)` (`20261006032000`; staff door `ops-api?action=context_scorecard`).
+`context_scorecard(as_of)` and, per job, `context_scorecard_jobs(after,
+limit, as_of)` (W11 `20261006032000`, v2 `20261007120000`; staff door
+`ops-api?action=context_scorecard`, which accepts the v1 and v2 answers).
+Since v2 the job rows read only the live jobs the lead rule keeps monitored
+(`context_lead_monitored_jobs`), reading is the new AI reader's (row 6: an
+item is read once the job's live ledger reading's `evidence_until` covers its
+`landed_at`; never a shadow reading, never the retired fact reader), and each
+row reads its slice's own read, never a re-derivation: row 2
+`context_party_roles_lanes`, row 3 `context_placement_grades_newest` and
+`context_placement_misfile_counts` (a row on a holding job is a known
+misfile; every customer message counts, a prospect's with no job yet too,
+until the owner rules on prospects, so its lanes count what the placement
+grade's population counts), row 4 `context_history_crm_summary` (done = loaded
+or tried with no CRM contact) and the Xero top-up, rows 7 to 9
+`context_item_kinds` and `context_grades_newest` (row 9 also needs the story
+switch `feature_flags.context_job_story_v1` on now, not only at the test run:
+done means green and live), row 10 `context_scorecard_run_status(as_of)->'lane'`
+as it is, row 14 `context_email_history_reach`. Shares round down, never up.
+Both reads carry `statement_timeout = 50s`, which PostgREST hoists, so the
+door's 8 s role timeout does not cut the card. While a later body is live,
+W11's contract stands W11's three bodies back up (`w11_scorecard.sql`).
 Every threshold, including each capture lane's quiet limit in Perth working
 minutes and the 3-run history stall rule, lives only in
 `context_scorecard_policy()`; change it there by migration, never in a caller.

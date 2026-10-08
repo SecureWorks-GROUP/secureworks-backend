@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 //
-// The context scorecard door (gap map W11, migration 20261006032000).
+// The context scorecard door (gap map W11, migration 20261006032000; the
+// scorecard v2, 20261007120000, answers the same door).
 //
 // GET ops-api?action=context_scorecard            rows 1 to 14 of the owner's
 //     definition of done, per lane, with the lane_quiet and
@@ -14,7 +15,12 @@
 // facts, Xero invoices and the story rows (11 to 13) are read as they are now.
 //
 // Staff front door, GET only. It calls two read-only SQL functions and writes
-// nothing; a failed read is an error with a code, never an empty card.
+// nothing; a failed read is an error with a code, never an empty card. It
+// accepts the v1 card and page and the v2 ones (the job rows of v2 measure the
+// live jobs the lead rule keeps monitored), so the migration and its rollback
+// each answer this door, whichever reaches production first.
+export const SCORECARD_VERSIONS = ["context-scorecard-v1", "context-scorecard-v2"];
+export const SCORECARD_JOBS_VERSIONS = ["context-scorecard-jobs-v1", "context-scorecard-jobs-v2"];
 
 import {
   parseInstant,
@@ -65,7 +71,7 @@ export async function contextScorecardAction(
       );
     }
     if (
-      !page.data || page.data.version !== "context-scorecard-jobs-v1" ||
+      !page.data || !SCORECARD_JOBS_VERSIONS.includes(page.data.version) ||
       !Array.isArray(page.data.jobs)
     ) {
       throw new StoryReadError(
@@ -85,7 +91,7 @@ export async function contextScorecardAction(
     );
   }
   if (
-    !card.data || card.data.version !== "context-scorecard-v1" ||
+    !card.data || !SCORECARD_VERSIONS.includes(card.data.version) ||
     !Array.isArray(card.data.rows) || card.data.rows.length !== 14
   ) {
     throw new StoryReadError(

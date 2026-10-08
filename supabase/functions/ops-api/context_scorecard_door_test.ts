@@ -57,6 +57,24 @@ Deno.test("GET context_scorecard returns the rows 1 to 14 card", async () => {
   assertEquals(client.calls, [{ fn: "context_scorecard", args: {} }]);
 });
 
+Deno.test("the scorecard v2 card and page answer the same door; another version does not", async () => {
+  const v2 = { ...CARD, version: "context-scorecard-v2", monitored_jobs: 2, leads_not_followed_up: 1 };
+  const client = fakeClient({ context_scorecard: { data: v2, error: null } });
+  const card: any = await contextScorecardAction(client, new URLSearchParams(""));
+  assertEquals(card.version, "context-scorecard-v2");
+  assertEquals(card.monitored_jobs, 2);
+  const page = { version: "context-scorecard-jobs-v2", jobs: [{ job_id: JOB, status: "red", rows: [] }], next: null };
+  const pageClient = fakeClient({ context_scorecard_jobs: { data: page, error: null } });
+  const got: any = await contextScorecardAction(pageClient, new URLSearchParams("jobs=1"));
+  assertEquals(got.version, "context-scorecard-jobs-v2");
+  const other = fakeClient({ context_scorecard: { data: { ...CARD, version: "context-scorecard-v9" }, error: null } });
+  const err = await assertRejects(() => contextScorecardAction(other, new URLSearchParams("")), StoryReadError);
+  assertEquals((err as StoryReadError).code, "scorecard_invalid_shape");
+  const otherPage = fakeClient({ context_scorecard_jobs: { data: { ...page, version: "context-scorecard-jobs-v9" }, error: null } });
+  const pageErr = await assertRejects(() => contextScorecardAction(otherPage, new URLSearchParams("jobs=1")), StoryReadError);
+  assertEquals((pageErr as StoryReadError).code, "scorecard_invalid_shape");
+});
+
 Deno.test("as_of is passed through as an ISO instant", async () => {
   const client = fakeClient({ context_scorecard: { data: CARD, error: null } });
   await contextScorecardAction(client, new URLSearchParams("as_of=2026-10-05T04:00:00Z"));

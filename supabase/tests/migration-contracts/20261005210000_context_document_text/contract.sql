@@ -246,13 +246,20 @@ CREATE TABLE cron.job (jobid bigserial PRIMARY KEY,schedule text NOT NULL,comman
 CREATE FUNCTION cron.schedule(job_name text,schedule text,command text) RETURNS bigint LANGUAGE sql AS $$
  INSERT INTO cron.job(jobname,schedule,command) VALUES(job_name,schedule,command) RETURNING jobid
 $$;
--- A later slice (history depth, 20261007080000) adds its own job to the lane
--- list; stand this migration's body back up (rolled back below) so its
--- re-apply guard holds.
+-- Later slices (history daily, 20261007050000; history depth, 20261007080000)
+-- add their jobs to the lane list, and history daily widens M4's live-job
+-- list, both pinned by this migration's guard; stand those bodies back up
+-- (rolled back below) so the re-apply is tested against the pre-images it
+-- was written for.
 SELECT md5(prosrc) NOT IN ('8c99245789cadf661d4b6be1207f0887','99e6d70e80a79e548f2478b65fc6cd78') AS b5_lanes_moved
 FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure \gset
 \if :b5_lanes_moved
 \ir b5_cron_lanes.sql
+\endif
+SELECT md5(prosrc)<>'49eb23015b724a29058c11b2743954bf' AS b5_list_moved
+FROM pg_proc WHERE oid='public.context_ghl_history_live_jobs()'::regprocedure \gset
+\if :b5_list_moved
+\ir ../20261007050000_context_history_daily/m4_live_jobs.sql
 \endif
 DO $$
 BEGIN
