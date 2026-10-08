@@ -27,6 +27,7 @@ import {
   STAFF,
 } from "./debt_ws_test_fakes.ts";
 import { DEBT_WS_SETTINGS_OFF } from "./debt_ws_store.ts";
+import type { BankTransaction } from "./debt_ws_rules.ts";
 
 type Deps = ReturnType<typeof fakeDeps>["deps"];
 
@@ -65,6 +66,8 @@ const D7_SEND = {
   step: "d7",
   action: "send",
   text: "Hi Alex,\n\nThere's $1,000.00 still outstanding.\n\nCheers,\nShaun",
+  // A template send carries the amount its draft was written against.
+  amount: 1000,
 };
 
 // ── Switches and owner ──
@@ -404,7 +407,8 @@ Deno.test("decide: a possible payment refuses; Send anyway overrides and is logg
     (refused.body.possible_payments as any[])[0].reason,
     "amount matches, name unclear",
   );
-  assertEquals(rec.bankReads, ["2026-09-30"]);
+  // One read that reaches back to the oldest open invoice (1 Sep), not just this one.
+  assertEquals(rec.bankReads, ["2026-08-31"]);
   assertEquals(rec.sms.length, 0);
 
   const sent = await call(deps, "debt_ws_decide", SHAUN, {
@@ -1564,4 +1568,572 @@ Deno.test("auto-send: off by default; runs the same guarded send only when every
   const { deps: d4, rec: r4 } = fakeDeps(store4, { env });
   await call(d4, "debt_ws_agent_submit", SERVER, draft);
   assertEquals(r4.sms.length, 0);
+});
+
+// ── Review fixes, 8 October 2026 (Codex and the independent review) ──
+
+/** Like call(), but keeps the bank-feed cache between calls (a warm function). */
+async function callWarm(
+  deps: Deps,
+  action: string,
+  caller = SHAUN,
+  input: Record<string, unknown> = {},
+) {
+  const method = DEBT_WS_ACTIONS[action].method;
+  const params = new URLSearchParams(
+    method === "GET"
+      ? Object.fromEntries(
+        Object.entries(input).map(([k, v]) => [k, String(v)]),
+      )
+      : {},
+  );
+  return await runDebtWsAction(
+    action,
+    method,
+    params,
+    method === "POST" ? input : {},
+    caller,
+    deps,
+  );
+}
+
+function receive(
+  over: Partial<BankTransaction> & { total: number; date: string },
+): BankTransaction {
+  return {
+    bank_transaction_id: `b0000000-0000-4000-8000-${
+      String(Math.round(over.total * 100)).padStart(12, "0")
+    }`,
+    type: "RECEIVE",
+    reference: null,
+    contact_name: null,
+    line_item_descriptions: [],
+    ...over,
+  };
+}
+
+Deno.test("bank cache: several sends reuse one read of the bank feed (Codex 1)", async () => {
+  _resetDebtWsBankCacheForTest();
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const ov = (await callWarm(deps, "debt_ws_overview")).body as any;
+  const progress = ov.rows.find((r: any) => r.xero_invoice_id === IDS.progress);
+  assert(progress.step_due, "the materials invoice has a step due");
+  // A refused send, a sent one, and a send on another invoice: one bank read.
+  const refused = await callWarm(deps, "debt_ws_decide", SHAUN, {
+    ...D7_SEND,
+    amount: 5000,
+  });
+  assertEquals(refused.body.code, "part_paid");
+  assertEquals(
+    (await callWarm(deps, "debt_ws_decide", SHAUN, D7_SEND)).status,
+    200,
+  );
+  const second = await callWarm(deps, "debt_ws_decide", SHAUN, {
+    xero_invoice_id: IDS.progress,
+    step: progress.step_due.step,
+    action: "send",
+    text: "Hi Casey,\n\nThe materials invoice is still open.\n\nCheers,\nShaun",
+    amount: 2000,
+  });
+  assertEquals(second.status, 200);
+  await callWarm(deps, "debt_ws_job", SHAUN, { xero_invoice_id: IDS.final });
+  assertEquals(rec.sms.length, 2);
+  assertEquals(rec.bankReads, ["2026-08-31"]);
+  // Fifteen minutes later the feed is read again, once.
+  const { deps: later, rec: rec2 } = fakeDeps(store, {
+    env: ON,
+    now: new Date(NOW.getTime() + 16 * 60_000),
+  });
+  await callWarm(later, "debt_ws_job", SHAUN, {
+    xero_invoice_id: IDS.progress,
+  });
+  await callWarm(later, "debt_ws_job", SHAUN, { xero_invoice_id: IDS.final });
+  assertEquals(rec2.bankReads.length, 1);
+  _resetDebtWsBankCacheForTest();
+});
+
+Deno.test("bank cache: an invoice over 120 days old is matched; pages are followed and spends ignored (Codex 1, review 3)", async () => {
+  const store = new FakeStore();
+  const old = store.invoices.find((i) => i.xero_invoice_id === IDS.final)!;
+  old.invoice_date = "2026-03-02";
+  // Out of rectification yesterday: a fresh clock, so day 1 is due today.
+  store.exits.push({ job_id: JOBS.fence, occurred_at: "2026-10-07T04:00:00Z" });
+  const spend = receive({ total: 1000, date: "2026-03-20", type: "SPEND" });
+  const filler = Array.from(
+    { length: 100 },
+    (_, k) =>
+      receive({
+        total: 7 + k,
+        date: "2026-09-01",
+        bank_transaction_id: `b1000000-0000-4000-8000-${
+          String(k).padStart(12, "0")
+        }`,
+      }),
+  );
+  const { deps, rec } = fakeDeps(store, {
+    env: sendingOn(store),
+    bankPages: [
+      [spend, ...filler.slice(0, 99)],
+      filler,
+      [receive({ total: 1000, date: "2026-03-20", reference: "INV-2001" })],
+    ],
+  });
+  const ov = (await call(deps, "debt_ws_overview")).body as any;
+  const row = ov.rows.find((r: any) => r.xero_invoice_id === IDS.final);
+  assertEquals(row.step_due.step, "d1");
+  const refused = await call(deps, "debt_ws_decide", SHAUN, {
+    ...D7_SEND,
+    step: "d1",
+  });
+  assertEquals(refused.body.code, "possible_payment");
+  const found = refused.body.possible_payments as any[];
+  // Only the RECEIVE row: the spend of the same amount is not a payment.
+  assertEquals(found.length, 1);
+  assertEquals(found[0].reason, "amount and invoice number match");
+  assertEquals(rec.bankReads, ["2026-03-01", "2026-03-01", "2026-03-01"]);
+  assertEquals(rec.bankPages, [1, 2, 3]);
+  assertEquals(rec.sms.length, 0);
+  const job = (await call(deps, "debt_ws_job", SHAUN, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(job.possible_payments.length, 1);
+  assertEquals(job.possible_payments_status, "ok");
+});
+
+Deno.test("bank cache: a read cut short at the page cap never clears an invoice it does not reach", async () => {
+  const store = new FakeStore();
+  // Eleven full pages, newest first, all dated after the invoice: the read stops at ten.
+  const pages = Array.from(
+    { length: 11 },
+    (_, p) =>
+      Array.from({ length: 100 }, (_, k) =>
+        receive({
+          total: 1 + k,
+          date: p < 10 ? "2026-10-07" : "2026-10-03",
+          bank_transaction_id: `b2000000-0000-4000-8000-${
+            String(p * 100 + k).padStart(12, "0")
+          }`,
+        })),
+  );
+  const { deps, rec } = fakeDeps(store, {
+    env: sendingOn(store),
+    bankPages: pages,
+  });
+  const res = await call(deps, "debt_ws_decide", SHAUN, D7_SEND);
+  assertEquals(res.status, 503);
+  assertEquals(res.body.code, "bank_check_unavailable");
+  assertEquals(rec.bankPages.length, 10);
+  assertEquals(rec.sms.length, 0);
+  const job = (await call(deps, "debt_ws_job", SHAUN, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(job.possible_payments_status, "partial");
+});
+
+Deno.test("statement: a possible payment on any invoice refuses; the owner can send anyway, logged (Codex 2)", async () => {
+  const store = new FakeStore();
+  const bank = [receive({ total: 330, date: "2026-09-05" })];
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store), bank });
+  const refused = await call(deps, "debt_ws_statement_send", SHAUN, {
+    company_key: MLB_CONTACT,
+  });
+  assertEquals(refused.status, 409);
+  assertEquals(refused.body.code, "possible_payment");
+  assertEquals(
+    (refused.body.possible_payments as any[]).map((p) => p.xero_invoice_id),
+    [IDS.account],
+  );
+  assert(String(refused.body.error).includes("INV-2003"));
+  assertEquals(rec.emails.length, 0);
+  // The claim is released, and the refusal is logged with which invoices.
+  assertEquals(store.statementRows[0].status, "refused");
+  const log = store.logRows.at(-1)!;
+  assertEquals(log.kind, "send_refused");
+  assertEquals(log.meta.code, "possible_payment");
+  assertEquals((log.meta.possible_payments as any[]).length, 1);
+  assertEquals(
+    (await call(deps, "debt_ws_statement_send", SHAUN, {
+      company_key: MLB_CONTACT,
+      override_possible_payment: "yes",
+    })).status,
+    400,
+  );
+  const sent = await call(deps, "debt_ws_statement_send", SHAUN, {
+    company_key: MLB_CONTACT,
+    override_possible_payment: true,
+  });
+  assertEquals(sent.status, 200);
+  assertEquals(sent.body.override_possible_payment, true);
+  assertEquals(rec.emails.length, 1);
+  const sentLog = store.logRows.find((l) => l.kind === "statement_sent")!;
+  assertEquals(sentLog.meta.override_possible_payment, true);
+  assertEquals((sentLog.meta.possible_payments as any[]).length, 1);
+
+  // No bank feed: refused, nothing emailed.
+  const store2 = new FakeStore();
+  const { deps: d2, rec: r2 } = fakeDeps(store2, {
+    env: sendingOn(store2),
+    bankError: new Error("xero down"),
+  });
+  const down = await call(d2, "debt_ws_statement_send", SHAUN, {
+    company_key: MLB_CONTACT,
+  });
+  assertEquals(down.body.code, "bank_check_unavailable");
+  assertEquals(r2.emails.length, 0);
+  assertEquals(store2.statementRows[0].status, "refused");
+});
+
+/** Locks next Monday's list on Friday 9 Oct, 09:00 Perth. */
+async function lockJanList(store: FakeStore) {
+  store.settingsRow.jan_list_auto_send = true;
+  store.settingsRow.sending_enabled = true;
+  const { deps } = fakeDeps(store, {
+    env: ON,
+    now: new Date("2026-10-09T01:00:00Z"),
+  });
+  const lock = await call(deps, "debt_ws_jan_list_lock", SERVER);
+  assertEquals(lock.body.locked, true);
+}
+
+const SUNDAY = new Date("2026-10-11T11:00:00Z");
+
+Deno.test("Jan's list: a failed live Xero read fails closed, never sends from our copy (Codex 3)", async () => {
+  const store = new FakeStore();
+  await lockJanList(store);
+  const { deps, rec } = fakeDeps(store, {
+    env: ON,
+    now: SUNDAY,
+    liveError: new Error("xero down"),
+  });
+  const res = await call(deps, "debt_ws_jan_list_send", SERVER);
+  assertEquals(res.body.ok, false);
+  assertEquals(res.body.sent, false);
+  assertEquals(res.body.reason, "xero_unavailable");
+  assertEquals(rec.staffSms.length, 0);
+  assertEquals(store.janRows[0].status, "failed");
+  assertEquals(store.janRows[0].error, "xero_unavailable");
+});
+
+Deno.test("Jan's list: a possible payment drops that visit and logs it; the rest still go (Codex 4)", async () => {
+  const store = new FakeStore();
+  const second = "10000000-0000-4000-8000-000000000020";
+  store.invoices.push({
+    ...store.invoices.find((i) => i.xero_invoice_id === IDS.janFinal)!,
+    xero_invoice_id: second,
+    invoice_number: "INV-2020",
+    contact_name: "Taylor Main",
+    reference: "SWF-90004-FINBAL",
+    total: 600,
+    amount_due: 600,
+  });
+  await lockJanList(store);
+  assertEquals(store.janRows[0].items.length, 2);
+  const { deps, rec } = fakeDeps(store, {
+    env: ON,
+    now: SUNDAY,
+    bank: [receive({ total: 750, date: "2026-10-10" })],
+  });
+  const res = await call(deps, "debt_ws_jan_list_send", SERVER);
+  assertEquals(res.body.sent, true);
+  assertEquals(res.body.count, 1);
+  assertEquals(res.body.dropped, [{
+    share_key: IDS.janFinal,
+    xero_invoice_id: IDS.janFinal,
+    code: "possible_payment",
+  }]);
+  assertEquals(rec.staffSms.length, 1);
+  assert(!rec.staffSms[0].message.includes("Robin Next"));
+  assert(rec.staffSms[0].message.includes("Taylor Main"));
+  assertEquals(
+    (store.janRows[0].items as any[]).map((i) => i.xero_invoice_id),
+    [second],
+  );
+  const refusal = store.logRows.find((l) => l.kind === "send_refused")!;
+  assertEquals(refusal.share_key, IDS.janFinal);
+  assertEquals(refusal.step, "d21");
+  assertEquals(refusal.meta.code, "possible_payment");
+  assertEquals(refusal.created_by_name, "cron");
+  assert(String(refusal.body).includes("$750.00"));
+
+  // No bank feed at all: the list fails closed.
+  const store2 = new FakeStore();
+  await lockJanList(store2);
+  const { deps: d2, rec: r2 } = fakeDeps(store2, {
+    env: ON,
+    now: SUNDAY,
+    bankError: new Error("xero down"),
+  });
+  const down = await call(d2, "debt_ws_jan_list_send", SERVER);
+  assertEquals(down.body.reason, "bank_check_unavailable");
+  assertEquals(r2.staffSms.length, 0);
+  assertEquals(store2.janRows[0].status, "failed");
+});
+
+Deno.test("auth: the server key reaches only the Jan list cron and the agent; staff actions need a staff JWT (Codex 5)", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps, rec } = fakeDeps(store);
+  const staffActions = Object.entries(DEBT_WS_ACTIONS).filter(([, s]) =>
+    s.who === "staff"
+  ).map(([a]) => a);
+  assertEquals(staffActions.sort(), [
+    "debt_ws_document",
+    "debt_ws_jan_list",
+    "debt_ws_job",
+    "debt_ws_note",
+    "debt_ws_overview",
+    "debt_ws_statement_preview",
+  ]);
+  const inputs: Record<string, Record<string, unknown>> = {
+    debt_ws_document: { xero_invoice_id: IDS.final },
+    debt_ws_job: { xero_invoice_id: IDS.final },
+    debt_ws_note: { xero_invoice_id: IDS.final, text: "server note" },
+    debt_ws_statement_preview: { company_key: MLB_CONTACT },
+  };
+  for (const action of staffActions) {
+    const res = await call(deps, action, SERVER, inputs[action] ?? {});
+    assertEquals(res.status, 403, action);
+    assertEquals(res.body.code, "operator_access_required", action);
+    // The same call with a staff JWT is allowed.
+    assertEquals(
+      (await call(deps, action, STAFF, inputs[action] ?? {})).status,
+      200,
+      action,
+    );
+  }
+  assertEquals(store.logRows.filter((l) => l.body === "server note").length, 1);
+  assertEquals(rec.sms.length, 0);
+  // Owner actions refuse the server key too.
+  for (
+    const action of Object.entries(DEBT_WS_ACTIONS).filter(([, s]) =>
+      s.who === "owner"
+    ).map(([a]) => a)
+  ) {
+    assertEquals((await call(deps, action, SERVER, {})).status, 403, action);
+  }
+  // The server key does reach the cron and the agent.
+  for (
+    const action of [
+      "debt_ws_jan_list_lock",
+      "debt_ws_jan_list_send",
+      "debt_ws_agent_queue",
+    ]
+  ) {
+    assertEquals((await call(deps, action, SERVER)).status, 200, action);
+  }
+});
+
+Deno.test("agent queue: hands out nothing while the bank feed is down (Codex 6)", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store, { bankError: new Error("xero down") });
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  assertEquals(q.ok, true);
+  assertEquals(q.agent_on, true);
+  assertEquals(q.items, []);
+  assertEquals(q.blocked, "bank_feed_unavailable");
+  const { deps: up } = fakeDeps(store);
+  const ok = (await call(up, "debt_ws_agent_queue", SERVER)).body as any;
+  assertEquals(ok.blocked, null);
+  assertEquals(ok.items.length, 2);
+  assertEquals(ok.items[0].possible_payments_status, "ok");
+});
+
+Deno.test("decide: a template send needs the amount its draft was written for (review 1)", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store, {
+    env: sendingOn(store),
+    live: {
+      [IDS.final]: {
+        InvoiceID: IDS.final,
+        Status: "AUTHORISED",
+        AmountDue: 600,
+      },
+    },
+  });
+  const { amount: _amount, ...noAmount } = D7_SEND;
+  const missing = await call(deps, "debt_ws_decide", SHAUN, noAmount);
+  assertEquals(missing.status, 400);
+  assertEquals(missing.body.code, "amount_required");
+  assertEquals(rec.liveReads.length + rec.sms.length, 0);
+  // The amount is the bar: Xero shows $600 owing on a $1,000 draft.
+  const part = await call(deps, "debt_ws_decide", SHAUN, D7_SEND);
+  assertEquals(part.body.code, "part_paid");
+  assert(String(part.body.error).includes("$600.00"));
+  assertEquals(rec.sms.length, 0);
+  // A suggestion's own amount is the bar, so its send needs no amount.
+  const suggestion = await store.insertSuggestion({
+    share_key: IDS.final,
+    xero_invoice_ids: [IDS.final],
+    job_id: JOBS.fence,
+    cycle_start: "2026-10-01",
+    step: "d7",
+    kind: "draft",
+    channel: "sms",
+    text: "draft",
+    why: "Day 7",
+    proposed_category: null,
+    amount: 600,
+    source: "agent",
+    agent_version: "debt-ws-playbook/v1",
+  });
+  const sent = await call(deps, "debt_ws_decide", SHAUN, {
+    ...noAmount,
+    suggestion_id: suggestion.id,
+  });
+  assertEquals(sent.status, 200);
+  assertEquals(rec.sms.length, 1);
+});
+
+const MLB_ALIAS = "4d7121e3-89d5-4021-8880-ce9e8c4f1a91";
+
+function aliasStore() {
+  const store = new FakeStore();
+  store.settingsRow.company_aliases = { [MLB_ALIAS]: MLB_CONTACT };
+  store.invoices.push({
+    ...store.invoices.find((i) => i.xero_invoice_id === IDS.account)!,
+    xero_invoice_id: "10000000-0000-4000-8000-000000000030",
+    xero_contact_id: MLB_ALIAS.toUpperCase(),
+    contact_name: "ML Builders",
+    invoice_number: "INV-2030",
+    reference: "WO-3",
+    total: 110,
+    amount_due: 110,
+    invoice_date: "2026-08-20",
+  });
+  return store;
+}
+
+Deno.test("companies: one builder on several Xero contacts is one company, by the canonical id (review 2)", async () => {
+  const store = aliasStore();
+  const { deps, rec } = fakeDeps(store, { env: sendingOn(store) });
+  const ov = (await call(deps, "debt_ws_overview", STAFF)).body as any;
+  assertEquals(ov.companies.length, 1);
+  const mlb = ov.companies[0];
+  assertEquals(mlb.company_key, MLB_CONTACT);
+  assertEquals(mlb.name, "Major Loss Builders");
+  assertEquals(mlb.past_due.count, 2);
+  assertEquals(mlb.past_due.amount, 440);
+  assertEquals(mlb.statement.status, "ready");
+  const aliasRow = ov.rows.find((r: any) => r.invoice_number === "INV-2030");
+  assertEquals(aliasRow.company_key, MLB_CONTACT);
+  // The alias id reads as the company too.
+  const preview = (await call(deps, "debt_ws_statement_preview", STAFF, {
+    company_key: MLB_ALIAS,
+  })).body as any;
+  assertEquals(preview.company_key, MLB_CONTACT);
+  assertEquals(preview.to_email, "accounts@builders.example.test");
+  assertEquals(preview.invoices.length, 2);
+  const sent = await call(deps, "debt_ws_statement_send", SHAUN, {
+    company_key: MLB_ALIAS,
+  });
+  assertEquals(sent.status, 200);
+  assertEquals(sent.body.company_key, MLB_CONTACT);
+  assertEquals(sent.body.invoices, 2);
+  assertEquals(store.statementRows[0].company_key, MLB_CONTACT);
+  assertEquals(rec.emails.length, 1);
+  // A company note on the alias id sits on the canonical company.
+  await call(deps, "debt_ws_note", STAFF, {
+    company_key: MLB_ALIAS,
+    text: "Rang accounts",
+  });
+  assertEquals(store.logRows.at(-1)!.share_key, MLB_CONTACT);
+});
+
+Deno.test("companies: statement email by name is a fallback; not chased matches a contact id (review 2)", async () => {
+  const store = aliasStore();
+  store.settingsRow.statement_emails = {
+    "Major Loss Builders": "byname@builders.example.test",
+  };
+  const { deps } = fakeDeps(store);
+  const ov = (await call(deps, "debt_ws_overview", STAFF)).body as any;
+  assertEquals(ov.companies[0].to_email, "byname@builders.example.test");
+  // The id key wins over the name.
+  store.settingsRow.statement_emails = {
+    "Major Loss Builders": "byname@builders.example.test",
+    [MLB_CONTACT.toUpperCase()]: "byid@builders.example.test",
+  };
+  const ov2 = (await call(deps, "debt_ws_overview", STAFF)).body as any;
+  assertEquals(ov2.companies[0].to_email, "byid@builders.example.test");
+  // Not chased by the canonical id covers the alias contact as well.
+  store.settingsRow.not_chased_contacts = [
+    ...store.settingsRow.not_chased_contacts,
+    MLB_CONTACT,
+  ];
+  const ov3 = (await call(deps, "debt_ws_overview", STAFF)).body as any;
+  assertEquals(ov3.companies, []);
+  const group = ov3.not_chased.find((g: any) =>
+    g.xero_invoice_ids.includes("10000000-0000-4000-8000-000000000030")
+  );
+  assert(group, "the alias contact's invoice is not chased");
+  assertEquals(
+    (await call(deps, "debt_ws_statement_preview", STAFF, {
+      company_key: MLB_ALIAS,
+    })).body.code,
+    "not_chased",
+  );
+});
+
+Deno.test("set_category: manual says paid, rectification and clear work with no suggestion_id (review 5)", async () => {
+  const store = new FakeStore();
+  const { deps, rec } = fakeDeps(store);
+  // A pending agent move stays pending: a manual button decides no suggestion.
+  const move = await store.insertSuggestion({
+    share_key: IDS.final,
+    xero_invoice_ids: [IDS.final],
+    job_id: JOBS.fence,
+    cycle_start: "2026-10-01",
+    step: "reply_says_paid",
+    kind: "move",
+    channel: "sms",
+    text: "Thanks Alex!\n\nCheers,\nShaun",
+    why: "Client says paid",
+    proposed_category: "says_paid",
+    amount: 1000,
+    source: "agent",
+    agent_version: "debt-ws-playbook/v1",
+  });
+  const paid = await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "says_paid",
+  });
+  assertEquals(paid.status, 200);
+  const state = () => store.stateRows.find((s) => s.share_key === IDS.final)!;
+  assertEquals(state().says_paid_since, "2026-10-08");
+  assertEquals(move.status, "pending");
+  // Says paid again keeps the first date.
+  state().says_paid_since = "2026-10-06";
+  await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "says_paid",
+  });
+  assertEquals(state().says_paid_since, "2026-10-06");
+  // Clear removes says paid.
+  const cleared = await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "clear",
+  });
+  assertEquals(cleared.status, 200);
+  assertEquals(state().says_paid_since, null);
+  assertEquals(cleared.body.note, null);
+  assertEquals(
+    store.logRows.filter((l) => l.kind === "category_change").at(-1)!.body,
+    "Cleared says paid",
+  );
+  // Rectification moves the card only when it is not already there.
+  store.jobRows.find((j) => j.id === JOBS.fence)!.status = "rectification";
+  const rect = await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "rectification",
+  });
+  assertEquals(rect.status, 200);
+  assertEquals(rec.statusMoves, []);
+  store.jobRows.find((j) => j.id === JOBS.fence)!.status = "final_payment";
+  await call(deps, "debt_ws_set_category", SHAUN, {
+    xero_invoice_id: IDS.final,
+    category: "rectification",
+  });
+  assertEquals(rec.statusMoves.length, 1);
+  assertEquals(move.status, "pending");
 });

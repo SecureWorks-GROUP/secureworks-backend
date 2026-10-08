@@ -101,21 +101,27 @@ export function createDebtWsDeps(input: DebtWsDepsInput): DebtWsDeps {
         .invoice as Record<string, unknown>,
     readInvoices: (ids) => readXeroInvoicesByIds(client, ids, read),
     payLink: (id) => getXeroOnlineInvoiceUrl(client, id, read),
-    bankTransactions: async (dateFrom) => {
+    // One page per call; debt_ws_actions.ts pages, filters to RECEIVE and caches.
+    // listXeroBankTransactions has no Type filter, so spends come back and are dropped there.
+    bankTransactions: async (dateFrom, page) => {
       const result = await listXeroBankTransactions(client, {
         status: "UNRECONCILED",
+        page: String(page),
         page_size: "100",
         ...(dateFrom ? { date_from: dateFrom } : {}),
       }, read);
-      return result.transactions.map((t): BankTransaction => ({
-        bank_transaction_id: t.bank_transaction_id,
-        type: typeof t.type === "string" ? t.type : null,
-        date: typeof t.date === "string" ? t.date : null,
-        total: t.total,
-        reference: t.reference,
-        contact_name: t.contact_name,
-        line_item_descriptions: t.line_item_descriptions,
-      }));
+      return {
+        has_more: result.pagination.has_more === true,
+        transactions: result.transactions.map((t): BankTransaction => ({
+          bank_transaction_id: t.bank_transaction_id,
+          type: typeof t.type === "string" ? t.type : null,
+          date: typeof t.date === "string" ? t.date : null,
+          total: t.total,
+          reference: t.reference,
+          contact_name: t.contact_name,
+          line_item_descriptions: t.line_item_descriptions,
+        })),
+      };
     },
     sendSms: input.sendChaseSms,
     sendStaffSms: input.sendStaffSms,

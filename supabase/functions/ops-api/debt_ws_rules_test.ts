@@ -251,6 +251,34 @@ Deno.test("kind: every final ending with Balance or Remaining is final", () => {
   }
 });
 
+Deno.test("kind: numbered endings (FIN25, FINBAL25, DEP10) and Remainder (review 2026-10-08)", () => {
+  assertEquals(invoiceKindOf("SWF-1-FIN25", "Remainder (25%)"), {
+    kind: "final",
+    stage: null,
+  });
+  assertEquals(invoiceKindOf("SWF-1-FINBAL25", "Balance (25%)"), {
+    kind: "final",
+    stage: null,
+  });
+  assertEquals(invoiceKindOf("SWF-1-FINBAL", "Remainder (50%)").kind, "final");
+  assertEquals(invoiceKindOf("SWF-1-BAL5", "Balance").kind, "final");
+  assertEquals(invoiceKindOf("SWF-1-FIN", "Remaining").kind, "final");
+  assertEquals(invoiceKindOf("SWP-1-DEP10", "Deposit (10%)"), {
+    kind: "not_final",
+    stage: "deposit",
+  });
+  assertEquals(invoiceKindOf("SWP-1-MAT25", "Materials").stage, "materials");
+  assertEquals(
+    invoiceKindOf("SWP-1-PROG2", "Progress claim 2").stage,
+    "progress",
+  );
+  // FIN25 with a deposit description cannot be told: needs a look.
+  assertEquals(invoiceKindOf("SWF-1-FIN25", "Deposit"), {
+    kind: null,
+    stage: null,
+  });
+});
+
 Deno.test("kind: every not-final ending with its matching description", () => {
   const cases: Array<[string, string, string]> = [
     ["DEP", "Deposit", "deposit"],
@@ -275,9 +303,12 @@ Deno.test("kind: an unknown ending or a disagreeing description cannot be told",
   const none = { kind: null, stage: null };
   assertEquals(invoiceKindOf("SWF-1-FINBAL", "Deposit (50%)"), none);
   assertEquals(invoiceKindOf("SWF-1-DEP50", "Balance (50%)"), none);
-  assertEquals(invoiceKindOf("SWF-1-FIN25", "Balance (25%)"), none);
-  assertEquals(invoiceKindOf("SWF-1-DEP10", "Deposit (10%)"), none);
-  assertEquals(invoiceKindOf("SWF-1-FINBAL", "Remainder (50%)"), none);
+  assertEquals(invoiceKindOf("SWF-1-FIN25", "Deposit (25%)"), none);
+  assertEquals(invoiceKindOf("SWF-1-FIN1000", "Balance"), none);
+  assertEquals(invoiceKindOf("SWF-1-DEP1000", "Deposit"), none);
+  assertEquals(invoiceKindOf("SWF-1-FINALS", "Balance"), none);
+  assertEquals(invoiceKindOf("SWF-1-PLAN2", "Planning Fee"), none);
+  assertEquals(invoiceKindOf("SWF-1-VAR1", "Extra Labour"), none);
   assertEquals(invoiceKindOf("SWF-1-FINBAL", ""), none);
   assertEquals(invoiceKindOf(null, "Balance"), none);
   assertEquals(invoiceKindOf("SWF-1-PLAN", "Materials"), none);
@@ -419,7 +450,7 @@ Deno.test("needs a look: unlinked person, unknown type, unknown kind, duplicate"
     "unknown job type",
   );
   const unknownKind = classifyInvoice(
-    inv({ reference: "SWF-90001-FIN25" }),
+    inv({ reference: "SWF-90001-FIN25", first_description: "Deposit" }),
     job(),
     [],
   );
@@ -459,6 +490,23 @@ Deno.test("not chased: whole words of a listed contact, any case", () => {
   assert(!isNotChased("Major Loss Builders", list));
   assert(!isNotChased(null, list));
   assert(!isNotChased("Anyone", []));
+  // A contact id entry matches the invoice's contact id or its canonical id, any case.
+  const ETS = "d3d81d78-1f5e-450f-9852-ab6c2e1c9bc8";
+  const BW = "c3a479ce-20c4-43fe-b893-bbcacfeb417e";
+  const byId = [ETS.toUpperCase(), BW];
+  assert(isNotChased("Renamed Trade Co", byId, [ETS]));
+  assert(isNotChased("BW Alias Contact", byId, [
+    "aff63429-b473-4c46-bfaa-40c2678b3ae0",
+    BW,
+  ]));
+  assert(
+    !isNotChased("Major Loss Builders", byId, [
+      "96abb9b3-89d5-4021-8880-ce9e8c4f1a91",
+    ]),
+  );
+  // An id entry never matches by name, and a name entry still matches with ids given.
+  assert(!isNotChased(ETS, byId, []));
+  assert(isNotChased("Builderwest Pty Ltd", list, [BW]));
 });
 
 // ── Section 3 ──

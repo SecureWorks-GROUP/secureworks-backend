@@ -14,6 +14,11 @@
 --    owner_user_ids is copied from debt_desk_settings when that table has a non-empty
 --    list, else seeded with Shaun's users.id. Never a role: several users hold
 --    ops_manager. not_chased_contacts and statement_emails are seeded from the spec.
+--    One builder can sit on several Xero contacts, so companies are grouped by a
+--    canonical Xero contact id: company_aliases maps each extra contact id to it
+--    (seeded for Major Loss Builders, Western Building and Builderwest), and
+--    statement_emails is keyed by the canonical id (a contact name key is only a
+--    fallback). not_chased_contacts holds names or contact ids.
 -- 2. debt_ws_log: what was done and noted per invoice (share) or company.
 -- 3. debt_ws_suggestions: agent or template output waiting for Shaun.
 -- 4. debt_ws_states: per share; says paid, a promise pause, the agent's last review, and
@@ -50,6 +55,8 @@ CREATE TABLE IF NOT EXISTS public.debt_ws_settings (
   not_chased_contacts text[] NOT NULL DEFAULT '{}',
   statement_emails jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (jsonb_typeof(statement_emails) = 'object'),
+  company_aliases jsonb NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(company_aliases) = 'object'),
   updated_at timestamptz NOT NULL DEFAULT now(),
   updated_by text
 );
@@ -66,14 +73,30 @@ BEGIN
     v_owners := ARRAY['9913309f-35ae-4a71-8e1f-f704ecc526ea']::uuid[];
   END IF;
   INSERT INTO public.debt_ws_settings (
-    id, owner_user_ids, not_chased_contacts, statement_emails, updated_by
+    id, owner_user_ids, not_chased_contacts, statement_emails, company_aliases,
+    updated_by
   ) VALUES (
     1,
     v_owners,
-    ARRAY['Emergency Trade Services', 'Builderwest'],
+    -- Names, plus the contact ids (Emergency Trade Services; Builderwest's canonical id,
+    -- which covers its alias contact too).
+    ARRAY[
+      'Emergency Trade Services', 'Builderwest',
+      'd3d81d78-1f5e-450f-9852-ab6c2e1c9bc8',
+      'c3a479ce-20c4-43fe-b893-bbcacfeb417e'
+    ],
+    -- Keyed by the canonical Xero contact id: Major Loss Builders, AJ Building &
+    -- Restoration.
     jsonb_build_object(
-      'Major Loss Builders', 'accounts@mlbuilders.com.au',
-      'AJ Building & Restoration', 'accounts@ajs.build'
+      '96abb9b3-89d5-4021-8880-ce9e8c4f1a91', 'accounts@mlbuilders.com.au',
+      '71a5e645-3ef7-4946-9926-470dcd78979d', 'accounts@ajs.build'
+    ),
+    -- Extra contact id -> canonical contact id: MLB ("ML Builders"), Western
+    -- Building, Builderwest.
+    jsonb_build_object(
+      '4d7121e3-89d5-4021-8880-ce9e8c4f1a91', '96abb9b3-89d5-4021-8880-ce9e8c4f1a91',
+      '2a34b09f-ed34-4b26-9ad0-f59bd9d3b264', '29d70cdc-8ba1-4a21-ba9a-ade6374e987b',
+      'aff63429-b473-4c46-bfaa-40c2678b3ae0', 'c3a479ce-20c4-43fe-b893-bbcacfeb417e'
     ),
     'migration 20261008170000_debt_workshop'
   )
@@ -82,6 +105,10 @@ END $$;
 
 COMMENT ON TABLE public.debt_ws_settings IS
   'Debt Workshop switches, one row. Everything defaults off. Effective sending = env DEBT_WS_SENDING_ENABLED = "true" AND sending_enabled. owner_user_ids (users.id) may send, approve statements, link contacts and move cards; env DEBT_WS_OWNER_USER_IDS overrides it. See docs/debt-workshop/README.md.';
+COMMENT ON COLUMN public.debt_ws_settings.company_aliases IS
+  'Extra Xero contact id -> canonical Xero contact id, so one builder on several Xero contacts is one company (one statement, one company_key).';
+COMMENT ON COLUMN public.debt_ws_settings.statement_emails IS
+  'Canonical Xero contact id -> accounts email for the Monday statement. A contact-name key is a fallback only.';
 
 -- 2. The log
 CREATE TABLE IF NOT EXISTS public.debt_ws_log (

@@ -51,13 +51,36 @@ BEGIN
   IF NOT (s.not_chased_contacts @> ARRAY['Emergency Trade Services', 'Builderwest']) THEN
     RAISE EXCEPTION 'contract: the not-chased contacts are not seeded';
   END IF;
-  IF s.statement_emails->>'Major Loss Builders' IS DISTINCT FROM 'accounts@mlbuilders.com.au'
-     OR s.statement_emails->>'AJ Building & Restoration' IS DISTINCT FROM 'accounts@ajs.build' THEN
-    RAISE EXCEPTION 'contract: the statement emails are not seeded';
+  IF NOT (s.not_chased_contacts @> ARRAY[
+      'd3d81d78-1f5e-450f-9852-ab6c2e1c9bc8', 'c3a479ce-20c4-43fe-b893-bbcacfeb417e'
+    ]) THEN
+    RAISE EXCEPTION 'contract: the not-chased contact ids are not seeded';
+  END IF;
+  -- Statement emails are keyed by the canonical Xero contact id, not the name.
+  IF s.statement_emails->>'96abb9b3-89d5-4021-8880-ce9e8c4f1a91' IS DISTINCT FROM 'accounts@mlbuilders.com.au'
+     OR s.statement_emails->>'71a5e645-3ef7-4946-9926-470dcd78979d' IS DISTINCT FROM 'accounts@ajs.build' THEN
+    RAISE EXCEPTION 'contract: the statement emails are not seeded by contact id';
+  END IF;
+  IF s.statement_emails ? 'Major Loss Builders' THEN
+    RAISE EXCEPTION 'contract: statement emails must be keyed by contact id, not name';
+  END IF;
+  -- Company aliases: the extra contact ids of MLB, Western Building and Builderwest.
+  IF s.company_aliases IS DISTINCT FROM jsonb_build_object(
+       '4d7121e3-89d5-4021-8880-ce9e8c4f1a91', '96abb9b3-89d5-4021-8880-ce9e8c4f1a91',
+       '2a34b09f-ed34-4b26-9ad0-f59bd9d3b264', '29d70cdc-8ba1-4a21-ba9a-ade6374e987b',
+       'aff63429-b473-4c46-bfaa-40c2678b3ae0', 'c3a479ce-20c4-43fe-b893-bbcacfeb417e'
+     ) THEN
+    RAISE EXCEPTION 'contract: the company aliases are not seeded: %', s.company_aliases;
   END IF;
   BEGIN
     INSERT INTO public.debt_ws_settings (id) VALUES (2);
     RAISE EXCEPTION 'contract: a second settings row was accepted';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+  BEGIN
+    UPDATE public.debt_ws_settings SET company_aliases = '[]'::jsonb WHERE id = 1;
+    RAISE EXCEPTION 'contract: company_aliases accepted a non-object';
   EXCEPTION WHEN check_violation THEN
     NULL;
   END;
@@ -262,7 +285,8 @@ END $$;
 -- 10. Re-applying is a no-op that keeps the rows, a changed settings row and the
 --     policies.
 UPDATE public.debt_ws_settings
-   SET owner_user_ids = '{}', sending_enabled = true, not_chased_contacts = '{}'
+   SET owner_user_ids = '{}', sending_enabled = true, not_chased_contacts = '{}',
+       company_aliases = '{}'::jsonb
  WHERE id = 1;
 \ir ../../../migrations/20261008170000_debt_workshop.sql
 DO $$
@@ -271,7 +295,7 @@ DECLARE
 BEGIN
   SELECT * INTO s FROM public.debt_ws_settings WHERE id = 1;
   IF s.owner_user_ids <> '{}'::uuid[] OR NOT s.sending_enabled
-     OR s.not_chased_contacts <> '{}'::text[] THEN
+     OR s.not_chased_contacts <> '{}'::text[] OR s.company_aliases <> '{}'::jsonb THEN
     RAISE EXCEPTION 'contract: a re-apply overwrote a changed settings row';
   END IF;
   IF (SELECT count(*) FROM public.debt_ws_sends WHERE share_key = 'inv-1') <> 5 THEN

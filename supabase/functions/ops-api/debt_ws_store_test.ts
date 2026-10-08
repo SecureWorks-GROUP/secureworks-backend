@@ -67,6 +67,7 @@ Deno.test("store: a missing settings row reads as everything off and nobody the 
   assertEquals(settings.sending_enabled, false);
   assertEquals(settings.owner_user_ids, []);
   assertEquals(settings.auto_send_steps, {});
+  assertEquals(settings.company_aliases, {});
 });
 
 Deno.test("store: settings are normalised from the row", async () => {
@@ -80,10 +81,23 @@ Deno.test("store: settings are normalised from the row", async () => {
       jan_list_auto_send: false,
       not_chased_contacts: ["X"],
       statement_emails: { A: "a@example.test" },
+      company_aliases: {
+        "4D7121E3-89D5-4021-8880-CE9E8C4F1A91":
+          "96ABB9B3-89D5-4021-8880-CE9E8C4F1A91",
+        "not-an-id": "96abb9b3-89d5-4021-8880-ce9e8c4f1a91",
+        "aff63429-b473-4c46-bfaa-40c2678b3ae0": 7,
+        "c3a479ce-20c4-43fe-b893-bbcacfeb417e":
+          "c3a479ce-20c4-43fe-b893-bbcacfeb417e",
+      },
     },
     error: null,
   }));
   const s = await createSupabaseDebtWsStore(client).settings();
+  // Aliases: id pairs only, lower case, never an id mapped to itself.
+  assertEquals(s.company_aliases, {
+    "4d7121e3-89d5-4021-8880-ce9e8c4f1a91":
+      "96abb9b3-89d5-4021-8880-ce9e8c4f1a91",
+  });
   assertEquals(s.owner_user_ids, ["abc"]);
   assertEquals(s.tab_visible, true);
   // Only a real boolean true switches sending on.

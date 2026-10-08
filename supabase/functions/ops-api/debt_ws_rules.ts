@@ -248,26 +248,19 @@ export function parseReference(reference: unknown): {
   return { letter, ending: clean || null };
 }
 
-const FINAL_ENDINGS = new Set([
-  "FINBAL",
-  "FINBAL50",
-  "BAL",
-  "FINAL",
-  "PRIVATE",
-]);
-const FINAL_DESCRIPTIONS = ["balance", "remaining"];
+/** Final endings: FIN, FINBAL or BAL with up to three digits (FIN25, FINBAL50), FINAL, PRIVATE. */
+const FINAL_ENDING = /^(?:(?:FIN|FINBAL|BAL)\d{0,3}|FINAL|PRIVATE)$/;
+const FINAL_DESCRIPTIONS = ["balance", "remaining", "remainder"];
 /** Not-final endings, the description each must start with, and the stage it names. */
-const NOT_FINAL_ENDINGS: Record<string, { starts: string; stage: string }> = {
-  DEP: { starts: "deposit", stage: "deposit" },
-  DEP20: { starts: "deposit", stage: "deposit" },
-  DEP25: { starts: "deposit", stage: "deposit" },
-  DEP50: { starts: "deposit", stage: "deposit" },
-  PLAN: { starts: "planning fee", stage: "planning fee" },
-  MAT: { starts: "materials", stage: "materials" },
-  MAT50: { starts: "materials", stage: "materials" },
-  PROG: { starts: "progress", stage: "progress" },
-  VAR: { starts: "extra labour", stage: "extra labour" },
-};
+const NOT_FINAL_ENDINGS: Array<
+  { ending: RegExp; starts: string; stage: string }
+> = [
+  { ending: /^DEP\d{0,3}$/, starts: "deposit", stage: "deposit" },
+  { ending: /^MAT\d{0,3}$/, starts: "materials", stage: "materials" },
+  { ending: /^PROG\d{0,3}$/, starts: "progress", stage: "progress" },
+  { ending: /^PLAN$/, starts: "planning fee", stage: "planning fee" },
+  { ending: /^VAR$/, starts: "extra labour", stage: "extra labour" },
+];
 
 export interface InvoiceKind {
   kind: "final" | "not_final" | null;
@@ -283,12 +276,12 @@ export function invoiceKindOf(
   const { ending } = parseReference(reference);
   const desc = String(description ?? "").trim().toLowerCase();
   if (!ending || !desc) return { kind: null, stage: null };
-  if (FINAL_ENDINGS.has(ending)) {
+  if (FINAL_ENDING.test(ending)) {
     return FINAL_DESCRIPTIONS.some((d) => desc.startsWith(d))
       ? { kind: "final", stage: null }
       : { kind: null, stage: null };
   }
-  const notFinal = NOT_FINAL_ENDINGS[ending];
+  const notFinal = NOT_FINAL_ENDINGS.find((n) => n.ending.test(ending));
   if (notFinal && desc.startsWith(notFinal.starts)) {
     return { kind: "not_final", stage: notFinal.stage };
   }
@@ -439,16 +432,28 @@ export function classifyInvoice(
     };
 }
 
-/** A contact in debt_ws_settings.not_chased_contacts (whole words, any case). */
+const CONTACT_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A contact in debt_ws_settings.not_chased_contacts. An entry that is a Xero contact id
+ * matches the invoice's contact id or its canonical company id (contactIds); any other
+ * entry matches the contact name (whole words, any case).
+ */
 export function isNotChased(
   contactName: unknown,
   notChased: readonly string[],
+  contactIds: ReadonlyArray<string | null | undefined> = [],
 ): boolean {
   const name = normaliseName(contactName);
-  if (!name) return false;
+  const ids = new Set(
+    contactIds.filter((id): id is string => !!id).map((id) => id.toLowerCase()),
+  );
   return notChased.some((entry) => {
-    const n = normaliseName(entry);
-    return !!n && ` ${name} `.includes(` ${n} `);
+    const raw = String(entry ?? "").trim();
+    if (CONTACT_ID.test(raw)) return ids.has(raw.toLowerCase());
+    const n = normaliseName(raw);
+    return !!name && !!n && ` ${name} `.includes(` ${n} `);
   });
 }
 

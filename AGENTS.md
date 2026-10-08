@@ -4212,11 +4212,14 @@ The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
   `debt_ws_settings.owner_user_ids`, and is never a role.
 - Every send goes through `guardedSend`:
   - a live Xero re-check;
-  - a fresh bank-feed check;
+  - the bank-feed check (one cached, paged read that reaches back to the oldest open
+    invoice; statements and Jan's list run it too, and fail closed without it);
   - a `debt_ws_sends` claim (unique per share, cycle and step);
   - then the injected `sendChaseSms` only.
   Never add a second text path.
 - An unconfirmed send keeps its claim. Only a guard refusal releases it.
+- Staff actions need a signed-in staff JWT. The server key reaches only the Jan list crons
+  and the agent queue and submit.
 - The debt rules are plain code in `debt_ws_rules.ts`. Change them there, with a test.
 - Apply `20261008170000_debt_workshop.sql` before deploying the matching `ops-api`.
 

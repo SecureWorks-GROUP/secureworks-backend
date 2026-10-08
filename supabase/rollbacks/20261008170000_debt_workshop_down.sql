@@ -4,8 +4,9 @@
 --
 -- Fail-closed: it refuses while any workshop record exists (a log row, a suggestion, a
 -- send, a statement or a Jan list), so a rollback never silently discards what was sent,
--- noted or decided. Export or delete those rows first, on purpose. The settings row and
--- the per-share states are switches and caches, not records, and go with their tables.
+-- noted or decided. Export or delete those rows first, on purpose. The settings row (the
+-- switches, owners, not-chased list, statement emails and company aliases) and the
+-- per-share states are settings and caches, not records, and go with their tables.
 -- Re-running it is a no-op.
 
 DO $$

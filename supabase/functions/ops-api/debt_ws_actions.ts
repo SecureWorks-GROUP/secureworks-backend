@@ -11,7 +11,10 @@
 //     a role) may send, approve statements, link contacts or move a card.
 //   - Before every text: a live Xero re-check (AUTHORISED, amount due above zero and not
 //     below the draft's amount) and the bank-feed check. Either failing refuses, with a
-//     plain reason, and the refusal is logged.
+//     plain reason, and the refusal is logged. Statements and Jan's list run both checks
+//     too, and a failed live read never falls back to our Xero copy (fail closed).
+//   - The bank feed is one cached read (15 minutes, same Perth day) that reaches back to
+//     the oldest open invoice, paged and capped well inside Xero's 60 calls a minute.
 //   - A claim row (debt_ws_sends, unique per share, cycle and step) is written before the
 //     text goes, so a step is never texted twice.
 //   - Texts go only through the injected sendChaseSms path (771, the SES fence and the
@@ -26,6 +29,7 @@ import {
   clientTextProblem,
   DEBT_WS_PLAYBOOK_VERSION,
   DEBT_WS_VERSION,
+  inScope,
   isIsoDate,
   isLadderStep,
   isReplyStep,
@@ -50,13 +54,13 @@ import {
 import {
   type Book,
   type BookEntry,
+  canonicalCompanyKey,
   categoryTotals,
   companiesOf,
   type CompanyView,
   janItemsLive,
   loadBook,
   paidThisWeek,
-  possiblePaymentsFor,
   sortRows,
   suggestionView,
   templateDraftFor,
@@ -75,8 +79,12 @@ export const DEBT_WS_SENDING_SWITCH = "DEBT_WS_SENDING_ENABLED";
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
-/** Bank feed: one page, re-read at most every 15 minutes within a Perth day (spec section 6). */
+/** Bank feed: one read, re-read at most every 15 minutes within a Perth day (spec section 6). */
 export const DEBT_WS_BANK_CACHE_MS = 15 * 60_000;
+/** Pages of 100 per bank-feed read at most: 10 Xero calls, well inside 60 a minute. */
+export const DEBT_WS_BANK_MAX_PAGES = 10;
+/** Bank-feed page calls allowed from one warm function in any 60 seconds. */
+export const DEBT_WS_BANK_CALLS_PER_MINUTE = 30;
 /** Pay links fetched live per request at most; the rest come from the cache or wait. */
 export const DEBT_WS_PAY_LINK_FETCH_LIMIT = 20;
 export const DEBT_WS_AGENT_QUEUE_LIMIT = 25;
@@ -112,8 +120,14 @@ export interface DebtWsDeps {
   readInvoices: (ids: string[]) => Promise<Record<string, unknown>[]>;
   /** Xero's online invoice URL for one invoice. */
   payLink: (xeroInvoiceId: string) => Promise<string>;
-  /** One page of Xero's unreconciled bank transactions, from this date when given. */
-  bankTransactions: (dateFrom: string | null) => Promise<BankTransaction[]>;
+  /**
+   * One page (100 rows, newest first) of Xero's unreconciled bank transactions dated on or
+   * after dateFrom (all dates when null). has_more: a full page, so another may follow.
+   */
+  bankTransactions: (
+    dateFrom: string | null,
+    page: number,
+  ) => Promise<{ transactions: BankTransaction[]; has_more: boolean }>;
   /** The existing ops-api sendChaseSms path (771, SES fence, contact/job guard). */
   sendSms: (
     body: Record<string, unknown>,
@@ -236,24 +250,143 @@ function optionalText(value: unknown, field: string, max: number) {
 
 // ── Bank feed cache (module level: survives between requests on a warm function) ──
 
-let bankCache: { day: string; at: number; txs: BankTransaction[] } | null =
-  null;
+/** One bank-feed read: the RECEIVE transactions and how far back they are complete. */
+interface BankFeed {
+  day: string;
+  at: number;
+  /** The date_from asked of Xero (null: all dates). */
+  from: string | null;
+  /** Every RECEIVE transaction dated on or after this is in txs; null: all of them. */
+  coveredFrom: string | null;
+  /** The read stopped at DEBT_WS_BANK_MAX_PAGES before Xero ran out of pages. */
+  truncated: boolean;
+  txs: BankTransaction[];
+}
+
+let bankCache: BankFeed | null = null;
+let bankCallTimes: number[] = [];
 
 export function _resetDebtWsBankCacheForTest() {
   bankCache = null;
+  bankCallTimes = [];
 }
 
-/** The cached page (same Perth day, under 15 minutes old), else one fresh read. */
-async function cachedBankFeed(deps: DebtWsDeps): Promise<BankTransaction[]> {
+/** The bank-feed date an invoice needs: its invoice date minus one day (null: undated). */
+function bankFromOf(inv: { invoice_date: string | null }): string | null {
+  return inv.invoice_date && isIsoDate(inv.invoice_date)
+    ? addDays(inv.invoice_date, -1)
+    : null;
+}
+
+/** The feed holds every RECEIVE transaction from this date on (null: an undated invoice). */
+function bankCovers(feed: BankFeed, from: string | null): boolean {
+  if (from === null) return feed.coveredFrom === null;
+  return feed.coveredFrom === null || from >= feed.coveredFrom;
+}
+
+/** The oldest open invoice in our Xero copy, as a bank-feed date; null when none is dated. */
+async function oldestOpenFrom(deps: DebtWsDeps): Promise<string | null> {
+  const dates = (await deps.store.openInvoices()).filter(inScope)
+    .map((i) => bankFromOf(i)).filter((d): d is string => !!d).sort();
+  return dates[0] ?? null;
+}
+
+class DebtWsBankBusyError extends Error {
+  constructor() {
+    super("The bank feed was read too often this minute");
+    this.name = "DebtWsBankBusyError";
+  }
+}
+
+/**
+ * The cached feed when it is fresh (same Perth day, under 15 minutes) and reaches back far
+ * enough for every date in `need`; else ONE new read, paged, that reaches back to the
+ * oldest open invoice (and anything older in `need`), so later checks reuse it.
+ */
+async function cachedBankFeed(
+  deps: DebtWsDeps,
+  need: Array<string | null>,
+): Promise<BankFeed> {
   const now = deps.now();
   const day = perthDate(now);
-  if (
-    bankCache && bankCache.day === day &&
-    now.getTime() - bankCache.at < DEBT_WS_BANK_CACHE_MS
-  ) return bankCache.txs;
-  const txs = await deps.bankTransactions(addDays(day, -120));
-  bankCache = { day, at: now.getTime(), txs };
-  return txs;
+  const fresh = bankCache && bankCache.day === day &&
+      now.getTime() - bankCache.at < DEBT_WS_BANK_CACHE_MS
+    ? bankCache
+    : null;
+  if (fresh && need.every((from) => bankCovers(fresh, from))) return fresh;
+  let floor = await oldestOpenFrom(deps);
+  for (const from of need) if (from && (!floor || from < floor)) floor = from;
+  if (fresh?.from && floor && fresh.from < floor) floor = fresh.from;
+
+  const txs: BankTransaction[] = [];
+  let oldest: string | null = null;
+  let truncated = false;
+  for (let page = 1;; page++) {
+    if (page > DEBT_WS_BANK_MAX_PAGES) {
+      truncated = true;
+      break;
+    }
+    const at = deps.now().getTime();
+    bankCallTimes = bankCallTimes.filter((t) => at - t < 60_000);
+    if (bankCallTimes.length >= DEBT_WS_BANK_CALLS_PER_MINUTE) {
+      throw new DebtWsBankBusyError();
+    }
+    bankCallTimes.push(at);
+    const result = await deps.bankTransactions(floor, page);
+    for (const tx of result.transactions) {
+      const date = tx.date ? String(tx.date).slice(0, 10) : null;
+      if (date && isIsoDate(date) && (!oldest || date < oldest)) oldest = date;
+      // Spends never pay an invoice: only RECEIVE rows are kept.
+      if (String(tx.type ?? "").toUpperCase().startsWith("RECEIVE")) {
+        txs.push(tx);
+      }
+    }
+    if (!result.has_more) break;
+  }
+  const feed: BankFeed = {
+    day,
+    at: now.getTime(),
+    from: floor,
+    // Cut short: only the days after the oldest row read are whole.
+    coveredFrom: truncated
+      ? (oldest ? addDays(oldest, 1) : "9999-12-31")
+      : floor,
+    truncated,
+    txs,
+  };
+  bankCache = feed;
+  return feed;
+}
+
+/** The feed, or null when it cannot be read (the caller decides what that blocks). */
+async function bankFeedSafe(
+  deps: DebtWsDeps,
+  need: Array<string | null>,
+): Promise<BankFeed | null> {
+  try {
+    return await cachedBankFeed(deps, need);
+  } catch (error) {
+    console.error("[debt_ws] bank feed unavailable", (error as Error)?.name);
+    return null;
+  }
+}
+
+/**
+ * Possible payments for one invoice from the feed, or null when there is no feed or it
+ * does not reach back to the invoice date (so the invoice cannot be checked).
+ */
+function bankCheck(
+  feed: BankFeed | null,
+  invoice: {
+    invoice_number: string | null;
+    amount_due: number | null;
+    total: number | null;
+    invoice_date: string | null;
+  },
+  names: Array<string | null | undefined>,
+): PossiblePayment[] | null {
+  if (!feed || !bankCovers(feed, bankFromOf(invoice))) return null;
+  return possiblePayments(invoice, names, feed.txs);
 }
 
 // ── Pay links (cached on debt_ws_states.pay_link) ──
@@ -330,6 +463,9 @@ async function log(
     created_by_name: actor.label,
   });
 }
+
+/** The names a bank transaction may carry for this share: the Xero contact and the client. */
+const payerNames = (e: BookEntry) => [e.inv.contact_name, e.job?.client_name];
 
 const entryRef = (e: BookEntry) => ({
   share_key: e.row.share_key,
@@ -527,15 +663,6 @@ function documentView(d: Record<string, unknown>) {
   };
 }
 
-async function bankFeedSafe(deps: DebtWsDeps) {
-  try {
-    return { txs: await cachedBankFeed(deps), status: "ok" as const };
-  } catch (error) {
-    console.error("[debt_ws] bank feed unavailable", (error as Error)?.name);
-    return { txs: [] as BankTransaction[], status: "unavailable" as const };
-  }
-}
-
 export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
   const id = uuidOf(params.get("xero_invoice_id"), "xero_invoice_id");
   const { book, entry } = await oneEntry(deps, id);
@@ -567,7 +694,7 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
         : Promise.resolve({ messages: [], summary: null }),
       job ? deps.store.logsForJob(job.id) : Promise.resolve([]),
       payLinkFor(deps, entry, budget),
-      bankFeedSafe(deps),
+      bankFeedSafe(deps, [bankFromOf(entry.inv)]),
       contactCandidates(deps, entry),
     ]);
   const notes = new Map<string, WsLogRow>();
@@ -621,8 +748,12 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
       why: f.why,
       created_at: f.created_at,
     })),
-    possible_payments: possiblePaymentsFor(entry, bank.txs),
-    possible_payments_status: bank.status,
+    possible_payments: bankCheck(bank, entry.inv, payerNames(entry)) ?? [],
+    possible_payments_status: !bank
+      ? "unavailable"
+      : bankCovers(bank, bankFromOf(entry.inv))
+      ? "ok"
+      : "partial",
     contact: { ghl_contact_id: job?.ghl_contact_id ?? null, candidates },
     pay_link: payLink,
   };
@@ -719,7 +850,12 @@ export async function debtWsNote(
     }
     ref = { share_key: id, ids: [id], job_id: inv.job_id ?? null };
   } else if (typeof body.company_key === "string" && body.company_key.trim()) {
-    const key = body.company_key.trim().toLowerCase().slice(0, 200);
+    // A company note sits on the canonical company (an alias contact id is mapped).
+    const settings = await deps.store.settings();
+    const key = canonicalCompanyKey(
+      body.company_key.trim().toLowerCase().slice(0, 200),
+      settings.company_aliases,
+    );
     ref = { share_key: key, ids: [], job_id: null };
   } else {
     bad("Send the xero_invoice_id or the company_key the note is about");
@@ -898,21 +1034,14 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
   const problem = liveCheck(live, input.draftAmount);
   if (problem) await refuse(deps, input, problem.code, problem.message);
 
-  // The bank-feed check (fresh, from the invoice date minus one day).
-  let payments: PossiblePayment[];
-  try {
-    const from = entry.inv.invoice_date
-      ? addDays(entry.inv.invoice_date, -1)
-      : null;
-    payments = possiblePayments(
-      {
-        ...entry.inv,
-        amount_due: Number(live.AmountDue ?? entry.inv.amount_due),
-      },
-      [entry.inv.contact_name, entry.job?.client_name],
-      await deps.bankTransactions(from),
-    );
-  } catch (_) {
+  // The bank-feed check: the cached feed (one read per 15 minutes) when it reaches back to
+  // the invoice date minus one day, else one new read that does.
+  const feed = await bankFeedSafe(deps, [bankFromOf(entry.inv)]);
+  const checked = bankCheck(feed, {
+    ...entry.inv,
+    amount_due: Number(live.AmountDue ?? entry.inv.amount_due),
+  }, payerNames(entry));
+  if (!checked) {
     return await refuse(
       deps,
       input,
@@ -921,6 +1050,7 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
       503,
     );
   }
+  const payments: PossiblePayment[] = checked;
   if (payments.length && !input.override) {
     const first = payments[0];
     await refuse(
@@ -1192,6 +1322,14 @@ export async function debtWsDecide(
   if (amount !== null && (!Number.isFinite(amount) || amount <= 0)) {
     bad("amount must be the positive amount the draft was written for");
   }
+  // A template send (no suggestion_id) carries the amount its draft was written against:
+  // the live check refuses when Xero shows less owing than that (part paid since).
+  if (!suggestion && amount === null) {
+    bad(
+      "amount is required: send the amount the draft was written for",
+      "amount_required",
+    );
+  }
   const draftAmount = suggestion?.amount !== null &&
       suggestion?.amount !== undefined
     ? Number(suggestion.amount)
@@ -1440,8 +1578,12 @@ export async function debtWsStatementPreview(
   deps: DebtWsDeps,
   params: URLSearchParams,
 ) {
-  const key = companyKeyParam(params.get("company_key"));
   const book = await loadBook(deps.store, { now: deps.now() });
+  // An alias contact id reads as its canonical company.
+  const key = canonicalCompanyKey(
+    companyKeyParam(params.get("company_key")),
+    book.settings.company_aliases,
+  );
   const { company, entries } = await statementFor(deps, book, key);
   const lines = await statementLines(deps, entries);
   return {
@@ -1453,21 +1595,35 @@ export async function debtWsStatementPreview(
   };
 }
 
+/** One statement invoice with a possible payment in the bank feed. */
+interface StatementPossiblePayment {
+  xero_invoice_id: string;
+  invoice_number: string | null;
+  possible_payments: PossiblePayment[];
+}
+
 export async function debtWsStatementSend(
   deps: DebtWsDeps,
   caller: DebtWsCaller,
   rawBody: unknown,
 ) {
   const body = asBody(rawBody);
-  onlyKeys(body, ["company_key"]);
-  const key = companyKeyParam(body.company_key);
+  onlyKeys(body, ["company_key", "override_possible_payment"]);
+  const rawKey = companyKeyParam(body.company_key);
+  if (
+    body.override_possible_payment !== undefined &&
+    typeof body.override_possible_payment !== "boolean"
+  ) bad("override_possible_payment must be true or false");
+  const override = body.override_possible_payment === true;
   const actor = await actorOf(deps, caller);
   const book = await loadBook(deps.store, { now: deps.now() });
+  const key = canonicalCompanyKey(rawKey, book.settings.company_aliases);
   const weekStart = mondayOf(book.today);
   const refuseStatement = async (
     code: string,
     message: string,
     status = 409,
+    details: Record<string, unknown> = {},
   ): Promise<never> => {
     await log(
       deps,
@@ -1476,10 +1632,10 @@ export async function debtWsStatementSend(
       "send_refused",
       {
         body: message,
-        meta: { code, week_start: weekStart, statement: true },
+        meta: { code, week_start: weekStart, statement: true, ...details },
       },
     ).catch(() => {});
-    throw new DebtWsError(message, status, code);
+    throw new DebtWsError(message, status, code, details);
   };
   if (!debtWsSendingOn(deps.env, book.settings)) {
     await refuseStatement(
@@ -1516,8 +1672,22 @@ export async function debtWsStatementSend(
       "This week's statement was already sent",
     );
   }
+  /** Releases the claim (refused), then refuses with the reason. */
+  const release = async (
+    code: string,
+    message: string,
+    status = 409,
+    details: Record<string, unknown> = {},
+  ): Promise<never> => {
+    await deps.store.settleStatement(claim!.id, {
+      status: "refused",
+      error: code,
+    }).catch(() => {});
+    return await refuseStatement(code, message, status, details);
+  };
 
-  // The live re-check: drop anything Xero shows paid or no longer open.
+  // The live re-check: drop anything Xero shows paid or no longer open. A failed read
+  // refuses; it never falls back to our copy.
   let kept = entries;
   try {
     const live = await deps.readInvoices(
@@ -1535,26 +1705,57 @@ export async function debtWsStatementSend(
       return e;
     });
   } catch (_) {
-    await deps.store.settleStatement(claim!.id, {
-      status: "refused",
-      error: "xero_unavailable",
-    }).catch(() => {});
-    return await refuseStatement(
+    return await release(
       "xero_unavailable",
       "Xero could not be read for the last check, so the statement was not sent",
       503,
     );
   }
   if (!kept.length) {
-    await deps.store.settleStatement(claim!.id, {
-      status: "refused",
-      error: "nothing_due",
-    }).catch(() => {});
-    return await refuseStatement(
+    return await release(
       "nothing_due",
       "Xero shows everything on this statement paid",
     );
   }
+
+  // The bank-feed check on every invoice kept (spec section 6.5): any possible payment
+  // refuses the statement, listing which invoices, unless the owner sends anyway.
+  const feed = await bankFeedSafe(
+    deps,
+    kept.map((e) => bankFromOf(e.inv)),
+  );
+  const flagged: StatementPossiblePayment[] = [];
+  for (const e of kept) {
+    const payments = bankCheck(feed, {
+      ...e.inv,
+      amount_due: e.row.amount_due,
+    }, payerNames(e));
+    if (!payments) {
+      return await release(
+        "bank_check_unavailable",
+        "The bank feed could not be read, so the statement was not sent. Try again shortly",
+        503,
+      );
+    }
+    if (payments.length) {
+      flagged.push({
+        xero_invoice_id: e.inv.xero_invoice_id,
+        invoice_number: e.inv.invoice_number,
+        possible_payments: payments,
+      });
+    }
+  }
+  if (flagged.length && !override) {
+    return await release(
+      "possible_payment",
+      `There may already be a payment for ${
+        flagged.map((f) => f.invoice_number ?? f.xero_invoice_id).join(", ")
+      }. Match it in Xero, or send anyway`,
+      409,
+      { possible_payments: flagged },
+    );
+  }
+
   const lines = await statementLines(deps, kept);
   const view = statementView(company, weekStart, lines);
   let result: Awaited<ReturnType<DebtWsDeps["sendEmail"]>>;
@@ -1600,6 +1801,7 @@ export async function debtWsStatementSend(
     xero_invoice_ids: lines.map((l) => l.xero_invoice_id),
     total: view.total,
   });
+  const overridden = override && flagged.length > 0;
   await log(
     deps,
     {
@@ -1618,6 +1820,8 @@ export async function debtWsStatementSend(
         statement_id: claim!.id,
         week_start: weekStart,
         to: company.to_email,
+        override_possible_payment: overridden,
+        ...(overridden ? { possible_payments: flagged } : {}),
       },
     },
   );
@@ -1632,6 +1836,7 @@ export async function debtWsStatementSend(
     invoices: lines.length,
     total: view.total,
     sent_at: sentAt,
+    override_possible_payment: overridden,
   };
 }
 
@@ -1866,6 +2071,9 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
       visit_date: visitDate,
     };
   }
+  const dropped: Array<
+    { share_key: string; xero_invoice_id: string; code: string }
+  > = [];
   const fail = async (
     error: string,
     status: "failed" | "skipped" = "failed",
@@ -1878,20 +2086,22 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
       status,
       reason: error,
       visit_date: visitDate,
+      dropped,
     };
   };
 
-  // Drop anyone paid since the lock: live from Xero, else from our copy.
+  // Drop anyone paid since the lock, read live from Xero. A failed live read fails the
+  // list closed: it is never sent from our copy (spec section 4).
   const items = (row.items as JanListItem[]).filter((i) =>
     !row.removed_share_keys.includes(i.share_key)
   );
-  let kept: JanListItem[];
+  let open: JanListItem[];
   try {
     const live = await deps.readInvoices(items.map((i) => i.xero_invoice_id));
     const byId = new Map(
       live.map((inv) => [String(inv.InvoiceID ?? "").toLowerCase(), inv]),
     );
-    kept = items.filter((i) => {
+    open = items.filter((i) => {
       const inv = byId.get(i.xero_invoice_id);
       return inv && inv.Status === "AUTHORISED" && Number(inv.AmountDue) > 0;
     }).map((i) => ({
@@ -1899,17 +2109,86 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
       amount: Number(byId.get(i.xero_invoice_id)!.AmountDue),
     }));
   } catch (_) {
-    const copy = await deps.store.invoicesByIds(
-      items.map((i) => i.xero_invoice_id),
+    return await fail("xero_unavailable");
+  }
+  if (!open.length) return await fail("nobody left to visit", "skipped");
+
+  // The bank-feed check on every item left (spec section 6.6): a possible payment drops
+  // that item, logged against its share, and the rest still go to Jan. No feed at all
+  // fails the list closed.
+  let copy: Map<string, WsInvoice>;
+  let clients: Map<string, string | null>;
+  try {
+    const invoices = await deps.store.invoicesByIds(
+      open.map((i) => i.xero_invoice_id),
     );
-    const open = new Map(
-      copy.filter((c) => c.status === "AUTHORISED" && Number(c.amount_due) > 0)
-        .map((c) => [c.xero_invoice_id, c]),
-    );
-    kept = items.filter((i) => open.has(i.xero_invoice_id)).map((i) => ({
-      ...i,
-      amount: Number(open.get(i.xero_invoice_id)!.amount_due),
-    }));
+    copy = new Map(invoices.map((i) => [i.xero_invoice_id, i]));
+    const jobIds = [
+      ...new Set(invoices.map((i) => i.job_id).filter((j): j is string => !!j)),
+    ];
+    const jobs = jobIds.length ? await deps.store.jobs(jobIds) : [];
+    clients = new Map(jobs.map((j) => [String(j.id), j.client_name]));
+  } catch (_) {
+    return await fail("bank_check_unavailable");
+  }
+  const feed = await bankFeedSafe(
+    deps,
+    open.map((i) => {
+      const inv = copy.get(i.xero_invoice_id);
+      return inv ? bankFromOf(inv) : null;
+    }),
+  );
+  if (!feed) return await fail("bank_check_unavailable");
+  const actor: Actor = { user_id: null, label: "cron" };
+  const kept: JanListItem[] = [];
+  for (const item of open) {
+    const inv = copy.get(item.xero_invoice_id) ?? null;
+    const payments = inv
+      ? bankCheck(feed, { ...inv, amount_due: item.amount }, [
+        inv.contact_name,
+        inv.job_id ? clients.get(String(inv.job_id)) : null,
+      ])
+      : null;
+    if (payments && !payments.length) {
+      kept.push(item);
+      continue;
+    }
+    const code = payments ? "possible_payment" : "bank_check_unavailable";
+    const first = payments?.[0];
+    const message = first
+      ? `Dropped from Jan's visit list for ${
+        longDate(visitDate)
+      }: there may already be a payment: ${first.date ?? "a recent date"}, $${
+        first.amount.toFixed(2)
+      } from ${first.payer_text} (${first.reason}). Match it in Xero`
+      : `Dropped from Jan's visit list for ${
+        longDate(visitDate)
+      }: the bank feed could not be checked for this invoice`;
+    dropped.push({
+      share_key: item.share_key,
+      xero_invoice_id: item.xero_invoice_id,
+      code,
+    });
+    await log(
+      deps,
+      {
+        share_key: item.share_key,
+        ids: [item.xero_invoice_id],
+        job_id: inv?.job_id ?? null,
+      },
+      actor,
+      "send_refused",
+      {
+        step: "d21",
+        body: message,
+        meta: {
+          code,
+          visit_date: visitDate,
+          jan_list: true,
+          possible_payments: payments ?? [],
+        },
+      },
+    ).catch(() => {});
   }
   if (!kept.length) return await fail("nobody left to visit", "skipped");
   const mobile = await janMobile(deps.store);
@@ -1926,14 +2205,13 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
     provider_message_id: sent.messageId,
     error: null,
   });
-  const actor: Actor = { user_id: null, label: "cron" };
   for (const item of kept) {
     await log(
       deps,
       {
         share_key: item.share_key,
         ids: [item.xero_invoice_id],
-        job_id: null,
+        job_id: copy.get(item.xero_invoice_id)?.job_id ?? null,
       },
       actor,
       "jan_list",
@@ -1951,6 +2229,7 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
     visit_date: visitDate,
     count: kept.length,
     provider_message_id: sent.messageId,
+    dropped,
   };
 }
 
@@ -2012,12 +2291,27 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
     perth_date: book.today,
     playbook_version: DEBT_WS_PLAYBOOK_VERSION,
     agent_on: book.settings.agent_enabled,
+    /** "bank_feed_unavailable": nothing is handed out until the bank feed reads again. */
+    blocked: null as string | null,
   };
   if (!book.settings.agent_enabled) return { ...base, items: [], more: false };
   const candidates = book.entries.filter((e) =>
     e.open && e.kind !== "account" && !e.notChased && e.category !== null &&
     e.job
   );
+  // Every item carries its bank-feed check (spec section 6), so without the feed the
+  // queue hands out nothing rather than items that may already be paid.
+  const bank = candidates.length
+    ? await bankFeedSafe(deps, candidates.map((e) => bankFromOf(e.inv)))
+    : null;
+  if (candidates.length && !bank) {
+    return {
+      ...base,
+      items: [],
+      more: false,
+      blocked: "bank_feed_unavailable",
+    };
+  }
   const jobIds = [...new Set(candidates.map((e) => e.job!.id))];
   const oldest = candidates.reduce((m, e) => {
     const since = e.state?.agent_reviewed_at ??
@@ -2035,8 +2329,11 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
     entry: e,
     why: needsAgent(e, evidenceBy.get(e.job!.id) ?? null),
   })).filter((q) => q.why.due || q.why.evidence);
-  const take = queued.slice(0, DEBT_WS_AGENT_QUEUE_LIMIT);
-  const bank = await bankFeedSafe(deps);
+  // An invoice the feed does not reach back to waits for a later round.
+  const checkable = queued.filter((q) =>
+    bankCovers(bank!, bankFromOf(q.entry.inv))
+  );
+  const take = checkable.slice(0, DEBT_WS_AGENT_QUEUE_LIMIT);
   const budget = { left: DEBT_WS_PAY_LINK_FETCH_LIMIT };
   const items = [];
   for (const { entry, why } of take) {
@@ -2074,8 +2371,8 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
       story_status: story.status ?? null,
       messages,
       notes: entry.logs.map(noteView),
-      possible_payments: possiblePaymentsFor(entry, bank.txs),
-      possible_payments_status: bank.status,
+      possible_payments: bankCheck(bank, entry.inv, payerNames(entry)) ?? [],
+      possible_payments_status: "ok",
       queued_because: {
         step_due_without_suggestion: why.due,
         new_evidence: why.evidence,
@@ -2249,12 +2546,12 @@ export async function debtWsAgentSubmit(
     deps.env(DEBT_WS_AUTO_SEND_SWITCH) === "true" &&
     debtWsSendingOn(deps.env, settings)
   ) {
-    const bank = await bankFeedSafe(deps);
-    const payments = possiblePaymentsFor(entry, bank.txs);
-    if (bank.status !== "ok" || payments.length) {
+    const bank = await bankFeedSafe(deps, [bankFromOf(entry.inv)]);
+    const payments = bankCheck(bank, entry.inv, payerNames(entry));
+    if (!payments || payments.length) {
       autoSend = {
         attempted: false,
-        reason: payments.length ? "possible_payment" : "bank_check_unavailable",
+        reason: payments ? "possible_payment" : "bank_check_unavailable",
       };
     } else {
       try {
@@ -2336,9 +2633,11 @@ async function authorise(
 ): Promise<void> {
   const user = caller.kind === "user" && !!caller.user_id && caller.staff;
   if (who === "staff") {
-    if (user || caller.kind === "server") return;
+    // A signed-in staff JWT only. The server key reaches the Jan list cron actions and
+    // the agent queue and submit, never the screen's reads and writes.
+    if (user) return;
     throw new DebtWsError(
-      "An authorised operator session is required",
+      "A signed-in staff session is required",
       403,
       "operator_access_required",
     );

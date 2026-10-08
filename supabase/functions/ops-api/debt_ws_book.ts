@@ -218,10 +218,26 @@ export function shownSuggestion(
   ) ?? null;
 }
 
-export function companyKeyOf(inv: WsInvoice): string {
-  return inv.xero_contact_id
-    ? String(inv.xero_contact_id).toLowerCase()
-    : `name:${normaliseName(inv.contact_name)}`;
+/**
+ * The company an account invoice belongs to: the canonical Xero contact id after
+ * debt_ws_settings.company_aliases (one builder can sit on several Xero contacts), else
+ * "name:" and the normalised contact name when the invoice has no contact id.
+ */
+export function companyKeyOf(
+  inv: Pick<WsInvoice, "xero_contact_id" | "contact_name">,
+  aliases: Record<string, string> = {},
+): string {
+  if (!inv.xero_contact_id) return `name:${normaliseName(inv.contact_name)}`;
+  return canonicalCompanyKey(String(inv.xero_contact_id), aliases);
+}
+
+/** A company key (or an alias contact id) as its canonical key, lower case. */
+export function canonicalCompanyKey(
+  key: string,
+  aliases: Record<string, string> = {},
+): string {
+  const id = key.trim().toLowerCase();
+  return aliases[id] ?? id;
 }
 
 export interface LoadBookOptions {
@@ -319,9 +335,16 @@ export async function loadBook(
         jobStatus: job?.status ?? null,
       })
       : null;
+    const rawContact = inv.xero_contact_id
+      ? String(inv.xero_contact_id).toLowerCase()
+      : null;
     const notChased = isNotChased(
       inv.contact_name,
       settings.not_chased_contacts,
+      [
+        rawContact,
+        rawContact ? companyKeyOf(inv, settings.company_aliases) : null,
+      ],
     );
     const shareLogs = (logsBy.get(key) ?? []).sort((a, b) =>
       String(b.created_at).localeCompare(String(a.created_at))
@@ -350,7 +373,9 @@ export async function loadBook(
     const label = cls.lane === "homeowner"
       ? payerLabel(payer, job?.client_name ?? null, cls.letter)
       : { label: payer, neighbourOf: null };
-    const companyKey = cls.lane === "account" ? companyKeyOf(inv) : null;
+    const companyKey = cls.lane === "account"
+      ? companyKeyOf(inv, settings.company_aliases)
+      : null;
     const templateReady = !!ladder.step_due && isTextStep(ladder.step_due.step);
     const row: OverviewRow = {
       share_key: key,
@@ -526,13 +551,19 @@ export interface ViewerSettings {
   owner_set: boolean;
 }
 
+/**
+ * The accounts email for a company: statement_emails keyed by the canonical contact id
+ * (any case); a key that is the company's name is a fallback only.
+ */
 function statementEmailFor(
   settings: DebtWsSettings,
   companyKey: string,
   name: string | null,
 ): string | null {
   const map = settings.statement_emails;
-  const byKey = map[companyKey];
+  const byKey = Object.entries(map).find(([k]) =>
+    k.trim().toLowerCase() === companyKey
+  )?.[1];
   const wanted = normaliseName(name);
   const byName = Object.entries(map).find(([k]) =>
     normaliseName(k) === wanted && !!wanted
@@ -575,8 +606,14 @@ export function companiesOf(
   );
   const out: CompanyView[] = [];
   for (const [companyKey, entries] of groups) {
-    const name = entries[0].inv.contact_name || "Unknown company";
-    const pastDue = entries.filter((e) => e.day >= 1);
+    // The name on the canonical contact when one of its invoices is open, else the first.
+    const named = entries.find((e) =>
+      String(e.inv.xero_contact_id ?? "").toLowerCase() === companyKey
+    ) ?? entries[0];
+    const name = named.inv.contact_name || "Unknown company";
+    const pastDue = entries.filter((e) =>
+      e.day >= 1
+    );
     const inGrace = entries.filter((e) => e.day < 1);
     const toEmail = statementEmailFor(book.settings, companyKey, name);
     const sent = statements.some((s) =>
@@ -590,11 +627,11 @@ export function companiesOf(
       : !toEmail
       ? "no_email"
       : "ready";
-    const worst = pastDue.map((e) =>
-      e.category
-    ).filter((c): c is Category => !!c).sort((a, b) =>
-      CATEGORY_RANK[a] - CATEGORY_RANK[b]
-    )[0] ?? null;
+    const worst =
+      pastDue.map((e) => e.category).filter((c): c is Category => !!c).sort((
+        a,
+        b,
+      ) => CATEGORY_RANK[a] - CATEGORY_RANK[b])[0] ?? null;
     out.push({
       company_key: companyKey,
       name,

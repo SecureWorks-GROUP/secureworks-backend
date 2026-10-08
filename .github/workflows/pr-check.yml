@@ -234,11 +234,16 @@ jobs:
       # weekend shift, templates, the bank-feed matcher), the Supabase store, and every
       # debt_ws_ action over an in-memory store. Sending, the agent, auto-send and Jan's
       # list are all proven off by default; every send runs the live Xero and bank checks.
-      - name: Test the Debt Workshop rules, store and actions
+      # The 8 Oct review fixes are pinned here too: one cached, paged bank read reaching
+      # the oldest open invoice; the statement and Jan list bank checks; Jan's list failing
+      # closed; server-key denial on staff actions; the agent queue blocked without the
+      # feed; the template amount bar; company aliases; numbered reference endings.
+      - name: Test the Debt Workshop rules, store, dependencies and actions
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ops-api/debt_ws_rules_test.ts \
             supabase/functions/ops-api/debt_ws_store_test.ts \
+            supabase/functions/ops-api/debt_ws_deps_test.ts \
             supabase/functions/ops-api/debt_ws_actions_test.ts
 
       # A service-role key committed in 2026-03 stayed live for six months.

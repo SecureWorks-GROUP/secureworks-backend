@@ -31,8 +31,12 @@ export interface DebtWsSettings {
   agent_enabled: boolean;
   auto_send_steps: Record<string, unknown>;
   jan_list_auto_send: boolean;
+  /** Names or Xero contact ids (a canonical id covers its aliases too). */
   not_chased_contacts: string[];
+  /** Canonical Xero contact id (lower case) to the accounts email; a name key is a fallback. */
   statement_emails: Record<string, unknown>;
+  /** Extra Xero contact id to the canonical company contact id, both lower case. */
+  company_aliases: Record<string, string>;
 }
 
 /** Everything off and nobody the owner: what a missing settings row means. */
@@ -45,6 +49,7 @@ export const DEBT_WS_SETTINGS_OFF: DebtWsSettings = {
   jan_list_auto_send: false,
   not_chased_contacts: [],
   statement_emails: {},
+  company_aliases: {},
 };
 
 export interface WsState {
@@ -340,7 +345,25 @@ function toSettings(r: any): DebtWsSettings {
       ? r.not_chased_contacts.map((x: unknown) => String(x))
       : [],
     statement_emails: obj(r?.statement_emails),
+    company_aliases: aliasesOf(r?.company_aliases),
   };
+}
+
+const CONTACT_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** company_aliases as {alias id: canonical id}, lower case; anything not an id pair is dropped. */
+export function aliasesOf(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+  for (const [alias, canonical] of Object.entries(value)) {
+    const a = alias.trim().toLowerCase();
+    const c = typeof canonical === "string"
+      ? canonical.trim().toLowerCase()
+      : "";
+    if (CONTACT_ID.test(a) && CONTACT_ID.test(c) && a !== c) out[a] = c;
+  }
+  return out;
 }
 
 export function createSupabaseDebtWsStore(
@@ -375,7 +398,7 @@ export function createSupabaseDebtWsStore(
   return {
     async settings() {
       const { data, error } = await client.from("debt_ws_settings").select(
-        "owner_user_ids, tab_visible, sending_enabled, agent_enabled, auto_send_steps, jan_list_auto_send, not_chased_contacts, statement_emails",
+        "owner_user_ids, tab_visible, sending_enabled, agent_enabled, auto_send_steps, jan_list_auto_send, not_chased_contacts, statement_emails, company_aliases",
       ).eq("id", 1).maybeSingle();
       if (error) readFailed("the workshop settings", error);
       return data ? toSettings(data) : { ...DEBT_WS_SETTINGS_OFF };

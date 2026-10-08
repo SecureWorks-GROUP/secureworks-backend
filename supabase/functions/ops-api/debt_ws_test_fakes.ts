@@ -261,9 +261,11 @@ export class FakeStore implements DebtWsStore {
     ...DEBT_WS_SETTINGS_OFF,
     owner_user_ids: [SHAUN_ID],
     not_chased_contacts: ["Emergency Trade Services", "Builderwest"],
+    // Keyed by the canonical Xero contact id (spec section 4).
     statement_emails: {
-      "Major Loss Builders": "accounts@builders.example.test",
+      [MLB_CONTACT]: "accounts@builders.example.test",
     },
+    company_aliases: {},
   };
   invoices: WsInvoice[] = fixtureInvoices();
   jobRows: WsJob[] = fixtureJobs();
@@ -535,7 +537,9 @@ export interface Recorder {
   >;
   statusMoves: Record<string, unknown>[];
   liveReads: string[];
+  /** One entry per bank-feed page call: the date_from asked for. */
   bankReads: Array<string | null>;
+  bankPages: number[];
   payLinkReads: string[];
 }
 
@@ -544,7 +548,14 @@ export function fakeDeps(
   options: {
     env?: Record<string, string>;
     live?: Record<string, Record<string, unknown>>;
+    /** One page of bank transactions (has_more false). */
     bank?: BankTransaction[];
+    /** Several pages, in order; has_more is true on every page but the last. */
+    bankPages?: BankTransaction[][];
+    /** Every bank-feed call fails with this. */
+    bankError?: Error;
+    /** readInvoices (the batch live read) fails with this. */
+    liveError?: Error;
     smsError?: Error;
     now?: Date;
   } = {},
@@ -556,6 +567,7 @@ export function fakeDeps(
     statusMoves: [],
     liveReads: [],
     bankReads: [],
+    bankPages: [],
     payLinkReads: [],
   };
   const liveOf = (id: string) => {
@@ -579,15 +591,25 @@ export function fakeDeps(
     },
     readInvoices: (ids) => {
       rec.liveReads.push(...ids);
+      if (options.liveError) return Promise.reject(options.liveError);
       return Promise.resolve(ids.map(liveOf));
     },
     payLink: (id) => {
       rec.payLinkReads.push(id);
       return Promise.resolve(`https://in.xero.com/pay-${id.slice(-4)}`);
     },
-    bankTransactions: (dateFrom) => {
+    bankTransactions: (dateFrom, page) => {
       rec.bankReads.push(dateFrom);
-      return Promise.resolve(options.bank ?? []);
+      rec.bankPages.push(page);
+      if (options.bankError) return Promise.reject(options.bankError);
+      const pages = options.bankPages ?? [options.bank ?? []];
+      // Like Xero's Date>= filter: nothing dated before date_from comes back.
+      return Promise.resolve({
+        transactions: (pages[page - 1] ?? []).filter((t) =>
+          !dateFrom || !t.date || String(t.date).slice(0, 10) >= dateFrom
+        ),
+        has_more: page < pages.length,
+      });
     },
     sendSms: (body) => {
       rec.sms.push(body);

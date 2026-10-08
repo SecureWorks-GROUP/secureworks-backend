@@ -1122,8 +1122,9 @@ Deno.test("debt desk writes are staff or server only; trades and the agent key a
 });
 
 Deno.test("debt workshop actions are staff JWT or server secret only; trades and the agent read key are refused", () => {
-  // runDebtWsAction (debt_ws_actions.ts) then narrows each action: the owner for sends,
-  // statements, contacts and card moves, the server key for the Jan list cron.
+  // runDebtWsAction (debt_ws_actions.ts) then narrows each action: a staff JWT for the
+  // screen's actions (the server key is refused there), the owner for sends, statements,
+  // contacts and card moves, the server key for the Jan list cron and the agent.
   for (
     const action of [
       "debt_ws_overview",
