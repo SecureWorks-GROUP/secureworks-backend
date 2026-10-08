@@ -126,6 +126,14 @@ case "$action" in
   trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
     printf '%s\n' '{"error":"Login required"}'
     ;;
+  # Stands in for the ops-api front door (_authorizeOpsApiAction): no debt_ws_
+  # action is in OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS, so the shared dashboard
+  # key is refused with user_jwt_required before runDebtWsAction checks the
+  # method or the staff / owner / server-key rule. Kept honest by
+  # test_jwt_fail_closed_actions_are_refused_by_a_source_gate.
+  debt_ws_*)
+    printf '%s\n' '{"error":"A signed-in Supabase user session is required.","code":"user_jwt_required"}'
+    ;;
   *)
     printf '%s\n' '{"ok":true}'
     ;;
@@ -197,6 +205,18 @@ authtrade_gated_actions() {
       printf '%s\n' "$action"
     fi
   done < <(manifest_actions)
+}
+
+# The actions the ops-api front door lets the shared dashboard key through
+# (OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS). Every other action refuses that key
+# with user_jwt_required before its dispatch block runs.
+static_key_compatible_actions() {
+  awk '
+    /^const OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS = new Set\(\[/ { inside = 1; next }
+    inside && /^\]\)/ { exit }
+    inside { print }
+  ' "$OPS_API_SOURCE" |
+    sed -n "s/^[[:space:]]*'\([A-Za-z_]*\)',.*/\1/p"
 }
 
 run_smoke() {
@@ -453,6 +473,35 @@ test_authtrade_gated_actions_declare_jwt_fail_closed() {
   pass "$name"
 }
 
+# A jwt-fail-closed declaration is only true if the deployed source really
+# refuses the shared key at authentication: either the front door (the action is
+# not static-key compatible) or an authTrade guard in its dispatch block. This is
+# what keeps the fake surface's refusals above tied to the real handler.
+test_jwt_fail_closed_actions_are_refused_by_a_source_gate() {
+  local name="test_jwt_fail_closed_actions_are_refused_by_a_source_gate"
+  local static="$TEST_TMP/static-key-actions"
+  local gated="$TEST_TMP/jwt-source-gated"
+
+  static_key_compatible_actions | sort -u > "$static"
+  if ! grep -Fxq ops_api_version "$static"; then
+    fail "$name" "could not read OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS from the ops-api source; the scan has stopped matching"
+    return
+  fi
+
+  authtrade_gated_actions | sort -u > "$gated"
+
+  local action
+  while IFS= read -r action; do
+    [[ -z "$action" ]] && continue
+    if grep -Fxq "$action" "$static" && ! grep -Fxq "$action" "$gated"; then
+      fail "$name" "jwt-fail-closed action is static-key compatible and has no authTrade guard, so the shared key would reach it: $action"
+      return
+    fi
+  done < <(manifest_actions_with_policy jwt-fail-closed)
+
+  pass "$name"
+}
+
 test_unknown_probe_policy_fails_closed() {
   local name="test_unknown_probe_policy_fails_closed"
   local manifest="$TEST_TMP/bad-policy.txt"
@@ -484,6 +533,7 @@ main() {
   test_jwt_policy_is_enforced_for_any_manifest_action
   test_bounded_probe_that_runs_instead_of_refusing_fails
   test_authtrade_gated_actions_declare_jwt_fail_closed
+  test_jwt_fail_closed_actions_are_refused_by_a_source_gate
   test_unknown_probe_policy_fails_closed
 
   echo
