@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS public.debt_ws_settings (
   updated_by text
 );
 
+-- Tolerate a partly created table from an earlier draft of this migration: make sure
+-- the later columns exist before the seed below references them.
+ALTER TABLE public.debt_ws_settings
+  ADD COLUMN IF NOT EXISTS statement_emails jsonb NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS company_aliases jsonb NOT NULL DEFAULT '{}'::jsonb;
+
 DO $$
 DECLARE
   v_owners uuid[];
@@ -94,7 +100,7 @@ BEGIN
     -- Extra contact id -> canonical contact id: MLB ("ML Builders"), Western
     -- Building, Builderwest.
     jsonb_build_object(
-      '4d7121e3-89d5-4021-8880-ce9e8c4f1a91', '96abb9b3-89d5-4021-8880-ce9e8c4f1a91',
+      '4d7121e3-b324-4566-9552-96d6add93f58', '96abb9b3-89d5-4021-8880-ce9e8c4f1a91',
       '2a34b09f-ed34-4b26-9ad0-f59bd9d3b264', '29d70cdc-8ba1-4a21-ba9a-ade6374e987b',
       'aff63429-b473-4c46-bfaa-40c2678b3ae0', 'c3a479ce-20c4-43fe-b893-bbcacfeb417e'
     ),

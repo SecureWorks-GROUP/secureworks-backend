@@ -32,7 +32,7 @@ BEGIN
   IF (SELECT count(*) FROM public.debt_ws_settings) <> 1 THEN
     RAISE EXCEPTION 'rollback contract: re-apply after rollback did not seed settings';
   END IF;
-  IF (SELECT company_aliases->>'4d7121e3-89d5-4021-8880-ce9e8c4f1a91'
+  IF (SELECT company_aliases->>'4d7121e3-b324-4566-9552-96d6add93f58'
         FROM public.debt_ws_settings WHERE id = 1)
      IS DISTINCT FROM '96abb9b3-89d5-4021-8880-ce9e8c4f1a91' THEN
     RAISE EXCEPTION 'rollback contract: re-apply after rollback did not seed the company aliases';

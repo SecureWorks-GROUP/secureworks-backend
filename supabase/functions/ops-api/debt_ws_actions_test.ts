@@ -1986,7 +1986,7 @@ Deno.test("decide: a template send needs the amount its draft was written for (r
   assertEquals(rec.sms.length, 1);
 });
 
-const MLB_ALIAS = "4d7121e3-89d5-4021-8880-ce9e8c4f1a91";
+const MLB_ALIAS = "4d7121e3-b324-4566-9552-96d6add93f58";
 
 function aliasStore() {
   const store = new FakeStore();
