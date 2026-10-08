@@ -1423,14 +1423,15 @@ DO $c$
 DECLARE j uuid; e uuid; fin jsonb; f record; n integer := 0; code text;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('live', 50);
- -- The store accepted the one item it saw, but the reader proposed four and
- -- refused two itself: half refused, not promoted, the run counts as a failure.
+ -- The store accepted the one item it saw, but the reader proposed six and
+ -- refused three itself: half refused, more than the 2 the small-count floor
+ -- forgives (20261008095000), not promoted, the run counts as a failure.
  j := pg_temp.lg_job('SWF-98101'); e := pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
- fin := pg_temp.lg_build(j, e, 'call me about the gate', '{"validator":"ok","proposed":4,"refused_local":2}');
+ fin := pg_temp.lg_build(j, e, 'call me about the gate', '{"validator":"ok","proposed":6,"refused_local":3}');
  PERFORM pg_temp.lg_assert(fin ->> 'outcome' = 'built' AND NOT (fin ->> 'promoted')::boolean AND NOT (fin ->> 'passed')::boolean
   AND (fin #>> '{checks,refusal_rate}')::numeric = 0.5 AND (fin #>> '{checks,refused_rate}')::numeric = 0, 'reader refusals count: ' || fin::text);
- PERFORM pg_temp.lg_assert((SELECT status = 'shadow' AND checks ->> 'passed' = 'false' AND checks #>> '{store,proposed}' = '4'
-  AND checks #>> '{store,refused_local}' = '2' FROM public.context_ledger_generations WHERE id = (fin ->> 'generation_id')::uuid)
+ PERFORM pg_temp.lg_assert((SELECT status = 'shadow' AND checks ->> 'passed' = 'false' AND checks #>> '{store,proposed}' = '6'
+  AND checks #>> '{store,refused_local}' = '3' FROM public.context_ledger_generations WHERE id = (fin ->> 'generation_id')::uuid)
   AND (SELECT status = 'done' AND error = 'checks_failed' FROM public.context_extraction_runs WHERE id = (fin ->> 'run_id')::uuid),
   'the verdict is stored on the generation and the run counts as failed');
  PERFORM pg_temp.lg_assert((SELECT f2.failures = 1 FROM public.context_ledger_failures(ARRAY[j]) f2), 'a check-failed build counts toward the backoff');
