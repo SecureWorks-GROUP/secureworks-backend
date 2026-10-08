@@ -46,9 +46,12 @@ BEGIN
  -- sms R13 shape: two open fencing quotes for one contact, text "$5,478" on the
  -- fencing line. Step 1 must fall through (bills "5" and "478" sit on the holding
  -- job); the contact rules send it to review with no job. content_ref is slice P2.
- INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
- (quote_a,org,'quoted','fencing','L1-R13-QUOTE-A','l1-r13-contact'),
- (quote_b,org,'quoted','fencing','L1-R13-QUOTE-B','l1-r13-contact');
+ -- Both quotes stand open before the 21 Sep text whenever the contract runs: since
+ -- P1a (20260924140000_context_placement_at_time) a job created after a message is
+ -- its candidate only inside its 30-day lead window.
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at) VALUES
+ (quote_a,org,'quoted','fencing','L1-R13-QUOTE-A','l1-r13-contact','2026-09-01T00:00:00Z'),
+ (quote_b,org,'quoted','fencing','L1-R13-QUOTE-B','l1-r13-contact','2026-09-01T00:00:00Z');
  INSERT INTO public.business_events(payload,contact_id,event_at,provider_message_id)
  VALUES('{"body":"I only see one price of $5,478","line":"fencing"}','l1-r13-contact','2026-09-21T03:51:00Z','ghl:l1-r13') RETURNING * INTO e;
  IF e.attribution_step=1 OR e.job_id IS NOT NULL THEN

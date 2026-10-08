@@ -156,9 +156,12 @@ DECLARE org uuid:='00000000-0000-0000-0000-000000000001'; job_a uuid:=gen_random
  out jsonb; e public.business_events; ev uuid;
 BEGIN
  UPDATE public.automation_switches SET capture=true, attribution=true WHERE id=1;
- INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,metadata,client_email) VALUES
-  (job_a,org,'scheduled','patio','SWP-990001','em2-contact-a','{}','pat.example@example.com'),
-  (job_b,org,'accepted','patio','SWP-990002','em2-contact-b','{}','sam.sample@example.net');
+ -- Both jobs stand open before the 1 Oct emails whenever the contract runs:
+ -- since P1a (20260924140000_context_placement_at_time) a job created after a
+ -- message is its candidate only inside its 30-day lead window.
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,metadata,client_email,created_at) VALUES
+  (job_a,org,'scheduled','patio','SWP-990001','em2-contact-a','{}','pat.example@example.com','2026-09-01T00:00:00Z'),
+  (job_b,org,'accepted','patio','SWP-990002','em2-contact-b','{}','sam.sample@example.net','2026-09-01T00:00:00Z');
 
  out:=public.capture_business_event((SELECT r FROM em2_rows WHERE label='e_direct'));
  IF out->>'outcome'<>'inserted' OR out->>'attribution_status'<>'direct' OR (out->>'job_id')::uuid<>job_a

@@ -69,16 +69,22 @@ DECLARE
  r5_job uuid:='33333333-3333-4333-8333-333333333335';
  r1_a uuid:=gen_random_uuid(); r1_b uuid:=gen_random_uuid(); stranger uuid:=gen_random_uuid(); two_a uuid:=gen_random_uuid(); two_b uuid:=gen_random_uuid();
  tool jsonb; hook jsonb; out jsonb; e public.business_events; before public.business_events; n int; total int; t_start timestamptz:=clock_timestamp();
+ -- The fixture jobs stand open before every recorded message (the earliest is
+ -- R7, 8 Sep 2026), whenever the contract runs. Since P1a
+ -- (20260924140000_context_placement_at_time) a job created after a message is
+ -- its candidate only inside the job's 30-day lead window, so jobs created at
+ -- the run's now() stopped covering R7 from 8 Oct 2026 02:00 UTC.
+ jobs_at constant timestamptz:='2026-09-01T00:00:00Z';
 BEGIN
  SELECT r INTO tool FROM c1a_rows WHERE label='r5_tool';
  SELECT r INTO hook FROM c1a_rows WHERE label='r5_webhook';
- INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,metadata) VALUES
-  (r5_job,org,'accepted','fencing','C1A-261335','1VHBzZX6DsjMZW2WbgQn','{}'),
-  (r1_a,org,'quoted','fencing','C1A-261448','lYPee0K2DuQHXH2xHL1P','{}'),
-  (r1_b,org,'quoted','fencing','C1A-261431','lYPee0K2DuQHXH2xHL1P','{}'),
-  (stranger,org,'accepted','fencing','C1A-STRANGER','c1a-other-contact','{}'),
-  (two_a,org,'quoted','fencing','C1A-TWO-A','c1a-two-jobs-contact','{}'),
-  (two_b,org,'quoted','patio','C1A-TWO-B','c1a-two-jobs-contact','{}');
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,metadata,created_at) VALUES
+  (r5_job,org,'accepted','fencing','C1A-261335','1VHBzZX6DsjMZW2WbgQn','{}',jobs_at),
+  (r1_a,org,'quoted','fencing','C1A-261448','lYPee0K2DuQHXH2xHL1P','{}',jobs_at),
+  (r1_b,org,'quoted','fencing','C1A-261431','lYPee0K2DuQHXH2xHL1P','{}',jobs_at),
+  (stranger,org,'accepted','fencing','C1A-STRANGER','c1a-other-contact','{}',jobs_at),
+  (two_a,org,'quoted','fencing','C1A-TWO-A','c1a-two-jobs-contact','{}',jobs_at),
+  (two_b,org,'quoted','patio','C1A-TWO-B','c1a-two-jobs-contact','{}',jobs_at);
 
  -- R5, the webhook wins the race: the row is placed by the ladder (the
  -- contact's one open job), never direct, keyed ghl:<id>, no thread binding.

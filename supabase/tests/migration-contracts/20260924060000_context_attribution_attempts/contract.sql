@@ -18,9 +18,12 @@ DO $$
 DECLARE j48 uuid:=gen_random_uuid(); j31 uuid:=gen_random_uuid(); e public.business_events; eid uuid;
  a public.context_attribution_attempts; n integer;
 BEGIN
- INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
- (j48,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261448','lYPee0K2DuQHXH2xHL1P'),
- (j31,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261431','lYPee0K2DuQHXH2xHL1P');
+ -- Both quotes stand open before the recorded text (23 Sep 2026), whenever the
+ -- contract runs: since P1a (20260924140000_context_placement_at_time) a job
+ -- created after a message is its candidate only inside its 30-day lead window.
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at) VALUES
+ (j48,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261448','lYPee0K2DuQHXH2xHL1P','2026-09-01T00:00:00Z'),
+ (j31,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261431','lYPee0K2DuQHXH2xHL1P','2026-09-01T00:00:00Z');
  INSERT INTO public.business_events(payload,contact_id,provider_message_id,direction,event_at)
  VALUES('{"body":"I haven''t received all three quotes as yet?","line":"fencing"}','lYPee0K2DuQHXH2xHL1P',
   'ghl:pffXnIL1v2FTaKnz4DHm','inbound','2026-09-23T04:35:00Z') RETURNING * INTO e;
@@ -62,9 +65,11 @@ BEGIN;
 DO $$
 DECLARE j21 uuid:=gen_random_uuid(); j22 uuid:=gen_random_uuid(); e1 public.business_events; e2 public.business_events; n integer;
 BEGIN
- INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id) VALUES
- (j21,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261421','r17-contact'),
- (j22,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261422','r17-contact');
+ -- Both quotes stand open before the recorded texts (15 and 17 Sep 2026),
+ -- whenever the contract runs (the P1a lead window, as in section 1).
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,created_at) VALUES
+ (j21,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261421','r17-contact','2026-09-01T00:00:00Z'),
+ (j22,'00000000-0000-0000-0000-000000000001','quoted','fencing','SWF-261422','r17-contact','2026-09-01T00:00:00Z');
  INSERT INTO public.business_events(payload,contact_id,provider_message_id,direction,event_at)
  VALUES('{"body":"Confirms receipt of both quote emails","line":"fencing"}','r17-contact','ghl:K96MNiYqLzNhENhginhN','inbound','2026-09-15T02:00:00Z')
  RETURNING * INTO e1;
