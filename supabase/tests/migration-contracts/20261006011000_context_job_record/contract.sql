@@ -324,7 +324,8 @@ BEGIN
  -- made), so no reader infers it from the words.
  IF (SELECT array_agg(DISTINCT t.source_id || '=' || coalesce(t.state, '-') ORDER BY t.source_id || '=' || coalesce(t.state, '-'))
      FROM public.context_job_record_timeline(ARRAY[a], asof) t WHERE t.source_table = 'xero_invoices')
-    IS DISTINCT FROM ARRAY['c0000000-0000-4000-8000-000000000001=issued', 'c0000000-0000-4000-8000-000000000002=voided',
+    -- (changed by record timeline T1, 20261008090000: a deleted invoice's state is deleted, never voided)
+    IS DISTINCT FROM ARRAY['c0000000-0000-4000-8000-000000000001=issued', 'c0000000-0000-4000-8000-000000000002=deleted',
                            'c0000000-0000-4000-8000-000000000003=draft', 'c0000000-0000-4000-8000-000000000004=issued',
                            'c0000000-0000-4000-8000-000000000005=paid'] THEN
   RAISE EXCEPTION 'record contract: invoice states wrong: %', (SELECT array_agg(t.source_id || '=' || coalesce(t.state, '-'))

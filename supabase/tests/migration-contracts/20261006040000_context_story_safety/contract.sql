@@ -3360,9 +3360,15 @@ ROLLBACK;
 -- this migration's own bodies.
 SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
+-- (and the record timeline T1, 20261008090000, which replaced this migration's timeline since)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(record timeline T1, 20261008090000)%' AS record_timeline_t1_live \gset
 BEGIN;
 \if :lead_cutoff_live
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
+\endif
+\if :record_timeline_t1_live
+\ir ../../../rollbacks/20261008090000_context_record_timeline_t1_down.sql
 \endif
 CREATE TEMP TABLE story_safety_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p

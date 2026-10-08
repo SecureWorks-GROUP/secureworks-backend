@@ -444,9 +444,16 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timel
 -- of all: story safety's down refuses while a later body is live)
 SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
+-- (and the record timeline T1, 20261008090000, which replaced story safety's timeline since: story
+-- safety's down refuses while it is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(record timeline T1, 20261008090000)%' AS record_timeline_t1_live \gset
 BEGIN;
 \if :lead_cutoff_live
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
+\endif
+\if :record_timeline_t1_live
+\ir ../../../rollbacks/20261008090000_context_record_timeline_t1_down.sql
 \endif
 \if :story_safety_live
 \ir ../../../rollbacks/20261006040000_context_story_safety_down.sql
