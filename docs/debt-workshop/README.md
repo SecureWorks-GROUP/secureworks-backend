@@ -8,9 +8,7 @@ send the follow-up text with one tap. Captain: Shaun, approved 8 Oct 2026.
   (`references/agent-contract.md` is the agent's view of the two agent actions).
 - **Screen:** secureworks-ux `modules/ops-debt-workshop.js`, documented in
   secureworks-ux `docs/debt-workshop.md`.
-- **Replaces:** the 30 Sep debt desk (`docs/debt-book/`). The workshop never imports
-  `debt_desk_*`, `debt_book*`, `debt_morning_list`, `debt_jan_text`, `debt_chase_schedule` or
-  `debt_draft_templates`. A later PR deletes them.
+- **Replaces:** the 30 Sep to 1 Oct debt desk, removed 8 Oct 2026 (code, actions and `docs/debt-book/`); its decisions are superseded by secureworks-wiki `decisions/2026-10-08-debt-workshop.md`.
 
 Nothing is sent when this merges. Every switch below starts off.
 

@@ -1,8 +1,8 @@
-// Our automated money messages are switched off (captain, 30 Sep 2026, debt book
-// DECISIONS.md Q6: "all off"). Xero's own reminder emails stay on permanently.
+// Our automated money messages are switched off (captain, 30 Sep 2026: "all off").
+// Xero's own reminder emails stay on permanently.
 //
-// Every money message to a customer now goes through the debt desk, one approved
-// send at a time. Until then these paths send nothing:
+// Every money message to a customer now goes through the Debt Workshop
+// (docs/debt-workshop/README.md), one guarded send at a time. These paths send nothing:
 //   - the GoHighLevel chase-overdue tag workflow (trigger_chase_workflow /
 //     stop_chase_workflow): refused here, by name;
 //   - the payment thank-you text (handle_payment_event, driven by the
@@ -28,7 +28,7 @@ export function chaseWorkflowRefusal(action: RetiredChaseWorkflowAction) {
   return {
     status: 409,
     body: {
-      error: `${action} is switched off: automated money messages are off (captain, 30 Sep 2026). Chase from the debt desk instead.`,
+      error: `${action} is switched off: automated money messages are off (captain, 30 Sep 2026). Chase from the Debt Workshop instead.`,
       code: AUTOMATED_MONEY_MESSAGES_OFF_CODE,
       action,
     },

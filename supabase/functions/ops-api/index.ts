@@ -519,7 +519,6 @@ import {
   updateSupplierBill,
 } from './xero_accpay_books.ts'
 import {
-  getXeroOnlineInvoiceUrl,
   getXeroReceivable,
   listXeroBankTransactions,
   readXeroBankSummary,
@@ -531,21 +530,7 @@ import {
   XeroReceivablesReadError,
   createXeroReadGet,
 } from './xero_receivables_read.ts'
-import { createSupabaseDebtBookStore, DebtBookError, logDebtDeskFailure, readDebtBook } from './debt_book.ts'
-import { createSupabaseDebtChaseLogStore, readDebtMorningList } from './debt_morning_list.ts'
-import {
-  createSupabaseDebtDeskStore,
-  debtDeskOwnerIds,
-  debtDeskState,
-  debtDraftDecide,
-  debtDraftSend,
-  DebtDeskError,
-  DebtSendRefusedError,
-  debtLogOutcome,
-  debtSendingEnabled,
-} from './debt_desk_actions.ts'
-import { DEBT_CHASE_HISTORY_FILTER } from './debt_desk_drafts.ts'
-import { createSupabaseJanStaffStore, readJanMobile } from './debt_jan_text.ts'
+import { DEBT_CHASE_HISTORY_FILTER } from './debt_chase_history.ts'
 import { type DebtWsCaller, DebtWsSendRefusedError, runDebtWsAction } from './debt_ws_actions.ts'
 import { createDebtWsDeps } from './debt_ws_deps.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
@@ -7793,99 +7778,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           // The existing credential helper can include a provider error body in
           // its exception. Do not reflect or log credentials through this read door.
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
-        }
-      }
-      // ── Debt book (plan step 1, docs/debt-book/PLAN.md) ──
-      // Read-only: the open book live from Xero through xero_receivables_read.ts, the
-      // captain's rules (debt_book_rules.ts), and a copy-vs-Xero check. Writes nothing.
-      case 'debt_book': {
-        if (req.method !== 'GET') {
-          return json({ ok: false, error: 'debt_book requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
-        }
-        try {
-          return json(await readDebtBook(client, url.searchParams, {
-            getToken,
-            xeroGet: xeroReadGet,
-            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
-          }))
-        } catch (error) {
-          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
-            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
-          }
-          logDebtDeskFailure('debt_book', error)
-          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
-        }
-      }
-      // ── Debt morning list (plan steps 2, 3 and 5, docs/debt-book/PLAN.md) ──
-      // Read-only: the debt book plus the chase log, worked into today's step per payer
-      // (debt_chase_schedule.ts), with each draft and Jan's morning text. No sending, no writes.
-      case 'debt_morning_list': {
-        if (req.method !== 'GET') {
-          return json({ ok: false, error: 'debt_morning_list requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
-        }
-        try {
-          return json(await readDebtMorningList(client, url.searchParams, {
-            getToken,
-            xeroGet: xeroReadGet,
-            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
-            chaseLog: createSupabaseDebtChaseLogStore(client, DEFAULT_ORG_ID),
-            payLink: (id) => getXeroOnlineInvoiceUrl(client, id, { getToken, xeroGet: xeroReadGet }),
-            desk: () => debtDeskState(
-              authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null,
-              {
-                deskOwnerIds: () => debtDeskOwnerIds(createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID)),
-                sendingEnabled: debtSendingEnabled(),
-              },
-            ),
-            janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
-          }))
-        } catch (error) {
-          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
-            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
-          }
-          logDebtDeskFailure('debt_morning_list', error)
-          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
-        }
-      }
-      // ── Debt desk actions (plan step 3, docs/debt-book/PLAN.md; debt_desk_actions.ts) ──
-      // Approve or skip a draft and send approved drafts (desk owner only), and log a call or
-      // visit outcome (any staff user). Writes go to payment_chase_logs only and name the
-      // signed-in user. Sending is off unless DEBT_SENDING_ENABLED is exactly "true".
-      case 'debt_draft_decide':
-      case 'debt_log_outcome':
-      case 'debt_draft_send': {
-        if (req.method !== 'POST') {
-          return json({ ok: false, error: `${action} requires POST`, code: 'METHOD_NOT_ALLOWED' }, 405)
-        }
-        const actor = authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null
-        const deskStore = createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID)
-        const deskDeps = {
-          store: deskStore,
-          readInvoice: async (id: string) => (await getXeroReceivable(client, { xero_invoice_id: id }, { getToken, xeroGet: xeroReadGet })).invoice,
-          sendSms: async (smsBody: Record<string, unknown>) => {
-            try {
-              return await sendChaseSms(client, smsBody)
-            } catch (error) {
-              if (error instanceof ApiError || error instanceof SesActionError) throw new DebtSendRefusedError(error.message)
-              throw error
-            }
-          },
-          // Jan's morning text (plan step 5): to Jan's own mobile through the staff SMS path.
-          janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
-          sendStaffSms: (phone: string, message: string) => sendSmsViaGhlWithReceipt(phone, message, null),
-          sendingEnabled: debtSendingEnabled(),
-          deskOwnerIds: () => debtDeskOwnerIds(deskStore),
-        }
-        try {
-          if (action === 'debt_draft_decide') return json(await debtDraftDecide(body, actor, deskDeps))
-          if (action === 'debt_log_outcome') return json(await debtLogOutcome(body, actor, deskDeps))
-          return json(await debtDraftSend(body, actor, deskDeps))
-        } catch (error) {
-          if (error instanceof DebtDeskError) {
-            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
-          }
-          logDebtDeskFailure(action, error)
-          return json({ ok: false, code: 'DEBT_DESK_FAILED', error: 'The debt desk could not complete this action' }, 502)
         }
       }
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──

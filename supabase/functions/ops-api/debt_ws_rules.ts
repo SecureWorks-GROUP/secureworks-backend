@@ -10,8 +10,7 @@
 //   Section 5  the message templates, with Perth dates like "Friday the 17th of October"
 //   Section 6  the bank-feed possible-payment matcher
 //
-// Never import the retired debt desk modules (debt_desk_*, debt_book*, debt_morning_list,
-// debt_jan_text, debt_chase_schedule, debt_draft_templates): a later PR deletes them.
+// The 30 Sep debt desk modules this replaced were removed on 8 Oct 2026; do not bring them back.
 
 export const DEBT_WS_VERSION = "debt-ws/v1";
 export const DEBT_WS_PLAYBOOK_VERSION = "debt-ws-playbook/v1";
