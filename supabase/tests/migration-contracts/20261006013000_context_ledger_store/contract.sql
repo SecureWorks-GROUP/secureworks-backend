@@ -1887,7 +1887,7 @@ ROLLBACK;
 BEGIN;
 DO $c$
 DECLARE w uuid; a1 uuid; wf uuid; t1 uuid; c1 uuid; t2 uuid; c2 uuid; cl jsonb; res jsonb; d date; dtext text; exp record;
- t3 uuid; t4 uuid; c4 uuid; t5 uuid; c5 uuid; pk jsonb; tx jsonb;
+ t3 uuid; t4 uuid; c4 uuid; t5 uuid; c5 uuid; pk jsonb; tx jsonb; t6 uuid;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('shadow', 50);
  w := pg_temp.lg_job('SWF-99001');
@@ -1931,6 +1931,9 @@ BEGIN
  -- The packet tells the reader the same rule: each transcript row carries call_customer,
  -- true on its call's customer stamp, false when its linked call lacks it, null when no
  -- call row is linked; the citation check agrees on every one.
+ -- (ledger reader fixes, 20261007150000: with no call row on its job, the transcript's own stamp
+ -- decides when its CRM contact is the job's: t6, stamped the job's customer on the job's contact,
+ -- is the customer's call; t3, stamped so but with no contact, reads "unknown", never a bare null)
  t3 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'No call row names this transcript', '20 hours', 'customer', 'job_customer',
   '{"ghl_call_id":"CALLZ"}');
  t4 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'Linked to its call by its own key only', '19 hours', NULL);
@@ -1938,14 +1941,17 @@ BEGIN
  t5 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'Its call row carries no stamp at all', '18 hours', 'customer', 'job_customer',
   '{"ghl_call_id":"CALLV"}');
  c5 := pg_temp.lg_ev(w, 'client.call_logged', 'call', 'inbound', 'Call. Provider status: completed. Duration: 40 seconds', '18 hours 1 minute');
+ t6 := pg_temp.lg_ev(w, 'call.transcript_completed', 'call', 'inbound', 'No call row names this one either', '17 hours', 'customer', 'job_customer',
+  '{"ghl_call_id":"CALLU"}');
  PERFORM set_config('session_replication_role', 'replica', true);
+ UPDATE public.business_events SET contact_id = 'ghl-SWF-99001' WHERE id = t6;
  UPDATE public.business_events SET provider_message_id = 'ghltx:CALLW' WHERE id = t4;
  UPDATE public.business_events SET provider_message_id = 'ghl:CALLW' WHERE id = c4;
  UPDATE public.business_events SET provider_message_id = 'ghl:CALLV' WHERE id = c5;
  PERFORM set_config('session_replication_role', 'origin', true);
  pk := public.context_ledger_packet(w);
- FOR exp IN SELECT * FROM (VALUES (t1, 'false', true), (t2, 'true', true), (t3, 'null', true), (t4, 'true', true), (t5, 'false', true),
-   (c2, 'null', false)) v(id, want, transcript) LOOP
+ FOR exp IN SELECT * FROM (VALUES (t1, 'false', true), (t2, 'true', true), (t3, '"unknown"', true), (t4, 'true', true), (t5, 'false', true),
+   (t6, 'true', true), (c2, 'null', false)) v(id, want, transcript) LOOP
   SELECT x INTO tx FROM jsonb_array_elements(pk -> 'evidence') x WHERE (x ->> 'id')::uuid = exp.id;
   PERFORM pg_temp.lg_assert(tx ? 'call_customer' AND tx -> 'call_customer' = exp.want::jsonb,
    format('call_customer of %s: want %s, row %s', exp.id, exp.want, tx));
@@ -2265,6 +2271,8 @@ ROLLBACK;
 -- 26. A payment closes only on a PAID invoice, at its paid day (Perth midnight, the
 -- timeline's paid line); an issued invoice not yet paid never closes a payment,
 -- though it closes invoice_issued; in an item and in a transition.
+-- (ledger reader fixes, 20261007150000: at the end of its paid Perth day, so a request made the
+-- day it was paid is closed by it; proved in that migration's contract)
 BEGIN;
 DO $c$
 DECLARE w uuid; r1 uuid; cl jsonb; res jsonb; k text; paid_day date := pg_temp.lg_today() - 2;
@@ -2298,7 +2306,8 @@ BEGIN
  PERFORM pg_temp.lg_assert(pg_temp.lg_accepted(res, 'pay_by_paid') AND pg_temp.lg_accepted(res, 'inv_by_auth') AND pg_temp.lg_accepted(res, 'pay_open'),
   'a paid invoice closes a payment; an issued one an invoice: ' || res::text);
  PERFORM pg_temp.lg_assert((SELECT closed_at FROM public.context_ledger_items WHERE generation_id = (cl ->> 'generation_id')::uuid
-   AND item_key = pg_temp.lg_key(res, 'pay_by_paid')) = (paid_day::timestamp AT TIME ZONE 'Australia/Perth'), 'a payment closes at its paid day');
+   AND item_key = pg_temp.lg_key(res, 'pay_by_paid')) = ((paid_day + 1)::timestamp AT TIME ZONE 'Australia/Perth') - interval '1 second',
+  'a payment closes at the end of its paid day');
  k := pg_temp.lg_key(res, 'pay_open');
  res := public.context_ledger_write((cl ->> 'run_id')::uuid, (cl ->> 'lease_token')::uuid, (cl ->> 'generation_id')::uuid, '[]', jsonb_build_array(
   jsonb_build_object('item_key', k, 'to_status', 'closed', 'evidence', pg_temp.lg_cite(x_auth, NULL, 'xero_invoices')),
