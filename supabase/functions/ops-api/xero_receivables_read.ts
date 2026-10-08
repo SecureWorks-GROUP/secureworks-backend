@@ -538,7 +538,7 @@ export async function getXeroReceivable(
 
 /**
  * The invoice's Xero online-invoice link: the page where the client can see and pay it. A
- * read (GET /Invoices/{id}/OnlineInvoice), used for the debt desk's firm text, one invoice at a
+ * read (GET /Invoices/{id}/OnlineInvoice), used for the Debt Workshop's texts (debt_ws_deps.ts), one invoice at a
  * time. Never the newest invoice's link and never a guess: a missing link is an error.
  */
 export async function getXeroOnlineInvoiceUrl(

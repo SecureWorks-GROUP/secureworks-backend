@@ -4204,9 +4204,10 @@ must fail closed on Xero retry rather than inventing history. Apply
 
 The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
 `coding/capabilities/debt-follow-up/debt-workshop-spec.md`; switches and actions:
-`docs/debt-workshop/README.md`). Do not import the retired debt desk modules
-(`debt_desk_*`, `debt_book*`, `debt_morning_list`, `debt_jan_text`, `debt_chase_schedule`,
-`debt_draft_templates`). Load-bearing rules:
+`docs/debt-workshop/README.md`). It is the only debt system: the 30 Sep to 1 Oct debt desk
+(`debt_book`, `debt_morning_list`, `debt_draft_*`, `debt_log_outcome`) was removed on 8 Oct
+2026. Its migrations stay, and its old `payment_chase_logs` rows are kept out of chase history
+by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
 - Effective sending is env `DEBT_WS_SENDING_ENABLED === "true"` AND
   `debt_ws_settings.sending_enabled`. The owner comes from env `DEBT_WS_OWNER_USER_IDS`, else
   `debt_ws_settings.owner_user_ids`, and is never a role.
