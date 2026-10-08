@@ -12,7 +12,14 @@ To register a new migration contract:
    needs. Make it compatible with the setup files for earlier registered
    migrations because the runner applies registered cases in timestamp order.
 3. Add `contract.sql` with observable SQL assertions. Wrap fixture writes in
-   `BEGIN` / `ROLLBACK` so they do not leak into the next contract.
+   `BEGIN` / `ROLLBACK` so they do not leak into the next contract. Never mix
+   a recorded date with the run's clock: give a job that a dated fixture
+   message is placed on a fixed `created_at` before the message (since
+   `20260924140000` a job created after a message is its candidate only
+   inside its 30-day lead window), and set any first-apply instant a fixture
+   reads to a fixed value inside the rolled-back transaction. Otherwise the
+   contract passes until a calendar date and then fails on every PR (C1a R7
+   on 8 Oct 2026).
 4. When the migration promises fail-closed behavior, add
    `preexisting-failure.sql` and `preexisting-failure.expected`.
 5. When practical, add `break-contract.sql` and `break-contract.expected` to

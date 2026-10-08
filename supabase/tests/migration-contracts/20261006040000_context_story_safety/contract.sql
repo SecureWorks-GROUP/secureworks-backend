@@ -771,6 +771,13 @@ SET LOCAL session_replication_role = replica;
 -- time was captured the day they were written (6 Oct), never the day the suite runs, or every
 -- run after that instant would see those rows land after the instant measured (rolled back).
 ALTER TABLE public.business_events ALTER COLUMN context_captured_at SET DEFAULT '2026-10-06 12:00Z';
+-- For the same reason the rule's first apply (context_ledger_mail_rule_since) is production's
+-- own instant, Wed 7 Oct 2026 05:40 UTC, never the instant this stack was built: the fixtures
+-- time their readings from it, and the judge calls a reading's unread evidence late when it
+-- starts more than 14 days before the reading's evidence_until, so on a stack built after
+-- 16 Oct 2026 00:00 UTC L3's 2 Oct mail read as late, not new (rolled back).
+CREATE OR REPLACE FUNCTION public.context_ledger_mail_rule_since() RETURNS timestamptz
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $since$ SELECT '2026-10-07 05:40:14.825847+00'::timestamptz $since$;
 
 -- Jobs. Org and dates fixed; the replay instant is Wed 7 Oct 2026 10:00 Perth.
 INSERT INTO public.jobs (id, org_id, job_number, status, type, client_name, client_email, ghl_contact_id, xero_contact_id, pricing_json,

@@ -158,17 +158,23 @@ DECLARE
  r25_job uuid:=gen_random_uuid(); r1_a uuid:=gen_random_uuid(); r1_b uuid:=gen_random_uuid(); r9_job uuid:=gen_random_uuid();
  r26_a uuid:=gen_random_uuid(); r26_b uuid:=gen_random_uuid(); r28_job uuid:=gen_random_uuid(); r30_job uuid:=gen_random_uuid(); r31_job uuid:=gen_random_uuid();
  out jsonb; e public.business_events; n int; threads int;
+ -- The fixture jobs stand open before every recorded row (the earliest is R25,
+ -- 8 Sep 2026), whenever the contract runs. Since P1a
+ -- (20260924140000_context_placement_at_time) a job created after a message is
+ -- its candidate only inside the job's 30-day lead window, so jobs created at
+ -- the run's now() stopped covering R25 from 8 Oct 2026 02:10 UTC.
+ jobs_at constant timestamptz:='2026-09-01T00:00:00Z';
 BEGIN
- INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,metadata) VALUES
-  (r25_job,org,'accepted','fencing','C1C-261335','1VHBzZX6DsjMZW2WbgQn','{}'),
-  (r1_a,org,'quoted','fencing','C1C-261448','lYPee0K2DuQHXH2xHL1P','{}'),
-  (r1_b,org,'quoted','fencing','C1C-261431','lYPee0K2DuQHXH2xHL1P','{}'),
-  (r9_job,org,'accepted','patio','C1C-26941','Oxqi7eCx2rGCsS0BXOH2','{}'),
-  (r26_a,org,'quoted','fencing','C1C-261421','r26-contact-placeholder','{}'),
-  (r26_b,org,'quoted','fencing','C1C-261422','r26-contact-placeholder','{}'),
-  (r28_job,org,'accepted','fencing','C1C-R28','r28-contact-placeholder','{}'),
-  (r30_job,org,'accepted','fencing','C1C-261424','r30-contact-placeholder','{}'),
-  (r31_job,org,'accepted','fencing','C1C-261438','r31-contact-placeholder','{}');
+ INSERT INTO public.jobs(id,org_id,status,type,job_number,ghl_contact_id,metadata,created_at) VALUES
+  (r25_job,org,'accepted','fencing','C1C-261335','1VHBzZX6DsjMZW2WbgQn','{}',jobs_at),
+  (r1_a,org,'quoted','fencing','C1C-261448','lYPee0K2DuQHXH2xHL1P','{}',jobs_at),
+  (r1_b,org,'quoted','fencing','C1C-261431','lYPee0K2DuQHXH2xHL1P','{}',jobs_at),
+  (r9_job,org,'accepted','patio','C1C-26941','Oxqi7eCx2rGCsS0BXOH2','{}',jobs_at),
+  (r26_a,org,'quoted','fencing','C1C-261421','r26-contact-placeholder','{}',jobs_at),
+  (r26_b,org,'quoted','fencing','C1C-261422','r26-contact-placeholder','{}',jobs_at),
+  (r28_job,org,'accepted','fencing','C1C-R28','r28-contact-placeholder','{}',jobs_at),
+  (r30_job,org,'accepted','fencing','C1C-261424','r30-contact-placeholder','{}',jobs_at),
+  (r31_job,org,'accepted','fencing','C1C-261438','r31-contact-placeholder','{}',jobs_at);
  SELECT count(*) INTO threads FROM public.event_threads;
 
  -- R1: inbound, two open fencing quotes on the contact: review, never a guess;
