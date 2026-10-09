@@ -106,7 +106,7 @@ BEGIN
   = '24fdd0673f8692c082cf9d19c22ab210', 'the migration re-applies over its rollback');
  PERFORM pg_temp.rb_assert((SELECT count(*) FROM public.context_ledger_generations WHERE id IN (SELECT pg_temp.rb_id('f762a000', n) FROM generate_series(1, 3) n)
    AND checks ->> 'passed' = 'true' AND checks ->> 'repassed_by' = 'migration 20261007160000: pass floor') = 3
-  AND (SELECT checks = b.checks FROM public.context_ledger_generations g JOIN rb_before b ON b.id = g.id WHERE g.id = pg_temp.rb_id('f762a000', 4)),
+  AND (SELECT g.checks = b.checks FROM public.context_ledger_generations g JOIN rb_before b ON b.id = g.id WHERE g.id = pg_temp.rb_id('f762a000', 4)),
   'the floor passed the three it qualifies over the 20261006013000 body');
  -- 2 is updated cleanly under the floor; 3 goes live.
  run := pg_temp.rb_run((SELECT job_id FROM public.context_ledger_generations WHERE id = g2), tok);
