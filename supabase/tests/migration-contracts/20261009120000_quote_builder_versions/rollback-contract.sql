@@ -1,5 +1,5 @@
 -- Rollback contract: 20261009120000_quote_builder_versions. The down drops the table and its
--- guard function and nothing else; the tables it pointed at remain.
+-- guard function and the private-job request index on jobs, and nothing else; the tables it pointed at remain.
 \set ON_ERROR_STOP on
 DO $$
 BEGIN
@@ -8,6 +8,9 @@ BEGIN
  END IF;
  IF to_regprocedure('public.quote_builder_versions_guard()') IS NOT NULL THEN
   RAISE EXCEPTION 'quote builder rollback contract: quote_builder_versions_guard() still exists';
+ END IF;
+ IF to_regclass('public.ux_jobs_quote_builder_request_id') IS NOT NULL THEN
+  RAISE EXCEPTION 'quote builder rollback contract: ux_jobs_quote_builder_request_id still exists';
  END IF;
  IF to_regclass('public.jobs') IS NULL OR to_regclass('public.job_variations') IS NULL
     OR to_regclass('public.job_documents') IS NULL THEN

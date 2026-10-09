@@ -2,7 +2,7 @@
 --
 -- Contract: docs/quote-builder-contract.md. Writer: ops-api
 -- (supabase/functions/ops-api/quote_builder.ts). This migration adds ONE table
--- and changes nothing an existing caller does:
+-- and one partial index on jobs, and changes nothing an existing caller does:
 --
 --   quote_builder_versions holds every saved version of a job's scope chain and
 --   of each variation chain: Hugo's write-up, the internal cost lines (what it
@@ -24,6 +24,9 @@
 --   * an issued version is frozen: no UPDATE and no DELETE (trigger);
 --   * least privilege: RLS on with no policy, revoked from anon and
 --     authenticated, so internal cost lines are reachable only through ops-api.
+--   * a private quote job is minted once per request: one miscellaneous job
+--     per metadata.quote_builder.request_id (built-in jsonb operators only, so
+--     every role that writes jobs can maintain the index).
 --
 -- Rollback: supabase/rollbacks/20261009120000_quote_builder_versions_down.sql.
 
@@ -126,3 +129,8 @@ ALTER TABLE public.quote_builder_versions ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.quote_builder_versions FROM PUBLIC, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.quote_builder_versions TO service_role;
 REVOKE ALL ON FUNCTION public.quote_builder_versions_guard() FROM PUBLIC, anon, authenticated;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_quote_builder_request_id
+  ON public.jobs ((metadata -> 'quote_builder' ->> 'request_id'))
+  WHERE type = 'miscellaneous'
+    AND (metadata -> 'quote_builder' ->> 'request_id') IS NOT NULL;

@@ -21,6 +21,7 @@ import {
   loadInsuranceRepairJobIds,
   projectInsuranceRepairPipelineRow,
 } from "./insurance_repairs_board.ts";
+import { quoteBuilderRunLabel } from "../_shared/quote_builder_run_label.ts";
 
 export const QUOTE_BUILDER_ORG_ID = "00000000-0000-0000-0000-000000000001";
 export const QUOTE_BUILDER_PHOTO_BUCKET = "job-photos";
@@ -1162,41 +1163,68 @@ export async function issueQuoteBuilderVersion(
   const fileName = path.slice(path.lastIndexOf("/") + 1);
 
   // Retry-safe without a cross-call transaction: the PDF document is found by
-  // its version before a new one is filed, and a new variation row is linked to
-  // the draft before the freeze, so a retry after a partial failure reuses both
-  // instead of filing a second document or a second variation.
-  const { data: priorDocs, error: priorDocError } = await client.from(
-    "job_documents",
-  )
-    .select("id, quote_number, pdf_url, storage_url")
-    .eq("job_id", version.job_id)
-    .eq("type", "quote")
-    .eq("metadata->>quote_builder_version_id", version.id)
-    .limit(1);
-  if (priorDocError) readError("quote document read failed", priorDocError);
-  let doc = (priorDocs || [])[0] || null;
-  if (!doc) {
+  // its version before a new one is filed (and refreshed to this attempt's
+  // number and lines), and a new variation row is linked to the draft before
+  // the freeze, so a retry after a partial failure reuses both instead of
+  // filing a second document or a second variation. Each chain keeps one live
+  // document under its own run_label; the chain's earlier one is retired.
+  const docFields = {
+    version: Number(version.version),
+    quote_number: version.quote_number,
+    pdf_url: urlData.publicUrl,
+    storage_url: urlData.publicUrl,
+    file_name: fileName,
+    data_snapshot_json: {
+      source: "quote_builder",
+      quote_builder_version_id: version.id,
+      kind: version.kind,
+      title: version.title,
+      charge_lines: version.charge_lines,
+      totals,
+      client: version.client_snapshot,
+    },
+  };
+  const docColumns = "id, quote_number, pdf_url, storage_url";
+  const findVersionDoc = async () => {
+    const { data, error } = await client.from("job_documents")
+      .select(docColumns)
+      .eq("job_id", version.job_id)
+      .eq("type", "quote")
+      .eq("metadata->>quote_builder_version_id", version.id)
+      .limit(1);
+    if (error) readError("quote document read failed", error);
+    return (data || [])[0] || null;
+  };
+  let doc = await findVersionDoc();
+  if (doc) {
+    const { data, error } = await client.from("job_documents")
+      .update(docFields)
+      .eq("id", doc.id)
+      .select(docColumns)
+      .maybeSingle();
+    if (error) readError("quote document write failed", error);
+    doc = data || doc;
+  } else {
+    const runLabel = quoteBuilderRunLabel(version.chain_id);
+    const { error: retireError } = await client.from("job_documents")
+      .update({ superseded_at: new Date().toISOString() })
+      .eq("job_id", version.job_id)
+      .eq("type", "quote")
+      .eq("run_label", runLabel)
+      .not("sent_to_client", "is", true)
+      .is("superseded_at", null)
+      .is("accepted_at", null)
+      .is("declined_at", null);
+    if (retireError) readError("quote document retire failed", retireError);
     const { data, error: docError } = await client.from("job_documents")
       .insert({
+        ...docFields,
         job_id: version.job_id,
         type: "quote",
-        version: Number(version.version),
-        quote_number: version.quote_number,
-        pdf_url: urlData.publicUrl,
-        storage_url: urlData.publicUrl,
-        file_name: fileName,
+        run_label: runLabel,
         visible_to_trades: false,
         created_by: actor.id,
         uploaded_by: actor.id,
-        data_snapshot_json: {
-          source: "quote_builder",
-          quote_builder_version_id: version.id,
-          kind: version.kind,
-          title: version.title,
-          charge_lines: version.charge_lines,
-          totals,
-          client: version.client_snapshot,
-        },
         metadata: {
           source: "quote_builder",
           quote_builder_version_id: version.id,
@@ -1204,13 +1232,18 @@ export async function issueQuoteBuilderVersion(
           chain_id: version.chain_id,
         },
       })
-      .select("id, quote_number, pdf_url, storage_url")
+      .select(docColumns)
       .single();
-    if (docError) readError("quote document write failed", docError);
-    doc = data;
+    if (docError) {
+      doc = docError.code === "23505" ? await findVersionDoc() : null;
+      if (!doc) readError("quote document write failed", docError);
+    } else {
+      doc = data;
+    }
   }
 
   let variationResult: any = null;
+  let createdVariationId: string | null = null;
   let draftUpdatedAt = version.updated_at;
   if (version.kind === "variation") {
     const description = text(version.title, 500) ||
@@ -1255,6 +1288,7 @@ export async function issueQuoteBuilderVersion(
         .single();
       if (error) readError("variation create failed", error);
       variationResult = data;
+      createdVariationId = data.id;
     }
     if (version.variation_id !== variationResult.id) {
       let link = client.from("quote_builder_versions")
@@ -1265,8 +1299,21 @@ export async function issueQuoteBuilderVersion(
       const { data: linked, error: linkError } = await link.select(
         "id, updated_at",
       ).maybeSingle();
-      if (linkError) readError("variation link failed", linkError);
-      if (!linked) {
+      if (linkError || !linked) {
+        if (createdVariationId) {
+          const { error: discardError } = await client.from("job_variations")
+            .delete()
+            .eq("id", createdVariationId)
+            .eq("status", "pending_approval");
+          if (discardError) {
+            console.error(
+              "[quote_builder] unlinked variation not discarded",
+              createdVariationId,
+              discardError.message,
+            );
+          }
+        }
+        if (linkError) readError("variation link failed", linkError);
         fail(
           "stale_version",
           "This version changed while issuing; reload it and issue again.",

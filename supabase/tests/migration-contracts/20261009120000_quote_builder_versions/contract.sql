@@ -1,6 +1,7 @@
 -- Contract: 20261009120000_quote_builder_versions. One table, browser roles locked out, one
 -- version number per chain, the scope chain is the job's own id, issuing needs a PDF and a quote
--- number, and an issued version is frozen against update and delete.
+-- number, an issued version is frozen against update and delete, and a private quote job is
+-- minted once per request id.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -54,6 +55,22 @@ SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
  INSERT INTO public.quote_builder_versions (job_id, kind, chain_id, version, cost_lines)
  VALUES ('9a000000-0000-4000-8000-000000000001', 'variation', '9a000000-0000-4000-8000-0000000000ee', 1, '{}')
 $q$), 'cost_lines must be an array');
+
+-- A private quote job is minted once per request id; other job types and jobs without one are untouched.
+INSERT INTO public.jobs (id, org_id, status, type, metadata)
+VALUES ('9a000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous',
+ '{"quote_builder":{"request_id":"9a000000-0000-4000-8000-0000000000e1"}}');
+SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
+ INSERT INTO public.jobs (org_id, status, type, metadata)
+ VALUES ('00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous',
+  '{"quote_builder":{"request_id":"9a000000-0000-4000-8000-0000000000e1"}}')
+$q$), 'a second private quote job for the same request id must be refused');
+INSERT INTO public.jobs (org_id, status, type, metadata)
+VALUES ('00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous', '{}'),
+       ('00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous', '{}');
+SELECT pg_temp.qb_assert(
+ (SELECT count(*) FROM public.jobs WHERE type = 'miscellaneous' AND metadata = '{}'::jsonb) >= 2,
+ 'miscellaneous jobs without a quote builder request id must not collide');
 
 -- A draft is editable and its updated_at moves.
 UPDATE public.quote_builder_versions SET updated_at = '2026-01-01T00:00:00Z' WHERE id = '9a000000-0000-4000-8000-0000000000a1';

@@ -57,11 +57,34 @@ function pathValue(row: Row, key: string): any {
   return value;
 }
 
-function makeFakeClient(store: Store) {
+const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+
+// ux_job_docs_live_unsent_quote (20260701000001) and
+// ux_jobs_quote_builder_request_id (20261009120000).
+function uniqueKey(table: string, r: Row): string | null {
+  if (table === "job_documents") {
+    const live = r.type === "quote" && r.sent_to_client !== true &&
+      r.superseded_at == null && r.accepted_at == null &&
+      r.declined_at == null;
+    return live
+      ? [r.job_id, r.job_contact_id ?? ZERO_UUID, r.run_label ?? ""].join("|")
+      : null;
+  }
+  if (table === "jobs") {
+    const requestId = r.metadata?.quote_builder?.request_id;
+    return r.type === "miscellaneous" && requestId != null ? requestId : null;
+  }
+  return null;
+}
+
+function makeFakeClient(
+  store: Store,
+  hooks: { afterInsert?: (table: string, rows: Row[]) => void } = {},
+) {
   const uploads = new Set<string>();
   function from(table: string) {
     store[table] = store[table] || [];
-    let mode: "select" | "insert" | "update" = "select";
+    let mode: "select" | "insert" | "update" | "delete" = "select";
     let payload: any = null;
     const preds: Array<(r: Row) => boolean> = [];
     let orderKey: string | null = null;
@@ -78,24 +101,32 @@ function makeFakeClient(store: Store) {
           updated_at: tick(),
           ...r,
         }));
-        if (table === "quote_builder_versions") {
-          for (const r of rows) {
-            const clash = store[table].some((o) =>
+        for (const r of rows) {
+          const clash = table === "quote_builder_versions"
+            ? store[table].some((o) =>
               o.job_id === r.job_id && o.chain_id === r.chain_id &&
               o.version === r.version
-            );
-            if (clash) {
-              return {
-                data: null,
-                error: { code: "23505", message: "duplicate" },
-              };
-            }
+            )
+            : uniqueKey(table, r) !== null &&
+              store[table].some((o) =>
+                uniqueKey(table, o) === uniqueKey(table, r)
+              );
+          if (clash) {
+            return {
+              data: null,
+              error: { code: "23505", message: "duplicate" },
+            };
           }
         }
         store[table].push(...rows);
+        hooks.afterInsert?.(table, rows);
         return { data: rows.map((r: Row) => ({ ...r })), error: null };
       }
       const matched = store[table].filter((r) => preds.every((p) => p(r)));
+      if (mode === "delete") {
+        store[table] = store[table].filter((r) => !matched.includes(r));
+        return { data: matched.map((r) => ({ ...r })), error: null };
+      }
       if (mode === "update") {
         for (const r of matched) {
           if (table === "quote_builder_versions" && r.status === "issued") {
@@ -137,6 +168,10 @@ function makeFakeClient(store: Store) {
         payload = r;
         return b;
       },
+      delete: () => {
+        mode = "delete";
+        return b;
+      },
       eq: (k: string, v: any) => {
         preds.push((r) => pathValue(r, k) === v);
         return b;
@@ -145,8 +180,12 @@ function makeFakeClient(store: Store) {
         preds.push((r) => vs.includes(r[k]));
         return b;
       },
-      not: (k: string, _op: string, _v: any) => {
-        preds.push((r) => r[k] !== null && r[k] !== undefined);
+      is: (k: string, v: any) => {
+        preds.push((r) => v === null ? r[k] == null : r[k] === v);
+        return b;
+      },
+      not: (k: string, _op: string, v: any) => {
+        preds.push((r) => v === null ? r[k] != null : r[k] !== v);
         return b;
       },
       order: (k: string, opts?: { ascending?: boolean }) => {
@@ -466,6 +505,73 @@ Deno.test("quote builder: save drafts in place, refuses a stale base, versions a
   );
 });
 
+Deno.test("quote builder: a newer scope version and a variation each issue beside the job's own quote draft", async () => {
+  const store = seed();
+  const { client, upload } = makeFakeClient(store);
+  const moveRepairStage = stageMover(store, []);
+  // The job-wide live unsent draft ghl-proxy prepare_quote reuses.
+  store.job_documents.push({
+    id: "99999999-0000-4000-8000-000000000001",
+    job_id: REPAIR_JOB,
+    type: "quote",
+    job_contact_id: null,
+    run_label: null,
+    sent_to_client: false,
+    superseded_at: null,
+  });
+  const issue = async (versionId: string) => {
+    const slot = await quoteBuilderPdfUploadUrl(
+      client,
+      { version_id: versionId },
+      ACTOR,
+    );
+    upload("job-pdfs", slot.path);
+    return await issueQuoteBuilderVersion(
+      client,
+      { version_id: versionId, pdf_path: slot.path },
+      ACTOR,
+      { moveRepairStage },
+    );
+  };
+
+  const v1 = (await saveQuoteBuilderVersion(client, {
+    job_id: REPAIR_JOB,
+    kind: "scope",
+    charge_lines: CHARGE,
+  }, ACTOR)).version;
+  const first = await issue(v1.id);
+  const v2 = (await saveQuoteBuilderVersion(client, {
+    job_id: REPAIR_JOB,
+    kind: "scope",
+    base_version_id: v1.id,
+    charge_lines: [{ ...CHARGE[0], unit_price_ex_gst: 700 }],
+  }, ACTOR)).version;
+  const second = await issue(v2.id);
+  assertEquals(second.document.quote_number, "SWR-26101-Q2");
+  const variation = (await saveQuoteBuilderVersion(client, {
+    job_id: REPAIR_JOB,
+    kind: "variation",
+    charge_lines: CHARGE,
+  }, ACTOR)).version;
+  const third = await issue(variation.id);
+
+  const docById = (id: string) => store.job_documents.find((d) => d.id === id)!;
+  assert(docById(first.document.id).superseded_at);
+  assertEquals(docById(second.document.id).superseded_at, undefined);
+  assertEquals(docById(second.document.id).run_label, `qb:${REPAIR_JOB}`);
+  assertEquals(docById(third.document.id).superseded_at, undefined);
+  assertEquals(
+    docById(third.document.id).run_label,
+    `qb:${variation.chain_id}`,
+  );
+  const prepared = docById("99999999-0000-4000-8000-000000000001");
+  assertEquals(prepared.superseded_at, null);
+  assertEquals(prepared.quote_number, undefined);
+  for (const id of [first, second, third].map((r) => r.document.id)) {
+    assertEquals(docById(id).sent_at, undefined);
+  }
+});
+
 Deno.test("quote builder: make-safe cards and foreign photos are refused", async () => {
   const store = seed();
   const { client } = makeFakeClient(store);
@@ -656,6 +762,12 @@ Deno.test("quote builder: variation issue, re-issue, decision and stage moves", 
   );
   assertEquals(store.job_variations.length, 1);
   assertEquals(store.job_variations[0].amount, 770);
+  const liveVariationDocs = store.job_documents.filter((d) =>
+    d.run_label === `qb:${d1.chain_id}` && d.superseded_at == null
+  );
+  assertEquals(liveVariationDocs.map((d) => d.quote_number), [
+    "SWR-26101-V1.2",
+  ]);
 
   const decisions: any[] = [];
   const decideVariation = (input: any) => {
@@ -749,6 +861,81 @@ Deno.test("quote builder: a retried issue reuses the filed PDF document", async 
   );
   assertEquals(issued.document.id, "77777777-7777-4777-8777-777777777777");
   assertEquals(store.job_documents.length, 1);
+});
+
+Deno.test("quote builder: a save landing mid-issue leaves no unlinked variation behind", async () => {
+  const store = seed();
+  let raced = false;
+  const { client, upload } = makeFakeClient(store, {
+    afterInsert: (table) => {
+      if (table !== "job_variations" || raced) return;
+      raced = true;
+      const draft = store.quote_builder_versions[0];
+      Object.assign(draft, { quote_number: null, updated_at: tick() });
+    },
+  });
+  const moveRepairStage = stageMover(store, []);
+  const d1 = (await saveQuoteBuilderVersion(client, {
+    job_id: REPAIR_JOB,
+    kind: "variation",
+    charge_lines: CHARGE,
+  }, ACTOR)).version;
+  const slot1 = await quoteBuilderPdfUploadUrl(
+    client,
+    { version_id: d1.id },
+    ACTOR,
+  );
+  upload("job-pdfs", slot1.path);
+  assertEquals(
+    await code(
+      issueQuoteBuilderVersion(
+        client,
+        { version_id: d1.id, pdf_path: slot1.path },
+        ACTOR,
+        { moveRepairStage },
+      ),
+    ),
+    "stale_version",
+  );
+  assertEquals(store.job_variations.length, 0);
+
+  const slot2 = await quoteBuilderPdfUploadUrl(
+    client,
+    { version_id: d1.id },
+    ACTOR,
+  );
+  assertEquals(slot2.quote_number, "SWR-26101-V1.1");
+  upload("job-pdfs", slot2.path);
+  const issued = await issueQuoteBuilderVersion(
+    client,
+    { version_id: d1.id, pdf_path: slot2.path },
+    ACTOR,
+    { moveRepairStage },
+  );
+  assertEquals(store.job_variations.length, 1);
+  assertEquals(store.job_variations[0].variation_number, 1);
+  assertEquals(issued.variation.id, store.job_variations[0].id);
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(issued.document.quote_number, "SWR-26101-V1.1");
+});
+
+Deno.test("quote builder: a double-submitted private job mints one job", async () => {
+  const store = seed();
+  const { client } = makeFakeClient(store);
+  const body = {
+    request_id: "88888888-8888-4888-8888-888888888889",
+    client_name: "Jane Citizen",
+  };
+  const [a, b] = await Promise.all([
+    createQuoteBuilderPrivateJob(client, body, ACTOR),
+    createQuoteBuilderPrivateJob(client, body, ACTOR),
+  ]);
+  assertEquals(a.job.id, b.job.id);
+  assertEquals([a.created, b.created].sort(), [false, true]);
+  assertEquals(
+    store.jobs.filter((j) => j.type === "miscellaneous").length,
+    1,
+  );
 });
 
 Deno.test("quote builder: private job is SWM miscellaneous, idempotent, never stage-moved", async () => {

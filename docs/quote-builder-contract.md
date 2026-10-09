@@ -256,7 +256,10 @@ A version object:
 ```
 
 `client_name` and `request_id` are required. Retrying with the same `request_id`
-returns the job already made (`"created": false`) instead of a second job.
+returns the job already made (`"created": false`) instead of a second job. Two
+requests with the same `request_id` at the same moment still mint one job: the
+unique index `ux_jobs_quote_builder_request_id` (`20261009120000`) refuses the
+second insert, and that request returns the first job (`"created": false`).
 
 ```json
 { "created": true, "job": { "id": "...", "job_number": "SWM-26001", "type": "miscellaneous", "status": "draft", ... } }
@@ -348,7 +351,13 @@ for a new slot and re-render), or the variation is already decided.
 Then it:
 
 - writes a `job_documents` row (`type='quote'`, `quote_number`, `storage_url`,
-  `pdf_url`, `visible_to_trades=false`, metadata names the version);
+  `pdf_url`, `visible_to_trades=false`, metadata names the version) under
+  `run_label = 'qb:<chain_id>'` (`_shared/quote_builder_run_label.ts`), after
+  retiring (`superseded_at`) the same chain's earlier live unsent document. So
+  each chain (the scope, each variation) keeps one live document, a scope and its
+  variations stay live side by side, and none of them ever takes the job-wide
+  draft slot (`job_contact_id` and `run_label` null) that `ghl-proxy`
+  `prepare_quote` reuses under `ux_job_docs_live_unsent_quote`;
 - freezes the version (`status='issued'`, `issued_at`, `issued_by`, PDF linked);
 - for a variation: creates (first issue) or updates (re-issue while still
   pending) its `job_variations` row: `amount` = charge total inc GST,
@@ -358,12 +367,17 @@ Then it:
 - on a repair job, moves the stage forward per section 3.
 
 Issue is safe to retry: a retry after a partial failure reuses the
-`job_documents` row already filed for that version and the variation already
-linked to it, so it never files a second document or a second variation.
+`job_documents` row already filed for that version (refreshed to this attempt's
+quote number, PDF and lines) and the variation already linked to it, so it never
+files a second document or a second variation. If a save lands between a first
+variation issue creating its `job_variations` row and linking it to the draft,
+that new row is deleted before the `409 stale_version`, so the retry reuses the
+same variation number and no unlinked variation is left open.
 
 The quote document is filed with `sent_at` empty and `sent_to_client=false`, so
 nothing that counts sent quotes (`job_quote_values`, the job dossier) reads it
-as sent. Nothing is emailed or texted to anyone. Sending the PDF is a separate step
+as sent, and send-quote's "every party accepted" rule skips `qb:` documents, so
+they never hold a job at `partially_accepted`. Nothing is emailed or texted to anyone. Sending the PDF is a separate step
 outside this contract.
 
 Returns:
