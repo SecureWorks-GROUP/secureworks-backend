@@ -3,4 +3,4 @@
 -- it, and the window function dropped). contract.sql must then fail on its first check, the rule as
 -- of Wed 7 Oct 2026 10:00 Perth, which reads only a function that exists before this migration: a
 -- draft is never monitored by the earlier rule's live set and every lead has 28 days.
-\ir ../../../rollbacks/20261009130000_context_scoping_pipeline_down.sql
+\ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql

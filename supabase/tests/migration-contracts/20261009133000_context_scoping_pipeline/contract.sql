@@ -1,4 +1,4 @@
--- Contract for 20261009130000_context_scoping_pipeline: the owner's ruling of 9 Oct 2026. The reader
+-- Contract for 20261009133000_context_scoping_pipeline: the owner's ruling of 9 Oct 2026. The reader
 -- reads active scoping (drafts), and the lead rule's window is the job type's: 6 weeks on a patio
 -- job, 4 weeks on fencing and every other type. Failing first: section 1 runs first and reads only
 -- the rule (context_lead_monitored_jobs), which exists before this migration, and fails on its
@@ -503,7 +503,7 @@ BEGIN
  IF has_function_privilege('anon', 'public.context_lead_window_hours(text)', 'EXECUTE')
     OR has_function_privilege('authenticated', 'public.context_lead_window_hours(text)', 'EXECUTE')
     OR NOT has_function_privilege('service_role', 'public.context_lead_window_hours(text)', 'EXECUTE')
-    OR coalesce(obj_description('public.context_lead_window_hours(text)'::regprocedure, 'pg_proc'), '') NOT LIKE 'Scoping pipeline (20261009130000): %' THEN
+    OR coalesce(obj_description('public.context_lead_window_hours(text)'::regprocedure, 'pg_proc'), '') NOT LIKE 'Scoping pipeline (20261009133000): %' THEN
   RAISE EXCEPTION 'scoping pipeline contract: the window function''s access or comment';
  END IF;
 END $window$;
@@ -514,14 +514,14 @@ DECLARE x record; p record; rule_shape constant text :=
  'TABLE(job_id uuid, job_number text, monitored boolean, state text, quote_sent_at timestamp with time zone, customer_at timestamp with time zone, cutoff_at timestamp with time zone)';
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-   ('public.context_lead_monitored_jobs(uuid[],timestamptz)', true, 'Lead cutoff (20261007010000): (scoping pipeline, 20261009130000) %'),
+   ('public.context_lead_monitored_jobs(uuid[],timestamptz)', true, 'Lead cutoff (20261007010000): (scoping pipeline, 20261009133000) %'),
    ('public.context_ledger_judge(uuid[])', true,
-    'Context ledger store (20261006013000), story safety (20261006040000): (lead cutoff, 20261007010000) (scoping pipeline, 20261009130000) %'),
-   ('public.context_ledger_due(integer)', true, 'Context ledger store (20261006013000): (scoping pipeline, 20261009130000) %'),
+    'Context ledger store (20261006013000), story safety (20261006040000): (scoping pipeline, 20261009133000) %'),
+   ('public.context_ledger_due(integer)', true, 'Context ledger store (20261006013000): (scoping pipeline, 20261009133000) %'),
    ('public.context_job_record_loops(uuid[],timestamptz)', true,
-    'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) (scoping pipeline, 20261009130000) %'),
+    'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) (scoping pipeline, 20261009133000) %'),
    ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', false,
-    'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) (scoping pipeline, 20261009130000) %')
+    'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) (scoping pipeline, 20261009133000) %')
  ) v(sig, definer, cmt) LOOP
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig, pr.prolang INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(x.sig);
   IF p IS NULL THEN RAISE EXCEPTION 'scoping pipeline contract: % missing', x.sig; END IF;
@@ -544,7 +544,7 @@ BEGIN
  -- the one-job form keeps its body (the set form's row) and its slice name first, and its comment
  -- says what it now returns
  IF coalesce(obj_description('public.context_lead_monitored(uuid,timestamptz)'::regprocedure, 'pg_proc'), '')
-      NOT LIKE 'Lead cutoff (20261007010000): (scoping pipeline, 20261009130000) %a draft%'
+      NOT LIKE 'Lead cutoff (20261007010000): (scoping pipeline, 20261009133000) %a draft%'
     OR has_function_privilege('anon', 'public.context_lead_monitored(uuid,timestamptz)', 'EXECUTE')
     OR has_function_privilege('authenticated', 'public.context_lead_monitored(uuid,timestamptz)', 'EXECUTE')
     OR NOT has_function_privilege('service_role', 'public.context_lead_monitored(uuid,timestamptz)', 'EXECUTE') THEN
@@ -558,7 +558,7 @@ CREATE TEMP TABLE scoping_pipeline_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_window_hours', 'context_lead_monitored_jobs', 'context_lead_monitored',
   'context_ledger_judge', 'context_ledger_due', 'context_job_record_loops', 'context_job_story_assemble');
-\ir ../../../migrations/20261009130000_context_scoping_pipeline.sql
+\ir ../../../migrations/20261009133000_context_scoping_pipeline.sql
 DO $again$
 BEGIN
  IF (SELECT count(*) FROM scoping_pipeline_md5) <> 7 OR EXISTS (SELECT 1 FROM scoping_pipeline_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure

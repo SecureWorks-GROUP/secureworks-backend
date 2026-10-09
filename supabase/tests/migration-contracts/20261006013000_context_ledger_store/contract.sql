@@ -160,12 +160,14 @@ BEGIN
  -- Store functions run as definer with a fixed path; per-row helpers carry no SET (they inline).
  -- (widened by story safety, 20261006040000: its two helpers of the legacy-mail rule,
  -- context_ledger_mail_rule_since and context_ledger_mail_copies, are plain SQL with no SET
- -- read inside the definer evidence and judge)
+ -- read inside the definer evidence and judge; and by notes freshness, 20261009132000: its one
+ -- rule for a row a reading has not read, context_ledger_row_unread, is plain SQL with no SET
+ -- read inside the definer judge, due list, sweep and story ledger read)
  FOR p IN SELECT pp.proname, pp.prosecdef, pp.proconfig FROM pg_proc pp JOIN pg_namespace n ON n.oid = pp.pronamespace
   WHERE n.nspname = 'public' AND pp.proname LIKE 'context_ledger_%' LOOP
   IF p.proname IN ('context_ledger_text_norm','context_ledger_message_kind','context_ledger_row_admissible','context_ledger_checks_pass',
     'context_ledger_backfill_open','context_ledger_party_keys','context_ledger_call_customer','context_ledger_job_event_closes',
-    'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies') THEN
+    'context_ledger_email_closes', 'context_ledger_mail_rule_since', 'context_ledger_mail_copies', 'context_ledger_row_unread') THEN
    PERFORM pg_temp.lg_assert(NOT p.prosecdef AND p.proconfig IS NULL, p.proname || ' must be an inlinable helper (no SET, no definer)');
   ELSE
    PERFORM pg_temp.lg_assert(p.prosecdef AND p.proconfig = ARRAY['search_path=public, pg_temp'], p.proname || ' must be definer with search_path public, pg_temp');
@@ -611,11 +613,14 @@ BEGIN
  END LOOP;
  -- The due list: only due jobs, new evidence and moved citations first
  -- (newest evidence first), then never-read (SWF-92005 now holds the moved
- -- message and has never been read), then reader changes.
+ -- message and has never been read), then reader changes. (Notes freshness,
+ -- 20261009132000) Within a priority the reading that has waited longest for a
+ -- row it has not read goes first: SWF-92012's shadow since two hours ago, then
+ -- SWF-92002 since an hour ago, then SWF-92004 (nothing unread).
  SELECT array_agg(jb.job_number ORDER BY x.ord) INTO got
  FROM public.context_ledger_due(200) WITH ORDINALITY x(job_id, kind, reason, priority, newest_evidence_at, ord)
  JOIN public.jobs jb ON jb.id = x.job_id WHERE jb.job_number LIKE 'SWF-920%';
- PERFORM pg_temp.lg_assert(got = ARRAY['SWF-92002','SWF-92012','SWF-92004','SWF-92001','SWF-92005','SWF-92006'], 'due order ' || array_to_string(got, ','));
+ PERFORM pg_temp.lg_assert(got = ARRAY['SWF-92012','SWF-92002','SWF-92004','SWF-92001','SWF-92005','SWF-92006'], 'due order ' || array_to_string(got, ','));
  PERFORM pg_temp.lg_assert((SELECT count(*) FROM public.context_ledger_due(2)) = 2, 'limit');
  -- A staged start: with a rollout list only the listed job is due; an unlisted job that
  -- would be due is blocked not_in_rollout, so the due list skips it and a claim is not_due.
@@ -1178,17 +1183,20 @@ BEGIN
  PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM public.context_ledger_items WHERE generation_id = gen2 AND what = 'Call before arriving' AND person_locked
   AND written_by = 'person:' || staff), 'the late correction carried');
  PERFORM pg_temp.lg_assert(public.context_ledger_promote(gen, 'rule:auto') ->> 'reason' = 'not_shadow', 'a retired generation cannot be promoted');
- -- Checks fail when too many items were refused: built but not promoted.
+ -- Checks fail when too many items were refused: built but not promoted (the
+ -- store refused two of the three it saw, more than the half a reading may
+ -- lose and still pass, 20261007160000).
  PERFORM pg_temp.lg_mode('live', 50);
  b := pg_temp.lg_job('SWF-96002'); e1 := pg_temp.lg_ev(b, 'client.reply', 'sms', 'inbound', 'Can you send the invoice again?', '2 days', 'customer');
  cl := public.context_ledger_claim(b, 'backfill', pg_temp.lg_today());
  run := (cl ->> 'run_id')::uuid; tok := (cl ->> 'lease_token')::uuid; gen := (cl ->> 'generation_id')::uuid;
  PERFORM public.context_ledger_write(run, tok, gen, jsonb_build_array(
   pg_temp.lg_it('ok', 'request', 'open', 'customer', 'us', 'Asked for the invoice again', pg_temp.lg_cite(e1, 'send the invoice again')),
-  pg_temp.lg_it('bad', 'request', 'open', 'customer', 'us', 'Made up', pg_temp.lg_cite(e1, 'send the quote again'))), '[]', 'luna-ledger:v1');
+  pg_temp.lg_it('bad', 'request', 'open', 'customer', 'us', 'Made up', pg_temp.lg_cite(e1, 'send the quote again')),
+  pg_temp.lg_it('bad2', 'request', 'open', 'customer', 'us', 'Made up too', pg_temp.lg_cite(e1, 'send the receipt again'))), '[]', 'luna-ledger:v1');
  fin := public.context_ledger_finish(run, tok, gen, 'built', pg_temp.lg_meta(1));
  PERFORM pg_temp.lg_assert(fin ->> 'generation_status' = 'shadow' AND NOT (fin ->> 'promoted')::boolean AND NOT (fin #>> '{checks,pass}')::boolean
-  AND (fin #>> '{checks,refused_rate}')::numeric = 0.5, 'half refused: not promoted: ' || fin::text);
+  AND (fin #>> '{checks,refused_rate}')::numeric = 0.6667, 'two of three refused: not promoted: ' || fin::text);
  -- An update moves evidence_until forward on the current generation, never back.
  u := pg_temp.lg_job('SWF-96003');
  PERFORM pg_temp.lg_ev(u, 'client.reply', 'sms', 'inbound', 'Old', '9 days', 'customer');
@@ -1423,14 +1431,15 @@ DO $c$
 DECLARE j uuid; e uuid; fin jsonb; f record; n integer := 0; code text;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('live', 50);
- -- The store accepted the one item it saw, but the reader proposed four and
- -- refused two itself: half refused, not promoted, the run counts as a failure.
+ -- The store accepted the one item it saw, but the reader proposed five and
+ -- refused three itself: more than half refused (at most half may be,
+ -- 20261007160000), not promoted, the run counts as a failure.
  j := pg_temp.lg_job('SWF-98101'); e := pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
- fin := pg_temp.lg_build(j, e, 'call me about the gate', '{"validator":"ok","proposed":4,"refused_local":2}');
+ fin := pg_temp.lg_build(j, e, 'call me about the gate', '{"validator":"ok","proposed":5,"refused_local":3}');
  PERFORM pg_temp.lg_assert(fin ->> 'outcome' = 'built' AND NOT (fin ->> 'promoted')::boolean AND NOT (fin ->> 'passed')::boolean
-  AND (fin #>> '{checks,refusal_rate}')::numeric = 0.5 AND (fin #>> '{checks,refused_rate}')::numeric = 0, 'reader refusals count: ' || fin::text);
- PERFORM pg_temp.lg_assert((SELECT status = 'shadow' AND checks ->> 'passed' = 'false' AND checks #>> '{store,proposed}' = '4'
-  AND checks #>> '{store,refused_local}' = '2' FROM public.context_ledger_generations WHERE id = (fin ->> 'generation_id')::uuid)
+  AND (fin #>> '{checks,refusal_rate}')::numeric = 0.6 AND (fin #>> '{checks,refused_rate}')::numeric = 0, 'reader refusals count: ' || fin::text);
+ PERFORM pg_temp.lg_assert((SELECT status = 'shadow' AND checks ->> 'passed' = 'false' AND checks #>> '{store,proposed}' = '5'
+  AND checks #>> '{store,refused_local}' = '3' FROM public.context_ledger_generations WHERE id = (fin ->> 'generation_id')::uuid)
   AND (SELECT status = 'done' AND error = 'checks_failed' FROM public.context_extraction_runs WHERE id = (fin ->> 'run_id')::uuid),
   'the verdict is stored on the generation and the run counts as failed');
  PERFORM pg_temp.lg_assert((SELECT f2.failures = 1 FROM public.context_ledger_failures(ARRAY[j]) f2), 'a check-failed build counts toward the backoff');

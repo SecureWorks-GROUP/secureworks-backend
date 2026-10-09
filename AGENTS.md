@@ -834,6 +834,21 @@ closes a payment item at the end of its paid Perth day (`context_ledger_paid_clo
 item and in a transition alike. The packet stays `ledger-packet-v1` (the reader refuses any
 other version): add fields, never rename or retype one.
 
+## A Reading's Unread Rows Have One Rule
+
+`context_ledger_row_unread(landed_at, automated, evidence_until)` (`20261009132000`) is the one
+rule for a row a ledger reading has not read: a `context_ledger_evidence_rows` row that is not
+automated and landed after the reading's `evidence_until` (counts leave copies out). The judge
+(an update is not held by the backoff for such a row that landed after the last failed read; a
+waiting shadow answers a live reading's rebuild only with none), the due order (within a priority
+updates first, each group by the longest wait), the go-live sweep (`context_ledger_promote_shadow`
+skips a shadow with one, `unread_rows`) and the story's ledger read (`unread_rows`, so
+`meta.ledger.stale` and the not-known line) all read it; never re-derive it. `new_evidence` still
+counts every row, so an automated-only update stays cheap. Finish's auto-promote is not gated on
+purpose: its reading read every row landed by its claim, and a shadow held beside a live reading
+is never updated. A later change to those four bodies rolls this migration back first in the lead
+cutoff, story safety and story fixups re-applies and the lead cutoff break proof.
+
 ## The Job Story Sorts Text In C Order
 
 Production's collation is ICU `en-US` (letters compared without case first,
@@ -899,7 +914,7 @@ first line's item or a reason for whose move.
 ## A Lead Not Followed Up Has One Rule
 
 `context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`, drafts and
-windows by type since `20261009130000`; null ids means every live job, a draft
+windows by type since `20261009133000`; null ids means every live job, a draft
 only while monitored) and `context_lead_monitored(job, as_of)`, which returns that
 job's same row (`job_id`, `monitored`, `state`, ...; no row for an unknown job),
 are the owner's lead rule (7 Oct 2026, widened 9 Oct), the only one. The window is
@@ -937,7 +952,7 @@ SQL helper called with a sub-select argument is never inlined and runs whole
 that reason: 1.8 s against 13.5 s read one job at a time for every live job).
 The story fixes and story safety contracts roll this migration back first in
 their re-apply sections, as its own guard pins their bodies (and the scoping
-pipeline, `20261009130000`, before it, in theirs and in the lead cutoff's).
+pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's).
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 

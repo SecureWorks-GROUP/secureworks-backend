@@ -1,6 +1,6 @@
--- Rollback for 20261009130000_context_scoping_pipeline.sql: puts back the five bodies and
--- comments it replaced, word for word (20261007010000's lead rule, judge, record loops and
--- assembler; 20261006013000's due list) and the one-job form's comment (context_lead_monitored), then
+-- Rollback for 20261009133000_context_scoping_pipeline.sql: puts back the five bodies and
+-- comments it replaced, word for word (20261007010000's lead rule, record loops and
+-- assembler; 20261009132000's notes freshness judge and due list) and the one-job form's comment (context_lead_monitored), then
 -- drops the window function (context_lead_window_hours), which no earlier body reads. Signatures,
 -- owners and grants never changed, so nothing else moves: drafts are left out of the monitored set,
 -- the judge and the due list again, and every lead's window is 28 days. Refuses unless each live
@@ -12,11 +12,11 @@ DO $guard$
 DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_lead_monitored_jobs(uuid[],timestamptz)', ARRAY['6d4f104e5138c7267edaa0b0ddc0d762', '97299baad327f7c105840bd751e6f3ce']),
-  ('public.context_ledger_judge(uuid[])', ARRAY['3bc34aa826d8d6006800a8ff3dcceae6', 'eb359d521397c8be161bfef6421a35c9']),
-  ('public.context_ledger_due(integer)', ARRAY['ff5feedcfd8274c4594916ae96e8f1c4', 'b546910aafd7eed12660049e363cd587']),
-  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['6c287b4af127f1c3ad016873c0bfe4f6', '9e074113878161cb0ef257ec0e10f670']),
-  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['6c0b42d8d103e660d4740d753e45ea2a', 'b033f0a79e354567a87967d0efdf3a5c'])
+  ('public.context_lead_monitored_jobs(uuid[],timestamptz)', ARRAY['4787286b92096a92be13171b72a5f291', '97299baad327f7c105840bd751e6f3ce']),
+  ('public.context_ledger_judge(uuid[])', ARRAY['7f876b0454195b26515b5efca3d9ca13', 'e0809f08f49e10d500464b2c57e60461']),
+  ('public.context_ledger_due(integer)', ARRAY['f6118bbea03f3cf1ad3a0956700a5bed', '306bab3434fca5b6ced5f1d040f5cad1']),
+  ('public.context_job_record_loops(uuid[],timestamptz)', ARRAY['82b7f10dabdef1a2022398b78c816bf9', '9e074113878161cb0ef257ec0e10f670']),
+  ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', ARRAY['0612faee09a436d9f971ff8477e13f1d', 'b033f0a79e354567a87967d0efdf3a5c'])
  ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
   IF live IS NULL OR NOT live = ANY (x.accepted) THEN
@@ -24,7 +24,7 @@ BEGIN
   END IF;
  END LOOP;
  IF to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL
-    AND coalesce(obj_description(to_regprocedure('public.context_lead_window_hours(text)'), 'pg_proc'), '') NOT LIKE 'Scoping pipeline (20261009130000)%' THEN
+    AND coalesce(obj_description(to_regprocedure('public.context_lead_window_hours(text)'), 'pg_proc'), '') NOT LIKE 'Scoping pipeline (20261009133000)%' THEN
   problems := problems || 'public.context_lead_window_hours(text) is not this migration''s'::text;
  END IF;
  IF cardinality(problems) > 0 THEN
@@ -33,8 +33,8 @@ BEGIN
  END IF;
 END $guard$;
 
--- The bodies and comments as they were before 20261009130000, word for word (20261007010000,
--- 20261006013000). None of them reads the window function, so it is dropped after them.
+-- The bodies and comments as they were before 20261009133000, word for word (lead cutoff
+-- and merged notes freshness). None of them reads the window function, so it is dropped after them.
 CREATE OR REPLACE FUNCTION public.context_job_record_loops(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, rule text, loop_key text, shown_as text, owner text, counterparty text, what text, why text,
  opened_at timestamptz, due_date date, amount numeric, about_key text, closes_when text, source_table text, source_id text,
@@ -1849,6 +1849,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  ), g AS (
   SELECT c.job_id, gen.id, gen.status, gen.reader, gen.evidence_until, gen.created_at, gen.checks
   FROM cur c JOIN public.context_ledger_generations gen ON gen.id = c.gid
+ ), wait AS (
+  -- (notes freshness, 20261009132000) the reading the go-live sweep would put live in place of a
+  -- live one (context_ledger_promote_shadow's own choice): the job's newest shadow, newer than the
+  -- live reading, by the current reader and passing its checks
+  SELECT n.job_id, n.id, n.evidence_until
+  FROM g CROSS JOIN s CROSS JOIN LATERAL (
+   SELECT x.job_id, x.id, x.evidence_until, x.reader, x.checks, x.created_at FROM public.context_ledger_generations x
+   WHERE x.job_id = g.job_id AND x.status = 'shadow' ORDER BY x.created_at DESC, x.id DESC LIMIT 1) n
+  WHERE g.status = 'live' AND n.created_at > g.created_at AND n.reader = s.reader AND public.context_ledger_checks_pass(n.checks)
  ), cbe AS (
   -- The read every judgement can afford: the admitted business_events rows
   -- exactly (count and newest landed time, no text compare, no copy grouping)...
@@ -1890,14 +1899,17 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   -- a reading whose newest possible evidence is past its evidence_until, or a
   -- never-read job whose only possible evidence is legacy mail, or whose admitted rows
   -- are all CRM texts loaded from the cache (the evidence leaves out one from before the
-  -- job's lead window, so it may hold none: story safety, 20261006040000).
+  -- job's lead window, so it may hold none: story safety, 20261006040000). (Notes freshness,
+  -- 20261009132000) Also a job whose waiting shadow may not have read a row (the answer below).
   SELECT j.id FROM j LEFT JOIN g ON g.job_id = j.id LEFT JOIN cbe ON cbe.job_id = j.id LEFT JOIN cib ON cib.job_id = j.id
+  LEFT JOIN wait w ON w.job_id = j.id
   WHERE j.live_job AND NOT EXISTS (SELECT 1 FROM lo WHERE lo.job_id = j.id)
-   AND CASE WHEN g.id IS NULL THEN (coalesce(cbe.n, 0) = 0 AND coalesce(cib.n, 0) > 0)
-                                                   OR (coalesce(cbe.n, 0) > 0 AND cbe.n = cbe.bf)
-                            ELSE g.evidence_until IS NULL OR greatest(cbe.newest, cib.newest) > g.evidence_until END
+   AND (CASE WHEN g.id IS NULL THEN (coalesce(cbe.n, 0) = 0 AND coalesce(cib.n, 0) > 0)
+                                                    OR (coalesce(cbe.n, 0) > 0 AND cbe.n = cbe.bf)
+                             ELSE g.evidence_until IS NULL OR greatest(cbe.newest, cib.newest) > g.evidence_until END
+        OR (w.job_id IS NOT NULL AND (w.evidence_until IS NULL OR greatest(cbe.newest, cib.newest) > w.evidence_until)))
  ), er AS MATERIALIZED (
-  SELECT r.job_id, r.src_id, r.at, r.landed_at, r.copy_of
+  SELECT r.job_id, r.src_id, r.at, r.landed_at, r.copy_of, r.automated
   FROM public.context_ledger_evidence_rows(ARRAY(SELECT need.id FROM need), now()) r
  ), ev AS (
   -- Exact where read in full; elsewhere the cheap read gives the same judgement
@@ -1965,11 +1977,21 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  ), answered AS (
   -- A newer passing reading by the current reader already answers a rebuild of
   -- the live one (it waits for promotion); one that failed its checks answers
-  -- it only while the job backs off.
-  SELECT DISTINCT g.job_id FROM g CROSS JOIN s
-  JOIN public.context_ledger_generations n ON n.job_id = g.job_id AND n.status = 'shadow' AND n.reader = s.reader
-   AND n.created_at > g.created_at AND public.context_ledger_checks_pass(n.checks)
-  WHERE g.status = 'live'
+  -- it only while the job backs off. (Notes freshness, 20261009132000) Only the one the
+  -- go-live sweep would promote (wait), and only while it has read every row by the one rule
+  -- (context_ledger_row_unread): the sweep never promotes a reading with a row it has not read,
+  -- and a shadow beside a live reading is never updated, so such a one would wait for ever.
+  SELECT w.job_id FROM wait w
+  WHERE NOT EXISTS (SELECT 1 FROM er r WHERE r.job_id = w.job_id AND r.copy_of IS NULL
+                     AND public.context_ledger_row_unread(r.landed_at, r.automated, w.evidence_until))
+ ), unr AS (
+  -- (notes freshness, 20261009132000) the newest landing of a row the job's reading has not read
+  -- by the one rule (not automated, landed after its evidence_until; copies left out). Read in
+  -- full wherever a row can have landed after the reading, so a job not read in full has none.
+  SELECT r.job_id, max(r.landed_at) AS newest
+  FROM er r JOIN g ON g.job_id = r.job_id
+  WHERE r.copy_of IS NULL AND public.context_ledger_row_unread(r.landed_at, r.automated, g.evidence_until)
+  GROUP BY r.job_id
  ), fnew AS (
   -- Where the unread evidence starts (the earliest row that landed after the reading).
   SELECT DISTINCT ON (r.job_id) r.job_id, r.at, r.src_id
@@ -2010,10 +2032,14 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
     WHEN coalesce(ev.n, 0) = 0 THEN 'no_evidence'
     WHEN b.building_live OR b.run_live THEN 'busy'
     WHEN f.needs_person THEN 'needs_person'
-    WHEN f.backoff_until > now() OR b.building_lapsed_recent THEN 'backoff' END AS blocked
+    WHEN f.backoff_until > now() OR b.building_lapsed_recent THEN 'backoff' END AS blocked,
+   -- (notes freshness, 20261009132000) a row the reading has not read landed after the last failed
+   -- read ended (a read that lost its building lease in the last 2 hours still holds the job)
+   coalesce(u.newest > coalesce(f.last_failure_at, '-infinity'::timestamptz) AND NOT b.building_lapsed_recent, false) AS fresh
   FROM j CROSS JOIN s LEFT JOIN ev ON ev.job_id = j.id LEFT JOIN g ON g.job_id = j.id
   LEFT JOIN moved m ON m.job_id = j.id LEFT JOIN answered a ON a.job_id = j.id LEFT JOIN late lt ON lt.job_id = j.id
   LEFT JOIN fail f ON f.job_id = j.id LEFT JOIN busy b ON b.job_id = j.id LEFT JOIN lo ON lo.job_id = j.id
+  LEFT JOIN unr u ON u.job_id = j.id
  )
  SELECT d.job_id, d.blk IS NULL AND d.reason IS NOT NULL,
   CASE WHEN d.reason IS NULL THEN NULL WHEN d.reason = 'never_read' THEN 'backfill' WHEN d.reason = 'new_evidence' THEN 'update'
@@ -2022,31 +2048,50 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   CASE d.reason WHEN 'citation_moved' THEN 1 WHEN 'new_evidence' THEN 1 WHEN 'late_evidence' THEN 1 WHEN 'never_read' THEN 2
    WHEN 'reader_changed' THEN 3 WHEN 'checks_failed' THEN 3 END,
   d.newest, d.n, d.gid, d.blk
- FROM (  -- backfills and rebuilds wait for the backfill hours; an update is never held
-  SELECT d0.*, coalesce(d0.blocked, CASE WHEN NOT s.window_open AND d0.reason IS NOT NULL AND d0.reason <> 'new_evidence'
-                                         THEN 'outside_window' END) AS blk
+ FROM (  -- backfills and rebuilds wait for the backfill hours; an update is never held, (notes
+         -- freshness, 20261009132000) nor held back by the backoff of failed reads for a row that
+         -- landed after the last of them ended: the reading reads it at once
+  SELECT d0.*, coalesce(CASE WHEN d0.blocked = 'backoff' AND d0.reason = 'new_evidence' AND d0.fresh THEN NULL ELSE d0.blocked END,
+                        CASE WHEN NOT s.window_open AND d0.reason IS NOT NULL AND d0.reason <> 'new_evidence'
+                             THEN 'outside_window' END) AS blk
   FROM judged d0 CROSS JOIN s) d
 $$;
 COMMENT ON FUNCTION public.context_ledger_judge(uuid[]) IS
- 'Context ledger store (20261006013000), story safety (20261006040000): (lead cutoff, 20261007010000) blocked lead_not_monitored: a live job that is a lead no longer followed up (context_lead_monitored_jobs as of now: still at quoted with no acceptance, Xero invoice or bill, booking or later status 28 days after the newer of its newest quote send and the customer''s newest text, email or call, wherever it is placed) is never due a read, so context_ledger_due never lists it and a claim answers not_due; its evidence is not read in full. It is due again the moment it progresses or the customer writes. Earlier (eighth review) citation_moved also takes an item whose citation the citation check refuses now, as the story''s ledger read re-checks it: a CRM text loaded from the cache whose CRM time is not kept or is more than 30 days before the job was created, and an old-inbox mail now placed on another job (or from the client''s address on no job while the client has another job, or from before the job''s lead window), not worded, spam, a newsletter or an auto-reply, or with a saved copy on this job or another live job (the judge''s live set); a mail''s copies time it from when one left a live job (context_ledger_mail_copies). Earlier: a legacy mail whose saved copy sits on another job or on no job counts from when it can have joined the job''s evidence (context_ledger_mail_copies: no earlier than that rule''s first apply and the copy''s own landing), in the quick read (for a job with a reading) as in the full one, so a reading built before then is never taken to have read it and the job is due; (seventh review) one whose copy sits on another live job is not this job''s evidence at all: the full read leaves it out, and the quick read, a superset, may only overstate by it and then reads the job in full; a never-read job''s quick read is as before, except that a never-read job whose admitted rows are all CRM texts loaded from the cache (source ghl_sms_cache_backfill) is read in full, since the evidence leaves out one dated before the job''s lead window and so may hold none (then it is no_evidence, never a backfill of nothing). Earlier: the one ledger due judgement per job (the full evidence read only for a job whose reading may have newer evidence or whose only possible evidence is legacy mail; elsewhere a count and newest landed time of the admitted rows decide the same; evidence_rows is then that count): kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours), outside_window (a backfill or rebuild outside the settings backfill hours; an update is never held). A person-locked item is never a moved citation (a rebuild would carry it back). Service role only.';
+ 'Context ledger store (20261006013000), story safety (20261006040000): (notes freshness, 20261009132000) a row a reading has not read is the ledger''s one rule (context_ledger_row_unread: a row of the evidence that is not automated and landed after the reading''s evidence_until, copies left out; landing covers a row whose own time is earlier, such as a late call transcript, a late-captured email or a backfilled text). An update is never held by the backoff of failed reads for such a row that landed after the last failed read ended (a read that lost its building lease in the last 2 hours still holds the job; a backfill or rebuild backs off as before). A rebuild of a live reading (moved citation, changed reader) is answered only by the reading the go-live sweep would promote: the job''s newest shadow, newer than the live one, by the current reader, passing its checks, with no row it has not read; the sweep never promotes one with such a row and a shadow beside a live reading is never updated, so such a one answers nothing. Earlier (lead cutoff, 20261007010000) blocked lead_not_monitored: a live job that is a lead no longer followed up (context_lead_monitored_jobs as of now: still at quoted with no acceptance, Xero invoice or bill, booking or later status 28 days after the newer of its newest quote send and the customer''s newest text, email or call, wherever it is placed) is never due a read, so context_ledger_due never lists it and a claim answers not_due; its evidence is not read in full. It is due again the moment it progresses or the customer writes. Earlier (eighth review) citation_moved also takes an item whose citation the citation check refuses now, as the story''s ledger read re-checks it: a CRM text loaded from the cache whose CRM time is not kept or is more than 30 days before the job was created, and an old-inbox mail now placed on another job (or from the client''s address on no job while the client has another job, or from before the job''s lead window), not worded, spam, a newsletter or an auto-reply, or with a saved copy on this job or another live job (the judge''s live set); a mail''s copies time it from when one left a live job (context_ledger_mail_copies). Earlier: a legacy mail whose saved copy sits on another job or on no job counts from when it can have joined the job''s evidence (context_ledger_mail_copies: no earlier than that rule''s first apply and the copy''s own landing), in the quick read (for a job with a reading) as in the full one, so a reading built before then is never taken to have read it and the job is due; (seventh review) one whose copy sits on another live job is not this job''s evidence at all: the full read leaves it out, and the quick read, a superset, may only overstate by it and then reads the job in full; a never-read job''s quick read is as before, except that a never-read job whose admitted rows are all CRM texts loaded from the cache (source ghl_sms_cache_backfill) is read in full, since the evidence leaves out one dated before the job''s lead window and so may hold none (then it is no_evidence, never a backfill of nothing). Earlier: the one ledger due judgement per job (the full evidence read only for a job whose reading may have newer evidence or whose only possible evidence is legacy mail; elsewhere a count and newest landed time of the admitted rows decide the same; evidence_rows is then that count): kind backfill (never_read), update (new_evidence: the current generation''s evidence_until is older than the newest admissible evidence), or rebuild (checks_failed: the current reading is a shadow whose checks.passed is false; citation_moved: an item cites a business_events row now gone, off the job or not admissible; reader_changed; late_evidence: the earliest unread row is more than 14 days older than evidence_until, or more than 150 already-read rows follow it). A rebuild of the live reading for a moved citation or a changed reader is not due while a newer passing shadow by the current reader waits for promotion. Blocked: ledger_off, lane_off, not_in_rollout (settings.job_ids is set and does not list the job), not_live, holding_job, no_evidence, busy (a live building generation or a running ledger run), needs_person (three builds in a row failed their checks: context_ledger_failures), backoff (consecutive failed or check-failed runs: 2 hours, 8 hours, the next Perth day, then 7 days; or a building generation that lost its lease in the last 2 hours), outside_window (a backfill or rebuild outside the settings backfill hours; an update is never held). A person-locked item is never a moved citation (a rebuild would carry it back). Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_ledger_due(p_limit integer DEFAULT 20)
 RETURNS TABLE(job_id uuid, kind text, reason text, priority integer, newest_evidence_at timestamptz)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
- WITH st AS (SELECT x.mode, x.job_ids FROM public.context_ledger_settings x WHERE x.id)
+ WITH st AS (SELECT x.mode, x.job_ids FROM public.context_ledger_settings x WHERE x.id),
+ d AS MATERIALIZED (
+  SELECT jd.job_id, jd.kind, jd.reason, jd.priority, jd.newest_evidence_at, jd.generation_id
+  FROM public.context_ledger_judge(ARRAY(
+    -- only jobs the judgement could find due: live, the lane on, in the rollout list
+    SELECT jb.id FROM public.jobs jb, st
+    WHERE jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost')
+     AND st.mode <> 'off' AND public.automation_lane_enabled('extraction')
+     AND (st.job_ids IS NULL OR jb.id = ANY(st.job_ids)))) jd
+  WHERE jd.due
+ ), w AS (
+  -- (notes freshness, 20261009132000) since when each due job's reading has not read a row by the
+  -- ledger's one rule (context_ledger_row_unread; copies left out): the earliest landing of one
+  SELECT r.job_id, min(r.landed_at) AS since
+  FROM public.context_ledger_evidence_rows(ARRAY(SELECT d.job_id FROM d WHERE d.generation_id IS NOT NULL), now()) r
+  JOIN d ON d.job_id = r.job_id JOIN public.context_ledger_generations g ON g.id = d.generation_id
+  WHERE r.copy_of IS NULL AND public.context_ledger_row_unread(r.landed_at, r.automated, g.evidence_until)
+  GROUP BY r.job_id
+ )
  SELECT d.job_id, d.kind, d.reason, d.priority, d.newest_evidence_at
- FROM public.context_ledger_judge(ARRAY(
-   -- only jobs the judgement could find due: live, the lane on, in the rollout list
-   SELECT jb.id FROM public.jobs jb, st
-   WHERE jb.status::text NOT IN ('cancelled','draft','archived','complete','completed','lost')
-    AND st.mode <> 'off' AND public.automation_lane_enabled('extraction')
-    AND (st.job_ids IS NULL OR jb.id = ANY(st.job_ids)))) d
- WHERE d.due
- ORDER BY d.priority, d.newest_evidence_at DESC NULLS LAST, d.job_id
+ FROM d LEFT JOIN w ON w.job_id = d.job_id
+ -- within a priority the updates first (cheap, never held by the backfill hours, and what keeps a
+ -- reading current; a rebuild a reader skips once read that day never pushes them out of a capped
+ -- page), each by the longest wait for a row it has not read, so a busy job's newest messages never
+ -- keep an older one waiting; then the rest newest evidence first
+ ORDER BY d.priority, d.kind IS DISTINCT FROM 'update', w.since NULLS LAST, d.newest_evidence_at DESC NULLS LAST, d.job_id
  LIMIT greatest(0, least(coalesce(p_limit, 20), 200))
 $$;
 COMMENT ON FUNCTION public.context_ledger_due(integer) IS
- 'Context ledger store (20261006013000): live jobs due a ledger read now (context_ledger_judge), new evidence and moved citations first, then never-read jobs newest evidence first, then reader changes. At most 200. Empty while context_ledger_settings.mode is off or the extraction lane is off; only jobs on settings.job_ids when that rollout list is set. Service role only.';
+ 'Context ledger store (20261006013000): (notes freshness, 20261009132000) within a priority the updates come first, then the rest, and within each the job whose reading has waited longest for a row it has not read by the ledger''s one rule (context_ledger_row_unread: not automated, landed after its evidence_until; copies left out) comes first, by the earliest landing of one, so a busy job''s newest messages never keep an older one waiting and a rebuild a reader skips once read that day never pushes an update out of a capped page; then the rest newest evidence first. The priorities are the judge''s, unchanged. Earlier: live jobs due a ledger read now (context_ledger_judge), new evidence and moved citations first, then never-read jobs newest evidence first, then reader changes. At most 200. Empty while context_ledger_settings.mode is off or the extraction lane is off; only jobs on settings.job_ids when that rollout list is set. Service role only.';
 
 CREATE OR REPLACE FUNCTION public.context_lead_monitored_jobs(p_job_ids uuid[] DEFAULT NULL, p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, job_number text, monitored boolean, state text, quote_sent_at timestamptz, customer_at timestamptz,

@@ -1,4 +1,4 @@
--- Runs after supabase/rollbacks/20261009130000_context_scoping_pipeline_down.sql on the stack applied
+-- Runs after supabase/rollbacks/20261009133000_context_scoping_pipeline_down.sql on the stack applied
 -- through this case: the five bodies and their comments are back word for word (20261007010000's lead
 -- rule, judge, record loops and assembler; 20261006013000's due list), and so is the one-job form's
 -- comment; the window function is gone, and a draft is out of the monitored set, the judge and the due
@@ -8,9 +8,9 @@ DECLARE x record; live text;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
    ('public.context_lead_monitored_jobs(uuid[],timestamptz)', '97299baad327f7c105840bd751e6f3ce', 'Lead cutoff (20261007010000): the owner''s 7 Oct 2026 ruling, the one lead rule.%'),
-   ('public.context_ledger_judge(uuid[])', 'eb359d521397c8be161bfef6421a35c9',
-    'Context ledger store (20261006013000), story safety (20261006040000): (lead cutoff, 20261007010000) blocked lead_not_monitored:%'),
-   ('public.context_ledger_due(integer)', 'b546910aafd7eed12660049e363cd587', 'Context ledger store (20261006013000): live jobs due a ledger read now%'),
+   ('public.context_ledger_judge(uuid[])', 'e0809f08f49e10d500464b2c57e60461',
+    'Context ledger store (20261006013000), story safety (20261006040000): (notes freshness, 20261009132000)%'),
+   ('public.context_ledger_due(integer)', '306bab3434fca5b6ced5f1d040f5cad1', 'Context ledger store (20261006013000): (notes freshness, 20261009132000)%'),
    ('public.context_job_record_loops(uuid[],timestamptz)', '9e074113878161cb0ef257ec0e10f670',
     'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) R7 on a lead%'),
    ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', 'b033f0a79e354567a87967d0efdf3a5c',
