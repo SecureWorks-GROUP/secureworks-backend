@@ -61,13 +61,13 @@ INSERT INTO public.jobs (id, org_id, status, type, metadata)
 VALUES ('9a000000-0000-4000-8000-000000000002', '00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous',
  '{"quote_builder":{"request_id":"9a000000-0000-4000-8000-0000000000e1"}}');
 SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
- INSERT INTO public.jobs (org_id, status, type, metadata)
- VALUES ('00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous',
+ INSERT INTO public.jobs (id, org_id, status, type, metadata)
+ VALUES ('9a000000-0000-4000-8000-000000000003', '00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous',
   '{"quote_builder":{"request_id":"9a000000-0000-4000-8000-0000000000e1"}}')
 $q$), 'a second private quote job for the same request id must be refused');
-INSERT INTO public.jobs (org_id, status, type, metadata)
-VALUES ('00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous', '{}'),
-       ('00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous', '{}');
+INSERT INTO public.jobs (id, org_id, status, type, metadata)
+VALUES ('9a000000-0000-4000-8000-000000000004', '00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous', '{}'),
+       ('9a000000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'draft', 'miscellaneous', '{}');
 SELECT pg_temp.qb_assert(
  (SELECT count(*) FROM public.jobs WHERE type = 'miscellaneous' AND metadata = '{}'::jsonb) >= 2,
  'miscellaneous jobs without a quote builder request id must not collide');
