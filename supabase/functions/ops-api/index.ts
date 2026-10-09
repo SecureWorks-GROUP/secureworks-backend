@@ -25,6 +25,8 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 //   pipeline            — Jobs by status for kanban view
 //   makesafe_board      — Canonical make-safe rows projected for Ops or Trade
 //   job_detail          — Full job + assignments + POs + WOs + invoices
+//   job_overview        — Job page Overview: story card, AI notes, conversation, files, saved story (staff, GET)
+//   request_job_story   — Ask for a job's saved story to be written or rewritten (staff, POST)
 //   list_invoices       — Xero invoices with filters
 //   job_financials      — Job P&L list (makesafe-scoped view; M3 panel)
 //   job_financials_detail — Single job P&L + trade charge lines (get_job_financials rpc)
@@ -414,6 +416,7 @@ import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invo
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
+import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
 import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
@@ -7462,6 +7465,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               : action === 'context_scorecard'
                 ? await contextScorecardAction(client, url.searchParams)
                 : await storyScorecardAction(client, url.searchParams))
+        } catch (error) {
+          if (error instanceof StoryReadError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
+      // ── Job overview (job overview v1, 20261009100000): the job page
+      // Overview's one read (story card, AI notes, conversation, files and the
+      // saved written story, each part on its own) and the staff ask to write
+      // or rewrite the saved story. Staff front door (the default for an action
+      // on no static, profile, routine or agent list). job_overview is GET only
+      // and writes nothing; request_job_story is POST only and records the
+      // verified caller as the asker, never a body field.
+      case 'job_overview':
+      case 'request_job_story': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        try {
+          if (action === 'job_overview') {
+            if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+            return json(await jobOverviewAction(client, url.searchParams, { getJobConversation }))
+          }
+          if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+          return json(await requestJobStoryAction(client, body, receiptActor(requestActor, authMode)))
         } catch (error) {
           if (error instanceof StoryReadError) return json({ error: error.message, code: error.code }, error.status)
           throw error

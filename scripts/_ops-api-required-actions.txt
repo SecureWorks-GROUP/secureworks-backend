@@ -103,6 +103,11 @@ client_story              # probe=bounded-refusal probe-args=job_id=__deploy_pro
 context_story_scorecard   # probe=bounded-refusal probe-args=as_of=__deploy_probe__
 # The context scorecard (W11): rows 1 to 14 and its per-job pages, same probe.
 context_scorecard         # probe=bounded-refusal probe-args=as_of=__deploy_probe__
+# Job overview v1: the job page Overview's read (staff, GET; refuses the probe's
+# invalid job id before any read) and the ask to rewrite the saved story (POST
+# only: proved by the source gate, never called against production).
+job_overview              # probe=bounded-refusal probe-args=jobId=__deploy_probe__
+request_job_story         # probe=source-only
 assemble_job_brain
 get_job_context_facts
 get_job_conversation
