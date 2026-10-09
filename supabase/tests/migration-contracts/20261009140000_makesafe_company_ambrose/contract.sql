@@ -28,10 +28,14 @@ BEGIN
     RAISE EXCEPTION 'ambrose: active row without parsing-rule coverage';
   END IF;
   -- The stored PO rule must read the 8-2 Ambrose shape and keep the sequence.
-  IF substring('Purchase Order P.O. No: 20999101-02' FROM c.parsing_rules->'fields'->'external_ref'->>'regex') <> '20999101-02' THEN
+  -- The rule is JavaScript (the intake runs it); PostgreSQL spells a word
+  -- boundary \y and reads \b as a backspace, so translate it here. IS DISTINCT
+  -- FROM, not <>: a rule that matches nothing returns NULL, and NULL <> x
+  -- never raises.
+  IF substring('Purchase Order P.O. No: 20999101-02' FROM replace(c.parsing_rules->'fields'->'external_ref'->>'regex', '\b', '\y')) IS DISTINCT FROM '20999101-02' THEN
     RAISE EXCEPTION 'ambrose: external_ref rule does not read the PO';
   END IF;
-  IF substring(E'Insured Owner: Alex Example\nAuthorised Contact: Jordan Example' FROM c.parsing_rules->'fields'->'client_name'->>'regex') <> 'Alex Example' THEN
+  IF substring(E'Insured Owner: Alex Example\nAuthorised Contact: Jordan Example' FROM c.parsing_rules->'fields'->'client_name'->>'regex') IS DISTINCT FROM 'Alex Example' THEN
     RAISE EXCEPTION 'ambrose: client_name rule crosses the line';
   END IF;
 END $$;
