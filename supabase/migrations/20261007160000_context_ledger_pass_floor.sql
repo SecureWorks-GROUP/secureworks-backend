@@ -1,57 +1,69 @@
--- Ledger pass floor (9 Oct 2026): a small reading may lose up to 2 items to refusals, and up to 1 to
--- the store, and still pass; the readings the old share hid are judged again.
+-- Ledger pass rule (9 Oct 2026): a reading passes while at most half of its items were refused, and
+-- the hidden readings the old 20% rule failed are judged again by it. (The file keeps the name of
+-- this change's first draft, a floor of 2 refusals; the rule it installs is at most half refused.)
 --
--- Why. The store judges a whole reading when its run finishes (context_ledger_finish). It passed a
--- reading only when the refusals on both sides, the reader's own validator's and the store's, were at
--- most 20% of what was proposed, and the store's own at most 20% of what it saw. Every item the store
--- keeps has already passed its own word-for-word citation check, so a refusal only drops an item; it
--- never lets a wrong one in. On a small job one refusal is already 20% and two are 40%, so a reading of
--- 5 items with 2 refused failed whole: it stayed a hidden shadow, its good items were never shown, the
--- run counted toward the job's backoff and the job was due to be read again from scratch.
+-- Why. Each item a reader proposes is checked on its own: one that fails its word-for-word citation
+-- or date checks is refused and dropped, and that stays exactly as it is. The store then judges the
+-- whole reading when its run finishes (context_ledger_finish). It passed a reading only when the
+-- refusals on both sides, the reader's own validator's and the store's, were at most 20% of what was
+-- proposed, and the store's own at most 20% of what it saw. A refusal only drops that item, yet more
+-- than 1 in 5 refused hid every good item the reading kept: it stayed a hidden shadow, the run counted
+-- toward the job's backoff and the job was due to be read again from scratch.
 --
--- What it does (owner approved, 9 Oct: live with fewer checks):
+-- The owner's ruling (Marnin, 9 Oct 2026): "thats stupid that it does that. of course save good
+-- ones. agree with you about the half yes go for it". So refused items stay dropped one by one, and a
+-- reading is hidden only when more than half of its items were refused.
+--
+-- What it does:
 --  1. context_ledger_finish, its verdict line only:
 --     before: v_pass := (v_local + v_ref) <= 0.2 * v_den AND v_ref <= 0.2 * (v_acc + v_ref);
---     after:  v_pass := (v_local + v_ref) <= greatest(2, 0.2 * v_den) AND v_ref <= greatest(1, 0.2 * (v_acc + v_ref));
---     Up to 2 refused items in all, and up to 1 refused by the store, never fail a reading by share;
---     from 10 items proposed (5 the store saw) up, each share is the 20% it was. Every other condition
---     stays: a build that read evidence still needs at least one item, an update is judged by the same
---     line and its verdict still combines with its build's, and the rates the store records
---     (refusal_rate, refused_rate) are unchanged. Its comment says so.
---  2. The readings already stored are judged again by the new line, once. A shadow generation by
---     luna-ledger:v2 whose checks.passed is false passes now when the old line explains every verdict
---     stored on it from the counts finish stored with it (checks.store: proposed, refused_local,
---     items_accepted, items_refused, items, evidence_rows; and after an update checks.last_update's
---     proposed, refused_local, items_accepted, items_refused), and the new line passes it with the item
---     condition still holding. It gets checks.passed true, store.pass true (and last_update.pass true
---     after an update, so its next update combines with a passing build), and the audit keys
---     repassed_by ('migration 20261007160000: pass floor'), repassed_at and repassed_from (the verdicts
---     it had). Its counts and rates stay as stored. A reading whose verdicts the counts do not explain,
---     or whose counts are missing, is left alone, and so is every live, retired, failed or building
---     generation and every other reader's. Nothing is promoted here: a re-judged reading goes live only
---     the way any passing shadow does (context_ledger_promote, promote_shadow once the lane is live, or
---     finish on its next clean update in live mode). The runs keep their recorded error, so a job's
---     backoff clock is as it was.
+--     after:  v_pass := (v_local + v_ref) <= 0.5 * v_den AND v_ref <= 0.5 * (v_acc + v_ref);
+--     (v_local: refused by the reader's own validator; v_acc, v_ref: accepted and refused by the
+--     store; v_den: the larger of what the reader proposed and what the store saw.) Every other
+--     condition stays: per-item refusals are unchanged, a build that read evidence still needs at
+--     least one item, an update is judged by the same line and its verdict still combines with its
+--     build's, and the rates the store records (refusal_rate, refused_rate) are unchanged. Its comment
+--     says so.
+--  2. The hidden readings already stored are judged again by the new line, once. A shadow generation
+--     by luna-ledger:v2 whose checks.passed is false passes now when the old line explains every
+--     verdict stored on it from the counts finish stored with it (checks.store: proposed,
+--     refused_local, items_accepted, items_refused, items, evidence_rows; and after an update
+--     checks.last_update's proposed, refused_local, items_accepted, items_refused), and the new line
+--     passes it with the item condition still holding. It gets checks.passed true, store.pass true (and
+--     last_update.pass true after an update, so its next update combines with a passing build), and the
+--     audit keys repassed_by ('migration 20261007160000: at most half refused (owner ruling 9 Oct
+--     2026)'), repassed_at and repassed_from (the verdicts it had). Its counts and rates stay as
+--     stored. A reading that already carries checks.repassed_by (the owner's direct re-judge below) is
+--     left as it is, and so is one whose verdicts its counts do not explain or whose counts are missing,
+--     every live, retired, failed or building generation and every other reader's. Nothing is promoted
+--     here: a re-judged reading goes live only the way any passing shadow does (the go-live sweep,
+--     context_ledger_promote_shadow, which takes a job's newest shadow only when it is newer than the
+--     job's live reading; or finish on its next clean update while it is the job's current reading).
+--     The runs keep their recorded error, so a job's backoff clock is as it was.
 --
--- Read only on production (9 Oct 2026, about 10:06 Perth; ledger mode shadow, reader luna-ledger:v2,
--- running, so these move until the migration applies, and it judges whatever is a shadow then):
---  - 74 shadow readings by luna-ledger:v2: 28 passed, 46 failed. 19 of the 46 fail only on the 20%
---    share and pass the new line: 18 builds (1 of 2, 1 of 3, 1 of 4, 2 of 3, 2 of 6, 2 of 7 or 2 of 9
---    items refused by the reader's own validator, none by the store) and 1 passing build whose last
---    update had 1 of 3 refused. 16 of the 19 are their job's current reading, 2 are newer than their
---    job's live reading and 1 is older. The other 27 still fail: 7 kept no item though they read
---    evidence, 19 have 3 or more of the reader's own refusals and over 20%, and on 1 the store refused
---    3 of 8.
---  - Every stored verdict on those 46 is exactly the old line's on its stored counts.
+-- Production, read only (9 Oct 2026, about 11:54 Perth; ledger mode live, reader luna-ledger:v2,
+-- running, so these move until the migration applies, and it judges whatever is hidden then):
+--  - Done by hand before this, under the same rule: at about 11:20 Perth 68 hidden luna-ledger:v2
+--    readings were judged again directly in the database (checks.passed true, checks.repassed_by
+--    'owner go 9 Oct 2026 (Marnin): at most half of notes refused; refused notes stay dropped',
+--    checks.passed_before_repass false); 60 of them are live now and 8 still shadow. Their store.pass
+--    stays false (an update of one would combine it with the update's verdict); this migration leaves
+--    them as they are.
+--  - 127 shadow readings by luna-ledger:v2: 46 pass (8 of them the owner's), 81 hidden. Every stored
+--    verdict on the 81 is exactly the old line's on its stored counts. 28 of them pass the new line (1
+--    on its last update): 15 are older than their job's live reading, so the sweep never promotes
+--    them, and 12 are their job's newest shadow and newer than its live reading. The other 53 stay
+--    hidden: 42 kept no item though they read evidence, 11 had more than half refused by the reader's
+--    own validator.
 --
 -- Replaced body (guarded on its live production md5, the 20261006013000 body): context_ledger_finish,
 --   its verdict line (with a comment added above it), and its comment (the store's name first).
 -- Not changed: every other line of finish; context_ledger_checks_pass (it reads checks.passed), the
 --   judge, the backoff, the write, promote and the reader. No run, flag or setting is written.
 -- Rollback: supabase/rollbacks/20261007160000_context_ledger_pass_floor_down.sql (the 20261006013000
---   body and comment word for word; each reading this judged again that is still a shadow is judged
---   again by the old line on its stored counts and loses its audit keys; a reading promoted since is
---   left as it is).
+--   body and comment word for word; each reading this migration judged again that is still a shadow
+--   is judged again by the old line on its stored counts and loses its audit keys; a reading promoted
+--   since, and every reading the owner's direct re-judge passed, is left as it is).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
@@ -61,7 +73,7 @@ DECLARE problems text[] := '{}'; live text; f text; t text;
 BEGIN
  -- The one replaced body: the 20261006013000 body production runs, or this migration's (re-apply).
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)');
- IF live IS NULL OR NOT live = ANY(ARRAY['0c02a410bb32f46315fbf278090ef60e', '24fdd0673f8692c082cf9d19c22ab210']) THEN
+ IF live IS NULL OR NOT live = ANY(ARRAY['0c02a410bb32f46315fbf278090ef60e', '110174bcd355a82568fd7bc572d414f6']) THEN
   problems := problems || format('public.context_ledger_finish(uuid,uuid,uuid,text,jsonb) md5 %s', coalesce(live, '<missing>'));
  END IF;
  -- Read, never replaced: the body and the re-judge call these.
@@ -167,10 +179,11 @@ BEGIN
  -- store saw.
  v_den := greatest(v_proposed, v_acc + v_ref, 1);
  v_all_rate := trim_scale(round((v_local + v_ref)::numeric / v_den, 4));
- -- (ledger pass floor, 20261007160000) a refusal only drops an item, so a small
- -- reading may lose up to 2 items in all and up to 1 to the store; from 10 items
- -- proposed (5 the store saw) up, each share is the 20% it was.
- v_pass := (v_local + v_ref) <= greatest(2, 0.2 * v_den) AND v_ref <= greatest(1, 0.2 * (v_acc + v_ref));
+ -- The verdict, at most half refused (owner ruling 9 Oct 2026): a refusal only
+ -- drops that item, and every item kept passed its own checks, so a reading is
+ -- hidden only when more than half of what was proposed, or more than half of
+ -- what the store saw, was refused (20261007160000).
+ v_pass := (v_local + v_ref) <= 0.5 * v_den AND v_ref <= 0.5 * (v_acc + v_ref);
  IF p_outcome = 'updated' THEN
   IF g.evidence_until IS NOT NULL AND v_until < g.evidence_until THEN
    RETURN jsonb_build_object('outcome', 'refused', 'reason', 'evidence_until_backwards');
@@ -220,17 +233,19 @@ BEGIN
   'promoted', v_promoted, 'carried', v_carried, 'passed', v_pass, 'checks', v_store, 'evidence_until', v_until);
 END $$;
 COMMENT ON FUNCTION public.context_ledger_finish(uuid, uuid, uuid, text, jsonb) IS
- 'Context ledger store (20261006013000), ledger pass floor (20261007160000): closes a ledger run. evidence_until is capped at the claim''s instant (the run''s started_at) and returned. The verdict counts both sides'' refusals: p_meta.checks.refused_local + store refusals at most 20% of greatest(p_meta.checks.proposed, store accepted + refused, 1) or 2, whichever is more, the store''s own refusals at most 20% of what it saw or 1, whichever is more (the pass floor, 20261007160000: a refusal only drops an item, so a small reading may lose up to 2 items in all and 1 to the store; from 10 items proposed, and 5 the store saw, up each share is the 20% it was), and for a build at least one item unless there was no evidence; it is stored as checks.passed (a build: its verdict; an update: the build''s and this update''s), and a run whose verdict fails is done with error checks_failed (it counts toward the backoff). The shadow readings by luna-ledger:v2 stored before the floor were judged again by it once (checks.repassed_by). built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and checks.passed it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow is promoted on its first update with checks.passed once mode is live. failed: a building generation fails with the reason; a live or shadow one is untouched. A stop (p_meta.failure ledger_budget, model_cap, ledger_off, lane_off, paused, rate_limited, auth_required or worker_stopping) is released, not failed: error and failure released:<code>, never counted toward the backoff. A repeated finish of a closed run reports and changes nothing. Service role only.';
+ 'Context ledger store (20261006013000), ledger pass rule (20261007160000): closes a ledger run. evidence_until is capped at the claim''s instant (the run''s started_at) and returned. The verdict, at most half refused (owner ruling 9 Oct 2026), counts both sides'' refusals: (p_meta.checks.refused_local + store refusals) / greatest(p_meta.checks.proposed, store accepted + refused, 1) at most 50%, the store''s own refusals at most 50% of what it saw, and for a build at least one item unless there was no evidence (a refused item is dropped on its own; a reading is hidden only when more than half was refused); it is stored as checks.passed (a build: its verdict; an update: the build''s and this update''s), and a run whose verdict fails is done with error checks_failed (it counts toward the backoff). The failed shadow readings by luna-ledger:v2 stored under the earlier 20% rule were judged again by this one once (checks.repassed_by), apart from those the owner''s direct re-judge of 9 Oct 2026 had already passed. built: the run''s building generation becomes shadow with the reader''s meta (model, prompt_sha256, evidence_until, evidence_rows, chunks, calls, checks), the live generation''s person-locked items are carried forward, and with mode live and checks.passed it is promoted. updated: the current generation''s evidence_until moves forward (never back), and a shadow is promoted on its first update with checks.passed once mode is live. failed: a building generation fails with the reason; a live or shadow one is untouched. A stop (p_meta.failure ledger_budget, model_cap, ledger_off, lane_off, paused, rate_limited, auth_required or worker_stopping) is released, not failed: error and failure released:<code>, never counted toward the backoff. A repeated finish of a closed run reports and changes nothing. Service role only.';
 
--- 2. The readings already stored, judged again by the new line once. A failed shadow reading by
--- luna-ledger:v2 passes when the old line explains every verdict stored on it (finish wrote them from
--- these counts) and the new line passes it, the item condition still holding. Its counts and rates
--- stay; it carries the audit keys. Nothing else is written: no live, retired, failed or building
--- generation, no other reader's, no run. A reading changed since it was read here is left alone.
+-- 2. The hidden readings already stored, judged again by the new line once. A failed shadow reading
+-- by luna-ledger:v2 passes when the old line explains every verdict stored on it (finish wrote them
+-- from these counts) and the new line passes it, the item condition still holding. A reading already
+-- judged again (checks.repassed_by: the owner's direct re-judge of 9 Oct 2026, or this one) is left
+-- as it is. Its counts and rates stay; it carries the audit keys. Nothing else is written: no live,
+-- retired, failed or building generation, no other reader's, no run. A reading changed since it was
+-- read here is left alone.
 DO $rejudge$
 DECLARE v_flipped integer; v_updates integer;
 BEGIN
- WITH c AS (  -- each failed shadow reading by luna-ledger:v2, with its stored counts (a whole number, else null)
+ WITH c AS (  -- each hidden shadow reading by luna-ledger:v2 not judged again yet, with its stored counts (a whole number, else null)
   SELECT g.id, g.checks, (g.checks -> 'last_update') IS NOT NULL AS upd,
    CASE WHEN jsonb_typeof(g.checks -> 'passed') = 'boolean' THEN (g.checks ->> 'passed')::boolean END AS passed,
    CASE WHEN jsonb_typeof(g.checks #> '{store,pass}') = 'boolean' THEN (g.checks #>> '{store,pass}')::boolean END AS build_pass,
@@ -247,19 +262,19 @@ BEGIN
    CASE WHEN g.checks #>> '{last_update,items_refused}' ~ '^[0-9]{1,9}$' THEN (g.checks #>> '{last_update,items_refused}')::integer END AS ur
   FROM public.context_ledger_generations g
   WHERE g.status = 'shadow' AND g.reader = 'luna-ledger:v2' AND NOT public.context_ledger_checks_pass(g.checks)
+   AND NOT (g.checks ? 'repassed_by')
  ), v AS (  -- the verdicts the old line gave and the new line gives on those counts (null when a count is missing)
   SELECT c.*,
    (c.l + c.r) <= 0.2 * greatest(c.p, c.a + c.r, 1) AND c.r <= 0.2 * (c.a + c.r) AND (c.items >= 1 OR c.ev = 0) AS build_old,
-   (c.l + c.r) <= greatest(2, 0.2 * greatest(c.p, c.a + c.r, 1)) AND c.r <= greatest(1, 0.2 * (c.a + c.r))
-    AND (c.items >= 1 OR c.ev = 0) AS build_new,
+   (c.l + c.r) <= 0.5 * greatest(c.p, c.a + c.r, 1) AND c.r <= 0.5 * (c.a + c.r) AND (c.items >= 1 OR c.ev = 0) AS build_new,
    (c.ul + c.ur) <= 0.2 * greatest(c.up, c.ua + c.ur, 1) AND c.ur <= 0.2 * (c.ua + c.ur) AS update_old,
-   (c.ul + c.ur) <= greatest(2, 0.2 * greatest(c.up, c.ua + c.ur, 1)) AND c.ur <= greatest(1, 0.2 * (c.ua + c.ur)) AS update_new
+   (c.ul + c.ur) <= 0.5 * greatest(c.up, c.ua + c.ur, 1) AND c.ur <= 0.5 * (c.ua + c.ur) AS update_new
   FROM c
  ), u AS (
   UPDATE public.context_ledger_generations g SET updated_at = now(),
    checks = g.checks || jsonb_build_object('passed', true, 'store', (g.checks -> 'store') || '{"pass": true}'::jsonb)
     || CASE WHEN v.upd THEN jsonb_build_object('last_update', (g.checks -> 'last_update') || '{"pass": true}'::jsonb) ELSE '{}'::jsonb END
-    || jsonb_build_object('repassed_by', 'migration 20261007160000: pass floor', 'repassed_at', now(),
+    || jsonb_build_object('repassed_by', 'migration 20261007160000: at most half refused (owner ruling 9 Oct 2026)', 'repassed_at', now(),
      'repassed_from', jsonb_build_object('passed', v.passed, 'store_pass', v.build_pass)
       || CASE WHEN v.upd THEN jsonb_build_object('last_update_pass', v.update_pass) ELSE '{}'::jsonb END)
   FROM v
@@ -274,7 +289,7 @@ BEGIN
   RETURNING v.upd
  )
  SELECT count(*), count(*) FILTER (WHERE u.upd) INTO v_flipped, v_updates FROM u;
- RAISE NOTICE 'ledger pass floor: % shadow luna-ledger:v2 readings judged again and passed (% of them on their last update)',
+ RAISE NOTICE 'ledger pass rule: % hidden shadow luna-ledger:v2 readings judged again and passed (% of them on their last update)',
   v_flipped, v_updates;
 END $rejudge$;
 

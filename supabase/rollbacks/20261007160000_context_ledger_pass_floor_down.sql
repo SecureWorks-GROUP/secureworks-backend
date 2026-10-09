@@ -1,11 +1,13 @@
--- Rollback of 20261007160000_context_ledger_pass_floor: context_ledger_finish goes back to the
--- 20261006013000 body and comment word for word (CREATE OR REPLACE keeps its grants), and each reading
--- that migration judged again that is still a shadow is judged again by the old line on its stored
--- counts (checks.passed, store.pass and, after an update, last_update.pass as finish would have stored
--- them) and loses its audit keys (repassed_by, repassed_at, repassed_from). A reading promoted since
--- keeps its verdict and its audit keys: the rollback never demotes a live reading. Readings finish
--- built or updated under the floor stay as written. Refuses while a later body has replaced finish
--- (roll that back first).
+-- Rollback of 20261007160000_context_ledger_pass_floor (the ledger pass rule, at most half refused):
+-- context_ledger_finish goes back to the 20261006013000 body and comment word for word (CREATE OR
+-- REPLACE keeps its grants), and each reading that migration judged again that is still a shadow is
+-- judged again by the old 20% line on its stored counts (checks.passed, store.pass and, after an
+-- update, last_update.pass as finish would have stored them) and loses its audit keys (repassed_by,
+-- repassed_at, repassed_from). A reading promoted since keeps its verdict and its audit keys: the
+-- rollback never demotes a live reading. Readings the owner's direct re-judge of 9 Oct 2026 passed
+-- (their checks.repassed_by is the owner's, not the migration's) and readings finish built or updated
+-- under the half rule stay as written. Refuses while a later body has replaced finish (roll that back
+-- first).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -13,14 +15,14 @@ DO $guard$
 DECLARE live text;
 BEGIN
  SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure('public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)');
- IF live IS NULL OR live NOT IN ('24fdd0673f8692c082cf9d19c22ab210', '0c02a410bb32f46315fbf278090ef60e') THEN
+ IF live IS NULL OR live NOT IN ('110174bcd355a82568fd7bc572d414f6', '0c02a410bb32f46315fbf278090ef60e') THEN
   RAISE EXCEPTION 'context_ledger_pass_floor_down_refused: context_ledger_finish md5 % is a later body; roll that back first',
    coalesce(live, '<missing>');
  END IF;
 END $guard$;
 
 -- The readings the migration judged again, still shadow: judged again by the old line on their
--- stored counts (an update since then is judged as finish judged it before the floor).
+-- stored counts (an update since then is judged as finish judged it before the half rule).
 WITH c AS (
  SELECT g.id, g.checks, (g.checks -> 'last_update') IS NOT NULL AS upd,
   CASE WHEN g.checks #>> '{store,proposed}' ~ '^[0-9]{1,9}$' THEN (g.checks #>> '{store,proposed}')::integer END AS p,
@@ -34,7 +36,7 @@ WITH c AS (
   CASE WHEN g.checks #>> '{last_update,items_accepted}' ~ '^[0-9]{1,9}$' THEN (g.checks #>> '{last_update,items_accepted}')::integer END AS ua,
   CASE WHEN g.checks #>> '{last_update,items_refused}' ~ '^[0-9]{1,9}$' THEN (g.checks #>> '{last_update,items_refused}')::integer END AS ur
  FROM public.context_ledger_generations g
- WHERE g.status = 'shadow' AND g.checks ->> 'repassed_by' = 'migration 20261007160000: pass floor'
+ WHERE g.status = 'shadow' AND g.checks ->> 'repassed_by' = 'migration 20261007160000: at most half refused (owner ruling 9 Oct 2026)'
 ), v AS (  -- the old line on those counts (a missing count fails, as the reading did before)
  SELECT c.*,
   coalesce((c.l + c.r) <= 0.2 * greatest(c.p, c.a + c.r, 1) AND c.r <= 0.2 * (c.a + c.r) AND (c.items >= 1 OR c.ev = 0), false) AS build_old,
