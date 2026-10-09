@@ -106,6 +106,7 @@ function pdf(postId: string, id = `${postId}-pdf`) {
 Deno.test("registry keeps specific builder adapters ahead of shared Prime transport", () => {
   assertEquals(DETERMINISTIC_ADAPTER_REGISTRY.map((a) => a.id), [
     "synthetic_livefire",
+    "ambrose",
     "mlb",
     "ajs_ajbr",
     "western",

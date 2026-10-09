@@ -17,9 +17,49 @@ export interface BuilderWorkOrderIdentity {
 // ABJR is a live-mail typo of AJBR (Track A D7): both spellings are read and
 // canonicalClaim collapses them onto the one AJBR identity.
 const BUILDER_REF_WITH_PO_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA|ACG)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
 const BUILDER_REF_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA|ACG)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
+
+/**
+ * Ambrose Construct Group (`makesafe_companies.slug = 'acg'`) numbers each
+ * purchase order `<8-digit job number>-<2-digit sequence>` ("P.O. No:
+ * 20999101-02", "PO #20999101-02", "Purchase Order Make Safe: 20999101-02").
+ * The job number is Ambrose's claim (the GROUP); the sequence is the per-trade
+ * instruction, and one job routinely issues us several (-03 and -08 on one job,
+ * one day). The shared PO grammar is digits-only, so read raw it keeps the job
+ * number and drops the sequence, collapsing every PO of a job onto one key.
+ *
+ * Ambrose text is therefore rewritten, ONLY when the reviewed company is Ambrose,
+ * into the composite form every grammar here already reads:
+ * `ACG-<job>PO-<job><seq>`. The PO token is the job and sequence digits joined,
+ * which is lossless because both widths are fixed, and is unique per Ambrose
+ * PO under every digits-only PO reader (obligation dedupe, instruction key).
+ * Anything that is not exactly 8-2 digits behind a PO label is left alone, so
+ * a format change fails closed into review instead of guessing.
+ */
+export const AMBROSE_COMPANY_SLUG = "acg";
+const AMBROSE_PO_TOKEN_RE =
+  /(?<![A-Z0-9])(?:P\.?\s*O\.?(?:\s*(?:No\.?|Number|#))?|Purchase\s+Order(?:\s+Make\s+Safe)?)\s*[:#]?\s*#?\s*(\d{8})-(\d{2})(?![0-9A-Z])/gi;
+
+export function isAmbroseCompanySlug(slug: string | null | undefined): boolean {
+  return String(slug || "").trim().toLowerCase() === AMBROSE_COMPANY_SLUG;
+}
+
+export function normaliseAmbroseIdentityText(value: string): string;
+export function normaliseAmbroseIdentityText(
+  value: string | null | undefined,
+): string | null | undefined;
+export function normaliseAmbroseIdentityText(
+  value: string | null | undefined,
+): string | null | undefined {
+  if (value === null || value === undefined) return value;
+  return String(value).replace(
+    AMBROSE_PO_TOKEN_RE,
+    (_match, job: string, sequence: string) =>
+      `PO ACG-${job}PO-${job}${sequence}`,
+  );
+}
 /**
  * The PO label this module can read, as a source pattern. Exported so downstream
  * identity matching derives the SAME grammar instead of keeping a second copy:
@@ -295,9 +335,36 @@ export function matchBuilderRefText(
     text.match(BUILDER_REF_RE)?.[0] || null;
 }
 
+/** The same evidence with Ambrose PO tokens in composite form; other builders unchanged. */
+function ambroseNormalisedIdentityInput<
+  T extends {
+    requestingCompanySlug?: string | null;
+    externalRef?: string | null;
+    subject?: string | null;
+    bodyText?: string | null;
+    attachmentNames?: Array<string | null | undefined>;
+    documentTexts?: Array<string | null | undefined>;
+  },
+>(input: T): T {
+  if (!isAmbroseCompanySlug(input.requestingCompanySlug)) return input;
+  return {
+    ...input,
+    externalRef: normaliseAmbroseIdentityText(input.externalRef),
+    subject: normaliseAmbroseIdentityText(input.subject),
+    bodyText: normaliseAmbroseIdentityText(input.bodyText),
+    attachmentNames: input.attachmentNames?.map((name) =>
+      normaliseAmbroseIdentityText(name)
+    ),
+    documentTexts: input.documentTexts?.map((text) =>
+      normaliseAmbroseIdentityText(text)
+    ),
+  };
+}
+
 export function extractBuilderWorkOrderIdentity(
-  input: BuilderWorkOrderIdentityInput,
+  rawInput: BuilderWorkOrderIdentityInput,
 ): BuilderWorkOrderIdentity {
+  const input = ambroseNormalisedIdentityInput(rawInput);
   const result: BuilderWorkOrderIdentity = {
     builder_claim_ref: null,
     builder_work_order_number: null,
@@ -392,8 +459,9 @@ const EMPTY_IDENTITY = (): BuilderWorkOrderIdentity => ({
  * fill and approval correlation must prefer this cardinality-safe path.
  */
 export function parseWorkOrderReferenceFromEvidence(
-  input: WorkOrderReferenceEvidenceInput,
+  rawInput: WorkOrderReferenceEvidenceInput,
 ): WorkOrderReferenceParseResult {
+  const input = ambroseNormalisedIdentityInput(rawInput);
   type SourceTokens = BuilderAttachmentIdentityTokens & { source: string };
   const sources: SourceTokens[] = [];
 
@@ -597,7 +665,13 @@ export function applyParsedWorkOrderReferenceToExtraction(
  * the job grain, and a bare PO string is only unique inside one builder, so the
  * scope is part of the key rather than an assumption around it.
  */
-export type BuilderInstructionScope = "AJ" | "MLB" | "BWCWA" | "WB" | "KBA";
+export type BuilderInstructionScope =
+  | "AJ"
+  | "MLB"
+  | "BWCWA"
+  | "WB"
+  | "KBA"
+  | "ACG";
 
 /**
  * `makesafe_companies.slug` -> scope. Deliberately a CLOSED map, not a string
@@ -614,6 +688,7 @@ const COMPANY_SLUG_SCOPES: Record<string, BuilderInstructionScope> = {
   bw: "BWCWA",
   wb: "WB",
   kba: "KBA",
+  [AMBROSE_COMPANY_SLUG]: "ACG",
 };
 
 /**
@@ -639,6 +714,7 @@ export function builderInstructionScope(input: {
   if (/^MLB(-[A-Z]{2})?$/.test(prefix)) return "MLB";
   if (prefix === "WB") return "WB";
   if (prefix === "KBA") return "KBA";
+  if (prefix === "ACG") return "ACG";
   const slug = String(input.requestingCompanySlug || "").trim().toLowerCase();
   return COMPANY_SLUG_SCOPES[slug] || null;
 }
