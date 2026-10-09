@@ -29,6 +29,7 @@ import {
 } from "./makesafe_cancellation_classifier.ts";
 import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
 import {
+  AMBROSE_COMPANY_SLUG,
   extractBuilderWorkOrderIdentity,
   isSelfGeneratedMakesafeWorkOrder,
 } from "./makesafe_builder_work_order_identity.ts";
@@ -43,6 +44,11 @@ import {
   type PdfDeclaredTypeResult,
 } from "./makesafe_pdf_declared_type.ts";
 import { scopeBlockFromPdfText } from "./makesafe_pdf_scope.ts";
+import {
+  ambroseSubjectSiteAddress,
+  ambroseSuburbFromAddress,
+  readAmbroseWorkOrderFields,
+} from "./makesafe_ambrose_work_order.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
   "makesafe-deterministic-intake@2026-08-13.v12";
@@ -58,6 +64,7 @@ export type AdapterId =
   | "western"
   | "prime"
   | "rapid"
+  | "ambrose"
   | "chatter";
 export type StoryEventKind =
   | "instruction"
@@ -453,6 +460,28 @@ const BUILDERWEST_SIGNAL = /\bBWCWA[-\s#]*\d{3,}\b|\bbuilderwest\b/i;
 const WESTERN_SIGNAL =
   /\bmake\s+safe\s+work\s+order\s*:\s*WB\d{3,}\b|\bwestern\.mailer\b/i;
 const MLB_SIGNAL = /\bMLB[-\s#]*\d{3,}\b/i;
+// Ambrose Construct Group's purchase-order mail names itself in the subject:
+// "Ambrose Construct Group Purchase Order Make Safe: <PO> - <address> is
+// attached", "Updated:Ambrose Construct Group Purchase Order: <PO> - ...", and
+// the pre-acceptance "Ambrose Construct Group Acceptance Required - Purchase
+// Order: <PO>". Their staff send from personal ambroseconstruct.com.au
+// addresses, so the sender pattern on the company row is the other selector.
+const AMBROSE_SUBJECT_SIGNAL =
+  /^\s*(?:updated\s*:\s*)?ambrose\s+construct\s+group\b[^\n]*\bpurchase\s+order\b/i;
+// The acceptance prompt carries the PO number but no purchase-order PDF: the
+// PO email with the PDF follows only once someone accepts it in Ambrose's
+// portal. Filing the prompt as work would open a PDF-less exception for the
+// same PO the real instruction lands on minutes later.
+const AMBROSE_ACCEPTANCE_PROMPT_SUBJECT =
+  /^\s*ambrose\s+construct\s+group\s+acceptance\s+required\b/i;
+// Ambrose declares the instruction type in its own subject and body: a make
+// safe reads "Purchase Order Make Safe:" / "regarding Make Safe required"; a
+// repair reads "Purchase Order:" / "regarding repairs required" with a
+// "Repair Schedule" link.
+const AMBROSE_MAKE_SAFE_DECLARED =
+  /\bpurchase\s+order\s+make\s+safe\s*:|\bregarding\s+make\s*safe\s+required\b/i;
+const AMBROSE_REPAIR_DECLARED =
+  /\bregarding\s+repairs?\s+required\b|\brepair\s+schedule\b/i;
 // Require an explicit label delimiter/number token. Bare "NEW WORK ORDER
 // MLB-123" proves an instruction and claim, but must not silently promote that
 // claim to a builder WO identity.
@@ -565,6 +594,8 @@ function profileFor(
     ? ["builderwest", "bw"]
     : adapterId === "western"
     ? ["western", "wb", "western-building"]
+    : adapterId === "ambrose"
+    ? [AMBROSE_COMPANY_SLUG]
     : [adapterId];
   const sender = profiles.find((p) =>
     p.senderPatterns.some((pattern) =>
@@ -750,6 +781,7 @@ function extractRawIdentity(
   item: DeterministicSourceItem,
   adapterId: AdapterId,
 ): { externalRef: string | null; wo: string | null; po: string | null } {
+  if (adapterId === "ambrose") return ambroseRawIdentity(item);
   // Email stays first so an explicit email value wins. PDF text is a fallback for
   // the common builder shape where the body only says "new work order".
   const hay = `${text(item)}\n${pdfText(item)}`;
@@ -853,6 +885,32 @@ function extractRawIdentity(
   };
 }
 
+// Ambrose's purchase-order number IS its instruction identity, so it is read
+// only through the shared identity module's Ambrose grammar: claim
+// `ACG-<job>`, purchase order `PO-<job><seq>`, work order the composite of
+// both. The generic WO/job-number fallbacks below are deliberately not used:
+// "Job Number: <job>" on the PDF is the claim, never a work order, and would
+// otherwise promote a claim-only email past the identity floor.
+function ambroseRawIdentity(
+  item: DeterministicSourceItem,
+): { externalRef: string | null; wo: string | null; po: string | null } {
+  const identity = extractBuilderWorkOrderIdentity({
+    requestingCompanySlug: AMBROSE_COMPANY_SLUG,
+    subject: item.subject,
+    bodyText: `${item.body || ""}\n${pdfText(item)}`,
+    attachmentNames: item.attachments
+      .filter((attachment) =>
+        !isSelfGeneratedMakesafeWorkOrder(attachment.name)
+      )
+      .map((attachment) => attachment.name),
+  });
+  return {
+    externalRef: identity.builder_claim_ref,
+    wo: identity.builder_work_order_number,
+    po: identity.builder_po_number,
+  };
+}
+
 // The declared-type header of the deliverable's OWN work-order PDF (charter
 // S1a, Ruling 5). One email can carry several WO PDFs with distinct POs; the
 // document whose filename carries this source's extracted PO is the deliverable
@@ -891,6 +949,29 @@ function declaredTypeForSource(
 }
 
 function jobFamilyDecision(
+  item: DeterministicSourceItem,
+  adapterId: AdapterId | null,
+) {
+  const shared = sharedJobFamilyDecision(item, adapterId);
+  if (adapterId !== "ambrose") return shared;
+  // Ambrose states the instruction type itself (see AMBROSE_*_DECLARED). A
+  // declared make safe keeps the shared ladder's make-safe subtype (general or
+  // temporary fence) and is never read as repair; a declared repair is repair.
+  // An email declaring neither keeps the shared ladder's answer unchanged.
+  const declared = `${item.subject || ""}\n${item.body || ""}`;
+  if (AMBROSE_MAKE_SAFE_DECLARED.test(declared)) {
+    return shared.family === "general_makesafe" ||
+        shared.family === "temp_fence_makesafe"
+      ? shared
+      : { family: "general_makesafe", evidence: "ambrose_declared_make_safe" };
+  }
+  if (AMBROSE_REPAIR_DECLARED.test(declared)) {
+    return { family: "repair", evidence: "ambrose_declared_repair" };
+  }
+  return shared;
+}
+
+function sharedJobFamilyDecision(
   item: DeterministicSourceItem,
   adapterId: AdapterId | null,
 ) {
@@ -1347,6 +1428,13 @@ function isChatter(item: DeterministicSourceItem): boolean {
     item.attachments.length > 0 &&
     (isRevisionSource(item) || WORK_SIGNAL.test(hay))
   ) return false;
+  if (
+    AMBROSE_ACCEPTANCE_PROMPT_SUBJECT.test(item.subject || "") &&
+    !item.attachments.some((attachment) =>
+      /pdf/i.test(attachment.contentType || "") ||
+      /\.pdf$/i.test(attachment.name || "")
+    )
+  ) return true;
   return subjectIsExcludedNonWorkOrder(item.subject) ||
     subjectIsKnownBuilderNoise(item.subject) ||
     /\b(thanks|thank\s+you|noted|received|acknowledged|please\s+disregard|pricing\s+(?:query|enquiry)|photo\s+evidence|invoice\s+attached)\b/i
@@ -1411,6 +1499,9 @@ function buildKnown(
       }
     }
   }
+  if (adapterId === "ambrose") {
+    applyAmbroseWorkOrderFields(item, fields, parsed);
+  }
   deriveMissingSiteSuburb(
     fields,
     parsed.provenance,
@@ -1432,6 +1523,7 @@ function buildKnown(
       "WB",
       "RAPID",
       "RR",
+      "ACG",
     ],
   });
   const identity: ExtractedIdentity = {
@@ -1439,7 +1531,11 @@ function buildKnown(
     // Persist the actual profile slug used by the existing guarded job creator.
     // AJS/AJBR convergence is the stable companyId/companyKey, never slug text.
     builderSlug: profile?.slug ||
-      (adapterId === "ajs_ajbr" ? "ajs-ajbr" : adapterId),
+      (adapterId === "ajs_ajbr"
+        ? "ajs-ajbr"
+        : adapterId === "ambrose"
+        ? AMBROSE_COMPANY_SLUG
+        : adapterId),
     companyId: profile?.id || null,
     companyKey: profile?.id
       ? `company:${encodeURIComponent(profile.id)}`
@@ -1490,6 +1586,90 @@ function buildKnown(
     fieldProvenance: parsed.provenance,
     pdfFieldProvenance: parsed.pdfProvenance,
   };
+}
+
+// Ambrose's purchase-order PDF names the insured, their contact and the site in
+// fixed blocks next to OUR subcontractor details and the issuing supervisor's,
+// so the generic label readers can take the wrong person's phone or email. Its
+// own reader is authoritative for the customer fields it finds; anything it
+// does not find keeps the generic value. The subject's "<PO> - <address> is
+// attached" is the address fallback when no PDF text was extracted.
+function applyAmbroseWorkOrderFields(
+  item: DeterministicSourceItem,
+  fields: Record<string, string>,
+  parsed: ReturnType<typeof fieldCandidates>,
+): void {
+  for (const document of extractedPdfDocuments(item)) {
+    const read = readAmbroseWorkOrderFields(document.text);
+    for (
+      const field of [
+        "client_name",
+        "client_phone",
+        "client_email",
+        "site_address",
+      ] as const
+    ) {
+      const value = clean(read[field]);
+      if (!value) continue;
+      fields[field] = value;
+      const source = pdfFieldProvenance(
+        item,
+        document,
+        `ambrose_purchase_order_pdf:${field}`,
+      );
+      parsed.provenance[field] = source;
+      if (field !== "client_email") parsed.pdfProvenance[field] = source;
+    }
+    const description = clean(read.description);
+    if (description && !clean(fields.description)) {
+      fields.description = description;
+      const source = pdfFieldProvenance(
+        item,
+        document,
+        "ambrose_purchase_order_pdf:description",
+      );
+      parsed.provenance.description = source;
+      parsed.pdfProvenance.description = source;
+    }
+    if (read.site_address) {
+      delete fields.site_suburb;
+      delete parsed.provenance.site_suburb;
+      delete parsed.pdfProvenance.site_suburb;
+    }
+    break;
+  }
+  if (!extractedPdfDocuments(item).length) {
+    const subjectAddress = ambroseSubjectSiteAddress(item.subject);
+    if (subjectAddress) {
+      fields.site_address = subjectAddress;
+      parsed.provenance.site_address = emailFieldProvenance(
+        item,
+        "email_subject",
+        "ambrose_subject:site_address",
+      );
+      delete fields.site_suburb;
+      delete parsed.provenance.site_suburb;
+    }
+  }
+  if (!clean(fields.site_suburb)) {
+    const suburb = ambroseSuburbFromAddress(fields.site_address);
+    const addressSource = parsed.provenance.site_address;
+    if (suburb && addressSource) {
+      // Stamped as Ambrose's own reading of its address, not as the generic
+      // derived-suburb rule: the case merge re-derives "derived" suburbs with
+      // the comma-based generic reader, which cannot split Ambrose's
+      // comma-less "<street> <suburb> WA <postcode>" and would blank it.
+      fields.site_suburb = suburb;
+      const suburbSource: DeterministicFieldProvenance = {
+        ...addressSource,
+        rule: `ambrose_site_address:site_suburb`,
+      };
+      parsed.provenance.site_suburb = suburbSource;
+      if (suburbSource.source === "work_order_pdf_text") {
+        parsed.pdfProvenance.site_suburb = suburbSource;
+      }
+    }
+  }
 }
 
 function blankIdentity(): ExtractedIdentity {
@@ -1577,6 +1757,16 @@ const PRIME_ADAPTER: Adapter = {
     ) || senderMatchesAdapter("prime", item, profiles),
   build: (item, profiles) => buildKnown(item, profiles, "prime"),
 };
+const AMBROSE_ADAPTER: Adapter = {
+  id: "ambrose",
+  version: "ambrose@v1",
+  // Ambrose has its own transport (no PrimeEco relay) and its own subject
+  // grammar, so either signal alone is specific to it.
+  matches: (item, profiles) =>
+    AMBROSE_SUBJECT_SIGNAL.test(item.subject || "") ||
+    senderMatchesAdapter("ambrose", item, profiles),
+  build: (item, profiles) => buildKnown(item, profiles, "ambrose"),
+};
 const RAPID_ADAPTER: Adapter = {
   id: "rapid",
   version: "rapid@v1",
@@ -1613,6 +1803,10 @@ const CHATTER_ADAPTER: Adapter = {
 export const DETERMINISTIC_ADAPTER_REGISTRY: readonly Adapter[] = Object.freeze(
   [
     SYNTHETIC_LIVEFIRE_ADAPTER,
+    // Ahead of the reference-signal adapters: an Ambrose purchase order is
+    // selected by its own sender or subject, and Ambrose body text must never
+    // be stolen by a stray "rapid" or "prime" word further down the list.
+    AMBROSE_ADAPTER,
     MLB_ADAPTER,
     AJS_ADAPTER,
     WESTERN_ADAPTER,

@@ -26,6 +26,13 @@ import {
   isInsuranceRepairFamily,
   projectInsuranceRepairPipelineRow,
 } from "./insurance_repairs_board.ts";
+import { buildDeterministicIntakePlan } from "./makesafe_deterministic_intake.ts";
+import {
+  AMBROSE_TEST_COMPANY_ID,
+  type AmbrosePurchaseOrderFixture,
+  ambrosePdfText,
+  ambroseSource,
+} from "./makesafe_ambrose_intake_fixtures.ts";
 
 type Row = Record<string, any>;
 
@@ -1182,4 +1189,140 @@ Deno.test("the Pingelly work order approves into an SWR- repair card on the Repa
         2,
       ),
   );
+});
+
+// Ambrose Construct Group (anonymised fixtures): the deterministic plan for a
+// repair purchase order, written as the runtime writes its draft, approved by a
+// person, lands as an SWR- repair card in the Repairs board entry column with
+// the builder, purchase order and claim on it. The make-safe purchase order is
+// the control: same builder, SWMS- make-safe card, off the Repairs board.
+function ambroseDraftRow(
+  draftId: string,
+  fixture: AmbrosePurchaseOrderFixture,
+): Row {
+  const plan = buildDeterministicIntakePlan(
+    [ambroseSource(`${draftId}-post`, fixture)],
+    [{
+      id: AMBROSE_TEST_COMPANY_ID,
+      slug: "acg",
+      name: "Ambrose Construct Group",
+      senderPatterns: ["ambrose.test"],
+    }],
+  ).cases[0];
+  assertEquals(plan.state, "confirmed_live_job");
+  return {
+    id: draftId,
+    org_id: ORG_ID,
+    status: "needs_review",
+    graph_message_id: `${draftId}-graph`,
+    subject: `Ambrose Construct Group purchase order ${fixture.job}`,
+    body_preview: null,
+    requesting_company_slug: plan.identity.builderSlug,
+    requesting_company_name: plan.identity.builderSlug,
+    external_ref: plan.identity.builderWoCanonical,
+    client_name: plan.identity.clientName,
+    client_phone: plan.identity.clientPhone,
+    client_email: plan.identity.clientEmail,
+    site_address: plan.identity.siteAddress,
+    site_suburb: plan.identity.siteSuburb,
+    description: plan.identity.description,
+    report_type: null,
+    confidence: "high",
+    missing_fields: [],
+    approved_job_id: null,
+    attachments_json: [{
+      id: `${draftId}-attachment`,
+      file_name: "Purchase Order.pdf",
+      is_work_order: true,
+      storage_url: `storage/${draftId}.pdf`,
+      pdf_url: `storage/${draftId}.pdf`,
+    }],
+    extraction_json: {
+      makesafe_job_family: plan.identity.jobFamily,
+      builder_claim_ref: plan.identity.externalRefCanonical,
+      builder_work_order_number: plan.identity.builderWoCanonical,
+      builder_po_number: plan.identity.builderPoCanonical,
+      work_order_pdf_text: [{
+        attachment_id: `${draftId}-attachment`,
+        attachment_name: "Purchase Order.pdf",
+        status: "extracted",
+        text: ambrosePdfText(fixture),
+      }],
+    },
+  };
+}
+
+function ambroseStore(draft: Row): Store {
+  return makeStore({
+    tables: {
+      makesafe_intake_drafts: [draft],
+      makesafe_companies: [{
+        id: AMBROSE_TEST_COMPANY_ID,
+        org_id: ORG_ID,
+        slug: "acg",
+        name: "Ambrose Construct Group",
+        sender_patterns: ["ambrose.test"],
+        active: true,
+        parsing_rules: { fields: {} },
+        billing_rules: {},
+      }],
+    },
+  });
+}
+
+Deno.test("an approved Ambrose repair purchase order mints an SWR- card in WO In with its PO and claim", async () => {
+  const draft = ambroseDraftRow("ambrose-repair-draft", {
+    job: "20999202",
+    sequence: "05",
+    address: "7 Sample Road Demoville WA 6010",
+    kind: "repair",
+  });
+  const store = ambroseStore(draft);
+  const result: any = await _approveIntakeDraftForTest(makeClient(store), {
+    draft_id: "ambrose-repair-draft",
+    approved_by: "captain@secureworkswa.com.au",
+  });
+  assertEquals(result.ok, true);
+  assertEquals(result.job_created, true);
+  const job = store.tables.jobs[0];
+  assertEquals(job.type, "repair");
+  assertEquals(job.job_number, "SWR-261400");
+  assertEquals(job.metadata.makesafe_job_family, "repair");
+  assertEquals(job.metadata.requesting_company?.slug, "acg");
+  assertEquals(job.metadata.builder_claim_ref, "ACG-20999202");
+  assertEquals(job.metadata.builder_po_number, "PO-2099920205");
+  assertEquals(
+    job.metadata.builder_work_order_number,
+    "ACG-20999202PO-2099920205",
+  );
+  assertEquals(job.client_name, "Alex Example");
+  assertEquals(job.site_suburb, "Demoville");
+  assertEquals(isInsuranceRepairFamily(job), true);
+  assertEquals(insuranceRepairStage(job), "wo_in");
+  assertEquals(excludeInsuranceRepairs([job]).length, 0);
+  assertEquals(
+    store.tables.makesafe_job_details[0]?.requesting_company_slug,
+    "acg",
+  );
+});
+
+Deno.test("CONTROL: an approved Ambrose make-safe purchase order mints an SWMS- make-safe, not a repair", async () => {
+  const draft = ambroseDraftRow("ambrose-makesafe-draft", {
+    job: "20999101",
+    sequence: "02",
+    address: "12 Example Street Testville WA 6000",
+    kind: "make_safe",
+  });
+  const store = ambroseStore(draft);
+  const result: any = await _approveIntakeDraftForTest(makeClient(store), {
+    draft_id: "ambrose-makesafe-draft",
+    approved_by: "captain@secureworkswa.com.au",
+  });
+  assertEquals(result.ok, true);
+  const job = store.tables.jobs[0];
+  assertEquals(job.type, "makesafe");
+  assertEquals(job.job_number, "SWMS-261400");
+  assertEquals(job.metadata.makesafe_job_family, "general_makesafe");
+  assertEquals(job.metadata.builder_po_number, "PO-2099910102");
+  assertEquals(isInsuranceRepairFamily(job), false);
 });
