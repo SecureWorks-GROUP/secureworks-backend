@@ -441,10 +441,15 @@ ROLLBACK;
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE '%story safety (20261006040000)%' AS story_safety_live \gset
 -- (and the lead cutoff, 20261007010000, which replaced three of story safety's bodies since, first
--- of all: story safety's down refuses while a later body is live)
+-- of all: story safety's down refuses while a later body is live; and the scoping pipeline,
+-- 20261009130000, which replaced three of the lead cutoff's bodies since, before that)
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
 BEGIN;
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009130000_context_scoping_pipeline_down.sql
+\endif
 \if :lead_cutoff_live
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
 \endif

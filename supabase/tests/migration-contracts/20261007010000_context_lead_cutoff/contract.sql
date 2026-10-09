@@ -595,8 +595,14 @@ BEGIN
  END IF;
 END $shape$;
 
--- 5. Re-applying the migration changes nothing (its guard accepts its own bodies).
+-- 5. Re-applying the migration changes nothing (its guard accepts its own bodies). When the scoping
+-- pipeline (20261009130000) has replaced four of these bodies since, it is rolled back first inside
+-- this transaction, so the re-apply starts from this migration's own bodies.
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 BEGIN;
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009130000_context_scoping_pipeline_down.sql
+\endif
 CREATE TEMP TABLE lead_cutoff_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_monitored_jobs', 'context_lead_monitored', 'context_job_record_loops',

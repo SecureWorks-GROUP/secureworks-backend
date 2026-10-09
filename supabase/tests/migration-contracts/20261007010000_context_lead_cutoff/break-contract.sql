@@ -3,4 +3,10 @@
 -- rule dropped). contract.sql must then fail on its first check, R7 of a lead 29 days after its
 -- quote, which reads only a body that exists before this migration: the contract fails first on
 -- the earlier bodies.
+-- (The scoping pipeline, 20261009130000, replaced four of these bodies since: its rollback goes
+-- first, as this one refuses while a later body is live.)
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009130000_context_scoping_pipeline_down.sql
+\endif
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
