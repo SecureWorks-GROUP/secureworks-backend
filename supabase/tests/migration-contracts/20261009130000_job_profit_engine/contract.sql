@@ -4,11 +4,13 @@
 --   JP-FENCE  line-level costs from every source, the exclusions (ops-rejected
 --             and Xero-deleted trade invoices, QA test line, trade-mirror bills
 --             by id and by the app's line format, a deleted bill), inclusive
---             GST lines, a draft and a voided sales invoice, a variation, an
---             open PO, frozen expected costs and a sent quote.
+--             GST lines, a draft and a voided sales invoice, all variation
+--             states with only agreed values summed, an open PO, frozen
+--             expected costs and a sent quote.
 --   JP-PROJ   Xero Project total larger than line-level: materials inferred.
---   JP-DBL    trade lines larger than the project total: stays line-level and
---             flags project_below_trade_lines (the double-count check).
+--   JP-DBL    trade lines larger than the project total: stays line-level,
+--             flags project_below_trade_lines, and a negative materials
+--             deduction cannot publish a labour-only margin.
 --   JP-MS     make-safe roof report with no client invoice and a trade line
 --             found by job number: margin suppressed, flags carried.
 --   JP-OLD    legacy job: not in the engine.
@@ -91,6 +93,7 @@ INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, li
   ('a7200000-0000-4000-8000-000000000005', 'a7000000-0000-4000-8000-000000000002', NULL, 'labour', 'Patio labour', 300, 6, '2026-08-05'),
   ('a7200000-0000-4000-8000-000000000006', 'a7000000-0000-4000-8000-000000000003', NULL, 'labour', 'Fence labour', 300, 6, '2026-08-05'),
   ('a7200000-0000-4000-8000-000000000007', 'a7000000-0000-4000-8000-000000000003', NULL, 'labour', NULL, 0, 0, '2026-08-05'),
+  ('a7200000-0000-4000-8000-000000000006', 'a7000000-0000-4000-8000-000000000003', NULL, 'materials', 'Materials deduction', -40, NULL, '2026-08-05'),
   ('a7200000-0000-4000-8000-000000000005', NULL, 'JP-MS', 'make safe', 'Roof report attendance', 120, 2, '2026-08-06');
 
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, amount_paid, invoice_date, fully_paid_on, job_id, raw_json, line_items) VALUES
@@ -135,8 +138,16 @@ INSERT INTO public.xero_projects (job_id, total_expenses, total_invoiced) VALUES
   ('a7000000-0000-4000-8000-000000000002', 1000, 1500),
   ('a7000000-0000-4000-8000-000000000003', 200, 800);
 
-INSERT INTO public.job_variations (job_id, variation_number, description, amount, gst_included, status, created_at) VALUES
-  ('a7000000-0000-4000-8000-000000000001', 1, 'Extra gate', 110, true, 'approved', '2026-08-07T00:00:00Z');
+INSERT INTO public.job_variations (job_id, variation_number, description, amount, gst_included, status, accepted_at, declined_at, created_at) VALUES
+  ('a7000000-0000-4000-8000-000000000001', 1, 'Approved internally only', 110, true, 'approved', NULL, NULL, '2026-08-07T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 2, 'Customer accepted', 220, true, 'accepted', NULL, NULL, '2026-08-08T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 3, 'Invoiced variation', 55, false, 'invoiced', NULL, NULL, '2026-08-09T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 4, 'Accepted timestamp', 33, false, 'approved', '2026-08-10T00:00:00Z', NULL, '2026-08-10T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 5, 'Sent only', 110, true, 'sent', NULL, NULL, '2026-08-11T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 6, 'Declined variation', 77, false, 'declined', NULL, NULL, '2026-08-12T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 7, 'Rejected variation', 88, false, 'rejected', NULL, NULL, '2026-08-13T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 8, 'Pending variation', 99, false, 'pending_approval', NULL, NULL, '2026-08-14T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000001', 9, 'Accepted then declined', 66, false, 'accepted', '2026-08-15T00:00:00Z', '2026-08-16T00:00:00Z', '2026-08-15T00:00:00Z');
 
 INSERT INTO public.purchase_orders (job_id, po_number, supplier_name, status, subtotal, total, created_at) VALUES
   ('a7000000-0000-4000-8000-000000000001', 'PO-OPEN', 'Fence Supplies', 'sent', 80, 88, '2026-08-01T00:00:00Z'),
@@ -205,12 +216,22 @@ BEGIN
     sum(amount_ex) FILTER (WHERE counts_as_invoiced) AS invoiced,
     count(*) FILTER (WHERE kind = 'variation') AS variations,
     sum(amount_ex) FILTER (WHERE kind = 'variation') AS variation_ex,
+    sum(amount_ex) FILTER (WHERE kind = 'variation' AND agreed) AS agreed_variation_ex,
     bool_or(document_id = 'INV-3') AS has_voided
   INTO r
   FROM public.v_job_revenue_events
   WHERE job_id = 'a7000000-0000-4000-8000-000000000001';
   IF r.invoiced <> 1000 THEN RAISE EXCEPTION 'jp revenue: JP-FENCE invoiced %, expected 1000', r.invoiced; END IF;
-  IF r.variations <> 1 OR r.variation_ex <> 100 THEN RAISE EXCEPTION 'jp revenue: variation listed wrong: % %', r.variations, r.variation_ex; END IF;
+  IF r.variations <> 9 OR r.variation_ex <> 718 OR r.agreed_variation_ex <> 288 THEN
+    RAISE EXCEPTION 'jp revenue: variation list/agreement wrong: listed % amount % agreed %', r.variations, r.variation_ex, r.agreed_variation_ex;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.v_job_revenue_events
+    WHERE job_id = 'a7000000-0000-4000-8000-000000000001'
+      AND kind = 'variation'
+      AND document_number IN ('V1', 'V5', 'V6', 'V7', 'V8', 'V9')
+      AND agreed
+  ) THEN RAISE EXCEPTION 'jp revenue: approved-only, sent, declined, rejected or pending variation counted as agreed'; END IF;
   IF r.has_voided THEN RAISE EXCEPTION 'jp revenue: voided invoice listed'; END IF;
   IF (SELECT amount_ex FROM public.v_job_revenue_events WHERE document_id = 'INV-4') <> 1500 THEN
     RAISE EXCEPTION 'jp revenue: header fallback for an invoice with no lines';
@@ -233,7 +254,7 @@ BEGIN
      IS DISTINCT FROM (350::numeric, 100::numeric, 120::numeric, 0::numeric, 570::numeric) THEN
     RAISE EXCEPTION 'jp fence: lanes % % % % %', r.actual_labour_ex, r.actual_materials_ex, r.actual_commission_ex, r.actual_other_ex, r.actual_cost_ex;
   END IF;
-  IF r.invoiced_ex <> 1000 OR r.collected_ex <> 1000 OR r.draft_revenue_ex <> 50 OR r.variations_listed_ex <> 100 THEN
+  IF r.invoiced_ex <> 1000 OR r.collected_ex <> 1000 OR r.draft_revenue_ex <> 50 OR r.variations_listed_ex <> 288 THEN
     RAISE EXCEPTION 'jp fence: revenue % % % %', r.invoiced_ex, r.collected_ex, r.draft_revenue_ex, r.variations_listed_ex;
   END IF;
   IF r.profit_ex <> 430 OR r.margin_pct <> 43.0 THEN RAISE EXCEPTION 'jp fence: profit % margin %', r.profit_ex, r.margin_pct; END IF;
@@ -269,7 +290,7 @@ BEGIN
 
   -- JP-DBL: trade lines exceed the project total; never summed with it.
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-DBL';
-  IF r.cost_basis <> 'line_level' OR r.actual_cost_ex <> 300 OR NOT ('project_below_trade_lines' = ANY (r.completeness)) THEN
+  IF r.cost_basis <> 'line_level' OR r.actual_cost_ex <> 260 OR r.actual_materials_ex <> -40 OR NOT ('project_below_trade_lines' = ANY (r.completeness)) THEN
     RAISE EXCEPTION 'jp dbl: basis % cost % completeness %', r.cost_basis, r.actual_cost_ex, r.completeness;
   END IF;
   IF r.xero_project_expenses_ex <> 200 THEN RAISE EXCEPTION 'jp dbl: project figure %', r.xero_project_expenses_ex; END IF;
@@ -281,7 +302,7 @@ BEGIN
   END IF;
   -- labour-only cost on a fencing job: the margin is not published
   IF NOT ('materials_not_linked' = ANY (r.completeness)) OR r.cost_flag <> 'materials_not_linked'
-     OR r.margin_pct IS NOT NULL OR r.profit_ex IS NOT NULL OR r.profit_ex_unsuppressed <> 500 THEN
+     OR r.margin_pct IS NOT NULL OR r.profit_ex IS NOT NULL OR r.profit_ex_unsuppressed <> 540 THEN
     RAISE EXCEPTION 'jp dbl: materials suppression % % % %', r.completeness, r.cost_flag, r.margin_pct, r.profit_ex_unsuppressed;
   END IF;
   -- a zero-value pending line neither blocks nor proves payment
