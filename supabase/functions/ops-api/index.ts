@@ -47438,7 +47438,7 @@ async function resolveRoofReportPhotos(
     throw new ApiError('roof report photo cycle read failed: missing makesafe detail', 500)
   }
   const currentMedia = filterMediaForCurrentCycle(
-    (media as any[]) || [],
+    ((media as any[]) || []).filter(isApplicablePackPhoto),
     detail,
     detail?.attendance_cycle_id || null,
   )
@@ -47476,6 +47476,8 @@ async function resolveRoofReportPhotos(
     .filter((m) => m?.storage_url)
     .map((m) => ({ url: m.storage_url as string, thumbUrl: (m.thumbnail_url as string) || undefined, label: (m.label as string) || undefined }))
 }
+
+export const _resolveRoofReportPhotosForTest = resolveRoofReportPhotos
 
 // Render OUR letterhead roof-report PDF and attach it as a 'roof_report' document.
 // Shared by submit_roof_report and render_roof_report. attachMakesafeDocument
