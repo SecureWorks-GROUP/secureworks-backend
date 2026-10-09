@@ -119,8 +119,9 @@ Deno.test("job_profit: summary from the engine, trades rolled up, timeline built
     jobs: [{ id: JOB, job_number: "SWF-1" }],
     v_job_profit: [{ job_id: JOB, job_number: "SWF-1", invoiced_ex: 1000, actual_cost_ex: 570, profit_ex: 430 }],
     v_job_cost_events: [
-      { job_id: JOB, source: "trade_line", source_id: "l1", document_id: "ti1", event_date: "2026-08-04", lane: "labour", party: "Trade One", amount_ex: 300, is_actual: true, paid: true, paid_on: "2026-08-20" },
-      { job_id: JOB, source: "trade_line", source_id: "l2", document_id: "ti2", event_date: "2026-08-11", lane: "labour", party: "Trade One", amount_ex: 50, is_actual: true, paid: false, paid_on: null },
+      { job_id: JOB, source: "trade_line", source_id: "l1", document_id: "ti1", event_date: "2026-08-04", lane: "labour", party_id: "u1", party: "Trade One", amount_ex: 300, is_actual: true, paid: true, paid_on: "2026-08-20" },
+      { job_id: JOB, source: "trade_line", source_id: "l2", document_id: "ti2", event_date: "2026-08-11", lane: "labour", party_id: "u1", party: "Trade One", amount_ex: 50, is_actual: true, paid: false, paid_on: null },
+      { job_id: JOB, source: "trade_line", source_id: "l3", document_id: "ti3", event_date: "2026-08-12", lane: "labour", party_id: "u2", party: "Trade One", amount_ex: 40, is_actual: true, paid: false, paid_on: null },
       { job_id: JOB, source: "supplier_bill", source_id: "b1:1", document_id: "b1", event_date: "2026-08-02", lane: "materials", party: "Supplier", amount_ex: 100, is_actual: true, paid: true, paid_on: "2026-08-15" },
     ],
     v_job_revenue_events: [
@@ -131,8 +132,11 @@ Deno.test("job_profit: summary from the engine, trades rolled up, timeline built
   assertEquals(out.status, 200);
   const body = out.body as any;
   assertEquals(body.job.profit_ex, 430, "money comes from the engine row untouched");
-  assertEquals(body.trades, [{ party: "Trade One", amount_ex: 350, lines: 2, first: "2026-08-04", last: "2026-08-11" }]);
-  assertEquals(body.timeline.length, 3 + 1 + 3);
+  assertEquals(body.trades, [
+    { party_id: "u1", party: "Trade One", amount_ex: 350, lines: 2, first: "2026-08-04", last: "2026-08-11" },
+    { party_id: "u2", party: "Trade One", amount_ex: 40, lines: 1, first: "2026-08-12", last: "2026-08-12" },
+  ], "two trades with one name stay two rows");
+  assertEquals(body.timeline.length, 4 + 1 + 3);
   assert(typeof body.labels.profit === "string" && body.labels.profit.includes("No overhead"));
   // the job number is upper-cased and every events read is scoped to the job id
   assertEquals(c.calls[0].table, "jobs");
@@ -171,6 +175,12 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
   assert(ops.some(([op, args]) => op === "gte" && args[0] === "first_invoice_date" && args[1] === "2025-07-01"));
   assert(ops.some(([op, args]) => op === "range" && args[0] === 0 && args[1] === 99));
   assertEquals(ops.find(([op]) => op === "select")![1], ["*", { count: "planned" }]);
+  assert("total_estimate" in (out.body as any) && !("total" in (out.body as any)));
+  const perth = fakeClient({ v_job_profit: [] });
+  await jobProfitListAction(perth, new URLSearchParams("from=2025-07-01&to=2026-06-30"));
+  const perthOps = perth.calls[0].ops;
+  assert(perthOps.some(([op, args]) => op === "gte" && args[0] === "created_at" && args[1] === "2025-07-01T00:00:00+08:00"));
+  assert(perthOps.some(([op, args]) => op === "lte" && args[0] === "created_at" && args[1] === "2026-06-30T23:59:59.999+08:00"));
   assertEquals((await jobProfitListAction(c, new URLSearchParams("limit=99999"))).status, 400);
   const bad = fakeClient({}, { v_job_profit: "boom" });
   assertEquals((await jobProfitListAction(bad, new URLSearchParams(""))).status, 500);
