@@ -245,6 +245,39 @@ Deno.test("customer fields come from the insured's blocks, never our details or 
   );
 });
 
+Deno.test("a schedule PDF ahead of the purchase order does not stop the Ambrose reader", () => {
+  const source = ambroseSource("sched-1", REPAIR);
+  const po = source.pdfDocuments![0];
+  const schedule = {
+    ...po,
+    attachmentId: "sched-1-schedule",
+    sha256: "sha-sched-1-schedule",
+    text: "Schedule of Works\nSupervisor mobile: 0700000009\nRoom: Kitchen",
+  };
+  for (
+    const documents of [
+      [{ ...schedule, attachmentName: "Schedule.pdf" }, po],
+      [
+        { ...schedule, attachmentName: "Schedule.pdf" },
+        { ...po, attachmentName: "scan0001.pdf" },
+      ],
+    ]
+  ) {
+    const plan = buildDeterministicIntakePlan(
+      [{ ...source, pdfDocuments: documents }],
+      PROFILES,
+    );
+    const identity = plan.cases[0].identity;
+    assertEquals(identity.clientName, "Alex Example");
+    assertEquals(identity.clientPhone, "0400000001");
+    assertEquals(identity.clientEmail, "alex.example@example.test");
+    assertEquals(
+      plan.cases[0].fieldProvenance.client_phone?.rule,
+      "ambrose_purchase_order_pdf:client_phone",
+    );
+  }
+});
+
 Deno.test("the field reader returns null rather than guessing when a block is missing", () => {
   const withoutContacts = ambrosePdfText(MAKE_SAFE)
     .replace(/BEST CONTACT DETAILS[\s\S]*?JOB DETAILS/, "JOB DETAILS");
@@ -271,6 +304,24 @@ Deno.test("subject address and suburb parsing", () => {
   );
   assertEquals(
     ambroseSuburbFromAddress("1 Example Place Testvale WA 6171"),
+    "Testvale",
+  );
+  // A street-type word straight after a closing type starts the suburb.
+  assertEquals(
+    ambroseSuburbFromAddress("12 Smith Rd St James WA 6102"),
+    "St James",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("5 Ocean Dr Green Head WA 6514"),
+    "Green Head",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("8 Sample Road St Testville WA 6102"),
+    "St Testville",
+  );
+  // A naming type before the closing one stays in the street.
+  assertEquals(
+    ambroseSuburbFromAddress("3 Lake View Rd Testvale WA 6171"),
     "Testvale",
   );
   // No street type, or nothing after it: no suburb (the backstop flags it).

@@ -1599,8 +1599,20 @@ function applyAmbroseWorkOrderFields(
   fields: Record<string, string>,
   parsed: ReturnType<typeof fieldCandidates>,
 ): void {
-  for (const document of extractedPdfDocuments(item)) {
-    const read = readAmbroseWorkOrderFields(document.text);
+  const reads = extractedPdfDocuments(item).map((document) => ({
+    document,
+    read: readAmbroseWorkOrderFields(document.text),
+  }));
+  const chosen =
+    reads.find(({ document }) =>
+      /purchase\s*order/i.test(document.attachmentName || "")
+    ) ||
+    reads.find(({ read }) =>
+      !!(clean(read.client_name) || clean(read.client_phone) ||
+        clean(read.client_email) || clean(read.site_address))
+    );
+  if (chosen) {
+    const { document, read } = chosen;
     for (
       const field of [
         "client_name",
@@ -1636,9 +1648,8 @@ function applyAmbroseWorkOrderFields(
       delete parsed.provenance.site_suburb;
       delete parsed.pdfProvenance.site_suburb;
     }
-    break;
   }
-  if (!extractedPdfDocuments(item).length) {
+  if (!reads.length) {
     const subjectAddress = ambroseSubjectSiteAddress(item.subject);
     if (subjectAddress) {
       fields.site_address = subjectAddress;

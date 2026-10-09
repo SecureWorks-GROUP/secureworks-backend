@@ -238,6 +238,20 @@ const STREET_TYPES = [
   "boardwalk",
 ];
 const STREET_TYPE_SET = new Set(STREET_TYPES);
+// Types that always close a street name: a street-type word straight after one
+// of these starts the suburb ("Rd St James", "Dr Green Head"), while one after
+// a naming type stays in the street ("Lake View Rd").
+const STREET_CLOSING_TYPES = new Set([
+  "street",
+  "st",
+  "road",
+  "rd",
+  "avenue",
+  "ave",
+  "av",
+  "drive",
+  "dr",
+]);
 
 export function ambroseSuburbFromAddress(
   address: string | null | undefined,
@@ -245,12 +259,15 @@ export function ambroseSuburbFromAddress(
   const match = clean(address)?.match(/^(.*\S)\s+WA\s+\d{4}$/i);
   if (!match) return null;
   const words = match[1].split(" ");
-  let lastStreetType = -1;
+  const word = (index: number) =>
+    words[index].toLowerCase().replace(/[.,]$/, "");
+  let streetEnd = -1;
   for (let index = 1; index < words.length; index++) {
-    if (STREET_TYPE_SET.has(words[index].toLowerCase().replace(/[.,]$/, ""))) {
-      lastStreetType = index;
-    }
+    if (!STREET_TYPE_SET.has(word(index))) continue;
+    const followsClosingType = index > 1 && streetEnd === index - 1 &&
+      STREET_CLOSING_TYPES.has(word(index - 1));
+    if (!followsClosingType) streetEnd = index;
   }
-  if (lastStreetType < 0 || lastStreetType === words.length - 1) return null;
-  return clean(words.slice(lastStreetType + 1).join(" "));
+  if (streetEnd < 0 || streetEnd === words.length - 1) return null;
+  return clean(words.slice(streetEnd + 1).join(" "));
 }
