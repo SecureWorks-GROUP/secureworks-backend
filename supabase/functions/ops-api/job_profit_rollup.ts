@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 // Company, work-type and month totals for job_profit_list?view=rollup.
 //
 // Reads EVERY v_job_profit row matching the list's validated filters (limit and
@@ -23,7 +24,10 @@ export type JobProfitRollupFilters = {
   offset: number;
 };
 
-export type JobProfitRollupResult = { status: number; body: Record<string, unknown> };
+export type JobProfitRollupResult = {
+  status: number;
+  body: Record<string, unknown>;
+};
 
 const ROLLUP_PAGE_SIZE = 1000;
 const PERTH_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -79,7 +83,9 @@ function emptyBucket(): Bucket {
 function toCents(value: unknown, field: string): bigint | null {
   if (value === null || value === undefined) return null;
   const n = typeof value === "number" ? value : Number(String(value));
-  if (!Number.isFinite(n)) throw new Error(`v_job_profit.${field} is not a number`);
+  if (!Number.isFinite(n)) {
+    throw new Error(`v_job_profit.${field} is not a number`);
+  }
   return BigInt(Math.round(n * 100));
 }
 
@@ -101,7 +107,9 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
   bucket.actual += actual ?? 0n;
   if (quoted !== null) bucket.quoted = (bucket.quoted ?? 0n) + quoted;
   if (expected !== null) bucket.expected = (bucket.expected ?? 0n) + expected;
-  if (row.revenue_verified_paid === true) bucket.revenue_verified_paid_jobs += 1;
+  if (row.revenue_verified_paid === true) {
+    bucket.revenue_verified_paid_jobs += 1;
+  }
 
   if (profit !== null) {
     bucket.jobs_with_margin += 1;
@@ -113,9 +121,9 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
 }
 
 function presentBucket(bucket: Bucket): Record<string, unknown> {
-  const margin = bucket.published_revenue === 0n
-    ? null
-    : Math.round((Number(bucket.profit) / Number(bucket.published_revenue)) * 1000) / 10;
+  const margin = bucket.published_revenue === 0n ? null : Math.round(
+    (Number(bucket.profit) / Number(bucket.published_revenue)) * 1000,
+  ) / 10;
   return {
     jobs: bucket.jobs,
     jobs_with_margin: bucket.jobs_with_margin,
@@ -133,21 +141,17 @@ function presentBucket(bucket: Bucket): Record<string, unknown> {
   };
 }
 
-// Perth (UTC+8, no daylight saving) calendar day boundaries as UTC instants.
-function perthDayStartUtc(day: string): string {
-  return new Date(Date.parse(`${day}T00:00:00Z`) - PERTH_OFFSET_MS).toISOString();
-}
-
-function perthNextDayStartUtc(day: string): string {
-  return new Date(Date.parse(`${day}T00:00:00Z`) + 24 * 60 * 60 * 1000 - PERTH_OFFSET_MS).toISOString();
-}
-
-function monthOf(row: Record<string, unknown>, dateField: "created" | "invoiced"): string | null {
+function monthOf(
+  row: Record<string, unknown>,
+  dateField: "created" | "invoiced",
+): string | null {
   if (dateField === "invoiced") {
     const d = row.first_invoice_date;
     return typeof d === "string" && d.length >= 7 ? d.slice(0, 7) : null;
   }
-  const created = typeof row.created_at === "string" ? Date.parse(row.created_at) : NaN;
+  const created = typeof row.created_at === "string"
+    ? Date.parse(row.created_at)
+    : NaN;
   if (!Number.isFinite(created)) return null;
   return new Date(created + PERTH_OFFSET_MS).toISOString().slice(0, 7);
 }
@@ -172,15 +176,23 @@ export async function jobProfitRollupAction(
         if (f.from) query = query.gte("first_invoice_date", f.from);
         if (f.to) query = query.lte("first_invoice_date", f.to);
       } else {
-        if (f.from) query = query.gte("created_at", perthDayStartUtc(f.from));
-        if (f.to) query = query.lt("created_at", perthNextDayStartUtc(f.to));
+        if (f.from) query = query.gte("created_at", `${f.from}T00:00:00+08:00`);
+        if (f.to) query = query.lte("created_at", `${f.to}T23:59:59.999+08:00`);
       }
-      query = query.order("created_at", { ascending: false }).order("job_id", { ascending: true })
+      query = query.order("created_at", { ascending: false }).order("job_id", {
+        ascending: true,
+      })
         .range(offset, offset + ROLLUP_PAGE_SIZE - 1);
 
       const { data, error } = await query;
       if (error) {
-        return { status: 500, body: { error: `job profit rollup read failed at row ${offset}: ${error.message}` } };
+        return {
+          status: 500,
+          body: {
+            error:
+              `job profit rollup read failed at row ${offset}: ${error.message}`,
+          },
+        };
       }
       const rows: Record<string, unknown>[] = data || [];
       for (const row of rows) {
@@ -189,7 +201,9 @@ export async function jobProfitRollupAction(
         if (jobId) seen.add(jobId);
 
         addRow(totals, row);
-        const type = typeof row.work_type === "string" && row.work_type ? row.work_type : null;
+        const type = typeof row.work_type === "string" && row.work_type
+          ? row.work_type
+          : null;
         if (!byType.has(type)) byType.set(type, emptyBucket());
         addRow(byType.get(type)!, row);
         const month = monthOf(row, f.dateField);
@@ -199,15 +213,42 @@ export async function jobProfitRollupAction(
       if (rows.length < ROLLUP_PAGE_SIZE) break;
     }
   } catch (err) {
-    return { status: 500, body: { error: `job profit rollup failed: ${err instanceof Error ? err.message : String(err)}` } };
+    return {
+      status: 500,
+      body: {
+        error: `job profit rollup failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      },
+    };
   }
 
   const by_type = [...byType.entries()]
-    .sort((a, b) => (a[1].invoiced === b[1].invoiced ? String(a[0] ?? "").localeCompare(String(b[0] ?? "")) : a[1].invoiced > b[1].invoiced ? -1 : 1))
+    .sort((
+      a,
+      b,
+    ) => (a[1].invoiced === b[1].invoiced
+      ? String(a[0] ?? "").localeCompare(String(b[0] ?? ""))
+      : a[1].invoiced > b[1].invoiced
+      ? -1
+      : 1)
+    )
     .map(([work_type, bucket]) => ({ work_type, ...presentBucket(bucket) }));
 
   const by_month = [...byMonth.entries()]
-    .sort((a, b) => (a[0] === b[0] ? 0 : a[0] === null ? 1 : b[0] === null ? -1 : a[0] < b[0] ? -1 : 1))
+    .sort((
+      a,
+      b,
+    ) => (a[0] === b[0]
+      ? 0
+      : a[0] === null
+      ? 1
+      : b[0] === null
+      ? -1
+      : a[0] < b[0]
+      ? -1
+      : 1)
+    )
     .map(([month, bucket]) => ({ month, ...presentBucket(bucket) }));
 
   return {
@@ -217,7 +258,13 @@ export async function jobProfitRollupAction(
       totals: presentBucket(totals),
       by_type,
       by_month,
-      filters: { type: f.types, status: f.statuses, from: f.from, to: f.to, date_field: f.dateField },
+      filters: {
+        type: f.types,
+        status: f.statuses,
+        from: f.from,
+        to: f.to,
+        date_field: f.dateField,
+      },
       month_basis: f.dateField,
       as_of: asOf,
       labels,

@@ -6,8 +6,11 @@
 // the SQL engine from 20261009130000_job_profit_engine.sql and never compute a
 // money figure here: every number on the response comes from v_job_profit,
 // v_job_cost_events or v_job_revenue_events, so Jarvis, the ops API and the
-// finance tab cannot disagree. Read only. The admin/owner gate lives at the
+// finance tab cannot disagree. view=rollup sums those same v_job_profit rows
+// in job_profit_rollup.ts. Read only. The admin/owner gate lives at the
 // dispatch in index.ts (privileged ops key or an admin/owner session).
+
+import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 
 export const JOB_PROFIT_LABELS = {
   profit:
@@ -423,6 +426,13 @@ export async function jobProfitListAction(
 ): Promise<JobProfitResult> {
   const f = parseJobProfitListFilters(params);
   if (!f.ok) return { status: 400, body: { error: f.error } };
+  const view = params.get("view");
+  if (view === "rollup") {
+    return await jobProfitRollupAction(client, f, JOB_PROFIT_LABELS);
+  }
+  if (view !== null) {
+    return { status: 400, body: { error: "view must be rollup or omitted" } };
+  }
   let query = client.from("v_job_profit").select("*", { count: "planned" });
   if (f.types.length) query = query.in("work_type", f.types);
   if (f.statuses.length) query = query.in("status", f.statuses);
