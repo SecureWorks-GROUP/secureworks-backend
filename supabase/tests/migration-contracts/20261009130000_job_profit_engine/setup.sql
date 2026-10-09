@@ -99,7 +99,8 @@ ALTER TABLE public.job_materials_facts
   ADD COLUMN IF NOT EXISTS confidence text,
   ADD COLUMN IF NOT EXISTS automation_source text,
   ADD COLUMN IF NOT EXISTS match_reason text,
-  ADD COLUMN IF NOT EXISTS fact_date date;
+  ADD COLUMN IF NOT EXISTS fact_date date,
+  ADD COLUMN IF NOT EXISTS matched_po_id uuid;
 
 CREATE TABLE IF NOT EXISTS public.purchase_orders (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.purchase_orders

@@ -38,8 +38,10 @@
 --    materials_fact  an actual job_materials_facts row whose bill is not
 --                    already counted on the same job as a supplier_bill, and is
 --                    not a trade app mirror.
---    po_committed    an open purchase order with no bill yet. Committed, not
---                    actual: confidence 'committed', never in actual cost.
+--    po_committed    an open purchase order with no bill yet (no bill id, no
+--                    invoice received, and no actual job_materials_facts row
+--                    matched to it). Committed, not actual: confidence
+--                    'committed', never in actual cost.
 --    Lane of a supplier bill line: description naming commission ->
 --    commission; account 306 (labour direct cost) -> labour; any other 3xx
 --    cost-of-sales account -> materials; anything else -> other.
@@ -73,9 +75,16 @@
 --    adds no_cost_linked, materials_not_linked and cost_basis_inferred. Margin
 --    and profit are null (suppressed) where job_financials suppresses them (no
 --    client invoice, no cost, incomplete trade invoice lines, unclassified
---    lines) and also where materials are owed but none is linked: a fencing,
---    patio, decking or combo job, or any job whose expected cost carries
---    materials, costed line-level with no materials line.
+--    lines, no labour linked) and also where materials are owed but none is
+--    linked: a fencing, patio, decking or combo job, or any job whose expected
+--    cost carries materials, costed line-level with no materials line. No
+--    labour linked means a job costed line-level with no labour line.
+--
+-- 8. Work type and subtype follow the family rules, whatever jobs.type says:
+--    the family is metadata.insurance_job_type 'restoration' first, then
+--    metadata.ses_family, metadata.makesafe_job_family, then the make-safe
+--    report type. A repair family (or jobs.type repair) reports as work type
+--    repair; work_subtype is the family.
 --
 -- 6. Paid-verified means Xero recorded the payment (status PAID; trade
 --    invoices paid). It is not a bank reconciliation. A zero-value line (a
@@ -129,6 +138,7 @@ trade AS (
     CASE WHEN r.cost_lane = 'unclassified' THEN 'other' ELSE r.cost_lane END AS lane,
     r.cost_lane AS lane_detail,
     'trade'::text AS party_kind,
+    r.user_id::text AS party_id,
     COALESCE(NULLIF(btrim(u.name), ''), 'Unnamed trade') AS party,
     r.line_total_ex AS amount_ex,
     'trade_line'::text AS source,
@@ -201,6 +211,7 @@ supplier AS (
     END AS lane,
     COALESCE(b.line ->> 'AccountCode', 'no_account') AS lane_detail,
     'supplier'::text AS party_kind,
+    NULL::text AS party_id,
     COALESCE(NULLIF(btrim(b.contact_name), ''), 'Unnamed supplier') AS party,
     b.amount_ex,
     'supplier_bill'::text AS source,
@@ -230,6 +241,7 @@ fact AS (
     CASE WHEN f.lane IN ('labour', 'materials', 'commission', 'other') THEN f.lane ELSE 'materials' END AS lane,
     f.lane AS lane_detail,
     'supplier'::text AS party_kind,
+    NULL::text AS party_id,
     COALESCE(NULLIF(btrim(f.contact_name), ''), 'Unnamed supplier') AS party,
     f.amount_ex_gst AS amount_ex,
     'materials_fact'::text AS source,
@@ -267,6 +279,7 @@ po AS (
     'materials'::text AS lane,
     'purchase_order'::text AS lane_detail,
     'supplier'::text AS party_kind,
+    NULL::text AS party_id,
     COALESCE(NULLIF(btrim(p.supplier_name), ''), 'Unnamed supplier') AS party,
     COALESCE(p.subtotal, p.total / 1.1) AS amount_ex,
     'po_committed'::text AS source,
@@ -288,6 +301,10 @@ po AS (
   WHERE p.job_id IS NOT NULL
     AND p.xero_bill_id IS NULL
     AND p.invoice_received_at IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM public.job_materials_facts f
+      WHERE f.matched_po_id = p.id AND f.kind = 'actual'
+    )
     AND lower(COALESCE(p.status, '')) NOT IN ('draft', 'billed', 'cancelled', 'canceled', 'void', 'voided', 'deleted')
     AND COALESCE(p.subtotal, p.total) IS NOT NULL
 )
@@ -516,11 +533,11 @@ base AS (
     j.org_id,
     j.job_number,
     j.client_name,
-    j.type AS work_type,
     CASE
-      WHEN j.type IN ('makesafe', 'repair', 'insurance')
-        THEN COALESCE(NULLIF(j.metadata ->> 'ses_family', ''), NULLIF(j.metadata ->> 'makesafe_job_family', ''), md.report_type)
-    END AS work_subtype,
+      WHEN j.type = 'repair' OR fam.family = 'repair' THEN 'repair'
+      ELSE j.type
+    END AS work_type,
+    fam.family AS work_subtype,
     j.status,
     j.created_at,
     (lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) = 'true') AS holding_job,
@@ -588,6 +605,14 @@ base AS (
     COALESCE(pr.project_count, 0) AS xero_project_count
   FROM public.jobs j
   LEFT JOIN public.makesafe_job_details md ON md.job_id = j.id
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN lower(COALESCE(j.metadata ->> 'insurance_job_type', '')) = 'restoration' THEN 'restoration'
+      ELSE lower(COALESCE(NULLIF(btrim(j.metadata ->> 'ses_family'), ''),
+                          NULLIF(btrim(j.metadata ->> 'makesafe_job_family'), ''),
+                          NULLIF(btrim(md.report_type), '')))
+    END AS family
+  ) fam
   LEFT JOIN quoted qd ON qd.job_id = j.id
   LEFT JOIN accepted_rev ar ON ar.job_id = j.id
   LEFT JOIN sent_rev sr ON sr.job_id = j.id
@@ -625,6 +650,7 @@ costed AS (
     (s.cost_basis = 'line_level'
       AND s.line_materials_ex <= 0
       AND (s.work_type IN ('fencing', 'patio', 'decking', 'combo') OR COALESCE(s.expected_materials_ex, 0) > 0)) AS materials_missing,
+    (s.cost_basis = 'line_level' AND s.line_labour_ex = 0) AS labour_missing,
     s.line_labour_ex AS actual_labour_ex,
     CASE WHEN s.cost_basis = 'xero_project_inferred'
          THEN s.xero_project_expenses_ex - s.line_non_materials_ex
@@ -646,13 +672,13 @@ flagged AS (
       WHEN c.has_incomplete_invoice THEN 'incomplete_invoice_lines'
       WHEN c.has_unclassified THEN 'unclassified_lines'
       WHEN c.materials_missing THEN 'materials_not_linked'
+      WHEN c.labour_missing THEN 'no_labour_linked'
       WHEN c.has_text_matched THEN 'text_matched_lines'
       WHEN c.cost_basis = 'xero_project_inferred' THEN 'cost_basis_inferred'
-      WHEN c.actual_labour_ex = 0 THEN 'no_labour_linked'
       ELSE 'ok'
     END AS cost_flag,
     (c.invoiced_ex > 0 AND c.has_cost AND NOT c.has_incomplete_invoice AND NOT c.has_unclassified
-      AND NOT c.materials_missing) AS margin_ok
+      AND NOT c.materials_missing AND NOT c.labour_missing) AS margin_ok
   FROM costed c
 )
 SELECT
