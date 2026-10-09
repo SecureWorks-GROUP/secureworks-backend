@@ -941,6 +941,26 @@ that reason: 1.8 s against 13.5 s read one job at a time for every live job).
 The story fixes and story safety contracts roll this migration back first in
 their re-apply sections, as its own guard pins their bodies.
 
+## The Saved Job Story Is Fresh By Its Digest, Never By The Clock
+
+`20261009100000` keeps a job's written story (`context_job_story_texts`, one
+current a job) and its rewrite queue (`context_job_story_requests`), behind
+`feature_flags.context_job_story_text_v1` (created off; owner's word to turn
+on). A story is fresh while its `card_hash` equals
+`context_job_story_card_hash` of the card now: the story-digest-v1 projection
+of the card's stable facts, never `as_of`, `built_at`, day counts or prose, so
+the clock alone never makes a story stale. Change the digest, or how the card
+is built, and every story reads stale once. "Something new happened" is
+`context_job_story_enqueue_changed` alone; every number is in
+`context_job_story_text_policy()`. A story call is phase `story` in
+`reserve_context_model_call` (no run, the extraction lane, its own daily cap,
+never inside the ledger's live reserve lines); the call budget and ledger store
+contracts accept that admission body, and a later admission change widens the
+same pins and rolls this migration back first where they run a down. The staff
+door is `ops-api?action=job_overview` (GET, read only, transcript words never
+in the answer) and `request_job_story` (POST, the verified caller asks). Field
+contract: `docs/context/job-story-text.md`.
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
