@@ -25015,13 +25015,13 @@ async function submitMakesafeReport(
   if (submittingFinal) {
     if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
-      .select('id, phase, attendance_cycle_id, cycle_attribution')
+      .select('id, type, phase, attendance_cycle_id, cycle_attribution')
       .eq('job_id', jId)
       .eq('type', 'photo')
       .limit(200)
     if (mediaErr) throw mediaErr
     const currentCycleMedia = filterMediaForCurrentCycle(
-      mediaRows || [],
+      (mediaRows || []).filter(isApplicablePackPhoto),
       cycleDetail || { cycle_number: currentCycle, reattend_count: 0 },
       attendanceCycle.id,
     )
@@ -45568,12 +45568,6 @@ async function assertCurrentWikiSourceEvidence(
     detail,
     attendanceCycleId,
   )
-  const photoIsApplicable = (item: any) => {
-    const type = String(item?.type || '').trim().toLowerCase()
-    const phase = String(item?.phase || '').trim().toLowerCase()
-    return type.includes('photo') || type.includes('image') ||
-      phase.includes('completion') || phase.includes('after')
-  }
   // Photo evidence order is `created_at` ascending, with `id` only as a stable
   // tiebreak for equal timestamps — the same order the media read above already
   // asks PostgREST for.
@@ -45612,9 +45606,9 @@ async function assertCurrentWikiSourceEvidence(
     sourceLabel: string,
     media: any[],
   ) => {
-    const applicable = media.filter(photoIsApplicable).slice()
+    const applicable = media.filter(isApplicablePackPhoto).slice()
       .sort(comparePackMediaCreatedAtThenId)
-    const excluded = media.filter((item: any) => !photoIsApplicable(item))
+    const excluded = media.filter((item: any) => !isApplicablePackPhoto(item))
       .slice().sort(comparePackMediaCreatedAtThenId)
     const applicableIds = applicable.map((item: any) =>
       String(item.id || '').trim()
@@ -48305,8 +48299,8 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
       .eq('job_id', jobId),
   ])
 
-  const media = mediaRes.data || []
-  const selectedMedia = selectMakesafeReportPhotosForReport(media || [], 8)
+  const media = (mediaRes.data || []).filter(isApplicablePackPhoto)
+  const selectedMedia = selectMakesafeReportPhotosForReport(media, 8)
   const selectedPhotoDefaults = (selectedMedia || [])
     .map((m: any) => m.storage_url || m.thumbnail_url || null)
     .filter(Boolean)

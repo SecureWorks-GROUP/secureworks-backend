@@ -100,6 +100,80 @@ Deno.test("loadDraftPackContext carries the canonical job-family classification"
   assertEquals(context.job, rows.jobs);
 });
 
+Deno.test("loadDraftPackContext leaves quote builder photos out of the default report photos", async () => {
+  const media = [
+    {
+      id: "scope-1",
+      type: "photo",
+      phase: "scope",
+      storage_url: "https://example.test/scope.jpg",
+      created_at: "2026-10-01T01:00:00Z",
+    },
+    {
+      id: "qb-1",
+      type: "photo",
+      phase: "quote_builder",
+      storage_url: "https://example.test/quote-builder.jpg",
+      created_at: "2026-10-01T02:00:00Z",
+    },
+    {
+      id: "completion-1",
+      type: "photo",
+      phase: "completion",
+      storage_url: "https://example.test/completion.jpg",
+      created_at: "2026-10-01T03:00:00Z",
+    },
+  ];
+  const rows: Record<string, unknown> = {
+    jobs: { id: "job-qb", metadata: {} },
+    makesafe_job_details: { job_id: "job-qb" },
+    job_service_reports: null,
+    job_documents: [],
+    job_media: media,
+  };
+  const client = {
+    from(table: string) {
+      const response = () => ({ data: rows[table] ?? [], error: null });
+      const query = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve(response());
+        },
+        then(resolve: (value: ReturnType<typeof response>) => unknown) {
+          return Promise.resolve(response()).then(resolve);
+        },
+      };
+      return query;
+    },
+  };
+
+  const context = await loadDraftPackContext(client, { job_id: "job-qb" });
+  assertEquals(
+    [...context.selected_photo_urls].sort(),
+    [
+      "https://example.test/completion.jpg",
+      "https://example.test/scope.jpg",
+    ],
+  );
+  assertEquals(
+    context.source_docs.some((doc: any) =>
+      doc.url === "https://example.test/quote-builder.jpg"
+    ),
+    false,
+  );
+});
+
 Deno.test("draftMakesafeReportPack: drafts report + DRAFT invoice + invoice PDF only", async () => {
   const calls: Record<string, any[]> = {
     claude: [],
