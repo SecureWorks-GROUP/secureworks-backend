@@ -436,3 +436,51 @@ Deno.test("live wiring: the deep gate and scope read their RPCs; the prefix set 
     null,
   );
 });
+
+Deno.test("live wiring: a copy of our own email goes to context_email_audience_resolve whole; anything but a known answer reads as error", async () => {
+  const sb = fakeSupabase({ reader: true, program: true });
+  const seen: unknown[] = [];
+  let reply: unknown = {
+    data: { outcome: "relabelled", id: "e1", basis: "mailbox_copy" },
+    error: null,
+  };
+  sb.rpc = (name: string, args?: unknown) => {
+    seen.push({ name, args });
+    if (reply === "throw") throw new Error("network");
+    return Promise.resolve(reply) as any;
+  };
+  const d = liveCaptureDeps({ env, createSupabase: () => sb });
+  const row = {
+    provider_message_id: "email:gma-x-0001@secureworkswa.com.au",
+    payload: { folder_kind: "sent" },
+  };
+  assertEquals(await d.resolveAudience(row), "relabelled");
+  assertEquals(seen, [{
+    name: "context_email_audience_resolve",
+    args: { p_row: row },
+  }]);
+  for (
+    const outcome of [
+      "confirmed",
+      "unchanged",
+      "not_found",
+      "capture_disabled",
+      "refused",
+    ]
+  ) {
+    reply = { data: { outcome }, error: null };
+    assertEquals<string>(await d.resolveAudience(row), outcome);
+  }
+  for (
+    const bad of [
+      { data: null, error: { code: "42883" } },
+      { data: [], error: null },
+      { data: { outcome: "something_else" }, error: null },
+      { data: "relabelled", error: null },
+      "throw",
+    ]
+  ) {
+    reply = bad;
+    assertEquals(await d.resolveAudience(row), "error");
+  }
+});

@@ -36,6 +36,7 @@ import {
   storeEmailAttachments,
 } from "./attachments.ts";
 import {
+  type AudienceResolveOutcome,
   type CaptureDeps,
   type CaptureOutcome,
   type CaptureRequest,
@@ -310,6 +311,26 @@ export function liveCaptureDeps(deps: HandlerDeps): CaptureDeps {
         return data as CaptureOutcome;
       } catch {
         return { outcome: "error", code: "rpc_threw" };
+      }
+    },
+    // A copy of our own email that met the row another copy saved: the
+    // database relabels that row when this copy knows its audience better.
+    // Any failure answers error (the run counts it and goes on).
+    async resolveAudience(row): Promise<AudienceResolveOutcome> {
+      try {
+        const { data, error } = await supabase.rpc(
+          "context_email_audience_resolve",
+          { p_row: row },
+        );
+        if (error || !data || typeof data !== "object") return "error";
+        const outcome = (data as { outcome?: unknown }).outcome;
+        return outcome === "relabelled" || outcome === "confirmed" ||
+            outcome === "unchanged" || outcome === "not_found" ||
+            outcome === "capture_disabled" || outcome === "refused"
+          ? outcome
+          : "error";
+      } catch {
+        return "error";
       }
     },
     async legacyCopy({ from, receivedAt, subject }) {

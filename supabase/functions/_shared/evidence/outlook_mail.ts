@@ -22,6 +22,17 @@
 //     email (D-EM3). Tool-marked mail is always captured.
 //   * payload.email is the counterpart (inbound sender, outbound first outside
 //     recipient), the key the placement ladder matches against a job.
+//   * who our own email went to (group mailbox audience, 9 Oct 2026): its own
+//     outside recipient decides (outbound); recorded recipients that are all
+//     ours make it internal. A group post carries no recipients (Graph lists
+//     none), and a message may have none recorded: then the group thread
+//     decides (groupThreadParty: the outside party whose thread our post is
+//     in, outbound, payload.audience_basis group_thread), and with no such
+//     party the audience is unknown (UNKNOWN_AUDIENCE_EVENT, outbound with no
+//     counterpart, audience_basis unknown), never internal: the ledger reads
+//     it as possibly external. A later copy of the same email that shows its
+//     recipients relabels the row (context_email_audience_resolve,
+//     20261009131000).
 //   * attachments: names, types and sizes only on the row; the bytes are the
 //     reader's attachment ledger's business, never this row's.
 //   * payload.builder_refs (history depth, 7 Oct 2026): the builder
@@ -56,6 +67,13 @@ export interface OutlookAttachmentMeta {
   kind?: "file" | "item" | "reference" | null;
 }
 
+/** Another post of the same group thread, as the reader listed it. */
+export interface ThreadPost {
+  graphId?: string | null;
+  from?: string | null;
+  receivedAt?: string | null;
+}
+
 /** One message (user mailbox) or post (group), already read from Graph. */
 export interface OutlookMailItem {
   graphId: string;
@@ -76,6 +94,12 @@ export interface OutlookMailItem {
   folderKind: FolderKind;
   hasAttachments?: boolean | null;
   attachments?: OutlookAttachmentMeta[] | null;
+  /**
+   * A group post only: the posts of its thread (the reader lists a thread's
+   * posts together; withGroupThread). A post carries no recipients, so who
+   * our own post went to is read from the others (groupThreadParty).
+   */
+  threadPosts?: ThreadPost[] | null;
 }
 
 export interface OutlookSource {
@@ -115,6 +139,20 @@ export const PREVIEW_CHARS = 500;
 export const SUBJECT_MAX_CHARS = 200;
 export const ATTACHMENTS_ON_ROW = 10;
 export const BUILDER_REFS_ON_ROW = 10;
+
+/**
+ * Our own email whose audience nobody can tell: a group post with no outside
+ * party in its thread, or a message with no recipients recorded. Saved
+ * outbound with no counterpart, so the ledger reads it as possibly external,
+ * never as internal (group mailbox audience, 20261009131000).
+ */
+export const UNKNOWN_AUDIENCE_EVENT = "staff.email_unknown_audience";
+
+/**
+ * Where an email of ours took its audience from, when not from its own
+ * recipients (payload.audience_basis; absent when its recipients decided).
+ */
+export type AudienceBasis = "group_thread" | "unknown";
 
 const OUR_DOMAIN =
   /(^|\.)(secureworksgroup\.com\.au|secureworksgroup\.app|secureworkswa\.com\.au)$/;
@@ -334,6 +372,59 @@ export function toTag(recipients: string[]): string | null {
   return null;
 }
 
+/**
+ * Each post of one group thread, carrying the thread's posts (sender and time
+ * only; one list shared by every post, the post itself included, which
+ * groupThreadParty skips by its id), so the builder can read who our own post
+ * went to. The reader calls it on every thread it lists, before any window or
+ * cursor filter.
+ */
+export function withGroupThread(posts: OutlookMailItem[]): OutlookMailItem[] {
+  const thread: ThreadPost[] = posts.map((p) => ({
+    graphId: p.graphId,
+    from: p.from ?? null,
+    receivedAt: p.receivedAt ?? null,
+  }));
+  return posts.map((p) => ({ ...p, threadPosts: thread }));
+}
+
+/**
+ * Who our group post went to, read from its thread: the outside sender (a
+ * customer, supplier or council by senderKind; never automated mail, a
+ * platform or our own people) of the thread's newest other post at or before
+ * ours, else of its earliest post after ours; null when the thread has none.
+ * Ties go to the address that sorts first. A post in someone's thread is a
+ * reply to them: measured on production 9 Oct 2026 over the 146 of our group
+ * posts with an outside party in their thread and a copy in the old inbox,
+ * the copy's To line named an outside party for 144 (the two others were
+ * forwards into the group) and this party itself for 134.
+ */
+export function groupThreadParty(
+  item: OutlookMailItem,
+  supplierDomains?: ReadonlySet<string>,
+): string | null {
+  const own = Date.parse(String(item.receivedAt ?? item.sentAt ?? ""));
+  let before: { at: number; addr: string } | null = null;
+  let after: { at: number; addr: string } | null = null;
+  for (const p of item.threadPosts ?? []) {
+    if (!p || (!!p.graphId && p.graphId === item.graphId)) continue;
+    const addr = emailAddress(p.from);
+    if (!addr) continue;
+    const k = senderKind(addr, null, supplierDomains);
+    if (k !== "customer" && k !== "supplier" && k !== "council") continue;
+    const at = Date.parse(String(p.receivedAt ?? ""));
+    if (!Number.isFinite(at)) continue;
+    if (Number.isFinite(own) && at <= own) {
+      if (
+        !before || at > before.at || (at === before.at && addr < before.addr)
+      ) before = { at, addr };
+    } else if (
+      !after || at < after.at || (at === after.at && addr < after.addr)
+    ) after = { at, addr };
+  }
+  return (before ?? after)?.addr ?? null;
+}
+
 /** The row for one Outlook message or group post, or why it is not written. */
 export function buildOutlookMailRow(
   item: OutlookMailItem,
@@ -378,12 +469,32 @@ export function buildOutlookMailRow(
   let eventType: string;
   let direction: "inbound" | "outbound" | "internal";
   let counterpart: string | null;
+  let audienceBasis: AudienceBasis | null = null;
   if (kind === "ours") {
-    direction = external.length > 0 ? "outbound" : "internal";
-    eventType = direction === "outbound"
-      ? "client.email_out"
-      : "staff.email_internal";
-    counterpart = direction === "outbound" ? external[0] : null;
+    // Who our email went to. Its own outside recipient decides; recorded
+    // recipients that are all ours make it internal. A group post carries no
+    // recipients and a message may have none recorded: then its group thread
+    // decides, and with no outside party there the audience is unknown,
+    // never internal.
+    const recipientsKnown = source.kind !== "group" &&
+      (to.length > 0 || cc.length > 0);
+    if (external.length > 0) {
+      direction = "outbound";
+      eventType = "client.email_out";
+      counterpart = external[0];
+    } else if (recipientsKnown) {
+      direction = "internal";
+      eventType = "staff.email_internal";
+      counterpart = null;
+    } else {
+      const party = source.kind === "group"
+        ? groupThreadParty(item, ctx.supplierDomains)
+        : null;
+      direction = "outbound";
+      eventType = party ? "client.email_out" : UNKNOWN_AUDIENCE_EVENT;
+      counterpart = party;
+      audienceBasis = party ? "group_thread" : "unknown";
+    }
     const marked = toolMarked(item.headers);
     if (source.ownerPrivacy && !marked && source.kind === "user") {
       const toClient = !!ctx.jobClientEmails &&
@@ -452,6 +563,7 @@ export function buildOutlookMailRow(
   };
   if (tag) payload.to_tag = tag;
   if (builderRefs.length) payload.builder_refs = builderRefs;
+  if (audienceBasis) payload.audience_basis = audienceBasis;
   const metadata: Record<string, unknown> = keyFromInternet
     ? { capture_mode: ctx.captureMode, capture_path: "outlook_mail_v1" }
     : {

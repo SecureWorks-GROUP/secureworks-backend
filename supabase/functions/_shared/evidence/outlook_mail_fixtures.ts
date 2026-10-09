@@ -135,3 +135,102 @@ export const E_GROUP_POST: OutlookMailItem = {
   folderKind: "group",
   hasAttachments: true,
 };
+
+// Group mailbox audience (9 Oct 2026). A made-up builder's thread in the ses@
+// group, our reply posted to it (a group post lists no recipients), the
+// sender's own Sent Items copy of that reply (it does), our invoice email's
+// copy alone in the finance group, and a forward into the group.
+
+export const SES: OutlookSource = {
+  email: "ses@secureworkswa.com.au",
+  sourceKey: "ses",
+  kind: "group",
+  scopeLabel: "ses",
+  ownerPrivacy: false,
+};
+export const FINANCE: OutlookSource = {
+  email: "finance@secureworkswa.com.au",
+  sourceKey: "finance",
+  kind: "group",
+  scopeLabel: "finance",
+  ownerPrivacy: false,
+};
+export const ADMIN: OutlookSource = {
+  email: "admin@secureworkswa.com.au",
+  sourceKey: "admin",
+  kind: "user",
+  scopeLabel: "admin",
+  ownerPrivacy: false,
+};
+
+/** The builder's request: the first post of its thread in the ses@ group. */
+export const P_BUILDER: OutlookMailItem = {
+  graphId: "AAMkAGGmaBuilderPost01=",
+  internetMessageId: "<gma-builder-0001@mail.builder.example>",
+  subject: "Our Ref: BLD-99001 - 1 Example Street",
+  from: "Jo Coordinator <coordinator@builder.example>",
+  to: [],
+  cc: [],
+  receivedAt: "2026-10-01T01:00:00Z",
+  sentAt: "2026-10-01T01:00:00Z",
+  bodyText: "Hi team, can you confirm the install date?",
+  folderKind: "group",
+};
+
+/** Our reply in the builder's thread, as the group lists it: no recipients. */
+export const P_OUR_REPLY: OutlookMailItem = {
+  graphId: "AAMkAGGmaOurReply02=",
+  internetMessageId: "<GMA-Reply-0002@secureworkswa.com.au>",
+  subject: "Our Ref: BLD-99001 - 1 Example Street",
+  from: "admin@secureworkswa.com.au",
+  to: [],
+  cc: [],
+  receivedAt: "2026-10-01T02:00:00Z",
+  sentAt: "2026-10-01T02:00:00Z",
+  bodyText: "Hi team, booked in for Friday.",
+  folderKind: "group",
+};
+
+/** Our invoice email's copy in the finance group, alone in its thread. */
+export const P_OUR_ALONE: OutlookMailItem = {
+  graphId: "AAMkAGGmaOurAlone03=",
+  internetMessageId: "<GMA-Alone-0003@secureworkswa.com.au>",
+  subject: "BLD-99001 - Xero invoice INV-99001",
+  from: "admin@secureworkswa.com.au",
+  to: [],
+  cc: [],
+  receivedAt: "2026-10-01T03:00:00Z",
+  sentAt: "2026-10-01T03:00:00Z",
+  bodyText: "Please find attached our invoice.",
+  folderKind: "group",
+};
+
+/** The sender's Sent Items copy of P_OUR_REPLY: the same email, recipients listed. */
+export const E_OUR_REPLY_SENT: OutlookMailItem = {
+  graphId: "AAMkAGGmaOurReplySent04=",
+  internetMessageId: "<GMA-Reply-0002@secureworkswa.com.au>",
+  conversationId: "AAQkAGGmaConvReply04=",
+  subject: "RE: Our Ref: BLD-99001 - 1 Example Street",
+  from: "admin@secureworkswa.com.au",
+  to: ["Jo Coordinator <coordinator@builder.example>"],
+  cc: ["ses@secureworkswa.com.au"],
+  receivedAt: "2026-10-01T02:00:01Z",
+  sentAt: "2026-10-01T02:00:00Z",
+  bodyText: "Hi team, booked in for Friday.",
+  folderKind: "sent",
+};
+
+/** A forward into the group from the sender's Sent Items: to the group only. */
+export const E_FORWARD_SENT: OutlookMailItem = {
+  graphId: "AAMkAGGmaForwardSent05=",
+  internetMessageId: "<GMA-Forward-0005@secureworkswa.com.au>",
+  conversationId: "AAQkAGGmaConvForward05=",
+  subject: "FW: Our Ref: BLD-99001 - 1 Example Street",
+  from: "admin@secureworkswa.com.au",
+  to: ["ses@secureworkswa.com.au"],
+  cc: [],
+  receivedAt: "2026-10-01T04:00:01Z",
+  sentAt: "2026-10-01T04:00:00Z",
+  bodyText: "For the file.",
+  folderKind: "sent",
+};
