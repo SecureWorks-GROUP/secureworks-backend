@@ -63,7 +63,8 @@ INSERT INTO public.users (id, org_id, name) VALUES
 
 -- Trade invoices carry the 2026-09-18 money split (gst off, 12% super,
 -- 6% withheld). T1 paid, T2 ops-rejected, T3 Xero bill deleted, T4 a QA test
--- line, T5 approved and pushed, not yet paid.
+-- line, T5 approved and pushed, not yet paid, T6 paid, T7 a trade's empty day
+-- still awaiting acknowledgment (zero value).
 INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, xero_bill_id, xero_bill_status, invoice_number, paid_at,
                                    gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay) VALUES
   ('a7200000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 400, 'BILL-T1', 'PAID', 'SW-INV-T1', '2026-08-20',
@@ -74,8 +75,12 @@ INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subt
    false, 0, 70, 0.12, 8.4, 70, 65.8),
   ('a7200000-0000-4000-8000-000000000004', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 40, 'BILL-T4', 'PAID', 'SW-INV-T4', '2026-08-20',
    false, 0, 40, 0.12, 4.8, 40, 37.6),
-  ('a7200000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'pushed_to_xero', 720, 'BILL-T5', 'AUTHORISED', 'SW-INV-T5', NULL,
-   false, 0, 720, 0.12, 86.4, 720, 676.8);
+  ('a7200000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'pushed_to_xero', 420, 'BILL-T5', 'AUTHORISED', 'SW-INV-T5', NULL,
+   false, 0, 420, 0.12, 50.4, 420, 394.8),
+  ('a7200000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 300, 'BILL-T6', 'PAID', 'SW-INV-T6', '2026-08-25',
+   false, 0, 300, 0.12, 36, 300, 282),
+  ('a7200000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'pending_acknowledgment', 0, NULL, NULL, 'SW-INV-T7', NULL,
+   false, 0, 0, 0.12, 0, 0, 0);
 
 INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, line_type, description, line_total_ex, total_hours, line_date) VALUES
   ('a7200000-0000-4000-8000-000000000001', 'a7000000-0000-4000-8000-000000000001', NULL, 'labour', 'Fence labour', 300, 6, '2026-08-04'),
@@ -84,7 +89,8 @@ INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, li
   ('a7200000-0000-4000-8000-000000000003', 'a7000000-0000-4000-8000-000000000001', NULL, 'labour', 'Deleted bill labour', 70, 2, '2026-08-04'),
   ('a7200000-0000-4000-8000-000000000004', 'a7000000-0000-4000-8000-000000000001', NULL, 'labour', 'QA TEST line', 40, 1, '2026-08-04'),
   ('a7200000-0000-4000-8000-000000000005', 'a7000000-0000-4000-8000-000000000002', NULL, 'labour', 'Patio labour', 300, 6, '2026-08-05'),
-  ('a7200000-0000-4000-8000-000000000005', 'a7000000-0000-4000-8000-000000000003', NULL, 'labour', 'Fence labour', 300, 6, '2026-08-05'),
+  ('a7200000-0000-4000-8000-000000000006', 'a7000000-0000-4000-8000-000000000003', NULL, 'labour', 'Fence labour', 300, 6, '2026-08-05'),
+  ('a7200000-0000-4000-8000-000000000007', 'a7000000-0000-4000-8000-000000000003', NULL, 'labour', NULL, 0, 0, '2026-08-05'),
   ('a7200000-0000-4000-8000-000000000005', NULL, 'JP-MS', 'make safe', 'Roof report attendance', 120, 2, '2026-08-06');
 
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, amount_paid, invoice_date, fully_paid_on, job_id, raw_json, line_items) VALUES
@@ -273,7 +279,15 @@ BEGIN
   IF r.quoted_ex <> 900 OR r.quoted_source <> 'live_price_not_a_sent_quote' THEN
     RAISE EXCEPTION 'jp dbl: quoted % from %', r.quoted_ex, r.quoted_source;
   END IF;
-  IF NOT ('materials_not_linked' = ANY (r.completeness)) THEN RAISE EXCEPTION 'jp dbl: materials_not_linked missing: %', r.completeness; END IF;
+  -- labour-only cost on a fencing job: the margin is not published
+  IF NOT ('materials_not_linked' = ANY (r.completeness)) OR r.cost_flag <> 'materials_not_linked'
+     OR r.margin_pct IS NOT NULL OR r.profit_ex IS NOT NULL OR r.profit_ex_unsuppressed <> 500 THEN
+    RAISE EXCEPTION 'jp dbl: materials suppression % % % %', r.completeness, r.cost_flag, r.margin_pct, r.profit_ex_unsuppressed;
+  END IF;
+  -- a zero-value pending line neither blocks nor proves payment
+  IF NOT r.costs_verified_paid OR 'unapproved_trade_charges' = ANY (r.completeness) THEN
+    RAISE EXCEPTION 'jp dbl: zero-value pending line changed paid state: % %', r.costs_verified_paid, r.completeness;
+  END IF;
 
   -- JP-MS: no client invoice, so margin and profit are suppressed.
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-MS';
