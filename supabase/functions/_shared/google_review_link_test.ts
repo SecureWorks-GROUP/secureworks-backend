@@ -15,7 +15,10 @@ const REAL_REVIEW_URL = "https://share.google/AFyfkE7jLfCZcxanV";
 
 function assertRealReviewLink(text: string) {
   assertStringIncludes(text, REAL_REVIEW_URL);
-  assert(!/placeholder/i.test(text), "review text must not contain PLACEHOLDER");
+  assert(
+    !/placeholder/i.test(text),
+    "review text must not contain PLACEHOLDER",
+  );
   assert(!text.includes("g.page/r/"), "review text must not use a g.page link");
 }
 

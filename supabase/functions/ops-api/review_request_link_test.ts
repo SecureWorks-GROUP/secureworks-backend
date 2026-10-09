@@ -16,8 +16,14 @@ Deno.test("review request SMS carries the real Google review link and no placeho
   const message = _reviewRequestMessageForTest("Jane Citizen");
   assertStringIncludes(message, REAL_REVIEW_URL);
   assertStringIncludes(message, "Hi Jane,");
-  assert(!/placeholder/i.test(message), "review SMS must not contain PLACEHOLDER");
-  assert(!message.includes("g.page/r/"), "review SMS must not use the old g.page link");
+  assert(
+    !/placeholder/i.test(message),
+    "review SMS must not contain PLACEHOLDER",
+  );
+  assert(
+    !message.includes("g.page/r/"),
+    "review SMS must not use the old g.page link",
+  );
 });
 
 Deno.test("review request SMS still greets a job with no client name", () => {
