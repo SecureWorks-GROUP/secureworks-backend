@@ -1,8 +1,9 @@
 -- Quote builder v1: versioned scopes and variations for one job.
 --
 -- Contract: docs/quote-builder-contract.md. Writer: ops-api
--- (supabase/functions/ops-api/quote_builder.ts). This migration adds ONE table
--- and one partial index on jobs, and changes nothing an existing caller does:
+-- (supabase/functions/ops-api/quote_builder.ts). This migration adds ONE table,
+-- one partial index on jobs and one job_media phase, and changes nothing an
+-- existing caller does:
 --
 --   quote_builder_versions holds every saved version of a job's scope chain and
 --   of each variation chain: Hugo's write-up, the internal cost lines (what it
@@ -27,6 +28,9 @@
 --   * a private quote job is minted once per request: one miscellaneous job
 --     per metadata.quote_builder.request_id (built-in jsonb operators only, so
 --     every role that writes jobs can maintain the index).
+--   * the builder's scoping photos are job_media rows with their own phase,
+--     'quote_builder', so no SES pack, report or builder photo email picks
+--     them up; every existing phase stays allowed exactly as before.
 --
 -- Rollback: supabase/rollbacks/20261009120000_quote_builder_versions_down.sql.
 
@@ -134,3 +138,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_quote_builder_request_id
   ON public.jobs ((metadata -> 'quote_builder' ->> 'request_id'))
   WHERE type = 'miscellaneous'
     AND (metadata -> 'quote_builder' ->> 'request_id') IS NOT NULL;
+
+ALTER TABLE public.job_media DROP CONSTRAINT IF EXISTS job_media_phase_check;
+ALTER TABLE public.job_media ADD CONSTRAINT job_media_phase_check
+  CHECK (phase IN ('scope', 'in_progress', 'completion', 'receipt', 'marketing', 'neighbour_signoff', 'issue', 'quote_builder'));

@@ -1,7 +1,8 @@
 -- Contract: 20261009120000_quote_builder_versions. One table, browser roles locked out, one
 -- version number per chain, the scope chain is the job's own id, issuing needs a PDF and a quote
--- number, an issued version is frozen against update and delete, and a private quote job is
--- minted once per request id.
+-- number, an issued version is frozen against update and delete, a private quote job is
+-- minted once per request id, and job_media takes the 'quote_builder' phase beside every phase it
+-- took before.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -71,6 +72,18 @@ VALUES ('9a000000-0000-4000-8000-000000000004', '00000000-0000-0000-0000-0000000
 SELECT pg_temp.qb_assert(
  (SELECT count(*) FROM public.jobs WHERE type = 'miscellaneous' AND metadata = '{}'::jsonb) >= 2,
  'miscellaneous jobs without a quote builder request id must not collide');
+
+-- Quote builder photos have their own job_media phase; every earlier phase is still accepted.
+INSERT INTO public.job_media (job_id, phase, type, storage_url)
+SELECT '9a000000-0000-4000-8000-000000000001', p, 'photo', 'https://example.invalid/' || p || '.jpg'
+FROM unnest(ARRAY['scope', 'in_progress', 'completion', 'receipt', 'marketing', 'neighbour_signoff',
+ 'issue', 'quote_builder']) AS p;
+SELECT pg_temp.qb_assert(
+ (SELECT count(*) FROM public.job_media WHERE job_id = '9a000000-0000-4000-8000-000000000001') = 8,
+ 'job_media must accept the quote_builder phase and every earlier phase');
+SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
+ INSERT INTO public.job_media (job_id, phase, type) VALUES ('9a000000-0000-4000-8000-000000000001', 'nope', 'photo')
+$q$), 'job_media must still refuse an unknown phase');
 
 -- A draft is editable and its updated_at moves.
 UPDATE public.quote_builder_versions SET updated_at = '2026-01-01T00:00:00Z' WHERE id = '9a000000-0000-4000-8000-0000000000a1';

@@ -22,6 +22,7 @@ import {
   projectInsuranceRepairPipelineRow,
 } from "./insurance_repairs_board.ts";
 import { quoteBuilderRunLabel } from "../_shared/quote_builder_run_label.ts";
+import { QUOTE_BUILDER_PHOTO_PHASE } from "./makesafe_cycle_evidence.ts";
 
 export const QUOTE_BUILDER_ORG_ID = "00000000-0000-0000-0000-000000000001";
 export const QUOTE_BUILDER_PHOTO_BUCKET = "job-photos";
@@ -502,7 +503,7 @@ export async function getQuoteBuilderJob(
       "id, storage_url, thumbnail_url, label, taken_at, created_at, phase, type",
     )
     .eq("job_id", jobId)
-    .eq("phase", "scope")
+    .eq("phase", QUOTE_BUILDER_PHOTO_PHASE)
     .eq("type", "photo")
     .order("created_at", { ascending: true });
   if (mediaError) readError("photos read failed", mediaError);
@@ -643,17 +644,19 @@ async function validatePhotoIds(client: any, jobId: string, raw: unknown) {
   }
   if (!ids.length) return [];
   const { data, error } = await client.from("job_media")
-    .select("id, job_id")
+    .select("id, job_id, phase")
     .in("id", ids);
   if (error) readError("photo read failed", error);
   const owned = new Set(
-    (data || []).filter((m: any) => m.job_id === jobId).map((m: any) => m.id),
+    (data || []).filter((m: any) =>
+      m.job_id === jobId && m.phase === QUOTE_BUILDER_PHOTO_PHASE
+    ).map((m: any) => m.id),
   );
   const foreign = ids.filter((id) => !owned.has(id));
   if (foreign.length) {
     fail(
       "photo_not_on_job",
-      `photos not on this job: ${foreign.join(", ")}`,
+      `photos not among this job's quote builder photos: ${foreign.join(", ")}`,
       409,
     );
   }
@@ -888,7 +891,7 @@ export async function quoteBuilderPhotoRegister(
   const { data, error } = await client.from("job_media")
     .insert({
       job_id: jobId,
-      phase: "scope",
+      phase: QUOTE_BUILDER_PHOTO_PHASE,
       type: "photo",
       storage_url: urlData.publicUrl,
       label: text(body?.caption, 500),
@@ -914,7 +917,7 @@ export async function quoteBuilderPhotoCaption(
     .eq("id", photoId)
     .maybeSingle();
   if (error) readError("photo read failed", error);
-  if (!photo || photo.phase !== "scope") {
+  if (!photo || photo.phase !== QUOTE_BUILDER_PHOTO_PHASE) {
     fail("photo_not_found", "Photo not found", 404);
   }
   const { lane } = await loadJob(client, photo.job_id, actor);
@@ -1439,6 +1442,24 @@ export async function decideQuoteBuilderVariation(
     notes: text(body?.notes, 2000),
     userId: actor.id,
   });
+
+  const expected = approved ? "approved" : "rejected";
+  const { data: decided, error: decidedError } = await client.from(
+    "job_variations",
+  )
+    .select("status")
+    .eq("id", variationId)
+    .maybeSingle();
+  if (decidedError) readError("variation read failed", decidedError);
+  if (decided?.status !== expected) {
+    fail(
+      "variation_decision_not_recorded",
+      `Variation ${variation.variation_number} was not recorded as ${expected}; it reads ${
+        decided?.status ?? "missing"
+      }. Try again.`,
+      409,
+    );
+  }
 
   const stage = approved
     ? await moveStageForward(

@@ -37,6 +37,7 @@ const LATE_REPAIR_JOB = "22222222-2222-4222-8222-222222222222";
 const MAKESAFE_JOB = "33333333-3333-4333-8333-333333333333";
 const PHOTO_ON_JOB = "44444444-4444-4444-8444-444444444444";
 const PHOTO_ELSEWHERE = "55555555-5555-4555-8555-555555555555";
+const TRADE_PHOTO_ON_JOB = "77777777-7777-4777-8777-777777777777";
 const ACTOR = {
   id: "66666666-6666-4666-8666-666666666666",
   email: "hugo@example.invalid",
@@ -288,16 +289,23 @@ function seed(): Store {
       {
         id: PHOTO_ON_JOB,
         job_id: REPAIR_JOB,
-        phase: "scope",
+        phase: "quote_builder",
         type: "photo",
         storage_url: "https://cdn.invalid/a.jpg",
       },
       {
         id: PHOTO_ELSEWHERE,
         job_id: LATE_REPAIR_JOB,
-        phase: "scope",
+        phase: "quote_builder",
         type: "photo",
         storage_url: "https://cdn.invalid/b.jpg",
+      },
+      {
+        id: TRADE_PHOTO_ON_JOB,
+        job_id: REPAIR_JOB,
+        phase: "scope",
+        type: "photo",
+        storage_url: "https://cdn.invalid/trade.jpg",
       },
     ],
     quote_builder_versions: [],
@@ -597,6 +605,16 @@ Deno.test("quote builder: make-safe cards and foreign photos are refused", async
   );
   assertEquals(
     await code(
+      saveQuoteBuilderVersion(client, {
+        job_id: REPAIR_JOB,
+        kind: "scope",
+        photo_media_ids: [TRADE_PHOTO_ON_JOB],
+      }, ACTOR),
+    ),
+    "photo_not_on_job",
+  );
+  assertEquals(
+    await code(
       saveQuoteBuilderVersion(client, { job_id: REPAIR_JOB, kind: "scope" }, {
         ...ACTOR,
         orgId: "other-org",
@@ -768,6 +786,25 @@ Deno.test("quote builder: variation issue, re-issue, decision and stage moves", 
   assertEquals(liveVariationDocs.map((d) => d.quote_number), [
     "SWR-26101-V1.2",
   ]);
+
+  const lostWrite = () => Promise.resolve({});
+  const stagesBefore = calls.length;
+  assertEquals(
+    await code(
+      decideQuoteBuilderVariation(
+        client,
+        { variation_id: store.job_variations[0].id, approved: true },
+        ACTOR,
+        { decideVariation: lostWrite, moveRepairStage },
+      ),
+    ),
+    "variation_decision_not_recorded",
+  );
+  assertEquals(calls.length, stagesBefore);
+  assertEquals(
+    store.jobs.find((j) => j.id === REPAIR_JOB)!.metadata.repair_stage,
+    "variation",
+  );
 
   const decisions: any[] = [];
   const decideVariation = (input: any) => {
@@ -1029,7 +1066,7 @@ Deno.test("quote builder: repair lane lists scoping-stage repair cards only", as
   );
 });
 
-Deno.test("quote builder: photos register only after the upload lands, on the scope phase", async () => {
+Deno.test("quote builder: photos register only after the upload lands, on the quote builder phase", async () => {
   const store = seed();
   const { client, upload } = makeFakeClient(store);
   assertEquals(
@@ -1078,7 +1115,7 @@ Deno.test("quote builder: photos register only after the upload lands, on the sc
   assertEquals(again.photo.id, registered.photo.id);
   const row = store.job_media.find((m) => m.id === registered.photo.id)!;
   assertEquals([row.phase, row.type, row.label], [
-    "scope",
+    "quote_builder",
     "photo",
     "Rear eave",
   ]);

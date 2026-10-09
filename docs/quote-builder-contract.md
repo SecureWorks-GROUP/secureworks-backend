@@ -45,7 +45,7 @@ would not.
 | Scope and its versions | `quote_builder_versions` (new) | One row per version. Cost lines, charge lines, narrative, totals. |
 | Internal cost lines ("what it costs us") | `quote_builder_versions.cost_lines` | Never on the client PDF, never sent to trades. |
 | Client charge lines ("what we charge") | `quote_builder_versions.charge_lines` | What the client PDF shows. |
-| Site photos + captions | `job_media` (`phase='scope'`, `type='photo'`, caption in `label`) | Files in Storage bucket `job-photos`. Same table the trade app and boards already read. |
+| Site photos + captions | `job_media` (`phase='quote_builder'`, `type='photo'`, caption in `label`) | Files in Storage bucket `job-photos`. Their own phase (`20261009120000`) keeps them internal: SES packs, report photo sets, the board photo count and the builder photo email never pick them up, and the builder lists and accepts only photos in that phase. |
 | Client quote PDF | Storage bucket `job-pdfs` + one `job_documents` row (`type='quote'`) | Its own document, linked from the version. |
 | Variations | `job_variations` (existing) + a `kind='variation'` version chain | The variation row is created when Hugo issues it. |
 | Client details on a private job | `jobs` (`client_name`, `client_phone`, `client_email`, `site_address`, `site_suburb`) | Copied into each version's `client_snapshot`. |
@@ -291,7 +291,8 @@ Saves the draft of one chain.
   or null when the chain is empty. If someone else saved or issued since, the
   save is refused `409 stale_version` and nothing is written; reload and retry.
 - `photo_media_ids`: photos (from `job_media`) chosen for this version, in order.
-  Each must belong to this job.
+  Each must be one of this job's quote builder photos (`phase='quote_builder'`);
+  anything else is `409 photo_not_on_job`.
 
 Allowed jobs: repair-family jobs (`jobs.type='repair'` or the repair family
 markers the Repairs board reads) and `miscellaneous` jobs. Anything else is
@@ -402,7 +403,9 @@ when nothing moved. A stage write that loses a race returns
 ```
 
 Records the decision on `job_variations` through the existing variation approval
-path, then moves a repair job to `approved` when approved. Returns
+path, re-reads the variation, then moves a repair job to `approved` when approved.
+If the variation does not read back as `approved` (or `rejected`), nothing moves
+and the call is refused `409 variation_decision_not_recorded`; try again. Returns
 `{ "approved": true, "variation_id": "...", "stage": { ... } }`.
 
 ## 6. Out of scope for v1

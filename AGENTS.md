@@ -1340,7 +1340,10 @@ tools) or `jobs.expected_costs` (frozen at acceptance). Issuing files a
 a repair card forward only, through `updateRepairStage`: scope -> `quoted`,
 variation -> `variation`, approved variation -> `approved`. Private quotes are
 `jobs.type='miscellaneous'` (`SWM-`), never `renovation` (shares `SWR-` with
-repair). Tests: `quote_builder_test.ts` plus the migration contract.
+repair). Its photos are `job_media` phase `quote_builder` (`QUOTE_BUILDER_PHOTO_PHASE`),
+which `isApplicablePackPhoto` and the mailer photo route exclude: they are internal and
+must never reach an SES pack, report or builder email. Tests: `quote_builder_test.ts`
+plus the migration contract.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
