@@ -240,6 +240,22 @@ const STREET_TYPES = [
 const STREET_TYPE_SET = new Set(STREET_TYPES);
 // Street-type words that also open WA suburbs ("St James", "Green Head").
 const SUBURB_OPENING_TYPES = new Set(["st", "green"]);
+// Street-type words that also name a street ("Lake View St"), so a St or Green
+// after one of them still ends the street.
+const STREET_NAMING_TYPES = new Set([
+  "view",
+  "vista",
+  "grove",
+  "gr",
+  "green",
+  "ridge",
+  "gardens",
+  "gdns",
+  "mall",
+  "rise",
+  "heights",
+  "hts",
+]);
 
 export function ambroseSuburbFromAddress(
   address: string | null | undefined,
@@ -258,7 +274,7 @@ export function ambroseSuburbFromAddress(
     streetEnd < words.length - 1 && previous >= 2 &&
     SUBURB_OPENING_TYPES.has(word(streetEnd)) &&
     STREET_TYPE_SET.has(word(previous)) &&
-    !SUBURB_OPENING_TYPES.has(word(previous))
+    !STREET_NAMING_TYPES.has(word(previous))
   ) {
     streetEnd = previous;
   }

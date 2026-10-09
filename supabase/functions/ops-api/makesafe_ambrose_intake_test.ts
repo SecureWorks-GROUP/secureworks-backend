@@ -347,6 +347,18 @@ Deno.test("subject address and suburb parsing", () => {
     ambroseSuburbFromAddress("123 Sample Street Mall Testville WA 6000"),
     "Testville",
   );
+  assertEquals(
+    ambroseSuburbFromAddress("12 Lake View St Testville WA 6000"),
+    "Testville",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("12 Smith St St James WA 6102"),
+    "St James",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("12 Smith St Green Head WA 6514"),
+    "Green Head",
+  );
   // No street type, or nothing after it: no suburb (the backstop flags it).
   assertEquals(ambroseSuburbFromAddress("Lot 9 Testvale WA 6171"), null);
   assertEquals(ambroseSuburbFromAddress("12 Example Street WA 6000"), null);
