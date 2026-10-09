@@ -13,6 +13,10 @@
 --             deduction cannot publish a labour-only margin.
 --   JP-MS     make-safe roof report with no client invoice and a trade line
 --             found by job number: margin suppressed, flags carried.
+--   JP-REP    a fencing card family-tagged repair, invoiced with a materials
+--             bill and no labour: reports as repair, margin suppressed.
+--   JP-REST   an insurance card whose restoration type outranks a stale
+--             make-safe family.
 --   JP-OLD    legacy job: not in the engine.
 
 \set ON_ERROR_STOP on
@@ -58,7 +62,11 @@ INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata,
   ('a7000000-0000-4000-8000-000000000004', '00000000-0000-0000-0000-000000000001', 'archived', 'makesafe', 'JP-MS', false,
    '{"ses_family": "roof_report"}', NULL, NULL, '2026-08-01T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP-OLD', true, '{}', NULL, NULL,
-   '2026-08-01T00:00:00Z');
+   '2026-08-01T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP-REP', false,
+   '{"makesafe_job_family": "repair"}', NULL, NULL, '2026-08-01T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'complete', 'insurance', 'JP-REST', false,
+   '{"insurance_job_type": "restoration", "makesafe_job_family": "make_safe"}', NULL, NULL, '2026-08-01T00:00:00Z');
 
 INSERT INTO public.users (id, org_id, name) VALUES
   ('a7100000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'Trade One');
@@ -132,7 +140,12 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
   ('00000000-0000-0000-0000-000000000001', 'INV-4', 'INV-4', 'ACCREC', 'AUTHORISED', 'Client', 1500, 1650, 550, '2026-08-08', NULL,
    'a7000000-0000-4000-8000-000000000002', NULL, '[]'),
   ('00000000-0000-0000-0000-000000000001', 'INV-5', 'INV-5', 'ACCREC', 'PAID', 'Client', 800, 880, 880, '2026-08-08', '2026-08-28',
-   'a7000000-0000-4000-8000-000000000003', NULL, '[{"LineAmount": 800, "AccountCode": "200", "Description": "Fence"}]');
+   'a7000000-0000-4000-8000-000000000003', NULL, '[{"LineAmount": 800, "AccountCode": "200", "Description": "Fence"}]'),
+  -- JP-REP: invoiced, a materials bill, no labour linked
+  ('00000000-0000-0000-0000-000000000001', 'INV-6', 'INV-6', 'ACCREC', 'PAID', 'Client', 10000, 11000, 11000, '2026-08-08', '2026-08-28',
+   'a7000000-0000-4000-8000-000000000006', NULL, '[{"LineAmount": 10000, "AccountCode": "200", "Description": "Repair"}]'),
+  ('00000000-0000-0000-0000-000000000001', 'BILL-S4', 'S-4', 'ACCPAY', 'PAID', 'Fence Supplies', 3000, 3300, 3300, '2026-08-02', '2026-08-15',
+   'a7000000-0000-4000-8000-000000000006', NULL, '[{"LineAmount": 3000, "AccountCode": "305", "Description": "Panels"}]');
 
 INSERT INTO public.xero_projects (job_id, total_expenses, total_invoiced) VALUES
   ('a7000000-0000-4000-8000-000000000002', 1000, 1500),
@@ -152,6 +165,13 @@ INSERT INTO public.job_variations (job_id, variation_number, description, amount
 INSERT INTO public.purchase_orders (job_id, po_number, supplier_name, status, subtotal, total, created_at) VALUES
   ('a7000000-0000-4000-8000-000000000001', 'PO-OPEN', 'Fence Supplies', 'sent', 80, 88, '2026-08-01T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000001', 'PO-DRAFT', 'Fence Supplies', 'draft', 500, 550, '2026-08-01T00:00:00Z');
+
+-- PO-BILLED: its bill BILL-S1 landed as a materials fact matched to the PO;
+-- the PO itself was never stamped, and it is no longer open.
+INSERT INTO public.purchase_orders (id, job_id, po_number, supplier_name, status, subtotal, total, created_at) VALUES
+  ('a7400000-0000-4000-8000-000000000001', 'a7000000-0000-4000-8000-000000000001', 'PO-BILLED', 'Fence Supplies', 'sent', 100, 110, '2026-08-01T00:00:00Z');
+INSERT INTO public.job_materials_facts (job_id, xero_invoice_id, invoice_number, contact_name, lane, kind, amount_ex_gst, confidence, fact_date, matched_po_id) VALUES
+  ('a7000000-0000-4000-8000-000000000001', 'BILL-S1', 'S-1', 'Fence Supplies', 'materials', 'actual', 100, 'high', '2026-08-02', 'a7400000-0000-4000-8000-000000000001');
 
 -- JP-FENCE sent quote: the sealed revision total 1320 inc GST.
 INSERT INTO public.job_documents (id, job_id, type, sent_at, created_at) VALUES
@@ -186,7 +206,7 @@ BEGIN
   WHERE job_id = 'a7000000-0000-4000-8000-000000000001';
   IF r.trade_n <> 2 THEN RAISE EXCEPTION 'jp cost: JP-FENCE trade lines %, expected 2 (rejected, deleted-bill and QA lines excluded)', r.trade_n; END IF;
   IF r.bill_n <> 3 THEN RAISE EXCEPTION 'jp cost: JP-FENCE supplier bill lines %, expected 3 (mirrors and deleted bill excluded)', r.bill_n; END IF;
-  IF r.po_n <> 1 THEN RAISE EXCEPTION 'jp cost: JP-FENCE open POs %, expected 1 (draft excluded)', r.po_n; END IF;
+  IF r.po_n <> 1 THEN RAISE EXCEPTION 'jp cost: JP-FENCE open POs %, expected 1 (draft and billed excluded)', r.po_n; END IF;
   IF r.actual <> 570 THEN RAISE EXCEPTION 'jp cost: JP-FENCE actual %, expected 570', r.actual; END IF;
   IF r.has_excluded_bill THEN RAISE EXCEPTION 'jp cost: a trade-mirror or deleted bill counted'; END IF;
   IF r.has_excluded_line THEN RAISE EXCEPTION 'jp cost: a rejected, deleted-bill or QA trade line counted'; END IF;
@@ -318,6 +338,17 @@ BEGIN
   END IF;
   IF r.cost_flag <> 'text_matched_lines' OR r.actual_labour_ex <> 120 THEN RAISE EXCEPTION 'jp ms: cost % %', r.cost_flag, r.actual_labour_ex; END IF;
   IF r.quoted_ex IS NOT NULL OR r.expected_source IS NOT NULL THEN RAISE EXCEPTION 'jp ms: quoted or expected invented'; END IF;
+
+  -- JP-REP: family repair outranks jobs.type fencing; no labour, no margin.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-REP';
+  IF r.work_type <> 'repair' OR r.work_subtype <> 'repair' THEN RAISE EXCEPTION 'jp rep: work type % %', r.work_type, r.work_subtype; END IF;
+  IF r.cost_flag <> 'no_labour_linked' OR r.margin_pct IS NOT NULL OR r.profit_ex IS NOT NULL OR r.profit_ex_unsuppressed <> 7000 THEN
+    RAISE EXCEPTION 'jp rep: labour suppression % % % %', r.cost_flag, r.margin_pct, r.profit_ex, r.profit_ex_unsuppressed;
+  END IF;
+
+  -- JP-REST: restoration type outranks a stale make-safe family.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-REST';
+  IF r.work_type <> 'insurance' OR r.work_subtype <> 'restoration' THEN RAISE EXCEPTION 'jp rest: work type % %', r.work_type, r.work_subtype; END IF;
 END $$;
 
 ROLLBACK;

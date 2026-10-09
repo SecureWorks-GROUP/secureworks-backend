@@ -16,7 +16,7 @@ export const JOB_PROFIT_LABELS = {
   verified_paid:
     "Xero recorded the payment (status PAID; trade invoices paid). Not a bank reconciliation.",
   margin:
-    "Null when job_financials would suppress it (no client invoice, no cost, incomplete trade invoice lines, unclassified lines) or when materials are owed but none is linked (labour-only cost).",
+    "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines) or when materials are owed but none is linked (labour-only cost).",
 } as const;
 
 /**
@@ -39,7 +39,7 @@ const LIST_DEFAULT_LIMIT = 100;
 const LIST_MAX_LIMIT = 500;
 
 const COST_EVENT_COLUMNS =
-  "job_id, event_date, lane, lane_detail, party_kind, party, amount_ex, source, source_id, document_id, document_number, document_status, paid, paid_on, confidence, is_actual, description, hours, account_code, business_unit, match_method";
+  "job_id, event_date, lane, lane_detail, party_kind, party_id, party, amount_ex, source, source_id, document_id, document_number, document_status, paid, paid_on, confidence, is_actual, description, hours, account_code, business_unit, match_method";
 const REVENUE_EVENT_COLUMNS =
   "job_id, kind, invoice_date, amount_ex, status, paid, paid_on, counts_as_invoiced, source_id, document_id, document_number, party, description, account_code, business_unit";
 
@@ -266,15 +266,16 @@ export async function jobProfitAction(client: any, params: URLSearchParams): Pro
 
   const costEvents = costs.data || [];
   const revenueEvents = revenue.data || [];
-  const trades = new Map<string, { party: string; amount_ex: number; lines: number; first: string | null; last: string | null }>();
+  const trades = new Map<string, { party_id: string | null; party: string; amount_ex: number; lines: number; first: string | null; last: string | null }>();
   for (const e of costEvents) {
     if (e.source !== "trade_line" || !e.is_actual) continue;
-    const t = trades.get(e.party) ?? { party: e.party, amount_ex: 0, lines: 0, first: null, last: null };
+    const key = e.party_id ? `id:${e.party_id}` : `line:${e.source_id}`;
+    const t = trades.get(key) ?? { party_id: e.party_id ?? null, party: e.party, amount_ex: 0, lines: 0, first: null, last: null };
     t.amount_ex = round2(t.amount_ex + (num(e.amount_ex) ?? 0));
     t.lines += 1;
     if (e.event_date && (!t.first || e.event_date < t.first)) t.first = e.event_date;
     if (e.event_date && (!t.last || e.event_date > t.last)) t.last = e.event_date;
-    trades.set(e.party, t);
+    trades.set(key, t);
   }
 
   return {
@@ -298,8 +299,8 @@ export async function jobProfitListAction(client: any, params: URLSearchParams):
   if (f.types.length) query = query.in("work_type", f.types);
   if (f.statuses.length) query = query.in("status", f.statuses);
   const dateColumn = f.dateField === "invoiced" ? "first_invoice_date" : "created_at";
-  if (f.from) query = query.gte(dateColumn, f.from);
-  if (f.to) query = query.lte(dateColumn, f.dateField === "invoiced" ? f.to : `${f.to}T23:59:59.999Z`);
+  if (f.from) query = query.gte(dateColumn, f.dateField === "invoiced" ? f.from : `${f.from}T00:00:00+08:00`);
+  if (f.to) query = query.lte(dateColumn, f.dateField === "invoiced" ? f.to : `${f.to}T23:59:59.999+08:00`);
   query = query.order("created_at", { ascending: false }).order("job_id", { ascending: true })
     .range(f.offset, f.offset + f.limit - 1);
   const { data, error, count } = await query;
@@ -308,7 +309,7 @@ export async function jobProfitListAction(client: any, params: URLSearchParams):
     status: 200,
     body: {
       jobs: data || [],
-      total: count ?? null,
+      total_estimate: count ?? null,
       limit: f.limit,
       offset: f.offset,
       filters: { type: f.types, status: f.statuses, from: f.from, to: f.to, date_field: f.dateField },
