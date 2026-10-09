@@ -73,8 +73,9 @@ INSERT INTO public.users (id, org_id, name) VALUES
 
 -- Trade invoices carry the 2026-09-18 money split (gst off, 12% super,
 -- 6% withheld). T1 paid, T2 ops-rejected, T3 Xero bill deleted, T4 a QA test
--- line, T5 approved and pushed, not yet paid, T6 paid, T7 a trade's empty day
--- still awaiting acknowledgment (zero value).
+-- line, T5 approved and pushed, not yet paid, T6 paid (its subtotal is net of
+-- its -40 materials deduction line, so its lines are complete), T7 a trade's
+-- empty day still awaiting acknowledgment (zero value).
 INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, xero_bill_id, xero_bill_status, invoice_number, paid_at,
                                    gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay) VALUES
   ('a7200000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 400, 'BILL-T1', 'PAID', 'SW-INV-T1', '2026-08-20',
@@ -87,8 +88,8 @@ INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subt
    false, 0, 40, 0.12, 4.8, 40, 37.6),
   ('a7200000-0000-4000-8000-000000000005', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'pushed_to_xero', 420, 'BILL-T5', 'AUTHORISED', 'SW-INV-T5', NULL,
    false, 0, 420, 0.12, 50.4, 420, 394.8),
-  ('a7200000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 300, 'BILL-T6', 'PAID', 'SW-INV-T6', '2026-08-25',
-   false, 0, 300, 0.12, 36, 300, 282),
+  ('a7200000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 260, 'BILL-T6', 'PAID', 'SW-INV-T6', '2026-08-25',
+   false, 0, 260, 0.12, 31.2, 260, 244.4),
   ('a7200000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'pending_acknowledgment', 0, NULL, NULL, 'SW-INV-T7', NULL,
    false, 0, 0, 0.12, 0, 0, 0);
 
@@ -242,7 +243,7 @@ BEGIN
   FROM public.v_job_revenue_events
   WHERE job_id = 'a7000000-0000-4000-8000-000000000001';
   IF r.invoiced <> 1000 THEN RAISE EXCEPTION 'jp revenue: JP-FENCE invoiced %, expected 1000', r.invoiced; END IF;
-  IF r.variations <> 9 OR r.variation_ex <> 718 OR r.agreed_variation_ex <> 288 THEN
+  IF r.variations <> 9 OR r.variation_ex <> 818 OR r.agreed_variation_ex <> 288 THEN
     RAISE EXCEPTION 'jp revenue: variation list/agreement wrong: listed % amount % agreed %', r.variations, r.variation_ex, r.agreed_variation_ex;
   END IF;
   IF EXISTS (
