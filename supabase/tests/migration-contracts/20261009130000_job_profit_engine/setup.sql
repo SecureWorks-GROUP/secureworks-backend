@@ -144,6 +144,7 @@ ALTER TABLE public.job_variations
   ADD COLUMN IF NOT EXISTS status text,
   ADD COLUMN IF NOT EXISTS sent_at timestamptz,
   ADD COLUMN IF NOT EXISTS accepted_at timestamptz,
+  ADD COLUMN IF NOT EXISTS declined_at timestamptz,
   ADD COLUMN IF NOT EXISTS approved_at timestamptz,
   ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
 

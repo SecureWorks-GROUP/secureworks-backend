@@ -35,8 +35,8 @@ export type JobProfitResult = { status: number; body: Record<string, unknown> };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const LIST_TOKEN_RE = /^[a-z_]{1,40}$/;
-const LIST_DEFAULT_LIMIT = 200;
-const LIST_MAX_LIMIT = 1000;
+const LIST_DEFAULT_LIMIT = 100;
+const LIST_MAX_LIMIT = 500;
 
 const COST_EVENT_COLUMNS =
   "job_id, event_date, lane, lane_detail, party_kind, party, amount_ex, source, source_id, document_id, document_number, document_status, paid, paid_on, confidence, is_actual, description, hours, account_code, business_unit, match_method";
@@ -229,13 +229,31 @@ export async function jobProfitAction(client: any, params: URLSearchParams): Pro
     return { status: 400, body: { error: "job_number is not a job number" } };
   }
 
-  let query = client.from("v_job_profit").select("*");
-  query = jobIdParam ? query.eq("job_id", jobIdParam) : query.eq("job_number", jobNumber);
-  const { data: rows, error } = await query.limit(2);
+  let jobId = jobIdParam;
+  if (!jobId) {
+    const { data: jobs, error: jobError } = await client.from("jobs")
+      .select("id")
+      .eq("job_number", jobNumber)
+      .limit(2);
+    if (jobError) return { status: 500, body: { error: `job number lookup failed: ${jobError.message}` } };
+    if (!jobs || jobs.length === 0) return { status: 404, body: { error: "no job matches that job number" } };
+    if (jobs.length > 1) {
+      return {
+        status: 409,
+        body: { error: "job_number matches more than one job; pass job_id", job_ids: jobs.map((r: any) => r.id) },
+      };
+    }
+    jobId = jobs[0].id;
+  }
+
+  const { data: rows, error } = await client.from("v_job_profit")
+    .select("*")
+    .eq("job_id", jobId)
+    .limit(2);
   if (error) return { status: 500, body: { error: `job profit read failed: ${error.message}` } };
   if (!rows || rows.length === 0) return { status: 404, body: { error: "no job profit row for that job" } };
   if (rows.length > 1) {
-    return { status: 409, body: { error: "job_number matches more than one job; pass job_id", job_ids: rows.map((r: any) => r.job_id) } };
+    return { status: 500, body: { error: "job profit view returned more than one row for a job" } };
   }
   const summary = rows[0];
 
@@ -276,7 +294,7 @@ export async function jobProfitAction(client: any, params: URLSearchParams): Pro
 export async function jobProfitListAction(client: any, params: URLSearchParams): Promise<JobProfitResult> {
   const f = parseJobProfitListFilters(params);
   if (!f.ok) return { status: 400, body: { error: f.error } };
-  let query = client.from("v_job_profit").select("*", { count: "exact" });
+  let query = client.from("v_job_profit").select("*", { count: "planned" });
   if (f.types.length) query = query.in("work_type", f.types);
   if (f.statuses.length) query = query.in("status", f.statuses);
   const dateColumn = f.dateField === "invoiced" ? "first_invoice_date" : "created_at";
