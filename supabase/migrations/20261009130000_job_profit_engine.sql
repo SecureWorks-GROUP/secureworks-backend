@@ -69,12 +69,16 @@
 -- 5. Completeness reuses the job_financials vocabulary (revenue_flag
 --    missing_client_invoice / ok; cost_flag no_labour_linked,
 --    incomplete_invoice_lines, unclassified_lines, text_matched_lines, ok) and
---    adds no_cost_linked and cost_basis_inferred. Margin and profit are null
---    (suppressed) exactly where job_financials suppresses them: no client
---    invoice, no cost, incomplete trade invoice lines, or unclassified lines.
+--    adds no_cost_linked, materials_not_linked and cost_basis_inferred. Margin
+--    and profit are null (suppressed) where job_financials suppresses them (no
+--    client invoice, no cost, incomplete trade invoice lines, unclassified
+--    lines) and also where materials are owed but none is linked: a fencing,
+--    patio, decking or combo job, or any job whose expected cost carries
+--    materials, costed line-level with no materials line.
 --
 -- 6. Paid-verified means Xero recorded the payment (status PAID; trade
---    invoices paid). It is not a bank reconciliation.
+--    invoices paid). It is not a bank reconciliation. A zero-value line (a
+--    trade's empty day on the job) neither blocks nor proves payment.
 --
 -- job_financials, get_job_financials and their make-safe consumers are left
 -- untouched. Nothing here writes.
@@ -388,11 +392,12 @@ cost AS (
     sum(e.amount_ex) FILTER (WHERE e.is_actual AND e.source = 'trade_line') AS trade_lines_ex,
     sum(e.amount_ex) FILTER (WHERE NOT e.is_actual) AS committed_open_ex,
     count(*) FILTER (WHERE e.is_actual) AS actual_events,
-    bool_and(e.paid) FILTER (WHERE e.is_actual) AS all_paid,
+    bool_and(e.paid) FILTER (WHERE e.is_actual AND e.amount_ex <> 0) AS all_paid,
     bool_or(e.lane_detail = 'unclassified') AS has_unclassified,
     bool_or(e.source = 'trade_line' AND e.match_method <> 'job_id') AS has_text_matched,
     bool_or(e.incomplete_invoice) AS has_incomplete_invoice,
-    bool_or(e.source = 'trade_line' AND e.document_status NOT IN ('approved', 'pushed_to_xero', 'paid')) AS has_unapproved_trade,
+    bool_or(e.source = 'trade_line' AND e.amount_ex <> 0
+            AND e.document_status NOT IN ('approved', 'pushed_to_xero', 'paid')) AS has_unapproved_trade,
     min(e.event_date) FILTER (WHERE e.is_actual) AS first_cost_date,
     max(e.event_date) FILTER (WHERE e.is_actual) AS last_cost_date
   FROM public.v_job_cost_events e
@@ -588,6 +593,13 @@ basis AS (
 costed AS (
   SELECT
     s.*,
+    -- Materials are owed but none is known: a fencing, patio, decking or combo
+    -- job, or any job whose expected cost carries materials, costed line-level
+    -- with no materials line. Its margin would be labour-only, so it is
+    -- suppressed rather than published high.
+    (s.cost_basis = 'line_level'
+      AND s.line_materials_ex = 0
+      AND (s.work_type IN ('fencing', 'patio', 'decking', 'combo') OR COALESCE(s.expected_materials_ex, 0) > 0)) AS materials_missing,
     s.line_labour_ex AS actual_labour_ex,
     CASE WHEN s.cost_basis = 'xero_project_inferred'
          THEN s.xero_project_expenses_ex - s.line_non_materials_ex
@@ -608,12 +620,14 @@ flagged AS (
       WHEN NOT c.has_cost THEN 'no_cost_linked'
       WHEN c.has_incomplete_invoice THEN 'incomplete_invoice_lines'
       WHEN c.has_unclassified THEN 'unclassified_lines'
+      WHEN c.materials_missing THEN 'materials_not_linked'
       WHEN c.has_text_matched THEN 'text_matched_lines'
       WHEN c.cost_basis = 'xero_project_inferred' THEN 'cost_basis_inferred'
       WHEN c.actual_labour_ex = 0 THEN 'no_labour_linked'
       ELSE 'ok'
     END AS cost_flag,
-    (c.invoiced_ex > 0 AND c.has_cost AND NOT c.has_incomplete_invoice AND NOT c.has_unclassified) AS margin_ok
+    (c.invoiced_ex > 0 AND c.has_cost AND NOT c.has_incomplete_invoice AND NOT c.has_unclassified
+      AND NOT c.materials_missing) AS margin_ok
   FROM costed c
 )
 SELECT
@@ -642,6 +656,7 @@ SELECT
   f.actual_cost_ex,
   (f.cost_basis = 'xero_project_inferred') AS materials_inferred,
   f.line_total_ex AS line_level_cost_ex,
+  f.actual_cost_events,
   f.trade_lines_ex,
   f.committed_open_ex,
   f.xero_project_expenses_ex,
@@ -672,8 +687,7 @@ SELECT
     CASE WHEN f.cost_basis = 'xero_project_inferred' THEN 'cost_basis_inferred' END,
     CASE WHEN f.has_cost AND f.actual_labour_ex = 0 THEN 'no_labour_linked' END,
     CASE WHEN f.project_below_trade_lines THEN 'project_below_trade_lines' END,
-    CASE WHEN f.cost_basis = 'line_level' AND f.has_cost AND f.actual_materials_ex = 0
-              AND f.work_type IN ('fencing', 'patio', 'decking', 'combo') THEN 'materials_not_linked' END,
+    CASE WHEN f.has_cost AND f.materials_missing THEN 'materials_not_linked' END,
     CASE WHEN f.has_unapproved_trade THEN 'unapproved_trade_charges' END,
     CASE WHEN f.committed_open_ex > 0 THEN 'open_purchase_orders' END,
     CASE WHEN f.draft_revenue_ex > 0 THEN 'draft_revenue' END,
