@@ -617,3 +617,9 @@ context-document-vision|supabase/migrations/20261006001000_context_document_visi
 context-document-vision|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
 context-document-vision|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 context-document-vision|supabase/migrations/20261005180000_context_email_legacy_dedupe_and_history.sql|function|context_catchup_list_backfill
+# Job profit engine (job profitability PR 1): job_profit / job_profit_list read
+# these service-role-only views; the migration must land before the ops-api deploy.
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_profit
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cost_events
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
