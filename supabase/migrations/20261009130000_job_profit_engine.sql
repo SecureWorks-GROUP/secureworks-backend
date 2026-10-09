@@ -80,12 +80,6 @@
 --    cost carries materials, costed line-level with no materials line. No
 --    labour linked means a job costed line-level with no labour line.
 --
--- 8. Work type and subtype follow the family rules, whatever jobs.type says:
---    the family is metadata.insurance_job_type 'restoration' first, then
---    metadata.ses_family, metadata.makesafe_job_family, then the make-safe
---    report type. A repair family (or jobs.type repair) reports as work type
---    repair; work_subtype is the family.
---
 -- 6. Paid-verified means Xero recorded the payment (status PAID; trade
 --    invoices paid). It is not a bank reconciliation. A zero-value line (a
 --    trade's empty day on the job) neither blocks nor proves payment.
@@ -94,6 +88,12 @@
 --    affect variations_listed_ex: accepted_at, status accepted, or status
 --    invoiced, unless declined_at is set or status is declined/rejected. This
 --    follows job_commercial_read.ts variationAgreement.
+--
+-- 8. Work type and subtype follow the family rules, whatever jobs.type says:
+--    the family is metadata.insurance_job_type 'restoration' first, then
+--    metadata.ses_family, metadata.makesafe_job_family, then the make-safe
+--    report type. A repair family (or jobs.type repair) reports as work type
+--    repair; work_subtype is the family.
 --
 -- job_financials, get_job_financials and their make-safe consumers are left
 -- untouched. Nothing here writes.
