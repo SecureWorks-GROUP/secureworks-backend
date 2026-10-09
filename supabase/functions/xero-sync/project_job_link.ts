@@ -11,10 +11,15 @@
 
 import { extractJobNumber } from "./materials_ingest.ts";
 
-export type ProjectJobLinkMethod = "project_name_job_number" | "contact_match" | null;
+export type ProjectJobLinkMethod =
+  | "project_name_job_number"
+  | "contact_match"
+  | null;
 
 /** The job number a project name carries, in the shared job-reference grammar. */
-export function projectNameJobNumber(name: string | null | undefined): string | null {
+export function projectNameJobNumber(
+  name: string | null | undefined,
+): string | null {
   return extractJobNumber(name);
 }
 
@@ -31,9 +36,13 @@ export function resolveProjectJobId(input: {
   const token = projectNameJobNumber(input.name);
   if (token) {
     const ids = input.jobIdsByNumber.get(token) ?? [];
-    if (ids.length === 1) return { jobId: ids[0], method: "project_name_job_number" };
+    if (ids.length === 1) {
+      return { jobId: ids[0], method: "project_name_job_number" };
+    }
   }
-  const contactJob = input.contactId ? input.contactToJob.get(input.contactId) : undefined;
+  const contactJob = input.contactId
+    ? input.contactToJob.get(input.contactId)
+    : undefined;
   if (contactJob) return { jobId: contactJob, method: "contact_match" };
   return { jobId: null, method: null };
 }

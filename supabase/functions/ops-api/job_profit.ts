@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 // Job profit reads (job profitability PR 1).
 //
 // ops-api `job_profit` (one job: the engine's summary plus a dated money
@@ -24,7 +25,10 @@ export const JOB_PROFIT_LABELS = {
  * or an admin/owner session. ops_manager, trades, the routine and the agent
  * read credential are refused.
  */
-export function jobProfitCallerAllowed(authMode: string, role: string | null | undefined): boolean {
+export function jobProfitCallerAllowed(
+  authMode: string,
+  role: string | null | undefined,
+): boolean {
   if (authMode === "api_key") return true;
   const r = String(role || "").toLowerCase();
   return authMode === "jwt" && (r === "admin" || r === "owner");
@@ -32,7 +36,8 @@ export function jobProfitCallerAllowed(authMode: string, role: string | null | u
 
 export type JobProfitResult = { status: number; body: Record<string, unknown> };
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const LIST_TOKEN_RE = /^[a-z_]{1,40}$/;
 const LIST_DEFAULT_LIMIT = 100;
@@ -90,7 +95,10 @@ function round2(n: number): number {
  * The financial job story: every cost and revenue event, plus one "paid" entry
  * per paid document (summed from the same event rows), oldest first. Pure.
  */
-export function buildJobProfitTimeline(costEvents: any[], revenueEvents: any[]): TimelineEntry[] {
+export function buildJobProfitTimeline(
+  costEvents: any[],
+  revenueEvents: any[],
+): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const e of costEvents) {
     out.push({
@@ -133,10 +141,18 @@ export function buildJobProfitTimeline(costEvents: any[], revenueEvents: any[]):
 
   // One paid entry per paid document, on its paid date.
   const paidDocs = new Map<string, TimelineEntry>();
-  const addPaid = (key: string, kind: TimelineEntry["kind"], e: any, date: string, amount: number | null) => {
+  const addPaid = (
+    key: string,
+    kind: TimelineEntry["kind"],
+    e: any,
+    date: string,
+    amount: number | null,
+  ) => {
     const prior = paidDocs.get(key);
     if (prior) {
-      prior.amount_ex = prior.amount_ex === null || amount === null ? null : round2(prior.amount_ex + amount);
+      prior.amount_ex = prior.amount_ex === null || amount === null
+        ? null
+        : round2(prior.amount_ex + amount);
       return;
     }
     paidDocs.set(key, {
@@ -158,13 +174,27 @@ export function buildJobProfitTimeline(costEvents: any[], revenueEvents: any[]):
     });
   };
   for (const e of revenueEvents) {
-    if (e.kind === "invoice_line" && e.counts_as_invoiced && e.paid && e.paid_on) {
-      addPaid(`rev:${e.document_id}`, "sales_invoice_paid", e, e.paid_on, num(e.amount_ex));
+    if (
+      e.kind === "invoice_line" && e.counts_as_invoiced && e.paid && e.paid_on
+    ) {
+      addPaid(
+        `rev:${e.document_id}`,
+        "sales_invoice_paid",
+        e,
+        e.paid_on,
+        num(e.amount_ex),
+      );
     }
   }
   for (const e of costEvents) {
     if (e.is_actual && e.paid && e.paid_on && e.document_id) {
-      addPaid(`cost:${e.source}:${e.document_id}`, "cost_paid", e, e.paid_on, num(e.amount_ex));
+      addPaid(
+        `cost:${e.source}:${e.document_id}`,
+        "cost_paid",
+        e,
+        e.paid_on,
+        num(e.amount_ex),
+      );
     }
   }
   out.push(...paidDocs.values());
@@ -193,17 +223,33 @@ export function parseJobProfitListFilters(params: URLSearchParams):
   const list = (name: string): string[] | null => {
     const raw = (params.get(name) || "").trim();
     if (!raw) return [];
-    const parts = raw.split(",").map((p) => p.trim().toLowerCase()).filter(Boolean);
+    const parts = raw.split(",").map((p) => p.trim().toLowerCase()).filter(
+      Boolean,
+    );
     return parts.every((p) => LIST_TOKEN_RE.test(p)) ? parts : null;
   };
   const types = list("type");
-  if (types === null) return { ok: false, error: "type must be a comma-separated list of job types" };
+  if (types === null) {
+    return {
+      ok: false,
+      error: "type must be a comma-separated list of job types",
+    };
+  }
   const statuses = list("status");
-  if (statuses === null) return { ok: false, error: "status must be a comma-separated list of job statuses" };
+  if (statuses === null) {
+    return {
+      ok: false,
+      error: "status must be a comma-separated list of job statuses",
+    };
+  }
   const from = params.get("from");
   const to = params.get("to");
-  if (from && !DATE_RE.test(from)) return { ok: false, error: "from must be YYYY-MM-DD" };
-  if (to && !DATE_RE.test(to)) return { ok: false, error: "to must be YYYY-MM-DD" };
+  if (from && !DATE_RE.test(from)) {
+    return { ok: false, error: "from must be YYYY-MM-DD" };
+  }
+  if (to && !DATE_RE.test(to)) {
+    return { ok: false, error: "to must be YYYY-MM-DD" };
+  }
   const dateFieldRaw = params.get("date_field") || "created";
   if (dateFieldRaw !== "created" && dateFieldRaw !== "invoiced") {
     return { ok: false, error: "date_field must be created or invoiced" };
@@ -215,16 +261,35 @@ export function parseJobProfitListFilters(params: URLSearchParams):
   if (!Number.isInteger(limit) || limit < 1 || limit > LIST_MAX_LIMIT) {
     return { ok: false, error: `limit must be 1 to ${LIST_MAX_LIMIT}` };
   }
-  if (!Number.isInteger(offset) || offset < 0) return { ok: false, error: "offset must be 0 or more" };
-  return { ok: true, types, statuses, from, to, dateField: dateFieldRaw, limit, offset };
+  if (!Number.isInteger(offset) || offset < 0) {
+    return { ok: false, error: "offset must be 0 or more" };
+  }
+  return {
+    ok: true,
+    types,
+    statuses,
+    from,
+    to,
+    dateField: dateFieldRaw,
+    limit,
+    offset,
+  };
 }
 
 /** ops-api `job_profit`: one job's numbers and its dated money timeline. */
-export async function jobProfitAction(client: any, params: URLSearchParams): Promise<JobProfitResult> {
+export async function jobProfitAction(
+  client: any,
+  params: URLSearchParams,
+): Promise<JobProfitResult> {
   const jobIdParam = (params.get("job_id") || params.get("jobId") || "").trim();
-  const jobNumber = (params.get("job_number") || params.get("jobNumber") || "").trim().toUpperCase();
-  if (!jobIdParam && !jobNumber) return { status: 400, body: { error: "job_id or job_number required" } };
-  if (jobIdParam && !UUID_RE.test(jobIdParam)) return { status: 400, body: { error: "job_id must be a UUID" } };
+  const jobNumber = (params.get("job_number") || params.get("jobNumber") || "")
+    .trim().toUpperCase();
+  if (!jobIdParam && !jobNumber) {
+    return { status: 400, body: { error: "job_id or job_number required" } };
+  }
+  if (jobIdParam && !UUID_RE.test(jobIdParam)) {
+    return { status: 400, body: { error: "job_id must be a UUID" } };
+  }
   if (!jobIdParam && !/^[A-Z0-9-]{3,40}$/.test(jobNumber)) {
     return { status: 400, body: { error: "job_number is not a job number" } };
   }
@@ -235,12 +300,22 @@ export async function jobProfitAction(client: any, params: URLSearchParams): Pro
       .select("id")
       .eq("job_number", jobNumber)
       .limit(2);
-    if (jobError) return { status: 500, body: { error: `job number lookup failed: ${jobError.message}` } };
-    if (!jobs || jobs.length === 0) return { status: 404, body: { error: "no job matches that job number" } };
+    if (jobError) {
+      return {
+        status: 500,
+        body: { error: `job number lookup failed: ${jobError.message}` },
+      };
+    }
+    if (!jobs || jobs.length === 0) {
+      return { status: 404, body: { error: "no job matches that job number" } };
+    }
     if (jobs.length > 1) {
       return {
         status: 409,
-        body: { error: "job_number matches more than one job; pass job_id", job_ids: jobs.map((r: any) => r.id) },
+        body: {
+          error: "job_number matches more than one job; pass job_id",
+          job_ids: jobs.map((r: any) => r.id),
+        },
       };
     }
     jobId = jobs[0].id;
@@ -250,31 +325,81 @@ export async function jobProfitAction(client: any, params: URLSearchParams): Pro
     .select("*")
     .eq("job_id", jobId)
     .limit(2);
-  if (error) return { status: 500, body: { error: `job profit read failed: ${error.message}` } };
-  if (!rows || rows.length === 0) return { status: 404, body: { error: "no job profit row for that job" } };
+  if (error) {
+    return {
+      status: 500,
+      body: { error: `job profit read failed: ${error.message}` },
+    };
+  }
+  if (!rows || rows.length === 0) {
+    return { status: 404, body: { error: "no job profit row for that job" } };
+  }
   if (rows.length > 1) {
-    return { status: 500, body: { error: "job profit view returned more than one row for a job" } };
+    return {
+      status: 500,
+      body: { error: "job profit view returned more than one row for a job" },
+    };
   }
   const summary = rows[0];
 
   const [costs, revenue] = await Promise.all([
-    client.from("v_job_cost_events").select(COST_EVENT_COLUMNS).eq("job_id", summary.job_id).order("event_date", { ascending: true }).limit(2000),
-    client.from("v_job_revenue_events").select(REVENUE_EVENT_COLUMNS).eq("job_id", summary.job_id).order("invoice_date", { ascending: true }).limit(2000),
+    client.from("v_job_cost_events").select(COST_EVENT_COLUMNS).eq(
+      "job_id",
+      summary.job_id,
+    ).order("event_date", { ascending: true }).limit(2000),
+    client.from("v_job_revenue_events").select(REVENUE_EVENT_COLUMNS).eq(
+      "job_id",
+      summary.job_id,
+    ).order("invoice_date", { ascending: true }).limit(2000),
   ]);
-  if (costs.error) return { status: 500, body: { error: `job cost events read failed: ${costs.error.message}` } };
-  if (revenue.error) return { status: 500, body: { error: `job revenue events read failed: ${revenue.error.message}` } };
+  if (costs.error) {
+    return {
+      status: 500,
+      body: { error: `job cost events read failed: ${costs.error.message}` },
+    };
+  }
+  if (revenue.error) {
+    return {
+      status: 500,
+      body: {
+        error: `job revenue events read failed: ${revenue.error.message}`,
+      },
+    };
+  }
 
   const costEvents = costs.data || [];
   const revenueEvents = revenue.data || [];
-  const trades = new Map<string, { party_id: string | null; party: string; amount_ex: number; lines: number; first: string | null; last: string | null }>();
+  const trades = new Map<
+    string,
+    {
+      party_id: string | null;
+      party: string;
+      amount_ex: number;
+      lines: number;
+      first: string | null;
+      last: string | null;
+    }
+  >();
   for (const e of costEvents) {
     if (e.source !== "trade_line" || !e.is_actual) continue;
     const key = e.party_id ? `id:${e.party_id}` : `line:${e.source_id}`;
-    const t = trades.get(key) ?? { party_id: e.party_id ?? null, party: e.party, amount_ex: 0, lines: 0, first: null, last: null };
+    const t = trades.get(key) ??
+      {
+        party_id: e.party_id ?? null,
+        party: e.party,
+        amount_ex: 0,
+        lines: 0,
+        first: null,
+        last: null,
+      };
     t.amount_ex = round2(t.amount_ex + (num(e.amount_ex) ?? 0));
     t.lines += 1;
-    if (e.event_date && (!t.first || e.event_date < t.first)) t.first = e.event_date;
-    if (e.event_date && (!t.last || e.event_date > t.last)) t.last = e.event_date;
+    if (e.event_date && (!t.first || e.event_date < t.first)) {
+      t.first = e.event_date;
+    }
+    if (e.event_date && (!t.last || e.event_date > t.last)) {
+      t.last = e.event_date;
+    }
     trades.set(key, t);
   }
 
@@ -292,19 +417,41 @@ export async function jobProfitAction(client: any, params: URLSearchParams): Pro
 }
 
 /** ops-api `job_profit_list`: the engine's rows, filtered. */
-export async function jobProfitListAction(client: any, params: URLSearchParams): Promise<JobProfitResult> {
+export async function jobProfitListAction(
+  client: any,
+  params: URLSearchParams,
+): Promise<JobProfitResult> {
   const f = parseJobProfitListFilters(params);
   if (!f.ok) return { status: 400, body: { error: f.error } };
   let query = client.from("v_job_profit").select("*", { count: "planned" });
   if (f.types.length) query = query.in("work_type", f.types);
   if (f.statuses.length) query = query.in("status", f.statuses);
-  const dateColumn = f.dateField === "invoiced" ? "first_invoice_date" : "created_at";
-  if (f.from) query = query.gte(dateColumn, f.dateField === "invoiced" ? f.from : `${f.from}T00:00:00+08:00`);
-  if (f.to) query = query.lte(dateColumn, f.dateField === "invoiced" ? f.to : `${f.to}T23:59:59.999+08:00`);
-  query = query.order("created_at", { ascending: false }).order("job_id", { ascending: true })
+  const dateColumn = f.dateField === "invoiced"
+    ? "first_invoice_date"
+    : "created_at";
+  if (f.from) {
+    query = query.gte(
+      dateColumn,
+      f.dateField === "invoiced" ? f.from : `${f.from}T00:00:00+08:00`,
+    );
+  }
+  if (f.to) {
+    query = query.lte(
+      dateColumn,
+      f.dateField === "invoiced" ? f.to : `${f.to}T23:59:59.999+08:00`,
+    );
+  }
+  query = query.order("created_at", { ascending: false }).order("job_id", {
+    ascending: true,
+  })
     .range(f.offset, f.offset + f.limit - 1);
   const { data, error, count } = await query;
-  if (error) return { status: 500, body: { error: `job profit list read failed: ${error.message}` } };
+  if (error) {
+    return {
+      status: 500,
+      body: { error: `job profit list read failed: ${error.message}` },
+    };
+  }
   return {
     status: 200,
     body: {
@@ -312,7 +459,13 @@ export async function jobProfitListAction(client: any, params: URLSearchParams):
       total_estimate: count ?? null,
       limit: f.limit,
       offset: f.offset,
-      filters: { type: f.types, status: f.statuses, from: f.from, to: f.to, date_field: f.dateField },
+      filters: {
+        type: f.types,
+        status: f.statuses,
+        from: f.from,
+        to: f.to,
+        date_field: f.dateField,
+      },
       labels: JOB_PROFIT_LABELS,
     },
   };
