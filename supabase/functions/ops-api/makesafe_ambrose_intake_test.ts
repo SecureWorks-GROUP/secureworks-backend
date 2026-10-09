@@ -306,7 +306,15 @@ Deno.test("subject address and suburb parsing", () => {
     ambroseSuburbFromAddress("1 Example Place Testvale WA 6171"),
     "Testvale",
   );
-  // A street-type word straight after a closing type starts the suburb.
+  // St or Green after another street type opens the suburb.
+  assertEquals(
+    ambroseSuburbFromAddress("3 Hale Pl St James WA 6102"),
+    "St James",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("8 Ocean Way Green Head WA 6514"),
+    "Green Head",
+  );
   assertEquals(
     ambroseSuburbFromAddress("12 Smith Rd St James WA 6102"),
     "St James",
@@ -319,10 +327,25 @@ Deno.test("subject address and suburb parsing", () => {
     ambroseSuburbFromAddress("8 Sample Road St Testville WA 6102"),
     "St Testville",
   );
-  // A naming type before the closing one stays in the street.
+  assertEquals(
+    ambroseSuburbFromAddress("12 Green St Testville WA 6000"),
+    "Testville",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("4 Park View Rd Testville WA 6000"),
+    "Testville",
+  );
   assertEquals(
     ambroseSuburbFromAddress("3 Lake View Rd Testvale WA 6171"),
     "Testvale",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("9 Example Tce Testville WA 6000"),
+    "Testville",
+  );
+  assertEquals(
+    ambroseSuburbFromAddress("123 Sample Street Mall Testville WA 6000"),
+    "Testville",
   );
   // No street type, or nothing after it: no suburb (the backstop flags it).
   assertEquals(ambroseSuburbFromAddress("Lot 9 Testvale WA 6171"), null);
