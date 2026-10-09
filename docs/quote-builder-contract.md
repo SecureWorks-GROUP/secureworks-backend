@@ -45,7 +45,7 @@ would not.
 | Scope and its versions | `quote_builder_versions` (new) | One row per version. Cost lines, charge lines, narrative, totals. |
 | Internal cost lines ("what it costs us") | `quote_builder_versions.cost_lines` | Never on the client PDF, never sent to trades. |
 | Client charge lines ("what we charge") | `quote_builder_versions.charge_lines` | What the client PDF shows. |
-| Site photos + captions | `job_media` (`phase='quote_builder'`, `type='photo'`, caption in `label`) | Files in Storage bucket `job-photos`. Their own phase (`20261009120000`) keeps them internal: SES packs, report photo sets, the board photo count and the builder photo email never pick them up, and the builder lists and accepts only photos in that phase. |
+| Site photos + captions | `job_media` (`phase='quote_builder'`, `type='photo'`, caption in `label`) | Files in Storage bucket `job-photos`. Their own phase (`20261009120000`) keeps them internal: `isApplicablePackPhoto` drops it for SES packs, curated bind, the draft pack and roof report photo sets and the final-submit photo floor, and the mailer photo route drops it too. The make-safe board photo count does not filter the phase; it never sees these photos because the board excludes repair and private jobs. The builder lists and accepts only photos in that phase. |
 | Client quote PDF | Storage bucket `job-pdfs` + one `job_documents` row (`type='quote'`) | Its own document, linked from the version. |
 | Variations | `job_variations` (existing) + a `kind='variation'` version chain | The variation row is created when Hugo issues it. |
 | Client details on a private job | `jobs` (`client_name`, `client_phone`, `client_email`, `site_address`, `site_suburb`) | Copied into each version's `client_snapshot`. |
