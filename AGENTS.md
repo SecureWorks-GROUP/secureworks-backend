@@ -4359,7 +4359,8 @@ null: the client, each neighbour and a whole-job quote are different parties.
 or a forward from an older fence-run duplicate to the party's current one), and
 a retired link forwards only to the same party's current quote; never list
 every live quote on the job. Accept refuses a non-current run duplicate; "all
-accepted" counts current documents only. Once any per-contact document exists,
+accepted" counts current documents only and skips quote builder documents
+(run label `qb:<chain>`, `_shared/quote_builder_run_label.ts`). Once any per-contact document exists,
 a job-wide document (contact null AND run label null) is not a required party
 for job acceptance and is not retired either; a contact-less RUN document (the
 client's `(null, 'RHS')`) still is required. `/send` retires the party's earlier versions unless the caller passes
