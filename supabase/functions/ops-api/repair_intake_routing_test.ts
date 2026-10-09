@@ -29,8 +29,8 @@ import {
 import { buildDeterministicIntakePlan } from "./makesafe_deterministic_intake.ts";
 import {
   AMBROSE_TEST_COMPANY_ID,
-  type AmbrosePurchaseOrderFixture,
   ambrosePdfText,
+  type AmbrosePurchaseOrderFixture,
   ambroseSource,
 } from "./makesafe_ambrose_intake_fixtures.ts";
 
