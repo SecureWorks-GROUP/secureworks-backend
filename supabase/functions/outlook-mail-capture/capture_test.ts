@@ -14,12 +14,14 @@ import {
 } from "../_shared/evidence/outlook_mail_fixtures.ts";
 import type { AttachmentResult } from "./attachments.ts";
 import {
+  type AudienceResolveOutcome,
   type CaptureDeps,
   type CaptureOutcome,
   type DeepGate,
   type DeepScope,
   deepWindow,
   historyWindow,
+  mayResolveAudience,
   perthMonth,
   POLICY,
   runOutlookCapture,
@@ -83,6 +85,9 @@ interface World {
   deepScope: DeepScope;
   /** The make-safe prefix set; null reads as unreadable. */
   prefixes: string[] | null;
+  /** Every copy handed to context_email_audience_resolve, and what it answers. */
+  resolveCalls: Record<string, unknown>[];
+  resolveAnswer?: AudienceResolveOutcome;
 }
 
 function world(partial: Partial<World> = {}): World {
@@ -124,6 +129,7 @@ function world(partial: Partial<World> = {}): World {
       builderRefs: new Map(),
     },
     prefixes: ["MLB", "AJBR", "MS"],
+    resolveCalls: [],
     ...partial,
   };
 }
@@ -194,6 +200,10 @@ function deps(w: World): CaptureDeps {
       const id = `ev-${w.keys.size + 1}`;
       w.keys.set(key, id);
       return { outcome: "inserted", id };
+    },
+    resolveAudience: async (row) => {
+      w.resolveCalls.push(row);
+      return w.resolveAnswer ?? "unchanged";
     },
     legacyCopy: async (args) => {
       w.legacyCalls.push(args);
@@ -1627,4 +1637,280 @@ Deno.test("every mode writes the builder references an email names; the prefix f
       .builder_ref_prefixes_floor_only,
     1,
   );
+});
+
+// Group mailbox audience (9 Oct 2026): a group post lists no recipients, so
+// who our own post went to is read from its thread, and a copy that meets
+// the row another copy saved goes to the resolver when it may know better.
+function groupSource(email: string, key: string): SourceRow {
+  return {
+    email,
+    source_key: key,
+    kind: "group",
+    scope_label: key,
+    owner_privacy: false,
+  };
+}
+
+function gpost(
+  id: string,
+  at: string,
+  from: string,
+  subject: string,
+  words: string,
+  internetMessageId?: string,
+): OutlookMailItem {
+  return {
+    graphId: id,
+    internetMessageId: internetMessageId ??
+      `<${id.toLowerCase()}@mail.example.org>`,
+    subject,
+    from,
+    to: [],
+    cc: [],
+    receivedAt: at,
+    sentAt: at,
+    bodyText: words,
+    folderKind: "group",
+  };
+}
+
+Deno.test("group mailbox audience: our reply in a builder's thread is saved outbound to the builder, read from the whole thread; our post alone in its thread is unknown, never internal", async () => {
+  const w = world({
+    sources: [groupSource("ses@secureworkswa.com.au", "ses")],
+    groups: {
+      "ses@secureworkswa.com.au": {
+        id: "GRP-SES",
+        posts: [
+          // The builder's request is older than the poll's window: it still names the thread's party.
+          {
+            conv: "C1",
+            thread: "T1",
+            post: gpost(
+              "PB",
+              "2026-10-02T05:00:00Z",
+              "Jo Coordinator <coordinator@builder.example>",
+              "Our Ref: BLD-99001",
+              "Can you confirm the date?",
+            ),
+          },
+          {
+            conv: "C1",
+            thread: "T1",
+            post: gpost(
+              "PR",
+              "2026-10-02T05:50:00Z",
+              "admin@secureworkswa.com.au",
+              "Our Ref: BLD-99001",
+              "Booked in for Friday.",
+            ),
+          },
+          {
+            conv: "C2",
+            thread: "T2",
+            post: gpost(
+              "PA",
+              "2026-10-02T05:52:00Z",
+              "admin@secureworkswa.com.au",
+              "BLD-99001 - Xero invoice INV-99001",
+              "Invoice attached.",
+            ),
+          },
+        ],
+      },
+    },
+  });
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  const run = lastRun(w, "outlook_ses");
+  assertEquals(run.status, "succeeded");
+  const byKey = Object.fromEntries(
+    w.captured.map((r) => [String(r.provider_message_id), r]),
+  );
+  assertEquals(Object.keys(byKey).sort(), [
+    "email:pa@mail.example.org",
+    "email:pr@mail.example.org",
+  ]);
+  const reply = byKey["email:pr@mail.example.org"];
+  const replyPayload = reply.payload as Record<string, unknown>;
+  assertEquals(reply.event_type, "client.email_out");
+  assertEquals(reply.direction, "outbound");
+  assertEquals(replyPayload.email, "coordinator@builder.example");
+  assertEquals(replyPayload.audience_basis, "group_thread");
+  assertEquals(replyPayload.to, []);
+  const alone = byKey["email:pa@mail.example.org"];
+  const alonePayload = alone.payload as Record<string, unknown>;
+  assertEquals(alone.event_type, "staff.email_unknown_audience");
+  assertEquals(alone.direction, "outbound");
+  assertEquals(alonePayload.email, null);
+  assertEquals(alonePayload.audience_basis, "unknown");
+  assertEquals(run.counts!.audience_from_thread, 1);
+  assertEquals(run.counts!.audience_unknown, 1);
+  assertEquals(run.counts!.inserted, 2);
+  // Nothing met a saved row: the resolver was never asked.
+  assertEquals(w.resolveCalls, []);
+});
+
+Deno.test("group mailbox audience: a mailbox copy of our own email that went to a group and meets the row its group post saved goes to the resolver; a duplicate sent to no group does not", async () => {
+  const x = "<GMA-X-0001@secureworkswa.com.au>";
+  const w = world({
+    resolveAnswer: "relabelled",
+    sources: [
+      groupSource("ses@secureworkswa.com.au", "ses"),
+      {
+        email: "admin@secureworkswa.com.au",
+        source_key: "admin",
+        kind: "user",
+        scope_label: "admin",
+        owner_privacy: false,
+      },
+    ],
+    groups: {
+      "ses@secureworkswa.com.au": {
+        id: "GRP-SES",
+        posts: [{
+          conv: "C1",
+          thread: "T1",
+          post: gpost(
+            "PX",
+            "2026-10-02T05:50:00Z",
+            "admin@secureworkswa.com.au",
+            "Our Ref: BLD-99001",
+            "Booked in for Friday.",
+            x,
+          ),
+        }],
+      },
+    },
+    mailboxes: {
+      "admin@secureworkswa.com.au": [
+        msg(1, "2026-10-02T05:50:00Z", {
+          internetMessageId: x,
+          subject: "RE: Our Ref: BLD-99001",
+          from: "admin@secureworkswa.com.au",
+          to: ["coordinator@builder.example"],
+          cc: ["SES <ses@secureworkswa.com.au>"],
+          parentFolderId: "F-sent",
+        }),
+        // Our email to a customer, saved before through another copy: it went to no group.
+        msg(2, "2026-10-02T05:51:00Z", {
+          internetMessageId: "<gma-y-0002@secureworkswa.com.au>",
+          from: "admin@secureworkswa.com.au",
+          to: ["pat.example@example.com"],
+          parentFolderId: "F-sent",
+        }),
+      ],
+    },
+  });
+  w.keys.set("email:gma-y-0002@secureworkswa.com.au", "ev-earlier");
+  await runOutlookCapture(deps(w), { mode: "poll" });
+  // The group copy was saved first: no outside party in its thread, unknown.
+  assertEquals(lastRun(w, "outlook_ses").counts!.audience_unknown, 1);
+  // The Sent Items copy met it and was handed over whole; the other duplicate was not.
+  assertEquals(w.resolveCalls.length, 1);
+  const copy = w.resolveCalls[0];
+  const copyPayload = copy.payload as Record<string, unknown>;
+  assertEquals(copy.provider_message_id, "email:gma-x-0001@secureworkswa.com.au");
+  assertEquals(copy.event_type, "client.email_out");
+  assertEquals(copyPayload.folder_kind, "sent");
+  assertEquals(copyPayload.email, "coordinator@builder.example");
+  assertEquals(copyPayload.cc, ["ses@secureworkswa.com.au"]);
+  const admin = lastRun(w, "outlook_admin");
+  assertEquals(admin.counts!.duplicates, 2);
+  assertEquals(admin.counts!.audience_relabelled, 1);
+  assertEquals(admin.counts!.audience_resolve_errors, 0);
+});
+
+Deno.test("group mailbox audience: our group post read again (a sweep) goes to the resolver, someone else's never; a failed call is counted and the run goes on", async () => {
+  const w = world({
+    resolveAnswer: "error",
+    sources: [groupSource("ses@secureworkswa.com.au", "ses")],
+    groups: {
+      "ses@secureworkswa.com.au": {
+        id: "GRP-SES",
+        posts: [
+          {
+            conv: "C1",
+            thread: "T1",
+            post: gpost(
+              "PB",
+              "2026-10-02T05:40:00Z",
+              "coordinator@builder.example",
+              "Our Ref: BLD-99001",
+              "Can you confirm?",
+            ),
+          },
+          {
+            conv: "C1",
+            thread: "T1",
+            post: gpost(
+              "PR",
+              "2026-10-02T05:50:00Z",
+              "admin@secureworkswa.com.au",
+              "Our Ref: BLD-99001",
+              "Booked in.",
+            ),
+          },
+        ],
+      },
+    },
+  });
+  // Both were saved by an earlier reading of the group.
+  w.keys.set("email:pb@mail.example.org", "ev-b");
+  w.keys.set("email:pr@mail.example.org", "ev-r");
+  await runOutlookCapture(deps(w), { mode: "sweep" });
+  const run = lastRun(w, "outlook_sweep_ses");
+  assertEquals(run.status, "succeeded");
+  assertEquals(run.counts!.duplicates, 2);
+  assertEquals(w.resolveCalls.map((r) => r.provider_message_id), [
+    "email:pr@mail.example.org",
+  ]);
+  assertEquals(
+    (w.resolveCalls[0].payload as Record<string, unknown>).audience_basis,
+    "group_thread",
+  );
+  assertEquals(run.counts!.audience_resolve_errors, 1);
+  assertEquals(run.counts!.audience_relabelled, 0);
+});
+
+Deno.test("group mailbox audience: which copies that meet a saved row may know better who our email went to", () => {
+  const groups = new Set([
+    "ses@secureworkswa.com.au",
+    "finance@secureworkswa.com.au",
+  ]);
+  const r = (to: string[], cc: string[] = []) => ({ payload: { to, cc } });
+  assert(mayResolveAudience(r([]), "ours", "group", groups));
+  assert(
+    mayResolveAudience(
+      r(["coordinator@builder.example"], ["ses@secureworkswa.com.au"]),
+      "ours",
+      "user",
+      groups,
+    ),
+  );
+  assert(
+    mayResolveAudience(
+      r(["Finance <FINANCE@secureworkswa.com.au>"]),
+      "ours",
+      "user",
+      groups,
+    ),
+  );
+  assert(
+    !mayResolveAudience(
+      r(["pat.example@example.com"], ["admin@secureworkswa.com.au"]),
+      "ours",
+      "user",
+      groups,
+    ),
+  );
+  assert(!mayResolveAudience(r([]), "ours", "user", groups));
+  assert(
+    !mayResolveAudience(
+      r(["ses@secureworkswa.com.au"]),
+      "customer",
+      "user",
+      groups,
+    ),
+  );
+  assert(!mayResolveAudience(r([]), "customer", "group", groups));
 });

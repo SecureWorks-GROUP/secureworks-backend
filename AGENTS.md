@@ -4363,3 +4363,19 @@ deep history load (`20261007080000`, flag `email_reader_deep_v1`): its rows
 carry `metadata.history_tier` deep, which AI placement never asks about and
 which never moves a job's first record, and row 14 reads its reach through
 `context_email_history_reach` / `_reach_jobs`, never by re-deriving it.
+
+## A Group Post Shows No Recipients, So Our Own Is Never Internal On That Alone
+
+Graph lists a group post (ses@, finance@, fencing@, patios@) with no To or Cc.
+`_shared/evidence/outlook_mail.ts` reads who our own post went to from its
+group thread (`groupThreadParty`; the reader hands each post its thread through
+`withGroupThread`), else labels it `staff.email_unknown_audience` (outbound, no
+counterpart, `payload.audience_basis` unknown), never `staff.email_internal`;
+only recorded recipients that are all ours make our email internal. The ledger
+store and the reader key on the party-roles audience, never the event type, so
+an unknown audience reads as possibly external. A copy meeting the saved row
+goes to `context_email_audience_resolve` (a stronger basis only), and a relabel
+moves `context_captured_at` (original kept in `metadata.audience_relabel`) so
+the judge reads the job again. Contract:
+`20261009131000_context_group_mailbox_audience`; field contract in
+[`docs/context/email-capture.md`](docs/context/email-capture.md).

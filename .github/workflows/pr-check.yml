@@ -365,11 +365,18 @@ jobs:
 
       # The email reader (EM2) and its group history walk (W7): cursor
       # handling, the restart loop of 5 Oct 2026 and resume-where-it-stopped,
-      # over fake Graph reads and a fake run ledger. No network.
+      # over fake Graph reads and a fake run ledger. No network. Its row
+      # builder next to it: who our own email went to (group mailbox
+      # audience, 9 Oct 2026), and the builder rows the PostgreSQL contracts
+      # feed capture_business_event and context_email_audience_resolve.
       - name: Test the Outlook email reader
         run: |
           deno test --allow-read --allow-env \
-            supabase/functions/outlook-mail-capture/
+            supabase/functions/outlook-mail-capture/ \
+            supabase/functions/_shared/evidence/outlook_mail_test.ts \
+            supabase/functions/_shared/evidence/outlook_mail_contract_rows_test.ts \
+            supabase/functions/_shared/evidence/outlook_mail_audience_test.ts \
+            supabase/functions/_shared/evidence/outlook_mail_audience_contract_rows_test.ts
 
       - name: Test GHL webhook receiver auth and receipts
         run: |
