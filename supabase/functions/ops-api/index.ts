@@ -52882,7 +52882,7 @@ export const _tradeLabourBudgetForTest = tradeLabourBudget
 // JOB COMPLETION PACKAGE
 // ════════════════════════════════════════════════════════════
 
-const GOOGLE_REVIEW_URL = 'https://g.page/r/PLACEHOLDER/review' // TODO: replace with actual Google review link
+const GOOGLE_REVIEW_URL = 'https://share.google/AFyfkE7jLfCZcxanV'
 
 // ── complete_job: mark job complete + GHL stage sync ──
 async function completeJob(client: any, body: any) {
@@ -53466,6 +53466,12 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 }
 
 // ── send_review_request: SMS client with Google review link ──
+function reviewRequestMessage(clientName?: string | null): string {
+  return `Hi ${clientName?.split(' ')[0] || 'there'}, thanks for choosing SecureWorks! We'd love to hear about your experience: ${GOOGLE_REVIEW_URL}\n\nYour feedback means the world to us 🙏`
+}
+export const _reviewRequestMessageForTest = reviewRequestMessage
+export const _googleReviewUrlForTest = GOOGLE_REVIEW_URL
+
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -53485,7 +53491,7 @@ async function sendReviewRequest(client: any, body: any) {
 
   if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
 
-  const smsMessage = `Hi ${job.client_name?.split(' ')[0] || 'there'}, thanks for choosing SecureWorks! We'd love to hear about your experience: ${GOOGLE_REVIEW_URL}\n\nYour feedback means the world to us 🙏`
+  const smsMessage = reviewRequestMessage(job.client_name)
 
   const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
   const smsResp = await fetch(ghlUrl, {
