@@ -5,7 +5,7 @@ scope a job, price what it costs us, price what we charge, attach site photos,
 and keep the client quote PDF as its own document. This file is the contract the
 app builds against. The app itself lives elsewhere.
 
-Status: v1. Code: `supabase/functions/ops-api/quote_builder.ts`. Migration:
+Status: v1, implemented. Code: `supabase/functions/ops-api/quote_builder.ts`. Migration:
 `supabase/migrations/20261009120000_quote_builder_versions.sql`.
 
 ## 1. Access: edge-function actions, not browser tables
@@ -22,6 +22,8 @@ its own server credential).
   `apikey: <project anon/publishable key>`.
 - Base URL: `https://<project>.supabase.co/functions/v1/ops-api?action=<name>`.
 - Reads are `GET` with query params. Writes are `POST` with a JSON body.
+- CORS is open (`*`), so the app can be served from any origin, including a
+  page opened on the iPad.
 - Who may call: staff roles `admin`, `owner`, `ops_manager` (Hugo is
   `ops_manager`). Any other signed-in user gets `403 operator_access_required`.
   No session or an expired one gets `401` (the app should send the user to sign
@@ -292,7 +294,9 @@ Allowed jobs: repair-family jobs (`jobs.type='repair'` or the repair family
 markers the Repairs board reads) and `miscellaneous` jobs. Anything else is
 `409 job_not_quotable` (make-safe cards stay with the SES pack system).
 
-Returns `{ "version": <version object> }`.
+Returns `{ "version": <version object> }`. A save clears the draft's
+`quote_number`, because any PDF made before the edit no longer matches it: ask
+for a fresh PDF upload slot (5.6) after the last edit and before issuing.
 
 ### 5.5 `POST quote_builder_photo_upload_url` then `POST quote_builder_photo_register`
 
@@ -316,7 +320,10 @@ Returns `{ "path": "...", "signed_url": "...", "token": "...", "public_url": "..
 ```
 
 Returns `{ "photo": { "id": "...", "url": "...", "caption": "..." } }`. The server
-checks the file is really in Storage before writing the row.
+checks the file is really in Storage before writing the row, and registering
+the same path twice returns the same photo. Optional `taken_at` (ISO time).
+Photo URLs are public links in the existing `job-photos` bucket, the same as
+every other job photo today.
 
 Change a caption later with `POST quote_builder_photo_caption`
 `{ "photo_id": "uuid", "caption": "..." }`.
@@ -332,7 +339,13 @@ costs), uploads it, then issues.
    version 2 of variation 1).
 2. `{ "version_id": "uuid", "pdf_path": "<path from step 1>" }`.
 
-Issue checks the PDF is in Storage, then:
+Issue refuses with nothing written when: the draft has no charge lines
+(`409 no_charge_lines`), no PDF slot was asked for since the last save
+(`409 pdf_not_prepared`), the PDF is not in Storage (`409 upload_missing`), the
+quote number moved since the slot was issued (`409 quote_number_changed`; ask
+for a new slot and re-render), or the variation is already decided.
+
+Then it:
 
 - writes a `job_documents` row (`type='quote'`, `quote_number`, `storage_url`,
   `pdf_url`, `visible_to_trades=false`, metadata names the version);
@@ -344,7 +357,13 @@ Issue checks the PDF is in Storage, then:
   start a new variation instead);
 - on a repair job, moves the stage forward per section 3.
 
-Nothing is emailed or texted to anyone. Sending the PDF is a separate step
+Issue is safe to retry: a retry after a partial failure reuses the
+`job_documents` row already filed for that version and the variation already
+linked to it, so it never files a second document or a second variation.
+
+The quote document is filed with `sent_at` empty and `sent_to_client=false`, so
+nothing that counts sent quotes (`job_quote_values`, the job dossier) reads it
+as sent. Nothing is emailed or texted to anyone. Sending the PDF is a separate step
 outside this contract.
 
 Returns:

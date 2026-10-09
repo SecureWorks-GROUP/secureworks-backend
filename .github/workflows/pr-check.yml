@@ -248,14 +248,15 @@ jobs:
       # exclusions and the non-repair Xero categories still behave exactly as
       # they did. --no-check matches the repo's known pre-existing type errors in
       # sibling ops-api test files; the assertions themselves are fully executed.
-      - name: Check repair intake routing and stage-write contracts
+      - name: Check repair intake routing and stage-write contracts, and the quote builder
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/repair_intake_routing_test.ts \
             supabase/functions/ops-api/repair_classifier_routing_test.ts \
             supabase/functions/ops-api/repair_stage_write_test.ts \
             supabase/functions/ops-api/insurance_repairs_board_test.ts \
-            supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
+            supabase/functions/ops-api/insurance_repairs_pipeline_test.ts \
+            supabase/functions/ops-api/quote_builder_test.ts
 
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,

@@ -1327,6 +1327,21 @@ Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
 
+## Quote Builder Scopes Live In `quote_builder_versions`, Not `quote_revisions`
+
+Hugo's iPad quote builder (contract `docs/quote-builder-contract.md`, code
+`ops-api/quote_builder.ts`, actions `quote_builder_*`) keeps every scope and
+variation version in `quote_builder_versions` (`20261009120000`): internal cost
+lines beside client charge lines, server-computed totals, issued rows frozen by
+trigger, RLS on and revoked from browser roles. Do not write builder scopes into
+`quote_revisions` (send-quote's SENT ledger), `jobs.scope_json` (fence/patio
+tools) or `jobs.expected_costs` (frozen at acceptance). Issuing files a
+`job_documents` `quote` row with `sent_at` null (never counted as sent) and moves
+a repair card forward only, through `updateRepairStage`: scope -> `quoted`,
+variation -> `variation`, approved variation -> `approved`. Private quotes are
+`jobs.type='miscellaneous'` (`SWM-`), never `renovation` (shares `SWR-` with
+repair). Tests: `quote_builder_test.ts` plus the migration contract.
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that
