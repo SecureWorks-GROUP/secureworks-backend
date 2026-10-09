@@ -1,7 +1,8 @@
 -- Runs after supabase/rollbacks/20261009130000_context_scoping_pipeline_down.sql on the stack applied
 -- through this case: the five bodies and their comments are back word for word (20261007010000's lead
--- rule, judge, record loops and assembler; 20261006013000's due list), the window function is gone,
--- and a draft is out of the monitored set, the judge and the due list again.
+-- rule, judge, record loops and assembler; 20261006013000's due list), and so is the one-job form's
+-- comment; the window function is gone, and a draft is out of the monitored set, the judge and the due
+-- list again.
 DO $restored$
 DECLARE x record; live text;
 BEGIN
@@ -30,6 +31,12 @@ BEGIN
  END LOOP;
  IF to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL THEN
   RAISE EXCEPTION 'scoping pipeline rollback: the window function must be gone';
+ END IF;
+ -- the one-job form's comment is 20261007010000's again
+ IF coalesce(obj_description('public.context_lead_monitored(uuid,timestamptz)'::regprocedure, 'pg_proc'), '')
+      NOT LIKE 'Lead cutoff (20261007010000): the one lead rule (context_lead_monitored_jobs) for one job as of p_as_of%'
+    OR obj_description('public.context_lead_monitored(uuid,timestamptz)'::regprocedure, 'pg_proc') LIKE '%scoping pipeline%' THEN
+  RAISE EXCEPTION 'scoping pipeline rollback: the one-job form''s comment is not the earlier one';
  END IF;
 END $restored$;
 

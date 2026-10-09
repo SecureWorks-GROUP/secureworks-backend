@@ -26,7 +26,8 @@
 --  4. The scorecard: live_jobs and monitored_jobs count a monitored draft, never a quiet or untouched
 --     one, and leads_not_followed_up counts only the lead; the per-job page lists the monitored draft.
 --  5. The window function: its numbers, flags and access.
---  6. Shape and access of the replaced bodies: flags, grants, the rule's columns, slice names first.
+--  6. Shape and access of the replaced bodies: flags, grants, the rule's columns, slice names first;
+--     the one-job form's comment.
 --  7. Re-applying changes nothing.
 --  8. The service role reads the rule directly with drafts in the set, in a fresh session with the
 --     table grants production has, while the record layer's ladder helper stays revoked from it.
@@ -292,7 +293,8 @@ BEGIN
  FOR r IN SELECT d.*, jb.job_number FROM public.context_ledger_judge(ARRAY['9a000000-0000-4000-8000-000000000101', '9a000000-0000-4000-8000-000000000102',
             '9a000000-0000-4000-8000-000000000103', '9a000000-0000-4000-8000-000000000104', '9a000000-0000-4000-8000-000000000105',
             '9a000000-0000-4000-8000-000000000106']::uuid[]) d JOIN public.jobs jb ON jb.id = d.job_id LOOP
-  IF NOT CASE r.job_number
+  -- (the CASE sits in parentheses: PL/pgSQL reads an IF condition up to its first THEN outside them)
+  IF NOT coalesce((CASE r.job_number
      -- a draft the customer texted 2 days ago, and a patio draft texted 35 days ago (inside its 6 weeks): a backfill
      WHEN 'SWF-99101' THEN r.due AND r.kind = 'backfill' AND r.reason = 'never_read' AND r.blocked_reason IS NULL AND r.evidence_rows = 1
      WHEN 'SWP-99104' THEN r.due AND r.kind = 'backfill' AND r.reason = 'never_read' AND r.blocked_reason IS NULL
@@ -302,10 +304,16 @@ BEGIN
      -- a lead no longer followed up, as before
      WHEN 'SWF-99105' THEN NOT r.due AND r.blocked_reason = 'lead_not_monitored'
      -- a monitored draft off the rollout list
-     WHEN 'SWF-99106' THEN NOT r.due AND r.kind = 'backfill' AND r.blocked_reason = 'not_in_rollout' END THEN
+     WHEN 'SWF-99106' THEN NOT r.due AND r.kind = 'backfill' AND r.blocked_reason = 'not_in_rollout' END), false) THEN
    RAISE EXCEPTION 'scoping pipeline contract: judgement of %: %', r.job_number, row_to_json(r);
   END IF;
  END LOOP;
+ -- every one of the six was judged
+ IF (SELECT count(*) FROM public.context_ledger_judge(ARRAY['9a000000-0000-4000-8000-000000000101', '9a000000-0000-4000-8000-000000000102',
+       '9a000000-0000-4000-8000-000000000103', '9a000000-0000-4000-8000-000000000104', '9a000000-0000-4000-8000-000000000105',
+       '9a000000-0000-4000-8000-000000000106']::uuid[])) <> 6 THEN
+  RAISE EXCEPTION 'scoping pipeline contract: the judge must answer for each of the six jobs';
+ END IF;
  -- the due list holds the monitored drafts on the rollout list, newest evidence first
  SELECT string_agg(jb.job_number, ',' ORDER BY x.ord) INTO due
  FROM public.context_ledger_due(200) WITH ORDINALITY x(job_id, kind, reason, priority, newest_evidence_at, ord) JOIN public.jobs jb ON jb.id = x.job_id;
@@ -533,18 +541,27 @@ BEGIN
     OR pg_get_function_result('public.context_lead_monitored(uuid,timestamptz)'::regprocedure) IS DISTINCT FROM rule_shape THEN
   RAISE EXCEPTION 'scoping pipeline contract: the rule''s columns changed';
  END IF;
+ -- the one-job form keeps its body (the set form's row) and its slice name first, and its comment
+ -- says what it now returns
+ IF coalesce(obj_description('public.context_lead_monitored(uuid,timestamptz)'::regprocedure, 'pg_proc'), '')
+      NOT LIKE 'Lead cutoff (20261007010000): (scoping pipeline, 20261009130000) %a draft%'
+    OR has_function_privilege('anon', 'public.context_lead_monitored(uuid,timestamptz)', 'EXECUTE')
+    OR has_function_privilege('authenticated', 'public.context_lead_monitored(uuid,timestamptz)', 'EXECUTE')
+    OR NOT has_function_privilege('service_role', 'public.context_lead_monitored(uuid,timestamptz)', 'EXECUTE') THEN
+  RAISE EXCEPTION 'scoping pipeline contract: the one-job form''s comment or access';
+ END IF;
 END $shape$;
 
 -- 7. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
 CREATE TEMP TABLE scoping_pipeline_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
- WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_window_hours', 'context_lead_monitored_jobs', 'context_ledger_judge',
-  'context_ledger_due', 'context_job_record_loops', 'context_job_story_assemble');
+ WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_window_hours', 'context_lead_monitored_jobs', 'context_lead_monitored',
+  'context_ledger_judge', 'context_ledger_due', 'context_job_record_loops', 'context_job_story_assemble');
 \ir ../../../migrations/20261009130000_context_scoping_pipeline.sql
 DO $again$
 BEGIN
- IF (SELECT count(*) FROM scoping_pipeline_md5) <> 6 OR EXISTS (SELECT 1 FROM scoping_pipeline_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
+ IF (SELECT count(*) FROM scoping_pipeline_md5) <> 7 OR EXISTS (SELECT 1 FROM scoping_pipeline_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure
        WHERE md5(p.prosrc) IS DISTINCT FROM x.m OR obj_description(p.oid, 'pg_proc') IS DISTINCT FROM x.c) THEN
   RAISE EXCEPTION 'scoping pipeline contract: a re-apply must change nothing';
  END IF;
