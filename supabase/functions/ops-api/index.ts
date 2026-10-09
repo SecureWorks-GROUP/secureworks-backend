@@ -1251,6 +1251,7 @@ import {
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -52881,8 +52882,6 @@ export const _tradeLabourBudgetForTest = tradeLabourBudget
 // ════════════════════════════════════════════════════════════
 // JOB COMPLETION PACKAGE
 // ════════════════════════════════════════════════════════════
-
-const GOOGLE_REVIEW_URL = 'https://share.google/AFyfkE7jLfCZcxanV'
 
 // ── complete_job: mark job complete + GHL stage sync ──
 async function completeJob(client: any, body: any) {
