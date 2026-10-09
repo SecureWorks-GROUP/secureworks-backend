@@ -444,7 +444,14 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timel
 -- of all: story safety's down refuses while a later body is live)
 SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
+-- (and before it the notes freshness, 20261009132000, which replaced the lead cutoff's judge and story
+-- safety's ledger read since: both their downs refuse while it is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
+       LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
 BEGIN;
+\if :notes_freshness_live
+\ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
+\endif
 \if :lead_cutoff_live
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
 \endif
