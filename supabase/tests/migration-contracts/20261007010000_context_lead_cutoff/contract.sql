@@ -565,7 +565,8 @@ BEGIN
    ('public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)', true, 'Job story (20261006014000), lead cutoff (20261007010000): %'),
    ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', false,
     'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) %'),
-   ('public.context_ledger_judge(uuid[])', true, 'Context ledger store (20261006013000), story safety (20261006040000): (lead cutoff, 20261007010000) %')
+   -- (widened by notes freshness, 20261009132000, which names itself first and keeps this slice's text after "Earlier")
+   ('public.context_ledger_judge(uuid[])', true, 'Context ledger store (20261006013000), story safety (20261006040000): %(lead cutoff, 20261007010000) %')
  ) v(sig, definer, cmt) LOOP
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig, pr.prolang INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(x.sig);
   IF p IS NULL THEN RAISE EXCEPTION 'lead cutoff contract: % missing', x.sig; END IF;
@@ -595,8 +596,15 @@ BEGIN
  END IF;
 END $shape$;
 
--- 5. Re-applying the migration changes nothing (its guard accepts its own bodies).
+-- 5. Re-applying the migration changes nothing (its guard accepts its own bodies). When the notes
+-- freshness (20261009132000) has replaced this migration's judge since, it is rolled back first
+-- inside this transaction, so the re-apply starts from this migration's own bodies.
+SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
+       LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
 BEGIN;
+\if :notes_freshness_live
+\ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
+\endif
 CREATE TEMP TABLE lead_cutoff_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_monitored_jobs', 'context_lead_monitored', 'context_job_record_loops',

@@ -834,6 +834,21 @@ closes a payment item at the end of its paid Perth day (`context_ledger_paid_clo
 item and in a transition alike. The packet stays `ledger-packet-v1` (the reader refuses any
 other version): add fields, never rename or retype one.
 
+## A Reading's Unread Rows Have One Rule
+
+`context_ledger_row_unread(landed_at, automated, evidence_until)` (`20261009132000`) is the one
+rule for a row a ledger reading has not read: a `context_ledger_evidence_rows` row that is not
+automated and landed after the reading's `evidence_until` (counts leave copies out). The judge
+(an update is not held by the backoff for such a row that landed after the last failed read; a
+waiting shadow answers a live reading's rebuild only with none), the due order (within a priority
+updates first, each group by the longest wait), the go-live sweep (`context_ledger_promote_shadow`
+skips a shadow with one, `unread_rows`) and the story's ledger read (`unread_rows`, so
+`meta.ledger.stale` and the not-known line) all read it; never re-derive it. `new_evidence` still
+counts every row, so an automated-only update stays cheap. Finish's auto-promote is not gated on
+purpose: its reading read every row landed by its claim, and a shadow held beside a live reading
+is never updated. A later change to those four bodies rolls this migration back first in the lead
+cutoff, story safety and story fixups re-applies and the lead cutoff break proof.
+
 ## The Job Story Sorts Text In C Order
 
 Production's collation is ICU `en-US` (letters compared without case first,
