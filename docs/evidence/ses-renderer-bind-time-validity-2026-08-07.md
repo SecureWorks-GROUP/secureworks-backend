@@ -140,9 +140,12 @@ the partial-fix shape rather than the cure, and 34 of the 36 live binds carry
 the superseded identity, so bundles built on one are the dominant case.
 
 The read is deliberately narrow and no more permissive than a same-job bind. It
-fires only when the own-job lookup found nothing AND the artifact declares
-`evidence_source: "explicit_sibling_bundle"` AND names a `sibling_job_id`, and
-each of these refuses (each pinned by a test that was watched to fail against a
+fires whenever the artifact declares `evidence_source: "explicit_sibling_bundle"`
+AND names a `sibling_job_id`, and its bind INSTANT is consumed only when the
+own-job lookup found nothing. (As shipped here the read itself was also gated on
+that empty own-job lookup; it was hoisted on 2026-08-07 so the same trail answers
+the supersession question for every bundle, which is marginally stricter and
+never looser. See "Sibling supersessions" below.) Each of these refuses (each pinned by a test that was watched to fail against a
 deliberately broken guard):
 
 - a sibling bind made **after** the identity's window closed — the forward
@@ -160,6 +163,25 @@ deliberately broken guard):
 Isolating that last case needs the sibling trail to fault while the docket job's
 own trail reads cleanly; faulting both stops at the own-job audit and never
 reaches the sibling branch at all.
+
+### Sibling supersessions
+
+The supersession question has the same owner as the bind instant, and for the
+same reason: `sesSupportingReportIsSuperseded` filters the trail by the
+artifact's own `source_document_id`, which for a bundle is the SIBLING job's
+document and can never appear on the docket job's events. Answering it from the
+docket trail therefore filtered to nothing and returned "not superseded" for
+every bundle, so a sibling report corrected on its own job was served to a
+builder — the one outcome supersession suppression exists to prevent. Both
+consumers now resolve the owning job through the single producer
+`sesSupportingReportSiblingJobId` (sibling job for an explicit bundle, docket
+job otherwise): the read path in `verifyStoredSupportingReport`, and the send
+wall `assertSesReleasedSourcesNotSuperseded`, which answers each artifact from
+its own owning trail and reads each trail at most once per release. An
+unreadable sibling trail refuses as `curated_source_supersession_unreadable`,
+matching the own-job fail-closed rule. Regression (watched red against the
+shipped docket-scoped read, asserting the artifact is suppressed AND that no
+signed URL is issued for it): `ses_reporting_actions_regression_test.ts`.
 
 ## Proofs
 
