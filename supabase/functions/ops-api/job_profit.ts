@@ -16,7 +16,7 @@ export const JOB_PROFIT_LABELS = {
   verified_paid:
     "Xero recorded the payment (status PAID; trade invoices paid). Not a bank reconciliation.",
   margin:
-    "Null when job_financials would suppress it: no client invoice, no cost, incomplete trade invoice lines, or unclassified lines.",
+    "Null when job_financials would suppress it (no client invoice, no cost, incomplete trade invoice lines, unclassified lines) or when materials are owed but none is linked (labour-only cost).",
 } as const;
 
 /**
