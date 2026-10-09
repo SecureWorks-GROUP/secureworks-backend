@@ -59,8 +59,18 @@ Deno.test("only the ops key or an admin/owner session may read job profit", () =
 Deno.test("list filters are validated, never passed through raw", () => {
   const ok = parseJobProfitListFilters(new URLSearchParams("type=fencing,patio&status=complete&from=2025-07-01&to=2026-06-30&date_field=invoiced&limit=50&offset=10"));
   assertEquals(ok, { ok: true, types: ["fencing", "patio"], statuses: ["complete"], from: "2025-07-01", to: "2026-06-30", dateField: "invoiced", limit: 50, offset: 10 });
-  assertEquals(parseJobProfitListFilters(new URLSearchParams("")).ok, true);
-  for (const bad of ["type=fencing)", "status=a;b", "from=1/7/2025", "to=2026-6-1", "date_field=paid", "limit=0", "limit=5000", "offset=-1", "limit=abc"]) {
+  assertEquals(parseJobProfitListFilters(new URLSearchParams("")), {
+    ok: true,
+    types: [],
+    statuses: [],
+    from: null,
+    to: null,
+    dateField: "created",
+    limit: 100,
+    offset: 0,
+  });
+  assertEquals(parseJobProfitListFilters(new URLSearchParams("limit=500")).ok, true);
+  for (const bad of ["type=fencing)", "status=a;b", "from=1/7/2025", "to=2026-6-1", "date_field=paid", "limit=0", "limit=501", "offset=-1", "limit=abc"]) {
     assertEquals(parseJobProfitListFilters(new URLSearchParams(bad)).ok, false, bad);
   }
 });
@@ -96,15 +106,17 @@ Deno.test("timeline: every event in date order, one paid entry per paid document
 });
 
 Deno.test("job_profit: needs a job, rejects malformed ids, 404 when absent", async () => {
-  const c = fakeClient({ v_job_profit: [] });
+  const c = fakeClient({ v_job_profit: [], jobs: [] });
   assertEquals((await jobProfitAction(c, new URLSearchParams(""))).status, 400);
   assertEquals((await jobProfitAction(c, new URLSearchParams("job_id=nope"))).status, 400);
   assertEquals((await jobProfitAction(c, new URLSearchParams("job_number=SWF-1;drop"))).status, 400);
   assertEquals((await jobProfitAction(c, new URLSearchParams(`job_id=${JOB}`))).status, 404);
+  assertEquals((await jobProfitAction(c, new URLSearchParams("job_number=SWF-404"))).status, 404);
 });
 
 Deno.test("job_profit: summary from the engine, trades rolled up, timeline built", async () => {
   const c = fakeClient({
+    jobs: [{ id: JOB, job_number: "SWF-1" }],
     v_job_profit: [{ job_id: JOB, job_number: "SWF-1", invoiced_ex: 1000, actual_cost_ex: 570, profit_ex: 430 }],
     v_job_cost_events: [
       { job_id: JOB, source: "trade_line", source_id: "l1", document_id: "ti1", event_date: "2026-08-04", lane: "labour", party: "Trade One", amount_ex: 300, is_actual: true, paid: true, paid_on: "2026-08-20" },
@@ -123,6 +135,7 @@ Deno.test("job_profit: summary from the engine, trades rolled up, timeline built
   assertEquals(body.timeline.length, 3 + 1 + 3);
   assert(typeof body.labels.profit === "string" && body.labels.profit.includes("No overhead"));
   // the job number is upper-cased and every events read is scoped to the job id
+  assertEquals(c.calls[0].table, "jobs");
   assertEquals(c.calls[0].ops.find(([op]) => op === "eq")![1], ["job_number", "SWF-1"]);
   for (const call of c.calls.slice(1)) assertEquals(call.ops.find(([op]) => op === "eq")![1], ["job_id", JOB]);
 });
@@ -136,9 +149,17 @@ Deno.test("job_profit: a read error is a 500, never an empty job", async () => {
 });
 
 Deno.test("job_profit: a job number on two jobs asks for the id", async () => {
-  const c = fakeClient({ v_job_profit: [{ job_id: "x", job_number: "SWF-2" }, { job_id: "y", job_number: "SWF-2" }] });
+  const c = fakeClient({ jobs: [{ id: "x", job_number: "SWF-2" }, { id: "y", job_number: "SWF-2" }] });
   const out = await jobProfitAction(c, new URLSearchParams("job_number=SWF-2"));
   assertEquals(out.status, 409);
+  assertEquals(c.calls.length, 1, "ambiguous job numbers stop before reading the engine");
+});
+
+Deno.test("job_profit: job-number lookup errors are visible", async () => {
+  const c = fakeClient({}, { jobs: "database unavailable" });
+  const out = await jobProfitAction(c, new URLSearchParams("job_number=SWF-3"));
+  assertEquals(out.status, 500);
+  assert((out.body.error as string).includes("job number lookup failed"));
 });
 
 Deno.test("job_profit_list: filters reach the engine; bad filters are 400", async () => {
@@ -148,7 +169,8 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
   assertEquals((out.body as any).jobs.map((j: any) => j.job_id), ["a"]);
   const ops = c.calls[0].ops;
   assert(ops.some(([op, args]) => op === "gte" && args[0] === "first_invoice_date" && args[1] === "2025-07-01"));
-  assert(ops.some(([op, args]) => op === "range" && args[0] === 0 && args[1] === 199));
+  assert(ops.some(([op, args]) => op === "range" && args[0] === 0 && args[1] === 99));
+  assertEquals(ops.find(([op]) => op === "select")![1], ["*", { count: "planned" }]);
   assertEquals((await jobProfitListAction(c, new URLSearchParams("limit=99999"))).status, 400);
   const bad = fakeClient({}, { v_job_profit: "boom" });
   assertEquals((await jobProfitListAction(bad, new URLSearchParams(""))).status, 500);

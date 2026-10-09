@@ -13,8 +13,9 @@
 --                              (never 0). Immutable helper.
 --   v_job_cost_events          one row per job cost: lane, party, amount ex GST,
 --                              source, paid, confidence.
---   v_job_revenue_events       one row per sales invoice line on a job, plus the
---                              job's variations (listed, never summed).
+--   v_job_revenue_events       one row per sales invoice line on a job, plus
+--                              every variation listed; only agreed variations
+--                              are included in variations_listed_ex.
 --   v_job_profit               one row per non-legacy job: quoted, expected cost
 --                              by lane, actual cost by lane, the Xero Project
 --                              expense total as a separate reconciling figure,
@@ -79,6 +80,11 @@
 -- 6. Paid-verified means Xero recorded the payment (status PAID; trade
 --    invoices paid). It is not a bank reconciliation. A zero-value line (a
 --    trade's empty day on the job) neither blocks nor proves payment.
+--
+-- 7. Variations are all visible as revenue events, but only agreed variations
+--    affect variations_listed_ex: accepted_at, status accepted, or status
+--    invoiced, unless declined_at is set or status is declined/rejected. This
+--    follows job_commercial_read.ts variationAgreement.
 --
 -- job_financials, get_job_financials and their make-safe consumers are left
 -- untouched. Nothing here writes.
@@ -321,7 +327,8 @@ SELECT
   (SELECT t.value ->> 'Option'
      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(li.value -> 'Tracking') = 'array' THEN li.value -> 'Tracking' ELSE '[]'::jsonb END) t
     WHERE t.value ->> 'Name' = 'Business Unit'
-    LIMIT 1) AS business_unit
+    LIMIT 1) AS business_unit,
+  false AS agreed
 FROM public.xero_invoices x
 CROSS JOIN LATERAL jsonb_array_elements(
   CASE
@@ -348,12 +355,17 @@ SELECT
   NULL::text AS party,
   v.description,
   NULL::text AS account_code,
-  NULL::text AS business_unit
+  NULL::text AS business_unit,
+  (
+    v.declined_at IS NULL
+    AND lower(COALESCE(v.status, '')) NOT IN ('declined', 'rejected')
+    AND (v.accepted_at IS NOT NULL OR lower(COALESCE(v.status, '')) IN ('accepted', 'invoiced'))
+  ) AS agreed
 FROM public.job_variations v
 WHERE v.job_id IS NOT NULL;
 
 COMMENT ON VIEW public.v_job_revenue_events IS
-  'Job profit engine (20261009130000): sales invoice lines per job (VOIDED/DELETED excluded; counts_as_invoiced for AUTHORISED/PAID) and the job''s variations, listed only (counts_as_invoiced false). Read only, service role only.';
+  'Job profit engine (20261009130000): sales invoice lines per job (VOIDED/DELETED excluded; counts_as_invoiced for AUTHORISED/PAID) and every variation (counts_as_invoiced false; agreed only when accepted_at is set or status is accepted/invoiced, unless declined_at or declined/rejected status). Read only, service role only.';
 
 -- ─────────────────────────────────────────────────────────────
 -- v_job_profit
@@ -364,7 +376,7 @@ WITH rev AS (
     e.job_id,
     sum(e.amount_ex) FILTER (WHERE e.counts_as_invoiced) AS invoiced_ex,
     sum(e.amount_ex) FILTER (WHERE e.kind = 'invoice_line' AND e.status = 'DRAFT') AS draft_revenue_ex,
-    sum(e.amount_ex) FILTER (WHERE e.kind = 'variation') AS variations_listed_ex,
+    sum(e.amount_ex) FILTER (WHERE e.kind = 'variation' AND e.agreed) AS variations_listed_ex,
     count(DISTINCT e.document_id) FILTER (WHERE e.counts_as_invoiced) AS invoice_count,
     bool_and(e.paid) FILTER (WHERE e.counts_as_invoiced) AS all_paid,
     max(e.paid_on) FILTER (WHERE e.counts_as_invoiced) AS last_paid_on,
@@ -435,6 +447,9 @@ quote_docs AS (
   FROM public.job_documents d
   WHERE d.type = 'quote' AND d.sent_at IS NOT NULL
 ),
+-- Keep this CTE single-use. Splitting whole quote and picked quote into
+-- separate consumers materializes the rows and runs job_quote_values for
+-- every quoted job, even when a caller filters v_job_profit to one job.
 quote_rows AS (
   SELECT
     q.job_id,
@@ -446,44 +461,54 @@ quote_rows AS (
     d.sent_at,
     d.created_at,
     d.superseded_at,
-    d.declined_at
+    d.declined_at,
+    row_number() OVER (
+      PARTITION BY q.job_id
+      ORDER BY
+        (d.superseded_at IS NULL AND d.declined_at IS NULL AND v.value_inc_gst IS NOT NULL) DESC,
+        (d.accepted_at IS NOT NULL) DESC,
+        d.accepted_at DESC NULLS LAST,
+        d.sent_at DESC,
+        d.created_at DESC
+    ) AS pick_rank
   FROM quote_docs q
   CROSS JOIN LATERAL public.job_quote_values(q.job_id) v
   JOIN public.job_documents d ON d.id = v.document_id
 ),
-quote_pick AS (
-  -- The commercial read's headline: the accepted current quote, else the
-  -- newest current one (current = not superseded, not declined).
-  SELECT DISTINCT ON (r.job_id)
-    r.job_id,
-    r.value_inc_gst,
-    r.value_source,
-    CASE WHEN r.accepted_at IS NOT NULL THEN 'accepted' ELSE 'newest_current' END AS basis
-  FROM quote_rows r
-  WHERE r.superseded_at IS NULL
-    AND r.declined_at IS NULL
-    AND r.value_inc_gst IS NOT NULL
-  ORDER BY r.job_id, (r.accepted_at IS NOT NULL) DESC, r.accepted_at DESC NULLS LAST,
-           r.sent_at DESC, r.created_at DESC
-),
-quote_whole AS (
-  SELECT DISTINCT ON (r.job_id)
-    r.job_id, r.whole_quote_total_inc, r.whole_quote_source
-  FROM quote_rows r
-  WHERE r.whole_quote_total_inc IS NOT NULL
-  ORDER BY r.job_id
-),
 quoted AS (
   SELECT
     q.job_id,
-    COALESCE(w.whole_quote_total_inc, p.value_inc_gst) AS quoted_inc,
+    COALESCE(q.whole_quote_total_inc, q.picked_value_inc_gst) AS quoted_inc,
     CASE
-      WHEN w.whole_quote_total_inc IS NOT NULL THEN 'whole_job_total:' || w.whole_quote_source
-      WHEN p.value_inc_gst IS NOT NULL THEN p.basis || ':' || p.value_source
+      WHEN q.whole_quote_total_inc IS NOT NULL THEN 'whole_job_total:' || q.whole_quote_source
+      WHEN q.picked_value_inc_gst IS NOT NULL THEN q.picked_basis || ':' || q.picked_value_source
     END AS quoted_source
-  FROM quote_docs q
-  LEFT JOIN quote_whole w ON w.job_id = q.job_id
-  LEFT JOIN quote_pick p ON p.job_id = q.job_id
+  FROM (
+    SELECT
+      r.job_id,
+      max(r.whole_quote_total_inc) AS whole_quote_total_inc,
+      max(r.whole_quote_source) FILTER (WHERE r.whole_quote_total_inc IS NOT NULL) AS whole_quote_source,
+      max(r.value_inc_gst) FILTER (
+        WHERE r.pick_rank = 1
+          AND r.superseded_at IS NULL
+          AND r.declined_at IS NULL
+          AND r.value_inc_gst IS NOT NULL
+      ) AS picked_value_inc_gst,
+      max(r.value_source) FILTER (
+        WHERE r.pick_rank = 1
+          AND r.superseded_at IS NULL
+          AND r.declined_at IS NULL
+          AND r.value_inc_gst IS NOT NULL
+      ) AS picked_value_source,
+      CASE WHEN bool_or(r.accepted_at IS NOT NULL) FILTER (
+        WHERE r.pick_rank = 1
+          AND r.superseded_at IS NULL
+          AND r.declined_at IS NULL
+          AND r.value_inc_gst IS NOT NULL
+      ) THEN 'accepted' ELSE 'newest_current' END AS picked_basis
+    FROM quote_rows r
+    GROUP BY r.job_id
+  ) q
 ),
 base AS (
   SELECT
@@ -595,10 +620,10 @@ costed AS (
     s.*,
     -- Materials are owed but none is known: a fencing, patio, decking or combo
     -- job, or any job whose expected cost carries materials, costed line-level
-    -- with no materials line. Its margin would be labour-only, so it is
-    -- suppressed rather than published high.
+    -- with no positive materials line. Its margin would be labour-only, so it
+    -- is suppressed rather than published high.
     (s.cost_basis = 'line_level'
-      AND s.line_materials_ex = 0
+      AND s.line_materials_ex <= 0
       AND (s.work_type IN ('fencing', 'patio', 'decking', 'combo') OR COALESCE(s.expected_materials_ex, 0) > 0)) AS materials_missing,
     s.line_labour_ex AS actual_labour_ex,
     CASE WHEN s.cost_basis = 'xero_project_inferred'
