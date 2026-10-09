@@ -3357,7 +3357,9 @@ ROLLBACK;
 -- written to the cache with the triggers off is kept by the apply, and its time stays after
 -- the cache row is gone. When the lead cutoff (20261007010000) has replaced three of these
 -- bodies since, it is rolled back first inside this transaction, so the re-apply starts from
--- this migration's own bodies.
+-- this migration's own bodies. (And the scoping pipeline, 20261009133000, which replaced three of
+-- the lead cutoff's bodies since, before it: the lead cutoff's down refuses while a later body is live.)
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
 -- (and before it the notes freshness, 20261009132000, which replaced the lead cutoff's judge and this
@@ -3365,6 +3367,9 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_j
 SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
        LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
 BEGIN;
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
+\endif
 \if :notes_freshness_live
 \ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
 \endif
