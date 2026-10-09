@@ -1178,17 +1178,20 @@ BEGIN
  PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM public.context_ledger_items WHERE generation_id = gen2 AND what = 'Call before arriving' AND person_locked
   AND written_by = 'person:' || staff), 'the late correction carried');
  PERFORM pg_temp.lg_assert(public.context_ledger_promote(gen, 'rule:auto') ->> 'reason' = 'not_shadow', 'a retired generation cannot be promoted');
- -- Checks fail when too many items were refused: built but not promoted.
+ -- Checks fail when too many items were refused: built but not promoted (the
+ -- store refused two of the three it saw, more than the half a reading may
+ -- lose and still pass, 20261007160000).
  PERFORM pg_temp.lg_mode('live', 50);
  b := pg_temp.lg_job('SWF-96002'); e1 := pg_temp.lg_ev(b, 'client.reply', 'sms', 'inbound', 'Can you send the invoice again?', '2 days', 'customer');
  cl := public.context_ledger_claim(b, 'backfill', pg_temp.lg_today());
  run := (cl ->> 'run_id')::uuid; tok := (cl ->> 'lease_token')::uuid; gen := (cl ->> 'generation_id')::uuid;
  PERFORM public.context_ledger_write(run, tok, gen, jsonb_build_array(
   pg_temp.lg_it('ok', 'request', 'open', 'customer', 'us', 'Asked for the invoice again', pg_temp.lg_cite(e1, 'send the invoice again')),
-  pg_temp.lg_it('bad', 'request', 'open', 'customer', 'us', 'Made up', pg_temp.lg_cite(e1, 'send the quote again'))), '[]', 'luna-ledger:v1');
+  pg_temp.lg_it('bad', 'request', 'open', 'customer', 'us', 'Made up', pg_temp.lg_cite(e1, 'send the quote again')),
+  pg_temp.lg_it('bad2', 'request', 'open', 'customer', 'us', 'Made up too', pg_temp.lg_cite(e1, 'send the receipt again'))), '[]', 'luna-ledger:v1');
  fin := public.context_ledger_finish(run, tok, gen, 'built', pg_temp.lg_meta(1));
  PERFORM pg_temp.lg_assert(fin ->> 'generation_status' = 'shadow' AND NOT (fin ->> 'promoted')::boolean AND NOT (fin #>> '{checks,pass}')::boolean
-  AND (fin #>> '{checks,refused_rate}')::numeric = 0.5, 'half refused: not promoted: ' || fin::text);
+  AND (fin #>> '{checks,refused_rate}')::numeric = 0.6667, 'two of three refused: not promoted: ' || fin::text);
  -- An update moves evidence_until forward on the current generation, never back.
  u := pg_temp.lg_job('SWF-96003');
  PERFORM pg_temp.lg_ev(u, 'client.reply', 'sms', 'inbound', 'Old', '9 days', 'customer');
@@ -1423,14 +1426,15 @@ DO $c$
 DECLARE j uuid; e uuid; fin jsonb; f record; n integer := 0; code text;
 BEGIN
  PERFORM pg_temp.lg_lanes(true, true, true); PERFORM pg_temp.lg_mode('live', 50);
- -- The store accepted the one item it saw, but the reader proposed four and
- -- refused two itself: half refused, not promoted, the run counts as a failure.
+ -- The store accepted the one item it saw, but the reader proposed five and
+ -- refused three itself: more than half refused (at most half may be,
+ -- 20261007160000), not promoted, the run counts as a failure.
  j := pg_temp.lg_job('SWF-98101'); e := pg_temp.lg_ev(j, 'client.reply', 'sms', 'inbound', 'Please call me about the gate.', '2 days', 'customer');
- fin := pg_temp.lg_build(j, e, 'call me about the gate', '{"validator":"ok","proposed":4,"refused_local":2}');
+ fin := pg_temp.lg_build(j, e, 'call me about the gate', '{"validator":"ok","proposed":5,"refused_local":3}');
  PERFORM pg_temp.lg_assert(fin ->> 'outcome' = 'built' AND NOT (fin ->> 'promoted')::boolean AND NOT (fin ->> 'passed')::boolean
-  AND (fin #>> '{checks,refusal_rate}')::numeric = 0.5 AND (fin #>> '{checks,refused_rate}')::numeric = 0, 'reader refusals count: ' || fin::text);
- PERFORM pg_temp.lg_assert((SELECT status = 'shadow' AND checks ->> 'passed' = 'false' AND checks #>> '{store,proposed}' = '4'
-  AND checks #>> '{store,refused_local}' = '2' FROM public.context_ledger_generations WHERE id = (fin ->> 'generation_id')::uuid)
+  AND (fin #>> '{checks,refusal_rate}')::numeric = 0.6 AND (fin #>> '{checks,refused_rate}')::numeric = 0, 'reader refusals count: ' || fin::text);
+ PERFORM pg_temp.lg_assert((SELECT status = 'shadow' AND checks ->> 'passed' = 'false' AND checks #>> '{store,proposed}' = '5'
+  AND checks #>> '{store,refused_local}' = '3' FROM public.context_ledger_generations WHERE id = (fin ->> 'generation_id')::uuid)
   AND (SELECT status = 'done' AND error = 'checks_failed' FROM public.context_extraction_runs WHERE id = (fin ->> 'run_id')::uuid),
   'the verdict is stored on the generation and the run counts as failed');
  PERFORM pg_temp.lg_assert((SELECT f2.failures = 1 FROM public.context_ledger_failures(ARRAY[j]) f2), 'a check-failed build counts toward the backoff');
