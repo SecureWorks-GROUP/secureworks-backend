@@ -4215,6 +4215,29 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
+## Debt Workshop Sends Are Double-Switched, Owner-Only, And Claimed First
+
+The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
+`coding/capabilities/debt-follow-up/debt-workshop-spec.md`; switches and actions:
+`docs/debt-workshop/README.md`). Do not import the retired debt desk modules
+(`debt_desk_*`, `debt_book*`, `debt_morning_list`, `debt_jan_text`, `debt_chase_schedule`,
+`debt_draft_templates`). Load-bearing rules:
+- Effective sending is env `DEBT_WS_SENDING_ENABLED === "true"` AND
+  `debt_ws_settings.sending_enabled`. The owner comes from env `DEBT_WS_OWNER_USER_IDS`, else
+  `debt_ws_settings.owner_user_ids`, and is never a role.
+- Every send goes through `guardedSend`:
+  - a live Xero re-check;
+  - the bank-feed check (one cached, paged read that reaches back to the oldest open
+    invoice; statements and Jan's list run it too, and fail closed without it);
+  - a `debt_ws_sends` claim (unique per share, cycle and step);
+  - then the injected `sendChaseSms` only.
+  Never add a second text path.
+- An unconfirmed send keeps its claim. Only a guard refusal releases it.
+- Staff actions need a signed-in staff JWT. The server key reaches only the Jan list crons
+  and the agent queue and submit.
+- The debt rules are plain code in `debt_ws_rules.ts`. Change them there, with a test.
+- Apply `20261008170000_debt_workshop.sql` before deploying the matching `ops-api`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
