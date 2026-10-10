@@ -308,10 +308,17 @@ export type PackPhotoSourceScope =
   | typeof PACK_PHOTO_SOURCE_CURRENT_CYCLE
   | typeof PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES;
 
+/**
+ * job_media phase of the quote builder's scoping photos (20261009120000). They
+ * are Hugo's internal record of how a job was scoped and never builder-facing.
+ */
+export const QUOTE_BUILDER_PHOTO_PHASE = "quote_builder" as const;
+
 /** Same applicability predicate curated bind and the assembler share. */
 export function isApplicablePackPhoto(item: any): boolean {
   const type = String(item?.type || "").trim().toLowerCase();
   const phase = String(item?.phase || "").trim().toLowerCase();
+  if (phase === QUOTE_BUILDER_PHOTO_PHASE) return false;
   return type.includes("photo") || type.includes("image") ||
     phase.includes("completion") || phase.includes("after");
 }

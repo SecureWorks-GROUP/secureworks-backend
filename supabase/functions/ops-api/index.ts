@@ -234,6 +234,20 @@ import {
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
 import {
+  createQuoteBuilderPrivateJob,
+  decideQuoteBuilderVariation,
+  getQuoteBuilderJob,
+  issueQuoteBuilderVersion,
+  listQuoteBuilderJobs,
+  QuoteBuilderError,
+  quoteBuilderPdfUploadUrl,
+  quoteBuilderPhotoCaption,
+  quoteBuilderPhotoRegister,
+  quoteBuilderPhotoUploadUrl,
+  saveQuoteBuilderVersion,
+  type QuoteBuilderActor,
+} from './quote_builder.ts'
+import {
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
   isInsuranceRepairFamily,
@@ -8287,6 +8301,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'forbidden: update_repair_stage requires the privileged ops key or a staff session' }, 403)
         }
         return json(await updateRepairStage(client, body))
+      }
+      // Quote builder (docs/quote-builder-contract.md). Staff JWT or the
+      // privileged ops key only: absent from ROUTINE_ALLOWED_ACTIONS,
+      // AGENT_READ_ALLOWED_ACTIONS and the profile-scoped trade list, so the
+      // front door already demands a staff session; the check here keeps the
+      // rule true if a later edit widens those lists. Internal cost lines live
+      // in these responses, so no trade may reach them.
+      case 'quote_builder_list_jobs':
+      case 'quote_builder_get_job':
+      case 'quote_builder_create_private_job':
+      case 'quote_builder_save':
+      case 'quote_builder_photo_upload_url':
+      case 'quote_builder_photo_register':
+      case 'quote_builder_photo_caption':
+      case 'quote_builder_pdf_upload_url':
+      case 'quote_builder_issue':
+      case 'quote_builder_decide_variation': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        return await dispatchQuoteBuilderAction(client, action, url.searchParams, body, {
+          id: authUser?.id || null,
+          email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+          orgId: authUser?.orgId || null,
+        })
       }
       case 'create_po': return json(await createPO(client, body))
       case 'update_po': return json(await updatePO(client, body))
@@ -20529,6 +20568,48 @@ async function updateMakesafeSubstatus(
 export const _updateMakesafeSubstatus = updateMakesafeSubstatus
 
 // ══════════════════════════════════════════════════════════════
+// Quote builder dispatch (quote_builder.ts owns the logic)
+// ══════════════════════════════════════════════════════════════
+//
+// Repair stage moves are bound to updateRepairStage, the one repair_stage
+// writer; variation decisions to approveVariation, the existing approval path.
+// Both run with this request's client, so the audit rows match every other
+// stage move and variation decision.
+export async function dispatchQuoteBuilderAction(
+  client: any,
+  action: string,
+  params: URLSearchParams,
+  body: any,
+  actor: QuoteBuilderActor,
+): Promise<Response> {
+  const moveRepairStage = ({ jobId, stage, operatorEmail }: { jobId: string; stage: string; operatorEmail: string | null }) =>
+    updateRepairStage(client, { job_id: jobId, stage, operator_email: operatorEmail })
+  const decideVariation = ({ variationId, approved, notes, userId }: { variationId: string; approved: boolean; notes: string | null; userId: string | null }) =>
+    approveVariation(client, { variation_id: variationId, approved, notes, user_id: userId })
+  try {
+    switch (action) {
+      case 'quote_builder_list_jobs': return json(await listQuoteBuilderJobs(client, params, actor))
+      case 'quote_builder_get_job': return json(await getQuoteBuilderJob(client, params, actor))
+      case 'quote_builder_create_private_job': return json(await createQuoteBuilderPrivateJob(client, body, actor))
+      case 'quote_builder_save': return json(await saveQuoteBuilderVersion(client, body, actor))
+      case 'quote_builder_photo_upload_url': return json(await quoteBuilderPhotoUploadUrl(client, body, actor))
+      case 'quote_builder_photo_register': return json(await quoteBuilderPhotoRegister(client, body, actor))
+      case 'quote_builder_photo_caption': return json(await quoteBuilderPhotoCaption(client, body, actor))
+      case 'quote_builder_pdf_upload_url': return json(await quoteBuilderPdfUploadUrl(client, body, actor))
+      case 'quote_builder_issue': return json(await issueQuoteBuilderVersion(client, body, actor, { moveRepairStage }))
+      case 'quote_builder_decide_variation':
+        return json(await decideQuoteBuilderVariation(client, body, actor, { decideVariation, moveRepairStage }))
+      default: return json({ error: `Unknown action: ${action}` }, 400)
+    }
+  } catch (error) {
+    if (error instanceof QuoteBuilderError) {
+      return json({ error: error.message, code: error.code }, error.status)
+    }
+    throw error
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 // Repairs board — persisted stage moves
 // ══════════════════════════════════════════════════════════════
 //
@@ -24934,13 +25015,13 @@ async function submitMakesafeReport(
   if (submittingFinal) {
     if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
-      .select('id, phase, attendance_cycle_id, cycle_attribution')
+      .select('id, type, phase, attendance_cycle_id, cycle_attribution')
       .eq('job_id', jId)
       .eq('type', 'photo')
       .limit(200)
     if (mediaErr) throw mediaErr
     const currentCycleMedia = filterMediaForCurrentCycle(
-      mediaRows || [],
+      (mediaRows || []).filter(isApplicablePackPhoto),
       cycleDetail || { cycle_number: currentCycle, reattend_count: 0 },
       attendanceCycle.id,
     )
@@ -45487,12 +45568,6 @@ async function assertCurrentWikiSourceEvidence(
     detail,
     attendanceCycleId,
   )
-  const photoIsApplicable = (item: any) => {
-    const type = String(item?.type || '').trim().toLowerCase()
-    const phase = String(item?.phase || '').trim().toLowerCase()
-    return type.includes('photo') || type.includes('image') ||
-      phase.includes('completion') || phase.includes('after')
-  }
   // Photo evidence order is `created_at` ascending, with `id` only as a stable
   // tiebreak for equal timestamps — the same order the media read above already
   // asks PostgREST for.
@@ -45531,9 +45606,9 @@ async function assertCurrentWikiSourceEvidence(
     sourceLabel: string,
     media: any[],
   ) => {
-    const applicable = media.filter(photoIsApplicable).slice()
+    const applicable = media.filter(isApplicablePackPhoto).slice()
       .sort(comparePackMediaCreatedAtThenId)
-    const excluded = media.filter((item: any) => !photoIsApplicable(item))
+    const excluded = media.filter((item: any) => !isApplicablePackPhoto(item))
       .slice().sort(comparePackMediaCreatedAtThenId)
     const applicableIds = applicable.map((item: any) =>
       String(item.id || '').trim()
@@ -47363,7 +47438,7 @@ async function resolveRoofReportPhotos(
     throw new ApiError('roof report photo cycle read failed: missing makesafe detail', 500)
   }
   const currentMedia = filterMediaForCurrentCycle(
-    (media as any[]) || [],
+    ((media as any[]) || []).filter(isApplicablePackPhoto),
     detail,
     detail?.attendance_cycle_id || null,
   )
@@ -47401,6 +47476,8 @@ async function resolveRoofReportPhotos(
     .filter((m) => m?.storage_url)
     .map((m) => ({ url: m.storage_url as string, thumbUrl: (m.thumbnail_url as string) || undefined, label: (m.label as string) || undefined }))
 }
+
+export const _resolveRoofReportPhotosForTest = resolveRoofReportPhotos
 
 // Render OUR letterhead roof-report PDF and attach it as a 'roof_report' document.
 // Shared by submit_roof_report and render_roof_report. attachMakesafeDocument
@@ -48224,8 +48301,8 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
       .eq('job_id', jobId),
   ])
 
-  const media = mediaRes.data || []
-  const selectedMedia = selectMakesafeReportPhotosForReport(media || [], 8)
+  const media = (mediaRes.data || []).filter(isApplicablePackPhoto)
+  const selectedMedia = selectMakesafeReportPhotosForReport(media, 8)
   const selectedPhotoDefaults = (selectedMedia || [])
     .map((m: any) => m.storage_url || m.thumbnail_url || null)
     .filter(Boolean)

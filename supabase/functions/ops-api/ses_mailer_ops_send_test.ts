@@ -856,6 +856,58 @@ Deno.test("mailer ops action: receipts never ride the builder-facing photo pack"
   assertEquals(photo.excluded_receipt_count, 1);
 });
 
+Deno.test("mailer ops action: quote builder photos never ride the builder-facing photo pack", async () => {
+  const result = await sendMailerOpsVisibilityAction(
+    makeClient({
+      media: [
+        {
+          id: "media-scope-1",
+          job_id: "job-1",
+          type: "photo",
+          phase: "scope",
+          storage_url:
+            "https://example.supabase.co/storage/v1/object/public/job-photos/job-1/scope.jpg",
+          created_at: "2026-08-01T00:00:00Z",
+        },
+        {
+          id: "media-quote-builder-1",
+          job_id: "job-1",
+          type: "photo",
+          phase: "quote_builder",
+          storage_url:
+            "https://example.supabase.co/storage/v1/object/public/job-photos/job-1/quote-builder/a.jpg",
+          created_at: "2026-08-01T00:00:01Z",
+        },
+        {
+          id: "media-site-1",
+          job_id: "job-1",
+          type: "photo",
+          phase: "completion",
+          storage_url:
+            "https://example.supabase.co/storage/v1/object/public/job-photos/job-1/site.jpg",
+          created_at: "2026-08-01T00:00:02Z",
+        },
+      ],
+    }),
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "job-1",
+      kind: "photo",
+      to: "mlb.mailer@primeeco.tech",
+      dry_run: true,
+    },
+    {
+      makeMailGateway: () => {
+        throw new Error("no gateway");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  const photo = result.photo_selection as any;
+  assertEquals(photo.media_ids, ["media-scope-1", "media-site-1"]);
+});
+
 Deno.test("mailer ops action: reattended card only carries current-cycle evidence", async () => {
   const detail = {
     job_id: "job-1",

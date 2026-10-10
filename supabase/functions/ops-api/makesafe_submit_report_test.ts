@@ -496,6 +496,39 @@ Deno.test("submit_makesafe_report rejects final submit with fewer than 5 photos"
   assertEquals(rows.job_service_reports.length, 0);
 });
 
+Deno.test("submit_makesafe_report does not count quote builder photos toward the five-photo floor", async () => {
+  const quoteBuilderPhotos = Array.from({ length: 5 }, (_, i) => ({
+    id: `qb-${i + 1}`,
+    job_id: "job-1",
+    type: "photo",
+    phase: "quote_builder",
+  }));
+  const { client, rows } = makeSubmitClient(baseRows({
+    job_media: quoteBuilderPhotos,
+  }));
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "MakeSafe report needs at least 5 photos (found 0)",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+
+  for (let i = 0; i < 5; i++) {
+    rows.job_media.push({
+      id: `site-${i + 1}`,
+      job_id: "job-1",
+      type: "photo",
+      phase: i < 2 ? "scope" : "completion",
+    });
+  }
+  const result: any = await _submitMakesafeReportForTest(
+    client,
+    validBody(),
+  );
+  assertEquals(result.ok, true);
+});
+
 Deno.test("confirm_upload stamps a MakeSafe photo with the server current cycle", async () => {
   // makesafe_open retired 2026-09-24: this test exercises cycle-stamping, not
   // access-tier behaviour, so the caller now needs a real assignment — the

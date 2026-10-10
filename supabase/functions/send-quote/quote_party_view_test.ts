@@ -253,6 +253,28 @@ Deno.test("all accepted stays false while a current party has not accepted", () 
   assert(!everyQuotePartyAccepted([]))
 })
 
+Deno.test("all accepted ignores quote builder documents, which are never sent or accepted", () => {
+  const accepted = doc("sent-whole", { accepted_at: "2026-09-03T00:00:00Z", created_at: "2026-09-03T00:00:00Z" })
+  const builderScope = doc("qb-scope", {
+    run_label: "qb:11111111-1111-4111-8111-111111111111",
+    sent_to_client: false,
+    sent_at: null,
+    send_claimed_at: null,
+    accepted_at: null,
+    created_at: "2026-09-04T00:00:00Z",
+  })
+  const builderVariation = doc("qb-variation", {
+    run_label: "qb:22222222-2222-4222-8222-222222222222",
+    sent_to_client: false,
+    sent_at: null,
+    send_claimed_at: null,
+    accepted_at: null,
+    created_at: "2026-09-05T00:00:00Z",
+  })
+  assert(everyQuotePartyAccepted([accepted, builderScope, builderVariation]))
+  assert(!everyQuotePartyAccepted([builderScope, builderVariation]))
+})
+
 Deno.test("all accepted counts a contact's separate current runs as separate parties", () => {
   assert(!everyQuotePartyAccepted([
     doc("client-rhs", { job_contact_id: "client", run_label: "RHS", accepted_at: "2026-09-03T00:00:00Z", created_at: "2026-09-03T00:00:00Z" }),

@@ -17,6 +17,7 @@ import {
   quoteDocumentHasClientSend,
   quoteDocumentIsSuperseded,
 } from '../_shared/trade_quote_pack/pack_trade_quote.ts'
+import { isQuoteBuilderRunLabel } from '../_shared/quote_builder_run_label.ts'
 
 export type QuotePartyDocument = {
   id: string
@@ -205,6 +206,7 @@ export function everyQuotePartyAccepted(
   }
   for (const d of docs || []) {
     if (quoteDocumentIsSuperseded(d)) continue
+    if (isQuoteBuilderRunLabel(d.run_label)) continue
     const party = JSON.stringify(quotePartyKey(d))
     const partyDocs = byParty.get(party) || []
     partyDocs.push(d)
