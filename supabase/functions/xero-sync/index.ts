@@ -31,6 +31,7 @@ import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '.
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
+import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -1728,8 +1729,10 @@ async function syncReports(sb: any) {
 // SYNC PROJECTS — Pull all Xero Projects with per-job P&L
 //
 // Xero Projects contain revenue + expenses per project.
-// Project names follow "SW1234 Address" pattern.
-// Matched to internal jobs via xero_contact_id → contact_matches.
+// Project names follow "SWF-26764 Address" (older: "SW1234 Address").
+// Matched to internal jobs by the job number in the name when it resolves to
+// exactly one job, else via xero_contact_id → contact_matches
+// (project_job_link.ts). Writes xero_projects only.
 // ════════════════════════════════════════════════════════════
 
 async function syncProjects(sb: any) {
@@ -1768,6 +1771,29 @@ async function syncProjects(sb: any) {
     }
   }
 
+  // Job numbers named by the projects, resolved to job ids. A number that
+  // matches more than one job stays ambiguous and never links by name. A
+  // failed read throws: syncing on would rewrite every name-linked project
+  // back to its contact match.
+  const nameTokens = [...new Set(
+    allProjects.map((p: any) => projectNameJobNumber(p.name)).filter((t: string | null): t is string => !!t),
+  )]
+  const jobIdsByNumber = new Map<string, string[]>()
+  for (let i = 0; i < nameTokens.length; i += 100) {
+    const chunk = nameTokens.slice(i, i + 100)
+    const { data: jobRows, error: jobErr } = await sb
+      .from('jobs')
+      .select('id, job_number')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .in('job_number', chunk)
+    if (jobErr) throw new Error(`syncProjects: job number lookup failed: ${jobErr.message}`)
+    for (const row of (jobRows || [])) {
+      const ids = jobIdsByNumber.get(row.job_number) ?? []
+      ids.push(row.id)
+      jobIdsByNumber.set(row.job_number, ids)
+    }
+  }
+
   // Extract SW job number from project name (e.g. "SW1334 15 Cloudberry Crescent")
   const extractJobNumber = (name: string): string | null => {
     const match = name.match(/^(SW\d{3,5})/i)
@@ -1776,12 +1802,18 @@ async function syncProjects(sb: any) {
 
   let upserted = 0
   let matched = 0
+  let matchedByName = 0
 
   for (const proj of allProjects) {
     const val = (field: any) => field?.value ?? 0
 
     const jobNumber = extractJobNumber(proj.name || '')
-    const jobId = proj.contactId ? contactToJob.get(proj.contactId) : null
+    const { jobId, method: linkMethod } = resolveProjectJobId({
+      name: proj.name,
+      contactId: proj.contactId,
+      jobIdsByNumber,
+      contactToJob,
+    })
 
     const record = {
       org_id: DEFAULT_ORG_ID,
@@ -1812,6 +1844,7 @@ async function syncProjects(sb: any) {
     } else {
       upserted++
       if (jobId) matched++
+      if (linkMethod === 'project_name_job_number') matchedByName++
     }
   }
 
@@ -1820,7 +1853,7 @@ async function syncProjects(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_projects',
-    payload: { total: allProjects.length, upserted, matched_to_jobs: matched },
+    payload: { total: allProjects.length, upserted, matched_to_jobs: matched, matched_by_name: matchedByName },
     status: 'processed',
   })
 
@@ -1829,6 +1862,7 @@ async function syncProjects(sb: any) {
     total_projects: allProjects.length,
     upserted,
     matched_to_jobs: matched,
+    matched_by_name: matchedByName,
     in_progress: allProjects.filter((p: any) => p.status === 'INPROGRESS').length,
     closed: allProjects.filter((p: any) => p.status === 'CLOSED').length,
   }

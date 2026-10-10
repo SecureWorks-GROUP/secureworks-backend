@@ -133,6 +133,11 @@ submit_work_order_invoice # probe=jwt-fail-closed
 job_financials
 job_financials_detail
 
+# ── Job profit engine (20261009130000) — read-only, ops key or admin/owner ──
+# A bare GET of job_profit refuses its missing job_id before any read.
+job_profit                # probe=bounded-refusal
+job_profit_list           # probe=bounded-refusal probe-args=limit=0
+
 # ── Make-safe audit — read-only; the compact pipeline reader the intake-audit
 #    and close-out-audit skills depend on (retires the per-job sw_job_detail loop) ──
 makesafe_audit
