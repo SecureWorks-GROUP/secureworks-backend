@@ -55,6 +55,10 @@ type Bucket = {
   quoted: bigint | null;
   expected: bigint | null;
   actual: bigint;
+  jobs_with_quote: number;
+  invoiced_on_quoted: bigint | null;
+  jobs_with_expected: number;
+  actual_on_expected: bigint | null;
   published_revenue: bigint;
   published_cost: bigint;
   profit: bigint;
@@ -71,6 +75,10 @@ function emptyBucket(): Bucket {
     quoted: null,
     expected: null,
     actual: 0n,
+    jobs_with_quote: 0,
+    invoiced_on_quoted: null,
+    jobs_with_expected: 0,
+    actual_on_expected: null,
     published_revenue: 0n,
     published_cost: 0n,
     profit: 0n,
@@ -105,8 +113,18 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
   bucket.invoiced += invoiced ?? 0n;
   bucket.collected += collected ?? 0n;
   bucket.actual += actual ?? 0n;
-  if (quoted !== null) bucket.quoted = (bucket.quoted ?? 0n) + quoted;
-  if (expected !== null) bucket.expected = (bucket.expected ?? 0n) + expected;
+  if (quoted !== null) {
+    bucket.quoted = (bucket.quoted ?? 0n) + quoted;
+    bucket.jobs_with_quote += 1;
+    bucket.invoiced_on_quoted = (bucket.invoiced_on_quoted ?? 0n) +
+      (invoiced ?? 0n);
+  }
+  if (expected !== null) {
+    bucket.expected = (bucket.expected ?? 0n) + expected;
+    bucket.jobs_with_expected += 1;
+    bucket.actual_on_expected = (bucket.actual_on_expected ?? 0n) +
+      (actual ?? 0n);
+  }
   if (row.revenue_verified_paid === true) {
     bucket.revenue_verified_paid_jobs += 1;
   }
@@ -132,6 +150,10 @@ function presentBucket(bucket: Bucket): Record<string, unknown> {
     quoted_ex: centsToNumber(bucket.quoted),
     expected_cost_ex: centsToNumber(bucket.expected),
     actual_cost_ex: centsToNumber(bucket.actual),
+    jobs_with_quote: bucket.jobs_with_quote,
+    invoiced_on_quoted_ex: centsToNumber(bucket.invoiced_on_quoted),
+    jobs_with_expected: bucket.jobs_with_expected,
+    actual_cost_on_expected_ex: centsToNumber(bucket.actual_on_expected),
     published_revenue_ex: centsToNumber(bucket.published_revenue),
     published_cost_ex: centsToNumber(bucket.published_cost),
     profit_ex: centsToNumber(bucket.profit),
