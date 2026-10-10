@@ -10,6 +10,11 @@
 // figures are never added to line-level costs: actual_cost_ex is the engine's
 // chosen basis and is summed as it stands.
 //
+// expected_cost_ex and quoted_ex sum only jobs that carry them, while
+// actual_cost_ex and invoiced_ex sum every job. Compare like with like through
+// actual_cost_on_expected_ex / jobs_with_expected and invoiced_on_quoted_ex /
+// jobs_with_quote, never expected_cost_ex against actual_cost_ex.
+//
 // by_month groups jobs by the date_field that filtered them (created Perth day
 // or first invoice date). It is a job cohort, not an accrual P&L period.
 
