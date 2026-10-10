@@ -51,6 +51,7 @@ TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION="$REPO_ROOT/supabase/migrations/2026091812
 SALES_PERFORMANCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260911000001_sales_performance_weeks.sql"
 SALES_BOOKING_EXECUTIONS_MIGRATION="$REPO_ROOT/supabase/migrations/20260923181500_sales_booking_executions.sql"
 ACTOR_RECORDING_MIGRATION="$REPO_ROOT/supabase/migrations/20260924201000_ops_api_actor_recording.sql"
+JOB_PROFIT_ENGINE_MIGRATION="$REPO_ROOT/supabase/migrations/20261009130000_job_profit_engine.sql"
 
 
 PASS_COUNT=0
@@ -298,6 +299,7 @@ write_response() {
   SALES_PERFORMANCE_EXPECTED_SHA="$(shasum -a 256 "$SALES_PERFORMANCE_MIGRATION" | awk '{print $1}')" \
   SALES_BOOKING_EXECUTIONS_EXPECTED_SHA="$(shasum -a 256 "$SALES_BOOKING_EXECUTIONS_MIGRATION" | awk '{print $1}')" \
   ACTOR_RECORDING_EXPECTED_SHA="$(shasum -a 256 "$ACTOR_RECORDING_MIGRATION" | awk '{print $1}')" \
+  JOB_PROFIT_ENGINE_EXPECTED_SHA="$(shasum -a 256 "$JOB_PROFIT_ENGINE_MIGRATION" | awk '{print $1}')" \
   BOOKING_MIGRATIONS_ROOT="$REPO_ROOT/supabase/migrations" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
@@ -829,6 +831,17 @@ actor_recording_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+job_profit_engine_row = {
+    "function_name": "ops-api",
+    "migration_version": "20261009130000",
+    "expected_migration_name": "job_profit_engine",
+    "expected_statement_sha256": os.environ["JOB_PROFIT_ENGINE_EXPECTED_SHA"],
+    "actual_migration_version": "20261009130000",
+    "actual_migration_name": "job_profit_engine",
+    "actual_statement_count": 18,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 booking_read_rows = []
 from pathlib import Path
 import hashlib
@@ -914,6 +927,7 @@ with open(sys.argv[1], "w") as f:
             sales_booking_executions_row,
             sales_booking_executions_ghl_row,
             actor_recording_row,
+            job_profit_engine_row,
         ],
         f,
     )
@@ -1207,7 +1221,7 @@ PYTEST
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" || ! -f "$ECHO_CODE_APPROVAL_MIGRATION" || ! -f "$DEBT_PICTURE_MIGRATION" || ! -f "$CALENDAR_JOB_FAMILY_MIGRATION" || ! -f "$SALES_BOOKING_PACKS_MIGRATION" || ! -f "$SALES_BOOKING_THREAD_FACTS_MIGRATION" || ! -f "$SALES_BOOKING_ROSTER_MIGRATION" || ! -f "$CONTEXT_PIPELINE_STATUS_MIGRATION" || ! -f "$TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION" || ! -f "$ACTOR_RECORDING_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" || ! -f "$ECHO_CODE_APPROVAL_MIGRATION" || ! -f "$DEBT_PICTURE_MIGRATION" || ! -f "$CALENDAR_JOB_FAMILY_MIGRATION" || ! -f "$SALES_BOOKING_PACKS_MIGRATION" || ! -f "$SALES_BOOKING_THREAD_FACTS_MIGRATION" || ! -f "$SALES_BOOKING_ROSTER_MIGRATION" || ! -f "$CONTEXT_PIPELINE_STATUS_MIGRATION" || ! -f "$TRADE_INVOICE_PAYABLE_SPLIT_MIGRATION" || ! -f "$ACTOR_RECORDING_MIGRATION" || ! -f "$JOB_PROFIT_ENGINE_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared
