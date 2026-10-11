@@ -5,6 +5,13 @@
 -- the earlier bodies.
 -- (The scoping pipeline, 20261009133000, replaced four of these bodies since: its rollback goes
 -- first, as this one refuses while a later body is live.)
+-- (The story lead rank, 20261011100000, replaced the assembler since: its rollback goes first, as the
+-- scoping pipeline's refuses while a later assembler body is live.)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story lead rank, 20261011100000)%' AS story_lead_rank_live \gset
+\if :story_lead_rank_live
+\ir ../../../rollbacks/20261011100000_context_story_lead_rank_down.sql
+\endif
 SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 \if :scoping_pipeline_live
 \ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
