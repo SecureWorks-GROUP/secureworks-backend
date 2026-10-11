@@ -1859,7 +1859,13 @@ BEGIN
  PERFORM pg_temp.lg_calls_add(1, 'ledger');
 END $c$;
 -- (the call budget and then the story, when a full stack has them, go first, as
--- the store's rollback demands: the call budget replaced the admission)
+-- the store's rollback demands: the call budget replaced the admission; before the
+-- call budget, the record scope, 20261011130000, which replaced its vision policy)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(record scope, 20261011130000)%' AS record_scope_live \gset
+\if :record_scope_live
+\ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
+\endif
 \ir ../../../rollbacks/20261006060000_context_call_budget_1000_down.sql
 \ir ../../../rollbacks/20261006014000_context_job_story_down.sql
 \ir ../../../rollbacks/20261006013000_context_ledger_store_down.sql
