@@ -596,12 +596,15 @@ BEGIN
  END IF;
 END $shape$;
 
--- 5. Re-applying the migration changes nothing (its guard accepts its own bodies). When the notes
--- freshness (20261009132000) has replaced this migration's judge since, it is rolled back first
--- inside this transaction, so the re-apply starts from this migration's own bodies.
-SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
-       LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
+-- 5. Re-applying the migration changes nothing (its guard accepts its own bodies). When the scoping
+-- pipeline (20261009133000) has replaced four of these bodies since, it is rolled back first inside
+-- this transaction, so the re-apply starts from this migration's own bodies.
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 BEGIN;
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
+\endif
+SELECT to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)') IS NOT NULL AS notes_freshness_live \gset
 \if :notes_freshness_live
 \ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
 \endif
