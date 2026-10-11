@@ -3,6 +3,13 @@
 -- it, and the window function dropped). contract.sql must then fail on its first check, the rule as
 -- of Wed 7 Oct 2026 10:00 Perth, which reads only a function that exists before this migration: a
 -- draft is never monitored by the earlier rule's live set and every lead has 28 days.
+-- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down
+-- goes first, as the story lead rank's refuses while a later assembler body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story settled notes, 20261011120000)%' AS story_settled_notes_live \gset
+\if :story_settled_notes_live
+\ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql
+\endif
 -- (The story lead rank, 20261011100000, replaced the assembler since: its rollback goes first, as the
 -- scoping pipeline's refuses while a later assembler body is live.)
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')

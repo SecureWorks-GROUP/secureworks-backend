@@ -5,6 +5,13 @@
 -- the earlier bodies.
 -- (The scoping pipeline, 20261009133000, replaced four of these bodies since: its rollback goes
 -- first, as this one refuses while a later body is live.)
+-- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down
+-- goes first, as the story lead rank's refuses while a later assembler body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story settled notes, 20261011120000)%' AS story_settled_notes_live \gset
+\if :story_settled_notes_live
+\ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql
+\endif
 -- (The story lead rank, 20261011100000, replaced the assembler since: its rollback goes first, as the
 -- scoping pipeline's refuses while a later assembler body is live.)
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
