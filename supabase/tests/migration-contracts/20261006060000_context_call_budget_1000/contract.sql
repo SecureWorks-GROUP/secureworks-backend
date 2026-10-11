@@ -375,14 +375,17 @@ BEGIN
  -- Readers of the policy are untouched; the replaced bodies are this migration's.
  PERFORM pg_temp.cb_assert((SELECT jsonb_object_agg(p.oid::regprocedure::text, md5(p.prosrc)) FROM pg_proc p
    WHERE p.oid::regprocedure::text IN (SELECT jsonb_object_keys(pre.untouched))) = pre.untouched, 'a reader this migration leaves alone moved');
+ -- (the saved job story, 20261009100000, adds a story branch to the admission and
+ -- leaves every other phase as it was: its own contract proves both, so its body
+ -- is accepted here too)
  FOR x IN SELECT * FROM (VALUES
-  ('public.reserve_context_model_call(text,uuid,uuid)', '0d741538d7874ce63d48e54d8645d18c'),
-  ('public.context_ledger_budget()', '8f7b42529db2e1062283de005cef01a7'),
-  ('public.context_document_vision_policy()', '160abaf805bacd50e6ee570385c67037'),
-  ('public.context_document_vision_admission()', 'f1d33b0f0ee54516941ee313cb7fe756'),
-  ('public.context_core_status()', '2b6b2c54daeae381cdeff7802d72df81')) AS t(sig, md5) LOOP
+  ('public.reserve_context_model_call(text,uuid,uuid)', ARRAY['0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56']),
+  ('public.context_ledger_budget()', ARRAY['8f7b42529db2e1062283de005cef01a7']),
+  ('public.context_document_vision_policy()', ARRAY['160abaf805bacd50e6ee570385c67037']),
+  ('public.context_document_vision_admission()', ARRAY['f1d33b0f0ee54516941ee313cb7fe756']),
+  ('public.context_core_status()', ARRAY['2b6b2c54daeae381cdeff7802d72df81'])) AS t(sig, md5s) LOOP
   SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid = to_regprocedure(x.sig);
-  PERFORM pg_temp.cb_assert(live = x.md5, format('%s md5 %s', x.sig, live));
+  PERFORM pg_temp.cb_assert(live = ANY (x.md5s), format('%s md5 %s', x.sig, live));
  END LOOP;
  -- No number of the old budget is left in a body that decides a call.
  PERFORM pg_temp.cb_assert(position('>400' IN (SELECT prosrc FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)) = 0

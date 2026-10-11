@@ -176,8 +176,10 @@ BEGIN
  PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND contype = 'c'
   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'ledger'::text])))$d$),
   'runs phase check must admit ledger');
+ -- (the saved job story, 20261009100000, widens the list again with story)
  PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_model_call_reservations'::regclass AND contype = 'c'
-  AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text])))$d$),
+  AND pg_get_constraintdef(oid) IN ($d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text])))$d$,
+   $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text, 'story'::text])))$d$)),
   'reservations phase check must admit ledger');
  PERFORM pg_temp.lg_assert(obj_description('public.context_ledger_writes'::regclass, 'pg_class') LIKE 'Context ledger store:%', 'receipts comment');
  PERFORM pg_temp.lg_assert((SELECT relrowsecurity FROM pg_class WHERE oid = 'public.context_ledger_writes'::regclass), 'receipts RLS');
@@ -1858,8 +1860,10 @@ BEGIN
  PERFORM pg_temp.lg_run(j, 'ledger', 'running', '30 minutes');
  PERFORM pg_temp.lg_calls_add(1, 'ledger');
 END $c$;
--- (the call budget and then the story, when a full stack has them, go first, as
--- the store's rollback demands: the call budget replaced the admission)
+-- (the saved job story, the call budget and then the story, when a full stack
+-- has them, go first, as the store's rollback demands: the saved job story and
+-- the call budget replaced the admission, each refusing a later body)
+\ir ../../../rollbacks/20261009100000_context_job_story_text_down.sql
 \ir ../../../rollbacks/20261006060000_context_call_budget_1000_down.sql
 \ir ../../../rollbacks/20261006014000_context_job_story_down.sql
 \ir ../../../rollbacks/20261006013000_context_ledger_store_down.sql
@@ -2363,8 +2367,9 @@ END $c$;
 -- 15. Last, so a behaviour break above is reported by its behaviour: the
 -- admission is exactly this migration's body, or the call budget's
 -- (20261006060000: this body with the cap and attribution's share read from
--- the policy, proved by its own contract).
+-- the policy, proved by its own contract), or the saved job story's
+-- (20261009100000: the call budget's with a story branch, proved by its own).
 DO $c$ BEGIN
  PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c'), 'reserve_context_model_call is not this migration''s body');
+  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56'), 'reserve_context_model_call is not this migration''s body');
 END $c$;
