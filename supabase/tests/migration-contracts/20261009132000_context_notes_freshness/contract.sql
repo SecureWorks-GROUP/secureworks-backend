@@ -123,8 +123,8 @@ BEGIN
  PERFORM pg_temp.nf_assert(plan NOT LIKE '%context_ledger_row_unread%', 'the rule is not inlined: ' || plan);
  FOR x IN SELECT * FROM (VALUES
    ('public.context_ledger_judge(uuid[])', 's',
-    'Context ledger store (20261006013000), story safety (20261006040000): (notes freshness, 20261009132000) %Earlier (lead cutoff, 20261007010000) %'),
-   ('public.context_ledger_due(integer)', 's', 'Context ledger store (20261006013000): (notes freshness, 20261009132000) %Earlier: %'),
+    'Context ledger store (20261006013000), story safety (20261006040000): %(notes freshness, 20261009132000) %Earlier (lead cutoff, 20261007010000) %'),
+   ('public.context_ledger_due(integer)', 's', 'Context ledger store (20261006013000): %(notes freshness, 20261009132000) %Earlier: %'),
    ('public.context_ledger_promote_shadow(text,uuid[],integer)', 'v',
     'Context ledger store (20261006013000): (notes freshness, 20261009132000) %Earlier: bulk go-live.%'),
    ('public.context_job_story_ledger(uuid,uuid,timestamptz)', 's',
@@ -424,8 +424,13 @@ BEGIN
 END $story$;
 ROLLBACK;
 
--- 8. Re-applying the migration changes nothing (its guard accepts its own bodies).
+-- 8. Re-applying the migration changes nothing. A later scoping pipeline body is first returned
+-- to this migration's judge and due bodies inside the rolled-back transaction.
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 BEGIN;
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
+\endif
 CREATE TEMP TABLE notes_freshness_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_ledger_row_unread', 'context_ledger_judge', 'context_ledger_due',
