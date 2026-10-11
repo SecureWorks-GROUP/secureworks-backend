@@ -36,7 +36,11 @@
 -- Replaced bodies (each guarded on its live production md5, read 11 Oct 2026): context_job_record_timeline
 --   (the 20261006040000 body, 0921f25dfb5a67ab04629d2977e9f0a6) and context_document_vision_policy (the 20261006060000 body,
 --   160abaf805bacd50e6ee570385c67037). Signatures, volatility, owners and grants stay; the timeline comment keeps its slice
---   names first. Open PRs #1001, #1005 and #1009 replace neither body, so merge order does not matter.
+--   names first. Open PRs #1001, #1005 and #1009 replace neither body. Open PR #996
+--   (20261008090000, record timeline T1) replaces the same timeline body from the same production md5
+--   and leaves the quote line alone: whichever of the two merges second must be re-derived on the
+--   other's body (the quote-line change here applies to its body unchanged) and widen its guard.
+--   Neither overwrites the other silently: the second one's guard refuses the first one's body.
 -- Rollback: supabase/rollbacks/20261011120000_context_record_scope_down.sql (both bodies and the comment
 --   word for word; no row touched).
 SET LOCAL lock_timeout = '5s';
