@@ -448,7 +448,14 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_j
 -- safety's ledger read since: both their downs refuse while it is live)
 SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
        LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
+-- (and first the record scope, 20261011120000, which replaced story safety's record timeline since:
+-- story safety's down refuses while it is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(record scope, 20261011120000)%' AS record_scope_live \gset
 BEGIN;
+\if :record_scope_live
+\ir ../../../rollbacks/20261011120000_context_record_scope_down.sql
+\endif
 \if :notes_freshness_live
 \ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
 \endif

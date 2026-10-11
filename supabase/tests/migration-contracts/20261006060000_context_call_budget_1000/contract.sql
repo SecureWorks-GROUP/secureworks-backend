@@ -365,7 +365,10 @@ BEGIN
  PERFORM pg_temp.cb_assert((pol ->> 'model_call_cap')::integer = 1000 AND (pol ->> 'morning_cap')::integer = 750
   AND (pol ->> 'attribution_calls_day')::integer = 300 AND pol ->> 'morning_until' = '12:00', 'the ruled numbers: ' || pol::text);
  PERFORM pg_temp.cb_assert((pol - keys) = (pre.policy - keys), 'every other cadence number and live_since must be unchanged: ' || (pol - keys)::text);
- PERFORM pg_temp.cb_assert(public.context_document_vision_policy() = pre.vision_policy || '{"shared_calls_ceiling":500}'::jsonb
+ -- (record scope, 20261011120000, raised max_image_bytes to 10 MB since; a full stack has it)
+ PERFORM pg_temp.cb_assert(public.context_document_vision_policy() - 'max_image_bytes'
+   = (pre.vision_policy || '{"shared_calls_ceiling":500}'::jsonb) - 'max_image_bytes'
+  AND public.context_document_vision_policy() -> 'max_image_bytes' IN (pre.vision_policy -> 'max_image_bytes', '10000000'::jsonb)
   AND (pre.vision_policy ->> 'shared_calls_ceiling')::integer = 200, 'the vision policy may change only its ceiling, 200 to 500');
  -- The live reserves are unchanged.
  PERFORM pg_temp.cb_assert((SELECT live_reserve_calls_day = 100 AND live_reserve_calls_morning = 100 AND live_reserve_reads_per_job = 2
@@ -382,7 +385,9 @@ BEGIN
   ('public.context_document_vision_admission()', 'f1d33b0f0ee54516941ee313cb7fe756'),
   ('public.context_core_status()', '2b6b2c54daeae381cdeff7802d72df81')) AS t(sig, md5) LOOP
   SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid = to_regprocedure(x.sig);
-  PERFORM pg_temp.cb_assert(live = x.md5, format('%s md5 %s', x.sig, live));
+  -- (record scope, 20261011120000, replaced the vision policy since: a photo up to 10 MB)
+  PERFORM pg_temp.cb_assert(live = x.md5 OR (x.sig = 'public.context_document_vision_policy()' AND live = '1f0c955a0875282be2aeec1dd0bb644a'),
+   format('%s md5 %s', x.sig, live));
  END LOOP;
  -- No number of the old budget is left in a body that decides a call.
  PERFORM pg_temp.cb_assert(position('>400' IN (SELECT prosrc FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)) = 0
