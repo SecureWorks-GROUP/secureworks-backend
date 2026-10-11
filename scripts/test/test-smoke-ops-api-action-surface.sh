@@ -113,6 +113,14 @@ if [[ "$action" == "job_story" || "$action" == "client_story" ]]; then
   fi
   exit 0
 fi
+if [[ "$action" == "job_overview" ]]; then
+  if printf '%s' "$url" | grep -q 'jobId=__deploy_probe__'; then
+    printf '%s\n' '{"error":"job_id must be a uuid","code":"invalid_job_id"}'
+  else
+    printf '%s\n' '{"version":"job-overview-v1"}'
+  fi
+  exit 0
+fi
 if [[ "$action" == "context_story_scorecard" || "$action" == "context_scorecard" ]]; then
   if printf '%s' "$url" | grep -q 'as_of=__deploy_probe__'; then
     printf '%s\n' '{"error":"as_of must be an ISO date-time","code":"invalid_as_of"}'
