@@ -1,4 +1,4 @@
--- Rollback contract: 20261011120000_context_record_scope. The runner applied the stack through this
+-- Rollback contract: 20261011130000_context_record_scope. The runner applied the stack through this
 -- migration and then its down. Both bodies and the timeline comment are the earlier ones word for word
 -- (20261006040000's record timeline, 20261006060000's vision policy), flags and grants stand, the
 -- earlier behaviour is back (a quote line ends at its value; a photo up to 5 MB); the down runs again
@@ -49,16 +49,16 @@ END $c$;
 ROLLBACK;
 
 -- The down runs again cleanly (its guard accepts the earlier bodies), and changes nothing.
-\ir ../../../rollbacks/20261011120000_context_record_scope_down.sql
+\ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
 SELECT pg_temp.rb_restored();
 
 -- The migration re-applies on top of its own rollback.
 BEGIN;
-\ir ../../../migrations/20261011120000_context_record_scope.sql
+\ir ../../../migrations/20261011130000_context_record_scope.sql
 DO $re$
 BEGIN
  PERFORM pg_temp.rb_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_job_record_timeline(uuid[],timestamptz)'::regprocedure)
-  = '27df48d65b222613575ed617470866e7', 'the migration did not re-apply its timeline');
+  = 'fca5eda750a40bbf1f2d8f0e7cf33055', 'the migration did not re-apply its timeline');
  PERFORM pg_temp.rb_assert((public.context_document_vision_policy() ->> 'max_image_bytes')::bigint = 10000000, 'the migration did not re-apply its policy');
 END $re$;
 ROLLBACK;

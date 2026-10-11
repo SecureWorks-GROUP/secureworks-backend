@@ -1,4 +1,4 @@
--- Contract: 20261011120000_context_record_scope. Every fixture write is rolled back. Job numbers, names
+-- Contract: 20261011130000_context_record_scope. Every fixture write is rolled back. Job numbers, names
 -- and words are synthetic; the first job is SWF-261469's shape (diagnosis cio-ctx-missing-info): an
 -- accepted quote that sold 16 m (8.5 m at 1800 mm plus 7.5 m at 1200 mm, 7 panels) and a custom extra
 -- "2 hours 2 trades For Jack hammering and cutting roots" at $240 ex GST, on a price record that also
@@ -55,7 +55,7 @@ BEGIN
    AND NOT has_function_privilege('authenticated', x.sig, 'EXECUTE'), x.sig || ' grants changed');
  END LOOP;
  PERFORM pg_temp.rs_assert(obj_description('public.context_job_record_timeline(uuid[],timestamptz)'::regprocedure, 'pg_proc')
-   LIKE 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (record scope, 20261011120000) %',
+   LIKE 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (record scope, 20261011130000) %',
   'the timeline comment must keep its slice names first');
 END $shape$;
 
@@ -207,7 +207,7 @@ BEGIN;
 CREATE TEMP TABLE record_scope_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_job_record_timeline', 'context_document_vision_policy');
-\ir ../../../migrations/20261011120000_context_record_scope.sql
+\ir ../../../migrations/20261011130000_context_record_scope.sql
 DO $again$
 BEGIN
  IF (SELECT count(*) FROM record_scope_md5) <> 2 OR EXISTS (SELECT 1 FROM record_scope_md5 x JOIN pg_proc p ON p.oid = x.sig::regprocedure

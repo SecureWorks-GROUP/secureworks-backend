@@ -1,86 +1,29 @@
--- Record scope (11 Oct 2026): what a quote sold reaches the job record, and the photo reader takes
--- photos up to 10 MB.
---
--- Why. The owner's example job SWF-261469 (diagnosis cio-ctx-missing-info, slices B and C). Its accepted
--- quote Q-0797 sold 16 m of fencing (8.5 m at 1800 mm plus 7.5 m at 1200 mm, 7 panels) and a custom
--- extra "2 hours 2 trades For Jack hammering and cutting roots" at $240 ex GST. The record line said
--- only "Quote Q-0797 v1 accepted, value $2,684.00 inc GST", so the reader never saw what was sold and
--- the story said the records showed "no separate amount" for the $240. Live (11 Oct): 141 quoted jobs carry a
--- priced custom extra; 141 of 729 sent or accepted quotes carry a scope summary. Separately, a 5.70 MB
--- customer photo on that job was refused as too large: the backend door allowed 5 MB per image, the
--- worker that sends it allows 10 MB.
---
--- What it does:
---  1. context_job_record_timeline: a sent or accepted quote line's what adds
---     "; scope: <the document's trade_pack_json.summary>" (price free) and
---     "; extras: <custom extra> $240.00 ex GST" from the job's pricing_json.line_items (category custom),
---     at most 3 named and ", and N more". An extra belongs to the document when its words are one of the
---     document's own quote lines (trade_pack_json.quote_lines); a document with no quote lines takes the
---     job's extras only when it is the job's one current client quote. A superseded document shows its
---     scope and no price (the price record is today's). what stays within 360 characters (the reader cuts
---     its record line at 400 with date, kind and amount): the scope is cut first. amount, kind, state,
---     every other line and the row order are unchanged. The reader already renders a record line's what,
---     so this reaches it with no reader change; the story's card hash leaves out every what.
---  2. context_document_vision_policy: max_image_bytes 5,000,000 -> 10,000,000, the worker's limit. It
---     bounds a photo and each page image of a scanned PDF; max_pdf_bytes stays 5 MB, so a PDF is
---     unchanged. No model call is added: a photo over 5 MB was refused before its call was reserved,
---     and the daily vision cap and shared ceiling are unchanged. The described-photo kind is not added
---     (it needs the owner's word on the reader side).
---
--- Prices: the timeline is a SECURITY DEFINER read granted to service_role only; its readers are the job
---   story (ops-api job_story, staff door), the scorecard and the reader's own record packet. The line
---   already carried the quote's value; no trade surface reads it.
--- Not changed: job_quote_values, the story assembler, every other timeline line, the vision admission,
---   caps and ceilings. No row, flag or setting is written; no reading is rebuilt (existing notes stay
---   until a read revisits them).
--- Replaced bodies (each guarded on its live production md5, read 11 Oct 2026): context_job_record_timeline
---   (the 20261006040000 body, 0921f25dfb5a67ab04629d2977e9f0a6) and context_document_vision_policy (the 20261006060000 body,
---   160abaf805bacd50e6ee570385c67037). Signatures, volatility, owners and grants stay; the timeline comment keeps its slice
---   names first. Open PRs #1001, #1005 and #1009 replace neither body. Open PR #996
---   (20261008090000, record timeline T1) replaces the same timeline body from the same production md5
---   and leaves the quote line alone: whichever of the two merges second must be re-derived on the
---   other's body (the quote-line change here applies to its body unchanged) and widen its guard.
---   Neither overwrites the other silently: the second one's guard refuses the first one's body.
--- Rollback: supabase/rollbacks/20261011120000_context_record_scope_down.sql (both bodies and the comment
---   word for word; no row touched).
+-- Rollback for 20261011130000_context_record_scope.sql: puts back the two bodies it replaced, word for
+-- word (20261006040000's record timeline and its comment; 20261006060000's vision policy, a photo up to
+-- 5 MB). Signatures, owners and grants never changed, so nothing else moves. No row is touched: a photo
+-- read while the cap was 10 MB keeps its words; one refused stays refused.
+-- Refuses unless each live body is this migration's or already the earlier one (a re-run is a no-op):
+-- a later change to one of them must be rolled back first.
 SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '120s';
-
--- 0. Pre-image guard. Reports every mismatch at once.
+SET LOCAL statement_timeout = '60s';
 DO $guard$
-DECLARE problems text[] := '{}'; live text; x record; f text;
+DECLARE problems text[] := '{}'; x record; live text;
 BEGIN
- -- The two replaced bodies: the ones production runs, or this migration's (re-apply).
  FOR x IN SELECT * FROM (VALUES
-  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['0921f25dfb5a67ab04629d2977e9f0a6', '27df48d65b222613575ed617470866e7']),
-  ('public.context_document_vision_policy()', ARRAY['160abaf805bacd50e6ee570385c67037', '1f0c955a0875282be2aeec1dd0bb644a'])
- ) AS v(sig, accepted) LOOP
-  live := NULL;
+  ('public.context_job_record_timeline(uuid[],timestamptz)', ARRAY['fca5eda750a40bbf1f2d8f0e7cf33055', '0921f25dfb5a67ab04629d2977e9f0a6']),
+  ('public.context_document_vision_policy()', ARRAY['e2fc43a4e4d7189daac5c894423ac5dc', '160abaf805bacd50e6ee570385c67037'])
+ ) v(sig, accepted) LOOP
   SELECT md5(p.prosrc) INTO live FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
-  IF live IS NULL OR NOT live = ANY(x.accepted) THEN
+  IF live IS NULL OR NOT live = ANY (x.accepted) THEN
    problems := problems || format('%s md5 %s', x.sig, coalesce(live, '<missing>'));
   END IF;
  END LOOP;
- -- Read, never replaced: these must exist with these signatures.
- FOREACH f IN ARRAY ARRAY['public.context_job_record_messages(uuid[],timestamptz)', 'public.job_quote_values(uuid)',
-  'public.context_job_record_bill_share(text,jsonb,text)', 'public.context_job_record_date(text)'] LOOP
-  IF to_regprocedure(f) IS NULL THEN problems := problems || format('%s missing', f); END IF;
- END LOOP;
- -- The new words read two columns.
- FOR x IN SELECT * FROM (VALUES ('job_documents', 'trade_pack_json'), ('jobs', 'pricing_json')) AS v(t, c) LOOP
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = x.t AND column_name = x.c
-                 AND data_type = 'jsonb') THEN
-   problems := problems || format('%s.%s is not a jsonb column', x.t, x.c);
-  END IF;
- END LOOP;
  IF cardinality(problems) > 0 THEN
-  RAISE EXCEPTION 'context_record_scope_preimage_mismatch: %; read the live definitions before replacing them',
+  RAISE EXCEPTION 'context_record_scope_down_refused: %; a later change replaced these bodies, roll it back first',
    array_to_string(problems, '; ');
  END IF;
 END $guard$;
 
--- 1. The record timeline: the 20261006040000 body, its quote line adding what the quote sold
--- (marked "record scope").
 CREATE OR REPLACE FUNCTION public.context_job_record_timeline(p_job_ids uuid[], p_as_of timestamptz DEFAULT now())
 RETURNS TABLE(job_id uuid, at timestamptz, perth_date date, time_basis text, kind text, what text, amount numeric,
  party text, placement text, source_table text, source_id text, state text, made_at timestamptz)
@@ -260,7 +203,14 @@ AS $fn$
   -- happened on the same Perth day within an hour
   UNION ALL
   SELECT d.job_id, q.at, 'observed', 'quote',
-         qs.what,
+         CASE WHEN d.type = 'quote' THEN 'Quote ' ELSE initcap(replace(d.type, '_', ' ')) || ' ' END
+           || coalesce(d.quote_number, 'without a number') || coalesce(' v' || d.version, '')
+           || coalesce(' (' || d.run_label || ')', '') || ' ' || q.ev
+           || CASE WHEN q.ev = 'sent' AND de.undelivered THEN ', but every email of it bounced or failed: not received' ELSE '' END
+           || CASE WHEN q.ev = 'sent' THEN coalesce(', value ' || to_char(v.value_inc_gst, 'FM$999,999,990.00') || ' inc GST',
+                                                    ', value not recorded (' || coalesce(v.value_source, 'not a sent quote') || ')')
+                   WHEN q.ev = 'accepted' THEN coalesce(', value ' || to_char(v.value_inc_gst, 'FM$999,999,990.00') || ' inc GST', '')
+                   ELSE '' END,
          CASE WHEN q.ev IN ('sent', 'accepted') THEN v.value_inc_gst END, NULL, 'on_job', 'job_documents', d.id::text
   FROM public.job_documents d
   LEFT JOIN qv v ON v.job_id = d.job_id AND v.document_id = d.id
@@ -272,66 +222,6 @@ AS $fn$
        AND NOT coalesce(d.viewed_at <= p_as_of OR d.accepted_at <= p_as_of OR d.declined_at <= p_as_of, false)) AS undelivered) de
   CROSS JOIN LATERAL (VALUES ('generated', d.created_at), ('sent', d.sent_at), ('viewed', d.viewed_at),
        ('accepted', d.accepted_at), ('declined', d.declined_at), ('superseded', d.superseded_at)) q(ev, at)
-  -- (record scope, 20261011120000) qb.base is the line's earlier words; a sent or accepted line adds what
-  -- the quote sold: its own price-free scope summary (trade_pack_json.summary) and the custom extra
-  -- lines of the job's price record (pricing_json.line_items, category custom) with their sell price
-  -- ex GST. An extra is this document's when its words are one of the document's own quote lines
-  -- (trade_pack_json.quote_lines); a document with no quote lines takes the job's extras only when it
-  -- is the job's one current client quote (no party, no run, none other sent and not superseded).
-  -- A document superseded by p_as_of shows its scope but never a price (the price record is today's).
-  -- The words stay within 360 characters (the reader's line is 400 with its date, kind and amount):
-  -- the scope is cut first, then (rarely) the whole line.
-  CROSS JOIN LATERAL (SELECT
-   CASE WHEN d.type = 'quote' THEN 'Quote ' ELSE initcap(replace(d.type, '_', ' ')) || ' ' END
-             || coalesce(d.quote_number, 'without a number') || coalesce(' v' || d.version, '')
-             || coalesce(' (' || d.run_label || ')', '') || ' ' || q.ev
-             || CASE WHEN q.ev = 'sent' AND de.undelivered THEN ', but every email of it bounced or failed: not received' ELSE '' END
-             || CASE WHEN q.ev = 'sent' THEN coalesce(', value ' || to_char(v.value_inc_gst, 'FM$999,999,990.00') || ' inc GST',
-                                                      ', value not recorded (' || coalesce(v.value_source, 'not a sent quote') || ')')
-                     WHEN q.ev = 'accepted' THEN coalesce(', value ' || to_char(v.value_inc_gst, 'FM$999,999,990.00') || ' inc GST', '')
-                     ELSE '' END AS base) qb
-  CROSS JOIN LATERAL (
-   SELECT CASE WHEN length(w.w) > 360 THEN left(w.w, 359) || '…' ELSE w.w END AS what
-   FROM (SELECT qb.base
-                || CASE WHEN s.scope IS NULL OR s.room < 24 THEN ''
-                        WHEN length(s.scope) <= s.room THEN '; scope: ' || s.scope
-                        ELSE '; scope: ' || left(s.scope, s.room - 1) || '…' END
-                || coalesce('; extras: ' || s.extras, '') AS w
-         FROM (SELECT x.scope, x.extras, 360 - length(qb.base) - 9 - coalesce(length(x.extras) + 11, 0) AS room
-               FROM (SELECT
-                      CASE WHEN q.ev IN ('sent', 'accepted') AND jsonb_typeof(d.trade_pack_json -> 'summary') = 'string'
-                           THEN nullif(btrim(regexp_replace(d.trade_pack_json ->> 'summary', '\s+', ' ', 'g')), '') END AS scope,
-                      (SELECT string_agg(e.line, ', ' ORDER BY e.ord) FILTER (WHERE e.n <= 3)
-                              || CASE WHEN count(*) > 3 THEN ', and ' || (count(*) - 3) || ' more' ELSE '' END
-                       FROM (SELECT it.ord, row_number() OVER (ORDER BY it.ord) AS n,
-                                    CASE WHEN length(li.descr) > 60 THEN left(li.descr, 59) || '…' ELSE li.descr END
-                                    || ' ' || to_char(li.price, 'FM$999,999,990.00') || ' ex GST' AS line
-                             FROM public.jobs pj
-                             CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(pj.pricing_json -> 'line_items') = 'array'
-                                                                          THEN pj.pricing_json -> 'line_items' ELSE '[]'::jsonb END)
-                                  WITH ORDINALITY it(v, ord)
-                             CROSS JOIN LATERAL (SELECT
-                                    nullif(btrim(regexp_replace(CASE WHEN jsonb_typeof(it.v -> 'description') = 'string'
-                                                                     THEN it.v ->> 'description' END, '\s+', ' ', 'g')), '') AS descr,
-                                    CASE WHEN jsonb_typeof(it.v -> 'total_sell') = 'number' THEN (it.v ->> 'total_sell')::numeric
-                                         WHEN jsonb_typeof(it.v -> 'sell_price') = 'number'
-                                         THEN (it.v ->> 'sell_price')::numeric
-                                              * CASE WHEN jsonb_typeof(it.v -> 'quantity') = 'number' THEN (it.v ->> 'quantity')::numeric ELSE 1 END
-                                    END AS price) li
-                             WHERE pj.id = d.job_id AND q.ev IN ('sent', 'accepted')
-                               AND NOT coalesce(d.superseded_at <= p_as_of, false)
-                               AND jsonb_typeof(it.v) = 'object' AND it.v ->> 'category' = 'custom'
-                               AND li.descr IS NOT NULL AND li.price IS NOT NULL
-                               AND CASE WHEN jsonb_typeof(d.trade_pack_json -> 'quote_lines') = 'array'
-                                        THEN EXISTS (SELECT 1 FROM jsonb_array_elements(d.trade_pack_json -> 'quote_lines') ql
-                                                     WHERE jsonb_typeof(ql) = 'object' AND jsonb_typeof(ql -> 'description') = 'string'
-                                                       AND lower(btrim(regexp_replace(ql ->> 'description', '\s+', ' ', 'g'))) = lower(li.descr))
-                                        ELSE d.job_contact_id IS NULL AND d.run_label IS NULL
-                                             AND NOT EXISTS (SELECT 1 FROM public.job_documents o
-                                                             WHERE o.job_id = d.job_id AND o.id <> d.id AND o.type ILIKE '%quote%'
-                                                               AND o.job_contact_id IS NULL AND o.run_label IS NULL
-                                                               AND (o.sent_at <= p_as_of OR o.accepted_at <= p_as_of)
-                                                               AND NOT coalesce(o.superseded_at <= p_as_of, false)) END) e) AS extras) x) s) w) qs
   WHERE d.job_id = ANY (p_job_ids) AND d.type ILIKE '%quote%' AND q.at IS NOT NULL AND q.at <= p_as_of
     AND NOT (q.ev = 'generated' AND d.sent_at IS NOT NULL AND d.sent_at <= p_as_of
              AND d.sent_at - d.created_at < interval '1 hour'
@@ -723,9 +613,8 @@ AS $fn$
  ORDER BY m.job_id, m.at, m.kind COLLATE "C", m.source_id COLLATE "C", m.what COLLATE "C"
 $fn$;
 COMMENT ON FUNCTION public.context_job_record_timeline(uuid[], timestamptz) IS
- 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): (record scope, 20261011120000) a sent or accepted quote line''s what adds what the quote sold: "; scope: " and the document''s own price-free scope summary (trade_pack_json.summary), then "; extras: " and up to 3 custom extra lines of the job''s price record (pricing_json.line_items, category custom; ", and N more" beyond) each with its sell price ex GST (total_sell, else sell_price times quantity). An extra is the document''s when its words are one of its own quote lines (trade_pack_json.quote_lines, case and spacing ignored); a document with no quote lines takes the job''s extras only when it is the job''s one current client quote (no party, no run, no other client quote sent and not superseded as of p_as_of); a document superseded as of p_as_of shows its scope and no price. what stays within 360 characters (the scope is cut first, with an ellipsis). amount is unchanged (the quote''s value inc GST). Prices stay on this service-role read and the staff surfaces built on it, never a trade one. Earlier, story safety: a booking change on a ghost or observer row (is_ghost, or role observer), or one its writer tags as a ghost copy, is booking_mirror (an observer copy, never "Booking made"); a supplier bill whose lines name other jobs says it is shared and gives this job''s lines; first contact never comes from a text dated before the job''s lead window (context_job_record_messages). Earlier, story fixes: app events the ledger store lets close a matter (quote_sent, invoice.emailed, acceptance_invoice_sent, payment_link_sent, payment_received, payment_recorded, clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted) are lines citing job_events, one per event type, matter and Perth day (the newest cited, the count named; a folded clock-off gives the day''s net hours, every stint added, or none), each with state = its event_type, or not_delivered when it names a document whose every email bounced or failed and the customer never viewed or answered it; rows sort by time, then kind, source and words in C (byte) order. Earlier: one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes (never a crew-planning mark: a lock, a status mark, or a move to the same date), attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
+ 'Job record (20261006011000), story fixes (20261006033000), story safety (20261006040000): a booking change on a ghost or observer row (is_ghost, or role observer), or one its writer tags as a ghost copy, is booking_mirror (an observer copy, never "Booking made"); a supplier bill whose lines name other jobs says it is shared and gives this job''s lines; first contact never comes from a text dated before the job''s lead window (context_job_record_messages). Earlier, story fixes: app events the ledger store lets close a matter (quote_sent, invoice.emailed, acceptance_invoice_sent, payment_link_sent, payment_received, payment_recorded, clock.clock_on, clock.clock_off, makesafe_report_submitted, roof_report_submitted) are lines citing job_events, one per event type, matter and Perth day (the newest cited, the count named; a folded clock-off gives the day''s net hours, every stint added, or none), each with state = its event_type, or not_delivered when it names a document whose every email bounced or failed and the customer never viewed or answered it; rows sort by time, then kind, source and words in C (byte) order. Earlier: one row per record milestone per job, oldest first (job created, first contact, site visit, quote version events with value, folded status changes, invoices, payments, credits, supplier bills, system emails, bookings, booking changes (never a crew-planning mark: a lock, a status mark, or a move to the same date), attendance, variations, purchase and work orders, rectification, make-safe, tasks, staff notes, documents). time_basis observed|date_only|stamp|scheduled. state: the cited record''s state (invoices draft, issued, paid, voided; documents generated, sent, viewed, accepted, declined, superseded; crew bookings scheduled, attended (started, completed, or status complete with neither recorded), cancelled (not standing: cancelled, deleted, draft, disputed, declined); else null); made_at: a crew booking''s created time. A status-only completion is timed at the end of its booked Perth day, or now while that is still ahead. Rows recorded after p_as_of are ignored; mutable rows are read as now. Service role only.';
 
--- 2. The vision policy: the 20261006060000 body, a photo up to 10 MB.
 CREATE OR REPLACE FUNCTION public.context_document_vision_policy() RETURNS jsonb
 LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
  SELECT jsonb_build_object(
@@ -744,10 +633,9 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   -- shared model calls are used; the rest stay for the job reads (owner
   -- ruling 6 Oct 2026: 500 of the 1,000; call budget 20261006060000).
   'shared_calls_ceiling',500,
-  -- What one call may carry: a photo up to 10 MB, the most the worker sends
-  -- (record scope 20261011120000; 5 MB until then); a scanned PDF up to 5 MB,
+  -- What one call may carry: a photo up to 5 MB; a scanned PDF up to 5 MB,
   -- of which at most 5 page images (each at least 300 px on its short side).
-  'max_image_bytes',10000000,
+  'max_image_bytes',5000000,
   'max_pdf_bytes',5000000,
   'max_images',5,
   'min_image_side',300,

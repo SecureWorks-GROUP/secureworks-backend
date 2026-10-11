@@ -3366,12 +3366,12 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_j
 -- migration's ledger read since: the lead cutoff's down refuses while it is live)
 SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
        LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
--- (and first the record scope, 20261011120000, which replaced this migration's record timeline since)
+-- (and first the record scope, 20261011130000, which replaced this migration's record timeline since)
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
-       LIKE '%(record scope, 20261011120000)%' AS record_scope_live \gset
+       LIKE '%(record scope, 20261011130000)%' AS record_scope_live \gset
 BEGIN;
 \if :record_scope_live
-\ir ../../../rollbacks/20261011120000_context_record_scope_down.sql
+\ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
 \endif
 \if :scoping_pipeline_live
 \ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
