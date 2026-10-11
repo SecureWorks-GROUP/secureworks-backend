@@ -3367,6 +3367,12 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_j
 SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
        LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
 BEGIN;
+-- (the story lead rank, 20261011100000, replaced the assembler since: its down goes first)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story lead rank, 20261011100000)%' AS story_lead_rank_live \gset
+\if :story_lead_rank_live
+\ir ../../../rollbacks/20261011100000_context_story_lead_rank_down.sql
+\endif
 \if :scoping_pipeline_live
 \ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
 \endif
