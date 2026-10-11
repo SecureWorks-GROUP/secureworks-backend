@@ -601,6 +601,13 @@ END $shape$;
 -- this transaction, so the re-apply starts from this migration's own bodies.
 SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 BEGIN;
+-- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down
+-- goes first, as the story lead rank's refuses while a later assembler body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story settled notes, 20261011120000)%' AS story_settled_notes_live \gset
+\if :story_settled_notes_live
+\ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql
+\endif
 -- (the story lead rank, 20261011100000, replaced the assembler since: its down goes first)
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
        LIKE '%(story lead rank, 20261011100000)%' AS story_lead_rank_live \gset
