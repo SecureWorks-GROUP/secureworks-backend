@@ -1,4 +1,4 @@
--- Rollback for 20261006120000_job_work_orders.sql.
+-- Rollback for 20261012090000_job_work_orders.sql.
 --
 -- Removes the job work order layer. Refuses while any job work order exists,
 -- so it can never silently delete an approved (sealed) work order or the
@@ -7,7 +7,7 @@
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM public.work_orders WHERE kind = 'job') THEN
-    RAISE EXCEPTION 'job work orders exist: resolve them before rolling back 20261006120000_job_work_orders';
+    RAISE EXCEPTION 'job work orders exist: resolve them before rolling back 20261012090000_job_work_orders';
   END IF;
 END $$;
 
