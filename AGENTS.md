@@ -976,7 +976,9 @@ first line's item or a reason for whose move.
 
 `context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`, drafts and
 windows by type since `20261009133000`; null ids means every live job, a draft
-only while monitored) and `context_lead_monitored(job, as_of)`, which returns that
+only while monitored and, since `20261012093500`, a finished job only while its
+customer has written on it inside 30 days, state `finished_awake`) and
+`context_lead_monitored(job, as_of)`, which returns that
 job's same row (`job_id`, `monitored`, `state`, ...; no row for an unknown job),
 are the owner's lead rule (7 Oct 2026, widened 9 Oct), the only one. The window is
 `context_lead_window_hours(type)`: 1008 hours (6 weeks) for a patio job, 672 for
@@ -1013,7 +1015,8 @@ SQL helper called with a sub-select argument is never inlined and runs whole
 that reason: 1.8 s against 13.5 s read one job at a time for every live job).
 The story fixes and story safety contracts roll this migration back first in
 their re-apply sections, as its own guard pins their bodies (and the scoping
-pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's).
+pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's, and
+the finished wake, `20261012093500`, before that in all of them).
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
