@@ -271,14 +271,15 @@ import {
 } from './fencing_stage_engine_v1.ts'
 import { isFencingStageTruthRequested } from './fencing_stage_recipe_v1.ts'
 import {
+  DISPATCH_LIST_PROJECTION,
   DISPATCH_LIST_STATUSES,
-  DISPATCH_SCOPE_PROJECTION,
-  DISPATCH_UNLISTED_TYPE,
+  DISPATCH_LISTED_WORK_FILTER,
   dispatchJobDescription,
   dispatchValueIncGst,
+  dispatchWorkType,
   isDispatchListRequested,
   projectDispatchJobNote,
-  stripDispatchScopeAliases,
+  stripDispatchListAliases,
 } from './dispatch_job_list.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
@@ -15466,9 +15467,9 @@ async function pipeline(client: any, params: URLSearchParams) {
     }
     if (typeFilter === 'repair') scoped = scoped.in('id', repairJobIds || [])
     else if (typeFilter) scoped = scoped.eq('type', typeFilter)
-    // Make-safe jobs are off the Dispatch list and come back only for a search.
-    // jobs.type is NOT NULL, so this .neq drops no row to three-valued logic.
-    else if (dispatchList && !search) scoped = scoped.neq('type', DISPATCH_UNLISTED_TYPE)
+    // Make-safe jobs are off the Dispatch list and come back only for a search;
+    // a repair-family card typed makesafe is a repair and stays on it.
+    else if (dispatchList && !search) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
     return scoped
   }
 
@@ -15476,7 +15477,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   // aliases below restores the previous key order — the response stays byte-identical.
   const repairProjection = typeFilter === 'repair' ? ', metadata' : ''
   // Appended last and stripped again below, like the pricing aliases.
-  const dispatchProjection = dispatchList ? ', ' + DISPATCH_SCOPE_PROJECTION.join(', ') : ''
+  const dispatchProjection = dispatchList ? ', ' + DISPATCH_LIST_PROJECTION.join(', ') : ''
   const buildJobsQuery = () => applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
@@ -15789,7 +15790,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     // extracted. Previously this dropped the whole `pricing_json` blob; the aliases
     // occupy its slot in the select, so the surviving key order is unchanged.
     const jLite = dispatchList
-      ? stripDispatchScopeAliases(stripPipelinePricingAliases(j))
+      ? stripDispatchListAliases(stripPipelinePricingAliases(j))
       : stripPipelinePricingAliases(j)
     const pipelineRow = {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
@@ -15813,7 +15814,11 @@ async function pipeline(client: any, params: URLSearchParams) {
       has_final_invoice: invoiceMap[j.id]?.has_final || false,
       final_paid: invoiceMap[j.id]?.final_paid || false,
       ...(dispatchList
-        ? { description: dispatchJobDescription(j), value_inc_gst: dispatchValueIncGst(j) }
+        ? {
+          description: dispatchJobDescription(j),
+          value_inc_gst: dispatchValueIncGst(j),
+          work_type: dispatchWorkType(j),
+        }
         : {}),
     }
     if (stageTruth && stageTruthRows) {
@@ -15892,6 +15897,8 @@ export const _pipelineForTest = pipeline
 // Every note on a job, newest first (docs/dispatch-slice-1-read-contract.md).
 // job_detail.events is the newest 50 events of every kind, so a busy job's older
 // notes fall outside it. A pure read: none of job_detail's annotation side effect.
+// System markers are left out by the rule comms_notes_count uses, so the list
+// and that count agree.
 async function jobNotes(client: any, jobRef: string) {
   const ref = String(jobRef || '').trim()
   const isJobNumber = /^SW[A-Z]+-\d+$/i.test(ref)
@@ -15917,7 +15924,8 @@ async function jobNotes(client: any, jobRef: string) {
     'job_notes',
     'id',
   )
-  return { job_id: jobId, notes: rows.map(projectDispatchJobNote), total: rows.length }
+  const notes = rows.map(projectDispatchJobNote).filter((note) => !noteIsSystemMarker(note.text))
+  return { job_id: jobId, notes, total: notes.length }
 }
 
 export const _jobNotesForTest = jobNotes

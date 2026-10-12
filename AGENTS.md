@@ -426,9 +426,11 @@ it at 1,000 rows, newest `updated_at` first. It matched 1,400 jobs on
 board (mostly archived). That is existing behaviour, left alone: never read a
 count of jobs off the plain read. `pipeline&dispatch=1` is the complete, opt-in
 list read for the Ops screen's Dispatch tab: accepted work only, paged, with a
-derived `description` line and a `value_inc_gst` flag, and `job_notes` returns
-every note on a job (`job_detail.events` is only the newest 50 events of every
-kind). The description is built from five projected `scope_json` paths; the
+derived `description` line, a `value_inc_gst` flag and a `work_type` (repair
+wins: a repair-family card typed `makesafe` is listed as a repair, a true
+make-safe comes back only for a search), and `job_notes` returns every note on a
+job less the `noteIsSystemMarker` rows (`job_detail.events` is only the newest
+50 events of every kind). The description is built from five projected `scope_json` paths; the
 status floor is what keeps that affordable, because draft and quoted rows hold
 the heaviest blobs (4.9 s to project every pipeline row against 0.43 s for
 accepted work). Rules: `dispatch_job_list.ts`; contract:

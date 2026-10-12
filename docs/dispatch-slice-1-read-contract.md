@@ -21,12 +21,13 @@ With `dispatch=1`:
 | What | Behaviour |
 |---|---|
 | Row set | Accepted or later only: every pipeline status except `draft` and `quoted`. The `draft` and `quoted` columns come back empty. An explicit `status` still wins. |
-| Make-safe | `type = 'makesafe'` rows are left out unless `search` has text (or `type` is given). So `total` with no `search` and no `type` is the "All jobs" count. |
+| Make-safe | Make-safe jobs are left out unless `search` has text (or `type` is given). A repair-family job typed `makesafe` is a repair, not a make-safe, and is listed (below). So `total` with no `search` and no `type` is the "All jobs" count. |
 | Completeness | Paged past the 1,000-row ceiling. Every job in the set is returned; nothing is capped. |
 | Order | `updated_at` newest first inside each column, as before. Sort the merged list on `updated_at` for one newest-first list. |
 | Search | Same four fields as before (client name, suburb, address, job number), case-insensitive contains. |
 | New row field `description` | `string` or `null`. The one-line job description (below). |
 | New row field `value_inc_gst` | `boolean`. `true` only when `value` is `pricing_json.totalIncGST`. `false` when `value` is the unlabelled fallback `pricing_json.total`, and when there is no price (`value` is `0`). Print "inc GST" only on `true`. |
+| New row field `work_type` | `string`. The work type the type buttons filter on: `repair` for a repair-family job whatever its `type`, else the row's `type`. |
 
 Every other row key is exactly what the plain read returns (`value`,
 `next_scheduled_date`, `last_scheduled_date`, `council_status`, `council_step`,
@@ -60,11 +61,25 @@ screen's own summary does not read them either: 5 patio jobs saved in the
 multi-patio shape (`scope_json.patios`) and 1 fencing job saved as free text
 (`scope_json.job_description`).
 
-### Type buttons
+### Type buttons and repair
 
-Filter on `row.type` in the browser. Do not use `type=repair` for the Repair
-button: that parameter is the Repairs board's set (jobs whose insurance family is
-repair, whatever their type) and returns rows in that board's shape.
+Filter on `row.work_type` in the browser, never `row.type`.
+
+A make-safe card reclassified as a repair keeps `type = 'makesafe'` for good
+(`update_makesafe_job_family` never retypes a card). Repair wins: a job is a
+repair when its `type` is `repair`, or `metadata.ses_family` or
+`metadata.makesafe_job_family` is `repair`. That is the rule the Trade app's
+`_jobVertical` and the Repairs board apply. Such a job is on the default list and
+under the Repair button with `work_type: "repair"`; its `type` comes back as
+stored. A true make-safe has `work_type: "makesafe"` and comes back only for a
+search.
+
+A job whose only repair mark is `makesafe_job_details.report_type = 'repair'` is
+not recognised here, as on the calendar's `job_family`; a read-only production
+check on 16 Sep 2026 found none.
+
+Do not use `type=repair` for the Repair button: that parameter is the Repairs
+board's set and returns rows in that board's shape.
 
 ## 2. The GST flag
 
@@ -97,13 +112,21 @@ save or on Retry).
 ```
 
 - Rows: every `job_events` row with `event_type = 'note'` for the job, newest
-  first, paged, never capped. `total` is the row count.
-- `text`: `detail_json.text`, falling back to the keys older writers used
-  (`note`, `note_text`, `message`).
-- `author`: the linked user's name, else a name the writer stored, else `null`.
-  Most notes have no user: 238 of the 374 notes on non-make-safe jobs today were
-  written with a server key. Show no author for `null`; `from_ops: true` marks a
-  note written from the office side.
+  first, paged, never capped, less the system marker rows. `total` is the count
+  of notes returned.
+- System markers: the pack-sent (`MAKESAFE_PACK_SENT ...`) and agent-reply
+  (`MAKESAFE_AGENT_REPLY ...`) rows are machine breadcrumbs stored as notes. They
+  are left out by `noteIsSystemMarker`, the rule the list read's
+  `comms_notes_count` uses, so the two agree. The portal-ready marker
+  (`MAKESAFE_PACK_PORTAL_READY ...`) is not in that rule: it still counts and
+  still shows.
+- `text`: `detail_json.text`, else `detail_json.note`, else
+  `detail_json.message`. Read on production, 12 Oct 2026, 1,243 note rows: `text`
+  on 1,228, `note` on 6, `message` on 9 with no other text key.
+- `author`: the linked user's name, else `null`. Most notes have no user: 238 of
+  the 374 notes on non-make-safe jobs today were written with a server key. Show
+  no author for `null`; `from_ops: true` marks a note written from the office
+  side.
 - `visibility`: `internal_only`, `client_visible`, or `null` on old rows.
 - Errors: `400` when `jobId` is missing or is neither a job id nor a job number;
   `404` when the job does not exist. An empty `notes` list always means the job
@@ -135,9 +158,16 @@ Measured read-only on production, 12 Oct 2026.
   jobs table gives. `pipeline` has always left out jobs with no job number (179
   accepted-or-later: 148 fencing, 31 patio) and old-system records (3). By type:
   fencing 206, patio 86, repair 14, insurance 3, decking 0. Make-safe: 538.
+  Dispatch shows the same job set as the other Ops tabs, so the unnumbered jobs
+  stay off it; they are being handled separately as a records problem.
+- Those counts are by stored `type` and were taken before repair-family jobs
+  typed `makesafe` joined the list. How many of the 538 are repair-family was not
+  measured: "All jobs" and the Repair count rise by that number, and the
+  description coverage above (245 of 309) does not include them.
 - `pipeline` also drops any job whose client name contains the word "test", as it
   always has. None of the 309 listed jobs is one today; 2 make-safe jobs are, so a
   search will not find those two.
 - Cost: the scope projection adds about 0.4 s to the list read. Draft and quoted
   jobs hold the heaviest scope blobs (4.9 s to project all 1,400 rows), which is
-  why this read stops at accepted work.
+  why this read stops at accepted work. The two `metadata` family paths were
+  added after that measurement and are not in it.

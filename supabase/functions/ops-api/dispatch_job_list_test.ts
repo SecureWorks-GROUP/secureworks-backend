@@ -16,13 +16,17 @@ import {
   LEAD_INSTALLER_READ_ACTIONS,
 } from "./index.ts";
 import {
+  DISPATCH_LIST_ALIASES,
   DISPATCH_LIST_STATUSES,
-  DISPATCH_SCOPE_ALIASES,
+  DISPATCH_LISTED_WORK_FILTER,
   dispatchJobDescription,
   dispatchValueIncGst,
+  dispatchWorkType,
   isDispatchListRequested,
   projectDispatchJobNote,
 } from "./dispatch_job_list.ts";
+import { buildAgentReplyBody } from "./makesafe_draft_notes.ts";
+import { buildPackSentMarkerText } from "./makesafe_send_pack.ts";
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
 // PostgREST's response ceiling: a read with no .range() stops here.
@@ -35,6 +39,7 @@ function jobId(index: number): string {
 }
 
 function job(index: number, overrides: Row = {}): Row {
+  const metadata = overrides.metadata ?? null;
   return {
     id: jobId(index),
     org_id: ORG_ID,
@@ -67,8 +72,29 @@ function job(index: number, overrides: Row = {}): Row {
     ds_colour: null,
     ds_profile: null,
     ds_config: null,
+    // What the two family projections return for this row's metadata.
+    ds_ses_family: metadata?.ses_family ?? null,
+    ds_makesafe_family: metadata?.makesafe_job_family ?? null,
+    metadata,
     ...overrides,
   };
+}
+
+// One term of a flat PostgREST `or`: column.op.value, the column optionally a
+// `->>` text path. A null never satisfies eq or neq, as in SQL.
+function orTermMatches(row: Row, term: string): boolean {
+  const parsed =
+    /^(\w+)(?:->>(\w+))?\.(not\.is\.null|is\.null|eq|neq)(?:\.(.*))?$/
+      .exec(term);
+  if (!parsed) throw new Error(`unsupported or term: ${term}`);
+  const [, column, key, operator, value] = parsed;
+  const actual = (key ? row[column]?.[key] : row[column]) ?? null;
+  if (operator === "is.null") return actual === null;
+  if (operator === "not.is.null") return actual !== null;
+  if (actual === null) return false;
+  return operator === "eq"
+    ? String(actual) === value
+    : String(actual) !== value;
 }
 
 // A PostgREST stand-in that applies the filters these reads depend on and
@@ -80,6 +106,7 @@ function makeClient(tables: Record<string, Row[]>) {
     eq: Array<[string, unknown]>;
     neq: Array<[string, unknown]>;
     in: Array<[string, unknown[]]>;
+    or: string[];
     ranged: boolean;
   }> = [];
 
@@ -90,6 +117,7 @@ function makeClient(tables: Record<string, Row[]>) {
       eq: [] as Array<[string, unknown]>,
       neq: [] as Array<[string, unknown]>,
       in: [] as Array<[string, unknown[]]>,
+      or: [] as string[],
       ranged: false,
     };
     reads.push(read);
@@ -114,6 +142,15 @@ function makeClient(tables: Record<string, Row[]>) {
         rows = rows.filter((row) =>
           String(row[column] ?? "").toLowerCase() === value.toLowerCase()
         );
+      }
+      for (const filter of read.or) {
+        rows = rows.filter((row) =>
+          filter.split(",").some((term) => orTermMatches(row, term))
+        );
+      }
+      // Only a select that names the column returns it.
+      if (table === "jobs" && !/(^|,\s*)metadata(\s*,|$)/.test(read.select)) {
+        rows = rows.map(({ metadata: _metadata, ...rest }) => rest);
       }
       rows.sort((a, b) => {
         for (const [column, ascending] of orders) {
@@ -148,7 +185,10 @@ function makeClient(tables: Record<string, Row[]>) {
         return builder;
       },
       not: () => builder,
-      or: () => builder,
+      or: (filter: string) => {
+        read.or.push(filter);
+        return builder;
+      },
       is: () => builder,
       order: (column: string, options?: { ascending?: boolean }) => {
         orders.push([column, options?.ascending !== false]);
@@ -368,7 +408,9 @@ Deno.test("pipeline without the flag is unchanged: same select, same rows, no ne
   assertEquals(jobsReads().length, 1);
   assertEquals(read.ranged, false);
   assertEquals(read.neq, []);
+  assert(!read.or.includes(DISPATCH_LISTED_WORK_FILTER));
   assert(!read.select.includes("scope_json"));
+  assert(!read.select.includes("metadata"));
   const statuses = read.in.find(([column]) => column === "status")?.[1] || [];
   assert(statuses.includes("draft") && statuses.includes("quoted"));
   assertEquals(statuses.length, 20);
@@ -376,13 +418,14 @@ Deno.test("pipeline without the flag is unchanged: same select, same rows, no ne
   for (const row of allRows(result)) {
     assert(!("description" in row));
     assert(!("value_inc_gst" in row));
+    assert(!("work_type" in row));
     // The fixture rows carry the scope aliases; the plain read must pass a row
     // through as it always has rather than start stripping keys.
     assert("ds_runs" in row);
   }
 });
 
-Deno.test("dispatch list: accepted work only, make-safe left out, both new fields on every row", async () => {
+Deno.test("dispatch list: accepted work only, make-safe left out, the new fields on every row", async () => {
   const { client, jobsReads } = makeClient(mixedBoard());
   const result = await _pipelineForTest(client, params("dispatch=1"));
 
@@ -396,7 +439,6 @@ Deno.test("dispatch list: accepted work only, make-safe left out, both new field
 
   const [read] = jobsReads();
   assertEquals(read.ranged, true);
-  assertEquals(read.neq, [["type", "makesafe"]]);
   assertEquals(
     read.in.find(([column]) => column === "status")?.[1],
     DISPATCH_LIST_STATUSES,
@@ -411,8 +453,10 @@ Deno.test("dispatch list: accepted work only, make-safe left out, both new field
   assertEquals(fence.description, "12.5m Woodland Grey Sameside fence");
   assertEquals(fence.value, 1001);
   assertEquals(fence.value_inc_gst, true);
+  assertEquals(fence.work_type, "fencing");
 
   const fallback = result.columns.order_materials[0];
+  assertEquals(fallback.work_type, "patio");
   assertEquals(fallback.description, null);
   assertEquals(fallback.value, 3850);
   assertEquals(fallback.value_inc_gst, false);
@@ -423,11 +467,120 @@ Deno.test("dispatch list: accepted work only, make-safe left out, both new field
 
   for (const row of allRows(result)) {
     for (
-      const alias of [...DISPATCH_SCOPE_ALIASES, "pj_total_inc", "pj_total"]
+      const alias of [...DISPATCH_LIST_ALIASES, "pj_total_inc", "pj_total"]
     ) {
       assert(!(alias in row), `${alias} leaked into the response`);
     }
   }
+});
+
+Deno.test("work type: repair wins over the row's own type, by either family tag", () => {
+  assertEquals(
+    dispatchWorkType({ type: "makesafe", ds_ses_family: "repair" }),
+    "repair",
+  );
+  assertEquals(
+    dispatchWorkType({ type: "fencing", ds_makesafe_family: " Repair " }),
+    "repair",
+  );
+  assertEquals(dispatchWorkType({ type: "repair" }), "repair");
+  assertEquals(
+    dispatchWorkType({ type: "makesafe", ds_ses_family: "roof_report" }),
+    "makesafe",
+  );
+  assertEquals(
+    dispatchWorkType({
+      type: "makesafe",
+      ds_ses_family: null,
+      ds_makesafe_family: null,
+    }),
+    "makesafe",
+  );
+  assertEquals(dispatchWorkType({ type: "patio" }), "patio");
+});
+
+function repairBoard(): Record<string, Row[]> {
+  return {
+    jobs: [
+      ...mixedBoard().jobs,
+      job(7, {
+        type: "makesafe",
+        status: "in_progress",
+        job_number: "SWMS-5007",
+        metadata: { ses_family: "repair" },
+      }),
+      job(8, {
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-5008",
+        metadata: { makesafe_job_family: "repair" },
+      }),
+      job(9, {
+        type: "makesafe",
+        status: "accepted",
+        job_number: "SWMS-5009",
+        metadata: { ses_family: "roof_report" },
+      }),
+      job(10, { type: "repair", status: "accepted", job_number: "SWR-5010" }),
+    ],
+  };
+}
+
+Deno.test("dispatch list: a repair-family job typed makesafe is listed as a repair, a true make-safe is not", async () => {
+  const { client } = makeClient(repairBoard());
+  const result = await _pipelineForTest(client, params("dispatch=1"));
+
+  const byNumber = Object.fromEntries(
+    allRows(result).map((row) => [row.job_number, row]),
+  );
+  assertEquals(Object.keys(byNumber).sort(), [
+    "SWF-1001",
+    "SWF-1006",
+    "SWMS-5007",
+    "SWMS-5008",
+    "SWP-2002",
+    "SWR-5010",
+  ]);
+  assertEquals(result.total, 6);
+
+  for (const number of ["SWMS-5007", "SWMS-5008"]) {
+    assertEquals(byNumber[number].work_type, "repair");
+    // The stored type is reported as it is, never rewritten.
+    assertEquals(byNumber[number].type, "makesafe");
+  }
+  assertEquals(byNumber["SWR-5010"].work_type, "repair");
+  assertEquals(byNumber["SWF-1001"].work_type, "fencing");
+
+  assertEquals(
+    allRows(result).filter((row) => row.work_type === "repair").length,
+    3,
+  );
+  for (const row of allRows(result)) {
+    for (const alias of DISPATCH_LIST_ALIASES) {
+      assert(!(alias in row), `${alias} leaked into the response`);
+    }
+    assert(!("metadata" in row));
+  }
+});
+
+Deno.test("dispatch list: a search returns true make-safes as make-safe and repair-family ones as repair", async () => {
+  const { client } = makeClient(repairBoard());
+  const result = await _pipelineForTest(
+    client,
+    params("dispatch=1&search=swms-"),
+  );
+
+  assertEquals(
+    Object.fromEntries(
+      allRows(result).map((row) => [row.job_number, row.work_type]),
+    ),
+    {
+      "SWMS-5005": "makesafe",
+      "SWMS-5007": "repair",
+      "SWMS-5008": "repair",
+      "SWMS-5009": "makesafe",
+    },
+  );
 });
 
 Deno.test("dispatch list: a search brings make-safe jobs back and reads enrichment for matches only", async () => {
@@ -440,7 +593,8 @@ Deno.test("dispatch list: a search brings make-safe jobs back and reads enrichme
   assertEquals(result.total, 1);
   assertEquals(result.columns.accepted[0].job_number, "SWMS-5005");
   assertEquals(result.columns.accepted[0].value_inc_gst, false);
-  assertEquals(jobsReads()[0].neq, []);
+  assertEquals(result.columns.accepted[0].work_type, "makesafe");
+  assert(!jobsReads()[0].or.includes(DISPATCH_LISTED_WORK_FILTER));
 
   const assignmentReads = reads.filter((read) =>
     read.table === "job_assignments"
@@ -486,7 +640,7 @@ Deno.test("dispatch list: every job comes back past the 1000-row ceiling the pla
 
 // ── job_notes ───────────────────────────────────────────────────────────────
 
-Deno.test("note row: text and author fall back through the keys older writers used", () => {
+Deno.test("note row: text falls back through the keys live rows hold, and the author is the linked user", () => {
   assertEquals(
     projectDispatchJobNote({
       id: "n1",
@@ -514,11 +668,11 @@ Deno.test("note row: text and author fall back through the keys older writers us
     id: "n2",
     user_id: null,
     created_at: "2026-10-01T00:00:00+00:00",
-    detail_json: { message: "From the message key", author: "Stored Name" },
+    detail_json: { message: "From the message key" },
     users: null,
   });
   assertEquals(keyed.text, "From the message key");
-  assertEquals(keyed.author, "Stored Name");
+  assertEquals(keyed.author, null);
   assertEquals(keyed.user_id, null);
   assertEquals(keyed.visibility, null);
   assertEquals(keyed.from_ops, false);
@@ -527,19 +681,10 @@ Deno.test("note row: text and author fall back through the keys older writers us
     projectDispatchJobNote({ detail_json: { note: "Older key" } }).text,
     "Older key",
   );
-  // A server-key note: no user and no stored name is no author, not a guess.
+  // A server-key note: no user is no author, not a guess.
   assertEquals(
     projectDispatchJobNote({ detail_json: { text: "x" } }).author,
     null,
-  );
-  // detail_json stored as a string, as JSON and as bare text.
-  assertEquals(
-    projectDispatchJobNote({ detail_json: '{"text":"encoded"}' }).text,
-    "encoded",
-  );
-  assertEquals(
-    projectDispatchJobNote({ detail_json: "bare words" }).text,
-    "bare words",
   );
   assertEquals(projectDispatchJobNote({ detail_json: null }).text, "");
 });
@@ -590,6 +735,37 @@ Deno.test("job_notes: every note on the job, including those outside its newest 
     result.notes.map((note: any) => note.text),
     ["Note 3", "Note 20", "Note 60", "Note 75"],
   );
+});
+
+Deno.test("job_notes: system marker rows are left out, so the list holds what comms_notes_count counts", async () => {
+  const fixture = notesFixture();
+  const marker = (id: string, text: string, hour: number): Row => ({
+    id,
+    job_id: jobId(3),
+    user_id: null,
+    event_type: "note",
+    detail_json: { text },
+    created_at: new Date(Date.UTC(2026, 9, 12, hour)).toISOString(),
+    users: null,
+  });
+  fixture.job_events.push(
+    marker(
+      "pack-sent",
+      buildPackSentMarkerText({
+        invoiceNumber: "INV-0835",
+        to: "builder@example.test",
+        nowIso: "2026-10-12T03:00:00.000Z",
+        messageId: "m1",
+      }),
+      3,
+    ),
+    marker("agent-reply", buildAgentReplyBody("Report wording revised"), 2),
+    marker("human", "Called the builder about access", 1),
+  );
+
+  const result = await _jobNotesForTest(makeClient(fixture).client, jobId(3));
+  assertEquals(result.total, 1);
+  assertEquals(result.notes.map((note: any) => note.id), ["human"]);
 });
 
 Deno.test("job_notes: a job number resolves, and a job with no notes is an empty list", async () => {

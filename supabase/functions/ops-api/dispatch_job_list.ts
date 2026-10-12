@@ -6,6 +6,8 @@
 // this module owns what they project and derive, so the rules are testable
 // without a database.
 
+import { isInsuranceRepairFamily } from "./insurance_repairs_board.ts";
+
 export const DISPATCH_LIST_PARAM = "dispatch";
 export const DISPATCH_LIST_ON = "1";
 
@@ -44,7 +46,11 @@ export const DISPATCH_LIST_STATUSES = [
 ];
 
 // Make-safe jobs are not listed on Dispatch; they are reachable by search only.
-export const DISPATCH_UNLISTED_TYPE = "makesafe";
+// A repair-family card keeps type makesafe for good (update_makesafe_job_family
+// never retypes one), and repair wins, so it is listed. One flat PostgREST `or`,
+// the same three terms the Trade app's repair pool reads.
+export const DISPATCH_LISTED_WORK_FILTER =
+  "type.neq.makesafe,metadata->>ses_family.eq.repair,metadata->>makesafe_job_family.eq.repair";
 
 // jobs.scope_json must never be selected across a list (AGENTS.md: it averages
 // ~100 kB a row). These five paths are the whole input of the description line.
@@ -58,14 +64,40 @@ export const DISPATCH_SCOPE_PROJECTION = [
   "ds_config:scope_json->config",
 ];
 
-export const DISPATCH_SCOPE_ALIASES = DISPATCH_SCOPE_PROJECTION.map(
+// The two family tags that make a job a repair whatever its type. `->>` on
+// purpose: these are compared as text.
+export const DISPATCH_FAMILY_PROJECTION = [
+  "ds_ses_family:metadata->>ses_family",
+  "ds_makesafe_family:metadata->>makesafe_job_family",
+];
+
+export const DISPATCH_LIST_PROJECTION = [
+  ...DISPATCH_SCOPE_PROJECTION,
+  ...DISPATCH_FAMILY_PROJECTION,
+];
+
+export const DISPATCH_LIST_ALIASES = DISPATCH_LIST_PROJECTION.map(
   (projection) => projection.slice(0, projection.indexOf(":")),
 );
 
-export function stripDispatchScopeAliases(row: any) {
+export function stripDispatchListAliases(row: any) {
   const leanRow: Record<string, any> = { ...row };
-  for (const alias of DISPATCH_SCOPE_ALIASES) delete leanRow[alias];
+  for (const alias of DISPATCH_LIST_ALIASES) delete leanRow[alias];
   return leanRow;
+}
+
+// The work type the screen's type buttons filter on. Repair wins over the
+// row's own type, by the Repairs board's rule; jobs.type itself is never
+// rewritten in the response.
+export function dispatchWorkType(row: any): string {
+  const repair = isInsuranceRepairFamily({
+    type: row?.type,
+    metadata: {
+      ses_family: row?.ds_ses_family,
+      makesafe_job_family: row?.ds_makesafe_family,
+    },
+  });
+  return repair ? "repair" : row?.type;
 }
 
 function cleanText(value: unknown): string {
@@ -142,18 +174,9 @@ export function dispatchValueIncGst(row: any): boolean {
 
 function noteDetail(event: any): Record<string, any> {
   const detail = event?.detail_json;
-  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
-    return detail;
-  }
-  if (typeof detail !== "string") return {};
-  try {
-    const parsed = JSON.parse(detail);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed
-      : { text: detail };
-  } catch (_) {
-    return { text: detail };
-  }
+  return detail && typeof detail === "object" && !Array.isArray(detail)
+    ? detail
+    : {};
 }
 
 function firstText(...values: unknown[]): string {
@@ -173,16 +196,16 @@ export type DispatchJobNote = {
   from_ops: boolean;
 };
 
-// One job_events note row as the screen shows it. The body falls back through
-// the keys older writers used (the Ops screen's own readers do the same), and
-// the author is the linked user's name, else a name the writer stored, else null:
-// most notes were written with a server key and carry no user.
+// One job_events note row as the screen shows it. The body is `text`, else the
+// two keys live rows also hold (`note`, `message`), and the author is the linked
+// user's name, else null: most notes were written with a server key and carry
+// no user.
 export function projectDispatchJobNote(event: any): DispatchJobNote {
   const detail = noteDetail(event);
   return {
     id: event?.id,
-    text: firstText(detail.text, detail.note, detail.note_text, detail.message),
-    author: firstText(event?.users?.name, detail.author) || null,
+    text: firstText(detail.text, detail.note, detail.message),
+    author: firstText(event?.users?.name) || null,
     user_id: event?.user_id || null,
     created_at: event?.created_at,
     visibility: typeof detail.visibility === "string"
