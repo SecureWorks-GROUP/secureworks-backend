@@ -588,7 +588,9 @@ BEGIN
  h := pg_temp.lg_job('SWF-92010');
  PERFORM pg_temp.lg_ev(h, 'client.sms_out', 'sms', 'outbound', 'Reminder: your booking is tomorrow', '4 days', 'staff', 'job_customer', '{"sent_by_kind":"workflow"}');
  PERFORM pg_temp.lg_ev(h, 'invoice.raised', 'invoice', 'outbound', 'Invoice INV-9 raised for 100.00', '4 days');
- i := pg_temp.lg_job('SWF-92011', NULL, 'complete'); PERFORM pg_temp.lg_ev(i, 'client.reply', 'sms', 'inbound', 'Finished job', '4 days', 'customer');
+ -- (finished wake, 20261012093500: a finished job is live again while its customer has written on it
+ -- inside 30 days, so this one's only message is older than that)
+ i := pg_temp.lg_job('SWF-92011', NULL, 'complete'); PERFORM pg_temp.lg_ev(i, 'client.reply', 'sms', 'inbound', 'Finished job', '40 days', 'customer');
  s := pg_temp.lg_job('SWF-92012'); PERFORM pg_temp.lg_ev(s, 'client.reply', 'sms', 'inbound', 'New since the shadow read', '2 hours', 'customer');
  PERFORM pg_temp.lg_gen(s, 'shadow', now() - interval '1 day');
  m := pg_temp.lg_job('SWF-92013'); PERFORM pg_temp.lg_ev(m, 'client.reply', 'sms', 'inbound', 'A ledger run failed an hour ago', '4 days', 'customer');
