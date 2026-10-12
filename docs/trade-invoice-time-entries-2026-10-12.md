@@ -35,9 +35,13 @@ Every invoice line that bills a trade's time carries:
   times on carries none.
 - The trade app no longer sends any `source: 'extra_day'` value; the server
   never read that value, so nothing here depends on it.
-- A line is a time line when its type is Labour, Fencing, Patio, Make Safe or
-  General Labour (`TRADE_INVOICE_TIME_LINE_TYPES`, the same list the existing
-  hours guard reads). Materials, travel, equipment, commission, work order and
+- A line is a time line when its type is Labour, Fencing, Patio, Make Safe,
+  General Labour or Decking: every type the trade app's hours row offers
+  (`TRADE_INVOICE_TIME_LINE_TYPES`, the same list the existing hours guard
+  reads, so a Decking line with no hours is now refused there too). The type
+  is matched whatever its case and spacing, so `MakeSafe` is Make Safe. A new
+  hours type in the trade app must be added to that list, or its lines sit
+  outside the rule. Materials, travel, equipment, commission, work order and
   other lines carry none of these fields; any sent on them are ignored.
 
 ### What the trade app sends

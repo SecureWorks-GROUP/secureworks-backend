@@ -209,9 +209,31 @@ Deno.test("time entry: a line with none of the fields is accepted while the flag
   }
 });
 
+// Every type the trade app's manual hours row offers. A type added to the app
+// goes here, and fails below until the server treats it as a time line.
+const TRADE_APP_HOURS_TYPES = [
+  "Labour",
+  "Fencing",
+  "Patio",
+  "Make Safe",
+  "General Labour",
+  "Decking",
+];
+
 Deno.test("time entry: only lines that bill hours are time lines", () => {
+  for (const type of TRADE_APP_HOURS_TYPES) {
+    assert(isTradeInvoiceTimeLineType(type), type);
+  }
+  // one type, whatever its case and spacing
   for (
-    const type of ["Labour", "Fencing", "Patio", "Make Safe", "General Labour"]
+    const type of [
+      "MakeSafe",
+      "make safe",
+      "MAKE  SAFE",
+      " General Labour ",
+      "generallabour",
+      "DECKING",
+    ]
   ) {
     assert(isTradeInvoiceTimeLineType(type), type);
   }
@@ -732,6 +754,9 @@ const storedTimeOf = (row: any) => ({
   break_minutes: row.break_minutes ?? null,
 });
 
+const isMakeSafeType = (type: string) =>
+  type.toLowerCase().replace(/\s+/g, "") === "makesafe";
+
 const submitBody = (manual_assignments: any[], extra_items: any[] = []) => ({
   week_start: WEEK_START,
   gst_on: false,
@@ -915,6 +940,73 @@ for (const flagOn of [false, true]) {
     assertEquals(materials.line_type, "materials");
     assertEquals(timeOf(materials), NO_TIME);
     assertEquals(materials.line_total_ex, 20);
+  });
+
+  handlerTest(`generate_trade_invoice (${state}): every hours type the trade app offers stores the times sent on its line`, async () => {
+    for (const type of [...TRADE_APP_HOURS_TYPES, "MakeSafe"]) {
+      const makeSafe = isMakeSafeType(type);
+      const out = await callTradeAction(
+        "generate_trade_invoice",
+        submitBody([], [{
+          type,
+          description: "Extra hours",
+          unit: "hr",
+          rate: 50,
+          job_id: JOB_A,
+          job_number: makeSafe ? "SWMS-261001" : "SWF-TIME-1",
+          work_date: "2026-08-27",
+          start_time: "08:00",
+          finish_time: "12:30",
+          break_minutes: 30,
+        }]),
+        {
+          flagOn,
+          cards: [],
+          jobs: makeSafe
+            ? [{ ...JOBS[0], type: "makesafe", job_number: "SWMS-261001" }]
+            : JOBS,
+        },
+      );
+      assertEquals(out.lineRows.length, 1, `${type}: ${JSON.stringify(out.body)}`);
+      assertEquals(timeOf(out.lineRows[0]), {
+        work_date: "2026-08-27",
+        start_time: "08:00",
+        finish_time: "12:30",
+        break_minutes: 30,
+      }, type);
+      assertEquals(
+        [out.lineRows[0].quantity, out.lineRows[0].total_hours, out.lineRows[0].line_total_ex],
+        [4, 4, 200],
+        type,
+      );
+    }
+  });
+
+  handlerTest(`save_trade_invoice_draft (${state}): a Decking hours line keeps its times`, async () => {
+    const out = await callTradeAction("save_trade_invoice_draft", {
+      gst_on: false,
+      labour_lines: [],
+      extra_items: [{
+        type: "Decking",
+        description: "Deck boards",
+        quantity: 4,
+        unit: "hr",
+        rate: 50,
+        job_id: JOB_A,
+        job_number: "SWF-TIME-1",
+        work_date: "2026-08-27",
+        start_time: "08:00",
+        finish_time: "12:00",
+      }],
+    }, { flagOn });
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    assertEquals(out.lineRows.length, 1, JSON.stringify(out.body));
+    assertEquals(timeOf(out.lineRows[0]), {
+      work_date: "2026-08-27",
+      start_time: "08:00",
+      finish_time: "12:00",
+      break_minutes: 0,
+    });
   });
 
   handlerTest(`save_trade_invoice_draft (${state}): a draft stores the fields on both persist routes and is never refused`, async () => {
@@ -1133,6 +1225,44 @@ handlerTest("generate_trade_invoice: a make-safe job split over two day lines is
   }
   // a fencing job on the same invoice is never a make-safe line
   assertEquals(otherJob.flag_type, null);
+});
+
+handlerTest("generate_trade_invoice: an hours line of any type the trade app offers needs its times when the flag is on", async () => {
+  for (const type of [...TRADE_APP_HOURS_TYPES, "MakeSafe"]) {
+    const makeSafe = isMakeSafeType(type);
+    const line = {
+      type,
+      description: "Extra hours",
+      quantity: 4,
+      unit: "hr",
+      rate: 50,
+      job_id: JOB_A,
+      job_number: makeSafe ? "SWMS-261001" : "SWF-TIME-1",
+    };
+    const jobs = makeSafe
+      ? [{ ...JOBS[0], type: "makesafe", job_number: "SWMS-261001" }]
+      : JOBS;
+
+    // flag on, no times: refused, nothing saved
+    const refused = await callTradeAction(
+      "generate_trade_invoice",
+      submitBody([], [line]),
+      { flagOn: true, cards: [], jobs },
+    );
+    assertEquals(refused.status, 422, `${type}: ${JSON.stringify(refused.body)}`);
+    assertEquals(refused.body.code, "time_entry_required", type);
+    assertEquals(refused.writes, [], type);
+
+    // flag off, no times: saved as before, with no entry
+    const saved = await callTradeAction(
+      "generate_trade_invoice",
+      submitBody([], [line]),
+      { flagOn: false, cards: [], jobs },
+    );
+    assertEquals(saved.lineRows.length, 1, `${type}: ${JSON.stringify(saved.body)}`);
+    assertEquals(saved.lineRows[0].total_hours, 4, type);
+    assertEquals(timeOf(saved.lineRows[0]), NO_TIME, type);
+  }
 });
 
 // The auto-collected clock lane: no manual cards, so the server gathers the

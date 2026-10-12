@@ -615,7 +615,6 @@ import {
   loadLoggedTimesByCard,
   loggedTimeEntryForCard,
   resolveTradeInvoiceTimeEntry,
-  TRADE_INVOICE_TIME_LINE_TYPES,
   tradeInvoiceTimeEntriesNeededError,
   TradeInvoiceTimeEntryError,
   tradeInvoiceTimeEntryColumns,
@@ -12182,7 +12181,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   line_type: item.type ? item.type.toLowerCase() : 'other',
                   description: woDescription || item.description || item.type || 'Extra item',
                   quantity: Number(item.quantity || 1),
-                  // M0 guard reads total_hours for HOURLY_TYPES lines; extras carry their
+                  // M0 guard reads total_hours for lines that bill hours; extras carry their
                   // hours in `quantity` (searched-in make-safe/labour route here), so mirror
                   // it to total_hours or the guard rejects every searched-in line as "zero hours".
                   total_hours: extraHours,
@@ -12242,7 +12241,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // UX: normal job-centric cards pass untouched — the guard only
             // kills the lump-sum/zero-line class of submission.
             {
-              const HOURLY_TYPES = new Set<string>(TRADE_INVOICE_TIME_LINE_TYPES)
               const NON_JOB_TYPES = new Set(['adjustment', 'final_payout_deduction']) // narrow allowlist — no job attribution required
               const allLines = [...lineItems, ...extraLineItems]
 
@@ -12272,7 +12270,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   }
                 }
                 // Hours > 0 on hourly-type lines
-                if (HOURLY_TYPES.has(lt) && line._weeklyServerResolved !== true) {
+                if (isTradeInvoiceTimeLineType(line.line_type) && line._weeklyServerResolved !== true) {
                   const hrs = Number(line.total_hours || 0)
                   if (hrs <= 0) {
                     throw new ApiError(`Invoice rejected: labour line "${line.description || lt}" has zero or missing hours. Enter hours greater than 0.`, 422)

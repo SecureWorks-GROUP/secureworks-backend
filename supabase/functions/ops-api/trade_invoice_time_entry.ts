@@ -29,20 +29,30 @@
 export const TRADE_INVOICE_TIME_ENTRY_FLAG =
   "trade_invoice_time_entry_required_v1";
 
-// The line types that bill hours. The M0 capture guard in
-// generate_trade_invoice reads this same list for its hours check.
+// The line types that bill hours: every type the trade app's hours row
+// offers. The M0 capture guard in generate_trade_invoice asks the same
+// question for its hours check.
 export const TRADE_INVOICE_TIME_LINE_TYPES = [
   "labour",
   "fencing",
   "patio",
   "make safe",
   "general labour",
+  "decking",
 ] as const;
 
-const TIME_LINE_TYPES = new Set<string>(TRADE_INVOICE_TIME_LINE_TYPES);
+// A type is matched whatever its case and spacing: "Make Safe", "MakeSafe"
+// and "make safe" are one type.
+function timeLineTypeKey(lineType: unknown): string {
+  return String(lineType ?? "").toLowerCase().replace(/\s+/g, "");
+}
+
+const TIME_LINE_TYPE_KEYS = new Set<string>(
+  TRADE_INVOICE_TIME_LINE_TYPES.map(timeLineTypeKey),
+);
 
 export function isTradeInvoiceTimeLineType(lineType: unknown): boolean {
-  return TIME_LINE_TYPES.has(String(lineType ?? "").trim().toLowerCase());
+  return TIME_LINE_TYPE_KEYS.has(timeLineTypeKey(lineType));
 }
 
 export type TradeInvoiceTimeEntry = {
