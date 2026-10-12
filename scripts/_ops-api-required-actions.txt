@@ -103,6 +103,11 @@ client_story              # probe=bounded-refusal probe-args=job_id=__deploy_pro
 context_story_scorecard   # probe=bounded-refusal probe-args=as_of=__deploy_probe__
 # The context scorecard (W11): rows 1 to 14 and its per-job pages, same probe.
 context_scorecard         # probe=bounded-refusal probe-args=as_of=__deploy_probe__
+# Job overview v1: the job page Overview's read (staff, GET; refuses the probe's
+# invalid job id before any read) and the ask to rewrite the saved story (POST
+# only: proved by the source gate, never called against production).
+job_overview              # probe=bounded-refusal probe-args=jobId=__deploy_probe__
+request_job_story         # probe=source-only
 assemble_job_brain
 get_job_context_facts
 get_job_conversation
@@ -110,6 +115,10 @@ get_job_conversation
 # ── Sales cockpit / Secure Sale core reads ──
 pipeline
 job_detail
+
+# ── Ops screen Dispatch tab: every note on a job (docs/dispatch-slice-1-read-contract.md).
+#    A pure read; a bare call is refused 400 "jobId required" before any query. ──
+job_notes
 
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
@@ -121,12 +130,29 @@ log_business_event
 # by a smoke run, even with an invalid bound.
 update_repair_stage       # probe=source-only
 
+# ── Quote builder (docs/quote-builder-contract.md) ──
+# Hugo's iPad scoping app depends on every one. Staff-session actions that
+# return internal costs or write job rows, so all are source-only: no smoke run
+# may call them against production.
+quote_builder_list_jobs          # probe=source-only
+quote_builder_get_job            # probe=source-only
+quote_builder_create_private_job # probe=source-only
+quote_builder_save               # probe=source-only
+quote_builder_photo_upload_url   # probe=source-only
+quote_builder_photo_register     # probe=source-only
+quote_builder_photo_caption      # probe=source-only
+quote_builder_pdf_upload_url     # probe=source-only
+quote_builder_issue              # probe=source-only
+quote_builder_decide_variation   # probe=source-only
+
 # ── Trade authenticated surface ──
 # Post-deploy recognition uses API-key-only GET requests and must fail closed at
 # authTrade before any tenant read or invoice submission path can run.
 trade_calendar            # probe=jwt-fail-closed
 my_jobs                   # probe=jwt-fail-closed
 my_work_orders            # probe=jwt-fail-closed
+my_job_work_order         # probe=jwt-fail-closed
+report_work_order_variation # probe=jwt-fail-closed
 submit_work_order_invoice # probe=jwt-fail-closed
 
 # ── Job P&L (M3) — read-only; pairs with ops.html #119 + M1 migration ──
@@ -291,3 +317,9 @@ sales_booking_routes_write # probe=source-only
 sales_performance_write # probe=source-only
 sales_performance_read # probe=source-only
 sales_performance_note # probe=source-only
+# Job work orders (job_work_orders.ts): one sealed work order per fencing and patio job
+job_work_order # probe=bounded-refusal probe-args=job_id=__deploy_probe__
+approve_work_order # probe=source-only
+backfill_job_work_orders # probe=source-only
+resend_work_order_variation_emails # probe=source-only
+correct_work_order_variation # probe=source-only

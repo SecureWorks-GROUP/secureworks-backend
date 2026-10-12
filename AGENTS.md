@@ -257,11 +257,118 @@ would keep only the job number, merging every PO on one job. So, only when
 the company is `acg`, `normaliseAmbroseIdentityText` rewrites each
 PO-labelled 8-2 token to `ACG-<job>PO-<job><seq>` before any scan: claim
 `ACG-<job>`, PO `PO-<job><seq>`, key `ACG:PO-<job><seq>`. Do not widen it to
-other builders or relax the exact 8-2 shape. Ambrose mail goes to admin@ and
-marnin@, not the ses@ intake mailbox, so nothing reaches intake until it is
-redirected there (a forward becomes own-domain chatter). Ambrose has no SES
-family-matrix row, so pack and invoice prep stay refused. Tests:
-`makesafe_ambrose_intake_test.ts`.
+other builders or relax the exact 8-2 shape. Ambrose addresses its mail to the
+swwa@ general Group, not ses@; it reaches intake through the sender-scoped
+Group lane below (a human forward becomes own-domain chatter and is not the
+route). Ambrose has no SES family-matrix row, so pack and invoice prep stay
+refused. Tests: `makesafe_ambrose_intake_test.ts`.
+
+## Builder Mail In A General Group Is Read By Sender, And Stored As ses@
+
+`monitor-ses-makesafes` also reads the Groups in `SENDER_SCOPED_GROUPS` (today
+swwa@). A Group has no inbox rules, so there is no auto-forward to configure:
+the poll reads it. Five rules are load-bearing.
+
+- **Only a sender pattern of a company the Group lists admits a post.** Each
+  Group carries its own `companySlugs` (swwa@: `acg` only, owner ruling
+  12 Oct 2026), so another active builder's mail there is ignored like anyone
+  else's. No subject, keyword or Prime-floor match. Posts are listed WITHOUT
+  their body; an out-of-scope post is counted and dropped with no row in any
+  table (no exclusion audit either) and its body is never requested. Do not
+  route a scoped Group through `collectPosts` / `auditExclusion`, which store a
+  row for everything.
+- **An admitted post is stored under the ses@ mailbox key**, because every
+  downstream reader selects on it. Its origin is
+  `email_events_raw.page_meta.source_mailbox` on the `created` row. Do not add
+  a second mailbox key downstream to "fix" this.
+- **Each scoped Group has its own `mail_sync_cursors` row** (and `sync_state`
+  row for health), keyed by its own address. Its first read starts at its
+  `firstReadFrom` and catches up oldest first in slices of 40 conversations. A
+  conversation sorts by its LATEST post, so one not yet behind the cursor is
+  read back to `firstReadFrom`, never from the moving cursor, or an older
+  purchase order in a thread that later got a reply is skipped for good.
+- **The Group read never runs on the poll's response path.** The pg_net caller
+  disconnects at five seconds and a catch-up slice is many sequential Graph
+  reads, so the read runs in the poll's `EdgeRuntime.waitUntil` continuation,
+  under the mailbox lease, and the ses@ scan handoff starts once it returns,
+  carrying its sources. It waits out Graph throttling for at most 20 seconds.
+  A Group that cannot be read never fails the ses@ poll or its scan: it is
+  logged and alarmed once, its `sync_state` row turning `ERROR` only after that
+  alarm event is written. The poll response carries no Group result.
+- **A post whose attachment list cannot be read fails its slice**, after every
+  other post in the slice is stored and handed to intake. The Group cursor
+  never returns to a post, so the read is retried every poll with the cursor
+  unmoved, and a post whose attachments can NEVER be read holds that Group's
+  cursor until someone steps in. `sync_state.last_error` names the
+  post. Recovery: take that purchase order in by hand, then set the Group's
+  `mail_sync_cursors.last_completed_max` to 16 minutes after that
+  conversation's last delivery and check the mail around the new cursor,
+  because a conversation inside that gap is read only from the new cursor on.
+
+One purchase order sent to both addresses is two posts and one job: the planner
+and the instruction key fold them. Tests:
+`monitor_ses_sender_scoped_groups_test.ts` and the Ambrose cases in
+`makesafe_deterministic_intake_runtime_test.ts`. Switch the lane off with
+`MAKESAFE_SENDER_SCOPED_GROUPS=off`. The lane re-queues no PDF itself: the
+`makesafe-pdf-extraction-drain` cron is the retry for a failed text read. That
+cron read `active = false` in production on 12 Oct 2026, so check `cron.job`
+before relying on it; while it is off a failed first handoff is not retried.
+
+## A New Intake Adapter Must Be Admitted By The Database In The Same PR
+
+`makesafe_intake_cases.adapter_id` is checked against a list inside
+`makesafe_intake_cases_deterministic_shapes_check`. It is the only adapter list
+in the database (no other intake table has one). An adapter registered in
+`DETERMINISTIC_ADAPTER_REGISTRY` but missing from that list plans correctly in
+every test and is refused on every case insert in production: the runtime
+then stores a stripped fallback (`state` exception, `adapter_id` null,
+`last_decision_reason` `deterministic source_persist_failed case_insert`) and
+no job or draft can exist. That is what happened to Ambrose (PR #1004 shipped
+the adapter, `20261012043000` admitted it).
+`makesafe_adapter_admission_contract_test.ts` now fails CI whenever a
+registered adapter is missing from the newest definition of that constraint in
+the migrations; the Postgres half is the `20261012043000` migration contract.
+
+A stripped fallback is stuck on purpose and no scan re-decides it; the only
+exact recovery (`makesafe_source_persist_recovery.ts`) is closed to one MLB
+card. `RELEASED_SOURCE_PERSIST_FALLBACK_ADAPTERS` in
+`makesafe_deterministic_intake_runtime.ts` is the one release: for an adapter
+listed there (today `ambrose`) the ordinary scan upgrades the fallback through
+the same fenced update. Three things to know before touching it:
+
+- **One purchase order can hold several fallback rows**, one per email, because
+  a stripped row has no identity for the next email to bind to. They cannot be
+  merged or deleted (append-only, immutable lineage), so
+  `readSourcePersistRecoveryGate` lets exactly one case hold the purchase
+  order. A case holds it only when it holds work (`holdsBuilderObligation`: a
+  job, a live state, or `awaiting_job_creation`). Non-work and exception plans
+  are always released and hold nothing. A plan that would open a draft or a job
+  is released only while no sibling on its `company_key` + `wo_po_identity_key`
+  holds, and no later PDF email of the same purchase order is still stranded,
+  so across separate pages the newest email is the one released. When both
+  emails are read on ONE page the shared planner merges them into one case with
+  the OLDER email as primary (its subject, received time and description) and
+  both PDFs on the draft: read the Updated PDF when reviewing such a draft. That
+  merge order is shared by every builder and is not changed here; reordering it
+  is a fate-moving planner change that needs its own replay. Every other plan
+  on a held purchase order is withheld: it keeps its row's fate and opens
+  nothing, including an email recovered as an exception whose PDF is read
+  later. Known gap: a withheld email's PDF is never staged on the holding case.
+  The intake desk hides a stripped make-safe row once a live make-safe job
+  carries its reference (`matchingLiveObligationJobIds`); a stripped repair row
+  stays a "could not be stored" review card, because that match is make-safe
+  only.
+- **Only the sweep half of the scan reaches them.** A source with a case-source
+  row is final-fated, so the recent queue skips it; the sweep walks the 60-day
+  window two sources per run. Recovery after a deploy takes as long as the sweep
+  needs to reach those rows (`makesafe_intake_health.deterministic_scan_cursor_at`
+  against their `received_at`). Calling `scan_ses_makesafes` advances it.
+- **Add an adapter to the release list only with the migration that fixes its
+  cause**, and never release a builder whose fallbacks have another cause: the
+  older MLB and Rapid fallbacks stay stuck by design.
+
+Tests: the stranded Ambrose cases in
+`makesafe_deterministic_intake_runtime_test.ts`.
 
 ## Never Select `scope_json` In A List/Feed Query
 
@@ -368,6 +475,29 @@ Rules:
   `CAL_FINANCIAL_COLUMNS` and `OPS_SUMMARY_SCHEDULE_COLUMNS` — never
   `TRADE_CALENDAR_COLUMNS`, which is a separate query path for the Trade app
   calendar and has no Divisions filter to serve.
+
+## The Plain `pipeline` Read Is Cut At 1,000 Rows; The Dispatch List Is Not
+
+`ops-api?action=pipeline` reads `jobs` once with no paging, so PostgREST stops
+it at 1,000 rows, newest `updated_at` first. It matched 1,400 jobs on
+12 Oct 2026, so the 400 least recently updated were already missing from the Jobs
+board (mostly archived). That is existing behaviour, left alone: never read a
+count of jobs off the plain read. `pipeline&dispatch=1` is the complete, opt-in
+list read for the Ops screen's Dispatch tab: accepted work only, paged, with a
+derived `description` line, a `value_inc_gst` flag and a `work_type` (repair
+wins: a repair-family card typed `makesafe` is listed as a repair, a true
+make-safe comes back only for a search), and `job_notes` returns every note on a
+job less the `noteIsSystemMarker` rows (`job_detail.events` is only the newest
+50 events of every kind). A Dispatch card's `comms_notes_count` and that job's
+`job_notes` must stay equal: both read `JOB_NOTE_EVENT_TYPES` and
+`isPersonWrittenJobNote`, so change the rule there, never in one reader (the
+plain read counts no notes for a `draft`, which Dispatch never lists).
+`job_notes` matches a job number whole against the stored number (live numbers
+include `SW1346` and `SWF-PDF-BUCKET`), never by shape or pattern. The
+description is built from five projected `scope_json` paths; the status floor is what keeps that affordable, because draft and quoted rows hold
+the heaviest blobs (4.9 s to project every pipeline row against 0.43 s for
+accepted work). Rules: `dispatch_job_list.ts`; contract:
+`docs/dispatch-slice-1-read-contract.md`; tests: `dispatch_job_list_test.ts`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
@@ -927,7 +1057,9 @@ first line's item or a reason for whose move.
 
 `context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`, drafts and
 windows by type since `20261009133000`; null ids means every live job, a draft
-only while monitored) and `context_lead_monitored(job, as_of)`, which returns that
+only while monitored and, since `20261012093500`, a finished job only while its
+customer has written on it inside 30 days, state `finished_awake`) and
+`context_lead_monitored(job, as_of)`, which returns that
 job's same row (`job_id`, `monitored`, `state`, ...; no row for an unknown job),
 are the owner's lead rule (7 Oct 2026, widened 9 Oct), the only one. The window is
 `context_lead_window_hours(type)`: 1008 hours (6 weeks) for a patio job, 672 for
@@ -964,7 +1096,28 @@ SQL helper called with a sub-select argument is never inlined and runs whole
 that reason: 1.8 s against 13.5 s read one job at a time for every live job).
 The story fixes and story safety contracts roll this migration back first in
 their re-apply sections, as its own guard pins their bodies (and the scoping
-pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's).
+pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's, and
+the finished wake, `20261012093500`, before that in all of them).
+
+## The Saved Job Story Is Fresh By Its Digest, Never By The Clock
+
+`20261009100000` keeps a job's written story (`context_job_story_texts`, one
+current a job) and its rewrite queue (`context_job_story_requests`), behind
+`feature_flags.context_job_story_text_v1` (created off; owner's word to turn
+on). A story is fresh while its `card_hash` equals
+`context_job_story_card_hash` of the card now: the story-digest-v1 projection
+of the card's stable facts, never `as_of`, `built_at`, day counts or prose, so
+the clock alone never makes a story stale. Change the digest, or how the card
+is built, and every story reads stale once. "Something new happened" is
+`context_job_story_enqueue_changed` alone; every number is in
+`context_job_story_text_policy()`. A story call is phase `story` in
+`reserve_context_model_call` (no run, the extraction lane, its own daily cap,
+never inside the ledger's live reserve lines); the call budget and ledger store
+contracts accept that admission body, and a later admission change widens the
+same pins and rolls this migration back first where they run a down. The staff
+door is `ops-api?action=job_overview` (GET, read only, transcript words never
+in the answer) and `request_job_story` (POST, the verified caller asks). Field
+contract: `docs/context/job-story-text.md`.
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
@@ -1366,6 +1519,24 @@ Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
 Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
+
+## Quote Builder Scopes Live In `quote_builder_versions`, Not `quote_revisions`
+
+Hugo's iPad quote builder (contract `docs/quote-builder-contract.md`, code
+`ops-api/quote_builder.ts`, actions `quote_builder_*`) keeps every scope and
+variation version in `quote_builder_versions` (`20261009120000`): internal cost
+lines beside client charge lines, server-computed totals, issued rows frozen by
+trigger, RLS on and revoked from browser roles. Do not write builder scopes into
+`quote_revisions` (send-quote's SENT ledger), `jobs.scope_json` (fence/patio
+tools) or `jobs.expected_costs` (frozen at acceptance). Issuing files a
+`job_documents` `quote` row with `sent_at` null (never counted as sent) and moves
+a repair card forward only, through `updateRepairStage`: scope -> `quoted`,
+variation -> `variation`, approved variation -> `approved`. Private quotes are
+`jobs.type='miscellaneous'` (`SWM-`), never `renovation` (shares `SWR-` with
+repair). Its photos are `job_media` phase `quote_builder` (`QUOTE_BUILDER_PHOTO_PHASE`),
+which `isApplicablePackPhoto` and the mailer photo route exclude: they are internal and
+must never reach an SES pack, report or builder email. Tests: `quote_builder_test.ts`
+plus the migration contract.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
@@ -4240,6 +4411,36 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
+## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
+
+Since `20261012130000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
+older row: the per-trade crew-pay work order) or `job` (the one work order per
+fencing / patio job, draft then approved). An approved job work order is sealed
+by trigger: any update or delete raises, so a crew-path writer that touches it
+fails loudly. Every crew-pay read or write (`my_work_orders`,
+`submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
+`kind = 'crew'`; a new one must too. Only the users in
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role, and an
+approval seals only the draft that was read: `approve_work_order` requires
+`expected_updated_at`, compared under the row lock in `approve_job_work_order`.
+A recorded variation changes only through the staff door
+`correct_work_order_variation`, never a trade one. Every
+line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
+by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
+before the approval; never set it from code. Only the labour lane of
+`v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
+restate that lane list. One temporary exception lives in
+`workOrderLineIsLabour` (`job_work_orders.ts`): the trade app's Work Order pay
+line (`work order` / `work_order`) counts as labour until that view classifies
+it; remove the exception then. This migration inserts one call,
+`carry_work_order_variations`, into the deployed bodies of the three
+draft-replacing functions (`replace_trade_invoice_draft_v1`,
+`persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a
+variation raised on a draft invoice survives the draft being replaced; a later
+body of any of them must keep it. Variation emails, the draft backfill and
+approval named only by the `x-sw-actor` header (the terminal) are behind flags
+seeded off. Contract and API: `docs/job-work-orders-v1.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
@@ -4384,7 +4585,8 @@ null: the client, each neighbour and a whole-job quote are different parties.
 or a forward from an older fence-run duplicate to the party's current one), and
 a retired link forwards only to the same party's current quote; never list
 every live quote on the job. Accept refuses a non-current run duplicate; "all
-accepted" counts current documents only. Once any per-contact document exists,
+accepted" counts current documents only and skips quote builder documents
+(run label `qb:<chain>`, `_shared/quote_builder_run_label.ts`). Once any per-contact document exists,
 a job-wide document (contact null AND run label null) is not a required party
 for job acceptance and is not retired either; a contact-less RUN document (the
 client's `(null, 'RHS')`) still is required. `/send` retires the party's earlier versions unless the caller passes
@@ -4403,3 +4605,19 @@ deep history load (`20261007080000`, flag `email_reader_deep_v1`): its rows
 carry `metadata.history_tier` deep, which AI placement never asks about and
 which never moves a job's first record, and row 14 reads its reach through
 `context_email_history_reach` / `_reach_jobs`, never by re-deriving it.
+
+## A Group Post Shows No Recipients, So Our Own Is Never Internal On That Alone
+
+Graph lists a group post (ses@, finance@, fencing@, patios@) with no To or Cc.
+`_shared/evidence/outlook_mail.ts` reads who our own post went to from its
+group thread (`groupThreadParty`; the reader hands each post its thread through
+`withGroupThread`), else labels it `staff.email_unknown_audience` (outbound, no
+counterpart, `payload.audience_basis` unknown), never `staff.email_internal`;
+only recorded recipients that are all ours make our email internal. The ledger
+store and the reader key on the party-roles audience, never the event type, so
+an unknown audience reads as possibly external. A copy meeting the saved row
+goes to `context_email_audience_resolve` (a stronger basis only), and a relabel
+moves `context_captured_at` (original kept in `metadata.audience_relabel`) so
+the judge reads the job again. Contract:
+`20261009131000_context_group_mailbox_audience`; field contract in
+[`docs/context/email-capture.md`](docs/context/email-capture.md).

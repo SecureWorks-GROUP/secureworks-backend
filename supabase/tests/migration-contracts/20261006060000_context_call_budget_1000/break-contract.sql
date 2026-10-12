@@ -8,4 +8,6 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timel
 \if :record_scope_live
 \ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
 \endif
+-- The saved job story replaced the admission after the call budget.
+\ir ../../../rollbacks/20261009100000_context_job_story_text_down.sql
 \ir ../../../rollbacks/20261006060000_context_call_budget_1000_down.sql

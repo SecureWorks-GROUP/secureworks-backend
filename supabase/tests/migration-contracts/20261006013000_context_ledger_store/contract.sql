@@ -176,8 +176,10 @@ BEGIN
  PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_extraction_runs'::regclass AND contype = 'c'
   AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'ledger'::text])))$d$),
   'runs phase check must admit ledger');
+ -- (the saved job story, 20261009100000, widens the list again with story)
  PERFORM pg_temp.lg_assert(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.context_model_call_reservations'::regclass AND contype = 'c'
-  AND pg_get_constraintdef(oid) = $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text])))$d$),
+  AND pg_get_constraintdef(oid) IN ($d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text])))$d$,
+   $d$CHECK ((phase = ANY (ARRAY['attribution'::text, 'extraction'::text, 'bucket'::text, 'vision'::text, 'ledger'::text, 'story'::text])))$d$)),
   'reservations phase check must admit ledger');
  PERFORM pg_temp.lg_assert(obj_description('public.context_ledger_writes'::regclass, 'pg_class') LIKE 'Context ledger store:%', 'receipts comment');
  PERFORM pg_temp.lg_assert((SELECT relrowsecurity FROM pg_class WHERE oid = 'public.context_ledger_writes'::regclass), 'receipts RLS');
@@ -588,7 +590,9 @@ BEGIN
  h := pg_temp.lg_job('SWF-92010');
  PERFORM pg_temp.lg_ev(h, 'client.sms_out', 'sms', 'outbound', 'Reminder: your booking is tomorrow', '4 days', 'staff', 'job_customer', '{"sent_by_kind":"workflow"}');
  PERFORM pg_temp.lg_ev(h, 'invoice.raised', 'invoice', 'outbound', 'Invoice INV-9 raised for 100.00', '4 days');
- i := pg_temp.lg_job('SWF-92011', NULL, 'complete'); PERFORM pg_temp.lg_ev(i, 'client.reply', 'sms', 'inbound', 'Finished job', '4 days', 'customer');
+ -- (finished wake, 20261012093500: a finished job is live again while its customer has written on it
+ -- inside 30 days, so this one's only message is older than that)
+ i := pg_temp.lg_job('SWF-92011', NULL, 'complete'); PERFORM pg_temp.lg_ev(i, 'client.reply', 'sms', 'inbound', 'Finished job', '40 days', 'customer');
  s := pg_temp.lg_job('SWF-92012'); PERFORM pg_temp.lg_ev(s, 'client.reply', 'sms', 'inbound', 'New since the shadow read', '2 hours', 'customer');
  PERFORM pg_temp.lg_gen(s, 'shadow', now() - interval '1 day');
  m := pg_temp.lg_job('SWF-92013'); PERFORM pg_temp.lg_ev(m, 'client.reply', 'sms', 'inbound', 'A ledger run failed an hour ago', '4 days', 'customer');
@@ -1866,6 +1870,8 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timel
 \if :record_scope_live
 \ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
 \endif
+-- The saved job story replaced the admission after the call budget.
+\ir ../../../rollbacks/20261009100000_context_job_story_text_down.sql
 \ir ../../../rollbacks/20261006060000_context_call_budget_1000_down.sql
 \ir ../../../rollbacks/20261006014000_context_job_story_down.sql
 \ir ../../../rollbacks/20261006013000_context_ledger_store_down.sql
@@ -2369,8 +2375,9 @@ END $c$;
 -- 15. Last, so a behaviour break above is reported by its behaviour: the
 -- admission is exactly this migration's body, or the call budget's
 -- (20261006060000: this body with the cap and attribution's share read from
--- the policy, proved by its own contract).
+-- the policy, proved by its own contract), or the saved job story's
+-- (20261009100000: the call budget's with a story branch, proved by its own).
 DO $c$ BEGIN
  PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c'), 'reserve_context_model_call is not this migration''s body');
+  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56'), 'reserve_context_model_call is not this migration''s body');
 END $c$;

@@ -66,6 +66,11 @@ concurrency guards. Both the environment brake
   one non-authoritative `exception` case with `reason_code=adapter_parse_failure`
   and `last_decision_reason=deterministic source_persist_failed case_insert`;
   the source is reason-coded for retry and no draft or job mint is attempted.
+  A later scan leaves that fallback as it is unless its adapter is on
+  `RELEASED_SOURCE_PERSIST_FALLBACK_ADAPTERS`
+  (`makesafe_deterministic_intake_runtime.ts`); the release rules are owned by
+  `AGENTS.md`, "A New Intake Adapter Must Be Admitted By The Database In The
+  Same PR".
 - Retries reuse deterministic keys and append-only authority/artifact ledgers.
 - Email-derived values win; PDF-derived fields carry per-field provenance.
 - Gaps remain review work. No deterministic shortfall may call a paid AI endpoint or

@@ -26,6 +26,14 @@ import {
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
 } from "./makesafe_synthetic_livefire.ts";
 import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
+import {
+  AMBROSE_TEST_COMPANY_ID,
+  AMBROSE_TEST_SENDER,
+  ambroseBody,
+  ambrosePdfText,
+  type AmbrosePurchaseOrderFixture,
+  ambroseSubject,
+} from "./makesafe_ambrose_intake_fixtures.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -7556,4 +7564,739 @@ Deno.test("a degraded case re-read decides against the known row instead of crea
   assertEquals(caseRow.state, "confirmed_live_job");
   assertEquals(caseRow.last_decision_provenance, "human");
   assertEquals(caseRow.last_decision_actor, "captain@secureworkswa.com.au");
+});
+
+// ── Ambrose purchase orders reaching intake from two addresses ───────────────
+// Ambrose sends to the swwa@ general Group and has been asked to send to ses@
+// too. The monitor stores a swwa@ post under the ses@ mailbox key, so here both
+// copies are ordinary intake sources with different post ids. One purchase
+// order must still be one job. Fixtures are synthetic, in the Ambrose shape.
+function ambroseIntakeStore(): Store {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: AMBROSE_TEST_COMPANY_ID,
+    slug: "acg",
+    name: "Ambrose Construct Group",
+    sender_patterns: ["ambrose.test"],
+    parsing_rules: null,
+    active: true,
+  });
+  return store;
+}
+
+function pushAmbroseMail(
+  store: Store,
+  postId: string,
+  fixture: AmbrosePurchaseOrderFixture,
+  receivedAt: string,
+  pdfSha: string,
+  // Extra PDF text, so two versions of one purchase order can be told apart.
+  pdfRevisionNote = "",
+) {
+  store.emails.push(email({
+    post_id: postId,
+    conversation_id: `conversation-${postId}`,
+    from_email: AMBROSE_TEST_SENDER,
+    received_at: receivedAt,
+    subject: ambroseSubject(fixture),
+    body_content: ambroseBody(fixture),
+  }));
+  const text = pdfRevisionNote
+    ? `${ambrosePdfText(fixture)}\n${pdfRevisionNote}`
+    : ambrosePdfText(fixture);
+  store.email_attachments.push({
+    id: `att-${postId}`,
+    email_id: postId,
+    name: "Purchase Order.pdf",
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 300_000,
+    sha256: pdfSha,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: text,
+    pdf_extraction_char_count: text.length,
+    pdf_extraction_page_count: 7,
+    pdf_extraction_extractor: "fixture",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+}
+
+const AMBROSE_MAKE_SAFE: AmbrosePurchaseOrderFixture = {
+  job: "20999101",
+  sequence: "02",
+  address: "12 Example Street Testville WA 6000",
+  kind: "make_safe",
+};
+const AMBROSE_REPAIR: AmbrosePurchaseOrderFixture = {
+  job: "20999202",
+  sequence: "05",
+  address: "4/7 Sample Road Demo Park WA 6010",
+  kind: "repair",
+};
+
+Deno.test("an Ambrose make-safe PO sent to swwa@ and again to ses@ is one job, and a later Updated email adds no second", async () => {
+  const store = ambroseIntakeStore();
+  pushAmbroseMail(
+    store,
+    "swwa-copy",
+    AMBROSE_MAKE_SAFE,
+    "2026-07-18T06:31:00.000Z",
+    "sha-po-v1",
+  );
+  let approvals = 0;
+  const approving = () => {
+    approvals++;
+    return Promise.resolve({ job: { id: "job-ambrose-ms" } });
+  };
+  const client = fakeClient(store);
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: approving,
+    });
+
+  const first = await run(NOW);
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(approvals, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].state, "confirmed_live_job");
+  assertEquals(
+    store.makesafe_intake_cases[0].builder_po_canonical,
+    "PO-2099910102",
+  );
+
+  // The same email, now also delivered to ses@: a new post, the same PDF bytes.
+  pushAmbroseMail(
+    store,
+    "ses-copy",
+    AMBROSE_MAKE_SAFE,
+    "2026-07-18T06:31:05.000Z",
+    "sha-po-v1",
+  );
+  const second = await run("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(second.totals.case_rows_created, 0);
+  assertEquals(approvals, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+
+  // Ambrose re-issues the same PO as "Updated" with a changed PDF.
+  pushAmbroseMail(
+    store,
+    "updated-copy",
+    { ...AMBROSE_MAKE_SAFE, updated: true },
+    "2026-07-19T04:35:00.000Z",
+    "sha-po-v2",
+  );
+  const third = await run("2026-07-20T12:04:00.000Z");
+  assertEquals(third.totals.jobs_created, 0);
+  assertEquals(third.totals.case_rows_created, 0);
+  assertEquals(approvals, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  // All three emails are accounted on the one case: none is left without a fate.
+  assertEquals(
+    store.makesafe_intake_case_sources.map((row: any) => row.post_id).sort(),
+    ["ses-copy", "swwa-copy", "updated-copy"],
+  );
+  assertEquals(
+    new Set(store.makesafe_intake_case_sources.map((row: any) => row.case_id))
+      .size,
+    1,
+  );
+
+  // CONTROL: a different purchase order on the same Ambrose job is new work.
+  pushAmbroseMail(
+    store,
+    "second-po",
+    { ...AMBROSE_MAKE_SAFE, sequence: "03" },
+    "2026-07-19T05:00:00.000Z",
+    "sha-po-03",
+  );
+  const fourth = await run("2026-07-20T12:06:00.000Z");
+  assertEquals(fourth.totals.jobs_created, 1);
+  assertEquals(approvals, 2);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+});
+
+Deno.test("an Ambrose repair PO sent to both addresses is one review draft and is never auto-minted", async () => {
+  const store = ambroseIntakeStore();
+  pushAmbroseMail(
+    store,
+    "repair-swwa",
+    AMBROSE_REPAIR,
+    "2026-07-18T02:45:00.000Z",
+    "sha-repair",
+  );
+  let approvals = 0;
+  const client = fakeClient(store);
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "never" } });
+      },
+    });
+  const first = await run(NOW);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.makesafe_job_family,
+    "repair",
+  );
+
+  pushAmbroseMail(
+    store,
+    "repair-ses",
+    AMBROSE_REPAIR,
+    "2026-07-18T02:45:04.000Z",
+    "sha-repair",
+  );
+  pushAmbroseMail(
+    store,
+    "repair-updated",
+    { ...AMBROSE_REPAIR, updated: true },
+    "2026-07-19T03:28:00.000Z",
+    "sha-repair-v2",
+  );
+  const second = await run("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approvals, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 3);
+});
+
+Deno.test("an Ambrose acceptance prompt with no PDF never opens a job, whichever address it reached", async () => {
+  const store = ambroseIntakeStore();
+  store.emails.push(email({
+    post_id: "acceptance-swwa",
+    from_email: AMBROSE_TEST_SENDER,
+    received_at: "2026-07-18T02:00:00.000Z",
+    subject:
+      "Ambrose Construct Group Acceptance Required - Purchase Order: 20999202-05",
+    body_content:
+      "Ambrose Construct Group have allocated you PO #20999202-05 which requires your acceptance.",
+  }));
+  let approvals = 0;
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxCases: 5,
+    selectionMode: "full_open",
+    approveDraft: () => {
+      approvals++;
+      return Promise.resolve({ job: { id: "never" } });
+    },
+  });
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.totals.drafts_created, 0);
+  assertEquals(approvals, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+// ── Ambrose cases stranded while the database refused the adapter id ─────────
+// Until 20261012043000 the adapter list on makesafe_intake_cases did not admit
+// 'ambrose', so every Ambrose case insert was refused and stored as the
+// stripped persistence-failure fallback. The standing scan read each email of
+// one purchase order on its own, and a stripped row carries no identity for the
+// next email to bind to, so one purchase order ended up with several fallback
+// rows. This double refuses the adapter the way the constraint did.
+const AMBROSE_REFUSED = {
+  code: "23514",
+  message:
+    'new row for relation "makesafe_intake_cases" violates check constraint "makesafe_intake_cases_deterministic_shapes_check"',
+};
+
+function strandedAmbroseHarness() {
+  const store = ambroseIntakeStore();
+  const state = { adapterAdmitted: false, approvals: 0 };
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      !state.adapterAdmitted && table === "makesafe_intake_cases" &&
+        (operation === "insert" || operation === "update") &&
+        payload.adapter_id === "ambrose"
+        ? AMBROSE_REFUSED
+        : null,
+  );
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        state.approvals++;
+        return Promise.resolve({ job: { id: `job-${state.approvals}` } });
+      },
+    });
+  // Plans exactly one email, as the four-source standing page did.
+  const runAlone = async (postId: string, nowIso: string) => {
+    const others = store.emails.filter((row: any) => row.post_id !== postId);
+    store.emails = store.emails.filter((row: any) => row.post_id === postId);
+    try {
+      return await run(nowIso);
+    } finally {
+      store.emails.push(...others);
+    }
+  };
+  const fallbacks = () =>
+    store.makesafe_intake_cases.filter((row: any) =>
+      row.last_decision_reason ===
+        "deterministic source_persist_failed case_insert"
+    );
+  return { store, state, run, runAlone, fallbacks };
+}
+
+// Only the Updated email's PDF carries this line.
+const UPDATED_PDF_NOTE = "Revision 2: additional works added to this order.";
+
+async function strandTwoEmailsOfOnePurchaseOrder(
+  fixture: AmbrosePurchaseOrderFixture,
+) {
+  const harness = strandedAmbroseHarness();
+  pushAmbroseMail(
+    harness.store,
+    "first-email",
+    fixture,
+    "2026-07-18T06:31:00.000Z",
+    "sha-first",
+  );
+  await harness.runAlone("first-email", NOW);
+  pushAmbroseMail(
+    harness.store,
+    "updated-email",
+    { ...fixture, updated: true },
+    "2026-07-19T04:35:00.000Z",
+    "sha-updated",
+    UPDATED_PDF_NOTE,
+  );
+  const stranded = await harness.runAlone(
+    "updated-email",
+    "2026-07-20T12:02:00.000Z",
+  );
+  // The production shape: two stripped fallbacks, one email each, nothing made.
+  assertEquals(stranded.totals.write_failures, 1);
+  assertEquals(harness.fallbacks().length, 2);
+  assertEquals(harness.store.makesafe_intake_case_sources.length, 2);
+  assertEquals(
+    harness.store.makesafe_intake_cases.map((row: any) => row.adapter_id),
+    [null, null],
+  );
+  assertEquals(harness.state.approvals, 0);
+  assertEquals(harness.store.makesafe_intake_drafts.length, 0);
+  return harness;
+}
+
+// What the released draft is built from depends on the page, and both shapes
+// are accepted behaviour:
+//   - emails read on separate pages: the newest PDF email of the purchase order
+//     is the one released, so the draft is the Updated email alone;
+//   - both emails read on ONE page: the shared planner merges them into one
+//     case with the OLDER email as primary (its subject and received time),
+//     and both PDFs' text on the draft. A reviewer of such a draft must read
+//     the Updated PDF. The planner's merge order is shared by every builder and
+//     is deliberately not changed here.
+function assertDraftBuiltAsThePageDictates(
+  draft: any,
+  fixture: AmbrosePurchaseOrderFixture,
+  readOnOnePage: boolean,
+) {
+  const pdfs = (draft.extraction_json.work_order_pdf_text || []).map((
+    document: any,
+  ) => [document.source_post_id, document.text.includes(UPDATED_PDF_NOTE)]);
+  if (readOnOnePage) {
+    assertEquals(draft.subject, ambroseSubject(fixture));
+    assertEquals(draft.received_at, "2026-07-18T06:31:00.000Z");
+    assertEquals(draft.extraction_json.intake_source_post_ids, [
+      "first-email",
+      "updated-email",
+    ]);
+    assertEquals(pdfs, [["first-email", false], ["updated-email", true]]);
+  } else {
+    assertEquals(draft.subject, ambroseSubject({ ...fixture, updated: true }));
+    assertEquals(draft.received_at, "2026-07-19T04:35:00.000Z");
+    assertEquals(draft.extraction_json.intake_source_post_ids, [
+      "updated-email",
+    ]);
+    assertEquals(pdfs, [["updated-email", true]]);
+  }
+}
+
+// The email whose row became the purchase order's case.
+function releasedEmail(store: Store): string | undefined {
+  const released = store.makesafe_intake_cases.find((row: any) =>
+    row.is_authoritative
+  );
+  return store.makesafe_intake_case_sources.find((source: any) =>
+    source.case_id === released?.id
+  )?.post_id;
+}
+
+for (
+  const order of [
+    ["both emails on one page"],
+    ["first-email", "updated-email"],
+    ["updated-email", "first-email"],
+  ] as const
+) {
+  Deno.test(`stranded Ambrose make-safe recovers to exactly one job on the ordinary scan (${order.join(", then ")})`, async () => {
+    const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_MAKE_SAFE);
+    const { store, state } = harness;
+
+    // While the database still refuses the adapter the scan retries the
+    // recovery, fails closed and makes nothing.
+    const refused = await harness.run("2026-07-20T12:04:00.000Z");
+    assertEquals(refused.totals.jobs_created, 0);
+    assertEquals(harness.fallbacks().length, 2);
+    assertEquals(state.approvals, 0);
+
+    state.adapterAdmitted = true;
+    let clock = Date.parse("2026-07-20T12:06:00.000Z");
+    const tick = () => new Date(clock += 120_000).toISOString();
+    if (order.length === 1) {
+      await harness.run(tick());
+    } else {
+      for (const postId of order) await harness.runAlone(postId, tick());
+    }
+    // Several more ordinary scans, on every page shape, change nothing more.
+    await harness.run(tick());
+    await harness.runAlone("first-email", tick());
+    await harness.runAlone("updated-email", tick());
+    const settled = await harness.run(tick());
+
+    assertEquals(state.approvals, 1);
+    assertEquals(store.makesafe_intake_drafts.length, 1);
+    assertEquals(settled.totals.write_failures, 0);
+    assertEquals(settled.totals.cases_failed, 0);
+    assertEquals(settled.totals.jobs_created, 0);
+    // No third row: the two emails keep the cases they were accounted on.
+    assertEquals(store.makesafe_intake_cases.length, 2);
+    assertEquals(store.makesafe_intake_case_sources.length, 2);
+
+    const live = store.makesafe_intake_cases.filter((row: any) => row.job_id);
+    assertEquals(live.length, 1);
+    assertEquals(live[0].state, "confirmed_live_job");
+    assertEquals(live[0].is_authoritative, true);
+    assertEquals(live[0].adapter_id, "ambrose");
+    assertEquals(live[0].builder_po_canonical, "PO-2099910102");
+    assertEquals(live[0].company_id, AMBROSE_TEST_COMPANY_ID);
+    // The other email's row stays the quiet stripped fallback it was.
+    assertEquals(harness.fallbacks().length, 1);
+    assertEquals(harness.fallbacks()[0].job_id, null);
+    assertEquals(harness.fallbacks()[0].is_authoritative, false);
+    assertDraftBuiltAsThePageDictates(
+      store.makesafe_intake_drafts[0],
+      AMBROSE_MAKE_SAFE,
+      order.length === 1,
+    );
+    assertEquals(
+      releasedEmail(store),
+      order.length === 1 ? "first-email" : "updated-email",
+    );
+  });
+}
+
+// The live shape: one repair purchase order, two PDF emails an hour apart, the
+// later one "Updated", with different PDFs. One review draft either way; what
+// it is built from follows assertDraftBuiltAsThePageDictates.
+for (
+  const order of [
+    ["both emails on one page"],
+    ["first-email", "updated-email"],
+    ["updated-email", "first-email"],
+  ] as const
+) {
+  Deno.test(`a stranded Ambrose repair with two PDF emails recovers to one review draft, never minted (${order.join(", then ")})`, async () => {
+    const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_REPAIR);
+    const { store, state } = harness;
+    state.adapterAdmitted = true;
+    let clock = Date.parse("2026-07-20T12:04:00.000Z");
+    const tick = () => new Date(clock += 120_000).toISOString();
+    if (order.length === 1) {
+      await harness.run(tick());
+    } else {
+      for (const postId of order) await harness.runAlone(postId, tick());
+    }
+    await harness.run(tick());
+    await harness.runAlone("first-email", tick());
+    await harness.runAlone("updated-email", tick());
+    const settled = await harness.run(tick());
+
+    assertEquals(state.approvals, 0);
+    assertEquals(store.makesafe_intake_drafts.length, 1);
+    const draft = store.makesafe_intake_drafts[0];
+    assertEquals(draft.status, "needs_review");
+    assertEquals(draft.extraction_json.makesafe_job_family, "repair");
+    assertDraftBuiltAsThePageDictates(
+      draft,
+      AMBROSE_REPAIR,
+      order.length === 1,
+    );
+    assertEquals(
+      releasedEmail(store),
+      order.length === 1 ? "first-email" : "updated-email",
+    );
+    assertEquals(settled.totals.write_failures, 0);
+    assertEquals(settled.totals.cases_failed, 0);
+    assertEquals(store.makesafe_intake_cases.length, 2);
+    const recovered = store.makesafe_intake_cases.filter((row: any) =>
+      row.is_authoritative
+    );
+    assertEquals(recovered.length, 1);
+    assertEquals(recovered[0].adapter_id, "ambrose");
+    assertEquals(recovered[0].job_id, null);
+    assertEquals(recovered[0].reason_code, "awaiting_job_creation");
+    if (order.length === 2) {
+      // Read on separate pages, the Updated email's own row is the one released.
+      assertEquals(draft.extraction_json.intake_source_post_ids, [
+        "updated-email",
+      ]);
+      assertEquals(
+        store.makesafe_intake_case_sources.find((source: any) =>
+          source.post_id === "updated-email"
+        ).case_id,
+        recovered[0].id,
+      );
+    }
+    // The other email's row stays a stripped fallback the intake desk shows.
+    assertEquals(harness.fallbacks().length, 1);
+  });
+}
+
+// An email of a purchase order that recovers as an exception opened nothing,
+// so it holds nothing: the email that carries the readable purchase order
+// still opens the work. When the exception's own PDF is read later it finds
+// the purchase order already held and opens nothing more.
+function pushAmbrosePdf(
+  store: Store,
+  postId: string,
+  fixture: AmbrosePurchaseOrderFixture,
+  pdfSha: string,
+) {
+  const text = ambrosePdfText(fixture);
+  store.email_attachments.push({
+    id: `att-${postId}`,
+    email_id: postId,
+    name: "Purchase Order.pdf",
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 300_000,
+    sha256: pdfSha,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: text,
+    pdf_extraction_char_count: text.length,
+    pdf_extraction_page_count: 7,
+    pdf_extraction_extractor: "fixture",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+}
+
+for (const fixture of [AMBROSE_MAKE_SAFE, AMBROSE_REPAIR]) {
+  for (
+    const order of [
+      ["both emails on one page"],
+      ["unread-email", "purchase-order"],
+      ["purchase-order", "unread-email"],
+    ] as const
+  ) {
+    Deno.test(`a stranded Ambrose ${fixture.kind} email that recovers as an exception never blocks its purchase order or opens a second one (${order.join(", then ")})`, async () => {
+      const harness = strandedAmbroseHarness();
+      const { store, state } = harness;
+      // The first email names the purchase order but its PDF never arrived.
+      store.emails.push(email({
+        post_id: "unread-email",
+        conversation_id: "conversation-unread-email",
+        from_email: AMBROSE_TEST_SENDER,
+        received_at: "2026-07-18T06:31:00.000Z",
+        subject: ambroseSubject(fixture),
+        body_content: ambroseBody(fixture),
+      }));
+      await harness.runAlone("unread-email", NOW);
+      pushAmbroseMail(
+        store,
+        "purchase-order",
+        { ...fixture, updated: true },
+        "2026-07-19T04:35:00.000Z",
+        "sha-po",
+      );
+      await harness.runAlone("purchase-order", "2026-07-20T12:02:00.000Z");
+      assertEquals(harness.fallbacks().length, 2);
+
+      state.adapterAdmitted = true;
+      let clock = Date.parse("2026-07-20T12:04:00.000Z");
+      const tick = () => new Date(clock += 120_000).toISOString();
+      if (order.length === 1) {
+        await harness.run(tick());
+      } else {
+        for (const postId of order) await harness.runAlone(postId, tick());
+      }
+      const opened = () => ({
+        approvals: state.approvals,
+        drafts: store.makesafe_intake_drafts.length,
+        jobs: store.makesafe_intake_cases.filter((row: any) => row.job_id)
+          .length,
+        holders: store.makesafe_intake_cases.filter((row: any) =>
+          row.job_id || row.reason_code === "awaiting_job_creation"
+        ).length,
+      });
+      const expected = fixture.kind === "make_safe"
+        ? { approvals: 1, drafts: 1, jobs: 1, holders: 1 }
+        : { approvals: 0, drafts: 1, jobs: 0, holders: 1 };
+      assertEquals(opened(), expected);
+      if (order.length === 2) {
+        const unread = store.makesafe_intake_cases.find((row: any) =>
+          store.makesafe_intake_case_sources.some((source: any) =>
+            source.case_id === row.id && source.post_id === "unread-email"
+          )
+        );
+        assertEquals(unread.state, "exception");
+        assertEquals(unread.reason_code, "adapter_parse_failure");
+        assertEquals(unread.is_authoritative, true);
+        assertEquals(
+          unread.builder_po_canonical,
+          fixture.kind === "make_safe" ? "PO-2099910102" : "PO-2099920205",
+        );
+        assertEquals(unread.job_id, null);
+      }
+
+      // The missing PDF is read at last: the earlier email would now be work.
+      pushAmbrosePdf(store, "unread-email", fixture, "sha-late");
+      await harness.runAlone("unread-email", tick());
+      await harness.run(tick());
+      await harness.runAlone("purchase-order", tick());
+      await harness.runAlone("unread-email", tick());
+      const settled = await harness.run(tick());
+
+      assertEquals(opened(), expected);
+      assertEquals(settled.totals.jobs_created, 0);
+      assertEquals(settled.totals.drafts_created, 0);
+      assertEquals(settled.totals.write_failures, 0);
+      assertEquals(settled.totals.cases_failed, 0);
+      assertEquals(store.makesafe_intake_cases.length, 2);
+      assertEquals(store.makesafe_intake_case_sources.length, 2);
+    });
+  }
+}
+
+Deno.test("a stranded Ambrose acceptance prompt recovers as non-work and never blocks its purchase order", async () => {
+  const harness = strandedAmbroseHarness();
+  const { store, state } = harness;
+  // The prompt names the same purchase order and arrives first, with no PDF.
+  store.emails.push(email({
+    post_id: "acceptance-prompt",
+    from_email: AMBROSE_TEST_SENDER,
+    received_at: "2026-07-18T02:00:00.000Z",
+    subject:
+      "Ambrose Construct Group Acceptance Required - Purchase Order: 20999101-02",
+    body_content:
+      "Ambrose Construct Group have allocated you PO #20999101-02 which requires your acceptance.",
+  }));
+  await harness.runAlone("acceptance-prompt", NOW);
+  pushAmbroseMail(
+    store,
+    "purchase-order",
+    AMBROSE_MAKE_SAFE,
+    "2026-07-18T06:31:00.000Z",
+    "sha-po",
+  );
+  await harness.runAlone("purchase-order", "2026-07-20T12:02:00.000Z");
+  assertEquals(harness.fallbacks().length, 2);
+
+  state.adapterAdmitted = true;
+  await harness.runAlone("acceptance-prompt", "2026-07-20T12:06:00.000Z");
+  const prompt = store.makesafe_intake_cases.find((row: any) =>
+    store.makesafe_intake_case_sources.some((source: any) =>
+      source.case_id === row.id && source.post_id === "acceptance-prompt"
+    )
+  );
+  assertEquals(prompt.state, "accounted_non_wo");
+  assertEquals(prompt.reason_code, "non_makesafe");
+  assertEquals(prompt.adapter_id, "ambrose");
+  assertEquals(
+    prompt.last_decision_reason,
+    "deterministic source_persist_recovered non_makesafe",
+  );
+  assertEquals(state.approvals, 0);
+
+  await harness.runAlone("purchase-order", "2026-07-20T12:08:00.000Z");
+  await harness.run("2026-07-20T12:10:00.000Z");
+  assertEquals(state.approvals, 1);
+  assertEquals(harness.fallbacks().length, 0);
+  assertEquals(
+    store.makesafe_intake_cases.filter((row: any) => row.job_id).length,
+    1,
+  );
+});
+
+Deno.test("CONTROL for the Ambrose release: another builder's stripped fallback is still stuck on the ordinary scan", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "mlb-stranded",
+    subject: "NEW WORK ORDER MLB-62011 Work Order: WO-62011 PO: 620111",
+    body_content:
+      "Client: Control Client\nAddress: 1 Control Way, Perth\nPlease attend and make safe the property.",
+  }));
+  let refuse = true;
+  let approvals = 0;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      refuse && table === "makesafe_intake_cases" && operation === "insert" &&
+        payload.last_decision_reason !==
+          "deterministic source_persist_failed case_insert"
+        ? {
+          code: "23514",
+          message: "primary deterministic case shape rejected",
+        }
+        : null,
+  );
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "must-not-mint" } });
+      },
+    });
+  await run(NOW);
+  assertEquals(
+    store.makesafe_intake_cases[0].last_decision_reason,
+    "deterministic source_persist_failed case_insert",
+  );
+  refuse = false;
+  const later = await run("2026-07-20T12:06:00.000Z");
+  assertEquals(later.totals.cases_attempted, 0);
+  assertEquals(later.totals.jobs_created, 0);
+  assertEquals(approvals, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].last_decision_reason,
+    "deterministic source_persist_failed case_insert",
+  );
 });

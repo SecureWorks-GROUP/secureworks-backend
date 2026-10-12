@@ -398,6 +398,10 @@ outlook-mail-capture|supabase/migrations/20261006050000_context_lanes_health.sql
 # History depth PR B: mode deep reads its gate and the monitored jobs' keys.
 outlook-mail-capture|supabase/migrations/20261007080000_context_email_deep_history.sql|function|context_email_deep_enabled
 outlook-mail-capture|supabase/migrations/20261007080000_context_email_deep_history.sql|function|context_email_deep_scope
+# Group mailbox audience: a copy of our own email that meets the row another
+# copy saved is handed to the resolver, which relabels that row when this copy
+# knows who the email went to better.
+outlook-mail-capture|supabase/migrations/20261009131000_context_group_mailbox_audience.sql|function|context_email_audience_resolve
 monitor-inbox|supabase/migrations/20261002150000_context_email_reader.sql|function|context_email_reader_flags
 
 # T2: the call transcript fetcher selects due calls (live, and history calls
@@ -595,6 +599,10 @@ ops-api|supabase/migrations/20261006014000_context_job_story.sql|function|contex
 ops-api|supabase/migrations/20261006014000_context_job_story.sql|function|context_story_scorecard_jobs
 ops-api|supabase/migrations/20261006032000_context_scorecard.sql|function|context_scorecard
 ops-api|supabase/migrations/20261006032000_context_scorecard.sql|function|context_scorecard_jobs
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|table|context_job_story_texts
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|table|context_job_story_requests
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|function|context_job_story_text_get
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|function|context_job_story_request
 ops-api|supabase/migrations/20261002120000_job_parties_foundation.sql|table|job_site_links
 context-document-text|supabase/migrations/20261005210000_context_document_text.sql|table|context_document_texts
 context-document-text|supabase/migrations/20261005210000_context_document_text.sql|function|record_context_document_text
@@ -617,6 +625,41 @@ context-document-vision|supabase/migrations/20261006001000_context_document_visi
 context-document-vision|supabase/migrations/20260924100000_context_capture_business_event.sql|function|capture_business_event
 context-document-vision|supabase/migrations/20260911170000_automation_switches.sql|function|automation_lane_enabled
 context-document-vision|supabase/migrations/20261005180000_context_email_legacy_dedupe_and_history.sql|function|context_catchup_list_backfill
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|table|quote_builder_versions
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.chain_id
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.cost_lines
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.charge_lines
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.photo_media_ids
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.client_snapshot
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.variation_id
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.client_pdf_document_id
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.quote_number
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.issued_at
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|constraint|quote_builder_versions_unique_chain_version
+ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|trigger|quote_builder_versions.trg_quote_builder_versions_guard
+
+# The deterministic intake stamps each case with its adapter id; the Ambrose
+# adapter is refused on every case insert until this migration admits it. The
+# constraint name is unchanged, so the ledger version is what proves it landed.
+ops-api|supabase/migrations/20261012043000_makesafe_intake_cases_admit_ambrose_adapter.sql|constraint|makesafe_intake_cases_deterministic_shapes_check
+
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.kind
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.agreed_labour_ex
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.approved_by
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.sealed_content_hash
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|jobs.work_order_id
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|trade_invoice_lines.job_work_order_id
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|table|work_order_settings
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|table|work_order_variations
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|table|work_order_variation_emails
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|trigger|work_orders.trg_work_orders_job_kind_guard
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|trigger|trade_invoice_lines.trg_trade_invoice_lines_link_job_work_order
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|approve_job_work_order
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|ensure_job_work_order_draft
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|backfill_job_work_order_drafts
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|policy|work_orders.work_orders_job_kind_hidden_from_clients
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|carry_work_order_variations
+reporting-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.kind
 
 ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|column|trade_invoice_lines.work_date
 ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|column|trade_invoice_lines.start_time

@@ -248,14 +248,38 @@ jobs:
       # exclusions and the non-repair Xero categories still behave exactly as
       # they did. --no-check matches the repo's known pre-existing type errors in
       # sibling ops-api test files; the assertions themselves are fully executed.
-      - name: Check repair intake routing and stage-write contracts
+      - name: Check repair intake routing and stage-write contracts, and the quote builder
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             supabase/functions/ops-api/repair_intake_routing_test.ts \
             supabase/functions/ops-api/repair_classifier_routing_test.ts \
             supabase/functions/ops-api/repair_stage_write_test.ts \
             supabase/functions/ops-api/insurance_repairs_board_test.ts \
-            supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
+            supabase/functions/ops-api/insurance_repairs_pipeline_test.ts \
+            supabase/functions/ops-api/quote_builder_test.ts
+
+      # Builder mail read from a general company Group (swwa@) must never store
+      # or download anyone else's mail, and one purchase order must stay one job
+      # when it reaches both swwa@ and ses@. The runtime file is filtered because
+      # it carries an unrelated pre-existing failure. Same --no-check reason as
+      # above.
+      - name: Test sender-scoped intake Groups and Ambrose two-address intake
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/monitor_ses_sender_scoped_groups_test.ts \
+            supabase/functions/ops-api/makesafe_ambrose_intake_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "Ambrose" \
+            supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
+
+      # An adapter registered in code but missing from the database's adapter
+      # list is refused on every case insert and nothing else notices (Ambrose,
+      # 12 Oct 2026). Compares the real registry with the newest definition of
+      # makesafe_intake_cases_deterministic_shapes_check in the migrations.
+      - name: Check every intake adapter is admitted by the database
+        run: |
+          deno test --allow-read \
+            supabase/functions/ops-api/makesafe_adapter_admission_contract_test.ts
 
       # Trade invoice time entries (docs/trade-invoice-time-entries-2026-10-12.md):
       # every trade invoice write path stores the date worked and the start and
@@ -277,6 +301,15 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/debt_autotexts_off_test.ts \
             supabase/functions/daily-digest/deposit_autotexts_off_test.ts
+
+      # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
+      # stay exactly as it was, and the list must never drop a job past the
+      # 1000-row ceiling or select the whole scope blob. Same --no-check reason
+      # as above.
+      - name: Test the Dispatch list and job notes reads
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/dispatch_job_list_test.ts
 
       - name: Test edge deploy workflow classification
         run: |
@@ -311,6 +344,7 @@ jobs:
             supabase/functions/ops-api/ses_report_trigger_test.ts \
             supabase/functions/ops-api/xero_bank_read_test.ts \
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
+            supabase/functions/ops-api/job_work_orders_test.ts \
             supabase/functions/ops-api/sales_booking_read_test.ts \
             supabase/functions/ops-api/sales_booking_outlook_test.ts \
             supabase/functions/ops-api/sales_booking_pack_test.ts \
@@ -327,7 +361,7 @@ jobs:
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
-      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline and its period window, the job search with closed jobs, the job commercial read, job freshness, the job state card, the job story doors, the ledger correction door, the context scorecard door, actor recording and monitored mailboxes
+      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline and its period window, the job search with closed jobs, the job commercial read, job freshness, the job state card, the job story doors, the job overview door, the ledger correction door, the context scorecard door, actor recording and monitored mailboxes
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
@@ -340,6 +374,7 @@ jobs:
             supabase/functions/ops-api/job_freshness_test.ts \
             supabase/functions/ops-api/job_state_card_test.ts \
             supabase/functions/ops-api/job_story_door_test.ts \
+            supabase/functions/ops-api/job_overview_read_test.ts \
             supabase/functions/ops-api/context_scorecard_door_test.ts \
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/job_conversation_window_test.ts \
@@ -376,11 +411,18 @@ jobs:
 
       # The email reader (EM2) and its group history walk (W7): cursor
       # handling, the restart loop of 5 Oct 2026 and resume-where-it-stopped,
-      # over fake Graph reads and a fake run ledger. No network.
+      # over fake Graph reads and a fake run ledger. No network. Its row
+      # builder next to it: who our own email went to (group mailbox
+      # audience, 9 Oct 2026), and the builder rows the PostgreSQL contracts
+      # feed capture_business_event and context_email_audience_resolve.
       - name: Test the Outlook email reader
         run: |
           deno test --allow-read --allow-env \
-            supabase/functions/outlook-mail-capture/
+            supabase/functions/outlook-mail-capture/ \
+            supabase/functions/_shared/evidence/outlook_mail_test.ts \
+            supabase/functions/_shared/evidence/outlook_mail_contract_rows_test.ts \
+            supabase/functions/_shared/evidence/outlook_mail_audience_test.ts \
+            supabase/functions/_shared/evidence/outlook_mail_audience_contract_rows_test.ts
 
       - name: Test GHL webhook receiver auth and receipts
         run: |

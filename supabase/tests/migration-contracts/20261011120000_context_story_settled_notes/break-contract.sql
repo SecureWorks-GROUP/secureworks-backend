@@ -1,4 +1,10 @@
 -- Deliberately put the earlier bodies back (this migration's own rollback: 20261011100000's
 -- assembler, open notes only, oldest first; 20261007010000's story read). contract.sql must then
 -- fail on its first check: SWF-261469's shape has no settled list.
+-- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
+-- as the story settled notes' refuses while a later story read is live)
+SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset
+\if :held_messages_live
+\ir ../../../rollbacks/20261012100000_context_held_messages_down.sql
+\endif
 \ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql

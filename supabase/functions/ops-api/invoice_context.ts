@@ -501,7 +501,9 @@ async function liveReadByJob(
           "context_extraction_runs",
           () =>
             client.from("context_extraction_runs")
-              .select("id, job_id, run_date, status, error, started_at, finished_at")
+              .select(
+                "id, job_id, run_date, status, error, started_at, finished_at",
+              )
               .eq("phase", "extraction")
               .in("status", ["done", "failed"])
               .in("job_id", ids),
@@ -894,7 +896,7 @@ export async function invoiceContext(
             unwrap(
               await client.from("work_orders").select(
                 "wo_number, trade_name, status, scheduled_date, completed_at",
-              ).eq("job_id", jobRow.id).order("created_at", {
+              ).eq("job_id", jobRow.id).neq("kind", "job").order("created_at", {
                 ascending: false,
               }).limit(50),
             ),

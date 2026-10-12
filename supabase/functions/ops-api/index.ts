@@ -25,6 +25,8 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 //   pipeline            — Jobs by status for kanban view
 //   makesafe_board      — Canonical make-safe rows projected for Ops or Trade
 //   job_detail          — Full job + assignments + POs + WOs + invoices
+//   job_overview        — Job page Overview: story card, AI notes, conversation, files, saved story (staff, GET)
+//   request_job_story   — Ask for a job's saved story to be written or rewritten (staff, POST)
 //   list_invoices       — Xero invoices with filters
 //   job_financials      — Job P&L list (makesafe-scoped view; M3 panel)
 //   job_financials_detail — Single job P&L + trade charge lines (get_job_financials rpc)
@@ -234,6 +236,20 @@ import {
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
 import {
+  createQuoteBuilderPrivateJob,
+  decideQuoteBuilderVariation,
+  getQuoteBuilderJob,
+  issueQuoteBuilderVersion,
+  listQuoteBuilderJobs,
+  QuoteBuilderError,
+  quoteBuilderPdfUploadUrl,
+  quoteBuilderPhotoCaption,
+  quoteBuilderPhotoRegister,
+  quoteBuilderPhotoUploadUrl,
+  saveQuoteBuilderVersion,
+  type QuoteBuilderActor,
+} from './quote_builder.ts'
+import {
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
   isInsuranceRepairFamily,
@@ -256,6 +272,19 @@ import {
   fencingStageTruthFields,
 } from './fencing_stage_engine_v1.ts'
 import { isFencingStageTruthRequested } from './fencing_stage_recipe_v1.ts'
+import {
+  DISPATCH_LIST_PROJECTION,
+  DISPATCH_LIST_STATUSES,
+  DISPATCH_LISTED_WORK_FILTER,
+  dispatchJobDescription,
+  dispatchValueIncGst,
+  dispatchWorkType,
+  isDispatchListRequested,
+  isPersonWrittenJobNote,
+  JOB_NOTE_EVENT_TYPES,
+  projectDispatchJobNote,
+  stripDispatchListAliases,
+} from './dispatch_job_list.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -414,6 +443,7 @@ import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invo
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
+import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
 import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
@@ -590,6 +620,22 @@ import {
   tradeInvoiceTimeEntryRequired,
   type TradeInvoiceTimeEntry,
 } from './trade_invoice_time_entry.ts'
+import {
+  approveJobWorkOrder,
+  backfillJobWorkOrders,
+  correctWorkOrderVariation,
+  createJobWorkOrder,
+  JobWorkOrderError,
+  listJobWorkOrders,
+  readJobWorkOrder,
+  reportWorkOrderVariation,
+  resendWorkOrderVariationEmails,
+  resolveWorkOrderApprover,
+  sendOutlookVariationEmail,
+  tradeJobWorkOrderRead,
+  type TradeRedaction,
+  updateJobWorkOrderDraft,
+} from './job_work_orders.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -1687,10 +1733,12 @@ export async function _findLiveTradeInvoiceForWeek(
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 
+// `apikey` and `x-client-info` are what a browser Supabase client adds to a
+// function call; without them here its preflight is refused before any action runs.
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, apikey, x-client-info',
 }
 
 export class ApiError extends Error {
@@ -4248,6 +4296,11 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // vertical-manager, or ownership authorization in their handlers.
   'trade_calendar',
   'my_work_orders',
+  // Job work orders (job_work_orders.ts): the trade read of the job's approved
+  // work order (no prices) and the variation report on the trade's own
+  // invoice. Both run authTrade + assertAssignedOrMakesafeAccess in the route.
+  'my_job_work_order',
+  'report_work_order_variation',
   'my_jobs',
   'trade_job_detail',
   'trade_quote_extract',
@@ -6488,6 +6541,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
         return json(await jobDetail(client, jid, { slim }))
       }
+      // Staff-only by the front door's default (not on the trade or routine lists).
+      case 'job_notes':
+        return json(await jobNotes(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -7508,6 +7564,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      // ── Job overview (job overview v1, 20261009100000): the job page
+      // Overview's one read (story card, AI notes, conversation, files and the
+      // saved written story, each part on its own) and the staff ask to write
+      // or rewrite the saved story. Staff front door (the default for an action
+      // on no static, profile, routine or agent list). job_overview is GET only
+      // and writes nothing; request_job_story is POST only and records the
+      // verified caller as the asker, never a body field.
+      case 'job_overview':
+      case 'request_job_story': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        try {
+          if (action === 'job_overview') {
+            if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+            return json(await jobOverviewAction(client, url.searchParams, { getJobConversation }))
+          }
+          if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+          return json(await requestJobStoryAction(client, body, receiptActor(requestActor, authMode)))
+        } catch (error) {
+          if (error instanceof StoryReadError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       // ── Same-site links (sites slice S-M1): a person proposes, confirms or
       // rejects that two legacy job records are one site. Staff front door,
       // not on the routine or agent-read lists; actor recorded on the receipt.
@@ -8037,7 +8115,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           orgId: DEFAULT_ORG_ID,
         }))
 
-      case 'list_work_orders': return json(await listWorkOrders(client, url.searchParams))
+      case 'list_work_orders':
+        if (url.searchParams.get('kind') === 'job') {
+          return json(await runJobWorkOrder(() => listJobWorkOrders(client, url.searchParams)))
+        }
+        return json(await listWorkOrders(client, url.searchParams))
+      case 'job_work_order':
+        return json(await runJobWorkOrder(() => readJobWorkOrder(client, {
+          jobId: url.searchParams.get('job_id'),
+          workOrderId: url.searchParams.get('work_order_id'),
+        })))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
       case 'ops_targets': return json(await opsTargets(client))
@@ -8328,13 +8415,81 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await updateRepairStage(client, body))
       }
+      // Quote builder (docs/quote-builder-contract.md). Staff JWT or the
+      // privileged ops key only: absent from ROUTINE_ALLOWED_ACTIONS,
+      // AGENT_READ_ALLOWED_ACTIONS and the profile-scoped trade list, so the
+      // front door already demands a staff session; the check here keeps the
+      // rule true if a later edit widens those lists. Internal cost lines live
+      // in these responses, so no trade may reach them.
+      case 'quote_builder_list_jobs':
+      case 'quote_builder_get_job':
+      case 'quote_builder_create_private_job':
+      case 'quote_builder_save':
+      case 'quote_builder_photo_upload_url':
+      case 'quote_builder_photo_register':
+      case 'quote_builder_photo_caption':
+      case 'quote_builder_pdf_upload_url':
+      case 'quote_builder_issue':
+      case 'quote_builder_decide_variation': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
+        }
+        return await dispatchQuoteBuilderAction(client, action, url.searchParams, body, {
+          id: authUser?.id || null,
+          email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+          orgId: authUser?.orgId || null,
+        })
+      }
       case 'create_po': return json(await createPO(client, body))
       case 'update_po': return json(await updatePO(client, body))
       case 'push_po_to_xero': return json(await pushPOToXero(client, body))
       case 'email_po': return json(await emailPO(client, body))
-      case 'create_work_order': return json(await createWorkOrder(client, body))
-      case 'update_work_order': return json(await updateWorkOrder(client, body))
-      case 'send_work_order': return json(await sendWorkOrder(client, body))
+      case 'create_work_order':
+        if (body?.kind === 'job') return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
+        return json(await createWorkOrder(client, body))
+      case 'update_work_order':
+        if (await workOrderIsJobKind(client, body?.id)) {
+          return json(await runJobWorkOrder(() => updateJobWorkOrderDraft(client, body)))
+        }
+        return json(await updateWorkOrder(client, body))
+      case 'send_work_order':
+        if (await workOrderIsJobKind(client, body?.id || body?.work_order_id)) {
+          throw new ApiError('A job work order is approved, not sent. Use approve_work_order.', 409, {
+            error: 'A job work order is approved, not sent. Use approve_work_order.',
+            code: 'job_work_order_not_sendable',
+          })
+        }
+        return json(await sendWorkOrder(client, body))
+      // Shaun only: work_order_settings.approver_user_ids, checked here and
+      // again by the database. The approver is the signed-in user. An approver
+      // named only by x-sw-actor `user:<id>` on a server-secret call is refused
+      // until feature flag work_order_terminal_approval_v1 is on.
+      case 'approve_work_order':
+        return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
+      // Dry run unless apply:true AND feature flag job_work_order_backfill_v1.
+      case 'backfill_job_work_orders': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: backfill_job_work_orders requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
+      }
+      // Re-sends variation emails left failed or stuck in sending. Sends
+      // nothing while feature flag work_order_variation_emails_v1 is off.
+      case 'resend_work_order_variation_emails':
+        return json(await runJobWorkOrder(() => resendWorkOrderVariationEmails(client, {
+          sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
+      // Office staff only, never a trade door: corrects a variation's amount
+      // and description, keeping what the trade reported and who corrected it.
+      case 'correct_work_order_variation':
+        return json(await runJobWorkOrder(() => correctWorkOrderVariation(client, body, requestActor, {
+          sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
       // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
@@ -10402,6 +10557,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return await handleTradeCalendarAction(req, client)
       case 'my_work_orders':
         return await handleTradeWorkOrdersAction(req, client)
+      case 'my_job_work_order':
+      case 'report_work_order_variation':
+        return await handleTradeJobWorkOrderAction(req, client, action, body)
       case 'my_jobs':
       case 'trade_job_detail':
       case 'trade_quote_extract':
@@ -10673,6 +10831,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
               .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
               .eq('id', work_order_id)
+              .neq('kind', 'job')
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
               .single()
@@ -13737,6 +13896,7 @@ async function opsSummary(client: any) {
     client.from('work_orders')
       .select('id, status, scheduled_date, job_id, wo_number')
       .eq('org_id', DEFAULT_ORG_ID)
+      .neq('kind', 'job')
       .in('status', ['draft', 'sent', 'accepted', 'in_progress']),
 
     // KPI targets
@@ -14660,11 +14820,15 @@ export async function _resolveWeeklyWorkOrderInvoice(
   }
 
   const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
-    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+    .select('id, org_id, job_id, wo_number, kind, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
     .eq('org_id', tradeUser.orgId)
     .eq('jobs.org_id', tradeUser.orgId)
     .in('id', workOrderIds)
   if (workOrderErr) throw new Error('Failed to load weekly work orders: ' + workOrderErr.message)
+  // A job work order (job_work_orders.ts) is never a crew-pay invoice source.
+  if ((workOrders || []).some((row: any) => row.kind === 'job')) {
+    throw new ApiError('A job work order cannot be invoiced as a weekly job block', 422)
+  }
   if ((workOrders || []).length !== workOrderIds.length) {
     throw new ApiError('One or more weekly work orders were not found in your business', 404)
   }
@@ -14923,6 +15087,64 @@ async function readWorkOrderChargeRows(
   return rows
 }
 
+// ── Job work orders (job_work_orders.ts) ──
+// The module throws JobWorkOrderError; the serve() handler answers ApiError.
+async function runJobWorkOrder<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    if (e instanceof JobWorkOrderError) {
+      throw new ApiError(e.message, e.status, { error: e.message, code: e.code })
+    }
+    throw e
+  }
+}
+
+// Routes update/send by kind: a job work order never takes the crew paths.
+async function workOrderIsJobKind(client: any, id: unknown): Promise<boolean> {
+  if (typeof id !== 'string' || !id) return false
+  const { data, error } = await client.from('work_orders').select('kind').eq('id', id).maybeSingle()
+  if (error) throw new ApiError('The work order could not be read', 500)
+  return data?.kind === 'job'
+}
+
+// The shared trade money filter, as the job work order's trade view uses it.
+export const tradeJobWorkOrderRedaction: TradeRedaction = {
+  scopeItems: (items) => redactTradeWorkOrderScopeItems(items) || [],
+  text: (value, key) => sanitizeTradeAllocatedStringLeaf(value, key),
+  scopeTextKey: (key) => TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key) && TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key),
+}
+
+// Trade doors for the job work order. Access is the ONE per-job tier decision
+// (assertAssignedOrMakesafeAccess); the variation also requires the caller's
+// own invoice, checked inside reportWorkOrderVariation.
+export async function handleTradeJobWorkOrderAction(
+  req: Request,
+  client: any,
+  action: string,
+  body: any,
+): Promise<Response> {
+  const tradeUser = await authTrade(req, client)
+  const access: TradeJobAccessContext = { orgId: tradeUser.orgId, managedVerticals: tradeUser.managedVerticals }
+  if (action === 'my_job_work_order') {
+    const jobId = new URL(req.url).searchParams.get('job_id') || ''
+    if (!jobId) throw new ApiError('job_id required', 400)
+    await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
+    return json(await runJobWorkOrder(() => tradeJobWorkOrderRead(client, jobId, tradeUser.id, tradeJobWorkOrderRedaction)))
+  }
+  if (req.method !== 'POST') throw new ApiError('POST required', 405)
+  const jobId = String(body?.job_id || '')
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
+  const { data: me } = await client.from('users').select('name').eq('id', tradeUser.id).maybeSingle()
+  return json(await runJobWorkOrder(() => reportWorkOrderVariation(
+    client,
+    body,
+    { id: tradeUser.id, orgId: tradeUser.orgId, name: me?.name ?? null },
+    { sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY) },
+  )))
+}
+
 // Actual authenticated boundary for the Trade work-order selector. Authorization
 // comes exclusively from the JWT profile, matching trade_calendar and my_jobs.
 export async function handleTradeWorkOrdersAction(req: Request, client: any): Promise<Response> {
@@ -15004,6 +15226,7 @@ export async function tradeWorkOrders(
     let query = client
       .from('work_orders')
       .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+      .neq('kind', 'job')
       .eq('org_id', viewer.orgId)
       .eq('jobs.org_id', viewer.orgId)
       .not('status', 'in', '("cancelled","deleted")')
@@ -15511,6 +15734,9 @@ async function pipeline(client: any, params: URLSearchParams) {
   // Opt-in fencing stage-truth diagnostic. Default path (flag absent) must
   // stay byte-identical: same selects, same enrichment, same row keys.
   const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
+  // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
+  // absent: nothing below changes for any existing caller.
+  const dispatchList = isDispatchListRequested(params)
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
@@ -15527,6 +15753,8 @@ async function pipeline(client: any, params: URLSearchParams) {
       .or('job_number.not.is.null,status.eq.draft')
     if (statusFilter) {
       scoped = scoped.eq('status', statusFilter)
+    } else if (dispatchList) {
+      scoped = scoped.in('status', DISPATCH_LIST_STATUSES)
     } else {
       // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
       scoped = scoped.in('status', [
@@ -15538,18 +15766,48 @@ async function pipeline(client: any, params: URLSearchParams) {
     }
     if (typeFilter === 'repair') scoped = scoped.in('id', repairJobIds || [])
     else if (typeFilter) scoped = scoped.eq('type', typeFilter)
+    // Make-safe jobs are off the Dispatch list and come back only for a search;
+    // a repair-family card typed makesafe is a repair and stays on it.
+    else if (dispatchList && !search) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
     return scoped
   }
 
   // The projection sits exactly where `pricing_json` used to, so that stripping the
   // aliases below restores the previous key order — the response stays byte-identical.
   const repairProjection = typeFilter === 'repair' ? ', metadata' : ''
-  const query = applyJobFilters(client.from('jobs')
+  // Appended last and stripped again below, like the pricing aliases.
+  const dispatchProjection = dispatchList ? ', ' + DISPATCH_LIST_PROJECTION.join(', ') : ''
+  const buildJobsQuery = () => applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
       ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required' +
-      repairProjection))
+      repairProjection + dispatchProjection))
     .order('updated_at', { ascending: false })
+  // Test records and the search box read only raw job columns, so one rule
+  // serves two places: every caller applies it after enrichment, as before, and
+  // the Dispatch list also applies it straight after the read, so the thirteen
+  // enrichment reads run for matching jobs only.
+  const isListedPipelineRow = (j: any) => {
+    // Filter out test records
+    if (isTestRecord(j.client_name)) return false
+    if (!search) return true
+    const s = search.toLowerCase()
+    return (j.client_name || '').toLowerCase().includes(s)
+      || (j.site_suburb || '').toLowerCase().includes(s)
+      || (j.site_address || '').toLowerCase().includes(s)
+      || (j.job_number || '').toLowerCase().includes(s)
+  }
+  // The plain read stops at PostgREST's 1000-row ceiling (existing behaviour,
+  // left alone). The Dispatch list must show every job, so it pages.
+  const query = dispatchList
+    ? _fetchAllRows<any>(buildJobsQuery, 'pipeline.dispatch_jobs', 'id').then(
+      (data) => ({
+        data: typeFilter === 'repair' ? data : data.filter(isListedPipelineRow),
+        error: null,
+      }),
+      (error) => ({ data: null, error }),
+    )
+    : buildJobsQuery()
 
   let malformedPricingQuery = applyJobFilters(client.from('jobs').select('id, pricing_json'))
     .eq('type', 'fencing')
@@ -15637,7 +15895,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
-        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled')),
+        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').neq('kind', 'job')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
@@ -15659,7 +15917,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       // Trade<->ops comms thread notes (job_events). detail_json needed so system
       // markers can be excluded from the count (they must never light the badge).
       readPipelineEnrichmentRows(jobIds, 'job_events', (chunkIds) =>
-        client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', ['note', 'note_added', 'site_note'])),
+        client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', JOB_NOTE_EVENT_TYPES)),
       stageTruth
         ? readPipelineEnrichmentRows(jobIds, 'job_service_reports', (chunkIds) =>
           client.from('job_service_reports').select('id, job_id, status, submitted_at').in('job_id', chunkIds))
@@ -15764,8 +16022,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   // MAKESAFE_AGENT_REPLY system markers). Lights the kanban comms indicator.
   const commsNotesMap: Record<string, number> = {}
   for (const ev of (commsNotesRes.data || [])) {
-    const body = ev?.detail_json?.text ?? ev?.detail_json?.note ?? ''
-    if (noteIsSystemMarker(body)) continue
+    if (!isPersonWrittenJobNote(ev)) continue
     commsNotesMap[ev.job_id] = (commsNotesMap[ev.job_id] || 0) + 1
   }
 
@@ -15830,7 +16087,9 @@ async function pipeline(client: any, params: URLSearchParams) {
     // Strip the pricing projection from the response — value/neighbourCount already
     // extracted. Previously this dropped the whole `pricing_json` blob; the aliases
     // occupy its slot in the select, so the surviving key order is unchanged.
-    const jLite = stripPipelinePricingAliases(j)
+    const jLite = dispatchList
+      ? stripDispatchListAliases(stripPipelinePricingAliases(j))
+      : stripPipelinePricingAliases(j)
     const pipelineRow = {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,
@@ -15852,6 +16111,13 @@ async function pipeline(client: any, params: URLSearchParams) {
       deposit_paid: invoiceMap[j.id]?.deposit_paid || false,
       has_final_invoice: invoiceMap[j.id]?.has_final || false,
       final_paid: invoiceMap[j.id]?.final_paid || false,
+      ...(dispatchList
+        ? {
+          description: dispatchJobDescription(j),
+          value_inc_gst: dispatchValueIncGst(j),
+          work_type: dispatchWorkType(j),
+        }
+        : {}),
     }
     if (stageTruth && stageTruthRows) {
       Object.assign(
@@ -15874,16 +16140,7 @@ async function pipeline(client: any, params: URLSearchParams) {
         repairDetails?.details.get(String(j.id)) || null,
       )
       : pipelineRow
-  }).filter((j: any) => {
-    // Filter out test records
-    if (isTestRecord(j.client_name)) return false
-    if (!search) return true
-    const s = search.toLowerCase()
-    return (j.client_name || '').toLowerCase().includes(s)
-      || (j.site_suburb || '').toLowerCase().includes(s)
-      || (j.site_address || '').toLowerCase().includes(s)
-      || (j.job_number || '').toLowerCase().includes(s)
-  })
+  }).filter(isListedPipelineRow)
 
   // Cap 1A follow-up fix (2026-05-04): pre-allocate every active canonical
   // status as its own column key. The widened .in('status', [...]) filter
@@ -15935,6 +16192,51 @@ async function pipeline(client: any, params: URLSearchParams) {
 
 export const _pipelineForTest = pipeline
 
+// Every note on a job, newest first (docs/dispatch-slice-1-read-contract.md).
+// job_detail.events is the newest 50 events of every kind, so a busy job's older
+// notes fall outside it. A pure read: none of job_detail's annotation side effect.
+// The event types and the marker rule are the ones comms_notes_count uses
+// (JOB_NOTE_EVENT_TYPES, isPersonWrittenJobNote), so the list's count and the
+// notes returned here agree on every job.
+async function jobNotes(client: any, jobRef: string) {
+  const ref = String(jobRef || '').trim()
+  if (!ref) throw new ApiError('jobId required', 400)
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)
+
+  // Anything that is not a job id is a job number, matched whole against the
+  // stored number: never by shape (live numbers include SW1346 and
+  // SWF-PDF-BUCKET) and never by pattern (`_` is a LIKE wildcard). Stored
+  // numbers are upper case, so a lower-case reference is tried again in upper
+  // case, as the old case-blind match allowed.
+  const findJobId = async (column: 'id' | 'job_number', value: string) => {
+    const { data, error } = await client.from('jobs').select('id')
+      .eq('org_id', DEFAULT_ORG_ID).eq(column, value).limit(1)
+    if (error) throw error
+    return data?.[0]?.id || null
+  }
+  let jobId = await findJobId(isUuid ? 'id' : 'job_number', ref)
+  if (!jobId && !isUuid && ref !== ref.toUpperCase()) {
+    jobId = await findJobId('job_number', ref.toUpperCase())
+  }
+  // An unknown job is a 404, never an empty list: "no notes" must mean the
+  // job was found and has none.
+  if (!jobId) throw new ApiError(`Job ${ref} not found`, 404)
+
+  const rows = await _fetchAllRows<any>(
+    () => client.from('job_events')
+      .select('id, user_id, detail_json, created_at, users:user_id(name)')
+      .eq('job_id', jobId)
+      .in('event_type', JOB_NOTE_EVENT_TYPES)
+      .order('created_at', { ascending: false }),
+    'job_notes',
+    'id',
+  )
+  const notes = rows.filter(isPersonWrittenJobNote).map(projectDispatchJobNote)
+  return { job_id: jobId, notes, total: notes.length }
+}
+
+export const _jobNotesForTest = jobNotes
+
 async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
   if (!jobId) throw new Error('jobId required')
 
@@ -15953,7 +16255,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
     client.from('job_media').select('*').eq('job_id', jobId).order('created_at'),
     client.from('purchase_orders').select('*').eq('job_id', jobId).neq('status', 'deleted').order('created_at', { ascending: false }),
-    client.from('work_orders').select('*').eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
+    client.from('work_orders').select('*').eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at, event_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
@@ -16079,6 +16381,25 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     return rest
   })
 
+  // The job's own work order (job_work_orders.ts): additive, fencing and
+  // patio only. A failed read never fails the job detail.
+  let jobWorkOrder: any = null
+  if (job?.type === 'fencing' || job?.type === 'patio') {
+    try {
+      const jwo = await readJobWorkOrder(client, { jobId })
+      jobWorkOrder = {
+        work_order: jwo.work_order,
+        live_work_order_id: jwo.live_work_order?.id ?? null,
+        draft_work_order_id: jwo.draft_work_order?.id ?? null,
+        figures: jwo.figures,
+        invoice_count: jwo.invoices.length,
+        variation_count: jwo.variations.length,
+      }
+    } catch (e) {
+      console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
+      jobWorkOrder = { unreadable: true }
+    }
+  }
   // Trade time entries stamped against this job by submitted trade invoices:
   // who, which day, start, finish, hours, which invoice (view
   // job_trade_time_entries). Additive. A failed read never fails the job
@@ -16104,6 +16425,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     media: mediaRes.data || [],
     purchase_orders: posLite,
     work_orders: woRes.data || [],
+    job_work_order: jobWorkOrder,
     xero_project: xeroRes.data,
     invoices: invoicesLite,
     job_contacts: contactsRes.data || [],
@@ -16391,12 +16713,13 @@ async function listPOs(client: any, params: URLSearchParams) {
   return { purchase_orders: enriched }
 }
 
-async function listWorkOrders(client: any, params: URLSearchParams) {
+export async function listWorkOrders(client: any, params: URLSearchParams) {
   const status = params.get('status')
   const jobId = params.get('job_id') || params.get('jobId')
 
   let query = client.from('work_orders')
     .select('*')
+    .neq('kind', 'job')
     .neq('status', 'cancelled')
     .order('created_at', { ascending: false })
 
@@ -16978,6 +17301,7 @@ async function assembleJobDossier(client: any, body: any) {
     const { data, error } = await client.from('work_orders')
       .select('id, wo_number, trade_name, status, scheduled_date, sent_at, accepted_at, completed_at, created_at')
       .eq('job_id', jobId)
+      .neq('kind', 'job')
       .order('created_at', { ascending: false })
       .limit(50)
     if (error) throw new Error(error.message)
@@ -20666,6 +20990,48 @@ async function updateMakesafeSubstatus(
 }
 // Test-only export alias (mirrors the `_`-prefixed convention for the other make-safe helpers).
 export const _updateMakesafeSubstatus = updateMakesafeSubstatus
+
+// ══════════════════════════════════════════════════════════════
+// Quote builder dispatch (quote_builder.ts owns the logic)
+// ══════════════════════════════════════════════════════════════
+//
+// Repair stage moves are bound to updateRepairStage, the one repair_stage
+// writer; variation decisions to approveVariation, the existing approval path.
+// Both run with this request's client, so the audit rows match every other
+// stage move and variation decision.
+export async function dispatchQuoteBuilderAction(
+  client: any,
+  action: string,
+  params: URLSearchParams,
+  body: any,
+  actor: QuoteBuilderActor,
+): Promise<Response> {
+  const moveRepairStage = ({ jobId, stage, operatorEmail }: { jobId: string; stage: string; operatorEmail: string | null }) =>
+    updateRepairStage(client, { job_id: jobId, stage, operator_email: operatorEmail })
+  const decideVariation = ({ variationId, approved, notes, userId }: { variationId: string; approved: boolean; notes: string | null; userId: string | null }) =>
+    approveVariation(client, { variation_id: variationId, approved, notes, user_id: userId })
+  try {
+    switch (action) {
+      case 'quote_builder_list_jobs': return json(await listQuoteBuilderJobs(client, params, actor))
+      case 'quote_builder_get_job': return json(await getQuoteBuilderJob(client, params, actor))
+      case 'quote_builder_create_private_job': return json(await createQuoteBuilderPrivateJob(client, body, actor))
+      case 'quote_builder_save': return json(await saveQuoteBuilderVersion(client, body, actor))
+      case 'quote_builder_photo_upload_url': return json(await quoteBuilderPhotoUploadUrl(client, body, actor))
+      case 'quote_builder_photo_register': return json(await quoteBuilderPhotoRegister(client, body, actor))
+      case 'quote_builder_photo_caption': return json(await quoteBuilderPhotoCaption(client, body, actor))
+      case 'quote_builder_pdf_upload_url': return json(await quoteBuilderPdfUploadUrl(client, body, actor))
+      case 'quote_builder_issue': return json(await issueQuoteBuilderVersion(client, body, actor, { moveRepairStage }))
+      case 'quote_builder_decide_variation':
+        return json(await decideQuoteBuilderVariation(client, body, actor, { decideVariation, moveRepairStage }))
+      default: return json({ error: `Unknown action: ${action}` }, 400)
+    }
+  } catch (error) {
+    if (error instanceof QuoteBuilderError) {
+      return json({ error: error.message, code: error.code }, error.status)
+    }
+    throw error
+  }
+}
 
 // ══════════════════════════════════════════════════════════════
 // Repairs board — persisted stage moves
@@ -25073,13 +25439,13 @@ async function submitMakesafeReport(
   if (submittingFinal) {
     if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
-      .select('id, phase, attendance_cycle_id, cycle_attribution')
+      .select('id, type, phase, attendance_cycle_id, cycle_attribution')
       .eq('job_id', jId)
       .eq('type', 'photo')
       .limit(200)
     if (mediaErr) throw mediaErr
     const currentCycleMedia = filterMediaForCurrentCycle(
-      mediaRows || [],
+      (mediaRows || []).filter(isApplicablePackPhoto),
       cycleDetail || { cycle_number: currentCycle, reattend_count: 0 },
       attendanceCycle.id,
     )
@@ -34371,9 +34737,12 @@ async function updateJobStatus(client: any, body: any) {
     (async () => {
       try {
         // 1. Approve draft work orders for this job
+        // Crew work orders only: a job work order is approved by Shaun alone
+        // (job_work_orders.ts), never by job acceptance.
         const { data: draftWOs } = await client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
+          .neq('kind', 'job')
           .eq('status', 'draft')
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
@@ -42270,7 +42639,7 @@ async function tradeJobDetail(
     // order, so this is a real mismatch, not a theoretical one.
     client.from('work_orders')
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
-      .eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
+      .eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
       .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
@@ -45626,12 +45995,6 @@ async function assertCurrentWikiSourceEvidence(
     detail,
     attendanceCycleId,
   )
-  const photoIsApplicable = (item: any) => {
-    const type = String(item?.type || '').trim().toLowerCase()
-    const phase = String(item?.phase || '').trim().toLowerCase()
-    return type.includes('photo') || type.includes('image') ||
-      phase.includes('completion') || phase.includes('after')
-  }
   // Photo evidence order is `created_at` ascending, with `id` only as a stable
   // tiebreak for equal timestamps — the same order the media read above already
   // asks PostgREST for.
@@ -45670,9 +46033,9 @@ async function assertCurrentWikiSourceEvidence(
     sourceLabel: string,
     media: any[],
   ) => {
-    const applicable = media.filter(photoIsApplicable).slice()
+    const applicable = media.filter(isApplicablePackPhoto).slice()
       .sort(comparePackMediaCreatedAtThenId)
-    const excluded = media.filter((item: any) => !photoIsApplicable(item))
+    const excluded = media.filter((item: any) => !isApplicablePackPhoto(item))
       .slice().sort(comparePackMediaCreatedAtThenId)
     const applicableIds = applicable.map((item: any) =>
       String(item.id || '').trim()
@@ -47502,7 +47865,7 @@ async function resolveRoofReportPhotos(
     throw new ApiError('roof report photo cycle read failed: missing makesafe detail', 500)
   }
   const currentMedia = filterMediaForCurrentCycle(
-    (media as any[]) || [],
+    ((media as any[]) || []).filter(isApplicablePackPhoto),
     detail,
     detail?.attendance_cycle_id || null,
   )
@@ -47540,6 +47903,8 @@ async function resolveRoofReportPhotos(
     .filter((m) => m?.storage_url)
     .map((m) => ({ url: m.storage_url as string, thumbUrl: (m.thumbnail_url as string) || undefined, label: (m.label as string) || undefined }))
 }
+
+export const _resolveRoofReportPhotosForTest = resolveRoofReportPhotos
 
 // Render OUR letterhead roof-report PDF and attach it as a 'roof_report' document.
 // Shared by submit_roof_report and render_roof_report. attachMakesafeDocument
@@ -48363,8 +48728,8 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
       .eq('job_id', jobId),
   ])
 
-  const media = mediaRes.data || []
-  const selectedMedia = selectMakesafeReportPhotosForReport(media || [], 8)
+  const media = (mediaRes.data || []).filter(isApplicablePackPhoto)
+  const selectedMedia = selectMakesafeReportPhotosForReport(media, 8)
   const selectedPhotoDefaults = (selectedMedia || [])
     .map((m: any) => m.storage_url || m.thumbnail_url || null)
     .filter(Boolean)

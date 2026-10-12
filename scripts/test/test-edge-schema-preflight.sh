@@ -856,6 +856,15 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261006014000", "context_job_story"),
                       # W11: the context_scorecard door (rows 1 to 14, per job).
                       ("20261006032000", "context_scorecard"),
+                      # job overview v1: the job_overview and request_job_story doors.
+                      ("20261009100000", "context_job_story_text"),
+                      # quote builder actions (quote_builder_*).
+                      ("20261009120000", "quote_builder_versions"),
+                      # deterministic intake: the ambrose adapter's case inserts.
+                      ("20261012043000", "makesafe_intake_cases_admit_ambrose_adapter"),
+                      # Job work orders: one sealed work order per fencing
+                      # and patio job (job_work_orders.ts).
+                      ("20261012130000", "job_work_orders"),
                       # Trade invoice time entries: the four line fields, the
                       # stamping persist and the per-job list
                       # (trade_invoice_time_entry.ts).
