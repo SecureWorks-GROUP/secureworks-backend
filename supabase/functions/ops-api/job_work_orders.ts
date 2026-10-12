@@ -240,7 +240,6 @@ export function computeWorkOrderFigures(input: {
   variations: Array<
     {
       amount_ex: number | null;
-      status: string;
       work_order_id: string | null;
       counted: boolean;
     }
@@ -249,7 +248,7 @@ export function computeWorkOrderFigures(input: {
   const counted = input.lines.filter((l) => l.counted && l.work_order_id);
   const billed = money(counted.reduce((s, l) => s + money(l.amount_ex), 0));
   const liveVariations = input.variations.filter((v) =>
-    v.status === "reported" && v.work_order_id && v.counted
+    v.work_order_id && v.counted
   );
   const variationsEx = money(
     liveVariations.reduce((s, v) => s + money(v.amount_ex ?? 0), 0),
@@ -664,7 +663,7 @@ async function readVariations(client: any, jobIds: string[]): Promise<any[]> {
   for (let i = 0; i < jobIds.length; i += 25) {
     const { data, error } = await client.from("work_order_variations")
       .select(
-        "id, job_id, work_order_id, trade_invoice_id, reported_by, description, amount_ex, status, created_at, users:reported_by(name), trade_invoices:trade_invoice_id(status)",
+        "id, job_id, work_order_id, trade_invoice_id, reported_by, description, amount_ex, created_at, users:reported_by(name), trade_invoices:trade_invoice_id(status)",
       )
       .in("job_id", jobIds.slice(i, i + 25))
       .order("created_at", { ascending: true });
@@ -704,7 +703,6 @@ function figuresFor(
       amount_ex: v.amount_ex === null || v.amount_ex === undefined
         ? null
         : Number(v.amount_ex),
-      status: v.status,
       work_order_id: v.work_order_id,
       counted: v.counted === true,
     })),
@@ -735,7 +733,7 @@ function invoicesFrom(lines: WorkOrderLine[], variations: any[]) {
   }
   for (const v of variations) {
     const cur = byInvoice.get(v.trade_invoice_id);
-    if (cur && v.status === "reported") cur.has_variation = true;
+    if (cur) cur.has_variation = true;
   }
   return [...byInvoice.values()].sort((a, b) =>
     String(a.submitted_at || "").localeCompare(String(b.submitted_at || ""))
@@ -753,7 +751,6 @@ function shapeVariation(v: any) {
     amount_ex: v.amount_ex === null || v.amount_ex === undefined
       ? null
       : money(v.amount_ex),
-    status: v.status,
     counted: v.counted === true,
     created_at: v.created_at,
   };
@@ -1113,7 +1110,7 @@ export async function tradeJobWorkOrderRead(
   const job = await readJob(client, jobId);
   const live = liveOf(await readJobWorkOrders(client, jobId));
   const { data: mine, error } = await client.from("work_order_variations")
-    .select("id, description, status, created_at, trade_invoice_id")
+    .select("id, description, created_at, trade_invoice_id")
     .eq("job_id", jobId).eq("reported_by", viewerId).order("created_at", {
       ascending: true,
     });
@@ -1130,7 +1127,6 @@ export async function tradeJobWorkOrderRead(
       id: v.id,
       trade_invoice_id: v.trade_invoice_id,
       description: v.description,
-      status: v.status,
       created_at: v.created_at,
     })),
   };
@@ -1222,7 +1218,7 @@ export async function reportWorkOrderVariation(
   const live = liveOf(rows);
 
   const VARIATION_COLUMNS =
-    "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, status, created_at";
+    "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, created_at";
   const { data: inserted, error: insErr } = await client.from(
     "work_order_variations",
   ).insert({
