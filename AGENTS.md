@@ -1387,6 +1387,24 @@ Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
 
+## Quote Builder Scopes Live In `quote_builder_versions`, Not `quote_revisions`
+
+Hugo's iPad quote builder (contract `docs/quote-builder-contract.md`, code
+`ops-api/quote_builder.ts`, actions `quote_builder_*`) keeps every scope and
+variation version in `quote_builder_versions` (`20261009120000`): internal cost
+lines beside client charge lines, server-computed totals, issued rows frozen by
+trigger, RLS on and revoked from browser roles. Do not write builder scopes into
+`quote_revisions` (send-quote's SENT ledger), `jobs.scope_json` (fence/patio
+tools) or `jobs.expected_costs` (frozen at acceptance). Issuing files a
+`job_documents` `quote` row with `sent_at` null (never counted as sent) and moves
+a repair card forward only, through `updateRepairStage`: scope -> `quoted`,
+variation -> `variation`, approved variation -> `approved`. Private quotes are
+`jobs.type='miscellaneous'` (`SWM-`), never `renovation` (shares `SWR-` with
+repair). Its photos are `job_media` phase `quote_builder` (`QUOTE_BUILDER_PHOTO_PHASE`),
+which `isApplicablePackPhoto` and the mailer photo route exclude: they are internal and
+must never reach an SES pack, report or builder email. Tests: `quote_builder_test.ts`
+plus the migration contract.
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that
@@ -4404,7 +4422,8 @@ null: the client, each neighbour and a whole-job quote are different parties.
 or a forward from an older fence-run duplicate to the party's current one), and
 a retired link forwards only to the same party's current quote; never list
 every live quote on the job. Accept refuses a non-current run duplicate; "all
-accepted" counts current documents only. Once any per-contact document exists,
+accepted" counts current documents only and skips quote builder documents
+(run label `qb:<chain>`, `_shared/quote_builder_run_label.ts`). Once any per-contact document exists,
 a job-wide document (contact null AND run label null) is not a required party
 for job acceptance and is not retired either; a contact-less RUN document (the
 client's `(null, 'RHS')`) still is required. `/send` retires the party's earlier versions unless the caller passes
@@ -4423,3 +4442,19 @@ deep history load (`20261007080000`, flag `email_reader_deep_v1`): its rows
 carry `metadata.history_tier` deep, which AI placement never asks about and
 which never moves a job's first record, and row 14 reads its reach through
 `context_email_history_reach` / `_reach_jobs`, never by re-deriving it.
+
+## A Group Post Shows No Recipients, So Our Own Is Never Internal On That Alone
+
+Graph lists a group post (ses@, finance@, fencing@, patios@) with no To or Cc.
+`_shared/evidence/outlook_mail.ts` reads who our own post went to from its
+group thread (`groupThreadParty`; the reader hands each post its thread through
+`withGroupThread`), else labels it `staff.email_unknown_audience` (outbound, no
+counterpart, `payload.audience_basis` unknown), never `staff.email_internal`;
+only recorded recipients that are all ours make our email internal. The ledger
+store and the reader key on the party-roles audience, never the event type, so
+an unknown audience reads as possibly external. A copy meeting the saved row
+goes to `context_email_audience_resolve` (a stronger basis only), and a relabel
+moves `context_captured_at` (original kept in `metadata.audience_relabel`) so
+the judge reads the job again. Contract:
+`20261009131000_context_group_mailbox_audience`; field contract in
+[`docs/context/email-capture.md`](docs/context/email-capture.md).
