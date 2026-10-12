@@ -122,6 +122,26 @@ if [[ "$action" == "context_story_scorecard" || "$action" == "context_scorecard"
   exit 0
 fi
 
+# Stands in for the job profit doors (job_profit.ts): job_profit refuses a
+# request with no job_id or job_number, and job_profit_list a limit outside
+# 1..500, before any v_job_profit read.
+if [[ "$action" == "job_profit" ]]; then
+  if printf '%s' "$url" | grep -qE '[?&](job_id|jobId|job_number)='; then
+    printf '%s\n' '{"version":"job-profit-v1"}'
+  else
+    printf '%s\n' '{"error":"job_id or job_number required"}'
+  fi
+  exit 0
+fi
+if [[ "$action" == "job_profit_list" ]]; then
+  if printf '%s' "$url" | grep -q 'limit=0'; then
+    printf '%s\n' '{"error":"limit must be 1 to 500"}'
+  else
+    printf '%s\n' '{"version":"job-profit-v1","rows":[]}'
+  fi
+  exit 0
+fi
+
 case "$action" in
   trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
     printf '%s\n' '{"error":"Login required"}'
