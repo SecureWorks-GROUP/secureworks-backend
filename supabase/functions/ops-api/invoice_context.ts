@@ -501,7 +501,9 @@ async function liveReadByJob(
           "context_extraction_runs",
           () =>
             client.from("context_extraction_runs")
-              .select("id, job_id, run_date, status, error, started_at, finished_at")
+              .select(
+                "id, job_id, run_date, status, error, started_at, finished_at",
+              )
               .eq("phase", "extraction")
               .in("status", ["done", "failed"])
               .in("job_id", ids),
