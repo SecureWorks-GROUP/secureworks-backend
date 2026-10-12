@@ -831,7 +831,37 @@ function invoicesFrom(lines: WorkOrderLine[], variations: any[]) {
   );
 }
 
-function shapeVariation(v: any) {
+/**
+ * The labour each invoice bills in these lines, ex GST, by the work order's
+ * own labour rule (workOrderLineIsLabour), whatever the invoice's status.
+ */
+function labourByInvoice(lines: WorkOrderLine[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const l of lines) {
+    if (!workOrderLineIsLabour(l)) continue;
+    out.set(
+      l.trade_invoice_id,
+      money((out.get(l.trade_invoice_id) ?? 0) + l.amount_ex),
+    );
+  }
+  return out;
+}
+
+/**
+ * A variation is part of the labour its invoice bills on the job. This is the
+ * one test of a variation that is larger than that labour: it refuses a report
+ * or a correction, and it is the flag on a variation already recorded (its
+ * draft invoice was replaced by one that bills less).
+ */
+function variationOverInvoiceLabour(
+  amountEx: unknown,
+  invoiceLabourEx: number,
+): boolean {
+  return amountEx !== null && amountEx !== undefined &&
+    money(amountEx) > money(invoiceLabourEx);
+}
+
+function shapeVariation(v: any, invoiceLabourEx: number) {
   return {
     id: v.id,
     work_order_id: v.work_order_id,
@@ -843,6 +873,10 @@ function shapeVariation(v: any) {
       ? null
       : money(v.amount_ex),
     counted: v.counted === true,
+    over_invoice_labour: variationOverInvoiceLabour(
+      v.amount_ex,
+      invoiceLabourEx,
+    ),
     created_at: v.created_at,
     corrected_at: v.corrected_at ?? null,
     corrected_by: v.corrected_by ?? null,
@@ -887,6 +921,7 @@ export async function readJobWorkOrder(
   ]);
   const linked = lines.filter((l) => l.work_order_id);
   const before = lines.filter((l) => !l.work_order_id && l.counted);
+  const invoiceLabour = labourByInvoice(lines);
   return {
     schema: JOB_WORK_ORDER_SCHEMA,
     job: {
@@ -912,7 +947,9 @@ export async function readJobWorkOrder(
       note:
         "Labour billed on this job with no approved work order to count it against. It links and counts when the work order is approved.",
     },
-    variations: variations.map(shapeVariation),
+    variations: variations.map((v) =>
+      shapeVariation(v, invoiceLabour.get(v.trade_invoice_id) ?? 0)
+    ),
   };
 }
 
@@ -1269,58 +1306,38 @@ function parseVariationAmount(value: unknown): number | null {
   return money(n);
 }
 
-/**
- * What one invoice bills on one job, ex GST: every line of it on that job.
- * Null when the invoice has no line for the job.
- */
-async function readInvoiceBilledOnJob(
-  client: any,
-  invoiceId: string,
-  jobId: string,
-): Promise<number | null> {
-  const { data, error } = await client.from("trade_invoice_lines")
-    .select("id, line_total_ex, override_amount")
-    .eq("trade_invoice_id", invoiceId).eq("job_id", jobId);
-  if (error) fail(500, "invoice_unreadable", "The invoice could not be read");
-  if (!data?.length) return null;
-  return money(
-    data.reduce(
-      (sum: number, line: any) =>
-        sum + money(line.override_amount ?? line.line_total_ex),
-      0,
-    ),
-  );
-}
-
-/** A variation is part of its invoice, so it is never more than the invoice bills on the job. */
-function requireVariationWithinInvoice(
+function requireVariationWithinInvoiceLabour(
   amountEx: number | null,
-  billedEx: number,
+  invoiceLabourEx: number,
 ) {
-  if (amountEx !== null && amountEx > billedEx) {
+  if (variationOverInvoiceLabour(amountEx, invoiceLabourEx)) {
     fail(
       422,
       "variation_over_invoice",
-      `The variation amount is more than this invoice bills on this job ($${
-        billedEx.toFixed(2)
+      `The variation amount is more than the labour this invoice bills on this job ($${
+        money(invoiceLabourEx).toFixed(2)
       } ex GST). Check the amount.`,
     );
   }
 }
 
-/** The work order's figures for a variation email; null when unreadable. */
+/**
+ * The work order's figures for a variation email, from the job's lines as
+ * already read; null when the variations are unreadable.
+ */
 async function variationEmailFigures(
   client: any,
   live: any,
   jobId: string,
+  jobLines: WorkOrderLine[],
 ): Promise<WorkOrderFigures | null> {
   if (!live) return null;
   try {
-    const [lines, variations] = await Promise.all([
-      readWorkOrderLines(client, [jobId], { linkedOnly: true }),
-      readVariations(client, [jobId]),
-    ]);
-    return figuresFor(live, lines, variations);
+    return figuresFor(
+      live,
+      jobLines.filter((l) => l.work_order_id),
+      await readVariations(client, [jobId]),
+    );
   } catch (_e) {
     return null;
   }
@@ -1351,11 +1368,14 @@ export async function reportWorkOrderVariation(
     fail(409, "invoice_rejected", "This invoice was rejected");
   }
 
-  const billedEx = await readInvoiceBilledOnJob(client, invoiceId, jobId);
-  if (billedEx === null) {
+  const jobLines = await readWorkOrderLines(client, [jobId]);
+  if (!jobLines.some((l) => l.trade_invoice_id === invoiceId)) {
     fail(422, "job_not_on_invoice", "This invoice has no line for that job");
   }
-  requireVariationWithinInvoice(amountEx, billedEx);
+  requireVariationWithinInvoiceLabour(
+    amountEx,
+    labourByInvoice(jobLines).get(invoiceId) ?? 0,
+  );
 
   const job = await readJob(client, jobId);
   if (!JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || ""))) {
@@ -1409,7 +1429,7 @@ export async function reportWorkOrderVariation(
     invoiceNumber: invoice.invoice_number ?? null,
     description,
     amountEx,
-    figures: await variationEmailFigures(client, live, jobId),
+    figures: await variationEmailFigures(client, live, jobId, jobLines),
   });
   const emailResults = await recordAndMaybeSendVariationEmails(
     client,
@@ -1479,16 +1499,10 @@ export async function correctWorkOrderVariation(
       "Give the corrected description or amount_ex",
     );
   }
-  if (amountEx !== null) {
-    requireVariationWithinInvoice(
-      amountEx,
-      await readInvoiceBilledOnJob(
-        client,
-        current.trade_invoice_id,
-        current.job_id,
-      ) ?? 0,
-    );
-  }
+  const jobLines = await readWorkOrderLines(client, [current.job_id]);
+  const invoiceLabourEx =
+    labourByInvoice(jobLines).get(current.trade_invoice_id) ?? 0;
+  requireVariationWithinInvoiceLabour(amountEx, invoiceLabourEx);
   const job = await readJob(client, current.job_id);
   const live = liveOf(await readJobWorkOrders(client, current.job_id));
 
@@ -1523,7 +1537,12 @@ export async function correctWorkOrderVariation(
       invoiceNumber: invoice?.invoice_number ?? null,
       description,
       amountEx,
-      figures: await variationEmailFigures(client, live, current.job_id),
+      figures: await variationEmailFigures(
+        client,
+        live,
+        current.job_id,
+        jobLines,
+      ),
       correction: {
         previousDescription: String(current.description),
         previousAmountEx,
@@ -1546,7 +1565,7 @@ export async function correctWorkOrderVariation(
       counted: JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(
         String(invoice?.status || ""),
       ),
-    }),
+    }, invoiceLabourEx),
     emails,
   };
 }

@@ -126,10 +126,12 @@ Rules (`figures.rules[]`, each `{key, level, message}`):
 
 `report_work_order_variation` records one `work_order_variations` row per
 trade invoice per job, against the approved work order (or none: kept, and
-linked when the work order is approved). A variation is part of its invoice, so
-`amount_ex` may not be more than that invoice bills on that job (every line of
-the invoice on the job, ex GST); a larger amount is refused 422
-`variation_over_invoice`. It writes two rows in `work_order_variation_emails`: one to
+linked when the work order is approved). A variation is part of the labour its
+invoice bills, so `amount_ex` may not be more than the labour that invoice
+bills on that job, ex GST, by the same labour rule the work order totals use
+(labour lane, plus Work Order pay lines for now; materials, travel and other
+lines never count). A larger amount is refused 422 `variation_over_invoice`:
+300 labour plus 400 materials refuses 650. It writes two rows in `work_order_variation_emails`: one to
 finance@secureworkswa.com.au and a separate one to admin@secureworkswa.com.au,
 sent from admin@ through `send-outlook-email`. Addresses: secureworks-wiki
 `harness/ops/sops/make-safe-ops-agent-sop.md` lines 134 and 137.
@@ -170,11 +172,19 @@ or `failed`. Recovery, with no scheduler:
   never sends a `recorded` row, so variations reported while the flag was off
   are not sent as a backlog. Safe to call again.
 
+A variation already recorded is never changed or blocked by a later invoice
+save. When a draft is replaced by one that bills less labour on the job than
+its carried variation, the save goes through and the variation keeps its
+amount; the staff read shows it instead: that `variations[]` row carries
+`over_invoice_labour: true` (its amount is larger than the labour its invoice
+now bills on the job, the same test as the refusal above). Staff then use the
+correction below. The flag is computed at read time and stored nowhere.
+
 ### Correcting a variation (office staff only)
 
 The trade cannot change a variation once it is recorded. When one is wrong,
 office staff call `correct_work_order_variation` with the corrected
-`description`, `amount_ex`, or both (the same invoice limit applies). The row
+`description`, `amount_ex`, or both (the same invoice labour limit applies). The row
 keeps what the trade first reported in `original_description` and
 `original_amount_ex` (written by the first correction, never again) and who
 corrected it and when in `corrected_by` (the caller: `user:<users.id>` for a
@@ -217,12 +227,14 @@ Errors are `{error, code}`.
 | `send_work_order` | POST | staff | job work order id | 409 `job_work_order_not_sendable` |
 | `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, invoice_count, variation_count}` on fencing and patio jobs (null on other types); `{unreadable: true}` when that read fails, which never fails the job detail |
 | `my_job_work_order` | GET | trade with access to the job | `job_id` | `{schema:"trade-job-work-order.v1", job_id, work_order: {id, wo_number, status, approved_at, job_id, job_number, job_type, site_address, scheduled_date, scope_items, special_instructions} or null, reason, can_report_variation, my_variations[]}`. No price, allowance, agreed amount or figure, ever. |
-| `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice` when `amount_ex` is more than the invoice bills on the job |
+| `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice` when `amount_ex` is more than the labour the invoice bills on the job |
 
 Each `variations[]` row on the staff read: `id, work_order_id,
 trade_invoice_id, reported_by, reported_by_name, description, amount_ex,
-counted, created_at, corrected_at, corrected_by, original_description,
-original_amount_ex` (the last four null until a correction).
+counted, over_invoice_labour, created_at, corrected_at, corrected_by,
+original_description, original_amount_ex` (the last four null until a
+correction; `over_invoice_labour` is true when the amount is larger than the
+labour its invoice bills on the job).
 
 Work order row fields: `id, job_id, wo_number, kind, status, scope_items,
 special_instructions, scheduled_date, site_address, agreed_labour_ex,

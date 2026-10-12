@@ -658,7 +658,7 @@ Deno.test("events: what this module writes to job_events carries no price, amoun
       trade_invoice_id: INV,
       job_id: JOB,
       description: "Extra post",
-      amount_ex: 876.54,
+      amount_ex: 612.34,
     },
     { id: TRADE, orgId: ORG },
     { sendEmail: async () => ({ ok: true as const }) },
@@ -675,7 +675,7 @@ Deno.test("events: what this module writes to job_events carries no price, amoun
     for (
       const leak of [
         "1234.56",
-        "876.54",
+        "612.34",
         "feedface",
         "agreed",
         "amount",
@@ -1575,6 +1575,84 @@ Deno.test("variation: an amount over what the invoice bills on the job is refuse
   assertEquals(read.figures.variations_ex, 80);
   assertEquals(read.figures.billed_within_agreed_scope_ex, 420);
 
+  // Only labour counts: 300 labour plus 400 materials on the job refuses 650.
+  const mixed = baseDb();
+  mixed.tables.trade_invoice_lines = mixed.tables.trade_invoice_lines.map(
+    (l) =>
+      l.id === "l1"
+        ? { ...l, line_total_ex: 300 }
+        : l.id === "l2"
+        ? { ...l, line_type: "materials", line_total_ex: 400 }
+        : l,
+  );
+  mixed.tables.v_trade_charge_resolved = [
+    { line_id: "l1", cost_lane: "labour" },
+    { line_id: "l2", cost_lane: "materials" },
+    { line_id: "l3", cost_lane: "labour" },
+  ];
+  const overLabour = await assertRejects(
+    () =>
+      reportWorkOrderVariation(
+        mixed,
+        {
+          trade_invoice_id: INV,
+          job_id: JOB,
+          description: "Extra post",
+          amount_ex: 650,
+        },
+        trade,
+        noSend,
+      ),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([overLabour.status, overLabour.code], [
+    422,
+    "variation_over_invoice",
+  ]);
+  assert(overLabour.message.includes("$300.00"));
+  assertEquals(mixed.tables.work_order_variations.length, 0);
+  const within = await reportWorkOrderVariation(
+    mixed,
+    {
+      trade_invoice_id: INV,
+      job_id: JOB,
+      description: "Extra post",
+      amount_ex: 65,
+    },
+    trade,
+    noSend,
+  );
+  assertEquals(within.variation.amount_ex, 65);
+  embedVariationRelations(mixed);
+  const mixedRead = await readJobWorkOrder(mixed, { jobId: JOB });
+  assertEquals(mixedRead.figures.billed_within_agreed_scope_ex, 235);
+  assertEquals(mixedRead.variations[0].over_invoice_labour, false);
+
+  // A Work Order pay line is labour for the cap, as it is for the totals.
+  const payLine = baseDb();
+  payLine.tables.trade_invoice_lines = payLine.tables.trade_invoice_lines.map(
+    (l) => l.id === "l1" ? { ...l, line_type: "work order" } : l,
+  );
+  payLine.tables.v_trade_charge_resolved = [
+    { line_id: "l1", cost_lane: "unclassified" },
+    { line_id: "l2", cost_lane: "commission" },
+    { line_id: "l3", cost_lane: "labour" },
+  ];
+  assertEquals(
+    (await reportWorkOrderVariation(
+      payLine,
+      {
+        trade_invoice_id: INV,
+        job_id: JOB,
+        description: "Extra post",
+        amount_ex: 640,
+      },
+      trade,
+      noSend,
+    )).variation.amount_ex,
+    640,
+  );
+
   // An override is what the line bills.
   const overridden = baseDb();
   overridden.tables.trade_invoice_lines[0].override_amount = 100;
@@ -1596,6 +1674,118 @@ Deno.test("variation: an amount over what the invoice bills on the job is refuse
       JobWorkOrderError,
     ) as JobWorkOrderError).code,
     "variation_over_invoice",
+  );
+});
+
+Deno.test("variation: one carried to a draft that bills less labour is kept and reads flagged for staff", async () => {
+  const REPLACED = "66666666-6666-4666-8666-666666666666";
+  const CARRIED = "77777777-7777-4777-8777-777777777777";
+  const WITHIN = "88888888-8888-4888-8888-888888888888";
+  // The trade raised 400 on a draft billing 500 labour, then saved the draft
+  // again billing 100. The database moved the variation to the replacing row
+  // (carry_work_order_variations) and changed nothing on it.
+  const db = baseDb({
+    work_order_variations: [
+      {
+        id: CARRIED,
+        org_id: ORG,
+        job_id: JOB,
+        work_order_id: WO,
+        trade_invoice_id: REPLACED,
+        reported_by: TRADE,
+        description: "Extra post",
+        amount_ex: 400,
+        users: { name: "Trade One" },
+        trade_invoices: { invoice_number: null, status: "draft" },
+      },
+      {
+        id: WITHIN,
+        org_id: ORG,
+        job_id: JOB,
+        work_order_id: WO,
+        trade_invoice_id: INV,
+        reported_by: TRADE,
+        description: "Second gate",
+        amount_ex: 120,
+        users: { name: "Trade One" },
+        trade_invoices: {
+          invoice_number: "TI-1",
+          status: "pending_acknowledgment",
+        },
+      },
+    ],
+  });
+  db.tables.trade_invoices.push({
+    id: REPLACED,
+    org_id: ORG,
+    user_id: TRADE,
+    status: "draft",
+    invoice_number: null,
+  });
+  db.tables.trade_invoice_lines.push(
+    {
+      id: "d1",
+      trade_invoice_id: REPLACED,
+      job_id: JOB,
+      job_work_order_id: null,
+      line_type: "labour",
+      line_total_ex: 100,
+      override_amount: null,
+      trade_invoices: { id: REPLACED, user_id: TRADE, status: "draft" },
+    },
+    {
+      id: "d2",
+      trade_invoice_id: REPLACED,
+      job_id: JOB,
+      job_work_order_id: null,
+      line_type: "materials",
+      line_total_ex: 900,
+      override_amount: null,
+      trade_invoices: { id: REPLACED, user_id: TRADE, status: "draft" },
+    },
+  );
+  db.tables.v_trade_charge_resolved.push(
+    { line_id: "d1", cost_lane: "labour" },
+    { line_id: "d2", cost_lane: "materials" },
+  );
+
+  const read = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(
+    read.variations.map((
+      v: any,
+    ) => [v.id, v.amount_ex, v.over_invoice_labour]),
+    [[CARRIED, 400, true], [WITHIN, 120, false]],
+  );
+  assertEquals(db.tables.work_order_variations[0].amount_ex, 400);
+  assertEquals(db.tables.work_order_variations[0].corrected_at ?? null, null);
+
+  // Staff clear it with the existing correction, held to the same labour.
+  const deps = { sendEmail: async () => ({ ok: true as const }) };
+  assertEquals(
+    (await assertRejects(
+      () =>
+        correctWorkOrderVariation(
+          db,
+          { variation_id: CARRIED, amount_ex: 150 },
+          { actor: `user:${HUGO}`, missing: false },
+          deps,
+        ),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "variation_over_invoice",
+  );
+  const corrected = await correctWorkOrderVariation(
+    db,
+    { variation_id: CARRIED, amount_ex: 100 },
+    { actor: `user:${HUGO}`, missing: false },
+    deps,
+  );
+  assertEquals(corrected.variation.over_invoice_labour, false);
+  assertEquals(corrected.variation.original_amount_ex, 400);
+  const after = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(
+    after.variations.map((v: any) => v.over_invoice_labour),
+    [false, false],
   );
 });
 
@@ -1623,7 +1813,7 @@ async function reportedDb(flags: any[] = []) {
       trade_invoice_id: INV,
       job_id: JOB,
       description: "Extra psot",
-      amount_ex: 800,
+      amount_ex: 600,
     },
     { id: TRADE, orgId: ORG, name: "Trade One" },
     deps,
@@ -1636,7 +1826,7 @@ Deno.test("correction: staff correct the amount and description; the figures fol
   const { db, sent, deps, variationId } = await reportedDb();
   assertEquals(
     (await readJobWorkOrder(db, { jobId: JOB })).figures.variations_ex,
-    800,
+    600,
   );
 
   const out = await correctWorkOrderVariation(
@@ -1652,14 +1842,14 @@ Deno.test("correction: staff correct the amount and description; the figures fol
   assertEquals(out.variation.description, "Extra post");
   assertEquals(out.variation.amount_ex, 80);
   assertEquals(out.variation.original_description, "Extra psot");
-  assertEquals(out.variation.original_amount_ex, 800);
+  assertEquals(out.variation.original_amount_ex, 600);
   assertEquals(out.variation.corrected_by, `user:${HUGO}`);
   assertEquals(out.variation.corrected_at, new Date(T0).toISOString());
 
   const read = await readJobWorkOrder(db, { jobId: JOB });
   assertEquals(read.figures.variations_ex, 80);
   assertEquals(read.figures.billed_within_agreed_scope_ex, 560);
-  assertEquals(read.variations[0].original_amount_ex, 800);
+  assertEquals(read.variations[0].original_amount_ex, 600);
   assertEquals(read.variations[0].corrected_by, `user:${HUGO}`);
 
   // A second correction never rewrites what the trade first reported.
@@ -1675,11 +1865,11 @@ Deno.test("correction: staff correct the amount and description; the figures fol
   assertEquals(again.variation.description, "Extra post");
   assertEquals(again.variation.amount_ex, 90);
   assertEquals(again.variation.original_description, "Extra psot");
-  assertEquals(again.variation.original_amount_ex, 800);
+  assertEquals(again.variation.original_amount_ex, 600);
   assertEquals(again.variation.corrected_by, `user:${SHAUN}`);
 
   // The email flag is off: nothing is sent, and the ledger holds the corrected
-  // email, so the 800 one can never go out later.
+  // email, so the 600 one can never go out later.
   assertEquals(sent.length, 0);
   assertEquals(again.emails.map((e: any) => e.status), [
     "recorded",
@@ -1688,7 +1878,7 @@ Deno.test("correction: staff correct the amount and description; the figures fol
   for (const row of db.tables.work_order_variation_emails) {
     assert(row.subject.startsWith("Correction: "));
     assert(row.body_text.includes("$90.00"));
-    assert(!row.body_text.includes("$800.00"));
+    assert(!row.body_text.includes("$600.00"));
   }
   assertEquals(db.tables.work_order_variation_emails.length, 2);
 
@@ -1735,7 +1925,7 @@ Deno.test("correction: with the email flag on, finance and admin each get one em
     assert(email.body.includes("Variation: Extra post"));
     assert(email.body.includes("Variation amount (ex GST): $80.00"));
     assert(email.body.includes("Variation was: Extra psot"));
-    assert(email.body.includes("Variation amount was (ex GST): $800.00"));
+    assert(email.body.includes("Variation amount was (ex GST): $600.00"));
     assert(!/[\u2013\u2014]/.test(email.subject + email.body));
   }
 
@@ -1756,13 +1946,13 @@ Deno.test("correction: refused above the invoice, with nothing to change, for an
     JobWorkOrderError,
   ) as JobWorkOrderError);
 
-  const over = await refused({ variation_id: variationId, amount_ex: 941 });
+  const over = await refused({ variation_id: variationId, amount_ex: 641 });
   assertEquals([over.status, over.code], [422, "variation_over_invoice"]);
   assertEquals(
     (await refused({
       variation_id: variationId,
       description: "Extra psot",
-      amount_ex: 800,
+      amount_ex: 600,
     })).code,
     "nothing_to_correct",
   );
@@ -1785,7 +1975,7 @@ Deno.test("correction: refused above the invoice, with nothing to change, for an
   ]);
 
   const row = db.tables.work_order_variations[0];
-  assertEquals([row.description, row.amount_ex], ["Extra psot", 800]);
+  assertEquals([row.description, row.amount_ex], ["Extra psot", 600]);
   assertEquals(row.corrected_at ?? null, null);
   assertEquals(sent.length, 0);
 });
