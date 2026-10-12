@@ -62,6 +62,24 @@ export const JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: ReadonlySet<string> =
  */
 export const WORK_ORDER_LABOUR_COST_LANE = "labour";
 
+/**
+ * Whether a line is labour against the agreed labour figure: the one place
+ * that decides it.
+ *
+ * TEMPORARY: the trade app's "Work Order" pay line (line_type 'work order',
+ * or 'work_order') is labour, but the shared view does not classify it yet,
+ * so it reads 'unclassified' there. It is counted here by line type until
+ * v_trade_charge_resolved puts those types in its labour lane (the finance
+ * desk's change, since it moves the job costing reports). Remove the
+ * line-type test then.
+ */
+export function workOrderLineIsLabour(
+  line: { cost_lane: string; line_type: string | null },
+): boolean {
+  return line.cost_lane === WORK_ORDER_LABOUR_COST_LANE ||
+    line.line_type === "work order" || line.line_type === "work_order";
+}
+
 // Recipients (secureworks-wiki harness/ops/sops/make-safe-ops-agent-sop.md:
 // line 134 "From: admin@secureworkswa.com.au", the default operational
 // mailbox; line 137 the finance department mailbox
@@ -171,7 +189,7 @@ export type WorkOrderLine = {
   amount_ex: number;
   /** v_trade_charge_resolved.cost_lane: labour, materials, commission, other, unclassified. */
   cost_lane: string;
-  /** In the billed totals: a labour-lane line on an invoice that is billed. */
+  /** In the billed totals: a labour line (workOrderLineIsLabour) on an invoice that is billed. */
   counted: boolean;
 };
 
@@ -635,7 +653,7 @@ async function readWorkOrderLines(
   );
   for (const line of out) {
     line.cost_lane = lanes.get(line.trade_invoice_line_id) || "unclassified";
-    line.counted = line.cost_lane === WORK_ORDER_LABOUR_COST_LANE &&
+    line.counted = workOrderLineIsLabour(line) &&
       JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(line.invoice_status);
   }
   return out;
@@ -709,7 +727,7 @@ function invoicesFrom(lines: WorkOrderLine[], variations: any[]) {
       hours: 0,
       has_variation: false,
     };
-    if (l.cost_lane === WORK_ORDER_LABOUR_COST_LANE) {
+    if (workOrderLineIsLabour(l)) {
       cur.amount_ex = money(cur.amount_ex + l.amount_ex);
       cur.hours = Math.round((cur.hours + (l.hours || 0)) * 100) / 100;
     }

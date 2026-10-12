@@ -739,13 +739,11 @@ Deno.test("staff read: 1,900 labour plus 400 materials is 1,900 against the agre
       line("lab", "labour", 1900),
       line("mat", "materials", 400),
       line("trv", "travel", 60),
-      line("new", "a line type the lane view does not know", 75),
     ],
     v_trade_charge_resolved: [
       { line_id: "lab", cost_lane: "labour" },
       { line_id: "mat", cost_lane: "materials" },
       { line_id: "trv", cost_lane: "other" },
-      { line_id: "new", cost_lane: "unclassified" },
     ],
   });
   db.tables.work_orders[0].agreed_labour_ex = 2000;
@@ -761,7 +759,6 @@ Deno.test("staff read: 1,900 labour plus 400 materials is 1,900 against the agre
       ["lab", "labour", true],
       ["mat", "materials", false],
       ["trv", "other", false],
-      ["new", "unclassified", false],
     ],
   );
   assertEquals(r.invoices.map((i) => [i.amount_ex, i.hours]), [[1900, 8]]);
@@ -776,6 +773,70 @@ Deno.test("staff read: 1,900 labour plus 400 materials is 1,900 against the agre
     JobWorkOrderError,
   ) as JobWorkOrderError;
   assertEquals(err.code, "labour_unreadable");
+});
+
+Deno.test("staff read: a 2,000 Work Order pay line is labour, billed 2,000 against the agreed 2,000", async () => {
+  // The trade app stores the type lower-cased ('work order'); the shared lane
+  // view does not classify it yet, so it answers 'unclassified' for the line.
+  for (const workOrderType of ["work order", "work_order"]) {
+    const line = (id: string, line_type: string, amount: number) => ({
+      id,
+      trade_invoice_id: INV,
+      job_id: JOB,
+      job_work_order_id: WO,
+      line_type,
+      total_hours: null,
+      line_total_ex: amount,
+      override_amount: null,
+      trade_invoices: {
+        id: INV,
+        user_id: TRADE,
+        invoice_number: "TI-1",
+        status: "pending_acknowledgment",
+        submitted_at: "2026-10-06T01:00:00Z",
+        users: { name: "Trade One" },
+      },
+    });
+    const db = baseDb({
+      trade_invoice_lines: [
+        line("wo", workOrderType, 2000),
+        line("mat", "materials", 400),
+        line("trv", "travel", 60),
+      ],
+      v_trade_charge_resolved: [
+        { line_id: "wo", cost_lane: "unclassified" },
+        { line_id: "mat", cost_lane: "materials" },
+        { line_id: "trv", cost_lane: "other" },
+      ],
+    });
+    db.tables.work_orders[0].agreed_labour_ex = 2000;
+
+    const r = await readJobWorkOrder(db, { jobId: JOB });
+    assertEquals(r.figures.billed_to_date_ex, 2000, workOrderType);
+    assertEquals(r.figures.remaining_ex, 0, workOrderType);
+    assertEquals(r.figures.over_agreed, false, workOrderType);
+    assertEquals(
+      r.lines.map((l) => [l.trade_invoice_line_id, l.counted]),
+      [["wo", true], ["mat", false], ["trv", false]],
+      workOrderType,
+    );
+    assertEquals(r.invoices.map((i) => i.amount_ex), [2000], workOrderType);
+
+    const listed = await listJobWorkOrders(db, new URLSearchParams());
+    assertEquals(
+      listed.work_orders[0].figures?.billed_to_date_ex,
+      2000,
+      workOrderType,
+    );
+
+    db.tables.trade_invoice_lines.push(line("wo2", workOrderType, 1));
+    db.tables.v_trade_charge_resolved.push({
+      line_id: "wo2",
+      cost_lane: "unclassified",
+    });
+    const over = await readJobWorkOrder(db, { jobId: JOB });
+    assertEquals(over.figures.over_agreed, true, workOrderType);
+  }
 });
 
 // ── Trade read: no prices, allowances or margins ─────────────────────────────
