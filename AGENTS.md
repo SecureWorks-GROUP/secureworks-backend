@@ -267,7 +267,7 @@ refused. Tests: `makesafe_ambrose_intake_test.ts`.
 
 `monitor-ses-makesafes` also reads the Groups in `SENDER_SCOPED_GROUPS` (today
 swwa@). A Group has no inbox rules, so there is no auto-forward to configure:
-the poll reads it. Three rules are load-bearing.
+the poll reads it. Four rules are load-bearing.
 
 - **Only a sender pattern of a company the Group lists admits a post.** Each
   Group carries its own `companySlugs` (swwa@: `acg` only, owner ruling
@@ -291,6 +291,14 @@ the poll reads it. Three rules are load-bearing.
   fails or stalls the ses@ poll: it waits out Graph throttling for at most 20
   seconds, is reported in the poll response, and is alarmed once, its
   `sync_state` row turning `ERROR` only after that alarm event is written.
+- **A post whose attachment list cannot be read fails its slice.** The Group
+  cursor never returns to a post, so the read is retried every poll with the
+  cursor unmoved, and a post whose attachments can NEVER be read holds that
+  Group's intake until someone steps in. `sync_state.last_error` names the
+  post. Recovery: take that purchase order in by hand, then set the Group's
+  `mail_sync_cursors.last_completed_max` to 16 minutes after that
+  conversation's last delivery and check the mail around the new cursor,
+  because a conversation inside that gap is read only from the new cursor on.
 
 One purchase order sent to both addresses is two posts and one job: the planner
 and the instruction key fold them. Tests:

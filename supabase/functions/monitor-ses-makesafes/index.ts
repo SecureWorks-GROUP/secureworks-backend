@@ -645,6 +645,7 @@ async function processAttachments(
   token: string,
   groupId: string,
   post: GraphPost,
+  opts: { failOnListError?: boolean } = {},
 ): Promise<number> {
   if (!post.hasAttachments) return 0;
 
@@ -737,6 +738,11 @@ async function processAttachments(
       throw new Error(
         `attachment expand fetch failed AND failed-placeholder upsert failed for ${post.id}: ` +
           `fetch_error=${fetchError}; upsert_error=${error.message}`,
+      );
+    }
+    if (opts.failOnListError) {
+      throw new Error(
+        `attachment list read failed for ${post.id}: ${fetchError}`,
       );
     }
     return 1;
@@ -1161,10 +1167,13 @@ async function persistPost(
   groupId: string,
   post: GraphPost,
   cls: ReturnType<typeof classifyPost>,
-  // Set only for a post read from a sender-scoped Group: the Group it really
-  // arrived at. The row is still keyed to the ses@ mailbox (see the
-  // SENDER_SCOPED_GROUPS note); this keeps the origin on its audit row.
-  origin: { sourceMailbox?: string } = {},
+  // Set only for a post read from a sender-scoped Group. `sourceMailbox` is the
+  // Group it really arrived at: the row is still keyed to the ses@ mailbox (see
+  // the SENDER_SCOPED_GROUPS note) and this keeps the origin on its audit row.
+  // `failOnAttachmentListError` makes a failed attachment list read throw once
+  // its placeholder row is stored, for a caller whose cursor never comes back
+  // to this post.
+  origin: { sourceMailbox?: string; failOnAttachmentListError?: boolean } = {},
 ): Promise<number> {
   const fromEmail = post.from?.emailAddress?.address ||
     post.sender?.emailAddress?.address || null;
@@ -1262,7 +1271,9 @@ async function persistPost(
   }
 
   // 3) Attachments (decoupled DEGRADED contract).
-  const unresolved = await processAttachments(sb, token, groupId, post);
+  const unresolved = await processAttachments(sb, token, groupId, post, {
+    failOnListError: origin.failOnAttachmentListError,
+  });
 
   // 4) pipeline_items projection (rebuildable; stamped with versions + provenance).
   if (cls.ref) {
@@ -1990,6 +2001,7 @@ async function ingestSenderScopedGroups(
         }
         unresolved += await persistPost(sb, token, groupId, post, cls, {
           sourceMailbox: mail,
+          failOnAttachmentListError: true,
         });
         report.included++;
         handoff.sources.push({

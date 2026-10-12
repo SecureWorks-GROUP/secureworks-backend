@@ -12,7 +12,9 @@
 //     first read, and catches up in bounded slices that always advance and
 //     never leave an older builder post behind;
 //   - a Group that cannot be read, or is throttled, is reported and never
-//     breaks or stalls the ses@ poll.
+//     breaks or stalls the ses@ poll;
+//   - a builder post whose attachments cannot be read holds the Group cursor
+//     until they can.
 //
 // Every sender, subject and address below is invented in the Ambrose shape.
 import {
@@ -127,15 +129,25 @@ function memorySb(opts: { failTable?: string } = {}) {
     };
     return b;
   }
+  const uploads: string[] = [];
   const sb = {
     from,
+    storage: {
+      from: () => ({
+        upload: (path: string) => {
+          uploads.push(path);
+          return Promise.resolve({ data: { path }, error: null });
+        },
+        remove: () => Promise.resolve({ data: [], error: null }),
+      }),
+    },
     rpc: (name: string) =>
       Promise.resolve({
         data: name === "automation_lane_enabled" ? true : null,
         error: null,
       }),
   };
-  return { sb, tables };
+  return { sb, tables, uploads };
 }
 
 // ── Graph double for one Group. ──────────────────────────────────────────────
@@ -145,6 +157,8 @@ interface FakePost {
   receivedDateTime: string;
   body: string;
   hasAttachments?: boolean;
+  // Carries a real PDF work order instead of the default inline logo.
+  pdf?: boolean;
 }
 interface FakeConversation {
   id: string;
@@ -162,8 +176,14 @@ function json(body: unknown, status = 200): Response {
 
 function graphDouble(
   conversations: FakeConversation[],
-  opts: { resolveStatus?: number; throttleRetryAfterSeconds?: number } = {},
+  opts: {
+    resolveStatus?: number;
+    throttleRetryAfterSeconds?: number;
+    // The first N attachment reads answer 503.
+    failAttachmentReads?: number;
+  } = {},
 ) {
+  let attachmentReadsToFail = opts.failAttachmentReads ?? 0;
   const calls: string[] = [];
   const bodyFetches: string[] = [];
   const newestFirst = () =>
@@ -231,6 +251,26 @@ function graphDouble(
       const post = c.posts.find((p) => url.includes(`${base}/${p.id}`));
       if (post) {
         if (url.includes("$expand=attachments")) {
+          if (attachmentReadsToFail > 0) {
+            attachmentReadsToFail--;
+            return Promise.resolve(
+              json({ error: { code: "serviceUnavailable" } }, 503),
+            );
+          }
+          if (post.pdf) {
+            return Promise.resolve(json({
+              id: post.id,
+              attachments: [{
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                id: `pdf-${post.id}`,
+                name: "purchase-order.pdf",
+                contentType: "application/pdf",
+                isInline: false,
+                size: 20,
+                contentBytes: btoa("%PDF-1.4 test order"),
+              }],
+            }));
+          }
           return Promise.resolve(json({
             id: post.id,
             attachments: [{
@@ -661,6 +701,53 @@ Deno.test("a throttled Group read fails its slice at once instead of stalling th
     double.calls.filter((c) => c.includes("/conversations?")).length,
     1,
   );
+});
+
+Deno.test("a failed attachment read fails the slice: the cursor stays put and the next poll stores the post with its PDF", async () => {
+  const withPdf = purchaseOrder("po", "2026-10-08T06:31:00Z");
+  withPdf.posts[0].hasAttachments = true;
+  withPdf.posts[0].pdf = true;
+  // Later general mail: a finished slice would move the cursor past the order.
+  const double = graphDouble([withPdf, {
+    id: "conv-later",
+    lastDeliveredDateTime: "2026-10-10T01:00:00Z",
+    topic: "Unrelated enquiry",
+    posts: [{
+      id: "post-later",
+      from: "member.of.public@customer.test",
+      receivedDateTime: "2026-10-10T01:00:00Z",
+      body: "Hello",
+    }],
+  }], { failAttachmentReads: 1 });
+  const { sb, tables, uploads } = memorySb();
+
+  const first = await withGraph(double, () => ingest(sb));
+  assertEquals(first.reports[0].ok, false);
+  assert(
+    first.reports[0].error?.includes(
+      "attachment list read failed for post-po",
+    ),
+  );
+  assertEquals(tables.mail_sync_cursors, []);
+  assertEquals(first.handoff.sources, []);
+  assertEquals(uploads, []);
+  assertEquals(tables.sync_state[0].mode, "ERROR");
+  assertEquals(tables.business_events.length, 1);
+
+  const second = await withGraph(double, () => ingest(sb));
+  assertEquals(second.reports[0].error, null);
+  assertEquals(second.reports[0].included, 1);
+  assertEquals(second.reports[0].cursor, "2026-10-10T01:00:00.000Z");
+  assertEquals(tables.mail_sync_cursors[0].mailbox, SWWA);
+  assertEquals(second.handoff.sources.map((s: any) => s.postId), ["post-po"]);
+  assertEquals(uploads.length, 1);
+  assertEquals(
+    tables.email_attachments.map((a) => [a.email_id, a.name, a.status]),
+    [["post-po", "purchase-order.pdf", "uploaded"]],
+  );
+  assertEquals(second.handoff.pdfCoordinates.length, 1);
+  assertEquals(tables.sync_state[0].mode, "OK");
+  assertEquals(tables.business_events.length, 1);
 });
 
 Deno.test("a storage failure leaves the Group cursor unmoved so the same mail is retried", async () => {
