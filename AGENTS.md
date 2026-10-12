@@ -257,11 +257,60 @@ would keep only the job number, merging every PO on one job. So, only when
 the company is `acg`, `normaliseAmbroseIdentityText` rewrites each
 PO-labelled 8-2 token to `ACG-<job>PO-<job><seq>` before any scan: claim
 `ACG-<job>`, PO `PO-<job><seq>`, key `ACG:PO-<job><seq>`. Do not widen it to
-other builders or relax the exact 8-2 shape. Ambrose mail goes to admin@ and
-marnin@, not the ses@ intake mailbox, so nothing reaches intake until it is
-redirected there (a forward becomes own-domain chatter). Ambrose has no SES
-family-matrix row, so pack and invoice prep stay refused. Tests:
-`makesafe_ambrose_intake_test.ts`.
+other builders or relax the exact 8-2 shape. Ambrose addresses its mail to the
+swwa@ general Group, not ses@; it reaches intake through the sender-scoped
+Group lane below (a human forward becomes own-domain chatter and is not the
+route). Ambrose has no SES family-matrix row, so pack and invoice prep stay
+refused. Tests: `makesafe_ambrose_intake_test.ts`.
+
+## Builder Mail In A General Group Is Read By Sender, And Stored As ses@
+
+`monitor-ses-makesafes` also reads the Groups in `SENDER_SCOPED_GROUPS` (today
+swwa@). A Group has no inbox rules, so there is no auto-forward to configure:
+the poll reads it. Five rules are load-bearing.
+
+- **Only a sender pattern of a company the Group lists admits a post.** Each
+  Group carries its own `companySlugs` (swwa@: `acg` only, owner ruling
+  12 Oct 2026), so another active builder's mail there is ignored like anyone
+  else's. No subject, keyword or Prime-floor match. Posts are listed WITHOUT
+  their body; an out-of-scope post is counted and dropped with no row in any
+  table (no exclusion audit either) and its body is never requested. Do not
+  route a scoped Group through `collectPosts` / `auditExclusion`, which store a
+  row for everything.
+- **An admitted post is stored under the ses@ mailbox key**, because every
+  downstream reader selects on it. Its origin is
+  `email_events_raw.page_meta.source_mailbox` on the `created` row. Do not add
+  a second mailbox key downstream to "fix" this.
+- **Each scoped Group has its own `mail_sync_cursors` row** (and `sync_state`
+  row for health), keyed by its own address. Its first read starts at its
+  `firstReadFrom` and catches up oldest first in slices of 40 conversations. A
+  conversation sorts by its LATEST post, so one not yet behind the cursor is
+  read back to `firstReadFrom`, never from the moving cursor, or an older
+  purchase order in a thread that later got a reply is skipped for good.
+- **The Group read never runs on the poll's response path.** The pg_net caller
+  disconnects at five seconds and a catch-up slice is many sequential Graph
+  reads, so the read runs in the poll's `EdgeRuntime.waitUntil` continuation,
+  under the mailbox lease, and the ses@ scan handoff starts once it returns,
+  carrying its sources. It waits out Graph throttling for at most 20 seconds.
+  A Group that cannot be read never fails the ses@ poll or its scan: it is
+  logged and alarmed once, its `sync_state` row turning `ERROR` only after that
+  alarm event is written. The poll response carries no Group result.
+- **A post whose attachment list cannot be read fails its slice**, after every
+  other post in the slice is stored and handed to intake. The Group cursor
+  never returns to a post, so the read is retried every poll with the cursor
+  unmoved, and a post whose attachments can NEVER be read holds that Group's
+  cursor until someone steps in. `sync_state.last_error` names the
+  post. Recovery: take that purchase order in by hand, then set the Group's
+  `mail_sync_cursors.last_completed_max` to 16 minutes after that
+  conversation's last delivery and check the mail around the new cursor,
+  because a conversation inside that gap is read only from the new cursor on.
+
+One purchase order sent to both addresses is two posts and one job: the planner
+and the instruction key fold them. Tests:
+`monitor_ses_sender_scoped_groups_test.ts` and the Ambrose cases in
+`makesafe_deterministic_intake_runtime_test.ts`. Switch the lane off with
+`MAKESAFE_SENDER_SCOPED_GROUPS=off`. The lane re-queues no PDF itself: the
+every-minute `makesafe-pdf-extraction-drain` retries a failed text read.
 
 ## Never Select `scope_json` In A List/Feed Query
 
