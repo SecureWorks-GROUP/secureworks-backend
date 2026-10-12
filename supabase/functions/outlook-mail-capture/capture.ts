@@ -108,6 +108,21 @@
 // (_shared/makesafe_refs.ts builderRefTokens over the prefix set loaded once a
 // call), so the ladder can place a builder's email by its reference.
 //
+// Group mailbox audience (9 Oct 2026): a group post carries no recipients, so
+// every post of a thread is handed its thread's posts (withGroupThread), and
+// the row builder reads who our own post went to from the others: the outside
+// party whose thread it is in, else unknown, never internal
+// (counts.audience_from_thread, counts.audience_unknown). One email is one row
+// whichever copy is saved first, so when a copy of our own email meets the
+// row another copy saved (a duplicate), and that copy can know better (a
+// group post, or a mailbox copy that lists its recipients and went to one of
+// our group mailboxes), the reader hands it to
+// context_email_audience_resolve, which relabels the saved row only when this
+// copy's basis is stronger (its own recipients, then the old inbox's copy,
+// then the thread, then unknown) and its label differs
+// (counts.audience_relabelled; a refused or failed call counts
+// audience_resolve_errors and never stops the run).
+//
 // Gates: feature flag email_reader_v1 (this reader's own switch, off by
 // default), email_capture_v2 (the email capture program's switch, EM1) and the
 // capture lane must all be on; otherwise the call is idle and reads nothing.
@@ -125,6 +140,7 @@ import {
   ourReferences,
   type OutlookMailItem,
   type OutlookSource,
+  withGroupThread,
 } from "../_shared/evidence/outlook_mail.ts";
 import {
   builderRefTokens,
@@ -264,6 +280,21 @@ export type CaptureOutcome =
   | { outcome: "capture_disabled" }
   | { outcome: "error"; code?: string };
 
+/**
+ * context_email_audience_resolve's answer for one copy of our own email:
+ * relabelled (the saved row took this copy's label), confirmed (the same label,
+ * this copy's stronger basis recorded), unchanged (the saved row's basis is as
+ * strong or stronger), not_found, capture_disabled, or refused/error (a code).
+ */
+export type AudienceResolveOutcome =
+  | "relabelled"
+  | "confirmed"
+  | "unchanged"
+  | "not_found"
+  | "capture_disabled"
+  | "refused"
+  | "error";
+
 type ListedMessage = MessagePage["items"][number] & { skip?: boolean };
 
 export interface MailReads {
@@ -348,6 +379,12 @@ export interface CaptureDeps {
   /** record_capture_run. Throws on refusal; returns the run id. */
   recordRun(run: Record<string, unknown>): Promise<string>;
   capture(row: Record<string, unknown>): Promise<CaptureOutcome>;
+  /**
+   * context_email_audience_resolve: a copy of our own email that met the row
+   * another copy saved; the database relabels that row when this copy knows
+   * its audience better. Never throws: a failure answers error.
+   */
+  resolveAudience(row: Record<string, unknown>): Promise<AudienceResolveOutcome>;
   /** The old monitor-inbox path's row for the same inbound email, or null. Throws when unreadable. */
   legacyCopy(args: {
     from: string;
@@ -634,9 +671,17 @@ export async function runOutlookCapture(
     }
   }
 
-  let sources = (await deps.sources()).filter((s) =>
+  const selected = (await deps.sources()).filter((s) =>
     s.kind === "user" || s.kind === "group"
   );
+  // Our group mailboxes: a mailbox copy of our own email sent to one of them
+  // may meet the row its group post saved first (resolveAudience).
+  const groupMailboxes = new Set(
+    selected.filter((s) => s.kind === "group").map((s) =>
+      s.email.trim().toLowerCase()
+    ),
+  );
+  let sources = selected;
   if (req.source) {
     sources = sources.filter((s) => s.source_key === req.source);
     if (sources.length === 0) {
@@ -674,6 +719,7 @@ export async function runOutlookCapture(
         deepScope,
         prefixes,
         prefixesFloorOnly: loaded === null,
+        groupMailboxes,
       }),
     );
   }
@@ -696,6 +742,29 @@ interface RunEnv {
   prefixes: readonly string[];
   /** The company prefixes could not be read: the floor was used. */
   prefixesFloorOnly: boolean;
+  /** The selected group mailboxes' addresses, lower case. */
+  groupMailboxes: Set<string>;
+}
+
+/**
+ * Whether a copy of an email that met the row another copy saved may know
+ * better who our email went to: our own email, read from a group (the row may
+ * be an older reading of the post, or another group's copy), or a mailbox copy
+ * that lists its recipients and went to one of our group mailboxes (the group
+ * post, which shows none, may have been saved first). Pure.
+ */
+export function mayResolveAudience(
+  row: Record<string, unknown>,
+  senderKind: string,
+  sourceKind: "user" | "group",
+  groupMailboxes: ReadonlySet<string>,
+): boolean {
+  if (senderKind !== "ours") return false;
+  if (sourceKind === "group") return true;
+  const p = row.payload as Record<string, unknown>;
+  return [...(p.to as unknown[] ?? []), ...(p.cc as unknown[] ?? [])]
+    .map((a) => emailAddress(String(a ?? "")))
+    .some((a) => !!a && groupMailboxes.has(a));
 }
 
 export type DeepDecision =
@@ -907,6 +976,10 @@ async function runSource(
     attachments_skipped: 0,
     attachment_errors: 0,
     progressed: 0,
+    audience_from_thread: 0,
+    audience_unknown: 0,
+    audience_relabelled: 0,
+    audience_resolve_errors: 0,
   };
   if (req.mode === "sweep") counts.sweep_misses = 0;
   if (req.mode === "deep") {
@@ -1140,9 +1213,30 @@ async function runSource(
         // An unreadable time is listed as null; the status counts it.
         missTimes.push(ms(item.receivedAt));
       }
+      if (payload.audience_basis === "group_thread") {
+        counts.audience_from_thread++;
+      } else if (payload.audience_basis === "unknown") {
+        counts.audience_unknown++;
+      }
     } else {
       counts.duplicates++;
       if (out.upgraded) counts.upgraded++;
+      // Another copy of the same email was saved first: this copy may know
+      // better who our email went to.
+      if (
+        mayResolveAudience(
+          built.row,
+          built.senderKind,
+          source.kind,
+          env.groupMailboxes,
+        )
+      ) {
+        const r = await deps.resolveAudience(built.row);
+        if (r === "relabelled") counts.audience_relabelled++;
+        else if (r === "refused" || r === "error") {
+          counts.audience_resolve_errors++;
+        }
+      }
     }
     if ((built.row.metadata as Record<string, unknown>).no_internet_id) {
       counts.no_internet_id++;
@@ -1186,8 +1280,12 @@ async function runSource(
     const h = await deps.hash(c.id);
     const posts: Array<{ post: OutlookMailItem; threadId: string }> = [];
     for (const th of await deps.mail.listGroupThreads(groupId, c.id)) {
+      // Each post carries its whole thread (outside the window too): who our
+      // own post went to is read from it.
       for (
-        const p of await deps.mail.listGroupPosts(groupId, th.id, th.topic)
+        const p of withGroupThread(
+          await deps.mail.listGroupPosts(groupId, th.id, th.topic),
+        )
       ) {
         const t = ms(p.receivedAt);
         if (t === null || t < fromMs || t >= toMs) continue;
@@ -1416,11 +1514,10 @@ async function runSource(
             }
             conversations++;
             for (const th of await deps.mail.listGroupThreads(groupId, c.id)) {
+              // Each post carries its whole thread (before the cursor too).
               for (
-                const p of await deps.mail.listGroupPosts(
-                  groupId,
-                  th.id,
-                  th.topic,
+                const p of withGroupThread(
+                  await deps.mail.listGroupPosts(groupId, th.id, th.topic),
                 )
               ) {
                 const t = ms(p.receivedAt);
