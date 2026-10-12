@@ -4165,7 +4165,8 @@ async function computeJobIntelligence(sb: any, jobId: string) {
     // Work orders
     sb.from('work_orders')
       .select('id, wo_number, status, scope_items, scheduled_date, completed_at')
-      .eq('job_id', jobId),
+      .eq('job_id', jobId)
+      .neq('kind', 'job'),
     // Job assignments
     sb.from('job_assignments')
       .select('id, user_id, crew_name, scheduled_date, scheduled_end, status')

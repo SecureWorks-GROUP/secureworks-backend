@@ -476,6 +476,29 @@ Rules:
   `TRADE_CALENDAR_COLUMNS`, which is a separate query path for the Trade app
   calendar and has no Divisions filter to serve.
 
+## The Plain `pipeline` Read Is Cut At 1,000 Rows; The Dispatch List Is Not
+
+`ops-api?action=pipeline` reads `jobs` once with no paging, so PostgREST stops
+it at 1,000 rows, newest `updated_at` first. It matched 1,400 jobs on
+12 Oct 2026, so the 400 least recently updated were already missing from the Jobs
+board (mostly archived). That is existing behaviour, left alone: never read a
+count of jobs off the plain read. `pipeline&dispatch=1` is the complete, opt-in
+list read for the Ops screen's Dispatch tab: accepted work only, paged, with a
+derived `description` line, a `value_inc_gst` flag and a `work_type` (repair
+wins: a repair-family card typed `makesafe` is listed as a repair, a true
+make-safe comes back only for a search), and `job_notes` returns every note on a
+job less the `noteIsSystemMarker` rows (`job_detail.events` is only the newest
+50 events of every kind). A Dispatch card's `comms_notes_count` and that job's
+`job_notes` must stay equal: both read `JOB_NOTE_EVENT_TYPES` and
+`isPersonWrittenJobNote`, so change the rule there, never in one reader (the
+plain read counts no notes for a `draft`, which Dispatch never lists).
+`job_notes` matches a job number whole against the stored number (live numbers
+include `SW1346` and `SWF-PDF-BUCKET`), never by shape or pattern. The
+description is built from five projected `scope_json` paths; the status floor is what keeps that affordable, because draft and quoted rows hold
+the heaviest blobs (4.9 s to project every pipeline row against 0.43 s for
+accepted work). Rules: `dispatch_job_list.ts`; contract:
+`docs/dispatch-slice-1-read-contract.md`; tests: `dispatch_job_list_test.ts`.
+
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
 `jobs.pricing_json` is a full quote blob and the same list/feed rule applies.
@@ -4410,6 +4433,36 @@ The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
   and the agent queue and submit.
 - The debt rules are plain code in `debt_ws_rules.ts`. Change them there, with a test.
 - Apply `20261008170000_debt_workshop.sql` before deploying the matching `ops-api`.
+
+## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
+
+Since `20261012130000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
+older row: the per-trade crew-pay work order) or `job` (the one work order per
+fencing / patio job, draft then approved). An approved job work order is sealed
+by trigger: any update or delete raises, so a crew-path writer that touches it
+fails loudly. Every crew-pay read or write (`my_work_orders`,
+`submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
+`kind = 'crew'`; a new one must too. Only the users in
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role, and an
+approval seals only the draft that was read: `approve_work_order` requires
+`expected_updated_at`, compared under the row lock in `approve_job_work_order`.
+A recorded variation changes only through the staff door
+`correct_work_order_variation`, never a trade one. Every
+line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
+by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
+before the approval; never set it from code. Only the labour lane of
+`v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
+restate that lane list. One temporary exception lives in
+`workOrderLineIsLabour` (`job_work_orders.ts`): the trade app's Work Order pay
+line (`work order` / `work_order`) counts as labour until that view classifies
+it; remove the exception then. This migration inserts one call,
+`carry_work_order_variations`, into the deployed bodies of the three
+draft-replacing functions (`replace_trade_invoice_draft_v1`,
+`persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a
+variation raised on a draft invoice survives the draft being replaced; a later
+body of any of them must keep it. Variation emails, the draft backfill and
+approval named only by the `x-sw-actor` header (the terminal) are behind flags
+seeded off. Contract and API: `docs/job-work-orders-v1.md`.
 
 ## Maintaining this file
 

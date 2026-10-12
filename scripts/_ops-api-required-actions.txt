@@ -116,6 +116,10 @@ get_job_conversation
 pipeline
 job_detail
 
+# ── Ops screen Dispatch tab: every note on a job (docs/dispatch-slice-1-read-contract.md).
+#    A pure read; a bare call is refused 400 "jobId required" before any query. ──
+job_notes
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event
@@ -147,6 +151,8 @@ quote_builder_decide_variation   # probe=source-only
 trade_calendar            # probe=jwt-fail-closed
 my_jobs                   # probe=jwt-fail-closed
 my_work_orders            # probe=jwt-fail-closed
+my_job_work_order         # probe=jwt-fail-closed
+report_work_order_variation # probe=jwt-fail-closed
 submit_work_order_invoice # probe=jwt-fail-closed
 
 # ── Job P&L (M3) — read-only; pairs with ops.html #119 + M1 migration ──
@@ -329,3 +335,9 @@ debt_ws_jan_list_lock # probe=jwt-fail-closed
 debt_ws_jan_list_send # probe=jwt-fail-closed
 debt_ws_agent_queue # probe=jwt-fail-closed
 debt_ws_agent_submit # probe=jwt-fail-closed
+# Job work orders (job_work_orders.ts): one sealed work order per fencing and patio job
+job_work_order # probe=bounded-refusal probe-args=job_id=__deploy_probe__
+approve_work_order # probe=source-only
+backfill_job_work_orders # probe=source-only
+resend_work_order_variation_emails # probe=source-only
+correct_work_order_variation # probe=source-only

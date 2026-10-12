@@ -48,6 +48,8 @@ See edge-functions.md for full list. Key ones:
   pair re-applies the old non-null exclusion in code, so a NULL-status visit is
   visible to `next`/`last` only. Regressions:
   `pipeline_next_scheduled_date_test.ts`.
+- `pipeline&dispatch=1`, `job_notes` — the Dispatch tab's job list and
+  every-note read. Contract: `docs/dispatch-slice-1-read-contract.md`.
 - `create_po`, `update_po`, `push_po_to_xero` — purchase orders
 - `create_wo`, `update_wo` — work orders
 - `job_detail` — full job data with assignments, POs, WOs, scope, invoices

@@ -1,6 +1,12 @@
 -- Deliberately put the earlier body back (this migration's own rollback: 20261009133000's assembler,
 -- open loops ranked oldest first). contract.sql must then fail on its first check: on SWF-261469's
 -- shape the 5 Oct install ask leads again over the newer completion complaint.
+-- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
+-- as the story settled notes' refuses while a later story read is live)
+SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset
+\if :held_messages_live
+\ir ../../../rollbacks/20261012100000_context_held_messages_down.sql
+\endif
 -- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down
 -- goes first, as the story lead rank's refuses while a later assembler body is live)
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
