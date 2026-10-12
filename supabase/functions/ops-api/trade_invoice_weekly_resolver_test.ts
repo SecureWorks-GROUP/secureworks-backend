@@ -417,7 +417,7 @@ Deno.test("weekly persistence sends one complete server-owned invoice to the dat
   assertEquals(invoiceId, "00000000-0000-0000-0000-000000000900");
   const call = calls[0];
   if (!call) throw new Error("weekly persistence RPC was not called");
-  assertEquals(call.name, "persist_weekly_trade_invoice_v1");
+  assertEquals(call.name, "persist_weekly_trade_invoice_v2");
   assertEquals(call.args.p_requested_prior_draft_id, null);
   assertEquals(
     (call.args.p_lines as Array<Record<string, unknown>>).map((line) => ({
@@ -522,7 +522,7 @@ Deno.test("dated hourly drafts use the weekly lock boundary without losing audit
 
   assertEquals(invoiceId, "00000000-0000-0000-0000-000000000902");
   assertEquals(calls, [{
-    name: "persist_weekly_trade_invoice_v1",
+    name: "persist_weekly_trade_invoice_v2",
     args: {
       p_invoice: {
         org_id: ORG_ID,
