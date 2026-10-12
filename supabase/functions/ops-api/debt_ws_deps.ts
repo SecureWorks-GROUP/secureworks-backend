@@ -127,8 +127,13 @@ export function createDebtWsDeps(input: DebtWsDepsInput): DebtWsDeps {
     sendStaffSms: input.sendStaffSms,
     sendEmail: input.sendEmail,
     updateJobStatus: input.updateJobStatus,
-    conversation: (jobId, limit) =>
-      input.getJobConversation({ job_id: jobId, limit }),
+    // extra_contact_ids: a neighbour payer's own GoHighLevel thread, read with the job's.
+    conversation: (jobId, limit, contactIds) =>
+      input.getJobConversation({
+        job_id: jobId,
+        limit,
+        ...(contactIds?.length ? { extra_contact_ids: contactIds } : {}),
+      }),
     story: async (jobId) => {
       const { story, status } = await readJobStory(client, { jobId });
       return { story, status };

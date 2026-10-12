@@ -7,6 +7,7 @@
 // and throws DebtWsError, so an unread table never reads as "nothing there".
 
 import type { WsInvoice, WsJob } from "./debt_ws_rules.ts";
+import type { WsJobContact } from "./debt_ws_payer.ts";
 
 export const DEBT_WS_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const IN_CHUNK = 50;
@@ -165,6 +166,8 @@ export interface DebtWsStore {
   /** ACCREC invoices fully paid between two Perth dates (inclusive). */
   paidBetween(from: string, to: string): Promise<WsInvoice[]>;
   jobs(jobIds: string[]): Promise<WsJob[]>;
+  /** The payers on these jobs (job_contacts rows that are active or have no status). */
+  jobContacts(jobIds: string[]): Promise<WsJobContact[]>;
   /** The latest job.status_changed event out of rectification, per job. */
   rectificationExits(
     jobIds: string[],
@@ -241,6 +244,12 @@ export interface DebtWsStore {
     },
   ): Promise<boolean>;
   setJobContact(jobId: string, ghlContactId: string): Promise<void>;
+  /** Links a GoHighLevel contact on ONE job_contacts row (a neighbour payer), never the job. */
+  setContactRowGhl(
+    rowId: string,
+    jobId: string,
+    ghlContactId: string,
+  ): Promise<void>;
   userName(userId: string): Promise<string | null>;
   /** Staff records whose name starts with Jan. */
   janStaff(): Promise<
@@ -293,7 +302,9 @@ function writeFailed(what: string, error: any): never {
 const INVOICE_SELECT =
   "xero_invoice_id, xero_contact_id, contact_name, invoice_number, invoice_type, status, reference, total, amount_due, invoice_date, due_date, fully_paid_on, job_id, first_description:line_items->0->>Description";
 const JOB_SELECT =
-  "id, status, type, job_number, client_name, client_phone, client_email, site_address, site_suburb, ghl_contact_id";
+  "id, status, type, job_number, client_name, client_phone, client_email, site_address, site_suburb, ghl_contact_id, xero_contact_id";
+const JOB_CONTACT_SELECT =
+  "id, job_id, contact_type, contact_label, is_primary, status, client_name, client_phone, client_email, xero_contact_id, ghl_contact_id";
 const EVIDENCE_TYPES = [
   "client.reply",
   "client.email_in",
@@ -471,6 +482,19 @@ export function createSupabaseDebtWsStore(
             ascending: true,
           }),
         "jobs",
+      );
+    },
+    jobContacts(jobIds) {
+      return byChunks<WsJobContact>(
+        jobIds,
+        (part) =>
+          client.from("job_contacts").select(JOB_CONTACT_SELECT).in(
+            "job_id",
+            part,
+          ).or("status.is.null,status.eq.active").order("id", {
+            ascending: true,
+          }),
+        "the job contacts",
       );
     },
     async rectificationExits(jobIds) {
@@ -719,6 +743,20 @@ export function createSupabaseDebtWsStore(
       if (error) writeFailed("the job's contact", error);
       if ((data || []).length !== 1) {
         throw new DebtWsError("That job was not found", 404, "job_not_found");
+      }
+    },
+    async setContactRowGhl(rowId, jobId, ghlContactId) {
+      const { data, error } = await client.from("job_contacts").update({
+        ghl_contact_id: ghlContactId,
+        updated_at: new Date().toISOString(),
+      }).eq("id", rowId).eq("job_id", jobId).select("id");
+      if (error) writeFailed("the payer's contact", error);
+      if ((data || []).length !== 1) {
+        throw new DebtWsError(
+          "That payer's contact row was not found on the job",
+          404,
+          "contact_row_not_found",
+        );
       }
     },
     async userName(userId) {

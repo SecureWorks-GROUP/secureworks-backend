@@ -598,7 +598,7 @@ Deno.test("decide: refuses texts the guard forbids, steps not due, company invoi
   store.jobRows.find((j) => j.id === JOBS.fence)!.ghl_contact_id = null;
   assertEquals(
     (await call(deps, "debt_ws_decide", SHAUN, D7_SEND)).body.code,
-    "no_contact",
+    "payer_not_linked",
   );
   assertEquals(
     (await call(deps, "debt_ws_decide", SHAUN, { ...D7_SEND, extra: 1 }))
@@ -961,7 +961,24 @@ Deno.test("job: row, job, story, invoices, documents, conversation, ladder, temp
   assertEquals(b.contact, {
     ghl_contact_id: "ghlcontact0000000001",
     candidates: [],
+    linkable: true,
+    payer_name: "Alex Sample",
   });
+  // A single-payer job: the payer is the job's client, every message is theirs.
+  assertEquals(b.payer_contact.is_primary, true);
+  assertEquals(b.payer_contact.resolved_by, "single_payer_job");
+  assertEquals(b.payer_contact.phone, "0400 000 001");
+  assertEquals(b.conversation.all_job_messages_count, 2);
+  assertEquals(b.conversation.reason, null);
+  assertEquals(b.send_block, null);
+  assertEquals(b.job.shares, [{
+    label: "main",
+    payer_name: "Alex Sample",
+    is_primary: true,
+    owing: 1000,
+    paid: false,
+    invoice_count: 1,
+  }]);
 
   // The patio's job lists its go-ahead deposit and the progress invoice.
   const patio =

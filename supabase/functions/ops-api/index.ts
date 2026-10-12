@@ -204,6 +204,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
+import { findLiveJobContactForGhlContact } from '../_shared/job_contact_membership.ts'
 import {
   canonicalMakesafeBuilderDisplayName,
   canonicalMakesafeInvoiceContactName,
@@ -448,7 +449,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -16849,23 +16850,49 @@ async function getJobConversation(client: any, body: any) {
 
   // 1. GHL conversation cache (sms / email / call metadata) — by job_id first,
   //    falling back to contact_id if cache row was synced before job_id link.
+  //    Each message is tagged with the cache row's contact_id (whose thread it is).
+  //    extra_contact_ids (Debt Workshop): the threads of other payers on this job, a
+  //    neighbour on a shared fence. Only ids on this job's active job_contacts rows are
+  //    read, so a caller can never pull an unrelated contact's thread onto a job.
   try {
     let ghlRow: any = null
     if (ghlContactId) {
       const { data: byContact } = await client.from('ghl_conversation_cache')
-        .select('messages, message_count, synced_at')
+        .select('contact_id, messages, message_count, synced_at')
         .eq('contact_id', ghlContactId)
         .maybeSingle()
       ghlRow = byContact || null
     }
     if (!ghlRow) {
       const { data: byJob } = await client.from('ghl_conversation_cache')
-        .select('messages, message_count, synced_at')
+        .select('contact_id, messages, message_count, synced_at')
         .eq('job_id', jobId)
         .maybeSingle()
       ghlRow = byJob || null
     }
-    const ghlMsgs: any[] = Array.isArray(ghlRow?.messages) ? ghlRow.messages : []
+    const ghlRows: any[] = ghlRow ? [ghlRow] : []
+    const extraIds: string[] = Array.isArray(body?.extra_contact_ids)
+      ? Array.from(new Set<string>(body.extra_contact_ids.map((v: unknown) => String(v || '').trim())
+        .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v) && v !== ghlContactId && v !== ghlRow?.contact_id)))
+        .slice(0, 5)
+      : []
+    if (extraIds.length) {
+      const { data: onJob, error: onJobErr } = await client.from('job_contacts')
+        .select('ghl_contact_id')
+        .eq('job_id', jobId)
+        .or('status.is.null,status.eq.active')
+        .in('ghl_contact_id', extraIds)
+      if (onJobErr) console.error('[ops-api] get_job_conversation job_contacts check failed:', onJobErr.message)
+      const allowed = (onJob || []).map((r: any) => String(r.ghl_contact_id)).filter(Boolean)
+      if (allowed.length) {
+        const { data: extraRows } = await client.from('ghl_conversation_cache')
+          .select('contact_id, messages, message_count, synced_at')
+          .in('contact_id', allowed)
+        ghlRows.push(...(extraRows || []))
+      }
+    }
+    const ghlMsgs: any[] = ghlRows.flatMap((row: any) =>
+      (Array.isArray(row?.messages) ? row.messages : []).map((m: any) => ({ ...m, __contact_id: row?.contact_id || null })))
     for (const m of ghlMsgs) {
       const ts = m.timestamp || ''
       if (sinceFilter && ts && ts < sinceFilter) continue
@@ -16884,6 +16911,7 @@ async function getJobConversation(client: any, body: any) {
         subject: undefined,
         source_system: 'ghl_cache',
         source_ref: m.id || '',
+        contact_id: m.__contact_id || null,
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
         // The CRM thread is read by the job's customer contact (party roles, B-6).
         ...conversationRoleFields(customerThreadPartyRoles(m.direction || 'inbound')),
@@ -16932,6 +16960,7 @@ async function getJobConversation(client: any, body: any) {
         subject: r.subject || null,
         source_system: 'inbox',
         source_ref: r.id,
+        email_addresses: Array.from(new Set(emailAddresses([r.from_email, r.to_email]))),
         placed_by: 'old_inbox_matcher',
         label,
         event_copy,
@@ -35819,16 +35848,31 @@ async function assertGhlContactMatchesResolvedJob(
       ),
     )
   }
+  // The job's own contact passes.
   if (
-    !job.data.ghl_contact_id ||
-    String(job.data.ghl_contact_id) !== String(ghlContactId)
-  ) {
-    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
-      job_id: jobId,
-      expected_ghl_contact_id: job.data.ghl_contact_id || null,
-      received_ghl_contact_id: ghlContactId,
-    }))
+    job.data.ghl_contact_id &&
+    String(job.data.ghl_contact_id) === String(ghlContactId)
+  ) return
+  // So does a live party on the SAME job's contact list (a neighbour on a shared
+  // fence; Captain ruling 12 Oct 2026). A removed row, another job's row or a
+  // contact on no list is refused exactly as before; a failed read fails closed.
+  const party = await findLiveJobContactForGhlContact(client, jobId, ghlContactId)
+  if (party.ok) return
+  if (party.reason === 'lookup_failed') {
+    throw new SesActionError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        action,
+        `The job contact list lookup failed (${party.message}).`,
+        { job_id: jobId, ghl_contact_id: ghlContactId },
+      ),
+    )
   }
+  throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+    job_id: jobId,
+    expected_ghl_contact_id: job.data.ghl_contact_id || null,
+    received_ghl_contact_id: ghlContactId,
+  }))
 }
 
 async function assertNoSyntheticLivefireJobs(
@@ -59625,7 +59669,9 @@ export async function sendClientUpdate(client: any, body: any) {
       const smsRes = await fetch(ghlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contactId: contactGhlId, message }),
+        // A per-contact send names the job, so ghl-proxy's contact/job match runs:
+        // the contact must be the job's or a live party on the same job's list.
+        body: JSON.stringify({ contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) }),
       })
       // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
       // so only a body confirming success may record status='sent' — an in-band

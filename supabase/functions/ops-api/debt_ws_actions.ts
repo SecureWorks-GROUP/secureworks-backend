@@ -66,6 +66,12 @@ import {
   templateDraftFor,
 } from "./debt_ws_book.ts";
 import {
+  partiesOf,
+  type PayerContact,
+  sharesOf,
+  splitConversation,
+} from "./debt_ws_payer.ts";
+import {
   DebtWsError,
   type DebtWsSettings,
   type DebtWsStore,
@@ -152,10 +158,16 @@ export interface DebtWsDeps {
   }) => Promise<{ ok: boolean; status: number; error: string | null }>;
   /** The existing updateJobStatus (job_events, business_events, the GHL stage move). */
   updateJobStatus: (body: Record<string, unknown>) => Promise<unknown>;
-  /** getJobConversation: messages with full text, call transcripts included. */
+  /**
+   * getJobConversation: messages with full text, call transcripts included. Each message
+   * carries contact_id (its GoHighLevel contact) and email_addresses where its source
+   * has them. contactIds: extra GoHighLevel contacts whose cached threads are read too
+   * (a neighbour payer's own thread on a shared job).
+   */
   conversation: (
     jobId: string,
     limit: number,
+    contactIds?: string[],
   ) => Promise<{ messages: Record<string, unknown>[]; summary?: unknown }>;
   /** readJobStory: job-story-v1 or null, with its status. */
   story: (jobId: string) => Promise<{ story: unknown; status: unknown }>;
@@ -464,8 +476,54 @@ async function log(
   });
 }
 
-/** The names a bank transaction may carry for this share: the Xero contact and the client. */
-const payerNames = (e: BookEntry) => [e.inv.contact_name, e.job?.client_name];
+/** The names a bank transaction may carry for this share: the Xero contact and the payer. */
+const payerNames = (e: BookEntry) => [e.inv.contact_name, e.payer.name];
+
+const firstName = (name: string) => name.trim().split(/\s+/)[0] || name;
+
+/**
+ * Why this invoice's payer cannot be texted from here, or null when they can.
+ *   payer_not_linked: the payer has no GoHighLevel contact yet (link it first).
+ * A neighbour on a shared job is texted at their OWN contact (their job_contacts row's
+ * ghl_contact_id), never the job's. The send names the job, so the one guarded text path
+ * (sendChaseSms: assertGhlContactMatchesResolvedJob, then ghl-proxy's contact/job match)
+ * checks the contact is the job's own or a live party on the same job's contact list
+ * (Captain ruling, 12 Oct 2026). A contact on no list for this job is still refused there.
+ */
+export function payerSendBlock(
+  entry: Pick<BookEntry, "job" | "payer">,
+): { code: string; message: string } | null {
+  const payer = entry.payer;
+  const who = firstName(payer.name);
+  if (!entry.job || !payer.ghl_contact_id) {
+    return {
+      code: "payer_not_linked",
+      message:
+        `Link ${who}'s GoHighLevel contact first: there is no contact to text`,
+    };
+  }
+  return null;
+}
+
+/** A neighbour payer's own GoHighLevel thread is read as well as the job's. */
+function extraContactIds(entry: BookEntry): string[] {
+  const id = entry.payer.ghl_contact_id;
+  return id && id !== entry.job?.ghl_contact_id ? [id] : [];
+}
+
+/** The payer as the screen and the agent see them. */
+function payerView(p: PayerContact) {
+  return {
+    name: p.name,
+    phone: p.phone,
+    email: p.email,
+    ghl_contact_id: p.ghl_contact_id,
+    contact_row_id: p.contact_row_id,
+    label: p.label,
+    is_primary: p.is_primary,
+    resolved_by: p.resolved_by,
+  };
+}
 
 const entryRef = (e: BookEntry) => ({
   share_key: e.row.share_key,
@@ -588,15 +646,22 @@ function kindLabel(book: Book, inv: WsInvoice) {
 
 const digits = (s: unknown) => String(s ?? "").replace(/\D/g, "").slice(-9);
 
+/**
+ * GoHighLevel contacts that may be the PAYER, searched by the payer's own phone and email
+ * (a neighbour's from their job_contacts row). None when the payer is linked, or when there
+ * is nowhere to link them (a neighbour with no job_contacts row).
+ */
 async function contactCandidates(deps: DebtWsDeps, entry: BookEntry) {
   const job = entry.job;
-  if (!job || job.ghl_contact_id) return [];
-  const phone = digits(job.client_phone);
-  const email = String(job.client_email ?? "").trim().toLowerCase();
+  const payer = entry.payer;
+  if (!job || payer.ghl_contact_id) return [];
+  if (!payer.is_primary && !payer.contact_row_id) return [];
+  const phone = digits(payer.phone);
+  const email = String(payer.email ?? "").trim().toLowerCase();
   const queries = [
-    phone.length >= 8 ? String(job.client_phone) : null,
+    phone.length >= 8 ? String(payer.phone) : null,
     email || null,
-    !phone && !email ? entry.row.payer_name : null,
+    !phone && !email ? payer.name : null,
   ].filter((q): q is string => !!q && q.trim().length >= 2);
   const seen = new Map<string, Record<string, unknown>>();
   for (const q of queries) {
@@ -665,8 +730,16 @@ function documentView(d: Record<string, unknown>) {
 
 export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
   const id = uuidOf(params.get("xero_invoice_id"), "xero_invoice_id");
+  // conversation=payer (default): the payer's own messages; conversation=all: the whole
+  // job's thread, each message marked with whose it is.
+  const mode = params.get("conversation") || "payer";
+  if (mode !== "payer" && mode !== "all") {
+    bad('conversation must be "payer" or "all"');
+  }
   const { book, entry } = await oneEntry(deps, id);
   const job = entry.job;
+  const payer = entry.payer;
+  const rows = job ? book.contacts.get(String(job.id)) ?? [] : [];
   const budget = { left: DEBT_WS_PAY_LINK_FETCH_LIMIT };
   const [story, documents, conversation, jobLogs, payLink, bank, candidates] =
     await Promise.all([
@@ -686,12 +759,15 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
         })).catch(() => ({ rows: [], status: "unavailable" }))
         : Promise.resolve({ rows: [], status: "no_job" }),
       job
-        ? deps.conversation(job.id, 100).catch(() => ({
-          messages: [],
-          summary: null,
+        ? deps.conversation(job.id, 100, extraContactIds(entry)).catch(() => ({
+          messages: [] as Record<string, unknown>[],
+          summary: null as unknown,
           error: "The conversation could not be read",
         }))
-        : Promise.resolve({ messages: [], summary: null }),
+        : Promise.resolve({
+          messages: [] as Record<string, unknown>[],
+          summary: null as unknown,
+        }),
       job ? deps.store.logsForJob(job.id) : Promise.resolve([]),
       payLinkFor(deps, entry, budget),
       bankFeedSafe(deps, [bankFromOf(entry.inv)]),
@@ -713,6 +789,11 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
   const suggestion = entry.suggestion
     ? suggestionView(entry.suggestion)
     : templateDraftFor(entry, payLink);
+  const split = splitConversation(
+    conversation.messages ?? [],
+    payer,
+    partiesOf(job, rows),
+  );
   return {
     ok: true,
     version: DEBT_WS_VERSION,
@@ -729,14 +810,24 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
         site_address: job.site_address,
         site_suburb: job.site_suburb,
         ghl_contact_id: job.ghl_contact_id,
+        // Every share on the job: a shared fence has one per payer.
+        shares: sharesOf(job, book.history.get(String(job.id)) ?? [], rows),
       }
       : null,
+    payer_contact: payerView(payer),
     story: story.story ?? null,
     story_status: story.status ?? null,
     invoices,
     documents: documents.rows,
     documents_status: documents.status,
-    conversation,
+    conversation: {
+      ...conversation,
+      messages: mode === "all" ? split.all_messages : split.payer_messages,
+      mode,
+      all_job_messages_count: split.all_messages.length,
+      payer_messages_count: split.payer_messages.length,
+      reason: split.reason,
+    },
     notes: [...notes.values()].sort((a, b) =>
       String(b.created_at).localeCompare(String(a.created_at))
     ).map(noteView),
@@ -754,7 +845,15 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
       : bankCovers(bank, bankFromOf(entry.inv))
       ? "ok"
       : "partial",
-    contact: { ghl_contact_id: job?.ghl_contact_id ?? null, candidates },
+    // The PAYER's contact. Linking writes to the payer (a neighbour's job_contacts row).
+    contact: {
+      ghl_contact_id: payer.ghl_contact_id,
+      candidates,
+      linkable: !!job && (payer.is_primary || !!payer.contact_row_id),
+      payer_name: payer.name,
+    },
+    // Why Send is off for this payer (null: it can be texted once sending is on).
+    send_block: entry.kind === "account" ? null : payerSendBlock(entry),
     pay_link: payLink,
   };
 }
@@ -981,15 +1080,11 @@ async function guardedSend(deps: DebtWsDeps, input: SendInput) {
         : "Company invoices go on the Monday statement, not a text",
     );
   }
-  const contact = entry.job?.ghl_contact_id ?? null;
-  if (!entry.job || !contact) {
-    await refuse(
-      deps,
-      input,
-      "no_contact",
-      "The job has no GoHighLevel contact to text. Link the contact first",
-    );
-  }
+  // The text goes to the PAYER's own contact, never the job's: on a shared fence the
+  // job's contact is the primary client, who may not owe this invoice.
+  const block = payerSendBlock(entry);
+  if (block) await refuse(deps, input, block.code, block.message);
+  const contact = entry.payer.ghl_contact_id as string;
   if (isLadderStep(step) && entry.row.step_due?.step !== step) {
     await refuse(
       deps,
@@ -1444,17 +1539,140 @@ export async function debtWsLinkContact(
 ) {
   const body = asBody(rawBody);
   onlyKeys(body, ["job_id", "ghl_contact_id", "xero_invoice_id", "replace"]);
-  const jobId = uuidOf(body.job_id, "job_id");
   const contact = typeof body.ghl_contact_id === "string"
     ? body.ghl_contact_id.trim()
     : "";
   if (!GHL_ID.test(contact)) {
     bad("ghl_contact_id must be a GoHighLevel contact id");
   }
+  if (body.xero_invoice_id === undefined && body.job_id === undefined) {
+    bad("Send the xero_invoice_id whose payer is being linked");
+  }
+  const invoiceId = body.xero_invoice_id !== undefined
+    ? uuidOf(body.xero_invoice_id, "xero_invoice_id")
+    : null;
   const actor = await actorOf(deps, caller);
+
+  // With the invoice, the link goes to the invoice's PAYER: a neighbour's own
+  // job_contacts row on a shared fence, never the job (whose contact is the primary's).
+  let payer: PayerContact | null = null;
+  let jobId: string;
+  let jobRows: Awaited<ReturnType<DebtWsStore["jobContacts"]>> = [];
+  if (invoiceId) {
+    const { book, entry } = await oneEntry(deps, invoiceId);
+    if (!entry.job) {
+      throw new DebtWsError(
+        "This invoice has no job, so there is nowhere to link a contact",
+        409,
+        "no_job",
+      );
+    }
+    if (
+      body.job_id !== undefined &&
+      uuidOf(body.job_id, "job_id") !== entry.job.id
+    ) {
+      throw new DebtWsError(
+        "That invoice is not on that job",
+        409,
+        "job_mismatch",
+      );
+    }
+    jobId = entry.job.id;
+    payer = entry.payer;
+    jobRows = book.contacts.get(String(jobId)) ?? [];
+  } else {
+    jobId = uuidOf(body.job_id, "job_id");
+  }
   const [job] = await deps.store.jobs([jobId]);
   if (!job) {
     throw new DebtWsError("That job was not found", 404, "job_not_found");
+  }
+  if (!invoiceId) jobRows = await deps.store.jobContacts([jobId]);
+  const active = jobRows.filter((r) =>
+    !r.status || String(r.status).toLowerCase() === "active"
+  );
+  const ref = {
+    share_key: invoiceId ?? `job:${jobId}`,
+    ids: invoiceId ? [invoiceId] : [],
+    job_id: jobId,
+  };
+
+  if (payer && !payer.is_primary) {
+    if (!payer.contact_row_id) {
+      throw new DebtWsError(
+        `${payer.name} has no contact row on this job, so there is nowhere to link them. Add them to the job's contacts first`,
+        409,
+        "payer_not_on_job",
+      );
+    }
+    const row = active.find((r) => r.id === payer!.contact_row_id);
+    // One GoHighLevel contact is one person: never the primary's (or another payer's)
+    // contact on a neighbour's row.
+    const primaryIds = new Set(
+      [
+        job.ghl_contact_id,
+        ...active.filter((r) => r.is_primary === true).map((r) =>
+          r.ghl_contact_id
+        ),
+      ].filter((x): x is string => !!x),
+    );
+    const otherRow = active.find((r) =>
+      r.id !== payer!.contact_row_id && r.ghl_contact_id === contact
+    );
+    if (primaryIds.has(contact) || otherRow) {
+      throw new DebtWsError(
+        `That GoHighLevel contact belongs to ${
+          otherRow?.client_name?.replace(/\s+/g, " ").trim() ||
+          job.client_name || "another payer on this job"
+        }, not ${payer.name}. Pick ${payer.name}'s own contact`,
+        409,
+        "contact_belongs_to_other_payer",
+      );
+    }
+    const previous = row?.ghl_contact_id ?? null;
+    if (previous && previous !== contact && body.replace !== true) {
+      throw new DebtWsError(
+        `${payer.name} already has a different GoHighLevel contact. Send replace: true to change it`,
+        409,
+        "contact_already_linked",
+        { current_ghl_contact_id: previous },
+      );
+    }
+    await deps.store.setContactRowGhl(payer.contact_row_id, jobId, contact);
+    await log(deps, ref, actor, "link_contact", {
+      body:
+        `Linked GoHighLevel contact ${contact} to ${payer.name} (share ${payer.label})`,
+      meta: {
+        ghl_contact_id: contact,
+        previous,
+        target: "job_contacts",
+        job_contact_id: payer.contact_row_id,
+        label: payer.label,
+      },
+    });
+    return {
+      ok: true,
+      version: DEBT_WS_VERSION,
+      job_id: jobId,
+      ghl_contact_id: contact,
+      target: "job_contacts",
+      job_contact_id: payer.contact_row_id,
+    };
+  }
+
+  // The primary payer (or a job_id-only call): the job's own contact, as before. A
+  // neighbour's contact is never put on the job.
+  const neighbourRow = active.find((r) =>
+    r.is_primary !== true && r.ghl_contact_id === contact
+  );
+  if (neighbourRow) {
+    throw new DebtWsError(
+      `That GoHighLevel contact belongs to ${
+        neighbourRow.client_name?.replace(/\s+/g, " ").trim() || "a neighbour"
+      }, a neighbour on this job, not the job's client`,
+      409,
+      "contact_belongs_to_other_payer",
+    );
   }
   if (
     job.ghl_contact_id && job.ghl_contact_id !== contact &&
@@ -1468,28 +1686,20 @@ export async function debtWsLinkContact(
     );
   }
   await deps.store.setJobContact(jobId, contact);
-  const invoiceId = body.xero_invoice_id
-    ? uuidOf(body.xero_invoice_id, "xero_invoice_id")
-    : null;
-  await log(
-    deps,
-    {
-      share_key: invoiceId ?? `job:${jobId}`,
-      ids: invoiceId ? [invoiceId] : [],
-      job_id: jobId,
+  await log(deps, ref, actor, "link_contact", {
+    body: `Linked GoHighLevel contact ${contact}`,
+    meta: {
+      ghl_contact_id: contact,
+      previous: job.ghl_contact_id ?? null,
+      target: "jobs",
     },
-    actor,
-    "link_contact",
-    {
-      body: `Linked GoHighLevel contact ${contact}`,
-      meta: { ghl_contact_id: contact, previous: job.ghl_contact_id ?? null },
-    },
-  );
+  });
   return {
     ok: true,
     version: DEBT_WS_VERSION,
     job_id: jobId,
     ghl_contact_id: contact,
+    target: "jobs",
   };
 }
 
@@ -2342,12 +2552,22 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
         story: null,
         status: { ok: false, state: "failed" },
       })),
-      deps.conversation(entry.job!.id, DEBT_WS_AGENT_MESSAGES).catch(() => ({
+      // Read wider than the bundle keeps: only the payer's own messages are handed over.
+      deps.conversation(
+        entry.job!.id,
+        DEBT_WS_AGENT_MESSAGES * 2,
+        extraContactIds(entry),
+      ).catch(() => ({
         messages: [] as Record<string, unknown>[],
       })),
     ]);
     const payLink = await payLinkFor(deps, entry, budget);
-    const messages = [...(conversation.messages ?? [])].slice(
+    const split = splitConversation(
+      conversation.messages ?? [],
+      entry.payer,
+      partiesOf(entry.job, book.contacts.get(String(entry.job!.id)) ?? []),
+    );
+    const messages = [...split.payer_messages].slice(
       0,
       DEBT_WS_AGENT_MESSAGES,
     ).map(agentMessage).sort((a, b) =>
@@ -2356,6 +2576,10 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
     const draft = templateDraftFor(entry, payLink);
     items.push({
       row: entry.row,
+      // Who owes it: the agent writes to this person, by this name.
+      payer_contact: payerView(entry.payer),
+      conversation_reason: split.reason,
+      send_block: payerSendBlock(entry),
       template_draft: draft
         ? {
           step: draft.step,

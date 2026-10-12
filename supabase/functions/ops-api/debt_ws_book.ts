@@ -47,6 +47,11 @@ import {
   type WsInvoice,
   type WsJob,
 } from "./debt_ws_rules.ts";
+import {
+  type PayerContact,
+  resolvePayer,
+  type WsJobContact,
+} from "./debt_ws_payer.ts";
 import type {
   DebtWsSettings,
   DebtWsStore,
@@ -80,7 +85,10 @@ export interface OverviewRow {
   next_step: { step: string; date: string } | null;
   paused_until: string | null;
   suggestion: { id: string | null; source: string; status: string } | null;
+  /** The PAYER (not the job) has a GoHighLevel contact. */
   ghl_linked: boolean;
+  /** Who owes this invoice, with their own contact (debt_ws_payer.ts). */
+  payer_contact: PayerContact;
   last_touch: { kind: string; at: string; label: string } | null;
   on_jan_list: boolean;
   // Additions beyond the spec shape (a superset; the screen may ignore them).
@@ -115,6 +123,8 @@ export interface BookEntry {
   suggestion: WsSuggestion | null;
   flags: WsSuggestion[];
   companyKey: string | null;
+  /** Who owes this invoice: their own name, phone, email and GoHighLevel contact. */
+  payer: PayerContact;
   row: OverviewRow;
 }
 
@@ -138,6 +148,8 @@ export interface Book {
   goAhead: WsInvoice[];
   jobs: Map<string, WsJob>;
   history: Map<string, WsInvoice[]>;
+  /** Active job_contacts rows (the payers on shared jobs), by job id. */
+  contacts: Map<string, WsJobContact[]>;
   janVisitDate: string;
   janRow: WsJanListRow | null;
 }
@@ -261,12 +273,14 @@ export async function loadBook(
 
   const jobIds = uniq(invoices.map((i) => i.job_id));
   const janVisitDate = nextMonday(today);
-  const [jobRows, historyRows, exits, janRow] = await Promise.all([
+  const [jobRows, historyRows, exits, janRow, contactRows] = await Promise.all([
     jobIds.length ? store.jobs(jobIds) : Promise.resolve([]),
     jobIds.length ? store.jobInvoices(jobIds) : Promise.resolve([]),
     jobIds.length ? store.rectificationExits(jobIds) : Promise.resolve([]),
     store.janList(janVisitDate),
+    jobIds.length ? store.jobContacts(jobIds) : Promise.resolve([]),
   ]);
+  const contacts = groupBy(contactRows, (c) => String(c.job_id));
   const jobs = new Map(jobRows.map((j) => [String(j.id), j]));
   const history = groupBy(historyRows, (i) => i.job_id);
   const exitByJob = new Map(
@@ -376,6 +390,12 @@ export async function loadBook(
     const companyKey = cls.lane === "account"
       ? companyKeyOf(inv, settings.company_aliases)
       : null;
+    const payerContact = resolvePayer(
+      inv,
+      job,
+      job ? contacts.get(String(job.id)) ?? [] : [],
+      cls.lane,
+    );
     const templateReady = !!ladder.step_due && isTextStep(ladder.step_due.step);
     const row: OverviewRow = {
       share_key: key,
@@ -403,7 +423,8 @@ export async function loadBook(
         : templateReady
         ? { id: null, source: "template", status: "pending" }
         : null,
-      ghl_linked: !!job?.ghl_contact_id,
+      ghl_linked: !!payerContact.ghl_contact_id,
+      payer_contact: payerContact,
       last_touch: lastTouch(shareLogs),
       on_jan_list: onJanList({
         kind,
@@ -442,6 +463,7 @@ export async function loadBook(
       suggestion,
       flags,
       companyKey,
+      payer: payerContact,
       row,
     });
   }
@@ -455,6 +477,7 @@ export async function loadBook(
     goAhead,
     jobs,
     history,
+    contacts,
     janVisitDate,
     janRow,
   };
@@ -717,7 +740,8 @@ export function janItemsLive(book: Book): JanListItem[] {
         k === 0 ||
         !String(all[0]).toLowerCase().includes(String(part).toLowerCase())
       ).join(", ") || null,
-    phone: e.job?.client_phone ?? null,
+    // The payer's own phone (a neighbour's, on a shared fence), never the job's.
+    phone: e.payer.phone ?? null,
     amount: e.row.amount_due,
     history: historyLine(e.logs),
   }));
@@ -731,7 +755,7 @@ export function possiblePaymentsFor(
 ): PossiblePayment[] {
   return possiblePayments(
     entry.inv,
-    [entry.inv.contact_name, entry.job?.client_name],
+    [entry.inv.contact_name, entry.payer.name],
     transactions,
   );
 }
