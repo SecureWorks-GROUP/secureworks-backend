@@ -10,7 +10,7 @@ BEGIN
   END IF;
   IF to_regclass('public.work_order_variations') IS NOT NULL
      OR to_regclass('public.work_order_settings') IS NOT NULL
-     OR to_regprocedure('public.approve_job_work_order(uuid, uuid, text)') IS NOT NULL
+     OR to_regprocedure('public.approve_job_work_order(uuid, uuid, text, timestamptz)') IS NOT NULL
      OR to_regprocedure('public.carry_work_order_variations(uuid, uuid)') IS NOT NULL THEN
     RAISE EXCEPTION 'rollback: job work order tables and functions must be removed';
   END IF;

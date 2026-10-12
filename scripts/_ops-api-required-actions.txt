@@ -318,3 +318,4 @@ job_work_order # probe=bounded-refusal probe-args=job_id=__deploy_probe__
 approve_work_order # probe=source-only
 backfill_job_work_orders # probe=source-only
 resend_work_order_variation_emails # probe=source-only
+correct_work_order_variation # probe=source-only

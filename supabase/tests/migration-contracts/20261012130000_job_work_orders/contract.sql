@@ -86,7 +86,7 @@ BEGIN
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job';
 
   BEGIN
-    PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+    PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session', (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
     RAISE EXCEPTION 'contract: a draft with no agreed labour must not approve';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -96,7 +96,7 @@ BEGIN
     WHERE id = v_wo;
 
   BEGIN
-    PERFORM public.approve_job_work_order(v_wo, 'b353f39a-b3cc-495d-a016-50ebf4a8497d', 'session');
+    PERFORM public.approve_job_work_order(v_wo, 'b353f39a-b3cc-495d-a016-50ebf4a8497d', 'session', (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
     RAISE EXCEPTION 'contract: another ops_manager must not approve';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
@@ -107,7 +107,7 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 
-  v_row := public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'terminal');
+  v_row := public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'terminal', (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
   IF v_row->>'status' <> 'approved' OR v_row->>'approved_via' <> 'terminal'
      OR length(v_row->>'sealed_content_hash') <> 64 THEN
     RAISE EXCEPTION 'contract: Shaun''s approval must seal the draft with a sha256 content hash';
@@ -145,10 +145,54 @@ BEGIN
     RAISE EXCEPTION 'contract: ensure must return the approved work order, not open another';
   END IF;
   BEGIN
-    PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+    PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session', (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
     RAISE EXCEPTION 'contract: an approved work order must not be approved again';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
+END $$;
+
+-- 4b. Approval seals only what the approver read. Shaun reads the draft at
+-- 2,000, someone else saves 3,000, and the approval that carries the stamp of
+-- the 2,000 read (or no stamp) is refused: nothing is sealed.
+DO $$
+DECLARE
+  v_job uuid := gen_random_uuid();
+  v_wo uuid;
+  v_read_at timestamptz;
+  v_row jsonb;
+BEGIN
+  INSERT INTO public.jobs (id, org_id, type, status, job_number)
+  VALUES (v_job, '00000000-0000-0000-0000-000000000001', 'fencing', 'accepted', 'WOC-S-1');
+  SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job';
+  UPDATE public.work_orders SET agreed_labour_ex = 2000, special_instructions = 'Front run' WHERE id = v_wo;
+  SELECT updated_at INTO v_read_at FROM public.work_orders WHERE id = v_wo;
+
+  UPDATE public.work_orders SET agreed_labour_ex = 3000 WHERE id = v_wo;
+  IF (SELECT updated_at FROM public.work_orders WHERE id = v_wo) IS NOT DISTINCT FROM v_read_at THEN
+    RAISE EXCEPTION 'contract: saving a draft must move its updated_at';
+  END IF;
+
+  BEGIN
+    PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session', v_read_at);
+    RAISE EXCEPTION 'contract: an approval carrying the stamp of an earlier read must be refused';
+  EXCEPTION WHEN SQLSTATE 'WO409' THEN NULL;
+  END;
+  BEGIN
+    PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session', NULL);
+    RAISE EXCEPTION 'contract: an approval with no stamp must be refused';
+  EXCEPTION WHEN SQLSTATE 'WO409' THEN NULL;
+  END;
+  IF (SELECT status FROM public.work_orders WHERE id = v_wo) <> 'draft'
+     OR (SELECT approved_at FROM public.work_orders WHERE id = v_wo) IS NOT NULL
+     OR (SELECT sealed_content_hash FROM public.work_orders WHERE id = v_wo) IS NOT NULL THEN
+    RAISE EXCEPTION 'contract: a refused approval must seal nothing';
+  END IF;
+
+  v_row := public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session',
+    (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
+  IF v_row->>'status' <> 'approved' OR (v_row->>'agreed_labour_ex')::numeric <> 3000 THEN
+    RAISE EXCEPTION 'contract: an approval carrying the stamp of the draft as it stands must seal it';
+  END IF;
 END $$;
 
 -- 5. The shared lists: which job statuses open a draft, and which trade
@@ -184,7 +228,7 @@ BEGIN
     (v_draft_job, '00000000-0000-0000-0000-000000000001', 'patio', 'scheduled', 'WOC-L-2');
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job';
   UPDATE public.work_orders SET agreed_labour_ex = 1000, special_instructions = 'Insulated roof' WHERE id = v_wo;
-  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session', (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
 
   -- The money split every new trade invoice carries (20260918120000).
   INSERT INTO public.trade_invoices (id, org_id, user_id, status, subtotal_ex, gst, total_inc,
@@ -270,7 +314,7 @@ BEGIN
 
   v_wo := public.ensure_job_work_order_draft(v_job, 'backfill');
   UPDATE public.work_orders SET agreed_labour_ex = 2000, special_instructions = 'Finish the rear run' WHERE id = v_wo;
-  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session', (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
 
   IF (SELECT COALESCE(sum(line_total_ex), 0) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 2360
      OR (SELECT count(*) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 4 THEN
@@ -324,7 +368,7 @@ BEGIN
     (v_other, '00000000-0000-0000-0000-000000000001', 'fencing', 'scheduled', 'WOC-V-2');
   SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job';
   UPDATE public.work_orders SET agreed_labour_ex = 1000, special_instructions = 'Front run' WHERE id = v_wo;
-  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session', (SELECT updated_at FROM public.work_orders WHERE id = v_wo));
 
   v_header := jsonb_build_object(
     'org_id', '00000000-0000-0000-0000-000000000001', 'user_id', 'aaaaaaaa-0000-0000-0000-00000000000a',
@@ -430,7 +474,7 @@ BEGIN
   IF has_table_privilege('anon', 'public.work_order_settings', 'SELECT')
      OR has_table_privilege('authenticated', 'public.work_order_variations', 'SELECT')
      OR has_table_privilege('authenticated', 'public.work_order_variation_emails', 'SELECT')
-     OR has_function_privilege('authenticated', 'public.approve_job_work_order(uuid, uuid, text)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.approve_job_work_order(uuid, uuid, text, timestamptz)', 'EXECUTE')
      OR has_function_privilege('anon', 'public.backfill_job_work_order_drafts(boolean)', 'EXECUTE')
      OR NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'work_orders'
                     AND policyname = 'work_orders_job_kind_hidden_from_clients' AND permissive = 'RESTRICTIVE'
