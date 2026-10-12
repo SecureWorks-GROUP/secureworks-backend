@@ -1688,10 +1688,12 @@ export async function _findLiveTradeInvoiceForWeek(
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
 
+// `apikey` and `x-client-info` are what a browser Supabase client adds to a
+// function call; without them here its preflight is refused before any action runs.
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, apikey, x-client-info',
 }
 
 export class ApiError extends Error {

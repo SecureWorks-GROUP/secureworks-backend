@@ -18,8 +18,12 @@ its own server credential).
 - Sign in with the existing Supabase staff login (`supabase.auth.signInWithPassword`
   or the existing magic link). No service key, shared key or `SW_API_KEY` ever
   goes to the browser.
-- Every call: `Authorization: Bearer <session.access_token>` and
-  `apikey: <project anon/publishable key>`.
+- Every call: `Authorization: Bearer <session.access_token>`. The
+  `apikey: <project anon/publishable key>` header is optional: ops-api allows it
+  (and `x-client-info`) in its CORS preflight, so a plain `fetch` and
+  `supabase.functions.invoke` both work from the browser. Send no other custom
+  header; the preflight allows only `Content-Type`, `Authorization`,
+  `x-api-key`, `apikey` and `x-client-info`.
 - Base URL: `https://<project>.supabase.co/functions/v1/ops-api?action=<name>`.
 - Reads are `GET` with query params. Writes are `POST` with a JSON body.
 - CORS is open (`*`), so the app can be served from any origin, including a
