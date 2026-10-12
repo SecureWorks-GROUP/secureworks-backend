@@ -251,6 +251,18 @@ under the current text-matching behaviour. Widening it to the shared PO_RE
 boundaries is a fate-moving change that needs its own replay revalidation.
 Both halves are pinned in `makesafe_bwcwa6781_filename_po_fixture_test.ts`.
 
+Ambrose Construct Group (slug `acg`, scope `ACG`, intake adapter `ambrose`)
+numbers a PO `<8-digit job>-<2-digit seq>`, and the digits-only PO grammar
+would keep only the job number, merging every PO on one job. So, only when
+the company is `acg`, `normaliseAmbroseIdentityText` rewrites each
+PO-labelled 8-2 token to `ACG-<job>PO-<job><seq>` before any scan: claim
+`ACG-<job>`, PO `PO-<job><seq>`, key `ACG:PO-<job><seq>`. Do not widen it to
+other builders or relax the exact 8-2 shape. Ambrose mail goes to admin@ and
+marnin@, not the ses@ intake mailbox, so nothing reaches intake until it is
+redirected there (a forward becomes own-domain chatter). Ambrose has no SES
+family-matrix row, so pack and invoice prep stay refused. Tests:
+`makesafe_ambrose_intake_test.ts`.
+
 ## Never Select `scope_json` In A List/Feed Query
 
 `jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small
