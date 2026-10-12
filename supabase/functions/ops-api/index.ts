@@ -272,6 +272,17 @@ import {
   fencingStageTruthFields,
 } from './fencing_stage_engine_v1.ts'
 import { isFencingStageTruthRequested } from './fencing_stage_recipe_v1.ts'
+import {
+  DISPATCH_LIST_PROJECTION,
+  DISPATCH_LIST_STATUSES,
+  DISPATCH_LISTED_WORK_FILTER,
+  dispatchJobDescription,
+  dispatchValueIncGst,
+  dispatchWorkType,
+  isDispatchListRequested,
+  projectDispatchJobNote,
+  stripDispatchListAliases,
+} from './dispatch_job_list.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -6467,6 +6478,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
         return json(await jobDetail(client, jid, { slim }))
       }
+      // Staff-only by the front door's default (not on the trade or routine lists).
+      case 'job_notes':
+        return json(await jobNotes(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -15446,6 +15460,9 @@ async function pipeline(client: any, params: URLSearchParams) {
   // Opt-in fencing stage-truth diagnostic. Default path (flag absent) must
   // stay byte-identical: same selects, same enrichment, same row keys.
   const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
+  // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
+  // absent: nothing below changes for any existing caller.
+  const dispatchList = isDispatchListRequested(params)
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
@@ -15462,6 +15479,8 @@ async function pipeline(client: any, params: URLSearchParams) {
       .or('job_number.not.is.null,status.eq.draft')
     if (statusFilter) {
       scoped = scoped.eq('status', statusFilter)
+    } else if (dispatchList) {
+      scoped = scoped.in('status', DISPATCH_LIST_STATUSES)
     } else {
       // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
       scoped = scoped.in('status', [
@@ -15473,18 +15492,48 @@ async function pipeline(client: any, params: URLSearchParams) {
     }
     if (typeFilter === 'repair') scoped = scoped.in('id', repairJobIds || [])
     else if (typeFilter) scoped = scoped.eq('type', typeFilter)
+    // Make-safe jobs are off the Dispatch list and come back only for a search;
+    // a repair-family card typed makesafe is a repair and stays on it.
+    else if (dispatchList && !search) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
     return scoped
   }
 
   // The projection sits exactly where `pricing_json` used to, so that stripping the
   // aliases below restores the previous key order — the response stays byte-identical.
   const repairProjection = typeFilter === 'repair' ? ', metadata' : ''
-  const query = applyJobFilters(client.from('jobs')
+  // Appended last and stripped again below, like the pricing aliases.
+  const dispatchProjection = dispatchList ? ', ' + DISPATCH_LIST_PROJECTION.join(', ') : ''
+  const buildJobsQuery = () => applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
       ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required' +
-      repairProjection))
+      repairProjection + dispatchProjection))
     .order('updated_at', { ascending: false })
+  // Test records and the search box read only raw job columns, so one rule
+  // serves two places: every caller applies it after enrichment, as before, and
+  // the Dispatch list also applies it straight after the read, so the thirteen
+  // enrichment reads run for matching jobs only.
+  const isListedPipelineRow = (j: any) => {
+    // Filter out test records
+    if (isTestRecord(j.client_name)) return false
+    if (!search) return true
+    const s = search.toLowerCase()
+    return (j.client_name || '').toLowerCase().includes(s)
+      || (j.site_suburb || '').toLowerCase().includes(s)
+      || (j.site_address || '').toLowerCase().includes(s)
+      || (j.job_number || '').toLowerCase().includes(s)
+  }
+  // The plain read stops at PostgREST's 1000-row ceiling (existing behaviour,
+  // left alone). The Dispatch list must show every job, so it pages.
+  const query = dispatchList
+    ? _fetchAllRows<any>(buildJobsQuery, 'pipeline.dispatch_jobs', 'id').then(
+      (data) => ({
+        data: typeFilter === 'repair' ? data : data.filter(isListedPipelineRow),
+        error: null,
+      }),
+      (error) => ({ data: null, error }),
+    )
+    : buildJobsQuery()
 
   let malformedPricingQuery = applyJobFilters(client.from('jobs').select('id, pricing_json'))
     .eq('type', 'fencing')
@@ -15765,7 +15814,9 @@ async function pipeline(client: any, params: URLSearchParams) {
     // Strip the pricing projection from the response — value/neighbourCount already
     // extracted. Previously this dropped the whole `pricing_json` blob; the aliases
     // occupy its slot in the select, so the surviving key order is unchanged.
-    const jLite = stripPipelinePricingAliases(j)
+    const jLite = dispatchList
+      ? stripDispatchListAliases(stripPipelinePricingAliases(j))
+      : stripPipelinePricingAliases(j)
     const pipelineRow = {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,
@@ -15787,6 +15838,13 @@ async function pipeline(client: any, params: URLSearchParams) {
       deposit_paid: invoiceMap[j.id]?.deposit_paid || false,
       has_final_invoice: invoiceMap[j.id]?.has_final || false,
       final_paid: invoiceMap[j.id]?.final_paid || false,
+      ...(dispatchList
+        ? {
+          description: dispatchJobDescription(j),
+          value_inc_gst: dispatchValueIncGst(j),
+          work_type: dispatchWorkType(j),
+        }
+        : {}),
     }
     if (stageTruth && stageTruthRows) {
       Object.assign(
@@ -15809,16 +15867,7 @@ async function pipeline(client: any, params: URLSearchParams) {
         repairDetails?.details.get(String(j.id)) || null,
       )
       : pipelineRow
-  }).filter((j: any) => {
-    // Filter out test records
-    if (isTestRecord(j.client_name)) return false
-    if (!search) return true
-    const s = search.toLowerCase()
-    return (j.client_name || '').toLowerCase().includes(s)
-      || (j.site_suburb || '').toLowerCase().includes(s)
-      || (j.site_address || '').toLowerCase().includes(s)
-      || (j.job_number || '').toLowerCase().includes(s)
-  })
+  }).filter(isListedPipelineRow)
 
   // Cap 1A follow-up fix (2026-05-04): pre-allocate every active canonical
   // status as its own column key. The widened .in('status', [...]) filter
@@ -15869,6 +15918,42 @@ async function pipeline(client: any, params: URLSearchParams) {
 }
 
 export const _pipelineForTest = pipeline
+
+// Every note on a job, newest first (docs/dispatch-slice-1-read-contract.md).
+// job_detail.events is the newest 50 events of every kind, so a busy job's older
+// notes fall outside it. A pure read: none of job_detail's annotation side effect.
+// System markers are left out by the rule comms_notes_count uses, so the list
+// and that count agree.
+async function jobNotes(client: any, jobRef: string) {
+  const ref = String(jobRef || '').trim()
+  const isJobNumber = /^SW[A-Z]+-\d+$/i.test(ref)
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)
+  if (!isJobNumber && !isUuid) throw new ApiError('jobId required', 400)
+
+  // An unknown job is a 404, never an empty list: "no notes" must mean the
+  // job was found and has none.
+  const jobLookup = client.from('jobs').select('id').eq('org_id', DEFAULT_ORG_ID)
+  const { data: found, error: jobError } = await (isJobNumber
+    ? jobLookup.ilike('job_number', ref)
+    : jobLookup.eq('id', ref)).limit(1)
+  if (jobError) throw jobError
+  const jobId = found?.[0]?.id
+  if (!jobId) throw new ApiError(`Job ${ref} not found`, 404)
+
+  const rows = await _fetchAllRows<any>(
+    () => client.from('job_events')
+      .select('id, user_id, detail_json, created_at, users:user_id(name)')
+      .eq('job_id', jobId)
+      .eq('event_type', 'note')
+      .order('created_at', { ascending: false }),
+    'job_notes',
+    'id',
+  )
+  const notes = rows.map(projectDispatchJobNote).filter((note) => !noteIsSystemMarker(note.text))
+  return { job_id: jobId, notes, total: notes.length }
+}
+
+export const _jobNotesForTest = jobNotes
 
 async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
   if (!jobId) throw new Error('jobId required')

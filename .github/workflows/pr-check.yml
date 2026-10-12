@@ -291,6 +291,15 @@ jobs:
             supabase/functions/ops-api/debt_autotexts_off_test.ts \
             supabase/functions/daily-digest/deposit_autotexts_off_test.ts
 
+      # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
+      # stay exactly as it was, and the list must never drop a job past the
+      # 1000-row ceiling or select the whole scope blob. Same --no-check reason
+      # as above.
+      - name: Test the Dispatch list and job notes reads
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/dispatch_job_list_test.ts
+
       - name: Test edge deploy workflow classification
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh
