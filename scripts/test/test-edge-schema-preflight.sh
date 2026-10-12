@@ -858,8 +858,12 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261006032000", "context_scorecard"),
                       # Debt Workshop: the debt_ws_ tables and claim indexes.
                       ("20261008170000", "debt_workshop"),
+                      # job overview v1: the job_overview and request_job_story doors.
+                      ("20261009100000", "context_job_story_text"),
                       # quote builder actions (quote_builder_*).
-                      ("20261009120000", "quote_builder_versions")]:
+                      ("20261009120000", "quote_builder_versions"),
+                      # deterministic intake: the ambrose adapter's case inserts.
+                      ("20261012043000", "makesafe_intake_cases_admit_ambrose_adapter")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

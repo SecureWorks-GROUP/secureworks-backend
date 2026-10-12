@@ -599,6 +599,10 @@ ops-api|supabase/migrations/20261006014000_context_job_story.sql|function|contex
 ops-api|supabase/migrations/20261006014000_context_job_story.sql|function|context_story_scorecard_jobs
 ops-api|supabase/migrations/20261006032000_context_scorecard.sql|function|context_scorecard
 ops-api|supabase/migrations/20261006032000_context_scorecard.sql|function|context_scorecard_jobs
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|table|context_job_story_texts
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|table|context_job_story_requests
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|function|context_job_story_text_get
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|function|context_job_story_request
 ops-api|supabase/migrations/20261002120000_job_parties_foundation.sql|table|job_site_links
 context-document-text|supabase/migrations/20261005210000_context_document_text.sql|table|context_document_texts
 context-document-text|supabase/migrations/20261005210000_context_document_text.sql|function|record_context_document_text
@@ -652,3 +656,8 @@ ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quo
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.issued_at
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|constraint|quote_builder_versions_unique_chain_version
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|trigger|quote_builder_versions.trg_quote_builder_versions_guard
+
+# The deterministic intake stamps each case with its adapter id; the Ambrose
+# adapter is refused on every case insert until this migration admits it. The
+# constraint name is unchanged, so the ledger version is what proves it landed.
+ops-api|supabase/migrations/20261012043000_makesafe_intake_cases_admit_ambrose_adapter.sql|constraint|makesafe_intake_cases_deterministic_shapes_check
