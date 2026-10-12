@@ -14,7 +14,9 @@ import {
   distinctBuilderInstructionKeys,
   extractBuilderWorkOrderIdentity,
   hasUnparseablePoRemainder,
+  isAmbroseCompanySlug,
   isSelfGeneratedMakesafeWorkOrder,
+  normaliseAmbroseIdentityText,
   parseWorkOrderReferenceFromEvidence,
 } from "./makesafe_builder_work_order_identity.ts";
 
@@ -170,7 +172,24 @@ export function correlateIntakeApprovalIdentity(input: {
     requestingCompanySlug: input.requesting_company_slug,
     family: input.family,
   };
-  const source = sourceIdentity(input);
+  // Ambrose writes its purchase orders as <job>-<seq>, which the shared token
+  // scanners below cannot read; give them the composite form first. Every
+  // other builder's evidence passes through untouched.
+  const evidence = isAmbroseCompanySlug(input.requesting_company_slug)
+    ? {
+      ...input,
+      approved_external_ref: normaliseAmbroseIdentityText(
+        input.approved_external_ref,
+      ) ?? null,
+      attachment_names: input.attachment_names.map((name) =>
+        normaliseAmbroseIdentityText(name)
+      ),
+      document_texts: input.document_texts?.map((text) =>
+        normaliseAmbroseIdentityText(text)
+      ),
+    }
+    : input;
+  const source = sourceIdentity(evidence);
   const typed = typedIdentity(input.extraction);
   const instructionKeys = new Set(builderInstructionKeysForCard({
     requestingCompanySlug: input.requesting_company_slug,

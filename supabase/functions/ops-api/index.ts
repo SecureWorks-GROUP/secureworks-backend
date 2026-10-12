@@ -1251,6 +1251,7 @@ import {
 // the approve-intake dup-check compares NORMALISED refs (AJBR 67200 == AJBR-67200
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -52882,8 +52883,6 @@ export const _tradeLabourBudgetForTest = tradeLabourBudget
 // JOB COMPLETION PACKAGE
 // ════════════════════════════════════════════════════════════
 
-const GOOGLE_REVIEW_URL = 'https://g.page/r/PLACEHOLDER/review' // TODO: replace with actual Google review link
-
 // ── complete_job: mark job complete + GHL stage sync ──
 async function completeJob(client: any, body: any) {
   const jId = body.job_id || body.jobId
@@ -53466,6 +53465,12 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 }
 
 // ── send_review_request: SMS client with Google review link ──
+function reviewRequestMessage(clientName?: string | null): string {
+  return `Hi ${clientName?.split(' ')[0] || 'there'}, thanks for choosing SecureWorks! We'd love to hear about your experience: ${GOOGLE_REVIEW_URL}\n\nYour feedback means the world to us 🙏`
+}
+export const _reviewRequestMessageForTest = reviewRequestMessage
+export const _googleReviewUrlForTest = GOOGLE_REVIEW_URL
+
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
@@ -53485,7 +53490,7 @@ async function sendReviewRequest(client: any, body: any) {
 
   if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
 
-  const smsMessage = `Hi ${job.client_name?.split(' ')[0] || 'there'}, thanks for choosing SecureWorks! We'd love to hear about your experience: ${GOOGLE_REVIEW_URL}\n\nYour feedback means the world to us 🙏`
+  const smsMessage = reviewRequestMessage(job.client_name)
 
   const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
   const smsResp = await fetch(ghlUrl, {
