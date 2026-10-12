@@ -857,7 +857,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # W11: the context_scorecard door (rows 1 to 14, per job).
                       ("20261006032000", "context_scorecard"),
                       # quote builder actions (quote_builder_*).
-                      ("20261009120000", "quote_builder_versions")]:
+                      ("20261009120000", "quote_builder_versions"),
+                      # deterministic intake: the ambrose adapter's case inserts.
+                      ("20261012043000", "makesafe_intake_cases_admit_ambrose_adapter")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
