@@ -25,11 +25,10 @@ backfill: `supabase/migrations/20261012090000_job_work_orders.sql` (contract
   figure. The figures live on the work order row, which trades cannot read.
 - The crew work order readers (`job_detail.work_orders`, the old
   `list_work_orders`, `ops_summary`, the dossier, the invoice context,
-  `reporting-api`, and the trade's `trade_job_detail.work_orders`) leave the
-  job work order out; it is read through `job_work_order`, `list_work_orders`
-  with `kind=job`, and `job_detail.job_work_order`. One reader counts it:
-  `pipeline`'s `wo_count` (the "Work order exists" readiness check) counts crew
-  work orders plus an approved job work order, never a draft one. Known
+  `reporting-api`, the trade's `trade_job_detail.work_orders`, and
+  `pipeline`'s `wo_count`, the "Work order exists" readiness check) leave the
+  job work order out, draft or approved; it is read through `job_work_order`,
+  `list_work_orders` with `kind=job`, and `job_detail.job_work_order`. Known
   follow-up: the context job record SQL (`20261011130000`) still lists it as a
   work order line in the job story.
 - `jobs.work_order_id` points at the job's work order (the draft, then the
