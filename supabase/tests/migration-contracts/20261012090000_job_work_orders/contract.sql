@@ -1,7 +1,8 @@
 -- Contract for 20261012090000_job_work_orders.sql: one work order per
 -- fencing / patio job, draft then approved (sealed) by the named approver,
--- labour stamped against it at invoice submit and at approval, backfill
--- switched off.
+-- invoice lines stamped against it at submit and at approval (labour decided
+-- by the cost lane), variations carried across a replaced draft invoice,
+-- backfill switched off.
 
 BEGIN;
 
@@ -60,6 +61,11 @@ BEGIN
      OR (SELECT origin FROM public.work_orders WHERE id = v_wo) <> 'job_approved' THEN
     RAISE EXCEPTION 'contract: an accepted patio job must open one draft referenced by jobs.work_order_id';
   END IF;
+  BEGIN
+    UPDATE public.work_orders SET status = 'cancelled' WHERE id = v_wo;
+    RAISE EXCEPTION 'contract: a job work order is a draft or approved, never cancelled';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
 
   UPDATE public.jobs SET status = 'scheduled' WHERE id = v_fence;
   UPDATE public.jobs SET status = 'in_progress' WHERE id = v_fence;
@@ -145,29 +151,26 @@ BEGIN
   END;
 END $$;
 
--- 5. The shared lists are exactly the ones ops-api/job_work_orders.ts mirrors
--- (JOB_WORK_ORDER_OPEN_STATUSES, JOB_WORK_ORDER_BILLED_INVOICE_STATUSES,
--- JOB_WORK_ORDER_EXCLUDED_LINE_TYPES).
+-- 5. The shared lists: which job statuses open a draft, and which trade
+-- invoice statuses count as billed (ops-api/job_work_orders.ts mirrors the
+-- second as JOB_WORK_ORDER_BILLED_INVOICE_STATUSES).
 DO $$
 BEGIN
   IF public.job_work_order_open_statuses() IS DISTINCT FROM ARRAY[
        'accepted', 'partially_accepted', 'approvals', 'deposit', 'awaiting_deposit',
        'processing', 'order_materials', 'awaiting_supplier', 'order_confirmed',
        'schedule_install', 'scheduled', 'in_progress', 'rectification']::text[] THEN
-    RAISE EXCEPTION 'contract: job_work_order_open_statuses() drifted from the list ops-api mirrors';
+    RAISE EXCEPTION 'contract: job_work_order_open_statuses() changed';
   END IF;
   IF public.job_work_order_billed_invoice_statuses() IS DISTINCT FROM ARRAY[
        'pending_acknowledgment', 'queried', 'acknowledged', 'pending_ops_review',
        'approved', 'pushed_to_xero', 'paid']::text[] THEN
     RAISE EXCEPTION 'contract: job_work_order_billed_invoice_statuses() drifted from the list ops-api mirrors';
   END IF;
-  IF public.job_work_order_excluded_line_types() IS DISTINCT FROM ARRAY[
-       'commission', 'final_payout_deduction']::text[] THEN
-    RAISE EXCEPTION 'contract: job_work_order_excluded_line_types() drifted from the list ops-api mirrors';
-  END IF;
 END $$;
 
--- 6. Labour links to the approved work order at submit, never to a draft.
+-- 6. Invoice lines link to the approved work order at submit, never to a
+-- draft. Only the labour cost lane (v_trade_charge_resolved) is labour.
 DO $$
 DECLARE
   v_job uuid := gen_random_uuid();
@@ -196,8 +199,14 @@ BEGIN
     (v_inv, v_draft_job, 'labour', 300),
     (v_draft_inv, v_job, 'labour', 250);
 
-  IF (SELECT count(*) FROM public.trade_invoice_lines WHERE trade_invoice_id = v_inv AND job_work_order_id = v_wo) <> 1 THEN
-    RAISE EXCEPTION 'contract: a submitted labour line must link to the approved work order (and commission must not)';
+  IF (SELECT count(*) FROM public.trade_invoice_lines WHERE trade_invoice_id = v_inv AND job_work_order_id = v_wo) <> 2 THEN
+    RAISE EXCEPTION 'contract: every submitted line on the job must link to the approved work order';
+  END IF;
+  IF (SELECT COALESCE(sum(r.line_total_ex), 0)
+      FROM public.v_trade_charge_resolved r
+      JOIN public.trade_invoice_lines til ON til.id = r.line_id
+      WHERE til.job_work_order_id = v_wo AND r.cost_lane = 'labour') <> 400 THEN
+    RAISE EXCEPTION 'contract: commission linked to the work order must not be in the labour cost lane';
   END IF;
   IF EXISTS (SELECT 1 FROM public.trade_invoice_lines WHERE job_id = v_draft_job AND job_work_order_id IS NOT NULL) THEN
     RAISE EXCEPTION 'contract: labour on a job whose work order is only a draft must not link';
@@ -213,9 +222,11 @@ BEGIN
 END $$;
 
 -- 6b. A job invoiced before its work order is approved (the backfilled,
--- mid-install job): approving links the labour already billed on the job and
--- the variation already reported on it. Commission, a draft invoice, a
--- rejected invoice and another job's labour stay unlinked.
+-- mid-install job): approving links the lines already billed on the job and
+-- the variation already reported on it. A draft invoice, a rejected invoice
+-- and another job's labour stay unlinked. Of the linked lines only the labour
+-- cost lane is labour: 1,900 labour and 400 materials is 1,900 against the
+-- agreed 2,000, not 2,300.
 DO $$
 DECLARE
   v_job uuid := gen_random_uuid();
@@ -243,10 +254,11 @@ BEGIN
     (v_rejected, '00000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'ops-reject',
      80, 0, 80, false, 0.12, 9.6, 80, 75.2);
   INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex) VALUES
-    (v_paid, v_job, 'labour', 600),
+    (v_paid, v_job, 'labour', 1500),
     (v_paid, v_job, 'commission', 60),
     (v_paid, v_other, 'labour', 500),
-    (v_open, v_job, 'labour', 350),
+    (v_open, v_job, 'labour', 400),
+    (v_open, v_job, 'materials', 400),
     (v_draft, v_job, 'labour', 100),
     (v_rejected, v_job, 'labour', 80);
   IF EXISTS (SELECT 1 FROM public.trade_invoice_lines
@@ -257,18 +269,27 @@ BEGIN
   VALUES ('00000000-0000-0000-0000-000000000001', v_job, v_open, 'aaaaaaaa-0000-0000-0000-00000000000a', 'Extra post', 50);
 
   v_wo := public.ensure_job_work_order_draft(v_job, 'backfill');
-  UPDATE public.work_orders SET agreed_labour_ex = 900, special_instructions = 'Finish the rear run' WHERE id = v_wo;
+  UPDATE public.work_orders SET agreed_labour_ex = 2000, special_instructions = 'Finish the rear run' WHERE id = v_wo;
   PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
 
-  IF (SELECT COALESCE(sum(line_total_ex), 0) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 950
-     OR (SELECT count(*) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 2 THEN
-    RAISE EXCEPTION 'contract: approving must link the labour already billed on the job (600 + 350), and nothing else';
+  IF (SELECT COALESCE(sum(line_total_ex), 0) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 2360
+     OR (SELECT count(*) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 4 THEN
+    RAISE EXCEPTION 'contract: approving must link every line already billed on the job (1500 + 60 + 400 + 400), and nothing else';
   END IF;
   IF EXISTS (SELECT 1 FROM public.trade_invoice_lines
              WHERE job_work_order_id IS NOT NULL
-               AND (trade_invoice_id IN (v_draft, v_rejected) OR job_id = v_other OR line_type = 'commission')
-               AND trade_invoice_id IN (v_paid, v_open, v_draft, v_rejected)) THEN
-    RAISE EXCEPTION 'contract: approving must not link a draft or rejected invoice, commission, or another job';
+               AND (trade_invoice_id IN (v_draft, v_rejected) OR job_id = v_other)) THEN
+    RAISE EXCEPTION 'contract: approving must not link a draft or rejected invoice, or another job';
+  END IF;
+  IF (SELECT COALESCE(sum(r.line_total_ex), 0)
+      FROM public.v_trade_charge_resolved r
+      JOIN public.trade_invoice_lines til ON til.id = r.line_id
+      WHERE til.job_work_order_id = v_wo AND r.cost_lane = 'labour') <> 1900
+     OR (SELECT r.cost_lane
+         FROM public.v_trade_charge_resolved r
+         JOIN public.trade_invoice_lines til ON til.id = r.line_id
+         WHERE til.job_work_order_id = v_wo AND til.line_type = 'materials') <> 'materials' THEN
+    RAISE EXCEPTION 'contract: labour against the work order must be 1900 (materials and commission are other lanes)';
   END IF;
   IF (SELECT work_order_id FROM public.work_order_variations WHERE job_id = v_job) IS DISTINCT FROM v_wo THEN
     RAISE EXCEPTION 'contract: approving must link the variation already reported on the job';
@@ -277,6 +298,88 @@ BEGIN
   UPDATE public.trade_invoices SET status = 'pending_acknowledgment' WHERE id = v_draft;
   IF (SELECT job_work_order_id FROM public.trade_invoice_lines WHERE trade_invoice_id = v_draft) IS DISTINCT FROM v_wo THEN
     RAISE EXCEPTION 'contract: a draft invoice submitted after approval must link its labour';
+  END IF;
+END $$;
+
+-- 6c. Save a draft, report a variation on it, save again, submit. Each save
+-- and the submit delete the draft row and insert a new invoice row; the
+-- variation moves to the replacing row with its work order and its email
+-- ledger. A variation whose job the replacing invoice no longer bills goes
+-- with the draft.
+DO $$
+DECLARE
+  v_job uuid := gen_random_uuid();
+  v_other uuid := gen_random_uuid();
+  v_wo uuid;
+  v_header jsonb;
+  v_lines jsonb;
+  v_draft uuid;
+  v_saved uuid;
+  v_submitted uuid := gen_random_uuid();
+  v_variation uuid;
+  v_emails uuid[];
+BEGIN
+  INSERT INTO public.jobs (id, org_id, type, status, job_number) VALUES
+    (v_job, '00000000-0000-0000-0000-000000000001', 'fencing', 'scheduled', 'WOC-V-1'),
+    (v_other, '00000000-0000-0000-0000-000000000001', 'fencing', 'scheduled', 'WOC-V-2');
+  SELECT id INTO v_wo FROM public.work_orders WHERE job_id = v_job AND kind = 'job';
+  UPDATE public.work_orders SET agreed_labour_ex = 1000, special_instructions = 'Front run' WHERE id = v_wo;
+  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+
+  v_header := jsonb_build_object(
+    'org_id', '00000000-0000-0000-0000-000000000001', 'user_id', 'aaaaaaaa-0000-0000-0000-00000000000a',
+    'week_start', '2026-10-05', 'week_end', '2026-10-11',
+    'total_hours', 7.5, 'total_breaks_minutes', 0,
+    'subtotal_ex', 300, 'gst', 0, 'total_inc', 300, 'gst_on', false,
+    'super_rate', 0.12, 'super_amount', 36, 'gross_earned', 300, 'net_pay', 282,
+    'invoice_source', 'hourly', 'status', 'draft');
+  v_lines := jsonb_build_array(
+    jsonb_build_object('job_id', v_job, 'job_number', 'WOC-V-1', 'line_type', 'labour',
+      'description', 'Clocked labour', 'quantity', 5, 'unit', 'hr', 'unit_rate', 40,
+      'total_hours', 5, 'hourly_rate', 40, 'line_total_ex', 200, 'line_position', 0),
+    jsonb_build_object('job_id', v_other, 'job_number', 'WOC-V-2', 'line_type', 'labour',
+      'description', 'Clocked labour', 'quantity', 2.5, 'unit', 'hr', 'unit_rate', 40,
+      'total_hours', 2.5, 'hourly_rate', 40, 'line_total_ex', 100, 'line_position', 1));
+
+  v_draft := public.persist_weekly_trade_invoice_v1(v_header, v_lines, NULL);
+
+  INSERT INTO public.work_order_variations (org_id, job_id, work_order_id, trade_invoice_id, reported_by, description, amount_ex)
+  VALUES ('00000000-0000-0000-0000-000000000001', v_job, v_wo, v_draft, 'aaaaaaaa-0000-0000-0000-00000000000a', 'Extra post', 50)
+  RETURNING id INTO v_variation;
+  INSERT INTO public.work_order_variations (org_id, job_id, trade_invoice_id, reported_by, description)
+  VALUES ('00000000-0000-0000-0000-000000000001', v_other, v_draft, 'aaaaaaaa-0000-0000-0000-00000000000a', 'Rock in the footing');
+  INSERT INTO public.work_order_variation_emails (variation_id, recipient_role, recipient, subject, body_text, body_html, status, sent_at) VALUES
+    (v_variation, 'finance', 'finance@secureworkswa.com.au', 's', 't', 'h', 'sent', now()),
+    (v_variation, 'admin', 'admin@secureworkswa.com.au', 's', 't', 'h', 'sent', now());
+  SELECT array_agg(id ORDER BY id) INTO v_emails
+  FROM public.work_order_variation_emails WHERE variation_id = v_variation;
+
+  v_saved := public.persist_weekly_trade_invoice_v1(v_header, v_lines, v_draft);
+  IF EXISTS (SELECT 1 FROM public.trade_invoices WHERE id = v_draft)
+     OR (SELECT count(*) FROM public.work_order_variations WHERE trade_invoice_id = v_saved) <> 2 THEN
+    RAISE EXCEPTION 'contract: saving a draft again must carry its variations to the replacing draft';
+  END IF;
+
+  INSERT INTO public.trade_invoices (id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay)
+  VALUES (v_submitted, '00000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'pending_acknowledgment', 200, 0, 200, false, 0.12, 24, 200, 188);
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex)
+  VALUES (v_submitted, v_job, 'labour', 200);
+  PERFORM public.replace_trade_invoice_draft_v1(v_saved, v_submitted, 'aaaaaaaa-0000-0000-0000-00000000000a', ARRAY[]::uuid[]);
+
+  IF EXISTS (SELECT 1 FROM public.trade_invoices WHERE id = v_saved)
+     OR NOT EXISTS (SELECT 1 FROM public.work_order_variations
+                    WHERE id = v_variation AND trade_invoice_id = v_submitted
+                      AND work_order_id = v_wo AND description = 'Extra post')
+     OR (SELECT count(*) FROM public.work_order_variations WHERE job_id = v_job) <> 1 THEN
+    RAISE EXCEPTION 'contract: a variation raised on a draft must be on the submitted invoice and still on the work order';
+  END IF;
+  IF (SELECT array_agg(id ORDER BY id) FROM public.work_order_variation_emails
+      WHERE variation_id = v_variation AND status = 'sent') IS DISTINCT FROM v_emails THEN
+    RAISE EXCEPTION 'contract: a carried variation must keep its email ledger, so nothing is sent again';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.work_order_variations WHERE job_id = v_other) THEN
+    RAISE EXCEPTION 'contract: a variation whose job the replacing invoice no longer bills must go with the draft';
   END IF;
 END $$;
 

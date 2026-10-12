@@ -649,3 +649,5 @@ ops-api|supabase/migrations/20261012090000_job_work_orders.sql|function|approve_
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|function|ensure_job_work_order_draft
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|function|backfill_job_work_order_drafts
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|policy|work_orders.work_orders_job_kind_hidden_from_clients
+ops-api|supabase/migrations/20261012090000_job_work_orders.sql|function|carry_work_order_variations
+reporting-api|supabase/migrations/20261012090000_job_work_orders.sql|column|work_orders.kind

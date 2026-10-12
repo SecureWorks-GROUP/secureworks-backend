@@ -4267,12 +4267,19 @@ by trigger: any update or delete raises, so a crew-path writer that touches it
 fails loudly. Every crew-pay read or write (`my_work_orders`,
 `submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
 `kind = 'crew'`; a new one must too. Only the users in
-`work_order_settings.approver_user_ids` (Shaun) approve, never a role. Labour is
-stamped onto `trade_invoice_lines.job_work_order_id` by trigger at invoice
-submit, and by `approve_job_work_order` for labour invoiced before the approval;
-never set it from code. Variation emails, the draft backfill and approval named
-only by the `x-sw-actor` header (the terminal) are behind flags seeded off.
-Contract and API: `docs/job-work-orders-v1.md`.
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role. Every
+line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
+by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
+before the approval; never set it from code. Only the labour lane of
+`v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
+restate that lane list. This migration inserts one call,
+`carry_work_order_variations`, into the deployed bodies of the three
+draft-replacing functions (`replace_trade_invoice_draft_v1`,
+`persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a
+variation raised on a draft invoice survives the draft being replaced; a later
+body of any of them must keep it. Variation emails, the draft backfill and
+approval named only by the `x-sw-actor` header (the terminal) are behind flags
+seeded off. Contract and API: `docs/job-work-orders-v1.md`.
 
 ## Maintaining this file
 
