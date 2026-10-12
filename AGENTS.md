@@ -310,7 +310,52 @@ and the instruction key fold them. Tests:
 `monitor_ses_sender_scoped_groups_test.ts` and the Ambrose cases in
 `makesafe_deterministic_intake_runtime_test.ts`. Switch the lane off with
 `MAKESAFE_SENDER_SCOPED_GROUPS=off`. The lane re-queues no PDF itself: the
-every-minute `makesafe-pdf-extraction-drain` retries a failed text read.
+`makesafe-pdf-extraction-drain` cron is the retry for a failed text read. That
+cron read `active = false` in production on 12 Oct 2026, so check `cron.job`
+before relying on it; while it is off a failed first handoff is not retried.
+
+## A New Intake Adapter Must Be Admitted By The Database In The Same PR
+
+`makesafe_intake_cases.adapter_id` is checked against a list inside
+`makesafe_intake_cases_deterministic_shapes_check`. It is the only adapter list
+in the database (no other intake table has one). An adapter registered in
+`DETERMINISTIC_ADAPTER_REGISTRY` but missing from that list plans correctly in
+every test and is refused on every case insert in production: the runtime
+then stores a stripped fallback (`state` exception, `adapter_id` null,
+`last_decision_reason` `deterministic source_persist_failed case_insert`) and
+no job or draft can exist. That is what happened to Ambrose (PR #1004 shipped
+the adapter, `20261012043000` admitted it).
+`makesafe_adapter_admission_contract_test.ts` now fails CI whenever a
+registered adapter is missing from the newest definition of any adapter list in
+the migrations; the Postgres half is the `20261012043000` migration contract.
+
+A stripped fallback is stuck on purpose and no scan re-decides it; the only
+exact recovery (`makesafe_source_persist_recovery.ts`) is closed to one MLB
+card. `RELEASED_SOURCE_PERSIST_FALLBACK_ADAPTERS` in
+`makesafe_deterministic_intake_runtime.ts` is the one release: for an adapter
+listed there (today `ambrose`) the ordinary scan upgrades the fallback through
+the same fenced update. Three things to know before touching it:
+
+- **One purchase order can hold several fallback rows**, one per email, because
+  a stripped row has no identity for the next email to bind to. They cannot be
+  merged or deleted (append-only, immutable lineage). A plan that would open a
+  draft or a job is released only while no other authoritative work case holds
+  its `company_key` + `wo_po_identity_key`; the others stay stripped. The
+  intake desk hides a stripped make-safe row once a live make-safe job carries
+  its reference (`matchingLiveObligationJobIds`); a stripped repair row stays a
+  "could not be stored" review card, because that match is make-safe only.
+  Non-work and exception plans are always released, since they open nothing.
+- **Only the sweep half of the scan reaches them.** A source with a case-source
+  row is final-fated, so the recent queue skips it; the sweep walks the 60-day
+  window two sources per run. Recovery after a deploy takes as long as the sweep
+  needs to reach those rows (`makesafe_intake_health.deterministic_scan_cursor_at`
+  against their `received_at`). Calling `scan_ses_makesafes` advances it.
+- **Add an adapter to the release list only with the migration that fixes its
+  cause**, and never release a builder whose fallbacks have another cause: the
+  older MLB and Rapid fallbacks stay stuck by design.
+
+Tests: the stranded Ambrose cases in
+`makesafe_deterministic_intake_runtime_test.ts`.
 
 ## Never Select `scope_json` In A List/Feed Query
 

@@ -4247,6 +4247,89 @@ export const _ensureDraftAndJobForTest = ensureDraftAndJob;
 
 // Mirrors makesafe_intake_case_transition_allowed in migration 20260720000001.
 // An upgrade is attempted only along an edge the database already accepts.
+// A stripped persistence-failure fallback is normally stuck: its cause is
+// unknown, so replaying it could loop or mint past an unresolved fault. For an
+// adapter listed here the cause is known and fixed by a reviewed migration, so
+// the ordinary scan may take its fallbacks through the same fenced upgrade the
+// exact recovery uses.
+//
+//   ambrose: every Ambrose case was rejected because the database's adapter list
+//   (makesafe_intake_cases_deterministic_shapes_check) did not yet admit the
+//   adapter. Admitted by 20261012043000_makesafe_intake_cases_admit_ambrose_adapter.
+const RELEASED_SOURCE_PERSIST_FALLBACK_ADAPTERS: ReadonlySet<string> = new Set([
+  "ambrose",
+]);
+
+function isSourcePersistFallbackRow(row: any | null | undefined): boolean {
+  return Boolean(row) &&
+    row.last_decision_reason ===
+      "deterministic source_persist_failed case_insert" &&
+    row.is_authoritative === false && !row.job_id;
+}
+
+// Which planned cases may recover their stripped fallback in this ordinary run.
+//
+// While the fault lasted, each email of one purchase order was planned on its
+// own and got its own fallback row (the stripped row carries no identity for a
+// later email to bind to). Those rows cannot be merged or deleted, so exactly
+// one of them may become the purchase order's case: a plan that would open a
+// draft or a job is released only while no other authoritative work case
+// already holds its builder obligation, here or earlier in this same run. The
+// rest stay stripped and stuck, which is quiet. A plan that opens nothing
+// (non-work, or an exception) is always released: it only records its fate.
+async function readReleasedSourcePersistFallbacks(
+  client: any,
+  cases: readonly DeterministicCasePlan[],
+  persisted: ReadonlyMap<string, any>,
+  bindingExceptions: ReadonlyMap<string, unknown>,
+): Promise<Set<string>> {
+  const released = new Set<string>();
+  const obligationsReleased = new Set<string>();
+  for (const plan of cases) {
+    const row = persisted.get(plan.instructionKey);
+    if (
+      !isSourcePersistFallbackRow(row) ||
+      !RELEASED_SOURCE_PERSIST_FALLBACK_ADAPTERS.has(
+        String(plan.adapterId || ""),
+      ) ||
+      plan.targetRelation === "cancellation_of" ||
+      bindingExceptions.has(plan.instructionKey)
+    ) continue;
+    const opensWork = plan.state === "confirmed_live_job" ||
+      plan.state === "blocked_live_job";
+    if (!opensWork) {
+      released.add(plan.instructionKey);
+      continue;
+    }
+    const companyKey = plan.identity.companyKey;
+    const obligation = plan.identity.woPoIdentityKey;
+    // No purchase-order identity to compare siblings on: fail closed.
+    if (!companyKey || !obligation) continue;
+    const obligationKey = `${companyKey}|${obligation}`;
+    if (obligationsReleased.has(obligationKey)) continue;
+    const { data, error } = await client.from("makesafe_intake_cases")
+      .select("id,state,is_authoritative")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .eq("company_key", companyKey)
+      .eq("wo_po_identity_key", obligation);
+    if (error) {
+      throw new Error(
+        `source-persistence fallback sibling read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    const heldElsewhere = (data || []).some((sibling: any) =>
+      sibling.id !== row.id && sibling.is_authoritative === true &&
+      sibling.state !== "accounted_non_wo"
+    );
+    if (heldElsewhere) continue;
+    obligationsReleased.add(obligationKey);
+    released.add(plan.instructionKey);
+  }
+  return released;
+}
+
 const ALLOWED_TRANSITIONS: Record<string, readonly string[]> = {
   confirmed_live_job: ["blocked_live_job"],
   blocked_live_job: ["confirmed_live_job", "exception"],
@@ -4353,8 +4436,9 @@ async function insertCaseAndSources(
         side_effects_suppressed: true,
         last_decision_provenance: "deterministic",
         last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
-        last_decision_reason:
-          "deterministic source_persist_recovered awaiting_job_creation",
+        last_decision_reason: `deterministic source_persist_recovered ${
+          desired.reason_code || "awaiting_job_creation"
+        }`,
         adapter_id: desired.adapter_id,
         adapter_version: desired.adapter_version,
         manifest_version: desired.manifest_version,
@@ -5330,6 +5414,14 @@ export async function runDeterministicIntake(
   const canonicallyAccountedSources = new Set(
     sourceAuthorities.byPostId.keys(),
   );
+  const releasedFallbacks = recoveryTarget
+    ? new Set<string>()
+    : await readReleasedSourcePersistFallbacks(
+      client,
+      actionableCases,
+      persisted,
+      bindingExceptions,
+    );
   type CaseRank = "fresh" | "job_retry" | "stuck";
   const rankCase = (casePlan: DeterministicCasePlan): CaseRank => {
     const row = persisted.get(casePlan.instructionKey);
@@ -5351,7 +5443,10 @@ export async function runDeterministicIntake(
       row.last_decision_reason ===
         "deterministic source_persist_failed case_insert"
     ) {
-      return recoveryTarget ? "fresh" : "stuck";
+      return recoveryTarget ||
+          releasedFallbacks.has(casePlan.instructionKey)
+        ? "fresh"
+        : "stuck";
     }
     // The BOX reconciliation migration creates corrected authorities solely to
     // replace a false shared PO identity. They are deliberately non-operational:
@@ -5490,7 +5585,8 @@ export async function runDeterministicIntake(
         sourceMap,
         existing,
         false,
-        Boolean(recoveryTarget),
+        Boolean(recoveryTarget) ||
+          releasedFallbacks.has(casePlan.instructionKey),
       );
       let resumedCase = saved.resumed;
       if (saved.caseCreated) report.totals.case_rows_created++;

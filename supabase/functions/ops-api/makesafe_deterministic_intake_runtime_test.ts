@@ -7802,3 +7802,278 @@ Deno.test("an Ambrose acceptance prompt with no PDF never opens a job, whichever
   assertEquals(approvals, 0);
   assertEquals(store.makesafe_intake_drafts.length, 0);
 });
+
+// ── Ambrose cases stranded while the database refused the adapter id ─────────
+// Until 20261012043000 the adapter list on makesafe_intake_cases did not admit
+// 'ambrose', so every Ambrose case insert was refused and stored as the
+// stripped persistence-failure fallback. The standing scan read each email of
+// one purchase order on its own, and a stripped row carries no identity for the
+// next email to bind to, so one purchase order ended up with several fallback
+// rows. This double refuses the adapter the way the constraint did.
+const AMBROSE_REFUSED = {
+  code: "23514",
+  message:
+    'new row for relation "makesafe_intake_cases" violates check constraint "makesafe_intake_cases_deterministic_shapes_check"',
+};
+
+function strandedAmbroseHarness() {
+  const store = ambroseIntakeStore();
+  const state = { adapterAdmitted: false, approvals: 0 };
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      !state.adapterAdmitted && table === "makesafe_intake_cases" &&
+        (operation === "insert" || operation === "update") &&
+        payload.adapter_id === "ambrose"
+        ? AMBROSE_REFUSED
+        : null,
+  );
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        state.approvals++;
+        return Promise.resolve({ job: { id: `job-${state.approvals}` } });
+      },
+    });
+  // Plans exactly one email, as the four-source standing page did.
+  const runAlone = async (postId: string, nowIso: string) => {
+    const others = store.emails.filter((row: any) => row.post_id !== postId);
+    store.emails = store.emails.filter((row: any) => row.post_id === postId);
+    try {
+      return await run(nowIso);
+    } finally {
+      store.emails.push(...others);
+    }
+  };
+  const fallbacks = () =>
+    store.makesafe_intake_cases.filter((row: any) =>
+      row.last_decision_reason ===
+        "deterministic source_persist_failed case_insert"
+    );
+  return { store, state, run, runAlone, fallbacks };
+}
+
+async function strandTwoEmailsOfOnePurchaseOrder(
+  fixture: AmbrosePurchaseOrderFixture,
+) {
+  const harness = strandedAmbroseHarness();
+  pushAmbroseMail(
+    harness.store,
+    "first-email",
+    fixture,
+    "2026-07-18T06:31:00.000Z",
+    "sha-first",
+  );
+  await harness.runAlone("first-email", NOW);
+  pushAmbroseMail(
+    harness.store,
+    "updated-email",
+    { ...fixture, updated: true },
+    "2026-07-19T04:35:00.000Z",
+    "sha-updated",
+  );
+  const stranded = await harness.runAlone(
+    "updated-email",
+    "2026-07-20T12:02:00.000Z",
+  );
+  // The production shape: two stripped fallbacks, one email each, nothing made.
+  assertEquals(stranded.totals.write_failures, 1);
+  assertEquals(harness.fallbacks().length, 2);
+  assertEquals(harness.store.makesafe_intake_case_sources.length, 2);
+  assertEquals(
+    harness.store.makesafe_intake_cases.map((row: any) => row.adapter_id),
+    [null, null],
+  );
+  assertEquals(harness.state.approvals, 0);
+  assertEquals(harness.store.makesafe_intake_drafts.length, 0);
+  return harness;
+}
+
+for (
+  const order of [
+    ["both emails on one page"],
+    ["first-email", "updated-email"],
+    ["updated-email", "first-email"],
+  ] as const
+) {
+  Deno.test(`stranded Ambrose make-safe recovers to exactly one job on the ordinary scan (${order.join(", then ")})`, async () => {
+    const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_MAKE_SAFE);
+    const { store, state } = harness;
+
+    // While the database still refuses the adapter the scan retries the
+    // recovery, fails closed and makes nothing.
+    const refused = await harness.run("2026-07-20T12:04:00.000Z");
+    assertEquals(refused.totals.jobs_created, 0);
+    assertEquals(harness.fallbacks().length, 2);
+    assertEquals(state.approvals, 0);
+
+    state.adapterAdmitted = true;
+    let clock = Date.parse("2026-07-20T12:06:00.000Z");
+    const tick = () => new Date(clock += 120_000).toISOString();
+    if (order.length === 1) {
+      await harness.run(tick());
+    } else {
+      for (const postId of order) await harness.runAlone(postId, tick());
+    }
+    // Several more ordinary scans, on every page shape, change nothing more.
+    await harness.run(tick());
+    await harness.runAlone("first-email", tick());
+    await harness.runAlone("updated-email", tick());
+    const settled = await harness.run(tick());
+
+    assertEquals(state.approvals, 1);
+    assertEquals(store.makesafe_intake_drafts.length, 1);
+    assertEquals(settled.totals.write_failures, 0);
+    assertEquals(settled.totals.cases_failed, 0);
+    assertEquals(settled.totals.jobs_created, 0);
+    // No third row: the two emails keep the cases they were accounted on.
+    assertEquals(store.makesafe_intake_cases.length, 2);
+    assertEquals(store.makesafe_intake_case_sources.length, 2);
+
+    const live = store.makesafe_intake_cases.filter((row: any) => row.job_id);
+    assertEquals(live.length, 1);
+    assertEquals(live[0].state, "confirmed_live_job");
+    assertEquals(live[0].is_authoritative, true);
+    assertEquals(live[0].adapter_id, "ambrose");
+    assertEquals(live[0].builder_po_canonical, "PO-2099910102");
+    assertEquals(live[0].company_id, AMBROSE_TEST_COMPANY_ID);
+    // The other email's row stays the quiet stripped fallback it was.
+    assertEquals(harness.fallbacks().length, 1);
+    assertEquals(harness.fallbacks()[0].job_id, null);
+    assertEquals(harness.fallbacks()[0].is_authoritative, false);
+  });
+}
+
+Deno.test("a stranded Ambrose repair recovers to one review draft and is never minted", async () => {
+  const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_REPAIR);
+  const { store, state } = harness;
+  state.adapterAdmitted = true;
+  await harness.runAlone("updated-email", "2026-07-20T12:06:00.000Z");
+  await harness.runAlone("first-email", "2026-07-20T12:08:00.000Z");
+  await harness.run("2026-07-20T12:10:00.000Z");
+  const settled = await harness.run("2026-07-20T12:12:00.000Z");
+
+  assertEquals(state.approvals, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.makesafe_job_family,
+    "repair",
+  );
+  assertEquals(settled.totals.write_failures, 0);
+  const recovered = store.makesafe_intake_cases.filter((row: any) =>
+    row.is_authoritative
+  );
+  assertEquals(recovered.length, 1);
+  assertEquals(recovered[0].adapter_id, "ambrose");
+  assertEquals(recovered[0].job_id, null);
+  assertEquals(harness.fallbacks().length, 1);
+});
+
+Deno.test("a stranded Ambrose acceptance prompt recovers as non-work and never blocks its purchase order", async () => {
+  const harness = strandedAmbroseHarness();
+  const { store, state } = harness;
+  // The prompt names the same purchase order and arrives first, with no PDF.
+  store.emails.push(email({
+    post_id: "acceptance-prompt",
+    from_email: AMBROSE_TEST_SENDER,
+    received_at: "2026-07-18T02:00:00.000Z",
+    subject:
+      "Ambrose Construct Group Acceptance Required - Purchase Order: 20999101-02",
+    body_content:
+      "Ambrose Construct Group have allocated you PO #20999101-02 which requires your acceptance.",
+  }));
+  await harness.runAlone("acceptance-prompt", NOW);
+  pushAmbroseMail(
+    store,
+    "purchase-order",
+    AMBROSE_MAKE_SAFE,
+    "2026-07-18T06:31:00.000Z",
+    "sha-po",
+  );
+  await harness.runAlone("purchase-order", "2026-07-20T12:02:00.000Z");
+  assertEquals(harness.fallbacks().length, 2);
+
+  state.adapterAdmitted = true;
+  await harness.runAlone("acceptance-prompt", "2026-07-20T12:06:00.000Z");
+  const prompt = store.makesafe_intake_cases.find((row: any) =>
+    store.makesafe_intake_case_sources.some((source: any) =>
+      source.case_id === row.id && source.post_id === "acceptance-prompt"
+    )
+  );
+  assertEquals(prompt.state, "accounted_non_wo");
+  assertEquals(prompt.reason_code, "non_makesafe");
+  assertEquals(prompt.adapter_id, "ambrose");
+  assertEquals(
+    prompt.last_decision_reason,
+    "deterministic source_persist_recovered non_makesafe",
+  );
+  assertEquals(state.approvals, 0);
+
+  await harness.runAlone("purchase-order", "2026-07-20T12:08:00.000Z");
+  await harness.run("2026-07-20T12:10:00.000Z");
+  assertEquals(state.approvals, 1);
+  assertEquals(harness.fallbacks().length, 0);
+  assertEquals(
+    store.makesafe_intake_cases.filter((row: any) => row.job_id).length,
+    1,
+  );
+});
+
+Deno.test("CONTROL for the Ambrose release: another builder's stripped fallback is still stuck on the ordinary scan", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "mlb-stranded",
+    subject: "NEW WORK ORDER MLB-62011 Work Order: WO-62011 PO: 620111",
+    body_content:
+      "Client: Control Client\nAddress: 1 Control Way, Perth\nPlease attend and make safe the property.",
+  }));
+  let refuse = true;
+  let approvals = 0;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      refuse && table === "makesafe_intake_cases" && operation === "insert" &&
+        payload.last_decision_reason !==
+          "deterministic source_persist_failed case_insert"
+        ? { code: "23514", message: "primary deterministic case shape rejected" }
+        : null,
+  );
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "must-not-mint" } });
+      },
+    });
+  await run(NOW);
+  assertEquals(
+    store.makesafe_intake_cases[0].last_decision_reason,
+    "deterministic source_persist_failed case_insert",
+  );
+  refuse = false;
+  const later = await run("2026-07-20T12:06:00.000Z");
+  assertEquals(later.totals.cases_attempted, 0);
+  assertEquals(later.totals.jobs_created, 0);
+  assertEquals(approvals, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].last_decision_reason,
+    "deterministic source_persist_failed case_insert",
+  );
+});
