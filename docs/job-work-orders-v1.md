@@ -18,9 +18,15 @@ backfill: `supabase/migrations/20261012090000_job_work_orders.sql` (contract
 - Status `draft` (editable, counts for nothing) or `approved` (sealed). There
   is no cancelled state. One work order per job: a draft, then that same row
   approved, enforced by unique index `uq_work_orders_job_current`.
-- The staff crew work order readers (`job_detail.work_orders`, the dossier,
-  the invoice context, `reporting-api`) leave the job work order out; it is
-  read through `job_work_order` and `job_detail.job_work_order`. Known
+- The `job_events` rows this module writes (draft opened or updated, approved,
+  variation reported) carry ids only: never the agreed labour, a variation
+  amount or the sealed hash. `job_events` is readable by any signed-in user of
+  the org, trades included, and the hash could be used to guess the agreed
+  figure. The figures live on the work order row, which trades cannot read.
+- The staff crew work order readers (`job_detail.work_orders`, the old
+  `list_work_orders`, the dossier, the invoice context, `reporting-api`) leave
+  the job work order out; it is read through `job_work_order`, `list_work_orders`
+  with `kind=job`, and `job_detail.job_work_order`. Known
   follow-up: the context job record SQL (`20261011130000`) still lists it as a
   work order line in the job story.
 - `jobs.work_order_id` points at the job's work order (the draft, then the
@@ -163,7 +169,7 @@ Errors are `{error, code}`.
 | action | method | who | input | output |
 | --- | --- | --- | --- | --- |
 | `job_work_order` | GET | staff | `job_id` or `work_order_id` | `{schema:"job-work-order.v1", job, eligible, work_order, live_work_order, draft_work_order, figures, invoices[], lines[] (each with `cost_lane` and `counted`), labour_before_approval, variations[]}` |
-| `list_work_orders` | GET | staff | `kind=job`, optional `status` (draft, approved), `type` (fencing, patio), `job_id` | `{schema:"job-work-orders.v1", work_orders[] (row + job_number, client_name, job_type, job_status, site_suburb, figures for approved ones), total}`. Without `kind=job` the old list (every kind, rows carry `kind`). |
+| `list_work_orders` | GET | staff | `kind=job`, optional `status` (draft, approved), `type` (fencing, patio), `job_id` | `{schema:"job-work-orders.v1", work_orders[] (row + job_number, client_name, job_type, job_status, site_suburb, figures for approved ones), total}`. Without `kind=job` the old list, crew work orders only: a job work order is never in it. |
 | `create_work_order` | POST | staff | `{kind:"job", job_id, ...draft fields}` | `{created, work_order}`: the open draft, else a new draft; 409 `work_order_sealed` once the job's work order is approved |
 | `update_work_order` | POST | staff | `{id, scope_items?, special_instructions?, agreed_labour_ex?, scheduled_date?, site_address?}` | `{work_order}`; approved returns 409 `work_order_sealed`; a `status` other than `draft` returns 400 `invalid_status` |
 | `approve_work_order` | POST | Shaun (session; terminal only while its flag is on) | `{work_order_id, expected_updated_at?}` | `{work_order}`; 403 `approver_required` / `approver_identity_missing` / `terminal_approval_switched_off`, 422 `work_order_not_ready`, 409 `not_a_draft` / `stale_review` |
