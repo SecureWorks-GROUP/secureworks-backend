@@ -860,7 +860,7 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261009120000", "quote_builder_versions"),
                       # Job work orders: one sealed work order per fencing
                       # and patio job (job_work_orders.ts).
-                      ("20261012090000", "job_work_orders")]:
+                      ("20261012130000", "job_work_orders")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

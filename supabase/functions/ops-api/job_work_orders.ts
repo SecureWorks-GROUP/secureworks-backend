@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 // Job work orders: one live work order per fencing and patio job (captain,
 // 6 Oct 2026). Schema, seal, triggers and backfill:
-// 20261012090000_job_work_orders.sql. Screen contract:
+// 20261012130000_job_work_orders.sql. Screen contract:
 // docs/job-work-orders-v1.md.
 //
 // A job work order is a work_orders row with kind = 'job'. It is a draft
