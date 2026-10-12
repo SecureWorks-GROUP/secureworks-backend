@@ -392,6 +392,61 @@ export type TradeRedaction = {
   text: (value: string, key: string) => string;
 };
 
+// Heights and lengths are the work order, so they are set aside before the
+// shared trade money filter (which drops decimals and 3+ digit numbers as
+// possible amounts) and put back after it. Only three shapes are a
+// measurement: a number then a length unit (2.1 m, 1800mm, 24.5 m2), a
+// dimension run ending in a unit (6.5 x 4.2 m), and a number then a dimension
+// word (1800 high). A number after a currency sign or before a GST mark is
+// never one, and every other number stays with the money filter.
+const WO_MEASURE_NUMBER = "\\d+(?:\\.\\d+)?";
+const WO_MEASURE_UNIT =
+  "(?:mm|cm|m2|m\u00B2|sqm|lm|metres?|meters?|m)(?![A-Za-z0-9])";
+const WO_MEASURE_HEAD = "(?<![\\w.,])(?<![$\\p{Sc}]\\s*)";
+const WO_MEASURE_TAIL =
+  "(?!\\s*\\(?\\s*(?:(?:ex\\w*|inc\\w*|plus)\\b\\.?|\\+)?\\s*(?:of\\s+)?(?:gst|tax)\\b)";
+const WO_MEASURE_RE = new RegExp(
+  `${WO_MEASURE_HEAD}(?:` +
+    `(?:${WO_MEASURE_NUMBER}(?:\\s?${WO_MEASURE_UNIT})?\\s*[x\u00D7]\\s*)+${WO_MEASURE_NUMBER}\\s?${WO_MEASURE_UNIT}` +
+    `|${WO_MEASURE_NUMBER}\\s?${WO_MEASURE_UNIT}` +
+    `|${WO_MEASURE_NUMBER}\\s+(?:high|long|wide|deep|height|length|width)\\b` +
+    `)${WO_MEASURE_TAIL}`,
+  "giu",
+);
+// One private-use character stands in for each measurement: the money filter
+// has no rule that reads or removes one.
+const WO_MEASURE_MARK_FIRST = 0xE000;
+const WO_MEASURE_MARK_LAST = 0xF8FF;
+const WO_MEASURE_MARK_RE = /[\uE000-\uF8FF]/g;
+
+function holdWorkOrderMeasurements(value: string, kept: string[]): string {
+  return value.replace(WO_MEASURE_MARK_RE, "").replace(
+    WO_MEASURE_RE,
+    (match) => {
+      const mark = WO_MEASURE_MARK_FIRST + kept.length;
+      if (mark > WO_MEASURE_MARK_LAST) return match;
+      kept.push(match);
+      return String.fromCharCode(mark);
+    },
+  );
+}
+
+function restoreWorkOrderMeasurements(value: string, kept: string[]): string {
+  return value.replace(
+    WO_MEASURE_MARK_RE,
+    (mark) => kept[mark.charCodeAt(0) - WO_MEASURE_MARK_FIRST] ?? "",
+  );
+}
+
+function mapStringLeaves(item: unknown, map: (value: string) => string) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+  return Object.fromEntries(
+    Object.entries(item).map((
+      [key, value],
+    ) => [key, typeof value === "string" ? map(value) : value]),
+  );
+}
+
 /**
  * What a trade sees: scope and agreed details only. Built from an explicit
  * allowlist, so agreed_labour_ex, figures, billed amounts and any price on a
@@ -402,8 +457,13 @@ export function projectTradeJobWorkOrder(
   job: any,
   redact: TradeRedaction,
 ): Record<string, unknown> {
+  const kept: string[] = [];
+  const hold = (value: string) => holdWorkOrderMeasurements(value, kept);
+  const restore = (value: string) => restoreWorkOrderMeasurements(value, kept);
   const instructions = typeof wo?.special_instructions === "string"
-    ? redact.text(wo.special_instructions, "special_instructions")
+    ? restore(
+      redact.text(hold(wo.special_instructions), "special_instructions"),
+    )
     : null;
   return {
     id: wo.id,
@@ -417,8 +477,10 @@ export function projectTradeJobWorkOrder(
       [job?.site_address, job?.site_suburb].filter(Boolean).join(", ") || null,
     scheduled_date: wo.scheduled_date || null,
     scope_items: redact.scopeItems(
-      Array.isArray(wo.scope_items) ? wo.scope_items : [],
-    ),
+      (Array.isArray(wo.scope_items) ? wo.scope_items : []).map((
+        item: unknown,
+      ) => mapStringLeaves(item, hold)),
+    ).map((item) => mapStringLeaves(item, restore)),
     special_instructions: instructions || null,
   };
 }

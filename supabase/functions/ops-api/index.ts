@@ -606,6 +606,7 @@ import {
   resolveWorkOrderApprover,
   sendOutlookVariationEmail,
   tradeJobWorkOrderRead,
+  type TradeRedaction,
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
 
@@ -14953,6 +14954,12 @@ async function workOrderIsJobKind(client: any, id: unknown): Promise<boolean> {
   return data?.kind === 'job'
 }
 
+// The shared trade money filter, as the job work order's trade view uses it.
+export const tradeJobWorkOrderRedaction: TradeRedaction = {
+  scopeItems: (items) => redactTradeWorkOrderScopeItems(items) || [],
+  text: (value, key) => sanitizeTradeAllocatedStringLeaf(value, key),
+}
+
 // Trade doors for the job work order. Access is the ONE per-job tier decision
 // (assertAssignedOrMakesafeAccess); the variation also requires the caller's
 // own invoice, checked inside reportWorkOrderVariation.
@@ -14968,10 +14975,7 @@ export async function handleTradeJobWorkOrderAction(
     const jobId = new URL(req.url).searchParams.get('job_id') || ''
     if (!jobId) throw new ApiError('job_id required', 400)
     await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
-    return json(await runJobWorkOrder(() => tradeJobWorkOrderRead(client, jobId, tradeUser.id, {
-      scopeItems: (items) => redactTradeWorkOrderScopeItems(items) || [],
-      text: (value, key) => sanitizeTradeAllocatedStringLeaf(value, key),
-    })))
+    return json(await runJobWorkOrder(() => tradeJobWorkOrderRead(client, jobId, tradeUser.id, tradeJobWorkOrderRedaction)))
   }
   if (req.method !== 'POST') throw new ApiError('POST required', 405)
   const jobId = String(body?.job_id || '')
