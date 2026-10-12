@@ -11,6 +11,32 @@ BEGIN
   END IF;
 END $$;
 
+-- Give the three draft-replacing functions (20260827112928, 20260831021701)
+-- their bodies back: remove the one carry call this migration inserted.
+DO $carry_work_order_variations$
+DECLARE
+  v_signature text;
+  v_definition text;
+BEGIN
+  FOREACH v_signature IN ARRAY ARRAY[
+    'public.replace_trade_invoice_draft_v1(uuid, uuid, uuid, uuid[])',
+    'public.persist_trade_work_order_invoice_v1(jsonb, jsonb, uuid)',
+    'public.persist_weekly_trade_invoice_v1(jsonb, jsonb, uuid)'
+  ] LOOP
+    CONTINUE WHEN to_regprocedure(v_signature) IS NULL;
+    v_definition := pg_get_functiondef(to_regprocedure(v_signature));
+    CONTINUE WHEN position('public.carry_work_order_variations(' IN v_definition) = 0;
+    EXECUTE regexp_replace(
+      v_definition,
+      '[ \t]*PERFORM public\.carry_work_order_variations\([^)]*\);\n',
+      '',
+      'g'
+    );
+  END LOOP;
+END;
+$carry_work_order_variations$;
+DROP FUNCTION IF EXISTS public.carry_work_order_variations(uuid, uuid);
+
 DROP FUNCTION IF EXISTS public.backfill_job_work_order_drafts(boolean);
 
 DROP TRIGGER IF EXISTS trg_trade_invoices_link_job_work_orders ON public.trade_invoices;
@@ -26,7 +52,6 @@ DROP TRIGGER IF EXISTS trg_work_orders_job_kind_guard ON public.work_orders;
 DROP FUNCTION IF EXISTS public.work_orders_job_kind_guard();
 
 DROP FUNCTION IF EXISTS public.job_live_work_order_id(uuid);
-DROP FUNCTION IF EXISTS public.job_work_order_excluded_line_types();
 DROP FUNCTION IF EXISTS public.job_work_order_billed_invoice_statuses();
 DROP FUNCTION IF EXISTS public.job_work_order_open_statuses();
 

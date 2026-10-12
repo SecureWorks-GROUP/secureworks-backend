@@ -10,6 +10,7 @@ import {
   computeWorkOrderFigures,
   createJobWorkOrder,
   JobWorkOrderError,
+  listJobWorkOrders,
   projectTradeJobWorkOrder,
   readJobWorkOrder,
   reportWorkOrderVariation,
@@ -289,6 +290,12 @@ function baseDb(extra: Partial<Tables> = {}) {
     ],
     work_order_variations: [],
     work_order_variation_emails: [],
+    // The cost lane of each line, as v_trade_charge_resolved answers it.
+    v_trade_charge_resolved: [
+      { line_id: "l1", cost_lane: "labour" },
+      { line_id: "l2", cost_lane: "commission" },
+      { line_id: "l3", cost_lane: "labour" },
+    ],
     work_order_settings: [{ id: 1, approver_user_ids: [SHAUN] }],
     feature_flags: [],
     job_events: [],
@@ -484,6 +491,24 @@ Deno.test("update: an approved work order is sealed", async () => {
   );
   assertEquals((err as JobWorkOrderError).code, "work_order_sealed");
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, 1000);
+});
+
+Deno.test("update and list: a job work order is a draft or approved, there is no cancel", async () => {
+  const db = draftDb();
+  const err = await assertRejects(
+    () => updateJobWorkOrderDraft(db, { id: DRAFT, status: "cancelled" }),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([err.status, err.code], [400, "invalid_status"]);
+  assertEquals(db.tables.work_orders[0].status, "draft");
+  assertEquals(db.tables.jobs[0].work_order_id, WO);
+  assertEquals(db.tables.job_events.length, 0);
+
+  const listErr = await assertRejects(
+    () => listJobWorkOrders(db, new URLSearchParams({ status: "cancelled" })),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([listErr.status, listErr.code], [400, "invalid_status"]);
 });
 
 Deno.test("create: once the job's work order is approved there is no second one", async () => {
@@ -682,8 +707,75 @@ Deno.test("staff read: live figures, invoices, and labour from before approval k
   assertEquals(r.figures.remaining_ex, 360);
   assertEquals(r.invoices.length, 1);
   assertEquals(r.invoices[0].amount_ex, 640);
-  assertEquals(r.labour_lines.map((l) => l.trade_invoice_line_id), ["l1"]);
+  assertEquals(
+    r.lines.map((l) => [l.trade_invoice_line_id, l.cost_lane, l.counted]),
+    [["l1", "labour", true], ["l2", "commission", false]],
+  );
   assertEquals(r.labour_before_approval.amount_ex, 200);
+});
+
+Deno.test("staff read: 1,900 labour plus 400 materials is 1,900 against the agreed labour", async () => {
+  const invoice = {
+    id: INV,
+    user_id: TRADE,
+    invoice_number: "TI-1",
+    status: "pending_acknowledgment",
+    submitted_at: "2026-10-06T01:00:00Z",
+    users: { name: "Trade One" },
+  };
+  const line = (id: string, line_type: string, amount: number) => ({
+    id,
+    trade_invoice_id: INV,
+    job_id: JOB,
+    job_work_order_id: WO,
+    line_type,
+    total_hours: line_type === "labour" ? 8 : null,
+    line_total_ex: amount,
+    override_amount: null,
+    trade_invoices: invoice,
+  });
+  const db = baseDb({
+    trade_invoice_lines: [
+      line("lab", "labour", 1900),
+      line("mat", "materials", 400),
+      line("trv", "travel", 60),
+      line("new", "a line type the lane view does not know", 75),
+    ],
+    v_trade_charge_resolved: [
+      { line_id: "lab", cost_lane: "labour" },
+      { line_id: "mat", cost_lane: "materials" },
+      { line_id: "trv", cost_lane: "other" },
+      { line_id: "new", cost_lane: "unclassified" },
+    ],
+  });
+  db.tables.work_orders[0].agreed_labour_ex = 2000;
+
+  const r = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.figures.billed_to_date_ex, 1900);
+  assertEquals(r.figures.remaining_ex, 100);
+  assertEquals(r.figures.over_agreed, false);
+  assertEquals(r.figures.rules.map((rule) => rule.key), ["near_agreed"]);
+  assertEquals(
+    r.lines.map((l) => [l.trade_invoice_line_id, l.cost_lane, l.counted]),
+    [
+      ["lab", "labour", true],
+      ["mat", "materials", false],
+      ["trv", "other", false],
+      ["new", "unclassified", false],
+    ],
+  );
+  assertEquals(r.invoices.map((i) => [i.amount_ex, i.hours]), [[1900, 8]]);
+
+  const listed = await listJobWorkOrders(db, new URLSearchParams());
+  assertEquals(listed.work_orders[0].figures?.billed_to_date_ex, 1900);
+  assertEquals(listed.work_orders[0].figures?.over_agreed, false);
+
+  db.failOn.add("select:v_trade_charge_resolved");
+  const err = await assertRejects(
+    () => readJobWorkOrder(db, { jobId: JOB }),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals(err.code, "labour_unreadable");
 });
 
 // ── Trade read: no prices, allowances or margins ─────────────────────────────
@@ -847,6 +939,72 @@ Deno.test("variation: flag on sends each email once", async () => {
   assertEquals(again.duplicate, true);
   assertEquals(again.emails.map((e: any) => e.status), ["sent", "sent"]);
   assertEquals(sent.length, 2);
+});
+
+Deno.test("variation: after its draft invoice was replaced, a repeat report on the new invoice sends nothing again", async () => {
+  const SUBMITTED = "55555555-5555-4555-8555-555555555555";
+  // The database carried the variation, with its sent emails, from the
+  // replaced draft to the submitted invoice (carry_work_order_variations).
+  const db = baseDb({
+    feature_flags: [{
+      flag_name: "work_order_variation_emails_v1",
+      enabled: true,
+    }],
+    trade_invoices: [{
+      id: SUBMITTED,
+      org_id: ORG,
+      user_id: TRADE,
+      status: "pending_acknowledgment",
+      invoice_number: "TI-2",
+    }],
+    trade_invoice_lines: [{
+      id: "s1",
+      trade_invoice_id: SUBMITTED,
+      job_id: JOB,
+      job_work_order_id: WO,
+      line_type: "labour",
+      line_total_ex: 640,
+      override_amount: null,
+    }],
+    work_order_variations: [{
+      id: "v1",
+      org_id: ORG,
+      job_id: JOB,
+      work_order_id: WO,
+      trade_invoice_id: SUBMITTED,
+      reported_by: TRADE,
+      description: "Extra post",
+      amount_ex: null,
+      status: "reported",
+    }],
+    work_order_variation_emails: [
+      {
+        id: "e1",
+        variation_id: "v1",
+        recipient_role: "finance",
+        status: "sent",
+      },
+      { id: "e2", variation_id: "v1", recipient_role: "admin", status: "sent" },
+    ],
+  });
+  let sends = 0;
+  const out = await reportWorkOrderVariation(
+    db,
+    { trade_invoice_id: SUBMITTED, job_id: JOB, description: "Extra post" },
+    { id: TRADE, orgId: ORG },
+    {
+      sendEmail: async () => {
+        sends++;
+        return { ok: true };
+      },
+    },
+  );
+  assertEquals(out.duplicate, true);
+  assertEquals(out.variation.id, "v1");
+  assertEquals(out.emails.map((e: any) => e.status), ["sent", "sent"]);
+  assertEquals(sends, 0);
+  assertEquals(db.tables.work_order_variations.length, 1);
+  assertEquals(db.tables.work_order_variation_emails.length, 2);
 });
 
 const EMAILS_ON = [{
