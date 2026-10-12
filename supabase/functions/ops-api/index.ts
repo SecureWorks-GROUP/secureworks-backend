@@ -14979,6 +14979,7 @@ async function workOrderIsJobKind(client: any, id: unknown): Promise<boolean> {
 export const tradeJobWorkOrderRedaction: TradeRedaction = {
   scopeItems: (items) => redactTradeWorkOrderScopeItems(items) || [],
   text: (value, key) => sanitizeTradeAllocatedStringLeaf(value, key),
+  scopeTextKey: (key) => TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key) && TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key),
 }
 
 // Trade doors for the job work order. Access is the ONE per-job tier decision

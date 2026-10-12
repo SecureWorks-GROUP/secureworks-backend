@@ -396,6 +396,8 @@ export type TradeRedaction = {
   scopeItems: (items: unknown) => unknown[];
   /** index.ts sanitizeTradeAllocatedStringLeaf (drops money language). */
   text: (value: string, key: string) => string;
+  /** A scope item key the filter can show as prose (never a price key). */
+  scopeTextKey: (key: string) => boolean;
 };
 
 // Heights and lengths are the work order, so they are set aside before the
@@ -444,6 +446,13 @@ function restoreWorkOrderMeasurements(value: string, kept: string[]): string {
   );
 }
 
+/**
+ * What the trade reads in place of a scope line or special instruction the
+ * shared money filter withheld whole: the line exists, none of it is shown.
+ */
+export const TRADE_WORK_ORDER_LINE_WITHHELD =
+  "Line withheld. Ask the office for this detail.";
+
 function mapStringLeaves(item: unknown, map: (value: string) => string) {
   if (!item || typeof item !== "object" || Array.isArray(item)) return item;
   return Object.fromEntries(
@@ -466,11 +475,28 @@ export function projectTradeJobWorkOrder(
   const kept: string[] = [];
   const hold = (value: string) => holdWorkOrderMeasurements(value, kept);
   const restore = (value: string) => restoreWorkOrderMeasurements(value, kept);
+  const written = (value: unknown): value is string =>
+    typeof value === "string" && value.trim() !== "";
   const instructions = typeof wo?.special_instructions === "string"
     ? restore(
       redact.text(hold(wo.special_instructions), "special_instructions"),
     )
     : null;
+  // One item at a time, so a withheld line is matched to what was written.
+  const scopeItems = (Array.isArray(wo.scope_items) ? wo.scope_items : [])
+    .flatMap((item: unknown) => {
+      const [seen] = redact.scopeItems([mapStringLeaves(item, hold)]);
+      if (!seen || typeof seen !== "object" || Array.isArray(seen)) return [];
+      const shown = mapStringLeaves(seen, restore) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(item as object)) {
+        if (
+          written(value) && redact.scopeTextKey(key) && !written(shown[key])
+        ) {
+          shown[key] = TRADE_WORK_ORDER_LINE_WITHHELD;
+        }
+      }
+      return [shown];
+    });
   return {
     id: wo.id,
     wo_number: wo.wo_number,
@@ -482,12 +508,12 @@ export function projectTradeJobWorkOrder(
     site_address: wo.site_address ||
       [job?.site_address, job?.site_suburb].filter(Boolean).join(", ") || null,
     scheduled_date: wo.scheduled_date || null,
-    scope_items: redact.scopeItems(
-      (Array.isArray(wo.scope_items) ? wo.scope_items : []).map((
-        item: unknown,
-      ) => mapStringLeaves(item, hold)),
-    ).map((item) => mapStringLeaves(item, restore)),
-    special_instructions: instructions || null,
+    scope_items: scopeItems,
+    special_instructions: written(instructions)
+      ? instructions
+      : written(wo?.special_instructions)
+      ? TRADE_WORK_ORDER_LINE_WITHHELD
+      : null,
   };
 }
 

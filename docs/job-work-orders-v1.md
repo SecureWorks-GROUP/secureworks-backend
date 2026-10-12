@@ -256,6 +256,18 @@ money filter: `30 m at 45 per m` reads `30 m` without the 45. The filter itself
 and the trade quote views are unchanged. Cases:
 `job_work_order_trade_measurements_test.ts`.
 
+The filter withholds a whole field when it reads a money word in it (`fee`,
+`price`, a rate such as `85/hr`), amount or not. In this view alone a scope
+line's text or a special instruction withheld that way reads
+`Line withheld. Ask the office for this detail.`
+(`TRADE_WORK_ORDER_LINE_WITHHELD`), so the trade sees that a line exists and
+can ask; none of the original text or any amount is returned. A field that was
+empty, and a price key on a scope item, still return nothing. Follow-up, not
+built: office staff are not yet told which lines a trade cannot see, so a line
+such as `Tip fee included. Dog on site.` reaches the trade as the placeholder
+with no warning on the Ops side. Until then, keep site instructions and money
+wording in separate lines.
+
 Trade invoice flow: the trade allocates and invoices as before. After the
 invoice is created, show `my_job_work_order` for each job on it, then a "Any
 variations to the work order?" choice; on yes, call

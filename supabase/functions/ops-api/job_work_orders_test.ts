@@ -996,6 +996,7 @@ const redact = {
       unit: i.unit,
     })),
   text: (v: string) => v,
+  scopeTextKey: (key: string) => key === "description",
 };
 
 Deno.test("trade read: scope and agreed details only, never agreed labour or prices", async () => {
