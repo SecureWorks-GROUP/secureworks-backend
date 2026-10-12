@@ -160,14 +160,14 @@ Deno.test("loadDraftPackContext leaves quote builder photos out of the default r
 
   const context = await loadDraftPackContext(client, { job_id: "job-qb" });
   assertEquals(
-    [...context.selected_photo_urls].sort(),
+    [...context.selected_photo_urls!].sort(),
     [
       "https://example.test/completion.jpg",
       "https://example.test/scope.jpg",
     ],
   );
   assertEquals(
-    context.source_docs.some((doc: any) =>
+    context.source_docs!.some((doc: { url?: unknown }) =>
       doc.url === "https://example.test/quote-builder.jpg"
     ),
     false,
