@@ -856,6 +856,8 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261006014000", "context_job_story"),
                       # W11: the context_scorecard door (rows 1 to 14, per job).
                       ("20261006032000", "context_scorecard"),
+                      # job overview v1: the job_overview and request_job_story doors.
+                      ("20261009100000", "context_job_story_text"),
                       # quote builder actions (quote_builder_*).
                       ("20261009120000", "quote_builder_versions")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
