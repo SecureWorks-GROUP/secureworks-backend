@@ -20,6 +20,12 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemb
 \ir ../../../rollbacks/20261011100000_context_story_lead_rank_down.sql
 \endif
 SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
+-- (the finished wake, 20261012093500, replaced the lead rule, the judge and the due list since: its
+-- down goes first, as the scoping pipeline's refuses while a later body is live)
+SELECT to_regprocedure('public.context_finished_wake_hours()') IS NOT NULL AS finished_wake_live \gset
+\if :finished_wake_live
+\ir ../../../rollbacks/20261012093500_context_finished_wake_down.sql
+\endif
 \if :scoping_pipeline_live
 \ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
 \endif
