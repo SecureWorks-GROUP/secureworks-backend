@@ -1,4 +1,4 @@
--- Contract for 20261006120000_job_work_orders.sql: one live work order per
+-- Contract for 20261012090000_job_work_orders.sql: one live work order per
 -- fencing / patio job, draft then approved (sealed) by the named approver,
 -- labour stamped against it at invoice submit, backfill switched off.
 

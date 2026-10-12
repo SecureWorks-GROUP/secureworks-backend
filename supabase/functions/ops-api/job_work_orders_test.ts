@@ -396,7 +396,7 @@ Deno.test("figures: near_agreed at 90 percent, nothing counts before approval", 
 Deno.test("lists mirror the migration's SQL lists", async () => {
   const sql = await Deno.readTextFile(
     new URL(
-      "../../migrations/20261006120000_job_work_orders.sql",
+      "../../migrations/20261012090000_job_work_orders.sql",
       import.meta.url,
     ),
   );
