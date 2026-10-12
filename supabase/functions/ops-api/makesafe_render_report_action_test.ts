@@ -3093,6 +3093,101 @@ Deno.test("curated bind and assembler agree on created_at then id photo order", 
   }
 });
 
+Deno.test("curated bind never counts a quote builder photo as report evidence", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nquote builder photo fixture");
+  const media = [
+    {
+      id: "scope-1",
+      type: "photo",
+      phase: "scope",
+      created_at: "2026-10-01T01:00:00+00:00",
+      storage_url: "https://storage.example.test/scope.jpg",
+    },
+    {
+      id: "qb-1",
+      type: "photo",
+      phase: "quote_builder",
+      created_at: "2026-10-01T02:00:00+00:00",
+      storage_url: "https://storage.example.test/quote-builder.jpg",
+    },
+    {
+      id: "completion-1",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-10-01T03:00:00+00:00",
+      storage_url: "https://storage.example.test/completion.jpg",
+    },
+  ];
+  const photoBytes = new TextEncoder().encode("photo-bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const reportJob = (
+    ids: string[],
+    excluded: Array<{ evidence_id: string; reason: string }>,
+  ) => ({
+    ...currentReportJob(),
+    photos: ids.map((id) => ({
+      evidence_id: id,
+      caption: `Site photo ${id}`,
+      content_sha256: contentHash,
+    })),
+    photo_evidence: {
+      source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+      completeness_verified: true,
+      source_count: media.length,
+      applicable_count: ids.length,
+      selected_count: ids.length,
+      applicable_ids: ids,
+      selected_ids: ids,
+      excluded,
+      rejected: [],
+    },
+  });
+  const base = await bindBody(bytes);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const { client } = bindClient(bytes, { media });
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      {
+        ...base,
+        report_job: reportJob(
+          ["scope-1", "completion-1"],
+          [{ evidence_id: "qb-1", reason: "internal quote builder photo" }],
+        ),
+      },
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+
+    const { client: second } = bindClient(bytes, { media });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          second,
+          {
+            ...base,
+            report_job: reportJob(["scope-1", "qb-1", "completion-1"], []),
+          },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "photo_evidence does not completely account",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 Deno.test("curated bind photo accounting keeps sub-millisecond created_at order", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nmicrosecond photo fixture");
   // Both rows land inside the same millisecond, so `Date.parse` alone reports
