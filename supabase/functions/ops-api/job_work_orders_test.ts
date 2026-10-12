@@ -16,6 +16,7 @@ import {
   reportWorkOrderVariation,
   resendWorkOrderVariationEmails,
   resolveWorkOrderApprover,
+  sendOutlookVariationEmail,
   tradeJobWorkOrderRead,
   updateJobWorkOrderDraft,
   validateJobWorkOrderDraftPatch,
@@ -1128,6 +1129,62 @@ Deno.test("variation: after its draft invoice was replaced, a repeat report on t
   assertEquals(db.tables.work_order_variation_emails.length, 2);
 });
 
+Deno.test("variation emails: the send request names no job, so the body with the figures is never filed on the job", async () => {
+  const db = baseDb({
+    feature_flags: [{
+      flag_name: "work_order_variation_emails_v1",
+      enabled: true,
+    }],
+    work_order_variations: [],
+  });
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const fetchImpl = ((input: unknown, init?: { body?: unknown }) => {
+    requests.push({
+      url: String(input),
+      body: JSON.parse(String(init?.body)),
+    });
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  }) as typeof fetch;
+
+  const out = await reportWorkOrderVariation(
+    db,
+    { trade_invoice_id: INV, job_id: JOB, description: "Extra post" },
+    { id: TRADE, orgId: ORG },
+    {
+      sendEmail: sendOutlookVariationEmail(
+        "https://x.invalid",
+        "service-key",
+        fetchImpl,
+      ),
+    },
+  );
+  assertEquals(out.emails.map((e: any) => e.status), ["sent", "sent"]);
+  assertEquals(requests.map((r) => [r.url, r.body.to]), [
+    [
+      "https://x.invalid/functions/v1/send-outlook-email",
+      WORK_ORDER_VARIATION_FINANCE_EMAIL,
+    ],
+    [
+      "https://x.invalid/functions/v1/send-outlook-email",
+      WORK_ORDER_VARIATION_ADMIN_EMAIL,
+    ],
+  ]);
+  for (const request of requests) {
+    assertEquals(Object.keys(request.body).sort(), [
+      "htmlBody",
+      "mailbox",
+      "subject",
+      "to",
+    ]);
+    assert(String(request.body.htmlBody).includes("Agreed labour"));
+    assert(!JSON.stringify(request.body).includes(JOB));
+    assertEquals(
+      request.body.subject,
+      "Work order variation on SWF-26123 (Duncraig)",
+    );
+  }
+});
+
 const EMAILS_ON = [{
   flag_name: "work_order_variation_emails_v1",
   enabled: true,
@@ -1289,11 +1346,11 @@ Deno.test("resend: failed and abandoned emails go once; sent, in-flight and reco
     work_order_variations: variations,
     work_order_variation_emails: rows(),
   });
-  const sent: Array<[string, string]> = [];
+  const sent: string[] = [];
   const deps = {
     now: () => T0,
     sendEmail: async (e: any) => {
-      sent.push([e.recipient_role, e.jobId]);
+      sent.push(e.recipient_role);
       return { ok: true as const };
     },
   };
@@ -1302,7 +1359,7 @@ Deno.test("resend: failed and abandoned emails go once; sent, in-flight and reco
     ["e-failed", "sent"],
     ["e-stale", "sent"],
   ]);
-  assertEquals(sent, [["finance", JOB], ["admin", JOB]]);
+  assertEquals(sent, ["finance", "admin"]);
   assertEquals(
     db.tables.work_order_variation_emails.map((e) => e.status),
     ["sent", "sent", "sending", "sent", "recorded"],

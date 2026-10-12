@@ -122,6 +122,13 @@ finance@secureworkswa.com.au and a separate one to admin@secureworkswa.com.au,
 sent from admin@ through `send-outlook-email`. Addresses: secureworks-wiki
 `harness/ops/sops/make-safe-ops-agent-sop.md` lines 134 and 137.
 
+The email body carries the agreed labour, billed to date and remaining, so the
+send request names no job (`job_id` is never passed). With a job id,
+`send-outlook-email` copies the whole body into `po_communications`, which any
+signed-in user of the org can read, and files it in the job's client email
+thread. The `work_order_variation_emails` ledger, which trades cannot read, is
+the record of each email. The subject carries the job number and suburb only.
+
 A trade usually raises the variation while the invoice is still a draft, and
 saving or submitting an invoice deletes the draft row and inserts a new one.
 The variation is not lost with it: `carry_work_order_variations(prior,

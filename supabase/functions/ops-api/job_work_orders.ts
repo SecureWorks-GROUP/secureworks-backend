@@ -1133,7 +1133,7 @@ export async function tradeJobWorkOrderRead(
 // ── Trade: report a variation on the trade's own invoice ─────────────────────
 
 export type VariationEmailSender = (
-  email: VariationEmail & { jobId: string },
+  email: VariationEmail,
 ) => Promise<
   { ok: true } | { ok: false; error: string }
 >;
@@ -1275,7 +1275,6 @@ export async function reportWorkOrderVariation(
   const emailResults = await recordAndMaybeSendVariationEmails(
     client,
     variation.id,
-    jobId,
     emails,
     deps.sendEmail,
     deps.now,
@@ -1321,7 +1320,6 @@ function variationEmailOwed(
 async function claimAndSendVariationEmail(
   client: any,
   row: any,
-  jobId: string,
   sendEmail: VariationEmailSender,
   nowMs: number,
 ): Promise<string> {
@@ -1345,7 +1343,6 @@ async function claimAndSendVariationEmail(
       subject: row.subject,
       body_text: row.body_text,
       body_html: row.body_html,
-      jobId,
     });
   } catch (e) {
     outcome = { ok: false, error: (e as Error)?.message || "send threw" };
@@ -1373,7 +1370,6 @@ async function claimAndSendVariationEmail(
 export async function recordAndMaybeSendVariationEmails(
   client: any,
   variationId: string,
-  jobId: string,
   emails: VariationEmail[],
   sendEmail: VariationEmailSender,
   now: () => number = Date.now,
@@ -1419,7 +1415,7 @@ export async function recordAndMaybeSendVariationEmails(
       continue;
     }
     const status = sendOn && variationEmailOwed(row, now(), true)
-      ? await claimAndSendVariationEmail(client, row, jobId, sendEmail, now())
+      ? await claimAndSendVariationEmail(client, row, sendEmail, now())
       : row.status;
     results.push({ recipient_role: email.recipient_role, status });
   }
@@ -1456,28 +1452,10 @@ export async function resendWorkOrderVariationEmails(
   const owed = (rows || []).filter((r: any) =>
     variationEmailOwed(r, now(), false)
   );
-  const jobByVariation = new Map<string, string>();
-  const variationIds = [
-    ...new Set(owed.map((r: any) => String(r.variation_id))),
-  ];
-  for (let i = 0; i < variationIds.length; i += 25) {
-    const { data, error: varErr } = await client.from("work_order_variations")
-      .select("id, job_id").in("id", variationIds.slice(i, i + 25));
-    if (varErr) {
-      fail(
-        500,
-        "variations_unreadable",
-        "Work order variations could not be read",
-      );
-    }
-    for (const v of data || []) jobByVariation.set(String(v.id), v.job_id);
-  }
   const results: Array<
     { id: string; variation_id: string; recipient_role: string; status: string }
   > = [];
   for (const row of owed) {
-    const jobId = jobByVariation.get(String(row.variation_id));
-    if (!jobId) continue;
     results.push({
       id: row.id,
       variation_id: row.variation_id,
@@ -1485,7 +1463,6 @@ export async function resendWorkOrderVariationEmails(
       status: await claimAndSendVariationEmail(
         client,
         row,
-        jobId,
         deps.sendEmail,
         now(),
       ),
@@ -1515,7 +1492,6 @@ export function sendOutlookVariationEmail(
           to: email.recipient,
           subject: email.subject,
           htmlBody: email.body_html,
-          job_id: email.jobId,
         }),
       },
     );
