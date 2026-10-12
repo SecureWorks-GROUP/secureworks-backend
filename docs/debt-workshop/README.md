@@ -56,7 +56,7 @@ A refusal is `{ok: false, code, error}`, with a plain reason in `error`. The cod
 - `sending_off`, `not_owner`, `owner_not_set`, `operator_access_required`, `amount_required`;
 - `part_paid`, `paid`, `not_open`;
 - `possible_payment` (it also carries `possible_payments[]`);
-- `already_sent`, `step_not_due`, `payer_not_linked`, `neighbour_send_unsupported`, `no_email`, `nothing_due`;
+- `already_sent`, `step_not_due`, `payer_not_linked`, `no_email`, `nothing_due`;
 - `text_not_allowed`, `xero_unavailable`, `bank_check_unavailable`;
 - `send_refused_by_guard`, `send_not_confirmed`.
 
@@ -70,7 +70,7 @@ The checks run in this order. A refusal is logged to `debt_ws_log` as `send_refu
    - no talk of legal action, debt collectors or credit reporting;
    - no unfilled blank;
    - 1,600 characters or fewer.
-3. The invoice is a homeowner invoice that is still open and is chased, and its PAYER has a GHL contact (`payer_not_linked`) and is the job's own client (`neighbour_send_unsupported`, see the payer below). The text goes to the payer's contact.
+3. The invoice is a homeowner invoice that is still open and is chased, and its PAYER has a GHL contact (`payer_not_linked`). The text goes to the payer's own contact (a neighbour's from their `job_contacts` row), with the job named so the contact/job guard runs (see the payer below).
 4. The step is the one due now. A reply step (`reply_says_paid`, `reply_promise` or `reply_problem`) needs its suggestion instead, and is not held by Says paid or Rectification.
 5. The step has not been sent already this cycle.
 6. A live Xero read of the invoice:
@@ -100,7 +100,7 @@ Otherwise the payer is not resolved (the Xero name only, nothing to link or text
 - **Overview:** each row carries `payer_contact`; `ghl_linked` means the payer is linked.
 - **Job view:** the payer's phone, `job.shares[]` (label, payer name, owing, paid), and the payer's own messages. A message is the payer's when its GHL contact (`contact_id`), an email address or a phone is theirs. A payer with no GHL contact gets no conversation (`reason: "payer_not_linked"`), never the job's thread in its place. `getJobConversation` reads a neighbour payer's own cached GHL thread too (`extra_contact_ids`, accepted only for contacts on that job's `job_contacts` rows).
 - **Link:** a neighbour's contact goes on their `job_contacts` row; the job's link is untouched. Candidates are searched by the payer's own phone and email.
-- **Sending:** the text goes to the payer's GHL contact. A neighbour is refused with `neighbour_send_unsupported`: `sendChaseSms` (`assertGhlContactMatchesResolvedJob`) and ghl-proxy's contact/job match accept only `jobs.ghl_contact_id`, and there is no guarded neighbour text path (`sendClientUpdate` with `job_contact_id` reaches a neighbour only by leaving the job off the send, which skips the match guard). The guard is not widened here.
+- **Sending:** the text goes to the payer's own GHL contact, never the job's, with `job_id` passed. `sendChaseSms` (`assertGhlContactMatchesResolvedJob`) and ghl-proxy's `send_sms` contact/job match accept a contact that is `jobs.ghl_contact_id` OR the `ghl_contact_id` of a live `job_contacts` row (status empty or `active`, no `removed_at`) on the SAME job (Captain ruling, 12 Oct 2026; `_shared/job_contact_membership.ts`). A contact on another job's list, a removed row, or a contact on no list is refused as before (`send_refused_by_guard`); a failed contact-list read fails closed. The SES fence, the 10-minute duplicate block and the 771 sender default are unchanged. `sendClientUpdate` with `job_contact_id` now names the job too, so that path runs the same guard.
 - **Jan's list:** the payer's label, the payer's phone and the site address. **The agent:** the payer's contact, messages and `send_block`. Statements are unchanged.
 
 ## The switches

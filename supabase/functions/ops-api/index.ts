@@ -204,6 +204,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
+import { findLiveJobContactForGhlContact } from '../_shared/job_contact_membership.ts'
 import {
   canonicalMakesafeBuilderDisplayName,
   canonicalMakesafeInvoiceContactName,
@@ -35847,16 +35848,31 @@ async function assertGhlContactMatchesResolvedJob(
       ),
     )
   }
+  // The job's own contact passes.
   if (
-    !job.data.ghl_contact_id ||
-    String(job.data.ghl_contact_id) !== String(ghlContactId)
-  ) {
-    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
-      job_id: jobId,
-      expected_ghl_contact_id: job.data.ghl_contact_id || null,
-      received_ghl_contact_id: ghlContactId,
-    }))
+    job.data.ghl_contact_id &&
+    String(job.data.ghl_contact_id) === String(ghlContactId)
+  ) return
+  // So does a live party on the SAME job's contact list (a neighbour on a shared
+  // fence; Captain ruling 12 Oct 2026). A removed row, another job's row or a
+  // contact on no list is refused exactly as before; a failed read fails closed.
+  const party = await findLiveJobContactForGhlContact(client, jobId, ghlContactId)
+  if (party.ok) return
+  if (party.reason === 'lookup_failed') {
+    throw new SesActionError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        action,
+        `The job contact list lookup failed (${party.message}).`,
+        { job_id: jobId, ghl_contact_id: ghlContactId },
+      ),
+    )
   }
+  throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+    job_id: jobId,
+    expected_ghl_contact_id: job.data.ghl_contact_id || null,
+    received_ghl_contact_id: ghlContactId,
+  }))
 }
 
 async function assertNoSyntheticLivefireJobs(
@@ -59653,7 +59669,9 @@ export async function sendClientUpdate(client: any, body: any) {
       const smsRes = await fetch(ghlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contactId: contactGhlId, message }),
+        // A per-contact send names the job, so ghl-proxy's contact/job match runs:
+        // the contact must be the job's or a live party on the same job's list.
+        body: JSON.stringify({ contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) }),
       })
       // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
       // so only a body confirming success may record status='sent' — an in-band

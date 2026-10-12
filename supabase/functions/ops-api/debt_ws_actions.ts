@@ -484,11 +484,11 @@ const firstName = (name: string) => name.trim().split(/\s+/)[0] || name;
 /**
  * Why this invoice's payer cannot be texted from here, or null when they can.
  *   payer_not_linked: the payer has no GoHighLevel contact yet (link it first).
- *   neighbour_send_unsupported: the payer is a neighbour on a shared job. The one guarded
- *     text path (sendChaseSms: assertGhlContactMatchesResolvedJob, then ghl-proxy's
- *     contact/job match) only accepts jobs.ghl_contact_id, the primary client's contact,
- *     and there is no guarded neighbour path. A neighbour text is refused here, never
- *     sent to the job's contact instead and never sent around the guard.
+ * A neighbour on a shared job is texted at their OWN contact (their job_contacts row's
+ * ghl_contact_id), never the job's. The send names the job, so the one guarded text path
+ * (sendChaseSms: assertGhlContactMatchesResolvedJob, then ghl-proxy's contact/job match)
+ * checks the contact is the job's own or a live party on the same job's contact list
+ * (Captain ruling, 12 Oct 2026). A contact on no list for this job is still refused there.
  */
 export function payerSendBlock(
   entry: Pick<BookEntry, "job" | "payer">,
@@ -500,13 +500,6 @@ export function payerSendBlock(
       code: "payer_not_linked",
       message:
         `Link ${who}'s GoHighLevel contact first: there is no contact to text`,
-    };
-  }
-  if (!payer.is_primary) {
-    return {
-      code: "neighbour_send_unsupported",
-      message:
-        `${who} is a neighbour on this job. Texts can only go to the job's own client contact for now, so nothing was sent. Text ${who} from GoHighLevel directly`,
     };
   }
   return null;

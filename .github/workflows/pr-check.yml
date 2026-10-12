@@ -336,6 +336,8 @@ jobs:
             supabase/functions/ghl-proxy/provider_reads_test.ts \
             supabase/functions/ghl-proxy/lead_search_test.ts \
             supabase/functions/ghl-proxy/sms_sender_default_test.ts \
+            supabase/functions/ghl-proxy/send_sms_contact_guard_test.ts \
+            supabase/functions/_shared/job_contact_membership_test.ts \
             supabase/functions/ghl-proxy/calendar_events_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_release_test.ts \
@@ -374,6 +376,7 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
             supabase/functions/ops-api/proposed_sms_receipt_test.ts \
+            supabase/functions/ops-api/chase_sms_contact_guard_test.ts \
             supabase/functions/ops-api/retired_booking_actions_test.ts \
             supabase/functions/ops-api/invoice_context_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \

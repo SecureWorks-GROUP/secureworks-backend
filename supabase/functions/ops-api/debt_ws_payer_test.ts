@@ -9,6 +9,7 @@ import {
 import {
   _resetDebtWsBankCacheForTest,
   DEBT_WS_ACTIONS,
+  DebtWsSendRefusedError,
   runDebtWsAction,
 } from "./debt_ws_actions.ts";
 import {
@@ -374,7 +375,8 @@ Deno.test("job: a neighbour's invoice shows the neighbour's phone, shares, no bo
   assertEquals(linked.conversation.reason, null);
   assertEquals(rec.conversationReads.at(-1)!.contactIds, [SHARED.neighbourGhl]);
   assertEquals(linked.contact.candidates, []);
-  assertEquals(linked.send_block.code, "neighbour_send_unsupported");
+  // A linked neighbour can be texted at their own contact.
+  assertEquals(linked.send_block, null);
 });
 
 // ── Linking ──
@@ -493,7 +495,7 @@ Deno.test("link_contact: a neighbour with no contact row on the job has nowhere 
 
 // ── Sending ──
 
-Deno.test("decide: a neighbour is never texted on the job's (primary's) contact", async () => {
+Deno.test("decide: a linked neighbour is texted at THEIR own contact, never the job's", async () => {
   const store = sharedStore();
   store.settingsRow.sending_enabled = true;
   const { deps, rec } = fakeDeps(store, { env: ON });
@@ -501,16 +503,17 @@ Deno.test("decide: a neighbour is never texted on the job's (primary's) contact"
   assertEquals(unlinked.body.code, "payer_not_linked");
   assertEquals(rec.sms.length, 0);
 
-  // Linked: the guarded text path only accepts the job's own contact, so a neighbour
-  // send is refused with its own code and logged, not routed around the guard.
+  // Linked: the text goes to the neighbour's job_contacts contact, and names the job so
+  // sendChaseSms's contact/job match (job contact or a live party on the same job's
+  // contact list) runs on it.
   linkNeighbour(store);
   const linked = await call(deps, "debt_ws_decide", SHAUN, B_SEND);
-  assertEquals(linked.status, 409);
-  assertEquals(linked.body.code, "neighbour_send_unsupported");
-  assertEquals(rec.sms.length, 0);
-  assertEquals(store.sendRows.length, 0);
-  assertEquals(store.logRows.at(-1)!.kind, "send_refused");
-  assertEquals(store.logRows.at(-1)!.meta.code, "neighbour_send_unsupported");
+  assertEquals(linked.body.sent, true);
+  assertEquals(rec.sms.length, 1);
+  assertEquals(rec.sms[0].ghl_contact_id, SHARED.neighbourGhl);
+  assertEquals(rec.sms[0].job_id, SHARED.job);
+  assertEquals(rec.sms[0].xero_invoice_id, SHARED.bBal);
+  assert(rec.sms[0].ghl_contact_id !== SHARED.primaryGhl);
 
   // The single-payer fence still texts its payer, who is the job's contact.
   const fence = await call(deps, "debt_ws_decide", SHAUN, {
@@ -521,7 +524,20 @@ Deno.test("decide: a neighbour is never texted on the job's (primary's) contact"
     amount: 1000,
   });
   assertEquals(fence.body.sent, true);
-  assertEquals(rec.sms[0].ghl_contact_id, "ghlcontact0000000001");
+  assertEquals(rec.sms[1].ghl_contact_id, "ghlcontact0000000001");
+});
+
+Deno.test("decide: the guard refusing a neighbour's contact sends nothing and releases the claim", async () => {
+  const store = sharedStore();
+  store.settingsRow.sending_enabled = true;
+  linkNeighbour(store);
+  const { deps } = fakeDeps(store, {
+    env: ON,
+    smsError: new DebtWsSendRefusedError("contact is not on this job"),
+  });
+  const res = await call(deps, "debt_ws_decide", SHAUN, B_SEND);
+  assertEquals(res.body.code, "send_refused_by_guard");
+  assertEquals(store.sendRows.at(-1)!.status, "refused");
 });
 
 // ── Jan's list and the agent ──
@@ -557,5 +573,5 @@ Deno.test("agent queue: a neighbour's bundle has their contact and only their me
   );
   assertEquals(linked.messages.map((m: any) => m.id), ["bev:4", "bev:3"]);
   assert(linked.messages.every((m: any) => !String(m.body).includes("Jordan")));
-  assertEquals(linked.send_block.code, "neighbour_send_unsupported");
+  assertEquals(linked.send_block, null);
 });
