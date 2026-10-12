@@ -175,7 +175,6 @@ CREATE TABLE IF NOT EXISTS public.work_order_variations (
   reported_by uuid NOT NULL REFERENCES public.users(id),
   description text NOT NULL CHECK (length(btrim(description)) BETWEEN 1 AND 2000),
   amount_ex numeric(12,2) CHECK (amount_ex IS NULL OR amount_ex >= 0),
-  status text NOT NULL DEFAULT 'reported' CHECK (status IN ('reported', 'withdrawn')),
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (trade_invoice_id, job_id)
 );
