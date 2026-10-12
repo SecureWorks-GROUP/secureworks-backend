@@ -834,6 +834,21 @@ closes a payment item at the end of its paid Perth day (`context_ledger_paid_clo
 item and in a transition alike. The packet stays `ledger-packet-v1` (the reader refuses any
 other version): add fields, never rename or retype one.
 
+## A Reading's Unread Rows Have One Rule
+
+`context_ledger_row_unread(landed_at, automated, evidence_until)` (`20261009132000`) is the one
+rule for a row a ledger reading has not read: a `context_ledger_evidence_rows` row that is not
+automated and landed after the reading's `evidence_until` (counts leave copies out). The judge
+(an update is not held by the backoff for such a row that landed after the last failed read; a
+waiting shadow answers a live reading's rebuild only with none), the due order (within a priority
+updates first, each group by the longest wait), the go-live sweep (`context_ledger_promote_shadow`
+skips a shadow with one, `unread_rows`) and the story's ledger read (`unread_rows`, so
+`meta.ledger.stale` and the not-known line) all read it; never re-derive it. `new_evidence` still
+counts every row, so an automated-only update stays cheap. Finish's auto-promote is not gated on
+purpose: its reading read every row landed by its claim, and a shadow held beside a live reading
+is never updated. A later change to those four bodies rolls this migration back first in the lead
+cutoff, story safety and story fixups re-applies and the lead cutoff break proof.
+
 ## The Job Story Sorts Text In C Order
 
 Production's collation is ICU `en-US` (letters compared without case first,
@@ -898,13 +913,25 @@ first line's item or a reason for whose move.
 
 ## A Lead Not Followed Up Has One Rule
 
-`context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`; null ids means
-every live job) and `context_lead_monitored(job, as_of)`, which returns that
+`context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`, drafts and
+windows by type since `20261009133000`; null ids means every live job, a draft
+only while monitored) and `context_lead_monitored(job, as_of)`, which returns that
 job's same row (`job_id`, `monitored`, `state`, ...; no row for an unknown job),
-are the owner's 7 Oct 2026 lead rule, the only one. A job still at `quoted` with
+are the owner's lead rule (7 Oct 2026, widened 9 Oct), the only one. The window is
+`context_lead_window_hours(type)`: 1008 hours (6 weeks) for a patio job, 672 for
+fencing and every other type; change it there. A draft (scoping, and patio
+quoting, which stays at draft until accepted) is monitored only inside its window
+after the newer of its newest real activity on the draft itself (a non-automated
+message, never mail among our own people; the customer's old-inbox mail from the
+client's address; a quote sent, viewed, accepted or declined; an app event other
+than the machine rows, a scope save among them) and its creation; with no real
+activity never (states `draft_active`, `draft_quiet`, `draft_no_activity`). A
+draft the rule does not monitor is not live for the judge (`not_live`), the due
+list judges only the drafts it monitors, and the story never says "Lead not
+followed up" for a draft (only `now.monitored` is false). A job still at `quoted` with
 a quote sent and no progress (no accepted quote, no Xero invoice or bill on the
 job that is not voided or deleted, whatever its type, no standing booking, no
-later status) stops being monitored 672 hours after the newer of its newest
+later status) stops being monitored its window after the newer of its newest
 quote send (`job_documents` type `quote`, else `jobs.quoted_at`) and the
 customer's newest inbound text, email or call wherever the story finds it: on
 the job (`context_job_record_messages`), their old-inbox mail by address, their
@@ -924,7 +951,8 @@ SQL helper called with a sub-select argument is never inlined and runs whole
 (the rule reads `context_job_record_messages(ARRAY[l.id], k.t)` per lead for
 that reason: 1.8 s against 13.5 s read one job at a time for every live job).
 The story fixes and story safety contracts roll this migration back first in
-their re-apply sections, as its own guard pins their bodies.
+their re-apply sections, as its own guard pins their bodies (and the scoping
+pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's).
 
 ## The Saved Job Story Is Fresh By Its Digest, Never By The Clock
 

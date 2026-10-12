@@ -15,6 +15,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { opsAiReviewRequestMessage } from './review_request.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -2382,7 +2383,7 @@ async function executeTool(name: string, input: any, view: string): Promise<{ re
         return { result: { error: `Job ${job.job_number} is ${job.status} — must be complete or invoiced to send review request` } }
       }
       const method = input.method || 'sms'
-      const reviewMsg = `Hi ${(job.client_name || '').split(' ')[0]}, thanks for choosing SecureWorks for your project! We'd really appreciate a quick Google review — it helps other Perth homeowners find quality builders. Here's the link: https://g.page/r/secureworkswa/review`
+      const reviewMsg = opsAiReviewRequestMessage(job.client_name)
       return {
         result: {
           action: 'send_review_request',
