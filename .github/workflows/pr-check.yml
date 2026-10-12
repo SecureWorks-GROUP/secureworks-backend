@@ -272,6 +272,15 @@ jobs:
             --filter "Ambrose" \
             supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
 
+      # An adapter registered in code but missing from the database's adapter
+      # list is refused on every case insert and nothing else notices (Ambrose,
+      # 12 Oct 2026). Compares the real registry with the newest definition of
+      # makesafe_intake_cases_deterministic_shapes_check in the migrations.
+      - name: Check every intake adapter is admitted by the database
+        run: |
+          deno test --allow-read \
+            supabase/functions/ops-api/makesafe_adapter_admission_contract_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as
