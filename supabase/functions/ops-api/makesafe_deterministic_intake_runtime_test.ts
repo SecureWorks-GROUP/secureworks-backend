@@ -26,6 +26,14 @@ import {
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
 } from "./makesafe_synthetic_livefire.ts";
 import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
+import {
+  AMBROSE_TEST_COMPANY_ID,
+  AMBROSE_TEST_SENDER,
+  ambroseBody,
+  ambrosePdfText,
+  type AmbrosePurchaseOrderFixture,
+  ambroseSubject,
+} from "./makesafe_ambrose_intake_fixtures.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -7556,4 +7564,241 @@ Deno.test("a degraded case re-read decides against the known row instead of crea
   assertEquals(caseRow.state, "confirmed_live_job");
   assertEquals(caseRow.last_decision_provenance, "human");
   assertEquals(caseRow.last_decision_actor, "captain@secureworkswa.com.au");
+});
+
+// ── Ambrose purchase orders reaching intake from two addresses ───────────────
+// Ambrose sends to the swwa@ general Group and has been asked to send to ses@
+// too. The monitor stores a swwa@ post under the ses@ mailbox key, so here both
+// copies are ordinary intake sources with different post ids. One purchase
+// order must still be one job. Fixtures are synthetic, in the Ambrose shape.
+function ambroseIntakeStore(): Store {
+  const store = baseStore();
+  store.makesafe_companies.push({
+    id: AMBROSE_TEST_COMPANY_ID,
+    slug: "acg",
+    name: "Ambrose Construct Group",
+    sender_patterns: ["ambrose.test"],
+    parsing_rules: null,
+    active: true,
+  });
+  return store;
+}
+
+function pushAmbroseMail(
+  store: Store,
+  postId: string,
+  fixture: AmbrosePurchaseOrderFixture,
+  receivedAt: string,
+  pdfSha: string,
+) {
+  store.emails.push(email({
+    post_id: postId,
+    conversation_id: `conversation-${postId}`,
+    from_email: AMBROSE_TEST_SENDER,
+    received_at: receivedAt,
+    subject: ambroseSubject(fixture),
+    body_content: ambroseBody(fixture),
+  }));
+  const text = ambrosePdfText(fixture);
+  store.email_attachments.push({
+    id: `att-${postId}`,
+    email_id: postId,
+    name: "Purchase Order.pdf",
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 300_000,
+    sha256: pdfSha,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: text,
+    pdf_extraction_char_count: text.length,
+    pdf_extraction_page_count: 7,
+    pdf_extraction_extractor: "fixture",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+}
+
+const AMBROSE_MAKE_SAFE: AmbrosePurchaseOrderFixture = {
+  job: "20999101",
+  sequence: "02",
+  address: "12 Example Street Testville WA 6000",
+  kind: "make_safe",
+};
+const AMBROSE_REPAIR: AmbrosePurchaseOrderFixture = {
+  job: "20999202",
+  sequence: "05",
+  address: "4/7 Sample Road Demo Park WA 6010",
+  kind: "repair",
+};
+
+Deno.test("an Ambrose make-safe PO sent to swwa@ and again to ses@ is one job, and a later Updated email adds no second", async () => {
+  const store = ambroseIntakeStore();
+  pushAmbroseMail(
+    store,
+    "swwa-copy",
+    AMBROSE_MAKE_SAFE,
+    "2026-07-18T06:31:00.000Z",
+    "sha-po-v1",
+  );
+  let approvals = 0;
+  const approving = () => {
+    approvals++;
+    return Promise.resolve({ job: { id: "job-ambrose-ms" } });
+  };
+  const client = fakeClient(store);
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: approving,
+    });
+
+  const first = await run(NOW);
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(approvals, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].state, "confirmed_live_job");
+  assertEquals(
+    store.makesafe_intake_cases[0].builder_po_canonical,
+    "PO-2099910102",
+  );
+
+  // The same email, now also delivered to ses@: a new post, the same PDF bytes.
+  pushAmbroseMail(
+    store,
+    "ses-copy",
+    AMBROSE_MAKE_SAFE,
+    "2026-07-18T06:31:05.000Z",
+    "sha-po-v1",
+  );
+  const second = await run("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(second.totals.case_rows_created, 0);
+  assertEquals(approvals, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+
+  // Ambrose re-issues the same PO as "Updated" with a changed PDF.
+  pushAmbroseMail(
+    store,
+    "updated-copy",
+    { ...AMBROSE_MAKE_SAFE, updated: true },
+    "2026-07-19T04:35:00.000Z",
+    "sha-po-v2",
+  );
+  const third = await run("2026-07-20T12:04:00.000Z");
+  assertEquals(third.totals.jobs_created, 0);
+  assertEquals(third.totals.case_rows_created, 0);
+  assertEquals(approvals, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  // All three emails are accounted on the one case: none is left without a fate.
+  assertEquals(
+    store.makesafe_intake_case_sources.map((row: any) => row.post_id).sort(),
+    ["ses-copy", "swwa-copy", "updated-copy"],
+  );
+  assertEquals(
+    new Set(store.makesafe_intake_case_sources.map((row: any) => row.case_id))
+      .size,
+    1,
+  );
+
+  // CONTROL: a different purchase order on the same Ambrose job is new work.
+  pushAmbroseMail(
+    store,
+    "second-po",
+    { ...AMBROSE_MAKE_SAFE, sequence: "03" },
+    "2026-07-19T05:00:00.000Z",
+    "sha-po-03",
+  );
+  const fourth = await run("2026-07-20T12:06:00.000Z");
+  assertEquals(fourth.totals.jobs_created, 1);
+  assertEquals(approvals, 2);
+  assertEquals(store.makesafe_intake_cases.length, 2);
+});
+
+Deno.test("an Ambrose repair PO sent to both addresses is one review draft and is never auto-minted", async () => {
+  const store = ambroseIntakeStore();
+  pushAmbroseMail(
+    store,
+    "repair-swwa",
+    AMBROSE_REPAIR,
+    "2026-07-18T02:45:00.000Z",
+    "sha-repair",
+  );
+  let approvals = 0;
+  const client = fakeClient(store);
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "never" } });
+      },
+    });
+  const first = await run(NOW);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.makesafe_job_family,
+    "repair",
+  );
+
+  pushAmbroseMail(
+    store,
+    "repair-ses",
+    AMBROSE_REPAIR,
+    "2026-07-18T02:45:04.000Z",
+    "sha-repair",
+  );
+  pushAmbroseMail(
+    store,
+    "repair-updated",
+    { ...AMBROSE_REPAIR, updated: true },
+    "2026-07-19T03:28:00.000Z",
+    "sha-repair-v2",
+  );
+  const second = await run("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approvals, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 3);
+});
+
+Deno.test("an Ambrose acceptance prompt with no PDF never opens a job, whichever address it reached", async () => {
+  const store = ambroseIntakeStore();
+  store.emails.push(email({
+    post_id: "acceptance-swwa",
+    from_email: AMBROSE_TEST_SENDER,
+    received_at: "2026-07-18T02:00:00.000Z",
+    subject:
+      "Ambrose Construct Group Acceptance Required - Purchase Order: 20999202-05",
+    body_content:
+      "Ambrose Construct Group have allocated you PO #20999202-05 which requires your acceptance.",
+  }));
+  let approvals = 0;
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: NOW,
+    maxCases: 5,
+    selectionMode: "full_open",
+    approveDraft: () => {
+      approvals++;
+      return Promise.resolve({ job: { id: "never" } });
+    },
+  });
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.totals.drafts_created, 0);
+  assertEquals(approvals, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
 });

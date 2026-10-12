@@ -565,7 +565,8 @@ BEGIN
    ('public.context_job_story(uuid,timestamptz,uuid,timestamptz,boolean)', true, 'Job story (20261006014000), lead cutoff (20261007010000): %'),
    ('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)', false,
     'Job story (20261006014000), story fixes (20261006033000), story safety (20261006040000): (lead cutoff, 20261007010000) %'),
-   ('public.context_ledger_judge(uuid[])', true, 'Context ledger store (20261006013000), story safety (20261006040000): (lead cutoff, 20261007010000) %')
+   -- (widened by notes freshness, 20261009132000, which names itself first and keeps this slice's text after "Earlier")
+   ('public.context_ledger_judge(uuid[])', true, 'Context ledger store (20261006013000), story safety (20261006040000): %(lead cutoff, 20261007010000) %')
  ) v(sig, definer, cmt) LOOP
   SELECT pr.prosecdef, pr.provolatile, pr.proconfig, pr.prolang INTO p FROM pg_proc pr WHERE pr.oid = to_regprocedure(x.sig);
   IF p IS NULL THEN RAISE EXCEPTION 'lead cutoff contract: % missing', x.sig; END IF;
@@ -595,8 +596,37 @@ BEGIN
  END IF;
 END $shape$;
 
--- 5. Re-applying the migration changes nothing (its guard accepts its own bodies).
+-- 5. Re-applying the migration changes nothing (its guard accepts its own bodies). When the scoping
+-- pipeline (20261009133000) has replaced four of these bodies since, it is rolled back first inside
+-- this transaction, so the re-apply starts from this migration's own bodies.
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 BEGIN;
+-- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down
+-- goes first, as the story lead rank's refuses while a later assembler body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story settled notes, 20261011120000)%' AS story_settled_notes_live \gset
+\if :story_settled_notes_live
+\ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql
+\endif
+-- (the story lead rank, 20261011100000, replaced the assembler since: its down goes first)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story lead rank, 20261011100000)%' AS story_lead_rank_live \gset
+\if :story_lead_rank_live
+\ir ../../../rollbacks/20261011100000_context_story_lead_rank_down.sql
+\endif
+-- (the finished wake, 20261012093500, replaced the lead rule, the judge and the due list since: its
+-- down goes first, as the scoping pipeline's refuses while a later body is live)
+SELECT to_regprocedure('public.context_finished_wake_hours()') IS NOT NULL AS finished_wake_live \gset
+\if :finished_wake_live
+\ir ../../../rollbacks/20261012093500_context_finished_wake_down.sql
+\endif
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
+\endif
+SELECT to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)') IS NOT NULL AS notes_freshness_live \gset
+\if :notes_freshness_live
+\ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
+\endif
 CREATE TEMP TABLE lead_cutoff_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_lead_monitored_jobs', 'context_lead_monitored', 'context_job_record_loops',

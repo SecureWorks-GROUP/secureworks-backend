@@ -857,7 +857,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # W11: the context_scorecard door (rows 1 to 14, per job).
                       ("20261006032000", "context_scorecard"),
                       # Debt Workshop: the debt_ws_ tables and claim indexes.
-                      ("20261008170000", "debt_workshop")]:
+                      ("20261008170000", "debt_workshop"),
+                      # quote builder actions (quote_builder_*).
+                      ("20261009120000", "quote_builder_versions")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

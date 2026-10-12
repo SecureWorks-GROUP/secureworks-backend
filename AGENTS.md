@@ -251,6 +251,67 @@ under the current text-matching behaviour. Widening it to the shared PO_RE
 boundaries is a fate-moving change that needs its own replay revalidation.
 Both halves are pinned in `makesafe_bwcwa6781_filename_po_fixture_test.ts`.
 
+Ambrose Construct Group (slug `acg`, scope `ACG`, intake adapter `ambrose`)
+numbers a PO `<8-digit job>-<2-digit seq>`, and the digits-only PO grammar
+would keep only the job number, merging every PO on one job. So, only when
+the company is `acg`, `normaliseAmbroseIdentityText` rewrites each
+PO-labelled 8-2 token to `ACG-<job>PO-<job><seq>` before any scan: claim
+`ACG-<job>`, PO `PO-<job><seq>`, key `ACG:PO-<job><seq>`. Do not widen it to
+other builders or relax the exact 8-2 shape. Ambrose addresses its mail to the
+swwa@ general Group, not ses@; it reaches intake through the sender-scoped
+Group lane below (a human forward becomes own-domain chatter and is not the
+route). Ambrose has no SES family-matrix row, so pack and invoice prep stay
+refused. Tests: `makesafe_ambrose_intake_test.ts`.
+
+## Builder Mail In A General Group Is Read By Sender, And Stored As ses@
+
+`monitor-ses-makesafes` also reads the Groups in `SENDER_SCOPED_GROUPS` (today
+swwa@). A Group has no inbox rules, so there is no auto-forward to configure:
+the poll reads it. Five rules are load-bearing.
+
+- **Only a sender pattern of a company the Group lists admits a post.** Each
+  Group carries its own `companySlugs` (swwa@: `acg` only, owner ruling
+  12 Oct 2026), so another active builder's mail there is ignored like anyone
+  else's. No subject, keyword or Prime-floor match. Posts are listed WITHOUT
+  their body; an out-of-scope post is counted and dropped with no row in any
+  table (no exclusion audit either) and its body is never requested. Do not
+  route a scoped Group through `collectPosts` / `auditExclusion`, which store a
+  row for everything.
+- **An admitted post is stored under the ses@ mailbox key**, because every
+  downstream reader selects on it. Its origin is
+  `email_events_raw.page_meta.source_mailbox` on the `created` row. Do not add
+  a second mailbox key downstream to "fix" this.
+- **Each scoped Group has its own `mail_sync_cursors` row** (and `sync_state`
+  row for health), keyed by its own address. Its first read starts at its
+  `firstReadFrom` and catches up oldest first in slices of 40 conversations. A
+  conversation sorts by its LATEST post, so one not yet behind the cursor is
+  read back to `firstReadFrom`, never from the moving cursor, or an older
+  purchase order in a thread that later got a reply is skipped for good.
+- **The Group read never runs on the poll's response path.** The pg_net caller
+  disconnects at five seconds and a catch-up slice is many sequential Graph
+  reads, so the read runs in the poll's `EdgeRuntime.waitUntil` continuation,
+  under the mailbox lease, and the ses@ scan handoff starts once it returns,
+  carrying its sources. It waits out Graph throttling for at most 20 seconds.
+  A Group that cannot be read never fails the ses@ poll or its scan: it is
+  logged and alarmed once, its `sync_state` row turning `ERROR` only after that
+  alarm event is written. The poll response carries no Group result.
+- **A post whose attachment list cannot be read fails its slice**, after every
+  other post in the slice is stored and handed to intake. The Group cursor
+  never returns to a post, so the read is retried every poll with the cursor
+  unmoved, and a post whose attachments can NEVER be read holds that Group's
+  cursor until someone steps in. `sync_state.last_error` names the
+  post. Recovery: take that purchase order in by hand, then set the Group's
+  `mail_sync_cursors.last_completed_max` to 16 minutes after that
+  conversation's last delivery and check the mail around the new cursor,
+  because a conversation inside that gap is read only from the new cursor on.
+
+One purchase order sent to both addresses is two posts and one job: the planner
+and the instruction key fold them. Tests:
+`monitor_ses_sender_scoped_groups_test.ts` and the Ambrose cases in
+`makesafe_deterministic_intake_runtime_test.ts`. Switch the lane off with
+`MAKESAFE_SENDER_SCOPED_GROUPS=off`. The lane re-queues no PDF itself: the
+every-minute `makesafe-pdf-extraction-drain` retries a failed text read.
+
 ## Never Select `scope_json` In A List/Feed Query
 
 `jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small
@@ -834,6 +895,21 @@ closes a payment item at the end of its paid Perth day (`context_ledger_paid_clo
 item and in a transition alike. The packet stays `ledger-packet-v1` (the reader refuses any
 other version): add fields, never rename or retype one.
 
+## A Reading's Unread Rows Have One Rule
+
+`context_ledger_row_unread(landed_at, automated, evidence_until)` (`20261009132000`) is the one
+rule for a row a ledger reading has not read: a `context_ledger_evidence_rows` row that is not
+automated and landed after the reading's `evidence_until` (counts leave copies out). The judge
+(an update is not held by the backoff for such a row that landed after the last failed read; a
+waiting shadow answers a live reading's rebuild only with none), the due order (within a priority
+updates first, each group by the longest wait), the go-live sweep (`context_ledger_promote_shadow`
+skips a shadow with one, `unread_rows`) and the story's ledger read (`unread_rows`, so
+`meta.ledger.stale` and the not-known line) all read it; never re-derive it. `new_evidence` still
+counts every row, so an automated-only update stays cheap. Finish's auto-promote is not gated on
+purpose: its reading read every row landed by its claim, and a shadow held beside a live reading
+is never updated. A later change to those four bodies rolls this migration back first in the lead
+cutoff, story safety and story fixups re-applies and the lead cutoff break proof.
+
 ## The Job Story Sorts Text In C Order
 
 Production's collation is ICU `en-US` (letters compared without case first,
@@ -898,13 +974,27 @@ first line's item or a reason for whose move.
 
 ## A Lead Not Followed Up Has One Rule
 
-`context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`; null ids means
-every live job) and `context_lead_monitored(job, as_of)`, which returns that
+`context_lead_monitored_jobs(job_ids, as_of)` (`20261007010000`, drafts and
+windows by type since `20261009133000`; null ids means every live job, a draft
+only while monitored and, since `20261012093500`, a finished job only while its
+customer has written on it inside 30 days, state `finished_awake`) and
+`context_lead_monitored(job, as_of)`, which returns that
 job's same row (`job_id`, `monitored`, `state`, ...; no row for an unknown job),
-are the owner's 7 Oct 2026 lead rule, the only one. A job still at `quoted` with
+are the owner's lead rule (7 Oct 2026, widened 9 Oct), the only one. The window is
+`context_lead_window_hours(type)`: 1008 hours (6 weeks) for a patio job, 672 for
+fencing and every other type; change it there. A draft (scoping, and patio
+quoting, which stays at draft until accepted) is monitored only inside its window
+after the newer of its newest real activity on the draft itself (a non-automated
+message, never mail among our own people; the customer's old-inbox mail from the
+client's address; a quote sent, viewed, accepted or declined; an app event other
+than the machine rows, a scope save among them) and its creation; with no real
+activity never (states `draft_active`, `draft_quiet`, `draft_no_activity`). A
+draft the rule does not monitor is not live for the judge (`not_live`), the due
+list judges only the drafts it monitors, and the story never says "Lead not
+followed up" for a draft (only `now.monitored` is false). A job still at `quoted` with
 a quote sent and no progress (no accepted quote, no Xero invoice or bill on the
 job that is not voided or deleted, whatever its type, no standing booking, no
-later status) stops being monitored 672 hours after the newer of its newest
+later status) stops being monitored its window after the newer of its newest
 quote send (`job_documents` type `quote`, else `jobs.quoted_at`) and the
 customer's newest inbound text, email or call wherever the story finds it: on
 the job (`context_job_record_messages`), their old-inbox mail by address, their
@@ -924,7 +1014,9 @@ SQL helper called with a sub-select argument is never inlined and runs whole
 (the rule reads `context_job_record_messages(ARRAY[l.id], k.t)` per lead for
 that reason: 1.8 s against 13.5 s read one job at a time for every live job).
 The story fixes and story safety contracts roll this migration back first in
-their re-apply sections, as its own guard pins their bodies.
+their re-apply sections, as its own guard pins their bodies (and the scoping
+pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's, and
+the finished wake, `20261012093500`, before that in all of them).
 
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
@@ -1326,6 +1418,24 @@ Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
 Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
+
+## Quote Builder Scopes Live In `quote_builder_versions`, Not `quote_revisions`
+
+Hugo's iPad quote builder (contract `docs/quote-builder-contract.md`, code
+`ops-api/quote_builder.ts`, actions `quote_builder_*`) keeps every scope and
+variation version in `quote_builder_versions` (`20261009120000`): internal cost
+lines beside client charge lines, server-computed totals, issued rows frozen by
+trigger, RLS on and revoked from browser roles. Do not write builder scopes into
+`quote_revisions` (send-quote's SENT ledger), `jobs.scope_json` (fence/patio
+tools) or `jobs.expected_costs` (frozen at acceptance). Issuing files a
+`job_documents` `quote` row with `sent_at` null (never counted as sent) and moves
+a repair card forward only, through `updateRepairStage`: scope -> `quoted`,
+variation -> `variation`, approved variation -> `approved`. Private quotes are
+`jobs.type='miscellaneous'` (`SWM-`), never `renovation` (shares `SWR-` with
+repair). Its photos are `job_media` phase `quote_builder` (`QUOTE_BUILDER_PHOTO_PHASE`),
+which `isApplicablePackPhoto` and the mailer photo route exclude: they are internal and
+must never reach an SES pack, report or builder email. Tests: `quote_builder_test.ts`
+plus the migration contract.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
@@ -4368,7 +4478,8 @@ null: the client, each neighbour and a whole-job quote are different parties.
 or a forward from an older fence-run duplicate to the party's current one), and
 a retired link forwards only to the same party's current quote; never list
 every live quote on the job. Accept refuses a non-current run duplicate; "all
-accepted" counts current documents only. Once any per-contact document exists,
+accepted" counts current documents only and skips quote builder documents
+(run label `qb:<chain>`, `_shared/quote_builder_run_label.ts`). Once any per-contact document exists,
 a job-wide document (contact null AND run label null) is not a required party
 for job acceptance and is not retired either; a contact-less RUN document (the
 client's `(null, 'RHS')`) still is required. `/send` retires the party's earlier versions unless the caller passes
@@ -4387,3 +4498,19 @@ deep history load (`20261007080000`, flag `email_reader_deep_v1`): its rows
 carry `metadata.history_tier` deep, which AI placement never asks about and
 which never moves a job's first record, and row 14 reads its reach through
 `context_email_history_reach` / `_reach_jobs`, never by re-deriving it.
+
+## A Group Post Shows No Recipients, So Our Own Is Never Internal On That Alone
+
+Graph lists a group post (ses@, finance@, fencing@, patios@) with no To or Cc.
+`_shared/evidence/outlook_mail.ts` reads who our own post went to from its
+group thread (`groupThreadParty`; the reader hands each post its thread through
+`withGroupThread`), else labels it `staff.email_unknown_audience` (outbound, no
+counterpart, `payload.audience_basis` unknown), never `staff.email_internal`;
+only recorded recipients that are all ours make our email internal. The ledger
+store and the reader key on the party-roles audience, never the event type, so
+an unknown audience reads as possibly external. A copy meeting the saved row
+goes to `context_email_audience_resolve` (a stronger basis only), and a relabel
+moves `context_captured_at` (original kept in `metadata.audience_relabel`) so
+the judge reads the job again. Contract:
+`20261009131000_context_group_mailbox_audience`; field contract in
+[`docs/context/email-capture.md`](docs/context/email-capture.md).
