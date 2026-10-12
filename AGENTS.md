@@ -4390,7 +4390,7 @@ must fail closed on Xero retry rather than inventing history. Apply
 
 ## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
 
-Since `20261012090000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
+Since `20261012130000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
 older row: the per-trade crew-pay work order) or `job` (the one work order per
 fencing / patio job, draft then approved). An approved job work order is sealed
 by trigger: any update or delete raises, so a crew-path writer that touches it

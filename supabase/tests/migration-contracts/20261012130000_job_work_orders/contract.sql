@@ -1,4 +1,4 @@
--- Contract for 20261012090000_job_work_orders.sql: one work order per
+-- Contract for 20261012130000_job_work_orders.sql: one work order per
 -- fencing / patio job, draft then approved (sealed) by the named approver,
 -- invoice lines stamped against it at submit and at approval (labour decided
 -- by the cost lane), variations carried across a replaced draft invoice,

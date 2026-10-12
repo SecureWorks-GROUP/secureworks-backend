@@ -6,8 +6,8 @@ job shows against it live, and a trade can report a variation on their invoice,
 which emails finance and, separately, admin.
 
 Code: `supabase/functions/ops-api/job_work_orders.ts`. Schema, seal, triggers,
-backfill: `supabase/migrations/20261012090000_job_work_orders.sql` (contract
-`supabase/tests/migration-contracts/20261012090000_job_work_orders/`).
+backfill: `supabase/migrations/20261012130000_job_work_orders.sql` (contract
+`supabase/tests/migration-contracts/20261012130000_job_work_orders/`).
 
 ## Model
 
