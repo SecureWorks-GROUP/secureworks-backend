@@ -5,11 +5,13 @@
  * Covers the contract in docs/trade-invoice-time-entries-2026-10-12.md:
  *   1. the rule itself (hours computed, mismatch, finish before start,
  *      missing fields under both flag states),
- *   2. every write path stores the fields:
- *        - generate_trade_invoice: job cards (manual_assignments), searched-in
- *          hour lines (extra_items) and the auto-collected clock lane,
- *        - save_trade_invoice_draft: the no-week insert and the dated persist,
- *        - submit_trade_invoice: the legacy hourly lane,
+ *   2. every write path a time line goes through:
+ *        - generate_trade_invoice: job cards (manual_assignments) and
+ *          searched-in hour lines (extra_items) store the fields sent,
+ *        - save_trade_invoice_draft: the no-week insert and the dated persist
+ *          store the fields sent,
+ *        - the auto-collected lanes (generate_trade_invoice's clock lane and
+ *          submit_trade_invoice's legacy hourly lane) store none: see 6,
  *   3. a job's list reads its entries, billed and saved on the job view, and
  *      every read of an invoice line answers the four fields,
  *   4. the day worked is never after today, Perth, on every path,
@@ -684,7 +686,12 @@ async function callTradeAction(
       )));
     }
     if (table === "trade_invoices") {
-      if (method === "POST") return Promise.resolve(reply([{ id: NEW_INVOICE }]));
+      // A write answers the row it wrote. An update that answered no row
+      // would read as "invoice state changed" and turn a saved invoice into
+      // an HTTP 500.
+      if (method === "POST" || method === "PATCH") {
+        return Promise.resolve(reply([{ id: NEW_INVOICE }]));
+      }
       if (method === "DELETE") {
         return Promise.resolve(reply([{ id: NEW_INVOICE }]));
       }
@@ -795,6 +802,7 @@ for (const flagOn of [false, true]) {
       ]),
       { flagOn },
     );
+    assertEquals(out.status, 200, JSON.stringify(out.body));
     assertEquals(out.lineRows.length, 3, JSON.stringify(out.body));
     assertEquals(
       out.lineRows.map((row) => ({
@@ -1124,6 +1132,7 @@ handlerTest("generate_trade_invoice (flag off): a job card with no time entry is
     }]),
     { flagOn: false },
   );
+  assertEquals(out.status, 200, JSON.stringify(out.body));
   assertEquals(out.lineRows.length, 3, JSON.stringify(out.body));
   assertEquals(
     out.lineRows.map((row) => [row.job_id, row.total_hours, row.line_total_ex]),

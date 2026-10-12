@@ -126,9 +126,10 @@ invoice line; see "Times saved on the job view".
 
 - **Drafts are never refused.** A draft is a working copy: each field is kept
   when well formed and dropped when not (a day worked after today is dropped
-  the same way), a half-filled entry is kept, and a complete entry sets the
-  line's hours. Submit is where an entry is required
-  and checked. Drafts are also not in a job's list.
+  the same way), a half-filled entry is kept, and a complete entry on a
+  `labour_lines[]` line sets that line's hours (a draft hours extra keeps the
+  quantity sent). Submit is where an entry is required and checked. Drafts
+  are also not in a job's list.
 - **Auto-collected lanes (3 and 6) carry no time entry.** Nobody types on
   those lanes, and the server derives nothing, so nothing stored can disagree
   with the hours a line bills.

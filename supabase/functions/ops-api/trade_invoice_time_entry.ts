@@ -154,7 +154,9 @@ function parseWorkDate(value: unknown): string | null {
 }
 
 // Exactly HH:MM, 24-hour: the contract form and the stored form.
-function parseClockTime(value: unknown): { text: string; minutes: number } | null {
+function parseClockTime(
+  value: unknown,
+): { text: string; minutes: number } | null {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(
     String(value ?? "").trim(),
   );
@@ -308,7 +310,9 @@ export function resolveTradeInvoiceTimeEntry(
     if (gap > 0.01) {
       throw new TradeInvoiceTimeEntryError(
         "time_entry_hours_mismatch",
-        `The hours on ${where} (${String(opts.clientHours)}) do not match the start and finish time (${start.text} to ${finish.text}${
+        `The hours on ${where} (${
+          String(opts.clientHours)
+        }) do not match the start and finish time (${start.text} to ${finish.text}${
           breakMinutes ? `, ${breakMinutes} minute break` : ""
         } is ${hours} hours). Reload and try again.`,
       );

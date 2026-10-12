@@ -282,8 +282,9 @@ jobs:
             supabase/functions/ops-api/makesafe_adapter_admission_contract_test.ts
 
       # Trade invoice time entries (docs/trade-invoice-time-entries-2026-10-12.md):
-      # every trade invoice write path stores the date worked and the start and
-      # finish time, under both states of the enforcement flag. Drives the real
+      # every trade invoice write path keeps the date worked and the start and
+      # finish time the trade sent on a line, and derives none itself, under
+      # both states of the enforcement flag. Drives the real
       # ops-api request handler with every database call answered by a fetch
       # stub. Same --no-check reason as the step above.
       - name: Test trade invoice time entries
