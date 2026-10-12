@@ -637,3 +637,8 @@ ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quo
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.issued_at
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|constraint|quote_builder_versions_unique_chain_version
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|trigger|quote_builder_versions.trg_quote_builder_versions_guard
+
+# The deterministic intake stamps each case with its adapter id; the Ambrose
+# adapter is refused on every case insert until this migration admits it. The
+# constraint name is unchanged, so the ledger version is what proves it landed.
+ops-api|supabase/migrations/20261012043000_makesafe_intake_cases_admit_ambrose_adapter.sql|constraint|makesafe_intake_cases_deterministic_shapes_check
