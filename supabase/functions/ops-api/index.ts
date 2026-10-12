@@ -599,6 +599,7 @@ import {
   listJobWorkOrders,
   readJobWorkOrder,
   reportWorkOrderVariation,
+  resendWorkOrderVariationEmails,
   resolveWorkOrderApprover,
   sendOutlookVariationEmail,
   tradeJobWorkOrderRead,
@@ -8038,8 +8039,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await listWorkOrders(client, url.searchParams))
       case 'job_work_order':
         return json(await runJobWorkOrder(() => readJobWorkOrder(client, {
-          jobId: url.searchParams.get('job_id') || url.searchParams.get('jobId'),
-          workOrderId: url.searchParams.get('work_order_id') || url.searchParams.get('id'),
+          jobId: url.searchParams.get('job_id'),
+          workOrderId: url.searchParams.get('work_order_id'),
         })))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
@@ -8377,8 +8378,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await sendWorkOrder(client, body))
       // Shaun only: work_order_settings.approver_user_ids, checked here and
-      // again by the database. The approver is the signed-in user, or on a
-      // server-secret call the trusted x-sw-actor `user:<id>`.
+      // again by the database. The approver is the signed-in user. An approver
+      // named only by x-sw-actor `user:<id>` on a server-secret call is refused
+      // until feature flag work_order_terminal_approval_v1 is on.
       case 'approve_work_order':
         return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
           authMode,
@@ -8393,6 +8395,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
       }
+      // Re-sends variation emails left failed or stuck in sending. Sends
+      // nothing while feature flag work_order_variation_emails_v1 is off.
+      case 'resend_work_order_variation_emails':
+        return json(await runJobWorkOrder(() => resendWorkOrderVariationEmails(client, {
+          sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
       // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
@@ -13710,6 +13718,7 @@ async function opsSummary(client: any) {
     client.from('work_orders')
       .select('id, status, scheduled_date, job_id, wo_number')
       .eq('org_id', DEFAULT_ORG_ID)
+      .neq('kind', 'job')
       .in('status', ['draft', 'sent', 'accepted', 'in_progress']),
 
     // KPI targets
@@ -42357,7 +42366,7 @@ async function tradeJobDetail(
     // order, so this is a real mismatch, not a theoretical one.
     client.from('work_orders')
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
-      .eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
+      .eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
       .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')

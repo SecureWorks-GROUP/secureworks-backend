@@ -638,8 +638,6 @@ ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|work_order
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|work_orders.agreed_labour_ex
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|work_orders.approved_by
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|work_orders.sealed_content_hash
-ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|work_orders.supersedes_work_order_id
-ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|work_orders.superseded_at
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|jobs.work_order_id
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|column|trade_invoice_lines.job_work_order_id
 ops-api|supabase/migrations/20261012090000_job_work_orders.sql|table|work_order_settings

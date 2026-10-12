@@ -12,7 +12,6 @@ BEGIN
 END $$;
 
 DROP FUNCTION IF EXISTS public.backfill_job_work_order_drafts(boolean);
-DROP VIEW IF EXISTS public.job_work_order_labour_lines;
 
 DROP TRIGGER IF EXISTS trg_trade_invoices_link_job_work_orders ON public.trade_invoices;
 DROP FUNCTION IF EXISTS public.trade_invoices_link_job_work_orders();
@@ -32,7 +31,8 @@ DROP FUNCTION IF EXISTS public.job_work_order_billed_invoice_statuses();
 DROP FUNCTION IF EXISTS public.job_work_order_open_statuses();
 
 DELETE FROM public.feature_flags
-WHERE flag_name IN ('work_order_variation_emails_v1', 'job_work_order_backfill_v1');
+WHERE flag_name IN ('work_order_variation_emails_v1', 'job_work_order_backfill_v1',
+                    'work_order_terminal_approval_v1');
 
 DROP TABLE IF EXISTS public.work_order_variation_emails;
 DROP TABLE IF EXISTS public.work_order_variations;
@@ -43,8 +43,7 @@ ALTER TABLE public.trade_invoice_lines DROP COLUMN IF EXISTS job_work_order_id;
 ALTER TABLE public.jobs DROP COLUMN IF EXISTS work_order_id;
 
 DROP POLICY IF EXISTS work_orders_job_kind_hidden_from_clients ON public.work_orders;
-DROP INDEX IF EXISTS public.uq_work_orders_job_live_approved;
-DROP INDEX IF EXISTS public.uq_work_orders_job_open_draft;
+DROP INDEX IF EXISTS public.uq_work_orders_job_current;
 DROP INDEX IF EXISTS public.idx_work_orders_kind;
 
 ALTER TABLE public.work_orders DROP CONSTRAINT IF EXISTS work_orders_origin_check;
@@ -59,9 +58,6 @@ ALTER TABLE public.work_orders ADD CONSTRAINT work_orders_status_check
 
 ALTER TABLE public.work_orders
   DROP COLUMN IF EXISTS origin,
-  DROP COLUMN IF EXISTS superseded_by_work_order_id,
-  DROP COLUMN IF EXISTS superseded_at,
-  DROP COLUMN IF EXISTS supersedes_work_order_id,
   DROP COLUMN IF EXISTS sealed_content_hash,
   DROP COLUMN IF EXISTS approved_via,
   DROP COLUMN IF EXISTS approved_by,

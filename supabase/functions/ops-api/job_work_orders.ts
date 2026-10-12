@@ -7,19 +7,22 @@
 // A job work order is a work_orders row with kind = 'job'. It is a draft
 // (editable, counts for nothing) until an approver named in
 // work_order_settings (seeded with Shaun's users.id) approves it. Approving
-// seals it like an invoice: the database refuses any later edit, and change
-// comes only through trade variations or a revision that supersedes it.
+// seals it like an invoice: the database refuses any later edit, and later
+// change is recorded as a trade variation.
 //
 //   Staff (ops key or staff session):
 //     job_work_order          GET   one job's work order, live figures, labour
 //                                   lines, invoices and variations
 //     list_work_orders        GET   kind=job lists job work orders with figures
-//     create_work_order       POST  kind=job opens the job's draft, or a
-//                                   revision draft of the live approved one
+//     create_work_order       POST  kind=job opens (or edits) the job's draft
 //     update_work_order       POST  edits a job DRAFT (approved ones are sealed)
 //     approve_work_order      POST  approver only (see resolveWorkOrderApprover)
 //     backfill_job_work_orders POST ops key only; dry run unless apply:true AND
 //                                   feature flag job_work_order_backfill_v1 is on
+//     resend_work_order_variation_emails POST re-sends variation emails left
+//                                   failed, or stuck in sending past the
+//                                   staleness bound; nothing while the email
+//                                   flag is off
 //   Trade (signed-in Trade App user with access to the job):
 //     my_job_work_order       GET   the approved work order's scope and agreed
 //                                   details, every price and allowance left out
@@ -28,7 +31,8 @@
 //                                   only while work_order_variation_emails_v1 is on
 //
 // Labour billed against a work order is stamped by the database at invoice
-// submit (trade_invoice_lines.job_work_order_id); this module only reads it.
+// submit, and at approval for labour invoiced earlier
+// (trade_invoice_lines.job_work_order_id); this module only reads it.
 
 export const JOB_WORK_ORDER_SCHEMA = "job-work-order.v1";
 export const TRADE_JOB_WORK_ORDER_SCHEMA = "trade-job-work-order.v1";
@@ -83,6 +87,11 @@ export const WORK_ORDER_VARIATION_ADMIN_EMAIL = "admin@secureworkswa.com.au";
 export const WORK_ORDER_VARIATION_SENDER_MAILBOX = "admin@secureworkswa.com.au";
 export const WORK_ORDER_VARIATION_EMAILS_FLAG =
   "work_order_variation_emails_v1";
+/** Off: approve_work_order refuses an approver named only by x-sw-actor. */
+export const WORK_ORDER_TERMINAL_APPROVAL_FLAG =
+  "work_order_terminal_approval_v1";
+/** A variation email left in `sending` this long is taken to be abandoned. */
+export const WORK_ORDER_VARIATION_EMAIL_STALE_SENDING_MS = 10 * 60 * 1000;
 
 /** Rule near_agreed fires at this share of the agreed labour. */
 export const WORK_ORDER_NEAR_AGREED_RATIO = 0.9;
@@ -128,10 +137,10 @@ export type WorkOrderApprover = { userId: string; via: "session" | "terminal" };
 /**
  * The human behind an approve call, or null.
  *   session   a verified staff JWT: the signed-in user.
- *   terminal  a server-secret call (SecureSuite) whose trusted x-sw-actor
- *             header names the user as `user:<users.id>`. The header is a
- *             claim made by a caller that already holds a server secret, the
- *             same trust the approved-send recorder relies on.
+ *   terminal  a server-secret call (SecureSuite) whose x-sw-actor header
+ *             names the user as `user:<users.id>`. The header is self-declared
+ *             by a caller that holds a server secret, so approveJobWorkOrder
+ *             refuses it until WORK_ORDER_TERMINAL_APPROVAL_FLAG is on.
  * The shared browser key never counts (its header is untrusted upstream).
  * Being named is not enough: approveJobWorkOrder then requires the id to be on
  * work_order_settings.approver_user_ids, and the database checks it again.
@@ -202,10 +211,11 @@ export type WorkOrderFigures = {
 
 /**
  * Live figures for the job's approved work order.
- *   billed_to_date_ex  every counted labour line stamped against an approved
- *                      job work order of this job (variation work included,
- *                      since the trade bills a variation on the same invoice).
- *   variations_ex      the part of billed the trades marked as variations.
+ *   billed_to_date_ex  every counted labour line stamped against the job's
+ *                      approved work order (variation work included, since
+ *                      the trade bills a variation on the same invoice).
+ *   variations_ex      the part of billed the trades marked as variations;
+ *                      a variation counts only while its invoice is billed.
  *   remaining_ex       agreed - billed_to_date.
  * Rules (named, in the PR and docs/job-work-orders-v1.md):
  *   over_agreed   flag  billed (within agreed scope + variations) > agreed
@@ -220,13 +230,18 @@ export function computeWorkOrderFigures(input: {
     Pick<WorkOrderLabourLine, "amount_ex" | "counted" | "work_order_id">
   >;
   variations: Array<
-    { amount_ex: number | null; status: string; work_order_id: string | null }
+    {
+      amount_ex: number | null;
+      status: string;
+      work_order_id: string | null;
+      counted: boolean;
+    }
   >;
 }): WorkOrderFigures {
   const counted = input.lines.filter((l) => l.counted && l.work_order_id);
   const billed = money(counted.reduce((s, l) => s + money(l.amount_ex), 0));
   const liveVariations = input.variations.filter((v) =>
-    v.status === "reported" && v.work_order_id
+    v.status === "reported" && v.work_order_id && v.counted
   );
   const variationsEx = money(
     liveVariations.reduce((s, v) => s + money(v.amount_ex ?? 0), 0),
@@ -304,8 +319,8 @@ export function validateJobWorkOrderDraftPatch(
   body: any,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  if (body?.scope_items !== undefined || body?.scopeItems !== undefined) {
-    const items = body.scope_items ?? body.scopeItems;
+  if (body?.scope_items !== undefined) {
+    const items = body.scope_items;
     if (!Array.isArray(items) || items.length > MAX_SCOPE_ITEMS) {
       fail(
         400,
@@ -320,7 +335,7 @@ export function validateJobWorkOrderDraftPatch(
     }
     out.scope_items = items;
   }
-  const instructions = body?.special_instructions ?? body?.specialInstructions;
+  const instructions = body?.special_instructions;
   if (instructions !== undefined) {
     if (
       instructions !== null &&
@@ -334,7 +349,7 @@ export function validateJobWorkOrderDraftPatch(
     }
     out.special_instructions = instructions;
   }
-  const agreed = body?.agreed_labour_ex ?? body?.agreedLabourEx;
+  const agreed = body?.agreed_labour_ex;
   if (agreed !== undefined) {
     if (agreed !== null) {
       const n = Number(agreed);
@@ -350,14 +365,14 @@ export function validateJobWorkOrderDraftPatch(
       out.agreed_labour_ex = null;
     }
   }
-  const scheduled = body?.scheduled_date ?? body?.scheduledDate;
+  const scheduled = body?.scheduled_date;
   if (scheduled !== undefined) {
     if (scheduled !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(scheduled))) {
       fail(400, "invalid_scheduled_date", "scheduled_date must be YYYY-MM-DD");
     }
     out.scheduled_date = scheduled;
   }
-  const address = body?.site_address ?? body?.siteAddress;
+  const address = body?.site_address;
   if (address !== undefined) {
     if (
       address !== null && (typeof address !== "string" || address.length > 500)
@@ -520,7 +535,7 @@ export function buildVariationEmails(
 const JOB_COLUMNS =
   "id, org_id, job_number, client_name, type, status, site_address, site_suburb, work_order_id";
 const WO_COLUMNS =
-  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, supersedes_work_order_id, superseded_at, superseded_by_work_order_id, origin, created_at, updated_at";
+  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, created_at, updated_at";
 
 async function readJob(client: any, jobId: string) {
   const { data, error } = await client.from("jobs").select(JOB_COLUMNS).eq(
@@ -558,7 +573,7 @@ async function readWorkOrder(client: any, id: string) {
 }
 
 function liveOf(rows: any[]) {
-  return rows.find((r) => r.status === "approved" && !r.superseded_at) || null;
+  return rows.find((r) => r.status === "approved") || null;
 }
 function draftOf(rows: any[]) {
   return rows.find((r) => r.status === "draft") || null;
@@ -622,7 +637,7 @@ async function readVariations(client: any, jobIds: string[]): Promise<any[]> {
   for (let i = 0; i < jobIds.length; i += 25) {
     const { data, error } = await client.from("work_order_variations")
       .select(
-        "id, job_id, work_order_id, trade_invoice_id, reported_by, description, amount_ex, status, created_at, users:reported_by(name)",
+        "id, job_id, work_order_id, trade_invoice_id, reported_by, description, amount_ex, status, created_at, users:reported_by(name), trade_invoices:trade_invoice_id(status)",
       )
       .in("job_id", jobIds.slice(i, i + 25))
       .order("created_at", { ascending: true });
@@ -633,7 +648,18 @@ async function readVariations(client: any, jobIds: string[]): Promise<any[]> {
         "Work order variations could not be read",
       );
     }
-    out.push(...(data || []));
+    for (const row of data || []) {
+      const inv = Array.isArray(row.trade_invoices)
+        ? row.trade_invoices[0]
+        : row.trade_invoices;
+      const { trade_invoices: _inv, ...variation } = row;
+      out.push({
+        ...variation,
+        counted: JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(
+          String(inv?.status || ""),
+        ),
+      });
+    }
   }
   return out;
 }
@@ -653,6 +679,7 @@ function figuresFor(
         : Number(v.amount_ex),
       status: v.status,
       work_order_id: v.work_order_id,
+      counted: v.counted === true,
     })),
   });
 }
@@ -698,6 +725,7 @@ function shapeVariation(v: any) {
       ? null
       : money(v.amount_ex),
     status: v.status,
+    counted: v.counted === true,
     created_at: v.created_at,
   };
 }
@@ -749,7 +777,6 @@ export async function readJobWorkOrder(
     work_order: live || draft || null,
     live_work_order: live,
     draft_work_order: draft,
-    history: rows.filter((r) => r !== live && r !== draft),
     figures: figuresFor(live, linked, variations),
     invoices: invoicesFrom(linked, variations),
     labour_lines: linked,
@@ -757,7 +784,7 @@ export async function readJobWorkOrder(
       amount_ex: money(before.reduce((s, l) => s + l.amount_ex, 0)),
       line_count: before.length,
       note:
-        "Labour billed on this job before a work order was approved. Shown for reference, not counted.",
+        "Labour billed on this job with no approved work order to count it against. It links and counts when the work order is approved.",
     },
     variations: variations.map(shapeVariation),
   };
@@ -768,15 +795,9 @@ export async function readJobWorkOrder(
 export async function listJobWorkOrders(client: any, params: URLSearchParams) {
   const status = String(params.get("status") || "").trim();
   const type = String(params.get("type") || "").trim();
-  const jobId = params.get("job_id") || params.get("jobId");
-  if (
-    status && !["draft", "approved", "cancelled", "superseded"].includes(status)
-  ) {
-    fail(
-      400,
-      "invalid_status",
-      "status must be draft, approved, superseded or cancelled",
-    );
+  const jobId = params.get("job_id");
+  if (status && !["draft", "approved", "cancelled"].includes(status)) {
+    fail(400, "invalid_status", "status must be draft, approved or cancelled");
   }
   if (type && !JOB_WORK_ORDER_JOB_TYPES.has(type)) {
     fail(400, "invalid_type", "type must be fencing or patio");
@@ -792,12 +813,8 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
       .range(offset, offset + 999);
     if (jobId) q = q.eq("job_id", requireUuid(jobId, "job_id"));
     if (type) q = q.eq("jobs.type", type);
-    if (status === "approved") {
-      q = q.eq("status", "approved").is("superseded_at", null);
-    } else if (status === "superseded") {
-      q = q.eq("status", "approved").not("superseded_at", "is", null);
-    } else if (status) q = q.eq("status", status);
-    else q = q.neq("status", "cancelled").is("superseded_at", null);
+    if (status) q = q.eq("status", status);
+    else q = q.neq("status", "cancelled");
     const { data, error } = await q;
     if (error) {
       fail(500, "work_orders_unreadable", "Job work orders could not be read");
@@ -813,7 +830,7 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
   ]);
   const work_orders = rows.map((r) => {
     const job = Array.isArray(r.jobs) ? r.jobs[0] : r.jobs;
-    const isLive = r.status === "approved" && !r.superseded_at;
+    const isLive = r.status === "approved";
     const jobLines = lines.filter((l) =>
       l.job_id === r.job_id && l.work_order_id
     );
@@ -837,10 +854,10 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
   };
 }
 
-// ── Staff: open a draft (or a revision) ──────────────────────────────────────
+// ── Staff: open (or edit) the job's draft ────────────────────────────────────
 
 export async function createJobWorkOrder(client: any, body: any) {
-  const jobId = requireUuid(body?.job_id ?? body?.jobId, "job_id");
+  const jobId = requireUuid(body?.job_id, "job_id");
   const patch = validateJobWorkOrderDraftPatch(body);
   const job = await readJob(client, jobId);
   if (!JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || ""))) {
@@ -851,37 +868,16 @@ export async function createJobWorkOrder(client: any, body: any) {
     );
   }
   const rows = await readJobWorkOrders(client, jobId);
-  const live = liveOf(rows);
+  if (liveOf(rows)) {
+    fail(
+      409,
+      "work_order_sealed",
+      "This job's work order is approved and sealed. Later change is recorded as a variation.",
+    );
+  }
   let draft = draftOf(rows);
-  let created = false;
-  if (!draft && live) {
-    const revision = rows.filter((r) => r.kind === "job").length + 1;
-    const base = String(
-      live.wo_number || `WO-${job.job_number || jobId.slice(0, 8)}`,
-    ).replace(/-R\d+$/, "");
-    const { data, error } = await client.from("work_orders").insert({
-      org_id: live.org_id || job.org_id,
-      job_id: jobId,
-      wo_number: `${base}-R${revision}`,
-      kind: "job",
-      status: "draft",
-      scope_items: live.scope_items || [],
-      special_instructions: live.special_instructions,
-      scheduled_date: live.scheduled_date,
-      site_address: live.site_address,
-      agreed_labour_ex: live.agreed_labour_ex,
-      supersedes_work_order_id: live.id,
-      origin: "revision",
-    }).select(WO_COLUMNS).single();
-    if (error) {
-      if (error.code === "23505") {
-        fail(409, "draft_exists", "The job already has a draft work order");
-      }
-      fail(500, "draft_not_created", "The revision draft could not be created");
-    }
-    draft = data;
-    created = true;
-  } else if (!draft) {
+  const created = !draft;
+  if (!draft) {
     const { data: id, error } = await client.rpc(
       "ensure_job_work_order_draft",
       {
@@ -897,7 +893,6 @@ export async function createJobWorkOrder(client: any, body: any) {
       );
     }
     draft = await readWorkOrder(client, id);
-    created = true;
   }
   if (Object.keys(patch).length > 0) {
     draft = await applyDraftPatch(client, draft, patch);
@@ -909,7 +904,6 @@ export async function createJobWorkOrder(client: any, body: any) {
     {
       work_order_id: draft.id,
       wo_number: draft.wo_number,
-      revision_of: draft.supersedes_work_order_id || null,
     },
   );
   return { created, work_order: draft };
@@ -933,7 +927,7 @@ async function applyDraftPatch(
 // ── Staff: edit a draft (approved ones are sealed) ───────────────────────────
 
 export async function updateJobWorkOrderDraft(client: any, body: any) {
-  const id = requireUuid(body?.id ?? body?.work_order_id, "id");
+  const id = requireUuid(body?.id, "id");
   const wo = await readWorkOrder(client, id);
   if (wo.kind !== "job") {
     fail(
@@ -946,7 +940,7 @@ export async function updateJobWorkOrderDraft(client: any, body: any) {
     fail(
       409,
       "work_order_sealed",
-      "This work order is approved and sealed. Open a revision to change it.",
+      "This work order is approved and sealed. Later change is recorded as a variation.",
     );
   }
   if (wo.status !== "draft") {
@@ -967,9 +961,8 @@ export async function updateJobWorkOrderDraft(client: any, body: any) {
     if (error || !data) {
       fail(409, "not_a_draft", "The draft could not be cancelled");
     }
-    const live = liveOf(await readJobWorkOrders(client, wo.job_id));
     const { error: jobErr } = await client.from("jobs").update({
-      work_order_id: live?.id ?? null,
+      work_order_id: null,
     })
       .eq("id", wo.job_id).eq("work_order_id", id);
     if (jobErr) {
@@ -1012,8 +1005,6 @@ export async function readWorkOrderApprovers(client: any): Promise<string[]> {
 const APPROVE_ERRORS: Record<string, [number, string]> = {
   "42501": [403, "approver_required"],
   "23514": [422, "work_order_not_ready"],
-  "23505": [409, "live_work_order_exists"],
-  "40001": [409, "revision_stale"],
   "P0002": [404, "work_order_not_found"],
 };
 
@@ -1022,12 +1013,22 @@ export async function approveJobWorkOrder(
   body: any,
   approver: WorkOrderApprover | null,
 ) {
-  const id = requireUuid(body?.id ?? body?.work_order_id, "work_order_id");
+  const id = requireUuid(body?.work_order_id, "work_order_id");
   if (!approver) {
     fail(
       403,
       "approver_identity_missing",
-      "Approving needs Shaun's own session, or his terminal naming him (x-sw-actor user:<id>).",
+      "Approving needs Shaun's own signed-in session.",
+    );
+  }
+  if (
+    approver.via === "terminal" &&
+    !(await readFlag(client, WORK_ORDER_TERMINAL_APPROVAL_FLAG))
+  ) {
+    fail(
+      403,
+      "terminal_approval_switched_off",
+      "Approving from the terminal is switched off (feature flag work_order_terminal_approval_v1). Approve from Shaun's signed-in session.",
     );
   }
   const approvers = await readWorkOrderApprovers(client);
@@ -1078,7 +1079,6 @@ export async function approveJobWorkOrder(
     via: approver.via,
     agreed_labour_ex: data?.agreed_labour_ex ?? wo.agreed_labour_ex,
     sealed_content_hash: data?.sealed_content_hash ?? null,
-    superseded_work_order_id: wo.supersedes_work_order_id || null,
   }, approver.userId);
   return { work_order: data };
 }
@@ -1160,7 +1160,7 @@ export async function reportWorkOrderVariation(
   client: any,
   body: any,
   trade: { id: string; orgId: string; name?: string | null },
-  deps: { sendEmail: VariationEmailSender },
+  deps: { sendEmail: VariationEmailSender; now?: () => number },
 ) {
   const invoiceId = requireUuid(body?.trade_invoice_id, "trade_invoice_id");
   const jobId = requireUuid(body?.job_id, "job_id");
@@ -1222,6 +1222,8 @@ export async function reportWorkOrderVariation(
   const rows = await readJobWorkOrders(client, jobId);
   const live = liveOf(rows);
 
+  const VARIATION_COLUMNS =
+    "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, status, created_at";
   const { data: inserted, error: insErr } = await client.from(
     "work_order_variations",
   ).insert({
@@ -1232,29 +1234,26 @@ export async function reportWorkOrderVariation(
     reported_by: trade.id,
     description,
     amount_ex: amountEx,
-  }).select(
-    "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, status, created_at",
-  ).single();
-  if (insErr) {
-    if (insErr.code === "23505") {
-      const { data: existing } = await client.from("work_order_variations")
-        .select(
-          "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, status, created_at",
-        )
-        .eq("trade_invoice_id", invoiceId).eq("job_id", jobId).maybeSingle();
-      if (
-        existing && existing.description === description &&
-        (existing.amount_ex === null ? null : money(existing.amount_ex)) ===
-          amountEx
-      ) {
-        return { variation: existing, duplicate: true, emails: [] };
-      }
+  }).select(VARIATION_COLUMNS).single();
+  let variation = inserted;
+  const duplicate = insErr?.code === "23505";
+  if (duplicate) {
+    const { data: existing } = await client.from("work_order_variations")
+      .select(VARIATION_COLUMNS)
+      .eq("trade_invoice_id", invoiceId).eq("job_id", jobId).maybeSingle();
+    if (
+      !existing || existing.description !== description ||
+      (existing.amount_ex === null ? null : money(existing.amount_ex)) !==
+        amountEx
+    ) {
       fail(
         409,
         "variation_exists",
         "A different variation is already recorded for this job on this invoice",
       );
     }
+    variation = existing;
+  } else if (insErr) {
     fail(500, "variation_not_saved", "The variation could not be saved");
   }
 
@@ -1286,24 +1285,102 @@ export async function reportWorkOrderVariation(
   });
   const emailResults = await recordAndMaybeSendVariationEmails(
     client,
-    inserted.id,
+    variation.id,
     jobId,
     emails,
     deps.sendEmail,
+    deps.now,
   );
-  await logJobEvent(client, jobId, "work_order_variation_reported", {
-    variation_id: inserted.id,
-    work_order_id: live?.id ?? null,
-    trade_invoice_id: invoiceId,
-    amount_ex: amountEx,
-  }, trade.id);
-  return { variation: inserted, duplicate: false, emails: emailResults };
+  if (!duplicate) {
+    await logJobEvent(client, jobId, "work_order_variation_reported", {
+      variation_id: variation.id,
+      work_order_id: live?.id ?? null,
+      trade_invoice_id: invoiceId,
+      amount_ex: amountEx,
+    }, trade.id);
+  }
+  return { variation, duplicate, emails: emailResults };
+}
+
+const VARIATION_EMAIL_COLUMNS =
+  "id, variation_id, recipient_role, recipient, subject, body_text, body_html, status, sending_started_at";
+
+/**
+ * Whether a ledger row is still owed a send. `failed` always is. `sending` is
+ * only once its claim is older than the staleness bound (the worker that held
+ * it is gone). `recorded` is owed to the variation's own report call, never to
+ * the sweep: a row recorded while the flag was off is not a backlog to send.
+ */
+function variationEmailOwed(
+  row: any,
+  nowMs: number,
+  includeRecorded: boolean,
+): boolean {
+  if (row.status === "failed") return true;
+  if (row.status === "recorded") return includeRecorded;
+  if (row.status === "sending" && row.sending_started_at) {
+    return Date.parse(row.sending_started_at) <=
+      nowMs - WORK_ORDER_VARIATION_EMAIL_STALE_SENDING_MS;
+  }
+  return false;
 }
 
 /**
- * One ledger row per recipient (finance, admin). Sends nothing unless the
- * feature flag is on at the moment the variation is reported. A row is claimed
- * recorded -> sending before the send, so a retry can never send it twice.
+ * Claims one owed row and sends it. The claim is a compare-and-set on the
+ * exact state that was read (and, for a stale `sending` row, on its claim
+ * stamp), so two callers can never both send the same email.
+ */
+async function claimAndSendVariationEmail(
+  client: any,
+  row: any,
+  jobId: string,
+  sendEmail: VariationEmailSender,
+  nowMs: number,
+): Promise<string> {
+  let claim = client.from("work_order_variation_emails")
+    .update({
+      status: "sending",
+      sending_started_at: new Date(nowMs).toISOString(),
+      send_error: null,
+    })
+    .eq("id", row.id).eq("status", row.status);
+  if (row.status === "sending") {
+    claim = claim.eq("sending_started_at", row.sending_started_at);
+  }
+  const { data: claimed } = await claim.select("id").maybeSingle();
+  if (!claimed) return "claimed_elsewhere";
+  let outcome: { ok: true } | { ok: false; error: string };
+  try {
+    outcome = await sendEmail({
+      recipient_role: row.recipient_role,
+      recipient: row.recipient,
+      subject: row.subject,
+      body_text: row.body_text,
+      body_html: row.body_html,
+      jobId,
+    });
+  } catch (e) {
+    outcome = { ok: false, error: (e as Error)?.message || "send threw" };
+  }
+  const patch = outcome.ok
+    ? { status: "sent", sent_at: new Date().toISOString() }
+    : { status: "failed", send_error: outcome.error.slice(0, 500) };
+  const { error: updErr } = await client.from("work_order_variation_emails")
+    .update(patch).eq("id", row.id);
+  if (updErr) {
+    console.error(
+      "[job-work-orders] variation email outcome not saved:",
+      updErr.message,
+    );
+  }
+  return patch.status;
+}
+
+/**
+ * One ledger row per recipient (finance, admin), written once. While the
+ * feature flag is on, every row this variation still owes is claimed and sent:
+ * a first report sends both, and a retry of the same report sends only what is
+ * not already sent or in flight. Sends nothing while the flag is off.
  */
 export async function recordAndMaybeSendVariationEmails(
   client: any,
@@ -1311,24 +1388,37 @@ export async function recordAndMaybeSendVariationEmails(
   jobId: string,
   emails: VariationEmail[],
   sendEmail: VariationEmailSender,
+  now: () => number = Date.now,
 ) {
-  const results: Array<{ recipient_role: string; status: string }> = [];
-  const { data: rows, error } = await client.from("work_order_variation_emails")
+  const notRecorded = () =>
+    emails.map((e) => ({
+      recipient_role: e.recipient_role,
+      status: "not_recorded",
+    }));
+  const { error } = await client.from("work_order_variation_emails")
     .upsert(
       emails.map((e) => ({ variation_id: variationId, ...e })),
       { onConflict: "variation_id,recipient_role", ignoreDuplicates: true },
-    ).select("id, recipient_role, status");
+    );
   if (error) {
     console.error(
       "[job-work-orders] variation emails not recorded:",
       error.message,
     );
-    return emails.map((e) => ({
-      recipient_role: e.recipient_role,
-      status: "not_recorded",
-    }));
+    return notRecorded();
+  }
+  const { data: rows, error: readErr } = await client.from(
+    "work_order_variation_emails",
+  ).select(VARIATION_EMAIL_COLUMNS).eq("variation_id", variationId);
+  if (readErr) {
+    console.error(
+      "[job-work-orders] variation emails not read back:",
+      readErr.message,
+    );
+    return notRecorded();
   }
   const sendOn = await readFlag(client, WORK_ORDER_VARIATION_EMAILS_FLAG);
+  const results: Array<{ recipient_role: string; status: string }> = [];
   for (const email of emails) {
     const row = (rows || []).find((r: any) =>
       r.recipient_role === email.recipient_role
@@ -1336,50 +1426,84 @@ export async function recordAndMaybeSendVariationEmails(
     if (!row) {
       results.push({
         recipient_role: email.recipient_role,
-        status: "already_recorded",
+        status: "not_recorded",
       });
       continue;
     }
-    if (!sendOn) {
-      results.push({
-        recipient_role: email.recipient_role,
-        status: "recorded",
-      });
-      continue;
-    }
-    const { data: claimed } = await client.from("work_order_variation_emails")
-      .update({ status: "sending" }).eq("id", row.id).eq("status", "recorded")
-      .select("id").maybeSingle();
-    if (!claimed) {
-      results.push({
-        recipient_role: email.recipient_role,
-        status: "claimed_elsewhere",
-      });
-      continue;
-    }
-    let outcome: { ok: true } | { ok: false; error: string };
-    try {
-      outcome = await sendEmail({ ...email, jobId });
-    } catch (e) {
-      outcome = { ok: false, error: (e as Error)?.message || "send threw" };
-    }
-    const patch = outcome.ok
-      ? { status: "sent", sent_at: new Date().toISOString() }
-      : { status: "failed", send_error: outcome.error.slice(0, 500) };
-    const { error: updErr } = await client.from("work_order_variation_emails")
-      .update(patch).eq("id", row.id);
-    if (updErr) {
-      console.error(
-        "[job-work-orders] variation email outcome not saved:",
-        updErr.message,
-      );
-    }
-    results.push({
-      recipient_role: email.recipient_role,
-      status: patch.status,
-    });
+    const status = sendOn && variationEmailOwed(row, now(), true)
+      ? await claimAndSendVariationEmail(client, row, jobId, sendEmail, now())
+      : row.status;
+    results.push({ recipient_role: email.recipient_role, status });
   }
   return results;
+}
+
+const VARIATION_EMAIL_RESEND_LIMIT = 100;
+
+/**
+ * Staff sweep: re-sends variation emails left `failed`, or stuck in `sending`
+ * past the staleness bound. Idempotent: a row already sent, in flight, or
+ * claimed by another call is left alone. Does nothing while the flag is off.
+ */
+export async function resendWorkOrderVariationEmails(
+  client: any,
+  deps: { sendEmail: VariationEmailSender; now?: () => number },
+) {
+  const now = deps.now ?? Date.now;
+  if (!(await readFlag(client, WORK_ORDER_VARIATION_EMAILS_FLAG))) {
+    return { sending_on: false, emails: [] };
+  }
+  const { data: rows, error } = await client.from("work_order_variation_emails")
+    .select(VARIATION_EMAIL_COLUMNS)
+    .in("status", ["failed", "sending"])
+    .order("created_at", { ascending: true })
+    .limit(VARIATION_EMAIL_RESEND_LIMIT);
+  if (error) {
+    fail(
+      500,
+      "variation_emails_unreadable",
+      "The variation emails could not be read",
+    );
+  }
+  const owed = (rows || []).filter((r: any) =>
+    variationEmailOwed(r, now(), false)
+  );
+  const jobByVariation = new Map<string, string>();
+  const variationIds = [
+    ...new Set(owed.map((r: any) => String(r.variation_id))),
+  ];
+  for (let i = 0; i < variationIds.length; i += 25) {
+    const { data, error: varErr } = await client.from("work_order_variations")
+      .select("id, job_id").in("id", variationIds.slice(i, i + 25));
+    if (varErr) {
+      fail(
+        500,
+        "variations_unreadable",
+        "Work order variations could not be read",
+      );
+    }
+    for (const v of data || []) jobByVariation.set(String(v.id), v.job_id);
+  }
+  const results: Array<
+    { id: string; variation_id: string; recipient_role: string; status: string }
+  > = [];
+  for (const row of owed) {
+    const jobId = jobByVariation.get(String(row.variation_id));
+    if (!jobId) continue;
+    results.push({
+      id: row.id,
+      variation_id: row.variation_id,
+      recipient_role: row.recipient_role,
+      status: await claimAndSendVariationEmail(
+        client,
+        row,
+        jobId,
+        deps.sendEmail,
+        now(),
+      ),
+    });
+  }
+  return { sending_on: true, emails: results };
 }
 
 /** Production sender: admin@ mailbox through send-outlook-email (Graph). */
