@@ -1,4 +1,4 @@
--- Rollback of 20261012110000_trade_invoice_time_entries.
+-- Rollback of 20261012180000_trade_invoice_time_entries.
 --
 -- Takes back the surface, never the record: the per-job view, the stamping
 -- persist wrapper and the enforcement flag go. The four columns on

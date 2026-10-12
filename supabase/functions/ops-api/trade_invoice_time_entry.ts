@@ -416,7 +416,7 @@ export async function tradeInvoiceTimeEntryRequired(
 
 // ── The per-job list ────────────────────────────────────────────────────────
 // View public.job_trade_time_entries (migration
-// 20261012110000_trade_invoice_time_entries.sql): one row per submitted time
+// 20261012180000_trade_invoice_time_entries.sql): one row per submitted time
 // line that says when it was worked. Drafts are not in it.
 
 export const JOB_TRADE_TIME_ENTRY_COLUMNS =

@@ -1,4 +1,4 @@
--- Trade invoice time entries (20261012110000): the four fields on a time
+-- Trade invoice time entries (20261012180000): the four fields on a time
 -- line, the stamping persist, the per-job list and the flag, off.
 -- Everything below, including the second run of the migration, is rolled back.
 BEGIN;
@@ -283,7 +283,7 @@ UPDATE public.feature_flags
 SET enabled = true
 WHERE flag_name = 'trade_invoice_time_entry_required_v1';
 
-\ir ../../../migrations/20261012110000_trade_invoice_time_entries.sql
+\ir ../../../migrations/20261012180000_trade_invoice_time_entries.sql
 
 DO $$
 BEGIN

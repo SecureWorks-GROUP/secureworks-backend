@@ -118,7 +118,7 @@ GRANT EXECUTE ON FUNCTION public.persist_weekly_trade_invoice_v2(jsonb, jsonb, u
   TO service_role;
 
 COMMENT ON FUNCTION public.persist_weekly_trade_invoice_v2(jsonb, jsonb, uuid) IS
-  'Trade invoice time entries (20261012110000): persist_weekly_trade_invoice_v1 unchanged, then stamps work_date, start_time, finish_time and break_minutes on the lines it inserted, in one transaction.';
+  'Trade invoice time entries (20261012180000): persist_weekly_trade_invoice_v1 unchanged, then stamps work_date, start_time, finish_time and break_minutes on the lines it inserted, in one transaction.';
 
 -- ── 3. The per-job list ─────────────────────────────────────────────────────
 -- One row per submitted time line that says when it was worked. `hours` is
@@ -161,7 +161,7 @@ REVOKE ALL ON public.job_trade_time_entries FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.job_trade_time_entries TO service_role;
 
 COMMENT ON VIEW public.job_trade_time_entries IS
-  'Trade invoice time entries (20261012110000): per job, who worked which day, from when to when (Perth), the hours billed and the invoice. Submitted invoices only; drafts are left out. Read by ops-api job_detail; the context job record may read it the same way.';
+  'Trade invoice time entries (20261012180000): per job, who worked which day, from when to when (Perth), the hours billed and the invoice. Submitted invoices only; drafts are left out. Read by ops-api job_detail; the context job record may read it the same way.';
 
 -- ── 4. The enforcement flag, off ────────────────────────────────────────────
 -- A missing or unreadable flag also reads as off.

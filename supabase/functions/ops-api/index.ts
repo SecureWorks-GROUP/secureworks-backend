@@ -14542,7 +14542,7 @@ export async function _persistTradeInvoiceWeekDraft(
   requestedPriorDraftId: string | null,
 ): Promise<string> {
   // v2 is v1 unchanged plus the time-entry stamp on the lines it inserted
-  // (20261012110000_trade_invoice_time_entries.sql).
+  // (20261012180000_trade_invoice_time_entries.sql).
   const { data, error } = await client.rpc('persist_weekly_trade_invoice_v2', {
     p_invoice: invoicePayload,
     p_lines: lineRows.map((line, linePosition) => ({

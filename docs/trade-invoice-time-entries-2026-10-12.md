@@ -8,9 +8,9 @@ This is the back end. The trade app screens are a paired change in
 `secureworks-ux`.
 
 - Rule owner: `supabase/functions/ops-api/trade_invoice_time_entry.ts`
-- Migration: `supabase/migrations/20261012110000_trade_invoice_time_entries.sql`
+- Migration: `supabase/migrations/20261012180000_trade_invoice_time_entries.sql`
 - Tests: `supabase/functions/ops-api/trade_invoice_time_entry_test.ts`,
-  `supabase/tests/migration-contracts/20261012110000_trade_invoice_time_entries/`
+  `supabase/tests/migration-contracts/20261012180000_trade_invoice_time_entries/`
 
 ## The contract
 
@@ -155,7 +155,7 @@ this change with the fields sent.
 3. On the owner's word, firstmate sets the flag on.
 
 Rollback keeps the recorded times: see
-`supabase/rollbacks/20261012110000_trade_invoice_time_entries_down.sql`.
+`supabase/rollbacks/20261012180000_trade_invoice_time_entries_down.sql`.
 
 ## Work orders back end (branch `fm/work-orders-backend-20261006`)
 
@@ -164,4 +164,4 @@ invoice persist functions; expect textual conflicts only where both append:
 the end of `scripts/edge-function-schema-requirements.txt`, the version list
 in `scripts/test/test-edge-schema-preflight.sh`, and the `jobDetail` return in
 `ops-api/index.ts`. Keep both sides. Its migration is `20261012090000`; this
-one is `20261012110000`.
+one is `20261012180000`.

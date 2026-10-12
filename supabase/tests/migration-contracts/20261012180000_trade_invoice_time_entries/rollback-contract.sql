@@ -1,4 +1,4 @@
--- Runs after supabase/rollbacks/20261012110000_trade_invoice_time_entries_down.sql
+-- Runs after supabase/rollbacks/20261012180000_trade_invoice_time_entries_down.sql
 -- against the exact forward stack it reverses.
 --
 -- The down takes back the surface (the list, the stamping persist, the flag)
