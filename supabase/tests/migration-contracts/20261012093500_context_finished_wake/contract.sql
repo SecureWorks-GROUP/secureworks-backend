@@ -442,6 +442,12 @@ END $shape$;
 
 -- 7. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (the rebuild order, 20261012164500, replaced the due list since: its down goes first, so the
+-- re-apply starts from this migration's own bodies)
+SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_due(integer)'), 'pg_proc'), '') LIKE '%(rebuild order, 20261012164500)%' AS rebuild_order_live \gset
+\if :rebuild_order_live
+\ir ../../../rollbacks/20261012164500_context_rebuild_order_down.sql
+\endif
 CREATE TEMP TABLE finished_wake_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_finished_wake_hours', 'context_lead_monitored_jobs', 'context_lead_monitored',
