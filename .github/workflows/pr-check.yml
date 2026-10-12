@@ -275,7 +275,7 @@ jobs:
       # An adapter registered in code but missing from the database's adapter
       # list is refused on every case insert and nothing else notices (Ambrose,
       # 12 Oct 2026). Compares the real registry with the newest definition of
-      # every such list in the migrations.
+      # makesafe_intake_cases_deterministic_shapes_check in the migrations.
       - name: Check every intake adapter is admitted by the database
         run: |
           deno test --allow-read \

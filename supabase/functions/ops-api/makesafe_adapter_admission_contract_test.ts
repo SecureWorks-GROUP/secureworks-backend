@@ -179,7 +179,9 @@ Deno.test("REGRESSION: before the admitting migration, ambrose was registered in
   );
   const list = newestAdapterIdList(before, CASE_ADAPTER_CONSTRAINT);
   assert(list, "the case adapter list existed before the admitting migration");
-  assertEquals(missingFrom(list, REGISTERED), ["ambrose"]);
+  // Pinned to ambrose alone: an adapter registered later is admitted by its
+  // own migration and must not turn this historical fact red.
+  assertEquals(missingFrom(list, ["ambrose"]), ["ambrose"]);
 });
 
 Deno.test("the adapter list is read as a list: the newest definition wins, and comments and other constraints count for nothing", () => {

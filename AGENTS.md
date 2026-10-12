@@ -344,8 +344,13 @@ the same fenced update. Three things to know before touching it:
   job, a live state, or `awaiting_job_creation`). Non-work and exception plans
   are always released and hold nothing. A plan that would open a draft or a job
   is released only while no sibling on its `company_key` + `wo_po_identity_key`
-  holds, and no later PDF email of the same purchase order is still stranded:
-  the newest email wins, whichever page the sweep reads first. Every other plan
+  holds, and no later PDF email of the same purchase order is still stranded,
+  so across separate pages the newest email is the one released. When both
+  emails are read on ONE page the shared planner merges them into one case with
+  the OLDER email as primary (its subject, received time and description) and
+  both PDFs on the draft: read the Updated PDF when reviewing such a draft. That
+  merge order is shared by every builder and is not changed here; reordering it
+  is a fate-moving planner change that needs its own replay. Every other plan
   on a held purchase order is withheld: it keeps its row's fate and opens
   nothing, including an email recovered as an exception whose PDF is read
   later. Known gap: a withheld email's PDF is never staged on the holding case.

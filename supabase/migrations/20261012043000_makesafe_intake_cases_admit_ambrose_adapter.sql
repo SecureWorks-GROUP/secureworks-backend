@@ -13,7 +13,7 @@
 -- one table with an adapter_id column, and no other intake table (case
 -- sources, drafts, artifacts, case events) constrains an adapter. The contract
 -- test makesafe_adapter_admission_contract_test.ts fails whenever an adapter
--- registered in code is missing from the newest definition of any such list.
+-- registered in code is missing from the newest definition of this constraint.
 --
 -- Everything else in the constraint is unchanged from
 -- 20260727080821_makesafe_synthetic_livefire_infrastructure.sql. Re-adding a

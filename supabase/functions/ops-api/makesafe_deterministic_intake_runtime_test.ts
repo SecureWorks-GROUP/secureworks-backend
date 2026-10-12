@@ -7590,6 +7590,8 @@ function pushAmbroseMail(
   fixture: AmbrosePurchaseOrderFixture,
   receivedAt: string,
   pdfSha: string,
+  // Extra PDF text, so two versions of one purchase order can be told apart.
+  pdfRevisionNote = "",
 ) {
   store.emails.push(email({
     post_id: postId,
@@ -7599,7 +7601,9 @@ function pushAmbroseMail(
     subject: ambroseSubject(fixture),
     body_content: ambroseBody(fixture),
   }));
-  const text = ambrosePdfText(fixture);
+  const text = pdfRevisionNote
+    ? `${ambrosePdfText(fixture)}\n${pdfRevisionNote}`
+    : ambrosePdfText(fixture);
   store.email_attachments.push({
     id: `att-${postId}`,
     email_id: postId,
@@ -7861,6 +7865,9 @@ function strandedAmbroseHarness() {
   return { store, state, run, runAlone, fallbacks };
 }
 
+// Only the Updated email's PDF carries this line.
+const UPDATED_PDF_NOTE = "Revision 2: additional works added to this order.";
+
 async function strandTwoEmailsOfOnePurchaseOrder(
   fixture: AmbrosePurchaseOrderFixture,
 ) {
@@ -7879,6 +7886,7 @@ async function strandTwoEmailsOfOnePurchaseOrder(
     { ...fixture, updated: true },
     "2026-07-19T04:35:00.000Z",
     "sha-updated",
+    UPDATED_PDF_NOTE,
   );
   const stranded = await harness.runAlone(
     "updated-email",
@@ -7895,6 +7903,51 @@ async function strandTwoEmailsOfOnePurchaseOrder(
   assertEquals(harness.state.approvals, 0);
   assertEquals(harness.store.makesafe_intake_drafts.length, 0);
   return harness;
+}
+
+// What the released draft is built from depends on the page, and both shapes
+// are accepted behaviour:
+//   - emails read on separate pages: the newest PDF email of the purchase order
+//     is the one released, so the draft is the Updated email alone;
+//   - both emails read on ONE page: the shared planner merges them into one
+//     case with the OLDER email as primary (its subject and received time),
+//     and both PDFs' text on the draft. A reviewer of such a draft must read
+//     the Updated PDF. The planner's merge order is shared by every builder and
+//     is deliberately not changed here.
+function assertDraftBuiltAsThePageDictates(
+  draft: any,
+  fixture: AmbrosePurchaseOrderFixture,
+  readOnOnePage: boolean,
+) {
+  const pdfs = (draft.extraction_json.work_order_pdf_text || []).map((
+    document: any,
+  ) => [document.source_post_id, document.text.includes(UPDATED_PDF_NOTE)]);
+  if (readOnOnePage) {
+    assertEquals(draft.subject, ambroseSubject(fixture));
+    assertEquals(draft.received_at, "2026-07-18T06:31:00.000Z");
+    assertEquals(draft.extraction_json.intake_source_post_ids, [
+      "first-email",
+      "updated-email",
+    ]);
+    assertEquals(pdfs, [["first-email", false], ["updated-email", true]]);
+  } else {
+    assertEquals(draft.subject, ambroseSubject({ ...fixture, updated: true }));
+    assertEquals(draft.received_at, "2026-07-19T04:35:00.000Z");
+    assertEquals(draft.extraction_json.intake_source_post_ids, [
+      "updated-email",
+    ]);
+    assertEquals(pdfs, [["updated-email", true]]);
+  }
+}
+
+// The email whose row became the purchase order's case.
+function releasedEmail(store: Store): string | undefined {
+  const released = store.makesafe_intake_cases.find((row: any) =>
+    row.is_authoritative
+  );
+  return store.makesafe_intake_case_sources.find((source: any) =>
+    source.case_id === released?.id
+  )?.post_id;
 }
 
 for (
@@ -7949,17 +8002,21 @@ for (
     assertEquals(harness.fallbacks().length, 1);
     assertEquals(harness.fallbacks()[0].job_id, null);
     assertEquals(harness.fallbacks()[0].is_authoritative, false);
-    // The job is built from the builder's newest email of the purchase order.
-    assert(
-      store.makesafe_intake_drafts[0].extraction_json.intake_source_post_ids
-        .includes("updated-email"),
+    assertDraftBuiltAsThePageDictates(
+      store.makesafe_intake_drafts[0],
+      AMBROSE_MAKE_SAFE,
+      order.length === 1,
+    );
+    assertEquals(
+      releasedEmail(store),
+      order.length === 1 ? "first-email" : "updated-email",
     );
   });
 }
 
 // The live shape: one repair purchase order, two PDF emails an hour apart, the
-// later one "Updated". Whichever page the sweep reads first, the review draft
-// is built from the Updated email.
+// later one "Updated", with different PDFs. One review draft either way; what
+// it is built from follows assertDraftBuiltAsThePageDictates.
 for (
   const order of [
     ["both emails on one page"],
@@ -7967,7 +8024,7 @@ for (
     ["updated-email", "first-email"],
   ] as const
 ) {
-  Deno.test(`a stranded Ambrose repair with two PDF emails recovers to one review draft built from the newest, never minted (${order.join(", then ")})`, async () => {
+  Deno.test(`a stranded Ambrose repair with two PDF emails recovers to one review draft, never minted (${order.join(", then ")})`, async () => {
     const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_REPAIR);
     const { store, state } = harness;
     state.adapterAdmitted = true;
@@ -7988,8 +8045,14 @@ for (
     const draft = store.makesafe_intake_drafts[0];
     assertEquals(draft.status, "needs_review");
     assertEquals(draft.extraction_json.makesafe_job_family, "repair");
-    assert(
-      draft.extraction_json.intake_source_post_ids.includes("updated-email"),
+    assertDraftBuiltAsThePageDictates(
+      draft,
+      AMBROSE_REPAIR,
+      order.length === 1,
+    );
+    assertEquals(
+      releasedEmail(store),
+      order.length === 1 ? "first-email" : "updated-email",
     );
     assertEquals(settled.totals.write_failures, 0);
     assertEquals(settled.totals.cases_failed, 0);
