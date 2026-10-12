@@ -849,6 +849,7 @@ Deno.test("job_notes: a job number of any stored shape resolves, by the whole nu
       "SWF-PDF-BUCKE_",
       "SWF_PDF_BUCKET",
       "SW%",
+      "SW*",
       "SWF-100",
       "SW9999",
     ]
@@ -1102,6 +1103,34 @@ Deno.test("the list's note count and job_notes agree on every listed job, by id 
   }
 });
 
+Deno.test("pipeline without the flag: the note count follows the same note rule, and no Dispatch key appears", async () => {
+  const { client } = makeClient(noteCountFixture());
+  const rows = allRows(await _pipelineForTest(client, params("")));
+  assertEquals(
+    Object.fromEntries(
+      rows.map((row) => [row.job_number, row.comms_notes_count]),
+    ),
+    {
+      "SWF-1001": 4,
+      "SW1346": 2,
+      "SWF-PDF-BUCKET": 3,
+      "SWG-20260713-BE": 0,
+      "SWF-1005": 2,
+      "SWF-1006": 0,
+      // The plain read keeps the true make-safe, and counts its note.
+      "SWF-1007": 1,
+      // It keeps the draft too, but has never read enrichment for a draft, so
+      // the draft's one note_added stays uncounted, as before this fix.
+      "SWF-1008": 0,
+    },
+  );
+  for (const row of rows) {
+    assert(!("description" in row));
+    assert(!("value_inc_gst" in row));
+    assert(!("work_type" in row));
+  }
+});
+
 // ── Who may call ────────────────────────────────────────────────────────────
 
 Deno.test("job_notes and the Dispatch list are staff reads: a trade session is refused", () => {
@@ -1133,6 +1162,11 @@ Deno.test("job_notes and the Dispatch list are staff reads: a trade session is r
       assertEquals((refused as any).status, 403);
       assertEquals((refused as any).code, "operator_access_required");
     }
+    // No credential at all is a 401: there is no session to judge a role on.
+    const anonymous = _authorizeOpsApiAction({ url, authMode: "none" });
+    assertEquals(anonymous.ok, false);
+    assertEquals((anonymous as any).status, 401);
+    assertEquals((anonymous as any).code, "user_jwt_required");
   }
   assert(!LEAD_INSTALLER_READ_ACTIONS.has("job_notes"));
   assert(!AGENT_READ_ALLOWED_ACTIONS.has("job_notes"));
