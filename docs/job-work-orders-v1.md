@@ -65,10 +65,19 @@ Only labour counts against the agreed labour. Which lines are labour is the
 repo's one definition, `v_trade_charge_resolved.cost_lane` (`20260831021701`):
 this module reads the lane per line and never restates it. Billed to date,
 remaining, the over agreed and near agreed rules, and each invoice's amount
-count labour-lane lines only. Materials, travel, equipment, commission and
+count labour lines only. Materials, travel, equipment, commission and
 other lines stay in the work order's `lines[]` with their `cost_lane` and
 `counted: false`. Example: agreed 2,000, billed 1,900 labour and 400 materials
 reads billed 1,900, remaining 100, not over.
+
+Temporary exception, in one place (`workOrderLineIsLabour` in
+`job_work_orders.ts`): the trade app's "Work Order" pay line (`line_type`
+`work order` or `work_order`) is labour and counts, although the shared view
+does not classify it yet and gives it `cost_lane: unclassified`. A job billed
+as one 2,000 Work Order line against an agreed 2,000 reads billed 2,000,
+remaining 0. The shared view is left alone in this change because it also
+feeds the job costing reports; that is the finance desk's change. When the
+view puts those two types in its labour lane, remove the line-type test.
 
 Lines invoiced before the work order is approved (a backfilled job already mid
 install, or a trade who invoices before Shaun approves) are linked by
@@ -84,7 +93,7 @@ and shown as `labour_before_approval`.
 | field | meaning |
 | --- | --- |
 | `agreed_ex` | sealed agreed labour |
-| `billed_to_date_ex` | labour-lane lines on billed invoices, stamped against this job's approved work order (variation work included) |
+| `billed_to_date_ex` | labour lines (labour lane, plus Work Order pay lines for now) on billed invoices, stamped against this job's approved work order (variation work included) |
 | `variations_ex` | the part of billed the trades marked as variations. A variation counts only while its trade invoice is billed (not draft, not `ops-reject`), the same rule as labour lines |
 | `billed_within_agreed_scope_ex` | billed minus variations |
 | `remaining_ex` | agreed minus billed |
