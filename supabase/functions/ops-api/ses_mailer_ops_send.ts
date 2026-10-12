@@ -40,6 +40,7 @@ import {
   filterMediaForCurrentCycle,
   hasReattendBoundary,
   isEvidenceBoundToCurrentCycle,
+  QUOTE_BUILDER_PHOTO_PHASE,
 } from "./makesafe_cycle_evidence.ts";
 import {
   SES_OPERATION_HEADER,
@@ -900,7 +901,8 @@ export async function resolveMailerOpsPhotoAttachments(
   const siteRows = rows.filter((row: any) => {
     const t = text(row.type).toLowerCase();
     if (t && t !== "photo") return false;
-    return text(row.phase).toLowerCase() !== "receipt";
+    const phase = text(row.phase).toLowerCase();
+    return phase !== "receipt" && phase !== QUOTE_BUILDER_PHOTO_PHASE;
   });
   const excludedReceiptCount = rows.length - siteRows.length;
   // Current attendance cycle only — one shared boundary, no private copy.
