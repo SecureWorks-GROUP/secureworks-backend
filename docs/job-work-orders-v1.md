@@ -19,7 +19,7 @@ backfill: `supabase/migrations/20261012130000_job_work_orders.sql` (contract
   is no cancelled state. One work order per job: a draft, then that same row
   approved, enforced by unique index `uq_work_orders_job_current`.
 - The `job_events` rows this module writes (draft opened or updated, approved,
-  variation reported) carry ids only: never the agreed labour, a variation
+  variation reported or corrected) carry ids only: never the agreed labour, a variation
   amount or the sealed hash. `job_events` is readable by any signed-in user of
   the org, trades included, and the hash could be used to guess the agreed
   figure. The figures live on the work order row, which trades cannot read.
@@ -39,6 +39,12 @@ backfill: `supabase/migrations/20261012130000_job_work_orders.sql` (contract
 - `agreed_labour_ex` is the labour we allowed and agreed (ex GST). Approving
   needs it set and some scope (scope items or special instructions). The
   trigger stamps `sealed_content_hash` (sha256 of the sealed content).
+- Approval seals only what the approver read. `approve_work_order` must carry
+  `expected_updated_at`, the `updated_at` of the draft as it was read. Every
+  save of a draft moves `updated_at` (the same trigger), and
+  `approve_job_work_order` compares the stamp under its row lock, so a save
+  that lands after the read, even between the press and the seal, is refused
+  409 `stale_review` and nothing is sealed. Read the draft again, then approve.
 
 ## Who approves (Shaun only)
 
@@ -120,7 +126,10 @@ Rules (`figures.rules[]`, each `{key, level, message}`):
 
 `report_work_order_variation` records one `work_order_variations` row per
 trade invoice per job, against the approved work order (or none: kept, and
-linked when the work order is approved). It writes two rows in `work_order_variation_emails`: one to
+linked when the work order is approved). A variation is part of its invoice, so
+`amount_ex` may not be more than that invoice bills on that job (every line of
+the invoice on the job, ex GST); a larger amount is refused 422
+`variation_over_invoice`. It writes two rows in `work_order_variation_emails`: one to
 finance@secureworkswa.com.au and a separate one to admin@secureworkswa.com.au,
 sent from admin@ through `send-outlook-email`. Addresses: secureworks-wiki
 `harness/ops/sops/make-safe-ops-agent-sop.md` lines 134 and 137.
@@ -161,6 +170,25 @@ or `failed`. Recovery, with no scheduler:
   never sends a `recorded` row, so variations reported while the flag was off
   are not sent as a backlog. Safe to call again.
 
+### Correcting a variation (office staff only)
+
+The trade cannot change a variation once it is recorded. When one is wrong,
+office staff call `correct_work_order_variation` with the corrected
+`description`, `amount_ex`, or both (the same invoice limit applies). The row
+keeps what the trade first reported in `original_description` and
+`original_amount_ex` (written by the first correction, never again) and who
+corrected it and when in `corrected_by` (the caller: `user:<users.id>` for a
+signed-in session, the `x-sw-actor` value for a server key call; a call that
+names nobody is refused) and `corrected_at`. The work order figures read the
+row, so they follow the correction. There is no withdraw and no history beyond
+the original values.
+
+The two ledger emails for the variation are replaced by corrected ones (subject
+`Correction: work order variation on ...`, with what the variation was), so an
+earlier email with the wrong amount can never be sent later. They are sent, one
+to finance and one to admin, only while `work_order_variation_emails_v1` is on;
+while it is off they stay `recorded`.
+
 ## Backfill (OFF)
 
 `backfill_job_work_orders` (ops server key only) calls
@@ -182,13 +210,19 @@ Errors are `{error, code}`.
 | `list_work_orders` | GET | staff | `kind=job`, optional `status` (draft, approved), `type` (fencing, patio), `job_id` | `{schema:"job-work-orders.v1", kind:"job", work_orders[] (row + job_number, client_name, job_type, job_status, site_suburb, figures for approved ones), total}`. Without `kind=job` the old list, crew work orders only: a job work order is never in it. |
 | `create_work_order` | POST | staff | `{kind:"job", job_id, ...draft fields}` | `{created, work_order}`: the open draft, else a new draft; 409 `work_order_sealed` once the job's work order is approved |
 | `update_work_order` | POST | staff | `{id, scope_items?, special_instructions?, agreed_labour_ex?, scheduled_date?, site_address?}` | `{work_order}`; approved returns 409 `work_order_sealed`; a `status` other than `draft` returns 400 `invalid_status` |
-| `approve_work_order` | POST | Shaun (session; terminal only while its flag is on) | `{work_order_id, expected_updated_at?}` | `{work_order}`; 403 `approver_required` / `approver_identity_missing` / `terminal_approval_switched_off`, 422 `work_order_not_ready`, 409 `not_a_draft` / `stale_review` |
+| `approve_work_order` | POST | Shaun (session; terminal only while its flag is on) | `{work_order_id, expected_updated_at}`: both required; `expected_updated_at` is the draft's `updated_at` exactly as it was read | `{work_order}`; 400 `expected_updated_at_required` (missing: read the draft again), 409 `stale_review` (the draft changed after it was read: read it again), 403 `approver_required` / `approver_identity_missing` / `terminal_approval_switched_off`, 422 `work_order_not_ready`, 409 `not_a_draft` |
 | `backfill_job_work_orders` | POST | ops server key | `{apply?: true}` | `{dry_run, candidates, by_type_status, job_ids, opened}` |
 | `resend_work_order_variation_emails` | POST | staff | none | `{sending_on, emails:[{id, variation_id, recipient_role, status}]}`; `sending_on:false` and no sends while the email flag is off |
+| `correct_work_order_variation` | POST | staff only, never a trade session | `{variation_id, description?, amount_ex?}` (at least one, and different from what is recorded; `amount_ex: null` clears the amount) | `{variation, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice`, 400 `nothing_to_correct`, 404 `variation_not_found`, 403 `corrector_identity_missing` |
 | `send_work_order` | POST | staff | job work order id | 409 `job_work_order_not_sendable` |
 | `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, invoice_count, variation_count}` on fencing and patio jobs (null on other types); `{unreadable: true}` when that read fails, which never fails the job detail |
 | `my_job_work_order` | GET | trade with access to the job | `job_id` | `{schema:"trade-job-work-order.v1", job_id, work_order: {id, wo_number, status, approved_at, job_id, job_number, job_type, site_address, scheduled_date, scope_items, special_instructions} or null, reason, can_report_variation, my_variations[]}`. No price, allowance, agreed amount or figure, ever. |
-| `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}` |
+| `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice` when `amount_ex` is more than the invoice bills on the job |
+
+Each `variations[]` row on the staff read: `id, work_order_id,
+trade_invoice_id, reported_by, reported_by_name, description, amount_ex,
+counted, created_at, corrected_at, corrected_by, original_description,
+original_amount_ex` (the last four null until a correction).
 
 Work order row fields: `id, job_id, wo_number, kind, status, scope_items,
 special_instructions, scheduled_date, site_address, agreed_labour_ex,

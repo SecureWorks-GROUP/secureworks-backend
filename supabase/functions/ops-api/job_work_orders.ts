@@ -16,13 +16,19 @@
 //     list_work_orders        GET   kind=job lists job work orders with figures
 //     create_work_order       POST  kind=job opens (or edits) the job's draft
 //     update_work_order       POST  edits a job DRAFT (approved ones are sealed)
-//     approve_work_order      POST  approver only (see resolveWorkOrderApprover)
+//     approve_work_order      POST  approver only (see resolveWorkOrderApprover);
+//                                   seals only the draft as it was read
+//                                   (expected_updated_at is required)
 //     backfill_job_work_orders POST ops key only; dry run unless apply:true AND
 //                                   feature flag job_work_order_backfill_v1 is on
 //     resend_work_order_variation_emails POST re-sends variation emails left
 //                                   failed, or stuck in sending past the
 //                                   staleness bound; nothing while the email
 //                                   flag is off
+//     correct_work_order_variation POST corrects a variation's amount and
+//                                   description, keeping what the trade first
+//                                   reported and who corrected it; never a
+//                                   trade door
 //   Trade (signed-in Trade App user with access to the job):
 //     my_job_work_order       GET   the approved work order's scope and agreed
 //                                   details, every price and allowance left out
@@ -509,6 +515,11 @@ export type VariationEmailInput = {
   description: string;
   amountEx: number | null;
   figures: WorkOrderFigures | null;
+  /** Set by the office correction: what the email it replaces said. */
+  correction?: {
+    previousDescription: string;
+    previousAmountEx: number | null;
+  } | null;
 };
 
 export type VariationEmail = {
@@ -524,20 +535,31 @@ export function buildVariationEmails(
 ): VariationEmail[] {
   const job = input.jobNumber || "a job";
   const where = input.siteSuburb ? ` (${input.siteSuburb})` : "";
-  const subject = noDashes(`Work order variation on ${job}${where}`);
+  const correction = input.correction ?? null;
+  const amountText = (value: number | null) =>
+    value === null ? "Not given" : `$${money(value).toFixed(2)}`;
+  const subject = noDashes(
+    `${
+      correction ? "Correction: work" : "Work"
+    } order variation on ${job}${where}`,
+  );
   const facts: Array<[string, string]> = [
     ["Job", `${job}${where}`],
     ["Work order", input.woNumber || "No approved work order yet"],
     ["Trade", input.tradeName || "Unknown"],
     ["Trade invoice", input.invoiceNumber || "Not numbered yet"],
     ["Variation", input.description],
-    [
-      "Variation amount (ex GST)",
-      input.amountEx === null
-        ? "Not given"
-        : `$${money(input.amountEx).toFixed(2)}`,
-    ],
+    ["Variation amount (ex GST)", amountText(input.amountEx)],
   ];
+  if (correction) {
+    facts.push(
+      ["Variation was", correction.previousDescription],
+      [
+        "Variation amount was (ex GST)",
+        amountText(correction.previousAmountEx),
+      ],
+    );
+  }
   if (input.figures && input.figures.agreed_ex !== null) {
     facts.push(
       ["Agreed labour (ex GST)", `$${input.figures.agreed_ex.toFixed(2)}`],
@@ -554,11 +576,13 @@ export function buildVariationEmails(
       facts.push(["Flag", "Billed is over the agreed labour"]);
     }
   }
+  const opening = correction
+    ? "Correction: the office has corrected a work order variation reported earlier. This replaces the earlier email."
+    : "A trade has reported a variation to the work order on their invoice.";
   const intros: Record<"finance" | "admin", string> = {
-    finance:
-      "A trade has reported a variation to the work order on their invoice. Please check it before the invoice is paid.",
+    finance: `${opening} Please check it before the invoice is paid.`,
     admin:
-      "A trade has reported a variation to the work order on their invoice. Please update the job and follow up with the client if needed.",
+      `${opening} Please update the job and follow up with the client if needed.`,
   };
   const recipients: Array<["finance" | "admin", string]> = [
     ["finance", WORK_ORDER_VARIATION_FINANCE_EMAIL],
@@ -720,12 +744,17 @@ async function readWorkOrderLines(
   return out;
 }
 
+const VARIATION_COLUMNS =
+  "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, created_at";
+const VARIATION_STAFF_COLUMNS =
+  `${VARIATION_COLUMNS}, reported_by, original_description, original_amount_ex, corrected_by, corrected_at`;
+
 async function readVariations(client: any, jobIds: string[]): Promise<any[]> {
   const out: any[] = [];
   for (let i = 0; i < jobIds.length; i += 25) {
     const { data, error } = await client.from("work_order_variations")
       .select(
-        "id, job_id, work_order_id, trade_invoice_id, reported_by, description, amount_ex, created_at, users:reported_by(name), trade_invoices:trade_invoice_id(status)",
+        `${VARIATION_STAFF_COLUMNS}, users:reported_by(name), trade_invoices:trade_invoice_id(status)`,
       )
       .in("job_id", jobIds.slice(i, i + 25))
       .order("created_at", { ascending: true });
@@ -815,6 +844,15 @@ function shapeVariation(v: any) {
       : money(v.amount_ex),
     counted: v.counted === true,
     created_at: v.created_at,
+    corrected_at: v.corrected_at ?? null,
+    corrected_by: v.corrected_by ?? null,
+    original_description: v.corrected_at
+      ? v.original_description ?? null
+      : null,
+    original_amount_ex: v.corrected_at && v.original_amount_ex !== null &&
+        v.original_amount_ex !== undefined
+      ? money(v.original_amount_ex)
+      : null,
   };
 }
 
@@ -1064,6 +1102,7 @@ const APPROVE_ERRORS: Record<string, [number, string]> = {
   "42501": [403, "approver_required"],
   "23514": [422, "work_order_not_ready"],
   "P0002": [404, "work_order_not_found"],
+  "WO409": [409, "stale_review"],
 };
 
 export async function approveJobWorkOrder(
@@ -1100,6 +1139,14 @@ export async function approveJobWorkOrder(
   if (!approvers.includes(approver.userId.toLowerCase())) {
     fail(403, "approver_required", "Only Shaun approves job work orders");
   }
+  const expected = body?.expected_updated_at;
+  if (typeof expected !== "string" || !Number.isFinite(Date.parse(expected))) {
+    fail(
+      400,
+      "expected_updated_at_required",
+      "Read the draft again and send its updated_at as expected_updated_at. Approving seals only the draft you read.",
+    );
+  }
   const wo = await readWorkOrder(client, id);
   if (wo.kind !== "job") {
     fail(422, "not_a_job_work_order", "Only a job work order is approved");
@@ -1107,21 +1154,11 @@ export async function approveJobWorkOrder(
   if (wo.status !== "draft") {
     fail(409, "not_a_draft", `This work order is ${wo.status}`);
   }
-  const expected = body?.expected_updated_at;
-  if (
-    expected !== undefined && expected !== null &&
-    String(expected) !== String(wo.updated_at)
-  ) {
-    fail(
-      409,
-      "stale_review",
-      "The draft changed after it was read. Read it again before approving.",
-    );
-  }
   const { data, error } = await client.rpc("approve_job_work_order", {
     p_work_order_id: id,
     p_approver: approver.userId,
     p_via: approver.via,
+    p_expected_updated_at: expected,
   });
   if (error) {
     const mapped = APPROVE_ERRORS[String(error.code || "")];
@@ -1211,6 +1248,84 @@ export async function readFlag(client: any, flag: string): Promise<boolean> {
   }
 }
 
+function parseVariationDescription(value: unknown): string {
+  const description = typeof value === "string" ? value.trim() : "";
+  if (!description || description.length > MAX_VARIATION_TEXT) {
+    fail(
+      400,
+      "invalid_description",
+      `Describe the variation in 1 to ${MAX_VARIATION_TEXT} characters`,
+    );
+  }
+  return description;
+}
+
+function parseVariationAmount(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 1_000_000) {
+    fail(400, "invalid_amount_ex", "amount_ex must be zero or more");
+  }
+  return money(n);
+}
+
+/**
+ * What one invoice bills on one job, ex GST: every line of it on that job.
+ * Null when the invoice has no line for the job.
+ */
+async function readInvoiceBilledOnJob(
+  client: any,
+  invoiceId: string,
+  jobId: string,
+): Promise<number | null> {
+  const { data, error } = await client.from("trade_invoice_lines")
+    .select("id, line_total_ex, override_amount")
+    .eq("trade_invoice_id", invoiceId).eq("job_id", jobId);
+  if (error) fail(500, "invoice_unreadable", "The invoice could not be read");
+  if (!data?.length) return null;
+  return money(
+    data.reduce(
+      (sum: number, line: any) =>
+        sum + money(line.override_amount ?? line.line_total_ex),
+      0,
+    ),
+  );
+}
+
+/** A variation is part of its invoice, so it is never more than the invoice bills on the job. */
+function requireVariationWithinInvoice(
+  amountEx: number | null,
+  billedEx: number,
+) {
+  if (amountEx !== null && amountEx > billedEx) {
+    fail(
+      422,
+      "variation_over_invoice",
+      `The variation amount is more than this invoice bills on this job ($${
+        billedEx.toFixed(2)
+      } ex GST). Check the amount.`,
+    );
+  }
+}
+
+/** The work order's figures for a variation email; null when unreadable. */
+async function variationEmailFigures(
+  client: any,
+  live: any,
+  jobId: string,
+): Promise<WorkOrderFigures | null> {
+  if (!live) return null;
+  try {
+    const [lines, variations] = await Promise.all([
+      readWorkOrderLines(client, [jobId], { linkedOnly: true }),
+      readVariations(client, [jobId]),
+    ]);
+    return figuresFor(live, lines, variations);
+  } catch (_e) {
+    return null;
+  }
+}
+
 export async function reportWorkOrderVariation(
   client: any,
   body: any,
@@ -1219,27 +1334,8 @@ export async function reportWorkOrderVariation(
 ) {
   const invoiceId = requireUuid(body?.trade_invoice_id, "trade_invoice_id");
   const jobId = requireUuid(body?.job_id, "job_id");
-  const description = typeof body?.description === "string"
-    ? body.description.trim()
-    : "";
-  if (!description || description.length > MAX_VARIATION_TEXT) {
-    fail(
-      400,
-      "invalid_description",
-      `Describe the variation in 1 to ${MAX_VARIATION_TEXT} characters`,
-    );
-  }
-  let amountEx: number | null = null;
-  if (
-    body?.amount_ex !== undefined && body?.amount_ex !== null &&
-    body?.amount_ex !== ""
-  ) {
-    const n = Number(body.amount_ex);
-    if (!Number.isFinite(n) || n < 0 || n > 1_000_000) {
-      fail(400, "invalid_amount_ex", "amount_ex must be zero or more");
-    }
-    amountEx = money(n);
-  }
+  const description = parseVariationDescription(body?.description);
+  const amountEx = parseVariationAmount(body?.amount_ex);
 
   const { data: invoice, error: invErr } = await client.from("trade_invoices")
     .select("id, org_id, user_id, status, invoice_number").eq("id", invoiceId)
@@ -1255,16 +1351,11 @@ export async function reportWorkOrderVariation(
     fail(409, "invoice_rejected", "This invoice was rejected");
   }
 
-  const { data: lineRows, error: lineErr } = await client.from(
-    "trade_invoice_lines",
-  )
-    .select("id").eq("trade_invoice_id", invoiceId).eq("job_id", jobId).limit(
-      1,
-    );
-  if (lineErr) fail(500, "invoice_unreadable", "The invoice could not be read");
-  if (!lineRows?.length) {
+  const billedEx = await readInvoiceBilledOnJob(client, invoiceId, jobId);
+  if (billedEx === null) {
     fail(422, "job_not_on_invoice", "This invoice has no line for that job");
   }
+  requireVariationWithinInvoice(amountEx, billedEx);
 
   const job = await readJob(client, jobId);
   if (!JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || ""))) {
@@ -1277,8 +1368,6 @@ export async function reportWorkOrderVariation(
   const rows = await readJobWorkOrders(client, jobId);
   const live = liveOf(rows);
 
-  const VARIATION_COLUMNS =
-    "id, job_id, work_order_id, trade_invoice_id, description, amount_ex, created_at";
   const { data: inserted, error: insErr } = await client.from(
     "work_order_variations",
   ).insert({
@@ -1312,18 +1401,6 @@ export async function reportWorkOrderVariation(
     fail(500, "variation_not_saved", "The variation could not be saved");
   }
 
-  let figures: WorkOrderFigures | null = null;
-  if (live) {
-    try {
-      const [lines, variations] = await Promise.all([
-        readWorkOrderLines(client, [jobId], { linkedOnly: true }),
-        readVariations(client, [jobId]),
-      ]);
-      figures = figuresFor(live, lines, variations);
-    } catch (_e) {
-      figures = null;
-    }
-  }
   const emails = buildVariationEmails({
     jobNumber: job.job_number,
     siteSuburb: job.site_suburb,
@@ -1332,7 +1409,7 @@ export async function reportWorkOrderVariation(
     invoiceNumber: invoice.invoice_number ?? null,
     description,
     amountEx,
-    figures,
+    figures: await variationEmailFigures(client, live, jobId),
   });
   const emailResults = await recordAndMaybeSendVariationEmails(
     client,
@@ -1349,6 +1426,129 @@ export async function reportWorkOrderVariation(
     }, trade.id);
   }
   return { variation, duplicate, emails: emailResults };
+}
+
+// ── Staff: correct a variation (never a trade door) ──────────────────────────
+
+/**
+ * The one way a recorded variation changes: office staff correct its amount
+ * and description. The first correction keeps what the trade reported
+ * (original_description, original_amount_ex); every correction stamps who and
+ * when. The figures follow the row, so they are corrected with it. The two
+ * ledger emails are replaced by the corrected ones, sent only while the email
+ * flag is on.
+ */
+export async function correctWorkOrderVariation(
+  client: any,
+  body: any,
+  corrector: { actor: string; missing: boolean },
+  deps: { sendEmail: VariationEmailSender; now?: () => number },
+) {
+  const id = requireUuid(body?.variation_id, "variation_id");
+  if (corrector.missing) {
+    fail(
+      403,
+      "corrector_identity_missing",
+      "A correction records who made it. Sign in, or name the caller with x-sw-actor on a server key call.",
+    );
+  }
+  const { data: current, error } = await client.from("work_order_variations")
+    .select(
+      `${VARIATION_STAFF_COLUMNS}, users:reported_by(name), trade_invoices:trade_invoice_id(invoice_number, status)`,
+    )
+    .eq("id", id).maybeSingle();
+  if (error) {
+    fail(500, "variations_unreadable", "The variation could not be read");
+  }
+  if (!current) fail(404, "variation_not_found", "Variation not found");
+
+  const previousAmountEx = current.amount_ex === null ||
+      current.amount_ex === undefined
+    ? null
+    : money(current.amount_ex);
+  const description = body?.description === undefined
+    ? String(current.description)
+    : parseVariationDescription(body.description);
+  const amountEx = body?.amount_ex === undefined
+    ? previousAmountEx
+    : parseVariationAmount(body.amount_ex);
+  if (description === current.description && amountEx === previousAmountEx) {
+    fail(
+      400,
+      "nothing_to_correct",
+      "Give the corrected description or amount_ex",
+    );
+  }
+  if (amountEx !== null) {
+    requireVariationWithinInvoice(
+      amountEx,
+      await readInvoiceBilledOnJob(
+        client,
+        current.trade_invoice_id,
+        current.job_id,
+      ) ?? 0,
+    );
+  }
+  const job = await readJob(client, current.job_id);
+  const live = liveOf(await readJobWorkOrders(client, current.job_id));
+
+  const now = deps.now ?? Date.now;
+  const { data: saved, error: saveErr } = await client.from(
+    "work_order_variations",
+  ).update({
+    description,
+    amount_ex: amountEx,
+    corrected_by: corrector.actor,
+    corrected_at: new Date(now()).toISOString(),
+    ...(current.corrected_at ? {} : {
+      original_description: current.description,
+      original_amount_ex: current.amount_ex ?? null,
+    }),
+  }).eq("id", id).select(VARIATION_STAFF_COLUMNS).maybeSingle();
+  if (saveErr || !saved) {
+    fail(500, "variation_not_corrected", "The correction could not be saved");
+  }
+
+  const invoice = Array.isArray(current.trade_invoices)
+    ? current.trade_invoices[0]
+    : current.trade_invoices;
+  const emails = await recordAndMaybeSendVariationEmails(
+    client,
+    id,
+    buildVariationEmails({
+      jobNumber: job.job_number,
+      siteSuburb: job.site_suburb,
+      woNumber: live?.wo_number ?? null,
+      tradeName: current.users?.name ?? null,
+      invoiceNumber: invoice?.invoice_number ?? null,
+      description,
+      amountEx,
+      figures: await variationEmailFigures(client, live, current.job_id),
+      correction: {
+        previousDescription: String(current.description),
+        previousAmountEx,
+      },
+    }),
+    deps.sendEmail,
+    now,
+    { replace: true },
+  );
+  const correctorUser = /^user:([0-9a-f-]{36})$/i.exec(corrector.actor)?.[1];
+  await logJobEvent(client, current.job_id, "work_order_variation_corrected", {
+    variation_id: id,
+    work_order_id: saved.work_order_id ?? null,
+    trade_invoice_id: saved.trade_invoice_id,
+  }, isUuid(correctorUser) ? correctorUser : null);
+  return {
+    variation: shapeVariation({
+      ...saved,
+      users: current.users,
+      counted: JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(
+        String(invoice?.status || ""),
+      ),
+    }),
+    emails,
+  };
 }
 
 const VARIATION_EMAIL_COLUMNS =
@@ -1377,7 +1577,9 @@ function variationEmailOwed(
 /**
  * Claims one owed row and sends it. The claim is a compare-and-set on the
  * exact state that was read (and, for a stale `sending` row, on its claim
- * stamp), so two callers can never both send the same email.
+ * stamp), so two callers can never both send the same email. The outcome is
+ * written only while this call still holds the claim, so it never marks a row
+ * a correction has since replaced.
  */
 async function claimAndSendVariationEmail(
   client: any,
@@ -1385,10 +1587,11 @@ async function claimAndSendVariationEmail(
   sendEmail: VariationEmailSender,
   nowMs: number,
 ): Promise<string> {
+  const claimedAt = new Date(nowMs).toISOString();
   let claim = client.from("work_order_variation_emails")
     .update({
       status: "sending",
-      sending_started_at: new Date(nowMs).toISOString(),
+      sending_started_at: claimedAt,
       send_error: null,
     })
     .eq("id", row.id).eq("status", row.status);
@@ -1413,7 +1616,7 @@ async function claimAndSendVariationEmail(
     ? { status: "sent", sent_at: new Date().toISOString() }
     : { status: "failed", send_error: outcome.error.slice(0, 500) };
   const { error: updErr } = await client.from("work_order_variation_emails")
-    .update(patch).eq("id", row.id);
+    .update(patch).eq("id", row.id).eq("sending_started_at", claimedAt);
   if (updErr) {
     console.error(
       "[job-work-orders] variation email outcome not saved:",
@@ -1428,6 +1631,8 @@ async function claimAndSendVariationEmail(
  * feature flag is on, every row this variation still owes is claimed and sent:
  * a first report sends both, and a retry of the same report sends only what is
  * not already sent or in flight. Sends nothing while the flag is off.
+ * `replace` (the office correction) overwrites both rows with the corrected
+ * emails and owes them afresh, so an earlier email is never sent in their place.
  */
 export async function recordAndMaybeSendVariationEmails(
   client: any,
@@ -1435,7 +1640,9 @@ export async function recordAndMaybeSendVariationEmails(
   emails: VariationEmail[],
   sendEmail: VariationEmailSender,
   now: () => number = Date.now,
+  opts: { replace?: boolean } = {},
 ) {
+  const replace = opts.replace === true;
   const notRecorded = () =>
     emails.map((e) => ({
       recipient_role: e.recipient_role,
@@ -1443,8 +1650,19 @@ export async function recordAndMaybeSendVariationEmails(
     }));
   const { error } = await client.from("work_order_variation_emails")
     .upsert(
-      emails.map((e) => ({ variation_id: variationId, ...e })),
-      { onConflict: "variation_id,recipient_role", ignoreDuplicates: true },
+      emails.map((e) => ({
+        variation_id: variationId,
+        ...e,
+        ...(replace
+          ? {
+            status: "recorded",
+            sending_started_at: null,
+            sent_at: null,
+            send_error: null,
+          }
+          : {}),
+      })),
+      { onConflict: "variation_id,recipient_role", ignoreDuplicates: !replace },
     );
   if (error) {
     console.error(

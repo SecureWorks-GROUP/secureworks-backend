@@ -175,13 +175,20 @@ CREATE TABLE IF NOT EXISTS public.work_order_variations (
   reported_by uuid NOT NULL REFERENCES public.users(id),
   description text NOT NULL CHECK (length(btrim(description)) BETWEEN 1 AND 2000),
   amount_ex numeric(12,2) CHECK (amount_ex IS NULL OR amount_ex >= 0),
+  -- Set by the one office correction (ops-api correct_work_order_variation):
+  -- what the trade first reported, who corrected it and when. The original
+  -- values are written by the first correction and never again.
+  original_description text,
+  original_amount_ex numeric(12,2),
+  corrected_by text,
+  corrected_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (trade_invoice_id, job_id)
 );
 CREATE INDEX IF NOT EXISTS idx_work_order_variations_wo ON public.work_order_variations (work_order_id);
 CREATE INDEX IF NOT EXISTS idx_work_order_variations_job ON public.work_order_variations (job_id);
 COMMENT ON TABLE public.work_order_variations IS
-  'A trade''s variation to a job work order, reported on their invoice. One per invoice per job. amount_ex is the part of that invoice the trade says is the variation.';
+  'A trade''s variation to a job work order, reported on their invoice. One per invoice per job. amount_ex is the part of that invoice the trade says is the variation. Only office staff change one afterwards (corrected_by, corrected_at, original_*).';
 ALTER TABLE public.work_order_variations ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS work_order_variations_service_role_all ON public.work_order_variations;
 CREATE POLICY work_order_variations_service_role_all ON public.work_order_variations
@@ -305,6 +312,12 @@ BEGIN
         USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
+  END IF;
+
+  -- Every write to a job work order that is not yet sealed moves updated_at:
+  -- it is the stamp approve_job_work_order compares with what the approver read.
+  IF NEW.kind = 'job' THEN
+    NEW.updated_at := clock_timestamp();
   END IF;
 
   IF NEW.kind = 'job' AND NEW.status = 'approved' THEN
@@ -436,14 +449,19 @@ CREATE TRIGGER trg_jobs_open_job_work_order
 
 -- ── 11. approve (Shaun only) ─────────────────────────────────────────────────
 
--- Seals the job's draft and points jobs.work_order_id at it. In the same
--- transaction, labour already invoiced on the job (and any variation already
--- reported on it) is linked to the approved work order, so a job that was
--- invoiced before its work order was approved counts all of its labour.
+-- Seals the job's draft and points jobs.work_order_id at it. The approval
+-- seals only what the approver read: p_expected_updated_at is the updated_at
+-- of the draft as they read it, compared under the row lock, so a save that
+-- lands after their read is refused (SQLSTATE WO409) and nothing is sealed.
+-- In the same transaction, labour already invoiced on the job (and any
+-- variation already reported on it) is linked to the approved work order, so a
+-- job that was invoiced before its work order was approved counts all of its
+-- labour.
 CREATE OR REPLACE FUNCTION public.approve_job_work_order(
   p_work_order_id uuid,
   p_approver uuid,
-  p_via text
+  p_via text,
+  p_expected_updated_at timestamptz
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -463,6 +481,10 @@ BEGIN
   END IF;
   IF v_wo.status <> 'draft' THEN
     RAISE EXCEPTION 'work order is %, not draft', v_wo.status USING ERRCODE = '23514';
+  END IF;
+  IF p_expected_updated_at IS NULL OR v_wo.updated_at IS DISTINCT FROM p_expected_updated_at THEN
+    RAISE EXCEPTION 'The draft changed after it was read. Read it again before approving.'
+      USING ERRCODE = 'WO409';
   END IF;
 
   UPDATE public.work_orders
@@ -487,8 +509,8 @@ BEGIN
   RETURN to_jsonb(v_out);
 END;
 $$;
-REVOKE ALL ON FUNCTION public.approve_job_work_order(uuid, uuid, text) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.approve_job_work_order(uuid, uuid, text) TO service_role;
+REVOKE ALL ON FUNCTION public.approve_job_work_order(uuid, uuid, text, timestamptz) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.approve_job_work_order(uuid, uuid, text, timestamptz) TO service_role;
 
 -- ── 12. link invoice lines to the approved work order at submit ──────────────
 

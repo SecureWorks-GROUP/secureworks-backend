@@ -594,6 +594,7 @@ import {
 import {
   approveJobWorkOrder,
   backfillJobWorkOrders,
+  correctWorkOrderVariation,
   createJobWorkOrder,
   JobWorkOrderError,
   listJobWorkOrders,
@@ -8400,6 +8401,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // nothing while feature flag work_order_variation_emails_v1 is off.
       case 'resend_work_order_variation_emails':
         return json(await runJobWorkOrder(() => resendWorkOrderVariationEmails(client, {
+          sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
+      // Office staff only, never a trade door: corrects a variation's amount
+      // and description, keeping what the trade reported and who corrected it.
+      case 'correct_work_order_variation':
+        return json(await runJobWorkOrder(() => correctWorkOrderVariation(client, body, requestActor, {
           sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
         })))
 

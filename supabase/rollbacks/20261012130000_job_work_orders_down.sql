@@ -44,7 +44,7 @@ DROP FUNCTION IF EXISTS public.trade_invoices_link_job_work_orders();
 DROP TRIGGER IF EXISTS trg_trade_invoice_lines_link_job_work_order ON public.trade_invoice_lines;
 DROP FUNCTION IF EXISTS public.trade_invoice_lines_link_job_work_order();
 
-DROP FUNCTION IF EXISTS public.approve_job_work_order(uuid, uuid, text);
+DROP FUNCTION IF EXISTS public.approve_job_work_order(uuid, uuid, text, timestamptz);
 DROP TRIGGER IF EXISTS trg_jobs_open_job_work_order ON public.jobs;
 DROP FUNCTION IF EXISTS public.jobs_open_job_work_order();
 DROP FUNCTION IF EXISTS public.ensure_job_work_order_draft(uuid, text);

@@ -8,6 +8,7 @@ import {
   approveJobWorkOrder,
   buildVariationEmails,
   computeWorkOrderFigures,
+  correctWorkOrderVariation,
   createJobWorkOrder,
   JobWorkOrderError,
   listJobWorkOrders,
@@ -142,7 +143,14 @@ class Query {
       const key = String(this.upsertOpts?.onConflict || "").split(",");
       const out: any[] = [];
       for (const raw of this.payload) {
-        if (rows.some((r) => key.every((k) => r[k] === raw[k]))) continue;
+        const held = rows.find((r) => key.every((k) => r[k] === raw[k]));
+        if (held) {
+          if (this.upsertOpts?.ignoreDuplicates === false) {
+            Object.assign(held, raw);
+            out.push(held);
+          }
+          continue;
+        }
         const row = { id: crypto.randomUUID(), status: "recorded", ...raw };
         rows.push(row);
         out.push(row);
@@ -539,6 +547,8 @@ Deno.test("create: edits the job's open draft instead of opening another", async
 
 // ── Approve ──────────────────────────────────────────────────────────────────
 
+const READ_AT = "2026-10-06T01:00:00.123456+00:00";
+
 function draftDb(extra: Partial<Tables> = {}) {
   const db = baseDb({
     work_orders: [{
@@ -550,7 +560,7 @@ function draftDb(extra: Partial<Tables> = {}) {
       status: "draft",
       agreed_labour_ex: 1200,
       scope_items: [{ description: "x" }],
-      updated_at: "t1",
+      updated_at: READ_AT,
     }],
     ...extra,
   });
@@ -589,14 +599,22 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
     403,
   );
   assertEquals(db.rpcCalls.length, 0);
-  const out = await approveJobWorkOrder(db, { work_order_id: DRAFT }, {
+  const out = await approveJobWorkOrder(db, {
+    work_order_id: DRAFT,
+    expected_updated_at: READ_AT,
+  }, {
     userId: SHAUN,
     via: "session",
   });
   assertEquals(out.work_order.status, "approved");
   assertEquals(db.rpcCalls[0], {
     fn: "approve_job_work_order",
-    args: { p_work_order_id: DRAFT, p_approver: SHAUN, p_via: "session" },
+    args: {
+      p_work_order_id: DRAFT,
+      p_approver: SHAUN,
+      p_via: "session",
+      p_expected_updated_at: READ_AT,
+    },
   });
   const event = db.tables.job_events.at(-1);
   assertEquals(event.event_type, "job_work_order_approved");
@@ -625,7 +643,10 @@ Deno.test("events: what this module writes to job_events carries no price, amoun
     job_id: JOB,
     agreed_labour_ex: 1234.56,
   });
-  await approveJobWorkOrder(approved, { work_order_id: DRAFT }, {
+  await approveJobWorkOrder(approved, {
+    work_order_id: DRAFT,
+    expected_updated_at: READ_AT,
+  }, {
     userId: SHAUN,
     via: "session",
   });
@@ -637,7 +658,7 @@ Deno.test("events: what this module writes to job_events carries no price, amoun
       trade_invoice_id: INV,
       job_id: JOB,
       description: "Extra post",
-      amount_ex: 987.65,
+      amount_ex: 876.54,
     },
     { id: TRADE, orgId: ORG },
     { sendEmail: async () => ({ ok: true as const }) },
@@ -654,7 +675,7 @@ Deno.test("events: what this module writes to job_events carries no price, amoun
     for (
       const leak of [
         "1234.56",
-        "987.65",
+        "876.54",
         "feedface",
         "agreed",
         "amount",
@@ -711,7 +732,10 @@ Deno.test("approve: a header-named terminal approver is refused until its flag i
       enabled: true,
     }],
   });
-  const out = await approveJobWorkOrder(on, { work_order_id: DRAFT }, terminal);
+  const out = await approveJobWorkOrder(on, {
+    work_order_id: DRAFT,
+    expected_updated_at: READ_AT,
+  }, terminal);
   assertEquals(out.work_order.status, "approved");
   assertEquals(on.rpcCalls[0].args.p_via, "terminal");
 });
@@ -732,17 +756,25 @@ Deno.test("approve: an empty approver list means nobody, a stale review refuses,
   );
 
   const stale = draftDb();
-  assertEquals(
-    (await assertRejects(
-      () =>
-        approveJobWorkOrder(stale, {
-          work_order_id: DRAFT,
-          expected_updated_at: "t0",
-        }, { userId: SHAUN, via: "session" }),
-      JobWorkOrderError,
-    ) as JobWorkOrderError).code,
-    "stale_review",
-  );
+  stale.rpcImpl = () => ({
+    data: null,
+    error: {
+      code: "WO409",
+      message:
+        "The draft changed after it was read. Read it again before approving.",
+    },
+  });
+  const staleErr = await assertRejects(
+    () =>
+      approveJobWorkOrder(stale, {
+        work_order_id: DRAFT,
+        expected_updated_at: "2026-10-06T00:30:00+00:00",
+      }, { userId: SHAUN, via: "session" }),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([staleErr.status, staleErr.code], [409, "stale_review"]);
+  assert(staleErr.message.includes("Read it again"));
+  assertEquals(stale.tables.job_events.length, 0);
 
   const notReady = draftDb();
   notReady.rpcImpl = () => ({
@@ -751,13 +783,66 @@ Deno.test("approve: an empty approver list means nobody, a stale review refuses,
   });
   const err = await assertRejects(
     () =>
-      approveJobWorkOrder(notReady, { work_order_id: DRAFT }, {
+      approveJobWorkOrder(notReady, {
+        work_order_id: DRAFT,
+        expected_updated_at: READ_AT,
+      }, {
         userId: SHAUN,
         via: "session",
       }),
     JobWorkOrderError,
   ) as JobWorkOrderError;
   assertEquals([err.status, err.code], [422, "work_order_not_ready"]);
+});
+
+Deno.test("approve: Shaun must send the stamp of the draft he read, and it reaches the database as he read it", async () => {
+  const shaun = { userId: SHAUN, via: "session" as const };
+  for (
+    const body of [
+      { work_order_id: DRAFT },
+      { work_order_id: DRAFT, expected_updated_at: null },
+      { work_order_id: DRAFT, expected_updated_at: "" },
+      { work_order_id: DRAFT, expected_updated_at: "yesterday" },
+      { work_order_id: DRAFT, expected_updated_at: 1791234567 },
+    ]
+  ) {
+    const db = draftDb();
+    const err = await assertRejects(
+      () => approveJobWorkOrder(db, body, shaun),
+      JobWorkOrderError,
+    ) as JobWorkOrderError;
+    assertEquals([err.status, err.code], [400, "expected_updated_at_required"]);
+    assert(err.message.includes("Read the draft again"));
+    assertEquals(db.rpcCalls.length, 0);
+    assertEquals(db.tables.work_orders[0].status, "draft");
+    assertEquals(db.tables.job_events.length, 0);
+  }
+
+  // Shaun read the draft at 2,000. Someone else saved 3,000 since. The
+  // database decides under its row lock, so it must be handed the stamp Shaun
+  // read, never the one the row carries now.
+  const db = draftDb();
+  db.tables.work_orders[0].agreed_labour_ex = 2000;
+  await updateJobWorkOrderDraft(db, { id: DRAFT, agreed_labour_ex: 3000 });
+  db.tables.work_orders[0].updated_at = "2026-10-06T01:05:00.654321+00:00";
+  db.rpcImpl = (_fn, args) =>
+    args.p_expected_updated_at === db.tables.work_orders[0].updated_at
+      ? { data: { id: DRAFT, status: "approved" }, error: null }
+      : {
+        data: null,
+        error: { code: "WO409", message: "The draft changed. Read it again." },
+      };
+  const err = await assertRejects(
+    () =>
+      approveJobWorkOrder(db, {
+        work_order_id: DRAFT,
+        expected_updated_at: READ_AT,
+      }, shaun),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([err.status, err.code], [409, "stale_review"]);
+  assertEquals(db.rpcCalls[0].args.p_expected_updated_at, READ_AT);
+  assertEquals(db.tables.job_events.length, 0);
 });
 
 // ── Staff read ───────────────────────────────────────────────────────────────
@@ -1432,6 +1517,279 @@ Deno.test("variation: only on the trade's own invoice, and only for a job on it"
   assertEquals(offInvoice.code, "job_not_on_invoice");
 });
 
+// The stored variation as PostgREST embeds its reporter and its invoice.
+function embedVariationRelations(db: FakeDb) {
+  for (const row of db.tables.work_order_variations) {
+    row.users = { name: "Trade One" };
+    row.trade_invoices = {
+      invoice_number: "TI-1",
+      status: "pending_acknowledgment",
+    };
+  }
+}
+
+Deno.test("variation: an amount over what the invoice bills on the job is refused", async () => {
+  const noSend = { sendEmail: async () => ({ ok: true as const }) };
+  const trade = { id: TRADE, orgId: ORG };
+  // The invoice bills 500 on the job; the trade types 800 instead of 80.
+  const db = baseDb();
+  db.tables.trade_invoice_lines = db.tables.trade_invoice_lines
+    .filter((l) => l.id !== "l2")
+    .map((l) => l.id === "l1" ? { ...l, line_total_ex: 500 } : l);
+  const err = await assertRejects(
+    () =>
+      reportWorkOrderVariation(
+        db,
+        {
+          trade_invoice_id: INV,
+          job_id: JOB,
+          description: "Extra post",
+          amount_ex: 800,
+        },
+        trade,
+        noSend,
+      ),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([err.status, err.code], [422, "variation_over_invoice"]);
+  assert(err.message.includes("$500.00"));
+  assert(!/[\u2013\u2014]/.test(err.message));
+  assertEquals(db.tables.work_order_variations.length, 0);
+  assertEquals(db.tables.work_order_variation_emails.length, 0);
+  assertEquals(db.tables.job_events.length, 0);
+
+  const ok = await reportWorkOrderVariation(
+    db,
+    {
+      trade_invoice_id: INV,
+      job_id: JOB,
+      description: "Extra post",
+      amount_ex: 80,
+    },
+    trade,
+    noSend,
+  );
+  assertEquals(ok.variation.amount_ex, 80);
+  embedVariationRelations(db);
+  const read = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(read.figures.variations_ex, 80);
+  assertEquals(read.figures.billed_within_agreed_scope_ex, 420);
+
+  // An override is what the line bills.
+  const overridden = baseDb();
+  overridden.tables.trade_invoice_lines[0].override_amount = 100;
+  overridden.tables.trade_invoice_lines[1].line_total_ex = 0;
+  assertEquals(
+    (await assertRejects(
+      () =>
+        reportWorkOrderVariation(
+          overridden,
+          {
+            trade_invoice_id: INV,
+            job_id: JOB,
+            description: "Extra post",
+            amount_ex: 120,
+          },
+          trade,
+          noSend,
+        ),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "variation_over_invoice",
+  );
+});
+
+// ── Staff correction of a variation ──────────────────────────────────────────
+
+const HUGO_ACTOR = { actor: `user:${HUGO}`, missing: false };
+
+async function reportedDb(flags: any[] = []) {
+  const db = baseDb({ feature_flags: flags });
+  const sent: Array<{ recipient: string; subject: string; body: string }> = [];
+  const deps = {
+    sendEmail: async (e: any) => {
+      sent.push({
+        recipient: e.recipient,
+        subject: e.subject,
+        body: e.body_text,
+      });
+      return { ok: true as const };
+    },
+    now: () => T0,
+  };
+  const out = await reportWorkOrderVariation(
+    db,
+    {
+      trade_invoice_id: INV,
+      job_id: JOB,
+      description: "Extra psot",
+      amount_ex: 800,
+    },
+    { id: TRADE, orgId: ORG, name: "Trade One" },
+    deps,
+  );
+  embedVariationRelations(db);
+  return { db, sent, deps, variationId: out.variation.id as string };
+}
+
+Deno.test("correction: staff correct the amount and description; the figures follow and the original is kept", async () => {
+  const { db, sent, deps, variationId } = await reportedDb();
+  assertEquals(
+    (await readJobWorkOrder(db, { jobId: JOB })).figures.variations_ex,
+    800,
+  );
+
+  const out = await correctWorkOrderVariation(
+    db,
+    {
+      variation_id: variationId,
+      description: "Extra post",
+      amount_ex: 80,
+    },
+    HUGO_ACTOR,
+    deps,
+  );
+  assertEquals(out.variation.description, "Extra post");
+  assertEquals(out.variation.amount_ex, 80);
+  assertEquals(out.variation.original_description, "Extra psot");
+  assertEquals(out.variation.original_amount_ex, 800);
+  assertEquals(out.variation.corrected_by, `user:${HUGO}`);
+  assertEquals(out.variation.corrected_at, new Date(T0).toISOString());
+
+  const read = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(read.figures.variations_ex, 80);
+  assertEquals(read.figures.billed_within_agreed_scope_ex, 560);
+  assertEquals(read.variations[0].original_amount_ex, 800);
+  assertEquals(read.variations[0].corrected_by, `user:${HUGO}`);
+
+  // A second correction never rewrites what the trade first reported.
+  const again = await correctWorkOrderVariation(
+    db,
+    {
+      variation_id: variationId,
+      amount_ex: 90,
+    },
+    { actor: `user:${SHAUN}`, missing: false },
+    deps,
+  );
+  assertEquals(again.variation.description, "Extra post");
+  assertEquals(again.variation.amount_ex, 90);
+  assertEquals(again.variation.original_description, "Extra psot");
+  assertEquals(again.variation.original_amount_ex, 800);
+  assertEquals(again.variation.corrected_by, `user:${SHAUN}`);
+
+  // The email flag is off: nothing is sent, and the ledger holds the corrected
+  // email, so the 800 one can never go out later.
+  assertEquals(sent.length, 0);
+  assertEquals(again.emails.map((e: any) => e.status), [
+    "recorded",
+    "recorded",
+  ]);
+  for (const row of db.tables.work_order_variation_emails) {
+    assert(row.subject.startsWith("Correction: "));
+    assert(row.body_text.includes("$90.00"));
+    assert(!row.body_text.includes("$800.00"));
+  }
+  assertEquals(db.tables.work_order_variation_emails.length, 2);
+
+  // The job_events row carries ids only, like every other one.
+  const event = db.tables.job_events.at(-1);
+  assertEquals(event.event_type, "work_order_variation_corrected");
+  assertEquals(event.user_id, SHAUN);
+  assertEquals(Object.keys(event.detail_json).sort(), [
+    "trade_invoice_id",
+    "variation_id",
+    "work_order_id",
+  ]);
+});
+
+Deno.test("correction: with the email flag on, finance and admin each get one email marked as a correction", async () => {
+  const { db, sent, deps, variationId } = await reportedDb(EMAILS_ON);
+  assertEquals(sent.length, 2);
+  sent.length = 0;
+
+  const out = await correctWorkOrderVariation(
+    db,
+    {
+      variation_id: variationId,
+      description: "Extra post",
+      amount_ex: 80,
+    },
+    HUGO_ACTOR,
+    deps,
+  );
+  assertEquals(out.emails, [
+    { recipient_role: "finance", status: "sent" },
+    { recipient_role: "admin", status: "sent" },
+  ]);
+  assertEquals(sent.map((e) => e.recipient), [
+    WORK_ORDER_VARIATION_FINANCE_EMAIL,
+    WORK_ORDER_VARIATION_ADMIN_EMAIL,
+  ]);
+  for (const email of sent) {
+    assertEquals(
+      email.subject,
+      "Correction: work order variation on SWF-26123 (Duncraig)",
+    );
+    assert(email.body.startsWith("Correction: "));
+    assert(email.body.includes("Variation: Extra post"));
+    assert(email.body.includes("Variation amount (ex GST): $80.00"));
+    assert(email.body.includes("Variation was: Extra psot"));
+    assert(email.body.includes("Variation amount was (ex GST): $800.00"));
+    assert(!/[\u2013\u2014]/.test(email.subject + email.body));
+  }
+
+  // The sweep has nothing left to send for it.
+  const sweep = await resendWorkOrderVariationEmails(db, deps);
+  assertEquals(sweep.emails, []);
+  assertEquals(sent.length, 2);
+});
+
+Deno.test("correction: refused above the invoice, with nothing to change, for an unknown variation, or with nobody named", async () => {
+  const { db, sent, deps, variationId } = await reportedDb(EMAILS_ON);
+  sent.length = 0;
+  const refused = async (
+    body: any,
+    corrector = HUGO_ACTOR,
+  ) => (await assertRejects(
+    () => correctWorkOrderVariation(db, body, corrector, deps),
+    JobWorkOrderError,
+  ) as JobWorkOrderError);
+
+  const over = await refused({ variation_id: variationId, amount_ex: 941 });
+  assertEquals([over.status, over.code], [422, "variation_over_invoice"]);
+  assertEquals(
+    (await refused({
+      variation_id: variationId,
+      description: "Extra psot",
+      amount_ex: 800,
+    })).code,
+    "nothing_to_correct",
+  );
+  assertEquals(
+    (await refused({ variation_id: variationId })).code,
+    "nothing_to_correct",
+  );
+  assertEquals(
+    (await refused({ variation_id: crypto.randomUUID(), amount_ex: 80 }))
+      .status,
+    404,
+  );
+  const nobody = await refused(
+    { variation_id: variationId, amount_ex: 80 },
+    { actor: "actor_missing", missing: true },
+  );
+  assertEquals([nobody.status, nobody.code], [
+    403,
+    "corrector_identity_missing",
+  ]);
+
+  const row = db.tables.work_order_variations[0];
+  assertEquals([row.description, row.amount_ex], ["Extra psot", 800]);
+  assertEquals(row.corrected_at ?? null, null);
+  assertEquals(sent.length, 0);
+});
+
 // ── Front door: staff doors stay staff, trade doors are profile-scoped ───────
 
 Deno.test("front door: work order staff actions need a staff role, the trade doors do not", async () => {
@@ -1444,6 +1802,7 @@ Deno.test("front door: work order staff actions need a staff role, the trade doo
       "approve_work_order",
       "backfill_job_work_orders",
       "resend_work_order_variation_emails",
+      "correct_work_order_variation",
       "create_work_order",
       "update_work_order",
     ]
@@ -1452,6 +1811,36 @@ Deno.test("front door: work order staff actions need a staff role, the trade doo
   }
   for (const trade of ["my_job_work_order", "report_work_order_variation"]) {
     assertEquals(_opsApiActionNeedsStaffRole(url(trade)), false, trade);
+  }
+});
+
+Deno.test("front door: a trade session cannot call the variation correction; office staff can", async () => {
+  const { _authorizeOpsApiAction } = await import("./index.ts");
+  const url = new URL(
+    "https://x.invalid/ops-api?action=correct_work_order_variation",
+  );
+  for (const role of ["crew", "trade", "lead_installer", "subcontractor"]) {
+    const refused = _authorizeOpsApiAction({
+      url,
+      authMode: "jwt",
+      authUser: { role, managedVerticals: ["fencing", "patio"] },
+    });
+    assertEquals(
+      refused.ok === false && [refused.status, refused.code],
+      [403, "operator_access_required"],
+      role,
+    );
+  }
+  assertEquals(
+    _authorizeOpsApiAction({ url, authMode: "api_key" }).ok,
+    false,
+  );
+  for (const role of ["admin", "owner", "ops_manager"]) {
+    assertEquals(
+      _authorizeOpsApiAction({ url, authMode: "jwt", authUser: { role } }).ok,
+      true,
+      role,
+    );
   }
 });
 
