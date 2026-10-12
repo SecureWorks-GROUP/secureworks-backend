@@ -1154,6 +1154,7 @@ import {
   assignReconRow as _assignReconRow,
   markReconNotJobRelated as _markReconNotJobRelated,
 } from './materials_recon.ts'
+import { jobProfitAction, jobProfitCallerAllowed, jobProfitListAction } from './job_profit.ts'
 // M4 U5 -- finance job cost report (read-only, token-gated share page).
 import {
   MAKESAFE_COST_REPORT_ACTION,
@@ -7952,6 +7953,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const jobId = url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''
         if (!jobId) return json({ error: 'jobId required' }, 400)
         return json(await getJobFinancialsDetail(client, jobId))
+      }
+      // ── Job profit engine (20261009130000) — read only, admin/owner only ──
+      case 'job_profit':
+      case 'job_profit_list': {
+        if (!jobProfitCallerAllowed(authMode, authUser?.role)) {
+          return json({
+            ok: false,
+            code: 'operator_access_required',
+            error: `${action} requires the privileged ops key or an admin/owner session`,
+          }, 403)
+        }
+        const out = action === 'job_profit'
+          ? await jobProfitAction(client, url.searchParams)
+          : await jobProfitListAction(client, url.searchParams)
+        return json(out.body, out.status)
       }
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
       // The sealed-SES read exemption (captain, 2026-08-02) needs the resolved
