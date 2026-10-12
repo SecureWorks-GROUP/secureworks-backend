@@ -267,7 +267,7 @@ refused. Tests: `makesafe_ambrose_intake_test.ts`.
 
 `monitor-ses-makesafes` also reads the Groups in `SENDER_SCOPED_GROUPS` (today
 swwa@). A Group has no inbox rules, so there is no auto-forward to configure:
-the poll reads it. Four rules are load-bearing.
+the poll reads it. Five rules are load-bearing.
 
 - **Only a sender pattern of a company the Group lists admits a post.** Each
   Group carries its own `companySlugs` (swwa@: `acg` only, owner ruling
@@ -283,18 +283,23 @@ the poll reads it. Four rules are load-bearing.
   a second mailbox key downstream to "fix" this.
 - **Each scoped Group has its own `mail_sync_cursors` row** (and `sync_state`
   row for health), keyed by its own address. Its first read starts at its
-  `firstReadFrom`, never further back than the 60-day scan window, and catches
-  up oldest first in slices of 40 conversations. A conversation sorts by its
-  LATEST post, so one not yet behind the cursor is read back to that first-read
-  floor, never from the moving cursor, or an older purchase order in a thread
-  that later got a reply is skipped for good. A Group that cannot be read never
-  fails or stalls the ses@ poll: it waits out Graph throttling for at most 20
-  seconds, is reported in the poll response, and is alarmed once, its
-  `sync_state` row turning `ERROR` only after that alarm event is written.
-- **A post whose attachment list cannot be read fails its slice.** The Group
-  cursor never returns to a post, so the read is retried every poll with the
-  cursor unmoved, and a post whose attachments can NEVER be read holds that
-  Group's intake until someone steps in. `sync_state.last_error` names the
+  `firstReadFrom` and catches up oldest first in slices of 40 conversations. A
+  conversation sorts by its LATEST post, so one not yet behind the cursor is
+  read back to `firstReadFrom`, never from the moving cursor, or an older
+  purchase order in a thread that later got a reply is skipped for good.
+- **The Group read never runs on the poll's response path.** The pg_net caller
+  disconnects at five seconds and a catch-up slice is many sequential Graph
+  reads, so the read runs in the poll's `EdgeRuntime.waitUntil` continuation,
+  under the mailbox lease, and the ses@ scan handoff starts once it returns,
+  carrying its sources. It waits out Graph throttling for at most 20 seconds.
+  A Group that cannot be read never fails the ses@ poll or its scan: it is
+  logged and alarmed once, its `sync_state` row turning `ERROR` only after that
+  alarm event is written. The poll response carries no Group result.
+- **A post whose attachment list cannot be read fails its slice**, after every
+  other post in the slice is stored and handed to intake. The Group cursor
+  never returns to a post, so the read is retried every poll with the cursor
+  unmoved, and a post whose attachments can NEVER be read holds that Group's
+  cursor until someone steps in. `sync_state.last_error` names the
   post. Recovery: take that purchase order in by hand, then set the Group's
   `mail_sync_cursors.last_completed_max` to 16 minutes after that
   conversation's last delivery and check the mail around the new cursor,

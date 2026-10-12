@@ -180,18 +180,16 @@ const SENDER_SCOPED_GROUPS: readonly SenderScopedGroup[] =
         companySlugs: ["acg"],
       },
     ];
-// The first read never reaches further back than the deterministic scan's own
-// window, whatever firstReadFrom says: older mail could not be planned anyway.
-const SENDER_SCOPED_MAX_LOOKBACK_DAYS = 60;
 // A general inbox is far busier than ses@, and each conversation costs a thread
 // read plus a post read. One poll therefore reads at most this many conversations
 // it has not covered before, oldest first, and commits its cursor at that
 // boundary; the next poll carries on from there. Catch-up is spread over polls
-// instead of risking the run that also owns the ses@ handoff.
+// instead of one long read holding the mailbox lease.
 const SENDER_SCOPED_MAX_NEW_CONVERSATIONS = 40;
-// The scoped read runs inside the poll that still owes ses@ its scan handoff and
-// lease release, so one Group read may spend at most this long waiting out Graph
-// 429s. Past it the slice fails with its cursor unmoved and the next poll retries.
+// The scoped read runs in the poll's continuation, ahead of the ses@ intake scan
+// and under the mailbox lease, so one Group read may spend at most this long
+// waiting out Graph 429s. Past it the slice fails with its cursor unmoved and the
+// next poll retries.
 const SENDER_SCOPED_MAX_THROTTLE_WAIT_MS = 20_000;
 
 // Projection / extractor versions — stamped on pipeline_items for rebuildability.
@@ -639,6 +637,8 @@ async function priorAttempts(
   return (data as { attempts?: number } | null)?.attempts ?? 0;
 }
 
+class AttachmentListReadError extends Error {}
+
 async function processAttachments(
   // deno-lint-ignore no-explicit-any -- supabase-js v2 untyped client (ops-api convention)
   sb: any,
@@ -741,7 +741,7 @@ async function processAttachments(
       );
     }
     if (opts.failOnListError) {
-      throw new Error(
+      throw new AttachmentListReadError(
         `attachment list read failed for ${post.id}: ${fetchError}`,
       );
     }
@@ -1716,7 +1716,7 @@ interface SenderScopedWindow {
 // Post window: a conversation sorts by its LATEST post, so one first reached
 // behind a slice boundary can hold builder posts older than the moving cursor.
 // A conversation not yet behind the cursor is therefore read back to `floorIso`
-// (the Group's first-read floor); only one already behind it is read from
+// (the Group's firstReadFrom); only one already behind it is read from
 // `sinceIso`. Re-seeing a stored post is safe: persistPost is idempotent.
 async function collectSenderScopedGroupPosts(
   token: string,
@@ -1904,9 +1904,10 @@ async function recordSenderScopedGroupState(
 
 // Take in builder mail from every sender-scoped Group. Never throws: a Group that
 // cannot be read is reported and retried next poll with its cursor unmoved, and
-// the ses@ poll that called this carries on. Persisted posts are appended to
+// the ses@ handoff that follows carries on. Persisted posts are appended to
 // `handoff` as they land, so a source stored before a later failure still reaches
-// the intake scan.
+// the intake scan. A post whose attachment list cannot be read fails the slice
+// only after every other post in it is stored.
 async function ingestSenderScopedGroups(
   // deno-lint-ignore no-explicit-any
   sb: any,
@@ -1918,14 +1919,10 @@ async function ingestSenderScopedGroups(
   },
   opts: {
     groups?: readonly SenderScopedGroup[];
-    nowMs?: number;
     maxNewConversations?: number;
   } = {},
-): Promise<{ reports: SenderScopedGroupReport[]; unresolved: number }> {
+): Promise<{ reports: SenderScopedGroupReport[] }> {
   const reports: SenderScopedGroupReport[] = [];
-  let unresolved = 0;
-  const nowMs = opts.nowMs ?? Date.now();
-  const windowFloorMs = nowMs - SENDER_SCOPED_MAX_LOOKBACK_DAYS * 86_400_000;
 
   for (
     const { mail, firstReadFrom, companySlugs } of opts.groups ??
@@ -1969,8 +1966,7 @@ async function ingestSenderScopedGroups(
       if (!Number.isFinite(firstReadMs)) {
         throw new Error(`invalid firstReadFrom for ${mail}`);
       }
-      const floorIso = new Date(Math.max(firstReadMs, windowFloorMs))
-        .toISOString();
+      const floorIso = new Date(firstReadMs).toISOString();
       const sinceIso = cursorIso
         ? new Date(Date.parse(cursorIso) - overlapSeconds * 1000).toISOString()
         : floorIso;
@@ -1991,6 +1987,7 @@ async function ingestSenderScopedGroups(
       report.conversations_read = window.conversationsRead;
       report.catch_up_pending = window.catchUpPending;
 
+      let attachmentReadFailure: AttachmentListReadError | null = null;
       for (const post of window.posts) {
         const cls = classifyPost(post, scopedPatterns, loaded.refPrefixes);
         // The sender gate above and the classifier read the same address, so a
@@ -1999,10 +1996,16 @@ async function ingestSenderScopedGroups(
           report.out_of_scope++;
           continue;
         }
-        unresolved += await persistPost(sb, token, groupId, post, cls, {
-          sourceMailbox: mail,
-          failOnAttachmentListError: true,
-        });
+        try {
+          await persistPost(sb, token, groupId, post, cls, {
+            sourceMailbox: mail,
+            failOnAttachmentListError: true,
+          });
+        } catch (e) {
+          if (!(e instanceof AttachmentListReadError)) throw e;
+          attachmentReadFailure ??= e;
+          continue;
+        }
         report.included++;
         handoff.sources.push({
           postId: post.id,
@@ -2014,6 +2017,8 @@ async function ingestSenderScopedGroups(
           ...await pendingPdfExtractionCoordinates(sb, post.id),
         );
       }
+
+      if (attachmentReadFailure) throw attachmentReadFailure;
 
       // Cursor LAST, only after every in-scope post above is durably stored.
       if (window.nextCursor) {
@@ -2041,7 +2046,7 @@ async function ingestSenderScopedGroups(
       await recordSenderScopedGroupState(sb, mail, report.error);
     }
   }
-  return { reports, unresolved };
+  return { reports };
 }
 
 // ════════════════════════════════════════════════════════════
@@ -3134,18 +3139,6 @@ async function handler(req: Request): Promise<Response> {
       }
     }
 
-    // Builder mail addressed to a general Group instead of ses@. Runs after the
-    // ses@ watermark is safe, cannot throw, and waits out Graph throttling only
-    // up to SENDER_SCOPED_MAX_THROTTLE_WAIT_MS, so it cannot hold up ses@.
-    const scoped = await ingestSenderScopedGroups(
-      sb,
-      token,
-      { patterns: companies, refPrefixes },
-      { sources: includedSources, pdfCoordinates: freshPdfCoordinates },
-    );
-    for (const report of scoped.reports) included += report.included;
-    totalUnresolved += scoped.unresolved;
-
     // M2 — sync_state write error is surfaced (throws) so we never return success
     // with an uncommitted state row.
     await refreshSyncState(sb, true, null);
@@ -3190,93 +3183,121 @@ async function handler(req: Request): Promise<Response> {
     } else {
       const pdfExtractionUrl =
         `${SUPABASE_URL}/functions/v1/ops-api?action=makesafe_pdf_extraction_drain`;
-      for (
-        const { id: attachmentId } of uniquePdfExtractionCoordinates(
-          freshPdfCoordinates,
-        )
-      ) {
-        _schedulePdfExtractionContinuation(
-          fetch,
-          (promise) => edgeRuntime.waitUntil(promise),
-          pdfExtractionUrl,
-          {
-            "Content-Type": "application/json",
-            "x-api-key": SW_API_KEY,
-            "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
-          },
-          attachmentId,
-          (failure) =>
-            recordPdfExtractionHandoffFailure(sb, attachmentId, failure),
+      const handoffHeaders = {
+        "Content-Type": "application/json",
+        "x-api-key": SW_API_KEY,
+        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+      };
+      const keepAlive = (promise: Promise<void>) =>
+        edgeRuntime.waitUntil(promise);
+      const handOffPdfs = (
+        coordinates: readonly PdfExtractionCoordinate[],
+        register: (promise: Promise<void>) => void,
+      ) => {
+        for (
+          const { id: attachmentId } of uniquePdfExtractionCoordinates(
+            coordinates,
+          )
+        ) {
+          _schedulePdfExtractionContinuation(
+            fetch,
+            register,
+            pdfExtractionUrl,
+            handoffHeaders,
+            attachmentId,
+            (failure) =>
+              recordPdfExtractionHandoffFailure(sb, attachmentId, failure),
+          );
+        }
+      };
+      handOffPdfs(freshPdfCoordinates, keepAlive);
+      // Builder mail addressed to a general Group instead of ses@ is read HERE,
+      // in the continuation, never on the response path: a catch-up slice is
+      // many sequential Graph reads and the pg_net caller disconnects at five
+      // seconds. Its sources join the same scan handoff, which starts once the
+      // read returns. Everything the continuation starts is awaited inside this
+      // one registered promise.
+      keepAlive((async () => {
+        const handoffs: Promise<void>[] = [];
+        const hold = (promise: Promise<void>) => {
+          handoffs.push(promise);
+        };
+        const scopedPdfCoordinates: PdfExtractionCoordinate[] = [];
+        await ingestSenderScopedGroups(
+          sb,
+          token,
+          { patterns: companies, refPrefixes },
+          { sources: includedSources, pdfCoordinates: scopedPdfCoordinates },
         );
-      }
-      _scheduleIntakeScanContinuation(
-        fetch,
-        (promise) => edgeRuntime.waitUntil(promise),
-        opsApiUrl,
-        {
-          "Content-Type": "application/json",
-          "x-api-key": SW_API_KEY,
-          "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
-        },
-        async () => {
-          const { error } = await sb.rpc("unlock_mailbox_sync", {
-            p_mailbox: MAILBOX,
-          });
-          if (error) {
-            console.error(
-              "[monitor-ses] continuation lock release failed:",
-              error.message,
+        handOffPdfs(scopedPdfCoordinates, hold);
+        _scheduleIntakeScanContinuation(
+          fetch,
+          hold,
+          opsApiUrl,
+          handoffHeaders,
+          async () => {
+            const { error } = await sb.rpc("unlock_mailbox_sync", {
+              p_mailbox: MAILBOX,
+            });
+            if (error) {
+              console.error(
+                "[monitor-ses] continuation lock release failed:",
+                error.message,
+              );
+            }
+          },
+          async (failure) => {
+            await recordIntakeScanFailure(
+              sb,
+              includedSources,
+              failure,
+              maxReceived,
             );
-          }
-        },
-        async (failure) => {
-          await recordIntakeScanFailure(
-            sb,
-            includedSources,
-            failure,
-            maxReceived,
-          );
-        },
-        async (outcome) => {
-          // HTTP 200 proves only that the scanner returned. Close the source-level
-          // handoff by checking the canonical case-source ledger. Anything still
-          // absent receives a durable reason-coded fate instead of relying on an
-          // aggregate response or the next sweep.
-          const missing = await findIntakeSourcesWithoutCase(
-            sb,
-            includedSources,
-          );
-          if (!missing.length) return;
-          const fateMetadata = {
-            synced_watermark: maxReceived,
-            included_sources: included,
-            unaccounted_sources: missing.length,
-            cases_deferred: outcome.casesDeferred,
-            source_read_cap_reached: outcome.sourceReadCapReached,
-          };
-          // A run that stopped at its per-run case cap or source-read cap has not
-          // dropped these sources, it has not reached them. Recording that as a
-          // terminal exception would alarm on healthy bursts and would mislabel
-          // deferral as a settled exception fate in the replay accounting.
-          if (outcome.boundedRun) {
-            await recordIntakeSourceDeferrals(
+          },
+          async (outcome) => {
+            // HTTP 200 proves only that the scanner returned. Close the source-level
+            // handoff by checking the canonical case-source ledger. Anything still
+            // absent receives a durable reason-coded fate instead of relying on an
+            // aggregate response or the next sweep.
+            const missing = await findIntakeSourcesWithoutCase(
+              sb,
+              includedSources,
+            );
+            if (!missing.length) return;
+            const fateMetadata = {
+              synced_watermark: maxReceived,
+              included_sources: includedSources.length,
+              unaccounted_sources: missing.length,
+              cases_deferred: outcome.casesDeferred,
+              source_read_cap_reached: outcome.sourceReadCapReached,
+            };
+            // A run that stopped at its per-run case cap or source-read cap has not
+            // dropped these sources, it has not reached them. Recording that as a
+            // terminal exception would alarm on healthy bursts and would mislabel
+            // deferral as a settled exception fate in the replay accounting.
+            if (outcome.boundedRun) {
+              await recordIntakeSourceDeferrals(
+                sb,
+                missing,
+                "scan_run_cap_deferred",
+                "Deterministic intake returned successfully but stopped at a per-run bound; the remaining synced sources are queued for the next run.",
+                fateMetadata,
+              );
+              return;
+            }
+            await recordIntakeSourceExceptions(
               sb,
               missing,
-              "scan_run_cap_deferred",
-              "Deterministic intake returned successfully but stopped at a per-run bound; the remaining synced sources are queued for the next run.",
+              "scan_completed_without_case_fate",
+              "Deterministic intake returned successfully but one or more synced sources still had no canonical case fate.",
               fateMetadata,
             );
-            return;
-          }
-          await recordIntakeSourceExceptions(
-            sb,
-            missing,
-            "scan_completed_without_case_fate",
-            "Deterministic intake returned successfully but one or more synced sources still had no canonical case fate.",
-            fateMetadata,
-          );
-        },
-      );
+          },
+        );
+        const settled = await Promise.allSettled(handoffs);
+        const rejected = settled.find((result) => result.status === "rejected");
+        if (rejected) throw (rejected as PromiseRejectedResult).reason;
+      })());
       // Transfer the existing 10-minute mailbox lease to the continuation. The
       // next scheduled poll exits as locked until this scan settles, preventing
       // overlapping deterministic batches from reading one completion cursor.
@@ -3292,7 +3313,6 @@ async function handler(req: Request): Promise<Response> {
       unresolved_attachments_this_run: totalUnresolved,
       page_counts: pageCounts,
       watermark: maxReceived,
-      sender_scoped_groups: scoped.reports,
       timestamp: new Date().toISOString(),
     };
     console.log(

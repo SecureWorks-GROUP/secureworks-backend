@@ -12,9 +12,11 @@
 //     first read, and catches up in bounded slices that always advance and
 //     never leave an older builder post behind;
 //   - a Group that cannot be read, or is throttled, is reported and never
-//     breaks or stalls the ses@ poll;
+//     breaks the ses@ poll;
 //   - a builder post whose attachments cannot be read holds the Group cursor
-//     until they can.
+//     until they can, without holding back the other posts of its slice;
+//   - the poll answers before the Group read finishes: the read and the ses@
+//     scan handoff run in the poll's continuation.
 //
 // Every sender, subject and address below is invented in the Ambrose shape.
 import {
@@ -23,15 +25,17 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _collectSenderScopedGroupPosts,
+  _handler,
   _ingestSenderScopedGroups,
+  _setTestClientFactory,
 } from "../monitor-ses-makesafes/index.ts";
+import { _resetGraphTokenCache } from "../_shared/graph_client.ts";
 
 const SES = "ses@secureworkswa.com.au";
 const SWWA = "swwa@secureworkswa.com.au";
 const GROUP = "group-swwa";
 const BUILDER = "orders@ambrose.test";
 const OTHER_BUILDER = "workorders@otherbuilder.test";
-const NOW_MS = Date.parse("2026-10-12T02:00:00.000Z");
 const FIRST_READ_FROM = "2026-10-01T00:00:00.000Z";
 const LOADED = {
   patterns: [{
@@ -130,6 +134,7 @@ function memorySb(opts: { failTable?: string } = {}) {
     return b;
   }
   const uploads: string[] = [];
+  const rpcCalls: string[] = [];
   const sb = {
     from,
     storage: {
@@ -141,13 +146,18 @@ function memorySb(opts: { failTable?: string } = {}) {
         remove: () => Promise.resolve({ data: [], error: null }),
       }),
     },
-    rpc: (name: string) =>
-      Promise.resolve({
-        data: name === "automation_lane_enabled" ? true : null,
+    rpc: (name: string) => {
+      rpcCalls.push(name);
+      return Promise.resolve({
+        data: name === "automation_lane_enabled" ||
+            name === "try_lock_mailbox_sync"
+          ? true
+          : null,
         error: null,
-      }),
+      });
+    },
   };
-  return { sb, tables, uploads };
+  return { sb, tables, uploads, rpcCalls };
 }
 
 // ── Graph double for one Group. ──────────────────────────────────────────────
@@ -334,7 +344,6 @@ function ingest(sb: any, extra: Record<string, unknown> = {}) {
       firstReadFrom: FIRST_READ_FROM,
       companySlugs: ["acg"],
     }],
-    nowMs: NOW_MS,
     ...extra,
   }).then((out) => ({ ...out, handoff }));
 }
@@ -495,19 +504,6 @@ Deno.test("the first read starts at the Group's first-read date, so builder mail
   assertEquals(out.reports[0].cursor, "2026-10-08T06:10:00.000Z");
   assertEquals(tables.sync_state[0].mailbox, SWWA);
   assertEquals(tables.sync_state[0].mode, "OK");
-});
-
-Deno.test("a first read long after the first-read date reaches back no further than the 60-day scan window", async () => {
-  const lateNow = Date.parse("2027-03-01T00:00:00.000Z");
-  const double = graphDouble([
-    purchaseOrder("inside", "2027-02-01T00:00:00Z"),
-    // After the first-read date, but too old for the scan to plan.
-    purchaseOrder("outside", "2026-12-01T00:00:00Z", "20999000-01"),
-  ]);
-  const { sb, tables } = memorySb();
-  await withGraph(double, () => ingest(sb, { nowMs: lateNow }));
-  assertEquals(tables.emails.map((e) => e.post_id), ["post-inside"]);
-  assert(!double.calls.some((c) => c.includes("/conversations/outside/")));
 });
 
 Deno.test("catch-up runs in bounded slices, oldest first, and every poll advances until nothing is left", async () => {
@@ -703,12 +699,16 @@ Deno.test("a throttled Group read fails its slice at once instead of stalling th
   );
 });
 
-Deno.test("a failed attachment read fails the slice: the cursor stays put and the next poll stores the post with its PDF", async () => {
+Deno.test("a failed attachment read fails the slice: the cursor stays put, the slice's other posts are still stored, and the next poll stores the post with its PDF", async () => {
   const withPdf = purchaseOrder("po", "2026-10-08T06:31:00Z");
   withPdf.posts[0].hasAttachments = true;
   withPdf.posts[0].pdf = true;
+  // A second builder order later in the same slice, whose read succeeds.
+  const sameSlice = purchaseOrder("po2", "2026-10-08T07:34:00Z", "20999102-01");
+  sameSlice.posts[0].hasAttachments = true;
+  sameSlice.posts[0].pdf = true;
   // Later general mail: a finished slice would move the cursor past the order.
-  const double = graphDouble([withPdf, {
+  const double = graphDouble([withPdf, sameSlice, {
     id: "conv-later",
     lastDeliveredDateTime: "2026-10-10T01:00:00Z",
     topic: "Unrelated enquiry",
@@ -729,25 +729,150 @@ Deno.test("a failed attachment read fails the slice: the cursor stays put and th
     ),
   );
   assertEquals(tables.mail_sync_cursors, []);
-  assertEquals(first.handoff.sources, []);
-  assertEquals(uploads, []);
   assertEquals(tables.sync_state[0].mode, "ERROR");
   assertEquals(tables.business_events.length, 1);
+  // The order after the unreadable one is stored and handed to intake anyway.
+  assertEquals(first.handoff.sources.map((s: any) => s.postId), ["post-po2"]);
+  assertEquals(uploads.length, 1);
+  assert(uploads[0].startsWith("post-po2/"));
+  assertEquals(
+    tables.email_attachments.filter((a) => a.status === "uploaded")
+      .map((a) => a.email_id),
+    ["post-po2"],
+  );
+  assertEquals(first.handoff.pdfCoordinates.length, 1);
 
   const second = await withGraph(double, () => ingest(sb));
   assertEquals(second.reports[0].error, null);
-  assertEquals(second.reports[0].included, 1);
+  assertEquals(second.reports[0].included, 2);
   assertEquals(second.reports[0].cursor, "2026-10-10T01:00:00.000Z");
   assertEquals(tables.mail_sync_cursors[0].mailbox, SWWA);
-  assertEquals(second.handoff.sources.map((s: any) => s.postId), ["post-po"]);
-  assertEquals(uploads.length, 1);
   assertEquals(
-    tables.email_attachments.map((a) => [a.email_id, a.name, a.status]),
-    [["post-po", "purchase-order.pdf", "uploaded"]],
+    second.handoff.sources.map((s: any) => s.postId),
+    ["post-po", "post-po2"],
   );
-  assertEquals(second.handoff.pdfCoordinates.length, 1);
+  assertEquals(uploads.length, 2);
+  assert(uploads[1].startsWith("post-po/"));
+  assertEquals(
+    tables.email_attachments.map((a) => [a.email_id, a.name, a.status])
+      .sort(),
+    [
+      ["post-po", "purchase-order.pdf", "uploaded"],
+      ["post-po2", "purchase-order.pdf", "uploaded"],
+    ],
+  );
+  assertEquals(tables.emails.length, 2);
   assertEquals(tables.sync_state[0].mode, "OK");
   assertEquals(tables.business_events.length, 1);
+});
+
+Deno.test("the poll answers before a slow Group read finishes: the read and the ses@ scan handoff run in the continuation", async () => {
+  const { sb, tables, rpcCalls } = memorySb();
+  tables.makesafe_companies = [{
+    slug: "acg",
+    name: "Ambrose Construct Group",
+    sender_patterns: ["ambrose.test"],
+    parsing_rules: null,
+    active: true,
+  }];
+  let releaseGroupRead!: (response: Response) => void;
+  const slowGroupRead = new Promise<Response>((resolve) => {
+    releaseGroupRead = resolve;
+  });
+  const seen: string[] = [];
+  const scanCalls = () =>
+    seen.filter((url) => url.includes("action=scan_ses_makesafes")).length;
+  const fetchStub = (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    seen.push(url);
+    if (url.includes("login.microsoftonline.com")) {
+      return Promise.resolve(json({ access_token: "tok", expires_in: 3600 }));
+    }
+    if (url.includes("action=scan_ses_makesafes")) {
+      return Promise.resolve(json({}));
+    }
+    if (url.includes("/groups?$filter=")) {
+      return url.includes(encodeURIComponent(`mail eq '${SWWA}'`))
+        ? slowGroupRead
+        : Promise.resolve(json({ value: [{ id: "group-ses" }] }));
+    }
+    // ses@ and swwa@ both hold no mail in this poll.
+    return Promise.resolve(json({ value: [] }));
+  };
+
+  const env: Record<string, string> = {
+    SUPABASE_SECRET_KEYS: JSON.stringify(["sb_secret_monitor_poll_test"]),
+    MICROSOFT_TENANT_ID: "tenant",
+    MICROSOFT_CLIENT_ID: "client",
+    MICROSOFT_CLIENT_SECRET: "secret",
+  };
+  const priorEnv = Object.keys(env).map((k) => [k, Deno.env.get(k)] as const);
+  for (const [k, v] of Object.entries(env)) Deno.env.set(k, v);
+  const realFetch = globalThis.fetch;
+  const registered: Promise<void>[] = [];
+  (globalThis as any).fetch = fetchStub;
+  (globalThis as any).EdgeRuntime = {
+    waitUntil: (promise: Promise<void>) => registered.push(promise),
+  };
+  _setTestClientFactory(() => sb);
+  _resetGraphTokenCache();
+  let timer = 0;
+  try {
+    const answered = await Promise.race([
+      _handler(
+        new Request("https://x/functions/v1/monitor-ses-makesafes", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            apikey: "sb_secret_monitor_poll_test",
+          },
+          body: "{}",
+        }),
+      ),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), 2000);
+      }),
+    ]);
+    assert(answered, "the poll response waited on the scoped Group read");
+    assertEquals(answered.status, 200);
+    assertEquals((await answered.json()).success, true);
+
+    // The Group read has started and is still pending; the scan handoff and
+    // the lease release wait behind it in the registered continuation.
+    assert(
+      seen.some((url) => url.includes(encodeURIComponent(`'${SWWA}'`))),
+      "the scoped Group read was not started",
+    );
+    assertEquals(scanCalls(), 0);
+    assert(!rpcCalls.includes("unlock_mailbox_sync"));
+    assert(registered.length > 0);
+
+    releaseGroupRead(json({ value: [{ id: GROUP }] }));
+    await Promise.all(registered);
+    assertEquals(scanCalls(), 1);
+    assert(
+      seen.findIndex((url) => url.includes(`/groups/${GROUP}/`)) <
+        seen.findIndex((url) => url.includes("action=scan_ses_makesafes")),
+      "the scan handoff did not wait for the Group read",
+    );
+    assert(rpcCalls.includes("unlock_mailbox_sync"));
+    assertEquals(
+      tables.sync_state.find((row) => row.mailbox === SWWA)?.mode,
+      "OK",
+    );
+  } finally {
+    clearTimeout(timer);
+    releaseGroupRead(json({ value: [{ id: GROUP }] }));
+    await Promise.allSettled(registered);
+    _setTestClientFactory(null);
+    _resetGraphTokenCache();
+    delete (globalThis as any).EdgeRuntime;
+    globalThis.fetch = realFetch;
+    for (const [k, v] of priorEnv) {
+      if (v === undefined) Deno.env.delete(k);
+      else Deno.env.set(k, v);
+    }
+  }
 });
 
 Deno.test("a storage failure leaves the Group cursor unmoved so the same mail is retried", async () => {
