@@ -21,6 +21,7 @@ Nothing is sent when this merges. Every switch below starts off.
 | `supabase/functions/ops-api/debt_ws_rules.ts` | The plain rules, with no database and no AI: scope, lane, invoice kind, share, the debt rule, due dates, day 0, categories, the steps with the weekend shift, the neighbour label, the bank-feed matcher, the message templates, Jan's text and the statement HTML. |
 | `debt_ws_store.ts` | Every database read and write, behind one interface. |
 | `debt_ws_book.ts` | The read model: the debt book worked out once and shared by the overview, the job view, statements, Jan's list and the agent queue. |
+| `debt_ws_payer.ts` | Who pays each invoice (the payer, see below), which messages are theirs, and the shares on a job. |
 | `debt_ws_actions.ts` | The 15 actions, the guarded send, and `runDebtWsAction` (the method, staff, owner and server-key checks). |
 | `debt_ws_deps.ts` | Builds the dependencies from what `index.ts` owns. |
 | `index.ts` | Wiring only: one `case` block that injects `sendChaseSms`, `getJobConversation`, `getToken`, `xeroReadGet`, `updateJobStatus`, the Outlook send, `getInvoicePdf`, `searchGHLContacts`, the staff SMS path and the job document reads. |
@@ -36,12 +37,12 @@ Who may call each action:
 | Action | Method | Who | What it does |
 |---|---|---|---|
 | `debt_ws_overview` | GET | staff | Everything W1 needs: categories, rows, companies, not due, not chased, needs a look, paid this week, Jan's list. |
-| `debt_ws_job` | GET `xero_invoice_id` | staff | Everything W2 needs: row, job, story, invoices, documents, conversation (100), notes, ladder, suggestion (a pending agent draft or move, else the template draft), flags, possible payments, contact candidates and the pay link. |
+| `debt_ws_job` | GET `xero_invoice_id` (optional `conversation=all`) | staff | Everything W2 needs: row, job (with `shares[]`), `payer_contact`, story, invoices, documents, conversation (the payer's own messages; `conversation=all` gives the whole job's thread with each message marked `party_name` / `is_payer`), notes, ladder, suggestion (a pending agent draft or move, else the template draft), flags, possible payments, the payer's contact candidates, `send_block` and the pay link. |
 | `debt_ws_document` | GET `job_id, document_id` (or `xero_invoice_id`) | staff | One job document as base64, or the invoice PDF. |
 | `debt_ws_note` | POST | staff | Add a note (`body`, `note` or `text`). An optional `promise_date` pauses the steps until that date and logs a promise. |
 | `debt_ws_decide` | POST | owner | `action: send` runs the guarded send. A template send (no `suggestion_id`) must carry `amount`, the amount its draft was written for, or it is refused with `amount_required`. `skip` marks the due step done for this cycle. `dismiss` closes a pending suggestion, such as an agent flag. |
 | `debt_ws_set_category` | POST | owner | `says_paid`, `rectification` (through `updateJobStatus`, source `debt_workshop`, only when the card is not already in Rectification) or `clear` (removes says paid). Works with no `suggestion_id` (the manual buttons). With `suggestion_id`, a move is marked accepted; `clear` marks it dismissed ("Keep chasing"). |
-| `debt_ws_link_contact` | POST | owner | Sets `jobs.ghl_contact_id`. Replacing a different contact needs `replace: true`. |
+| `debt_ws_link_contact` | POST `{xero_invoice_id, ghl_contact_id}` (`job_id` still accepted) | owner | Links the invoice's PAYER. A neighbour's contact goes on their own `job_contacts` row and never touches `jobs.ghl_contact_id`; the primary client (or a `job_id`-only call) sets `jobs.ghl_contact_id` as before. Replacing a different contact needs `replace: true`. Refuses `contact_belongs_to_other_payer` (another payer's contact on this job), `payer_not_on_job` (a neighbour with no `job_contacts` row) and `job_mismatch`. |
 | `debt_ws_statement_preview` | GET `company_key` | staff | The statement HTML, its invoices, total and To address. An alias contact id reads as its canonical company. |
 | `debt_ws_statement_send` | POST | owner | Emails the statement. Refused unless sending is on, an address is set, and it has not been sent this week. Xero is re-checked live first (a failed read refuses), and paid invoices are dropped. Then every invoice left is checked against the bank feed: a possible payment refuses with `possible_payment`, listing which invoices, unless `override_possible_payment: true` (logged). |
 | `debt_ws_jan_list` | GET | staff | This week's visit list: live while open, stored once locked. |
@@ -55,7 +56,7 @@ A refusal is `{ok: false, code, error}`, with a plain reason in `error`. The cod
 - `sending_off`, `not_owner`, `owner_not_set`, `operator_access_required`, `amount_required`;
 - `part_paid`, `paid`, `not_open`;
 - `possible_payment` (it also carries `possible_payments[]`);
-- `already_sent`, `step_not_due`, `no_contact`, `no_email`, `nothing_due`;
+- `already_sent`, `step_not_due`, `payer_not_linked`, `neighbour_send_unsupported`, `no_email`, `nothing_due`;
 - `text_not_allowed`, `xero_unavailable`, `bank_check_unavailable`;
 - `send_refused_by_guard`, `send_not_confirmed`.
 
@@ -69,7 +70,7 @@ The checks run in this order. A refusal is logged to `debt_ws_log` as `send_refu
    - no talk of legal action, debt collectors or credit reporting;
    - no unfilled blank;
    - 1,600 characters or fewer.
-3. The invoice is a homeowner invoice that is still open and is chased, and its job has a GHL contact.
+3. The invoice is a homeowner invoice that is still open and is chased, and its PAYER has a GHL contact (`payer_not_linked`) and is the job's own client (`neighbour_send_unsupported`, see the payer below). The text goes to the payer's contact.
 4. The step is the one due now. A reply step (`reply_says_paid`, `reply_promise` or `reply_problem`) needs its suggestion instead, and is not held by Says paid or Rectification.
 5. The step has not been sent already this cycle.
 6. A live Xero read of the invoice:
@@ -84,6 +85,23 @@ The checks run in this order. A refusal is logged to `debt_ws_log` as `send_refu
 9. The text goes through `sendChaseSms`. That path sends from 771, keeps the SES fence and the contact/job match guard, and also logs to `payment_chase_logs`.
    - A guard refusal releases the claim, because nothing was sent.
    - A send that is not confirmed keeps the claim, so the step can never be texted twice.
+
+### The payer (shared fences)
+
+On a shared fence one job has several payers: the job's client (share A, the primary `job_contacts` row) and each neighbour (share B, C, ...). Each invoice belongs to one of them, and the workshop uses THAT person's own contact, phone and conversation, never the job's (the job's contact is the primary client's). `debt_ws_payer.ts` finds the payer in this order, and never by name alone:
+
+1. the active `job_contacts` row whose `xero_contact_id` is the invoice's Xero contact;
+2. the row whose `contact_label` is the reference's share letter (`SWF-26624-B-BAL` is B);
+3. the job's client, when the invoice's Xero contact is `jobs.xero_contact_id`;
+4. the job's client, when the reference has no letter (or A) and the job has no neighbour rows.
+
+Otherwise the payer is not resolved (the Xero name only, nothing to link or text). For the primary, the GHL contact, phone and email fall back to the job's.
+
+- **Overview:** each row carries `payer_contact`; `ghl_linked` means the payer is linked.
+- **Job view:** the payer's phone, `job.shares[]` (label, payer name, owing, paid), and the payer's own messages. A message is the payer's when its GHL contact (`contact_id`), an email address or a phone is theirs. A payer with no GHL contact gets no conversation (`reason: "payer_not_linked"`), never the job's thread in its place. `getJobConversation` reads a neighbour payer's own cached GHL thread too (`extra_contact_ids`, accepted only for contacts on that job's `job_contacts` rows).
+- **Link:** a neighbour's contact goes on their `job_contacts` row; the job's link is untouched. Candidates are searched by the payer's own phone and email.
+- **Sending:** the text goes to the payer's GHL contact. A neighbour is refused with `neighbour_send_unsupported`: `sendChaseSms` (`assertGhlContactMatchesResolvedJob`) and ghl-proxy's contact/job match accept only `jobs.ghl_contact_id`, and there is no guarded neighbour text path (`sendClientUpdate` with `job_contact_id` reaches a neighbour only by leaving the job off the send, which skips the match guard). The guard is not widened here.
+- **Jan's list:** the payer's label, the payer's phone and the site address. **The agent:** the payer's contact, messages and `send_block`. Statements are unchanged.
 
 ## The switches
 
@@ -130,5 +148,5 @@ pg_cron runs in UTC; Perth is UTC+8 with no daylight saving.
   - a read cut short at 10 pages only vouches for the days it reached: an older invoice is `bank_check_unavailable` for a send and `possible_payments_status: "partial"` on the job view.
 - **Pay links** (Xero online-invoice URLs) are cached on `debt_ws_states.pay_link`. A request fetches at most 20 new ones.
 - **Invoice kinds:** final endings are FIN, FINBAL or BAL with up to three digits (FIN25, FINBAL50), FINAL and PRIVATE, with a description starting Balance, Remaining or Remainder. Not final: DEP, MAT and PROG with up to three digits, PLAN and VAR. An ending and description that disagree (FIN25 with "Deposit") still fall to "needs a look".
-- **Tests:** `deno test --allow-read --allow-env supabase/functions/ops-api/debt_ws_rules_test.ts supabase/functions/ops-api/debt_ws_store_test.ts supabase/functions/ops-api/debt_ws_deps_test.ts supabase/functions/ops-api/debt_ws_actions_test.ts` (CI runs the same).
+- **Tests:** `deno test --allow-read --allow-env supabase/functions/ops-api/debt_ws_rules_test.ts supabase/functions/ops-api/debt_ws_store_test.ts supabase/functions/ops-api/debt_ws_deps_test.ts supabase/functions/ops-api/debt_ws_actions_test.ts supabase/functions/ops-api/debt_ws_payer_test.ts` (CI runs the same), plus `job_conversation_payer_threads_test.ts` for the conversation reader.
 - **Migration contract:** `supabase/tests/migration-contracts/20261008170000_debt_workshop/`.

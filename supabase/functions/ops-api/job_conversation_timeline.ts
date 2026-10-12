@@ -74,7 +74,7 @@ export const MESSAGE_ROW_FILTER = `channel.in.(${
 
 /** The business_events columns a conversation message is built from. */
 export const TIMELINE_MESSAGE_COLUMNS =
-  "id, event_type, source, occurred_at, event_at, channel, direction, body_preview, provider_message_id, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, party_roles:metadata->party_roles, audience:metadata->>audience, recipient_role:metadata->>recipient_role";
+  "id, event_type, source, occurred_at, event_at, channel, direction, body_preview, provider_message_id, payload, correlation_id, attribution_status, attribution_step, placement_rule:metadata->>placement_rule, party_roles:metadata->party_roles, audience:metadata->>audience, recipient_role:metadata->>recipient_role, contact_id, entity_type, entity_id";
 
 /** When the row happened: coalesce(event_at, occurred_at), as an ISO string. */
 export function eventSourceTime(row: any): string | null {
@@ -433,6 +433,26 @@ export function businessEventTimelineMessage(
       p.cc,
     ], customer))
     : null;
+  // Who the message is with: its GoHighLevel contact (texts and calls carry it in
+  // contact_id, older rows as a contact entity), and every address on an email. The
+  // Debt Workshop uses these to show one payer's messages on a shared job.
+  const contactId = str(r?.contact_id) ||
+    (r?.entity_type === "contact" ? str(r?.entity_id) : "") ||
+    str(p.ghl_contact_id) || str(p.contactId) || null;
+  const addresses = channel === "email"
+    ? [
+      ...new Set(
+        emailAddresses([
+          from,
+          p.to,
+          p.to_email,
+          p.recipients,
+          p.to_recipients,
+          p.cc,
+        ]),
+      ),
+    ]
+    : [];
   const m: any = {
     id: `bev:${r.id}`,
     job_id: jobId,
@@ -449,6 +469,8 @@ export function businessEventTimelineMessage(
     source_system: "business_events",
     source_ref: r.id,
     provider_message_id: r?.provider_message_id ?? null,
+    contact_id: contactId,
+    email_addresses: addresses,
     attribution_status: r.attribution_status ?? null,
     attribution_step: r.attribution_step ?? null,
     placement_rule: r.placement_rule ?? null,
@@ -518,6 +540,7 @@ export function sentCustomerEmailMessages(
       subject,
       source_system: "email_events",
       source_ref: r.id,
+      email_addresses: to,
       email_type: r.email_type ?? null,
       delivery_status: r.status ?? null,
       customer_party: true,

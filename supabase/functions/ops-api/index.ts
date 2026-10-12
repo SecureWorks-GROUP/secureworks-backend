@@ -448,7 +448,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -16849,23 +16849,49 @@ async function getJobConversation(client: any, body: any) {
 
   // 1. GHL conversation cache (sms / email / call metadata) — by job_id first,
   //    falling back to contact_id if cache row was synced before job_id link.
+  //    Each message is tagged with the cache row's contact_id (whose thread it is).
+  //    extra_contact_ids (Debt Workshop): the threads of other payers on this job, a
+  //    neighbour on a shared fence. Only ids on this job's active job_contacts rows are
+  //    read, so a caller can never pull an unrelated contact's thread onto a job.
   try {
     let ghlRow: any = null
     if (ghlContactId) {
       const { data: byContact } = await client.from('ghl_conversation_cache')
-        .select('messages, message_count, synced_at')
+        .select('contact_id, messages, message_count, synced_at')
         .eq('contact_id', ghlContactId)
         .maybeSingle()
       ghlRow = byContact || null
     }
     if (!ghlRow) {
       const { data: byJob } = await client.from('ghl_conversation_cache')
-        .select('messages, message_count, synced_at')
+        .select('contact_id, messages, message_count, synced_at')
         .eq('job_id', jobId)
         .maybeSingle()
       ghlRow = byJob || null
     }
-    const ghlMsgs: any[] = Array.isArray(ghlRow?.messages) ? ghlRow.messages : []
+    const ghlRows: any[] = ghlRow ? [ghlRow] : []
+    const extraIds: string[] = Array.isArray(body?.extra_contact_ids)
+      ? Array.from(new Set<string>(body.extra_contact_ids.map((v: unknown) => String(v || '').trim())
+        .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v) && v !== ghlContactId && v !== ghlRow?.contact_id)))
+        .slice(0, 5)
+      : []
+    if (extraIds.length) {
+      const { data: onJob, error: onJobErr } = await client.from('job_contacts')
+        .select('ghl_contact_id')
+        .eq('job_id', jobId)
+        .or('status.is.null,status.eq.active')
+        .in('ghl_contact_id', extraIds)
+      if (onJobErr) console.error('[ops-api] get_job_conversation job_contacts check failed:', onJobErr.message)
+      const allowed = (onJob || []).map((r: any) => String(r.ghl_contact_id)).filter(Boolean)
+      if (allowed.length) {
+        const { data: extraRows } = await client.from('ghl_conversation_cache')
+          .select('contact_id, messages, message_count, synced_at')
+          .in('contact_id', allowed)
+        ghlRows.push(...(extraRows || []))
+      }
+    }
+    const ghlMsgs: any[] = ghlRows.flatMap((row: any) =>
+      (Array.isArray(row?.messages) ? row.messages : []).map((m: any) => ({ ...m, __contact_id: row?.contact_id || null })))
     for (const m of ghlMsgs) {
       const ts = m.timestamp || ''
       if (sinceFilter && ts && ts < sinceFilter) continue
@@ -16884,6 +16910,7 @@ async function getJobConversation(client: any, body: any) {
         subject: undefined,
         source_system: 'ghl_cache',
         source_ref: m.id || '',
+        contact_id: m.__contact_id || null,
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
         // The CRM thread is read by the job's customer contact (party roles, B-6).
         ...conversationRoleFields(customerThreadPartyRoles(m.direction || 'inbound')),
@@ -16932,6 +16959,7 @@ async function getJobConversation(client: any, body: any) {
         subject: r.subject || null,
         source_system: 'inbox',
         source_ref: r.id,
+        email_addresses: Array.from(new Set(emailAddresses([r.from_email, r.to_email]))),
         placed_by: 'old_inbox_matcher',
         label,
         event_copy,
