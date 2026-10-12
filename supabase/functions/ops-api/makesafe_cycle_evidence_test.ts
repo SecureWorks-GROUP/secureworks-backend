@@ -13,8 +13,10 @@ import {
   hasReattendBoundary,
   isEvidenceBoundToCurrentCycle,
   isLegacyMakesafeCard,
+  isApplicablePackPhoto,
   PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
   projectCycleScopedEvidence,
+  QUOTE_BUILDER_PHOTO_PHASE,
   readinessRevisionPayload,
   normalizePackPhotoSelectedIds,
   resolveBoardPhotoCount,
@@ -227,6 +229,55 @@ Deno.test(
       }).map((row) => row.id),
       ["friday-1", "monday-1"],
     );
+  },
+);
+
+Deno.test(
+  "quote builder photos on a repair card never enter the pack photo set",
+  () => {
+    const detail = { cycle_number: 1, reattend_count: 0 };
+    const media = [
+      {
+        id: "existing-scope",
+        type: "photo",
+        phase: "scope",
+        created_at: "2026-10-01T08:00:00.000Z",
+      },
+      {
+        id: "hugo-quote-builder",
+        type: "photo",
+        phase: QUOTE_BUILDER_PHOTO_PHASE,
+        created_at: "2026-10-02T08:00:00.000Z",
+      },
+      {
+        id: "trade-completion",
+        type: "photo",
+        phase: "completion",
+        created_at: "2026-10-03T08:00:00.000Z",
+      },
+    ];
+    assertEquals(
+      selectPackPhotoMedia({ media, detail }).map((row) => row.id),
+      ["existing-scope", "trade-completion"],
+    );
+    assertEquals(
+      selectPackPhotoMedia({
+        media,
+        detail,
+        photoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+      }).map((row) => row.id),
+      ["existing-scope", "trade-completion"],
+    );
+    assertEquals(
+      selectPackPhotoMedia({
+        media,
+        detail,
+        photoSourceScope: PACK_PHOTO_SOURCE_SAME_JOB_ALL_ATTENDANCES,
+        photoSelectedIds: ["hugo-quote-builder", "trade-completion"],
+      }).map((row) => row.id),
+      ["trade-completion"],
+    );
+    assertEquals(media.map(isApplicablePackPhoto), [true, false, true]);
   },
 );
 
