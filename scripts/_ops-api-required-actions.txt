@@ -116,6 +116,10 @@ get_job_conversation
 pipeline
 job_detail
 
+# ── Ops screen Dispatch tab: every note on a job (docs/dispatch-slice-1-read-contract.md).
+#    A pure read; a bare call is refused 400 "jobId required" before any query. ──
+job_notes
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event
