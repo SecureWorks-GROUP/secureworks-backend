@@ -11861,7 +11861,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   ? autoCollectedTimeEntry({
                     saved: savedJobViewTimes.get(String(a.id)),
                     userId: tradeUser.id,
-                    cardHours: a.hours_worked,
+                    billedHours: a.hours_worked,
                     startedAt: a.clocked_on_at,
                     finishedAt: a.clocked_off_at,
                     breakMinutes: a.break_minutes,
@@ -52097,7 +52097,12 @@ export const _tradeWaiveNeighbourSignoffForTest = tradeWaiveNeighbourSignoff
 //   - hours: finite, 0.25..24, rounded to the nearest quarter hour; REPLACES
 //     hours_worked (not additive) so a re-tap corrects rather than doubles.
 //   - target assignment: the caller's own non-cancelled assignment on the job,
-//     preferring in_progress > scheduled/confirmed > latest complete. A
+//     preferring in_progress > scheduled/confirmed > latest complete. A log
+//     that names its card (assignment_id) goes on that card. A log with times
+//     goes on the card for that day (the card already holding that day's saved
+//     times, else the card scheduled that day), so two days on one job are two
+//     cards; with no card for the day the usual pick stands, but never onto a
+//     card that already holds another day's hours. A
 //     make-safe with no assignment for the caller gets the same completing-trade
 //     binding submit_makesafe_report mints (the report submitter is the
 //     attending trade). Any other job with no assignment is refused: the office
@@ -52125,8 +52130,17 @@ function normaliseLoggedHours(raw: unknown): number {
   return q
 }
 const LOG_HOURS_ASSIGNMENT_COLUMNS = 'id, job_id, user_id, status, role, assignment_type, scheduled_date, hours_worked, invoiced_in, completed_at, attendance_cycle_id, cycle_attribution, notes'
+function liveHoursAssignments(rows: any[]): any[] {
+  return (rows || []).filter((r) => r && r.status !== 'cancelled' && isGenuineTradeAssignment(r))
+}
+function pickHoursAssignmentForDay(rows: any[], workDate: string, savedDayByCard: Map<string, string>): any | null {
+  const live = liveHoursAssignments(rows)
+  return live.find((r) => savedDayByCard.get(String(r.id)) === workDate)
+    || live.find((r) => String(r.scheduled_date || '') === workDate)
+    || pickHoursAssignment(rows)
+}
 function pickHoursAssignment(rows: any[]): any | null {
-  const live = (rows || []).filter((r) => r && r.status !== 'cancelled' && isGenuineTradeAssignment(r))
+  const live = liveHoursAssignments(rows)
   if (!live.length) return null
   const byDate = (a: any, b: any) => String(b.scheduled_date || '').localeCompare(String(a.scheduled_date || ''))
   const active = live.find((r) => r.status === 'in_progress')
@@ -52138,6 +52152,7 @@ function pickHoursAssignment(rows: any[]): any | null {
 async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthContext, access: TradeJobAccessContext) {
   const jobId = String(body?.jobId || body?.job_id || '').trim()
   if (!jobId) throw new ApiError('jobId required', 400)
+  const namedCardId = String(body?.assignmentId || body?.assignment_id || '').trim()
   // All three time fields or none: a half-filled or wrong entry (finish not
   // after start, a day after today, hours that disagree) is refused as on an
   // invoice line.
@@ -52159,7 +52174,34 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
     .select(LOG_HOURS_ASSIGNMENT_COLUMNS)
     .eq('job_id', jobId).eq('user_id', tradeUser.id)
   if (asnErr) throw asnErr
-  let assignment = pickHoursAssignment(mine || [])
+  const savedDayByCard = new Map<string, string>()
+  if (timeEntry && !namedCardId) {
+    const saved = await loadLoggedTimesByCard(client, (mine || []).map((row: any) => row?.id))
+    if (saved.error) throw new Error('Failed to read the times saved on your job cards: ' + saved.error)
+    for (const row of (mine || [])) {
+      const savedDay = loggedTimeEntryForCard(saved.byCard.get(String(row?.id)), row?.hours_worked, tradeUser.id)?.work_date
+      if (savedDay) savedDayByCard.set(String(row.id), savedDay)
+    }
+  }
+  const pickCard = (rows: any[]): any | null => {
+    if (namedCardId) {
+      const named = liveHoursAssignments(rows).find((row) => String(row.id) === namedCardId) || null
+      if (!named) throw new ApiError('That job card is not one of yours on this job. Reload and try again.', 404)
+      return named
+    }
+    if (!timeEntry) return pickHoursAssignment(rows)
+    const picked = pickHoursAssignmentForDay(rows, timeEntry.work_date, savedDayByCard)
+    const pickedDay = picked ? (savedDayByCard.get(String(picked.id)) || String(picked.scheduled_date || '')) : ''
+    if (picked && Number(picked.hours_worked) > 0 && pickedDay !== timeEntry.work_date) {
+      throw new ApiError(
+        'Your job card on this job already holds your hours for ' + (pickedDay || 'another day') + ', and you have no other card here for ' +
+          timeEntry.work_date + '. Enter these times on the Weekly Invoice, or ask the office to add you to the job for that day.',
+        409,
+      )
+    }
+    return picked
+  }
+  let assignment = pickCard(mine || [])
   let created = false
   if (!assignment) {
     const { data: detail } = await client.from('makesafe_job_details')
@@ -52183,7 +52225,7 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
       .select(LOG_HOURS_ASSIGNMENT_COLUMNS)
       .eq('job_id', jobId).eq('user_id', tradeUser.id)
     if (rereadErr) throw rereadErr
-    assignment = pickHoursAssignment(reread || []) || bound.assignment
+    assignment = pickCard(reread || []) || bound.assignment
     if (!assignment) throw new ApiError('Could not find your assignment on this job', 500)
   }
   if (assignment.invoiced_in) {
@@ -52695,7 +52737,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   const { data: weekAssignments, error } = await client
     .from('job_assignments')
     .select(`
-      id, scheduled_date, started_at, completed_at, hours_worked, role, assignment_type, status, invoiced_in,
+      id, scheduled_date, started_at, completed_at, role, assignment_type, status, invoiced_in,
       jobs:job_id (
         id, type, job_number, client_name, site_address, site_suburb, metadata
       )
@@ -52913,13 +52955,14 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       // completed stamps. While the flag is off those are the entry (null
       // when they are not one same-day Perth shift) and the lines group per
       // job as before. When it is on, one line per card: the trade's own
-      // times saved on the job view, else those stamps; a card with neither
-      // is refused by name below. Billed hours are unchanged.
+      // times saved on the job view while they make the hours billed here,
+      // else those stamps; a card with neither is refused by name below.
+      // Billed hours are unchanged.
       const stTimeEntry = stSavedJobViewTimes
         ? autoCollectedTimeEntry({
           saved: stSavedJobViewTimes.get(String(a.id)),
           userId,
-          cardHours: a.hours_worked,
+          billedHours: hours,
           startedAt: a.started_at,
           finishedAt: a.completed_at,
         })

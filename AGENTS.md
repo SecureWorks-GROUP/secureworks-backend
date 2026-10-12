@@ -4450,11 +4450,14 @@ Enforcement of a MISSING entry is flag `trade_invoice_time_entry_required_v1`,
 seeded off and turned on only on the owner's word after the trade app screens
 are live; a wrong entry is refused in both states. Times typed on the job view
 go in `job_assignment_logged_times`, never new columns on `job_assignments`
-(every column there is inside the make-safe fact hash). With the flag on, a
-job card the server collects itself takes those saved times, else its
-same-day clock stamps, and is refused by name only with neither;
-`job_detail` lists saved times against the job until that day is billed.
-`loggedTimeEntryForCard` is the one rule for when a saved row may be used.
+(every column there is inside the make-safe fact hash). A stored entry always
+makes the hours its line bills: with the flag on, a job card the server
+collects itself takes those saved times only while they make the hours that
+line bills, else its same-day clock stamps, and is refused by name only with
+neither; `job_detail` lists saved times against the job until that day is
+billed. `loggedTimeEntryForCard` is the one rule for when a saved row may be
+used. A log with times goes on that day's card (`assignment_id` wins), never
+over another day's hours.
 Write paths, refusal
 codes, reads and the per-job list `job_trade_time_entries`:
 `docs/trade-invoice-time-entries-2026-10-12.md`.

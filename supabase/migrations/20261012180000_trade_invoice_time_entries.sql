@@ -187,9 +187,10 @@ WHERE NOT EXISTS (
 
 -- ── 5. Times saved on the job view ──────────────────────────────────────────
 -- One row per job card. `hours` is the hours those times make; ops-api uses
--- the row only while it still equals the card's hours_worked and only for the
--- trade who saved it (user_id), so a later change to the hours by any other
--- writer, or a card handed to another trade, never rides stale times.
+-- the row only while it equals the hours it is read against (the card's
+-- hours_worked, or the hours an invoice line bills for the card) and only for
+-- the trade who saved it (user_id), so a later change to the hours by any
+-- other writer, or a card handed to another trade, never rides stale times.
 CREATE TABLE IF NOT EXISTS public.job_assignment_logged_times (
   assignment_id uuid PRIMARY KEY
     REFERENCES public.job_assignments(id) ON DELETE CASCADE,

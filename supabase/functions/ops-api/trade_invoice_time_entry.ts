@@ -18,9 +18,11 @@
 // Enforcement is behind feature flag TRADE_INVOICE_TIME_ENTRY_FLAG, seeded
 // off: while off the fields are stored when sent and a line without them is
 // accepted; when on, a time line without them is refused `time_entry_required`.
-// A job card the server collects itself (nobody typed its line) takes, when
-// the flag is on, the trade's own times saved on the job view, else the
-// clock's same-day pair, and is refused by name only when it has neither.
+// A stored entry always makes the hours its line bills. A job card the server
+// collects itself (nobody typed its line) takes, when the flag is on, the
+// trade's own times saved on the job view while they make the hours that line
+// bills, else the clock's same-day pair, and is refused by name only when it
+// has neither.
 // A wrong entry (finish not after start, hours that disagree, a day worked
 // that is after today) is refused in both states. Contract: docs/trade-invoice-time-entries-2026-10-12.md.
 
@@ -99,8 +101,8 @@ export class TradeInvoiceTimeEntryError extends Error {
 
 /**
  * The one refusal for job cards the server collected itself that say nowhere
- * when they were worked. It names every such job and day, so the trade can
- * fix exactly those.
+ * when they were worked. It names every such job and day and both ways to
+ * give the times, so the trade can fix exactly those.
  */
 export function tradeInvoiceTimeEntriesNeededError(
   cards: TradeInvoiceTimeEntryNeeded[],
@@ -112,7 +114,7 @@ export function tradeInvoiceTimeEntriesNeededError(
   ).join("; ");
   return new TradeInvoiceTimeEntryError(
     "time_entry_required",
-    `Enter your start and finish time for: ${named}. Open each job, log the hours with the date worked and your start and finish time, then submit again.`,
+    `Enter your start and finish time for: ${named}. Either open that job and log your hours for that day with your start and finish time, or enter them on that job's card in the Weekly Invoice. Then submit again.`,
     cards,
   );
 }
@@ -488,10 +490,12 @@ export const JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS =
 
 /**
  * The saved times for a job card, or null. They are returned only while they
- * still describe the card's hours: when the hours were changed since by any
- * other writer (the clock, the office, a bare-hours log), the saved times are
- * stale and are not used. With `ownerUserId` they must also be that trade's
- * own: a card handed to someone else never carries the first trade's times.
+ * make `cardHours`, the hours they are read against (the card's hours, or the
+ * hours an invoice line bills for it): when the hours were changed since by
+ * any other writer (the clock, the office, a bare-hours log), the saved times
+ * are stale and are not used. With `ownerUserId` they must also be that
+ * trade's own: a card handed to someone else never carries the first trade's
+ * times.
  */
 export function loggedTimeEntryForCard(
   row: unknown,
@@ -562,21 +566,22 @@ export async function loadLoggedTimesByCard(
 
 /**
  * The entry for a job card the server collected itself, when an entry is
- * required: the trade's own saved job-view times first, else the system's
- * same-day pair of stamps (the clock's, or the assignment's started and
- * completed). Null when the card has neither: nothing is invented.
+ * required: the trade's own saved job-view times first, but only while they
+ * make the hours the line bills (`billedHours`), else the system's same-day
+ * pair of stamps (the clock's, or the assignment's started and completed).
+ * Null when the card has neither: nothing is invented.
  */
 export function autoCollectedTimeEntry(
   card: {
     saved: unknown;
     userId: unknown;
-    cardHours: unknown;
+    billedHours: unknown;
     startedAt: unknown;
     finishedAt: unknown;
     breakMinutes?: unknown;
   },
 ): TradeInvoiceRecordedTimeEntry | null {
-  return loggedTimeEntryForCard(card.saved, card.cardHours, card.userId) ||
+  return loggedTimeEntryForCard(card.saved, card.billedHours, card.userId) ||
     clockTradeInvoiceTimeEntry(
       card.startedAt,
       card.finishedAt,
