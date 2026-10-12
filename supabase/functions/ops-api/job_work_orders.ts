@@ -1073,8 +1073,6 @@ export async function approveJobWorkOrder(
     wo_number: wo.wo_number,
     approved_by: approver.userId,
     via: approver.via,
-    agreed_labour_ex: data?.agreed_labour_ex ?? wo.agreed_labour_ex,
-    sealed_content_hash: data?.sealed_content_hash ?? null,
   }, approver.userId);
   return { work_order: data };
 }
@@ -1287,7 +1285,6 @@ export async function reportWorkOrderVariation(
       variation_id: variation.id,
       work_order_id: live?.id ?? null,
       trade_invoice_id: invoiceId,
-      amount_ex: amountEx,
     }, trade.id);
   }
   return { variation, duplicate, emails: emailResults };
