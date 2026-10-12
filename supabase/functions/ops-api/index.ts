@@ -16017,7 +16017,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
     client.from('job_media').select('*').eq('job_id', jobId).order('created_at'),
     client.from('purchase_orders').select('*').eq('job_id', jobId).neq('status', 'deleted').order('created_at', { ascending: false }),
-    client.from('work_orders').select('*').eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
+    client.from('work_orders').select('*').eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at, event_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
@@ -17054,6 +17054,7 @@ async function assembleJobDossier(client: any, body: any) {
     const { data, error } = await client.from('work_orders')
       .select('id, wo_number, trade_name, status, scheduled_date, sent_at, accepted_at, completed_at, created_at')
       .eq('job_id', jobId)
+      .neq('kind', 'job')
       .order('created_at', { ascending: false })
       .limit(50)
     if (error) throw new Error(error.message)

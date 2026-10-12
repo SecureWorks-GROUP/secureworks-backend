@@ -30,9 +30,10 @@
 //                                   records the finance and admin emails, sent
 //                                   only while work_order_variation_emails_v1 is on
 //
-// Labour billed against a work order is stamped by the database at invoice
-// submit, and at approval for labour invoiced earlier
-// (trade_invoice_lines.job_work_order_id); this module only reads it.
+// Invoice lines billed on the job are stamped by the database at invoice
+// submit, and at approval for lines invoiced earlier
+// (trade_invoice_lines.job_work_order_id); this module only reads them. Only
+// labour-lane lines count against the agreed labour; the rest are listed.
 
 export const JOB_WORK_ORDER_SCHEMA = "job-work-order.v1";
 export const TRADE_JOB_WORK_ORDER_SCHEMA = "trade-job-work-order.v1";
@@ -41,23 +42,6 @@ export const JOB_WORK_ORDER_JOB_TYPES: ReadonlySet<string> = new Set([
   "fencing",
   "patio",
 ]);
-
-/** Mirror of public.job_work_order_open_statuses(). */
-export const JOB_WORK_ORDER_OPEN_STATUSES: readonly string[] = [
-  "accepted",
-  "partially_accepted",
-  "approvals",
-  "deposit",
-  "awaiting_deposit",
-  "processing",
-  "order_materials",
-  "awaiting_supplier",
-  "order_confirmed",
-  "schedule_install",
-  "scheduled",
-  "in_progress",
-  "rectification",
-];
 
 /** Mirror of public.job_work_order_billed_invoice_statuses(). */
 export const JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: ReadonlySet<string> =
@@ -71,11 +55,12 @@ export const JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: ReadonlySet<string> =
     "paid",
   ]);
 
-/** Mirror of public.job_work_order_excluded_line_types(). */
-export const JOB_WORK_ORDER_EXCLUDED_LINE_TYPES: ReadonlySet<string> = new Set([
-  "commission",
-  "final_payout_deduction",
-]);
+/**
+ * The one cost lane that counts against the agreed labour. The lane of a line
+ * is v_trade_charge_resolved.cost_lane (20260831021701), the repo's single
+ * definition; this module reads it and never restates it.
+ */
+export const WORK_ORDER_LABOUR_COST_LANE = "labour";
 
 // Recipients (secureworks-wiki harness/ops/sops/make-safe-ops-agent-sop.md:
 // line 134 "From: admin@secureworkswa.com.au", the default operational
@@ -170,7 +155,7 @@ export function resolveWorkOrderApprover(input: {
 
 // ── Pure: running figures and rules ──────────────────────────────────────────
 
-export type WorkOrderLabourLine = {
+export type WorkOrderLine = {
   trade_invoice_line_id: string;
   trade_invoice_id: string;
   work_order_id: string | null;
@@ -184,6 +169,9 @@ export type WorkOrderLabourLine = {
   description: string | null;
   hours: number | null;
   amount_ex: number;
+  /** v_trade_charge_resolved.cost_lane: labour, materials, commission, other, unclassified. */
+  cost_lane: string;
+  /** In the billed totals: a labour-lane line on an invoice that is billed. */
   counted: boolean;
 };
 
@@ -211,9 +199,11 @@ export type WorkOrderFigures = {
 
 /**
  * Live figures for the job's approved work order.
- *   billed_to_date_ex  every counted labour line stamped against the job's
- *                      approved work order (variation work included, since
- *                      the trade bills a variation on the same invoice).
+ *   billed_to_date_ex  every counted line stamped against the job's approved
+ *                      work order: labour lane only, on a billed invoice
+ *                      (variation work included, since the trade bills a
+ *                      variation on the same invoice). Materials, travel,
+ *                      equipment and other lines are never in it.
  *   variations_ex      the part of billed the trades marked as variations;
  *                      a variation counts only while its invoice is billed.
  *   remaining_ex       agreed - billed_to_date.
@@ -227,7 +217,7 @@ export function computeWorkOrderFigures(input: {
   agreedEx: number | null;
   approved: boolean;
   lines: Array<
-    Pick<WorkOrderLabourLine, "amount_ex" | "counted" | "work_order_id">
+    Pick<WorkOrderLine, "amount_ex" | "counted" | "work_order_id">
   >;
   variations: Array<
     {
@@ -306,14 +296,6 @@ export function computeWorkOrderFigures(input: {
 }
 
 // ── Pure: validation of draft edits ──────────────────────────────────────────
-
-export const JOB_WORK_ORDER_DRAFT_FIELDS = [
-  "scope_items",
-  "special_instructions",
-  "agreed_labour_ex",
-  "scheduled_date",
-  "site_address",
-] as const;
 
 export function validateJobWorkOrderDraftPatch(
   body: any,
@@ -579,20 +561,42 @@ function draftOf(rows: any[]) {
   return rows.find((r) => r.status === "draft") || null;
 }
 
-async function readLabourLines(
+async function readCostLanes(
+  client: any,
+  lineIds: string[],
+): Promise<Map<string, string>> {
+  const lanes = new Map<string, string>();
+  for (let i = 0; i < lineIds.length; i += 100) {
+    const { data, error } = await client.from("v_trade_charge_resolved")
+      .select("line_id, cost_lane")
+      .in("line_id", lineIds.slice(i, i + 100));
+    if (error) {
+      fail(500, "labour_unreadable", "Trade labour could not be read");
+    }
+    for (const row of data || []) {
+      lanes.set(String(row.line_id), String(row.cost_lane || ""));
+    }
+  }
+  return lanes;
+}
+
+async function readWorkOrderLines(
   client: any,
   jobIds: string[],
-): Promise<WorkOrderLabourLine[]> {
-  const out: WorkOrderLabourLine[] = [];
+  opts: { linkedOnly?: boolean } = {},
+): Promise<WorkOrderLine[]> {
+  const out: WorkOrderLine[] = [];
   for (let i = 0; i < jobIds.length; i += 25) {
     const chunk = jobIds.slice(i, i + 25);
     let offset = 0;
     while (true) {
-      const { data, error } = await client.from("trade_invoice_lines")
+      let q = client.from("trade_invoice_lines")
         .select(
           "id, trade_invoice_id, job_id, job_work_order_id, line_type, description, total_hours, work_order_hours, line_total_ex, override_amount, trade_invoices!inner(id, user_id, invoice_number, status, submitted_at, users:user_id(name))",
         )
-        .in("job_id", chunk)
+        .in("job_id", chunk);
+      if (opts.linkedOnly) q = q.not("job_work_order_id", "is", null);
+      const { data, error } = await q
         .order("id", { ascending: true })
         .range(offset, offset + 999);
       if (error) {
@@ -602,11 +606,6 @@ async function readLabourLines(
         const inv = Array.isArray(row.trade_invoices)
           ? row.trade_invoices[0]
           : row.trade_invoices;
-        const lineType = row.line_type ?? null;
-        if (JOB_WORK_ORDER_EXCLUDED_LINE_TYPES.has(String(lineType || ""))) {
-          continue;
-        }
-        const status = String(inv?.status || "");
         const hours = row.work_order_hours ?? row.total_hours;
         out.push({
           trade_invoice_line_id: row.id,
@@ -616,18 +615,28 @@ async function readLabourLines(
           user_id: inv?.user_id ?? null,
           trade_name: inv?.users?.name ?? null,
           invoice_number: inv?.invoice_number ?? null,
-          invoice_status: status,
+          invoice_status: String(inv?.status || ""),
           submitted_at: inv?.submitted_at ?? null,
-          line_type: lineType,
+          line_type: row.line_type ?? null,
           description: row.description ?? null,
           hours: hours === null || hours === undefined ? null : Number(hours),
           amount_ex: money(row.override_amount ?? row.line_total_ex),
-          counted: JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(status),
+          cost_lane: "unclassified",
+          counted: false,
         });
       }
       if (!data || data.length < 1000) break;
       offset += 1000;
     }
+  }
+  const lanes = await readCostLanes(
+    client,
+    out.map((l) => l.trade_invoice_line_id),
+  );
+  for (const line of out) {
+    line.cost_lane = lanes.get(line.trade_invoice_line_id) || "unclassified";
+    line.counted = line.cost_lane === WORK_ORDER_LABOUR_COST_LANE &&
+      JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(line.invoice_status);
   }
   return out;
 }
@@ -666,7 +675,7 @@ async function readVariations(client: any, jobIds: string[]): Promise<any[]> {
 
 function figuresFor(
   live: any,
-  lines: WorkOrderLabourLine[],
+  lines: WorkOrderLine[],
   variations: any[],
 ) {
   return computeWorkOrderFigures({
@@ -684,7 +693,7 @@ function figuresFor(
   });
 }
 
-function invoicesFrom(lines: WorkOrderLabourLine[], variations: any[]) {
+function invoicesFrom(lines: WorkOrderLine[], variations: any[]) {
   const byInvoice = new Map<string, any>();
   for (const l of lines) {
     if (!l.work_order_id) continue;
@@ -692,7 +701,7 @@ function invoicesFrom(lines: WorkOrderLabourLine[], variations: any[]) {
       trade_invoice_id: l.trade_invoice_id,
       invoice_number: l.invoice_number,
       status: l.invoice_status,
-      counted: l.counted,
+      counted: JOB_WORK_ORDER_BILLED_INVOICE_STATUSES.has(l.invoice_status),
       trade_user_id: l.user_id,
       trade_name: l.trade_name,
       submitted_at: l.submitted_at,
@@ -700,8 +709,10 @@ function invoicesFrom(lines: WorkOrderLabourLine[], variations: any[]) {
       hours: 0,
       has_variation: false,
     };
-    cur.amount_ex = money(cur.amount_ex + l.amount_ex);
-    cur.hours = Math.round((cur.hours + (l.hours || 0)) * 100) / 100;
+    if (l.cost_lane === WORK_ORDER_LABOUR_COST_LANE) {
+      cur.amount_ex = money(cur.amount_ex + l.amount_ex);
+      cur.hours = Math.round((cur.hours + (l.hours || 0)) * 100) / 100;
+    }
     byInvoice.set(l.trade_invoice_id, cur);
   }
   for (const v of variations) {
@@ -756,7 +767,7 @@ export async function readJobWorkOrder(
   const live = liveOf(rows);
   const draft = draftOf(rows);
   const [lines, variations] = await Promise.all([
-    readLabourLines(client, [job.id]),
+    readWorkOrderLines(client, [job.id]),
     readVariations(client, [job.id]),
   ]);
   const linked = lines.filter((l) => l.work_order_id);
@@ -779,7 +790,7 @@ export async function readJobWorkOrder(
     draft_work_order: draft,
     figures: figuresFor(live, linked, variations),
     invoices: invoicesFrom(linked, variations),
-    labour_lines: linked,
+    lines: linked,
     labour_before_approval: {
       amount_ex: money(before.reduce((s, l) => s + l.amount_ex, 0)),
       line_count: before.length,
@@ -796,8 +807,8 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
   const status = String(params.get("status") || "").trim();
   const type = String(params.get("type") || "").trim();
   const jobId = params.get("job_id");
-  if (status && !["draft", "approved", "cancelled"].includes(status)) {
-    fail(400, "invalid_status", "status must be draft, approved or cancelled");
+  if (status && !["draft", "approved"].includes(status)) {
+    fail(400, "invalid_status", "status must be draft or approved");
   }
   if (type && !JOB_WORK_ORDER_JOB_TYPES.has(type)) {
     fail(400, "invalid_type", "type must be fencing or patio");
@@ -814,7 +825,6 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
     if (jobId) q = q.eq("job_id", requireUuid(jobId, "job_id"));
     if (type) q = q.eq("jobs.type", type);
     if (status) q = q.eq("status", status);
-    else q = q.neq("status", "cancelled");
     const { data, error } = await q;
     if (error) {
       fail(500, "work_orders_unreadable", "Job work orders could not be read");
@@ -825,15 +835,13 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
   }
   const jobIds = [...new Set(rows.map((r) => String(r.job_id)))];
   const [lines, variations] = await Promise.all([
-    readLabourLines(client, jobIds),
+    readWorkOrderLines(client, jobIds, { linkedOnly: true }),
     readVariations(client, jobIds),
   ]);
   const work_orders = rows.map((r) => {
     const job = Array.isArray(r.jobs) ? r.jobs[0] : r.jobs;
     const isLive = r.status === "approved";
-    const jobLines = lines.filter((l) =>
-      l.job_id === r.job_id && l.work_order_id
-    );
+    const jobLines = lines.filter((l) => l.job_id === r.job_id);
     const jobVariations = variations.filter((v) => v.job_id === r.job_id);
     const { jobs: _jobs, ...wo } = r;
     return {
@@ -943,39 +951,12 @@ export async function updateJobWorkOrderDraft(client: any, body: any) {
       "This work order is approved and sealed. Later change is recorded as a variation.",
     );
   }
-  if (wo.status !== "draft") {
-    fail(409, "not_a_draft", `This work order is ${wo.status}`);
-  }
   if (body?.status !== undefined && body.status !== "draft") {
-    if (body.status !== "cancelled") {
-      fail(
-        400,
-        "invalid_status",
-        "A draft can only be cancelled here. Use approve_work_order to approve it.",
-      );
-    }
-    const { data, error } = await client.from("work_orders").update({
-      status: "cancelled",
-    })
-      .eq("id", id).eq("status", "draft").select(WO_COLUMNS).maybeSingle();
-    if (error || !data) {
-      fail(409, "not_a_draft", "The draft could not be cancelled");
-    }
-    const { error: jobErr } = await client.from("jobs").update({
-      work_order_id: null,
-    })
-      .eq("id", wo.job_id).eq("work_order_id", id);
-    if (jobErr) {
-      console.error(
-        "[job-work-orders] job reference not cleared:",
-        jobErr.message,
-      );
-    }
-    await logJobEvent(client, wo.job_id, "job_work_order_draft_cancelled", {
-      work_order_id: id,
-      wo_number: wo.wo_number,
-    });
-    return { work_order: data };
+    fail(
+      400,
+      "invalid_status",
+      "A draft work order's status changes only through approve_work_order.",
+    );
   }
   const patch = validateJobWorkOrderDraftPatch(body);
   if (Object.keys(patch).length === 0) {
@@ -1261,14 +1242,10 @@ export async function reportWorkOrderVariation(
   if (live) {
     try {
       const [lines, variations] = await Promise.all([
-        readLabourLines(client, [jobId]),
+        readWorkOrderLines(client, [jobId], { linkedOnly: true }),
         readVariations(client, [jobId]),
       ]);
-      figures = figuresFor(
-        live,
-        lines.filter((l) => l.work_order_id),
-        variations,
-      );
+      figures = figuresFor(live, lines, variations);
     } catch (_e) {
       figures = null;
     }

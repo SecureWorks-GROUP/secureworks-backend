@@ -18,10 +18,15 @@
 --   2. jobs.work_order_id: the job's current job work order.
 --   3. trade_invoice_lines.job_work_order_id: stamped when the trade's invoice
 --      is submitted, with the job's APPROVED work order (drafts count for
---      nothing). Stamped by trigger so every submit path is covered. Labour
---      invoiced before the approval is stamped by the approval itself.
+--      nothing). Stamped by trigger so every submit path is covered. Lines
+--      invoiced before the approval are stamped by the approval itself. Every
+--      line on the job is stamped; which of them is labour is decided at read
+--      time by v_trade_charge_resolved.cost_lane, the one definition.
 --   4. work_order_variations: a trade's "there is a variation" on an invoice,
---      recorded against the job's approved work order.
+--      recorded against the job's approved work order. A variation raised on a
+--      draft invoice is carried to the invoice row that replaces the draft
+--      (carry_work_order_variations, called by the three draft-replacing
+--      functions of 20260827112928 and 20260831021701).
 --   5. work_order_variation_emails: the finance and admin emails per
 --      variation. Sending is off until feature flag
 --      work_order_variation_emails_v1 is on (seeded off).
@@ -62,7 +67,7 @@ ALTER TABLE public.work_orders DROP CONSTRAINT IF EXISTS work_orders_kind_status
 ALTER TABLE public.work_orders ADD CONSTRAINT work_orders_kind_status_check
   CHECK (
     (kind = 'crew' AND status <> 'approved')
-    OR (kind = 'job' AND status IN ('draft', 'approved', 'cancelled'))
+    OR (kind = 'job' AND status IN ('draft', 'approved'))
   );
 
 ALTER TABLE public.work_orders DROP CONSTRAINT IF EXISTS work_orders_approved_sealed_check;
@@ -88,7 +93,7 @@ ALTER TABLE public.work_orders ADD CONSTRAINT work_orders_origin_check
 -- One job work order per job: a draft, then that same row approved.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_work_orders_job_current
   ON public.work_orders (job_id)
-  WHERE kind = 'job' AND status IN ('draft', 'approved');
+  WHERE kind = 'job';
 CREATE INDEX IF NOT EXISTS idx_work_orders_kind ON public.work_orders (kind);
 
 -- The table's existing "Users view org WOs" policy lets any signed-in org user
@@ -164,6 +169,8 @@ CREATE TABLE IF NOT EXISTS public.work_order_variations (
   -- The job's approved work order. NULL while the job has none: the variation
   -- is kept, and approve_job_work_order links it when the work order is approved.
   work_order_id uuid REFERENCES public.work_orders(id),
+  -- A variation goes with an invoice that is deleted outright. When a draft is
+  -- replaced, carry_work_order_variations moves it to the replacing row first.
   trade_invoice_id uuid NOT NULL REFERENCES public.trade_invoices(id) ON DELETE CASCADE,
   reported_by uuid NOT NULL REFERENCES public.users(id),
   description text NOT NULL CHECK (length(btrim(description)) BETWEEN 1 AND 2000),
@@ -224,8 +231,7 @@ ON CONFLICT (flag_name) DO NOTHING;
 
 -- Open, approved job statuses: the client has accepted and the job is not
 -- closed. Closed (complete, invoiced, final_payment, get_review, archived) and
--- dead (cancelled, lost) jobs are left alone. Mirrored in
--- ops-api/job_work_orders.ts JOB_WORK_ORDER_OPEN_STATUSES.
+-- dead (cancelled, lost) jobs are left alone.
 CREATE OR REPLACE FUNCTION public.job_work_order_open_statuses()
 RETURNS text[]
 LANGUAGE sql
@@ -249,15 +255,6 @@ AS $$
     'pending_acknowledgment', 'queried', 'acknowledged', 'pending_ops_review',
     'approved', 'pushed_to_xero', 'paid'
   ]::text[]
-$$;
-
--- Line types that are never labour against a job work order.
-CREATE OR REPLACE FUNCTION public.job_work_order_excluded_line_types()
-RETURNS text[]
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT ARRAY['commission', 'final_payout_deduction']::text[]
 $$;
 
 -- The approved job work order of a job, or NULL.
@@ -482,7 +479,6 @@ BEGIN
     WHERE ti.id = til.trade_invoice_id
       AND til.job_id = v_out.job_id
       AND til.job_work_order_id IS NULL
-      AND NOT (COALESCE(til.line_type, '') = ANY (public.job_work_order_excluded_line_types()))
       AND ti.status = ANY (public.job_work_order_billed_invoice_statuses());
 
   UPDATE public.work_order_variations
@@ -495,7 +491,7 @@ $$;
 REVOKE ALL ON FUNCTION public.approve_job_work_order(uuid, uuid, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.approve_job_work_order(uuid, uuid, text) TO service_role;
 
--- ── 12. link labour to the approved work order at submit ─────────────────────
+-- ── 12. link invoice lines to the approved work order at submit ──────────────
 
 CREATE OR REPLACE FUNCTION public.trade_invoice_lines_link_job_work_order()
 RETURNS trigger
@@ -506,8 +502,7 @@ AS $$
 DECLARE
   v_status text;
 BEGIN
-  IF NEW.job_work_order_id IS NOT NULL OR NEW.job_id IS NULL
-     OR COALESCE(NEW.line_type, '') = ANY (public.job_work_order_excluded_line_types()) THEN
+  IF NEW.job_work_order_id IS NOT NULL OR NEW.job_id IS NULL THEN
     RETURN NEW;
   END IF;
   BEGIN
@@ -542,8 +537,7 @@ BEGIN
         SET job_work_order_id = public.job_live_work_order_id(til.job_id)
         WHERE til.trade_invoice_id = NEW.id
           AND til.job_work_order_id IS NULL
-          AND til.job_id IS NOT NULL
-          AND NOT (COALESCE(til.line_type, '') = ANY (public.job_work_order_excluded_line_types()));
+          AND til.job_id IS NOT NULL;
     EXCEPTION WHEN OTHERS THEN
       RAISE WARNING 'job work order links skipped for trade invoice %: SQLSTATE %', NEW.id, SQLSTATE;
     END;
@@ -557,7 +551,90 @@ CREATE TRIGGER trg_trade_invoices_link_job_work_orders
   AFTER UPDATE OF status ON public.trade_invoices
   FOR EACH ROW EXECUTE FUNCTION public.trade_invoices_link_job_work_orders();
 
--- ── 13. backfill: drafts for open approved jobs (switched off) ───────────────
+-- ── 13. a variation survives its draft invoice being replaced ────────────────
+
+-- Saving or submitting an invoice deletes the prior draft row and inserts a
+-- new one. A variation raised on the draft moves to the replacing row, keeping
+-- its id, its work order and its email ledger (so nothing is emailed again).
+-- It moves only when the replacement still bills that job. Never blocks the
+-- invoice write.
+CREATE OR REPLACE FUNCTION public.carry_work_order_variations(
+  p_prior_invoice_id uuid,
+  p_replacement_invoice_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  UPDATE public.work_order_variations v
+    SET trade_invoice_id = p_replacement_invoice_id
+    WHERE v.trade_invoice_id = p_prior_invoice_id
+      AND EXISTS (
+        SELECT 1 FROM public.trade_invoice_lines til
+        WHERE til.trade_invoice_id = p_replacement_invoice_id AND til.job_id = v.job_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM public.work_order_variations kept
+        WHERE kept.trade_invoice_id = p_replacement_invoice_id AND kept.job_id = v.job_id
+      );
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'work order variations not carried from trade invoice % to %: SQLSTATE %',
+    p_prior_invoice_id, p_replacement_invoice_id, SQLSTATE;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.carry_work_order_variations(uuid, uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.carry_work_order_variations(uuid, uuid) TO service_role;
+
+-- The three draft-replacing functions belong to 20260827112928 and
+-- 20260831021701. Their deployed bodies are read from the catalog and one call
+-- is inserted in front of the prior draft's DELETE; the rest is preserved byte
+-- for byte (the 20260826000001 next_job_number convention). Fail closed: the
+-- patch refuses unless that DELETE appears exactly once. The rollback removes
+-- the same one line.
+DO $carry_work_order_variations$
+DECLARE
+  v_target record;
+  v_definition text;
+  v_pattern text;
+  v_hits int;
+BEGIN
+  FOR v_target IN
+    SELECT * FROM (VALUES
+      ('public.replace_trade_invoice_draft_v1(uuid, uuid, uuid, uuid[])', 'p_prior_draft_id', 'p_replacement_id'),
+      ('public.persist_trade_work_order_invoice_v1(jsonb, jsonb, uuid)', 'v_prior_draft_id', 'v_invoice_id'),
+      ('public.persist_weekly_trade_invoice_v1(jsonb, jsonb, uuid)', 'v_prior_draft_id', 'v_invoice_id')
+    ) AS t(signature, prior_variable, replacement_variable)
+  LOOP
+    IF to_regprocedure(v_target.signature) IS NULL THEN
+      RAISE EXCEPTION '% is not deployed; work order variations cannot be carried across a draft replacement',
+        v_target.signature;
+    END IF;
+    v_definition := pg_get_functiondef(to_regprocedure(v_target.signature));
+
+    IF position('public.carry_work_order_variations(' IN v_definition) > 0 THEN
+      CONTINUE;
+    END IF;
+
+    v_pattern := '([ \t]*)(DELETE FROM public\.trade_invoices\s+WHERE id = '
+      || v_target.prior_variable || ';)';
+    SELECT count(*) INTO v_hits FROM regexp_matches(v_definition, v_pattern, 'g');
+    IF v_hits <> 1 THEN
+      RAISE EXCEPTION '% deletes its prior draft % times (expected exactly 1); refusing to patch blind',
+        v_target.signature, v_hits;
+    END IF;
+
+    EXECUTE regexp_replace(
+      v_definition,
+      v_pattern,
+      E'\\1PERFORM public.carry_work_order_variations(' || v_target.prior_variable || ', '
+        || v_target.replacement_variable || E');\n\\1\\2'
+    );
+  END LOOP;
+END;
+$carry_work_order_variations$;
+
+-- ── 14. backfill: drafts for open approved jobs (switched off) ───────────────
 
 CREATE OR REPLACE FUNCTION public.backfill_job_work_order_drafts(p_apply boolean DEFAULT false)
 RETURNS jsonb
