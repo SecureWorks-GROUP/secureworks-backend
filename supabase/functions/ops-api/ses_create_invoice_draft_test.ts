@@ -66,6 +66,8 @@ function revisionRow(overrides: Record<string, unknown> = {}) {
 
 function mintClient(opts: {
   revision?: Record<string, unknown>;
+  obligation?: Record<string, unknown> | null;
+  indexedInvoices?: Array<Record<string, unknown>>;
   /** Stored ses_external_effects rows served to list reads (retry gate). */
   effectRows?: Array<Record<string, unknown>>;
 } = {}) {
@@ -111,6 +113,12 @@ function mintClient(opts: {
           ) {
             return { data: revision, error: null };
           }
+          if (table === "makesafe_invoice_obligations") {
+            return {
+              data: opts.obligation === undefined ? null : opts.obligation,
+              error: null,
+            };
+          }
           if (table === "makesafe_job_details") {
             return {
               data: {
@@ -127,6 +135,8 @@ function mintClient(opts: {
           Promise.resolve({
             data: table === "ses_external_effects"
               ? (opts.effectRows || [])
+              : table === "xero_invoices"
+              ? (opts.indexedInvoices || [])
               : [],
             error: null,
           }).then(resolve, reject),
@@ -1099,5 +1109,176 @@ Deno.test("R5: a retry key with no prior attempt refuses (mint normally instead)
     ((error as SesActionError).refusal as any).code,
     "invoice_retry_not_permitted",
   );
+  assertEquals(gateway.createCalls, 0);
+});
+
+const LAKE_PRESTON_MS = "a4f2f7b5-aa02-430c-b648-ee6872bbf883";
+const LAKE_PRESTON_ASSESS = "1caa4531-910c-45af-95c5-d5ce3b99d4e9";
+const lakePrestonAssessInvoice = {
+  xero_invoice_id: "xero-0876",
+  invoice_number: "INV-0876",
+  status: "AUTHORISED",
+  job_id: LAKE_PRESTON_ASSESS,
+  reference: "MLB-25765",
+  invoice_type: "ACCREC",
+};
+
+function lakePrestonFamily(jobId: string) {
+  if (jobId === LAKE_PRESTON_ASSESS) return "assessment_quote";
+  if (jobId === LAKE_PRESTON_MS) return "physical_makesafe";
+  return "unknown";
+}
+
+function lakePrestonRevision() {
+  return revisionRow({
+    job_id: LAKE_PRESTON_MS,
+    reference: "MLB-25765",
+    proposal: { ...proposal, job_id: LAKE_PRESTON_MS, reference: "MLB-25765" },
+  });
+}
+
+Deno.test("Lake Preston JWT second_invoice mints a DRAFT beside sibling INV-0876", async () => {
+  const gateway = draftGateway();
+  const result = await createSesInvoiceDraftAction(
+    mintClient({
+      revision: lakePrestonRevision(),
+      obligation: {
+        id: "obligation-1",
+        post_release_disposition: "second_invoice",
+      },
+      indexedInvoices: [lakePrestonAssessInvoice],
+    }) as any,
+    {
+      mode: "jwt",
+      user: { id: "user-2", email: "captain@test", role: "admin" },
+    },
+    {
+      org_id: ORG_ID,
+      job_id: LAKE_PRESTON_MS,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "captain@test",
+    },
+    gateway,
+    {
+      fetchAllAccrecInvoices: async () => [lakePrestonAssessInvoice],
+      loadCardFamily: async (_c, jobId) => lakePrestonFamily(jobId),
+    },
+  );
+  assertEquals(result.state, "xero_draft_created");
+  assertEquals(gateway.createCalls, 1);
+  assertEquals(gateway.authoriseCalls, 0);
+});
+
+Deno.test("Lake Preston sibling INV-0876 still 409s create without second_invoice", async () => {
+  const gateway = draftGateway();
+  const err = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        mintClient({
+          revision: lakePrestonRevision(),
+          obligation: { id: "obligation-1", post_release_disposition: null },
+          indexedInvoices: [lakePrestonAssessInvoice],
+        }) as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: LAKE_PRESTON_MS,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+        },
+        gateway,
+        {
+          fetchAllAccrecInvoices: async () => [lakePrestonAssessInvoice],
+          loadCardFamily: async (_c, jobId) => lakePrestonFamily(jobId),
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(err.status, 409);
+  assertStringIncludes(err.message, "INV-0876");
+  assertEquals(gateway.createCalls, 0);
+});
+
+Deno.test("same-card live ACCREC still 409s create even with second_invoice", async () => {
+  const gateway = draftGateway();
+  const sameCard = {
+    ...lakePrestonAssessInvoice,
+    job_id: LAKE_PRESTON_MS,
+    invoice_number: "INV-0999",
+    xero_invoice_id: "xero-same",
+    status: "AUTHORISED",
+  };
+  const err = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        mintClient({
+          revision: lakePrestonRevision(),
+          obligation: {
+            id: "obligation-1",
+            post_release_disposition: "second_invoice",
+          },
+          indexedInvoices: [sameCard],
+        }) as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: LAKE_PRESTON_MS,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+        },
+        gateway,
+        {
+          fetchAllAccrecInvoices: async () => [sameCard],
+          loadCardFamily: async (_c, jobId) => lakePrestonFamily(jobId),
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(err.status, 409);
+  assertEquals(gateway.createCalls, 0);
+});
+
+Deno.test("same-family sibling still 409s create with second_invoice", async () => {
+  const gateway = draftGateway();
+  const twin = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const sameFamily = {
+    ...lakePrestonAssessInvoice,
+    job_id: twin,
+    invoice_number: "INV-0888",
+    xero_invoice_id: "xero-0888",
+  };
+  const err = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        mintClient({
+          revision: lakePrestonRevision(),
+          obligation: {
+            id: "obligation-1",
+            post_release_disposition: "second_invoice",
+          },
+          indexedInvoices: [sameFamily],
+        }) as any,
+        {
+          mode: "jwt",
+          user: { id: "user-2", email: "captain@test", role: "admin" },
+        },
+        {
+          org_id: ORG_ID,
+          job_id: LAKE_PRESTON_MS,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "captain@test",
+        },
+        gateway,
+        {
+          fetchAllAccrecInvoices: async () => [sameFamily],
+          loadCardFamily: async (_c, jobId) =>
+            jobId === LAKE_PRESTON_MS || jobId === twin
+              ? "physical_makesafe"
+              : "unknown",
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(err.status, 409);
   assertEquals(gateway.createCalls, 0);
 });
