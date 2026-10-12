@@ -10,11 +10,11 @@ BEGIN
   END IF;
   IF to_regclass('public.work_order_variations') IS NOT NULL
      OR to_regclass('public.work_order_settings') IS NOT NULL
-     OR to_regclass('public.job_work_order_labour_lines') IS NOT NULL
      OR to_regprocedure('public.approve_job_work_order(uuid, uuid, text)') IS NOT NULL THEN
-    RAISE EXCEPTION 'rollback: job work order tables, view and functions must be removed';
+    RAISE EXCEPTION 'rollback: job work order tables and functions must be removed';
   END IF;
-  IF EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name IN ('work_order_variation_emails_v1', 'job_work_order_backfill_v1')) THEN
+  IF EXISTS (SELECT 1 FROM public.feature_flags WHERE flag_name IN ('work_order_variation_emails_v1', 'job_work_order_backfill_v1',
+                                'work_order_terminal_approval_v1')) THEN
     RAISE EXCEPTION 'rollback: the job work order flags must be removed';
   END IF;
 END $$;

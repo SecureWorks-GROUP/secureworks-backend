@@ -8,12 +8,12 @@ import {
   approveJobWorkOrder,
   buildVariationEmails,
   computeWorkOrderFigures,
-  JOB_WORK_ORDER_BILLED_INVOICE_STATUSES,
-  JOB_WORK_ORDER_OPEN_STATUSES,
+  createJobWorkOrder,
   JobWorkOrderError,
   projectTradeJobWorkOrder,
   readJobWorkOrder,
   reportWorkOrderVariation,
+  resendWorkOrderVariationEmails,
   resolveWorkOrderApprover,
   tradeJobWorkOrderRead,
   updateJobWorkOrderDraft,
@@ -154,7 +154,9 @@ class Query {
       return this.finish(matched);
     }
     return this.finish(
-      this.lim === null ? matched : matched.slice(0, this.lim),
+      (this.lim === null ? matched : matched.slice(0, this.lim)).map((r) => ({
+        ...r,
+      })),
     );
   }
   private finish(rows: any[]) {
@@ -222,7 +224,6 @@ function baseDb(extra: Partial<Tables> = {}) {
       special_instructions: "Rear gate first",
       agreed_labour_ex: 1000,
       approved_at: "2026-10-06T00:00:00Z",
-      superseded_at: null,
       updated_at: "2026-10-06T00:00:00Z",
     }],
     trade_invoices: [{
@@ -365,7 +366,12 @@ Deno.test("figures: only counted lines on an approved work order are billed; ove
       { amount_ex: 999, counted: false, work_order_id: WO },
       { amount_ex: 999, counted: true, work_order_id: null },
     ],
-    variations: [{ amount_ex: 150, status: "reported", work_order_id: WO }],
+    variations: [{
+      amount_ex: 150,
+      status: "reported",
+      work_order_id: WO,
+      counted: true,
+    }],
   });
   assertEquals(f.billed_to_date_ex, 1100);
   assertEquals(f.variations_ex, 150);
@@ -393,20 +399,51 @@ Deno.test("figures: near_agreed at 90 percent, nothing counts before approval", 
   assertEquals(draft.rules.map((r) => r.key), ["no_approved_work_order"]);
 });
 
-Deno.test("lists mirror the migration's SQL lists", async () => {
-  const sql = await Deno.readTextFile(
-    new URL(
-      "../../migrations/20261012090000_job_work_orders.sql",
-      import.meta.url,
-    ),
-  );
-  for (const s of JOB_WORK_ORDER_OPEN_STATUSES) {
-    assert(sql.includes(`'${s}'`), s);
-  }
-  for (const s of JOB_WORK_ORDER_BILLED_INVOICE_STATUSES) {
-    assert(sql.includes(`'${s}'`), s);
-  }
-  assert(!JOB_WORK_ORDER_OPEN_STATUSES.includes("complete"));
+Deno.test("figures: a variation counts only while its invoice is billed", async () => {
+  const f = computeWorkOrderFigures({
+    agreedEx: 1000,
+    approved: true,
+    lines: [{ amount_ex: 700, counted: true, work_order_id: WO }],
+    variations: [
+      { amount_ex: 300, status: "reported", work_order_id: WO, counted: false },
+      { amount_ex: 300, status: "reported", work_order_id: WO, counted: true },
+    ],
+  });
+  assertEquals(f.variations_ex, 300);
+  assertEquals(f.variation_count, 1);
+  assertEquals(f.billed_within_agreed_scope_ex, 400);
+
+  // The rejected invoice's variation, then the same variation on the resubmit.
+  const db = baseDb({
+    work_order_variations: [
+      {
+        id: "v-rejected",
+        job_id: JOB,
+        work_order_id: WO,
+        trade_invoice_id: "rejected",
+        status: "reported",
+        amount_ex: 300,
+        trade_invoices: { status: "ops-reject" },
+      },
+      {
+        id: "v-live",
+        job_id: JOB,
+        work_order_id: WO,
+        trade_invoice_id: INV,
+        status: "reported",
+        amount_ex: 300,
+        trade_invoices: { status: "pending_acknowledgment" },
+      },
+    ],
+  });
+  const r = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.figures.variations_ex, 300);
+  assertEquals(r.figures.variation_count, 1);
+  assertEquals(r.figures.billed_within_agreed_scope_ex, 340);
+  assertEquals(r.variations.map((v) => [v.id, v.counted]), [
+    ["v-rejected", false],
+    ["v-live", true],
+  ]);
 });
 
 // ── Draft edits and the seal ─────────────────────────────────────────────────
@@ -422,6 +459,14 @@ Deno.test("draft patch: validates and keeps only editable fields", () => {
     agreed_labour_ex: 1234.57,
     scope_items: [{ description: "x" }],
   });
+  assertEquals(
+    validateJobWorkOrderDraftPatch({
+      agreedLabourEx: 5,
+      scopeItems: [{ description: "x" }],
+      specialInstructions: "x",
+    }),
+    {},
+  );
   let err: any;
   try {
     validateJobWorkOrderDraftPatch({ agreed_labour_ex: -1 });
@@ -441,21 +486,51 @@ Deno.test("update: an approved work order is sealed", async () => {
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, 1000);
 });
 
+Deno.test("create: once the job's work order is approved there is no second one", async () => {
+  const db = baseDb();
+  const err = await assertRejects(
+    () =>
+      createJobWorkOrder(db, {
+        kind: "job",
+        job_id: JOB,
+        agreed_labour_ex: 5000,
+      }),
+    JobWorkOrderError,
+  ) as JobWorkOrderError;
+  assertEquals([err.status, err.code], [409, "work_order_sealed"]);
+  assertEquals(db.tables.work_orders.length, 1);
+  assertEquals(db.rpcCalls.length, 0);
+});
+
+Deno.test("create: edits the job's open draft instead of opening another", async () => {
+  const db = draftDb();
+  const out = await createJobWorkOrder(db, {
+    kind: "job",
+    job_id: JOB,
+    agreed_labour_ex: 1500,
+  });
+  assertEquals(out.created, false);
+  assertEquals(out.work_order.id, DRAFT);
+  assertEquals(db.tables.work_orders.length, 1);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, 1500);
+});
+
 // ── Approve ──────────────────────────────────────────────────────────────────
 
-function draftDb() {
-  const db = baseDb();
-  db.tables.work_orders.push({
-    id: DRAFT,
-    org_id: ORG,
-    job_id: JOB,
-    wo_number: "WO-SWF-26123-R2",
-    kind: "job",
-    status: "draft",
-    agreed_labour_ex: 1200,
-    scope_items: [{ description: "x" }],
-    supersedes_work_order_id: WO,
-    updated_at: "t1",
+function draftDb(extra: Partial<Tables> = {}) {
+  const db = baseDb({
+    work_orders: [{
+      id: DRAFT,
+      org_id: ORG,
+      job_id: JOB,
+      wo_number: "WO-SWF-26123",
+      kind: "job",
+      status: "draft",
+      agreed_labour_ex: 1200,
+      scope_items: [{ description: "x" }],
+      updated_at: "t1",
+    }],
+    ...extra,
   });
   db.rpcImpl = (fn, args) =>
     fn === "approve_job_work_order"
@@ -494,17 +569,64 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
   assertEquals(db.rpcCalls.length, 0);
   const out = await approveJobWorkOrder(db, { work_order_id: DRAFT }, {
     userId: SHAUN,
-    via: "terminal",
+    via: "session",
   });
   assertEquals(out.work_order.status, "approved");
   assertEquals(db.rpcCalls[0], {
     fn: "approve_job_work_order",
-    args: { p_work_order_id: DRAFT, p_approver: SHAUN, p_via: "terminal" },
+    args: { p_work_order_id: DRAFT, p_approver: SHAUN, p_via: "session" },
   });
   assertEquals(
     db.tables.job_events.at(-1).event_type,
     "job_work_order_approved",
   );
+});
+
+Deno.test("approve: a header-named terminal approver is refused until its flag is on", async () => {
+  const terminal = { userId: SHAUN, via: "terminal" as const };
+  for (
+    const flags of [
+      [],
+      [{ flag_name: "work_order_terminal_approval_v1", enabled: false }],
+    ]
+  ) {
+    const off = draftDb({ feature_flags: flags });
+    const err = await assertRejects(
+      () => approveJobWorkOrder(off, { work_order_id: DRAFT }, terminal),
+      JobWorkOrderError,
+    ) as JobWorkOrderError;
+    assertEquals([err.status, err.code], [
+      403,
+      "terminal_approval_switched_off",
+    ]);
+    assertEquals(off.rpcCalls.length, 0);
+    assertEquals(off.tables.job_events.length, 0);
+  }
+
+  const unreadable = draftDb({
+    feature_flags: [{
+      flag_name: "work_order_terminal_approval_v1",
+      enabled: true,
+    }],
+  });
+  unreadable.failOn.add("select:feature_flags");
+  assertEquals(
+    (await assertRejects(
+      () => approveJobWorkOrder(unreadable, { work_order_id: DRAFT }, terminal),
+      JobWorkOrderError,
+    ) as JobWorkOrderError).code,
+    "terminal_approval_switched_off",
+  );
+
+  const on = draftDb({
+    feature_flags: [{
+      flag_name: "work_order_terminal_approval_v1",
+      enabled: true,
+    }],
+  });
+  const out = await approveJobWorkOrder(on, { work_order_id: DRAFT }, terminal);
+  assertEquals(out.work_order.status, "approved");
+  assertEquals(on.rpcCalls[0].args.p_via, "terminal");
 });
 
 Deno.test("approve: an empty approver list means nobody, a stale review refuses, database refusals map", async () => {
@@ -723,7 +845,228 @@ Deno.test("variation: flag on sends each email once", async () => {
     },
   );
   assertEquals(again.duplicate, true);
+  assertEquals(again.emails.map((e: any) => e.status), ["sent", "sent"]);
   assertEquals(sent.length, 2);
+});
+
+const EMAILS_ON = [{
+  flag_name: "work_order_variation_emails_v1",
+  enabled: true,
+}];
+const T0 = Date.parse("2026-10-06T02:00:00Z");
+const MINUTE = 60 * 1000;
+
+function emailRow(role: "finance" | "admin", patch: Record<string, unknown>) {
+  return {
+    id: `e-${role}`,
+    variation_id: "v1",
+    recipient_role: role,
+    recipient: role === "finance"
+      ? WORK_ORDER_VARIATION_FINANCE_EMAIL
+      : WORK_ORDER_VARIATION_ADMIN_EMAIL,
+    subject: "Work order variation on SWF-26123 (Duncraig)",
+    body_text: "stored text",
+    body_html: "<p>stored html</p>",
+    status: "recorded",
+    sending_started_at: null,
+    ...patch,
+  };
+}
+
+function variationRow() {
+  return {
+    id: "v1",
+    org_id: ORG,
+    job_id: JOB,
+    work_order_id: WO,
+    trade_invoice_id: INV,
+    reported_by: TRADE,
+    description: "Extra post",
+    amount_ex: null,
+    status: "reported",
+  };
+}
+
+Deno.test("variation retry: records and sends what the variation still owes, never a sent or in-flight email", async () => {
+  const report = (db: FakeDb, sent: string[]) =>
+    reportWorkOrderVariation(
+      db,
+      { trade_invoice_id: INV, job_id: JOB, description: "Extra post" },
+      { id: TRADE, orgId: ORG },
+      {
+        now: () => T0,
+        sendEmail: async (e) => {
+          sent.push(`${e.recipient_role}:${e.body_html}`);
+          return { ok: true };
+        },
+      },
+    );
+
+  // The first call saved the variation and died before any email was written.
+  const none = baseDb({
+    feature_flags: EMAILS_ON,
+    work_order_variations: [variationRow()],
+  });
+  const sentNone: string[] = [];
+  const first = await report(none, sentNone);
+  assertEquals(first.duplicate, true);
+  assertEquals(first.emails.map((e: any) => e.status), ["sent", "sent"]);
+  assertEquals(sentNone.length, 2);
+  assertEquals(
+    none.tables.work_order_variation_emails.map((e) => e.status),
+    ["sent", "sent"],
+  );
+  assertEquals(none.tables.job_events.length, 0);
+
+  // Finance went out, admin failed: only admin is sent again, from its stored row.
+  const partial = baseDb({
+    feature_flags: EMAILS_ON,
+    work_order_variations: [variationRow()],
+    work_order_variation_emails: [
+      emailRow("finance", { status: "sent" }),
+      emailRow("admin", { status: "failed", send_error: "boom" }),
+    ],
+  });
+  const sentPartial: string[] = [];
+  const second = await report(partial, sentPartial);
+  assertEquals(second.emails.map((e: any) => e.status), ["sent", "sent"]);
+  assertEquals(sentPartial, ["admin:<p>stored html</p>"]);
+  assertEquals(partial.tables.work_order_variation_emails.length, 2);
+
+  // In flight a minute ago is left alone; abandoned eleven minutes ago is sent.
+  const inFlight = baseDb({
+    feature_flags: EMAILS_ON,
+    work_order_variations: [variationRow()],
+    work_order_variation_emails: [
+      emailRow("finance", {
+        status: "sending",
+        sending_started_at: new Date(T0 - MINUTE).toISOString(),
+      }),
+      emailRow("admin", {
+        status: "sending",
+        sending_started_at: new Date(T0 - 11 * MINUTE).toISOString(),
+      }),
+    ],
+  });
+  const sentInFlight: string[] = [];
+  const third = await report(inFlight, sentInFlight);
+  assertEquals(third.emails.map((e: any) => e.status), ["sending", "sent"]);
+  assertEquals(sentInFlight, ["admin:<p>stored html</p>"]);
+
+  // Flag off: the retry records the missing rows and sends nothing.
+  const off = baseDb({ work_order_variations: [variationRow()] });
+  const sentOff: string[] = [];
+  const fourth = await report(off, sentOff);
+  assertEquals(fourth.emails.map((e: any) => e.status), [
+    "recorded",
+    "recorded",
+  ]);
+  assertEquals(sentOff, []);
+});
+
+Deno.test("resend: failed and abandoned emails go once; sent, in-flight and recorded ones never do", async () => {
+  const rows = () => [
+    emailRow("finance", { id: "e-failed", status: "failed", send_error: "x" }),
+    emailRow("admin", {
+      id: "e-stale",
+      status: "sending",
+      sending_started_at: new Date(T0 - 11 * MINUTE).toISOString(),
+    }),
+    emailRow("finance", {
+      id: "e-fresh",
+      variation_id: "v2",
+      status: "sending",
+      sending_started_at: new Date(T0 - MINUTE).toISOString(),
+    }),
+    emailRow("admin", { id: "e-sent", variation_id: "v2", status: "sent" }),
+    emailRow("finance", { id: "e-recorded", variation_id: "v3" }),
+  ];
+  const variations = [
+    variationRow(),
+    { ...variationRow(), id: "v2" },
+    { ...variationRow(), id: "v3" },
+  ];
+
+  const off = baseDb({
+    work_order_variations: variations,
+    work_order_variation_emails: rows(),
+  });
+  const sentOff: string[] = [];
+  const dormant = await resendWorkOrderVariationEmails(off, {
+    now: () => T0,
+    sendEmail: async (e) => {
+      sentOff.push(e.recipient);
+      return { ok: true };
+    },
+  });
+  assertEquals(dormant, { sending_on: false, emails: [] });
+  assertEquals(sentOff, []);
+  assertEquals(
+    off.tables.work_order_variation_emails.map((e) => e.status),
+    ["failed", "sending", "sending", "sent", "recorded"],
+  );
+
+  const db = baseDb({
+    feature_flags: EMAILS_ON,
+    work_order_variations: variations,
+    work_order_variation_emails: rows(),
+  });
+  const sent: Array<[string, string]> = [];
+  const deps = {
+    now: () => T0,
+    sendEmail: async (e: any) => {
+      sent.push([e.recipient_role, e.jobId]);
+      return { ok: true as const };
+    },
+  };
+  const out = await resendWorkOrderVariationEmails(db, deps);
+  assertEquals(out.emails.map((e) => [e.id, e.status]), [
+    ["e-failed", "sent"],
+    ["e-stale", "sent"],
+  ]);
+  assertEquals(sent, [["finance", JOB], ["admin", JOB]]);
+  assertEquals(
+    db.tables.work_order_variation_emails.map((e) => e.status),
+    ["sent", "sent", "sending", "sent", "recorded"],
+  );
+
+  const again = await resendWorkOrderVariationEmails(db, deps);
+  assertEquals(again, { sending_on: true, emails: [] });
+  assertEquals(sent.length, 2);
+});
+
+Deno.test("resend: a failed send stays failed, and an email another call claimed is not sent again", async () => {
+  const db = baseDb({
+    feature_flags: EMAILS_ON,
+    work_order_variations: [variationRow()],
+    work_order_variation_emails: [
+      emailRow("finance", { status: "failed" }),
+      emailRow("admin", { status: "failed" }),
+    ],
+  });
+  const sent: string[] = [];
+  const out = await resendWorkOrderVariationEmails(db, {
+    now: () => T0,
+    sendEmail: async (e) => {
+      sent.push(e.recipient_role);
+      // While finance is sending, another call claims admin.
+      Object.assign(db.tables.work_order_variation_emails[1], {
+        status: "sending",
+        sending_started_at: new Date(T0).toISOString(),
+      });
+      return { ok: false, error: "graph 503" };
+    },
+  });
+  assertEquals(sent, ["finance"]);
+  assertEquals(out.emails.map((e) => e.status), [
+    "failed",
+    "claimed_elsewhere",
+  ]);
+  assertEquals(
+    db.tables.work_order_variation_emails[0].send_error,
+    "graph 503",
+  );
+  assertEquals(db.tables.work_order_variation_emails[1].status, "sending");
 });
 
 Deno.test("variation: only on the trade's own invoice, and only for a job on it", async () => {
@@ -765,6 +1108,7 @@ Deno.test("front door: work order staff actions need a staff role, the trade doo
       "job_work_order",
       "approve_work_order",
       "backfill_job_work_orders",
+      "resend_work_order_variation_emails",
       "create_work_order",
       "update_work_order",
     ]

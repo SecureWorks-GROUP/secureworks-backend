@@ -1,6 +1,7 @@
--- Contract for 20261012090000_job_work_orders.sql: one live work order per
+-- Contract for 20261012090000_job_work_orders.sql: one work order per
 -- fencing / patio job, draft then approved (sealed) by the named approver,
--- labour stamped against it at invoice submit, backfill switched off.
+-- labour stamped against it at invoice submit and at approval, backfill
+-- switched off.
 
 BEGIN;
 
@@ -127,46 +128,46 @@ BEGIN
   END;
   UPDATE public.work_orders SET viewed_at = now() WHERE id = v_wo;
 
-  -- A second plain draft cannot be approved over the live one.
-  INSERT INTO public.work_orders (org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items)
-  VALUES ('00000000-0000-0000-0000-000000000001', v_job, 'WO-WOC-A-1-X', 'job', 'draft', 10, '[{"description":"x"}]');
+  -- One work order per job: no second draft beside the approved one.
   BEGIN
-    PERFORM public.approve_job_work_order(
-      (SELECT id FROM public.work_orders WHERE wo_number = 'WO-WOC-A-1-X'),
-      '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
-    RAISE EXCEPTION 'contract: a non-revision draft must not replace a live approved work order';
+    INSERT INTO public.work_orders (org_id, job_id, wo_number, kind, status, agreed_labour_ex, scope_items)
+    VALUES ('00000000-0000-0000-0000-000000000001', v_job, 'WO-WOC-A-1-X', 'job', 'draft', 10, '[{"description":"x"}]');
+    RAISE EXCEPTION 'contract: a job must not hold a second job work order beside its approved one';
   EXCEPTION WHEN unique_violation THEN NULL;
   END;
-  DELETE FROM public.work_orders WHERE wo_number = 'WO-WOC-A-1-X';
-
-  -- 5. Revisions supersede in one step.
-  INSERT INTO public.work_orders (org_id, job_id, wo_number, kind, status, agreed_labour_ex,
-    scope_items, supersedes_work_order_id, origin)
-  VALUES ('00000000-0000-0000-0000-000000000001', v_job, 'WO-WOC-A-1-R2', 'job', 'draft', 2400,
-    '[{"description":"Install 26 m Colorbond"}]', v_wo, 'revision');
-  v_row := public.approve_job_work_order(
-    (SELECT id FROM public.work_orders WHERE wo_number = 'WO-WOC-A-1-R2'),
-    '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
-  IF (SELECT superseded_by_work_order_id FROM public.work_orders WHERE id = v_wo) IS DISTINCT FROM (v_row->>'id')::uuid
-     OR public.job_live_work_order_id(v_job) IS DISTINCT FROM (v_row->>'id')::uuid
-     OR (SELECT work_order_id FROM public.jobs WHERE id = v_job) IS DISTINCT FROM (v_row->>'id')::uuid THEN
-    RAISE EXCEPTION 'contract: an approved revision must supersede the old one and become the live reference';
+  IF public.ensure_job_work_order_draft(v_job, 'manual') IS DISTINCT FROM v_wo THEN
+    RAISE EXCEPTION 'contract: ensure must return the approved work order, not open another';
   END IF;
-
-  INSERT INTO public.work_orders (org_id, job_id, wo_number, kind, status, agreed_labour_ex,
-    scope_items, supersedes_work_order_id)
-  VALUES ('00000000-0000-0000-0000-000000000001', v_job, 'WO-WOC-A-1-STALE', 'job', 'draft', 1,
-    '[{"description":"x"}]', v_wo);
   BEGIN
-    PERFORM public.approve_job_work_order(
-      (SELECT id FROM public.work_orders WHERE wo_number = 'WO-WOC-A-1-STALE'),
-      '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
-    RAISE EXCEPTION 'contract: a revision of a superseded work order must not approve';
-  EXCEPTION WHEN serialization_failure THEN NULL;
+    PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+    RAISE EXCEPTION 'contract: an approved work order must not be approved again';
+  EXCEPTION WHEN check_violation THEN NULL;
   END;
 END $$;
 
--- 6. Labour links to the live approved work order at submit, never to a draft.
+-- 5. The shared lists are exactly the ones ops-api/job_work_orders.ts mirrors
+-- (JOB_WORK_ORDER_OPEN_STATUSES, JOB_WORK_ORDER_BILLED_INVOICE_STATUSES,
+-- JOB_WORK_ORDER_EXCLUDED_LINE_TYPES).
+DO $$
+BEGIN
+  IF public.job_work_order_open_statuses() IS DISTINCT FROM ARRAY[
+       'accepted', 'partially_accepted', 'approvals', 'deposit', 'awaiting_deposit',
+       'processing', 'order_materials', 'awaiting_supplier', 'order_confirmed',
+       'schedule_install', 'scheduled', 'in_progress', 'rectification']::text[] THEN
+    RAISE EXCEPTION 'contract: job_work_order_open_statuses() drifted from the list ops-api mirrors';
+  END IF;
+  IF public.job_work_order_billed_invoice_statuses() IS DISTINCT FROM ARRAY[
+       'pending_acknowledgment', 'queried', 'acknowledged', 'pending_ops_review',
+       'approved', 'pushed_to_xero', 'paid']::text[] THEN
+    RAISE EXCEPTION 'contract: job_work_order_billed_invoice_statuses() drifted from the list ops-api mirrors';
+  END IF;
+  IF public.job_work_order_excluded_line_types() IS DISTINCT FROM ARRAY[
+       'commission', 'final_payout_deduction']::text[] THEN
+    RAISE EXCEPTION 'contract: job_work_order_excluded_line_types() drifted from the list ops-api mirrors';
+  END IF;
+END $$;
+
+-- 6. Labour links to the approved work order at submit, never to a draft.
 DO $$
 DECLARE
   v_job uuid := gen_random_uuid();
@@ -196,7 +197,7 @@ BEGIN
     (v_draft_inv, v_job, 'labour', 250);
 
   IF (SELECT count(*) FROM public.trade_invoice_lines WHERE trade_invoice_id = v_inv AND job_work_order_id = v_wo) <> 1 THEN
-    RAISE EXCEPTION 'contract: a submitted labour line must link to the live approved work order (and commission must not)';
+    RAISE EXCEPTION 'contract: a submitted labour line must link to the approved work order (and commission must not)';
   END IF;
   IF EXISTS (SELECT 1 FROM public.trade_invoice_lines WHERE job_id = v_draft_job AND job_work_order_id IS NOT NULL) THEN
     RAISE EXCEPTION 'contract: labour on a job whose work order is only a draft must not link';
@@ -209,10 +210,73 @@ BEGIN
   IF (SELECT job_work_order_id FROM public.trade_invoice_lines WHERE trade_invoice_id = v_draft_inv) IS DISTINCT FROM v_wo THEN
     RAISE EXCEPTION 'contract: submitting a draft invoice must link its labour';
   END IF;
+END $$;
 
-  UPDATE public.trade_invoices SET status = 'ops-reject' WHERE id = v_draft_inv;
-  IF (SELECT sum(amount_ex) FROM public.job_work_order_labour_lines WHERE work_order_id = v_wo AND counted) <> 400 THEN
-    RAISE EXCEPTION 'contract: rejected invoices must not count in the labour view';
+-- 6b. A job invoiced before its work order is approved (the backfilled,
+-- mid-install job): approving links the labour already billed on the job and
+-- the variation already reported on it. Commission, a draft invoice, a
+-- rejected invoice and another job's labour stay unlinked.
+DO $$
+DECLARE
+  v_job uuid := gen_random_uuid();
+  v_other uuid := gen_random_uuid();
+  v_wo uuid;
+  v_paid uuid := gen_random_uuid();
+  v_open uuid := gen_random_uuid();
+  v_draft uuid := gen_random_uuid();
+  v_rejected uuid := gen_random_uuid();
+BEGIN
+  ALTER TABLE public.jobs DISABLE TRIGGER trg_jobs_open_job_work_order;
+  INSERT INTO public.jobs (id, org_id, type, status, job_number) VALUES
+    (v_job, '00000000-0000-0000-0000-000000000001', 'fencing', 'in_progress', 'WOC-MID-1'),
+    (v_other, '00000000-0000-0000-0000-000000000001', 'fencing', 'in_progress', 'WOC-MID-2');
+  ALTER TABLE public.jobs ENABLE TRIGGER trg_jobs_open_job_work_order;
+
+  INSERT INTO public.trade_invoices (id, org_id, user_id, status, subtotal_ex, gst, total_inc,
+    gst_on, super_rate, super_amount, gross_earned, net_pay) VALUES
+    (v_paid, '00000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'paid',
+     600, 0, 600, false, 0.12, 72, 600, 564),
+    (v_open, '00000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'pending_ops_review',
+     350, 0, 350, false, 0.12, 42, 350, 329),
+    (v_draft, '00000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'draft',
+     100, 0, 100, false, 0.12, 12, 100, 94),
+    (v_rejected, '00000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-00000000000a', 'ops-reject',
+     80, 0, 80, false, 0.12, 9.6, 80, 75.2);
+  INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, line_type, line_total_ex) VALUES
+    (v_paid, v_job, 'labour', 600),
+    (v_paid, v_job, 'commission', 60),
+    (v_paid, v_other, 'labour', 500),
+    (v_open, v_job, 'labour', 350),
+    (v_draft, v_job, 'labour', 100),
+    (v_rejected, v_job, 'labour', 80);
+  IF EXISTS (SELECT 1 FROM public.trade_invoice_lines
+             WHERE job_id IN (v_job, v_other) AND job_work_order_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'contract: labour on a job with no approved work order must not link at submit';
+  END IF;
+  INSERT INTO public.work_order_variations (org_id, job_id, trade_invoice_id, reported_by, description, amount_ex)
+  VALUES ('00000000-0000-0000-0000-000000000001', v_job, v_open, 'aaaaaaaa-0000-0000-0000-00000000000a', 'Extra post', 50);
+
+  v_wo := public.ensure_job_work_order_draft(v_job, 'backfill');
+  UPDATE public.work_orders SET agreed_labour_ex = 900, special_instructions = 'Finish the rear run' WHERE id = v_wo;
+  PERFORM public.approve_job_work_order(v_wo, '9913309f-35ae-4a71-8e1f-f704ecc526ea', 'session');
+
+  IF (SELECT COALESCE(sum(line_total_ex), 0) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 950
+     OR (SELECT count(*) FROM public.trade_invoice_lines WHERE job_work_order_id = v_wo) <> 2 THEN
+    RAISE EXCEPTION 'contract: approving must link the labour already billed on the job (600 + 350), and nothing else';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.trade_invoice_lines
+             WHERE job_work_order_id IS NOT NULL
+               AND (trade_invoice_id IN (v_draft, v_rejected) OR job_id = v_other OR line_type = 'commission')
+               AND trade_invoice_id IN (v_paid, v_open, v_draft, v_rejected)) THEN
+    RAISE EXCEPTION 'contract: approving must not link a draft or rejected invoice, commission, or another job';
+  END IF;
+  IF (SELECT work_order_id FROM public.work_order_variations WHERE job_id = v_job) IS DISTINCT FROM v_wo THEN
+    RAISE EXCEPTION 'contract: approving must link the variation already reported on the job';
+  END IF;
+
+  UPDATE public.trade_invoices SET status = 'pending_acknowledgment' WHERE id = v_draft;
+  IF (SELECT job_work_order_id FROM public.trade_invoice_lines WHERE trade_invoice_id = v_draft) IS DISTINCT FROM v_wo THEN
+    RAISE EXCEPTION 'contract: a draft invoice submitted after approval must link its labour';
   END IF;
 END $$;
 
@@ -240,8 +304,9 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
   IF (SELECT enabled FROM public.feature_flags WHERE flag_name = 'job_work_order_backfill_v1') IS DISTINCT FROM false
-     OR (SELECT enabled FROM public.feature_flags WHERE flag_name = 'work_order_variation_emails_v1') IS DISTINCT FROM false THEN
-    RAISE EXCEPTION 'contract: both flags must be seeded off';
+     OR (SELECT enabled FROM public.feature_flags WHERE flag_name = 'work_order_variation_emails_v1') IS DISTINCT FROM false
+     OR (SELECT enabled FROM public.feature_flags WHERE flag_name = 'work_order_terminal_approval_v1') IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'contract: all three flags must be seeded off';
   END IF;
 
   UPDATE public.feature_flags SET enabled = true WHERE flag_name = 'job_work_order_backfill_v1';

@@ -10,28 +10,29 @@
 --   kind = 'job'   the job's own work order: what we have allowed and agreed
 --                  for the whole job. Draft, then approved by Shaun. Approving
 --                  SEALS it like an invoice: the row can no longer be edited,
---                  and later change comes only through variations or a new
---                  revision that supersedes it.
+--                  and later change is recorded as a variation.
 --
 -- What it adds:
---   1. work_orders: kind, agreed_labour_ex, approval and seal columns, the
---      supersede chain, and the 'approved' status (job kind only).
+--   1. work_orders: kind, agreed_labour_ex, approval and seal columns, and
+--      the 'approved' status (job kind only).
 --   2. jobs.work_order_id: the job's current job work order.
 --   3. trade_invoice_lines.job_work_order_id: stamped when the trade's invoice
---      is submitted, with the job's live APPROVED work order (drafts count for
---      nothing). Stamped by trigger so every submit path is covered.
+--      is submitted, with the job's APPROVED work order (drafts count for
+--      nothing). Stamped by trigger so every submit path is covered. Labour
+--      invoiced before the approval is stamped by the approval itself.
 --   4. work_order_variations: a trade's "there is a variation" on an invoice,
 --      recorded against the job's approved work order.
 --   5. work_order_variation_emails: the finance and admin emails per
 --      variation. Sending is off until feature flag
 --      work_order_variation_emails_v1 is on (seeded off).
 --   6. work_order_settings: the users who may approve (seeded with Shaun's
---      users.id). Never a role: six users hold ops_manager.
+--      users.id). Never a role: six users hold ops_manager. Approval that
+--      names the approver through the x-sw-actor header (the terminal) is
+--      refused by ops-api until feature flag work_order_terminal_approval_v1
+--      is on (seeded off).
 --   7. A trigger that opens a draft job work order when a fencing or patio job
 --      becomes approved, and backfill_job_work_order_drafts(), dry run unless
 --      p_apply AND feature flag job_work_order_backfill_v1 is on (seeded off).
---   8. View job_work_order_labour_lines: labour lines per job work order, the
---      shape later job costing rolls up.
 --
 -- Nothing here sends, writes Xero, or changes any existing row's values beyond
 -- the new nullable / defaulted columns. The job trigger and the line linkers
@@ -47,9 +48,6 @@ ALTER TABLE public.work_orders
   ADD COLUMN IF NOT EXISTS approved_by uuid REFERENCES public.users(id),
   ADD COLUMN IF NOT EXISTS approved_via text,
   ADD COLUMN IF NOT EXISTS sealed_content_hash text,
-  ADD COLUMN IF NOT EXISTS supersedes_work_order_id uuid REFERENCES public.work_orders(id),
-  ADD COLUMN IF NOT EXISTS superseded_at timestamptz,
-  ADD COLUMN IF NOT EXISTS superseded_by_work_order_id uuid REFERENCES public.work_orders(id),
   ADD COLUMN IF NOT EXISTS origin text;
 
 ALTER TABLE public.work_orders DROP CONSTRAINT IF EXISTS work_orders_kind_check;
@@ -85,15 +83,12 @@ ALTER TABLE public.work_orders ADD CONSTRAINT work_orders_approved_via_check
 
 ALTER TABLE public.work_orders DROP CONSTRAINT IF EXISTS work_orders_origin_check;
 ALTER TABLE public.work_orders ADD CONSTRAINT work_orders_origin_check
-  CHECK (origin IS NULL OR origin IN ('job_approved', 'backfill', 'manual', 'revision'));
+  CHECK (origin IS NULL OR origin IN ('job_approved', 'backfill', 'manual'));
 
--- One live approved job work order, and at most one open draft, per job.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_work_orders_job_live_approved
+-- One job work order per job: a draft, then that same row approved.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_work_orders_job_current
   ON public.work_orders (job_id)
-  WHERE kind = 'job' AND status = 'approved' AND superseded_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_work_orders_job_open_draft
-  ON public.work_orders (job_id)
-  WHERE kind = 'job' AND status = 'draft';
+  WHERE kind = 'job' AND status IN ('draft', 'approved');
 CREATE INDEX IF NOT EXISTS idx_work_orders_kind ON public.work_orders (kind);
 
 -- The table's existing "Users view org WOs" policy lets any signed-in org user
@@ -123,7 +118,7 @@ COMMENT ON COLUMN public.work_orders.sealed_content_hash IS
 ALTER TABLE public.jobs
   ADD COLUMN IF NOT EXISTS work_order_id uuid;
 COMMENT ON COLUMN public.jobs.work_order_id IS
-  'The job''s current job work order (work_orders.kind = job): the live approved one, or the draft while none is approved.';
+  'The job''s job work order (work_orders.kind = job): the draft, then that same row once approved.';
 
 -- ── 3. trade_invoice_lines.job_work_order_id ─────────────────────────────────
 
@@ -135,7 +130,7 @@ ALTER TABLE public.trade_invoice_lines
 CREATE INDEX IF NOT EXISTS idx_trade_invoice_lines_job_work_order
   ON public.trade_invoice_lines (job_work_order_id) WHERE job_work_order_id IS NOT NULL;
 COMMENT ON COLUMN public.trade_invoice_lines.job_work_order_id IS
-  'The job''s live APPROVED job work order at the time the invoice was submitted. Stamped by trigger, never by a caller.';
+  'The job''s APPROVED job work order. Stamped by trigger at invoice submit, or by approve_job_work_order for labour invoiced before the approval. Never by a caller.';
 
 -- ── 4. settings: who may approve ─────────────────────────────────────────────
 
@@ -166,8 +161,8 @@ CREATE TABLE IF NOT EXISTS public.work_order_variations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL,
   job_id uuid NOT NULL REFERENCES public.jobs(id) ON DELETE CASCADE,
-  -- The job's live approved work order when the variation was reported. NULL
-  -- when the job had none: the variation is kept, and counts for nothing.
+  -- The job's approved work order. NULL while the job has none: the variation
+  -- is kept, and approve_job_work_order links it when the work order is approved.
   work_order_id uuid REFERENCES public.work_orders(id),
   trade_invoice_id uuid NOT NULL REFERENCES public.trade_invoices(id) ON DELETE CASCADE,
   reported_by uuid NOT NULL REFERENCES public.users(id),
@@ -199,13 +194,14 @@ CREATE TABLE IF NOT EXISTS public.work_order_variation_emails (
   body_html text NOT NULL,
   status text NOT NULL DEFAULT 'recorded'
     CHECK (status IN ('recorded', 'sending', 'sent', 'failed')),
+  sending_started_at timestamptz,
   sent_at timestamptz,
   send_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (variation_id, recipient_role)
 );
 COMMENT ON TABLE public.work_order_variation_emails IS
-  'The finance email and the separate admin email for each work order variation. recorded = written, not sent: sending happens only while feature flag work_order_variation_emails_v1 is on, and only for variations reported while it is on.';
+  'The finance email and the separate admin email for each work order variation. recorded = written, not sent: sending happens only while feature flag work_order_variation_emails_v1 is on. sending_started_at is the claim a send holds; a failed row, or one left in sending past the staleness bound, is re-sent by ops-api resend_work_order_variation_emails.';
 ALTER TABLE public.work_order_variation_emails ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS work_order_variation_emails_service_role_all ON public.work_order_variation_emails;
 CREATE POLICY work_order_variation_emails_service_role_all ON public.work_order_variation_emails
@@ -219,7 +215,9 @@ VALUES
   ('work_order_variation_emails_v1', false,
    'Send the finance and admin emails when a trade reports a work order variation. Off until the captain says so.'),
   ('job_work_order_backfill_v1', false,
-   'Allow backfill_job_work_order_drafts(true) to open draft job work orders for open approved fencing and patio jobs.')
+   'Allow backfill_job_work_order_drafts(true) to open draft job work orders for open approved fencing and patio jobs.'),
+  ('work_order_terminal_approval_v1', false,
+   'Allow approve_work_order to take the approver from the self-declared x-sw-actor header on a server-secret call (the terminal). Off until the owner rules on that identity proof; approval from a signed-in session does not need it.')
 ON CONFLICT (flag_name) DO NOTHING;
 
 -- ── 8. the shared lists ──────────────────────────────────────────────────────
@@ -262,7 +260,7 @@ AS $$
   SELECT ARRAY['commission', 'final_payout_deduction']::text[]
 $$;
 
--- The live approved job work order of a job, or NULL.
+-- The approved job work order of a job, or NULL.
 CREATE OR REPLACE FUNCTION public.job_live_work_order_id(p_job_id uuid)
 RETURNS uuid
 LANGUAGE sql
@@ -270,7 +268,6 @@ STABLE
 AS $$
   SELECT wo.id FROM public.work_orders wo
   WHERE wo.job_id = p_job_id AND wo.kind = 'job' AND wo.status = 'approved'
-    AND wo.superseded_at IS NULL
   LIMIT 1
 $$;
 
@@ -282,7 +279,7 @@ LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  v_mutable text[] := ARRAY['superseded_at', 'superseded_by_work_order_id', 'viewed_at', 'updated_at'];
+  v_mutable text[] := ARRAY['viewed_at', 'updated_at'];
   v_approvers uuid[];
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -308,13 +305,8 @@ BEGIN
 
   IF OLD.kind = 'job' AND OLD.status = 'approved' THEN
     IF (to_jsonb(NEW) - v_mutable) IS DISTINCT FROM (to_jsonb(OLD) - v_mutable) THEN
-      RAISE EXCEPTION 'an approved job work order is sealed: change it with a variation or a new revision'
+      RAISE EXCEPTION 'an approved job work order is sealed: later change is recorded as a variation'
         USING ERRCODE = '23514';
-    END IF;
-    IF OLD.superseded_at IS NOT NULL AND (
-         NEW.superseded_at IS DISTINCT FROM OLD.superseded_at
-         OR NEW.superseded_by_work_order_id IS DISTINCT FROM OLD.superseded_by_work_order_id) THEN
-      RAISE EXCEPTION 'a superseded job work order cannot be re-pointed' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
   END IF;
@@ -348,8 +340,7 @@ BEGIN
       'special_instructions', NEW.special_instructions,
       'site_address', NEW.site_address,
       'scheduled_date', NEW.scheduled_date,
-      'agreed_labour_ex', NEW.agreed_labour_ex,
-      'supersedes_work_order_id', NEW.supersedes_work_order_id
+      'agreed_labour_ex', NEW.agreed_labour_ex
     )::text, 'UTF8')), 'hex');
   END IF;
   RETURN NEW;
@@ -363,8 +354,8 @@ CREATE TRIGGER trg_work_orders_job_kind_guard
 
 -- ── 10. open a draft for a job ───────────────────────────────────────────────
 
--- Returns the job's current job work order (live approved, else open draft),
--- opening a draft when there is neither, and points jobs.work_order_id at it.
+-- Returns the job's job work order (approved, else the open draft), opening a
+-- draft when there is neither, and points jobs.work_order_id at it.
 -- Fencing and patio only.
 CREATE OR REPLACE FUNCTION public.ensure_job_work_order_draft(p_job_id uuid, p_origin text)
 RETURNS uuid
@@ -385,11 +376,8 @@ BEGIN
     RAISE EXCEPTION 'job work orders are for fencing and patio jobs' USING ERRCODE = '23514';
   END IF;
 
-  v_id := public.job_live_work_order_id(p_job_id);
-  IF v_id IS NULL THEN
-    SELECT wo.id INTO v_id FROM public.work_orders wo
-    WHERE wo.job_id = p_job_id AND wo.kind = 'job' AND wo.status = 'draft' LIMIT 1;
-  END IF;
+  SELECT wo.id INTO v_id FROM public.work_orders wo
+  WHERE wo.job_id = p_job_id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved') LIMIT 1;
 
   IF v_id IS NULL THEN
     BEGIN
@@ -404,7 +392,7 @@ BEGIN
       ) RETURNING id INTO v_id;
     EXCEPTION WHEN unique_violation THEN
       SELECT wo.id INTO v_id FROM public.work_orders wo
-      WHERE wo.job_id = p_job_id AND wo.kind = 'job' AND wo.status = 'draft' LIMIT 1;
+      WHERE wo.job_id = p_job_id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved') LIMIT 1;
     END;
   END IF;
 
@@ -433,8 +421,7 @@ BEGIN
           OR OLD.type IS DISTINCT FROM NEW.type)
      AND NOT EXISTS (
        SELECT 1 FROM public.work_orders wo
-       WHERE wo.job_id = NEW.id AND wo.kind = 'job'
-         AND (wo.status = 'draft' OR (wo.status = 'approved' AND wo.superseded_at IS NULL))
+       WHERE wo.job_id = NEW.id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved')
      ) THEN
     BEGIN
       PERFORM public.ensure_job_work_order_draft(NEW.id, 'job_approved');
@@ -453,9 +440,10 @@ CREATE TRIGGER trg_jobs_open_job_work_order
 
 -- ── 11. approve (Shaun only) ─────────────────────────────────────────────────
 
--- Seals a draft. When the draft is a revision (supersedes_work_order_id), the
--- work order it replaces must still be the live one; it is marked superseded
--- in the same transaction. Points jobs.work_order_id at the approved row.
+-- Seals the job's draft and points jobs.work_order_id at it. In the same
+-- transaction, labour already invoiced on the job (and any variation already
+-- reported on it) is linked to the approved work order, so a job that was
+-- invoiced before its work order was approved counts all of its labour.
 CREATE OR REPLACE FUNCTION public.approve_job_work_order(
   p_work_order_id uuid,
   p_approver uuid,
@@ -468,7 +456,6 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_wo public.work_orders%ROWTYPE;
-  v_live uuid;
   v_out public.work_orders%ROWTYPE;
 BEGIN
   SELECT * INTO v_wo FROM public.work_orders WHERE id = p_work_order_id FOR UPDATE;
@@ -482,38 +469,33 @@ BEGIN
     RAISE EXCEPTION 'work order is %, not draft', v_wo.status USING ERRCODE = '23514';
   END IF;
 
-  -- Serialise per job.
-  PERFORM 1 FROM public.jobs WHERE id = v_wo.job_id FOR UPDATE;
-  v_live := public.job_live_work_order_id(v_wo.job_id);
-  IF v_live IS DISTINCT FROM v_wo.supersedes_work_order_id THEN
-    IF v_live IS NULL THEN
-      RAISE EXCEPTION 'this revision replaces a work order that is no longer live' USING ERRCODE = '40001';
-    ELSIF v_wo.supersedes_work_order_id IS NULL THEN
-      RAISE EXCEPTION 'the job already has an approved work order: approve a revision of it instead' USING ERRCODE = '23505';
-    ELSE
-      RAISE EXCEPTION 'this revision replaces a work order that is no longer live' USING ERRCODE = '40001';
-    END IF;
-  END IF;
-
-  IF v_live IS NOT NULL THEN
-    UPDATE public.work_orders
-      SET superseded_at = now(), superseded_by_work_order_id = v_wo.id
-      WHERE id = v_live;
-  END IF;
-
   UPDATE public.work_orders
     SET status = 'approved', approved_by = p_approver, approved_at = now(), approved_via = p_via
     WHERE id = v_wo.id
     RETURNING * INTO v_out;
 
   UPDATE public.jobs SET work_order_id = v_out.id WHERE id = v_out.job_id;
+
+  UPDATE public.trade_invoice_lines til
+    SET job_work_order_id = v_out.id
+    FROM public.trade_invoices ti
+    WHERE ti.id = til.trade_invoice_id
+      AND til.job_id = v_out.job_id
+      AND til.job_work_order_id IS NULL
+      AND NOT (COALESCE(til.line_type, '') = ANY (public.job_work_order_excluded_line_types()))
+      AND ti.status = ANY (public.job_work_order_billed_invoice_statuses());
+
+  UPDATE public.work_order_variations
+    SET work_order_id = v_out.id
+    WHERE job_id = v_out.job_id AND work_order_id IS NULL;
+
   RETURN to_jsonb(v_out);
 END;
 $$;
 REVOKE ALL ON FUNCTION public.approve_job_work_order(uuid, uuid, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.approve_job_work_order(uuid, uuid, text) TO service_role;
 
--- ── 12. link labour to the live approved work order at submit ────────────────
+-- ── 12. link labour to the approved work order at submit ─────────────────────
 
 CREATE OR REPLACE FUNCTION public.trade_invoice_lines_link_job_work_order()
 RETURNS trigger
@@ -575,33 +557,7 @@ CREATE TRIGGER trg_trade_invoices_link_job_work_orders
   AFTER UPDATE OF status ON public.trade_invoices
   FOR EACH ROW EXECUTE FUNCTION public.trade_invoices_link_job_work_orders();
 
--- ── 13. labour lines per job work order (for job costing) ────────────────────
-
-CREATE OR REPLACE VIEW public.job_work_order_labour_lines
-WITH (security_invoker = true) AS
-SELECT
-  til.job_work_order_id AS work_order_id,
-  til.job_id,
-  til.trade_invoice_id,
-  til.id AS trade_invoice_line_id,
-  ti.user_id,
-  ti.invoice_number,
-  ti.status AS invoice_status,
-  ti.submitted_at,
-  til.line_type,
-  til.description,
-  til.total_hours,
-  til.work_order_hours,
-  COALESCE(til.override_amount, til.line_total_ex) AS amount_ex,
-  (ti.status = ANY (public.job_work_order_billed_invoice_statuses())) AS counted
-FROM public.trade_invoice_lines til
-JOIN public.trade_invoices ti ON ti.id = til.trade_invoice_id
-WHERE til.job_work_order_id IS NOT NULL;
-COMMENT ON VIEW public.job_work_order_labour_lines IS
-  'Trade labour lines stamped against a job work order. counted = the invoice is still billed (not draft or rejected). Roll up by job_id for costing.';
-REVOKE ALL ON public.job_work_order_labour_lines FROM anon, authenticated;
-
--- ── 14. backfill: drafts for open approved jobs (switched off) ───────────────
+-- ── 13. backfill: drafts for open approved jobs (switched off) ───────────────
 
 CREATE OR REPLACE FUNCTION public.backfill_job_work_order_drafts(p_apply boolean DEFAULT false)
 RETURNS jsonb
@@ -622,8 +578,7 @@ BEGIN
     AND j.status = ANY (public.job_work_order_open_statuses())
     AND NOT EXISTS (
       SELECT 1 FROM public.work_orders wo
-      WHERE wo.job_id = j.id AND wo.kind = 'job'
-        AND (wo.status = 'draft' OR (wo.status = 'approved' AND wo.superseded_at IS NULL))
+      WHERE wo.job_id = j.id AND wo.kind = 'job' AND wo.status IN ('draft', 'approved')
     );
 
   SELECT COALESCE(jsonb_object_agg(k, n), '{}'::jsonb) INTO v_by FROM (
