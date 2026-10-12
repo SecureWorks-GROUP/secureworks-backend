@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-import-prefix
 //
 // Every adapter the deterministic intake registers in code must be admitted by
-// every database list of adapter ids.
+// the database's adapter list.
 //
 // Why this exists: PR #1004 registered the `ambrose` adapter and shipped its
 // company row, but the CHECK on makesafe_intake_cases still listed the older
@@ -9,12 +9,11 @@
 // stripped exception, so no Ambrose job or review draft could exist. Nothing
 // failed in CI, because nothing compared the two lists.
 //
-// What is compared: the adapter ids of the real exported registry, against a
-// model of the migrations. The model replays the migration files in order and
-// keeps, for each constraint or function that lists adapter ids, its newest
-// definition (a later DROP with no re-add removes it). The lists are parsed
-// out of the SQL as lists, not searched for as text: a mention in a comment
-// does not count, and a list that drops an adapter is seen. PostgreSQL itself
+// What is compared: the adapter ids of the real exported registry, against the
+// newest definition of makesafe_intake_cases_deterministic_shapes_check in the
+// migration files, the one adapter list in the database. The list is parsed out
+// of the SQL as a list, not searched for as text: a mention in a comment does
+// not count, and a definition that drops an adapter is seen. PostgreSQL itself
 // proves the newest constraint behaves as listed, in
 // supabase/tests/migration-contracts/20261012043000_makesafe_intake_cases_admit_ambrose_adapter/.
 import {
@@ -25,7 +24,7 @@ import { DETERMINISTIC_ADAPTER_REGISTRY } from "./makesafe_deterministic_intake.
 
 const MIGRATIONS_DIR = new URL("../../migrations/", import.meta.url);
 const CASE_ADAPTER_CONSTRAINT =
-  "constraint makesafe_intake_cases_deterministic_shapes_check";
+  "makesafe_intake_cases_deterministic_shapes_check";
 
 interface MigrationFile {
   name: string;
@@ -33,8 +32,6 @@ interface MigrationFile {
 }
 
 interface AdapterIdList {
-  // "constraint <name>" or "function <name>".
-  owner: string;
   migration: string;
   ids: string[];
 }
@@ -111,125 +108,36 @@ function stringLiterals(sql: string): string[] {
   return values;
 }
 
-// `adapter_id IN (...)` and `adapter_id = ANY (ARRAY[...])`, the two spellings
-// PostgreSQL accepts and prints for the same list.
-const ADAPTER_LIST = /\badapter_id\s*(?:IN\s*\(|=\s*ANY\s*\(\s*ARRAY\s*\[)/gi;
-
-/** Same length as `sql`, with the inside of every string literal blanked. */
-function maskLiterals(sql: string): string {
-  let out = "";
-  let i = 0;
-  while (i < sql.length) {
-    if (sql[i] === "'") {
-      const end = closingQuote(sql, i);
-      out += "'" + " ".repeat(Math.max(0, end - i - 1)) + "'";
-      i = end + 1;
-    } else {
-      out += sql[i];
-      i++;
-    }
-  }
-  return out;
-}
-
-function adapterIdsIn(sql: string): string[] | null {
-  const ids = new Set<string>();
-  let found = false;
-  // Searched on the masked text so words inside a string literal never match;
-  // the ids are then read from the original at the same offsets.
-  for (const match of maskLiterals(sql).matchAll(ADAPTER_LIST)) {
-    found = true;
-    const open = match.index! + match[0].length - 1;
-    const close = match[0].endsWith("[") ? "]" : ")";
-    const body = close === ")"
-      ? balanced(sql, open)
-      : sql.slice(open + 1, sql.indexOf("]", open));
-    for (const id of stringLiterals(body)) ids.add(id);
-  }
-  return found ? [...ids].sort() : null;
-}
-
-/** Top-level statements; a dollar-quoted body stays inside its statement. */
-function statements(sql: string): string[] {
-  const out: string[] = [];
-  let current = "";
-  let i = 0;
-  while (i < sql.length) {
-    if (sql[i] === "'") {
-      const end = closingQuote(sql, i);
-      current += sql.slice(i, end + 1);
-      i = end + 1;
-      continue;
-    }
-    const tag = /^\$[A-Za-z_]*\$/.exec(sql.slice(i, i + 64))?.[0];
-    if (tag) {
-      const end = sql.indexOf(tag, i + tag.length);
-      const stop = end < 0 ? sql.length : end + tag.length;
-      current += sql.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (sql[i] === ";") {
-      out.push(current);
-      current = "";
-    } else {
-      current += sql[i];
-    }
-    i++;
-  }
-  if (current.trim()) out.push(current);
-  return out;
-}
-
 /**
- * Replays migrations in filename order and returns the adapter-id lists that
- * are in force afterwards.
+ * The adapter ids admitted by the newest definition of `constraint` across the
+ * migrations, read in filename order. Null when no migration defines it.
  */
-export function adapterIdListsInForce(
+export function newestAdapterIdList(
   migrations: readonly MigrationFile[],
-): AdapterIdList[] {
-  const inForce = new Map<string, AdapterIdList>();
+  constraint: string,
+): AdapterIdList | null {
+  const definition = new RegExp(
+    `\\bCONSTRAINT\\s+${constraint}\\s+CHECK\\s*\\(`,
+    "gi",
+  );
+  let newest: AdapterIdList | null = null;
   const ordered = [...migrations].sort((a, b) => a.name.localeCompare(b.name));
   for (const migration of ordered) {
-    for (const statement of statements(stripSqlComments(migration.sql))) {
-      const fn = /\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)/i.exec(
-        statement,
-      );
-      if (fn) {
-        const owner = `function ${fn[1].replace(/^public\./, "")}`;
-        const ids = adapterIdsIn(statement);
-        if (ids) inForce.set(owner, { owner, migration: migration.name, ids });
-        else inForce.delete(owner);
-        continue;
-      }
-      for (
-        const drop of statement.matchAll(
-          /\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(\w+)/gi,
-        )
-      ) {
-        inForce.delete(`constraint ${drop[1]}`);
-      }
-      for (
-        const drop of statement.matchAll(
-          /\bDROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?([\w.]+)/gi,
-        )
-      ) {
-        inForce.delete(`function ${drop[1].replace(/^public\./, "")}`);
-      }
-      for (
-        const check of statement.matchAll(
-          /\bCONSTRAINT\s+(\w+)\s+CHECK\s*\(/gi,
-        )
-      ) {
-        const open = check.index! + check[0].length - 1;
-        const ids = adapterIdsIn(balanced(statement, open));
-        if (!ids) continue;
-        const owner = `constraint ${check[1]}`;
-        inForce.set(owner, { owner, migration: migration.name, ids });
-      }
+    const sql = stripSqlComments(migration.sql);
+    for (const match of sql.matchAll(definition)) {
+      const check = balanced(sql, match.index! + match[0].length - 1);
+      const list = /\badapter_id\s+IN\s*\(/i.exec(check);
+      newest = {
+        migration: migration.name,
+        ids: list
+          ? stringLiterals(
+            balanced(check, list.index + list[0].length - 1),
+          ).sort()
+          : [],
+      };
     }
   }
-  return [...inForce.values()].sort((a, b) => a.owner.localeCompare(b.owner));
+  return newest;
 }
 
 function missingFrom(list: AdapterIdList, registered: readonly string[]) {
@@ -250,24 +158,17 @@ async function readMigrations(): Promise<MigrationFile[]> {
 
 const REGISTERED = DETERMINISTIC_ADAPTER_REGISTRY.map((adapter) => adapter.id);
 
-Deno.test("every adapter registered in code is admitted by every database adapter list", async () => {
-  const lists = adapterIdListsInForce(await readMigrations());
-  // The case table's list must be found, or this test proves nothing.
-  assert(
-    lists.some((list) => list.owner === CASE_ADAPTER_CONSTRAINT),
-    `no adapter list found for ${CASE_ADAPTER_CONSTRAINT}`,
+Deno.test("every adapter registered in code is admitted by the database adapter list", async () => {
+  const list = newestAdapterIdList(
+    await readMigrations(),
+    CASE_ADAPTER_CONSTRAINT,
   );
-  const gaps = lists
-    .map((list) => ({
-      owner: list.owner,
-      migration: list.migration,
-      missing: missingFrom(list, REGISTERED),
-    }))
-    .filter((gap) => gap.missing.length);
+  // The case table's list must be found, or this test proves nothing.
+  assert(list, `no definition found for ${CASE_ADAPTER_CONSTRAINT}`);
   assertEquals(
-    gaps,
-    [],
-    "an adapter registered in DETERMINISTIC_ADAPTER_REGISTRY is missing from a database adapter list; add a migration that admits it in the same PR",
+    { migration: list.migration, missing: missingFrom(list, REGISTERED) },
+    { migration: list.migration, missing: [] },
+    "an adapter registered in DETERMINISTIC_ADAPTER_REGISTRY is missing from the database adapter list; add a migration that admits it in the same PR",
   );
 });
 
@@ -276,15 +177,27 @@ Deno.test("REGRESSION: before the admitting migration, ambrose was registered in
     migration.name <
       "20261012043000_makesafe_intake_cases_admit_ambrose_adapter.sql"
   );
-  const list = adapterIdListsInForce(before).find((item) =>
-    item.owner === CASE_ADAPTER_CONSTRAINT
-  );
+  const list = newestAdapterIdList(before, CASE_ADAPTER_CONSTRAINT);
   assert(list, "the case adapter list existed before the admitting migration");
   assertEquals(missingFrom(list, REGISTERED), ["ambrose"]);
 });
 
-Deno.test("the adapter list is read as a list: newest definition wins, both spellings parse, comments and drops count for nothing", () => {
-  const lists = adapterIdListsInForce([
+Deno.test("the adapter list is read as a list: the newest definition wins, and comments and other constraints count for nothing", () => {
+  const list = newestAdapterIdList([
+    {
+      name: "20260201000000_second.sql",
+      sql: `
+        -- CONSTRAINT cases_shape CHECK (adapter_id IN ('commented_out'))
+        ALTER TABLE public.cases DROP CONSTRAINT IF EXISTS cases_shape;
+        ALTER TABLE public.cases
+          ADD CONSTRAINT cases_shape CHECK (
+            (adapter_id IS NULL OR adapter_id IN ('three', 'one'))
+            AND note <> 'it''s (quoted'
+          );
+        ALTER TABLE public.other
+          ADD CONSTRAINT other_shape CHECK (adapter_id IN ('one', 'four'));
+      `,
+    },
     {
       name: "20260101000000_first.sql",
       sql: `
@@ -293,43 +206,14 @@ Deno.test("the adapter list is read as a list: newest definition wins, both spel
             (adapter_id IS NULL OR adapter_id IN ('one', 'two'))
             AND jsonb_typeof(story) = 'array'
           );
-        ALTER TABLE public.other
-          ADD CONSTRAINT other_shape CHECK (adapter_id IN ('one'));
       `,
     },
-    {
-      name: "20260201000000_second.sql",
-      sql: `
-        -- adapter_id IN ('commented_out') must not count.
-        ALTER TABLE public.cases DROP CONSTRAINT IF EXISTS cases_shape;
-        ALTER TABLE public.cases
-          ADD CONSTRAINT cases_shape CHECK (
-            adapter_id = ANY (ARRAY['one'::text, 'three'::text])
-            AND note <> 'adapter_id IN (''quoted'')'
-          );
-        ALTER TABLE public.other DROP CONSTRAINT other_shape;
-        CREATE OR REPLACE FUNCTION public.guard() RETURNS trigger
-        LANGUAGE plpgsql AS $$
-        BEGIN
-          IF NEW.adapter_id IN ('one', 'four') THEN RETURN NEW; END IF;
-          RAISE EXCEPTION 'no';
-        END;
-        $$;
-      `,
-    },
-  ]);
-  assertEquals(lists, [
-    {
-      owner: "constraint cases_shape",
-      migration: "20260201000000_second.sql",
-      ids: ["one", "three"],
-    },
-    {
-      owner: "function guard",
-      migration: "20260201000000_second.sql",
-      ids: ["four", "one"],
-    },
-  ]);
+  ], "cases_shape");
+  assertEquals(list, {
+    migration: "20260201000000_second.sql",
+    ids: ["one", "three"],
+  });
   // 'two' was dropped by the newer definition, so it is reported missing.
-  assertEquals(missingFrom(lists[0], ["one", "two", "three"]), ["two"]);
+  assertEquals(missingFrom(list!, ["one", "two", "three"]), ["two"]);
+  assertEquals(newestAdapterIdList([], "cases_shape"), null);
 });

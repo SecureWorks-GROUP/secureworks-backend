@@ -7949,34 +7949,191 @@ for (
     assertEquals(harness.fallbacks().length, 1);
     assertEquals(harness.fallbacks()[0].job_id, null);
     assertEquals(harness.fallbacks()[0].is_authoritative, false);
+    // The job is built from the builder's newest email of the purchase order.
+    assert(
+      store.makesafe_intake_drafts[0].extraction_json.intake_source_post_ids
+        .includes("updated-email"),
+    );
   });
 }
 
-Deno.test("a stranded Ambrose repair recovers to one review draft and is never minted", async () => {
-  const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_REPAIR);
-  const { store, state } = harness;
-  state.adapterAdmitted = true;
-  await harness.runAlone("updated-email", "2026-07-20T12:06:00.000Z");
-  await harness.runAlone("first-email", "2026-07-20T12:08:00.000Z");
-  await harness.run("2026-07-20T12:10:00.000Z");
-  const settled = await harness.run("2026-07-20T12:12:00.000Z");
+// The live shape: one repair purchase order, two PDF emails an hour apart, the
+// later one "Updated". Whichever page the sweep reads first, the review draft
+// is built from the Updated email.
+for (
+  const order of [
+    ["both emails on one page"],
+    ["first-email", "updated-email"],
+    ["updated-email", "first-email"],
+  ] as const
+) {
+  Deno.test(`a stranded Ambrose repair with two PDF emails recovers to one review draft built from the newest, never minted (${order.join(", then ")})`, async () => {
+    const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_REPAIR);
+    const { store, state } = harness;
+    state.adapterAdmitted = true;
+    let clock = Date.parse("2026-07-20T12:04:00.000Z");
+    const tick = () => new Date(clock += 120_000).toISOString();
+    if (order.length === 1) {
+      await harness.run(tick());
+    } else {
+      for (const postId of order) await harness.runAlone(postId, tick());
+    }
+    await harness.run(tick());
+    await harness.runAlone("first-email", tick());
+    await harness.runAlone("updated-email", tick());
+    const settled = await harness.run(tick());
 
-  assertEquals(state.approvals, 0);
-  assertEquals(store.makesafe_intake_drafts.length, 1);
-  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
-  assertEquals(
-    store.makesafe_intake_drafts[0].extraction_json.makesafe_job_family,
-    "repair",
-  );
-  assertEquals(settled.totals.write_failures, 0);
-  const recovered = store.makesafe_intake_cases.filter((row: any) =>
-    row.is_authoritative
-  );
-  assertEquals(recovered.length, 1);
-  assertEquals(recovered[0].adapter_id, "ambrose");
-  assertEquals(recovered[0].job_id, null);
-  assertEquals(harness.fallbacks().length, 1);
-});
+    assertEquals(state.approvals, 0);
+    assertEquals(store.makesafe_intake_drafts.length, 1);
+    const draft = store.makesafe_intake_drafts[0];
+    assertEquals(draft.status, "needs_review");
+    assertEquals(draft.extraction_json.makesafe_job_family, "repair");
+    assert(
+      draft.extraction_json.intake_source_post_ids.includes("updated-email"),
+    );
+    assertEquals(settled.totals.write_failures, 0);
+    assertEquals(settled.totals.cases_failed, 0);
+    assertEquals(store.makesafe_intake_cases.length, 2);
+    const recovered = store.makesafe_intake_cases.filter((row: any) =>
+      row.is_authoritative
+    );
+    assertEquals(recovered.length, 1);
+    assertEquals(recovered[0].adapter_id, "ambrose");
+    assertEquals(recovered[0].job_id, null);
+    assertEquals(recovered[0].reason_code, "awaiting_job_creation");
+    if (order.length === 2) {
+      // Read on separate pages, the Updated email's own row is the one released.
+      assertEquals(draft.extraction_json.intake_source_post_ids, [
+        "updated-email",
+      ]);
+      assertEquals(
+        store.makesafe_intake_case_sources.find((source: any) =>
+          source.post_id === "updated-email"
+        ).case_id,
+        recovered[0].id,
+      );
+    }
+    // The other email's row stays a stripped fallback the intake desk shows.
+    assertEquals(harness.fallbacks().length, 1);
+  });
+}
+
+// An email of a purchase order that recovers as an exception opened nothing,
+// so it holds nothing: the email that carries the readable purchase order
+// still opens the work. When the exception's own PDF is read later it finds
+// the purchase order already held and opens nothing more.
+function pushAmbrosePdf(
+  store: Store,
+  postId: string,
+  fixture: AmbrosePurchaseOrderFixture,
+  pdfSha: string,
+) {
+  const text = ambrosePdfText(fixture);
+  store.email_attachments.push({
+    id: `att-${postId}`,
+    email_id: postId,
+    name: "Purchase Order.pdf",
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 300_000,
+    sha256: pdfSha,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: text,
+    pdf_extraction_char_count: text.length,
+    pdf_extraction_page_count: 7,
+    pdf_extraction_extractor: "fixture",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+}
+
+for (const fixture of [AMBROSE_MAKE_SAFE, AMBROSE_REPAIR]) {
+  for (
+    const order of [
+      ["both emails on one page"],
+      ["unread-email", "purchase-order"],
+      ["purchase-order", "unread-email"],
+    ] as const
+  ) {
+    Deno.test(`a stranded Ambrose ${fixture.kind} email that recovers as an exception never blocks its purchase order or opens a second one (${order.join(", then ")})`, async () => {
+      const harness = strandedAmbroseHarness();
+      const { store, state } = harness;
+      // The first email names the purchase order but its PDF never arrived.
+      store.emails.push(email({
+        post_id: "unread-email",
+        conversation_id: "conversation-unread-email",
+        from_email: AMBROSE_TEST_SENDER,
+        received_at: "2026-07-18T06:31:00.000Z",
+        subject: ambroseSubject(fixture),
+        body_content: ambroseBody(fixture),
+      }));
+      await harness.runAlone("unread-email", NOW);
+      pushAmbroseMail(
+        store,
+        "purchase-order",
+        { ...fixture, updated: true },
+        "2026-07-19T04:35:00.000Z",
+        "sha-po",
+      );
+      await harness.runAlone("purchase-order", "2026-07-20T12:02:00.000Z");
+      assertEquals(harness.fallbacks().length, 2);
+
+      state.adapterAdmitted = true;
+      let clock = Date.parse("2026-07-20T12:04:00.000Z");
+      const tick = () => new Date(clock += 120_000).toISOString();
+      if (order.length === 1) {
+        await harness.run(tick());
+      } else {
+        for (const postId of order) await harness.runAlone(postId, tick());
+      }
+      const opened = () => ({
+        approvals: state.approvals,
+        drafts: store.makesafe_intake_drafts.length,
+        jobs: store.makesafe_intake_cases.filter((row: any) => row.job_id)
+          .length,
+        holders: store.makesafe_intake_cases.filter((row: any) =>
+          row.job_id || row.reason_code === "awaiting_job_creation"
+        ).length,
+      });
+      const expected = fixture.kind === "make_safe"
+        ? { approvals: 1, drafts: 1, jobs: 1, holders: 1 }
+        : { approvals: 0, drafts: 1, jobs: 0, holders: 1 };
+      assertEquals(opened(), expected);
+      if (order.length === 2) {
+        const unread = store.makesafe_intake_cases.find((row: any) =>
+          store.makesafe_intake_case_sources.some((source: any) =>
+            source.case_id === row.id && source.post_id === "unread-email"
+          )
+        );
+        assertEquals(unread.state, "exception");
+        assertEquals(unread.reason_code, "adapter_parse_failure");
+        assertEquals(unread.is_authoritative, true);
+        assertEquals(
+          unread.builder_po_canonical,
+          fixture.kind === "make_safe" ? "PO-2099910102" : "PO-2099920205",
+        );
+        assertEquals(unread.job_id, null);
+      }
+
+      // The missing PDF is read at last: the earlier email would now be work.
+      pushAmbrosePdf(store, "unread-email", fixture, "sha-late");
+      await harness.runAlone("unread-email", tick());
+      await harness.run(tick());
+      await harness.runAlone("purchase-order", tick());
+      await harness.runAlone("unread-email", tick());
+      const settled = await harness.run(tick());
+
+      assertEquals(opened(), expected);
+      assertEquals(settled.totals.jobs_created, 0);
+      assertEquals(settled.totals.drafts_created, 0);
+      assertEquals(settled.totals.write_failures, 0);
+      assertEquals(settled.totals.cases_failed, 0);
+      assertEquals(store.makesafe_intake_cases.length, 2);
+      assertEquals(store.makesafe_intake_case_sources.length, 2);
+    });
+  }
+}
 
 Deno.test("a stranded Ambrose acceptance prompt recovers as non-work and never blocks its purchase order", async () => {
   const harness = strandedAmbroseHarness();
@@ -8047,7 +8204,10 @@ Deno.test("CONTROL for the Ambrose release: another builder's stripped fallback 
       refuse && table === "makesafe_intake_cases" && operation === "insert" &&
         payload.last_decision_reason !==
           "deterministic source_persist_failed case_insert"
-        ? { code: "23514", message: "primary deterministic case shape rejected" }
+        ? {
+          code: "23514",
+          message: "primary deterministic case shape rejected",
+        }
         : null,
   );
   const run = (nowIso: string) =>

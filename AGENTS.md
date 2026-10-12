@@ -326,7 +326,7 @@ then stores a stripped fallback (`state` exception, `adapter_id` null,
 no job or draft can exist. That is what happened to Ambrose (PR #1004 shipped
 the adapter, `20261012043000` admitted it).
 `makesafe_adapter_admission_contract_test.ts` now fails CI whenever a
-registered adapter is missing from the newest definition of any adapter list in
+registered adapter is missing from the newest definition of that constraint in
 the migrations; the Postgres half is the `20261012043000` migration contract.
 
 A stripped fallback is stuck on purpose and no scan re-decides it; the only
@@ -338,13 +338,21 @@ the same fenced update. Three things to know before touching it:
 
 - **One purchase order can hold several fallback rows**, one per email, because
   a stripped row has no identity for the next email to bind to. They cannot be
-  merged or deleted (append-only, immutable lineage). A plan that would open a
-  draft or a job is released only while no other authoritative work case holds
-  its `company_key` + `wo_po_identity_key`; the others stay stripped. The
-  intake desk hides a stripped make-safe row once a live make-safe job carries
-  its reference (`matchingLiveObligationJobIds`); a stripped repair row stays a
-  "could not be stored" review card, because that match is make-safe only.
-  Non-work and exception plans are always released, since they open nothing.
+  merged or deleted (append-only, immutable lineage), so
+  `readSourcePersistRecoveryGate` lets exactly one case hold the purchase
+  order. A case holds it only when it holds work (`holdsBuilderObligation`: a
+  job, a live state, or `awaiting_job_creation`). Non-work and exception plans
+  are always released and hold nothing. A plan that would open a draft or a job
+  is released only while no sibling on its `company_key` + `wo_po_identity_key`
+  holds, and no later PDF email of the same purchase order is still stranded:
+  the newest email wins, whichever page the sweep reads first. Every other plan
+  on a held purchase order is withheld: it keeps its row's fate and opens
+  nothing, including an email recovered as an exception whose PDF is read
+  later. Known gap: a withheld email's PDF is never staged on the holding case.
+  The intake desk hides a stripped make-safe row once a live make-safe job
+  carries its reference (`matchingLiveObligationJobIds`); a stripped repair row
+  stays a "could not be stored" review card, because that match is make-safe
+  only.
 - **Only the sweep half of the scan reaches them.** A source with a case-source
   row is final-fated, so the recent queue skips it; the sweep walks the 60-day
   window two sources per run. Recovery after a deploy takes as long as the sweep
