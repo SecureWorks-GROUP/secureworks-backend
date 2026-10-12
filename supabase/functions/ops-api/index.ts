@@ -612,7 +612,9 @@ import {
   clockTradeInvoiceTimeEntry,
   draftTradeInvoiceTimeEntry,
   isTradeInvoiceTimeLineType,
+  JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS,
   loadJobTradeTimeEntries,
+  loggedTimeEntryForCard,
   resolveTradeInvoiceTimeEntry,
   TRADE_INVOICE_TIME_LINE_TYPES,
   TradeInvoiceTimeEntryError,
@@ -52060,6 +52062,13 @@ export const _tradeWaiveNeighbourSignoffForTest = tradeWaiveNeighbourSignoff
 //   - status moves to complete (completed_at stamped) unless already complete;
 //     scheduled_date is set to today (AWST) when missing so my_hours lists it.
 //   - never touches rates, invoices, or the make-safe board.
+//   - times (12 Oct 2026): when the trade also sends work_date, start_time and
+//     finish_time (optional break_minutes), the hours are the server's
+//     (finish - start - break, trade_invoice_time_entry.ts; not rounded to the
+//     quarter hour) and the times are saved beside the card in
+//     job_assignment_logged_times, so my_hours can hand them to the Weekly
+//     Invoice card. Hours logged without times clear any saved times. This
+//     door never requires times: the enforcement flag is about invoice lines.
 const LOG_MY_JOB_HOURS_MAX = 24
 function normaliseLoggedHours(raw: unknown): number {
   const n = typeof raw === 'string' ? Number(raw.trim()) : Number(raw)
@@ -52083,7 +52092,15 @@ function pickHoursAssignment(rows: any[]): any | null {
 async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthContext, access: TradeJobAccessContext) {
   const jobId = String(body?.jobId || body?.job_id || '').trim()
   if (!jobId) throw new ApiError('jobId required', 400)
-  const hours = normaliseLoggedHours(body?.hours)
+  // All three time fields or none: a half-filled or wrong entry (finish not
+  // after start, a day after today, hours that disagree) is refused as on an
+  // invoice line.
+  const timeEntry = resolveTimeEntryOrRefuse(body, {
+    required: false,
+    clientHours: body?.hours,
+    label: 'job',
+  })
+  const hours = timeEntry ? timeEntry.hours : normaliseLoggedHours(body?.hours)
   const source = String(body?.source || 'job_view').replace(/[^a-z0-9_]/gi, '').slice(0, 40) || 'job_view'
   await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, false, access)
   const { data: job, error: jobErr } = await client.from('jobs')
@@ -52127,6 +52144,24 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
     throw new ApiError('These hours are already on invoice ' + assignment.invoiced_in + '. Ask the office to adjust it.', 409)
   }
   const nowIso = new Date().toISOString()
+  // The saved times go in BEFORE the hours: a failed save then leaves the
+  // card's hours untouched, and my_hours never shows saved times whose hours
+  // differ from the card's (loggedTimeEntryForCard).
+  if (timeEntry) {
+    const { error: timeErr } = await client.from('job_assignment_logged_times').upsert({
+      assignment_id: assignment.id,
+      job_id: jobId,
+      user_id: tradeUser.id,
+      work_date: timeEntry.work_date,
+      start_time: timeEntry.start_time,
+      finish_time: timeEntry.finish_time,
+      break_minutes: timeEntry.break_minutes,
+      hours: timeEntry.hours,
+      source,
+      logged_at: nowIso,
+    }, { onConflict: 'assignment_id' })
+    if (timeErr) throw timeErr
+  }
   const update: any = { hours_worked: hours }
   if (!assignment.scheduled_date) update.scheduled_date = getAWSTDate()
   if (assignment.status !== 'complete') {
@@ -52136,6 +52171,18 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
   const { data: saved, error: updErr } = await client.from('job_assignments')
     .update(update).eq('id', assignment.id).select(LOG_HOURS_ASSIGNMENT_COLUMNS).single()
   if (updErr) throw updErr
+  if (!timeEntry) {
+    // Hours logged without times replace the card's hours, so times saved
+    // earlier no longer describe them. Best effort: the read hides saved
+    // times whose hours differ from the card's either way.
+    try {
+      const { error: clearErr } = await client.from('job_assignment_logged_times')
+        .delete().eq('assignment_id', assignment.id)
+      if (clearErr) console.error('[ops-api] log_my_job_hours: saved times not cleared:', clearErr.message)
+    } catch (e) {
+      console.error('[ops-api] log_my_job_hours: saved times not cleared:', (e as Error)?.message)
+    }
+  }
   try {
     await client.from('job_events').insert({
       job_id: jobId,
@@ -52147,6 +52194,12 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
         previous_hours: assignment.hours_worked == null ? null : Number(assignment.hours_worked),
         source,
         assignment_created: created,
+        ...(timeEntry ? {
+          work_date: timeEntry.work_date,
+          start_time: timeEntry.start_time,
+          finish_time: timeEntry.finish_time,
+          break_minutes: timeEntry.break_minutes,
+        } : {}),
       },
     })
   } catch (_e) { /* audit is non-blocking */ }
@@ -52161,6 +52214,9 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
       hours_worked: hours,
       created,
     },
+    // The times saved with these hours, in the invoice line's own form; null
+    // when the hours were logged without times.
+    time_entry: timeEntry,
     week_ending: weekEndSundayFor(scheduledDate),
   }
 }
@@ -52463,6 +52519,28 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
 
   const rate = rateRow ? Number(rateRow.hourly_rate) : 0
 
+  // Times the trade saved on the job view with these hours (log_my_job_hours),
+  // so the Weekly Invoice card can open on them. A failed read is logged and
+  // answers no saved times; it never fails the hours view.
+  const loggedTimeByCard = new Map<string, any>()
+  const cardIds = (assignments || []).map((a: any) => String(a.id || '')).filter(Boolean)
+  if (cardIds.length > 0) {
+    try {
+      for (let i = 0; i < cardIds.length; i += 100) {
+        const { data: loggedRows, error: loggedErr } = await client.from('job_assignment_logged_times')
+          .select(JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS)
+          .in('assignment_id', cardIds.slice(i, i + 100))
+        if (loggedErr) {
+          console.error('[ops-api] my_hours: saved times unreadable:', loggedErr.message)
+          break
+        }
+        for (const row of (loggedRows || [])) loggedTimeByCard.set(String(row.assignment_id), row)
+      }
+    } catch (e) {
+      console.error('[ops-api] my_hours: saved times read threw:', (e as Error)?.message)
+    }
+  }
+
   // Calculate hours per assignment
   let totalHours = 0
   const enriched = (assignments || []).map((a: any) => {
@@ -52481,6 +52559,8 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       // (required) hours field for this card instead of a read-only value.
       hours_worked: a.hours_worked != null ? parseFloat(a.hours_worked) : null,
       amount: Math.round(hours * rate * 100) / 100,
+      // { work_date, start_time, finish_time, break_minutes, hours } or null.
+      logged_time_entry: loggedTimeEntryForCard(loggedTimeByCard.get(String(a.id)), a.hours_worked),
     }
   })
 

@@ -37,6 +37,11 @@ assignment of their own; that caller gets the same completing-trade binding
 `job_events.trade_hours_logged { assignment_id, hours, previous_hours, source }`.
 Response: `{ ok, hours, assignment: { id, status, scheduled_date, hours_worked, created }, week_ending }`.
 
+Since 12 Oct 2026 the body may also carry `work_date`, `start_time`,
+`finish_time` and `break_minutes`; the hours are then computed on the server
+and the times are saved with the card. Contract:
+`docs/trade-invoice-time-entries-2026-10-12.md`.
+
 Tests: `roof_report_flow_test.ts` (normal make-safe renders without board
 advance), `trade_access_tier_test.ts` (log_my_job_hours + pickHoursAssignment).
 

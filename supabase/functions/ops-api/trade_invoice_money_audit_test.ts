@@ -154,7 +154,10 @@ Deno.test("audit 2: manual hours must be finite, more than 0 and at most 24", ()
 });
 
 Deno.test("audit 2: generate_trade_invoice manual lane never reads a client rate", () => {
-  assertStringIncludes(INDEX, "hoursById[m.assignment_id] = cleanHours");
+  // The hours are the sanitised figure, or the server's own (finish - start -
+  // break) when the card carries a time entry: never a raw client number.
+  assertStringIncludes(INDEX, "const cleanHours = entry ? entry.hours : _sanitiseManualAssignmentHours(m.hours)");
+  assertStringIncludes(INDEX, "manualEntries.push({ m, hours: cleanHours, entry })");
   assertStringIncludes(INDEX, "hours_worked: h, hourly_rate: resolvedRate,");
   assertEquals(INDEX.includes("clientRateProvided"), false, "client rate path must be gone");
   assertEquals(INDEX.includes("anyClientRate"), false, "client rate must not bypass RATE_NOT_CONFIGURED");

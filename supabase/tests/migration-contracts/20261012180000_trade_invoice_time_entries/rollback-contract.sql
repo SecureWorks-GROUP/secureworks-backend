@@ -34,6 +34,10 @@ BEGIN
     RAISE EXCEPTION 'the down migration dropped recorded time entry columns (% of 4 kept)', kept;
   END IF;
 
+  IF to_regclass('public.job_assignment_logged_times') IS NULL THEN
+    RAISE EXCEPTION 'the down migration dropped the times saved on the job view';
+  END IF;
+
   -- a recorded entry is still stored, and still held to its shape
   INSERT INTO public.trade_invoice_lines (
     trade_invoice_id, job_id, line_type, line_total_ex,

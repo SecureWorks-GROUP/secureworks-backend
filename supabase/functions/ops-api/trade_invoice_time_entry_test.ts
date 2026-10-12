@@ -10,7 +10,10 @@
  *          hour lines (extra_items) and the auto-collected clock lane,
  *        - save_trade_invoice_draft: the no-week insert and the dated persist,
  *        - submit_trade_invoice: the legacy hourly lane,
- *   3. a job's list reads its entries.
+ *   3. a job's list reads its entries,
+ *   4. the day worked is never after today, Perth, on every path,
+ *   5. times saved on the job view (log_my_job_hours) are stored with the
+ *      card's hours and returned by my_hours.
  *
  * The two trade actions are driven through the REAL request handler against
  * a PostgREST-shaped fetch stub, so a write path that stops calling the rule
@@ -25,13 +28,20 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _opsApiRequestHandlerForTest, submitTradeInvoice } from "./index.ts";
+import {
+  _opsApiRequestHandlerForTest,
+  _tradeLogMyJobHoursForTest,
+  myHours,
+  submitTradeInvoice,
+} from "./index.ts";
 import {
   assertManualTimeEntriesDistinct,
   clockTradeInvoiceTimeEntry,
   draftTradeInvoiceTimeEntry,
   isTradeInvoiceTimeLineType,
   loadJobTradeTimeEntries,
+  loggedTimeEntryForCard,
+  perthToday,
   resolveTradeInvoiceTimeEntry,
   TRADE_INVOICE_TIME_ENTRY_FLAG,
   TradeInvoiceTimeEntryError,
@@ -227,6 +237,52 @@ Deno.test("time entry: only lines that bill hours are time lines", () => {
   );
 });
 
+for (const required of [false, true]) {
+  const state = required ? "flag on" : "flag off";
+
+  Deno.test(`time entry (${state}): a day worked after today, Perth, is refused; today is accepted`, () => {
+    const shift = { start_time: "07:00", finish_time: "15:00" };
+    const error = refusal(() =>
+      resolveTradeInvoiceTimeEntry(
+        { work_date: "2026-08-26", ...shift },
+        { required, today: "2026-08-25", label: "SWF-TIME-1" },
+      )
+    );
+    assertEquals(error.code, "time_entry_future_date");
+    assertEquals(error.status, 422);
+    assertStringIncludes(error.message, "2026-08-26");
+    assertStringIncludes(error.message, "SWF-TIME-1");
+    assertEquals(
+      resolveTradeInvoiceTimeEntry(
+        { work_date: "2026-08-25", ...shift },
+        { required, today: "2026-08-25" },
+      )?.work_date,
+      "2026-08-25",
+    );
+    // With no `today` given the rule reads the clock, in Perth.
+    assertEquals(
+      refusal(() =>
+        resolveTradeInvoiceTimeEntry({ work_date: "2099-01-01", ...shift }, {
+          required,
+        })
+      ).code,
+      "time_entry_future_date",
+    );
+    assertEquals(
+      resolveTradeInvoiceTimeEntry({ work_date: perthToday(), ...shift }, {
+        required,
+      })?.work_date,
+      perthToday(),
+    );
+  });
+}
+
+Deno.test("time entry: today is the Perth calendar day, not the UTC one", () => {
+  // 16:30 UTC on 25 Aug is 00:30 on 26 Aug in Perth (UTC+8, no daylight saving).
+  assertEquals(perthToday(new Date("2026-08-25T16:30:00Z")), "2026-08-26");
+  assertEquals(perthToday(new Date("2026-08-25T15:59:00Z")), "2026-08-25");
+});
+
 Deno.test("time entry: a draft keeps what is well formed and refuses nothing", () => {
   assertEquals(
     draftTradeInvoiceTimeEntry({
@@ -276,6 +332,24 @@ Deno.test("time entry: a draft keeps what is well formed and refuses nothing", (
     },
     hours: null,
   });
+  // a day worked after today is dropped like any other field that is not
+  // valid: the times are kept, and no hours are set until the day is right
+  assertEquals(
+    draftTradeInvoiceTimeEntry({
+      work_date: "2026-08-26",
+      start_time: "07:00",
+      finish_time: "15:00",
+    }, "2026-08-25"),
+    {
+      columns: {
+        work_date: null,
+        start_time: "07:00",
+        finish_time: "15:00",
+        break_minutes: 0,
+      },
+      hours: null,
+    },
+  );
 });
 
 Deno.test("time entry: the clock's own record is read in Perth time and never invented", () => {
@@ -1413,4 +1487,361 @@ Deno.test("job list: the ops job detail read carries it, and the invoice line re
   assertStringIncludes(INDEX.slice(listAt, listAt + 2500), fields);
   const crewAt = INDEX.indexOf("case 'crew_charges_on_my_jobs': {");
   assertStringIncludes(INDEX.slice(crewAt, crewAt + 2500), fields);
+});
+
+// ── 4. The day worked is never after today, on the submit paths ─────────────
+
+for (const flagOn of [false, true]) {
+  const state = flagOn ? "flag on" : "flag off";
+
+  handlerTest(`generate_trade_invoice (${state}): a job card or an hours line dated after today is refused before anything is saved`, async () => {
+    const card = await callTradeAction(
+      "generate_trade_invoice",
+      submitBody([{
+        assignment_id: CARD_A,
+        work_date: "2099-01-01",
+        start_time: "07:00",
+        finish_time: "15:00",
+      }]),
+      { flagOn },
+    );
+    assertEquals(card.status, 422, JSON.stringify(card.body));
+    assertEquals(card.body.code, "time_entry_future_date");
+    assertEquals(card.body.saved, false);
+    assertEquals(card.writes, []);
+
+    const extra = await callTradeAction(
+      "generate_trade_invoice",
+      submitBody([], [{
+        type: "Labour",
+        job_id: JOB_A,
+        job_number: "SWF-TIME-1",
+        description: "Extra hours",
+        rate: 50,
+        work_date: "2099-01-01",
+        start_time: "07:00",
+        finish_time: "15:00",
+      }]),
+      { flagOn },
+    );
+    assertEquals(extra.status, 422, JSON.stringify(extra.body));
+    assertEquals(extra.body.code, "time_entry_future_date");
+    assertEquals(extra.writes, []);
+  });
+}
+
+// ── 5. Times saved on the job view (log_my_job_hours → my_hours) ────────────
+
+type Tables = Record<string, any[]>;
+
+// A small in-memory PostgREST stand-in: filters are applied to the seeded
+// rows, and insert, update, upsert and delete change them.
+function tableClient(tables: Tables, fail: Record<string, string> = {}) {
+  const from = (table: string) => {
+    const preds: Array<(row: any) => boolean> = [];
+    let op: "select" | "insert" | "update" | "upsert" | "delete" = "select";
+    let payload: any = null;
+    let conflict = "id";
+    let limitN: number | null = null;
+    const matched = () =>
+      (tables[table] ||= []).filter((row) => preds.every((p) => p(row)));
+    const run = () => {
+      const fault = fail[`${op} ${table}`];
+      if (fault) return { data: null, error: { message: fault } };
+      if (op === "insert") {
+        const rows = (Array.isArray(payload) ? payload : [payload]).map((
+          row: any,
+        ) => ({ id: `${table}-${(tables[table] ||= []).length + 1}`, ...row }));
+        tables[table].push(...rows);
+        return { data: rows, error: null };
+      }
+      if (op === "upsert") {
+        const existing = (tables[table] ||= []).find((row) =>
+          String(row[conflict]) === String(payload[conflict])
+        );
+        if (existing) Object.assign(existing, payload);
+        else tables[table].push({ ...payload });
+        return { data: [payload], error: null };
+      }
+      if (op === "update") {
+        const rows = matched();
+        for (const row of rows) Object.assign(row, payload);
+        return { data: rows, error: null };
+      }
+      if (op === "delete") {
+        const rows = matched();
+        tables[table] = tables[table].filter((row) => !rows.includes(row));
+        return { data: rows, error: null };
+      }
+      const rows = matched();
+      return { data: limitN == null ? rows : rows.slice(0, limitN), error: null };
+    };
+    const one = () => {
+      const out = run();
+      return Promise.resolve({
+        data: Array.isArray(out.data) ? out.data[0] ?? null : out.data,
+        error: out.error,
+      });
+    };
+    const api: any = {
+      select: () => api,
+      order: () => api,
+      or: () => api,
+      not: () => api,
+      limit(n: number) {
+        limitN = n;
+        return api;
+      },
+      eq(column: string, value: unknown) {
+        preds.push((row) =>
+          String((column === "is_ghost" ? row?.[column] ?? false : row?.[column]) ?? "") ===
+            String(value)
+        );
+        return api;
+      },
+      neq(column: string, value: unknown) {
+        preds.push((row) => String(row?.[column] ?? "") !== String(value));
+        return api;
+      },
+      is(column: string, value: unknown) {
+        preds.push((row) => (row?.[column] ?? null) === value);
+        return api;
+      },
+      in(column: string, values: unknown[]) {
+        preds.push((row) => values.map(String).includes(String(row?.[column] ?? "")));
+        return api;
+      },
+      gte(column: string, value: unknown) {
+        preds.push((row) => String(row?.[column] ?? "") >= String(value));
+        return api;
+      },
+      lte(column: string, value: unknown) {
+        preds.push((row) => String(row?.[column] ?? "") <= String(value));
+        return api;
+      },
+      insert(row: any) {
+        op = "insert";
+        payload = row;
+        return api;
+      },
+      update(row: any) {
+        op = "update";
+        payload = row;
+        return api;
+      },
+      upsert(row: any, opts?: { onConflict?: string }) {
+        op = "upsert";
+        payload = row;
+        conflict = opts?.onConflict || "id";
+        return api;
+      },
+      delete() {
+        op = "delete";
+        return api;
+      },
+      single: one,
+      maybeSingle: one,
+      then: (resolve: any, reject: any) => Promise.resolve(run()).then(resolve, reject),
+    };
+    return api;
+  };
+  return { from };
+}
+
+const jobViewTables = (): Tables => ({
+  users: [{
+    id: TRADE_ID,
+    org_id: ORG_ID,
+    role: "trade",
+    invoice_type: "hourly",
+    trade_details: {},
+  }],
+  jobs: [{
+    id: JOB_A,
+    org_id: ORG_ID,
+    type: "fencing",
+    job_number: "SWF-TIME-1",
+    status: "processing",
+    metadata: {},
+  }],
+  job_assignments: [{
+    id: CARD_A,
+    job_id: JOB_A,
+    user_id: TRADE_ID,
+    status: "scheduled",
+    role: "installer",
+    assignment_type: "install",
+    scheduled_date: "2026-08-25",
+    hours_worked: null,
+    invoiced_in: null,
+    is_ghost: false,
+    jobs: { id: JOB_A, type: "fencing", job_number: "SWF-TIME-1" },
+  }],
+  trade_rates: [{ user_id: TRADE_ID, hourly_rate: 50, effective_from: "2026-01-01" }],
+  job_assignment_logged_times: [],
+  job_events: [],
+});
+
+const jobViewTrade = {
+  id: TRADE_ID,
+  email: "tess@example.test",
+  orgId: ORG_ID,
+  role: "trade",
+  managedVerticals: [] as string[],
+  seeEverything: false,
+};
+const jobViewAccess = { orgId: ORG_ID, managedVerticals: [] as string[] };
+
+const logHours = (tables: Tables, body: Record<string, unknown>, fail = {}) =>
+  _tradeLogMyJobHoursForTest(
+    tableClient(tables, fail),
+    { jobId: JOB_A, ...body },
+    jobViewTrade as any,
+    jobViewAccess,
+  );
+
+const weekCards = async (tables: Tables, fail = {}) =>
+  (await myHours(
+    tableClient(tables, fail),
+    TRADE_ID,
+    new URLSearchParams({ week_ending: WEEK_END }),
+  )).assignments;
+
+Deno.test("log_my_job_hours: times typed on the job view are saved with the card's hours and my_hours returns them", async () => {
+  const tables = jobViewTables();
+  const res = await logHours(tables, {
+    work_date: "2026-08-25",
+    start_time: "07:10",
+    finish_time: "15:30",
+    break_minutes: 30,
+  });
+  // hours are the server's: 07:10 to 15:30 less 30 minutes, not rounded to
+  // the quarter hour
+  assertEquals(res.hours, 7.83);
+  const entry = {
+    work_date: "2026-08-25",
+    start_time: "07:10",
+    finish_time: "15:30",
+    break_minutes: 30,
+    hours: 7.83,
+  };
+  assertEquals(res.time_entry, entry);
+  assertEquals(tables.job_assignments[0].hours_worked, 7.83);
+  assertEquals(tables.job_assignments[0].status, "complete");
+  assertEquals(tables.job_assignment_logged_times.length, 1);
+  const saved = tables.job_assignment_logged_times[0];
+  assertEquals(
+    { assignment_id: saved.assignment_id, job_id: saved.job_id, user_id: saved.user_id },
+    { assignment_id: CARD_A, job_id: JOB_A, user_id: TRADE_ID },
+  );
+  const audit = tables.job_events.find((e) => e.event_type === "trade_hours_logged");
+  assertEquals(audit.detail_json.start_time, "07:10");
+  assertEquals(audit.detail_json.finish_time, "15:30");
+
+  // the read the Weekly Invoice card uses
+  const cards = await weekCards(tables);
+  assertEquals(cards.length, 1);
+  assertEquals(cards[0].hours, 7.83);
+  assertEquals(cards[0].logged_time_entry, entry);
+
+  // a re-log replaces the one saved row, never adds a second
+  const again = await logHours(tables, {
+    work_date: "2026-08-25",
+    start_time: "08:00",
+    finish_time: "12:00",
+    hours: 4,
+  });
+  assertEquals(again.hours, 4);
+  assertEquals(tables.job_assignment_logged_times.length, 1);
+  assertEquals((await weekCards(tables))[0].logged_time_entry, {
+    work_date: "2026-08-25",
+    start_time: "08:00",
+    finish_time: "12:00",
+    break_minutes: 0,
+    hours: 4,
+  });
+});
+
+Deno.test("log_my_job_hours: hours logged without times work as before and clear saved times", async () => {
+  const tables = jobViewTables();
+  await logHours(tables, {
+    work_date: "2026-08-25",
+    start_time: "07:00",
+    finish_time: "15:00",
+  });
+  const bare = await logHours(tables, { hours: 3.1 });
+  assertEquals(bare.hours, 3); // the quarter-hour rule of the bare door
+  assertEquals(bare.time_entry, null);
+  assertEquals(tables.job_assignments[0].hours_worked, 3);
+  assertEquals(tables.job_assignment_logged_times, []);
+  const cards = await weekCards(tables);
+  assertEquals(cards[0].hours, 3);
+  assertEquals(cards[0].logged_time_entry, null);
+});
+
+Deno.test("log_my_job_hours: a wrong or half-filled entry is refused and nothing is written", async () => {
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ work_date: "2099-01-01", start_time: "07:00", finish_time: "15:00" }, "time_entry_future_date"],
+    [{ work_date: "2026-08-25", start_time: "15:00", finish_time: "07:00" }, "time_entry_finish_before_start"],
+    [{ work_date: "2026-08-25", start_time: "07:00", finish_time: "15:00", hours: 9 }, "time_entry_hours_mismatch"],
+    [{ work_date: "2026-08-25", start_time: "07:00", hours: 8 }, "time_entry_required"],
+    [{ work_date: "2026-08-25", start_time: "7am", finish_time: "15:00" }, "time_entry_invalid"],
+  ];
+  for (const [body, code] of cases) {
+    const tables = jobViewTables();
+    const error = await assertRejects(() => logHours(tables, body)) as any;
+    assertEquals(error.status, 422, code);
+    assertEquals(error.body?.code, code);
+    assertEquals(tables.job_assignments[0].hours_worked, null, code);
+    assertEquals(tables.job_assignment_logged_times, [], code);
+    assertEquals(tables.job_events, [], code);
+  }
+});
+
+Deno.test("log_my_job_hours: when the times cannot be saved the card's hours are not changed", async () => {
+  const tables = jobViewTables();
+  await assertRejects(() =>
+    logHours(tables, {
+      work_date: "2026-08-25",
+      start_time: "07:00",
+      finish_time: "15:00",
+    }, { "upsert job_assignment_logged_times": "relation missing" })
+  );
+  assertEquals(tables.job_assignments[0].hours_worked, null);
+  assertEquals(tables.job_assignments[0].status, "scheduled");
+});
+
+Deno.test("my_hours: saved times are shown only while they still describe the card's hours", async () => {
+  const tables = jobViewTables();
+  await logHours(tables, {
+    work_date: "2026-08-25",
+    start_time: "07:00",
+    finish_time: "15:00",
+  });
+  // another writer (the office, the clock) changes the hours afterwards
+  tables.job_assignments[0].hours_worked = 6;
+  assertEquals((await weekCards(tables))[0].logged_time_entry, null);
+  tables.job_assignments[0].hours_worked = 8;
+  assertEquals((await weekCards(tables))[0].logged_time_entry?.start_time, "07:00");
+
+  // a failed read of the saved times never fails the hours view
+  const cards = await weekCards(tables, {
+    "select job_assignment_logged_times": "relation missing",
+  });
+  assertEquals(cards.length, 1);
+  assertEquals(cards[0].hours, 8);
+  assertEquals(cards[0].logged_time_entry, null);
+
+  // the pure rule
+  const row = {
+    work_date: "2026-08-25",
+    start_time: "07:00:00",
+    finish_time: "15:00",
+    break_minutes: null,
+    hours: "8",
+  };
+  assertEquals(loggedTimeEntryForCard(row, 8.004)?.finish_time, "15:00");
+  assertEquals(loggedTimeEntryForCard(row, 8.5), null);
+  assertEquals(loggedTimeEntryForCard(row, null), null);
+  assertEquals(loggedTimeEntryForCard(null, 8), null);
 });

@@ -1,5 +1,6 @@
 -- Trade invoice time entries (20261012180000): the four fields on a time
--- line, the stamping persist, the per-job list and the flag, off.
+-- line, the stamping persist, the per-job list, the flag, off, and the times
+-- saved on the job view.
 -- Everything below, including the second run of the migration, is rolled back.
 BEGIN;
 
@@ -278,6 +279,81 @@ BEGIN
 END;
 $$;
 
+-- 6b. Times saved on the job view: one row per job card, replaced on a
+--     re-log, held to the same shape, gone with its card, service role only.
+INSERT INTO public.job_assignments (id, job_id, user_id, status) VALUES
+  ('f3000000-0000-4000-8000-000000000001', 'f2000000-0000-4000-8000-000000000001',
+   'f1000000-0000-4000-8000-000000000001', 'complete');
+
+DO $$
+DECLARE
+  saved record;
+BEGIN
+  IF has_table_privilege('anon', 'public.job_assignment_logged_times', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')
+     OR has_table_privilege('authenticated', 'public.job_assignment_logged_times', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')
+     OR NOT has_table_privilege('service_role', 'public.job_assignment_logged_times', 'SELECT')
+     OR NOT has_table_privilege('service_role', 'public.job_assignment_logged_times', 'INSERT')
+     OR NOT has_table_privilege('service_role', 'public.job_assignment_logged_times', 'UPDATE')
+     OR NOT has_table_privilege('service_role', 'public.job_assignment_logged_times', 'DELETE') THEN
+    RAISE EXCEPTION 'job_assignment_logged_times must be the service role''s only';
+  END IF;
+  IF NOT (SELECT relrowsecurity FROM pg_class
+          WHERE oid = 'public.job_assignment_logged_times'::regclass) THEN
+    RAISE EXCEPTION 'job_assignment_logged_times must have row level security on';
+  END IF;
+
+  INSERT INTO public.job_assignment_logged_times (
+    assignment_id, job_id, user_id, work_date, start_time, finish_time, break_minutes, hours
+  ) VALUES (
+    'f3000000-0000-4000-8000-000000000001', 'f2000000-0000-4000-8000-000000000001',
+    'f1000000-0000-4000-8000-000000000001', '2026-10-06', '07:00', '15:30', 30, 8
+  );
+  -- a re-log replaces the card's one row (ops-api upserts on assignment_id)
+  INSERT INTO public.job_assignment_logged_times (
+    assignment_id, job_id, user_id, work_date, start_time, finish_time, hours
+  ) VALUES (
+    'f3000000-0000-4000-8000-000000000001', 'f2000000-0000-4000-8000-000000000001',
+    'f1000000-0000-4000-8000-000000000001', '2026-10-07', '08:00', '12:00', 4
+  )
+  ON CONFLICT (assignment_id) DO UPDATE
+  SET work_date = EXCLUDED.work_date, start_time = EXCLUDED.start_time,
+      finish_time = EXCLUDED.finish_time, break_minutes = EXCLUDED.break_minutes,
+      hours = EXCLUDED.hours;
+  SELECT * INTO saved FROM public.job_assignment_logged_times
+  WHERE assignment_id = 'f3000000-0000-4000-8000-000000000001';
+  IF (SELECT count(*) FROM public.job_assignment_logged_times
+      WHERE assignment_id = 'f3000000-0000-4000-8000-000000000001') <> 1
+     OR saved.work_date <> DATE '2026-10-07' OR saved.start_time <> '08:00'
+     OR saved.finish_time <> '12:00' OR saved.break_minutes <> 0 OR saved.hours <> 4 THEN
+    RAISE EXCEPTION 'a re-log did not replace the card''s saved times: %', row_to_json(saved);
+  END IF;
+
+  BEGIN
+    UPDATE public.job_assignment_logged_times
+    SET start_time = '15:00', finish_time = '07:00'
+    WHERE assignment_id = 'f3000000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'saved times with a finish before the start were stored';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+  BEGIN
+    UPDATE public.job_assignment_logged_times
+    SET start_time = '7:00'
+    WHERE assignment_id = 'f3000000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'a saved start time that is not HH:MM was stored';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+
+  -- saved times never outlive their card
+  DELETE FROM public.job_assignments WHERE id = 'f3000000-0000-4000-8000-000000000001';
+  IF EXISTS (SELECT 1 FROM public.job_assignment_logged_times
+             WHERE assignment_id = 'f3000000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'saved times outlived their job card';
+  END IF;
+END;
+$$;
+
 -- 7. A second run changes nothing, and never turns an ON flag back off.
 UPDATE public.feature_flags
 SET enabled = true
@@ -294,6 +370,11 @@ BEGIN
   IF (SELECT count(*) FROM pg_constraint
       WHERE conname = 'trade_invoice_lines_time_entry_check') <> 1 THEN
     RAISE EXCEPTION 'a second run of the migration duplicated the time entry check';
+  END IF;
+  IF to_regclass('public.job_assignment_logged_times') IS NULL
+     OR has_table_privilege('anon', 'public.job_assignment_logged_times', 'SELECT')
+     OR has_table_privilege('authenticated', 'public.job_assignment_logged_times', 'SELECT') THEN
+    RAISE EXCEPTION 'a second run of the migration lost or opened the saved times table';
   END IF;
   IF (SELECT count(*) FROM public.job_trade_time_entries
       WHERE job_id = 'f2000000-0000-4000-8000-000000000001') <> 2 THEN

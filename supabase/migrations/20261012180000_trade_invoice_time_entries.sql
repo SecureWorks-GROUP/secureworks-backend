@@ -16,6 +16,13 @@
 --      missing entry; when on, a time line without them is refused
 --      `time_entry_required`. Turned on only on the owner's word, after the
 --      trade app screens are live.
+--   5. Table job_assignment_logged_times: the times a trade typed when they
+--      logged a job card's hours on the job view (ops-api log_my_job_hours),
+--      one row per card, so the Weekly Invoice card can open on them. It is
+--      its own table, not columns on job_assignments, because every
+--      job_assignments column is inside the make-safe fact hash
+--      (stamp_makesafe_fact_identity_v1): new columns there would move the
+--      fact version of every make-safe card on its next write.
 --
 -- start_time and finish_time are text 'HH:MM' (24-hour, Perth local), held to
 -- that shape by a CHECK, so every `select *` read of a line already answers
@@ -174,3 +181,38 @@ WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags
   WHERE flag_name = 'trade_invoice_time_entry_required_v1'
 );
+
+-- ── 5. Times saved on the job view ──────────────────────────────────────────
+-- One row per job card. `hours` is the hours those times make; ops-api shows
+-- the row only while it still equals the card's hours_worked, so a later
+-- change to the hours by any other writer never rides stale times.
+CREATE TABLE IF NOT EXISTS public.job_assignment_logged_times (
+  assignment_id uuid PRIMARY KEY
+    REFERENCES public.job_assignments(id) ON DELETE CASCADE,
+  job_id uuid NOT NULL,
+  user_id uuid NOT NULL,
+  work_date date NOT NULL,
+  start_time text NOT NULL,
+  finish_time text NOT NULL,
+  break_minutes integer NOT NULL DEFAULT 0,
+  hours numeric NOT NULL,
+  source text,
+  logged_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT job_assignment_logged_times_entry_check CHECK (
+    start_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+    AND finish_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+    AND finish_time COLLATE "C" > start_time COLLATE "C"
+    AND break_minutes >= 0
+    AND hours > 0
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_assignment_logged_times_job
+  ON public.job_assignment_logged_times (job_id, work_date);
+
+ALTER TABLE public.job_assignment_logged_times ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.job_assignment_logged_times FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.job_assignment_logged_times TO service_role;
+
+COMMENT ON TABLE public.job_assignment_logged_times IS
+  'Trade invoice time entries (20261012180000): the date worked, start and finish time (HH:MM, Perth) and break a trade typed when logging a job card''s hours on the job view (ops-api log_my_job_hours). One row per job card, replaced on a re-log. Read by ops-api my_hours as logged_time_entry. Service role only.';

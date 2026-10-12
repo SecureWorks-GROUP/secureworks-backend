@@ -18,7 +18,7 @@ Every invoice line that bills a trade's time carries:
 
 | Field | Form | Notes |
 | --- | --- | --- |
-| `work_date` | `YYYY-MM-DD` | The Perth calendar day worked |
+| `work_date` | `YYYY-MM-DD` | The Perth calendar day worked. Never after today, Perth |
 | `start_time` | `HH:MM`, 24-hour | Perth local time |
 | `finish_time` | `HH:MM`, 24-hour | After `start_time` on the same `work_date` |
 | `break_minutes` | whole minutes | Optional, default 0 |
@@ -28,6 +28,9 @@ Every invoice line that bills a trade's time carries:
   0.01 away is refused.
 - One line is one job on one day. Two days on a job is two lines. A shift
   across midnight is two lines.
+- The trade types every time line's date and times. The trade app pre-fills
+  none of them and no longer sends any `source: 'extra_day'` value; the server
+  never read that value, so nothing here depends on it.
 - A line is a time line when its type is Labour, Fencing, Patio, Make Safe or
   General Labour (`TRADE_INVOICE_TIME_LINE_TYPES`, the same list the existing
   hours guard reads). Materials, travel, equipment, commission, work order and
@@ -50,6 +53,7 @@ Nothing is written before a refusal.
 | --- | --- | --- | --- |
 | `time_entry_required` | a time line has none of the three fields | accepted | refused |
 | `time_entry_required` | a time line has some but not all three | refused | refused |
+| `time_entry_future_date` | `work_date` is after today, Perth | refused | refused |
 | `time_entry_finish_before_start` | finish is not after start | refused | refused |
 | `time_entry_hours_mismatch` | client hours differ from the computed hours by more than 0.01 | refused | refused |
 | `time_entry_invalid` | a malformed date, time or break, or a break as long as the shift | refused | refused |
@@ -63,6 +67,11 @@ Each invoice line carries `work_date`, `start_time`, `finish_time` and
 `list_trade_invoice_lines`, `list_trade_invoices` and
 `crew_charges_on_my_jobs`. `start_time` and `finish_time` are stored as text
 `HH:MM`, so every read answers the contract form as it stands.
+
+`my_hours` (the read the Weekly Invoice card uses) carries, on each
+`assignments[]` card, `logged_time_entry`: `{ work_date, start_time,
+finish_time, break_minutes, hours }` or `null`. See "Times saved on the job
+view" below.
 
 ## The flag
 
@@ -95,13 +104,14 @@ work order, commission, materials, travel, equipment and other extras
 (including the named crew `wo_labour_lines` inside a work order line).
 `review_crew_charge` and `acknowledge_invoice_line` change a saved line's
 review fields only. `log_my_job_hours` writes hours on the job card, not an
-invoice line, and is unchanged.
+invoice line; see "Times saved on the job view".
 
 ### Decisions worth knowing
 
 - **Drafts are never refused.** A draft is a working copy: each field is kept
-  when well formed and dropped when not, a half-filled entry is kept, and a
-  complete entry sets the line's hours. Submit is where an entry is required
+  when well formed and dropped when not (a day worked after today is dropped
+  the same way), a half-filled entry is kept, and a complete entry sets the
+  line's hours. Submit is where an entry is required
   and checked. Drafts are also not in a job's list.
 - **Auto-collected lanes (3 and 6) take the system's own record.** Nobody types
   on those lanes, so the entry is the clock's stamps (lane 3) or the
@@ -115,6 +125,31 @@ invoice line, and is unchanged.
   times. Their four fields stay null.
 - **The Xero bill is unchanged in wording.** A job card with an entry is one
   bill line per day rather than one per job, with the same rate.
+
+## Times saved on the job view (`log_my_job_hours`)
+
+A trade who logs a job card's hours on the job view may send the same four
+fields. Body: `{ job_id, work_date, start_time, finish_time, break_minutes?,
+hours? }`.
+
+- All three of `work_date`, `start_time`, `finish_time`, or none. With them the
+  hours are the server's (finish minus start minus break, 2 decimal places, not
+  rounded to the quarter hour); a sent `hours` more than 0.01 away is refused.
+  The same refusal codes as an invoice line apply, HTTP 422, nothing written.
+- The times are stored with that hours record: table
+  `job_assignment_logged_times`, one row per job card, replaced on a re-log. It
+  is its own table because every `job_assignments` column is inside the
+  make-safe fact hash.
+- Hours logged without times work exactly as before (0.25 to 24, quarter hour)
+  and clear any saved times.
+- This door never requires times, whatever the flag says: the flag is about
+  invoice lines.
+- Response adds `time_entry`: the saved entry, or `null`.
+- `my_hours` returns it per card as `logged_time_entry`, only while it still
+  describes the card's hours: if the office or the clock changes
+  `hours_worked` afterwards, the saved times are stale and read `null`.
+- The server does not copy saved times onto an invoice line. The Weekly Invoice
+  card can open on them, and the trade submits them as the line's entry.
 
 ## Stamped against the job
 
@@ -157,11 +192,9 @@ this change with the fields sent.
 Rollback keeps the recorded times: see
 `supabase/rollbacks/20261012180000_trade_invoice_time_entries_down.sql`.
 
-## Work orders back end (branch `fm/work-orders-backend-20261006`)
+## Work orders back end
 
-That branch is not merged and edits the same file. It does not touch the
-invoice persist functions; expect textual conflicts only where both append:
-the end of `scripts/edge-function-schema-requirements.txt`, the version list
-in `scripts/test/test-edge-schema-preflight.sh`, and the `jobDetail` return in
-`ops-api/index.ts`. Keep both sides. Its migration is `20261012090000`; this
-one is `20261012180000`.
+Merged first (PR 1022, migration `20261012130000`). It patches
+`persist_weekly_trade_invoice_v1` in place to carry work order variations
+across a draft replacement; `persist_weekly_trade_invoice_v2` here calls v1,
+so both hold. This migration is `20261012180000`, after it.

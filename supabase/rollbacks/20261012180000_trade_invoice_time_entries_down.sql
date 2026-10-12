@@ -4,7 +4,9 @@
 -- persist wrapper and the enforcement flag go. The four columns on
 -- trade_invoice_lines (work_date, start_time, finish_time, break_minutes),
 -- their check and their index STAY, because the times trades entered are kept
--- nowhere else and a rollback must not destroy them.
+-- nowhere else and a rollback must not destroy them. Table
+-- job_assignment_logged_times (times saved on the job view) stays for the
+-- same reason; nothing reads it once the matching ops-api is rolled back.
 --
 -- Roll the matching ops-api back first: it calls
 -- persist_weekly_trade_invoice_v2. persist_weekly_trade_invoice_v1 is

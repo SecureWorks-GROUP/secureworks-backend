@@ -12,13 +12,14 @@
 //   break_minutes  whole minutes, optional, default 0
 //   hours = (finish_time - start_time) - break_minutes, computed here
 // One line is one job on one day. A shift across midnight is two lines.
+// The day worked is never after today, Perth: nobody bills a day not yet worked.
 // Materials, travel, equipment, commission and other lines carry none of this.
 //
 // Enforcement is behind feature flag TRADE_INVOICE_TIME_ENTRY_FLAG, seeded
 // off: while off the fields are stored when sent and a line without them is
 // accepted; when on, a time line without them is refused `time_entry_required`.
-// A wrong entry (finish not after start, hours that disagree) is refused in
-// both states. Contract: docs/trade-invoice-time-entries-2026-10-12.md.
+// A wrong entry (finish not after start, hours that disagree, a day worked
+// that is after today) is refused in both states. Contract: docs/trade-invoice-time-entries-2026-10-12.md.
 
 export const TRADE_INVOICE_TIME_ENTRY_FLAG =
   "trade_invoice_time_entry_required_v1";
@@ -63,6 +64,7 @@ export type TradeInvoiceTimeEntryColumns = {
 export type TradeInvoiceTimeEntryErrorCode =
   | "time_entry_required"
   | "time_entry_invalid"
+  | "time_entry_future_date"
   | "time_entry_finish_before_start"
   | "time_entry_hours_mismatch"
   | "time_entry_overlap";
@@ -132,6 +134,34 @@ function hoursFromMinutes(minutes: number): number {
   return Math.round((minutes / 60) * 100) / 100;
 }
 
+const perthClockFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Australia/Perth",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+function perthClock(value: unknown): { date: string; time: string } | null {
+  if (!present(value)) return null;
+  const instant = new Date(String(value));
+  if (Number.isNaN(instant.getTime())) return null;
+  const parts = perthClockFormatter.formatToParts(instant);
+  const part = (type: string) =>
+    parts.find((entry) => entry.type === type)?.value || "";
+  return {
+    date: `${part("year")}-${part("month")}-${part("day")}`,
+    time: `${part("hour")}:${part("minute")}`,
+  };
+}
+
+/** Today's calendar day in Perth, YYYY-MM-DD. */
+export function perthToday(now: Date = new Date()): string {
+  return perthClock(now.toISOString())?.date ?? now.toISOString().slice(0, 10);
+}
+
 function lineLabel(label: string | undefined): string {
   const text = String(label ?? "").trim();
   return text ? `the ${text} line` : "a time line";
@@ -145,11 +175,17 @@ function lineLabel(label: string | undefined): string {
  * a missing or half-filled entry is `time_entry_required`, a malformed one
  * `time_entry_invalid`, a finish not after the start
  * `time_entry_finish_before_start`, and a client hours figure more than 0.01
- * away from the computed hours `time_entry_hours_mismatch`.
+ * away from the computed hours `time_entry_hours_mismatch`, and a day worked
+ * after today in Perth `time_entry_future_date`. `today` is for tests.
  */
 export function resolveTradeInvoiceTimeEntry(
   raw: unknown,
-  opts: { required: boolean; clientHours?: unknown; label?: string },
+  opts: {
+    required: boolean;
+    clientHours?: unknown;
+    label?: string;
+    today?: string;
+  },
 ): TradeInvoiceTimeEntry | null {
   const line = raw && typeof raw === "object"
     ? raw as Record<string, unknown>
@@ -183,6 +219,13 @@ export function resolveTradeInvoiceTimeEntry(
     throw new TradeInvoiceTimeEntryError(
       "time_entry_invalid",
       `The date worked on ${where} is not a valid date.`,
+    );
+  }
+  // YYYY-MM-DD compares as text.
+  if (workDate > (opts.today || perthToday())) {
+    throw new TradeInvoiceTimeEntryError(
+      "time_entry_future_date",
+      `The date worked on ${where} (${workDate}) is after today. Enter the day the work was done.`,
     );
   }
   const start = parseClockTime(line.start_time);
@@ -253,16 +296,19 @@ export function tradeInvoiceTimeEntryColumns(
 
 /**
  * Draft lines are a working copy: nothing is refused. Each field is kept when
- * it is well formed and dropped when it is not, a half-filled entry is kept as
- * it stands, and `hours` is computed only for a complete, valid entry.
+ * it is well formed and dropped when it is not (a day worked after today is
+ * dropped the same way), a half-filled entry is kept as it stands, and `hours`
+ * is computed only for a complete, valid entry.
  */
 export function draftTradeInvoiceTimeEntry(
   raw: unknown,
+  today: string = perthToday(),
 ): { columns: TradeInvoiceTimeEntryColumns; hours: number | null } {
   const line = raw && typeof raw === "object"
     ? raw as Record<string, unknown>
     : {};
-  const workDate = parseWorkDate(line.work_date);
+  let workDate = parseWorkDate(line.work_date);
+  if (workDate && workDate > today) workDate = null;
   const start = parseClockTime(line.start_time);
   let finish = parseClockTime(line.finish_time);
   // The table refuses a finish that is not after the start; keep the start.
@@ -284,29 +330,6 @@ export function draftTradeInvoiceTimeEntry(
     hours: workDate && workedMinutes > 0
       ? hoursFromMinutes(workedMinutes)
       : null,
-  };
-}
-
-const perthClockFormatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Australia/Perth",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-function perthClock(value: unknown): { date: string; time: string } | null {
-  if (!present(value)) return null;
-  const instant = new Date(String(value));
-  if (Number.isNaN(instant.getTime())) return null;
-  const parts = perthClockFormatter.formatToParts(instant);
-  const part = (type: string) =>
-    parts.find((entry) => entry.type === type)?.value || "";
-  return {
-    date: `${part("year")}-${part("month")}-${part("day")}`,
-    time: `${part("hour")}:${part("minute")}`,
   };
 }
 
@@ -471,4 +494,46 @@ export async function loadJobTradeTimeEntries(
     console.error("[ops-api] job_trade_time_entries read threw:", message);
     return { entries: null, error: message };
   }
+}
+
+// ── Times saved on the job view (log_my_job_hours) ──────────────────────────
+// Table public.job_assignment_logged_times: one row per job card, the times the
+// trade typed when they logged the card's hours. It sits beside
+// job_assignments.hours_worked rather than on that table, because every
+// job_assignments column is inside the make-safe fact hash. my_hours returns
+// it as `logged_time_entry` so the Weekly Invoice card can open on the trade's
+// own saved times.
+
+export const JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS =
+  "assignment_id, work_date, start_time, finish_time, break_minutes, hours";
+
+/**
+ * The saved times for a job card, or null. They are returned only while they
+ * still describe the card's hours: when the hours were changed since by any
+ * other writer (the clock, the office, a bare-hours log), the saved times are
+ * stale and are not shown.
+ */
+export function loggedTimeEntryForCard(
+  row: unknown,
+  cardHours: unknown,
+): TradeInvoiceTimeEntry | null {
+  if (!row || typeof row !== "object") return null;
+  const saved = row as Record<string, unknown>;
+  const workDate = parseWorkDate(saved.work_date);
+  const start = parseClockTime(saved.start_time);
+  const finish = parseClockTime(saved.finish_time);
+  const hours = Number(saved.hours);
+  if (!workDate || !start || !finish || !Number.isFinite(hours)) return null;
+  if (!present(cardHours)) return null;
+  const current = Number(cardHours);
+  if (!Number.isFinite(current) || Math.abs(current - hours) > 0.01) {
+    return null;
+  }
+  return {
+    work_date: workDate,
+    start_time: start.text,
+    finish_time: finish.text,
+    break_minutes: parseBreakMinutes(saved.break_minutes) ?? 0,
+    hours,
+  };
 }
