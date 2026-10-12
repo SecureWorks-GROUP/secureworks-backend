@@ -4251,8 +4251,10 @@ fails loudly. Every crew-pay read or write (`my_work_orders`,
 `kind = 'crew'`; a new one must too. Only the users in
 `work_order_settings.approver_user_ids` (Shaun) approve, never a role. Labour is
 stamped onto `trade_invoice_lines.job_work_order_id` by trigger at invoice
-submit; never set it from code. Variation emails and the draft backfill are
-behind flags seeded off. Contract and API: `docs/job-work-orders-v1.md`.
+submit, and by `approve_job_work_order` for labour invoiced before the approval;
+never set it from code. Variation emails, the draft backfill and approval named
+only by the `x-sw-actor` header (the terminal) are behind flags seeded off.
+Contract and API: `docs/job-work-orders-v1.md`.
 
 ## Maintaining this file
 
