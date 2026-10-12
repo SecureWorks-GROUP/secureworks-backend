@@ -5550,7 +5550,9 @@ export async function runDeterministicIntake(
     // The stripped fallback is visible and source-accounted but deliberately
     // non-authoritative. Exact/manual replay must not turn the same unresolved
     // persistence failure into a job mint; a reviewed correction must clear or
-    // replace this decision before the obligation can advance.
+    // replace this decision before the obligation can advance. The two such
+    // corrections are the exact recovery target and a fallback released by
+    // readSourcePersistRecoveryGate.
     if (
       row.last_decision_reason ===
         "deterministic source_persist_failed case_insert"

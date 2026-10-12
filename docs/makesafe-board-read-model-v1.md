@@ -454,8 +454,11 @@ Distinct source-issue rows are aggregated per physical source under the live
 every reason in stable severity/reason order instead of failing or selecting one
 arbitrarily. An exact non-authoritative `source_persist_failed case_insert`
 fallback may expose its validated raw work-order and purchase-order references
-for display only; it remains human-review-only with job and draft auto-creation
-disabled.
+for display only; the card itself stays human-review-only (`auto_create_job` and
+`auto_create_draft` false). The ordinary intake scan may still recover such a
+row for an adapter on `RELEASED_SOURCE_PERSIST_FALLBACK_ADAPTERS`; that release
+is owned by `AGENTS.md`, "A New Intake Adapter Must Be Admitted By The Database
+In The Same PR".
 
 ## Trade projection
 
