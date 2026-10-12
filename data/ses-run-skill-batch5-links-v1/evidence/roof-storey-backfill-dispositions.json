@@ -1,0 +1,302 @@
+[
+  {
+    "job_number": "SWMS-261016",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261018",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261019",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261022",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261049",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261079",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261081",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261113",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261114",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261116",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-261123",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26618",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26632",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26658",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26660",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26706",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26709",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26713",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26715",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26719",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26720",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26721",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26727",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26729",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26735",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26736",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26742",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26754",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26759",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26762",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26763",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26773",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26783",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26786",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26793",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26795",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26803",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26805",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26810",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26814",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26844",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26847",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26848",
+    "disposition": "hold_competing_storey_signal",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26849",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26928",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26930",
+    "disposition": "refused_no_sealed_price",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26934",
+    "disposition": "write",
+    "storeys": "single",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26957",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26980",
+    "disposition": "write",
+    "storeys": "double",
+    "reason": null
+  },
+  {
+    "job_number": "SWMS-26998",
+    "disposition": "no_fact",
+    "storeys": null,
+    "reason": null
+  }
+]
