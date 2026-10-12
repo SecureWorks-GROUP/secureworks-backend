@@ -280,6 +280,8 @@ import {
   dispatchValueIncGst,
   dispatchWorkType,
   isDispatchListRequested,
+  isPersonWrittenJobNote,
+  JOB_NOTE_EVENT_TYPES,
   projectDispatchJobNote,
   stripDispatchListAliases,
 } from './dispatch_job_list.ts'
@@ -15643,7 +15645,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       // Trade<->ops comms thread notes (job_events). detail_json needed so system
       // markers can be excluded from the count (they must never light the badge).
       readPipelineEnrichmentRows(jobIds, 'job_events', (chunkIds) =>
-        client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', ['note', 'note_added', 'site_note'])),
+        client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', JOB_NOTE_EVENT_TYPES)),
       stageTruth
         ? readPipelineEnrichmentRows(jobIds, 'job_service_reports', (chunkIds) =>
           client.from('job_service_reports').select('id, job_id, status, submitted_at').in('job_id', chunkIds))
@@ -15748,8 +15750,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   // MAKESAFE_AGENT_REPLY system markers). Lights the kanban comms indicator.
   const commsNotesMap: Record<string, number> = {}
   for (const ev of (commsNotesRes.data || [])) {
-    const body = ev?.detail_json?.text ?? ev?.detail_json?.note ?? ''
-    if (noteIsSystemMarker(body)) continue
+    if (!isPersonWrittenJobNote(ev)) continue
     commsNotesMap[ev.job_id] = (commsNotesMap[ev.job_id] || 0) + 1
   }
 
@@ -15922,34 +15923,43 @@ export const _pipelineForTest = pipeline
 // Every note on a job, newest first (docs/dispatch-slice-1-read-contract.md).
 // job_detail.events is the newest 50 events of every kind, so a busy job's older
 // notes fall outside it. A pure read: none of job_detail's annotation side effect.
-// System markers are left out by the rule comms_notes_count uses, so the list
-// and that count agree.
+// The event types and the marker rule are the ones comms_notes_count uses
+// (JOB_NOTE_EVENT_TYPES, isPersonWrittenJobNote), so the list's count and the
+// notes returned here agree on every job.
 async function jobNotes(client: any, jobRef: string) {
   const ref = String(jobRef || '').trim()
-  const isJobNumber = /^SW[A-Z]+-\d+$/i.test(ref)
+  if (!ref) throw new ApiError('jobId required', 400)
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)
-  if (!isJobNumber && !isUuid) throw new ApiError('jobId required', 400)
 
+  // Anything that is not a job id is a job number, matched whole against the
+  // stored number: never by shape (live numbers include SW1346 and
+  // SWF-PDF-BUCKET) and never by pattern (`_` is a LIKE wildcard). Stored
+  // numbers are upper case, so a lower-case reference is tried again in upper
+  // case, as the old case-blind match allowed.
+  const findJobId = async (column: 'id' | 'job_number', value: string) => {
+    const { data, error } = await client.from('jobs').select('id')
+      .eq('org_id', DEFAULT_ORG_ID).eq(column, value).limit(1)
+    if (error) throw error
+    return data?.[0]?.id || null
+  }
+  let jobId = await findJobId(isUuid ? 'id' : 'job_number', ref)
+  if (!jobId && !isUuid && ref !== ref.toUpperCase()) {
+    jobId = await findJobId('job_number', ref.toUpperCase())
+  }
   // An unknown job is a 404, never an empty list: "no notes" must mean the
   // job was found and has none.
-  const jobLookup = client.from('jobs').select('id').eq('org_id', DEFAULT_ORG_ID)
-  const { data: found, error: jobError } = await (isJobNumber
-    ? jobLookup.ilike('job_number', ref)
-    : jobLookup.eq('id', ref)).limit(1)
-  if (jobError) throw jobError
-  const jobId = found?.[0]?.id
   if (!jobId) throw new ApiError(`Job ${ref} not found`, 404)
 
   const rows = await _fetchAllRows<any>(
     () => client.from('job_events')
       .select('id, user_id, detail_json, created_at, users:user_id(name)')
       .eq('job_id', jobId)
-      .eq('event_type', 'note')
+      .in('event_type', JOB_NOTE_EVENT_TYPES)
       .order('created_at', { ascending: false }),
     'job_notes',
     'id',
   )
-  const notes = rows.map(projectDispatchJobNote).filter((note) => !noteIsSystemMarker(note.text))
+  const notes = rows.filter(isPersonWrittenJobNote).map(projectDispatchJobNote)
   return { job_id: jobId, notes, total: notes.length }
 }
 

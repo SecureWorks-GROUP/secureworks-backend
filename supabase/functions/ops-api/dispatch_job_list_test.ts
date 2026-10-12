@@ -23,6 +23,8 @@ import {
   dispatchValueIncGst,
   dispatchWorkType,
   isDispatchListRequested,
+  isPersonWrittenJobNote,
+  JOB_NOTE_EVENT_TYPES,
   projectDispatchJobNote,
 } from "./dispatch_job_list.ts";
 import { buildAgentReplyBody } from "./makesafe_draft_notes.ts";
@@ -106,6 +108,7 @@ function makeClient(tables: Record<string, Row[]>) {
     eq: Array<[string, unknown]>;
     neq: Array<[string, unknown]>;
     in: Array<[string, unknown[]]>;
+    ilike: Array<[string, string]>;
     or: string[];
     ranged: boolean;
   }> = [];
@@ -117,11 +120,12 @@ function makeClient(tables: Record<string, Row[]>) {
       eq: [] as Array<[string, unknown]>,
       neq: [] as Array<[string, unknown]>,
       in: [] as Array<[string, unknown[]]>,
+      ilike: [] as Array<[string, string]>,
       or: [] as string[],
       ranged: false,
     };
     reads.push(read);
-    const ilike: Array<[string, string]> = [];
+    const ilike = read.ilike;
     const orders: Array<[string, boolean]> = [];
     let rowLimit: number | null = null;
 
@@ -783,6 +787,80 @@ Deno.test("job_notes: a job number resolves, and a job with no notes is an empty
   assertEquals(empty, { job_id: jobId(3), notes: [], total: 0 });
 });
 
+// The job number shapes the live Dispatch list returns that are not letters,
+// a hyphen, then digits (7 of 315 on 12 Oct 2026).
+const ODD_JOB_NUMBERS = ["SW1346", "SWF-PDF-BUCKET", "SWG-20260713-BE"];
+
+Deno.test("job_notes: a job number of any stored shape resolves, by the whole number only", async () => {
+  const fixture = notesFixture();
+  ODD_JOB_NUMBERS.forEach((jobNumber, index) => {
+    fixture.jobs.push({
+      id: jobId(10 + index),
+      org_id: ORG_ID,
+      job_number: jobNumber,
+    });
+    fixture.job_events.push({
+      id: `odd-${index}`,
+      job_id: jobId(10 + index),
+      user_id: null,
+      event_type: "note",
+      detail_json: { text: `Note on ${jobNumber}` },
+      created_at: "2026-10-12T00:00:00.000Z",
+      users: null,
+    });
+  });
+  // Another org's job with the same number is never the answer.
+  fixture.jobs.push({
+    id: jobId(20),
+    org_id: "00000000-0000-0000-0000-00000000ffff",
+    job_number: "SW9999",
+  });
+
+  for (const [index, jobNumber] of ODD_JOB_NUMBERS.entries()) {
+    const { client, reads } = makeClient(fixture);
+    const result = await _jobNotesForTest(client, ` ${jobNumber} `);
+    assertEquals(result.job_id, jobId(10 + index));
+    assertEquals(result.notes.map((note: any) => note.text), [
+      `Note on ${jobNumber}`,
+    ]);
+    // Matched with eq on the stored number: no pattern read at all.
+    assert(reads.every((read) => read.ilike.length === 0));
+    assert(
+      reads.some((read) =>
+        read.table === "jobs" &&
+        read.eq.some(([column, value]) =>
+          column === "job_number" && value === jobNumber
+        )
+      ),
+    );
+  }
+  const lowerCase = await _jobNotesForTest(
+    makeClient(fixture).client,
+    "swf-pdf-bucket",
+  );
+  assertEquals(lowerCase.job_id, jobId(11));
+
+  // Not a prefix, not a part, not a LIKE pattern, not another org's number.
+  for (
+    const reference of [
+      "SW134",
+      "SW13466",
+      "PDF-BUCKET",
+      "SWF-PDF-BUCKE_",
+      "SWF_PDF_BUCKET",
+      "SW%",
+      "SWF-100",
+      "SW9999",
+    ]
+  ) {
+    const missing = await assertRejects(
+      () => _jobNotesForTest(makeClient(fixture).client, reference),
+      ApiError,
+    );
+    assertEquals(missing.status, 404, reference);
+  }
+});
+
 Deno.test("job_notes: every note comes back past the 1000-row ceiling", async () => {
   const fixture = notesFixture();
   for (let index = 0; index < 1100; index++) {
@@ -802,19 +880,225 @@ Deno.test("job_notes: every note comes back past the 1000-row ceiling", async ()
   assertEquals(result.notes[0].text, "Bulk 1099");
 });
 
-Deno.test("job_notes: an unknown job is a 404 and a bad reference a 400, never an empty list", async () => {
-  const missing = await assertRejects(
-    () => _jobNotesForTest(makeClient(notesFixture()).client, jobId(99)),
-    ApiError,
-  );
-  assertEquals(missing.status, 404);
+Deno.test("job_notes: an unknown job is a 404 and a missing reference a 400, never an empty list", async () => {
+  // A reference that is not a job id is read as a job number, so one that
+  // matches no stored number is an unknown job.
+  for (const reference of [jobId(99), "not-a-job", "12345"]) {
+    const missing = await assertRejects(
+      () => _jobNotesForTest(makeClient(notesFixture()).client, reference),
+      ApiError,
+    );
+    assertEquals(missing.status, 404, reference);
+  }
 
-  for (const reference of ["", "not-a-job", "12345"]) {
+  for (const reference of ["", "   "]) {
     const bad = await assertRejects(
       () => _jobNotesForTest(makeClient(notesFixture()).client, reference),
       ApiError,
     );
     assertEquals(bad.status, 400);
+  }
+});
+
+// ── The note count on a card and the notes under it ─────────────────────────
+
+Deno.test("note rule: the three note event types, less the pack-sent and agent-reply markers", () => {
+  assertEquals(JOB_NOTE_EVENT_TYPES, ["note", "note_added", "site_note"]);
+  const packSent = buildPackSentMarkerText({
+    invoiceNumber: "INV-0835",
+    to: "builder@example.test",
+    nowIso: "2026-10-12T03:00:00.000Z",
+    messageId: "m1",
+  });
+  const agentReply = buildAgentReplyBody("Report wording revised");
+
+  for (
+    const detail_json of [
+      { text: "Gate is locked" },
+      { note: "Older key" },
+      { message: "Only a message key" },
+      { text: "Call back", note: "Call back", from_ops: true },
+      { text: "MAKESAFE_PACK_PORTAL_READY | portal" },
+      {},
+      null,
+    ]
+  ) {
+    assert(
+      isPersonWrittenJobNote({ detail_json }),
+      JSON.stringify(detail_json),
+    );
+  }
+  for (
+    const detail_json of [
+      { text: packSent },
+      { text: agentReply },
+      { note: packSent },
+      { note: agentReply },
+    ]
+  ) {
+    assert(
+      !isPersonWrittenJobNote({ detail_json }),
+      JSON.stringify(detail_json),
+    );
+  }
+});
+
+// Every shape a note row takes on live records, on jobs the Dispatch list
+// returns: the three note_added key shapes (2 and 3 Sep 2026), site_note,
+// markers under either key, a body under `message`, an empty body, and events
+// that are not notes.
+function noteCountFixture(): Record<string, Row[]> {
+  const packSent = buildPackSentMarkerText({
+    invoiceNumber: "INV-0835",
+    to: "builder@example.test",
+    nowIso: "2026-10-12T03:00:00.000Z",
+    messageId: "m1",
+  });
+  const agentReply = buildAgentReplyBody("Report wording revised");
+  let sequence = 0;
+  const event = (
+    job: number,
+    event_type: string,
+    detail_json: Row | null,
+    extra: Row = {},
+  ): Row => {
+    sequence += 1;
+    return {
+      id: `count-${String(sequence).padStart(3, "0")}`,
+      job_id: jobId(job),
+      user_id: null,
+      event_type,
+      detail_json,
+      created_at: new Date(Date.UTC(2026, 8, 2) + sequence * 60000)
+        .toISOString(),
+      users: null,
+      ...extra,
+    };
+  };
+  return {
+    jobs: [
+      // The SWF-261279 shape: three notes and one Ops screen note_added.
+      job(1),
+      job(2, { job_number: "SW1346" }),
+      job(3, { job_number: "SWF-PDF-BUCKET", type: "patio" }),
+      job(4, { job_number: "SWG-20260713-BE" }),
+      // A repair-family job typed make-safe is listed, markers and all.
+      job(5, { type: "makesafe", metadata: { ses_family: "repair" } }),
+      job(6),
+      // Not listed: a true make-safe, and a draft.
+      job(7, { type: "makesafe" }),
+      job(8, { status: "draft" }),
+    ],
+    job_events: [
+      event(1, "note", { text: "First", visibility: "internal_only" }),
+      event(1, "note", { text: "Second" }, {
+        user_id: "u1",
+        users: { name: "Office Person" },
+      }),
+      event(1, "note", { text: "Third" }),
+      event(1, "note_added", {
+        from_ops: true,
+        note: "From the Ops screen",
+        source: "ops",
+        text: "From the Ops screen",
+        visibility: "internal_only",
+      }),
+      event(1, "status_changed", { text: "Not a note" }),
+      event(2, "note_added", {
+        from_ops: true,
+        note: "No source key",
+        text: "No source key",
+        visibility: "client_visible",
+      }),
+      event(2, "note_added", { note: "Only the note key" }),
+      event(3, "site_note", { text: "Side gate code on the fridge" }),
+      event(3, "note", { message: "Only the message key" }),
+      event(3, "note", {}),
+      event(4, "note_added", { text: packSent }),
+      event(4, "site_note", { note: agentReply }),
+      event(5, "note", { text: packSent }),
+      event(5, "note", { text: agentReply }),
+      event(5, "note_added", { note: packSent }),
+      event(5, "note", { text: "Called the builder about access" }),
+      event(5, "note", { text: "MAKESAFE_PACK_PORTAL_READY | portal" }),
+      event(7, "note", { text: "On a job that is not listed" }),
+      event(8, "note_added", { text: "On a draft" }),
+    ],
+  };
+}
+
+Deno.test("job_notes: note_added and site_note rows come back in the note shape, newest first", async () => {
+  const { client, reads } = makeClient(noteCountFixture());
+  const first = await _jobNotesForTest(client, jobId(1));
+  assertEquals(first.total, 4);
+  assertEquals(first.notes[0], {
+    id: "count-004",
+    text: "From the Ops screen",
+    author: null,
+    user_id: null,
+    created_at: "2026-09-02T00:04:00.000Z",
+    visibility: "internal_only",
+    from_ops: true,
+  });
+  assertEquals(
+    first.notes.map((note: any) => note.text),
+    ["From the Ops screen", "Third", "Second", "First"],
+  );
+  const notesRead = reads.find((read) => read.table === "job_events");
+  assertEquals(notesRead?.in, [["event_type", JOB_NOTE_EVENT_TYPES]]);
+
+  const second = await _jobNotesForTest(client, "SW1346");
+  assertEquals(
+    second.notes.map((
+      note: any,
+    ) => [note.text, note.visibility, note.from_ops]),
+    [
+      ["Only the note key", null, false],
+      ["No source key", "client_visible", true],
+    ],
+  );
+
+  const third = await _jobNotesForTest(client, jobId(3));
+  assertEquals(
+    third.notes.map((note: any) => note.text),
+    ["", "Only the message key", "Side gate code on the fridge"],
+  );
+
+  // A marker is a marker whichever note type and key it was stored under.
+  assertEquals((await _jobNotesForTest(client, jobId(4))).total, 0);
+  assertEquals(
+    (await _jobNotesForTest(client, jobId(5))).notes.map((note: any) =>
+      note.text
+    ),
+    ["MAKESAFE_PACK_PORTAL_READY | portal", "Called the builder about access"],
+  );
+});
+
+Deno.test("the list's note count and job_notes agree on every listed job, by id and by job number", async () => {
+  const { client } = makeClient(noteCountFixture());
+  const listed = allRows(
+    await _pipelineForTest(client, params("dispatch=1")),
+  );
+  assertEquals(
+    Object.fromEntries(
+      listed.map((row) => [row.job_number, row.comms_notes_count]),
+    ),
+    {
+      "SWF-1001": 4,
+      "SW1346": 2,
+      "SWF-PDF-BUCKET": 3,
+      "SWG-20260713-BE": 0,
+      "SWF-1005": 2,
+      "SWF-1006": 0,
+    },
+  );
+  for (const row of listed) {
+    for (const reference of [row.id, row.job_number]) {
+      const notes = await _jobNotesForTest(client, reference);
+      assertEquals(notes.job_id, row.id, reference);
+      assertEquals(notes.total, row.comms_notes_count, reference);
+      assertEquals(notes.notes.length, row.comms_notes_count, reference);
+    }
   }
 });
 

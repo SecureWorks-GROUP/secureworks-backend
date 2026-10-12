@@ -7,6 +7,7 @@
 // without a database.
 
 import { isInsuranceRepairFamily } from "./insurance_repairs_board.ts";
+import { noteIsSystemMarker } from "./makesafe_draft_notes.ts";
 
 export const DISPATCH_LIST_PARAM = "dispatch";
 export const DISPATCH_LIST_ON = "1";
@@ -172,6 +173,23 @@ export function dispatchValueIncGst(row: any): boolean {
   return !!row?.pj_total_inc;
 }
 
+// The job_events types that hold a note a person wrote. `note` is what add_note
+// writes; `note_added` is an older Ops screen writer (live rows from 2 and 3 Sep
+// 2026, body under `text` or `note`); `site_note` has no live row and is kept
+// because the list's count has always asked for it.
+export const JOB_NOTE_EVENT_TYPES = ["note", "note_added", "site_note"];
+
+// One rule for "is this row a note a person wrote", shared by the list read's
+// comms_notes_count and the job_notes read so the count on a card and the notes
+// under it cannot disagree. The pack-sent and agent-reply rows are machine
+// breadcrumbs stored as notes and are not counted. The body tested is `text`,
+// else `note`: exactly what the count has always tested, so the plain pipeline
+// read's comms_notes_count is unchanged.
+export function isPersonWrittenJobNote(event: any): boolean {
+  const body = event?.detail_json?.text ?? event?.detail_json?.note ?? "";
+  return !noteIsSystemMarker(body);
+}
+
 function noteDetail(event: any): Record<string, any> {
   const detail = event?.detail_json;
   return detail && typeof detail === "object" && !Array.isArray(detail)
@@ -196,10 +214,10 @@ export type DispatchJobNote = {
   from_ops: boolean;
 };
 
-// One job_events note row as the screen shows it. The body is `text`, else the
-// two keys live rows also hold (`note`, `message`), and the author is the linked
-// user's name, else null: most notes were written with a server key and carry
-// no user.
+// One job_events note row as the screen shows it, whichever of the note event
+// types it is. The body is `text`, else the two keys live rows also hold (`note`,
+// `message`), and the author is the linked user's name, else null: most notes
+// were written with a server key and carry no user.
 export function projectDispatchJobNote(event: any): DispatchJobNote {
   const detail = noteDetail(event);
   return {
