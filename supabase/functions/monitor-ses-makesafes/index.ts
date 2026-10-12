@@ -10,6 +10,10 @@ import { insertCapturedEvidence } from "../_shared/evidence/capture_guard.ts";
 // + stores PDF attachment bytes in a PRIVATE Storage bucket, and projects
 // pipeline_items for the skills/board to read.
 //
+// It also reads builder mail addressed to a general company Group (see
+// SENDER_SCOPED_GROUPS). That lane is the one exception to the audit-row rule
+// below: a post from a sender outside its scope is dropped with no row at all.
+//
 // Phase 1 scope ONLY. Reconciliation (D1-D4), the canary, and the dedicated
 // attachment-retry worker are the NEXT phase. Where a Phase-2 concern is touched
 // (e.g. retry, target-job match), it is best-effort and marked TODO.
@@ -1783,7 +1787,8 @@ async function collectSenderScopedGroupPosts(
     const threads = await graphGetAll<GraphThread>(threadUrl, token, budget);
     for (const thread of threads.values) {
       // Same valid Post fields collectPosts requests, MINUS the body.
-      const headerUrl = `${GRAPH}/groups/${groupId}/threads/${thread.id}/posts` +
+      const headerUrl =
+        `${GRAPH}/groups/${groupId}/threads/${thread.id}/posts` +
         `?$select=id,createdDateTime,receivedDateTime,from,sender,hasAttachments,conversationId,conversationThreadId`;
       const headers = await graphGetAll<GraphPost>(headerUrl, token, budget);
       for (const header of headers.values) {
@@ -1954,9 +1959,8 @@ async function ingestSenderScopedGroups(
       if (cursorReadErr) {
         throw new Error(`cursor read failed: ${cursorReadErr.message}`);
       }
-      const cursorIso =
-        (cursor as { last_completed_max?: string } | null)
-          ?.last_completed_max || null;
+      const cursorIso = (cursor as { last_completed_max?: string } | null)
+        ?.last_completed_max || null;
       const overlapSeconds =
         (cursor as { overlap_seconds?: number } | null)?.overlap_seconds ?? 900;
       // No cursor yet: this Group has never been read, so start at its
