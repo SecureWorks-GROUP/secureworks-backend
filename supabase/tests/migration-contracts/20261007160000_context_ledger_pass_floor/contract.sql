@@ -23,7 +23,8 @@
 --     the readings the owner's direct re-judge marked (passed, or failed again by an update since) are
 --     untouched; a second apply writes nothing.
 --  4. Re-applying the migration changes no body, comment or grant.
---  5. Last, so a behaviour break above is reported by its behaviour: the body is this migration's.
+--  5. Last, so a behaviour break above is reported by its behaviour: the body is this migration's (or
+--     the 20261012110000 body, which keeps it and adds the thin rebuild guard).
 \set ON_ERROR_STOP on
 
 CREATE FUNCTION pg_temp.pf_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
@@ -227,6 +228,14 @@ ROLLBACK;
 -- 3. The re-judge, and 4. re-applying changes no body, comment or grant. The readings as finish
 -- stored them under the 20% line (and the owner's direct re-judge), then the migration applied over them.
 BEGIN;
+-- A later slice has replaced finish (20261012110000, the thin rebuild guard: this migration's body
+-- with a guard added to a build). This migration's own guard accepts only its pre-image and its own
+-- body, so that slice is rolled back first, inside this rolled-back transaction.
+SELECT md5(p.prosrc) = '1695e52f99f56534a24166f6662ced35' AS pf_thin_rebuild_live
+FROM pg_proc p WHERE p.oid = 'public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure \gset
+\if :pf_thin_rebuild_live
+\ir ../../../rollbacks/20261012110000_context_ledger_thin_rebuild_down.sql
+\endif
 DO $c$
 BEGIN
  -- Passed by the half rule: a build with 3 of 6 refused by the reader; a build whose store refused 4
@@ -335,8 +344,9 @@ DO $c$ BEGIN
 END $c$;
 ROLLBACK;
 
--- 5. Last, so a behaviour break above is reported by its behaviour: finish is this migration's body.
+-- 5. Last, so a behaviour break above is reported by its behaviour: finish is this migration's body,
+-- or the later body that keeps it word for word and adds the thin rebuild guard (20261012110000).
 DO $c$ BEGIN
  PERFORM pg_temp.pf_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.context_ledger_finish(uuid,uuid,uuid,text,jsonb)'::regprocedure)
-  = '110174bcd355a82568fd7bc572d414f6', 'context_ledger_finish is not this migration''s body');
+  IN ('110174bcd355a82568fd7bc572d414f6', '1695e52f99f56534a24166f6662ced35'), 'context_ledger_finish is not this migration''s body');
 END $c$;
