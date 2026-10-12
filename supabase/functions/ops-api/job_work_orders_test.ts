@@ -125,7 +125,6 @@ class Query {
       for (const raw of list) {
         const row = {
           id: crypto.randomUUID(),
-          status: "reported",
           created_at: new Date().toISOString(),
           ...raw,
         };
@@ -375,7 +374,6 @@ Deno.test("figures: only counted lines on an approved work order are billed; ove
     ],
     variations: [{
       amount_ex: 150,
-      status: "reported",
       work_order_id: WO,
       counted: true,
     }],
@@ -412,8 +410,8 @@ Deno.test("figures: a variation counts only while its invoice is billed", async 
     approved: true,
     lines: [{ amount_ex: 700, counted: true, work_order_id: WO }],
     variations: [
-      { amount_ex: 300, status: "reported", work_order_id: WO, counted: false },
-      { amount_ex: 300, status: "reported", work_order_id: WO, counted: true },
+      { amount_ex: 300, work_order_id: WO, counted: false },
+      { amount_ex: 300, work_order_id: WO, counted: true },
     ],
   });
   assertEquals(f.variations_ex, 300);
@@ -428,7 +426,6 @@ Deno.test("figures: a variation counts only while its invoice is billed", async 
         job_id: JOB,
         work_order_id: WO,
         trade_invoice_id: "rejected",
-        status: "reported",
         amount_ex: 300,
         trade_invoices: { status: "ops-reject" },
       },
@@ -437,7 +434,6 @@ Deno.test("figures: a variation counts only while its invoice is billed", async 
         job_id: JOB,
         work_order_id: WO,
         trade_invoice_id: INV,
-        status: "reported",
         amount_ex: 300,
         trade_invoices: { status: "pending_acknowledgment" },
       },
@@ -1036,7 +1032,6 @@ Deno.test("variation: after its draft invoice was replaced, a repeat report on t
       reported_by: TRADE,
       description: "Extra post",
       amount_ex: null,
-      status: "reported",
     }],
     work_order_variation_emails: [
       {
@@ -1102,7 +1097,6 @@ function variationRow() {
     reported_by: TRADE,
     description: "Extra post",
     amount_ex: null,
-    status: "reported",
   };
 }
 
