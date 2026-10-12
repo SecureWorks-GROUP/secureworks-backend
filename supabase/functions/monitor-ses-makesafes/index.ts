@@ -140,6 +140,67 @@ const FALLBACK_MAX_LOOKBACK_DAYS = Number(
   Deno.env.get("MAKESAFE_FALLBACK_MAX_LOOKBACK_DAYS") || "14",
 );
 
+// ── Sender-scoped intake groups ──────────────────────────────────────────────
+// Some builders address their work orders to a general company Group instead of
+// ses@ (Ambrose Construct Group sends purchase orders to swwa@). A Group has no
+// inbox rules, so there is no forward to set up: this poll reads those Groups
+// itself and takes in ONLY posts whose sender matches an active
+// makesafe_companies sender pattern. Everything else in a general inbox is not
+// make-safe business: it is never stored, never audited and its body is never
+// even downloaded (see collectSenderScopedGroupPosts).
+//
+// An in-scope post is persisted under the ses@ mailbox key, exactly as if it had
+// arrived at ses@, because every downstream reader (the deterministic scan, the
+// fresh-source health read, gap-fill, the reconciler) selects on that key. Its
+// real origin is kept on the post's 'created' email_events_raw row
+// (page_meta.source_mailbox). Each scoped Group keeps its OWN cursor row in
+// mail_sync_cursors, keyed by its own address: the ses@ cursor sits at "now", so
+// sharing it would skip every post the scoped Group already holds.
+//
+// Set MAKESAFE_SENDER_SCOPED_GROUPS=off to switch the lane off without a deploy.
+interface SenderScopedGroup {
+  mail: string;
+  // Where this Group's FIRST read starts. Mail older than this is never read:
+  // it predates the first builder who sends here, and reading further back would
+  // only pull other builders' long-settled mail into intake.
+  firstReadFrom: string;
+}
+const SENDER_SCOPED_GROUPS: readonly SenderScopedGroup[] =
+  (Deno.env.get("MAKESAFE_SENDER_SCOPED_GROUPS") || "").trim().toLowerCase() ===
+      "off"
+    ? []
+    : [
+      // Ambrose's first purchase order reached swwa@ on 8 Oct 2026.
+      {
+        mail: "swwa@secureworkswa.com.au",
+        firstReadFrom: "2026-10-01T00:00:00.000Z",
+      },
+    ];
+// The first read never reaches further back than the deterministic scan's own
+// window, whatever firstReadFrom says: older mail could not be planned anyway.
+const SENDER_SCOPED_MAX_LOOKBACK_DAYS = 60;
+// A general inbox is far busier than ses@, and each conversation costs a thread
+// read plus a post read. One poll therefore reads at most this many conversations
+// it has not covered before, oldest first, and commits its cursor at that
+// boundary; the next poll carries on from there. Catch-up is spread over polls
+// instead of risking the run that also owns the ses@ handoff.
+const SENDER_SCOPED_MAX_NEW_CONVERSATIONS = positiveEnvNumber(
+  "MAKESAFE_SENDER_SCOPED_MAX_CONVERSATIONS",
+  40,
+);
+
+// PDF text extraction is handed off once, when a post is stored, and again only
+// while the post is still inside the poll's re-read window. Mail picked up on a
+// scoped Group's first read is days old, so a failed handoff would never be
+// retried and its purchase order would wait forever. Each poll therefore
+// re-queues up to this many of the lane's own still-unread PDFs.
+const SENDER_SCOPED_MAX_PDF_RETRIES_PER_POLL = 5;
+
+function positiveEnvNumber(name: string, fallback: number): number {
+  const value = Number(Deno.env.get(name) || "");
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 // Projection / extractor versions — stamped on pipeline_items for rebuildability.
 const EXTRACTOR_VERSION = "v1";
 const MATCHER_VERSION = "v1";
@@ -374,9 +435,12 @@ async function graphGetConversationsSince(
 // ════════════════════════════════════════════════════════════
 // Resolve the M365 group id at runtime by mail. NEVER use /users/ on a group.
 // ════════════════════════════════════════════════════════════
-async function resolveGroupId(token: string): Promise<string> {
+async function resolveGroupId(
+  token: string,
+  mail: string = SES_GROUP_MAIL,
+): Promise<string> {
   const url = `${GRAPH}/groups?$filter=` +
-    encodeURIComponent(`mail eq '${SES_GROUP_MAIL}'`) +
+    encodeURIComponent(`mail eq '${mail.replace(/'/g, "''")}'`) +
     `&$select=id,mail,displayName`;
   const resp = await graphGet(url, token);
   if (!resp.ok) {
@@ -389,11 +453,11 @@ async function resolveGroupId(token: string): Promise<string> {
   // than one = ambiguous (we must not silently poll an arbitrary first match and
   // ingest the wrong mailbox's mail). Fail closed in both cases.
   if (groups.length === 0 || !groups[0]?.id) {
-    throw new Error(`No M365 group found for mail ${SES_GROUP_MAIL}`);
+    throw new Error(`No M365 group found for mail ${mail}`);
   }
   if (groups.length > 1) {
     throw new Error(
-      `Ambiguous group resolution: ${groups.length} groups match mail ${SES_GROUP_MAIL}`,
+      `Ambiguous group resolution: ${groups.length} groups match mail ${mail}`,
     );
   }
   return groups[0].id as string;
@@ -1082,6 +1146,10 @@ async function persistPost(
   groupId: string,
   post: GraphPost,
   cls: ReturnType<typeof classifyPost>,
+  // Set only for a post read from a sender-scoped Group: the Group it really
+  // arrived at. The row is still keyed to the ses@ mailbox (see the
+  // SENDER_SCOPED_GROUPS note); this keeps the origin on its audit row.
+  origin: { sourceMailbox?: string } = {},
 ): Promise<number> {
   const fromEmail = post.from?.emailAddress?.address ||
     post.sender?.emailAddress?.address || null;
@@ -1166,7 +1234,9 @@ async function persistPost(
         extracted_ref: cls.ref,
         conversation_id: post.conversationId || null,
         thread_id: post.conversationThreadId || null,
-        page_meta: {},
+        page_meta: origin.sourceMailbox
+          ? { source_mailbox: origin.sourceMailbox }
+          : {},
       }).select("id").single();
     if (evErr) {
       throw new Error(
@@ -1552,6 +1622,427 @@ async function collectPosts(
       posts: postPages,
     },
   };
+}
+
+// ════════════════════════════════════════════════════════════
+// SENDER-SCOPED GROUP SOURCES (see SENDER_SCOPED_GROUPS).
+// ════════════════════════════════════════════════════════════
+// One 429-aware GET of a single Graph entity (graphGetAll reads collections).
+async function graphGetOne<T>(
+  url: string,
+  token: string,
+  budget: { total: number },
+): Promise<T> {
+  let urlRetries = 0;
+  for (;;) {
+    const resp: Response = await graphGet(url, token);
+    if (resp.status === 429) {
+      if (urlRetries >= MAX_429_RETRIES_PER_URL || budget.total <= 0) {
+        throw new Error(
+          `Graph 429 retry budget exhausted for ${url} ` +
+            `(url_retries=${urlRetries}, total_remaining=${budget.total})`,
+        );
+      }
+      urlRetries++;
+      budget.total--;
+      const retryAfter = Number(resp.headers.get("Retry-After") || "5");
+      const backoff = Math.min(
+        Math.max(retryAfter, 2 ** urlRetries),
+        MAX_BACKOFF_SECONDS,
+      );
+      await new Promise((r) => setTimeout(r, backoff * 1000));
+      continue;
+    }
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`Graph GET failed ${resp.status} for ${url}: ${err}`);
+    }
+    return await resp.json() as T;
+  }
+}
+
+interface SenderScopedWindow {
+  // In-scope posts only, each with its body. Nothing else leaves this function.
+  posts: GraphPost[];
+  outOfScopePosts: number;
+  conversationsListed: number;
+  conversationsRead: number;
+  // True when this poll stopped at the per-run conversation bound.
+  catchUpPending: boolean;
+  // The cursor to commit once every returned post is durably persisted.
+  nextCursor: string | null;
+}
+
+// Read one bounded slice of a general Group's mail and return ONLY the posts a
+// trusted builder sent.
+//
+// Privacy: posts are first listed WITHOUT their body. A post whose sender is out
+// of scope is counted and dropped right there; its body is never requested. Only
+// an in-scope post is fetched again, by id, for its body.
+//
+// Bound: conversations at or before the cursor are the overlap re-read (small,
+// always taken, so a late reply is never missed). Conversations after it are new
+// work and are taken oldest first up to `maxNewConversations`. When that bound
+// cuts the list, the cursor moves only to the last conversation actually read,
+// so the next poll resumes there and every poll makes progress.
+async function collectSenderScopedGroupPosts(
+  token: string,
+  groupId: string,
+  opts: {
+    sinceIso: string;
+    cursorIso: string | null;
+    maxNewConversations: number;
+    senderInScope: (fromEmail: string) => boolean;
+  },
+): Promise<SenderScopedWindow> {
+  const budget = { total: MAX_429_RETRIES_TOTAL };
+  const convUrl = `${GRAPH}/groups/${groupId}/conversations` +
+    `?$select=id,lastDeliveredDateTime&$orderby=lastDeliveredDateTime desc&$top=25`;
+  const listed = await graphGetConversationsSince(
+    convUrl,
+    token,
+    opts.sinceIso,
+    budget,
+  );
+
+  const cursorMs = opts.cursorIso ? Date.parse(opts.cursorIso) : NaN;
+  const hasCursor = Number.isFinite(cursorMs);
+  const dated = listed.values
+    .map((conv) => ({
+      conv,
+      deliveredMs: Date.parse(conv.lastDeliveredDateTime || ""),
+    }));
+  // A conversation with no delivery time cannot be ordered against the cursor:
+  // read it every time and never let it move the cursor.
+  const undated = dated.filter((item) => !Number.isFinite(item.deliveredMs));
+  const ordered = dated
+    .filter((item) => Number.isFinite(item.deliveredMs))
+    .sort((a, b) => a.deliveredMs - b.deliveredMs);
+  const overlap = ordered.filter((item) =>
+    hasCursor && item.deliveredMs <= cursorMs
+  );
+  const fresh = ordered.filter((item) =>
+    !hasCursor || item.deliveredMs > cursorMs
+  );
+  const freshTaken = fresh.slice(0, Math.max(1, opts.maxNewConversations));
+  const catchUpPending = fresh.length > freshTaken.length;
+  const toRead = [...overlap, ...undated, ...freshTaken];
+
+  const posts: GraphPost[] = [];
+  let outOfScopePosts = 0;
+  let maxSeenMs = hasCursor ? cursorMs : NaN;
+  const seen = (ms: number) => {
+    if (Number.isFinite(ms) && !(maxSeenMs >= ms)) maxSeenMs = ms;
+  };
+
+  for (const { conv, deliveredMs } of toRead) {
+    seen(deliveredMs);
+    const threadUrl =
+      `${GRAPH}/groups/${groupId}/conversations/${conv.id}/threads` +
+      `?$select=id,topic,lastDeliveredDateTime,hasAttachments,toRecipients,ccRecipients`;
+    const threads = await graphGetAll<GraphThread>(threadUrl, token, budget);
+    for (const thread of threads.values) {
+      // Same valid Post fields collectPosts requests, MINUS the body.
+      const headerUrl = `${GRAPH}/groups/${groupId}/threads/${thread.id}/posts` +
+        `?$select=id,createdDateTime,receivedDateTime,from,sender,hasAttachments,conversationId,conversationThreadId`;
+      const headers = await graphGetAll<GraphPost>(headerUrl, token, budget);
+      for (const header of headers.values) {
+        const ts = header.receivedDateTime || header.createdDateTime;
+        if (ts && ts < opts.sinceIso) continue;
+        if (ts) seen(Date.parse(ts));
+        const fromEmail = header.from?.emailAddress?.address ||
+          header.sender?.emailAddress?.address || "";
+        if (!opts.senderInScope(fromEmail)) {
+          outOfScopePosts++;
+          continue;
+        }
+        const full = await graphGetOne<GraphPost>(
+          `${GRAPH}/groups/${groupId}/threads/${thread.id}/posts/${header.id}`,
+          token,
+          budget,
+        );
+        posts.push({
+          ...header,
+          body: full.body,
+          conversationId: header.conversationId || conv.id,
+          conversationThreadId: header.conversationThreadId || thread.id,
+          subject: thread.topic ?? "",
+          toRecipients: thread.toRecipients,
+          ccRecipients: thread.ccRecipients,
+          sourceKind: "group_post",
+        });
+      }
+    }
+  }
+
+  // Cut short: the cursor may only reach the last new conversation actually
+  // read, never a newer post time, or the unread conversations between them
+  // would be skipped for good.
+  const boundaryMs = catchUpPending
+    ? freshTaken[freshTaken.length - 1].deliveredMs
+    : maxSeenMs;
+  return {
+    posts,
+    outOfScopePosts,
+    conversationsListed: listed.values.length,
+    conversationsRead: toRead.length,
+    catchUpPending,
+    nextCursor: Number.isFinite(boundaryMs)
+      ? new Date(boundaryMs).toISOString()
+      : null,
+  };
+}
+
+export interface SenderScopedGroupReport {
+  mailbox: string;
+  ok: boolean;
+  included: number;
+  out_of_scope: number;
+  conversations_listed: number;
+  conversations_read: number;
+  catch_up_pending: boolean;
+  cursor: string | null;
+  error: string | null;
+}
+
+// Health of one scoped Group, on its own sync_state row. A failed read raises ONE
+// business event when the source turns from healthy to failing, not one per poll.
+// Best-effort: a state write must never be the reason ses@ intake stops.
+async function recordSenderScopedGroupState(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  mail: string,
+  error: string | null,
+): Promise<void> {
+  try {
+    const { data: prior, error: priorErr } = await sb.from("sync_state")
+      .select("mode")
+      .eq("mailbox", mail)
+      .maybeSingle();
+    if (priorErr) throw new Error(`state read failed: ${priorErr.message}`);
+    const now = new Date().toISOString();
+    const { error: upErr } = await sb.from("sync_state").upsert({
+      mailbox: mail,
+      last_attempt_at: now,
+      last_successful_sync_at: error ? undefined : now,
+      last_error: error ? error.slice(0, 1000) : null,
+      mode: error ? "ERROR" : "OK",
+      updated_at: now,
+    }, { onConflict: "mailbox" });
+    if (upErr) throw new Error(`state upsert failed: ${upErr.message}`);
+    if (error && (prior as { mode?: string } | null)?.mode !== "ERROR") {
+      await insertCapturedEvidence(sb, {
+        event_type: "makesafe.intake.mail_read_failed",
+        source: "monitor-ses-makesafes",
+        entity_type: "mailbox",
+        entity_id: mail,
+        body_preview: error.slice(0, 500),
+        safe_summary:
+          `Builder mail read from ${mail} failed; mail sent there is not reaching intake. ses@ intake is unaffected.`
+            .slice(0, 280),
+        payload: {
+          mailbox: mail,
+          sender_scoped_group: true,
+          error: error.slice(0, 500),
+        },
+        metadata: { legacy_envelope_inferred: true },
+        schema_version: "1.0",
+      });
+    }
+  } catch (e) {
+    console.error(
+      `[monitor-ses] sender-scoped state write failed for ${mail}:`,
+      (e as Error).message,
+    );
+  }
+}
+
+// PDFs this lane stored whose text has still not been read (see
+// SENDER_SCOPED_MAX_PDF_RETRIES_PER_POLL). Found through the origin stamp on the
+// post's 'created' audit row, oldest first so the longest wait goes first.
+async function pendingSenderScopedPdfCoordinates(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  mail: string,
+  sinceIso: string,
+): Promise<PdfExtractionCoordinate[]> {
+  const { data: events, error } = await sb.from("email_events_raw")
+    .select("post_id")
+    .eq("change_type", "created")
+    .eq("page_meta->>source_mailbox", mail)
+    .gte("received_at", sinceIso)
+    .order("received_at", { ascending: true })
+    .limit(500);
+  if (error) {
+    throw new Error(`scoped source read failed: ${error.message}`);
+  }
+  const postIds = [
+    ...new Set(
+      ((events || []) as Array<{ post_id?: string }>)
+        .map((row) => row.post_id || "").filter(Boolean),
+    ),
+  ];
+  const pending: PdfExtractionCoordinate[] = [];
+  for (let offset = 0; offset < postIds.length; offset += 25) {
+    const { data, error: attErr } = await sb.from("email_attachments")
+      .select("id,sha256")
+      .in("email_id", postIds.slice(offset, offset + 25))
+      .eq("status", "uploaded")
+      .in("pdf_extraction_status", ["pending", "failed"]);
+    if (attErr) {
+      throw new Error(`scoped pdf queue read failed: ${attErr.message}`);
+    }
+    for (const row of (data || []) as Array<{ id?: string; sha256?: string }>) {
+      if (row.id) {
+        pending.push({
+          id: String(row.id),
+          sha256: row.sha256 ? String(row.sha256) : null,
+        });
+      }
+    }
+  }
+  return uniquePdfExtractionCoordinates(pending)
+    .slice(0, SENDER_SCOPED_MAX_PDF_RETRIES_PER_POLL);
+}
+
+// Take in builder mail from every sender-scoped Group. Never throws: a Group that
+// cannot be read is reported and retried next poll with its cursor unmoved, and
+// the ses@ poll that called this carries on. Persisted posts are appended to
+// `handoff` as they land, so a source stored before a later failure still reaches
+// the intake scan.
+async function ingestSenderScopedGroups(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  token: string,
+  loaded: LoadedCompanies,
+  handoff: {
+    sources: IntakeHandoffSource[];
+    pdfCoordinates: PdfExtractionCoordinate[];
+  },
+  opts: {
+    groups?: readonly SenderScopedGroup[];
+    nowMs?: number;
+    maxNewConversations?: number;
+  } = {},
+): Promise<{ reports: SenderScopedGroupReport[]; unresolved: number }> {
+  const reports: SenderScopedGroupReport[] = [];
+  let unresolved = 0;
+  const nowMs = opts.nowMs ?? Date.now();
+  const windowFloorMs = nowMs - SENDER_SCOPED_MAX_LOOKBACK_DAYS * 86_400_000;
+  const senderInScope = (fromEmail: string) =>
+    loaded.patterns.some((c) => senderMatchesPattern(fromEmail, c.pattern));
+
+  for (const { mail, firstReadFrom } of opts.groups ?? SENDER_SCOPED_GROUPS) {
+    const report: SenderScopedGroupReport = {
+      mailbox: mail,
+      ok: false,
+      included: 0,
+      out_of_scope: 0,
+      conversations_listed: 0,
+      conversations_read: 0,
+      catch_up_pending: false,
+      cursor: null,
+      error: null,
+    };
+    reports.push(report);
+    try {
+      const groupId = await resolveGroupId(token, mail);
+      const { data: cursor, error: cursorReadErr } = await sb.from(
+        "mail_sync_cursors",
+      )
+        .select("last_completed_max, overlap_seconds")
+        .eq("mailbox", mail)
+        .maybeSingle();
+      if (cursorReadErr) {
+        throw new Error(`cursor read failed: ${cursorReadErr.message}`);
+      }
+      const cursorIso =
+        (cursor as { last_completed_max?: string } | null)
+          ?.last_completed_max || null;
+      const overlapSeconds =
+        (cursor as { overlap_seconds?: number } | null)?.overlap_seconds ?? 900;
+      // No cursor yet: this Group has never been read, so start at its
+      // firstReadFrom. That is what picks up mail a builder sent here before
+      // this lane existed, through the ordinary poll and with no backfill run.
+      const firstReadMs = Date.parse(firstReadFrom);
+      if (!cursorIso && !Number.isFinite(firstReadMs)) {
+        throw new Error(`invalid firstReadFrom for ${mail}`);
+      }
+      const sinceIso = new Date(
+        cursorIso
+          ? Date.parse(cursorIso) - overlapSeconds * 1000
+          : Math.max(firstReadMs, windowFloorMs),
+      ).toISOString();
+
+      const window = await collectSenderScopedGroupPosts(token, groupId, {
+        sinceIso,
+        cursorIso,
+        maxNewConversations: opts.maxNewConversations ??
+          SENDER_SCOPED_MAX_NEW_CONVERSATIONS,
+        senderInScope,
+      });
+      report.out_of_scope = window.outOfScopePosts;
+      report.conversations_listed = window.conversationsListed;
+      report.conversations_read = window.conversationsRead;
+      report.catch_up_pending = window.catchUpPending;
+
+      for (const post of window.posts) {
+        const cls = classifyPost(post, loaded.patterns, loaded.refPrefixes);
+        // The sender gate above and the classifier read the same address, so a
+        // collected post always carries its company. Fail closed if not.
+        if (!cls.include || !cls.company) {
+          report.out_of_scope++;
+          continue;
+        }
+        unresolved += await persistPost(sb, token, groupId, post, cls, {
+          sourceMailbox: mail,
+        });
+        report.included++;
+        handoff.sources.push({
+          postId: post.id,
+          receivedAt: post.receivedDateTime || post.createdDateTime || null,
+          conversationId: post.conversationId || null,
+          threadId: post.conversationThreadId || null,
+        });
+        handoff.pdfCoordinates.push(
+          ...await pendingPdfExtractionCoordinates(sb, post.id),
+        );
+      }
+
+      // Cursor LAST, only after every in-scope post above is durably stored.
+      if (window.nextCursor) {
+        const { error: curErr } = await sb.from("mail_sync_cursors").upsert({
+          mailbox: mail,
+          last_completed_max: window.nextCursor,
+          overlap_seconds: overlapSeconds,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "mailbox" });
+        if (curErr) throw new Error(`cursor commit failed: ${curErr.message}`);
+      }
+      report.cursor = window.nextCursor || cursorIso;
+      handoff.pdfCoordinates.push(
+        ...await pendingSenderScopedPdfCoordinates(
+          sb,
+          mail,
+          new Date(windowFloorMs).toISOString(),
+        ),
+      );
+      report.ok = true;
+      console.log(
+        `[monitor-ses] sender-scoped ${mail}: included=${report.included} ` +
+          `out_of_scope=${report.out_of_scope} conversations=${report.conversations_read}/${report.conversations_listed} ` +
+          `catch_up_pending=${report.catch_up_pending}`,
+      );
+      await recordSenderScopedGroupState(sb, mail, null);
+    } catch (e) {
+      report.error = (e as Error).message;
+      console.error(
+        `[monitor-ses] sender-scoped ${mail} failed (ses@ unaffected): ${report.error}`,
+      );
+      await recordSenderScopedGroupState(sb, mail, report.error);
+    }
+  }
+  return { reports, unresolved };
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2644,6 +3135,17 @@ async function handler(req: Request): Promise<Response> {
       }
     }
 
+    // Builder mail addressed to a general Group instead of ses@. Runs after the
+    // ses@ watermark is safe and cannot throw, so it can never hold up ses@.
+    const scoped = await ingestSenderScopedGroups(
+      sb,
+      token,
+      { patterns: companies, refPrefixes },
+      { sources: includedSources, pdfCoordinates: freshPdfCoordinates },
+    );
+    for (const report of scoped.reports) included += report.included;
+    totalUnresolved += scoped.unresolved;
+
     // M2 — sync_state write error is surfaced (throws) so we never return success
     // with an uncommitted state row.
     await refreshSyncState(sb, true, null);
@@ -2790,6 +3292,7 @@ async function handler(req: Request): Promise<Response> {
       unresolved_attachments_this_run: totalUnresolved,
       page_counts: pageCounts,
       watermark: maxReceived,
+      sender_scoped_groups: scoped.reports,
       timestamp: new Date().toISOString(),
     };
     console.log(
@@ -2848,6 +3351,7 @@ export {
   classifyPost as _classifyPost,
   collectFallbackMailboxPosts as _collectFallbackMailboxPosts,
   collectPosts as _collectPosts,
+  collectSenderScopedGroupPosts as _collectSenderScopedGroupPosts,
   decodeJwtRole as _decodeJwtRole,
   DEFAULT_REF_PREFIXES as _DEFAULT_REF_PREFIXES,
   extractRef as _extractRef,
@@ -2855,6 +3359,7 @@ export {
   findIntakeSourcesWithoutCase as _findIntakeSourcesWithoutCase,
   graphGetAll as _graphGetAll,
   handler as _handler,
+  ingestSenderScopedGroups as _ingestSenderScopedGroups,
   isAuthorized as _isAuthorized,
   isPdfMagic as _isPdfMagic,
   loadCompanyPatterns as _loadCompanyPatterns,

@@ -257,6 +257,20 @@ jobs:
             supabase/functions/ops-api/insurance_repairs_board_test.ts \
             supabase/functions/ops-api/insurance_repairs_pipeline_test.ts
 
+      # Builder mail read from a general company Group (swwa@) must never store
+      # or download anyone else's mail, and one purchase order must stay one job
+      # when it reaches both swwa@ and ses@. The runtime file is filtered because
+      # it carries an unrelated pre-existing failure. Same --no-check reason as
+      # above.
+      - name: Test sender-scoped intake Groups and Ambrose two-address intake
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/monitor_ses_sender_scoped_groups_test.ts \
+            supabase/functions/ops-api/makesafe_ambrose_intake_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "Ambrose" \
+            supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as

@@ -257,11 +257,39 @@ would keep only the job number, merging every PO on one job. So, only when
 the company is `acg`, `normaliseAmbroseIdentityText` rewrites each
 PO-labelled 8-2 token to `ACG-<job>PO-<job><seq>` before any scan: claim
 `ACG-<job>`, PO `PO-<job><seq>`, key `ACG:PO-<job><seq>`. Do not widen it to
-other builders or relax the exact 8-2 shape. Ambrose mail goes to admin@ and
-marnin@, not the ses@ intake mailbox, so nothing reaches intake until it is
-redirected there (a forward becomes own-domain chatter). Ambrose has no SES
-family-matrix row, so pack and invoice prep stay refused. Tests:
-`makesafe_ambrose_intake_test.ts`.
+other builders or relax the exact 8-2 shape. Ambrose addresses its mail to the
+swwa@ general Group, not ses@; it reaches intake through the sender-scoped
+Group lane below (a human forward becomes own-domain chatter and is not the
+route). Ambrose has no SES family-matrix row, so pack and invoice prep stay
+refused. Tests: `makesafe_ambrose_intake_test.ts`.
+
+## Builder Mail In A General Group Is Read By Sender, And Stored As ses@
+
+`monitor-ses-makesafes` also reads the Groups in `SENDER_SCOPED_GROUPS` (today
+swwa@). A Group has no inbox rules, so there is no auto-forward to configure:
+the poll reads it. Three rules are load-bearing.
+
+- **Only a company sender pattern admits a post.** No subject, keyword or
+  Prime-floor match. Posts are listed WITHOUT their body; an out-of-scope post
+  is counted and dropped with no row in any table (no exclusion audit either)
+  and its body is never requested. Do not route a scoped Group through
+  `collectPosts` / `auditExclusion`, which store a row for everything.
+- **An admitted post is stored under the ses@ mailbox key**, because every
+  downstream reader selects on it. Its origin is
+  `email_events_raw.page_meta.source_mailbox` on the `created` row. Do not add
+  a second mailbox key downstream to "fix" this.
+- **Each scoped Group has its own `mail_sync_cursors` row** (and `sync_state`
+  row for health), keyed by its own address. Its first read starts at its
+  `firstReadFrom`, never further back than the 60-day scan window, and catches
+  up oldest first in bounded slices. A Group that cannot be read never fails
+  the ses@ poll: it is reported in the poll response, set `ERROR` on its
+  `sync_state` row and alarmed once.
+
+One purchase order sent to both addresses is two posts and one job: the planner
+and the instruction key fold them. Tests:
+`monitor_ses_sender_scoped_groups_test.ts` and the Ambrose cases in
+`makesafe_deterministic_intake_runtime_test.ts`. Switch the lane off with
+`MAKESAFE_SENDER_SCOPED_GROUPS=off`.
 
 ## Never Select `scope_json` In A List/Feed Query
 
