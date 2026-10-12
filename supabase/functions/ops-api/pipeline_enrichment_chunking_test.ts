@@ -232,6 +232,30 @@ Deno.test("pipeline enrichment: a small board still returns populated dates and 
   }
 });
 
+Deno.test("pipeline enrichment: an approved job work order with no crew work order is not a work order on the board", async () => {
+  const tables = fixture(2);
+  const [crewJob, jobOnlyJob] = [jobId(1), jobId(2)];
+  tables.work_orders = [
+    { id: "wo-crew", job_id: crewJob, kind: "crew", status: "sent" },
+    { id: "wo-job-1", job_id: crewJob, kind: "job", status: "approved" },
+    { id: "wo-job-2", job_id: jobOnlyJob, kind: "job", status: "approved" },
+  ];
+  const { client } = makePipelineClient(tables, {
+    maxJobIdBytes: IN_URL_BUDGET,
+  });
+
+  const result = await _pipelineForTest(
+    client,
+    new URLSearchParams("type=fencing"),
+  );
+
+  assertEquals(result.degraded, undefined);
+  const cards = result.columns.scheduled as Array<Record<string, any>>;
+  const byId = new Map(cards.map((card) => [card.id, card]));
+  assertEquals(byId.get(crewJob)?.wo_count, 1);
+  assertEquals(byId.get(jobOnlyJob)?.wo_count, 0);
+});
+
 Deno.test("pipeline enrichment: a URL-breaking board chunks all nine reads and merges every row", async () => {
   const jobCount = 377;
   const allIds = Array.from(

@@ -15680,7 +15680,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
-        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').or('kind.eq.crew,status.eq.approved')),
+        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').neq('kind', 'job')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
