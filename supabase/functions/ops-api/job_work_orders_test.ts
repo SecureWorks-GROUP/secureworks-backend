@@ -597,10 +597,75 @@ Deno.test("approve: only Shaun, and only with a named identity", async () => {
     fn: "approve_job_work_order",
     args: { p_work_order_id: DRAFT, p_approver: SHAUN, p_via: "session" },
   });
-  assertEquals(
-    db.tables.job_events.at(-1).event_type,
-    "job_work_order_approved",
+  const event = db.tables.job_events.at(-1);
+  assertEquals(event.event_type, "job_work_order_approved");
+  assertEquals(event.detail_json, {
+    work_order_id: DRAFT,
+    wo_number: "WO-SWF-26123",
+    approved_by: SHAUN,
+    via: "session",
+  });
+});
+
+Deno.test("events: what this module writes to job_events carries no price, amount or seal hash", async () => {
+  const approved = draftDb();
+  approved.rpcImpl = (_fn, args) => ({
+    data: {
+      id: args.p_work_order_id,
+      status: "approved",
+      agreed_labour_ex: 1234.56,
+      sealed_content_hash: "feedfacefeedface",
+    },
+    error: null,
+  });
+  approved.tables.work_orders[0].agreed_labour_ex = 1234.56;
+  await createJobWorkOrder(approved, {
+    kind: "job",
+    job_id: JOB,
+    agreed_labour_ex: 1234.56,
+  });
+  await approveJobWorkOrder(approved, { work_order_id: DRAFT }, {
+    userId: SHAUN,
+    via: "session",
+  });
+
+  const reported = baseDb();
+  await reportWorkOrderVariation(
+    reported,
+    {
+      trade_invoice_id: INV,
+      job_id: JOB,
+      description: "Extra post",
+      amount_ex: 987.65,
+    },
+    { id: TRADE, orgId: ORG },
+    { sendEmail: async () => ({ ok: true as const }) },
   );
+
+  const events = [...approved.tables.job_events, ...reported.tables.job_events];
+  assertEquals(events.map((e) => e.event_type), [
+    "job_work_order_draft_updated",
+    "job_work_order_approved",
+    "work_order_variation_reported",
+  ]);
+  for (const event of events) {
+    const text = JSON.stringify(event);
+    for (
+      const leak of [
+        "1234.56",
+        "987.65",
+        "feedface",
+        "agreed",
+        "amount",
+        "hash",
+      ]
+    ) {
+      assert(
+        !text.includes(leak),
+        `${event.event_type} leaked ${leak}: ${text}`,
+      );
+    }
+  }
 });
 
 Deno.test("approve: a header-named terminal approver is refused until its flag is on", async () => {
@@ -1331,4 +1396,36 @@ Deno.test("front door: work order staff actions need a staff role, the trade doo
   for (const trade of ["my_job_work_order", "report_work_order_variation"]) {
     assertEquals(_opsApiActionNeedsStaffRole(url(trade)), false, trade);
   }
+});
+
+Deno.test("old work order list: crew work orders only, never the job's own work order", async () => {
+  const { listWorkOrders } = await import("./index.ts");
+  const db = baseDb();
+  db.tables.work_orders.push(
+    {
+      id: "crew-1",
+      org_id: ORG,
+      job_id: JOB,
+      wo_number: "WO-111111",
+      kind: "crew",
+      status: "sent",
+    },
+    {
+      id: "crew-cancelled",
+      org_id: ORG,
+      job_id: JOB,
+      wo_number: "WO-222222",
+      kind: "crew",
+      status: "cancelled",
+    },
+  );
+  const out = await listWorkOrders(db, new URLSearchParams({ job_id: JOB }));
+  assertEquals(out.work_orders.map((w: any) => w.id), ["crew-1"]);
+
+  db.tables.work_orders[0].status = "draft";
+  const withDraft = await listWorkOrders(
+    db,
+    new URLSearchParams({ job_id: JOB }),
+  );
+  assertEquals(withDraft.work_orders.map((w: any) => w.id), ["crew-1"]);
 });

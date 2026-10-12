@@ -16401,12 +16401,13 @@ async function listPOs(client: any, params: URLSearchParams) {
   return { purchase_orders: enriched }
 }
 
-async function listWorkOrders(client: any, params: URLSearchParams) {
+export async function listWorkOrders(client: any, params: URLSearchParams) {
   const status = params.get('status')
   const jobId = params.get('job_id') || params.get('jobId')
 
   let query = client.from('work_orders')
     .select('*')
+    .neq('kind', 'job')
     .neq('status', 'cancelled')
     .order('created_at', { ascending: false })
 
