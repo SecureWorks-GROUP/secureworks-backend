@@ -199,6 +199,18 @@ created_at, updated_at`.
 Inputs are the snake_case names in this table only. There are no camelCase or
 alternate id spellings on these doors.
 
+What the trade reads in `scope_items` and `special_instructions` goes through
+the shared trade money filter, which drops decimals and 3+ digit numbers as
+possible amounts. Heights and lengths are the work order, so this view alone
+keeps three shapes (`projectTradeJobWorkOrder`): a number then a length unit
+(`2.1 m`, `1800mm`, `24.5 m2`; units mm, cm, m, lm, m2, sqm, metres), a
+dimension run ending in a unit (`6.5 x 4.2 m`), and a number then high, long,
+wide, deep, height, length or width (`1800 high`). A number after a currency
+sign or before a GST mark is never kept, and every other number stays with the
+money filter: `30 m at 45 per m` reads `30 m` without the 45. The filter itself
+and the trade quote views are unchanged. Cases:
+`job_work_order_trade_measurements_test.ts`.
+
 Trade invoice flow: the trade allocates and invoices as before. After the
 invoice is created, show `my_job_work_order` for each job on it, then a "Any
 variations to the work order?" choice; on yes, call
