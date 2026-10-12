@@ -39,7 +39,7 @@ Response: `{ ok, hours, assignment: { id, status, scheduled_date, hours_worked, 
 
 Since 12 Oct 2026 the body may also carry `work_date`, `start_time`,
 `finish_time` and `break_minutes`; the hours are then computed on the server
-and the times are saved with the card for that day (an optional
+and the times are saved with the card scheduled that day (an optional
 `assignment_id` names the card). Contract:
 `docs/trade-invoice-time-entries-2026-10-12.md`.
 

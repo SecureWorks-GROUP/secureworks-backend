@@ -18,10 +18,9 @@
 --      trade app screens are live.
 --   5. Table job_assignment_logged_times: the times a trade typed when they
 --      logged a job card's hours on the job view (ops-api log_my_job_hours),
---      one row per card. The Weekly Invoice card opens on them, a job card
---      the server collects for an invoice takes them as its entry when the
---      flag is on, and job_detail lists them against the job until that day
---      is billed. It is
+--      one row per card. The Weekly Invoice card opens on them and
+--      job_detail lists them against the job until that day is billed; they
+--      are never copied onto an invoice line. It is
 --      its own table, not columns on job_assignments, because every
 --      job_assignments column is inside the make-safe fact hash
 --      (stamp_makesafe_fact_identity_v1): new columns there would move the
@@ -187,10 +186,9 @@ WHERE NOT EXISTS (
 
 -- ── 5. Times saved on the job view ──────────────────────────────────────────
 -- One row per job card. `hours` is the hours those times make; ops-api uses
--- the row only while it equals the hours it is read against (the card's
--- hours_worked, or the hours an invoice line bills for the card) and only for
--- the trade who saved it (user_id), so a later change to the hours by any
--- other writer, or a card handed to another trade, never rides stale times.
+-- the row only while it still equals the card's hours_worked and only for the
+-- trade who saved it (user_id), so a later change to the hours by any other
+-- writer, or a card handed to another trade, never rides stale times.
 CREATE TABLE IF NOT EXISTS public.job_assignment_logged_times (
   assignment_id uuid PRIMARY KEY
     REFERENCES public.job_assignments(id) ON DELETE CASCADE,
@@ -220,4 +218,4 @@ REVOKE ALL ON public.job_assignment_logged_times FROM PUBLIC, anon, authenticate
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.job_assignment_logged_times TO service_role;
 
 COMMENT ON TABLE public.job_assignment_logged_times IS
-  'Trade invoice time entries (20261012180000): the date worked, start and finish time (HH:MM, Perth) and break a trade typed when logging a job card''s hours on the job view (ops-api log_my_job_hours). One row per job card, replaced on a re-log. Read by ops-api my_hours as logged_time_entry, by the auto-collected trade invoice lanes as a card''s time entry when trade_invoice_time_entry_required_v1 is on, and by job_detail as a job''s unbilled time entries. Service role only.';
+  'Trade invoice time entries (20261012180000): the date worked, start and finish time (HH:MM, Perth) and break a trade typed when logging a job card''s hours on the job view (ops-api log_my_job_hours). One row per job card, replaced on a re-log. Read by ops-api my_hours as logged_time_entry and by job_detail as a job''s unbilled time entries; never copied onto an invoice line. Service role only.';

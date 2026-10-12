@@ -18,11 +18,11 @@
 // Enforcement is behind feature flag TRADE_INVOICE_TIME_ENTRY_FLAG, seeded
 // off: while off the fields are stored when sent and a line without them is
 // accepted; when on, a time line without them is refused `time_entry_required`.
-// A stored entry always makes the hours its line bills. A job card the server
-// collects itself (nobody typed its line) takes, when the flag is on, the
-// trade's own times saved on the job view while they make the hours that line
-// bills, else the clock's same-day pair, and is refused by name only when it
-// has neither.
+// An invoice line's time entry is always the trade's own statement on that
+// line, and always makes the hours the line bills: the server never fills one
+// in from the clock or from times saved elsewhere. A job card the server
+// collects itself (nobody typed its line) therefore carries none, and when
+// the flag is on it is refused by name.
 // A wrong entry (finish not after start, hours that disagree, a day worked
 // that is after today) is refused in both states. Contract: docs/trade-invoice-time-entries-2026-10-12.md.
 
@@ -52,12 +52,6 @@ export type TradeInvoiceTimeEntry = {
   break_minutes: number;
   hours: number;
 };
-
-// A recorded entry whose hours are not this module's to compute (the clock's).
-export type TradeInvoiceRecordedTimeEntry = Pick<
-  TradeInvoiceTimeEntry,
-  "work_date" | "start_time" | "finish_time" | "break_minutes"
->;
 
 export type TradeInvoiceTimeEntryColumns = {
   work_date: string | null;
@@ -100,8 +94,8 @@ export class TradeInvoiceTimeEntryError extends Error {
 }
 
 /**
- * The one refusal for job cards the server collected itself that say nowhere
- * when they were worked. It names every such job and day and both ways to
+ * The one refusal for job cards the server collected itself, which say nowhere
+ * when they were worked. It names every such job and day and the one way to
  * give the times, so the trade can fix exactly those.
  */
 export function tradeInvoiceTimeEntriesNeededError(
@@ -114,7 +108,7 @@ export function tradeInvoiceTimeEntriesNeededError(
   ).join("; ");
   return new TradeInvoiceTimeEntryError(
     "time_entry_required",
-    `Enter your start and finish time for: ${named}. Either open that job and log your hours for that day with your start and finish time, or enter them on that job's card in the Weekly Invoice. Then submit again.`,
+    `Enter your start and finish time for: ${named}. Enter them on that job's card in the Weekly Invoice, then submit again.`,
     cards,
   );
 }
@@ -321,7 +315,7 @@ export function resolveTradeInvoiceTimeEntry(
 }
 
 export function tradeInvoiceTimeEntryColumns(
-  entry: TradeInvoiceRecordedTimeEntry | null | undefined,
+  entry: TradeInvoiceTimeEntry | null | undefined,
 ): TradeInvoiceTimeEntryColumns {
   if (!entry) return { ...NO_TIME_ENTRY };
   return {
@@ -368,38 +362,6 @@ export function draftTradeInvoiceTimeEntry(
     hours: workDate && workedMinutes > 0
       ? hoursFromMinutes(workedMinutes)
       : null,
-  };
-}
-
-/**
- * The time entry the system already recorded for an auto-collected line (the
- * clock, or an assignment's started and completed stamps). Returns null when
- * the two stamps do not make one same-day Perth shift: nothing is invented.
- * The billed hours stay the clock's own; this only names when they were worked.
- */
-export function clockTradeInvoiceTimeEntry(
-  startedAt: unknown,
-  finishedAt: unknown,
-  breakMinutes: unknown = 0,
-): TradeInvoiceRecordedTimeEntry | null {
-  const start = perthClock(startedAt);
-  const finish = perthClock(finishedAt);
-  if (!start || !finish || start.date !== finish.date) return null;
-  const startMinutes = parseClockTime(start.time)?.minutes;
-  const finishMinutes = parseClockTime(finish.time)?.minutes;
-  if (
-    startMinutes === undefined || finishMinutes === undefined ||
-    finishMinutes <= startMinutes
-  ) {
-    return null;
-  }
-  const breaks = parseBreakMinutes(breakMinutes) ?? 0;
-  if (finishMinutes - startMinutes - breaks <= 0) return null;
-  return {
-    work_date: start.date,
-    start_time: start.time,
-    finish_time: finish.time,
-    break_minutes: breaks,
   };
 }
 
@@ -479,23 +441,21 @@ export async function tradeInvoiceTimeEntryRequired(
 // Table public.job_assignment_logged_times: one row per job card, the times the
 // trade typed when they logged the card's hours. It sits beside
 // job_assignments.hours_worked rather than on that table, because every
-// job_assignments column is inside the make-safe fact hash. Three readers:
-// my_hours returns it as `logged_time_entry` so the Weekly Invoice card can
-// open on the trade's own saved times; the auto-collected invoice lanes take
-// it as a card's entry when the flag is on; and a job's list shows it until
-// that day is billed.
+// job_assignments column is inside the make-safe fact hash. It is a record of
+// its own, never an invoice line's entry. Two readers: my_hours returns it as
+// `logged_time_entry` so the Weekly Invoice card can open on the trade's own
+// saved times for the trade to confirm, and a job's list shows it until that
+// day is billed.
 
 export const JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS =
   "assignment_id, user_id, work_date, start_time, finish_time, break_minutes, hours";
 
 /**
  * The saved times for a job card, or null. They are returned only while they
- * make `cardHours`, the hours they are read against (the card's hours, or the
- * hours an invoice line bills for it): when the hours were changed since by
- * any other writer (the clock, the office, a bare-hours log), the saved times
- * are stale and are not used. With `ownerUserId` they must also be that
- * trade's own: a card handed to someone else never carries the first trade's
- * times.
+ * still describe the card's hours: when the hours were changed since by any
+ * other writer (the clock, the office, a bare-hours log), the saved times are
+ * stale and are not used. With `ownerUserId` they must also be that trade's
+ * own: a card handed to someone else never carries the first trade's times.
  */
 export function loggedTimeEntryForCard(
   row: unknown,
@@ -532,7 +492,7 @@ export function loggedTimeEntryForCard(
 /**
  * The saved rows for a set of job cards, by card id. A failed read answers
  * the reason: the caller decides whether that may be shown as "no saved
- * times" (a view) or must stop the work (a refusal that would name the card).
+ * times" (a view) or must stop the work (a log that would replace them).
  */
 export async function loadLoggedTimesByCard(
   // deno-lint-ignore no-explicit-any
@@ -562,31 +522,6 @@ export async function loadLoggedTimesByCard(
       error: error instanceof Error ? error.message : String(error),
     };
   }
-}
-
-/**
- * The entry for a job card the server collected itself, when an entry is
- * required: the trade's own saved job-view times first, but only while they
- * make the hours the line bills (`billedHours`), else the system's same-day
- * pair of stamps (the clock's, or the assignment's started and completed).
- * Null when the card has neither: nothing is invented.
- */
-export function autoCollectedTimeEntry(
-  card: {
-    saved: unknown;
-    userId: unknown;
-    billedHours: unknown;
-    startedAt: unknown;
-    finishedAt: unknown;
-    breakMinutes?: unknown;
-  },
-): TradeInvoiceRecordedTimeEntry | null {
-  return loggedTimeEntryForCard(card.saved, card.billedHours, card.userId) ||
-    clockTradeInvoiceTimeEntry(
-      card.startedAt,
-      card.finishedAt,
-      card.breakMinutes ?? 0,
-    );
 }
 
 // ── The per-job list ────────────────────────────────────────────────────────

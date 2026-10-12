@@ -15,9 +15,10 @@
  *   4. the day worked is never after today, Perth, on every path,
  *   5. times saved on the job view (log_my_job_hours) are stored with the
  *      card's hours and returned by my_hours,
- *   6. a job card the server collects itself takes the trade's saved job-view
- *      times while they make the hours its line bills, else the system's own
- *      stamps, else is refused by name,
+ *   6. an invoice line's time entry is only ever the trade's own statement
+ *      on that line: a job card the server collects itself carries none
+ *      (flag off) or is refused by name (flag on), whatever the clock or the
+ *      job view holds,
  *   7. two days on one job are two job cards: each day's log goes on that
  *      day's card.
  *
@@ -42,7 +43,6 @@ import {
 } from "./index.ts";
 import {
   assertManualTimeEntriesDistinct,
-  clockTradeInvoiceTimeEntry,
   draftTradeInvoiceTimeEntry,
   isTradeInvoiceTimeLineType,
   loadJobTradeTimeEntries,
@@ -345,32 +345,6 @@ Deno.test("time entry: a draft keeps what is well formed and refuses nothing", (
       },
       hours: null,
     },
-  );
-});
-
-Deno.test("time entry: the clock's own record is read in Perth time and never invented", () => {
-  assertEquals(
-    clockTradeInvoiceTimeEntry(
-      "2026-08-25T23:30:00Z",
-      "2026-08-26T07:45:00Z",
-      30,
-    ),
-    {
-      work_date: "2026-08-26",
-      start_time: "07:30",
-      finish_time: "15:45",
-      break_minutes: 30,
-    },
-  );
-  // crosses Perth midnight, a missing stamp, a finish before the start
-  assertEquals(
-    clockTradeInvoiceTimeEntry("2026-08-26T10:00:00Z", "2026-08-26T18:00:00Z"),
-    null,
-  );
-  assertEquals(clockTradeInvoiceTimeEntry("2026-08-26T00:00:00Z", null), null);
-  assertEquals(
-    clockTradeInvoiceTimeEntry("2026-08-26T05:00:00Z", "2026-08-26T01:00:00Z"),
-    null,
   );
 });
 
@@ -749,6 +723,14 @@ const NO_TIME = {
   finish_time: null,
   break_minutes: null,
 };
+
+// A stored line with no time entry: the four fields null, or not sent at all.
+const storedTimeOf = (row: any) => ({
+  work_date: row.work_date ?? null,
+  start_time: row.start_time ?? null,
+  finish_time: row.finish_time ?? null,
+  break_minutes: row.break_minutes ?? null,
+});
 
 const submitBody = (manual_assignments: any[], extra_items: any[] = []) => ({
   week_start: WEEK_START,
@@ -1184,73 +1166,6 @@ const clockBody = {
   }],
 };
 
-handlerTest("generate_trade_invoice clock lane: the clock's record is the entry; the billed hours stay the clock's", async () => {
-  const twoDays = [
-    clockedCard(CARD_A, JOB_A, {}),
-    clockedCard(CARD_B, JOB_A, {
-      scheduled_date: "2026-08-26",
-      hours_worked: 4,
-      break_minutes: 0,
-      clocked_on_at: "2026-08-25T23:00:00Z",
-      clocked_off_at: "2026-08-26T03:00:00Z",
-    }),
-  ];
-  // flag off: two days on one job stay one line, as before, with no entry
-  const off = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: false,
-    cards: twoDays,
-  });
-  const offLabour = off.lineRows.filter((row) => row.line_type === "labour");
-  assertEquals(offLabour.length, 1, JSON.stringify(off.body));
-  assertEquals(
-    [offLabour[0].total_hours, offLabour[0].days_worked],
-    [12, 2],
-  );
-  assertEquals(timeOf(offLabour[0]), NO_TIME);
-
-  // flag off, one card on the job: that line can say when it was worked
-  const single = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: false,
-    cards: [twoDays[0]],
-  });
-  const singleLabour = single.lineRows.filter((row) =>
-    row.line_type === "labour"
-  );
-  assertEquals(singleLabour.length, 1, JSON.stringify(single.body));
-  assertEquals(timeOf(singleLabour[0]), {
-    work_date: "2026-08-25",
-    start_time: "07:00",
-    finish_time: "15:30",
-    break_minutes: 30,
-  });
-  assertEquals(singleLabour[0].total_hours, 8);
-
-  // flag on: one line per card, each with the clock's entry
-  const on = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: true,
-    cards: twoDays,
-  });
-  const onLabour = on.lineRows.filter((row) => row.line_type === "labour");
-  assertEquals(onLabour.length, 2, JSON.stringify(on.body));
-  assertEquals(onLabour.map((row) => ({ hours: row.total_hours, ...timeOf(row) })), [
-    {
-      hours: 8,
-      work_date: "2026-08-25",
-      start_time: "07:00",
-      finish_time: "15:30",
-      break_minutes: 30,
-    },
-    {
-      hours: 4,
-      work_date: "2026-08-26",
-      start_time: "07:00",
-      finish_time: "11:00",
-      break_minutes: 0,
-    },
-  ]);
-
-});
-
 // A saved job-view row, as log_my_job_hours stores it.
 const savedTimes = (assignment_id: string, job_id: string, extra: Record<string, unknown> = {}) => ({
   assignment_id,
@@ -1264,116 +1179,80 @@ const savedTimes = (assignment_id: string, job_id: string, extra: Record<string,
   ...extra,
 });
 
-handlerTest("generate_trade_invoice clock lane (flag on): a card takes the trade's saved job-view times, else the clock's record, else is refused by name", async () => {
-  // CARD_A: hours typed on the job view, never clocked. CARD_B: clocked.
-  const typedOnJob = clockedCard(CARD_A, JOB_A, {
-    clocked_on_at: null,
-    clocked_off_at: null,
-    break_minutes: 0,
+const NEEDS_TIMES_ON_TWO_JOBS =
+  "Enter your start and finish time for: SWF-TIME-1 on 2026-08-25; SWF-TIME-2 on 2026-08-26. " +
+  "Enter them on that job's card in the Weekly Invoice, then submit again.";
+
+handlerTest("generate_trade_invoice clock lane (flag off): the lines are saved as before, with no time entry", async () => {
+  const twoDays = [
+    clockedCard(CARD_A, JOB_A, {}),
+    clockedCard(CARD_B, JOB_A, {
+      scheduled_date: "2026-08-26",
+      hours_worked: 4,
+      break_minutes: 0,
+      clocked_on_at: "2026-08-25T23:00:00Z",
+      clocked_off_at: "2026-08-26T03:00:00Z",
+    }),
+  ];
+  // two days on one job stay one line
+  const grouped = await callTradeAction("generate_trade_invoice", clockBody, {
+    flagOn: false,
+    cards: twoDays,
   });
-  const clocked = clockedCard(CARD_B, JOB_B, {
-    scheduled_date: "2026-08-26",
-    hours_worked: 4,
-    break_minutes: 0,
-    clocked_on_at: "2026-08-25T23:00:00Z", // 07:00 Perth, 26 Aug
-    clocked_off_at: "2026-08-26T03:00:00Z", // 11:00 Perth
-  });
-  const both = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: true,
-    cards: [typedOnJob, clocked],
-    loggedTimes: [savedTimes(CARD_A, JOB_A)],
-  });
-  const labour = both.lineRows.filter((row) => row.line_type === "labour");
-  assertEquals(labour.length, 2, JSON.stringify(both.body));
+  const groupedLabour = grouped.lineRows.filter((row) => row.line_type === "labour");
+  assertEquals(groupedLabour.length, 1, JSON.stringify(grouped.body));
   assertEquals(
-    labour.map((row) => ({
-      job_id: row.job_id,
-      hours: row.total_hours,
-      total: row.line_total_ex,
-      ...timeOf(row),
-    })),
-    [
-      // the trade's own saved times
-      {
-        job_id: JOB_A,
-        hours: 8,
-        total: 400,
-        work_date: "2026-08-25",
-        start_time: "06:30",
-        finish_time: "15:00",
-        break_minutes: 30,
-      },
-      // the clock's record
-      {
-        job_id: JOB_B,
-        hours: 4,
-        total: 200,
+    [groupedLabour[0].total_hours, groupedLabour[0].days_worked],
+    [12, 2],
+  );
+  assertEquals(storedTimeOf(groupedLabour[0]), NO_TIME);
+
+  // one card with a same-day clock record and times saved on the job view:
+  // the server fills in neither, and never reads the saved times
+  const single = await callTradeAction("generate_trade_invoice", clockBody, {
+    flagOn: false,
+    cards: [twoDays[0]],
+    loggedTimes: [savedTimes(CARD_A, JOB_A)],
+    fail: { job_assignment_logged_times: "relation missing" },
+  });
+  const singleLabour = single.lineRows.filter((row) => row.line_type === "labour");
+  assertEquals(singleLabour.length, 1, JSON.stringify(single.body));
+  assertEquals(singleLabour[0].total_hours, 8);
+  assertEquals(storedTimeOf(singleLabour[0]), NO_TIME);
+});
+
+handlerTest("generate_trade_invoice clock lane (flag on): every auto-collected card is refused by name, whatever the clock or the job view holds", async () => {
+  const out = await callTradeAction("generate_trade_invoice", clockBody, {
+    flagOn: true,
+    cards: [
+      // a same-day clock record, and times saved on the job view
+      clockedCard(CARD_A, JOB_A, {}),
+      // hours typed on the job view, never clocked
+      clockedCard(CARD_B, JOB_B, {
+        scheduled_date: "2026-08-26",
+        hours_worked: 4,
+        break_minutes: 0,
+        clocked_on_at: null,
+        clocked_off_at: null,
+      }),
+    ],
+    loggedTimes: [
+      savedTimes(CARD_A, JOB_A),
+      savedTimes(CARD_B, JOB_B, {
         work_date: "2026-08-26",
         start_time: "07:00",
         finish_time: "11:00",
         break_minutes: 0,
-      },
-    ],
-  );
-
-  // a clocked card that also has saved times: the trade's own come first
-  const preferred = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: true,
-    cards: [clockedCard(CARD_A, JOB_A, {})],
-    loggedTimes: [savedTimes(CARD_A, JOB_A)],
-  });
-  assertEquals(
-    timeOf(preferred.lineRows.find((row) => row.line_type === "labour")),
-    {
-      work_date: "2026-08-25",
-      start_time: "06:30",
-      finish_time: "15:00",
-      break_minutes: 30,
-    },
-  );
-
-  // saved times are not used once they stop describing the card's hours, or
-  // when another trade saved them: the clock's record stands
-  for (
-    const stale of [
-      savedTimes(CARD_A, JOB_A, { hours: 6 }),
-      savedTimes(CARD_A, JOB_A, { user_id: "7d4f0a52-0000-4000-8000-00000000aa99" }),
-    ]
-  ) {
-    const out = await callTradeAction("generate_trade_invoice", clockBody, {
-      flagOn: true,
-      cards: [clockedCard(CARD_A, JOB_A, {})],
-      loggedTimes: [stale],
-    });
-    assertEquals(
-      timeOf(out.lineRows.find((row) => row.line_type === "labour")),
-      {
-        work_date: "2026-08-25",
-        start_time: "07:00",
-        finish_time: "15:30",
-        break_minutes: 30,
-      },
-      JSON.stringify(out.body),
-    );
-  }
-
-  // neither: one refusal naming every job and day that needs times (the
-  // clocked card is not named), and nothing is saved
-  const neither = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: true,
-    cards: [
-      typedOnJob,
-      clocked,
-      clockedCard("7d4f0a52-0000-4000-8000-00000000c003", JOB_B, {
-        scheduled_date: "2026-08-27",
-        clocked_off_at: null,
+        hours: 4,
       }),
     ],
+    // the saved times are never read on this lane
+    fail: { job_assignment_logged_times: "relation missing" },
   });
-  assertEquals(neither.status, 422, JSON.stringify(neither.body));
-  assertEquals(neither.body.code, "time_entry_required");
-  assertEquals(neither.body.saved, false);
-  assertEquals(neither.body.needs_times, [
+  assertEquals(out.status, 422, JSON.stringify(out.body));
+  assertEquals(out.body.code, "time_entry_required");
+  assertEquals(out.body.saved, false);
+  assertEquals(out.body.needs_times, [
     {
       assignment_id: CARD_A,
       job_id: JOB_A,
@@ -1381,59 +1260,15 @@ handlerTest("generate_trade_invoice clock lane (flag on): a card takes the trade
       work_date: "2026-08-25",
     },
     {
-      assignment_id: "7d4f0a52-0000-4000-8000-00000000c003",
+      assignment_id: CARD_B,
       job_id: JOB_B,
       job_number: "SWF-TIME-2",
-      work_date: "2026-08-27",
+      work_date: "2026-08-26",
     },
   ]);
-  assertStringIncludes(neither.body.userMessage, "SWF-TIME-1 on 2026-08-25");
-  assertStringIncludes(neither.body.userMessage, "SWF-TIME-2 on 2026-08-27");
-  // both ways to give the times
-  assertStringIncludes(neither.body.userMessage, "log your hours for that day");
-  assertStringIncludes(neither.body.userMessage, "Weekly Invoice");
-  assertEquals(neither.body.userMessage.includes("2026-08-26"), false);
-  assertEquals(neither.writes, []);
-
-  // saved times that cannot be read are never "none saved"
-  const unreadable = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: true,
-    cards: [typedOnJob],
-    loggedTimes: [savedTimes(CARD_A, JOB_A)],
-    fail: { job_assignment_logged_times: "relation missing" },
-  });
-  assert(unreadable.status >= 500, JSON.stringify(unreadable.body));
-  assertEquals(unreadable.body.code === "time_entry_required", false);
-  assertEquals(unreadable.writes, []);
-});
-
-handlerTest("generate_trade_invoice clock lane (flag off): saved job-view times are not read and the lines are as before", async () => {
-  const out = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: false,
-    cards: [clockedCard(CARD_A, JOB_A, {})],
-    loggedTimes: [savedTimes(CARD_A, JOB_A)],
-    // an unreadable table cannot matter to a lane that never reads it
-    fail: { job_assignment_logged_times: "relation missing" },
-  });
-  const labour = out.lineRows.filter((row) => row.line_type === "labour");
-  assertEquals(labour.length, 1, JSON.stringify(out.body));
-  assertEquals(labour[0].total_hours, 8);
-  assertEquals(timeOf(labour[0]), {
-    work_date: "2026-08-25",
-    start_time: "07:00",
-    finish_time: "15:30",
-    break_minutes: 30,
-  });
-
-  // never clocked, flag off: billed as before, with no entry and no refusal
-  const typed = await callTradeAction("generate_trade_invoice", clockBody, {
-    flagOn: false,
-    cards: [clockedCard(CARD_A, JOB_A, { clocked_on_at: null, clocked_off_at: null })],
-    loggedTimes: [savedTimes(CARD_A, JOB_A)],
-  });
-  const typedLabour = typed.lineRows.filter((row) => row.line_type === "labour");
-  assertEquals(typedLabour.length, 1, JSON.stringify(typed.body));
-  assertEquals(timeOf(typedLabour[0]), NO_TIME);
+  // each job and day, and the one way to give the times
+  assertEquals(out.body.userMessage, NEEDS_TIMES_ON_TWO_JOBS);
+  assertEquals(out.writes, []);
 });
 
 // ── 2b. submit_trade_invoice: the legacy hourly lane ────────────────────────
@@ -1441,13 +1276,7 @@ handlerTest("generate_trade_invoice clock lane (flag off): saved job-view times 
 type Write = { table: string; op: string; payload: any };
 
 function legacyClient(
-  fx: {
-    flagOn: boolean;
-    assignments: any[];
-    invoiceType?: string;
-    loggedTimes?: any[];
-    fail?: Record<string, string>;
-  },
+  fx: { flagOn: boolean; assignments: any[]; invoiceType?: string },
 ): { client: any; writes: Write[] } {
   const writes: Write[] = [];
   const client = {
@@ -1471,14 +1300,6 @@ function legacyClient(
             : [];
         }
         if (table === "trade_rates") return [{ hourly_rate: 50 }];
-        if (table === "job_assignment_logged_times") {
-          const ids = Array.isArray(filters.assignment_id)
-            ? filters.assignment_id.map(String)
-            : null;
-          return (fx.loggedTimes ?? []).filter((row) =>
-            !ids || ids.includes(String(row.assignment_id))
-          );
-        }
         if (table === "job_assignments") {
           const ids = Array.isArray(filters.id) ? filters.id.map(String) : null;
           return fx.assignments.filter((a) => !ids || ids.includes(String(a.id)));
@@ -1524,12 +1345,7 @@ function legacyClient(
           builder.then((r: any) => ({ data: (r.data || [])[0] ?? null, error: null })),
         then(resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) {
           if (op !== "select") writes.push({ table, op, payload });
-          const fault = fx.fail?.[table];
-          return Promise.resolve(
-            fault
-              ? { data: null, error: { message: fault } }
-              : { data: rows(), error: null },
-          ).then(resolve, reject);
+          return Promise.resolve({ data: rows(), error: null }).then(resolve, reject);
         },
       };
       return builder;
@@ -1562,12 +1378,7 @@ const completedCard = (id: string, extra: Record<string, unknown> = {}) => ({
 // The lane goes on to Xero, which a fake client cannot answer: every run
 // rejects there. What matters is what was written before that point.
 async function submitLegacy(
-  fx: {
-    flagOn: boolean;
-    assignments: any[];
-    loggedTimes?: any[];
-    fail?: Record<string, string>;
-  },
+  fx: { flagOn: boolean; assignments: any[] },
 ): Promise<{ lines: any[]; writes: Write[]; error: Error }> {
   const { client, writes } = legacyClient(fx);
   const error = await assertRejects(() =>
@@ -1579,31 +1390,26 @@ async function submitLegacy(
   return { lines, writes, error };
 }
 
-Deno.test("submit_trade_invoice: the assignment's own stamps are the entry, and billed hours do not move", async () => {
+Deno.test("submit_trade_invoice (flag off): the lines are saved as before, with no time entry", async () => {
   const dayTwo = completedCard(CARD_B, {
     scheduled_date: "2026-08-27",
     started_at: "2026-08-26T23:00:00Z", // 07:00 Perth, 27 Aug
     completed_at: "2026-08-27T03:00:00Z", // 11:00 Perth
   });
 
-  // flag off, one card on the job: stamped
+  // one card with a same-day pair of stamps: the server fills in no entry
   const single = await submitLegacy({
     flagOn: false,
     assignments: [completedCard(CARD_A)],
   });
   assertEquals(single.lines.length, 1);
   assertEquals(
-    { hours: single.lines[0].total_hours, ...timeOf(single.lines[0]) },
-    {
-      hours: 8,
-      work_date: "2026-08-26",
-      start_time: "08:00",
-      finish_time: "16:00",
-      break_minutes: 0,
-    },
+    [single.lines[0].total_hours, single.lines[0].line_total_ex],
+    [8, 400],
   );
+  assertEquals(storedTimeOf(single.lines[0]), NO_TIME);
 
-  // flag off, two days on one job: one line as before, no entry
+  // two days on one job: one line, as before
   const grouped = await submitLegacy({
     flagOn: false,
     assignments: [completedCard(CARD_A), dayTwo],
@@ -1613,246 +1419,40 @@ Deno.test("submit_trade_invoice: the assignment's own stamps are the entry, and 
     [grouped.lines[0].total_hours, grouped.lines[0].line_total_ex],
     [12, 600],
   );
-  assertEquals(timeOf(grouped.lines[0]), NO_TIME);
-
-  // flag on: one line per card, same money in total
-  const split = await submitLegacy({
-    flagOn: true,
-    assignments: [completedCard(CARD_A), dayTwo],
-  });
-  assertEquals(
-    split.lines.map((row) => ({
-      job_id: row.job_id,
-      hours: row.total_hours,
-      total: row.line_total_ex,
-      cards: row.assignment_ids,
-      ...timeOf(row),
-    })),
-    [
-      {
-        job_id: JOB_A,
-        hours: 8,
-        total: 400,
-        cards: [CARD_A],
-        work_date: "2026-08-26",
-        start_time: "08:00",
-        finish_time: "16:00",
-        break_minutes: 0,
-      },
-      {
-        job_id: JOB_A,
-        hours: 4,
-        total: 200,
-        cards: [CARD_B],
-        work_date: "2026-08-27",
-        start_time: "07:00",
-        finish_time: "11:00",
-        break_minutes: 0,
-      },
-    ],
-  );
+  assertEquals(grouped.lines[0].assignment_ids, [CARD_A, CARD_B]);
+  assertEquals(storedTimeOf(grouped.lines[0]), NO_TIME);
 });
 
-Deno.test("submit_trade_invoice (flag on): stamps that are not one same-day shift are refused before any write", async () => {
-  const acrossMidnight = completedCard(CARD_A, {
-    started_at: "2026-08-26T10:00:00Z", // 18:00 Perth
-    completed_at: "2026-08-26T18:00:00Z", // 02:00 Perth, next day
-  });
-  const sameDay = completedCard(CARD_B, { scheduled_date: "2026-08-27" });
+Deno.test("submit_trade_invoice (flag on): every card is refused by name before any write", async () => {
   const on = await submitLegacy({
     flagOn: true,
-    assignments: [acrossMidnight, sameDay],
+    assignments: [
+      completedCard(CARD_A, { scheduled_date: "2026-08-25" }),
+      completedCard(CARD_B, {
+        scheduled_date: "2026-08-26",
+        jobs: { id: JOB_B, type: "fencing", job_number: "SWF-TIME-2" },
+      }),
+    ],
   });
-  assertEquals((on.error as any).body?.code, "time_entry_required");
   assertEquals((on.error as any).status, 422);
-  // the refusal names the job and day that needs times, and only that one
-  assertEquals((on.error as any).body?.needs_times, [{
-    assignment_id: CARD_A,
-    job_id: JOB_A,
-    job_number: "SWF-TIME-1",
-    work_date: "2026-08-26",
-  }]);
-  assertStringIncludes(on.error.message, "SWF-TIME-1 on 2026-08-26");
-  assertEquals(on.error.message.includes("2026-08-27"), false);
-  assertEquals(on.writes, []);
-
-  // flag off: the same card is billed as before, with no entry
-  const off = await submitLegacy({ flagOn: false, assignments: [acrossMidnight] });
-  assertEquals(off.lines.length, 1);
-  assertEquals(off.lines[0].total_hours, 8);
-  assertEquals(timeOf(off.lines[0]), NO_TIME);
-});
-
-// A card whose start was tapped at 07:05 and which was completed at 15:10,
-// Perth, 26 Aug: this lane bills completed minus started, 8.08 hours.
-const tappedCard = (extra: Record<string, unknown> = {}) =>
-  completedCard(CARD_A, {
-    started_at: "2026-08-25T23:05:00Z", // 07:05 Perth, 26 Aug
-    completed_at: "2026-08-26T07:10:00Z", // 15:10 Perth
-    ...extra,
-  });
-// What the trade typed on the job view for that day: 7.5 hours.
-const typedShift = (extra: Record<string, unknown> = {}) =>
-  savedTimes(CARD_A, JOB_A, {
-    work_date: "2026-08-26",
-    start_time: "07:00",
-    finish_time: "15:00",
-    break_minutes: 30,
-    hours: 7.5,
-    ...extra,
-  });
-const billedLine = (row: any) => ({
-  cards: row.assignment_ids,
-  hours: row.total_hours,
-  total: row.line_total_ex,
-  ...timeOf(row),
-});
-
-Deno.test("submit_trade_invoice (flag on): saved job-view times that make the billed hours are the entry", async () => {
-  // 08:00 to 16:00 is billed as 8 hours; 06:30 to 15:00 less 30 minutes is 8
-  const match = await submitLegacy({
-    flagOn: true,
-    assignments: [completedCard(CARD_A)],
-    loggedTimes: [savedTimes(CARD_A, JOB_A, { work_date: "2026-08-26" })],
-  });
-  assertEquals(match.lines.map(billedLine), [{
-    cards: [CARD_A],
-    hours: 8,
-    total: 400,
-    work_date: "2026-08-26",
-    start_time: "06:30",
-    finish_time: "15:00",
-    break_minutes: 30,
-  }]);
-
-  // the stamps cross midnight (18:00 to 02:00, billed 8 hours), and the
-  // trade's saved times make those same 8 hours: they are the entry
-  const acrossMidnight = completedCard(CARD_A, {
-    started_at: "2026-08-26T10:00:00Z", // 18:00 Perth
-    completed_at: "2026-08-26T18:00:00Z", // 02:00 Perth, next day
-  });
-  const noClock = await submitLegacy({
-    flagOn: true,
-    assignments: [acrossMidnight],
-    loggedTimes: [savedTimes(CARD_A, JOB_A, { work_date: "2026-08-26" })],
-  });
-  assertEquals(noClock.lines.map(billedLine), [{
-    cards: [CARD_A],
-    hours: 8,
-    total: 400,
-    work_date: "2026-08-26",
-    start_time: "06:30",
-    finish_time: "15:00",
-    break_minutes: 30,
-  }]);
-});
-
-Deno.test("submit_trade_invoice (flag on): saved job-view times that do not make the billed hours are never stamped; the card falls to its own stamps", async () => {
-  // billed 8.08 hours, typed 7.5: the line says what the stamps say
-  const out = await submitLegacy({
-    flagOn: true,
-    assignments: [tappedCard()],
-    loggedTimes: [typedShift()],
-  });
-  assertEquals(out.lines.map(billedLine), [{
-    cards: [CARD_A],
-    hours: 8.08,
-    total: 404,
-    work_date: "2026-08-26",
-    start_time: "07:05",
-    finish_time: "15:10",
-    break_minutes: 0,
-  }]);
-
-  // the saved hours are never billed in place of the lane's own
-  assertEquals(out.lines[0].total_hours === 7.5, false);
-
-  // another trade's saved times are not this trade's, whatever their hours
-  const others = await submitLegacy({
-    flagOn: true,
-    assignments: [completedCard(CARD_A)],
-    loggedTimes: [savedTimes(CARD_A, JOB_A, {
-      work_date: "2026-08-26",
-      user_id: "7d4f0a52-0000-4000-8000-00000000aa99",
-    })],
-  });
-  assertEquals(timeOf(others.lines[0]), {
-    work_date: "2026-08-26",
-    start_time: "08:00",
-    finish_time: "16:00",
-    break_minutes: 0,
-  });
-});
-
-Deno.test("submit_trade_invoice (flag on): saved times that do not make the billed hours, and no same-day stamps, are refused by name", async () => {
-  // started 07:05 on 26 Aug, hours logged the next morning at 09:00: the
-  // lane bills 25.92 hours, the trade typed 07:00 to 15:00
-  const loggedNextMorning = tappedCard({
-    completed_at: "2026-08-27T01:00:00Z", // 09:00 Perth, 27 Aug
-  });
-  const sameDay = completedCard(CARD_B, { scheduled_date: "2026-08-27" });
-  const refused = await submitLegacy({
-    flagOn: true,
-    assignments: [loggedNextMorning, sameDay],
-    loggedTimes: [typedShift()],
-  });
-  assertEquals((refused.error as any).status, 422);
-  assertEquals((refused.error as any).body?.code, "time_entry_required");
-  assertEquals((refused.error as any).body?.needs_times, [{
-    assignment_id: CARD_A,
-    job_id: JOB_A,
-    job_number: "SWF-TIME-1",
-    work_date: "2026-08-26",
-  }]);
-  assertStringIncludes(refused.error.message, "SWF-TIME-1 on 2026-08-26");
-  // both ways to give the times
-  assertStringIncludes(refused.error.message, "log your hours for that day");
-  assertStringIncludes(refused.error.message, "Weekly Invoice");
-  assertEquals(refused.writes, []);
-
-  // stamps across midnight (billed 8 hours) and a typed 7.5 hour shift
-  const acrossMidnight = completedCard(CARD_A, {
-    started_at: "2026-08-26T10:00:00Z", // 18:00 Perth
-    completed_at: "2026-08-26T18:00:00Z", // 02:00 Perth, next day
-  });
-  const mismatch = await submitLegacy({
-    flagOn: true,
-    assignments: [acrossMidnight],
-    loggedTimes: [typedShift()],
-  });
-  assertEquals((mismatch.error as any).body?.code, "time_entry_required");
-  assertEquals(mismatch.writes, []);
-
-  // saved times that cannot be read are never "none saved"
-  const unreadable = await submitLegacy({
-    flagOn: true,
-    assignments: [acrossMidnight],
-    loggedTimes: [typedShift()],
-    fail: { job_assignment_logged_times: "relation missing" },
-  });
-  assertEquals((unreadable.error as any).body?.code, undefined);
-  assertStringIncludes(unreadable.error.message, "relation missing");
-  assertEquals(unreadable.writes, []);
-});
-
-Deno.test("submit_trade_invoice (flag off): saved job-view times are not read and the line is as before", async () => {
-  const out = await submitLegacy({
-    flagOn: false,
-    assignments: [completedCard(CARD_A)],
-    loggedTimes: [savedTimes(CARD_A, JOB_A, { work_date: "2026-08-26" })],
-    fail: { job_assignment_logged_times: "relation missing" },
-  });
-  assertEquals(out.lines.length, 1);
-  assertEquals(
-    { hours: out.lines[0].total_hours, ...timeOf(out.lines[0]) },
+  assertEquals((on.error as any).body?.code, "time_entry_required");
+  assertEquals((on.error as any).body?.needs_times, [
     {
-      hours: 8,
-      work_date: "2026-08-26",
-      start_time: "08:00",
-      finish_time: "16:00",
-      break_minutes: 0,
+      assignment_id: CARD_A,
+      job_id: JOB_A,
+      job_number: "SWF-TIME-1",
+      work_date: "2026-08-25",
     },
-  );
+    {
+      assignment_id: CARD_B,
+      job_id: JOB_B,
+      job_number: "SWF-TIME-2",
+      work_date: "2026-08-26",
+    },
+  ]);
+  // each job and day, and the one way to give the times
+  assertEquals(on.error.message, NEEDS_TIMES_ON_TWO_JOBS);
+  assertEquals(on.writes, []);
 });
 
 // ── 3. A job's list ─────────────────────────────────────────────────────────
@@ -2498,16 +2098,20 @@ const savedOf = (tables: Tables, id: string) => {
   return row ? { ...timeOf(row), hours: row.hours } : null;
 };
 
-handlerTest("two days on one job (flag on): the refusal names both days, each day's times go on that day's card, and the invoice then carries both", async () => {
+handlerTest("two days on one job (flag on): each day's times go on that day's card, and the invoice carries only what the trade enters on its cards", async () => {
   const tables = twoDayTables();
-  const submit = () =>
-    callTradeAction("generate_trade_invoice", clockBody, {
-      flagOn: true,
-      cards: tables.job_assignments,
-      loggedTimes: tables.job_assignment_logged_times,
-    });
+  const submit = (manual_assignments: any[] = []) =>
+    callTradeAction(
+      "generate_trade_invoice",
+      { ...clockBody, manual_assignments },
+      {
+        flagOn: true,
+        cards: tables.job_assignments,
+        loggedTimes: tables.job_assignment_logged_times,
+      },
+    );
 
-  // neither card says when it was worked
+  // no cards entered: the server collects both, and neither says when
   const refused = await submit();
   assertEquals(refused.status, 422, JSON.stringify(refused.body));
   assertEquals(refused.body.code, "time_entry_required");
@@ -2517,7 +2121,7 @@ handlerTest("two days on one job (flag on): the refusal names both days, each da
   );
   assertEquals(refused.writes, []);
 
-  // the trade logs each day on the job, as the refusal says
+  // the trade logs each day on the job view
   const monday = await logHours(tables, {
     work_date: "2026-08-24",
     start_time: "07:00",
@@ -2552,8 +2156,29 @@ handlerTest("two days on one job (flag on): the refusal names both days, each da
     hours: 4,
   });
 
-  // the same submit now goes through, one line per day
-  const sent = await submit();
+  // times saved on the job view are not an invoice line's entry: the same
+  // submit is refused the same way
+  const stillRefused = await submit();
+  assertEquals(stillRefused.status, 422, JSON.stringify(stillRefused.body));
+  assertEquals(
+    stillRefused.body.needs_times.map((card: any) => card.assignment_id),
+    [CARD_MON, CARD_TUE],
+  );
+  assertEquals(stillRefused.writes, []);
+
+  // the Weekly Invoice card opens on each card's saved times, and the trade
+  // submits them as that card's own line
+  const cards = await weekCards(tables);
+  assertEquals(
+    cards.map((card: any) => [card.id, card.logged_time_entry?.work_date]),
+    [[CARD_MON, "2026-08-24"], [CARD_TUE, "2026-08-25"]],
+  );
+  const sent = await submit(
+    cards.map((card: any) => ({
+      assignment_id: card.id,
+      ...card.logged_time_entry,
+    })),
+  );
   const labour = sent.lineRows.filter((row) => row.line_type === "labour");
   assertEquals(labour.length, 2, JSON.stringify(sent.body));
   assertEquals(
@@ -2644,7 +2269,46 @@ Deno.test("log_my_job_hours: a named job card wins over the day, and a card that
   assertEquals(JSON.stringify(tables), before);
 });
 
-Deno.test("log_my_job_hours: with no card for the day the usual card is used, but never one holding another day's hours", async () => {
+Deno.test("log_my_job_hours: times for a day other than the card's scheduled day land on a card holding hours with no saved times", async () => {
+  // one card scheduled Tuesday; 2 hours were logged on it without times
+  const tables: Tables = {
+    ...jobViewTables(),
+    job_assignments: [dayCard(CARD_TUE, "2026-08-25", { hours_worked: 2 })],
+  };
+  // the work was done on the Wednesday
+  const logged = await logHours(tables, {
+    work_date: "2026-08-26",
+    start_time: "09:00",
+    finish_time: "11:30",
+  });
+  assertEquals(logged.assignment.id, CARD_TUE);
+  assertEquals(logged.hours, 2.5);
+  assertEquals(cardOf(tables, CARD_TUE).hours_worked, 2.5);
+  assertEquals(cardOf(tables, CARD_TUE).scheduled_date, "2026-08-25");
+  assertEquals(savedOf(tables, CARD_TUE), {
+    work_date: "2026-08-26",
+    start_time: "09:00",
+    finish_time: "11:30",
+    break_minutes: 0,
+    hours: 2.5,
+  });
+  assertEquals((await weekCards(tables))[0].logged_time_entry?.work_date, "2026-08-26");
+
+  // the office changes the hours: the saved times no longer describe them, so
+  // they hold no day and a log for another day lands
+  cardOf(tables, CARD_TUE).hours_worked = 5;
+  const later = await logHours(tables, {
+    work_date: "2026-08-27",
+    start_time: "07:00",
+    finish_time: "10:00",
+  });
+  assertEquals(later.assignment.id, CARD_TUE);
+  assertEquals(cardOf(tables, CARD_TUE).hours_worked, 3);
+  assertEquals(tables.job_assignment_logged_times.length, 1);
+  assertEquals(savedOf(tables, CARD_TUE)?.work_date, "2026-08-27");
+});
+
+Deno.test("log_my_job_hours: with no card scheduled that day the usual card is used, but never one holding saved times for another day", async () => {
   // one card, scheduled Tuesday, no hours yet; the work was done on Wednesday
   const tables: Tables = {
     ...jobViewTables(),
@@ -2664,7 +2328,8 @@ Deno.test("log_my_job_hours: with no card for the day the usual card is used, bu
   assertEquals(tables.job_assignment_logged_times.length, 1);
   assertEquals(savedOf(tables, CARD_TUE)?.finish_time, "13:00");
 
-  // a different day has no card, and the only card holds Wednesday's hours
+  // the only card holds saved times for the Wednesday: a log for any other
+  // day, its own scheduled day included, is refused
   for (const work_date of ["2026-08-27", "2026-08-25"]) {
     const before = JSON.stringify(tables);
     const error = await assertRejects(() =>

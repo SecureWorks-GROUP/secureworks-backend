@@ -28,8 +28,12 @@ Every invoice line that bills a trade's time carries:
   0.01 away is refused.
 - One line is one job on one day. Two days on a job is two lines. A shift
   across midnight is two lines.
-- The trade types every time line's date and times. The trade app pre-fills
-  none of them and no longer sends any `source: 'extra_day'` value; the server
+- An invoice line's time entry is always the trade's own statement on that
+  line, and it always makes the hours the line bills. The server never fills
+  one in: not from the clock, not from an assignment's started and completed
+  stamps, not from times saved on the job view. A line the trade did not give
+  times on carries none.
+- The trade app no longer sends any `source: 'extra_day'` value; the server
   never read that value, so nothing here depends on it.
 - A line is a time line when its type is Labour, Fencing, Patio, Make Safe or
   General Labour (`TRADE_INVOICE_TIME_LINE_TYPES`, the same list the existing
@@ -52,7 +56,7 @@ Nothing is written before a refusal.
 | Code | When | Flag off | Flag on |
 | --- | --- | --- | --- |
 | `time_entry_required` | a time line has none of the three fields | accepted | refused |
-| `time_entry_required` | a job card the server collected itself has no saved job-view times and no same-day stamps | accepted | refused, naming each job and day |
+| `time_entry_required` | a job card the server collected itself (nobody typed its line) | accepted | refused, naming each job and day |
 | `time_entry_required` | a time line has some but not all three | refused | refused |
 | `time_entry_future_date` | `work_date` is after today, Perth | refused | refused |
 | `time_entry_finish_before_start` | finish is not after start | refused | refused |
@@ -62,11 +66,10 @@ Nothing is written before a refusal.
 
 The refusal for job cards the server collected itself (lanes 3 and 6 below) is
 one answer for the whole invoice. Its message names every job and day that
-needs times and gives both ways to fix it: log the hours on that job for that
-day with a start and finish time, or enter them on that job's card in the
-Weekly Invoice. The body also carries them as `needs_times`:
+needs times and gives the one way to fix it: enter them on that job's card in
+the Weekly Invoice. The body also carries them as `needs_times`:
 `[{ assignment_id, job_id, job_number, work_date }]`, where `work_date` is the
-card's scheduled day. Cards that already have an entry are not named.
+card's scheduled day.
 
 ### What every read returns
 
@@ -101,10 +104,10 @@ screens are live. Until then no trade is locked out of invoicing.
 | --- | --- | --- | --- | --- |
 | 1 | `generate_trade_invoice` | job cards (`manual_assignments`) | direct insert | the request. A card with an entry is its own line; a card without one still groups per job. |
 | 2 | `generate_trade_invoice` | searched-in hours lines (`extra_items`, time types) | direct insert | the request |
-| 3 | `generate_trade_invoice` | auto-collected clock lane (no job cards sent) | direct insert | flag off: the clock's own on and off stamps. Flag on: the trade's saved job-view times while they make the card's hours, else those stamps |
+| 3 | `generate_trade_invoice` | auto-collected clock lane (no job cards sent) | direct insert | nowhere: nobody typed the line, so it carries no entry |
 | 4 | `save_trade_invoice_draft` | no week | direct insert | the request, stored as sent |
 | 5 | `save_trade_invoice_draft` | dated week | `persist_weekly_trade_invoice_v2` | the request, stored as sent |
-| 6 | `submit_trade_invoice` | legacy hourly lane | direct insert | flag off: the assignment's started and completed stamps. Flag on: the trade's saved job-view times while they make the hours this lane bills, else those stamps |
+| 6 | `submit_trade_invoice` | legacy hourly lane | direct insert | nowhere: nobody typed the line, so it carries no entry |
 
 Not time lines, unchanged: the weekly work-order invoice (`work_order_blocks`:
 priced scope lines, crew deductions and `labour_deduction` lines),
@@ -122,30 +125,21 @@ invoice line; see "Times saved on the job view".
   the same way), a half-filled entry is kept, and a complete entry sets the
   line's hours. Submit is where an entry is required
   and checked. Drafts are also not in a job's list.
-- **Auto-collected lanes (3 and 6) never ask for what the trade already
-  gave.** Nobody types on those lanes. The billed hours do not move.
-  - Flag off, unchanged: the entry is the clock's stamps (lane 3) or the
-    assignment's started and completed stamps (lane 6), read in Perth time.
-    The lines group per job as before, and a line that is one card says when
-    it was worked. Saved job-view times are not read.
-  - Flag on: each card is its own line, and takes its entry in this order.
-    First, the trade's own times saved on the job view for that card (see
-    below), but only while they make the hours that line bills: the card's
-    `hours_worked` on lane 3, completed minus started on lane 6. A stored
-    entry always makes the hours its line bills, so saved times that
-    disagree are never stamped and their hours are never billed in place of
-    the lane's own. Else the same-day pair of stamps, as above. Only a card
-    with neither is refused `time_entry_required`, and that one refusal names
-    every job and day that needs times and both ways to give them, so the
-    trade fixes exactly those and submits again. Nothing is written before
-    the refusal.
-  - If the saved times cannot be read the submit fails with that reason. It
-    is never treated as "none saved", which would name cards the trade has
-    already given times for.
+- **Auto-collected lanes (3 and 6) carry no time entry.** Nobody types on
+  those lanes, and the server derives nothing, so nothing stored can disagree
+  with the hours a line bills.
+  - Flag off: the lines are saved exactly as before this change, grouped per
+    job, with the four fields null.
+  - Flag on: every card on those lanes is refused `time_entry_required`. The
+    one refusal names every job and day and the one remedy, entering the
+    times on that job's card in the Weekly Invoice, which makes it a typed
+    line on lane 1. Nothing is written before the refusal.
+  - The clock's stamps and an assignment's started and completed stamps stay
+    where they already are, on the job card. They are not copied onto a line.
 - **Existing invoices and drafts are untouched.** No backfill, no invented
   times. Their four fields stay null.
-- **The Xero bill is unchanged in wording.** A job card with an entry is one
-  bill line per day rather than one per job, with the same rate.
+- **The Xero bill is unchanged in wording.** A job card sent with an entry is
+  one bill line per day rather than one per job, with the same rate.
 
 ## Times saved on the job view (`log_my_job_hours`)
 
@@ -153,18 +147,19 @@ A trade who logs a job card's hours on the job view may send the same four
 fields. Body: `{ job_id, work_date, start_time, finish_time, break_minutes?,
 hours?, assignment_id? }`.
 
-- Which job card the log goes on. Two days on one job are two job cards, and
-  logging one day never replaces another day's hours.
+- Which job card the log goes on. Two days on one job are two job cards.
   - `assignment_id`, when sent, names the card and wins. It must be one of the
     trade's own live cards on that job, else HTTP 404 and nothing is written.
-  - Else, with times: the card for that `work_date`. That is the card already
-    holding that day's saved times (so logging the day again corrects it),
-    else the trade's card scheduled that day.
+  - Else, with times: the trade's card on that job scheduled on `work_date`.
   - Else the usual pick (in progress, then the newest scheduled, then the
-    newest by date). If the card it lands on already holds hours for another
-    day, the log is refused HTTP 409 and nothing is written: the trade enters
-    those times on the Weekly Invoice, or the office adds them to the job for
-    that day.
+    newest by date).
+  - A card's day is never inferred from its schedule to refuse a log: a card
+    holding hours with no saved times takes times for any day, and the log
+    replaces its hours as hours logging always has. Only when the card picked
+    by day or by the usual pick already holds SAVED times for a different
+    `work_date` is the log refused HTTP 409, with nothing written: the trade
+    enters those times on the Weekly Invoice, or the office adds them to the
+    job for that day.
   - Hours logged without times and without `assignment_id` use the usual pick,
     as before.
 
@@ -184,16 +179,12 @@ hours?, assignment_id? }`.
 - `my_hours` returns it per card as `logged_time_entry`, only while it still
   describes the card's hours: if the office or the clock changes
   `hours_worked` afterwards, the saved times are stale and read `null`.
-- Saved times are used only while they make the hours they are read against
-  (the card's hours, or the hours an invoice line bills for it) and only for
-  the trade who saved them. That one rule (`loggedTimeEntryForCard`) serves
-  all three readers: `my_hours`, the auto-collected invoice lanes and the
-  job's list.
-- On a job card the trade ticks on the Weekly Invoice, the server does not
-  copy saved times onto the line: the card opens on them and the trade submits
-  them as the line's entry. On a job card the server collects itself, with the
-  flag on, the saved times are the line's entry (see "Decisions worth
-  knowing").
+- Saved times are used only while they still describe the card's hours and
+  only for the trade who saved them. That one rule (`loggedTimeEntryForCard`)
+  serves every reader: `my_hours`, the job's list and the 409 above.
+- They are a record of their own, never an invoice line's entry. The server
+  does not copy them onto a line on any lane: the Weekly Invoice card can open
+  on them, and the trade confirms and submits them as that line's entry.
 - They are listed against the job straight away: see "Stamped against the
   job".
 
