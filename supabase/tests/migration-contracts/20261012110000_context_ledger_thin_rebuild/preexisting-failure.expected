@@ -1,0 +1,4 @@
+context_ledger_thin_rebuild_preimage_mismatch
+public.context_ledger_finish(uuid,uuid,uuid,text,jsonb) md5
+public.context_ledger_promote(uuid,text) missing
+context_ledger_thin_rebuild_policy() exists and is not this migration's

@@ -20,6 +20,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
+import { completionPackReviewPdfLine, completionPackReviewVisitHtml } from './review_cta.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -30,7 +31,6 @@ const COMPANY_PHONE = '0489 267 771'
 const COMPANY_EMAIL = 'swwa@secureworkswa.com.au'
 const COMPANY_WEBSITE = 'secureworkswa.com.au'
 const COMPANY_ABN = '64 689 223 416'
-const GOOGLE_REVIEW_URL = 'https://g.page/r/CY-SwuwXayc1EBM/review'
 const REFERRAL_INCENTIVE = '$200'
 
 const CORS = {
@@ -418,7 +418,7 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#293C46;backg
       1. Scan the QR code with your phone camera<br>
       2. Sign in to your Google account<br>
       3. Tap the stars and write a few words<br><br>
-      <span style="font-size:12px;">Or visit: <strong style="color:#F15A29">${esc(GOOGLE_REVIEW_URL)}</strong></span>
+      ${completionPackReviewVisitHtml()}
     </div>
   </div>
 </div>
@@ -714,7 +714,7 @@ serve(async (req: Request) => {
       doc.setFont('helvetica', 'normal')
       doc.setTextColor(76, 106, 124)
       doc.text('We\'d love to hear about your experience!', margin, 35)
-      doc.text(`Review us on Google: ${GOOGLE_REVIEW_URL}`, margin, 45)
+      doc.text(completionPackReviewPdfLine(), margin, 45)
       doc.text(`Refer a friend and receive ${REFERRAL_INCENTIVE} off your next project.`, margin, 60)
 
       // Footer on all pages

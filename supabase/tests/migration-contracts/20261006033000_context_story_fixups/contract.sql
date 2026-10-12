@@ -441,10 +441,48 @@ ROLLBACK;
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE '%story safety (20261006040000)%' AS story_safety_live \gset
 -- (and the lead cutoff, 20261007010000, which replaced three of story safety's bodies since, first
--- of all: story safety's down refuses while a later body is live)
+-- of all: story safety's down refuses while a later body is live; and the scoping pipeline,
+-- 20261009133000, which replaced three of the lead cutoff's bodies since, before that)
+SELECT to_regprocedure('public.context_lead_window_hours(text)') IS NOT NULL AS scoping_pipeline_live \gset
 SELECT coalesce(obj_description(to_regprocedure('public.context_lead_monitored_jobs(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE 'Lead cutoff (20261007010000)%' AS lead_cutoff_live \gset
+-- (and before it the notes freshness, 20261009132000, which replaced the lead cutoff's judge and story
+-- safety's ledger read since: both their downs refuse while it is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_row_unread(timestamptz,boolean,timestamptz)'), 'pg_proc'), '')
+       LIKE 'Notes freshness (20261009132000)%' AS notes_freshness_live \gset
+-- (and first the record scope, 20261011130000, which replaced story safety's record timeline since:
+-- story safety's down refuses while it is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
+       LIKE '%(record scope, 20261011130000)%' AS record_scope_live \gset
 BEGIN;
+\if :record_scope_live
+\ir ../../../rollbacks/20261011130000_context_record_scope_down.sql
+\endif
+-- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down
+-- goes first, as the story lead rank's refuses while a later assembler body is live)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story settled notes, 20261011120000)%' AS story_settled_notes_live \gset
+\if :story_settled_notes_live
+\ir ../../../rollbacks/20261011120000_context_story_settled_notes_down.sql
+\endif
+-- (the story lead rank, 20261011100000, replaced the assembler since: its down goes first)
+SELECT coalesce(obj_description(to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'), 'pg_proc'), '')
+       LIKE '%(story lead rank, 20261011100000)%' AS story_lead_rank_live \gset
+\if :story_lead_rank_live
+\ir ../../../rollbacks/20261011100000_context_story_lead_rank_down.sql
+\endif
+-- (the finished wake, 20261012093500, replaced the lead rule, the judge and the due list since: its
+-- down goes first, as the scoping pipeline's refuses while a later body is live)
+SELECT to_regprocedure('public.context_finished_wake_hours()') IS NOT NULL AS finished_wake_live \gset
+\if :finished_wake_live
+\ir ../../../rollbacks/20261012093500_context_finished_wake_down.sql
+\endif
+\if :scoping_pipeline_live
+\ir ../../../rollbacks/20261009133000_context_scoping_pipeline_down.sql
+\endif
+\if :notes_freshness_live
+\ir ../../../rollbacks/20261009132000_context_notes_freshness_down.sql
+\endif
 \if :lead_cutoff_live
 \ir ../../../rollbacks/20261007010000_context_lead_cutoff_down.sql
 \endif

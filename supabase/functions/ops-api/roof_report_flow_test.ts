@@ -13,6 +13,7 @@ import {
   _getRoofReportTemplateForJobForTest,
   _presentRoofReportWriteForTest,
   _renderRoofReportActionForTest,
+  _resolveRoofReportPhotosForTest,
   _saveRoofReportForTest,
   _submitRoofReportForTest,
 } from "./index.ts";
@@ -202,6 +203,45 @@ const fullFill = {
   overall_findings: "Roof in fair condition; localised storm damage.",
   maintenance_recommendation: "Recommended",
 };
+
+Deno.test("roof report default photos leave out quote builder photos", async () => {
+  const { client } = makeClient(baseRows({
+    job_media: [
+      {
+        job_id: "job-1",
+        type: "photo",
+        phase: "scope",
+        storage_url: "https://example.test/scope.jpg",
+        created_at: "2026-10-01T01:00:00Z",
+      },
+      {
+        job_id: "job-1",
+        type: "photo",
+        phase: "quote_builder",
+        storage_url: "https://example.test/quote-builder.jpg",
+        created_at: "2026-10-01T02:00:00Z",
+      },
+      {
+        job_id: "job-1",
+        type: "photo",
+        phase: "completion",
+        storage_url: "https://example.test/completion.jpg",
+        created_at: "2026-10-01T03:00:00Z",
+      },
+    ],
+  }));
+
+  const photos = await _resolveRoofReportPhotosForTest(
+    client,
+    "job-1",
+    undefined,
+    undefined,
+  );
+  assertEquals(photos.map((p) => p.url), [
+    "https://example.test/scope.jpg",
+    "https://example.test/completion.jpg",
+  ]);
+});
 
 Deno.test("save_roof_report: inserts a draft, denormalises storey, records audit, no board change", async () => {
   const { client, rows } = makeClient(baseRows());

@@ -174,6 +174,34 @@ read first, so before a file is uploaded its bytes are hashed, and a file whose
 sha-256 is already stored for the same email is recorded `skipped_duplicate`
 (with that `sha256`, no file). The same file attached twice is stored once.
 
+Who our own email went to (group mailbox audience, `20261009131000`): its own
+outside To or Cc decides (`client.email_out`, `payload.email` the first outside
+recipient); recorded recipients that are all ours make it `staff.email_internal`.
+Graph lists a group post with no recipients, so its group thread decides: the
+outside sender (customer, supplier or council, never automated mail or our own)
+of the thread's newest other post at or before ours, else the earliest after
+(`client.email_out`, `payload.audience_basis` `group_thread`). With none, and
+for a mailbox message with no recipients recorded, the audience is unknown:
+`staff.email_unknown_audience`, outbound with no counterpart (`audience_basis`
+`unknown`), which the party-roles stamp reads as staff to unknown, so the
+ledger treats it as possibly external, never as internal. One email is one row,
+so a copy that meets the row another copy saved and may know better (our group
+post read again, or a mailbox copy that lists its recipients and went to one of
+our groups) goes to `context_email_audience_resolve`: a stronger basis (the
+email's own or a mailbox copy's recipients, then the old inbox's copy, then the
+thread, then unknown) with a different label relabels the row, the same label
+records the basis (`confirmed`), anything else is unchanged; counts
+`audience_from_thread`, `audience_unknown`, `audience_relabelled`,
+`audience_resolve_errors`. A relabel keeps the row's original label and
+captured time in `metadata.audience_relabel` and moves `context_captured_at`
+to the relabel instant, so a ledger reading that read the old label is due
+again (`context_ledger_judge`: late_evidence, or new_evidence inside 14 days).
+The rows saved internal before the rule were relabelled once by
+`context_email_audience_backfill` (a dry run by default), which also reads the
+old inbox's copy (`inbox_events.to_email`, same sender at the same instant or
+within 2 minutes with the same topic); a copy naming only our own addresses
+keeps a post internal (`audience_basis` `inbox_copy`).
+
 Old-path copies (gap plan B-1, `20261005180000`): the old path's rows
 (sources `monitor-inbox`, `monitor_inbox`, `monitor-inbox-group`, keys
 `graph:<id>` / `graph-group:<id>`) never collide with the reader's key. Before

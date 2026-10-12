@@ -121,6 +121,21 @@ log_business_event
 # by a smoke run, even with an invalid bound.
 update_repair_stage       # probe=source-only
 
+# ── Quote builder (docs/quote-builder-contract.md) ──
+# Hugo's iPad scoping app depends on every one. Staff-session actions that
+# return internal costs or write job rows, so all are source-only: no smoke run
+# may call them against production.
+quote_builder_list_jobs          # probe=source-only
+quote_builder_get_job            # probe=source-only
+quote_builder_create_private_job # probe=source-only
+quote_builder_save               # probe=source-only
+quote_builder_photo_upload_url   # probe=source-only
+quote_builder_photo_register     # probe=source-only
+quote_builder_photo_caption      # probe=source-only
+quote_builder_pdf_upload_url     # probe=source-only
+quote_builder_issue              # probe=source-only
+quote_builder_decide_variation   # probe=source-only
+
 # ── Trade authenticated surface ──
 # Post-deploy recognition uses API-key-only GET requests and must fail closed at
 # authTrade before any tenant read or invoice submission path can run.
