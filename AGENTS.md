@@ -269,11 +269,14 @@ refused. Tests: `makesafe_ambrose_intake_test.ts`.
 swwa@). A Group has no inbox rules, so there is no auto-forward to configure:
 the poll reads it. Three rules are load-bearing.
 
-- **Only a company sender pattern admits a post.** No subject, keyword or
-  Prime-floor match. Posts are listed WITHOUT their body; an out-of-scope post
-  is counted and dropped with no row in any table (no exclusion audit either)
-  and its body is never requested. Do not route a scoped Group through
-  `collectPosts` / `auditExclusion`, which store a row for everything.
+- **Only a sender pattern of a company the Group lists admits a post.** Each
+  Group carries its own `companySlugs` (swwa@: `acg` only, owner ruling
+  12 Oct 2026), so another active builder's mail there is ignored like anyone
+  else's. No subject, keyword or Prime-floor match. Posts are listed WITHOUT
+  their body; an out-of-scope post is counted and dropped with no row in any
+  table (no exclusion audit either) and its body is never requested. Do not
+  route a scoped Group through `collectPosts` / `auditExclusion`, which store a
+  row for everything.
 - **An admitted post is stored under the ses@ mailbox key**, because every
   downstream reader selects on it. Its origin is
   `email_events_raw.page_meta.source_mailbox` on the `created` row. Do not add
@@ -281,15 +284,20 @@ the poll reads it. Three rules are load-bearing.
 - **Each scoped Group has its own `mail_sync_cursors` row** (and `sync_state`
   row for health), keyed by its own address. Its first read starts at its
   `firstReadFrom`, never further back than the 60-day scan window, and catches
-  up oldest first in bounded slices. A Group that cannot be read never fails
-  the ses@ poll: it is reported in the poll response, set `ERROR` on its
-  `sync_state` row and alarmed once.
+  up oldest first in slices of 40 conversations. A conversation sorts by its
+  LATEST post, so one not yet behind the cursor is read back to that first-read
+  floor, never from the moving cursor, or an older purchase order in a thread
+  that later got a reply is skipped for good. A Group that cannot be read never
+  fails or stalls the ses@ poll: it waits out Graph throttling for at most 20
+  seconds, is reported in the poll response, and is alarmed once, its
+  `sync_state` row turning `ERROR` only after that alarm event is written.
 
 One purchase order sent to both addresses is two posts and one job: the planner
 and the instruction key fold them. Tests:
 `monitor_ses_sender_scoped_groups_test.ts` and the Ambrose cases in
 `makesafe_deterministic_intake_runtime_test.ts`. Switch the lane off with
-`MAKESAFE_SENDER_SCOPED_GROUPS=off`.
+`MAKESAFE_SENDER_SCOPED_GROUPS=off`. The lane re-queues no PDF itself: the
+every-minute `makesafe-pdf-extraction-drain` retries a failed text read.
 
 ## Never Select `scope_json` In A List/Feed Query
 

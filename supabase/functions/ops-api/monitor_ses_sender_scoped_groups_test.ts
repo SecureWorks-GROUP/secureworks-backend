@@ -6,10 +6,13 @@
 // Proved here, with no network:
 //   - a builder's post is stored as ses@ intake mail, with its real origin kept;
 //   - general mail is never stored and its body is never requested;
-//   - only a company sender pattern admits a post (no subject or floor match);
+//   - only a sender pattern of a company the Group lists admits a post (no
+//     subject or floor match, and no other active builder);
 //   - the Group keeps its own cursor, starts at its first-read date on its
-//     first read, and catches up in bounded slices that always advance;
-//   - a Group that cannot be read is reported and never breaks the ses@ poll.
+//     first read, and catches up in bounded slices that always advance and
+//     never leave an older builder post behind;
+//   - a Group that cannot be read, or is throttled, is reported and never
+//     breaks or stalls the ses@ poll.
 //
 // Every sender, subject and address below is invented in the Ambrose shape.
 import {
@@ -25,6 +28,7 @@ const SES = "ses@secureworkswa.com.au";
 const SWWA = "swwa@secureworkswa.com.au";
 const GROUP = "group-swwa";
 const BUILDER = "orders@ambrose.test";
+const OTHER_BUILDER = "workorders@otherbuilder.test";
 const NOW_MS = Date.parse("2026-10-12T02:00:00.000Z");
 const FIRST_READ_FROM = "2026-10-01T00:00:00.000Z";
 const LOADED = {
@@ -32,6 +36,10 @@ const LOADED = {
     slug: "acg",
     name: "Ambrose Construct Group",
     pattern: "ambrose.test",
+  }, {
+    slug: "mlb",
+    name: "Another Active Builder",
+    pattern: "otherbuilder.test",
   }],
   refPrefixes: ["MLB", "AJBR", "MS"],
 };
@@ -82,15 +90,10 @@ function memorySb(opts: { failTable?: string } = {}) {
       }
       return result;
     };
-    // PostgREST's `column->>key` text accessor, as the monitor uses it.
-    const read = (row: any, column: string) => {
-      const [col, key] = column.split("->>");
-      return key === undefined ? row[col] : row[col]?.[key];
-    };
     const b: any = {
       select: () => b,
       eq: (c: string, v: unknown) => (
-        filters.push((r) => read(r, c) === v), b
+        filters.push((r) => r[c] === v), b
       ),
       gte: (c: string, v: string) => (
         filters.push((r) => String(r[c] ?? "") >= v), b
@@ -159,7 +162,7 @@ function json(body: unknown, status = 200): Response {
 
 function graphDouble(
   conversations: FakeConversation[],
-  opts: { resolveStatus?: number } = {},
+  opts: { resolveStatus?: number; throttleRetryAfterSeconds?: number } = {},
 ) {
   const calls: string[] = [];
   const bodyFetches: string[] = [];
@@ -184,6 +187,14 @@ function graphDouble(
     }
     assert(url.includes(`/groups/${GROUP}/`), `wrong group in ${url}`);
     if (url.includes("/conversations?")) {
+      if (opts.throttleRetryAfterSeconds) {
+        return Promise.resolve(
+          new Response("throttled", {
+            status: 429,
+            headers: { "Retry-After": String(opts.throttleRetryAfterSeconds) },
+          }),
+        );
+      }
       return Promise.resolve(json({
         value: newestFirst().map((c) => ({
           id: c.id,
@@ -278,7 +289,11 @@ function purchaseOrder(
 function ingest(sb: any, extra: Record<string, unknown> = {}) {
   const handoff = { sources: [] as any[], pdfCoordinates: [] as any[] };
   return _ingestSenderScopedGroups(sb, "tok", LOADED, handoff, {
-    groups: [{ mail: SWWA, firstReadFrom: FIRST_READ_FROM }],
+    groups: [{
+      mail: SWWA,
+      firstReadFrom: FIRST_READ_FROM,
+      companySlugs: ["acg"],
+    }],
     nowMs: NOW_MS,
     ...extra,
   }).then((out) => ({ ...out, handoff }));
@@ -362,7 +377,53 @@ Deno.test("only a company sender pattern admits a post: a work-order subject or 
   assertEquals(out.reports[0].out_of_scope, 2);
   assertEquals(double.bodyFetches, []);
   assertEquals(tables.emails, undefined);
-  assertEquals(tables.email_events_raw, []);
+  assertEquals(tables.email_events_raw, undefined);
+});
+
+Deno.test("another active builder's mail in the general Group is ignored: only the companies the Group lists are admitted", async () => {
+  const other: FakeConversation = {
+    id: "conv-other-builder",
+    lastDeliveredDateTime: "2026-10-09T04:00:00Z",
+    topic: "NEW WORK ORDER - MLB-26109 make safe required",
+    posts: [{
+      id: "post-other-builder",
+      from: OTHER_BUILDER,
+      receivedDateTime: "2026-10-09T04:00:00Z",
+      body: "Work order MLB-26109 attached.",
+    }],
+  };
+  const double = graphDouble([
+    purchaseOrder("po", "2026-10-08T06:31:00Z"),
+    other,
+  ]);
+  const { sb, tables } = memorySb();
+  const out = await withGraph(double, () => ingest(sb));
+
+  assertEquals(out.reports[0].ok, true);
+  assertEquals(out.reports[0].included, 1);
+  assertEquals(out.reports[0].out_of_scope, 1);
+  assertEquals(double.bodyFetches, ["post-po"]);
+  assertEquals(tables.emails.map((e) => e.post_id), ["post-po"]);
+  assertEquals(out.handoff.sources.map((s: any) => s.postId), ["post-po"]);
+  for (const [table, rows] of Object.entries(tables)) {
+    assert(
+      !JSON.stringify(rows).includes("otherbuilder.test") &&
+        !JSON.stringify(rows).includes("post-other-builder"),
+      `another builder's mail leaked into ${table}`,
+    );
+  }
+
+  // The same builder IS admitted once the Group lists its company.
+  const widened = memorySb();
+  const wide = await withGraph(double, () =>
+    ingest(widened.sb, {
+      groups: [{
+        mail: SWWA,
+        firstReadFrom: FIRST_READ_FROM,
+        companySlugs: ["acg", "mlb"],
+      }],
+    }));
+  assertEquals(wide.reports[0].included, 2);
 });
 
 Deno.test("the first read starts at the Group's first-read date, so builder mail sent before this lane existed is picked up", async () => {
@@ -448,6 +509,67 @@ Deno.test("catch-up runs in bounded slices, oldest first, and every poll advance
   assertEquals(tables.email_events_raw.length, 5);
 });
 
+Deno.test("catch-up never drops an older builder post in a conversation that later got another post", async () => {
+  // The purchase order arrived 8 Oct; an Acceptance Required email in the same
+  // conversation on 10 Oct moves the whole conversation behind later slices.
+  const thread: FakeConversation = {
+    id: "po-thread",
+    lastDeliveredDateTime: "2026-10-10T05:00:00Z",
+    topic:
+      "Ambrose Construct Group Purchase Order Make Safe: 20999555-01 -  12 Example Street Testville WA 6000  is attached",
+    posts: [{
+      id: "post-po-old",
+      from: BUILDER,
+      receivedDateTime: "2026-10-08T06:10:00Z",
+      body: "Please see attached PO #20999555-01 regarding Make Safe required.",
+    }, {
+      id: "post-acceptance",
+      from: BUILDER,
+      receivedDateTime: "2026-10-10T05:00:00Z",
+      body: "Acceptance Required for PO #20999555-01.",
+    }],
+  };
+  const general = (id: string, at: string): FakeConversation => ({
+    id,
+    lastDeliveredDateTime: at,
+    topic: "General enquiry",
+    posts: [{
+      id: `post-${id}`,
+      from: "member.of.public@customer.test",
+      receivedDateTime: at,
+      body: "Hello",
+    }],
+  });
+  const double = graphDouble([
+    general("g1", "2026-10-03T03:00:00Z"),
+    general("g2", "2026-10-06T03:00:00Z"),
+    // Read in the slice before the PO thread: the cursor is now past 8 Oct.
+    general("g3", "2026-10-09T22:00:00Z"),
+    thread,
+  ]);
+  const { sb, tables } = memorySb();
+  let polls = 0;
+  for (;;) {
+    const out = await withGraph(
+      double,
+      () => ingest(sb, { maxNewConversations: 1 }),
+    );
+    assertEquals(out.reports[0].error, null);
+    polls++;
+    if (!out.reports[0].catch_up_pending) break;
+    assert(polls < 10, "catch-up did not finish");
+  }
+  assertEquals(polls, 4);
+  assertEquals(
+    tables.emails.map((e) => e.post_id).sort(),
+    ["post-acceptance", "post-po-old"],
+  );
+  assertEquals(
+    tables.emails.find((e) => e.post_id === "post-po-old").received_at,
+    "2026-10-08T06:10:00Z",
+  );
+});
+
 Deno.test("a slice boundary never skips a conversation that shares the boundary time", async () => {
   // Three conversations delivered in the same second, bound of two per poll.
   const double = graphDouble(
@@ -484,57 +606,6 @@ Deno.test("a builder post's attachments are fetched from the Group it arrived at
   assertEquals(tables.email_attachments[0].email_id, "post-att");
 });
 
-Deno.test("a stored PDF whose text is still unread is re-queued on later polls, although its post has left the re-read window", async () => {
-  // Later general mail moves the Group cursor well past the purchase order.
-  const double = graphDouble([purchaseOrder("po", "2026-10-08T06:31:00Z"), {
-    id: "conv-later",
-    lastDeliveredDateTime: "2026-10-10T01:00:00Z",
-    topic: "Unrelated enquiry",
-    posts: [{
-      id: "post-later",
-      from: "member.of.public@customer.test",
-      receivedDateTime: "2026-10-10T01:00:00Z",
-      body: "Hello",
-    }],
-  }]);
-  const { sb, tables } = memorySb();
-  const first = await withGraph(double, () => ingest(sb));
-  assertEquals(first.reports[0].included, 1);
-  assertEquals(first.handoff.pdfCoordinates, []);
-  // The PDF was stored, but its first text-extraction handoff failed.
-  tables.email_attachments = [{
-    id: "att-po-pdf",
-    email_id: "post-po",
-    status: "uploaded",
-    sha256: "sha-po",
-    pdf_extraction_status: "failed",
-  }, {
-    // A ses@ post's PDF is not this lane's to re-queue.
-    id: "att-ses-pdf",
-    email_id: "some-ses-post",
-    status: "uploaded",
-    sha256: "sha-ses",
-    pdf_extraction_status: "failed",
-  }];
-  // Four days on: nothing new in the Group, the post is far behind the cursor.
-  const later = await withGraph(
-    double,
-    () => ingest(sb, { nowMs: NOW_MS + 4 * 86_400_000 }),
-  );
-  assertEquals(later.reports[0].included, 0);
-  assertEquals(later.handoff.pdfCoordinates, [{
-    id: "att-po-pdf",
-    sha256: "sha-po",
-  }]);
-  // Once the text is read it stops being queued.
-  tables.email_attachments[0].pdf_extraction_status = "extracted";
-  const done = await withGraph(
-    double,
-    () => ingest(sb, { nowMs: NOW_MS + 4 * 86_400_000 }),
-  );
-  assertEquals(done.handoff.pdfCoordinates, []);
-});
-
 Deno.test("a Group that cannot be read is reported once and never throws into the ses@ poll", async () => {
   const double = graphDouble([], { resolveStatus: 403 });
   const { sb, tables } = memorySb();
@@ -550,6 +621,46 @@ Deno.test("a Group that cannot be read is reported once and never throws into th
   // Still failing two minutes later: state stays ERROR, no second alarm.
   await withGraph(double, () => ingest(sb));
   assertEquals(tables.business_events.length, 1);
+});
+
+Deno.test("an outage alarm that could not be written is raised again on the next poll, then only once", async () => {
+  const double = graphDouble([], { resolveStatus: 403 });
+  const fault: { failTable?: string } = { failTable: "business_events" };
+  const { sb, tables } = memorySb(fault);
+  const first = await withGraph(double, () => ingest(sb));
+  assertEquals(first.reports[0].ok, false);
+  assertEquals(tables.business_events ?? [], []);
+  // Not marked as alarmed: the outage is still owed its event.
+  assert(!(tables.sync_state ?? []).some((row) => row.mode === "ERROR"));
+
+  fault.failTable = undefined;
+  await withGraph(double, () => ingest(sb));
+  assertEquals(tables.business_events.length, 1);
+  assertEquals(tables.business_events[0].entity_id, SWWA);
+  assertEquals(tables.sync_state[0].mode, "ERROR");
+
+  await withGraph(double, () => ingest(sb));
+  assertEquals(tables.business_events.length, 1);
+});
+
+Deno.test("a throttled Group read fails its slice at once instead of stalling the ses@ poll, cursor unmoved", async () => {
+  const double = graphDouble([purchaseOrder("po", "2026-10-08T06:31:00Z")], {
+    throttleRetryAfterSeconds: 120,
+  });
+  const { sb, tables } = memorySb();
+  const startedAt = Date.now();
+  const out = await withGraph(double, () => ingest(sb));
+  assert(Date.now() - startedAt < 2000, "the read waited out the throttle");
+  assertEquals(out.reports[0].ok, false);
+  assert(out.reports[0].error?.includes("429 wait budget exhausted"));
+  assertEquals(tables.mail_sync_cursors ?? [], []);
+  assertEquals(tables.emails, undefined);
+  assertEquals(out.handoff.sources, []);
+  // One listing attempt, no retry.
+  assertEquals(
+    double.calls.filter((c) => c.includes("/conversations?")).length,
+    1,
+  );
 });
 
 Deno.test("a storage failure leaves the Group cursor unmoved so the same mail is retried", async () => {
@@ -585,6 +696,7 @@ Deno.test("collector: the cursor of a cut-short read is the last conversation re
     () =>
       _collectSenderScopedGroupPosts("tok", GROUP, {
         sinceIso: "2026-09-01T00:00:00.000Z",
+        floorIso: "2026-09-01T00:00:00.000Z",
         cursorIso: null,
         maxNewConversations: 2,
         senderInScope: (from) => from.endsWith("@ambrose.test"),
