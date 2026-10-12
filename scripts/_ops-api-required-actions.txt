@@ -151,6 +151,8 @@ quote_builder_decide_variation   # probe=source-only
 trade_calendar            # probe=jwt-fail-closed
 my_jobs                   # probe=jwt-fail-closed
 my_work_orders            # probe=jwt-fail-closed
+my_job_work_order         # probe=jwt-fail-closed
+report_work_order_variation # probe=jwt-fail-closed
 submit_work_order_invoice # probe=jwt-fail-closed
 
 # ── Job P&L (M3) — read-only; pairs with ops.html #119 + M1 migration ──
@@ -315,3 +317,9 @@ sales_booking_routes_write # probe=source-only
 sales_performance_write # probe=source-only
 sales_performance_read # probe=source-only
 sales_performance_note # probe=source-only
+# Job work orders (job_work_orders.ts): one sealed work order per fencing and patio job
+job_work_order # probe=bounded-refusal probe-args=job_id=__deploy_probe__
+approve_work_order # probe=source-only
+backfill_job_work_orders # probe=source-only
+resend_work_order_variation_emails # probe=source-only
+correct_work_order_variation # probe=source-only

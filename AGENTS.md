@@ -4411,6 +4411,36 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
+## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
+
+Since `20261012130000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
+older row: the per-trade crew-pay work order) or `job` (the one work order per
+fencing / patio job, draft then approved). An approved job work order is sealed
+by trigger: any update or delete raises, so a crew-path writer that touches it
+fails loudly. Every crew-pay read or write (`my_work_orders`,
+`submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
+`kind = 'crew'`; a new one must too. Only the users in
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role, and an
+approval seals only the draft that was read: `approve_work_order` requires
+`expected_updated_at`, compared under the row lock in `approve_job_work_order`.
+A recorded variation changes only through the staff door
+`correct_work_order_variation`, never a trade one. Every
+line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
+by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
+before the approval; never set it from code. Only the labour lane of
+`v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
+restate that lane list. One temporary exception lives in
+`workOrderLineIsLabour` (`job_work_orders.ts`): the trade app's Work Order pay
+line (`work order` / `work_order`) counts as labour until that view classifies
+it; remove the exception then. This migration inserts one call,
+`carry_work_order_variations`, into the deployed bodies of the three
+draft-replacing functions (`replace_trade_invoice_draft_v1`,
+`persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a
+variation raised on a draft invoice survives the draft being replaced; a later
+body of any of them must keep it. Variation emails, the draft backfill and
+approval named only by the `x-sw-actor` header (the terminal) are behind flags
+seeded off. Contract and API: `docs/job-work-orders-v1.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
