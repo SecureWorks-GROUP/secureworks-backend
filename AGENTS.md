@@ -488,8 +488,13 @@ derived `description` line, a `value_inc_gst` flag and a `work_type` (repair
 wins: a repair-family card typed `makesafe` is listed as a repair, a true
 make-safe comes back only for a search), and `job_notes` returns every note on a
 job less the `noteIsSystemMarker` rows (`job_detail.events` is only the newest
-50 events of every kind). The description is built from five projected `scope_json` paths; the
-status floor is what keeps that affordable, because draft and quoted rows hold
+50 events of every kind). A Dispatch card's `comms_notes_count` and that job's
+`job_notes` must stay equal: both read `JOB_NOTE_EVENT_TYPES` and
+`isPersonWrittenJobNote`, so change the rule there, never in one reader (the
+plain read counts no notes for a `draft`, which Dispatch never lists).
+`job_notes` matches a job number whole against the stored number (live numbers
+include `SW1346` and `SWF-PDF-BUCKET`), never by shape or pattern. The
+description is built from five projected `scope_json` paths; the status floor is what keeps that affordable, because draft and quoted rows hold
 the heaviest blobs (4.9 s to project every pipeline row against 0.43 s for
 accepted work). Rules: `dispatch_job_list.ts`; contract:
 `docs/dispatch-slice-1-read-contract.md`; tests: `dispatch_job_list_test.ts`.

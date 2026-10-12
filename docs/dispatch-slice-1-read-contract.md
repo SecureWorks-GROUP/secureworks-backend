@@ -111,26 +111,42 @@ save or on Retry).
 }
 ```
 
-- Rows: every `job_events` row with `event_type = 'note'` for the job, newest
-  first, paged, never capped, less the system marker rows. `total` is the count
-  of notes returned.
+- Rows: every `job_events` row for the job whose `event_type` is `note`,
+  `note_added` or `site_note` (`JOB_NOTE_EVENT_TYPES`), newest first, paged,
+  never capped, less the system marker rows. `total` is the count of notes
+  returned. All three come back in the one shape above; nothing tells them
+  apart. `note_added` is an older Ops screen writer: 13 live rows, all from 2
+  and 3 Sep 2026, 11 of them on listed jobs. `site_note` has no live row.
+- The list's count: `total` equals that job's `comms_notes_count` on the list
+  read, on every listed job. Both use the same event types and the same marker
+  rule (`isPersonWrittenJobNote`), so a card's note count and the notes under
+  it cannot differ. The first version of this read returned `note` rows only,
+  and 11 of the 315 listed jobs read one fewer note than their count (measured
+  12 Oct 2026).
 - System markers: the pack-sent (`MAKESAFE_PACK_SENT ...`) and agent-reply
   (`MAKESAFE_AGENT_REPLY ...`) rows are machine breadcrumbs stored as notes. They
-  are left out by `noteIsSystemMarker`, the rule the list read's
-  `comms_notes_count` uses, so the two agree. The portal-ready marker
+  are left out by `noteIsSystemMarker`, tested on `detail_json.text`, else
+  `detail_json.note`. The portal-ready marker
   (`MAKESAFE_PACK_PORTAL_READY ...`) is not in that rule: it still counts and
   still shows.
 - `text`: `detail_json.text`, else `detail_json.note`, else
-  `detail_json.message`. Read on production, 12 Oct 2026, 1,243 note rows: `text`
-  on 1,228, `note` on 6, `message` on 9 with no other text key.
+  `detail_json.message`. Read on production, 12 Oct 2026, 1,243 `note` rows:
+  `text` on 1,228, `note` on 6, `message` on 9 with no other text key. The 13
+  `note_added` rows: `text` and `note` holding the same words on 12, `note`
+  alone on 1.
 - `author`: the linked user's name, else `null`. Most notes have no user: 238 of
   the 374 notes on non-make-safe jobs today were written with a server key. Show
   no author for `null`; `from_ops: true` marks a note written from the office
   side.
 - `visibility`: `internal_only`, `client_visible`, or `null` on old rows.
-- Errors: `400` when `jobId` is missing or is neither a job id nor a job number;
-  `404` when the job does not exist. An empty `notes` list always means the job
-  was found and has no notes.
+- `jobId`: a job id, or a job number. A value that is not a job id is read as a
+  job number and matched whole against the stored number, so every number the
+  list returns works whatever its shape (`SW1346`, `SWF-PDF-BUCKET` and
+  `SWG-20260713-BE` are live). Never a prefix, a part or a pattern. Stored
+  numbers are upper case; a lower-case number is accepted.
+- Errors: `400` when `jobId` is missing; `404` when no job has that id or that
+  job number. An empty `notes` list always means the job was found and has no
+  notes.
 
 Saving a note is the existing `add_note` (unchanged). Send what the Jobs tab
 sends: `{ job_id, text, visibility: 'internal_only', from_ops: true }`. A note
