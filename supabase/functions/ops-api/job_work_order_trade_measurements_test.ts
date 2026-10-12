@@ -283,5 +283,8 @@ Deno.test("trade work order view never carries a dollar amount or a rate, withhe
     !/\d\s*(?:per\b|\/)|(?:per|@|\bat)\s*\d/i.test(text),
     `kept a rate: ${text}`,
   );
-  assertEquals(out.scope_items[1].description, "Remove old fence 30 m, disposal");
+  assertEquals(
+    out.scope_items[1].description,
+    "Remove old fence 30 m, disposal",
+  );
 });
