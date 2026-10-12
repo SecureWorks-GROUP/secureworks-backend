@@ -609,18 +609,21 @@ import {
 } from './trade_invoice_weekly.ts'
 import {
   assertManualTimeEntriesDistinct,
+  autoCollectedTimeEntry,
   clockTradeInvoiceTimeEntry,
   draftTradeInvoiceTimeEntry,
   isTradeInvoiceTimeLineType,
-  JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS,
   loadJobTradeTimeEntries,
+  loadLoggedTimesByCard,
   loggedTimeEntryForCard,
   resolveTradeInvoiceTimeEntry,
   TRADE_INVOICE_TIME_LINE_TYPES,
+  tradeInvoiceTimeEntriesNeededError,
   TradeInvoiceTimeEntryError,
   tradeInvoiceTimeEntryColumns,
   tradeInvoiceTimeEntryRequired,
   type TradeInvoiceTimeEntry,
+  type TradeInvoiceTimeEntryNeeded,
 } from './trade_invoice_time_entry.ts'
 import {
   approveJobWorkOrder,
@@ -1776,9 +1779,26 @@ function tradeInvoiceTimeEntryApiError(error: unknown): never {
       code: error.code,
       error: error.message,
       userMessage: error.message,
+      ...(error.needsTimes ? { needs_times: error.needsTimes } : {}),
     })
   }
   throw error
+}
+
+// The trade's own times saved on the job view, for the job cards a submit
+// lane collects itself. Unreadable is never "none saved": the refusal that
+// follows would name cards the trade has already given times for.
+async function savedJobViewTimesOrFail(client: any, assignmentIds: unknown[]): Promise<Map<string, unknown>> {
+  const saved = await loadLoggedTimesByCard(client, assignmentIds)
+  if (saved.error) {
+    throw new Error('Failed to read the times saved on your job cards: ' + saved.error)
+  }
+  return saved.byCard
+}
+
+function refuseJobCardsNeedingTimes(needsTimes: TradeInvoiceTimeEntryNeeded[]): void {
+  if (needsTimes.length === 0) return
+  tradeInvoiceTimeEntryApiError(tradeInvoiceTimeEntriesNeededError(needsTimes))
 }
 
 function resolveTimeEntryOrRefuse(
@@ -11823,15 +11843,30 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 .filter((a: any) => isClockedAssignmentBillable(a))
               // Stamp the server-resolved rate so clocked lines never trust a
               // client/stale assignment rate for pricing.                     [F2]
-              // Time entry: this lane is auto-collected, so the entry is the
-              // clock's own record (nothing typed, nothing invented; null when
-              // the clock stamps are not one same-day shift). The billed hours
-              // stay the clock's. While the flag is off the lines group per
-              // job exactly as before; when it is on each card is its own line.
+              // Time entry: this lane is auto-collected, so nothing is typed
+              // and nothing is invented. While the flag is off the entry is
+              // the clock's own record (null when the clock stamps are not one
+              // same-day shift) and the lines group per job exactly as before.
+              // When it is on each card is its own line and takes the trade's
+              // own times saved on the job view, else the clock's record; a
+              // card with neither is refused by name below. The billed hours
+              // stay the card's.
+              const savedJobViewTimes = timeEntryRequired
+                ? await savedJobViewTimesOrFail(client, clockedBillable.map((a: any) => a.id))
+                : null
               assignments = clockedBillable.map((a: any) => ({
                 ...a,
                 hourly_rate: resolvedRate > 0 ? resolvedRate : (a.hourly_rate || 0),
-                _timeEntry: clockTradeInvoiceTimeEntry(a.clocked_on_at, a.clocked_off_at, a.break_minutes),
+                _timeEntry: savedJobViewTimes
+                  ? autoCollectedTimeEntry({
+                    saved: savedJobViewTimes.get(String(a.id)),
+                    userId: tradeUser.id,
+                    cardHours: a.hours_worked,
+                    startedAt: a.clocked_on_at,
+                    finishedAt: a.clocked_off_at,
+                    breakMinutes: a.break_minutes,
+                  })
+                  : clockTradeInvoiceTimeEntry(a.clocked_on_at, a.clocked_off_at, a.break_minutes),
                 _lineKey: timeEntryRequired ? `${a.job_id}#${a.id}` : null,
               }))
             }
@@ -11863,6 +11898,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               .in('id', jobIds)
             const jobMap: Record<string, any> = {}
             for (const j of (jobs || [])) jobMap[j.id] = j
+            // Every job card that says nowhere when it was worked is named in
+            // one refusal, before anything is written.
+            if (timeEntryRequired) {
+              refuseJobCardsNeedingTimes(assignments.filter((a: any) => !a._timeEntry).map((a: any) => ({
+                assignment_id: String(a.id),
+                job_id: a.job_id ? String(a.job_id) : null,
+                job_number: jobMap[a.job_id]?.job_number || null,
+                work_date: a.scheduled_date || null,
+              })))
+            }
             // Enrich makesafe jobs with external_ref from makesafe_job_details (100% population vs 91% in metadata)
             const msJobIds = jobIds.filter((id: string) => jobMap[id]?.type === 'makesafe')
             if (msJobIds.length > 0) {
@@ -11912,9 +11957,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               const job = jobMap[jobId] || {}
               // A line says when it was worked only when it is one card.
               const lineTimeEntry = assigns.length === 1 ? (assigns[0]._timeEntry || null) : null
-              if (timeEntryRequired && !lineTimeEntry) {
-                resolveTimeEntryOrRefuse(null, { required: true, label: job.job_number || 'job card' })
-              }
               let jobHours = 0
               const assignmentIds: string[] = []
 
@@ -16402,10 +16444,12 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
       jobWorkOrder = { unreadable: true }
     }
   }
-  // Trade time entries stamped against this job by submitted trade invoices:
-  // who, which day, start, finish, hours, which invoice (view
-  // job_trade_time_entries). Additive. A failed read never fails the job
-  // detail: the list is then null with the reason, never an empty list.
+  // Trade time entries stamped against this job: who, which day, start,
+  // finish and hours, from submitted trade invoices (view
+  // job_trade_time_entries, with which invoice) and from the times trades
+  // saved on the job view that are not billed yet (source job_view, no
+  // invoice fields). Additive. A failed read never fails the job detail: the
+  // list is then null with the reason, never an empty list.
   const tradeTimeEntries = await loadJobTradeTimeEntries(client, jobId)
 
   return {
@@ -52067,8 +52111,10 @@ export const _tradeWaiveNeighbourSignoffForTest = tradeWaiveNeighbourSignoff
 //     (finish - start - break, trade_invoice_time_entry.ts; not rounded to the
 //     quarter hour) and the times are saved beside the card in
 //     job_assignment_logged_times, so my_hours can hand them to the Weekly
-//     Invoice card. Hours logged without times clear any saved times. This
-//     door never requires times: the enforcement flag is about invoice lines.
+//     Invoice card, the auto-collected invoice lanes can take them as the
+//     card's entry, and job_detail lists them against the job. Hours logged
+//     without times clear any saved times. This door never requires times:
+//     the enforcement flag is about invoice lines.
 const LOG_MY_JOB_HOURS_MAX = 24
 function normaliseLoggedHours(raw: unknown): number {
   const n = typeof raw === 'string' ? Number(raw.trim()) : Number(raw)
@@ -52522,24 +52568,9 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   // Times the trade saved on the job view with these hours (log_my_job_hours),
   // so the Weekly Invoice card can open on them. A failed read is logged and
   // answers no saved times; it never fails the hours view.
-  const loggedTimeByCard = new Map<string, any>()
-  const cardIds = (assignments || []).map((a: any) => String(a.id || '')).filter(Boolean)
-  if (cardIds.length > 0) {
-    try {
-      for (let i = 0; i < cardIds.length; i += 100) {
-        const { data: loggedRows, error: loggedErr } = await client.from('job_assignment_logged_times')
-          .select(JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS)
-          .in('assignment_id', cardIds.slice(i, i + 100))
-        if (loggedErr) {
-          console.error('[ops-api] my_hours: saved times unreadable:', loggedErr.message)
-          break
-        }
-        for (const row of (loggedRows || [])) loggedTimeByCard.set(String(row.assignment_id), row)
-      }
-    } catch (e) {
-      console.error('[ops-api] my_hours: saved times read threw:', (e as Error)?.message)
-    }
-  }
+  const loggedTimes = await loadLoggedTimesByCard(client, (assignments || []).map((a: any) => a.id))
+  if (loggedTimes.error) console.error('[ops-api] my_hours: saved times unreadable:', loggedTimes.error)
+  const loggedTimeByCard = loggedTimes.byCard
 
   // Calculate hours per assignment
   let totalHours = 0
@@ -52560,7 +52591,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       hours_worked: a.hours_worked != null ? parseFloat(a.hours_worked) : null,
       amount: Math.round(hours * rate * 100) / 100,
       // { work_date, start_time, finish_time, break_minutes, hours } or null.
-      logged_time_entry: loggedTimeEntryForCard(loggedTimeByCard.get(String(a.id)), a.hours_worked),
+      logged_time_entry: loggedTimeEntryForCard(loggedTimeByCard.get(String(a.id)), a.hours_worked, userId),
     }
   })
 
@@ -52664,7 +52695,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   const { data: weekAssignments, error } = await client
     .from('job_assignments')
     .select(`
-      id, scheduled_date, started_at, completed_at, role, assignment_type, status, invoiced_in,
+      id, scheduled_date, started_at, completed_at, hours_worked, role, assignment_type, status, invoiced_in,
       jobs:job_id (
         id, type, job_number, client_name, site_address, site_suburb, metadata
       )
@@ -52775,6 +52806,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     if (day) l.days.add(day)
   }
   let subtotal = 0
+  const stNeedsTimes: TradeInvoiceTimeEntryNeeded[] = []
 
   if (isPerMetre) {
     // ── Per-metre invoice: use client-sent items with per-metre rate ──
@@ -52845,6 +52877,9 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 
     if (!rateRow) throw new Error('No hourly rate set — update your rate in Profile before submitting')
     const rate = Number(rateRow.hourly_rate)
+    const stSavedJobViewTimes = stTimeEntryRequired
+      ? await savedJobViewTimesOrFail(client, assignments.map((a: any) => a.id))
+      : null
 
     for (const a of assignments) {
       const hours = Math.round(((new Date(a.completed_at).getTime() - new Date(a.started_at).getTime()) / 3600000) * 100) / 100
@@ -52875,13 +52910,32 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
         Tracking: xeroTracking(job?.job_number || '', job?.type),
       })
       // Time entry: this lane bills the assignment's own started and
-      // completed stamps, so those are the entry (null when they are not one
-      // same-day Perth shift). Billed hours are unchanged. While the flag is
-      // off the lines group per job as before; when on, one line per card.
+      // completed stamps. While the flag is off those are the entry (null
+      // when they are not one same-day Perth shift) and the lines group per
+      // job as before. When it is on, one line per card: the trade's own
+      // times saved on the job view, else those stamps; a card with neither
+      // is refused by name below. Billed hours are unchanged.
+      const stTimeEntry = stSavedJobViewTimes
+        ? autoCollectedTimeEntry({
+          saved: stSavedJobViewTimes.get(String(a.id)),
+          userId,
+          cardHours: a.hours_worked,
+          startedAt: a.started_at,
+          finishedAt: a.completed_at,
+        })
+        : clockTradeInvoiceTimeEntry(a.started_at, a.completed_at, 0)
+      if (stTimeEntryRequired && job?.id && !stTimeEntry) {
+        stNeedsTimes.push({
+          assignment_id: String(a.id),
+          job_id: String(job.id),
+          job_number: job.job_number || null,
+          work_date: a.scheduled_date || null,
+        })
+      }
       addJobLine(
         job?.id, job, hours, rate, amount, a.id, a.scheduled_date, undefined, undefined,
         stTimeEntryRequired && job?.id ? `${job.id}#${a.id}` : undefined,
-        clockTradeInvoiceTimeEntry(a.started_at, a.completed_at, 0),
+        stTimeEntry,
       )
     }
   }
@@ -52916,13 +52970,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
   // A line says when it was worked only when it is one job card.
   const stLineTimeEntry = (l: { assignment_ids: string[]; time_entries: Array<ReturnType<typeof clockTradeInvoiceTimeEntry>> }) =>
     l.assignment_ids.length === 1 ? (l.time_entries[0] ?? null) : null
-  if (stTimeEntryRequired) {
-    for (const l of Object.values(jobLines)) {
-      if (!stLineTimeEntry(l)) {
-        resolveTimeEntryOrRefuse(null, { required: true, label: l.job_number || 'job card' })
-      }
-    }
-  }
+  refuseJobCardsNeedingTimes(stNeedsTimes)
 
   // Own the complete invoice and relational line truth before contacting Xero.
   // A contact/bill failure remains recoverable through the ops retry route; an

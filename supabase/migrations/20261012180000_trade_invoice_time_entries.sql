@@ -18,7 +18,10 @@
 --      trade app screens are live.
 --   5. Table job_assignment_logged_times: the times a trade typed when they
 --      logged a job card's hours on the job view (ops-api log_my_job_hours),
---      one row per card, so the Weekly Invoice card can open on them. It is
+--      one row per card. The Weekly Invoice card opens on them, a job card
+--      the server collects for an invoice takes them as its entry when the
+--      flag is on, and job_detail lists them against the job until that day
+--      is billed. It is
 --      its own table, not columns on job_assignments, because every
 --      job_assignments column is inside the make-safe fact hash
 --      (stamp_makesafe_fact_identity_v1): new columns there would move the
@@ -168,7 +171,7 @@ REVOKE ALL ON public.job_trade_time_entries FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.job_trade_time_entries TO service_role;
 
 COMMENT ON VIEW public.job_trade_time_entries IS
-  'Trade invoice time entries (20261012180000): per job, who worked which day, from when to when (Perth), the hours billed and the invoice. Submitted invoices only; drafts are left out. Read by ops-api job_detail; the context job record may read it the same way.';
+  'Trade invoice time entries (20261012180000): per job, who worked which day, from when to when (Perth), the hours billed and the invoice. Submitted invoices only; drafts are left out. Read by ops-api job_detail, which lists times saved on the job view (job_assignment_logged_times) beside it; the context job record may read it the same way.';
 
 -- ── 4. The enforcement flag, off ────────────────────────────────────────────
 -- A missing or unreadable flag also reads as off.
@@ -183,9 +186,10 @@ WHERE NOT EXISTS (
 );
 
 -- ── 5. Times saved on the job view ──────────────────────────────────────────
--- One row per job card. `hours` is the hours those times make; ops-api shows
--- the row only while it still equals the card's hours_worked, so a later
--- change to the hours by any other writer never rides stale times.
+-- One row per job card. `hours` is the hours those times make; ops-api uses
+-- the row only while it still equals the card's hours_worked and only for the
+-- trade who saved it (user_id), so a later change to the hours by any other
+-- writer, or a card handed to another trade, never rides stale times.
 CREATE TABLE IF NOT EXISTS public.job_assignment_logged_times (
   assignment_id uuid PRIMARY KEY
     REFERENCES public.job_assignments(id) ON DELETE CASCADE,
@@ -215,4 +219,4 @@ REVOKE ALL ON public.job_assignment_logged_times FROM PUBLIC, anon, authenticate
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.job_assignment_logged_times TO service_role;
 
 COMMENT ON TABLE public.job_assignment_logged_times IS
-  'Trade invoice time entries (20261012180000): the date worked, start and finish time (HH:MM, Perth) and break a trade typed when logging a job card''s hours on the job view (ops-api log_my_job_hours). One row per job card, replaced on a re-log. Read by ops-api my_hours as logged_time_entry. Service role only.';
+  'Trade invoice time entries (20261012180000): the date worked, start and finish time (HH:MM, Perth) and break a trade typed when logging a job card''s hours on the job view (ops-api log_my_job_hours). One row per job card, replaced on a re-log. Read by ops-api my_hours as logged_time_entry, by the auto-collected trade invoice lanes as a card''s time entry when trade_invoice_time_entry_required_v1 is on, and by job_detail as a job''s unbilled time entries. Service role only.';

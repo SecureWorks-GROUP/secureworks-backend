@@ -18,6 +18,9 @@
 // Enforcement is behind feature flag TRADE_INVOICE_TIME_ENTRY_FLAG, seeded
 // off: while off the fields are stored when sent and a line without them is
 // accepted; when on, a time line without them is refused `time_entry_required`.
+// A job card the server collects itself (nobody typed its line) takes, when
+// the flag is on, the trade's own times saved on the job view, else the
+// clock's same-day pair, and is refused by name only when it has neither.
 // A wrong entry (finish not after start, hours that disagree, a day worked
 // that is after today) is refused in both states. Contract: docs/trade-invoice-time-entries-2026-10-12.md.
 
@@ -69,15 +72,49 @@ export type TradeInvoiceTimeEntryErrorCode =
   | "time_entry_hours_mismatch"
   | "time_entry_overlap";
 
+// A job card that still needs its times: which job, and the card's day.
+export type TradeInvoiceTimeEntryNeeded = {
+  assignment_id: string;
+  job_id: string | null;
+  job_number: string | null;
+  work_date: string | null;
+};
+
 export class TradeInvoiceTimeEntryError extends Error {
   readonly status = 422;
   readonly code: TradeInvoiceTimeEntryErrorCode;
+  readonly needsTimes: TradeInvoiceTimeEntryNeeded[] | null;
 
-  constructor(code: TradeInvoiceTimeEntryErrorCode, message: string) {
+  constructor(
+    code: TradeInvoiceTimeEntryErrorCode,
+    message: string,
+    needsTimes: TradeInvoiceTimeEntryNeeded[] | null = null,
+  ) {
     super(message);
     this.name = "TradeInvoiceTimeEntryError";
     this.code = code;
+    this.needsTimes = needsTimes;
   }
+}
+
+/**
+ * The one refusal for job cards the server collected itself that say nowhere
+ * when they were worked. It names every such job and day, so the trade can
+ * fix exactly those.
+ */
+export function tradeInvoiceTimeEntriesNeededError(
+  cards: TradeInvoiceTimeEntryNeeded[],
+): TradeInvoiceTimeEntryError {
+  const named = cards.map((card) =>
+    `${card.job_number || "a job card"}${
+      card.work_date ? ` on ${card.work_date}` : ""
+    }`
+  ).join("; ");
+  return new TradeInvoiceTimeEntryError(
+    "time_entry_required",
+    `Enter your start and finish time for: ${named}. Open each job, log the hours with the date worked and your start and finish time, then submit again.`,
+    cards,
+  );
 }
 
 const NO_TIME_ENTRY: TradeInvoiceTimeEntryColumns = {
@@ -110,10 +147,9 @@ function parseWorkDate(value: unknown): string | null {
   return text;
 }
 
-// Accepts HH:MM, and HH:MM:SS as a time column or a restored draft may send
-// it back; the stored form is always HH:MM.
+// Exactly HH:MM, 24-hour: the contract form and the stored form.
 function parseClockTime(value: unknown): { text: string; minutes: number } | null {
-  const match = /^([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?$/.exec(
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(
     String(value ?? "").trim(),
   );
   if (!match) return null;
@@ -437,16 +473,133 @@ export async function tradeInvoiceTimeEntryRequired(
   }
 }
 
+// ── Times saved on the job view (log_my_job_hours) ──────────────────────────
+// Table public.job_assignment_logged_times: one row per job card, the times the
+// trade typed when they logged the card's hours. It sits beside
+// job_assignments.hours_worked rather than on that table, because every
+// job_assignments column is inside the make-safe fact hash. Three readers:
+// my_hours returns it as `logged_time_entry` so the Weekly Invoice card can
+// open on the trade's own saved times; the auto-collected invoice lanes take
+// it as a card's entry when the flag is on; and a job's list shows it until
+// that day is billed.
+
+export const JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS =
+  "assignment_id, user_id, work_date, start_time, finish_time, break_minutes, hours";
+
+/**
+ * The saved times for a job card, or null. They are returned only while they
+ * still describe the card's hours: when the hours were changed since by any
+ * other writer (the clock, the office, a bare-hours log), the saved times are
+ * stale and are not used. With `ownerUserId` they must also be that trade's
+ * own: a card handed to someone else never carries the first trade's times.
+ */
+export function loggedTimeEntryForCard(
+  row: unknown,
+  cardHours: unknown,
+  ownerUserId?: unknown,
+): TradeInvoiceTimeEntry | null {
+  if (!row || typeof row !== "object") return null;
+  const saved = row as Record<string, unknown>;
+  if (
+    ownerUserId !== undefined &&
+    String(saved.user_id ?? "") !== String(ownerUserId ?? "")
+  ) {
+    return null;
+  }
+  const workDate = parseWorkDate(saved.work_date);
+  const start = parseClockTime(saved.start_time);
+  const finish = parseClockTime(saved.finish_time);
+  const hours = Number(saved.hours);
+  if (!workDate || !start || !finish || !Number.isFinite(hours)) return null;
+  if (!present(cardHours)) return null;
+  const current = Number(cardHours);
+  if (!Number.isFinite(current) || Math.abs(current - hours) > 0.01) {
+    return null;
+  }
+  return {
+    work_date: workDate,
+    start_time: start.text,
+    finish_time: finish.text,
+    break_minutes: parseBreakMinutes(saved.break_minutes) ?? 0,
+    hours,
+  };
+}
+
+/**
+ * The saved rows for a set of job cards, by card id. A failed read answers
+ * the reason: the caller decides whether that may be shown as "no saved
+ * times" (a view) or must stop the work (a refusal that would name the card).
+ */
+export async function loadLoggedTimesByCard(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  assignmentIds: unknown[],
+): Promise<{ byCard: Map<string, unknown>; error: string | null }> {
+  const byCard = new Map<string, unknown>();
+  const ids = [
+    ...new Set(assignmentIds.map((id) => String(id ?? "")).filter(Boolean)),
+  ];
+  try {
+    for (let i = 0; i < ids.length; i += 100) {
+      const { data, error } = await client.from("job_assignment_logged_times")
+        .select(JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS)
+        .in("assignment_id", ids.slice(i, i + 100));
+      if (error) {
+        return { byCard, error: String(error.message || "read failed") };
+      }
+      for (const row of (data || [])) {
+        byCard.set(String(row.assignment_id), row);
+      }
+    }
+    return { byCard, error: null };
+  } catch (error) {
+    return {
+      byCard,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * The entry for a job card the server collected itself, when an entry is
+ * required: the trade's own saved job-view times first, else the system's
+ * same-day pair of stamps (the clock's, or the assignment's started and
+ * completed). Null when the card has neither: nothing is invented.
+ */
+export function autoCollectedTimeEntry(
+  card: {
+    saved: unknown;
+    userId: unknown;
+    cardHours: unknown;
+    startedAt: unknown;
+    finishedAt: unknown;
+    breakMinutes?: unknown;
+  },
+): TradeInvoiceRecordedTimeEntry | null {
+  return loggedTimeEntryForCard(card.saved, card.cardHours, card.userId) ||
+    clockTradeInvoiceTimeEntry(
+      card.startedAt,
+      card.finishedAt,
+      card.breakMinutes ?? 0,
+    );
+}
+
 // ── The per-job list ────────────────────────────────────────────────────────
-// View public.job_trade_time_entries (migration
-// 20261012180000_trade_invoice_time_entries.sql): one row per submitted time
-// line that says when it was worked. Drafts are not in it.
+// Two sources, each row marked with its own:
+//   invoice   view public.job_trade_time_entries (migration
+//             20261012180000_trade_invoice_time_entries.sql): one row per
+//             submitted time line that says when it was worked. Drafts are
+//             not in it.
+//   job_view  the times a trade saved on the job view, with no invoice
+//             fields, until that trade has a submitted time line on the job
+//             for the same day.
 
 export const JOB_TRADE_TIME_ENTRY_COLUMNS =
   "trade_invoice_line_id, job_id, job_number, user_id, user_name, work_date, start_time, finish_time, break_minutes, hours, started_at, finished_at, line_type, trade_invoice_id, invoice_number, invoice_status, submitted_at";
 
 export type JobTradeTimeEntry = {
-  trade_invoice_line_id: string;
+  source: "invoice" | "job_view";
+  trade_invoice_line_id: string | null;
   job_id: string;
   job_number: string | null;
   user_id: string | null;
@@ -459,16 +612,88 @@ export type JobTradeTimeEntry = {
   started_at: string | null;
   finished_at: string | null;
   line_type: string | null;
-  trade_invoice_id: string;
+  trade_invoice_id: string | null;
   invoice_number: string | null;
   invoice_status: string | null;
   submitted_at: string | null;
 };
 
+// Perth is UTC+8 all year.
+function perthInstant(workDate: string, clockTime: string): string {
+  return new Date(`${workDate}T${clockTime}:00+08:00`).toISOString();
+}
+
+async function loadJobViewTimeEntries(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  jobId: string,
+  billed: JobTradeTimeEntry[],
+): Promise<{ entries: JobTradeTimeEntry[]; error: string | null }> {
+  const { data: saved, error: savedError } = await client
+    .from("job_assignment_logged_times")
+    .select(JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS)
+    .eq("job_id", jobId);
+  if (savedError) {
+    return { entries: [], error: String(savedError.message || "read failed") };
+  }
+  const rows = (saved || []) as Array<Record<string, unknown>>;
+  if (rows.length === 0) return { entries: [], error: null };
+
+  // deno-lint-ignore no-explicit-any
+  const cardById = new Map<string, any>();
+  const cardIds = rows.map((row) => String(row.assignment_id));
+  for (let i = 0; i < cardIds.length; i += 100) {
+    const { data: cards, error: cardError } = await client
+      .from("job_assignments")
+      .select(
+        "id, user_id, hours_worked, users:user_id(name), jobs:job_id(job_number)",
+      )
+      .in("id", cardIds.slice(i, i + 100));
+    if (cardError) {
+      return { entries: [], error: String(cardError.message || "read failed") };
+    }
+    for (const card of (cards || [])) cardById.set(String(card.id), card);
+  }
+
+  const billedDays = new Set(
+    billed.map((entry) => `${entry.user_id}|${entry.work_date}`),
+  );
+  const entries: JobTradeTimeEntry[] = [];
+  for (const row of rows) {
+    const card = cardById.get(String(row.assignment_id));
+    if (!card) continue;
+    const entry = loggedTimeEntryForCard(row, card.hours_worked, card.user_id);
+    if (!entry) continue;
+    if (billedDays.has(`${card.user_id}|${entry.work_date}`)) continue;
+    entries.push({
+      source: "job_view",
+      trade_invoice_line_id: null,
+      job_id: jobId,
+      job_number: card.jobs?.job_number ?? null,
+      user_id: String(card.user_id),
+      user_name: card.users?.name ?? null,
+      work_date: entry.work_date,
+      start_time: entry.start_time,
+      finish_time: entry.finish_time,
+      break_minutes: entry.break_minutes,
+      hours: entry.hours,
+      started_at: perthInstant(entry.work_date, entry.start_time),
+      finished_at: perthInstant(entry.work_date, entry.finish_time),
+      line_type: null,
+      trade_invoice_id: null,
+      invoice_number: null,
+      invoice_status: null,
+      submitted_at: null,
+    });
+  }
+  return { entries, error: null };
+}
+
 /**
  * Who worked on a job, which day, from when to when, for how many hours and
- * on which invoice. A failed read answers `entries: null` with the reason,
- * never an empty list: no rows must mean nobody recorded time, not a fault.
+ * on which invoice, by day then start. A failed read of either source answers
+ * `entries: null` with the reason, never a short or empty list: no rows must
+ * mean nobody recorded time, not a fault.
  */
 export async function loadJobTradeTimeEntries(
   // deno-lint-ignore no-explicit-any
@@ -488,52 +713,28 @@ export async function loadJobTradeTimeEntries(
       );
       return { entries: null, error: String(error.message || "read failed") };
     }
-    return { entries: (data || []) as JobTradeTimeEntry[], error: null };
+    const billed = ((data || []) as Array<Omit<JobTradeTimeEntry, "source">>)
+      .map((row): JobTradeTimeEntry => ({ source: "invoice", ...row }));
+    const jobView = await loadJobViewTimeEntries(client, jobId, billed);
+    if (jobView.error) {
+      console.error(
+        "[ops-api] job view times read failed:",
+        jobView.error,
+      );
+      return { entries: null, error: jobView.error };
+    }
+    if (jobView.entries.length === 0) return { entries: billed, error: null };
+    const key = (entry: JobTradeTimeEntry) =>
+      `${entry.work_date} ${entry.start_time}`;
+    return {
+      entries: [...billed, ...jobView.entries].sort((a, b) =>
+        key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0
+      ),
+      error: null,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("[ops-api] job_trade_time_entries read threw:", message);
     return { entries: null, error: message };
   }
-}
-
-// ── Times saved on the job view (log_my_job_hours) ──────────────────────────
-// Table public.job_assignment_logged_times: one row per job card, the times the
-// trade typed when they logged the card's hours. It sits beside
-// job_assignments.hours_worked rather than on that table, because every
-// job_assignments column is inside the make-safe fact hash. my_hours returns
-// it as `logged_time_entry` so the Weekly Invoice card can open on the trade's
-// own saved times.
-
-export const JOB_ASSIGNMENT_LOGGED_TIME_COLUMNS =
-  "assignment_id, work_date, start_time, finish_time, break_minutes, hours";
-
-/**
- * The saved times for a job card, or null. They are returned only while they
- * still describe the card's hours: when the hours were changed since by any
- * other writer (the clock, the office, a bare-hours log), the saved times are
- * stale and are not shown.
- */
-export function loggedTimeEntryForCard(
-  row: unknown,
-  cardHours: unknown,
-): TradeInvoiceTimeEntry | null {
-  if (!row || typeof row !== "object") return null;
-  const saved = row as Record<string, unknown>;
-  const workDate = parseWorkDate(saved.work_date);
-  const start = parseClockTime(saved.start_time);
-  const finish = parseClockTime(saved.finish_time);
-  const hours = Number(saved.hours);
-  if (!workDate || !start || !finish || !Number.isFinite(hours)) return null;
-  if (!present(cardHours)) return null;
-  const current = Number(cardHours);
-  if (!Number.isFinite(current) || Math.abs(current - hours) > 0.01) {
-    return null;
-  }
-  return {
-    work_date: workDate,
-    start_time: start.text,
-    finish_time: finish.text,
-    break_minutes: parseBreakMinutes(saved.break_minutes) ?? 0,
-    hours,
-  };
 }
