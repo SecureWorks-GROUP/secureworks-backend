@@ -801,7 +801,7 @@ Deno.test("the poll answers before a slow Group read finishes: the read and the 
   };
 
   const env: Record<string, string> = {
-    SUPABASE_SECRET_KEYS: JSON.stringify(["sb_secret_monitor_poll_test"]),
+    SUPABASE_SECRET_KEYS: JSON.stringify(["sb_secret_fx_swwa_poll"]),
     MICROSOFT_TENANT_ID: "tenant",
     MICROSOFT_CLIENT_ID: "client",
     MICROSOFT_CLIENT_SECRET: "secret",
@@ -824,7 +824,7 @@ Deno.test("the poll answers before a slow Group read finishes: the read and the 
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            apikey: "sb_secret_monitor_poll_test",
+            apikey: "sb_secret_fx_swwa_poll",
           },
           body: "{}",
         }),
