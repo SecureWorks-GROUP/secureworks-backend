@@ -445,7 +445,11 @@ export async function jobProfitListAction(
   if (view !== null) {
     return { status: 400, body: { error: "view must be rollup or omitted" } };
   }
-  let query = client.from("v_job_profit").select("*", { count: "planned" });
+  // No row count: a planned count makes PostgREST refuse (416) any offset at
+  // or above the planner's estimate, and work_type is computed, so that
+  // estimate is about 1 for every type filter. One row past the page says
+  // whether another page exists.
+  let query = client.from("v_job_profit").select("*");
   if (f.types.length) query = query.in("work_type", f.types);
   if (f.statuses.length) query = query.in("status", f.statuses);
   const dateColumn = f.dateField === "invoiced"
@@ -466,19 +470,20 @@ export async function jobProfitListAction(
   query = query.order("created_at", { ascending: false }).order("job_id", {
     ascending: true,
   })
-    .range(f.offset, f.offset + f.limit - 1);
-  const { data, error, count } = await query;
+    .range(f.offset, f.offset + f.limit);
+  const { data, error } = await query;
   if (error) {
     return {
       status: 500,
       body: { error: `job profit list read failed: ${error.message}` },
     };
   }
+  const rows: unknown[] = data || [];
   return {
     status: 200,
     body: {
-      jobs: data || [],
-      total_estimate: count ?? null,
+      jobs: rows.slice(0, f.limit),
+      has_more: rows.length > f.limit,
       limit: f.limit,
       offset: f.offset,
       filters: {

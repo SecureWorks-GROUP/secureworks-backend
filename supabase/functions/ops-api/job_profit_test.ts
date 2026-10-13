@@ -24,13 +24,20 @@ function fakeClient(
       const call = { table, ops: [] as Array<[string, unknown[]]> };
       calls.push(call);
       let rows = [...(tables[table] ?? [])];
+      let window: [number, number] | null = null;
       const builder: any = {};
-      for (const op of ["select", "order", "limit", "range", "gte", "lte"]) {
+      for (const op of ["select", "order", "limit", "gte", "lte"]) {
         builder[op] = (...args: unknown[]) => {
           call.ops.push([op, args]);
           return builder;
         };
       }
+      // inclusive at both ends, as PostgREST reads a range
+      builder.range = (from: number, to: number) => {
+        call.ops.push(["range", [from, to]]);
+        window = [from, to];
+        return builder;
+      };
       builder.eq = (col: string, val: unknown) => {
         call.ops.push(["eq", [col, val]]);
         rows = rows.filter((r) => r[col] === val);
@@ -45,7 +52,10 @@ function fakeClient(
         resolve(
           errors[table]
             ? { data: null, error: { message: errors[table] }, count: null }
-            : { data: rows, error: null, count: rows.length },
+            : {
+              data: window ? rows.slice(window[0], window[1] + 1) : rows,
+              error: null,
+            },
         );
       return builder;
     },
@@ -431,15 +441,7 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
       args[1] === "2025-07-01"
     ),
   );
-  assert(
-    ops.some(([op, args]) => op === "range" && args[0] === 0 && args[1] === 99),
-  );
-  assertEquals(ops.find(([op]) => op === "select")![1], ["*", {
-    count: "planned",
-  }]);
-  assert(
-    "total_estimate" in (out.body as any) && !("total" in (out.body as any)),
-  );
+  assertEquals((out.body as any).has_more, false);
   const perth = fakeClient({ v_job_profit: [] });
   await jobProfitListAction(
     perth,
@@ -466,6 +468,33 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
   assertEquals(
     (await jobProfitListAction(bad, new URLSearchParams(""))).status,
     500,
+  );
+});
+
+Deno.test("job_profit_list: pages past the first, and says when another follows", async () => {
+  const jobs = ["a", "b", "c", "d", "e"].map((job_id) => ({
+    job_id,
+    work_type: "fencing",
+  }));
+  const page = async (query: string) => {
+    const out = await jobProfitListAction(
+      fakeClient({
+        v_job_profit: [...jobs, { job_id: "m", work_type: "makesafe" }],
+      }),
+      new URLSearchParams(`type=fencing&${query}`),
+    );
+    assertEquals(out.status, 200);
+    const body = out.body as any;
+    return [body.jobs.map((j: any) => j.job_id), body.has_more];
+  };
+  assertEquals(await page("limit=2"), [["a", "b"], true]);
+  assertEquals(await page("limit=2&offset=2"), [["c", "d"], true]);
+  assertEquals(await page("limit=2&offset=4"), [["e"], false]);
+  assertEquals(await page("limit=5"), [["a", "b", "c", "d", "e"], false]);
+  assertEquals(
+    await page("limit=2&offset=50"),
+    [[], false],
+    "an offset past the last job is an empty page, never an error",
   );
 });
 

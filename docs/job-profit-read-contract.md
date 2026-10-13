@@ -16,8 +16,13 @@ All money is ex GST. Profit is gross profit on direct costs, no overhead.
 | Action | Returns |
 |---|---|
 | `job_profit&job_id=<uuid>` or `&job_number=<number>` | `job` (one row of the fields below), `trades`, `cost_events`, `revenue_events`, `timeline`, `labels` |
-| `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `total_estimate`, `labels` |
+| `job_profit_list` (`type`, `status`, `from`, `to`, `date_field=created\|invoiced`, `limit`, `offset`) | `jobs` (rows of the fields below), `has_more`, `labels` |
 | `job_profit_list&view=rollup` (same filters) | `totals`, `by_type`, `by_month`, `labels` |
+
+`job_profit_list` returns no row count. `has_more` is true when another page
+follows: ask again with `offset` raised by `limit`. An offset past the last job
+answers an empty `jobs` with `has_more` false, never an error. Totals come from
+`view=rollup`.
 
 ## Job fields
 
