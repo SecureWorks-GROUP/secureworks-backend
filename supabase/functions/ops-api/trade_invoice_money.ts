@@ -27,7 +27,8 @@ export type TradeInvoiceMoneyErrorCode =
   | "MONEY_SPLIT_INVALID"
   | "LINE_AMOUNT_UNRESOLVED"
   | "XERO_GROSS_MISMATCH"
-  | "XERO_RETURNED_SPLIT_INVALID";
+  | "XERO_RETURNED_SPLIT_INVALID"
+  | "RECURRING_DEDUCTION_INVALID";
 
 export class TradeInvoiceMoneyError extends Error {
   readonly code: TradeInvoiceMoneyErrorCode;
@@ -39,6 +40,17 @@ export class TradeInvoiceMoneyError extends Error {
   }
 }
 
+// A recurring deduction (first use: a trade's weekly ute hire). It is not a
+// line of the trade's work and is not inside gross earned: it comes off the
+// amount payable after super and GST, so the trade is paid exactly this much
+// less whatever the tax treatment of the other lines. Which invoice carries
+// one is decided in trade_invoice_recurring_deduction.ts.
+export type TradeInvoiceRecurringDeduction = {
+  id: string | null;
+  label: string;
+  amount: number;
+};
+
 export type TradeInvoiceMoney = {
   gst_on: boolean;
   super_rate: number;
@@ -48,9 +60,13 @@ export type TradeInvoiceMoney = {
   company_contribution: number;
   net_pay: number;
   gst_amount: number;
+  // Cash payable to the trade: net_pay + gst_amount, less a recurring
+  // deduction when the invoice carries one.
   trade_payable: number;
   total_inc: number;
   company_total_out: number;
+  // Absent or null on every invoice that carries no recurring deduction.
+  recurring_deduction?: TradeInvoiceRecurringDeduction | null;
 };
 
 export type TradeInvoiceXeroLine = Record<string, unknown> & {
@@ -247,6 +263,81 @@ export function calculateTradeInvoiceMoney(input: {
   };
 }
 
+/** net_pay + GST: what the trade is paid before any recurring deduction. */
+export function tradeInvoicePayableBeforeDeduction(
+  money: TradeInvoiceMoney,
+): number {
+  return round2(money.net_pay + money.gst_amount);
+}
+
+/** The ex-GST total of the Xero bill: its lines, summed. */
+export function tradeInvoiceXeroBillSubtotal(money: TradeInvoiceMoney): number {
+  return round2(money.net_pay - (money.recurring_deduction?.amount ?? 0));
+}
+
+/**
+ * Take a recurring deduction off the amount payable. Gross earned, super, GST
+ * and total_inc are untouched: only trade_payable moves, by exactly the
+ * amount. null returns the money as it is. A deduction of more than the
+ * amount payable is refused here, never applied: the caller decides to take
+ * none (trade_invoice_recurring_deduction.ts).
+ */
+export function withTradeInvoiceRecurringDeduction(
+  money: TradeInvoiceMoney,
+  deduction: TradeInvoiceRecurringDeduction | null | undefined,
+): TradeInvoiceMoney {
+  const { recurring_deduction: _carried, ...base } = money;
+  const payable = tradeInvoicePayableBeforeDeduction(money);
+  if (!deduction) return { ...base, trade_payable: payable };
+  const label = String(deduction.label ?? "").replace(/\s+/g, " ").trim();
+  const amount = round2(Number(deduction.amount));
+  if (!label || !Number.isFinite(amount) || amount <= 0) {
+    throw new TradeInvoiceMoneyError(
+      "RECURRING_DEDUCTION_INVALID",
+      "A recurring deduction needs a label and an amount of more than zero",
+    );
+  }
+  if (toCents(amount) > toCents(payable)) {
+    throw new TradeInvoiceMoneyError(
+      "RECURRING_DEDUCTION_INVALID",
+      `${label} ${moneyLabel(amount)} is more than the amount payable ${
+        moneyLabel(payable)
+      }`,
+    );
+  }
+  return {
+    ...base,
+    trade_payable: round2(payable - amount),
+    recurring_deduction: {
+      id: deduction.id ? String(deduction.id) : null,
+      label,
+      amount,
+    },
+  };
+}
+
+/**
+ * The recurring deduction a stored invoice carries (trade_invoices
+ * recurring_deduction_id / _label / _amount), or null. A read that did not
+ * select the columns reads as none, exactly like an invoice saved before them.
+ */
+export function persistedTradeInvoiceRecurringDeduction(
+  value: unknown,
+): TradeInvoiceRecurringDeduction | null {
+  const record = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  const raw = record.recurring_deduction_amount;
+  if (raw === null || raw === undefined || raw === "") return null;
+  return {
+    id: record.recurring_deduction_id
+      ? String(record.recurring_deduction_id)
+      : null,
+    label: String(record.recurring_deduction_label ?? ""),
+    amount: Number(raw),
+  };
+}
+
 function requiredNumber(
   record: Record<string, unknown>,
   key: string,
@@ -320,7 +411,9 @@ export function validatePersistedTradeInvoiceMoney(
 
   const derived = derivedPayableFromStored(gross, superAmount, netPay);
 
-  return {
+  // A stored recurring deduction comes off the amount payable here, so every
+  // read, retry and Xero check built on this split sees the reduced figure.
+  return withTradeInvoiceRecurringDeduction({
     gst_on: record.gst_on,
     super_rate: superRate,
     gross_earned: round2(gross),
@@ -332,7 +425,7 @@ export function validatePersistedTradeInvoiceMoney(
     trade_payable: round2(netPay + gstAmount),
     total_inc: round2(totalInc),
     company_total_out: derived.company_total_out,
-  };
+  }, persistedTradeInvoiceRecurringDeduction(record));
 }
 
 const PERSISTED_SPLIT_FIELDS = [
@@ -343,9 +436,24 @@ const PERSISTED_SPLIT_FIELDS = [
   "net_pay",
 ] as const;
 
+// Added to a presented invoice only when it carries a recurring deduction, so
+// an invoice with none reads exactly as it did before deductions existed.
+export type PresentedTradeInvoiceRecurringDeduction = {
+  // The deduction's own labelled line: the app shows `label` and `amount`
+  // between the money split and the amount payable.
+  recurring_deduction: TradeInvoiceRecurringDeduction;
+  // net_pay + GST before the deduction. trade_payable is after it.
+  payable_before_deduction: number;
+};
+
 export function presentTradeInvoiceMoney<
   T extends Record<string, unknown>,
->(invoice: T): T & { trade_payable: number | null } {
+>(
+  invoice: T,
+):
+  & T
+  & { trade_payable: number | null }
+  & Partial<PresentedTradeInvoiceRecurringDeduction> {
   const hasPersistedSplit = PERSISTED_SPLIT_FIELDS.some((field) =>
     invoice[field] !== null && invoice[field] !== undefined
   );
@@ -353,9 +461,15 @@ export function presentTradeInvoiceMoney<
     return { ...invoice, trade_payable: null };
   }
 
+  const money = validatePersistedTradeInvoiceMoney(invoice);
+  if (!money.recurring_deduction) {
+    return { ...invoice, trade_payable: money.trade_payable };
+  }
   return {
     ...invoice,
-    trade_payable: validatePersistedTradeInvoiceMoney(invoice).trade_payable,
+    trade_payable: money.trade_payable,
+    recurring_deduction: money.recurring_deduction,
+    payable_before_deduction: tradeInvoicePayableBeforeDeduction(money),
   };
 }
 
@@ -464,6 +578,35 @@ export function isTradeInvoiceSuperXeroLine(
   return /superannuation guarantee/i.test(String(line?.Description || ""));
 }
 
+// The recurring deduction's own line on the Xero bill. The first line of its
+// description is this prefix plus the label, and nothing else writes it: a
+// work line always starts with the trade's name (see
+// withTradeIdentityOnXeroDescription), so a trade's own "ute hire" wording on
+// a work line is never read as the deduction.
+export const TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX =
+  "Weekly deduction - ";
+
+export function isTradeInvoiceRecurringDeductionXeroLine(
+  line: TradeInvoiceXeroLine | null | undefined,
+): boolean {
+  return String(line?.Description || "").trimStart().toLowerCase().startsWith(
+    TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX.toLowerCase(),
+  );
+}
+
+export function formatTradeInvoiceRecurringDeductionDescription(
+  deduction: TradeInvoiceRecurringDeduction,
+  tradeName?: unknown,
+): string {
+  const name = String(tradeName || "").trim() || "the trade";
+  return [
+    `${TRADE_INVOICE_RECURRING_DEDUCTION_XERO_PREFIX}${deduction.label}`,
+    `${
+      moneyLabel(deduction.amount)
+    } taken off the amount payable to ${name}, after super and GST. Not part of the work billed on this invoice.`,
+  ].join("\n");
+}
+
 export function withTradeIdentityOnXeroDescription(
   description: unknown,
   tradeName: unknown,
@@ -501,12 +644,15 @@ export type TradeInvoiceAuditLine = {
   quantity: number;
   unit_amount: number;
   line_total: number;
-  kind: "submitted" | "super";
+  kind: "submitted" | "super" | "recurring_deduction";
 };
 
 export type TradeInvoiceAuditModel = {
   submitted_lines: TradeInvoiceAuditLine[];
   super_line: TradeInvoiceAuditLine;
+  // The recurring deduction's own minus line, or null when the invoice
+  // carries none. amount_payable is before it; trade_payable is after it.
+  recurring_deduction_line: TradeInvoiceAuditLine | null;
   submitted_total: number;
   super_rate: number;
   super_amount: number;
@@ -597,10 +743,24 @@ export function buildTradeInvoiceAuditModel(
     line_total: -round2(money.worker_withhold),
     kind: "super",
   };
+  const deduction = money.recurring_deduction ?? null;
+  const recurringDeductionLine: TradeInvoiceAuditLine | null = deduction
+    ? {
+      description: formatTradeInvoiceRecurringDeductionDescription(
+        deduction,
+        tradeName,
+      ),
+      quantity: 1,
+      unit_amount: -round2(deduction.amount),
+      line_total: -round2(deduction.amount),
+      kind: "recurring_deduction",
+    }
+    : null;
 
   return {
     submitted_lines: submitted,
     super_line: superLine,
+    recurring_deduction_line: recurringDeductionLine,
     submitted_total: money.gross_earned,
     super_rate: money.super_rate,
     super_amount: money.super_amount,
@@ -618,7 +778,13 @@ export function buildTradeInvoiceAuditModel(
 export function splitTradeInvoiceXeroLines(
   grossLines: TradeInvoiceXeroLine[],
   money: TradeInvoiceMoney,
-  options: { superAccountCode: string; tradeName?: string | null },
+  options: {
+    superAccountCode: string;
+    tradeName?: string | null;
+    // Account for the recurring deduction's minus line. Required whenever the
+    // money carries one: a line with no account cannot be posted.
+    recurringDeductionAccountCode?: string | null;
+  },
 ): TradeInvoiceXeroLine[] {
   const model = buildTradeInvoiceAuditModel(
     grossLines,
@@ -662,6 +828,28 @@ export function splitTradeInvoiceXeroLines(
     Tracking: [],
   });
 
+  // A recurring deduction is its own minus line after the split, TaxType NONE,
+  // so the bill total drops by exactly its amount with GST on or off. Whether
+  // the hire itself should carry GST is the bookkeeper's call on the draft.
+  if (model.recurring_deduction_line) {
+    const accountCode = String(options.recurringDeductionAccountCode || "")
+      .trim();
+    if (!accountCode) {
+      throw new TradeInvoiceMoneyError(
+        "RECURRING_DEDUCTION_INVALID",
+        "A recurring deduction needs a Xero account for its line",
+      );
+    }
+    labourLines.push({
+      Description: model.recurring_deduction_line.description,
+      Quantity: model.recurring_deduction_line.quantity,
+      UnitAmount: model.recurring_deduction_line.unit_amount,
+      AccountCode: accountCode,
+      TaxType: "NONE",
+      Tracking: [],
+    });
+  }
+
   return labourLines;
 }
 
@@ -684,8 +872,12 @@ export function assertReturnedTradeInvoiceXeroSplit(
 
   const lines = value as TradeInvoiceXeroLine[];
   const superLines = lines.filter((line) => isTradeInvoiceSuperXeroLine(line));
+  const deductionLines = lines.filter((line) =>
+    isTradeInvoiceRecurringDeductionXeroLine(line)
+  );
   const labourLines = lines.filter((line) =>
-    !isTradeInvoiceSuperXeroLine(line)
+    !isTradeInvoiceSuperXeroLine(line) &&
+    !isTradeInvoiceRecurringDeductionXeroLine(line)
   );
   const expectedLabourTaxType = money.gst_on ? "INPUT" : "NONE";
   // 2026-09-08: Xero (AU orgs) stores a TaxType of NONE as BASEXCLUDED and
@@ -706,16 +898,29 @@ export function assertReturnedTradeInvoiceXeroSplit(
     (sum, line) => sum + lineGrossCents(line),
     0,
   );
+  const deductionCents = deductionLines.reduce(
+    (sum, line) => sum + lineGrossCents(line),
+    0,
+  );
   const expectedWithholdCents = -toCents(money.worker_withhold);
-  const expectedNetCents = toCents(money.net_pay);
+  const expectedDeductionCents = -toCents(
+    money.recurring_deduction?.amount ?? 0,
+  );
+  // The bill's lines sum to net pay, less the recurring deduction when the
+  // invoice carries one. A bill with a deduction line the invoice does not
+  // carry, or without the one it does, is refused like any other mismatch.
+  const expectedNetCents = toCents(money.net_pay) + expectedDeductionCents;
   const expectedGrossCents = toCents(money.gross_earned);
 
   if (
     superLines.length !== 1 ||
+    deductionLines.length !== (money.recurring_deduction ? 1 : 0) ||
     Math.abs(labourCents - expectedGrossCents) > 1 ||
     Math.abs(superCents - expectedWithholdCents) > 1 ||
+    Math.abs(deductionCents - expectedDeductionCents) > 1 ||
     Math.abs(totalCents - expectedNetCents) > 1 ||
     superLines.some((line) => taxTypeOf(line) !== "NONE") ||
+    deductionLines.some((line) => taxTypeOf(line) !== "NONE") ||
     labourLines.some((line) => taxTypeOf(line) !== expectedLabourTaxType)
   ) {
     throw new TradeInvoiceMoneyError(

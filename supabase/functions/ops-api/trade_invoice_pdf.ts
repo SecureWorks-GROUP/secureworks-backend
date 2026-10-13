@@ -48,11 +48,27 @@ export function buildTradeInvoiceAuditText(
       moneyLabel(model.header.amount_payable)
     }`,
   );
+  // Cash payable before any recurring deduction: the split's own figure.
+  const cashBeforeDeduction = model.header.amount_payable + model.gst_amount;
   if (model.gst_amount > 0) {
     lines.push(
       `GST ${
         moneyLabel(model.gst_amount)
       } on submitted total. Cash payable including GST ${
+        moneyLabel(cashBeforeDeduction)
+      }`,
+    );
+  }
+  // A recurring deduction (for example Ute hire) is its own line, after the
+  // split, and the last figure is what is actually paid.
+  if (model.recurring_deduction_line) {
+    lines.push(
+      `${
+        model.recurring_deduction_line.description.replace(/\s+/g, " ").trim()
+      }  ${moneyLabel(model.recurring_deduction_line.line_total)}`,
+    );
+    lines.push(
+      `CASH PAYABLE after the weekly deduction ${
         moneyLabel(model.trade_payable)
       }`,
     );

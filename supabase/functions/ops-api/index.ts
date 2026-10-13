@@ -511,6 +511,7 @@ import {
   _tradeInvoiceXeroTax,
   TRADE_INVOICE_XERO_ACCOUNT_CODE,
   TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+  TRADE_INVOICE_RECURRING_DEDUCTION_XERO_ACCOUNT_CODE,
   tradeBillInvoiceNumber,
   _woLabourProblemNote,
   _woNetMismatch,
@@ -526,10 +527,19 @@ import {
   splitTradeInvoiceXeroLines,
   TradeInvoiceMoneyError,
   type TradeInvoiceMoney,
+  tradeInvoicePayableBeforeDeduction,
+  tradeInvoiceXeroBillSubtotal,
   type TradeInvoiceXeroIdentity,
   type TradeInvoiceXeroLine,
   validatePersistedTradeInvoiceMoney,
+  withTradeInvoiceRecurringDeduction,
 } from './trade_invoice_money.ts'
+import {
+  loadTradeRecurringDeductionDecision,
+  type TradeRecurringDeductionDecision,
+  tradeRecurringDeductionInvoiceFields,
+  tradeRecurringDeductionResponse,
+} from './trade_invoice_recurring_deduction.ts'
 import {
   attachPdfToXeroInvoiceUntilAttached,
   attachTradeInvoicePdfIfPresent,
@@ -1727,7 +1737,7 @@ export async function _findLiveTradeInvoiceForWeek(
   weekEnd: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, recurring_deduction_label, recurring_deduction_amount')
     .eq('user_id', userId)
     .eq('week_end', weekEnd)
     .order('created_at', { ascending: true })
@@ -1932,7 +1942,55 @@ function tradeInvoiceMoneyResponse(money: TradeInvoiceMoney) {
     worker_withhold: money.worker_withhold,
     company_contribution: money.company_contribution,
     company_total_out: money.company_total_out,
+    // Only on an invoice that carries a recurring deduction (for example Ute
+    // hire): every other response is exactly what it was. trade_payable above
+    // is already the reduced figure.
+    ...(money.recurring_deduction
+      ? {
+        recurring_deduction: money.recurring_deduction,
+        payable_before_deduction: tradeInvoicePayableBeforeDeduction(money),
+      }
+      : {}),
   }
+}
+
+// Recurring deduction (trade_invoice_recurring_deduction.ts): decide what this
+// weekly invoice carries and take it off the amount payable, after super and
+// GST. An invoice with no week, and every trade with no rule row, comes back
+// exactly as it went in. A failed rule read throws: the invoice is not saved.
+async function applyTradeRecurringDeduction(
+  client: any,
+  money: TradeInvoiceMoney,
+  input: { userId: string; weekStart: string | null | undefined },
+): Promise<{ money: TradeInvoiceMoney; decision: TradeRecurringDeductionDecision }> {
+  const decision = await loadTradeRecurringDeductionDecision(client, {
+    userId: input.userId,
+    weekStart: input.weekStart,
+    payable: tradeInvoicePayableBeforeDeduction(money),
+  })
+  if (decision.outcome === 'none') return { money, decision }
+  try {
+    return { money: withTradeInvoiceRecurringDeduction(money, decision.applied), decision }
+  } catch (error) {
+    return tradeInvoiceMoneyApiError(error)
+  }
+}
+
+// A deduction that covered the week but was not taken is said on the invoice
+// the office reads (query_note), after whatever is already written there.
+async function noteTradeRecurringDeductionNotTaken(
+  client: any,
+  invoiceId: string,
+  decision: TradeRecurringDeductionDecision,
+): Promise<void> {
+  if (!decision.note) return
+  const { data: noted, error: readErr } = await client.from('trade_invoices')
+    .select('query_note').eq('id', invoiceId).maybeSingle()
+  if (readErr) console.error('[ops-api] recurring deduction note read failed:', readErr.message)
+  const merged = [noted?.query_note, decision.note].filter(Boolean).join(' | ').slice(0, 2000)
+  const { error: noteErr } = await client.from('trade_invoices')
+    .update({ query_note: merged }).eq('id', invoiceId)
+  if (noteErr) console.error('[ops-api] recurring deduction note update failed:', noteErr.message)
 }
 
 function presentTradeInvoice<T extends Record<string, unknown>>(
@@ -9304,7 +9362,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const xeroLineItems = splitTradeInvoiceXeroLines(
           grossXeroLineItems,
           invMoney,
-          { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
+          {
+            tradeName,
+            superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+            recurringDeductionAccountCode: TRADE_INVOICE_RECURRING_DEDUCTION_XERO_ACCOUNT_CODE,
+          },
         )
 
         if (inv.xero_bill_id) {
@@ -9414,7 +9476,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             invoice_type: 'ACCPAY',
             status: bill.Status || 'DRAFT',
             reference: reference,
-            sub_total: invMoney.net_pay,
+            sub_total: tradeInvoiceXeroBillSubtotal(invMoney),
             total_tax: invMoney.gst_amount,
             total: bill.Total || invMoney.trade_payable,
             amount_due: bill.AmountDue || invMoney.trade_payable,
@@ -11334,7 +11396,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               )
             }
             const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
-            const draftMoney = tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd)
+            // Recurring deduction: a dated draft shows what the submitted
+            // invoice will carry, so the trade sees it before submitting.
+            const { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
+              client,
+              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd),
+              { userId: tradeUser.id, weekStart: draftWeekStart || null },
+            )
 
             // Preserve the legacy draft lookup exactly for hourly invoices.
             // Weekly work-order drafts use the stricter one-draft resolver above.
@@ -11419,6 +11487,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               gst: draftMoney.gst_amount,
               total_inc: draftMoney.total_inc,
               ...tradeInvoiceMoneyFields(draftMoney),
+              ...tradeRecurringDeductionInvoiceFields(draftRecurringDeduction),
               invoice_source: 'hourly',
               job_grand_total_ex: null,
               final_deductions_total_ex: null,
@@ -11440,6 +11509,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   gst: draftMoney.gst_amount,
                   total_inc: draftMoney.total_inc,
                   ...tradeInvoiceMoneyFields(draftMoney),
+                  ...tradeRecurringDeductionInvoiceFields(draftRecurringDeduction),
                   invoice_source: 'weekly_work_order',
                   job_grand_total_ex: weeklyInvoice.grand_total,
                   final_deductions_total_ex: weeklyInvoice.final_deductions_total,
@@ -11498,6 +11568,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               success: true,
               draft_id: draftId,
               ...tradeInvoiceMoneyResponse(draftMoney),
+              ...tradeRecurringDeductionResponse(draftRecurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
             })
           }
@@ -11687,6 +11758,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (liveWeekInvoice) {
                 const liveNet = Number(liveWeekInvoice.net_pay)
                 const liveGst = Number(liveWeekInvoice.gst)
+                // A recurring deduction the live invoice carries comes off its payable.
+                const liveDeduction = Number(liveWeekInvoice.recurring_deduction_amount || 0)
                 const liveLabel = liveWeekInvoice.invoice_number ? ` (${liveWeekInvoice.invoice_number})` : ''
                 return json({
                   ok: false,
@@ -11708,8 +11781,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   gst: liveWeekInvoice.gst ?? null,
                   total_inc: liveWeekInvoice.total_inc ?? null,
                   trade_payable: Number.isFinite(liveNet) && Number.isFinite(liveGst)
-                    ? Math.round((liveNet + liveGst) * 100) / 100
+                    ? Math.round((liveNet + liveGst - liveDeduction) * 100) / 100
                     : null,
+                  ...(liveDeduction > 0
+                    ? {
+                      recurring_deduction: {
+                        label: liveWeekInvoice.recurring_deduction_label || null,
+                        amount: liveDeduction,
+                      },
+                    }
+                    : {}),
                   userMessage: `You already have an invoice for the week ${week_start} to ${weekEnd}${liveLabel}. This submission was NOT saved. Check the week shown at the top of the invoice, or contact the office if that invoice needs changing.`,
                 }, 409)
               }
@@ -12308,7 +12389,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
             const subtotal = labourSubtotal + extraSubtotal
             const invoiceEarningsDate = weekEnd || new Date().toISOString().slice(0, 10)
-            const money = tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate)
+            // Recurring deduction (for example Ute hire): taken off the amount
+            // payable of a weekly invoice, after super and GST. The lines,
+            // subtotal, super and GST below are untouched by it.
+            const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
+              client,
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate),
+              { userId: tradeUser.id, weekStart: week_start || null },
+            )
             const gst = money.gst_amount
             const totalInc = money.total_inc
 
@@ -12454,6 +12542,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               gst,
               total_inc: totalInc,
               ...tradeInvoiceMoneyFields(money),
+              ...tradeRecurringDeductionInvoiceFields(recurringDeduction),
               invoice_source: weeklyInvoice ? 'weekly_work_order' : 'hourly',
               job_grand_total_ex: weeklyInvoice?.grand_total ?? null,
               final_deductions_total_ex: weeklyInvoice?.final_deductions_total ?? null,
@@ -12855,6 +12944,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
               }).eq('id', invoice.id)
             }
+            // After the soft-review note above, which replaces query_note.
+            await noteTradeRecurringDeductionNotTaken(client, invoice.id, recurringDeduction)
 
             // Log business event
             try {
@@ -13009,7 +13100,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 const allLines = splitTradeInvoiceXeroLines(
                   grossXeroLines,
                   money,
-                  { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
+                  {
+                    tradeName,
+                    superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+                    recurringDeductionAccountCode: TRADE_INVOICE_RECURRING_DEDUCTION_XERO_ACCOUNT_CODE,
+                  },
                 )
 
                 // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
@@ -13090,7 +13185,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       invoice_type: 'ACCPAY',
                       status: 'DRAFT',
                       reference: xeroReference,
-                      sub_total: money.net_pay,
+                      sub_total: tradeInvoiceXeroBillSubtotal(money),
                       total_tax: money.gst_amount,
                       total: money.trade_payable,
                       amount_due: money.trade_payable,
@@ -13180,6 +13275,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
+                ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
                 xero_bill_id: null,
@@ -13200,6 +13296,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               invoice_number: invoiceNumber,
               total_hours: totalHours,
               ...tradeInvoiceMoneyResponse(money),
+              ...tradeRecurringDeductionResponse(recurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
               line_count: lineItems.length + extraLineItems.length,
               xero_bill_id: xeroBillId,
@@ -14789,8 +14886,10 @@ export async function _persistTradeInvoiceWeekDraft(
   requestedPriorDraftId: string | null,
 ): Promise<string> {
   // v2 is v1 unchanged plus the time-entry stamp on the lines it inserted
-  // (20261012180000_trade_invoice_time_entries.sql).
-  const { data, error } = await client.rpc('persist_weekly_trade_invoice_v2', {
+  // (20261012180000_trade_invoice_time_entries.sql). v3 is v2 unchanged plus
+  // the recurring-deduction stamp on the invoice it inserted
+  // (20261013143700_trade_recurring_deductions.sql).
+  const { data, error } = await client.rpc('persist_weekly_trade_invoice_v3', {
     p_invoice: invoicePayload,
     p_lines: lineRows.map((line, linePosition) => ({
       ...line,
@@ -52747,7 +52846,20 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const previewGstOn = previewGstParam === 'true' || previewGstParam === 'false'
     ? previewGstParam === 'true'
     : userRow?.trade_details?.gstRegistered === true
-  const previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  // Recurring deduction (for example Ute hire): the week's rule rides along
+  // as recurring_deduction_week so the trade sees the label and amount before
+  // submitting. It is taken off this preview only when the preview covers it.
+  // A failed rule read is logged and shows no deduction; it never fails the
+  // hours view. The submit path does not share that leniency.
+  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
+  try {
+    const previewed = await applyTradeRecurringDeduction(client, previewMoney, { userId, weekStart })
+    previewMoney = previewed.money
+    previewRecurringDeduction = previewed.decision
+  } catch (deductionErr) {
+    console.error('[ops-api] my_hours: weekly deduction unreadable:', (deductionErr as Error)?.message)
+  }
   const gst = previewMoney.gst_amount
 
   // Check verification state across assignments
@@ -52765,6 +52877,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
     ...tradeInvoiceMoneyResponse(previewMoney),
+    ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
     subtotal,
     gst,
     total: previewMoney.total_inc,
@@ -53042,13 +53155,23 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     throw new Error('Invoice rejected: invoice subtotal is zero or negative. Check hours and rates.')
   }
   // ── END M0 LEGACY GUARD ──
-  const stMoney = tradeInvoiceMoney(subtotal, stGstOn, week_ending)
+  // Recurring deduction (for example Ute hire): taken off the amount payable
+  // of this weekly invoice, after super and GST.
+  const { money: stMoney, decision: stRecurringDeduction } = await applyTradeRecurringDeduction(
+    client,
+    tradeInvoiceMoney(subtotal, stGstOn, week_ending),
+    { userId, weekStart },
+  )
   const gst = stMoney.gst_amount
   const total = stMoney.total_inc
   const stXeroLineItems = splitTradeInvoiceXeroLines(
     lineItems,
     stMoney,
-    { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
+    {
+      tradeName,
+      superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+      recurringDeductionAccountCode: TRADE_INVOICE_RECURRING_DEDUCTION_XERO_ACCOUNT_CODE,
+    },
   )
 
   const persistedLineSubtotal = Object.values(jobLines).reduce(
@@ -53075,11 +53198,14 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     gst: stMoney.gst_amount,
     total_inc: stMoney.total_inc,
     ...tradeInvoiceMoneyFields(stMoney),
+    ...tradeRecurringDeductionInvoiceFields(stRecurringDeduction),
     notes: notes || null,
     invoice_source: isPerMetre ? 'per_metre' : 'hourly',
     xero_bill_id: null,
     status: 'approved',
-    query_note: 'Validated invoice awaiting Xero ACCPAY creation.',
+    // A deduction that covered the week but was not taken is said here too.
+    query_note: ['Validated invoice awaiting Xero ACCPAY creation.', stRecurringDeduction.note]
+      .filter(Boolean).join(' | '),
   }
   const { data: insertedInvoice, error: invInsertErr } = await client
     .from('trade_invoices').insert(invoiceRecord).select('id').single()
@@ -53250,7 +53376,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       invoice_type: 'ACCPAY',
       status: 'DRAFT',
       reference: `${tradeName} | WE ${week_ending}`,
-      sub_total: stMoney.net_pay,
+      sub_total: tradeInvoiceXeroBillSubtotal(stMoney),
       total_tax: gst,
       total: stMoney.trade_payable,
       amount_due: stMoney.trade_payable,
@@ -53268,6 +53394,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     xero_bill_number: billNumber,
     total,
     ...tradeInvoiceMoneyResponse(stMoney),
+    ...tradeRecurringDeductionResponse(stRecurringDeduction),
     invoice_type: serverInvoiceType,
     invoice_type_source: 'user',
     pdf_attached: pdfAttached,
@@ -53275,7 +53402,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 }
 
 // ── my_trade_invoices: invoice history for a trade ──
-const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at'
+const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note'
 
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
@@ -53391,7 +53518,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   // pending_ops_review invoices with their totals + query_note.            [D3]
   let query = client
     .from('trade_invoices')
-    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
+    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
     .order('week_start', { ascending: false, nullsFirst: false })
     .limit(limit)
 
