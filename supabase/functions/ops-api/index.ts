@@ -694,6 +694,7 @@ import {
 import {
   repairAutoIntakeMintStamp as _repairAutoIntakeMintStamp,
   repairIntakeAutoEnabled as _repairIntakeAutoEnabled,
+  withoutBuilderOrderValue as _withoutBuilderOrderValue,
 } from './repair_intake_auto.ts'
 import {
   notifyDeterministicPhysicalJob as _notifyDeterministicPhysicalJob,
@@ -42124,6 +42125,9 @@ function projectTradeAllocatedMyJobsCard(assignment: any): void {
   if (assignment.jobs && typeof assignment.jobs === 'object' && !Array.isArray(assignment.jobs)) {
     if ('notes' in assignment.jobs) {
       assignment.jobs.notes = sanitizeTradeAllocatedJobNotes(assignment.jobs.notes)
+    }
+    if ('metadata' in assignment.jobs) {
+      assignment.jobs.metadata = _withoutBuilderOrderValue(assignment.jobs.metadata)
     }
   }
 }

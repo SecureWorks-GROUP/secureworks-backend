@@ -1545,9 +1545,14 @@ a clean repair work order from MLB or Ambrose. Rules:
   a REPAIR order for a claim with an open repair job is matched by
   `matchOpenRepairJob` and landed on that job: purchase order recorded (a
   second one is listed, never written over the first), PDF attached, one job
-  event, one intake desk item, no message, board stage untouched. The
+  event, one intake desk item, no message, board stage untouched. The match
+  and the write count the same held purchase orders, the one inside the
+  detail row's `external_ref` included (`landing.jobExternalRef`). The
   auto-file brakes hold the landing too: with a brake on the order is a
-  waiting draft and nothing is written to the live job.
+  waiting draft and nothing is written to the live job. An order not landed
+  on a claim that has an open repair job NEVER earns the automatic stamp
+  (`claim_has_open_repair_job`), or releasing the brake mints a second repair
+  job on the claim.
 - A landed order's case NEVER takes `job_id`: `uq_makesafe_intake_cases_job`
   (one case per job) is live and the job's own order holds the slot. It is
   accounted as `accounted_non_wo` / `revision` with the job in
@@ -1566,7 +1571,10 @@ a clean repair work order from MLB or Ambrose. Rules:
   job, stamped `builder_work_order_value_source:
   builder_work_order_value_not_read`. The Repairs card shows it as its own
   field (`builder_work_order_value_ex_gst` + `builder_work_order_value_note`)
-  and never in `value`.
+  and never in `value`. It never reaches a trade: `my_jobs` returns job
+  metadata, so `projectTradeAllocatedMyJobsCard` strips it and each
+  `builder_additional_work_orders[].value_ex_gst` (`withoutBuilderOrderValue`).
+  A new money key on `jobs.metadata` must be stripped there too.
 - A collection or reattendance order with no original job and a first-issue
   purchase order opens a review draft that nothing approves automatically.
 - Flag-on runs leave earlier fates alone: a waiting unstamped draft, an order

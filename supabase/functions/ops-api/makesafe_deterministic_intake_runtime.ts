@@ -63,6 +63,7 @@ import {
   ORPHAN_LIFECYCLE_REVIEW_FIELD,
   orphanLifecycleOrderOpensReviewDraft,
   planWorkOrderValueExGst,
+  type RepairAutoIntakeDecision,
   type RepairAutoIntakeStamp,
   type RepairWorkOrderLanding,
 } from "./repair_intake_auto.ts";
@@ -5860,12 +5861,16 @@ export async function runDeterministicIntake(
       // live repair job. An order that already has a draft is left to the
       // person holding that draft. The auto-file brakes hold the landing too:
       // with a brake on the order falls through to the waiting draft below and
-      // nothing is written to the live job.
+      // nothing is written to the live job. Whenever the claim has an open
+      // repair job and the order is not landed, its draft is a person's to
+      // decide: it never earns the automatic stamp, so releasing the brake
+      // cannot mint a second repair job on the claim.
       let repairLandingTarget:
         | Extract<OpenRepairJobMatch, { kind: "one" }>
         | null = null;
+      let claimHasOpenRepairJob = false;
       if (
-        repairAutoIntake && options.advanceDrafts !== false &&
+        repairAutoIntake &&
         !existing?.job_id &&
         !existingObligationJobs.get(casePlan.instructionKey) &&
         (!bindingException ||
@@ -5881,8 +5886,9 @@ export async function runDeterministicIntake(
           repairJobRows,
           obligationMatches.refPrefixes,
         );
+        claimHasOpenRepairJob = repairMatch.kind !== "none";
         if (
-          repairMatch.kind !== "none" &&
+          repairMatch.kind !== "none" && options.advanceDrafts !== false &&
           !await findDraft(client, casePlan.recoveryCursor.sideEffectKeys.draft)
         ) {
           if (repairMatch.kind === "one") {
@@ -6015,6 +6021,7 @@ export async function runDeterministicIntake(
         );
         const landing: RepairWorkOrderLanding = {
           jobId: repairLandingTarget.jobId,
+          jobExternalRef: repairLandingTarget.externalRef,
           caseId: saved.caseRow.id,
           instructionKey: effectivePlan.instructionKey,
           claimRef: effectivePlan.identity.externalRefCanonical,
@@ -6027,7 +6034,7 @@ export async function runDeterministicIntake(
             ?.receivedAt || null,
           attachments: stagedWorkOrders,
         };
-        await landWorkOrderOnRepairJob(client, landing, {
+        const landed = await landWorkOrderOnRepairJob(client, landing, {
           // The purchase order is recorded on the job explicitly above, so
           // the attach-time identity refresh has nothing left to decide; run
           // here it would only log a false conflict against the claim key.
@@ -6058,14 +6065,17 @@ export async function runDeterministicIntake(
           caseRow: await accountCaseLandedOnRepairJob(
             client,
             effectivePlan,
-            repairLandingTarget,
+            { ...repairLandingTarget, relation: landed.relation },
           ),
         };
         repairIntakeReport.landed_on_existing_job++;
       } else if (wantsJob && transitionAllowed) {
-        const repairDecision = repairAutoIntake && !orphanLifecycleReview
-          ? decideRepairAutoIntake(effectivePlan)
-          : null;
+        const repairDecision: RepairAutoIntakeDecision | null =
+          !repairAutoIntake || orphanLifecycleReview
+            ? null
+            : claimHasOpenRepairJob
+            ? { auto: false, reason: "claim_has_open_repair_job" }
+            : decideRepairAutoIntake(effectivePlan);
         const live = await ensureDraftAndJob(
           client,
           saved.caseRow.id,

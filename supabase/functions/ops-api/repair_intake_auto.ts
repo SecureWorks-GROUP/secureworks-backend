@@ -329,6 +329,9 @@ export type OpenRepairJobMatch =
     jobId: string;
     jobNumber: string | null;
     relation: RepairJobPurchaseOrderRelation;
+    /** The job's `makesafe_job_details.external_ref`, which can hold the
+     * job's own purchase order when its metadata does not. */
+    externalRef: unknown;
   }
   | { kind: "many"; jobIds: string[]; jobNumbers: string[] };
 
@@ -447,12 +450,17 @@ export function matchOpenRepairJob(
   if (!targetPo) return { kind: "none" };
   const matches = new Map<
     string,
-    { jobNumber: string | null; relation: RepairJobPurchaseOrderRelation }
+    {
+      jobNumber: string | null;
+      relation: RepairJobPurchaseOrderRelation;
+      externalRef: unknown;
+    }
   >();
   for (const job of openRepairJobsOnClaim(identity, rows, prefixes)) {
     matches.set(job.jobId, {
       jobNumber: job.jobNumber,
       relation: purchaseOrderRelation(targetPo, job.metadata, job.externalRef),
+      externalRef: job.externalRef,
     });
   }
   const entries = [...matches.entries()];
@@ -478,6 +486,7 @@ export function matchOpenRepairJob(
     jobId: chosen[0],
     jobNumber: chosen[1].jobNumber,
     relation: chosen[1].relation,
+    externalRef: chosen[1].externalRef,
   };
 }
 
@@ -486,6 +495,9 @@ export const REPAIR_WORK_ORDER_LANDED_EVENT =
 
 export interface RepairWorkOrderLanding {
   jobId: string;
+  /** The job's `makesafe_job_details.external_ref`, as the match read it: the
+   * landing must count the same purchase orders the match did. */
+  jobExternalRef: unknown;
   caseId: string;
   instructionKey: string;
   claimRef: string | null;
@@ -543,7 +555,11 @@ export async function landWorkOrderOnRepairJob(
   if (!targetPo) {
     throw new Error("repair landing refused: no purchase order");
   }
-  const relation = purchaseOrderRelation(targetPo, metadata, null);
+  const relation = purchaseOrderRelation(
+    targetPo,
+    metadata,
+    landing.jobExternalRef,
+  );
   let nextMetadata: Record<string, any> | null = null;
   if (relation === "empty") {
     nextMetadata = {
@@ -633,6 +649,42 @@ export async function landWorkOrderOnRepairJob(
 }
 
 // ── A make-safe raised on a claim that has an open repair job ────────────────
+
+// ── The builder's order value never reaches a trade ─────────────────────────
+
+/**
+ * Job metadata as a trade may read it: without the builder's order value, on
+ * the job's own order and on every additional one. The value is the builder's
+ * money figure, and a trade sees no totals. Metadata carrying neither is
+ * returned as it is.
+ */
+export function withoutBuilderOrderValue<T>(metadata: T): T {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return metadata;
+  }
+  const source = metadata as Record<string, any>;
+  const additional = source.builder_additional_work_orders;
+  if (
+    !("builder_work_order_value_ex_gst" in source) &&
+    !(Array.isArray(additional) &&
+      additional.some((entry: any) =>
+        entry && typeof entry === "object" && "value_ex_gst" in entry
+      ))
+  ) return metadata;
+  const { builder_work_order_value_ex_gst: _value, ...rest } = source;
+  return {
+    ...rest,
+    ...(Array.isArray(additional)
+      ? {
+        builder_additional_work_orders: additional.map((entry: any) => {
+          if (!entry || typeof entry !== "object") return entry;
+          const { value_ex_gst: _entryValue, ...entryRest } = entry;
+          return entryRest;
+        }),
+      }
+      : {}),
+  } as T;
+}
 
 export const MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT =
   "make_safe_raised_on_repair_claim";

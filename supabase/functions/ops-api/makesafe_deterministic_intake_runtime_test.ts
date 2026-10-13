@@ -8879,7 +8879,7 @@ Deno.test("repair intake: a landing whose desk notice cannot be written is retri
   assertEquals(approver.bodies.length, 0);
 });
 
-Deno.test("repair intake: the auto-file brake holds the landing: a waiting draft, and nothing written to the live job", async () => {
+Deno.test("repair intake: the auto-file brake holds the landing, and releasing it mints no second repair job on the claim", async () => {
   const store = repairIntakeStore();
   const job = seedRepairJob(store, {
     id: "job-kinross",
@@ -8913,6 +8913,72 @@ Deno.test("repair intake: the auto-file brake holds the landing: a waiting draft
   assertEquals(store.job_documents.length, 0);
   assertEquals(landedNotices(store).length, 0);
   assertEquals(landedCases(store).length, 0);
+  // The waiting draft is a person's to decide: the claim already has an open
+  // repair job, so it carries no automatic stamp.
+  assertEquals(
+    "repair_auto_intake" in store.makesafe_intake_drafts[0].extraction_json,
+    false,
+  );
+  assertEquals(braked.repair_intake?.parked_for_review, {
+    claim_has_open_repair_job: 1,
+  });
+
+  // The brake is released. The draft still waits for its person: it is not
+  // approved into a second repair job on the claim, and it is not landed.
+  const released = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(released.totals.cases_failed, 0);
+  assertEquals(released.totals.jobs_created, 0);
+  assertEquals(released.repair_intake?.auto_approved, 0);
+  assertEquals(released.repair_intake?.landed_on_existing_job, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(landedCases(store).length, 0);
+});
+
+Deno.test("repair intake: CONTROL: with no repair job on the claim, a braked repair draft is approved once the brake is released", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const braked = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: REPAIR_NOW,
+    maxCases: 10,
+    selectionMode: "full_open",
+    approveDraft: approver.approve,
+    repairAutoIntake: true,
+    advanceDrafts: false,
+  });
+  assertEquals(braked.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.repair_auto_intake.builder,
+    "mlb",
+  );
+
+  const released = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(released.totals.cases_failed, 0);
+  assertEquals(released.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
 });
 
 // The Rapid Repair header is MLB's own declaration. Ordinary repair wording in

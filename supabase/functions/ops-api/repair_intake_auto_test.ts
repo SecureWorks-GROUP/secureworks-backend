@@ -29,6 +29,7 @@ import {
   REPAIR_WORK_ORDER_LANDED_EVENT,
   repairAutoIntakeMintStamp,
   repairIntakeAutoEnabled,
+  withoutBuilderOrderValue,
 } from "./repair_intake_auto.ts";
 
 const PREFIXES = ["MLB", "AJBR", "ACG"];
@@ -364,6 +365,7 @@ Deno.test("an order finds the open repair job on its builder and claim", () => {
     jobId: "a",
     jobNumber: "SWR-a",
     relation: "empty",
+    externalRef: "MLB-49502",
   });
   // The job already holds this purchase order (a re-send).
   assertEquals(
@@ -374,14 +376,37 @@ Deno.test("an order finds the open repair job on its builder and claim", () => {
         metadata: { builder_po_number: "PO-69815" },
       }),
     ]),
-    { kind: "one", jobId: "a", jobNumber: "SWR-a", relation: "same" },
+    {
+      kind: "one",
+      jobId: "a",
+      jobNumber: "SWR-a",
+      relation: "same",
+      externalRef: "MLB-49502PO-69815",
+    },
   );
   // The job holds another purchase order on the same claim.
   assertEquals(
     match([
       repairRow({ jobId: "a", metadata: { builder_po_number: "PO-11111" } }),
     ]),
-    { kind: "one", jobId: "a", jobNumber: "SWR-a", relation: "different" },
+    {
+      kind: "one",
+      jobId: "a",
+      jobNumber: "SWR-a",
+      relation: "different",
+      externalRef: "MLB-49502",
+    },
+  );
+  // The job's own purchase order sits only in its detail row's reference.
+  assertEquals(
+    match([repairRow({ jobId: "a", ref: "MLB-49502PO-11111" })]),
+    {
+      kind: "one",
+      jobId: "a",
+      jobNumber: "SWR-a",
+      relation: "different",
+      externalRef: "MLB-49502PO-11111",
+    },
   );
   // An additional work order recorded earlier counts as held.
   assertEquals(
@@ -394,7 +419,13 @@ Deno.test("an order finds the open repair job on its builder and claim", () => {
         },
       }),
     ]),
-    { kind: "one", jobId: "a", jobNumber: "SWR-a", relation: "same" },
+    {
+      kind: "one",
+      jobId: "a",
+      jobNumber: "SWR-a",
+      relation: "same",
+      externalRef: "MLB-49502",
+    },
   );
 });
 
@@ -449,6 +480,7 @@ Deno.test("several open repair jobs on one claim are a person's call, unless one
     jobId: "c",
     jobNumber: "SWR-c",
     relation: "same",
+    externalRef: "MLB-49502",
   });
 });
 
@@ -506,6 +538,7 @@ function landingClient(job: Record<string, any>) {
 
 const LANDING = {
   jobId: "job-1",
+  jobExternalRef: "MLB-49502",
   caseId: "case-1",
   instructionKey: "key/cycle:1",
   claimRef: "MLB-49502",
@@ -592,6 +625,96 @@ Deno.test("a second purchase order on the claim is listed, never written over th
     db.job.metadata.builder_additional_work_orders[0].value_ex_gst,
     1080,
   );
+});
+
+Deno.test("a job whose own purchase order sits only in its detail row keeps it: the new order is listed", async () => {
+  const job = () => ({
+    id: "job-1",
+    job_number: "SWR-1",
+    type: "repair",
+    status: "accepted",
+    metadata: { repair_stage: "materials", builder_claim_ref: "MLB-49502" },
+  });
+  const deps = { attachEvidence: () => Promise.resolve() };
+  const db = landingClient(job());
+  const landing = { ...LANDING, jobExternalRef: "MLB-49502PO-11111" };
+  const result = await landWorkOrderOnRepairJob(db.client, landing, deps);
+  // The landing counts the purchase order the match counted, so the new one
+  // is never written into the job's own purchase order slot.
+  assertEquals(result.relation, "different");
+  assertEquals("builder_po_number" in db.job.metadata, false);
+  assertEquals("builder_work_order_number" in db.job.metadata, false);
+  assertEquals(
+    db.job.metadata.builder_additional_work_orders.map((entry: any) =>
+      entry.purchase_order
+    ),
+    ["PO-69815"],
+  );
+  assertEquals(db.events[0].detail_json.purchase_order_relation, "different");
+  // Landing it again lists nothing twice.
+  const again = await landWorkOrderOnRepairJob(db.client, landing, deps);
+  assertEquals(again, { relation: "same", eventCreated: false });
+  assertEquals(db.job.metadata.builder_additional_work_orders.length, 1);
+
+  // The detail row holding this very order is a re-send: nothing is written.
+  const resend = landingClient(job());
+  assertEquals(
+    (await landWorkOrderOnRepairJob(resend.client, {
+      ...LANDING,
+      jobExternalRef: "MLB-49502PO-69815",
+    }, deps)).relation,
+    "same",
+  );
+  assertEquals(resend.writes.length, 0);
+
+  // CONTROL: a detail row holding the claim only leaves the slot empty, and
+  // the order becomes the job's own.
+  const empty = landingClient(job());
+  assertEquals(
+    (await landWorkOrderOnRepairJob(empty.client, LANDING, deps)).relation,
+    "empty",
+  );
+  assertEquals(empty.job.metadata.builder_po_number, "PO-69815");
+});
+
+Deno.test("job metadata as a trade reads it carries no builder order value", () => {
+  const metadata = {
+    repair_stage: "scheduled",
+    builder_claim_ref: "MLB-49502",
+    builder_po_number: "PO-11111",
+    builder_work_order_value_ex_gst: 1080,
+    builder_work_order_value_source: "builder_work_order_pdf_not_our_quote",
+    builder_additional_work_orders: [
+      { purchase_order: "PO-69815", claim_ref: "MLB-49502", value_ex_gst: 500 },
+      { purchase_order: "PO-70001", value_ex_gst: null },
+    ],
+  };
+  const before = JSON.stringify(metadata);
+  assertEquals(withoutBuilderOrderValue(metadata), {
+    repair_stage: "scheduled",
+    builder_claim_ref: "MLB-49502",
+    builder_po_number: "PO-11111",
+    builder_work_order_value_source: "builder_work_order_pdf_not_our_quote",
+    builder_additional_work_orders: [
+      { purchase_order: "PO-69815", claim_ref: "MLB-49502" },
+      { purchase_order: "PO-70001" },
+    ],
+  } as any);
+  // The stored metadata is not changed.
+  assertEquals(JSON.stringify(metadata), before);
+  // A value that was looked for and not read is stripped too.
+  assertEquals(
+    withoutBuilderOrderValue({
+      builder_po_number: "PO-1",
+      builder_work_order_value_ex_gst: null,
+    }),
+    { builder_po_number: "PO-1" } as any,
+  );
+  // Metadata carrying neither is returned as it is.
+  const plain = { repair_stage: "wo_in", builder_po_number: "PO-1" };
+  assertEquals(withoutBuilderOrderValue(plain), plain);
+  assertEquals(withoutBuilderOrderValue(null), null);
+  assertEquals(withoutBuilderOrderValue(undefined), undefined);
 });
 
 Deno.test("landing refuses a job that is not a repair job", async () => {

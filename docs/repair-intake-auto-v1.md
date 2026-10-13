@@ -72,6 +72,12 @@ a builder's figure as our price.
 A repair job nobody read a work order for (raised by hand) carries none of
 these fields.
 
+A trade never reads the figure. The Trade App's `my_jobs` returns the job's
+metadata, so for every viewer below the quote tier the card is projected
+through `withoutBuilderOrderValue`: `builder_work_order_value_ex_gst` and each
+`builder_additional_work_orders[].value_ex_gst` are removed. The purchase order
+numbers stay. `trade_job_detail` returns no metadata at all.
+
 ### What the 28 Aug 2026 rule guarded, and how it is still guarded
 
 The rule said every repair mint needs a person, because a repair job's type and
@@ -101,6 +107,11 @@ all.
 | Holds this purchase order | Left as it is. |
 | Holds a different purchase order | The new one is listed under `metadata.builder_additional_work_orders`. The first is never written over. |
 | More than one open repair job, none holding this order | A binding review card names them. A person picks. |
+
+What the job "holds" is read the same way by the match and by the write: its
+metadata, and the purchase order inside its detail row's `external_ref`
+(`MLB-25147PO-56236`). A job whose own purchase order sits only in that
+reference still holds it, so a new order is listed and never takes its slot.
 
 In every landed case the work order PDF is attached to the job, one
 `repair_work_order_landed_on_existing_job` job event is written, and one "new
@@ -133,7 +144,13 @@ keeps its fate on later scans and with the flag off.
 With an auto-file brake on (environment or database), nothing is written to the
 live job. The order falls back to a waiting review draft, as any order does
 under the brake. That draft is then a person's to decide: releasing the brake
-does not land it.
+neither lands it nor approves it.
+
+That holds because the draft carries no automatic stamp. Whenever the claim has
+an open repair job and the order is not landed (a brake is on, or the order
+already has a draft), the order is counted under `parked_for_review` as
+`claim_has_open_repair_job` and never stamped, so no later scan can approve it
+into a second repair job on the claim.
 
 ### A make-safe on a claim that has a repair job
 
