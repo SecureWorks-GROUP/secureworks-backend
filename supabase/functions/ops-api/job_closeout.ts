@@ -325,7 +325,7 @@ const JOB_COLUMNS =
 const INVOICE_COLUMNS =
   "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_paid, job_contact_id, xero_contact_id, fully_paid_on";
 const PARTY_COLUMNS =
-  "id, job_id, contact_label, is_primary, share_percentage, removed_at, xero_contact_id, client_name, ghl_contact_id";
+  "id, job_id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id, client_name, ghl_contact_id";
 
 function chunks<T>(items: T[], size = ID_CHUNK): T[][] {
   const out: T[][] = [];

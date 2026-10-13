@@ -17,10 +17,11 @@ All three, in `evaluateJobPaid`:
 1. Every linked sales invoice that is not voided or deleted is PAID, and none is
    a DRAFT.
 2. Every paying party has a paid final invoice. Paying parties are
-   `job_contacts` rows with `removed_at` null whose `share_percentage` is not an
-   explicit 0 (a null share counts: the party writer stores null when no
-   portions were sent); a job with none has one payer, its client. A final is any sales invoice that is not
-   a deposit (`DEP`, `DEP50`, `DEPOSIT`, or `jobs.deposit_invoice_id`) and not a
+   `job_contacts` rows not removed (`removed_at` null and `status` not
+   `removed`, the legacy neighbour sync's removal) whose `share_percentage` is
+   not an explicit 0 (a null share counts: the party writer stores null when no
+   portions were sent); a job with none has one payer, its client. A final is
+   any sales invoice that is not a deposit (`DEP`, `DEP50`, `DEPOSIT`, or `jobs.deposit_invoice_id`) and not a
    `MAT`/`PROG`/`PLAN`/`VAR` stage invoice. An invoice belongs to the party its
    `job_contact_id` names, else the share letter on its reference
    (`SWF-26624-B-FINBAL` is B), else the party with its Xero contact, else the

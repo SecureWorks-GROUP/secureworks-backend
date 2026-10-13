@@ -4644,9 +4644,9 @@ Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
 `complete`), gets one review text, and is archived 24 hours later. "Paid" is
 the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
 invoice PAID and none DRAFT; every paying party, `job_contacts` with
-`removed_at` null and a share that is not an explicit 0 (null counts), has a
-paid final; paid covers the `job_quote_values` quote plus customer-accepted or invoiced variations; one
-approved internally but never accepted is not owed). Every read, move, text and
+`removed_at` null, `status` not `removed`, and a share that is not an explicit
+0 (null counts), has a paid final; paid covers the `job_quote_values` quote
+plus customer-accepted or invoiced variations; one approved internally but never accepted is not owed). Every read, move, text and
 sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
 holds: status `rectification` or `jobs.is_callback`. If only the quote check
 fails the card stays put with `job_closeout_state.paid_less_than_quoted`.

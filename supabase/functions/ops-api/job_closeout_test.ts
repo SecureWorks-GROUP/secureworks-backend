@@ -718,6 +718,17 @@ Deno.test("live: every paying owner is texted once, a contact asked in the last 
       client_name: "Cy Neighbour",
       ghl_contact_id: "ghl-c",
     },
+    {
+      id: "pd",
+      job_id: job.id,
+      contact_label: "D",
+      is_primary: false,
+      share_percentage: 50,
+      removed_at: null,
+      status: "removed",
+      client_name: "Di Pulledout",
+      ghl_contact_id: "ghl-d",
+    },
   );
   for (
     const [ref, cid] of [["SWF-20-DEP50", null], ["SWF-20-FINBAL", null], [

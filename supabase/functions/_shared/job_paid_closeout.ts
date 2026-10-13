@@ -10,10 +10,11 @@
 //   1. Every linked sales invoice that is not voided or deleted is PAID, and none is a
 //      DRAFT (a draft is money we still mean to bill).
 //   2. Every paying party has a paid final invoice. A paying party is a job_contacts
-//      row with removed_at null whose share_percentage is not an explicit 0 (a null share
-//      counts; the owner and each neighbour on a shared fence); a job with no such row has
-//      one payer, its client. A final is any sales invoice that is not a deposit and not
-//      a materials, progress, planning or variation stage invoice. An invoice belongs to the party its job_contact_id
+//      row not removed (removed_at null and status not 'removed') whose share_percentage
+//      is not an explicit 0 (a null share counts; the owner and each neighbour on a
+//      shared fence); a job with no such row has one payer, its client. A final is any
+//      sales invoice that is not a deposit and not a materials, progress, planning or
+//      variation stage invoice. An invoice belongs to the party its job_contact_id
 //      names, else the party whose share letter is on its reference (SWF-26624-B-FINBAL
 //      is share B), else the party whose Xero contact it carries, else the job's own
 //      client (the primary party).
@@ -80,6 +81,8 @@ export interface CloseoutParty {
   is_primary: boolean | null;
   share_percentage: number | string | null;
   removed_at: string | null;
+  /** The legacy neighbour sync removes a party with status 'removed' and no removed_at. */
+  status?: string | null;
   xero_contact_id: string | null;
 }
 
@@ -185,11 +188,12 @@ export function isFinalInvoice(
   return !(ending && STAGE_ENDING.test(ending));
 }
 
-/** The parties who pay: active rows, unless their share is explicitly zero (a null share
- *  is a paying party: the party writer stores null when no portions were sent). */
+/** The parties who pay: rows not removed (removed_at or status 'removed'), unless their
+ *  share is explicitly zero (a null share is a paying party: the party writer stores null
+ *  when no portions were sent). */
 export function payingParties(parties: CloseoutParty[]): CloseoutParty[] {
   return parties.filter((p) =>
-    !p.removed_at &&
+    !p.removed_at && text(p.status).toLowerCase() !== "removed" &&
     (text(p.share_percentage) === "" || money(p.share_percentage) !== 0)
   );
 }

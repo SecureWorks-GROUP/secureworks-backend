@@ -322,6 +322,7 @@ Deno.test("a removed neighbour or a zero share is not a paying party", () => {
       party("pa", "A", 100),
       party("pb", "B", 50, { removed_at: "2026-09-01T00:00:00Z" }),
       party("pc", "C", 0),
+      party("pd", "D", 50, { status: "removed" }),
     ],
     quote: noQuote,
   });
