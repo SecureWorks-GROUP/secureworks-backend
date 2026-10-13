@@ -1108,7 +1108,7 @@ for (const flagOn of [false, true]) {
     }, { flagOn });
     assertEquals(dated.status, 200, JSON.stringify(dated.body));
     assertEquals(dated.rpcCalls.length, 1);
-    assertEquals(dated.rpcCalls[0].name, "persist_weekly_trade_invoice_v2");
+    assertEquals(dated.rpcCalls[0].name, "persist_weekly_trade_invoice_v3");
     assertEquals(shape(dated.rpcCalls[0].args.p_lines), expected);
     assertEquals(dated.lineRows, []);
   });

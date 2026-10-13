@@ -33,7 +33,10 @@ All values are rounded to cents:
   this is $1,060 (was $1,000). Not `total_inc`.
 - `gst_on`: the per-invoice choice.
 - `gst`: `gross_earned * 0.10` when `gst_on`, otherwise zero.
-- `trade_payable`: `net_pay + gst` (response-only convenience field).
+- `trade_payable`: `net_pay + gst` (response-only convenience field), less a
+  recurring deduction on an invoice that carries one. That rule, its response
+  keys and its Xero line are owned by
+  `docs/trade-recurring-deductions-2026-10-13.md`.
 - `total_inc`: `gross_earned + gst`. This stays the GST-inclusive contractor
   supply face, not company total out. Company cost and invoice face have
   diverged; callers that want cash payable use `trade_payable`, callers that

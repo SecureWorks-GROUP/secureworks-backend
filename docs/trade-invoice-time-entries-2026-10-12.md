@@ -110,7 +110,7 @@ screens are live. Until then no trade is locked out of invoicing.
 | 2 | `generate_trade_invoice` | searched-in hours lines (`extra_items`, time types) | direct insert | the request |
 | 3 | `generate_trade_invoice` | auto-collected clock lane (no job cards sent) | direct insert | nowhere: nobody typed the line, so it carries no entry |
 | 4 | `save_trade_invoice_draft` | no week | direct insert | the request, stored as sent |
-| 5 | `save_trade_invoice_draft` | dated week | `persist_weekly_trade_invoice_v2` | the request, stored as sent |
+| 5 | `save_trade_invoice_draft` | dated week | `persist_weekly_trade_invoice_v3` (calls v2, which stamps the times) | the request, stored as sent |
 | 6 | `submit_trade_invoice` | legacy hourly lane | direct insert | nowhere: nobody typed the line, so it carries no entry |
 
 Not time lines, unchanged: the weekly work-order invoice (`work_order_blocks`:

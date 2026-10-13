@@ -312,6 +312,21 @@ jobs:
             supabase/functions/ops-api/trade_invoice_time_entry_test.ts \
             supabase/functions/ops-api/trade_invoice_weekly_resolver_test.ts
 
+      # Trade recurring deductions (docs/trade-recurring-deductions-2026-10-13.md):
+      # one trade's weekly ute hire comes off the amount payable of his weekly
+      # invoice, once per invoice week, never below zero, and no other trade's
+      # invoice changes in any figure or field. Drives the real ops-api request
+      # handler with every database call answered by a fetch stub, plus the
+      # money and audit PDF suites the deduction is built on.
+      - name: Test trade recurring deductions
+        run: |
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_invoice_recurring_deduction_test.ts \
+            supabase/functions/ops-api/trade_invoice_money_test.ts \
+            supabase/functions/ops-api/trade_invoice_money_audit_test.ts \
+            supabase/functions/ops-api/trade_invoice_pdf_test.ts \
+            supabase/functions/ops-api/trade_money_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as

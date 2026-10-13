@@ -26,7 +26,7 @@ import { reconcileStaleXeroInvoices } from './xero_invoice_reconciliation.ts'
 import { shouldBackfillTradeBillPdf, tradeBillStatusPatch } from './trade_bill_status.ts'
 import { applyDepositStamp, depositStampRelevant, xeroDateToIsoTimestamp } from './deposit_stamp.ts'
 import { renderTradeInvoiceAuditPdf } from '../ops-api/trade_invoice_pdf.ts'
-import { isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
+import { isTradeInvoiceRecurringDeductionXeroLine, isTradeInvoiceSuperXeroLine, validatePersistedTradeInvoiceMoney } from '../ops-api/trade_invoice_money.ts'
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
@@ -407,7 +407,9 @@ const TRADE_PDF_BACKFILL_PER_RUN = 15
 async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: string, tenantId: string): Promise<true | string> {
   try {
     const money = validatePersistedTradeInvoiceMoney(tradeInv)
-    const labour = (inv.LineItems as any[]).filter((l) => !isTradeInvoiceSuperXeroLine(l)).map((l) => ({
+    // The super minus line and a recurring deduction's minus line (for example
+    // Ute hire) are rebuilt from the persisted money, never read as work lines.
+    const labour = (inv.LineItems as any[]).filter((l) => !isTradeInvoiceSuperXeroLine(l) && !isTradeInvoiceRecurringDeductionXeroLine(l)).map((l) => ({
       Description: String(l.Description || ''),
       Quantity: Number(l.Quantity ?? 1),
       UnitAmount: Number(l.UnitAmount ?? 0),
@@ -444,7 +446,7 @@ async function attachTradeBillAuditPdf(inv: any, tradeInv: any, accessToken: str
 // week_end / week_start / submitted_at / created_at: the money validator resolves
 // the statutory super rate from the earnings date. Without them every backfill
 // failed with SUPER_RATE_UNRESOLVED (2026-09-10).
-const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, week_start, week_end, submitted_at, created_at, pdf_backfill_attempts, user_id, users:user_id(name)'
+const TRADE_PDF_SWEEP_COLUMNS = 'id, status, xero_bill_id, xero_bill_status, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, week_start, week_end, submitted_at, created_at, pdf_backfill_attempts, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)'
 const TRADE_PDF_BACKFILL_MAX_ATTEMPTS = 3
 // ════════════════════════════════════════════════════════════
 // CONTACT ADDRESS SWEEP (2026-09-10)
@@ -877,7 +879,7 @@ async function syncInvoices(sb: any) {
           if (inv.Type === 'ACCPAY') {
             try {
               const { data: tradeInv } = await sb.from('trade_invoices')
-                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, user_id, users:user_id(name)')
+                .select('id, status, xero_bill_status, amount_paid, paid_at, invoice_number, gst_on, super_rate, super_amount, gross_earned, net_pay, subtotal_ex, gst, total_inc, user_id, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, users:user_id(name)')
                 .eq('xero_bill_id', inv.InvoiceID)
                 .maybeSingle()
               if (tradeInv) {
