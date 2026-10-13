@@ -32,8 +32,12 @@ import {
 import {
   _authorizeOpsApiAction,
   _opsApiActionNeedsStaffRole,
+  _pushPOToXero,
+  _updateJobStatus,
   AGENT_READ_ALLOWED_ACTIONS,
+  ApiError,
   dispatchQuoteBuilderAction,
+  redactTradeWorkOrdersForAllocated,
 } from "./index.ts";
 
 type Row = Record<string, any>;
@@ -1218,6 +1222,7 @@ Deno.test("quote builder: a non-uuid job id is refused before any read", async (
 
 const FENCE_REPAIR_JOB = "88888888-8888-4888-8888-888888888888";
 const PRIVATE_JOB = "99999999-9999-4999-8999-999999999999";
+const UNPRICED_FENCE_JOB = "abababab-abab-4bab-8bab-abababababab";
 const FENCE_TOOL_PRICING = {
   totalIncGST: 6420.5,
   totalExGST: 5836.82,
@@ -1431,8 +1436,13 @@ Deno.test("quote builder: settings come from the settings table, null when a row
   assertEquals((await open()).settings.labour_rate_ex_gst, 95);
 });
 
-Deno.test("quote builder: the scope of works and material order list are filed on the job beside the quote", async () => {
+Deno.test("quote builder: the scope of works is filed on the job beside the quote, and carries no cost figure", async () => {
   const store = seed();
+  store.quote_builder_settings = [
+    { org_id: ORG, setting_key: "insurance_labour_rate_ex_gst", amount: 95 },
+    { org_id: ORG, setting_key: "insurance_materials_multiplier", amount: 1.4 },
+    { org_id: ORG, setting_key: "target_margin_pct", amount: 33 },
+  ];
   const { client, upload } = makeFakeClient(store);
   const draft = (await saveQuoteBuilderVersion(client, {
     job_id: REPAIR_JOB,
@@ -1449,14 +1459,7 @@ Deno.test("quote builder: the scope of works and material order list are filed o
     version_id: draft.id,
     document: "scope_of_works",
   }, ACTOR);
-  const materialSlot = await quoteBuilderPdfUploadUrl(client, {
-    version_id: draft.id,
-    document: "material_order_list",
-  }, ACTOR);
-  assertEquals(
-    new Set([quoteSlot.path, scopeSlot.path, materialSlot.path]).size,
-    3,
-  );
+  assert(scopeSlot.path !== quoteSlot.path);
   assertEquals(scopeSlot.quote_number, "SWR-26101-Q1");
   // An extra slot writes nothing on the version: the quote number stamp stands.
   assertEquals(store.quote_builder_versions[0].quote_number, "SWR-26101-Q1");
@@ -1469,6 +1472,15 @@ Deno.test("quote builder: the scope of works and material order list are filed o
     ),
     "invalid_input",
   );
+  assertEquals(
+    await code(
+      quoteBuilderPdfUploadUrl(client, {
+        version_id: draft.id,
+        document: "toString",
+      }, ACTOR),
+    ),
+    "invalid_input",
+  );
 
   const issue = (extra_documents: any) =>
     issueQuoteBuilderVersion(
@@ -1477,19 +1489,16 @@ Deno.test("quote builder: the scope of works and material order list are filed o
       ACTOR,
       { moveRepairStage: stageMover(store, []) },
     );
-  const both = [
-    { document: "scope_of_works", pdf_path: scopeSlot.path },
-    { document: "material_order_list", pdf_path: materialSlot.path },
-  ];
+  const scope = { document: "scope_of_works", pdf_path: scopeSlot.path };
   // Every refusal leaves nothing written and the version a draft.
-  assertEquals(await code(issue(both)), "upload_missing");
+  assertEquals(await code(issue([scope])), "upload_missing");
   assertEquals(
     await code(
       issue([{ document: "scope_of_works", pdf_path: quoteSlot.path }]),
     ),
     "invalid_input",
   );
-  assertEquals(await code(issue([both[0], both[0]])), "invalid_input");
+  assertEquals(await code(issue([scope, scope])), "invalid_input");
   assertEquals(
     await code(issue([{ document: "other", pdf_path: scopeSlot.path }])),
     "invalid_input",
@@ -1498,55 +1507,129 @@ Deno.test("quote builder: the scope of works and material order list are filed o
   assertEquals(store.quote_builder_versions[0].status, "draft");
 
   upload("job-pdfs", scopeSlot.path);
-  upload("job-pdfs", materialSlot.path);
-  const issued = await issue(both);
+  const issued = await issue([scope]);
   assertEquals(issued.extra_documents.map((d: any) => d.document), [
     "scope_of_works",
-    "material_order_list",
   ]);
   const extras = store.job_documents.filter((d) => d.type === "other");
-  assertEquals(extras.length, 2);
-  for (const doc of extras) {
-    assertEquals(doc.job_id, REPAIR_JOB);
-    assertEquals(doc.visible_to_trades, false);
-    assertEquals(doc.run_label, `qb:${REPAIR_JOB}`);
-    assertEquals(doc.metadata.quote_builder_version_id, draft.id);
-    // quote_number is unique on job_documents and belongs to the quote row.
-    assertEquals(doc.quote_number, undefined);
-    assertEquals(doc.sent_at, undefined);
-  }
+  assertEquals(extras.length, 1);
+  const doc = extras[0];
+  assertEquals(doc.job_id, REPAIR_JOB);
+  assertEquals(doc.visible_to_trades, false);
+  assertEquals(doc.run_label, `qb:${REPAIR_JOB}`);
+  assertEquals(doc.metadata.quote_builder_version_id, draft.id);
+  assertEquals(doc.metadata.quote_builder_document, "scope_of_works");
+  // quote_number is unique on job_documents and belongs to the quote row.
+  assertEquals(doc.quote_number, undefined);
+  assertEquals(doc.sent_at, undefined);
   assertEquals(
     store.job_documents.filter((d) => d.type === "quote").length,
     1,
   );
+
+  // The filed row sits beside the client quote, so it holds no cost, rate,
+  // multiplier, margin or total: its only number is the version number, and no
+  // field is named for money.
+  const keys: string[] = [];
+  const numbers: number[] = [];
+  const texts: string[] = [];
+  const walk = (value: any) => {
+    if (typeof value === "number") numbers.push(value);
+    else if (typeof value === "string") texts.push(value);
+    else if (value && typeof value === "object") {
+      for (const [key, inner] of Object.entries(value)) {
+        keys.push(key);
+        walk(inner);
+      }
+    }
+  };
+  walk(doc);
+  assertEquals(numbers, [1]);
+  assertEquals(
+    keys.filter((key) =>
+      /cost|price|rate|multiplier|margin|total|charge|gst|line|snapshot/i
+        .test(key)
+    ),
+    [],
+  );
+  assertEquals(texts.filter((value) => value.includes("$")), []);
 
   const opened = await getQuoteBuilderJob(
     client,
     new URLSearchParams(`job_id=${REPAIR_JOB}`),
     ACTOR,
   );
-  // The client quote list stays the quote alone; the extras have their own key.
+  // The client quote list stays the quote alone; the extra has its own key.
   assertEquals(opened.documents.length, 1);
   assertEquals(
     opened.extra_documents.map((d: any) => [d.document, d.superseded]),
-    [["scope_of_works", false], ["material_order_list", false]],
+    [["scope_of_works", false]],
   );
 
-  // A re-issue retires the earlier version's extras, even one it does not replace.
+  // A re-issue retires the earlier version's scope of works, with or without a new one.
   const second = await issueScope(store, client, upload, REPAIR_JOB, {
     baseVersionId: draft.id,
     extras: ["scope_of_works"],
   });
-  const live = store.job_documents.filter((d) =>
-    d.type === "other" && d.superseded_at == null
-  );
-  assertEquals(live.map((d) => d.metadata.quote_builder_version_id), [
+  const third = await issueScope(store, client, upload, REPAIR_JOB, {
+    baseVersionId: second.version.id,
+  });
+  assertEquals(third.extra_documents, []);
+  const filed = store.job_documents.filter((d) => d.type === "other");
+  assertEquals(filed.map((d) => d.metadata.quote_builder_version_id), [
+    draft.id,
     second.version.id,
   ]);
+  assertEquals(filed.filter((d) => d.superseded_at == null), []);
+});
+
+Deno.test("quote builder: the material order list is never given a slot or filed", async () => {
+  const store = seed();
+  const { client, upload } = makeFakeClient(store);
+  const draft = (await saveQuoteBuilderVersion(client, {
+    job_id: REPAIR_JOB,
+    kind: "scope",
+    charge_lines: CHARGE,
+    cost_lines: TYPED_COST,
+  }, ACTOR)).version;
+  const quoteSlot = await quoteBuilderPdfUploadUrl(client, {
+    version_id: draft.id,
+  }, ACTOR);
+  upload("job-pdfs", quoteSlot.path);
+
+  // No upload slot, so nothing of the cost list can reach the public bucket.
   assertEquals(
-    store.job_documents.filter((d) => d.type === "other").length,
-    3,
+    await code(
+      quoteBuilderPdfUploadUrl(client, {
+        version_id: draft.id,
+        document: "material_order_list",
+      }, ACTOR),
+    ),
+    "invalid_input",
   );
+  // And an issue naming one is refused whole, whatever path it gives.
+  const listPath = quoteSlot.path.replace(".pdf", "-material-order-list.pdf");
+  upload("job-pdfs", listPath);
+  assertEquals(
+    await code(
+      issueQuoteBuilderVersion(
+        client,
+        {
+          version_id: draft.id,
+          pdf_path: quoteSlot.path,
+          extra_documents: [{
+            document: "material_order_list",
+            pdf_path: listPath,
+          }],
+        },
+        ACTOR,
+        { moveRepairStage: stageMover(store, []) },
+      ),
+    ),
+    "invalid_input",
+  );
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(store.quote_builder_versions[0].status, "draft");
 });
 
 Deno.test("quote builder: an issue with no extra documents files the quote alone, as before", async () => {
@@ -1584,6 +1667,17 @@ Deno.test("quote builder: issuing a scope writes the job's value, and only on a 
       created_at: "2026-10-05T00:00:00Z",
       updated_at: "2026-10-05T00:00:00Z",
     },
+    {
+      id: UNPRICED_FENCE_JOB,
+      org_id: ORG,
+      job_number: "SWF-26170",
+      type: "fencing",
+      status: "accepted",
+      metadata: { ses_family: "repair", repair_stage: "scoping" },
+      pricing_json: {},
+      created_at: "2026-10-06T00:00:00Z",
+      updated_at: "2026-10-06T00:00:00Z",
+    },
   );
   const { client, upload } = makeFakeClient(store);
   const job = (id: string) => store.jobs.find((j) => j.id === id)!;
@@ -1610,6 +1704,17 @@ Deno.test("quote builder: issuing a scope writes the job's value, and only on a 
   assertEquals(job(FENCE_REPAIR_JOB).pricing_json, FENCE_TOOL_PRICING);
   assertEquals(job(FENCE_REPAIR_JOB).updated_at, "2026-10-04T00:00:00Z");
   assertEquals(fence.version.status, "issued");
+
+  // A repair card typed fencing with no pricing at all is not priced by
+  // another tool, and the reply does not say it is.
+  const unpriced = await issueScope(store, client, upload, UNPRICED_FENCE_JOB);
+  assertEquals(unpriced.job_value, {
+    written: false,
+    reason: "job_type_not_valued_here",
+  });
+  assertEquals(job(UNPRICED_FENCE_JOB).pricing_json, {});
+  assertEquals(job(UNPRICED_FENCE_JOB).updated_at, "2026-10-06T00:00:00Z");
+  assertEquals(unpriced.version.status, "issued");
 
   const privateQuote = await issueScope(store, client, upload, PRIVATE_JOB);
   assertEquals(privateQuote.job_value, { written: true, total_inc_gst: 715 });
@@ -1793,12 +1898,18 @@ Deno.test("quote builder: a work order from an issued quote carries the scope an
   assertEquals(row.origin, undefined);
   assertEquals(row.scope_items, [
     {
-      item: "Scope of works",
-      details: "Replace the storm damaged fascia and gutter",
+      description: "Scope of works",
+      notes: "Replace the storm damaged fascia and gutter",
     },
-    { item: "Carpenter on site", details: "8 hr" },
-    { item: "Labourer", details: "4.5 hr" },
+    { description: "Carpenter on site", qty: 8, unit: "hr" },
+    { description: "Labourer", qty: 4.5, unit: "hr" },
   ]);
+  // What an allocated trade reads: the real trade redaction keeps every key,
+  // so the scope text and the labour hours reach the crew.
+  assertEquals(
+    redactTradeWorkOrdersForAllocated([structuredClone(row)])[0].scope_items,
+    row.scope_items,
+  );
   assertEquals(row.special_instructions, "From quote SWR-26101-Q1");
   // No dollar sign, and none of the version's unit costs, prices or totals.
   const printed = JSON.stringify([row.scope_items, row.special_instructions]);
@@ -1889,6 +2000,15 @@ Deno.test("quote builder: a dollar amount in the scope text or a labour line ref
         unit: "hr",
       }],
     }),
+    items({
+      narrative: "Fix the gutter",
+      cost_lines: [{
+        line_type: "labour",
+        description: "Carpenter",
+        qty: 8,
+        unit: "$55/hr",
+      }],
+    }),
     items({ narrative: null, cost_lines: [TYPED_COST[2], TYPED_COST[7]] }),
     // A material line's wording never reaches the work order, so it cannot refuse it.
     items({
@@ -1897,6 +2017,7 @@ Deno.test("quote builder: a dollar amount in the scope text or a labour line ref
     }),
   ]).then((codes) =>
     assertEquals(codes, [
+      "work_order_text_has_money",
       "work_order_text_has_money",
       "work_order_text_has_money",
       "nothing_for_work_order",
@@ -1993,29 +2114,61 @@ Deno.test("quote builder: purchase orders from an issued quote, one draft per su
     "No supplier named",
   ]);
 
-  // A second press makes nothing and returns the same three.
+  assertEquals("message" in first, false);
+
+  // A second press makes nothing, returns the same three and names them.
   const second = await make({ version_id: issued.version.id });
-  assertEquals(second, { created: 0, purchase_orders: first.purchase_orders });
+  assertEquals(second.created, 0);
+  assertEquals(second.purchase_orders, first.purchase_orders);
+  assert(
+    String(second.message).includes(
+      "PO-1 (Bunnings), PO-2 (Stratco), PO-3 (No supplier named)",
+    ),
+    second.message,
+  );
   assertEquals(store.purchase_orders.length, 3);
   assertEquals(createdWith.length, 3);
 
-  // A cancelled order is made again; the live ones are left alone.
-  store.purchase_orders[1].status = "cancelled";
-  const third = await make({ version_id: issued.version.id });
-  assertEquals(third.created, 1);
-  assertEquals(third.purchase_orders.length, 3);
-  assertEquals(
-    store.purchase_orders.filter((po) => po.supplier_name === "Stratco").length,
-    2,
+  // Staff fill in the unnamed order's supplier. A further press still makes
+  // nothing: the renamed order is not made a second time.
+  store.purchase_orders[2].supplier_name = "Reece";
+  const afterRename = await make({ version_id: issued.version.id });
+  assertEquals(afterRename.created, 0);
+  assert(
+    String(afterRename.message).includes("PO-3 (Reece)"),
+    afterRename.message,
   );
+  assertEquals(store.purchase_orders.length, 3);
+
+  // While any order is live a cancelled one is not topped up either.
+  store.purchase_orders[1].status = "cancelled";
+  const partial = await make({ version_id: issued.version.id });
+  assertEquals(partial.created, 0);
+  assertEquals(
+    partial.purchase_orders.map((po: any) => po.supplier_name),
+    ["Bunnings", "Reece"],
+  );
+  assertEquals(store.purchase_orders.length, 3);
+  assertEquals(createdWith.length, 3);
 
   const opened = await getQuoteBuilderJob(
     client,
     new URLSearchParams(`job_id=${REPAIR_JOB}`),
     ACTOR,
   );
-  assertEquals(opened.scope.versions[0].purchase_orders.length, 3);
+  assertEquals(opened.scope.versions[0].purchase_orders.length, 2);
   assertEquals(opened.scope.versions[0].work_order, null);
+
+  // With every order cancelled, a press makes the full set again.
+  for (const po of store.purchase_orders) po.status = "cancelled";
+  const again = await make({ version_id: issued.version.id });
+  assertEquals(again.created, 3);
+  assertEquals("message" in again, false);
+  assertEquals(
+    again.purchase_orders.map((po: any) => po.supplier_name),
+    ["Bunnings", "Stratco", "No supplier named"],
+  );
+  assertEquals(store.purchase_orders.length, 6);
 
   // Nothing to order, and a draft, are both refused with nothing made.
   const labourOnly = await issueScope(store, client, upload, LATE_REPAIR_JOB, {
@@ -2026,7 +2179,7 @@ Deno.test("quote builder: purchase orders from an issued quote, one draft per su
     "no_material_lines",
   );
   assertEquals(quoteBuilderPurchaseOrderGroups({ cost_lines: COST }), []);
-  assertEquals(store.purchase_orders.length, 4);
+  assertEquals(store.purchase_orders.length, 6);
 });
 
 Deno.test("quote builder: the dispatch makes a real draft crew work order and real draft purchase orders", async () => {
@@ -2067,6 +2220,21 @@ Deno.test("quote builder: the dispatch makes a real draft crew work order and re
       [REPAIR_JOB, "draft", issued.version.id, undefined, undefined],
     );
     assertEquals(wo.scope_items.length, 3);
+    // The order records who pressed: the user's id (created_by is a uuid
+    // column), never the email.
+    assertEquals(wo.created_by, ACTOR.id);
+    // An allocated trade reads the scope text and the labour hours.
+    assertEquals(
+      redactTradeWorkOrdersForAllocated([structuredClone(wo)])[0].scope_items,
+      [
+        {
+          description: "Scope of works",
+          notes: "Replace the storm damaged fascia and gutter",
+        },
+        { description: "Carpenter on site", qty: 8, unit: "hr" },
+        { description: "Labourer", qty: 4.5, unit: "hr" },
+      ],
+    );
     assertEquals((await call("quote_builder_make_work_order")).body, {
       created: false,
       work_order: workOrder.body.work_order,
@@ -2089,11 +2257,140 @@ Deno.test("quote builder: the dispatch makes a real draft crew work order and re
         [REPAIR_JOB, "draft", issued.version.id, 18],
       ],
     );
+    for (const order of [wo, ...store.purchase_orders]) {
+      assertEquals(order.created_by, ACTOR.id);
+      assertEquals(String(order.created_by).includes("@"), false);
+    }
     assertEquals(
       (await call("quote_builder_make_purchase_orders")).body.created,
       0,
     );
     assertEquals(store.purchase_orders.length, 3);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+Deno.test("quote builder: job acceptance leaves quote builder orders alone, and an unnamed supplier is never pushed to Xero", async () => {
+  const store = seed();
+  const { client, upload } = makeFakeClient(store);
+  const issued = await issueScope(store, client, upload, REPAIR_JOB, {
+    costLines: TYPED_COST,
+  });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(new Response("{}"));
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    for (
+      const action of [
+        "quote_builder_make_work_order",
+        "quote_builder_make_purchase_orders",
+      ]
+    ) {
+      const response = await dispatchQuoteBuilderAction(
+        client,
+        action,
+        new URLSearchParams(),
+        { version_id: issued.version.id },
+        ACTOR,
+      );
+      assertEquals(response.status, 200);
+      await response.json();
+    }
+    // work_orders.kind defaults to 'crew' in the database; the fake has no defaults.
+    const builderWorkOrder = store.work_orders[0];
+    builderWorkOrder.kind = "crew";
+    const ORDINARY_WO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const ORDINARY_PO = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    store.work_orders.push({
+      id: ORDINARY_WO,
+      job_id: REPAIR_JOB,
+      wo_number: "WO-ORDINARY",
+      kind: "crew",
+      status: "draft",
+    });
+    store.purchase_orders.push({
+      id: ORDINARY_PO,
+      job_id: REPAIR_JOB,
+      po_number: "PO-ORDINARY",
+      supplier_name: "Stratco",
+      status: "draft",
+      line_items: [],
+    });
+
+    // Which purchase orders a push to Xero was started for, and how often a
+    // push got as far as asking for the Xero token.
+    const pushStartedFor: string[] = [];
+    let xeroTokenReads = 0;
+    const watched = {
+      ...client,
+      from: (table: string) => {
+        const builder = client.from(table);
+        if (table === "xero_tokens") xeroTokenReads += 1;
+        if (table === "purchase_orders") {
+          const eq = builder.eq;
+          builder.eq = (key: string, value: any) => {
+            if (key === "id") pushStartedFor.push(value);
+            return eq(key, value);
+          };
+        }
+        return builder;
+      },
+    };
+
+    const accepted = await _updateJobStatus(watched, {
+      job_id: REPAIR_JOB,
+      status: "accepted",
+    });
+    assertEquals(accepted.success, true);
+    await flush();
+    await flush();
+
+    // Every other order moves exactly as before; the quote builder's stay drafts.
+    const status = (id: string) =>
+      store.work_orders.find((w) => w.id === id)!.status;
+    assertEquals(status(ORDINARY_WO), "approved");
+    assertEquals(status(builderWorkOrder.id), "draft");
+    assertEquals(pushStartedFor, [ORDINARY_PO]);
+    assertEquals(xeroTokenReads, 1);
+    const builderOrders = store.purchase_orders.filter((po) =>
+      po.quote_builder_version_id === issued.version.id
+    );
+    assertEquals(builderOrders.length, 3);
+    for (const po of builderOrders) {
+      assertEquals([po.status, po.xero_po_id], ["draft", undefined]);
+    }
+
+    // A person's own push: the unnamed draft is refused before Xero is asked
+    // for anything, so no Xero contact of that name can be made.
+    const unnamed = builderOrders.find((po) =>
+      po.supplier_name === "No supplier named"
+    )!;
+    const refused = await assertRejects(
+      () => _pushPOToXero(watched, { id: unnamed.id }),
+      ApiError,
+    );
+    assertEquals(refused.status, 409);
+    assertEquals((refused.body as any).code, "po_supplier_not_named");
+    assertEquals(unnamed.xero_po_id, undefined);
+    assertEquals(xeroTokenReads, 1);
+
+    // Once a real supplier is set the same push goes on to Xero (which this
+    // test does not have: it stops at the missing token, past the refusal).
+    unnamed.supplier_name = "Reece";
+    await assertRejects(
+      () => _pushPOToXero(watched, { id: unnamed.id }),
+      Error,
+      "No Xero token available",
+    );
+    assertEquals(xeroTokenReads, 2);
+    // A named quote builder order was never refused.
+    const named = builderOrders.find((po) => po.supplier_name === "Bunnings")!;
+    await assertRejects(
+      () => _pushPOToXero(watched, { id: named.id }),
+      Error,
+      "No Xero token available",
+    );
   } finally {
     globalThis.fetch = realFetch;
   }

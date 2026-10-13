@@ -1546,13 +1546,23 @@ variation write the job's value to `jobs.pricing_json` (`jobs.quoted_value` is
 generated from it) only through `quoteBuilderMayWriteJobValue`: `repair` and
 `miscellaneous` jobs whose pricing is empty or already `source: quote_builder`;
 never widen it to `fencing` or `makesafe` typed repair cards, because
-`createInvoice` prices a job from `pricing_json` when given no lines. The scope
-of works and material order list PDFs are `job_documents` of type `other`
-(a meaningful type no close-out reader counts), never `work_order`. An order
-made from an issued quote is a draft crew work order (never `kind='job'`) or a
-draft purchase order, tied to its version by `quote_builder_version_id`, which
-only the quote builder dispatch may set (`createWorkOrder` / `createPO` take it
-as an option, never from the request body).
+`createInvoice` prices a job from `pricing_json` when given no lines (such a
+card with no other tool's pricing answers `job_type_not_valued_here`, never
+`priced_by_another_tool`). The scope of works PDF is a `job_documents` row of
+type `other` (a meaningful type no close-out reader counts), never
+`work_order`. The material order list prints our costs and is never given an
+upload slot or filed: `job-pdfs` is a public bucket, so filing it waits on
+private storage with signed links and the owner's say. An order made from an
+issued quote is a draft crew work order (never `kind='job'`) or a draft
+purchase order, tied to its version by `quote_builder_version_id`, which only
+the quote builder dispatch may set (`createWorkOrder` / `createPO` take it, and
+the pressing user's id for `created_by`, a uuid column, as options, never from
+the request body). Its work order lines use only keys on
+`TRADE_WO_SCOPE_ITEM_ALLOWLIST`; any other key reaches the crew blank. Once a
+live purchase order exists for a version a further press makes nothing. The
+acceptance trigger in `updateJobStatus` leaves quote builder orders out, and
+`pushPOToXero` refuses one with no supplier named (`po_supplier_not_named`), so
+they reach approval and Xero only on a person's own action.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 

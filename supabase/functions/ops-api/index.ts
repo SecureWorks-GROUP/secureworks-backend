@@ -246,6 +246,7 @@ import {
   makeQuoteBuilderWorkOrder,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
+  quoteBuilderPurchaseOrderNeedsSupplier,
   quoteBuilderPhotoCaption,
   quoteBuilderPhotoRegister,
   quoteBuilderPhotoUploadUrl,
@@ -21145,6 +21146,8 @@ export const _updateMakesafeSubstatus = updateMakesafeSubstatus
 // stage move and variation decision. A work order or purchase order made from
 // an issued quote goes through createWorkOrder and createPO, always as a draft:
 // a crew work order (never kind 'job'), nothing sent, nothing pushed to Xero.
+// Each records the signed-in user who pressed: the id in created_by (a uuid
+// column), the email on the event only.
 export async function dispatchQuoteBuilderAction(
   client: any,
   action: string,
@@ -21160,13 +21163,13 @@ export async function dispatchQuoteBuilderAction(
     createWorkOrder(
       client,
       { job_id: input.jobId, scope_items: input.scopeItems, special_instructions: input.specialInstructions },
-      { quoteBuilderVersionId: input.quoteBuilderVersionId },
+      { quoteBuilderVersionId: input.quoteBuilderVersionId, createdByUserId: actor.id, operatorEmail: actor.email },
     )
   const createPurchaseOrder = (input: { jobId: string; supplierName: string; reference: string | null; lineItems: unknown[]; notes: string | null; quoteBuilderVersionId: string }) =>
     createPO(
       client,
       { job_id: input.jobId, supplier_name: input.supplierName, reference: input.reference, line_items: input.lineItems, notes: input.notes, status: 'draft' },
-      { quoteBuilderVersionId: input.quoteBuilderVersionId },
+      { quoteBuilderVersionId: input.quoteBuilderVersionId, createdByUserId: actor.id, operatorEmail: actor.email },
     )
   try {
     switch (action) {
@@ -34900,12 +34903,15 @@ async function updateJobStatus(client: any, body: any) {
       try {
         // 1. Approve draft work orders for this job
         // Crew work orders only: a job work order is approved by Shaun alone
-        // (job_work_orders.ts), never by job acceptance.
+        // (job_work_orders.ts), never by job acceptance. An order made from a
+        // quote builder version is left out here and below: it moves only on a
+        // person's own approve or push.
         const { data: draftWOs } = await client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
           .neq('kind', 'job')
           .eq('status', 'draft')
+          .is('quote_builder_version_id', null)
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
             await client.from('work_orders')
@@ -34926,6 +34932,7 @@ async function updateJobStatus(client: any, body: any) {
           .eq('job_id', jId)
           .eq('status', 'draft')
           .is('xero_po_id', null)
+          .is('quote_builder_version_id', null)
         if (draftPOs && draftPOs.length > 0) {
           for (const po of draftPOs) {
             try {
@@ -34947,9 +34954,11 @@ async function updateJobStatus(client: any, body: any) {
 // Test-only export alias (mirrors the `_`-prefixed convention in this file).
 export const _updateJobStatus = updateJobStatus
 
-// `opts.quoteBuilderVersionId` is set only by the quote builder dispatch, never
-// read from the request body, so no caller can tie an order to a version.
-async function createPO(client: any, body: any, opts: { quoteBuilderVersionId?: string | null } = {}) {
+// `opts` is set only by the quote builder dispatch, never read from the request
+// body, so no caller can tie an order to a version. `createdByUserId` goes in
+// created_by (a uuid column); `operatorEmail` goes on the event only.
+type QuoteBuilderOrderOpts = { quoteBuilderVersionId?: string | null; createdByUserId?: string | null; operatorEmail?: string | null }
+async function createPO(client: any, body: any, opts: QuoteBuilderOrderOpts = {}) {
   const { job_id, jobId, supplier_name, supplierName, xero_contact_id,
           line_items, lineItems, delivery_date, deliveryDate, delivery_address, reference, notes } = body
 
@@ -34978,7 +34987,7 @@ async function createPO(client: any, body: any, opts: { quoteBuilderVersionId?: 
       reference: reference || null,
       notes: formatPoDeliveryNotes(delivery_address, notes),
       status: body.status || 'draft',
-      created_by: body.operator_email || body.user_email || null,
+      created_by: opts.createdByUserId ?? (body.operator_email || body.user_email || null),
       ...(opts.quoteBuilderVersionId ? { quote_builder_version_id: opts.quoteBuilderVersionId } : {}),
     })
     .select()
@@ -35027,7 +35036,7 @@ async function createPO(client: any, body: any, opts: { quoteBuilderVersionId?: 
       ],
       po_reference: data.reference || null,
     },
-    metadata: { operator: body.operator_email || body.user_email || null },
+    metadata: { operator: opts.operatorEmail || body.operator_email || body.user_email || null },
   }
   let t7PoFailed = false
   if (t7PoEnabled) {
@@ -35055,7 +35064,7 @@ async function createPO(client: any, body: any, opts: { quoteBuilderVersionId?: 
           ],
           po_reference: data.reference || null,
         },
-        metadata: { operator: body.operator_email || body.user_email || null },
+        metadata: { operator: opts.operatorEmail || body.operator_email || body.user_email || null },
       }, {
         org_id: '00000000-0000-0000-0000-000000000001',
         storage_client: client.storage,
@@ -35133,6 +35142,10 @@ async function pushPOToXero(client: any, body: any) {
 
   if (error || !po) throw new Error('PO not found')
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
+  if (quoteBuilderPurchaseOrderNeedsSupplier(po)) {
+    const message = `${po.po_number || 'This purchase order'} has no supplier named. Set the supplier on it, then push it to Xero.`
+    throw new ApiError(message, 409, { error: message, code: 'po_supplier_not_named' })
+  }
 
   // U2 reference discipline — resolve the canonical outbound job ref ONCE so both
   // the Xero Reference field and the DeliveryInstructions quote-back ask carry the
@@ -35244,6 +35257,9 @@ async function pushPOToXero(client: any, body: any) {
 
   return { success: true, xero_po_id: xeroPOId }
 }
+
+// Test-only export alias (mirrors the `_`-prefixed convention in this file).
+export const _pushPOToXero = pushPOToXero
 
 async function emailPO(client: any, body: any) {
   const id = body.id || body.po_id
@@ -35382,7 +35398,7 @@ async function reconcilePayment(client: any, body: any) {
   }
 }
 
-async function createWorkOrder(client: any, body: any, opts: { quoteBuilderVersionId?: string | null } = {}) {
+async function createWorkOrder(client: any, body: any, opts: QuoteBuilderOrderOpts = {}) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
@@ -35410,7 +35426,7 @@ async function createWorkOrder(client: any, body: any, opts: { quoteBuilderVersi
       scheduled_date: body.scheduled_date || body.scheduledDate || null,
       site_address: address || null,
       status: 'draft',
-      created_by: body.operator_email || body.user_email || null,
+      created_by: opts.createdByUserId ?? (body.operator_email || body.user_email || null),
       ...(opts.quoteBuilderVersionId ? { quote_builder_version_id: opts.quoteBuilderVersionId } : {}),
     })
     .select()
@@ -35438,7 +35454,7 @@ async function createWorkOrder(client: any, body: any, opts: { quoteBuilderVersi
         { type: 'trade', id: data.assigned_user_id || null, name: body.trade_name || body.tradeName || '' },
       ],
     },
-    metadata: { operator: body.operator_email || body.user_email || null },
+    metadata: { operator: opts.operatorEmail || body.operator_email || body.user_email || null },
   })
 
   // Log to jarvis_event_log (non-blocking, fire-and-forget)

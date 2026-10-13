@@ -691,7 +691,8 @@ ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|table|
 
 # Quote builder pricing settings and the orders made from an issued quote:
 # quote_builder_get_job reads the settings table and both link columns on every
-# open, so ops-api must not deploy ahead of this migration.
+# open, and the job acceptance step filters its draft work orders and purchase
+# orders on those link columns, so ops-api must not deploy ahead of this migration.
 ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|table|quote_builder_settings
 ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|column|quote_builder_settings.amount
 ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|column|work_orders.quote_builder_version_id

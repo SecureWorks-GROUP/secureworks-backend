@@ -22,16 +22,18 @@
 --      purchase_orders.quote_builder_version_id name the issued quote builder
 --      version an order was made from. Null on every existing row.
 --
---   3. Two partial unique indexes make a second press of "make work order" or
---      "make purchase orders" harmless: one live crew work order per version,
---      and one live purchase order per version and supplier. Built-in
---      expressions only, so every role that writes these tables can maintain
---      them.
+--   3. Two partial unique indexes hold two presses at the same moment of "make
+--      work order" or "make purchase orders" to one set: one live crew work
+--      order per version, and one live purchase order per version and
+--      supplier. (A later press is stopped in ops-api: once any live purchase
+--      order exists for the version it makes nothing.) Built-in expressions
+--      only, so every role that writes these tables can maintain them.
 --
---   4. One more partial unique index on job_documents: the scope of works and
---      the material order list PDFs filed beside the client quote at issue are
---      rows of type 'other' whose metadata names the version and the document,
---      and a version holds at most one of each. Built-in operators only.
+--   4. One more partial unique index on job_documents: the scope of works PDF
+--      filed beside the client quote at issue is a row of type 'other' whose
+--      metadata names the version and the document, and a version holds at
+--      most one of each document. Built-in operators only. The material order
+--      list prints our costs and is not filed: job-pdfs is a public bucket.
 --
 -- Nothing here touches job work orders (kind = 'job'), approves, sends or
 -- prices anything.
@@ -87,7 +89,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_orders_quote_builder_version_suppl
   ON public.purchase_orders (quote_builder_version_id, lower(coalesce(supplier_name, '')))
   WHERE quote_builder_version_id IS NOT NULL AND status NOT IN ('cancelled', 'deleted');
 
--- A double-submitted issue files each extra document once: the second insert is
+-- A double-submitted issue files the scope of works once: the second insert is
 -- refused and ops-api reads back the first.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_job_docs_quote_builder_extra
   ON public.job_documents (job_id, (metadata ->> 'quote_builder_version_id'), (metadata ->> 'quote_builder_document'))
