@@ -34,18 +34,22 @@ Tests: `quote_work_order_lines_test.ts` and `job_work_order_quote_fill_test.ts`.
 
 ## Which quote
 
-The accepted quote is the scope revision frozen at acceptance
-(`jobs.expected_costs.scope_revision_id`, read from `scope_revisions.pricing_canonical_text`).
-It is read whether it is still `frozen` or was `superseded` by a later revision (a re-quote
-after acceptance), so a later revision never lands in the base work order unmarked.
+Only the accepted quote is read, never a revision frozen after acceptance and never the
+job's live `pricing_json`. The rule is the one the expected-costs freeze uses
+(`_shared/expected_costs/expected_costs_freeze.ts`):
 
-- If the accepted revision cannot be found or read, the newest frozen revision is used and
-  flagged `accepted_revision_missing` (with `frozen_quote_unreadable` when the accepted one
-  was found but could not be read).
-- If there is no frozen revision, the job's live `pricing_json` is used, flagged
-  `quote_not_frozen`.
+- the revision recorded at acceptance (`jobs.expected_costs.scope_revision_id`), read whether
+  it is still `frozen` or was `superseded` by a later revision (a re-quote after acceptance);
+- without one, the latest revision, `frozen` or `superseded`, frozen at or before
+  `jobs.accepted_at`.
 
-Each of these flags puts the result in review.
+Its pricing is read from `scope_revisions.pricing_canonical_text`. With no accepted revision
+(no recorded revision, no acceptance time, or only revisions frozen after acceptance) the
+result is flagged `no_accepted_quote` and the draft is not filled (`quote_fill.reason`
+`no_accepted_quote`); it stays empty for the approver to fill. An accepted revision whose
+pricing cannot be read adds `frozen_quote_unreadable` and is never replaced by another
+revision. Measured on 13 Oct 2026: 26 of the 81 open fencing and patio jobs have an accepted
+revision by this rule (17 recorded, 9 by acceptance time).
 
 ## The lines
 
@@ -118,8 +122,7 @@ These rules apply to any job type.
 - `agreed_labour_ex` is null when no line could be counted.
 - `needs_review` is true when any flag other than `saved_as_material` or
   `quote_counted_as_materials` is present.
-- **Review flags ride on every line.** The quote's flags (`accepted_revision_missing`,
-  `frozen_quote_unreadable`, `quote_not_frozen`) and the result's flags
+- **Review flags ride on every line.** The result's flags
   (`quote_labour_missing`, `labour_differs_from_quote`, `unsupported_job_type`) are added to
   each line's `flags`, so they stay on the stored draft after the one call that filled it.
   `flags` is office-only: trades never see it.
@@ -174,6 +177,9 @@ instead. An unreadable cost table or quote is a failure (`fill_failed` with
 and returns:
 
 `{job:{id, job_number, type, status}, quote:{source, scope_revision_id, frozen_at, flags}, result}`
+
+`quote.source` is `accepted_revision`, `revision_at_acceptance`, or null when the job has no
+accepted revision (`flags` then holds `no_accepted_quote`).
 
 - 400 `job_id_required`, before any query, when `job_id` is missing or is not a job id
   (uuid). A job number is not accepted.

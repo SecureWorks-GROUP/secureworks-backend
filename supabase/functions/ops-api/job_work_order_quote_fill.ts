@@ -43,8 +43,7 @@ export class QuoteFillError extends Error {
 
 export type QuoteSource =
   | "accepted_revision"
-  | "frozen_revision"
-  | "live_pricing";
+  | "revision_at_acceptance";
 
 export type JobQuoteWorkOrderLines = {
   job: {
@@ -54,7 +53,8 @@ export type JobQuoteWorkOrderLines = {
     status: string | null;
   };
   quote: {
-    source: QuoteSource;
+    /** null when the job has no accepted quote revision to read. */
+    source: QuoteSource | null;
     scope_revision_id: string | null;
     frozen_at: string | null;
     flags: string[];
@@ -70,6 +70,7 @@ export type QuoteFillOutcome = {
     | "no_draft"
     | "sealed"
     | "draft_already_has_lines"
+    | "no_accepted_quote"
     | "no_quote_lines"
     | "draft_changed";
   work_order: any | null;
@@ -106,7 +107,7 @@ async function readJobForQuote(client: any, jobId: string) {
   }
   const { data, error } = await client.from("jobs")
     .select(
-      "id, org_id, job_number, type, status, expected_costs, pricing_json",
+      "id, org_id, job_number, type, status, accepted_at, expected_costs",
     )
     .eq("id", id)
     .limit(1);
@@ -144,69 +145,71 @@ async function readRevisions(
   return Array.isArray(data) ? data : [];
 }
 
-// The accepted quote: the scope revision frozen at acceptance
-// (jobs.expected_costs.scope_revision_id), read whether it is still frozen or
-// was superseded by a later revision. Without it, the newest frozen revision,
-// flagged accepted_revision_missing; else the job's live pricing (flagged
-// quote_not_frozen).
-async function readAcceptedQuote(client: any, job: any) {
+// The accepted quote, and only the accepted quote: never a revision frozen
+// after acceptance, never the job's live pricing. The rule is the one the
+// expected-costs freeze uses (_shared/expected_costs/expected_costs_freeze.ts):
+// the revision recorded at acceptance (jobs.expected_costs.scope_revision_id),
+// read whether it is still frozen or was superseded since; without one, the
+// latest revision frozen at or before jobs.accepted_at, frozen or superseded.
+// With neither there is no accepted quote, flagged no_accepted_quote, and the
+// draft is not filled.
+async function readAcceptedQuote(client: any, job: any): Promise<{
+  pricing: Record<string, any> | null;
+  quote: JobQuoteWorkOrderLines["quote"];
+}> {
   const flags: string[] = [];
+  const none = () => ({
+    pricing: null,
+    quote: {
+      source: null,
+      scope_revision_id: null,
+      frozen_at: null,
+      flags: [...flags, "no_accepted_quote"],
+    },
+  });
+  const use = (revision: any, source: QuoteSource) => {
+    const pricing = parsePricing(revision.pricing_canonical_text);
+    if (!pricing) {
+      flags.push("frozen_quote_unreadable");
+      return none();
+    }
+    return {
+      pricing,
+      quote: {
+        source,
+        scope_revision_id: String(revision.id),
+        frozen_at: revision.frozen_at ?? null,
+        flags,
+      },
+    };
+  };
   const acceptedId = typeof job?.expected_costs?.scope_revision_id === "string"
     ? job.expected_costs.scope_revision_id
     : null;
-  const found = (revision: any, source: QuoteSource, pricing: any) => ({
-    pricing,
-    quote: {
-      source,
-      scope_revision_id: String(revision.id),
-      frozen_at: revision.frozen_at ?? null,
-      flags,
-    },
-  });
   if (acceptedId) {
     const [accepted] = await readRevisions(client, (q) =>
       q.eq("job_id", job.id)
         .eq("id", acceptedId)
         .in("status", ["frozen", "superseded"])
         .limit(1));
-    if (accepted) {
-      const pricing = parsePricing(accepted.pricing_canonical_text);
-      if (pricing) return found(accepted, "accepted_revision", pricing);
-      flags.push("frozen_quote_unreadable");
-    }
+    if (accepted) return use(accepted, "accepted_revision");
   }
-  const frozen = await readRevisions(client, (q) =>
-    q.eq("job_id", job.id)
-      .eq("status", "frozen")
-      .order("revision_number", { ascending: false })
-      .limit(20));
-  const newest = frozen
-    .slice()
-    .sort((a: any, b: any) =>
-      Number(b.revision_number || 0) - Number(a.revision_number || 0)
-    )[0] ?? null;
-  if (newest) {
-    const pricing = parsePricing(newest.pricing_canonical_text);
-    if (pricing) {
-      flags.push("accepted_revision_missing");
-      return found(newest, "frozen_revision", pricing);
-    }
-    if (!flags.includes("frozen_quote_unreadable")) {
-      flags.push("frozen_quote_unreadable");
-    }
+  const acceptedAt = typeof job?.accepted_at === "string" && job.accepted_at
+    ? job.accepted_at
+    : null;
+  if (acceptedAt) {
+    const [atAcceptance] = await readRevisions(
+      client,
+      (q) =>
+        q.eq("job_id", job.id)
+          .in("status", ["frozen", "superseded"])
+          .lte("frozen_at", acceptedAt)
+          .order("frozen_at", { ascending: false })
+          .limit(1),
+    );
+    if (atAcceptance) return use(atAcceptance, "revision_at_acceptance");
   }
-  flags.push("quote_not_frozen");
-  return {
-    pricing: job.pricing_json && typeof job.pricing_json === "object"
-      ? job.pricing_json
-      : {},
-    quote: {
-      source: "live_pricing" as QuoteSource,
-      scope_revision_id: null,
-      frozen_at: null,
-      flags,
-    },
-  };
+  return none();
 }
 
 /** The fencing labour rates from the scoping tool's cost table. A read
@@ -243,7 +246,8 @@ async function linesForJob(
   job: any,
 ): Promise<JobQuoteWorkOrderLines> {
   const { pricing, quote } = await readAcceptedQuote(client, job);
-  const costTable = String(job.type || "") === "fencing"
+  // No accepted quote, nothing to price: the cost table is not read.
+  const costTable = pricing && String(job.type || "") === "fencing"
     ? await readFenceLabourCostTable(client, job.org_id ?? null)
     : {};
   const result = buildQuoteWorkOrderLines({
@@ -318,6 +322,14 @@ export async function fillJobWorkOrderDraftFromQuote(
   }
 
   const { quote, result } = await linesForJob(client, job);
+  if (quote.source === null) {
+    return {
+      filled: false,
+      reason: "no_accepted_quote",
+      work_order: draft,
+      scope_revision_id: null,
+    };
+  }
   if (result.lines.length === 0) {
     return {
       filled: false,

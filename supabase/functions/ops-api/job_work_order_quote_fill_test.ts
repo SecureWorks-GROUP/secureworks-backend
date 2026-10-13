@@ -41,6 +41,7 @@ class Query {
   private payload: any = null;
   private mode: "one" | "maybe" | null = null;
   private lim: number | null = null;
+  private sorts: Array<{ col: string; ascending: boolean }> = [];
   constructor(private db: FakeDb, private table: string) {}
   select(_cols?: string) {
     return this;
@@ -75,7 +76,13 @@ class Query {
     this.filters.push((r) => (get(r, col) ?? null) !== val);
     return this;
   }
-  order() {
+  lte(col: string, val: any) {
+    // Like SQL, a missing value never satisfies the comparison.
+    this.filters.push((r) => get(r, col) != null && get(r, col) <= val);
+    return this;
+  }
+  order(col: string, opts?: { ascending?: boolean }) {
+    this.sorts.push({ col, ascending: opts?.ascending !== false });
     return this;
   }
   range() {
@@ -110,6 +117,13 @@ class Query {
     }
     if (this.op === "update") this.db.beforeUpdate?.(this.table);
     const matched = rows.filter((r) => this.filters.every((f) => f(r)));
+    for (const { col, ascending } of [...this.sorts].reverse()) {
+      matched.sort((a, b) => {
+        const x = get(a, col), y = get(b, col);
+        if (x === y) return 0;
+        return (x < y ? -1 : 1) * (ascending ? 1 : -1);
+      });
+    }
     if (this.op === "update") {
       for (const r of matched) {
         Object.assign(r, this.payload, {
@@ -191,6 +205,29 @@ const ACCEPTED_PRICING = {
   labourCostEstimate: 767.5,
 };
 const ACCEPTED_AGREED = 647.5 + 120 + 277.5 + 160;
+// The job was accepted after its revision was frozen (5 Oct) and before the
+// re-quote below (10 Oct).
+const ACCEPTED_AT = "2026-10-09T04:05:03Z";
+
+// A re-quote frozen after acceptance: 5 m, labour 175. Never the work order's.
+function laterRevision() {
+  return {
+    id: REV_NEWER,
+    job_id: JOB,
+    revision_number: 2,
+    status: "frozen",
+    frozen_at: "2026-10-10T00:00:00Z",
+    pricing_canonical_text: JSON.stringify({
+      line_items: [{
+        unit: "m",
+        category: "fencing",
+        quantity: 5,
+        description: "2× Ridgeside (5.0m total)",
+      }],
+      labourCostEstimate: 175,
+    }),
+  };
+}
 
 function costTableRows() {
   return [
@@ -354,76 +391,126 @@ Deno.test("a save that lands between the read and the fill wins; the fill writes
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);
 });
 
-Deno.test("the quote used is the revision frozen at acceptance, even once superseded; then the newest frozen one (flagged); then live pricing (flagged)", async () => {
-  const newerPricing = {
-    line_items: [{
-      unit: "m",
-      category: "fencing",
-      quantity: 5,
-      description: "2× Ridgeside (5.0m total)",
-    }],
-    labourCostEstimate: 175,
-  };
+Deno.test("the quote used is the accepted revision, even once a later revision superseded it", async () => {
   const db = baseDb();
   // A re-quote after acceptance freezes a newer revision and supersedes the
   // accepted one.
   db.tables.scope_revisions[0].status = "superseded";
-  db.tables.scope_revisions.push({
-    id: REV_NEWER,
-    job_id: JOB,
-    revision_number: 2,
-    status: "frozen",
-    frozen_at: "2026-10-07T00:00:00Z",
-    pricing_canonical_text: JSON.stringify(newerPricing),
-  });
-  let p = await previewQuoteWorkOrderLines(db, JOB);
+  db.tables.scope_revisions.push(laterRevision());
+  const p = await previewQuoteWorkOrderLines(db, JOB);
   assertEquals([p.quote.source, p.quote.scope_revision_id, p.quote.flags], [
     "accepted_revision",
     REV_ACCEPTED,
     [],
   ]);
   assertEquals(p.result.agreed_labour_ex, ACCEPTED_AGREED);
+  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(r.quote_fill.scope_revision_id, REV_ACCEPTED);
+  assertEquals(r.work_order.agreed_labour_ex, ACCEPTED_AGREED);
+});
 
+Deno.test("with no revision recorded at acceptance, the revision frozen at or before acceptance is used, never a later one", async () => {
+  const db = baseDb();
   db.tables.jobs[0].expected_costs = null;
-  p = await previewQuoteWorkOrderLines(db, JOB);
+  db.tables.jobs[0].accepted_at = ACCEPTED_AT;
+  db.tables.scope_revisions[0].status = "superseded";
+  db.tables.scope_revisions.push(laterRevision());
+  const p = await previewQuoteWorkOrderLines(db, JOB);
   assertEquals([p.quote.source, p.quote.scope_revision_id, p.quote.flags], [
-    "frozen_revision",
-    REV_NEWER,
-    ["accepted_revision_missing"],
+    "revision_at_acceptance",
+    REV_ACCEPTED,
+    [],
   ]);
-  assertEquals(p.result.needs_review, true);
-  assertEquals(p.result.agreed_labour_ex, 175);
-  assert(
-    p.result.lines.every((l) => l.flags.includes("accepted_revision_missing")),
-  );
-
-  db.tables.scope_revisions = [];
-  db.tables.jobs[0].pricing_json = ACCEPTED_PRICING;
-  p = await previewQuoteWorkOrderLines(db, JOB);
-  assertEquals(p.quote.source, "live_pricing");
-  assertEquals(p.quote.flags, ["quote_not_frozen"]);
-  assertEquals(p.result.needs_review, true);
   assertEquals(p.result.agreed_labour_ex, ACCEPTED_AGREED);
+});
+
+Deno.test("no accepted revision: the draft is not filled, from a later revision or from live pricing", async () => {
+  const cases: Array<[string, (db: FakeDb) => void]> = [
+    ["only a revision frozen after acceptance", (db) => {
+      db.tables.jobs[0].accepted_at = "2026-10-01T00:00:00Z";
+    }],
+    ["no acceptance time to compare with", (db) => {
+      db.tables.jobs[0].accepted_at = null;
+    }],
+    ["no revision at all", (db) => {
+      db.tables.scope_revisions = [];
+    }],
+  ];
+  for (const [label, arrange] of cases) {
+    const db = baseDb();
+    db.tables.jobs[0].expected_costs = null;
+    db.tables.jobs[0].accepted_at = ACCEPTED_AT;
+    db.tables.jobs[0].pricing_json = ACCEPTED_PRICING;
+    arrange(db);
+    const p = await previewQuoteWorkOrderLines(db, JOB);
+    assertEquals(
+      [p.quote.source, p.quote.flags],
+      [null, ["no_accepted_quote"]],
+      label,
+    );
+    assertEquals(p.result.lines, [], label);
+    const r: any = await readJobWorkOrder(db, { jobId: JOB });
+    assertEquals([r.quote_fill.filled, r.quote_fill.reason], [
+      false,
+      "no_accepted_quote",
+    ], label);
+    assertEquals(db.tables.work_orders[0].scope_items, [], label);
+    assertEquals(db.tables.work_orders[0].agreed_labour_ex, null, label);
+    assertEquals(db.writes(), [], label);
+  }
+});
+
+Deno.test("an unreadable accepted revision is never replaced by another one", async () => {
+  const db = baseDb();
+  db.tables.jobs[0].accepted_at = ACCEPTED_AT;
+  db.tables.scope_revisions[0].pricing_canonical_text = "{not json";
+  db.tables.scope_revisions.push(laterRevision());
+  const p = await previewQuoteWorkOrderLines(db, JOB);
+  assertEquals([p.quote.source, p.quote.flags], [null, [
+    "frozen_quote_unreadable",
+    "no_accepted_quote",
+  ]]);
+  const outcome = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(outcome.reason, "no_accepted_quote");
   assertEquals(db.writes(), []);
 });
 
-Deno.test("a fill from an unfrozen quote keeps its review flag on every stored line", async () => {
-  const db = baseDb({ scope_revisions: [] });
-  db.tables.jobs[0].expected_costs = null;
-  db.tables.jobs[0].pricing_json = ACCEPTED_PRICING;
+Deno.test("review flags are kept on each flagged line in the stored draft", async () => {
+  const flaggedPricing = {
+    ...ACCEPTED_PRICING,
+    line_items: [
+      ...ACCEPTED_PRICING.line_items,
+      {
+        kind: "material",
+        unit: "job",
+        category: "custom",
+        quantity: 1,
+        cost_price: 250,
+        description: "Root removal  ",
+      },
+    ],
+  };
+  const db = baseDb();
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify(
+    flaggedPricing,
+  );
+  // Today's install rate no longer rebuilds the quote's labour figure.
+  db.tables.scope_tool_defaults.find((r) => r.item_key === "base-labour")!
+    .default_cost_rate = "40.00";
   const r: any = await readJobWorkOrder(db, { jobId: JOB });
   assertEquals([r.quote_fill.filled, r.quote_fill.needs_review], [true, true]);
   const stored = db.tables.work_orders[0].scope_items;
-  assert(stored.length > 0);
-  assert(stored.every((l: any) => l.flags.includes("quote_not_frozen")));
-  // A later read no longer fills, and the flag is still on the draft.
+  const roots = stored.find((l: any) => l.description === "Root removal");
+  assert(roots.flags.includes("labour_or_material_unknown"));
+  assertEquals(roots.counted, false);
+  // The result-level flag rides on every line.
+  assert(
+    stored.every((l: any) => l.flags.includes("labour_differs_from_quote")),
+  );
+  // A later read does not fill again, and every flag is still on the draft.
   const again: any = await readJobWorkOrder(db, { jobId: JOB });
   assertEquals(again.quote_fill, null);
-  assert(
-    again.work_order.scope_items.every((l: any) =>
-      l.flags.includes("quote_not_frozen")
-    ),
-  );
+  assertEquals(again.work_order.scope_items, stored);
 });
 
 Deno.test("preview: a job id only, writes nothing; an unknown job is a 404", async () => {
@@ -462,8 +549,14 @@ Deno.test("an unreadable cost table never fills on wrong figures and never fails
 });
 
 Deno.test("a job with no quote lines keeps its empty draft", async () => {
-  const db = baseDb({ scope_revisions: [] });
-  db.tables.jobs[0].expected_costs = null;
+  const db = baseDb();
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify({
+    line_items: [{
+      category: "delivery",
+      quantity: 1,
+      description: "Delivery",
+    }],
+  });
   const r: any = await readJobWorkOrder(db, { jobId: JOB });
   assertEquals(r.quote_fill.reason, "no_quote_lines");
   assertEquals(db.tables.work_orders[0].scope_items, []);
@@ -513,7 +606,9 @@ Deno.test("backfill: a dry run counts untouched drafts; apply fills them in batc
     id: crypto.randomUUID(),
     job_id: JOB2,
   });
+  // Its accepted revision is found by the acceptance time.
   db.tables.jobs[1].expected_costs = null;
+  db.tables.jobs[1].accepted_at = ACCEPTED_AT;
   db.tables.work_orders.push(
     draftRow({ id: DRAFT2, job_id: JOB2, created_at: "2026-10-10T00:00:00Z" }),
   );
