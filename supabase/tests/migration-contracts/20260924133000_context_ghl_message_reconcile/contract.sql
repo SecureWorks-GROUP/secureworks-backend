@@ -50,13 +50,15 @@ BEGIN
  -- outlook-mail-poll and monitor-inbox-sweep; B-2, 20261005190000:
  -- ghl-history-schedule; B-5, 20261005210000: context-document-text; history
  -- daily, 20261007050000: xero-history-daily; history depth, 20261007080000:
- -- outlook-mail-deep-history, all capture); C1d's three rows must stay as
+ -- outlook-mail-deep-history, all capture; paid close-out, 20261013140000:
+ -- job-closeout-sweep on its own closeout lane); C1d's three rows must stay as
  -- they are.
  IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())
     @> ARRAY['contact-matching:attribution','ghl-message-reconcile:capture','monitor-inbox-poll:capture']
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname NOT IN
     ('contact-matching','ghl-message-reconcile','monitor-inbox-poll','ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep',
-     'ghl-history-schedule','context-document-text','xero-history-daily','outlook-mail-deep-history'))
+     'ghl-history-schedule','context-document-text','xero-history-daily','outlook-mail-deep-history','job-closeout-sweep'))
+  OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname='job-closeout-sweep' AND l.lane<>'closeout')
   OR EXISTS(SELECT 1 FROM public.automation_switch_cron_lanes() l WHERE l.cron_jobname IN ('ghl-call-transcript-fetch','outlook-mail-poll','monitor-inbox-sweep',
      'ghl-history-schedule','context-document-text','xero-history-daily','outlook-mail-deep-history') AND l.lane<>'capture')
  THEN RAISE EXCEPTION 'c1d cron lane list %',(SELECT array_agg(to_jsonb(l)) FROM public.automation_switch_cron_lanes() l); END IF;

@@ -4,6 +4,7 @@ import {
   getStagesForType,
   isLegalForType,
   MAKESAFE_STAGES,
+  mapStatus,
 } from "./job-state-machine.ts";
 
 Deno.test("makesafe stage contract: simple operational pipeline only", () => {
@@ -49,4 +50,15 @@ Deno.test("makesafe stage contract does not disturb existing job types", () => {
   assertEquals(isLegalForType("approvals", "patio"), true);
   assertEquals(isLegalForType("quoted", "quick_quote"), true);
   assertEquals(isLegalForType("quoted", "makesafe"), false);
+});
+
+Deno.test("paid close-out: get_review is a real fencing and patio stage, never make-safe or repair", () => {
+  for (const type of ["fencing", "patio"]) {
+    const stages = getStagesForType(type);
+    assertEquals(isLegalForType("get_review", type), true, type);
+    assertEquals(stages.indexOf("get_review"), stages.indexOf("invoiced") + 1, type);
+  }
+  assertEquals(isLegalForType("get_review", "makesafe"), false);
+  assertEquals(isLegalForType("get_review", "repair"), false);
+  assertEquals(mapStatus("get_review").derived_view, false);
 });

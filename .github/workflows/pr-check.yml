@@ -248,6 +248,20 @@ jobs:
             supabase/functions/ops-api/debt_ws_actions_test.ts \
             supabase/functions/ops-api/debt_ws_payer_test.ts
 
+      # Paid close-out (13 Oct 2026): a paid fencing or patio job goes to Get Review
+      # (the strict paid rule, the holds, compare and set), one review text per job
+      # (claim first, 90-day look-back, every paying owner), the 24-hour archive
+      # sweep and the dry-run Complete backlog list; get_review is a real stage and a
+      # GHL stage event can no longer pull a card out of Get Review or the archive.
+      - name: Test the paid close-out rule, review sender, sweeps and stage
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/job_paid_closeout_test.ts \
+            supabase/functions/ops-api/job_closeout_test.ts \
+            supabase/functions/_shared/stage-gate/job-state-machine_test.ts \
+            supabase/functions/_shared/stage-gate/engine_test.ts \
+            supabase/functions/ghl-webhook/stage_rank_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.
@@ -456,7 +470,8 @@ jobs:
             supabase/functions/ops-api/ledger_person_edit_test.ts \
             supabase/functions/ops-api/actor_calls_test.ts \
             supabase/functions/ops-api/actor_calls_handler_test.ts \
-            supabase/functions/ops-api/monitored_mailboxes_test.ts
+            supabase/functions/ops-api/monitored_mailboxes_test.ts \
+            supabase/functions/ops-api/job_closeout_status_cas_test.ts
 
       # Slice C1b: the GHL webhook receiver's two-proof auth (observe until
       # GHL_WEBHOOK_AUTH_MODE=enforce), ids-only webhook_log receipts and the

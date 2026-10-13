@@ -4638,6 +4638,39 @@ columns or it shows the undeducted figure. The Xero line is found by its
 description prefix. Contract, the screen changes still owed and how the office
 ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
 
+## Paid Fencing And Patio Jobs Go To Get Review
+
+Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
+`complete`), gets one review text, and is archived 24 hours later. "Paid" is
+the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
+invoice PAID and none DRAFT; every paying party, `job_contacts` with
+`removed_at` null and a share above 0, has a paid final; paid covers the
+`job_quote_values` quote plus approved variations). Every read, move, text and
+sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
+holds: status `rectification` or `jobs.is_callback`. If only the quote check
+fails the card stays put with `job_closeout_state.paid_less_than_quoted`.
+Builder, insurance, make-safe and repair jobs keep the old xero-sync rule
+(`invoiced` -> `complete`), and so do fencing and patio while the move switch
+is off. One review text per job ever (`job_review_claims`, claimed before any
+send), to every paying owner, skipping any contact sent a review text in the
+last 90 days from any source. Every status write uses `update_job_status`
+`expected_statuses` (compare and set). The `complete` backlog is never caught
+up or texted: `job_closeout_backlog_preview` only lists what a later step may
+archive.
+
+Switches (migration `20261013140000`), all off; turn on in this order:
+`job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
+`dry_run` (read the `review_request_dry_run` job events); then someone must
+switch the old GoHighLevel review workflow OFF in GHL Automation; then env
+`JOB_REVIEW_SENDING_ENABLED=true` on ops-api and `review_sender_mode` `live`
+(live without the env reads as dry run); last, `automation_switches.closeout`
+for the `job-closeout-sweep` cron. Adding a lane to `automation_lane_enabled()`
+moves the md5 four earlier migrations' guards pin: their contracts stand the old
+body back up from
+`supabase/tests/migration-contracts/20261013140000_job_closeout_review_archive/pre_closeout_lane_reader.sql`.
+Contract: `docs/job-closeout-v1.md`; tests: `job_paid_closeout_test.ts`,
+`job_closeout_test.ts`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

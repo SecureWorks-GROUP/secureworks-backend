@@ -90,10 +90,12 @@ const EXECUTION_PIPELINE_IDS = new Set([
   'SxayUz0KRDlCUk58apCC', // Patio Execution
 ])
 
-// Status rank for forward-only progression
+// Status rank for forward-only progression. get_review and archived rank above every
+// stage GHL can map to, so a GHL stage event can never pull a paid card out of Get Review
+// or an archived card back onto the board (an unranked status used to read as 0).
 const STATUS_RANK: Record<string, number> = {
   draft: 0, quoted: 1, accepted: 2, scheduled: 3,
-  in_progress: 4, complete: 5, invoiced: 6, cancelled: -1,
+  in_progress: 4, complete: 5, invoiced: 6, get_review: 7, archived: 8, cancelled: -1,
 }
 
 // Pipeline ID → job type for fallback contact matching
