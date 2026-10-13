@@ -1515,7 +1515,9 @@ explicit direction as the card's own stated PO and projected verbatim past every
 pairing and conflict rule — `create_makesafe_job` stamps it straight off the
 request body (the `metadata` literal in `createMakesafeJob`, `index.ts`; no
 validation), so that caller is the whole trust boundary and the only remaining
-route by which a wrong or fused PO reaches the card.
+route by which a fused PO reaches the card. Its one other writer is a flag-on
+repair landing (`landWorkOrderOnRepairJob`), which fills an EMPTY slot only,
+with the PO the sealed grammar read.
 
 Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
 Tests: `repair_intake_routing_test.ts`,

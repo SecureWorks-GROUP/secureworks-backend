@@ -294,7 +294,7 @@ export function repairAutoIntakeMintStamp(input: {
 }
 
 /**
- * Fix 4. A collection or reattendance order whose original job cannot be found
+ * Rule 3. A collection or reattendance order whose original job cannot be found
  * used to become an exception with nothing to act on. When it arrives as a
  * first-issue purchase order (an instruction, not an amendment, with its PO
  * read), there is real work in it and a person must see it as a draft.
@@ -309,7 +309,7 @@ export function orphanLifecycleOrderOpensReviewDraft(
   );
 }
 
-// ── Fix 3: an order for a claim that already has an open repair job ──────────
+// ── Rule 2: an order for a claim that already has an open repair job ─────────
 
 const DEAD_REPAIR_JOB_STATUSES = new Set([
   "cancelled",
@@ -716,8 +716,6 @@ export async function landWorkOrderOnRepairJob(
   return { relation, eventCreated: true };
 }
 
-// ── A make-safe raised on a claim that has an open repair job ────────────────
-
 // ── The builder's order value never reaches a trade ─────────────────────────
 
 /**
@@ -753,6 +751,8 @@ export function withoutBuilderOrderValue<T>(metadata: T): T {
       : {}),
   } as T;
 }
+
+// ── A make-safe raised on a claim that has an open repair job ────────────────
 
 export const MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT =
   "make_safe_raised_on_repair_claim";

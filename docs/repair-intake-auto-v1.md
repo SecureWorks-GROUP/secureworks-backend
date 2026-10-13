@@ -114,7 +114,7 @@ all.
 | Holds no purchase order | The order's purchase order and value are recorded on it. |
 | Holds this purchase order | Left as it is. |
 | Holds a different purchase order | The new one is listed under `metadata.builder_additional_work_orders`. The first is never written over. |
-| More than one open repair job, none holding this order | A binding review card names them. A person picks. |
+| More than one open repair job, and not exactly one of them holding this order | A binding review card names them. A person picks. |
 
 What the job "holds" is read the same way by the match and by the write: its
 metadata, and the purchase order inside its detail row's `external_ref`
@@ -268,4 +268,6 @@ make-safe job sends today.
   `repair intake: ...`: scan replays in the real mail shapes, all details
   invented.
 - `repair_intake_routing_test.ts`: the mint brake, each way.
+- `trade_app_visibility_rules_test.ts`, tests named `builder's order value`:
+  an allocated trade's `my_jobs` card carries no builder figure.
 - Migration contract: `supabase/tests/migration-contracts/20261013110000_repair_intake_auto_flag/`.

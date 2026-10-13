@@ -6003,8 +6003,10 @@ export async function runDeterministicIntake(
         report.totals.job_creation_deferred++;
       }
       if (wantsJob && transitionAllowed && repairLandingTarget) {
-        // The case was accounted above, before any job work, so a landing that
-        // fails part way is retried on the next run; every step can run twice.
+        // The case row was saved above as awaiting job creation, before any
+        // job work, and takes its landed fate only at the end, so a landing
+        // that fails part way is retried on the next run; every step can run
+        // twice.
         const landingSources = effectivePlan.sourcePostIds.flatMap((postId) => {
           const source = sourceMap.get(postId);
           return source ? [source] : [];
