@@ -24,9 +24,9 @@
 --             labour-only margin.
 --   JP-QQ     a quick quote sent with no cost figures (zeros stored): quoted
 --             is the sent value, expected cost is null, never 0.
---   JP-QQ2    an accepted quote with no cost figures over an earlier sent
---             revision that had them: expected falls through to the sent
---             revision.
+--   JP-QQ2    an accepted quote with no cost figures over an earlier,
+--             superseded version that had them: expected cost is null; the
+--             older version never stands in.
 --   JP-MS     make-safe roof report with no client invoice and a trade line
 --             found by job number: margin suppressed, flags carried.
 --   JP-REP    a fencing card family-tagged repair, invoiced with a materials
@@ -240,8 +240,8 @@ INSERT INTO public.quote_revisions (job_id, job_document_id, version, sent_at, r
    '{"total_inc_gst": 550, "total_ex_gst": 500}',
    '{"cost_estimates": {"labour_total": 0, "material_total": 0, "subcontract_commission_total": 0}}');
 
--- JP-QQ2: version 1 sent with cost figures, then an accepted document whose
--- revision carries zeros.
+-- JP-QQ2: version 1 sent at 800 with costs 350 and superseded, then version 2
+-- sent at 900 and accepted, its costs all zero.
 INSERT INTO public.job_documents (id, job_id, type, sent_at, superseded_at, created_at) VALUES
   ('a7300000-0000-4000-8000-000000000004', 'a7000000-0000-4000-8000-00000000000b', 'quote', '2026-07-18T00:00:00Z', '2026-07-20T00:00:00Z', '2026-07-18T00:00:00Z');
 INSERT INTO public.job_documents (id, job_id, type, sent_at, accepted_at, created_at) VALUES
@@ -462,16 +462,16 @@ BEGIN
       r.expected_labour_ex, r.expected_materials_ex, r.expected_commission_ex;
   END IF;
 
-  -- JP-QQ2: the accepted revision fixed no cost, so the earlier sent revision's
-  -- figures are the expected cost.
+  -- JP-QQ2: the accepted revision is also the newest sent one and fixed no
+  -- cost. The superseded version's 350 never stands in for it.
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-QQ2';
   IF r.quoted_ex <> 900 OR r.quoted_source <> 'sent_quote:accepted:quote_revision' THEN
     RAISE EXCEPTION 'jp qq2: quoted % from %', r.quoted_ex, r.quoted_source;
   END IF;
-  IF r.expected_source <> 'sent_quote_revision' OR r.expected_labour_ex <> 200 OR r.expected_materials_ex <> 150
-     OR r.expected_commission_ex <> 0 OR r.expected_cost_ex <> 350 THEN
-    RAISE EXCEPTION 'jp qq2: expected % % % % %', r.expected_source, r.expected_labour_ex, r.expected_materials_ex,
-      r.expected_commission_ex, r.expected_cost_ex;
+  IF r.expected_source IS NOT NULL OR r.expected_cost_ex IS NOT NULL OR r.expected_labour_ex IS NOT NULL
+     OR r.expected_materials_ex IS NOT NULL OR r.expected_commission_ex IS NOT NULL THEN
+    RAISE EXCEPTION 'jp qq2: an older quote version stood in as expected cost % % % % %', r.expected_source, r.expected_cost_ex,
+      r.expected_labour_ex, r.expected_materials_ex, r.expected_commission_ex;
   END IF;
 
   -- JP-MS: no client invoice, so margin and profit are suppressed.

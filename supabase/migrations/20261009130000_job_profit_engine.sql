@@ -74,11 +74,14 @@
 -- 4. Expected cost by lane is a cost fixed at the quote, first source that has
 --    it (expected_source): jobs.expected_costs (frozen_at_acceptance) -> the
 --    accepted quote revision's cost_estimates (accepted_quote_revision) -> the
---    newest sent quote revision's cost_estimates (sent_quote_revision). A
---    revision fixes a cost only when at least one of labour_total,
---    material_total and subcontract_commission_total is above zero; a quote
---    sent with no cost figures stores zeros and is passed over. With none of
---    those it is null, never 0 and never the live pricing estimate.
+--    newest sent quote revision's cost_estimates (sent_quote_revision). Each
+--    quote source is one revision, picked first: the newest revision of the
+--    newest accepted document, and the newest sent revision. That revision
+--    fixes a cost only when at least one of labour_total, material_total and
+--    subcontract_commission_total is above zero; a quote sent with no cost
+--    figures stores zeros and gives none. An older or superseded version never
+--    stands in for it. With no source it is null, never 0 and never the live
+--    pricing estimate.
 --
 -- 5. Completeness reuses the job_financials vocabulary (revenue_flag
 --    missing_client_invoice / ok; cost_flag no_labour_linked,
@@ -467,29 +470,35 @@ project AS (
   GROUP BY p.job_id
 ),
 accepted_rev AS (
-  SELECT DISTINCT ON (r.job_id)
-    r.job_id, r.id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
-  FROM public.quote_revisions r
-  JOIN public.job_documents d ON d.id = r.job_document_id
-  WHERE d.accepted_at IS NOT NULL
-    AND greatest(
-          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,labour_total}'), 0),
-          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,material_total}'), 0),
-          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,subcontract_commission_total}'), 0)
+  SELECT n.job_id, n.ce
+  FROM (
+    SELECT DISTINCT ON (r.job_id)
+      r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
+    FROM public.quote_revisions r
+    JOIN public.job_documents d ON d.id = r.job_document_id
+    WHERE d.accepted_at IS NOT NULL
+    ORDER BY r.job_id, d.accepted_at DESC, r.version DESC
+  ) n
+  WHERE greatest(
+          COALESCE(public.job_profit_num(n.ce -> 'labour_total'), 0),
+          COALESCE(public.job_profit_num(n.ce -> 'material_total'), 0),
+          COALESCE(public.job_profit_num(n.ce -> 'subcontract_commission_total'), 0)
         ) > 0
-  ORDER BY r.job_id, d.accepted_at DESC, r.version DESC
 ),
 sent_rev AS (
-  SELECT DISTINCT ON (r.job_id)
-    r.job_id, r.id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
-  FROM public.quote_revisions r
-  WHERE r.sent_at IS NOT NULL
-    AND greatest(
-          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,labour_total}'), 0),
-          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,material_total}'), 0),
-          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,subcontract_commission_total}'), 0)
+  SELECT n.job_id, n.ce
+  FROM (
+    SELECT DISTINCT ON (r.job_id)
+      r.job_id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
+    FROM public.quote_revisions r
+    WHERE r.sent_at IS NOT NULL
+    ORDER BY r.job_id, r.sent_at DESC, r.version DESC
+  ) n
+  WHERE greatest(
+          COALESCE(public.job_profit_num(n.ce -> 'labour_total'), 0),
+          COALESCE(public.job_profit_num(n.ce -> 'material_total'), 0),
+          COALESCE(public.job_profit_num(n.ce -> 'subcontract_commission_total'), 0)
         ) > 0
-  ORDER BY r.job_id, r.sent_at DESC, r.version DESC
 ),
 quote_docs AS (
   SELECT DISTINCT d.job_id
