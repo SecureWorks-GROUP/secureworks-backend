@@ -67,7 +67,8 @@ Holds (never moved, texted or archived): status `rectification`, or
   card has archived): a job whose newest payment is over 30 days old (the same
   window as the move; `paid_too_long_ago`), a contact not linked yet
   (`no_contact`), or every send refused by a ghl-proxy guard before GHL
-  (`refused`; the claim is released). A real send keeps its claim. A text that
+  (`refused`; the claim is released, and only the first refusal is logged as
+  `review_request_not_sent`). A real send keeps its claim. A text that
   does not answer within 15 seconds counts as unconfirmed, keeps its claim and
   is never retried. Manual `send_review_request` uses
   the same sender and switch (it skips only the status, hold, paid and window

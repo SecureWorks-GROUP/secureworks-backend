@@ -901,7 +901,7 @@ Deno.test("no linked contact on a manual request claims nothing either", async (
   assertEquals(sms.length, 1);
 });
 
-Deno.test("every send refused by a guard keeps no claim, so a later attempt sends exactly once", async () => {
+Deno.test("every send refused by a guard keeps no claim and logs once, so a later attempt sends exactly once", async () => {
   const { db, deps, sms, setSms } = setup({ sender: "live" });
   const job = reviewJob(db);
   setSms(() => ({ ok: false, refused: true, error: "contact not on job" }));
@@ -916,16 +916,35 @@ Deno.test("every send refused by a guard keeps no claim, so a later attempt send
     ).map((e) => e.detail_json.status),
     ["refused"],
   );
+  for (let i = 0; i < 3; i++) {
+    assertEquals(
+      (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+      "refused",
+    );
+  }
+  assertEquals(db.rows("job_review_claims").length, 0);
+  assertEquals(
+    db.rows("job_events").filter((e) =>
+      e.event_type === "review_request_not_sent"
+    ).length,
+    1,
+    "a repeated refusal logs once",
+  );
   setSms(() => ({ ok: true, message_id: "m2" }));
   assertEquals(
     (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
     "sent",
   );
   assertEquals(
+    db.rows("job_events").filter((e) => e.event_type === "review_request_sent")
+      .length,
+    1,
+  );
+  assertEquals(
     (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
     "already_claimed",
   );
-  assertEquals(sms.length, 2);
+  assertEquals(sms.length, 5);
   assertEquals(db.rows("job_review_claims")[0].status, "sent");
 });
 

@@ -953,23 +953,32 @@ export async function requestJobReview(
       finishError.message,
     );
   }
-  await deps.client.from("job_events").insert({
-    job_id: job.id,
-    event_type: status === "sent"
-      ? "review_request_sent"
-      : "review_request_not_sent",
-    detail_json: {
-      trigger: opts.trigger,
-      status,
-      reason,
-      review_url: GOOGLE_REVIEW_URL,
-      recipients: stored.map(({ label, ghl_contact_id, result }) => ({
-        label,
-        ghl_contact_id,
-        result,
-      })),
-    },
-  });
+  const { data: priorRefusal } = status === "refused"
+    ? await deps.client.from("job_events").select("id")
+      .eq("job_id", job.id)
+      .eq("event_type", "review_request_not_sent")
+      .eq("detail_json->>status", "refused")
+      .limit(1)
+    : { data: null };
+  if (!priorRefusal?.length) {
+    await deps.client.from("job_events").insert({
+      job_id: job.id,
+      event_type: status === "sent"
+        ? "review_request_sent"
+        : "review_request_not_sent",
+      detail_json: {
+        trigger: opts.trigger,
+        status,
+        reason,
+        review_url: GOOGLE_REVIEW_URL,
+        recipients: stored.map(({ label, ghl_contact_id, result }) => ({
+          label,
+          ghl_contact_id,
+          result,
+        })),
+      },
+    });
+  }
   return {
     ok: true,
     action: status,
