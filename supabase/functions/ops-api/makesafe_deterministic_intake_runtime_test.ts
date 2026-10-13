@@ -29,6 +29,12 @@ import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_f
 import { projectInsuranceRepairPipelineRow } from "./insurance_repairs_board.ts";
 import { ensureIntakeWorkOrderEvidence } from "./makesafe_intake_settlement.ts";
 import { MAKESAFE_ATTACH_KEY_CONSTRAINT } from "./makesafe_document_idempotency.ts";
+import { notifyDeterministicPhysicalJob } from "./makesafe_hugo_notification.ts";
+import {
+  auditClient,
+  MAKESAFE_TEXT_RECIPIENT,
+  REPAIR_TEXT_RECIPIENT,
+} from "./makesafe_hugo_notification_test_fakes.ts";
 import {
   AMBROSE_TEST_COMPANY_ID,
   AMBROSE_TEST_SENDER,
@@ -9357,6 +9363,140 @@ Deno.test("repair intake: CONTROL: with no repair job on the claim, the same rap
   assertEquals(second.totals.jobs_created, 0);
   assertEquals(approver.bodies.length, 1);
   assertEquals(store.jobs.length, 1);
+});
+
+// The scan's own post-board text, run with the real notifier over a fake SMS
+// transport. The approver stands in for approveIntakeDraft: it makes the job
+// with the draft's suburb, as createMakesafeJob does, and names the job for
+// the text.
+function scanTextHarness(store: Store) {
+  const base = intakeApprover(store);
+  const approve = async (client: any, body: any) => {
+    const approved = await base.approve(client, body);
+    const job = store.jobs.find((row: any) => row.id === approved.job.id);
+    const draft = store.makesafe_intake_drafts.find((row: any) =>
+      row.id === body.draft_id
+    );
+    job.site_suburb = draft.site_suburb || null;
+    return { ...approved, notification_job_ids: [job.id] };
+  };
+  const audit = auditClient({ duplicateAfterFirst: true });
+  const sends: Array<{ phone: string; message: string }> = [];
+  const notifyPhysicalJob = (_client: any, input: any) =>
+    notifyDeterministicPhysicalJob(audit.client, input, {
+      loadBoardJob: (_boardClient, jobId) => {
+        const job = store.jobs.find((row: any) => row.id === jobId);
+        return Promise.resolve(
+          job
+            ? {
+              jobId,
+              jobNumber: job.job_number,
+              canonicalStage: "new",
+              sesFamily: job.type === "repair" ? "repair" : "physical_makesafe",
+              jobType: job.type,
+              siteSuburb: job.site_suburb,
+            }
+            : null,
+        );
+      },
+      loadConfig: () =>
+        Promise.resolve({
+          enabled: true,
+          fromNumber: "+61000000000",
+          recipient: MAKESAFE_TEXT_RECIPIENT,
+          failureReason: null,
+        }),
+      loadRepairConfig: () =>
+        Promise.resolve({
+          enabled: true,
+          fromNumber: "+61000000000",
+          recipient: REPAIR_TEXT_RECIPIENT,
+          failureReason: null,
+        }),
+      sendSms: (phone, message) => {
+        sends.push({ phone, message });
+        return Promise.resolve({
+          accepted: true,
+          messageId: `ghl-message-${sends.length}`,
+          failureReason: null,
+        });
+      },
+    });
+  const scan = (nowIso = REPAIR_NOW) =>
+    runDeterministicIntake(fakeClient(store), {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approve,
+      notifyPhysicalJob,
+      repairAutoIntake: true,
+    });
+  return { scan, sends, audit };
+}
+
+Deno.test("repair intake: a repair job the scan makes automatically sends one text to the repair recipient, worded as a repair with an Ops link", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const text = scanTextHarness(store);
+
+  const first = await text.scan();
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(first.repair_intake?.auto_approved, 1);
+  assertEquals(first.totals.hugo_notifications_required, 1);
+  assertEquals(first.totals.hugo_notifications_accepted, 1);
+  assertEquals(first.totals.hugo_notifications_failed, 0);
+  assertEquals(store.jobs.length, 1);
+  const job = store.jobs[0];
+  assertEquals(job.type, "repair");
+  assertEquals(job.site_suburb, "Testville");
+  assertEquals(text.sends, [{
+    phone: REPAIR_TEXT_RECIPIENT.phone,
+    message:
+      `SecureWorks: New repair job ${job.job_number}, Testville. Open in Ops: ` +
+      `https://secureworks-group.github.io/secureworks-ux/ops.html#job/${job.id}`,
+  }]);
+  assertEquals(text.audit.inserts.length, 1);
+  assertEquals(text.audit.inserts[0].job_id, job.id);
+  assertEquals(text.audit.inserts[0].recipient_set, [{
+    user_id: REPAIR_TEXT_RECIPIENT.userId,
+    name: REPAIR_TEXT_RECIPIENT.name,
+    phone: REPAIR_TEXT_RECIPIENT.phone,
+  }]);
+
+  // A later scan of the same order makes no second job and sends no second text.
+  const second = await text.scan("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(text.sends.length, 1);
+});
+
+Deno.test("repair intake: CONTROL: a make-safe job the same scan makes still sends today's make-safe text to the make-safe recipient", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "make-safe", {
+    claim: "MLB-49911",
+    po: "PO-69911",
+    address: "20 Sample Drive, Demoville, WA 6010",
+    rapidRepair: false,
+    scope:
+      "Make safe the storm damaged boundary and secure the property. Install temporary roof tarps as required.",
+    receivedAt: "2026-07-19T03:33:00.000Z",
+  });
+  const text = scanTextHarness(store);
+
+  const report = await text.scan();
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.jobs.length, 1);
+  const job = store.jobs[0];
+  assertEquals(job.type, "makesafe");
+  assertEquals(text.sends, [{
+    phone: MAKESAFE_TEXT_RECIPIENT.phone,
+    message: `SecureWorks: New make-safe ${job.job_number} (${job.id})\n` +
+      `Assign in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${job.id}`,
+  }]);
 });
 
 function makeSafeOnRepairClaimStore() {

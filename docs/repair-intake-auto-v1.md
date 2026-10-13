@@ -247,9 +247,9 @@ not send.
 
 | What fires when a repair job is created automatically | To | Same as manual approval | Switch |
 |---|---|---|---|
-| Post-board "new job" text, once per job | Hugo (staff) | Yes | `makesafe_notify_settings.notify_enabled` |
+| Post-board "new job" text, once per job | The repair recipient (see below) | Yes | `makesafe_notify_settings.notify_enabled` |
 | `makesafe_created` job event | Nobody | Yes | None |
-| Intake case bound to the job, draft marked approved | Nobody | Yes | None |
+| Draft marked approved and linked to the job (the intake case is not bound: see "Known gaps") | Nobody | Yes | None |
 | Work order PDF attached to the job | Nobody | Yes | None |
 | Address geocode | Nobody | Yes | None |
 
@@ -261,6 +261,137 @@ A landing (rule 2), a make-safe job event and a collection draft (rule 3) send
 no message at all. A make-safe job raised on a repair claim sends exactly what any
 make-safe job sends today.
 
+### Who gets the "new job" text for a repair job
+
+**Before 13 Oct 2026 (as first shipped).** This document said the text went to
+Hugo. It did not. A repair job used the make-safe text and the make-safe
+recipient: the one phone in `makesafe_notify_settings.arrival_general_phones`,
+matched to a user who manages the make-safe vertical. On 13 Oct 2026 that was a
+crew member, so the five repair jobs approved that day (SWR-261570 to
+SWR-261574) were each texted to him as "SecureWorks: New make-safe SWR-...
+(job id)" with an "Assign in Trade" link, and Hugo received nothing. The
+automatic switch was turned off that afternoon for this reason.
+
+**Now.** A repair job (`jobs.type = 'repair'`, or a card the board reads as the
+repair family) sends its one text to the repair recipient, in repair words:
+
+```
+SecureWorks: New repair job SWR-261570, Baldivis. Open in Ops: https://secureworks-group.github.io/secureworks-ux/ops.html#job/<job id>
+```
+
+- The suburb is the job's `site_suburb`, left out when the job has none.
+- The link is the Ops screen's own job link (`ops.html#job/<job id>`).
+- It is the same text whether the scan made the job or a person approved the
+  draft: both go through `notifyDeterministicPhysicalJob`
+  (`makesafe_hugo_notification.ts`).
+- The recipient is the user named in
+  `makesafe_notify_settings.repair_new_job_user_ids`
+  (`20261013170000_makesafe_notify_repair_recipients.sql`), read by
+  `loadRepairNotificationConfig` (`index.ts`). The list holds user ids, never a
+  phone number: the phone comes from that user's row when the text is sent. The
+  migration names the insurance operations manager (Hugo) once, when it first
+  adds the list, in a database that holds his user row. Changing who gets the
+  text is an edit to that list, not a code change.
+- Exactly one named user with a phone sends. Anything else sends nothing and
+  records the reason on the job's `makesafe_intake_hugo_notifications` row:
+
+| The list | Recorded `failure_reason` |
+|---|---|
+| Empty | `repair_recipient_not_configured` |
+| More than one user | `repair_recipient_config_ambiguous` |
+| A user id that is not a user | `repair_recipient_user_missing` |
+| A user with no phone | `repair_recipient_phone_missing` |
+| The setting or the user row could not be read | `repair_recipient_config_read_failed` |
+
+- It never falls back to a role or to the make-safe recipient.
+- As with a make-safe text that cannot be sent, the job itself stands: only the
+  draft's settlement is left unfinished (`makesafe_intake_job_mints.state`
+  `settlement_failed`, with the same reason) and is retried. Once the list is
+  right, the retry sends the text once.
+- Still one text a job: the unique claim on `makesafe_intake_hugo_notifications`
+  (one row per job) holds for repair jobs as it does for make-safes.
+
+Make-safe jobs are unchanged: the same words, the same link and the same
+recipient as before, and they never read the repair list.
+
+Not covered: a repair job raised by hand through `create_makesafe_job`, or from
+a draft that is not a deterministic intake draft, sends the older make-safe
+manager text ("New repair: ...", `notifyVerticalManagersSms`) to the make-safe
+managers and no text to the repair recipient.
+
+## Known gaps
+
+None of these is fixed by the staff text change of 13 Oct 2026. Each is written
+up here so the next change starts from the cause.
+
+### The message classifier does not know the repair text
+
+Two functions name our staff texts by their opening words, "Docs Ready: " and
+"SecureWorks: New make-safe ": `context_internal_text_role`
+(`20261005090000_context_ladder_internal_text.sql`) and
+`context_message_party_roles` (newest body:
+`20261007060000_context_party_roles_v4.sql`). The repair text opens
+"SecureWorks: New repair job " and is on neither list, so a saved copy of it is
+not recognised as a staff text by that rule. Whether another rule labels it
+first has not been checked. Adding the wording is a classifier change with its
+own contract touch points (`AGENTS.md`, the party-roles entry), so it is a
+separate migration.
+
+### The intake case is never bound to a repair job
+
+Every repair job intake has made carries a job event
+`makesafe_intake_case_bind_failed` with `stage: case_bind` and the error
+"current make-safe job not found" (167 events on production on 13 Oct 2026, all
+on jobs that were repair jobs when made). The job, its documents and its draft
+are all in place; only the case link is missing, so the order's case stays
+`awaiting_job_creation` with no `job_id`.
+
+Cause: `bindIntakeCasesToMintedJobs` (`makesafe_intake_settlement.ts`) updates
+`makesafe_intake_cases.job_id`. The table's trigger
+`trg_makesafe_intake_cases_readiness_invalidate`
+(`20260728000001_makesafe_state_authority_u2.sql`) then calls
+`invalidate_makesafe_readiness`, which looks the job up with
+`type = 'makesafe'` (newest body:
+`20260728030000_synthetic_livefire_readiness_cleanup.sql`) and raises for any
+other type, rolling the update back. `20260826000001_repair_job_type.sql`
+widened the case write check and the money seal for repair jobs and did not
+widen this function.
+
+Smallest fix: a migration that patches that one lookup to
+`type IN ('makesafe', 'repair')`, written the guarded way
+`20260826000001` patches a deployed body. It is not made here because it
+changes live case state, not only new jobs: every repair case still waiting
+inside the scan's 60-day window would bind on its next settlement retry, each
+taking a live identity and the one-case-per-job slot, and each repair job would
+gain a `makesafe_readiness_current` row. That needs a read-only count of the
+cases it would move and a look at what reads readiness for a repair job first.
+
+### A waiting draft cannot be landed on the repair job its claim already has
+
+Rule 2 lands an order on an existing repair job only when the scan reads new
+mail. A draft that is already waiting for review has no such path: approving it
+either makes a second job or is refused as a duplicate. On 13 Oct 2026 the
+work order for a claim that already had a repair job was recorded by hand for
+that reason.
+
+What it needs: a staff action that takes the draft and the repair job, and
+
+1. checks the match the way the scan does (`matchOpenRepairJob`: same builder,
+   same claim, exactly one open repair job),
+2. calls `landWorkOrderOnRepairJob` with the draft's staged PDF, so the same
+   guards hold (a repair job only, a purchase order read, never without the
+   PDF) and the same job event is written,
+3. settles the draft as approved and linked to that job without a mint, and
+4. accounts the order's case the way `accountCaseLandedOnRepairJob` does
+   (`accounted_non_wo` / `revision`, no `job_id`).
+
+It sends nothing and never moves the board column or the job status. Steps 3
+and 4 are the part that is not small: the draft settlement is built around a
+job the draft minted (`settleApprovedIntakeDraft`), the case accounting is
+private to the scan and takes the scan's plan, not a stored draft, and the
+action needs its own staff gate, tests and a button on the review screen
+(`secureworks-ux`).
+
 ## Tests
 
 - `repair_intake_auto_test.ts`: the pure rules.
@@ -268,6 +399,13 @@ make-safe job sends today.
   `repair intake: ...`: scan replays in the real mail shapes, all details
   invented.
 - `repair_intake_routing_test.ts`: the mint brake, each way.
+- `makesafe_hugo_notification_test.ts`, `makesafe_hugo_notification_index_test.ts`:
+  the repair text's words, link and recipient, each way it sends nothing, and
+  the make-safe text pinned byte for byte.
+- `makesafe_intake_settlement_test.ts` (a person approves a repair draft) and
+  the scan test `repair intake: a repair job the scan makes automatically
+  sends one text ...`: the real notifier on each path.
 - `trade_app_visibility_rules_test.ts`, tests named `builder's order value`:
   an allocated trade's `my_jobs` card carries no builder figure.
-- Migration contract: `supabase/tests/migration-contracts/20261013110000_repair_intake_auto_flag/`.
+- Migration contracts: `supabase/tests/migration-contracts/20261013110000_repair_intake_auto_flag/`
+  and `.../20261013170000_makesafe_notify_repair_recipients/`.

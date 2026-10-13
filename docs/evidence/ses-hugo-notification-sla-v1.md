@@ -12,7 +12,10 @@ facts are true:
    request families;
 4. the source is not a synthetic live-fire fixture; and
 5. `arrival_general_phones` names one recipient whose phone resolves to exactly
-   one staff user with `managed_verticals` containing `makesafe`.
+   one staff user with `managed_verticals` containing `makesafe`. Since
+   13 Oct 2026 a repair job does not use that recipient: its text goes to the
+   one user named in `repair_new_job_user_ids`, in repair words with an Ops
+   link (`docs/repair-intake-auto-v1.md`, "Messages").
 
 The configured `makesafe_notify_settings.notify_enabled` kill switch and
 `from_number` remain authoritative. No recipient phone is embedded in this
