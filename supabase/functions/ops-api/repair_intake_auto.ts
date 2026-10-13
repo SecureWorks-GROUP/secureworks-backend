@@ -520,6 +520,68 @@ export interface RepairWorkOrderLandingDeps {
 }
 
 /**
+ * The landing's work order PDFs, named so each one is really attached. A job
+ * holds one active work order document per file name, and builders reuse one
+ * name for every order ("Purchase Order.pdf"), so a PDF whose name the job
+ * already holds for OTHER bytes would be taken for that document and dropped.
+ * Such a PDF takes a name of its own: the purchase order in front of the
+ * original name. A PDF already on the job is left as it is, so a repeat
+ * attaches nothing twice.
+ */
+async function landingAttachmentsNamedForJob(
+  client: any,
+  landing: RepairWorkOrderLanding,
+): Promise<any[]> {
+  const { data, error } = await client.from("job_documents")
+    .select("file_name,storage_url,pdf_url")
+    .eq("job_id", landing.jobId)
+    .eq("type", "work_order")
+    .is("superseded_at", null);
+  if (error) {
+    throw new Error(
+      `repair landing document read failed: ${error.message || error}`,
+    );
+  }
+  const onJob = new Set<string>();
+  const heldNames = new Map<string, Set<string>>();
+  const hold = (name: unknown, urls: readonly unknown[]) => {
+    const key = String(name || "");
+    if (!key) return;
+    const held = heldNames.get(key) || new Set<string>();
+    for (const url of urls) if (url) held.add(String(url));
+    heldNames.set(key, held);
+  };
+  for (const row of data || []) {
+    for (const url of [row.storage_url, row.pdf_url]) {
+      if (url) onJob.add(String(url));
+    }
+    hold(row.file_name, [row.storage_url, row.pdf_url]);
+  }
+  return landing.attachments.map((attachment) => {
+    const urls = [attachment.storage_url, attachment.pdf_url].filter(Boolean)
+      .map(String);
+    if (urls.some((url) => onJob.has(url))) return attachment;
+    const original = String(
+      attachment.file_name || attachment.name || "work-order.pdf",
+    );
+    const heldByOtherBytes = (name: string) => {
+      const held = heldNames.get(name);
+      return Boolean(held) && !urls.some((url) => held!.has(url));
+    };
+    let fileName = original;
+    for (let copy = 1; heldByOtherBytes(fileName); copy++) {
+      fileName = copy === 1
+        ? `${landing.purchaseOrder} ${original}`
+        : `${landing.purchaseOrder} (${copy}) ${original}`;
+    }
+    hold(fileName, urls);
+    return fileName === original
+      ? attachment
+      : { ...attachment, file_name: fileName };
+  });
+}
+
+/**
  * Records a work order on the repair job its claim already has. Every step can
  * run twice: a job with no purchase order takes this one as its own, a job that
  * already holds a different one lists this as an additional work order, and a
@@ -567,6 +629,7 @@ export async function landWorkOrderOnRepairJob(
     metadata,
     landing.jobExternalRef,
   );
+  const attachments = await landingAttachmentsNamedForJob(client, landing);
   let nextMetadata: Record<string, any> | null = null;
   if (relation === "empty") {
     nextMetadata = {
@@ -613,7 +676,7 @@ export async function landWorkOrderOnRepairJob(
       );
     }
   }
-  await deps.attachEvidence(client, [landing.jobId], landing.attachments);
+  await deps.attachEvidence(client, [landing.jobId], attachments);
   const { data: events, error: eventsError } = await client.from("job_events")
     .select("id,detail_json")
     .eq("job_id", landing.jobId)

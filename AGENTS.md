@@ -1547,7 +1547,11 @@ a clean repair work order from MLB or Ambrose. Rules:
   second one is listed, never written over the first), PDF attached, one job
   event, one intake desk item, no message, board stage untouched. A landing
   is final, so `landWorkOrderOnRepairJob` refuses an order with no staged PDF
-  before any write and the case is retried. The Repairs card shows the listed
+  before any write and the case is retried, and it names a PDF after its
+  purchase order when the job already holds that file name for other bytes
+  (the attach key is one document per job and name, and Ambrose names every
+  order `Purchase Order.pdf`; the shared attach would drop it silently).
+  The Repairs card shows the listed
   orders as `builder_additional_purchase_orders` (order, the builder's figure,
   date arrived) beside an unchanged `builder_po_number`: it never picks one
   or adds them up, and `ops.html` does not draw the list yet. The match

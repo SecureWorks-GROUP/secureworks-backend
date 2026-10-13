@@ -484,7 +484,12 @@ Deno.test("several open repair jobs on one claim are a person's call, unless one
   });
 });
 
-function landingClient(job: Record<string, any>) {
+// `documents` are the job's active work order documents as the landing reads
+// them; `false` is that read failing.
+function landingClient(
+  job: Record<string, any>,
+  documents: readonly Record<string, any>[] | false = [],
+) {
   const events: any[] = [];
   const writes: any[] = [];
   return {
@@ -498,6 +503,7 @@ function landingClient(job: Record<string, any>) {
         let update: any = null;
         const query: any = {
           select: () => query,
+          is: () => query,
           eq: (column: string, value: any) => {
             filters[column] = value;
             if (update && table === "jobs" && column === "id") {
@@ -521,14 +527,20 @@ function landingClient(job: Record<string, any>) {
               error: null,
             }),
           then: (resolve: (value: any) => unknown) =>
-            resolve({
-              data: table === "job_events"
-                ? events.filter((event) =>
-                  event.event_type === filters.event_type
-                )
-                : [],
-              error: insert ? null : null,
-            }),
+            resolve(
+              table === "job_documents" && documents === false
+                ? { data: null, error: { message: "job_documents down" } }
+                : {
+                  data: table === "job_events"
+                    ? events.filter((event) =>
+                      event.event_type === filters.event_type
+                    )
+                    : table === "job_documents"
+                    ? documents
+                    : [],
+                  error: insert ? null : null,
+                },
+            ),
         };
         return query;
       },
@@ -715,6 +727,112 @@ Deno.test("job metadata as a trade reads it carries no builder order value", () 
   assertEquals(withoutBuilderOrderValue(plain), plain);
   assertEquals(withoutBuilderOrderValue(null), null);
   assertEquals(withoutBuilderOrderValue(undefined), undefined);
+});
+
+Deno.test("a landed PDF whose name the job holds for other bytes is attached under a name of its own", async () => {
+  const job = () => ({
+    id: "job-1",
+    job_number: "SWR-1",
+    type: "repair",
+    status: "accepted",
+    metadata: {
+      repair_stage: "materials",
+      builder_claim_ref: "MLB-49502",
+      builder_po_number: "PO-11111",
+    },
+  });
+  const pdf = {
+    file_name: "Purchase Order.pdf",
+    storage_url: "staged/second.pdf",
+    pdf_url: "https://example.test/second.pdf",
+  };
+  const attachedNames = async (
+    documents: readonly Record<string, any>[],
+    attachments: readonly any[] = [pdf],
+  ) => {
+    const db = landingClient(job(), documents);
+    let attached: readonly any[] = [];
+    await landWorkOrderOnRepairJob(db.client, { ...LANDING, attachments }, {
+      attachEvidence: (_c: any, _jobIds: readonly string[], atts) => {
+        attached = atts;
+        return Promise.resolve();
+      },
+    });
+    return attached.map((entry: any) => [entry.file_name, entry.storage_url]);
+  };
+  const first = {
+    file_name: "Purchase Order.pdf",
+    storage_url: "staged/first.pdf",
+    pdf_url: null,
+  };
+  // The job's own order holds the name: the landed PDF takes its order number.
+  assertEquals(await attachedNames([first]), [
+    ["PO-69815 Purchase Order.pdf", "staged/second.pdf"],
+  ]);
+  // That name is taken by other bytes too (an earlier version of this order).
+  assertEquals(
+    await attachedNames([first, {
+      file_name: "PO-69815 Purchase Order.pdf",
+      storage_url: "staged/earlier.pdf",
+      pdf_url: null,
+    }]),
+    [["PO-69815 (2) Purchase Order.pdf", "staged/second.pdf"]],
+  );
+  // CONTROL: a free name is kept as the builder sent it.
+  assertEquals(await attachedNames([]), [
+    ["Purchase Order.pdf", "staged/second.pdf"],
+  ]);
+  assertEquals(
+    await attachedNames([{ ...first, file_name: "Other Order.pdf" }]),
+    [["Purchase Order.pdf", "staged/second.pdf"]],
+  );
+  // CONTROL: the same PDF already on the job is left as it is, so a repeat
+  // gives it no second name.
+  assertEquals(
+    await attachedNames([first, {
+      file_name: "PO-69815 Purchase Order.pdf",
+      storage_url: "staged/second.pdf",
+      pdf_url: null,
+    }]),
+    [["Purchase Order.pdf", "staged/second.pdf"]],
+  );
+  // Two PDFs of one order sharing a name do not take each other's place.
+  assertEquals(
+    await attachedNames([], [pdf, {
+      ...pdf,
+      storage_url: "staged/third.pdf",
+      pdf_url: "https://example.test/third.pdf",
+    }]),
+    [
+      ["Purchase Order.pdf", "staged/second.pdf"],
+      ["PO-69815 Purchase Order.pdf", "staged/third.pdf"],
+    ],
+  );
+});
+
+Deno.test("a landing that cannot read the job's documents writes nothing to the job", async () => {
+  const db = landingClient({
+    id: "job-1",
+    job_number: "SWR-1",
+    type: "repair",
+    status: "accepted",
+    metadata: { repair_stage: "scoping", builder_claim_ref: "MLB-49502" },
+  }, false);
+  let attachCalls = 0;
+  await assertRejects(
+    () =>
+      landWorkOrderOnRepairJob(db.client, LANDING, {
+        attachEvidence: () => {
+          attachCalls++;
+          return Promise.resolve();
+        },
+      }),
+    Error,
+    "repair landing document read failed",
+  );
+  assertEquals(attachCalls, 0);
+  assertEquals(db.writes.length, 0);
+  assertEquals(db.events.length, 0);
 });
 
 Deno.test("landing refuses an order with no staged work order PDF, before anything is written", async () => {

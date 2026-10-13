@@ -48,6 +48,14 @@ Rapid Repair order worded that way is read as declared by the builder, not as
 a repair inferred from scope words. Scope wording with no declaration, and a
 repair reached by elimination, stay supervised.
 
+**Declared-only is the rule for this first switch-on** (owner's decision,
+13 Oct 2026). A "clean repair order" means one the builder itself labelled as
+repair work. An MLB or Ambrose order that only reads as a repair from its scope
+wording, or by elimination, stops as a draft for a person even with every field
+read. This is the first thing to widen once real orders have run through the
+automatic path: the run report's `repair_intake.parked_for_review` count of
+`repair_not_declared_by_builder` shows how many orders that would move.
+
 The job is a `repair` job (SWR- number) in WO In, with the builder, claim,
 purchase order and site on it.
 
@@ -124,6 +132,14 @@ An order whose work order PDF cannot be staged (a storage read or write that
 fails, or no uploaded PDF) is **not landed**: nothing is written to the job,
 the case stays `awaiting_job_creation`, and the next scan tries the whole
 landing again. A landing is final, so it is never made without its PDF.
+
+A job holds one active work order document per file name
+(`ux_job_documents_makesafe_attach_key`), and builders reuse one name for every
+order (Ambrose: `Purchase Order.pdf`). So when the job already holds that name
+for a different PDF, the landed order's PDF is attached under a name of its
+own, the purchase order in front of the original
+(`PO-2099930108 Purchase Order.pdf`), and both PDFs are on the job. A PDF
+already on the job is not attached again.
 
 ### Further orders on the Repairs card
 

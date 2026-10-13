@@ -27,6 +27,8 @@ import {
 } from "./makesafe_synthetic_livefire.ts";
 import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
 import { projectInsuranceRepairPipelineRow } from "./insurance_repairs_board.ts";
+import { ensureIntakeWorkOrderEvidence } from "./makesafe_intake_settlement.ts";
+import { MAKESAFE_ATTACH_KEY_CONSTRAINT } from "./makesafe_document_idempotency.ts";
 import {
   AMBROSE_TEST_COMPANY_ID,
   AMBROSE_TEST_SENDER,
@@ -352,7 +354,32 @@ function evalPostgrestExpr(row: any, expr: string): boolean {
 // one job id across cases as a shortcut, and the D3 reattendance path really
 // does bind a second case to its parent's job (it fails with these indexes
 // on); neither is this change's to alter.
-const CASE_INDEX_ENFORCED_STORES = new WeakSet<Store>();
+const LIVE_INDEX_ENFORCED_STORES = new WeakSet<Store>();
+
+// `ux_job_documents_makesafe_attach_key` (20260821093825): a job holds one
+// active document per type and file name, for these types. Enforced for the
+// same registered stores.
+const ATTACH_KEYED_DOCUMENT_TYPES = new Set([
+  "work_order",
+  "makesafe_report",
+  "roof_report",
+  "invoice",
+  "swms",
+]);
+
+function jobDocumentAttachKeyViolated(
+  rows: readonly any[],
+  candidate: any,
+): boolean {
+  if (
+    !ATTACH_KEYED_DOCUMENT_TYPES.has(candidate.type) ||
+    candidate.file_name == null || candidate.superseded_at != null
+  ) return false;
+  return rows.some((row) =>
+    row.job_id === candidate.job_id && row.type === candidate.type &&
+    row.file_name === candidate.file_name && row.superseded_at == null
+  );
+}
 
 function intakeCaseUniqueViolation(
   rows: readonly any[],
@@ -504,6 +531,20 @@ class FakeQuery {
           error: { code: "23505", message: "duplicate key value" },
         };
       }
+      if (
+        this.table === "job_documents" &&
+        LIVE_INDEX_ENFORCED_STORES.has(this.store) &&
+        jobDocumentAttachKeyViolated(this.store[this.table], this.payload)
+      ) {
+        return {
+          data: [],
+          error: {
+            code: "23505",
+            message:
+              `duplicate key value violates unique constraint "${MAKESAFE_ATTACH_KEY_CONSTRAINT}"`,
+          },
+        };
+      }
       const id = `${this.table}-${this.store[this.table].length + 1}`;
       let payload = this.payload;
       if (this.table === "makesafe_intake_cases") {
@@ -539,7 +580,7 @@ class FakeQuery {
           cycle,
           lineage_id: parent ? parent.lineage_id ?? parent.id : id,
         };
-        const violated = CASE_INDEX_ENFORCED_STORES.has(this.store)
+        const violated = LIVE_INDEX_ENFORCED_STORES.has(this.store)
           ? intakeCaseUniqueViolation(this.store[this.table], {
             id,
             ...payload,
@@ -571,7 +612,7 @@ class FakeQuery {
       const matched = this.rows();
       if (
         this.table === "makesafe_intake_cases" &&
-        CASE_INDEX_ENFORCED_STORES.has(this.store)
+        LIVE_INDEX_ENFORCED_STORES.has(this.store)
       ) {
         for (const row of matched) {
           const violated = intakeCaseUniqueViolation(this.store[this.table], {
@@ -743,8 +784,8 @@ function fakeClient(
             });
           },
           upload: () => Promise.resolve({ data: {}, error: null }),
-          getPublicUrl: () => ({
-            data: { publicUrl: "https://example.test/doc.pdf" },
+          getPublicUrl: (path: string) => ({
+            data: { publicUrl: `https://example.test/${path}` },
           }),
         };
       },
@@ -8412,9 +8453,14 @@ const REPAIR_NOW = "2026-07-20T12:00:00.000Z";
 
 // The guarded approval, as far as the scan can see it: it turns the draft into
 // a job and its make-safe detail row, which is what the next order's match reads.
-function intakeApprover(store: Store) {
+// `attachWorkOrders` also attaches the draft's work order PDFs to the new job
+// through the real settlement attach, as the guarded approval does.
+function intakeApprover(
+  store: Store,
+  options: { attachWorkOrders?: boolean } = {},
+) {
   const bodies: any[] = [];
-  const approve = (_client: any, body: any) => {
+  const approve = async (client: any, body: any) => {
     bodies.push(body);
     const draft = store.makesafe_intake_drafts.find((row: any) =>
       row.id === body.draft_id
@@ -8443,16 +8489,31 @@ function intakeApprover(store: Store) {
     });
     draft.status = "approved";
     draft.approved_job_id = job.id;
-    return Promise.resolve({ job: { id: job.id }, job_created: true });
+    if (options.attachWorkOrders) {
+      await ensureIntakeWorkOrderEvidence(
+        client,
+        [job.id],
+        draft.attachments_json,
+        draft.extraction_json,
+        { refreshIdentity: () => Promise.resolve(null) },
+      );
+    }
+    return { job: { id: job.id }, job_created: true };
   };
   return { approve, bodies };
+}
+
+function workOrderDocuments(store: Store, jobId: string) {
+  return store.job_documents.filter((row: any) =>
+    row.job_id === jobId && row.type === "work_order"
+  );
 }
 
 function repairIntakeStore(): Store {
   const store = ambroseIntakeStore();
   store.job_events = [];
   store.job_documents = [];
-  CASE_INDEX_ENFORCED_STORES.add(store);
+  LIVE_INDEX_ENFORCED_STORES.add(store);
   return store;
 }
 
@@ -8647,7 +8708,7 @@ Deno.test("repair intake: replay: five Ambrose repair purchase orders become one
   for (const [postId, fixture, receivedAt] of orders) {
     pushAmbroseMail(store, postId, fixture, receivedAt, `sha-${postId}`);
   }
-  const approver = intakeApprover(store);
+  const approver = intakeApprover(store, { attachWorkOrders: true });
 
   const first = await runRepairScan(store, approver.approve, true);
   assertEquals(first.totals.cases_failed, 0);
@@ -8725,6 +8786,19 @@ Deno.test("repair intake: replay: five Ambrose repair purchase orders become one
   });
   // Both orders' mail is settled.
   for (const mail of store.emails) assert(mail.makesafe_scanned_at);
+  // Every order's PDF is on its job. Ambrose names every one "Purchase
+  // Order.pdf" and a job holds one work order document per name, so the
+  // landed order's PDF is on the shared job under a name of its own.
+  assertEquals(store.job_documents.length, 5);
+  const sharedDocuments = workOrderDocuments(store, shared.id);
+  assertEquals(
+    sharedDocuments.map((row: any) => row.file_name).sort(),
+    ["PO-2099930108 Purchase Order.pdf", "Purchase Order.pdf"],
+  );
+  assertEquals(
+    new Set(sharedDocuments.map((row: any) => row.storage_url)).size,
+    2,
+  );
 
   // The next scan finds nothing to do: no second job, draft, event or notice.
   const second = await runRepairScan(
@@ -8740,6 +8814,7 @@ Deno.test("repair intake: replay: five Ambrose repair purchase orders become one
   assertEquals(landedNotices(store).length, 1);
   assertEquals(shared.metadata.builder_additional_work_orders.length, 1);
   assertEquals(second.totals.cases_failed, 0);
+  assertEquals(store.job_documents.length, 5);
   assertEquals(store.makesafe_intake_cases.length, 5);
   assertEquals(landedCases(store).length, 1);
   assertEquals(landedCases(store)[0].state, "accounted_non_wo");
@@ -9004,6 +9079,85 @@ Deno.test("repair intake: replay: a second purchase order on a job that already 
       .builder_additional_purchase_orders.length,
     1,
   );
+});
+
+Deno.test("repair intake: replay: an order landing on a job that already holds a same-named PDF keeps both PDFs on the job", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-esplanade",
+    jobNumber: "SWR-990301",
+    slug: "acg",
+    claim: "ACG-20999301",
+    metadata: { builder_po_number: "PO-2099930103" },
+  });
+  // The job's own order, attached when the job was made.
+  store.job_documents.push({
+    id: "doc-first-order",
+    job_id: job.id,
+    type: "work_order",
+    file_name: "Purchase Order.pdf",
+    storage_url: "makesafe-deterministic/first-order/sha256-first.pdf",
+    pdf_url: "https://example.test/first-order.pdf",
+    superseded_at: null,
+  });
+  pushAmbroseMail(
+    store,
+    "esplanade-08",
+    {
+      job: "20999301",
+      sequence: "08",
+      address: "25 Sample Esplanade Demo Point WA 6020",
+      kind: "repair",
+      updated: true,
+    },
+    "2026-07-15T06:10:20.000Z",
+    "sha-esplanade-08",
+  );
+  const approver = intakeApprover(store, { attachWorkOrders: true });
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(
+    job.metadata.builder_additional_work_orders.map((entry: any) =>
+      entry.purchase_order
+    ),
+    ["PO-2099930108"],
+  );
+  // Both PDFs are on the job: the first under its name, untouched, and the
+  // landed order's under a name of its own.
+  const documents = workOrderDocuments(store, job.id);
+  assertEquals(
+    documents.map((row: any) => [row.file_name, row.storage_url]).sort(),
+    [
+      [
+        "PO-2099930108 Purchase Order.pdf",
+        documents.find((row: any) => row.id !== "doc-first-order").storage_url,
+      ],
+      [
+        "Purchase Order.pdf",
+        "makesafe-deterministic/first-order/sha256-first.pdf",
+      ],
+    ],
+  );
+  assert(
+    documents.find((row: any) => row.id !== "doc-first-order").storage_url !==
+      "makesafe-deterministic/first-order/sha256-first.pdf",
+  );
+  assertEquals(landedCases(store).length, 1);
+  assertEquals(landedNotices(store).length, 1);
+
+  // A later scan attaches nothing twice.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(workOrderDocuments(store, job.id).length, 2);
+  assertEquals(store.jobs.length, 1);
 });
 
 Deno.test("repair intake: the auto-file brake holds the landing, and releasing it mints no second repair job on the claim", async () => {
