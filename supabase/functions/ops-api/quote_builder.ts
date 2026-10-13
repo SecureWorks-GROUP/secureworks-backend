@@ -67,7 +67,7 @@ const SETTING_KEYS = {
   target_margin_pct: "target_margin_pct",
 } as const;
 const OPEN_VARIATION_STATUSES = new Set(["pending_approval", "sent"]);
-const APPROVED_THEN_MOVED_STATUSES = new Set(["sent", "accepted"]);
+const COUNTED_VARIATION_STATUSES = new Set(["approved", "accepted"]);
 const VARIATION_STATE_EVENTS = new Set([
   "variation_approved",
   "variation_rejected",
@@ -543,7 +543,18 @@ export async function getQuoteBuilderJob(
   }
 
   const versions = (await loadVersions(client, [jobId])).map(versionView);
-  const settings = await loadQuoteBuilderSettings(client);
+  // The pricing goal is the insurance repair lane's. A private job's reply
+  // carries no settings keys at all, so the app opens it as it always has.
+  const pricing: {
+    settings?: Awaited<ReturnType<typeof loadQuoteBuilderSettings>>;
+    can_edit_settings?: boolean;
+  } = lane === "repair"
+    ? {
+      settings: await loadQuoteBuilderSettings(client),
+      // No settings editor is offered yet: the numbers change by database update.
+      can_edit_settings: false,
+    }
+    : {};
   const { data: variationRows, error: variationError } = await client
     .from("job_variations")
     .select("id, variation_number, status, amount, cost_estimate, approved_at")
@@ -600,9 +611,7 @@ export async function getQuoteBuilderJob(
   if (extraDocsError) readError("documents read failed", extraDocsError);
 
   return {
-    settings,
-    // No settings editor is offered yet: the numbers change by database update.
-    can_edit_settings: false,
+    ...pricing,
     job: jobHeader(job, detail, lane),
     scope: {
       chain_id: jobId,
@@ -1256,7 +1265,8 @@ function extraDocumentsInput(raw: unknown, version: any) {
 /**
  * Files the scope of works PDF on the version's job. Same shape as the client
  * quote: found by its version before a new row is written (so a retried issue
- * reuses it), under the chain's run label, never visible to trades. It carries
+ * reuses it, refreshed to this attempt's quote number), under the chain's run
+ * label, never visible to trades. It carries
  * no quote_number column (unique, and the client quote document's) and none of
  * the version's lines, totals or pricing settings.
  */
@@ -1274,6 +1284,14 @@ async function fileExtraDocument(
     pdf_url: urlData.publicUrl,
     storage_url: urlData.publicUrl,
     file_name: extra.path.slice(extra.path.lastIndexOf("/") + 1),
+    metadata: {
+      source: QUOTE_BUILDER_SOURCE,
+      quote_builder_version_id: version.id,
+      quote_builder_document: extra.document,
+      kind: version.kind,
+      chain_id: version.chain_id,
+      quote_number: version.quote_number,
+    },
   };
   const find = async () => {
     const { data, error } = await client.from("job_documents")
@@ -1305,14 +1323,6 @@ async function fileExtraDocument(
         visible_to_trades: false,
         created_by: actor.id,
         uploaded_by: actor.id,
-        metadata: {
-          source: QUOTE_BUILDER_SOURCE,
-          quote_builder_version_id: version.id,
-          quote_builder_document: extra.document,
-          kind: version.kind,
-          chain_id: version.chain_id,
-          quote_number: version.quote_number,
-        },
       })
       .select(columns)
       .single();
@@ -1339,20 +1349,20 @@ const CARD_VERSION_SELECT =
   "id, job_id, kind, chain_id, version, variation_id, charge_total_inc_gst";
 
 /**
- * The variations on these jobs that count toward a job's value: approved, and
- * still counted once an approved one is sent to the client or accepted by them.
+ * The variations on these jobs that count toward a job's value: approved by
+ * the office, sent to the client after an approval, or accepted by the client.
  *
- * `approved` is read off the row. `sent` and `accepted` say nothing about the
- * decision (a variation can be sent before anyone decides, and approved_at is
- * stamped on a rejection too), so for those the newest job event about the
+ * `approved` and `accepted` are read off the row: the client's acceptance
+ * counts whether or not the office approved first. `sent` says nothing about
+ * the decision (a variation can be sent before anyone decides, and approved_at
+ * is stamped on a rejection too), so for it the newest job event about the
  * variation must be an approval: the approval path writes one on every
  * decision, and every issue writes `variation_requested`, so an approval that
- * an issue has since followed no longer stands. A variation sent or accepted
- * without ever being approved, or re-issued and sent again without a fresh
- * approval, is not counted. Neither is a draft, rejected, declined or
- * cancelled one.
+ * an issue has since followed no longer stands. A variation sent without ever
+ * being approved, or re-issued and sent again without a fresh approval, is not
+ * counted. Neither is a draft, pending, rejected, declined or cancelled one.
  */
-async function approvedVariationIds(client: any, jobIds: string[]) {
+async function countedVariationIds(client: any, jobIds: string[]) {
   const rows = await fetchAllRowsInChunks<any>(
     jobIds,
     (chunk) =>
@@ -1363,17 +1373,16 @@ async function approvedVariationIds(client: any, jobIds: string[]) {
     "id",
   );
   const ids = new Set<string>(
-    rows.filter((v) => v.status === "approved").map((v) => String(v.id)),
+    rows.filter((v) => COUNTED_VARIATION_STATUSES.has(String(v.status || "")))
+      .map((v) => String(v.id)),
   );
-  const afterDecision = rows.filter((v) =>
-    APPROVED_THEN_MOVED_STATUSES.has(String(v.status || ""))
-  );
-  if (!afterDecision.length) return ids;
+  const sent = rows.filter((v) => v.status === "sent");
+  if (!sent.length) return ids;
 
   // A variation's events all sit on its one job, so they arrive in one chunk,
   // oldest first: the last one seen is the newest.
   const events = await fetchAllRowsInChunks<any>(
-    afterDecision.map((v) => String(v.job_id)),
+    sent.map((v) => String(v.job_id)),
     (chunk) =>
       client.from("job_events")
         .select("id, event_type, detail_json, created_at")
@@ -1388,7 +1397,7 @@ async function approvedVariationIds(client: any, jobIds: string[]) {
     const id = event.detail_json?.variation_id;
     if (id) lastEvent.set(String(id), event.event_type);
   }
-  for (const v of afterDecision) {
+  for (const v of sent) {
     if (lastEvent.get(String(v.id)) === "variation_approved") {
       ids.add(String(v.id));
     }
@@ -1422,7 +1431,7 @@ export interface QuoteBuilderCardValues {
 /**
  * The money the Repairs card shows for a job quoted in the builder: the latest
  * issued scope's client total plus the latest issued version of every
- * variation that counts (approvedVariationIds). Worked out on every board read
+ * variation that counts (countedVariationIds). Worked out on every board read
  * and stored nowhere, so it cannot go stale and no invoice or send path can
  * read it. A job with pricing of its own (the fence or patio tool's) gets no
  * entry and its card keeps its own figure. Never throws: a failed read offers
@@ -1460,10 +1469,10 @@ export async function loadQuoteBuilderCardValues(
       v.kind === "variation" && v.variation_id && quoted.has(String(v.job_id))
     );
 
-    const [priced, approvedIds] = await Promise.all([
+    const [priced, countedIds] = await Promise.all([
       jobsWithOwnPricing(client, quotedJobIds),
       variations.length
-        ? approvedVariationIds(
+        ? countedVariationIds(
           client,
           variations.map((v) => String(v.job_id)),
         )
@@ -1478,7 +1487,7 @@ export async function loadQuoteBuilderCardValues(
           Number(v.charge_total_inc_gst || 0),
       );
     scopes.forEach(add);
-    variations.filter((v) => approvedIds.has(String(v.variation_id)))
+    variations.filter((v) => countedIds.has(String(v.variation_id)))
       .forEach(add);
     for (const [jobId, total] of totals) {
       if (!priced.has(jobId)) values.set(jobId, cents(total));

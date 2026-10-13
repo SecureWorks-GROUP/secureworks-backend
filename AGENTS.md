@@ -1630,15 +1630,18 @@ next read) and `quoteBuilderCardRow` fills `value` and adds
 own; every other row and every other `pipeline` request is unchanged. A failed
 read fills nothing and reports `pipeline.quote_builder_value` in
 `enrichment_errors`. That read projects ids, version keys and the client total
-only, never `cost_lines` or `charge_lines`. `approvedVariationIds` is the one
-rule for which variations count: once
-approved and still when later `sent` or `accepted`, but only when the
-newest `job_events` row about it (`variation_approved`, `variation_rejected`,
-or the `variation_requested` every issue writes) is an approval: `approved_at`
-is stamped on a rejection too, a variation can be sent or accepted without ever
-being approved, and a re-issue voids the earlier approval. The settings are a goal the
-scoper may ignore, never a rule: nothing on the server refuses, clamps or
-rewrites a charge line or margin for differing from them. The scope of works
+only, never `cost_lines` or `charge_lines`. `countedVariationIds` is the one
+rule for which variations count: `approved` and `accepted` off the row (the
+customer's acceptance counts with or without an office approval), and `sent`
+only when the newest `job_events` row about it (`variation_approved`,
+`variation_rejected`, or the `variation_requested` every issue writes) is an
+approval: `approved_at` is stamped on a rejection too, a variation can be sent
+without ever being approved, and a re-issue voids the earlier approval. The
+settings are a goal the scoper may ignore, never a rule: nothing on the server
+refuses, clamps or rewrites a charge line or margin for differing from them,
+and the table checks a setting's name, never its size. Only a repair-family
+job's `quote_builder_get_job` reply carries `settings` and `can_edit_settings`;
+a private job's has neither key and never reads the table. The scope of works
 PDF is a `job_documents` row of type `other` (a meaningful type no close-out
 reader counts), never `work_order`. The material order list prints our costs
 and is never given an upload slot or filed: `job-pdfs` is a public bucket, so

@@ -13,8 +13,8 @@
 --
 --      They are a goal the app shows the scoper, not a rule: the scoper sets
 --      his own markups, and nothing in the database or in ops-api refuses,
---      clamps or rewrites a quote line for differing from them. The bounds
---      below guard the setting itself against a mistyped value, nothing more.
+--      clamps or rewrites a quote line for differing from them. The owner may
+--      set any number: the table checks the setting's name, never its value.
 --
 --      Why its own table and not org_config: org_config is readable by every
 --      signed-in user of the organisation, trades included (live policy "Users
@@ -45,16 +45,11 @@ CREATE TABLE IF NOT EXISTS public.quote_builder_settings (
   CONSTRAINT quote_builder_settings_pkey PRIMARY KEY (org_id, setting_key),
   CONSTRAINT quote_builder_settings_key_valid CHECK (
     setting_key IN ('insurance_labour_rate_ex_gst', 'insurance_materials_multiplier', 'target_margin_pct')
-  ),
-  CONSTRAINT quote_builder_settings_amount_valid CHECK (
-    (setting_key = 'insurance_labour_rate_ex_gst' AND amount > 0 AND amount <= 1000)
-    OR (setting_key = 'insurance_materials_multiplier' AND amount >= 1 AND amount <= 10)
-    OR (setting_key = 'target_margin_pct' AND amount > 0 AND amount <= 95)
   )
 );
 
 COMMENT ON TABLE public.quote_builder_settings IS
-  'Quote builder pricing settings (docs/quote-builder-contract.md), one row per number: a goal shown to the scoper, never a rule applied to a quote. Read only by ops-api; a missing row means not set.';
+  'Quote builder pricing settings (docs/quote-builder-contract.md), one row per number: a goal shown to the scoper, never a rule applied to a quote, and any number the owner sets is kept. Read only by ops-api; a missing row means not set.';
 COMMENT ON COLUMN public.quote_builder_settings.amount IS
   'insurance_labour_rate_ex_gst: dollars per hour charged, ex GST. insurance_materials_multiplier: client price = our cost x this. target_margin_pct: percent.';
 

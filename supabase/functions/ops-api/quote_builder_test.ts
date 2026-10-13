@@ -1423,8 +1423,8 @@ Deno.test("quote builder: settings come from the settings table, null when a row
       ACTOR,
     );
 
-  // No rows at all: every setting is null, and the key is still sent, because
-  // the app switches line types on from the presence of `settings`.
+  // No rows at all: every setting is null, and a repair job's key is still
+  // sent, because the app switches line types on from the presence of `settings`.
   assertEquals((await open()).settings, {
     labour_rate_ex_gst: null,
     materials_multiplier: null,
@@ -1451,7 +1451,61 @@ Deno.test("quote builder: settings come from the settings table, null when a row
     materials_multiplier: 1.4,
     target_margin_pct: null,
   });
-  assertEquals((await open()).settings.labour_rate_ex_gst, 95);
+  assertEquals((await open()).settings?.labour_rate_ex_gst, 95);
+});
+
+Deno.test("quote builder: a private job opens with no settings keys and no settings read, and still keeps line types", async () => {
+  const store = seed();
+  store.quote_builder_settings = [
+    { org_id: ORG, setting_key: "insurance_labour_rate_ex_gst", amount: 95 },
+    { org_id: ORG, setting_key: "insurance_materials_multiplier", amount: 1.4 },
+    { org_id: ORG, setting_key: "target_margin_pct", amount: 33 },
+  ];
+  const reads: string[] = [];
+  const { client } = makeFakeClient(store, {
+    selectError: (table) => {
+      reads.push(table);
+      return null;
+    },
+  });
+  const made = await createQuoteBuilderPrivateJob(client, {
+    request_id: "88888888-8888-4888-8888-88888888888a",
+    client_name: "Jane Citizen",
+  }, ACTOR);
+  await saveQuoteBuilderVersion(client, {
+    job_id: made.job.id,
+    kind: "scope",
+    cost_lines: [{ ...COST[0], line_type: "labour", unit: "hr" }],
+    charge_lines: CHARGE,
+  }, ACTOR);
+
+  reads.length = 0;
+  const opened = await getQuoteBuilderJob(
+    client,
+    new URLSearchParams(`job_id=${made.job.id}`),
+    ACTOR,
+  );
+  assertEquals(opened.job.lane, "private");
+  assertEquals("settings" in opened, false);
+  assertEquals("can_edit_settings" in opened, false);
+  assertEquals(reads.includes("quote_builder_settings"), false);
+  assertEquals(opened.scope.versions[0].cost_lines[0].line_type, "labour");
+
+  // The insurance repair lane is told the goal, from the same table.
+  reads.length = 0;
+  const repair = await getQuoteBuilderJob(
+    client,
+    new URLSearchParams(`job_id=${REPAIR_JOB}`),
+    ACTOR,
+  );
+  assertEquals(repair.job.lane, "repair");
+  assertEquals(repair.settings, {
+    labour_rate_ex_gst: 95,
+    materials_multiplier: 1.4,
+    target_margin_pct: 33,
+  });
+  assertEquals(repair.can_edit_settings, false);
+  assertEquals(reads.includes("quote_builder_settings"), true);
 });
 
 Deno.test("quote builder: the scope of works is filed on the job beside the quote, and carries no cost figure", async () => {
@@ -1599,6 +1653,101 @@ Deno.test("quote builder: the scope of works is filed on the job beside the quot
     second.version.id,
   ]);
   assertEquals(filed.filter((d) => d.superseded_at == null), []);
+});
+
+Deno.test("quote builder: a retried variation issue refiles the scope of works under the number it is issued with", async () => {
+  const store = seed();
+  let failVariationInsert = true;
+  const { client, upload } = makeFakeClient(store, {
+    insertError: (table) => {
+      if (table !== "job_variations" || !failVariationInsert) return null;
+      failVariationInsert = false;
+      return { message: "statement timeout" };
+    },
+  });
+  const moveRepairStage = stageMover(store, []);
+  const draft = (await saveQuoteBuilderVersion(client, {
+    job_id: REPAIR_JOB,
+    kind: "variation",
+    charge_lines: CHARGE,
+  }, ACTOR)).version;
+  const attempt = async () => {
+    const quote = await quoteBuilderPdfUploadUrl(client, {
+      version_id: draft.id,
+    }, ACTOR);
+    upload("job-pdfs", quote.path);
+    const scope = await quoteBuilderPdfUploadUrl(client, {
+      version_id: draft.id,
+      document: "scope_of_works",
+    }, ACTOR);
+    upload("job-pdfs", scope.path);
+    return {
+      quoteNumber: quote.quote_number,
+      issue: () =>
+        issueQuoteBuilderVersion(
+          client,
+          {
+            version_id: draft.id,
+            pdf_path: quote.path,
+            extra_documents: [{
+              document: "scope_of_works",
+              pdf_path: scope.path,
+            }],
+          },
+          ACTOR,
+          { moveRepairStage },
+        ),
+    };
+  };
+  const filedScope = () =>
+    store.job_documents.filter((d) => d.type === "other");
+
+  // The first attempt files both PDFs, then dies creating the variation.
+  const first = await attempt();
+  assertEquals(first.quoteNumber, "SWR-26101-V1.1");
+  let died = false;
+  await first.issue().catch(() => {
+    died = true;
+  });
+  assert(died, "the first issue was meant to fail at the variation insert");
+  assertEquals(store.job_variations.length, 0);
+  assertEquals(store.quote_builder_versions[0].status, "draft");
+  assertEquals(filedScope().length, 1);
+  assertEquals(filedScope()[0].metadata.quote_number, "SWR-26101-V1.1");
+  const firstFileName = filedScope()[0].file_name;
+
+  // Another variation on the job takes number 1 before the retry.
+  store.job_variations.push({
+    id: "66666666-6666-4666-8666-666666666666",
+    job_id: REPAIR_JOB,
+    variation_number: 1,
+    status: "pending_approval",
+  });
+  assertEquals(await code(first.issue()), "quote_number_changed");
+
+  const second = await attempt();
+  assertEquals(second.quoteNumber, "SWR-26101-V2.1");
+  const issued = await second.issue();
+  assertEquals(issued.version.status, "issued");
+  assertEquals(issued.document.quote_number, "SWR-26101-V2.1");
+
+  // One scope of works row, reused, now reading the number it was issued under.
+  assertEquals(filedScope().length, 1);
+  const doc = filedScope()[0];
+  assertEquals(doc.metadata.quote_number, "SWR-26101-V2.1");
+  assertEquals(doc.metadata.quote_builder_version_id, draft.id);
+  assertEquals(doc.metadata.quote_builder_document, "scope_of_works");
+  assert(doc.file_name !== firstFileName);
+  assert(String(doc.file_name).includes("V2.1"), doc.file_name);
+  const opened = await getQuoteBuilderJob(
+    client,
+    new URLSearchParams(`job_id=${REPAIR_JOB}`),
+    ACTOR,
+  );
+  assertEquals(
+    opened.extra_documents.map((d: any) => [d.document, d.quote_number]),
+    [["scope_of_works", "SWR-26101-V2.1"]],
+  );
 });
 
 Deno.test("quote builder: the material order list is never given a slot or filed, and never fails an issue", async () => {
@@ -1910,7 +2059,7 @@ Deno.test("quote builder: issuing never writes the job's pricing, and the Repair
   assertEquals(fencingRows.some((row) => "value_source" in row), false);
 });
 
-Deno.test("quote builder: a variation counts on the Repairs card only while its approval stands, and a declined one drops out on the next read", async () => {
+Deno.test("quote builder: a variation counts on the Repairs card once approved, sent after approval or accepted, and a declined one drops out on the next read", async () => {
   const store = seed();
   const { client, upload } = makeFakeClient(store);
   const variation = (id: string) =>
@@ -1936,15 +2085,15 @@ Deno.test("quote builder: a variation counts on the Repairs card only while its 
   accept(approvedOne);
   assertEquals(await cardValue(client), 935);
 
-  // Sent before anyone decided, then accepted on the client's link: never
-  // approved, so never counted.
+  // Sent before anyone decided: not counted while it is only sent. Accepted on
+  // the client's link: counted, with no office approval at all.
   const neverDecided = (await issueVariationOn(store, client, upload, 1000))
     .variation
     .id as string;
   send(neverDecided);
   assertEquals(await cardValue(client), 935);
   accept(neverDecided);
-  assertEquals(await cardValue(client), 935);
+  assertEquals(await cardValue(client), 2035);
 
   // Rejected (which stamps approved_at too), then sent anyway: not counted.
   const rejectedOne = (await issueVariationOn(store, client, upload, 3000))
@@ -1953,21 +2102,36 @@ Deno.test("quote builder: a variation counts on the Repairs card only while its 
   await decideThroughDispatch(client, rejectedOne, false);
   assert(variation(rejectedOne).approved_at);
   send(rejectedOne);
-  assertEquals(await cardValue(client), 935);
+  assertEquals(await cardValue(client), 2035);
+  // The client accepts it all the same: counted, the rejection notwithstanding.
+  accept(rejectedOne);
+  assertEquals(await cardValue(client), 5335);
+  // Back to sent with the rejection still its newest decision: off again.
+  send(rejectedOne);
+  assertEquals(await cardValue(client), 2035);
   // Re-decided as approved while sent, then sent again: counted from then on.
   await decideThroughDispatch(client, rejectedOne, true);
   send(rejectedOne);
-  assertEquals(await cardValue(client), 4235);
+  assertEquals(await cardValue(client), 5335);
 
   // The customer declines it on their link, with no builder action at all: it
-  // is off the card on the very next read. So is a draft or cancelled one.
-  for (const status of ["declined", "draft", "cancelled", "pending_approval"]) {
+  // is off the card on the very next read. So is a draft, cancelled, pending or
+  // rejected one.
+  for (
+    const status of [
+      "declined",
+      "draft",
+      "cancelled",
+      "pending_approval",
+      "rejected",
+    ]
+  ) {
     variation(rejectedOne).status = status;
-    assertEquals(await cardValue(client), 935);
+    assertEquals(await cardValue(client), 2035);
   }
   // Approved with the ops button, outside the builder: on the card at once.
   variation(rejectedOne).status = "approved";
-  assertEquals(await cardValue(client), 4235);
+  assertEquals(await cardValue(client), 5335);
 
   // Nothing above touched the job's own pricing.
   assertEquals(

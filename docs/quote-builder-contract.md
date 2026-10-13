@@ -166,24 +166,33 @@ when the charge is zero).
 
 `quote_builder_settings` (`20261013160000`) holds one row per number:
 
-| `setting_key` | Meaning | Allowed |
-|---|---|---|
-| `insurance_labour_rate_ex_gst` | Dollars per hour charged for labour on an insurance repair, ex GST | above 0, up to 1000 |
-| `insurance_materials_multiplier` | Client price of a material = our cost times this | 1 to 10 |
-| `target_margin_pct` | Target gross margin, percent | above 0, up to 95 |
+| `setting_key` | Meaning |
+|---|---|
+| `insurance_labour_rate_ex_gst` | Dollars per hour charged for labour on an insurance repair, ex GST |
+| `insurance_materials_multiplier` | Client price of a material = our cost times this |
+| `target_margin_pct` | Target gross margin, percent |
 
 The first two are seeded by the migration with the owner's starting values of
 13 Oct 2026. The target has no row until the owner names one. The numbers are
-changed by a database update (the bounds above are a database check); there is
-no settings write action yet, so `can_edit_settings` is always `false`.
+changed by a database update; there is no settings write action yet, so
+`can_edit_settings` is always `false`. The table checks the setting's name and
+keeps one row per setting. It holds no rule about a number's size: the owner
+may set any number.
 
 The table has row-level security on with no policy and is revoked from `anon`
 and `authenticated`, like `quote_builder_versions`. It is not `org_config`:
 that table is readable by every signed-in user of the organisation, trades
 included, and what we charge a builder per hour is not a trade's to read.
 
-`quote_builder_get_job` returns them as `settings` (5.2). A missing row, or a
-value that is not a number, is `null`. The server has no fallback number.
+`quote_builder_get_job` returns them as `settings` (5.2) for an insurance
+repair-family job. A missing row, or a value that is not a number, is `null`.
+The server has no fallback number.
+
+A private job (section 4) gets no `settings` and no `can_edit_settings` key at
+all, and the settings table is not read for it: the figures are the insurance
+lane's goal, and the private quote lane opens exactly as it did before this
+table existed. Line types on a saved cost line are kept and returned on either
+lane.
 
 **The settings are a goal, not a rule.** The scoper decides his own markups;
 the rate, the multiplier and the target margin are what the owner is aiming
@@ -237,24 +246,25 @@ part figure, such as the scope without its approved variation), the board still
 loads, and the response says so: `degraded: true` with
 `pipeline.quote_builder_value` in `enrichment_errors`.
 
-A variation counts once it is approved, and keeps counting after it is sent to
-the client and after the client accepts it:
+A variation counts once the office approves it, keeps counting after an
+approved one is sent to the client, and counts once the client accepts it:
 
 | `job_variations.status` | Counts |
 |---|---|
 | `approved` | Yes. |
-| `sent`, `accepted` | Only if the newest event about it is an approval (below). |
+| `accepted` | Yes: the client's acceptance counts, with or without an office approval first. |
+| `sent` | Only if the newest event about it is an approval (below). |
 | `draft`, `pending_approval`, `rejected`, `declined`, `cancelled`, anything else | No. |
 
-`sent` and `accepted` do not say whether anyone approved the variation: the ops
-"send variation" action and the client's accept link set them from any status,
-so a variation can be sent, and accepted, without ever being approved. That
-case is not counted. Nor can `approved_at` settle it, because the approval path
-stamps it on a rejection as well. The record that does is the job event trail
-naming the variation (`job_events`): the approval path writes
-`variation_approved` or `variation_rejected` on every decision, and every issue
-of the variation writes `variation_requested`. The newest of those three must
-be `variation_approved`. So a variation with no approval is not counted, and
+`sent` does not say whether anyone approved the variation: the ops "send
+variation" action sets it from any status, so a variation can be sent without
+ever being approved. That case is not counted until the client accepts it. Nor
+can `approved_at` settle it, because the approval path stamps it on a rejection
+as well. The record that does is the job event trail naming the variation
+(`job_events`): the approval path writes `variation_approved` or
+`variation_rejected` on every decision, and every issue of the variation writes
+`variation_requested`. For a `sent` variation the newest of those three must be
+`variation_approved`. So a sent variation with no approval is not counted, and
 neither is one that was approved, re-issued as a new version and sent again
 without a fresh approval: the issue came after the approval, and nobody has
 approved the new version.
@@ -364,11 +374,12 @@ Returns everything the app needs to open a job:
 }
 ```
 
-- `settings` is always present (section 2c): each value a number or `null`. Its
-  presence is what switches the app's line types and pricing bar on. The values
-  shown above are placeholders, not the real numbers.
-- `can_edit_settings` is `false` for everyone until a settings write action
-  exists.
+- `settings` is present on every insurance repair-family job (section 2c): each
+  value a number or `null`. Its presence is what switches the app's line types
+  and pricing bar on. The values shown above are placeholders, not the real
+  numbers. A private job's reply has no `settings` key.
+- `can_edit_settings` is sent with `settings` and is `false` for everyone until
+  a settings write action exists. A private job's reply has no such key.
 - `documents` is the client quote PDFs only. The scope of works PDFs filed at
   issue are in `extra_documents`, one entry per filed PDF (`document` is always
   `scope_of_works`); `superseded` is true once a later version of the same chain

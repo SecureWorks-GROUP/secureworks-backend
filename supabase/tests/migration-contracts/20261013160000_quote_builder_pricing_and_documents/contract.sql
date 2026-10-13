@@ -1,7 +1,7 @@
 -- Contract: 20261013160000_quote_builder_pricing_and_documents. The pricing settings sit in a table no browser role can read,
--- seeded with the owner's two starting values and no target margin; a setting outside its bounds is
--- refused; an issued quote holds at most one filed copy of each extra document; and every other
--- job_documents row is left exactly as free as before.
+-- seeded with the owner's two starting values and no target margin; only a known setting is kept,
+-- one row each, at whatever number the owner sets; an issued quote holds at most one filed copy of
+-- each extra document; and every other job_documents row is left exactly as free as before.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -16,7 +16,7 @@ EXCEPTION WHEN check_violation OR unique_violation OR foreign_key_violation THEN
  RETURN true;
 END $$;
 
--- 1. Settings: locked away from the browser, seeded, bounded.
+-- 1. Settings: locked away from the browser, seeded, one row per known setting.
 SELECT pg_temp.qb_assert(
  (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.quote_builder_settings'::regclass),
  'row level security must be on for quote_builder_settings');
@@ -45,25 +45,18 @@ SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
  INSERT INTO public.quote_builder_settings (setting_key, amount) VALUES ('labour_rate', 100)
 $q$), 'an unknown setting key must be refused');
 SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
- UPDATE public.quote_builder_settings SET amount = 0 WHERE setting_key = 'insurance_labour_rate_ex_gst'
-$q$), 'a labour rate of zero must be refused');
-SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
- UPDATE public.quote_builder_settings SET amount = 1000.01 WHERE setting_key = 'insurance_labour_rate_ex_gst'
-$q$), 'a labour rate above 1000 must be refused');
-SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
- UPDATE public.quote_builder_settings SET amount = 0.9 WHERE setting_key = 'insurance_materials_multiplier'
-$q$), 'a materials multiplier below 1 must be refused: it would sell materials under cost');
-SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
- INSERT INTO public.quote_builder_settings (setting_key, amount) VALUES ('target_margin_pct', 96)
-$q$), 'a target margin above 95 must be refused');
-SELECT pg_temp.qb_assert(pg_temp.qb_refused($q$
  INSERT INTO public.quote_builder_settings (setting_key, amount) VALUES ('insurance_labour_rate_ex_gst', 130)
 $q$), 'one row per setting: a second labour rate row must be refused');
--- The owner's later changes are ordinary writes inside the bounds.
+-- The owner's later changes are ordinary writes, at any number he chooses: the figures are a goal
+-- shown to the scoper, so the table holds no rule about their size.
 UPDATE public.quote_builder_settings SET amount = 135 WHERE setting_key = 'insurance_labour_rate_ex_gst';
-INSERT INTO public.quote_builder_settings (setting_key, amount) VALUES ('target_margin_pct', 30);
+UPDATE public.quote_builder_settings SET amount = 0.9 WHERE setting_key = 'insurance_materials_multiplier';
+INSERT INTO public.quote_builder_settings (setting_key, amount) VALUES ('target_margin_pct', 96);
 SELECT pg_temp.qb_assert(
- (SELECT count(*) FROM public.quote_builder_settings) = 3, 'a target margin inside its bounds must be accepted');
+ (SELECT jsonb_object_agg(setting_key, amount) FROM public.quote_builder_settings
+  WHERE org_id = '00000000-0000-0000-0000-000000000001')
+ = '{"insurance_labour_rate_ex_gst": 135, "insurance_materials_multiplier": 0.9, "target_margin_pct": 96}'::jsonb,
+ 'the owner must be able to set any number on each of the three settings');
 
 -- 2. Extra documents: one of each per version; nothing else on job_documents is narrowed.
 INSERT INTO public.jobs (id, org_id, status, type)
