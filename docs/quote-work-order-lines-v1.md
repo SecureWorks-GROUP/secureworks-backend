@@ -30,7 +30,8 @@ Code:
 - `supabase/functions/ops-api/job_work_order_quote_fill.ts`: the reads and the one write.
 - `job_work_orders.ts` calls the fill when staff open or read a draft, and in the backfill.
 
-Tests: `quote_work_order_lines_test.ts` and `job_work_order_quote_fill_test.ts`.
+Tests: `quote_work_order_lines_test.ts`, `job_work_order_quote_fill_test.ts` and
+`job_work_order_quote_fill_handler_test.ts`.
 
 ## Which quote
 
