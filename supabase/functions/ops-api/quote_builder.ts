@@ -1234,7 +1234,10 @@ function extraDocumentsInput(raw: unknown, version: any) {
       continue;
     }
     if (!isExtraDocument(document)) {
-      fail("invalid_input", "extra_documents[].document must be scope_of_works");
+      fail(
+        "invalid_input",
+        "extra_documents[].document must be scope_of_works",
+      );
     }
     if (seen.has(document)) {
       fail("invalid_input", `extra_documents names ${document} twice`);

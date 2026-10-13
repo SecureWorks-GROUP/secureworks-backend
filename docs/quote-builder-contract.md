@@ -62,7 +62,7 @@ would not.
 | Scope of works PDF | Storage bucket `job-pdfs` + one `job_documents` row (`type='other'`, `metadata.quote_builder_document = 'scope_of_works'`) | Filed at issue beside the quote when the app sends it (5.6). It carries no prices. Never visible to trades. |
 | Material order list | Not filed anywhere | It prints our costs, and `job-pdfs` is a public bucket (read in production, 13 Oct 2026), so the server gives it no upload slot and files no document. The app shows and prints it on demand from the version's saved cost lines (5.6). |
 | Pricing settings (labour rate, materials multiplier, target margin) | `quote_builder_settings` (section 2c) | Read only by `ops-api`. |
-| The job's value | `jobs.pricing_json`, behind a guard (section 2d) | Written on a scope issue and a variation approval, so the Repairs card shows money. |
+| The job's value | `jobs.pricing_json`, behind a guard (section 2d) | Written on every issue and every variation decision, so the Repairs card shows money. |
 | Variations | `job_variations` (existing) + a `kind='variation'` version chain | The variation row is created when Hugo issues it. |
 | Client details on a private job | `jobs` (`client_name`, `client_phone`, `client_email`, `site_address`, `site_suburb`) | Copied into each version's `client_snapshot`. |
 | Builder / customer (e.g. ML Builders) on a repair job | `makesafe_job_details.requesting_company_id` -> `makesafe_companies` | Read only. Adding Ambrose Construct Group is the intake worker's job. |
@@ -565,8 +565,8 @@ Then it:
   `cost_estimate` = cost total ex GST, `status='pending_approval'`. A variation
   already approved or rejected cannot be re-issued (`409 variation_decided`;
   start a new variation instead);
-- for a scope version, writes the job's value (section 2d), before the stage
-  move;
+- writes the job's value (section 2d), for a scope and a variation alike,
+  before the stage move;
 - on a repair job, moves the stage forward per section 3.
 
 Issue is safe to retry: a retry after a partial failure reuses the
@@ -684,7 +684,6 @@ Open design points the first attempt raised. The follow-up starts from these:
    record the signed-in user's id, and the email only on the event.
 
 ## 7. Out of scope for v1
-
 
 GHL, Xero, sending anything to a client, builder, supplier or trade, intake
 changes, the Ambrose Construct Group builder record, actual-cost capture, moving

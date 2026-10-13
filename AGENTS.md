@@ -1541,15 +1541,15 @@ plus the migration contract.
 Since `20261013160000`: its pricing numbers (insurance labour rate, materials
 multiplier, target margin) live only in `quote_builder_settings`, never in code,
 the contract doc or `org_config` (every signed-in user, trades included, can
-read `org_config` through its live policy). Issuing a scope and approving a
-variation write the job's value to `jobs.pricing_json` (`jobs.quoted_value` is
+read `org_config` through its live policy). Every issue and every variation
+decision writes the job's value to `jobs.pricing_json` (`jobs.quoted_value` is
 generated from it) only through `quoteBuilderMayWriteJobValue`: `repair` and
 `miscellaneous` jobs whose pricing is empty or already `source: quote_builder`;
 never widen it to `fencing` or `makesafe` typed repair cards, because
 `createInvoice` prices a job from `pricing_json` when given no lines (such a
 card with no other tool's pricing answers `job_type_not_valued_here`, never
-`priced_by_another_tool`). The value is rewritten on every issue and every
-variation decision, never only on approvals. A variation counts toward it once
+`priced_by_another_tool`). A rejection and a variation re-issue rewrite it
+too, never only approvals. A variation counts toward it once
 approved and still counts when later `sent` or `accepted`, but only when the
 newest `job_events` row about it (`variation_approved`, `variation_rejected`,
 or the `variation_requested` every issue writes) is an approval: `approved_at`
