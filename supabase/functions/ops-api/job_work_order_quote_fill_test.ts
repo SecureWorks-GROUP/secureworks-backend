@@ -354,7 +354,7 @@ Deno.test("a save that lands between the read and the fill wins; the fill writes
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);
 });
 
-Deno.test("the quote used is the revision frozen at acceptance, then the newest frozen one, then live pricing (flagged)", async () => {
+Deno.test("the quote used is the revision frozen at acceptance, even once superseded; then the newest frozen one (flagged); then live pricing (flagged)", async () => {
   const newerPricing = {
     line_items: [{
       unit: "m",
@@ -365,6 +365,9 @@ Deno.test("the quote used is the revision frozen at acceptance, then the newest 
     labourCostEstimate: 175,
   };
   const db = baseDb();
+  // A re-quote after acceptance freezes a newer revision and supersedes the
+  // accepted one.
+  db.tables.scope_revisions[0].status = "superseded";
   db.tables.scope_revisions.push({
     id: REV_NEWER,
     job_id: JOB,
@@ -374,19 +377,25 @@ Deno.test("the quote used is the revision frozen at acceptance, then the newest 
     pricing_canonical_text: JSON.stringify(newerPricing),
   });
   let p = await previewQuoteWorkOrderLines(db, JOB);
-  assertEquals([p.quote.source, p.quote.scope_revision_id], [
+  assertEquals([p.quote.source, p.quote.scope_revision_id, p.quote.flags], [
     "accepted_revision",
     REV_ACCEPTED,
+    [],
   ]);
   assertEquals(p.result.agreed_labour_ex, ACCEPTED_AGREED);
 
   db.tables.jobs[0].expected_costs = null;
   p = await previewQuoteWorkOrderLines(db, JOB);
-  assertEquals([p.quote.source, p.quote.scope_revision_id], [
+  assertEquals([p.quote.source, p.quote.scope_revision_id, p.quote.flags], [
     "frozen_revision",
     REV_NEWER,
+    ["accepted_revision_missing"],
   ]);
+  assertEquals(p.result.needs_review, true);
   assertEquals(p.result.agreed_labour_ex, 175);
+  assert(
+    p.result.lines.every((l) => l.flags.includes("accepted_revision_missing")),
+  );
 
   db.tables.scope_revisions = [];
   db.tables.jobs[0].pricing_json = ACCEPTED_PRICING;
@@ -398,22 +407,47 @@ Deno.test("the quote used is the revision frozen at acceptance, then the newest 
   assertEquals(db.writes(), []);
 });
 
-Deno.test("preview: by job number, writes nothing; an unknown job is a 404", async () => {
+Deno.test("a fill from an unfrozen quote keeps its review flag on every stored line", async () => {
+  const db = baseDb({ scope_revisions: [] });
+  db.tables.jobs[0].expected_costs = null;
+  db.tables.jobs[0].pricing_json = ACCEPTED_PRICING;
+  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals([r.quote_fill.filled, r.quote_fill.needs_review], [true, true]);
+  const stored = db.tables.work_orders[0].scope_items;
+  assert(stored.length > 0);
+  assert(stored.every((l: any) => l.flags.includes("quote_not_frozen")));
+  // A later read no longer fills, and the flag is still on the draft.
+  const again: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(again.quote_fill, null);
+  assert(
+    again.work_order.scope_items.every((l: any) =>
+      l.flags.includes("quote_not_frozen")
+    ),
+  );
+});
+
+Deno.test("preview: a job id only, writes nothing; an unknown job is a 404", async () => {
   const db = baseDb();
-  const p = await previewQuoteWorkOrderLines(db, "swf-261527");
+  const p = await previewQuoteWorkOrderLines(db, JOB);
   assertEquals(p.job.id, JOB);
   assertEquals(p.result.schema, "quote-work-order-lines.v1");
   assertEquals(db.writes(), []);
   await assertRejects(
-    () => previewQuoteWorkOrderLines(db, "SWF-999999"),
+    () =>
+      previewQuoteWorkOrderLines(db, "22222222-2222-4222-8222-222222222222"),
     QuoteFillError,
     "not found",
   );
-  await assertRejects(
-    () => previewQuoteWorkOrderLines(db, ""),
-    QuoteFillError,
-    "job_id required",
-  );
+  // A missing job id or a job number is refused before any query.
+  const before = db.calls.length;
+  for (const ref of ["", "SWF-261527", "swf-261527"]) {
+    await assertRejects(
+      () => previewQuoteWorkOrderLines(db, ref),
+      QuoteFillError,
+      "job_id required",
+    );
+  }
+  assertEquals(db.calls.length, before);
 });
 
 Deno.test("an unreadable cost table never fills on wrong figures and never fails the read", async () => {

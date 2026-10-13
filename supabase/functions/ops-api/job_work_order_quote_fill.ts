@@ -99,48 +99,41 @@ function parsePricing(textValue: unknown): Record<string, any> | null {
   }
 }
 
-async function readJobForQuote(client: any, jobRef: string) {
-  const ref = String(jobRef || "").trim();
-  if (!ref) throw new QuoteFillError(400, "job_id_required", "job_id required");
-  const select =
-    "id, org_id, job_number, type, status, expected_costs, pricing_json";
-  const byId = UUID_RE.test(ref);
-  const find = async (column: "id" | "job_number", value: string) => {
-    const { data, error } = await client.from("jobs").select(select)
-      .eq(column, value).limit(1);
-    if (error) {
-      throw new QuoteFillError(
-        500,
-        "job_unreadable",
-        "The job could not be read",
-      );
-    }
-    return Array.isArray(data) ? data[0] ?? null : data ?? null;
-  };
-  let job = await find(byId ? "id" : "job_number", ref);
-  if (!job && !byId && ref !== ref.toUpperCase()) {
-    job = await find("job_number", ref.toUpperCase());
+async function readJobForQuote(client: any, jobId: string) {
+  const id = String(jobId || "").trim();
+  if (!UUID_RE.test(id)) {
+    throw new QuoteFillError(400, "job_id_required", "job_id required");
   }
+  const { data, error } = await client.from("jobs")
+    .select(
+      "id, org_id, job_number, type, status, expected_costs, pricing_json",
+    )
+    .eq("id", id)
+    .limit(1);
+  if (error) {
+    throw new QuoteFillError(
+      500,
+      "job_unreadable",
+      "The job could not be read",
+    );
+  }
+  const job = Array.isArray(data) ? data[0] ?? null : data ?? null;
   if (!job) {
-    throw new QuoteFillError(404, "job_not_found", `Job ${ref} not found`);
+    throw new QuoteFillError(404, "job_not_found", `Job ${id} not found`);
   }
   return job;
 }
 
-// The accepted quote: the scope revision frozen at acceptance
-// (jobs.expected_costs.scope_revision_id), else the newest frozen revision,
-// else the job's live pricing (flagged quote_not_frozen).
-async function readAcceptedQuote(client: any, job: any) {
-  const flags: string[] = [];
-  const acceptedId = typeof job?.expected_costs?.scope_revision_id === "string"
-    ? job.expected_costs.scope_revision_id
-    : null;
-  const { data, error } = await client.from("scope_revisions")
-    .select("id, revision_number, status, frozen_at, pricing_canonical_text")
-    .eq("job_id", job.id)
-    .eq("status", "frozen")
-    .order("revision_number", { ascending: false })
-    .limit(20);
+const REVISION_COLUMNS =
+  "id, revision_number, status, frozen_at, pricing_canonical_text";
+
+async function readRevisions(
+  client: any,
+  query: (q: any) => any,
+): Promise<any[]> {
+  const { data, error } = await query(
+    client.from("scope_revisions").select(REVISION_COLUMNS),
+  );
   if (error) {
     throw new QuoteFillError(
       500,
@@ -148,33 +141,55 @@ async function readAcceptedQuote(client: any, job: any) {
       "The job's frozen quote could not be read",
     );
   }
-  const revisions = Array.isArray(data) ? data : [];
-  const accepted = acceptedId
-    ? revisions.find((r: any) => r.id === acceptedId) ?? null
+  return Array.isArray(data) ? data : [];
+}
+
+// The accepted quote: the scope revision frozen at acceptance
+// (jobs.expected_costs.scope_revision_id), read whether it is still frozen or
+// was superseded by a later revision. Without it, the newest frozen revision,
+// flagged accepted_revision_missing; else the job's live pricing (flagged
+// quote_not_frozen).
+async function readAcceptedQuote(client: any, job: any) {
+  const flags: string[] = [];
+  const acceptedId = typeof job?.expected_costs?.scope_revision_id === "string"
+    ? job.expected_costs.scope_revision_id
     : null;
-  const newest = revisions
+  const found = (revision: any, source: QuoteSource, pricing: any) => ({
+    pricing,
+    quote: {
+      source,
+      scope_revision_id: String(revision.id),
+      frozen_at: revision.frozen_at ?? null,
+      flags,
+    },
+  });
+  if (acceptedId) {
+    const [accepted] = await readRevisions(client, (q) =>
+      q.eq("job_id", job.id)
+        .eq("id", acceptedId)
+        .in("status", ["frozen", "superseded"])
+        .limit(1));
+    if (accepted) {
+      const pricing = parsePricing(accepted.pricing_canonical_text);
+      if (pricing) return found(accepted, "accepted_revision", pricing);
+      flags.push("frozen_quote_unreadable");
+    }
+  }
+  const frozen = await readRevisions(client, (q) =>
+    q.eq("job_id", job.id)
+      .eq("status", "frozen")
+      .order("revision_number", { ascending: false })
+      .limit(20));
+  const newest = frozen
     .slice()
     .sort((a: any, b: any) =>
       Number(b.revision_number || 0) - Number(a.revision_number || 0)
     )[0] ?? null;
-  for (
-    const [revision, source] of [
-      [accepted, "accepted_revision"],
-      [newest, "frozen_revision"],
-    ] as const
-  ) {
-    if (!revision) continue;
-    const pricing = parsePricing(revision.pricing_canonical_text);
+  if (newest) {
+    const pricing = parsePricing(newest.pricing_canonical_text);
     if (pricing) {
-      return {
-        pricing,
-        quote: {
-          source: source as QuoteSource,
-          scope_revision_id: String(revision.id),
-          frozen_at: revision.frozen_at ?? null,
-          flags,
-        },
-      };
+      flags.push("accepted_revision_missing");
+      return found(newest, "frozen_revision", pricing);
     }
     if (!flags.includes("frozen_quote_unreadable")) {
       flags.push("frozen_quote_unreadable");
@@ -236,7 +251,16 @@ async function linesForJob(
     pricing,
     costTable,
   });
-  if (quote.flags.length > 0) result.needs_review = true;
+  // The quote's and the result's review flags ride on every line, so they
+  // stay on the stored draft for the approver (scope_items past description,
+  // qty and unit are office-only).
+  const reviewFlags = [...quote.flags, ...result.flags];
+  if (reviewFlags.length > 0) result.needs_review = true;
+  for (const line of result.lines) {
+    for (const flag of reviewFlags) {
+      if (!line.flags.includes(flag)) line.flags.push(flag);
+    }
+  }
   return {
     job: {
       id: String(job.id),
@@ -252,9 +276,9 @@ async function linesForJob(
 /** Read-only preview: the work order lines the accepted quote gives a job. */
 export async function previewQuoteWorkOrderLines(
   client: any,
-  jobRef: string,
+  jobId: string,
 ): Promise<JobQuoteWorkOrderLines> {
-  const job = await readJobForQuote(client, jobRef);
+  const job = await readJobForQuote(client, jobId);
   return await linesForJob(client, job);
 }
 
@@ -328,21 +352,25 @@ export async function fillJobWorkOrderDraftFromQuote(
   }
   // Ids and counts only: job_events is readable by every signed-in user of
   // the org, trades included, so no amount goes here (job-work-orders-v1).
-  try {
-    await client.from("job_events").insert({
-      job_id: job.id,
-      event_type: "job_work_order_draft_filled_from_quote",
-      detail_json: {
-        work_order_id: written.id,
-        wo_number: written.wo_number,
-        scope_revision_id: quote.scope_revision_id,
-        quote_source: quote.source,
-        line_count: result.lines.length,
-        needs_review: result.needs_review,
-      },
-    });
-  } catch {
+  const { error: eventError } = await client.from("job_events").insert({
+    job_id: job.id,
+    event_type: "job_work_order_draft_filled_from_quote",
+    detail_json: {
+      work_order_id: written.id,
+      wo_number: written.wo_number,
+      scope_revision_id: quote.scope_revision_id,
+      quote_source: quote.source,
+      line_count: result.lines.length,
+      needs_review: result.needs_review,
+    },
+  });
+  if (eventError) {
     // The fill stands even when its event cannot be written.
+    console.error(
+      "[ops-api] job work order: fill event not written:",
+      job.id,
+      eventError.message,
+    );
   }
   return {
     filled: true,

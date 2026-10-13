@@ -10,8 +10,18 @@ on the work order as the allocation towards the trades." His answers on the plan
 3. Fencing is shown as quoted, per metre, with hours only where the quote has hours.
 4. The quote's own cost table is the one rate source.
 
-Approved 13 Oct 2026 ("go"). This slice is plan steps 2 and 3: the builder, and filling
-each job work order draft (`docs/job-work-orders-v1.md`) from it. Variations and the
+Approved 13 Oct 2026 ("go"). This slice does four things:
+
+- the "work order from the quote" builder (plan step 2);
+- filling an untouched job work order draft (`docs/job-work-orders-v1.md`) from it when
+  staff open it, when staff read it, and in the backfill's apply (part of plan step 3);
+- the backfill fill for open jobs;
+- the staff preview action `quote_work_order_lines`.
+
+Not in this slice: retiring the old office create work order form (the crew
+`create_work_order` path and its dashboard form) is a tracked follow-up of step 3. The
+fence and patio quoting tool source fixes (step 1: every extra marked Labour or Material,
+labour lines carrying hours and a cost per hour) are separate PRs. Variations and the
 screens are later steps.
 
 Code:
@@ -26,9 +36,16 @@ Tests: `quote_work_order_lines_test.ts` and `job_work_order_quote_fill_test.ts`.
 
 The accepted quote is the scope revision frozen at acceptance
 (`jobs.expected_costs.scope_revision_id`, read from `scope_revisions.pricing_canonical_text`).
-If that is missing, the newest frozen revision is used. If there is no frozen revision, the
-job's live `pricing_json` is used, and the result is flagged `quote_not_frozen`, which puts
-it in review.
+It is read whether it is still `frozen` or was `superseded` by a later revision (a re-quote
+after acceptance), so a later revision never lands in the base work order unmarked.
+
+- If the accepted revision cannot be found or read, the newest frozen revision is used and
+  flagged `accepted_revision_missing` (with `frozen_quote_unreadable` when the accepted one
+  was found but could not be read).
+- If there is no frozen revision, the job's live `pricing_json` is used, flagged
+  `quote_not_frozen`.
+
+Each of these flags puts the result in review.
 
 ## The lines
 
@@ -43,8 +60,11 @@ Each line is a `scope_items` entry of the job work order:
   `quote_cost_ex` are office-only.
 - **`counted` lines** add up to `agreed_labour_ex`. A line that is not counted stays on the
   work order for the trades to see, with flags saying why it was not counted.
-- **`line_key`** is `<basis>:<index in pricing.line_items>`. Two exceptions: `plinths`
-  (summed across rows) and `access` (derived).
+- **`line_key`** is `<prefix>:<index in pricing.line_items>`, the prefix being `install:`
+  (`fence_install`), `gate:` (`fence_gate`), `removal:` (`removal`), `labour:` (a
+  `category: labour` row or any `kind: labour` row) or `extra:` (any other `custom`
+  row). Two keys carry no index: `plinths` (summed across rows) and
+  `access` (derived).
 
 ### Fencing
 
@@ -74,8 +94,10 @@ lines carry `quote_counted_as_materials`. An asbestos removal is flagged
 These rules apply to any job type.
 
 - **A `category: labour` row or a `kind: labour` row** is labour. Its hours come from
-  `hours` / `labour_hours`, or from its quantity when its unit is hours. Its rate is
-  `cost_per_hour` / `hourly_cost`, else `cost_price` per quoted unit. A labour row with no
+  `hours`, or from its quantity when its unit is hours. Its rate is `cost_per_hour`, else
+  `cost_price` per quoted unit. These are the quoting tools' own field names: the fence tool
+  writes `kind`, `hours`, `cost_per_hour` and `total_cost`; the patio tool writes `kind`,
+  `hours` and `cost_per_hour`. A labour row with no
   hours is flagged `hours_missing`, unless it is priced per metre, each or per sheet. A
   labour row with no cost is flagged `cost_missing` and is not counted.
 - **A `custom` row priced in hours** is labour, whatever its kind. It is flagged
@@ -96,6 +118,19 @@ These rules apply to any job type.
 - `agreed_labour_ex` is null when no line could be counted.
 - `needs_review` is true when any flag other than `saved_as_material` or
   `quote_counted_as_materials` is present.
+- **Review flags ride on every line.** The quote's flags (`accepted_revision_missing`,
+  `frozen_quote_unreadable`, `quote_not_frozen`) and the result's flags
+  (`quote_labour_missing`, `labour_differs_from_quote`, `unsupported_job_type`) are added to
+  each line's `flags`, so they stay on the stored draft after the one call that filled it.
+  `flags` is office-only: trades never see it.
+
+## Approving a draft with flagged lines
+
+Approval (`approve_work_order`, `docs/job-work-orders-v1.md`) does not refuse a draft whose
+lines carry flags. A flagged draft can be approved and sealed as it is: the captain approves
+each work order, and the flags on its lines are there for him to read first. A line that is
+not counted (for example an old "Root removal, 1 job" extra, `labour_or_material_unknown`)
+adds nothing to `agreed_labour_ex` unless the approver edits the draft before approving.
 
 ## Filling the job work order draft
 
@@ -117,7 +152,7 @@ It runs at three points:
 - `job_work_order` (and `job_detail`'s `job_work_order` block) fills an untouched draft on
   the staff read. Every draft is read by staff before it can be approved, because approval
   needs the draft's `updated_at` as read. This also covers drafts the database trigger
-  opened when the job was accepted. The response carries
+  opened when the job was accepted. The response (and `job_detail`'s block) carries
   `quote_fill: {filled, reason, scope_revision_id, needs_review, code?}`, or `null` when
   nothing was attempted.
 - `create_work_order` with `kind:"job"` fills the draft it opens, unless the call brought
@@ -135,10 +170,11 @@ instead. An unreadable cost table or quote is a failure (`fill_failed` with
 
 ## Preview
 
-`GET ops-api?action=quote_work_order_lines&job_id=<uuid or job number>` (staff only).
-It writes nothing and returns:
+`GET ops-api?action=quote_work_order_lines&job_id=<job id>` (staff only). It writes nothing
+and returns:
 
 `{job:{id, job_number, type, status}, quote:{source, scope_revision_id, frozen_at, flags}, result}`
 
-- 400 `job_id_required` when no job is named.
+- 400 `job_id_required`, before any query, when `job_id` is missing or is not a job id
+  (uuid). A job number is not accepted.
 - 404 `job_not_found` for an unknown job.

@@ -59,8 +59,9 @@ export type QuoteWorkOrderLineBasis =
  *  (docs/job-work-orders-v1.md). The trade view keeps description, qty and
  *  unit only; every other key is office-only. */
 export type QuoteWorkOrderLine = {
-  /** Stable within one quote: "<basis>:<index in pricing.line_items>", or
-   *  "plinths" and "access" for the lines summed or derived from several rows. */
+  /** Stable within one quote: "<install|gate|removal|labour|extra>:<index in
+   *  pricing.line_items>", or "plinths" and "access" for the lines summed or
+   *  derived from several rows. */
   line_key: string;
   source: "quote";
   basis: QuoteWorkOrderLineBasis;
@@ -365,8 +366,8 @@ function removalLines(
 // - patio labour line: {category:'labour', unit:'hrs', quantity (hours),
 //   cost_price (per hour), description 'Labour — 2 trades × 1.5 days'}
 // - labour lines that carry their own hours and cost per hour (the quoting
-//   tools' new shape): {hours | labour_hours, cost_per_hour | hourly_cost}
-//   alongside quantity, unit and cost_price.
+//   tools' new shape): {kind:'labour', hours, cost_per_hour} alongside
+//   quantity, unit and cost_price.
 
 function labourLine(
   row: Record<string, any>,
@@ -378,9 +379,9 @@ function labourLine(
   const flags = [...extraFlags];
   const qty = positive(row.quantity ?? row.qty);
   const unit = text(row.unit) || null;
-  const explicitHours = positive(row.hours ?? row.labour_hours);
+  const explicitHours = positive(row.hours);
   const hours = explicitHours ?? (isHoursUnit(unit) ? qty : null);
-  const costPerHour = positive(row.cost_per_hour ?? row.hourly_cost);
+  const costPerHour = positive(row.cost_per_hour);
   const costPerUnit = positive(row.cost_price);
 
   let rate: number | null = null;
@@ -460,7 +461,7 @@ function extraLines(items: Record<string, any>[]): QuoteWorkOrderLine[] {
     const description = text(row.description);
     if (!description) return;
     const hasHours = isHoursUnit(row.unit) ||
-      positive(row.hours ?? row.labour_hours) !== null;
+      positive(row.hours) !== null;
     if (cat === "labour" || kind === "labour") {
       out.push(
         labourLine(row, `labour:${i}`, "quote_labour_line", description, []),

@@ -8217,7 +8217,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'quote_work_order_lines':
         return json(await runJobWorkOrder(() => previewQuoteWorkOrderLines(
           client,
-          url.searchParams.get('job_id') || url.searchParams.get('jobId') || '',
+          url.searchParams.get('job_id') || '',
         )))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
@@ -16490,6 +16490,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
         figures: jwo.figures,
         invoice_count: jwo.invoices.length,
         variation_count: jwo.variations.length,
+        quote_fill: jwo.quote_fill,
       }
     } catch (e) {
       console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
