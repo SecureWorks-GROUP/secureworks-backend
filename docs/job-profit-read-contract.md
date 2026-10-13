@@ -24,6 +24,10 @@ follows: ask again with `offset` raised by `limit`. An offset past the last job
 answers an empty `jobs` with `has_more` false, never an error. Totals come from
 `view=rollup`.
 
+The `type` filter matches `work_type`, not `jobs.type`: a job whose family is
+repair is listed as `repair` whatever its type. `work_subtype` is the family.
+Legacy jobs have no row.
+
 ## Job fields
 
 | Field | Meaning | Null means |
@@ -39,10 +43,35 @@ answers an empty `jobs` with `has_more` false, never an error. Totals come from
 | `profit_ex`, `margin_pct` | Invoiced minus actual cost, and that as a share of invoiced | Unknown. `cost_flag` and `completeness` name why |
 | `profit_ex_unsuppressed` | Invoiced minus the costs linked so far. Not a profit figure | The Xero Project total exceeds the linked costs |
 | `revenue_verified_paid`, `costs_verified_paid` | Xero recorded the payment. Not a bank reconciliation | Never null |
-| `cost_flag`, `revenue_flag`, `completeness` | The first reason, and every reason, a figure is missing or weak | Never null |
+| `committed_open_ex` | Open purchase orders with no bill yet. Committed, not actual: never in `actual_cost_ex` | Never null |
+| `cost_flag`, `revenue_flag`, `completeness` | The first reason, and every reason, a figure is missing or weak. Values below | Never null |
 
 There is no live price or live estimate field. Show "no quote sent" when
 `quoted_ex` is null.
+
+## Flag values
+
+`revenue_flag` is `ok` or `missing_client_invoice`. `cost_flag` is `ok` or the
+first of the cost reasons below, in this order. `completeness` lists every
+reason and note that applies.
+
+| Value | Meaning | Profit and margin |
+|---|---|---|
+| `missing_client_invoice` | Nothing invoiced yet | Null |
+| `xero_project_exceeds_line_costs` | See the Xero Project rule | Null |
+| `no_cost_linked` | No cost is linked to the job | Null |
+| `incomplete_invoice_lines` | A trade invoice on the job has no lines, or lines that do not add up to its total | Null |
+| `unclassified_lines` | A trade line has no cost lane | Null |
+| `materials_not_linked` | Materials are owed (a fencing, patio, decking or combo job, or one whose expected cost or pricing carries materials) and none is linked | Null |
+| `no_labour_linked` | No labour cost is linked | Null |
+| `text_matched_lines` | A trade line was matched to the job by text, not by job id | Shown |
+| `xero_project_linked_by_contact_only` | The job's Xero Project is linked by contact, not by name, so it gives no project figure | Shown |
+| `unapproved_trade_charges` | A trade charge is on an invoice not yet approved | Shown |
+| `open_purchase_orders` | `committed_open_ex` is above zero | Shown |
+| `draft_revenue` | `draft_revenue_ex` is above zero | Shown |
+| `holding_job` | A holding job, not a customer's job | Shown |
+
+The last five appear in `completeness` only.
 
 ## Xero Project rule
 

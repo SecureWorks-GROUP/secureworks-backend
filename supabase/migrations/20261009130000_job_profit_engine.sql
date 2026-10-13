@@ -95,7 +95,10 @@
 --    combo job, or any job whose expected cost carries materials, with no
 --    materials line. A job with no fixed expected cost is also read as owing
 --    materials when its live pricing estimate carries them; that estimate is
---    used for this check only and is never returned.
+--    used for this check only and is never returned. completeness also
+--    carries notes that suppress nothing (unapproved_trade_charges,
+--    open_purchase_orders, draft_revenue, holding_job); every value is listed
+--    in docs/job-profit-read-contract.md.
 --
 -- 6. Paid-verified means Xero recorded the payment (status PAID; trade
 --    invoices paid). It is not a bank reconciliation. A zero-value line (a
