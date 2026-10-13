@@ -18,9 +18,9 @@
 --                              are included in variations_listed_ex.
 --   v_job_profit               one row per non-legacy job: quoted, expected cost
 --                              by lane, actual cost by lane, the Xero Project
---                              expense total as a separate reconciling figure,
---                              one cost basis, invoiced, collected, profit,
---                              margin, paid-verified flags, completeness flags.
+--                              expense total as separate evidence (never a
+--                              cost), invoiced, collected, profit, margin,
+--                              paid-verified flags, completeness flags.
 --   job_profit(uuid)           v_job_profit for one job.
 --
 -- Rules that hold the numbers honest:
@@ -46,46 +46,52 @@
 --    commission; account 306 (labour direct cost) -> labour; any other 3xx
 --    cost-of-sales account -> materials; anything else -> other.
 --
--- 2. One cost basis per job. Xero Project expense totals already include the
---    bills the bookkeeper put on the project, the trade app bills among them,
---    so a project total is NEVER added to line-level costs.
---      line_level             the job's line-level events (default).
---      xero_project_inferred  the job's project total is larger than everything
---                             line-level: labour, commission and other stay
---                             line-level and materials = project total minus
---                             those, flagged inferred.
+-- 2. One cost basis: the job's line-level events. actual_cost_ex and every
+--    actual lane are line-level and nothing else (cost_basis is always
+--    line_level; line_level_cost_ex equals actual_cost_ex).
+--    xero_project_expenses_ex is the expenses on record against the job's Xero
+--    Project. It is evidence only, NOT the job's full cost: the trade app's
+--    bills carry no Xero Project, so the engine cannot tell whether the trade
+--    labour is inside a project total. A project total is therefore never
+--    returned as actual cost, never added to it and never used to infer a lane.
+--    When the project total is larger than every line-level cost, expenses are
+--    on record that the job's lines do not carry: the job is flagged
+--    xero_project_exceeds_line_costs and its profit and margin stay unknown
+--    (null), profit_ex_unsuppressed included.
 --    When line-level labour, commission and other already exceed the project
---    total, the basis stays line_level and the job is flagged
---    project_below_trade_lines (the double-count check).
+--    total, the job is flagged project_below_trade_lines.
 --    A project counts for a job only when its name carries that job's own job
 --    number (case ignored, not followed by a further digit). xero-sync also
 --    links a project by its Xero contact, and one contact can own several
 --    jobs, so a project linked by contact only gives no figure: the project
---    total stays null (never 0, never the contact-linked expenses), it is
---    never a cost basis, and the job is flagged
---    xero_project_linked_by_contact_only.
+--    total stays null (never 0, never the contact-linked expenses) and the job
+--    is flagged xero_project_linked_by_contact_only.
 --
--- 3. Quoted ex GST takes a sent quote's value only from job_quote_values (the
+-- 3. quoted_ex is a sent quote's value only, read from job_quote_values (the
 --    one interpreter): the whole-job total when quotes are split by party,
 --    else the accepted current quote, else the newest current quote; inc GST
---    divided by 1.1. With no sent quote value, pricing_json.totalExGST,
---    labelled as the live price.
+--    divided by 1.1. With no sent quote value it is null, never 0 and never
+--    the live price in pricing_json.
 --
--- 4. Expected cost by lane, first source that has it (expected_source):
---    jobs.expected_costs (frozen at acceptance) -> the accepted quote
---    revision's cost_estimates -> the newest sent quote revision's
---    cost_estimates -> pricing_json cost estimates (live price).
+-- 4. Expected cost by lane is a cost fixed at the quote, first source that has
+--    it (expected_source): jobs.expected_costs (frozen_at_acceptance) -> the
+--    accepted quote revision's cost_estimates (accepted_quote_revision) -> the
+--    newest sent quote revision's cost_estimates (sent_quote_revision). With
+--    none of those it is null, never 0 and never the live pricing estimate.
 --
 -- 5. Completeness reuses the job_financials vocabulary (revenue_flag
 --    missing_client_invoice / ok; cost_flag no_labour_linked,
 --    incomplete_invoice_lines, unclassified_lines, text_matched_lines, ok) and
---    adds no_cost_linked, materials_not_linked and cost_basis_inferred. Margin
---    and profit are null (suppressed) where job_financials suppresses them (no
---    client invoice, no cost, incomplete trade invoice lines, unclassified
---    lines, no labour linked) and also where materials are owed but none is
---    linked: a fencing, patio, decking or combo job, or any job whose expected
---    cost carries materials, costed line-level with no materials line. No
---    labour linked means a job costed line-level with no labour line.
+--    adds no_cost_linked, materials_not_linked and
+--    xero_project_exceeds_line_costs. Margin and profit are null (suppressed)
+--    where job_financials suppresses them (no client invoice, no cost,
+--    incomplete trade invoice lines, unclassified lines, no labour linked),
+--    where the Xero Project total exceeds the line-level costs (rule 2), and
+--    where materials are owed but none is linked: a fencing, patio, decking or
+--    combo job, or any job whose expected cost carries materials, with no
+--    materials line. A job with no fixed expected cost is also read as owing
+--    materials when its live pricing estimate carries them; that estimate is
+--    used for this check only and is never returned.
 --
 -- 6. Paid-verified means Xero recorded the payment (status PAID; trade
 --    invoices paid). It is not a bank reconciliation. A zero-value line (a
@@ -559,39 +565,31 @@ base AS (
     j.created_at,
     (lower(COALESCE(j.metadata ->> 'do_not_schedule', '')) = 'true') AS holding_job,
     -- quoted
-    CASE
-      WHEN qd.quoted_inc IS NOT NULL THEN round(qd.quoted_inc / 1.1, 2)
-      ELSE public.job_profit_num(j.pricing_json -> 'totalExGST')
-    END AS quoted_ex,
-    CASE
-      WHEN qd.quoted_inc IS NOT NULL THEN 'sent_quote:' || qd.quoted_source
-      WHEN public.job_profit_num(j.pricing_json -> 'totalExGST') IS NOT NULL THEN 'live_price_not_a_sent_quote'
-    END AS quoted_source,
-    -- expected by lane, first source that has it
+    round(qd.quoted_inc / 1.1, 2) AS quoted_ex,
+    'sent_quote:' || qd.quoted_source AS quoted_source,
+    -- expected by lane, first quote-fixed source that has it
     CASE
       WHEN jsonb_typeof(j.expected_costs -> 'lanes') = 'object' THEN 'frozen_at_acceptance'
       WHEN ar.job_id IS NOT NULL THEN 'accepted_quote_revision'
       WHEN sr.job_id IS NOT NULL THEN 'sent_quote_revision'
-      WHEN COALESCE(public.job_profit_num(j.pricing_json -> 'totalCostEstimate'), 0) > 0 THEN 'live_pricing_estimate'
     END AS expected_source,
     CASE
       WHEN jsonb_typeof(j.expected_costs -> 'lanes') = 'object' THEN public.job_profit_num(j.expected_costs #> '{lanes,labour,amount_ex_gst}')
       WHEN ar.job_id IS NOT NULL THEN public.job_profit_num(ar.ce -> 'labour_total')
       WHEN sr.job_id IS NOT NULL THEN public.job_profit_num(sr.ce -> 'labour_total')
-      WHEN COALESCE(public.job_profit_num(j.pricing_json -> 'totalCostEstimate'), 0) > 0 THEN public.job_profit_num(j.pricing_json -> 'labourCostEstimate')
     END AS expected_labour_ex,
     CASE
       WHEN jsonb_typeof(j.expected_costs -> 'lanes') = 'object' THEN public.job_profit_num(j.expected_costs #> '{lanes,materials,amount_ex_gst}')
       WHEN ar.job_id IS NOT NULL THEN public.job_profit_num(ar.ce -> 'material_total')
       WHEN sr.job_id IS NOT NULL THEN public.job_profit_num(sr.ce -> 'material_total')
-      WHEN COALESCE(public.job_profit_num(j.pricing_json -> 'totalCostEstimate'), 0) > 0 THEN public.job_profit_num(j.pricing_json -> 'materialCostEstimate')
     END AS expected_materials_ex,
     CASE
       WHEN jsonb_typeof(j.expected_costs -> 'lanes') = 'object' THEN public.job_profit_num(j.expected_costs #> '{lanes,commission,amount_ex_gst}')
       WHEN ar.job_id IS NOT NULL THEN public.job_profit_num(ar.ce -> 'subcontract_commission_total')
       WHEN sr.job_id IS NOT NULL THEN public.job_profit_num(sr.ce -> 'subcontract_commission_total')
-      WHEN COALESCE(public.job_profit_num(j.pricing_json -> 'totalCostEstimate'), 0) > 0 THEN public.job_profit_num(j.pricing_json -> 'commissionCostEstimate')
     END AS expected_commission_ex,
+    -- read only to decide whether materials are owed; never returned
+    public.job_profit_num(j.pricing_json -> 'materialCostEstimate') AS live_materials_estimate_ex,
     -- revenue
     COALESCE(rev.invoiced_ex, 0) AS invoiced_ex,
     COALESCE(rev.draft_revenue_ex, 0) AS draft_revenue_ex,
@@ -616,7 +614,7 @@ base AS (
     COALESCE(cost.has_unapproved_trade, false) AS has_unapproved_trade,
     cost.first_cost_date,
     cost.last_cost_date,
-    -- Xero Projects, a separate reconciling figure
+    -- Xero Projects: expenses on record, evidence only, never a cost
     pr.project_expenses_ex AS xero_project_expenses_ex,
     pr.project_invoiced_ex AS xero_project_invoiced_ex,
     COALESCE(pr.project_count, 0) AS xero_project_count,
@@ -644,15 +642,9 @@ basis AS (
   SELECT
     b.*,
     b.line_labour_ex + b.line_materials_ex + b.line_commission_ex + b.line_other_ex AS line_total_ex,
-    b.line_labour_ex + b.line_commission_ex + b.line_other_ex AS line_non_materials_ex,
-    CASE
-      WHEN COALESCE(b.xero_project_expenses_ex, 0) > 0
-       AND b.line_labour_ex + b.line_materials_ex + b.line_commission_ex + b.line_other_ex
-           < b.xero_project_expenses_ex - greatest(5, 0.01 * b.xero_project_expenses_ex)
-       AND b.line_labour_ex + b.line_commission_ex + b.line_other_ex <= b.xero_project_expenses_ex
-        THEN 'xero_project_inferred'
-      ELSE 'line_level'
-    END AS cost_basis,
+    (COALESCE(b.xero_project_expenses_ex, 0) > 0
+      AND b.line_labour_ex + b.line_materials_ex + b.line_commission_ex + b.line_other_ex
+          < b.xero_project_expenses_ex - greatest(5, 0.01 * b.xero_project_expenses_ex)) AS project_exceeds_line_costs,
     (COALESCE(b.xero_project_expenses_ex, 0) > 0
       AND b.line_labour_ex + b.line_commission_ex + b.line_other_ex
           > b.xero_project_expenses_ex + greatest(5, 0.01 * b.xero_project_expenses_ex)) AS project_below_trade_lines
@@ -662,23 +654,21 @@ costed AS (
   SELECT
     s.*,
     -- Materials are owed but none is known: a fencing, patio, decking or combo
-    -- job, or any job whose expected cost carries materials, costed line-level
-    -- with no positive materials line. Its margin would be labour-only, so it
-    -- is suppressed rather than published high.
-    (s.cost_basis = 'line_level'
-      AND s.line_materials_ex <= 0
-      AND (s.work_type IN ('fencing', 'patio', 'decking', 'combo') OR COALESCE(s.expected_materials_ex, 0) > 0)) AS materials_missing,
-    (s.cost_basis = 'line_level' AND s.line_labour_ex = 0) AS labour_missing,
+    -- job, or any job whose expected cost (or, with no fixed expected cost,
+    -- live pricing estimate) carries materials, with no positive materials
+    -- line. Its margin would be labour-only, so it is suppressed rather than
+    -- published high.
+    (s.line_materials_ex <= 0
+      AND (s.work_type IN ('fencing', 'patio', 'decking', 'combo')
+           OR COALESCE(s.expected_materials_ex, 0) > 0
+           OR (s.expected_source IS NULL AND COALESCE(s.live_materials_estimate_ex, 0) > 0))) AS materials_missing,
+    (s.line_labour_ex = 0) AS labour_missing,
     s.line_labour_ex AS actual_labour_ex,
-    CASE WHEN s.cost_basis = 'xero_project_inferred'
-         THEN s.xero_project_expenses_ex - s.line_non_materials_ex
-         ELSE s.line_materials_ex END AS actual_materials_ex,
+    s.line_materials_ex AS actual_materials_ex,
     s.line_commission_ex AS actual_commission_ex,
     s.line_other_ex AS actual_other_ex,
-    CASE WHEN s.cost_basis = 'xero_project_inferred'
-         THEN s.xero_project_expenses_ex
-         ELSE s.line_total_ex END AS actual_cost_ex,
-    (s.actual_cost_events > 0 OR s.cost_basis = 'xero_project_inferred') AS has_cost
+    s.line_total_ex AS actual_cost_ex,
+    (s.actual_cost_events > 0) AS has_cost
   FROM basis s
 ),
 flagged AS (
@@ -686,16 +676,17 @@ flagged AS (
     c.*,
     CASE WHEN c.invoiced_ex > 0 THEN 'ok' ELSE 'missing_client_invoice' END AS revenue_flag,
     CASE
+      WHEN c.project_exceeds_line_costs THEN 'xero_project_exceeds_line_costs'
       WHEN NOT c.has_cost THEN 'no_cost_linked'
       WHEN c.has_incomplete_invoice THEN 'incomplete_invoice_lines'
       WHEN c.has_unclassified THEN 'unclassified_lines'
       WHEN c.materials_missing THEN 'materials_not_linked'
       WHEN c.labour_missing THEN 'no_labour_linked'
       WHEN c.has_text_matched THEN 'text_matched_lines'
-      WHEN c.cost_basis = 'xero_project_inferred' THEN 'cost_basis_inferred'
       ELSE 'ok'
     END AS cost_flag,
     (c.invoiced_ex > 0 AND c.has_cost AND NOT c.has_incomplete_invoice AND NOT c.has_unclassified
+      AND NOT c.project_exceeds_line_costs
       AND NOT c.materials_missing AND NOT c.labour_missing) AS margin_ok
   FROM costed c
 )
@@ -717,13 +708,12 @@ SELECT
   CASE WHEN f.expected_source IS NOT NULL
        THEN COALESCE(f.expected_labour_ex, 0) + COALESCE(f.expected_materials_ex, 0) + COALESCE(f.expected_commission_ex, 0)
   END AS expected_cost_ex,
-  f.cost_basis,
+  'line_level'::text AS cost_basis,
   f.actual_labour_ex,
   f.actual_materials_ex,
   f.actual_commission_ex,
   f.actual_other_ex,
   f.actual_cost_ex,
-  (f.cost_basis = 'xero_project_inferred') AS materials_inferred,
   f.line_total_ex AS line_level_cost_ex,
   f.actual_cost_events,
   f.trade_lines_ex,
@@ -738,9 +728,9 @@ SELECT
   f.invoice_count,
   CASE WHEN f.margin_ok THEN f.invoiced_ex - f.actual_cost_ex END AS profit_ex,
   CASE WHEN f.margin_ok THEN round((f.invoiced_ex - f.actual_cost_ex) / f.invoiced_ex * 100, 1) END AS margin_pct,
-  f.invoiced_ex - f.actual_cost_ex AS profit_ex_unsuppressed,
+  CASE WHEN NOT f.project_exceeds_line_costs THEN f.invoiced_ex - f.actual_cost_ex END AS profit_ex_unsuppressed,
   (f.invoice_count > 0 AND COALESCE(f.revenue_all_paid, false)) AS revenue_verified_paid,
-  (f.cost_basis = 'line_level' AND f.actual_cost_events > 0 AND COALESCE(f.cost_all_paid, false)) AS costs_verified_paid,
+  (NOT f.project_exceeds_line_costs AND f.actual_cost_events > 0 AND COALESCE(f.cost_all_paid, false)) AS costs_verified_paid,
   f.revenue_last_paid_on,
   f.first_invoice_date,
   f.first_cost_date,
@@ -753,7 +743,7 @@ SELECT
     CASE WHEN f.has_incomplete_invoice THEN 'incomplete_invoice_lines' END,
     CASE WHEN f.has_unclassified THEN 'unclassified_lines' END,
     CASE WHEN f.has_text_matched THEN 'text_matched_lines' END,
-    CASE WHEN f.cost_basis = 'xero_project_inferred' THEN 'cost_basis_inferred' END,
+    CASE WHEN f.project_exceeds_line_costs THEN 'xero_project_exceeds_line_costs' END,
     CASE WHEN f.has_cost AND f.actual_labour_ex = 0 THEN 'no_labour_linked' END,
     CASE WHEN f.project_below_trade_lines THEN 'project_below_trade_lines' END,
     CASE WHEN f.project_contact_only THEN 'xero_project_linked_by_contact_only' END,
@@ -768,7 +758,16 @@ SELECT
 FROM flagged f;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. One cost basis per job (line_level, or xero_project_inferred with materials = project total minus line-level labour, commission and other). A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. Margin/profit null where job_financials would suppress them. Read only, service role only.';
+  'Job profit engine (20261009130000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. Actual cost is line-level only (trade charges, supplier bills, materials facts). xero_project_expenses_ex is the expenses on record against the job''s Xero Project: evidence only, not the job''s full cost, never in actual cost; where it exceeds the line-level costs the job is flagged xero_project_exceeds_line_costs and profit and margin are null. A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. quoted_ex is a sent quote only and expected costs are fixed at the quote only; neither is ever a live price or estimate. Margin/profit also null where job_financials would suppress them. Read only, service role only.';
+
+COMMENT ON COLUMN public.v_job_profit.xero_project_expenses_ex IS
+  'Expenses on record against the job''s Xero Project (name-linked only). Evidence only: not the job''s full cost, never part of actual_cost_ex, profit_ex or any total. Trade app labour may sit outside it.';
+COMMENT ON COLUMN public.v_job_profit.actual_cost_ex IS
+  'Line-level actual cost ex GST (trade charges, supplier bills, materials facts). Never a Xero Project total.';
+COMMENT ON COLUMN public.v_job_profit.quoted_ex IS
+  'Sent or accepted quote value ex GST (job_quote_values). Null with no sent quote; never the live price.';
+COMMENT ON COLUMN public.v_job_profit.expected_cost_ex IS
+  'Expected cost fixed at the quote (expected_source frozen_at_acceptance, accepted_quote_revision or sent_quote_revision). Null with none; never the live pricing estimate.';
 
 -- ─────────────────────────────────────────────────────────────
 -- job_profit(job_id)

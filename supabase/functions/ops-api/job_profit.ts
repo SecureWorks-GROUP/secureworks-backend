@@ -7,7 +7,9 @@
 // money figure here: every number on the response comes from v_job_profit,
 // v_job_cost_events or v_job_revenue_events, so Jarvis, the ops API and the
 // finance tab cannot disagree. view=rollup sums those same v_job_profit rows
-// in job_profit_rollup.ts. Read only. The admin/owner gate lives at the
+// in job_profit_rollup.ts. Read only. Field contract for the dashboard:
+// docs/job-profit-read-contract.md (JOB_PROFIT_LABELS carries the same
+// meanings on every response). The admin/owner gate lives at the
 // dispatch in index.ts (privileged ops key or an admin/owner session).
 
 import { jobProfitRollupAction } from "./job_profit_rollup.ts";
@@ -15,18 +17,28 @@ import { jobProfitRollupAction } from "./job_profit_rollup.ts";
 export const JOB_PROFIT_LABELS = {
   profit:
     "Gross profit on direct costs (trade labour, materials, commission and other direct lines), ex GST. No overhead share. Trade labour is the trade's charge; the company's super share is not added.",
-  cost_basis:
-    "line_level: costs from trade charges and supplier bills linked to the job. xero_project_inferred: the Xero Project total is larger, so labour, commission and other stay line-level and materials = project total minus those (inferred). A project total is never added to line-level costs. A Xero Project counts only when its name carries the job's own job number; one linked by contact only gives no figure and the job is flagged xero_project_linked_by_contact_only.",
+  quoted_ex:
+    "What was quoted: the value of a sent or accepted quote, ex GST. Null when no quote was sent. Never the live price. quoted_source names the quote it came from.",
+  expected_cost_ex:
+    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision or sent_quote_revision. Null when no cost was fixed at a quote. Never a live pricing estimate.",
+  actual_cost_ex:
+    "Actual cost from the job's own lines only: trade charges, supplier bills and materials facts linked to the job (cost_basis is always line_level; line_level_cost_ex is the same figure). Never a Xero Project total.",
+  xero_project_expenses_ex:
+    "Expenses on record against the job's Xero Project. Evidence only, not the job's full cost: trade labour may sit outside it. Never part of actual cost, profit, margin or any company, work-type or month total. A Xero Project counts only when its name carries the job's own job number; one linked by contact only gives no figure and the job is flagged xero_project_linked_by_contact_only.",
+  xero_project_exceeds_line_costs:
+    "The Xero Project has more expenses on record than the costs linked to the job, so the job's full cost is unknown. Profit and margin are null until those expenses are linked to the job.",
   verified_paid:
     "Xero recorded the payment (status PAID; trade invoices paid). Not a bank reconciliation.",
   margin:
-    "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines) or when materials are owed but none is linked (labour-only cost).",
+    "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines), when the Xero Project total exceeds the costs linked to the job (xero_project_exceeds_line_costs), or when materials are owed but none is linked (labour-only cost).",
+  profit_ex_unsuppressed:
+    "Invoiced minus the costs linked so far, shown even where profit is suppressed. Not a profit figure. Null when the Xero Project total exceeds the costs linked to the job.",
 } as const;
 
 /**
- * Deliberately strict, like the other money surfaces: the privileged ops key
- * or an admin/owner session. ops_manager, trades, the routine and the agent
- * read credential are refused.
+ * Deliberately strict, like the other money surfaces: a server key (the
+ * service key or the agent server key, both auth mode api_key) or an
+ * admin/owner session. ops_manager, trades and the routine are refused.
  */
 export function jobProfitCallerAllowed(
   authMode: string,

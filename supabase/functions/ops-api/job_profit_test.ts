@@ -469,7 +469,7 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
   );
 });
 
-Deno.test("rollup: expected and quoted count only jobs with a sent or accepted quote", async () => {
+Deno.test("rollup: expected and quoted count only jobs the engine gave a quote figure", async () => {
   const row = (over: Record<string, unknown>) => ({
     work_type: "fencing",
     status: "complete",
@@ -478,12 +478,10 @@ Deno.test("rollup: expected and quoted count only jobs with a sent or accepted q
     invoiced_ex: 0,
     collected_ex: 0,
     quoted_ex: null,
-    quoted_source: null,
     expected_cost_ex: null,
-    expected_source: null,
     actual_cost_ex: 0,
     profit_ex: null,
-    cost_basis: "line_level",
+    xero_project_expenses_ex: null,
     revenue_verified_paid: false,
     ...over,
   });
@@ -493,28 +491,16 @@ Deno.test("rollup: expected and quoted count only jobs with a sent or accepted q
         job_id: "won",
         invoiced_ex: 1500,
         quoted_ex: 1400,
-        quoted_source: "sent_quote:accepted:quote_revision",
         expected_cost_ex: 1000,
-        expected_source: "frozen_at_acceptance",
         actual_cost_ex: 900,
       }),
       row({
         job_id: "sent",
         status: "quoted",
         quoted_ex: 600,
-        quoted_source: "sent_quote:newest_current:quote_revision",
         expected_cost_ex: 400,
-        expected_source: "sent_quote_revision",
       }),
-      row({
-        job_id: "lead",
-        status: "draft",
-        quoted_ex: 200000,
-        quoted_source: "live_price_not_a_sent_quote",
-        expected_cost_ex: 150000,
-        expected_source: "live_pricing_estimate",
-        actual_cost_ex: 50,
-      }),
+      row({ job_id: "lead", status: "draft", actual_cost_ex: 50 }),
     ],
   });
   const out = await jobProfitListAction(c, new URLSearchParams("view=rollup"));
@@ -530,14 +516,7 @@ Deno.test("rollup: expected and quoted count only jobs with a sent or accepted q
   assertEquals(totals.actual_cost_ex, 950);
 
   const leadsOnly = fakeClient({
-    v_job_profit: [row({
-      job_id: "lead",
-      status: "draft",
-      quoted_ex: 200000,
-      quoted_source: "live_price_not_a_sent_quote",
-      expected_cost_ex: 150000,
-      expected_source: "live_pricing_estimate",
-    })],
+    v_job_profit: [row({ job_id: "lead", status: "draft" })],
   });
   const none = (await jobProfitListAction(
     leadsOnly,
@@ -549,4 +528,51 @@ Deno.test("rollup: expected and quoted count only jobs with a sent or accepted q
   assertEquals(none.totals.jobs_with_expected, 0);
   assertEquals(none.totals.expected_cost_ex, null);
   assertEquals(none.totals.actual_cost_on_expected_ex, null);
+});
+
+Deno.test("rollup: Xero Project expenses are in no total of cost or profit", async () => {
+  const base = {
+    work_type: "makesafe",
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: "2026-08-08",
+    collected_ex: 0,
+    quoted_ex: null,
+    expected_cost_ex: null,
+    revenue_verified_paid: false,
+  };
+  const c = fakeClient({
+    v_job_profit: [
+      // project expenses 5000 on record, trade labour 3000 not on the project
+      {
+        ...base,
+        job_id: "project",
+        invoiced_ex: 10000,
+        actual_cost_ex: 3000,
+        xero_project_expenses_ex: 5000,
+        profit_ex: null,
+      },
+      {
+        ...base,
+        job_id: "plain",
+        invoiced_ex: 1000,
+        actual_cost_ex: 600,
+        xero_project_expenses_ex: null,
+        profit_ex: 400,
+      },
+    ],
+  });
+  const body = (await jobProfitListAction(
+    c,
+    new URLSearchParams("view=rollup&date_field=invoiced"),
+  )).body as any;
+  for (const bucket of [body.totals, body.by_type[0], body.by_month[0]]) {
+    assertEquals(bucket.jobs, 2);
+    assertEquals(bucket.actual_cost_ex, 3600);
+    assertEquals(bucket.jobs_with_margin, 1);
+    assertEquals(bucket.profit_ex, 400);
+    assertEquals(bucket.published_revenue_ex, 1000);
+    assertEquals(bucket.published_cost_ex, 600);
+    assertEquals(bucket.margin_pct, 40);
+  }
 });

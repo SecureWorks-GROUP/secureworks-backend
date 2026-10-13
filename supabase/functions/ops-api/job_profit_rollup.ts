@@ -6,14 +6,14 @@
 // cents. A failed page fails the whole answer: a partial total is never returned.
 //
 // Profit and margin come only from rows the engine already published
-// (profit_ex not null). profit_ex_unsuppressed is never read, and Xero Project
-// figures are never added to line-level costs: actual_cost_ex is the engine's
-// chosen basis and is summed as it stands.
+// (profit_ex not null). profit_ex_unsuppressed and the Xero Project figures are
+// never read: actual_cost_ex is the engine's line-level cost and is summed as
+// it stands, so a project total is in no total of cost or profit.
 //
-// expected_cost_ex and quoted_ex sum only jobs with a sent or accepted quote:
-// a quoted figure from a sent quote and an expected cost frozen at acceptance
-// or taken from an accepted or sent quote revision. A live price or live
-// pricing estimate (an unwon lead) is left out whatever the status filter.
+// expected_cost_ex and quoted_ex sum the engine's figures as they stand: the
+// engine publishes a quoted figure only from a sent or accepted quote and an
+// expected cost only where it was fixed at the quote, and leaves both null
+// otherwise, so an unwon lead's live price is in neither sum.
 // actual_cost_ex and invoiced_ex sum every job. Compare like with like through
 // actual_cost_on_expected_ex / jobs_with_expected and invoiced_on_quoted_ex /
 // jobs_with_quote, never expected_cost_ex against actual_cost_ex.
@@ -38,12 +38,6 @@ export type JobProfitRollupResult = {
 };
 
 const ROLLUP_PAGE_SIZE = 1000;
-const SENT_QUOTE_SOURCE_PREFIX = "sent_quote:";
-const QUOTE_BACKED_EXPECTED_SOURCES = new Set([
-  "frozen_at_acceptance",
-  "accepted_quote_revision",
-  "sent_quote_revision",
-]);
 const PERTH_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 const ROLLUP_COLUMNS = [
@@ -54,12 +48,9 @@ const ROLLUP_COLUMNS = [
   "invoiced_ex",
   "collected_ex",
   "quoted_ex",
-  "quoted_source",
   "expected_cost_ex",
-  "expected_source",
   "actual_cost_ex",
   "profit_ex",
-  "cost_basis",
   "revenue_verified_paid",
 ].join(", ");
 
@@ -78,7 +69,6 @@ type Bucket = {
   published_revenue: bigint;
   published_cost: bigint;
   profit: bigint;
-  inferred_jobs: number;
   revenue_verified_paid_jobs: number;
 };
 
@@ -98,7 +88,6 @@ function emptyBucket(): Bucket {
     published_revenue: 0n,
     published_cost: 0n,
     profit: 0n,
-    inferred_jobs: 0,
     revenue_verified_paid_jobs: 0,
   };
 }
@@ -120,14 +109,8 @@ function centsToNumber(cents: bigint | null): number | null {
 function addRow(bucket: Bucket, row: Record<string, unknown>) {
   const invoiced = toCents(row.invoiced_ex, "invoiced_ex");
   const collected = toCents(row.collected_ex, "collected_ex");
-  const quoted = typeof row.quoted_source === "string" &&
-      row.quoted_source.startsWith(SENT_QUOTE_SOURCE_PREFIX)
-    ? toCents(row.quoted_ex, "quoted_ex")
-    : null;
-  const expected =
-    QUOTE_BACKED_EXPECTED_SOURCES.has(String(row.expected_source))
-      ? toCents(row.expected_cost_ex, "expected_cost_ex")
-      : null;
+  const quoted = toCents(row.quoted_ex, "quoted_ex");
+  const expected = toCents(row.expected_cost_ex, "expected_cost_ex");
   const actual = toCents(row.actual_cost_ex, "actual_cost_ex");
   const profit = toCents(row.profit_ex, "profit_ex");
 
@@ -156,7 +139,6 @@ function addRow(bucket: Bucket, row: Record<string, unknown>) {
     bucket.profit += profit;
     bucket.published_revenue += invoiced ?? 0n;
     bucket.published_cost += actual ?? 0n;
-    if (row.cost_basis === "xero_project_inferred") bucket.inferred_jobs += 1;
   }
 }
 
@@ -180,7 +162,6 @@ function presentBucket(bucket: Bucket): Record<string, unknown> {
     published_cost_ex: centsToNumber(bucket.published_cost),
     profit_ex: centsToNumber(bucket.profit),
     margin_pct: margin,
-    inferred_jobs: bucket.inferred_jobs,
     revenue_verified_paid_jobs: bucket.revenue_verified_paid_jobs,
   };
 }

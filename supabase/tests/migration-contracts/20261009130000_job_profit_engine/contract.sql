@@ -2,19 +2,26 @@
 --
 -- Synthetic jobs, fixed dates, no customer data. Everything rolls back.
 --   JP-FENCE  two projects linked by contact only (no job number, and a longer
---             number): no project figure, basis stays line-level, flagged.
+--             number): no project figure, flagged.
 --             Line-level costs from every source, the exclusions (ops-rejected
 --             and Xero-deleted trade invoices, QA test line, trade-mirror bills
 --             by id and by the app's line format, a deleted bill), inclusive
 --             GST lines, a draft and a voided sales invoice, all variation
 --             states with only agreed values summed, an open PO, frozen
 --             expected costs and a sent quote.
---   JP-PROJ   Xero Project total larger than line-level: materials inferred
---             from the project named after the job; a second project linked
---             by contact only adds nothing and flags the job.
---   JP-DBL    trade lines larger than the project total: stays line-level,
---             flags project_below_trade_lines, and a negative materials
---             deduction cannot publish a labour-only margin.
+--   JP-PROJ   Xero Project total larger than line-level: the total is evidence
+--             only, actual cost stays line-level, profit and margin unknown;
+--             a second project linked by contact only adds nothing and flags
+--             the job.
+--   JP-INF    project expenses 5000, trade labour 3000 not on the project:
+--             cost 3000 line-level, the 5000 never a cost, no profit figure.
+--   JP-DBL    trade lines larger than the project total: flags
+--             project_below_trade_lines, a negative materials deduction cannot
+--             publish a labour-only margin, and a live price and live pricing
+--             estimate are never a quoted figure or an expected cost.
+--   JP-LIVE   no quote sent: quoted and expected stay null whatever the live
+--             price says, and a live materials estimate still holds back a
+--             labour-only margin.
 --   JP-MS     make-safe roof report with no client invoice and a trade line
 --             found by job number: margin suppressed, flags carried.
 --   JP-REP    a fencing card family-tagged repair, invoiced with a materials
@@ -70,7 +77,12 @@ INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata,
   ('a7000000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'complete', 'fencing', 'JP-REP', false,
    '{"makesafe_job_family": "repair"}', NULL, NULL, '2026-08-01T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'complete', 'insurance', 'JP-REST', false,
-   '{"insurance_job_type": "restoration", "makesafe_job_family": "make_safe"}', NULL, NULL, '2026-08-01T00:00:00Z');
+   '{"insurance_job_type": "restoration", "makesafe_job_family": "make_safe"}', NULL, NULL, '2026-08-01T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'complete', 'makesafe', 'JP-INF', false, '{}', NULL, NULL,
+   '2026-08-01T00:00:00Z'),
+  ('a7000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'makesafe', 'JP-LIVE', false, '{}',
+   '{"totalExGST": 5000, "totalCostEstimate": 900, "labourCostEstimate": 500, "materialCostEstimate": 400}', NULL,
+   '2026-08-01T00:00:00Z');
 
 INSERT INTO public.users (id, org_id, name) VALUES
   ('a7100000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'Trade One');
@@ -79,7 +91,7 @@ INSERT INTO public.users (id, org_id, name) VALUES
 -- 6% withheld). T1 paid, T2 ops-rejected, T3 Xero bill deleted, T4 a QA test
 -- line, T5 approved and pushed, not yet paid, T6 paid (its subtotal is net of
 -- its -40 materials deduction line, so its lines are complete), T7 a trade's
--- empty day still awaiting acknowledgment (zero value).
+-- empty day still awaiting acknowledgment (zero value), T8 and T9 paid.
 INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subtotal_ex, xero_bill_id, xero_bill_status, invoice_number, paid_at,
                                    gst_on, gst, total_inc, super_rate, super_amount, gross_earned, net_pay) VALUES
   ('a7200000-0000-4000-8000-000000000001', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 400, 'BILL-T1', 'PAID', 'SW-INV-T1', '2026-08-20',
@@ -95,7 +107,11 @@ INSERT INTO public.trade_invoices (id, org_id, user_id, week_start, status, subt
   ('a7200000-0000-4000-8000-000000000006', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 260, 'BILL-T6', 'PAID', 'SW-INV-T6', '2026-08-25',
    false, 0, 260, 0.12, 31.2, 260, 244.4),
   ('a7200000-0000-4000-8000-000000000007', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'pending_acknowledgment', 0, NULL, NULL, 'SW-INV-T7', NULL,
-   false, 0, 0, 0.12, 0, 0, 0);
+   false, 0, 0, 0.12, 0, 0, 0),
+  ('a7200000-0000-4000-8000-000000000008', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 3000, 'BILL-T8', 'PAID', 'SW-INV-T8', '2026-08-25',
+   false, 0, 3000, 0.12, 360, 3000, 2820),
+  ('a7200000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'a7100000-0000-4000-8000-000000000001', '2026-08-03', 'paid', 500, 'BILL-T9', 'PAID', 'SW-INV-T9', '2026-08-25',
+   false, 0, 500, 0.12, 60, 500, 470);
 
 INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, line_type, description, line_total_ex, total_hours, line_date) VALUES
   ('a7200000-0000-4000-8000-000000000001', 'a7000000-0000-4000-8000-000000000001', NULL, 'labour', 'Fence labour', 300, 6, '2026-08-04'),
@@ -107,7 +123,9 @@ INSERT INTO public.trade_invoice_lines (trade_invoice_id, job_id, job_number, li
   ('a7200000-0000-4000-8000-000000000006', 'a7000000-0000-4000-8000-000000000003', NULL, 'labour', 'Fence labour', 300, 6, '2026-08-05'),
   ('a7200000-0000-4000-8000-000000000007', 'a7000000-0000-4000-8000-000000000003', NULL, 'labour', NULL, 0, 0, '2026-08-05'),
   ('a7200000-0000-4000-8000-000000000006', 'a7000000-0000-4000-8000-000000000003', NULL, 'materials', 'Materials deduction', -40, NULL, '2026-08-05'),
-  ('a7200000-0000-4000-8000-000000000005', NULL, 'JP-MS', 'make safe', 'Roof report attendance', 120, 2, '2026-08-06');
+  ('a7200000-0000-4000-8000-000000000005', NULL, 'JP-MS', 'make safe', 'Roof report attendance', 120, 2, '2026-08-06'),
+  ('a7200000-0000-4000-8000-000000000008', 'a7000000-0000-4000-8000-000000000008', NULL, 'labour', 'Site labour', 3000, 40, '2026-08-05'),
+  ('a7200000-0000-4000-8000-000000000009', 'a7000000-0000-4000-8000-000000000009', NULL, 'labour', 'Site labour', 500, 8, '2026-08-05');
 
 INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoice_type, status, contact_name, sub_total, total, amount_paid, invoice_date, fully_paid_on, job_id, raw_json, line_items) VALUES
   -- the trade app's own bill for T1: mirror by id, never a supplier cost
@@ -150,11 +168,18 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
   ('00000000-0000-0000-0000-000000000001', 'INV-6', 'INV-6', 'ACCREC', 'PAID', 'Client', 10000, 11000, 11000, '2026-08-08', '2026-08-28',
    'a7000000-0000-4000-8000-000000000006', NULL, '[{"LineAmount": 10000, "AccountCode": "200", "Description": "Repair"}]'),
   ('00000000-0000-0000-0000-000000000001', 'BILL-S4', 'S-4', 'ACCPAY', 'PAID', 'Fence Supplies', 3000, 3300, 3300, '2026-08-02', '2026-08-15',
-   'a7000000-0000-4000-8000-000000000006', NULL, '[{"LineAmount": 3000, "AccountCode": "305", "Description": "Panels"}]');
+   'a7000000-0000-4000-8000-000000000006', NULL, '[{"LineAmount": 3000, "AccountCode": "305", "Description": "Panels"}]'),
+  -- JP-INF and JP-LIVE: invoiced and paid
+  ('00000000-0000-0000-0000-000000000001', 'INV-7', 'INV-7', 'ACCREC', 'PAID', 'Client', 10000, 11000, 11000, '2026-08-08', '2026-08-28',
+   'a7000000-0000-4000-8000-000000000008', NULL, '[{"LineAmount": 10000, "AccountCode": "200", "Description": "Works"}]'),
+  ('00000000-0000-0000-0000-000000000001', 'INV-8', 'INV-8', 'ACCREC', 'PAID', 'Client', 2000, 2200, 2200, '2026-08-08', '2026-08-28',
+   'a7000000-0000-4000-8000-000000000009', NULL, '[{"LineAmount": 2000, "AccountCode": "200", "Description": "Works"}]');
 
 INSERT INTO public.xero_projects (job_id, project_name, total_expenses, total_invoiced) VALUES
   ('a7000000-0000-4000-8000-000000000002', 'jp-proj 4 Patio Pl', 1000, 1500),
   ('a7000000-0000-4000-8000-000000000003', 'JP-DBL 6 Fence Rd', 200, 800),
+  -- supplier bills only; the trade app's labour bill is not on the project
+  ('a7000000-0000-4000-8000-000000000008', 'JP-INF 9 Sample St', 5000, 10000),
   -- linked by contact only: another job's project, and a longer job number
   ('a7000000-0000-4000-8000-000000000002', 'SW1334 old patio', 9000, 9500),
   ('a7000000-0000-4000-8000-000000000001', 'SW1334 old patio', 9000, 9500),
@@ -278,7 +303,9 @@ BEGIN
 
   -- JP-FENCE: line level, every lane, frozen expected, sent quote value.
   SELECT * INTO r FROM public.job_profit('a7000000-0000-4000-8000-000000000001');
-  IF r.cost_basis <> 'line_level' THEN RAISE EXCEPTION 'jp fence: basis %', r.cost_basis; END IF;
+  IF r.cost_basis <> 'line_level' OR r.line_level_cost_ex <> r.actual_cost_ex THEN
+    RAISE EXCEPTION 'jp fence: basis % line level %', r.cost_basis, r.line_level_cost_ex;
+  END IF;
   IF (r.actual_labour_ex, r.actual_materials_ex, r.actual_commission_ex, r.actual_other_ex, r.actual_cost_ex)
      IS DISTINCT FROM (350::numeric, 100::numeric, 120::numeric, 0::numeric, 570::numeric) THEN
     RAISE EXCEPTION 'jp fence: lanes % % % % %', r.actual_labour_ex, r.actual_materials_ex, r.actual_commission_ex, r.actual_other_ex, r.actual_cost_ex;
@@ -300,8 +327,7 @@ BEGIN
   IF NOT ('open_purchase_orders' = ANY (r.completeness) AND 'draft_revenue' = ANY (r.completeness)) THEN
     RAISE EXCEPTION 'jp fence: completeness %', r.completeness;
   END IF;
-  -- projects linked by contact only: no figure, never a basis, flagged
-  IF r.cost_basis <> 'line_level' OR r.materials_inferred THEN RAISE EXCEPTION 'jp fence: contact-linked project became the basis %', r.cost_basis; END IF;
+  -- projects linked by contact only: no figure, flagged
   IF r.xero_project_expenses_ex IS NOT NULL OR r.xero_project_invoiced_ex IS NOT NULL OR r.xero_project_count <> 0 THEN
     RAISE EXCEPTION 'jp fence: contact-linked project figure % % %', r.xero_project_expenses_ex, r.xero_project_invoiced_ex, r.xero_project_count;
   END IF;
@@ -309,14 +335,20 @@ BEGIN
     RAISE EXCEPTION 'jp fence: contact-linked project not flagged %', r.completeness;
   END IF;
 
-  -- JP-PROJ: project total larger than line level; materials inferred.
+  -- JP-PROJ: project total larger than line level. The total is evidence only:
+  -- actual cost stays line-level, no lane is inferred, no profit is published.
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-PROJ';
-  IF r.cost_basis <> 'xero_project_inferred' OR NOT r.materials_inferred THEN RAISE EXCEPTION 'jp proj: basis %', r.cost_basis; END IF;
-  IF r.actual_labour_ex <> 300 OR r.actual_materials_ex <> 700 OR r.actual_cost_ex <> 1000 OR r.line_level_cost_ex <> 300 THEN
+  IF r.cost_basis <> 'line_level' THEN RAISE EXCEPTION 'jp proj: basis %', r.cost_basis; END IF;
+  IF r.actual_labour_ex <> 300 OR r.actual_materials_ex <> 0 OR r.actual_cost_ex <> 300 OR r.line_level_cost_ex <> 300 THEN
     RAISE EXCEPTION 'jp proj: lanes % % % %', r.actual_labour_ex, r.actual_materials_ex, r.actual_cost_ex, r.line_level_cost_ex;
   END IF;
-  IF r.profit_ex <> 500 OR r.margin_pct <> 33.3 THEN RAISE EXCEPTION 'jp proj: profit % margin %', r.profit_ex, r.margin_pct; END IF;
-  IF r.cost_flag <> 'cost_basis_inferred' OR r.costs_verified_paid THEN RAISE EXCEPTION 'jp proj: cost flag %', r.cost_flag; END IF;
+  IF r.profit_ex IS NOT NULL OR r.margin_pct IS NOT NULL OR r.profit_ex_unsuppressed IS NOT NULL THEN
+    RAISE EXCEPTION 'jp proj: profit % margin % unsuppressed %', r.profit_ex, r.margin_pct, r.profit_ex_unsuppressed;
+  END IF;
+  IF r.cost_flag <> 'xero_project_exceeds_line_costs' OR r.costs_verified_paid
+     OR NOT ('xero_project_exceeds_line_costs' = ANY (r.completeness)) OR NOT ('materials_not_linked' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'jp proj: cost flag % completeness %', r.cost_flag, r.completeness;
+  END IF;
   -- only the project named after the job counts; the contact-linked 9000 does not
   IF r.xero_project_expenses_ex <> 1000 OR r.xero_project_invoiced_ex <> 1500 OR r.xero_project_count <> 1
      OR NOT ('xero_project_linked_by_contact_only' = ANY (r.completeness)) THEN
@@ -330,6 +362,25 @@ BEGIN
     RAISE EXCEPTION 'jp proj: quoted % from %', r.quoted_ex, r.quoted_source;
   END IF;
 
+  -- JP-INF: project expenses 5000 (supplier bills only), trade labour 3000 not
+  -- on the project. Real cost is unknown, so nothing is published as profit and
+  -- the 5000 is never a cost.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-INF';
+  IF r.xero_project_expenses_ex <> 5000 OR r.xero_project_count <> 1 THEN
+    RAISE EXCEPTION 'jp inf: project evidence % %', r.xero_project_expenses_ex, r.xero_project_count;
+  END IF;
+  IF (r.actual_labour_ex, r.actual_materials_ex, r.actual_commission_ex, r.actual_other_ex, r.actual_cost_ex, r.line_level_cost_ex)
+     IS DISTINCT FROM (3000::numeric, 0::numeric, 0::numeric, 0::numeric, 3000::numeric, 3000::numeric) THEN
+    RAISE EXCEPTION 'jp inf: lanes % % % % % %', r.actual_labour_ex, r.actual_materials_ex, r.actual_commission_ex, r.actual_other_ex, r.actual_cost_ex, r.line_level_cost_ex;
+  END IF;
+  IF r.invoiced_ex <> 10000 OR r.profit_ex IS NOT NULL OR r.margin_pct IS NOT NULL OR r.profit_ex_unsuppressed IS NOT NULL OR r.margin_ok THEN
+    RAISE EXCEPTION 'jp inf: a profit figure was published: % % % %', r.profit_ex, r.margin_pct, r.profit_ex_unsuppressed, r.margin_ok;
+  END IF;
+  IF r.cost_flag <> 'xero_project_exceeds_line_costs' OR NOT ('xero_project_exceeds_line_costs' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'jp inf: reason not named: % %', r.cost_flag, r.completeness;
+  END IF;
+  IF r.costs_verified_paid THEN RAISE EXCEPTION 'jp inf: costs verified paid with project expenses unlinked'; END IF;
+
   -- JP-DBL: trade lines exceed the project total; never summed with it.
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-DBL';
   IF r.cost_basis <> 'line_level' OR r.actual_cost_ex <> 260 OR r.actual_materials_ex <> -40 OR NOT ('project_below_trade_lines' = ANY (r.completeness)) THEN
@@ -338,11 +389,13 @@ BEGIN
   IF r.xero_project_expenses_ex <> 200 OR 'xero_project_linked_by_contact_only' = ANY (r.completeness) THEN
     RAISE EXCEPTION 'jp dbl: project figure % completeness %', r.xero_project_expenses_ex, r.completeness;
   END IF;
-  IF r.expected_source <> 'live_pricing_estimate' OR r.expected_materials_ex <> 250 OR r.expected_cost_ex <> 500 THEN
-    RAISE EXCEPTION 'jp dbl: expected % %', r.expected_source, r.expected_cost_ex;
+  -- no quote sent: the live price 900 and live estimate 500 are never returned
+  IF r.expected_source IS NOT NULL OR r.expected_cost_ex IS NOT NULL OR r.expected_labour_ex IS NOT NULL
+     OR r.expected_materials_ex IS NOT NULL OR r.expected_commission_ex IS NOT NULL THEN
+    RAISE EXCEPTION 'jp dbl: live estimate presented as expected cost % %', r.expected_source, r.expected_cost_ex;
   END IF;
-  IF r.quoted_ex <> 900 OR r.quoted_source <> 'live_price_not_a_sent_quote' THEN
-    RAISE EXCEPTION 'jp dbl: quoted % from %', r.quoted_ex, r.quoted_source;
+  IF r.quoted_ex IS NOT NULL OR r.quoted_source IS NOT NULL THEN
+    RAISE EXCEPTION 'jp dbl: live price presented as quoted % from %', r.quoted_ex, r.quoted_source;
   END IF;
   -- labour-only cost on a fencing job: the margin is not published
   IF NOT ('materials_not_linked' = ANY (r.completeness)) OR r.cost_flag <> 'materials_not_linked'
@@ -352,6 +405,18 @@ BEGIN
   -- a zero-value pending line neither blocks nor proves payment
   IF NOT r.costs_verified_paid OR 'unapproved_trade_charges' = ANY (r.completeness) THEN
     RAISE EXCEPTION 'jp dbl: zero-value pending line changed paid state: % %', r.costs_verified_paid, r.completeness;
+  END IF;
+
+  -- JP-LIVE: a make-safe, no quote sent. Quoted and expected stay null, and the
+  -- live materials estimate still holds back a labour-only margin.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-LIVE';
+  IF r.quoted_ex IS NOT NULL OR r.quoted_source IS NOT NULL OR r.expected_source IS NOT NULL OR r.expected_cost_ex IS NOT NULL
+     OR r.expected_materials_ex IS NOT NULL THEN
+    RAISE EXCEPTION 'jp live: live figure returned % % % %', r.quoted_ex, r.quoted_source, r.expected_source, r.expected_cost_ex;
+  END IF;
+  IF r.actual_cost_ex <> 500 OR r.cost_flag <> 'materials_not_linked' OR r.profit_ex IS NOT NULL OR r.margin_pct IS NOT NULL
+     OR r.profit_ex_unsuppressed <> 1500 THEN
+    RAISE EXCEPTION 'jp live: materials suppression % % % % %', r.actual_cost_ex, r.cost_flag, r.profit_ex, r.margin_pct, r.profit_ex_unsuppressed;
   END IF;
 
   -- JP-MS: no client invoice, so margin and profit are suppressed.
