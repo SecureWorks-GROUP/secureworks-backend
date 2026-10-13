@@ -1474,7 +1474,7 @@ Deno.test("flag on: a stamped builder-declared repair on the scan lane passes th
   assertEquals(store.tables.makesafe_intake_drafts[0].status, "needs_review");
 });
 
-Deno.test("a repair card carries the builder's work order value, and the Repairs card shows it only where we have no price", async () => {
+Deno.test("a repair card carries the builder's work order value as its own named field, never as our price", async () => {
   const body = {
     client_name: "Alex Example",
     site_address: "7 Sample Road Demoville WA 6010",
@@ -1501,26 +1501,57 @@ Deno.test("a repair card carries the builder's work order value, and the Repairs
     job.metadata.builder_work_order_value_source,
     "builder_work_order_pdf_not_our_quote",
   );
-  const card = projectInsuranceRepairPipelineRow({ ...job, value: 0 });
-  assertEquals(card.builder_work_order_value_ex_gst, 200);
-  assertEquals(card.value, 220);
-  // The card never passes the builder's figure off as our price.
-  assertEquals(card.value_source, "builder_work_order_value");
-  assertEquals(card.value_is_our_price, false);
-  assertEquals(
-    card.value_note,
-    "Builder's work order value (inc GST), not our quote",
-  );
-  // Our own price always wins, and carries none of those markers.
-  const priced = projectInsuranceRepairPipelineRow({ ...job, value: 990 });
-  assertEquals(priced.value, 990);
-  assertEquals("value_source" in priced, false);
-  assertEquals("value_is_our_price" in priced, false);
-  assertEquals("value_note" in priced, false);
-  assertEquals(priced.builder_work_order_value_ex_gst, 200);
+  // The card shows the builder's figure beside `value`, never in it: a reader
+  // that sums `value` counts none of it.
+  for (const ours of [0, 990]) {
+    const card = projectInsuranceRepairPipelineRow({ ...job, value: ours });
+    assertEquals(card.value, ours);
+    assertEquals(card.builder_work_order_value_ex_gst, 200);
+    assertEquals(
+      card.builder_work_order_value_note,
+      "Builder's work order value (ex GST), not our quote",
+    );
+  }
 
-  // CONTROL: a make-safe never takes the field, and a card without it is
-  // projected exactly as before.
+  // An order whose value could not be read is still a job, marked as such.
+  const unreadStore = makeStore();
+  await _createMakesafeJob(
+    makeClient(unreadStore),
+    { ...body, builder_work_order_value_ex_gst: null },
+    { jobRoute: "repair", suppressGeocoding: true },
+  );
+  const unread = unreadStore.tables.jobs[0];
+  assertEquals(unread.type, "repair");
+  assertEquals(unread.metadata.builder_po_number, "PO-2099920205");
+  assertEquals(unread.metadata.builder_work_order_value_ex_gst, null);
+  assertEquals(
+    unread.metadata.builder_work_order_value_source,
+    "builder_work_order_value_not_read",
+  );
+  const unreadCard = projectInsuranceRepairPipelineRow({ ...unread, value: 0 });
+  assertEquals(unreadCard.value, 0);
+  assertEquals(unreadCard.builder_work_order_value_ex_gst, null);
+  assertEquals(
+    unreadCard.builder_work_order_value_note,
+    "Builder's order value not read",
+  );
+
+  // CONTROL: a repair job nobody read a work order for, and a make-safe, never
+  // take the field, and a card without it is projected exactly as before.
+  const manualStore = makeStore();
+  const { builder_work_order_value_ex_gst: _value, ...manualBody } = body;
+  await _createMakesafeJob(makeClient(manualStore), manualBody, {
+    jobRoute: "repair",
+    suppressGeocoding: true,
+  });
+  assertEquals(
+    "builder_work_order_value_ex_gst" in manualStore.tables.jobs[0].metadata,
+    false,
+  );
+  assertEquals(
+    "builder_work_order_value_source" in manualStore.tables.jobs[0].metadata,
+    false,
+  );
   const controlStore = makeStore();
   await _createMakesafeJob(makeClient(controlStore), body, {
     suppressGeocoding: true,
@@ -1537,5 +1568,5 @@ Deno.test("a repair card carries the builder's work order value, and the Repairs
   });
   assertEquals(plain.value, 0);
   assertEquals("builder_work_order_value_ex_gst" in plain, false);
-  assertEquals("value_note" in plain, false);
+  assertEquals("builder_work_order_value_note" in plain, false);
 });

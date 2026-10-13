@@ -342,6 +342,52 @@ function evalPostgrestExpr(row: any, expr: string): boolean {
   return evalPostgrestLeaf(row, expr);
 }
 
+// The three unique indexes on makesafe_intake_cases that a case write can
+// collide with (20260720000001): one case per job, and one LIVE case per
+// builder + WO/PO identity (or, with no WO/PO identity, per claim reference),
+// each within deliverable and cycle. Returns the violated index's name.
+//
+// Enforced for the stores registered here. Older fixtures in this file share
+// one job id across cases as a shortcut, and the D3 reattendance path really
+// does bind a second case to its parent's job (it fails with these indexes
+// on); neither is this change's to alter.
+const CASE_INDEX_ENFORCED_STORES = new WeakSet<Store>();
+
+function intakeCaseUniqueViolation(
+  rows: readonly any[],
+  candidate: any,
+): string | null {
+  const live = (row: any) =>
+    row.state === "confirmed_live_job" || row.state === "blocked_live_job";
+  const others = rows.filter((row) =>
+    row.id !== candidate.id && row.org_id === candidate.org_id
+  );
+  if (
+    candidate.job_id &&
+    others.some((row) => row.job_id === candidate.job_id)
+  ) return "uq_makesafe_intake_cases_job";
+  if (!live(candidate) || !candidate.company_key) return null;
+  const sameSlot = (row: any) =>
+    live(row) && row.company_key === candidate.company_key &&
+    (row.deliverable_ref_canonical ?? "") ===
+      (candidate.deliverable_ref_canonical ?? "") &&
+    (row.cycle ?? 1) === (candidate.cycle ?? 1);
+  if (candidate.wo_po_identity_key) {
+    return others.some((row) =>
+        sameSlot(row) && row.wo_po_identity_key === candidate.wo_po_identity_key
+      )
+      ? "uq_makesafe_intake_cases_live_identity"
+      : null;
+  }
+  return candidate.external_ref_canonical &&
+      others.some((row) =>
+        sameSlot(row) && !row.wo_po_identity_key &&
+        row.external_ref_canonical === candidate.external_ref_canonical
+      )
+    ? "uq_makesafe_intake_cases_live_claim_identity"
+    : null;
+}
+
 class FakeQuery {
   private filters: Array<(row: any) => boolean> = [];
   private sliceRange: [number, number] | null = null;
@@ -492,6 +538,22 @@ class FakeQuery {
           cycle,
           lineage_id: parent ? parent.lineage_id ?? parent.id : id,
         };
+        const violated = CASE_INDEX_ENFORCED_STORES.has(this.store)
+          ? intakeCaseUniqueViolation(this.store[this.table], {
+            id,
+            ...payload,
+          })
+          : null;
+        if (violated) {
+          return {
+            data: [],
+            error: {
+              code: "23505",
+              message:
+                `duplicate key value violates unique constraint "${violated}"`,
+            },
+          };
+        }
       }
       const row = { id, ...payload };
       this.store[this.table].push(row);
@@ -506,6 +568,27 @@ class FakeQuery {
     }
     if (this.op === "update") {
       const matched = this.rows();
+      if (
+        this.table === "makesafe_intake_cases" &&
+        CASE_INDEX_ENFORCED_STORES.has(this.store)
+      ) {
+        for (const row of matched) {
+          const violated = intakeCaseUniqueViolation(this.store[this.table], {
+            ...row,
+            ...this.payload,
+          });
+          if (violated) {
+            return {
+              data: [],
+              error: {
+                code: "23505",
+                message:
+                  `duplicate key value violates unique constraint "${violated}"`,
+              },
+            };
+          }
+        }
+      }
       for (const row of matched) Object.assign(row, this.payload);
       return { data: matched, error: null };
     }
@@ -537,7 +620,8 @@ class FakeQuery {
     return Promise.resolve({ data: data[0] ?? null, error });
   }
   single() {
-    const { data } = this.run();
+    const { data, error } = this.run();
+    if (error) return Promise.resolve({ data: null, error });
     return Promise.resolve(
       data.length ? { data: data[0], error: null } : {
         data: null,
@@ -8360,6 +8444,7 @@ function repairIntakeStore(): Store {
   const store = ambroseIntakeStore();
   store.job_events = [];
   store.job_documents = [];
+  CASE_INDEX_ENFORCED_STORES.add(store);
   return store;
 }
 
@@ -8503,6 +8588,14 @@ function landedNotices(store: Store) {
   );
 }
 
+// An order recorded on its claim's repair job: accounted, holding no job slot
+// and no live identity, and naming the job it landed on.
+function landedCases(store: Store) {
+  return store.makesafe_intake_cases.filter((row: any) =>
+    row.recovery_cursor?.landedOnRepairJob
+  );
+}
+
 Deno.test("repair intake: replay: five Ambrose repair purchase orders become one repair job per claim and none makes two", async () => {
   const store = repairIntakeStore();
   const orders: Array<[string, AmbrosePurchaseOrderFixture, string]> = [
@@ -8600,12 +8693,30 @@ Deno.test("repair intake: replay: five Ambrose repair purchase orders become one
     ).map((event: any) => event.job_id),
     [shared.id],
   );
-  // All five orders are accounted on a job.
+  // All five orders are accounted. Each job's own order holds that job's one
+  // case slot; the second order on the shared claim is accounted as landed on
+  // the job without taking the slot (one case per job is a unique index).
   assertEquals(store.makesafe_intake_cases.length, 5);
-  for (const row of store.makesafe_intake_cases) {
-    assertEquals(row.state, "confirmed_live_job");
-    assert(row.job_id);
-  }
+  const jobCases = store.makesafe_intake_cases.filter((row: any) => row.job_id);
+  assertEquals(
+    jobCases.map((row: any) => row.job_id).sort(),
+    store.jobs.map((job: any) => job.id).sort(),
+  );
+  for (const row of jobCases) assertEquals(row.state, "confirmed_live_job");
+  const landed = landedCases(store);
+  assertEquals(landed.length, 1);
+  assertEquals(landed[0].job_id, null);
+  assertEquals(landed[0].state, "accounted_non_wo");
+  assertEquals(landed[0].reason_code, "revision");
+  assertEquals(landed[0].builder_po_canonical, "PO-2099930108");
+  assertEquals(landed[0].recovery_cursor.landedOnRepairJob, {
+    jobId: shared.id,
+    jobNumber: null,
+    purchaseOrder: "PO-2099930108",
+    purchaseOrderRelation: "different",
+  });
+  // Both orders' mail is settled.
+  for (const mail of store.emails) assert(mail.makesafe_scanned_at);
 
   // The next scan finds nothing to do: no second job, draft, event or notice.
   const second = await runRepairScan(
@@ -8620,6 +8731,16 @@ Deno.test("repair intake: replay: five Ambrose repair purchase orders become one
   assertEquals(store.makesafe_intake_drafts.length, 4);
   assertEquals(landedNotices(store).length, 1);
   assertEquals(shared.metadata.builder_additional_work_orders.length, 1);
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(store.makesafe_intake_cases.length, 5);
+  assertEquals(landedCases(store).length, 1);
+  assertEquals(landedCases(store)[0].state, "accounted_non_wo");
+  assertEquals(
+    store.job_events.filter((event: any) =>
+      event.event_type === REPAIR_WORK_ORDER_LANDED_EVENT
+    ).length,
+    1,
+  );
 });
 
 Deno.test("repair intake: replay: the rapid repair order for a claim that already has a repair job lands on that job", async () => {
@@ -8664,12 +8785,22 @@ Deno.test("repair intake: replay: the rapid repair order for a claim that alread
     landedNotices(store)[0].page_meta.next_action_code,
     "human_review_work_order_on_existing_job",
   );
-  // The order is accounted on the existing job.
+  // The order is accounted as landed on the existing job, without taking the
+  // job's case slot.
   assertEquals(store.makesafe_intake_cases.length, 1);
-  assertEquals(store.makesafe_intake_cases[0].job_id, "job-kinross");
-  // Live on the job. (MLB's template gives no phone the planner reads, which
-  // is the "blocked" flavour of live and holds nothing back.)
-  assertEquals(store.makesafe_intake_cases[0].state, "blocked_live_job");
+  assertEquals(store.makesafe_intake_cases[0].job_id, null);
+  assertEquals(store.makesafe_intake_cases[0].state, "accounted_non_wo");
+  assertEquals(store.makesafe_intake_cases[0].reason_code, "revision");
+  assertEquals(
+    store.makesafe_intake_cases[0].recovery_cursor.landedOnRepairJob,
+    {
+      jobId: "job-kinross",
+      jobNumber: "SWR-990499",
+      purchaseOrder: "PO-69815",
+      purchaseOrderRelation: "empty",
+    },
+  );
+  assert(store.emails[0].makesafe_scanned_at);
   assertEquals(first.repair_intake?.landed_on_existing_job, 1);
 
   const second = await runRepairScan(
@@ -8679,10 +8810,172 @@ Deno.test("repair intake: replay: the rapid repair order for a claim that alread
     "2026-07-20T12:02:00.000Z",
   );
   assertEquals(second.totals.jobs_created, 0);
+  assertEquals(second.totals.drafts_created, 0);
+  assertEquals(second.totals.cases_failed, 0);
   assertEquals(store.job_events.length, 1);
   assertEquals(store.job_documents.length, 1);
   assertEquals(landedNotices(store).length, 1);
   assertEquals(store.jobs.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(store.makesafe_intake_cases[0].state, "accounted_non_wo");
+});
+
+Deno.test("repair intake: a landing whose desk notice cannot be written is retried whole, and the notice is written", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+  let failNotice = true;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      failNotice && table === "email_events_raw" && operation === "insert" &&
+        payload?.change_type ===
+          "intake_exception_new_work_order_on_existing_job"
+        ? { message: "email_events_raw unavailable" }
+        : null,
+  );
+  const scan = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approver.approve,
+      repairAutoIntake: true,
+    });
+
+  const first = await scan(REPAIR_NOW);
+  assertEquals(first.totals.cases_failed, 1);
+  assertEquals(landedNotices(store).length, 0);
+  // The order is still awaiting: it has not taken its landed fate.
+  assertEquals(landedCases(store).length, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "awaiting_job_creation",
+  );
+
+  failNotice = false;
+  const second = await scan("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(second.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(landedCases(store).length, 1);
+  // Retrying the landing wrote nothing twice.
+  assertEquals(job.metadata.builder_po_number, "PO-69815");
+  assertEquals("builder_additional_work_orders" in job.metadata, false);
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(approver.bodies.length, 0);
+});
+
+Deno.test("repair intake: the auto-file brake holds the landing: a waiting draft, and nothing written to the live job", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  const before = JSON.stringify(job);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const braked = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: REPAIR_NOW,
+    maxCases: 10,
+    selectionMode: "full_open",
+    approveDraft: approver.approve,
+    repairAutoIntake: true,
+    advanceDrafts: false,
+  });
+  assertEquals(braked.totals.cases_failed, 0);
+  assertEquals(braked.totals.jobs_created, 0);
+  assertEquals(braked.totals.drafts_created, 1);
+  assertEquals(braked.repair_intake?.landed_on_existing_job, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+  assertEquals(landedCases(store).length, 0);
+});
+
+// The Rapid Repair header is MLB's own declaration. Ordinary repair wording in
+// the scope ("remove and replace") is what the scope reader answers on first,
+// and must not hide that declaration.
+const REPLACEMENT_WORDING_ORDER = {
+  claim: "MLB-49611",
+  po: "PO-69902",
+  address: "4 Sample Close, Testville, WA 6000",
+  scope:
+    "Remove and replace damaged fascia to the rear elevation. Supply and install Colorbond gutter to match existing.",
+  receivedAt: "2026-07-19T02:20:00.000Z",
+};
+
+Deno.test("repair intake: replay: a declared rapid repair order worded as remove and replace becomes one repair job", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "replace-wording", {
+    ...REPLACEMENT_WORDING_ORDER,
+    rapidRepair: true,
+  });
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(report.repair_intake?.auto_approved, 1);
+  assertEquals(report.repair_intake?.parked_for_review, {});
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.repair_auto_intake,
+    {
+      version: REPAIR_AUTO_INTAKE_VERSION,
+      builder: "mlb",
+      family_evidence: ["rapid_repair_signal"],
+      work_order_value_ex_gst: 1080,
+    },
+  );
+});
+
+Deno.test("repair intake: CONTROL: the same remove and replace order with no declaration still stops as a review draft", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "replace-wording", {
+    ...REPLACEMENT_WORDING_ORDER,
+    rapidRepair: false,
+  });
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.status, "needs_review");
+  assertEquals(draft.extraction_json.makesafe_job_family, "repair");
+  assertEquals("repair_auto_intake" in draft.extraction_json, false);
+  assertEquals(report.repair_intake?.parked_for_review, {
+    repair_not_declared_by_builder: 1,
+  });
 });
 
 Deno.test("repair intake: CONTROL: with no repair job on the claim, the same rapid repair order becomes exactly one repair job", async () => {
@@ -8743,13 +9036,15 @@ function makeSafeOnRepairClaimStore() {
   return { store, job };
 }
 
-function makeSafeOnRepairClaimNotices(store: Store) {
+// The make-safe notice is a job event only: it opens nothing on the intake
+// desk, so no source issue of any kind may follow a clean make-safe mint.
+function intakeDeskItems(store: Store) {
   return store.email_events_raw.filter((row: any) =>
-    row.change_type === "intake_exception_make_safe_raised_on_repair_claim"
+    String(row.change_type || "").startsWith("intake_exception_")
   );
 }
 
-Deno.test("repair intake: replay: a make-safe order on a claim with an open repair job still becomes a make-safe job, and the repair job gets a notice", async () => {
+Deno.test("repair intake: replay: a make-safe order on a claim with an open repair job still becomes a make-safe job, and the repair job gets one plain job event", async () => {
   const { store, job } = makeSafeOnRepairClaimStore();
   const before = JSON.stringify(job);
   const approver = intakeApprover(store);
@@ -8781,9 +9076,8 @@ Deno.test("repair intake: replay: a make-safe order on a claim with an open repa
   assertEquals(store.job_documents.length, 0);
   assertEquals(landedNotices(store).length, 0);
   assertEquals(first.repair_intake?.landed_on_existing_job, 0);
-  // The notice: one event on the repair job naming the make-safe job, and one
-  // item on the intake desk. A repair order misread as a make-safe is caught
-  // here, not prevented.
+  // One plain event on the repair job naming the make-safe job, and nothing on
+  // the intake desk.
   assertEquals(store.job_events.length, 1);
   assertEquals(store.job_events[0].job_id, "job-additional");
   assertEquals(
@@ -8796,11 +9090,7 @@ Deno.test("repair intake: replay: a make-safe order on a claim with an open repa
   );
   assertEquals(store.job_events[0].detail_json.make_safe_job_id, makeSafe.id);
   assertEquals(store.job_events[0].detail_json.purchase_order, "PO-69323");
-  assertEquals(makeSafeOnRepairClaimNotices(store).length, 1);
-  assertEquals(
-    makeSafeOnRepairClaimNotices(store)[0].page_meta.next_action_code,
-    "human_check_make_safe_against_repair_job",
-  );
+  assertEquals(intakeDeskItems(store).length, 0);
   assertEquals(first.repair_intake?.make_safe_on_repair_claim, 1);
 
   // The next scan adds no second job, event or desk item.
@@ -8814,7 +9104,7 @@ Deno.test("repair intake: replay: a make-safe order on a claim with an open repa
   assertEquals(approver.bodies.length, 1);
   assertEquals(store.jobs.length, 2);
   assertEquals(store.job_events.length, 1);
-  assertEquals(makeSafeOnRepairClaimNotices(store).length, 1);
+  assertEquals(intakeDeskItems(store).length, 0);
 });
 
 Deno.test("repair intake: flag off: the same make-safe order becomes the same make-safe job, with no notice", async () => {
@@ -8832,7 +9122,7 @@ Deno.test("repair intake: flag off: the same make-safe order becomes the same ma
   assertEquals(store.jobs[1].type, "makesafe");
   assertEquals(JSON.stringify(job), before);
   assertEquals(store.job_events.length, 0);
-  assertEquals(makeSafeOnRepairClaimNotices(store).length, 0);
+  assertEquals(intakeDeskItems(store).length, 0);
 });
 
 Deno.test("repair intake: a notice that cannot be written never fails the make-safe job it describes", async () => {
@@ -8978,7 +9268,7 @@ Deno.test("repair intake: flag off: the collection order is the exception it is 
   assertEquals(approver.bodies.length, 0);
 });
 
-Deno.test("repair intake: an unclear repair order still stops as a review draft", async () => {
+Deno.test("repair intake: an order whose value cannot be read still becomes a repair job, with the value left empty", async () => {
   const store = repairIntakeStore();
   pushAmbroseMail(
     store,
@@ -9002,17 +9292,24 @@ Deno.test("repair intake: an unclear repair order still stops as a review draft"
 
   const report = await runRepairScan(store, approver.approve, true);
   assertEquals(report.totals.cases_failed, 0);
-  assertEquals(report.totals.jobs_created, 0);
-  assertEquals(approver.bodies.length, 0);
-  assertEquals(store.jobs.length, 0);
-  assertEquals(store.makesafe_intake_drafts.length, 1);
-  const draft = store.makesafe_intake_drafts[0];
-  assertEquals(draft.status, "needs_review");
-  assertEquals(draft.extraction_json.makesafe_job_family, "repair");
-  assertEquals("repair_auto_intake" in draft.extraction_json, false);
-  assertEquals(report.repair_intake?.parked_for_review, {
-    work_order_value_unreadable: 1,
-  });
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(report.repair_intake?.auto_approved, 1);
+  assertEquals(report.repair_intake?.parked_for_review, {});
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
+  // The stamp says the value was looked for and not read; the mint marks the
+  // job from it (repair_intake_routing_test.ts).
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.repair_auto_intake,
+    {
+      version: REPAIR_AUTO_INTAKE_VERSION,
+      builder: "acg",
+      family_evidence: ["ambrose_declared_repair"],
+      work_order_value_ex_gst: null,
+    },
+  );
 });
 
 Deno.test("repair intake: flag off: a repair order for a claim with a repair job is the waiting draft it is today, and nothing touches the job", async () => {

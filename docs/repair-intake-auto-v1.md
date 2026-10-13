@@ -32,31 +32,45 @@ these hold (`decideRepairAutoIntake`):
 
 - The builder is MLB or Ambrose, and known to the system.
 - The **builder declared** the repair: Ambrose's "regarding repairs required",
-  MLB's "Rapid Repair" header, or a work order PDF's declared type.
+  MLB's "Rapid Repair" header, or a work order PDF's declared type
+  (`builderDeclaredRepair`).
 - Claim reference, purchase order, customer name and site address are read.
 - Nothing conflicts. The only gap allowed is the customer's phone, which does
   not hold a make-safe today either.
-- Exactly one ex-GST value is read from the work order PDF.
 - It is a first-issue order, not an amendment, a reattendance or a cancellation.
 
 Anything else is written as a review draft and waits, as before. The run
 report's `repair_intake.parked_for_review` counts each reason.
 
+The builder's declaration decides. Ordinary repair wording in the scope
+("remove and replace", "supply and install") never parks a declared order: a
+Rapid Repair order worded that way is read as declared by the builder, not as
+a repair inferred from scope words. Scope wording with no declaration, and a
+repair reached by elimination, stay supervised.
+
 The job is a `repair` job (SWR- number) in WO In, with the builder, claim,
-purchase order and site on it, and the builder's value in
-`metadata.builder_work_order_value_ex_gst`.
+purchase order and site on it.
 
-That value is the **builder's order value, not our quote**, and every field it
-writes says so:
+### The builder's order value
 
-| Where | Field | Says |
+The work order's ex-GST value is read off the PDF when it states exactly one.
+It never decides whether the job is made: an order whose value cannot be read
+still becomes a job, with the value left empty and marked as not read.
+
+It is the **builder's order value, not our quote**. It is its own named field
+and is never put in the card's `value`, so nothing that adds up `value` counts
+a builder's figure as our price.
+
+| Where | Value read | Value not read |
 |---|---|---|
-| Job | `metadata.builder_work_order_value_source` | `builder_work_order_pdf_not_our_quote` |
-| Repairs card | `builder_work_order_value_ex_gst` | The builder's figure, always shown when stamped. |
-| Repairs card | `value` | Filled (inc GST) only where the job has no price of ours. |
-| Repairs card, with a filled `value` | `value_source`, `value_is_our_price`, `value_note` | `builder_work_order_value`, `false`, "Builder's work order value (inc GST), not our quote" |
+| Job `metadata.builder_work_order_value_ex_gst` | The figure | `null` |
+| Job `metadata.builder_work_order_value_source` | `builder_work_order_pdf_not_our_quote` | `builder_work_order_value_not_read` |
+| Repairs card `builder_work_order_value_ex_gst` | The figure | `null` |
+| Repairs card `builder_work_order_value_note` | "Builder's work order value (ex GST), not our quote" | "Builder's order value not read" |
+| Repairs card `value` | Unchanged: our price only | Unchanged |
 
-Our own price always wins, and then none of the three markers is present.
+A repair job nobody read a work order for (raised by hand) carries none of
+these fields.
 
 ### What the 28 Aug 2026 rule guarded, and how it is still guarded
 
@@ -95,23 +109,49 @@ blank draft.
 
 This applies only to an order that reads as repair work.
 
+### How a landed order is accounted
+
+A job holds one intake case (`uq_makesafe_intake_cases_job`, live in
+production), and the job's own order already holds it. So a landed order's case
+does **not** take `job_id`:
+
+| Case field | Landed order |
+|---|---|
+| `state` | `accounted_non_wo` (outside both live-identity indexes) |
+| `reason_code` | `revision` |
+| `job_id` | `null` |
+| `recovery_cursor.landedOnRepairJob` | `jobId`, `jobNumber`, `purchaseOrder`, `purchaseOrderRelation` |
+| `last_decision_reason` | `deterministic landed_on_existing_repair_job <job id>` |
+
+The desk item is written before the case takes that fate. If the item, the PDF
+attach or the job event fails, the case stays `awaiting_job_creation` and the
+next scan repeats the whole landing; every step can run twice. A landed case
+keeps its fate on later scans and with the flag off.
+
+### The auto-file brakes hold the landing
+
+With an auto-file brake on (environment or database), nothing is written to the
+live job. The order falls back to a waiting review draft, as any order does
+under the brake. That draft is then a person's to decide: releasing the brake
+does not land it.
+
 ### A make-safe on a claim that has a repair job
 
 An order that reads as a make-safe by the existing make-safe test still becomes
 a make-safe job automatically, exactly as it does today, even when its claim
 has an open repair job. Urgent work never waits for a person to read a notice.
 
-The claim's repair job gets a notice that a make-safe was raised on the same
-claim (`noteMakeSafeRaisedOnRepairClaim`): one `make_safe_raised_on_repair_claim`
-job event naming the make-safe job, and one item on the intake desk. The repair
-job itself is not changed.
+The claim's repair job gets one plain job event saying a make-safe was raised
+on the same claim (`noteMakeSafeRaisedOnRepairClaim`, event
+`make_safe_raised_on_repair_claim`, naming the make-safe job). Nothing opens on
+the intake desk and the repair job itself is not changed.
 
 So a repair order **misread as a make-safe** is still possible. That is the
 Woodvale shape: a second "additional costs" order on a repair claim, with no
-repair header, became its own make-safe job. It is **caught by the notice, not
-prevented**: a person sees the notice and moves the work to the repair job.
+repair header, became its own make-safe job. It is **not prevented**; the job
+event on the repair job is the only trace.
 
-If the notice cannot be written, the make-safe job still stands. The run report
+If the event cannot be written, the make-safe job still stands. The run report
 records the reason and the caveat `make_safe_on_repair_claim_notice_unwritten`;
 it is not retried.
 
@@ -151,8 +191,8 @@ Not sent: the make-safe manager text (suppressed for every deterministic
 draft), any crew assignment (repair jobs stay unassigned), anything to a
 customer or a builder.
 
-A landing (rule 2), a make-safe notice and a collection draft (rule 3) send no
-message at all. A make-safe job raised on a repair claim sends exactly what any
+A landing (rule 2), a make-safe job event and a collection draft (rule 3) send
+no message at all. A make-safe job raised on a repair claim sends exactly what any
 make-safe job sends today.
 
 ## Tests

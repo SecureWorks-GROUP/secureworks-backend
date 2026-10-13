@@ -1530,9 +1530,12 @@ a clean repair work order from MLB or Ambrose. Rules:
 `ops-api/repair_intake_auto.ts`; contract, message list and limits:
 `docs/repair-intake-auto-v1.md`. What must not regress:
 
-- Automatic only for a repair the BUILDER declared (`plan.familyEvidence`),
-  never one inferred from scope words or by elimination, and only with one
-  readable ex-GST value. Anything else still parks as a review draft.
+- Automatic only for a repair the BUILDER declared (`builderDeclaredRepair`
+  over `plan.familyEvidence`), never one inferred from scope words alone or by
+  elimination. The declaration decides: a Rapid Repair order worded "remove
+  and replace" is declared (`decideDeterministicMakeSafeJobFamily` names the
+  builder's label, not the scope rung that answered first). Anything else
+  still parks as a review draft.
 - The stamp is on the DRAFT (`extraction_json.repair_auto_intake`), written by a
   flag-on run. The brake in `approveIntakeDraft` re-reads the flag and the
   stamp at mint time and takes a request marker only the two deterministic scan
@@ -1542,15 +1545,28 @@ a clean repair work order from MLB or Ambrose. Rules:
   a REPAIR order for a claim with an open repair job is matched by
   `matchOpenRepairJob` and landed on that job: purchase order recorded (a
   second one is listed, never written over the first), PDF attached, one job
-  event, one intake desk item, no message, board stage untouched.
+  event, one intake desk item, no message, board stage untouched. The
+  auto-file brakes hold the landing too: with a brake on the order is a
+  waiting draft and nothing is written to the live job.
+- A landed order's case NEVER takes `job_id`: `uq_makesafe_intake_cases_job`
+  (one case per job) is live and the job's own order holds the slot. It is
+  accounted as `accounted_non_wo` / `revision` with the job in
+  `recovery_cursor.landedOnRepairJob` (`accountCaseLandedOnRepairJob`), after
+  the desk item is written, and `isLandedOnRepairJobRow` keeps that fate on
+  every later scan. The older reattendance path (D3) still binds a second
+  case to its parent's job and would hit the same index; it is unchanged.
 - An order that reads as a make-safe is NEVER diverted or held by that rule
   (ruling 13 Oct 2026: urgent work never waits on a notice). It mints as
-  today and `noteMakeSafeRaisedOnRepairClaim` leaves a notice on the claim's
-  repair job. A repair order misread as a make-safe is caught by that notice,
-  not prevented; do not widen the landing to make-safe families.
+  today and `noteMakeSafeRaisedOnRepairClaim` leaves one plain job event on
+  the claim's repair job: no desk item, no source-issue reason. A repair order
+  misread as a make-safe is not prevented; do not widen the landing to
+  make-safe families.
 - `metadata.builder_work_order_value_ex_gst` is the BUILDER'S order value, not
-  our quote. The Repairs card fills `value` from it only where we have no
-  price, always with `value_is_our_price: false` and `value_note`.
+  our quote, and never gates the mint: an unreadable value still makes the
+  job, stamped `builder_work_order_value_source:
+  builder_work_order_value_not_read`. The Repairs card shows it as its own
+  field (`builder_work_order_value_ex_gst` + `builder_work_order_value_note`)
+  and never in `value`.
 - A collection or reattendance order with no original job and a first-issue
   purchase order opens a review draft that nothing approves automatically.
 - Flag-on runs leave earlier fates alone: a waiting unstamped draft, an order

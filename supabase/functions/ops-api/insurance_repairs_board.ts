@@ -147,8 +147,12 @@ function detailCompanyRow(detail: any): any {
   return embedded && typeof embedded === "object" ? embedded : null;
 }
 
+export const BUILDER_WORK_ORDER_VALUE_NOT_READ =
+  "builder_work_order_value_not_read";
 export const BUILDER_WORK_ORDER_VALUE_NOTE =
-  "Builder's work order value (inc GST), not our quote";
+  "Builder's work order value (ex GST), not our quote";
+export const BUILDER_WORK_ORDER_VALUE_NOT_READ_NOTE =
+  "Builder's order value not read";
 
 /**
  * The pipeline card shape consumed by the merged Repairs UX tab.
@@ -238,32 +242,30 @@ export function projectInsuranceRepairPipelineRow(
   );
   const purchaseOrder = cleanRef(meta.builder_po_number) ??
     (pairedPurchaseOrders.size === 1 ? [...pairedPurchaseOrders][0] : null);
-  // The builder's ex-GST work order value, stamped at intake from its PDF. A
-  // repair card raised from a work order has no pricing of ours, so without
-  // this the card shows no money at all. It only ever fills an EMPTY value
-  // (inc GST, the unit `value` already carries); our own pricing always wins.
-  // It is the BUILDER'S order value, never our quote, and every field it
-  // writes says so: `value_is_our_price: false` and `value_note` travel with
-  // the filled value so no reader can take it for our price.
+  // The builder's ex-GST work order value, stamped at intake from its PDF. It
+  // is the BUILDER'S order value, never our quote, so it is shown as its own
+  // named field and never enters `value`: nothing that sums `value` can count
+  // a builder's figure as our price. An order whose value could not be read
+  // says so instead of showing nothing.
   const workOrderValueExGst =
     typeof meta.builder_work_order_value_ex_gst === "number" &&
       Number.isFinite(meta.builder_work_order_value_ex_gst) &&
       meta.builder_work_order_value_ex_gst > 0
       ? meta.builder_work_order_value_ex_gst
       : null;
+  const workOrderValueNotRead = workOrderValueExGst === null &&
+    meta.builder_work_order_value_source === BUILDER_WORK_ORDER_VALUE_NOT_READ;
   return {
     ...projected,
     ...(workOrderValueExGst !== null
       ? {
         builder_work_order_value_ex_gst: workOrderValueExGst,
-        ...(!Number(projected.value)
-          ? {
-            value: Math.round(workOrderValueExGst * 110) / 100,
-            value_source: "builder_work_order_value",
-            value_is_our_price: false,
-            value_note: BUILDER_WORK_ORDER_VALUE_NOTE,
-          }
-          : {}),
+        builder_work_order_value_note: BUILDER_WORK_ORDER_VALUE_NOTE,
+      }
+      : workOrderValueNotRead
+      ? {
+        builder_work_order_value_ex_gst: null,
+        builder_work_order_value_note: BUILDER_WORK_ORDER_VALUE_NOT_READ_NOTE,
       }
       : {}),
     source_type: row?.type || null,

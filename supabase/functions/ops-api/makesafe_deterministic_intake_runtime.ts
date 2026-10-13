@@ -116,10 +116,6 @@ export interface DeterministicRuntimeOptions {
   // repair draft parks, repair jobs stay invisible to the obligation match and
   // an orphan collection order stays an exception. Rules: repair_intake_auto.ts.
   repairAutoIntake?: boolean;
-  landWorkOrderOnRepairJob?: (
-    client: any,
-    landing: RepairWorkOrderLanding,
-  ) => Promise<unknown>;
 }
 
 export interface BuilderCancellationCommand {
@@ -4542,6 +4538,67 @@ function withheldCasePlan(
   };
 }
 
+// A work order recorded on the repair job its claim already has is accounted
+// WITHOUT taking that job's case slot: `uq_makesafe_intake_cases_job` allows
+// one case per job, and the job's own order already holds it. The landed case
+// is a non-work fate (`accounted_non_wo`, reason `revision`: a change to work a
+// job already holds), which sits outside both live-identity indexes, carries
+// no `job_id`, and names the job in `recovery_cursor.landedOnRepairJob`.
+const LANDED_ON_REPAIR_JOB_DECISION =
+  "deterministic landed_on_existing_repair_job";
+
+function isLandedOnRepairJobRow(row: any): boolean {
+  return Boolean(row) && !row.job_id && row.state === "accounted_non_wo" &&
+    String(row.last_decision_reason || "").startsWith(
+      LANDED_ON_REPAIR_JOB_DECISION,
+    );
+}
+
+async function accountCaseLandedOnRepairJob(
+  client: any,
+  plan: DeterministicCasePlan,
+  target: {
+    jobId: string;
+    jobNumber: string | null;
+    relation: string;
+  },
+): Promise<any> {
+  const { data, error } = await client.from("makesafe_intake_cases")
+    .update({
+      state: "accounted_non_wo",
+      reason_code: "revision",
+      blocked_reasons: [],
+      last_decision_provenance: "deterministic",
+      last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
+      last_decision_reason: `${LANDED_ON_REPAIR_JOB_DECISION} ${target.jobId}`,
+      recovery_cursor: {
+        ...plan.recoveryCursor,
+        nextStage: null,
+        landedOnRepairJob: {
+          jobId: target.jobId,
+          jobNumber: target.jobNumber,
+          purchaseOrder: plan.identity.builderPoCanonical,
+          purchaseOrderRelation: target.relation,
+        },
+      },
+    })
+    .eq("org_id", DEFAULT_ORG_ID)
+    .eq("instruction_key", plan.instructionKey)
+    .is("job_id", null)
+    .select(
+      "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,is_authoritative,field_provenance,last_decision_reason",
+    )
+    .single();
+  if (error || !data?.id) {
+    throw new Error(
+      `deterministic case update failed: ${
+        error?.message || error || "landed case not found"
+      }`,
+    );
+  }
+  return data;
+}
+
 // Mirrors makesafe_intake_case_transition_allowed in migration 20260720000001.
 // An upgrade is attempted only along an edge the database already accepts.
 const ALLOWED_TRANSITIONS: Record<string, readonly string[]> = {
@@ -5653,8 +5710,20 @@ export async function runDeterministicIntake(
     );
   const releasedFallbacks = recoveryGate.released;
   for (const key of recoveryGate.withheld) existingObligationJobs.delete(key);
+  // An order already recorded on its claim's repair job keeps that fate: it is
+  // never re-planned into a job, a draft or a binding review card.
+  const landedOnRepairJob = new Set(
+    actionableCases.map((casePlan) => casePlan.instructionKey).filter((key) =>
+      isLandedOnRepairJobRow(persisted.get(key))
+    ),
+  );
+  for (const key of landedOnRepairJob) {
+    existingObligationJobs.delete(key);
+    bindingExceptions.delete(key);
+  }
   const runCases = actionableCases.map((casePlan) =>
-    recoveryGate.withheld.has(casePlan.instructionKey)
+    recoveryGate.withheld.has(casePlan.instructionKey) ||
+      landedOnRepairJob.has(casePlan.instructionKey)
       ? withheldCasePlan(casePlan, persisted.get(casePlan.instructionKey))
       : casePlan
   );
@@ -5789,12 +5858,15 @@ export async function runDeterministicIntake(
       // and a dead make-safe twin of the same claim (the usual leftover when a
       // make-safe was cancelled in favour of the repair) must not outrank the
       // live repair job. An order that already has a draft is left to the
-      // person holding that draft.
+      // person holding that draft. The auto-file brakes hold the landing too:
+      // with a brake on the order falls through to the waiting draft below and
+      // nothing is written to the live job.
       let repairLandingTarget:
         | Extract<OpenRepairJobMatch, { kind: "one" }>
         | null = null;
       if (
-        repairAutoIntake && !existing?.job_id &&
+        repairAutoIntake && options.advanceDrafts !== false &&
+        !existing?.job_id &&
         !existingObligationJobs.get(casePlan.instructionKey) &&
         (!bindingException ||
           bindingException.kind === "terminal_job_binding") &&
@@ -5955,40 +6027,23 @@ export async function runDeterministicIntake(
             ?.receivedAt || null,
           attachments: stagedWorkOrders,
         };
-        if (options.landWorkOrderOnRepairJob) {
-          await options.landWorkOrderOnRepairJob(client, landing);
-        } else {
-          await landWorkOrderOnRepairJob(client, landing, {
-            // The purchase order is recorded on the job explicitly above, so
-            // the attach-time identity refresh has nothing left to decide; run
-            // here it would only log a false conflict against the claim key.
-            attachEvidence: (evidenceClient, jobIds, attachments) =>
-              ensureIntakeWorkOrderEvidence(
-                evidenceClient,
-                jobIds,
-                attachments,
-                {},
-                { refreshIdentity: () => Promise.resolve(null) },
-              ),
-          });
-        }
-        jobId = repairLandingTarget.jobId;
-        const landedCaseRow = await findCase(
-          client,
-          effectivePlan.instructionKey,
-        );
-        if (landedCaseRow) {
-          saved = await insertCaseAndSources(
-            client,
-            effectivePlan,
-            jobId,
-            sourceMap,
-            landedCaseRow,
-            true,
-          );
-        }
+        await landWorkOrderOnRepairJob(client, landing, {
+          // The purchase order is recorded on the job explicitly above, so
+          // the attach-time identity refresh has nothing left to decide; run
+          // here it would only log a false conflict against the claim key.
+          attachEvidence: (evidenceClient, jobIds, attachments) =>
+            ensureIntakeWorkOrderEvidence(
+              evidenceClient,
+              jobIds,
+              attachments,
+              {},
+              { refreshIdentity: () => Promise.resolve(null) },
+            ),
+        });
         // The "new work order on existing job" notice: an open item on the
-        // intake desk, beside the job event the landing wrote. No message.
+        // intake desk, beside the job event the landing wrote. No message. It
+        // is written BEFORE the case takes its landed fate, so a notice that
+        // fails leaves the case awaiting and the whole landing is retried.
         await persistIssueForSources(
           client,
           landingSources,
@@ -5998,6 +6053,14 @@ export async function runDeterministicIntake(
             caseId: saved.caseRow.id,
           },
         );
+        saved = {
+          ...saved,
+          caseRow: await accountCaseLandedOnRepairJob(
+            client,
+            effectivePlan,
+            repairLandingTarget,
+          ),
+        };
         repairIntakeReport.landed_on_existing_job++;
       } else if (wantsJob && transitionAllowed) {
         const repairDecision = repairAutoIntake && !orphanLifecycleReview
@@ -6035,11 +6098,11 @@ export async function runDeterministicIntake(
           repairIntakeReport.auto_approved++;
         }
         // A make-safe job just raised on a claim that has an open repair job:
-        // the make-safe is live and nothing waits, and the repair job gets a
-        // notice so a repair order misread as a make-safe is seen. The notice
-        // is informational, so its own failure is recorded as a caveat and a
-        // write-failure REASON only and never fails the mint (the same
-        // contract as the suburb backstop below).
+        // the make-safe is live and nothing waits, and the repair job gets one
+        // plain job event saying so. The event is informational, so its own
+        // failure is recorded as a caveat and a write-failure REASON only and
+        // never fails the mint (the same contract as the suburb backstop
+        // below).
         if (
           repairAutoIntake && live.jobCreated && jobId &&
           effectivePlan.identity.jobFamily !== "repair" &&
@@ -6066,18 +6129,6 @@ export async function runDeterministicIntake(
               });
             }
             if (claimRepairJobs.length) {
-              await persistIssueForSources(
-                client,
-                effectivePlan.sourcePostIds.flatMap((postId) => {
-                  const source = sourceMap.get(postId);
-                  return source ? [source] : [];
-                }),
-                "make_safe_raised_on_repair_claim",
-                {
-                  instructionKey: effectivePlan.instructionKey,
-                  caseId: saved.caseRow.id,
-                },
-              );
               repairIntakeReport.make_safe_on_repair_claim++;
             }
           } catch (noticeError) {

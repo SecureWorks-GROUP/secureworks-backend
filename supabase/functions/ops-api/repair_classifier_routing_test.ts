@@ -83,6 +83,35 @@ Deno.test("a **RAPID REPAIR** work order routes to repair on the approval fallba
   );
 });
 
+Deno.test("a **RAPID REPAIR** order worded as remove and replace is a repair the builder declared", () => {
+  const replacementBody =
+    "Remove and replace damaged fascia to the rear elevation.";
+  // The scope wording alone already reads as repair, as an inference.
+  assertEquals(
+    decideDeterministicMakeSafeJobFamily(
+      "NEW WORK ORDER - WO-26303",
+      replacementBody,
+    ),
+    { family: "repair", evidence: "repair_replacement_scope" },
+  );
+  // With the builder's label the family is the same and the evidence is the
+  // builder's own declaration, not the scope wording that answered first.
+  assertEquals(
+    decideDeterministicMakeSafeJobFamily(RAPID_REPAIR_SUBJECT, replacementBody),
+    { family: "repair", evidence: "rapid_repair_signal" },
+  );
+  // CONTROL: the label never retags another declared family.
+  assertEquals(
+    decideDeterministicMakeSafeJobFamily(
+      RAPID_REPAIR_SUBJECT,
+      replacementBody,
+      null,
+      { pdfDeclaredType: { declaredType: "roof", fenceSubtype: false } as any },
+    ).family,
+    "roof_report",
+  );
+});
+
 Deno.test("a labelled Dispatch Class: Rapid Repairs line routes to repair", () => {
   assertEquals(
     classifyMakeSafeJobFamily("NEW WORK ORDER - WO-27249", DISPATCH_LINE_BODY),

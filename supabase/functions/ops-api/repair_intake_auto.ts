@@ -14,16 +14,18 @@
 //    MISREAD work order minting an irreversible repair card. So the automatic
 //    path takes only a repair the BUILDER declared (never one inferred from
 //    scope words or by elimination), from a builder on a closed list, on a
-//    plan with its claim, purchase order, customer and site read, nothing
-//    conflicting and one readable ex-GST value. Anything else still parks as a
-//    review draft.
+//    plan with its claim, purchase order, customer and site read and nothing
+//    conflicting. Anything else still parks as a review draft. The builder's
+//    ex-GST order value rides along when the PDF states one; an order whose
+//    value cannot be read is still made, marked "builder's order value not
+//    read".
 // 2. `matchOpenRepairJob` / `landWorkOrderOnRepairJob` - a REPAIR work order
 //    for a claim that already has an open repair job lands on that job. It
 //    never opens a second job or a blank draft. An order that reads as a
 //    make-safe is never held back by this: it becomes a make-safe job exactly
-//    as it does today (urgent work must not wait for a person to read a
-//    notice), and `noteMakeSafeRaisedOnRepairClaim` leaves a notice on the
-//    claim's repair job so a repair order misread as a make-safe is caught.
+//    as it does today (urgent work must not wait for a person), and
+//    `noteMakeSafeRaisedOnRepairClaim` leaves one plain job event on the
+//    claim's repair job saying so.
 // 3. `orphanLifecycleOrderOpensReviewDraft` - a collection or reattendance
 //    order with no original job, carrying a first-issue purchase order, opens a
 //    review draft instead of an exception nobody can act on.
@@ -47,15 +49,33 @@ export const REPAIR_AUTO_INTAKE_BUILDERS: ReadonlySet<string> = new Set([
 /**
  * Family evidence that is the builder's own statement of a repair: Ambrose's
  * "regarding repairs required", MLB's "Rapid Repair" header, a work order PDF's
- * declared type. `repair_replacement_scope` (scope verbs) and the
- * `identified_wo_repair_complement` (repair by elimination) are inferences and
- * stay supervised.
+ * declared type.
  */
 export const REPAIR_DECLARED_FAMILY_EVIDENCE: ReadonlySet<string> = new Set([
   "ambrose_declared_repair",
   "rapid_repair_signal",
   "pdf_declared_type_header",
 ]);
+
+/** Replacement scope wording ("remove and replace"): an inference on its own,
+ * and ordinary repair wording beside a builder's declaration. */
+const REPAIR_SCOPE_FAMILY_EVIDENCE = "repair_replacement_scope";
+
+/**
+ * The builder's own declaration decides. A repair is declared when at least
+ * one email of the order carries the builder's statement and no email reads as
+ * anything but a repair: replacement scope wording agrees with the
+ * declaration, any other reading disagrees with it. Scope wording alone, and a
+ * repair by elimination (`identified_wo_repair_complement`), are inferences
+ * and stay supervised.
+ */
+export function builderDeclaredRepair(evidence: readonly string[]): boolean {
+  return evidence.some((code) => REPAIR_DECLARED_FAMILY_EVIDENCE.has(code)) &&
+    evidence.every((code) =>
+      REPAIR_DECLARED_FAMILY_EVIDENCE.has(code) ||
+      code === REPAIR_SCOPE_FAMILY_EVIDENCE
+    );
+}
 
 /** The review reason a parked collection draft carries, which also keeps the
  * backlog sweep from approving it. */
@@ -153,7 +173,9 @@ export interface RepairAutoIntakeStamp {
   version: typeof REPAIR_AUTO_INTAKE_VERSION;
   builder: string;
   family_evidence: string[];
-  work_order_value_ex_gst: number;
+  /** The builder's ex-GST order value, or null when the PDF states none we
+   * can read. Never our price. */
+  work_order_value_ex_gst: number | null;
 }
 
 export type RepairAutoIntakeDecision =
@@ -213,19 +235,16 @@ export function decideRepairAutoIntake(
     return no("client_or_site_missing");
   }
   const evidence = [...new Set(plan.familyEvidence || [])].sort();
-  if (
-    !evidence.length ||
-    !evidence.every((code) => REPAIR_DECLARED_FAMILY_EVIDENCE.has(code))
-  ) return no("repair_not_declared_by_builder");
-  const value = planWorkOrderValueExGst(plan);
-  if (value === null) return no("work_order_value_unreadable");
+  if (!builderDeclaredRepair(evidence)) {
+    return no("repair_not_declared_by_builder");
+  }
   return {
     auto: true,
     stamp: {
       version: REPAIR_AUTO_INTAKE_VERSION,
       builder,
       family_evidence: evidence,
-      work_order_value_ex_gst: value,
+      work_order_value_ex_gst: planWorkOrderValueExGst(plan),
     },
   };
 }
@@ -261,17 +280,16 @@ export function repairAutoIntakeMintStamp(input: {
   const evidence = Array.isArray(stamp.family_evidence)
     ? stamp.family_evidence.map(String)
     : [];
-  if (
-    !evidence.length ||
-    !evidence.every((code: string) => REPAIR_DECLARED_FAMILY_EVIDENCE.has(code))
-  ) return null;
-  const value = Number(stamp.work_order_value_ex_gst);
-  if (!Number.isFinite(value) || value <= 0) return null;
+  if (!builderDeclaredRepair(evidence)) return null;
+  const value = stamp.work_order_value_ex_gst;
   return {
     version: REPAIR_AUTO_INTAKE_VERSION,
     builder,
     family_evidence: evidence,
-    work_order_value_ex_gst: value,
+    work_order_value_ex_gst:
+      typeof value === "number" && Number.isFinite(value) && value > 0
+        ? value
+        : null,
   };
 }
 
@@ -620,11 +638,10 @@ export const MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT =
   "make_safe_raised_on_repair_claim";
 
 /**
- * The notice on a repair job that a make-safe job was just raised on its claim.
- * The make-safe is never held for it. It exists because a repair order can be
- * misread as a make-safe (a second "additional costs" order with no repair
- * header): the misread is not prevented, it is made visible here. One event per
- * instruction; nothing is sent to anyone and the repair job is not changed.
+ * A plain job event on a repair job saying a make-safe job was just raised on
+ * its claim. The make-safe is never held for it. One event per instruction;
+ * nothing is sent to anyone, no desk item is opened and the repair job is not
+ * changed.
  */
 export async function noteMakeSafeRaisedOnRepairClaim(
   client: any,

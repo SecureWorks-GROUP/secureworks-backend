@@ -16,6 +16,7 @@ import {
   ambroseSource,
 } from "./makesafe_ambrose_intake_fixtures.ts";
 import {
+  builderDeclaredRepair,
   decideRepairAutoIntake,
   landWorkOrderOnRepairJob,
   MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT,
@@ -158,12 +159,24 @@ Deno.test("anything that does not read cleanly keeps its person", () => {
     reason({ familyEvidence: [] }),
     "repair_not_declared_by_builder",
   );
-  // Two emails that disagree about why it is a repair.
+  assertEquals(
+    reason({ familyEvidence: ["identified_wo_repair_complement"] }),
+    "repair_not_declared_by_builder",
+  );
+  // Two emails that disagree about what the work is.
   assertEquals(
     reason({
       familyEvidence: ["ambrose_declared_repair", "physical_makesafe"],
     }),
     "repair_not_declared_by_builder",
+  );
+  // The builder's declaration decides: replacement wording on another email
+  // of the same order agrees with it and holds nothing back.
+  assertEquals(
+    reason({
+      familyEvidence: ["ambrose_declared_repair", "repair_replacement_scope"],
+    }),
+    "auto",
   );
   // A builder the owner did not name.
   assertEquals(
@@ -202,24 +215,43 @@ Deno.test("anything that does not read cleanly keeps its person", () => {
     }),
     "auto",
   );
-  // The value cannot be read.
-  assertEquals(
-    reason({
-      pdfDocuments: plan.pdfDocuments.map((document) => ({
-        ...document,
-        text: String(document.text).replace(
-          /TOTAL Purchase Order Price \(ex GST\) \$[\d.,]+/,
-          "TOTAL Purchase Order Price (ex GST) see schedule",
-        ),
-      })),
-    }),
-    "work_order_value_unreadable",
-  );
+  // A value that cannot be read never holds the order: it is automatic, with
+  // the value left empty.
+  const unread = decideRepairAutoIntake({
+    ...plan,
+    pdfDocuments: plan.pdfDocuments.map((document) => ({
+      ...document,
+      text: String(document.text).replace(
+        /TOTAL Purchase Order Price \(ex GST\) \$[\d.,]+/,
+        "TOTAL Purchase Order Price (ex GST) see schedule",
+      ),
+    })),
+  });
+  assertEquals(unread.auto && unread.stamp.work_order_value_ex_gst, null);
   // An amended order is a change to work a person already knows about.
   assertEquals(
     reason({ parentRelation: "revision_of" }),
     "not_a_first_issue_order",
   );
+});
+
+Deno.test("a repair is declared by the builder's own statement, never by scope wording alone", () => {
+  assertEquals(builderDeclaredRepair(["rapid_repair_signal"]), true);
+  assertEquals(builderDeclaredRepair(["pdf_declared_type_header"]), true);
+  assertEquals(
+    builderDeclaredRepair(["rapid_repair_signal", "repair_replacement_scope"]),
+    true,
+  );
+  assertEquals(builderDeclaredRepair(["repair_replacement_scope"]), false);
+  assertEquals(
+    builderDeclaredRepair(["identified_wo_repair_complement"]),
+    false,
+  );
+  assertEquals(
+    builderDeclaredRepair(["rapid_repair_signal", "physical_makesafe"]),
+    false,
+  );
+  assertEquals(builderDeclaredRepair([]), false);
 });
 
 Deno.test("a make-safe plan is never an automatic repair", () => {
@@ -264,15 +296,28 @@ Deno.test("the mint-time stamp is judged on the draft, not on the caller", () =>
     }),
     null,
   );
+  // A stamp resting on scope wording alone is no stamp either.
   assertEquals(
     stamp({
       repair_auto_intake: {
         ...extraction.repair_auto_intake,
-        work_order_value_ex_gst: 0,
+        family_evidence: ["repair_replacement_scope"],
       },
     }),
     null,
   );
+  // A value that was not read, or is not a usable figure, leaves the stamp
+  // standing with the value empty: it never decides whether a job is made.
+  for (const unread of [null, 0, -5, "200", undefined]) {
+    const result = stamp({
+      repair_auto_intake: {
+        ...extraction.repair_auto_intake,
+        work_order_value_ex_gst: unread,
+      },
+    });
+    assertEquals(result?.builder, "acg");
+    assertEquals(result?.work_order_value_ex_gst, null);
+  }
 });
 
 function repairRow(input: {

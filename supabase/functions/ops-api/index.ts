@@ -251,6 +251,7 @@ import {
   type QuoteBuilderActor,
 } from './quote_builder.ts'
 import {
+  BUILDER_WORK_ORDER_VALUE_NOT_READ as _BUILDER_WORK_ORDER_VALUE_NOT_READ,
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
   isInsuranceRepairFamily,
@@ -18813,13 +18814,17 @@ async function createMakesafeJob(
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
   // The builder's own ex-GST work order value, as read off its PDF. Recorded on
   // a repair card only, beside its purchase order; it is the builder's figure,
-  // never our price, so it stays in metadata and out of pricing_json.
+  // never our price, so it stays in metadata and out of pricing_json. A caller
+  // that looked and could not read one passes null, and the card says so.
   const reviewedWorkOrderValueExGst = isRepairRoute &&
       typeof builder_work_order_value_ex_gst === 'number' &&
       Number.isFinite(builder_work_order_value_ex_gst) &&
       builder_work_order_value_ex_gst > 0
     ? Math.round(builder_work_order_value_ex_gst * 100) / 100
     : null
+  const reviewedWorkOrderValueNotRead = isRepairRoute &&
+    reviewedWorkOrderValueExGst === null &&
+    builder_work_order_value_ex_gst === null
 
   if (reviewedJobFamily === 'roof_report') {
     const authority = internalOptions.canonicalIntakeAuthority
@@ -18892,6 +18897,11 @@ async function createMakesafeJob(
       ? {
         builder_work_order_value_ex_gst: reviewedWorkOrderValueExGst,
         builder_work_order_value_source: 'builder_work_order_pdf_not_our_quote',
+      }
+      : reviewedWorkOrderValueNotRead
+      ? {
+        builder_work_order_value_ex_gst: null,
+        builder_work_order_value_source: _BUILDER_WORK_ORDER_VALUE_NOT_READ,
       }
       : {}),
     ...(intake_mint_id ? { intake_mint_id } : {}),
@@ -27901,7 +27911,7 @@ async function approveIntakeDraft(client: any, body: any) {
   // minting a card that can never be retyped. That is still guarded, by a
   // narrower check: the request marker from a deterministic scan lane, the flag
   // read again here, and a draft stamped by a run that found the repair
-  // declared by MLB or Ambrose with nothing missing and its value read.
+  // declared by MLB or Ambrose with nothing missing.
   const repairAutoStamp =
     _normaliseDedupJobFamily(approvedJobFamily) === 'repair'
       ? _repairAutoIntakeMintStamp({
@@ -28266,9 +28276,10 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
-      // The value a flag-on scan read off the work order rides with the stamp,
-      // whoever approves the draft: a person ticking a stamped draft the gate
-      // refused gets the same card the automatic path would have made.
+      // The value a flag-on scan read off the work order (null when it could
+      // not read one) rides with the stamp, whoever approves the draft: a
+      // person ticking a stamped draft the gate refused gets the same card the
+      // automatic path would have made.
       ...(repairAutoStamp
         ? {
           builder_work_order_value_ex_gst:
