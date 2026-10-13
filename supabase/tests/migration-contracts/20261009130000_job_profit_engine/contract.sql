@@ -27,6 +27,8 @@
 --   JP-QQ2    an accepted quote with no cost figures over an earlier,
 --             superseded version that had them: expected cost is null; the
 --             older version never stands in.
+--   JP-SENT   a sent, unaccepted quote whose newest revision carries costs:
+--             those are the expected cost, source sent_quote_revision.
 --   JP-MS     make-safe roof report with no client invoice and a trade line
 --             found by job number: margin suppressed, flags carried.
 --   JP-REP    a fencing card family-tagged repair, invoiced with a materials
@@ -91,6 +93,8 @@ INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata,
   ('a7000000-0000-4000-8000-00000000000a', '00000000-0000-0000-0000-000000000001', 'quoted', 'makesafe', 'JP-QQ', false, '{}', NULL, NULL,
    '2026-08-01T00:00:00Z'),
   ('a7000000-0000-4000-8000-00000000000b', '00000000-0000-0000-0000-000000000001', 'accepted', 'makesafe', 'JP-QQ2', false, '{}', NULL, NULL,
+   '2026-08-01T00:00:00Z'),
+  ('a7000000-0000-4000-8000-00000000000c', '00000000-0000-0000-0000-000000000001', 'quoted', 'makesafe', 'JP-SENT', false, '{}', NULL, NULL,
    '2026-08-01T00:00:00Z');
 
 INSERT INTO public.users (id, org_id, name) VALUES
@@ -253,6 +257,17 @@ INSERT INTO public.quote_revisions (job_id, job_document_id, version, sent_at, r
   ('a7000000-0000-4000-8000-00000000000b', 'a7300000-0000-4000-8000-000000000005', 2, '2026-07-20T00:00:00Z', 'send-quote/send',
    '{"total_inc_gst": 990, "total_ex_gst": 900}',
    '{"cost_estimates": {"labour_total": 0, "material_total": 0, "subcontract_commission_total": 0}}');
+
+-- JP-SENT: sent at 1100 inc GST, not accepted, its newest revision costed.
+INSERT INTO public.job_documents (id, job_id, type, sent_at, created_at) VALUES
+  ('a7300000-0000-4000-8000-000000000006', 'a7000000-0000-4000-8000-00000000000c', 'quote', '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z');
+INSERT INTO public.quote_revisions (job_id, job_document_id, version, sent_at, released_via, totals_snapshot_json, internal_cost_snapshot_json) VALUES
+  ('a7000000-0000-4000-8000-00000000000c', 'a7300000-0000-4000-8000-000000000006', 1, '2026-07-19T00:00:00Z', 'send-quote/send',
+   '{"total_inc_gst": 880, "total_ex_gst": 800}',
+   '{"cost_estimates": {"labour_total": 100, "material_total": 100, "subcontract_commission_total": 100}}'),
+  ('a7000000-0000-4000-8000-00000000000c', 'a7300000-0000-4000-8000-000000000006', 2, '2026-07-20T00:00:00Z', 'send-quote/send',
+   '{"total_inc_gst": 1100, "total_ex_gst": 1000}',
+   '{"cost_estimates": {"labour_total": 300, "material_total": "250", "subcontract_commission_total": 40}}');
 
 -- ── Cost events ─────────────────────────────────────────────────────────────
 DO $$
@@ -472,6 +487,16 @@ BEGIN
      OR r.expected_materials_ex IS NOT NULL OR r.expected_commission_ex IS NOT NULL THEN
     RAISE EXCEPTION 'jp qq2: an older quote version stood in as expected cost % % % % %', r.expected_source, r.expected_cost_ex,
       r.expected_labour_ex, r.expected_materials_ex, r.expected_commission_ex;
+  END IF;
+
+  -- JP-SENT: sent, not accepted. The newest sent revision's costs are the
+  -- expected cost.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-SENT';
+  IF r.expected_source IS DISTINCT FROM 'sent_quote_revision'
+     OR (r.expected_labour_ex, r.expected_materials_ex, r.expected_commission_ex, r.expected_cost_ex)
+        IS DISTINCT FROM (300::numeric, 250::numeric, 40::numeric, 590::numeric) THEN
+    RAISE EXCEPTION 'jp sent: expected % % % % %', r.expected_source, r.expected_labour_ex, r.expected_materials_ex,
+      r.expected_commission_ex, r.expected_cost_ex;
   END IF;
 
   -- JP-MS: no client invoice, so margin and profit are suppressed.
