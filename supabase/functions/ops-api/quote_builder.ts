@@ -6,12 +6,20 @@
 // auth (staff JWT or the privileged server key) and passes the verified actor
 // in; nothing here trusts a body field for identity.
 //
-// Writes land in four places and nowhere else: quote_builder_versions (the
+// Writes land in these places and nowhere else: quote_builder_versions (the
 // versioned scope with internal costs), job_media (scope photos), job_documents
-// (the client quote PDF, never marked sent), job_variations (a variation, from
-// its first issue). A private quote mints one `miscellaneous` job. Repair stage
-// moves go through the injected `moveRepairStage`, which the dispatch binds to
-// the existing update_repair_stage writer, and only ever forward.
+// (the client quote PDF, never marked sent, and the scope of works PDF filed
+// beside it) and job_variations (a variation, from its first issue). The
+// job's own pricing (jobs.pricing_json) is never written: invoices, the quote
+// send paths and the CRM all read it as authority. The Repairs card takes its
+// money from the issued versions at read time instead
+// (loadQuoteBuilderCardValues). The material order list carries our costs and is
+// never filed: the PDF bucket is public. A private quote mints one `miscellaneous` job.
+// Repair stage moves go through the injected `moveRepairStage`, which the
+// dispatch binds to the existing update_repair_stage writer, and only ever
+// forward. Pricing settings are read from quote_builder_settings
+// (20261013160000): a goal the app shows the scoper, never a rule this file
+// applies to a line, and no pricing number lives here.
 
 import {
   INSURANCE_REPAIR_STAGES,
@@ -23,6 +31,7 @@ import {
 } from "./insurance_repairs_board.ts";
 import { quoteBuilderRunLabel } from "../_shared/quote_builder_run_label.ts";
 import { QUOTE_BUILDER_PHOTO_PHASE } from "./makesafe_cycle_evidence.ts";
+import { fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
 
 export const QUOTE_BUILDER_ORG_ID = "00000000-0000-0000-0000-000000000001";
 export const QUOTE_BUILDER_PHOTO_BUCKET = "job-photos";
@@ -36,7 +45,34 @@ const PHOTO_CONTENT_TYPES: Record<string, string> = {
   "image/webp": "webp",
 };
 const TERMINAL_JOB_STATUSES = new Set(["cancelled", "lost", "archived"]);
+const COST_LINE_TYPES = new Set(["material", "labour", "other"]);
+// The document filed beside the client quote: a job_documents row of type
+// `other`, a meaningful type no close-out or pack reader counts. It carries no
+// prices. The material order list prints our costs and has no entry here: the
+// PDF bucket is public, so it is never given a slot or filed. An issue that
+// names it is not refused for that: the entry is skipped and the reply says so.
+const EXTRA_DOCUMENT_TYPE = "other";
+const UNFILED_DOCUMENT = "material_order_list";
+const EXTRA_DOCUMENTS: Record<string, { suffix: string }> = {
+  scope_of_works: { suffix: "scope-of-works" },
+};
+const isExtraDocument = (kind: unknown): kind is string =>
+  typeof kind === "string" && Object.hasOwn(EXTRA_DOCUMENTS, kind);
+const DOCUMENTS_ACCEPTED =
+  "quote or scope_of_works (the material order list carries our costs and is not filed)";
+const QUOTE_BUILDER_SOURCE = "quote_builder";
+const SETTING_KEYS = {
+  labour_rate_ex_gst: "insurance_labour_rate_ex_gst",
+  materials_multiplier: "insurance_materials_multiplier",
+  target_margin_pct: "target_margin_pct",
+} as const;
 const OPEN_VARIATION_STATUSES = new Set(["pending_approval", "sent"]);
+const APPROVED_THEN_MOVED_STATUSES = new Set(["sent", "accepted"]);
+const VARIATION_STATE_EVENTS = new Set([
+  "variation_approved",
+  "variation_rejected",
+  "variation_requested",
+]);
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -169,8 +205,14 @@ export function normaliseCostLines(raw: unknown): any[] {
     }
     const qty = amount(line?.qty ?? 1, "qty", i);
     const unitCost = amount(line?.unit_cost_ex_gst ?? 0, "unit_cost_ex_gst", i);
+    // A type outside the three is dropped, never refused, so an older cached
+    // page still saves. A line with no type reads as "other" in the app.
+    const lineType = COST_LINE_TYPES.has(line?.line_type)
+      ? { line_type: line.line_type as string }
+      : {};
     return {
       line_id: lineId(line, "c"),
+      ...lineType,
       description,
       qty,
       unit: text(line?.unit, 32),
@@ -452,6 +494,34 @@ export async function listQuoteBuilderJobs(
   };
 }
 
+// ── Pricing settings ────────────────────────────────────────────────────────
+
+/**
+ * The owner's pricing numbers: a goal the app shows the scoper, who sets his
+ * own markups. Nothing on the server compares a line or a margin to them. A
+ * missing row or a value that is not a number reads as null; there is no
+ * fallback number anywhere on the server.
+ */
+export async function loadQuoteBuilderSettings(client: any) {
+  const { data, error } = await client.from("quote_builder_settings")
+    .select("setting_key, amount")
+    .eq("org_id", QUOTE_BUILDER_ORG_ID);
+  if (error) readError("quote builder settings read failed", error);
+  const byKey = new Map<string, unknown>(
+    (data || []).map((row: any) => [row.setting_key, row.amount]),
+  );
+  const number = (key: string): number | null => {
+    const raw = byKey.get(key);
+    const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
+    return typeof n === "number" && Number.isFinite(n) ? n : null;
+  };
+  return {
+    labour_rate_ex_gst: number(SETTING_KEYS.labour_rate_ex_gst),
+    materials_multiplier: number(SETTING_KEYS.materials_multiplier),
+    target_margin_pct: number(SETTING_KEYS.target_margin_pct),
+  };
+}
+
 // ── GET quote_builder_get_job ───────────────────────────────────────────────
 
 export async function getQuoteBuilderJob(
@@ -473,6 +543,7 @@ export async function getQuoteBuilderJob(
   }
 
   const versions = (await loadVersions(client, [jobId])).map(versionView);
+  const settings = await loadQuoteBuilderSettings(client);
   const { data: variationRows, error: variationError } = await client
     .from("job_variations")
     .select("id, variation_number, status, amount, cost_estimate, approved_at")
@@ -517,7 +588,21 @@ export async function getQuoteBuilderJob(
     .order("created_at", { ascending: true });
   if (docsError) readError("documents read failed", docsError);
 
+  const { data: extraDocs, error: extraDocsError } = await client
+    .from("job_documents")
+    .select(
+      "id, storage_url, pdf_url, file_name, metadata, superseded_at, created_at",
+    )
+    .eq("job_id", jobId)
+    .eq("type", EXTRA_DOCUMENT_TYPE)
+    .eq("metadata->>source", QUOTE_BUILDER_SOURCE)
+    .order("created_at", { ascending: true });
+  if (extraDocsError) readError("documents read failed", extraDocsError);
+
   return {
+    settings,
+    // No settings editor is offered yet: the numbers change by database update.
+    can_edit_settings: false,
     job: jobHeader(job, detail, lane),
     scope: {
       chain_id: jobId,
@@ -540,6 +625,20 @@ export async function getQuoteBuilderJob(
       version_id: d.metadata?.quote_builder_version_id ?? null,
       created_at: d.created_at ?? null,
     })),
+    // The scope of works PDFs filed at issue. Kept out of `documents`, which an
+    // app page reads as "the client quote PDFs".
+    extra_documents: (extraDocs || [])
+      .filter((d: any) => isExtraDocument(d.metadata?.quote_builder_document))
+      .map((d: any) => ({
+        id: d.id,
+        document: d.metadata.quote_builder_document,
+        url: d.pdf_url || d.storage_url || null,
+        file_name: d.file_name ?? null,
+        version_id: d.metadata?.quote_builder_version_id ?? null,
+        quote_number: d.metadata?.quote_number ?? null,
+        superseded: d.superseded_at != null,
+        created_at: d.created_at ?? null,
+      })),
   };
 }
 
@@ -992,6 +1091,22 @@ function pdfPathFor(version: any, quoteNumber: string) {
   return `${version.job_id}/quote-builder/${version.id}/${safe}.pdf`;
 }
 
+/** Where the scope of works PDF of a version lives. */
+function extraPdfPathFor(version: any, quoteNumber: string, document: string) {
+  const safe = quoteNumber.replace(/[^A-Za-z0-9._-]/g, "_");
+  const suffix = EXTRA_DOCUMENTS[document].suffix;
+  return `${version.job_id}/quote-builder/${version.id}/${safe}-${suffix}.pdf`;
+}
+
+function documentKind(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "quote";
+  const kind = String(value);
+  if (kind !== "quote" && !isExtraDocument(kind)) {
+    fail("invalid_input", `document must be ${DOCUMENTS_ACCEPTED}`);
+  }
+  return kind;
+}
+
 async function plannedQuoteNumber(client: any, version: any, job: any) {
   if (version.kind !== "variation") {
     return quoteBuilderQuoteNumber(
@@ -1017,9 +1132,30 @@ export async function quoteBuilderPdfUploadUrl(
   actor: QuoteBuilderActor,
 ) {
   const versionId = requireUuid(body?.version_id, "version_id");
+  const document = documentKind(body?.document);
   const version = await loadDraftVersion(client, versionId);
   const { job } = await loadJob(client, version.job_id, actor);
   const quoteNumber = await plannedQuoteNumber(client, version, job);
+
+  // A slot for the scope of works writes nothing on the version: only the
+  // client quote's slot stamps the quote number, so the two slots can be asked
+  // for in either order.
+  if (document !== "quote") {
+    const extraPath = extraPdfPathFor(version, quoteNumber, document);
+    const extraBucket = client.storage.from(QUOTE_BUILDER_PDF_BUCKET);
+    const { data: slot, error: slotError } = await extraBucket
+      .createSignedUploadUrl(extraPath, { upsert: true });
+    if (slotError) readError("PDF upload slot failed", slotError);
+    const { data: extraUrl } = extraBucket.getPublicUrl(extraPath);
+    return {
+      document,
+      path: extraPath,
+      signed_url: slot.signedUrl,
+      token: slot.token,
+      public_url: extraUrl.publicUrl,
+      quote_number: quoteNumber,
+    };
+  }
   const path = pdfPathFor(version, quoteNumber);
 
   // Stamp the number on the draft so issue can prove the PDF prints the number
@@ -1048,12 +1184,326 @@ export async function quoteBuilderPdfUploadUrl(
   if (error) readError("PDF upload slot failed", error);
   const { data: urlData } = bucket.getPublicUrl(path);
   return {
+    document,
     path,
     signed_url: data.signedUrl,
     token: data.token,
     public_url: urlData.publicUrl,
     quote_number: quoteNumber,
   };
+}
+
+/**
+ * Retires the scope of works PDF an earlier version of this chain filed,
+ * whether or not this issue files a new one: a re-issued quote never leaves
+ * the superseded version's document reading as current.
+ */
+async function retireEarlierExtraDocuments(client: any, version: any) {
+  const { error } = await client.from("job_documents")
+    .update({ superseded_at: new Date().toISOString() })
+    .eq("job_id", version.job_id)
+    .eq("type", EXTRA_DOCUMENT_TYPE)
+    .eq("run_label", quoteBuilderRunLabel(version.chain_id))
+    .neq("metadata->>quote_builder_version_id", version.id)
+    .is("superseded_at", null);
+  if (error) readError("extra document retire failed", error);
+}
+
+/**
+ * `extra_documents` on issue: checked whole before anything is written. A
+ * material order list entry is never filed and never fails the issue: it comes
+ * back in `notFiled` and its path is not read.
+ */
+function extraDocumentsInput(raw: unknown, version: any) {
+  const file: Array<{ document: string; path: string }> = [];
+  const notFiled: Array<{ document: string; reason: string }> = [];
+  if (raw === undefined || raw === null) return { file, notFiled };
+  if (!Array.isArray(raw)) {
+    fail("invalid_input", "extra_documents must be an array");
+  }
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const document = String(entry?.document || "");
+    if (document === UNFILED_DOCUMENT) {
+      if (!seen.has(document)) {
+        notFiled.push({ document, reason: "internal_costs_not_filed" });
+      }
+      seen.add(document);
+      continue;
+    }
+    if (!isExtraDocument(document)) {
+      fail(
+        "invalid_input",
+        "extra_documents[].document must be scope_of_works",
+      );
+    }
+    if (seen.has(document)) {
+      fail("invalid_input", `extra_documents names ${document} twice`);
+    }
+    seen.add(document);
+    const path = extraPdfPathFor(version, version.quote_number, document);
+    if (String(entry?.pdf_path || "") !== path) {
+      fail(
+        "invalid_input",
+        `extra_documents: pdf_path for ${document} must be the path quote_builder_pdf_upload_url returned`,
+      );
+    }
+    file.push({ document, path });
+  }
+  return { file, notFiled };
+}
+
+/**
+ * Files the scope of works PDF on the version's job. Same shape as the client
+ * quote: found by its version before a new row is written (so a retried issue
+ * reuses it), under the chain's run label, never visible to trades. It carries
+ * no quote_number column (unique, and the client quote document's) and none of
+ * the version's lines, totals or pricing settings.
+ */
+async function fileExtraDocument(
+  client: any,
+  version: any,
+  extra: { document: string; path: string },
+  actor: QuoteBuilderActor,
+) {
+  const { data: urlData } = client.storage.from(QUOTE_BUILDER_PDF_BUCKET)
+    .getPublicUrl(extra.path);
+  const columns = "id, pdf_url, storage_url, file_name";
+  const fields = {
+    version: Number(version.version),
+    pdf_url: urlData.publicUrl,
+    storage_url: urlData.publicUrl,
+    file_name: extra.path.slice(extra.path.lastIndexOf("/") + 1),
+  };
+  const find = async () => {
+    const { data, error } = await client.from("job_documents")
+      .select(columns)
+      .eq("job_id", version.job_id)
+      .eq("type", EXTRA_DOCUMENT_TYPE)
+      .eq("metadata->>quote_builder_version_id", version.id)
+      .eq("metadata->>quote_builder_document", extra.document)
+      .limit(1);
+    if (error) readError("extra document read failed", error);
+    return (data || [])[0] || null;
+  };
+  let doc = await find();
+  if (doc) {
+    const { data, error } = await client.from("job_documents")
+      .update(fields)
+      .eq("id", doc.id)
+      .select(columns)
+      .maybeSingle();
+    if (error) readError("extra document write failed", error);
+    doc = data || doc;
+  } else {
+    const { data, error } = await client.from("job_documents")
+      .insert({
+        ...fields,
+        job_id: version.job_id,
+        type: EXTRA_DOCUMENT_TYPE,
+        run_label: quoteBuilderRunLabel(version.chain_id),
+        visible_to_trades: false,
+        created_by: actor.id,
+        uploaded_by: actor.id,
+        metadata: {
+          source: QUOTE_BUILDER_SOURCE,
+          quote_builder_version_id: version.id,
+          quote_builder_document: extra.document,
+          kind: version.kind,
+          chain_id: version.chain_id,
+          quote_number: version.quote_number,
+        },
+      })
+      .select(columns)
+      .single();
+    if (error) {
+      doc = error.code === "23505" ? await find() : null;
+      if (!doc) readError("extra document write failed", error);
+    } else {
+      doc = data;
+    }
+  }
+  return {
+    id: doc.id,
+    document: extra.document,
+    url: doc.pdf_url || doc.storage_url,
+    file_name: doc.file_name ?? fields.file_name,
+  };
+}
+
+// ── The Repairs card value ──────────────────────────────────────────────────
+
+const CARD_VALUE_LABEL = "pipeline.quote_builder_value";
+// The card read never selects cost_lines or charge_lines: our costs stay off it.
+const CARD_VERSION_SELECT =
+  "id, job_id, kind, chain_id, version, variation_id, charge_total_inc_gst";
+
+/**
+ * The variations on these jobs that count toward a job's value: approved, and
+ * still counted once an approved one is sent to the client or accepted by them.
+ *
+ * `approved` is read off the row. `sent` and `accepted` say nothing about the
+ * decision (a variation can be sent before anyone decides, and approved_at is
+ * stamped on a rejection too), so for those the newest job event about the
+ * variation must be an approval: the approval path writes one on every
+ * decision, and every issue writes `variation_requested`, so an approval that
+ * an issue has since followed no longer stands. A variation sent or accepted
+ * without ever being approved, or re-issued and sent again without a fresh
+ * approval, is not counted. Neither is a draft, rejected, declined or
+ * cancelled one.
+ */
+async function approvedVariationIds(client: any, jobIds: string[]) {
+  const rows = await fetchAllRowsInChunks<any>(
+    jobIds,
+    (chunk) =>
+      client.from("job_variations")
+        .select("id, job_id, status")
+        .in("job_id", chunk),
+    `${CARD_VALUE_LABEL}.job_variations`,
+    "id",
+  );
+  const ids = new Set<string>(
+    rows.filter((v) => v.status === "approved").map((v) => String(v.id)),
+  );
+  const afterDecision = rows.filter((v) =>
+    APPROVED_THEN_MOVED_STATUSES.has(String(v.status || ""))
+  );
+  if (!afterDecision.length) return ids;
+
+  // A variation's events all sit on its one job, so they arrive in one chunk,
+  // oldest first: the last one seen is the newest.
+  const events = await fetchAllRowsInChunks<any>(
+    afterDecision.map((v) => String(v.job_id)),
+    (chunk) =>
+      client.from("job_events")
+        .select("id, event_type, detail_json, created_at")
+        .in("job_id", chunk)
+        .in("event_type", [...VARIATION_STATE_EVENTS])
+        .order("created_at", { ascending: true }),
+    `${CARD_VALUE_LABEL}.job_events`,
+    "id",
+  );
+  const lastEvent = new Map<string, string>();
+  for (const event of events) {
+    const id = event.detail_json?.variation_id;
+    if (id) lastEvent.set(String(id), event.event_type);
+  }
+  for (const v of afterDecision) {
+    if (lastEvent.get(String(v.id)) === "variation_approved") {
+      ids.add(String(v.id));
+    }
+  }
+  return ids;
+}
+
+/** The jobs among these that carry pricing of their own (ids only, no blob). */
+async function jobsWithOwnPricing(client: any, jobIds: string[]) {
+  const rows = await fetchAllRowsInChunks<any>(
+    jobIds,
+    (chunk) =>
+      client.from("jobs")
+        .select("id")
+        .in("id", chunk)
+        .not("pricing_json", "is", null)
+        .not("pricing_json", "eq", "{}"),
+    `${CARD_VALUE_LABEL}.jobs`,
+    "id",
+  );
+  return new Set<string>(rows.map((row) => String(row.id)));
+}
+
+export interface QuoteBuilderCardValues {
+  /** Client total inc GST by job id, only for jobs the card may show it on. */
+  values: Map<string, number>;
+  /** True when a read failed: no value is offered, and the caller says so. */
+  degraded: boolean;
+}
+
+/**
+ * The money the Repairs card shows for a job quoted in the builder: the latest
+ * issued scope's client total plus the latest issued version of every
+ * variation that counts (approvedVariationIds). Worked out on every board read
+ * and stored nowhere, so it cannot go stale and no invoice or send path can
+ * read it. A job with pricing of its own (the fence or patio tool's) gets no
+ * entry and its card keeps its own figure. Never throws: a failed read offers
+ * no value at all and reports `degraded`.
+ */
+export async function loadQuoteBuilderCardValues(
+  client: any,
+  jobIds: readonly string[],
+): Promise<QuoteBuilderCardValues> {
+  const values = new Map<string, number>();
+  try {
+    const issued = await fetchAllRowsInChunks<any>(
+      [...jobIds],
+      (chunk) =>
+        client.from("quote_builder_versions")
+          .select(CARD_VERSION_SELECT)
+          .in("job_id", chunk)
+          .eq("status", "issued"),
+      `${CARD_VALUE_LABEL}.quote_builder_versions`,
+      "id",
+    );
+    // Latest issued version of each chain: the scope chain and every variation's.
+    const latest = new Map<string, any>();
+    for (const v of issued) {
+      const key = `${v.job_id}|${v.chain_id}`;
+      const held = latest.get(key);
+      if (!held || Number(v.version) > Number(held.version)) latest.set(key, v);
+    }
+    const heads = [...latest.values()];
+    const scopes = heads.filter((v) => v.kind === "scope");
+    if (!scopes.length) return { values, degraded: false };
+    const quotedJobIds = scopes.map((v) => String(v.job_id));
+    const quoted = new Set(quotedJobIds);
+    const variations = heads.filter((v) =>
+      v.kind === "variation" && v.variation_id && quoted.has(String(v.job_id))
+    );
+
+    const [priced, approvedIds] = await Promise.all([
+      jobsWithOwnPricing(client, quotedJobIds),
+      variations.length
+        ? approvedVariationIds(
+          client,
+          variations.map((v) => String(v.job_id)),
+        )
+        : Promise.resolve(new Set<string>()),
+    ]);
+
+    const totals = new Map<string, number>();
+    const add = (v: any) =>
+      totals.set(
+        String(v.job_id),
+        (totals.get(String(v.job_id)) || 0) +
+          Number(v.charge_total_inc_gst || 0),
+      );
+    scopes.forEach(add);
+    variations.filter((v) => approvedIds.has(String(v.variation_id)))
+      .forEach(add);
+    for (const [jobId, total] of totals) {
+      if (!priced.has(jobId)) values.set(jobId, cents(total));
+    }
+    return { values, degraded: false };
+  } catch (error) {
+    console.error(
+      "[ops-api] quote builder card value read failed (Repairs cards keep their own value):",
+      (error as Error)?.message || error,
+    );
+    return { values: new Map(), degraded: true };
+  }
+}
+
+/**
+ * Puts the builder's figure on a Repairs card row and names where it came
+ * from. A row with no builder value is returned as it is.
+ */
+export function quoteBuilderCardRow<T extends Record<string, any>>(
+  row: T,
+  value: number | undefined,
+): T {
+  return value === undefined
+    ? row
+    : { ...row, value, value_source: QUOTE_BUILDER_SOURCE };
 }
 
 async function moveStageForward(
@@ -1140,6 +1590,21 @@ export async function issueQuoteBuilderVersion(
   }
   const { data: urlData } = client.storage.from(QUOTE_BUILDER_PDF_BUCKET)
     .getPublicUrl(path);
+  const { file: extras, notFiled } = extraDocumentsInput(
+    body?.extra_documents,
+    version,
+  );
+  for (const extra of extras) {
+    if (
+      !(await storageObjectExists(client, QUOTE_BUILDER_PDF_BUCKET, extra.path))
+    ) {
+      fail(
+        "upload_missing",
+        `The ${extra.document} PDF is not in storage yet; upload it, then issue.`,
+        409,
+      );
+    }
+  }
 
   // Variation: decide the job_variations row BEFORE any write, so a decided
   // variation refuses with nothing written.
@@ -1245,6 +1710,12 @@ export async function issueQuoteBuilderVersion(
     }
   }
 
+  await retireEarlierExtraDocuments(client, version);
+  const filedExtras: any[] = [];
+  for (const extra of extras) {
+    filedExtras.push(await fileExtraDocument(client, version, extra, actor));
+  }
+
   let variationResult: any = null;
   let createdVariationId: string | null = null;
   let draftUpdatedAt = version.updated_at;
@@ -1325,7 +1796,10 @@ export async function issueQuoteBuilderVersion(
       }
       draftUpdatedAt = linked.updated_at;
     }
-    await client.from("job_events").insert({
+    // The Repairs card value reads this event: it is what voids an earlier approval
+    // when a variation is re-issued. A failed write never fails the issue, but
+    // it is reported, because that approval would then still read as current.
+    const requested = await client.from("job_events").insert({
       job_id: version.job_id,
       user_id: actor.id,
       event_type: "variation_requested",
@@ -1337,7 +1811,17 @@ export async function issueQuoteBuilderVersion(
         amount_inc_gst: totals.charge_total_inc_gst,
         operator_email: actor.email,
       },
-    }).then(() => {}, () => {});
+    }).then((result: any) => result, (error: unknown) => ({ error }));
+    if (requested?.error) {
+      console.error(
+        "[ops-api] quote builder variation_requested event not recorded for variation",
+        variationResult.id,
+        "version",
+        version.id,
+        ":",
+        requested.error?.message || requested.error,
+      );
+    }
   }
 
   let freeze = client.from("quote_builder_versions")
@@ -1393,6 +1877,8 @@ export async function issueQuoteBuilderVersion(
       quote_number: doc.quote_number,
       url: doc.pdf_url || doc.storage_url,
     },
+    extra_documents: filedExtras,
+    ...(notFiled.length ? { extra_documents_not_filed: notFiled } : {}),
     variation: variationResult,
     stage,
   };
