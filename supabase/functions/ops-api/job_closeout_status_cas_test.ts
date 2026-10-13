@@ -30,13 +30,19 @@ function client(status: string) {
       },
       single: () => Promise.resolve({ data: job, error: null }),
       maybeSingle: () => {
-        const statusFilter = filters.find(([op, c]) => op === "in" && c === "status");
-        const match = !statusFilter || (statusFilter[2] as string[]).includes(job.status);
+        const statusFilter = filters.find(([op, c]) =>
+          op === "in" && c === "status"
+        );
+        const match = !statusFilter ||
+          (statusFilter[2] as string[]).includes(job.status);
         if (patch && match) {
           writes.push(`update:${table}`);
           Object.assign(job, patch);
         }
-        return Promise.resolve({ data: patch && match ? job : null, error: null });
+        return Promise.resolve({
+          data: patch && match ? job : null,
+          error: null,
+        });
       },
     };
     return q;

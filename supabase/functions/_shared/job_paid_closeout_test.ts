@@ -68,12 +68,25 @@ function party(
   };
 }
 
-const noQuote = { quote_total_inc: null, variations_inc: 0, unknown_reason: "quote_unknown" };
+const noQuote = {
+  quote_total_inc: null,
+  variations_inc: 0,
+  unknown_reason: "quote_unknown",
+};
 
 Deno.test("only fencing and patio are close-out jobs, from complete, final payment or invoiced", () => {
   assertEquals(isCloseoutJobType("fencing"), true);
   assertEquals(isCloseoutJobType("Patio"), true);
-  for (const t of ["makesafe", "repair", "insurance", "decking", "renovation", null]) {
+  for (
+    const t of [
+      "makesafe",
+      "repair",
+      "insurance",
+      "decking",
+      "renovation",
+      null,
+    ]
+  ) {
     assertEquals(isCloseoutJobType(t), false, String(t));
   }
   for (const s of ["complete", "final_payment", "invoiced"]) {
@@ -85,15 +98,27 @@ Deno.test("only fencing and patio are close-out jobs, from complete, final payme
 });
 
 Deno.test("holds: rectification and callback only", () => {
-  assertEquals(closeoutHold({ status: "rectification", is_callback: false }), "rectification");
-  assertEquals(closeoutHold({ status: "invoiced", is_callback: true }), "callback");
+  assertEquals(
+    closeoutHold({ status: "rectification", is_callback: false }),
+    "rectification",
+  );
+  assertEquals(
+    closeoutHold({ status: "invoiced", is_callback: true }),
+    "callback",
+  );
   assertEquals(closeoutHold({ status: "invoiced", is_callback: null }), null);
 });
 
 Deno.test("deposit and final: DEP50 is a deposit, FINBAL and FIN25 are finals, VAR and MAT are not", () => {
-  assertEquals(isDepositInvoice(inv("SWF-261200-DEP50", "PAID", 1), null), true);
+  assertEquals(
+    isDepositInvoice(inv("SWF-261200-DEP50", "PAID", 1), null),
+    true,
+  );
   assertEquals(isDepositInvoice(inv("DEP50", "PAID", 1), null), true);
-  assertEquals(isDepositInvoice(inv("SWF-26984-C-RHS-DEP50", "PAID", 1), null), true);
+  assertEquals(
+    isDepositInvoice(inv("SWF-26984-C-RHS-DEP50", "PAID", 1), null),
+    true,
+  );
   assertEquals(isDepositInvoice(inv("SWF-1-DEPOSIT", "PAID", 1), null), true);
   const byId = inv("SWF-1 fence", "PAID", 1);
   assertEquals(isDepositInvoice(byId, byId.xero_invoice_id), true);
@@ -110,12 +135,33 @@ Deno.test("party matching: job_contact_id, then share letter, then Xero contact,
   const a = party("pa", "A", 50, { xero_contact_id: "xa" });
   const b = party("pb", "B", 50, { xero_contact_id: "xb" });
   const paying = [a, b];
-  assertEquals(invoicePartyKey(inv("SWF-1-A-DEP50", "PAID", 1, { job_contact_id: "pb" }), paying), "pb");
+  assertEquals(
+    invoicePartyKey(
+      inv("SWF-1-A-DEP50", "PAID", 1, { job_contact_id: "pb" }),
+      paying,
+    ),
+    "pb",
+  );
   assertEquals(invoicePartyKey(inv("SWF-1-B-FINBAL", "PAID", 1), paying), "pb");
-  assertEquals(invoicePartyKey(inv("SWF-1-FINBAL", "PAID", 1, { xero_contact_id: "XB" }), paying), "pb");
+  assertEquals(
+    invoicePartyKey(
+      inv("SWF-1-FINBAL", "PAID", 1, { xero_contact_id: "XB" }),
+      paying,
+    ),
+    "pb",
+  );
   assertEquals(invoicePartyKey(inv("SWF-1-FINBAL", "PAID", 1), paying), "pa");
-  assertEquals(invoicePartyKey(inv("SWF-1-C-FINBAL", "PAID", 1), paying), "unmatched:letter:C");
-  assertEquals(invoicePartyKey(inv("SWF-1-FINBAL", "PAID", 1, { job_contact_id: "gone" }), paying), "unmatched:job_contact:gone");
+  assertEquals(
+    invoicePartyKey(inv("SWF-1-C-FINBAL", "PAID", 1), paying),
+    "unmatched:letter:C",
+  );
+  assertEquals(
+    invoicePartyKey(
+      inv("SWF-1-FINBAL", "PAID", 1, { job_contact_id: "gone" }),
+      paying,
+    ),
+    "unmatched:job_contact:gone",
+  );
   // No party rows: everything without a neighbour letter is the client's.
   assertEquals(invoicePartyKey(inv("SWF-1-FINBAL", "PAID", 1), []), OWNER_KEY);
 });
@@ -123,7 +169,10 @@ Deno.test("party matching: job_contact_id, then share letter, then Xero contact,
 Deno.test("a single-payer job with a paid deposit and paid final is paid", () => {
   const v = evaluateJobPaid({
     job: job(),
-    invoices: [inv("SWF-1-DEP50", "PAID", 2000), inv("SWF-1-FINBAL", "PAID", 2000)],
+    invoices: [
+      inv("SWF-1-DEP50", "PAID", 2000),
+      inv("SWF-1-FINBAL", "PAID", 2000),
+    ],
     parties: [],
     quote: { quote_total_inc: 4000, variations_inc: 0, unknown_reason: null },
   });
@@ -162,7 +211,10 @@ Deno.test("SWF-261227 shape: neighbour B paid deposit and final, owner A billed 
     quote: { quote_total_inc: 4340, variations_inc: 0, unknown_reason: null },
   });
   assertEquals(v.outcome, "not_paid");
-  assertEquals(v.parties.map((p) => [p.label, p.has_paid_final]), [["A", false], ["B", true]]);
+  assertEquals(v.parties.map((p) => [p.label, p.has_paid_final]), [
+    ["A", false],
+    ["B", true],
+  ]);
   assertEquals(v.reasons.includes("party_without_paid_final:A"), true);
 });
 
@@ -178,7 +230,10 @@ Deno.test("SWF-26767 shape: final voided, only deposits paid -> not paid", () =>
     quote: null,
   });
   assertEquals(v.outcome, "not_paid");
-  assertEquals(v.reasons, ["party_without_paid_final:A", "party_without_paid_final:B"]);
+  assertEquals(v.reasons, [
+    "party_without_paid_final:A",
+    "party_without_paid_final:B",
+  ]);
   assertEquals(v.quote_known, false);
 });
 
@@ -200,7 +255,11 @@ Deno.test("SWF-26989 shape: final balance still AUTHORISED -> not paid", () => {
 Deno.test("a draft invoice blocks paid even when everything else is paid", () => {
   const v = evaluateJobPaid({
     job: job(),
-    invoices: [inv("SWF-1-DEP50", "PAID", 1000), inv("SWF-1-FINBAL", "PAID", 1000), inv("SWF-1-VAR", "DRAFT", 200)],
+    invoices: [
+      inv("SWF-1-DEP50", "PAID", 1000),
+      inv("SWF-1-FINBAL", "PAID", 1000),
+      inv("SWF-1-VAR", "DRAFT", 200),
+    ],
     parties: [],
     quote: noQuote,
   });
@@ -209,7 +268,12 @@ Deno.test("a draft invoice blocks paid even when everything else is paid", () =>
 });
 
 Deno.test("no linked invoice is never paid", () => {
-  const v = evaluateJobPaid({ job: job(), invoices: [], parties: [], quote: noQuote });
+  const v = evaluateJobPaid({
+    job: job(),
+    invoices: [],
+    parties: [],
+    quote: noQuote,
+  });
   assertEquals(v.outcome, "not_paid");
   assertEquals(v.reasons, ["no_invoices", "party_without_paid_final:owner"]);
 });
@@ -250,7 +314,10 @@ Deno.test("shared fence: both owners paid their finals and the quote is covered 
 Deno.test("a removed neighbour or a zero share is not a paying party", () => {
   const v = evaluateJobPaid({
     job: job(),
-    invoices: [inv("SWF-3-DEP50", "PAID", 1000), inv("SWF-3-FINBAL", "PAID", 1000)],
+    invoices: [
+      inv("SWF-3-DEP50", "PAID", 1000),
+      inv("SWF-3-FINBAL", "PAID", 1000),
+    ],
     parties: [
       party("pa", "A", 100),
       party("pb", "B", 50, { removed_at: "2026-09-01T00:00:00Z" }),
@@ -265,16 +332,34 @@ Deno.test("a removed neighbour or a zero share is not a paying party", () => {
 Deno.test("tolerance: a few dollars short and agreed variations both count", () => {
   const base = {
     job: job(),
-    invoices: [inv("SWF-4-DEP50", "PAID", 2000), inv("SWF-4-FINBAL", "PAID", 1998), inv("SWF-4-VAR", "PAID", 330)],
+    invoices: [
+      inv("SWF-4-DEP50", "PAID", 2000),
+      inv("SWF-4-FINBAL", "PAID", 1998),
+      inv("SWF-4-VAR", "PAID", 330),
+    ],
     parties: [],
   };
   assertEquals(
-    evaluateJobPaid({ ...base, quote: { quote_total_inc: 4000, variations_inc: 330, unknown_reason: null } }).outcome,
+    evaluateJobPaid({
+      ...base,
+      quote: {
+        quote_total_inc: 4000,
+        variations_inc: 330,
+        unknown_reason: null,
+      },
+    }).outcome,
     "paid",
   );
   // An accepted variation that was never invoiced leaves money owing.
   assertEquals(
-    evaluateJobPaid({ ...base, quote: { quote_total_inc: 4000, variations_inc: 990, unknown_reason: null } }).outcome,
+    evaluateJobPaid({
+      ...base,
+      quote: {
+        quote_total_inc: 4000,
+        variations_inc: 990,
+        unknown_reason: null,
+      },
+    }).outcome,
     "paid_less_than_quoted",
   );
 });
@@ -290,7 +375,11 @@ Deno.test("unknown quote or unreadable variations: rules 1 and 2 decide alone", 
   assertEquals(unknown.quote_known, false);
   const noVariations = evaluateJobPaid({
     ...base,
-    quote: { quote_total_inc: 9999, variations_inc: null, unknown_reason: null },
+    quote: {
+      quote_total_inc: 9999,
+      variations_inc: null,
+      unknown_reason: null,
+    },
   });
   assertEquals(noVariations.outcome, "paid");
   assertEquals(noVariations.quote_unknown_reason, "variations_unreadable");

@@ -260,7 +260,9 @@ export function evaluateJobPaid(input: {
     reasons.push("draft_invoice");
   }
   if (
-    live.some((inv) => upper(inv.status) !== "PAID" && upper(inv.status) !== "DRAFT")
+    live.some((inv) =>
+      upper(inv.status) !== "PAID" && upper(inv.status) !== "DRAFT"
+    )
   ) {
     reasons.push("unpaid_invoice");
   }
@@ -328,12 +330,10 @@ export function evaluateJobPaid(input: {
     expected_inc: expected,
     shortfall_inc: shortfall,
     quote_known: quoteKnown,
-    quote_unknown_reason: quoteKnown
-      ? null
-      : (input.quote?.unknown_reason ??
-        (variations === null && quoteTotal !== null
-          ? "variations_unreadable"
-          : "quote_unknown")),
+    quote_unknown_reason: quoteKnown ? null : (input.quote?.unknown_reason ??
+      (variations === null && quoteTotal !== null
+        ? "variations_unreadable"
+        : "quote_unknown")),
     last_paid_on: newestDate(live.map((inv) => inv.fully_paid_on)),
   };
 }

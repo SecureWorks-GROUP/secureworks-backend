@@ -32,7 +32,12 @@ function deps(jobStatus: string, events: unknown[]): GhlWebhookDeps {
       eq: () => ({
         limit: () =>
           Promise.resolve({
-            data: [{ id: "job-1", status: jobStatus, type: "patio", ghl_opportunity_id: "opp-1" }],
+            data: [{
+              id: "job-1",
+              status: jobStatus,
+              type: "patio",
+              ghl_opportunity_id: "opp-1",
+            }],
             error: null,
           }),
       }),
@@ -48,7 +53,10 @@ for (const status of ["get_review", "archived"]) {
   for (const stage of [GHL_GET_GOOGLE_REVIEW, GHL_INVOICE_SENT]) {
     Deno.test(`a GHL stage event cannot move a ${status} card backwards (${stage.slice(0, 8)})`, async () => {
       const events: unknown[] = [];
-      const res = await handleGhlWebhook(stageChange(stage), deps(status, events));
+      const res = await handleGhlWebhook(
+        stageChange(stage),
+        deps(status, events),
+      );
       const body = await res.json();
       assertEquals(body.action, "conflict_logged");
       assertEquals(body.current, status);

@@ -115,7 +115,11 @@ export interface JobCloseoutDeps {
 }
 
 export class JobCloseoutError extends Error {
-  constructor(message: string, readonly status = 400, readonly code = "bad_request") {
+  constructor(
+    message: string,
+    readonly status = 400,
+    readonly code = "bad_request",
+  ) {
     super(message);
   }
 }
@@ -144,7 +148,12 @@ export async function readCloseoutSwitches(
       .eq("id", 1)
       .maybeSingle();
     if (error || !data) {
-      return { move_enabled: false, sender_mode: "off", sender_configured_mode: "off", read_ok: false };
+      return {
+        move_enabled: false,
+        sender_mode: "off",
+        sender_configured_mode: "off",
+        read_ok: false,
+      };
     }
     const configured = (["off", "dry_run", "live"] as const).includes(
         data.review_sender_mode,
@@ -153,12 +162,20 @@ export async function readCloseoutSwitches(
       : "off";
     return {
       move_enabled: data.get_review_move_enabled === true,
-      sender_mode: effectiveSenderMode(configured, deps.env("JOB_REVIEW_SENDING_ENABLED")),
+      sender_mode: effectiveSenderMode(
+        configured,
+        deps.env("JOB_REVIEW_SENDING_ENABLED"),
+      ),
       sender_configured_mode: configured,
       read_ok: true,
     };
   } catch {
-    return { move_enabled: false, sender_mode: "off", sender_configured_mode: "off", read_ok: false };
+    return {
+      move_enabled: false,
+      sender_mode: "off",
+      sender_configured_mode: "off",
+      read_ok: false,
+    };
   }
 }
 
@@ -201,15 +218,19 @@ export function reviewRequestMessage(
  */
 export function quoteForCloseout(
   quotes: Pick<JobQuotes, "status" | "whole_quote_total" | "headline"> | null,
-  variations: Pick<VariationView, "agreed" | "amount" | "gst_included">[] | null,
+  variations:
+    | Pick<VariationView, "agreed" | "amount" | "gst_included">[]
+    | null,
 ): CloseoutQuote {
   let quoteTotal: number | null = null;
   let reason: string | null = null;
   if (!quotes) reason = "quote_unreadable";
   else if (quotes.status === "none_recorded") reason = "no_sent_quote";
-  else if (quotes.whole_quote_total) quoteTotal = quotes.whole_quote_total.value_inc_gst;
-  else if (quotes.headline?.value_inc_gst != null) quoteTotal = quotes.headline.value_inc_gst;
-  else reason = "quote_value_not_recorded";
+  else if (quotes.whole_quote_total) {
+    quoteTotal = quotes.whole_quote_total.value_inc_gst;
+  } else if (quotes.headline?.value_inc_gst != null) {
+    quoteTotal = quotes.headline.value_inc_gst;
+  } else reason = "quote_value_not_recorded";
   let variationsInc: number | null = null;
   if (variations) {
     variationsInc = 0;
@@ -221,7 +242,11 @@ export function quoteForCloseout(
   } else if (!reason) {
     reason = "variations_unreadable";
   }
-  return { quote_total_inc: quoteTotal, variations_inc: variationsInc, unknown_reason: reason };
+  return {
+    quote_total_inc: quoteTotal,
+    variations_inc: variationsInc,
+    unknown_reason: reason,
+  };
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -246,12 +271,20 @@ const PARTY_COLUMNS =
 
 function chunks<T>(items: T[], size = ID_CHUNK): T[][] {
   const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
   return out;
 }
 
 // deno-lint-ignore no-explicit-any
-async function readByJob<T>(client: any, table: string, columns: string, jobIds: string[], extra?: (q: any) => any): Promise<Map<string, T[]> | null> {
+async function readByJob<T>(
+  client: any,
+  table: string,
+  columns: string,
+  jobIds: string[],
+  extra?: (q: any) => any,
+): Promise<Map<string, T[]> | null> {
   const out = new Map<string, T[]>();
   for (const id of jobIds) out.set(id, []);
   for (const part of chunks(jobIds)) {
@@ -272,23 +305,45 @@ export interface JobFacts {
 
 /** Invoices and parties for many jobs at once; null when either read fails. */
 // deno-lint-ignore no-explicit-any
-export async function loadJobFacts(client: any, jobs: CloseoutJobRow[]): Promise<Map<string, JobFacts> | null> {
+export async function loadJobFacts(
+  client: any,
+  jobs: CloseoutJobRow[],
+): Promise<Map<string, JobFacts> | null> {
   const ids = jobs.map((j) => j.id);
   if (!ids.length) return new Map();
   const [invoices, parties] = await Promise.all([
-    readByJob<CloseoutInvoice & { job_id: string }>(client, "xero_invoices", INVOICE_COLUMNS, ids, (q) => q.eq("invoice_type", "ACCREC")),
-    readByJob<PartyRow & { job_id: string }>(client, "job_contacts", PARTY_COLUMNS, ids),
+    readByJob<CloseoutInvoice & { job_id: string }>(
+      client,
+      "xero_invoices",
+      INVOICE_COLUMNS,
+      ids,
+      (q) => q.eq("invoice_type", "ACCREC"),
+    ),
+    readByJob<PartyRow & { job_id: string }>(
+      client,
+      "job_contacts",
+      PARTY_COLUMNS,
+      ids,
+    ),
   ]);
   if (!invoices || !parties) return null;
   const out = new Map<string, JobFacts>();
   for (const job of jobs) {
-    out.set(job.id, { job, invoices: invoices.get(job.id) ?? [], parties: parties.get(job.id) ?? [] });
+    out.set(job.id, {
+      job,
+      invoices: invoices.get(job.id) ?? [],
+      parties: parties.get(job.id) ?? [],
+    });
   }
   return out;
 }
 
 // deno-lint-ignore no-explicit-any
-async function loadQuote(client: any, job: CloseoutJobRow, now: Date): Promise<CloseoutQuote> {
+async function loadQuote(
+  client: any,
+  job: CloseoutJobRow,
+  now: Date,
+): Promise<CloseoutQuote> {
   try {
     const [quotes, variations] = await Promise.all([
       readJobQuotes(client, { id: job.id, client_email: job.client_email }),
@@ -296,7 +351,11 @@ async function loadQuote(client: any, job: CloseoutJobRow, now: Date): Promise<C
     ]);
     return quoteForCloseout(quotes.quotes, variations.variations);
   } catch {
-    return { quote_total_inc: null, variations_inc: null, unknown_reason: "quote_read_threw" };
+    return {
+      quote_total_inc: null,
+      variations_inc: null,
+      unknown_reason: "quote_read_threw",
+    };
   }
 }
 
@@ -304,23 +363,48 @@ async function loadQuote(client: any, job: CloseoutJobRow, now: Date): Promise<C
  * The strict check for one job. The quote (several reads) is read only when rules 1 and 2
  * already hold, since it can only turn "paid" into "paid less than quoted".
  */
-export async function evaluateFacts(deps: Pick<JobCloseoutDeps, "client" | "now">, facts: JobFacts): Promise<PaidVerdict> {
-  const base = { job: facts.job, invoices: facts.invoices, parties: facts.parties };
+export async function evaluateFacts(
+  deps: Pick<JobCloseoutDeps, "client" | "now">,
+  facts: JobFacts,
+): Promise<PaidVerdict> {
+  const base = {
+    job: facts.job,
+    invoices: facts.invoices,
+    parties: facts.parties,
+  };
   const first = evaluateJobPaid({ ...base, quote: null });
   if (first.outcome === "not_paid") return first;
-  return evaluateJobPaid({ ...base, quote: await loadQuote(deps.client, facts.job, deps.now()) });
+  return evaluateJobPaid({
+    ...base,
+    quote: await loadQuote(deps.client, facts.job, deps.now()),
+  });
 }
 
 // deno-lint-ignore no-explicit-any
-async function loadJob(client: any, jobId: string): Promise<CloseoutJobRow | null> {
-  const { data, error } = await client.from("jobs").select(JOB_COLUMNS).eq("id", jobId).maybeSingle();
-  if (error) throw new JobCloseoutError(`job read failed: ${error.message}`, 503, "job_unreadable");
+async function loadJob(
+  client: any,
+  jobId: string,
+): Promise<CloseoutJobRow | null> {
+  const { data, error } = await client.from("jobs").select(JOB_COLUMNS).eq(
+    "id",
+    jobId,
+  ).maybeSingle();
+  if (error) {
+    throw new JobCloseoutError(
+      `job read failed: ${error.message}`,
+      503,
+      "job_unreadable",
+    );
+  }
   return data ?? null;
 }
 
 /** Every fencing and patio card in these statuses, paged by id; null when a page fails. */
 // deno-lint-ignore no-explicit-any
-async function loadJobsByStatus(client: any, statuses: string[]): Promise<CloseoutJobRow[] | null> {
+async function loadJobsByStatus(
+  client: any,
+  statuses: string[],
+): Promise<CloseoutJobRow[] | null> {
   const all: CloseoutJobRow[] = [];
   for (let page = 0; page < JOB_PAGES_MAX; page++) {
     const { data, error } = await client.from("jobs").select(JOB_COLUMNS)
@@ -337,7 +421,10 @@ async function loadJobsByStatus(client: any, statuses: string[]): Promise<Closeo
 
 /** When each job last entered get_review (its newest status_changed row to get_review). */
 // deno-lint-ignore no-explicit-any
-export async function loadGetReviewEntries(client: any, jobIds: string[]): Promise<Map<string, string> | null> {
+export async function loadGetReviewEntries(
+  client: any,
+  jobIds: string[],
+): Promise<Map<string, string> | null> {
   const out = new Map<string, string>();
   for (const part of chunks(jobIds)) {
     const { data, error } = await client.from("job_events")
@@ -358,7 +445,12 @@ export async function loadGetReviewEntries(client: any, jobIds: string[]): Promi
 // ── Records ──────────────────────────────────────────────────────────────────
 
 /** Upserts the job's paid check; logs one job_events row when the short marker first appears. */
-async function recordPaidCheck(deps: JobCloseoutDeps, jobId: string, verdict: PaidVerdict, by: string): Promise<void> {
+async function recordPaidCheck(
+  deps: JobCloseoutDeps,
+  jobId: string,
+  verdict: PaidVerdict,
+  by: string,
+): Promise<void> {
   const { client } = deps;
   const { data: prior } = await client.from("job_closeout_state")
     .select("paid_less_than_quoted").eq("job_id", jobId).maybeSingle();
@@ -374,7 +466,9 @@ async function recordPaidCheck(deps: JobCloseoutDeps, jobId: string, verdict: Pa
     checked_at: deps.now().toISOString(),
     checked_by: by,
   }, { onConflict: "job_id" });
-  if (error) console.error("[job_closeout] paid check write failed:", error.message);
+  if (error) {
+    console.error("[job_closeout] paid check write failed:", error.message);
+  }
   if (short && prior?.paid_less_than_quoted !== true) {
     await client.from("job_events").insert({
       job_id: jobId,
@@ -407,25 +501,47 @@ export interface SettleResult {
   detail?: unknown;
 }
 
-async function settleJob(deps: JobCloseoutDeps, facts: JobFacts, source: string): Promise<SettleResult> {
+async function settleJob(
+  deps: JobCloseoutDeps,
+  facts: JobFacts,
+  source: string,
+): Promise<SettleResult> {
   const { job } = facts;
   const base = { job_id: job.id, job_number: job.job_number };
-  if (!isCloseoutJobType(job.type)) return { ...base, action: "not_closeout_type" };
+  if (!isCloseoutJobType(job.type)) {
+    return { ...base, action: "not_closeout_type" };
+  }
   const hold = closeoutHold(job);
   if (hold) return { ...base, action: "held", detail: hold };
-  if (!isCloseoutFromStatus(job.status)) return { ...base, action: "not_in_from_status", detail: job.status };
+  if (!isCloseoutFromStatus(job.status)) {
+    return { ...base, action: "not_in_from_status", detail: job.status };
+  }
   const verdict = await evaluateFacts(deps, facts);
   await recordPaidCheck(deps, job.id, verdict, source);
-  if (verdict.outcome === "not_paid") return { ...base, action: "not_paid", detail: verdict.reasons };
+  if (verdict.outcome === "not_paid") {
+    return { ...base, action: "not_paid", detail: verdict.reasons };
+  }
   if (verdict.outcome === "paid_less_than_quoted") {
-    return { ...base, action: "paid_less_than_quoted", detail: { paid: verdict.paid_total_inc, expected: verdict.expected_inc } };
+    return {
+      ...base,
+      action: "paid_less_than_quoted",
+      detail: { paid: verdict.paid_total_inc, expected: verdict.expected_inc },
+    };
   }
   // The existing Complete backlog is archived separately and never texted (captain answer 5).
   if (
     text(job.status).toLowerCase() === "complete" &&
-    !paidWithin(verdict.last_paid_on, deps.now(), CATCH_UP_PAID_WITHIN_DAYS * DAY_MS)
+    !paidWithin(
+      verdict.last_paid_on,
+      deps.now(),
+      CATCH_UP_PAID_WITHIN_DAYS * DAY_MS,
+    )
   ) {
-    return { ...base, action: "complete_backlog", detail: { last_paid_on: verdict.last_paid_on } };
+    return {
+      ...base,
+      action: "complete_backlog",
+      detail: { last_paid_on: verdict.last_paid_on },
+    };
   }
   const moved = await deps.moveJobStatus({
     jobId: job.id,
@@ -433,13 +549,18 @@ async function settleJob(deps: JobCloseoutDeps, facts: JobFacts, source: string)
     source,
     expected_statuses: [...CLOSEOUT_FROM_STATUSES],
   });
-  return moved?.success === true
-    ? { ...base, action: "moved" }
-    : { ...base, action: "move_skipped", detail: moved?.skipped ?? moved?.error ?? null };
+  return moved?.success === true ? { ...base, action: "moved" } : {
+    ...base,
+    action: "move_skipped",
+    detail: moved?.skipped ?? moved?.error ?? null,
+  };
 }
 
 /** xero-sync: a linked sales invoice of this job just turned PAID. */
-export async function closeoutOnPaid(deps: JobCloseoutDeps, body: Record<string, unknown>) {
+export async function closeoutOnPaid(
+  deps: JobCloseoutDeps,
+  body: Record<string, unknown>,
+) {
   const jobId = text(body.job_id ?? body.jobId);
   if (!jobId) throw new JobCloseoutError("job_id required");
   const switches = await readCloseoutSwitches(deps);
@@ -448,15 +569,27 @@ export async function closeoutOnPaid(deps: JobCloseoutDeps, body: Record<string,
   if (!job) throw new JobCloseoutError("job not found", 404, "job_not_found");
   const facts = await loadJobFacts(deps.client, [job]);
   if (!facts) return { ok: true, job_id: jobId, action: "facts_unreadable" };
-  const result = await settleJob(deps, facts.get(jobId)!, text(body.source) || "xero_sync");
+  const result = await settleJob(
+    deps,
+    facts.get(jobId)!,
+    text(body.source) || "xero_sync",
+  );
   return { ok: true, ...result };
 }
 
 /** xero-sync, after each run: invoiced and final_payment cards paid before they got there. */
-export async function closeoutCatchUp(deps: JobCloseoutDeps, body: Record<string, unknown>) {
+export async function closeoutCatchUp(
+  deps: JobCloseoutDeps,
+  body: Record<string, unknown>,
+) {
   const switches = await readCloseoutSwitches(deps);
-  if (!switches.move_enabled) return { ok: true, ran: false, reason: "switch_off" };
-  const jobs = await loadJobsByStatus(deps.client, ["invoiced", "final_payment"]);
+  if (!switches.move_enabled) {
+    return { ok: true, ran: false, reason: "switch_off" };
+  }
+  const jobs = await loadJobsByStatus(deps.client, [
+    "invoiced",
+    "final_payment",
+  ]);
   if (!jobs) return { ok: false, ran: false, reason: "jobs_unreadable" };
   const facts = await loadJobFacts(deps.client, jobs);
   if (!facts) return { ok: false, ran: false, reason: "facts_unreadable" };
@@ -464,13 +597,31 @@ export async function closeoutCatchUp(deps: JobCloseoutDeps, body: Record<string
   for (const job of jobs) {
     const f = facts.get(job.id)!;
     // Cheap pre-check: only a job whose invoices are all paid can pass.
-    const pre = evaluateJobPaid({ job, invoices: f.invoices, parties: f.parties, quote: null });
+    const pre = evaluateJobPaid({
+      job,
+      invoices: f.invoices,
+      parties: f.parties,
+      quote: null,
+    });
     if (pre.outcome === "not_paid") continue;
-    if (!paidWithin(pre.last_paid_on, deps.now(), CATCH_UP_PAID_WITHIN_DAYS * DAY_MS)) {
-      results.push({ job_id: job.id, job_number: job.job_number, action: "not_paid", detail: "stale_payment" });
+    if (
+      !paidWithin(
+        pre.last_paid_on,
+        deps.now(),
+        CATCH_UP_PAID_WITHIN_DAYS * DAY_MS,
+      )
+    ) {
+      results.push({
+        job_id: job.id,
+        job_number: job.job_number,
+        action: "not_paid",
+        detail: "stale_payment",
+      });
       continue;
     }
-    results.push(await settleJob(deps, f, text(body.source) || "job_closeout_catch_up"));
+    results.push(
+      await settleJob(deps, f, text(body.source) || "job_closeout_catch_up"),
+    );
   }
   return { ok: true, ran: true, checked: jobs.length, results };
 }
@@ -488,18 +639,28 @@ export interface ReviewRecipient {
 }
 
 /** Every paying owner with their own contact (captain answer 3), one entry per GHL contact. */
-export function reviewRecipients(job: CloseoutJobRow, parties: PartyRow[]): ReviewRecipient[] {
+export function reviewRecipients(
+  job: CloseoutJobRow,
+  parties: PartyRow[],
+): ReviewRecipient[] {
   const paying = payingParties(parties) as PartyRow[];
   const out: ReviewRecipient[] = [];
   if (!paying.length) {
-    out.push({ label: "owner", party_id: null, ghl_contact_id: job.ghl_contact_id || null, first_name: job.client_name });
+    out.push({
+      label: "owner",
+      party_id: null,
+      ghl_contact_id: job.ghl_contact_id || null,
+      first_name: job.client_name,
+    });
   } else {
     for (const p of paying) {
       const primary = p.is_primary === true;
       out.push({
-        label: text(p.contact_label).toUpperCase() || (primary ? "owner" : p.id),
+        label: text(p.contact_label).toUpperCase() ||
+          (primary ? "owner" : p.id),
         party_id: p.id,
-        ghl_contact_id: p.ghl_contact_id || (primary ? job.ghl_contact_id : null) || null,
+        ghl_contact_id: p.ghl_contact_id ||
+          (primary ? job.ghl_contact_id : null) || null,
         first_name: p.client_name || (primary ? job.client_name : null),
       });
     }
@@ -514,9 +675,15 @@ export function reviewRecipients(job: CloseoutJobRow, parties: PartyRow[]): Revi
 }
 
 /** True when this contact was sent a review text in the lookback, from any source; null when unreadable. */
-async function askedRecently(deps: JobCloseoutDeps, contactId: string): Promise<boolean | null> {
-  const since = new Date(deps.now().getTime() - REVIEW_LOOKBACK_DAYS * DAY_MS).toISOString();
-  const patterns = REVIEW_TEXT_PATTERNS.map((p) => `body_preview.ilike."*${p}*"`).join(",");
+async function askedRecently(
+  deps: JobCloseoutDeps,
+  contactId: string,
+): Promise<boolean | null> {
+  const since = new Date(deps.now().getTime() - REVIEW_LOOKBACK_DAYS * DAY_MS)
+    .toISOString();
+  const patterns = REVIEW_TEXT_PATTERNS.map((p) =>
+    `body_preview.ilike."*${p}*"`
+  ).join(",");
   const [events, claims] = await Promise.all([
     deps.client.from("business_events").select("id")
       .eq("contact_id", contactId)
@@ -526,7 +693,10 @@ async function askedRecently(deps: JobCloseoutDeps, contactId: string): Promise<
       .limit(1),
     deps.client.from("job_review_claims").select("job_id")
       // A JSON string: postgrest-js sends an array as a Postgres array literal, which jsonb refuses.
-      .contains("recipients", JSON.stringify([{ ghl_contact_id: contactId, result: "sent" }]))
+      .contains(
+        "recipients",
+        JSON.stringify([{ ghl_contact_id: contactId, result: "sent" }]),
+      )
       .gte("claimed_at", since)
       .limit(1),
   ]);
@@ -552,7 +722,10 @@ export interface ReviewRequestOptions {
  * linking it and asking again sends; once claimed, the job is never texted again by this
  * system.
  */
-export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewRequestOptions) {
+export async function requestJobReview(
+  deps: JobCloseoutDeps,
+  opts: ReviewRequestOptions,
+) {
   const mode: ReviewSenderMode = (await readCloseoutSwitches(deps)).sender_mode;
   if (mode === "off") return { ok: true, action: "sender_off" };
   const job = await loadJob(deps.client, opts.job_id);
@@ -564,16 +737,30 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
   let skipReason: string | null = null;
   let paidWording: boolean;
   if (!opts.manual) {
-    if (!isCloseoutJobType(job.type)) return { ok: true, action: "not_closeout_type" };
-    if (job.status !== CLOSEOUT_REVIEW_STATUS) return { ok: true, action: "not_in_get_review", status: job.status };
+    if (!isCloseoutJobType(job.type)) {
+      return { ok: true, action: "not_closeout_type" };
+    }
+    if (job.status !== CLOSEOUT_REVIEW_STATUS) {
+      return { ok: true, action: "not_in_get_review", status: job.status };
+    }
     const hold = closeoutHold(job);
     if (hold) return { ok: true, action: "held", hold };
     const verdict = await evaluateFacts(deps, f);
-    if (verdict.outcome !== "paid") return { ok: true, action: "not_paid", outcome: verdict.outcome, reasons: verdict.reasons };
-    if (!paidWithin(verdict.last_paid_on, deps.now(), REVIEW_SEND_WINDOW_MS)) skipReason = "paid_too_long_ago";
+    if (verdict.outcome !== "paid") {
+      return {
+        ok: true,
+        action: "not_paid",
+        outcome: verdict.outcome,
+        reasons: verdict.reasons,
+      };
+    }
+    if (!paidWithin(verdict.last_paid_on, deps.now(), REVIEW_SEND_WINDOW_MS)) {
+      skipReason = "paid_too_long_ago";
+    }
     paidWording = true;
   } else {
-    paidWording = isCloseoutJobType(job.type) && (await evaluateFacts(deps, f)).outcome === "paid";
+    paidWording = isCloseoutJobType(job.type) &&
+      (await evaluateFacts(deps, f)).outcome === "paid";
   }
 
   const recipients = reviewRecipients(job, f.parties);
@@ -606,29 +793,47 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
             ghl_contact_id: r.ghl_contact_id,
             would: r.result === "to_send" ? "send" : r.result,
           })),
-          message: reviewRequestMessage(recipients[0]?.first_name ?? null, job.type, paidWording),
+          message: reviewRequestMessage(
+            recipients[0]?.first_name ?? null,
+            job.type,
+            paidWording,
+          ),
         },
       });
     }
-    return { ok: true, action: "dry_run", skip_reason: skipReason, recipients: recipients.map(({ label, result }) => ({ label, result })) };
+    return {
+      ok: true,
+      action: "dry_run",
+      skip_reason: skipReason,
+      recipients: recipients.map(({ label, result }) => ({ label, result })),
+    };
   }
 
   if (
     !skipReason && !recipients.some((r) => r.result === "to_send") &&
     recipients.some((r) => r.result === "skipped_no_contact")
   ) {
-    return { ok: true, action: "no_contact", recipients: recipients.map(({ label, result }) => ({ label, result })) };
+    return {
+      ok: true,
+      action: "no_contact",
+      recipients: recipients.map(({ label, result }) => ({ label, result })),
+    };
   }
 
   // Live: the claim first. A second claim for the same job is refused by the primary key.
-  const { error: claimError } = await deps.client.from("job_review_claims").insert({
-    job_id: job.id,
-    status: "claimed",
-    trigger: opts.trigger,
-    recipients: recipients.map(({ label, party_id, ghl_contact_id, result }) => ({ label, party_id, ghl_contact_id, result })),
-  });
+  const { error: claimError } = await deps.client.from("job_review_claims")
+    .insert({
+      job_id: job.id,
+      status: "claimed",
+      trigger: opts.trigger,
+      recipients: recipients.map((
+        { label, party_id, ghl_contact_id, result },
+      ) => ({ label, party_id, ghl_contact_id, result })),
+    });
   if (claimError) {
-    if (claimError.code === "23505") return { ok: true, action: "already_claimed" };
+    if (claimError.code === "23505") {
+      return { ok: true, action: "already_claimed" };
+    }
     return { ok: false, action: "claim_failed", error: claimError.message };
   }
 
@@ -661,33 +866,60 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
     ? "refused"
     : "skipped";
   const reason = skipReason ?? (status === "skipped" ? "asked_recently" : null);
-  const stored = recipients.map(({ label, party_id, ghl_contact_id, result, message_id, error }) => ({
-    label, party_id, ghl_contact_id, result, message_id: message_id ?? null, error: error ?? null,
+  const stored = recipients.map((
+    { label, party_id, ghl_contact_id, result, message_id, error },
+  ) => ({
+    label,
+    party_id,
+    ghl_contact_id,
+    result,
+    message_id: message_id ?? null,
+    error: error ?? null,
   }));
-  const { error: finishError } = await deps.client.from("job_review_claims").update({
-    status,
-    reason,
-    recipients: stored,
-    finished_at: deps.now().toISOString(),
-  }).eq("job_id", job.id).eq("status", "claimed");
-  if (finishError) console.error("[job_closeout] review claim finish failed:", finishError.message);
+  const { error: finishError } = await deps.client.from("job_review_claims")
+    .update({
+      status,
+      reason,
+      recipients: stored,
+      finished_at: deps.now().toISOString(),
+    }).eq("job_id", job.id).eq("status", "claimed");
+  if (finishError) {
+    console.error(
+      "[job_closeout] review claim finish failed:",
+      finishError.message,
+    );
+  }
   await deps.client.from("job_events").insert({
     job_id: job.id,
-    event_type: status === "sent" ? "review_request_sent" : "review_request_not_sent",
+    event_type: status === "sent"
+      ? "review_request_sent"
+      : "review_request_not_sent",
     detail_json: {
       trigger: opts.trigger,
       status,
       reason,
       review_url: GOOGLE_REVIEW_URL,
-      recipients: stored.map(({ label, ghl_contact_id, result }) => ({ label, ghl_contact_id, result })),
+      recipients: stored.map(({ label, ghl_contact_id, result }) => ({
+        label,
+        ghl_contact_id,
+        result,
+      })),
     },
   });
-  return { ok: true, action: status, reason, recipients: stored.map(({ label, result }) => ({ label, result })) };
+  return {
+    ok: true,
+    action: status,
+    reason,
+    recipients: stored.map(({ label, result }) => ({ label, result })),
+  };
 }
 
 // ── The 24-hour archive sweep ────────────────────────────────────────────────
 
-export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, unknown>) {
+export async function closeoutSweep(
+  deps: JobCloseoutDeps,
+  body: Record<string, unknown>,
+) {
   const dryRun = body.dry_run !== false;
   if (!dryRun && !(await deps.laneEnabled("closeout"))) {
     return { ok: true, ran: false, reason: "lane_off" };
@@ -699,9 +931,16 @@ export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, 
     loadJobFacts(deps.client, jobs),
     loadGetReviewEntries(deps.client, jobs.map((j) => j.id)),
   ]);
-  if (!facts || !entries) return { ok: false, ran: false, reason: "facts_unreadable" };
+  if (!facts || !entries) {
+    return { ok: false, ran: false, reason: "facts_unreadable" };
+  }
   const now = deps.now().getTime();
-  const results: { job_id: string; job_number: string | null; action: string; detail?: unknown }[] = [];
+  const results: {
+    job_id: string;
+    job_number: string | null;
+    action: string;
+    detail?: unknown;
+  }[] = [];
   for (const job of jobs) {
     const base = { job_id: job.id, job_number: job.job_number };
     const hold = closeoutHold(job);
@@ -715,9 +954,15 @@ export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, 
       continue;
     }
     const verdict = await evaluateFacts(deps, facts.get(job.id)!);
-    if (!dryRun) await recordPaidCheck(deps, job.id, verdict, "job_closeout_sweep");
+    if (!dryRun) {
+      await recordPaidCheck(deps, job.id, verdict, "job_closeout_sweep");
+    }
     if (verdict.outcome !== "paid") {
-      results.push({ ...base, action: verdict.outcome, detail: verdict.reasons });
+      results.push({
+        ...base,
+        action: verdict.outcome,
+        detail: verdict.reasons,
+      });
       continue;
     }
     // The review: the sweep is the sender's backstop for a card whose move did not send.
@@ -729,11 +974,15 @@ export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, 
       if (!claim && dryRun) {
         reviewWouldSend = true;
       } else if (!claim) {
-        const review = await requestJobReview(deps, { job_id: job.id, trigger: "job_closeout_sweep" });
+        const review = await requestJobReview(deps, {
+          job_id: job.id,
+          trigger: "job_closeout_sweep",
+        });
         noContact = review.action === "no_contact";
         claim = await readClaim(deps, job.id);
       }
-      reviewDone = reviewWouldSend || noContact || (claim !== null && claim.status !== "claimed");
+      reviewDone = reviewWouldSend || noContact ||
+        (claim !== null && claim.status !== "claimed");
     }
     if (!reviewDone) {
       results.push({ ...base, action: "waiting_for_review" });
@@ -744,7 +993,12 @@ export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, 
       continue;
     }
     if (dryRun) {
-      results.push({ ...base, action: reviewWouldSend ? "would_send_review_then_archive" : "would_archive" });
+      results.push({
+        ...base,
+        action: reviewWouldSend
+          ? "would_send_review_then_archive"
+          : "would_archive",
+      });
       continue;
     }
     const moved = await deps.moveJobStatus({
@@ -753,13 +1007,28 @@ export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, 
       source: "job_closeout_sweep",
       expected_statuses: [CLOSEOUT_REVIEW_STATUS],
     });
-    results.push({ ...base, action: moved?.success === true ? "archived" : "archive_skipped", detail: moved?.skipped ?? null });
+    results.push({
+      ...base,
+      action: moved?.success === true ? "archived" : "archive_skipped",
+      detail: moved?.skipped ?? null,
+    });
   }
-  return { ok: true, ran: true, dry_run: dryRun, sender_mode: switches.sender_mode, checked: jobs.length, results };
+  return {
+    ok: true,
+    ran: true,
+    dry_run: dryRun,
+    sender_mode: switches.sender_mode,
+    checked: jobs.length,
+    results,
+  };
 }
 
-async function readClaim(deps: JobCloseoutDeps, jobId: string): Promise<{ status: string } | null> {
-  const { data } = await deps.client.from("job_review_claims").select("status").eq("job_id", jobId).maybeSingle();
+async function readClaim(
+  deps: JobCloseoutDeps,
+  jobId: string,
+): Promise<{ status: string } | null> {
+  const { data } = await deps.client.from("job_review_claims").select("status")
+    .eq("job_id", jobId).maybeSingle();
   return data ?? null;
 }
 
@@ -771,9 +1040,17 @@ async function readClaim(deps: JobCloseoutDeps, jobId: string): Promise<{ status
  */
 export async function closeoutBacklogPreview(deps: JobCloseoutDeps) {
   const all = await loadJobsByStatus(deps.client, ["complete"]);
-  if (!all) throw new JobCloseoutError("jobs read failed", 503, "jobs_unreadable");
+  if (!all) {
+    throw new JobCloseoutError("jobs read failed", 503, "jobs_unreadable");
+  }
   const facts = await loadJobFacts(deps.client, all);
-  if (!facts) throw new JobCloseoutError("invoice or party read failed", 503, "facts_unreadable");
+  if (!facts) {
+    throw new JobCloseoutError(
+      "invoice or party read failed",
+      503,
+      "facts_unreadable",
+    );
+  }
   const wouldArchive: unknown[] = [];
   const excluded: Record<string, string[]> = {};
   const exclude = (why: string, job: CloseoutJobRow) => {
@@ -798,17 +1075,23 @@ export async function closeoutBacklogPreview(deps: JobCloseoutDeps) {
     } else if (verdict.outcome === "paid_less_than_quoted") {
       exclude("paid_less_than_quoted", job);
     } else {
-      exclude(verdict.reasons.includes("no_invoices") ? "no_invoices" : "not_paid", job);
+      exclude(
+        verdict.reasons.includes("no_invoices") ? "no_invoices" : "not_paid",
+        job,
+      );
     }
   }
   return {
     ok: true,
     dry_run: true,
-    note: "Nothing was archived or texted. These jobs would move from complete to archived, with no review text.",
+    note:
+      "Nothing was archived or texted. These jobs would move from complete to archived, with no review text.",
     checked: all.length,
     would_archive_count: wouldArchive.length,
     would_archive: wouldArchive,
-    excluded_counts: Object.fromEntries(Object.entries(excluded).map(([k, v]) => [k, v.length])),
+    excluded_counts: Object.fromEntries(
+      Object.entries(excluded).map(([k, v]) => [k, v.length]),
+    ),
     excluded,
   };
 }
@@ -822,7 +1105,9 @@ export const JOB_CLOSEOUT_ACTIONS = [
   "job_closeout_backlog_preview",
 ] as const;
 
-export type JobCloseoutCaller = { kind: "server" } | { kind: "staff" } | { kind: "none" };
+export type JobCloseoutCaller = { kind: "server" } | { kind: "staff" } | {
+  kind: "none";
+};
 
 /** Server key only for anything that moves, texts or archives; the backlog list also admits staff. */
 export async function runJobCloseoutAction(
@@ -834,17 +1119,37 @@ export async function runJobCloseoutAction(
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   try {
     if (action === "job_closeout_backlog_preview") {
-      if (caller.kind === "none") return { status: 403, body: { ok: false, code: "operator_access_required" } };
+      if (caller.kind === "none") {
+        return {
+          status: 403,
+          body: { ok: false, code: "operator_access_required" },
+        };
+      }
       return { status: 200, body: await closeoutBacklogPreview(deps) };
     }
-    if (caller.kind !== "server") return { status: 403, body: { ok: false, code: "server_key_required" } };
-    if (method !== "POST") return { status: 405, body: { ok: false, code: "method_not_allowed" } };
-    if (action === "job_closeout_paid") return { status: 200, body: await closeoutOnPaid(deps, body) };
-    if (action === "job_closeout_catch_up") return { status: 200, body: await closeoutCatchUp(deps, body) };
-    if (action === "job_closeout_sweep") return { status: 200, body: await closeoutSweep(deps, body) };
+    if (caller.kind !== "server") {
+      return { status: 403, body: { ok: false, code: "server_key_required" } };
+    }
+    if (method !== "POST") {
+      return { status: 405, body: { ok: false, code: "method_not_allowed" } };
+    }
+    if (action === "job_closeout_paid") {
+      return { status: 200, body: await closeoutOnPaid(deps, body) };
+    }
+    if (action === "job_closeout_catch_up") {
+      return { status: 200, body: await closeoutCatchUp(deps, body) };
+    }
+    if (action === "job_closeout_sweep") {
+      return { status: 200, body: await closeoutSweep(deps, body) };
+    }
     return { status: 400, body: { ok: false, code: "unknown_action" } };
   } catch (e) {
-    if (e instanceof JobCloseoutError) return { status: e.status, body: { ok: false, code: e.code, error: e.message } };
+    if (e instanceof JobCloseoutError) {
+      return {
+        status: e.status,
+        body: { ok: false, code: e.code, error: e.message },
+      };
+    }
     throw e;
   }
 }
