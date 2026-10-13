@@ -17,6 +17,7 @@ import {
   _approveIntakeDraftForTest,
   _createMakesafeJob,
   _makesafeJobRouteForFamily,
+  _repairAutoIntakeApprovalMarkerForTest,
   _requestedMakesafeJobRoute,
   _unattendedIntakeApprovalMarkerForTest,
 } from "./index.ts";
@@ -566,7 +567,7 @@ Deno.test("a quote-stage repair parks as an exception and never reaches a creato
   assertStringIncludes(
     runtimeSource,
     [
-      "const wantsJob = !jobId && !lifecycleReopen &&",
+      "const wantsJob = !jobId && (!lifecycleReopen || orphanLifecycleReview) &&",
       '        (effectivePlan.state === "confirmed_live_job" ||',
       '          effectivePlan.state === "blocked_live_job");',
     ].join("\n"),
@@ -1325,4 +1326,292 @@ Deno.test("CONTROL: an approved Ambrose make-safe purchase order mints an SWMS- 
   assertEquals(job.metadata.makesafe_job_family, "general_makesafe");
   assertEquals(job.metadata.builder_po_number, "PO-2099910102");
   assertEquals(isInsuranceRepairFamily(job), false);
+});
+
+// ── Automatic repair intake at the mint (flag repair_intake_auto_v1) ─────────
+// Owner's word 13 Oct 2026 narrows the 2026-08-28 ruling: behind the flag, the
+// deterministic scan may mint a repair card for a builder-declared repair work
+// order from MLB or Ambrose. The brake still judges the DRAFT at mint time:
+// the scan lane's request marker, the flag read again, and the stamp a
+// flag-on run wrote on the draft. Take any one away and it still refuses.
+const AUTO_REPAIR_STAMP = {
+  version: "repair-auto-intake/v1",
+  builder: "acg",
+  family_evidence: ["ambrose_declared_repair"],
+  work_order_value_ex_gst: 200,
+};
+
+function autoRepairDraft(stamp: Row | null = AUTO_REPAIR_STAMP): Row {
+  const draft = ambroseDraftRow("ambrose-auto-repair", {
+    job: "20999202",
+    sequence: "05",
+    address: "7 Sample Road Demoville WA 6010",
+    kind: "repair",
+  });
+  draft.deterministic_key = "draft:ambrose-auto/cycle:1";
+  draft.extraction_json = {
+    ...draft.extraction_json,
+    deterministic_intake: true,
+    intake_source_post_ids: ["src-auto"],
+    ...(stamp ? { repair_auto_intake: stamp } : {}),
+  };
+  return draft;
+}
+
+function autoRepairStore(draft: Row, flag: boolean | null): Store {
+  const store = ambroseStore(draft);
+  store.tables.feature_flags = flag === null
+    ? []
+    : [{ flag_name: "repair_intake_auto_v1", enabled: flag }];
+  return store;
+}
+
+const AUTO_REPAIR_BODY = {
+  draft_id: "ambrose-auto-repair",
+  approved_by: "makesafe-deterministic-intake",
+  reviewed_fields: { makesafe_job_family: "repair" },
+  repair_auto_intake: true,
+};
+
+async function assertRepairStillNeedsAPerson(store: Store, body: Row) {
+  const error = await assertRejects(
+    () => _approveIntakeDraftForTest(makeClient(store), body),
+    Error,
+    "Repair intake requires a human tick",
+  );
+  assertEquals((error as any).status, 409);
+  assertEquals(store.tables.jobs.length, 0);
+  assertEquals(store.tables.makesafe_intake_drafts[0].status, "needs_review");
+}
+
+Deno.test("flag off: a stamped repair draft on the scan lane still needs a person", async () => {
+  for (const flag of [false, null]) {
+    await assertRepairStillNeedsAPerson(
+      autoRepairStore(autoRepairDraft(), flag),
+      {
+        ..._unattendedIntakeApprovalMarkerForTest,
+        ..._repairAutoIntakeApprovalMarkerForTest,
+        ...AUTO_REPAIR_BODY,
+      },
+    );
+  }
+});
+
+Deno.test("flag on: a lane without the scan's repair marker still needs a person", async () => {
+  // The backlog sweep and the late-PDF lane carry the unattended marker only.
+  // A plain `repair_auto_intake: true` in a request body is not the marker.
+  await assertRepairStillNeedsAPerson(
+    autoRepairStore(autoRepairDraft(), true),
+    { ..._unattendedIntakeApprovalMarkerForTest, ...AUTO_REPAIR_BODY },
+  );
+});
+
+Deno.test("flag on: a repair draft with no automatic stamp still needs a person", async () => {
+  // The draft that was already waiting when the flag was switched on.
+  await assertRepairStillNeedsAPerson(
+    autoRepairStore(autoRepairDraft(null), true),
+    {
+      ..._unattendedIntakeApprovalMarkerForTest,
+      ..._repairAutoIntakeApprovalMarkerForTest,
+      ...AUTO_REPAIR_BODY,
+    },
+  );
+  // And a stamp that rests on an inferred repair is no stamp.
+  await assertRepairStillNeedsAPerson(
+    autoRepairStore(
+      autoRepairDraft({
+        ...AUTO_REPAIR_STAMP,
+        family_evidence: ["identified_wo_repair_complement"],
+      }),
+      true,
+    ),
+    {
+      ..._unattendedIntakeApprovalMarkerForTest,
+      ..._repairAutoIntakeApprovalMarkerForTest,
+      ...AUTO_REPAIR_BODY,
+    },
+  );
+});
+
+Deno.test("flag on: a stamped builder-declared repair on the scan lane passes the brake and reaches the mint", async () => {
+  // CONTROL for the three refusals above: the same draft, flag and markers all
+  // present. This fake has no intake mint ledger, so the run stops at the mint
+  // reservation, which sits AFTER both brake sites and the atomic claim. Getting
+  // there, rather than the human-tick refusal, is the brake standing aside. The
+  // scan replays prove the whole path through to one job.
+  const store = autoRepairStore(autoRepairDraft(), true);
+  store.tables.makesafe_intake_cases = [{
+    org_id: ORG_ID,
+    id: "case-auto",
+    instruction_key: "ambrose-auto/cycle:1",
+    cycle: 1,
+    parent_relation: null,
+    source_fingerprint: null,
+    state: "exception",
+    reason_code: "awaiting_job_creation",
+    job_id: null,
+    blocked_reasons: [],
+  }];
+  store.tables.makesafe_intake_case_sources = [{
+    org_id: ORG_ID,
+    post_id: "src-auto",
+    case_id: "case-auto",
+  }];
+  const error = await assertRejects(
+    () =>
+      _approveIntakeDraftForTest(makeClient(store), {
+        ..._unattendedIntakeApprovalMarkerForTest,
+        ..._repairAutoIntakeApprovalMarkerForTest,
+        ...AUTO_REPAIR_BODY,
+        intake_case_id: "case-auto",
+      }),
+    Error,
+    "intake mint reservation failed",
+  );
+  assertEquals((error as any).status, undefined);
+  // The failed reservation released the claim: nothing was minted.
+  assertEquals(store.tables.jobs.length, 0);
+  assertEquals(store.tables.makesafe_intake_drafts[0].status, "needs_review");
+});
+
+Deno.test("a repair card carries the builder's work order value as its own named field, never as our price", async () => {
+  const body = {
+    client_name: "Alex Example",
+    site_address: "7 Sample Road Demoville WA 6010",
+    suburb: "Demoville",
+    requesting_company_slug: "acg",
+    requesting_company_name: "Ambrose Construct Group",
+    external_ref: "ACG-20999202PO-2099920205",
+    builder_claim_ref: "ACG-20999202",
+    builder_po_number: "PO-2099920205",
+    builder_work_order_value_ex_gst: 200,
+    suppress_manager_notification: true,
+  };
+  const store = makeStore();
+  await _createMakesafeJob(makeClient(store), body, {
+    jobRoute: "repair",
+    suppressGeocoding: true,
+  });
+  const job = store.tables.jobs[0];
+  assertEquals(job.type, "repair");
+  assertEquals(job.metadata.builder_po_number, "PO-2099920205");
+  assertEquals(job.metadata.builder_work_order_value_ex_gst, 200);
+  // The stored field says whose figure it is.
+  assertEquals(
+    job.metadata.builder_work_order_value_source,
+    "builder_work_order_pdf_not_our_quote",
+  );
+  // The card shows the builder's figure beside `value`, never in it: a reader
+  // that sums `value` counts none of it.
+  for (const ours of [0, 990]) {
+    const card = projectInsuranceRepairPipelineRow({ ...job, value: ours });
+    assertEquals(card.value, ours);
+    assertEquals(card.builder_work_order_value_ex_gst, 200);
+    assertEquals(
+      card.builder_work_order_value_note,
+      "Builder's work order value (ex GST), not our quote",
+    );
+  }
+
+  // An order whose value could not be read is still a job, marked as such.
+  const unreadStore = makeStore();
+  await _createMakesafeJob(
+    makeClient(unreadStore),
+    { ...body, builder_work_order_value_ex_gst: null },
+    { jobRoute: "repair", suppressGeocoding: true },
+  );
+  const unread = unreadStore.tables.jobs[0];
+  assertEquals(unread.type, "repair");
+  assertEquals(unread.metadata.builder_po_number, "PO-2099920205");
+  assertEquals(unread.metadata.builder_work_order_value_ex_gst, null);
+  assertEquals(
+    unread.metadata.builder_work_order_value_source,
+    "builder_work_order_value_not_read",
+  );
+  const unreadCard = projectInsuranceRepairPipelineRow({ ...unread, value: 0 });
+  assertEquals(unreadCard.value, 0);
+  assertEquals(unreadCard.builder_work_order_value_ex_gst, null);
+  assertEquals(
+    unreadCard.builder_work_order_value_note,
+    "Builder's order value not read",
+  );
+
+  // CONTROL: a repair job nobody read a work order for, and a make-safe, never
+  // take the field, and a card without it is projected exactly as before.
+  const manualStore = makeStore();
+  const { builder_work_order_value_ex_gst: _value, ...manualBody } = body;
+  await _createMakesafeJob(makeClient(manualStore), manualBody, {
+    jobRoute: "repair",
+    suppressGeocoding: true,
+  });
+  assertEquals(
+    "builder_work_order_value_ex_gst" in manualStore.tables.jobs[0].metadata,
+    false,
+  );
+  assertEquals(
+    "builder_work_order_value_source" in manualStore.tables.jobs[0].metadata,
+    false,
+  );
+  const controlStore = makeStore();
+  await _createMakesafeJob(makeClient(controlStore), body, {
+    suppressGeocoding: true,
+  });
+  assertEquals(
+    "builder_work_order_value_ex_gst" in controlStore.tables.jobs[0].metadata,
+    false,
+  );
+  const plain = projectInsuranceRepairPipelineRow({
+    id: "j",
+    type: "repair",
+    value: 0,
+    metadata: { repair_stage: "wo_in" },
+  });
+  assertEquals(plain.value, 0);
+  assertEquals("builder_work_order_value_ex_gst" in plain, false);
+  assertEquals("builder_work_order_value_note" in plain, false);
+  assertEquals(plain.builder_additional_purchase_orders, []);
+});
+
+Deno.test("the Repairs card lists every further order on the job and never chooses between them or adds them up", () => {
+  const card = projectInsuranceRepairPipelineRow({
+    id: "j",
+    type: "repair",
+    value: 990,
+    metadata: {
+      repair_stage: "materials",
+      builder_claim_ref: "MLB-49502",
+      builder_po_number: "PO-11111",
+      builder_work_order_value_ex_gst: 500,
+      builder_additional_work_orders: [
+        {
+          purchase_order: "PO-69815",
+          work_order_number: "MLB-49502PO-69815",
+          value_ex_gst: 1080,
+          received_at: "2026-07-19T01:12:00.000Z",
+          source_post_ids: ["post-1"],
+        },
+        // An order whose value was not read, and one with no date kept.
+        { purchase_order: "PO-70001", value_ex_gst: null },
+        // Not an order: nothing is invented for it.
+        { work_order_number: "MLB-49502" },
+        null,
+      ],
+    },
+  });
+  assertEquals(card.builder_po_number, "PO-11111");
+  assertEquals(card.builder_work_order_value_ex_gst, 500);
+  assertEquals(card.builder_additional_purchase_orders, [
+    {
+      purchase_order: "PO-69815",
+      builder_work_order_value_ex_gst: 1080,
+      received_at: "2026-07-19T01:12:00.000Z",
+    },
+    {
+      purchase_order: "PO-70001",
+      builder_work_order_value_ex_gst: null,
+      received_at: null,
+    },
+  ]);
+  assertEquals(card.value, 990);
+  assertEquals("metadata" in card, false);
 });

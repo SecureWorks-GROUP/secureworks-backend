@@ -147,6 +147,13 @@ function detailCompanyRow(detail: any): any {
   return embedded && typeof embedded === "object" ? embedded : null;
 }
 
+export const BUILDER_WORK_ORDER_VALUE_NOT_READ =
+  "builder_work_order_value_not_read";
+export const BUILDER_WORK_ORDER_VALUE_NOTE =
+  "Builder's work order value (ex GST), not our quote";
+export const BUILDER_WORK_ORDER_VALUE_NOT_READ_NOTE =
+  "Builder's order value not read";
+
 /**
  * The pipeline card shape consumed by the merged Repairs UX tab.
  *
@@ -235,8 +242,53 @@ export function projectInsuranceRepairPipelineRow(
   );
   const purchaseOrder = cleanRef(meta.builder_po_number) ??
     (pairedPurchaseOrders.size === 1 ? [...pairedPurchaseOrders][0] : null);
+  // The builder's ex-GST work order value, stamped at intake from its PDF. It
+  // is the BUILDER'S order value, never our quote, so it is shown as its own
+  // named field and never enters `value`: nothing that sums `value` can count
+  // a builder's figure as our price. An order whose value could not be read
+  // says so instead of showing nothing.
+  const workOrderValueExGst =
+    typeof meta.builder_work_order_value_ex_gst === "number" &&
+      Number.isFinite(meta.builder_work_order_value_ex_gst) &&
+      meta.builder_work_order_value_ex_gst > 0
+      ? meta.builder_work_order_value_ex_gst
+      : null;
+  const workOrderValueNotRead = workOrderValueExGst === null &&
+    meta.builder_work_order_value_source === BUILDER_WORK_ORDER_VALUE_NOT_READ;
+  // Every further order the builder raised on this job, in the order they
+  // arrived. `builder_po_number` stays the job's first order: which order
+  // governs when a claim has several is the owner's pending decision, so the
+  // card shows all of them and neither chooses between them nor adds them up.
+  // Each value is the BUILDER'S figure for that order, never our price.
+  const additionalPurchaseOrders =
+    (Array.isArray(meta.builder_additional_work_orders)
+      ? meta.builder_additional_work_orders
+      : []).flatMap((entry: any) => {
+        const order = cleanRef(entry?.purchase_order);
+        if (order === null) return [];
+        const value = entry?.value_ex_gst;
+        return [{
+          purchase_order: order,
+          builder_work_order_value_ex_gst:
+            typeof value === "number" && Number.isFinite(value) && value > 0
+              ? value
+              : null,
+          received_at: cleanRef(entry?.received_at),
+        }];
+      });
   return {
     ...projected,
+    ...(workOrderValueExGst !== null
+      ? {
+        builder_work_order_value_ex_gst: workOrderValueExGst,
+        builder_work_order_value_note: BUILDER_WORK_ORDER_VALUE_NOTE,
+      }
+      : workOrderValueNotRead
+      ? {
+        builder_work_order_value_ex_gst: null,
+        builder_work_order_value_note: BUILDER_WORK_ORDER_VALUE_NOT_READ_NOTE,
+      }
+      : {}),
     source_type: row?.type || null,
     type: "repair",
     job_type: "repair",
@@ -245,6 +297,7 @@ export function projectInsuranceRepairPipelineRow(
     repair_stage: insuranceRepairStage(row),
     builder_work_order_ref: workOrderRef,
     builder_po_number: purchaseOrder,
+    builder_additional_purchase_orders: additionalPurchaseOrders,
     builder_company_name: cleanRef(detailRow.requesting_company_name) ??
       cleanRef(detailCompany?.name) ?? cleanRef(company?.name),
     builder_company_slug: cleanRef(detailRow.requesting_company_slug) ??

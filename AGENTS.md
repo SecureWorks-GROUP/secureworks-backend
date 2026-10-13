@@ -1478,7 +1478,9 @@ Fencing declared headers + the replacement-verb ladder route to repair; temp
 fencing and MLB's "Makesafe/Emergency Repairs" header stay make-safe; a
 dual-scope WO stays make-safe and flags `repair_leg_detected` (child SWR- spawn
 is a human tap); NO repair draft auto-approves
-(`repair_family_supervised_review` brake) so every SWR- mint is a human tick; and
+(`repair_family_supervised_review` brake) so every SWR- mint is a human tick
+(narrowed 13 Oct 2026 behind a flag seeded off: see "Automatic Repair Intake"
+below); and
 the three legacy repair-marked SWMS cards are never re-minted or stage-stamped
 (ruling 6 — reversing needs a new ruling, not a script run). Xero, Captain-confirmed
 2026-08-31: **repair revenue books as make-safe / insurance work** — account `210`
@@ -1513,12 +1515,85 @@ explicit direction as the card's own stated PO and projected verbatim past every
 pairing and conflict rule — `create_makesafe_job` stamps it straight off the
 request body (the `metadata` literal in `createMakesafeJob`, `index.ts`; no
 validation), so that caller is the whole trust boundary and the only remaining
-route by which a wrong or fused PO reaches the card.
+route by which a fused PO reaches the card. Its one other writer is a flag-on
+repair landing (`landWorkOrderOnRepairJob`), which fills an EMPTY slot only,
+with the PO the sealed grammar read.
 
 Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
 Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
+
+## Automatic Repair Intake Is One Flag, And The Mint Judges The Draft
+
+Owner's word, 13 Oct 2026: behind `feature_flags.repair_intake_auto_v1` (seeded
+off; missing or unreadable is off) the deterministic scan mints a repair job for
+a clean repair work order from MLB or Ambrose. Rules:
+`ops-api/repair_intake_auto.ts`; contract, message list and limits:
+`docs/repair-intake-auto-v1.md`. What must not regress:
+
+- Automatic only for a repair the BUILDER declared (`builderDeclaredRepair`
+  over `plan.familyEvidence`), never one inferred from scope words alone or by
+  elimination. The declaration decides: a Rapid Repair order worded "remove
+  and replace" is declared (`decideDeterministicMakeSafeJobFamily` names the
+  builder's label, not the scope rung that answered first). Anything else
+  still parks as a review draft.
+- The stamp is on the DRAFT (`extraction_json.repair_auto_intake`), written by a
+  flag-on run. The brake in `approveIntakeDraft` re-reads the flag and the
+  stamp at mint time and takes a request marker only the two deterministic scan
+  lanes carry. Do not let the backlog sweep or the late-PDF lane mint a repair,
+  and do not approve a repair draft that carries no stamp.
+- The obligation dedupe cannot see repair jobs (`isCanonicalSeedScopeJob`), so
+  a REPAIR order for a claim with an open repair job is matched by
+  `matchOpenRepairJob` and landed on that job: purchase order recorded (a
+  second one is listed, never written over the first), PDF attached, one job
+  event, one intake desk item, no message, board stage untouched. A landing
+  is final, so `landWorkOrderOnRepairJob` refuses an order with no staged PDF
+  before any write and the case is retried, and it names a PDF after its
+  purchase order when the job already holds that file name for other bytes
+  (the attach key is one document per job and name, and Ambrose names every
+  order `Purchase Order.pdf`; the shared attach would drop it silently).
+  The Repairs card shows the listed
+  orders as `builder_additional_purchase_orders` (order, the builder's figure,
+  date arrived) beside an unchanged `builder_po_number`: it never picks one
+  or adds them up, and `ops.html` does not draw the list yet. The match
+  and the write count the same held purchase orders, the one inside the
+  detail row's `external_ref` included (`landing.jobExternalRef`). The
+  auto-file brakes hold the landing too: with a brake on the order is a
+  waiting draft and nothing is written to the live job. An order not landed
+  on a claim that has an open repair job NEVER earns the automatic stamp
+  (`claim_has_open_repair_job`), or releasing the brake mints a second repair
+  job on the claim.
+- A landed order's case NEVER takes `job_id`: `uq_makesafe_intake_cases_job`
+  (one case per job) is live and the job's own order holds the slot. It is
+  accounted as `accounted_non_wo` / `revision` with the job in
+  `recovery_cursor.landedOnRepairJob` (`accountCaseLandedOnRepairJob`), after
+  the desk item is written, and `isLandedOnRepairJobRow` keeps that fate on
+  every later scan. The older reattendance path (D3) still binds a second
+  case to its parent's job and would hit the same index; it is unchanged.
+- An order that reads as a make-safe is NEVER diverted or held by that rule
+  (ruling 13 Oct 2026: urgent work never waits on a notice). It mints as
+  today and `noteMakeSafeRaisedOnRepairClaim` leaves one plain job event on
+  the claim's repair job: no desk item, no source-issue reason. A repair order
+  misread as a make-safe is not prevented; do not widen the landing to
+  make-safe families.
+- `metadata.builder_work_order_value_ex_gst` is the BUILDER'S order value, not
+  our quote, and never gates the mint: an unreadable value still makes the
+  job, stamped `builder_work_order_value_source:
+  builder_work_order_value_not_read`. The Repairs card shows it as its own
+  field (`builder_work_order_value_ex_gst` + `builder_work_order_value_note`)
+  and never in `value`. It never reaches a trade: `my_jobs` returns job
+  metadata, so `projectTradeAllocatedMyJobsCard` strips it and each
+  `builder_additional_work_orders[].value_ex_gst` (`withoutBuilderOrderValue`).
+  A new money key on `jobs.metadata` must be stripped there too.
+- A collection or reattendance order with no original job and a first-issue
+  purchase order opens a review draft that nothing approves automatically.
+- Flag-on runs leave earlier fates alone: a waiting unstamped draft, an order
+  that already has a draft, and a case already parked as
+  `reattendance_target_not_found`.
+
+Scan tests for it are named `repair intake: ...` because CI runs the runtime
+test file by filter.
 
 ## Quote Builder Scopes Live In `quote_builder_versions`, Not `quote_revisions`
 

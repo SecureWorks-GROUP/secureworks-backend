@@ -617,8 +617,10 @@ export function decideMakeSafeJobFamily(
  * on the MINT-TIME brake, not on the sweep. `approveIntakeDraft`'s
  * `UNATTENDED_INTAKE_APPROVAL` refusal (`index.ts`) judges the FINAL
  * `approvedJobFamily` — the one that will actually be created — and refuses any
- * caller carrying the unattended marker. That is the only reading that cannot be
- * outflanked upstream: `shouldAutoApproveCleanIntake`'s
+ * caller carrying the unattended marker. (Its one exception, a draft stamped by
+ * automatic repair intake, needs a repair the builder DECLARED, so it never
+ * admits a complement draft: `repair_intake_auto.ts`.) That is the only reading
+ * that cannot be outflanked upstream: `shouldAutoApproveCleanIntake`'s
  * `repair_family_supervised_review` check runs on `resolvedIntakeDraftFamily`
  * (subject + body preview + stored family), while the approval fallback
  * classifies from the full instruction text and only then applies THIS
@@ -648,7 +650,8 @@ export function decideDeterministicMakeSafeJobFamily(
   const decision = decideMakeSafeJobFamily(subject, body, reportType, context);
   if (
     hasExplicitRapidRepairSignal(subject, body) &&
-    (decision.family === "general_makesafe" || decision.family === null)
+    (decision.family === "general_makesafe" || decision.family === null ||
+      decision.evidence === "repair_replacement_scope")
   ) {
     return { family: "repair", evidence: "rapid_repair_signal" };
   }
@@ -671,8 +674,10 @@ export function decideDeterministicMakeSafeJobFamily(
  * This adds NO new business rule. It gives the fallback exactly the repair
  * signals the deterministic layer already seals — the RAPID REPAIR subject and
  * the labelled `Dispatch Class: Rapid Repairs` line — and the upgrade still
- * fires only when the ladder returned general_makesafe or abstained, so no
- * other family can be overwritten by it. The declared repair PDF header
+ * fires only when the ladder returned general_makesafe, abstained, or already
+ * read a repair off replacement scope wording (the family is unchanged there;
+ * the evidence names the builder's own declaration), so no other family can
+ * be overwritten by it. The declared repair PDF header
  * (`Rapid Repairs`, `Scaffolding/Access Equipment`) already reached repair
  * through the shared ladder and is unaffected.
  *
