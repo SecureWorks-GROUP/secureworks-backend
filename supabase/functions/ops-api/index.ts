@@ -251,6 +251,7 @@ import {
   type QuoteBuilderActor,
 } from './quote_builder.ts'
 import {
+  BUILDER_WORK_ORDER_VALUE_NOT_READ as _BUILDER_WORK_ORDER_VALUE_NOT_READ,
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
   isInsuranceRepairFamily,
@@ -653,6 +654,15 @@ import {
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
+import {
+  approveCustomerVariation,
+  cancelCustomerVariation,
+  createCustomerVariation,
+  createCustomerVariationXeroDraft,
+  listCustomerVariations,
+  prepareCustomerVariationInvoiceLine,
+  updateCustomerVariation,
+} from './work_order_customer_variations.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -701,6 +711,11 @@ import {
   type IntakeDraftObligationCandidate as _IntakeDraftObligationCandidate,
   type IntakeDraftObligationDisposition as _IntakeDraftObligationDisposition,
 } from './makesafe_deterministic_intake_runtime.ts'
+import {
+  repairAutoIntakeMintStamp as _repairAutoIntakeMintStamp,
+  repairIntakeAutoEnabled as _repairIntakeAutoEnabled,
+  withoutBuilderOrderValue as _withoutBuilderOrderValue,
+} from './repair_intake_auto.ts'
 import {
   notifyDeterministicPhysicalJob as _notifyDeterministicPhysicalJob,
   type HugoNotificationConfig as _HugoNotificationConfig,
@@ -8315,6 +8330,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           client,
           url.searchParams.get('job_id') || '',
         )))
+      // A job's customer variations (work_order_customer_variations.ts), with
+      // each one's invoice line. Staff-only by the front door's default.
+      case 'customer_variations':
+        return json(await runJobWorkOrder(() => listCustomerVariations(
+          client,
+          url.searchParams.get('job_id') || '',
+        )))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
       case 'ops_targets': return json(await opsTargets(client))
@@ -8679,6 +8701,38 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'correct_work_order_variation':
         return json(await runJobWorkOrder(() => correctWorkOrderVariation(client, body, requestActor, {
           sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
+      // Customer variations (work_order_customer_variations.ts): the office
+      // records one on a fencing or patio job, edits it while it is a draft
+      // (each edit names the updated_at it read), and a work order approver
+      // approves it, which joins it to the approved work order as a marked
+      // addendum and seals it. Staff-only by the front door's default.
+      case 'create_customer_variation':
+        return json(await runJobWorkOrder(() => createCustomerVariation(client, body, requestActor)))
+      case 'update_customer_variation':
+        return json(await runJobWorkOrder(() => updateCustomerVariation(client, body, requestActor)))
+      case 'cancel_customer_variation':
+        return json(await runJobWorkOrder(() => cancelCustomerVariation(client, body, requestActor)))
+      case 'approve_customer_variation':
+        return json(await runJobWorkOrder(() => approveCustomerVariation(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
+      // The customer's invoice line, built from the approved variation. No
+      // Xero write.
+      case 'prepare_customer_variation_invoice_line':
+        return json(await runJobWorkOrder(() => prepareCustomerVariationInvoiceLine(client, body, requestActor, {
+          accountCodeForJob: (jobType) => accountCodeForJob(jobType),
+        })))
+      // A Xero DRAFT (never sent) holding that line, through
+      // create_invoice_draft's own path with the caller's credentials. Refused
+      // while feature flag customer_variation_xero_draft_v1 is off.
+      case 'create_customer_variation_xero_draft':
+        return json(await runJobWorkOrder(() => createCustomerVariationXeroDraft(client, body, requestActor, {
+          accountCodeForJob: (jobType) => accountCodeForJob(jobType),
+          createDraft: (payload) => createInvoiceDraftAction(client, payload, authMode, authUser, serverSecretPresented),
         })))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
@@ -16649,8 +16703,10 @@ async function jobDetail(
         live_work_order_id: jwo.live_work_order?.id ?? null,
         draft_work_order_id: jwo.draft_work_order?.id ?? null,
         figures: jwo.figures,
+        addenda: jwo.addenda,
         invoice_count: jwo.invoices.length,
         variation_count: jwo.variations.length,
+        customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
         quote_fill: jwo.quote_fill,
       }
     } catch (e) {
@@ -18839,6 +18895,7 @@ async function createMakesafeJob(
     intake_mint_id,
     synthetic_livefire_marker,
     suppress_manager_notification,
+    builder_work_order_value_ex_gst,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -18954,6 +19011,19 @@ async function createMakesafeJob(
       },
     )
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
+  // The builder's own ex-GST work order value, as read off its PDF. Recorded on
+  // a repair card only, beside its purchase order; it is the builder's figure,
+  // never our price, so it stays in metadata and out of pricing_json. A caller
+  // that looked and could not read one passes null, and the card says so.
+  const reviewedWorkOrderValueExGst = isRepairRoute &&
+      typeof builder_work_order_value_ex_gst === 'number' &&
+      Number.isFinite(builder_work_order_value_ex_gst) &&
+      builder_work_order_value_ex_gst > 0
+    ? Math.round(builder_work_order_value_ex_gst * 100) / 100
+    : null
+  const reviewedWorkOrderValueNotRead = isRepairRoute &&
+    reviewedWorkOrderValueExGst === null &&
+    builder_work_order_value_ex_gst === null
 
   if (reviewedJobFamily === 'roof_report') {
     const authority = internalOptions.canonicalIntakeAuthority
@@ -19022,6 +19092,17 @@ async function createMakesafeJob(
     builder_claim_ref: builder_claim_ref || null,
     builder_work_order_number: builder_work_order_number || null,
     builder_po_number: builder_po_number || null,
+    ...(reviewedWorkOrderValueExGst !== null
+      ? {
+        builder_work_order_value_ex_gst: reviewedWorkOrderValueExGst,
+        builder_work_order_value_source: 'builder_work_order_pdf_not_our_quote',
+      }
+      : reviewedWorkOrderValueNotRead
+      ? {
+        builder_work_order_value_ex_gst: null,
+        builder_work_order_value_source: _BUILDER_WORK_ORDER_VALUE_NOT_READ,
+      }
+      : {}),
     ...(intake_mint_id ? { intake_mint_id } : {}),
     ...(reviewedSyntheticLivefireMarker
       ? { synthetic_livefire_marker: reviewedSyntheticLivefireMarker }
@@ -27712,6 +27793,18 @@ const UNATTENDED_INTAKE_APPROVAL_MARKER = {
   [UNATTENDED_INTAKE_APPROVAL]: UNATTENDED_INTAKE_APPROVAL,
 } as Record<symbol, symbol>
 
+// Narrowed 13 Oct 2026 (owner's word; rules in repair_intake_auto.ts): behind
+// `feature_flags.repair_intake_auto_v1` the deterministic scan may mint a
+// repair card for a builder-declared repair work order from MLB or Ambrose.
+// Only the two deterministic scan lanes stamp this marker, and only for a
+// draft their own run judged clean. It is a request, never the authority: the
+// brake below re-reads the flag and re-judges the DRAFT at mint time, so the
+// backlog sweep, the late-PDF lane and any future lane stay supervised.
+const REPAIR_AUTO_INTAKE_APPROVAL = Symbol('repairAutoIntakeApproval')
+const REPAIR_AUTO_INTAKE_APPROVAL_MARKER = {
+  [REPAIR_AUTO_INTAKE_APPROVAL]: REPAIR_AUTO_INTAKE_APPROVAL,
+} as Record<symbol, symbol>
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
@@ -28012,8 +28105,28 @@ async function approveIntakeDraft(client: any, body: any) {
   // half of that test — the refusal itself is placed at the two points where a
   // new card can actually be minted, so a settlement retry, a guarded
   // source-authority link and the F9 refusal all stay reachable.
-  const unattendedRepairMint = unattendedApproval &&
+  //
+  // 13 Oct 2026: what the ruling guarded against is a MISREAD work order
+  // minting a card that can never be retyped. That is still guarded, by a
+  // narrower check: the request marker from a deterministic scan lane, the flag
+  // read again here, and a draft stamped by a run that found the repair
+  // declared by MLB or Ambrose with nothing missing.
+  const repairAutoStamp =
     _normaliseDedupJobFamily(approvedJobFamily) === 'repair'
+      ? _repairAutoIntakeMintStamp({
+        extraction,
+        requestingCompanySlug: approvedFields.requesting_company_slug,
+        reviewedFamily: approvedJobFamily,
+      })
+      : null
+  const repairAutoIntakeAuthorised = unattendedApproval &&
+    body?.[REPAIR_AUTO_INTAKE_APPROVAL] === REPAIR_AUTO_INTAKE_APPROVAL &&
+    cleanReviewedString(reviewedFamily) === 'repair' &&
+    !!repairAutoStamp &&
+    await _repairIntakeAutoEnabled(client)
+  const unattendedRepairMint = unattendedApproval &&
+    _normaliseDedupJobFamily(approvedJobFamily) === 'repair' &&
+    !repairAutoIntakeAuthorised
   const refuseUnattendedRepairMint = (): never => {
     throw new ApiError(
       'Repair intake requires a human tick: this instruction resolves to the repair family, which no unattended lane may mint. The draft stays in the review queue for an operator to approve.',
@@ -28362,6 +28475,16 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
+      // The value a flag-on scan read off the work order (null when it could
+      // not read one) rides with the stamp, whoever approves the draft: a
+      // person ticking a stamped draft the gate refused gets the same card the
+      // automatic path would have made.
+      ...(repairAutoStamp
+        ? {
+          builder_work_order_value_ex_gst:
+            repairAutoStamp.work_order_value_ex_gst,
+        }
+        : {}),
       ...(primaryMint ? { intake_mint_id: primaryMint.id } : {}),
       ...(extraction?.synthetic_livefire_marker
         ? {
@@ -28647,6 +28770,8 @@ async function approveIntakeDraft(client: any, body: any) {
 export const _approveIntakeDraftForTest = approveIntakeDraft
 export const _unattendedIntakeApprovalMarkerForTest =
   UNATTENDED_INTAKE_APPROVAL_MARKER
+export const _repairAutoIntakeApprovalMarkerForTest =
+  REPAIR_AUTO_INTAKE_APPROVAL_MARKER
 
 // ── Slice 7: reject intake draft ──
 async function rejectIntakeDraft(client: any, body: any) {
@@ -29972,7 +30097,23 @@ interface StandingScanDeps {
   loadRollout?: (client: any) => Promise<any>
   autoApproveEnabled?: () => boolean
   loadAutoFileEnabled?: (client: any) => Promise<boolean>
+  loadRepairAutoIntake?: (client: any) => Promise<boolean>
   run?: (client: any, options: any) => Promise<any>
+}
+
+// The two deterministic scan lanes' approval call. The repair marker rides only
+// on a body the runtime itself asked it for, on a run whose flag read on.
+function deterministicScanApprovalBody(
+  approvalBody: any,
+  repairAutoIntake: boolean,
+) {
+  return {
+    ...approvalBody,
+    ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+    ...(repairAutoIntake && approvalBody?.repair_auto_intake === true
+      ? REPAIR_AUTO_INTAKE_APPROVAL_MARKER
+      : {}),
+  }
 }
 
 async function scanSesMakesafes(
@@ -29989,6 +30130,10 @@ async function scanSesMakesafes(
   const advanceDrafts =
     (deps.autoApproveEnabled || autoApproveCleanIntakeEnabled)() &&
     await (deps.loadAutoFileEnabled || isAutoFileEnabled)(client)
+  // Read once per run. Off, missing or unreadable passes nothing, so the run's
+  // options are exactly what they were before the flag existed.
+  const repairAutoIntake =
+    await (deps.loadRepairAutoIntake || _repairIntakeAutoEnabled)(client)
   return await (deps.run || _runDeterministicIntake)(client, {
     dryRun: false,
     selectionMode: rollout.selectionMode,
@@ -30002,13 +30147,14 @@ async function scanSesMakesafes(
     allowInstructionKeys: rollout.instructionKeys,
     advanceDrafts,
     approveDraft: (approvalClient: any, approvalBody: any) =>
-      approveIntakeDraft(approvalClient, {
-        ...approvalBody,
-        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
-      }),
+      approveIntakeDraft(
+        approvalClient,
+        deterministicScanApprovalBody(approvalBody, repairAutoIntake),
+      ),
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
   })
 }
 
@@ -30039,10 +30185,10 @@ async function scanFreshMakesafeSource(
   const rollout = await _loadDeterministicRolloutControls(client)
   const advanceDrafts = autoApproveCleanIntakeEnabled() &&
     await isAutoFileEnabled(client)
+  const repairAutoIntake = await _repairIntakeAutoEnabled(client)
   const approveExactDraft = (approvalClient: any, approvalBody: any) =>
     approveIntakeDraft(approvalClient, {
-      ...approvalBody,
-      ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+      ...deterministicScanApprovalBody(approvalBody, repairAutoIntake),
       ...(options.approvalReviewNote
         ? {
           review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
@@ -30064,6 +30210,7 @@ async function scanFreshMakesafeSource(
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
   })
   const { data: pendingDraft, error: pendingDraftError } = await client
     .from('makesafe_intake_drafts')
@@ -42177,6 +42324,9 @@ function projectTradeAllocatedMyJobsCard(assignment: any): void {
     if ('notes' in assignment.jobs) {
       assignment.jobs.notes = sanitizeTradeAllocatedJobNotes(assignment.jobs.notes)
     }
+    if ('metadata' in assignment.jobs) {
+      assignment.jobs.metadata = _withoutBuilderOrderValue(assignment.jobs.metadata)
+    }
   }
 }
 
@@ -42551,7 +42701,17 @@ export const TRADE_WO_SCOPE_ITEM_ALLOWLIST = new Set([
   'units',
   'kind',
   'special_instructions',
+  // Hours, not money: every trade sees how long each line takes (captain,
+  // 12 Oct 2026: hours only, the lead trade included).
+  'hours',
+  // A job work order's customer variation lines are marked as variations.
+  'is_variation',
+  'variation_number',
 ])
+
+// The numbers a work order line may show a trade. Every other number on a
+// line is treated as money and dropped.
+const TRADE_WO_SCOPE_ITEM_NUMERIC_KEYS = new Set(['qty', 'quantity', 'hours', 'variation_number'])
 
 function isTradeWoScopeItemScalar(value: unknown): boolean {
   return value == null ||
@@ -42570,6 +42730,10 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
+      if (key === 'is_variation') {
+        if (typeof value === 'boolean') out[key] = value
+        continue
+      }
       if (key === 'kind') {
         const kind = sanitizeTradePackKind(value)
         if (kind !== undefined) out[key] = kind
@@ -42587,7 +42751,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
         continue
       }
       if (typeof value === 'number' && Number.isFinite(value)) {
-        if (key === 'qty' || key === 'quantity') out[key] = value
+        if (TRADE_WO_SCOPE_ITEM_NUMERIC_KEYS.has(key)) out[key] = value
         continue
       }
       out[key] = value

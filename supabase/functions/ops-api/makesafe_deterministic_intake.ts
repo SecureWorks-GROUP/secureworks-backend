@@ -314,6 +314,11 @@ export interface DeterministicCasePlan {
     Partial<Record<PdfGapFillField, DeterministicFieldProvenance>>
   >;
   pdfDocuments: readonly DeterministicPdfDocument[];
+  // Why each instruction email was read as its family (the classifier's own
+  // evidence codes, e.g. `ambrose_declared_repair`). Reported only: it never
+  // enters a key, a fingerprint or a fate. Automatic repair intake reads it to
+  // tell a repair the builder DECLARED from one inferred from scope words.
+  familyEvidence?: readonly string[];
   // A combined make-safe + report obligation, when the primary is a physical
   // make-safe and a separate report card is still owed. Mirrors the AI intake's
   // extraction.secondary_obligation so a report-family plan carrying this is
@@ -3019,6 +3024,15 @@ export function buildDeterministicIntakePlan(
         fieldProvenance: merged.fieldProvenance,
         pdfFieldProvenance: merged.pdfFieldProvenance,
         pdfDocuments,
+        familyEvidence: [
+          ...new Set(
+            instructionItems.flatMap((item) =>
+              item.parseWarnings.filter((warning) =>
+                warning.startsWith("job_family:")
+              ).map((warning) => warning.slice("job_family:".length))
+            ),
+          ),
+        ].sort(),
         recoveryCursor: {
           version: DETERMINISTIC_INTAKE_VERSION,
           completedStages: [

@@ -291,6 +291,23 @@ jobs:
             --filter "Ambrose" \
             supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
 
+      # Automatic repair intake (flag repair_intake_auto_v1): the pure rules, and
+      # the scan replays of the repair orders it exists for. Every scan test of
+      # it is named "repair intake: ..." so the filter runs them all; the
+      # runtime file is filtered for the reason given above. The last run is the
+      # end-to-end proof that the Trade App's my_jobs gives an allocated trade
+      # no builder order value.
+      - name: Test automatic repair intake
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/repair_intake_auto_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "repair intake:" \
+            supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "builder's order value" \
+            supabase/functions/ops-api/trade_app_visibility_rules_test.ts
+
       # An adapter registered in code but missing from the database's adapter
       # list is refused on every case insert and nothing else notices (Ambrose,
       # 12 Oct 2026). Compares the real registry with the newest definition of
@@ -387,6 +404,7 @@ jobs:
             supabase/functions/ops-api/quote_work_order_lines_test.ts \
             supabase/functions/ops-api/job_work_order_quote_fill_test.ts \
             supabase/functions/ops-api/job_work_order_quote_fill_handler_test.ts \
+            supabase/functions/ops-api/work_order_customer_variations_test.ts \
             supabase/functions/ops-api/sales_booking_read_test.ts \
             supabase/functions/ops-api/sales_booking_outlook_test.ts \
             supabase/functions/ops-api/sales_booking_pack_test.ts \

@@ -884,6 +884,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # stamping persist and the per-job list
                       # (trade_invoice_time_entry.ts).
                       ("20261012180000", "trade_invoice_time_entries"),
+                      # Customer variations: the addenda every job work
+                      # order read takes (work_order_customer_variations.ts).
+                      ("20261013140000", "work_order_customer_variations"),
                       # Trade recurring deductions: the rule rows and the four
                       # invoice columns (trade_invoice_recurring_deduction.ts).
                       ("20261013143700", "trade_recurring_deductions")]:

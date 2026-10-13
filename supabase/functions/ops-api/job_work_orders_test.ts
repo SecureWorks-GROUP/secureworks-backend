@@ -1045,6 +1045,7 @@ Deno.test("trade projection is an allowlist", () => {
     redact,
   );
   assertEquals(Object.keys(out).sort(), [
+    "addenda",
     "approved_at",
     "id",
     "job_id",

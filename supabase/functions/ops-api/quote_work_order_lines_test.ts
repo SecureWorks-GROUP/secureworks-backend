@@ -830,7 +830,7 @@ Deno.test("trade view of the filled lines: hours and quantities, no dollars, no 
   for (const item of items) {
     assertEquals(
       Object.keys(item).sort().filter((k) =>
-        !["description", "qty", "unit"].includes(k)
+        !["description", "qty", "unit", "hours"].includes(k)
       ),
       [],
     );
@@ -840,16 +840,19 @@ Deno.test("trade view of the filled lines: hours and quantities, no dollars, no 
     description: "Root removal / hard digging",
     qty: 2,
     unit: "hrs",
+    hours: 2,
   });
   assertEquals(items.find((i) => /Ridgeside fence \(16/.test(i.description)), {
     description: "Install Ridgeside fence (16 panels)",
     qty: 37.6,
     unit: "m",
+    hours: null,
   });
   assertEquals(items.find((i) => /^Labour/.test(i.description)), {
     description: "Labour — 2 trades × 1.5 days",
     qty: 24,
     unit: "hrs",
+    hours: 24,
   });
   const text = JSON.stringify(items);
   for (

@@ -8,7 +8,8 @@
 // (editable, counts for nothing) until an approver named in
 // work_order_settings (seeded with Shaun's users.id) approves it. Approving
 // seals it like an invoice: the database refuses any later edit, and later
-// change is recorded as a trade variation.
+// change is recorded as a variation (the trade's overrun, or the office's
+// customer variation as an addendum).
 //
 //   Staff (ops key or staff session):
 //     job_work_order          GET   one job's work order, live figures, labour
@@ -41,6 +42,13 @@
 // staff open it, when staff read it, and by the backfill. A read fills only
 // when its caller asks (fillFromQuote: staff or the ops server key, never the
 // routine key). An approved work order is never filled.
+//
+// Customer variations (work_order_customer_variations.ts, the office's record
+// of a variation the customer agreed to) join the approved work order as
+// numbered addenda once approved: every read here returns them (`addenda`),
+// the figures measure billed against the agreed labour plus their trade
+// allocation (`agreed_total_ex`), and the trade read shows their lines with
+// hours and marked as variations, never their allocation or price.
 //
 // Invoice lines billed on the job are stamped by the database at invoice
 // submit, and at approval for lines invoiced earlier
@@ -217,6 +225,7 @@ export type WorkOrderRule = {
     | "over_agreed"
     | "near_agreed"
     | "has_variations"
+    | "has_customer_variations"
     | "no_approved_work_order";
   level: "flag" | "warn" | "info";
   message: string;
@@ -224,6 +233,13 @@ export type WorkOrderRule = {
 
 export type WorkOrderFigures = {
   agreed_ex: number | null;
+  /** Trade allocation of the approved customer variations (addenda). */
+  customer_variations_ex: number;
+  /** What the approved customer variations charge the customer, ex GST. */
+  customer_variations_price_ex: number;
+  customer_variation_count: number;
+  /** agreed_ex plus customer_variations_ex: what billed is measured against. */
+  agreed_total_ex: number | null;
   billed_to_date_ex: number;
   variations_ex: number;
   variation_count: number;
@@ -243,11 +259,16 @@ export type WorkOrderFigures = {
  *                      equipment and other lines are never in it.
  *   variations_ex      the part of billed the trades marked as variations;
  *                      a variation counts only while its invoice is billed.
- *   remaining_ex       agreed - billed_to_date.
+ *   customer_variations_ex  the trade allocation of the approved customer
+ *                      variations (the work order's addenda).
+ *   agreed_total_ex    agreed + customer_variations_ex: billed is measured
+ *                      against it.
+ *   remaining_ex       agreed_total - billed_to_date.
  * Rules (named, in the PR and docs/job-work-orders-v1.md):
- *   over_agreed   flag  billed (within agreed scope + variations) > agreed
- *   near_agreed   warn  billed >= 90% of agreed and not over
- *   has_variations info at least one variation reported on the work order
+ *   over_agreed   flag  billed > agreed total (agreed + approved customer variations)
+ *   near_agreed   warn  billed >= 90% of the agreed total and not over
+ *   has_variations info at least one trade variation reported on the work order
+ *   has_customer_variations info at least one approved customer variation
  *   no_approved_work_order info nothing counts until a work order is approved
  */
 export function computeWorkOrderFigures(input: {
@@ -263,6 +284,15 @@ export function computeWorkOrderFigures(input: {
       counted: boolean;
     }
   >;
+  /** Customer variations on the job; only approved ones count. */
+  customerVariations?: Array<
+    {
+      status: string;
+      work_order_id: string | null;
+      trade_allocation_ex: number | null;
+      customer_price_ex: number | null;
+    }
+  >;
 }): WorkOrderFigures {
   const counted = input.lines.filter((l) => l.counted && l.work_order_id);
   const billed = money(counted.reduce((s, l) => s + money(l.amount_ex), 0));
@@ -272,10 +302,27 @@ export function computeWorkOrderFigures(input: {
   const variationsEx = money(
     liveVariations.reduce((s, v) => s + money(v.amount_ex ?? 0), 0),
   );
+  const addenda = input.approved
+    ? (input.customerVariations || []).filter((v) =>
+      v.status === "approved" && v.work_order_id
+    )
+    : [];
+  const customerEx = money(
+    addenda.reduce((s, v) => s + money(v.trade_allocation_ex ?? 0), 0),
+  );
+  const customerPriceEx = money(
+    addenda.reduce((s, v) => s + money(v.customer_price_ex ?? 0), 0),
+  );
   const agreed = input.approved && input.agreedEx !== null &&
       input.agreedEx !== undefined
     ? money(input.agreedEx)
     : null;
+  const total = agreed === null ? null : money(agreed + customerEx);
+  const against = addenda.length > 0
+    ? `the agreed $${(total ?? 0).toFixed(2)} (including $${
+      customerEx.toFixed(2)
+    } of approved variations)`
+    : `the agreed $${(total ?? 0).toFixed(2)}`;
   const rules: WorkOrderRule[] = [];
   let usedRatio: number | null = null;
   let over = false;
@@ -286,26 +333,24 @@ export function computeWorkOrderFigures(input: {
       message: "No approved work order yet, so no labour counts against it.",
     });
   }
-  if (agreed !== null) {
-    usedRatio = agreed > 0
-      ? Math.round((billed / agreed) * 10000) / 10000
+  if (total !== null) {
+    usedRatio = total > 0
+      ? Math.round((billed / total) * 10000) / 10000
       : (billed > 0 ? null : 0);
-    over = billed > agreed;
+    over = billed > total;
     if (over) {
       rules.push({
         key: "over_agreed",
         level: "flag",
-        message: `Billed $${billed.toFixed(2)} is over the agreed $${
-          agreed.toFixed(2)
-        }.`,
+        message: `Billed $${billed.toFixed(2)} is over ${against}.`,
       });
-    } else if (agreed > 0 && billed >= agreed * WORK_ORDER_NEAR_AGREED_RATIO) {
+    } else if (total > 0 && billed >= total * WORK_ORDER_NEAR_AGREED_RATIO) {
       rules.push({
         key: "near_agreed",
         level: "warn",
         message: `Billed $${billed.toFixed(2)} is ${
-          Math.round((billed / agreed) * 100)
-        }% of the agreed $${agreed.toFixed(2)}.`,
+          Math.round((billed / total) * 100)
+        }% of ${against}.`,
       });
     }
   }
@@ -318,13 +363,26 @@ export function computeWorkOrderFigures(input: {
       } reported.`,
     });
   }
+  if (addenda.length > 0) {
+    rules.push({
+      key: "has_customer_variations",
+      level: "info",
+      message: `${addenda.length} approved customer variation${
+        addenda.length === 1 ? "" : "s"
+      } added $${customerEx.toFixed(2)} to the agreed labour.`,
+    });
+  }
   return {
     agreed_ex: agreed,
+    customer_variations_ex: customerEx,
+    customer_variations_price_ex: customerPriceEx,
+    customer_variation_count: addenda.length,
+    agreed_total_ex: total,
     billed_to_date_ex: billed,
     variations_ex: variationsEx,
     variation_count: liveVariations.length,
     billed_within_agreed_scope_ex: money(billed - variationsEx),
-    remaining_ex: agreed === null ? null : money(agreed - billed),
+    remaining_ex: total === null ? null : money(total - billed),
     used_ratio: usedRatio,
     over_agreed: over,
     rules,
@@ -484,26 +542,30 @@ export function projectTradeJobWorkOrder(
   wo: any,
   job: any,
   redact: TradeRedaction,
+  addenda: CustomerVariationAddendum[] = [],
 ): Record<string, unknown> {
   const kept: string[] = [];
   const hold = (value: string) => holdWorkOrderMeasurements(value, kept);
   const restore = (value: string) => restoreWorkOrderMeasurements(value, kept);
-  const written = (value: unknown): value is string =>
-    typeof value === "string" && value.trim() !== "";
-  const instructions = typeof wo?.special_instructions === "string"
-    ? restore(
-      redact.text(hold(wo.special_instructions), "special_instructions"),
-    )
-    : null;
+  const shownText = (value: unknown, key: string): string | null => {
+    if (typeof value !== "string") return null;
+    const shown = restore(redact.text(hold(value), key));
+    return writtenText(shown)
+      ? shown
+      : writtenText(value)
+      ? TRADE_WORK_ORDER_LINE_WITHHELD
+      : null;
+  };
   // One item at a time, so a withheld line is matched to what was written.
-  const scopeItems = (Array.isArray(wo.scope_items) ? wo.scope_items : [])
-    .flatMap((item: unknown) => {
+  const tradeItems = (items: unknown) =>
+    (Array.isArray(items) ? items : []).flatMap((item: unknown) => {
       const [seen] = redact.scopeItems([mapStringLeaves(item, hold)]);
       if (!seen || typeof seen !== "object" || Array.isArray(seen)) return [];
       const shown = mapStringLeaves(seen, restore) as Record<string, unknown>;
       for (const [key, value] of Object.entries(item as object)) {
         if (
-          written(value) && redact.scopeTextKey(key) && !written(shown[key])
+          writtenText(value) && redact.scopeTextKey(key) &&
+          !writtenText(shown[key])
         ) {
           shown[key] = TRADE_WORK_ORDER_LINE_WITHHELD;
         }
@@ -521,13 +583,133 @@ export function projectTradeJobWorkOrder(
     site_address: wo.site_address ||
       [job?.site_address, job?.site_suburb].filter(Boolean).join(", ") || null,
     scheduled_date: wo.scheduled_date || null,
-    scope_items: scopeItems,
-    special_instructions: written(instructions)
-      ? instructions
-      : written(wo?.special_instructions)
-      ? TRADE_WORK_ORDER_LINE_WITHHELD
-      : null,
+    scope_items: tradeItems(wo.scope_items),
+    special_instructions: shownText(
+      wo?.special_instructions,
+      "special_instructions",
+    ),
+    // Approved customer variations, each a marked addendum: its number, the
+    // label built here from the number and the approval day, what the office
+    // wrote, and its task lines with their hours. Built field by field, so the
+    // trade allocation and the customer price can never reach it.
+    addenda: addenda.map((a) => ({
+      variation_number: a.variation_number,
+      label: a.label,
+      approved_at: a.approved_at,
+      description: shownText(a.description, "description"),
+      scope_items: tradeItems(a.lines),
+    })),
   };
+}
+
+function writtenText(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+// ── Pure: customer variations as addenda ─────────────────────────────────────
+
+/** One task of a customer variation, as stored. */
+export type CustomerVariationTask = {
+  description: string;
+  hours: number;
+  qty?: number | null;
+  unit?: string | null;
+};
+
+/** One line of an addendum: the work order's scope_items shape. */
+export type CustomerVariationLine = {
+  line_key: string;
+  source: "variation";
+  is_variation: true;
+  variation_number: number;
+  description: string;
+  qty: number;
+  unit: string;
+  hours: number;
+};
+
+export type CustomerVariationAddendum = {
+  id: string;
+  variation_number: number;
+  label: string;
+  approved_at: string;
+  description: string;
+  lines: CustomerVariationLine[];
+};
+
+const PERTH_DAY = new Intl.DateTimeFormat("en-AU", {
+  timeZone: "Australia/Perth",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+});
+
+/** "Variation 1 - approved 13 Oct 2026" (the approval day in Perth). */
+export function customerVariationLabel(
+  variationNumber: number,
+  approvedAt: string,
+): string {
+  const at = new Date(approvedAt);
+  const day = Number.isFinite(at.getTime())
+    ? PERTH_DAY.format(at).replace(/\./g, "")
+    : null;
+  return day
+    ? `Variation ${variationNumber} - approved ${day}`
+    : `Variation ${variationNumber}`;
+}
+
+/**
+ * The task lines of an approved variation, in the work order's scope_items
+ * shape. A task with no quantity of its own carries its hours as the quantity
+ * in hours, as the quote's hour-priced lines do, so a trade reads the time.
+ */
+export function customerVariationLines(
+  variationNumber: number,
+  tasks: unknown,
+): CustomerVariationLine[] {
+  return (Array.isArray(tasks) ? tasks : []).flatMap((task: any, i: number) => {
+    if (!task || typeof task !== "object" || Array.isArray(task)) return [];
+    const hours = Number(task.hours);
+    const qty = task.qty === null || task.qty === undefined
+      ? null
+      : Number(task.qty);
+    const unit = typeof task.unit === "string" && task.unit.trim()
+      ? task.unit.trim()
+      : null;
+    const ownQty = qty !== null && Number.isFinite(qty) && unit !== null;
+    return [{
+      line_key: `variation:${variationNumber}:${i}`,
+      source: "variation" as const,
+      is_variation: true as const,
+      variation_number: variationNumber,
+      description: String(task.description ?? ""),
+      qty: ownQty ? qty : hours,
+      unit: ownQty ? unit : "hrs",
+      hours,
+    }];
+  });
+}
+
+/** The addenda of a work order: its approved customer variations, in order. */
+export function customerVariationAddenda(
+  rows: any[],
+  workOrderId: string | null,
+): CustomerVariationAddendum[] {
+  if (!workOrderId) return [];
+  return rows
+    .filter((v) =>
+      v.status === "approved" && v.work_order_id === workOrderId &&
+      Number.isInteger(v.variation_number)
+    )
+    .sort((a, b) => a.variation_number - b.variation_number)
+    .map((v) => ({
+      id: v.id,
+      variation_number: v.variation_number,
+      label: customerVariationLabel(v.variation_number, v.approved_at),
+      approved_at: v.approved_at,
+      description: v.description,
+      lines: customerVariationLines(v.variation_number, v.tasks),
+    }));
 }
 
 // ── Pure: variation emails ───────────────────────────────────────────────────
@@ -602,6 +784,20 @@ export function buildVariationEmails(
   if (input.figures && input.figures.agreed_ex !== null) {
     facts.push(
       ["Agreed labour (ex GST)", `$${input.figures.agreed_ex.toFixed(2)}`],
+    );
+    if (input.figures.customer_variation_count > 0) {
+      facts.push(
+        [
+          "Approved customer variations (ex GST)",
+          `$${input.figures.customer_variations_ex.toFixed(2)}`,
+        ],
+        [
+          "Agreed including variations (ex GST)",
+          `$${(input.figures.agreed_total_ex ?? 0).toFixed(2)}`,
+        ],
+      );
+    }
+    facts.push(
       [
         "Billed to date (ex GST)",
         `$${input.figures.billed_to_date_ex.toFixed(2)}`,
@@ -820,10 +1016,96 @@ async function readVariations(client: any, jobIds: string[]): Promise<any[]> {
   return out;
 }
 
+/**
+ * Customer variations (work_order_customer_variations). Office reads take
+ * every column; the trade read takes CUSTOMER_VARIATION_TRADE_COLUMNS, which
+ * names no money column at all.
+ */
+export const CUSTOMER_VARIATION_COLUMNS =
+  "id, org_id, job_id, work_order_id, variation_number, status, description, tasks, trade_allocation_ex, customer_price_ex, created_by, approved_at, approved_by, approved_via, sealed_content_hash, cancelled_at, cancelled_by, cancel_reason, created_at, updated_at";
+export const CUSTOMER_VARIATION_TRADE_COLUMNS =
+  "id, job_id, work_order_id, variation_number, status, description, tasks, approved_at";
+
+export async function readCustomerVariations(
+  client: any,
+  jobIds: string[],
+): Promise<any[]> {
+  const out: any[] = [];
+  for (let i = 0; i < jobIds.length; i += 25) {
+    const { data, error } = await client.from("work_order_customer_variations")
+      .select(CUSTOMER_VARIATION_COLUMNS)
+      .in("job_id", jobIds.slice(i, i + 25))
+      .order("created_at", { ascending: true });
+    if (error) {
+      fail(
+        500,
+        "customer_variations_unreadable",
+        "Customer variations could not be read",
+      );
+    }
+    out.push(...(data || []));
+  }
+  return out;
+}
+
+function nullableMoney(value: unknown): number | null {
+  return value === null || value === undefined ? null : money(value);
+}
+
+/** One customer variation as the office reads it. */
+export function shapeCustomerVariation(v: any) {
+  const tasks = Array.isArray(v.tasks) ? v.tasks : [];
+  return {
+    id: v.id,
+    job_id: v.job_id,
+    status: v.status,
+    work_order_id: v.work_order_id ?? null,
+    variation_number: v.variation_number ?? null,
+    label: v.status === "approved" && Number.isInteger(v.variation_number)
+      ? customerVariationLabel(v.variation_number, v.approved_at)
+      : null,
+    description: v.description,
+    tasks,
+    hours_total: Math.round(
+      tasks.reduce((s: number, t: any) => s + (Number(t?.hours) || 0), 0) *
+        100,
+    ) / 100,
+    trade_allocation_ex: nullableMoney(v.trade_allocation_ex),
+    customer_price_ex: nullableMoney(v.customer_price_ex),
+    created_by: v.created_by ?? null,
+    created_at: v.created_at,
+    updated_at: v.updated_at,
+    approved_at: v.approved_at ?? null,
+    approved_by: v.approved_by ?? null,
+    approved_via: v.approved_via ?? null,
+    cancelled_at: v.cancelled_at ?? null,
+    cancelled_by: v.cancelled_by ?? null,
+    cancel_reason: v.cancel_reason ?? null,
+  };
+}
+
+/** The office's addenda: the trade's addenda plus what each costs and charges. */
+function staffAddenda(rows: any[], workOrderId: string | null) {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return customerVariationAddenda(rows, workOrderId).map((a) => {
+    const row = byId.get(a.id);
+    return {
+      ...a,
+      approved_by: row?.approved_by ?? null,
+      hours_total: Math.round(
+        a.lines.reduce((s, l) => s + (Number(l.hours) || 0), 0) * 100,
+      ) / 100,
+      trade_allocation_ex: nullableMoney(row?.trade_allocation_ex),
+      customer_price_ex: nullableMoney(row?.customer_price_ex),
+    };
+  });
+}
+
 function figuresFor(
   live: any,
   lines: WorkOrderLine[],
   variations: any[],
+  customerVariations: any[] = [],
 ) {
   return computeWorkOrderFigures({
     agreedEx: live?.agreed_labour_ex ?? null,
@@ -836,6 +1118,14 @@ function figuresFor(
       work_order_id: v.work_order_id,
       counted: v.counted === true,
     })),
+    customerVariations: customerVariations
+      .filter((v) => live && v.work_order_id === live.id)
+      .map((v) => ({
+        status: String(v.status || ""),
+        work_order_id: v.work_order_id ?? null,
+        trade_allocation_ex: nullableMoney(v.trade_allocation_ex),
+        customer_price_ex: nullableMoney(v.customer_price_ex),
+      })),
   });
 }
 
@@ -1022,9 +1312,10 @@ export async function readJobWorkOrder(
   }
   const live = liveOf(rows);
   const draft = draftOf(rows);
-  const [lines, variations] = await Promise.all([
+  const [lines, variations, customerVariations] = await Promise.all([
     readWorkOrderLines(client, [job.id]),
     readVariations(client, [job.id]),
+    readCustomerVariations(client, [job.id]),
   ]);
   const linked = lines.filter((l) => l.work_order_id);
   const before = lines.filter((l) => !l.work_order_id && l.counted);
@@ -1045,7 +1336,8 @@ export async function readJobWorkOrder(
     work_order: live || draft || null,
     live_work_order: live,
     draft_work_order: draft,
-    figures: figuresFor(live, linked, variations),
+    figures: figuresFor(live, linked, variations, customerVariations),
+    addenda: staffAddenda(customerVariations, live?.id ?? null),
     invoices: invoicesFrom(linked, variations),
     lines: linked,
     labour_before_approval: {
@@ -1057,6 +1349,7 @@ export async function readJobWorkOrder(
     variations: variations.map((v) =>
       shapeVariation(v, invoiceLabour.get(v.trade_invoice_id) ?? 0)
     ),
+    customer_variations: customerVariations.map(shapeCustomerVariation),
     quote_fill: quoteFill,
   };
 }
@@ -1094,15 +1387,19 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
     offset += 1000;
   }
   const jobIds = [...new Set(rows.map((r) => String(r.job_id)))];
-  const [lines, variations] = await Promise.all([
+  const [lines, variations, customerVariations] = await Promise.all([
     readWorkOrderLines(client, jobIds, { linkedOnly: true }),
     readVariations(client, jobIds),
+    readCustomerVariations(client, jobIds),
   ]);
   const work_orders = rows.map((r) => {
     const job = Array.isArray(r.jobs) ? r.jobs[0] : r.jobs;
     const isLive = r.status === "approved";
     const jobLines = lines.filter((l) => l.job_id === r.job_id);
     const jobVariations = variations.filter((v) => v.job_id === r.job_id);
+    const jobCustomerVariations = customerVariations.filter((v) =>
+      v.job_id === r.job_id
+    );
     const { jobs: _jobs, ...wo } = r;
     return {
       ...wo,
@@ -1111,7 +1408,9 @@ export async function listJobWorkOrders(client: any, params: URLSearchParams) {
       job_type: job?.type ?? null,
       job_status: job?.status ?? null,
       site_suburb: job?.site_suburb ?? null,
-      figures: isLive ? figuresFor(r, jobLines, jobVariations) : null,
+      figures: isLive
+        ? figuresFor(r, jobLines, jobVariations, jobCustomerVariations)
+        : null,
     };
   });
   return {
@@ -1414,6 +1713,23 @@ export async function tradeJobWorkOrderRead(
 ) {
   const job = await readJob(client, jobId);
   const live = liveOf(await readJobWorkOrders(client, jobId));
+  // Approved addenda only, and never a money column: the select names none.
+  let addenda: CustomerVariationAddendum[] = [];
+  if (live) {
+    const { data: approved, error: addendaErr } = await client.from(
+      "work_order_customer_variations",
+    ).select(CUSTOMER_VARIATION_TRADE_COLUMNS)
+      .eq("job_id", jobId).eq("work_order_id", live.id).eq("status", "approved")
+      .order("variation_number", { ascending: true });
+    if (addendaErr) {
+      fail(
+        500,
+        "customer_variations_unreadable",
+        "The work order's variations could not be read",
+      );
+    }
+    addenda = customerVariationAddenda(approved || [], live.id);
+  }
   const { data: mine, error } = await client.from("work_order_variations")
     .select("id, description, created_at, trade_invoice_id")
     .eq("job_id", jobId).eq("reported_by", viewerId).order("created_at", {
@@ -1425,7 +1741,9 @@ export async function tradeJobWorkOrderRead(
   return {
     schema: TRADE_JOB_WORK_ORDER_SCHEMA,
     job_id: jobId,
-    work_order: live ? projectTradeJobWorkOrder(live, job, redact) : null,
+    work_order: live
+      ? projectTradeJobWorkOrder(live, job, redact, addenda)
+      : null,
     reason: live ? null : "no_approved_work_order",
     can_report_variation: JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || "")),
     my_variations: (mine || []).map((v: any) => ({
@@ -1504,10 +1822,15 @@ async function variationEmailFigures(
 ): Promise<WorkOrderFigures | null> {
   if (!live) return null;
   try {
+    const [variations, customerVariations] = await Promise.all([
+      readVariations(client, [jobId]),
+      readCustomerVariations(client, [jobId]),
+    ]);
     return figuresFor(
       live,
       jobLines.filter((l) => l.work_order_id),
-      await readVariations(client, [jobId]),
+      variations,
+      customerVariations,
     );
   } catch (_e) {
     return null;
