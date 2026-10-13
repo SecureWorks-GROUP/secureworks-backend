@@ -43,15 +43,26 @@ class Query {
   private mode: "select" | "insert" | "update" | "upsert" = "select";
   private payload: any = null;
   private single: "one" | "maybe" | null = null;
+  private badFilter: { message: string; code: string } | null = null;
   constructor(private db: FakeDb, private table: string) {}
   select(_cols?: string) { return this; }
   eq(col: string, v: unknown) { this.filters.push((r) => read(r, col) === v); return this; }
   in(col: string, vs: unknown[]) { this.filters.push((r) => vs.includes(read(r, col))); return this; }
   gte(col: string, v: string) { this.filters.push((r) => String(read(r, col) ?? "") >= v); return this; }
-  contains(col: string, v: Row[]) {
+  // Serialised as postgrest-js does: a string is sent as is, an array becomes a Postgres
+  // array literal (`{[object Object]}`), which a jsonb column refuses with 22P02.
+  contains(col: string, v: unknown) {
+    let want: Row[];
+    try {
+      if (typeof v !== "string") throw new Error("not a JSON string");
+      want = JSON.parse(v);
+    } catch {
+      this.badFilter = { message: "invalid input syntax for type json", code: "22P02" };
+      return this;
+    }
     this.filters.push((r) =>
-      v.every((want) =>
-        (r[col] ?? []).some((have: Row) => Object.entries(want).every(([k, x]) => have[k] === x))
+      want.every((w) =>
+        (r[col] ?? []).some((have: Row) => Object.entries(w).every(([k, x]) => have[k] === x))
       )
     );
     return this;
@@ -74,6 +85,7 @@ class Query {
   private run(): { data: any; error: any } {
     const fail = this.db.failures[this.table];
     if (fail) return { data: null, error: { message: fail, code: "XX000" } };
+    if (this.badFilter) return { data: null, error: this.badFilter };
     const rows = this.db.rows(this.table);
     const pk = PRIMARY_KEYS[this.table];
     if (this.mode === "insert" || this.mode === "upsert") {

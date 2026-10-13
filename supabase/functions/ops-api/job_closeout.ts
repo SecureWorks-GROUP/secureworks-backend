@@ -525,7 +525,8 @@ async function askedRecently(deps: JobCloseoutDeps, contactId: string): Promise<
       .or(patterns)
       .limit(1),
     deps.client.from("job_review_claims").select("job_id")
-      .contains("recipients", [{ ghl_contact_id: contactId, result: "sent" }])
+      // A JSON string: postgrest-js sends an array as a Postgres array literal, which jsonb refuses.
+      .contains("recipients", JSON.stringify([{ ghl_contact_id: contactId, result: "sent" }]))
       .gte("claimed_at", since)
       .limit(1),
   ]);
