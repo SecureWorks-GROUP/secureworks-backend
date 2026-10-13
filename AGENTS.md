@@ -1625,9 +1625,9 @@ would bill and send. Do not reintroduce that write or guard those paths one by
 one. The Repairs card gets its money at read time: `pipeline&type=repair` calls
 `loadQuoteBuilderCardValues` (latest issued scope plus the variations that
 count, stored nowhere, so an ops approval or a customer decline shows on the
-next read) and `quoteBuilderCardRow` fills `value` and adds
-`value_source: "quote_builder"` only on a card whose job has no pricing of its
-own; every other row and every other `pipeline` request is unchanged. A failed
+next read) and `quoteBuilderCardRow` fills `value`, and adds no other field,
+only on a card whose job has no pricing of its own; every other row and every
+other `pipeline` request is unchanged. A failed
 read fills nothing and reports `pipeline.quote_builder_value` in
 `enrichment_errors`. That read projects ids, version keys and the client total
 only, never `cost_lines` or `charge_lines`. `countedVariationIds` is the one
@@ -1643,7 +1643,10 @@ and the table checks a setting's name, never its size. Only a repair-family
 job's `quote_builder_get_job` reply carries `settings` and `can_edit_settings`;
 a private job's has neither key and never reads the table. The scope of works
 PDF is a `job_documents` row of type `other` (a meaningful type no close-out
-reader counts), never `work_order`. The material order list prints our costs
+reader counts), never `work_order`, filed on a repair-family job only and
+listed in no reply. A private job's `quote_builder_get_job` and
+`quote_builder_issue` replies stay key for key what they were: its slot refuses
+`scope_of_works` and its issue does not read `extra_documents`. The material order list prints our costs
 and is never given an upload slot or filed: `job-pdfs` is a public bucket, so
 filing it waits on private storage with signed links and the owner's say; an
 issue that names it still issues and answers `extra_documents_not_filed`.

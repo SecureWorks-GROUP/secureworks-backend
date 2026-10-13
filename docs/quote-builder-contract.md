@@ -59,7 +59,7 @@ would not.
 | Client charge lines ("what we charge") | `quote_builder_versions.charge_lines` | What the client PDF shows. |
 | Site photos + captions | `job_media` (`phase='quote_builder'`, `type='photo'`, caption in `label`) | Files in Storage bucket `job-photos`. Their own phase (`20261009120000`) keeps them internal: `isApplicablePackPhoto` drops it for SES packs, curated bind, the draft pack and roof report photo sets and the final-submit photo floor, and the mailer photo route drops it too. The make-safe board photo count does not filter the phase; it never sees these photos because the board excludes repair and private jobs. The builder lists and accepts only photos in that phase. |
 | Client quote PDF | Storage bucket `job-pdfs` + one `job_documents` row (`type='quote'`) | Its own document, linked from the version. |
-| Scope of works PDF | Storage bucket `job-pdfs` + one `job_documents` row (`type='other'`, `metadata.quote_builder_document = 'scope_of_works'`) | Filed at issue beside the quote when the app sends it (5.6). It carries no prices. Never visible to trades. |
+| Scope of works PDF | Storage bucket `job-pdfs` + one `job_documents` row (`type='other'`, `metadata.quote_builder_document = 'scope_of_works'`) | Filed at issue beside the quote when the app sends it, on an insurance repair-family job only (5.6). It carries no prices. Never visible to trades. |
 | Material order list | Not filed anywhere | It prints our costs, and `job-pdfs` is a public bucket (read in production, 13 Oct 2026), so the server gives it no upload slot and files no document. The app shows and prints it on demand from the version's saved cost lines (5.6). |
 | Pricing settings (labour rate, materials multiplier, target margin) | `quote_builder_settings` (section 2c) | Read only by `ops-api`. |
 | The money on the Repairs card | Stored nowhere (section 2d) | Worked out from the issued versions each time the Repairs board is read. The builder never writes `jobs.pricing_json`. |
@@ -236,10 +236,10 @@ Which cards get it:
 - only a job with an issued scope version. A draft shows nothing.
 
 A card that takes the builder's figure carries it in `value`, the field the card
-already reads, plus one new field, `value_source: "quote_builder"`. No other
-row has that field, and every other board (`pipeline` with any other `type`, or
-none) is read without touching the quote builder. Only the client total rides
-on the row: cost lines, cost totals and margins are never read for the card.
+already reads, and gains no other field. Every other row is exactly what it
+was, and every other board (`pipeline` with any other `type`, or none) is read
+without touching the quote builder. Only the client total rides on the row:
+cost lines, cost totals and margins are never read for the card.
 
 If the quote builder read fails, no card is given a builder figure (never a
 part figure, such as the scope without its approved variation), the board still
@@ -368,9 +368,7 @@ Returns everything the app needs to open a job:
       "versions": [ /* version objects */ ] }
   ],
   "photos": [ { "id": "...", "url": "https://...", "caption": "...", "taken_at": null, "created_at": "..." } ],
-  "documents": [ { "id": "...", "quote_number": "SWR-26123-Q2", "url": "https://...", "version_id": "...", "created_at": "..." } ],
-  "extra_documents": [ { "id": "...", "document": "scope_of_works", "url": "https://...", "file_name": "...",
-                         "version_id": "...", "quote_number": "SWR-26123-Q2", "superseded": false, "created_at": "..." } ]
+  "documents": [ { "id": "...", "quote_number": "SWR-26123-Q2", "url": "https://...", "version_id": "...", "created_at": "..." } ]
 }
 ```
 
@@ -380,10 +378,13 @@ Returns everything the app needs to open a job:
   numbers. A private job's reply has no `settings` key.
 - `can_edit_settings` is sent with `settings` and is `false` for everyone until
   a settings write action exists. A private job's reply has no such key.
-- `documents` is the client quote PDFs only. The scope of works PDFs filed at
-  issue are in `extra_documents`, one entry per filed PDF (`document` is always
-  `scope_of_works`); `superseded` is true once a later version of the same chain
-  is issued. The material order list is never in either list: it is not filed.
+- `documents` is the client quote PDFs only. A scope of works PDF filed at issue
+  (5.6) is on the job as a document but is not listed in this reply: no app page
+  reads such a list (the app's code was read on 13 Oct 2026), so none is sent
+  and no extra read runs when a job is opened. The material order list is not
+  filed at all.
+- A private job's reply has exactly the keys it had before pricing settings
+  existed: `job`, `scope`, `variations`, `photos`, `documents`.
 
 A version object:
 
@@ -502,14 +503,14 @@ Change a caption later with `POST quote_builder_photo_caption`
 The app renders the client quote PDF itself (charge lines only, no internal
 costs), uploads it, then issues.
 
-1. `{ "version_id": "uuid of the draft" }` -> `{ "document", "path", "signed_url", "token", "public_url", "quote_number" }`.
+1. `{ "version_id": "uuid of the draft" }` -> `{ "path", "signed_url", "token", "public_url", "quote_number" }`.
    Upload with `PUT <signed_url>`, `Content-Type: application/pdf`, max 20 MB.
    Print `quote_number` on the PDF (e.g. `SWR-26123-Q2`, or `SWR-26123-V1.2` for
    version 2 of variation 1).
 2. `{ "version_id": "uuid", "pdf_path": "<path from step 1>" }`.
 
-To file the scope of works on the job as well (optional; an issue without it
-works as before):
+To file the scope of works on the job as well (insurance repair-family jobs
+only, and optional; an issue without it works as before):
 
 - Ask for its slot: `{ "version_id": "uuid", "document": "scope_of_works" }`.
   `document` defaults to `quote`. It returns its own `path`; the two slots can
@@ -528,6 +529,12 @@ An entry with an unknown `document`, a `document` named twice or a `pdf_path`
 that is not the slot's is `400 invalid_input`; a PDF not yet in Storage is
 `409 upload_missing`. All are checked before anything is written.
 
+A private job files the client quote alone, as it always has. Its upload slot
+answers `400 invalid_input` to `document: "scope_of_works"`, and its issue does
+not read `extra_documents` at all: whatever the field holds, nothing extra is
+filed, nothing is refused for it and the reply is the one a private job has
+always had.
+
 The scope of works PDF sits beside the client quote in a public bucket, so the
 app must print no cost, rate, multiplier or margin figure on it. The server
 stores none on its `job_documents` row: no lines, no totals, no settings.
@@ -542,7 +549,8 @@ link. So the server gives it no slot, stores no file and files no document:
   refused for it. That entry is skipped (its `pdf_path` is not read), the quote
   issues as normal, and the reply carries
   `"extra_documents_not_filed": [ { "document": "material_order_list", "reason": "internal_costs_not_filed" } ]`.
-  The key is absent when the issue named no such document.
+  The key is absent when the issue named no such document, and always absent
+  on a private job.
 
 The list stays available in the app on demand, built from the version's saved
 cost lines, which are already on the job. Filing it waits on private storage
@@ -600,12 +608,16 @@ Returns:
 {
   "version": { ...frozen version... },
   "document": { "id": "...", "quote_number": "SWR-26123-Q2", "url": "https://..." },
-  "extra_documents": [ { "id": "...", "document": "scope_of_works", "url": "https://...", "file_name": "..." } ],
-  "extra_documents_not_filed": [ { "document": "material_order_list", "reason": "internal_costs_not_filed" } ],
   "variation": null,
-  "stage": { "moved": true, "from": "scoping", "to": "quoted" }
+  "stage": { "moved": true, "from": "scoping", "to": "quoted" },
+  "extra_documents_not_filed": [ { "document": "material_order_list", "reason": "internal_costs_not_filed" } ]
 }
 ```
+
+The reply lists no filed extra documents: a scope of works named on the issue
+is filed on the job or the issue fails, and no app page reads such a list.
+`extra_documents_not_filed` is present only when a repair job's issue named a
+document that was not filed.
 
 The reply carries no `job_value`: issuing stores no value on the job, and the
 Repairs card works its figure out when the board is read (section 2d).

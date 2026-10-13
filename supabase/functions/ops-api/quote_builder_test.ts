@@ -1486,8 +1486,14 @@ Deno.test("quote builder: a private job opens with no settings keys and no setti
     ACTOR,
   );
   assertEquals(opened.job.lane, "private");
-  assertEquals("settings" in opened, false);
-  assertEquals("can_edit_settings" in opened, false);
+  // Key for key the reply a private job had before this change.
+  assertEquals(Object.keys(opened), [
+    "job",
+    "scope",
+    "variations",
+    "photos",
+    "documents",
+  ]);
   assertEquals(reads.includes("quote_builder_settings"), false);
   assertEquals(opened.scope.versions[0].cost_lines[0].line_type, "labour");
 
@@ -1508,6 +1514,100 @@ Deno.test("quote builder: a private job opens with no settings keys and no setti
   assertEquals(reads.includes("quote_builder_settings"), true);
 });
 
+Deno.test("quote builder: a private job files the quote alone, and its slot and issue replies are what they were", async () => {
+  const store = seed();
+  const { client, upload } = makeFakeClient(store);
+  const made = await createQuoteBuilderPrivateJob(client, {
+    request_id: "88888888-8888-4888-8888-88888888888b",
+    client_name: "Jane Citizen",
+  }, ACTOR);
+  const draft = (await saveQuoteBuilderVersion(client, {
+    job_id: made.job.id,
+    kind: "scope",
+    charge_lines: CHARGE,
+  }, ACTOR)).version;
+
+  // No scope of works slot, and no material order list slot, on a private job.
+  for (const document of ["scope_of_works", "material_order_list"]) {
+    assertEquals(
+      await code(
+        quoteBuilderPdfUploadUrl(
+          client,
+          { version_id: draft.id, document },
+          ACTOR,
+        ),
+      ),
+      "invalid_input",
+    );
+  }
+  const slot = await quoteBuilderPdfUploadUrl(
+    client,
+    { version_id: draft.id },
+    ACTOR,
+  );
+  assertEquals(Object.keys(slot), [
+    "path",
+    "signed_url",
+    "token",
+    "public_url",
+    "quote_number",
+  ]);
+  upload("job-pdfs", slot.path);
+
+  // Whatever an issue sends as extra_documents, a private job does not read
+  // it: nothing is refused, nothing extra is filed and the reply gains no key.
+  const scopePath = slot.path.replace(".pdf", "-scope-of-works.pdf");
+  upload("job-pdfs", scopePath);
+  const issued = await issueQuoteBuilderVersion(
+    client,
+    {
+      version_id: draft.id,
+      pdf_path: slot.path,
+      extra_documents: [
+        { document: "scope_of_works", pdf_path: scopePath },
+        { document: "material_order_list" },
+        { document: "invoice" },
+      ],
+    },
+    ACTOR,
+    { moveRepairStage: stageMover(store, []) },
+  );
+  assertEquals(Object.keys(issued), [
+    "version",
+    "document",
+    "variation",
+    "stage",
+  ]);
+  assertEquals(issued.version.status, "issued");
+  assertEquals(store.job_documents.map((d) => d.type), ["quote"]);
+
+  const next = (await saveQuoteBuilderVersion(client, {
+    job_id: made.job.id,
+    kind: "scope",
+    base_version_id: draft.id,
+    charge_lines: CHARGE,
+  }, ACTOR)).version;
+  const nextSlot = await quoteBuilderPdfUploadUrl(
+    client,
+    { version_id: next.id },
+    ACTOR,
+  );
+  upload("job-pdfs", nextSlot.path);
+  const reissued = await issueQuoteBuilderVersion(
+    client,
+    { version_id: next.id, pdf_path: nextSlot.path, extra_documents: "junk" },
+    ACTOR,
+    { moveRepairStage: stageMover(store, []) },
+  );
+  assertEquals(Object.keys(reissued), [
+    "version",
+    "document",
+    "variation",
+    "stage",
+  ]);
+  assertEquals(store.job_documents.map((d) => d.type), ["quote", "quote"]);
+});
+
 Deno.test("quote builder: the scope of works is filed on the job beside the quote, and carries no cost figure", async () => {
   const store = seed();
   store.quote_builder_settings = [
@@ -1525,7 +1625,6 @@ Deno.test("quote builder: the scope of works is filed on the job beside the quot
   const quoteSlot = await quoteBuilderPdfUploadUrl(client, {
     version_id: draft.id,
   }, ACTOR);
-  assertEquals(quoteSlot.document, "quote");
   upload("job-pdfs", quoteSlot.path);
   const scopeSlot = await quoteBuilderPdfUploadUrl(client, {
     version_id: draft.id,
@@ -1580,8 +1679,12 @@ Deno.test("quote builder: the scope of works is filed on the job beside the quot
 
   upload("job-pdfs", scopeSlot.path);
   const issued = await issue([scope]);
-  assertEquals(issued.extra_documents.map((d: any) => d.document), [
-    "scope_of_works",
+  // The reply lists no filed extra documents; the row on the job is the record.
+  assertEquals(Object.keys(issued), [
+    "version",
+    "document",
+    "variation",
+    "stage",
   ]);
   const extras = store.job_documents.filter((d) => d.type === "other");
   assertEquals(extras.length, 1);
@@ -1631,12 +1734,10 @@ Deno.test("quote builder: the scope of works is filed on the job beside the quot
     new URLSearchParams(`job_id=${REPAIR_JOB}`),
     ACTOR,
   );
-  // The client quote list stays the quote alone; the extra has its own key.
+  // The client quote list stays the quote alone, and no other list is sent.
   assertEquals(opened.documents.length, 1);
-  assertEquals(
-    opened.extra_documents.map((d: any) => [d.document, d.superseded]),
-    [["scope_of_works", false]],
-  );
+  assertEquals("extra_documents" in opened, false);
+  assertEquals(doc.superseded_at, undefined);
 
   // A re-issue retires the earlier version's scope of works, with or without a new one.
   const second = await issueScope(store, client, upload, REPAIR_JOB, {
@@ -1646,7 +1747,7 @@ Deno.test("quote builder: the scope of works is filed on the job beside the quot
   const third = await issueScope(store, client, upload, REPAIR_JOB, {
     baseVersionId: second.version.id,
   });
-  assertEquals(third.extra_documents, []);
+  assertEquals(third.version.status, "issued");
   const filed = store.job_documents.filter((d) => d.type === "other");
   assertEquals(filed.map((d) => d.metadata.quote_builder_version_id), [
     draft.id,
@@ -1739,15 +1840,7 @@ Deno.test("quote builder: a retried variation issue refiles the scope of works u
   assertEquals(doc.metadata.quote_builder_document, "scope_of_works");
   assert(doc.file_name !== firstFileName);
   assert(String(doc.file_name).includes("V2.1"), doc.file_name);
-  const opened = await getQuoteBuilderJob(
-    client,
-    new URLSearchParams(`job_id=${REPAIR_JOB}`),
-    ACTOR,
-  );
-  assertEquals(
-    opened.extra_documents.map((d: any) => [d.document, d.quote_number]),
-    [["scope_of_works", "SWR-26101-V2.1"]],
-  );
+  assert(String(doc.pdf_url).endsWith(doc.file_name), doc.pdf_url);
 });
 
 Deno.test("quote builder: the material order list is never given a slot or filed, and never fails an issue", async () => {
@@ -1800,8 +1893,12 @@ Deno.test("quote builder: the material order list is never given a slot or filed
   );
   assertEquals(issued.version.status, "issued");
   assertEquals(issued.stage, { moved: true, from: "scoping", to: "quoted" });
-  assertEquals(issued.extra_documents.map((d: any) => d.document), [
-    "scope_of_works",
+  assertEquals(Object.keys(issued), [
+    "version",
+    "document",
+    "variation",
+    "stage",
+    "extra_documents_not_filed",
   ]);
   assertEquals(issued.extra_documents_not_filed, [
     { document: "material_order_list", reason: "internal_costs_not_filed" },
@@ -1832,7 +1929,12 @@ Deno.test("quote builder: an issue with no extra documents files the quote alone
   const store = seed();
   const { client, upload } = makeFakeClient(store);
   const issued = await issueScope(store, client, upload, REPAIR_JOB);
-  assertEquals(issued.extra_documents, []);
+  assertEquals(Object.keys(issued), [
+    "version",
+    "document",
+    "variation",
+    "stage",
+  ]);
   assertEquals(store.job_documents.map((d) => d.type), ["quote"]);
 });
 
@@ -1983,7 +2085,6 @@ Deno.test("quote builder: issuing never writes the job's pricing, and the Repair
 
   const before = await repairsBoard(client);
   assertEquals(before.card(REPAIR_JOB).value, 0);
-  assertEquals("value_source" in before.card(REPAIR_JOB), false);
   const fenceBefore = before.card(FENCE_REPAIR_JOB);
   assertEquals(fenceBefore.value, 6420.5);
 
@@ -2012,29 +2113,20 @@ Deno.test("quote builder: issuing never writes the job's pricing, and the Repair
   assertEquals(after.board.degraded, undefined);
   const card = after.card(REPAIR_JOB);
   assertEquals(card.value, 715);
-  assertEquals(card.value_source, "quote_builder");
-  // The figure and where it came from are all the builder adds to a card.
-  assertEquals(
-    Object.keys(card).filter((key) =>
-      !Object.keys(before.card(REPAIR_JOB)).includes(key)
-    ),
-    ["value_source"],
-  );
+  // The figure is all the builder puts on a card: it gains no field.
+  assertEquals(Object.keys(card), Object.keys(before.card(REPAIR_JOB)));
   assertEquals(JSON.stringify(card).includes("cost"), false);
 
   // A repair card nobody priced takes the builder's figure whatever its type.
   assertEquals(after.card(UNPRICED_FENCE_JOB).value, 715);
-  assertEquals(after.card(UNPRICED_FENCE_JOB).value_source, "quote_builder");
 
   // A card priced by another tool keeps its own figure, keys and all.
   const fenceAfter = after.card(FENCE_REPAIR_JOB);
   assertEquals(fenceAfter.value, 6420.5);
   assertEquals(Object.keys(fenceAfter), Object.keys(fenceBefore));
   assertEquals(after.card(TOTAL_LESS_JOB).value, 0);
-  assertEquals("value_source" in after.card(TOTAL_LESS_JOB), false);
   // A job with nothing issued, and a private quote, show nothing from this.
   assertEquals(after.card(LATE_REPAIR_JOB).value, 0);
-  assertEquals("value_source" in after.card(LATE_REPAIR_JOB), false);
   assertEquals(after.card(PRIVATE_JOB), undefined);
 
   // A re-issued scope replaces the figure on the next read.
@@ -2056,7 +2148,6 @@ Deno.test("quote builder: issuing never writes the job's pricing, and the Repair
     [UNPRICED_FENCE_JOB, 0],
     [FENCE_REPAIR_JOB, 6420.5],
   ]);
-  assertEquals(fencingRows.some((row) => "value_source" in row), false);
 });
 
 Deno.test("quote builder: a variation counts on the Repairs card once approved, sent after approval or accepted, and a declined one drops out on the next read", async () => {
@@ -2214,7 +2305,6 @@ Deno.test("quote builder: a failed card value read leaves every card as it was a
       failing = table;
       const { board, card } = await repairsBoard(client);
       assertEquals(card(REPAIR_JOB).value, 0);
-      assertEquals("value_source" in card(REPAIR_JOB), false);
       assertEquals(board.total, 2);
       assertEquals(board.degraded, true);
       assert(

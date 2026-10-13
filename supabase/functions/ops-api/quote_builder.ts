@@ -46,11 +46,12 @@ const PHOTO_CONTENT_TYPES: Record<string, string> = {
 };
 const TERMINAL_JOB_STATUSES = new Set(["cancelled", "lost", "archived"]);
 const COST_LINE_TYPES = new Set(["material", "labour", "other"]);
-// The document filed beside the client quote: a job_documents row of type
-// `other`, a meaningful type no close-out or pack reader counts. It carries no
-// prices. The material order list prints our costs and has no entry here: the
-// PDF bucket is public, so it is never given a slot or filed. An issue that
-// names it is not refused for that: the entry is skipped and the reply says so.
+// The document filed beside the client quote on a repair job: a job_documents
+// row of type `other`, a meaningful type no close-out or pack reader counts. It
+// carries no prices. The material order list prints our costs and has no entry
+// here: the PDF bucket is public, so it is never given a slot or filed. An
+// issue that names it is not refused for that: the entry is skipped and the
+// reply says so. A private job files the client quote alone.
 const EXTRA_DOCUMENT_TYPE = "other";
 const UNFILED_DOCUMENT = "material_order_list";
 const EXTRA_DOCUMENTS: Record<string, { suffix: string }> = {
@@ -599,17 +600,6 @@ export async function getQuoteBuilderJob(
     .order("created_at", { ascending: true });
   if (docsError) readError("documents read failed", docsError);
 
-  const { data: extraDocs, error: extraDocsError } = await client
-    .from("job_documents")
-    .select(
-      "id, storage_url, pdf_url, file_name, metadata, superseded_at, created_at",
-    )
-    .eq("job_id", jobId)
-    .eq("type", EXTRA_DOCUMENT_TYPE)
-    .eq("metadata->>source", QUOTE_BUILDER_SOURCE)
-    .order("created_at", { ascending: true });
-  if (extraDocsError) readError("documents read failed", extraDocsError);
-
   return {
     ...pricing,
     job: jobHeader(job, detail, lane),
@@ -634,20 +624,6 @@ export async function getQuoteBuilderJob(
       version_id: d.metadata?.quote_builder_version_id ?? null,
       created_at: d.created_at ?? null,
     })),
-    // The scope of works PDFs filed at issue. Kept out of `documents`, which an
-    // app page reads as "the client quote PDFs".
-    extra_documents: (extraDocs || [])
-      .filter((d: any) => isExtraDocument(d.metadata?.quote_builder_document))
-      .map((d: any) => ({
-        id: d.id,
-        document: d.metadata.quote_builder_document,
-        url: d.pdf_url || d.storage_url || null,
-        file_name: d.file_name ?? null,
-        version_id: d.metadata?.quote_builder_version_id ?? null,
-        quote_number: d.metadata?.quote_number ?? null,
-        superseded: d.superseded_at != null,
-        created_at: d.created_at ?? null,
-      })),
   };
 }
 
@@ -1143,7 +1119,13 @@ export async function quoteBuilderPdfUploadUrl(
   const versionId = requireUuid(body?.version_id, "version_id");
   const document = documentKind(body?.document);
   const version = await loadDraftVersion(client, versionId);
-  const { job } = await loadJob(client, version.job_id, actor);
+  const { job, lane } = await loadJob(client, version.job_id, actor);
+  if (document !== "quote" && lane !== "repair") {
+    fail(
+      "invalid_input",
+      "Only the quote PDF is filed on this job; the scope of works is filed on repair jobs only",
+    );
+  }
   const quoteNumber = await plannedQuoteNumber(client, version, job);
 
   // A slot for the scope of works writes nothing on the version: only the
@@ -1157,7 +1139,6 @@ export async function quoteBuilderPdfUploadUrl(
     if (slotError) readError("PDF upload slot failed", slotError);
     const { data: extraUrl } = extraBucket.getPublicUrl(extraPath);
     return {
-      document,
       path: extraPath,
       signed_url: slot.signedUrl,
       token: slot.token,
@@ -1193,7 +1174,6 @@ export async function quoteBuilderPdfUploadUrl(
   if (error) readError("PDF upload slot failed", error);
   const { data: urlData } = bucket.getPublicUrl(path);
   return {
-    document,
     path,
     signed_url: data.signedUrl,
     token: data.token,
@@ -1278,7 +1258,6 @@ async function fileExtraDocument(
 ) {
   const { data: urlData } = client.storage.from(QUOTE_BUILDER_PDF_BUCKET)
     .getPublicUrl(extra.path);
-  const columns = "id, pdf_url, storage_url, file_name";
   const fields = {
     version: Number(version.version),
     pdf_url: urlData.publicUrl,
@@ -1295,7 +1274,7 @@ async function fileExtraDocument(
   };
   const find = async () => {
     const { data, error } = await client.from("job_documents")
-      .select(columns)
+      .select("id")
       .eq("job_id", version.job_id)
       .eq("type", EXTRA_DOCUMENT_TYPE)
       .eq("metadata->>quote_builder_version_id", version.id)
@@ -1304,41 +1283,27 @@ async function fileExtraDocument(
     if (error) readError("extra document read failed", error);
     return (data || [])[0] || null;
   };
-  let doc = await find();
+  const doc = await find();
   if (doc) {
-    const { data, error } = await client.from("job_documents")
+    const { error } = await client.from("job_documents")
       .update(fields)
-      .eq("id", doc.id)
-      .select(columns)
-      .maybeSingle();
+      .eq("id", doc.id);
     if (error) readError("extra document write failed", error);
-    doc = data || doc;
-  } else {
-    const { data, error } = await client.from("job_documents")
-      .insert({
-        ...fields,
-        job_id: version.job_id,
-        type: EXTRA_DOCUMENT_TYPE,
-        run_label: quoteBuilderRunLabel(version.chain_id),
-        visible_to_trades: false,
-        created_by: actor.id,
-        uploaded_by: actor.id,
-      })
-      .select(columns)
-      .single();
-    if (error) {
-      doc = error.code === "23505" ? await find() : null;
-      if (!doc) readError("extra document write failed", error);
-    } else {
-      doc = data;
-    }
+    return;
   }
-  return {
-    id: doc.id,
-    document: extra.document,
-    url: doc.pdf_url || doc.storage_url,
-    file_name: doc.file_name ?? fields.file_name,
-  };
+  const { error } = await client.from("job_documents")
+    .insert({
+      ...fields,
+      job_id: version.job_id,
+      type: EXTRA_DOCUMENT_TYPE,
+      run_label: quoteBuilderRunLabel(version.chain_id),
+      visible_to_trades: false,
+      created_by: actor.id,
+      uploaded_by: actor.id,
+    });
+  if (error && !(error.code === "23505" && await find())) {
+    readError("extra document write failed", error);
+  }
 }
 
 // ── The Repairs card value ──────────────────────────────────────────────────
@@ -1503,16 +1468,14 @@ export async function loadQuoteBuilderCardValues(
 }
 
 /**
- * Puts the builder's figure on a Repairs card row and names where it came
- * from. A row with no builder value is returned as it is.
+ * Puts the builder's figure on a Repairs card row. A row with no builder value
+ * is returned as it is.
  */
 export function quoteBuilderCardRow<T extends Record<string, any>>(
   row: T,
   value: number | undefined,
 ): T {
-  return value === undefined
-    ? row
-    : { ...row, value, value_source: QUOTE_BUILDER_SOURCE };
+  return value === undefined ? row : { ...row, value };
 }
 
 async function moveStageForward(
@@ -1599,8 +1562,10 @@ export async function issueQuoteBuilderVersion(
   }
   const { data: urlData } = client.storage.from(QUOTE_BUILDER_PDF_BUCKET)
     .getPublicUrl(path);
+  // Only a repair job files a scope of works; on a private job the field is
+  // not read at all.
   const { file: extras, notFiled } = extraDocumentsInput(
-    body?.extra_documents,
+    lane === "repair" ? body?.extra_documents : undefined,
     version,
   );
   for (const extra of extras) {
@@ -1719,10 +1684,11 @@ export async function issueQuoteBuilderVersion(
     }
   }
 
-  await retireEarlierExtraDocuments(client, version);
-  const filedExtras: any[] = [];
-  for (const extra of extras) {
-    filedExtras.push(await fileExtraDocument(client, version, extra, actor));
+  if (lane === "repair") {
+    await retireEarlierExtraDocuments(client, version);
+    for (const extra of extras) {
+      await fileExtraDocument(client, version, extra, actor);
+    }
   }
 
   let variationResult: any = null;
@@ -1886,10 +1852,9 @@ export async function issueQuoteBuilderVersion(
       quote_number: doc.quote_number,
       url: doc.pdf_url || doc.storage_url,
     },
-    extra_documents: filedExtras,
-    ...(notFiled.length ? { extra_documents_not_filed: notFiled } : {}),
     variation: variationResult,
     stage,
+    ...(notFiled.length ? { extra_documents_not_filed: notFiled } : {}),
   };
 }
 
