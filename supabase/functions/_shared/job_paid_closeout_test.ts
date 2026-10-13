@@ -11,7 +11,6 @@ import {
   invoicePartyKey,
   isCloseoutFromStatus,
   isCloseoutJobType,
-  isDepositInvoice,
   isFinalInvoice,
   OWNER_KEY,
 } from "./job_paid_closeout.ts";
@@ -26,6 +25,19 @@ function job(over: Partial<CloseoutJob> = {}): CloseoutJob {
     deposit_invoice_id: null,
     ...over,
   };
+}
+
+/** What the first line of each kind of invoice says in Xero ("Balance of works ..."). */
+function firstLine(reference: string): string | null {
+  const ending = reference.toUpperCase().split("-").pop() ?? "";
+  if (/^(?:FIN|FINBAL|BAL)\d{0,3}$|^FINAL$|^PRIVATE$/.test(ending)) {
+    return "Balance of works";
+  }
+  if (/^DEP/.test(ending)) return "Deposit";
+  if (/^VAR/.test(ending)) return "Extra labour";
+  if (/^MAT/.test(ending)) return "Materials";
+  if (/^PROG/.test(ending)) return "Progress payment";
+  return null;
 }
 
 let seq = 0;
@@ -47,6 +59,7 @@ function inv(
     job_contact_id: null,
     xero_contact_id: null,
     fully_paid_on: status === "PAID" ? "2026-10-01" : null,
+    first_description: firstLine(reference),
     ...over,
   };
 }
@@ -109,26 +122,47 @@ Deno.test("holds: rectification and callback only", () => {
   assertEquals(closeoutHold({ status: "invoiced", is_callback: null }), null);
 });
 
-Deno.test("deposit and final: DEP50 is a deposit, FINBAL and FIN25 are finals, VAR and MAT are not", () => {
-  assertEquals(
-    isDepositInvoice(inv("SWF-261200-DEP50", "PAID", 1), null),
-    true,
-  );
-  assertEquals(isDepositInvoice(inv("DEP50", "PAID", 1), null), true);
-  assertEquals(
-    isDepositInvoice(inv("SWF-26984-C-RHS-DEP50", "PAID", 1), null),
-    true,
-  );
-  assertEquals(isDepositInvoice(inv("SWF-1-DEPOSIT", "PAID", 1), null), true);
-  const byId = inv("SWF-1 fence", "PAID", 1);
-  assertEquals(isDepositInvoice(byId, byId.xero_invoice_id), true);
+Deno.test("a final needs positive evidence: a final ending and a balance first line", () => {
   assertEquals(isFinalInvoice(inv("SWF-261200-FINBAL", "PAID", 1), null), true);
   assertEquals(isFinalInvoice(inv("SWF-26818-FIN25", "PAID", 1), null), true);
+  assertEquals(isFinalInvoice(inv("SWF-1-A-FINAL", "PAID", 1), null), true);
+  assertEquals(isFinalInvoice(inv("SWF-261200-DEP50", "PAID", 1), null), false);
   assertEquals(isFinalInvoice(inv("SWF-26989-VAR", "PAID", 1), null), false);
   assertEquals(isFinalInvoice(inv("SWP-1-MAT30", "PAID", 1), null), false);
   assertEquals(isFinalInvoice(inv("SWP-1-PROG", "PAID", 1), null), false);
-  // Anything that is not a named stage invoice counts as a final.
-  assertEquals(isFinalInvoice(inv("12 Example St", "PAID", 1), null), true);
+  // A final ending whose first line does not say balance is not evidence.
+  assertEquals(
+    isFinalInvoice(
+      inv("SWF-1-FINBAL", "PAID", 1, { first_description: "Deposit" }),
+      null,
+    ),
+    false,
+  );
+  // The job's own deposit invoice is never a final.
+  const byId = inv("SWF-1-FINBAL", "PAID", 1);
+  assertEquals(isFinalInvoice(byId, byId.xero_invoice_id), false);
+  // An unlabelled invoice is not a final.
+  assertEquals(isFinalInvoice(inv("12 Example St", "PAID", 1), null), false);
+  assertEquals(
+    isFinalInvoice(
+      inv("SWF-26624", "PAID", 1, { first_description: "Deposit 50%" }),
+      null,
+    ),
+    false,
+  );
+});
+
+Deno.test("an unlabelled paid invoice is not a final, so a deposit-only job is not paid", () => {
+  const v = evaluateJobPaid({
+    job: job({ job_number: "SWF-26624" }),
+    invoices: [
+      inv("SWF-26624", "PAID", 2000, { first_description: "Deposit 50%" }),
+    ],
+    parties: [],
+    quote: null,
+  });
+  assertEquals(v.outcome, "not_paid");
+  assertEquals(v.reasons, ["party_without_paid_final:owner"]);
 });
 
 Deno.test("party matching: job_contact_id, then share letter, then Xero contact, else the client", () => {
@@ -424,15 +458,45 @@ Deno.test("only a dollar of rounding is allowed: a few dollars or a percent shor
   );
 });
 
-Deno.test("unknown quote or unreadable variations: rules 1 and 2 decide alone", () => {
+Deno.test("no sent quote or no recorded quote value: rules 1 and 2 decide alone", () => {
   const base = {
     job: job(),
     invoices: [inv("SWF-5-DEP50", "PAID", 10), inv("SWF-5-FINBAL", "PAID", 10)],
     parties: [],
   };
-  const unknown = evaluateJobPaid({ ...base, quote: null });
-  assertEquals(unknown.outcome, "paid");
-  assertEquals(unknown.quote_known, false);
+  const preCheck = evaluateJobPaid({ ...base, quote: null });
+  assertEquals(preCheck.outcome, "paid");
+  assertEquals(preCheck.quote_known, false);
+  for (const reason of ["no_sent_quote", "quote_value_not_recorded"]) {
+    const v = evaluateJobPaid({
+      ...base,
+      quote: {
+        quote_total_inc: null,
+        variations_inc: 0,
+        unknown_reason: reason,
+      },
+    });
+    assertEquals([v.outcome, v.quote_unknown_reason], ["paid", reason]);
+  }
+});
+
+Deno.test("a quote or variations read failure decides nothing", () => {
+  const base = {
+    job: job(),
+    invoices: [inv("SWF-5-DEP50", "PAID", 10), inv("SWF-5-FINBAL", "PAID", 10)],
+    parties: [],
+  };
+  for (const reason of ["quote_unreadable", "quote_read_threw"]) {
+    const v = evaluateJobPaid({
+      ...base,
+      quote: {
+        quote_total_inc: null,
+        variations_inc: null,
+        unknown_reason: reason,
+      },
+    });
+    assertEquals([v.outcome, v.reasons], ["undecided", [reason]]);
+  }
   const noVariations = evaluateJobPaid({
     ...base,
     quote: {
@@ -441,6 +505,17 @@ Deno.test("unknown quote or unreadable variations: rules 1 and 2 decide alone", 
       unknown_reason: null,
     },
   });
-  assertEquals(noVariations.outcome, "paid");
+  assertEquals(noVariations.outcome, "undecided");
   assertEquals(noVariations.quote_unknown_reason, "variations_unreadable");
+  // Rules 1 and 2 failing still read as not paid.
+  const unpaid = evaluateJobPaid({
+    ...base,
+    invoices: [inv("SWF-5-FINBAL", "AUTHORISED", 10)],
+    quote: {
+      quote_total_inc: null,
+      variations_inc: null,
+      unknown_reason: "quote_unreadable",
+    },
+  });
+  assertEquals(unpaid.outcome, "not_paid");
 });

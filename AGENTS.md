@@ -4645,8 +4645,13 @@ Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
 the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
 invoice PAID and none DRAFT; every paying party, `job_contacts` with
 `removed_at` null, `status` not `removed`, and a share that is not an explicit
-0 (null counts), has a paid final; paid covers the `job_quote_values` quote
-plus customer-accepted or invoiced variations; one approved internally but never accepted is not owed). Every read, move, text and
+0 (null counts), has a paid final, a final needing positive evidence by the
+Debt tab's `invoiceKindOf` (an unlabelled invoice never is); paid covers the
+`job_quote_values` quote plus customer-accepted or invoiced variations; one
+approved internally but never accepted is not owed). A quote or variations READ
+failure is `undecided`: nothing moves, texts, archives or is recorded that run;
+only no sent quote or no recorded value lets rules 1 and 2 decide alone. A live
+sweep that cannot read the switches archives nothing. Every read, move, text and
 sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
 holds: status `rectification` or `jobs.is_callback`. If only the quote check
 fails the card stays put with `job_closeout_state.paid_less_than_quoted`.

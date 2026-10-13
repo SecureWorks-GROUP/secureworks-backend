@@ -297,6 +297,11 @@ function addInvoice(
     job_contact_id: null,
     xero_contact_id: null,
     fully_paid_on: status === "PAID" ? "2026-10-12" : null,
+    first_description: /-(?:FIN|FINBAL|BAL)\d{0,3}$/.test(reference)
+      ? "Balance of works"
+      : /DEP\d{0,3}$/.test(reference)
+      ? "Deposit"
+      : null,
     ...over,
   });
 }
@@ -1092,7 +1097,84 @@ Deno.test("manual send_review_request says payment was received only on a paid f
   }
 });
 
+Deno.test("an unreadable quote decides nothing: no move, no record, no text, no claim, no archive, not on the backlog list", async () => {
+  const { db, deps, moves, sms } = setup({ sender: "live" });
+  const invoiced = paidJob(db, { job_number: "SWF-80" });
+  const review = paidJob(db, { job_number: "SWF-81", status: "get_review" });
+  enteredGetReview(db, review.id, hoursAgo(30));
+  const complete = paidJob(db, { job_number: "SWF-82", status: "complete" });
+  db.failures.job_documents = "boom";
+
+  assertEquals(
+    (await closeoutOnPaid(deps, { job_id: invoiced.id })).action,
+    "facts_unreadable",
+  );
+  assertEquals(
+    (await closeoutCatchUp(deps, {})).results?.map((r: any) => r.action),
+    ["facts_unreadable"],
+  );
+  assertEquals(invoiced.status, "invoiced");
+  assertEquals(db.rows("job_closeout_state").length, 0);
+
+  assertEquals(
+    (await requestJobReview(deps, { job_id: review.id, trigger: "t" })).action,
+    "facts_unreadable",
+  );
+  assertEquals(
+    (await requestJobReview(deps, {
+      job_id: complete.id,
+      trigger: "manual",
+      manual: true,
+    })).action,
+    "facts_unreadable",
+  );
+
+  const sweep = await closeoutSweep(deps, { dry_run: false });
+  assertEquals(
+    sweep.results?.map((r: any) => [r.job_number, r.action]),
+    [["SWF-81", "undecided"]],
+  );
+  const backlog = await closeoutBacklogPreview(deps);
+  assertEquals(backlog.would_archive_count, 0);
+  assertEquals(backlog.excluded, { quote_unreadable: ["SWF-82"] });
+
+  assertEquals([moves.length, sms.length], [0, 0]);
+  assertEquals(db.rows("job_review_claims").length, 0);
+  assertEquals(db.rows("job_closeout_state").length, 0);
+
+  delete db.failures.job_documents;
+  assertEquals(
+    (await closeoutOnPaid(deps, { job_id: invoiced.id })).action,
+    "moved",
+  );
+});
+
+Deno.test("an unlabelled paid invoice is not a final, so the card stays where it is", async () => {
+  const { db, deps, moves } = setup();
+  const job = addJob(db, { job_number: "SWF-26624" });
+  addInvoice(db, job.id, "SWF-26624", "PAID", 2000, {
+    first_description: "Deposit 50%",
+  });
+  const out = await closeoutOnPaid(deps, { job_id: job.id });
+  assertEquals(out.action, "not_paid");
+  assertEquals((out as any).detail, ["party_without_paid_final:owner"]);
+  assertEquals([moves.length, job.status], [0, "invoiced"]);
+});
+
 // ── The 24-hour archive sweep ────────────────────────────────────────────────
+
+Deno.test("sweep: unreadable switches archive nothing on a live run", async () => {
+  const { db, deps, moves, sms } = setup({ sender: "live" });
+  const job = paidJob(db, { status: "get_review" });
+  enteredGetReview(db, job.id, hoursAgo(30));
+  db.failures.job_closeout_settings = "boom";
+  assertEquals(await closeoutSweep(deps, { dry_run: false }), {
+    ok: false,
+    ran: false,
+    reason: "switches_unreadable",
+  });
+  assertEquals([moves.length, sms.length, job.status], [0, 0, "get_review"]);
+});
 
 Deno.test("sweep: lane off archives nothing", async () => {
   const { db, deps, moves } = setup({ lane: false });

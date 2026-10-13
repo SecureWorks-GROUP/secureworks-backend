@@ -12,24 +12,25 @@
 //   2. Every paying party has a paid final invoice. A paying party is a job_contacts
 //      row not removed (removed_at null and status not 'removed') whose share_percentage
 //      is not an explicit 0 (a null share counts; the owner and each neighbour on a
-//      shared fence); a job with no such row has one payer, its client. A final is any
-//      sales invoice that is not a deposit and not a materials, progress, planning or
-//      variation stage invoice. An invoice belongs to the party its job_contact_id
+//      shared fence); a job with no such row has one payer, its client. A final needs
+//      positive evidence: the Debt tab's rule (debt_ws_rules.ts invoiceKindOf), a final
+//      reference ending (FIN, FINBAL or BAL with up to three digits, FINAL, PRIVATE)
+//      whose first line starts "balance", "remaining" or "remainder"; an unlabelled
+//      invoice is never a final. An invoice belongs to the party its job_contact_id
 //      names, else the party whose share letter is on its reference (SWF-26624-B-FINBAL
 //      is share B), else the party whose Xero contact it carries, else the job's own
 //      client (the primary party).
 //   3. The money paid covers the sent quote plus agreed variations (customer accepted
 //      or invoiced), short by no more than PAID_QUOTE_ROUNDING_INC (GST rounding). When the
-//      quote value is not known, rules 1 and 2 decide.
+//      job has no sent quote or no recorded quote value, rules 1 and 2 decide; when the
+//      quote or variations could not be read, nothing is decided (QUOTE_READ_FAILURES).
 //
 // Outcomes: "paid" (all three), "paid_less_than_quoted" (1 and 2 hold, 3 fails: the
-// card stays where it is and carries a marker), "not_paid" (1 or 2 fails).
-//
-// The deposit test is this module's own: ops-api/fencing_stage_recipe_v1.ts
-// referenceLooksLikeDeposit misses "DEP50" (a word boundary is required after DEP),
-// and changing it moves the shadow fencing engine, so it is left alone.
+// card stays where it is and carries a marker), "not_paid" (1 or 2 fails), "undecided"
+// (1 and 2 hold but the quote could not be read: nothing moves, texts, archives or is
+// recorded, and the next run asks again).
 
-import { parseReference } from "../ops-api/debt_ws_rules.ts";
+import { invoiceKindOf, parseReference } from "../ops-api/debt_ws_rules.ts";
 
 /** The only job types the paid close-out flow touches. */
 export const CLOSEOUT_JOB_TYPES = ["fencing", "patio"] as const;
@@ -50,9 +51,12 @@ export const CLOSEOUT_ARCHIVE_AFTER_MS = 24 * 60 * 60 * 1000;
 /** Paid may fall short of the quote by this much (GST rounding) before it counts as short. */
 export const PAID_QUOTE_ROUNDING_INC = 1;
 
-/** Reference endings that name a stage invoice, never a final. */
-const DEPOSIT_ENDING = /^DEP(?:OSIT)?\d{0,3}$/;
-const STAGE_ENDING = /^(?:MAT|PROG)\d{0,3}$|^PLAN$|^VAR\d{0,3}$/;
+/** Quote reasons that mean the quote or its variations could not be read, not that there is none. */
+export const QUOTE_READ_FAILURES = [
+  "quote_unreadable",
+  "variations_unreadable",
+  "quote_read_threw",
+] as const;
 
 export interface CloseoutJob {
   id: string;
@@ -74,6 +78,8 @@ export interface CloseoutInvoice {
   job_contact_id: string | null;
   xero_contact_id: string | null;
   fully_paid_on: string | null;
+  /** The first line item's description (line_items->0->>Description). */
+  first_description?: string | null;
 }
 
 export interface CloseoutParty {
@@ -97,7 +103,11 @@ export interface CloseoutQuote {
   unknown_reason: string | null;
 }
 
-export type PaidOutcome = "paid" | "paid_less_than_quoted" | "not_paid";
+export type PaidOutcome =
+  | "paid"
+  | "paid_less_than_quoted"
+  | "not_paid"
+  | "undecided";
 
 export interface PartyPaidView {
   key: string;
@@ -166,27 +176,17 @@ export function isLiveSalesInvoice(inv: CloseoutInvoice): boolean {
   return status !== "VOIDED" && status !== "DELETED";
 }
 
-export function isDepositInvoice(
+/** A final by positive evidence (invoiceKindOf), and never the job's own deposit invoice. */
+export function isFinalInvoice(
   inv: CloseoutInvoice,
   depositInvoiceId: string | null,
 ): boolean {
   if (
     depositInvoiceId && text(inv.xero_invoice_id) === text(depositInvoiceId)
   ) {
-    return true;
+    return false;
   }
-  const { ending } = parseReference(inv.reference);
-  return Boolean(ending && DEPOSIT_ENDING.test(ending));
-}
-
-/** A final: not a deposit and not a materials, progress, planning or variation invoice. */
-export function isFinalInvoice(
-  inv: CloseoutInvoice,
-  depositInvoiceId: string | null,
-): boolean {
-  if (isDepositInvoice(inv, depositInvoiceId)) return false;
-  const { ending } = parseReference(inv.reference);
-  return !(ending && STAGE_ENDING.test(ending));
+  return invoiceKindOf(inv.reference, inv.first_description).kind === "final";
 }
 
 /** The parties who pay: rows not removed (removed_at or status 'removed'), unless their
@@ -252,7 +252,7 @@ function newestDate(values: (string | null)[]): string | null {
   return dates.length ? dates[dates.length - 1] : null;
 }
 
-/** The strict paid check. Pure. */
+/** The strict paid check. Pure. A null quote is a pre-check (not read yet): rules 1 and 2 decide. */
 export function evaluateJobPaid(input: {
   job: CloseoutJob;
   invoices: CloseoutInvoice[];
@@ -320,10 +320,20 @@ export function evaluateJobPaid(input: {
     quoteShort = shortfall > PAID_QUOTE_ROUNDING_INC;
   }
 
+  const quoteUnknownReason = quoteKnown ? null : (input.quote?.unknown_reason ??
+    (variations === null && quoteTotal !== null
+      ? "variations_unreadable"
+      : "quote_unknown"));
+  const quoteUnread = input.quote !== null && quoteUnknownReason !== null &&
+    (QUOTE_READ_FAILURES as readonly string[]).includes(quoteUnknownReason);
+
   const rules12 = reasons.length === 0;
   if (quoteShort) reasons.push("paid_less_than_quoted");
+  if (rules12 && quoteUnread) reasons.push(quoteUnknownReason!);
   const outcome: PaidOutcome = !rules12
     ? "not_paid"
+    : quoteUnread
+    ? "undecided"
     : quoteShort
     ? "paid_less_than_quoted"
     : "paid";
@@ -335,10 +345,7 @@ export function evaluateJobPaid(input: {
     expected_inc: expected,
     shortfall_inc: shortfall,
     quote_known: quoteKnown,
-    quote_unknown_reason: quoteKnown ? null : (input.quote?.unknown_reason ??
-      (variations === null && quoteTotal !== null
-        ? "variations_unreadable"
-        : "quote_unknown")),
+    quote_unknown_reason: quoteUnknownReason,
     last_paid_on: newestDate(live.map((inv) => inv.fully_paid_on)),
   };
 }

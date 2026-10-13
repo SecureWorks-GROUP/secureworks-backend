@@ -326,7 +326,7 @@ interface PartyRow extends CloseoutParty {
 const JOB_COLUMNS =
   "id, job_number, type, status, is_callback, deposit_invoice_id, client_name, client_email, ghl_contact_id";
 const INVOICE_COLUMNS =
-  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_paid, job_contact_id, xero_contact_id, fully_paid_on";
+  "job_id, xero_invoice_id, invoice_number, invoice_type, status, reference, total, amount_paid, job_contact_id, xero_contact_id, fully_paid_on, first_description:line_items->0->>Description";
 const PARTY_COLUMNS =
   "id, job_id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id, client_name, ghl_contact_id";
 
@@ -506,13 +506,15 @@ export async function loadGetReviewEntries(
 
 // ── Records ──────────────────────────────────────────────────────────────────
 
-/** Upserts the job's paid check; logs one job_events row when the short marker first appears. */
+/** Upserts the job's paid check; logs one job_events row when the short marker first appears.
+ *  An undecided check (quote unreadable) records nothing. */
 async function recordPaidCheck(
   deps: JobCloseoutDeps,
   jobId: string,
   verdict: PaidVerdict,
   by: string,
 ): Promise<void> {
+  if (verdict.outcome === "undecided") return;
   const { client } = deps;
   const { data: prior } = await client.from("job_closeout_state")
     .select("paid_less_than_quoted").eq("job_id", jobId).maybeSingle();
@@ -580,6 +582,13 @@ async function settleJob(
   }
   const verdict = await evaluateFacts(deps, facts);
   await recordPaidCheck(deps, job.id, verdict, source);
+  if (verdict.outcome === "undecided") {
+    return {
+      ...base,
+      action: "facts_unreadable",
+      detail: verdict.quote_unknown_reason,
+    };
+  }
   if (verdict.outcome === "not_paid") {
     return { ...base, action: "not_paid", detail: verdict.reasons };
   }
@@ -796,6 +805,13 @@ export async function requestJobReview(
     const hold = closeoutHold(job);
     if (hold) return { ok: true, action: "held", hold };
     const verdict = await evaluateFacts(deps, f);
+    if (verdict.outcome === "undecided") {
+      return {
+        ok: true,
+        action: "facts_unreadable",
+        reason: verdict.quote_unknown_reason,
+      };
+    }
     if (verdict.outcome !== "paid") {
       return {
         ok: true,
@@ -808,9 +824,18 @@ export async function requestJobReview(
       skipReason = "paid_too_long_ago";
     }
     paidWording = true;
+  } else if (isCloseoutJobType(job.type)) {
+    const verdict = await evaluateFacts(deps, f);
+    if (verdict.outcome === "undecided") {
+      return {
+        ok: true,
+        action: "facts_unreadable",
+        reason: verdict.quote_unknown_reason,
+      };
+    }
+    paidWording = verdict.outcome === "paid";
   } else {
-    paidWording = isCloseoutJobType(job.type) &&
-      (await evaluateFacts(deps, f)).outcome === "paid";
+    paidWording = false;
   }
 
   const recipients = reviewRecipients(job, f.parties);
@@ -1005,6 +1030,9 @@ export async function closeoutSweep(
     return { ok: true, ran: false, reason: "lane_off" };
   }
   const switches = await readCloseoutSwitches(deps);
+  if (!dryRun && !switches.read_ok) {
+    return { ok: false, ran: false, reason: "switches_unreadable" };
+  }
   const jobs = await loadJobsByStatus(deps.client, [CLOSEOUT_REVIEW_STATUS]);
   if (!jobs) return { ok: false, ran: false, reason: "jobs_unreadable" };
   const [facts, entries] = await Promise.all([
@@ -1186,6 +1214,8 @@ export async function closeoutBacklogPreview(deps: JobCloseoutDeps) {
       });
     } else if (verdict.outcome === "paid_less_than_quoted") {
       exclude("paid_less_than_quoted", job);
+    } else if (verdict.outcome === "undecided") {
+      exclude("quote_unreadable", job);
     } else {
       exclude(
         verdict.reasons.includes("no_invoices") ? "no_invoices" : "not_paid",

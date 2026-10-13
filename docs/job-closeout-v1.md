@@ -20,9 +20,14 @@ All three, in `evaluateJobPaid`:
    `job_contacts` rows not removed (`removed_at` null and `status` not
    `removed`, the legacy neighbour sync's removal) whose `share_percentage` is
    not an explicit 0 (a null share counts: the party writer stores null when no
-   portions were sent); a job with none has one payer, its client. A final is
-   any sales invoice that is not a deposit (`DEP`, `DEP50`, `DEPOSIT`, or `jobs.deposit_invoice_id`) and not a
-   `MAT`/`PROG`/`PLAN`/`VAR` stage invoice. An invoice belongs to the party its
+   portions were sent); a job with none has one payer, its client. A final
+   needs positive evidence, the Debt tab's rule (`invoiceKindOf` in
+   `debt_ws_rules.ts`): a reference ending `FIN`, `FINBAL` or `BAL` (up to
+   three digits), `FINAL` or `PRIVATE`, and a first line item starting
+   "balance", "remaining" or "remainder" (read as
+   `line_items->0->>Description`), and never `jobs.deposit_invoice_id`. An
+   unlabelled invoice is not a final, so such a card stays where it is for
+   staff to move by hand. An invoice belongs to the party its
    `job_contact_id` names, else the share letter on its reference
    (`SWF-26624-B-FINBAL` is B), else the party with its Xero contact, else the
    client.
@@ -30,11 +35,17 @@ All three, in `evaluateJobPaid`:
    `readJobQuotes`) plus agreed variations (customer accepted or invoiced; one
    approved internally but never accepted is not owed), short by no more than
    $1 (GST rounding).
-   Unknown quote or unreadable variations: rules 1 and 2 decide.
+   No sent quote (`no_sent_quote`) or no recorded quote value
+   (`quote_value_not_recorded`): rules 1 and 2 decide. A quote or variations
+   read failure (`quote_unreadable`, `variations_unreadable`,
+   `quote_read_threw`) decides nothing.
 
 Outcomes: `paid`; `paid_less_than_quoted` (1 and 2 hold, 3 fails: the card
 stays where it is and `job_closeout_state.paid_less_than_quoted` is set, for the
-Ops card to show); `not_paid`.
+Ops card to show); `not_paid`; `undecided` (1 and 2 hold but the quote could not
+be read: in that run nothing moves, is texted, archived or recorded, the move
+and the sender answer `facts_unreadable`, the backlog list excludes it as
+`quote_unreadable`, and the next run asks again).
 
 Holds (never moved, texted or archived): status `rectification`, or
 `jobs.is_callback`.
@@ -74,13 +85,15 @@ Holds (never moved, texted or archived): status `rectification`, or
   the same sender and switch (it skips only the status, hold, paid and window
   checks); only a fencing or patio job that passes the paid rule gets the
   "Payment is well received" wording, every other manual request gets a
-  neutral text signed "SecureWorks".
+  neutral text signed "SecureWorks", and a fencing or patio job whose quote
+  could not be read is not texted (`facts_unreadable`).
 - **24-hour archive.** pg_cron `job-closeout-sweep` (17 and 47 past each hour,
   gated on the `closeout` lane) posts `job_closeout_sweep`. A card archives when
   it entered `get_review` at least 24 hours ago, is still paid, is not held and
   its review claim is finished, or the sender answered `no_contact`,
   `paid_too_long_ago` or `refused` (no claim is kept, so the review can still be
-  sent by hand once the cause is fixed), or the sender is not live. A claim still `claimed` more than an hour
+  sent by hand once the cause is fixed), or the sender is not live. A live sweep
+  that cannot read the switches archives nothing (`switches_unreadable`). A claim still `claimed` more than an hour
   after it was taken (the finish write failed or the worker died mid-send) is
   recorded `unconfirmed` with reason `stuck_claim`, never re-sent, and counts as
   finished. Compare and set on `get_review`. The sweep also sends a missing
