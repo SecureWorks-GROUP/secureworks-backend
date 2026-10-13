@@ -1613,6 +1613,49 @@ which `isApplicablePackPhoto` and the mailer photo route exclude: they are inter
 must never reach an SES pack, report or builder email. Tests: `quote_builder_test.ts`
 plus the migration contract.
 
+Since `20261013160000`: its pricing numbers (insurance labour rate, materials
+multiplier, target margin) live only in `quote_builder_settings`, never in code,
+the contract doc or `org_config` (every signed-in user, trades included, can
+read `org_config` through its live policy). The builder NEVER writes
+`jobs.pricing_json` (so never `jobs.quoted_value`): `completeAndInvoice` prices
+an invoice from it when given no lines, the deposit invoice derives a deposit
+from it, and both quote send gates (`send-quote` `/send`,
+`send_quick_quote_email`) pass any total above zero, so a stored builder total
+would bill and send. Do not reintroduce that write or guard those paths one by
+one. The Repairs card gets its money at read time: `pipeline&type=repair` calls
+`loadQuoteBuilderCardValues` (latest issued scope plus the variations that
+count, stored nowhere, so an ops approval or a customer decline shows on the
+next read) and `quoteBuilderCardRow` fills `value`, and adds no other field,
+only on a card whose job has no pricing of its own; every other row and every
+other `pipeline` request is unchanged. A failed
+read fills nothing and reports `pipeline.quote_builder_value` in
+`enrichment_errors`. That read projects ids, version keys and the client total
+only, never `cost_lines` or `charge_lines`. `countedVariationIds` is the one
+rule for which variations count: `approved` and `accepted` off the row (the
+customer's acceptance counts with or without an office approval), and `sent`
+only when the newest `job_events` row about it (`variation_approved`,
+`variation_rejected`, or the `variation_requested` every issue writes) is an
+approval: `approved_at` is stamped on a rejection too, a variation can be sent
+without ever being approved, and a re-issue voids the earlier approval. The
+settings are a goal the scoper may ignore, never a rule: nothing on the server
+refuses, clamps or rewrites a charge line or margin for differing from them,
+and the table checks a setting's name, never its size. Only a repair-family
+job's `quote_builder_get_job` reply carries `settings` and `can_edit_settings`;
+a private job's has neither key and never reads the table. The scope of works
+PDF is a `job_documents` row of type `other` (a meaningful type no close-out
+reader counts), never `work_order`, filed on a repair-family job only and
+listed in no reply. A private job's `quote_builder_get_job` and
+`quote_builder_issue` replies stay key for key what they were: its slot refuses
+`scope_of_works` and its issue does not read `extra_documents`. The material order list prints our costs
+and is never given an upload slot or filed: `job-pdfs` is a public bucket, so
+filing it waits on private storage with signed links and the owner's say; an
+issue that names it still issues and answers `extra_documents_not_filed`.
+Making a draft crew work order and draft purchase orders from an issued quote
+is NOT built: the first attempt was taken out, and its open design points
+(the trade read blanks a text holding any money word, a supplier name is no
+key, the acceptance trigger, the Xero push of an unnamed supplier, uuid
+`created_by`) are in the contract doc under "Not built yet".
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that

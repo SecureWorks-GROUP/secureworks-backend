@@ -242,6 +242,8 @@ import {
   getQuoteBuilderJob,
   issueQuoteBuilderVersion,
   listQuoteBuilderJobs,
+  loadQuoteBuilderCardValues,
+  quoteBuilderCardRow,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
   quoteBuilderPhotoCaption,
@@ -16108,6 +16110,12 @@ async function pipeline(client: any, params: URLSearchParams) {
     .order('updated_at', { ascending: false })
     .limit(PIPELINE_MALFORMED_PRICING_LIMIT)
 
+  // Starts beside the job read and is awaited with the enrichment wave; it
+  // degrades internally and never rejects.
+  const quoteBuilderValuesRead = repairJobIds
+    ? loadQuoteBuilderCardValues(client, repairJobIds)
+    : null
+
   const [{ data: jobs, error }, malformedPricingRes, repairDetails] = await Promise.all([
     query,
     // A non-fencing endpoint filter can skip the defensive query entirely.
@@ -16261,6 +16269,8 @@ async function pipeline(client: any, params: URLSearchParams) {
   // detail read must be published rather than served as an indistinguishable
   // null on the very fields the card exists to reconcile.
   if (repairDetails?.degraded) enrichmentErrors.push('pipeline.makesafe_job_details')
+  const quoteBuilderValues = await quoteBuilderValuesRead
+  if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -16424,7 +16434,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     }
     return typeFilter === 'repair'
       ? projectInsuranceRepairPipelineRow(
-        pipelineRow,
+        quoteBuilderCardRow(pipelineRow, quoteBuilderValues?.values.get(String(j.id))),
         repairDetails?.details.get(String(j.id)) || null,
       )
       : pipelineRow

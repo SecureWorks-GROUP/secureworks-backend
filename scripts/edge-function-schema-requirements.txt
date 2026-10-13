@@ -713,3 +713,10 @@ ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|functi
 xero-sync|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_id
 xero-sync|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_label
 xero-sync|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_amount
+
+# Quote builder pricing settings and the filed scope of works:
+# quote_builder_get_job reads the settings table on every open, so ops-api must
+# not deploy ahead of this migration.
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|table|quote_builder_settings
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|column|quote_builder_settings.amount
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|index|ux_job_docs_quote_builder_extra
