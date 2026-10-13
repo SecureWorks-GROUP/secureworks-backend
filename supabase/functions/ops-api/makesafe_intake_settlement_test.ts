@@ -11,6 +11,12 @@ import {
   settleApprovedIntakeDraft,
   SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION,
 } from "./makesafe_intake_settlement.ts";
+import { notifyDeterministicPhysicalJob } from "./makesafe_hugo_notification.ts";
+import {
+  auditClient,
+  MAKESAFE_TEXT_RECIPIENT,
+  REPAIR_TEXT_RECIPIENT,
+} from "./makesafe_hugo_notification_test_fakes.ts";
 
 const noIdentityRefresh = async () => null;
 
@@ -1202,4 +1208,206 @@ Deno.test("an already-bound case is a silent no-op, not a recorded gap", async (
 
   assertEquals(db.updates, []);
   assertEquals(db.jobEvents, []);
+});
+
+// ── The one staff text for a repair draft a person approves ─────────────────
+//
+// The approval path's text is sent from here: approveIntakeDraft settles the
+// draft through settleApprovedIntakeDraft with the notifier as `notify`. These
+// two tests run that seam with the real notifier over a fake board and a fake
+// SMS transport, so they prove who is texted and in what words.
+
+function approvalTextHarness(
+  board: {
+    jobNumber: string;
+    sesFamily: string;
+    jobType: string;
+    siteSuburb: string | null;
+  },
+) {
+  const audit = auditClient({ duplicateAfterFirst: true });
+  const sends: Array<{ phone: string; message: string }> = [];
+  const notify = (input: any) =>
+    notifyDeterministicPhysicalJob(audit.client, input, {
+      loadBoardJob: async (_client, jobId) => ({
+        jobId,
+        canonicalStage: "new",
+        ...board,
+      }),
+      loadConfig: async () => ({
+        enabled: true,
+        fromNumber: "+61000000000",
+        recipient: MAKESAFE_TEXT_RECIPIENT,
+        failureReason: null,
+      }),
+      loadRepairConfig: async () => ({
+        enabled: true,
+        fromNumber: "+61000000000",
+        recipient: REPAIR_TEXT_RECIPIENT,
+        failureReason: null,
+      }),
+      sendSms: async (phone, message) => {
+        sends.push({ phone, message });
+        return {
+          accepted: true,
+          messageId: `ghl-message-${sends.length}`,
+          failureReason: null,
+        };
+      },
+    });
+  return { audit, sends, notify };
+}
+
+function approvedByPerson(client: any, notify: (input: any) => Promise<any>) {
+  return settleApprovedIntakeDraft(client, {
+    draftId: "draft-repair",
+    approvedJobId: "job-repair",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "storage/work-order.pdf",
+    }],
+    extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
+    caseBindingProvenance: "human",
+    caseBindingActor: "operator@example.test",
+    notify,
+  });
+}
+
+function awaitingCase() {
+  return {
+    id: "case-repair",
+    state: "exception",
+    reason_code: "awaiting_job_creation",
+    job_id: null,
+    blocked_reasons: [],
+  };
+}
+
+Deno.test("a repair draft a person approves sends one text to the repair recipient, worded as a repair, and a retry sends no second", async () => {
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [awaitingCase()],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+  const text = approvalTextHarness({
+    jobNumber: "SWR-270010",
+    sesFamily: "repair",
+    jobType: "repair",
+    siteSuburb: "Testville",
+  });
+
+  const result = await approvedByPerson(db.client, text.notify);
+
+  assertEquals(result.notificationJobIds, ["job-repair"]);
+  assertEquals(mint.state, "settled");
+  assertEquals(text.sends, [{
+    phone: REPAIR_TEXT_RECIPIENT.phone,
+    message:
+      "SecureWorks: New repair job SWR-270010, Testville. Open in Ops: " +
+      "https://secureworks-group.github.io/secureworks-ux/ops.html#job/job-repair",
+  }]);
+  assertEquals(text.audit.inserts.length, 1);
+  assertEquals(text.audit.inserts[0].job_id, "job-repair");
+  assertEquals(text.audit.inserts[0].case_id, "case-repair");
+  assertEquals(text.audit.inserts[0].recipient_set, [{
+    user_id: REPAIR_TEXT_RECIPIENT.userId,
+    name: REPAIR_TEXT_RECIPIENT.name,
+    phone: REPAIR_TEXT_RECIPIENT.phone,
+  }]);
+
+  // The scan asks again for the same job after the approval returns. The
+  // once-per-job claim answers it: recorded, and nothing is sent.
+  const again = await text.notify({
+    caseId: "case-repair",
+    sourcePostIds: ["post-repair"],
+    jobId: "job-repair",
+  });
+  assertEquals(again.reason, "already_recorded");
+  assertEquals(text.sends.length, 1);
+});
+
+Deno.test("CONTROL: a make-safe draft a person approves still sends today's make-safe text to the make-safe recipient", async () => {
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [awaitingCase()],
+    jobs: [{ id: "job-repair", type: "makesafe" }],
+  });
+  const text = approvalTextHarness({
+    jobNumber: "SWMS-270001",
+    sesFamily: "physical_makesafe",
+    jobType: "makesafe",
+    siteSuburb: "Testville",
+  });
+
+  await approvedByPerson(db.client, text.notify);
+
+  assertEquals(text.sends, [{
+    phone: MAKESAFE_TEXT_RECIPIENT.phone,
+    message: "SecureWorks: New make-safe SWMS-270001 (job-repair)\n" +
+      "Assign in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/job-repair",
+  }]);
+});
+
+Deno.test("a repair draft approved while no repair recipient is set sends nothing, records why, and leaves the mint marked for a retry", async () => {
+  const mint = repairMint();
+  const db = caseBindingClient({
+    mints: [mint],
+    cases: [awaitingCase()],
+    jobs: [{ id: "job-repair", type: "repair" }],
+  });
+  const audit = auditClient();
+  let sends = 0;
+  const notify = (input: any) =>
+    notifyDeterministicPhysicalJob(audit.client, input, {
+      loadBoardJob: async (_client, jobId) => ({
+        jobId,
+        jobNumber: "SWR-270010",
+        canonicalStage: "new",
+        sesFamily: "repair",
+        jobType: "repair",
+        siteSuburb: "Testville",
+      }),
+      loadConfig: async () => ({
+        enabled: true,
+        fromNumber: "+61000000000",
+        recipient: MAKESAFE_TEXT_RECIPIENT,
+        failureReason: null,
+      }),
+      loadRepairConfig: async () => ({
+        enabled: true,
+        fromNumber: "+61000000000",
+        recipient: null,
+        failureReason: "repair_recipient_not_configured",
+      }),
+      sendSms: async () => {
+        sends++;
+        return {
+          accepted: true,
+          messageId: "must-not-send",
+          failureReason: null,
+        };
+      },
+    });
+
+  await assertRejects(
+    () => approvedByPerson(db.client, notify),
+    Error,
+    "repair_recipient_not_configured",
+  );
+  assertEquals(sends, 0);
+  assertEquals(audit.inserts.length, 1);
+  assertEquals(audit.inserts[0].state, "failed");
+  assertEquals(
+    audit.inserts[0].failure_reason,
+    "repair_recipient_not_configured",
+  );
+  assertEquals(audit.inserts[0].recipient_set, []);
+  assertEquals(mint.state, "settlement_failed");
+  assertEquals(
+    (mint as Record<string, unknown>).last_error,
+    "repair_recipient_not_configured",
+  );
 });

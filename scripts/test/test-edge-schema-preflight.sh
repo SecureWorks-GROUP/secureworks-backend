@@ -889,7 +889,13 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261013140000", "work_order_customer_variations"),
                       # Trade recurring deductions: the rule rows and the four
                       # invoice columns (trade_invoice_recurring_deduction.ts).
-                      ("20261013143700", "trade_recurring_deductions")]:
+                      ("20261013143700", "trade_recurring_deductions"),
+                      # Quote builder pricing settings and the filed scope of
+                      # works (quote_builder.ts).
+                      ("20261013160000", "quote_builder_pricing_and_documents"),
+                      # Repair job staff text: the repair recipient list
+                      # (loadRepairNotificationConfig).
+                      ("20261013170000", "makesafe_notify_repair_recipients")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

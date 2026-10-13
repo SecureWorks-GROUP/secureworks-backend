@@ -308,6 +308,18 @@ jobs:
             --filter "builder's order value" \
             supabase/functions/ops-api/trade_app_visibility_rules_test.ts
 
+      # The one staff text for a new job (docs/repair-intake-auto-v1.md,
+      # "Messages"): a repair job is told to the repair recipient in repair
+      # words, on the approval path and the scan path, and the make-safe text
+      # and its recipient are pinned byte for byte. Every SMS in these files is
+      # a fake transport. Same --no-check reason as above.
+      - name: Test the new job staff text for repair and make-safe jobs
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/makesafe_hugo_notification_test.ts \
+            supabase/functions/ops-api/makesafe_hugo_notification_index_test.ts \
+            supabase/functions/ops-api/makesafe_intake_settlement_test.ts
+
       # An adapter registered in code but missing from the database's adapter
       # list is refused on every case insert and nothing else notices (Ambrose,
       # 12 Oct 2026). Compares the real registry with the newest definition of

@@ -242,6 +242,8 @@ import {
   getQuoteBuilderJob,
   issueQuoteBuilderVersion,
   listQuoteBuilderJobs,
+  loadQuoteBuilderCardValues,
+  quoteBuilderCardRow,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
   quoteBuilderPhotoCaption,
@@ -2959,6 +2961,68 @@ async function loadHugoNotificationConfig(
   }
 }
 
+// The one staff text for a new REPAIR job goes to the user named in
+// makesafe_notify_settings.repair_new_job_user_ids (20261013170000); the phone
+// is read from that user's row at send time. Exactly one user with a phone
+// sends; an empty list, more than one user, an unknown user or a user with no
+// phone sends nothing and names the reason. It never falls back to a role or
+// to the make-safe list.
+async function loadRepairNotificationConfig(
+  client: any,
+): Promise<_HugoNotificationConfig> {
+  const settingsResult = await client.from('makesafe_notify_settings')
+    .select('notify_enabled, from_number, repair_new_job_user_ids')
+    .eq('id', true)
+    .maybeSingle()
+  if (settingsResult.error) {
+    throw new Error(
+      `Repair notification settings read failed: ${settingsResult.error.message || settingsResult.error}`,
+    )
+  }
+  const userIds = Array.from(new Set<string>(
+    (Array.isArray(settingsResult.data?.repair_new_job_user_ids)
+      ? settingsResult.data.repair_new_job_user_ids
+      : [])
+      .map((id: any) => String(id || '').trim())
+      .filter(Boolean),
+  ))
+  let user: any = null
+  if (userIds.length === 1) {
+    const usersResult = await client.from('users')
+      .select('id, name, phone')
+      .in('id', userIds)
+    if (usersResult.error) {
+      throw new Error(
+        `Repair notification staff read failed: ${usersResult.error.message || usersResult.error}`,
+      )
+    }
+    user = (usersResult.data || []).find((row: any) =>
+      String(row?.id || '') === userIds[0]
+    ) || null
+  }
+  const phone = String(user?.phone || '').trim()
+  return {
+    enabled: settingsResult.data?.notify_enabled === true,
+    fromNumber: String(settingsResult.data?.from_number || '').trim() || null,
+    recipient: user && phone
+      ? {
+        userId: String(user.id),
+        name: user.name ? String(user.name) : null,
+        phone,
+      }
+      : null,
+    failureReason: userIds.length === 0
+      ? 'repair_recipient_not_configured'
+      : userIds.length > 1
+      ? 'repair_recipient_config_ambiguous'
+      : !user
+      ? 'repair_recipient_user_missing'
+      : !phone
+      ? 'repair_recipient_phone_missing'
+      : null,
+  }
+}
+
 async function notifyMintedDeterministicPhysicalJob(
   client: any,
   input: {
@@ -2980,15 +3044,19 @@ async function notifyMintedDeterministicPhysicalJob(
         jobNumber: row.job_number || null,
         canonicalStage: String(row.canonical_stage || ''),
         sesFamily: String(row.ses_family || ''),
+        jobType: row.type ? String(row.type) : null,
+        siteSuburb: row.site_suburb ? String(row.site_suburb) : null,
       }
     },
     loadConfig: loadHugoNotificationConfig,
+    loadRepairConfig: loadRepairNotificationConfig,
     sendSms: (phone, message, fromNumber) =>
       sendSmsViaGhlWithReceipt(phone, message, fromNumber),
   })
 }
 
 export const _loadHugoNotificationConfigForTest = loadHugoNotificationConfig
+export const _loadRepairNotificationConfigForTest = loadRepairNotificationConfig
 export const _notifyMintedDeterministicPhysicalJobForTest =
   notifyMintedDeterministicPhysicalJob
 
@@ -16124,6 +16192,12 @@ async function pipeline(client: any, params: URLSearchParams) {
     .order('updated_at', { ascending: false })
     .limit(PIPELINE_MALFORMED_PRICING_LIMIT)
 
+  // Starts beside the job read and is awaited with the enrichment wave; it
+  // degrades internally and never rejects.
+  const quoteBuilderValuesRead = repairJobIds
+    ? loadQuoteBuilderCardValues(client, repairJobIds)
+    : null
+
   const [{ data: jobs, error }, malformedPricingRes, repairDetails] = await Promise.all([
     query,
     // A non-fencing endpoint filter can skip the defensive query entirely.
@@ -16277,6 +16351,8 @@ async function pipeline(client: any, params: URLSearchParams) {
   // detail read must be published rather than served as an indistinguishable
   // null on the very fields the card exists to reconcile.
   if (repairDetails?.degraded) enrichmentErrors.push('pipeline.makesafe_job_details')
+  const quoteBuilderValues = await quoteBuilderValuesRead
+  if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -16440,7 +16516,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     }
     return typeFilter === 'repair'
       ? projectInsuranceRepairPipelineRow(
-        pipelineRow,
+        quoteBuilderCardRow(pipelineRow, quoteBuilderValues?.values.get(String(j.id))),
         repairDetails?.details.get(String(j.id)) || null,
       )
       : pipelineRow
