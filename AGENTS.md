@@ -4503,12 +4503,12 @@ inside gross and shifts super and GST. A trade with no row gets no keys on any
 write or read; keep it that way. A deduction due but not taken (a work-order
 or no-week invoice included) is kept on `recurring_deduction_note`: the stored
 `query_note` is cleared as the invoice moves on, so `presentTradeInvoice` puts
-the reason back into `query_note` on every read. The stored columns ride every invoice read
-through `validatePersistedTradeInvoiceMoney`, so a list read that feeds
-`presentTradeInvoice` must select the four `recurring_deduction_*` columns or
-it shows the undeducted figure. The Xero line is found by its description
-prefix. Contract, the screen changes still owed and how the office ends one:
-`docs/trade-recurring-deductions-2026-10-13.md`.
+the reason back into `query_note` on every read. The stored columns ride every
+invoice read through `validatePersistedTradeInvoiceMoney`, so a list read that
+feeds `presentTradeInvoice` must select the four `recurring_deduction_*`
+columns or it shows the undeducted figure. The Xero line is found by its
+description prefix. Contract, the screen changes still owed and how the office
+ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
 
 ## Maintaining this file
 

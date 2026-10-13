@@ -36,8 +36,9 @@ This is the back end. The trade app and ops screens need a paired change in
   taken and the invoice is marked for the office with the reason.
 - Once per invoice week. When another live invoice of the same trade and
   `week_start` already carries it, this one carries none and says so. A draft,
-  and an invoice the office rejected, are released: the invoice that replaces
-  them carries it once. A partial unique index is the guard under the code.
+  a failed invoice and an invoice the office rejected are released: the invoice
+  that replaces them carries it once. A partial unique index is the guard under
+  the code.
 - Never a negative invoice. When the amount payable (net pay + GST) is less
   than the deduction, nothing is refused and nothing is taken: the invoice is
   saved and paid in full and is marked for the office with the reason. A
@@ -113,11 +114,14 @@ preview covers it; `label` and `amount` are what comes off at submit. It is
 absent when two rows cover the week, and on a work-order or no-week invoice:
 those are marked for the office only.
 
-Every read that returns `query_note` (`list_trade_invoices`,
-`list_new_trade_invoices`) returns it with the invoice's
+Every read that returns `query_note` returns it with the invoice's
 `recurring_deduction_note` in it, whatever the invoice's status, so a "not
 taken" reason reaches the office after the stored `query_note` has been
-rewritten. An invoice with no such reason reads exactly as before.
+rewritten. Those reads are the office's `list_trade_invoices` and
+`list_new_trade_invoices`, and the trade's own `my_invoices` and
+`get_trade_invoice`, which return every column; `my_trade_invoices` and
+`my_money` do not return `query_note`. An invoice with no such reason reads
+exactly as before.
 
 A rule read that fails stops a submit or a draft save (nothing is written); it
 never fails `my_hours`, which then shows no deduction.
