@@ -55,15 +55,21 @@ revision by this rule (17 recorded, 9 by acceptance time).
 
 Each line is a `scope_items` entry of the job work order:
 
-`{line_key, source:"quote", basis, description, qty, unit, hours, rate, rate_unit, total, counted, flags[], quote_cost_ex?}`
+`{line_key, source:"quote", basis, description, qty, unit, hours, rate, rate_unit, total, counted, flags[], needs_review, quote_cost_ex?}`
 
 - **The trade view.** It keeps `description`, `qty` and `unit` only (`projectTradeJobWorkOrder`).
   A line priced by the hour carries its hours as `qty` with unit `hrs`, so trades see the time.
   Descriptions never carry a rate, amount, percent or money word, because the trade filter
-  withholds a whole line that does. `rate`, `total`, `hours`, `counted`, `flags` and
-  `quote_cost_ex` are office-only.
-- **`counted` lines** add up to `agreed_labour_ex`. A line that is not counted stays on the
-  work order for the trades to see, with flags saying why it was not counted.
+  withholds a whole line that does. `rate`, `total`, `hours`, `counted`, `flags`,
+  `needs_review` and `quote_cost_ex` are office-only.
+- **`agreed_labour_ex` is the quote's own labour figure** (`labourCostEstimate`, else
+  `internal.labour`), never a sum re-priced from today's cost table. A quote with no labour
+  figure gives no agreed labour (`quote_labour_missing`): the draft is filled with lines only.
+- **`counted` lines** are the lines the quote's labour figure is made of, so they add up to
+  it. A line that is not counted stays on the work order for the trades to see, with flags
+  saying why it was not counted.
+- **`needs_review`** is true on a line carrying any flag other than `saved_as_material` or
+  `quote_counted_as_materials`, so the approver can see which lines to check.
 - **`line_key`** is `<prefix>:<index in pricing.line_items>`, the prefix being `install:`
   (`fence_install`), `gate:` (`fence_gate`), `removal:` (`removal`), `labour:` (a
   `category: labour` row or any `kind: labour` row) or `extra:` (any other `custom`
@@ -86,12 +92,20 @@ from:
 
 The rebuilt install split (install, plinths, gates and access) is compared with the
 quote's `labourCostEstimate`. It matched exactly on all 140 fencing quotes since 1 Aug 2026
-(measured 13 Oct 2026). When the two differ, the result is flagged
-`labour_differs_from_quote` and each install line is flagged `rates_differ_from_quote`.
+(measured 13 Oct 2026). The split counts only when it reproduces that figure from rates the
+quote used. Two cases mean it cannot, and then nothing in it is counted and the lines go to
+review (`needs_review: true`):
 
-Removal is counted, but the quote's cost breakdown files it under materials, so removal
-lines carry `quote_counted_as_materials`. An asbestos removal is flagged
-`licensed_removal`. The asbestos certificate fee is not a task, so it is left out.
+- a cost table row a line uses was changed after the accepted revision was frozen
+  (`scope_tool_defaults.last_updated_at` after `frozen_at`, or no time to compare): that line
+  is flagged `rates_changed_since_quote`, and so is the result;
+- the split differs from the quote's labour figure: the result and every line priced from the
+  table, removal included, are flagged `labour_differs_from_quote`.
+
+Removal is never part of the quote's labour figure (its cost breakdown files removal under
+materials), so removal lines are never counted and carry `quote_counted_as_materials`. An
+asbestos removal is flagged `licensed_removal`. The asbestos certificate fee is not a task,
+so it is left out.
 
 ### Labour lines and extras
 
@@ -104,6 +118,10 @@ These rules apply to any job type.
   `hours` and `cost_per_hour`. A labour row with no
   hours is flagged `hours_missing`, unless it is priced per metre, each or per sheet. A
   labour row with no cost is flagged `cost_missing` and is not counted.
+- **A custom labour or hours line counts only when it is part of the quote's labour
+  figure:** when the install split (fencing) or the labour rows (patio) plus those lines
+  reproduce `labourCostEstimate`, as the quoting tools' new format does. Otherwise it stays
+  on the work order uncounted and flagged `outside_quote_labour` for the approver to decide.
 - **A `custom` row priced in hours** is labour, whatever its kind. It is flagged
   `saved_as_material` when the fence tool saved it as material, or `kind_missing` when it
   has no kind. Example: "Root removal / hard digging, 2 hrs" at $80 an hour is 2 hours, $160.
@@ -112,28 +130,35 @@ These rules apply to any job type.
   `labour_or_material_unknown`. If its words mention hours ("3 hours 2 trades…"), it is
   also flagged `hours_in_words`, and those hours are never read as hours.
 - **Patio:** the quote's labour rows ("Labour — 2 trades × 1.5 days", 24 hrs at $45) come
-  through as hours. Their sum is compared with `labourCostEstimate`; on 81 patio quotes
-  since 1 Aug 2026 it matched on every one.
+  through as hours and count when their sum equals `labourCostEstimate`; on 81 patio quotes
+  since 1 Aug 2026 it matched on every one. When it does not, they are flagged
+  `labour_differs_from_quote` and not counted.
 
 ### Result
 
 `{schema:"quote-work-order-lines.v1", job_type, lines[], agreed_labour_ex, totals:{install_labour_ex, removal_ex, extras_labour_ex, uncertain_cost_ex}, quote_labour_ex, labour_matches_quote, needs_review, flags[]}`
 
-- `agreed_labour_ex` is null when no line could be counted.
+- `agreed_labour_ex` is the quote's labour figure, null when the quote has none.
+- `totals` are the line totals by group, counted or not (an office breakdown).
+- `labour_matches_quote` is true when the counted lines reproduce the quote's labour figure,
+  false when they cannot, and null when nothing could be compared (no labour figure, a rate
+  missing or changed since the quote).
 - `needs_review` is true when any flag other than `saved_as_material` or
   `quote_counted_as_materials` is present.
 - **Review flags ride on every line.** The result's flags
-  (`quote_labour_missing`, `labour_differs_from_quote`, `unsupported_job_type`) are added to
-  each line's `flags`, so they stay on the stored draft after the one call that filled it.
-  `flags` is office-only: trades never see it.
+  (`quote_labour_missing`, `labour_differs_from_quote`, `rates_changed_since_quote`,
+  `unsupported_job_type`) and the quote's (`frozen_quote_unreadable`) are added to each
+  line's `flags`, with `needs_review: true`, so they stay on the stored draft after the one
+  call that filled it. `flags` and `needs_review` are office-only: trades never see them.
 
 ## Approving a draft with flagged lines
 
 Approval (`approve_work_order`, `docs/job-work-orders-v1.md`) does not refuse a draft whose
 lines carry flags. A flagged draft can be approved and sealed as it is: the captain approves
 each work order, and the flags on its lines are there for him to read first. A line that is
-not counted (for example an old "Root removal, 1 job" extra, `labour_or_material_unknown`)
-adds nothing to `agreed_labour_ex` unless the approver edits the draft before approving.
+not counted (for example an old "Root removal, 1 job" extra, `labour_or_material_unknown`,
+or a custom hours line outside the quote's labour, `outside_quote_labour`) adds nothing to
+`agreed_labour_ex` unless the approver edits the draft before approving.
 
 ## Filling the job work order draft
 
@@ -144,17 +169,19 @@ adds nothing to `agreed_labour_ex` unless the approver edits the draft before ap
 - **An approved work order is never written.**
 - **The write is guarded by the draft's `updated_at` as read.** If a save lands between the
   read and the fill, the save wins and the fill writes nothing (`draft_changed`).
-- **What is written:** `scope_items` gets the lines, and `agreed_labour_ex` the counted
-  total. When nothing could be counted, `agreed_labour_ex` is left empty for the approver to
-  set.
+- **What is written:** `scope_items` gets the lines, and `agreed_labour_ex` the quote's own
+  labour figure. When the quote has none, `agreed_labour_ex` is left empty for the approver
+  to set.
 - **The event:** `job_work_order_draft_filled_from_quote` carries ids and counts only, never
   an amount.
 
 It runs at three points:
 
 - `job_work_order` (and `job_detail`'s `job_work_order` block) fills an untouched draft on
-  the staff read. Every draft is read by staff before it can be approved, because approval
-  needs the draft's `updated_at` as read. This also covers drafts the database trigger
+  the staff read: a signed-in admin, owner or ops manager, or the ops server key. A read
+  with the make-safe routine key (`job_detail` is on its allow-list, which stays
+  writes-free) never fills or writes anything. Every draft is read by staff before it can be
+  approved, because approval needs the draft's `updated_at` as read. This also covers drafts the database trigger
   opened when the job was accepted. The response (and `job_detail`'s block) carries
   `quote_fill: {filled, reason, scope_revision_id, needs_review, code?}`, or `null` when
   nothing was attempted.

@@ -11,9 +11,9 @@
 //   Anything a person has typed into the draft is left alone.
 // - The update is guarded by the draft's updated_at as read, so a save that
 //   lands between the read and the fill wins and the fill writes nothing.
-// - scope_items gets the builder's lines and agreed_labour_ex the counted
-//   total. When no line could be counted, agreed_labour_ex stays empty for the
-//   approver to set.
+// - scope_items gets the builder's lines and agreed_labour_ex the quote's own
+//   labour figure. When the quote has none, agreed_labour_ex stays empty for
+//   the approver to set.
 
 import {
   buildQuoteWorkOrderLines,
@@ -212,14 +212,16 @@ async function readAcceptedQuote(client: any, job: any): Promise<{
   return none();
 }
 
-/** The fencing labour rates from the scoping tool's cost table. A read
- *  fault throws: an unreadable table must never read as "no rates". */
+/** The fencing labour rates from the scoping tool's cost table, and the keys
+ *  changed after the quote was frozen (or with no change time to compare). A
+ *  read fault throws: an unreadable table must never read as "no rates". */
 export async function readFenceLabourCostTable(
   client: any,
   orgId: string | null,
-): Promise<QuoteCostTable> {
+  frozenAt: string | null,
+): Promise<{ rates: QuoteCostTable; changedSinceQuote: string[] }> {
   let query = client.from("scope_tool_defaults")
-    .select("item_key, default_cost_rate")
+    .select("item_key, default_cost_rate, last_updated_at")
     .eq("scope_tool", "fence-designer")
     .in("item_key", [...FENCE_LABOUR_COST_ITEM_KEYS]);
   if (orgId) query = query.eq("org_id", orgId);
@@ -231,14 +233,22 @@ export async function readFenceLabourCostTable(
       "The scoping tool's cost table could not be read",
     );
   }
-  const table: Record<string, number> = {};
+  const frozenMs = Date.parse(String(frozenAt ?? ""));
+  const rates: Record<string, number> = {};
+  const changed = new Set<string>();
   for (const row of Array.isArray(data) ? data : []) {
     const rate = Number(row?.default_cost_rate);
-    if (typeof row?.item_key === "string" && Number.isFinite(rate)) {
-      table[row.item_key] = rate;
+    if (typeof row?.item_key !== "string" || !Number.isFinite(rate)) continue;
+    rates[row.item_key] = rate;
+    const updatedMs = Date.parse(String(row.last_updated_at ?? ""));
+    if (
+      !Number.isFinite(frozenMs) || !Number.isFinite(updatedMs) ||
+      updatedMs > frozenMs
+    ) {
+      changed.add(row.item_key);
     }
   }
-  return table;
+  return { rates, changedSinceQuote: [...changed] };
 }
 
 async function linesForJob(
@@ -247,13 +257,18 @@ async function linesForJob(
 ): Promise<JobQuoteWorkOrderLines> {
   const { pricing, quote } = await readAcceptedQuote(client, job);
   // No accepted quote, nothing to price: the cost table is not read.
-  const costTable = pricing && String(job.type || "") === "fencing"
-    ? await readFenceLabourCostTable(client, job.org_id ?? null)
-    : {};
+  const table = pricing && String(job.type || "") === "fencing"
+    ? await readFenceLabourCostTable(
+      client,
+      job.org_id ?? null,
+      quote.frozen_at,
+    )
+    : { rates: {}, changedSinceQuote: [] };
   const result = buildQuoteWorkOrderLines({
     jobType: job.type,
     pricing,
-    costTable,
+    costTable: table.rates,
+    ratesChangedSinceQuote: table.changedSinceQuote,
   });
   // The quote's and the result's review flags ride on every line, so they
   // stay on the stored draft for the approver (scope_items past description,
@@ -264,6 +279,7 @@ async function linesForJob(
     for (const flag of reviewFlags) {
       if (!line.flags.includes(flag)) line.flags.push(flag);
     }
+    if (reviewFlags.length > 0) line.needs_review = true;
   }
   return {
     job: {

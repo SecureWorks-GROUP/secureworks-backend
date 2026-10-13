@@ -38,8 +38,9 @@
 //
 // A draft is filled from the accepted quote (job_work_order_quote_fill.ts,
 // docs/quote-work-order-lines-v1.md) while nobody has written into it: when
-// staff open it, when staff read it, and by the backfill. An approved work
-// order is never filled.
+// staff open it, when staff read it, and by the backfill. A read fills only
+// when its caller asks (fillFromQuote: staff or the ops server key, never the
+// routine key). An approved work order is never filled.
 //
 // Invoice lines billed on the job are stamped by the database at invoice
 // submit, and at approval for lines invoiced earlier
@@ -980,7 +981,13 @@ async function fillDraftFromQuote(
 
 export async function readJobWorkOrder(
   client: any,
-  params: { jobId?: string | null; workOrderId?: string | null },
+  params: {
+    jobId?: string | null;
+    workOrderId?: string | null;
+    /** Fill an untouched draft from the accepted quote. Only a staff session
+     *  or the ops server key; any other read writes nothing. */
+    fillFromQuote?: boolean;
+  },
 ) {
   let jobId = params.jobId || null;
   if (!jobId && params.workOrderId) {
@@ -1004,7 +1011,10 @@ export async function readJobWorkOrder(
   // the draft's updated_at as read), so an untouched draft is filled from the
   // accepted quote here, once, and the read returns the filled draft.
   let quoteFill: JobWorkOrderQuoteFill | null = null;
-  const untouched = eligible && !liveOf(rows) ? draftOf(rows) : null;
+  const untouched = params.fillFromQuote === true && eligible &&
+      !liveOf(rows)
+    ? draftOf(rows)
+    : null;
   if (untouched && jobWorkOrderDraftIsUntouched(untouched)) {
     const fill = await fillDraftFromQuote(client, job.id);
     quoteFill = fill.summary;
@@ -1336,8 +1346,7 @@ async function readUntouchedJobDrafts(client: any): Promise<any[]> {
     )
     .eq("kind", "job")
     .eq("status", "draft")
-    // Filled drafts carry an agreed amount, so they never crowd unfilled ones
-    // out of the read.
+    // A draft with an agreed amount is never a candidate, so it is not read.
     .is("agreed_labour_ex", null)
     .order("created_at", { ascending: true });
   if (error) {

@@ -213,8 +213,10 @@ when they enter an open approved status.
 
 An untouched draft (no `scope_items`, no `agreed_labour_ex`) is filled from the
 job's accepted quote: its task lines, with hours where the quote has hours, and
-the labour they add up to. This happens when staff open it (`create_work_order`),
-when staff read it (`job_work_order`, `job_detail`), and in the backfill's apply.
+the quote's own labour figure as the agreed labour. This happens when staff open
+it (`create_work_order`), when staff (or the ops server key) read it
+(`job_work_order`, `job_detail`; never on a routine-key read), and in the
+backfill's apply.
 A draft anyone has written into, and every approved work order, is left alone.
 Rules, line shape and flags: `docs/quote-work-order-lines-v1.md`.
 

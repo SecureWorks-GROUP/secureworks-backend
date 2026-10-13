@@ -258,18 +258,21 @@ Deno.test("The Strand (SWF-26904): install per metre as quoted, plinths, removal
     removal.total,
   ], ["Remove Hardie fence", 15, "m", 12.5, 187.5]);
   assertEquals(removal.flags, [QUOTE_LINE_FLAGS.quoteCountedAsMaterials]);
+  // Removal is not part of the quote's labour figure, so it is not counted.
+  assertEquals([removal.counted, removal.needs_review], [false, false]);
   assertEquals(r.quote_labour_ex, 1526);
   assertEquals(r.labour_matches_quote, true);
   assertEquals(r.totals.install_labour_ex, 1526);
   assertEquals(r.totals.removal_ex, 187.5);
-  assertEquals(r.agreed_labour_ex, 1713.5);
+  // The agreed labour is the quote's own figure.
+  assertEquals(r.agreed_labour_ex, 1526);
   // Delivery is not a task on site.
   assert(!r.lines.some((l) => /delivery/i.test(l.description)));
   assertEquals(r.flags, []);
   assertEquals(r.needs_review, false);
 });
 
-Deno.test("SWF-261527: 'Root removal / hard digging, 2 hrs' saved as material is read as 2 hours of labour", () => {
+Deno.test("SWF-261527: 'Root removal / hard digging, 2 hrs' saved as material is read as 2 hours, kept uncounted outside the quote's labour", () => {
   const r = buildQuoteWorkOrderLines({
     jobType: "fencing",
     pricing: ROOTS_2HRS_PRICING,
@@ -296,16 +299,25 @@ Deno.test("SWF-261527: 'Root removal / hard digging, 2 hrs' saved as material is
       rate: 80,
       rate_unit: "hr",
       total: 160,
-      counted: true,
-      flags: [QUOTE_LINE_FLAGS.savedAsMaterial],
+      counted: false,
+      flags: [
+        QUOTE_LINE_FLAGS.savedAsMaterial,
+        QUOTE_LINE_FLAGS.outsideQuoteLabour,
+      ],
     },
   );
+  assertEquals(roots.needs_review, true);
   assertEquals(r.totals.install_labour_ex, 767.5);
   assertEquals(r.labour_matches_quote, true);
   assertEquals(r.totals.extras_labour_ex, 160);
   assertEquals(r.totals.removal_ex, 277.5);
-  assertEquals(r.agreed_labour_ex, 647.5 + 120 + 277.5 + 160);
-  assertEquals(r.needs_review, false);
+  // The quote's labour figure is the install split alone: 647.5 + 120.
+  assertEquals(r.agreed_labour_ex, 767.5);
+  assertEquals(
+    r.lines.filter((l) => l.counted).map((l) => l.line_key),
+    ["install:0", "plinths"],
+  );
+  assertEquals(r.needs_review, true);
 });
 
 Deno.test("SWF-261525: 'Root removal, 1 job' saved as material is not guessed at: listed, flagged, not counted", () => {
@@ -403,46 +415,48 @@ Deno.test("patio: the quote's labour row comes through as hours at the cost per 
   assertEquals(r.needs_review, false);
 });
 
-Deno.test("new quote shape: a labour line carrying its own hours and cost per hour", () => {
+const NEW_SHAPE_ITEMS = [
+  {
+    unit: "m",
+    category: "fencing",
+    quantity: 10,
+    description: "4× Ridgeside (10.0m total)",
+  },
+  {
+    kind: "labour",
+    unit: "job",
+    category: "custom",
+    quantity: 1,
+    hours: 3,
+    cost_per_hour: 80,
+    cost_price: 240,
+    sell_price: 390,
+    description: "Root removal",
+  },
+  {
+    kind: "labour",
+    unit: "job",
+    category: "custom",
+    quantity: 1,
+    cost_price: 150,
+    description: "Reposition gate",
+  },
+  {
+    kind: "labour",
+    unit: "m",
+    category: "custom",
+    quantity: 4,
+    cost_price: 20,
+    description: "Cut sheet into existing fence",
+  },
+];
+
+Deno.test("new quote shape: labour lines carrying their own hours and cost per hour count when the quote's labour includes them", () => {
   const r = buildQuoteWorkOrderLines({
     jobType: "fencing",
     pricing: {
-      line_items: [
-        {
-          unit: "m",
-          category: "fencing",
-          quantity: 10,
-          description: "4× Ridgeside (10.0m total)",
-        },
-        {
-          kind: "labour",
-          unit: "job",
-          category: "custom",
-          quantity: 1,
-          hours: 3,
-          cost_per_hour: 80,
-          cost_price: 240,
-          sell_price: 390,
-          description: "Root removal",
-        },
-        {
-          kind: "labour",
-          unit: "job",
-          category: "custom",
-          quantity: 1,
-          cost_price: 150,
-          description: "Reposition gate",
-        },
-        {
-          kind: "labour",
-          unit: "m",
-          category: "custom",
-          quantity: 4,
-          cost_price: 20,
-          description: "Cut sheet into existing fence",
-        },
-      ],
-      labourCostEstimate: 350,
+      line_items: NEW_SHAPE_ITEMS,
+      labourCostEstimate: 350 + 240 + 150 + 80,
     },
     costTable: COST_TABLE,
   });
@@ -470,8 +484,26 @@ Deno.test("new quote shape: a labour line carrying its own hours and cost per ho
   // Priced per metre: no hours expected.
   const cut = byKey(r.lines, "labour:3");
   assertEquals([cut.qty, cut.unit, cut.total, cut.flags], [4, "m", 80, []]);
+  assert(r.lines.every((l) => l.counted));
+  assertEquals(r.labour_matches_quote, true);
   assertEquals(r.agreed_labour_ex, 350 + 240 + 150 + 80);
   assertEquals(r.needs_review, true);
+});
+
+Deno.test("a labour line outside the quote's labour figure is kept, uncounted and flagged for the approver", () => {
+  const r = buildQuoteWorkOrderLines({
+    jobType: "fencing",
+    pricing: { line_items: NEW_SHAPE_ITEMS, labourCostEstimate: 350 },
+    costTable: COST_TABLE,
+  });
+  assertEquals(byKey(r.lines, "install:0").counted, true);
+  for (const key of ["labour:1", "labour:2", "labour:3"]) {
+    const line = byKey(r.lines, key);
+    assertEquals([line.counted, line.needs_review], [false, true], key);
+    assert(line.flags.includes(QUOTE_LINE_FLAGS.outsideQuoteLabour), key);
+  }
+  assertEquals(r.agreed_labour_ex, 350);
+  assertEquals(r.labour_matches_quote, true);
 });
 
 Deno.test("access: the quote's own access percent is a line, worded without the percent, and the split still equals the quote", () => {
@@ -517,7 +549,7 @@ Deno.test("access: the quote's own access percent is a line, worded without the 
   assertEquals(r.agreed_labour_ex, 1320);
 });
 
-Deno.test("a cost table that no longer matches the quote is flagged, never silently used", () => {
+Deno.test("a cost table that no longer rebuilds the quote's labour: nothing counted, the agreed labour stays the quote's, every rate line in review", () => {
   const r = buildQuoteWorkOrderLines({
     jobType: "fencing",
     pricing: STRAND_PRICING,
@@ -525,11 +557,59 @@ Deno.test("a cost table that no longer matches the quote is flagged, never silen
   });
   assertEquals(r.labour_matches_quote, false);
   assert(r.flags.includes(QUOTE_RESULT_FLAGS.labourDiffersFromQuote));
+  assertEquals(r.agreed_labour_ex, 1526);
+  // Install, plinths and removal: every line priced from the table.
+  assertEquals(r.lines.length, 3);
+  for (const line of r.lines) {
+    assertEquals([line.counted, line.needs_review], [false, true]);
+    assert(line.flags.includes(QUOTE_LINE_FLAGS.labourDiffersFromQuote));
+  }
+  assertEquals(r.needs_review, true);
+});
+
+Deno.test("a rate changed since the quote was frozen: its lines are in review and the split is not counted", () => {
+  const removalChanged = buildQuoteWorkOrderLines({
+    jobType: "fencing",
+    pricing: STRAND_PRICING,
+    costTable: COST_TABLE,
+    ratesChangedSinceQuote: [FENCE_LABOUR_COST_KEYS.removeHardie],
+  });
+  const removal = byKey(removalChanged.lines, "removal:2");
+  assertEquals([removal.counted, removal.needs_review], [false, true]);
+  assert(removal.flags.includes(QUOTE_LINE_FLAGS.ratesChangedSinceQuote));
+  // The install split's own rates are unchanged, so it still counts.
+  assertEquals(byKey(removalChanged.lines, "install:0").counted, true);
   assert(
-    byKey(r.lines, "install:0").flags.includes(
-      QUOTE_LINE_FLAGS.ratesDifferFromQuote,
-    ),
+    removalChanged.flags.includes(QUOTE_RESULT_FLAGS.ratesChangedSinceQuote),
   );
+  assertEquals(removalChanged.agreed_labour_ex, 1526);
+
+  const installChanged = buildQuoteWorkOrderLines({
+    jobType: "fencing",
+    pricing: STRAND_PRICING,
+    costTable: COST_TABLE,
+    ratesChangedSinceQuote: [FENCE_LABOUR_COST_KEYS.installPerMetre],
+  });
+  const install = byKey(installChanged.lines, "install:0");
+  assertEquals([install.counted, install.needs_review], [false, true]);
+  assert(install.flags.includes(QUOTE_LINE_FLAGS.ratesChangedSinceQuote));
+  assert(installChanged.lines.every((l) => !l.counted));
+  assertEquals(installChanged.labour_matches_quote, null);
+  assertEquals(installChanged.agreed_labour_ex, 1526);
+  assertEquals(installChanged.needs_review, true);
+});
+
+Deno.test("a quote with no labour figure: lines only, no agreed labour, flagged", () => {
+  const { labourCostEstimate: _l, internal: _i, ...noLabour } = STRAND_PRICING;
+  const r = buildQuoteWorkOrderLines({
+    jobType: "fencing",
+    pricing: noLabour,
+    costTable: COST_TABLE,
+  });
+  assert(r.lines.length > 0);
+  assert(r.lines.every((l) => !l.counted));
+  assertEquals(r.agreed_labour_ex, null);
+  assert(r.flags.includes(QUOTE_RESULT_FLAGS.quoteLabourMissing));
   assertEquals(r.needs_review, true);
 });
 
@@ -544,7 +624,7 @@ Deno.test("a missing rate leaves the line uncounted and flagged", () => {
     assertEquals(line.total, null);
     assert(line.flags.includes(QUOTE_LINE_FLAGS.rateMissing));
   }
-  assertEquals(r.agreed_labour_ex, null);
+  assertEquals(r.agreed_labour_ex, 1526);
   assertEquals(r.labour_matches_quote, null);
   assertEquals(r.needs_review, true);
 });
@@ -703,6 +783,7 @@ Deno.test("trade view of the filled lines: hours and quantities, no dollars, no 
       "quote_cost_ex",
       "flags",
       "counted",
+      "needs_review",
     ]
   ) {
     assert(!text.includes(leak), `trade view leaked ${leak}: ${text}`);

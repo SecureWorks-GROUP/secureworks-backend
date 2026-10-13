@@ -204,7 +204,8 @@ const ACCEPTED_PRICING = {
   ],
   labourCostEstimate: 767.5,
 };
-const ACCEPTED_AGREED = 647.5 + 120 + 277.5 + 160;
+// The quote's own labour figure (labourCostEstimate), never re-priced.
+const ACCEPTED_AGREED = 767.5;
 // The job was accepted after its revision was frozen (5 Oct) and before the
 // re-quote below (10 Oct).
 const ACCEPTED_AT = "2026-10-09T04:05:03Z";
@@ -246,6 +247,8 @@ function costTableRows() {
     scope_tool: "fence-designer",
     item_key,
     default_cost_rate,
+    // Set before the accepted revision was frozen (5 Oct).
+    last_updated_at: "2026-09-01T00:00:00+00:00",
   }));
 }
 
@@ -301,7 +304,10 @@ function baseDb(extra: Partial<Tables> = {}) {
 
 Deno.test("an untouched draft is filled from the accepted quote on the staff read, and the read returns it filled", async () => {
   const db = baseDb();
-  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals(r.quote_fill.filled, true);
   assertEquals(r.quote_fill.reason, "filled");
   assertEquals(r.quote_fill.scope_revision_id, REV_ACCEPTED);
@@ -312,6 +318,8 @@ Deno.test("an untouched draft is filled from the accepted quote on the staff rea
   const roots = wo.scope_items.find((i: any) =>
     /hard digging/.test(i.description)
   );
+  // The 2 hours come through; the quote's labour figure does not include
+  // them, so they are kept uncounted and flagged for the approver.
   assertEquals([
     roots.qty,
     roots.unit,
@@ -319,11 +327,16 @@ Deno.test("an untouched draft is filled from the accepted quote on the staff rea
     roots.rate,
     roots.total,
     roots.counted,
-  ], [2, "hrs", 2, 80, 160, true]);
+    roots.needs_review,
+  ], [2, "hrs", 2, 80, 160, false, true]);
+  assert(roots.flags.includes("outside_quote_labour"));
   assert(wo.scope_items.every((i: any) => i.source === "quote"));
   // Stored, so the next read is a plain read.
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
-  const again: any = await readJobWorkOrder(db, { jobId: JOB });
+  const again: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals(again.quote_fill, null);
   // The event carries ids and counts only: job_events is readable by trades.
   const events = db.tables.job_events.filter((e) =>
@@ -343,7 +356,10 @@ Deno.test("an approved work order is never filled or written", async () => {
       draftRow({ status: "approved", approved_at: "2026-10-10T00:00:00Z" }),
     ],
   });
-  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals(r.quote_fill, null);
   const direct = await fillJobWorkOrderDraftFromQuote(db, JOB);
   assertEquals(direct.reason, "sealed");
@@ -359,7 +375,10 @@ Deno.test("a draft someone has written into is left alone", async () => {
     ]
   ) {
     const db = baseDb({ work_orders: [draftRow(typed)] });
-    const r: any = await readJobWorkOrder(db, { jobId: JOB });
+    const r: any = await readJobWorkOrder(db, {
+      jobId: JOB,
+      fillFromQuote: true,
+    });
     assertEquals(r.quote_fill, null);
     const direct = await fillJobWorkOrderDraftFromQuote(db, JOB);
     assertEquals(direct.reason, "draft_already_has_lines");
@@ -404,7 +423,10 @@ Deno.test("the quote used is the accepted revision, even once a later revision s
     [],
   ]);
   assertEquals(p.result.agreed_labour_ex, ACCEPTED_AGREED);
-  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals(r.quote_fill.scope_revision_id, REV_ACCEPTED);
   assertEquals(r.work_order.agreed_labour_ex, ACCEPTED_AGREED);
 });
@@ -449,7 +471,10 @@ Deno.test("no accepted revision: the draft is not filled, from a later revision 
       label,
     );
     assertEquals(p.result.lines, [], label);
-    const r: any = await readJobWorkOrder(db, { jobId: JOB });
+    const r: any = await readJobWorkOrder(db, {
+      jobId: JOB,
+      fillFromQuote: true,
+    });
     assertEquals([r.quote_fill.filled, r.quote_fill.reason], [
       false,
       "no_accepted_quote",
@@ -497,20 +522,60 @@ Deno.test("review flags are kept on each flagged line in the stored draft", asyn
   // Today's install rate no longer rebuilds the quote's labour figure.
   db.tables.scope_tool_defaults.find((r) => r.item_key === "base-labour")!
     .default_cost_rate = "40.00";
-  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals([r.quote_fill.filled, r.quote_fill.needs_review], [true, true]);
   const stored = db.tables.work_orders[0].scope_items;
   const roots = stored.find((l: any) => l.description === "Root removal");
   assert(roots.flags.includes("labour_or_material_unknown"));
   assertEquals(roots.counted, false);
-  // The result-level flag rides on every line.
+  // The result-level flag rides on every line, and every line is in review.
   assert(
-    stored.every((l: any) => l.flags.includes("labour_differs_from_quote")),
+    stored.every((l: any) =>
+      l.flags.includes("labour_differs_from_quote") && l.needs_review === true
+    ),
   );
+  // The agreed labour is still the quote's own figure.
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
   // A later read does not fill again, and every flag is still on the draft.
-  const again: any = await readJobWorkOrder(db, { jobId: JOB });
+  const again: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals(again.quote_fill, null);
   assertEquals(again.work_order.scope_items, stored);
+});
+
+Deno.test("a cost table row changed after the quote was frozen puts its lines in review; the agreed labour stays the quote's", async () => {
+  for (const updated of ["2026-10-06T00:00:00+00:00", null]) {
+    const db = baseDb();
+    db.tables.scope_tool_defaults.find((r) =>
+      r.item_key === "remove-colorbond-cost"
+    )!.last_updated_at = updated;
+    const r: any = await readJobWorkOrder(db, {
+      jobId: JOB,
+      fillFromQuote: true,
+    });
+    assertEquals(r.quote_fill.filled, true, String(updated));
+    const stored = db.tables.work_orders[0].scope_items;
+    const removal = stored.find((l: any) => l.basis === "removal");
+    assertEquals([removal.counted, removal.needs_review], [false, true]);
+    assert(removal.flags.includes("rates_changed_since_quote"));
+    assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
+  }
+});
+
+Deno.test("a read that does not ask to fill writes nothing (the routine key's read)", async () => {
+  const db = baseDb();
+  for (const params of [{ jobId: JOB }, { jobId: JOB, fillFromQuote: false }]) {
+    const r: any = await readJobWorkOrder(db, params);
+    assertEquals(r.quote_fill, null);
+    assertEquals(r.work_order.scope_items, []);
+  }
+  assertEquals(db.writes(), []);
+  assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);
 });
 
 Deno.test("preview: a job id only, writes nothing; an unknown job is a 404", async () => {
@@ -540,7 +605,10 @@ Deno.test("preview: a job id only, writes nothing; an unknown job is a 404", asy
 Deno.test("an unreadable cost table never fills on wrong figures and never fails the read", async () => {
   const db = baseDb();
   db.failOn.add("select:scope_tool_defaults");
-  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals(r.quote_fill.filled, false);
   assertEquals(r.quote_fill.reason, "fill_failed");
   assertEquals(r.quote_fill.code, "cost_table_unreadable");
@@ -557,7 +625,10 @@ Deno.test("a job with no quote lines keeps its empty draft", async () => {
       description: "Delivery",
     }],
   });
-  const r: any = await readJobWorkOrder(db, { jobId: JOB });
+  const r: any = await readJobWorkOrder(db, {
+    jobId: JOB,
+    fillFromQuote: true,
+  });
   assertEquals(r.quote_fill.reason, "no_quote_lines");
   assertEquals(db.tables.work_orders[0].scope_items, []);
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, null);

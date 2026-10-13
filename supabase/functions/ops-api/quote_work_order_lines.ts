@@ -9,6 +9,10 @@
 // Captain's answers, 12 Oct 2026, that this module follows:
 // - The quote's own cost table is the only rate source (scope_tool_defaults,
 //   the table the fence tool prices from). No other rate card is read.
+// - The agreed labour is the quote's own labour figure (labourCostEstimate,
+//   else internal.labour), never a sum re-priced from today's table. A line
+//   counts toward it only when it is part of that figure; the rest stay on the
+//   work order, uncounted and flagged.
 // - Fencing install is shown as quoted, per metre. Hours appear only where the
 //   quote itself has hours.
 // - A custom labour line counts as labour, whatever the cost breakdown called it.
@@ -74,6 +78,8 @@ export type QuoteWorkOrderLine = {
   total: number | null;
   counted: boolean;
   flags: string[];
+  /** True when any flag on the line asks the approver to look. */
+  needs_review: boolean;
   /** What the quote's cost breakdown put against a line it is not certain is
    *  labour. Office-only, never counted. */
   quote_cost_ex?: number | null;
@@ -83,8 +89,9 @@ export type QuoteWorkOrderLines = {
   schema: typeof QUOTE_WORK_ORDER_LINES_SCHEMA;
   job_type: "fencing" | "patio" | "other";
   lines: QuoteWorkOrderLine[];
-  /** Sum of counted line totals; null when no line could be counted. */
+  /** The quote's own labour figure; null when the quote has none. */
   agreed_labour_ex: number | null;
+  /** Line totals by group, counted or not (office breakdown). */
   totals: {
     install_labour_ex: number;
     removal_ex: number;
@@ -93,9 +100,9 @@ export type QuoteWorkOrderLines = {
   };
   /** The quote's own labour figure (labourCostEstimate), for comparison. */
   quote_labour_ex: number | null;
-  /** Fencing: the install split (metres, plinths, gates, access) rebuilt from
-   *  the cost table equals the quote's labour figure. Patio: the labour lines
-   *  add up to it. Null when there was nothing to compare. */
+  /** The counted lines reproduce the quote's labour figure. Null when they
+   *  could not be compared (no labour figure, a rate missing or changed since
+   *  the quote). */
   labour_matches_quote: boolean | null;
   needs_review: boolean;
   flags: string[];
@@ -112,13 +119,16 @@ export const QUOTE_LINE_FLAGS = {
   rateMissing: "rate_missing",
   quoteCountedAsMaterials: "quote_counted_as_materials",
   licensedRemoval: "licensed_removal",
-  ratesDifferFromQuote: "rates_differ_from_quote",
+  ratesChangedSinceQuote: "rates_changed_since_quote",
+  labourDiffersFromQuote: "labour_differs_from_quote",
+  outsideQuoteLabour: "outside_quote_labour",
 } as const;
 
 export const QUOTE_RESULT_FLAGS = {
   noQuoteLines: "no_quote_lines",
   quoteLabourMissing: "quote_labour_missing",
   labourDiffersFromQuote: "labour_differs_from_quote",
+  ratesChangedSinceQuote: "rates_changed_since_quote",
   unsupportedJobType: "unsupported_job_type",
 } as const;
 
@@ -198,9 +208,11 @@ export function fenceInstallDescription(quoted: string): string {
 function fencingInstallLines(
   items: Record<string, any>[],
   table: QuoteCostTable | undefined,
-): { lines: QuoteWorkOrderLine[]; complete: boolean; subtotal: number } {
+  changed: ReadonlySet<string>,
+): { lines: QuoteWorkOrderLine[]; complete: boolean; ratesChanged: boolean } {
   const lines: QuoteWorkOrderLine[] = [];
   let complete = true;
+  let ratesChanged = false;
   const priced = (
     key: string,
     basis: QuoteWorkOrderLineBasis,
@@ -211,7 +223,14 @@ function fencingInstallLines(
     rateUnit: string,
   ) => {
     const rate = costRate(table, rateKey);
-    if (rate === null) complete = false;
+    const flags: string[] = [];
+    if (rate === null) {
+      complete = false;
+      flags.push(QUOTE_LINE_FLAGS.rateMissing);
+    } else if (changed.has(rateKey)) {
+      ratesChanged = true;
+      flags.push(QUOTE_LINE_FLAGS.ratesChangedSinceQuote);
+    }
     lines.push({
       line_key: key,
       source: "quote",
@@ -223,8 +242,9 @@ function fencingInstallLines(
       rate,
       rate_unit: rate === null ? null : rateUnit,
       total: rate === null ? null : round2(qty * rate),
-      counted: rate !== null,
-      flags: rate === null ? [QUOTE_LINE_FLAGS.rateMissing] : [],
+      counted: false,
+      flags,
+      needs_review: false,
     });
   };
 
@@ -290,6 +310,11 @@ function fencingInstallLines(
     )
     : null;
   if (accessPct !== null && lines.length > 0) {
+    const accessFlags = !complete
+      ? [QUOTE_LINE_FLAGS.rateMissing]
+      : ratesChanged
+      ? [QUOTE_LINE_FLAGS.ratesChangedSinceQuote]
+      : [];
     lines.push({
       line_key: "access",
       source: "quote",
@@ -303,18 +328,22 @@ function fencingInstallLines(
       rate: accessPct,
       rate_unit: "pct",
       total: complete ? round2(subtotal * accessPct / 100) : null,
-      counted: complete,
-      flags: complete ? [] : [QUOTE_LINE_FLAGS.rateMissing],
+      counted: false,
+      flags: accessFlags,
+      needs_review: false,
     });
   }
-  return { lines, complete, subtotal };
+  return { lines, complete, ratesChanged };
 }
 
 // ── Removal (the quote counts these under materials) ────────────────────────
+//
+// Never part of the quote's labour figure, so never counted.
 
 function removalLines(
   items: Record<string, any>[],
   table: QuoteCostTable | undefined,
+  changed: ReadonlySet<string>,
 ): QuoteWorkOrderLine[] {
   const out: QuoteWorkOrderLine[] = [];
   items.forEach((row, i) => {
@@ -340,6 +369,9 @@ function removalLines(
     const unit = text(row.unit) || "lot";
     const rate = rateKey ? costRate(table, rateKey) : null;
     if (rate === null) flags.push(QUOTE_LINE_FLAGS.rateMissing);
+    else if (changed.has(rateKey!)) {
+      flags.push(QUOTE_LINE_FLAGS.ratesChangedSinceQuote);
+    }
     out.push({
       line_key: `removal:${i}`,
       source: "quote",
@@ -351,8 +383,9 @@ function removalLines(
       rate,
       rate_unit: rate === null ? null : unit,
       total: rate === null ? null : round2(qty * rate),
-      counted: rate !== null,
+      counted: false,
       flags,
+      needs_review: false,
     });
   });
   return out;
@@ -419,8 +452,9 @@ function labourLine(
     rate,
     rate_unit: rateUnit,
     total,
-    counted: total !== null,
+    counted: false,
     flags,
+    needs_review: false,
   };
 }
 
@@ -449,6 +483,7 @@ function uncertainExtra(
     total: null,
     counted: false,
     flags,
+    needs_review: false,
     quote_cost_ex: cost !== null && qty !== null ? round2(qty * cost) : null,
   };
 }
@@ -499,86 +534,118 @@ export function buildQuoteWorkOrderLines(input: {
   jobType: unknown;
   pricing: unknown;
   costTable?: QuoteCostTable;
+  /** Cost table item keys changed since the quote was frozen (or whose
+   *  change time is unknown): lines priced from them cannot reproduce the
+   *  quote. */
+  ratesChangedSinceQuote?: readonly string[];
 }): QuoteWorkOrderLines {
   const jobType = jobTypeOf(input.jobType);
   const pricing = asObject(input.pricing);
   const items = lineItems(pricing);
+  const changed = new Set(input.ratesChangedSinceQuote ?? []);
   const flags: string[] = [];
   const quoteLabour = positive(pricing.labourCostEstimate) ??
     positive(asObject(pricing.internal).labour);
 
+  // The base lines are the ones the quote's labour figure is built from:
+  // the fencing install split, or the patio quote's labour rows.
+  let base: QuoteWorkOrderLine[] = [];
+  let baseComparable = true;
   let installLines: QuoteWorkOrderLine[] = [];
   let removal: QuoteWorkOrderLine[] = [];
-  let labourMatches: boolean | null = null;
-
   if (jobType === "fencing") {
-    const install = fencingInstallLines(items, input.costTable);
+    const install = fencingInstallLines(items, input.costTable, changed);
     installLines = install.lines;
-    removal = removalLines(items, input.costTable);
-    if (installLines.length > 0) {
-      if (quoteLabour === null) {
-        flags.push(QUOTE_RESULT_FLAGS.quoteLabourMissing);
-      } else if (install.complete) {
-        const rebuilt = installLines.reduce((s, l) => s + (l.total ?? 0), 0);
-        labourMatches = Math.abs(round2(rebuilt) - round2(quoteLabour)) <= 0.5;
-        if (!labourMatches) {
-          flags.push(QUOTE_RESULT_FLAGS.labourDiffersFromQuote);
-          for (const line of installLines) {
-            line.flags.push(QUOTE_LINE_FLAGS.ratesDifferFromQuote);
-          }
-        }
-      }
-    }
+    base = installLines;
+    baseComparable = install.complete && !install.ratesChanged;
+    removal = removalLines(items, input.costTable, changed);
   } else if (jobType === "other") {
     flags.push(QUOTE_RESULT_FLAGS.unsupportedJobType);
   }
 
   const extras = extraLines(items);
   if (jobType === "patio") {
-    const labourTotal = extras
-      .filter((l) => l.line_key.startsWith("labour:"))
-      .reduce((s, l) => s + (l.total ?? 0), 0);
-    if (quoteLabour === null) {
-      if (labourTotal > 0) flags.push(QUOTE_RESULT_FLAGS.quoteLabourMissing);
-    } else {
-      labourMatches =
-        Math.abs(round2(labourTotal) - round2(quoteLabour)) <= 0.5;
-      if (!labourMatches) flags.push(QUOTE_RESULT_FLAGS.labourDiffersFromQuote);
-    }
+    const labourRowKeys = new Set(
+      items.flatMap((row, i) =>
+        category(row) === "labour" ? [`labour:${i}`] : []
+      ),
+    );
+    base = extras.filter((l) => labourRowKeys.has(l.line_key));
   }
+  const extraLabour = extras.filter((l) =>
+    l.basis === "quote_labour_line" && !base.includes(l)
+  );
 
   const lines = [...installLines, ...removal, ...extras];
   if (lines.length === 0) flags.push(QUOTE_RESULT_FLAGS.noQuoteLines);
 
-  const sumOf = (pick: (l: QuoteWorkOrderLine) => boolean) =>
-    round2(
-      lines.filter((l) => l.counted && pick(l)).reduce(
-        (s, l) => s + (l.total ?? 0),
-        0,
-      ),
+  const sum = (ls: QuoteWorkOrderLine[]) =>
+    round2(ls.reduce((s, l) => s + (l.total ?? 0), 0));
+  const near = (a: number, b: number) => Math.abs(round2(a) - round2(b)) <= 0.5;
+
+  let counted: QuoteWorkOrderLine[] = [];
+  let labourMatches: boolean | null = null;
+  if (jobType !== "other" && lines.length > 0) {
+    if (quoteLabour === null) {
+      flags.push(QUOTE_RESULT_FLAGS.quoteLabourMissing);
+    } else if (baseComparable) {
+      const pricedExtras = extraLabour.filter((l) => l.total !== null);
+      if (near(sum(base), quoteLabour)) {
+        counted = base;
+        labourMatches = true;
+      } else if (
+        pricedExtras.length > 0 &&
+        near(sum(base) + sum(pricedExtras), quoteLabour)
+      ) {
+        // The quoting tools' new shape: custom labour lines are part of the
+        // quote's labour figure.
+        counted = [...base, ...pricedExtras];
+        labourMatches = true;
+      } else {
+        labourMatches = false;
+        flags.push(QUOTE_RESULT_FLAGS.labourDiffersFromQuote);
+        for (const line of [...base, ...removal]) {
+          line.flags.push(QUOTE_LINE_FLAGS.labourDiffersFromQuote);
+        }
+      }
+    }
+    for (const line of extraLabour) {
+      if (!counted.includes(line)) {
+        line.flags.push(QUOTE_LINE_FLAGS.outsideQuoteLabour);
+      }
+    }
+  }
+  if (
+    lines.some((l) => l.flags.includes(QUOTE_LINE_FLAGS.ratesChangedSinceQuote))
+  ) {
+    flags.push(QUOTE_RESULT_FLAGS.ratesChangedSinceQuote);
+  }
+  for (const line of lines) {
+    line.counted = counted.includes(line);
+    line.needs_review = line.flags.some((f) =>
+      !INFORMATIONAL_LINE_FLAGS.has(f)
     );
-  const counted = lines.filter((l) => l.counted);
-  const needsReview = flags.length > 0 ||
-    lines.some((l) => l.flags.some((f) => !INFORMATIONAL_LINE_FLAGS.has(f)));
+  }
+
+  const totalOf = (pick: (l: QuoteWorkOrderLine) => boolean) =>
+    sum(lines.filter(pick));
 
   return {
     schema: QUOTE_WORK_ORDER_LINES_SCHEMA,
     job_type: jobType,
     lines,
-    agreed_labour_ex: counted.length > 0
-      ? round2(counted.reduce((s, l) => s + (l.total ?? 0), 0))
-      : null,
+    agreed_labour_ex: quoteLabour,
     totals: {
-      install_labour_ex: sumOf((l) => l.basis.startsWith("fence_")),
-      removal_ex: sumOf((l) => l.basis === "removal"),
-      extras_labour_ex: sumOf((l) => l.basis === "quote_labour_line"),
+      install_labour_ex: totalOf((l) => l.basis.startsWith("fence_")),
+      removal_ex: totalOf((l) => l.basis === "removal"),
+      extras_labour_ex: totalOf((l) => l.basis === "quote_labour_line"),
       uncertain_cost_ex: round2(
         lines.reduce((s, l) => s + (l.quote_cost_ex ?? 0), 0),
       ),
     },
     quote_labour_ex: quoteLabour,
     labour_matches_quote: labourMatches,
-    needs_review: needsReview,
+    needs_review: flags.length > 0 || lines.some((l) => l.needs_review),
     flags,
   };
 }

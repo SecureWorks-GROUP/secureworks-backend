@@ -6551,7 +6551,12 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         if (!jid) return json({ error: 'jobId required' }, 400)
         const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
-        return json(await jobDetail(client, jid, { slim }))
+        // Only staff or the ops server key may fill the work order draft on
+        // this read; the routine key reads it and writes nothing.
+        return json(await jobDetail(client, jid, {
+          slim,
+          fillWorkOrderFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
+        }))
       }
       // Staff-only by the front door's default (not on the trade or routine lists).
       case 'job_notes':
@@ -8210,6 +8215,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await runJobWorkOrder(() => readJobWorkOrder(client, {
           jobId: url.searchParams.get('job_id'),
           workOrderId: url.searchParams.get('work_order_id'),
+          fillFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
         })))
       // The work order lines a job's accepted quote gives
       // (docs/quote-work-order-lines-v1.md). A pure read: writes nothing.
@@ -16333,7 +16339,11 @@ async function jobNotes(client: any, jobRef: string) {
 
 export const _jobNotesForTest = jobNotes
 
-async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
+async function jobDetail(
+  client: any,
+  jobId: string,
+  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean } = {},
+) {
   if (!jobId) throw new Error('jobId required')
 
   // If job_number passed instead of UUID, resolve it
@@ -16482,7 +16492,10 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
   let jobWorkOrder: any = null
   if (job?.type === 'fencing' || job?.type === 'patio') {
     try {
-      const jwo = await readJobWorkOrder(client, { jobId })
+      const jwo = await readJobWorkOrder(client, {
+        jobId,
+        fillFromQuote: opts.fillWorkOrderFromQuote === true,
+      })
       jobWorkOrder = {
         work_order: jwo.work_order,
         live_work_order_id: jwo.live_work_order?.id ?? null,
