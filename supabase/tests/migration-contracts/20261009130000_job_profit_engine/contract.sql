@@ -15,13 +15,18 @@
 --             the job.
 --   JP-INF    project expenses 5000, trade labour 3000 not on the project:
 --             cost 3000 line-level, the 5000 never a cost, no profit figure.
---   JP-DBL    trade lines larger than the project total: flags
---             project_below_trade_lines, a negative materials deduction cannot
---             publish a labour-only margin, and a live price and live pricing
---             estimate are never a quoted figure or an expected cost.
+--   JP-DBL    trade lines larger than the project total: never summed with
+--             it, a negative materials deduction cannot publish a labour-only
+--             margin, and a live price and live pricing estimate are never a
+--             quoted figure or an expected cost.
 --   JP-LIVE   no quote sent: quoted and expected stay null whatever the live
 --             price says, and a live materials estimate still holds back a
 --             labour-only margin.
+--   JP-QQ     a quick quote sent with no cost figures (zeros stored): quoted
+--             is the sent value, expected cost is null, never 0.
+--   JP-QQ2    an accepted quote with no cost figures over an earlier sent
+--             revision that had them: expected falls through to the sent
+--             revision.
 --   JP-MS     make-safe roof report with no client invoice and a trade line
 --             found by job number: margin suppressed, flags carried.
 --   JP-REP    a fencing card family-tagged repair, invoiced with a materials
@@ -82,6 +87,10 @@ INSERT INTO public.jobs (id, org_id, status, type, job_number, legacy, metadata,
    '2026-08-01T00:00:00Z'),
   ('a7000000-0000-4000-8000-000000000009', '00000000-0000-0000-0000-000000000001', 'complete', 'makesafe', 'JP-LIVE', false, '{}',
    '{"totalExGST": 5000, "totalCostEstimate": 900, "labourCostEstimate": 500, "materialCostEstimate": 400}', NULL,
+   '2026-08-01T00:00:00Z'),
+  ('a7000000-0000-4000-8000-00000000000a', '00000000-0000-0000-0000-000000000001', 'quoted', 'makesafe', 'JP-QQ', false, '{}', NULL, NULL,
+   '2026-08-01T00:00:00Z'),
+  ('a7000000-0000-4000-8000-00000000000b', '00000000-0000-0000-0000-000000000001', 'accepted', 'makesafe', 'JP-QQ2', false, '{}', NULL, NULL,
    '2026-08-01T00:00:00Z');
 
 INSERT INTO public.users (id, org_id, name) VALUES
@@ -222,6 +231,28 @@ INSERT INTO public.quote_revisions (job_id, job_document_id, version, sent_at, r
   ('a7000000-0000-4000-8000-000000000002', 'a7300000-0000-4000-8000-000000000002', 1, '2026-07-20T00:00:00Z', 'send-quote/send',
    '{"total_inc_gst": 1650, "total_ex_gst": 1500}',
    '{"cost_estimates": {"labour_total": 400, "material_total": 500, "subcontract_commission_total": 60}}');
+
+-- JP-QQ: a quick quote sent with no cost figures; the adapter stores zeros.
+INSERT INTO public.job_documents (id, job_id, type, sent_at, created_at) VALUES
+  ('a7300000-0000-4000-8000-000000000003', 'a7000000-0000-4000-8000-00000000000a', 'quote', '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z');
+INSERT INTO public.quote_revisions (job_id, job_document_id, version, sent_at, released_via, totals_snapshot_json, internal_cost_snapshot_json) VALUES
+  ('a7000000-0000-4000-8000-00000000000a', 'a7300000-0000-4000-8000-000000000003', 1, '2026-07-20T00:00:00Z', 'send-quote/send',
+   '{"total_inc_gst": 550, "total_ex_gst": 500}',
+   '{"cost_estimates": {"labour_total": 0, "material_total": 0, "subcontract_commission_total": 0}}');
+
+-- JP-QQ2: version 1 sent with cost figures, then an accepted document whose
+-- revision carries zeros.
+INSERT INTO public.job_documents (id, job_id, type, sent_at, superseded_at, created_at) VALUES
+  ('a7300000-0000-4000-8000-000000000004', 'a7000000-0000-4000-8000-00000000000b', 'quote', '2026-07-18T00:00:00Z', '2026-07-20T00:00:00Z', '2026-07-18T00:00:00Z');
+INSERT INTO public.job_documents (id, job_id, type, sent_at, accepted_at, created_at) VALUES
+  ('a7300000-0000-4000-8000-000000000005', 'a7000000-0000-4000-8000-00000000000b', 'quote', '2026-07-20T00:00:00Z', '2026-07-22T00:00:00Z', '2026-07-20T00:00:00Z');
+INSERT INTO public.quote_revisions (job_id, job_document_id, version, sent_at, released_via, totals_snapshot_json, internal_cost_snapshot_json) VALUES
+  ('a7000000-0000-4000-8000-00000000000b', 'a7300000-0000-4000-8000-000000000004', 1, '2026-07-18T00:00:00Z', 'send-quote/send',
+   '{"total_inc_gst": 880, "total_ex_gst": 800}',
+   '{"cost_estimates": {"labour_total": 200, "material_total": "150", "subcontract_commission_total": 0}}'),
+  ('a7000000-0000-4000-8000-00000000000b', 'a7300000-0000-4000-8000-000000000005', 2, '2026-07-20T00:00:00Z', 'send-quote/send',
+   '{"total_inc_gst": 990, "total_ex_gst": 900}',
+   '{"cost_estimates": {"labour_total": 0, "material_total": 0, "subcontract_commission_total": 0}}');
 
 -- ── Cost events ─────────────────────────────────────────────────────────────
 DO $$
@@ -383,8 +414,8 @@ BEGIN
 
   -- JP-DBL: trade lines exceed the project total; never summed with it.
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-DBL';
-  IF r.cost_basis <> 'line_level' OR r.actual_cost_ex <> 260 OR r.actual_materials_ex <> -40 OR NOT ('project_below_trade_lines' = ANY (r.completeness)) THEN
-    RAISE EXCEPTION 'jp dbl: basis % cost % completeness %', r.cost_basis, r.actual_cost_ex, r.completeness;
+  IF r.cost_basis <> 'line_level' OR r.actual_cost_ex <> 260 OR r.actual_materials_ex <> -40 THEN
+    RAISE EXCEPTION 'jp dbl: basis % cost % materials %', r.cost_basis, r.actual_cost_ex, r.actual_materials_ex;
   END IF;
   IF r.xero_project_expenses_ex <> 200 OR 'xero_project_linked_by_contact_only' = ANY (r.completeness) THEN
     RAISE EXCEPTION 'jp dbl: project figure % completeness %', r.xero_project_expenses_ex, r.completeness;
@@ -417,6 +448,30 @@ BEGIN
   IF r.actual_cost_ex <> 500 OR r.cost_flag <> 'materials_not_linked' OR r.profit_ex IS NOT NULL OR r.margin_pct IS NOT NULL
      OR r.profit_ex_unsuppressed <> 1500 THEN
     RAISE EXCEPTION 'jp live: materials suppression % % % % %', r.actual_cost_ex, r.cost_flag, r.profit_ex, r.margin_pct, r.profit_ex_unsuppressed;
+  END IF;
+
+  -- JP-QQ: sent with no cost figures. The quote is real, the expected cost is
+  -- unknown: null in every lane, never 0.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-QQ';
+  IF r.quoted_ex <> 500 OR r.quoted_source <> 'sent_quote:newest_current:quote_revision' THEN
+    RAISE EXCEPTION 'jp qq: quoted % from %', r.quoted_ex, r.quoted_source;
+  END IF;
+  IF r.expected_source IS NOT NULL OR r.expected_cost_ex IS NOT NULL OR r.expected_labour_ex IS NOT NULL
+     OR r.expected_materials_ex IS NOT NULL OR r.expected_commission_ex IS NOT NULL THEN
+    RAISE EXCEPTION 'jp qq: zero-filled revision read as a fixed cost % % % % %', r.expected_source, r.expected_cost_ex,
+      r.expected_labour_ex, r.expected_materials_ex, r.expected_commission_ex;
+  END IF;
+
+  -- JP-QQ2: the accepted revision fixed no cost, so the earlier sent revision's
+  -- figures are the expected cost.
+  SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-QQ2';
+  IF r.quoted_ex <> 900 OR r.quoted_source <> 'sent_quote:accepted:quote_revision' THEN
+    RAISE EXCEPTION 'jp qq2: quoted % from %', r.quoted_ex, r.quoted_source;
+  END IF;
+  IF r.expected_source <> 'sent_quote_revision' OR r.expected_labour_ex <> 200 OR r.expected_materials_ex <> 150
+     OR r.expected_commission_ex <> 0 OR r.expected_cost_ex <> 350 THEN
+    RAISE EXCEPTION 'jp qq2: expected % % % % %', r.expected_source, r.expected_labour_ex, r.expected_materials_ex,
+      r.expected_commission_ex, r.expected_cost_ex;
   END IF;
 
   -- JP-MS: no client invoice, so margin and profit are suppressed.

@@ -58,8 +58,6 @@
 --    on record that the job's lines do not carry: the job is flagged
 --    xero_project_exceeds_line_costs and its profit and margin stay unknown
 --    (null), profit_ex_unsuppressed included.
---    When line-level labour, commission and other already exceed the project
---    total, the job is flagged project_below_trade_lines.
 --    A project counts for a job only when its name carries that job's own job
 --    number (case ignored, not followed by a further digit). xero-sync also
 --    links a project by its Xero contact, and one contact can own several
@@ -76,8 +74,11 @@
 -- 4. Expected cost by lane is a cost fixed at the quote, first source that has
 --    it (expected_source): jobs.expected_costs (frozen_at_acceptance) -> the
 --    accepted quote revision's cost_estimates (accepted_quote_revision) -> the
---    newest sent quote revision's cost_estimates (sent_quote_revision). With
---    none of those it is null, never 0 and never the live pricing estimate.
+--    newest sent quote revision's cost_estimates (sent_quote_revision). A
+--    revision fixes a cost only when at least one of labour_total,
+--    material_total and subcontract_commission_total is above zero; a quote
+--    sent with no cost figures stores zeros and is passed over. With none of
+--    those it is null, never 0 and never the live pricing estimate.
 --
 -- 5. Completeness reuses the job_financials vocabulary (revenue_flag
 --    missing_client_invoice / ok; cost_flag no_labour_linked,
@@ -471,7 +472,11 @@ accepted_rev AS (
   FROM public.quote_revisions r
   JOIN public.job_documents d ON d.id = r.job_document_id
   WHERE d.accepted_at IS NOT NULL
-    AND jsonb_typeof(r.internal_cost_snapshot_json -> 'cost_estimates') = 'object'
+    AND greatest(
+          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,labour_total}'), 0),
+          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,material_total}'), 0),
+          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,subcontract_commission_total}'), 0)
+        ) > 0
   ORDER BY r.job_id, d.accepted_at DESC, r.version DESC
 ),
 sent_rev AS (
@@ -479,7 +484,11 @@ sent_rev AS (
     r.job_id, r.id, r.internal_cost_snapshot_json -> 'cost_estimates' AS ce
   FROM public.quote_revisions r
   WHERE r.sent_at IS NOT NULL
-    AND jsonb_typeof(r.internal_cost_snapshot_json -> 'cost_estimates') = 'object'
+    AND greatest(
+          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,labour_total}'), 0),
+          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,material_total}'), 0),
+          COALESCE(public.job_profit_num(r.internal_cost_snapshot_json #> '{cost_estimates,subcontract_commission_total}'), 0)
+        ) > 0
   ORDER BY r.job_id, r.sent_at DESC, r.version DESC
 ),
 quote_docs AS (
@@ -644,10 +653,7 @@ basis AS (
     b.line_labour_ex + b.line_materials_ex + b.line_commission_ex + b.line_other_ex AS line_total_ex,
     (COALESCE(b.xero_project_expenses_ex, 0) > 0
       AND b.line_labour_ex + b.line_materials_ex + b.line_commission_ex + b.line_other_ex
-          < b.xero_project_expenses_ex - greatest(5, 0.01 * b.xero_project_expenses_ex)) AS project_exceeds_line_costs,
-    (COALESCE(b.xero_project_expenses_ex, 0) > 0
-      AND b.line_labour_ex + b.line_commission_ex + b.line_other_ex
-          > b.xero_project_expenses_ex + greatest(5, 0.01 * b.xero_project_expenses_ex)) AS project_below_trade_lines
+          < b.xero_project_expenses_ex - greatest(5, 0.01 * b.xero_project_expenses_ex)) AS project_exceeds_line_costs
   FROM base b
 ),
 costed AS (
@@ -745,7 +751,6 @@ SELECT
     CASE WHEN f.has_text_matched THEN 'text_matched_lines' END,
     CASE WHEN f.project_exceeds_line_costs THEN 'xero_project_exceeds_line_costs' END,
     CASE WHEN f.has_cost AND f.actual_labour_ex = 0 THEN 'no_labour_linked' END,
-    CASE WHEN f.project_below_trade_lines THEN 'project_below_trade_lines' END,
     CASE WHEN f.project_contact_only THEN 'xero_project_linked_by_contact_only' END,
     CASE WHEN f.has_cost AND f.materials_missing THEN 'materials_not_linked' END,
     CASE WHEN f.has_unapproved_trade THEN 'unapproved_trade_charges' END,
