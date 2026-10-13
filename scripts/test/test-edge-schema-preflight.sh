@@ -866,7 +866,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261012043000", "makesafe_intake_cases_admit_ambrose_adapter"),
                       # Job work orders: one sealed work order per fencing
                       # and patio job (job_work_orders.ts).
-                      ("20261012130000", "job_work_orders")]:
+                      ("20261012130000", "job_work_orders"),
+                      # Trade invoice time entries: the four line fields, the
+                      # stamping persist and the per-job list
+                      # (trade_invoice_time_entry.ts).
+                      ("20261012180000", "trade_invoice_time_entries")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

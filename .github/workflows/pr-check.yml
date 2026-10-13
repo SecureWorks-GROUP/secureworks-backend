@@ -300,6 +300,18 @@ jobs:
           deno test --allow-read \
             supabase/functions/ops-api/makesafe_adapter_admission_contract_test.ts
 
+      # Trade invoice time entries (docs/trade-invoice-time-entries-2026-10-12.md):
+      # every trade invoice write path keeps the date worked and the start and
+      # finish time the trade sent on a line, and derives none itself, under
+      # both states of the enforcement flag. Drives the real
+      # ops-api request handler with every database call answered by a fetch
+      # stub. Same --no-check reason as the step above.
+      - name: Test trade invoice time entries
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_invoice_time_entry_test.ts \
+            supabase/functions/ops-api/trade_invoice_weekly_resolver_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as

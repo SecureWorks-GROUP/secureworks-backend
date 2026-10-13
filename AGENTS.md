@@ -4464,6 +4464,30 @@ body of any of them must keep it. Variation emails, the draft backfill and
 approval named only by the `x-sw-actor` header (the terminal) are behind flags
 seeded off. Contract and API: `docs/job-work-orders-v1.md`.
 
+## A Trade's Time Line Says When It Was Worked, And One Module Owns The Rule
+
+`trade_invoice_time_entry.ts` is the one owner of `work_date` / `start_time` /
+`finish_time` / `break_minutes` on a trade invoice line that bills hours: the
+server computes the hours, and no write path parses these fields itself.
+Enforcement of a MISSING entry is flag `trade_invoice_time_entry_required_v1`,
+seeded off and turned on only on the owner's word after the trade app screens
+are live; a wrong entry is refused in both states. Times typed on the job view
+go in `job_assignment_logged_times`, never new columns on `job_assignments`
+(every column there is inside the make-safe fact hash). An invoice line's
+time entry is always the trade's own statement on that line and always makes
+the hours it bills: never derive one on the server, from the clock, from
+assignment stamps or from those saved times. A job card the server collects
+itself therefore carries none, and with the flag on is refused by name with
+one remedy, entering the times on its Weekly Invoice card. Saved job-view
+times are a separate record: `my_hours` returns them as `logged_time_entry`,
+`job_detail` lists them against the job until that day is billed, and
+`loggedTimeEntryForCard` is the one rule for when a saved row may be used. A
+log with times goes on the card scheduled that day (`assignment_id` wins) and
+is refused only when the picked card holds saved times for another day.
+Write paths, refusal codes, reads and the per-job list
+`job_trade_time_entries`:
+`docs/trade-invoice-time-entries-2026-10-12.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
