@@ -41,7 +41,7 @@ class Query {
   private sort: { col: string; asc: boolean } | null = null;
   private max: number | null = null;
   private from_ = 0;
-  private mode: "select" | "insert" | "update" | "upsert" = "select";
+  private mode: "select" | "insert" | "update" | "upsert" | "delete" = "select";
   private payload: any = null;
   private single: "one" | "maybe" | null = null;
   private badFilter: { message: string; code: string } | null = null;
@@ -127,6 +127,10 @@ class Query {
     this.payload = v;
     return this;
   }
+  delete() {
+    this.mode = "delete";
+    return this;
+  }
   then(ok?: (v: { data: any; error: any }) => any, bad?: (e: unknown) => any) {
     return Promise.resolve(this.run()).then(ok, bad);
   }
@@ -153,6 +157,10 @@ class Query {
     let hit = rows.filter((r) => this.filters.every((f) => f(r)));
     if (this.mode === "update") {
       hit.forEach((r) => Object.assign(r, this.payload));
+      return { data: null, error: null };
+    }
+    if (this.mode === "delete") {
+      this.db.tables[this.table] = rows.filter((r) => !hit.includes(r));
       return { data: null, error: null };
     }
     if (this.sort) {
@@ -551,35 +559,34 @@ Deno.test("paid less than quoted: the card stays and carries the marker, logged 
   );
 });
 
-Deno.test("a complete card paid long ago is the backlog: it never moves and is never texted", async () => {
-  const { db, deps, moves, sms } = setup({ sender: "live" });
-  const job = addJob(db, { status: "complete", job_number: "SWF-50" });
-  addInvoice(db, job.id, "SWF-50-FINBAL", "PAID", 1000, {
-    fully_paid_on: "2026-05-01",
-  });
-  const out = await closeoutOnPaid(deps, { job_id: job.id });
-  assertEquals(out.action, "complete_backlog");
-  assertEquals([moves.length, sms.length, job.status], [0, 0, "complete"]);
-  assertEquals(db.rows("job_review_claims").length, 0);
+Deno.test("a card paid over 30 days ago is the backlog in every from-status: it never moves and is never texted", async () => {
+  for (const status of ["complete", "final_payment", "invoiced"]) {
+    const { db, deps, moves, sms } = setup({ sender: "live" });
+    const job = addJob(db, { status, job_number: "SWF-50" });
+    addInvoice(db, job.id, "SWF-50-FINBAL", "PAID", 1000, {
+      fully_paid_on: "2026-09-01",
+    });
+    const out = await closeoutOnPaid(deps, { job_id: job.id });
+    assertEquals(out.action, "stale_payment", status);
+    assertEquals([moves.length, sms.length, job.status], [0, 0, status]);
+    assertEquals(db.rows("job_review_claims").length, 0);
+  }
 });
 
-Deno.test("an invoiced card paid long ago may still move, but its review is claimed as skipped, never texted", async () => {
-  const { db, deps, sms } = setup({ sender: "live" });
-  const job = addJob(db, { status: "invoiced", job_number: "SWF-51" });
-  addInvoice(db, job.id, "SWF-51-FINBAL", "PAID", 1000, {
-    fully_paid_on: "2026-05-01",
-  });
-  assertEquals(
-    (await closeoutOnPaid(deps, { job_id: job.id })).action,
-    "moved",
-  );
-  const out = await requestJobReview(deps, {
-    job_id: job.id,
-    trigger: "status_changed:xero_sync",
-  });
-  assertEquals([out.action, out.reason], ["skipped", "paid_too_long_ago"]);
-  assertEquals(sms.length, 0);
-  assertEquals(db.rows("job_review_claims")[0].status, "skipped");
+Deno.test("a card paid within 30 days moves from every from-status", async () => {
+  for (const status of ["complete", "final_payment", "invoiced"]) {
+    const { db, deps } = setup();
+    const job = addJob(db, { status });
+    addInvoice(db, job.id, "SWF-1-FINBAL", "PAID", 1000, {
+      fully_paid_on: "2026-09-14",
+    });
+    assertEquals(
+      (await closeoutOnPaid(deps, { job_id: job.id })).action,
+      "moved",
+      status,
+    );
+    assertEquals(job.status, "get_review");
+  }
 });
 
 Deno.test("a card moved by hand meanwhile is left alone (compare and set)", async () => {
@@ -809,21 +816,40 @@ Deno.test("re-checked at send time: not in get_review, held, or not paid -> no c
   assertEquals(db.rows("job_review_claims").length, 0);
 });
 
-Deno.test("a card paid over a week ago is claimed as skipped, never texted, however recently it entered get_review", async () => {
-  for (const entered of ["2026-09-21T00:00:00.000Z", hoursAgo(1)]) {
+Deno.test("a card paid within 30 days entering get_review is texted, even when paid weeks before it got there", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = addJob(db, { status: "get_review" });
+  addInvoice(db, job.id, "SWF-1-FINBAL", "PAID", 1000, {
+    fully_paid_on: "2026-09-20",
+  });
+  enteredGetReview(db, job.id, hoursAgo(1));
+  assertEquals(
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+    "sent",
+  );
+  assertEquals(sms.length, 1);
+});
+
+Deno.test("a card paid over 30 days ago is not texted and not claimed, so a manual Send review still works", async () => {
+  for (const entered of ["2026-09-02T00:00:00.000Z", hoursAgo(1)]) {
     const { db, deps, sms } = setup({ sender: "live" });
     const job = addJob(db, { status: "get_review" });
     addInvoice(db, job.id, "SWF-1-FINBAL", "PAID", 1000, {
-      fully_paid_on: "2026-09-20",
+      fully_paid_on: "2026-09-01",
     });
     enteredGetReview(db, job.id, entered);
     const out = await requestJobReview(deps, { job_id: job.id, trigger: "t" });
+    assertEquals(out.action, "paid_too_long_ago", entered);
+    assertEquals([sms.length, db.rows("job_review_claims").length], [0, 0]);
     assertEquals(
-      [out.action, out.reason],
-      ["skipped", "paid_too_long_ago"],
-      entered,
+      (await requestJobReview(deps, {
+        job_id: job.id,
+        trigger: "manual",
+        manual: true,
+      })).action,
+      "sent",
     );
-    assertEquals(sms.length, 0);
+    assertEquals(sms.length, 1);
   }
 });
 
@@ -875,31 +901,83 @@ Deno.test("no linked contact on a manual request claims nothing either", async (
   assertEquals(sms.length, 1);
 });
 
-Deno.test("no contact past the send window is claimed as skipped, so the card can archive", async () => {
-  const { db, deps, sms } = setup({ sender: "live" });
-  const job = addJob(db, { status: "get_review", ghl_contact_id: null });
-  addInvoice(db, job.id, "SWF-1-FINBAL", "PAID", 1000, {
-    fully_paid_on: "2026-09-20",
-  });
-  enteredGetReview(db, job.id, hoursAgo(1));
-  const out = await requestJobReview(deps, { job_id: job.id, trigger: "t" });
-  assertEquals([out.action, out.reason], ["skipped", "paid_too_long_ago"]);
-  assertEquals(sms.length, 0);
-});
-
-Deno.test("a refused send and an unconfirmed send both finish the claim, and neither is retried", async () => {
-  const refused = setup({ sender: "live" });
-  const a = reviewJob(refused.db);
-  refused.setSms(() => ({
-    ok: false,
-    refused: true,
-    error: "contact not on job",
-  }));
+Deno.test("every send refused by a guard keeps no claim, so a later attempt sends exactly once", async () => {
+  const { db, deps, sms, setSms } = setup({ sender: "live" });
+  const job = reviewJob(db);
+  setSms(() => ({ ok: false, refused: true, error: "contact not on job" }));
   assertEquals(
-    (await requestJobReview(refused.deps, { job_id: a.id, trigger: "t" }))
-      .action,
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
     "refused",
   );
+  assertEquals(db.rows("job_review_claims").length, 0);
+  assertEquals(
+    db.rows("job_events").filter((e) =>
+      e.event_type === "review_request_not_sent"
+    ).map((e) => e.detail_json.status),
+    ["refused"],
+  );
+  setSms(() => ({ ok: true, message_id: "m2" }));
+  assertEquals(
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+    "sent",
+  );
+  assertEquals(
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+    "already_claimed",
+  );
+  assertEquals(sms.length, 2);
+  assertEquals(db.rows("job_review_claims")[0].status, "sent");
+});
+
+Deno.test("a send confirmed for one owner keeps the claim even when another owner's send was refused", async () => {
+  const { db, deps, setSms } = setup({ sender: "live" });
+  const job = reviewJob(db);
+  db.rows("job_contacts").push(
+    {
+      id: "p-a",
+      job_id: job.id,
+      contact_label: "A",
+      is_primary: true,
+      share_percentage: 50,
+      removed_at: null,
+      status: "active",
+      xero_contact_id: null,
+      client_name: "Pat",
+      ghl_contact_id: "ghl-a",
+    },
+    {
+      id: "p-b",
+      job_id: job.id,
+      contact_label: "B",
+      is_primary: false,
+      share_percentage: 50,
+      removed_at: null,
+      status: "active",
+      xero_contact_id: null,
+      client_name: "Sam",
+      ghl_contact_id: "ghl-b",
+    },
+  );
+  for (const share of ["A", "B"]) {
+    addInvoice(db, job.id, `SWF-1-${share}-FINBAL`, "PAID", 500);
+  }
+  setSms((n) =>
+    n === 1
+      ? { ok: true, message_id: "m1" }
+      : { ok: false, refused: true, error: "contact not on job" }
+  );
+  assertEquals(
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+    "sent",
+  );
+  assertEquals(db.rows("job_review_claims")[0].status, "sent");
+  assertEquals(
+    (await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action,
+    "already_claimed",
+  );
+});
+
+Deno.test("an unconfirmed send finishes the claim and is never retried", async () => {
   const lost = setup({ sender: "live" });
   const b = reviewJob(lost.db);
   lost.setSms(() => new Error("network"));
@@ -1092,6 +1170,32 @@ Deno.test("sweep: a paid card with no linked contact archives after 24 hours wit
     "sent",
   );
   assertEquals(sms.map((s) => s.contactId), ["ghl-linked"]);
+});
+
+Deno.test("sweep: a card paid over 30 days ago or whose sends were all refused archives after 24 hours with no claim", async () => {
+  const { db, deps, moves, sms, setSms } = setup({ sender: "live" });
+  const stale = addJob(db, { status: "get_review", job_number: "SWF-70" });
+  addInvoice(db, stale.id, "SWF-70-FINBAL", "PAID", 1000, {
+    fully_paid_on: "2026-09-01",
+  });
+  enteredGetReview(db, stale.id, hoursAgo(25));
+  const refused = paidJob(db, { status: "get_review", job_number: "SWF-71" });
+  enteredGetReview(db, refused.id, hoursAgo(25));
+  const young = paidJob(db, { status: "get_review", job_number: "SWF-72" });
+  enteredGetReview(db, young.id, hoursAgo(2));
+  setSms(() => ({ ok: false, refused: true, error: "contact not on job" }));
+  const out = await closeoutSweep(deps, { dry_run: false });
+  const byJob = Object.fromEntries(
+    (out.results ?? []).map((r: any) => [r.job_number, r.action]),
+  );
+  assertEquals(byJob, {
+    "SWF-70": "archived",
+    "SWF-71": "archived",
+    "SWF-72": "waiting_24h",
+  });
+  assertEquals(moves.map((m) => m.jobId), [stale.id, refused.id]);
+  assertEquals(db.rows("job_review_claims").length, 0);
+  assertEquals(sms.length, 2);
 });
 
 Deno.test("sweep: the backstop sends a missing review before archiving; with the sender off it archives without one", async () => {

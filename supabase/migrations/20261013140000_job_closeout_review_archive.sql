@@ -72,7 +72,7 @@ COMMENT ON TABLE public.job_closeout_state IS
 -- ── 3. The per-job review claim ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.job_review_claims (
   job_id      uuid PRIMARY KEY REFERENCES public.jobs(id) ON DELETE CASCADE,
-  status      text NOT NULL CHECK (status IN ('claimed', 'sent', 'skipped', 'unconfirmed', 'refused')),
+  status      text NOT NULL CHECK (status IN ('claimed', 'sent', 'skipped', 'unconfirmed')),
   trigger     text NOT NULL,
   reason      text,
   recipients  jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS public.job_review_claims (
 );
 
 COMMENT ON TABLE public.job_review_claims IS
-  'Paid close-out (20261013140000): one review claim per job, inserted before any review text is sent, so the job is never texted twice by this system. status claimed (in flight) | sent (at least one text confirmed) | skipped (deliberately not sent: every paying owner was asked in the last 90 days, had no contact, or the job left get_review long ago) | unconfirmed (a send could not be confirmed; never retried) | refused (every send refused by a guard). recipients holds one entry per paying owner: label, GHL contact id, result. Written only by ops-api job_closeout.ts.';
+  'Paid close-out (20261013140000): one review claim per job, inserted before any review text is sent, so the job is never texted twice by this system. status claimed (in flight) | sent (at least one text confirmed) | skipped (deliberately not sent: every paying owner with a contact was asked in the last 90 days) | unconfirmed (a send could not be confirmed; never retried). No row is kept when nothing could go out (no linked contact, paid too long ago, every send refused by a guard), so a later attempt can send. recipients holds one entry per paying owner: label, GHL contact id, result. Written only by ops-api job_closeout.ts.';
 
 ALTER TABLE public.job_closeout_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.job_closeout_state ENABLE ROW LEVEL SECURITY;

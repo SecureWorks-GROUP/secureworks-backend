@@ -7,23 +7,24 @@
 //                          a fencing or patio job turns PAID: a paid job moves from
 //                          complete, final_payment or invoiced to get_review (compare and
 //                          set on the status); "paid less than quoted" stays put with a
-//                          marker; a held job never moves; a complete card moves only when
-//                          paid within CATCH_UP_PAID_WITHIN_DAYS (older ones are the backlog).
+//                          marker; a held job never moves; a job whose newest payment is
+//                          older than PAID_WITHIN_DAYS never moves (stale_payment).
 //   - closeoutCatchUp      xero-sync calls job_closeout_catch_up after each run: the same
 //                          for invoiced and final_payment cards whose last invoice was paid
-//                          before the card got there (paid within CATCH_UP_PAID_WITHIN_DAYS).
+//                          before the card got there.
 //   - requestJobReview     the one review sender: once per job (a job_review_claims row is
 //                          inserted before any text), to every paying owner, skipping any
 //                          contact asked for a review in the last 90 days from any source,
 //                          re-checking get_review, the holds and the paid rule first. A job
-//                          paid more than REVIEW_SEND_WINDOW_MS ago is claimed as skipped.
+//                          paid more than PAID_WITHIN_DAYS ago is not texted and not claimed.
 //   - closeoutSweep        the job-closeout-sweep cron (closeout lane): archives a card that
 //                          entered get_review at least 24 hours ago, is still paid, is not
 //                          held and whose review was sent or deliberately skipped, could
-//                          not go for want of a linked contact (no claim is taken, so a
-//                          later Send review still works), or the sender is not live. A
-//                          claim stuck 'claimed' past STUCK_CLAIM_AFTER_MS is recorded
-//                          unconfirmed (never re-sent) and counts as finished.
+//                          not go (no linked contact, paid too long ago, or every send
+//                          refused by a guard: no claim is kept, so a later Send review
+//                          still works), or the sender is not live. A claim stuck
+//                          'claimed' past STUCK_CLAIM_AFTER_MS is recorded unconfirmed
+//                          (never re-sent) and counts as finished.
 //                          Compare and set on get_review.
 //   - closeoutBacklogPreview  the dry-run list of fully paid fencing and patio jobs sitting
 //                          in complete that a later, separate step may archive. Writes
@@ -61,10 +62,9 @@ import {
 
 /** A contact asked for a review this recently, from any source, is not asked again. */
 export const REVIEW_LOOKBACK_DAYS = 90;
-/** The automatic sender texts only while the job's last payment is this recent. */
-export const REVIEW_SEND_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-/** The catch-up, and the paid hook for a complete card, move only jobs whose newest payment is this recent. */
-export const CATCH_UP_PAID_WITHIN_DAYS = 30;
+/** A card moves to get_review, and the automatic sender texts, only while the job's newest
+ *  payment is this recent; older paid jobs are the backlog. */
+export const PAID_WITHIN_DAYS = 30;
 /** A review claim still 'claimed' this long after it was taken never finished; the sweep
  *  records it as unconfirmed (never re-sent) so the card can archive. */
 export const STUCK_CLAIM_AFTER_MS = 60 * 60 * 1000;
@@ -78,10 +78,11 @@ const ID_CHUNK = 50;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** True when the newest payment (a YYYY-MM-DD day, read as its end) is within `ms` of now. */
-function paidWithin(lastPaidOn: string | null, now: Date, ms: number): boolean {
+/** True when the newest payment (a YYYY-MM-DD day, read as its end) is within PAID_WITHIN_DAYS. */
+function paidRecently(lastPaidOn: string | null, now: Date): boolean {
   if (!lastPaidOn) return false;
-  return now.getTime() - new Date(`${lastPaidOn}T23:59:59Z`).getTime() <= ms;
+  return now.getTime() - new Date(`${lastPaidOn}T23:59:59Z`).getTime() <=
+    PAID_WITHIN_DAYS * DAY_MS;
 }
 
 /** What a captured review text looks like, whoever sent it (GHL workflow, by hand, us). */
@@ -556,7 +557,6 @@ export interface SettleResult {
     | "not_closeout_type"
     | "not_in_from_status"
     | "paid_less_than_quoted"
-    | "complete_backlog"
     | "stale_payment"
     | "not_paid"
     | "facts_unreadable";
@@ -590,18 +590,12 @@ async function settleJob(
       detail: { paid: verdict.paid_total_inc, expected: verdict.expected_inc },
     };
   }
-  // The existing Complete backlog is archived separately and never texted (captain answer 5).
-  if (
-    text(job.status).toLowerCase() === "complete" &&
-    !paidWithin(
-      verdict.last_paid_on,
-      deps.now(),
-      CATCH_UP_PAID_WITHIN_DAYS * DAY_MS,
-    )
-  ) {
+  // Paid long ago is the backlog, whatever the card's status: the existing Complete backlog
+  // is archived separately and never texted (captain answer 5).
+  if (!paidRecently(verdict.last_paid_on, deps.now())) {
     return {
       ...base,
-      action: "complete_backlog",
+      action: "stale_payment",
       detail: { last_paid_on: verdict.last_paid_on },
     };
   }
@@ -666,13 +660,7 @@ export async function closeoutCatchUp(
       quote: null,
     });
     if (pre.outcome === "not_paid") continue;
-    if (
-      !paidWithin(
-        pre.last_paid_on,
-        deps.now(),
-        CATCH_UP_PAID_WITHIN_DAYS * DAY_MS,
-      )
-    ) {
+    if (!paidRecently(pre.last_paid_on, deps.now())) {
       results.push({
         job_id: job.id,
         job_number: job.job_number,
@@ -779,10 +767,10 @@ export interface ReviewRequestOptions {
  * The one review sender, automatic and manual alike, so neither ships on before its switch.
  * Order: switch -> job -> (automatic only) type, get_review, hold,
  * paid rule, send window -> recipients -> 90-day look-back -> claim -> send. Nothing is
- * claimed until every read has answered, so a failed read is retried by the next sweep,
- * and nothing is claimed while the only thing in the way is a contact not linked yet, so
- * linking it and asking again sends; once claimed, the job is never texted again by this
- * system.
+ * claimed until every read has answered, so a failed read is retried by the next sweep.
+ * Nothing is kept claimed when nothing could go out (no linked contact, paid too long ago,
+ * or every send refused by a guard before GHL), so fixing the cause and asking again sends;
+ * once a claim is kept, the job is never texted again by this system.
  */
 export async function requestJobReview(
   deps: JobCloseoutDeps,
@@ -816,7 +804,7 @@ export async function requestJobReview(
         reasons: verdict.reasons,
       };
     }
-    if (!paidWithin(verdict.last_paid_on, deps.now(), REVIEW_SEND_WINDOW_MS)) {
+    if (!paidRecently(verdict.last_paid_on, deps.now())) {
       skipReason = "paid_too_long_ago";
     }
     paidWording = true;
@@ -871,8 +859,15 @@ export async function requestJobReview(
     };
   }
 
+  if (skipReason) {
+    return {
+      ok: true,
+      action: skipReason,
+      recipients: recipients.map(({ label, result }) => ({ label, result })),
+    };
+  }
   if (
-    !skipReason && !recipients.some((r) => r.result === "to_send") &&
+    !recipients.some((r) => r.result === "to_send") &&
     recipients.some((r) => r.result === "skipped_no_contact")
   ) {
     return {
@@ -927,7 +922,7 @@ export async function requestJobReview(
     : results.includes("refused")
     ? "refused"
     : "skipped";
-  const reason = skipReason ?? (status === "skipped" ? "asked_recently" : null);
+  const reason = status === "skipped" ? "asked_recently" : null;
   const stored = recipients.map((
     { label, party_id, ghl_contact_id, result, message_id, error },
   ) => ({
@@ -938,13 +933,20 @@ export async function requestJobReview(
     message_id: message_id ?? null,
     error: error ?? null,
   }));
-  const { error: finishError } = await deps.client.from("job_review_claims")
-    .update({
+  // Every send refused by a guard before GHL: nothing went out, so the claim is released
+  // and a later automatic or manual attempt can send once the cause is fixed.
+  const finish = status === "refused"
+    ? deps.client.from("job_review_claims").delete()
+    : deps.client.from("job_review_claims").update({
       status,
       reason,
       recipients: stored,
       finished_at: deps.now().toISOString(),
-    }).eq("job_id", job.id).eq("status", "claimed");
+    });
+  const { error: finishError } = await finish.eq("job_id", job.id).eq(
+    "status",
+    "claimed",
+  );
   if (finishError) {
     console.error(
       "[job_closeout] review claim finish failed:",
@@ -977,6 +979,13 @@ export async function requestJobReview(
 }
 
 // ── The 24-hour archive sweep ────────────────────────────────────────────────
+
+/** Sender answers that keep no claim but leave nothing to wait for: the card still archives. */
+const UNCLAIMED_REVIEW_ACTIONS: readonly string[] = [
+  "no_contact",
+  "paid_too_long_ago",
+  "refused",
+];
 
 export async function closeoutSweep(
   deps: JobCloseoutDeps,
@@ -1032,7 +1041,7 @@ export async function closeoutSweep(
     let reviewWouldSend = false;
     if (!reviewDone) {
       let claim = await readClaim(deps, job.id);
-      let noContact = false;
+      let notClaimed = false;
       if (!claim && dryRun) {
         reviewWouldSend = true;
       } else if (!claim) {
@@ -1040,7 +1049,7 @@ export async function closeoutSweep(
           job_id: job.id,
           trigger: "job_closeout_sweep",
         });
-        noContact = review.action === "no_contact";
+        notClaimed = UNCLAIMED_REVIEW_ACTIONS.includes(review.action);
         claim = await readClaim(deps, job.id);
       }
       if (claim?.status === "claimed" && claimStuck(claim, now)) {
@@ -1048,7 +1057,7 @@ export async function closeoutSweep(
           ? { ...claim, status: "unconfirmed" }
           : await releaseStuckClaim(deps, job.id);
       }
-      reviewDone = reviewWouldSend || noContact ||
+      reviewDone = reviewWouldSend || notClaimed ||
         (claim !== null && claim.status !== "claimed");
     }
     if (!reviewDone) {

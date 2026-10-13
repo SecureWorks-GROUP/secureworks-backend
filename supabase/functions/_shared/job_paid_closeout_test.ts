@@ -355,12 +355,12 @@ Deno.test("an active party with a null share is a paying party, so an unbilled n
   assertEquals(both.outcome, "paid");
 });
 
-Deno.test("tolerance: a few dollars short and agreed variations both count", () => {
+Deno.test("rounding: a dollar short and agreed variations both count", () => {
   const base = {
     job: job(),
     invoices: [
       inv("SWF-4-DEP50", "PAID", 2000),
-      inv("SWF-4-FINBAL", "PAID", 1998),
+      inv("SWF-4-FINBAL", "PAID", 1999),
       inv("SWF-4-VAR", "PAID", 330),
     ],
     parties: [],
@@ -387,6 +387,40 @@ Deno.test("tolerance: a few dollars short and agreed variations both count", () 
       },
     }).outcome,
     "paid_less_than_quoted",
+  );
+});
+
+Deno.test("only a dollar of rounding is allowed: a few dollars or a percent short is paid less than quoted", () => {
+  const quote = (total: number) => ({
+    quote_total_inc: total,
+    variations_inc: 0,
+    unknown_reason: null,
+  });
+  const fewDollars = evaluateJobPaid({
+    job: job(),
+    invoices: [
+      inv("SWF-4-DEP50", "PAID", 2000),
+      inv("SWF-4-FINBAL", "PAID", 1998),
+    ],
+    parties: [],
+    quote: quote(4000),
+  });
+  assertEquals(
+    [fewDollars.outcome, fewDollars.shortfall_inc],
+    ["paid_less_than_quoted", 2],
+  );
+  const percent = evaluateJobPaid({
+    job: job(),
+    invoices: [
+      inv("SWF-4-DEP50", "PAID", 15000),
+      inv("SWF-4-FINBAL", "PAID", 14750),
+    ],
+    parties: [],
+    quote: quote(30000),
+  });
+  assertEquals(
+    [percent.outcome, percent.shortfall_inc],
+    ["paid_less_than_quoted", 250],
   );
 });
 

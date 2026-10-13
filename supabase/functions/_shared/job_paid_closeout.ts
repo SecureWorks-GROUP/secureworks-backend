@@ -19,7 +19,8 @@
 //      is share B), else the party whose Xero contact it carries, else the job's own
 //      client (the primary party).
 //   3. The money paid covers the sent quote plus agreed variations (customer accepted
-//      or invoiced), within PAID_QUOTE_TOLERANCE. When the quote value is not known, rules 1 and 2 decide.
+//      or invoiced), short by no more than PAID_QUOTE_ROUNDING_INC (GST rounding). When the
+//      quote value is not known, rules 1 and 2 decide.
 //
 // Outcomes: "paid" (all three), "paid_less_than_quoted" (1 and 2 hold, 3 fails: the
 // card stays where it is and carries a marker), "not_paid" (1 or 2 fails).
@@ -46,8 +47,8 @@ export const CLOSEOUT_ARCHIVE_STATUS = "archived";
 /** How long a card sits in Get Review before the sweep archives it. */
 export const CLOSEOUT_ARCHIVE_AFTER_MS = 24 * 60 * 60 * 1000;
 
-/** Paid may fall short of the quote by the larger of these before it counts as short. */
-export const PAID_QUOTE_TOLERANCE = { absolute_inc: 5, fraction: 0.01 };
+/** Paid may fall short of the quote by this much (GST rounding) before it counts as short. */
+export const PAID_QUOTE_ROUNDING_INC = 1;
 
 /** Reference endings that name a stage invoice, never a final. */
 const DEPOSIT_ENDING = /^DEP(?:OSIT)?\d{0,3}$/;
@@ -316,11 +317,7 @@ export function evaluateJobPaid(input: {
   if (quoteKnown) {
     expected = round2(quoteTotal! + variations!);
     shortfall = round2(Math.max(0, expected - paidTotal));
-    const tolerance = Math.max(
-      PAID_QUOTE_TOLERANCE.absolute_inc,
-      expected * PAID_QUOTE_TOLERANCE.fraction,
-    );
-    quoteShort = shortfall > tolerance;
+    quoteShort = shortfall > PAID_QUOTE_ROUNDING_INC;
   }
 
   const rules12 = reasons.length === 0;

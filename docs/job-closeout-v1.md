@@ -28,8 +28,8 @@ All three, in `evaluateJobPaid`:
    client.
 3. Money paid covers the sent quote (`job_quote_values` through
    `readJobQuotes`) plus agreed variations (customer accepted or invoiced; one
-   approved internally but never accepted is not owed), within the larger of $5
-   and 1%.
+   approved internally but never accepted is not owed), short by no more than
+   $1 (GST rounding).
    Unknown quote or unreadable variations: rules 1 and 2 decide.
 
 Outcomes: `paid`; `paid_less_than_quoted` (1 and 2 hold, 3 fails: the card
@@ -45,14 +45,13 @@ Holds (never moved, texted or archived): status `rectification`, or
   turns PAID, xero-sync posts `ops-api?action=job_closeout_paid`. A paid, unheld
   job in `complete`, `final_payment` or `invoiced` moves to `get_review` through
   `update_job_status` with `expected_statuses` (compare and set: a card moved by
-  hand meanwhile is left alone). A `complete` card moves only when its newest
-  payment is within 30 days: an older one is the backlog (xero-sync re-reads an
-  old paid invoice whenever Xero touches it) and is reported `complete_backlog`.
+  hand meanwhile is left alone). A card moves, from any of the three, only when
+  its newest payment is within 30 days: an older one is the backlog, reported
+  `stale_payment`, and stays put (xero-sync re-reads an old paid invoice
+  whenever Xero touches it, so the window keeps that touch from moving it).
   After every run xero-sync also posts `job_closeout_catch_up`: `invoiced` and
-  `final_payment` cards whose newest payment is within 30 days (paid before the
-  card got there); a paid card whose newest payment is older is reported
-  `stale_payment` and stays put. `complete` cards are never caught up: they are
-  the backlog.
+  `final_payment` cards paid before the card got there, under the same 30-day
+  window. `complete` cards are never caught up: they are the backlog.
   The catch-up, the sweep and the backlog list read every candidate card (paged
   by id), so cards that stay put never hide newer ones.
 - **Review text.** Any fencing or patio card entering `get_review` (by the sync
@@ -63,12 +62,14 @@ Holds (never moved, texted or archived): status `rectification`, or
   contact/job guard). A `job_review_claims` row is inserted before any text, so
   a job is never texted twice by this system; a contact sent any review text in
   the last 90 days (any source in `business_events`, or our own claims) is
-  skipped; a job whose newest payment is over 7 days old is claimed as skipped
-  (`paid_too_long_ago`), however recently it entered Get Review. Nothing is
-  claimed while the only blocker is a contact not linked yet (`no_contact`):
-  link it and the next request or sweep sends, or press Send review after the
-  card has archived. A text that does not answer within 15 seconds counts as
-  unconfirmed and is never retried. Manual `send_review_request` uses
+  skipped. Nothing is claimed when nothing could go out, so fixing the cause
+  and asking again sends (the next request or sweep, or Send review after the
+  card has archived): a job whose newest payment is over 30 days old (the same
+  window as the move; `paid_too_long_ago`), a contact not linked yet
+  (`no_contact`), or every send refused by a ghl-proxy guard before GHL
+  (`refused`; the claim is released). A real send keeps its claim. A text that
+  does not answer within 15 seconds counts as unconfirmed, keeps its claim and
+  is never retried. Manual `send_review_request` uses
   the same sender and switch (it skips only the status, hold, paid and window
   checks); only a fencing or patio job that passes the paid rule gets the
   "Payment is well received" wording, every other manual request gets a
@@ -76,9 +77,9 @@ Holds (never moved, texted or archived): status `rectification`, or
 - **24-hour archive.** pg_cron `job-closeout-sweep` (17 and 47 past each hour,
   gated on the `closeout` lane) posts `job_closeout_sweep`. A card archives when
   it entered `get_review` at least 24 hours ago, is still paid, is not held and
-  its review claim is finished, or the sender answered `no_contact` (no claim
-  is taken, so the review can still be sent by hand once the contact is
-  linked), or the sender is not live. A claim still `claimed` more than an hour
+  its review claim is finished, or the sender answered `no_contact`,
+  `paid_too_long_ago` or `refused` (no claim is kept, so the review can still be
+  sent by hand once the cause is fixed), or the sender is not live. A claim still `claimed` more than an hour
   after it was taken (the finish write failed or the worker died mid-send) is
   recorded `unconfirmed` with reason `stuck_claim`, never re-sent, and counts as
   finished. Compare and set on `get_review`. The sweep also sends a missing

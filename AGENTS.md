@@ -4652,14 +4652,17 @@ holds: status `rectification` or `jobs.is_callback`. If only the quote check
 fails the card stays put with `job_closeout_state.paid_less_than_quoted`.
 Builder, insurance, make-safe and repair jobs keep the old xero-sync rule
 (`invoiced` -> `complete`), and so do fencing and patio while the move switch
-is off. One review text per job ever (`job_review_claims`, claimed before any
-send, never while the only blocker is an unlinked contact), to every paying
-owner, skipping any contact sent a review text in the last 90 days from any
-source and any job paid more than 7 days ago. Every status write uses
-`update_job_status` `expected_statuses` (compare and set). The `complete`
-backlog is never caught up or texted: a `complete` card moves on payment only
-when paid within 30 days, and `job_closeout_backlog_preview` only lists what a
-later step may archive.
+is off. Paid covers the quote short by at most $1 (rounding). One review text
+per job ever (`job_review_claims`, claimed before any send; no claim is kept
+when nothing went out: an unlinked contact, a job paid more than 30 days ago,
+or every send refused by a ghl-proxy guard, and such a card still archives
+after 24 hours), to every paying owner, skipping any contact sent a review text
+in the last 90 days from any source. Every status write uses
+`update_job_status` `expected_statuses` (compare and set). A card moves on
+payment only when paid within 30 days, whatever its from-status
+(`stale_payment` otherwise); the `complete` backlog is never caught up or
+texted, and `job_closeout_backlog_preview` only lists what a later step may
+archive.
 
 Switches (migration `20261013140000`), all off; turn on in this order:
 `job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
