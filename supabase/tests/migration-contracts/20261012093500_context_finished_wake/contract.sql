@@ -448,6 +448,12 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_due(integ
 \if :rebuild_order_live
 \ir ../../../rollbacks/20261012164500_context_rebuild_order_down.sql
 \endif
+-- (the rebuild request, 20261013153000, replaced the judge since: its down goes first, so the
+-- re-apply starts from this migration's own bodies)
+SELECT to_regprocedure('public.context_ledger_request_rebuild(uuid,text,text)') IS NOT NULL AS rebuild_request_live \gset
+\if :rebuild_request_live
+\ir ../../../rollbacks/20261013153000_context_rebuild_request_down.sql
+\endif
 CREATE TEMP TABLE finished_wake_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('context_finished_wake_hours', 'context_lead_monitored_jobs', 'context_lead_monitored',
