@@ -36,7 +36,7 @@ its own server credential).
 - Reads are `GET` with query params. Writes are `POST` with a JSON body.
 - CORS is open (`*`), so the app can be served from any origin, including a
   page opened on the iPad.
-- Who may call, every action including the two that make orders: staff roles
+- Who may call, every action: staff roles
   `admin`, `owner`, `ops_manager` (Hugo is `ops_manager`). Any other signed-in user gets `403 operator_access_required`.
   No session or an expired one gets `401` (the app should send the user to sign
   in again). The make-safe routine key and the agent read key are refused.
@@ -209,8 +209,10 @@ the builder writes `pricing_json`:
   "quote_builder": { "scope_version_id": "...", "quote_number": "...", "variation_ids": [], "written_at": "..." } }
 ```
 
-It is written when a scope version is issued and when a variation is approved.
-Issuing a variation, or rejecting one, writes nothing.
+It is recomputed and written on every issue (scope or variation) and on every
+variation decision (approval or rejection), so a variation that stops counting
+comes off the value at once: rejecting one that was approved and then sent, or
+re-issuing one that was approved, which puts it back to undecided.
 
 A variation counts once it is approved, and keeps counting after it is sent to
 the client and after the client accepts it:
@@ -218,22 +220,27 @@ the client and after the client accepts it:
 | `job_variations.status` | Counts |
 |---|---|
 | `approved` | Yes. |
-| `sent`, `accepted` | Only if its newest recorded decision is an approval. |
+| `sent`, `accepted` | Only if the newest event about it is an approval (below). |
 | `draft`, `pending_approval`, `rejected`, `declined`, `cancelled`, anything else | No. |
 
 `sent` and `accepted` do not say whether anyone approved the variation: the ops
 "send variation" action and the client's accept link set them from any status,
 so a variation can be sent, and accepted, without ever being approved. That
 case is not counted. Nor can `approved_at` settle it, because the approval path
-stamps it on a rejection as well. The record that does is the decision event
-that path writes on every decision (`job_events` `variation_approved` /
-`variation_rejected`, naming the variation): the newest one for the variation
-must be `variation_approved`. A variation with no decision event is not
-counted.
+stamps it on a rejection as well. The record that does is the job event trail
+naming the variation (`job_events`): the approval path writes
+`variation_approved` or `variation_rejected` on every decision, and every issue
+of the variation writes `variation_requested`. The newest of those three must
+be `variation_approved`. So a variation with no approval is not counted, and
+neither is one that was approved, re-issued as a new version and sent again
+without a fresh approval: the issue came after the approval, and nobody has
+approved the new version.
 
-The value is only recomputed at the two moments above, so a variation approved
-through the ordinary ops approval, or sent or accepted afterwards, changes the
-stored value at the next scope issue or builder approval, not at once.
+The value is only recomputed at the moments above (an issue or a decision made
+in the builder), so a variation approved through the ordinary ops approval, or
+sent or accepted afterwards, changes the stored value at the next of those
+moments, not at once. For the same reason a job whose scope was issued before
+this change gets its value at its next issue or decision, never by a backfill.
 
 The guard (`quoteBuilderMayWriteJobValue`), both halves required:
 
@@ -590,7 +597,8 @@ Returns:
 }
 ```
 
-`job_value` is present on a scope issue and absent on a variation issue:
+`job_value` is on every issue, scope or variation. A variation issue reports
+the value without that variation, which is not approved yet:
 
 | `job_value` | Meaning |
 |---|---|
@@ -615,8 +623,9 @@ path, re-reads the variation, then moves a repair job to `approved` when approve
 If the variation does not read back as `approved` (or `rejected`), nothing moves
 and the call is refused `409 variation_decision_not_recorded`; try again. Returns
 `{ "approved": true, "variation_id": "...", "job_value": { ... }, "stage": { ... } }`.
-An approval rewrites the job's value (section 2d) and returns `job_value` in the
-shape of 5.6; a rejection writes nothing and returns no `job_value`.
+Either decision rewrites the job's value (section 2d) and returns `job_value` in
+the shape of 5.6: an approval adds the variation, and a rejection takes it off
+when it had been counted.
 
 ## 6. Not built yet: a work order and purchase orders from an issued quote
 

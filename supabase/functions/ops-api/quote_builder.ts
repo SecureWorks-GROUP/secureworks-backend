@@ -70,9 +70,10 @@ const SETTING_KEYS = {
 } as const;
 const OPEN_VARIATION_STATUSES = new Set(["pending_approval", "sent"]);
 const APPROVED_THEN_MOVED_STATUSES = new Set(["sent", "accepted"]);
-const VARIATION_DECISION_EVENTS = new Set([
+const VARIATION_STATE_EVENTS = new Set([
   "variation_approved",
   "variation_rejected",
+  "variation_requested",
 ]);
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1337,9 +1338,12 @@ async function fileExtraDocument(
  *
  * `approved` is read off the row. `sent` and `accepted` say nothing about the
  * decision (a variation can be sent before anyone decides, and approved_at is
- * stamped on a rejection too), so for those the variation's newest recorded
- * decision, the job event the approval path writes, must be an approval. A
- * variation sent or accepted without ever being approved is not counted.
+ * stamped on a rejection too), so for those the newest job event about the
+ * variation must be an approval: the approval path writes one on every
+ * decision, and every issue writes `variation_requested`, so an approval that
+ * an issue has since followed no longer stands. A variation sent or accepted
+ * without ever being approved, or re-issued and sent again without a fresh
+ * approval, is not counted.
  */
 async function approvedVariationIds(client: any, jobId: string) {
   const { data, error } = await client.from("job_variations")
@@ -1358,16 +1362,16 @@ async function approvedVariationIds(client: any, jobId: string) {
   const { data: events, error: eventsError } = await client.from("job_events")
     .select("event_type, detail_json, created_at")
     .eq("job_id", jobId)
-    .in("event_type", [...VARIATION_DECISION_EVENTS])
+    .in("event_type", [...VARIATION_STATE_EVENTS])
     .order("created_at", { ascending: true });
-  if (eventsError) readError("variation decisions read failed", eventsError);
-  const lastDecision = new Map<string, string>();
+  if (eventsError) readError("variation events read failed", eventsError);
+  const lastEvent = new Map<string, string>();
   for (const event of events || []) {
     const id = event.detail_json?.variation_id;
-    if (id) lastDecision.set(String(id), event.event_type);
+    if (id) lastEvent.set(String(id), event.event_type);
   }
   for (const v of afterDecision) {
-    if (lastDecision.get(v.id) === "variation_approved") ids.add(v.id);
+    if (lastEvent.get(v.id) === "variation_approved") ids.add(v.id);
   }
   return ids;
 }
@@ -1859,10 +1863,9 @@ export async function issueQuoteBuilderVersion(
 
   // The value lands BEFORE the stage move: the stage writer reads the job and
   // then checks its row version, so a value write after it would race it. A
-  // variation changes the job's value only once it is approved.
-  const jobValue = version.kind === "scope"
-    ? await writeQuoteBuilderJobValue(client, version.job_id)
-    : null;
+  // variation issue is valued too: re-issuing one that was approved puts it
+  // back to undecided, so it must come off the job's value.
+  const jobValue = await writeQuoteBuilderJobValue(client, version.job_id);
 
   const stage = await moveStageForward(
     client,
@@ -1882,7 +1885,7 @@ export async function issueQuoteBuilderVersion(
     extra_documents: filedExtras,
     ...(notFiled.length ? { extra_documents_not_filed: notFiled } : {}),
     variation: variationResult,
-    ...(jobValue ? { job_value: jobValue } : {}),
+    job_value: jobValue,
     stage,
   };
 }
@@ -1950,9 +1953,7 @@ export async function decideQuoteBuilderVariation(
     );
   }
 
-  const jobValue = approved
-    ? await writeQuoteBuilderJobValue(client, variation.job_id)
-    : null;
+  const jobValue = await writeQuoteBuilderJobValue(client, variation.job_id);
 
   const stage = approved
     ? await moveStageForward(
@@ -1966,7 +1967,7 @@ export async function decideQuoteBuilderVariation(
   return {
     approved,
     variation_id: variationId,
-    ...(jobValue ? { job_value: jobValue } : {}),
+    job_value: jobValue,
     stage,
   };
 }

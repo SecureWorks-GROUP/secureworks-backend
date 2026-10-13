@@ -1548,11 +1548,13 @@ generated from it) only through `quoteBuilderMayWriteJobValue`: `repair` and
 never widen it to `fencing` or `makesafe` typed repair cards, because
 `createInvoice` prices a job from `pricing_json` when given no lines (such a
 card with no other tool's pricing answers `job_type_not_valued_here`, never
-`priced_by_another_tool`). A variation counts toward that value once approved
-and still counts when later `sent` or `accepted`, but only when its newest
-decision event (`job_events` `variation_approved` / `variation_rejected`) is an
-approval: `approved_at` is stamped on a rejection too, and a variation can be
-sent or accepted without ever being approved. The settings are a goal the
+`priced_by_another_tool`). The value is rewritten on every issue and every
+variation decision, never only on approvals. A variation counts toward it once
+approved and still counts when later `sent` or `accepted`, but only when the
+newest `job_events` row about it (`variation_approved`, `variation_rejected`,
+or the `variation_requested` every issue writes) is an approval: `approved_at`
+is stamped on a rejection too, a variation can be sent or accepted without ever
+being approved, and a re-issue voids the earlier approval. The settings are a goal the
 scoper may ignore, never a rule: nothing on the server refuses, clamps or
 rewrites a charge line or margin for differing from them. The scope of works
 PDF is a `job_documents` row of type `other` (a meaningful type no close-out

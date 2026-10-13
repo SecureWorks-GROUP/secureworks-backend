@@ -1807,9 +1807,9 @@ Deno.test("quote builder: an approved variation adds to the job's value and a re
       },
     );
 
-  // Issuing a variation changes nothing: it is not approved yet.
+  // Issuing a variation leaves the value at the scope: it is not approved yet.
   const first = await issueVariation(200);
-  assertEquals("job_value" in first, false);
+  assertEquals(first.job_value, { written: true, total_inc_gst: 715 });
   assertEquals(job().pricing_json.totalIncGST, 715);
 
   const approved = await decide(first.variation.id, true);
@@ -1821,7 +1821,7 @@ Deno.test("quote builder: an approved variation adds to the job's value and a re
 
   const second = await issueVariation(1000);
   const rejected = await decide(second.variation.id, false);
-  assertEquals("job_value" in rejected, false);
+  assertEquals(rejected.job_value, { written: true, total_inc_gst: 935 });
   assertEquals(job().pricing_json.totalIncGST, 935);
 });
 
@@ -1929,7 +1929,7 @@ Deno.test("quote builder: an approved variation still counts once it is sent or 
   // Rejected (which stamps approved_at too), then sent anyway: not counted.
   const rejectedOne = await issueVariation(3000);
   const rejected = await decide(rejectedOne, false);
-  assertEquals("job_value" in rejected, false);
+  assertEquals(rejected.job_value, { written: true, total_inc_gst: 935 });
   assert(variation(rejectedOne).approved_at);
   send(rejectedOne);
   assertEquals(await value(), [850, [approvedOne]]);
@@ -1943,6 +1943,113 @@ Deno.test("quote builder: an approved variation still counts once it is sent or 
     variation(rejectedOne).status = status;
     assertEquals(await value(), [850, [approvedOne]]);
   }
+});
+
+Deno.test("quote builder: a variation that stops counting comes off the job's value at once", async () => {
+  const store = seed();
+  const { client, upload } = makeFakeClient(store);
+  const moveRepairStage = stageMover(store, []);
+  const job = () => store.jobs.find((j) => j.id === REPAIR_JOB)!;
+  const variation = (id: string) =>
+    store.job_variations.find((v) => v.id === id)!;
+  await issueScope(store, client, upload, REPAIR_JOB);
+
+  const issueVariation = async (
+    price: number,
+    base?: { id: string; chain_id: string },
+  ) => {
+    const draft = (await saveQuoteBuilderVersion(client, {
+      job_id: REPAIR_JOB,
+      kind: "variation",
+      title: "Extra",
+      ...(base ? { chain_id: base.chain_id, base_version_id: base.id } : {}),
+      charge_lines: [{ ...CHARGE[0], unit_price_ex_gst: price }],
+    }, ACTOR)).version;
+    const slot = await quoteBuilderPdfUploadUrl(client, {
+      version_id: draft.id,
+    }, ACTOR);
+    upload("job-pdfs", slot.path);
+    return await issueQuoteBuilderVersion(
+      client,
+      { version_id: draft.id, pdf_path: slot.path },
+      ACTOR,
+      { moveRepairStage },
+    );
+  };
+  // Decisions go through the real dispatch, so the real approval path stamps
+  // the row and writes its decision event.
+  const decide = async (variationId: string, approved: boolean) => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve(new Response("{}"));
+    try {
+      const response = await dispatchQuoteBuilderAction(
+        client,
+        "quote_builder_decide_variation",
+        new URLSearchParams(),
+        { variation_id: variationId, approved },
+        ACTOR,
+      );
+      assertEquals(response.status, 200);
+      return await response.json();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+  // What the ops "send variation" action stamps, from any status.
+  const send = (id: string) =>
+    Object.assign(variation(id), { status: "sent", sent_at: tick() });
+  const stored = () => [
+    job().pricing_json.totalIncGST,
+    job().pricing_json.quote_builder.variation_ids,
+  ];
+
+  // Approved, sent to the client, then rejected in the builder: the rejection
+  // itself takes it off the value.
+  const first = await issueVariation(200);
+  const firstId = first.variation.id as string;
+  await decide(firstId, true);
+  assertEquals(stored(), [935, [firstId]]);
+  send(firstId);
+  const rejected = await decide(firstId, false);
+  assertEquals(rejected.job_value, { written: true, total_inc_gst: 715 });
+  assertEquals(stored(), [715, []]);
+
+  // Approved, sent, then re-issued as a new version: the re-issue puts it back
+  // to undecided, and the issue itself takes the approved amount off.
+  const second = await issueVariation(400);
+  const secondId = second.variation.id as string;
+  assertEquals(
+    (await decide(secondId, true)).job_value,
+    { written: true, total_inc_gst: 1155 },
+  );
+  send(secondId);
+  const reissued = await issueVariation(800, second.version);
+  assertEquals(reissued.variation.id, secondId);
+  assertEquals(variation(secondId).status, "pending_approval");
+  assertEquals(reissued.job_value, { written: true, total_inc_gst: 715 });
+  assertEquals(stored(), [715, []]);
+
+  // Ops send the new version without anyone approving it. The old approval is
+  // not an approval of this version, so it still does not count.
+  send(secondId);
+  assertEquals(await writeQuoteBuilderJobValue(client, REPAIR_JOB), {
+    written: true,
+    total_inc_gst: 715,
+  });
+  assertEquals(stored(), [715, []]);
+
+  // A fresh approval counts the new version at its own amount, and it keeps
+  // counting once sent.
+  assertEquals(
+    (await decide(secondId, true)).job_value,
+    { written: true, total_inc_gst: 1595 },
+  );
+  send(secondId);
+  assertEquals(await writeQuoteBuilderJobValue(client, REPAIR_JOB), {
+    written: true,
+    total_inc_gst: 1595,
+  });
+  assertEquals(stored(), [1595, [secondId]]);
 });
 
 Deno.test("quote builder: the pricing settings are a goal, and a quote priced away from them saves and issues unchanged", async () => {
