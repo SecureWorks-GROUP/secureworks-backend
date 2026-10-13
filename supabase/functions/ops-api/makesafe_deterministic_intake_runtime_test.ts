@@ -34,6 +34,11 @@ import {
   type AmbrosePurchaseOrderFixture,
   ambroseSubject,
 } from "./makesafe_ambrose_intake_fixtures.ts";
+import {
+  ORPHAN_LIFECYCLE_REVIEW_FIELD,
+  REPAIR_AUTO_INTAKE_VERSION,
+  REPAIR_WORK_ORDER_LANDED_EVENT,
+} from "./repair_intake_auto.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -8299,4 +8304,700 @@ Deno.test("CONTROL for the Ambrose release: another builder's stripped fallback 
     store.makesafe_intake_cases[0].last_decision_reason,
     "deterministic source_persist_failed case_insert",
   );
+});
+
+// ── Automatic repair intake (flag repair_intake_auto_v1) ─────────────────────
+// Owner's word, 13 Oct 2026: a repair work order MLB or Ambrose emails in
+// becomes a job in the insurance repair pipeline with no person in between.
+// These replay the orders that were found waiting that day, in their real
+// shapes with every name, address, number and figure invented: five Ambrose
+// repair purchase orders (two of them on one claim, sent in the same minute),
+// the MLB "Rapid Repair" order for a claim that already had a repair job, and
+// the Ambrose collection order that was dropped with no draft. `repairAutoIntake`
+// is the flag as the scan passes it; absent is the flag off.
+const REPAIR_NOW = "2026-07-20T12:00:00.000Z";
+
+// The guarded approval, as far as the scan can see it: it turns the draft into
+// a job and its make-safe detail row, which is what the next order's match reads.
+function intakeApprover(store: Store) {
+  const bodies: any[] = [];
+  const approve = (_client: any, body: any) => {
+    bodies.push(body);
+    const draft = store.makesafe_intake_drafts.find((row: any) =>
+      row.id === body.draft_id
+    );
+    const repair = body.reviewed_fields?.makesafe_job_family === "repair";
+    const job = {
+      id: `job-${bodies.length}`,
+      job_number: `${repair ? "SWR" : "SWMS"}-99${bodies.length}`,
+      type: repair ? "repair" : "makesafe",
+      status: "accepted",
+      metadata: {
+        makesafe_job_family: body.reviewed_fields?.makesafe_job_family,
+        builder_claim_ref: draft.extraction_json.builder_claim_ref,
+        builder_po_number: draft.extraction_json.builder_po_number,
+        ...(repair ? { repair_stage: "wo_in" } : {}),
+      },
+    };
+    store.jobs.push(job);
+    store.makesafe_job_details.push({
+      job_id: job.id,
+      external_ref: draft.external_ref,
+      requesting_company_slug: draft.requesting_company_slug,
+      requesting_company_name: null,
+      report_type: null,
+      jobs: job,
+    });
+    draft.status = "approved";
+    draft.approved_job_id = job.id;
+    return Promise.resolve({ job: { id: job.id }, job_created: true });
+  };
+  return { approve, bodies };
+}
+
+function repairIntakeStore(): Store {
+  const store = ambroseIntakeStore();
+  store.job_events = [];
+  store.job_documents = [];
+  return store;
+}
+
+function runRepairScan(
+  store: Store,
+  approve: (client: any, body: any) => Promise<any>,
+  repairAutoIntake: boolean,
+  nowIso = REPAIR_NOW,
+) {
+  return runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso,
+    maxCases: 10,
+    selectionMode: "full_open",
+    approveDraft: approve,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
+  });
+}
+
+// An open repair job as a person raises one from a quote request: the claim
+// reference, no purchase order yet, sitting in Scoping on the Repairs board.
+function seedRepairJob(
+  store: Store,
+  input: {
+    id: string;
+    jobNumber: string;
+    slug: string;
+    claim: string;
+    metadata?: Record<string, any>;
+  },
+) {
+  const job: any = {
+    id: input.id,
+    job_number: input.jobNumber,
+    type: "repair",
+    status: "accepted",
+    metadata: {
+      makesafe_job_family: "repair",
+      ses_family: "repair",
+      repair_stage: "scoping",
+      builder_claim_ref: input.claim,
+      external_ref: input.claim,
+      ...(input.metadata || {}),
+    },
+  };
+  store.jobs.push(job);
+  store.makesafe_job_details.push({
+    job_id: job.id,
+    external_ref: input.claim,
+    requesting_company_slug: input.slug,
+    requesting_company_name: null,
+    report_type: null,
+    jobs: job,
+  });
+  return job;
+}
+
+// MLB's work order mail. The "Rapid Repair" subject is MLB declaring a repair.
+function pushMlbWorkOrder(
+  store: Store,
+  postId: string,
+  input: {
+    claim: string;
+    po: string;
+    address: string;
+    rapidRepair: boolean;
+    scope: string;
+    receivedAt: string;
+  },
+) {
+  const number = `${input.claim}${input.po}`;
+  store.emails.push(email({
+    post_id: postId,
+    conversation_id: `conversation-${postId}`,
+    received_at: input.receivedAt,
+    subject: `${
+      input.rapidRepair ? "**Rapid Repair** " : ""
+    }NEW WORK ORDER - ${input.claim} ${input.address}`,
+    body_content: "Please find the attached work order.",
+  }));
+  const text = [
+    "Work Order",
+    `Work Order Assigned Secureworks Group Pty Ltd Work Order Number ${number}`,
+    `Job Number ${input.claim} Date 13/07/2026`,
+    "Supervisor Name Sam Supervisor Supervisor Contact 08 0000 0000",
+    "Admin Name Sam Supervisor Office Contact 08 0000 0001",
+    "Policyholders Name Alex Example & Mr Jordan Example",
+    "Policyholders Contact Mobile: 0400 000 001 Home: 0400 000 002 Email:",
+    "alex.example@example.test",
+    "Insurer Name Example Insurance",
+    `Site Address ${input.address}`,
+    "Other Contact Details",
+    "(Tenant)",
+    "Name Contact",
+    "Additional",
+    "Notes/Instructions:",
+    number,
+    "Carpentry",
+    "EXTERNAL",
+    "Labour for",
+    input.scope,
+    "Totals Totals",
+    "Subtotal $1,080.00",
+    "GST $108.00",
+    "Total $1,188.00",
+    "Example Builder Pty Ltd",
+  ].join("\n");
+  store.email_attachments.push({
+    id: `att-${postId}`,
+    email_id: postId,
+    name: `work_order_${number}_Secureworks_Group_Pty_Ltd.pdf`,
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 120_000,
+    sha256: `sha-${postId}`,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: text,
+    pdf_extraction_char_count: text.length,
+    pdf_extraction_page_count: 4,
+    pdf_extraction_extractor: "fixture",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+}
+
+const RAPID_REPAIR_ORDER = {
+  claim: "MLB-49502",
+  po: "PO-69815",
+  address: "12 Example Way, Testville, WA 6000",
+  rapidRepair: true,
+  scope:
+    "Remove and dispose from site. Supply and install similar to existing. - 2 lengths of gutter 3.6m and 6m long. - 1 length of fascia 3.6 m long - remove and reinstall downpipe as required.",
+  receivedAt: "2026-07-19T01:12:00.000Z",
+};
+
+function landedNotices(store: Store) {
+  return store.email_events_raw.filter((row: any) =>
+    row.change_type === "intake_exception_new_work_order_on_existing_job"
+  );
+}
+
+Deno.test("repair intake: replay: five Ambrose repair purchase orders become one repair job per claim and none makes two", async () => {
+  const store = repairIntakeStore();
+  const orders: Array<[string, AmbrosePurchaseOrderFixture, string]> = [
+    // Two purchase orders on one claim, sent in the same minute.
+    ["esplanade-03", {
+      job: "20999301",
+      sequence: "03",
+      address: "25 Sample Esplanade Demo Point WA 6020",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-15T06:10:00.000Z"],
+    ["esplanade-08", {
+      job: "20999301",
+      sequence: "08",
+      address: "25 Sample Esplanade Demo Point WA 6020",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-15T06:10:20.000Z"],
+    ["fence-14", {
+      job: "20999302",
+      sequence: "14",
+      address: "1 Example Place Testvale WA 6030",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-16T02:45:00.000Z"],
+    ["carport-05", {
+      job: "20999303",
+      sequence: "05",
+      address: "5 Sample Road Demoville WA 6010",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-16T04:35:00.000Z"],
+    ["fascia-03", {
+      job: "20999304",
+      sequence: "03",
+      address: "12 Example Way Testville WA 6000",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-19T00:17:00.000Z"],
+  ];
+  for (const [postId, fixture, receivedAt] of orders) {
+    pushAmbroseMail(store, postId, fixture, receivedAt, `sha-${postId}`);
+  }
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 4);
+  assertEquals(approver.bodies.length, 4);
+  for (const body of approver.bodies) {
+    assertEquals(body.repair_auto_intake, true);
+    assertEquals(body.reviewed_fields, { makesafe_job_family: "repair" });
+  }
+  // Four claims, four repair jobs: no claim has two.
+  assertEquals(store.jobs.map((job: any) => job.type), [
+    "repair",
+    "repair",
+    "repair",
+    "repair",
+  ]);
+  const claims = store.jobs.map((job: any) => job.metadata.builder_claim_ref);
+  assertEquals([...claims].sort(), [
+    "ACG-20999301",
+    "ACG-20999302",
+    "ACG-20999303",
+    "ACG-20999304",
+  ]);
+  // Each automatic draft carries the stamp it was approved on, with its value.
+  assertEquals(store.makesafe_intake_drafts.length, 4);
+  for (const draft of store.makesafe_intake_drafts) {
+    assertEquals(draft.extraction_json.repair_auto_intake, {
+      version: REPAIR_AUTO_INTAKE_VERSION,
+      builder: "acg",
+      family_evidence: ["ambrose_declared_repair"],
+      work_order_value_ex_gst: 200,
+    });
+  }
+  // The second purchase order on the shared claim landed on that claim's job.
+  const shared = store.jobs.find((job: any) =>
+    job.metadata.builder_claim_ref === "ACG-20999301"
+  );
+  const sharedOrders = [
+    shared.metadata.builder_po_number,
+    ...shared.metadata.builder_additional_work_orders.map((entry: any) =>
+      entry.purchase_order
+    ),
+  ].sort();
+  assertEquals(sharedOrders, ["PO-2099930103", "PO-2099930108"]);
+  assertEquals(first.repair_intake?.auto_approved, 4);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(
+    store.job_events.filter((event: any) =>
+      event.event_type === REPAIR_WORK_ORDER_LANDED_EVENT
+    ).map((event: any) => event.job_id),
+    [shared.id],
+  );
+  // All five orders are accounted on a job.
+  assertEquals(store.makesafe_intake_cases.length, 5);
+  for (const row of store.makesafe_intake_cases) {
+    assertEquals(row.state, "confirmed_live_job");
+    assert(row.job_id);
+  }
+
+  // The next scan finds nothing to do: no second job, draft, event or notice.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 4);
+  assertEquals(store.jobs.length, 4);
+  assertEquals(store.makesafe_intake_drafts.length, 4);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(shared.metadata.builder_additional_work_orders.length, 1);
+});
+
+Deno.test("repair intake: replay: the rapid repair order for a claim that already has a repair job lands on that job", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  // No second job and no blank draft.
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(first.totals.drafts_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  // The purchase order, work order number and value are on the job.
+  assertEquals(job.metadata.builder_po_number, "PO-69815");
+  assertEquals(job.metadata.builder_claim_ref, "MLB-49502");
+  assertEquals(job.metadata.builder_work_order_value_ex_gst, 1080);
+  // The board stage and status are a person's to move.
+  assertEquals(job.metadata.repair_stage, "scoping");
+  assertEquals(job.status, "accepted");
+  // The work order PDF is on the job.
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(store.job_documents[0].job_id, "job-kinross");
+  assertEquals(store.job_documents[0].type, "work_order");
+  // The "new work order on existing job" notice: one job event, one desk item.
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_events[0].event_type, REPAIR_WORK_ORDER_LANDED_EVENT);
+  assertEquals(
+    store.job_events[0].detail_json.notice,
+    "new_work_order_on_existing_job",
+  );
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(
+    landedNotices(store)[0].page_meta.next_action_code,
+    "human_review_work_order_on_existing_job",
+  );
+  // The order is accounted on the existing job.
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].job_id, "job-kinross");
+  // Live on the job. (MLB's template gives no phone the planner reads, which
+  // is the "blocked" flavour of live and holds nothing back.)
+  assertEquals(store.makesafe_intake_cases[0].state, "blocked_live_job");
+  assertEquals(first.repair_intake?.landed_on_existing_job, 1);
+
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(store.jobs.length, 1);
+});
+
+Deno.test("repair intake: CONTROL: with no repair job on the claim, the same rapid repair order becomes exactly one repair job", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.extraction_json.repair_auto_intake, {
+    version: REPAIR_AUTO_INTAKE_VERSION,
+    builder: "mlb",
+    family_evidence: ["rapid_repair_signal"],
+    work_order_value_ex_gst: 1080,
+  });
+  assertEquals(draft.extraction_json.builder_po_number, "PO-69815");
+  assertEquals(draft.site_address, "12 Example Way, Testville");
+  assertEquals(landedNotices(store).length, 0);
+
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(store.jobs.length, 1);
+});
+
+Deno.test("repair intake: a work order that reads as make-safe on a claim whose job is a repair job lands on the repair job", async () => {
+  // The "additional costs" shape: the claim's repair job already holds its
+  // first purchase order, and a second order arrives with no repair header.
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-additional",
+    jobNumber: "SWR-990314",
+    slug: "mlb",
+    claim: "MLB-49843",
+    metadata: { builder_po_number: "PO-68375", repair_stage: "materials" },
+  });
+  pushMlbWorkOrder(store, "additional-costs", {
+    claim: "MLB-49843",
+    po: "PO-69323",
+    address: "20 Sample Drive, Demoville, WA 6010",
+    rapidRepair: false,
+    scope:
+      "Make safe the storm damaged boundary and secure the property. Install temporary roof tarps as required.",
+    receivedAt: "2026-07-19T03:33:00.000Z",
+  });
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  // The plan read as make-safe, which is what would have minted a second job.
+  assertEquals(
+    store.makesafe_intake_cases[0].raw_identity_json?.job_family ??
+      "general_makesafe",
+    "general_makesafe",
+  );
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  // The first purchase order stays the job's own; the new one is listed.
+  assertEquals(job.metadata.builder_po_number, "PO-68375");
+  assertEquals(
+    job.metadata.builder_additional_work_orders.map((entry: any) =>
+      entry.purchase_order
+    ),
+    ["PO-69323"],
+  );
+  assertEquals(store.makesafe_intake_cases[0].job_id, "job-additional");
+  assertEquals(landedNotices(store).length, 1);
+});
+
+// The collection order: a declared make-safe purchase order whose notes ask
+// for temporary fencing to be collected, for a site with no job of ours.
+function pushAmbroseCollectionOrder(store: Store, postId: string) {
+  const fixture: AmbrosePurchaseOrderFixture = {
+    job: "20999978",
+    sequence: "01",
+    address: "8A Example Rise Testhead WA 6210",
+    kind: "make_safe",
+  };
+  pushAmbroseMail(
+    store,
+    postId,
+    fixture,
+    "2026-07-15T06:10:13.000Z",
+    `sha-${postId}`,
+  );
+  const mail = store.emails.find((row: any) => row.post_id === postId);
+  mail.body_content = [
+    "Hello SECUREWORKS WA,",
+    "",
+    "Please see attached PO #20999978-01 regarding Make Safe required at the above address. When completing a make safe for Ambrose Construct Group we require that you complete a make safe report and pictures via the Ambrose portal.",
+    "",
+    "Notes:",
+    "**NEW MAKE SAFE WORK ORDER**",
+    "Hi Team,",
+    "As discussed, please contact the insured on 0400 000 001 to confirm your arrival day/time to site to complete temp fence collection make safe.",
+    "Please attend site to collect 5 panels of temp fencing",
+  ].join("\n");
+}
+
+Deno.test("repair intake: replay: a collection order with no original job opens one review draft, and never a job", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseCollectionOrder(store, "collection");
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.drafts_created, 1);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.status, "needs_review");
+  // The reason it waits is on the draft, and keeps the backlog sweep off it.
+  assertEquals(draft.missing_fields, [ORPHAN_LIFECYCLE_REVIEW_FIELD]);
+  assertEquals(
+    draft.extraction_json.review_reason,
+    "collection_or_reattendance_without_original_job",
+  );
+  assertEquals(draft.extraction_json.builder_po_number, "PO-2099997801");
+  assertEquals(draft.site_address, "8A Example Rise Testhead WA 6210");
+  assertEquals(first.repair_intake?.orphan_lifecycle_drafts, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "awaiting_job_creation",
+  );
+
+  // Later scans leave it as one waiting draft.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.drafts_created, 0);
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+});
+
+Deno.test("repair intake: flag off: the collection order is the exception it is today, and switching the flag on later leaves it alone", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseCollectionOrder(store, "collection");
+  const approver = intakeApprover(store);
+
+  const off = await runRepairScan(store, approver.approve, false);
+  assertEquals(off.repair_intake, undefined);
+  assertEquals(off.totals.drafts_created, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "reattendance_target_not_found",
+  );
+
+  // An order parked before the flag was on is live data: it keeps its fate.
+  const on = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(on.totals.drafts_created, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "reattendance_target_not_found",
+  );
+  assertEquals(approver.bodies.length, 0);
+});
+
+Deno.test("repair intake: an unclear repair order still stops as a review draft", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseMail(
+    store,
+    "no-value",
+    {
+      job: "20999305",
+      sequence: "02",
+      address: "9 Example Court Testville WA 6000",
+      kind: "repair",
+    },
+    "2026-07-18T02:45:00.000Z",
+    "sha-no-value",
+  );
+  // The purchase order states no readable total.
+  const attachment = store.email_attachments[0];
+  attachment.pdf_extraction_text = attachment.pdf_extraction_text.replace(
+    "TOTAL Purchase Order Price (ex GST) $200.00",
+    "TOTAL Purchase Order Price (ex GST) as per schedule",
+  );
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.status, "needs_review");
+  assertEquals(draft.extraction_json.makesafe_job_family, "repair");
+  assertEquals("repair_auto_intake" in draft.extraction_json, false);
+  assertEquals(report.repair_intake?.parked_for_review, {
+    work_order_value_unreadable: 1,
+  });
+});
+
+Deno.test("repair intake: flag off: a repair order for a claim with a repair job is the waiting draft it is today, and nothing touches the job", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  const before = JSON.stringify(job);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const off = await runRepairScan(store, approver.approve, false);
+  assertEquals(off.repair_intake, undefined);
+  assertEquals(off.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(
+    "repair_auto_intake" in store.makesafe_intake_drafts[0].extraction_json,
+    false,
+  );
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+
+  // Switching the flag on does not act on a draft that was already waiting:
+  // it is neither approved nor landed on the job. A person holds it.
+  const on = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(on.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+});
+
+Deno.test("repair intake: a repair draft already waiting when the flag is switched on still waits for a person", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseMail(
+    store,
+    "waiting",
+    {
+      job: "20999306",
+      sequence: "04",
+      address: "3 Sample Street Demoville WA 6010",
+      kind: "repair",
+    },
+    "2026-07-18T02:45:00.000Z",
+    "sha-waiting",
+  );
+  const approver = intakeApprover(store);
+  await runRepairScan(store, approver.approve, false);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+
+  const on = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(on.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 0);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+});
+
+Deno.test("repair intake: the guarded approval refusing an automatic repair leaves the draft for a person and fails nothing", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  let attempts = 0;
+  const refusing = () => {
+    attempts++;
+    return Promise.reject(
+      Object.assign(new Error("Repair intake requires a human tick"), {
+        status: 409,
+      }),
+    );
+  };
+
+  const report = await runRepairScan(store, refusing, true);
+  assertEquals(attempts, 1);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.completion_status, "completed");
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.repair_intake?.approval_refused, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
 });

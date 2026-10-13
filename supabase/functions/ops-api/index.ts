@@ -691,6 +691,10 @@ import {
   type IntakeDraftObligationDisposition as _IntakeDraftObligationDisposition,
 } from './makesafe_deterministic_intake_runtime.ts'
 import {
+  repairAutoIntakeMintStamp as _repairAutoIntakeMintStamp,
+  repairIntakeAutoEnabled as _repairIntakeAutoEnabled,
+} from './repair_intake_auto.ts'
+import {
   notifyDeterministicPhysicalJob as _notifyDeterministicPhysicalJob,
   type HugoNotificationConfig as _HugoNotificationConfig,
   type HugoProviderResult as _HugoProviderResult,
@@ -18691,6 +18695,7 @@ async function createMakesafeJob(
     intake_mint_id,
     synthetic_livefire_marker,
     suppress_manager_notification,
+    builder_work_order_value_ex_gst,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -18806,6 +18811,15 @@ async function createMakesafeJob(
       },
     )
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
+  // The builder's own ex-GST work order value, as read off its PDF. Recorded on
+  // a repair card only, beside its purchase order; it is the builder's figure,
+  // never our price, so it stays in metadata and out of pricing_json.
+  const reviewedWorkOrderValueExGst = isRepairRoute &&
+      typeof builder_work_order_value_ex_gst === 'number' &&
+      Number.isFinite(builder_work_order_value_ex_gst) &&
+      builder_work_order_value_ex_gst > 0
+    ? Math.round(builder_work_order_value_ex_gst * 100) / 100
+    : null
 
   if (reviewedJobFamily === 'roof_report') {
     const authority = internalOptions.canonicalIntakeAuthority
@@ -18874,6 +18888,12 @@ async function createMakesafeJob(
     builder_claim_ref: builder_claim_ref || null,
     builder_work_order_number: builder_work_order_number || null,
     builder_po_number: builder_po_number || null,
+    ...(reviewedWorkOrderValueExGst !== null
+      ? {
+        builder_work_order_value_ex_gst: reviewedWorkOrderValueExGst,
+        builder_work_order_value_source: 'work_order_pdf',
+      }
+      : {}),
     ...(intake_mint_id ? { intake_mint_id } : {}),
     ...(reviewedSyntheticLivefireMarker
       ? { synthetic_livefire_marker: reviewedSyntheticLivefireMarker }
@@ -27564,6 +27584,18 @@ const UNATTENDED_INTAKE_APPROVAL_MARKER = {
   [UNATTENDED_INTAKE_APPROVAL]: UNATTENDED_INTAKE_APPROVAL,
 } as Record<symbol, symbol>
 
+// Narrowed 13 Oct 2026 (owner's word; rules in repair_intake_auto.ts): behind
+// `feature_flags.repair_intake_auto_v1` the deterministic scan may mint a
+// repair card for a builder-declared repair work order from MLB or Ambrose.
+// Only the two deterministic scan lanes stamp this marker, and only for a
+// draft their own run judged clean. It is a request, never the authority: the
+// brake below re-reads the flag and re-judges the DRAFT at mint time, so the
+// backlog sweep, the late-PDF lane and any future lane stay supervised.
+const REPAIR_AUTO_INTAKE_APPROVAL = Symbol('repairAutoIntakeApproval')
+const REPAIR_AUTO_INTAKE_APPROVAL_MARKER = {
+  [REPAIR_AUTO_INTAKE_APPROVAL]: REPAIR_AUTO_INTAKE_APPROVAL,
+} as Record<symbol, symbol>
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
@@ -27864,8 +27896,28 @@ async function approveIntakeDraft(client: any, body: any) {
   // half of that test — the refusal itself is placed at the two points where a
   // new card can actually be minted, so a settlement retry, a guarded
   // source-authority link and the F9 refusal all stay reachable.
-  const unattendedRepairMint = unattendedApproval &&
+  //
+  // 13 Oct 2026: what the ruling guarded against is a MISREAD work order
+  // minting a card that can never be retyped. That is still guarded, by a
+  // narrower check: the request marker from a deterministic scan lane, the flag
+  // read again here, and a draft stamped by a run that found the repair
+  // declared by MLB or Ambrose with nothing missing and its value read.
+  const repairAutoStamp =
     _normaliseDedupJobFamily(approvedJobFamily) === 'repair'
+      ? _repairAutoIntakeMintStamp({
+        extraction,
+        requestingCompanySlug: approvedFields.requesting_company_slug,
+        reviewedFamily: approvedJobFamily,
+      })
+      : null
+  const repairAutoIntakeAuthorised = unattendedApproval &&
+    body?.[REPAIR_AUTO_INTAKE_APPROVAL] === REPAIR_AUTO_INTAKE_APPROVAL &&
+    cleanReviewedString(reviewedFamily) === 'repair' &&
+    !!repairAutoStamp &&
+    await _repairIntakeAutoEnabled(client)
+  const unattendedRepairMint = unattendedApproval &&
+    _normaliseDedupJobFamily(approvedJobFamily) === 'repair' &&
+    !repairAutoIntakeAuthorised
   const refuseUnattendedRepairMint = (): never => {
     throw new ApiError(
       'Repair intake requires a human tick: this instruction resolves to the repair family, which no unattended lane may mint. The draft stays in the review queue for an operator to approve.',
@@ -28214,6 +28266,15 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
+      // The value a flag-on scan read off the work order rides with the stamp,
+      // whoever approves the draft: a person ticking a stamped draft the gate
+      // refused gets the same card the automatic path would have made.
+      ...(repairAutoStamp
+        ? {
+          builder_work_order_value_ex_gst:
+            repairAutoStamp.work_order_value_ex_gst,
+        }
+        : {}),
       ...(primaryMint ? { intake_mint_id: primaryMint.id } : {}),
       ...(extraction?.synthetic_livefire_marker
         ? {
@@ -28499,6 +28560,8 @@ async function approveIntakeDraft(client: any, body: any) {
 export const _approveIntakeDraftForTest = approveIntakeDraft
 export const _unattendedIntakeApprovalMarkerForTest =
   UNATTENDED_INTAKE_APPROVAL_MARKER
+export const _repairAutoIntakeApprovalMarkerForTest =
+  REPAIR_AUTO_INTAKE_APPROVAL_MARKER
 
 // ── Slice 7: reject intake draft ──
 async function rejectIntakeDraft(client: any, body: any) {
@@ -29824,7 +29887,23 @@ interface StandingScanDeps {
   loadRollout?: (client: any) => Promise<any>
   autoApproveEnabled?: () => boolean
   loadAutoFileEnabled?: (client: any) => Promise<boolean>
+  loadRepairAutoIntake?: (client: any) => Promise<boolean>
   run?: (client: any, options: any) => Promise<any>
+}
+
+// The two deterministic scan lanes' approval call. The repair marker rides only
+// on a body the runtime itself asked it for, on a run whose flag read on.
+function deterministicScanApprovalBody(
+  approvalBody: any,
+  repairAutoIntake: boolean,
+) {
+  return {
+    ...approvalBody,
+    ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+    ...(repairAutoIntake && approvalBody?.repair_auto_intake === true
+      ? REPAIR_AUTO_INTAKE_APPROVAL_MARKER
+      : {}),
+  }
 }
 
 async function scanSesMakesafes(
@@ -29841,6 +29920,10 @@ async function scanSesMakesafes(
   const advanceDrafts =
     (deps.autoApproveEnabled || autoApproveCleanIntakeEnabled)() &&
     await (deps.loadAutoFileEnabled || isAutoFileEnabled)(client)
+  // Read once per run. Off, missing or unreadable passes nothing, so the run's
+  // options are exactly what they were before the flag existed.
+  const repairAutoIntake =
+    await (deps.loadRepairAutoIntake || _repairIntakeAutoEnabled)(client)
   return await (deps.run || _runDeterministicIntake)(client, {
     dryRun: false,
     selectionMode: rollout.selectionMode,
@@ -29854,13 +29937,14 @@ async function scanSesMakesafes(
     allowInstructionKeys: rollout.instructionKeys,
     advanceDrafts,
     approveDraft: (approvalClient: any, approvalBody: any) =>
-      approveIntakeDraft(approvalClient, {
-        ...approvalBody,
-        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
-      }),
+      approveIntakeDraft(
+        approvalClient,
+        deterministicScanApprovalBody(approvalBody, repairAutoIntake),
+      ),
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
   })
 }
 
@@ -29891,10 +29975,10 @@ async function scanFreshMakesafeSource(
   const rollout = await _loadDeterministicRolloutControls(client)
   const advanceDrafts = autoApproveCleanIntakeEnabled() &&
     await isAutoFileEnabled(client)
+  const repairAutoIntake = await _repairIntakeAutoEnabled(client)
   const approveExactDraft = (approvalClient: any, approvalBody: any) =>
     approveIntakeDraft(approvalClient, {
-      ...approvalBody,
-      ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+      ...deterministicScanApprovalBody(approvalBody, repairAutoIntake),
       ...(options.approvalReviewNote
         ? {
           review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
@@ -29916,6 +30000,7 @@ async function scanFreshMakesafeSource(
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
   })
   const { data: pendingDraft, error: pendingDraftError } = await client
     .from('makesafe_intake_drafts')

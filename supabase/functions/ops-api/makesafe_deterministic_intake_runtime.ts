@@ -52,6 +52,19 @@ import {
   stripSyntheticLivefireSignature,
   verifySyntheticLivefireMarker,
 } from "./makesafe_synthetic_livefire.ts";
+import { ensureIntakeWorkOrderEvidence } from "./makesafe_intake_settlement.ts";
+import {
+  decideRepairAutoIntake,
+  landWorkOrderOnRepairJob,
+  matchOpenRepairJob,
+  type OpenRepairJobMatch,
+  ORPHAN_LIFECYCLE_REVIEW_FIELD,
+  orphanLifecycleOrderOpensReviewDraft,
+  planWorkOrderValueExGst,
+  REPAIR_LANDING_FAMILIES,
+  type RepairAutoIntakeStamp,
+  type RepairWorkOrderLanding,
+} from "./repair_intake_auto.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -97,6 +110,15 @@ export interface DeterministicRuntimeOptions {
     builderPurchaseOrder: string;
   };
   suppressPhysicalJobNotifications?: boolean;
+  // Automatic repair intake (`feature_flags.repair_intake_auto_v1`, read once
+  // per run by the caller). Absent or false is today's behaviour exactly: every
+  // repair draft parks, repair jobs stay invisible to the obligation match and
+  // an orphan collection order stays an exception. Rules: repair_intake_auto.ts.
+  repairAutoIntake?: boolean;
+  landWorkOrderOnRepairJob?: (
+    client: any,
+    landing: RepairWorkOrderLanding,
+  ) => Promise<unknown>;
 }
 
 export interface BuilderCancellationCommand {
@@ -206,6 +228,14 @@ export interface DeterministicRuntimeReport {
   // True when the run spent its attempt ceiling without committing a single case.
   // Repeat failures crowding out advanceable work is then visible, not silent.
   attempt_cap_reached_without_commit: boolean;
+  // Present only on a run with automatic repair intake switched on.
+  repair_intake?: {
+    auto_approved: number;
+    approval_refused: number;
+    parked_for_review: Record<string, number>;
+    landed_on_existing_job: number;
+    orphan_lifecycle_drafts: number;
+  };
   selection: {
     mode: DeterministicSelectionMode;
     source_allowlist_count: number;
@@ -3559,6 +3589,10 @@ async function readObligationMatches(
   existingJobs: Map<string, string>;
   cancellationTargets: Map<string, CancellationTargetResolution>;
   bindingExceptions: Map<string, ObligationBindingException>;
+  // The rows and prefixes this read paged, so the repair-job match reads the
+  // same snapshot instead of paging `makesafe_job_details` a second time.
+  obligationRows: readonly any[];
+  refPrefixes: readonly string[];
 }> {
   if (
     !cases.some((item) =>
@@ -3570,6 +3604,8 @@ async function readObligationMatches(
     return {
       existingJobs: new Map(),
       bindingExceptions: new Map(),
+      obligationRows: [],
+      refPrefixes: [],
       cancellationTargets: new Map(
         cases.filter((item) => item.targetRelation === "cancellation_of").map(
           (item) => [
@@ -3808,7 +3844,13 @@ async function readObligationMatches(
     }
     if (match) existingJobs.set(item.instructionKey, match.job_id);
   }
-  return { existingJobs, cancellationTargets, bindingExceptions };
+  return {
+    existingJobs,
+    cancellationTargets,
+    bindingExceptions,
+    obligationRows: data,
+    refPrefixes: prefixes,
+  };
 }
 
 // Retain the established write-boundary name: the result now also carries the
@@ -4022,6 +4064,13 @@ async function ensureDraftAndJob(
   onStorageBlocker: (blocker: string) => void,
   onPersistedOutcome: (outcome: PersistedOutcome) => void,
   advanceDrafts = true,
+  // Automatic repair intake. `auto` is the stamp a clean builder-declared
+  // repair plan earned on a run with the flag on; `review` marks a draft that
+  // must wait for a person whatever the brakes say. Both absent is today.
+  repairIntake: {
+    auto?: RepairAutoIntakeStamp | null;
+    review?: { missingField: string; reason: string } | null;
+  } = {},
 ): Promise<
   {
     jobId: string | null;
@@ -4030,6 +4079,7 @@ async function ensureDraftAndJob(
     notificationJobIds: string[];
     resumed: boolean;
     parked: boolean;
+    repairAuto?: "approved" | "refused";
   }
 > {
   // Run the same required-field gate as approval before storage, artifact-ledger
@@ -4106,6 +4156,10 @@ async function ensureDraftAndJob(
       ...(plan.secondaryObligation
         ? { secondary_obligation: plan.secondaryObligation }
         : {}),
+      ...(repairIntake.auto ? { repair_auto_intake: repairIntake.auto } : {}),
+      ...(repairIntake.review
+        ? { review_reason: repairIntake.review.reason }
+        : {}),
     };
     const { data, error } = await client.from("makesafe_intake_drafts").insert({
       org_id: DEFAULT_ORG_ID,
@@ -4127,7 +4181,9 @@ async function ensureDraftAndJob(
       site_suburb: plan.identity.siteSuburb,
       description: markedDescription,
       confidence: "high",
-      missing_fields: plan.blockedReasons,
+      missing_fields: repairIntake.review
+        ? [...plan.blockedReasons, repairIntake.review.missingField]
+        : plan.blockedReasons,
       extraction_json: extraction,
       attachments_json: attachments,
       report_type: splitObligation
@@ -4203,9 +4259,20 @@ async function ensureDraftAndJob(
   // The draft above is written and left `needs_review` either way; only the
   // guarded approval call is withheld. A parked repair card is picked up from
   // the review queue by a human, which is the whole of the 2026-08-28 ruling.
+  //
+  // Narrowed 13 Oct 2026 (repair_intake_auto.ts): a repair plan that earned the
+  // automatic stamp crosses the same guarded approval a make-safe does. The
+  // stamp must be on the DRAFT, so a draft that was already waiting when the
+  // flag was switched on (it carries none) still waits for a person.
+  const supervisedRepair = deterministicPlanNeedsSupervisedRepairReview(
+    reviewedFields,
+  );
+  const repairAuto = supervisedRepair && advanceDrafts &&
+    !repairIntake.review && Boolean(repairIntake.auto) &&
+    (draftCreated || await draftCarriesRepairAutoStamp(client, draft.id));
   if (
-    !advanceDrafts ||
-    deterministicPlanNeedsSupervisedRepairReview(reviewedFields)
+    !advanceDrafts || Boolean(repairIntake.review) ||
+    (supervisedRepair && !repairAuto)
   ) {
     return {
       jobId: null,
@@ -4221,14 +4288,40 @@ async function ensureDraftAndJob(
       "deterministic live mode requires the guarded approval callback",
     );
   }
-  const approved = await approveDraft(client, {
-    draft_id: draft.id,
-    intake_case_id: caseId,
-    approved_by: DETERMINISTIC_INTAKE_VERSION,
-    reviewed_fields: reviewedFields,
-    review_notes:
-      "Deterministic adapter approval through the existing guarded intake gate. No allocation, invoice, send or money action.",
-  });
+  let approved: any;
+  try {
+    approved = await approveDraft(client, {
+      draft_id: draft.id,
+      intake_case_id: caseId,
+      approved_by: DETERMINISTIC_INTAKE_VERSION,
+      reviewed_fields: reviewedFields,
+      review_notes: repairAuto
+        ? "Automatic repair intake: builder-declared repair work order, approved through the existing guarded intake gate. No allocation, invoice, send or money action."
+        : "Deterministic adapter approval through the existing guarded intake gate. No allocation, invoice, send or money action.",
+      ...(repairAuto ? { repair_auto_intake: true } : {}),
+    });
+  } catch (error) {
+    // The guarded gate refusing a repair (a possible duplicate, an identity
+    // conflict, the flag switched off mid-run) is the gate working: the draft
+    // stays in the review queue, exactly as a supervised repair does, instead
+    // of failing the case on every sweep.
+    if (
+      repairAuto &&
+      (Number((error as any)?.status) === 409 ||
+        /^Possible duplicate\b/.test(String((error as any)?.message || "")))
+    ) {
+      return {
+        jobId: null,
+        draftCreated,
+        jobCreated: false,
+        notificationJobIds: [],
+        resumed: !draftCreated,
+        parked: true,
+        repairAuto: "refused",
+      };
+    }
+    throw error;
+  }
   const jobId = approved?.job?.id;
   if (!jobId) throw new Error("guarded approval returned no job id");
   return {
@@ -4240,7 +4333,22 @@ async function ensureDraftAndJob(
       : [],
     resumed: !draftCreated,
     parked: false,
+    ...(repairAuto ? { repairAuto: "approved" as const } : {}),
   };
+}
+
+async function draftCarriesRepairAutoStamp(
+  client: any,
+  draftId: string,
+): Promise<boolean> {
+  const { data, error } = await client.from("makesafe_intake_drafts")
+    .select("extraction_json")
+    .eq("id", draftId)
+    .maybeSingle();
+  // Unreadable is "no stamp": the draft parks for a person.
+  if (error || !data) return false;
+  const stamp = data.extraction_json?.repair_auto_intake;
+  return Boolean(stamp) && typeof stamp === "object";
 }
 
 export const _ensureDraftAndJobForTest = ensureDraftAndJob;
@@ -5510,6 +5618,19 @@ export async function runDeterministicIntake(
   const existingObligationJobs = obligationMatches.existingJobs;
   const cancellationTargets = obligationMatches.cancellationTargets;
   const bindingExceptions = obligationMatches.bindingExceptions;
+  const repairAutoIntake = options.repairAutoIntake === true;
+  const repairIntakeReport = {
+    auto_approved: 0,
+    approval_refused: 0,
+    parked_for_review: {} as Record<string, number>,
+    landed_on_existing_job: 0,
+    orphan_lifecycle_drafts: 0,
+  };
+  if (repairAutoIntake) report.repair_intake = repairIntakeReport;
+  // The snapshot the repair-job match reads, plus every repair job this run
+  // mints: two purchase orders on one claim often arrive in the same minute,
+  // and the second must see the job the first one just became.
+  const repairJobRows: any[] = [...obligationMatches.obligationRows];
   const persisted = await readPersistedCases(client, actionableCases);
   const persistedSources = await readPersistedSourcePostIds(
     client,
@@ -5655,8 +5776,52 @@ export async function runDeterministicIntake(
         }
         continue;
       }
-      const bindingException = bindingExceptions.get(casePlan.instructionKey) ||
+      let bindingException = bindingExceptions.get(casePlan.instructionKey) ||
         null;
+      // Automatic repair intake, rule 2: an order for a claim that already has
+      // an open repair job lands on that job instead of opening a second job
+      // or a blank draft. The obligation match above cannot see a repair job,
+      // and a dead make-safe twin of the same claim (the usual leftover when a
+      // make-safe was cancelled in favour of the repair) must not outrank the
+      // live repair job. An order that already has a draft is left to the
+      // person holding that draft.
+      let repairLandingTarget:
+        | Extract<OpenRepairJobMatch, { kind: "one" }>
+        | null = null;
+      if (
+        repairAutoIntake && !existing?.job_id &&
+        !existingObligationJobs.get(casePlan.instructionKey) &&
+        (!bindingException ||
+          bindingException.kind === "terminal_job_binding") &&
+        inferredParentRelation(casePlan) !== "reopen_of" &&
+        (casePlan.state === "confirmed_live_job" ||
+          casePlan.state === "blocked_live_job") &&
+        !casePlan.identity.syntheticLivefireMarker &&
+        REPAIR_LANDING_FAMILIES.has(casePlan.identity.jobFamily)
+      ) {
+        const repairMatch = matchOpenRepairJob(
+          casePlan.identity,
+          repairJobRows,
+          obligationMatches.refPrefixes,
+        );
+        if (
+          repairMatch.kind !== "none" &&
+          !await findDraft(client, casePlan.recoveryCursor.sideEffectKeys.draft)
+        ) {
+          if (repairMatch.kind === "one") {
+            repairLandingTarget = repairMatch;
+            bindingException = null;
+          } else {
+            // Several open repair jobs on one claim: a person picks. The
+            // existing binding review card names every candidate.
+            bindingException = {
+              kind: "multiple_live_jobs",
+              candidateJobIds: repairMatch.jobIds,
+              candidateJobNumbers: repairMatch.jobNumbers,
+            };
+          }
+        }
+      }
       let effectivePlan = bindingException
         ? obligationBindingExceptionPlan(casePlan, bindingException)
         : casePlan;
@@ -5670,6 +5835,7 @@ export async function runDeterministicIntake(
       const lifecycleReopen = !bindingException &&
         effectivePlan.targetRelation !== "cancellation_of" &&
         inferredParentRelation(effectivePlan) === "reopen_of";
+      let orphanLifecycleReview = false;
       if (
         lifecycleReopen && !jobId &&
         (effectivePlan.state === "confirmed_live_job" ||
@@ -5678,6 +5844,17 @@ export async function runDeterministicIntake(
         const lineageParent = await findIdentityParent(client, effectivePlan);
         if (lineageParent?.job_id) {
           jobId = String(lineageParent.job_id);
+        } else if (
+          // Automatic repair intake, rule 3: a first-issue purchase order
+          // carries real work, so it opens a review draft a person can act on
+          // rather than an exception with nothing on it. A case already parked
+          // as an exception before the flag was on keeps that fate.
+          repairAutoIntake &&
+          existing?.reason_code !== "reattendance_target_not_found" &&
+          orphanLifecycleOrderOpensReviewDraft(effectivePlan) &&
+          !approvalPrevalidationMissingFields(effectivePlan, sourceMap).length
+        ) {
+          orphanLifecycleReview = true;
         } else {
           effectivePlan = {
             ...effectivePlan,
@@ -5725,7 +5902,7 @@ export async function runDeterministicIntake(
         continue;
       }
       let notificationSettlementComplete = true;
-      const wantsJob = !jobId && !lifecycleReopen &&
+      const wantsJob = !jobId && (!lifecycleReopen || orphanLifecycleReview) &&
         (effectivePlan.state === "confirmed_live_job" ||
           effectivePlan.state === "blocked_live_job");
       // Never create a guarded job the case row cannot then be moved to: the
@@ -5742,7 +5919,85 @@ export async function runDeterministicIntake(
       if (wantsJob && !transitionAllowed) {
         report.totals.job_creation_deferred++;
       }
-      if (wantsJob && transitionAllowed) {
+      if (wantsJob && transitionAllowed && repairLandingTarget) {
+        // The case was accounted above, before any job work, so a landing that
+        // fails part way is retried on the next run; every step can run twice.
+        const landingSources = effectivePlan.sourcePostIds.flatMap((postId) => {
+          const source = sourceMap.get(postId);
+          return source ? [source] : [];
+        });
+        const stagedWorkOrders = await stageAttachments(
+          client,
+          saved.caseRow.id,
+          effectivePlan,
+          sourceMap,
+          onStorageBlocker,
+          (outcome) => {
+            if (outcome === "artifact") report.totals.artifacts_created++;
+          },
+        );
+        const landing: RepairWorkOrderLanding = {
+          jobId: repairLandingTarget.jobId,
+          caseId: saved.caseRow.id,
+          instructionKey: effectivePlan.instructionKey,
+          claimRef: effectivePlan.identity.externalRefCanonical,
+          workOrderNumber: effectivePlan.identity.builderWoCanonical,
+          purchaseOrder: effectivePlan.identity.builderPoCanonical!,
+          jobFamily: effectivePlan.identity.jobFamily,
+          valueExGst: planWorkOrderValueExGst(effectivePlan),
+          sourcePostIds: effectivePlan.sourcePostIds,
+          receivedAt: sourceMap.get(effectivePlan.primarySourcePostId)
+            ?.receivedAt || null,
+          attachments: stagedWorkOrders,
+        };
+        if (options.landWorkOrderOnRepairJob) {
+          await options.landWorkOrderOnRepairJob(client, landing);
+        } else {
+          await landWorkOrderOnRepairJob(client, landing, {
+            // The purchase order is recorded on the job explicitly above, so
+            // the attach-time identity refresh has nothing left to decide; run
+            // here it would only log a false conflict against the claim key.
+            attachEvidence: (evidenceClient, jobIds, attachments) =>
+              ensureIntakeWorkOrderEvidence(
+                evidenceClient,
+                jobIds,
+                attachments,
+                {},
+                { refreshIdentity: () => Promise.resolve(null) },
+              ),
+          });
+        }
+        jobId = repairLandingTarget.jobId;
+        const landedCaseRow = await findCase(
+          client,
+          effectivePlan.instructionKey,
+        );
+        if (landedCaseRow) {
+          saved = await insertCaseAndSources(
+            client,
+            effectivePlan,
+            jobId,
+            sourceMap,
+            landedCaseRow,
+            true,
+          );
+        }
+        // The "new work order on existing job" notice: an open item on the
+        // intake desk, beside the job event the landing wrote. No message.
+        await persistIssueForSources(
+          client,
+          landingSources,
+          "new_work_order_on_existing_job",
+          {
+            instructionKey: effectivePlan.instructionKey,
+            caseId: saved.caseRow.id,
+          },
+        );
+        repairIntakeReport.landed_on_existing_job++;
+      } else if (wantsJob && transitionAllowed) {
+        const repairDecision = repairAutoIntake && !orphanLifecycleReview
+          ? decideRepairAutoIntake(effectivePlan)
+          : null;
         const live = await ensureDraftAndJob(
           client,
           saved.caseRow.id,
@@ -5755,10 +6010,57 @@ export async function runDeterministicIntake(
             if (outcome === "draft") report.totals.drafts_created++;
           },
           options.advanceDrafts !== false,
+          {
+            auto: repairDecision?.auto ? repairDecision.stamp : null,
+            review: orphanLifecycleReview
+              ? {
+                missingField: ORPHAN_LIFECYCLE_REVIEW_FIELD,
+                reason: "collection_or_reattendance_without_original_job",
+              }
+              : null,
+          },
         );
         jobId = live.jobId;
         if (live.jobCreated) report.totals.jobs_created++;
         if (live.parked) report.totals.job_creation_deferred++;
+        if (orphanLifecycleReview && live.draftCreated) {
+          repairIntakeReport.orphan_lifecycle_drafts++;
+        }
+        if (live.repairAuto === "approved" && live.jobCreated) {
+          repairIntakeReport.auto_approved++;
+        }
+        if (
+          repairAutoIntake && live.jobCreated && jobId &&
+          effectivePlan.identity.jobFamily === "repair"
+        ) {
+          repairJobRows.push({
+            job_id: jobId,
+            external_ref: effectivePlan.identity.builderWoCanonical ||
+              effectivePlan.identity.externalRefCanonical,
+            requesting_company_slug: effectivePlan.identity.builderSlug,
+            jobs: {
+              job_number: null,
+              type: "repair",
+              status: "accepted",
+              metadata: {
+                repair_stage: "wo_in",
+                builder_claim_ref: effectivePlan.identity.externalRefCanonical,
+                builder_po_number: effectivePlan.identity.builderPoCanonical,
+              },
+            },
+          });
+        }
+        if (live.repairAuto === "refused") {
+          repairIntakeReport.approval_refused++;
+        }
+        if (
+          repairDecision && !repairDecision.auto &&
+          repairDecision.reason !== "not_repair_family" && live.draftCreated
+        ) {
+          repairIntakeReport.parked_for_review[repairDecision.reason] =
+            (repairIntakeReport.parked_for_review[repairDecision.reason] ||
+              0) + 1;
+        }
         resumedCase = resumedCase || live.resumed;
         if (jobId) {
           // Sources were already accounted by the pre-job hop above, so this call

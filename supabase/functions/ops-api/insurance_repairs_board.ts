@@ -235,8 +235,29 @@ export function projectInsuranceRepairPipelineRow(
   );
   const purchaseOrder = cleanRef(meta.builder_po_number) ??
     (pairedPurchaseOrders.size === 1 ? [...pairedPurchaseOrders][0] : null);
+  // The builder's ex-GST work order value, stamped at intake from its PDF. A
+  // repair card raised from a work order has no pricing of ours, so without
+  // this the card shows no money at all. It only ever fills an EMPTY value
+  // (inc GST, the unit `value` already carries); our own pricing always wins.
+  const workOrderValueExGst =
+    typeof meta.builder_work_order_value_ex_gst === "number" &&
+      Number.isFinite(meta.builder_work_order_value_ex_gst) &&
+      meta.builder_work_order_value_ex_gst > 0
+      ? meta.builder_work_order_value_ex_gst
+      : null;
   return {
     ...projected,
+    ...(workOrderValueExGst !== null
+      ? {
+        work_order_value_ex_gst: workOrderValueExGst,
+        ...(!Number(projected.value)
+          ? {
+            value: Math.round(workOrderValueExGst * 110) / 100,
+            value_source: "builder_work_order",
+          }
+          : {}),
+      }
+      : {}),
     source_type: row?.type || null,
     type: "repair",
     job_type: "repair",

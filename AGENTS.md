@@ -1478,7 +1478,9 @@ Fencing declared headers + the replacement-verb ladder route to repair; temp
 fencing and MLB's "Makesafe/Emergency Repairs" header stay make-safe; a
 dual-scope WO stays make-safe and flags `repair_leg_detected` (child SWR- spawn
 is a human tap); NO repair draft auto-approves
-(`repair_family_supervised_review` brake) so every SWR- mint is a human tick; and
+(`repair_family_supervised_review` brake) so every SWR- mint is a human tick
+(narrowed 13 Oct 2026 behind a flag seeded off: see "Automatic Repair Intake"
+below); and
 the three legacy repair-marked SWMS cards are never re-minted or stage-stamped
 (ruling 6 — reversing needs a new ruling, not a script run). Xero, Captain-confirmed
 2026-08-31: **repair revenue books as make-safe / insurance work** — account `210`
@@ -1519,6 +1521,36 @@ Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
 Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
+
+## Automatic Repair Intake Is One Flag, And The Mint Judges The Draft
+
+Owner's word, 13 Oct 2026: behind `feature_flags.repair_intake_auto_v1` (seeded
+off; missing or unreadable is off) the deterministic scan mints a repair job for
+a clean repair work order from MLB or Ambrose. Rules:
+`ops-api/repair_intake_auto.ts`; contract, message list and limits:
+`docs/repair-intake-auto-v1.md`. What must not regress:
+
+- Automatic only for a repair the BUILDER declared (`plan.familyEvidence`),
+  never one inferred from scope words or by elimination, and only with one
+  readable ex-GST value. Anything else still parks as a review draft.
+- The stamp is on the DRAFT (`extraction_json.repair_auto_intake`), written by a
+  flag-on run. The brake in `approveIntakeDraft` re-reads the flag and the
+  stamp at mint time and takes a request marker only the two deterministic scan
+  lanes carry. Do not let the backlog sweep or the late-PDF lane mint a repair,
+  and do not approve a repair draft that carries no stamp.
+- The obligation dedupe cannot see repair jobs (`isCanonicalSeedScopeJob`), so
+  an order for a claim with an open repair job is matched by
+  `matchOpenRepairJob` and landed on that job: purchase order recorded (a
+  second one is listed, never written over the first), PDF attached, one job
+  event, one intake desk item, no message, board stage untouched.
+- A collection or reattendance order with no original job and a first-issue
+  purchase order opens a review draft that nothing approves automatically.
+- Flag-on runs leave earlier fates alone: a waiting unstamped draft, an order
+  that already has a draft, and a case already parked as
+  `reattendance_target_not_found`.
+
+Scan tests for it are named `repair intake: ...` because CI runs the runtime
+test file by filter.
 
 ## Quote Builder Scopes Live In `quote_builder_versions`, Not `quote_revisions`
 
