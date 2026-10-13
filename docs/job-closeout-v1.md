@@ -8,7 +8,7 @@ Xero rule (`invoiced` -> `complete` once every linked sales invoice is PAID).
 Code: `supabase/functions/_shared/job_paid_closeout.ts` (the paid rule, pure),
 `supabase/functions/ops-api/job_closeout.ts` (reads, moves, sender, sweeps),
 `supabase/functions/xero-sync/index.ts` (calls in). Migration:
-`20261013140000_job_closeout_review_archive.sql`.
+`20261013150000_job_closeout_review_archive.sql`.
 
 ## What "paid" means
 

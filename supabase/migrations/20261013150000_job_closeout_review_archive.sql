@@ -47,11 +47,11 @@ CREATE TABLE IF NOT EXISTS public.job_closeout_settings (
 
 -- DO NOTHING so a re-apply never flips an operator's setting back.
 INSERT INTO public.job_closeout_settings (id, get_review_move_enabled, review_sender_mode, updated_by, note)
-VALUES (1, false, 'off', 'migration:20261013140000_job_closeout_review_archive', 'seeded off')
+VALUES (1, false, 'off', 'migration:20261013150000_job_closeout_review_archive', 'seeded off')
 ON CONFLICT (id) DO NOTHING;
 
 COMMENT ON TABLE public.job_closeout_settings IS
-  'Paid close-out (20261013140000): the switches for fencing and patio jobs. get_review_move_enabled moves a paid job to get_review instead of complete; review_sender_mode off | dry_run | live (live also needs ops-api env JOB_REVIEW_SENDING_ENABLED=true). The 24-hour archive is the closeout automation lane. Change with UPDATE, never DELETE.';
+  'Paid close-out (20261013150000): the switches for fencing and patio jobs. get_review_move_enabled moves a paid job to get_review instead of complete; review_sender_mode off | dry_run | live (live also needs ops-api env JOB_REVIEW_SENDING_ENABLED=true). The 24-hour archive is the closeout automation lane. Change with UPDATE, never DELETE.';
 
 -- ── 2. The per-job paid check and marker ─────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.job_closeout_state (
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS public.job_closeout_state (
 );
 
 COMMENT ON TABLE public.job_closeout_state IS
-  'Paid close-out (20261013140000): the last strict paid check of a fencing or patio job (outcome paid | paid_less_than_quoted | not_paid, the reasons, paid and expected totals). paid_less_than_quoted is the marker the Ops card shows when every invoice and every paying party is paid but the money falls short of the quote plus agreed (customer accepted or invoiced) variations: such a card stays where it is. Written only by ops-api job_closeout.ts.';
+  'Paid close-out (20261013150000): the last strict paid check of a fencing or patio job (outcome paid | paid_less_than_quoted | not_paid, the reasons, paid and expected totals). paid_less_than_quoted is the marker the Ops card shows when every invoice and every paying party is paid but the money falls short of the quote plus agreed (customer accepted or invoiced) variations: such a card stays where it is. Written only by ops-api job_closeout.ts.';
 
 -- ── 3. The per-job review claim ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.job_review_claims (
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS public.job_review_claims (
 );
 
 COMMENT ON TABLE public.job_review_claims IS
-  'Paid close-out (20261013140000): one review claim per job, inserted before any review text is sent, so the job is never texted twice by this system. status claimed (in flight) | sent (at least one text confirmed) | skipped (deliberately not sent: every paying owner with a contact was asked in the last 90 days) | unconfirmed (a send could not be confirmed; never retried). No row is kept when nothing could go out (no linked contact, paid too long ago, every send refused by a guard), so a later attempt can send. recipients holds one entry per paying owner: label, GHL contact id, result. Written only by ops-api job_closeout.ts.';
+  'Paid close-out (20261013150000): one review claim per job, inserted before any review text is sent, so the job is never texted twice by this system. status claimed (in flight) | sent (at least one text confirmed) | skipped (deliberately not sent: every paying owner with a contact was asked in the last 90 days) | unconfirmed (a send could not be confirmed; never retried). No row is kept when nothing could go out (no linked contact, paid too long ago, every send refused by a guard), so a later attempt can send. recipients holds one entry per paying owner: label, GHL contact id, result. Written only by ops-api job_closeout.ts.';
 
 ALTER TABLE public.job_closeout_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.job_closeout_state ENABLE ROW LEVEL SECURITY;
@@ -105,7 +105,7 @@ CREATE POLICY job_review_claims_service_role_all ON public.job_review_claims
 -- operator's value.
 ALTER TABLE public.automation_switches ADD COLUMN IF NOT EXISTS closeout boolean NOT NULL DEFAULT false;
 COMMENT ON COLUMN public.automation_switches.closeout IS
-  'Paid close-out (20261013140000): the job-closeout-sweep pg_cron job (fencing and patio cards in get_review for 24 hours, paid, not held and with their review done, are archived). Off by default.';
+  'Paid close-out (20261013150000): the job-closeout-sweep pg_cron job (fencing and patio cards in get_review for 24 hours, paid, not held and with their review done, are archived). Off by default.';
 
 -- The reader with 'closeout' added to its closed list; every other line as before.
 CREATE OR REPLACE FUNCTION public.automation_lane_enabled(lane text)
@@ -148,7 +148,7 @@ END;
 $fn$;
 
 COMMENT ON FUNCTION public.automation_lane_enabled(text) IS
-  'True only when public.automation_switches row 1 exists, all_stop is false and the named lane column is true. False for an unknown lane, a missing row, a missing table and any error. Spec section 6. Lanes: capture, attribution, extraction, closeout (20261013140000).';
+  'True only when public.automation_switches row 1 exists, all_stop is false and the named lane column is true. False for an unknown lane, a missing row, a missing table and any error. Spec section 6. Lanes: capture, attribution, extraction, closeout (20261013150000).';
 
 -- The lane list: the live body (the email deep history slice's, 20261007080000,
 -- md5 6498276b1eb16b527fb76dd2b0fa6d83) plus this migration's row, every row kept.
@@ -212,7 +212,7 @@ BEGIN
   );
 END $$;
 COMMENT ON FUNCTION public.trigger_job_closeout_sweep() IS
-  'Paid close-out (20261013140000): pg_cron job-closeout-sweep (every 30 minutes, closeout lane) posts ops-api job_closeout_sweep with the service key. ops-api re-checks the lane, the paid rule and the holds before archiving anything.';
+  'Paid close-out (20261013150000): pg_cron job-closeout-sweep (every 30 minutes, closeout lane) posts ops-api job_closeout_sweep with the service key. ops-api re-checks the lane, the paid rule and the holds before archiving anything.';
 REVOKE ALL ON FUNCTION public.trigger_job_closeout_sweep() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.trigger_job_closeout_sweep() TO service_role, postgres;
 

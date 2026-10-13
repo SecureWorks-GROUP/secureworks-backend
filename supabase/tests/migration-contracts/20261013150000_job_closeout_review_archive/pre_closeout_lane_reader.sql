@@ -1,6 +1,6 @@
 -- automation_lane_enabled() as 20260911170000 wrote it (md5(prosrc)
 -- 818a13be854748e2d272bdd648c88b59): capture, attribution, extraction. The paid
--- close-out (20261013140000) adds closeout to its closed list. Earlier migrations whose
+-- close-out (20261013150000) adds closeout to its closed list. Earlier migrations whose
 -- re-apply guards pin this body (20261002100000, 20261002120000, 20261005210000,
 -- 20261006001000) stand it back up with this file inside their rolled-back re-apply
 -- blocks, so each re-apply is tested against the pre-image it was written for.

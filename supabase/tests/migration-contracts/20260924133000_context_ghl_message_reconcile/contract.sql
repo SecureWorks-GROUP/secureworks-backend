@@ -50,7 +50,7 @@ BEGIN
  -- outlook-mail-poll and monitor-inbox-sweep; B-2, 20261005190000:
  -- ghl-history-schedule; B-5, 20261005210000: context-document-text; history
  -- daily, 20261007050000: xero-history-daily; history depth, 20261007080000:
- -- outlook-mail-deep-history, all capture; paid close-out, 20261013140000:
+ -- outlook-mail-deep-history, all capture; paid close-out, 20261013150000:
  -- job-closeout-sweep on its own closeout lane); C1d's three rows must stay as
  -- they are.
  IF NOT (SELECT array_agg(cron_jobname||':'||lane ORDER BY cron_jobname) FROM public.automation_switch_cron_lanes())

@@ -30,7 +30,7 @@
 //                          in complete that a later, separate step may archive. Writes
 //                          nothing and never texts.
 //
-// Switches, all off at deploy (migration 20261013140000_job_closeout_review_archive.sql):
+// Switches, all off at deploy (migration 20261013150000_job_closeout_review_archive.sql):
 // job_closeout_settings.get_review_move_enabled, job_closeout_settings.review_sender_mode
 // (off | dry_run | live, and live needs env JOB_REVIEW_SENDING_ENABLED=true) and the
 // closeout automation lane for the sweep. Builder, insurance, make-safe and repair jobs are

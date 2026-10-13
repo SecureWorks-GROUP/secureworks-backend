@@ -4664,7 +4664,7 @@ payment only when paid within 30 days, whatever its from-status
 texted, and `job_closeout_backlog_preview` only lists what a later step may
 archive.
 
-Switches (migration `20261013140000`), all off; turn on in this order:
+Switches (migration `20261013150000`), all off; turn on in this order:
 `job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
 `dry_run` (read the `review_request_dry_run` job events); then someone must
 switch the old GoHighLevel review workflow OFF in GHL Automation; then env
@@ -4673,7 +4673,7 @@ switch the old GoHighLevel review workflow OFF in GHL Automation; then env
 for the `job-closeout-sweep` cron. Adding a lane to `automation_lane_enabled()`
 moves the md5 four earlier migrations' guards pin: their contracts stand the old
 body back up from
-`supabase/tests/migration-contracts/20261013140000_job_closeout_review_archive/pre_closeout_lane_reader.sql`.
+`supabase/tests/migration-contracts/20261013150000_job_closeout_review_archive/pre_closeout_lane_reader.sql`.
 Contract: `docs/job-closeout-v1.md`; tests: `job_paid_closeout_test.ts`,
 `job_closeout_test.ts`.
 

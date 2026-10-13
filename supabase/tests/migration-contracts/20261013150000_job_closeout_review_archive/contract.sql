@@ -1,4 +1,4 @@
--- Paid close-out (20261013140000): every switch ships off, the records keep one review
+-- Paid close-out (20261013150000): every switch ships off, the records keep one review
 -- claim per job, and the closeout lane gates the sweep exactly as the automation switch
 -- gates every other lane.
 
@@ -108,8 +108,8 @@ CREATE TABLE cron.job (jobid bigserial PRIMARY KEY, schedule text NOT NULL, comm
 CREATE FUNCTION cron.schedule(job_name text, schedule text, command text) RETURNS bigint LANGUAGE sql AS $$
  INSERT INTO cron.job(jobname, schedule, command) VALUES (job_name, schedule, command) RETURNING jobid
 $$;
-\ir ../../../migrations/20261013140000_job_closeout_review_archive.sql
-\ir ../../../migrations/20261013140000_job_closeout_review_archive.sql
+\ir ../../../migrations/20261013150000_job_closeout_review_archive.sql
+\ir ../../../migrations/20261013150000_job_closeout_review_archive.sql
 DO $$
 DECLARE w record;
 BEGIN

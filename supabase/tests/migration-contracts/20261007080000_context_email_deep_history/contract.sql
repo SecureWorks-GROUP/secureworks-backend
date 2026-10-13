@@ -900,7 +900,7 @@ ROLLBACK;
 -- this migration's row, or, when the history daily slice (20261007050000)
 -- applied first, that slice's list plus this migration's row (the body that
 -- slice writes when it applies second), or, once the paid close-out
--- (20261013140000) is on it, that list plus job-closeout-sweep (a list naming
+-- (20261013150000) is on it, that list plus job-closeout-sweep (a list naming
 -- outlook-mail-deep-history, which the guard leaves alone).
 DO $$
 BEGIN
