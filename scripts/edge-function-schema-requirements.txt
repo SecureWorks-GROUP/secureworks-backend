@@ -689,6 +689,16 @@ ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|functi
 ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|table|job_trade_time_entries
 ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|table|job_assignment_logged_times
 
+# Customer variations on a job work order: every job work order read (staff,
+# job_detail and the trade's my_job_work_order) reads the addenda, so the table
+# must exist before this ops-api ships.
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|table|work_order_customer_variations
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|column|work_order_customer_variations.trade_allocation_ex
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|column|work_order_customer_variations.customer_price_ex
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|trigger|work_order_customer_variations.trg_work_order_customer_variations_guard
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|function|approve_work_order_customer_variation
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|table|work_order_customer_variation_invoices
+
 ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|table|trade_recurring_deductions
 ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_recurring_deductions.first_week_start
 ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_recurring_deductions.last_week_start

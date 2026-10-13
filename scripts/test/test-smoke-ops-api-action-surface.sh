@@ -131,6 +131,17 @@ if [[ "$action" == "job_work_order" ]]; then
   fi
   exit 0
 fi
+# The customer variations read (work_order_customer_variations.ts
+# listCustomerVariations): requireUuid refuses a job_id that is not a uuid
+# before any job or variation read.
+if [[ "$action" == "customer_variations" ]]; then
+  if printf '%s' "$url" | grep -q 'job_id=__deploy_probe__'; then
+    printf '%s\n' '{"error":"job_id is required","code":"invalid_request"}'
+  else
+    printf '%s\n' '{"schema":"customer-variations.v1"}'
+  fi
+  exit 0
+fi
 if [[ "$action" == "context_story_scorecard" || "$action" == "context_scorecard" ]]; then
   if printf '%s' "$url" | grep -q 'as_of=__deploy_probe__'; then
     printf '%s\n' '{"error":"as_of must be an ISO date-time","code":"invalid_as_of"}'
