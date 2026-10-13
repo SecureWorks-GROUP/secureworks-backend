@@ -121,7 +121,9 @@ separate, later step.
 
 ## Live numbers (read only, 13 Oct 2026)
 
-Rules 1 and 2 only (the quote check needs the per-job quote read): Complete
+Rules 1 and 2 only (the quote check needs the per-job quote read), measured
+before a final needed positive evidence (any non-deposit invoice counted then),
+so the pass counts are an upper bound under the current rule: Complete
 holds 62 fencing and 8 patio jobs that pass, 80 fencing and 14 patio with no
 linked invoice, 2 fencing not paid. Get Review holds SWF-261227 and SWF-26989,
 which are not paid, so the sweep will not archive them. No `invoiced` or
