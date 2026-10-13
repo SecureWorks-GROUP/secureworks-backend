@@ -16,7 +16,7 @@ export const JOB_PROFIT_LABELS = {
   profit:
     "Gross profit on direct costs (trade labour, materials, commission and other direct lines), ex GST. No overhead share. Trade labour is the trade's charge; the company's super share is not added.",
   cost_basis:
-    "line_level: costs from trade charges and supplier bills linked to the job. xero_project_inferred: the Xero Project total is larger, so labour, commission and other stay line-level and materials = project total minus those (inferred). A project total is never added to line-level costs.",
+    "line_level: costs from trade charges and supplier bills linked to the job. xero_project_inferred: the Xero Project total is larger, so labour, commission and other stay line-level and materials = project total minus those (inferred). A project total is never added to line-level costs. A Xero Project counts only when its name carries the job's own job number; one linked by contact only gives no figure and the job is flagged xero_project_linked_by_contact_only.",
   verified_paid:
     "Xero recorded the payment (status PAID; trade invoices paid). Not a bank reconciliation.",
   margin:

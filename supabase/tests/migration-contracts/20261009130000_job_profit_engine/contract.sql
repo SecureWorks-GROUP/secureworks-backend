@@ -1,13 +1,17 @@
 -- Contract for 20261009130000_job_profit_engine (job profitability PR 1).
 --
 -- Synthetic jobs, fixed dates, no customer data. Everything rolls back.
---   JP-FENCE  line-level costs from every source, the exclusions (ops-rejected
+--   JP-FENCE  two projects linked by contact only (no job number, and a longer
+--             number): no project figure, basis stays line-level, flagged.
+--             Line-level costs from every source, the exclusions (ops-rejected
 --             and Xero-deleted trade invoices, QA test line, trade-mirror bills
 --             by id and by the app's line format, a deleted bill), inclusive
 --             GST lines, a draft and a voided sales invoice, all variation
 --             states with only agreed values summed, an open PO, frozen
 --             expected costs and a sent quote.
---   JP-PROJ   Xero Project total larger than line-level: materials inferred.
+--   JP-PROJ   Xero Project total larger than line-level: materials inferred
+--             from the project named after the job; a second project linked
+--             by contact only adds nothing and flags the job.
 --   JP-DBL    trade lines larger than the project total: stays line-level,
 --             flags project_below_trade_lines, and a negative materials
 --             deduction cannot publish a labour-only margin.
@@ -148,9 +152,13 @@ INSERT INTO public.xero_invoices (org_id, xero_invoice_id, invoice_number, invoi
   ('00000000-0000-0000-0000-000000000001', 'BILL-S4', 'S-4', 'ACCPAY', 'PAID', 'Fence Supplies', 3000, 3300, 3300, '2026-08-02', '2026-08-15',
    'a7000000-0000-4000-8000-000000000006', NULL, '[{"LineAmount": 3000, "AccountCode": "305", "Description": "Panels"}]');
 
-INSERT INTO public.xero_projects (job_id, total_expenses, total_invoiced) VALUES
-  ('a7000000-0000-4000-8000-000000000002', 1000, 1500),
-  ('a7000000-0000-4000-8000-000000000003', 200, 800);
+INSERT INTO public.xero_projects (job_id, project_name, total_expenses, total_invoiced) VALUES
+  ('a7000000-0000-4000-8000-000000000002', 'jp-proj 4 Patio Pl', 1000, 1500),
+  ('a7000000-0000-4000-8000-000000000003', 'JP-DBL 6 Fence Rd', 200, 800),
+  -- linked by contact only: another job's project, and a longer job number
+  ('a7000000-0000-4000-8000-000000000002', 'SW1334 old patio', 9000, 9500),
+  ('a7000000-0000-4000-8000-000000000001', 'SW1334 old patio', 9000, 9500),
+  ('a7000000-0000-4000-8000-000000000001', 'JP-FENCE77 other site', 500, 600);
 
 INSERT INTO public.job_variations (job_id, variation_number, description, amount, gst_included, status, accepted_at, declined_at, created_at) VALUES
   ('a7000000-0000-4000-8000-000000000001', 1, 'Approved internally only', 110, true, 'approved', NULL, NULL, '2026-08-07T00:00:00Z'),
@@ -292,6 +300,14 @@ BEGIN
   IF NOT ('open_purchase_orders' = ANY (r.completeness) AND 'draft_revenue' = ANY (r.completeness)) THEN
     RAISE EXCEPTION 'jp fence: completeness %', r.completeness;
   END IF;
+  -- projects linked by contact only: no figure, never a basis, flagged
+  IF r.cost_basis <> 'line_level' OR r.materials_inferred THEN RAISE EXCEPTION 'jp fence: contact-linked project became the basis %', r.cost_basis; END IF;
+  IF r.xero_project_expenses_ex IS NOT NULL OR r.xero_project_invoiced_ex IS NOT NULL OR r.xero_project_count <> 0 THEN
+    RAISE EXCEPTION 'jp fence: contact-linked project figure % % %', r.xero_project_expenses_ex, r.xero_project_invoiced_ex, r.xero_project_count;
+  END IF;
+  IF NOT ('xero_project_linked_by_contact_only' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'jp fence: contact-linked project not flagged %', r.completeness;
+  END IF;
 
   -- JP-PROJ: project total larger than line level; materials inferred.
   SELECT * INTO r FROM public.v_job_profit WHERE job_number = 'JP-PROJ';
@@ -301,6 +317,11 @@ BEGIN
   END IF;
   IF r.profit_ex <> 500 OR r.margin_pct <> 33.3 THEN RAISE EXCEPTION 'jp proj: profit % margin %', r.profit_ex, r.margin_pct; END IF;
   IF r.cost_flag <> 'cost_basis_inferred' OR r.costs_verified_paid THEN RAISE EXCEPTION 'jp proj: cost flag %', r.cost_flag; END IF;
+  -- only the project named after the job counts; the contact-linked 9000 does not
+  IF r.xero_project_expenses_ex <> 1000 OR r.xero_project_invoiced_ex <> 1500 OR r.xero_project_count <> 1
+     OR NOT ('xero_project_linked_by_contact_only' = ANY (r.completeness)) THEN
+    RAISE EXCEPTION 'jp proj: project figure % % % completeness %', r.xero_project_expenses_ex, r.xero_project_invoiced_ex, r.xero_project_count, r.completeness;
+  END IF;
   IF r.revenue_verified_paid OR round(r.collected_ex, 2) <> 500 THEN RAISE EXCEPTION 'jp proj: collected %', r.collected_ex; END IF;
   IF r.expected_source <> 'accepted_quote_revision' OR r.expected_materials_ex <> 500 OR r.expected_cost_ex <> 960 THEN
     RAISE EXCEPTION 'jp proj: expected % %', r.expected_source, r.expected_cost_ex;
@@ -314,7 +335,9 @@ BEGIN
   IF r.cost_basis <> 'line_level' OR r.actual_cost_ex <> 260 OR r.actual_materials_ex <> -40 OR NOT ('project_below_trade_lines' = ANY (r.completeness)) THEN
     RAISE EXCEPTION 'jp dbl: basis % cost % completeness %', r.cost_basis, r.actual_cost_ex, r.completeness;
   END IF;
-  IF r.xero_project_expenses_ex <> 200 THEN RAISE EXCEPTION 'jp dbl: project figure %', r.xero_project_expenses_ex; END IF;
+  IF r.xero_project_expenses_ex <> 200 OR 'xero_project_linked_by_contact_only' = ANY (r.completeness) THEN
+    RAISE EXCEPTION 'jp dbl: project figure % completeness %', r.xero_project_expenses_ex, r.completeness;
+  END IF;
   IF r.expected_source <> 'live_pricing_estimate' OR r.expected_materials_ex <> 250 OR r.expected_cost_ex <> 500 THEN
     RAISE EXCEPTION 'jp dbl: expected % %', r.expected_source, r.expected_cost_ex;
   END IF;

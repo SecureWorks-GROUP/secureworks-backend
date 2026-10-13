@@ -468,3 +468,85 @@ Deno.test("job_profit_list: filters reach the engine; bad filters are 400", asyn
     500,
   );
 });
+
+Deno.test("rollup: expected and quoted count only jobs with a sent or accepted quote", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    work_type: "fencing",
+    status: "complete",
+    created_at: "2026-08-01T00:00:00Z",
+    first_invoice_date: null,
+    invoiced_ex: 0,
+    collected_ex: 0,
+    quoted_ex: null,
+    quoted_source: null,
+    expected_cost_ex: null,
+    expected_source: null,
+    actual_cost_ex: 0,
+    profit_ex: null,
+    cost_basis: "line_level",
+    revenue_verified_paid: false,
+    ...over,
+  });
+  const c = fakeClient({
+    v_job_profit: [
+      row({
+        job_id: "won",
+        invoiced_ex: 1500,
+        quoted_ex: 1400,
+        quoted_source: "sent_quote:accepted:quote_revision",
+        expected_cost_ex: 1000,
+        expected_source: "frozen_at_acceptance",
+        actual_cost_ex: 900,
+      }),
+      row({
+        job_id: "sent",
+        status: "quoted",
+        quoted_ex: 600,
+        quoted_source: "sent_quote:newest_current:quote_revision",
+        expected_cost_ex: 400,
+        expected_source: "sent_quote_revision",
+      }),
+      row({
+        job_id: "lead",
+        status: "draft",
+        quoted_ex: 200000,
+        quoted_source: "live_price_not_a_sent_quote",
+        expected_cost_ex: 150000,
+        expected_source: "live_pricing_estimate",
+        actual_cost_ex: 50,
+      }),
+    ],
+  });
+  const out = await jobProfitListAction(c, new URLSearchParams("view=rollup"));
+  assertEquals(out.status, 200);
+  const totals = (out.body as any).totals;
+  assertEquals(totals.jobs, 3);
+  assertEquals(totals.jobs_with_quote, 2);
+  assertEquals(totals.quoted_ex, 2000);
+  assertEquals(totals.invoiced_on_quoted_ex, 1500);
+  assertEquals(totals.jobs_with_expected, 2);
+  assertEquals(totals.expected_cost_ex, 1400);
+  assertEquals(totals.actual_cost_on_expected_ex, 900);
+  assertEquals(totals.actual_cost_ex, 950);
+
+  const leadsOnly = fakeClient({
+    v_job_profit: [row({
+      job_id: "lead",
+      status: "draft",
+      quoted_ex: 200000,
+      quoted_source: "live_price_not_a_sent_quote",
+      expected_cost_ex: 150000,
+      expected_source: "live_pricing_estimate",
+    })],
+  });
+  const none = (await jobProfitListAction(
+    leadsOnly,
+    new URLSearchParams("view=rollup&status=draft"),
+  )).body as any;
+  assertEquals(none.totals.jobs_with_quote, 0);
+  assertEquals(none.totals.quoted_ex, null);
+  assertEquals(none.totals.invoiced_on_quoted_ex, null);
+  assertEquals(none.totals.jobs_with_expected, 0);
+  assertEquals(none.totals.expected_cost_ex, null);
+  assertEquals(none.totals.actual_cost_on_expected_ex, null);
+});
