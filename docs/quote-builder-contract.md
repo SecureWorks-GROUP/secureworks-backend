@@ -5,8 +5,16 @@ scope a job, price what it costs us, price what we charge, attach site photos,
 and keep the client quote PDF as its own document. This file is the contract the
 app builds against. The app itself lives elsewhere.
 
-Status: v1, implemented. Code: `supabase/functions/ops-api/quote_builder.ts`. Migration:
-`supabase/migrations/20261009120000_quote_builder_versions.sql`.
+Status: v1, implemented. Code: `supabase/functions/ops-api/quote_builder.ts`. Migrations:
+`supabase/migrations/20261009120000_quote_builder_versions.sql` and
+`supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql` (pricing
+settings, line types, the two extra documents, the job's value, and the work
+order and purchase orders made from an issued quote: sections 2b to 2d, 5.6,
+5.8 and 5.9).
+
+No pricing number is written in this file, in the app or in `ops-api` code. The
+owner's numbers live in one database table (section 2c) and reach the app only
+inside a signed-in staff response.
 
 ## 1. Access: edge-function actions, not browser tables
 
@@ -28,8 +36,8 @@ its own server credential).
 - Reads are `GET` with query params. Writes are `POST` with a JSON body.
 - CORS is open (`*`), so the app can be served from any origin, including a
   page opened on the iPad.
-- Who may call: staff roles `admin`, `owner`, `ops_manager` (Hugo is
-  `ops_manager`). Any other signed-in user gets `403 operator_access_required`.
+- Who may call, every action including the two that make orders: staff roles
+  `admin`, `owner`, `ops_manager` (Hugo is `ops_manager`). Any other signed-in user gets `403 operator_access_required`.
   No session or an expired one gets `401` (the app should send the user to sign
   in again). The make-safe routine key and the agent read key are refused.
 - The new table `quote_builder_versions` has row-level security ON with no
@@ -51,6 +59,10 @@ would not.
 | Client charge lines ("what we charge") | `quote_builder_versions.charge_lines` | What the client PDF shows. |
 | Site photos + captions | `job_media` (`phase='quote_builder'`, `type='photo'`, caption in `label`) | Files in Storage bucket `job-photos`. Their own phase (`20261009120000`) keeps them internal: `isApplicablePackPhoto` drops it for SES packs, curated bind, the draft pack and roof report photo sets and the final-submit photo floor, and the mailer photo route drops it too. The make-safe board photo count does not filter the phase; it never sees these photos because the board excludes repair and private jobs. The builder lists and accepts only photos in that phase. |
 | Client quote PDF | Storage bucket `job-pdfs` + one `job_documents` row (`type='quote'`) | Its own document, linked from the version. |
+| Scope of works PDF, material order list PDF | Storage bucket `job-pdfs` + one `job_documents` row each (`type='other'`, `metadata.quote_builder_document`) | Filed at issue beside the quote when the app sends them (5.6). Never visible to trades: the material order list prints our costs. |
+| Pricing settings (labour rate, materials multiplier, target margin) | `quote_builder_settings` (section 2c) | Read only by `ops-api`. |
+| The job's value | `jobs.pricing_json`, behind a guard (section 2d) | Written on a scope issue and a variation approval, so the Repairs card shows money. |
+| Draft crew work order, draft purchase orders | `work_orders`, `purchase_orders` (`quote_builder_version_id` names the version) | Made only by their own actions (5.8, 5.9), on a button press. |
 | Variations | `job_variations` (existing) + a `kind='variation'` version chain | The variation row is created when Hugo issues it. |
 | Client details on a private job | `jobs` (`client_name`, `client_phone`, `client_email`, `site_address`, `site_suburb`) | Copied into each version's `client_snapshot`. |
 | Builder / customer (e.g. ML Builders) on a repair job | `makesafe_job_details.requesting_company_id` -> `makesafe_companies` | Read only. Adding Ambrose Construct Group is the intake worker's job. |
@@ -104,6 +116,24 @@ Cost line (internal):
 
 Stored back with `line_total_ex_gst` (= qty x unit cost).
 
+A cost line may carry `line_type`: `material`, `labour` or `other`.
+
+```json
+{ "line_id": "c-6f1c", "line_type": "labour", "description": "Carpenter on site", "qty": 8, "unit": "hr", "unit_cost_ex_gst": 50, "supplier_or_trade": "Dave" }
+```
+
+- One of the three values is kept and returned on every read of the version.
+  Anything else, or no value, stores the line with no `line_type` key. A line is
+  never refused for its type, so an older cached page still saves.
+- A line read back with no `line_type` is an "other" line. Stored lines are
+  never rewritten, and an issued version stays as it was.
+- A Labour line is in hours: the app sends `unit: "hr"`, `qty` is the hours
+  allowed and `unit_cost_ex_gst` is what an hour costs us.
+- Totals do not change with the type. "Labour allowed" (hours and cost of the
+  Labour lines) is worked out by the app when shown.
+- The type decides what an order takes (5.8, 5.9): Labour lines go on the work
+  order as hours, Material lines go on purchase orders.
+
 Charge line (client):
 
 ```json
@@ -130,6 +160,67 @@ Totals on every version: `cost_total_ex_gst`, `charge_total_ex_gst`,
 `charge_gst`, `charge_total_inc_gst`, `margin_ex_gst`
 (= charge ex GST minus cost) and `margin_pct` (margin over charge ex GST, null
 when the charge is zero).
+
+### 2c. Pricing settings
+
+`quote_builder_settings` (`20261013160000`) holds one row per number:
+
+| `setting_key` | Meaning | Allowed |
+|---|---|---|
+| `insurance_labour_rate_ex_gst` | Dollars per hour charged for labour on an insurance repair, ex GST | above 0, up to 1000 |
+| `insurance_materials_multiplier` | Client price of a material = our cost times this | 1 to 10 |
+| `target_margin_pct` | Target gross margin, percent | above 0, up to 95 |
+
+The first two are seeded by the migration with the owner's starting values of
+13 Oct 2026. The target has no row until the owner names one. The numbers are
+changed by a database update (the bounds above are a database check); there is
+no settings write action yet, so `can_edit_settings` is always `false`.
+
+The table has row-level security on with no policy and is revoked from `anon`
+and `authenticated`, like `quote_builder_versions`. It is not `org_config`:
+that table is readable by every signed-in user of the organisation, trades
+included, and what we charge a builder per hour is not a trade's to read.
+
+`quote_builder_get_job` returns them as `settings` (5.2). A missing row, or a
+value that is not a number, is `null`. The server has no fallback number. How
+the app prices with them (labour at the rate, materials at cost times the
+multiplier, other lines by the markup the user types, private quotes by markup
+only) is the app's rule; the server stores whatever charge lines it is sent.
+
+### 2d. The job's value
+
+`jobs.quoted_value` is a column the database works out from
+`jobs.pricing_json.totalIncGST`, and the Repairs card reads the same field. So
+the builder writes `pricing_json`:
+
+    job value = latest issued scope version's charge total
+              + the latest issued version of each variation whose
+                job_variations.status is 'approved'
+
+```json
+{ "totalIncGST": 2893.00, "totalExGST": 2630.00, "gst": 263.00,
+  "source": "quote_builder",
+  "quote_builder": { "scope_version_id": "...", "quote_number": "...", "variation_ids": [], "written_at": "..." } }
+```
+
+It is written when a scope version is issued and when a variation is approved.
+Issuing a variation, or rejecting one, writes nothing.
+
+The guard (`quoteBuilderMayWriteJobValue`), both halves required:
+
+- `jobs.type` is `repair` or `miscellaneous`. A repair card typed `fencing` or
+  `makesafe` is never written, even with empty pricing: `createInvoice` prices a
+  job from `pricing_json` when it is given no lines, and those types are priced
+  by the fence tool and the SES invoice path.
+- the job's current `pricing_json` is null, `{}`, or already carries
+  `"source": "quote_builder"`. Anything else belongs to another tool (the fence
+  and patio tools, a CRM opportunity value) and is left exactly as it is.
+
+The write carries the job's row version, so a pricing write by another tool in
+between is never overwritten. A value that cannot be written never fails the
+issue or the decision; the response says what happened (`job_value`, 5.6).
+Quotes issued before this change keep whatever value they had: nothing goes back
+and sets one.
 
 ## 3. Repair jobs and the Repairs board
 
@@ -211,6 +302,8 @@ Returns everything the app needs to open a job:
 
 ```json
 {
+  "settings": { "labour_rate_ex_gst": 0, "materials_multiplier": 0, "target_margin_pct": null },
+  "can_edit_settings": false,
   "job": { "id": "...", "job_number": "...", "type": "repair", "status": "...",
            "repair_stage": "scoping", "client_name": "...", "client_phone": "...",
            "client_email": "...", "site_address": "...", "site_suburb": "...",
@@ -223,9 +316,20 @@ Returns everything the app needs to open a job:
       "versions": [ /* version objects */ ] }
   ],
   "photos": [ { "id": "...", "url": "https://...", "caption": "...", "taken_at": null, "created_at": "..." } ],
-  "documents": [ { "id": "...", "quote_number": "SWR-26123-Q2", "url": "https://...", "version_id": "...", "created_at": "..." } ]
+  "documents": [ { "id": "...", "quote_number": "SWR-26123-Q2", "url": "https://...", "version_id": "...", "created_at": "..." } ],
+  "extra_documents": [ { "id": "...", "document": "scope_of_works", "url": "https://...", "file_name": "...",
+                         "version_id": "...", "quote_number": "SWR-26123-Q2", "superseded": false, "created_at": "..." } ]
 }
 ```
+
+- `settings` is always present (section 2c): each value a number or `null`. Its
+  presence is what switches the app's line types and pricing bar on. The values
+  shown above are placeholders, not the real numbers.
+- `can_edit_settings` is `false` for everyone until a settings write action
+  exists.
+- `documents` is the client quote PDFs only. The scope of works and material
+  order list PDFs filed at issue are in `extra_documents`, one entry per filed
+  PDF; `superseded` is true once a later version of the same chain is issued.
 
 A version object:
 
@@ -240,9 +344,17 @@ A version object:
   "photo_media_ids": ["uuid"], "client_snapshot": { ... },
   "variation_id": null, "client_pdf_document_id": null, "quote_number": null,
   "created_by": "uuid", "created_at": "...", "updated_at": "...",
-  "issued_by": null, "issued_at": null
+  "issued_by": null, "issued_at": null,
+  "work_order": null,
+  "purchase_orders": []
 }
 ```
+
+On `quote_builder_get_job` only, each version also says what was already made
+from it: `work_order` is `{ "id", "wo_number", "status" }` or `null`, and
+`purchase_orders` is a list of `{ "id", "po_number", "supplier_name", "status" }`
+(cancelled and deleted orders are left out). The app shows these in place of the
+"make" buttons.
 
 ### 5.3 `POST quote_builder_create_private_job`
 
@@ -341,11 +453,33 @@ Change a caption later with `POST quote_builder_photo_caption`
 The app renders the client quote PDF itself (charge lines only, no internal
 costs), uploads it, then issues.
 
-1. `{ "version_id": "uuid of the draft" }` -> `{ "path", "signed_url", "token", "quote_number" }`.
+1. `{ "version_id": "uuid of the draft" }` -> `{ "document", "path", "signed_url", "token", "quote_number" }`.
    Upload with `PUT <signed_url>`, `Content-Type: application/pdf`, max 20 MB.
    Print `quote_number` on the PDF (e.g. `SWR-26123-Q2`, or `SWR-26123-V1.2` for
    version 2 of variation 1).
 2. `{ "version_id": "uuid", "pdf_path": "<path from step 1>" }`.
+
+To file the scope of works and the material order list on the job as well
+(optional; an issue without them works as before):
+
+- Ask for a slot for each: `{ "version_id": "uuid", "document": "scope_of_works" }`
+  and `{ "version_id": "uuid", "document": "material_order_list" }`. `document`
+  defaults to `quote`. Each returns its own `path`; the three slots can be asked
+  for in any order, and only the quote's slot stamps the quote number.
+- Upload each PDF to its slot, then name them on the issue:
+
+```json
+{ "version_id": "uuid", "pdf_path": "<quote path>",
+  "extra_documents": [
+    { "document": "scope_of_works", "pdf_path": "<its path>" },
+    { "document": "material_order_list", "pdf_path": "<its path>" }
+  ] }
+```
+
+Either one may be sent alone. An entry with an unknown `document`, a `document`
+named twice or a `pdf_path` that is not the slot's is `400 invalid_input`; a PDF
+not yet in Storage is `409 upload_missing`. All are checked before anything is
+written.
 
 Issue refuses with nothing written when: the draft has no charge lines
 (`409 no_charge_lines`), no PDF slot was asked for since the last save
@@ -363,12 +497,21 @@ Then it:
   variations stay live side by side, and none of them ever takes the job-wide
   draft slot (`job_contact_id` and `run_label` null) that `ghl-proxy`
   `prepare_quote` reuses under `ux_job_docs_live_unsent_quote`;
+- files each extra document as its own `job_documents` row (`type='other'`,
+  `visible_to_trades=false`, under the same `run_label`, `metadata` naming the
+  version and `quote_builder_document`), and retires the extra documents an
+  earlier version of the chain filed. They carry no `quote_number` column (it is
+  unique and belongs to the quote row); the number is in `metadata.quote_number`.
+  A version holds at most one of each (`ux_job_docs_quote_builder_extra`), so a
+  retried or double-submitted issue reuses the row;
 - freezes the version (`status='issued'`, `issued_at`, `issued_by`, PDF linked);
 - for a variation: creates (first issue) or updates (re-issue while still
   pending) its `job_variations` row: `amount` = charge total inc GST,
   `cost_estimate` = cost total ex GST, `status='pending_approval'`. A variation
   already approved or rejected cannot be re-issued (`409 variation_decided`;
   start a new variation instead);
+- for a scope version, writes the job's value (section 2d), before the stage
+  move;
 - on a repair job, moves the stage forward per section 3.
 
 Issue is safe to retry: a retry after a partial failure reuses the
@@ -391,10 +534,21 @@ Returns:
 {
   "version": { ...frozen version... },
   "document": { "id": "...", "quote_number": "SWR-26123-Q2", "url": "https://..." },
+  "extra_documents": [ { "id": "...", "document": "scope_of_works", "url": "https://...", "file_name": "..." } ],
   "variation": null,
+  "job_value": { "written": true, "total_inc_gst": 715.00 },
   "stage": { "moved": true, "from": "scoping", "to": "quoted" }
 }
 ```
+
+`job_value` is present on a scope issue and absent on a variation issue:
+
+| `job_value` | Meaning |
+|---|---|
+| `{ "written": true, "total_inc_gst": 715.00 }` | The job's value is now this. |
+| `{ "written": false, "reason": "priced_by_another_tool" }` | Left alone: the job is priced elsewhere (section 2d). |
+| `{ "written": false, "reason": "write_failed" }` | Could not be written just now. The quote is still issued. |
+| `{ "written": false, "reason": "nothing_issued" }` | No issued scope to value. |
 
 `stage` is `{ "moved": false, "reason": "not_a_repair_job" | "already_past_stage", ... }`
 when nothing moved. A stage write that loses a race returns
@@ -410,9 +564,69 @@ Records the decision on `job_variations` through the existing variation approval
 path, re-reads the variation, then moves a repair job to `approved` when approved.
 If the variation does not read back as `approved` (or `rejected`), nothing moves
 and the call is refused `409 variation_decision_not_recorded`; try again. Returns
-`{ "approved": true, "variation_id": "...", "stage": { ... } }`.
+`{ "approved": true, "variation_id": "...", "job_value": { ... }, "stage": { ... } }`.
+An approval rewrites the job's value (section 2d) and returns `job_value` in the
+shape of 5.6; a rejection writes nothing and returns no `job_value`.
+
+### 5.8 `POST quote_builder_make_work_order`
+
+```json
+{ "version_id": "uuid of an issued version" }
+```
+
+Makes one **draft crew work order** on the version's job. The job always comes
+from the version; a `job_id` in the body is ignored. It is a crew work order
+(`work_orders.kind = 'crew'`), never the approved job work order of
+`docs/job-work-orders-v1.md`, which this action does not touch. Nothing is sent
+to a trade.
+
+`scope_items` is the scope of works text, then one item per Labour cost line:
+
+```json
+[ { "item": "Scope of works", "details": "<the version's narrative>" },
+  { "item": "Carpenter on site", "details": "8 hr" } ]
+```
+
+A crew work order is read by trades, so no cost and no price goes on it.
+`special_instructions` is `From quote <quote number>`.
+
+Returns `{ "created": true, "work_order": { "id", "wo_number", "status" } }`.
+A second call makes nothing and returns the first with `"created": false`
+(`ux_work_orders_quote_builder_version`: one live work order per version; a
+cancelled one frees it).
+
+Refusals, nothing made: `404 version_not_found`; `409 version_not_issued` (a
+draft); `409 nothing_for_work_order` (no scope text and no Labour line);
+`409 work_order_text_has_money` (the scope text or a Labour line's description
+mentions a dollar amount, which must not reach a trade: issue a new version
+without it, or write the work order by hand).
+
+### 5.9 `POST quote_builder_make_purchase_orders`
+
+```json
+{ "version_id": "uuid of an issued version" }
+```
+
+Makes one **draft purchase order per supplier** from the version's Material cost
+lines, on the version's job. Supplier names are matched without regard to case.
+Each order has `status='draft'`, `reference` = the job number and `line_items`
+`[{ "description", "quantity", "unit", "unit_price" }]`, where `unit_price` is our
+unit cost ex GST. Material lines with no supplier share one draft named
+`No supplier named`, with the note "Supplier not named on the scope". Labour,
+Other and untyped lines are on no purchase order. Nothing is emailed to a
+supplier and nothing goes to Xero.
+
+Returns `{ "created": 2, "purchase_orders": [ { "id", "po_number", "supplier_name", "status" } ] }`:
+`created` is how many this call made, and the list is every live purchase order
+of the version. A second call makes only what is missing, so pressing twice
+leaves the same orders (`ux_purchase_orders_quote_builder_version_supplier`).
+
+Refusals, nothing made: `404 version_not_found`; `409 version_not_issued`;
+`409 no_material_lines`.
 
 ## 6. Out of scope for v1
 
-GHL, Xero, sending to clients, intake changes, the Ambrose Construct Group
-builder record, actual-cost capture, and moving a private job's status.
+GHL, Xero, sending anything to a client, builder, supplier or trade, intake
+changes, the Ambrose Construct Group builder record, actual-cost capture, moving
+a private job's status, changing the pricing settings from the app, and the
+approved job work order (`work_orders.kind = 'job'`).

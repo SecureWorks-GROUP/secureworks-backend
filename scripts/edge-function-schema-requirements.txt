@@ -688,3 +688,14 @@ ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|constr
 ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|function|persist_weekly_trade_invoice_v2
 ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|table|job_trade_time_entries
 ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|table|job_assignment_logged_times
+
+# Quote builder pricing settings and the orders made from an issued quote:
+# quote_builder_get_job reads the settings table and both link columns on every
+# open, so ops-api must not deploy ahead of this migration.
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|table|quote_builder_settings
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|column|quote_builder_settings.amount
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|column|work_orders.quote_builder_version_id
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|column|purchase_orders.quote_builder_version_id
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|index|ux_work_orders_quote_builder_version
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|index|ux_purchase_orders_quote_builder_version_supplier
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql|index|ux_job_docs_quote_builder_extra

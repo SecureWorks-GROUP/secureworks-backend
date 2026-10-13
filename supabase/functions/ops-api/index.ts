@@ -242,6 +242,8 @@ import {
   getQuoteBuilderJob,
   issueQuoteBuilderVersion,
   listQuoteBuilderJobs,
+  makeQuoteBuilderPurchaseOrders,
+  makeQuoteBuilderWorkOrder,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
   quoteBuilderPhotoCaption,
@@ -8530,7 +8532,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'quote_builder_photo_caption':
       case 'quote_builder_pdf_upload_url':
       case 'quote_builder_issue':
-      case 'quote_builder_decide_variation': {
+      case 'quote_builder_decide_variation':
+      case 'quote_builder_make_work_order':
+      case 'quote_builder_make_purchase_orders': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
         }
@@ -21138,7 +21142,9 @@ export const _updateMakesafeSubstatus = updateMakesafeSubstatus
 // Repair stage moves are bound to updateRepairStage, the one repair_stage
 // writer; variation decisions to approveVariation, the existing approval path.
 // Both run with this request's client, so the audit rows match every other
-// stage move and variation decision.
+// stage move and variation decision. A work order or purchase order made from
+// an issued quote goes through createWorkOrder and createPO, always as a draft:
+// a crew work order (never kind 'job'), nothing sent, nothing pushed to Xero.
 export async function dispatchQuoteBuilderAction(
   client: any,
   action: string,
@@ -21150,6 +21156,18 @@ export async function dispatchQuoteBuilderAction(
     updateRepairStage(client, { job_id: jobId, stage, operator_email: operatorEmail })
   const decideVariation = ({ variationId, approved, notes, userId }: { variationId: string; approved: boolean; notes: string | null; userId: string | null }) =>
     approveVariation(client, { variation_id: variationId, approved, notes, user_id: userId })
+  const createCrewWorkOrder = (input: { jobId: string; scopeItems: unknown[]; specialInstructions: string | null; quoteBuilderVersionId: string }) =>
+    createWorkOrder(
+      client,
+      { job_id: input.jobId, scope_items: input.scopeItems, special_instructions: input.specialInstructions },
+      { quoteBuilderVersionId: input.quoteBuilderVersionId },
+    )
+  const createPurchaseOrder = (input: { jobId: string; supplierName: string; reference: string | null; lineItems: unknown[]; notes: string | null; quoteBuilderVersionId: string }) =>
+    createPO(
+      client,
+      { job_id: input.jobId, supplier_name: input.supplierName, reference: input.reference, line_items: input.lineItems, notes: input.notes, status: 'draft' },
+      { quoteBuilderVersionId: input.quoteBuilderVersionId },
+    )
   try {
     switch (action) {
       case 'quote_builder_list_jobs': return json(await listQuoteBuilderJobs(client, params, actor))
@@ -21163,6 +21181,10 @@ export async function dispatchQuoteBuilderAction(
       case 'quote_builder_issue': return json(await issueQuoteBuilderVersion(client, body, actor, { moveRepairStage }))
       case 'quote_builder_decide_variation':
         return json(await decideQuoteBuilderVariation(client, body, actor, { decideVariation, moveRepairStage }))
+      case 'quote_builder_make_work_order':
+        return json(await makeQuoteBuilderWorkOrder(client, body, actor, { createWorkOrder: createCrewWorkOrder }))
+      case 'quote_builder_make_purchase_orders':
+        return json(await makeQuoteBuilderPurchaseOrders(client, body, actor, { createPurchaseOrder }))
       default: return json({ error: `Unknown action: ${action}` }, 400)
     }
   } catch (error) {
@@ -34925,7 +34947,9 @@ async function updateJobStatus(client: any, body: any) {
 // Test-only export alias (mirrors the `_`-prefixed convention in this file).
 export const _updateJobStatus = updateJobStatus
 
-async function createPO(client: any, body: any) {
+// `opts.quoteBuilderVersionId` is set only by the quote builder dispatch, never
+// read from the request body, so no caller can tie an order to a version.
+async function createPO(client: any, body: any, opts: { quoteBuilderVersionId?: string | null } = {}) {
   const { job_id, jobId, supplier_name, supplierName, xero_contact_id,
           line_items, lineItems, delivery_date, deliveryDate, delivery_address, reference, notes } = body
 
@@ -34955,6 +34979,7 @@ async function createPO(client: any, body: any) {
       notes: formatPoDeliveryNotes(delivery_address, notes),
       status: body.status || 'draft',
       created_by: body.operator_email || body.user_email || null,
+      ...(opts.quoteBuilderVersionId ? { quote_builder_version_id: opts.quoteBuilderVersionId } : {}),
     })
     .select()
     .single()
@@ -35357,7 +35382,7 @@ async function reconcilePayment(client: any, body: any) {
   }
 }
 
-async function createWorkOrder(client: any, body: any) {
+async function createWorkOrder(client: any, body: any, opts: { quoteBuilderVersionId?: string | null } = {}) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
@@ -35386,6 +35411,7 @@ async function createWorkOrder(client: any, body: any) {
       site_address: address || null,
       status: 'draft',
       created_by: body.operator_email || body.user_email || null,
+      ...(opts.quoteBuilderVersionId ? { quote_builder_version_id: opts.quoteBuilderVersionId } : {}),
     })
     .select()
     .single()

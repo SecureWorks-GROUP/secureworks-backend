@@ -1538,6 +1538,22 @@ which `isApplicablePackPhoto` and the mailer photo route exclude: they are inter
 must never reach an SES pack, report or builder email. Tests: `quote_builder_test.ts`
 plus the migration contract.
 
+Since `20261013160000`: its pricing numbers (insurance labour rate, materials
+multiplier, target margin) live only in `quote_builder_settings`, never in code,
+the contract doc or `org_config` (every signed-in user, trades included, can
+read `org_config` through its live policy). Issuing a scope and approving a
+variation write the job's value to `jobs.pricing_json` (`jobs.quoted_value` is
+generated from it) only through `quoteBuilderMayWriteJobValue`: `repair` and
+`miscellaneous` jobs whose pricing is empty or already `source: quote_builder`;
+never widen it to `fencing` or `makesafe` typed repair cards, because
+`createInvoice` prices a job from `pricing_json` when given no lines. The scope
+of works and material order list PDFs are `job_documents` of type `other`
+(a meaningful type no close-out reader counts), never `work_order`. An order
+made from an issued quote is a draft crew work order (never `kind='job'`) or a
+draft purchase order, tied to its version by `quote_builder_version_id`, which
+only the quote builder dispatch may set (`createWorkOrder` / `createPO` take it
+as an option, never from the request body).
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that
