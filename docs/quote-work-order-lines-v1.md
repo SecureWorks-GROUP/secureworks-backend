@@ -145,11 +145,13 @@ These rules apply to any job type.
   missing or changed since the quote).
 - `needs_review` is true when any flag other than `saved_as_material` or
   `quote_counted_as_materials` is present.
-- **Review flags ride on every line.** The result's flags
-  (`quote_labour_missing`, `labour_differs_from_quote`, `rates_changed_since_quote`,
+- **Review flags ride on every line.** The result's flags (`quote_labour_missing`,
   `unsupported_job_type`) and the quote's (`frozen_quote_unreadable`) are added to each
   line's `flags`, with `needs_review: true`, so they stay on the stored draft after the one
-  call that filled it. `flags` and `needs_review` are office-only: trades never see them.
+  call that filled it. `rates_changed_since_quote` and `labour_differs_from_quote` stay on
+  the lines they concern only: a line carries `rates_changed_since_quote` only when a cost
+  table row it uses changed, and `labour_differs_from_quote` marks every line priced from
+  the table. `flags` and `needs_review` are office-only: trades never see them.
 
 ## Approving a draft with flagged lines
 
@@ -191,8 +193,8 @@ It runs at three points:
   `job_work_order_backfill_v1`) fills untouched drafts after opening the missing ones, at
   most `fill_limit` per call, oldest first (default 100, at most 200). It adds
   `quote_fill: {dry_run, untouched_drafts, attempted, filled, not_filled:{reason:n}, remaining}`.
-  A draft whose quote has no labour lines stays untouched and is tried again on the next
-  run. A dry run fills nothing and counts `untouched_drafts`.
+  A draft is left untouched, and tried again on the next run, only when its quote gives no
+  work order lines or the job has no accepted quote. A dry run fills nothing and counts `untouched_drafts`.
 
 A fill failure never fails the open, the read or the backfill; the reason is reported
 instead. An unreadable cost table or quote is a failure (`fill_failed` with

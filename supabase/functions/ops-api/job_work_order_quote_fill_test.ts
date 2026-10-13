@@ -531,12 +531,18 @@ Deno.test("review flags are kept on each flagged line in the stored draft", asyn
   const roots = stored.find((l: any) => l.description === "Root removal");
   assert(roots.flags.includes("labour_or_material_unknown"));
   assertEquals(roots.counted, false);
-  // The result-level flag rides on every line, and every line is in review.
-  assert(
-    stored.every((l: any) =>
-      l.flags.includes("labour_differs_from_quote") && l.needs_review === true
-    ),
-  );
+  // Every line priced from the cost table carries the flag and is in review;
+  // the quote's own custom lines do not carry it.
+  for (const line of stored) {
+    const rateLine = line.basis.startsWith("fence_") ||
+      line.basis === "removal";
+    assertEquals(
+      line.flags.includes("labour_differs_from_quote"),
+      rateLine,
+      line.line_key,
+    );
+    assertEquals(line.needs_review, true, line.line_key);
+  }
   // The agreed labour is still the quote's own figure.
   assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
   // A later read does not fill again, and every flag is still on the draft.
@@ -563,6 +569,24 @@ Deno.test("a cost table row changed after the quote was frozen puts its lines in
     const removal = stored.find((l: any) => l.basis === "removal");
     assertEquals([removal.counted, removal.needs_review], [false, true]);
     assert(removal.flags.includes("rates_changed_since_quote"));
+    // Only remove-colorbond-cost changed: no other line is marked by it.
+    for (const line of stored.filter((l: any) => l.basis !== "removal")) {
+      assert(
+        !line.flags.includes("rates_changed_since_quote"),
+        line.line_key,
+      );
+    }
+    for (const key of ["install:0", "plinths"]) {
+      const line = stored.find((l: any) => l.line_key === key);
+      assertEquals([line.counted, line.needs_review, line.flags], [
+        true,
+        false,
+        [],
+      ], key);
+    }
+    const roots = stored.find((l: any) => /hard digging/.test(l.description));
+    assertEquals(roots.flags, ["saved_as_material", "outside_quote_labour"]);
+    assertEquals(r.quote_fill.needs_review, true);
     assertEquals(db.tables.work_orders[0].agreed_labour_ex, ACCEPTED_AGREED);
   }
 });

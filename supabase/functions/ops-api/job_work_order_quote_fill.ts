@@ -18,6 +18,7 @@
 import {
   buildQuoteWorkOrderLines,
   FENCE_LABOUR_COST_ITEM_KEYS,
+  QUOTE_RESULT_FLAGS,
   type QuoteCostTable,
   type QuoteWorkOrderLines,
 } from "./quote_work_order_lines.ts";
@@ -79,6 +80,12 @@ export type QuoteFillOutcome = {
 };
 
 const FILL_JOB_TYPES = new Set(["fencing", "patio"]);
+
+// Result flags the builder already puts on exactly the lines they concern.
+const LINE_SCOPED_RESULT_FLAGS: ReadonlySet<string> = new Set([
+  QUOTE_RESULT_FLAGS.labourDiffersFromQuote,
+  QUOTE_RESULT_FLAGS.ratesChangedSinceQuote,
+]);
 
 /** A draft nobody has written lines or an agreed amount into. */
 export function jobWorkOrderDraftIsUntouched(wo: any): boolean {
@@ -272,8 +279,12 @@ async function linesForJob(
   });
   // The quote's and the result's review flags ride on every line, so they
   // stay on the stored draft for the approver (scope_items past description,
-  // qty and unit are office-only).
-  const reviewFlags = [...quote.flags, ...result.flags];
+  // qty and unit are office-only). A line-scoped flag stays on the lines the
+  // builder put it on.
+  const reviewFlags = [
+    ...quote.flags,
+    ...result.flags.filter((f) => !LINE_SCOPED_RESULT_FLAGS.has(f)),
+  ];
   if (reviewFlags.length > 0) result.needs_review = true;
   for (const line of result.lines) {
     for (const flag of reviewFlags) {
