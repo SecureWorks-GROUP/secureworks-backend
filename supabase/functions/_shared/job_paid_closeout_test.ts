@@ -329,6 +329,31 @@ Deno.test("a removed neighbour or a zero share is not a paying party", () => {
   assertEquals(v.parties.map((p) => p.label), ["A"]);
 });
 
+Deno.test("an active party with a null share is a paying party, so an unbilled neighbour is not paid", () => {
+  const parties = [
+    party("pa", "A", 0, { share_percentage: null }),
+    party("pb", "B", 0, { share_percentage: null }),
+  ];
+  const v = evaluateJobPaid({
+    job: job(),
+    invoices: [inv("SWF-3-A-FINBAL", "PAID", 1000)],
+    parties,
+    quote: noQuote,
+  });
+  assertEquals(v.outcome, "not_paid");
+  assertEquals(v.parties.map((p) => p.label), ["A", "B"]);
+  const both = evaluateJobPaid({
+    job: job(),
+    invoices: [
+      inv("SWF-3-A-FINBAL", "PAID", 1000),
+      inv("SWF-3-B-FINBAL", "PAID", 1000),
+    ],
+    parties,
+    quote: noQuote,
+  });
+  assertEquals(both.outcome, "paid");
+});
+
 Deno.test("tolerance: a few dollars short and agreed variations both count", () => {
   const base = {
     job: job(),

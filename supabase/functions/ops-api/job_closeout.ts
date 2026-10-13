@@ -63,6 +63,11 @@ export const REVIEW_LOOKBACK_DAYS = 90;
 export const REVIEW_SEND_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /** The catch-up, and the paid hook for a complete card, move only jobs whose newest payment is this recent. */
 export const CATCH_UP_PAID_WITHIN_DAYS = 30;
+/** A review claim still 'claimed' this long after it was taken never finished; the sweep
+ *  records it as unconfirmed (never re-sent) so the card can archive. */
+export const STUCK_CLAIM_AFTER_MS = 60 * 60 * 1000;
+/** The longest one review text may wait on ghl-proxy before it counts as unconfirmed. */
+export const REVIEW_SMS_TIMEOUT_MS = 15_000;
 /** Jobs per page when a sweep, catch-up or backlog list reads every candidate card. */
 const JOB_PAGE_SIZE = 500;
 const JOB_PAGES_MAX = 10;
@@ -112,6 +117,59 @@ export interface JobCloseoutDeps {
     args: { contactId: string; message: string; jobId: string },
   ) => Promise<SmsSendResult>;
   laneEnabled: (lane: "closeout") => Promise<boolean>;
+}
+
+/** The live sendSms: one POST to ghl-proxy send_sms, abandoned after REVIEW_SMS_TIMEOUT_MS. */
+export function ghlProxyReviewSender(opts: {
+  supabaseUrl: string;
+  serviceKey: string;
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+}): JobCloseoutDeps["sendSms"] {
+  const doFetch = opts.fetch ?? fetch;
+  return async (args) => {
+    let resp: Response;
+    // deno-lint-ignore no-explicit-any
+    let result: any;
+    try {
+      resp = await doFetch(
+        `${opts.supabaseUrl}/functions/v1/ghl-proxy?action=send_sms`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${opts.serviceKey}`,
+          },
+          body: JSON.stringify({
+            contactId: args.contactId,
+            message: args.message,
+            jobId: args.jobId,
+          }),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? REVIEW_SMS_TIMEOUT_MS),
+        },
+      );
+      result = await resp.json().catch(() => ({}));
+    } catch (e) {
+      // A timeout or a lost connection: the text may or may not have reached GHL.
+      return {
+        ok: false,
+        refused: false,
+        error: (e as Error)?.name === "TimeoutError"
+          ? "timeout"
+          : String((e as Error)?.message ?? e),
+      };
+    }
+    if (resp.ok && result?.success === true) {
+      return { ok: true, message_id: (result.messageId as string) || null };
+    }
+    // A 4xx is a guard refusal before GHL (contact not on the job, duplicate, bad sender):
+    // nothing was sent. Anything else may or may not have reached GHL.
+    return {
+      ok: false,
+      refused: resp.status >= 400 && resp.status < 500,
+      error: String(result?.error || `HTTP ${resp.status}`),
+    };
+  };
 }
 
 export class JobCloseoutError extends Error {
@@ -496,6 +554,7 @@ export interface SettleResult {
     | "not_in_from_status"
     | "paid_less_than_quoted"
     | "complete_backlog"
+    | "stale_payment"
     | "not_paid"
     | "facts_unreadable";
   detail?: unknown;
@@ -614,8 +673,8 @@ export async function closeoutCatchUp(
       results.push({
         job_id: job.id,
         job_number: job.job_number,
-        action: "not_paid",
-        detail: "stale_payment",
+        action: "stale_payment",
+        detail: { last_paid_on: pre.last_paid_on },
       });
       continue;
     }
@@ -981,6 +1040,11 @@ export async function closeoutSweep(
         noContact = review.action === "no_contact";
         claim = await readClaim(deps, job.id);
       }
+      if (claim?.status === "claimed" && claimStuck(claim, now)) {
+        claim = dryRun
+          ? { ...claim, status: "unconfirmed" }
+          : await releaseStuckClaim(deps, job.id);
+      }
       reviewDone = reviewWouldSend || noContact ||
         (claim !== null && claim.status !== "claimed");
     }
@@ -1023,13 +1087,40 @@ export async function closeoutSweep(
   };
 }
 
+interface ClaimRow {
+  status: string;
+  claimed_at?: string | null;
+}
+
 async function readClaim(
   deps: JobCloseoutDeps,
   jobId: string,
-): Promise<{ status: string } | null> {
-  const { data } = await deps.client.from("job_review_claims").select("status")
-    .eq("job_id", jobId).maybeSingle();
+): Promise<ClaimRow | null> {
+  const { data } = await deps.client.from("job_review_claims").select(
+    "status, claimed_at",
+  ).eq("job_id", jobId).maybeSingle();
   return data ?? null;
+}
+
+function claimStuck(claim: ClaimRow, now: number): boolean {
+  const at = new Date(text(claim.claimed_at)).getTime();
+  return Number.isFinite(at) && now - at > STUCK_CLAIM_AFTER_MS;
+}
+
+/** A claim that never finished: recorded as unconfirmed, never re-sent. */
+async function releaseStuckClaim(
+  deps: JobCloseoutDeps,
+  jobId: string,
+): Promise<ClaimRow | null> {
+  const { error } = await deps.client.from("job_review_claims").update({
+    status: "unconfirmed",
+    reason: "stuck_claim",
+    finished_at: deps.now().toISOString(),
+  }).eq("job_id", jobId).eq("status", "claimed");
+  if (error) {
+    console.error("[job_closeout] stuck claim release failed:", error.message);
+  }
+  return await readClaim(deps, jobId);
 }
 
 // ── The existing Complete backlog (dry run only) ─────────────────────────────

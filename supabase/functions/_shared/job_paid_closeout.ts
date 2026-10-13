@@ -10,10 +10,10 @@
 //   1. Every linked sales invoice that is not voided or deleted is PAID, and none is a
 //      DRAFT (a draft is money we still mean to bill).
 //   2. Every paying party has a paid final invoice. A paying party is a job_contacts
-//      row with removed_at null and share_percentage > 0 (the owner and each neighbour
-//      on a shared fence); a job with no such row has one payer, its client. A final is
-//      any sales invoice that is not a deposit and not a materials, progress, planning
-//      or variation stage invoice. An invoice belongs to the party its job_contact_id
+//      row with removed_at null whose share_percentage is not an explicit 0 (a null share
+//      counts; the owner and each neighbour on a shared fence); a job with no such row has
+//      one payer, its client. A final is any sales invoice that is not a deposit and not
+//      a materials, progress, planning or variation stage invoice. An invoice belongs to the party its job_contact_id
 //      names, else the party whose share letter is on its reference (SWF-26624-B-FINBAL
 //      is share B), else the party whose Xero contact it carries, else the job's own
 //      client (the primary party).
@@ -185,9 +185,13 @@ export function isFinalInvoice(
   return !(ending && STAGE_ENDING.test(ending));
 }
 
-/** The parties who pay: active rows with a share above zero. */
+/** The parties who pay: active rows, unless their share is explicitly zero (a null share
+ *  is a paying party: the party writer stores null when no portions were sent). */
 export function payingParties(parties: CloseoutParty[]): CloseoutParty[] {
-  return parties.filter((p) => !p.removed_at && money(p.share_percentage) > 0);
+  return parties.filter((p) =>
+    !p.removed_at &&
+    (text(p.share_percentage) === "" || money(p.share_percentage) !== 0)
+  );
 }
 
 /** The key "owner" stands for the job's own client when no party row names one. */

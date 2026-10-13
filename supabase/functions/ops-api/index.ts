@@ -1349,10 +1349,10 @@ import {
   type JobCloseoutCaller,
   type JobCloseoutDeps,
   JobCloseoutError,
+  ghlProxyReviewSender,
   requestJobReview,
   reviewRequestMessage as closeoutReviewRequestMessage,
   runJobCloseoutAction,
-  type SmsSendResult,
 } from './job_closeout.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
@@ -54709,32 +54709,13 @@ export const _reviewRequestMessageForTest = reviewRequestMessage
 export const _googleReviewUrlForTest = GOOGLE_REVIEW_URL
 
 /** One review text through ghl-proxy send_sms: the shared sender policy and contact guard. */
-async function sendReviewSmsViaGhlProxy(args: { contactId: string; message: string; jobId: string }): Promise<SmsSendResult> {
-  const resp = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-    body: JSON.stringify({ contactId: args.contactId, message: args.message, jobId: args.jobId }),
-  })
-  const result = await resp.json().catch(() => ({} as Record<string, unknown>))
-  if (resp.ok && result?.success === true) {
-    return { ok: true, message_id: (result.messageId as string) || null }
-  }
-  // A 4xx is a guard refusal before GHL (contact not on the job, duplicate, bad sender):
-  // nothing was sent. Anything else may or may not have reached GHL.
-  return {
-    ok: false,
-    refused: resp.status >= 400 && resp.status < 500,
-    error: String(result?.error || `HTTP ${resp.status}`),
-  }
-}
-
 function jobCloseoutDeps(client: any): JobCloseoutDeps {
   return {
     client,
     now: () => new Date(),
     env: (key: string) => Deno.env.get(key),
     moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
-    sendSms: sendReviewSmsViaGhlProxy,
+    sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
     laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
   }
 }

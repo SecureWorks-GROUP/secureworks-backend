@@ -17,8 +17,9 @@ All three, in `evaluateJobPaid`:
 1. Every linked sales invoice that is not voided or deleted is PAID, and none is
    a DRAFT.
 2. Every paying party has a paid final invoice. Paying parties are
-   `job_contacts` rows with `removed_at` null and `share_percentage > 0`; a job
-   with none has one payer, its client. A final is any sales invoice that is not
+   `job_contacts` rows with `removed_at` null whose `share_percentage` is not an
+   explicit 0 (a null share counts: the party writer stores null when no
+   portions were sent); a job with none has one payer, its client. A final is any sales invoice that is not
    a deposit (`DEP`, `DEP50`, `DEPOSIT`, or `jobs.deposit_invoice_id`) and not a
    `MAT`/`PROG`/`PLAN`/`VAR` stage invoice. An invoice belongs to the party its
    `job_contact_id` names, else the share letter on its reference
@@ -48,7 +49,9 @@ Holds (never moved, texted or archived): status `rectification`, or
   old paid invoice whenever Xero touches it) and is reported `complete_backlog`.
   After every run xero-sync also posts `job_closeout_catch_up`: `invoiced` and
   `final_payment` cards whose newest payment is within 30 days (paid before the
-  card got there). `complete` cards are never caught up: they are the backlog.
+  card got there); a paid card whose newest payment is older is reported
+  `stale_payment` and stays put. `complete` cards are never caught up: they are
+  the backlog.
   The catch-up, the sweep and the backlog list read every candidate card (paged
   by id), so cards that stay put never hide newer ones.
 - **Review text.** Any fencing or patio card entering `get_review` (by the sync
@@ -63,7 +66,8 @@ Holds (never moved, texted or archived): status `rectification`, or
   (`paid_too_long_ago`), however recently it entered Get Review. Nothing is
   claimed while the only blocker is a contact not linked yet (`no_contact`):
   link it and the next request or sweep sends, or press Send review after the
-  card has archived. Manual `send_review_request` uses
+  card has archived. A text that does not answer within 15 seconds counts as
+  unconfirmed and is never retried. Manual `send_review_request` uses
   the same sender and switch (it skips only the status, hold, paid and window
   checks); only a fencing or patio job that passes the paid rule gets the
   "Payment is well received" wording, every other manual request gets a
@@ -73,8 +77,11 @@ Holds (never moved, texted or archived): status `rectification`, or
   it entered `get_review` at least 24 hours ago, is still paid, is not held and
   its review claim is finished, or the sender answered `no_contact` (no claim
   is taken, so the review can still be sent by hand once the contact is
-  linked), or the sender is not live. Compare and set on `get_review`. The
-  sweep also sends a missing review first (the backstop).
+  linked), or the sender is not live. A claim still `claimed` more than an hour
+  after it was taken (the finish write failed or the worker died mid-send) is
+  recorded `unconfirmed` with reason `stuck_claim`, never re-sent, and counts as
+  finished. Compare and set on `get_review`. The sweep also sends a missing
+  review first (the backstop).
 - **Backlog.** `job_closeout_backlog_preview` (server key or staff, read only)
   lists the fully paid fencing and patio jobs in `complete` that a later step
   may archive, with no review text. It archives nothing.

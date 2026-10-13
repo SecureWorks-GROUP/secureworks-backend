@@ -12,6 +12,7 @@ import {
   closeoutOnPaid,
   closeoutSweep,
   effectiveSenderMode,
+  ghlProxyReviewSender,
   type JobCloseoutDeps,
   quoteForCloseout,
   requestJobReview,
@@ -605,7 +606,7 @@ Deno.test("catch-up: an invoiced card paid recently moves; one paid long ago is 
   const byJob = Object.fromEntries(
     (out.results ?? []).map((r: any) => [r.job_number, r.action]),
   );
-  assertEquals(byJob["SWF-11"], "not_paid");
+  assertEquals(byJob["SWF-11"], "stale_payment");
   assertEquals(
     byJob["SWF-12"],
     undefined,
@@ -1026,6 +1027,7 @@ Deno.test("sweep: archives after 24 hours once paid, not held and the review is 
   db.rows("job_review_claims").push({
     job_id: inFlight.id,
     status: "claimed",
+    claimed_at: hoursAgo(0.5),
     recipients: [],
   });
 
@@ -1122,6 +1124,76 @@ Deno.test("sweep reads every get_review card, so stuck unpaid cards never hold b
   const out = await closeoutSweep(deps, { dry_run: false });
   assertEquals(out.checked, 601);
   assertEquals(ready.status, "archived");
+});
+
+Deno.test("sweep: a claim stuck in claimed for over an hour is recorded unconfirmed, never re-sent, and the card archives", async () => {
+  const { db, deps, moves, sms } = setup({ sender: "live" });
+  const stuck = paidJob(db, { status: "get_review", job_number: "SWF-35" });
+  enteredGetReview(db, stuck.id, hoursAgo(30));
+  db.rows("job_review_claims").push({
+    job_id: stuck.id,
+    status: "claimed",
+    claimed_at: hoursAgo(2),
+    recipients: [],
+  });
+  const dry = await closeoutSweep(deps, {});
+  assertEquals(dry.results?.map((r: any) => r.action), ["would_archive"]);
+  assertEquals(db.rows("job_review_claims")[0].status, "claimed");
+
+  const out = await closeoutSweep(deps, { dry_run: false });
+  assertEquals(out.results?.map((r: any) => r.action), ["archived"]);
+  const claim = db.rows("job_review_claims")[0];
+  assertEquals([claim.status, claim.reason], ["unconfirmed", "stuck_claim"]);
+  assert(claim.finished_at);
+  assertEquals([sms.length, moves.length], [0, 1]);
+});
+
+Deno.test("the ghl-proxy sender: a send that does not answer in time is unconfirmed, a 4xx is refused", async () => {
+  const hang: typeof fetch = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(init.signal!.reason),
+      );
+    });
+  const slow = ghlProxyReviewSender({
+    supabaseUrl: "https://x",
+    serviceKey: "k",
+    fetch: hang,
+    timeoutMs: 10,
+  });
+  assertEquals(
+    await slow({ contactId: "c", message: "m", jobId: "j" }),
+    { ok: false, refused: false, error: "timeout" },
+  );
+
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = reviewJob(db);
+  deps.sendSms = slow;
+  const out = await requestJobReview(deps, { job_id: job.id, trigger: "t" });
+  assertEquals(out.action, "unconfirmed");
+  assertEquals(db.rows("job_review_claims")[0].status, "unconfirmed");
+  assertEquals(sms.length, 0);
+
+  const answer = (status: number, body: unknown): typeof fetch => () =>
+    Promise.resolve(new Response(JSON.stringify(body), { status }));
+  const args = { contactId: "c", message: "m", jobId: "j" };
+  assertEquals(
+    await ghlProxyReviewSender({
+      supabaseUrl: "https://x",
+      serviceKey: "k",
+      fetch: answer(400, { error: "contact not on job" }),
+    })(args),
+    { ok: false, refused: true, error: "contact not on job" },
+  );
+  assertEquals(
+    await ghlProxyReviewSender({
+      supabaseUrl: "https://x",
+      serviceKey: "k",
+      fetch: answer(200, { success: true, messageId: "m1" }),
+    })(args),
+    { ok: true, message_id: "m1" },
+  );
 });
 
 Deno.test("sweep dry run (the default): reports would_archive and writes nothing", async () => {
