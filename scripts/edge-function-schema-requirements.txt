@@ -227,6 +227,12 @@ ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|function|c
 # field (alarm_phones empties, operator-configured arrival phones revert), so the deploy
 # must refuse rather than ship ahead of the migration.
 ops-api|supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql|column|makesafe_notify_settings.d1_reconcile_enabled
+# 20261013170000 names who gets the one staff text for a new repair job.
+# loadRepairNotificationConfig selects the column, and a 42703 there fails the
+# repair recipient read: a new repair job then sends no staff text (recorded as
+# repair_recipient_config_read_failed) and its draft settlement is retried. The
+# make-safe text does not read the column.
+ops-api|supabase/migrations/20261013170000_makesafe_notify_repair_recipients.sql|column|makesafe_notify_settings.repair_new_job_user_ids
 # Exact-once stale route recovery is migration-first. These service-role-only
 # RPCs own database-clock expiry, timeout settlement, redispatch leasing,
 # pre-Graph generation renewal, and the bounded board alarm read.
