@@ -1335,8 +1335,9 @@ export async function approveJobWorkOrder(
 // first, at most fill_limit per call (default 100, at most 200; 80 fencing and
 // patio jobs were open on 13 Oct 2026). A draft is left untouched, and tried
 // again on the next run, only when its quote gives no work order lines or the
-// job has no accepted quote; `remaining` says how many
-// were not tried. A dry run fills nothing and counts them.
+// job has no accepted quote (a quote with lines but no labour figure is filled
+// with lines only); `remaining` says how many were not tried. A dry run fills
+// nothing and counts them.
 export const BACKFILL_QUOTE_FILL_DEFAULT_LIMIT = 100;
 export const BACKFILL_QUOTE_FILL_MAX_LIMIT = 200;
 

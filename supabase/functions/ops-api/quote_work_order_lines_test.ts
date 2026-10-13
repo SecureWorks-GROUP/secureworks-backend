@@ -594,9 +594,88 @@ Deno.test("a rate changed since the quote was frozen: its lines are in review an
   assertEquals([install.counted, install.needs_review], [false, true]);
   assert(install.flags.includes(QUOTE_LINE_FLAGS.ratesChangedSinceQuote));
   assert(installChanged.lines.every((l) => !l.counted));
+  // The whole split is unverified; only the install line used the changed row.
+  const plinths = byKey(installChanged.lines, "plinths");
+  assertEquals([plinths.needs_review, plinths.flags], [true, [
+    QUOTE_LINE_FLAGS.labourSplitUnverified,
+  ]]);
+  assert(install.flags.includes(QUOTE_LINE_FLAGS.labourSplitUnverified));
+  // Removal uses its own row, which did not change.
+  const unchangedRemoval = byKey(installChanged.lines, "removal:2");
+  assertEquals([unchangedRemoval.needs_review, unchangedRemoval.flags], [
+    false,
+    [QUOTE_LINE_FLAGS.quoteCountedAsMaterials],
+  ]);
   assertEquals(installChanged.labour_matches_quote, null);
   assertEquals(installChanged.agreed_labour_ex, 1526);
   assertEquals(installChanged.needs_review, true);
+});
+
+Deno.test("a custom labour line is outside the quote's labour only when the split proves it", () => {
+  // The quoting tools' new format: install 10 m x 35 = 350, root removal
+  // 2 hrs x 80 = 160, labourCostEstimate 510.
+  const pricing = (labourCostEstimate: number) => ({
+    line_items: [
+      {
+        unit: "m",
+        category: "fencing",
+        quantity: 10,
+        description: "4× Ridgeside (10.0m total)",
+      },
+      {
+        kind: "labour",
+        unit: "hrs",
+        category: "custom",
+        quantity: 2,
+        hours: 2,
+        cost_per_hour: 80,
+        description: "Root removal",
+      },
+    ],
+    labourCostEstimate,
+  });
+  const counted = buildQuoteWorkOrderLines({
+    jobType: "fencing",
+    pricing: pricing(510),
+    costTable: COST_TABLE,
+  });
+  assert(counted.lines.every((l) => l.counted));
+  assertEquals(byKey(counted.lines, "labour:1").flags, []);
+  assertEquals(counted.agreed_labour_ex, 510);
+
+  const cases: Array<[string, Parameters<typeof buildQuoteWorkOrderLines>[0]]> =
+    [
+      ["mismatch", {
+        jobType: "fencing",
+        pricing: pricing(600),
+        costTable: COST_TABLE,
+      }],
+      ["install rate changed", {
+        jobType: "fencing",
+        pricing: pricing(510),
+        costTable: COST_TABLE,
+        ratesChangedSinceQuote: [FENCE_LABOUR_COST_KEYS.installPerMetre],
+      }],
+      ["no labour figure", {
+        jobType: "fencing",
+        pricing: { line_items: pricing(510).line_items },
+        costTable: COST_TABLE,
+      }],
+    ];
+  for (const [label, input] of cases) {
+    const r = buildQuoteWorkOrderLines(input);
+    const roots = byKey(r.lines, "labour:1");
+    assertEquals(roots.counted, false, label);
+    assertEquals(roots.needs_review, true, label);
+    assert(roots.flags.includes(QUOTE_LINE_FLAGS.labourUnverified), label);
+    assert(!roots.flags.includes(QUOTE_LINE_FLAGS.outsideQuoteLabour), label);
+    const install = byKey(r.lines, "install:0");
+    assertEquals([install.counted, install.needs_review], [false, true], label);
+    assert(
+      install.flags.includes(QUOTE_LINE_FLAGS.labourSplitUnverified),
+      label,
+    );
+  }
 });
 
 Deno.test("a quote with no labour figure: lines only, no agreed labour, flagged", () => {

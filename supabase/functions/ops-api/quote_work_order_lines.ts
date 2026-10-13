@@ -122,6 +122,8 @@ export const QUOTE_LINE_FLAGS = {
   ratesChangedSinceQuote: "rates_changed_since_quote",
   labourDiffersFromQuote: "labour_differs_from_quote",
   outsideQuoteLabour: "outside_quote_labour",
+  labourSplitUnverified: "labour_split_unverified",
+  labourUnverified: "labour_unverified",
 } as const;
 
 export const QUOTE_RESULT_FLAGS = {
@@ -609,9 +611,18 @@ export function buildQuoteWorkOrderLines(input: {
         }
       }
     }
+    for (const line of base) {
+      if (!counted.includes(line)) {
+        line.flags.push(QUOTE_LINE_FLAGS.labourSplitUnverified);
+      }
+    }
     for (const line of extraLabour) {
       if (!counted.includes(line)) {
-        line.flags.push(QUOTE_LINE_FLAGS.outsideQuoteLabour);
+        line.flags.push(
+          labourMatches === true
+            ? QUOTE_LINE_FLAGS.outsideQuoteLabour
+            : QUOTE_LINE_FLAGS.labourUnverified,
+        );
       }
     }
   }

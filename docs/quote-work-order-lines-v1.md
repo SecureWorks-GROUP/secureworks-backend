@@ -66,8 +66,8 @@ Each line is a `scope_items` entry of the job work order:
   `internal.labour`), never a sum re-priced from today's cost table. A quote with no labour
   figure gives no agreed labour (`quote_labour_missing`): the draft is filled with lines only.
 - **`counted` lines** are the lines the quote's labour figure is made of, so they add up to
-  it. A line that is not counted stays on the work order for the trades to see, with flags
-  saying why it was not counted.
+  it. A line that is not counted stays on the work order for the trades to see, with at
+  least one flag saying why it was not counted.
 - **`needs_review`** is true on a line carrying any flag other than `saved_as_material` or
   `quote_counted_as_materials`, so the approver can see which lines to check.
 - **`line_key`** is `<prefix>:<index in pricing.line_items>`, the prefix being `install:`
@@ -93,14 +93,20 @@ from:
 The rebuilt install split (install, plinths, gates and access) is compared with the
 quote's `labourCostEstimate`. It matched exactly on all 140 fencing quotes since 1 Aug 2026
 (measured 13 Oct 2026). The split counts only when it reproduces that figure from rates the
-quote used. Two cases mean it cannot, and then nothing in it is counted and the lines go to
-review (`needs_review: true`):
+quote used. When it cannot be verified, none of it counts and every split line (install,
+plinths, gates, access) is flagged `labour_split_unverified` and in review
+(`needs_review: true`). It cannot be verified when:
 
-- a cost table row a line uses was changed after the accepted revision was frozen
-  (`scope_tool_defaults.last_updated_at` after `frozen_at`, or no time to compare): that line
-  is flagged `rates_changed_since_quote`, and so is the result;
+- a cost table row a split line uses was changed after the accepted revision was frozen
+  (`scope_tool_defaults.last_updated_at` after `frozen_at`, or no time to compare): only the
+  lines that use that row are also flagged `rates_changed_since_quote`, and so is the result;
+- a split rate is missing: that line is also flagged `rate_missing`;
 - the split differs from the quote's labour figure: the result and every line priced from the
-  table, removal included, are flagged `labour_differs_from_quote`.
+  table, removal included, are also flagged `labour_differs_from_quote`;
+- the quote has no labour figure (`quote_labour_missing`).
+
+A removal line is affected only by its own rate row: it is flagged `rates_changed_since_quote`
+when that row changed.
 
 Removal is never part of the quote's labour figure (its cost breakdown files removal under
 materials), so removal lines are never counted and carry `quote_counted_as_materials`. An
@@ -120,8 +126,11 @@ These rules apply to any job type.
   labour row with no cost is flagged `cost_missing` and is not counted.
 - **A custom labour or hours line counts only when it is part of the quote's labour
   figure:** when the install split (fencing) or the labour rows (patio) plus those lines
-  reproduce `labourCostEstimate`, as the quoting tools' new format does. Otherwise it stays
-  on the work order uncounted and flagged `outside_quote_labour` for the approver to decide.
+  reproduce `labourCostEstimate`, as the quoting tools' new format does. When the split (or
+  the patio labour rows) reproduces the figure without it, it stays on the work order
+  uncounted and flagged `outside_quote_labour` for the approver to decide. When that could
+  not be checked (split unverified, no labour figure, or a mismatch), it is uncounted and
+  flagged `labour_unverified`: it may already be inside the agreed labour.
 - **A `custom` row priced in hours** is labour, whatever its kind. It is flagged
   `saved_as_material` when the fence tool saved it as material, or `kind_missing` when it
   has no kind. Example: "Root removal / hard digging, 2 hrs" at $80 an hour is 2 hours, $160.
@@ -132,7 +141,7 @@ These rules apply to any job type.
 - **Patio:** the quote's labour rows ("Labour — 2 trades × 1.5 days", 24 hrs at $45) come
   through as hours and count when their sum equals `labourCostEstimate`; on 81 patio quotes
   since 1 Aug 2026 it matched on every one. When it does not, they are flagged
-  `labour_differs_from_quote` and not counted.
+  `labour_differs_from_quote` and `labour_split_unverified` and not counted.
 
 ### Result
 
@@ -159,7 +168,8 @@ Approval (`approve_work_order`, `docs/job-work-orders-v1.md`) does not refuse a 
 lines carry flags. A flagged draft can be approved and sealed as it is: the captain approves
 each work order, and the flags on its lines are there for him to read first. A line that is
 not counted (for example an old "Root removal, 1 job" extra, `labour_or_material_unknown`,
-or a custom hours line outside the quote's labour, `outside_quote_labour`) adds nothing to
+a custom hours line outside the quote's labour, `outside_quote_labour`, or one that could
+not be checked against it, `labour_unverified`) adds nothing to
 `agreed_labour_ex` unless the approver edits the draft before approving.
 
 ## Filling the job work order draft
@@ -194,7 +204,8 @@ It runs at three points:
   most `fill_limit` per call, oldest first (default 100, at most 200). It adds
   `quote_fill: {dry_run, untouched_drafts, attempted, filled, not_filled:{reason:n}, remaining}`.
   A draft is left untouched, and tried again on the next run, only when its quote gives no
-  work order lines or the job has no accepted quote. A dry run fills nothing and counts `untouched_drafts`.
+  work order lines or the job has no accepted quote. A quote with lines but no labour figure
+  is filled with lines only. A dry run fills nothing and counts `untouched_drafts`.
 
 A fill failure never fails the open, the read or the backfill; the reason is reported
 instead. An unreadable cost table or quote is a failure (`fill_failed` with
