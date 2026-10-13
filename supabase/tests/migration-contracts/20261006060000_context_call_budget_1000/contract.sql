@@ -320,12 +320,15 @@ END $c$;
 BEGIN;
 DO $c$
 DECLARE c text;
+ -- (the call cap setting, 20261013100000, widens the reservation number and the ledger's
+ -- calls_per_day to 3,000 when it is in the stack; the two reserves keep 1,000)
+ top integer := CASE WHEN to_regprocedure('public.context_cadence_policy_today()') IS NULL THEN 1000 ELSE 3000 END;
 BEGIN
  PERFORM pg_temp.cb_calls(0);
- INSERT INTO public.context_model_call_reservations (run_date, ordinal, phase, reserved_at) VALUES (pg_temp.cb_today(), 1000, 'bucket', now());
+ INSERT INTO public.context_model_call_reservations (run_date, ordinal, phase, reserved_at) VALUES (pg_temp.cb_today(), top, 'bucket', now());
  BEGIN
-  INSERT INTO public.context_model_call_reservations (run_date, ordinal, phase, reserved_at) VALUES (pg_temp.cb_today(), 1001, 'bucket', now());
-  RAISE EXCEPTION 'call budget contract: a reservation numbered 1,001 was stored';
+  INSERT INTO public.context_model_call_reservations (run_date, ordinal, phase, reserved_at) VALUES (pg_temp.cb_today(), top + 1, 'bucket', now());
+  RAISE EXCEPTION 'call budget contract: a reservation numbered % was stored', top + 1;
  EXCEPTION WHEN check_violation THEN NULL; END;
  BEGIN
   INSERT INTO public.context_model_call_reservations (run_date, ordinal, phase, reserved_at) VALUES (pg_temp.cb_today(), 0, 'bucket', now());
@@ -334,8 +337,8 @@ BEGIN
  UPDATE public.context_ledger_settings SET calls_per_day = 1000, live_reserve_calls = 1000, live_reserve_calls_morning = 1000;
  FOREACH c IN ARRAY ARRAY['calls_per_day', 'live_reserve_calls', 'live_reserve_calls_morning'] LOOP
   BEGIN
-   EXECUTE format('UPDATE public.context_ledger_settings SET %I = 1001', c);
-   RAISE EXCEPTION 'call budget contract: ledger settings % of 1,001 was stored', c;
+   EXECUTE format('UPDATE public.context_ledger_settings SET %I = %s', c, CASE WHEN c = 'calls_per_day' THEN top + 1 ELSE 1001 END);
+   RAISE EXCEPTION 'call budget contract: ledger settings % above its bound was stored', c;
   EXCEPTION WHEN check_violation THEN NULL; END;
  END LOOP;
  BEGIN
@@ -376,17 +379,22 @@ BEGIN
  PERFORM pg_temp.cb_assert((SELECT live_reserve_calls = 100 AND live_reserve_calls_morning = 100 FROM public.context_ledger_settings WHERE id),
   'the ledger''s reserve must stay 100 and 100');
  -- Readers of the policy are untouched; the replaced bodies are this migration's.
- PERFORM pg_temp.cb_assert((SELECT jsonb_object_agg(p.oid::regprocedure::text, md5(p.prosrc)) FROM pg_proc p
+ -- (the call cap setting, 20261013100000, changed in two of them only which policy function the
+ -- cap reads call: that one name is put back before the comparison)
+ PERFORM pg_temp.cb_assert((SELECT jsonb_object_agg(p.oid::regprocedure::text,
+    md5(replace(p.prosrc, 'public.context_cadence_policy_today()', 'public.context_cadence_policy()'))) FROM pg_proc p
    WHERE p.oid::regprocedure::text IN (SELECT jsonb_object_keys(pre.untouched))) = pre.untouched, 'a reader this migration leaves alone moved');
  -- (the saved job story, 20261009100000, adds a story branch to the admission and
  -- leaves every other phase as it was: its own contract proves both, so its body
- -- is accepted here too)
+ -- is accepted here too; and the call cap setting, 20261013100000, leaves every body as it
+ -- was but for the policy function its cap reads call: its own contract proves that, so its
+ -- bodies are accepted here too)
  FOR x IN SELECT * FROM (VALUES
-  ('public.reserve_context_model_call(text,uuid,uuid)', ARRAY['0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56']),
-  ('public.context_ledger_budget()', ARRAY['8f7b42529db2e1062283de005cef01a7']),
+  ('public.reserve_context_model_call(text,uuid,uuid)', ARRAY['0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56', 'e381963e14d214b6b43c98eb70836919']),
+  ('public.context_ledger_budget()', ARRAY['8f7b42529db2e1062283de005cef01a7', 'e1342d1e088674c8e47ae4d2af317c6e']),
   ('public.context_document_vision_policy()', ARRAY['160abaf805bacd50e6ee570385c67037']),
-  ('public.context_document_vision_admission()', ARRAY['f1d33b0f0ee54516941ee313cb7fe756']),
-  ('public.context_core_status()', ARRAY['2b6b2c54daeae381cdeff7802d72df81'])) AS t(sig, md5s) LOOP
+  ('public.context_document_vision_admission()', ARRAY['f1d33b0f0ee54516941ee313cb7fe756', '6fc6fbe5e932885a6105d462932ee5bb']),
+  ('public.context_core_status()', ARRAY['2b6b2c54daeae381cdeff7802d72df81', '07c51159715c91663a1038f01bf6e09c'])) AS t(sig, md5s) LOOP
   SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid = to_regprocedure(x.sig);
   -- The later record-scope body is also accepted for the vision policy.
   PERFORM pg_temp.cb_assert(live = ANY (x.md5s) OR (x.sig = 'public.context_document_vision_policy()' AND live = 'e2fc43a4e4d7189daac5c894423ac5dc'),
@@ -407,5 +415,6 @@ BEGIN
  END LOOP;
  PERFORM pg_temp.cb_assert(obj_description('public.context_cadence_policy()'::regprocedure, 'pg_proc') LIKE '%20261006060000%'
   AND obj_description('public.reserve_context_model_call(text,uuid,uuid)'::regprocedure, 'pg_proc') LIKE '%1000%'
-  AND obj_description('public.context_ledger_settings'::regclass, 'pg_class') LIKE '%0 to 1000%', 'the comments must state the new budget');
+  AND (obj_description('public.context_ledger_settings'::regclass, 'pg_class') LIKE '%0 to 1000%'
+   OR obj_description('public.context_ledger_settings'::regclass, 'pg_class') LIKE '%0 to 3000%'), 'the comments must state the new budget');
 END $c$;

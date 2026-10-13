@@ -109,7 +109,9 @@ ROLLBACK;
 -- 2. Unchanged: the policy (every cap and live_since), the original writer and
 -- the cadence, candidates, batch, flags, done marker and status bodies. The
 -- cadence and status also accept the backlog ceiling's bodies (20261005233000),
--- which the registered stack applies before this contract runs.
+-- which the registered stack applies before this contract runs, and the call
+-- cap setting's (20261013100000: the same bodies reading the two caps from
+-- context_cadence_policy_today(), checked by its own contract).
 -- Once the call budget (20261006060000, its comment names it) is in the
 -- stack, the policy is the pre-image with that migration's three numbers.
 DO $$
@@ -123,10 +125,10 @@ BEGIN
  THEN RAISE EXCEPTION 'backlog moved the policy %',p; END IF;
  FOR x IN SELECT * FROM (VALUES
   ('public.context_catchup_request(boolean)','b12a7e9637f87d4345c03e4a604a4022'),
-  ('public.context_jobs_cadence(uuid[])','184bfbf98717e2a85cfaed282bcca9a6|c711479690d167f09d016f0413f11160'),
+  ('public.context_jobs_cadence(uuid[])','184bfbf98717e2a85cfaed282bcca9a6|c711479690d167f09d016f0413f11160|9750d24f7d8d79e05018c2b2f9e3781c'),
   ('public.context_cadence_pool()','5cb50d8d47eb917acb2406ae3f0d9369'),
   ('public.context_extraction_candidates(integer)','fc0f681d15d59c80a8ee41b45d0486cc'),
-  ('public.context_cadence_status()','552d7971757d43624ec3667e3dc1fb99|85e60d754e65b812b28e798435e2a5a4'),
+  ('public.context_cadence_status()','552d7971757d43624ec3667e3dc1fb99|85e60d754e65b812b28e798435e2a5a4|ddcd452a67e9e15150ac05d7847e655f'),
   ('public.context_extraction_events(uuid,integer)','68f6da2aac47cae91aa62a0420402d74'),
   ('public.context_extraction_event_flags(uuid,uuid[])','5aedb3e5a7aa3286145079032e8e22f8'),
   ('public.context_catchup_mark_done()','f52e823ab347b0983bb561bcb951514d'),

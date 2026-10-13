@@ -1865,6 +1865,12 @@ END $c$;
 -- (the call budget and then the story, when a full stack has them, go first, as
 -- the store's rollback demands: the call budget replaced the admission; before the
 -- call budget, the record scope, 20261011130000, which replaced its vision policy)
+-- (first of all the call cap setting, 20261013100000, when a full stack has it: it replaced the
+-- admission and the ledger budget after the story did)
+SELECT to_regprocedure('public.context_cadence_policy_today()') IS NOT NULL AS call_cap_setting_live \gset
+\if :call_cap_setting_live
+\ir ../../../rollbacks/20261013100000_context_call_cap_setting_down.sql
+\endif
 SELECT coalesce(obj_description(to_regprocedure('public.context_job_record_timeline(uuid[],timestamptz)'), 'pg_proc'), '')
        LIKE '%(record scope, 20261011130000)%' AS record_scope_live \gset
 \if :record_scope_live
@@ -2376,8 +2382,11 @@ END $c$;
 -- admission is exactly this migration's body, or the call budget's
 -- (20261006060000: this body with the cap and attribution's share read from
 -- the policy, proved by its own contract), or the saved job story's
--- (20261009100000: the call budget's with a story branch, proved by its own).
+-- (20261009100000: the call budget's with a story branch, proved by its own),
+-- or the call cap setting's (20261013100000: the story's with the policy read
+-- from context_cadence_policy_today(), proved by its own).
 DO $c$ BEGIN
  PERFORM pg_temp.lg_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56'), 'reserve_context_model_call is not this migration''s body');
+  IN ('28545c710b6234b76ba25eb09093fa39', '0d741538d7874ce63d48e54d8645d18c', '25a5b5f208af726d47e952f98cecef56',
+      'e381963e14d214b6b43c98eb70836919'), 'reserve_context_model_call is not this migration''s body');
 END $c$;
