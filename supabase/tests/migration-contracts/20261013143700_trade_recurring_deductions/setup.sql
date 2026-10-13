@@ -20,7 +20,9 @@ INSERT INTO public.users (id, org_id, name, role, email) VALUES
    'Other Trade (contract)', 'trade', 'other.trade@example.invalid');
 
 -- An invoice of his saved before the migration: it must come through with no
--- deduction and no note.
+-- deduction and no note. Its pay is the older full carve-out (880, as the
+-- earlier trade invoice cases seed theirs), which both the live split CHECK
+-- and the old one the 20260918120000 break proof restores accept.
 INSERT INTO public.trade_invoices (
   id, org_id, user_id, week_start, week_end, status, invoice_source, invoice_number,
   submitted_at, subtotal_ex, gst, total_inc, gst_on, super_rate, super_amount,
@@ -28,5 +30,5 @@ INSERT INTO public.trade_invoices (
 ) VALUES (
   '2de0c710-0000-4000-8000-000000000001', 'f0000000-0000-4000-8000-0000000000aa',
   '1de0c710-0000-4000-8000-000000000001', '2026-10-05', '2026-10-11', 'paid', 'hourly',
-  'SW-INV-UTE-BEFORE', '2026-10-11T10:00:00Z', 1000, 0, 1000, false, 0.12, 120, 1000, 940
+  'SW-INV-UTE-BEFORE', '2026-10-11T10:00:00Z', 1000, 0, 1000, false, 0.12, 120, 1000, 880
 );
