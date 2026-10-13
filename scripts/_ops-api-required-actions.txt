@@ -344,3 +344,13 @@ correct_work_order_variation # probe=source-only
 # Work order lines from the accepted quote (docs/quote-work-order-lines-v1.md).
 #    A pure read; a bare call is refused 400 "job_id required" before any query.
 quote_work_order_lines
+# Customer variations on a job work order (work_order_customer_variations.ts,
+#    docs/job-work-orders-v1.md). The read refuses a job_id that is not a job id
+#    with 400 before any query; every write mutates business data.
+customer_variations # probe=bounded-refusal probe-args=job_id=__deploy_probe__
+create_customer_variation # probe=source-only
+update_customer_variation # probe=source-only
+approve_customer_variation # probe=source-only
+cancel_customer_variation # probe=source-only
+prepare_customer_variation_invoice_line # probe=source-only
+create_customer_variation_xero_draft # probe=source-only

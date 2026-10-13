@@ -653,6 +653,15 @@ import {
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
 import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
+import {
+  approveCustomerVariation,
+  cancelCustomerVariation,
+  createCustomerVariation,
+  createCustomerVariationXeroDraft,
+  listCustomerVariations,
+  prepareCustomerVariationInvoiceLine,
+  updateCustomerVariation,
+} from './work_order_customer_variations.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -8299,6 +8308,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           client,
           url.searchParams.get('job_id') || '',
         )))
+      // A job's customer variations (work_order_customer_variations.ts), with
+      // each one's invoice line. Staff-only by the front door's default.
+      case 'customer_variations':
+        return json(await runJobWorkOrder(() => listCustomerVariations(
+          client,
+          url.searchParams.get('job_id') || '',
+        )))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
       case 'ops_targets': return json(await opsTargets(client))
@@ -8663,6 +8679,38 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'correct_work_order_variation':
         return json(await runJobWorkOrder(() => correctWorkOrderVariation(client, body, requestActor, {
           sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
+      // Customer variations (work_order_customer_variations.ts): the office
+      // records one on a fencing or patio job, edits it while it is a draft
+      // (each edit names the updated_at it read), and a work order approver
+      // approves it, which joins it to the approved work order as a marked
+      // addendum and seals it. Staff-only by the front door's default.
+      case 'create_customer_variation':
+        return json(await runJobWorkOrder(() => createCustomerVariation(client, body, requestActor)))
+      case 'update_customer_variation':
+        return json(await runJobWorkOrder(() => updateCustomerVariation(client, body, requestActor)))
+      case 'cancel_customer_variation':
+        return json(await runJobWorkOrder(() => cancelCustomerVariation(client, body, requestActor)))
+      case 'approve_customer_variation':
+        return json(await runJobWorkOrder(() => approveCustomerVariation(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
+      // The customer's invoice line, built from the approved variation. No
+      // Xero write.
+      case 'prepare_customer_variation_invoice_line':
+        return json(await runJobWorkOrder(() => prepareCustomerVariationInvoiceLine(client, body, requestActor, {
+          accountCodeForJob: (jobType) => accountCodeForJob(jobType),
+        })))
+      // A Xero DRAFT (never sent) holding that line, through
+      // create_invoice_draft's own path with the caller's credentials. Refused
+      // while feature flag customer_variation_xero_draft_v1 is off.
+      case 'create_customer_variation_xero_draft':
+        return json(await runJobWorkOrder(() => createCustomerVariationXeroDraft(client, body, requestActor, {
+          accountCodeForJob: (jobType) => accountCodeForJob(jobType),
+          createDraft: (payload) => createInvoiceDraftAction(client, payload, authMode, authUser, serverSecretPresented),
         })))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
@@ -16633,8 +16681,13 @@ async function jobDetail(
         live_work_order_id: jwo.live_work_order?.id ?? null,
         draft_work_order_id: jwo.draft_work_order?.id ?? null,
         figures: jwo.figures,
+        // The agreed labour plus the approved customer variations: what
+        // billed and remaining are measured against.
+        agreed_total_ex: jwo.figures.agreed_total_ex,
+        addenda: jwo.addenda,
         invoice_count: jwo.invoices.length,
         variation_count: jwo.variations.length,
+        customer_variation_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
         quote_fill: jwo.quote_fill,
       }
     } catch (e) {
@@ -42535,7 +42588,17 @@ export const TRADE_WO_SCOPE_ITEM_ALLOWLIST = new Set([
   'units',
   'kind',
   'special_instructions',
+  // Hours, not money: every trade sees how long each line takes (captain,
+  // 12 Oct 2026: hours only, the lead trade included).
+  'hours',
+  // A job work order's customer variation lines are marked as variations.
+  'is_variation',
+  'variation_number',
 ])
+
+// The numbers a work order line may show a trade. Every other number on a
+// line is treated as money and dropped.
+const TRADE_WO_SCOPE_ITEM_NUMERIC_KEYS = new Set(['qty', 'quantity', 'hours', 'variation_number'])
 
 function isTradeWoScopeItemScalar(value: unknown): boolean {
   return value == null ||
@@ -42554,6 +42617,10 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
+      if (key === 'is_variation') {
+        if (typeof value === 'boolean') out[key] = value
+        continue
+      }
       if (key === 'kind') {
         const kind = sanitizeTradePackKind(value)
         if (kind !== undefined) out[key] = kind
@@ -42571,7 +42638,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
         continue
       }
       if (typeof value === 'number' && Number.isFinite(value)) {
-        if (key === 'qty' || key === 'quantity') out[key] = value
+        if (TRADE_WO_SCOPE_ITEM_NUMERIC_KEYS.has(key)) out[key] = value
         continue
       }
       out[key] = value

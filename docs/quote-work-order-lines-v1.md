@@ -6,7 +6,8 @@ on the work order as the allocation towards the trades." His answers on the plan
 
 1. No trade sees a dollar amount, the lead trade included: every trade sees hours (and
    quantities) only.
-2. A variation joins the existing work order as a marked addendum (later step).
+2. A variation joins the existing work order as a marked addendum (built in
+   plan step 4: "Customer variations" in `docs/job-work-orders-v1.md`).
 3. Fencing is shown as quoted, per metre, with hours only where the quote has hours.
 4. The quote's own cost table is the one rate source.
 
@@ -21,8 +22,9 @@ Approved 13 Oct 2026 ("go"). This slice does four things:
 Not in this slice: retiring the old office create work order form (the crew
 `create_work_order` path and its dashboard form) is a tracked follow-up of step 3. The
 fence and patio quoting tool source fixes (step 1: every extra marked Labour or Material,
-labour lines carrying hours and a cost per hour) are separate PRs. Variations and the
-screens are later steps.
+labour lines carrying hours and a cost per hour) are separate PRs. Customer variations
+(step 4) are built separately ("Customer variations" in `docs/job-work-orders-v1.md`); the
+screens are a later step.
 
 Code:
 
@@ -58,10 +60,11 @@ Each line is a `scope_items` entry of the job work order:
 
 `{line_key, source:"quote", basis, description, qty, unit, hours, rate, rate_unit, total, counted, flags[], needs_review, quote_cost_ex?}`
 
-- **The trade view.** It keeps `description`, `qty` and `unit` only (`projectTradeJobWorkOrder`).
+- **The trade view.** It keeps `description`, `qty`, `unit` and `hours` only
+  (`projectTradeJobWorkOrder`; `hours` is null on a line priced per metre or each).
   A line priced by the hour carries its hours as `qty` with unit `hrs`, so trades see the time.
   Descriptions never carry a rate, amount, percent or money word, because the trade filter
-  withholds a whole line that does. `rate`, `total`, `hours`, `counted`, `flags`,
+  withholds a whole line that does. `rate`, `total`, `counted`, `flags`,
   `needs_review` and `quote_cost_ex` are office-only.
 - **`agreed_labour_ex` is the quote's own labour figure** (`labourCostEstimate`, else
   `internal.labour`), never a sum re-priced from today's cost table. A quote with no labour

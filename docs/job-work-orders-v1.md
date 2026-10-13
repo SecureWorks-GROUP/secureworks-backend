@@ -107,22 +107,34 @@ and shown as `labour_before_approval`.
 | field | meaning |
 | --- | --- |
 | `agreed_ex` | sealed agreed labour |
+| `customer_variations_ex` | the trade allocation of the approved customer variations (the addenda, see "Customer variations") |
+| `customer_variations_price_ex` | what those approved customer variations charge the customer, ex GST |
+| `customer_variation_count` | how many approved customer variations are counted |
+| `agreed_total_ex` | `agreed_ex` plus `customer_variations_ex`: what billed is measured against |
 | `billed_to_date_ex` | labour lines (labour lane, plus Work Order pay lines for now) on billed invoices, stamped against this job's approved work order (variation work included) |
 | `variations_ex` | the part of billed the trades marked as variations. A variation counts only while its trade invoice is billed (not draft, not `ops-reject`), the same rule as labour lines |
 | `variation_count` | how many variations are counted in `variations_ex` |
 | `billed_within_agreed_scope_ex` | billed minus variations |
-| `remaining_ex` | agreed minus billed |
-| `used_ratio` | billed / agreed |
-| `over_agreed` | true when billed (within scope plus variations) is over agreed |
+| `remaining_ex` | agreed total minus billed |
+| `used_ratio` | billed / agreed total |
+| `over_agreed` | true when billed (within scope plus trade variations) is over the agreed total |
 
 Rules (`figures.rules[]`, each `{key, level, message}`):
 
-- `over_agreed` (flag): billed is over the agreed labour.
-- `near_agreed` (warn): billed is 90% or more of agreed, and not over.
-- `has_variations` (info): one or more variations reported.
+- `over_agreed` (flag): billed is over the agreed total (agreed labour plus
+  approved customer variations).
+- `near_agreed` (warn): billed is 90% or more of the agreed total, and not over.
+- `has_variations` (info): one or more trade variations reported.
+- `has_customer_variations` (info): one or more approved customer variations
+  added to the agreed labour.
 - `no_approved_work_order` (info): nothing counts until a work order is approved.
 
 ## Variations and emails
+
+This section is the trade's variation: an overrun the trade reports on their
+own invoice (`work_order_variations`). The office's customer variation, which
+joins the work order as an addendum, is a separate record: see "Customer
+variations" below.
 
 `report_work_order_variation` records one `work_order_variations` row per
 trade invoice per job, against the approved work order (or none: kept, and
@@ -199,6 +211,123 @@ earlier email with the wrong amount can never be sent later. They are sent, one
 to finance and one to admin, only while `work_order_variation_emails_v1` is on;
 while it is off they stay `recorded`.
 
+## Customer variations
+
+Captain, 12 and 13 Oct 2026: a variation joins the existing work order as a
+marked addendum; no trade sees a dollar amount, the lead trade included; the
+customer invoice line comes from the same record instead of being typed into
+Xero by hand.
+
+Code: `supabase/functions/ops-api/work_order_customer_variations.ts` (actions)
+and `job_work_orders.ts` (the addenda in every work order read). Schema, seal
+and approval: `supabase/migrations/20261013140000_work_order_customer_variations.sql`
+(contract `supabase/tests/migration-contracts/20261013140000_work_order_customer_variations/`).
+
+### Why a new record
+
+Neither existing table that says "variation" can hold it:
+
+- `work_order_variations` is the trade's overrun flag: one row per trade invoice
+  per job, its amount the part of that invoice the trade says is extra. It is
+  unchanged.
+- `job_variations` gives every row a `share_token` at insert, and send-quote's
+  public page accepts or declines any row by that token whatever its status, so
+  an office draft would be acceptable by the customer before anyone approved it.
+  Its approve door (`approve_variation`) has no stale-read guard, it has no draft
+  or cancelled state, and the job story lists every row as an open matter.
+
+So customer variations live in `work_order_customer_variations`. Known
+follow-up: the invoice context (`promised.variations`), the dossier and the job
+story read `job_variations` only, so they do not yet list customer variations.
+
+### The record
+
+- `description`, and `tasks`: `[{description, hours, qty?, unit?}]`. Every task
+  carries the hours it takes (more than 0). A task may also carry a quantity with
+  its unit (6 m); a quantity needs its unit. Text with a `$` is refused
+  (`money_in_text`): trades read it, and the trade filter withholds a line that
+  carries a price.
+- `trade_allocation_ex`: the labour allowed to the trades for the variation, ex
+  GST. `customer_price_ex`: what the customer is charged, ex GST. Both office
+  only; both required to approve. A customer price of 0 is allowed (a variation
+  we fund) and has no invoice line.
+- Status `draft`, `approved` or `cancelled`. Only staff write a draft, and every
+  edit, approval and cancellation names the `updated_at` it read
+  (`expected_updated_at`); a draft that moved since is refused 409
+  `stale_review` and nothing changes.
+- Approving needs a work order approver (the `work_order_settings` list that
+  approves the work order, Shaun), from a signed-in session (the terminal only
+  while `work_order_terminal_approval_v1` is on), and the job's work order
+  already approved (409 `work_order_not_approved` otherwise). In one transaction
+  `approve_work_order_customer_variation` locks the work order, gives the
+  variation the next number on it (1, 2, 3, never reused) and seals it. The work
+  order's own sealed lines are never touched.
+- Approved is sealed by trigger: no edit, no cancel, no delete. A mistake is
+  corrected by a further variation. Only a draft can be cancelled.
+- `job_events` rows (`customer_variation_recorded`, `_updated`, `_approved`,
+  `_cancelled`, `_invoice_line_prepared`, `_xero_draft_created`) carry ids only.
+
+### On the work order
+
+Every staff read of the job work order (`job_work_order`, `list_work_orders`
+with `kind=job`, `job_detail.job_work_order`) counts the approved customer
+variations in the figures: `agreed_total_ex` = agreed labour + their trade
+allocation, and `remaining_ex`, `used_ratio`, `over_agreed` and `near_agreed`
+are measured against it. Trade labour billed for variation work is stamped
+against the same work order, as before.
+
+`addenda[]` lists the approved ones in number order:
+
+`{id, variation_number, label, approved_at, approved_by, description, lines[], hours_total, trade_allocation_ex, customer_price_ex}`
+
+`label` reads `Variation 1 - approved 13 Oct 2026` (the approval day in Perth).
+Each line is in the work order's `scope_items` shape:
+
+`{line_key:"variation:<n>:<i>", source:"variation", is_variation:true, variation_number, description, qty, unit, hours}`
+
+A task with no quantity of its own carries its hours as `qty` with unit `hrs`,
+as the quote's hour-priced lines do.
+
+### What a trade sees
+
+`my_job_work_order` adds `work_order.addenda[]`:
+`{variation_number, label, approved_at, description, scope_items[]}`, built
+field by field, with the same trade filter as the work order's lines. The trade
+read selects only `id, job_id, work_order_id, variation_number, status,
+description, tasks, approved_at`: it never asks for a money column. The trade
+line allowlist (`TRADE_WO_SCOPE_ITEM_ALLOWLIST`) now also keeps `hours`,
+`is_variation` and `variation_number`, so every trade sees each line's hours
+(per-metre lines read `hours: null`) and which lines are variations. No trade,
+the lead trade included, ever sees a dollar amount, price, rate or allocation.
+Drafts and cancelled variations are never shown.
+
+### The customer invoice line
+
+`prepare_customer_variation_invoice_line` builds the customer's line from the
+approved variation and keeps it in `work_order_customer_variation_invoices`
+(one per variation). It writes nothing to Xero. The line is
+create_invoice_draft's shape:
+
+`{description:"Variation 1 - approved 13 Oct 2026: <description>\n- <task>...", quantity:1, unit_price:<customer_price_ex>, account_code:<the job type's sales account>}`
+
+Hours, the trade allocation and any rate stay off it. The response carries
+`create_invoice_draft: {job_id, line_items:[line], reference:"<job number> Variation <n>"}`,
+ready for `create_invoice_draft` once the office picks the Xero contact.
+
+`create_customer_variation_xero_draft` creates one Xero DRAFT (ACCREC, never
+sent) holding that line, through `create_invoice_draft`'s own path and gates
+with the caller's credentials. It is OFF: feature flag
+`customer_variation_xero_draft_v1` is seeded false and while it is off the
+action is refused 403 `xero_draft_switched_off` before anything is called.
+Turning it on needs the captain's word. One draft per variation: the record is
+claimed (`prepared` -> `creating`) before the call. A refusal create_invoice_draft
+gives before Xero is called (bad input, a preflight failure) releases it back to
+`prepared` (422 `xero_draft_refused`); an outcome Xero did not confirm is kept as
+`unknown` (502 `xero_outcome_unknown`) and every later call is refused 409
+`xero_outcome_unknown`, because the draft may exist: check Xero by hand. A
+variation split across several payers (one owner each, as on SWF-26904) is out
+of this slice: one line, one contact.
+
 ## Backfill (OFF)
 
 `backfill_job_work_orders` (ops server key only) calls
@@ -237,8 +366,15 @@ Errors are `{error, code}`.
 | `resend_work_order_variation_emails` | POST | staff | none | `{sending_on, emails:[{id, variation_id, recipient_role, status}]}`; `sending_on:false` and no sends while the email flag is off |
 | `correct_work_order_variation` | POST | staff only, never a trade session | `{variation_id, description?, amount_ex?}` (at least one, and different from what is recorded; `amount_ex: null` clears the amount) | `{variation, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice`, 400 `nothing_to_correct`, 404 `variation_not_found`, 403 `corrector_identity_missing` |
 | `send_work_order` | POST | staff | job work order id | 409 `job_work_order_not_sendable` |
-| `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, invoice_count, variation_count, quote_fill}` on fencing and patio jobs (null on other types); `{unreadable: true}` when that read fails, which never fails the job detail |
-| `my_job_work_order` | GET | trade with access to the job | `job_id` | `{schema:"trade-job-work-order.v1", job_id, work_order: {id, wo_number, status, approved_at, job_id, job_number, job_type, site_address, scheduled_date, scope_items, special_instructions} or null, reason, can_report_variation, my_variations[]}`. No price, allowance, agreed amount or figure, ever. |
+| `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, agreed_total_ex, addenda, invoice_count, variation_count, customer_variation_count, quote_fill}` on fencing and patio jobs (null on other types); `customer_variation_count` counts drafts and approved ones, not cancelled; `{unreadable: true}` when that read fails, which never fails the job detail |
+| `my_job_work_order` | GET | trade with access to the job | `job_id` | `{schema:"trade-job-work-order.v1", job_id, work_order: {id, wo_number, status, approved_at, job_id, job_number, job_type, site_address, scheduled_date, scope_items, special_instructions, addenda[]} or null, reason, can_report_variation, my_variations[]}`. Each scope item is `{description, qty, unit, hours}` (plus `is_variation`, `variation_number` on an addendum line); each addendum `{variation_number, label, approved_at, description, scope_items}`. No price, allowance, agreed amount or figure, ever, for any trade, the lead trade included. |
+| `customer_variations` | GET | staff | `job_id` (a job id) | `{schema:"customer-variations.v1", job:{id, job_number, type}, customer_variations[]}`; each is the customer variation row below plus `invoice` (the invoice record, or null) |
+| `create_customer_variation` | POST | staff, a named caller | `{job_id, description, tasks?, trade_allocation_ex?, customer_price_ex?}` | `{customer_variation}` (a draft); 422 `job_type_not_eligible`, 400 `invalid_tasks` / `money_in_text` / `invalid_description`, 403 `actor_identity_missing` |
+| `update_customer_variation` | POST | staff, a named caller | `{variation_id, expected_updated_at, description?, tasks?, trade_allocation_ex?, customer_price_ex?}` (amounts may be null to clear) | `{customer_variation}`; 409 `stale_review` (read it again), 409 `variation_sealed`, 400 `nothing_to_update` / `expected_updated_at_required` |
+| `approve_customer_variation` | POST | work order approver (session; terminal only while its flag is on) | `{variation_id, expected_updated_at}` | `{customer_variation}` now `approved`, with `work_order_id`, `variation_number` and `label`; 409 `work_order_not_approved`, 409 `stale_review`, 409 `not_a_draft`, 422 `variation_not_ready` (a task without hours, or no allocation or price), 403 `approver_required` / `approver_identity_missing` / `approver_not_set` / `terminal_approval_switched_off` |
+| `cancel_customer_variation` | POST | staff, a named caller | `{variation_id, expected_updated_at, reason?}` | `{customer_variation}` now `cancelled`; 409 `variation_sealed` for an approved one, 409 `stale_review` |
+| `prepare_customer_variation_invoice_line` | POST | staff, a named caller | `{variation_id}` | `{customer_variation_id, line, invoice, create_invoice_draft:{job_id, line_items, reference}, xero_draft_switched_on}`; 409 `variation_not_approved`, 422 `no_customer_charge`. No Xero write |
+| `create_customer_variation_xero_draft` | POST | staff, a named caller | `{variation_id, xero_contact_id, job_contact_id?}` | the prepare response plus `duplicate`, with `invoice.status` `xero_draft_created` and `invoice.xero_invoice_id` / `invoice_number`; 403 `xero_draft_switched_off` while the flag is off; 422 `xero_draft_refused`; 502 then 409 `xero_outcome_unknown`; 409 `xero_draft_in_progress` |
 | `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice` when `amount_ex` is more than the labour the invoice bills on the job |
 
 Each `variations[]` row on the staff read: `id, work_order_id,
@@ -253,10 +389,20 @@ special_instructions, scheduled_date, site_address, agreed_labour_ex,
 approved_at, approved_by, approved_via, sealed_content_hash, origin,
 created_at, updated_at`.
 
+Each customer variation row (the `customer_variation` of a write,
+`customer_variations[]` on the reads): `id, job_id, status, work_order_id,
+variation_number, label, description, tasks, hours_total, trade_allocation_ex,
+customer_price_ex, created_by, created_at, updated_at, approved_at, approved_by,
+approved_via, cancelled_at, cancelled_by, cancel_reason` (`label` only once
+approved). Send `updated_at` back as `expected_updated_at`. The staff
+`job_work_order` read adds `addenda[]` (see "Customer variations") and
+`customer_variations[]` (every status) to its output.
+
 Inputs are the snake_case names in this table only. There are no camelCase or
 alternate id spellings on these doors.
 
-What the trade reads in `scope_items` and `special_instructions` goes through
+What the trade reads in `scope_items`, `special_instructions` and each
+addendum's `description` and `scope_items` goes through
 the shared trade money filter, which drops decimals and 3+ digit numbers as
 possible amounts. Heights and lengths are the work order, so this view alone
 keeps three shapes (`projectTradeJobWorkOrder`): a number then a length unit
