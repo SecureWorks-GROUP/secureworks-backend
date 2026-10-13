@@ -84,6 +84,7 @@ ALTER TABLE public.xero_invoices
 CREATE TABLE IF NOT EXISTS public.xero_projects (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
 ALTER TABLE public.xero_projects
   ADD COLUMN IF NOT EXISTS job_id uuid,
+  ADD COLUMN IF NOT EXISTS project_name text,
   ADD COLUMN IF NOT EXISTS total_expenses numeric,
   ADD COLUMN IF NOT EXISTS total_invoiced numeric;
 

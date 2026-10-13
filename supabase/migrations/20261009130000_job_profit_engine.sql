@@ -57,6 +57,13 @@
 --    When line-level labour, commission and other already exceed the project
 --    total, the basis stays line_level and the job is flagged
 --    project_below_trade_lines (the double-count check).
+--    A project counts for a job only when its name carries that job's own job
+--    number (case ignored, not followed by a further digit). xero-sync also
+--    links a project by its Xero contact, and one contact can own several
+--    jobs, so a project linked by contact only gives no figure: the project
+--    total stays null (never 0, never the contact-linked expenses), it is
+--    never a cost basis, and the job is flagged
+--    xero_project_linked_by_contact_only.
 --
 -- 3. Quoted ex GST takes a sent quote's value only from job_quote_values (the
 --    one interpreter): the whole-job total when quotes are split by party,
@@ -435,11 +442,21 @@ cost AS (
 project AS (
   SELECT
     p.job_id,
-    sum(p.total_expenses) AS project_expenses_ex,
-    sum(p.total_invoiced) AS project_invoiced_ex,
-    count(*) AS project_count
+    sum(p.total_expenses) FILTER (WHERE named.own) AS project_expenses_ex,
+    sum(p.total_invoiced) FILTER (WHERE named.own) AS project_invoiced_ex,
+    count(*) FILTER (WHERE named.own) AS project_count,
+    bool_or(NOT named.own) AS contact_only
   FROM public.xero_projects p
-  WHERE p.job_id IS NOT NULL
+  JOIN public.jobs pj ON pj.id = p.job_id
+  CROSS JOIN LATERAL (
+    SELECT COALESCE(
+      btrim(pj.job_number) <> ''
+      AND upper(p.project_name) ~ (
+        regexp_replace(upper(btrim(pj.job_number)), '([^A-Z0-9])', '\\\1', 'g') || '(?![0-9])'
+      ),
+      false
+    ) AS own
+  ) named
   GROUP BY p.job_id
 ),
 accepted_rev AS (
@@ -602,7 +619,8 @@ base AS (
     -- Xero Projects, a separate reconciling figure
     pr.project_expenses_ex AS xero_project_expenses_ex,
     pr.project_invoiced_ex AS xero_project_invoiced_ex,
-    COALESCE(pr.project_count, 0) AS xero_project_count
+    COALESCE(pr.project_count, 0) AS xero_project_count,
+    COALESCE(pr.contact_only, false) AS project_contact_only
   FROM public.jobs j
   LEFT JOIN public.makesafe_job_details md ON md.job_id = j.id
   CROSS JOIN LATERAL (
@@ -738,6 +756,7 @@ SELECT
     CASE WHEN f.cost_basis = 'xero_project_inferred' THEN 'cost_basis_inferred' END,
     CASE WHEN f.has_cost AND f.actual_labour_ex = 0 THEN 'no_labour_linked' END,
     CASE WHEN f.project_below_trade_lines THEN 'project_below_trade_lines' END,
+    CASE WHEN f.project_contact_only THEN 'xero_project_linked_by_contact_only' END,
     CASE WHEN f.has_cost AND f.materials_missing THEN 'materials_not_linked' END,
     CASE WHEN f.has_unapproved_trade THEN 'unapproved_trade_charges' END,
     CASE WHEN f.committed_open_ex > 0 THEN 'open_purchase_orders' END,
@@ -749,7 +768,7 @@ SELECT
 FROM flagged f;
 
 COMMENT ON VIEW public.v_job_profit IS
-  'Job profit engine (20261009130000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. One cost basis per job (line_level, or xero_project_inferred with materials = project total minus line-level labour, commission and other). Margin/profit null where job_financials would suppress them. Read only, service role only.';
+  'Job profit engine (20261009130000): one row per non-legacy job, all types. Gross profit on direct costs, no overhead. One cost basis per job (line_level, or xero_project_inferred with materials = project total minus line-level labour, commission and other). A Xero Project counts only when its name carries the job''s own job number; one linked by contact only gives no figure and flags xero_project_linked_by_contact_only. Margin/profit null where job_financials would suppress them. Read only, service role only.';
 
 -- ─────────────────────────────────────────────────────────────
 -- job_profit(job_id)
