@@ -641,6 +641,7 @@ import {
   type TradeRedaction,
   updateJobWorkOrderDraft,
 } from './job_work_orders.ts'
+import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -8210,6 +8211,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           jobId: url.searchParams.get('job_id'),
           workOrderId: url.searchParams.get('work_order_id'),
         })))
+      // The work order lines a job's accepted quote gives
+      // (docs/quote-work-order-lines-v1.md). A pure read: writes nothing.
+      // Staff-only by the front door's default (not on the trade or routine lists).
+      case 'quote_work_order_lines':
+        return json(await runJobWorkOrder(() => previewQuoteWorkOrderLines(
+          client,
+          url.searchParams.get('job_id') || url.searchParams.get('jobId') || '',
+        )))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
       case 'ops_targets': return json(await opsTargets(client))
@@ -15180,7 +15189,7 @@ async function runJobWorkOrder<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn()
   } catch (e) {
-    if (e instanceof JobWorkOrderError) {
+    if (e instanceof JobWorkOrderError || e instanceof QuoteFillError) {
       throw new ApiError(e.message, e.status, { error: e.message, code: e.code })
     }
     throw e

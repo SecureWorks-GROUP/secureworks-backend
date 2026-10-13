@@ -36,10 +36,22 @@
 //                                   records the finance and admin emails, sent
 //                                   only while work_order_variation_emails_v1 is on
 //
+// A draft is filled from the accepted quote (job_work_order_quote_fill.ts,
+// docs/quote-work-order-lines-v1.md) while nobody has written into it: when
+// staff open it, when staff read it, and by the backfill. An approved work
+// order is never filled.
+//
 // Invoice lines billed on the job are stamped by the database at invoice
 // submit, and at approval for lines invoiced earlier
 // (trade_invoice_lines.job_work_order_id); this module only reads them. Only
 // labour-lane lines count against the agreed labour; the rest are listed.
+
+import {
+  fillJobWorkOrderDraftFromQuote,
+  jobWorkOrderDraftIsUntouched,
+  QuoteFillError,
+  type QuoteFillOutcome,
+} from "./job_work_order_quote_fill.ts";
 
 export const JOB_WORK_ORDER_SCHEMA = "job-work-order.v1";
 export const TRADE_JOB_WORK_ORDER_SCHEMA = "trade-job-work-order.v1";
@@ -918,6 +930,54 @@ function shapeVariation(v: any, invoiceLabourEx: number) {
 
 // ── Staff: read one job's work order ─────────────────────────────────────────
 
+// ── Filling a draft from the accepted quote ──────────────────────────────────
+
+export type JobWorkOrderQuoteFill = {
+  filled: boolean;
+  reason: QuoteFillOutcome["reason"] | "fill_failed";
+  scope_revision_id: string | null;
+  needs_review: boolean | null;
+  code?: string;
+};
+
+// Never fails the caller: opening, reading or backfilling a work order goes
+// on when the quote cannot be read, and the reason is reported instead.
+async function fillDraftFromQuote(
+  client: any,
+  jobId: string,
+): Promise<{ summary: JobWorkOrderQuoteFill; workOrder: any | null }> {
+  try {
+    const outcome = await fillJobWorkOrderDraftFromQuote(client, jobId);
+    return {
+      summary: {
+        filled: outcome.filled,
+        reason: outcome.reason,
+        scope_revision_id: outcome.scope_revision_id ?? null,
+        needs_review: outcome.needs_review ?? null,
+      },
+      workOrder: outcome.filled ? outcome.work_order : null,
+    };
+  } catch (e) {
+    const code = e instanceof QuoteFillError ? e.code : "fill_failed";
+    console.error(
+      "[ops-api] job work order: draft not filled from the quote:",
+      jobId,
+      code,
+      (e as Error)?.message,
+    );
+    return {
+      summary: {
+        filled: false,
+        reason: "fill_failed",
+        scope_revision_id: null,
+        needs_review: null,
+        code,
+      },
+      workOrder: null,
+    };
+  }
+}
+
 export async function readJobWorkOrder(
   client: any,
   params: { jobId?: string | null; workOrderId?: string | null },
@@ -939,6 +999,17 @@ export async function readJobWorkOrder(
   }
   const job = await readJob(client, requireUuid(jobId, "job_id"));
   const rows = await readJobWorkOrders(client, job.id);
+  const eligible = JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || ""));
+  // Every draft is read by staff before it can be approved (approval needs
+  // the draft's updated_at as read), so an untouched draft is filled from the
+  // accepted quote here, once, and the read returns the filled draft.
+  let quoteFill: JobWorkOrderQuoteFill | null = null;
+  const untouched = eligible && !liveOf(rows) ? draftOf(rows) : null;
+  if (untouched && jobWorkOrderDraftIsUntouched(untouched)) {
+    const fill = await fillDraftFromQuote(client, job.id);
+    quoteFill = fill.summary;
+    if (fill.workOrder) rows[rows.indexOf(untouched)] = fill.workOrder;
+  }
   const live = liveOf(rows);
   const draft = draftOf(rows);
   const [lines, variations] = await Promise.all([
@@ -960,7 +1031,7 @@ export async function readJobWorkOrder(
       site_suburb: job.site_suburb,
       work_order_id: job.work_order_id,
     },
-    eligible: JOB_WORK_ORDER_JOB_TYPES.has(String(job.type || "")),
+    eligible,
     work_order: live || draft || null,
     live_work_order: live,
     draft_work_order: draft,
@@ -976,6 +1047,7 @@ export async function readJobWorkOrder(
     variations: variations.map((v) =>
       shapeVariation(v, invoiceLabour.get(v.trade_invoice_id) ?? 0)
     ),
+    quote_fill: quoteFill,
   };
 }
 
@@ -1092,7 +1164,15 @@ export async function createJobWorkOrder(client: any, body: any) {
       wo_number: draft.wo_number,
     },
   );
-  return { created, work_order: draft };
+  // Lines or an agreed amount sent with the call are kept as given; otherwise
+  // the draft opens filled from the accepted quote.
+  let quoteFill: JobWorkOrderQuoteFill | null = null;
+  if (jobWorkOrderDraftIsUntouched(draft)) {
+    const fill = await fillDraftFromQuote(client, jobId);
+    quoteFill = fill.summary;
+    if (fill.workOrder) draft = fill.workOrder;
+  }
+  return { created, work_order: draft, quote_fill: quoteFill };
 }
 
 async function applyDraftPatch(
@@ -1241,6 +1321,31 @@ export async function approveJobWorkOrder(
 
 // ── Staff: backfill (switched off) ───────────────────────────────────────────
 
+// Each apply also fills untouched drafts from their accepted quotes, oldest
+// first, at most fill_limit per call (default 100, at most 200; 80 fencing and
+// patio jobs were open on 13 Oct 2026). A draft whose quote has no labour lines
+// stays untouched and is tried again on the next run; `remaining` says how many
+// were not tried. A dry run fills nothing and counts them.
+export const BACKFILL_QUOTE_FILL_DEFAULT_LIMIT = 100;
+export const BACKFILL_QUOTE_FILL_MAX_LIMIT = 200;
+
+async function readUntouchedJobDrafts(client: any): Promise<any[]> {
+  const { data, error } = await client.from("work_orders")
+    .select(
+      "id, job_id, kind, status, scope_items, agreed_labour_ex, created_at",
+    )
+    .eq("kind", "job")
+    .eq("status", "draft")
+    // Filled drafts carry an agreed amount, so they never crowd unfilled ones
+    // out of the read.
+    .is("agreed_labour_ex", null)
+    .order("created_at", { ascending: true });
+  if (error) {
+    fail(500, "drafts_unreadable", "The draft work orders could not be read");
+  }
+  return (data || []).filter(jobWorkOrderDraftIsUntouched);
+}
+
 export async function backfillJobWorkOrders(client: any, body: any) {
   const apply = body?.apply === true;
   const { data, error } = await client.rpc("backfill_job_work_order_drafts", {
@@ -1256,7 +1361,36 @@ export async function backfillJobWorkOrders(client: any, body: any) {
     }
     fail(500, "backfill_failed", "The backfill could not run");
   }
-  return data;
+  const untouched = await readUntouchedJobDrafts(client);
+  if (!apply) {
+    return {
+      ...data,
+      quote_fill: { dry_run: true, untouched_drafts: untouched.length },
+    };
+  }
+  const requested = Number(body?.fill_limit);
+  const limit = Number.isInteger(requested) && requested > 0
+    ? Math.min(requested, BACKFILL_QUOTE_FILL_MAX_LIMIT)
+    : BACKFILL_QUOTE_FILL_DEFAULT_LIMIT;
+  const notFilled: Record<string, number> = {};
+  let filled = 0;
+  const batch = untouched.slice(0, limit);
+  for (const wo of batch) {
+    const { summary } = await fillDraftFromQuote(client, String(wo.job_id));
+    if (summary.filled) filled++;
+    else notFilled[summary.reason] = (notFilled[summary.reason] || 0) + 1;
+  }
+  return {
+    ...data,
+    quote_fill: {
+      dry_run: false,
+      untouched_drafts: untouched.length,
+      attempted: batch.length,
+      filled,
+      not_filled: notFilled,
+      remaining: untouched.length - batch.length,
+    },
+  };
 }
 
 // ── Trade: read the approved work order without prices ───────────────────────
