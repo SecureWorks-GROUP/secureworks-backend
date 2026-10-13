@@ -19,8 +19,10 @@
 //                          paid more than REVIEW_SEND_WINDOW_MS ago is claimed as skipped.
 //   - closeoutSweep        the job-closeout-sweep cron (closeout lane): archives a card that
 //                          entered get_review at least 24 hours ago, is still paid, is not
-//                          held and whose review was sent or deliberately skipped (or the
-//                          sender is not live). Compare and set on get_review.
+//                          held and whose review was sent or deliberately skipped, could
+//                          not go for want of a linked contact (no claim is taken, so a
+//                          later Send review still works), or the sender is not live.
+//                          Compare and set on get_review.
 //   - closeoutBacklogPreview  the dry-run list of fully paid fencing and patio jobs sitting
 //                          in complete that a later, separate step may archive. Writes
 //                          nothing and never texts.
@@ -722,13 +724,15 @@ export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, 
     let reviewWouldSend = false;
     if (!reviewDone) {
       let claim = await readClaim(deps, job.id);
+      let noContact = false;
       if (!claim && dryRun) {
         reviewWouldSend = true;
       } else if (!claim) {
-        await requestJobReview(deps, { job_id: job.id, trigger: "job_closeout_sweep" });
+        const review = await requestJobReview(deps, { job_id: job.id, trigger: "job_closeout_sweep" });
+        noContact = review.action === "no_contact";
         claim = await readClaim(deps, job.id);
       }
-      reviewDone = reviewWouldSend || (claim !== null && claim.status !== "claimed");
+      reviewDone = reviewWouldSend || noContact || (claim !== null && claim.status !== "claimed");
     }
     if (!reviewDone) {
       results.push({ ...base, action: "waiting_for_review" });

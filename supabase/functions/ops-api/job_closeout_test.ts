@@ -610,6 +610,22 @@ Deno.test("sweep: archives after 24 hours once paid, not held and the review is 
   assertEquals(moves, [{ jobId: ready.id, status: "archived", source: "job_closeout_sweep", expected_statuses: ["get_review"] }]);
 });
 
+Deno.test("sweep: a paid card with no linked contact archives after 24 hours with no claim, so Send review still works later", async () => {
+  const { db, deps, moves, sms } = setup({ sender: "live" });
+  const young = paidJob(db, { status: "get_review", job_number: "SWF-60", ghl_contact_id: null });
+  enteredGetReview(db, young.id, hoursAgo(2));
+  const old = paidJob(db, { status: "get_review", job_number: "SWF-61", ghl_contact_id: null });
+  enteredGetReview(db, old.id, hoursAgo(25));
+  const out = await closeoutSweep(deps, { dry_run: false });
+  const byJob = Object.fromEntries((out.results ?? []).map((r: any) => [r.job_number, r.action]));
+  assertEquals(byJob, { "SWF-60": "waiting_24h", "SWF-61": "archived" });
+  assertEquals(moves.map((m) => m.jobId), [old.id]);
+  assertEquals([sms.length, db.rows("job_review_claims").length], [0, 0]);
+  old.ghl_contact_id = "ghl-linked";
+  assertEquals((await requestJobReview(deps, { job_id: old.id, trigger: "manual", manual: true })).action, "sent");
+  assertEquals(sms.map((s) => s.contactId), ["ghl-linked"]);
+});
+
 Deno.test("sweep: the backstop sends a missing review before archiving; with the sender off it archives without one", async () => {
   const live = setup({ sender: "live" });
   const a = paidJob(live.db, { status: "get_review" });

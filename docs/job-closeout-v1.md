@@ -62,8 +62,8 @@ Holds (never moved, texted or archived): status `rectification`, or
   skipped; a job whose newest payment is over 7 days old is claimed as skipped
   (`paid_too_long_ago`), however recently it entered Get Review. Nothing is
   claimed while the only blocker is a contact not linked yet (`no_contact`):
-  link it and the next request or sweep sends; past the 7-day window it is
-  claimed as skipped so the card can archive. Manual `send_review_request` uses
+  link it and the next request or sweep sends, or press Send review after the
+  card has archived. Manual `send_review_request` uses
   the same sender and switch (it skips only the status, hold, paid and window
   checks); only a fencing or patio job that passes the paid rule gets the
   "Payment is well received" wording, every other manual request gets a
@@ -71,8 +71,10 @@ Holds (never moved, texted or archived): status `rectification`, or
 - **24-hour archive.** pg_cron `job-closeout-sweep` (17 and 47 past each hour,
   gated on the `closeout` lane) posts `job_closeout_sweep`. A card archives when
   it entered `get_review` at least 24 hours ago, is still paid, is not held and
-  its review claim is finished (or the sender is not live). Compare and set on
-  `get_review`. The sweep also sends a missing review first (the backstop).
+  its review claim is finished, or the sender answered `no_contact` (no claim
+  is taken, so the review can still be sent by hand once the contact is
+  linked), or the sender is not live. Compare and set on `get_review`. The
+  sweep also sends a missing review first (the backstop).
 - **Backlog.** `job_closeout_backlog_preview` (server key or staff, read only)
   lists the fully paid fencing and patio jobs in `complete` that a later step
   may archive, with no review text. It archives nothing.
