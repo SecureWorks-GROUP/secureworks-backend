@@ -3257,7 +3257,9 @@ The post-mint Hugo notification and honest five-minute denominator are owned by
 `docs/evidence/ses-hugo-notification-sla-v1.md`. Notify only a job with explicit
 deterministic mint authority after the canonical server board contains it,
 resolve the one recipient from staff/config authority, and persist the
-once-per-job pre-send audit claim before GHL. Synthetic live-fire must
+once-per-job pre-send audit claim before GHL. A repair job's text has its own
+recipient and wording and never falls back to the make-safe one:
+`docs/repair-intake-auto-v1.md`, "Messages". Synthetic live-fire must
 short-circuit before board, config, audit, or transport work. The ordered
 extraction-belt and settlement release sequence lives in
 `docs/evidence/makesafe-pdf-extraction-belt-2026-07-31.md`.

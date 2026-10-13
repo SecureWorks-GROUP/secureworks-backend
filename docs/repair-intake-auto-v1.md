@@ -321,8 +321,21 @@ managers and no text to the repair recipient.
 
 ## Known gaps
 
-Neither is fixed by the staff text change of 13 Oct 2026. Both are written up
-here so the next change starts from the cause.
+None of these is fixed by the staff text change of 13 Oct 2026. Each is written
+up here so the next change starts from the cause.
+
+### The message classifier does not know the repair text
+
+Two functions name our staff texts by their opening words, "Docs Ready: " and
+"SecureWorks: New make-safe ": `context_internal_text_role`
+(`20261005090000_context_ladder_internal_text.sql`) and
+`context_message_party_roles` (newest body:
+`20261007060000_context_party_roles_v4.sql`). The repair text opens
+"SecureWorks: New repair job " and is on neither list, so a saved copy of it is
+not recognised as a staff text by that rule. Whether another rule labels it
+first has not been checked. Adding the wording is a classifier change with its
+own contract touch points (`AGENTS.md`, the party-roles entry), so it is a
+separate migration.
 
 ### The intake case is never bound to a repair job
 
