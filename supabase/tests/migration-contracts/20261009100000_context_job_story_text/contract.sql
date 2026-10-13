@@ -189,7 +189,9 @@ BEGIN
   'the switch does not say the owner turns it on, or holds a dash');
  -- The admission and the phase list.
  PERFORM pg_temp.st_assert((SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.reserve_context_model_call(text,uuid,uuid)'::regprocedure)
-  = '25a5b5f208af726d47e952f98cecef56', 'the admission is not this migration''s body');
+  -- (or the call cap setting's, 20261013100000: this body with the policy read from
+  -- context_cadence_policy_today(), proved by its own contract)
+  IN ('25a5b5f208af726d47e952f98cecef56', 'e381963e14d214b6b43c98eb70836919'), 'the admission is not this migration''s body');
  PERFORM pg_temp.st_assert(obj_description('public.reserve_context_model_call(text,uuid,uuid)'::regprocedure, 'pg_proc') LIKE '%1000%'
   AND obj_description('public.reserve_context_model_call(text,uuid,uuid)'::regprocedure, 'pg_proc') LIKE '%Story (20261009100000)%',
   'the admission comment keeps the call budget and names the story branch');
@@ -871,7 +873,14 @@ END $c$;
 ROLLBACK;
 
 -- 15. A second apply changes nothing.
+-- (The call cap setting, 20261013100000, replaced the admission and the story budget read after
+-- this migration: when a full stack has it, it is rolled back first inside this rolled-back
+-- transaction, so the second apply runs on this migration's own result.)
 BEGIN;
+SELECT to_regprocedure('public.context_cadence_policy_today()') IS NOT NULL AS call_cap_setting_live \gset
+\if :call_cap_setting_live
+\ir ../../../rollbacks/20261013100000_context_call_cap_setting_down.sql
+\endif
 CREATE TEMP TABLE st_before ON COMMIT DROP AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS md5, obj_description(p.oid, 'pg_proc') AS cmt
  FROM pg_proc p WHERE obj_description(p.oid, 'pg_proc') LIKE 'Job story text (20261009100000)%'

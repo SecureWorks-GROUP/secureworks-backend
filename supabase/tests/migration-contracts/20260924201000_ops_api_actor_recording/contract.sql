@@ -49,13 +49,15 @@ BEGIN
  -- F-ACT's body, or the call budget's (20261006060000), which reads the cap
  -- from the policy in two places and is otherwise F-ACT's byte for byte.
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()'))
-    NOT IN ('e26a2d4387c9f642f473aa16caf4ab98','2b6b2c54daeae381cdeff7802d72df81')
-  OR md5(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+    -- (or the call cap setting's, 20261013100000: the call budget's with its two cap reads
+    -- on context_cadence_policy_today(); that one name is put back before each comparison)
+    NOT IN ('e26a2d4387c9f642f473aa16caf4ab98','2b6b2c54daeae381cdeff7802d72df81','07c51159715c91663a1038f01bf6e09c')
+  OR md5(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),'public.context_cadence_policy_today()','public.context_cadence_policy()'),
     '''run_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''run_cap'',400,'),
     '''model_call_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''model_call_cap'',400,'))
     IS DISTINCT FROM 'e26a2d4387c9f642f473aa16caf4ab98'
  THEN RAISE EXCEPTION 'f-act core body md5'; END IF;
- IF md5(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+ IF md5(replace(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),'public.context_cadence_policy_today()','public.context_cadence_policy()'),
     E'''coverage'',public.context_coverage(),\n  ''actor_missing'',public.context_actor_missing_status());',
     E'''coverage'',public.context_coverage());'),
     '''run_cap'',(public.context_cadence_policy()->>''model_call_cap'')::integer,','''run_cap'',400,'),

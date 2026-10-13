@@ -436,7 +436,9 @@ BEGIN
  THEN RAISE EXCEPTION 'f1 9-arg persist_luna_context_revision is neither the F1 nor approved catch-up body'; END IF;
  -- The core body is the production heartbeat body with exactly one line
  -- changed: the ready_jobs read.
- IF md5(replace(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),
+ -- (the call cap setting, 20261013100000, reads the two caps from context_cadence_policy_today():
+ -- that one name is put back before the comparison)
+ IF md5(replace(replace(replace(replace(replace((SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')),'public.context_cadence_policy_today()','public.context_cadence_policy()'),
     ' ready:=public.context_ready_jobs_count(400);',' SELECT count(*) INTO ready FROM public.context_extraction_candidates(400);'),
     -- F-ACT's one added key (20260924201000), when that migration has run.
     E',\n  ''actor_missing'',public.context_actor_missing_status());',');'),

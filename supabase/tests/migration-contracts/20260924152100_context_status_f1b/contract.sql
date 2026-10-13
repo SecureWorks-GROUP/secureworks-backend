@@ -421,6 +421,10 @@ BEGIN
   -- cap read from the policy, checked by its own contract).
   ('public.context_core_status()',CASE WHEN to_regprocedure('public.context_actor_missing_status()') IS NULL
     THEN '3df30c5ccf6db32c4782ba7859591b86'
+    -- the call cap setting's (20261013100000: the same body with its two cap reads on
+    -- context_cadence_policy_today(), checked by its own contract)
+    WHEN position('context_cadence_policy_today' IN (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')))>0
+    THEN '07c51159715c91663a1038f01bf6e09c'
     WHEN position('context_cadence_policy' IN (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')))>0
     THEN '2b6b2c54daeae381cdeff7802d72df81' ELSE 'e26a2d4387c9f642f473aa16caf4ab98' END),
   ('public.context_business_minutes(timestamptz,timestamptz)','510dbec36291c25aa1887ade89e2ca4e'),
