@@ -1569,4 +1569,49 @@ Deno.test("a repair card carries the builder's work order value as its own named
   assertEquals(plain.value, 0);
   assertEquals("builder_work_order_value_ex_gst" in plain, false);
   assertEquals("builder_work_order_value_note" in plain, false);
+  assertEquals(plain.builder_additional_purchase_orders, []);
+});
+
+Deno.test("the Repairs card lists every further order on the job and never chooses between them or adds them up", () => {
+  const card = projectInsuranceRepairPipelineRow({
+    id: "j",
+    type: "repair",
+    value: 990,
+    metadata: {
+      repair_stage: "materials",
+      builder_claim_ref: "MLB-49502",
+      builder_po_number: "PO-11111",
+      builder_work_order_value_ex_gst: 500,
+      builder_additional_work_orders: [
+        {
+          purchase_order: "PO-69815",
+          work_order_number: "MLB-49502PO-69815",
+          value_ex_gst: 1080,
+          received_at: "2026-07-19T01:12:00.000Z",
+          source_post_ids: ["post-1"],
+        },
+        // An order whose value was not read, and one with no date kept.
+        { purchase_order: "PO-70001", value_ex_gst: null },
+        // Not an order: nothing is invented for it.
+        { work_order_number: "MLB-49502" },
+        null,
+      ],
+    },
+  });
+  assertEquals(card.builder_po_number, "PO-11111");
+  assertEquals(card.builder_work_order_value_ex_gst, 500);
+  assertEquals(card.builder_additional_purchase_orders, [
+    {
+      purchase_order: "PO-69815",
+      builder_work_order_value_ex_gst: 1080,
+      received_at: "2026-07-19T01:12:00.000Z",
+    },
+    {
+      purchase_order: "PO-70001",
+      builder_work_order_value_ex_gst: null,
+      received_at: null,
+    },
+  ]);
+  assertEquals(card.value, 990);
+  assertEquals("metadata" in card, false);
 });

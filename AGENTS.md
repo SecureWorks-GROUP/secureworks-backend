@@ -1545,7 +1545,12 @@ a clean repair work order from MLB or Ambrose. Rules:
   a REPAIR order for a claim with an open repair job is matched by
   `matchOpenRepairJob` and landed on that job: purchase order recorded (a
   second one is listed, never written over the first), PDF attached, one job
-  event, one intake desk item, no message, board stage untouched. The match
+  event, one intake desk item, no message, board stage untouched. A landing
+  is final, so `landWorkOrderOnRepairJob` refuses an order with no staged PDF
+  before any write and the case is retried. The Repairs card shows the listed
+  orders as `builder_additional_purchase_orders` (order, the builder's figure,
+  date arrived) beside an unchanged `builder_po_number`: it never picks one
+  or adds them up, and `ops.html` does not draw the list yet. The match
   and the write count the same held purchase orders, the one inside the
   detail row's `external_ref` included (`landing.jobExternalRef`). The
   auto-file brakes hold the landing too: with a brake on the order is a

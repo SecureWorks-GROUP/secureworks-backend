@@ -294,7 +294,9 @@ jobs:
       # Automatic repair intake (flag repair_intake_auto_v1): the pure rules, and
       # the scan replays of the repair orders it exists for. Every scan test of
       # it is named "repair intake: ..." so the filter runs them all; the
-      # runtime file is filtered for the reason given above.
+      # runtime file is filtered for the reason given above. The last run is the
+      # end-to-end proof that the Trade App's my_jobs gives an allocated trade
+      # no builder order value.
       - name: Test automatic repair intake
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
@@ -302,6 +304,9 @@ jobs:
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
             --filter "repair intake:" \
             supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "builder's order value" \
+            supabase/functions/ops-api/trade_app_visibility_rules_test.ts
 
       # An adapter registered in code but missing from the database's adapter
       # list is refused on every case insert and nothing else notices (Ambrose,

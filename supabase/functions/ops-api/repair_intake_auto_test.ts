@@ -717,6 +717,33 @@ Deno.test("job metadata as a trade reads it carries no builder order value", () 
   assertEquals(withoutBuilderOrderValue(undefined), undefined);
 });
 
+Deno.test("landing refuses an order with no staged work order PDF, before anything is written", async () => {
+  const db = landingClient({
+    id: "job-1",
+    job_number: "SWR-1",
+    type: "repair",
+    status: "accepted",
+    metadata: { repair_stage: "scoping", builder_claim_ref: "MLB-49502" },
+  });
+  const before = JSON.stringify(db.job);
+  let attachCalls = 0;
+  await assertRejects(
+    () =>
+      landWorkOrderOnRepairJob(db.client, { ...LANDING, attachments: [] }, {
+        attachEvidence: () => {
+          attachCalls++;
+          return Promise.resolve();
+        },
+      }),
+    Error,
+    "no work order PDF staged",
+  );
+  assertEquals(JSON.stringify(db.job), before);
+  assertEquals(db.writes.length, 0);
+  assertEquals(db.events.length, 0);
+  assertEquals(attachCalls, 0);
+});
+
 Deno.test("landing refuses a job that is not a repair job", async () => {
   const db = landingClient({
     id: "job-1",

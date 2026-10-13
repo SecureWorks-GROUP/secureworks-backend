@@ -26,6 +26,7 @@ import {
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
 } from "./makesafe_synthetic_livefire.ts";
 import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
+import { projectInsuranceRepairPipelineRow } from "./insurance_repairs_board.ts";
 import {
   AMBROSE_TEST_COMPANY_ID,
   AMBROSE_TEST_SENDER,
@@ -638,7 +639,8 @@ function fakeClient(
   store: Store,
   selectLog: Array<[string, string]> = [],
   inLog?: (table: string, column: string, count: number) => void,
-  downloadBytes?: (path: string) => Uint8Array,
+  // Returning null is a storage download that fails.
+  downloadBytes?: (path: string) => Uint8Array | null,
   fail?: (
     table: string,
     operation: "select" | "insert" | "update" | "upsert",
@@ -724,16 +726,22 @@ function fakeClient(
     storage: {
       from() {
         return {
-          download: (path: string) =>
-            Promise.resolve({
+          download: (path: string) => {
+            const bytes = downloadBytes?.(path);
+            if (bytes === null) {
+              return Promise.resolve({
+                data: null,
+                error: { message: "storage download failed" },
+              });
+            }
+            return Promise.resolve({
               data: {
                 arrayBuffer: () =>
-                  Promise.resolve(
-                    (downloadBytes?.(path) || new Uint8Array([1, 2, 3])).buffer,
-                  ),
+                  Promise.resolve((bytes || new Uint8Array([1, 2, 3])).buffer),
               },
               error: null,
-            }),
+            });
+          },
           upload: () => Promise.resolve({ data: {}, error: null }),
           getPublicUrl: () => ({
             data: { publicUrl: "https://example.test/doc.pdf" },
@@ -8877,6 +8885,125 @@ Deno.test("repair intake: a landing whose desk notice cannot be written is retri
   assertEquals(store.job_documents.length, 1);
   assertEquals(store.jobs.length, 1);
   assertEquals(approver.bodies.length, 0);
+});
+
+Deno.test("repair intake: an order whose work order PDF cannot be staged is not landed, and lands with its PDF on the next scan", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  const before = JSON.stringify(job);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+  let storageDown = true;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => storageDown ? null : new Uint8Array([1, 2, 3]),
+  );
+  const scan = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approver.approve,
+      repairAutoIntake: true,
+    });
+
+  const first = await scan(REPAIR_NOW);
+  assertEquals(first.totals.cases_failed, 1);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 0);
+  // Nothing reached the live job, and the order has not taken its landed
+  // fate: no purchase order with no PDF behind it, no notice to check one.
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+  assertEquals(landedCases(store).length, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "awaiting_job_creation",
+  );
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+
+  storageDown = false;
+  const second = await scan("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(second.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(job.metadata.builder_po_number, "PO-69815");
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(store.job_documents[0].job_id, "job-kinross");
+  assertEquals(store.job_documents[0].type, "work_order");
+  assertEquals(store.job_events.length, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(landedCases(store).length, 1);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(approver.bodies.length, 0);
+});
+
+Deno.test("repair intake: replay: a second purchase order on a job that already holds one is shown on the Repairs card beside the first", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+    metadata: {
+      builder_po_number: "PO-11111",
+      builder_work_order_value_ex_gst: 500,
+      repair_stage: "materials",
+    },
+  });
+  const cardBefore = projectInsuranceRepairPipelineRow({ ...job, value: 990 });
+  assertEquals(cardBefore.builder_po_number, "PO-11111");
+  assertEquals(cardBefore.builder_additional_purchase_orders, []);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(
+    landedCases(store)[0].recovery_cursor.landedOnRepairJob
+      .purchaseOrderRelation,
+    "different",
+  );
+
+  const card = projectInsuranceRepairPipelineRow({ ...job, value: 990 });
+  // The job's first order is unchanged, and the new one is listed beside it
+  // with the builder's figure for it and the day it arrived.
+  assertEquals(card.builder_po_number, "PO-11111");
+  assertEquals(card.builder_work_order_value_ex_gst, 500);
+  assertEquals(card.builder_additional_purchase_orders, [{
+    purchase_order: "PO-69815",
+    builder_work_order_value_ex_gst: 1080,
+    received_at: RAPID_REPAIR_ORDER.receivedAt,
+  }]);
+  // Our price is ours: no builder figure is added to it, and the stage is a
+  // person's to move.
+  assertEquals(card.value, 990);
+  assertEquals(card.repair_stage, "materials");
+
+  // A later scan lists nothing twice.
+  await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(
+    projectInsuranceRepairPipelineRow({ ...job, value: 990 })
+      .builder_additional_purchase_orders.length,
+    1,
+  );
 });
 
 Deno.test("repair intake: the auto-file brake holds the landing, and releasing it mints no second repair job on the claim", async () => {

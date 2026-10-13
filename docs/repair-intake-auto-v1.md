@@ -120,6 +120,38 @@ blank draft.
 
 This applies only to an order that reads as repair work.
 
+An order whose work order PDF cannot be staged (a storage read or write that
+fails, or no uploaded PDF) is **not landed**: nothing is written to the job,
+the case stays `awaiting_job_creation`, and the next scan tries the whole
+landing again. A landing is final, so it is never made without its PDF.
+
+### Further orders on the Repairs card
+
+A job's first purchase order stays in the card's `builder_po_number`,
+unchanged. Every further order recorded on the job is in one read-only list on
+the Repairs card row, `builder_additional_purchase_orders`, in the order they
+arrived (an empty list when there are none):
+
+| Field | Value |
+|---|---|
+| `purchase_order` | The order number. |
+| `builder_work_order_value_ex_gst` | The builder's ex-GST figure for that order, or `null` when it was not read. Never our price. |
+| `received_at` | When the order's email arrived, or `null` when not kept. |
+
+The card shows all of them. It does not choose which order governs and does not
+add the figures up: that is the owner's pending decision. None of it enters
+`value`, and none of it reaches a trade (the trade feed strips each order's
+figure; see "The builder's order value").
+
+**Not drawn yet.** The ops screen (`ops.html`, in the `secureworks-ux` repo)
+does not read this field today, so a second order shows only in the job's
+events, documents and the intake desk notice until that screen changes. What it
+needs: under the order number on the Repairs card and in the job panel, a short
+list of the further orders, each as its order number, the date it arrived and
+the builder's figure labelled as the builder's, with no total. The Trade App
+needs no change: a trade reads the purchase order numbers from the job and
+never the figures.
+
 ### How a landed order is accounted
 
 A job holds one intake case (`uq_makesafe_intake_cases_job`, live in
@@ -134,9 +166,10 @@ does **not** take `job_id`:
 | `recovery_cursor.landedOnRepairJob` | `jobId`, `jobNumber`, `purchaseOrder`, `purchaseOrderRelation` |
 | `last_decision_reason` | `deterministic landed_on_existing_repair_job <job id>` |
 
-The desk item is written before the case takes that fate. If the item, the PDF
-attach or the job event fails, the case stays `awaiting_job_creation` and the
-next scan repeats the whole landing; every step can run twice. A landed case
+The desk item is written before the case takes that fate. If the PDF staging,
+the item, the PDF attach or the job event fails, the case stays
+`awaiting_job_creation` and the next scan repeats the whole landing; every step
+can run twice. A landed case
 keeps its fate on later scans and with the flag off.
 
 ### The auto-file brakes hold the landing

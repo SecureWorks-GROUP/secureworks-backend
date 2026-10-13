@@ -255,6 +255,27 @@ export function projectInsuranceRepairPipelineRow(
       : null;
   const workOrderValueNotRead = workOrderValueExGst === null &&
     meta.builder_work_order_value_source === BUILDER_WORK_ORDER_VALUE_NOT_READ;
+  // Every further order the builder raised on this job, in the order they
+  // arrived. `builder_po_number` stays the job's first order: which order
+  // governs when a claim has several is the owner's pending decision, so the
+  // card shows all of them and neither chooses between them nor adds them up.
+  // Each value is the BUILDER'S figure for that order, never our price.
+  const additionalPurchaseOrders =
+    (Array.isArray(meta.builder_additional_work_orders)
+      ? meta.builder_additional_work_orders
+      : []).flatMap((entry: any) => {
+        const order = cleanRef(entry?.purchase_order);
+        if (order === null) return [];
+        const value = entry?.value_ex_gst;
+        return [{
+          purchase_order: order,
+          builder_work_order_value_ex_gst:
+            typeof value === "number" && Number.isFinite(value) && value > 0
+              ? value
+              : null,
+          received_at: cleanRef(entry?.received_at),
+        }];
+      });
   return {
     ...projected,
     ...(workOrderValueExGst !== null
@@ -276,6 +297,7 @@ export function projectInsuranceRepairPipelineRow(
     repair_stage: insuranceRepairStage(row),
     builder_work_order_ref: workOrderRef,
     builder_po_number: purchaseOrder,
+    builder_additional_purchase_orders: additionalPurchaseOrders,
     builder_company_name: cleanRef(detailRow.requesting_company_name) ??
       cleanRef(detailCompany?.name) ?? cleanRef(company?.name),
     builder_company_slug: cleanRef(detailRow.requesting_company_slug) ??

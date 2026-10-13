@@ -526,6 +526,10 @@ export interface RepairWorkOrderLandingDeps {
  * job that already holds this one is left as it is. The PDF is attached and one
  * job event is written per instruction. It sends nothing to anyone, never moves
  * the board stage and never touches `jobs.status`.
+ *
+ * An order with no staged work order PDF is refused before anything is
+ * written: a landing is final, so one made without its PDF would leave the job
+ * holding a purchase order nobody can check.
  */
 export async function landWorkOrderOnRepairJob(
   client: any,
@@ -534,6 +538,9 @@ export async function landWorkOrderOnRepairJob(
 ): Promise<
   { relation: RepairJobPurchaseOrderRelation; eventCreated: boolean }
 > {
+  if (!landing.attachments.length) {
+    throw new Error("repair landing refused: no work order PDF staged");
+  }
   const { data: job, error: jobError } = await client.from("jobs")
     .select("id,job_number,type,metadata")
     .eq("id", landing.jobId)
@@ -606,9 +613,7 @@ export async function landWorkOrderOnRepairJob(
       );
     }
   }
-  if (landing.attachments.length) {
-    await deps.attachEvidence(client, [landing.jobId], landing.attachments);
-  }
+  await deps.attachEvidence(client, [landing.jobId], landing.attachments);
   const { data: events, error: eventsError } = await client.from("job_events")
     .select("id,detail_json")
     .eq("job_id", landing.jobId)
