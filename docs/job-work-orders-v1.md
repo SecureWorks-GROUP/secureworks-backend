@@ -209,6 +209,17 @@ draft for every fencing or patio job in an open approved status
 alone. Future jobs get their draft from trigger `trg_jobs_open_job_work_order`
 when they enter an open approved status.
 
+## Filled from the accepted quote
+
+An untouched draft (no `scope_items`, no `agreed_labour_ex`) is filled from the
+job's accepted quote: its task lines, with hours where the quote has hours, and
+the quote's own labour figure as the agreed labour. This happens when staff open
+it (`create_work_order`), when staff (or the ops server key) read it
+(`job_work_order`, `job_detail`; never on a routine-key read), and in the
+backfill's apply.
+A draft anyone has written into, and every approved work order, is left alone.
+Rules, line shape and flags: `docs/quote-work-order-lines-v1.md`.
+
 ## API for the screens
 
 All on `ops-api`. Staff = ops server key, or a signed-in admin/owner/ops_manager.
@@ -216,16 +227,17 @@ Errors are `{error, code}`.
 
 | action | method | who | input | output |
 | --- | --- | --- | --- | --- |
-| `job_work_order` | GET | staff | `job_id` or `work_order_id` | `{schema:"job-work-order.v1", job, eligible, work_order, live_work_order, draft_work_order, figures, invoices[], lines[] (each with `cost_lane` and `counted`), labour_before_approval, variations[]}` |
+| `job_work_order` | GET | staff | `job_id` or `work_order_id` | `{schema:"job-work-order.v1", job, eligible, work_order, live_work_order, draft_work_order, figures, invoices[], lines[] (each with `cost_lane` and `counted`), labour_before_approval, variations[], quote_fill}`; `quote_fill` is `{filled, reason, scope_revision_id, needs_review, code?}` (`code` only when the fill failed) when this read tried to fill an untouched draft from the quote, else null |
 | `list_work_orders` | GET | staff | `kind=job`, optional `status` (draft, approved), `type` (fencing, patio), `job_id` | `{schema:"job-work-orders.v1", kind:"job", work_orders[] (row + job_number, client_name, job_type, job_status, site_suburb, figures for approved ones), total}`. Without `kind=job` the old list, crew work orders only: a job work order is never in it. |
-| `create_work_order` | POST | staff | `{kind:"job", job_id, ...draft fields}` | `{created, work_order}`: the open draft, else a new draft; 409 `work_order_sealed` once the job's work order is approved |
+| `create_work_order` | POST | staff | `{kind:"job", job_id, ...draft fields}` | `{created, work_order, quote_fill}`: the open draft, else a new draft, filled from the quote unless the call sent `scope_items` or `agreed_labour_ex`; 409 `work_order_sealed` once the job's work order is approved |
 | `update_work_order` | POST | staff | `{id, scope_items?, special_instructions?, agreed_labour_ex?, scheduled_date?, site_address?}` | `{work_order}`; approved returns 409 `work_order_sealed`; a `status` other than `draft` returns 400 `invalid_status` |
 | `approve_work_order` | POST | Shaun (session; terminal only while its flag is on) | `{work_order_id, expected_updated_at}`: both required; `expected_updated_at` is the draft's `updated_at` exactly as it was read | `{work_order}`; 400 `expected_updated_at_required` (missing: read the draft again), 409 `stale_review` (the draft changed after it was read: read it again), 403 `approver_required` / `approver_identity_missing` / `terminal_approval_switched_off`, 422 `work_order_not_ready`, 409 `not_a_draft` |
-| `backfill_job_work_orders` | POST | ops server key | `{apply?: true}` | `{dry_run, candidates, by_type_status, job_ids, opened}` |
+| `backfill_job_work_orders` | POST | ops server key | `{apply?: true, fill_limit?}` | `{dry_run, candidates, by_type_status, job_ids, opened, quote_fill}`; `quote_fill` counts untouched drafts, and on apply fills up to `fill_limit` (default 100, at most 200) and says how many remain |
+| `quote_work_order_lines` | GET | staff | `job_id` (a job id; anything else is 400 `job_id_required`) | the lines the accepted quote gives the job, writing nothing (`docs/quote-work-order-lines-v1.md`) |
 | `resend_work_order_variation_emails` | POST | staff | none | `{sending_on, emails:[{id, variation_id, recipient_role, status}]}`; `sending_on:false` and no sends while the email flag is off |
 | `correct_work_order_variation` | POST | staff only, never a trade session | `{variation_id, description?, amount_ex?}` (at least one, and different from what is recorded; `amount_ex: null` clears the amount) | `{variation, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice`, 400 `nothing_to_correct`, 404 `variation_not_found`, 403 `corrector_identity_missing` |
 | `send_work_order` | POST | staff | job work order id | 409 `job_work_order_not_sendable` |
-| `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, invoice_count, variation_count}` on fencing and patio jobs (null on other types); `{unreadable: true}` when that read fails, which never fails the job detail |
+| `job_detail` | GET | unchanged | | adds `job_work_order: {work_order, live_work_order_id, draft_work_order_id, figures, invoice_count, variation_count, quote_fill}` on fencing and patio jobs (null on other types); `{unreadable: true}` when that read fails, which never fails the job detail |
 | `my_job_work_order` | GET | trade with access to the job | `job_id` | `{schema:"trade-job-work-order.v1", job_id, work_order: {id, wo_number, status, approved_at, job_id, job_number, job_type, site_address, scheduled_date, scope_items, special_instructions} or null, reason, can_report_variation, my_variations[]}`. No price, allowance, agreed amount or figure, ever. |
 | `report_work_order_variation` | POST | trade, own invoice, access to the job | `{trade_invoice_id, job_id, description, amount_ex?}` | `{variation, duplicate, emails:[{recipient_role, status}]}`; 422 `variation_over_invoice` when `amount_ex` is more than the labour the invoice bills on the job |
 
