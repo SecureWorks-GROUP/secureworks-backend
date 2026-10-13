@@ -485,6 +485,12 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_due(integ
 \if :rebuild_order_live
 \ir ../../../rollbacks/20261012164500_context_rebuild_order_down.sql
 \endif
+-- (the rebuild request, 20261013153000, replaced the judge since: its down goes first, as the
+-- finished wake's refuses while a later body is live)
+SELECT to_regprocedure('public.context_ledger_request_rebuild(uuid,text,text)') IS NOT NULL AS rebuild_request_live \gset
+\if :rebuild_request_live
+\ir ../../../rollbacks/20261013153000_context_rebuild_request_down.sql
+\endif
 SELECT to_regprocedure('public.context_finished_wake_hours()') IS NOT NULL AS finished_wake_live \gset
 \if :finished_wake_live
 \ir ../../../rollbacks/20261012093500_context_finished_wake_down.sql
