@@ -262,7 +262,7 @@ Deno.test("a removed neighbour or a zero share is not a paying party", () => {
   assertEquals(v.parties.map((p) => p.label), ["A"]);
 });
 
-Deno.test("tolerance: a few dollars short and approved variations both count", () => {
+Deno.test("tolerance: a few dollars short and agreed variations both count", () => {
   const base = {
     job: job(),
     invoices: [inv("SWF-4-DEP50", "PAID", 2000), inv("SWF-4-FINBAL", "PAID", 1998), inv("SWF-4-VAR", "PAID", 330)],
@@ -272,7 +272,7 @@ Deno.test("tolerance: a few dollars short and approved variations both count", (
     evaluateJobPaid({ ...base, quote: { quote_total_inc: 4000, variations_inc: 330, unknown_reason: null } }).outcome,
     "paid",
   );
-  // An approved variation that was never invoiced leaves money owing.
+  // An accepted variation that was never invoiced leaves money owing.
   assertEquals(
     evaluateJobPaid({ ...base, quote: { quote_total_inc: 4000, variations_inc: 990, unknown_reason: null } }).outcome,
     "paid_less_than_quoted",

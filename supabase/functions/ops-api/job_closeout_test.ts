@@ -209,12 +209,23 @@ function addQuote(db: FakeDb, jobId: string, valueInc: number) {
 // ── Pure pieces ──────────────────────────────────────────────────────────────
 
 Deno.test("the review text is the existing GHL wording with the one review link", () => {
-  const fence = reviewRequestMessage("Jane Citizen", "fencing");
+  const fence = reviewRequestMessage("Jane Citizen", "fencing", true);
   assertStringIncludes(fence, "Hi Jane,\n\nThank you for trusting us with your recent job! Payment is well received.");
   assertStringIncludes(fence, "You can leave a review here: https://share.google/AFyfkE7jLfCZcxanV");
   assert(fence.endsWith("Thank you again for your business!\n\nShaun\nSecureWorks Fencing"));
-  assert(reviewRequestMessage(null, "patio").startsWith("Hi there,"));
-  assert(reviewRequestMessage("Sam", "patio").endsWith("Shaun\nSecureWorks"));
+  assert(reviewRequestMessage(null, "patio", true).startsWith("Hi there,"));
+  assert(reviewRequestMessage("Sam", "patio", true).endsWith("Shaun\nSecureWorks"));
+});
+
+Deno.test("the review text makes no payment claim and signs SecureWorks for other types and unpaid jobs", () => {
+  for (const [type, paid] of [["decking", true], ["makesafe", true], ["fencing", false], ["patio", false]] as const) {
+    const message = reviewRequestMessage("Jane Citizen", type, paid);
+    assertStringIncludes(message, "Hi Jane,\n\nThank you for choosing SecureWorks for your recent job!");
+    assertStringIncludes(message, "You can leave a review here: https://share.google/AFyfkE7jLfCZcxanV");
+    assert(!message.includes("Payment"), `${type} ${paid}`);
+    assert(!message.includes("Fencing"), `${type} ${paid}`);
+    assert(message.endsWith("Thank you again for your business!\n\nSecureWorks"), `${type} ${paid}`);
+  }
 });
 
 Deno.test("sender mode: live needs the env switch too, otherwise it is a dry run", () => {
@@ -226,12 +237,12 @@ Deno.test("sender mode: live needs the env switch too, otherwise it is a dry run
   assertEquals(effectiveSenderMode("garbage", "true"), "off");
 });
 
-Deno.test("quote side: whole-job total wins, then the headline; approved variations add inc GST", () => {
+Deno.test("quote side: whole-job total wins, then the headline; only agreed variations add, inc GST", () => {
   const variations = [
-    { agreement: "customer_accepted" as const, amount: 220, gst_included: true },
-    { agreement: "approved_internally_not_accepted" as const, amount: 100, gst_included: false },
-    { agreement: "declined" as const, amount: 999, gst_included: true },
-    { agreement: "pending_internal_approval" as const, amount: 999, gst_included: true },
+    { agreed: true, amount: 220, gst_included: true },
+    { agreed: true, amount: 100, gst_included: false },
+    { agreed: false, amount: 200, gst_included: true },
+    { agreed: false, amount: 999, gst_included: true },
   ];
   assertEquals(
     quoteForCloseout({ status: "accepted", whole_quote_total: { value_inc_gst: 8000, source: "x" }, headline: { value_inc_gst: 4000 } as any }, variations),
@@ -320,6 +331,27 @@ Deno.test("paid less than quoted: the card stays and carries the marker, logged 
   assertEquals(db.rows("job_events").filter((e) => e.event_type === "closeout_paid_less_than_quoted").length, 1);
 });
 
+Deno.test("a complete card paid long ago is the backlog: it never moves and is never texted", async () => {
+  const { db, deps, moves, sms } = setup({ sender: "live" });
+  const job = addJob(db, { status: "complete", job_number: "SWF-50" });
+  addInvoice(db, job.id, "SWF-50-FINBAL", "PAID", 1000, { fully_paid_on: "2026-05-01" });
+  const out = await closeoutOnPaid(deps, { job_id: job.id });
+  assertEquals(out.action, "complete_backlog");
+  assertEquals([moves.length, sms.length, job.status], [0, 0, "complete"]);
+  assertEquals(db.rows("job_review_claims").length, 0);
+});
+
+Deno.test("an invoiced card paid long ago may still move, but its review is claimed as skipped, never texted", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = addJob(db, { status: "invoiced", job_number: "SWF-51" });
+  addInvoice(db, job.id, "SWF-51-FINBAL", "PAID", 1000, { fully_paid_on: "2026-05-01" });
+  assertEquals((await closeoutOnPaid(deps, { job_id: job.id })).action, "moved");
+  const out = await requestJobReview(deps, { job_id: job.id, trigger: "status_changed:xero_sync" });
+  assertEquals([out.action, out.reason], ["skipped", "paid_too_long_ago"]);
+  assertEquals(sms.length, 0);
+  assertEquals(db.rows("job_review_claims")[0].status, "skipped");
+});
+
 Deno.test("a card moved by hand meanwhile is left alone (compare and set)", async () => {
   const { db, deps } = setup();
   const job = paidJob(db);
@@ -339,6 +371,18 @@ Deno.test("catch-up: an invoiced card paid recently moves; one paid long ago is 
   assertEquals(byJob["SWF-11"], "not_paid");
   assertEquals(byJob["SWF-12"], undefined, "complete cards are the backlog, never caught up");
   assertEquals(complete.status, "complete");
+});
+
+Deno.test("catch-up reads every candidate card, so stuck unpaid cards never hide a newly paid one", async () => {
+  const { db, deps, moves } = setup();
+  for (let i = 0; i < 600; i++) {
+    const stuck = addJob(db, { job_number: `SWF-S${i}`, updated_at: hoursAgo(5000) });
+    addInvoice(db, stuck.id, `SWF-S${i}-FINBAL`, "AUTHORISED", 100);
+  }
+  const fresh = paidJob(db, { job_number: "SWF-FRESH", updated_at: hoursAgo(1) });
+  const out = await closeoutCatchUp(deps, {});
+  assertEquals(out.checked, 601);
+  assertEquals(moves.map((m) => m.jobId), [fresh.id]);
 });
 
 // ── The review sender ────────────────────────────────────────────────────────
@@ -432,13 +476,47 @@ Deno.test("re-checked at send time: not in get_review, held, or not paid -> no c
   assertEquals(db.rows("job_review_claims").length, 0);
 });
 
-Deno.test("a card paid and in get_review for over a week is claimed as skipped, never texted", async () => {
+Deno.test("a card paid over a week ago is claimed as skipped, never texted, however recently it entered get_review", async () => {
+  for (const entered of ["2026-09-21T00:00:00.000Z", hoursAgo(1)]) {
+    const { db, deps, sms } = setup({ sender: "live" });
+    const job = addJob(db, { status: "get_review" });
+    addInvoice(db, job.id, "SWF-1-FINBAL", "PAID", 1000, { fully_paid_on: "2026-09-20" });
+    enteredGetReview(db, job.id, entered);
+    const out = await requestJobReview(deps, { job_id: job.id, trigger: "t" });
+    assertEquals([out.action, out.reason], ["skipped", "paid_too_long_ago"], entered);
+    assertEquals(sms.length, 0);
+  }
+});
+
+Deno.test("no linked contact claims nothing, so linking it and asking again sends exactly once", async () => {
   const { db, deps, sms } = setup({ sender: "live" });
-  const job = addJob(db, { status: "get_review" });
+  const job = reviewJob(db, { ghl_contact_id: null });
+  assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action, "no_contact");
+  assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action, "no_contact");
+  assertEquals([sms.length, db.rows("job_review_claims").length], [0, 0]);
+  job.ghl_contact_id = "ghl-linked";
+  assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action, "sent");
+  assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "t" })).action, "already_claimed");
+  assertEquals(sms.map((s) => s.contactId), ["ghl-linked"]);
+});
+
+Deno.test("no linked contact on a manual request claims nothing either", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = addJob(db, { status: "archived", ghl_contact_id: null });
+  assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "manual", manual: true })).action, "no_contact");
+  assertEquals(db.rows("job_review_claims").length, 0);
+  job.ghl_contact_id = "ghl-linked";
+  assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "manual", manual: true })).action, "sent");
+  assertEquals(sms.length, 1);
+});
+
+Deno.test("no contact past the send window is claimed as skipped, so the card can archive", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const job = addJob(db, { status: "get_review", ghl_contact_id: null });
   addInvoice(db, job.id, "SWF-1-FINBAL", "PAID", 1000, { fully_paid_on: "2026-09-20" });
-  enteredGetReview(db, job.id, "2026-09-21T00:00:00.000Z");
+  enteredGetReview(db, job.id, hoursAgo(1));
   const out = await requestJobReview(deps, { job_id: job.id, trigger: "t" });
-  assertEquals([out.action, out.reason], ["skipped", "paid_and_in_get_review_too_long_ago"]);
+  assertEquals([out.action, out.reason], ["skipped", "paid_too_long_ago"]);
   assertEquals(sms.length, 0);
 });
 
@@ -474,6 +552,23 @@ Deno.test("manual send_review_request obeys the sender switch, skips the paid an
   assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "manual", manual: true })).action, "sent");
   assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "manual", manual: true })).action, "already_claimed");
   assertEquals(sms.length, 1);
+});
+
+Deno.test("manual send_review_request says payment was received only on a paid fencing or patio job", async () => {
+  const { db, deps, sms } = setup({ sender: "live" });
+  const paidFence = paidJob(db, { status: "archived", ghl_contact_id: "ghl-1" });
+  const unpaidFence = addJob(db, { status: "invoiced", ghl_contact_id: "ghl-2" });
+  addInvoice(db, unpaidFence.id, "SWF-1-FINBAL", "AUTHORISED", 1000);
+  const decking = paidJob(db, { type: "decking", status: "complete", ghl_contact_id: "ghl-3" });
+  for (const job of [paidFence, unpaidFence, decking]) {
+    assertEquals((await requestJobReview(deps, { job_id: job.id, trigger: "manual", manual: true })).action, "sent");
+  }
+  assert(sms[0].message.endsWith("Shaun\nSecureWorks Fencing"));
+  assertStringIncludes(sms[0].message, "Payment is well received.");
+  for (const message of [sms[1].message, sms[2].message]) {
+    assert(!message.includes("Payment"));
+    assert(message.endsWith("Thank you again for your business!\n\nSecureWorks"));
+  }
 });
 
 // ── The 24-hour archive sweep ────────────────────────────────────────────────
@@ -529,6 +624,20 @@ Deno.test("sweep: the backstop sends a missing review before archiving; with the
   await closeoutSweep(off.deps, { dry_run: false });
   assertEquals(off.sms.length, 0);
   assertEquals(b.status, "archived");
+});
+
+Deno.test("sweep reads every get_review card, so stuck unpaid cards never hold back an archive", async () => {
+  const { db, deps } = setup({ sender: "off" });
+  for (let i = 0; i < 600; i++) {
+    const stuck = addJob(db, { status: "get_review", job_number: `SWF-S${i}`, updated_at: hoursAgo(5000) });
+    addInvoice(db, stuck.id, `SWF-S${i}-FINBAL`, "AUTHORISED", 100);
+    enteredGetReview(db, stuck.id, hoursAgo(5000));
+  }
+  const ready = paidJob(db, { status: "get_review", job_number: "SWF-READY", updated_at: hoursAgo(30) });
+  enteredGetReview(db, ready.id, hoursAgo(30));
+  const out = await closeoutSweep(deps, { dry_run: false });
+  assertEquals(out.checked, 601);
+  assertEquals(ready.status, "archived");
 });
 
 Deno.test("sweep dry run (the default): reports would_archive and writes nothing", async () => {

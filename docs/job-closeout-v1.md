@@ -25,7 +25,9 @@ All three, in `evaluateJobPaid`:
    (`SWF-26624-B-FINBAL` is B), else the party with its Xero contact, else the
    client.
 3. Money paid covers the sent quote (`job_quote_values` through
-   `readJobQuotes`) plus approved variations, within the larger of $5 and 1%.
+   `readJobQuotes`) plus agreed variations (customer accepted or invoiced; one
+   approved internally but never accepted is not owed), within the larger of $5
+   and 1%.
    Unknown quote or unreadable variations: rules 1 and 2 decide.
 
 Outcomes: `paid`; `paid_less_than_quoted` (1 and 2 hold, 3 fails: the card
@@ -41,10 +43,14 @@ Holds (never moved, texted or archived): status `rectification`, or
   turns PAID, xero-sync posts `ops-api?action=job_closeout_paid`. A paid, unheld
   job in `complete`, `final_payment` or `invoiced` moves to `get_review` through
   `update_job_status` with `expected_statuses` (compare and set: a card moved by
-  hand meanwhile is left alone). After every run xero-sync also posts
-  `job_closeout_catch_up`: `invoiced` and `final_payment` cards whose newest
-  payment is within 30 days (paid before the card got there). `complete` cards
-  are never caught up: they are the backlog.
+  hand meanwhile is left alone). A `complete` card moves only when its newest
+  payment is within 30 days: an older one is the backlog (xero-sync re-reads an
+  old paid invoice whenever Xero touches it) and is reported `complete_backlog`.
+  After every run xero-sync also posts `job_closeout_catch_up`: `invoiced` and
+  `final_payment` cards whose newest payment is within 30 days (paid before the
+  card got there). `complete` cards are never caught up: they are the backlog.
+  The catch-up, the sweep and the backlog list read every candidate card (paged
+  by id), so cards that stay put never hide newer ones.
 - **Review text.** Any fencing or patio card entering `get_review` (by the sync
   or by hand) asks the one sender, `requestJobReview`. It re-checks get_review,
   holds and the paid rule, then texts every paying owner once, in the wording
@@ -53,9 +59,15 @@ Holds (never moved, texted or archived): status `rectification`, or
   contact/job guard). A `job_review_claims` row is inserted before any text, so
   a job is never texted twice by this system; a contact sent any review text in
   the last 90 days (any source in `business_events`, or our own claims) is
-  skipped; a card paid and in Get Review for over 7 days is claimed as skipped.
-  Manual `send_review_request` uses the same sender and switch (it skips only
-  the status, hold, paid and window checks).
+  skipped; a job whose newest payment is over 7 days old is claimed as skipped
+  (`paid_too_long_ago`), however recently it entered Get Review. Nothing is
+  claimed while the only blocker is a contact not linked yet (`no_contact`):
+  link it and the next request or sweep sends; past the 7-day window it is
+  claimed as skipped so the card can archive. Manual `send_review_request` uses
+  the same sender and switch (it skips only the status, hold, paid and window
+  checks); only a fencing or patio job that passes the paid rule gets the
+  "Payment is well received" wording, every other manual request gets a
+  neutral text signed "SecureWorks".
 - **24-hour archive.** pg_cron `job-closeout-sweep` (17 and 47 past each hour,
   gated on the `closeout` lane) posts `job_closeout_sweep`. A card archives when
   it entered `get_review` at least 24 hours ago, is still paid, is not held and
@@ -98,4 +110,5 @@ which are not paid, so the sweep will not archive them. No `invoiced` or
   `get_review` reads as legal there too (shadow observation only); the close-out
   itself touches fencing and patio only.
 - A patio review text signs "SecureWorks" (no patio wording was captured);
-  fencing signs "SecureWorks Fencing".
+  fencing signs "SecureWorks Fencing"; a manual text on any other job, or on a
+  job not paid, makes no payment claim and signs "SecureWorks".

@@ -7,14 +7,16 @@
 //                          a fencing or patio job turns PAID: a paid job moves from
 //                          complete, final_payment or invoiced to get_review (compare and
 //                          set on the status); "paid less than quoted" stays put with a
-//                          marker; a held job never moves.
+//                          marker; a held job never moves; a complete card moves only when
+//                          paid within CATCH_UP_PAID_WITHIN_DAYS (older ones are the backlog).
 //   - closeoutCatchUp      xero-sync calls job_closeout_catch_up after each run: the same
 //                          for invoiced and final_payment cards whose last invoice was paid
 //                          before the card got there (paid within CATCH_UP_PAID_WITHIN_DAYS).
 //   - requestJobReview     the one review sender: once per job (a job_review_claims row is
 //                          inserted before any text), to every paying owner, skipping any
 //                          contact asked for a review in the last 90 days from any source,
-//                          re-checking get_review, the holds and the paid rule first.
+//                          re-checking get_review, the holds and the paid rule first. A job
+//                          paid more than REVIEW_SEND_WINDOW_MS ago is claimed as skipped.
 //   - closeoutSweep        the job-closeout-sweep cron (closeout lane): archives a card that
 //                          entered get_review at least 24 hours ago, is still paid, is not
 //                          held and whose review was sent or deliberately skipped (or the
@@ -55,16 +57,23 @@ import {
 
 /** A contact asked for a review this recently, from any source, is not asked again. */
 export const REVIEW_LOOKBACK_DAYS = 90;
-/** The sender texts only while the later of entering get_review and the last payment is this recent. */
+/** The automatic sender texts only while the job's last payment is this recent. */
 export const REVIEW_SEND_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-/** The catch-up moves only jobs whose newest payment is this recent. */
+/** The catch-up, and the paid hook for a complete card, move only jobs whose newest payment is this recent. */
 export const CATCH_UP_PAID_WITHIN_DAYS = 30;
-/** Jobs read per sweep, catch-up or backlog page. */
-export const CLOSEOUT_BATCH_LIMIT = 200;
+/** Jobs per page when a sweep, catch-up or backlog list reads every candidate card. */
+const JOB_PAGE_SIZE = 500;
+const JOB_PAGES_MAX = 10;
 /** Ids per PostgREST .in() filter. */
 const ID_CHUNK = 50;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** True when the newest payment (a YYYY-MM-DD day, read as its end) is within `ms` of now. */
+function paidWithin(lastPaidOn: string | null, now: Date, ms: number): boolean {
+  if (!lastPaidOn) return false;
+  return now.getTime() - new Date(`${lastPaidOn}T23:59:59Z`).getTime() <= ms;
+}
 
 /** What a captured review text looks like, whoever sent it (GHL workflow, by hand, us). */
 const REVIEW_TEXT_PATTERNS = [
@@ -154,41 +163,43 @@ export async function readCloseoutSwitches(
 // ── The review text ──────────────────────────────────────────────────────────
 
 /**
- * The review text, in the wording the GHL review workflow and staff already send
- * (captured 2026: "Thank you for trusting us with your recent job! Payment is well
- * received. ... Shaun, SecureWorks Fencing"), with the one review link. A patio job signs
- * "SecureWorks" (no captured patio wording exists; "SecureWorks" is a captured sign-off).
+ * The review text. A fencing or patio job that passes the paid rule gets the wording the
+ * GHL review workflow and staff already send (captured 2026: "Thank you for trusting us
+ * with your recent job! Payment is well received. ... Shaun, SecureWorks Fencing"); a patio
+ * job signs "SecureWorks" (no captured patio wording exists; "SecureWorks" is a captured
+ * sign-off). Every other request (another job type, or a job not paid) makes no payment
+ * claim and signs "SecureWorks". Both carry the one review link.
  */
 export function reviewRequestMessage(
   clientName: string | null | undefined,
-  jobType?: string | null,
+  jobType: string | null | undefined,
+  paid: boolean,
 ): string {
   const first = text(clientName).split(/\s+/)[0] || "there";
+  const ask =
+    `If you were satisfied with our work and the overall experience, we'd greatly appreciate it if you could take a moment to share your feedback. ` +
+    `Your review helps us continue to provide quality service to our customers. You can leave a review here: ${GOOGLE_REVIEW_URL}\n\n` +
+    `Thank you again for your business!`;
+  if (!paid || !isCloseoutJobType(jobType)) {
+    return `Hi ${first},\n\nThank you for choosing SecureWorks for your recent job!\n\n${ask}\n\nSecureWorks`;
+  }
   const signOff = text(jobType).toLowerCase() === "patio"
     ? "SecureWorks"
     : "SecureWorks Fencing";
-  return `Hi ${first},\n\nThank you for trusting us with your recent job! Payment is well received.\n\n` +
-    `If you were satisfied with our work and the overall experience, we'd greatly appreciate it if you could take a moment to share your feedback. ` +
-    `Your review helps us continue to provide quality service to our customers. You can leave a review here: ${GOOGLE_REVIEW_URL}\n\n` +
-    `Thank you again for your business!\n\nShaun\n${signOff}`;
+  return `Hi ${first},\n\nThank you for trusting us with your recent job! Payment is well received.\n\n${ask}\n\nShaun\n${signOff}`;
 }
 
 // ── Quote side of the paid rule ──────────────────────────────────────────────
 
-const AGREED_VARIATIONS = new Set([
-  "customer_accepted",
-  "invoiced",
-  "approved_internally_not_accepted",
-]);
-
 /**
  * The sent quote (job_quote_values through readJobQuotes: the whole-job total when the
  * quote is split by party, else the accepted or newest current document's value) plus
- * approved variations, inc GST. Pure.
+ * agreed variations (customer accepted or invoiced; one approved internally but never
+ * accepted is not owed), inc GST. Pure.
  */
 export function quoteForCloseout(
   quotes: Pick<JobQuotes, "status" | "whole_quote_total" | "headline"> | null,
-  variations: Pick<VariationView, "agreement" | "amount" | "gst_included">[] | null,
+  variations: Pick<VariationView, "agreed" | "amount" | "gst_included">[] | null,
 ): CloseoutQuote {
   let quoteTotal: number | null = null;
   let reason: string | null = null;
@@ -201,7 +212,7 @@ export function quoteForCloseout(
   if (variations) {
     variationsInc = 0;
     for (const v of variations) {
-      if (!AGREED_VARIATIONS.has(v.agreement) || v.amount == null) continue;
+      if (!v.agreed || v.amount == null) continue;
       variationsInc += v.gst_included === false ? v.amount * 1.1 : v.amount;
     }
     variationsInc = Math.round(variationsInc * 100) / 100;
@@ -305,15 +316,21 @@ async function loadJob(client: any, jobId: string): Promise<CloseoutJobRow | nul
   return data ?? null;
 }
 
+/** Every fencing and patio card in these statuses, paged by id; null when a page fails. */
 // deno-lint-ignore no-explicit-any
-async function loadJobsByStatus(client: any, statuses: string[], limit: number): Promise<CloseoutJobRow[] | null> {
-  const { data, error } = await client.from("jobs").select(JOB_COLUMNS)
-    .in("type", ["fencing", "patio"])
-    .in("status", statuses)
-    .order("updated_at", { ascending: true })
-    .limit(limit);
-  if (error) return null;
-  return data ?? [];
+async function loadJobsByStatus(client: any, statuses: string[]): Promise<CloseoutJobRow[] | null> {
+  const all: CloseoutJobRow[] = [];
+  for (let page = 0; page < JOB_PAGES_MAX; page++) {
+    const { data, error } = await client.from("jobs").select(JOB_COLUMNS)
+      .in("type", ["fencing", "patio"])
+      .in("status", statuses)
+      .order("id", { ascending: true })
+      .range(page * JOB_PAGE_SIZE, page * JOB_PAGE_SIZE + JOB_PAGE_SIZE - 1);
+    if (error) return null;
+    all.push(...(data ?? []));
+    if ((data ?? []).length < JOB_PAGE_SIZE) break;
+  }
+  return all;
 }
 
 /** When each job last entered get_review (its newest status_changed row to get_review). */
@@ -382,6 +399,7 @@ export interface SettleResult {
     | "not_closeout_type"
     | "not_in_from_status"
     | "paid_less_than_quoted"
+    | "complete_backlog"
     | "not_paid"
     | "facts_unreadable";
   detail?: unknown;
@@ -399,6 +417,13 @@ async function settleJob(deps: JobCloseoutDeps, facts: JobFacts, source: string)
   if (verdict.outcome === "not_paid") return { ...base, action: "not_paid", detail: verdict.reasons };
   if (verdict.outcome === "paid_less_than_quoted") {
     return { ...base, action: "paid_less_than_quoted", detail: { paid: verdict.paid_total_inc, expected: verdict.expected_inc } };
+  }
+  // The existing Complete backlog is archived separately and never texted (captain answer 5).
+  if (
+    text(job.status).toLowerCase() === "complete" &&
+    !paidWithin(verdict.last_paid_on, deps.now(), CATCH_UP_PAID_WITHIN_DAYS * DAY_MS)
+  ) {
+    return { ...base, action: "complete_backlog", detail: { last_paid_on: verdict.last_paid_on } };
   }
   const moved = await deps.moveJobStatus({
     jobId: job.id,
@@ -429,18 +454,17 @@ export async function closeoutOnPaid(deps: JobCloseoutDeps, body: Record<string,
 export async function closeoutCatchUp(deps: JobCloseoutDeps, body: Record<string, unknown>) {
   const switches = await readCloseoutSwitches(deps);
   if (!switches.move_enabled) return { ok: true, ran: false, reason: "switch_off" };
-  const jobs = await loadJobsByStatus(deps.client, ["invoiced", "final_payment"], CLOSEOUT_BATCH_LIMIT);
+  const jobs = await loadJobsByStatus(deps.client, ["invoiced", "final_payment"]);
   if (!jobs) return { ok: false, ran: false, reason: "jobs_unreadable" };
   const facts = await loadJobFacts(deps.client, jobs);
   if (!facts) return { ok: false, ran: false, reason: "facts_unreadable" };
-  const cutoff = new Date(deps.now().getTime() - CATCH_UP_PAID_WITHIN_DAYS * DAY_MS).toISOString().slice(0, 10);
   const results: SettleResult[] = [];
   for (const job of jobs) {
     const f = facts.get(job.id)!;
     // Cheap pre-check: only a job whose invoices are all paid can pass.
-    if (evaluateJobPaid({ job, invoices: f.invoices, parties: f.parties, quote: null }).outcome === "not_paid") continue;
-    const lastPaid = f.invoices.map((i) => text(i.fully_paid_on).slice(0, 10)).filter(Boolean).sort().pop() ?? "";
-    if (!lastPaid || lastPaid < cutoff) {
+    const pre = evaluateJobPaid({ job, invoices: f.invoices, parties: f.parties, quote: null });
+    if (pre.outcome === "not_paid") continue;
+    if (!paidWithin(pre.last_paid_on, deps.now(), CATCH_UP_PAID_WITHIN_DAYS * DAY_MS)) {
       results.push({ job_id: job.id, job_number: job.job_number, action: "not_paid", detail: "stale_payment" });
       continue;
     }
@@ -511,7 +535,8 @@ export interface ReviewRequestOptions {
   job_id: string;
   trigger: string;
   /** A person asked (send_review_request): the sender switch still applies; the status,
-   *  hold, paid and send-window checks do not. */
+   *  hold, paid and send-window checks do not, and the paid wording is used only for a
+   *  fencing or patio job that passes the paid rule. */
   manual?: boolean;
 }
 
@@ -519,8 +544,10 @@ export interface ReviewRequestOptions {
  * The one review sender, automatic and manual alike, so neither ships on before its switch.
  * Order: switch -> job -> (automatic only) type, get_review, hold,
  * paid rule, send window -> recipients -> 90-day look-back -> claim -> send. Nothing is
- * claimed until every read has answered, so a failed read is retried by the next sweep;
- * once claimed, the job is never texted again by this system.
+ * claimed until every read has answered, so a failed read is retried by the next sweep,
+ * and nothing is claimed while the only thing in the way is a contact not linked yet, so
+ * linking it and asking again sends; once claimed, the job is never texted again by this
+ * system.
  */
 export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewRequestOptions) {
   const mode: ReviewSenderMode = (await readCloseoutSwitches(deps)).sender_mode;
@@ -532,6 +559,7 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
   const f = facts.get(job.id)!;
 
   let skipReason: string | null = null;
+  let paidWording: boolean;
   if (!opts.manual) {
     if (!isCloseoutJobType(job.type)) return { ok: true, action: "not_closeout_type" };
     if (job.status !== CLOSEOUT_REVIEW_STATUS) return { ok: true, action: "not_in_get_review", status: job.status };
@@ -539,14 +567,10 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
     if (hold) return { ok: true, action: "held", hold };
     const verdict = await evaluateFacts(deps, f);
     if (verdict.outcome !== "paid") return { ok: true, action: "not_paid", outcome: verdict.outcome, reasons: verdict.reasons };
-    const entries = await loadGetReviewEntries(deps.client, [job.id]);
-    if (!entries) return { ok: true, action: "entry_unreadable" };
-    const entered = entries.get(job.id) ?? null;
-    const lastPaid = verdict.last_paid_on ? `${verdict.last_paid_on}T23:59:59Z` : null;
-    const newest = [entered, lastPaid].filter(Boolean).map((t) => new Date(t!).getTime()).sort((a, b) => b - a)[0];
-    if (!newest || deps.now().getTime() - newest > REVIEW_SEND_WINDOW_MS) {
-      skipReason = "paid_and_in_get_review_too_long_ago";
-    }
+    if (!paidWithin(verdict.last_paid_on, deps.now(), REVIEW_SEND_WINDOW_MS)) skipReason = "paid_too_long_ago";
+    paidWording = true;
+  } else {
+    paidWording = isCloseoutJobType(job.type) && (await evaluateFacts(deps, f)).outcome === "paid";
   }
 
   const recipients = reviewRecipients(job, f.parties);
@@ -579,11 +603,18 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
             ghl_contact_id: r.ghl_contact_id,
             would: r.result === "to_send" ? "send" : r.result,
           })),
-          message: reviewRequestMessage(recipients[0]?.first_name ?? null, job.type),
+          message: reviewRequestMessage(recipients[0]?.first_name ?? null, job.type, paidWording),
         },
       });
     }
     return { ok: true, action: "dry_run", skip_reason: skipReason, recipients: recipients.map(({ label, result }) => ({ label, result })) };
+  }
+
+  if (
+    !skipReason && !recipients.some((r) => r.result === "to_send") &&
+    recipients.some((r) => r.result === "skipped_no_contact")
+  ) {
+    return { ok: true, action: "no_contact", recipients: recipients.map(({ label, result }) => ({ label, result })) };
   }
 
   // Live: the claim first. A second claim for the same job is refused by the primary key.
@@ -603,7 +634,7 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
     try {
       const sent = await deps.sendSms({
         contactId: r.ghl_contact_id!,
-        message: reviewRequestMessage(r.first_name, job.type),
+        message: reviewRequestMessage(r.first_name, job.type, paidWording),
         jobId: job.id,
       });
       if (sent.ok) {
@@ -626,8 +657,7 @@ export async function requestJobReview(deps: JobCloseoutDeps, opts: ReviewReques
     : results.includes("refused")
     ? "refused"
     : "skipped";
-  const reason = skipReason ??
-    (status === "skipped" ? (results.includes("skipped_asked_recently") ? "asked_recently" : "no_contact") : null);
+  const reason = skipReason ?? (status === "skipped" ? "asked_recently" : null);
   const stored = recipients.map(({ label, party_id, ghl_contact_id, result, message_id, error }) => ({
     label, party_id, ghl_contact_id, result, message_id: message_id ?? null, error: error ?? null,
   }));
@@ -660,7 +690,7 @@ export async function closeoutSweep(deps: JobCloseoutDeps, body: Record<string, 
     return { ok: true, ran: false, reason: "lane_off" };
   }
   const switches = await readCloseoutSwitches(deps);
-  const jobs = await loadJobsByStatus(deps.client, [CLOSEOUT_REVIEW_STATUS], CLOSEOUT_BATCH_LIMIT);
+  const jobs = await loadJobsByStatus(deps.client, [CLOSEOUT_REVIEW_STATUS]);
   if (!jobs) return { ok: false, ran: false, reason: "jobs_unreadable" };
   const [facts, entries] = await Promise.all([
     loadJobFacts(deps.client, jobs),
@@ -735,17 +765,8 @@ async function readClaim(deps: JobCloseoutDeps, jobId: string): Promise<{ status
  * archive (captain answer 5: archive only, never a review text). Writes nothing.
  */
 export async function closeoutBacklogPreview(deps: JobCloseoutDeps) {
-  const all: CloseoutJobRow[] = [];
-  for (let page = 0; page < 10; page++) {
-    const { data, error } = await deps.client.from("jobs").select(JOB_COLUMNS)
-      .in("type", ["fencing", "patio"])
-      .eq("status", "complete")
-      .order("id", { ascending: true })
-      .range(page * 500, page * 500 + 499);
-    if (error) throw new JobCloseoutError(`jobs read failed: ${error.message}`, 503, "jobs_unreadable");
-    all.push(...(data ?? []));
-    if ((data ?? []).length < 500) break;
-  }
+  const all = await loadJobsByStatus(deps.client, ["complete"]);
+  if (!all) throw new JobCloseoutError("jobs read failed", 503, "jobs_unreadable");
   const facts = await loadJobFacts(deps.client, all);
   if (!facts) throw new JobCloseoutError("invoice or party read failed", 503, "facts_unreadable");
   const wouldArchive: unknown[] = [];

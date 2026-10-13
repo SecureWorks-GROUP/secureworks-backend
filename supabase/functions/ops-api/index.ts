@@ -54700,9 +54700,10 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 // claim are the paid close-out sender's (job_closeout.ts requestJobReview), so a manual
 // request and the automatic one can never text the same job twice. The sender switch
 // (job_closeout_settings.review_sender_mode) governs both; a manual request skips only
-// the automatic checks (get_review, holds, paid rule, send window).
-function reviewRequestMessage(clientName?: string | null, jobType?: string | null): string {
-  return closeoutReviewRequestMessage(clientName, jobType)
+// the automatic checks (get_review, holds, paid rule, send window), and says payment was
+// received only on a fencing or patio job that passes the paid rule.
+function reviewRequestMessage(clientName?: string | null, jobType?: string | null, paid = false): string {
+  return closeoutReviewRequestMessage(clientName, jobType, paid)
 }
 export const _reviewRequestMessageForTest = reviewRequestMessage
 export const _googleReviewUrlForTest = GOOGLE_REVIEW_URL
@@ -54764,6 +54765,9 @@ async function sendReviewRequest(client: any, body: any) {
   }
   if (result.action === 'sender_off') {
     throw new ApiError('The review sender is switched off (job_closeout_settings.review_sender_mode)', 409)
+  }
+  if (result.action === 'no_contact') {
+    throw new ApiError('No GHL contact is linked for this job; link the contact and send the review again', 409)
   }
   const recipients = Array.isArray(result.recipients) ? result.recipients : []
   return {

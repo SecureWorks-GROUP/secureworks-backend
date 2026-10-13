@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS public.job_closeout_state (
 );
 
 COMMENT ON TABLE public.job_closeout_state IS
-  'Paid close-out (20261013140000): the last strict paid check of a fencing or patio job (outcome paid | paid_less_than_quoted | not_paid, the reasons, paid and expected totals). paid_less_than_quoted is the marker the Ops card shows when every invoice and every paying party is paid but the money falls short of the quote plus approved variations: such a card stays where it is. Written only by ops-api job_closeout.ts.';
+  'Paid close-out (20261013140000): the last strict paid check of a fencing or patio job (outcome paid | paid_less_than_quoted | not_paid, the reasons, paid and expected totals). paid_less_than_quoted is the marker the Ops card shows when every invoice and every paying party is paid but the money falls short of the quote plus agreed (customer accepted or invoiced) variations: such a card stays where it is. Written only by ops-api job_closeout.ts.';
 
 -- ── 3. The per-job review claim ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.job_review_claims (

@@ -17,8 +17,8 @@
 //      names, else the party whose share letter is on its reference (SWF-26624-B-FINBAL
 //      is share B), else the party whose Xero contact it carries, else the job's own
 //      client (the primary party).
-//   3. The money paid covers the sent quote plus approved variations, within
-//      PAID_QUOTE_TOLERANCE. When the quote value is not known, rules 1 and 2 decide.
+//   3. The money paid covers the sent quote plus agreed variations (customer accepted
+//      or invoiced), within PAID_QUOTE_TOLERANCE. When the quote value is not known, rules 1 and 2 decide.
 //
 // Outcomes: "paid" (all three), "paid_less_than_quoted" (1 and 2 hold, 3 fails: the
 // card stays where it is and carries a marker), "not_paid" (1 or 2 fails).
@@ -87,7 +87,7 @@ export interface CloseoutParty {
 export interface CloseoutQuote {
   /** Sent quote value inc GST, null when unknown. */
   quote_total_inc: number | null;
-  /** Approved variations inc GST; null when they could not be read. */
+  /** Agreed variations (customer accepted or invoiced) inc GST; null when they could not be read. */
   variations_inc: number | null;
   /** Why the quote is unknown, when it is. */
   unknown_reason: string | null;
@@ -108,7 +108,7 @@ export interface PaidVerdict {
   reasons: string[];
   parties: PartyPaidView[];
   paid_total_inc: number;
-  /** Quote plus approved variations, inc GST; null when unknown. */
+  /** Quote plus agreed variations, inc GST; null when unknown. */
   expected_inc: number | null;
   /** How far paid falls short of expected (0 when it covers it); null when unknown. */
   shortfall_inc: number | null;
@@ -292,7 +292,7 @@ export function evaluateJobPaid(input: {
     }
   }
 
-  // Rule 3: paid covers the quote plus approved variations.
+  // Rule 3: paid covers the quote plus agreed variations.
   const paidTotal = round2(
     live.reduce((sum, inv) => sum + money(inv.amount_paid), 0),
   );

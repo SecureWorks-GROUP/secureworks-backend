@@ -4645,18 +4645,21 @@ Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
 the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
 invoice PAID and none DRAFT; every paying party, `job_contacts` with
 `removed_at` null and a share above 0, has a paid final; paid covers the
-`job_quote_values` quote plus approved variations). Every read, move, text and
+`job_quote_values` quote plus customer-accepted or invoiced variations; one
+approved internally but never accepted is not owed). Every read, move, text and
 sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
 holds: status `rectification` or `jobs.is_callback`. If only the quote check
 fails the card stays put with `job_closeout_state.paid_less_than_quoted`.
 Builder, insurance, make-safe and repair jobs keep the old xero-sync rule
 (`invoiced` -> `complete`), and so do fencing and patio while the move switch
 is off. One review text per job ever (`job_review_claims`, claimed before any
-send), to every paying owner, skipping any contact sent a review text in the
-last 90 days from any source. Every status write uses `update_job_status`
-`expected_statuses` (compare and set). The `complete` backlog is never caught
-up or texted: `job_closeout_backlog_preview` only lists what a later step may
-archive.
+send, never while the only blocker is an unlinked contact), to every paying
+owner, skipping any contact sent a review text in the last 90 days from any
+source and any job paid more than 7 days ago. Every status write uses
+`update_job_status` `expected_statuses` (compare and set). The `complete`
+backlog is never caught up or texted: a `complete` card moves on payment only
+when paid within 30 days, and `job_closeout_backlog_preview` only lists what a
+later step may archive.
 
 Switches (migration `20261013140000`), all off; turn on in this order:
 `job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
