@@ -57,11 +57,12 @@ import {
   decideRepairAutoIntake,
   landWorkOrderOnRepairJob,
   matchOpenRepairJob,
+  noteMakeSafeRaisedOnRepairClaim,
   type OpenRepairJobMatch,
+  openRepairJobsOnClaim,
   ORPHAN_LIFECYCLE_REVIEW_FIELD,
   orphanLifecycleOrderOpensReviewDraft,
   planWorkOrderValueExGst,
-  REPAIR_LANDING_FAMILIES,
   type RepairAutoIntakeStamp,
   type RepairWorkOrderLanding,
 } from "./repair_intake_auto.ts";
@@ -235,6 +236,7 @@ export interface DeterministicRuntimeReport {
     parked_for_review: Record<string, number>;
     landed_on_existing_job: number;
     orphan_lifecycle_drafts: number;
+    make_safe_on_repair_claim: number;
   };
   selection: {
     mode: DeterministicSelectionMode;
@@ -5625,6 +5627,7 @@ export async function runDeterministicIntake(
     parked_for_review: {} as Record<string, number>,
     landed_on_existing_job: 0,
     orphan_lifecycle_drafts: 0,
+    make_safe_on_repair_claim: 0,
   };
   if (repairAutoIntake) report.repair_intake = repairIntakeReport;
   // The snapshot the repair-job match reads, plus every repair job this run
@@ -5778,9 +5781,11 @@ export async function runDeterministicIntake(
       }
       let bindingException = bindingExceptions.get(casePlan.instructionKey) ||
         null;
-      // Automatic repair intake, rule 2: an order for a claim that already has
-      // an open repair job lands on that job instead of opening a second job
-      // or a blank draft. The obligation match above cannot see a repair job,
+      // Automatic repair intake, rule 2: a REPAIR order for a claim that already
+      // has an open repair job lands on that job instead of opening a second
+      // job or a blank draft. An order that reads as a make-safe is never
+      // diverted here: it mints as it always has, and leaves a notice on the
+      // repair job below. The obligation match above cannot see a repair job,
       // and a dead make-safe twin of the same claim (the usual leftover when a
       // make-safe was cancelled in favour of the repair) must not outrank the
       // live repair job. An order that already has a draft is left to the
@@ -5797,7 +5802,7 @@ export async function runDeterministicIntake(
         (casePlan.state === "confirmed_live_job" ||
           casePlan.state === "blocked_live_job") &&
         !casePlan.identity.syntheticLivefireMarker &&
-        REPAIR_LANDING_FAMILIES.has(casePlan.identity.jobFamily)
+        casePlan.identity.jobFamily === "repair"
       ) {
         const repairMatch = matchOpenRepairJob(
           casePlan.identity,
@@ -6028,6 +6033,72 @@ export async function runDeterministicIntake(
         }
         if (live.repairAuto === "approved" && live.jobCreated) {
           repairIntakeReport.auto_approved++;
+        }
+        // A make-safe job just raised on a claim that has an open repair job:
+        // the make-safe is live and nothing waits, and the repair job gets a
+        // notice so a repair order misread as a make-safe is seen. The notice
+        // is informational, so its own failure is recorded as a caveat and a
+        // write-failure REASON only and never fails the mint (the same
+        // contract as the suburb backstop below).
+        if (
+          repairAutoIntake && live.jobCreated && jobId &&
+          effectivePlan.identity.jobFamily !== "repair" &&
+          !effectivePlan.identity.syntheticLivefireMarker
+        ) {
+          try {
+            const claimRepairJobs = openRepairJobsOnClaim(
+              effectivePlan.identity,
+              repairJobRows,
+              obligationMatches.refPrefixes,
+            );
+            for (const repairJob of claimRepairJobs) {
+              await noteMakeSafeRaisedOnRepairClaim(client, {
+                repairJobId: repairJob.jobId,
+                makeSafeJobId: jobId,
+                caseId: saved.caseRow.id,
+                instructionKey: effectivePlan.instructionKey,
+                claimRef: effectivePlan.identity.externalRefCanonical,
+                purchaseOrder: effectivePlan.identity.builderPoCanonical,
+                jobFamily: effectivePlan.identity.jobFamily,
+                sourcePostIds: effectivePlan.sourcePostIds,
+                receivedAt: sourceMap.get(effectivePlan.primarySourcePostId)
+                  ?.receivedAt || null,
+              });
+            }
+            if (claimRepairJobs.length) {
+              await persistIssueForSources(
+                client,
+                effectivePlan.sourcePostIds.flatMap((postId) => {
+                  const source = sourceMap.get(postId);
+                  return source ? [source] : [];
+                }),
+                "make_safe_raised_on_repair_claim",
+                {
+                  instructionKey: effectivePlan.instructionKey,
+                  caseId: saved.caseRow.id,
+                },
+              );
+              repairIntakeReport.make_safe_on_repair_claim++;
+            }
+          } catch (noticeError) {
+            report.write_failure_reasons.make_safe_raised_on_repair_claim =
+              (report.write_failure_reasons.make_safe_raised_on_repair_claim ||
+                0) + 1;
+            if (
+              !report.evidence.caveats.includes(
+                "make_safe_on_repair_claim_notice_unwritten",
+              )
+            ) {
+              report.evidence.caveats.push(
+                "make_safe_on_repair_claim_notice_unwritten",
+              );
+            }
+            console.error(
+              `[ops-api] deterministic intake: make-safe on repair claim notice failed for job ${jobId}: ${
+                (noticeError as Error)?.message || noticeError
+              }`,
+            );
+          }
         }
         if (
           repairAutoIntake && live.jobCreated && jobId &&

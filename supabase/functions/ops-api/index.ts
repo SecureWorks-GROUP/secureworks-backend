@@ -18891,7 +18891,7 @@ async function createMakesafeJob(
     ...(reviewedWorkOrderValueExGst !== null
       ? {
         builder_work_order_value_ex_gst: reviewedWorkOrderValueExGst,
-        builder_work_order_value_source: 'work_order_pdf',
+        builder_work_order_value_source: 'builder_work_order_pdf_not_our_quote',
       }
       : {}),
     ...(intake_mint_id ? { intake_mint_id } : {}),

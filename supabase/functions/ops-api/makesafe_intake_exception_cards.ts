@@ -553,6 +553,8 @@ function sourceAlarmBlockerSentence(fact: IntakeOperationalFact): string {
     }is live, but it was minted with no site suburb, so it is invisible to every suburb-keyed view.`,
     new_work_order_on_existing_job:
       "A new work order arrived for a claim that already has an open repair job. It was recorded on that job; no second job was opened.",
+    make_safe_raised_on_repair_claim:
+      "A make-safe job was raised on a claim that already has an open repair job. The make-safe is live; check it is not repair work that belongs on the repair job.",
   };
   return known[String(fact.reason_code || "")] ||
     `This source still needs review: ${
@@ -567,6 +569,8 @@ function sourceAlarmNextAction(fact: IntakeOperationalFact): string {
     review_source: "Review the source and record its final outcome.",
     human_review_work_order_on_existing_job:
       "Open the repair job, check the new work order against it and update the job.",
+    human_check_make_safe_against_repair_job:
+      "Open the make-safe job and the repair job on the same claim and confirm the new order is a make-safe.",
   };
   return known[String(fact.next_action_code || "")] ||
     `Review the source and ${

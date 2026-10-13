@@ -18,7 +18,10 @@ import {
 import {
   decideRepairAutoIntake,
   landWorkOrderOnRepairJob,
+  MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT,
   matchOpenRepairJob,
+  noteMakeSafeRaisedOnRepairClaim,
+  openRepairJobsOnClaim,
   orphanLifecycleOrderOpensReviewDraft,
   readWorkOrderValueExGst,
   REPAIR_AUTO_INTAKE_VERSION,
@@ -494,6 +497,10 @@ Deno.test("landing records the purchase order on a job that has none, once", asy
   assertEquals(db.job.metadata.builder_po_number, "PO-69815");
   assertEquals(db.job.metadata.builder_work_order_number, "MLB-49502PO-69815");
   assertEquals(db.job.metadata.builder_work_order_value_ex_gst, 1080);
+  assertEquals(
+    db.job.metadata.builder_work_order_value_source,
+    "builder_work_order_pdf_not_our_quote",
+  );
   // The board stage and the job status are never moved.
   assertEquals(db.job.metadata.repair_stage, "scoping");
   assertEquals(db.job.status, "accepted");
@@ -581,4 +588,50 @@ Deno.test("an orphan collection order opens a draft only as a first-issue purcha
     }),
     false,
   );
+});
+
+Deno.test("the claim's open repair jobs are found without a purchase order, for the make-safe notice", () => {
+  const jobs = openRepairJobsOnClaim(
+    { ...ORDER, builderPoCanonical: null } as any,
+    [
+      repairRow({ jobId: "b" }),
+      repairRow({ jobId: "a" }),
+      repairRow({ jobId: "c", status: "cancelled" }),
+      repairRow({ jobId: "d", type: "makesafe" }),
+    ],
+    PREFIXES,
+  );
+  assertEquals(jobs.map((job) => job.jobId), ["a", "b"]);
+});
+
+Deno.test("the make-safe notice is one event per instruction and changes nothing on the repair job", async () => {
+  const db = landingClient({
+    id: "job-1",
+    type: "repair",
+    status: "accepted",
+    metadata: { repair_stage: "materials", builder_po_number: "PO-11111" },
+  });
+  const before = JSON.stringify(db.job);
+  const note = {
+    repairJobId: "job-1",
+    makeSafeJobId: "job-makesafe",
+    caseId: "case-1",
+    instructionKey: "key/cycle:1",
+    claimRef: "MLB-49502",
+    purchaseOrder: "PO-69815",
+    jobFamily: "general_makesafe",
+    sourcePostIds: ["post-1"],
+    receivedAt: "2026-07-20T01:00:00.000Z",
+  };
+  assertEquals(await noteMakeSafeRaisedOnRepairClaim(db.client, note), {
+    eventCreated: true,
+  });
+  assertEquals(await noteMakeSafeRaisedOnRepairClaim(db.client, note), {
+    eventCreated: false,
+  });
+  assertEquals(db.events.length, 1);
+  assertEquals(db.events[0].event_type, MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT);
+  assertEquals(db.events[0].detail_json.make_safe_job_id, "job-makesafe");
+  assertEquals(db.writes.length, 0);
+  assertEquals(JSON.stringify(db.job), before);
 });

@@ -1539,10 +1539,18 @@ a clean repair work order from MLB or Ambrose. Rules:
   lanes carry. Do not let the backlog sweep or the late-PDF lane mint a repair,
   and do not approve a repair draft that carries no stamp.
 - The obligation dedupe cannot see repair jobs (`isCanonicalSeedScopeJob`), so
-  an order for a claim with an open repair job is matched by
+  a REPAIR order for a claim with an open repair job is matched by
   `matchOpenRepairJob` and landed on that job: purchase order recorded (a
   second one is listed, never written over the first), PDF attached, one job
   event, one intake desk item, no message, board stage untouched.
+- An order that reads as a make-safe is NEVER diverted or held by that rule
+  (ruling 13 Oct 2026: urgent work never waits on a notice). It mints as
+  today and `noteMakeSafeRaisedOnRepairClaim` leaves a notice on the claim's
+  repair job. A repair order misread as a make-safe is caught by that notice,
+  not prevented; do not widen the landing to make-safe families.
+- `metadata.builder_work_order_value_ex_gst` is the BUILDER'S order value, not
+  our quote. The Repairs card fills `value` from it only where we have no
+  price, always with `value_is_our_price: false` and `value_note`.
 - A collection or reattendance order with no original job and a first-issue
   purchase order opens a review draft that nothing approves automatically.
 - Flag-on runs leave earlier fates alone: a waiting unstamped draft, an order

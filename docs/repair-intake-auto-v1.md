@@ -44,8 +44,19 @@ report's `repair_intake.parked_for_review` counts each reason.
 
 The job is a `repair` job (SWR- number) in WO In, with the builder, claim,
 purchase order and site on it, and the builder's value in
-`metadata.builder_work_order_value_ex_gst`. The Repairs card shows that value
-(inc GST) only where the job has no price of ours.
+`metadata.builder_work_order_value_ex_gst`.
+
+That value is the **builder's order value, not our quote**, and every field it
+writes says so:
+
+| Where | Field | Says |
+|---|---|---|
+| Job | `metadata.builder_work_order_value_source` | `builder_work_order_pdf_not_our_quote` |
+| Repairs card | `builder_work_order_value_ex_gst` | The builder's figure, always shown when stamped. |
+| Repairs card | `value` | Filled (inc GST) only where the job has no price of ours. |
+| Repairs card, with a filled `value` | `value_source`, `value_is_our_price`, `value_note` | `builder_work_order_value`, `false`, "Builder's work order value (inc GST), not our quote" |
+
+Our own price always wins, and then none of the three markers is present.
 
 ### What the 28 Aug 2026 rule guarded, and how it is still guarded
 
@@ -65,9 +76,10 @@ That is still guarded, by a narrower check:
 
 ## Rule 2: never a duplicate
 
-Before a job or a draft is made, the scan looks for an open repair job with the
-same builder and claim reference (`matchOpenRepairJob`). The older duplicate
-check could not see repair jobs at all.
+Before a job or a draft is made from an order that reads as **repair** work,
+the scan looks for an open repair job with the same builder and claim reference
+(`matchOpenRepairJob`). The older duplicate check could not see repair jobs at
+all.
 
 | The repair job on that claim | What happens |
 |---|---|
@@ -81,8 +93,27 @@ In every landed case the work order PDF is attached to the job, one
 work order on existing job" item opens on the intake desk. No second job and no
 blank draft.
 
-This covers an order read as repair or as general make-safe. Roof report,
-assessment and temporary fence orders keep their own path.
+This applies only to an order that reads as repair work.
+
+### A make-safe on a claim that has a repair job
+
+An order that reads as a make-safe by the existing make-safe test still becomes
+a make-safe job automatically, exactly as it does today, even when its claim
+has an open repair job. Urgent work never waits for a person to read a notice.
+
+The claim's repair job gets a notice that a make-safe was raised on the same
+claim (`noteMakeSafeRaisedOnRepairClaim`): one `make_safe_raised_on_repair_claim`
+job event naming the make-safe job, and one item on the intake desk. The repair
+job itself is not changed.
+
+So a repair order **misread as a make-safe** is still possible. That is the
+Woodvale shape: a second "additional costs" order on a repair claim, with no
+repair header, became its own make-safe job. It is **caught by the notice, not
+prevented**: a person sees the notice and moves the work to the repair job.
+
+If the notice cannot be written, the make-safe job still stands. The run report
+records the reason and the caveat `make_safe_on_repair_claim_notice_unwritten`;
+it is not retried.
 
 Open follows the Repairs board stage (anything before Complete), not the job
 status. The board stage and job status are never moved by a landing.
@@ -91,8 +122,8 @@ Limits:
 
 - Only `jobs.type = 'repair'` jobs with a make-safe detail row are matched. A
   repair job that carries no builder reference cannot be found by it.
-- Two purchase orders on one claim land on one job, with a notice. Raising a
-  second job for the second order stays a person's call.
+- Two repair purchase orders on one claim land on one job, with a notice.
+  Raising a second job for the second order stays a person's call.
 
 ## Rule 3: never dropped
 
@@ -120,7 +151,9 @@ Not sent: the make-safe manager text (suppressed for every deterministic
 draft), any crew assignment (repair jobs stay unassigned), anything to a
 customer or a builder.
 
-A landing (rule 2) and a collection draft (rule 3) send no message at all.
+A landing (rule 2), a make-safe notice and a collection draft (rule 3) send no
+message at all. A make-safe job raised on a repair claim sends exactly what any
+make-safe job sends today.
 
 ## Tests
 

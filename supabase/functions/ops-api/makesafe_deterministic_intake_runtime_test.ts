@@ -35,6 +35,7 @@ import {
   ambroseSubject,
 } from "./makesafe_ambrose_intake_fixtures.ts";
 import {
+  MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT,
   ORPHAN_LIFECYCLE_REVIEW_FIELD,
   REPAIR_AUTO_INTAKE_VERSION,
   REPAIR_WORK_ORDER_LANDED_EVENT,
@@ -8718,9 +8719,10 @@ Deno.test("repair intake: CONTROL: with no repair job on the claim, the same rap
   assertEquals(store.jobs.length, 1);
 });
 
-Deno.test("repair intake: a work order that reads as make-safe on a claim whose job is a repair job lands on the repair job", async () => {
+function makeSafeOnRepairClaimStore() {
   // The "additional costs" shape: the claim's repair job already holds its
-  // first purchase order, and a second order arrives with no repair header.
+  // first purchase order, and a second order arrives with no repair header and
+  // a make-safe scope.
   const store = repairIntakeStore();
   const job = seedRepairJob(store, {
     id: "job-additional",
@@ -8738,30 +8740,139 @@ Deno.test("repair intake: a work order that reads as make-safe on a claim whose 
       "Make safe the storm damaged boundary and secure the property. Install temporary roof tarps as required.",
     receivedAt: "2026-07-19T03:33:00.000Z",
   });
+  return { store, job };
+}
+
+function makeSafeOnRepairClaimNotices(store: Store) {
+  return store.email_events_raw.filter((row: any) =>
+    row.change_type === "intake_exception_make_safe_raised_on_repair_claim"
+  );
+}
+
+Deno.test("repair intake: replay: a make-safe order on a claim with an open repair job still becomes a make-safe job, and the repair job gets a notice", async () => {
+  const { store, job } = makeSafeOnRepairClaimStore();
+  const before = JSON.stringify(job);
   const approver = intakeApprover(store);
 
-  const report = await runRepairScan(store, approver.approve, true);
-  assertEquals(report.totals.cases_failed, 0);
-  // The plan read as make-safe, which is what would have minted a second job.
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.write_failures, 0);
+  // Urgent work never waits: the make-safe job is made exactly as it is today.
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].reviewed_fields, {
+    makesafe_job_family: "general_makesafe",
+  });
+  assertEquals("repair_auto_intake" in approver.bodies[0], false);
+  assertEquals(store.jobs.length, 2);
+  const makeSafe = store.jobs[1];
+  assertEquals(makeSafe.type, "makesafe");
+  assertEquals(makeSafe.metadata.builder_po_number, "PO-69323");
   assertEquals(
-    store.makesafe_intake_cases[0].raw_identity_json?.job_family ??
-      "general_makesafe",
-    "general_makesafe",
+    store.makesafe_intake_cases[0].job_id,
+    makeSafe.id,
   );
-  assertEquals(report.totals.jobs_created, 0);
-  assertEquals(approver.bodies.length, 0);
-  assertEquals(store.jobs.length, 1);
-  assertEquals(store.makesafe_intake_drafts.length, 0);
-  // The first purchase order stays the job's own; the new one is listed.
-  assertEquals(job.metadata.builder_po_number, "PO-68375");
   assertEquals(
-    job.metadata.builder_additional_work_orders.map((entry: any) =>
-      entry.purchase_order
+    "repair_auto_intake" in store.makesafe_intake_drafts[0].extraction_json,
+    false,
+  );
+  // The repair job is not changed and nothing lands on it.
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 0);
+  // The notice: one event on the repair job naming the make-safe job, and one
+  // item on the intake desk. A repair order misread as a make-safe is caught
+  // here, not prevented.
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_events[0].job_id, "job-additional");
+  assertEquals(
+    store.job_events[0].event_type,
+    MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT,
+  );
+  assertEquals(
+    store.job_events[0].detail_json.notice,
+    "make_safe_raised_on_same_claim",
+  );
+  assertEquals(store.job_events[0].detail_json.make_safe_job_id, makeSafe.id);
+  assertEquals(store.job_events[0].detail_json.purchase_order, "PO-69323");
+  assertEquals(makeSafeOnRepairClaimNotices(store).length, 1);
+  assertEquals(
+    makeSafeOnRepairClaimNotices(store)[0].page_meta.next_action_code,
+    "human_check_make_safe_against_repair_job",
+  );
+  assertEquals(first.repair_intake?.make_safe_on_repair_claim, 1);
+
+  // The next scan adds no second job, event or desk item.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(store.jobs.length, 2);
+  assertEquals(store.job_events.length, 1);
+  assertEquals(makeSafeOnRepairClaimNotices(store).length, 1);
+});
+
+Deno.test("repair intake: flag off: the same make-safe order becomes the same make-safe job, with no notice", async () => {
+  const { store, job } = makeSafeOnRepairClaimStore();
+  const before = JSON.stringify(job);
+  const approver = intakeApprover(store);
+
+  const off = await runRepairScan(store, approver.approve, false);
+  assertEquals(off.repair_intake, undefined);
+  assertEquals(off.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].reviewed_fields, {
+    makesafe_job_family: "general_makesafe",
+  });
+  assertEquals(store.jobs[1].type, "makesafe");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(makeSafeOnRepairClaimNotices(store).length, 0);
+});
+
+Deno.test("repair intake: a notice that cannot be written never fails the make-safe job it describes", async () => {
+  const { store } = makeSafeOnRepairClaimStore();
+  const approver = intakeApprover(store);
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      undefined,
+      (table, operation) =>
+        table === "job_events" && operation === "insert"
+          ? { message: "job_events unavailable" }
+          : null,
     ),
-    ["PO-69323"],
+    {
+      dryRun: false,
+      days: 30,
+      nowIso: REPAIR_NOW,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approver.approve,
+      repairAutoIntake: true,
+    },
   );
-  assertEquals(store.makesafe_intake_cases[0].job_id, "job-additional");
-  assertEquals(landedNotices(store).length, 1);
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.jobs.length, 2);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.completion_status, "completed");
+  assertEquals(
+    report.write_failure_reasons.make_safe_raised_on_repair_claim,
+    1,
+  );
+  assert(
+    report.evidence.caveats.includes(
+      "make_safe_on_repair_claim_notice_unwritten",
+    ),
+  );
 });
 
 // The collection order: a declared make-safe purchase order whose notes ask

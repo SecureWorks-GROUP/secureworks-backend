@@ -17,9 +17,13 @@
 //    plan with its claim, purchase order, customer and site read, nothing
 //    conflicting and one readable ex-GST value. Anything else still parks as a
 //    review draft.
-// 2. `matchOpenRepairJob` / `landWorkOrderOnRepairJob` - a work order for a
-//    claim that already has an open repair job lands on that job. It never
-//    opens a second job or a blank draft.
+// 2. `matchOpenRepairJob` / `landWorkOrderOnRepairJob` - a REPAIR work order
+//    for a claim that already has an open repair job lands on that job. It
+//    never opens a second job or a blank draft. An order that reads as a
+//    make-safe is never held back by this: it becomes a make-safe job exactly
+//    as it does today (urgent work must not wait for a person to read a
+//    notice), and `noteMakeSafeRaisedOnRepairClaim` leaves a notice on the
+//    claim's repair job so a repair order misread as a make-safe is caught.
 // 3. `orphanLifecycleOrderOpensReviewDraft` - a collection or reattendance
 //    order with no original job, carrying a first-issue purchase order, opens a
 //    review draft instead of an exception nobody can act on.
@@ -289,13 +293,6 @@ export function orphanLifecycleOrderOpensReviewDraft(
 
 // ── Fix 3: an order for a claim that already has an open repair job ──────────
 
-/** Work order families that land on the claim's open repair job. Report and
- * temporary-fence orders are their own deliverables and keep their own path. */
-export const REPAIR_LANDING_FAMILIES: ReadonlySet<string> = new Set([
-  "repair",
-  "general_makesafe",
-]);
-
 const DEAD_REPAIR_JOB_STATUSES = new Set([
   "cancelled",
   "canceled",
@@ -346,7 +343,7 @@ function purchaseOrderRelation(
 }
 
 /**
- * The open repair job on this builder and claim, read from the same
+ * The open repair jobs on this builder and claim, read from the same
  * `makesafe_job_details` rows the obligation dedupe pages. That dedupe only
  * sees make-safe and restoration jobs (`isCanonicalSeedScopeJob`), so a repair
  * job was invisible to it and the same claim's next work order opened a new
@@ -356,27 +353,32 @@ function purchaseOrderRelation(
  * Open follows the Repairs board, not `jobs.status`, which goes stale behind
  * the board: any stage short of Complete is open.
  */
-export function matchOpenRepairJob(
+export function openRepairJobsOnClaim(
   identity: {
     builderSlug: string | null;
     externalRefCanonical: string | null;
     builderWoCanonical: string | null;
-    builderPoCanonical: string | null;
   },
   rows: readonly any[],
   prefixes: readonly string[],
-): OpenRepairJobMatch {
+): Array<{
+  jobId: string;
+  jobNumber: string | null;
+  metadata: Record<string, any>;
+  externalRef: unknown;
+}> {
   const company = canonicalCompanyDedupeKey(identity.builderSlug);
   const claim = canonicalExternalObligationRef(
     identity.externalRefCanonical || identity.builderWoCanonical,
     prefixes,
   );
-  const targetPo = canonicalObligationPoCore(identity.builderPoCanonical);
-  if (!company || !claim || !targetPo) return { kind: "none" };
-  const matches = new Map<
-    string,
-    { jobNumber: string | null; relation: RepairJobPurchaseOrderRelation }
-  >();
+  if (!company || !claim) return [];
+  const open = new Map<string, {
+    jobId: string;
+    jobNumber: string | null;
+    metadata: Record<string, any>;
+    externalRef: unknown;
+  }>();
   for (const row of rows || []) {
     if (!row?.job_id) continue;
     const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
@@ -399,9 +401,40 @@ export function matchOpenRepairJob(
       metadata.builder_work_order_number,
     ].map((value) => canonicalExternalObligationRef(value, prefixes));
     if (!claims.includes(claim)) continue;
-    matches.set(String(row.job_id), {
+    open.set(String(row.job_id), {
+      jobId: String(row.job_id),
       jobNumber: job?.job_number ? String(job.job_number) : null,
-      relation: purchaseOrderRelation(targetPo, metadata, row.external_ref),
+      metadata,
+      externalRef: row.external_ref,
+    });
+  }
+  return [...open.values()].sort((a, b) => a.jobId.localeCompare(b.jobId));
+}
+
+/**
+ * Which open repair job a REPAIR order lands on, and how the order's purchase
+ * order relates to what that job already holds.
+ */
+export function matchOpenRepairJob(
+  identity: {
+    builderSlug: string | null;
+    externalRefCanonical: string | null;
+    builderWoCanonical: string | null;
+    builderPoCanonical: string | null;
+  },
+  rows: readonly any[],
+  prefixes: readonly string[],
+): OpenRepairJobMatch {
+  const targetPo = canonicalObligationPoCore(identity.builderPoCanonical);
+  if (!targetPo) return { kind: "none" };
+  const matches = new Map<
+    string,
+    { jobNumber: string | null; relation: RepairJobPurchaseOrderRelation }
+  >();
+  for (const job of openRepairJobsOnClaim(identity, rows, prefixes)) {
+    matches.set(job.jobId, {
+      jobNumber: job.jobNumber,
+      relation: purchaseOrderRelation(targetPo, job.metadata, job.externalRef),
     });
   }
   const entries = [...matches.entries()];
@@ -505,7 +538,8 @@ export async function landWorkOrderOnRepairJob(
           metadata.builder_work_order_value_ex_gst == null
         ? {
           builder_work_order_value_ex_gst: landing.valueExGst,
-          builder_work_order_value_source: "work_order_pdf",
+          builder_work_order_value_source:
+            "builder_work_order_pdf_not_our_quote",
         }
         : {}),
     };
@@ -578,4 +612,69 @@ export async function landWorkOrderOnRepairJob(
     );
   }
   return { relation, eventCreated: true };
+}
+
+// ── A make-safe raised on a claim that has an open repair job ────────────────
+
+export const MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT =
+  "make_safe_raised_on_repair_claim";
+
+/**
+ * The notice on a repair job that a make-safe job was just raised on its claim.
+ * The make-safe is never held for it. It exists because a repair order can be
+ * misread as a make-safe (a second "additional costs" order with no repair
+ * header): the misread is not prevented, it is made visible here. One event per
+ * instruction; nothing is sent to anyone and the repair job is not changed.
+ */
+export async function noteMakeSafeRaisedOnRepairClaim(
+  client: any,
+  note: {
+    repairJobId: string;
+    makeSafeJobId: string;
+    caseId: string;
+    instructionKey: string;
+    claimRef: string | null;
+    purchaseOrder: string | null;
+    jobFamily: string | null;
+    sourcePostIds: readonly string[];
+    receivedAt: string | null;
+  },
+): Promise<{ eventCreated: boolean }> {
+  const { data: events, error: eventsError } = await client.from("job_events")
+    .select("id,detail_json")
+    .eq("job_id", note.repairJobId)
+    .eq("event_type", MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT);
+  if (eventsError) {
+    throw new Error(
+      `make-safe on repair claim event read failed: ${
+        eventsError.message || eventsError
+      }`,
+    );
+  }
+  if (
+    (events || []).some((event: any) =>
+      event?.detail_json?.instruction_key === note.instructionKey
+    )
+  ) return { eventCreated: false };
+  const { error } = await client.from("job_events").insert({
+    job_id: note.repairJobId,
+    event_type: MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT,
+    detail_json: {
+      notice: "make_safe_raised_on_same_claim",
+      make_safe_job_id: note.makeSafeJobId,
+      instruction_key: note.instructionKey,
+      intake_case_id: note.caseId,
+      claim_ref: note.claimRef,
+      purchase_order: note.purchaseOrder,
+      job_family: note.jobFamily,
+      received_at: note.receivedAt,
+      source_post_ids: [...note.sourcePostIds],
+    },
+  });
+  if (error) {
+    throw new Error(
+      `make-safe on repair claim event write failed: ${error.message || error}`,
+    );
+  }
+  return { eventCreated: true };
 }

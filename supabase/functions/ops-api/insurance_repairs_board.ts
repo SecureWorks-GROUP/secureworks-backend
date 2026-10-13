@@ -147,6 +147,9 @@ function detailCompanyRow(detail: any): any {
   return embedded && typeof embedded === "object" ? embedded : null;
 }
 
+export const BUILDER_WORK_ORDER_VALUE_NOTE =
+  "Builder's work order value (inc GST), not our quote";
+
 /**
  * The pipeline card shape consumed by the merged Repairs UX tab.
  *
@@ -239,6 +242,9 @@ export function projectInsuranceRepairPipelineRow(
   // repair card raised from a work order has no pricing of ours, so without
   // this the card shows no money at all. It only ever fills an EMPTY value
   // (inc GST, the unit `value` already carries); our own pricing always wins.
+  // It is the BUILDER'S order value, never our quote, and every field it
+  // writes says so: `value_is_our_price: false` and `value_note` travel with
+  // the filled value so no reader can take it for our price.
   const workOrderValueExGst =
     typeof meta.builder_work_order_value_ex_gst === "number" &&
       Number.isFinite(meta.builder_work_order_value_ex_gst) &&
@@ -249,11 +255,13 @@ export function projectInsuranceRepairPipelineRow(
     ...projected,
     ...(workOrderValueExGst !== null
       ? {
-        work_order_value_ex_gst: workOrderValueExGst,
+        builder_work_order_value_ex_gst: workOrderValueExGst,
         ...(!Number(projected.value)
           ? {
             value: Math.round(workOrderValueExGst * 110) / 100,
-            value_source: "builder_work_order",
+            value_source: "builder_work_order_value",
+            value_is_our_price: false,
+            value_note: BUILDER_WORK_ORDER_VALUE_NOTE,
           }
           : {}),
       }

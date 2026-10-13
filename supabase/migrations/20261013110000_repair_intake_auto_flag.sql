@@ -22,7 +22,7 @@ INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT
   'repair_intake_auto_v1',
   false,
-  'Automatic repair intake: when on, the make-safe intake scan (1) approves a clean, builder-declared repair work order from MLB or Ambrose into one repair job, (2) records a work order on the open repair job its claim already has instead of opening a second job or draft, and (3) opens a review draft for a collection or reattendance order that has no original job but carries a first-issue purchase order. Off, missing or unreadable: every repair draft waits for a person, as before. Turn on only on the owner''s word.'
+  'Automatic repair intake: when on, the make-safe intake scan (1) approves a clean, builder-declared repair work order from MLB or Ambrose into one repair job, (2) records a repair work order on the open repair job its claim already has instead of opening a second job or draft (a make-safe order still becomes a make-safe job and leaves a notice on that repair job), and (3) opens a review draft for a collection or reattendance order that has no original job but carries a first-issue purchase order. Off, missing or unreadable: every repair draft waits for a person, as before. Turn on only on the owner''s word.'
 WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags
   WHERE flag_name = 'repair_intake_auto_v1'

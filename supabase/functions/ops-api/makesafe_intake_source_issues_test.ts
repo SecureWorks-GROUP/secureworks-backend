@@ -136,6 +136,7 @@ Deno.test("every source issue reason has one typed change type", () => {
       "intake_exception_legacy_draft_attribution_ambiguous",
       "intake_exception_committed_without_site_suburb",
       "intake_exception_new_work_order_on_existing_job",
+      "intake_exception_make_safe_raised_on_repair_claim",
     ],
   );
 });

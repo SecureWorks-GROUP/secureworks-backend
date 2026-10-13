@@ -1496,15 +1496,28 @@ Deno.test("a repair card carries the builder's work order value, and the Repairs
   assertEquals(job.type, "repair");
   assertEquals(job.metadata.builder_po_number, "PO-2099920205");
   assertEquals(job.metadata.builder_work_order_value_ex_gst, 200);
-  assertEquals(job.metadata.builder_work_order_value_source, "work_order_pdf");
+  // The stored field says whose figure it is.
+  assertEquals(
+    job.metadata.builder_work_order_value_source,
+    "builder_work_order_pdf_not_our_quote",
+  );
   const card = projectInsuranceRepairPipelineRow({ ...job, value: 0 });
-  assertEquals(card.work_order_value_ex_gst, 200);
+  assertEquals(card.builder_work_order_value_ex_gst, 200);
   assertEquals(card.value, 220);
-  assertEquals(card.value_source, "builder_work_order");
-  // Our own price always wins.
+  // The card never passes the builder's figure off as our price.
+  assertEquals(card.value_source, "builder_work_order_value");
+  assertEquals(card.value_is_our_price, false);
+  assertEquals(
+    card.value_note,
+    "Builder's work order value (inc GST), not our quote",
+  );
+  // Our own price always wins, and carries none of those markers.
   const priced = projectInsuranceRepairPipelineRow({ ...job, value: 990 });
   assertEquals(priced.value, 990);
   assertEquals("value_source" in priced, false);
+  assertEquals("value_is_our_price" in priced, false);
+  assertEquals("value_note" in priced, false);
+  assertEquals(priced.builder_work_order_value_ex_gst, 200);
 
   // CONTROL: a make-safe never takes the field, and a card without it is
   // projected exactly as before.
@@ -1523,5 +1536,6 @@ Deno.test("a repair card carries the builder's work order value, and the Repairs
     metadata: { repair_stage: "wo_in" },
   });
   assertEquals(plain.value, 0);
-  assertEquals("work_order_value_ex_gst" in plain, false);
+  assertEquals("builder_work_order_value_ex_gst" in plain, false);
+  assertEquals("value_note" in plain, false);
 });
