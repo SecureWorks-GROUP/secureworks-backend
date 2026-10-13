@@ -781,9 +781,6 @@ export function splitTradeInvoiceXeroLines(
   options: {
     superAccountCode: string;
     tradeName?: string | null;
-    // Account for the recurring deduction's minus line. Required whenever the
-    // money carries one: a line with no account cannot be posted.
-    recurringDeductionAccountCode?: string | null;
   },
 ): TradeInvoiceXeroLine[] {
   const model = buildTradeInvoiceAuditModel(
@@ -829,11 +826,11 @@ export function splitTradeInvoiceXeroLines(
   });
 
   // A recurring deduction is its own minus line after the split, TaxType NONE,
-  // so the bill total drops by exactly its amount with GST on or off. Whether
-  // the hire itself should carry GST is the bookkeeper's call on the draft.
+  // so the bill total drops by exactly its amount with GST on or off. It sits
+  // on the account of the bill's own work lines. Whether the hire itself
+  // should carry GST is the bookkeeper's call on the draft.
   if (model.recurring_deduction_line) {
-    const accountCode = String(options.recurringDeductionAccountCode || "")
-      .trim();
+    const accountCode = String(grossLines[0]?.AccountCode ?? "").trim();
     if (!accountCode) {
       throw new TradeInvoiceMoneyError(
         "RECURRING_DEDUCTION_INVALID",

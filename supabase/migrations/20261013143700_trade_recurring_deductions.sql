@@ -7,8 +7,8 @@
 --
 --   1. Table trade_recurring_deductions: the rule, as data. Trade, label,
 --      amount, first invoice week, optional last invoice week, on or off.
---      The office ends or changes a deduction by editing a row (or adding a
---      later one), never by a deploy.
+--      The office ends a deduction by editing its row, and changes the amount
+--      by ending the row and adding the next, never by a deploy.
 --   2. trade_invoices gains four columns: which rule the invoice carries
 --      (id, label, amount) and, when a rule matched but was not taken, the
 --      plain reason (note). All four are NULL on every existing row and stay
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS public.trade_recurring_deductions (
 );
 
 COMMENT ON TABLE public.trade_recurring_deductions IS
-  'A weekly amount taken off one trade''s weekly invoice (first row: Ute hire). One row is one amount over a run of invoice weeks. Where two active rows of a trade cover the same week, the one with the later first_week_start applies, so the amount is changed by adding a row from the week it changes. Switch a deduction off with active = false, or end it with last_week_start. Read only by ops-api (trade_invoice_recurring_deduction.ts).';
+  'A weekly amount taken off one trade''s weekly invoice (first row: Ute hire). One row is one amount over a run of invoice weeks. Two active rows of a trade must never cover the same week: for such a week nothing is taken and the invoice is marked for the office. Change the amount by ending the current row with last_week_start and adding a row from the next week. Switch a deduction off with active = false, or end it with last_week_start. Read only by ops-api (trade_invoice_recurring_deduction.ts).';
 COMMENT ON COLUMN public.trade_recurring_deductions.user_id IS
   'The trade whose weekly invoice carries the deduction.';
 COMMENT ON COLUMN public.trade_recurring_deductions.label IS
@@ -95,7 +95,7 @@ COMMENT ON COLUMN public.trade_invoices.recurring_deduction_label IS
 COMMENT ON COLUMN public.trade_invoices.recurring_deduction_amount IS
   'Dollars taken off the amount payable (net_pay + gst) on this invoice. Not part of subtotal_ex, gross_earned, super or GST. NULL as recurring_deduction_id.';
 COMMENT ON COLUMN public.trade_invoices.recurring_deduction_note IS
-  'When a deduction applied to this trade and week but was not taken on this invoice, the plain reason for the office. NULL otherwise.';
+  'When a deduction was due for this trade but was not taken on this invoice (payable below it, already on another invoice, two rows covering the week, a work-order invoice or an invoice with no week), the plain reason for the office. NULL otherwise.';
 
 DO $$
 BEGIN

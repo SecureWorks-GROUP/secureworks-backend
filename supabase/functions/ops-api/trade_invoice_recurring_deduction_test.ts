@@ -5,11 +5,14 @@
  *
  * Covers the contract in docs/trade-recurring-deductions-2026-10-13.md:
  *   1. the rule: this week 100, next week 200, an earlier week none, a row
- *      switched off or ended none, another trade none;
+ *      switched off or ended none, another trade none, two rows covering one
+ *      week none and marked for the office;
  *   2. once per invoice week: a second invoice carries none, a resubmit or
  *      redraft does not double;
  *   3. never a negative invoice: a payable below the deduction takes nothing,
- *      refuses nothing and is marked for the office;
+ *      refuses nothing and is marked for the office; an invoice with nothing
+ *      payable yet is not marked; a submitted invoice with no week, and a
+ *      work-order invoice, take nothing and are marked;
  *   4. the money: the amount paid drops by exactly the deduction with GST on
  *      or off, and gross, super and GST do not move;
  *   5. the Xero bill: its own labelled minus line, and the returned bill is
@@ -44,9 +47,10 @@ import {
 import {
   decideTradeRecurringDeduction,
   loadTradeRecurringDeductionDecision,
-  selectTradeRecurringDeductionRule,
   tradeRecurringDeductionInvoiceFields,
   tradeRecurringDeductionResponse,
+  tradeRecurringDeductionRulesCovering,
+  withTradeRecurringDeductionOfficeNote,
 } from "./trade_invoice_recurring_deduction.ts";
 import { renderTradeInvoiceAuditPdf } from "./trade_invoice_pdf.ts";
 import { tradeMoneyRow } from "./trade_money.ts";
@@ -148,20 +152,20 @@ Deno.test("ute hire: a row switched off takes nothing from then on", () => {
   assertEquals(decide({ rules: vague }).outcome, "none");
 });
 
-Deno.test("ute hire: a last week ends it, and a later row changes the amount", () => {
+Deno.test("ute hire: a last week ends it, and the amount changes by ending one row and starting the next", () => {
   const ended = RULES.map((row) =>
-    row.id === RULE_200 ? { ...row, last_week_start: "2026-11-02" } : row
+    row.id === RULE_200 ? { ...row, last_week_start: "2026-11-30" } : row
   );
   assertEquals(
-    decide({ rules: ended, weekStart: "2026-11-02" }).applied?.amount,
+    decide({ rules: ended, weekStart: "2026-11-30" }).applied?.amount,
     200,
   );
   assertEquals(
-    decide({ rules: ended, weekStart: "2026-11-09" }).outcome,
+    decide({ rules: ended, weekStart: "2026-12-07" }).outcome,
     "none",
   );
-  // the office changes the amount by adding a row from the week it changes
-  const changed = [...RULES, {
+  // the office ends the row and adds one from the week the amount changes
+  const changed = [...ended, {
     id: "0a1e0000-0000-4000-8000-00000000f250",
     user_id: UTE_TRADE,
     label: "Ute hire",
@@ -180,6 +184,56 @@ Deno.test("ute hire: a last week ends it, and a later row changes the amount", (
   );
 });
 
+Deno.test("ute hire: two active rows covering one week take none and mark the invoice for the office", () => {
+  // The $200 row was never ended, and a $250 row was added over it.
+  const overlapping = [...RULES, {
+    id: "0a1e0000-0000-4000-8000-00000000f250",
+    user_id: UTE_TRADE,
+    label: "Ute hire",
+    amount: 250,
+    first_week_start: "2026-12-07",
+    last_week_start: null,
+    active: true,
+  }];
+  const decision = decide({ rules: overlapping, weekStart: "2026-12-07" });
+  assertEquals(decision.outcome, "rules_overlap");
+  assertEquals(decision.applied, null);
+  assertEquals(decision.rule, null);
+  assertStringIncludes(decision.note || "", "NOT taken");
+  assertStringIncludes(decision.note || "", "week starting 2026-12-07");
+  assertStringIncludes(decision.note || "", "2 active deductions");
+  assertStringIncludes(decision.note || "", "Ute hire $200.00");
+  assertStringIncludes(decision.note || "", "Ute hire $250.00");
+  assertEquals(tradeRecurringDeductionInvoiceFields(decision), {
+    recurring_deduction_id: null,
+    recurring_deduction_label: null,
+    recurring_deduction_amount: null,
+    recurring_deduction_note: decision.note,
+  });
+  // nothing comes off the money
+  const money = calculateTradeInvoiceMoney({
+    grossEarned: 1000,
+    gstOn: false,
+    earningsDate: "2026-12-13",
+  });
+  assertEquals(
+    withTradeInvoiceRecurringDeduction(money, decision.applied),
+    money,
+  );
+  // a week only one of them covers is unaffected
+  assertEquals(
+    decide({ rules: overlapping, weekStart: "2026-11-30" }).applied?.amount,
+    200,
+  );
+  // the two seeded rows never overlap
+  for (const weekStart of [THIS_WEEK, NEXT_WEEK]) {
+    assertEquals(
+      tradeRecurringDeductionRulesCovering(RULES, UTE_TRADE, weekStart).length,
+      1,
+    );
+  }
+});
+
 Deno.test("ute hire: a row that cannot be read as a rule is never guessed at", () => {
   for (
     const bad of [
@@ -194,14 +248,15 @@ Deno.test("ute hire: a row that cannot be read as a rule is never guessed at", (
   ) {
     const rules = [{ ...RULES[0], ...bad }];
     assertEquals(
-      selectTradeRecurringDeductionRule(rules, UTE_TRADE, THIS_WEEK),
-      null,
+      tradeRecurringDeductionRulesCovering(rules, UTE_TRADE, THIS_WEEK),
+      [],
       JSON.stringify(bad),
     );
+    assertEquals(decide({ rules }).outcome, "none", JSON.stringify(bad));
   }
   assertEquals(
-    selectTradeRecurringDeductionRule("not rows", UTE_TRADE, THIS_WEEK),
-    null,
+    tradeRecurringDeductionRulesCovering("not rows", UTE_TRADE, THIS_WEEK),
+    [],
   );
 });
 
@@ -254,18 +309,12 @@ Deno.test("ute hire: a redraft or resubmit of the same invoice does not double i
     assertEquals(decision.outcome, "applied", status);
     assertEquals(decision.applied?.amount, 100);
   }
-  // The invoice's own live row is never "another" invoice.
-  const own = decide({
-    carriers: [{ id: "this-invoice", status: "approved" }],
-    ownInvoiceIds: ["this-invoice"],
-  });
-  assertEquals(own.outcome, "applied");
 });
 
 // ── 3. Never a negative invoice ─────────────────────────────────────────────
 
 Deno.test("ute hire: a payable below the deduction takes nothing and is marked for the office", () => {
-  for (const payable of [99.99, 47, 0]) {
+  for (const payable of [99.99, 47, 0.01]) {
     const decision = decide({ payable });
     assertEquals(decision.outcome, "payable_below_deduction", String(payable));
     assertEquals(decision.applied, null);
@@ -291,6 +340,104 @@ Deno.test("ute hire: a payable below the deduction takes nothing and is marked f
     decide({ payable: "lots" }).outcome,
     "payable_below_deduction",
   );
+});
+
+Deno.test("ute hire: an invoice with nothing payable yet shows the week's deduction and carries no note", () => {
+  // an empty my_hours preview, or a draft with nothing on it
+  const empty = decide({ payable: 0 });
+  assertEquals(empty.outcome, "nothing_payable");
+  assertEquals(empty.applied, null);
+  assertEquals(empty.note, null);
+  assertEquals(tradeRecurringDeductionInvoiceFields(empty), {
+    recurring_deduction_id: null,
+    recurring_deduction_label: null,
+    recurring_deduction_amount: null,
+    recurring_deduction_note: null,
+  });
+  // the trade still sees what comes off at submit
+  assertEquals(tradeRecurringDeductionResponse(empty), {
+    recurring_deduction_week: {
+      label: "Ute hire",
+      amount: 100,
+      week_start: THIS_WEEK,
+      applied: false,
+      outcome: "nothing_payable",
+      note: null,
+    },
+  });
+  // already on another invoice: an empty one still says so
+  assertEquals(
+    decide({
+      payable: 0,
+      carriers: [{ id: "first-invoice", status: "approved" }],
+    }).outcome,
+    "already_taken",
+  );
+});
+
+// ── 3b. An invoice with no invoice week ─────────────────────────────────────
+
+Deno.test("ute hire: a submitted invoice with no week, or a work-order invoice, takes nothing and is marked for the office", () => {
+  for (
+    const [kind, words] of [
+      ["no_invoice_week", "this invoice has no invoice week"],
+      ["work_order_invoice", "this is a work-order invoice"],
+    ] as const
+  ) {
+    // Thursday 15 Oct 2026 is in the week of Monday 12 Oct: the $100 week
+    const decision = decide({
+      weekStart: null,
+      weekless: { kind, day: "2026-10-15" },
+    });
+    assertEquals(decision.outcome, kind);
+    assertEquals(decision.applied, null);
+    assertEquals(decision.rule, null);
+    assertStringIncludes(decision.note || "", "Ute hire $100.00 NOT applied");
+    assertStringIncludes(decision.note || "", words);
+    assertStringIncludes(decision.note || "", "week starting 2026-10-12");
+    // stored as a note only: no deduction columns, so no money moves
+    assertEquals(tradeRecurringDeductionInvoiceFields(decision), {
+      recurring_deduction_id: null,
+      recurring_deduction_label: null,
+      recurring_deduction_amount: null,
+      recurring_deduction_note: decision.note,
+    });
+    // and the response of those routes is what it was
+    assertEquals(tradeRecurringDeductionResponse(decision), {});
+
+    // Sunday 25 Oct 2026 is still the week of Monday 19 Oct: the $200 week
+    assertStringIncludes(
+      decide({ weekStart: null, weekless: { kind, day: "2026-10-25" } }).note ||
+        "",
+      "Ute hire $200.00 NOT applied",
+    );
+    // a week before the deduction starts, a trade with no row, a row switched
+    // off, and a day that cannot be read: nothing at all
+    for (
+      const none of [
+        decide({ weekStart: null, weekless: { kind, day: "2026-10-11" } }),
+        decide({
+          weekStart: null,
+          userId: OTHER_TRADE,
+          weekless: { kind, day: "2026-10-15" },
+        }),
+        decide({
+          weekStart: null,
+          rules: RULES.map((row) => ({ ...row, active: false })),
+          weekless: { kind, day: "2026-10-15" },
+        }),
+        decide({ weekStart: null, weekless: { kind, day: "soon" } }),
+      ]
+    ) {
+      assertEquals(none.outcome, "none");
+      assertEquals(tradeRecurringDeductionInvoiceFields(none), {});
+    }
+    // an invoice that has a week is decided by its week, never as weekless
+    assertEquals(
+      decide({ weekless: { kind, day: "2026-10-25" } }).applied?.amount,
+      100,
+    );
+  }
 });
 
 Deno.test("ute hire: the money module refuses a deduction above the payable rather than go negative", () => {
@@ -377,9 +524,9 @@ Deno.test("ute hire: it is its own labelled minus line on the Xero bill", () => 
       }),
       { id: RULE_100, label: "Ute hire", amount: 100 },
     );
+    // the super line's account is its own; the deduction's is the bill's
     const lines = splitTradeInvoiceXeroLines(WORK_LINES, money, {
-      superAccountCode: "306",
-      recurringDeductionAccountCode: "306",
+      superAccountCode: "826",
       tradeName: "Isaac",
     });
     assertEquals(lines.length, 3);
@@ -399,7 +546,7 @@ Deno.test("ute hire: it is its own labelled minus line on the Xero bill", () => 
     const without = splitTradeInvoiceXeroLines(
       WORK_LINES,
       withTradeInvoiceRecurringDeduction(money, null),
-      { superAccountCode: "306", tradeName: "Isaac" },
+      { superAccountCode: "826", tradeName: "Isaac" },
     );
     assertEquals(lines.slice(0, 2), without);
     // the bill's lines sum to what is paid, before GST
@@ -455,16 +602,17 @@ Deno.test("ute hire: a GST-off bill round-trips, and a line with no account is r
   const work = WORK_LINES.map((line) => ({ ...line, TaxType: "NONE" }));
   const lines = splitTradeInvoiceXeroLines(work, money, {
     superAccountCode: "306",
-    recurringDeductionAccountCode: "306",
     tradeName: "Isaac",
   });
   assertReturnedTradeInvoiceXeroSplit(lines, money);
+  // the bill's work lines name no account: the deduction line has none to use
   const error = assertThrows(
     () =>
-      splitTradeInvoiceXeroLines(work, money, {
-        superAccountCode: "306",
-        tradeName: "Isaac",
-      }),
+      splitTradeInvoiceXeroLines(
+        work.map(({ AccountCode: _account, ...line }) => line),
+        money,
+        { superAccountCode: "306", tradeName: "Isaac" },
+      ),
     TradeInvoiceMoneyError,
   );
   assertEquals(error.code, "RECURRING_DEDUCTION_INVALID");
@@ -610,6 +758,8 @@ type Stub = {
   // table name -> PostgREST error message
   fail?: Record<string, string>;
   gstRegistered?: boolean;
+  // job_assignments rows of the week. Absent: the one 8-hour card.
+  cards?: any[];
 };
 
 type Captured = {
@@ -736,7 +886,9 @@ async function callTradeAction(
       );
     }
     if (table === "job_assignments") {
-      return Promise.resolve(reply([{ ...CARD, user_id: stub.user }]));
+      return Promise.resolve(
+        reply(stub.cards ?? [{ ...CARD, user_id: stub.user }]),
+      );
     }
     if (table === "jobs") return Promise.resolve(reply([JOB]));
     if (table === "trade_invoices") {
@@ -1018,6 +1170,142 @@ handlerTest(
 );
 
 handlerTest(
+  "generate_trade_invoice: two active rows covering the week take none and mark the invoice for the office",
+  async () => {
+    const out = await callTradeAction(
+      "generate_trade_invoice",
+      submit(NEXT_WEEK, 8),
+      {
+        user: UTE_TRADE,
+        rules: [...RULES, {
+          ...RULES[1],
+          id: "0a1e0000-0000-4000-8000-00000000f250",
+          amount: 250,
+          first_week_start: NEXT_WEEK,
+        }],
+      },
+    );
+    assertEquals(out.body.success, true, JSON.stringify(out.body));
+    const stored = out.invoiceInserts[0];
+    assertEquals(
+      [stored.recurring_deduction_id, stored.recurring_deduction_amount],
+      [null, null],
+    );
+    assertStringIncludes(
+      stored.recurring_deduction_note,
+      "2 active deductions cover that week",
+    );
+    // paid in full, and said where the office reads it
+    assertEquals(out.body.trade_payable, 376);
+    assert(!("recurring_deduction" in out.body));
+    assertStringIncludes(notes(out), "2 active deductions cover that week");
+  },
+);
+
+// A no-week invoice is for the day it is submitted, so these rows cover every
+// week the test can run in.
+const ALWAYS_ON = [{
+  id: RULE_200,
+  user_id: UTE_TRADE,
+  label: "Ute hire",
+  amount: 150,
+  first_week_start: "2020-01-06",
+  last_week_start: null,
+  active: true,
+}];
+const noWeek = () => ({
+  gst_on: false,
+  extra_items: [{
+    type: "adjustment",
+    description: "Tool allowance",
+    quantity: 1,
+    rate: 400,
+  }],
+});
+
+handlerTest(
+  "generate_trade_invoice: an invoice with no week takes nothing and is marked for the office",
+  async () => {
+    const out = await callTradeAction("generate_trade_invoice", noWeek(), {
+      user: UTE_TRADE,
+      rules: ALWAYS_ON,
+    });
+    assertEquals(out.body.success, true, JSON.stringify(out.body));
+    assertEquals(out.invoiceInserts.length, 1);
+    const stored = out.invoiceInserts[0];
+    assertEquals(stored.week_start, null);
+    assertEquals(
+      [
+        stored.recurring_deduction_id,
+        stored.recurring_deduction_label,
+        stored.recurring_deduction_amount,
+      ],
+      [null, null, null],
+    );
+    assertStringIncludes(
+      stored.recurring_deduction_note,
+      "Ute hire $150.00 NOT applied: this invoice has no invoice week",
+    );
+    // said where the office reads it
+    assertStringIncludes(notes(out), "this invoice has no invoice week");
+    // nothing is taken and the response is what it was
+    assertEquals([stored.subtotal_ex, stored.net_pay], [400, 376]);
+    assertEquals(out.body.trade_payable, 376);
+    for (
+      const key of [
+        "recurring_deduction",
+        "recurring_deduction_week",
+        "payable_before_deduction",
+      ]
+    ) {
+      assert(!(key in out.body), key);
+    }
+  },
+);
+
+handlerTest(
+  "generate_trade_invoice: another trade's no-week invoice is unchanged, and an unreadable rule never stops one",
+  async () => {
+    const withRules = await callTradeAction(
+      "generate_trade_invoice",
+      noWeek(),
+      { user: OTHER_TRADE, rules: ALWAYS_ON },
+    );
+    const noRules = await callTradeAction("generate_trade_invoice", noWeek(), {
+      user: OTHER_TRADE,
+      rules: [],
+    });
+    assertEquals(withRules.body.success, true, JSON.stringify(withRules.body));
+    const strip = (row: any) => {
+      const { invoice_number: _n, submitted_at: _s, ...rest } = row;
+      return rest;
+    };
+    assertEquals(
+      strip(withRules.invoiceInserts[0]),
+      strip(noRules.invoiceInserts[0]),
+    );
+    assert(!("recurring_deduction_note" in withRules.invoiceInserts[0]));
+    assertEquals(withRules.invoicePatches, noRules.invoicePatches);
+
+    // Nothing is taken off a no-week invoice either way, so a rule that
+    // cannot be read leaves it unmarked rather than refused.
+    const unreadable = await callTradeAction(
+      "generate_trade_invoice",
+      noWeek(),
+      { user: UTE_TRADE, fail: { trade_recurring_deductions: "boom" } },
+    );
+    assertEquals(
+      unreadable.body.success,
+      true,
+      JSON.stringify(unreadable.body),
+    );
+    assertEquals(unreadable.invoiceInserts.length, 1);
+    assert(!("recurring_deduction_note" in unreadable.invoiceInserts[0]));
+    assertEquals(unreadable.body.trade_payable, 376);
+  },
+);
+
+handlerTest(
   "generate_trade_invoice: with the row switched off the invoice carries none",
   async () => {
     const out = await callTradeAction(
@@ -1245,6 +1533,72 @@ handlerTest(
   },
 );
 
+handlerTest(
+  "my_hours: an empty week shows the Ute hire to come and no note for the office",
+  async () => {
+    const empty = await callTradeAction(
+      "my_hours",
+      {},
+      { user: UTE_TRADE, cards: [] },
+      { week_ending: "2026-10-18" },
+    );
+    assertEquals(empty.status, 200, JSON.stringify(empty.body));
+    assertEquals(empty.body.recurring_deduction_week, {
+      label: "Ute hire",
+      amount: 100,
+      week_start: THIS_WEEK,
+      applied: false,
+      outcome: "nothing_payable",
+      note: null,
+    });
+    assertEquals(empty.body.trade_payable, 0);
+    assert(!("recurring_deduction" in empty.body));
+  },
+);
+
+// ── The office's note on a read ─────────────────────────────────────────────
+
+Deno.test("a 'not taken' reason reaches the office on a read whatever the invoice's status", () => {
+  const reason =
+    "Ute hire $100.00 NOT taken for the week starting 2026-10-12: the amount payable on this invoice ($47.00) is less than the deduction.";
+  // The stored query_note is cleared once the Xero bill reconciles, and
+  // replaced while the bill is being pushed or retried.
+  for (
+    const [status, stored, shown] of [
+      ["pushed_to_xero", null, reason],
+      ["paid", "", reason],
+      [
+        "approved",
+        "Xero bill BILL-1 was created by ops-api.",
+        `Xero bill BILL-1 was created by ops-api. | ${reason}`,
+      ],
+      // still there from the submit: said once
+      ["pending_ops_review", `Manual hours entered. | ${reason}`, null],
+    ] as const
+  ) {
+    const row = {
+      id: "stored-invoice",
+      status,
+      query_note: stored,
+      recurring_deduction_note: reason,
+    };
+    const read = withTradeRecurringDeductionOfficeNote(row);
+    assertEquals(read.query_note, shown ?? stored, status);
+    assertEquals(read.recurring_deduction_note, reason);
+  }
+  // an invoice with no reason, and a read that never selected query_note
+  // (the trade's own lists), come back exactly as they went in
+  for (
+    const row of [
+      { id: "a", query_note: "Manual hours entered." },
+      { id: "b", query_note: null, recurring_deduction_note: null },
+      { id: "c", recurring_deduction_note: reason },
+    ]
+  ) {
+    assert(withTradeRecurringDeductionOfficeNote(row) === row);
+  }
+});
+
 // ── The loader ──────────────────────────────────────────────────────────────
 
 Deno.test("loader: a failed read throws, it never reads as no deduction", async () => {
@@ -1288,4 +1642,30 @@ Deno.test("loader: a failed read throws, it never reads as no deduction", async 
     { userId: UTE_TRADE, weekStart: null, payable: 500 },
   );
   assertEquals(untouched.outcome, "none");
+
+  // A submitted work-order invoice reads the rules only (the invoices read
+  // would fail here) and is marked for the office.
+  const workOrder = {
+    userId: UTE_TRADE,
+    weekStart: null,
+    payable: 500,
+    weekless: { kind: "work_order_invoice" as const, day: "2026-10-15" },
+  };
+  const marked = await loadTradeRecurringDeductionDecision(
+    client("trade_invoices"),
+    workOrder,
+  );
+  assertEquals(marked.outcome, "work_order_invoice");
+  assertEquals(marked.applied, null);
+  assertStringIncludes(
+    marked.note || "",
+    "Ute hire $100.00 NOT applied: this is a work-order invoice",
+  );
+  // Nothing is taken off it either way, so a failed rule read leaves it
+  // unmarked and never stops the submit.
+  const unread = await loadTradeRecurringDeductionDecision(
+    client("trade_recurring_deductions"),
+    workOrder,
+  );
+  assertEquals(unread.outcome, "none");
 });

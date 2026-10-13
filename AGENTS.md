@@ -4494,12 +4494,16 @@ A trade's weekly deduction (first use: one trade's ute hire, owner 13 Oct 2026)
 is a row in `trade_recurring_deductions`, never a number in code and never a
 `trade_invoice_lines` row. `trade_invoice_recurring_deduction.ts` is the one
 owner of which invoice carries it (only an invoice with a `week_start`, once
-per trade and week, none when the amount payable is less than it);
+per trade and week, none when the amount payable is less than it or when two
+active rows cover the week);
 `trade_invoice_money.ts` takes it off `trade_payable` after super and GST, so
 the trade is paid exactly that much less and gross, super, GST and `total_inc`
 never move. Do not model one as a `final_payout_deduction` line: that sits
 inside gross and shifts super and GST. A trade with no row gets no keys on any
-write or read; keep it that way. The stored columns ride every invoice read
+write or read; keep it that way. A deduction due but not taken (a work-order
+or no-week invoice included) is kept on `recurring_deduction_note`: the stored
+`query_note` is cleared as the invoice moves on, so `presentTradeInvoice` puts
+the reason back into `query_note` on every read. The stored columns ride every invoice read
 through `validatePersistedTradeInvoiceMoney`, so a list read that feeds
 `presentTradeInvoice` must select the four `recurring_deduction_*` columns or
 it shows the undeducted figure. The Xero line is found by its description

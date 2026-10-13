@@ -43,16 +43,6 @@ export const TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE: string =
   (typeof Deno !== "undefined" && Deno.env.get("TRADE_SUPER_XERO_ACCOUNT_CODE")?.trim()) ||
   TRADE_INVOICE_XERO_ACCOUNT_CODE;
 
-// Where a recurring deduction's minus line lands (first use: a trade's weekly
-// ute hire, trade_invoice_recurring_deduction.ts). It nets a hire charge
-// against the trade's bill, so it stays on the same account as the bill's
-// work lines until the bookkeeper names another
-// (env TRADE_RECURRING_DEDUCTION_XERO_ACCOUNT_CODE). No other mapping moves.
-export const TRADE_INVOICE_RECURRING_DEDUCTION_XERO_ACCOUNT_CODE: string =
-  (typeof Deno !== "undefined" &&
-    Deno.env.get("TRADE_RECURRING_DEDUCTION_XERO_ACCOUNT_CODE")?.trim()) ||
-  TRADE_INVOICE_XERO_ACCOUNT_CODE;
-
 // Xero drops `Reference` on ACCPAY. The supplier-bill field a bookkeeper sees
 // as "Reference" is `InvoiceNumber` (non-unique, max 255 for ACCPAY). Every
 // trade bill push must set it, or the bill lands with a blank reference.

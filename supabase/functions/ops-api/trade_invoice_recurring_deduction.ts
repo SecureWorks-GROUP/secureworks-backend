@@ -11,12 +11,18 @@
 //     lives in code.
 //   - Only an invoice with an invoice week (week_start) carries one. An
 //     invoice for a week before the rule's first week carries none.
+//   - One row a week: when two active rows of a trade cover the same week,
+//     none is taken and the invoice is marked for the office.
 //   - Once per invoice week: when another live invoice of the same trade and
 //     week already carries it, this one carries none. A draft, a failed and an
 //     ops-reject invoice are released and never hold the week.
 //   - Never a negative invoice: when the amount payable is less than the
 //     deduction, nothing is refused and nothing is taken; the invoice is
-//     marked for the office with the plain reason.
+//     marked for the office with the plain reason. An invoice with nothing
+//     payable yet (an empty preview or draft) is not marked.
+//   - A submitted invoice with no invoice week, and a work-order invoice,
+//     carry none; when the trade has a deduction that week the invoice is
+//     marked for the office so the skip is never silent.
 //   - A trade with no row is untouched: no read of theirs changes shape and
 //     nothing is written for them.
 //
@@ -38,6 +44,13 @@ export type TradeRecurringDeductionRule = {
   active: boolean;
 };
 
+// A submitted invoice that has no invoice week: why, and the day it is for.
+// The week that day falls in is the week checked for a deduction.
+export type TradeRecurringDeductionWeekless = {
+  kind: "no_invoice_week" | "work_order_invoice";
+  day: unknown;
+};
+
 export type TradeRecurringDeductionOutcome =
   // no rule covers this trade and invoice week
   | "none"
@@ -46,16 +59,25 @@ export type TradeRecurringDeductionOutcome =
   // a rule covers the week, but another live invoice already carries it
   | "already_taken"
   // a rule covers the week, but the amount payable is less than it
-  | "payable_below_deduction";
+  | "payable_below_deduction"
+  // a rule covers the week, but nothing is payable on this invoice yet
+  | "nothing_payable"
+  // two active rows cover the week: none is taken
+  | "rules_overlap"
+  // the trade has a rule that week, but this invoice has no invoice week
+  | "no_invoice_week"
+  // the trade has a rule that week, but this is a work-order invoice
+  | "work_order_invoice";
 
 export type TradeRecurringDeductionDecision = {
   outcome: TradeRecurringDeductionOutcome;
-  // The rule covering this trade and week, whether or not it was taken.
+  // The one rule covering this invoice's week, whether or not it was taken.
+  // null when no single rule does, or the invoice has no invoice week.
   rule: (TradeInvoiceRecurringDeduction & { week_start: string }) | null;
   // What this invoice carries. null unless outcome is "applied".
   applied: TradeInvoiceRecurringDeduction | null;
-  // The plain reason for the office when a rule covered the week and was not
-  // taken. null otherwise.
+  // The plain reason for the office when a deduction was due and not taken.
+  // null otherwise.
   note: string | null;
 };
 
@@ -68,6 +90,8 @@ const NO_DEDUCTION: TradeRecurringDeductionDecision = {
 
 const moneyLabel = (value: number): string => `$${value.toFixed(2)}`;
 const toCents = (value: number): number => Math.round(value * 100);
+const namedRules = (rules: TradeRecurringDeductionRule[]): string =>
+  rules.map((rule) => `${rule.label} ${moneyLabel(rule.amount)}`).join(", ");
 
 function dateOnly(value: unknown): string | null {
   const text = String(value ?? "").slice(0, 10);
@@ -77,23 +101,31 @@ function dateOnly(value: unknown): string | null {
   return parsed.toISOString().slice(0, 10) === text ? text : null;
 }
 
+// The Monday of the invoice week a day falls in.
+function weekStartOf(value: unknown): string | null {
+  const day = dateOnly(value);
+  if (!day) return null;
+  const monday = new Date(`${day}T00:00:00.000Z`);
+  monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+  return monday.toISOString().slice(0, 10);
+}
+
 /**
- * The one rule row covering this trade and invoice week, or null. Rows that
- * are switched off, belong to another trade, or whose weeks do not include
- * this one are ignored. Where two rows cover the week, the one whose first
- * week is later wins: the amount is changed by adding a row from the week it
- * changes, never by rewriting history.
+ * The rule rows covering this trade and invoice week. Rows that are switched
+ * off, belong to another trade, or whose weeks do not include this one are
+ * left out. One row is the rule; more than one is a fault in the rows and is
+ * never resolved by picking one.
  */
-export function selectTradeRecurringDeductionRule(
+export function tradeRecurringDeductionRulesCovering(
   rules: unknown,
   userId: unknown,
   weekStart: unknown,
-): TradeRecurringDeductionRule | null {
+): TradeRecurringDeductionRule[] {
   const week = dateOnly(weekStart);
   const trade = String(userId ?? "").trim();
-  if (!week || !trade || !Array.isArray(rules)) return null;
+  if (!week || !trade || !Array.isArray(rules)) return [];
 
-  let chosen: TradeRecurringDeductionRule | null = null;
+  const covering: TradeRecurringDeductionRule[] = [];
   for (const raw of rules) {
     const row = raw && typeof raw === "object"
       ? raw as Record<string, unknown>
@@ -115,22 +147,40 @@ export function selectTradeRecurringDeductionRule(
     if (row.last_week_start && !last) continue;
     if (week < first) continue;
     if (last && week > last) continue;
-    if (
-      !chosen || first > chosen.first_week_start ||
-      (first === chosen.first_week_start && id > chosen.id)
-    ) {
-      chosen = {
-        id,
-        user_id: trade,
-        label,
-        amount,
-        first_week_start: first,
-        last_week_start: last,
-        active: true,
-      };
-    }
+    covering.push({
+      id,
+      user_id: trade,
+      label,
+      amount,
+      first_week_start: first,
+      last_week_start: last,
+      active: true,
+    });
   }
-  return chosen;
+  return covering;
+}
+
+// A submitted invoice with no invoice week carries none. When the trade has a
+// deduction in the week the invoice is for, it is marked for the office.
+function decideWeeklessTradeRecurringDeduction(
+  rules: unknown,
+  userId: unknown,
+  weekless: TradeRecurringDeductionWeekless | null | undefined,
+): TradeRecurringDeductionDecision {
+  const week = weekless ? weekStartOf(weekless.day) : null;
+  if (!weekless || !week) return NO_DEDUCTION;
+  const covering = tradeRecurringDeductionRulesCovering(rules, userId, week);
+  if (covering.length === 0) return NO_DEDUCTION;
+  return {
+    outcome: weekless.kind,
+    rule: null,
+    applied: null,
+    note: `Weekly deduction ${namedRules(covering)} NOT applied: ${
+      weekless.kind === "work_order_invoice"
+        ? "this is a work-order invoice"
+        : "this invoice has no invoice week"
+    }. Nothing was taken off. The office to check it is on the trade's weekly invoice for the week starting ${week}.`,
+  };
 }
 
 /**
@@ -148,18 +198,35 @@ export function decideTradeRecurringDeduction(input: {
   // Other invoices of this trade and week carrying a deduction:
   // { id, status, invoice_number }. Released ones never hold the week.
   carriers?: unknown;
-  // Invoices that are this same invoice (its own row on a retry, the draft it
-  // replaces): never counted as "another" invoice.
-  ownInvoiceIds?: unknown[];
+  // Only for a submitted invoice with no invoice week. A draft passes none.
+  weekless?: TradeRecurringDeductionWeekless | null;
 }): TradeRecurringDeductionDecision {
   const week = dateOnly(input.weekStart);
-  if (!week) return NO_DEDUCTION;
-  const rule = selectTradeRecurringDeductionRule(
+  if (!week) {
+    return decideWeeklessTradeRecurringDeduction(
+      input.rules,
+      input.userId,
+      input.weekless,
+    );
+  }
+  const rules = tradeRecurringDeductionRulesCovering(
     input.rules,
     input.userId,
     week,
   );
-  if (!rule) return NO_DEDUCTION;
+  if (rules.length === 0) return NO_DEDUCTION;
+  if (rules.length > 1) {
+    return {
+      outcome: "rules_overlap",
+      rule: null,
+      applied: null,
+      note:
+        `Weekly deduction NOT taken for the week starting ${week}: ${rules.length} active deductions cover that week for this trade (${
+          namedRules(rules)
+        }). Nothing was taken off. The office to leave one row covering the week and recover it another way.`,
+    };
+  }
+  const rule = rules[0];
 
   const covering = {
     id: rule.id,
@@ -167,17 +234,11 @@ export function decideTradeRecurringDeduction(input: {
     amount: rule.amount,
     week_start: week,
   };
-  const own = new Set(
-    (input.ownInvoiceIds || []).map((id) => String(id ?? "")).filter(Boolean),
-  );
   const holder = (Array.isArray(input.carriers) ? input.carriers : [])
     .map((raw) =>
       raw && typeof raw === "object" ? raw as Record<string, unknown> : {}
     )
-    .find((row) =>
-      !own.has(String(row.id ?? "")) &&
-      !RELEASED_INVOICE_STATUSES.has(String(row.status ?? ""))
-    );
+    .find((row) => !RELEASED_INVOICE_STATUSES.has(String(row.status ?? "")));
   if (holder) {
     const named = String(holder.invoice_number ?? "").trim();
     return {
@@ -193,6 +254,16 @@ export function decideTradeRecurringDeduction(input: {
   }
 
   const payable = Number(input.payable);
+  // An empty preview or a draft with nothing on it yet: nothing to take it
+  // from and nothing for the office to chase.
+  if (Number.isFinite(payable) && toCents(payable) === 0) {
+    return {
+      outcome: "nothing_payable",
+      rule: covering,
+      applied: null,
+      note: null,
+    };
+  }
   if (!Number.isFinite(payable) || toCents(payable) < toCents(rule.amount)) {
     return {
       outcome: "payable_below_deduction",
@@ -222,7 +293,9 @@ type QueryResult = {
 /**
  * Read the rule rows and this week's carriers, then decide. A failed read
  * throws: an invoice must never be saved in full because the rule could not
- * be read (a PostgREST error returns, it does not throw).
+ * be read (a PostgREST error returns, it does not throw). An invoice with no
+ * invoice week has nothing taken either way, so its submit never fails on the
+ * read: the failure is logged and the invoice goes unmarked.
  */
 export async function loadTradeRecurringDeductionDecision(
   // deno-lint-ignore no-explicit-any
@@ -231,11 +304,11 @@ export async function loadTradeRecurringDeductionDecision(
     userId: string;
     weekStart: string | null | undefined;
     payable: number;
-    ownInvoiceIds?: Array<string | null | undefined>;
+    weekless?: TradeRecurringDeductionWeekless | null;
   },
 ): Promise<TradeRecurringDeductionDecision> {
   const week = dateOnly(input.weekStart);
-  if (!week || !input.userId) return NO_DEDUCTION;
+  if (!input.userId || (!week && !input.weekless)) return NO_DEDUCTION;
 
   const rulesRead = await client.from("trade_recurring_deductions")
     .select(
@@ -244,15 +317,22 @@ export async function loadTradeRecurringDeductionDecision(
     .eq("user_id", input.userId)
     .eq("active", true) as QueryResult;
   if (rulesRead.error) {
-    throw new Error(
-      "Failed to read the weekly deductions for this trade: " +
-        (rulesRead.error.message || "unknown error"),
-    );
-  }
-  // The usual case, and every other trade's: no row, no second read.
-  if (!selectTradeRecurringDeductionRule(rulesRead.data, input.userId, week)) {
+    const message = "Failed to read the weekly deductions for this trade: " +
+      (rulesRead.error.message || "unknown error");
+    if (week) throw new Error(message);
+    console.error("[ops-api] " + message);
     return NO_DEDUCTION;
   }
+  const decided = decideTradeRecurringDeduction({
+    rules: rulesRead.data,
+    userId: input.userId,
+    weekStart: week,
+    payable: input.payable,
+    weekless: input.weekless,
+  });
+  // The usual case, and every other trade's: no single rule for the week, no
+  // second read.
+  if (!week || !decided.rule) return decided;
 
   const carriersRead = await client.from("trade_invoices")
     .select("id, status, invoice_number")
@@ -272,7 +352,6 @@ export async function loadTradeRecurringDeductionDecision(
     weekStart: week,
     payable: input.payable,
     carriers: carriersRead.data,
-    ownInvoiceIds: input.ownInvoiceIds,
   });
 }
 
@@ -295,7 +374,7 @@ export function tradeRecurringDeductionInvoiceFields(
 /**
  * What a response says about the week's deduction before and after submit:
  * the rule covering the week, whether this invoice carries it and, when not,
- * why. null when no rule covers the trade and week.
+ * why. null when no single rule covers the invoice's week.
  */
 export function tradeRecurringDeductionResponse(
   decision: TradeRecurringDeductionDecision,
@@ -310,5 +389,27 @@ export function tradeRecurringDeductionResponse(
       outcome: decision.outcome,
       note: decision.note,
     },
+  };
+}
+
+/**
+ * The office's note on a stored invoice, as a read returns it. The stored
+ * query_note is rewritten as the invoice moves on (it is cleared once the Xero
+ * bill reconciles), so a "not taken" reason kept only there is lost. The
+ * invoice's own recurring_deduction_note is never rewritten: a read that
+ * returns query_note carries the reason in it whatever the invoice's status.
+ * An invoice with no such reason, and a read without query_note, come back
+ * as they went in.
+ */
+export function withTradeRecurringDeductionOfficeNote<
+  T extends Record<string, unknown>,
+>(invoice: T): T {
+  const reason = String(invoice.recurring_deduction_note ?? "").trim();
+  if (!reason || !("query_note" in invoice)) return invoice;
+  const stored = String(invoice.query_note ?? "").trim();
+  if (stored.includes(reason)) return invoice;
+  return {
+    ...invoice,
+    query_note: [stored, reason].filter(Boolean).join(" | "),
   };
 }
