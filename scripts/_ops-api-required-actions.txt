@@ -144,8 +144,6 @@ quote_builder_photo_caption      # probe=source-only
 quote_builder_pdf_upload_url     # probe=source-only
 quote_builder_issue              # probe=source-only
 quote_builder_decide_variation   # probe=source-only
-quote_builder_make_work_order    # probe=source-only
-quote_builder_make_purchase_orders # probe=source-only
 
 # ── Trade authenticated surface ──
 # Post-deploy recognition uses API-key-only GET requests and must fail closed at

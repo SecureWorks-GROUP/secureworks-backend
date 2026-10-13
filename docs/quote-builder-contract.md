@@ -7,10 +7,10 @@ app builds against. The app itself lives elsewhere.
 
 Status: v1, implemented. Code: `supabase/functions/ops-api/quote_builder.ts`. Migrations:
 `supabase/migrations/20261009120000_quote_builder_versions.sql` and
-`supabase/migrations/20261013160000_quote_builder_pricing_and_orders.sql` (pricing
-settings, line types, the two extra documents, the job's value, and the work
-order and purchase orders made from an issued quote: sections 2b to 2d, 5.6,
-5.8 and 5.9).
+`supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql`
+(pricing settings, line types, the filed scope of works and the job's value:
+sections 2b to 2d and 5.6). Making a work order and purchase orders from an
+issued quote is not built yet (section 6).
 
 No pricing number is written in this file, in the app or in `ops-api` code. The
 owner's numbers live in one database table (section 2c) and reach the app only
@@ -63,7 +63,6 @@ would not.
 | Material order list | Not filed anywhere | It prints our costs, and `job-pdfs` is a public bucket (read in production, 13 Oct 2026), so the server gives it no upload slot and files no document. The app shows and prints it on demand from the version's saved cost lines (5.6). |
 | Pricing settings (labour rate, materials multiplier, target margin) | `quote_builder_settings` (section 2c) | Read only by `ops-api`. |
 | The job's value | `jobs.pricing_json`, behind a guard (section 2d) | Written on a scope issue and a variation approval, so the Repairs card shows money. |
-| Draft crew work order, draft purchase orders | `work_orders`, `purchase_orders` (`quote_builder_version_id` names the version) | Made only by their own actions (5.8, 5.9), on a button press. |
 | Variations | `job_variations` (existing) + a `kind='variation'` version chain | The variation row is created when Hugo issues it. |
 | Client details on a private job | `jobs` (`client_name`, `client_phone`, `client_email`, `site_address`, `site_suburb`) | Copied into each version's `client_snapshot`. |
 | Builder / customer (e.g. ML Builders) on a repair job | `makesafe_job_details.requesting_company_id` -> `makesafe_companies` | Read only. Adding Ambrose Construct Group is the intake worker's job. |
@@ -132,8 +131,9 @@ A cost line may carry `line_type`: `material`, `labour` or `other`.
   allowed and `unit_cost_ex_gst` is what an hour costs us.
 - Totals do not change with the type. "Labour allowed" (hours and cost of the
   Labour lines) is worked out by the app when shown.
-- The type decides what an order takes (5.8, 5.9): Labour lines go on the work
-  order as hours, Material lines go on purchase orders.
+- The type is kept so a later change can make orders from it (section 6):
+  Labour lines as work order hours, Material lines as purchase order lines.
+  Nothing on the server acts on it today.
 
 Charge line (client):
 
@@ -183,10 +183,16 @@ that table is readable by every signed-in user of the organisation, trades
 included, and what we charge a builder per hour is not a trade's to read.
 
 `quote_builder_get_job` returns them as `settings` (5.2). A missing row, or a
-value that is not a number, is `null`. The server has no fallback number. How
-the app prices with them (labour at the rate, materials at cost times the
-multiplier, other lines by the markup the user types, private quotes by markup
-only) is the app's rule; the server stores whatever charge lines it is sent.
+value that is not a number, is `null`. The server has no fallback number.
+
+**The settings are a goal, not a rule.** The scoper decides his own markups;
+the rate, the multiplier and the target margin are what the owner is aiming
+for, shown to him as a guide. The server never refuses, clamps or rewrites a
+charge line, a total or a margin for differing from them: save, issue and the
+job's value take the charge lines exactly as sent, and a quote priced under the
+goal (or at a loss) saves and issues like any other. How the app uses the goal
+(suggesting labour at the rate and materials at cost times the multiplier, and
+showing the margin against the target) is the app's own business.
 
 ### 2d. The job's value
 
@@ -195,8 +201,7 @@ only) is the app's rule; the server stores whatever charge lines it is sent.
 the builder writes `pricing_json`:
 
     job value = latest issued scope version's charge total
-              + the latest issued version of each variation whose
-                job_variations.status is 'approved'
+              + the latest issued version of each variation that counts
 
 ```json
 { "totalIncGST": 2893.00, "totalExGST": 2630.00, "gst": 263.00,
@@ -206,6 +211,29 @@ the builder writes `pricing_json`:
 
 It is written when a scope version is issued and when a variation is approved.
 Issuing a variation, or rejecting one, writes nothing.
+
+A variation counts once it is approved, and keeps counting after it is sent to
+the client and after the client accepts it:
+
+| `job_variations.status` | Counts |
+|---|---|
+| `approved` | Yes. |
+| `sent`, `accepted` | Only if its newest recorded decision is an approval. |
+| `draft`, `pending_approval`, `rejected`, `declined`, `cancelled`, anything else | No. |
+
+`sent` and `accepted` do not say whether anyone approved the variation: the ops
+"send variation" action and the client's accept link set them from any status,
+so a variation can be sent, and accepted, without ever being approved. That
+case is not counted. Nor can `approved_at` settle it, because the approval path
+stamps it on a rejection as well. The record that does is the decision event
+that path writes on every decision (`job_events` `variation_approved` /
+`variation_rejected`, naming the variation): the newest one for the variation
+must be `variation_approved`. A variation with no decision event is not
+counted.
+
+The value is only recomputed at the two moments above, so a variation approved
+through the ordinary ops approval, or sent or accepted afterwards, changes the
+stored value at the next scope issue or builder approval, not at once.
 
 The guard (`quoteBuilderMayWriteJobValue`), both halves required:
 
@@ -350,17 +378,12 @@ A version object:
   "photo_media_ids": ["uuid"], "client_snapshot": { ... },
   "variation_id": null, "client_pdf_document_id": null, "quote_number": null,
   "created_by": "uuid", "created_at": "...", "updated_at": "...",
-  "issued_by": null, "issued_at": null,
-  "work_order": null,
-  "purchase_orders": []
+  "issued_by": null, "issued_at": null
 }
 ```
 
-On `quote_builder_get_job` only, each version also says what was already made
-from it: `work_order` is `{ "id", "wo_number", "status" }` or `null`, and
-`purchase_orders` is a list of `{ "id", "po_number", "supplier_name", "status" }`
-(cancelled and deleted orders are left out). The app shows these in place of the
-"make" buttons.
+A version carries no `work_order` or `purchase_orders` key: no order is made
+from a quote yet (section 6), and the app reads a missing key as "none made".
 
 ### 5.3 `POST quote_builder_create_private_job`
 
@@ -491,13 +514,19 @@ stores none on its `job_documents` row: no lines, no totals, no settings.
 
 **The material order list is not filed.** It prints our costs, and every file
 in `job-pdfs` has a public address that can be worked out from the client quote
-link. So `document: "material_order_list"` is `400 invalid_input` on both the
-upload slot and the issue: the server gives it no slot, stores no file and
-files no document. The app must not ask for one. The list stays available in
-the app on demand, built from the version's saved cost lines, and its data is
-already on the job (the version, and the purchase orders of 5.9). Filing it
-waits on private storage with signed links, a separate change that needs the
-owner's say.
+link. So the server gives it no slot, stores no file and files no document:
+
+- the upload slot answers `400 invalid_input` to
+  `document: "material_order_list"`, so the PDF can never reach the bucket;
+- an issue whose `extra_documents` names `material_order_list` is **not**
+  refused for it. That entry is skipped (its `pdf_path` is not read), the quote
+  issues as normal, and the reply carries
+  `"extra_documents_not_filed": [ { "document": "material_order_list", "reason": "internal_costs_not_filed" } ]`.
+  The key is absent when the issue named no such document.
+
+The list stays available in the app on demand, built from the version's saved
+cost lines, which are already on the job. Filing it waits on private storage
+with signed links, a separate change that needs the owner's say.
 
 Issue refuses with nothing written when: the draft has no charge lines
 (`409 no_charge_lines`), no PDF slot was asked for since the last save
@@ -554,6 +583,7 @@ Returns:
   "version": { ...frozen version... },
   "document": { "id": "...", "quote_number": "SWR-26123-Q2", "url": "https://..." },
   "extra_documents": [ { "id": "...", "document": "scope_of_works", "url": "https://...", "file_name": "..." } ],
+  "extra_documents_not_filed": [ { "document": "material_order_list", "reason": "internal_costs_not_filed" } ],
   "variation": null,
   "job_value": { "written": true, "total_inc_gst": 715.00 },
   "stage": { "moved": true, "from": "scoping", "to": "quoted" }
@@ -588,96 +618,67 @@ and the call is refused `409 variation_decision_not_recorded`; try again. Return
 An approval rewrites the job's value (section 2d) and returns `job_value` in the
 shape of 5.6; a rejection writes nothing and returns no `job_value`.
 
-### 5.8 `POST quote_builder_make_work_order`
+## 6. Not built yet: a work order and purchase orders from an issued quote
 
-```json
-{ "version_id": "uuid of an issued version" }
-```
+The owner asked for the quote to carry "information that we can use ... so we
+can create the work order from that". The data for it is kept: every cost line
+may carry `line_type` (2b), a Labour line is in hours, and a Material line has
+its quantity, our unit cost and its supplier. **No action makes an order from a
+quote yet**, and this change leaves the existing work order and purchase order
+flows exactly as they were. Purchase orders are not in use yet (owner, 13 Oct
+2026), so this waits as its own change.
 
-Makes one **draft crew work order** on the version's job. The job always comes
-from the version; a `job_id` in the body is ignored. It is a crew work order
-(`work_orders.kind = 'crew'`), never the approved job work order of
-`docs/job-work-orders-v1.md`, which this action does not touch. Nothing is sent
-to a trade.
+What it would be, on a button press only, from an issued version, with the job
+always taken from the version and never from the request:
 
-`scope_items` is the scope of works text, then one item per Labour cost line
-(its description, the hours as `qty`, and its unit, `hr` when the line has
-none):
+- one draft crew work order (`work_orders.kind = 'crew'`, never the approved
+  job work order of `docs/job-work-orders-v1.md`): the scope of works text,
+  then each Labour line as its description and hours, with no dollar figure,
+  because trades read a crew work order;
+- one draft purchase order per supplier from the Material lines (quantity and
+  our unit cost);
+- a second press returns what the first made and makes nothing more;
+- nothing sent to a customer, builder, supplier or trade, and nothing to Xero.
 
-```json
-[ { "description": "Scope of works", "notes": "<the version's narrative>" },
-  { "description": "Carpenter on site", "qty": 8, "unit": "hr" } ]
-```
+Open design points the first attempt raised. The follow-up starts from these:
 
-Only these four keys are written. Each is on the list the Trade app's work
-order read keeps (`TRADE_WO_SCOPE_ITEM_ALLOWLIST`), so an allocated trade reads
-every line; a key off that list would reach the crew as a blank line. A crew
-work order is read by trades, so no cost and no price goes on it.
-`special_instructions` is `From quote <quote number>`. `created_by` is the
-signed-in user's id.
+1. **The trade read blanks any text that holds a money word, not only a dollar
+   sign.** An allocated trade reads a work order through
+   `redactTradeWorkOrderScopeItems`, which keeps only the keys on
+   `TRADE_WO_SCOPE_ITEM_ALLOWLIST` (so a line written under any other key
+   reaches the crew blank) and drops a whole string when it contains a money
+   word: total, cost, rate, charge, price, fee, amount, deposit, tax, invoice,
+   GST, pay, paid, balance, a percent sign (`tradeTextHasMoneyToken`,
+   `_shared/trade_quote_pack/pack_trade_quote.ts`). A scope of works put on the
+   work order as one text therefore vanishes for the crew on a sentence like
+   "replace a total of 6 sheets, tip fees included". Decide between one line
+   per scope item with a reply naming the lines the crew will not see, or a
+   check at make time with that same trade rule that refuses or warns by line.
+   Do not write a second, narrower money check.
+2. **A purchase order cannot be keyed on its supplier name.** The name is
+   editable, and an order for materials with no supplier named has to be
+   renamed by staff. A "one order per version and supplier name" rule both
+   lets a renamed order be made twice and blocks renaming the unnamed order to
+   a supplier that already has one. It needs a durable key per group of lines,
+   or the rule "once any live order exists for the version, make nothing more"
+   with no unique index on the name.
+3. **Job acceptance must not move these orders.** The acceptance step in
+   `updateJobStatus` approves every draft crew work order on the job and pushes
+   every draft purchase order to Xero. Orders made from a quote have to be left
+   out of it, so they are approved and pushed only by a person.
+4. **No push to Xero without a named supplier.** `pushPOToXero` creates a Xero
+   contact from the order's supplier name when it finds none, so a placeholder
+   name must be refused there until a real supplier is set.
+5. **Who made it.** `work_orders.created_by` and `purchase_orders.created_by`
+   are uuid columns in production (read 13 Oct 2026), while `createWorkOrder`
+   and `createPO` write the caller's email into them. An order made here must
+   record the signed-in user's id, and the email only on the event.
 
-Marking the job accepted does not approve this work order. The acceptance step
-that approves a job's other draft crew work orders leaves out any order made
-from a quote builder version; it is approved only by a person, through the
-existing work order approval.
+## 7. Out of scope for v1
 
-Returns `{ "created": true, "work_order": { "id", "wo_number", "status" } }`.
-A second call makes nothing and returns the first with `"created": false`
-(`ux_work_orders_quote_builder_version`: one live work order per version; a
-cancelled one frees it).
-
-Refusals, nothing made: `404 version_not_found`; `409 version_not_issued` (a
-draft); `409 nothing_for_work_order` (no scope text and no Labour line);
-`409 work_order_text_has_money` (the scope text, or a Labour line's description
-or unit, mentions a dollar amount, which must not reach a trade: issue a new
-version without it, or write the work order by hand).
-
-### 5.9 `POST quote_builder_make_purchase_orders`
-
-```json
-{ "version_id": "uuid of an issued version" }
-```
-
-Makes one **draft purchase order per supplier** from the version's Material cost
-lines, on the version's job. Supplier names are matched without regard to case.
-Each order has `status='draft'`, `reference` = the job number and `line_items`
-`[{ "description", "quantity", "unit", "unit_price" }]`, where `unit_price` is our
-unit cost ex GST. Material lines with no supplier share one draft named
-`No supplier named`, with the note "Supplier not named on the scope". Labour,
-Other and untyped lines are on no purchase order. Nothing is emailed to a
-supplier and nothing goes to Xero.
-
-Returns `{ "created": 2, "purchase_orders": [ { "id", "po_number", "supplier_name", "status" } ] }`:
-`created` is how many this call made, and the list is every live purchase order
-of the version. `created_by` on each is the signed-in user's id.
-
-Once any live purchase order exists for the version, a further call makes
-nothing, whatever the suppliers are called now. It returns `"created": 0`, the
-live orders, and a `message` naming them, for example "Purchase orders were
-already made from this quote: PO-123456 (Bunnings), PO-123457 (Reece). Nothing
-more was made. ...". So an order renamed since it was made (the unnamed one
-given its supplier) is never made a second time. The cost: a first call that
-made some orders and then failed is **not topped up** by a second call. Add the
-missing order by hand, or cancel the ones made and call again (with no live
-order left, the full set is made again). Two calls at the same moment are held
-to one order per supplier by `ux_purchase_orders_quote_builder_version_supplier`.
-
-Nothing here reaches Xero without a person's own push:
-
-- Marking the job accepted does not push these orders. The acceptance step that
-  pushes a job's other draft purchase orders to Xero leaves out any order made
-  from a quote builder version.
-- `push_po_to_xero` refuses a quote builder order that still has no supplier
-  (`No supplier named`, or a blank name) with `409 po_supplier_not_named`,
-  before Xero is asked for anything, so a Xero contact of that name can never be
-  made. Set the supplier on the order (`update_po`), then push.
-
-Refusals, nothing made: `404 version_not_found`; `409 version_not_issued`;
-`409 no_material_lines`.
-
-## 6. Out of scope for v1
 
 GHL, Xero, sending anything to a client, builder, supplier or trade, intake
 changes, the Ambrose Construct Group builder record, actual-cost capture, moving
-a private job's status, changing the pricing settings from the app, and the
-approved job work order (`work_orders.kind = 'job'`).
+a private job's status, changing the pricing settings from the app, work orders
+and purchase orders of any kind (section 6), and the approved job work order
+(`work_orders.kind = 'job'`).

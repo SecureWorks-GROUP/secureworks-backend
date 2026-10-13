@@ -15,10 +15,9 @@
 // never filed: the PDF bucket is public. A private quote mints one `miscellaneous` job.
 // Repair stage moves go through the injected `moveRepairStage`, which the
 // dispatch binds to the existing update_repair_stage writer, and only ever
-// forward. A draft crew work order and draft purchase orders are made only by
-// their own two actions, through the injected createWorkOrder and createPO.
-// Pricing settings are read from quote_builder_settings (20261013160000); no
-// pricing number lives in this file.
+// forward. Pricing settings are read from quote_builder_settings
+// (20261013160000): a goal the app shows the scoper, never a rule this file
+// applies to a line, and no pricing number lives here.
 
 import {
   INSURANCE_REPAIR_STAGES,
@@ -47,8 +46,10 @@ const COST_LINE_TYPES = new Set(["material", "labour", "other"]);
 // The document filed beside the client quote: a job_documents row of type
 // `other`, a meaningful type no close-out or pack reader counts. It carries no
 // prices. The material order list prints our costs and has no entry here: the
-// PDF bucket is public, so it is never given a slot or filed.
+// PDF bucket is public, so it is never given a slot or filed. An issue that
+// names it is not refused for that: the entry is skipped and the reply says so.
 const EXTRA_DOCUMENT_TYPE = "other";
+const UNFILED_DOCUMENT = "material_order_list";
 const EXTRA_DOCUMENTS: Record<string, { suffix: string }> = {
   scope_of_works: { suffix: "scope-of-works" },
 };
@@ -67,9 +68,12 @@ const SETTING_KEYS = {
   materials_multiplier: "insurance_materials_multiplier",
   target_margin_pct: "target_margin_pct",
 } as const;
-const UNNAMED_SUPPLIER = "No supplier named";
-const MONEY_IN_TEXT = /\$\s*\d/;
 const OPEN_VARIATION_STATUSES = new Set(["pending_approval", "sent"]);
+const APPROVED_THEN_MOVED_STATUSES = new Set(["sent", "accepted"]);
+const VARIATION_DECISION_EVENTS = new Set([
+  "variation_approved",
+  "variation_rejected",
+]);
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -111,35 +115,6 @@ export type VariationDecider = (input: {
   notes: string | null;
   userId: string | null;
 }) => Promise<unknown>;
-
-/**
- * One line of a crew work order. Only keys the trade read keeps
- * (TRADE_WO_SCOPE_ITEM_ALLOWLIST in index.ts), so the crew sees every one.
- */
-export type CrewWorkOrderScopeItem = {
-  description: string;
-  notes?: string;
-  qty?: number;
-  unit?: string;
-};
-
-/** Bound by the dispatch to createWorkOrder: one draft crew work order. */
-export type CrewWorkOrderCreator = (input: {
-  jobId: string;
-  scopeItems: CrewWorkOrderScopeItem[];
-  specialInstructions: string | null;
-  quoteBuilderVersionId: string;
-}) => Promise<any>;
-
-/** Bound by the dispatch to createPO: one draft purchase order. */
-export type PurchaseOrderCreator = (input: {
-  jobId: string;
-  supplierName: string;
-  reference: string | null;
-  lineItems: Array<Record<string, unknown>>;
-  notes: string | null;
-  quoteBuilderVersionId: string;
-}) => Promise<any>;
 
 function fail(code: string, message: string, status = 400): never {
   throw new QuoteBuilderError(code, message, status);
@@ -523,8 +498,10 @@ export async function listQuoteBuilderJobs(
 // ── Pricing settings ────────────────────────────────────────────────────────
 
 /**
- * The owner's pricing numbers. A missing row or a value that is not a number
- * reads as null; there is no fallback number anywhere on the server.
+ * The owner's pricing numbers: a goal the app shows the scoper, who sets his
+ * own markups. Nothing on the server compares a line or a margin to them. A
+ * missing row or a value that is not a number reads as null; there is no
+ * fallback number anywhere on the server.
  */
 export async function loadQuoteBuilderSettings(client: any) {
   const { data, error } = await client.from("quote_builder_settings")
@@ -544,52 +521,6 @@ export async function loadQuoteBuilderSettings(client: any) {
     materials_multiplier: number(SETTING_KEYS.materials_multiplier),
     target_margin_pct: number(SETTING_KEYS.target_margin_pct),
   };
-}
-
-// ── Orders made from an issued version ──────────────────────────────────────
-
-function workOrderView(row: any) {
-  return { id: row.id, wo_number: row.wo_number ?? null, status: row.status };
-}
-
-function purchaseOrderView(row: any) {
-  return {
-    id: row.id,
-    po_number: row.po_number ?? null,
-    supplier_name: row.supplier_name ?? null,
-    status: row.status,
-  };
-}
-
-async function liveWorkOrders(client: any, versionIds: string[]) {
-  const out: any[] = [];
-  for (let i = 0; i < versionIds.length; i += 50) {
-    const { data, error } = await client.from("work_orders")
-      .select("id, wo_number, status, quote_builder_version_id, created_at")
-      .in("quote_builder_version_id", versionIds.slice(i, i + 50))
-      .neq("status", "cancelled")
-      .order("created_at", { ascending: true });
-    if (error) readError("work orders read failed", error);
-    out.push(...(data || []));
-  }
-  return out;
-}
-
-async function livePurchaseOrders(client: any, versionIds: string[]) {
-  const out: any[] = [];
-  for (let i = 0; i < versionIds.length; i += 50) {
-    const { data, error } = await client.from("purchase_orders")
-      .select(
-        "id, po_number, supplier_name, status, quote_builder_version_id, created_at",
-      )
-      .in("quote_builder_version_id", versionIds.slice(i, i + 50))
-      .neq("status", "cancelled")
-      .neq("status", "deleted")
-      .order("created_at", { ascending: true });
-    if (error) readError("purchase orders read failed", error);
-    out.push(...(data || []));
-  }
-  return out;
 }
 
 // ── GET quote_builder_get_job ───────────────────────────────────────────────
@@ -612,27 +543,8 @@ export async function getQuoteBuilderJob(
     );
   }
 
-  const rawVersions = (await loadVersions(client, [jobId])).map(versionView);
-  const versionIds = rawVersions.map((v) => v.id);
-  const [workOrders, purchaseOrders, settings] = await Promise.all([
-    liveWorkOrders(client, versionIds),
-    livePurchaseOrders(client, versionIds),
-    loadQuoteBuilderSettings(client),
-  ]);
-  // What was already made from each version, so the app shows it instead of
-  // offering to make it again.
-  const versions = rawVersions.map((v) => {
-    const workOrder = workOrders.find((w) =>
-      w.quote_builder_version_id === v.id
-    );
-    return {
-      ...v,
-      work_order: workOrder ? workOrderView(workOrder) : null,
-      purchase_orders: purchaseOrders
-        .filter((po) => po.quote_builder_version_id === v.id)
-        .map(purchaseOrderView),
-    };
-  });
+  const versions = (await loadVersions(client, [jobId])).map(versionView);
+  const settings = await loadQuoteBuilderSettings(client);
   const { data: variationRows, error: variationError } = await client
     .from("job_variations")
     .select("id, variation_number, status, amount, cost_estimate, approved_at")
@@ -1298,20 +1210,30 @@ async function retireEarlierExtraDocuments(client: any, version: any) {
   if (error) readError("extra document retire failed", error);
 }
 
-/** `extra_documents` on issue: checked whole before anything is written. */
+/**
+ * `extra_documents` on issue: checked whole before anything is written. A
+ * material order list entry is never filed and never fails the issue: it comes
+ * back in `notFiled` and its path is not read.
+ */
 function extraDocumentsInput(raw: unknown, version: any) {
-  if (raw === undefined || raw === null) return [];
+  const file: Array<{ document: string; path: string }> = [];
+  const notFiled: Array<{ document: string; reason: string }> = [];
+  if (raw === undefined || raw === null) return { file, notFiled };
   if (!Array.isArray(raw)) {
     fail("invalid_input", "extra_documents must be an array");
   }
   const seen = new Set<string>();
-  return raw.map((entry: any) => {
+  for (const entry of raw) {
     const document = String(entry?.document || "");
+    if (document === UNFILED_DOCUMENT) {
+      if (!seen.has(document)) {
+        notFiled.push({ document, reason: "internal_costs_not_filed" });
+      }
+      seen.add(document);
+      continue;
+    }
     if (!isExtraDocument(document)) {
-      fail(
-        "invalid_input",
-        "extra_documents[].document must be scope_of_works (the material order list carries our costs and is not filed)",
-      );
+      fail("invalid_input", "extra_documents[].document must be scope_of_works");
     }
     if (seen.has(document)) {
       fail("invalid_input", `extra_documents names ${document} twice`);
@@ -1324,8 +1246,9 @@ function extraDocumentsInput(raw: unknown, version: any) {
         `extra_documents: pdf_path for ${document} must be the path quote_builder_pdf_upload_url returned`,
       );
     }
-    return { document, path };
-  });
+    file.push({ document, path });
+  }
+  return { file, notFiled };
 }
 
 /**
@@ -1409,8 +1332,49 @@ async function fileExtraDocument(
 // ── The job's value ─────────────────────────────────────────────────────────
 
 /**
- * Latest issued scope plus the latest issued version of every approved
- * variation. Null when no scope has been issued.
+ * The job's variations that count toward its value: approved, and still
+ * counted once an approved one is sent to the client or accepted by them.
+ *
+ * `approved` is read off the row. `sent` and `accepted` say nothing about the
+ * decision (a variation can be sent before anyone decides, and approved_at is
+ * stamped on a rejection too), so for those the variation's newest recorded
+ * decision, the job event the approval path writes, must be an approval. A
+ * variation sent or accepted without ever being approved is not counted.
+ */
+async function approvedVariationIds(client: any, jobId: string) {
+  const { data, error } = await client.from("job_variations")
+    .select("id, status")
+    .eq("job_id", jobId);
+  if (error) readError("variations read failed", error);
+  const rows = data || [];
+  const ids = new Set<string>(
+    rows.filter((v: any) => v.status === "approved").map((v: any) => v.id),
+  );
+  const afterDecision = rows.filter((v: any) =>
+    APPROVED_THEN_MOVED_STATUSES.has(String(v.status || ""))
+  );
+  if (!afterDecision.length) return ids;
+
+  const { data: events, error: eventsError } = await client.from("job_events")
+    .select("event_type, detail_json, created_at")
+    .eq("job_id", jobId)
+    .in("event_type", [...VARIATION_DECISION_EVENTS])
+    .order("created_at", { ascending: true });
+  if (eventsError) readError("variation decisions read failed", eventsError);
+  const lastDecision = new Map<string, string>();
+  for (const event of events || []) {
+    const id = event.detail_json?.variation_id;
+    if (id) lastDecision.set(String(id), event.event_type);
+  }
+  for (const v of afterDecision) {
+    if (lastDecision.get(v.id) === "variation_approved") ids.add(v.id);
+  }
+  return ids;
+}
+
+/**
+ * Latest issued scope plus the latest issued version of every variation that
+ * counts (approvedVariationIds). Null when no scope has been issued.
  */
 async function quoteBuilderJobValue(client: any, jobId: string) {
   const issued = (await loadVersions(client, [jobId])).filter((v) =>
@@ -1428,15 +1392,7 @@ async function quoteBuilderJobValue(client: any, jobId: string) {
   }
   let approved: any[] = [];
   if (chains.size) {
-    const { data, error } = await client.from("job_variations")
-      .select("id, status")
-      .eq("job_id", jobId);
-    if (error) readError("variations read failed", error);
-    const approvedIds = new Set(
-      (data || []).filter((v: any) => v.status === "approved").map((v: any) =>
-        v.id
-      ),
-    );
+    const approvedIds = await approvedVariationIds(client, jobId);
     approved = [...chains.values()].map(latest).filter((v) =>
       v.variation_id && approvedIds.has(v.variation_id)
     );
@@ -1642,7 +1598,10 @@ export async function issueQuoteBuilderVersion(
   }
   const { data: urlData } = client.storage.from(QUOTE_BUILDER_PDF_BUCKET)
     .getPublicUrl(path);
-  const extras = extraDocumentsInput(body?.extra_documents, version);
+  const { file: extras, notFiled } = extraDocumentsInput(
+    body?.extra_documents,
+    version,
+  );
   for (const extra of extras) {
     if (
       !(await storageObjectExists(client, QUOTE_BUILDER_PDF_BUCKET, extra.path))
@@ -1921,6 +1880,7 @@ export async function issueQuoteBuilderVersion(
       url: doc.pdf_url || doc.storage_url,
     },
     extra_documents: filedExtras,
+    ...(notFiled.length ? { extra_documents_not_filed: notFiled } : {}),
     variation: variationResult,
     ...(jobValue ? { job_value: jobValue } : {}),
     stage,
@@ -2011,244 +1971,6 @@ export async function decideQuoteBuilderVariation(
   };
 }
 
-// ── Work order and purchase orders from an issued version ───────────────────
-
-async function loadIssuedVersion(client: any, versionId: string) {
-  const { data, error } = await client.from("quote_builder_versions")
-    .select(VERSION_SELECT)
-    .eq("id", versionId)
-    .maybeSingle();
-  if (error) readError("quote builder version read failed", error);
-  if (!data) fail("version_not_found", "Version not found", 404);
-  if (data.status !== "issued") {
-    fail(
-      "version_not_issued",
-      "Issue this version first; orders are made from an issued quote.",
-      409,
-    );
-  }
-  return versionView(data);
-}
-
-/**
- * What goes on the crew work order: the scope of works text, then each Labour
- * cost line as its description and hours. A crew work order is read by trades,
- * so no cost and no price goes on it, and a dollar amount typed into any of the
- * text refuses the whole work order rather than reaching a trade.
- */
-export function quoteBuilderWorkOrderItems(
-  version: any,
-): CrewWorkOrderScopeItem[] {
-  const items: CrewWorkOrderScopeItem[] = [];
-  const narrative = text(version?.narrative, 20000);
-  if (narrative) items.push({ description: "Scope of works", notes: narrative });
-  for (const line of version?.cost_lines || []) {
-    if (line?.line_type !== "labour") continue;
-    items.push({
-      description: String(line.description || "Labour"),
-      qty: Number(line.qty),
-      unit: text(line.unit, 32) || "hr",
-    });
-  }
-  if (!items.length) {
-    fail(
-      "nothing_for_work_order",
-      "This quote has no scope of works text and no Labour lines, so there is nothing to put on a work order.",
-      409,
-    );
-  }
-  const priced = items.find((i) =>
-    [i.description, i.notes, i.unit].some((part) =>
-      MONEY_IN_TEXT.test(part ?? "")
-    )
-  );
-  if (priced) {
-    fail(
-      "work_order_text_has_money",
-      `"${priced.description}" mentions a dollar amount. A work order is read by the crew, so none was made. Issue a new version without the amount, or write the work order by hand.`,
-      409,
-    );
-  }
-  return items;
-}
-
-/**
- * One group per supplier from the Material cost lines, with quantity and our
- * unit cost ex GST. Labour, Other and untyped lines are never ordered. Lines
- * with no supplier share one group.
- */
-export function quoteBuilderPurchaseOrderGroups(version: any) {
-  const groups = new Map<string, {
-    supplier_name: string;
-    supplier_named: boolean;
-    line_items: Array<Record<string, unknown>>;
-  }>();
-  for (const line of version?.cost_lines || []) {
-    if (line?.line_type !== "material") continue;
-    const supplier = text(line.supplier_or_trade, 200);
-    const name = supplier ?? UNNAMED_SUPPLIER;
-    const key = name.toLowerCase();
-    const group = groups.get(key) ??
-      {
-        supplier_name: name,
-        supplier_named: supplier !== null,
-        line_items: [],
-      };
-    group.line_items.push({
-      description: line.description,
-      quantity: Number(line.qty),
-      ...(line.unit ? { unit: line.unit } : {}),
-      unit_price: Number(line.unit_cost_ex_gst),
-    });
-    groups.set(key, group);
-  }
-  return [...groups.values()];
-}
-
-/**
- * A purchase order made from a quote that still has no supplier: its Material
- * lines named none, so it carries the placeholder name (or the name was
- * cleared). Pushed to Xero as it stands, it would make a Xero contact of that
- * name, so the push refuses it until a real supplier is set.
- */
-export function quoteBuilderPurchaseOrderNeedsSupplier(po: any): boolean {
-  if (po?.quote_builder_version_id == null) return false;
-  const name = String(po?.supplier_name ?? "").trim().toLowerCase();
-  return name === "" || name === UNNAMED_SUPPLIER.toLowerCase();
-}
-
-function creatorFailure(label: string, error: any): never {
-  throw new QuoteBuilderError(
-    "order_create_failed",
-    `${label}: ${error?.message || error}`,
-    500,
-  );
-}
-
-// ── POST quote_builder_make_work_order ──────────────────────────────────────
-
-export async function makeQuoteBuilderWorkOrder(
-  client: any,
-  body: any,
-  actor: QuoteBuilderActor,
-  deps: { createWorkOrder: CrewWorkOrderCreator },
-) {
-  const versionId = requireUuid(body?.version_id, "version_id");
-  const version = await loadIssuedVersion(client, versionId);
-  // The job is the version's own, never one the request names.
-  const { lane } = await loadJob(client, version.job_id, actor);
-  if (!lane) {
-    fail(
-      "job_not_quotable",
-      "Only repair and private jobs are quoted here",
-      409,
-    );
-  }
-
-  const existing = (await liveWorkOrders(client, [versionId]))[0];
-  if (existing) return { created: false, work_order: workOrderView(existing) };
-
-  const scopeItems = quoteBuilderWorkOrderItems(version);
-  let made: any;
-  try {
-    made = await deps.createWorkOrder({
-      jobId: version.job_id,
-      scopeItems,
-      specialInstructions: version.quote_number
-        ? `From quote ${version.quote_number}`
-        : null,
-      quoteBuilderVersionId: versionId,
-    });
-  } catch (error) {
-    // A second press that lost the race: the unique index refused it, so
-    // return the one the first press made.
-    const again = (error as any)?.code === "23505"
-      ? (await liveWorkOrders(client, [versionId]))[0]
-      : null;
-    if (again) return { created: false, work_order: workOrderView(again) };
-    creatorFailure("work order create failed", error);
-  }
-  if (!made?.work_order?.id) {
-    creatorFailure("work order create failed", "no work order returned");
-  }
-  return { created: true, work_order: workOrderView(made.work_order) };
-}
-
-// ── POST quote_builder_make_purchase_orders ─────────────────────────────────
-
-export async function makeQuoteBuilderPurchaseOrders(
-  client: any,
-  body: any,
-  actor: QuoteBuilderActor,
-  deps: { createPurchaseOrder: PurchaseOrderCreator },
-) {
-  const versionId = requireUuid(body?.version_id, "version_id");
-  const version = await loadIssuedVersion(client, versionId);
-  const { job, lane } = await loadJob(client, version.job_id, actor);
-  if (!lane) {
-    fail(
-      "job_not_quotable",
-      "Only repair and private jobs are quoted here",
-      409,
-    );
-  }
-  const groups = quoteBuilderPurchaseOrderGroups(version);
-  if (!groups.length) {
-    fail(
-      "no_material_lines",
-      "This quote has no Material cost lines, so there is nothing to order.",
-      409,
-    );
-  }
-
-  // Once any live order exists for the version a further press makes nothing,
-  // whatever the suppliers are called now: an order renamed since (the unnamed
-  // one given its supplier) must not be made a second time.
-  const existing = await livePurchaseOrders(client, [versionId]);
-  if (existing.length) {
-    const named = existing.map((po) =>
-      `${po.po_number || "a purchase order"} (${
-        po.supplier_name || "no supplier"
-      })`
-    ).join(", ");
-    return {
-      created: 0,
-      purchase_orders: existing.map(purchaseOrderView),
-      message:
-        `Purchase orders were already made from this quote: ${named}. Nothing more was made. If one is missing, add it by hand; to make them all again, cancel these first.`,
-    };
-  }
-
-  let created = 0;
-  // One after another, never in parallel: createPO numbers a purchase order
-  // from the clock.
-  for (const group of groups) {
-    try {
-      await deps.createPurchaseOrder({
-        jobId: version.job_id,
-        supplierName: group.supplier_name,
-        reference: job.job_number ?? null,
-        lineItems: group.line_items,
-        notes: group.supplier_named ? null : "Supplier not named on the scope",
-        quoteBuilderVersionId: versionId,
-      });
-      created += 1;
-    } catch (error) {
-      // 23505: a press at the same moment made this supplier's order first; it
-      // is read back below with the rest.
-      if ((error as any)?.code !== "23505") {
-        creatorFailure("purchase order create failed", error);
-      }
-    }
-  }
-  return {
-    created,
-    purchase_orders: (await livePurchaseOrders(client, [versionId])).map(
-      purchaseOrderView,
-    ),
-  };
-}
-
 export const QUOTE_BUILDER_ACTIONS = new Set([
   "quote_builder_list_jobs",
   "quote_builder_get_job",
@@ -2260,6 +1982,4 @@ export const QUOTE_BUILDER_ACTIONS = new Set([
   "quote_builder_pdf_upload_url",
   "quote_builder_issue",
   "quote_builder_decide_variation",
-  "quote_builder_make_work_order",
-  "quote_builder_make_purchase_orders",
 ]);

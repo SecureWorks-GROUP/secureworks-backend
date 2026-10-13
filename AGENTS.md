@@ -1548,21 +1548,23 @@ generated from it) only through `quoteBuilderMayWriteJobValue`: `repair` and
 never widen it to `fencing` or `makesafe` typed repair cards, because
 `createInvoice` prices a job from `pricing_json` when given no lines (such a
 card with no other tool's pricing answers `job_type_not_valued_here`, never
-`priced_by_another_tool`). The scope of works PDF is a `job_documents` row of
-type `other` (a meaningful type no close-out reader counts), never
-`work_order`. The material order list prints our costs and is never given an
-upload slot or filed: `job-pdfs` is a public bucket, so filing it waits on
-private storage with signed links and the owner's say. An order made from an
-issued quote is a draft crew work order (never `kind='job'`) or a draft
-purchase order, tied to its version by `quote_builder_version_id`, which only
-the quote builder dispatch may set (`createWorkOrder` / `createPO` take it, and
-the pressing user's id for `created_by`, a uuid column, as options, never from
-the request body). Its work order lines use only keys on
-`TRADE_WO_SCOPE_ITEM_ALLOWLIST`; any other key reaches the crew blank. Once a
-live purchase order exists for a version a further press makes nothing. The
-acceptance trigger in `updateJobStatus` leaves quote builder orders out, and
-`pushPOToXero` refuses one with no supplier named (`po_supplier_not_named`), so
-they reach approval and Xero only on a person's own action.
+`priced_by_another_tool`). A variation counts toward that value once approved
+and still counts when later `sent` or `accepted`, but only when its newest
+decision event (`job_events` `variation_approved` / `variation_rejected`) is an
+approval: `approved_at` is stamped on a rejection too, and a variation can be
+sent or accepted without ever being approved. The settings are a goal the
+scoper may ignore, never a rule: nothing on the server refuses, clamps or
+rewrites a charge line or margin for differing from them. The scope of works
+PDF is a `job_documents` row of type `other` (a meaningful type no close-out
+reader counts), never `work_order`. The material order list prints our costs
+and is never given an upload slot or filed: `job-pdfs` is a public bucket, so
+filing it waits on private storage with signed links and the owner's say; an
+issue that names it still issues and answers `extra_documents_not_filed`.
+Making a draft crew work order and draft purchase orders from an issued quote
+is NOT built: the first attempt was taken out, and its open design points
+(the trade read blanks a text holding any money word, a supplier name is no
+key, the acceptance trigger, the Xero push of an unnamed supplier, uuid
+`created_by`) are in the contract doc under "Not built yet".
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 

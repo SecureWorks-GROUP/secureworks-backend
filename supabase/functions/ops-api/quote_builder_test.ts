@@ -11,8 +11,6 @@ import {
   issueQuoteBuilderVersion,
   listQuoteBuilderJobs,
   loadQuoteBuilderSettings,
-  makeQuoteBuilderPurchaseOrders,
-  makeQuoteBuilderWorkOrder,
   normaliseChargeLines,
   normaliseCostLines,
   QUOTE_BUILDER_ACTIONS,
@@ -21,10 +19,8 @@ import {
   quoteBuilderPdfUploadUrl,
   quoteBuilderPhotoRegister,
   quoteBuilderPhotoUploadUrl,
-  quoteBuilderPurchaseOrderGroups,
   quoteBuilderQuoteNumber,
   quoteBuilderTotals,
-  quoteBuilderWorkOrderItems,
   repairStageMoveDecision,
   saveQuoteBuilderVersion,
   writeQuoteBuilderJobValue,
@@ -32,12 +28,8 @@ import {
 import {
   _authorizeOpsApiAction,
   _opsApiActionNeedsStaffRole,
-  _pushPOToXero,
-  _updateJobStatus,
   AGENT_READ_ALLOWED_ACTIONS,
-  ApiError,
   dispatchQuoteBuilderAction,
-  redactTradeWorkOrdersForAllocated,
 } from "./index.ts";
 
 type Row = Record<string, any>;
@@ -73,24 +65,9 @@ function pathValue(row: Row, key: string): any {
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 
 // ux_job_docs_live_unsent_quote (20260701000001),
-// ux_jobs_quote_builder_request_id (20261009120000) and the three indexes of
-// 20261013160000: one extra document per version and kind, one live work order
-// per version, one live purchase order per version and supplier.
+// ux_jobs_quote_builder_request_id (20261009120000) and the extra document
+// index of 20261013160000: one filed copy per version and document.
 function uniqueKey(table: string, r: Row): string | null {
-  if (table === "work_orders") {
-    return r.quote_builder_version_id && r.status !== "cancelled"
-      ? r.quote_builder_version_id
-      : null;
-  }
-  if (table === "purchase_orders") {
-    return r.quote_builder_version_id &&
-        !["cancelled", "deleted"].includes(r.status)
-      ? [
-        r.quote_builder_version_id,
-        String(r.supplier_name ?? "").toLowerCase(),
-      ].join("|")
-      : null;
-  }
   if (table === "job_documents" && r.type === "other") {
     return r.metadata?.quote_builder_document
       ? [
@@ -1217,8 +1194,8 @@ Deno.test("quote builder: a non-uuid job id is refused before any read", async (
   );
 });
 
-// ── Pricing settings, line types, the job's value, extra documents and the
-// ── work order and purchase orders made from an issued quote (13 Oct 2026).
+// ── Pricing settings, line types, the job's value and the filed scope of
+// ── works (13 Oct 2026).
 
 const FENCE_REPAIR_JOB = "88888888-8888-4888-8888-888888888888";
 const PRIVATE_JOB = "99999999-9999-4999-8999-999999999999";
@@ -1583,7 +1560,7 @@ Deno.test("quote builder: the scope of works is filed on the job beside the quot
   assertEquals(filed.filter((d) => d.superseded_at == null), []);
 });
 
-Deno.test("quote builder: the material order list is never given a slot or filed", async () => {
+Deno.test("quote builder: the material order list is never given a slot or filed, and never fails an issue", async () => {
   const store = seed();
   const { client, upload } = makeFakeClient(store);
   const draft = (await saveQuoteBuilderVersion(client, {
@@ -1596,6 +1573,11 @@ Deno.test("quote builder: the material order list is never given a slot or filed
     version_id: draft.id,
   }, ACTOR);
   upload("job-pdfs", quoteSlot.path);
+  const scopeSlot = await quoteBuilderPdfUploadUrl(client, {
+    version_id: draft.id,
+    document: "scope_of_works",
+  }, ACTOR);
+  upload("job-pdfs", scopeSlot.path);
 
   // No upload slot, so nothing of the cost list can reach the public bucket.
   assertEquals(
@@ -1607,29 +1589,54 @@ Deno.test("quote builder: the material order list is never given a slot or filed
     ),
     "invalid_input",
   );
-  // And an issue naming one is refused whole, whatever path it gives.
+
+  // The app may still list it at issue. The quote issues as normal, nothing is
+  // filed for the list whatever path it gives, and the reply says so.
   const listPath = quoteSlot.path.replace(".pdf", "-material-order-list.pdf");
   upload("job-pdfs", listPath);
-  assertEquals(
-    await code(
-      issueQuoteBuilderVersion(
-        client,
-        {
-          version_id: draft.id,
-          pdf_path: quoteSlot.path,
-          extra_documents: [{
-            document: "material_order_list",
-            pdf_path: listPath,
-          }],
-        },
-        ACTOR,
-        { moveRepairStage: stageMover(store, []) },
-      ),
-    ),
-    "invalid_input",
+  const issued = await issueQuoteBuilderVersion(
+    client,
+    {
+      version_id: draft.id,
+      pdf_path: quoteSlot.path,
+      extra_documents: [
+        { document: "material_order_list", pdf_path: listPath },
+        { document: "scope_of_works", pdf_path: scopeSlot.path },
+        { document: "material_order_list" },
+      ],
+    },
+    ACTOR,
+    { moveRepairStage: stageMover(store, []) },
   );
-  assertEquals(store.job_documents.length, 0);
-  assertEquals(store.quote_builder_versions[0].status, "draft");
+  assertEquals(issued.version.status, "issued");
+  assertEquals(issued.job_value, { written: true, total_inc_gst: 715 });
+  assertEquals(issued.stage, { moved: true, from: "scoping", to: "quoted" });
+  assertEquals(issued.extra_documents.map((d: any) => d.document), [
+    "scope_of_works",
+  ]);
+  assertEquals(issued.extra_documents_not_filed, [
+    { document: "material_order_list", reason: "internal_costs_not_filed" },
+  ]);
+  assertEquals(
+    store.job_documents.map((d) => [
+      d.type,
+      d.metadata.quote_builder_document ?? null,
+    ]),
+    [["quote", null], ["other", "scope_of_works"]],
+  );
+  for (const doc of store.job_documents) {
+    assertEquals(
+      JSON.stringify(doc).includes("material-order-list"),
+      false,
+    );
+  }
+
+  // An issue that names no cost list says nothing about one.
+  const again = await issueScope(store, client, upload, REPAIR_JOB, {
+    baseVersionId: draft.id,
+    extras: ["scope_of_works"],
+  });
+  assertEquals("extra_documents_not_filed" in again, false);
 });
 
 Deno.test("quote builder: an issue with no extra documents files the quote alone, as before", async () => {
@@ -1839,559 +1846,207 @@ Deno.test("quote builder: a failed value write is reported and the quote is stil
   });
 });
 
-Deno.test("quote builder: a work order from an issued quote carries the scope and labour hours, never money", async () => {
+Deno.test("quote builder: an approved variation still counts once it is sent or accepted, and one never approved does not", async () => {
   const store = seed();
   const { client, upload } = makeFakeClient(store);
-  const createdWith: any[] = [];
-  const createWorkOrder = (input: any) => {
-    createdWith.push(input);
-    return client.from("work_orders").insert({
-      org_id: ORG,
-      job_id: input.jobId,
-      wo_number: `WO-${createdWith.length}`,
-      scope_items: input.scopeItems,
-      special_instructions: input.specialInstructions,
-      status: "draft",
-      quote_builder_version_id: input.quoteBuilderVersionId,
-    }).select().single().then(({ data, error }: any) => {
-      if (error) throw error;
-      return { work_order: data };
-    });
+  const moveRepairStage = stageMover(store, []);
+  const job = () => store.jobs.find((j) => j.id === REPAIR_JOB)!;
+  const variation = (id: string) =>
+    store.job_variations.find((v) => v.id === id)!;
+  await issueScope(store, client, upload, REPAIR_JOB);
+
+  const issueVariation = async (price: number) => {
+    const draft = (await saveQuoteBuilderVersion(client, {
+      job_id: REPAIR_JOB,
+      kind: "variation",
+      title: "Extra",
+      charge_lines: [{ ...CHARGE[0], unit_price_ex_gst: price }],
+    }, ACTOR)).version;
+    const slot = await quoteBuilderPdfUploadUrl(client, {
+      version_id: draft.id,
+    }, ACTOR);
+    upload("job-pdfs", slot.path);
+    return (await issueQuoteBuilderVersion(
+      client,
+      { version_id: draft.id, pdf_path: slot.path },
+      ACTOR,
+      { moveRepairStage },
+    )).variation.id as string;
   };
-  const make = (body: any) =>
-    makeQuoteBuilderWorkOrder(client, body, ACTOR, { createWorkOrder });
-
-  const draft = (await saveQuoteBuilderVersion(client, {
-    job_id: REPAIR_JOB,
-    kind: "scope",
-    charge_lines: CHARGE,
-    cost_lines: TYPED_COST,
-  }, ACTOR)).version;
-  assertEquals(
-    await code(make({ version_id: draft.id })),
-    "version_not_issued",
-  );
-  assertEquals(await code(make({ version_id: "nope" })), "invalid_input");
-  assertEquals(
-    await code(make({ version_id: crypto.randomUUID() })),
-    "version_not_found",
-  );
-  assertEquals(store.work_orders ?? [], []);
-
-  const issued = await issueScope(store, client, upload, REPAIR_JOB, {
-    baseVersionId: draft.id,
-    costLines: TYPED_COST,
-    chargeLines: [{ ...CHARGE[0], unit_price_ex_gst: 1234.56 }],
-  });
-  // The request names another job; the work order still lands on the version's.
-  const first = await make({
-    version_id: issued.version.id,
-    job_id: LATE_REPAIR_JOB,
-    jobId: LATE_REPAIR_JOB,
-  });
-  assertEquals(first.created, true);
-  assertEquals(store.work_orders.length, 1);
-  const row = store.work_orders[0];
-  assertEquals(row.job_id, REPAIR_JOB);
-  assertEquals(row.status, "draft");
-  assertEquals(row.kind, undefined);
-  assertEquals(row.origin, undefined);
-  assertEquals(row.scope_items, [
-    {
-      description: "Scope of works",
-      notes: "Replace the storm damaged fascia and gutter",
-    },
-    { description: "Carpenter on site", qty: 8, unit: "hr" },
-    { description: "Labourer", qty: 4.5, unit: "hr" },
-  ]);
-  // What an allocated trade reads: the real trade redaction keeps every key,
-  // so the scope text and the labour hours reach the crew.
-  assertEquals(
-    redactTradeWorkOrdersForAllocated([structuredClone(row)])[0].scope_items,
-    row.scope_items,
-  );
-  assertEquals(row.special_instructions, "From quote SWR-26101-Q1");
-  // No dollar sign, and none of the version's unit costs, prices or totals.
-  const printed = JSON.stringify([row.scope_items, row.special_instructions]);
-  assertEquals(printed.includes("$"), false);
-  const money = [
-    ...issued.version.cost_lines.flatMap((l: any) => [
-      l.unit_cost_ex_gst,
-      l.line_total_ex_gst,
-    ]),
-    ...issued.version.charge_lines.flatMap((l: any) => [
-      l.unit_price_ex_gst,
-      l.line_total_inc_gst,
-    ]),
-    issued.version.cost_total_ex_gst,
-    issued.version.charge_total_inc_gst,
-  ];
-  for (const figure of money) {
-    assertEquals(
-      new RegExp(`(^|[^0-9.])${String(figure).replace(".", "\\.")}([^0-9.]|$)`)
-        .test(printed.replace("SWR-26101-Q1", "")),
-      false,
-      `work order text carries the figure ${figure}`,
-    );
-  }
-
-  // A second press makes nothing and returns the first.
-  const second = await make({ version_id: issued.version.id });
-  assertEquals(second, { created: false, work_order: first.work_order });
-  assertEquals(store.work_orders.length, 1);
-  assertEquals(createdWith.length, 1);
-
-  // Two presses at once: the unique index refuses the loser, which reads back
-  // the winner's.
-  const racing = (input: any) => {
-    store.work_orders.push({
-      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      job_id: input.jobId,
-      wo_number: "WO-WON",
-      status: "draft",
-      quote_builder_version_id: input.quoteBuilderVersionId,
-      created_at: tick(),
-    });
-    return createWorkOrder(input);
-  };
-  const other = await issueScope(store, client, upload, LATE_REPAIR_JOB, {
-    costLines: TYPED_COST,
-  });
-  const lost = await makeQuoteBuilderWorkOrder(
-    client,
-    {
-      version_id: other.version.id,
-    },
-    ACTOR,
-    { createWorkOrder: racing },
-  );
-  assertEquals(lost, {
-    created: false,
-    work_order: {
-      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      wo_number: "WO-WON",
-      status: "draft",
-    },
-  });
-
-  // The app sees what was made on the version it came from.
-  const opened = await getQuoteBuilderJob(
-    client,
-    new URLSearchParams(`job_id=${REPAIR_JOB}`),
-    ACTOR,
-  );
-  assertEquals(
-    opened.scope.versions.map((v: any) => v.work_order),
-    [first.work_order],
-  );
-});
-
-Deno.test("quote builder: a dollar amount in the scope text or a labour line refuses the work order", () => {
-  const items = (version: any) =>
-    code(Promise.resolve().then(() => quoteBuilderWorkOrderItems(version)));
-  return Promise.all([
-    items({ narrative: "Allow $500 for tapware", cost_lines: [] }),
-    items({
-      narrative: "Fix the gutter",
-      cost_lines: [{
-        line_type: "labour",
-        description: "Carpenter @ $ 55 an hour",
-        qty: 8,
-        unit: "hr",
-      }],
-    }),
-    items({
-      narrative: "Fix the gutter",
-      cost_lines: [{
-        line_type: "labour",
-        description: "Carpenter",
-        qty: 8,
-        unit: "$55/hr",
-      }],
-    }),
-    items({ narrative: null, cost_lines: [TYPED_COST[2], TYPED_COST[7]] }),
-    // A material line's wording never reaches the work order, so it cannot refuse it.
-    items({
-      narrative: "Fix the gutter",
-      cost_lines: [{ ...TYPED_COST[2], description: "Board at $17 a metre" }],
-    }),
-  ]).then((codes) =>
-    assertEquals(codes, [
-      "work_order_text_has_money",
-      "work_order_text_has_money",
-      "work_order_text_has_money",
-      "nothing_for_work_order",
-      "no_error",
-    ])
-  );
-});
-
-Deno.test("quote builder: purchase orders from an issued quote, one draft per supplier from the Material lines", async () => {
-  const store = seed();
-  const { client, upload } = makeFakeClient(store);
-  const createdWith: any[] = [];
-  const createPurchaseOrder = (input: any) => {
-    createdWith.push(input);
-    const subtotal = input.lineItems.reduce(
-      (sum: number, li: any) => sum + li.quantity * li.unit_price,
-      0,
-    );
-    return client.from("purchase_orders").insert({
-      org_id: ORG,
-      job_id: input.jobId,
-      po_number: `PO-${createdWith.length}`,
-      supplier_name: input.supplierName,
-      reference: input.reference,
-      line_items: input.lineItems,
-      subtotal,
-      notes: input.notes,
-      status: "draft",
-      quote_builder_version_id: input.quoteBuilderVersionId,
-    }).select().single().then(({ data, error }: any) => {
-      if (error) throw error;
-      return { purchase_order: data };
-    });
-  };
-  const make = (body: any) =>
-    makeQuoteBuilderPurchaseOrders(client, body, ACTOR, {
-      createPurchaseOrder,
-    });
-
-  const issued = await issueScope(store, client, upload, REPAIR_JOB, {
-    costLines: TYPED_COST,
-  });
-  const first = await make({
-    version_id: issued.version.id,
-    job_id: LATE_REPAIR_JOB,
-  });
-  assertEquals(first.created, 3);
-  assertEquals(
-    store.purchase_orders.map((po) => [
-      po.supplier_name,
-      po.job_id,
-      po.status,
-      po.reference,
-      po.subtotal,
-      po.notes,
-      po.xero_po_id,
-    ]),
-    [
-      // "Bunnings" and "bunnings" are one supplier: 12 x 17 + 20 x 3.
-      ["Bunnings", REPAIR_JOB, "draft", "SWR-26101", 264, null, undefined],
-      ["Stratco", REPAIR_JOB, "draft", "SWR-26101", 138, null, undefined],
-      [
-        "No supplier named",
-        REPAIR_JOB,
-        "draft",
-        "SWR-26101",
-        18,
-        "Supplier not named on the scope",
-        undefined,
-      ],
-    ],
-  );
-  assertEquals(store.purchase_orders[0].line_items, [
-    {
-      description: "Fascia board 190 mm",
-      quantity: 12,
-      unit: "m",
-      unit_price: 17,
-    },
-    { description: "Gutter brackets", quantity: 20, unit: "ea", unit_price: 3 },
-  ]);
-  // Labour, Other and untyped lines are on no purchase order.
-  const ordered = store.purchase_orders.flatMap((po) =>
-    po.line_items.map((li: any) => li.description)
-  );
-  for (
-    const absent of ["Carpenter on site", "Skip bin", "Untyped legacy line"]
-  ) {
-    assertEquals(ordered.includes(absent), false);
-  }
-  assertEquals(first.purchase_orders.map((po: any) => po.supplier_name), [
-    "Bunnings",
-    "Stratco",
-    "No supplier named",
-  ]);
-
-  assertEquals("message" in first, false);
-
-  // A second press makes nothing, returns the same three and names them.
-  const second = await make({ version_id: issued.version.id });
-  assertEquals(second.created, 0);
-  assertEquals(second.purchase_orders, first.purchase_orders);
-  assert(
-    String(second.message).includes(
-      "PO-1 (Bunnings), PO-2 (Stratco), PO-3 (No supplier named)",
-    ),
-    second.message,
-  );
-  assertEquals(store.purchase_orders.length, 3);
-  assertEquals(createdWith.length, 3);
-
-  // Staff fill in the unnamed order's supplier. A further press still makes
-  // nothing: the renamed order is not made a second time.
-  store.purchase_orders[2].supplier_name = "Reece";
-  const afterRename = await make({ version_id: issued.version.id });
-  assertEquals(afterRename.created, 0);
-  assert(
-    String(afterRename.message).includes("PO-3 (Reece)"),
-    afterRename.message,
-  );
-  assertEquals(store.purchase_orders.length, 3);
-
-  // While any order is live a cancelled one is not topped up either.
-  store.purchase_orders[1].status = "cancelled";
-  const partial = await make({ version_id: issued.version.id });
-  assertEquals(partial.created, 0);
-  assertEquals(
-    partial.purchase_orders.map((po: any) => po.supplier_name),
-    ["Bunnings", "Reece"],
-  );
-  assertEquals(store.purchase_orders.length, 3);
-  assertEquals(createdWith.length, 3);
-
-  const opened = await getQuoteBuilderJob(
-    client,
-    new URLSearchParams(`job_id=${REPAIR_JOB}`),
-    ACTOR,
-  );
-  assertEquals(opened.scope.versions[0].purchase_orders.length, 2);
-  assertEquals(opened.scope.versions[0].work_order, null);
-
-  // With every order cancelled, a press makes the full set again.
-  for (const po of store.purchase_orders) po.status = "cancelled";
-  const again = await make({ version_id: issued.version.id });
-  assertEquals(again.created, 3);
-  assertEquals("message" in again, false);
-  assertEquals(
-    again.purchase_orders.map((po: any) => po.supplier_name),
-    ["Bunnings", "Stratco", "No supplier named"],
-  );
-  assertEquals(store.purchase_orders.length, 6);
-
-  // Nothing to order, and a draft, are both refused with nothing made.
-  const labourOnly = await issueScope(store, client, upload, LATE_REPAIR_JOB, {
-    costLines: [TYPED_COST[0], TYPED_COST[7]],
-  });
-  assertEquals(
-    await code(make({ version_id: labourOnly.version.id })),
-    "no_material_lines",
-  );
-  assertEquals(quoteBuilderPurchaseOrderGroups({ cost_lines: COST }), []);
-  assertEquals(store.purchase_orders.length, 6);
-});
-
-Deno.test("quote builder: the dispatch makes a real draft crew work order and real draft purchase orders", async () => {
-  const store = seed();
-  const { client, upload } = makeFakeClient(store);
-  const issued = await issueScope(store, client, upload, REPAIR_JOB, {
-    costLines: TYPED_COST,
-  });
-  const realFetch = globalThis.fetch;
-  // createPO pings reporting-api to recompute job intelligence; keep the test offline.
-  globalThis.fetch = () => Promise.resolve(new Response("{}"));
-  try {
-    const call = async (action: string) => {
+  // The decision goes through the real dispatch, so the real approval path
+  // stamps the row and writes its decision event.
+  const decide = async (variationId: string, approved: boolean) => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve(new Response("{}"));
+    try {
       const response = await dispatchQuoteBuilderAction(
         client,
-        action,
+        "quote_builder_decide_variation",
         new URLSearchParams(),
-        // A caller cannot aim the order at another job or version through the body.
-        {
-          version_id: issued.version.id,
-          job_id: LATE_REPAIR_JOB,
-          quote_builder_version_id: crypto.randomUUID(),
-          kind: "job",
-          status: "approved",
-        },
-        ACTOR,
-      );
-      return { status: response.status, body: await response.json() };
-    };
-
-    const workOrder = await call("quote_builder_make_work_order");
-    assertEquals(workOrder.status, 200);
-    assertEquals(workOrder.body.created, true);
-    assertEquals(store.work_orders.length, 1);
-    const wo = store.work_orders[0];
-    assertEquals(
-      [wo.job_id, wo.status, wo.quote_builder_version_id, wo.kind, wo.origin],
-      [REPAIR_JOB, "draft", issued.version.id, undefined, undefined],
-    );
-    assertEquals(wo.scope_items.length, 3);
-    // The order records who pressed: the user's id (created_by is a uuid
-    // column), never the email.
-    assertEquals(wo.created_by, ACTOR.id);
-    // An allocated trade reads the scope text and the labour hours.
-    assertEquals(
-      redactTradeWorkOrdersForAllocated([structuredClone(wo)])[0].scope_items,
-      [
-        {
-          description: "Scope of works",
-          notes: "Replace the storm damaged fascia and gutter",
-        },
-        { description: "Carpenter on site", qty: 8, unit: "hr" },
-        { description: "Labourer", qty: 4.5, unit: "hr" },
-      ],
-    );
-    assertEquals((await call("quote_builder_make_work_order")).body, {
-      created: false,
-      work_order: workOrder.body.work_order,
-    });
-    assertEquals(store.work_orders.length, 1);
-
-    const orders = await call("quote_builder_make_purchase_orders");
-    assertEquals(orders.status, 200);
-    assertEquals(orders.body.created, 3);
-    assertEquals(
-      store.purchase_orders.map((po) => [
-        po.job_id,
-        po.status,
-        po.quote_builder_version_id,
-        po.subtotal,
-      ]),
-      [
-        [REPAIR_JOB, "draft", issued.version.id, 264],
-        [REPAIR_JOB, "draft", issued.version.id, 138],
-        [REPAIR_JOB, "draft", issued.version.id, 18],
-      ],
-    );
-    for (const order of [wo, ...store.purchase_orders]) {
-      assertEquals(order.created_by, ACTOR.id);
-      assertEquals(String(order.created_by).includes("@"), false);
-    }
-    assertEquals(
-      (await call("quote_builder_make_purchase_orders")).body.created,
-      0,
-    );
-    assertEquals(store.purchase_orders.length, 3);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-Deno.test("quote builder: job acceptance leaves quote builder orders alone, and an unnamed supplier is never pushed to Xero", async () => {
-  const store = seed();
-  const { client, upload } = makeFakeClient(store);
-  const issued = await issueScope(store, client, upload, REPAIR_JOB, {
-    costLines: TYPED_COST,
-  });
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = () => Promise.resolve(new Response("{}"));
-  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-  try {
-    for (
-      const action of [
-        "quote_builder_make_work_order",
-        "quote_builder_make_purchase_orders",
-      ]
-    ) {
-      const response = await dispatchQuoteBuilderAction(
-        client,
-        action,
-        new URLSearchParams(),
-        { version_id: issued.version.id },
+        { variation_id: variationId, approved },
         ACTOR,
       );
       assertEquals(response.status, 200);
-      await response.json();
+      return await response.json();
+    } finally {
+      globalThis.fetch = realFetch;
     }
-    // work_orders.kind defaults to 'crew' in the database; the fake has no defaults.
-    const builderWorkOrder = store.work_orders[0];
-    builderWorkOrder.kind = "crew";
-    const ORDINARY_WO = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    const ORDINARY_PO = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-    store.work_orders.push({
-      id: ORDINARY_WO,
-      job_id: REPAIR_JOB,
-      wo_number: "WO-ORDINARY",
-      kind: "crew",
-      status: "draft",
-    });
-    store.purchase_orders.push({
-      id: ORDINARY_PO,
-      job_id: REPAIR_JOB,
-      po_number: "PO-ORDINARY",
-      supplier_name: "Stratco",
-      status: "draft",
-      line_items: [],
-    });
+  };
+  const value = async () => {
+    const result = await writeQuoteBuilderJobValue(client, REPAIR_JOB);
+    assertEquals(result.written, true);
+    return [
+      job().pricing_json.totalExGST,
+      job().pricing_json.quote_builder.variation_ids,
+    ];
+  };
+  // What the ops "send variation" action and the customer's accept link stamp.
+  const send = (id: string) =>
+    Object.assign(variation(id), { status: "sent", sent_at: tick() });
+  const accept = (id: string) =>
+    Object.assign(variation(id), { status: "accepted", accepted_at: tick() });
 
-    // Which purchase orders a push to Xero was started for, and how often a
-    // push got as far as asking for the Xero token.
-    const pushStartedFor: string[] = [];
-    let xeroTokenReads = 0;
-    const watched = {
-      ...client,
-      from: (table: string) => {
-        const builder = client.from(table);
-        if (table === "xero_tokens") xeroTokenReads += 1;
-        if (table === "purchase_orders") {
-          const eq = builder.eq;
-          builder.eq = (key: string, value: any) => {
-            if (key === "id") pushStartedFor.push(value);
-            return eq(key, value);
-          };
-        }
-        return builder;
-      },
-    };
+  const approvedOne = await issueVariation(200);
+  assertEquals((await decide(approvedOne, true)).job_value, {
+    written: true,
+    total_inc_gst: 935,
+  });
+  assertEquals(await value(), [850, [approvedOne]]);
+  // Sent to the client, then accepted by them: it keeps counting.
+  send(approvedOne);
+  assertEquals(await value(), [850, [approvedOne]]);
+  accept(approvedOne);
+  assertEquals(await value(), [850, [approvedOne]]);
 
-    const accepted = await _updateJobStatus(watched, {
-      job_id: REPAIR_JOB,
-      status: "accepted",
-    });
-    assertEquals(accepted.success, true);
-    await flush();
-    await flush();
+  // Sent before anyone decided, then accepted on the client's link: never
+  // approved, so never counted.
+  const neverDecided = await issueVariation(1000);
+  send(neverDecided);
+  assertEquals(await value(), [850, [approvedOne]]);
+  accept(neverDecided);
+  assertEquals(await value(), [850, [approvedOne]]);
 
-    // Every other order moves exactly as before; the quote builder's stay drafts.
-    const status = (id: string) =>
-      store.work_orders.find((w) => w.id === id)!.status;
-    assertEquals(status(ORDINARY_WO), "approved");
-    assertEquals(status(builderWorkOrder.id), "draft");
-    assertEquals(pushStartedFor, [ORDINARY_PO]);
-    assertEquals(xeroTokenReads, 1);
-    const builderOrders = store.purchase_orders.filter((po) =>
-      po.quote_builder_version_id === issued.version.id
-    );
-    assertEquals(builderOrders.length, 3);
-    for (const po of builderOrders) {
-      assertEquals([po.status, po.xero_po_id], ["draft", undefined]);
-    }
+  // Rejected (which stamps approved_at too), then sent anyway: not counted.
+  const rejectedOne = await issueVariation(3000);
+  const rejected = await decide(rejectedOne, false);
+  assertEquals("job_value" in rejected, false);
+  assert(variation(rejectedOne).approved_at);
+  send(rejectedOne);
+  assertEquals(await value(), [850, [approvedOne]]);
+  // Re-decided as approved while sent, then sent again: counted from then on.
+  await decide(rejectedOne, true);
+  send(rejectedOne);
+  assertEquals(await value(), [3850, [approvedOne, rejectedOne]]);
 
-    // A person's own push: the unnamed draft is refused before Xero is asked
-    // for anything, so no Xero contact of that name can be made.
-    const unnamed = builderOrders.find((po) =>
-      po.supplier_name === "No supplier named"
-    )!;
-    const refused = await assertRejects(
-      () => _pushPOToXero(watched, { id: unnamed.id }),
-      ApiError,
-    );
-    assertEquals(refused.status, 409);
-    assertEquals((refused.body as any).code, "po_supplier_not_named");
-    assertEquals(unnamed.xero_po_id, undefined);
-    assertEquals(xeroTokenReads, 1);
-
-    // Once a real supplier is set the same push goes on to Xero (which this
-    // test does not have: it stops at the missing token, past the refusal).
-    unnamed.supplier_name = "Reece";
-    await assertRejects(
-      () => _pushPOToXero(watched, { id: unnamed.id }),
-      Error,
-      "No Xero token available",
-    );
-    assertEquals(xeroTokenReads, 2);
-    // A named quote builder order was never refused.
-    const named = builderOrders.find((po) => po.supplier_name === "Bunnings")!;
-    await assertRejects(
-      () => _pushPOToXero(watched, { id: named.id }),
-      Error,
-      "No Xero token available",
-    );
-  } finally {
-    globalThis.fetch = realFetch;
+  // A draft, cancelled or declined variation is never counted.
+  for (const status of ["draft", "cancelled", "declined", "pending_approval"]) {
+    variation(rejectedOne).status = status;
+    assertEquals(await value(), [850, [approvedOne]]);
   }
+});
+
+Deno.test("quote builder: the pricing settings are a goal, and a quote priced away from them saves and issues unchanged", async () => {
+  const store = seed();
+  store.quote_builder_settings = [
+    { org_id: ORG, setting_key: "insurance_labour_rate_ex_gst", amount: 95 },
+    { org_id: ORG, setting_key: "insurance_materials_multiplier", amount: 1.4 },
+    { org_id: ORG, setting_key: "target_margin_pct", amount: 33 },
+  ];
+  const { client, upload } = makeFakeClient(store);
+  // Labour charged well under the goal rate, a material sold at cost and one
+  // given away: the margin is negative, far from the target.
+  const costLines = [
+    {
+      line_id: "c-lab",
+      line_type: "labour",
+      description: "Carpenter",
+      qty: 10,
+      unit: "hr",
+      unit_cost_ex_gst: 60,
+    },
+    {
+      line_id: "c-mat",
+      line_type: "material",
+      description: "Gutter",
+      qty: 4,
+      unit: "m",
+      unit_cost_ex_gst: 50,
+    },
+  ];
+  const chargeLines = [
+    {
+      line_id: "q-lab",
+      description: "Labour",
+      qty: 10,
+      unit: "hr",
+      unit_price_ex_gst: 20,
+    },
+    {
+      line_id: "q-mat",
+      description: "Gutter",
+      qty: 4,
+      unit: "m",
+      unit_price_ex_gst: 50,
+    },
+    {
+      line_id: "q-gift",
+      description: "Downpipe, no charge",
+      qty: 1,
+      unit: "ea",
+      unit_price_ex_gst: 0,
+    },
+  ];
+  const draft = (await saveQuoteBuilderVersion(client, {
+    job_id: REPAIR_JOB,
+    kind: "scope",
+    cost_lines: costLines,
+    charge_lines: chargeLines,
+  }, ACTOR)).version;
+  const priced = (version: any) =>
+    version.charge_lines.map((l: any) => [
+      l.line_id,
+      l.qty,
+      l.unit_price_ex_gst,
+      l.line_total_ex_gst,
+    ]);
+  const asSent = [
+    ["q-lab", 10, 20, 200],
+    ["q-mat", 4, 50, 200],
+    ["q-gift", 1, 0, 0],
+  ];
+  assertEquals(priced(draft), asSent);
+  assertEquals(
+    [draft.cost_total_ex_gst, draft.charge_total_ex_gst, draft.margin_ex_gst],
+    [800, 400, -400],
+  );
+  assertEquals(draft.margin_pct, -100);
+
+  const slot = await quoteBuilderPdfUploadUrl(client, {
+    version_id: draft.id,
+  }, ACTOR);
+  upload("job-pdfs", slot.path);
+  const issued = await issueQuoteBuilderVersion(
+    client,
+    { version_id: draft.id, pdf_path: slot.path },
+    ACTOR,
+    { moveRepairStage: stageMover(store, []) },
+  );
+  assertEquals(issued.version.status, "issued");
+  assertEquals(priced(issued.version), asSent);
+  assertEquals(issued.version.margin_ex_gst, -400);
+  // The job's value is the charge lines as sent, not the goal's arithmetic.
+  assertEquals(issued.job_value, { written: true, total_inc_gst: 440 });
+  assertEquals(store.jobs[0].pricing_json.totalExGST, 400);
+  // The goal is still what the app is told.
+  const opened = await getQuoteBuilderJob(
+    client,
+    new URLSearchParams(`job_id=${REPAIR_JOB}`),
+    ACTOR,
+  );
+  assertEquals(opened.settings, {
+    labour_rate_ex_gst: 95,
+    materials_multiplier: 1.4,
+    target_margin_pct: 33,
+  });
+  assertEquals(priced(opened.scope.versions[0]), asSent);
 });

@@ -1,8 +1,8 @@
--- Quote builder: pricing settings, and the link from an issued quote to the
--- draft crew work order and draft purchase orders made from it.
+-- Quote builder: pricing settings, and one filed scope of works per issued
+-- version.
 --
 -- Contract: docs/quote-builder-contract.md. Reader and writer: ops-api
--- (supabase/functions/ops-api/quote_builder.ts). Four additive changes:
+-- (supabase/functions/ops-api/quote_builder.ts). Two additive changes:
 --
 --   1. quote_builder_settings holds the insurance labour rate (ex GST, per
 --      hour), the insurance materials multiplier and, once the owner gives one,
@@ -11,6 +11,11 @@
 --      row until he names one. ops-api returns them in `settings` on
 --      quote_builder_get_job and nothing in code carries a pricing number.
 --
+--      They are a goal the app shows the scoper, not a rule: the scoper sets
+--      his own markups, and nothing in the database or in ops-api refuses,
+--      clamps or rewrites a quote line for differing from them. The bounds
+--      below guard the setting itself against a mistyped value, nothing more.
+--
 --      Why its own table and not org_config: org_config is readable by every
 --      signed-in user of the organisation, trades included (live policy "Users
 --      view own org config", read 13 Oct 2026), and what we charge a builder per
@@ -18,27 +23,18 @@
 --      RLS on with no policy and revoked from anon and authenticated, so only
 --      ops-api reaches it.
 --
---   2. work_orders.quote_builder_version_id and
---      purchase_orders.quote_builder_version_id name the issued quote builder
---      version an order was made from. Null on every existing row.
---
---   3. Two partial unique indexes hold two presses at the same moment of "make
---      work order" or "make purchase orders" to one set: one live crew work
---      order per version, and one live purchase order per version and
---      supplier. (A later press is stopped in ops-api: once any live purchase
---      order exists for the version it makes nothing.) Built-in expressions
---      only, so every role that writes these tables can maintain them.
---
---   4. One more partial unique index on job_documents: the scope of works PDF
---      filed beside the client quote at issue is a row of type 'other' whose
+--   2. One partial unique index on job_documents: the scope of works PDF filed
+--      beside the client quote at issue is a row of type 'other' whose
 --      metadata names the version and the document, and a version holds at
 --      most one of each document. Built-in operators only. The material order
 --      list prints our costs and is not filed: job-pdfs is a public bucket.
 --
--- Nothing here touches job work orders (kind = 'job'), approves, sends or
--- prices anything.
+-- Nothing here touches work orders or purchase orders, approves, sends or
+-- prices anything. Making a draft crew work order and draft purchase orders
+-- from an issued quote is not built yet (docs/quote-builder-contract.md,
+-- "Not built yet").
 --
--- Rollback: supabase/rollbacks/20261013160000_quote_builder_pricing_and_orders_down.sql.
+-- Rollback: supabase/rollbacks/20261013160000_quote_builder_pricing_and_documents_down.sql.
 
 CREATE TABLE IF NOT EXISTS public.quote_builder_settings (
   org_id uuid NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
@@ -58,7 +54,7 @@ CREATE TABLE IF NOT EXISTS public.quote_builder_settings (
 );
 
 COMMENT ON TABLE public.quote_builder_settings IS
-  'Quote builder pricing settings (docs/quote-builder-contract.md), one row per number. Read only by ops-api; a missing row means not set.';
+  'Quote builder pricing settings (docs/quote-builder-contract.md), one row per number: a goal shown to the scoper, never a rule applied to a quote. Read only by ops-api; a missing row means not set.';
 COMMENT ON COLUMN public.quote_builder_settings.amount IS
   'insurance_labour_rate_ex_gst: dollars per hour charged, ex GST. insurance_materials_multiplier: client price = our cost x this. target_margin_pct: percent.';
 
@@ -72,22 +68,6 @@ VALUES
   ('00000000-0000-0000-0000-000000000001', 'insurance_labour_rate_ex_gst', 120),
   ('00000000-0000-0000-0000-000000000001', 'insurance_materials_multiplier', 1.6)
 ON CONFLICT (org_id, setting_key) DO NOTHING;
-
-ALTER TABLE public.work_orders
-  ADD COLUMN IF NOT EXISTS quote_builder_version_id uuid REFERENCES public.quote_builder_versions(id);
-COMMENT ON COLUMN public.work_orders.quote_builder_version_id IS
-  'The issued quote builder version this crew work order was made from (quote_builder_make_work_order). Null otherwise.';
-CREATE UNIQUE INDEX IF NOT EXISTS ux_work_orders_quote_builder_version
-  ON public.work_orders (quote_builder_version_id)
-  WHERE quote_builder_version_id IS NOT NULL AND status <> 'cancelled';
-
-ALTER TABLE public.purchase_orders
-  ADD COLUMN IF NOT EXISTS quote_builder_version_id uuid REFERENCES public.quote_builder_versions(id);
-COMMENT ON COLUMN public.purchase_orders.quote_builder_version_id IS
-  'The issued quote builder version this purchase order was made from (quote_builder_make_purchase_orders). Null otherwise.';
-CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_orders_quote_builder_version_supplier
-  ON public.purchase_orders (quote_builder_version_id, lower(coalesce(supplier_name, '')))
-  WHERE quote_builder_version_id IS NOT NULL AND status NOT IN ('cancelled', 'deleted');
 
 -- A double-submitted issue files the scope of works once: the second insert is
 -- refused and ops-api reads back the first.
