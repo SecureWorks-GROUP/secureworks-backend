@@ -21,7 +21,9 @@
 //                          entered get_review at least 24 hours ago, is still paid, is not
 //                          held and whose review was sent or deliberately skipped, could
 //                          not go for want of a linked contact (no claim is taken, so a
-//                          later Send review still works), or the sender is not live.
+//                          later Send review still works), or the sender is not live. A
+//                          claim stuck 'claimed' past STUCK_CLAIM_AFTER_MS is recorded
+//                          unconfirmed (never re-sent) and counts as finished.
 //                          Compare and set on get_review.
 //   - closeoutBacklogPreview  the dry-run list of fully paid fencing and patio jobs sitting
 //                          in complete that a later, separate step may archive. Writes
@@ -335,12 +337,13 @@ function chunks<T>(items: T[], size = ID_CHUNK): T[][] {
   return out;
 }
 
-// deno-lint-ignore no-explicit-any
 async function readByJob<T>(
+  // deno-lint-ignore no-explicit-any
   client: any,
   table: string,
   columns: string,
   jobIds: string[],
+  // deno-lint-ignore no-explicit-any
   extra?: (q: any) => any,
 ): Promise<Map<string, T[]> | null> {
   const out = new Map<string, T[]>();
@@ -362,8 +365,8 @@ export interface JobFacts {
 }
 
 /** Invoices and parties for many jobs at once; null when either read fails. */
-// deno-lint-ignore no-explicit-any
 export async function loadJobFacts(
+  // deno-lint-ignore no-explicit-any
   client: any,
   jobs: CloseoutJobRow[],
 ): Promise<Map<string, JobFacts> | null> {
@@ -396,8 +399,8 @@ export async function loadJobFacts(
   return out;
 }
 
-// deno-lint-ignore no-explicit-any
 async function loadQuote(
+  // deno-lint-ignore no-explicit-any
   client: any,
   job: CloseoutJobRow,
   now: Date,
@@ -438,8 +441,8 @@ export async function evaluateFacts(
   });
 }
 
-// deno-lint-ignore no-explicit-any
 async function loadJob(
+  // deno-lint-ignore no-explicit-any
   client: any,
   jobId: string,
 ): Promise<CloseoutJobRow | null> {
@@ -458,8 +461,8 @@ async function loadJob(
 }
 
 /** Every fencing and patio card in these statuses, paged by id; null when a page fails. */
-// deno-lint-ignore no-explicit-any
 async function loadJobsByStatus(
+  // deno-lint-ignore no-explicit-any
   client: any,
   statuses: string[],
 ): Promise<CloseoutJobRow[] | null> {
@@ -478,8 +481,8 @@ async function loadJobsByStatus(
 }
 
 /** When each job last entered get_review (its newest status_changed row to get_review). */
-// deno-lint-ignore no-explicit-any
 export async function loadGetReviewEntries(
+  // deno-lint-ignore no-explicit-any
   client: any,
   jobIds: string[],
 ): Promise<Map<string, string> | null> {
