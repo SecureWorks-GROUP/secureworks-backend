@@ -16681,9 +16681,6 @@ async function jobDetail(
         live_work_order_id: jwo.live_work_order?.id ?? null,
         draft_work_order_id: jwo.draft_work_order?.id ?? null,
         figures: jwo.figures,
-        // The agreed labour plus the approved customer variations: what
-        // billed and remaining are measured against.
-        agreed_total_ex: jwo.figures.agreed_total_ex,
         addenda: jwo.addenda,
         invoice_count: jwo.invoices.length,
         variation_count: jwo.variations.length,
