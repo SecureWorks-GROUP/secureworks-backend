@@ -1243,6 +1243,128 @@ Deno.test("Xero draft: a refusal before Xero releases the line; an unconfirmed o
   );
 });
 
+Deno.test("Xero draft: every refusal create_invoice_draft throws before Xero releases the line", async () => {
+  const beforeXero: Array<[string, any]> = [
+    ["no line items", new Error("line_items required")],
+    ["no contact", new Error("contact_name or xero_contact_id required")],
+    [
+      "synthetic live-fire job",
+      Object.assign(
+        new Error(
+          "synthetic_livefire_release_forbidden: create_invoice cannot prepare, approve, execute, invoice, send, sign off, or close a synthetic live-fire job.",
+        ),
+        { status: 409 },
+      ),
+    ],
+    [
+      "synthetic live-fire gate unreadable",
+      Object.assign(
+        new Error(
+          "The create_invoice synthetic live-fire safety gate could not verify its jobs (timeout).",
+        ),
+        { status: 503 },
+      ),
+    ],
+    [
+      "preflight",
+      Object.assign(new Error("Invoice preflight failed: site_address"), {
+        code: "PREFLIGHT_FAILED",
+      }),
+    ],
+    [
+      "no Xero token",
+      new Error("No Xero token available. Ensure token_refresh is running."),
+    ],
+    ["Xero token refresh", new Error("Xero token refresh failed: 401")],
+  ];
+  for (const [name, error] of beforeXero) {
+    const d = approvedDb();
+    d.tables.feature_flags = flagOn;
+    let calls = 0;
+    const deps = {
+      ...accounts,
+      createDraft: async () => {
+        calls++;
+        if (calls === 1) throw error;
+        return {
+          ok: true,
+          xero_invoice_id: "77777777-7777-4777-8777-777777777777",
+          invoice_number: "INV-2002",
+        };
+      },
+    };
+    await refused(
+      () =>
+        createCustomerVariationXeroDraft(
+          d,
+          { variation_id: VAR, xero_contact_id: XERO_CONTACT },
+          ESTHER_ACTOR,
+          deps,
+        ),
+      422,
+      "xero_draft_refused",
+    );
+    const row = d.tables.work_order_customer_variation_invoices[0];
+    assertEquals(row.status, "prepared", name);
+    assertEquals(row.failure, error.message, name);
+    const again = await createCustomerVariationXeroDraft(
+      d,
+      { variation_id: VAR, xero_contact_id: XERO_CONTACT },
+      ESTHER_ACTOR,
+      deps,
+    );
+    assertEquals(again.invoice?.status, "xero_draft_created", name);
+    assertEquals(calls, 2, name);
+  }
+});
+
+Deno.test("Xero draft: a confirmed draft whose outcome is not saved fails naming the Xero invoice", async () => {
+  const XERO_INVOICE = "77777777-7777-4777-8777-777777777777";
+  for (const how of ["error", "no row"]) {
+    const d = approvedDb();
+    d.tables.feature_flags = flagOn;
+    const err = await assertRejects(
+      () =>
+        createCustomerVariationXeroDraft(
+          d,
+          { variation_id: VAR, xero_contact_id: XERO_CONTACT },
+          ESTHER_ACTOR,
+          {
+            ...accounts,
+            createDraft: async () => {
+              if (how === "error") {
+                d.failOn.add("update:work_order_customer_variation_invoices");
+              } else {
+                d.tables.work_order_customer_variation_invoices[0].status =
+                  "prepared";
+              }
+              return {
+                ok: true,
+                xero_invoice_id: XERO_INVOICE,
+                invoice_number: "INV-2003",
+              };
+            },
+          },
+        ),
+      JobWorkOrderError,
+    );
+    assertEquals(
+      [err.status, err.code],
+      [502, "xero_draft_outcome_not_saved"],
+      how,
+    );
+    assert(err.message.includes(XERO_INVOICE), how);
+    assert(err.message.includes("INV-2003"), how);
+    assertEquals(
+      d.tables.job_events.filter((e: any) =>
+        e.event_type === "customer_variation_xero_draft_created"
+      ).map((e: any) => e.detail_json.xero_invoice_id),
+      [XERO_INVOICE],
+      how,
+    );
+  }
+});
+
 // ── The front door ───────────────────────────────────────────────────────────
 
 const STAFF_ACTIONS = [

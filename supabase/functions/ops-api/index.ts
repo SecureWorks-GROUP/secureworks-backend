@@ -16687,7 +16687,7 @@ async function jobDetail(
         addenda: jwo.addenda,
         invoice_count: jwo.invoices.length,
         variation_count: jwo.variations.length,
-        customer_variation_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
+        customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
         quote_fill: jwo.quote_fill,
       }
     } catch (e) {

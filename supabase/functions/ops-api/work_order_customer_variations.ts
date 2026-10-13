@@ -720,13 +720,42 @@ export type CustomerVariationDraftCreator = (
 ) => Promise<Record<string, unknown>>;
 
 /**
+ * What create_invoice_draft throws before it asks Xero for anything: bad
+ * input, the synthetic live-fire refusal, the preflight refusal and a Xero
+ * token it could not get. Nothing exists in Xero after one of these.
+ */
+const REFUSED_BEFORE_XERO_MESSAGES = [
+  /^line_items required$/,
+  /^contact_name or xero_contact_id required$/,
+  /^synthetic_livefire_release_forbidden:/,
+  /synthetic live-fire safety gate could not verify/,
+  /^No Xero token available\b/,
+  /^Xero token refresh failed:/,
+];
+
+export function customerVariationDraftRefusedBeforeXero(
+  result: Record<string, unknown> | null,
+  thrown: any,
+): boolean {
+  if (result) {
+    return result.ok === false &&
+      result.code !== "INVOICE_DRAFT_OUTCOME_UNCONFIRMED";
+  }
+  if (thrown?.code === "PREFLIGHT_FAILED") return true;
+  const message = String(thrown?.message ?? "");
+  return REFUSED_BEFORE_XERO_MESSAGES.some((re) => re.test(message));
+}
+
+/**
  * Creates one Xero DRAFT customer invoice (ACCREC, never sent) holding the
  * variation's line, through create_invoice_draft's own path and gates. Refused
  * while feature flag customer_variation_xero_draft_v1 is off. One draft per
  * variation: the invoice record is claimed (prepared -> creating) before the
- * call. A refusal create_invoice_draft gives before Xero is called (bad input,
- * a preflight failure) releases the claim; an outcome Xero did not confirm is
- * kept as `unknown` and never retried here, because the draft may exist.
+ * call. A refusal create_invoice_draft gives before Xero is called
+ * (customerVariationDraftRefusedBeforeXero) releases the claim; any other
+ * outcome Xero did not confirm is kept as `unknown` and never retried here,
+ * because the draft may exist. A confirmed draft whose outcome could not be
+ * saved is reported as a failure naming the Xero invoice, never as success.
  */
 export async function createCustomerVariationXeroDraft(
   client: any,
@@ -816,11 +845,7 @@ export async function createCustomerVariationXeroDraft(
       invoice_number: result.invoice_number ?? null,
       xero_created_at: new Date().toISOString(),
     };
-  } else if (
-    (result && result.ok === false &&
-      result.code !== "INVOICE_DRAFT_OUTCOME_UNCONFIRMED") ||
-    thrown?.code === "PREFLIGHT_FAILED"
-  ) {
+  } else if (customerVariationDraftRefusedBeforeXero(result, thrown)) {
     // Refused before Xero was called: nothing exists, the line can go again.
     patch = {
       status: "prepared",
@@ -860,6 +885,15 @@ export async function createCustomerVariationXeroDraft(
       },
       actorUserId(author),
     );
+    if (saveErr || !saved) {
+      throw new JobWorkOrderError(
+        502,
+        "xero_draft_outcome_not_saved",
+        `Xero created draft invoice ${
+          String(patch.invoice_number ?? "(no number)")
+        } (Xero invoice id ${xeroInvoiceId}) but this variation's record of it was not saved. Check that invoice in Xero before doing anything else.`,
+      );
+    }
   }
   const invoice = shapeInvoiceRow(saved ?? { ...claimed, ...patch });
   if (patch.status !== "xero_draft_created") {
