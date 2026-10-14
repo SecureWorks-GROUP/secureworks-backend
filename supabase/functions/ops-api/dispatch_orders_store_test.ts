@@ -2166,6 +2166,39 @@ Deno.test("send: after a refusal (nothing went) a corrected send goes under a ne
   assertEquals(db.tables.job_order_emails[0].status, "sent");
 });
 
+Deno.test("send: a refusal on a retry after an unknown result keeps the draft not confirmed and the next retry uses the same key", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  const t = transport([
+    { status: 503, body: null },
+    { status: 429, body: { message: "Too many requests" } },
+    { status: 200, body: { id: "resend-3" } },
+  ]);
+  const press = async () => {
+    const read = await get(db, "dispatch_order_emails", { job_id: JOB.fence });
+    return call(db, "dispatch_order_send", {
+      draft_id: draft.id,
+      expected_draft_hash: read.drafts[0].draft_hash,
+    }, ctx(db, t));
+  };
+  await refused(press(), 502, "send_unknown");
+  const before = { ...db.tables.job_order_emails[0] };
+  await refused(press(), 502, "send_unknown");
+  const between = db.tables.job_order_emails[0];
+  assertEquals(between.status, "send_unknown");
+  assertEquals(between.send_attempt, before.send_attempt);
+  assertEquals(between.attempt_to_email, before.attempt_to_email);
+  assertEquals(between.attempt_in_reply_to, before.attempt_in_reply_to);
+  assertEquals(between.last_error, "Too many requests");
+  const ok = await press();
+  assertEquals(ok.success, true);
+  assertEquals(
+    t.calls.map((c) => c.idempotencyKey),
+    Array(3).fill(`dispatch-draft-${draft.id}`),
+  );
+  assertEquals(db.tables.job_order_emails[0].status, "sent");
+});
+
 Deno.test("send: a claim left with no answer for two minutes reads as not confirmed and can be retried", async () => {
   const db = withLines();
   const draft = await readyDraft(db);

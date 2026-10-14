@@ -1591,13 +1591,13 @@ export async function sendDispatchOrderDraft(
     idempotencyKey: dispatchDraftIdempotencyKey(draft.id, attempt),
   });
 
-  if (outcome.kind === "refused") {
+  if (outcome.kind === "refused" && firstAttempt) {
     await release("draft", outcome.reason, true);
     refuse(502, "send_refused", `Not sent: ${outcome.reason}`, {
       reason: outcome.reason,
     });
   }
-  if (outcome.kind === "unknown") {
+  if (outcome.kind !== "sent") {
     await release("send_unknown", outcome.reason);
     refuse(
       502,

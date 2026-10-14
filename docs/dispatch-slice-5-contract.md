@@ -261,9 +261,14 @@ null. The screen echoes the hash it last read.
    `operator_email`, `via`; the draft to `sent`; the order's `last_sent_*` and
    `sent` if it was `draft`. Each write reads its error; if one fails the email
    still went: the answer is `success: true, filed: false`.
-6. Any other 4xx except 409: refused, nothing went. Draft back to `draft` with
-   `last_error`, its attempt fields cleared and `send_attempt` raised, so the
-   corrected send goes under a new key; 502 `send_refused` with the reason.
+6. Any other 4xx except 409: refused, nothing went on this call. On a first
+   attempt the draft goes back to `draft` with `last_error`, its attempt fields
+   cleared and `send_attempt` raised, so the corrected send goes under a new
+   key; 502 `send_refused` with the reason. On a retry of a `send_unknown` or
+   stale `sending` draft the refusal says nothing about the earlier attempt,
+   which may still have gone: the draft goes back to `send_unknown` with
+   `last_error`, its attempt fields and `send_attempt` unchanged (the next
+   retry uses the same key); 502 `send_unknown`.
 7. 5xx, 409, a timeout (20 seconds) or a network failure: it may have gone.
    Draft to `send_unknown`; 502 `send_unknown`. Never sent again on its own. A
    person's retry repeats the same call with the same key and the same payload.
