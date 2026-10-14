@@ -511,7 +511,6 @@ let serverClock = Date.UTC(2026, 9, 14, 4, 0, 0);
 function ctx(
   overrides: Partial<DispatchMaterialsContext> = {},
 ): DispatchMaterialsContext {
-  let next = 900;
   return {
     orgId: ORG_ID,
     actor: {
@@ -521,7 +520,6 @@ function ctx(
     },
     extractMaterialsFromScope: (scope) =>
       _extractMaterialsFromScopeForTest(scope, null),
-    newId: () => line(next++),
     now: () => new Date(serverClock += 1000).toISOString(),
     ...overrides,
   };
@@ -1564,6 +1562,38 @@ Deno.test("suggest: a patio scope shaped like SWP-26701 adds the four lines, cle
     "lines_exist",
   );
   assertEquals((await read(db, JOB.patio)).can_suggest, false);
+});
+
+Deno.test("suggest: two presses at once add the scope lines once; the second is 409 lines_exist", async () => {
+  const db = await jobWithSuppliers();
+  const [first, second] = await Promise.allSettled([
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.steel,
+    }),
+    call(db, "dispatch_materials_suggest", {
+      job_id: JOB.patio,
+      supplier_id: SUP.sheets,
+    }),
+  ]);
+  const settled = [first, second];
+  const won = settled.filter((r) => r.status === "fulfilled");
+  const lost = settled.filter((r) => r.status === "rejected");
+  assertEquals(won.length, 1);
+  assertEquals(lost.length, 1);
+  const error = (lost[0] as PromiseRejectedResult).reason;
+  assert(error instanceof DispatchMaterialsError);
+  assertEquals(error.status, 409);
+  assertEquals(error.body.code, "lines_exist");
+  const stored = db.tables.job_material_lines.filter((l) =>
+    l.job_id === JOB.patio
+  );
+  assertEquals(stored.length, 4);
+  assertEquals(
+    stored.map((l) => l.position).sort(),
+    [1, 2, 3, 4],
+  );
+  assertEquals((await read(db, JOB.patio)).counts, { total: 4, ready: 0 });
 });
 
 Deno.test("suggest: not a patio job 409, even with a patio-shaped scope; supplier not on the job 409", async () => {
