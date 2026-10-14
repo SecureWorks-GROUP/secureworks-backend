@@ -40,8 +40,8 @@
 --   4. Ranking, contact reviews only (several jobs, a recently finished job
 --      beside one): jobs that cannot be a customer's job (no number: a hidden
 --      old-system record; a test job SW*-CANARY-*; a holding job) leave the
---      set, and quotes already dead at the message time (cancelled, lost,
---      archived with nothing delivered) leave the recently-finished set.
+--      set, and quotes already dead at the message time (closed with no
+--      trace of progress: context_job_dead) leave the recently-finished set.
 --      Exactly one job left and no finished work beside it places there
 --      (ranked_open). Status now and creation date never choose: a job live
 --      at the message time that closed later, finished work and aftercare
@@ -186,22 +186,37 @@ $$;
 COMMENT ON FUNCTION public.context_job_real(uuid) IS
  'Unplaced stage 1 (20261014170000): a job that can be a customer''s job: has a job number (a numberless job is a hidden old-system record), is not a test job (SW*-CANARY-*) and is not a holding job (metadata.do_not_schedule).';
 
--- A dead quote: cancelled or lost, or archived with no work delivered (no
--- completion, not complete or invoiced, no live customer invoice). Finished
--- work is never dead: its customer may still write about it (aftercare).
+-- A dead quote: a job closed (cancelled, lost, archived by status or flag)
+-- that never progressed past a quote. Any trace of progress keeps it alive
+-- as a competitor, since a customer may still write about it: completion,
+-- acceptance, a schedule or deposit date, a deposit invoice, any live Xero
+-- invoice or bill on it (customer or supplier), a crew assignment that is
+-- not a ghost watcher row (any status), a service report, a live purchase
+-- order, or a recorded status change into any stage past quoting. Read
+-- through to_jsonb where a column is live drift (job_assignments.is_ghost)
+-- so a database provisioned from migrations alone still accepts the body.
 CREATE OR REPLACE FUNCTION public.context_job_dead(p_job_id uuid)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
  SELECT coalesce((
-  SELECT j.status::text IN ('cancelled','lost')
-   OR ((j.status::text='archived' OR coalesce(j.archived,false))
-    AND j.completed_at IS NULL AND j.status::text NOT IN ('complete','completed','invoiced')
-    AND NOT EXISTS (SELECT 1 FROM public.xero_invoices xi WHERE xi.job_id=j.id AND xi.invoice_type='ACCREC'
-     AND coalesce(xi.status,'') NOT IN ('VOIDED','DELETED')))
+  SELECT (j.status::text IN ('cancelled','lost','archived') OR coalesce(j.archived,false))
+   AND j.completed_at IS NULL AND j.status::text NOT IN ('complete','completed','invoiced')
+   AND to_jsonb(j)->>'accepted_at' IS NULL AND to_jsonb(j)->>'scheduled_at' IS NULL
+   AND to_jsonb(j)->>'deposit_at' IS NULL AND to_jsonb(j)->>'deposit_invoice_id' IS NULL
+   AND NOT EXISTS (SELECT 1 FROM public.xero_invoices xi WHERE xi.job_id=j.id
+    AND coalesce(xi.status,'') NOT IN ('VOIDED','DELETED'))
+   AND NOT EXISTS (SELECT 1 FROM public.job_assignments a WHERE a.job_id=j.id
+    AND coalesce(to_jsonb(a)->>'is_ghost','false')<>'true' AND coalesce(to_jsonb(a)->>'role','')<>'observer')
+   AND NOT EXISTS (SELECT 1 FROM public.job_service_reports r WHERE r.job_id=j.id)
+   AND NOT EXISTS (SELECT 1 FROM public.purchase_orders po WHERE po.job_id=j.id
+    AND lower(coalesce(po.status::text,'')) NOT IN ('deleted','cancelled','void','voided'))
+   AND NOT EXISTS (SELECT 1 FROM public.business_events be WHERE be.entity_type='job' AND be.entity_id=j.id::text
+    AND be.event_type='job.status_changed'
+    AND lower(coalesce(be.payload->'changes'->'status'->>'to','')) NOT IN ('','draft','quoted','lost','cancelled','archived','closed'))
   FROM public.jobs j WHERE j.id=p_job_id),false)
 $$;
 COMMENT ON FUNCTION public.context_job_dead(uuid) IS
- 'Unplaced stage 1 (20261014170000): a quote that never went ahead: cancelled or lost, or archived (status or flag) with no completion, not complete or invoiced and no live ACCREC invoice. Finished work is never dead.';
+ 'Unplaced stage 1 (20261014170000): a quote that never went ahead: closed (cancelled, lost, archived by status or flag) with no trace of progress: no completion, acceptance, schedule, deposit or deposit invoice, no live Xero invoice or bill of any type, no crew assignment other than a ghost watcher row (any status), no service report, no live purchase order and no recorded status change past quoting. Any such trace keeps the job a competitor.';
 
 -- Candidate ranking for a contact review (agreed 14 Oct 2026, narrowed after
 -- the database review the same day). p_ids: the customer's jobs that were
