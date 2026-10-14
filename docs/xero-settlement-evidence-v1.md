@@ -72,7 +72,10 @@ When those checks pass, all reconciled payments yield `true`; any explicitly
 unreconciled payment yields `false`. Incomplete or contradictory evidence yields
 `null`, even if another payment is known. A failed evidence-table read also
 yields unknown; a failed invoice read fails the request. These are observations
-with `captured_at`, not an on-demand guarantee of Xero's current state.
+with `captured_at`, not an on-demand guarantee of Xero's current state. If any
+active payment or its batch was captured more than 26 hours before the read,
+the invoice returns unknown with `settlement_evidence_stale`. A stopped capture
+therefore cannot keep publishing a known reconciliation result indefinitely.
 
 `false` does not create debt. An invoice can be fully paid in Xero and still
 have an unreconciled payment. No debt, deposit, job, payer, due-date, context,

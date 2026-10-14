@@ -18,7 +18,7 @@ const PAY_A = "55555555-5555-4555-8555-555555555555";
 const PAY_B = "66666666-6666-4666-8666-666666666666";
 const BATCH = "77777777-7777-4777-8777-777777777777";
 const BANK = { AccountID: "88888888-8888-4888-8888-888888888888" };
-const AT = "2026-10-14T00:00:00.000Z";
+const AT = new Date().toISOString();
 
 function payment(id: string, over: Record<string, unknown> = {}) {
   return projectXeroSettlementEvidence(
@@ -203,4 +203,55 @@ Deno.test("payment date is the provider's own date, whatever the local timezone"
     "2026-10-14",
   );
   assertEquals(payment(PAY_A).payment_date, "2025-10-14");
+});
+
+Deno.test("settlement read: active payment and batch observations expire after 26 hours", () => {
+  const now = Date.parse(AT);
+  const boundary = new Date(now - 26 * 60 * 60 * 1000).toISOString();
+  const stale = new Date(Date.parse(boundary) - 1).toISOString();
+  for (const reconciled of [true, false]) {
+    const p = {
+      ...payment(PAY_A, { BatchPaymentID: BATCH, IsReconciled: reconciled }),
+      captured_at: boundary,
+    };
+    const b = { ...batch({ IsReconciled: reconciled }), captured_at: boundary };
+    assertEquals(
+      invoiceSettlementRead(invoice(100, [PAY_A]), [p, b], null, now)
+        .bank_proof.reconciled,
+      reconciled,
+    );
+    for (
+      const rows of [
+        [{ ...p, captured_at: stale }, b],
+        [p, { ...b, captured_at: stale }],
+      ]
+    ) {
+      const result = invoiceSettlementRead(
+        invoice(100, [PAY_A]),
+        rows,
+        null,
+        now,
+      );
+      assertEquals(result.bank_proof.reconciled, null);
+      assertEquals(result.bank_proof.unknown_reasons, [
+        "settlement_evidence_stale",
+      ]);
+    }
+  }
+});
+
+Deno.test("settlement read: stale deleted payments and unrelated batches do not expire active proof", () => {
+  const stale = "2026-01-02T00:00:00.000Z";
+  const result = invoiceSettlementRead(
+    invoice(100, [PAY_A, PAY_B]),
+    [
+      payment(PAY_A),
+      { ...payment(PAY_B, { Status: "DELETED" }), captured_at: stale },
+      { ...batch(), captured_at: stale },
+    ],
+    null,
+    Date.parse(AT),
+  );
+  assertEquals(result.bank_proof.reconciled, true);
+  assertEquals(result.bank_proof.unknown_reasons, []);
 });

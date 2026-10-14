@@ -72,6 +72,7 @@ export function invoiceSettlementRead(
   invoice: Invoice,
   evidence: SettlementEvidence[],
   readError: string | null = null,
+  now = Date.now(),
 ) {
   const invoiceId = invoice.xero_invoice_id.toLowerCase();
   const batchMap = new Map(
@@ -130,7 +131,15 @@ export function invoiceSettlementRead(
     invoice.amount_paid !== null &&
     observedAmount !== cents(invoice.amount_paid)
   ) reasons.add("payment_total_differs_from_invoice_paid");
+  const freshSince = now - 26 * 60 * 60 * 1000;
   for (const p of active) {
+    const batch = p.batch_payment_id
+      ? batchMap.get(p.batch_payment_id)
+      : undefined;
+    if (
+      Date.parse(p.captured_at) < freshSince ||
+      (batch && Date.parse(batch.captured_at) < freshSince)
+    ) reasons.add("settlement_evidence_stale");
     const currency = xeroText(xeroObject(p.raw_json.Invoice)?.CurrencyCode);
     if (
       !currency || !invoice.currency_code || currency !== invoice.currency_code
