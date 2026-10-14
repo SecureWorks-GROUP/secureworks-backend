@@ -55,9 +55,11 @@ export const DISPATCH_SUPPLIER_CONTACT_SELECT =
   "id, org_id, name, email, is_active";
 export const DISPATCH_WORKINGS_SELECT =
   "working_out, working_out_updated_at, sketch_png, sketch_updated_at";
-// No price, total, account code or tax column is selected.
+// No price, total, account code or tax column is selected. Slice 5 adds the
+// Dispatch order columns (docs/dispatch-slice-5-contract.md); xero_po_id is
+// read only to answer in_xero and is never passed on.
 export const DISPATCH_ORDER_SELECT =
-  "id, po_number, supplier_name, status, created_at, line_items";
+  "id, po_number, supplier_name, status, created_at, line_items, supplier_id, source, pdf_version, last_sent_pdf_version, last_sent_at, xero_po_id";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -162,6 +164,21 @@ export function projectDispatchMaterialLine(row: any) {
   };
 }
 
+// Slice 5: a line on an order also carries its order's number. `poNumbers` is
+// purchase order id -> number, from the job's orders read.
+export function projectDispatchMaterialLineOnOrder(
+  row: any,
+  poNumbers: Map<string, string | null>,
+) {
+  const line = projectDispatchMaterialLine(row);
+  return row?.purchase_order_id
+    ? {
+      ...line,
+      po_number: poNumbers.get(String(row.purchase_order_id)) ?? null,
+    }
+    : line;
+}
+
 // A chosen supplier as the screen shows it: name and email from the contact as
 // it is now; a contact that is gone or inactive falls back to the stored name,
 // no email, and active false.
@@ -198,7 +215,12 @@ export function flattenDispatchOrderLine(line: any) {
   const quantity = typeof stored.quantity === "number"
     ? (Number.isFinite(stored.quantity) ? stored.quantity : null)
     : plainText(stored.quantity);
+  // A Dispatch order line (slice 5) also carries the working line it copies.
+  const lineId = typeof stored.line_id === "string" && stored.line_id
+    ? { line_id: stored.line_id }
+    : {};
   return {
+    ...lineId,
     description: plainText(stored.description),
     quantity: quantity ?? null,
     unit: plainText(stored.unit),
@@ -212,6 +234,15 @@ export function projectDispatchOrder(order: any) {
     supplier_name: order?.supplier_name ?? null,
     status: order?.status ?? null,
     created_at: order?.created_at ?? null,
+    // Slice 5: an order made in Dispatch has a supplier_id and source
+    // 'dispatch'; every other order has neither and stays in "Orders on this
+    // job".
+    supplier_id: order?.supplier_id ?? null,
+    source: order?.source ?? null,
+    pdf_version: order?.pdf_version ?? null,
+    last_sent_pdf_version: order?.last_sent_pdf_version ?? null,
+    last_sent_at: order?.last_sent_at ?? null,
+    in_xero: !!order?.xero_po_id,
     lines: Array.isArray(order?.line_items)
       ? order.line_items.map(flattenDispatchOrderLine)
       : [],

@@ -510,6 +510,17 @@ Slice 4's Materials by supplier lives in three private tables
 worked out only in `dispatch_materials.ts`, and a failed list read of the lines
 answers `dispatch_materials: 'failed'`, never 0. Contract:
 `docs/dispatch-slice-4-contract.md`.
+Slice 5 turns a supplier's To order lines into a `source = 'dispatch'` purchase
+order (numbers `PO-1000001` on, from `dispatch_next_po_number`), its PDF in the
+private `dispatch-order-pdfs` bucket and a held draft in `job_order_emails`,
+through the `dispatch_order*` actions (`dispatch_orders_store.ts`, rules in
+`dispatch_orders.ts`); multi-table writes go only through
+`dispatch_commit_order` / `_update`. Only `dispatch_order_send` and
+`dispatch_order_reply` email anyone: on a person's press, or the ops key naming
+that person in `operator_email`, after the draft-hash check and the claim, and a
+Resend result that is not a clear yes or no is `send_unknown`, never re-sent on
+its own. A supplier reply never moves a Dispatch order. Contract:
+`docs/dispatch-slice-5-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
