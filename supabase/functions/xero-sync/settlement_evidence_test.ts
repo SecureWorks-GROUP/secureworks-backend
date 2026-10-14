@@ -1,7 +1,7 @@
-// deno-lint-ignore no-import-prefix
 import {
   assertEquals,
   assertRejects,
+  // deno-lint-ignore no-import-prefix
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { syncSettlementEvidence } from "./settlement_evidence.ts";
 import { settlementFakeClient } from "../ops-api/xero_settlement_test_fake.ts";
