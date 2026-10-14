@@ -74,14 +74,17 @@ revoked from `anon` and `authenticated`.
   supplier is left behind, inserts the draft and one `job_events` row
   `po_created` (`{po_number, supplier, total: 0, source: 'dispatch',
   operator_email}`). Refuses `lines_changed`, `order_open`, `no_lines_to_order`.
-- `dispatch_commit_order_update(p jsonb)`, `mode` `update` or `cancel`: guarded
-  on the order's `updated_at` (`order_changed`) and every touched line's
-  (`lines_changed`); refuses `draft_sending` while the order's email is sending
-  or not confirmed, and `draft_changed` when the open draft moved. Update
-  rewrites `line_items` and the PDF columns, stamps added lines, releases taken
-  off lines to To order, then refreshes the open draft or inserts one. Cancel
-  sets `cancelled` (only when never sent and not in Xero), releases every line,
-  discards the open draft and writes one `job_events` row `po_cancelled`.
+- `dispatch_commit_order_update(p jsonb)`, `mode` `update` or `cancel`: locks
+  the order row, then its drafts, before any check, so a send claim cannot slip
+  in between; guarded on the order's `updated_at` (`order_changed`) and every
+  touched line's (`lines_changed`); refuses `draft_sending` while the order's
+  email is sending or not confirmed, and `draft_changed` when the open draft
+  moved. Update rewrites `line_items` and the PDF columns, stamps added lines,
+  releases taken off lines to To order, then refreshes the open draft or
+  inserts one. Cancel sets `cancelled` (only when never sent and not in Xero;
+  a `sent` draft counts as sent even when the order's sent stamp did not land,
+  refused `order_sent`), releases every line, discards the open draft and
+  writes one `job_events` row `po_cancelled`.
 
 **Storage**: private bucket `dispatch-order-pdfs` (PDF only, 10 MB), path
 `<job_id>/<po_number>-v<version>.pdf`. Every version is kept. When that path is
@@ -219,7 +222,7 @@ No job event. Take off is this action with that line in `remove_line_ids`.
 that key order, `to_email` the contact's address when its state is `ok`, else
 null. The screen echoes the hash it last read.
 
-**`dispatch_order_send`**, in this order, nothing sent before step 6:
+**`dispatch_order_send`**, in this order, nothing sent before step 4:
 
 1. 404; 409 `draft_not_sendable` unless the draft is `draft`, `send_unknown`
    (a person's retry) or a `sending` claim older than two minutes; 409
@@ -228,7 +231,9 @@ null. The screen echoes the hash it last read.
    `supplier_email_malformed`; 409 `order_cancelled`; 400 `operator_required`.
 2. The claim: `status` to `sending` only where status and `updated_at` are the
    ones read. Two presses, tabs or terminals: one gets through, the other 409
-   `draft_not_sendable`.
+   `draft_not_sendable`. The order is then read again; if a cancel landed
+   before the claim, the draft goes back to its prior status and the answer is
+   409 `order_cancelled`, nothing sent.
 3. The PDF bytes are read back and checked against `pdf_sha256`; a mismatch puts
    the draft back with `last_error` and answers 409 `pdf_changed`.
 4. One POST to Resend: from `SecureWorks Group <orders@secureworksgroup.app>`,

@@ -1598,18 +1598,34 @@ Deno.test("update: two at once: one wins, the other is order_changed, and the wi
   const db = withLines();
   const made = await create(db);
   const order = orderRow(db, made.order.po_number);
-  const body = (remove: string) => ({ job_id: JOB.fence, purchase_order_id: order.id, expected_order_updated_at: order.updated_at, lines: [], remove_line_ids: [remove] });
+  const body = (remove: string) => ({
+    job_id: JOB.fence,
+    purchase_order_id: order.id,
+    expected_order_updated_at: order.updated_at,
+    lines: [],
+    remove_line_ids: [remove],
+  });
   const results = await Promise.allSettled([
     call(db, "dispatch_order_update", body(line(1))),
     call(db, "dispatch_order_update", body(line(2))),
   ]);
   assertEquals(results.filter((r) => r.status === "fulfilled").length, 1);
-  assertEquals((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason.body.code, "order_changed");
+  assertEquals(
+    (results.find((r) => r.status === "rejected") as PromiseRejectedResult)
+      .reason.body.code,
+    "order_changed",
+  );
   const after = orderRow(db, "PO-1000001");
   assertEquals(after.pdf_version, 2);
-  assertEquals(await sha256Hex(db.files.get(after.pdf_path)!), after.pdf_sha256);
+  assertEquals(
+    await sha256Hex(db.files.get(after.pdf_path)!),
+    after.pdf_sha256,
+  );
   assertEquals([...db.files.keys()].filter((k) => k.includes("-v2")).length, 1);
-  const v1 = await get(db, "dispatch_order_pdf", { purchase_order_id: order.id, version: "1" });
+  const v1 = await get(db, "dispatch_order_pdf", {
+    purchase_order_id: order.id,
+    version: "1",
+  });
   assert(v1.url.includes("PO-1000001-v1.pdf"));
 });
 

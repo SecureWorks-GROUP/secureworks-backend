@@ -651,14 +651,20 @@ export async function readDispatchOrderEmails(
 
 // An older version's file: the path a draft of that version recorded (a
 // version written beside a clash carries a suffix), else the plain path.
-async function olderPdfPath(client: any, order: any, jobId: string, version: number) {
+async function olderPdfPath(
+  client: any,
+  order: any,
+  jobId: string,
+  version: number,
+) {
   const { data, error } = await client.from("job_order_emails")
     .select("pdf_path, pdf_version")
     .eq("purchase_order_id", order.id)
     .eq("pdf_version", version)
     .limit(1);
   if (error) readFailed("pdf version read", error);
-  return (data || [])[0]?.pdf_path || dispatchOrderPdfPath(jobId, order.po_number, version);
+  return (data || [])[0]?.pdf_path ||
+    dispatchOrderPdfPath(jobId, order.po_number, version);
 }
 
 export async function readDispatchOrderPdf(
@@ -1008,7 +1014,12 @@ export async function updateDispatchOrder(
   // order's); write ours beside it. The commit decides which one the order
   // names, and the loser's file is removed below.
   if (upload.error && storageExists(upload.error)) {
-    path = dispatchOrderPdfPath(job.id, order.po_number, version, crypto.randomUUID().slice(0, 8));
+    path = dispatchOrderPdfPath(
+      job.id,
+      order.po_number,
+      version,
+      crypto.randomUUID().slice(0, 8),
+    );
     upload = await uploadPdf(client, path, pdf.bytes);
   }
   if (upload.error) writeFailed("pdf upload", upload.error);

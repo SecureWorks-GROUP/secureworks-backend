@@ -46,4 +46,3 @@ Deno.test("supplier reply: a Dispatch order is never moved by a reply; any other
   assertEquals(supplierReplyMayMoveOrder({}), true);
   assertEquals(supplierReplyMayMoveOrder(null), true);
 });
-
