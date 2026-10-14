@@ -127,6 +127,44 @@ export async function readDispatchInstallBookings(
   return data || [];
 }
 
+// What set_dispatch_stage answers To do with: the job's bookings, or "failed"
+// when they could not be read (the press still goes through; To do is then
+// unknown).
+type StageInstallRead = DispatchInstallContext | "failed" | undefined;
+
+async function readStageInstall(
+  client: any,
+  jobId: string,
+  today?: string,
+): Promise<StageInstallRead> {
+  if (!today) return undefined;
+  try {
+    return {
+      bookings: await readDispatchInstallBookings(client, jobId),
+      today,
+    };
+  } catch (error) {
+    console.error(
+      "[set_dispatch_stage] bookings not read; dispatch_todo unknown:",
+      error,
+    );
+    return "failed";
+  }
+}
+
+function stageRowFields(job: any, state: any, install: StageInstallRead) {
+  const {
+    dispatch_install: _install,
+    dispatch_install_open: _open,
+    ...fields
+  } = dispatchRowFields(
+    job,
+    state,
+    install === "failed" ? undefined : install,
+  );
+  return install === "failed" ? { ...fields, dispatch_todo: null } : fields;
+}
+
 async function writeEvent(
   client: any,
   row: {
@@ -156,7 +194,7 @@ function isUniqueViolation(error: any): boolean {
 async function stageChanged(
   client: any,
   job: any,
-  install?: DispatchInstallContext,
+  install: StageInstallRead,
 ): Promise<never> {
   const current = await readState(client, job.id);
   throw new DispatchStageWriteError(
@@ -168,7 +206,7 @@ async function stageChanged(
       code: "stage_changed",
       job_id: job.id,
       job_number: job.job_number ?? null,
-      ...dispatchRowFields(job, current, install),
+      ...stageRowFields(job, current, install),
     },
   );
 }
@@ -209,10 +247,8 @@ export async function setDispatchStage(
   const state = await readState(client, jobId);
   // Slice 7: To do at Trade scheduled turns on the install, so the answer is
   // worked out with the job's bookings (read only; nothing about them changes).
-  const install: DispatchInstallContext | undefined = today
-    ? { bookings: await readDispatchInstallBookings(client, jobId), today }
-    : undefined;
-  const before = dispatchRowFields(job, state, install);
+  const install = await readStageInstall(client, jobId, today);
+  const before = stageRowFields(job, state, install);
 
   // Two people, or two tabs, cannot both move a job.
   if (before.dispatch_stage !== expectedStage) {
@@ -239,12 +275,6 @@ export async function setDispatchStage(
       previous_source: before.dispatch_stage_source,
       dispatch_todo: before.dispatch_todo,
       dispatch_todo_out: before.dispatch_todo_out,
-      ...(install
-        ? {
-          dispatch_install: before.dispatch_install ?? null,
-          dispatch_install_open: before.dispatch_install_open ?? null,
-        }
-        : {}),
       audit_logged: false,
     };
   }
@@ -300,7 +330,7 @@ export async function setDispatchStage(
     },
   }, "set_dispatch_stage");
 
-  const after = dispatchRowFields(job, written, install);
+  const after = stageRowFields(job, written, install);
   return {
     success: true,
     job_id: jobId,
@@ -314,12 +344,6 @@ export async function setDispatchStage(
     previous_source: before.dispatch_stage_source,
     dispatch_todo: after.dispatch_todo,
     dispatch_todo_out: after.dispatch_todo_out,
-    ...(install
-      ? {
-        dispatch_install: after.dispatch_install ?? null,
-        dispatch_install_open: after.dispatch_install_open ?? null,
-      }
-      : {}),
     audit_logged: auditLogged,
   };
 }

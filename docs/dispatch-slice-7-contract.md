@@ -86,8 +86,9 @@ council hold. Ruling I7: on go-live, every stop 6 job in the window with an
 install ahead (or none) and no mark comes back into To do.
 
 `set_dispatch_stage` answers its `dispatch_todo` by the same rule: it reads the
-job's bookings (read only) and its answer also carries `dispatch_install` and
-`dispatch_install_open`.
+job's bookings (read only). Its answer carries no install field. If the bookings
+read fails the stage write still goes through, the failure is logged, and
+`dispatch_todo` is `null` (unknown).
 
 ## 4. The write: `POST ops-api?action=set_dispatch_install_confirmed`
 
