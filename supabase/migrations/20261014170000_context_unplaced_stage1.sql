@@ -1500,6 +1500,9 @@ REVOKE ALL ON FUNCTION public.context_redecide_events(uuid[],text,jsonb) FROM PU
 REVOKE ALL ON FUNCTION public.context_thread_bound_redecide() FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION public.context_invoice_linked_redecide() FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION public.context_job_contact_linked_reconsider() FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_text_names_other_site(text,jsonb,uuid) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_party_names_other_site(text,uuid) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_contact_names_other_site(text,text,jsonb,timestamptz,uuid) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.context_redecide_events(uuid[],text,jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_unplaced_lane(public.business_events) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_unplaced_policy() TO service_role;
@@ -1513,3 +1516,6 @@ GRANT EXECUTE ON FUNCTION public.context_job_dead(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_redecided_metadata(jsonb,timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_redecide_one(uuid,text,jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_redecide_resting(text,timestamptz,uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_text_names_other_site(text,jsonb,uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_party_names_other_site(text,uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_contact_names_other_site(text,text,jsonb,timestamptz,uuid) TO service_role;
