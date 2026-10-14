@@ -202,7 +202,7 @@ the sketch. On a job with no row the expected stamp is null (or left out).
 |---|---|
 | Saved | `{ success, workings: { working_out_updated_at, sketch_updated_at }, counts }`; the sketch is never sent back |
 | Stamp differs | 409 `workings_changed` with `field` and that field's stored value and stamp |
-| Neither or both fields; a bad value | 400 `invalid_request` ("Sketch not saved: too large" is the over-400,000 case) |
+| Neither or both fields; a bad value | 400 `invalid_request` with the server's own message (for an over-400,000 sketch the screen shows "Sketch not saved: too large") |
 
 ## 6. The Dispatch list: `GET ops-api?action=pipeline&dispatch=1`
 

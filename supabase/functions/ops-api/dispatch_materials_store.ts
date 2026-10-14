@@ -919,12 +919,11 @@ export async function saveDispatchWorkings(
       })
       .select(select)
       .single();
-    if (insertError) {
-      // Another tab made the row first: say so, with what it saved.
-      if (errorCode(insertError) === "23505") changed(await readStored());
+    if (!insertError) return await answer(inserted);
+    // Another tab made the row first: the guarded update below decides.
+    if (errorCode(insertError) !== "23505") {
       writeFailed("workings insert", insertError);
     }
-    return await answer(inserted);
   }
 
   let update = client.from("job_dispatch_workings")

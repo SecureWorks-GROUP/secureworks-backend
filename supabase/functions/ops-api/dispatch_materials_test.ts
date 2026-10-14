@@ -1748,6 +1748,44 @@ Deno.test("workings: save text and a sketch, each guarded on its own stamp", asy
   assertOnlyOwnWrites(db);
 });
 
+Deno.test("workings: first saves of the text and the sketch at once both land", async () => {
+  const db = makeDb();
+  const [text, sketch] = await Promise.all([
+    call(db, "dispatch_materials_save_workings", {
+      job_id: JOB.patio,
+      working_out: "18 bays",
+    }),
+    call(db, "dispatch_materials_save_workings", {
+      job_id: JOB.patio,
+      sketch_png: PNG,
+    }),
+  ]);
+  assert(text.workings.working_out_updated_at);
+  assert(sketch.workings.sketch_updated_at);
+  assertEquals(db.tables.job_dispatch_workings.length, 1);
+  const after = await read(db, JOB.patio);
+  assertEquals(after.workings.working_out, "18 bays");
+  assertEquals(after.workings.sketch_png, PNG);
+
+  const db2 = makeDb();
+  const results = await Promise.allSettled([
+    call(db2, "dispatch_materials_save_workings", {
+      job_id: JOB.patio,
+      working_out: "first tab",
+    }),
+    call(db2, "dispatch_materials_save_workings", {
+      job_id: JOB.patio,
+      working_out: "second tab",
+    }),
+  ]);
+  const lost = results.filter((r) => r.status === "rejected");
+  assertEquals(lost.length, 1);
+  const error = (lost[0] as PromiseRejectedResult).reason;
+  assert(error instanceof DispatchMaterialsError);
+  assertEquals(error.status, 409);
+  assertEquals(error.body.code, "workings_changed");
+});
+
 Deno.test("workings: a job with no row expects null; anything else is 409", async () => {
   const db = makeDb();
   await refused(
