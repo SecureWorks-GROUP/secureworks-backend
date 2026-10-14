@@ -10,8 +10,8 @@ Slice 3 adds the stage rail fields to the same list read and two writes:
 `docs/dispatch-slice-3-contract.md`.
 
 Nothing here changes an existing caller: `pipeline` without `dispatch=1` runs the
-same selects and returns the same rows and keys as before, and `job_detail` is
-untouched.
+same selects and returns the same rows and keys as before, and `job_detail`
+changes only by the two document dates in section 4.
 
 ## 1. The job list: `GET ops-api?action=pipeline&dispatch=1`
 
@@ -158,6 +158,14 @@ customer's CRM contact notes. The response is
 `{ note: <the raw job_events row>, visibility, ghl_synced, ... }`: the raw row,
 not the shape above, so either read `note.id`, `note.created_at` and
 `note.detail_json.text` from it or call `job_notes` again.
+
+## 4. Document dates on `job_detail` (slice 2)
+
+Each `job_detail.documents` row also carries `sent_at` and `superseded_at`
+straight from `job_documents` (null when unset), added last so every earlier key
+keeps its order. Slice 2's quote chips read them to show a sent date or
+"Superseded"; without them a superseded quote read "Sent". Projection:
+`projectJobDetailDocument`; test: `job_detail_document_dates_test.ts`.
 
 ## Who can call these
 
