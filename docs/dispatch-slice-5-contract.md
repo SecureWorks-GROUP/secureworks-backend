@@ -4,7 +4,7 @@ What `ops-api` gives the Ops screen's Dispatch tab (and the terminal) to turn on
 supplier's To order lines into a purchase order, its PDF and a held email; to
 read, change, send or discard that email; to reply to the supplier; to link a
 stray supplier email to an order; and to read the job's order and client email
-as threads. Two reads and eight writes, plus five more fields on slice 4's
+as threads. Two reads and nine writes, plus five more fields on slice 4's
 `dispatch_materials` read.
 
 Code: `supabase/functions/ops-api/dispatch_orders.ts` (the rules, pure:
@@ -97,10 +97,10 @@ which file the order names and the loser's own file is removed.
 
 ## 2. Who may call
 
-All ten through `_opsApiCallerIsStaffOperator`, gated in the switch exactly as
+All eleven through `_opsApiCallerIsStaffOperator`, gated in the switch exactly as
 slice 4: a staff session (admin, owner, ops manager) or the privileged ops key.
 Refused to the routine key, a trade session and a division manager; on neither
-`ROUTINE_ALLOWED_ACTIONS` nor `AGENT_READ_ALLOWED_ACTIONS`. The eight writes
+`ROUTINE_ALLOWED_ACTIONS` nor `AGENT_READ_ALLOWED_ACTIONS`. The nine writes
 need POST (405 otherwise).
 
 The two sending actions also need a named person: the session's user, or, for
@@ -137,7 +137,8 @@ for a make-safe job. Writes nothing; calls nothing outside.
 
 - `drafts`: open drafts, newest first. A `sending` claim older than two minutes
   shows as `send_unknown`. `to` is worked out on every read from the supplier
-  contact: `missing` (no email), `malformed` (not one address), `not_supplier`
+  contact (a `sending` or `send_unknown` draft shows the address its attempt
+  carried, section 5): `missing` (no email), `malformed` (not one address), `not_supplier`
   (our own domains, `example.com/.org/.net`, or `test@`), else `ok`.
   `body_edited`: the stored message is not the one the server last wrote.
   `order_changed_since_edit`: edited, and the message the server would now write
@@ -334,8 +335,9 @@ booking or a work order; a `business_events` row; a call to `reporting-api`,
    answer for two minutes (a worker that died) is treated the same way.
 4. **Update and cancel refuse `draft_sending`** while the order's email is
    sending or not confirmed: it may have gone, so the order must not change
-   under it or be cancelled.
-5. **Two extra draft columns**, `order_lines` and `sent_via` (section 1).
+   under it or be cancelled, until a person releases it (section 5, item 8).
+5. **Five extra draft columns**, `order_lines`, `sent_via`, `attempt_to_email`,
+   `attempt_in_reply_to` and `send_attempt` (section 1).
 6. **`create_po`'s fix** writes `created_by` from the verified session only
    (`authMode === 'jwt'`); a key caller's `operator_email` goes to
    `created_by_email`.

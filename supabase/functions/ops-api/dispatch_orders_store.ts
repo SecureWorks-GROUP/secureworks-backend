@@ -1,5 +1,5 @@
 // deno-lint-ignore-file no-explicit-any
-// Dispatch slice 5: the two reads and the eight writes behind a purchase order
+// Dispatch slice 5: the two reads and the nine writes behind a purchase order
 // and its email. Contract: docs/dispatch-slice-5-contract.md. Rules:
 // dispatch_orders.ts (lines, text, hash, address check, chip, threads),
 // dispatch_order_pdf.ts (the PDF), dispatch_order_send.ts (the email).

@@ -134,7 +134,7 @@ dispatch_materials_save_workings     # probe=source-only
 
 # ── Ops screen Dispatch tab, a purchase order and its email
 #    (docs/dispatch-slice-5-contract.md). The two reads are pure; a bare call is
-#    refused 400 before any query. The eight writes are staff-guarded and
+#    refused 400 before any query. The nine writes are staff-guarded and
 #    source-only: two of them send a supplier email, so no smoke run may fire
 #    any of them at production, even with an invalid bound. ──
 dispatch_order_emails
