@@ -4531,7 +4531,7 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
-## Debt Workshop Sends Are Double-Switched, Owner-Only, And Claimed First
+## Debt Workshop Sends Are Switched, Owner-Only, And Claimed First
 
 The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
 `coding/capabilities/debt-follow-up/debt-workshop-spec.md`; switches and actions:
@@ -4539,8 +4539,10 @@ The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
 (`debt_book`, `debt_morning_list`, `debt_draft_*`, `debt_log_outcome`) was removed on 8 Oct
 2026. Its migrations stay, and its old `payment_chase_logs` rows are kept out of chase history
 by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
-- Effective sending is env `DEBT_WS_SENDING_ENABLED === "true"` AND
-  `debt_ws_settings.sending_enabled`. The owner comes from env `DEBT_WS_OWNER_USER_IDS`, else
+- Sending is on when `debt_ws_settings.sending_enabled` is true. The database switch alone
+  decides it (Shaun decided 14 Oct 2026); the old env `DEBT_WS_SENDING_ENABLED` is retired and
+  ignored. Automatic sending stays two-key: it also needs env `DEBT_WS_AUTO_SEND_ENABLED ===
+  "true"` and `auto_send_steps[step]`. The owner comes from env `DEBT_WS_OWNER_USER_IDS`, else
   `debt_ws_settings.owner_user_ids`, and is never a role.
 - Every send goes through `guardedSend`:
   - a live Xero re-check;
