@@ -5,8 +5,9 @@
 // path to Jan's mobile, and the job document reads).
 //
 // Safety (spec section 1), in code:
-//   - Nothing reaches a client unless sending is effectively on: env DEBT_WS_SENDING_ENABLED
-//     is exactly "true" AND debt_ws_settings.sending_enabled is true. Both default off.
+//   - Nothing reaches a client unless sending is on: debt_ws_settings.sending_enabled is
+//     true (default off). That database switch alone decides it (Shaun decided 14 Oct 2026).
+//     The old env DEBT_WS_SENDING_ENABLED is retired and ignored.
 //   - Only the owner (env DEBT_WS_OWNER_USER_IDS, else debt_ws_settings.owner_user_ids, never
 //     a role) may send, approve statements, link contacts or move a card.
 //   - Before every text: a live Xero re-check (AUTHORISED, amount due above zero and not
@@ -19,8 +20,9 @@
 //     text goes, so a step is never texted twice.
 //   - Texts go only through the injected sendChaseSms path (771, the SES fence and the
 //     contact/job match guard). Xero is read only. A card moves only through updateJobStatus.
-//   - Automatic sending (stage 5) also needs env DEBT_WS_AUTO_SEND_ENABLED === "true" and
-//     debt_ws_settings.auto_send_steps[step] === true. Off by default.
+//   - Automatic sending (stage 5) stays two-key: on top of sending being on, it also needs
+//     env DEBT_WS_AUTO_SEND_ENABLED === "true" and debt_ws_settings.auto_send_steps[step]
+//     === true. Off by default.
 
 import {
   addDays,
@@ -83,7 +85,6 @@ import {
 
 export { DebtWsError } from "./debt_ws_store.ts";
 
-export const DEBT_WS_SENDING_SWITCH = "DEBT_WS_SENDING_ENABLED";
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
@@ -199,16 +200,14 @@ export interface DebtWsDeps {
 
 // ── Switches and the owner ──
 
-export function debtWsEnvSendingOn(env: DebtWsDeps["env"]): boolean {
-  return env(DEBT_WS_SENDING_SWITCH) === "true";
-}
-
-/** Effective sending: env DEBT_WS_SENDING_ENABLED === "true" AND the settings row says so. */
-export function debtWsSendingOn(
-  env: DebtWsDeps["env"],
-  settings: DebtWsSettings,
-): boolean {
-  return debtWsEnvSendingOn(env) && settings.sending_enabled === true;
+/**
+ * Sending is on when the settings row says so: debt_ws_settings.sending_enabled === true.
+ * The database switch alone decides it (Shaun decided 14 Oct 2026). The old env
+ * DEBT_WS_SENDING_ENABLED is retired and ignored. This covers manual texts, statements and
+ * Jan's list (which also needs jan_list_auto_send). Auto-send keeps its own env key on top.
+ */
+export function debtWsSendingOn(settings: DebtWsSettings): boolean {
+  return settings.sending_enabled === true;
 }
 
 /** The owners: env DEBT_WS_OWNER_USER_IDS when set (an unusable value means nobody), else the settings row. */
@@ -749,7 +748,7 @@ export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
     read_at: now.toISOString(),
     settings: {
       tab_visible: book.settings.tab_visible,
-      sending_on: debtWsSendingOn(deps.env, book.settings),
+      sending_on: debtWsSendingOn(book.settings),
       agent_on: book.settings.agent_enabled,
       viewer_is_owner: isOwner(caller, deps.env, book.settings),
       owner_set: debtWsOwnerIds(deps.env, book.settings).length > 0,
@@ -1217,7 +1216,7 @@ async function refuse(
 async function guardedSend(deps: DebtWsDeps, input: SendInput) {
   const { entry, step, actor } = input;
   const settings = input.book.settings;
-  if (!debtWsSendingOn(deps.env, settings)) {
+  if (!debtWsSendingOn(settings)) {
     await refuse(
       deps,
       input,
@@ -1961,7 +1960,7 @@ export async function debtWsStatementPreview(
     ok: true,
     version: DEBT_WS_VERSION,
     perth_date: book.today,
-    sending_on: debtWsSendingOn(deps.env, book.settings),
+    sending_on: debtWsSendingOn(book.settings),
     ...statementView(company, mondayOf(book.today), lines),
   };
 }
@@ -2008,7 +2007,7 @@ export async function debtWsStatementSend(
     ).catch(() => {});
     throw new DebtWsError(message, status, code, details);
   };
-  if (!debtWsSendingOn(deps.env, book.settings)) {
+  if (!debtWsSendingOn(book.settings)) {
     await refuseStatement(
       "sending_off",
       "Sending is off until you switch it on",
@@ -2296,7 +2295,7 @@ export async function debtWsJanList(
     sent_at: row?.sent_at ?? null,
     error: row?.error ?? null,
     auto_send_on: book.settings.jan_list_auto_send,
-    sending_on: debtWsSendingOn(deps.env, book.settings),
+    sending_on: debtWsSendingOn(book.settings),
     jan: {
       name: mobile.name,
       mobile_set: !!mobile.phone,
@@ -2408,7 +2407,7 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
   const visitDate = nextMonday(perthDate(now));
   const off = !settings.jan_list_auto_send
     ? "jan_list_auto_send_off"
-    : !debtWsSendingOn(deps.env, settings)
+    : !debtWsSendingOn(settings)
     ? "sending_off"
     : null;
   if (off) {
@@ -2933,7 +2932,7 @@ export async function debtWsAgentSubmit(
     kind === "draft" && isTextStep(step) && proposed === null &&
     settings.auto_send_steps[step] === true &&
     deps.env(DEBT_WS_AUTO_SEND_SWITCH) === "true" &&
-    debtWsSendingOn(deps.env, settings)
+    debtWsSendingOn(settings)
   ) {
     const bank = await bankFeedSafe(deps, [bankFromOf(entry.inv)]);
     const payments = bankCheck(bank, entry.inv, payerNames(entry));

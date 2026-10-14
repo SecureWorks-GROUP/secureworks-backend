@@ -109,19 +109,18 @@ Every switch starts off. Turn one on only when Shaun says so.
 |---|---|---|
 | Owner | env `DEBT_WS_OWNER_USER_IDS` (comma-separated users.id), else `debt_ws_settings.owner_user_ids` | Who may send, approve statements, link contacts, move cards and remove from Jan's list. The env value wins when it is set; a value with no valid id means nobody. The migration copies the debt desk's owner list (Shaun). |
 | Tab | `debt_ws_settings.tab_visible` | Shows the Debt tab to everyone. Without it, the tab appears only with `ops.html?debt=1`. |
-| Sending | env `DEBT_WS_SENDING_ENABLED=true` AND `debt_ws_settings.sending_enabled = true` | Texts, statements and Jan's Sunday text. Both must be on. |
+| Sending | `debt_ws_settings.sending_enabled = true` | Texts, statements and Jan's Sunday text. The database switch alone turns manual sending on (Shaun decided 14 Oct 2026). The old env `DEBT_WS_SENDING_ENABLED` is retired and ignored. |
 | Agent | `debt_ws_settings.agent_enabled` | The agent queue hands out items. The agent itself is a Claude routine; its setup is in the playbook README. |
-| Auto-send | env `DEBT_WS_AUTO_SEND_ENABLED=true` AND `debt_ws_settings.auto_send_steps` (e.g. `{"d1": true}`) AND sending on | Stage 5: a plain agent draft for a step switched on, with no proposed move and no possible payment, goes through the same guarded send as `agent-auto`. |
+| Auto-send | env `DEBT_WS_AUTO_SEND_ENABLED=true` AND `debt_ws_settings.auto_send_steps` (e.g. `{"d1": true}`) AND sending on (the database switch) | Stage 5: a plain agent draft for a step switched on, with no proposed move and no possible payment, goes through the same guarded send as `agent-auto`. |
 | Jan's list | `debt_ws_settings.jan_list_auto_send` | The Friday 09:00 lock and the Sunday 19:00 text to Jan (the text also needs sending on). |
 | Not chased | `debt_ws_settings.not_chased_contacts` | Contacts that stay in the totals but are never texted or sent a statement. Each entry is a contact name (whole words) or a Xero contact id (matching the invoice's contact or its canonical company). Seeded with Emergency Trade Services and Builderwest, by name and by id. |
 | Statement addresses | `debt_ws_settings.statement_emails` | A JSON map from the canonical Xero contact id to an accounts email; a contact-name key is a fallback only. Seeded with Major Loss Builders (`96abb9b3...`) and AJ Building & Restoration (`71a5e645...`). |
 | Company aliases | `debt_ws_settings.company_aliases` | A JSON map from an extra Xero contact id to the canonical one, because one builder can sit on several Xero contacts. Seeded: MLB `4d7121e3...` to `96abb9b3...`, Western Building `2a34b09f...` to `29d70cdc...`, Builderwest `aff63429...` to `c3a479ce...`. |
 
-To turn sending on:
-1. Set the Supabase function secret `DEBT_WS_SENDING_ENABLED` to `true`. Secrets reach the function on its next request; no deploy is needed.
-2. Run `UPDATE public.debt_ws_settings SET sending_enabled = true, updated_by = '<who>' WHERE id = 1;`.
+To turn sending on (Shaun decided 14 Oct 2026 that the database switch alone decides it):
+1. Run `UPDATE public.debt_ws_settings SET sending_enabled = true, updated_by = '<who>' WHERE id = 1;`.
 
-To turn it off, either one is enough.
+To turn it off, set `sending_enabled = false`. The env `DEBT_WS_SENDING_ENABLED` is retired: setting or unsetting it changes nothing. Automatic sending still needs its own env `DEBT_WS_AUTO_SEND_ENABLED=true` as well as the step switch.
 
 ## The cron
 

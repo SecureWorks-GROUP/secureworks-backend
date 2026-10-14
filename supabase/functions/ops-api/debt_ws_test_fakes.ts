@@ -753,6 +753,9 @@ export function fakeDeps(
   return { deps, rec };
 }
 
+// The retired env switch, set to "true". Since 14 Oct 2026 (Shaun) the database switch
+// debt_ws_settings.sending_enabled alone turns sending on, so this env is ignored. Tests
+// pass it to prove it neither turns sending on nor is needed.
 export const ON = {
   DEBT_WS_SENDING_ENABLED: "true",
 };

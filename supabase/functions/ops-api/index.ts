@@ -8105,8 +8105,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
       // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
       // (runDebtWsAction checks the method, then staff / owner / server key per action).
-      // Nothing reaches a client unless env DEBT_WS_SENDING_ENABLED is exactly "true" AND
-      // debt_ws_settings.sending_enabled is on. Xero is read only here.
+      // Nothing reaches a client unless debt_ws_settings.sending_enabled is on (the database
+      // switch alone, Shaun 14 Oct 2026; env DEBT_WS_SENDING_ENABLED is retired). Xero is read only here.
       case 'debt_ws_overview':
       case 'debt_ws_job':
       case 'debt_ws_document':
