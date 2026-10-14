@@ -222,13 +222,29 @@ jobs:
       # the oldest open invoice; the statement and Jan list bank checks; Jan's list failing
       # closed; server-key denial on staff actions; the agent queue blocked without the
       # feed; the template amount bar; company aliases; numbered reference endings.
+      # Shared fences (12 Oct): the invoice's payer owns the contact, conversation and link.
       - name: Test the Debt Workshop rules, store, dependencies and actions
         run: |
           deno test --allow-read --allow-env \
             supabase/functions/ops-api/debt_ws_rules_test.ts \
             supabase/functions/ops-api/debt_ws_store_test.ts \
             supabase/functions/ops-api/debt_ws_deps_test.ts \
-            supabase/functions/ops-api/debt_ws_actions_test.ts
+            supabase/functions/ops-api/debt_ws_actions_test.ts \
+            supabase/functions/ops-api/debt_ws_payer_test.ts
+
+      # Paid close-out (13 Oct 2026): a paid fencing or patio job goes to Get Review
+      # (the strict paid rule, the holds, compare and set), one review text per job
+      # (claim first, 90-day look-back, every paying owner), the 24-hour archive
+      # sweep and the dry-run Complete backlog list; get_review is a real stage and a
+      # GHL stage event can no longer pull a card out of Get Review or the archive.
+      - name: Test the paid close-out rule, review sender, sweeps and stage
+        run: |
+          deno test --allow-read --allow-env \
+            supabase/functions/_shared/job_paid_closeout_test.ts \
+            supabase/functions/ops-api/job_closeout_test.ts \
+            supabase/functions/_shared/stage-gate/job-state-machine_test.ts \
+            supabase/functions/_shared/stage-gate/engine_test.ts \
+            supabase/functions/ghl-webhook/stage_rank_test.ts
 
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
@@ -273,6 +289,71 @@ jobs:
             --filter "Ambrose" \
             supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
 
+      # Automatic repair intake (flag repair_intake_auto_v1): the pure rules, and
+      # the scan replays of the repair orders it exists for. Every scan test of
+      # it is named "repair intake: ..." so the filter runs them all; the
+      # runtime file is filtered for the reason given above. The last run is the
+      # end-to-end proof that the Trade App's my_jobs gives an allocated trade
+      # no builder order value.
+      - name: Test automatic repair intake
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/repair_intake_auto_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "repair intake:" \
+            supabase/functions/ops-api/makesafe_deterministic_intake_runtime_test.ts
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            --filter "builder's order value" \
+            supabase/functions/ops-api/trade_app_visibility_rules_test.ts
+
+      # The one staff text for a new job (docs/repair-intake-auto-v1.md,
+      # "Messages"): a repair job is told to the repair recipient in repair
+      # words, on the approval path and the scan path, and the make-safe text
+      # and its recipient are pinned byte for byte. Every SMS in these files is
+      # a fake transport. Same --no-check reason as above.
+      - name: Test the new job staff text for repair and make-safe jobs
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/makesafe_hugo_notification_test.ts \
+            supabase/functions/ops-api/makesafe_hugo_notification_index_test.ts \
+            supabase/functions/ops-api/makesafe_intake_settlement_test.ts
+
+      # An adapter registered in code but missing from the database's adapter
+      # list is refused on every case insert and nothing else notices (Ambrose,
+      # 12 Oct 2026). Compares the real registry with the newest definition of
+      # makesafe_intake_cases_deterministic_shapes_check in the migrations.
+      - name: Check every intake adapter is admitted by the database
+        run: |
+          deno test --allow-read \
+            supabase/functions/ops-api/makesafe_adapter_admission_contract_test.ts
+
+      # Trade invoice time entries (docs/trade-invoice-time-entries-2026-10-12.md):
+      # every trade invoice write path keeps the date worked and the start and
+      # finish time the trade sent on a line, and derives none itself, under
+      # both states of the enforcement flag. Drives the real
+      # ops-api request handler with every database call answered by a fetch
+      # stub. Same --no-check reason as the step above.
+      - name: Test trade invoice time entries
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_invoice_time_entry_test.ts \
+            supabase/functions/ops-api/trade_invoice_weekly_resolver_test.ts
+
+      # Trade recurring deductions (docs/trade-recurring-deductions-2026-10-13.md):
+      # one trade's weekly ute hire comes off the amount payable of his weekly
+      # invoice, once per invoice week, never below zero, and no other trade's
+      # invoice changes in any figure or field. Drives the real ops-api request
+      # handler with every database call answered by a fetch stub, plus the
+      # money and audit PDF suites the deduction is built on.
+      - name: Test trade recurring deductions
+        run: |
+          deno test --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/trade_invoice_recurring_deduction_test.ts \
+            supabase/functions/ops-api/trade_invoice_money_test.ts \
+            supabase/functions/ops-api/trade_invoice_money_audit_test.ts \
+            supabase/functions/ops-api/trade_invoice_pdf_test.ts \
+            supabase/functions/ops-api/trade_money_test.ts
+
       # Automated money messages are off (captain, 30 Sep 2026). Drives the
       # real ops-api and daily-digest request handlers with every database,
       # Xero and GHL call answered by a fetch spy. Same --no-check reason as
@@ -282,6 +363,15 @@ jobs:
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/debt_autotexts_off_test.ts \
             supabase/functions/daily-digest/deposit_autotexts_off_test.ts
+
+      # The Dispatch tab's list read is opt-in on `pipeline`: the plain read must
+      # stay exactly as it was, and the list must never drop a job past the
+      # 1000-row ceiling or select the whole scope blob. Same --no-check reason
+      # as above.
+      - name: Test the Dispatch list and job notes reads
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/dispatch_job_list_test.ts
 
       - name: Test edge deploy workflow classification
         run: |
@@ -300,6 +390,8 @@ jobs:
             supabase/functions/ghl-proxy/provider_reads_test.ts \
             supabase/functions/ghl-proxy/lead_search_test.ts \
             supabase/functions/ghl-proxy/sms_sender_default_test.ts \
+            supabase/functions/ghl-proxy/send_sms_contact_guard_test.ts \
+            supabase/functions/_shared/job_contact_membership_test.ts \
             supabase/functions/ghl-proxy/calendar_events_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_test.ts \
             supabase/functions/ghl-proxy/calendar_appointment_release_test.ts \
@@ -316,6 +408,11 @@ jobs:
             supabase/functions/ops-api/ses_report_trigger_test.ts \
             supabase/functions/ops-api/xero_bank_read_test.ts \
             supabase/functions/ops-api/trade_invoice_wo_line_lock_test.ts \
+            supabase/functions/ops-api/job_work_orders_test.ts \
+            supabase/functions/ops-api/quote_work_order_lines_test.ts \
+            supabase/functions/ops-api/job_work_order_quote_fill_test.ts \
+            supabase/functions/ops-api/job_work_order_quote_fill_handler_test.ts \
+            supabase/functions/ops-api/work_order_customer_variations_test.ts \
             supabase/functions/ops-api/sales_booking_read_test.ts \
             supabase/functions/ops-api/sales_booking_outlook_test.ts \
             supabase/functions/ops-api/sales_booking_pack_test.ts \
@@ -332,11 +429,12 @@ jobs:
       # This suite imports the serving monolith, whose pre-existing type errors
       # are reported by the advisory deno check above. Runtime assertions still
       # block release, and all provider calls are injected fixtures.
-      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline and its period window, the job search with closed jobs, the job commercial read, job freshness, the job state card, the job story doors, the ledger correction door, the context scorecard door, actor recording and monitored mailboxes
+      - name: Test proposed SMS receipts, replay holds, job conversation sources, the job message timeline and its period window, the job search with closed jobs, the job commercial read, job freshness, the job state card, the job story doors, the job overview door, the ledger correction door, the context scorecard door, actor recording and monitored mailboxes
         run: |
           deno test --no-check --allow-read --allow-env \
             supabase/functions/ops-api/context_visibility_test.ts \
             supabase/functions/ops-api/proposed_sms_receipt_test.ts \
+            supabase/functions/ops-api/chase_sms_contact_guard_test.ts \
             supabase/functions/ops-api/retired_booking_actions_test.ts \
             supabase/functions/ops-api/invoice_context_test.ts \
             supabase/functions/ops-api/job_conversation_chat_logs_retired_test.ts \
@@ -345,16 +443,20 @@ jobs:
             supabase/functions/ops-api/job_freshness_test.ts \
             supabase/functions/ops-api/job_state_card_test.ts \
             supabase/functions/ops-api/job_story_door_test.ts \
+            supabase/functions/ops-api/job_overview_read_test.ts \
             supabase/functions/ops-api/context_scorecard_door_test.ts \
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/job_conversation_window_test.ts \
+            supabase/functions/ops-api/job_conversation_payer_threads_test.ts \
+            supabase/functions/ops-api/job_conversation_held_messages_test.ts \
             supabase/functions/ops-api/search_jobs_closed_test.ts \
             supabase/functions/ops-api/trade_variation_request_test.ts \
             supabase/functions/ops-api/context_unlinked_test.ts \
             supabase/functions/ops-api/ledger_person_edit_test.ts \
             supabase/functions/ops-api/actor_calls_test.ts \
             supabase/functions/ops-api/actor_calls_handler_test.ts \
-            supabase/functions/ops-api/monitored_mailboxes_test.ts
+            supabase/functions/ops-api/monitored_mailboxes_test.ts \
+            supabase/functions/ops-api/job_closeout_status_cas_test.ts
 
       # Slice C1b: the GHL webhook receiver's two-proof auth (observe until
       # GHL_WEBHOOK_AUTH_MODE=enforce), ids-only webhook_log receipts and the

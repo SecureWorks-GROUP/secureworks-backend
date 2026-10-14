@@ -551,6 +551,8 @@ function sourceAlarmBlockerSentence(fact: IntakeOperationalFact): string {
     committed_without_site_suburb: `This source committed and its card ${
       fact.instruction_key ? `(${fact.instruction_key}) ` : ""
     }is live, but it was minted with no site suburb, so it is invisible to every suburb-keyed view.`,
+    new_work_order_on_existing_job:
+      "A new work order arrived for a claim that already has an open repair job. It was recorded on that job; no second job was opened.",
   };
   return known[String(fact.reason_code || "")] ||
     `This source still needs review: ${
@@ -563,6 +565,8 @@ function sourceAlarmNextAction(fact: IntakeOperationalFact): string {
     retry_bounded_pdf_extraction:
       "Review the attachment and retry bounded PDF extraction.",
     review_source: "Review the source and record its final outcome.",
+    human_review_work_order_on_existing_job:
+      "Open the repair job, check the new work order against it and update the job.",
   };
   return known[String(fact.next_action_code || "")] ||
     `Review the source and ${

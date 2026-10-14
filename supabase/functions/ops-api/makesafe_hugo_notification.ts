@@ -26,6 +26,11 @@ const RETRY_SAFE_PRETRANSPORT_FAILURES = new Set([
   "hugo_recipient_config_ambiguous",
   "hugo_staff_contact_missing",
   "hugo_staff_contact_ambiguous",
+  "repair_recipient_config_read_failed",
+  "repair_recipient_not_configured",
+  "repair_recipient_config_ambiguous",
+  "repair_recipient_user_missing",
+  "repair_recipient_phone_missing",
 ]);
 
 export interface HugoNotificationRecipient {
@@ -46,6 +51,10 @@ export interface HugoNotificationBoardJob {
   jobNumber: string | null;
   canonicalStage: string;
   sesFamily: string;
+  /** `jobs.type`. A repair job is told to the repair recipient, in repair words. */
+  jobType?: string | null;
+  /** `jobs.site_suburb`, used only in the repair wording. */
+  siteSuburb?: string | null;
 }
 
 export interface HugoProviderResult {
@@ -68,6 +77,12 @@ export interface HugoNotificationDeps {
     jobId: string,
   ) => Promise<HugoNotificationBoardJob | null>;
   loadConfig: (client: any) => Promise<HugoNotificationConfig>;
+  /**
+   * The repair recipient, read only for a repair job. It is never the
+   * make-safe list: a repair job whose recipient cannot be read or is not set
+   * sends nothing and records why.
+   */
+  loadRepairConfig?: (client: any) => Promise<HugoNotificationConfig>;
   sendSms: (
     phone: string,
     message: string,
@@ -95,6 +110,38 @@ export function buildHugoNotificationMessage(
 ): string {
   const label = jobNumber ? `${jobNumber} (${jobId})` : jobId;
   return `SecureWorks: New make-safe ${label}\nAssign in Trade: ${deepLink}`;
+}
+
+/** Repair wins: the job's type, or the family the board derived for it. */
+export function isRepairNotificationJob(
+  board: Pick<HugoNotificationBoardJob, "jobType" | "sesFamily">,
+): boolean {
+  const isRepair = (value: unknown) =>
+    String(value ?? "").trim().toLowerCase() === "repair";
+  return isRepair(board.jobType) || isRepair(board.sesFamily);
+}
+
+/** The job link the Ops screen itself opens (`restoreTab`: `#job/<ref>`). */
+export function buildRepairOpsDeepLink(jobId: string): string {
+  return `https://secureworks-group.github.io/secureworks-ux/ops.html#job/${jobId}`;
+}
+
+function repairMessagePart(value: string | null | undefined): string {
+  return String(value ?? "").replace(/[\u2012-\u2015]/g, "-")
+    .replace(/\s+/g, " ").trim();
+}
+
+export function buildRepairNotificationMessage(
+  jobId: string,
+  jobNumber: string | null,
+  suburb: string | null | undefined,
+  deepLink = buildRepairOpsDeepLink(jobId),
+): string {
+  const subject = [
+    ["New repair job", repairMessagePart(jobNumber)].filter(Boolean).join(" "),
+    repairMessagePart(suburb),
+  ].filter(Boolean).join(", ");
+  return `SecureWorks: ${subject}. Open in Ops: ${deepLink}`;
 }
 
 function isDuplicateError(error: any): boolean {
@@ -204,18 +251,44 @@ export async function notifyDeterministicPhysicalJob(
   const sourcePostIds = Array.from(
     new Set(input.sourcePostIds.map((value) => String(value || "").trim())),
   ).filter(Boolean);
-  const deepLink = buildHugoTradeDeepLink(input.jobId);
 
-  const [boardResult, configResult] = await Promise.allSettled([
+  const [boardResult, makesafeConfigResult] = await Promise.allSettled([
     deps.loadBoardJob(client, input.jobId),
     deps.loadConfig(client),
   ]);
   const board = boardResult.status === "fulfilled" ? boardResult.value : null;
+  const repair = board ? isRepairNotificationJob(board) : false;
+  // A repair job reads its own recipient and never the make-safe one: the
+  // make-safe result above is dropped, whatever it held.
+  const configResult = repair
+    ? (await Promise.allSettled([
+      Promise.resolve().then(() => {
+        if (!deps.loadRepairConfig) {
+          throw new Error("repair recipient loader not wired");
+        }
+        return deps.loadRepairConfig(client);
+      }),
+    ]))[0]
+    : makesafeConfigResult;
+  const reasons = repair
+    ? {
+      readFailed: "repair_recipient_config_read_failed",
+      notConfigured: "repair_recipient_not_configured",
+      phoneMissing: "repair_recipient_phone_missing",
+    }
+    : {
+      readFailed: "recipient_config_read_failed",
+      notConfigured: "hugo_recipient_not_configured",
+      phoneMissing: "hugo_recipient_phone_missing",
+    };
+  const deepLink = repair
+    ? buildRepairOpsDeepLink(input.jobId)
+    : buildHugoTradeDeepLink(input.jobId);
   const config = configResult.status === "fulfilled" ? configResult.value : {
     enabled: false,
     fromNumber: null,
     recipient: null,
-    failureReason: "recipient_config_read_failed",
+    failureReason: reasons.readFailed,
   };
   const boardStage = String(board?.canonicalStage || "").trim();
   const boardObservedAt = board ? now() : null;
@@ -233,17 +306,22 @@ export async function notifyDeterministicPhysicalJob(
   } else if (!String(board.sesFamily || "").trim()) {
     failureReason = "canonical_board_family_missing";
   } else if (configResult.status === "rejected") {
-    failureReason = "recipient_config_read_failed";
+    failureReason = reasons.readFailed;
   } else if (!config.enabled) failureReason = "notification_disabled";
   else if (config.failureReason) failureReason = config.failureReason;
-  else if (!config.recipient) failureReason = "hugo_recipient_not_configured";
+  else if (!config.recipient) failureReason = reasons.notConfigured;
   else if (!config.recipient.phone) {
-    failureReason = "hugo_recipient_phone_missing";
+    failureReason = reasons.phoneMissing;
   } else if (!config.fromNumber) failureReason = "sms_from_number_missing";
 
-  const message = board
-    ? buildHugoNotificationMessage(input.jobId, board.jobNumber, deepLink)
-    : null;
+  const message = !board ? null : repair
+    ? buildRepairNotificationMessage(
+      input.jobId,
+      board.jobNumber,
+      board.siteSuburb,
+      deepLink,
+    )
+    : buildHugoNotificationMessage(input.jobId, board.jobNumber, deepLink);
   const recipientSet = config.recipient
     ? [{
       user_id: config.recipient.userId,

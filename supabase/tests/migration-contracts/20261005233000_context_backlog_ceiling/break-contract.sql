@@ -2,6 +2,12 @@
 -- 20260924220000's cadence, K1's claim and the old status block, then the
 -- settings table is created again with its default row. A catch-up-only job
 -- is then due at 300 calls and the contract must catch it.
+-- (The call cap setting, 20261013100000, replaced the cadence and the status block after this
+-- migration: when a full stack has it, it is rolled back first, as this down demands.)
+SELECT to_regprocedure('public.context_cadence_policy_today()') IS NOT NULL AS call_cap_setting_live \gset
+\if :call_cap_setting_live
+\ir ../../../rollbacks/20261013100000_context_call_cap_setting_down.sql
+\endif
 \ir ../../../rollbacks/20261005233000_context_backlog_ceiling_down.sql
 CREATE TABLE public.context_cadence_settings (
  id boolean PRIMARY KEY DEFAULT true CHECK (id),

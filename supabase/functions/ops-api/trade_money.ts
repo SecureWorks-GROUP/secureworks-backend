@@ -26,6 +26,9 @@ export interface TradeMoneyRow {
   gst: number | null
   gst_on: boolean | null
   trade_payable: number | null
+  // The recurring deduction this invoice carries (for example Ute hire), taken
+  // off trade_payable already. Absent on an invoice that carries none.
+  recurring_deduction?: { label: string; amount: number }
   total_inc: number | null
   figures_ok: boolean
   figures_note: string | null
@@ -142,6 +145,14 @@ export function tradeMoneyRow(presented: any): TradeMoneyRow {
     gst: figuresOk ? num(presented?.gst) : null,
     gst_on: typeof presented?.gst_on === 'boolean' ? presented.gst_on : null,
     trade_payable: tradePayable,
+    ...(figuresOk && presented?.recurring_deduction
+      ? {
+        recurring_deduction: {
+          label: String(presented.recurring_deduction.label || ''),
+          amount: num(presented.recurring_deduction.amount) ?? 0,
+        },
+      }
+      : {}),
     total_inc: totalInc,
     figures_ok: figuresOk,
     figures_note: figuresError ? 'Figures unavailable for this invoice. The office has the Xero bill.' : null,

@@ -126,12 +126,20 @@ An `SWR-` mint is irreversible, so a human taps every one. Advance-what-passes
 stops at the repair family: `approveIntakeDraft` refuses (409) whenever the
 family that would actually be created is `repair` and the caller carries the
 module-private unattended marker every in-repo automation lane stamps (the
-sweep, the legacy drain and the deterministic scan lanes among them). The
-deterministic runtime additionally withholds its own guarded approval for a
-repair-family plan and leaves the draft written and `needs_review`, and the
-sweep skips it earlier with `repair_family_supervised_review`; those are
-earlier, weaker layers, not the guarantee. A parked repair draft is ordinary
-review-queue work for an operator.
+sweep, the legacy drain and the deterministic scan lanes among them).
+
+One exception, behind `feature_flags.repair_intake_auto_v1` (seeded off;
+missing or unreadable is off): the two deterministic scan lanes may mint a
+repair the builder itself declared, from MLB or Ambrose, on a draft a flag-on
+run stamped. The sweep, the legacy drain and the late-PDF lane stay supervised
+with the flag on. Rules and limits:
+[automatic repair intake](repair-intake-auto-v1.md).
+
+Outside that exception the deterministic runtime additionally withholds its
+own guarded approval for a repair-family plan and leaves the draft written and
+`needs_review`, and the sweep skips it earlier with
+`repair_family_supervised_review`; those are earlier, weaker layers, not the
+guarantee. A parked repair draft is ordinary review-queue work for an operator.
 
 Which work orders resolve to repair widened with the captain's 2026-08-31
 ruling: a properly identified, readable work order that is not general make-safe,

@@ -52,6 +52,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { computeHash } from '../_shared/evidence/storage.ts'
 import { parseSendSmsRecipient, saveSendSmsEvidence } from './sms_capture.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
+import { checkSendSmsContactJob } from './send_sms_contact_guard.ts'
 import {
   assignJobNumberWithNullCas,
   buildGhlContactUpdate,
@@ -4184,28 +4185,23 @@ serve(async (req: Request) => {
       }
       const fromNumber = resolvedFrom.fromNumber
 
-      // Contact-job mismatch guard: if both contactId and jobId supplied, verify they match.
+      // Contact-job mismatch guard: if both contactId and jobId supplied, the contact
+      // must be the job's own contact or a live party on the same job's contact list
+      // (a neighbour on a shared fence). send_sms_contact_guard.ts holds the rule.
       // The row read here also decides whether the evidence row may carry jobId as a
       // verified direct link (sms_capture.ts sendSmsJobCustody).
       let namedJob: { ghl_contact_id?: string | null } | null = null
       if (contactId && jobId) {
-        try {
-          const sbCheck = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-          const { data: job } = await sbCheck.from('jobs')
-            .select('ghl_contact_id, client_name')
-            .eq('id', jobId)
-            .single()
-          namedJob = job || null
-          if (job && job.ghl_contact_id && job.ghl_contact_id !== contactId) {
-            console.error(`[ghl-proxy] CONTACT MISMATCH BLOCKED: contactId=${contactId} does not match job ${jobId} contact=${job.ghl_contact_id} (${job.client_name})`)
-            return json({
-              error: 'Contact mismatch: contactId does not match the job contact. SMS blocked.',
-              expected_contact: job.ghl_contact_id,
-              expected_name: job.client_name,
-              supplied_contact: contactId,
-            }, 409)
-          }
-        } catch { /* non-blocking — if lookup fails, allow send */ }
+        const sbCheck = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        const guard = await checkSendSmsContactJob(sbCheck, jobId, contactId)
+        namedJob = guard.namedJob
+        if (guard.refusal) {
+          console.error(`[ghl-proxy] CONTACT MISMATCH BLOCKED: contactId=${contactId} is not on job ${jobId} (job contact=${guard.namedJob?.ghl_contact_id ?? 'none'})`)
+          return json(guard.refusal, 409)
+        }
+        if (guard.via === 'job_party') {
+          console.log(`[ghl-proxy] send_sms contact ${contactId} is a live party on job ${jobId}'s contact list`)
+        }
       }
 
       // Dedup: check for identical SMS to same contact within last 10 minutes

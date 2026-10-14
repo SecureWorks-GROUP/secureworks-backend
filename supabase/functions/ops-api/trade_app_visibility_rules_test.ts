@@ -74,6 +74,7 @@ type Job = {
   type: string;
   job_number?: string;
   status: string;
+  metadata?: Record<string, unknown>;
 };
 const JOBS: Job[] = [
   {
@@ -712,6 +713,80 @@ Deno.test("rule table (end-to-end): my_jobs for ordinary crew carries the presen
     true,
     "search carries the far-past allocation",
   );
+});
+
+Deno.test("rule table (end-to-end): my_jobs gives an allocated trade a repair job's purchase orders and never the builder's order value", async () => {
+  const REPAIR_CREW = "u-repair-crew";
+  const repairJob: Job = {
+    id: "job-repair-builder-value",
+    org_id: ORG_A,
+    type: "repair",
+    job_number: "SWR-1",
+    status: "scheduled",
+    metadata: {
+      repair_stage: "scheduled",
+      builder_claim_ref: "MLB-49502",
+      builder_po_number: "PO-11111",
+      builder_work_order_value_ex_gst: 1080,
+      builder_work_order_value_source: "builder_work_order_pdf_not_our_quote",
+      builder_additional_work_orders: [
+        { purchase_order: "PO-69815", value_ex_gst: 500 },
+      ],
+    },
+  };
+  const allocation: Assignment = {
+    id: "a-repair-crew",
+    job_id: repairJob.id,
+    user_id: REPAIR_CREW,
+    status: "scheduled",
+    scheduled_date: TODAY,
+  };
+  JOBS.push(repairJob);
+  ASSIGNMENTS.push(allocation);
+  try {
+    const card = async (isDispatcher: boolean) => {
+      const g = await myJobs(
+        surfaceClient([]),
+        REPAIR_CREW,
+        false,
+        isDispatcher,
+        false,
+        [],
+        [],
+        ORG_A,
+      );
+      const found = [
+        ...g.today,
+        ...g.thisWeek,
+        ...g.upcoming,
+        ...g.recent,
+        ...(g.recentCompleted || []),
+        ...(g.unscheduled || []),
+      ].find((a: any) => a.jobs?.id === repairJob.id);
+      assertEquals(Boolean(found), true, "the allocation is on the board");
+      return found.jobs.metadata;
+    };
+
+    const trade = await card(false);
+    assertEquals("builder_work_order_value_ex_gst" in trade, false);
+    assertEquals(trade.builder_additional_work_orders, [
+      { purchase_order: "PO-69815" },
+    ]);
+    // The numbers the trade works to stay on the card.
+    assertEquals(trade.builder_po_number, "PO-11111");
+    assertEquals(trade.builder_claim_ref, "MLB-49502");
+    assertEquals(JSON.stringify(trade).includes("1080"), false);
+
+    // CONTROL: the office reads the same card with the builder's figures.
+    const office = await card(true);
+    assertEquals(office.builder_work_order_value_ex_gst, 1080);
+    assertEquals(office.builder_additional_work_orders, [
+      { purchase_order: "PO-69815", value_ex_gst: 500 },
+    ]);
+  } finally {
+    JOBS.splice(JOBS.indexOf(repairJob), 1);
+    ASSIGNMENTS.splice(ASSIGNMENTS.indexOf(allocation), 1);
+  }
 });
 
 Deno.test("rule table: a ghost watcher row never grants the allocated tier", async () => {

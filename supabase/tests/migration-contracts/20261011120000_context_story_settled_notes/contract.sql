@@ -251,6 +251,12 @@ ROLLBACK;
 
 -- Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- (held messages, 20261012100000, replaced the story read and the packet since: its down goes first,
+-- so the bodies snapshotted and re-applied below are this migration's own)
+SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset
+\if :held_messages_live
+\ir ../../../rollbacks/20261012100000_context_held_messages_down.sql
+\endif
 CREATE TEMP TABLE story_settled_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.oid IN (to_regprocedure('public.context_job_story_assemble(jsonb,jsonb,jsonb,jsonb,timestamptz,timestamptz)'),

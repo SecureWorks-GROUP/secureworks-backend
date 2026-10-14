@@ -116,6 +116,8 @@ END $c$;
 DO $c$
 DECLARE cap integer := (public.context_cadence_policy() ->> 'model_call_cap')::integer;
 BEGIN
+ -- (the call cap setting, 20261013100000, lets calls_per_day raise the day's cap, to 3,000 at most)
+ IF to_regprocedure('public.context_cadence_policy_today()') IS NOT NULL THEN cap := 3000; END IF;
  BEGIN
   UPDATE public.context_ledger_settings SET calls_per_day = cap + 1;
   RAISE EXCEPTION 'ledger contract: calls_per_day above the % cap accepted', cap;

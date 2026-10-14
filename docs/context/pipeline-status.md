@@ -86,6 +86,23 @@ larger budget needs those CHECKs moved in the same migration. The Luna worker
 deploys the worker first. `ready_jobs` (at most 400 listed due jobs) is a
 list size, not the call budget.
 
+Call cap setting (`20261013100000`): the day's cap can be raised without a
+migration. The seven readers of `model_call_cap` and `morning_cap` (the
+admission, `context_ledger_budget()`, `context_jobs_cadence`,
+`context_document_vision_admission()`, `context_job_story_budget()`,
+`context_cadence_status()` and `context_core_status()`) read them from
+`context_cadence_policy_today()`: the policy itself while
+`context_ledger_settings.calls_per_day` is at or under the policy's cap
+(1,000), and above it `model_call_cap` is `calls_per_day` and `morning_cap`
+keeps the policy's share of the day (three quarters: 1,500 gives 1,125). The
+cap never follows the setting down: at or under 1,000 `calls_per_day` limits
+the ledger alone, as before. The two CHECKs above now stop at 3,000 (the
+reserves keep 1,000), and vision keeps its own `shared_calls_ceiling`. A raise
+is one settings change, made only after the worker's own ceiling is deployed
+at or above it. `context_ledger_settings.read_concurrency` (1 to 30, default 1)
+is how many ledger jobs the worker reads at once; nothing in the database
+reads it.
+
 Catch-up (`20260924220000`): `catchup` reports the one-time catch-up list
 (`context_catchup_jobs`, written by the service-role
 `context_catchup_request(dry_run default true)` and, since `20261004100000`, by

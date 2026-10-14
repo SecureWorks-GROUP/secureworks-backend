@@ -598,7 +598,7 @@ Deno.test("decide: refuses texts the guard forbids, steps not due, company invoi
   store.jobRows.find((j) => j.id === JOBS.fence)!.ghl_contact_id = null;
   assertEquals(
     (await call(deps, "debt_ws_decide", SHAUN, D7_SEND)).body.code,
-    "no_contact",
+    "payer_not_linked",
   );
   assertEquals(
     (await call(deps, "debt_ws_decide", SHAUN, { ...D7_SEND, extra: 1 }))
@@ -961,7 +961,24 @@ Deno.test("job: row, job, story, invoices, documents, conversation, ladder, temp
   assertEquals(b.contact, {
     ghl_contact_id: "ghlcontact0000000001",
     candidates: [],
+    linkable: true,
+    payer_name: "Alex Sample",
   });
+  // A single-payer job: the payer is the job's client, every message is theirs.
+  assertEquals(b.payer_contact.is_primary, true);
+  assertEquals(b.payer_contact.resolved_by, "single_payer_job");
+  assertEquals(b.payer_contact.phone, "0400 000 001");
+  assertEquals(b.conversation.all_job_messages_count, 2);
+  assertEquals(b.conversation.reason, null);
+  assertEquals(b.send_block, null);
+  assertEquals(b.job.shares, [{
+    label: "main",
+    payer_name: "Alex Sample",
+    is_primary: true,
+    owing: 1000,
+    paid: false,
+    invoice_count: 1,
+  }]);
 
   // The patio's job lists its go-ahead deposit and the progress invoice.
   const patio =
@@ -1340,6 +1357,56 @@ Deno.test("agent queue: off by default, then due steps without a suggestion, wit
   assertEquals(item.playbook_version, "debt-ws-playbook/v1");
   assertEquals(item.possible_payments, []);
   assert(Array.isArray(item.notes));
+});
+
+Deno.test("job and agent queue: the payer's unplaced messages are asked for, shown and marked", async () => {
+  // Live case (14 Oct 2026): a chase text held on no job (unplaced, this job its only
+  // candidate) never reached the Debt tab. The payer's contact is now passed as the held
+  // contact, and the message comes back marked unplaced: true.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const contact = "ghlcontact0000000001";
+  const { deps, rec } = fakeDeps(store, {
+    conversation: [
+      {
+        id: "bev:held-1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-09T03:02:52Z",
+        author: "Shaun",
+        body: "So sorry to bother you",
+        contact_id: contact,
+        unplaced: true,
+      },
+      {
+        id: "ghl:1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-01T03:00:00Z",
+        author: "Shaun",
+        body: "Hi there",
+        contact_id: contact,
+      },
+    ],
+  });
+  const job = (await call(deps, "debt_ws_job", STAFF, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(rec.conversationReads.at(-1)!.heldContactIds, [contact]);
+  assertEquals(job.conversation.messages.map((m: any) => m.id), [
+    "bev:held-1",
+    "ghl:1",
+  ]);
+  assertEquals(job.conversation.messages[0].unplaced, true);
+  assertEquals(job.conversation.messages[0].is_payer, true);
+  assertEquals(job.conversation.messages[1].unplaced, undefined);
+
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  const item = q.items.find((i: any) => i.row.xero_invoice_id === IDS.final);
+  // Oldest first in the bundle; the held message is the newest and is marked.
+  assertEquals(item.messages.map((m: any) => m.id), ["ghl:1", "bev:held-1"]);
+  assertEquals(item.messages[1].unplaced, true);
+  assertEquals("unplaced" in item.messages[0], false);
 });
 
 Deno.test("agent submit: draft supersedes drafts and moves, a flag is logged and supersedes nothing, no_action only stamps", async () => {

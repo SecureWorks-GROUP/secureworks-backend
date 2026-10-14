@@ -165,6 +165,8 @@ export interface WsJob {
   site_address: string | null;
   site_suburb: string | null;
   ghl_contact_id: string | null;
+  /** The job client's Xero contact (finds the payer of an invoice; debt_ws_payer.ts). */
+  xero_contact_id?: string | null;
 }
 
 export function isSampleReference(reference: unknown): boolean {

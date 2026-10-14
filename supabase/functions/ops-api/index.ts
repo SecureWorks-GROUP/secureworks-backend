@@ -25,6 +25,8 @@ import { salesPerformanceAction, salesPerformanceStore } from './sales_performan
 //   pipeline            — Jobs by status for kanban view
 //   makesafe_board      — Canonical make-safe rows projected for Ops or Trade
 //   job_detail          — Full job + assignments + POs + WOs + invoices
+//   job_overview        — Job page Overview: story card, AI notes, conversation, files, saved story (staff, GET)
+//   request_job_story   — Ask for a job's saved story to be written or rewritten (staff, POST)
 //   list_invoices       — Xero invoices with filters
 //   job_financials      — Job P&L list (makesafe-scoped view; M3 panel)
 //   job_financials_detail — Single job P&L + trade charge lines (get_job_financials rpc)
@@ -202,6 +204,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
+import { findLiveJobContactForGhlContact } from '../_shared/job_contact_membership.ts'
 import {
   canonicalMakesafeBuilderDisplayName,
   canonicalMakesafeInvoiceContactName,
@@ -239,6 +242,8 @@ import {
   getQuoteBuilderJob,
   issueQuoteBuilderVersion,
   listQuoteBuilderJobs,
+  loadQuoteBuilderCardValues,
+  quoteBuilderCardRow,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
   quoteBuilderPhotoCaption,
@@ -248,6 +253,7 @@ import {
   type QuoteBuilderActor,
 } from './quote_builder.ts'
 import {
+  BUILDER_WORK_ORDER_VALUE_NOT_READ as _BUILDER_WORK_ORDER_VALUE_NOT_READ,
   INSURANCE_REPAIR_STAGES,
   insuranceRepairStage,
   isInsuranceRepairFamily,
@@ -270,6 +276,19 @@ import {
   fencingStageTruthFields,
 } from './fencing_stage_engine_v1.ts'
 import { isFencingStageTruthRequested } from './fencing_stage_recipe_v1.ts'
+import {
+  DISPATCH_LIST_PROJECTION,
+  DISPATCH_LIST_STATUSES,
+  DISPATCH_LISTED_WORK_FILTER,
+  dispatchJobDescription,
+  dispatchValueIncGst,
+  dispatchWorkType,
+  isDispatchListRequested,
+  isPersonWrittenJobNote,
+  JOB_NOTE_EVENT_TYPES,
+  projectDispatchJobNote,
+  stripDispatchListAliases,
+} from './dispatch_job_list.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -428,11 +447,12 @@ import { debtContextCoverage, invoiceContext, InvoiceContextError } from './invo
 import { readJobQuotes, readJobVariations, readScopeSignOff, scopeSourceStatus, summariseScope } from './job_commercial_read.ts'
 import { readJobFreshness } from './job_freshness.ts'
 import { STORY_SECTIONS_VERSION, StoryReadError, buildStoryDossier, clientStoryAction, jobStoryAction, storyScorecardAction } from './job_story_read.ts'
+import { jobOverviewAction, requestJobStoryAction } from './job_overview_read.ts'
 import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -509,10 +529,21 @@ import {
   splitTradeInvoiceXeroLines,
   TradeInvoiceMoneyError,
   type TradeInvoiceMoney,
+  tradeInvoicePayableBeforeDeduction,
+  tradeInvoiceXeroBillSubtotal,
   type TradeInvoiceXeroIdentity,
   type TradeInvoiceXeroLine,
   validatePersistedTradeInvoiceMoney,
+  withTradeInvoiceRecurringDeduction,
 } from './trade_invoice_money.ts'
+import {
+  loadTradeRecurringDeductionDecision,
+  type TradeRecurringDeductionDecision,
+  tradeRecurringDeductionInvoiceFields,
+  tradeRecurringDeductionResponse,
+  type TradeRecurringDeductionWeekless,
+  withTradeRecurringDeductionOfficeNote,
+} from './trade_invoice_recurring_deduction.ts'
 import {
   attachPdfToXeroInvoiceUntilAttached,
   attachTradeInvoicePdfIfPresent,
@@ -578,6 +609,47 @@ import {
   type WeeklyInvoiceLine,
   type WeeklyWorkOrderInvoice,
 } from './trade_invoice_weekly.ts'
+import {
+  assertManualTimeEntriesDistinct,
+  draftTradeInvoiceTimeEntry,
+  isTradeInvoiceTimeLineType,
+  loadJobTradeTimeEntries,
+  loadLoggedTimesByCard,
+  loggedTimeEntryForCard,
+  resolveTradeInvoiceTimeEntry,
+  tradeInvoiceTimeEntriesNeededError,
+  TradeInvoiceTimeEntryError,
+  tradeInvoiceTimeEntryColumns,
+  tradeInvoiceTimeEntryRequired,
+  type TradeInvoiceTimeEntry,
+  type TradeInvoiceTimeEntryNeeded,
+} from './trade_invoice_time_entry.ts'
+import {
+  approveJobWorkOrder,
+  backfillJobWorkOrders,
+  correctWorkOrderVariation,
+  createJobWorkOrder,
+  JobWorkOrderError,
+  listJobWorkOrders,
+  readJobWorkOrder,
+  reportWorkOrderVariation,
+  resendWorkOrderVariationEmails,
+  resolveWorkOrderApprover,
+  sendOutlookVariationEmail,
+  tradeJobWorkOrderRead,
+  type TradeRedaction,
+  updateJobWorkOrderDraft,
+} from './job_work_orders.ts'
+import { previewQuoteWorkOrderLines, QuoteFillError } from './job_work_order_quote_fill.ts'
+import {
+  approveCustomerVariation,
+  cancelCustomerVariation,
+  createCustomerVariation,
+  createCustomerVariationXeroDraft,
+  listCustomerVariations,
+  prepareCustomerVariationInvoiceLine,
+  updateCustomerVariation,
+} from './work_order_customer_variations.ts'
 
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
@@ -626,6 +698,11 @@ import {
   type IntakeDraftObligationCandidate as _IntakeDraftObligationCandidate,
   type IntakeDraftObligationDisposition as _IntakeDraftObligationDisposition,
 } from './makesafe_deterministic_intake_runtime.ts'
+import {
+  repairAutoIntakeMintStamp as _repairAutoIntakeMintStamp,
+  repairIntakeAutoEnabled as _repairIntakeAutoEnabled,
+  withoutBuilderOrderValue as _withoutBuilderOrderValue,
+} from './repair_intake_auto.ts'
 import {
   notifyDeterministicPhysicalJob as _notifyDeterministicPhysicalJob,
   type HugoNotificationConfig as _HugoNotificationConfig,
@@ -1253,6 +1330,16 @@ import {
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
+import {
+  type JobCloseoutCaller,
+  type JobCloseoutDeps,
+  JobCloseoutError,
+  ghlProxyReviewSender,
+  requestJobReview,
+  reviewRequestMessage as closeoutReviewRequestMessage,
+  runJobCloseoutAction,
+} from './job_closeout.ts'
+import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -1664,7 +1751,7 @@ export async function _findLiveTradeInvoiceForWeek(
   weekEnd: string,
 ): Promise<any | null> {
   const { data, error } = await client.from('trade_invoices')
-    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc')
+    .select('id, status, invoice_number, week_start, week_end, xero_bill_id, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, recurring_deduction_label, recurring_deduction_amount')
     .eq('user_id', userId)
     .eq('week_end', weekEnd)
     .order('created_at', { ascending: true })
@@ -1703,6 +1790,39 @@ function tradeInvoiceMoneyApiError(error: unknown): never {
     })
   }
   throw error
+}
+
+// A time line that does not say when it was worked (or says it wrongly) is a
+// 422 the trade app can show as it stands. Rule: trade_invoice_time_entry.ts.
+function tradeInvoiceTimeEntryApiError(error: unknown): never {
+  if (error instanceof TradeInvoiceTimeEntryError) {
+    throw new ApiError(error.message, error.status, {
+      ok: false,
+      success: false,
+      saved: false,
+      code: error.code,
+      error: error.message,
+      userMessage: error.message,
+      ...(error.needsTimes ? { needs_times: error.needsTimes } : {}),
+    })
+  }
+  throw error
+}
+
+function refuseJobCardsNeedingTimes(needsTimes: TradeInvoiceTimeEntryNeeded[]): void {
+  if (needsTimes.length === 0) return
+  tradeInvoiceTimeEntryApiError(tradeInvoiceTimeEntriesNeededError(needsTimes))
+}
+
+function resolveTimeEntryOrRefuse(
+  raw: unknown,
+  opts: { required: boolean; clientHours?: unknown; label?: string },
+): TradeInvoiceTimeEntry | null {
+  try {
+    return resolveTradeInvoiceTimeEntry(raw, opts)
+  } catch (error) {
+    return tradeInvoiceTimeEntryApiError(error)
+  }
 }
 
 function supplierBillApiError(error: unknown): never {
@@ -1836,14 +1956,77 @@ function tradeInvoiceMoneyResponse(money: TradeInvoiceMoney) {
     worker_withhold: money.worker_withhold,
     company_contribution: money.company_contribution,
     company_total_out: money.company_total_out,
+    // Only on an invoice that carries a recurring deduction (for example Ute
+    // hire): every other response is exactly what it was. trade_payable above
+    // is already the reduced figure.
+    ...(money.recurring_deduction
+      ? {
+        recurring_deduction: money.recurring_deduction,
+        payable_before_deduction: tradeInvoicePayableBeforeDeduction(money),
+      }
+      : {}),
   }
+}
+
+// Recurring deduction (trade_invoice_recurring_deduction.ts): decide what this
+// weekly invoice carries and take it off the amount payable, after super and
+// GST. An invoice with no week, and every trade with no rule row, comes back
+// exactly as it went in. A failed rule read throws: the invoice is not saved.
+// `weekless` is passed only where an invoice with no invoice week is
+// submitted (a no-week invoice, a work-order invoice): nothing is taken, and
+// when the trade has a deduction that week the decision carries the note that
+// marks the invoice for the office.
+async function applyTradeRecurringDeduction(
+  client: any,
+  money: TradeInvoiceMoney,
+  input: {
+    userId: string
+    weekStart: string | null | undefined
+    weekless?: TradeRecurringDeductionWeekless
+  },
+): Promise<{ money: TradeInvoiceMoney; decision: TradeRecurringDeductionDecision }> {
+  const decision = await loadTradeRecurringDeductionDecision(client, {
+    userId: input.userId,
+    weekStart: input.weekStart,
+    payable: tradeInvoicePayableBeforeDeduction(money),
+    weekless: input.weekless,
+  })
+  if (decision.outcome === 'none') return { money, decision }
+  try {
+    return { money: withTradeInvoiceRecurringDeduction(money, decision.applied), decision }
+  } catch (error) {
+    return tradeInvoiceMoneyApiError(error)
+  }
+}
+
+// A deduction that was due but not taken is said on the invoice the office
+// reads (query_note), after whatever is already written there, and kept on
+// the invoice's own recurring_deduction_note: query_note is rewritten as the
+// invoice moves on, so every read puts the kept reason back
+// (withTradeRecurringDeductionOfficeNote in presentTradeInvoice).
+async function noteTradeRecurringDeductionNotTaken(
+  client: any,
+  invoiceId: string,
+  decision: TradeRecurringDeductionDecision,
+): Promise<void> {
+  if (!decision.note) return
+  const { data: noted, error: readErr } = await client.from('trade_invoices')
+    .select('query_note').eq('id', invoiceId).maybeSingle()
+  if (readErr) console.error('[ops-api] recurring deduction note read failed:', readErr.message)
+  const existing = String(noted?.query_note || '')
+  const merged = existing.includes(decision.note)
+    ? existing
+    : [existing, decision.note].filter(Boolean).join(' | ').slice(0, 2000)
+  const { error: noteErr } = await client.from('trade_invoices')
+    .update({ query_note: merged, recurring_deduction_note: decision.note }).eq('id', invoiceId)
+  if (noteErr) console.error('[ops-api] recurring deduction note update failed:', noteErr.message)
 }
 
 function presentTradeInvoice<T extends Record<string, unknown>>(
   invoice: T,
 ): T & { trade_payable: number | null } & Record<string, unknown> {
   try {
-    const presented = presentTradeInvoiceMoney(invoice)
+    const presented = presentTradeInvoiceMoney(withTradeRecurringDeductionOfficeNote(invoice))
     if (String(invoice.invoice_source || '') !== 'weekly_work_order') {
       return presented
     }
@@ -2772,6 +2955,68 @@ async function loadHugoNotificationConfig(
   }
 }
 
+// The one staff text for a new REPAIR job goes to the user named in
+// makesafe_notify_settings.repair_new_job_user_ids (20261013170000); the phone
+// is read from that user's row at send time. Exactly one user with a phone
+// sends; an empty list, more than one user, an unknown user or a user with no
+// phone sends nothing and names the reason. It never falls back to a role or
+// to the make-safe list.
+async function loadRepairNotificationConfig(
+  client: any,
+): Promise<_HugoNotificationConfig> {
+  const settingsResult = await client.from('makesafe_notify_settings')
+    .select('notify_enabled, from_number, repair_new_job_user_ids')
+    .eq('id', true)
+    .maybeSingle()
+  if (settingsResult.error) {
+    throw new Error(
+      `Repair notification settings read failed: ${settingsResult.error.message || settingsResult.error}`,
+    )
+  }
+  const userIds = Array.from(new Set<string>(
+    (Array.isArray(settingsResult.data?.repair_new_job_user_ids)
+      ? settingsResult.data.repair_new_job_user_ids
+      : [])
+      .map((id: any) => String(id || '').trim())
+      .filter(Boolean),
+  ))
+  let user: any = null
+  if (userIds.length === 1) {
+    const usersResult = await client.from('users')
+      .select('id, name, phone')
+      .in('id', userIds)
+    if (usersResult.error) {
+      throw new Error(
+        `Repair notification staff read failed: ${usersResult.error.message || usersResult.error}`,
+      )
+    }
+    user = (usersResult.data || []).find((row: any) =>
+      String(row?.id || '') === userIds[0]
+    ) || null
+  }
+  const phone = String(user?.phone || '').trim()
+  return {
+    enabled: settingsResult.data?.notify_enabled === true,
+    fromNumber: String(settingsResult.data?.from_number || '').trim() || null,
+    recipient: user && phone
+      ? {
+        userId: String(user.id),
+        name: user.name ? String(user.name) : null,
+        phone,
+      }
+      : null,
+    failureReason: userIds.length === 0
+      ? 'repair_recipient_not_configured'
+      : userIds.length > 1
+      ? 'repair_recipient_config_ambiguous'
+      : !user
+      ? 'repair_recipient_user_missing'
+      : !phone
+      ? 'repair_recipient_phone_missing'
+      : null,
+  }
+}
+
 async function notifyMintedDeterministicPhysicalJob(
   client: any,
   input: {
@@ -2793,15 +3038,19 @@ async function notifyMintedDeterministicPhysicalJob(
         jobNumber: row.job_number || null,
         canonicalStage: String(row.canonical_stage || ''),
         sesFamily: String(row.ses_family || ''),
+        jobType: row.type ? String(row.type) : null,
+        siteSuburb: row.site_suburb ? String(row.site_suburb) : null,
       }
     },
     loadConfig: loadHugoNotificationConfig,
+    loadRepairConfig: loadRepairNotificationConfig,
     sendSms: (phone, message, fromNumber) =>
       sendSmsViaGhlWithReceipt(phone, message, fromNumber),
   })
 }
 
 export const _loadHugoNotificationConfigForTest = loadHugoNotificationConfig
+export const _loadRepairNotificationConfigForTest = loadRepairNotificationConfig
 export const _notifyMintedDeterministicPhysicalJobForTest =
   notifyMintedDeterministicPhysicalJob
 
@@ -4211,6 +4460,11 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   // vertical-manager, or ownership authorization in their handlers.
   'trade_calendar',
   'my_work_orders',
+  // Job work orders (job_work_orders.ts): the trade read of the job's approved
+  // work order (no prices) and the variation report on the trade's own
+  // invoice. Both run authTrade + assertAssignedOrMakesafeAccess in the route.
+  'my_job_work_order',
+  'report_work_order_variation',
   'my_jobs',
   'trade_job_detail',
   'trade_quote_extract',
@@ -6449,8 +6703,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         if (!jid) return json({ error: 'jobId required' }, 400)
         const slim = url.searchParams.get('slim') === 'true' || url.searchParams.get('slim') === '1'
-        return json(await jobDetail(client, jid, { slim }))
+        // Only staff or the ops server key may fill the work order draft on
+        // this read; the routine key reads it and writes nothing.
+        return json(await jobDetail(client, jid, {
+          slim,
+          fillWorkOrderFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
+        }))
       }
+      // Staff-only by the front door's default (not on the trade or routine lists).
+      case 'job_notes':
+        return json(await jobNotes(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -7471,6 +7733,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw error
         }
       }
+      // ── Job overview (job overview v1, 20261009100000): the job page
+      // Overview's one read (story card, AI notes, conversation, files and the
+      // saved written story, each part on its own) and the staff ask to write
+      // or rewrite the saved story. Staff front door (the default for an action
+      // on no static, profile, routine or agent list). job_overview is GET only
+      // and writes nothing; request_job_story is POST only and records the
+      // verified caller as the asker, never a body field.
+      case 'job_overview':
+      case 'request_job_story': {
+        if (authMode === 'jwt' && authUser?.orgId !== DEFAULT_ORG_ID) return json({ error: 'Organisation access required', code: 'operator_org_required' }, 403)
+        try {
+          if (action === 'job_overview') {
+            if (req.method !== 'GET') return json({ error: `${action} requires GET` }, 405)
+            return json(await jobOverviewAction(client, url.searchParams, { getJobConversation }))
+          }
+          if (req.method !== 'POST') return json({ error: `${action} requires POST` }, 405)
+          return json(await requestJobStoryAction(client, body, receiptActor(requestActor, authMode)))
+        } catch (error) {
+          if (error instanceof StoryReadError) return json({ error: error.message, code: error.code }, error.status)
+          throw error
+        }
+      }
       // ── Same-site links (sites slice S-M1): a person proposes, confirms or
       // rejects that two legacy job records are one site. Staff front door,
       // not on the routine or agent-read lists; actor recorded on the receipt.
@@ -7797,6 +8081,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
         }
       }
+      // ── Paid close-out for fencing and patio (job_closeout.ts; AGENTS.md "Paid Fencing And
+      // Patio Jobs Go To Get Review"). Server key only for anything that moves, texts or
+      // archives; the backlog list (a dry run) also admits a signed-in staff operator.
+      case 'job_closeout_paid':
+      case 'job_closeout_catch_up':
+      case 'job_closeout_sweep':
+      case 'job_closeout_backlog_preview': {
+        const closeoutCaller: JobCloseoutCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' }
+          : _opsApiCallerIsStaffOperator(authMode, authUser)
+          ? { kind: 'staff' }
+          : { kind: 'none' }
+        const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
+        return json(closeout.body, closeout.status)
+      }
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
       // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
       // (runDebtWsAction checks the method, then staff / owner / server key per action).
@@ -7981,7 +8280,32 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           orgId: DEFAULT_ORG_ID,
         }))
 
-      case 'list_work_orders': return json(await listWorkOrders(client, url.searchParams))
+      case 'list_work_orders':
+        if (url.searchParams.get('kind') === 'job') {
+          return json(await runJobWorkOrder(() => listJobWorkOrders(client, url.searchParams)))
+        }
+        return json(await listWorkOrders(client, url.searchParams))
+      case 'job_work_order':
+        return json(await runJobWorkOrder(() => readJobWorkOrder(client, {
+          jobId: url.searchParams.get('job_id'),
+          workOrderId: url.searchParams.get('work_order_id'),
+          fillFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
+        })))
+      // The work order lines a job's accepted quote gives
+      // (docs/quote-work-order-lines-v1.md). A pure read: writes nothing.
+      // Staff-only by the front door's default (not on the trade or routine lists).
+      case 'quote_work_order_lines':
+        return json(await runJobWorkOrder(() => previewQuoteWorkOrderLines(
+          client,
+          url.searchParams.get('job_id') || '',
+        )))
+      // A job's customer variations (work_order_customer_variations.ts), with
+      // each one's invoice line. Staff-only by the front door's default.
+      case 'customer_variations':
+        return json(await runJobWorkOrder(() => listCustomerVariations(
+          client,
+          url.searchParams.get('job_id') || '',
+        )))
       case 'list_suppliers': return json(await listSuppliers(client))
       case 'list_users': return json(await listUsers(client))
       case 'ops_targets': return json(await opsTargets(client))
@@ -8301,9 +8625,84 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'update_po': return json(await updatePO(client, body))
       case 'push_po_to_xero': return json(await pushPOToXero(client, body))
       case 'email_po': return json(await emailPO(client, body))
-      case 'create_work_order': return json(await createWorkOrder(client, body))
-      case 'update_work_order': return json(await updateWorkOrder(client, body))
-      case 'send_work_order': return json(await sendWorkOrder(client, body))
+      case 'create_work_order':
+        if (body?.kind === 'job') return json(await runJobWorkOrder(() => createJobWorkOrder(client, body)))
+        return json(await createWorkOrder(client, body))
+      case 'update_work_order':
+        if (await workOrderIsJobKind(client, body?.id)) {
+          return json(await runJobWorkOrder(() => updateJobWorkOrderDraft(client, body)))
+        }
+        return json(await updateWorkOrder(client, body))
+      case 'send_work_order':
+        if (await workOrderIsJobKind(client, body?.id || body?.work_order_id)) {
+          throw new ApiError('A job work order is approved, not sent. Use approve_work_order.', 409, {
+            error: 'A job work order is approved, not sent. Use approve_work_order.',
+            code: 'job_work_order_not_sendable',
+          })
+        }
+        return json(await sendWorkOrder(client, body))
+      // Shaun only: work_order_settings.approver_user_ids, checked here and
+      // again by the database. The approver is the signed-in user. An approver
+      // named only by x-sw-actor `user:<id>` on a server-secret call is refused
+      // until feature flag work_order_terminal_approval_v1 is on.
+      case 'approve_work_order':
+        return json(await runJobWorkOrder(() => approveJobWorkOrder(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
+      // Dry run unless apply:true AND feature flag job_work_order_backfill_v1.
+      case 'backfill_job_work_orders': {
+        if (authMode !== 'api_key' || !serverSecretPresented) {
+          return json({ error: 'forbidden: backfill_job_work_orders requires the ops server key', code: 'server_key_required' }, 403)
+        }
+        return json(await runJobWorkOrder(() => backfillJobWorkOrders(client, body)))
+      }
+      // Re-sends variation emails left failed or stuck in sending. Sends
+      // nothing while feature flag work_order_variation_emails_v1 is off.
+      case 'resend_work_order_variation_emails':
+        return json(await runJobWorkOrder(() => resendWorkOrderVariationEmails(client, {
+          sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
+      // Office staff only, never a trade door: corrects a variation's amount
+      // and description, keeping what the trade reported and who corrected it.
+      case 'correct_work_order_variation':
+        return json(await runJobWorkOrder(() => correctWorkOrderVariation(client, body, requestActor, {
+          sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        })))
+      // Customer variations (work_order_customer_variations.ts): the office
+      // records one on a fencing or patio job, edits it while it is a draft
+      // (each edit names the updated_at it read), and a work order approver
+      // approves it, which joins it to the approved work order as a marked
+      // addendum and seals it. Staff-only by the front door's default.
+      case 'create_customer_variation':
+        return json(await runJobWorkOrder(() => createCustomerVariation(client, body, requestActor)))
+      case 'update_customer_variation':
+        return json(await runJobWorkOrder(() => updateCustomerVariation(client, body, requestActor)))
+      case 'cancel_customer_variation':
+        return json(await runJobWorkOrder(() => cancelCustomerVariation(client, body, requestActor)))
+      case 'approve_customer_variation':
+        return json(await runJobWorkOrder(() => approveCustomerVariation(client, body, resolveWorkOrderApprover({
+          authMode,
+          authUserId: authUser?.id ?? null,
+          serverSecretPresented,
+          actor: requestActor,
+        }))))
+      // The customer's invoice line, built from the approved variation. No
+      // Xero write.
+      case 'prepare_customer_variation_invoice_line':
+        return json(await runJobWorkOrder(() => prepareCustomerVariationInvoiceLine(client, body, requestActor, {
+          accountCodeForJob: (jobType) => accountCodeForJob(jobType),
+        })))
+      // A Xero DRAFT (never sent) holding that line, through
+      // create_invoice_draft's own path with the caller's credentials. Refused
+      // while feature flag customer_variation_xero_draft_v1 is off.
+      case 'create_customer_variation_xero_draft':
+        return json(await runJobWorkOrder(() => createCustomerVariationXeroDraft(client, body, requestActor, {
+          accountCodeForJob: (jobType) => accountCodeForJob(jobType),
+          createDraft: (payload) => createInvoiceDraftAction(client, payload, authMode, authUser, serverSecretPresented),
+        })))
 
       // ── Scope-Memory-Saving Loop 1 — frozen scope substrate ──
       // freeze_scope: read jobs.scope_json + pricing_json, canonicalize, write
@@ -9033,7 +9432,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         const xeroLineItems = splitTradeInvoiceXeroLines(
           grossXeroLineItems,
           invMoney,
-          { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
+          {
+            tradeName,
+            superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+          },
         )
 
         if (inv.xero_bill_id) {
@@ -9143,7 +9545,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             invoice_type: 'ACCPAY',
             status: bill.Status || 'DRAFT',
             reference: reference,
-            sub_total: invMoney.net_pay,
+            sub_total: tradeInvoiceXeroBillSubtotal(invMoney),
             total_tax: invMoney.gst_amount,
             total: bill.Total || invMoney.trade_payable,
             amount_due: bill.AmountDue || invMoney.trade_payable,
@@ -10371,6 +10773,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return await handleTradeCalendarAction(req, client)
       case 'my_work_orders':
         return await handleTradeWorkOrdersAction(req, client)
+      case 'my_job_work_order':
+      case 'report_work_order_variation':
+        return await handleTradeJobWorkOrderAction(req, client, action, body)
       case 'my_jobs':
       case 'trade_job_detail':
       case 'trade_quote_extract':
@@ -10572,7 +10977,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
 
             // Get other trades' invoice lines on those jobs
             let query = client.from('trade_invoice_lines')
-              .select('id, job_id, job_number, client_name, total_hours, hourly_rate, line_total_ex, acknowledgment_status, override_amount, override_note, line_date, division, description, trade_invoices!inner(user_id, week_start, status, users:user_id(name))')
+              .select('id, job_id, job_number, client_name, total_hours, hourly_rate, line_total_ex, acknowledgment_status, override_amount, override_note, line_date, division, description, work_date, start_time, finish_time, break_minutes, trade_invoices!inner(user_id, week_start, status, users:user_id(name))')
               .in('job_id', leadJobIds)
               .neq('trade_invoices.user_id', tradeUser.id)
             if (ccWeekStart) query = query.eq('trade_invoices.week_start', ccWeekStart)
@@ -10593,6 +10998,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               line_date: c.line_date,
               division: c.division,
               description: c.description,
+              work_date: c.work_date ?? null,
+              start_time: c.start_time ?? null,
+              finish_time: c.finish_time ?? null,
+              break_minutes: c.break_minutes ?? null,
               invoice_status: c.trade_invoices?.status,
             }))
             return json({ charges: mapped })
@@ -10638,6 +11047,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const { data: wo, error: woFetchErr } = await client.from('work_orders')
               .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
               .eq('id', work_order_id)
+              .neq('kind', 'job')
               .eq('org_id', tradeUser.orgId)
               .eq('jobs.org_id', tradeUser.orgId)
               .single()
@@ -10857,6 +11267,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             )
             const tradeInvoiceId = workOrderBoundary.invoiceId
             const tradeInv = { id: tradeInvoiceId }
+            // A work-order invoice carries no weekly deduction. When this
+            // trade has one this week the invoice is marked for the office;
+            // nothing is taken off and no figure above moves.
+            const { decision: woRecurringDeduction } = await applyTradeRecurringDeduction(
+              client,
+              woMoney,
+              {
+                userId: tradeUser.id,
+                weekStart: null,
+                weekless: { kind: 'work_order_invoice', day: woInvoiceDate },
+              },
+            )
+            await noteTradeRecurringDeductionNotTaken(client, tradeInvoiceId, woRecurringDeduction)
 
             // Resolve Xero supplier contact — auto-create only after money truth
             // is complete and the invoice can safely cross the Xero boundary.
@@ -11055,7 +11478,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               )
             }
             const draftSubtotal = weeklyInvoice?.to_be_paid ?? (labourTotal + extraTotal)
-            const draftMoney = tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd)
+            // Recurring deduction: a dated draft shows what the submitted
+            // invoice will carry, so the trade sees it before submitting.
+            const { money: draftMoney, decision: draftRecurringDeduction } = await applyTradeRecurringDeduction(
+              client,
+              tradeInvoiceMoney(draftSubtotal, draftGstOn, draftWeekEnd),
+              { userId: tradeUser.id, weekStart: draftWeekStart || null },
+            )
 
             // Preserve the legacy draft lookup exactly for hourly invoices.
             // Weekly work-order drafts use the stricter one-draft resolver above.
@@ -11075,12 +11504,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // Build a complete replacement beside the old draft. The old header
             // (and its cascading lines) is deleted only after every replacement
             // write succeeds, so any PostgREST error leaves the prior draft intact.
+            // Time entries (trade_invoice_time_entry.ts): a draft is a working
+            // copy, so the fields are stored as sent and nothing is refused. A
+            // complete entry sets the line's hours; submit is where a missing
+            // or wrong entry is refused.
             const hourlyDraftLineRows: Array<Record<string, unknown>> = [
-              ...labourLines.map((line: any) => ({
+              ...labourLines.map((line: any) => {
+                const draftTime = draftTradeInvoiceTimeEntry(line)
+                return {
                 job_id: line.job_id || null,
                 job_number: line.job_number || null,
                 client_name: line.client_name || null,
-                total_hours: line.total_hours ?? null,
+                total_hours: draftTime.hours ?? line.total_hours ?? null,
                 hourly_rate: line.hourly_rate ?? null,
                 line_total_ex: roundMoney(Number(line.line_total_ex ?? 0)),
                 work_order_hours: line.work_order_hours ?? null,
@@ -11103,7 +11538,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 wo_allocated: line.wo_allocated ?? null,
                 wo_labour_deduction: line.wo_labour_deduction ?? null,
                 wo_labour_lines: Array.isArray(line.wo_labour_lines) ? line.wo_labour_lines : null,
-              })),
+                ...draftTime.columns,
+                }
+              }),
               ...extras.map((extra: any) => {
                 const quantity = roundMoney(Number(extra.quantity || 1))
                 const unitRate = roundMoney(Number(extra.rate || 0))
@@ -11114,6 +11551,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   unit: extra.unit || 'ea',
                   unit_rate: unitRate,
                   line_total_ex: roundMoney(quantity * unitRate),
+                  // Only a line that bills time carries a time entry.
+                  ...(isTradeInvoiceTimeLineType(extra.type)
+                    ? draftTradeInvoiceTimeEntry(extra).columns
+                    : tradeInvoiceTimeEntryColumns(null)),
                 }
               }),
             ]
@@ -11122,12 +11563,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               user_id: tradeUser.id,
               week_start: draftWeekStart || null,
               week_end: draftWeekStart ? draftWeekEnd : null,
-              total_hours: labourLines.reduce((s: number, l: any) => s + Number(l.total_hours || 0), 0),
+              total_hours: hourlyDraftLineRows.reduce((s: number, row) => s + Number(row.total_hours || 0), 0),
               total_breaks_minutes: 0,
               subtotal_ex: draftMoney.gross_earned,
               gst: draftMoney.gst_amount,
               total_inc: draftMoney.total_inc,
               ...tradeInvoiceMoneyFields(draftMoney),
+              ...tradeRecurringDeductionInvoiceFields(draftRecurringDeduction),
               invoice_source: 'hourly',
               job_grand_total_ex: null,
               final_deductions_total_ex: null,
@@ -11149,6 +11591,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   gst: draftMoney.gst_amount,
                   total_inc: draftMoney.total_inc,
                   ...tradeInvoiceMoneyFields(draftMoney),
+                  ...tradeRecurringDeductionInvoiceFields(draftRecurringDeduction),
                   invoice_source: 'weekly_work_order',
                   job_grand_total_ex: weeklyInvoice.grand_total,
                   final_deductions_total_ex: weeklyInvoice.final_deductions_total,
@@ -11207,6 +11650,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               success: true,
               draft_id: draftId,
               ...tradeInvoiceMoneyResponse(draftMoney),
+              ...tradeRecurringDeductionResponse(draftRecurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
             })
           }
@@ -11396,6 +11840,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               if (liveWeekInvoice) {
                 const liveNet = Number(liveWeekInvoice.net_pay)
                 const liveGst = Number(liveWeekInvoice.gst)
+                // A recurring deduction the live invoice carries comes off its payable.
+                const liveDeduction = Number(liveWeekInvoice.recurring_deduction_amount || 0)
                 const liveLabel = liveWeekInvoice.invoice_number ? ` (${liveWeekInvoice.invoice_number})` : ''
                 return json({
                   ok: false,
@@ -11417,8 +11863,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   gst: liveWeekInvoice.gst ?? null,
                   total_inc: liveWeekInvoice.total_inc ?? null,
                   trade_payable: Number.isFinite(liveNet) && Number.isFinite(liveGst)
-                    ? Math.round((liveNet + liveGst) * 100) / 100
+                    ? Math.round((liveNet + liveGst - liveDeduction) * 100) / 100
                     : null,
+                  ...(liveDeduction > 0
+                    ? {
+                      recurring_deduction: {
+                        label: liveWeekInvoice.recurring_deduction_label || null,
+                        amount: liveDeduction,
+                      },
+                    }
+                    : {}),
                   userMessage: `You already have an invoice for the week ${week_start} to ${weekEnd}${liveLabel}. This submission was NOT saved. Check the week shown at the top of the invoice, or contact the office if that invoice needs changing.`,
                 }, 409)
               }
@@ -11444,6 +11898,11 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 date: line.line_date,
               }))
               : extra_items
+
+            // Time entries (trade_invoice_time_entry.ts): is a time line refused
+            // when it does not say when it was worked? Weekly work-order lines
+            // bill priced scope, never hours, so the flag is not read for them.
+            const timeEntryRequired = weeklyInvoice ? false : await tradeInvoiceTimeEntryRequired(client)
 
             // Resolve the server-side hourly rate for this trade for this week.
             // trade_rates is the ONLY live rate source (job_assignments.hourly_rate
@@ -11480,7 +11939,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   userMessage: 'No pay rate is set for you this week. Contact the office to have one configured before submitting.',
                 }, 422)
               }
-              const wantedIds = manualAssignmentsIn.map((m: any) => m.assignment_id)
+              // A job card may be sent once per day worked, so ids can repeat.
+              const wantedIds = [...new Set(manualAssignmentsIn.map((m: any) => m.assignment_id))]
               const { data: asn } = await client.from('job_assignments')
                 .select('id, job_id, scheduled_date, status, invoiced_in')
                 .eq('user_id', tradeUser.id)            // ownership check (unchanged)  [F2]
@@ -11495,10 +11955,18 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 liveRefIds = new Set((refInv || [])
                   .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || ''))).map((ti: any) => ti.id))
               }
-              const hoursById: Record<string, number> = {}
-              const manualById: Record<string, any> = {}
+              // One entry per job card line. With a time entry the hours are
+              // the server's (finish - start - break) and a client figure that
+              // disagrees is refused; without one the typed hours stand, as
+              // before, unless the flag requires the entry.
+              const manualEntries: Array<{ m: any; hours: number; entry: TradeInvoiceTimeEntry | null }> = []
               for (const m of manualAssignmentsIn) {
-                const cleanHours = _sanitiseManualAssignmentHours(m.hours)
+                const entry = resolveTimeEntryOrRefuse(m, {
+                  required: timeEntryRequired,
+                  clientHours: m.hours,
+                  label: 'job card',
+                })
+                const cleanHours = entry ? entry.hours : _sanitiseManualAssignmentHours(m.hours)
                 if (cleanHours === null) {
                   return json({
                     ok: false,
@@ -11506,9 +11974,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     userMessage: 'Enter the hours on each ticked job card as a number more than 0 and no more than 24.',
                   }, 422)
                 }
-                hoursById[m.assignment_id] = cleanHours
-                manualById[m.assignment_id] = m
+                manualEntries.push({ m, hours: cleanHours, entry })
               }
+              try {
+                assertManualTimeEntriesDistinct(manualEntries.map((row) => ({
+                  assignment_id: row.m.assignment_id,
+                  entry: row.entry,
+                })))
+              } catch (error) {
+                tradeInvoiceTimeEntryApiError(error)
+              }
+              const manualCardById = new Map<string, any>((asn || []).map((a: any) => [String(a.id), a]))
               for (const a of (asn || [])) {
                 if (!HOURLY_STATUS_WHITELIST.includes(a.status)) {
                   // B3: ASSIGNMENT_NOT_INVOICEABLE — structured error with plain-English message
@@ -11527,10 +12003,17 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                     userMessage: 'One of the job cards you selected has already been included in a previous invoice. Remove it from this submission or contact the office.',
                   }, 409)
                 }
-                const h = hoursById[a.id] || 0
+              }
+              if ((asn || []).length !== wantedIds.length) {
+                throw new ApiError('One of your job cards could not be found. It may have been removed or reassigned. Reload and try again, and tell the office if it keeps happening.', 422)
+              }
+              manualEntries.forEach((row, entryIndex) => {
+                const a = manualCardById.get(String(row.m.assignment_id))
+                if (!a) return
+                const h = row.hours
                 // hours>16/day is implausible — flag for ops review, do not reject. [F2]
                 if (h > 16) reviewFlag = 'hours_excess'
-                const manualRow = manualById[a.id] || {}
+                const manualRow = row.m || {}
                 // Server-resolved rate only. Any rate / subtotal / gst / super /
                 // total the client put on the row is never read.  [audit 2026-09]
                 assignments.push({
@@ -11541,13 +12024,14 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   // is U2/Deckhand B) so the jobGroups loop can attach it to a flagged
                   // make-safe line. Absent until U2 ships — the flag still fires.
                   justification: manualRow.justification || null,
-                  break_minutes: 0, manual_override_flag: false,
+                  break_minutes: row.entry?.break_minutes ?? 0, manual_override_flag: false,
                   scheduled_date: a.scheduled_date, status: a.status,
+                  // One line is one job on one day: a card with a time entry is
+                  // its own line. A card without one still groups per job.
+                  _timeEntry: row.entry,
+                  _lineKey: row.entry ? `${a.job_id}#${entryIndex}` : null,
                 })
-              }
-              if ((asn || []).length !== wantedIds.length) {
-                throw new ApiError('One of your job cards could not be found. It may have been removed or reassigned. Reload and try again, and tell the office if it keeps happening.', 422)
-              }
+              })
             } else if (!weeklyInvoice && week_start && weekEnd) {
               // Legacy clocked path: re-query completed assignments server-side.
               const { data: asn } = await client.from('job_assignments')
@@ -11585,6 +12069,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 .filter((a: any) => isClockedAssignmentBillable(a))
               // Stamp the server-resolved rate so clocked lines never trust a
               // client/stale assignment rate for pricing.                     [F2]
+              // Time entry: nobody typed these lines, so they carry none.
+              // While the flag is off they are saved as before; when it is on
+              // each card is refused by name below.
               assignments = clockedBillable.map((a: any) => ({
                 ...a,
                 hourly_rate: resolvedRate > 0 ? resolvedRate : (a.hourly_rate || 0),
@@ -11606,17 +12093,28 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // Group by job
             const jobGroups: Record<string, any[]> = {}
             for (const a of assignments) {
-              if (!jobGroups[a.job_id]) jobGroups[a.job_id] = []
-              jobGroups[a.job_id].push(a)
+              const groupKey = a._lineKey || a.job_id
+              if (!jobGroups[groupKey]) jobGroups[groupKey] = []
+              jobGroups[groupKey].push(a)
             }
 
             // Get job details — Change 4: add metadata so external_ref (builder ref) is available for Xero descriptions
-            const jobIds = Object.keys(jobGroups)
+            const jobIds = [...new Set(assignments.map((a: any) => String(a.job_id)))]
             const { data: jobs } = await client.from('jobs')
               .select('id, job_number, client_name, type, site_address, site_suburb, metadata')
               .in('id', jobIds)
             const jobMap: Record<string, any> = {}
             for (const j of (jobs || [])) jobMap[j.id] = j
+            // Every job card whose line does not say when it was worked is
+            // named in one refusal, before anything is written.
+            if (timeEntryRequired) {
+              refuseJobCardsNeedingTimes(assignments.filter((a: any) => !a._timeEntry).map((a: any) => ({
+                assignment_id: String(a.id),
+                job_id: a.job_id ? String(a.job_id) : null,
+                job_number: jobMap[a.job_id]?.job_number || null,
+                work_date: a.scheduled_date || null,
+              })))
+            }
             // Enrich makesafe jobs with external_ref from makesafe_job_details (100% population vs 91% in metadata)
             const msJobIds = jobIds.filter((id: string) => jobMap[id]?.type === 'makesafe')
             if (msJobIds.length > 0) {
@@ -11651,8 +12149,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const overrideDetails: any[] = []
             const lineItems: any[] = []
 
-            for (const [jobId, assigns] of Object.entries(jobGroups)) {
+            // A job billed over several day lines is still ONE charge against
+            // its make-safe allowance: the hours flag below reads the job's
+            // total, so splitting a job by day can never hide an over-run.
+            const cardsByJob: Record<string, any[]> = {}
+            for (const a of assignments) {
+              const cardJobId = String(a.job_id)
+              if (!cardsByJob[cardJobId]) cardsByJob[cardJobId] = []
+              cardsByJob[cardJobId].push(a)
+            }
+
+            for (const assigns of Object.values(jobGroups)) {
+              const jobId = String(assigns[0].job_id)
               const job = jobMap[jobId] || {}
+              // A line says when it was worked only when it is one card.
+              const lineTimeEntry = assigns.length === 1 ? (assigns[0]._timeEntry || null) : null
               let jobHours = 0
               const assignmentIds: string[] = []
 
@@ -11683,9 +12194,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               // flags — soft, never blocks, never touches $/hours.
               let hoursFlag: HoursFlagOutcome | null = null
               if (isMakeSafeLine({ jobType: job.type })) {
-                const justification = [...new Set(assigns.map((a: any) => a.justification).filter(Boolean))].join('; ') || null
+                const jobCards = cardsByJob[jobId] || assigns
+                const justification = [...new Set(jobCards.map((a: any) => a.justification).filter(Boolean))].join('; ') || null
                 hoursFlag = evaluateHoursFlag({
-                  chargedHours: jobHours,
+                  chargedHours: jobCards.reduce((sum: number, a: any) => sum + (a.hours_worked || 0), 0),
                   candidates: candidatesForJob(jobId),
                   justification,
                 })
@@ -11702,6 +12214,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 days_worked: assigns.length,
                 assignment_ids: assignmentIds,
                 description: descriptions.length > 0 ? descriptions.join('; ') : null,
+                ...tradeInvoiceTimeEntryColumns(lineTimeEntry),
                 query_note: hoursFlag?.flagged
                   ? hoursFlag.queryNote + ' | ' + rateNote
                   : rateNote,
@@ -11813,16 +12326,27 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 }
               }
 
-              for (const item of invoiceExtraItems) {
+              for (const rawItem of invoiceExtraItems) {
                 // Frontend weekly rows mirrored from clocked assignments are review-only base labour.
                 // They must never be accepted as extra items, or normal weekly hours are double-counted.
-                if (item?.source === 'clock' || item?._source === 'clock' || item?.source === 'server_labour') continue
-                const qty = Number(item.quantity || 0)
-                const rate = Number(item.rate || 0)
+                if (rawItem?.source === 'clock' || rawItem?._source === 'clock' || rawItem?.source === 'server_labour') continue
                 const serverResolvedWeeklyLine = _resolveWeeklyInvoiceLineTrust(
                   weeklyInvoice,
-                  item,
+                  rawItem,
                 )
+                // Time entry: an extra that bills hours (searched-in labour)
+                // says when it was worked. Its hours are then the server's
+                // (finish - start - break), never the client quantity.
+                const extraTimeEntry = !serverResolvedWeeklyLine && isTradeInvoiceTimeLineType(rawItem?.type)
+                  ? resolveTimeEntryOrRefuse(rawItem, {
+                    required: timeEntryRequired,
+                    clientHours: rawItem.quantity ?? rawItem.qty ?? rawItem.hours,
+                    label: rawItem.job_number || rawItem.job_id || 'extra',
+                  })
+                  : null
+                const item = extraTimeEntry ? { ...rawItem, quantity: extraTimeEntry.hours } : rawItem
+                const qty = Number(item.quantity || 0)
+                const rate = Number(item.rate || 0)
                 if (week_start) {
                   if (!serverResolvedWeeklyLine && !item.job_id && !item.job_number) throw new ApiError('Add a job number to the extra line before submitting.', 422)
                   if (!item.description) throw new ApiError(`Add a description of works for the ${item.job_number || item.job_id || 'extra'} line before submitting.`, 422)
@@ -11897,14 +12421,16 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   line_type: item.type ? item.type.toLowerCase() : 'other',
                   description: woDescription || item.description || item.type || 'Extra item',
                   quantity: Number(item.quantity || 1),
-                  // M0 guard reads total_hours for HOURLY_TYPES lines; extras carry their
+                  // M0 guard reads total_hours for lines that bill hours; extras carry their
                   // hours in `quantity` (searched-in make-safe/labour route here), so mirror
                   // it to total_hours or the guard rejects every searched-in line as "zero hours".
                   total_hours: extraHours,
                   unit: item.unit || 'ea',
                   unit_rate: Number(item.rate || 0),
                   line_total_ex: amt,
-                  line_date: item.date || null,
+                  // The day worked is the line's date when the entry says it.
+                  line_date: extraTimeEntry?.work_date || item.date || null,
+                  ...tradeInvoiceTimeEntryColumns(extraTimeEntry),
                   division: item.division || resolvedJob?.type || null,
                   job_id: resolvedJob?.id || item.job_id || null,
                   job_number: resolvedJob?.job_number || item.job_number || null,
@@ -11945,7 +12471,20 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             const labourSubtotal = lineItems.reduce((s: number, l: any) => s + l.line_total_ex, 0)
             const subtotal = labourSubtotal + extraSubtotal
             const invoiceEarningsDate = weekEnd || new Date().toISOString().slice(0, 10)
-            const money = tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate)
+            // Recurring deduction (for example Ute hire): taken off the amount
+            // payable of a weekly invoice, after super and GST. The lines,
+            // subtotal, super and GST below are untouched by it. An invoice
+            // with no week carries none; it is marked for the office when the
+            // trade has a deduction that week.
+            const { money, decision: recurringDeduction } = await applyTradeRecurringDeduction(
+              client,
+              tradeInvoiceMoney(subtotal, gstOn, invoiceEarningsDate),
+              {
+                userId: tradeUser.id,
+                weekStart: week_start || null,
+                weekless: { kind: 'no_invoice_week', day: invoiceEarningsDate },
+              },
+            )
             const gst = money.gst_amount
             const totalInc = money.total_inc
 
@@ -11955,7 +12494,6 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             // UX: normal job-centric cards pass untouched — the guard only
             // kills the lump-sum/zero-line class of submission.
             {
-              const HOURLY_TYPES = new Set(['labour', 'fencing', 'patio', 'make safe', 'general labour'])
               const NON_JOB_TYPES = new Set(['adjustment', 'final_payout_deduction']) // narrow allowlist — no job attribution required
               const allLines = [...lineItems, ...extraLineItems]
 
@@ -11985,7 +12523,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                   }
                 }
                 // Hours > 0 on hourly-type lines
-                if (HOURLY_TYPES.has(lt) && line._weeklyServerResolved !== true) {
+                if (isTradeInvoiceTimeLineType(line.line_type) && line._weeklyServerResolved !== true) {
                   const hrs = Number(line.total_hours || 0)
                   if (hrs <= 0) {
                     throw new ApiError(`Invoice rejected: labour line "${line.description || lt}" has zero or missing hours. Enter hours greater than 0.`, 422)
@@ -12092,6 +12630,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               gst,
               total_inc: totalInc,
               ...tradeInvoiceMoneyFields(money),
+              ...tradeRecurringDeductionInvoiceFields(recurringDeduction),
               invoice_source: weeklyInvoice ? 'weekly_work_order' : 'hourly',
               job_grand_total_ex: weeklyInvoice?.grand_total ?? null,
               final_deductions_total_ex: weeklyInvoice?.final_deductions_total ?? null,
@@ -12161,6 +12700,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 wo_allocated: dbLine.wo_allocated ?? null,
                 wo_labour_deduction: dbLine.wo_labour_deduction ?? null,
                 wo_labour_lines: dbLine.wo_labour_lines ?? null,
+                work_date: dbLine.work_date || null,
+                start_time: dbLine.start_time || null,
+                finish_time: dbLine.finish_time || null,
+                break_minutes: dbLine.break_minutes ?? null,
               }
             }
             // ── Work Order / Commission lines lock the trade's job cards ────
@@ -12489,6 +13032,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       : 'Manual hours entered — verify against schedule in Xero before approving the draft.',
               }).eq('id', invoice.id)
             }
+            // After the soft-review note above, which replaces query_note.
+            await noteTradeRecurringDeductionNotTaken(client, invoice.id, recurringDeduction)
 
             // Log business event
             try {
@@ -12643,7 +13188,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 const allLines = splitTradeInvoiceXeroLines(
                   grossXeroLines,
                   money,
-                  { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
+                  {
+                    tradeName,
+                    superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+                  },
                 )
 
                 // M9 FIX B: append distinct external_ref(s) to the Xero bill Reference
@@ -12724,7 +13272,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                       invoice_type: 'ACCPAY',
                       status: 'DRAFT',
                       reference: xeroReference,
-                      sub_total: money.net_pay,
+                      sub_total: tradeInvoiceXeroBillSubtotal(money),
                       total_tax: money.gst_amount,
                       total: money.trade_payable,
                       amount_due: money.trade_payable,
@@ -12814,6 +13362,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
                 invoice_number: invoiceNumber,
                 total_hours: totalHours,
                 ...tradeInvoiceMoneyResponse(money),
+                ...tradeRecurringDeductionResponse(recurringDeduction),
                 ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
                 line_count: lineItems.length + extraLineItems.length,
                 xero_bill_id: null,
@@ -12834,6 +13383,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
               invoice_number: invoiceNumber,
               total_hours: totalHours,
               ...tradeInvoiceMoneyResponse(money),
+              ...tradeRecurringDeductionResponse(recurringDeduction),
               ...(weeklyInvoice ? weeklyInvoiceResponse(weeklyInvoice) : {}),
               line_count: lineItems.length + extraLineItems.length,
               xero_bill_id: xeroBillId,
@@ -13617,6 +14167,7 @@ async function opsSummary(client: any) {
     client.from('work_orders')
       .select('id, status, scheduled_date, job_id, wo_number')
       .eq('org_id', DEFAULT_ORG_ID)
+      .neq('kind', 'job')
       .in('status', ['draft', 'sent', 'accepted', 'in_progress']),
 
     // KPI targets
@@ -14421,7 +14972,11 @@ export async function _persistTradeInvoiceWeekDraft(
   lineRows: Array<Record<string, unknown>>,
   requestedPriorDraftId: string | null,
 ): Promise<string> {
-  const { data, error } = await client.rpc('persist_weekly_trade_invoice_v1', {
+  // v2 is v1 unchanged plus the time-entry stamp on the lines it inserted
+  // (20261012180000_trade_invoice_time_entries.sql). v3 is v2 unchanged plus
+  // the recurring-deduction stamp on the invoice it inserted
+  // (20261013143700_trade_recurring_deductions.sql).
+  const { data, error } = await client.rpc('persist_weekly_trade_invoice_v3', {
     p_invoice: invoicePayload,
     p_lines: lineRows.map((line, linePosition) => ({
       ...line,
@@ -14538,11 +15093,15 @@ export async function _resolveWeeklyWorkOrderInvoice(
   }
 
   const { data: workOrders, error: workOrderErr } = await client.from('work_orders')
-    .select('id, org_id, job_id, wo_number, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+    .select('id, org_id, job_id, wo_number, kind, status, scope_items, scheduled_date, completed_at, site_address, assigned_user_id, jobs!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
     .eq('org_id', tradeUser.orgId)
     .eq('jobs.org_id', tradeUser.orgId)
     .in('id', workOrderIds)
   if (workOrderErr) throw new Error('Failed to load weekly work orders: ' + workOrderErr.message)
+  // A job work order (job_work_orders.ts) is never a crew-pay invoice source.
+  if ((workOrders || []).some((row: any) => row.kind === 'job')) {
+    throw new ApiError('A job work order cannot be invoiced as a weekly job block', 422)
+  }
   if ((workOrders || []).length !== workOrderIds.length) {
     throw new ApiError('One or more weekly work orders were not found in your business', 404)
   }
@@ -14801,6 +15360,64 @@ async function readWorkOrderChargeRows(
   return rows
 }
 
+// ── Job work orders (job_work_orders.ts) ──
+// The module throws JobWorkOrderError; the serve() handler answers ApiError.
+async function runJobWorkOrder<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    if (e instanceof JobWorkOrderError || e instanceof QuoteFillError) {
+      throw new ApiError(e.message, e.status, { error: e.message, code: e.code })
+    }
+    throw e
+  }
+}
+
+// Routes update/send by kind: a job work order never takes the crew paths.
+async function workOrderIsJobKind(client: any, id: unknown): Promise<boolean> {
+  if (typeof id !== 'string' || !id) return false
+  const { data, error } = await client.from('work_orders').select('kind').eq('id', id).maybeSingle()
+  if (error) throw new ApiError('The work order could not be read', 500)
+  return data?.kind === 'job'
+}
+
+// The shared trade money filter, as the job work order's trade view uses it.
+export const tradeJobWorkOrderRedaction: TradeRedaction = {
+  scopeItems: (items) => redactTradeWorkOrderScopeItems(items) || [],
+  text: (value, key) => sanitizeTradeAllocatedStringLeaf(value, key),
+  scopeTextKey: (key) => TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key) && TRADE_SCOPE_NARRATIVE_TEXT_KEYS.has(key),
+}
+
+// Trade doors for the job work order. Access is the ONE per-job tier decision
+// (assertAssignedOrMakesafeAccess); the variation also requires the caller's
+// own invoice, checked inside reportWorkOrderVariation.
+export async function handleTradeJobWorkOrderAction(
+  req: Request,
+  client: any,
+  action: string,
+  body: any,
+): Promise<Response> {
+  const tradeUser = await authTrade(req, client)
+  const access: TradeJobAccessContext = { orgId: tradeUser.orgId, managedVerticals: tradeUser.managedVerticals }
+  if (action === 'my_job_work_order') {
+    const jobId = new URL(req.url).searchParams.get('job_id') || ''
+    if (!jobId) throw new ApiError('job_id required', 400)
+    await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
+    return json(await runJobWorkOrder(() => tradeJobWorkOrderRead(client, jobId, tradeUser.id, tradeJobWorkOrderRedaction)))
+  }
+  if (req.method !== 'POST') throw new ApiError('POST required', 405)
+  const jobId = String(body?.job_id || '')
+  if (!jobId) throw new ApiError('job_id required', 400)
+  await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, tradeUser.seeEverything, access)
+  const { data: me } = await client.from('users').select('name').eq('id', tradeUser.id).maybeSingle()
+  return json(await runJobWorkOrder(() => reportWorkOrderVariation(
+    client,
+    body,
+    { id: tradeUser.id, orgId: tradeUser.orgId, name: me?.name ?? null },
+    { sendEmail: sendOutlookVariationEmail(SUPABASE_URL, SUPABASE_SERVICE_KEY) },
+  )))
+}
+
 // Actual authenticated boundary for the Trade work-order selector. Authorization
 // comes exclusively from the JWT profile, matching trade_calendar and my_jobs.
 export async function handleTradeWorkOrdersAction(req: Request, client: any): Promise<Response> {
@@ -14882,6 +15499,7 @@ export async function tradeWorkOrders(
     let query = client
       .from('work_orders')
       .select('id, org_id, job_id, assigned_user_id, wo_number, status, trade_name, scope_items, special_instructions, scheduled_date, site_address, sent_at, accepted_at, completed_at, created_at, assigned_user:assigned_user_id(id, name), jobs:job_id!inner(id, org_id, job_number, client_name, type, status, site_address, site_suburb, metadata)')
+      .neq('kind', 'job')
       .eq('org_id', viewer.orgId)
       .eq('jobs.org_id', viewer.orgId)
       .not('status', 'in', '("cancelled","deleted")')
@@ -15389,6 +16007,9 @@ async function pipeline(client: any, params: URLSearchParams) {
   // Opt-in fencing stage-truth diagnostic. Default path (flag absent) must
   // stay byte-identical: same selects, same enrichment, same row keys.
   const stageTruth = typeFilter === 'fencing' && isFencingStageTruthRequested(params)
+  // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
+  // absent: nothing below changes for any existing caller.
+  const dispatchList = isDispatchListRequested(params)
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
@@ -15405,6 +16026,8 @@ async function pipeline(client: any, params: URLSearchParams) {
       .or('job_number.not.is.null,status.eq.draft')
     if (statusFilter) {
       scoped = scoped.eq('status', statusFilter)
+    } else if (dispatchList) {
+      scoped = scoped.in('status', DISPATCH_LIST_STATUSES)
     } else {
       // Cap 1A: widened to canonical ACTIVE_STATUSES. Same rationale as line 3196 above.
       scoped = scoped.in('status', [
@@ -15416,18 +16039,48 @@ async function pipeline(client: any, params: URLSearchParams) {
     }
     if (typeFilter === 'repair') scoped = scoped.in('id', repairJobIds || [])
     else if (typeFilter) scoped = scoped.eq('type', typeFilter)
+    // Make-safe jobs are off the Dispatch list and come back only for a search;
+    // a repair-family card typed makesafe is a repair and stays on it.
+    else if (dispatchList && !search) scoped = scoped.or(DISPATCH_LISTED_WORK_FILTER)
     return scoped
   }
 
   // The projection sits exactly where `pricing_json` used to, so that stripping the
   // aliases below restores the previous key order — the response stays byte-identical.
   const repairProjection = typeFilter === 'repair' ? ', metadata' : ''
-  const query = applyJobFilters(client.from('jobs')
+  // Appended last and stripped again below, like the pricing aliases.
+  const dispatchProjection = dispatchList ? ', ' + DISPATCH_LIST_PROJECTION.join(', ') : ''
+  const buildJobsQuery = () => applyJobFilters(client.from('jobs')
     .select('id, type, status, client_name, client_phone, site_address, site_suburb, ' +
       PIPELINE_PRICING_PROJECTION.join(', ') +
       ', ghl_contact_id, ghl_opportunity_id, job_number, accepted_at, approvals_at, deposit_at, processing_at, scheduled_at, completed_at, created_at, updated_at, deposit_invoice_id, deposit_amount, council_required' +
-      repairProjection))
+      repairProjection + dispatchProjection))
     .order('updated_at', { ascending: false })
+  // Test records and the search box read only raw job columns, so one rule
+  // serves two places: every caller applies it after enrichment, as before, and
+  // the Dispatch list also applies it straight after the read, so the thirteen
+  // enrichment reads run for matching jobs only.
+  const isListedPipelineRow = (j: any) => {
+    // Filter out test records
+    if (isTestRecord(j.client_name)) return false
+    if (!search) return true
+    const s = search.toLowerCase()
+    return (j.client_name || '').toLowerCase().includes(s)
+      || (j.site_suburb || '').toLowerCase().includes(s)
+      || (j.site_address || '').toLowerCase().includes(s)
+      || (j.job_number || '').toLowerCase().includes(s)
+  }
+  // The plain read stops at PostgREST's 1000-row ceiling (existing behaviour,
+  // left alone). The Dispatch list must show every job, so it pages.
+  const query = dispatchList
+    ? _fetchAllRows<any>(buildJobsQuery, 'pipeline.dispatch_jobs', 'id').then(
+      (data) => ({
+        data: typeFilter === 'repair' ? data : data.filter(isListedPipelineRow),
+        error: null,
+      }),
+      (error) => ({ data: null, error }),
+    )
+    : buildJobsQuery()
 
   let malformedPricingQuery = applyJobFilters(client.from('jobs').select('id, pricing_json'))
     .eq('type', 'fencing')
@@ -15439,6 +16092,12 @@ async function pipeline(client: any, params: URLSearchParams) {
   malformedPricingQuery = malformedPricingQuery
     .order('updated_at', { ascending: false })
     .limit(PIPELINE_MALFORMED_PRICING_LIMIT)
+
+  // Starts beside the job read and is awaited with the enrichment wave; it
+  // degrades internally and never rejects.
+  const quoteBuilderValuesRead = repairJobIds
+    ? loadQuoteBuilderCardValues(client, repairJobIds)
+    : null
 
   const [{ data: jobs, error }, malformedPricingRes, repairDetails] = await Promise.all([
     query,
@@ -15515,7 +16174,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
-        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled')),
+        client.from('work_orders').select('job_id').in('job_id', chunkIds).neq('status', 'cancelled').neq('kind', 'job')),
       readPipelineEnrichmentRows(jobIds, 'council_submissions', (chunkIds) =>
         client.from('council_submissions').select('job_id, overall_status, current_step_index, steps').in('job_id', chunkIds)),
       readPipelineEnrichmentRows(jobIds, 'po_communications', (chunkIds) =>
@@ -15537,7 +16196,7 @@ async function pipeline(client: any, params: URLSearchParams) {
       // Trade<->ops comms thread notes (job_events). detail_json needed so system
       // markers can be excluded from the count (they must never light the badge).
       readPipelineEnrichmentRows(jobIds, 'job_events', (chunkIds) =>
-        client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', ['note', 'note_added', 'site_note'])),
+        client.from('job_events').select('job_id, detail_json').in('job_id', chunkIds).in('event_type', JOB_NOTE_EVENT_TYPES)),
       stageTruth
         ? readPipelineEnrichmentRows(jobIds, 'job_service_reports', (chunkIds) =>
           client.from('job_service_reports').select('id, job_id, status, submitted_at').in('job_id', chunkIds))
@@ -15593,6 +16252,8 @@ async function pipeline(client: any, params: URLSearchParams) {
   // detail read must be published rather than served as an indistinguishable
   // null on the very fields the card exists to reconcile.
   if (repairDetails?.degraded) enrichmentErrors.push('pipeline.makesafe_job_details')
+  const quoteBuilderValues = await quoteBuilderValuesRead
+  if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -15642,8 +16303,7 @@ async function pipeline(client: any, params: URLSearchParams) {
   // MAKESAFE_AGENT_REPLY system markers). Lights the kanban comms indicator.
   const commsNotesMap: Record<string, number> = {}
   for (const ev of (commsNotesRes.data || [])) {
-    const body = ev?.detail_json?.text ?? ev?.detail_json?.note ?? ''
-    if (noteIsSystemMarker(body)) continue
+    if (!isPersonWrittenJobNote(ev)) continue
     commsNotesMap[ev.job_id] = (commsNotesMap[ev.job_id] || 0) + 1
   }
 
@@ -15708,7 +16368,9 @@ async function pipeline(client: any, params: URLSearchParams) {
     // Strip the pricing projection from the response — value/neighbourCount already
     // extracted. Previously this dropped the whole `pricing_json` blob; the aliases
     // occupy its slot in the select, so the surviving key order is unchanged.
-    const jLite = stripPipelinePricingAliases(j)
+    const jLite = dispatchList
+      ? stripDispatchListAliases(stripPipelinePricingAliases(j))
+      : stripPipelinePricingAliases(j)
     const pipelineRow = {
       ...jLite, value, days_in_stage: daysInStage, neighbour_count: neighbourCount,
       assignment_count: assignMap[j.id] || 0,
@@ -15730,6 +16392,13 @@ async function pipeline(client: any, params: URLSearchParams) {
       deposit_paid: invoiceMap[j.id]?.deposit_paid || false,
       has_final_invoice: invoiceMap[j.id]?.has_final || false,
       final_paid: invoiceMap[j.id]?.final_paid || false,
+      ...(dispatchList
+        ? {
+          description: dispatchJobDescription(j),
+          value_inc_gst: dispatchValueIncGst(j),
+          work_type: dispatchWorkType(j),
+        }
+        : {}),
     }
     if (stageTruth && stageTruthRows) {
       Object.assign(
@@ -15748,20 +16417,11 @@ async function pipeline(client: any, params: URLSearchParams) {
     }
     return typeFilter === 'repair'
       ? projectInsuranceRepairPipelineRow(
-        pipelineRow,
+        quoteBuilderCardRow(pipelineRow, quoteBuilderValues?.values.get(String(j.id))),
         repairDetails?.details.get(String(j.id)) || null,
       )
       : pipelineRow
-  }).filter((j: any) => {
-    // Filter out test records
-    if (isTestRecord(j.client_name)) return false
-    if (!search) return true
-    const s = search.toLowerCase()
-    return (j.client_name || '').toLowerCase().includes(s)
-      || (j.site_suburb || '').toLowerCase().includes(s)
-      || (j.site_address || '').toLowerCase().includes(s)
-      || (j.job_number || '').toLowerCase().includes(s)
-  })
+  }).filter(isListedPipelineRow)
 
   // Cap 1A follow-up fix (2026-05-04): pre-allocate every active canonical
   // status as its own column key. The widened .in('status', [...]) filter
@@ -15813,7 +16473,56 @@ async function pipeline(client: any, params: URLSearchParams) {
 
 export const _pipelineForTest = pipeline
 
-async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = {}) {
+// Every note on a job, newest first (docs/dispatch-slice-1-read-contract.md).
+// job_detail.events is the newest 50 events of every kind, so a busy job's older
+// notes fall outside it. A pure read: none of job_detail's annotation side effect.
+// The event types and the marker rule are the ones comms_notes_count uses
+// (JOB_NOTE_EVENT_TYPES, isPersonWrittenJobNote), so the list's count and the
+// notes returned here agree on every job.
+async function jobNotes(client: any, jobRef: string) {
+  const ref = String(jobRef || '').trim()
+  if (!ref) throw new ApiError('jobId required', 400)
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)
+
+  // Anything that is not a job id is a job number, matched whole against the
+  // stored number: never by shape (live numbers include SW1346 and
+  // SWF-PDF-BUCKET) and never by pattern (`_` is a LIKE wildcard). Stored
+  // numbers are upper case, so a lower-case reference is tried again in upper
+  // case, as the old case-blind match allowed.
+  const findJobId = async (column: 'id' | 'job_number', value: string) => {
+    const { data, error } = await client.from('jobs').select('id')
+      .eq('org_id', DEFAULT_ORG_ID).eq(column, value).limit(1)
+    if (error) throw error
+    return data?.[0]?.id || null
+  }
+  let jobId = await findJobId(isUuid ? 'id' : 'job_number', ref)
+  if (!jobId && !isUuid && ref !== ref.toUpperCase()) {
+    jobId = await findJobId('job_number', ref.toUpperCase())
+  }
+  // An unknown job is a 404, never an empty list: "no notes" must mean the
+  // job was found and has none.
+  if (!jobId) throw new ApiError(`Job ${ref} not found`, 404)
+
+  const rows = await _fetchAllRows<any>(
+    () => client.from('job_events')
+      .select('id, user_id, detail_json, created_at, users:user_id(name)')
+      .eq('job_id', jobId)
+      .in('event_type', JOB_NOTE_EVENT_TYPES)
+      .order('created_at', { ascending: false }),
+    'job_notes',
+    'id',
+  )
+  const notes = rows.filter(isPersonWrittenJobNote).map(projectDispatchJobNote)
+  return { job_id: jobId, notes, total: notes.length }
+}
+
+export const _jobNotesForTest = jobNotes
+
+async function jobDetail(
+  client: any,
+  jobId: string,
+  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean } = {},
+) {
   if (!jobId) throw new Error('jobId required')
 
   // If job_number passed instead of UUID, resolve it
@@ -15831,7 +16540,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('job_events').select('*, users:user_id(name)').eq('job_id', jobId).order('created_at', { ascending: false }).limit(50),
     client.from('job_media').select('*').eq('job_id', jobId).order('created_at'),
     client.from('purchase_orders').select('*').eq('job_id', jobId).neq('status', 'deleted').order('created_at', { ascending: false }),
-    client.from('work_orders').select('*').eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
+    client.from('work_orders').select('*').eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at, event_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
@@ -15957,8 +16666,43 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     return rest
   })
 
+  // The job's own work order (job_work_orders.ts): additive, fencing and
+  // patio only. A failed read never fails the job detail.
+  let jobWorkOrder: any = null
+  if (job?.type === 'fencing' || job?.type === 'patio') {
+    try {
+      const jwo = await readJobWorkOrder(client, {
+        jobId,
+        fillFromQuote: opts.fillWorkOrderFromQuote === true,
+      })
+      jobWorkOrder = {
+        work_order: jwo.work_order,
+        live_work_order_id: jwo.live_work_order?.id ?? null,
+        draft_work_order_id: jwo.draft_work_order?.id ?? null,
+        figures: jwo.figures,
+        addenda: jwo.addenda,
+        invoice_count: jwo.invoices.length,
+        variation_count: jwo.variations.length,
+        customer_variations_open_count: jwo.customer_variations.filter((v: any) => v.status !== 'cancelled').length,
+        quote_fill: jwo.quote_fill,
+      }
+    } catch (e) {
+      console.error('[ops-api] job_detail: job work order unreadable:', (e as Error)?.message)
+      jobWorkOrder = { unreadable: true }
+    }
+  }
+  // Trade time entries stamped against this job: who, which day, start,
+  // finish and hours, from submitted trade invoices (view
+  // job_trade_time_entries, with which invoice) and from the times trades
+  // saved on the job view that are not billed yet (source job_view, no
+  // invoice fields). Additive. A failed read never fails the job detail: the
+  // list is then null with the reason, never an empty list.
+  const tradeTimeEntries = await loadJobTradeTimeEntries(client, jobId)
+
   return {
     job: jobLite,
+    trade_time_entries: tradeTimeEntries.entries,
+    trade_time_entries_error: tradeTimeEntries.error,
     job_identity: _projectMakesafeJobIdentity({
       builder_claim_ref: job?.metadata?.builder_claim_ref,
       builder_work_order_number: job?.metadata?.builder_work_order_number,
@@ -15974,6 +16718,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     media: mediaRes.data || [],
     purchase_orders: posLite,
     work_orders: woRes.data || [],
+    job_work_order: jobWorkOrder,
     xero_project: xeroRes.data,
     invoices: invoicesLite,
     job_contacts: contactsRes.data || [],
@@ -16261,12 +17006,13 @@ async function listPOs(client: any, params: URLSearchParams) {
   return { purchase_orders: enriched }
 }
 
-async function listWorkOrders(client: any, params: URLSearchParams) {
+export async function listWorkOrders(client: any, params: URLSearchParams) {
   const status = params.get('status')
   const jobId = params.get('job_id') || params.get('jobId')
 
   let query = client.from('work_orders')
     .select('*')
+    .neq('kind', 'job')
     .neq('status', 'cancelled')
     .order('created_at', { ascending: false })
 
@@ -16459,23 +17205,49 @@ async function getJobConversation(client: any, body: any) {
 
   // 1. GHL conversation cache (sms / email / call metadata) — by job_id first,
   //    falling back to contact_id if cache row was synced before job_id link.
+  //    Each message is tagged with the cache row's contact_id (whose thread it is).
+  //    extra_contact_ids (Debt Workshop): the threads of other payers on this job, a
+  //    neighbour on a shared fence. Only ids on this job's active job_contacts rows are
+  //    read, so a caller can never pull an unrelated contact's thread onto a job.
   try {
     let ghlRow: any = null
     if (ghlContactId) {
       const { data: byContact } = await client.from('ghl_conversation_cache')
-        .select('messages, message_count, synced_at')
+        .select('contact_id, messages, message_count, synced_at')
         .eq('contact_id', ghlContactId)
         .maybeSingle()
       ghlRow = byContact || null
     }
     if (!ghlRow) {
       const { data: byJob } = await client.from('ghl_conversation_cache')
-        .select('messages, message_count, synced_at')
+        .select('contact_id, messages, message_count, synced_at')
         .eq('job_id', jobId)
         .maybeSingle()
       ghlRow = byJob || null
     }
-    const ghlMsgs: any[] = Array.isArray(ghlRow?.messages) ? ghlRow.messages : []
+    const ghlRows: any[] = ghlRow ? [ghlRow] : []
+    const extraIds: string[] = Array.isArray(body?.extra_contact_ids)
+      ? Array.from(new Set<string>(body.extra_contact_ids.map((v: unknown) => String(v || '').trim())
+        .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v) && v !== ghlContactId && v !== ghlRow?.contact_id)))
+        .slice(0, 5)
+      : []
+    if (extraIds.length) {
+      const { data: onJob, error: onJobErr } = await client.from('job_contacts')
+        .select('ghl_contact_id')
+        .eq('job_id', jobId)
+        .or('status.is.null,status.eq.active')
+        .in('ghl_contact_id', extraIds)
+      if (onJobErr) console.error('[ops-api] get_job_conversation job_contacts check failed:', onJobErr.message)
+      const allowed = (onJob || []).map((r: any) => String(r.ghl_contact_id)).filter(Boolean)
+      if (allowed.length) {
+        const { data: extraRows } = await client.from('ghl_conversation_cache')
+          .select('contact_id, messages, message_count, synced_at')
+          .in('contact_id', allowed)
+        ghlRows.push(...(extraRows || []))
+      }
+    }
+    const ghlMsgs: any[] = ghlRows.flatMap((row: any) =>
+      (Array.isArray(row?.messages) ? row.messages : []).map((m: any) => ({ ...m, __contact_id: row?.contact_id || null })))
     for (const m of ghlMsgs) {
       const ts = m.timestamp || ''
       if (sinceFilter && ts && ts < sinceFilter) continue
@@ -16494,6 +17266,7 @@ async function getJobConversation(client: any, body: any) {
         subject: undefined,
         source_system: 'ghl_cache',
         source_ref: m.id || '',
+        contact_id: m.__contact_id || null,
         ...(isCall ? { call_duration: m.call_duration || null, call_status: m.call_status || null } : {}),
         // The CRM thread is read by the job's customer contact (party roles, B-6).
         ...conversationRoleFields(customerThreadPartyRoles(m.direction || 'inbound')),
@@ -16542,6 +17315,7 @@ async function getJobConversation(client: any, body: any) {
         subject: r.subject || null,
         source_system: 'inbox',
         source_ref: r.id,
+        email_addresses: Array.from(new Set(emailAddresses([r.from_email, r.to_email]))),
         placed_by: 'old_inbox_matcher',
         label,
         event_copy,
@@ -16622,6 +17396,33 @@ async function getJobConversation(client: any, body: any) {
     if (m.source_system === 'ghl_cache' && m.source_ref && providerIds.has(`ghl:${m.source_ref}`)) messages.splice(k, 1)
   }
   messages.push(...eventMessages)
+
+  // 4b. held_contact_ids (Debt Workshop, 14 Oct 2026): messages held on NO job
+  //     (unplaced or pending_luna, context PR #1013) whose candidate_job_ids
+  //     contain this job and whose GoHighLevel contact is one asked for (the
+  //     payer's). Each is marked unplaced: true. Placement is not changed. A
+  //     message already shown above (same provider message id) shows once.
+  //     Read with the same limit and merged before the newest-first cut, so the
+  //     newest messages are kept. Only callers that ask get these rows.
+  const heldIds: string[] = Array.isArray(body?.held_contact_ids)
+    ? Array.from(new Set<string>(body.held_contact_ids.map((v: unknown) => String(v || '').trim())
+      .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v)))).slice(0, 5)
+    : []
+  if (heldIds.length) {
+    try {
+      const { rows: held, error: heldErr } = await readHeldBusinessEventsBySourceTime(client, {
+        jobId,
+        contactIds: heldIds,
+        limit,
+        since: sinceFilter,
+        until,
+      })
+      if (heldErr) console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
+      messages.push(...heldConversationMessages(held, jobId, heldIds, customerAddresses, messages))
+    } catch (e) {
+      console.log('[ops-api] get_job_conversation held messages read failed:', (e as Error).message)
+    }
+  }
 
   // 5. email_events — emails our system sent to the customer (quotes,
   //    invoices, client updates). A copy already among the event rows shows once.
@@ -16848,6 +17649,7 @@ async function assembleJobDossier(client: any, body: any) {
     const { data, error } = await client.from('work_orders')
       .select('id, wo_number, trade_name, status, scheduled_date, sent_at, accepted_at, completed_at, created_at')
       .eq('job_id', jobId)
+      .neq('kind', 'job')
       .order('created_at', { ascending: false })
       .limit(50)
     if (error) throw new Error(error.message)
@@ -18097,6 +18899,7 @@ async function createMakesafeJob(
     intake_mint_id,
     synthetic_livefire_marker,
     suppress_manager_notification,
+    builder_work_order_value_ex_gst,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
@@ -18212,6 +19015,19 @@ async function createMakesafeJob(
       },
     )
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
+  // The builder's own ex-GST work order value, as read off its PDF. Recorded on
+  // a repair card only, beside its purchase order; it is the builder's figure,
+  // never our price, so it stays in metadata and out of pricing_json. A caller
+  // that looked and could not read one passes null, and the card says so.
+  const reviewedWorkOrderValueExGst = isRepairRoute &&
+      typeof builder_work_order_value_ex_gst === 'number' &&
+      Number.isFinite(builder_work_order_value_ex_gst) &&
+      builder_work_order_value_ex_gst > 0
+    ? Math.round(builder_work_order_value_ex_gst * 100) / 100
+    : null
+  const reviewedWorkOrderValueNotRead = isRepairRoute &&
+    reviewedWorkOrderValueExGst === null &&
+    builder_work_order_value_ex_gst === null
 
   if (reviewedJobFamily === 'roof_report') {
     const authority = internalOptions.canonicalIntakeAuthority
@@ -18280,6 +19096,17 @@ async function createMakesafeJob(
     builder_claim_ref: builder_claim_ref || null,
     builder_work_order_number: builder_work_order_number || null,
     builder_po_number: builder_po_number || null,
+    ...(reviewedWorkOrderValueExGst !== null
+      ? {
+        builder_work_order_value_ex_gst: reviewedWorkOrderValueExGst,
+        builder_work_order_value_source: 'builder_work_order_pdf_not_our_quote',
+      }
+      : reviewedWorkOrderValueNotRead
+      ? {
+        builder_work_order_value_ex_gst: null,
+        builder_work_order_value_source: _BUILDER_WORK_ORDER_VALUE_NOT_READ,
+      }
+      : {}),
     ...(intake_mint_id ? { intake_mint_id } : {}),
     ...(reviewedSyntheticLivefireMarker
       ? { synthetic_livefire_marker: reviewedSyntheticLivefireMarker }
@@ -26970,6 +27797,18 @@ const UNATTENDED_INTAKE_APPROVAL_MARKER = {
   [UNATTENDED_INTAKE_APPROVAL]: UNATTENDED_INTAKE_APPROVAL,
 } as Record<symbol, symbol>
 
+// Narrowed 13 Oct 2026 (owner's word; rules in repair_intake_auto.ts): behind
+// `feature_flags.repair_intake_auto_v1` the deterministic scan may mint a
+// repair card for a builder-declared repair work order from MLB or Ambrose.
+// Only the two deterministic scan lanes stamp this marker, and only for a
+// draft their own run judged clean. It is a request, never the authority: the
+// brake below re-reads the flag and re-judges the DRAFT at mint time, so the
+// backlog sweep, the late-PDF lane and any future lane stay supervised.
+const REPAIR_AUTO_INTAKE_APPROVAL = Symbol('repairAutoIntakeApproval')
+const REPAIR_AUTO_INTAKE_APPROVAL_MARKER = {
+  [REPAIR_AUTO_INTAKE_APPROVAL]: REPAIR_AUTO_INTAKE_APPROVAL,
+} as Record<symbol, symbol>
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
@@ -27270,8 +28109,28 @@ async function approveIntakeDraft(client: any, body: any) {
   // half of that test — the refusal itself is placed at the two points where a
   // new card can actually be minted, so a settlement retry, a guarded
   // source-authority link and the F9 refusal all stay reachable.
-  const unattendedRepairMint = unattendedApproval &&
+  //
+  // 13 Oct 2026: what the ruling guarded against is a MISREAD work order
+  // minting a card that can never be retyped. That is still guarded, by a
+  // narrower check: the request marker from a deterministic scan lane, the flag
+  // read again here, and a draft stamped by a run that found the repair
+  // declared by MLB or Ambrose with nothing missing.
+  const repairAutoStamp =
     _normaliseDedupJobFamily(approvedJobFamily) === 'repair'
+      ? _repairAutoIntakeMintStamp({
+        extraction,
+        requestingCompanySlug: approvedFields.requesting_company_slug,
+        reviewedFamily: approvedJobFamily,
+      })
+      : null
+  const repairAutoIntakeAuthorised = unattendedApproval &&
+    body?.[REPAIR_AUTO_INTAKE_APPROVAL] === REPAIR_AUTO_INTAKE_APPROVAL &&
+    cleanReviewedString(reviewedFamily) === 'repair' &&
+    !!repairAutoStamp &&
+    await _repairIntakeAutoEnabled(client)
+  const unattendedRepairMint = unattendedApproval &&
+    _normaliseDedupJobFamily(approvedJobFamily) === 'repair' &&
+    !repairAutoIntakeAuthorised
   const refuseUnattendedRepairMint = (): never => {
     throw new ApiError(
       'Repair intake requires a human tick: this instruction resolves to the repair family, which no unattended lane may mint. The draft stays in the review queue for an operator to approve.',
@@ -27620,6 +28479,16 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
+      // The value a flag-on scan read off the work order (null when it could
+      // not read one) rides with the stamp, whoever approves the draft: a
+      // person ticking a stamped draft the gate refused gets the same card the
+      // automatic path would have made.
+      ...(repairAutoStamp
+        ? {
+          builder_work_order_value_ex_gst:
+            repairAutoStamp.work_order_value_ex_gst,
+        }
+        : {}),
       ...(primaryMint ? { intake_mint_id: primaryMint.id } : {}),
       ...(extraction?.synthetic_livefire_marker
         ? {
@@ -27905,6 +28774,8 @@ async function approveIntakeDraft(client: any, body: any) {
 export const _approveIntakeDraftForTest = approveIntakeDraft
 export const _unattendedIntakeApprovalMarkerForTest =
   UNATTENDED_INTAKE_APPROVAL_MARKER
+export const _repairAutoIntakeApprovalMarkerForTest =
+  REPAIR_AUTO_INTAKE_APPROVAL_MARKER
 
 // ── Slice 7: reject intake draft ──
 async function rejectIntakeDraft(client: any, body: any) {
@@ -29230,7 +30101,23 @@ interface StandingScanDeps {
   loadRollout?: (client: any) => Promise<any>
   autoApproveEnabled?: () => boolean
   loadAutoFileEnabled?: (client: any) => Promise<boolean>
+  loadRepairAutoIntake?: (client: any) => Promise<boolean>
   run?: (client: any, options: any) => Promise<any>
+}
+
+// The two deterministic scan lanes' approval call. The repair marker rides only
+// on a body the runtime itself asked it for, on a run whose flag read on.
+function deterministicScanApprovalBody(
+  approvalBody: any,
+  repairAutoIntake: boolean,
+) {
+  return {
+    ...approvalBody,
+    ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+    ...(repairAutoIntake && approvalBody?.repair_auto_intake === true
+      ? REPAIR_AUTO_INTAKE_APPROVAL_MARKER
+      : {}),
+  }
 }
 
 async function scanSesMakesafes(
@@ -29247,6 +30134,10 @@ async function scanSesMakesafes(
   const advanceDrafts =
     (deps.autoApproveEnabled || autoApproveCleanIntakeEnabled)() &&
     await (deps.loadAutoFileEnabled || isAutoFileEnabled)(client)
+  // Read once per run. Off, missing or unreadable passes nothing, so the run's
+  // options are exactly what they were before the flag existed.
+  const repairAutoIntake =
+    await (deps.loadRepairAutoIntake || _repairIntakeAutoEnabled)(client)
   return await (deps.run || _runDeterministicIntake)(client, {
     dryRun: false,
     selectionMode: rollout.selectionMode,
@@ -29260,13 +30151,14 @@ async function scanSesMakesafes(
     allowInstructionKeys: rollout.instructionKeys,
     advanceDrafts,
     approveDraft: (approvalClient: any, approvalBody: any) =>
-      approveIntakeDraft(approvalClient, {
-        ...approvalBody,
-        ...UNATTENDED_INTAKE_APPROVAL_MARKER,
-      }),
+      approveIntakeDraft(
+        approvalClient,
+        deterministicScanApprovalBody(approvalBody, repairAutoIntake),
+      ),
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
   })
 }
 
@@ -29297,10 +30189,10 @@ async function scanFreshMakesafeSource(
   const rollout = await _loadDeterministicRolloutControls(client)
   const advanceDrafts = autoApproveCleanIntakeEnabled() &&
     await isAutoFileEnabled(client)
+  const repairAutoIntake = await _repairIntakeAutoEnabled(client)
   const approveExactDraft = (approvalClient: any, approvalBody: any) =>
     approveIntakeDraft(approvalClient, {
-      ...approvalBody,
-      ...UNATTENDED_INTAKE_APPROVAL_MARKER,
+      ...deterministicScanApprovalBody(approvalBody, repairAutoIntake),
       ...(options.approvalReviewNote
         ? {
           review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
@@ -29322,6 +30214,7 @@ async function scanFreshMakesafeSource(
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
   })
   const { data: pendingDraft, error: pendingDraftError } = await client
     .from('makesafe_intake_drafts')
@@ -34161,14 +35054,37 @@ async function updateJobStatus(client: any, body: any) {
     }
   }
 
-  const { data, error } = await client
-    .from('jobs')
-    .update(update)
-    .eq('id', jId)
-    .select()
-    .single()
+  // Optional compare and set (paid close-out, job_closeout.ts): with expected_statuses the
+  // write lands only while the job still has one of them, so a card moved by hand in the
+  // meantime is left alone and nothing below runs. Without it the write is unchanged.
+  const expectedStatuses = Array.isArray(body.expected_statuses)
+    ? body.expected_statuses.filter((s: unknown) => typeof s === 'string' && s.length > 0)
+    : null
+  let data: any
+  if (expectedStatuses && expectedStatuses.length > 0) {
+    const cas = await client
+      .from('jobs')
+      .update(update)
+      .eq('id', jId)
+      .in('status', expectedStatuses)
+      .select()
+      .maybeSingle()
+    if (cas.error) throw cas.error
+    if (!cas.data) {
+      return { success: false, job_id: jId, skipped: 'status_changed', expected_statuses: expectedStatuses, status_seen: oldStatus }
+    }
+    data = cas.data
+  } else {
+    const { data: written, error } = await client
+      .from('jobs')
+      .update(update)
+      .eq('id', jId)
+      .select()
+      .single()
 
-  if (error) throw error
+    if (error) throw error
+    data = written
+  }
 
   // ── M3d U2b: a transition INTO a terminal jobs.status closes the job's still-
   // open crew assignments so the trade Board stops classifying finished/dead work
@@ -34240,6 +35156,19 @@ async function updateJobStatus(client: any, body: any) {
     console.log('[ops-api] ready-transition manager notify failed (non-blocking):', (e as Error)?.message)
   }
 
+  // ── Paid close-out: a fencing or patio card entering Get Review (by the Xero sync or by
+  // hand) asks the one review sender (job_closeout.ts). The sender's own switch, the paid
+  // rule, the holds and the per-job claim decide; with the switch off it reads one row
+  // and returns. Never blocks the status change.
+  if (status === 'get_review' && oldStatus !== 'get_review' && isCloseoutJobType(data?.type || jobBefore?.type)) {
+    try {
+      const review = await requestJobReview(jobCloseoutDeps(client), { job_id: jId, trigger: `status_changed:${source}` })
+      console.log(`[ops-api] get_review review request for ${jId}: ${review?.action}`)
+    } catch (e) {
+      console.log('[ops-api] get_review review request failed (non-blocking):', (e as Error)?.message)
+    }
+  }
+
   // Fire-and-forget: recompute job intelligence after status change
   fetch(`${SUPABASE_URL}/functions/v1/reporting-api?action=job_intelligence&job_id=${jId}`, {
     headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
@@ -34283,9 +35212,12 @@ async function updateJobStatus(client: any, body: any) {
     (async () => {
       try {
         // 1. Approve draft work orders for this job
+        // Crew work orders only: a job work order is approved by Shaun alone
+        // (job_work_orders.ts), never by job acceptance.
         const { data: draftWOs } = await client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
+          .neq('kind', 'job')
           .eq('status', 'draft')
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
@@ -35425,16 +36357,31 @@ async function assertGhlContactMatchesResolvedJob(
       ),
     )
   }
+  // The job's own contact passes.
   if (
-    !job.data.ghl_contact_id ||
-    String(job.data.ghl_contact_id) !== String(ghlContactId)
-  ) {
-    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
-      job_id: jobId,
-      expected_ghl_contact_id: job.data.ghl_contact_id || null,
-      received_ghl_contact_id: ghlContactId,
-    }))
+    job.data.ghl_contact_id &&
+    String(job.data.ghl_contact_id) === String(ghlContactId)
+  ) return
+  // So does a live party on the SAME job's contact list (a neighbour on a shared
+  // fence; Captain ruling 12 Oct 2026). A removed row, another job's row or a
+  // contact on no list is refused exactly as before; a failed read fails closed.
+  const party = await findLiveJobContactForGhlContact(client, jobId, ghlContactId)
+  if (party.ok) return
+  if (party.reason === 'lookup_failed') {
+    throw new SesActionError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        action,
+        `The job contact list lookup failed (${party.message}).`,
+        { job_id: jobId, ghl_contact_id: ghlContactId },
+      ),
+    )
   }
+  throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+    job_id: jobId,
+    expected_ghl_contact_id: job.data.ghl_contact_id || null,
+    received_ghl_contact_id: ghlContactId,
+  }))
 }
 
 async function assertNoSyntheticLivefireJobs(
@@ -41417,6 +42364,9 @@ function projectTradeAllocatedMyJobsCard(assignment: any): void {
     if ('notes' in assignment.jobs) {
       assignment.jobs.notes = sanitizeTradeAllocatedJobNotes(assignment.jobs.notes)
     }
+    if ('metadata' in assignment.jobs) {
+      assignment.jobs.metadata = _withoutBuilderOrderValue(assignment.jobs.metadata)
+    }
   }
 }
 
@@ -41791,7 +42741,17 @@ export const TRADE_WO_SCOPE_ITEM_ALLOWLIST = new Set([
   'units',
   'kind',
   'special_instructions',
+  // Hours, not money: every trade sees how long each line takes (captain,
+  // 12 Oct 2026: hours only, the lead trade included).
+  'hours',
+  // A job work order's customer variation lines are marked as variations.
+  'is_variation',
+  'variation_number',
 ])
+
+// The numbers a work order line may show a trade. Every other number on a
+// line is treated as money and dropped.
+const TRADE_WO_SCOPE_ITEM_NUMERIC_KEYS = new Set(['qty', 'quantity', 'hours', 'variation_number'])
 
 function isTradeWoScopeItemScalar(value: unknown): boolean {
   return value == null ||
@@ -41810,6 +42770,10 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
       if (!TRADE_WO_SCOPE_ITEM_ALLOWLIST.has(key)) continue
       if (TRADE_SCOPE_QUOTE_KEYS.has(key) || TRADE_SCOPE_MONEY_KEYS.has(key)) continue
       if (!isTradeWoScopeItemScalar(value)) continue
+      if (key === 'is_variation') {
+        if (typeof value === 'boolean') out[key] = value
+        continue
+      }
       if (key === 'kind') {
         const kind = sanitizeTradePackKind(value)
         if (kind !== undefined) out[key] = kind
@@ -41827,7 +42791,7 @@ export function redactTradeWorkOrderScopeItems(items: any): any {
         continue
       }
       if (typeof value === 'number' && Number.isFinite(value)) {
-        if (key === 'qty' || key === 'quantity') out[key] = value
+        if (TRADE_WO_SCOPE_ITEM_NUMERIC_KEYS.has(key)) out[key] = value
         continue
       }
       out[key] = value
@@ -42182,7 +43146,7 @@ async function tradeJobDetail(
     // order, so this is a real mismatch, not a theoretical one.
     client.from('work_orders')
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
-      .eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
+      .eq('job_id', jobId).neq('kind', 'job').neq('status', 'cancelled').order('created_at', { ascending: false }),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
       .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
@@ -51594,7 +52558,11 @@ export const _tradeWaiveNeighbourSignoffForTest = tradeWaiveNeighbourSignoff
 //   - hours: finite, 0.25..24, rounded to the nearest quarter hour; REPLACES
 //     hours_worked (not additive) so a re-tap corrects rather than doubles.
 //   - target assignment: the caller's own non-cancelled assignment on the job,
-//     preferring in_progress > scheduled/confirmed > latest complete. A
+//     preferring in_progress > scheduled/confirmed > latest complete. A log
+//     that names its card (assignment_id) goes on that card. A log with times
+//     goes on the card scheduled that day, so two days on one job are two
+//     cards; with no card scheduled that day the usual pick stands. Only a
+//     card already holding saved times for a different day is refused. A
 //     make-safe with no assignment for the caller gets the same completing-trade
 //     binding submit_makesafe_report mints (the report submitter is the
 //     attending trade). Any other job with no assignment is refused: the office
@@ -51603,6 +52571,15 @@ export const _tradeWaiveNeighbourSignoffForTest = tradeWaiveNeighbourSignoff
 //   - status moves to complete (completed_at stamped) unless already complete;
 //     scheduled_date is set to today (AWST) when missing so my_hours lists it.
 //   - never touches rates, invoices, or the make-safe board.
+//   - times (12 Oct 2026): when the trade also sends work_date, start_time and
+//     finish_time (optional break_minutes), the hours are the server's
+//     (finish - start - break, trade_invoice_time_entry.ts; not rounded to the
+//     quarter hour) and the times are saved beside the card in
+//     job_assignment_logged_times, so my_hours can hand them to the Weekly
+//     Invoice card and job_detail lists them against the job. They are never
+//     copied onto an invoice line. Hours logged without times clear any saved
+//     times. This door never requires times: the enforcement flag is about
+//     invoice lines.
 const LOG_MY_JOB_HOURS_MAX = 24
 function normaliseLoggedHours(raw: unknown): number {
   const n = typeof raw === 'string' ? Number(raw.trim()) : Number(raw)
@@ -51613,8 +52590,15 @@ function normaliseLoggedHours(raw: unknown): number {
   return q
 }
 const LOG_HOURS_ASSIGNMENT_COLUMNS = 'id, job_id, user_id, status, role, assignment_type, scheduled_date, hours_worked, invoiced_in, completed_at, attendance_cycle_id, cycle_attribution, notes'
+function liveHoursAssignments(rows: any[]): any[] {
+  return (rows || []).filter((r) => r && r.status !== 'cancelled' && isGenuineTradeAssignment(r))
+}
+function pickHoursAssignmentForDay(rows: any[], workDate: string): any | null {
+  return liveHoursAssignments(rows).find((r) => String(r.scheduled_date || '') === workDate)
+    || pickHoursAssignment(rows)
+}
 function pickHoursAssignment(rows: any[]): any | null {
-  const live = (rows || []).filter((r) => r && r.status !== 'cancelled' && isGenuineTradeAssignment(r))
+  const live = liveHoursAssignments(rows)
   if (!live.length) return null
   const byDate = (a: any, b: any) => String(b.scheduled_date || '').localeCompare(String(a.scheduled_date || ''))
   const active = live.find((r) => r.status === 'in_progress')
@@ -51626,7 +52610,16 @@ function pickHoursAssignment(rows: any[]): any | null {
 async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthContext, access: TradeJobAccessContext) {
   const jobId = String(body?.jobId || body?.job_id || '').trim()
   if (!jobId) throw new ApiError('jobId required', 400)
-  const hours = normaliseLoggedHours(body?.hours)
+  const namedCardId = String(body?.assignmentId || body?.assignment_id || '').trim()
+  // All three time fields or none: a half-filled or wrong entry (finish not
+  // after start, a day after today, hours that disagree) is refused as on an
+  // invoice line.
+  const timeEntry = resolveTimeEntryOrRefuse(body, {
+    required: false,
+    clientHours: body?.hours,
+    label: 'job',
+  })
+  const hours = timeEntry ? timeEntry.hours : normaliseLoggedHours(body?.hours)
   const source = String(body?.source || 'job_view').replace(/[^a-z0-9_]/gi, '').slice(0, 40) || 'job_view'
   await assertAssignedOrMakesafeAccess(client, jobId, tradeUser.id, false, access)
   const { data: job, error: jobErr } = await client.from('jobs')
@@ -51639,7 +52632,28 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
     .select(LOG_HOURS_ASSIGNMENT_COLUMNS)
     .eq('job_id', jobId).eq('user_id', tradeUser.id)
   if (asnErr) throw asnErr
-  let assignment = pickHoursAssignment(mine || [])
+  const pickCard = async (rows: any[]): Promise<any | null> => {
+    if (namedCardId) {
+      const named = liveHoursAssignments(rows).find((row) => String(row.id) === namedCardId) || null
+      if (!named) throw new ApiError('That job card is not one of yours on this job. Reload and try again.', 404)
+      return named
+    }
+    if (!timeEntry) return pickHoursAssignment(rows)
+    const picked = pickHoursAssignmentForDay(rows, timeEntry.work_date)
+    if (!picked) return null
+    const saved = await loadLoggedTimesByCard(client, [picked.id])
+    if (saved.error) throw new Error('Failed to read the times saved on your job card: ' + saved.error)
+    const savedDay = loggedTimeEntryForCard(saved.byCard.get(String(picked.id)), picked.hours_worked, tradeUser.id)?.work_date
+    if (savedDay && savedDay !== timeEntry.work_date) {
+      throw new ApiError(
+        'Your job card on this job already holds your times for ' + savedDay + ', and you have no other card here for ' +
+          timeEntry.work_date + '. Enter these times on the Weekly Invoice, or ask the office to add you to the job for that day.',
+        409,
+      )
+    }
+    return picked
+  }
+  let assignment = await pickCard(mine || [])
   let created = false
   if (!assignment) {
     const { data: detail } = await client.from('makesafe_job_details')
@@ -51663,13 +52677,31 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
       .select(LOG_HOURS_ASSIGNMENT_COLUMNS)
       .eq('job_id', jobId).eq('user_id', tradeUser.id)
     if (rereadErr) throw rereadErr
-    assignment = pickHoursAssignment(reread || []) || bound.assignment
+    assignment = (await pickCard(reread || [])) || bound.assignment
     if (!assignment) throw new ApiError('Could not find your assignment on this job', 500)
   }
   if (assignment.invoiced_in) {
     throw new ApiError('These hours are already on invoice ' + assignment.invoiced_in + '. Ask the office to adjust it.', 409)
   }
   const nowIso = new Date().toISOString()
+  // The saved times go in BEFORE the hours: a failed save then leaves the
+  // card's hours untouched, and my_hours never shows saved times whose hours
+  // differ from the card's (loggedTimeEntryForCard).
+  if (timeEntry) {
+    const { error: timeErr } = await client.from('job_assignment_logged_times').upsert({
+      assignment_id: assignment.id,
+      job_id: jobId,
+      user_id: tradeUser.id,
+      work_date: timeEntry.work_date,
+      start_time: timeEntry.start_time,
+      finish_time: timeEntry.finish_time,
+      break_minutes: timeEntry.break_minutes,
+      hours: timeEntry.hours,
+      source,
+      logged_at: nowIso,
+    }, { onConflict: 'assignment_id' })
+    if (timeErr) throw timeErr
+  }
   const update: any = { hours_worked: hours }
   if (!assignment.scheduled_date) update.scheduled_date = getAWSTDate()
   if (assignment.status !== 'complete') {
@@ -51679,6 +52711,18 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
   const { data: saved, error: updErr } = await client.from('job_assignments')
     .update(update).eq('id', assignment.id).select(LOG_HOURS_ASSIGNMENT_COLUMNS).single()
   if (updErr) throw updErr
+  if (!timeEntry) {
+    // Hours logged without times replace the card's hours, so times saved
+    // earlier no longer describe them. Best effort: the read hides saved
+    // times whose hours differ from the card's either way.
+    try {
+      const { error: clearErr } = await client.from('job_assignment_logged_times')
+        .delete().eq('assignment_id', assignment.id)
+      if (clearErr) console.error('[ops-api] log_my_job_hours: saved times not cleared:', clearErr.message)
+    } catch (e) {
+      console.error('[ops-api] log_my_job_hours: saved times not cleared:', (e as Error)?.message)
+    }
+  }
   try {
     await client.from('job_events').insert({
       job_id: jobId,
@@ -51690,6 +52734,12 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
         previous_hours: assignment.hours_worked == null ? null : Number(assignment.hours_worked),
         source,
         assignment_created: created,
+        ...(timeEntry ? {
+          work_date: timeEntry.work_date,
+          start_time: timeEntry.start_time,
+          finish_time: timeEntry.finish_time,
+          break_minutes: timeEntry.break_minutes,
+        } : {}),
       },
     })
   } catch (_e) { /* audit is non-blocking */ }
@@ -51704,6 +52754,9 @@ async function tradeLogMyJobHours(client: any, body: any, tradeUser: TradeAuthCo
       hours_worked: hours,
       created,
     },
+    // The times saved with these hours, in the invoice line's own form; null
+    // when the hours were logged without times.
+    time_entry: timeEntry,
     week_ending: weekEndSundayFor(scheduledDate),
   }
 }
@@ -52006,6 +53059,13 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
 
   const rate = rateRow ? Number(rateRow.hourly_rate) : 0
 
+  // Times the trade saved on the job view with these hours (log_my_job_hours),
+  // so the Weekly Invoice card can open on them. A failed read is logged and
+  // answers no saved times; it never fails the hours view.
+  const loggedTimes = await loadLoggedTimesByCard(client, (assignments || []).map((a: any) => a.id))
+  if (loggedTimes.error) console.error('[ops-api] my_hours: saved times unreadable:', loggedTimes.error)
+  const loggedTimeByCard = loggedTimes.byCard
+
   // Calculate hours per assignment
   let totalHours = 0
   const enriched = (assignments || []).map((a: any) => {
@@ -52024,6 +53084,8 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
       // (required) hours field for this card instead of a read-only value.
       hours_worked: a.hours_worked != null ? parseFloat(a.hours_worked) : null,
       amount: Math.round(hours * rate * 100) / 100,
+      // { work_date, start_time, finish_time, break_minutes, hours } or null.
+      logged_time_entry: loggedTimeEntryForCard(loggedTimeByCard.get(String(a.id)), a.hours_worked, userId),
     }
   })
 
@@ -52060,7 +53122,20 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
   const previewGstOn = previewGstParam === 'true' || previewGstParam === 'false'
     ? previewGstParam === 'true'
     : userRow?.trade_details?.gstRegistered === true
-  const previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  // Recurring deduction (for example Ute hire): the week's rule rides along
+  // as recurring_deduction_week so the trade sees the label and amount before
+  // submitting. It is taken off this preview only when the preview covers it.
+  // A failed rule read is logged and shows no deduction; it never fails the
+  // hours view. The submit path does not share that leniency.
+  let previewMoney = tradeInvoiceMoney(subtotal, previewGstOn, weekEnding)
+  let previewRecurringDeduction: TradeRecurringDeductionDecision | null = null
+  try {
+    const previewed = await applyTradeRecurringDeduction(client, previewMoney, { userId, weekStart })
+    previewMoney = previewed.money
+    previewRecurringDeduction = previewed.decision
+  } catch (deductionErr) {
+    console.error('[ops-api] my_hours: weekly deduction unreadable:', (deductionErr as Error)?.message)
+  }
   const gst = previewMoney.gst_amount
 
   // Check verification state across assignments
@@ -52078,6 +53153,7 @@ export async function myHours(client: any, userId: string, params: URLSearchPara
     week_start: weekStart,
     total_hours: Math.round(totalHours * 100) / 100,
     ...tradeInvoiceMoneyResponse(previewMoney),
+    ...(previewRecurringDeduction ? tradeRecurringDeductionResponse(previewRecurringDeduction) : {}),
     subtotal,
     gst,
     total: previewMoney.total_inc,
@@ -52105,6 +53181,11 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     .single()
   const serverInvoiceType = tradeUser?.invoice_type === 'per_metre' ? 'per_metre' : 'hourly'
   const isPerMetre = serverInvoiceType === 'per_metre'
+  // Time entries (trade_invoice_time_entry.ts). Metres are not time, so the
+  // flag is only read for the hourly lane. Nobody types a line on that lane,
+  // so its lines carry no entry: while the flag is off they are saved as
+  // before, and when it is on every card is refused by name.
+  const stTimeEntryRequired = isPerMetre ? false : await tradeInvoiceTimeEntryRequired(client)
 
   // Prevent double-submit
   // week_end is the live column (trade_invoices was rebuilt in
@@ -52166,6 +53247,15 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     throw new Error(stHeldCount > 0
       ? 'Every completed job card for this week is already on a live invoice. Contact the office if this looks wrong.'
       : 'No completed hours found for this week')
+  }
+
+  if (stTimeEntryRequired) {
+    refuseJobCardsNeedingTimes(assignments.map((a: any) => ({
+      assignment_id: String(a.id),
+      job_id: a.jobs?.id ? String(a.jobs.id) : null,
+      job_number: a.jobs?.job_number || null,
+      work_date: a.scheduled_date || null,
+    })))
   }
 
   const stGstOn = tradeInvoiceGstOn(body)
@@ -52341,13 +53431,22 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     throw new Error('Invoice rejected: invoice subtotal is zero or negative. Check hours and rates.')
   }
   // ── END M0 LEGACY GUARD ──
-  const stMoney = tradeInvoiceMoney(subtotal, stGstOn, week_ending)
+  // Recurring deduction (for example Ute hire): taken off the amount payable
+  // of this weekly invoice, after super and GST.
+  const { money: stMoney, decision: stRecurringDeduction } = await applyTradeRecurringDeduction(
+    client,
+    tradeInvoiceMoney(subtotal, stGstOn, week_ending),
+    { userId, weekStart },
+  )
   const gst = stMoney.gst_amount
   const total = stMoney.total_inc
   const stXeroLineItems = splitTradeInvoiceXeroLines(
     lineItems,
     stMoney,
-    { tradeName, superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE },
+    {
+      tradeName,
+      superAccountCode: TRADE_INVOICE_SUPER_XERO_ACCOUNT_CODE,
+    },
   )
 
   const persistedLineSubtotal = Object.values(jobLines).reduce(
@@ -52374,11 +53473,14 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     gst: stMoney.gst_amount,
     total_inc: stMoney.total_inc,
     ...tradeInvoiceMoneyFields(stMoney),
+    ...tradeRecurringDeductionInvoiceFields(stRecurringDeduction),
     notes: notes || null,
     invoice_source: isPerMetre ? 'per_metre' : 'hourly',
     xero_bill_id: null,
     status: 'approved',
-    query_note: 'Validated invoice awaiting Xero ACCPAY creation.',
+    // A deduction that covered the week but was not taken is said here too.
+    query_note: ['Validated invoice awaiting Xero ACCPAY creation.', stRecurringDeduction.note]
+      .filter(Boolean).join(' | '),
   }
   const { data: insertedInvoice, error: invInsertErr } = await client
     .from('trade_invoices').insert(invoiceRecord).select('id').single()
@@ -52549,7 +53651,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
       invoice_type: 'ACCPAY',
       status: 'DRAFT',
       reference: `${tradeName} | WE ${week_ending}`,
-      sub_total: stMoney.net_pay,
+      sub_total: tradeInvoiceXeroBillSubtotal(stMoney),
       total_tax: gst,
       total: stMoney.trade_payable,
       amount_due: stMoney.trade_payable,
@@ -52567,6 +53669,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
     xero_bill_number: billNumber,
     total,
     ...tradeInvoiceMoneyResponse(stMoney),
+    ...tradeRecurringDeductionResponse(stRecurringDeduction),
     invoice_type: serverInvoiceType,
     invoice_type_source: 'user',
     pdf_attached: pdfAttached,
@@ -52574,7 +53677,7 @@ export async function submitTradeInvoice(client: any, userId: string, body: any)
 }
 
 // ── my_trade_invoices: invoice history for a trade ──
-const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at'
+const MY_TRADE_INVOICE_COLUMNS = 'id, week_start, week_end, invoice_number, notes, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, xero_bill_id, xero_bill_status, amount_paid, paid_at, status, submitted_at, created_at, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note'
 
 // presentTradeInvoice throws MONEY_SPLIT_INVALID on a legacy row whose split
 // does not reconcile. One such row is live; it used to 500 the whole list.
@@ -52690,7 +53793,7 @@ async function listTradeInvoices(client: any, params: URLSearchParams) {
   // pending_ops_review invoices with their totals + query_note.            [D3]
   let query = client
     .from('trade_invoices')
-    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position)')
+    .select('id, week_start, week_end, total_hours, subtotal_ex, gst, gst_on, super_rate, super_amount, gross_earned, net_pay, total_inc, job_grand_total_ex, final_deductions_total_ex, to_be_paid_ex, invoice_source, status, query_note, recurring_deduction_id, recurring_deduction_label, recurring_deduction_amount, recurring_deduction_note, xero_bill_id, xero_pushed_at, submitted_at, created_at, notes, invoice_number, users:user_id(name), lines:trade_invoice_lines(id, job_id, job_number, client_name, site_address, line_date, total_hours, hourly_rate, line_total_ex, line_type, description, quantity, unit, unit_rate, source_work_order_id, source_trade_invoice_line_id, deduction_user_id, deduction_assignment_id, deduction_trade_rate_id, line_position, work_date, start_time, finish_time, break_minutes)')
     .order('week_start', { ascending: false, nullsFirst: false })
     .limit(limit)
 
@@ -53511,12 +54614,30 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   }
 }
 
-// ── send_review_request: SMS client with Google review link ──
-function reviewRequestMessage(clientName?: string | null): string {
-  return `Hi ${clientName?.split(' ')[0] || 'there'}, thanks for choosing SecureWorks! We'd love to hear about your experience: ${GOOGLE_REVIEW_URL}\n\nYour feedback means the world to us 🙏`
+// ── send_review_request: a person asks for the review text on one job ──
+// The text, the recipients (every paying owner), the 90-day look-back and the per-job
+// claim are the paid close-out sender's (job_closeout.ts requestJobReview), so a manual
+// request and the automatic one can never text the same job twice. The sender switch
+// (job_closeout_settings.review_sender_mode) governs both; a manual request skips only
+// the automatic checks (get_review, holds, paid rule, send window), and says payment was
+// received only on a fencing or patio job that passes the paid rule.
+function reviewRequestMessage(clientName?: string | null, jobType?: string | null, paid = false): string {
+  return closeoutReviewRequestMessage(clientName, jobType, paid)
 }
 export const _reviewRequestMessageForTest = reviewRequestMessage
 export const _googleReviewUrlForTest = GOOGLE_REVIEW_URL
+
+/** One review text through ghl-proxy send_sms: the shared sender policy and contact guard. */
+function jobCloseoutDeps(client: any): JobCloseoutDeps {
+  return {
+    client,
+    now: () => new Date(),
+    env: (key: string) => Deno.env.get(key),
+    moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
+    sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+    laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
 
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
@@ -53528,41 +54649,33 @@ async function sendReviewRequest(client: any, body: any) {
     'send_review_request',
   )
 
-  const { data: job, error: jobErr } = await client
-    .from('jobs')
-    .select('id, client_name, job_number, ghl_contact_id')
-    .eq('id', jId)
-    .single()
-  if (jobErr || !job) throw new Error('Job not found')
-
-  if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
-
-  const smsMessage = reviewRequestMessage(job.client_name)
-
-  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-  const smsResp = await fetch(ghlUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contactId: job.ghl_contact_id,
-      message: smsMessage,
-    }),
-  })
-  const smsResult = await smsResp.json()
-
-  // Log event
-  await client.from('job_events').insert({
-    job_id: jId,
-    event_type: 'review_request_sent',
-    detail_json: {
-      review_url: GOOGLE_REVIEW_URL,
-      sms_sent: smsResult.success || false,
-    },
-  })
-
+  let result: Record<string, any>
+  try {
+    result = await requestJobReview(jobCloseoutDeps(client), {
+      job_id: jId,
+      trigger: `manual:${body.operator_email || body.user_email || 'send_review_request'}`,
+      manual: true,
+    })
+  } catch (e) {
+    if (e instanceof JobCloseoutError) throw new ApiError(e.message, e.status)
+    throw e
+  }
+  if (result.action === 'already_claimed') {
+    throw new ApiError('A review text was already requested for this job; it is never sent twice', 409)
+  }
+  if (result.action === 'sender_off') {
+    throw new ApiError('The review sender is switched off (job_closeout_settings.review_sender_mode)', 409)
+  }
+  if (result.action === 'no_contact') {
+    throw new ApiError('No GHL contact is linked for this job; link the contact and send the review again', 409)
+  }
+  const recipients = Array.isArray(result.recipients) ? result.recipients : []
   return {
-    success: true,
-    sms_sent: smsResult.success || false,
+    success: result.ok === true && result.action === 'sent',
+    sms_sent: result.action === 'sent',
+    outcome: result.action,
+    reason: result.reason ?? null,
+    recipients,
     review_url: GOOGLE_REVIEW_URL,
   }
 }
@@ -59231,7 +60344,9 @@ export async function sendClientUpdate(client: any, body: any) {
       const smsRes = await fetch(ghlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contactId: contactGhlId, message }),
+        // A per-contact send names the job, so ghl-proxy's contact/job match runs:
+        // the contact must be the job's or a live party on the same job's list.
+        body: JSON.stringify({ contactId: contactGhlId, message, ...(job_contact_id ? { jobId: job_id } : {}) }),
       })
       // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
       // so only a body confirming success may record status='sent' — an in-band

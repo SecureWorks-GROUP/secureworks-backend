@@ -14,6 +14,7 @@ import {
   type WsSuggestion,
 } from "./debt_ws_store.ts";
 import type { DebtWsCaller, DebtWsDeps } from "./debt_ws_actions.ts";
+import type { WsJobContact } from "./debt_ws_payer.ts";
 
 export const SHAUN_ID = "30000000-0000-4000-8000-0000000000aa";
 export const OTHER_STAFF_ID = "30000000-0000-4000-8000-0000000000bb";
@@ -269,6 +270,8 @@ export class FakeStore implements DebtWsStore {
   };
   invoices: WsInvoice[] = fixtureInvoices();
   jobRows: WsJob[] = fixtureJobs();
+  /** job_contacts rows (payers on shared jobs). None by default. */
+  contactRows: WsJobContact[] = [];
   exits: Array<{ job_id: string; occurred_at: string }> = [];
   evidence: Array<WsEvidence> = [];
   stateRows: WsState[] = [];
@@ -312,6 +315,21 @@ export class FakeStore implements DebtWsStore {
   }
   jobs(jobIds: string[]) {
     return Promise.resolve(this.jobRows.filter((j) => jobIds.includes(j.id)));
+  }
+  jobContacts(jobIds: string[]) {
+    return Promise.resolve(
+      this.contactRows.filter((c) =>
+        jobIds.includes(c.job_id) && (!c.status || c.status === "active")
+      ),
+    );
+  }
+  setContactRowGhl(rowId: string, jobId: string, contact: string) {
+    const row = this.contactRows.find((c) =>
+      c.id === rowId && c.job_id === jobId
+    );
+    if (!row) throw new Error("no contact row");
+    row.ghl_contact_id = contact;
+    return Promise.resolve();
   }
   rectificationExits(jobIds: string[]) {
     return Promise.resolve(this.exits.filter((e) => jobIds.includes(e.job_id)));
@@ -541,6 +559,10 @@ export interface Recorder {
   bankReads: Array<string | null>;
   bankPages: number[];
   payLinkReads: string[];
+  /** One entry per conversation read: the job, the extra and the held contact ids asked for. */
+  conversationReads: Array<
+    { jobId: string; contactIds: string[]; heldContactIds: string[] }
+  >;
 }
 
 export function fakeDeps(
@@ -557,6 +579,8 @@ export function fakeDeps(
     /** readInvoices (the batch live read) fails with this. */
     liveError?: Error;
     smsError?: Error;
+    /** The conversation every read returns, instead of the job's two default messages. */
+    conversation?: Record<string, unknown>[];
     now?: Date;
   } = {},
 ): { deps: DebtWsDeps; rec: Recorder } {
@@ -569,6 +593,7 @@ export function fakeDeps(
     bankReads: [],
     bankPages: [],
     payLinkReads: [],
+    conversationReads: [],
   };
   const liveOf = (id: string) => {
     if (options.live?.[id]) return options.live[id];
@@ -637,28 +662,40 @@ export function fakeDeps(
       if (job) job.status = String(body.status);
       return Promise.resolve({ success: true });
     },
-    conversation: (_jobId, limit) =>
-      Promise.resolve({
-        messages: [
-          {
-            id: "ghl:2",
-            channel: "call",
-            direction: "inbound",
-            occurred_at: "2026-10-07T03:00:00Z",
-            author: "Client",
-            body: "Transcript: I will pay Friday",
-          },
-          {
-            id: "ghl:1",
-            channel: "sms",
-            direction: "outbound",
-            occurred_at: "2026-10-02T03:00:00Z",
-            author: "Shaun",
-            body: "Hi there",
-          },
-        ].slice(0, limit),
-        summary: { count: 2 },
-      }),
+    // By default two messages with the job's own GoHighLevel contact.
+    conversation: (jobId, limit, contactIds, heldContactIds) => {
+      rec.conversationReads.push({
+        jobId,
+        contactIds: contactIds ?? [],
+        heldContactIds: heldContactIds ?? [],
+      });
+      const contact =
+        store.jobRows.find((j) => j.id === jobId)?.ghl_contact_id ?? null;
+      const messages = options.conversation ?? [
+        {
+          id: "ghl:2",
+          channel: "call",
+          direction: "inbound",
+          occurred_at: "2026-10-07T03:00:00Z",
+          author: "Client",
+          body: "Transcript: I will pay Friday",
+          contact_id: contact,
+        },
+        {
+          id: "ghl:1",
+          channel: "sms",
+          direction: "outbound",
+          occurred_at: "2026-10-02T03:00:00Z",
+          author: "Shaun",
+          body: "Hi there",
+          contact_id: contact,
+        },
+      ];
+      return Promise.resolve({
+        messages: messages.slice(0, limit),
+        summary: { count: messages.length },
+      });
+    },
     story: () =>
       Promise.resolve({
         story: {
@@ -719,3 +756,153 @@ export function fakeDeps(
 export const ON = {
   DEBT_WS_SENDING_ENABLED: "true",
 };
+
+// ── A shared fence (synthetic, shaped like a real two-payer job) ──
+//
+// The job's client is Jordan Primary (share A, linked in GoHighLevel, paid). The
+// neighbour is Riley Neighbour (share B): their own job_contacts row with their own Xero
+// contact, phone and email, NOT linked in GoHighLevel, and the open B balance is theirs.
+// The row's name has a double space, as live rows can.
+
+export const SHARED = {
+  job: "20000000-0000-4000-8000-0000000000f1",
+  aBal: "10000000-0000-4000-8000-0000000000f1",
+  bBal: "10000000-0000-4000-8000-0000000000f2",
+  bDep: "10000000-0000-4000-8000-0000000000f3",
+  aRow: "40000000-0000-4000-8000-0000000000f1",
+  bRow: "40000000-0000-4000-8000-0000000000f2",
+  primaryGhl: "ghlprimary0000000001",
+  neighbourGhl: "ghlneighbour00000001",
+  primaryXero: "c0000000-0000-4000-8000-0000000000f1",
+  neighbourXero: "c0000000-0000-4000-8000-0000000000f2",
+  neighbourPhone: "0400 999 222",
+  neighbourEmail: "riley@example.test",
+};
+
+export function addSharedFence(store: FakeStore) {
+  store.jobRows.push({
+    id: SHARED.job,
+    status: "final_payment",
+    type: "fencing",
+    job_number: "SWF-90007",
+    client_name: "Jordan Primary",
+    client_phone: "0400 111 000",
+    client_email: "jordan@example.test",
+    site_address: "7 Shared Boundary Road",
+    site_suburb: "Testville",
+    ghl_contact_id: SHARED.primaryGhl,
+    xero_contact_id: SHARED.primaryXero,
+  });
+  store.contactRows.push(
+    {
+      id: SHARED.aRow,
+      job_id: SHARED.job,
+      contact_type: "primary",
+      contact_label: "A",
+      is_primary: true,
+      status: "active",
+      client_name: "Jordan Primary",
+      client_phone: "0400 111 000",
+      client_email: "jordan@example.test",
+      xero_contact_id: SHARED.primaryXero,
+      ghl_contact_id: SHARED.primaryGhl,
+    },
+    {
+      id: SHARED.bRow,
+      job_id: SHARED.job,
+      contact_type: "neighbour_b",
+      contact_label: "B",
+      is_primary: false,
+      status: "active",
+      client_name: "Riley  Neighbour",
+      client_phone: SHARED.neighbourPhone,
+      client_email: SHARED.neighbourEmail,
+      xero_contact_id: SHARED.neighbourXero,
+      ghl_contact_id: null,
+    },
+  );
+  store.invoices.push(
+    inv({
+      xero_invoice_id: SHARED.aBal,
+      invoice_number: "INV-3001",
+      contact_name: "Jordan Primary",
+      xero_contact_id: SHARED.primaryXero,
+      reference: "SWF-90007-A-BAL",
+      first_description: "Balance (50%)",
+      job_id: SHARED.job,
+      status: "PAID",
+      total: 1400,
+      amount_due: 0,
+      invoice_date: "2026-09-25",
+    }),
+    inv({
+      xero_invoice_id: SHARED.bDep,
+      invoice_number: "INV-3000",
+      contact_name: "Riley Neighbour",
+      xero_contact_id: SHARED.neighbourXero,
+      reference: "SWF-90007-B-DEP50",
+      first_description: "Deposit (50%)",
+      job_id: SHARED.job,
+      status: "PAID",
+      total: 1400,
+      amount_due: 0,
+      invoice_date: "2026-07-01",
+    }),
+    inv({
+      // Day 7 final (invoice 1 Oct): step d7 due today, like the fence fixture.
+      xero_invoice_id: SHARED.bBal,
+      invoice_number: "INV-3002",
+      contact_name: "Riley Neighbour",
+      xero_contact_id: SHARED.neighbourXero,
+      reference: "SWF-90007-B-BAL",
+      first_description: "Balance (50%)",
+      job_id: SHARED.job,
+      total: 1420.37,
+      amount_due: 1420.37,
+      invoice_date: "2026-10-01",
+    }),
+  );
+}
+
+/** The shared job's thread: mostly the primary client's messages, one neighbour email. */
+export const SHARED_THREAD: Record<string, unknown>[] = [
+  {
+    id: "bev:1",
+    channel: "sms",
+    direction: "inbound",
+    occurred_at: "2026-10-06T03:00:00Z",
+    body: "I have paid my half",
+    contact_id: SHARED.primaryGhl,
+  },
+  {
+    id: "bev:2",
+    channel: "sms",
+    direction: "outbound",
+    occurred_at: "2026-10-05T03:00:00Z",
+    body: "Thanks Jordan",
+    contact_id: SHARED.primaryGhl,
+  },
+  {
+    id: "bev:3",
+    channel: "email",
+    direction: "inbound",
+    occurred_at: "2026-10-04T03:00:00Z",
+    body: "Can I pay next week?",
+    email_addresses: [SHARED.neighbourEmail, "admin@example.test"],
+  },
+  {
+    id: "bev:4",
+    channel: "sms",
+    direction: "outbound",
+    occurred_at: "2026-10-03T03:00:00Z",
+    body: "Hi Riley",
+    contact_id: SHARED.neighbourGhl,
+  },
+  {
+    id: "note:1",
+    channel: "note",
+    direction: "internal",
+    occurred_at: "2026-10-02T03:00:00Z",
+    body: "Staff note",
+  },
+];

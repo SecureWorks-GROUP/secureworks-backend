@@ -227,6 +227,12 @@ ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|function|c
 # field (alarm_phones empties, operator-configured arrival phones revert), so the deploy
 # must refuse rather than ship ahead of the migration.
 ops-api|supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql|column|makesafe_notify_settings.d1_reconcile_enabled
+# 20261013170000 names who gets the one staff text for a new repair job.
+# loadRepairNotificationConfig selects the column, and a 42703 there fails the
+# repair recipient read: a new repair job then sends no staff text (recorded as
+# repair_recipient_config_read_failed) and its draft settlement is retried. The
+# make-safe text does not read the column.
+ops-api|supabase/migrations/20261013170000_makesafe_notify_repair_recipients.sql|column|makesafe_notify_settings.repair_new_job_user_ids
 # Exact-once stale route recovery is migration-first. These service-role-only
 # RPCs own database-clock expiry, timeout settlement, redispatch leasing,
 # pre-Graph generation renewal, and the bounded board alarm read.
@@ -599,6 +605,10 @@ ops-api|supabase/migrations/20261006014000_context_job_story.sql|function|contex
 ops-api|supabase/migrations/20261006014000_context_job_story.sql|function|context_story_scorecard_jobs
 ops-api|supabase/migrations/20261006032000_context_scorecard.sql|function|context_scorecard
 ops-api|supabase/migrations/20261006032000_context_scorecard.sql|function|context_scorecard_jobs
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|table|context_job_story_texts
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|table|context_job_story_requests
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|function|context_job_story_text_get
+ops-api|supabase/migrations/20261009100000_context_job_story_text.sql|function|context_job_story_request
 ops-api|supabase/migrations/20261002120000_job_parties_foundation.sql|table|job_site_links
 context-document-text|supabase/migrations/20261005210000_context_document_text.sql|table|context_document_texts
 context-document-text|supabase/migrations/20261005210000_context_document_text.sql|function|record_context_document_text
@@ -652,3 +662,80 @@ ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quo
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quote_builder_versions.issued_at
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|constraint|quote_builder_versions_unique_chain_version
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|trigger|quote_builder_versions.trg_quote_builder_versions_guard
+
+# The deterministic intake stamps each case with its adapter id; the Ambrose
+# adapter is refused on every case insert until this migration admits it. The
+# constraint name is unchanged, so the ledger version is what proves it landed.
+ops-api|supabase/migrations/20261012043000_makesafe_intake_cases_admit_ambrose_adapter.sql|constraint|makesafe_intake_cases_deterministic_shapes_check
+
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.kind
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.agreed_labour_ex
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.approved_by
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.sealed_content_hash
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|jobs.work_order_id
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|column|trade_invoice_lines.job_work_order_id
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|table|work_order_settings
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|table|work_order_variations
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|table|work_order_variation_emails
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|trigger|work_orders.trg_work_orders_job_kind_guard
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|trigger|trade_invoice_lines.trg_trade_invoice_lines_link_job_work_order
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|approve_job_work_order
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|ensure_job_work_order_draft
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|backfill_job_work_order_drafts
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|policy|work_orders.work_orders_job_kind_hidden_from_clients
+ops-api|supabase/migrations/20261012130000_job_work_orders.sql|function|carry_work_order_variations
+reporting-api|supabase/migrations/20261012130000_job_work_orders.sql|column|work_orders.kind
+
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|column|trade_invoice_lines.work_date
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|column|trade_invoice_lines.start_time
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|column|trade_invoice_lines.finish_time
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|column|trade_invoice_lines.break_minutes
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|constraint|trade_invoice_lines_time_entry_check
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|function|persist_weekly_trade_invoice_v2
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|table|job_trade_time_entries
+ops-api|supabase/migrations/20261012180000_trade_invoice_time_entries.sql|table|job_assignment_logged_times
+
+# Customer variations on a job work order: every job work order read (staff,
+# job_detail and the trade's my_job_work_order) reads the addenda, so the table
+# must exist before this ops-api ships.
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|table|work_order_customer_variations
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|column|work_order_customer_variations.trade_allocation_ex
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|column|work_order_customer_variations.customer_price_ex
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|trigger|work_order_customer_variations.trg_work_order_customer_variations_guard
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|function|approve_work_order_customer_variation
+ops-api|supabase/migrations/20261013140000_work_order_customer_variations.sql|table|work_order_customer_variation_invoices
+
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|table|trade_recurring_deductions
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_recurring_deductions.first_week_start
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_recurring_deductions.last_week_start
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_recurring_deductions.active
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_id
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_label
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_amount
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_note
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|constraint|trade_invoices_recurring_deduction_check
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|index|trade_invoices_one_recurring_deduction_per_week
+ops-api|supabase/migrations/20261013143700_trade_recurring_deductions.sql|function|persist_weekly_trade_invoice_v3
+xero-sync|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_id
+xero-sync|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_label
+xero-sync|supabase/migrations/20261013143700_trade_recurring_deductions.sql|column|trade_invoices.recurring_deduction_amount
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|table|job_closeout_settings
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|job_closeout_settings.get_review_move_enabled
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|job_closeout_settings.review_sender_mode
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|policy|job_closeout_settings.job_closeout_settings_service_role_all
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|table|job_closeout_state
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|job_closeout_state.paid_less_than_quoted
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|policy|job_closeout_state.job_closeout_state_service_role_all
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|table|job_review_claims
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|job_review_claims.recipients
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|policy|job_review_claims.job_review_claims_service_role_all
+ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|automation_switches.closeout
+xero-sync|supabase/migrations/20261013150000_job_closeout_review_archive.sql|table|job_closeout_settings
+xero-sync|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|job_closeout_settings.get_review_move_enabled
+
+# Quote builder pricing settings and the filed scope of works:
+# quote_builder_get_job reads the settings table on every open, so ops-api must
+# not deploy ahead of this migration.
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|table|quote_builder_settings
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|column|quote_builder_settings.amount
+ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|index|ux_job_docs_quote_builder_extra

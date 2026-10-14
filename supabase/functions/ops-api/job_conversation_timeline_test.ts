@@ -747,3 +747,55 @@ Deno.test("timeline: a GHL message in the CRM cache and as its event row shows o
   assertEquals(messages[1].source_system, "ghl_cache");
   assertEquals(messages[1].who, "the customer to us");
 });
+
+// ── who a message is with (Debt Workshop: one payer's messages on a shared job) ──
+
+Deno.test("timeline: a message carries its GoHighLevel contact and every email address on it", () => {
+  const sms = businessEventTimelineMessage(
+    bev("c1", "J", {
+      event_type: "client.reply",
+      channel: "sms",
+      direction: "inbound",
+      contact_id: "ghlneighbour00000001",
+      event_at: "2026-10-02T01:00:00Z",
+      occurred_at: "2026-10-02T01:00:00Z",
+    }),
+    "J",
+    new Set([CLIENT_MAIL]),
+  );
+  assertEquals(sms.contact_id, "ghlneighbour00000001");
+  assertEquals(sms.email_addresses, []);
+  // Older rows name the contact as the event's entity.
+  const old = businessEventTimelineMessage(
+    bev("c2", "J", {
+      event_type: "client.sms_out",
+      channel: "sms",
+      direction: "outbound",
+      entity_type: "contact",
+      entity_id: "ghlprimary0000000001",
+      occurred_at: "2026-10-02T01:00:00Z",
+    }),
+    "J",
+    new Set([CLIENT_MAIL]),
+  );
+  assertEquals(old.contact_id, "ghlprimary0000000001");
+  const email = businessEventTimelineMessage(
+    bev("c3", "J", {
+      event_type: "client.email_in",
+      channel: "email",
+      direction: "inbound",
+      payload: {
+        from: "Riley <Riley@Example.test>",
+        to: ["admin@secureworkswa.com.au"],
+      },
+      occurred_at: "2026-10-02T01:00:00Z",
+    }),
+    "J",
+    new Set([CLIENT_MAIL]),
+  );
+  assertEquals(email.contact_id, null);
+  assertEquals(email.email_addresses, [
+    "riley@example.test",
+    "admin@secureworkswa.com.au",
+  ]);
+});

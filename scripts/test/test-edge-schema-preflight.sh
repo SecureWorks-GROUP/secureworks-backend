@@ -858,8 +858,33 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261006032000", "context_scorecard"),
                       # Debt Workshop: the debt_ws_ tables and claim indexes.
                       ("20261008170000", "debt_workshop"),
+                      # job overview v1: the job_overview and request_job_story doors.
+                      ("20261009100000", "context_job_story_text"),
                       # quote builder actions (quote_builder_*).
-                      ("20261009120000", "quote_builder_versions")]:
+                      ("20261009120000", "quote_builder_versions"),
+                      # deterministic intake: the ambrose adapter's case inserts.
+                      ("20261012043000", "makesafe_intake_cases_admit_ambrose_adapter"),
+                      # Job work orders: one sealed work order per fencing
+                      # and patio job (job_work_orders.ts).
+                      ("20261012130000", "job_work_orders"),
+                      # Trade invoice time entries: the four line fields, the
+                      # stamping persist and the per-job list
+                      # (trade_invoice_time_entry.ts).
+                      ("20261012180000", "trade_invoice_time_entries"),
+                      # Customer variations: the addenda every job work
+                      # order read takes (work_order_customer_variations.ts).
+                      ("20261013140000", "work_order_customer_variations"),
+                      # Trade recurring deductions: the rule rows and the four
+                      # invoice columns (trade_invoice_recurring_deduction.ts).
+                      ("20261013143700", "trade_recurring_deductions"),
+                      # Paid close-out: the job_closeout_* actions and switches.
+                      ("20261013150000", "job_closeout_review_archive"),
+                      # Quote builder pricing settings and the filed scope of
+                      # works (quote_builder.ts).
+                      ("20261013160000", "quote_builder_pricing_and_documents"),
+                      # Repair job staff text: the repair recipient list
+                      # (loadRepairNotificationConfig).
+                      ("20261013170000", "makesafe_notify_repair_recipients")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,

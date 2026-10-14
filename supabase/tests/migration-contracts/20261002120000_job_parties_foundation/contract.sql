@@ -670,6 +670,13 @@ FROM pg_proc WHERE oid='public.context_parties_status()'::regprocedure \gset
 \if :sm1_status_moved
 \ir ../20261006034000_context_party_roles_health/sm1_parties_status.sql
 \endif
+-- The paid close-out (20261013150000) adds closeout to automation_lane_enabled(),
+-- whose body this migration's guard pins; stand the original back up (rolled back below).
+SELECT md5(prosrc)<>'818a13be854748e2d272bdd648c88b59' AS closeout_lane_reader_moved
+FROM pg_proc WHERE oid='public.automation_lane_enabled(text)'::regprocedure \gset
+\if :closeout_lane_reader_moved
+\ir ../20261013150000_job_closeout_review_archive/pre_closeout_lane_reader.sql
+\endif
 CREATE TEMP TABLE sm1_before AS SELECT p.oid::regprocedure::text AS sig,md5(p.prosrc) AS m FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND (p.proname LIKE 'job_party%' OR p.proname IN ('upsert_job_party','set_job_party_ids','job_contacts_owner_mirror',
   'context_contact_parties_at','context_job_event_parties','context_site_address','context_site_candidates','link_site_jobs','context_parties_status'));

@@ -267,6 +267,13 @@ BEGIN
    NOT IN ('8c99245789cadf661d4b6be1207f0887','99e6d70e80a79e548f2478b65fc6cd78')
  THEN RAISE EXCEPTION 'b5 b5_cron_lanes.sql is not the B-5 body'; END IF;
 END $$;
+-- The paid close-out (20261013150000) adds closeout to automation_lane_enabled(),
+-- whose body this migration's guard pins; stand the original back up (rolled back below).
+SELECT md5(prosrc)<>'818a13be854748e2d272bdd648c88b59' AS closeout_lane_reader_moved
+FROM pg_proc WHERE oid='public.automation_lane_enabled(text)'::regprocedure \gset
+\if :closeout_lane_reader_moved
+\ir ../20261013150000_job_closeout_review_archive/pre_closeout_lane_reader.sql
+\endif
 \ir ../../../migrations/20261005210000_context_document_text.sql
 \ir ../../../migrations/20261005210000_context_document_text.sql
 DO $$

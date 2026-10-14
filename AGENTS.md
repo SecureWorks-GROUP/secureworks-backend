@@ -310,7 +310,65 @@ and the instruction key fold them. Tests:
 `monitor_ses_sender_scoped_groups_test.ts` and the Ambrose cases in
 `makesafe_deterministic_intake_runtime_test.ts`. Switch the lane off with
 `MAKESAFE_SENDER_SCOPED_GROUPS=off`. The lane re-queues no PDF itself: the
-every-minute `makesafe-pdf-extraction-drain` retries a failed text read.
+`makesafe-pdf-extraction-drain` cron is the retry for a failed text read. That
+cron read `active = false` in production on 12 Oct 2026, so check `cron.job`
+before relying on it; while it is off a failed first handoff is not retried.
+
+## A New Intake Adapter Must Be Admitted By The Database In The Same PR
+
+`makesafe_intake_cases.adapter_id` is checked against a list inside
+`makesafe_intake_cases_deterministic_shapes_check`. It is the only adapter list
+in the database (no other intake table has one). An adapter registered in
+`DETERMINISTIC_ADAPTER_REGISTRY` but missing from that list plans correctly in
+every test and is refused on every case insert in production: the runtime
+then stores a stripped fallback (`state` exception, `adapter_id` null,
+`last_decision_reason` `deterministic source_persist_failed case_insert`) and
+no job or draft can exist. That is what happened to Ambrose (PR #1004 shipped
+the adapter, `20261012043000` admitted it).
+`makesafe_adapter_admission_contract_test.ts` now fails CI whenever a
+registered adapter is missing from the newest definition of that constraint in
+the migrations; the Postgres half is the `20261012043000` migration contract.
+
+A stripped fallback is stuck on purpose and no scan re-decides it; the only
+exact recovery (`makesafe_source_persist_recovery.ts`) is closed to one MLB
+card. `RELEASED_SOURCE_PERSIST_FALLBACK_ADAPTERS` in
+`makesafe_deterministic_intake_runtime.ts` is the one release: for an adapter
+listed there (today `ambrose`) the ordinary scan upgrades the fallback through
+the same fenced update. Three things to know before touching it:
+
+- **One purchase order can hold several fallback rows**, one per email, because
+  a stripped row has no identity for the next email to bind to. They cannot be
+  merged or deleted (append-only, immutable lineage), so
+  `readSourcePersistRecoveryGate` lets exactly one case hold the purchase
+  order. A case holds it only when it holds work (`holdsBuilderObligation`: a
+  job, a live state, or `awaiting_job_creation`). Non-work and exception plans
+  are always released and hold nothing. A plan that would open a draft or a job
+  is released only while no sibling on its `company_key` + `wo_po_identity_key`
+  holds, and no later PDF email of the same purchase order is still stranded,
+  so across separate pages the newest email is the one released. When both
+  emails are read on ONE page the shared planner merges them into one case with
+  the OLDER email as primary (its subject, received time and description) and
+  both PDFs on the draft: read the Updated PDF when reviewing such a draft. That
+  merge order is shared by every builder and is not changed here; reordering it
+  is a fate-moving planner change that needs its own replay. Every other plan
+  on a held purchase order is withheld: it keeps its row's fate and opens
+  nothing, including an email recovered as an exception whose PDF is read
+  later. Known gap: a withheld email's PDF is never staged on the holding case.
+  The intake desk hides a stripped make-safe row once a live make-safe job
+  carries its reference (`matchingLiveObligationJobIds`); a stripped repair row
+  stays a "could not be stored" review card, because that match is make-safe
+  only.
+- **Only the sweep half of the scan reaches them.** A source with a case-source
+  row is final-fated, so the recent queue skips it; the sweep walks the 60-day
+  window two sources per run. Recovery after a deploy takes as long as the sweep
+  needs to reach those rows (`makesafe_intake_health.deterministic_scan_cursor_at`
+  against their `received_at`). Calling `scan_ses_makesafes` advances it.
+- **Add an adapter to the release list only with the migration that fixes its
+  cause**, and never release a builder whose fallbacks have another cause: the
+  older MLB and Rapid fallbacks stay stuck by design.
+
+Tests: the stranded Ambrose cases in
+`makesafe_deterministic_intake_runtime_test.ts`.
 
 ## Never Select `scope_json` In A List/Feed Query
 
@@ -417,6 +475,29 @@ Rules:
   `CAL_FINANCIAL_COLUMNS` and `OPS_SUMMARY_SCHEDULE_COLUMNS` — never
   `TRADE_CALENDAR_COLUMNS`, which is a separate query path for the Trade app
   calendar and has no Divisions filter to serve.
+
+## The Plain `pipeline` Read Is Cut At 1,000 Rows; The Dispatch List Is Not
+
+`ops-api?action=pipeline` reads `jobs` once with no paging, so PostgREST stops
+it at 1,000 rows, newest `updated_at` first. It matched 1,400 jobs on
+12 Oct 2026, so the 400 least recently updated were already missing from the Jobs
+board (mostly archived). That is existing behaviour, left alone: never read a
+count of jobs off the plain read. `pipeline&dispatch=1` is the complete, opt-in
+list read for the Ops screen's Dispatch tab: accepted work only, paged, with a
+derived `description` line, a `value_inc_gst` flag and a `work_type` (repair
+wins: a repair-family card typed `makesafe` is listed as a repair, a true
+make-safe comes back only for a search), and `job_notes` returns every note on a
+job less the `noteIsSystemMarker` rows (`job_detail.events` is only the newest
+50 events of every kind). A Dispatch card's `comms_notes_count` and that job's
+`job_notes` must stay equal: both read `JOB_NOTE_EVENT_TYPES` and
+`isPersonWrittenJobNote`, so change the rule there, never in one reader (the
+plain read counts no notes for a `draft`, which Dispatch never lists).
+`job_notes` matches a job number whole against the stored number (live numbers
+include `SW1346` and `SWF-PDF-BUCKET`), never by shape or pattern. The
+description is built from five projected `scope_json` paths; the status floor is what keeps that affordable, because draft and quoted rows hold
+the heaviest blobs (4.9 s to project every pipeline row against 0.43 s for
+accepted work). Rules: `dispatch_job_list.ts`; contract:
+`docs/dispatch-slice-1-read-contract.md`; tests: `dispatch_job_list_test.ts`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
@@ -1018,6 +1099,26 @@ their re-apply sections, as its own guard pins their bodies (and the scoping
 pipeline, `20261009133000`, before it, in theirs and in the lead cutoff's, and
 the finished wake, `20261012093500`, before that in all of them).
 
+## The Saved Job Story Is Fresh By Its Digest, Never By The Clock
+
+`20261009100000` keeps a job's written story (`context_job_story_texts`, one
+current a job) and its rewrite queue (`context_job_story_requests`), behind
+`feature_flags.context_job_story_text_v1` (created off; owner's word to turn
+on). A story is fresh while its `card_hash` equals
+`context_job_story_card_hash` of the card now: the story-digest-v1 projection
+of the card's stable facts, never `as_of`, `built_at`, day counts or prose, so
+the clock alone never makes a story stale. Change the digest, or how the card
+is built, and every story reads stale once. "Something new happened" is
+`context_job_story_enqueue_changed` alone; every number is in
+`context_job_story_text_policy()`. A story call is phase `story` in
+`reserve_context_model_call` (no run, the extraction lane, its own daily cap,
+never inside the ledger's live reserve lines); the call budget and ledger store
+contracts accept that admission body, and a later admission change widens the
+same pins and rolls this migration back first where they run a down. The staff
+door is `ops-api?action=job_overview` (GET, read only, transcript words never
+in the answer) and `request_job_story` (POST, the verified caller asks). Field
+contract: `docs/context/job-story-text.md`.
+
 ## The Ladder Has One Entry And Two Bodies Until P4's Flag Is Retired
 
 Since P4 (`20261002110000_context_unlinked_rules.sql`) every caller uses
@@ -1377,7 +1478,9 @@ Fencing declared headers + the replacement-verb ladder route to repair; temp
 fencing and MLB's "Makesafe/Emergency Repairs" header stay make-safe; a
 dual-scope WO stays make-safe and flags `repair_leg_detected` (child SWR- spawn
 is a human tap); NO repair draft auto-approves
-(`repair_family_supervised_review` brake) so every SWR- mint is a human tick; and
+(`repair_family_supervised_review` brake) so every SWR- mint is a human tick
+(narrowed 13 Oct 2026 behind a flag seeded off: see "Automatic Repair Intake"
+below); and
 the three legacy repair-marked SWMS cards are never re-minted or stage-stamped
 (ruling 6 — reversing needs a new ruling, not a script run). Xero, Captain-confirmed
 2026-08-31: **repair revenue books as make-safe / insurance work** — account `210`
@@ -1412,12 +1515,85 @@ explicit direction as the card's own stated PO and projected verbatim past every
 pairing and conflict rule — `create_makesafe_job` stamps it straight off the
 request body (the `metadata` literal in `createMakesafeJob`, `index.ts`; no
 validation), so that caller is the whole trust boundary and the only remaining
-route by which a wrong or fused PO reaches the card.
+route by which a fused PO reaches the card. Its one other writer is a flag-on
+repair landing (`landWorkOrderOnRepairJob`), which fills an EMPTY slot only,
+with the PO the sealed grammar read.
 
 Ruling 4's quote-stage repair mint is a declared follow-up PR, not yet built.
 Tests: `repair_intake_routing_test.ts`,
 `repair_classifier_routing_test.ts`, `repair_stage_write_test.ts`,
 `insurance_repairs_board_test.ts`, `insurance_repairs_pipeline_test.ts`.
+
+## Automatic Repair Intake Is One Flag, And The Mint Judges The Draft
+
+Owner's word, 13 Oct 2026: behind `feature_flags.repair_intake_auto_v1` (seeded
+off; missing or unreadable is off) the deterministic scan mints a repair job for
+a clean repair work order from MLB or Ambrose. Rules:
+`ops-api/repair_intake_auto.ts`; contract, message list and limits:
+`docs/repair-intake-auto-v1.md`. What must not regress:
+
+- Automatic only for a repair the BUILDER declared (`builderDeclaredRepair`
+  over `plan.familyEvidence`), never one inferred from scope words alone or by
+  elimination. The declaration decides: a Rapid Repair order worded "remove
+  and replace" is declared (`decideDeterministicMakeSafeJobFamily` names the
+  builder's label, not the scope rung that answered first). Anything else
+  still parks as a review draft.
+- The stamp is on the DRAFT (`extraction_json.repair_auto_intake`), written by a
+  flag-on run. The brake in `approveIntakeDraft` re-reads the flag and the
+  stamp at mint time and takes a request marker only the two deterministic scan
+  lanes carry. Do not let the backlog sweep or the late-PDF lane mint a repair,
+  and do not approve a repair draft that carries no stamp.
+- The obligation dedupe cannot see repair jobs (`isCanonicalSeedScopeJob`), so
+  a REPAIR order for a claim with an open repair job is matched by
+  `matchOpenRepairJob` and landed on that job: purchase order recorded (a
+  second one is listed, never written over the first), PDF attached, one job
+  event, one intake desk item, no message, board stage untouched. A landing
+  is final, so `landWorkOrderOnRepairJob` refuses an order with no staged PDF
+  before any write and the case is retried, and it names a PDF after its
+  purchase order when the job already holds that file name for other bytes
+  (the attach key is one document per job and name, and Ambrose names every
+  order `Purchase Order.pdf`; the shared attach would drop it silently).
+  The Repairs card shows the listed
+  orders as `builder_additional_purchase_orders` (order, the builder's figure,
+  date arrived) beside an unchanged `builder_po_number`: it never picks one
+  or adds them up, and `ops.html` does not draw the list yet. The match
+  and the write count the same held purchase orders, the one inside the
+  detail row's `external_ref` included (`landing.jobExternalRef`). The
+  auto-file brakes hold the landing too: with a brake on the order is a
+  waiting draft and nothing is written to the live job. An order not landed
+  on a claim that has an open repair job NEVER earns the automatic stamp
+  (`claim_has_open_repair_job`), or releasing the brake mints a second repair
+  job on the claim.
+- A landed order's case NEVER takes `job_id`: `uq_makesafe_intake_cases_job`
+  (one case per job) is live and the job's own order holds the slot. It is
+  accounted as `accounted_non_wo` / `revision` with the job in
+  `recovery_cursor.landedOnRepairJob` (`accountCaseLandedOnRepairJob`), after
+  the desk item is written, and `isLandedOnRepairJobRow` keeps that fate on
+  every later scan. The older reattendance path (D3) still binds a second
+  case to its parent's job and would hit the same index; it is unchanged.
+- An order that reads as a make-safe is NEVER diverted or held by that rule
+  (ruling 13 Oct 2026: urgent work never waits on a notice). It mints as
+  today and `noteMakeSafeRaisedOnRepairClaim` leaves one plain job event on
+  the claim's repair job: no desk item, no source-issue reason. A repair order
+  misread as a make-safe is not prevented; do not widen the landing to
+  make-safe families.
+- `metadata.builder_work_order_value_ex_gst` is the BUILDER'S order value, not
+  our quote, and never gates the mint: an unreadable value still makes the
+  job, stamped `builder_work_order_value_source:
+  builder_work_order_value_not_read`. The Repairs card shows it as its own
+  field (`builder_work_order_value_ex_gst` + `builder_work_order_value_note`)
+  and never in `value`. It never reaches a trade: `my_jobs` returns job
+  metadata, so `projectTradeAllocatedMyJobsCard` strips it and each
+  `builder_additional_work_orders[].value_ex_gst` (`withoutBuilderOrderValue`).
+  A new money key on `jobs.metadata` must be stripped there too.
+- A collection or reattendance order with no original job and a first-issue
+  purchase order opens a review draft that nothing approves automatically.
+- Flag-on runs leave earlier fates alone: a waiting unstamped draft, an order
+  that already has a draft, and a case already parked as
+  `reattendance_target_not_found`.
+
+Scan tests for it are named `repair intake: ...` because CI runs the runtime
+test file by filter.
 
 ## Quote Builder Scopes Live In `quote_builder_versions`, Not `quote_revisions`
 
@@ -1436,6 +1612,49 @@ repair). Its photos are `job_media` phase `quote_builder` (`QUOTE_BUILDER_PHOTO_
 which `isApplicablePackPhoto` and the mailer photo route exclude: they are internal and
 must never reach an SES pack, report or builder email. Tests: `quote_builder_test.ts`
 plus the migration contract.
+
+Since `20261013160000`: its pricing numbers (insurance labour rate, materials
+multiplier, target margin) live only in `quote_builder_settings`, never in code,
+the contract doc or `org_config` (every signed-in user, trades included, can
+read `org_config` through its live policy). The builder NEVER writes
+`jobs.pricing_json` (so never `jobs.quoted_value`): `completeAndInvoice` prices
+an invoice from it when given no lines, the deposit invoice derives a deposit
+from it, and both quote send gates (`send-quote` `/send`,
+`send_quick_quote_email`) pass any total above zero, so a stored builder total
+would bill and send. Do not reintroduce that write or guard those paths one by
+one. The Repairs card gets its money at read time: `pipeline&type=repair` calls
+`loadQuoteBuilderCardValues` (latest issued scope plus the variations that
+count, stored nowhere, so an ops approval or a customer decline shows on the
+next read) and `quoteBuilderCardRow` fills `value`, and adds no other field,
+only on a card whose job has no pricing of its own; every other row and every
+other `pipeline` request is unchanged. A failed
+read fills nothing and reports `pipeline.quote_builder_value` in
+`enrichment_errors`. That read projects ids, version keys and the client total
+only, never `cost_lines` or `charge_lines`. `countedVariationIds` is the one
+rule for which variations count: `approved` and `accepted` off the row (the
+customer's acceptance counts with or without an office approval), and `sent`
+only when the newest `job_events` row about it (`variation_approved`,
+`variation_rejected`, or the `variation_requested` every issue writes) is an
+approval: `approved_at` is stamped on a rejection too, a variation can be sent
+without ever being approved, and a re-issue voids the earlier approval. The
+settings are a goal the scoper may ignore, never a rule: nothing on the server
+refuses, clamps or rewrites a charge line or margin for differing from them,
+and the table checks a setting's name, never its size. Only a repair-family
+job's `quote_builder_get_job` reply carries `settings` and `can_edit_settings`;
+a private job's has neither key and never reads the table. The scope of works
+PDF is a `job_documents` row of type `other` (a meaningful type no close-out
+reader counts), never `work_order`, filed on a repair-family job only and
+listed in no reply. A private job's `quote_builder_get_job` and
+`quote_builder_issue` replies stay key for key what they were: its slot refuses
+`scope_of_works` and its issue does not read `extra_documents`. The material order list prints our costs
+and is never given an upload slot or filed: `job-pdfs` is a public bucket, so
+filing it waits on private storage with signed links and the owner's say; an
+issue that names it still issues and answers `extra_documents_not_filed`.
+Making a draft crew work order and draft purchase orders from an issued quote
+is NOT built: the first attempt was taken out, and its open design points
+(the trade read blanks a text holding any money word, a supplier name is no
+key, the acceptance trigger, the Xero push of an unnamed supplier, uuid
+`created_by`) are in the contract doc under "Not built yet".
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
@@ -3038,7 +3257,9 @@ The post-mint Hugo notification and honest five-minute denominator are owned by
 `docs/evidence/ses-hugo-notification-sla-v1.md`. Notify only a job with explicit
 deterministic mint authority after the canonical server board contains it,
 resolve the one recipient from staff/config authority, and persist the
-once-per-job pre-send audit claim before GHL. Synthetic live-fire must
+once-per-job pre-send audit claim before GHL. A repair job's text has its own
+recipient and wording and never falls back to the make-safe one:
+`docs/repair-intake-auto-v1.md`, "Messages". Synthetic live-fire must
 short-circuit before board, config, audit, or transport work. The ordered
 extraction-belt and settlement release sequence lives in
 `docs/evidence/makesafe-pdf-extraction-belt-2026-07-31.md`.
@@ -4333,6 +4554,134 @@ by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
   and the agent queue and submit.
 - The debt rules are plain code in `debt_ws_rules.ts`. Change them there, with a test.
 - Apply `20261008170000_debt_workshop.sql` before deploying the matching `ops-api`.
+
+## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
+
+Since `20261012130000_job_work_orders.sql`, `work_orders.kind` is `crew` (every
+older row: the per-trade crew-pay work order) or `job` (the one work order per
+fencing / patio job, draft then approved). An approved job work order is sealed
+by trigger: any update or delete raises, so a crew-path writer that touches it
+fails loudly. Every crew-pay read or write (`my_work_orders`,
+`submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
+`kind = 'crew'`; a new one must too. Only the users in
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role, and an
+approval seals only the draft that was read: `approve_work_order` requires
+`expected_updated_at`, compared under the row lock in `approve_job_work_order`.
+A recorded variation changes only through the staff door
+`correct_work_order_variation`, never a trade one. Every
+line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
+by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
+before the approval; never set it from code. Only the labour lane of
+`v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
+restate that lane list. One temporary exception lives in
+`workOrderLineIsLabour` (`job_work_orders.ts`): the trade app's Work Order pay
+line (`work order` / `work_order`) counts as labour until that view classifies
+it; remove the exception then. This migration inserts one call,
+`carry_work_order_variations`, into the deployed bodies of the three
+draft-replacing functions (`replace_trade_invoice_draft_v1`,
+`persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a
+variation raised on a draft invoice survives the draft being replaced; a later
+body of any of them must keep it. Variation emails, the draft backfill and
+approval named only by the `x-sw-actor` header (the terminal) are behind flags
+seeded off. Contract and API: `docs/job-work-orders-v1.md`.
+An untouched job draft is filled from the accepted quote revision only (never
+one frozen after acceptance, never live pricing; no accepted revision, no fill) by
+`job_work_order_quote_fill.ts` (pure rules in `quote_work_order_lines.ts`), on
+the staff open and read and in the backfill: never a sealed work order, never a
+draft someone wrote into, and the rates come only from the quote itself and
+the scoping tool's cost table. Filled lines are read by trades, so a line's description must never
+carry a rate, amount, percent or money word. Rules:
+`docs/quote-work-order-lines-v1.md`.
+
+## A Trade's Time Line Says When It Was Worked, And One Module Owns The Rule
+
+`trade_invoice_time_entry.ts` is the one owner of `work_date` / `start_time` /
+`finish_time` / `break_minutes` on a trade invoice line that bills hours: the
+server computes the hours, and no write path parses these fields itself.
+Enforcement of a MISSING entry is flag `trade_invoice_time_entry_required_v1`,
+seeded off and turned on only on the owner's word after the trade app screens
+are live; a wrong entry is refused in both states. Times typed on the job view
+go in `job_assignment_logged_times`, never new columns on `job_assignments`
+(every column there is inside the make-safe fact hash). An invoice line's
+time entry is always the trade's own statement on that line and always makes
+the hours it bills: never derive one on the server, from the clock, from
+assignment stamps or from those saved times. A job card the server collects
+itself therefore carries none, and with the flag on is refused by name with
+one remedy, entering the times on its Weekly Invoice card. Saved job-view
+times are a separate record: `my_hours` returns them as `logged_time_entry`,
+`job_detail` lists them against the job until that day is billed, and
+`loggedTimeEntryForCard` is the one rule for when a saved row may be used. A
+log with times goes on the card scheduled that day (`assignment_id` wins) and
+is refused only when the picked card holds saved times for another day.
+Write paths, refusal codes, reads and the per-job list
+`job_trade_time_entries`:
+`docs/trade-invoice-time-entries-2026-10-12.md`.
+
+## A Recurring Deduction Comes Off The Payable, Never The Gross
+
+A trade's weekly deduction (first use: one trade's ute hire, owner 13 Oct 2026)
+is a row in `trade_recurring_deductions`, never a number in code and never a
+`trade_invoice_lines` row. `trade_invoice_recurring_deduction.ts` is the one
+owner of which invoice carries it (only an invoice with a `week_start`, once
+per trade and week, none when the amount payable is less than it or when two
+active rows cover the week);
+`trade_invoice_money.ts` takes it off `trade_payable` after super and GST, so
+the trade is paid exactly that much less and gross, super, GST and `total_inc`
+never move. Do not model one as a `final_payout_deduction` line: that sits
+inside gross and shifts super and GST. A trade with no row gets no keys on any
+write or read; keep it that way. A deduction due but not taken (a work-order
+or no-week invoice included) is kept on `recurring_deduction_note`: the stored
+`query_note` is cleared as the invoice moves on, so `presentTradeInvoice` puts
+the reason back into `query_note` on every read. The stored columns ride every
+invoice read through `validatePersistedTradeInvoiceMoney`, so a list read that
+feeds `presentTradeInvoice` must select the four `recurring_deduction_*`
+columns or it shows the undeducted figure. The Xero line is found by its
+description prefix. Contract, the screen changes still owed and how the office
+ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
+
+## Paid Fencing And Patio Jobs Go To Get Review
+
+Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
+`complete`), gets one review text, and is archived 24 hours later. "Paid" is
+the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
+invoice PAID and none DRAFT; every paying party, `job_contacts` with
+`removed_at` null, `status` not `removed`, and a share that is not an explicit
+0 (null counts), has a paid final, a final needing positive evidence by the
+Debt tab's `invoiceKindOf` (an unlabelled invoice never is); paid covers the
+`job_quote_values` quote plus customer-accepted or invoiced variations; one
+approved internally but never accepted is not owed). A quote or variations READ
+failure is `undecided`: nothing moves, texts, archives or is recorded that run;
+only no sent quote or no recorded value lets rules 1 and 2 decide alone. A live
+sweep that cannot read the switches archives nothing. Every read, move, text and
+sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
+holds: status `rectification` or `jobs.is_callback`. If only the quote check
+fails the card stays put with `job_closeout_state.paid_less_than_quoted`.
+Builder, insurance, make-safe and repair jobs keep the old xero-sync rule
+(`invoiced` -> `complete`), and so do fencing and patio while the move switch
+is off. Paid covers the quote short by at most $1 (rounding). One review text
+per job ever (`job_review_claims`, claimed before any send; no claim is kept
+when nothing went out: an unlinked contact, a job paid more than 30 days ago,
+or every send refused by a ghl-proxy guard, and such a card still archives
+after 24 hours), to every paying owner, skipping any contact sent a review text
+in the last 90 days from any source. Every status write uses
+`update_job_status` `expected_statuses` (compare and set). A card moves on
+payment only when paid within 30 days, whatever its from-status
+(`stale_payment` otherwise); the `complete` backlog is never caught up or
+texted, and `job_closeout_backlog_preview` only lists what a later step may
+archive.
+
+Switches (migration `20261013150000`), all off; turn on in this order:
+`job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
+`dry_run` (read the `review_request_dry_run` job events); then someone must
+switch the old GoHighLevel review workflow OFF in GHL Automation; then env
+`JOB_REVIEW_SENDING_ENABLED=true` on ops-api and `review_sender_mode` `live`
+(live without the env reads as dry run); last, `automation_switches.closeout`
+for the `job-closeout-sweep` cron. Adding a lane to `automation_lane_enabled()`
+moves the md5 four earlier migrations' guards pin: their contracts stand the old
+body back up from
+`supabase/tests/migration-contracts/20261013150000_job_closeout_review_archive/pre_closeout_lane_reader.sql`.
+Contract: `docs/job-closeout-v1.md`; tests: `job_paid_closeout_test.ts`,
+`job_closeout_test.ts`.
 
 ## Maintaining this file
 

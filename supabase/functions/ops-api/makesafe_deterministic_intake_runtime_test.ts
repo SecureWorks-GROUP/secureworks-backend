@@ -26,6 +26,15 @@ import {
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
 } from "./makesafe_synthetic_livefire.ts";
 import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
+import { projectInsuranceRepairPipelineRow } from "./insurance_repairs_board.ts";
+import { ensureIntakeWorkOrderEvidence } from "./makesafe_intake_settlement.ts";
+import { MAKESAFE_ATTACH_KEY_CONSTRAINT } from "./makesafe_document_idempotency.ts";
+import { notifyDeterministicPhysicalJob } from "./makesafe_hugo_notification.ts";
+import {
+  auditClient,
+  MAKESAFE_TEXT_RECIPIENT,
+  REPAIR_TEXT_RECIPIENT,
+} from "./makesafe_hugo_notification_test_fakes.ts";
 import {
   AMBROSE_TEST_COMPANY_ID,
   AMBROSE_TEST_SENDER,
@@ -34,6 +43,12 @@ import {
   type AmbrosePurchaseOrderFixture,
   ambroseSubject,
 } from "./makesafe_ambrose_intake_fixtures.ts";
+import {
+  MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT,
+  ORPHAN_LIFECYCLE_REVIEW_FIELD,
+  REPAIR_AUTO_INTAKE_VERSION,
+  REPAIR_WORK_ORDER_LANDED_EVENT,
+} from "./repair_intake_auto.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -336,6 +351,77 @@ function evalPostgrestExpr(row: any, expr: string): boolean {
   return evalPostgrestLeaf(row, expr);
 }
 
+// The three unique indexes on makesafe_intake_cases that a case write can
+// collide with (20260720000001): one case per job, and one LIVE case per
+// builder + WO/PO identity (or, with no WO/PO identity, per claim reference),
+// each within deliverable and cycle. Returns the violated index's name.
+//
+// Enforced for the stores registered here. Older fixtures in this file share
+// one job id across cases as a shortcut, and the D3 reattendance path really
+// does bind a second case to its parent's job (it fails with these indexes
+// on); neither is this change's to alter.
+const LIVE_INDEX_ENFORCED_STORES = new WeakSet<Store>();
+
+// `ux_job_documents_makesafe_attach_key` (20260821093825): a job holds one
+// active document per type and file name, for these types. Enforced for the
+// same registered stores.
+const ATTACH_KEYED_DOCUMENT_TYPES = new Set([
+  "work_order",
+  "makesafe_report",
+  "roof_report",
+  "invoice",
+  "swms",
+]);
+
+function jobDocumentAttachKeyViolated(
+  rows: readonly any[],
+  candidate: any,
+): boolean {
+  if (
+    !ATTACH_KEYED_DOCUMENT_TYPES.has(candidate.type) ||
+    candidate.file_name == null || candidate.superseded_at != null
+  ) return false;
+  return rows.some((row) =>
+    row.job_id === candidate.job_id && row.type === candidate.type &&
+    row.file_name === candidate.file_name && row.superseded_at == null
+  );
+}
+
+function intakeCaseUniqueViolation(
+  rows: readonly any[],
+  candidate: any,
+): string | null {
+  const live = (row: any) =>
+    row.state === "confirmed_live_job" || row.state === "blocked_live_job";
+  const others = rows.filter((row) =>
+    row.id !== candidate.id && row.org_id === candidate.org_id
+  );
+  if (
+    candidate.job_id &&
+    others.some((row) => row.job_id === candidate.job_id)
+  ) return "uq_makesafe_intake_cases_job";
+  if (!live(candidate) || !candidate.company_key) return null;
+  const sameSlot = (row: any) =>
+    live(row) && row.company_key === candidate.company_key &&
+    (row.deliverable_ref_canonical ?? "") ===
+      (candidate.deliverable_ref_canonical ?? "") &&
+    (row.cycle ?? 1) === (candidate.cycle ?? 1);
+  if (candidate.wo_po_identity_key) {
+    return others.some((row) =>
+        sameSlot(row) && row.wo_po_identity_key === candidate.wo_po_identity_key
+      )
+      ? "uq_makesafe_intake_cases_live_identity"
+      : null;
+  }
+  return candidate.external_ref_canonical &&
+      others.some((row) =>
+        sameSlot(row) && !row.wo_po_identity_key &&
+        row.external_ref_canonical === candidate.external_ref_canonical
+      )
+    ? "uq_makesafe_intake_cases_live_claim_identity"
+    : null;
+}
+
 class FakeQuery {
   private filters: Array<(row: any) => boolean> = [];
   private sliceRange: [number, number] | null = null;
@@ -451,6 +537,20 @@ class FakeQuery {
           error: { code: "23505", message: "duplicate key value" },
         };
       }
+      if (
+        this.table === "job_documents" &&
+        LIVE_INDEX_ENFORCED_STORES.has(this.store) &&
+        jobDocumentAttachKeyViolated(this.store[this.table], this.payload)
+      ) {
+        return {
+          data: [],
+          error: {
+            code: "23505",
+            message:
+              `duplicate key value violates unique constraint "${MAKESAFE_ATTACH_KEY_CONSTRAINT}"`,
+          },
+        };
+      }
       const id = `${this.table}-${this.store[this.table].length + 1}`;
       let payload = this.payload;
       if (this.table === "makesafe_intake_cases") {
@@ -486,6 +586,22 @@ class FakeQuery {
           cycle,
           lineage_id: parent ? parent.lineage_id ?? parent.id : id,
         };
+        const violated = LIVE_INDEX_ENFORCED_STORES.has(this.store)
+          ? intakeCaseUniqueViolation(this.store[this.table], {
+            id,
+            ...payload,
+          })
+          : null;
+        if (violated) {
+          return {
+            data: [],
+            error: {
+              code: "23505",
+              message:
+                `duplicate key value violates unique constraint "${violated}"`,
+            },
+          };
+        }
       }
       const row = { id, ...payload };
       this.store[this.table].push(row);
@@ -500,6 +616,27 @@ class FakeQuery {
     }
     if (this.op === "update") {
       const matched = this.rows();
+      if (
+        this.table === "makesafe_intake_cases" &&
+        LIVE_INDEX_ENFORCED_STORES.has(this.store)
+      ) {
+        for (const row of matched) {
+          const violated = intakeCaseUniqueViolation(this.store[this.table], {
+            ...row,
+            ...this.payload,
+          });
+          if (violated) {
+            return {
+              data: [],
+              error: {
+                code: "23505",
+                message:
+                  `duplicate key value violates unique constraint "${violated}"`,
+              },
+            };
+          }
+        }
+      }
       for (const row of matched) Object.assign(row, this.payload);
       return { data: matched, error: null };
     }
@@ -531,7 +668,8 @@ class FakeQuery {
     return Promise.resolve({ data: data[0] ?? null, error });
   }
   single() {
-    const { data } = this.run();
+    const { data, error } = this.run();
+    if (error) return Promise.resolve({ data: null, error });
     return Promise.resolve(
       data.length ? { data: data[0], error: null } : {
         data: null,
@@ -548,7 +686,8 @@ function fakeClient(
   store: Store,
   selectLog: Array<[string, string]> = [],
   inLog?: (table: string, column: string, count: number) => void,
-  downloadBytes?: (path: string) => Uint8Array,
+  // Returning null is a storage download that fails.
+  downloadBytes?: (path: string) => Uint8Array | null,
   fail?: (
     table: string,
     operation: "select" | "insert" | "update" | "upsert",
@@ -634,19 +773,25 @@ function fakeClient(
     storage: {
       from() {
         return {
-          download: (path: string) =>
-            Promise.resolve({
+          download: (path: string) => {
+            const bytes = downloadBytes?.(path);
+            if (bytes === null) {
+              return Promise.resolve({
+                data: null,
+                error: { message: "storage download failed" },
+              });
+            }
+            return Promise.resolve({
               data: {
                 arrayBuffer: () =>
-                  Promise.resolve(
-                    (downloadBytes?.(path) || new Uint8Array([1, 2, 3])).buffer,
-                  ),
+                  Promise.resolve((bytes || new Uint8Array([1, 2, 3])).buffer),
               },
               error: null,
-            }),
+            });
+          },
           upload: () => Promise.resolve({ data: {}, error: null }),
-          getPublicUrl: () => ({
-            data: { publicUrl: "https://example.test/doc.pdf" },
+          getPublicUrl: (path: string) => ({
+            data: { publicUrl: `https://example.test/${path}` },
           }),
         };
       },
@@ -7590,6 +7735,8 @@ function pushAmbroseMail(
   fixture: AmbrosePurchaseOrderFixture,
   receivedAt: string,
   pdfSha: string,
+  // Extra PDF text, so two versions of one purchase order can be told apart.
+  pdfRevisionNote = "",
 ) {
   store.emails.push(email({
     post_id: postId,
@@ -7599,7 +7746,9 @@ function pushAmbroseMail(
     subject: ambroseSubject(fixture),
     body_content: ambroseBody(fixture),
   }));
-  const text = ambrosePdfText(fixture);
+  const text = pdfRevisionNote
+    ? `${ambrosePdfText(fixture)}\n${pdfRevisionNote}`
+    : ambrosePdfText(fixture);
   store.email_attachments.push({
     id: `att-${postId}`,
     email_id: postId,
@@ -7801,4 +7950,1949 @@ Deno.test("an Ambrose acceptance prompt with no PDF never opens a job, whichever
   assertEquals(report.totals.drafts_created, 0);
   assertEquals(approvals, 0);
   assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+// ── Ambrose cases stranded while the database refused the adapter id ─────────
+// Until 20261012043000 the adapter list on makesafe_intake_cases did not admit
+// 'ambrose', so every Ambrose case insert was refused and stored as the
+// stripped persistence-failure fallback. The standing scan read each email of
+// one purchase order on its own, and a stripped row carries no identity for the
+// next email to bind to, so one purchase order ended up with several fallback
+// rows. This double refuses the adapter the way the constraint did.
+const AMBROSE_REFUSED = {
+  code: "23514",
+  message:
+    'new row for relation "makesafe_intake_cases" violates check constraint "makesafe_intake_cases_deterministic_shapes_check"',
+};
+
+function strandedAmbroseHarness() {
+  const store = ambroseIntakeStore();
+  const state = { adapterAdmitted: false, approvals: 0 };
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      !state.adapterAdmitted && table === "makesafe_intake_cases" &&
+        (operation === "insert" || operation === "update") &&
+        payload.adapter_id === "ambrose"
+        ? AMBROSE_REFUSED
+        : null,
+  );
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        state.approvals++;
+        return Promise.resolve({ job: { id: `job-${state.approvals}` } });
+      },
+    });
+  // Plans exactly one email, as the four-source standing page did.
+  const runAlone = async (postId: string, nowIso: string) => {
+    const others = store.emails.filter((row: any) => row.post_id !== postId);
+    store.emails = store.emails.filter((row: any) => row.post_id === postId);
+    try {
+      return await run(nowIso);
+    } finally {
+      store.emails.push(...others);
+    }
+  };
+  const fallbacks = () =>
+    store.makesafe_intake_cases.filter((row: any) =>
+      row.last_decision_reason ===
+        "deterministic source_persist_failed case_insert"
+    );
+  return { store, state, run, runAlone, fallbacks };
+}
+
+// Only the Updated email's PDF carries this line.
+const UPDATED_PDF_NOTE = "Revision 2: additional works added to this order.";
+
+async function strandTwoEmailsOfOnePurchaseOrder(
+  fixture: AmbrosePurchaseOrderFixture,
+) {
+  const harness = strandedAmbroseHarness();
+  pushAmbroseMail(
+    harness.store,
+    "first-email",
+    fixture,
+    "2026-07-18T06:31:00.000Z",
+    "sha-first",
+  );
+  await harness.runAlone("first-email", NOW);
+  pushAmbroseMail(
+    harness.store,
+    "updated-email",
+    { ...fixture, updated: true },
+    "2026-07-19T04:35:00.000Z",
+    "sha-updated",
+    UPDATED_PDF_NOTE,
+  );
+  const stranded = await harness.runAlone(
+    "updated-email",
+    "2026-07-20T12:02:00.000Z",
+  );
+  // The production shape: two stripped fallbacks, one email each, nothing made.
+  assertEquals(stranded.totals.write_failures, 1);
+  assertEquals(harness.fallbacks().length, 2);
+  assertEquals(harness.store.makesafe_intake_case_sources.length, 2);
+  assertEquals(
+    harness.store.makesafe_intake_cases.map((row: any) => row.adapter_id),
+    [null, null],
+  );
+  assertEquals(harness.state.approvals, 0);
+  assertEquals(harness.store.makesafe_intake_drafts.length, 0);
+  return harness;
+}
+
+// What the released draft is built from depends on the page, and both shapes
+// are accepted behaviour:
+//   - emails read on separate pages: the newest PDF email of the purchase order
+//     is the one released, so the draft is the Updated email alone;
+//   - both emails read on ONE page: the shared planner merges them into one
+//     case with the OLDER email as primary (its subject and received time),
+//     and both PDFs' text on the draft. A reviewer of such a draft must read
+//     the Updated PDF. The planner's merge order is shared by every builder and
+//     is deliberately not changed here.
+function assertDraftBuiltAsThePageDictates(
+  draft: any,
+  fixture: AmbrosePurchaseOrderFixture,
+  readOnOnePage: boolean,
+) {
+  const pdfs = (draft.extraction_json.work_order_pdf_text || []).map((
+    document: any,
+  ) => [document.source_post_id, document.text.includes(UPDATED_PDF_NOTE)]);
+  if (readOnOnePage) {
+    assertEquals(draft.subject, ambroseSubject(fixture));
+    assertEquals(draft.received_at, "2026-07-18T06:31:00.000Z");
+    assertEquals(draft.extraction_json.intake_source_post_ids, [
+      "first-email",
+      "updated-email",
+    ]);
+    assertEquals(pdfs, [["first-email", false], ["updated-email", true]]);
+  } else {
+    assertEquals(draft.subject, ambroseSubject({ ...fixture, updated: true }));
+    assertEquals(draft.received_at, "2026-07-19T04:35:00.000Z");
+    assertEquals(draft.extraction_json.intake_source_post_ids, [
+      "updated-email",
+    ]);
+    assertEquals(pdfs, [["updated-email", true]]);
+  }
+}
+
+// The email whose row became the purchase order's case.
+function releasedEmail(store: Store): string | undefined {
+  const released = store.makesafe_intake_cases.find((row: any) =>
+    row.is_authoritative
+  );
+  return store.makesafe_intake_case_sources.find((source: any) =>
+    source.case_id === released?.id
+  )?.post_id;
+}
+
+for (
+  const order of [
+    ["both emails on one page"],
+    ["first-email", "updated-email"],
+    ["updated-email", "first-email"],
+  ] as const
+) {
+  Deno.test(`stranded Ambrose make-safe recovers to exactly one job on the ordinary scan (${order.join(", then ")})`, async () => {
+    const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_MAKE_SAFE);
+    const { store, state } = harness;
+
+    // While the database still refuses the adapter the scan retries the
+    // recovery, fails closed and makes nothing.
+    const refused = await harness.run("2026-07-20T12:04:00.000Z");
+    assertEquals(refused.totals.jobs_created, 0);
+    assertEquals(harness.fallbacks().length, 2);
+    assertEquals(state.approvals, 0);
+
+    state.adapterAdmitted = true;
+    let clock = Date.parse("2026-07-20T12:06:00.000Z");
+    const tick = () => new Date(clock += 120_000).toISOString();
+    if (order.length === 1) {
+      await harness.run(tick());
+    } else {
+      for (const postId of order) await harness.runAlone(postId, tick());
+    }
+    // Several more ordinary scans, on every page shape, change nothing more.
+    await harness.run(tick());
+    await harness.runAlone("first-email", tick());
+    await harness.runAlone("updated-email", tick());
+    const settled = await harness.run(tick());
+
+    assertEquals(state.approvals, 1);
+    assertEquals(store.makesafe_intake_drafts.length, 1);
+    assertEquals(settled.totals.write_failures, 0);
+    assertEquals(settled.totals.cases_failed, 0);
+    assertEquals(settled.totals.jobs_created, 0);
+    // No third row: the two emails keep the cases they were accounted on.
+    assertEquals(store.makesafe_intake_cases.length, 2);
+    assertEquals(store.makesafe_intake_case_sources.length, 2);
+
+    const live = store.makesafe_intake_cases.filter((row: any) => row.job_id);
+    assertEquals(live.length, 1);
+    assertEquals(live[0].state, "confirmed_live_job");
+    assertEquals(live[0].is_authoritative, true);
+    assertEquals(live[0].adapter_id, "ambrose");
+    assertEquals(live[0].builder_po_canonical, "PO-2099910102");
+    assertEquals(live[0].company_id, AMBROSE_TEST_COMPANY_ID);
+    // The other email's row stays the quiet stripped fallback it was.
+    assertEquals(harness.fallbacks().length, 1);
+    assertEquals(harness.fallbacks()[0].job_id, null);
+    assertEquals(harness.fallbacks()[0].is_authoritative, false);
+    assertDraftBuiltAsThePageDictates(
+      store.makesafe_intake_drafts[0],
+      AMBROSE_MAKE_SAFE,
+      order.length === 1,
+    );
+    assertEquals(
+      releasedEmail(store),
+      order.length === 1 ? "first-email" : "updated-email",
+    );
+  });
+}
+
+// The live shape: one repair purchase order, two PDF emails an hour apart, the
+// later one "Updated", with different PDFs. One review draft either way; what
+// it is built from follows assertDraftBuiltAsThePageDictates.
+for (
+  const order of [
+    ["both emails on one page"],
+    ["first-email", "updated-email"],
+    ["updated-email", "first-email"],
+  ] as const
+) {
+  Deno.test(`a stranded Ambrose repair with two PDF emails recovers to one review draft, never minted (${order.join(", then ")})`, async () => {
+    const harness = await strandTwoEmailsOfOnePurchaseOrder(AMBROSE_REPAIR);
+    const { store, state } = harness;
+    state.adapterAdmitted = true;
+    let clock = Date.parse("2026-07-20T12:04:00.000Z");
+    const tick = () => new Date(clock += 120_000).toISOString();
+    if (order.length === 1) {
+      await harness.run(tick());
+    } else {
+      for (const postId of order) await harness.runAlone(postId, tick());
+    }
+    await harness.run(tick());
+    await harness.runAlone("first-email", tick());
+    await harness.runAlone("updated-email", tick());
+    const settled = await harness.run(tick());
+
+    assertEquals(state.approvals, 0);
+    assertEquals(store.makesafe_intake_drafts.length, 1);
+    const draft = store.makesafe_intake_drafts[0];
+    assertEquals(draft.status, "needs_review");
+    assertEquals(draft.extraction_json.makesafe_job_family, "repair");
+    assertDraftBuiltAsThePageDictates(
+      draft,
+      AMBROSE_REPAIR,
+      order.length === 1,
+    );
+    assertEquals(
+      releasedEmail(store),
+      order.length === 1 ? "first-email" : "updated-email",
+    );
+    assertEquals(settled.totals.write_failures, 0);
+    assertEquals(settled.totals.cases_failed, 0);
+    assertEquals(store.makesafe_intake_cases.length, 2);
+    const recovered = store.makesafe_intake_cases.filter((row: any) =>
+      row.is_authoritative
+    );
+    assertEquals(recovered.length, 1);
+    assertEquals(recovered[0].adapter_id, "ambrose");
+    assertEquals(recovered[0].job_id, null);
+    assertEquals(recovered[0].reason_code, "awaiting_job_creation");
+    if (order.length === 2) {
+      // Read on separate pages, the Updated email's own row is the one released.
+      assertEquals(draft.extraction_json.intake_source_post_ids, [
+        "updated-email",
+      ]);
+      assertEquals(
+        store.makesafe_intake_case_sources.find((source: any) =>
+          source.post_id === "updated-email"
+        ).case_id,
+        recovered[0].id,
+      );
+    }
+    // The other email's row stays a stripped fallback the intake desk shows.
+    assertEquals(harness.fallbacks().length, 1);
+  });
+}
+
+// An email of a purchase order that recovers as an exception opened nothing,
+// so it holds nothing: the email that carries the readable purchase order
+// still opens the work. When the exception's own PDF is read later it finds
+// the purchase order already held and opens nothing more.
+function pushAmbrosePdf(
+  store: Store,
+  postId: string,
+  fixture: AmbrosePurchaseOrderFixture,
+  pdfSha: string,
+) {
+  const text = ambrosePdfText(fixture);
+  store.email_attachments.push({
+    id: `att-${postId}`,
+    email_id: postId,
+    name: "Purchase Order.pdf",
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 300_000,
+    sha256: pdfSha,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: text,
+    pdf_extraction_char_count: text.length,
+    pdf_extraction_page_count: 7,
+    pdf_extraction_extractor: "fixture",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+}
+
+for (const fixture of [AMBROSE_MAKE_SAFE, AMBROSE_REPAIR]) {
+  for (
+    const order of [
+      ["both emails on one page"],
+      ["unread-email", "purchase-order"],
+      ["purchase-order", "unread-email"],
+    ] as const
+  ) {
+    Deno.test(`a stranded Ambrose ${fixture.kind} email that recovers as an exception never blocks its purchase order or opens a second one (${order.join(", then ")})`, async () => {
+      const harness = strandedAmbroseHarness();
+      const { store, state } = harness;
+      // The first email names the purchase order but its PDF never arrived.
+      store.emails.push(email({
+        post_id: "unread-email",
+        conversation_id: "conversation-unread-email",
+        from_email: AMBROSE_TEST_SENDER,
+        received_at: "2026-07-18T06:31:00.000Z",
+        subject: ambroseSubject(fixture),
+        body_content: ambroseBody(fixture),
+      }));
+      await harness.runAlone("unread-email", NOW);
+      pushAmbroseMail(
+        store,
+        "purchase-order",
+        { ...fixture, updated: true },
+        "2026-07-19T04:35:00.000Z",
+        "sha-po",
+      );
+      await harness.runAlone("purchase-order", "2026-07-20T12:02:00.000Z");
+      assertEquals(harness.fallbacks().length, 2);
+
+      state.adapterAdmitted = true;
+      let clock = Date.parse("2026-07-20T12:04:00.000Z");
+      const tick = () => new Date(clock += 120_000).toISOString();
+      if (order.length === 1) {
+        await harness.run(tick());
+      } else {
+        for (const postId of order) await harness.runAlone(postId, tick());
+      }
+      const opened = () => ({
+        approvals: state.approvals,
+        drafts: store.makesafe_intake_drafts.length,
+        jobs: store.makesafe_intake_cases.filter((row: any) => row.job_id)
+          .length,
+        holders: store.makesafe_intake_cases.filter((row: any) =>
+          row.job_id || row.reason_code === "awaiting_job_creation"
+        ).length,
+      });
+      const expected = fixture.kind === "make_safe"
+        ? { approvals: 1, drafts: 1, jobs: 1, holders: 1 }
+        : { approvals: 0, drafts: 1, jobs: 0, holders: 1 };
+      assertEquals(opened(), expected);
+      if (order.length === 2) {
+        const unread = store.makesafe_intake_cases.find((row: any) =>
+          store.makesafe_intake_case_sources.some((source: any) =>
+            source.case_id === row.id && source.post_id === "unread-email"
+          )
+        );
+        assertEquals(unread.state, "exception");
+        assertEquals(unread.reason_code, "adapter_parse_failure");
+        assertEquals(unread.is_authoritative, true);
+        assertEquals(
+          unread.builder_po_canonical,
+          fixture.kind === "make_safe" ? "PO-2099910102" : "PO-2099920205",
+        );
+        assertEquals(unread.job_id, null);
+      }
+
+      // The missing PDF is read at last: the earlier email would now be work.
+      pushAmbrosePdf(store, "unread-email", fixture, "sha-late");
+      await harness.runAlone("unread-email", tick());
+      await harness.run(tick());
+      await harness.runAlone("purchase-order", tick());
+      await harness.runAlone("unread-email", tick());
+      const settled = await harness.run(tick());
+
+      assertEquals(opened(), expected);
+      assertEquals(settled.totals.jobs_created, 0);
+      assertEquals(settled.totals.drafts_created, 0);
+      assertEquals(settled.totals.write_failures, 0);
+      assertEquals(settled.totals.cases_failed, 0);
+      assertEquals(store.makesafe_intake_cases.length, 2);
+      assertEquals(store.makesafe_intake_case_sources.length, 2);
+    });
+  }
+}
+
+Deno.test("a stranded Ambrose acceptance prompt recovers as non-work and never blocks its purchase order", async () => {
+  const harness = strandedAmbroseHarness();
+  const { store, state } = harness;
+  // The prompt names the same purchase order and arrives first, with no PDF.
+  store.emails.push(email({
+    post_id: "acceptance-prompt",
+    from_email: AMBROSE_TEST_SENDER,
+    received_at: "2026-07-18T02:00:00.000Z",
+    subject:
+      "Ambrose Construct Group Acceptance Required - Purchase Order: 20999101-02",
+    body_content:
+      "Ambrose Construct Group have allocated you PO #20999101-02 which requires your acceptance.",
+  }));
+  await harness.runAlone("acceptance-prompt", NOW);
+  pushAmbroseMail(
+    store,
+    "purchase-order",
+    AMBROSE_MAKE_SAFE,
+    "2026-07-18T06:31:00.000Z",
+    "sha-po",
+  );
+  await harness.runAlone("purchase-order", "2026-07-20T12:02:00.000Z");
+  assertEquals(harness.fallbacks().length, 2);
+
+  state.adapterAdmitted = true;
+  await harness.runAlone("acceptance-prompt", "2026-07-20T12:06:00.000Z");
+  const prompt = store.makesafe_intake_cases.find((row: any) =>
+    store.makesafe_intake_case_sources.some((source: any) =>
+      source.case_id === row.id && source.post_id === "acceptance-prompt"
+    )
+  );
+  assertEquals(prompt.state, "accounted_non_wo");
+  assertEquals(prompt.reason_code, "non_makesafe");
+  assertEquals(prompt.adapter_id, "ambrose");
+  assertEquals(
+    prompt.last_decision_reason,
+    "deterministic source_persist_recovered non_makesafe",
+  );
+  assertEquals(state.approvals, 0);
+
+  await harness.runAlone("purchase-order", "2026-07-20T12:08:00.000Z");
+  await harness.run("2026-07-20T12:10:00.000Z");
+  assertEquals(state.approvals, 1);
+  assertEquals(harness.fallbacks().length, 0);
+  assertEquals(
+    store.makesafe_intake_cases.filter((row: any) => row.job_id).length,
+    1,
+  );
+});
+
+Deno.test("CONTROL for the Ambrose release: another builder's stripped fallback is still stuck on the ordinary scan", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "mlb-stranded",
+    subject: "NEW WORK ORDER MLB-62011 Work Order: WO-62011 PO: 620111",
+    body_content:
+      "Client: Control Client\nAddress: 1 Control Way, Perth\nPlease attend and make safe the property.",
+  }));
+  let refuse = true;
+  let approvals = 0;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      refuse && table === "makesafe_intake_cases" && operation === "insert" &&
+        payload.last_decision_reason !==
+          "deterministic source_persist_failed case_insert"
+        ? {
+          code: "23514",
+          message: "primary deterministic case shape rejected",
+        }
+        : null,
+  );
+  const run = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 5,
+      selectionMode: "full_open",
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "must-not-mint" } });
+      },
+    });
+  await run(NOW);
+  assertEquals(
+    store.makesafe_intake_cases[0].last_decision_reason,
+    "deterministic source_persist_failed case_insert",
+  );
+  refuse = false;
+  const later = await run("2026-07-20T12:06:00.000Z");
+  assertEquals(later.totals.cases_attempted, 0);
+  assertEquals(later.totals.jobs_created, 0);
+  assertEquals(approvals, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].last_decision_reason,
+    "deterministic source_persist_failed case_insert",
+  );
+});
+
+// ── Automatic repair intake (flag repair_intake_auto_v1) ─────────────────────
+// Owner's word, 13 Oct 2026: a repair work order MLB or Ambrose emails in
+// becomes a job in the insurance repair pipeline with no person in between.
+// These replay the orders that were found waiting that day, in their real
+// shapes with every name, address, number and figure invented: five Ambrose
+// repair purchase orders (two of them on one claim, sent in the same minute),
+// the MLB "Rapid Repair" order for a claim that already had a repair job, and
+// the Ambrose collection order that was dropped with no draft. `repairAutoIntake`
+// is the flag as the scan passes it; absent is the flag off.
+const REPAIR_NOW = "2026-07-20T12:00:00.000Z";
+
+// The guarded approval, as far as the scan can see it: it turns the draft into
+// a job and its make-safe detail row, which is what the next order's match reads.
+// `attachWorkOrders` also attaches the draft's work order PDFs to the new job
+// through the real settlement attach, as the guarded approval does.
+function intakeApprover(
+  store: Store,
+  options: { attachWorkOrders?: boolean } = {},
+) {
+  const bodies: any[] = [];
+  const approve = async (client: any, body: any) => {
+    bodies.push(body);
+    const draft = store.makesafe_intake_drafts.find((row: any) =>
+      row.id === body.draft_id
+    );
+    const repair = body.reviewed_fields?.makesafe_job_family === "repair";
+    const job = {
+      id: `job-${bodies.length}`,
+      job_number: `${repair ? "SWR" : "SWMS"}-99${bodies.length}`,
+      type: repair ? "repair" : "makesafe",
+      status: "accepted",
+      metadata: {
+        makesafe_job_family: body.reviewed_fields?.makesafe_job_family,
+        builder_claim_ref: draft.extraction_json.builder_claim_ref,
+        builder_po_number: draft.extraction_json.builder_po_number,
+        ...(repair ? { repair_stage: "wo_in" } : {}),
+      },
+    };
+    store.jobs.push(job);
+    store.makesafe_job_details.push({
+      job_id: job.id,
+      external_ref: draft.external_ref,
+      requesting_company_slug: draft.requesting_company_slug,
+      requesting_company_name: null,
+      report_type: null,
+      jobs: job,
+    });
+    draft.status = "approved";
+    draft.approved_job_id = job.id;
+    if (options.attachWorkOrders) {
+      await ensureIntakeWorkOrderEvidence(
+        client,
+        [job.id],
+        draft.attachments_json,
+        draft.extraction_json,
+        { refreshIdentity: () => Promise.resolve(null) },
+      );
+    }
+    return { job: { id: job.id }, job_created: true };
+  };
+  return { approve, bodies };
+}
+
+function workOrderDocuments(store: Store, jobId: string) {
+  return store.job_documents.filter((row: any) =>
+    row.job_id === jobId && row.type === "work_order"
+  );
+}
+
+function repairIntakeStore(): Store {
+  const store = ambroseIntakeStore();
+  store.job_events = [];
+  store.job_documents = [];
+  LIVE_INDEX_ENFORCED_STORES.add(store);
+  return store;
+}
+
+function runRepairScan(
+  store: Store,
+  approve: (client: any, body: any) => Promise<any>,
+  repairAutoIntake: boolean,
+  nowIso = REPAIR_NOW,
+) {
+  return runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso,
+    maxCases: 10,
+    selectionMode: "full_open",
+    approveDraft: approve,
+    ...(repairAutoIntake ? { repairAutoIntake: true } : {}),
+  });
+}
+
+// An open repair job as a person raises one from a quote request: the claim
+// reference, no purchase order yet, sitting in Scoping on the Repairs board.
+function seedRepairJob(
+  store: Store,
+  input: {
+    id: string;
+    jobNumber: string;
+    slug: string;
+    claim: string;
+    metadata?: Record<string, any>;
+  },
+) {
+  const job: any = {
+    id: input.id,
+    job_number: input.jobNumber,
+    type: "repair",
+    status: "accepted",
+    metadata: {
+      makesafe_job_family: "repair",
+      ses_family: "repair",
+      repair_stage: "scoping",
+      builder_claim_ref: input.claim,
+      external_ref: input.claim,
+      ...(input.metadata || {}),
+    },
+  };
+  store.jobs.push(job);
+  store.makesafe_job_details.push({
+    job_id: job.id,
+    external_ref: input.claim,
+    requesting_company_slug: input.slug,
+    requesting_company_name: null,
+    report_type: null,
+    jobs: job,
+  });
+  return job;
+}
+
+// MLB's work order mail. The "Rapid Repair" subject is MLB declaring a repair.
+function pushMlbWorkOrder(
+  store: Store,
+  postId: string,
+  input: {
+    claim: string;
+    po: string;
+    address: string;
+    rapidRepair: boolean;
+    scope: string;
+    receivedAt: string;
+  },
+) {
+  const number = `${input.claim}${input.po}`;
+  store.emails.push(email({
+    post_id: postId,
+    conversation_id: `conversation-${postId}`,
+    received_at: input.receivedAt,
+    subject: `${
+      input.rapidRepair ? "**Rapid Repair** " : ""
+    }NEW WORK ORDER - ${input.claim} ${input.address}`,
+    body_content: "Please find the attached work order.",
+  }));
+  const text = [
+    "Work Order",
+    `Work Order Assigned Secureworks Group Pty Ltd Work Order Number ${number}`,
+    `Job Number ${input.claim} Date 13/07/2026`,
+    "Supervisor Name Sam Supervisor Supervisor Contact 08 0000 0000",
+    "Admin Name Sam Supervisor Office Contact 08 0000 0001",
+    "Policyholders Name Alex Example & Mr Jordan Example",
+    "Policyholders Contact Mobile: 0400 000 001 Home: 0400 000 002 Email:",
+    "alex.example@example.test",
+    "Insurer Name Example Insurance",
+    `Site Address ${input.address}`,
+    "Other Contact Details",
+    "(Tenant)",
+    "Name Contact",
+    "Additional",
+    "Notes/Instructions:",
+    number,
+    "Carpentry",
+    "EXTERNAL",
+    "Labour for",
+    input.scope,
+    "Totals Totals",
+    "Subtotal $1,080.00",
+    "GST $108.00",
+    "Total $1,188.00",
+    "Example Builder Pty Ltd",
+  ].join("\n");
+  store.email_attachments.push({
+    id: `att-${postId}`,
+    email_id: postId,
+    name: `work_order_${number}_Secureworks_Group_Pty_Ltd.pdf`,
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 120_000,
+    sha256: `sha-${postId}`,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: text,
+    pdf_extraction_char_count: text.length,
+    pdf_extraction_page_count: 4,
+    pdf_extraction_extractor: "fixture",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+}
+
+const RAPID_REPAIR_ORDER = {
+  claim: "MLB-49502",
+  po: "PO-69815",
+  address: "12 Example Way, Testville, WA 6000",
+  rapidRepair: true,
+  scope:
+    "Remove and dispose from site. Supply and install similar to existing. - 2 lengths of gutter 3.6m and 6m long. - 1 length of fascia 3.6 m long - remove and reinstall downpipe as required.",
+  receivedAt: "2026-07-19T01:12:00.000Z",
+};
+
+function landedNotices(store: Store) {
+  return store.email_events_raw.filter((row: any) =>
+    row.change_type === "intake_exception_new_work_order_on_existing_job"
+  );
+}
+
+// An order recorded on its claim's repair job: accounted, holding no job slot
+// and no live identity, and naming the job it landed on.
+function landedCases(store: Store) {
+  return store.makesafe_intake_cases.filter((row: any) =>
+    row.recovery_cursor?.landedOnRepairJob
+  );
+}
+
+Deno.test("repair intake: replay: five Ambrose repair purchase orders become one repair job per claim and none makes two", async () => {
+  const store = repairIntakeStore();
+  const orders: Array<[string, AmbrosePurchaseOrderFixture, string]> = [
+    // Two purchase orders on one claim, sent in the same minute.
+    ["esplanade-03", {
+      job: "20999301",
+      sequence: "03",
+      address: "25 Sample Esplanade Demo Point WA 6020",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-15T06:10:00.000Z"],
+    ["esplanade-08", {
+      job: "20999301",
+      sequence: "08",
+      address: "25 Sample Esplanade Demo Point WA 6020",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-15T06:10:20.000Z"],
+    ["fence-14", {
+      job: "20999302",
+      sequence: "14",
+      address: "1 Example Place Testvale WA 6030",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-16T02:45:00.000Z"],
+    ["carport-05", {
+      job: "20999303",
+      sequence: "05",
+      address: "5 Sample Road Demoville WA 6010",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-16T04:35:00.000Z"],
+    ["fascia-03", {
+      job: "20999304",
+      sequence: "03",
+      address: "12 Example Way Testville WA 6000",
+      kind: "repair",
+      updated: true,
+    }, "2026-07-19T00:17:00.000Z"],
+  ];
+  for (const [postId, fixture, receivedAt] of orders) {
+    pushAmbroseMail(store, postId, fixture, receivedAt, `sha-${postId}`);
+  }
+  const approver = intakeApprover(store, { attachWorkOrders: true });
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 4);
+  assertEquals(approver.bodies.length, 4);
+  for (const body of approver.bodies) {
+    assertEquals(body.repair_auto_intake, true);
+    assertEquals(body.reviewed_fields, { makesafe_job_family: "repair" });
+  }
+  // Four claims, four repair jobs: no claim has two.
+  assertEquals(store.jobs.map((job: any) => job.type), [
+    "repair",
+    "repair",
+    "repair",
+    "repair",
+  ]);
+  const claims = store.jobs.map((job: any) => job.metadata.builder_claim_ref);
+  assertEquals([...claims].sort(), [
+    "ACG-20999301",
+    "ACG-20999302",
+    "ACG-20999303",
+    "ACG-20999304",
+  ]);
+  // Each automatic draft carries the stamp it was approved on, with its value.
+  assertEquals(store.makesafe_intake_drafts.length, 4);
+  for (const draft of store.makesafe_intake_drafts) {
+    assertEquals(draft.extraction_json.repair_auto_intake, {
+      version: REPAIR_AUTO_INTAKE_VERSION,
+      builder: "acg",
+      family_evidence: ["ambrose_declared_repair"],
+      work_order_value_ex_gst: 200,
+    });
+  }
+  // The second purchase order on the shared claim landed on that claim's job.
+  const shared = store.jobs.find((job: any) =>
+    job.metadata.builder_claim_ref === "ACG-20999301"
+  );
+  const sharedOrders = [
+    shared.metadata.builder_po_number,
+    ...shared.metadata.builder_additional_work_orders.map((entry: any) =>
+      entry.purchase_order
+    ),
+  ].sort();
+  assertEquals(sharedOrders, ["PO-2099930103", "PO-2099930108"]);
+  assertEquals(first.repair_intake?.auto_approved, 4);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(
+    store.job_events.filter((event: any) =>
+      event.event_type === REPAIR_WORK_ORDER_LANDED_EVENT
+    ).map((event: any) => event.job_id),
+    [shared.id],
+  );
+  // All five orders are accounted. Each job's own order holds that job's one
+  // case slot; the second order on the shared claim is accounted as landed on
+  // the job without taking the slot (one case per job is a unique index).
+  assertEquals(store.makesafe_intake_cases.length, 5);
+  const jobCases = store.makesafe_intake_cases.filter((row: any) => row.job_id);
+  assertEquals(
+    jobCases.map((row: any) => row.job_id).sort(),
+    store.jobs.map((job: any) => job.id).sort(),
+  );
+  for (const row of jobCases) assertEquals(row.state, "confirmed_live_job");
+  const landed = landedCases(store);
+  assertEquals(landed.length, 1);
+  assertEquals(landed[0].job_id, null);
+  assertEquals(landed[0].state, "accounted_non_wo");
+  assertEquals(landed[0].reason_code, "revision");
+  assertEquals(landed[0].builder_po_canonical, "PO-2099930108");
+  assertEquals(landed[0].recovery_cursor.landedOnRepairJob, {
+    jobId: shared.id,
+    jobNumber: null,
+    purchaseOrder: "PO-2099930108",
+    purchaseOrderRelation: "different",
+  });
+  // Both orders' mail is settled.
+  for (const mail of store.emails) assert(mail.makesafe_scanned_at);
+  // Every order's PDF is on its job. Ambrose names every one "Purchase
+  // Order.pdf" and a job holds one work order document per name, so the
+  // landed order's PDF is on the shared job under a name of its own.
+  assertEquals(store.job_documents.length, 5);
+  const sharedDocuments = workOrderDocuments(store, shared.id);
+  assertEquals(
+    sharedDocuments.map((row: any) => row.file_name).sort(),
+    ["PO-2099930108 Purchase Order.pdf", "Purchase Order.pdf"],
+  );
+  assertEquals(
+    new Set(sharedDocuments.map((row: any) => row.storage_url)).size,
+    2,
+  );
+
+  // The next scan finds nothing to do: no second job, draft, event or notice.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 4);
+  assertEquals(store.jobs.length, 4);
+  assertEquals(store.makesafe_intake_drafts.length, 4);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(shared.metadata.builder_additional_work_orders.length, 1);
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(store.job_documents.length, 5);
+  assertEquals(store.makesafe_intake_cases.length, 5);
+  assertEquals(landedCases(store).length, 1);
+  assertEquals(landedCases(store)[0].state, "accounted_non_wo");
+  assertEquals(
+    store.job_events.filter((event: any) =>
+      event.event_type === REPAIR_WORK_ORDER_LANDED_EVENT
+    ).length,
+    1,
+  );
+});
+
+Deno.test("repair intake: replay: the rapid repair order for a claim that already has a repair job lands on that job", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  // No second job and no blank draft.
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(first.totals.drafts_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  // The purchase order, work order number and value are on the job.
+  assertEquals(job.metadata.builder_po_number, "PO-69815");
+  assertEquals(job.metadata.builder_claim_ref, "MLB-49502");
+  assertEquals(job.metadata.builder_work_order_value_ex_gst, 1080);
+  // The board stage and status are a person's to move.
+  assertEquals(job.metadata.repair_stage, "scoping");
+  assertEquals(job.status, "accepted");
+  // The work order PDF is on the job.
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(store.job_documents[0].job_id, "job-kinross");
+  assertEquals(store.job_documents[0].type, "work_order");
+  // The "new work order on existing job" notice: one job event, one desk item.
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_events[0].event_type, REPAIR_WORK_ORDER_LANDED_EVENT);
+  assertEquals(
+    store.job_events[0].detail_json.notice,
+    "new_work_order_on_existing_job",
+  );
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(
+    landedNotices(store)[0].page_meta.next_action_code,
+    "human_review_work_order_on_existing_job",
+  );
+  // The order is accounted as landed on the existing job, without taking the
+  // job's case slot.
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].job_id, null);
+  assertEquals(store.makesafe_intake_cases[0].state, "accounted_non_wo");
+  assertEquals(store.makesafe_intake_cases[0].reason_code, "revision");
+  assertEquals(
+    store.makesafe_intake_cases[0].recovery_cursor.landedOnRepairJob,
+    {
+      jobId: "job-kinross",
+      jobNumber: "SWR-990499",
+      purchaseOrder: "PO-69815",
+      purchaseOrderRelation: "empty",
+    },
+  );
+  assert(store.emails[0].makesafe_scanned_at);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 1);
+
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(second.totals.drafts_created, 0);
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(store.makesafe_intake_cases[0].state, "accounted_non_wo");
+});
+
+Deno.test("repair intake: a landing whose desk notice cannot be written is retried whole, and the notice is written", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+  let failNotice = true;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation, payload) =>
+      failNotice && table === "email_events_raw" && operation === "insert" &&
+        payload?.change_type ===
+          "intake_exception_new_work_order_on_existing_job"
+        ? { message: "email_events_raw unavailable" }
+        : null,
+  );
+  const scan = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approver.approve,
+      repairAutoIntake: true,
+    });
+
+  const first = await scan(REPAIR_NOW);
+  assertEquals(first.totals.cases_failed, 1);
+  assertEquals(landedNotices(store).length, 0);
+  // The order is still awaiting: it has not taken its landed fate.
+  assertEquals(landedCases(store).length, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "awaiting_job_creation",
+  );
+
+  failNotice = false;
+  const second = await scan("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(second.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(landedCases(store).length, 1);
+  // Retrying the landing wrote nothing twice.
+  assertEquals(job.metadata.builder_po_number, "PO-69815");
+  assertEquals("builder_additional_work_orders" in job.metadata, false);
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(approver.bodies.length, 0);
+});
+
+Deno.test("repair intake: an order whose work order PDF cannot be staged is not landed, and lands with its PDF on the next scan", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  const before = JSON.stringify(job);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+  let storageDown = true;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => storageDown ? null : new Uint8Array([1, 2, 3]),
+  );
+  const scan = (nowIso: string) =>
+    runDeterministicIntake(client, {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approver.approve,
+      repairAutoIntake: true,
+    });
+
+  const first = await scan(REPAIR_NOW);
+  assertEquals(first.totals.cases_failed, 1);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 0);
+  // Nothing reached the live job, and the order has not taken its landed
+  // fate: no purchase order with no PDF behind it, no notice to check one.
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+  assertEquals(landedCases(store).length, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "awaiting_job_creation",
+  );
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+
+  storageDown = false;
+  const second = await scan("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(second.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(job.metadata.builder_po_number, "PO-69815");
+  assertEquals(store.job_documents.length, 1);
+  assertEquals(store.job_documents[0].job_id, "job-kinross");
+  assertEquals(store.job_documents[0].type, "work_order");
+  assertEquals(store.job_events.length, 1);
+  assertEquals(landedNotices(store).length, 1);
+  assertEquals(landedCases(store).length, 1);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(approver.bodies.length, 0);
+});
+
+Deno.test("repair intake: replay: a second purchase order on a job that already holds one is shown on the Repairs card beside the first", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+    metadata: {
+      builder_po_number: "PO-11111",
+      builder_work_order_value_ex_gst: 500,
+      repair_stage: "materials",
+    },
+  });
+  const cardBefore = projectInsuranceRepairPipelineRow({ ...job, value: 990 });
+  assertEquals(cardBefore.builder_po_number, "PO-11111");
+  assertEquals(cardBefore.builder_additional_purchase_orders, []);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(
+    landedCases(store)[0].recovery_cursor.landedOnRepairJob
+      .purchaseOrderRelation,
+    "different",
+  );
+
+  const card = projectInsuranceRepairPipelineRow({ ...job, value: 990 });
+  // The job's first order is unchanged, and the new one is listed beside it
+  // with the builder's figure for it and the day it arrived.
+  assertEquals(card.builder_po_number, "PO-11111");
+  assertEquals(card.builder_work_order_value_ex_gst, 500);
+  assertEquals(card.builder_additional_purchase_orders, [{
+    purchase_order: "PO-69815",
+    builder_work_order_value_ex_gst: 1080,
+    received_at: RAPID_REPAIR_ORDER.receivedAt,
+  }]);
+  // Our price is ours: no builder figure is added to it, and the stage is a
+  // person's to move.
+  assertEquals(card.value, 990);
+  assertEquals(card.repair_stage, "materials");
+
+  // A later scan lists nothing twice.
+  await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(
+    projectInsuranceRepairPipelineRow({ ...job, value: 990 })
+      .builder_additional_purchase_orders.length,
+    1,
+  );
+});
+
+Deno.test("repair intake: replay: an order landing on a job that already holds a same-named PDF keeps both PDFs on the job", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-esplanade",
+    jobNumber: "SWR-990301",
+    slug: "acg",
+    claim: "ACG-20999301",
+    metadata: { builder_po_number: "PO-2099930103" },
+  });
+  // The job's own order, attached when the job was made.
+  store.job_documents.push({
+    id: "doc-first-order",
+    job_id: job.id,
+    type: "work_order",
+    file_name: "Purchase Order.pdf",
+    storage_url: "makesafe-deterministic/first-order/sha256-first.pdf",
+    pdf_url: "https://example.test/first-order.pdf",
+    superseded_at: null,
+  });
+  pushAmbroseMail(
+    store,
+    "esplanade-08",
+    {
+      job: "20999301",
+      sequence: "08",
+      address: "25 Sample Esplanade Demo Point WA 6020",
+      kind: "repair",
+      updated: true,
+    },
+    "2026-07-15T06:10:20.000Z",
+    "sha-esplanade-08",
+  );
+  const approver = intakeApprover(store, { attachWorkOrders: true });
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 1);
+  assertEquals(
+    job.metadata.builder_additional_work_orders.map((entry: any) =>
+      entry.purchase_order
+    ),
+    ["PO-2099930108"],
+  );
+  // Both PDFs are on the job: the first under its name, untouched, and the
+  // landed order's under a name of its own.
+  const documents = workOrderDocuments(store, job.id);
+  assertEquals(
+    documents.map((row: any) => [row.file_name, row.storage_url]).sort(),
+    [
+      [
+        "PO-2099930108 Purchase Order.pdf",
+        documents.find((row: any) => row.id !== "doc-first-order").storage_url,
+      ],
+      [
+        "Purchase Order.pdf",
+        "makesafe-deterministic/first-order/sha256-first.pdf",
+      ],
+    ],
+  );
+  assert(
+    documents.find((row: any) => row.id !== "doc-first-order").storage_url !==
+      "makesafe-deterministic/first-order/sha256-first.pdf",
+  );
+  assertEquals(landedCases(store).length, 1);
+  assertEquals(landedNotices(store).length, 1);
+
+  // A later scan attaches nothing twice.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.cases_failed, 0);
+  assertEquals(workOrderDocuments(store, job.id).length, 2);
+  assertEquals(store.jobs.length, 1);
+});
+
+Deno.test("repair intake: the auto-file brake holds the landing, and releasing it mints no second repair job on the claim", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  const before = JSON.stringify(job);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const braked = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: REPAIR_NOW,
+    maxCases: 10,
+    selectionMode: "full_open",
+    approveDraft: approver.approve,
+    repairAutoIntake: true,
+    advanceDrafts: false,
+  });
+  assertEquals(braked.totals.cases_failed, 0);
+  assertEquals(braked.totals.jobs_created, 0);
+  assertEquals(braked.totals.drafts_created, 1);
+  assertEquals(braked.repair_intake?.landed_on_existing_job, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+  assertEquals(landedCases(store).length, 0);
+  // The waiting draft is a person's to decide: the claim already has an open
+  // repair job, so it carries no automatic stamp.
+  assertEquals(
+    "repair_auto_intake" in store.makesafe_intake_drafts[0].extraction_json,
+    false,
+  );
+  assertEquals(braked.repair_intake?.parked_for_review, {
+    claim_has_open_repair_job: 1,
+  });
+
+  // The brake is released. The draft still waits for its person: it is not
+  // approved into a second repair job on the claim, and it is not landed.
+  const released = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(released.totals.cases_failed, 0);
+  assertEquals(released.totals.jobs_created, 0);
+  assertEquals(released.repair_intake?.auto_approved, 0);
+  assertEquals(released.repair_intake?.landed_on_existing_job, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(landedCases(store).length, 0);
+});
+
+Deno.test("repair intake: CONTROL: with no repair job on the claim, a braked repair draft is approved once the brake is released", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const braked = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    days: 30,
+    nowIso: REPAIR_NOW,
+    maxCases: 10,
+    selectionMode: "full_open",
+    approveDraft: approver.approve,
+    repairAutoIntake: true,
+    advanceDrafts: false,
+  });
+  assertEquals(braked.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.repair_auto_intake.builder,
+    "mlb",
+  );
+
+  const released = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(released.totals.cases_failed, 0);
+  assertEquals(released.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
+});
+
+// The Rapid Repair header is MLB's own declaration. Ordinary repair wording in
+// the scope ("remove and replace") is what the scope reader answers on first,
+// and must not hide that declaration.
+const REPLACEMENT_WORDING_ORDER = {
+  claim: "MLB-49611",
+  po: "PO-69902",
+  address: "4 Sample Close, Testville, WA 6000",
+  scope:
+    "Remove and replace damaged fascia to the rear elevation. Supply and install Colorbond gutter to match existing.",
+  receivedAt: "2026-07-19T02:20:00.000Z",
+};
+
+Deno.test("repair intake: replay: a declared rapid repair order worded as remove and replace becomes one repair job", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "replace-wording", {
+    ...REPLACEMENT_WORDING_ORDER,
+    rapidRepair: true,
+  });
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(report.repair_intake?.auto_approved, 1);
+  assertEquals(report.repair_intake?.parked_for_review, {});
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.repair_auto_intake,
+    {
+      version: REPAIR_AUTO_INTAKE_VERSION,
+      builder: "mlb",
+      family_evidence: ["rapid_repair_signal"],
+      work_order_value_ex_gst: 1080,
+    },
+  );
+});
+
+Deno.test("repair intake: CONTROL: the same remove and replace order with no declaration still stops as a review draft", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "replace-wording", {
+    ...REPLACEMENT_WORDING_ORDER,
+    rapidRepair: false,
+  });
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.status, "needs_review");
+  assertEquals(draft.extraction_json.makesafe_job_family, "repair");
+  assertEquals("repair_auto_intake" in draft.extraction_json, false);
+  assertEquals(report.repair_intake?.parked_for_review, {
+    repair_not_declared_by_builder: 1,
+  });
+});
+
+Deno.test("repair intake: CONTROL: with no repair job on the claim, the same rapid repair order becomes exactly one repair job", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.extraction_json.repair_auto_intake, {
+    version: REPAIR_AUTO_INTAKE_VERSION,
+    builder: "mlb",
+    family_evidence: ["rapid_repair_signal"],
+    work_order_value_ex_gst: 1080,
+  });
+  assertEquals(draft.extraction_json.builder_po_number, "PO-69815");
+  assertEquals(draft.site_address, "12 Example Way, Testville");
+  assertEquals(landedNotices(store).length, 0);
+
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(store.jobs.length, 1);
+});
+
+// The scan's own post-board text, run with the real notifier over a fake SMS
+// transport. The approver stands in for approveIntakeDraft: it makes the job
+// with the draft's suburb, as createMakesafeJob does, and names the job for
+// the text.
+function scanTextHarness(store: Store) {
+  const base = intakeApprover(store);
+  const approve = async (client: any, body: any) => {
+    const approved = await base.approve(client, body);
+    const job = store.jobs.find((row: any) => row.id === approved.job.id);
+    const draft = store.makesafe_intake_drafts.find((row: any) =>
+      row.id === body.draft_id
+    );
+    job.site_suburb = draft.site_suburb || null;
+    return { ...approved, notification_job_ids: [job.id] };
+  };
+  const audit = auditClient({ duplicateAfterFirst: true });
+  const sends: Array<{ phone: string; message: string }> = [];
+  const notifyPhysicalJob = (_client: any, input: any) =>
+    notifyDeterministicPhysicalJob(audit.client, input, {
+      loadBoardJob: (_boardClient, jobId) => {
+        const job = store.jobs.find((row: any) => row.id === jobId);
+        return Promise.resolve(
+          job
+            ? {
+              jobId,
+              jobNumber: job.job_number,
+              canonicalStage: "new",
+              sesFamily: job.type === "repair" ? "repair" : "physical_makesafe",
+              jobType: job.type,
+              siteSuburb: job.site_suburb,
+            }
+            : null,
+        );
+      },
+      loadConfig: () =>
+        Promise.resolve({
+          enabled: true,
+          fromNumber: "+61000000000",
+          recipient: MAKESAFE_TEXT_RECIPIENT,
+          failureReason: null,
+        }),
+      loadRepairConfig: () =>
+        Promise.resolve({
+          enabled: true,
+          fromNumber: "+61000000000",
+          recipient: REPAIR_TEXT_RECIPIENT,
+          failureReason: null,
+        }),
+      sendSms: (phone, message) => {
+        sends.push({ phone, message });
+        return Promise.resolve({
+          accepted: true,
+          messageId: `ghl-message-${sends.length}`,
+          failureReason: null,
+        });
+      },
+    });
+  const scan = (nowIso = REPAIR_NOW) =>
+    runDeterministicIntake(fakeClient(store), {
+      dryRun: false,
+      days: 30,
+      nowIso,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approve,
+      notifyPhysicalJob,
+      repairAutoIntake: true,
+    });
+  return { scan, sends, audit };
+}
+
+Deno.test("repair intake: a repair job the scan makes automatically sends one text to the repair recipient, worded as a repair with an Ops link", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const text = scanTextHarness(store);
+
+  const first = await text.scan();
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(first.repair_intake?.auto_approved, 1);
+  assertEquals(first.totals.hugo_notifications_required, 1);
+  assertEquals(first.totals.hugo_notifications_accepted, 1);
+  assertEquals(first.totals.hugo_notifications_failed, 0);
+  assertEquals(store.jobs.length, 1);
+  const job = store.jobs[0];
+  assertEquals(job.type, "repair");
+  assertEquals(job.site_suburb, "Testville");
+  assertEquals(text.sends, [{
+    phone: REPAIR_TEXT_RECIPIENT.phone,
+    message:
+      `SecureWorks: New repair job ${job.job_number}, Testville. Open in Ops: ` +
+      `https://secureworks-group.github.io/secureworks-ux/ops.html#job/${job.id}`,
+  }]);
+  assertEquals(text.audit.inserts.length, 1);
+  assertEquals(text.audit.inserts[0].job_id, job.id);
+  assertEquals(text.audit.inserts[0].recipient_set, [{
+    user_id: REPAIR_TEXT_RECIPIENT.userId,
+    name: REPAIR_TEXT_RECIPIENT.name,
+    phone: REPAIR_TEXT_RECIPIENT.phone,
+  }]);
+
+  // A later scan of the same order makes no second job and sends no second text.
+  const second = await text.scan("2026-07-20T12:02:00.000Z");
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(text.sends.length, 1);
+});
+
+Deno.test("repair intake: CONTROL: a make-safe job the same scan makes still sends today's make-safe text to the make-safe recipient", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "make-safe", {
+    claim: "MLB-49911",
+    po: "PO-69911",
+    address: "20 Sample Drive, Demoville, WA 6010",
+    rapidRepair: false,
+    scope:
+      "Make safe the storm damaged boundary and secure the property. Install temporary roof tarps as required.",
+    receivedAt: "2026-07-19T03:33:00.000Z",
+  });
+  const text = scanTextHarness(store);
+
+  const report = await text.scan();
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.jobs.length, 1);
+  const job = store.jobs[0];
+  assertEquals(job.type, "makesafe");
+  assertEquals(text.sends, [{
+    phone: MAKESAFE_TEXT_RECIPIENT.phone,
+    message: `SecureWorks: New make-safe ${job.job_number} (${job.id})\n` +
+      `Assign in Trade: https://secureworks-group.github.io/secureworks-ux/trade.html#job/${job.id}`,
+  }]);
+});
+
+function makeSafeOnRepairClaimStore() {
+  // The "additional costs" shape: the claim's repair job already holds its
+  // first purchase order, and a second order arrives with no repair header and
+  // a make-safe scope.
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-additional",
+    jobNumber: "SWR-990314",
+    slug: "mlb",
+    claim: "MLB-49843",
+    metadata: { builder_po_number: "PO-68375", repair_stage: "materials" },
+  });
+  pushMlbWorkOrder(store, "additional-costs", {
+    claim: "MLB-49843",
+    po: "PO-69323",
+    address: "20 Sample Drive, Demoville, WA 6010",
+    rapidRepair: false,
+    scope:
+      "Make safe the storm damaged boundary and secure the property. Install temporary roof tarps as required.",
+    receivedAt: "2026-07-19T03:33:00.000Z",
+  });
+  return { store, job };
+}
+
+// The make-safe notice is a job event only: it opens nothing on the intake
+// desk, so no source issue of any kind may follow a clean make-safe mint.
+function intakeDeskItems(store: Store) {
+  return store.email_events_raw.filter((row: any) =>
+    String(row.change_type || "").startsWith("intake_exception_")
+  );
+}
+
+Deno.test("repair intake: replay: a make-safe order on a claim with an open repair job still becomes a make-safe job, and the repair job gets one plain job event", async () => {
+  const { store, job } = makeSafeOnRepairClaimStore();
+  const before = JSON.stringify(job);
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.write_failures, 0);
+  // Urgent work never waits: the make-safe job is made exactly as it is today.
+  assertEquals(first.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].reviewed_fields, {
+    makesafe_job_family: "general_makesafe",
+  });
+  assertEquals("repair_auto_intake" in approver.bodies[0], false);
+  assertEquals(store.jobs.length, 2);
+  const makeSafe = store.jobs[1];
+  assertEquals(makeSafe.type, "makesafe");
+  assertEquals(makeSafe.metadata.builder_po_number, "PO-69323");
+  assertEquals(
+    store.makesafe_intake_cases[0].job_id,
+    makeSafe.id,
+  );
+  assertEquals(
+    "repair_auto_intake" in store.makesafe_intake_drafts[0].extraction_json,
+    false,
+  );
+  // The repair job is not changed and nothing lands on it.
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+  assertEquals(first.repair_intake?.landed_on_existing_job, 0);
+  // One plain event on the repair job naming the make-safe job, and nothing on
+  // the intake desk.
+  assertEquals(store.job_events.length, 1);
+  assertEquals(store.job_events[0].job_id, "job-additional");
+  assertEquals(
+    store.job_events[0].event_type,
+    MAKE_SAFE_RAISED_ON_REPAIR_CLAIM_EVENT,
+  );
+  assertEquals(
+    store.job_events[0].detail_json.notice,
+    "make_safe_raised_on_same_claim",
+  );
+  assertEquals(store.job_events[0].detail_json.make_safe_job_id, makeSafe.id);
+  assertEquals(store.job_events[0].detail_json.purchase_order, "PO-69323");
+  assertEquals(intakeDeskItems(store).length, 0);
+  assertEquals(first.repair_intake?.make_safe_on_repair_claim, 1);
+
+  // The next scan adds no second job, event or desk item.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(store.jobs.length, 2);
+  assertEquals(store.job_events.length, 1);
+  assertEquals(intakeDeskItems(store).length, 0);
+});
+
+Deno.test("repair intake: flag off: the same make-safe order becomes the same make-safe job, with no notice", async () => {
+  const { store, job } = makeSafeOnRepairClaimStore();
+  const before = JSON.stringify(job);
+  const approver = intakeApprover(store);
+
+  const off = await runRepairScan(store, approver.approve, false);
+  assertEquals(off.repair_intake, undefined);
+  assertEquals(off.totals.jobs_created, 1);
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].reviewed_fields, {
+    makesafe_job_family: "general_makesafe",
+  });
+  assertEquals(store.jobs[1].type, "makesafe");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(intakeDeskItems(store).length, 0);
+});
+
+Deno.test("repair intake: a notice that cannot be written never fails the make-safe job it describes", async () => {
+  const { store } = makeSafeOnRepairClaimStore();
+  const approver = intakeApprover(store);
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      undefined,
+      (table, operation) =>
+        table === "job_events" && operation === "insert"
+          ? { message: "job_events unavailable" }
+          : null,
+    ),
+    {
+      dryRun: false,
+      days: 30,
+      nowIso: REPAIR_NOW,
+      maxCases: 10,
+      selectionMode: "full_open",
+      approveDraft: approver.approve,
+      repairAutoIntake: true,
+    },
+  );
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.jobs.length, 2);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.completion_status, "completed");
+  assertEquals(
+    report.write_failure_reasons.make_safe_raised_on_repair_claim,
+    1,
+  );
+  assert(
+    report.evidence.caveats.includes(
+      "make_safe_on_repair_claim_notice_unwritten",
+    ),
+  );
+});
+
+// The collection order: a declared make-safe purchase order whose notes ask
+// for temporary fencing to be collected, for a site with no job of ours.
+function pushAmbroseCollectionOrder(store: Store, postId: string) {
+  const fixture: AmbrosePurchaseOrderFixture = {
+    job: "20999978",
+    sequence: "01",
+    address: "8A Example Rise Testhead WA 6210",
+    kind: "make_safe",
+  };
+  pushAmbroseMail(
+    store,
+    postId,
+    fixture,
+    "2026-07-15T06:10:13.000Z",
+    `sha-${postId}`,
+  );
+  const mail = store.emails.find((row: any) => row.post_id === postId);
+  mail.body_content = [
+    "Hello SECUREWORKS WA,",
+    "",
+    "Please see attached PO #20999978-01 regarding Make Safe required at the above address. When completing a make safe for Ambrose Construct Group we require that you complete a make safe report and pictures via the Ambrose portal.",
+    "",
+    "Notes:",
+    "**NEW MAKE SAFE WORK ORDER**",
+    "Hi Team,",
+    "As discussed, please contact the insured on 0400 000 001 to confirm your arrival day/time to site to complete temp fence collection make safe.",
+    "Please attend site to collect 5 panels of temp fencing",
+  ].join("\n");
+}
+
+Deno.test("repair intake: replay: a collection order with no original job opens one review draft, and never a job", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseCollectionOrder(store, "collection");
+  const approver = intakeApprover(store);
+
+  const first = await runRepairScan(store, approver.approve, true);
+  assertEquals(first.totals.cases_failed, 0);
+  assertEquals(first.totals.drafts_created, 1);
+  assertEquals(first.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  const draft = store.makesafe_intake_drafts[0];
+  assertEquals(draft.status, "needs_review");
+  // The reason it waits is on the draft, and keeps the backlog sweep off it.
+  assertEquals(draft.missing_fields, [ORPHAN_LIFECYCLE_REVIEW_FIELD]);
+  assertEquals(
+    draft.extraction_json.review_reason,
+    "collection_or_reattendance_without_original_job",
+  );
+  assertEquals(draft.extraction_json.builder_po_number, "PO-2099997801");
+  assertEquals(draft.site_address, "8A Example Rise Testhead WA 6210");
+  assertEquals(first.repair_intake?.orphan_lifecycle_drafts, 1);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "awaiting_job_creation",
+  );
+
+  // Later scans leave it as one waiting draft.
+  const second = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(second.totals.drafts_created, 0);
+  assertEquals(second.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+});
+
+Deno.test("repair intake: flag off: the collection order is the exception it is today, and switching the flag on later leaves it alone", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseCollectionOrder(store, "collection");
+  const approver = intakeApprover(store);
+
+  const off = await runRepairScan(store, approver.approve, false);
+  assertEquals(off.repair_intake, undefined);
+  assertEquals(off.totals.drafts_created, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "reattendance_target_not_found",
+  );
+
+  // An order parked before the flag was on is live data: it keeps its fate.
+  const on = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(on.totals.drafts_created, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "reattendance_target_not_found",
+  );
+  assertEquals(approver.bodies.length, 0);
+});
+
+Deno.test("repair intake: an order whose value cannot be read still becomes a repair job, with the value left empty", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseMail(
+    store,
+    "no-value",
+    {
+      job: "20999305",
+      sequence: "02",
+      address: "9 Example Court Testville WA 6000",
+      kind: "repair",
+    },
+    "2026-07-18T02:45:00.000Z",
+    "sha-no-value",
+  );
+  // The purchase order states no readable total.
+  const attachment = store.email_attachments[0];
+  attachment.pdf_extraction_text = attachment.pdf_extraction_text.replace(
+    "TOTAL Purchase Order Price (ex GST) $200.00",
+    "TOTAL Purchase Order Price (ex GST) as per schedule",
+  );
+  const approver = intakeApprover(store);
+
+  const report = await runRepairScan(store, approver.approve, true);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(report.repair_intake?.auto_approved, 1);
+  assertEquals(report.repair_intake?.parked_for_review, {});
+  assertEquals(approver.bodies.length, 1);
+  assertEquals(approver.bodies[0].repair_auto_intake, true);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(store.jobs[0].type, "repair");
+  // The stamp says the value was looked for and not read; the mint marks the
+  // job from it (repair_intake_routing_test.ts).
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.repair_auto_intake,
+    {
+      version: REPAIR_AUTO_INTAKE_VERSION,
+      builder: "acg",
+      family_evidence: ["ambrose_declared_repair"],
+      work_order_value_ex_gst: null,
+    },
+  );
+});
+
+Deno.test("repair intake: flag off: a repair order for a claim with a repair job is the waiting draft it is today, and nothing touches the job", async () => {
+  const store = repairIntakeStore();
+  const job = seedRepairJob(store, {
+    id: "job-kinross",
+    jobNumber: "SWR-990499",
+    slug: "mlb",
+    claim: "MLB-49502",
+  });
+  const before = JSON.stringify(job);
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  const approver = intakeApprover(store);
+
+  const off = await runRepairScan(store, approver.approve, false);
+  assertEquals(off.repair_intake, undefined);
+  assertEquals(off.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(
+    "repair_auto_intake" in store.makesafe_intake_drafts[0].extraction_json,
+    false,
+  );
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(store.job_documents.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+
+  // Switching the flag on does not act on a draft that was already waiting:
+  // it is neither approved nor landed on the job. A person holds it.
+  const on = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(on.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+  assertEquals(JSON.stringify(job), before);
+  assertEquals(store.job_events.length, 0);
+  assertEquals(landedNotices(store).length, 0);
+});
+
+Deno.test("repair intake: a repair draft already waiting when the flag is switched on still waits for a person", async () => {
+  const store = repairIntakeStore();
+  pushAmbroseMail(
+    store,
+    "waiting",
+    {
+      job: "20999306",
+      sequence: "04",
+      address: "3 Sample Street Demoville WA 6010",
+      kind: "repair",
+    },
+    "2026-07-18T02:45:00.000Z",
+    "sha-waiting",
+  );
+  const approver = intakeApprover(store);
+  await runRepairScan(store, approver.approve, false);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+
+  const on = await runRepairScan(
+    store,
+    approver.approve,
+    true,
+    "2026-07-20T12:02:00.000Z",
+  );
+  assertEquals(on.totals.jobs_created, 0);
+  assertEquals(approver.bodies.length, 0);
+  assertEquals(store.jobs.length, 0);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
+});
+
+Deno.test("repair intake: the guarded approval refusing an automatic repair leaves the draft for a person and fails nothing", async () => {
+  const store = repairIntakeStore();
+  pushMlbWorkOrder(store, "rapid-repair", RAPID_REPAIR_ORDER);
+  let attempts = 0;
+  const refusing = () => {
+    attempts++;
+    return Promise.reject(
+      Object.assign(new Error("Repair intake requires a human tick"), {
+        status: 409,
+      }),
+    );
+  };
+
+  const report = await runRepairScan(store, refusing, true);
+  assertEquals(attempts, 1);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.completion_status, "completed");
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(report.repair_intake?.approval_refused, 1);
+  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(store.makesafe_intake_drafts[0].status, "needs_review");
 });

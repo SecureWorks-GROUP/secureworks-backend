@@ -13,6 +13,7 @@ export const INTAKE_SOURCE_ISSUE_REASONS = [
   "legacy_draft_source_missing",
   "legacy_draft_attribution_ambiguous",
   "committed_without_site_suburb",
+  "new_work_order_on_existing_job",
 ] as const;
 
 export type IntakeSourceIssueReason =
@@ -43,6 +44,7 @@ export const INTAKE_SOURCE_ISSUE_NEXT_ACTION: Readonly<
   legacy_draft_source_missing: "locate_or_import_exact_ses_source",
   legacy_draft_attribution_ambiguous: "human_resolve_exact_attribution",
   committed_without_site_suburb: "human_supply_site_suburb",
+  new_work_order_on_existing_job: "human_review_work_order_on_existing_job",
 };
 
 export function intakeSourceIssueChangeType(
