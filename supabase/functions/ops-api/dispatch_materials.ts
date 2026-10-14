@@ -59,7 +59,7 @@ export const DISPATCH_WORKINGS_SELECT =
 // Dispatch order columns (docs/dispatch-slice-5-contract.md); xero_po_id is
 // read only to answer in_xero and is never passed on.
 export const DISPATCH_ORDER_SELECT =
-  "id, po_number, supplier_name, status, created_at, line_items, supplier_id, source, pdf_version, last_sent_pdf_version, last_sent_at, xero_po_id";
+  "id, po_number, supplier_name, status, created_at, updated_at, line_items, supplier_id, source, pdf_version, last_sent_pdf_version, last_sent_at, xero_po_id";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -234,6 +234,9 @@ export function projectDispatchOrder(order: any) {
     supplier_name: order?.supplier_name ?? null,
     status: order?.status ?? null,
     created_at: order?.created_at ?? null,
+    // The stamp Update, Take off and Cancel order send back as
+    // expected_order_updated_at (slice 5): without it they are refused.
+    updated_at: order?.updated_at ?? null,
     // Slice 5: an order made in Dispatch has a supplier_id and source
     // 'dispatch'; every other order has neither and stays in "Orders on this
     // job".

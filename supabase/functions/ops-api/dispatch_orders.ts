@@ -621,6 +621,8 @@ export function dispatchSupplierOrder(input: {
     id: order.id,
     po_number: order.po_number ?? null,
     status: order.status ?? null,
+    // Sent back as expected_order_updated_at by Update, Take off and Cancel.
+    updated_at: order.updated_at ?? null,
     chip: dispatchOrderChip({
       order,
       openDraft,

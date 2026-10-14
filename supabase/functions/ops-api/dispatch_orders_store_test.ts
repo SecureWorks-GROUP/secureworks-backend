@@ -2978,6 +2978,19 @@ Deno.test("materials read: each supplier carries its order chip, lines their ord
   const legacy = answer.orders.find((o: Row) => o.po_number === "PO-683376");
   assertEquals([legacy.source, legacy.supplier_id], [null, null]);
   assert(!JSON.stringify(answer.orders).includes("unit_price"));
+  // The screen sends the read's stamp back to change the order: it is the
+  // stored one, and a cancel with it goes through.
+  const stored = db.tables.purchase_orders.find((o) =>
+    o.po_number === "PO-1000001"
+  )!;
+  assertEquals(steel.order.updated_at, stored.updated_at);
+  assertEquals(dispatchOrder.updated_at, stored.updated_at);
+  const cancelled = await call(db, "dispatch_order_cancel", {
+    job_id: JOB.fence,
+    purchase_order_id: steel.order.id,
+    expected_order_updated_at: steel.order.updated_at,
+  });
+  assertEquals(cancelled.order.status, "cancelled");
   // A failed chip read is never "Not ordered".
   db.failures.add("select:job_order_emails");
   const failed: any = await runDispatchMaterialsAction(
