@@ -76,7 +76,10 @@ export function projectXeroSettlementEvidence(
     batch_payment_id: kind === "payment"
       ? xeroText(raw.BatchPaymentID)?.toLowerCase() ?? null
       : null,
-    payment_date: xeroInstant(raw.DateString ?? raw.Date)?.slice(0, 10) ?? null,
+    payment_date:
+      (typeof raw.DateString === "string"
+        ? /^\d{4}-\d{2}-\d{2}/.exec(raw.DateString)?.[0]
+        : undefined) ?? xeroInstant(raw.Date)?.slice(0, 10) ?? null,
     amount: xeroNumber(kind === "payment" ? raw.Amount : raw.TotalAmount),
     reference: typeof raw.Reference === "string" ? raw.Reference : null,
     account: xeroObject(raw.Account),

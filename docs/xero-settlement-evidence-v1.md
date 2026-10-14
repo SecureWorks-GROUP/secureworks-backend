@@ -27,7 +27,11 @@ until a short page. BatchPayments is an unpaged collection in Xero's contract.
 The initial normal sync traverses the whole provider history. Later runs use
 their own `xero_sync_state` key, scoped to org and tenant, and the existing
 15-minute modified-since overlap. Invoice modification time is not used to
-decide whether payment reconciliation changed.
+decide whether payment reconciliation changed. Xero does not promise that
+reconciling a payment or batch moves its `UpdatedDateUTC`, so the first run
+after the last complete traversal is 24 hours old reads the whole history
+again (`settlement_evidence_full:<org>:<tenant>` records it). A payment
+reconciled after capture is therefore re-observed within about a day.
 
 The cursor advances only after both complete provider reads and every upsert
 succeed. An unreadable collection, duplicate ID, page-limit refusal, provider

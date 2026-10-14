@@ -15,6 +15,9 @@ type Get = (
 ) => Promise<unknown>;
 // Full initial traversal, then provider modification windows with the existing
 // 15 minute overlap. Invoice updates do not own payment reconciliation updates.
+// Xero does not promise that reconciling a payment moves its UpdatedDateUTC, so
+// a complete traversal is repeated whenever the last one is a day old.
+export const SETTLEMENT_FULL_REREAD_MS = 24 * 60 * 60 * 1000;
 export async function syncSettlementEvidence(
   sb: Pick<SupabaseClient, "from">,
   orgId: string,
@@ -23,13 +26,24 @@ export async function syncSettlementEvidence(
   now = () => new Date(),
 ) {
   const key = `settlement_evidence:${orgId}:${tenantId}`;
-  const { data: cursor, error: cursorError } = await sb.from("xero_sync_state")
-    .select("cursor_at").eq("key", key).maybeSingle();
-  if (cursorError) {
-    throw new Error(`Settlement cursor read failed: ${cursorError.message}`);
+  const fullKey = `settlement_evidence_full:${orgId}:${tenantId}`;
+  const { data: cursors, error: cursorError } = await sb.from("xero_sync_state")
+    .select("key,cursor_at").in("key", [key, fullKey]);
+  if (cursorError || !Array.isArray(cursors)) {
+    throw new Error(
+      `Settlement cursor read failed: ${cursorError?.message ?? "no rows"}`,
+    );
   }
-  const started = now().toISOString();
-  const since = incrementalModifiedSince(cursor?.cursor_at);
+  const cursorAt = (k: string) =>
+    cursors.find((c) => c.key === k)?.cursor_at as string | null | undefined;
+  const startedAt = now();
+  const started = startedAt.toISOString();
+  const lastFull = Date.parse(cursorAt(fullKey) ?? "");
+  const fullDue = !Number.isFinite(lastFull) ||
+    startedAt.getTime() - lastFull >= SETTLEMENT_FULL_REREAD_MS;
+  const since = fullDue
+    ? undefined
+    : incrementalModifiedSince(cursorAt(key), startedAt.getTime());
   const headers: Record<string, string> = since
     ? { "If-Modified-Since": since }
     : {};
@@ -109,13 +123,18 @@ export async function syncSettlementEvidence(
       throw new Error(`Settlement evidence write failed: ${error.message}`);
     }
   }
-  const { error } = await sb.from("xero_sync_state").upsert({
-    key,
-    cursor_at: started,
-    updated_at: now().toISOString(),
-    note:
-      `Payments ${seen.size}; receipt batches ${batchIds.size}; complete provider traversal`,
-  }, { onConflict: "key" });
+  const updatedAt = now().toISOString();
+  const note =
+    `Payments ${seen.size}; receipt batches ${batchIds.size}; complete provider traversal`;
+  const { error } = await sb.from("xero_sync_state").upsert([
+    { key, cursor_at: started, updated_at: updatedAt, note },
+    ...(since ? [] : [{
+      key: fullKey,
+      cursor_at: started,
+      updated_at: updatedAt,
+      note,
+    }]),
+  ], { onConflict: "key" });
   if (error) {
     throw new Error(`Settlement cursor write failed: ${error.message}`);
   }
@@ -125,6 +144,7 @@ export async function syncSettlementEvidence(
     batches: batchIds.size,
     payment_pages: pages,
     modified_since: since ?? null,
+    full_reread: !since,
     captured_at: started,
   };
 }
