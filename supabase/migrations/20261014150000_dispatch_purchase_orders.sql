@@ -265,6 +265,10 @@ BEGIN
   IF v_mode NOT IN ('update', 'cancel') THEN
     RAISE EXCEPTION 'invalid_mode';
   END IF;
+  -- Lock the order, then its emails, so a send claim cannot slip in between
+  -- this check and the writes below.
+  PERFORM 1 FROM public.purchase_orders o WHERE o.id = v_order_id FOR UPDATE;
+  PERFORM 1 FROM public.job_order_emails e WHERE e.purchase_order_id = v_order_id FOR UPDATE;
   -- A send in flight or not confirmed holds the order still: its email may have gone.
   IF EXISTS (SELECT 1 FROM public.job_order_emails e
               WHERE e.purchase_order_id = v_order_id AND e.status IN ('sending', 'send_unknown')) THEN
@@ -272,6 +276,11 @@ BEGIN
   END IF;
 
   IF v_mode = 'cancel' THEN
+    -- An order whose email went is never cancelled here, even when its sent stamp did not land.
+    IF EXISTS (SELECT 1 FROM public.job_order_emails e
+                WHERE e.purchase_order_id = v_order_id AND e.status = 'sent') THEN
+      RAISE EXCEPTION 'order_sent';
+    END IF;
     UPDATE public.purchase_orders o SET status = 'cancelled'
      WHERE o.id = v_order_id AND o.job_id = v_job AND o.source = 'dispatch'
        AND o.updated_at = (p->>'expected_order_updated_at')::timestamptz

@@ -184,6 +184,14 @@ SELECT public.dispatch_commit_order(jsonb_set(jsonb_set(jsonb_set(p, '{po_number
   '{lines}', (SELECT jsonb_agg(jsonb_build_object('id', id, 'updated_at', updated_at)) FROM public.job_material_lines
               WHERE job_id = '9f000000-0000-4000-8000-000000000001')))
 FROM po_args;
+UPDATE public.job_order_emails e SET status = 'sent' FROM public.purchase_orders o
+ WHERE e.purchase_order_id = o.id AND o.po_number = 'PO-9000003';
+SELECT pg_temp.po_assert(pg_temp.po_raised($q$
+ SELECT public.dispatch_commit_order_update(jsonb_build_object('mode', 'cancel', 'order_id', o.id, 'job_id', o.job_id,
+   'expected_order_updated_at', o.updated_at)) FROM public.purchase_orders o WHERE o.po_number = 'PO-9000003'
+$q$) = 'order_sent', 'an order whose email went must not be cancelled even with no sent stamp');
+UPDATE public.job_order_emails e SET status = 'draft' FROM public.purchase_orders o
+ WHERE e.purchase_order_id = o.id AND o.po_number = 'PO-9000003';
 UPDATE public.purchase_orders SET last_sent_at = now(), status = 'sent' WHERE po_number = 'PO-9000003';
 SELECT pg_temp.po_assert(pg_temp.po_raised($q$
  SELECT public.dispatch_commit_order_update(jsonb_build_object('mode', 'cancel', 'order_id', o.id, 'job_id', o.job_id,

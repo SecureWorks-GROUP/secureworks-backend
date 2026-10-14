@@ -1723,7 +1723,7 @@ Deno.test("save: subject and message saved and the hash moves; a stale stamp is 
     409,
     "draft_changed",
   );
-  assertEquals(stale.body.draft.subject, "New subject");
+  assertEquals((stale.body.draft as any).subject, "New subject");
   await refused(
     call(db, "dispatch_order_draft_save", {
       draft_id: draft.id,
@@ -1904,7 +1904,7 @@ Deno.test("send: a stale hash, an edited draft or a changed contact address send
     409,
     "draft_changed",
   );
-  assertEquals(changed.body.draft.to.email, "new@steel-supplies.test");
+  assertEquals((changed.body.draft as any).to.email, "new@steel-supplies.test");
   assertEquals(t.calls.length, 0);
   assertEquals(db.tables.job_order_emails[0].status, "draft");
 });
@@ -2074,6 +2074,52 @@ Deno.test("send: the email went but a filing write failed: success with filed fa
   assertEquals([answer.success, answer.filed], [true, false]);
   assertEquals(db.tables.job_order_emails[0].status, "sent");
   assertEquals(db.tables.po_communications.length, 1);
+});
+
+Deno.test("send: an order cancelled just after the claim sends nothing and puts the draft back", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  const client = new Proxy(db.client, {
+    get(target: any, prop: string) {
+      if (prop !== "from") return target[prop];
+      return (table: string) => {
+        const builder = target.from(table);
+        if (table !== "job_order_emails") return builder;
+        const update = builder.update;
+        builder.update = (value: any) => {
+          const result = update(value);
+          if (value?.status === "sending") {
+            const then = builder.then;
+            builder.then = (resolve: any, reject: any) =>
+              then((out: any) => {
+                orderRow(db, "PO-1000001").status = "cancelled";
+                return out;
+              }).then(resolve, reject);
+          }
+          return result;
+        };
+        return builder;
+      };
+    },
+  });
+  const t = transport();
+  await refused(
+    runDispatchOrdersAction(
+      client,
+      "dispatch_order_send",
+      new URLSearchParams(),
+      {
+        draft_id: draft.id,
+        expected_draft_hash: draft.draft_hash,
+      },
+      ctx(db, t),
+    ) as Promise<any>,
+    409,
+    "order_cancelled",
+  );
+  assertEquals(t.calls.length, 0);
+  assertEquals(db.tables.job_order_emails[0].status, "draft");
+  assertEquals(db.tables.po_communications.length, 0);
 });
 
 Deno.test("send: a PDF that is not the draft's bytes sends nothing", async () => {

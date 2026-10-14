@@ -195,6 +195,10 @@ const COMMIT_REFUSALS: Record<string, [number, string]> = {
     "This order's email is being sent or its send is not confirmed",
   ],
   no_lines_to_order: [409, "There is no To order line for this supplier"],
+  order_sent: [
+    409,
+    "This order was sent. Tell the supplier by replying on its thread.",
+  ],
 };
 
 function commitRefusal(error: any): [string, number, string] | null {
@@ -1494,6 +1498,27 @@ export async function sendDispatchOrderDraft(
       .eq("status", "sending");
     if (error) console.error("[dispatch_orders] draft release failed:", error);
   };
+
+  const { data: current, error: orderReadError } = await client.from(
+    "purchase_orders",
+  )
+    .select("id, status")
+    .eq("id", order.id)
+    .maybeSingle();
+  if (orderReadError) {
+    await release(priorStatus, "The order could not be read before sending");
+    readFailed("order read", orderReadError);
+  }
+  if (
+    !current || current.status === "cancelled" || current.status === "deleted"
+  ) {
+    await release(priorStatus, "The order was cancelled before sending");
+    refuse(
+      409,
+      "order_cancelled",
+      "This order is cancelled. Nothing was sent.",
+    );
+  }
 
   const bytes = await downloadPdf(client, draft.pdf_path);
   if (!bytes || await sha256Hex(bytes) !== draft.pdf_sha256) {
