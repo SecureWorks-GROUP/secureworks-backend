@@ -8126,7 +8126,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         const orgId = authMode === 'jwt' ? authUser?.orgId : DEFAULT_ORG_ID
         if (!orgId) return json({ error: 'Organisation access required' }, 403)
-        return json(await readInvoiceSettlement(client, orgId, invoiceId))
+        const settlement = await readInvoiceSettlement(client, orgId, invoiceId)
+        if (!settlement) return json({ error: 'Sales invoice not found' }, 404)
+        return json(settlement)
       }
       case 'read_xero_organisation':
       case 'read_xero_tracking_categories':

@@ -197,9 +197,7 @@ export async function readInvoiceSettlement(
     .eq("org_id", orgId).eq("xero_invoice_id", invoiceId.toLowerCase())
     .maybeSingle();
   if (error) throw new Error("Invoice settlement invoice read failed");
-  if (!invoice || invoice.invoice_type !== "ACCREC") {
-    throw new Error("Sales invoice not found");
-  }
+  if (!invoice || invoice.invoice_type !== "ACCREC") return null;
   const { data: connection, error: connectionError } = await sb.from(
     "xero_tokens",
   )
