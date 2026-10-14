@@ -120,6 +120,18 @@ job_detail
 #    A pure read; a bare call is refused 400 "jobId required" before any query. ──
 job_notes
 
+# ── Ops screen Dispatch tab, Materials by supplier (docs/dispatch-slice-4-contract.md).
+#    The read is pure; a bare call is refused 400 "job_id required" before any
+#    query. The six writes are staff-guarded and source-only: no smoke run may
+#    fire them at production, even with an invalid bound. ──
+dispatch_materials
+dispatch_materials_add_supplier      # probe=source-only
+dispatch_materials_remove_supplier   # probe=source-only
+dispatch_materials_save_line         # probe=source-only
+dispatch_materials_delete_line       # probe=source-only
+dispatch_materials_suggest           # probe=source-only
+dispatch_materials_save_workings     # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event

@@ -376,10 +376,14 @@ jobs:
       # stay exactly as it was, and the list must never drop a job past the
       # 1000-row ceiling or select the whole scope blob. Same --no-check reason
       # as above.
+      # Slice 4 adds Materials by supplier: its count rule, the one read, the six
+      # writes (none may touch jobs, suppliers, purchase orders or any event
+      # table) and the two list fields, which never read as 0 on a failed read.
       - name: Test the Dispatch list and job notes reads
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
-            supabase/functions/ops-api/dispatch_job_list_test.ts
+            supabase/functions/ops-api/dispatch_job_list_test.ts \
+            supabase/functions/ops-api/dispatch_materials_test.ts
 
       - name: Test edge deploy workflow classification
         run: |
