@@ -30,6 +30,7 @@ import { isTradeInvoiceRecurringDeductionXeroLine, isTradeInvoiceSuperXeroLine, 
 import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '../ops-api/xero_attachment.ts'
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
+import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 // serve is only started when this module is the process entrypoint so unit
@@ -976,6 +977,18 @@ async function syncInvoices(sb: any) {
     { onConflict: 'key' },
   )
 
+  // Independent payment/batch modification cursor. This capture never calls a
+  // provider write or changes invoice amounts, attribution, debt or job state.
+  let settlementEvidence: unknown
+  try {
+    settlementEvidence = await syncSettlementEvidence(sb, DEFAULT_ORG_ID, tenantId,
+      (path, params, headers) => xeroGet(path, accessToken, tenantId, params, headers))
+  } catch (e: any) {
+    if (e instanceof XeroCooldownError) throw e
+    settlementEvidence = { success: false, error: e.message }
+    console.error('[xero-sync] Settlement evidence capture failed:', e.message)
+  }
+
   // ── Paid close-out catch-up: invoiced and final_payment fencing and patio cards whose
   //    last invoice was paid before the card got there (switch on only; ops-api decides).
   let closeoutCatchUp: unknown = { ran: false, reason: 'switch_off' }
@@ -1062,11 +1075,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout },
+    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout }
+  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, settlement_evidence: settlementEvidence, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout }
 }
 
 

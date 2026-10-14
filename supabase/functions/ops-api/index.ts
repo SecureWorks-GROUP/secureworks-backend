@@ -596,6 +596,7 @@ import {
   XeroReceivablesReadError,
   createXeroReadGet,
 } from './xero_receivables_read.ts'
+import { readInvoiceSettlement } from './xero_invoice_settlement_read.ts'
 import { DEBT_CHASE_HISTORY_FILTER } from './debt_chase_history.ts'
 import { type DebtWsCaller, DebtWsSendRefusedError, runDebtWsAction } from './debt_ws_actions.ts'
 import { createDebtWsDeps } from './debt_ws_deps.ts'
@@ -8114,6 +8115,19 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await dispatchMakesafeReport(client, body, authMode, authUser, makesafeTradeAppIsOffice))
       }
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
+      case 'invoice_settlement': {
+        if (req.method !== 'GET') return json({ error: 'GET required' }, 405)
+        if (!((authMode === 'api_key' && serverSecretPresented) || _opsApiCallerIsStaffOperator(authMode, authUser))) {
+          return json({ error: 'Staff access required' }, 403)
+        }
+        const invoiceId = url.searchParams.get('xero_invoice_id') || ''
+        if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(invoiceId)) {
+          return json({ error: 'xero_invoice_id must be a provider UUID' }, 400)
+        }
+        const orgId = authMode === 'jwt' ? authUser?.orgId : DEFAULT_ORG_ID
+        if (!orgId) return json({ error: 'Organisation access required' }, 403)
+        return json(await readInvoiceSettlement(client, orgId, invoiceId))
+      }
       case 'read_xero_organisation':
       case 'read_xero_tracking_categories':
       case 'list_xero_receivables':
