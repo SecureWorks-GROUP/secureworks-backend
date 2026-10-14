@@ -593,7 +593,7 @@ async function postOpsApi(action: string, body: Record<string, unknown>): Promis
       body: JSON.stringify(body),
     })
     return await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }))
-  } catch (e: any) {
+  } catch (e) {
     return { ok: false, error: (e as Error).message }
   }
 }
@@ -915,7 +915,7 @@ async function syncInvoices(sb: any) {
                       })
                       const opsResult = await opsResp.json()
                       console.log(`[xero-sync] Job ${jobData.id} fully paid — status updated via ops-api:`, opsResult.job?.status || opsResult.error)
-                    } catch (e: any) {
+                    } catch (e) {
                       // Fallback: update directly if ops-api call fails
                       console.error(`[xero-sync] ops-api call failed, updating directly:`, (e as Error).message)
                       await sb.from('jobs')

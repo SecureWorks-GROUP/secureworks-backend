@@ -56,7 +56,11 @@ Deno.test("paid close-out: get_review is a real fencing and patio stage, never m
   for (const type of ["fencing", "patio"]) {
     const stages = getStagesForType(type);
     assertEquals(isLegalForType("get_review", type), true, type);
-    assertEquals(stages.indexOf("get_review"), stages.indexOf("invoiced") + 1, type);
+    assertEquals(
+      stages.indexOf("get_review"),
+      stages.indexOf("invoiced") + 1,
+      type,
+    );
   }
   assertEquals(isLegalForType("get_review", "makesafe"), false);
   assertEquals(isLegalForType("get_review", "repair"), false);
