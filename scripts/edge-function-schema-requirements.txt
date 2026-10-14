@@ -759,3 +759,7 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|job_dispatch_workings.sketch_png
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_supplier_on_job_fkey
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_status_valid
+
+# Provider payment/batch evidence: table must precede both capture and reader.
+xero-sync|supabase/migrations/20261014125951_xero_settlement_evidence.sql|table|xero_settlement_evidence
+ops-api|supabase/migrations/20261014125951_xero_settlement_evidence.sql|table|xero_settlement_evidence
