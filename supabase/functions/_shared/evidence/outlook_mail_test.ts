@@ -293,3 +293,72 @@ Deno.test("history rows are backfill", () => {
     "backfill",
   );
 });
+
+Deno.test("forwarded City correspondence retains supplied plans, without treating it as new sender words or placement identity", () => {
+  const r = row({
+    ...E_IDENTITY,
+    subject: "Fwd: City building plans",
+    bodyText: "Please see the City's response.",
+    fullBodyText:
+      "Please see the City's response.\nBegin forwarded message:\nFrom: Building Desk <plans@civic.example>\nPlease find attached all available building plans as requested.\nOld job SWP-999888.",
+  });
+  const p = r.payload as Record<string, unknown>;
+  assert(
+    String(p.forwarded_correspondence).includes(
+      "all available building plans as requested",
+    ),
+  );
+  assert(!String(p.body).includes("Old job SWP-999888"));
+  assertEquals(p.references, []);
+  assertEquals(r.job_id, null);
+});
+
+Deno.test("forwarded HTML is readable, bounded, and a normal reply still excludes its old thread", () => {
+  const r = row({
+    ...E_IDENTITY,
+    subject: "Fw: Plans",
+    bodyText: "",
+    fullBodyText: "<p>All requested plans attached.</p>" +
+      "<p>Detail</p>".repeat(5000),
+    fullBodyIsHtml: true,
+  });
+  const p = r.payload as Record<string, unknown>;
+  assert(
+    String(p.forwarded_correspondence).includes(
+      "All requested plans attached.",
+    ),
+  );
+  assert(!String(p.forwarded_correspondence).includes("<p>"));
+  assert(String(p.forwarded_correspondence).length <= BODY_MAX_CHARS);
+  assertEquals(p.forwarded_correspondence_truncated, true);
+  const reply = row({
+    ...E_IDENTITY,
+    subject: "Re: Plans",
+    bodyText: "Thanks, received.",
+    fullBodyText: "Thanks, received.\nFrom: Someone\nOld promise on SWP-999888",
+  });
+  assert(
+    !String((reply.payload as Record<string, unknown>).body).includes(
+      "Old promise",
+    ),
+  );
+  assertEquals(
+    (reply.payload as Record<string, unknown>).forwarded_correspondence,
+    undefined,
+  );
+});
+
+Deno.test("forwarded content cannot admit private owner mail by an old job reference", () => {
+  const r = buildOutlookMailRow(
+    {
+      ...E_SENT,
+      subject: "Fwd: Private",
+      to: ["private@example.test"],
+      bodyText: "For you.",
+      fullBodyText: "For you.\nOld quote SWP-999888",
+    },
+    MARNIN,
+    CTX,
+  );
+  assertEquals(r.kind, "skip");
+});

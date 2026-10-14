@@ -313,7 +313,13 @@ export interface MailReads {
     mailbox: string,
     graphId: string,
   ): Promise<
-    { text: string | null; isHtml: boolean; headers: Record<string, string> }
+    {
+      text: string | null;
+      isHtml: boolean;
+      fullText?: string | null;
+      fullIsHtml?: boolean;
+      headers: Record<string, string>;
+    }
   >;
   resolveGroupId(mail: string): Promise<string | null>;
   listGroupConversations(
@@ -384,7 +390,9 @@ export interface CaptureDeps {
    * another copy saved; the database relabels that row when this copy knows
    * its audience better. Never throws: a failure answers error.
    */
-  resolveAudience(row: Record<string, unknown>): Promise<AudienceResolveOutcome>;
+  resolveAudience(
+    row: Record<string, unknown>,
+  ): Promise<AudienceResolveOutcome>;
   /** The old monitor-inbox path's row for the same inbound email, or null. Throws when unreadable. */
   legacyCopy(args: {
     from: string;
@@ -1128,6 +1136,8 @@ async function runSource(
           ...item,
           bodyText: d.text,
           bodyIsHtml: d.isHtml,
+          fullBodyText: d.fullText,
+          fullBodyIsHtml: d.fullIsHtml,
           headers: d.headers,
         };
       } catch (e) {

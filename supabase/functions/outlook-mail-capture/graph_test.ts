@@ -339,3 +339,36 @@ Deno.test("a group post read larger than the read limit is refused with a code, 
   assertEquals((e as graph.GraphReadError).code, "attachment_post_too_large");
   assert(sent < 60, `read ${sent} MB before refusing`);
 });
+
+Deno.test("both full list and lean detail carry the complete forwarded body beside uniqueBody", async () => {
+  const message = {
+    id: "forward-01",
+    subject: "Fwd: Council plans",
+    uniqueBody: { contentType: "text", content: "" },
+    body: {
+      contentType: "text",
+      content:
+        "Begin forwarded message: All available building plans attached.",
+    },
+  };
+  const { deps, calls } = recorder((url) =>
+    ok(url.includes("/messages?") ? { value: [message] } : message)
+  );
+  const page = await graph.listMessages(deps, "office@example.test", {
+    fromIso: "2026-10-01T00:00:00Z",
+    top: 1,
+  });
+  const detail = await graph.messageDetail(
+    deps,
+    "office@example.test",
+    "forward-01",
+  );
+  assertEquals(page.items[0].fullBodyText, message.body.content);
+  assertEquals(detail.fullText, message.body.content);
+  assertEquals(detail.fullIsHtml, false);
+  assert(
+    calls.every((c) =>
+      new URL(c.url).searchParams.get("$select")?.split(",").includes("body")
+    ),
+  );
+});

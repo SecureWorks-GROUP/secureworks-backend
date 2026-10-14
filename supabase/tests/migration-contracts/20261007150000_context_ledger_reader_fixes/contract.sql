@@ -726,6 +726,11 @@ BEGIN;
 -- so the bodies snapshotted and re-applied below are this migration's own)
 SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset
 \if :held_messages_live
+-- The later story-card read changes are reversed only inside this contract's transaction.
+SELECT to_regprocedure('public.context_job_story_payment_terms(jsonb)') IS NOT NULL AS story_card_causes_live \gset
+\if :story_card_causes_live
+\ir ../../../rollbacks/20261014120000_context_story_card_causes_down.sql
+\endif
 \ir ../../../rollbacks/20261012100000_context_held_messages_down.sql
 \endif
 CREATE TEMP TABLE rf_md5 AS
