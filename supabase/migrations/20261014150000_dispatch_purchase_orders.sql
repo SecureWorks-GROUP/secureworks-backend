@@ -2,7 +2,7 @@
 --
 -- Contract: docs/dispatch-slice-5-contract.md. Rules:
 -- supabase/functions/ops-api/dispatch_orders.ts. Reads and writes:
--- supabase/functions/ops-api/dispatch_orders_store.ts, through the ten ops-api
+-- supabase/functions/ops-api/dispatch_orders_store.ts, through the eleven ops-api
 -- `dispatch_order*` / `dispatch_email_link_po` actions and nothing else.
 --
 -- What this adds:
@@ -20,7 +20,9 @@
 --   4. dispatch_commit_order and dispatch_commit_order_update: each multi-table
 --      write in one transaction, refusing `lines_changed`, `order_changed`,
 --      `order_open`, `draft_changed` or `draft_sending` (raised as the message of
---      a P0001) rather than ordering a line edited in another tab.
+--      a P0001) rather than ordering a line edited in another tab; and
+--      dispatch_release_unknown_send, which releases a send that was not
+--      confirmed to draft together with its job_events row.
 --   5. An index on job_material_lines.purchase_order_id, which this slice is
 --      the first to write.
 --   6. The private bucket dispatch-order-pdfs (skipped where Supabase storage is
