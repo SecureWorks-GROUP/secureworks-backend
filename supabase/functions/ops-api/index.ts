@@ -1345,6 +1345,16 @@ import {
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
+import {
+  type JobCloseoutCaller,
+  type JobCloseoutDeps,
+  JobCloseoutError,
+  ghlProxyReviewSender,
+  requestJobReview,
+  reviewRequestMessage as closeoutReviewRequestMessage,
+  runJobCloseoutAction,
+} from './job_closeout.ts'
+import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -8178,6 +8188,21 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           logDebtDeskFailure(action, error)
           return json({ ok: false, code: 'DEBT_DESK_FAILED', error: 'The debt desk could not complete this action' }, 502)
         }
+      }
+      // ── Paid close-out for fencing and patio (job_closeout.ts; AGENTS.md "Paid Fencing And
+      // Patio Jobs Go To Get Review"). Server key only for anything that moves, texts or
+      // archives; the backlog list (a dry run) also admits a signed-in staff operator.
+      case 'job_closeout_paid':
+      case 'job_closeout_catch_up':
+      case 'job_closeout_sweep':
+      case 'job_closeout_backlog_preview': {
+        const closeoutCaller: JobCloseoutCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' }
+          : _opsApiCallerIsStaffOperator(authMode, authUser)
+          ? { kind: 'staff' }
+          : { kind: 'none' }
+        const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
+        return json(closeout.body, closeout.status)
       }
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
       // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
@@ -35110,14 +35135,37 @@ async function updateJobStatus(client: any, body: any) {
     }
   }
 
-  const { data, error } = await client
-    .from('jobs')
-    .update(update)
-    .eq('id', jId)
-    .select()
-    .single()
+  // Optional compare and set (paid close-out, job_closeout.ts): with expected_statuses the
+  // write lands only while the job still has one of them, so a card moved by hand in the
+  // meantime is left alone and nothing below runs. Without it the write is unchanged.
+  const expectedStatuses = Array.isArray(body.expected_statuses)
+    ? body.expected_statuses.filter((s: unknown) => typeof s === 'string' && s.length > 0)
+    : null
+  let data: any
+  if (expectedStatuses && expectedStatuses.length > 0) {
+    const cas = await client
+      .from('jobs')
+      .update(update)
+      .eq('id', jId)
+      .in('status', expectedStatuses)
+      .select()
+      .maybeSingle()
+    if (cas.error) throw cas.error
+    if (!cas.data) {
+      return { success: false, job_id: jId, skipped: 'status_changed', expected_statuses: expectedStatuses, status_seen: oldStatus }
+    }
+    data = cas.data
+  } else {
+    const { data: written, error } = await client
+      .from('jobs')
+      .update(update)
+      .eq('id', jId)
+      .select()
+      .single()
 
-  if (error) throw error
+    if (error) throw error
+    data = written
+  }
 
   // ── M3d U2b: a transition INTO a terminal jobs.status closes the job's still-
   // open crew assignments so the trade Board stops classifying finished/dead work
@@ -35187,6 +35235,19 @@ async function updateJobStatus(client: any, body: any) {
     }
   } catch (e) {
     console.log('[ops-api] ready-transition manager notify failed (non-blocking):', (e as Error)?.message)
+  }
+
+  // ── Paid close-out: a fencing or patio card entering Get Review (by the Xero sync or by
+  // hand) asks the one review sender (job_closeout.ts). The sender's own switch, the paid
+  // rule, the holds and the per-job claim decide; with the switch off it reads one row
+  // and returns. Never blocks the status change.
+  if (status === 'get_review' && oldStatus !== 'get_review' && isCloseoutJobType(data?.type || jobBefore?.type)) {
+    try {
+      const review = await requestJobReview(jobCloseoutDeps(client), { job_id: jId, trigger: `status_changed:${source}` })
+      console.log(`[ops-api] get_review review request for ${jId}: ${review?.action}`)
+    } catch (e) {
+      console.log('[ops-api] get_review review request failed (non-blocking):', (e as Error)?.message)
+    }
   }
 
   // Fire-and-forget: recompute job intelligence after status change
@@ -54634,12 +54695,30 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   }
 }
 
-// ── send_review_request: SMS client with Google review link ──
-function reviewRequestMessage(clientName?: string | null): string {
-  return `Hi ${clientName?.split(' ')[0] || 'there'}, thanks for choosing SecureWorks! We'd love to hear about your experience: ${GOOGLE_REVIEW_URL}\n\nYour feedback means the world to us 🙏`
+// ── send_review_request: a person asks for the review text on one job ──
+// The text, the recipients (every paying owner), the 90-day look-back and the per-job
+// claim are the paid close-out sender's (job_closeout.ts requestJobReview), so a manual
+// request and the automatic one can never text the same job twice. The sender switch
+// (job_closeout_settings.review_sender_mode) governs both; a manual request skips only
+// the automatic checks (get_review, holds, paid rule, send window), and says payment was
+// received only on a fencing or patio job that passes the paid rule.
+function reviewRequestMessage(clientName?: string | null, jobType?: string | null, paid = false): string {
+  return closeoutReviewRequestMessage(clientName, jobType, paid)
 }
 export const _reviewRequestMessageForTest = reviewRequestMessage
 export const _googleReviewUrlForTest = GOOGLE_REVIEW_URL
+
+/** One review text through ghl-proxy send_sms: the shared sender policy and contact guard. */
+function jobCloseoutDeps(client: any): JobCloseoutDeps {
+  return {
+    client,
+    now: () => new Date(),
+    env: (key: string) => Deno.env.get(key),
+    moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
+    sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+    laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
 
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
@@ -54651,41 +54730,33 @@ async function sendReviewRequest(client: any, body: any) {
     'send_review_request',
   )
 
-  const { data: job, error: jobErr } = await client
-    .from('jobs')
-    .select('id, client_name, job_number, ghl_contact_id')
-    .eq('id', jId)
-    .single()
-  if (jobErr || !job) throw new Error('Job not found')
-
-  if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
-
-  const smsMessage = reviewRequestMessage(job.client_name)
-
-  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-  const smsResp = await fetch(ghlUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contactId: job.ghl_contact_id,
-      message: smsMessage,
-    }),
-  })
-  const smsResult = await smsResp.json()
-
-  // Log event
-  await client.from('job_events').insert({
-    job_id: jId,
-    event_type: 'review_request_sent',
-    detail_json: {
-      review_url: GOOGLE_REVIEW_URL,
-      sms_sent: smsResult.success || false,
-    },
-  })
-
+  let result: Record<string, any>
+  try {
+    result = await requestJobReview(jobCloseoutDeps(client), {
+      job_id: jId,
+      trigger: `manual:${body.operator_email || body.user_email || 'send_review_request'}`,
+      manual: true,
+    })
+  } catch (e) {
+    if (e instanceof JobCloseoutError) throw new ApiError(e.message, e.status)
+    throw e
+  }
+  if (result.action === 'already_claimed') {
+    throw new ApiError('A review text was already requested for this job; it is never sent twice', 409)
+  }
+  if (result.action === 'sender_off') {
+    throw new ApiError('The review sender is switched off (job_closeout_settings.review_sender_mode)', 409)
+  }
+  if (result.action === 'no_contact') {
+    throw new ApiError('No GHL contact is linked for this job; link the contact and send the review again', 409)
+  }
+  const recipients = Array.isArray(result.recipients) ? result.recipients : []
   return {
-    success: true,
-    sms_sent: smsResult.success || false,
+    success: result.ok === true && result.action === 'sent',
+    sms_sent: result.action === 'sent',
+    outcome: result.action,
+    reason: result.reason ?? null,
+    recipients,
     review_url: GOOGLE_REVIEW_URL,
   }
 }

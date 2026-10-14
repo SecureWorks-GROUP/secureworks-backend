@@ -4638,6 +4638,50 @@ columns or it shows the undeducted figure. The Xero line is found by its
 description prefix. Contract, the screen changes still owed and how the office
 ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
 
+## Paid Fencing And Patio Jobs Go To Get Review
+
+Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
+`complete`), gets one review text, and is archived 24 hours later. "Paid" is
+the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
+invoice PAID and none DRAFT; every paying party, `job_contacts` with
+`removed_at` null, `status` not `removed`, and a share that is not an explicit
+0 (null counts), has a paid final, a final needing positive evidence by the
+Debt tab's `invoiceKindOf` (an unlabelled invoice never is); paid covers the
+`job_quote_values` quote plus customer-accepted or invoiced variations; one
+approved internally but never accepted is not owed). A quote or variations READ
+failure is `undecided`: nothing moves, texts, archives or is recorded that run;
+only no sent quote or no recorded value lets rules 1 and 2 decide alone. A live
+sweep that cannot read the switches archives nothing. Every read, move, text and
+sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
+holds: status `rectification` or `jobs.is_callback`. If only the quote check
+fails the card stays put with `job_closeout_state.paid_less_than_quoted`.
+Builder, insurance, make-safe and repair jobs keep the old xero-sync rule
+(`invoiced` -> `complete`), and so do fencing and patio while the move switch
+is off. Paid covers the quote short by at most $1 (rounding). One review text
+per job ever (`job_review_claims`, claimed before any send; no claim is kept
+when nothing went out: an unlinked contact, a job paid more than 30 days ago,
+or every send refused by a ghl-proxy guard, and such a card still archives
+after 24 hours), to every paying owner, skipping any contact sent a review text
+in the last 90 days from any source. Every status write uses
+`update_job_status` `expected_statuses` (compare and set). A card moves on
+payment only when paid within 30 days, whatever its from-status
+(`stale_payment` otherwise); the `complete` backlog is never caught up or
+texted, and `job_closeout_backlog_preview` only lists what a later step may
+archive.
+
+Switches (migration `20261013150000`), all off; turn on in this order:
+`job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
+`dry_run` (read the `review_request_dry_run` job events); then someone must
+switch the old GoHighLevel review workflow OFF in GHL Automation; then env
+`JOB_REVIEW_SENDING_ENABLED=true` on ops-api and `review_sender_mode` `live`
+(live without the env reads as dry run); last, `automation_switches.closeout`
+for the `job-closeout-sweep` cron. Adding a lane to `automation_lane_enabled()`
+moves the md5 four earlier migrations' guards pin: their contracts stand the old
+body back up from
+`supabase/tests/migration-contracts/20261013150000_job_closeout_review_archive/pre_closeout_lane_reader.sql`.
+Contract: `docs/job-closeout-v1.md`; tests: `job_paid_closeout_test.ts`,
+`job_closeout_test.ts`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

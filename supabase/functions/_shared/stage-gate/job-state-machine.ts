@@ -46,7 +46,7 @@ export type CanonicalStatus =
   | 'complete'
   | 'final_payment'          // UI view per Phase C, but still in CHECK
   | 'invoiced'
-  | 'get_review'             // UI view per Phase C, but still in CHECK
+  | 'get_review'             // fencing/patio stage: paid, review text, archived after 24h
   | 'cancelled'
   | 'lost'                   // legacy — Phase D will retire
   | 'archived';
@@ -100,7 +100,7 @@ export const STATUS_MAP: Record<string, StatusEntry> = {
   complete:            { bucket: 'done',           stage_order: 14, human: 'Complete',              color: '#27AE60', owner: 'system', jarvis_posture: 'suggest' },
   final_payment:       { bucket: 'done',           stage_order: 15, human: 'Final Payment',         color: '#F39C12', owner: 'office', jarvis_posture: 'suggest', derived_view: true },
   invoiced:            { bucket: 'done',           stage_order: 16, human: 'Invoiced',              color: '#7F8C8D', owner: 'system', jarvis_posture: 'read_only' },
-  get_review:          { bucket: 'done',           stage_order: 17, human: 'Get Review',            color: '#9B59B6', owner: 'sales',  jarvis_posture: 'suggest', derived_view: true },
+  get_review:          { bucket: 'done',           stage_order: 17, human: 'Get Review',            color: '#9B59B6', owner: 'sales',  jarvis_posture: 'suggest' },
   cancelled:           { bucket: 'terminal',       stage_order: 98, human: 'Cancelled',             color: '#E74C3C', owner: 'sales',  jarvis_posture: 'read_only' },
   lost:                { bucket: 'terminal',       stage_order: 99, human: 'Lost',                  color: '#95A5A6', owner: 'sales',  jarvis_posture: 'read_only', legacy: true },
   archived:            { bucket: 'terminal',       stage_order: 99, human: 'Archived',              color: '#7F8C8D', owner: 'system', jarvis_posture: 'read_only' }
@@ -117,18 +117,21 @@ export const STATUS_COLORS: Record<string, string> = Object.fromEntries(
 /** Per-type stage order (Phase C lock 2026-04-25). These are the active
     stages a job of this type may legitimately occupy. Legacy values are
     NOT in these arrays — they exist in STATUS_MAP for visibility, but
-    Phase D will migrate rows out of them. */
+    Phase D will migrate rows out of them.
+    get_review is a real fencing and patio stage (paid close-out, 13 Oct 2026): a paid
+    job moves invoiced -> get_review, one review text goes out, and the card is archived
+    24 hours later (ops-api/job_closeout.ts). Decking follows the patio list, as before. */
 export const FENCING_STAGES: CanonicalStatus[] = [
   'draft', 'quoted', 'partially_accepted', 'accepted', 'awaiting_deposit',
   'order_materials', 'awaiting_supplier', 'order_confirmed',
-  'scheduled', 'in_progress', 'complete', 'invoiced',
+  'scheduled', 'in_progress', 'complete', 'invoiced', 'get_review',
   'cancelled', 'archived'
 ];
 
 export const PATIO_STAGES: CanonicalStatus[] = [
   'draft', 'quoted', 'accepted', 'awaiting_deposit', 'approvals',
   'order_materials', 'awaiting_supplier', 'order_confirmed',
-  'scheduled', 'in_progress', 'complete', 'invoiced',
+  'scheduled', 'in_progress', 'complete', 'invoiced', 'get_review',
   'cancelled', 'archived'
 ];
 
@@ -266,7 +269,7 @@ export function mapStatus(status: string | null | undefined): StatusMappingResul
 export const STATUS_ENUM_DESCRIPTION =
   'New status. Allowed values: ' + ALL_CANONICAL_STATUSES.join('|') +
   '. Per-type validity is enforced server-side. ' +
-  'Legacy values (deposit/processing/lost/rectification/final_payment/get_review/schedule_install) ' +
+  'Legacy values (deposit/processing/lost/rectification/final_payment/schedule_install) ' +
   'still exist in production but are migration targets — prefer canonical names.';
 
 export const VERSION = 'cap1a-state-machine-2026-05-01';

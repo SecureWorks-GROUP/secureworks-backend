@@ -31,6 +31,7 @@ import { attachPdfToXeroInvoiceUntilAttached, distinctXeroPdfFilenames } from '.
 import { contactAddressUpdate, xeroAddressesFor } from '../_shared/xero_contact_address.ts'
 import { incrementalModifiedSince } from './sync_window.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
+import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -565,7 +566,72 @@ async function sweepTradeBillPdfs(sb: any, accessToken: string, tenantId: string
   return out
 }
 
+// ── Paid close-out helpers (fencing and patio; ops-api job_closeout.ts owns the rule) ──
+
+// The move switch, read once per run. Unreadable reads as off: today's rule then runs.
+let closeoutMoveSwitch: Promise<boolean> | null = null
+function closeoutMoveEnabled(sb: any): Promise<boolean> {
+  closeoutMoveSwitch ??= (async () => {
+    try {
+      const { data, error } = await sb.from('job_closeout_settings')
+        .select('get_review_move_enabled')
+        .eq('id', 1)
+        .maybeSingle()
+      return !error && data?.get_review_move_enabled === true
+    } catch {
+      return false
+    }
+  })()
+  return closeoutMoveSwitch
+}
+
+async function postOpsApi(action: string, body: Record<string, unknown>): Promise<any> {
+  try {
+    const resp = await fetch(`${SUPABASE_URL}/functions/v1/ops-api?action=${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+      body: JSON.stringify(body),
+    })
+    return await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }))
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  }
+}
+
+// The job's payment_received event and its evidence row, written when a paid job moves.
+async function logJobPaymentReceived(sb: any, jobId: string, inv: any) {
+  await sb.from('job_events').insert({
+    job_id: jobId,
+    event_type: 'payment_received',
+    detail_json: {
+      source: 'xero_sync',
+      xero_invoice_id: inv.InvoiceID,
+      invoice_number: inv.InvoiceNumber,
+      amount_paid: inv.AmountPaid,
+      fully_paid_on: inv.FullyPaidOnDate,
+    },
+  })
+  if (await automationLaneEnabled(sb, 'capture')) {
+    const { error: captureError } = await insertCapturedEvidence(sb, {
+      event_type: 'invoice.payment_received', source: 'xero-sync',
+      entity_type: 'invoice', entity_id: inv.InvoiceID,
+      job_id: jobId, match_method: 'direct_job_id',
+      channel: 'invoice', direction: 'internal',
+      occurred_at: new Date().toISOString(),
+      event_at: xeroDateToIsoTimestamp(inv.FullyPaidOnDate),
+      provider_message_id: `xero:invoice:${inv.InvoiceID}:paid`,
+      body_preview: `Xero marks invoice ${inv.InvoiceNumber || inv.InvoiceID} PAID.`,
+      payload: { invoice_number: inv.InvoiceNumber, amount_paid: inv.AmountPaid,
+        fully_paid_on: inv.FullyPaidOnDate || null },
+    })
+    if (captureError && captureError.code !== '23505') console.error('[xero-sync] payment evidence failed:', captureError.message)
+  }
+  console.log(`[xero-sync] Job ${jobId} fully paid — payment event logged`)
+}
+
 async function syncInvoices(sb: any) {
+  closeoutMoveSwitch = null
+  const closeoutResults: { job_id: string; action: string }[] = []
   const { accessToken, tenantId } = await getToken(sb)
   let tradePdfBackfilled = 0
 
@@ -805,67 +871,61 @@ async function syncInvoices(sb: any) {
                 .limit(1)
 
               if (!unpaid || unpaid.length === 0) {
-                // All invoices paid — check if job is in 'invoiced' status
-                const { data: jobData } = await sb.from('jobs')
-                  .select('id, status')
+                // All invoices paid. A fencing or patio job, while the paid close-out
+                // switch is on, goes to ops-api job_closeout_paid: the strict paid rule,
+                // the holds and the move to get_review live there (job_closeout.ts).
+                // Every other job, and fencing and patio while the switch is off, keeps
+                // the rule below exactly: at 'invoiced' -> 'complete'.
+                const { data: paidJob } = await sb.from('jobs')
+                  .select('id, status, type')
                   .eq('id', invRecord.job_id)
-                  .eq('status', 'invoiced')
                   .maybeSingle()
-
-                if (jobData) {
-                  // Route through ops-api so GHL stage sync fires automatically
-                  try {
-                    const opsUrl = `${SUPABASE_URL}/functions/v1/ops-api?action=update_job_status`
-                    const opsResp = await fetch(opsUrl, {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-                      },
-                      body: JSON.stringify({
-                        jobId: jobData.id,
-                        status: 'complete',
-                        source: 'xero_sync',
-                      }),
-                    })
-                    const opsResult = await opsResp.json()
-                    console.log(`[xero-sync] Job ${jobData.id} fully paid — status updated via ops-api:`, opsResult.job?.status || opsResult.error)
-                  } catch (e: any) {
-                    // Fallback: update directly if ops-api call fails
-                    console.error(`[xero-sync] ops-api call failed, updating directly:`, (e as Error).message)
-                    await sb.from('jobs')
-                      .update({ status: 'complete', completed_at: new Date().toISOString() })
-                      .eq('id', jobData.id)
-                      .eq('status', 'invoiced')
-                  }
-
-                  await sb.from('job_events').insert({
-                    job_id: jobData.id,
-                    event_type: 'payment_received',
-                    detail_json: {
-                      source: 'xero_sync',
-                      xero_invoice_id: inv.InvoiceID,
-                      invoice_number: inv.InvoiceNumber,
-                      amount_paid: inv.AmountPaid,
-                      fully_paid_on: inv.FullyPaidOnDate,
-                    },
+                if (paidJob && isCloseoutJobType(paidJob.type) && await closeoutMoveEnabled(sb)) {
+                  const closeout = await postOpsApi('job_closeout_paid', {
+                    job_id: paidJob.id,
+                    source: 'xero_sync',
+                    xero_invoice_id: inv.InvoiceID,
                   })
-                  if (await automationLaneEnabled(sb, 'capture')) {
-                    const { error: captureError } = await insertCapturedEvidence(sb, {
-                      event_type: 'invoice.payment_received', source: 'xero-sync',
-                      entity_type: 'invoice', entity_id: inv.InvoiceID,
-                      job_id: jobData.id, match_method: 'direct_job_id',
-                      channel: 'invoice', direction: 'internal',
-                      occurred_at: new Date().toISOString(),
-                      event_at: xeroDateToIsoTimestamp(inv.FullyPaidOnDate),
-                      provider_message_id: `xero:invoice:${inv.InvoiceID}:paid`,
-                      body_preview: `Xero marks invoice ${inv.InvoiceNumber || inv.InvoiceID} PAID.`,
-                      payload: { invoice_number: inv.InvoiceNumber, amount_paid: inv.AmountPaid,
-                        fully_paid_on: inv.FullyPaidOnDate || null },
-                    })
-                    if (captureError && captureError.code !== '23505') console.error('[xero-sync] payment evidence failed:', captureError.message)
+                  closeoutResults.push({ job_id: paidJob.id, action: closeout?.action ?? closeout?.code ?? 'error' })
+                  console.log(`[xero-sync] Job ${paidJob.id} paid close-out: ${closeout?.action ?? closeout?.error}`)
+                  if (closeout?.action === 'moved') await logJobPaymentReceived(sb, paidJob.id, inv)
+                } else {
+                  // All invoices paid — check if job is in 'invoiced' status
+                  const { data: jobData } = await sb.from('jobs')
+                    .select('id, status')
+                    .eq('id', invRecord.job_id)
+                    .eq('status', 'invoiced')
+                    .maybeSingle()
+
+                  if (jobData) {
+                    // Route through ops-api so GHL stage sync fires automatically
+                    try {
+                      const opsUrl = `${SUPABASE_URL}/functions/v1/ops-api?action=update_job_status`
+                      const opsResp = await fetch(opsUrl, {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+                        },
+                        body: JSON.stringify({
+                          jobId: jobData.id,
+                          status: 'complete',
+                          source: 'xero_sync',
+                        }),
+                      })
+                      const opsResult = await opsResp.json()
+                      console.log(`[xero-sync] Job ${jobData.id} fully paid — status updated via ops-api:`, opsResult.job?.status || opsResult.error)
+                    } catch (e) {
+                      // Fallback: update directly if ops-api call fails
+                      console.error(`[xero-sync] ops-api call failed, updating directly:`, (e as Error).message)
+                      await sb.from('jobs')
+                        .update({ status: 'complete', completed_at: new Date().toISOString() })
+                        .eq('id', jobData.id)
+                        .eq('status', 'invoiced')
+                    }
+
+                    await logJobPaymentReceived(sb, jobData.id, inv)
                   }
-                  console.log(`[xero-sync] Job ${jobData.id} fully paid — payment event logged`)
                 }
               }
             }
@@ -915,6 +975,14 @@ async function syncInvoices(sb: any) {
     { key: 'sync_invoices', cursor_at: runStartedAt, note: `synced ${totalSynced} since ${modifiedSince || 'the beginning'}`, updated_at: new Date().toISOString() },
     { onConflict: 'key' },
   )
+
+  // ── Paid close-out catch-up: invoiced and final_payment fencing and patio cards whose
+  //    last invoice was paid before the card got there (switch on only; ops-api decides).
+  let closeoutCatchUp: unknown = { ran: false, reason: 'switch_off' }
+  if (await closeoutMoveEnabled(sb)) {
+    closeoutCatchUp = await postOpsApi('job_closeout_catch_up', { source: 'job_closeout_catch_up' })
+  }
+  const closeout = { on_paid: closeoutResults, catch_up: closeoutCatchUp }
 
   // ── Trade bill PDFs: targeted sweep for bills the incremental loop never re-reads ──
   const tradePdfSweep = await sweepTradeBillPdfs(sb, accessToken, tenantId)
@@ -994,11 +1062,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence },
+    payload: { synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence }
+  return { success: true, synced: totalSynced, deposit_stamps: depositStamps, deposit_stamp_contradictions: depositStampContradictions, reconciled, reconciliation_complete: !reconciliationError, reconciliation_error: reconciliationError, reconciliation: reconciliationSummary, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult, trade_pdf_sweep: tradePdfSweep, contact_address_sweep: contactAddressSweep, invoice_evidence: invoiceEvidence, closeout }
 }
 
 

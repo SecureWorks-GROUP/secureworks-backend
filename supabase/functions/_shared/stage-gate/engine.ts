@@ -297,8 +297,9 @@ export const FENCING_TRANSITIONS: TransitionGraph = {
   order_confirmed: { forward: ['scheduled'], backward: ['awaiting_supplier'] },
   scheduled: { forward: ['in_progress'], backward: ['order_confirmed'] },
   in_progress: { forward: ['complete'], backward: ['scheduled'] },
-  complete: { forward: ['invoiced', 'archived'], backward: [] },
-  invoiced: { forward: ['archived'], backward: [] },
+  complete: { forward: ['invoiced', 'get_review', 'archived'], backward: [] },
+  invoiced: { forward: ['get_review', 'archived'], backward: [] },
+  get_review: { forward: ['archived'], backward: ['invoiced'] },
   cancelled: { forward: ['archived'], backward: [] },
   archived: { forward: [], backward: [] },
 };
@@ -314,8 +315,9 @@ export const PATIO_TRANSITIONS: TransitionGraph = {
   order_confirmed: { forward: ['scheduled'], backward: ['awaiting_supplier'] },
   scheduled: { forward: ['in_progress'], backward: ['order_confirmed'] },
   in_progress: { forward: ['complete'], backward: ['scheduled'] },
-  complete: { forward: ['invoiced', 'archived'], backward: [] },
-  invoiced: { forward: ['archived'], backward: [] },
+  complete: { forward: ['invoiced', 'get_review', 'archived'], backward: [] },
+  invoiced: { forward: ['get_review', 'archived'], backward: [] },
+  get_review: { forward: ['archived'], backward: ['invoiced'] },
   cancelled: { forward: ['archived'], backward: [] },
   archived: { forward: [], backward: [] },
 };
@@ -1065,7 +1067,9 @@ export function canTransition(
     allowed = false;
     reasons.push(`complete → ${to} is forbidden (would corrupt finance reporting).`);
   }
-  if (from === 'invoiced' && to !== 'archived' && to !== 'cancelled') {
+  // A paid fencing or patio job goes invoiced -> get_review (paid close-out, 13 Oct 2026).
+  const paidCloseout = to === 'get_review' && (jobType === 'fencing' || jobType === 'patio');
+  if (from === 'invoiced' && to !== 'archived' && to !== 'cancelled' && !paidCloseout) {
     hardBlocked = true;
     allowed = false;
     reasons.push('invoiced is a financial pseudo-terminal — reverse via Xero void, not status flip.');
