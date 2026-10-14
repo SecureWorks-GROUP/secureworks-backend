@@ -21,7 +21,9 @@
 --      write in one transaction, refusing `lines_changed`, `order_changed`,
 --      `order_open`, `draft_changed` or `draft_sending` (raised as the message of
 --      a P0001) rather than ordering a line edited in another tab.
---   5. The private bucket dispatch-order-pdfs (skipped where Supabase storage is
+--   5. An index on job_material_lines.purchase_order_id, which this slice is
+--      the first to write.
+--   6. The private bucket dispatch-order-pdfs (skipped where Supabase storage is
 --      absent, as in the contract runner). Old versions are kept: a sent email
 --      keeps pointing at the bytes it carried.
 --
@@ -71,6 +73,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS purchase_orders_org_po_number_key
 CREATE UNIQUE INDEX IF NOT EXISTS purchase_orders_open_dispatch_supplier_key
   ON public.purchase_orders (job_id, supplier_id)
   WHERE source = 'dispatch' AND status NOT IN ('cancelled', 'deleted') AND xero_po_id IS NULL;
+
+-- Slice 5 is the first writer of job_material_lines.purchase_order_id, and the
+-- commit functions, the read and the purchase_orders ON DELETE SET NULL all look
+-- lines up by it.
+CREATE INDEX IF NOT EXISTS job_material_lines_purchase_order_id_idx
+  ON public.job_material_lines (purchase_order_id)
+  WHERE purchase_order_id IS NOT NULL;
 
 COMMENT ON COLUMN public.purchase_orders.source IS
   'dispatch when made by the Dispatch tab (docs/dispatch-slice-5-contract.md); null for every other order.';

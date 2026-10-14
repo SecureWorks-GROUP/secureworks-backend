@@ -53,6 +53,8 @@ SELECT pg_temp.po_assert((SELECT count(*) FROM information_schema.columns
  'purchase_orders must carry the nine nullable slice 5 columns');
 SELECT pg_temp.po_assert(to_regclass('public.purchase_orders_org_po_number_key') IS NOT NULL,
  'the (org_id, po_number) unique index must exist');
+SELECT pg_temp.po_assert(to_regclass('public.job_material_lines_purchase_order_id_idx') IS NOT NULL,
+ 'job_material_lines.purchase_order_id must be indexed');
 SELECT pg_temp.po_assert((SELECT is_called AND last_value >= 1000000 FROM public.po_number_seq),
  'po_number_seq must give 1,000,001 or more next');
 SELECT pg_temp.po_assert(public.dispatch_next_po_number() ~ '^PO-[0-9]{7,}$',

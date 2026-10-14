@@ -44,7 +44,8 @@ row, no paid AI read.
 
 Two indexes: unique `(org_id, po_number)`; and unique `(job_id, supplier_id)`
 where `source = 'dispatch'`, status not cancelled or deleted, and not in Xero
-(one open Dispatch order per job and supplier). A Dispatch order is made with
+(one open Dispatch order per job and supplier). `job_material_lines` gains an
+index on `purchase_order_id` (this slice is its first writer). A Dispatch order is made with
 `status 'draft'`, `po_type 'material'`, `subtotal`, `tax`, `total` 0,
 `reference` the job number, and goes to `sent` on its first send.
 

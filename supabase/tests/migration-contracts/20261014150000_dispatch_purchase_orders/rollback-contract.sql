@@ -18,6 +18,9 @@ BEGIN
                                  'pdf_version', 'pdf_rendered_at', 'last_sent_pdf_version', 'last_sent_at')) THEN
   RAISE EXCEPTION 'dispatch purchase orders rollback contract: a slice 5 purchase_orders column still exists';
  END IF;
+ IF to_regclass('public.job_material_lines_purchase_order_id_idx') IS NOT NULL THEN
+  RAISE EXCEPTION 'dispatch purchase orders rollback contract: the purchase_order_id index still exists';
+ END IF;
  IF to_regclass('public.purchase_orders') IS NULL OR to_regclass('public.job_material_lines') IS NULL
   OR to_regclass('public.po_number_seq') IS NULL THEN
   RAISE EXCEPTION 'dispatch purchase orders rollback contract: the down removed something it does not own';
