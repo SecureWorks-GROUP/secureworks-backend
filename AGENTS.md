@@ -520,7 +520,9 @@ through `dispatch_release_unknown_send` (draft and audit row together). Only `di
 `dispatch_order_reply` email anyone: on a person's press, or the ops key naming
 that person in `operator_email`, after the draft-hash check and the claim, and a
 Resend result that is not a clear yes or no is `send_unknown`, never re-sent on
-its own. A supplier reply never moves a Dispatch order. Contract:
+its own. A supplier reply never moves a Dispatch order, and job acceptance never
+pushes one to Xero (`updateJobStatus` reads `source IS NULL`, only on a real
+move into Accepted). Contract:
 `docs/dispatch-slice-5-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical

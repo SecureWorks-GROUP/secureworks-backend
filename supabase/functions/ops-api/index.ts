@@ -35477,12 +35477,19 @@ async function updateJobStatus(client: any, body: any) {
           }
         }
 
-        // 2. Push draft labour POs to Xero
+        // 2. Push draft labour POs to Xero, only when the job really moved INTO
+        // Accepted (a re-save or a drag back to Accepted pushes nothing), and
+        // never a Dispatch order (slice 5): it stays draft until its email goes,
+        // forever when the supplier has no address, and Dispatch never puts an
+        // order in Xero. `source` is 'dispatch' or null, so `is null` keeps every
+        // other order; `.neq('source', 'dispatch')` would drop them all (NULL).
+        if (oldStatus === 'accepted') return
         let draftPoQuery = client.from('purchase_orders')
           .select('id, po_number')
           .eq('job_id', jId)
           .eq('status', 'draft')
           .is('xero_po_id', null)
+          .is('source', null)
         if (ordersOn) draftPoQuery = draftPoQuery.is('quote_builder_version_id', null)
         const { data: draftPOs } = await draftPoQuery
         if (draftPOs && draftPOs.length > 0) {

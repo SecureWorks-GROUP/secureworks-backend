@@ -3,7 +3,8 @@
 -- unique; one open Dispatch order per job and supplier; create stamps exactly the To order lines it
 -- was given and refuses a line changed elsewhere; update adds and takes off lines and refreshes the
 -- draft; cancel releases every line and discards the draft; a send in flight holds the order; a
--- not-confirmed send is released only with its audit row.
+-- not-confirmed send is released only with its audit row; job acceptance's Xero push never reads
+-- a Dispatch order.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -126,6 +127,8 @@ SELECT pg_temp.po_assert(pg_temp.po_raised($q$
 $q$) IS NOT NULL, 'an order number must be unique in the organisation');
 
 -- 7. Update: take one line off, add the Not reviewed line once it is To order; the draft follows.
+--    The order stamp sent is the stored purchase_orders.updated_at, the value dispatch_materials
+--    returns for the screen: that one is accepted, any other refuses order_changed.
 UPDATE public.job_material_lines SET status = 'to_order', updated_at = updated_at + interval '1 second'
  WHERE id = '9f300000-0000-4000-8000-000000000003';
 CREATE TEMP TABLE po_upd AS
@@ -256,5 +259,24 @@ SELECT pg_temp.po_assert((SELECT count(*) FROM public.job_events ev JOIN po_rel 
  'the release must write exactly one audit row naming who, how and when');
 SELECT pg_temp.po_assert(pg_temp.po_raised($q$ SELECT public.dispatch_release_unknown_send(p) FROM po_rel $q$)
  = 'draft_not_unknown', 'a released draft cannot be released again');
+
+-- 13. Job acceptance pushes a job's draft orders to Xero (ops-api updateJobStatus) and must never
+--     take a Dispatch one: it reads status = 'draft', xero_po_id IS NULL, source IS NULL. On a job
+--     holding an older draft order and a Dispatch draft, that read finds the older order alone; the
+--     `source <> 'dispatch'` form would find neither, since an older order's source is NULL; and the
+--     column admits nothing else to slip past `IS NULL`.
+INSERT INTO public.purchase_orders (job_id, po_number, status)
+VALUES ('9f000000-0000-4000-8000-000000000001', 'PO-0000101', 'draft');
+UPDATE public.purchase_orders SET status = 'draft', last_sent_at = NULL WHERE po_number = 'PO-9000003';
+SELECT pg_temp.po_assert((SELECT array_agg(po_number ORDER BY po_number) FROM public.purchase_orders
+  WHERE job_id = '9f000000-0000-4000-8000-000000000001' AND status = 'draft' AND xero_po_id IS NULL
+    AND source IS NULL) = ARRAY['PO-0000101'],
+ 'the acceptance push read must find the older draft order and never the Dispatch draft');
+SELECT pg_temp.po_assert(NOT EXISTS (SELECT 1 FROM public.purchase_orders
+  WHERE job_id = '9f000000-0000-4000-8000-000000000001' AND status = 'draft' AND source <> 'dispatch'),
+ 'a not-equal filter on source would also drop the older order, so the push reads IS NULL');
+SELECT pg_temp.po_assert(pg_temp.po_raised($q$
+ UPDATE public.purchase_orders SET source = 'manual' WHERE po_number = 'PO-0000101'
+$q$) IS NOT NULL, 'source must admit only dispatch or null');
 
 ROLLBACK;

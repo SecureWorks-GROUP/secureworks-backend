@@ -174,13 +174,13 @@ for a make-safe job. Writes nothing; calls nothing outside.
 
 ### `dispatch_materials` (slice 4), extended
 
-- `orders[]` gains `supplier_id`, `source`, `pdf_version`,
+- `orders[]` gains `updated_at`, `supplier_id`, `source`, `pdf_version`,
   `last_sent_pdf_version`, `last_sent_at`, `in_xero`, and each Dispatch order line
   its `line_id`. `xero_po_id` is read only for `in_xero` and never passed on. An
   order with no `supplier_id` or no `source` was made outside Dispatch: it stays
   in "Orders on this job".
 - Each chosen supplier gains `order`: the newest Dispatch order for it on the job
-  that is not cancelled, as `{ id, po_number, status, chip: { state, text, tone,
+  that is not cancelled, as `{ id, po_number, status, updated_at, chip: { state, text, tone,
   in_xero }, in_xero, pdf_version, last_sent_pdf_version, last_sent_at }`, or
   null. The chip is `dispatchOrderChip` (the note's section 4.2): Not ordered;
   Send not confirmed; Draft email ready; Not sent; Changed, not sent; Replied
@@ -367,6 +367,12 @@ booking or a work order; a `business_events` row; a call to `reporting-api`,
 3. `analyseSupplierQuote`: section 6, item 7.
 4. Slice 4's `dispatch_materials_remove_supplier`: 409 `supplier_has_orders`
    while the supplier has an order on the job that is not cancelled.
+5. `updateJobStatus`'s acceptance push of draft orders to Xero runs only on a
+   real move into `accepted` (a re-save or a drag back to Accepted pushes
+   nothing) and reads `source IS NULL`, so a Dispatch order, which stays
+   draft until its email goes (for good when the supplier has no address),
+   never reaches Xero and never shows as in Xero. The crew work order
+   auto-approval beside it is unchanged.
 
 `send-po-email` and `update_supplier_email` are unchanged and never called.
 Known defects there, for separate work: `send-po-email` accepts only a server
