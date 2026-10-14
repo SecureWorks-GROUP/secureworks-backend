@@ -450,6 +450,7 @@ jobs:
             supabase/functions/ops-api/job_conversation_timeline_test.ts \
             supabase/functions/ops-api/job_conversation_window_test.ts \
             supabase/functions/ops-api/job_conversation_payer_threads_test.ts \
+            supabase/functions/ops-api/job_conversation_held_messages_test.ts \
             supabase/functions/ops-api/search_jobs_closed_test.ts \
             supabase/functions/ops-api/trade_variation_request_test.ts \
             supabase/functions/ops-api/context_unlinked_test.ts \
