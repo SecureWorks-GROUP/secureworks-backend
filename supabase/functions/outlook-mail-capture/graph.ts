@@ -236,7 +236,7 @@ const MESSAGE_SELECT = [
   "isDraft",
 ];
 /** Read with every message (full) or, when Graph refuses those on a list call, one GET per message. */
-const DETAIL_FIELDS = ["uniqueBody", "internetMessageHeaders"];
+const DETAIL_FIELDS = ["uniqueBody", "body", "internetMessageHeaders"];
 
 /** One page of a mailbox's messages (every folder), oldest first, in [fromIso, toIso). */
 export async function listMessages(
@@ -283,6 +283,9 @@ export async function listMessages(
       bodyIsHtml:
         (m.uniqueBody as { contentType?: unknown } | null)?.contentType ===
           "html",
+      fullBodyText: str((m.body as { content?: unknown } | null)?.content),
+      fullBodyIsHtml:
+        (m.body as { contentType?: unknown } | null)?.contentType === "html",
       headers: headerMap(m.internetMessageHeaders),
       detailRead: !args.lean,
       folderKind: "other",
@@ -298,7 +301,13 @@ export async function messageDetail(
   mailbox: string,
   graphId: string,
 ): Promise<
-  { text: string | null; isHtml: boolean; headers: Record<string, string> }
+  {
+    text: string | null;
+    isHtml: boolean;
+    fullText?: string | null;
+    fullIsHtml?: boolean;
+    headers: Record<string, string>;
+  }
 > {
   const m = await getJson(
     deps,
@@ -308,6 +317,9 @@ export async function messageDetail(
   );
   const b = m.uniqueBody as { content?: unknown; contentType?: unknown } | null;
   return {
+    fullText: str((m.body as { content?: unknown } | null)?.content),
+    fullIsHtml:
+      (m.body as { contentType?: unknown } | null)?.contentType === "html",
     text: str(b?.content),
     isHtml: b?.contentType === "html",
     headers: headerMap(m.internetMessageHeaders),

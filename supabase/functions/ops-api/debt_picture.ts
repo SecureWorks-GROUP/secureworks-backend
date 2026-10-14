@@ -11,7 +11,7 @@
 //   debt_note            add a note (with a tag) against an invoice and its job; returns the merged
 //                        thread (desk notes plus the job's own notes), newest first.
 
-import { DEBT_CHASE_HISTORY_FILTER } from './debt_desk_drafts.ts'
+import { DEBT_CHASE_HISTORY_FILTER } from './debt_chase_history.ts'
 
 export const DEBT_PICTURE_VERSION = 'debt-picture/v1'
 

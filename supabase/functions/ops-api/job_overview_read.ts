@@ -4,7 +4,7 @@
 // 9 Oct 2026). One staff GET feeds the new job page Overview:
 //
 //   - story       the job story card (context_job_story, job-story-v1), with
-//                 call transcript words taken out (loops[].why, and a last
+//                 call transcript words taken out (quoted loop reasons, and a last
 //                 exchange that is a transcript): the page never shows them;
 //   - notes       the live AI reading's items (context_job_story_ledger, the
 //                 citation-rechecked read), each with its owner, its group
@@ -423,7 +423,11 @@ export function overviewMessages(
         m.source_system === "business_events" &&
         pairedLegacy.has(String(m.source_ref))
       ) continue;
-      const key = callKey(m, facts) ?? `row:${m.id}`;
+      // A held transcript must never merge into a placed call and lose its
+      // uncertainty, even when both name the same provider call.
+      const key = `${m.unplaced === true ? "held" : "placed"}:${
+        callKey(m, facts) ?? `row:${m.id}`
+      }`;
       const isTranscript = m.call_transcript === true ||
         facts?.event_type === TRANSCRIPT_EVENT ||
         String(m.provider_message_id ?? "").startsWith("ghltx:") ||
@@ -536,6 +540,13 @@ export function overviewMessages(
         : r.text,
       source: r.source,
     };
+    if (m.unplaced === true) {
+      base.unplaced = true;
+      base.job_certain = false;
+      base.certainty = "job_not_certain";
+      base.label = "Held message, job not certain";
+      base.candidate_job_count = numberOrNull(m.candidate_job_count);
+    }
     if (r.kind === "call") {
       base.call_seconds = r.call_seconds;
       base.call_status = r.call_status;
@@ -640,6 +651,7 @@ export function overviewQuote(
     superseded_at: view.superseded_at,
     view_count: viewCounts ? (viewCounts.get(view.document_id) ?? 0) : null,
     current,
+    ...(view.send_evidence ? { send_evidence: view.send_evidence } : {}),
   };
 }
 
@@ -697,14 +709,44 @@ export function overviewAttachment(row: any): any | null {
 
 // ── the story card, without transcript words ────────────────────────────────
 
-/** The card as the overview shows it: a loop's quoted why and a transcript's last-exchange words are taken out. */
+/** Only present the published R8 judgement; never calculate whether money is due.
+ * Raw loop reasons can mix record explanations with transcript quotations.
+ * Keep those quotations withheld and express the existing money status plainly.
+ */
+function overviewLoopWhy(loop: any): string | null {
+  if (loop?.source !== "record" || loop?.rule !== "R8_not_yet_invoiced") {
+    return null;
+  }
+  const unknown = loop.amount == null
+    ? " The remaining amount is unconfirmed; check the job value."
+    : "";
+  if (loop.status === "not_due") {
+    return "Held until the work is complete, not owed now." + unknown;
+  }
+  if (loop.status === "unconfirmed") {
+    return "The remaining amount is unconfirmed; check the job value. This is not a payment request.";
+  }
+  return null;
+}
+
+/** The card keeps money qualifications and held context, without transcript words. */
 export function overviewStory(card: any): any {
   if (!card || typeof card !== "object") return card;
   const story = { ...card };
   if (Array.isArray(card.loops)) {
     story.loops = card.loops.map((l: any) =>
-      l && typeof l === "object" ? { ...l, why: null } : l
+      l && typeof l === "object" ? { ...l, why: overviewLoopWhy(l) } : l
     );
+  }
+  if (Array.isArray(card.held_messages?.items)) {
+    story.held_messages = {
+      ...card.held_messages,
+      items: card.held_messages.items.map((item: any) =>
+        item?.kind === TRANSCRIPT_EVENT
+          ? { ...item, text: null, text_withheld: "call_transcript" }
+          : item
+      ),
+    };
   }
   const le = card.last_exchange;
   if (le && typeof le === "object") {
@@ -924,6 +966,11 @@ export async function jobOverviewAction(
       const conversation = await deps.getJobConversation(client, {
         job_id: job.id,
         limit: OVERVIEW_CONVERSATION_READ,
+        // Server-owned contact only. The shared reader still requires this
+        // job among the held row's candidates and never changes placement.
+        ...(jobRow?.ghl_contact_id
+          ? { held_contact_ids: [jobRow.ghl_contact_id] }
+          : {}),
       });
       const messages = Array.isArray(conversation?.messages)
         ? conversation.messages
@@ -935,7 +982,7 @@ export async function jobOverviewAction(
       const read = await readJobQuotes(client, {
         id: job.id,
         client_email: jobRow?.client_email ?? null,
-      });
+      }, { includeEmailSends: true });
       return {
         data: read.quotes,
         status: read.quotes

@@ -359,3 +359,8 @@ approve_customer_variation # probe=source-only
 cancel_customer_variation # probe=source-only
 prepare_customer_variation_invoice_line # probe=source-only
 create_customer_variation_xero_draft # probe=source-only
+# Paid close-out for fencing and patio (job_closeout.ts): paid -> Get Review, one review text, 24h archive
+job_closeout_paid # probe=source-only
+job_closeout_catch_up # probe=source-only
+job_closeout_sweep # probe=source-only
+job_closeout_backlog_preview # probe=source-only

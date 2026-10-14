@@ -72,9 +72,16 @@ export const DISPATCH_FAMILY_PROJECTION = [
   "ds_makesafe_family:metadata->>makesafe_job_family",
 ];
 
+// The Repairs board stage, the one input of a repair job's place on the
+// Dispatch rail (dispatch_stage.ts, slice 3). `->>`: compared as text.
+export const DISPATCH_STAGE_PROJECTION = [
+  "ds_repair_stage:metadata->>repair_stage",
+];
+
 export const DISPATCH_LIST_PROJECTION = [
   ...DISPATCH_SCOPE_PROJECTION,
   ...DISPATCH_FAMILY_PROJECTION,
+  ...DISPATCH_STAGE_PROJECTION,
 ];
 
 export const DISPATCH_LIST_ALIASES = DISPATCH_LIST_PROJECTION.map(
@@ -230,5 +237,31 @@ export function projectDispatchJobNote(event: any): DispatchJobNote {
       ? detail.visibility
       : null,
     from_ops: detail.from_ops === true,
+  };
+}
+
+// One job_documents row as `job_detail` returns it. Dispatch slice 2's quote
+// chips read `sent_at` and `superseded_at` to show a sent date or
+// "Superseded"; both were added last so every earlier key keeps its order.
+export function projectJobDetailDocument(d: any) {
+  return {
+    id: d.id,
+    name: `${d.type} v${d.version || 1}`,
+    file_name: d.file_name,
+    type: d.type,
+    version: d.version,
+    url: d.pdf_url || d.storage_url,
+    pdf_url: d.pdf_url,
+    storage_url: d.storage_url,
+    thumbnail_url: d.thumbnail_url,
+    label: d.label,
+    visible_to_trades: d.visible_to_trades,
+    sent_to_client: d.sent_to_client,
+    accepted_at: d.accepted_at,
+    share_token: d.share_token,
+    created_at: d.created_at,
+    quote_number: d.quote_number,
+    sent_at: d.sent_at,
+    superseded_at: d.superseded_at,
   };
 }

@@ -899,11 +899,14 @@ ROLLBACK;
 -- 12. The bodies are the ones the guard accepts on a re-apply: B-5's list plus
 -- this migration's row, or, when the history daily slice (20261007050000)
 -- applied first, that slice's list plus this migration's row (the body that
--- slice writes when it applies second).
+-- slice writes when it applies second), or, once the paid close-out
+-- (20261013150000) is on it, that list plus job-closeout-sweep (a list naming
+-- outlook-mail-deep-history, which the guard leaves alone).
 DO $$
 BEGIN
  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid='public.automation_switch_cron_lanes()'::regprocedure)
-   <>(CASE WHEN to_regprocedure('public.context_history_daily_policy()') IS NULL THEN '250d7e9ec2ebecc7e83192a39b7da488'
+   <>(CASE WHEN to_regclass('public.job_closeout_settings') IS NOT NULL THEN 'd0a346b823b56258bf67bc835f41f922'
+     WHEN to_regprocedure('public.context_history_daily_policy()') IS NULL THEN '250d7e9ec2ebecc7e83192a39b7da488'
      ELSE '6498276b1eb16b527fb76dd2b0fa6d83' END)
  THEN RAISE EXCEPTION 'deep contract: the lane list differs from the md5 the guard accepts on a re-apply'; END IF;
 END $$;

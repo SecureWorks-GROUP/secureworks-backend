@@ -269,3 +269,15 @@ Deno.test('Read-only purity: engine has no fetch / write surface', async () => {
   assert(!/\.insert\s*\(/.test(codeOnly), 'engine must not call .insert(');
   assert(!/\.delete\s*\(/.test(codeOnly), 'engine must not call .delete(');
 });
+
+Deno.test('canTransition: a paid fencing or patio job goes invoiced -> get_review -> archived (paid close-out)', () => {
+  for (const type of ['fencing', 'patio']) {
+    assertEquals(canTransition({ type }, 'invoiced', 'get_review').allowed, true, type);
+    assertEquals(canTransition({ type }, 'complete', 'get_review').allowed, true, type);
+    assertEquals(canTransition({ type }, 'get_review', 'archived').allowed, true, type);
+  }
+  // Make-safe keeps invoiced as its money pseudo-terminal.
+  const makesafe = canTransition({ type: 'makesafe' }, 'invoiced', 'get_review');
+  assertEquals(makesafe.allowed, false);
+  assertEquals(makesafe.hard_blocked, true);
+});

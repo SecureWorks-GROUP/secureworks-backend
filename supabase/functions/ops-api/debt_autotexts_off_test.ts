@@ -1,6 +1,6 @@
 /**
  * The captain's "all off" ruling for our automated money messages
- * (debt book DECISIONS.md, Q6, 30 Sep 2026). Xero's own reminder emails stay on.
+ * (captain, 30 Sep 2026). Xero's own reminder emails stay on.
  *
  * What these prove, through the real ops-api request handler, with every
  * database, Xero and GHL call answered by a fetch spy (nothing leaves the

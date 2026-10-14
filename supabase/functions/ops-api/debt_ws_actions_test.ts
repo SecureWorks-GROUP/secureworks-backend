@@ -56,9 +56,10 @@ async function call(
   );
 }
 
+/** Sending on: the database switch alone (Shaun, 14 Oct 2026). No env is set. */
 function sendingOn(store: FakeStore) {
   store.settingsRow.sending_enabled = true;
-  return ON;
+  return {};
 }
 
 const D7_SEND = {
@@ -72,25 +73,18 @@ const D7_SEND = {
 
 // ── Switches and owner ──
 
-Deno.test("switches: sending needs the env AND the settings row; both default off", () => {
+Deno.test("switches: the database switch alone turns sending on; default off (Shaun, 14 Oct 2026)", () => {
   const settings = { ...DEBT_WS_SETTINGS_OFF };
-  const env = (v: Record<string, string>) => (n: string) => v[n];
-  assertEquals(debtWsSendingOn(env({}), settings), false);
-  assertEquals(debtWsSendingOn(env(ON), settings), false);
+  assertEquals(settings.sending_enabled, false);
+  assertEquals(debtWsSendingOn(settings), false);
+  assertEquals(debtWsSendingOn({ ...settings, sending_enabled: true }), true);
+  // Only a real true counts.
   assertEquals(
-    debtWsSendingOn(env({}), { ...settings, sending_enabled: true }),
-    false,
-  );
-  assertEquals(
-    debtWsSendingOn(env({ DEBT_WS_SENDING_ENABLED: "TRUE" }), {
+    debtWsSendingOn({
       ...settings,
-      sending_enabled: true,
+      sending_enabled: "true" as unknown as boolean,
     }),
     false,
-  );
-  assertEquals(
-    debtWsSendingOn(env(ON), { ...settings, sending_enabled: true }),
-    true,
   );
 });
 
@@ -329,12 +323,28 @@ Deno.test("decide: sending off refuses, logs the refusal, and texts nobody", asy
   assertEquals(log.kind, "send_refused");
   assertEquals(log.meta.code, "sending_off");
   assertEquals(log.created_by, SHAUN_ID);
-  // The env alone is not enough either.
-  const { deps: envOnly } = fakeDeps(store, { env: ON });
+  // The retired env switch does not turn sending on: database off still refuses.
+  const { deps: envOnly, rec: envRec } = fakeDeps(store, { env: ON });
   assertEquals(
     (await call(envOnly, "debt_ws_decide", SHAUN, D7_SEND)).body.code,
     "sending_off",
   );
+  assertEquals(envRec.sms.length, 0);
+  assertEquals(store.sendRows.length, 0);
+});
+
+Deno.test("decide: the database switch alone sends, with no env set (Shaun, 14 Oct 2026)", async () => {
+  const store = new FakeStore();
+  store.settingsRow.sending_enabled = true;
+  const { deps, rec } = fakeDeps(store, { env: {} });
+  const res = await call(deps, "debt_ws_decide", SHAUN, D7_SEND);
+  assertEquals(res.status, 200);
+  assertEquals(rec.sms.length, 1);
+  assertEquals(rec.liveReads, [IDS.final]);
+  assertEquals(store.sendRows.length, 1);
+  // The overview reports sending on from the database switch alone.
+  const b = (await call(deps, "debt_ws_overview", SHAUN)).body as any;
+  assertEquals(b.settings.sending_on, true);
 });
 
 Deno.test("decide: not the owner is refused before anything is read", async () => {
@@ -1223,9 +1233,9 @@ Deno.test("Jan's list: lock and send are no-ops while switched off", async () =>
   assertEquals(store.janRows.length, 0);
   const send = await call(deps, "debt_ws_jan_list_send", SERVER);
   assertEquals(send.body.reason, "jan_list_auto_send_off");
-  // Auto-send on but sending off: the lock runs, the send does not.
+  // Auto-send on but sending off: the lock runs, the send does not, whatever the env.
   store.settingsRow.jan_list_auto_send = true;
-  const { deps: offDeps } = fakeDeps(store);
+  const { deps: offDeps } = fakeDeps(store, { env: ON });
   assertEquals(
     (await call(offDeps, "debt_ws_jan_list_lock", SERVER)).body.locked,
     true,
@@ -1357,6 +1367,56 @@ Deno.test("agent queue: off by default, then due steps without a suggestion, wit
   assertEquals(item.playbook_version, "debt-ws-playbook/v1");
   assertEquals(item.possible_payments, []);
   assert(Array.isArray(item.notes));
+});
+
+Deno.test("job and agent queue: the payer's unplaced messages are asked for, shown and marked", async () => {
+  // Live case (14 Oct 2026): a chase text held on no job (unplaced, this job its only
+  // candidate) never reached the Debt tab. The payer's contact is now passed as the held
+  // contact, and the message comes back marked unplaced: true.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const contact = "ghlcontact0000000001";
+  const { deps, rec } = fakeDeps(store, {
+    conversation: [
+      {
+        id: "bev:held-1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-09T03:02:52Z",
+        author: "Shaun",
+        body: "So sorry to bother you",
+        contact_id: contact,
+        unplaced: true,
+      },
+      {
+        id: "ghl:1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-01T03:00:00Z",
+        author: "Shaun",
+        body: "Hi there",
+        contact_id: contact,
+      },
+    ],
+  });
+  const job = (await call(deps, "debt_ws_job", STAFF, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(rec.conversationReads.at(-1)!.heldContactIds, [contact]);
+  assertEquals(job.conversation.messages.map((m: any) => m.id), [
+    "bev:held-1",
+    "ghl:1",
+  ]);
+  assertEquals(job.conversation.messages[0].unplaced, true);
+  assertEquals(job.conversation.messages[0].is_payer, true);
+  assertEquals(job.conversation.messages[1].unplaced, undefined);
+
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  const item = q.items.find((i: any) => i.row.xero_invoice_id === IDS.final);
+  // Oldest first in the bundle; the held message is the newest and is marked.
+  assertEquals(item.messages.map((m: any) => m.id), ["ghl:1", "bev:held-1"]);
+  assertEquals(item.messages[1].unplaced, true);
+  assertEquals("unplaced" in item.messages[0], false);
 });
 
 Deno.test("agent submit: draft supersedes drafts and moves, a flag is logged and supersedes nothing, no_action only stamps", async () => {
@@ -1542,7 +1602,8 @@ Deno.test("auto-send: off by default; runs the same guarded send only when every
   const store2 = new FakeStore();
   store2.settingsRow.auto_send_steps = { d7: true };
   store2.settingsRow.sending_enabled = true;
-  const env = { ...ON, DEBT_WS_AUTO_SEND_ENABLED: "true" };
+  // Auto-send keeps its own env key; sending itself needs only the database switch.
+  const env = { DEBT_WS_AUTO_SEND_ENABLED: "true" };
   const { deps: d2, rec: r2 } = fakeDeps(store2, {
     env,
     bank: [{
@@ -1585,6 +1646,15 @@ Deno.test("auto-send: off by default; runs the same guarded send only when every
   const { deps: d4, rec: r4 } = fakeDeps(store4, { env });
   await call(d4, "debt_ws_agent_submit", SERVER, draft);
   assertEquals(r4.sms.length, 0);
+
+  // Auto env and the step on, but the database sending switch off: never auto-sent,
+  // even with the retired sending env set.
+  const store5 = new FakeStore();
+  store5.settingsRow.auto_send_steps = { d7: true };
+  const { deps: d5, rec: r5 } = fakeDeps(store5, { env: { ...ON, ...env } });
+  const off5 = await call(d5, "debt_ws_agent_submit", SERVER, draft);
+  assertEquals((off5.body as any).auto_send, { attempted: false });
+  assertEquals(r5.sms.length, 0);
 });
 
 // ── Review fixes, 8 October 2026 (Codex and the independent review) ──

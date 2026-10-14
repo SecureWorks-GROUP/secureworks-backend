@@ -287,8 +287,15 @@ import {
   isPersonWrittenJobNote,
   JOB_NOTE_EVENT_TYPES,
   projectDispatchJobNote,
+  projectJobDetailDocument,
   stripDispatchListAliases,
 } from './dispatch_job_list.ts'
+import { DISPATCH_STATE_SELECT, dispatchRowFields } from './dispatch_stage.ts'
+import {
+  DispatchStageWriteError,
+  setDispatchNextStep,
+  setDispatchStage,
+} from './dispatch_stage_write.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -452,7 +459,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -564,7 +571,6 @@ import {
   updateSupplierBill,
 } from './xero_accpay_books.ts'
 import {
-  getXeroOnlineInvoiceUrl,
   getXeroReceivable,
   listXeroBankTransactions,
   readXeroBankSummary,
@@ -576,21 +582,7 @@ import {
   XeroReceivablesReadError,
   createXeroReadGet,
 } from './xero_receivables_read.ts'
-import { createSupabaseDebtBookStore, DebtBookError, logDebtDeskFailure, readDebtBook } from './debt_book.ts'
-import { createSupabaseDebtChaseLogStore, readDebtMorningList } from './debt_morning_list.ts'
-import {
-  createSupabaseDebtDeskStore,
-  debtDeskOwnerIds,
-  debtDeskState,
-  debtDraftDecide,
-  debtDraftSend,
-  DebtDeskError,
-  DebtSendRefusedError,
-  debtLogOutcome,
-  debtSendingEnabled,
-} from './debt_desk_actions.ts'
-import { DEBT_CHASE_HISTORY_FILTER } from './debt_desk_drafts.ts'
-import { createSupabaseJanStaffStore, readJanMobile } from './debt_jan_text.ts'
+import { DEBT_CHASE_HISTORY_FILTER } from './debt_chase_history.ts'
 import { type DebtWsCaller, DebtWsSendRefusedError, runDebtWsAction } from './debt_ws_actions.ts'
 import { createDebtWsDeps } from './debt_ws_deps.ts'
 import { JobRecordReadError, readJobRecord } from './read_job_record.ts'
@@ -1346,6 +1338,17 @@ import {
 // == AJBR67200) instead of only near-exact ilike matches. Single source of truth.
 import { verifyServiceCredential } from '../_shared/service_credential.ts'
 import { GOOGLE_REVIEW_URL } from '../_shared/google_review_link.ts'
+import {
+  type JobCloseoutCaller,
+  type JobCloseoutDeps,
+  JobCloseoutError,
+  ghlProxyReviewSender,
+  requestJobReview,
+  reviewRequestMessage as closeoutReviewRequestMessage,
+  runJobCloseoutAction,
+} from './job_closeout.ts'
+import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
+import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
@@ -5821,7 +5824,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(calendarPayload)
       }
-      case 'pipeline': return json(await pipeline(client, url.searchParams))
+      case 'pipeline': return json(await pipeline(client, url.searchParams, {
+        // The paid close-out block reads service-role close-out tables: staff only.
+        includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
+      }))
       case 'makesafe_board': {
         // Outer JWT / projection gates live in makesafeBoardAction so the trade
         // envelope is one function the HTTP case and the deterministic proof share.
@@ -6714,6 +6720,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await jobDetail(client, jid, {
           slim,
           fillWorkOrderFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
+          // The paid close-out block reads service-role close-out tables: staff only.
+          includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
         }))
       }
       // Staff-only by the front door's default (not on the trade or routine lists).
@@ -8087,104 +8095,26 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
         }
       }
-      // ── Debt book (plan step 1, docs/debt-book/PLAN.md) ──
-      // Read-only: the open book live from Xero through xero_receivables_read.ts, the
-      // captain's rules (debt_book_rules.ts), and a copy-vs-Xero check. Writes nothing.
-      case 'debt_book': {
-        if (req.method !== 'GET') {
-          return json({ ok: false, error: 'debt_book requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
-        }
-        try {
-          return json(await readDebtBook(client, url.searchParams, {
-            getToken,
-            xeroGet: xeroReadGet,
-            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
-          }))
-        } catch (error) {
-          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
-            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
-          }
-          logDebtDeskFailure('debt_book', error)
-          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
-        }
-      }
-      // ── Debt morning list (plan steps 2, 3 and 5, docs/debt-book/PLAN.md) ──
-      // Read-only: the debt book plus the chase log, worked into today's step per payer
-      // (debt_chase_schedule.ts), with each draft and Jan's morning text. No sending, no writes.
-      case 'debt_morning_list': {
-        if (req.method !== 'GET') {
-          return json({ ok: false, error: 'debt_morning_list requires GET', code: 'METHOD_NOT_ALLOWED' }, 405)
-        }
-        try {
-          return json(await readDebtMorningList(client, url.searchParams, {
-            getToken,
-            xeroGet: xeroReadGet,
-            store: createSupabaseDebtBookStore(client, DEFAULT_ORG_ID),
-            chaseLog: createSupabaseDebtChaseLogStore(client, DEFAULT_ORG_ID),
-            payLink: (id) => getXeroOnlineInvoiceUrl(client, id, { getToken, xeroGet: xeroReadGet }),
-            desk: () => debtDeskState(
-              authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null,
-              {
-                deskOwnerIds: () => debtDeskOwnerIds(createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID)),
-                sendingEnabled: debtSendingEnabled(),
-              },
-            ),
-            janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
-          }))
-        } catch (error) {
-          if (error instanceof DebtBookError || error instanceof XeroReceivablesReadError || error instanceof XeroCooldownError) {
-            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
-          }
-          logDebtDeskFailure('debt_morning_list', error)
-          return json({ ok: false, code: 'XERO_CONNECTION_UNAVAILABLE', error: 'The Xero connection could not complete this read' }, 502)
-        }
-      }
-      // ── Debt desk actions (plan step 3, docs/debt-book/PLAN.md; debt_desk_actions.ts) ──
-      // Approve or skip a draft and send approved drafts (desk owner only), and log a call or
-      // visit outcome (any staff user). Writes go to payment_chase_logs only and name the
-      // signed-in user. Sending is off unless DEBT_SENDING_ENABLED is exactly "true".
-      case 'debt_draft_decide':
-      case 'debt_log_outcome':
-      case 'debt_draft_send': {
-        if (req.method !== 'POST') {
-          return json({ ok: false, error: `${action} requires POST`, code: 'METHOD_NOT_ALLOWED' }, 405)
-        }
-        const actor = authMode === 'jwt' && authUser ? { user_id: authUser.id, email: authUser.email || null } : null
-        const deskStore = createSupabaseDebtDeskStore(client, DEFAULT_ORG_ID)
-        const deskDeps = {
-          store: deskStore,
-          readInvoice: async (id: string) => (await getXeroReceivable(client, { xero_invoice_id: id }, { getToken, xeroGet: xeroReadGet })).invoice,
-          sendSms: async (smsBody: Record<string, unknown>) => {
-            try {
-              return await sendChaseSms(client, smsBody)
-            } catch (error) {
-              if (error instanceof ApiError || error instanceof SesActionError) throw new DebtSendRefusedError(error.message)
-              throw error
-            }
-          },
-          // Jan's morning text (plan step 5): to Jan's own mobile through the staff SMS path.
-          janMobile: () => readJanMobile(createSupabaseJanStaffStore(client, DEFAULT_ORG_ID)),
-          sendStaffSms: (phone: string, message: string) => sendSmsViaGhlWithReceipt(phone, message, null),
-          sendingEnabled: debtSendingEnabled(),
-          deskOwnerIds: () => debtDeskOwnerIds(deskStore),
-        }
-        try {
-          if (action === 'debt_draft_decide') return json(await debtDraftDecide(body, actor, deskDeps))
-          if (action === 'debt_log_outcome') return json(await debtLogOutcome(body, actor, deskDeps))
-          return json(await debtDraftSend(body, actor, deskDeps))
-        } catch (error) {
-          if (error instanceof DebtDeskError) {
-            return json({ ok: false, code: error.code, error: error.message, ...error.details }, error.status)
-          }
-          logDebtDeskFailure(action, error)
-          return json({ ok: false, code: 'DEBT_DESK_FAILED', error: 'The debt desk could not complete this action' }, 502)
-        }
+      // ── Paid close-out for fencing and patio (job_closeout.ts; AGENTS.md "Paid Fencing And
+      // Patio Jobs Go To Get Review"). Server key only for anything that moves, texts or
+      // archives; the backlog list (a dry run) also admits a signed-in staff operator.
+      case 'job_closeout_paid':
+      case 'job_closeout_catch_up':
+      case 'job_closeout_sweep':
+      case 'job_closeout_backlog_preview': {
+        const closeoutCaller: JobCloseoutCaller = authMode === 'api_key' && serverSecretPresented
+          ? { kind: 'server' }
+          : _opsApiCallerIsStaffOperator(authMode, authUser)
+          ? { kind: 'staff' }
+          : { kind: 'none' }
+        const closeout = await runJobCloseoutAction(action, req.method, body || {}, closeoutCaller, jobCloseoutDeps(client))
+        return json(closeout.body, closeout.status)
       }
       // ── Debt Workshop (secureworks-wiki debt-workshop-spec.md; docs/debt-workshop/README.md) ──
       // Wiring only: the rules, guards, switches and auth checks live in debt_ws_*.ts
       // (runDebtWsAction checks the method, then staff / owner / server key per action).
-      // Nothing reaches a client unless env DEBT_WS_SENDING_ENABLED is exactly "true" AND
-      // debt_ws_settings.sending_enabled is on. Xero is read only here.
+      // Nothing reaches a client unless debt_ws_settings.sending_enabled is on (the database
+      // switch alone, Shaun 14 Oct 2026; env DEBT_WS_SENDING_ENABLED is retired). Xero is read only here.
       case 'debt_ws_overview':
       case 'debt_ws_job':
       case 'debt_ws_document':
@@ -8694,6 +8624,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           return json({ error: 'forbidden: update_repair_stage requires the privileged ops key or a staff session' }, 403)
         }
         return json(await updateRepairStage(client, body))
+      }
+      // Dispatch slice 3 (docs/dispatch-slice-3-contract.md): the job's own
+      // Dispatch stage and next-step line. Gated exactly as update_repair_stage:
+      // staff sessions and the privileged ops key only, and absent from
+      // ROUTINE_ALLOWED_ACTIONS and AGENT_READ_ALLOWED_ACTIONS. Each writes the
+      // job_dispatch_state row and one job_events row, never the job status.
+      case 'set_dispatch_stage':
+      case 'set_dispatch_next_step': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session` }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        // A signed-in person is named by the verified session; the ops key has
+        // no user and is attributed by the operator email the screen stamps.
+        const dispatchActor = authMode === 'jwt'
+          ? { userId: authUser?.id || null, email: authUser?.email || cleanReviewedString(body?.operator_email) || null }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null }
+        try {
+          return json(action === 'set_dispatch_stage'
+            ? await setDispatchStage(client, body, dispatchActor, DEFAULT_ORG_ID)
+            : await setDispatchNextStep(client, body, dispatchActor, DEFAULT_ORG_ID))
+        } catch (e) {
+          if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
       }
       // Quote builder (docs/quote-builder-contract.md). Staff JWT or the
       // privileged ops key only: absent from ROUTINE_ALLOWED_ACTIONS,
@@ -16028,13 +15983,14 @@ async function readPipelineEnrichmentRows(
   jobIds: string[],
   label: string,
   buildQueryForChunk: (chunkIds: string[]) => any,
+  uniqueKey = 'id',
 ): Promise<PipelineEnrichmentResult> {
   try {
     const data = await _fetchAllRowsInChunks<any>(
       jobIds,
       buildQueryForChunk,
       `pipeline.${label}`,
-      'id',
+      uniqueKey,
     )
     return { data, error: null }
   } catch (error) {
@@ -16099,7 +16055,11 @@ export function _pipelineVisitDateMaps(
   return { next, last }
 }
 
-async function pipeline(client: any, params: URLSearchParams) {
+async function pipeline(
+  client: any,
+  params: URLSearchParams,
+  opts: { includeCloseout?: boolean } = {},
+) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
   const search = params.get('search') || ''
@@ -16109,12 +16069,15 @@ async function pipeline(client: any, params: URLSearchParams) {
   // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
   // absent: nothing below changes for any existing caller.
   const dispatchList = isDispatchListRequested(params)
+  // An empty Dispatch answer still says the stage read had nothing to fail on,
+  // so a search with no match never reads as "Could not load Dispatch stages".
+  const dispatchEmpty = dispatchList ? { dispatch_stages: 'ok', todo_total: 0 } : {}
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
 
   if (repairJobIds && repairJobIds.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
   }
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
@@ -16236,13 +16199,21 @@ async function pipeline(client: any, params: URLSearchParams) {
   }
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
   }
 
   // The default response keeps its non-draft enrichment scope. Stage truth
   // reads every returned row because the stored status is only a claim.
   const nonDraftJobs = jobs.filter((j: any) => j.status !== 'draft')
   const jobIds = (stageTruth ? jobs : nonDraftJobs).map((j: any) => j.id)
+  // Paid close-out block for fencing and patio rows (job_closeout_read.ts): staff
+  // callers only, read beside the enrichment wave. Never rejects: null on a failed read.
+  const closeoutRead: Promise<Map<string, CloseoutBlock> | null> | null = opts.includeCloseout
+    ? loadCloseoutBlocks(client, jobs).catch((e) => {
+      console.error('[pipeline] closeout read failed:', (e as Error)?.message)
+      return null
+    })
+    : null
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: PipelineEnrichmentResult = { data: [], error: null }
@@ -16258,9 +16229,12 @@ async function pipeline(client: any, params: URLSearchParams) {
   let assignEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
   let poEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
   let invoiceEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
+  let dispatchStateRes: PipelineEnrichmentResult = { data: [], error: null }
+  // The Dispatch stage is read for every returned job (dispatch_stage.ts).
+  const dispatchStateJobIds = dispatchList ? jobs.map((j: any) => j.id) : []
 
-  if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes] = await Promise.all([
+  if (jobIds.length > 0 || dispatchStateJobIds.length > 0) {
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes] = await Promise.all([
       // is_ghost/role feed next_scheduled_date only; assignment_count and
       // first_scheduled_date deliberately keep counting ghost rows as before.
       // `status` is nullable, so a `.neq` would drop NULL-status rows (SQL
@@ -16322,6 +16296,12 @@ async function pipeline(client: any, params: URLSearchParams) {
             'job_id, status, invoice_type, reference, id, xero_invoice_id, amount_paid, fully_paid_on',
           ).in('job_id', chunkIds).eq('invoice_type', 'ACCREC'))
         : Promise.resolve({ data: [], error: null }),
+      // Dispatch slice 3: the stage a person set on the rail and the next-step
+      // line. A failed read is never "nothing set" (below).
+      dispatchList
+        ? readPipelineEnrichmentRows(dispatchStateJobIds, 'job_dispatch_state', (chunkIds) =>
+          client.from('job_dispatch_state').select(DISPATCH_STATE_SELECT).in('job_id', chunkIds), 'job_id')
+        : Promise.resolve({ data: [], error: null }),
     ])
   }
 
@@ -16339,6 +16319,7 @@ async function pipeline(client: any, params: URLSearchParams) {
     ...(stageTruth ? [['pipeline.job_assignments_evidence', assignEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
     ...(stageTruth ? [['pipeline.purchase_orders_evidence', poEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
     ...(stageTruth ? [['pipeline.xero_invoices_evidence', invoiceEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(dispatchList ? [['pipeline.job_dispatch_state', dispatchStateRes] as [string, PipelineEnrichmentResult]] : []),
   ]
   // Preserve the existing partial-board behaviour, but make a failed dimension
   // loud in server logs and explicit in the response instead of publishing its
@@ -16353,6 +16334,8 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (repairDetails?.degraded) enrichmentErrors.push('pipeline.makesafe_job_details')
   const quoteBuilderValues = await quoteBuilderValuesRead
   if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
+  const closeoutBlocks = closeoutRead ? await closeoutRead : null
+  if (closeoutRead && !closeoutBlocks) enrichmentErrors.push('pipeline.closeout')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -16371,6 +16354,15 @@ async function pipeline(client: any, params: URLSearchParams) {
       unreadable: stageTruthUnreadable,
     }
     : null
+
+  // A failed stage read leaves every dispatch_ field and todo_total off the
+  // answer: a wrong column name or a missing table must never put every job
+  // back on its job status. The error is logged by logQueryErrors above.
+  const dispatchStagesOk = dispatchList && !dispatchStateRes.error
+  const dispatchStateMap = new Map<string, any>()
+  if (dispatchStagesOk) {
+    for (const row of dispatchStateRes.data || []) dispatchStateMap.set(String(row.job_id), row)
+  }
 
   const countMap = (rows: any[]) => {
     const m: Record<string, number> = {}
@@ -16496,7 +16488,11 @@ async function pipeline(client: any, params: URLSearchParams) {
           description: dispatchJobDescription(j),
           value_inc_gst: dispatchValueIncGst(j),
           work_type: dispatchWorkType(j),
+          ...(dispatchStagesOk ? dispatchRowFields(j, dispatchStateMap.get(String(j.id))) : {}),
         }
+        : {}),
+      ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
+        ? { closeout: closeoutBlocks?.get(String(j.id)) ?? null }
         : {}),
     }
     if (stageTruth && stageTruthRows) {
@@ -16564,6 +16560,14 @@ async function pipeline(client: any, params: URLSearchParams) {
   return {
     columns,
     total: enriched.length,
+    ...(dispatchList
+      ? dispatchStagesOk
+        ? {
+          dispatch_stages: 'ok',
+          todo_total: enriched.filter((j: any) => j.dispatch_todo === true).length,
+        }
+        : { dispatch_stages: 'failed' }
+      : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
@@ -16620,7 +16624,7 @@ export const _jobNotesForTest = jobNotes
 async function jobDetail(
   client: any,
   jobId: string,
-  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean } = {},
+  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean; includeCloseout?: boolean } = {},
 ) {
   if (!jobId) throw new Error('jobId required')
 
@@ -16797,6 +16801,17 @@ async function jobDetail(
   // invoice fields). Additive. A failed read never fails the job detail: the
   // list is then null with the reason, never an empty list.
   const tradeTimeEntries = await loadJobTradeTimeEntries(client, jobId)
+  // Paid close-out block (job_closeout_read.ts), fencing and patio only, staff only:
+  // null when its read fails, absent for every other job type and caller.
+  let closeoutBlock: CloseoutBlock | null | undefined
+  if (opts.includeCloseout && (job?.type === 'fencing' || job?.type === 'patio')) {
+    try {
+      closeoutBlock = (await loadCloseoutBlocks(client, [job]))?.get(String(job.id)) ?? null
+    } catch (e) {
+      console.error('[ops-api] job_detail: closeout unreadable:', (e as Error)?.message)
+      closeoutBlock = null
+    }
+  }
 
   return {
     job: jobLite,
@@ -16812,7 +16827,7 @@ async function jobDetail(
       authority: 'typed_job_metadata',
     }),
     assignments: assignRes.data || [],
-    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, thumbnail_url: d.thumbnail_url, label: d.label, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, accepted_at: d.accepted_at, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number })),
+    documents: (docsRes.data || []).map(projectJobDetailDocument),
     events: eventsRes.data || [],
     media: mediaRes.data || [],
     purchase_orders: posLite,
@@ -16836,6 +16851,7 @@ async function jobDetail(
     chase_logs: chaseLogs,
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
+    ...(closeoutBlock !== undefined ? { closeout: closeoutBlock } : {}),
   }
 }
 
@@ -17495,6 +17511,33 @@ async function getJobConversation(client: any, body: any) {
     if (m.source_system === 'ghl_cache' && m.source_ref && providerIds.has(`ghl:${m.source_ref}`)) messages.splice(k, 1)
   }
   messages.push(...eventMessages)
+
+  // 4b. held_contact_ids (Debt Workshop, 14 Oct 2026): messages held on NO job
+  //     (unplaced or pending_luna, context PR #1013) whose candidate_job_ids
+  //     contain this job and whose GoHighLevel contact is one asked for (the
+  //     payer's). Each is marked unplaced: true. Placement is not changed. A
+  //     message already shown above (same provider message id) shows once.
+  //     Read with the same limit and merged before the newest-first cut, so the
+  //     newest messages are kept. Only callers that ask get these rows.
+  const heldIds: string[] = Array.isArray(body?.held_contact_ids)
+    ? Array.from(new Set<string>(body.held_contact_ids.map((v: unknown) => String(v || '').trim())
+      .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v)))).slice(0, 5)
+    : []
+  if (heldIds.length) {
+    try {
+      const { rows: held, error: heldErr } = await readHeldBusinessEventsBySourceTime(client, {
+        jobId,
+        contactIds: heldIds,
+        limit,
+        since: sinceFilter,
+        until,
+      })
+      if (heldErr) console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
+      messages.push(...heldConversationMessages(held, jobId, heldIds, customerAddresses, messages))
+    } catch (e) {
+      console.log('[ops-api] get_job_conversation held messages read failed:', (e as Error).message)
+    }
+  }
 
   // 5. email_events — emails our system sent to the customer (quotes,
   //    invoices, client updates). A copy already among the event rows shows once.
@@ -35126,14 +35169,37 @@ async function updateJobStatus(client: any, body: any) {
     }
   }
 
-  const { data, error } = await client
-    .from('jobs')
-    .update(update)
-    .eq('id', jId)
-    .select()
-    .single()
+  // Optional compare and set (paid close-out, job_closeout.ts): with expected_statuses the
+  // write lands only while the job still has one of them, so a card moved by hand in the
+  // meantime is left alone and nothing below runs. Without it the write is unchanged.
+  const expectedStatuses = Array.isArray(body.expected_statuses)
+    ? body.expected_statuses.filter((s: unknown) => typeof s === 'string' && s.length > 0)
+    : null
+  let data: any
+  if (expectedStatuses && expectedStatuses.length > 0) {
+    const cas = await client
+      .from('jobs')
+      .update(update)
+      .eq('id', jId)
+      .in('status', expectedStatuses)
+      .select()
+      .maybeSingle()
+    if (cas.error) throw cas.error
+    if (!cas.data) {
+      return { success: false, job_id: jId, skipped: 'status_changed', expected_statuses: expectedStatuses, status_seen: oldStatus }
+    }
+    data = cas.data
+  } else {
+    const { data: written, error } = await client
+      .from('jobs')
+      .update(update)
+      .eq('id', jId)
+      .select()
+      .single()
 
-  if (error) throw error
+    if (error) throw error
+    data = written
+  }
 
   // ── M3d U2b: a transition INTO a terminal jobs.status closes the job's still-
   // open crew assignments so the trade Board stops classifying finished/dead work
@@ -35203,6 +35269,19 @@ async function updateJobStatus(client: any, body: any) {
     }
   } catch (e) {
     console.log('[ops-api] ready-transition manager notify failed (non-blocking):', (e as Error)?.message)
+  }
+
+  // ── Paid close-out: a fencing or patio card entering Get Review (by the Xero sync or by
+  // hand) asks the one review sender (job_closeout.ts). The sender's own switch, the paid
+  // rule, the holds and the per-job claim decide; with the switch off it reads one row
+  // and returns. Never blocks the status change.
+  if (status === 'get_review' && oldStatus !== 'get_review' && isCloseoutJobType(data?.type || jobBefore?.type)) {
+    try {
+      const review = await requestJobReview(jobCloseoutDeps(client), { job_id: jId, trigger: `status_changed:${source}` })
+      console.log(`[ops-api] get_review review request for ${jId}: ${review?.action}`)
+    } catch (e) {
+      console.log('[ops-api] get_review review request failed (non-blocking):', (e as Error)?.message)
+    }
   }
 
   // Fire-and-forget: recompute job intelligence after status change
@@ -54650,12 +54729,30 @@ async function sendAcceptanceInvoice(client: any, body: any) {
   }
 }
 
-// ── send_review_request: SMS client with Google review link ──
-function reviewRequestMessage(clientName?: string | null): string {
-  return `Hi ${clientName?.split(' ')[0] || 'there'}, thanks for choosing SecureWorks! We'd love to hear about your experience: ${GOOGLE_REVIEW_URL}\n\nYour feedback means the world to us 🙏`
+// ── send_review_request: a person asks for the review text on one job ──
+// The text, the recipients (every paying owner), the 90-day look-back and the per-job
+// claim are the paid close-out sender's (job_closeout.ts requestJobReview), so a manual
+// request and the automatic one can never text the same job twice. The sender switch
+// (job_closeout_settings.review_sender_mode) governs both; a manual request skips only
+// the automatic checks (get_review, holds, paid rule, send window), and says payment was
+// received only on a fencing or patio job that passes the paid rule.
+function reviewRequestMessage(clientName?: string | null, jobType?: string | null, paid = false): string {
+  return closeoutReviewRequestMessage(clientName, jobType, paid)
 }
 export const _reviewRequestMessageForTest = reviewRequestMessage
 export const _googleReviewUrlForTest = GOOGLE_REVIEW_URL
+
+/** One review text through ghl-proxy send_sms: the shared sender policy and contact guard. */
+function jobCloseoutDeps(client: any): JobCloseoutDeps {
+  return {
+    client,
+    now: () => new Date(),
+    env: (key: string) => Deno.env.get(key),
+    moveJobStatus: (moveBody: Record<string, unknown>) => updateJobStatus(client, moveBody),
+    sendSms: ghlProxyReviewSender({ supabaseUrl: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+    laneEnabled: (lane: 'closeout') => automationLaneEnabled(client, lane),
+  }
+}
 
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
@@ -54667,41 +54764,33 @@ async function sendReviewRequest(client: any, body: any) {
     'send_review_request',
   )
 
-  const { data: job, error: jobErr } = await client
-    .from('jobs')
-    .select('id, client_name, job_number, ghl_contact_id')
-    .eq('id', jId)
-    .single()
-  if (jobErr || !job) throw new Error('Job not found')
-
-  if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
-
-  const smsMessage = reviewRequestMessage(job.client_name)
-
-  const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-  const smsResp = await fetch(ghlUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contactId: job.ghl_contact_id,
-      message: smsMessage,
-    }),
-  })
-  const smsResult = await smsResp.json()
-
-  // Log event
-  await client.from('job_events').insert({
-    job_id: jId,
-    event_type: 'review_request_sent',
-    detail_json: {
-      review_url: GOOGLE_REVIEW_URL,
-      sms_sent: smsResult.success || false,
-    },
-  })
-
+  let result: Record<string, any>
+  try {
+    result = await requestJobReview(jobCloseoutDeps(client), {
+      job_id: jId,
+      trigger: `manual:${body.operator_email || body.user_email || 'send_review_request'}`,
+      manual: true,
+    })
+  } catch (e) {
+    if (e instanceof JobCloseoutError) throw new ApiError(e.message, e.status)
+    throw e
+  }
+  if (result.action === 'already_claimed') {
+    throw new ApiError('A review text was already requested for this job; it is never sent twice', 409)
+  }
+  if (result.action === 'sender_off') {
+    throw new ApiError('The review sender is switched off (job_closeout_settings.review_sender_mode)', 409)
+  }
+  if (result.action === 'no_contact') {
+    throw new ApiError('No GHL contact is linked for this job; link the contact and send the review again', 409)
+  }
+  const recipients = Array.isArray(result.recipients) ? result.recipients : []
   return {
-    success: true,
-    sms_sent: smsResult.success || false,
+    success: result.ok === true && result.action === 'sent',
+    sms_sent: result.action === 'sent',
+    outcome: result.action,
+    reason: result.reason ?? null,
+    recipients,
     review_url: GOOGLE_REVIEW_URL,
   }
 }

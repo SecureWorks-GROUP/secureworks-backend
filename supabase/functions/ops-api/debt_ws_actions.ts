@@ -5,8 +5,9 @@
 // path to Jan's mobile, and the job document reads).
 //
 // Safety (spec section 1), in code:
-//   - Nothing reaches a client unless sending is effectively on: env DEBT_WS_SENDING_ENABLED
-//     is exactly "true" AND debt_ws_settings.sending_enabled is true. Both default off.
+//   - Nothing reaches a client unless sending is on: debt_ws_settings.sending_enabled is
+//     true (default off). That database switch alone decides it (Shaun decided 14 Oct 2026).
+//     The old env DEBT_WS_SENDING_ENABLED is retired and ignored.
 //   - Only the owner (env DEBT_WS_OWNER_USER_IDS, else debt_ws_settings.owner_user_ids, never
 //     a role) may send, approve statements, link contacts or move a card.
 //   - Before every text: a live Xero re-check (AUTHORISED, amount due above zero and not
@@ -19,8 +20,9 @@
 //     text goes, so a step is never texted twice.
 //   - Texts go only through the injected sendChaseSms path (771, the SES fence and the
 //     contact/job match guard). Xero is read only. A card moves only through updateJobStatus.
-//   - Automatic sending (stage 5) also needs env DEBT_WS_AUTO_SEND_ENABLED === "true" and
-//     debt_ws_settings.auto_send_steps[step] === true. Off by default.
+//   - Automatic sending (stage 5) stays two-key: on top of sending being on, it also needs
+//     env DEBT_WS_AUTO_SEND_ENABLED === "true" and debt_ws_settings.auto_send_steps[step]
+//     === true. Off by default.
 
 import {
   addDays,
@@ -29,6 +31,7 @@ import {
   clientTextProblem,
   DEBT_WS_PLAYBOOK_VERSION,
   DEBT_WS_VERSION,
+  firstNameOf,
   inScope,
   isIsoDate,
   isLadderStep,
@@ -37,6 +40,7 @@ import {
   type JanListItem,
   janListText,
   longDate,
+  looksLikeCompanyName,
   mondayOf,
   nextMonday,
   perthDate,
@@ -81,7 +85,6 @@ import {
 
 export { DebtWsError } from "./debt_ws_store.ts";
 
-export const DEBT_WS_SENDING_SWITCH = "DEBT_WS_SENDING_ENABLED";
 export const DEBT_WS_AUTO_SEND_SWITCH = "DEBT_WS_AUTO_SEND_ENABLED";
 export const DEBT_WS_OWNERS_SETTING = "DEBT_WS_OWNER_USER_IDS";
 export const DEBT_WS_STATEMENT_FROM = "admin@secureworkswa.com.au";
@@ -162,12 +165,15 @@ export interface DebtWsDeps {
    * getJobConversation: messages with full text, call transcripts included. Each message
    * carries contact_id (its GoHighLevel contact) and email_addresses where its source
    * has them. contactIds: extra GoHighLevel contacts whose cached threads are read too
-   * (a neighbour payer's own thread on a shared job).
+   * (a neighbour payer's own thread on a shared job). heldContactIds: the payer's
+   * contact, whose messages held on NO job with this job among their candidates are
+   * read too, each marked unplaced: true (getJobConversation held_contact_ids).
    */
   conversation: (
     jobId: string,
     limit: number,
     contactIds?: string[],
+    heldContactIds?: string[],
   ) => Promise<{ messages: Record<string, unknown>[]; summary?: unknown }>;
   /** readJobStory: job-story-v1 or null, with its status. */
   story: (jobId: string) => Promise<{ story: unknown; status: unknown }>;
@@ -180,22 +186,28 @@ export interface DebtWsDeps {
   searchContacts: (
     q: string,
   ) => Promise<
-    Array<{ id: string; name?: string; phone?: string; email?: string }>
+    Array<
+      {
+        id: string;
+        name?: string;
+        firstName?: string;
+        phone?: string;
+        email?: string;
+      }
+    >
   >;
 }
 
 // ── Switches and the owner ──
 
-export function debtWsEnvSendingOn(env: DebtWsDeps["env"]): boolean {
-  return env(DEBT_WS_SENDING_SWITCH) === "true";
-}
-
-/** Effective sending: env DEBT_WS_SENDING_ENABLED === "true" AND the settings row says so. */
-export function debtWsSendingOn(
-  env: DebtWsDeps["env"],
-  settings: DebtWsSettings,
-): boolean {
-  return debtWsEnvSendingOn(env) && settings.sending_enabled === true;
+/**
+ * Sending is on when the settings row says so: debt_ws_settings.sending_enabled === true.
+ * The database switch alone decides it (Shaun decided 14 Oct 2026). The old env
+ * DEBT_WS_SENDING_ENABLED is retired and ignored. This covers manual texts, statements and
+ * Jan's list (which also needs jan_list_auto_send). Auto-send keeps its own env key on top.
+ */
+export function debtWsSendingOn(settings: DebtWsSettings): boolean {
+  return settings.sending_enabled === true;
 }
 
 /** The owners: env DEBT_WS_OWNER_USER_IDS when set (an unusable value means nobody), else the settings row. */
@@ -281,6 +293,8 @@ let bankCallTimes: number[] = [];
 export function _resetDebtWsBankCacheForTest() {
   bankCache = null;
   bankCallTimes = [];
+  // Tests reset between calls through this one hook; the greeting cache goes too.
+  greetingCache.clear();
 }
 
 /** The bank-feed date an invoice needs: its invoice date minus one day (null: undated). */
@@ -511,8 +525,133 @@ function extraContactIds(entry: BookEntry): string[] {
   return id && id !== entry.job?.ghl_contact_id ? [id] : [];
 }
 
-/** The payer as the screen and the agent see them. */
-function payerView(p: PayerContact) {
+/**
+ * Whose messages held on no job may be read onto this job: the PAYER's GoHighLevel
+ * contact only (on a shared fence the neighbour who owes, not the main client). A
+ * message the placement ladder left unplaced, with this job among its candidates, then
+ * shows in the conversation marked unplaced. No contact, no held messages.
+ */
+function heldContactIds(entry: BookEntry): string[] {
+  const id = entry.payer.ghl_contact_id;
+  return id ? [id] : [];
+}
+
+// -- Greeting name (Shaun, 14 Oct 2026) --
+//
+// Drafted texts greet the payer by the first name on their GoHighLevel contact when the
+// payer is linked, because that is the name Shaun's own texts use: Xero can hold another
+// name for the same household (Xero "Tuan Tran", GoHighLevel "Vincent Tran", Shaun writes
+// "Hi Vincent"). Otherwise, the Xero contact's first name as before.
+//
+// No stored copy of the GoHighLevel contact's name exists (jobs.client_name and
+// job_contacts.client_name are ours, business_events and ghl_conversation_cache carry no
+// contact name), so it comes from the existing GoHighLevel contact search (the one the
+// link candidates use, read only): the payer's phone, then email, keeping only the result
+// whose id IS the payer's linked contact. Cached per contact per Perth day. A failed
+// search is not cached and falls back to the Xero name. Nothing is written to
+// GoHighLevel.
+
+/** The name a draft greets the payer by, and where it came from. */
+export interface GreetingName {
+  /** The first name for {name} in a template. */
+  name: string;
+  /**
+   * ghl: the linked GoHighLevel contact's first name. xero: the Xero contact's first
+   * name. company_generic: the Xero payer is a company and no linked person was found,
+   * so the draft says "Hi there,".
+   */
+  source: "ghl" | "xero" | "company_generic";
+  /** The linked GoHighLevel contact's full name, when it was found. */
+  ghl_name: string | null;
+}
+
+/** GoHighLevel contact id -> its name, for one Perth day. */
+const greetingCache = new Map<
+  string,
+  { day: string; first: string | null; full: string | null }
+>();
+
+const tidyGhlName = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
+
+/** The payer's linked GoHighLevel contact's name (first and full), or nulls. */
+async function ghlContactName(
+  deps: DebtWsDeps,
+  payer: PayerContact,
+): Promise<{ first: string | null; full: string | null }> {
+  const id = payer.ghl_contact_id;
+  if (!id) return { first: null, full: null };
+  const day = perthDate(deps.now());
+  const hit = greetingCache.get(id);
+  if (hit && hit.day === day) return { first: hit.first, full: hit.full };
+  const email = String(payer.email ?? "").trim().toLowerCase();
+  const queries = [
+    ...new Set(
+      [
+        digits(payer.phone).length >= 8 ? String(payer.phone).trim() : null,
+        normaliseAuMobile(payer.phone),
+        email.includes("@") ? email : null,
+      ].filter((q): q is string => !!q && q.length >= 2),
+    ),
+  ];
+  let failed = false;
+  for (const q of queries) {
+    try {
+      const c = (await deps.searchContacts(q)).find((r) => r?.id === id);
+      if (c) {
+        const full = tidyGhlName(c.name) || tidyGhlName(c.firstName) || null;
+        const first = tidyGhlName(c.firstName) || full;
+        greetingCache.set(id, { day, first, full });
+        return { first, full };
+      }
+    } catch (error) {
+      failed = true;
+      console.error(
+        "[debt_ws] greeting name search failed",
+        (error as Error)?.name ?? "",
+      );
+    }
+  }
+  // Not found is remembered for the day; a failed search is tried again next time.
+  if (!failed) greetingCache.set(id, { day, first: null, full: null });
+  return { first: null, full: null };
+}
+
+/**
+ * The greeting name for an entry's drafts: the linked GoHighLevel contact's first name,
+ * else the Xero contact's first name (firstNameOf the row's payer name). On a shared
+ * fence the payer is the neighbour, so it is the neighbour's own contact. A company
+ * account is never texted, so it is never searched.
+ *
+ * A payer whose Xero name reads like a company (looksLikeCompanyName, e.g. "Thomasz
+ * Group") is never greeted by the first word of that name: the linked GoHighLevel
+ * contact's first name when that contact is a person, else "there" ("Hi there,") with
+ * source company_generic. A GoHighLevel contact whose own name reads like a company is
+ * never used for the greeting either.
+ */
+export async function greetingNameFor(
+  deps: DebtWsDeps,
+  entry: BookEntry,
+): Promise<GreetingName> {
+  const company = looksLikeCompanyName(entry.row.payer_name);
+  const fallback = (ghl_name: string | null): GreetingName =>
+    company
+      ? { name: "there", source: "company_generic", ghl_name }
+      : { name: firstNameOf(entry.row.payer_name), source: "xero", ghl_name };
+  if (entry.kind === "account" || !entry.payer.ghl_contact_id) {
+    return fallback(null);
+  }
+  const ghl = await ghlContactName(deps, entry.payer);
+  const person = !looksLikeCompanyName(ghl.full) &&
+    !looksLikeCompanyName(ghl.first);
+  const first = ghl.first && person ? firstNameOf(ghl.first) : null;
+  if (first && first !== "there") {
+    return { name: first, source: "ghl", ghl_name: ghl.full };
+  }
+  return fallback(ghl.full);
+}
+
+/** The payer as the screen and the agent see them, with the name drafts greet them by. */
+function payerView(p: PayerContact, greeting: GreetingName) {
   return {
     name: p.name,
     phone: p.phone,
@@ -522,6 +661,13 @@ function payerView(p: PayerContact) {
     label: p.label,
     is_primary: p.is_primary,
     resolved_by: p.resolved_by,
+    // {name} in a drafted text: the GoHighLevel contact's first name when linked and
+    // found, else the Xero contact's; "there" for a company payer with no linked person
+    // (source company_generic). first_name is the same value, for the agent.
+    greeting_name: greeting.name,
+    greeting_name_source: greeting.source,
+    first_name: greeting.name,
+    ghl_name: greeting.ghl_name,
   };
 }
 
@@ -602,7 +748,7 @@ export async function debtWsOverview(deps: DebtWsDeps, caller: DebtWsCaller) {
     read_at: now.toISOString(),
     settings: {
       tab_visible: book.settings.tab_visible,
-      sending_on: debtWsSendingOn(deps.env, book.settings),
+      sending_on: debtWsSendingOn(book.settings),
       agent_on: book.settings.agent_enabled,
       viewer_is_owner: isOwner(caller, deps.env, book.settings),
       owner_set: debtWsOwnerIds(deps.env, book.settings).length > 0,
@@ -741,8 +887,16 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
   const payer = entry.payer;
   const rows = job ? book.contacts.get(String(job.id)) ?? [] : [];
   const budget = { left: DEBT_WS_PAY_LINK_FETCH_LIMIT };
-  const [story, documents, conversation, jobLogs, payLink, bank, candidates] =
-    await Promise.all([
+  const [
+    story,
+    documents,
+    conversation,
+    jobLogs,
+    payLink,
+    bank,
+    candidates,
+    greeting,
+  ] = await Promise.all([
       job
         ? deps.story(job.id).catch(() => ({
           story: null,
@@ -759,7 +913,12 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
         })).catch(() => ({ rows: [], status: "unavailable" }))
         : Promise.resolve({ rows: [], status: "no_job" }),
       job
-        ? deps.conversation(job.id, 100, extraContactIds(entry)).catch(() => ({
+        ? deps.conversation(
+          job.id,
+          100,
+          extraContactIds(entry),
+          heldContactIds(entry),
+        ).catch(() => ({
           messages: [] as Record<string, unknown>[],
           summary: null as unknown,
           error: "The conversation could not be read",
@@ -772,6 +931,7 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
       payLinkFor(deps, entry, budget),
       bankFeedSafe(deps, [bankFromOf(entry.inv)]),
       contactCandidates(deps, entry),
+      greetingNameFor(deps, entry),
     ]);
   const notes = new Map<string, WsLogRow>();
   for (const l of [...entry.logs, ...jobLogs]) notes.set(l.id, l);
@@ -788,7 +948,7 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
     })).sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const suggestion = entry.suggestion
     ? suggestionView(entry.suggestion)
-    : templateDraftFor(entry, payLink);
+    : templateDraftFor(entry, payLink, greeting.name);
   const split = splitConversation(
     conversation.messages ?? [],
     payer,
@@ -814,7 +974,7 @@ export async function debtWsJob(deps: DebtWsDeps, params: URLSearchParams) {
         shares: sharesOf(job, book.history.get(String(job.id)) ?? [], rows),
       }
       : null,
-    payer_contact: payerView(payer),
+    payer_contact: payerView(payer, greeting),
     story: story.story ?? null,
     story_status: story.status ?? null,
     invoices,
@@ -1056,7 +1216,7 @@ async function refuse(
 async function guardedSend(deps: DebtWsDeps, input: SendInput) {
   const { entry, step, actor } = input;
   const settings = input.book.settings;
-  if (!debtWsSendingOn(deps.env, settings)) {
+  if (!debtWsSendingOn(settings)) {
     await refuse(
       deps,
       input,
@@ -1800,7 +1960,7 @@ export async function debtWsStatementPreview(
     ok: true,
     version: DEBT_WS_VERSION,
     perth_date: book.today,
-    sending_on: debtWsSendingOn(deps.env, book.settings),
+    sending_on: debtWsSendingOn(book.settings),
     ...statementView(company, mondayOf(book.today), lines),
   };
 }
@@ -1847,7 +2007,7 @@ export async function debtWsStatementSend(
     ).catch(() => {});
     throw new DebtWsError(message, status, code, details);
   };
-  if (!debtWsSendingOn(deps.env, book.settings)) {
+  if (!debtWsSendingOn(book.settings)) {
     await refuseStatement(
       "sending_off",
       "Sending is off until you switch it on",
@@ -2135,7 +2295,7 @@ export async function debtWsJanList(
     sent_at: row?.sent_at ?? null,
     error: row?.error ?? null,
     auto_send_on: book.settings.jan_list_auto_send,
-    sending_on: debtWsSendingOn(deps.env, book.settings),
+    sending_on: debtWsSendingOn(book.settings),
     jan: {
       name: mobile.name,
       mobile_set: !!mobile.phone,
@@ -2247,7 +2407,7 @@ export async function debtWsJanListSend(deps: DebtWsDeps) {
   const visitDate = nextMonday(perthDate(now));
   const off = !settings.jan_list_auto_send
     ? "jan_list_auto_send_off"
-    : !debtWsSendingOn(deps.env, settings)
+    : !debtWsSendingOn(settings)
     ? "sending_off"
     : null;
   if (off) {
@@ -2469,6 +2629,8 @@ function agentMessage(m: Record<string, unknown>) {
     from: m.author ?? m.who ?? null,
     body: m.body ?? m.preview ?? "",
     transcript: channel === "call" ? m.body ?? null : null,
+    // Held on no job by the placement ladder (this job one of its candidates).
+    ...(m.unplaced === true ? { unplaced: true } : {}),
   };
 }
 
@@ -2557,6 +2719,7 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
         entry.job!.id,
         DEBT_WS_AGENT_MESSAGES * 2,
         extraContactIds(entry),
+        heldContactIds(entry),
       ).catch(() => ({
         messages: [] as Record<string, unknown>[],
       })),
@@ -2573,11 +2736,12 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
     ).map(agentMessage).sort((a, b) =>
       String(a.at ?? "").localeCompare(String(b.at ?? ""))
     );
-    const draft = templateDraftFor(entry, payLink);
+    const greeting = await greetingNameFor(deps, entry);
+    const draft = templateDraftFor(entry, payLink, greeting.name);
     items.push({
       row: entry.row,
       // Who owes it: the agent writes to this person, by this name.
-      payer_contact: payerView(entry.payer),
+      payer_contact: payerView(entry.payer, greeting),
       conversation_reason: split.reason,
       send_block: payerSendBlock(entry),
       template_draft: draft
@@ -2768,7 +2932,7 @@ export async function debtWsAgentSubmit(
     kind === "draft" && isTextStep(step) && proposed === null &&
     settings.auto_send_steps[step] === true &&
     deps.env(DEBT_WS_AUTO_SEND_SWITCH) === "true" &&
-    debtWsSendingOn(deps.env, settings)
+    debtWsSendingOn(settings)
   ) {
     const bank = await bankFeedSafe(deps, [bankFromOf(entry.inv)]);
     const payments = bankCheck(bank, entry.inv, payerNames(entry));

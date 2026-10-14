@@ -6,7 +6,7 @@ export async function automationLaneEnabled(
       args: { lane: string },
     ) => PromiseLike<{ data: unknown; error: unknown }>;
   },
-  lane: "capture" | "attribution" | "extraction",
+  lane: "capture" | "attribution" | "extraction" | "closeout",
 ): Promise<boolean> {
   try {
     const { data, error } = await client.rpc("automation_lane_enabled", {

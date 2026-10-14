@@ -93,6 +93,7 @@ export interface QuoteDocumentRow {
   superseded_at: string | null;
   quote_revision_id: string | null;
   created_at: string | null;
+  send_evidence?: { source: "captured_email"; event_id: string };
 }
 
 export interface RunAcceptanceRow {
@@ -154,6 +155,7 @@ export interface QuoteDocumentView {
   sent_to: string | null;
   recipient_mismatch: boolean | null;
   status_line: string;
+  send_evidence?: { source: "captured_email"; event_id: string };
 }
 
 export interface OutstandingParty {
@@ -445,6 +447,7 @@ export function buildJobQuotes(input: BuildJobQuotesInput): JobQuotes {
       sent_to: rec.sent_to,
       recipient_mismatch: mismatch,
       status_line: "",
+      ...(doc.send_evidence ? { send_evidence: doc.send_evidence } : {}),
     };
     view.status_line = statusLine(view);
     views.push(view);
@@ -659,78 +662,143 @@ export function buildJobQuotes(input: BuildJobQuotesInput): JobQuotes {
 export async function readJobQuotes(
   client: any,
   job: { id: string; client_email: string | null },
+  options: { includeEmailSends?: boolean } = {},
 ): Promise<{ quotes: JobQuotes | null; status: CommercialSourceStatus }> {
-  const [values, documents, runAcceptances, revisions, parties, sentEvents] =
-    await Promise.all([
-      (async () => {
+  const [
+    values,
+    documents,
+    runAcceptances,
+    revisions,
+    parties,
+    sentEvents,
+    emailSends,
+  ] = await Promise.all([
+    (async () => {
+      try {
+        const { data, error } = await client.rpc("job_quote_values", {
+          p_job_id: job.id,
+        });
+        if (error) return { data: [], code: errorCode(error) };
+        return { data: Array.isArray(data) ? data : [] };
+      } catch (_e) {
+        return { data: [], code: "read_threw" };
+      }
+    })(),
+    select(
+      client.from("job_documents")
+        .select(
+          "id, version, quote_number, run_label, job_contact_id, sent_at, viewed_at, accepted_at, declined_at, superseded_at, quote_revision_id, created_at",
+        )
+        .eq("job_id", job.id)
+        .eq("type", "quote")
+        .order("created_at", { ascending: false })
+        .limit(QUOTE_DOC_LIMIT),
+    ),
+    select(
+      client.from("run_acceptances")
+        .select(
+          "job_contact_id, job_document_id, run_label, status, accepted_at, declined_at",
+        )
+        .eq("job_id", job.id)
+        .limit(QUOTE_DOC_LIMIT),
+    ),
+    select(
+      client.from("quote_revisions")
+        .select(
+          "id, job_document_id, recipient_email, option_label, released_via, version, sent_at, scope_snapshot_json",
+        )
+        .eq("job_id", job.id)
+        .limit(QUOTE_DOC_LIMIT),
+    ),
+    select(
+      client.from("job_contacts")
+        .select("id, client_email")
+        .eq("job_id", job.id)
+        .limit(QUOTE_DOC_LIMIT),
+    ),
+    // Found by the job it names (idx_events_entity), not business_events.job_id,
+    // which the attribution ladder may clear on a legacy insert.
+    select(
+      client.from("business_events")
+        .select("occurred_at, source, payload")
+        .eq("entity_type", "job")
+        .eq("entity_id", job.id)
+        .eq("event_type", "quote.sent")
+        .in("source", [...SEND_QUOTE_SOURCES])
+        .order("occurred_at", { ascending: false })
+        .limit(QUOTE_DOC_LIMIT),
+    ),
+    options.includeEmailSends
+      ? (async () => {
         try {
-          const { data, error } = await client.rpc("job_quote_values", {
-            p_job_id: job.id,
-          });
+          const { data, error } = await client.rpc(
+            "context_job_quote_email_sends",
+            {
+              p_job_ids: [job.id],
+            },
+          );
           if (error) return { data: [], code: errorCode(error) };
-          return { data: Array.isArray(data) ? data : [] };
+          if (!Array.isArray(data)) {
+            return { data: [], code: "email_sends_invalid_shape" };
+          }
+          return { data };
         } catch (_e) {
-          return { data: [], code: "read_threw" };
+          return { data: [], code: "email_sends_read_threw" };
         }
-      })(),
-      select(
-        client.from("job_documents")
-          .select(
-            "id, version, quote_number, run_label, job_contact_id, sent_at, viewed_at, accepted_at, declined_at, superseded_at, quote_revision_id, created_at",
-          )
-          .eq("job_id", job.id)
-          .eq("type", "quote")
-          .order("created_at", { ascending: false })
-          .limit(QUOTE_DOC_LIMIT),
-      ),
-      select(
-        client.from("run_acceptances")
-          .select(
-            "job_contact_id, job_document_id, run_label, status, accepted_at, declined_at",
-          )
-          .eq("job_id", job.id)
-          .limit(QUOTE_DOC_LIMIT),
-      ),
-      select(
-        client.from("quote_revisions")
-          .select(
-            "id, job_document_id, recipient_email, option_label, released_via, version, sent_at, scope_snapshot_json",
-          )
-          .eq("job_id", job.id)
-          .limit(QUOTE_DOC_LIMIT),
-      ),
-      select(
-        client.from("job_contacts")
-          .select("id, client_email")
-          .eq("job_id", job.id)
-          .limit(QUOTE_DOC_LIMIT),
-      ),
-      // Found by the job it names (idx_events_entity), not business_events.job_id,
-      // which the attribution ladder may clear on a legacy insert.
-      select(
-        client.from("business_events")
-          .select("occurred_at, source, payload")
-          .eq("entity_type", "job")
-          .eq("entity_id", job.id)
-          .eq("event_type", "quote.sent")
-          .in("source", [...SEND_QUOTE_SOURCES])
-          .order("occurred_at", { ascending: false })
-          .limit(QUOTE_DOC_LIMIT),
-      ),
-    ]);
+      })()
+      : Promise.resolve({ data: [], code: undefined }),
+  ]);
 
-  const requiredFailure = values.code ?? documents.code ?? runAcceptances.code;
+  const requiredFailure = values.code ?? documents.code ??
+    runAcceptances.code ?? emailSends.code;
   if (requiredFailure) {
     return {
       quotes: null,
       status: { ok: false, state: "failed", count: 0, code: requiredFailure },
     };
   }
+  // The existing SQL matcher proves the send. Never infer it from a file
+  // name here, stamp a document, or use today's job price as a sent quote's
+  // value. The value RPC may not yet know this document: publish unknown.
+  const provedSends = new Map<string, any>(
+    emailSends.data
+      .filter((r: any) =>
+        r.job_id === job.id && r.document_id && r.event_id && r.sent_at
+      )
+      .map((r: any) => [r.document_id, r]),
+  );
+  const effectiveDocuments = documents.data.map((doc: QuoteDocumentRow) => {
+    const proof = provedSends.get(doc.id);
+    return doc.sent_at || !proof ? doc : {
+      ...doc,
+      sent_at: proof.sent_at,
+      send_evidence: {
+        source: "captured_email" as const,
+        event_id: proof.event_id,
+      },
+    };
+  });
+  const effectiveValues = [...values.data];
+  const valued = new Set(values.data.map((v: QuoteValueRow) => v.document_id));
+  for (const doc of effectiveDocuments) {
+    if (!doc.send_evidence || valued.has(doc.id)) continue;
+    effectiveValues.push({
+      document_id: doc.id,
+      job_contact_id: doc.job_contact_id,
+      party_is_owner: null,
+      run_label: doc.run_label,
+      value_inc_gst: null,
+      value_source:
+        "Sent by email; value not recorded by the quote value reader",
+      whole_quote_total_inc: null,
+      whole_quote_source: null,
+    });
+  }
   const recipientFailure = revisions.code ?? parties.code ?? sentEvents.code;
   const quotes = buildJobQuotes({
     job: { client_email: job.client_email },
-    values: values.data as QuoteValueRow[],
-    documents: documents.data as QuoteDocumentRow[],
+    values: effectiveValues as QuoteValueRow[],
+    documents: effectiveDocuments as QuoteDocumentRow[],
     runAcceptances: runAcceptances.data as RunAcceptanceRow[],
     recipients: recipientFailure ? null : {
       revisions: revisions.data as QuoteRevisionRow[],

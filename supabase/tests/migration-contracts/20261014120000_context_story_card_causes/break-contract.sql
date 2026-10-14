@@ -1,0 +1,1 @@
+CREATE OR REPLACE FUNCTION public.context_job_quote_email_sends(p_job_ids uuid[],p_as_of timestamptz DEFAULT now()) RETURNS TABLE(document_id uuid,job_id uuid,event_id uuid,sent_at timestamptz) LANGUAGE sql STABLE AS $$ SELECT NULL::uuid,NULL::uuid,NULL::uuid,NULL::timestamptz WHERE false $$;

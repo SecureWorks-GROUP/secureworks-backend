@@ -29,6 +29,7 @@ import {
   ladderFor,
   type LadderResult,
   longDate,
+  looksLikeCompanyName,
   mondayOf,
   nextMonday,
   normaliseName,
@@ -515,10 +516,16 @@ export interface DraftView {
   amount: number;
 }
 
-/** The code's draft for the due text step, or null when no text step is due. */
+/**
+ * The code's draft for the due text step, or null when no text step is due.
+ * greetingName: the first name for {name} (debt_ws_actions.ts greetingNameFor: the
+ * linked GoHighLevel contact's, else Xero's, else "there" for a company payer); without
+ * it, the Xero contact's first name, or "there" when the payer reads like a company.
+ */
 export function templateDraftFor(
   entry: BookEntry,
   payLink: string | null,
+  greetingName?: string,
 ): DraftView | null {
   const step = entry.ladder.step_due?.step;
   if (!isTextStep(step) || entry.kind === "account") return null;
@@ -527,7 +534,11 @@ export function templateDraftFor(
     entry.kind,
     entry.cls.stage,
     {
-      name: firstNameOf(entry.row.payer_name),
+      // A company payer is never greeted by the first word of its name.
+      name: greetingName ||
+        (looksLikeCompanyName(entry.row.payer_name)
+          ? "there"
+          : firstNameOf(entry.row.payer_name)),
       street: streetOf(entry.job?.site_address),
       work: workOf(entry.job?.type),
       amount: entry.row.amount_due,

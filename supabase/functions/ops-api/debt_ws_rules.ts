@@ -10,8 +10,7 @@
 //   Section 5  the message templates, with Perth dates like "Friday the 17th of October"
 //   Section 6  the bank-feed possible-payment matcher
 //
-// Never import the retired debt desk modules (debt_desk_*, debt_book*, debt_morning_list,
-// debt_jan_text, debt_chase_schedule, debt_draft_templates): a later PR deletes them.
+// The 30 Sep debt desk modules this replaced were removed on 8 Oct 2026; do not bring them back.
 
 export const DEBT_WS_VERSION = "debt-ws/v1";
 export const DEBT_WS_PLAYBOOK_VERSION = "debt-ws-playbook/v1";
@@ -189,6 +188,18 @@ const COMPANY_WORDS =
 
 export function looksLikeCompany(name: unknown): boolean {
   return COMPANY_WORDS.test(String(name ?? ""));
+}
+
+// The spec's full company token list, for the greeting only (the lane rule above keeps
+// its own shorter list). A payer whose name carries one of these is a business, so a
+// drafted text never greets them by the first word of the company name ("Thomasz
+// Group" is not "Hi Thomasz,").
+const GREETING_COMPANY_WORDS =
+  /\b(pty|ltd|group|builders|building|restoration|housing|strata|insurance|services|construction|trust|council|department|holdings|enterprises|co|corporation|company|partners)\b/i;
+
+/** True when a payer or contact name reads like a business, not a person. */
+export function looksLikeCompanyName(name: unknown): boolean {
+  return GREETING_COMPANY_WORDS.test(String(name ?? ""));
 }
 
 const HOMEOWNER_TYPES = new Set(["fencing", "patio"]);

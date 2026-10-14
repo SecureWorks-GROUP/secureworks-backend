@@ -498,6 +498,11 @@ description is built from five projected `scope_json` paths; the status floor is
 the heaviest blobs (4.9 s to project every pipeline row against 0.43 s for
 accepted work). Rules: `dispatch_job_list.ts`; contract:
 `docs/dispatch-slice-1-read-contract.md`; tests: `dispatch_job_list_test.ts`.
+Slice 3's stage rail and To do rules live only in `dispatch_stage.ts`; its stage
+is the `job_dispatch_state` table, written only by `set_dispatch_stage` /
+`set_dispatch_next_step` (`dispatch_stage_write.ts`), never the job status, and
+a failed read of it answers `dispatch_stages: 'failed'`, never "nothing set".
+Contract: `docs/dispatch-slice-3-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
@@ -4531,15 +4536,18 @@ must fail closed on Xero retry rather than inventing history. Apply
 `ops-api`. API fields, formulas, UI handoff, source, and deploy order:
 `docs/trade-invoice-super-gst-contract-2026-08-27.md`.
 
-## Debt Workshop Sends Are Double-Switched, Owner-Only, And Claimed First
+## Debt Workshop Sends Are Switched, Owner-Only, And Claimed First
 
 The Debt tab's backend is `ops-api/debt_ws_*.ts` (contract: wiki
 `coding/capabilities/debt-follow-up/debt-workshop-spec.md`; switches and actions:
-`docs/debt-workshop/README.md`). Do not import the retired debt desk modules
-(`debt_desk_*`, `debt_book*`, `debt_morning_list`, `debt_jan_text`, `debt_chase_schedule`,
-`debt_draft_templates`). Load-bearing rules:
-- Effective sending is env `DEBT_WS_SENDING_ENABLED === "true"` AND
-  `debt_ws_settings.sending_enabled`. The owner comes from env `DEBT_WS_OWNER_USER_IDS`, else
+`docs/debt-workshop/README.md`). It is the only debt system: the 30 Sep to 1 Oct debt desk
+(`debt_book`, `debt_morning_list`, `debt_draft_*`, `debt_log_outcome`) was removed on 8 Oct
+2026. Its migrations stay, and its old `payment_chase_logs` rows are kept out of chase history
+by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
+- Sending is on when `debt_ws_settings.sending_enabled` is true. The database switch alone
+  decides it (Shaun decided 14 Oct 2026); the old env `DEBT_WS_SENDING_ENABLED` is retired and
+  ignored. Automatic sending stays two-key: it also needs env `DEBT_WS_AUTO_SEND_ENABLED ===
+  "true"` and `auto_send_steps[step]`. The owner comes from env `DEBT_WS_OWNER_USER_IDS`, else
   `debt_ws_settings.owner_user_ids`, and is never a role.
 - Every send goes through `guardedSend`:
   - a live Xero re-check;
@@ -4637,6 +4645,50 @@ feeds `presentTradeInvoice` must select the four `recurring_deduction_*`
 columns or it shows the undeducted figure. The Xero line is found by its
 description prefix. Contract, the screen changes still owed and how the office
 ends one: `docs/trade-recurring-deductions-2026-10-13.md`.
+
+## Paid Fencing And Patio Jobs Go To Get Review
+
+Captain 13 Oct 2026: a paid fencing or patio job moves to `get_review` (not
+`complete`), gets one review text, and is archived 24 hours later. "Paid" is
+the strict rule in `_shared/job_paid_closeout.ts` (every linked non-void sales
+invoice PAID and none DRAFT; every paying party, `job_contacts` with
+`removed_at` null, `status` not `removed`, and a share that is not an explicit
+0 (null counts), has a paid final, a final needing positive evidence by the
+Debt tab's `invoiceKindOf` (an unlabelled invoice never is); paid covers the
+`job_quote_values` quote plus customer-accepted or invoiced variations; one
+approved internally but never accepted is not owed). A quote or variations READ
+failure is `undecided`: nothing moves, texts, archives or is recorded that run;
+only no sent quote or no recorded value lets rules 1 and 2 decide alone. A live
+sweep that cannot read the switches archives nothing. Every read, move, text and
+sweep is `ops-api/job_closeout.ts`; never re-derive "paid" elsewhere. Only
+holds: status `rectification` or `jobs.is_callback`. If only the quote check
+fails the card stays put with `job_closeout_state.paid_less_than_quoted`.
+Builder, insurance, make-safe and repair jobs keep the old xero-sync rule
+(`invoiced` -> `complete`), and so do fencing and patio while the move switch
+is off. Paid covers the quote short by at most $1 (rounding). One review text
+per job ever (`job_review_claims`, claimed before any send; no claim is kept
+when nothing went out: an unlinked contact, a job paid more than 30 days ago,
+or every send refused by a ghl-proxy guard, and such a card still archives
+after 24 hours), to every paying owner, skipping any contact sent a review text
+in the last 90 days from any source. Every status write uses
+`update_job_status` `expected_statuses` (compare and set). A card moves on
+payment only when paid within 30 days, whatever its from-status
+(`stale_payment` otherwise); the `complete` backlog is never caught up or
+texted, and `job_closeout_backlog_preview` only lists what a later step may
+archive.
+
+Switches (migration `20261013150000`), all off; turn on in this order:
+`job_closeout_settings.get_review_move_enabled`; then `review_sender_mode`
+`dry_run` (read the `review_request_dry_run` job events); then someone must
+switch the old GoHighLevel review workflow OFF in GHL Automation; then env
+`JOB_REVIEW_SENDING_ENABLED=true` on ops-api and `review_sender_mode` `live`
+(live without the env reads as dry run); last, `automation_switches.closeout`
+for the `job-closeout-sweep` cron. Adding a lane to `automation_lane_enabled()`
+moves the md5 four earlier migrations' guards pin: their contracts stand the old
+body back up from
+`supabase/tests/migration-contracts/20261013150000_job_closeout_review_archive/pre_closeout_lane_reader.sql`.
+Contract: `docs/job-closeout-v1.md`; tests: `job_paid_closeout_test.ts`,
+`job_closeout_test.ts`.
 
 ## Maintaining this file
 

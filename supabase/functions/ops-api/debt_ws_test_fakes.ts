@@ -559,8 +559,10 @@ export interface Recorder {
   bankReads: Array<string | null>;
   bankPages: number[];
   payLinkReads: string[];
-  /** One entry per conversation read: the job and the extra contact ids asked for. */
-  conversationReads: Array<{ jobId: string; contactIds: string[] }>;
+  /** One entry per conversation read: the job, the extra and the held contact ids asked for. */
+  conversationReads: Array<
+    { jobId: string; contactIds: string[]; heldContactIds: string[] }
+  >;
 }
 
 export function fakeDeps(
@@ -661,8 +663,12 @@ export function fakeDeps(
       return Promise.resolve({ success: true });
     },
     // By default two messages with the job's own GoHighLevel contact.
-    conversation: (jobId, limit, contactIds) => {
-      rec.conversationReads.push({ jobId, contactIds: contactIds ?? [] });
+    conversation: (jobId, limit, contactIds, heldContactIds) => {
+      rec.conversationReads.push({
+        jobId,
+        contactIds: contactIds ?? [],
+        heldContactIds: heldContactIds ?? [],
+      });
       const contact =
         store.jobRows.find((j) => j.id === jobId)?.ghl_contact_id ?? null;
       const messages = options.conversation ?? [
@@ -747,6 +753,9 @@ export function fakeDeps(
   return { deps, rec };
 }
 
+// The retired env switch, set to "true". Since 14 Oct 2026 (Shaun) the database switch
+// debt_ws_settings.sending_enabled alone turns sending on, so this env is ignored. Tests
+// pass it to prove it neither turns sending on nor is needed.
 export const ON = {
   DEBT_WS_SENDING_ENABLED: "true",
 };
