@@ -27,7 +27,7 @@ revoked from `anon` and `authenticated`: only `ops-api` reaches them.
 | Table | One row per | Holds |
 |---|---|---|
 | `job_material_suppliers` | supplier chosen for a job (`unique (job_id, supplier_id)`) | `supplier_id` (a `suppliers` row), `supplier_name` (the contact's name when chosen), `position`, who and when |
-| `job_material_lines` | material line; `id` is made in the browser | `supplier_id`, `description` (1 to 300), `quantity` (`numeric(12,3)`, 0 or more, or null), `unit` (1 to 30, or null), `status`, `purchase_order_id`, `source` (`manual` or `scope`), `position`, who and when created and last changed |
+| `job_material_lines` | material line; `id` is made in the browser (a suggested line's by the server, section 5) | `supplier_id`, `description` (1 to 300), `quantity` (`numeric(12,3)`, 0 or more, or null), `unit` (1 to 30, or null), `status`, `purchase_order_id`, `source` (`manual` or `scope`), `position`, who and when created and last changed |
 | `job_dispatch_workings` | job, made on the first save | `working_out` (at most 20,000), `sketch_png` (a `data:image/png;base64,` URL, at most 400,000), each with its own updated-at and by-email |
 
 A line's foreign key on `(job_id, supplier_id)` points at
@@ -164,6 +164,11 @@ inserts one line per item under that supplier with `source: 'scope'` and
 cannot run, so a customer's quote line and its price never become a material
 line.
 
+Each suggested line's `id` is a uuid made from the job id and the line's place in
+the suggestion, so two presses that both find no lines insert the same ids: the
+second insert clashes on the primary key and answers `lines_exist`, and the scope
+lines land once.
+
 Cleaning: the long dash (and an en dash) with the spaces round it becomes `", "`,
 the multiplication sign becomes `x`, spaces collapse, trimmed to 300. `quantity`
 as given (a numeric string reads as its number, anything else as null); `unit` as
@@ -176,7 +181,7 @@ description is dropped.
 | The scope gives nothing | `{ success, added: 0, lines: [], counts }` |
 | Work type not `patio` (a fencing job with a patio-shaped scope included) | 409 `no_suggestion_for_work_type` |
 | Supplier not on the job | 409 `supplier_not_on_job` |
-| The job already has any line | 409 `lines_exist` |
+| The job already has any line, including a second press landing at the same time | 409 `lines_exist` |
 | The extractor throws on the stored scope | 409 `scope_unreadable` (never `added: 0`) |
 
 A scope shaped like SWP-26701's gives the four lines in the slice 4 build note

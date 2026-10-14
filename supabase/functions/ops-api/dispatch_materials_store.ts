@@ -706,6 +706,9 @@ export async function deleteDispatchMaterialLine(
 
 // ── The scope suggestion ────────────────────────────────────────────────────
 
+// A suggested line's id is fixed by its job and place, so two presses that both
+// pass the no-lines check insert the same ids and the second clashes on the
+// primary key (23505 -> lines_exist) instead of adding every line twice.
 async function suggestedLineId(jobId: string, index: number) {
   const digest = new Uint8Array(
     await crypto.subtle.digest(
