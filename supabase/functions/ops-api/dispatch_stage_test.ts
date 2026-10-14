@@ -105,28 +105,213 @@ function proofJobs(): Proof[] {
     id: string,
     over: Row,
     expect: Omit<Proof, "id" | "row">,
-  ): Proof => ({ id, row: job(n, { job_number: `SWX-${id}`, ...over }), ...expect });
+  ): Proof => ({
+    id,
+    row: job(n, { job_number: `SWX-${id}`, ...over }),
+    ...expect,
+  });
   return [
-    p(12, "P12", { status: "awaiting_deposit" }, { todo: true, stage: "accepted", index: 1, source: "job_status", from: "awaiting_deposit", out: null }),
-    p(13, "P13", { status: "order_materials" }, { todo: true, stage: "deposit_paid", index: 2, source: "job_status", from: "order_materials", out: null }),
-    p(14, "P14", { status: "processing" }, { todo: true, stage: "deposit_paid", index: 2, source: "job_status", from: "processing", out: null }),
-    p(15, "P15", { status: "awaiting_supplier" }, { todo: true, stage: "materials_ordered", index: 3, source: "job_status", from: "awaiting_supplier", out: null }),
-    p(4, "P4", { type: "patio", status: "order_materials", council_required: true }, { todo: true, stage: "deposit_paid", index: 2, source: "job_status", from: "order_materials", out: null }),
-    p(10, "P10", { type: "patio", status: "accepted", council_required: false }, { todo: true, stage: "accepted", index: 1, source: "job_status", from: "accepted", out: null }),
-    p(7, "P7", { type: "patio", status: "order_materials", council_required: false }, { todo: true, stage: "deposit_paid", index: 2, source: "job_status", from: "order_materials", out: null }),
-    p(16, "P16", { type: "patio", status: "schedule_install", council_required: false }, { todo: true, stage: "supplier_confirmed", index: 4, source: "job_status", from: "schedule_install", out: null }),
-    p(17, "P17", { type: "patio", status: "approvals", council_required: true }, { todo: false, stage: "deposit_paid", index: 2, source: "job_status", from: "approvals", out: "in_council" }),
-    p(18, "P18", { type: "patio", status: "awaiting_deposit", council_required: null }, { todo: false, stage: "accepted", index: 1, source: "job_status", from: "awaiting_deposit", out: "council_not_decided" }),
-    p(19, "P19", { type: "patio", status: "awaiting_deposit", council_required: true }, { todo: false, stage: "accepted", index: 1, source: "job_status", from: "awaiting_deposit", out: "council_to_come" }),
-    p(1, "P1", { status: "scheduled" }, { todo: false, stage: "trade_scheduled", index: 6, source: "job_status", from: "scheduled", out: null }),
-    p(20, "P20", { type: "repair", status: "accepted", ds_repair_stage: "approved" }, { todo: true, stage: "accepted", index: 1, source: "repairs_board", from: "approved", out: null }),
+    p(12, "P12", { status: "awaiting_deposit" }, {
+      todo: true,
+      stage: "accepted",
+      index: 1,
+      source: "job_status",
+      from: "awaiting_deposit",
+      out: null,
+    }),
+    p(13, "P13", { status: "order_materials" }, {
+      todo: true,
+      stage: "deposit_paid",
+      index: 2,
+      source: "job_status",
+      from: "order_materials",
+      out: null,
+    }),
+    p(14, "P14", { status: "processing" }, {
+      todo: true,
+      stage: "deposit_paid",
+      index: 2,
+      source: "job_status",
+      from: "processing",
+      out: null,
+    }),
+    p(15, "P15", { status: "awaiting_supplier" }, {
+      todo: true,
+      stage: "materials_ordered",
+      index: 3,
+      source: "job_status",
+      from: "awaiting_supplier",
+      out: null,
+    }),
+    p(4, "P4", {
+      type: "patio",
+      status: "order_materials",
+      council_required: true,
+    }, {
+      todo: true,
+      stage: "deposit_paid",
+      index: 2,
+      source: "job_status",
+      from: "order_materials",
+      out: null,
+    }),
+    p(
+      10,
+      "P10",
+      { type: "patio", status: "accepted", council_required: false },
+      {
+        todo: true,
+        stage: "accepted",
+        index: 1,
+        source: "job_status",
+        from: "accepted",
+        out: null,
+      },
+    ),
+    p(7, "P7", {
+      type: "patio",
+      status: "order_materials",
+      council_required: false,
+    }, {
+      todo: true,
+      stage: "deposit_paid",
+      index: 2,
+      source: "job_status",
+      from: "order_materials",
+      out: null,
+    }),
+    p(16, "P16", {
+      type: "patio",
+      status: "schedule_install",
+      council_required: false,
+    }, {
+      todo: true,
+      stage: "supplier_confirmed",
+      index: 4,
+      source: "job_status",
+      from: "schedule_install",
+      out: null,
+    }),
+    p(
+      17,
+      "P17",
+      { type: "patio", status: "approvals", council_required: true },
+      {
+        todo: false,
+        stage: "deposit_paid",
+        index: 2,
+        source: "job_status",
+        from: "approvals",
+        out: "in_council",
+      },
+    ),
+    p(18, "P18", {
+      type: "patio",
+      status: "awaiting_deposit",
+      council_required: null,
+    }, {
+      todo: false,
+      stage: "accepted",
+      index: 1,
+      source: "job_status",
+      from: "awaiting_deposit",
+      out: "council_not_decided",
+    }),
+    p(19, "P19", {
+      type: "patio",
+      status: "awaiting_deposit",
+      council_required: true,
+    }, {
+      todo: false,
+      stage: "accepted",
+      index: 1,
+      source: "job_status",
+      from: "awaiting_deposit",
+      out: "council_to_come",
+    }),
+    p(1, "P1", { status: "scheduled" }, {
+      todo: false,
+      stage: "trade_scheduled",
+      index: 6,
+      source: "job_status",
+      from: "scheduled",
+      out: null,
+    }),
+    p(20, "P20", {
+      type: "repair",
+      status: "accepted",
+      ds_repair_stage: "approved",
+    }, {
+      todo: true,
+      stage: "accepted",
+      index: 1,
+      source: "repairs_board",
+      from: "approved",
+      out: null,
+    }),
     // A repair-family job typed fencing: the Repairs board decides.
-    p(21, "P21", { type: "fencing", status: "schedule_install", ds_makesafe_family: "repair", ds_repair_stage: "materials" }, { todo: true, stage: "deposit_paid", index: 2, source: "repairs_board", from: "materials", out: null }),
-    p(5, "P5", { type: "fencing", status: "order_materials", ds_ses_family: "repair", ds_repair_stage: "complete" }, { todo: false, stage: "trade_scheduled", index: 6, source: "repairs_board", from: "complete", out: null }),
-    p(22, "P22", { type: "repair", status: "accepted", ds_repair_stage: "wo_in" }, { todo: false, stage: "not_started", index: 0, source: "repairs_board", from: "wo_in", out: null }),
-    p(23, "P23", { status: "partially_accepted" }, { todo: false, stage: "not_started", index: 0, source: "job_status", from: "partially_accepted", out: null }),
-    p(2, "P2", { status: "archived" }, { todo: false, stage: "trade_scheduled", index: 6, source: "job_status", from: "archived", out: null }),
-    p(6, "P6", { type: "makesafe", status: "accepted" }, { todo: false, stage: null, index: null, source: null, from: null, out: null }),
+    p(21, "P21", {
+      type: "fencing",
+      status: "schedule_install",
+      ds_makesafe_family: "repair",
+      ds_repair_stage: "materials",
+    }, {
+      todo: true,
+      stage: "deposit_paid",
+      index: 2,
+      source: "repairs_board",
+      from: "materials",
+      out: null,
+    }),
+    p(5, "P5", {
+      type: "fencing",
+      status: "order_materials",
+      ds_ses_family: "repair",
+      ds_repair_stage: "complete",
+    }, {
+      todo: false,
+      stage: "trade_scheduled",
+      index: 6,
+      source: "repairs_board",
+      from: "complete",
+      out: null,
+    }),
+    p(22, "P22", {
+      type: "repair",
+      status: "accepted",
+      ds_repair_stage: "wo_in",
+    }, {
+      todo: false,
+      stage: "not_started",
+      index: 0,
+      source: "repairs_board",
+      from: "wo_in",
+      out: null,
+    }),
+    p(23, "P23", { status: "partially_accepted" }, {
+      todo: false,
+      stage: "not_started",
+      index: 0,
+      source: "job_status",
+      from: "partially_accepted",
+      out: null,
+    }),
+    p(2, "P2", { status: "archived" }, {
+      todo: false,
+      stage: "trade_scheduled",
+      index: 6,
+      source: "job_status",
+      from: "archived",
+      out: null,
+    }),
+    p(6, "P6", { type: "makesafe", status: "accepted" }, {
+      todo: false,
+      stage: null,
+      index: null,
+      source: null,
+      from: null,
+      out: null,
+    }),
   ];
 }
 
@@ -163,12 +348,23 @@ Deno.test("rules: the nineteen proof jobs read the stage, source and To do of bu
 Deno.test("rules: every fencing status maps to its stop, and stop 5 is never read", () => {
   const expected: Record<string, number> = {
     partially_accepted: 0,
-    accepted: 1, awaiting_deposit: 1, deposit: 1,
-    approvals: 2, order_materials: 2, processing: 2,
+    accepted: 1,
+    awaiting_deposit: 1,
+    deposit: 1,
+    approvals: 2,
+    order_materials: 2,
+    processing: 2,
     awaiting_supplier: 3,
-    order_confirmed: 4, schedule_install: 4,
-    scheduled: 6, in_progress: 6, rectification: 6, complete: 6,
-    final_payment: 6, invoiced: 6, get_review: 6, archived: 6,
+    order_confirmed: 4,
+    schedule_install: 4,
+    scheduled: 6,
+    in_progress: 6,
+    rectification: 6,
+    complete: 6,
+    final_payment: 6,
+    invoiced: 6,
+    get_review: 6,
+    archived: 6,
   };
   for (const type of ["fencing", "patio", "decking", "insurance"]) {
     for (const [status, index] of Object.entries(expected)) {
@@ -183,12 +379,23 @@ Deno.test("rules: every fencing status maps to its stop, and stop 5 is never rea
 
 Deno.test("rules: a repair reads the Repairs board, by insuranceRepairStage, whatever its job status", () => {
   const byBoard: Record<string, number> = {
-    wo_in: 0, scoping: 0, quoted: 0, variation: 0,
-    approved: 1, materials: 2, scheduled: 6, on_site: 6, complete: 6,
+    wo_in: 0,
+    scoping: 0,
+    quoted: 0,
+    variation: 0,
+    approved: 1,
+    materials: 2,
+    scheduled: 6,
+    on_site: 6,
+    complete: 6,
   };
   for (const [boardStage, index] of Object.entries(byBoard)) {
     const place = dispatchPlace(
-      job(1, { type: "repair", status: "order_materials", ds_repair_stage: boardStage }),
+      job(1, {
+        type: "repair",
+        status: "order_materials",
+        ds_repair_stage: boardStage,
+      }),
       null,
     );
     assertEquals(place.index, index, boardStage);
@@ -196,7 +403,10 @@ Deno.test("rules: a repair reads the Repairs board, by insuranceRepairStage, wha
     assertEquals(place.from, boardStage);
   }
   // No stored board stage: the Repairs board's own fallback from the status.
-  const fallback = dispatchPlace(job(1, { type: "repair", status: "awaiting_supplier" }), null);
+  const fallback = dispatchPlace(
+    job(1, { type: "repair", status: "awaiting_supplier" }),
+    null,
+  );
   assertEquals(fallback.from, "materials");
   assertEquals(fallback.index, 2);
 });
@@ -226,35 +436,76 @@ Deno.test("rules: a set stage wins over the job status and the Repairs board", (
   }
   // The scheduled fence set back at stop 5 is in To do again; the repair at
   // WO In is still outside the window whatever is set.
-  assertEquals(dispatchRowFields(job(1, { status: "scheduled" }), state).dispatch_todo, true);
   assertEquals(
-    dispatchRowFields(job(2, { type: "repair", status: "accepted", ds_repair_stage: "wo_in" }), state).dispatch_todo,
+    dispatchRowFields(job(1, { status: "scheduled" }), state).dispatch_todo,
+    true,
+  );
+  assertEquals(
+    dispatchRowFields(
+      job(2, { type: "repair", status: "accepted", ds_repair_stage: "wo_in" }),
+      state,
+    ).dispatch_todo,
     false,
   );
   // The setter's email when the user has no name; nothing when neither.
   assertEquals(
-    dispatchRowFields(job(1), { ...state, stage_setter: null }).dispatch_stage_set_by,
+    dispatchRowFields(job(1), { ...state, stage_setter: null })
+      .dispatch_stage_set_by,
     "office@example.test",
   );
   assertEquals(
-    dispatchRowFields(job(1), { ...state, stage_setter: { name: " " }, stage_set_by_email: null }).dispatch_stage_set_by,
+    dispatchRowFields(job(1), {
+      ...state,
+      stage_setter: { name: " " },
+      stage_set_by_email: null,
+    }).dispatch_stage_set_by,
     null,
   );
 });
 
 Deno.test("rules: To do is stops 1 to 5 inside the window; stop 6, started, cancelled and other types are out", () => {
-  const set = (stage: string) => ({ stage, stage_set_at: "2026-10-14T00:00:00Z" });
-  assertEquals(dispatchRowFields(job(1, { status: "order_materials" }), set("trade_scheduled")).dispatch_todo, false);
-  assertEquals(dispatchRowFields(job(1, { status: "order_materials" }), set("materials_on_site")).dispatch_todo, true);
-  for (const status of ["in_progress", "complete", "archived", "cancelled", "lost"]) {
-    const fields = dispatchRowFields(job(1, { status }), set("materials_ordered"));
+  const set = (stage: string) => ({
+    stage,
+    stage_set_at: "2026-10-14T00:00:00Z",
+  });
+  assertEquals(
+    dispatchRowFields(
+      job(1, { status: "order_materials" }),
+      set("trade_scheduled"),
+    ).dispatch_todo,
+    false,
+  );
+  assertEquals(
+    dispatchRowFields(
+      job(1, { status: "order_materials" }),
+      set("materials_on_site"),
+    ).dispatch_todo,
+    true,
+  );
+  for (
+    const status of ["in_progress", "complete", "archived", "cancelled", "lost"]
+  ) {
+    const fields = dispatchRowFields(
+      job(1, { status }),
+      set("materials_ordered"),
+    );
     assertEquals(fields.dispatch_todo, false, status);
     assertEquals(fields.dispatch_stage, "materials_ordered", status);
   }
-  const insurance = dispatchRowFields(job(1, { type: "insurance", status: "order_materials" }), null);
+  const insurance = dispatchRowFields(
+    job(1, { type: "insurance", status: "order_materials" }),
+    null,
+  );
   assertEquals(insurance.dispatch_stage, "deposit_paid");
   assertEquals(insurance.dispatch_todo, false);
-  const decking = dispatchRowFields(job(1, { type: "decking", status: "order_materials", council_required: false }), null);
+  const decking = dispatchRowFields(
+    job(1, {
+      type: "decking",
+      status: "order_materials",
+      council_required: false,
+    }),
+    null,
+  );
   assertEquals(decking.dispatch_todo, true);
 });
 
@@ -277,12 +528,22 @@ Deno.test("rules: the patio council rule holds patio and decking only, before Ap
     if (out) assertEquals(result.todo, false);
   }
   // A held job outside the window carries no reason.
-  const notListed = job(1, { type: "patio", status: "partially_accepted", council_required: null });
-  assertEquals(dispatchTodo(notListed, dispatchPlace(notListed, null)).out, null);
+  const notListed = job(1, {
+    type: "patio",
+    status: "partially_accepted",
+    council_required: null,
+  });
+  assertEquals(
+    dispatchTodo(notListed, dispatchPlace(notListed, null)).out,
+    null,
+  );
 });
 
 Deno.test("rules: the next-step line is trimmed and its white space collapsed", () => {
-  assertEquals(normaliseDispatchNextStep("  call   the\tsupplier \n"), "call the supplier");
+  assertEquals(
+    normaliseDispatchNextStep("  call   the\tsupplier \n"),
+    "call the supplier",
+  );
   assertEquals(normaliseDispatchNextStep("   "), "");
   assertEquals(normaliseDispatchNextStep(undefined), null);
 });
@@ -294,7 +555,11 @@ function makeClient(
   seed: Record<string, Row[]>,
   options: {
     fail?: Record<string, Failure>;
-    beforeWrite?: (table: string, op: string, tables: Record<string, Row[]>) => void;
+    beforeWrite?: (
+      table: string,
+      op: string,
+      tables: Record<string, Row[]>,
+    ) => void;
   } = {},
 ) {
   const tables: Record<string, Row[]> = {
@@ -304,7 +569,9 @@ function makeClient(
     users: [],
     ...structuredClone(seed),
   };
-  const calls: Array<{ table: string; op: string; select: string; values?: any }> = [];
+  const calls: Array<
+    { table: string; op: string; select: string; values?: any }
+  > = [];
 
   function from(table: string) {
     let op = "select";
@@ -317,9 +584,15 @@ function makeClient(
     let single = false;
 
     const withEmbeds = (row: Row): Row => {
-      if (table === "job_dispatch_state" && select.includes("stage_setter:stage_set_by(name)")) {
+      if (
+        table === "job_dispatch_state" &&
+        select.includes("stage_setter:stage_set_by(name)")
+      ) {
         const user = tables.users.find((u) => u.id === row.stage_set_by);
-        return { ...row, stage_setter: user ? { name: user.name ?? null } : null };
+        return {
+          ...row,
+          stage_setter: user ? { name: user.name ?? null } : null,
+        };
       }
       return { ...row };
     };
@@ -327,7 +600,9 @@ function makeClient(
     const run = (): { data: any; error: any } => {
       const failure = options.fail?.[`${table}:${op}`];
       if (failure) return { data: null, error: failure };
-      if (table === "jobs" && op === "select" && select === "id, pricing_json") {
+      if (
+        table === "jobs" && op === "select" && select === "id, pricing_json"
+      ) {
         return { data: [], error: null };
       }
       const rows = tables[table] || (tables[table] = []);
@@ -347,8 +622,14 @@ function makeClient(
       options.beforeWrite?.(table, op, tables);
       if (op === "insert") {
         const row = { ...values };
-        if (table === "job_dispatch_state" && rows.some((r) => r.job_id === row.job_id)) {
-          return { data: null, error: { message: "duplicate key", code: "23505" } };
+        if (
+          table === "job_dispatch_state" &&
+          rows.some((r) => r.job_id === row.job_id)
+        ) {
+          return {
+            data: null,
+            error: { message: "duplicate key", code: "23505" },
+          };
         }
         rows.push(row);
         return { data: [withEmbeds(row)], error: null };
@@ -438,7 +719,10 @@ function makeClient(
         const result = settle();
         if (result.error) return Promise.resolve(result);
         return Promise.resolve({
-          data: result.data.slice(start, Math.min(end + 1, start + ROW_CEILING)),
+          data: result.data.slice(
+            start,
+            Math.min(end + 1, start + ROW_CEILING),
+          ),
           error: null,
         });
       },
@@ -446,8 +730,10 @@ function makeClient(
         single = true;
         return Promise.resolve(settle());
       },
-      then: (resolve: (v: unknown) => unknown, reject?: (r: unknown) => unknown) =>
-        Promise.resolve(settle()).then(resolve, reject),
+      then: (
+        resolve: (v: unknown) => unknown,
+        reject?: (r: unknown) => unknown,
+      ) => Promise.resolve(settle()).then(resolve, reject),
     };
     return builder;
   }
@@ -457,7 +743,8 @@ function makeClient(
 }
 
 const params = (query: string) => new URLSearchParams(query);
-const allRows = (result: any): Row[] => Object.values(result.columns).flat() as Row[];
+const allRows = (result: any): Row[] =>
+  Object.values(result.columns).flat() as Row[];
 const DISPATCH_KEYS = [
   "dispatch_stage",
   "dispatch_stage_index",
@@ -492,7 +779,9 @@ Deno.test("pipeline dispatch=1: every row carries its stage, and todo_total coun
     assertEquals(row.dispatch_stage_source, proof.source, proof.id);
     assertEquals(row.dispatch_stage_from, proof.from, proof.id);
     assertEquals(row.dispatch_todo_out, proof.out, proof.id);
-    for (const alias of DISPATCH_LIST_ALIASES) assert(!(alias in row), `${alias} leaked`);
+    for (const alias of DISPATCH_LIST_ALIASES) {
+      assert(!(alias in row), `${alias} leaked`);
+    }
   }
   assertEquals(result.todo_total, rows.filter((r) => r.dispatch_todo).length);
   assertEquals(result.todo_total, expected.filter((p) => p.todo).length);
@@ -502,16 +791,28 @@ Deno.test("pipeline dispatch=1: every row carries its stage, and todo_total coun
   // setter's name embedded; the jobs read projects repair_stage only.
   const stateReads = calls.filter((c) => c.table === "job_dispatch_state");
   assertEquals(stateReads.length, 1);
-  const jobsRead = calls.find((c) => c.table === "jobs" && c.select !== "id, pricing_json")!;
-  assertStringIncludes(jobsRead.select, "ds_repair_stage:metadata->>repair_stage");
+  const jobsRead = calls.find((c) =>
+    c.table === "jobs" && c.select !== "id, pricing_json"
+  )!;
+  assertStringIncludes(
+    jobsRead.select,
+    "ds_repair_stage:metadata->>repair_stage",
+  );
   assert(!/(^|,\s*)metadata(\s*,|$)/.test(jobsRead.select));
   assert(!/(^|,\s*)scope_json(\s*,|$)/.test(jobsRead.select));
-  assert(DISPATCH_LIST_PROJECTION.includes("ds_repair_stage:metadata->>repair_stage"));
+  assert(
+    DISPATCH_LIST_PROJECTION.includes(
+      "ds_repair_stage:metadata->>repair_stage",
+    ),
+  );
 });
 
 Deno.test("pipeline dispatch=1: a search returns the make-safe with no rail, never in To do", async () => {
   const { client } = makeClient(proofBoard());
-  const result: any = await _pipelineForTest(client, params("dispatch=1&search=SWX-P6"));
+  const result: any = await _pipelineForTest(
+    client,
+    params("dispatch=1&search=SWX-P6"),
+  );
   const rows = allRows(result);
   assertEquals(rows.length, 1);
   assertEquals(rows[0].dispatch_stage, null);
@@ -527,7 +828,10 @@ Deno.test("pipeline dispatch=1: a set stage and next step come through with the 
   const p1 = proofJobs().find((p) => p.id === "P1")!.row;
   const { client } = makeClient({
     ...board,
-    users: [{ id: "aaaaaaaa-0000-4000-8000-000000000001", name: "Office Person" }],
+    users: [{
+      id: "aaaaaaaa-0000-4000-8000-000000000001",
+      name: "Office Person",
+    }],
     job_dispatch_state: [{
       job_id: p1.id,
       org_id: ORG_ID,
@@ -553,7 +857,12 @@ Deno.test("pipeline dispatch=1: a set stage and next step come through with the 
 
 Deno.test("pipeline dispatch=1: a failed stage read is never 'nothing set': failed, and no stage field", async () => {
   const { client } = makeClient(proofBoard(), {
-    fail: { "job_dispatch_state:select": { message: "relation does not exist", code: "42P01" } },
+    fail: {
+      "job_dispatch_state:select": {
+        message: "relation does not exist",
+        code: "42P01",
+      },
+    },
   });
   const result: any = await _pipelineForTest(client, params("dispatch=1"));
   assertEquals(result.dispatch_stages, "failed");
@@ -563,7 +872,9 @@ Deno.test("pipeline dispatch=1: a failed stage read is never 'nothing set': fail
   const rows = allRows(result);
   assertEquals(rows.length, 18);
   for (const row of rows) {
-    for (const key of DISPATCH_KEYS) assert(!(key in row), `${key} on a failed read`);
+    for (const key of DISPATCH_KEYS) {
+      assert(!(key in row), `${key} on a failed read`);
+    }
     // Slice 1's fields still come back.
     assert("work_type" in row);
   }
@@ -571,7 +882,10 @@ Deno.test("pipeline dispatch=1: a failed stage read is never 'nothing set': fail
 
 Deno.test("pipeline dispatch=1: an answer with no job still says the stage read is ok", async () => {
   const { client } = makeClient(proofBoard());
-  const result: any = await _pipelineForTest(client, params("dispatch=1&search=nothing-matches"));
+  const result: any = await _pipelineForTest(
+    client,
+    params("dispatch=1&search=nothing-matches"),
+  );
   assertEquals(result.total, 0);
   assertEquals(result.dispatch_stages, "ok");
   assertEquals(result.todo_total, 0);
@@ -586,12 +900,17 @@ Deno.test("pipeline without dispatch=1 carries none of the new keys and does not
     for (const key of DISPATCH_KEYS) assert(!(key in row), key);
   }
   assertEquals(calls.filter((c) => c.table === "job_dispatch_state").length, 0);
-  const jobsRead = calls.find((c) => c.table === "jobs" && c.select !== "id, pricing_json")!;
+  const jobsRead = calls.find((c) =>
+    c.table === "jobs" && c.select !== "id, pricing_json"
+  )!;
   assert(!jobsRead.select.includes("repair_stage"));
 });
 
 // ── set_dispatch_stage ───────────────────────────────────────────────────────
-const STAFF = { userId: "aaaaaaaa-0000-4000-8000-000000000001", email: "office@example.test" };
+const STAFF = {
+  userId: "aaaaaaaa-0000-4000-8000-000000000001",
+  email: "office@example.test",
+};
 const OPS_KEY = { userId: null, email: "ops@example.test" };
 
 function writeBoard(): Record<string, Row[]> {
@@ -599,7 +918,12 @@ function writeBoard(): Record<string, Row[]> {
     jobs: [
       job(1, { status: "order_materials" }),
       job(2, { type: "makesafe", status: "accepted", job_number: "SWMS-T2" }),
-      job(3, { type: "makesafe", status: "accepted", ds_ses_family: "repair", ds_repair_stage: "approved" }),
+      job(3, {
+        type: "makesafe",
+        status: "accepted",
+        ds_ses_family: "repair",
+        ds_repair_stage: "approved",
+      }),
       job(4, { status: "scheduled" }),
     ],
     users: [{ id: STAFF.userId, name: "Office Person" }],
@@ -612,7 +936,11 @@ async function refusal(promise: Promise<unknown>) {
 }
 
 function noJobsWrite(writes: Array<{ table: string }>) {
-  assert(writes.every((w) => w.table === "job_dispatch_state" || w.table === "job_events"));
+  assert(
+    writes.every((w) =>
+      w.table === "job_dispatch_state" || w.table === "job_events"
+    ),
+  );
 }
 
 Deno.test("set_dispatch_stage: each of the six stages can be set, one state row and one event each, no jobs write", async () => {
@@ -622,10 +950,18 @@ Deno.test("set_dispatch_stage: each of the six stages can be set, one state row 
     if (stage === expected && tables.job_dispatch_state.length === 0) {
       // Pinning the stop the job shows from its status is a real write.
     }
-    const answer = await setDispatchStage(client, { job_id: jobId(1), stage, expected_stage: expected }, STAFF, ORG_ID);
+    const answer = await setDispatchStage(
+      client,
+      { job_id: jobId(1), stage, expected_stage: expected },
+      STAFF,
+      ORG_ID,
+    );
     assertEquals(answer.success, true);
     assertEquals(answer.dispatch_stage, stage);
-    assertEquals(answer.dispatch_stage_index, DISPATCH_STAGES.indexOf(stage) + 1);
+    assertEquals(
+      answer.dispatch_stage_index,
+      DISPATCH_STAGES.indexOf(stage) + 1,
+    );
     assertEquals(answer.dispatch_stage_source, "set");
     assertEquals(answer.dispatch_stage_set_by, "Office Person");
     assertEquals(answer.previous_stage, expected);
@@ -637,7 +973,9 @@ Deno.test("set_dispatch_stage: each of the six stages can be set, one state row 
   assertEquals(tables.job_dispatch_state[0].stage, "trade_scheduled");
   assertEquals(tables.job_dispatch_state[0].stage_set_by, STAFF.userId);
   assertEquals(tables.job_dispatch_state[0].stage_set_by_email, STAFF.email);
-  const events = tables.job_events.filter((e) => e.event_type === DISPATCH_STAGE_CHANGED_EVENT);
+  const events = tables.job_events.filter((e) =>
+    e.event_type === DISPATCH_STAGE_CHANGED_EVENT
+  );
   assertEquals(events.length, 6);
   assertEquals(tables.job_events.length, 6);
   assertEquals(events[0].detail_json.from_stage, "deposit_paid");
@@ -654,7 +992,16 @@ Deno.test("set_dispatch_stage: each of the six stages can be set, one state row 
 
 Deno.test("set_dispatch_stage: the ops key is attributed by its stamped email, with no user", async () => {
   const { client, tables } = makeClient(writeBoard());
-  const answer = await setDispatchStage(client, { job_id: jobId(1), stage: "materials_ordered", expected_stage: "deposit_paid" }, OPS_KEY, ORG_ID);
+  const answer = await setDispatchStage(
+    client,
+    {
+      job_id: jobId(1),
+      stage: "materials_ordered",
+      expected_stage: "deposit_paid",
+    },
+    OPS_KEY,
+    ORG_ID,
+  );
   assertEquals(answer.dispatch_stage_set_by, "ops@example.test");
   assertEquals(tables.job_dispatch_state[0].stage_set_by, null);
   assertEquals(tables.job_events[0].user_id, null);
@@ -662,12 +1009,30 @@ Deno.test("set_dispatch_stage: the ops key is attributed by its stamped email, w
 
 Deno.test("set_dispatch_stage: pinning the stop shown from the job status writes; setting the set stage again writes nothing", async () => {
   const { client, tables, writes } = makeClient(writeBoard());
-  const pinned = await setDispatchStage(client, { job_id: jobId(4), stage: "trade_scheduled", expected_stage: "trade_scheduled" }, STAFF, ORG_ID);
+  const pinned = await setDispatchStage(
+    client,
+    {
+      job_id: jobId(4),
+      stage: "trade_scheduled",
+      expected_stage: "trade_scheduled",
+    },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(pinned.previous_source, "job_status");
   assertEquals(pinned.dispatch_stage_source, "set");
   assertEquals(tables.job_events.length, 1);
   const before = writes().length;
-  const again = await setDispatchStage(client, { job_id: jobId(4), stage: "trade_scheduled", expected_stage: "trade_scheduled" }, STAFF, ORG_ID);
+  const again = await setDispatchStage(
+    client,
+    {
+      job_id: jobId(4),
+      stage: "trade_scheduled",
+      expected_stage: "trade_scheduled",
+    },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(again.unchanged, true);
   assertEquals(again.success, true);
   assertEquals(writes().length, before);
@@ -678,7 +1043,11 @@ Deno.test("set_dispatch_stage: not_started, an unknown or missing stage and a mi
   const { client, writes } = makeClient(writeBoard());
   for (
     const body of [
-      { job_id: jobId(1), stage: "not_started", expected_stage: "deposit_paid" },
+      {
+        job_id: jobId(1),
+        stage: "not_started",
+        expected_stage: "deposit_paid",
+      },
       { job_id: jobId(1), stage: "installed", expected_stage: "deposit_paid" },
       { job_id: jobId(1), stage: "scheduled", expected_stage: "deposit_paid" },
       { job_id: jobId(1), expected_stage: "deposit_paid" },
@@ -695,20 +1064,51 @@ Deno.test("set_dispatch_stage: not_started, an unknown or missing stage and a mi
 
 Deno.test("set_dispatch_stage: an unknown job is 404 and a make-safe job 409 not_dispatch_work", async () => {
   const { client, writes } = makeClient(writeBoard());
-  const missing = await refusal(setDispatchStage(client, { job_id: jobId(99), stage: "accepted", expected_stage: "not_started" }, STAFF, ORG_ID));
+  const missing = await refusal(
+    setDispatchStage(
+      client,
+      { job_id: jobId(99), stage: "accepted", expected_stage: "not_started" },
+      STAFF,
+      ORG_ID,
+    ),
+  );
   assertEquals(missing.status, 404);
-  const makesafe = await refusal(setDispatchStage(client, { job_id: jobId(2), stage: "accepted", expected_stage: "not_started" }, STAFF, ORG_ID));
+  const makesafe = await refusal(
+    setDispatchStage(
+      client,
+      { job_id: jobId(2), stage: "accepted", expected_stage: "not_started" },
+      STAFF,
+      ORG_ID,
+    ),
+  );
   assertEquals(makesafe.status, 409);
   assertEquals(makesafe.body.code, "not_dispatch_work");
   // Another organisation's job is not found.
-  const other = makeClient({ jobs: [job(1, { org_id: "00000000-0000-0000-0000-0000000000ff" })] });
-  assertEquals((await refusal(setDispatchStage(other.client, { job_id: jobId(1), stage: "accepted", expected_stage: "deposit_paid" }, STAFF, ORG_ID))).status, 404);
+  const other = makeClient({
+    jobs: [job(1, { org_id: "00000000-0000-0000-0000-0000000000ff" })],
+  });
+  assertEquals(
+    (await refusal(
+      setDispatchStage(
+        other.client,
+        { job_id: jobId(1), stage: "accepted", expected_stage: "deposit_paid" },
+        STAFF,
+        ORG_ID,
+      ),
+    )).status,
+    404,
+  );
   assertEquals(writes().length, 0);
 });
 
 Deno.test("set_dispatch_stage: a repair-family job stored as make-safe is allowed", async () => {
   const { client, tables } = makeClient(writeBoard());
-  const answer = await setDispatchStage(client, { job_id: jobId(3), stage: "deposit_paid", expected_stage: "accepted" }, STAFF, ORG_ID);
+  const answer = await setDispatchStage(
+    client,
+    { job_id: jobId(3), stage: "deposit_paid", expected_stage: "accepted" },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(answer.previous_source, "repairs_board");
   assertEquals(answer.dispatch_stage, "deposit_paid");
   assertEquals(tables.job_dispatch_state.length, 1);
@@ -716,7 +1116,18 @@ Deno.test("set_dispatch_stage: a repair-family job stored as make-safe is allowe
 
 Deno.test("set_dispatch_stage: a wrong expected_stage is 409 stage_changed with the current fields, and writes nothing", async () => {
   const { client, writes } = makeClient(writeBoard());
-  const error = await refusal(setDispatchStage(client, { job_id: jobId(1), stage: "materials_ordered", expected_stage: "accepted" }, STAFF, ORG_ID));
+  const error = await refusal(
+    setDispatchStage(
+      client,
+      {
+        job_id: jobId(1),
+        stage: "materials_ordered",
+        expected_stage: "accepted",
+      },
+      STAFF,
+      ORG_ID,
+    ),
+  );
   assertEquals(error.status, 409);
   assertEquals(error.body.code, "stage_changed");
   assertEquals(error.body.dispatch_stage, "deposit_paid");
@@ -730,11 +1141,27 @@ Deno.test("set_dispatch_stage: a row inserted or moved in between is a 409, neve
   const raced = makeClient(writeBoard(), {
     beforeWrite: (table, op, tables) => {
       if (table === "job_dispatch_state" && op === "insert") {
-        tables.job_dispatch_state.push({ job_id: jobId(1), org_id: ORG_ID, stage: "supplier_confirmed", stage_set_at: "2026-10-14T00:00:00Z" });
+        tables.job_dispatch_state.push({
+          job_id: jobId(1),
+          org_id: ORG_ID,
+          stage: "supplier_confirmed",
+          stage_set_at: "2026-10-14T00:00:00Z",
+        });
       }
     },
   });
-  const inserted = await refusal(setDispatchStage(raced.client, { job_id: jobId(1), stage: "materials_ordered", expected_stage: "deposit_paid" }, STAFF, ORG_ID));
+  const inserted = await refusal(
+    setDispatchStage(
+      raced.client,
+      {
+        job_id: jobId(1),
+        stage: "materials_ordered",
+        expected_stage: "deposit_paid",
+      },
+      STAFF,
+      ORG_ID,
+    ),
+  );
   assertEquals(inserted.status, 409);
   assertEquals(inserted.body.code, "stage_changed");
   assertEquals(inserted.body.dispatch_stage, "supplier_confirmed");
@@ -744,13 +1171,31 @@ Deno.test("set_dispatch_stage: a row inserted or moved in between is a 409, neve
   // A move lands between the read and the guarded update.
   const moved = makeClient({
     ...writeBoard(),
-    job_dispatch_state: [{ job_id: jobId(1), org_id: ORG_ID, stage: "accepted", stage_set_at: "2026-10-14T00:00:00Z" }],
+    job_dispatch_state: [{
+      job_id: jobId(1),
+      org_id: ORG_ID,
+      stage: "accepted",
+      stage_set_at: "2026-10-14T00:00:00Z",
+    }],
   }, {
     beforeWrite: (table, op, tables) => {
-      if (table === "job_dispatch_state" && op === "update") tables.job_dispatch_state[0].stage = "materials_on_site";
+      if (table === "job_dispatch_state" && op === "update") {
+        tables.job_dispatch_state[0].stage = "materials_on_site";
+      }
     },
   });
-  const updated = await refusal(setDispatchStage(moved.client, { job_id: jobId(1), stage: "materials_ordered", expected_stage: "accepted" }, STAFF, ORG_ID));
+  const updated = await refusal(
+    setDispatchStage(
+      moved.client,
+      {
+        job_id: jobId(1),
+        stage: "materials_ordered",
+        expected_stage: "accepted",
+      },
+      STAFF,
+      ORG_ID,
+    ),
+  );
   assertEquals(updated.status, 409);
   assertEquals(updated.body.dispatch_stage, "materials_on_site");
   assertEquals(moved.tables.job_dispatch_state[0].stage, "materials_on_site");
@@ -761,16 +1206,44 @@ Deno.test("set_dispatch_stage: a failed audit row after the stage landed answers
   const { client, tables } = makeClient(writeBoard(), {
     fail: { "job_events:insert": { message: "insert failed" } },
   });
-  const answer = await setDispatchStage(client, { job_id: jobId(1), stage: "materials_ordered", expected_stage: "deposit_paid" }, STAFF, ORG_ID);
+  const answer = await setDispatchStage(
+    client,
+    {
+      job_id: jobId(1),
+      stage: "materials_ordered",
+      expected_stage: "deposit_paid",
+    },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(answer.success, true);
   assertEquals(answer.audit_logged, false);
   assertEquals(tables.job_dispatch_state[0].stage, "materials_ordered");
 });
 
 Deno.test("set_dispatch_stage: a failed state read or write is an error, never a silent success", async () => {
-  for (const key of ["job_dispatch_state:select", "job_dispatch_state:insert", "jobs:select"]) {
-    const { client, tables } = makeClient(writeBoard(), { fail: { [key]: { message: "boom" } } });
-    await assertRejects(() => setDispatchStage(client, { job_id: jobId(1), stage: "materials_ordered", expected_stage: "deposit_paid" }, STAFF, ORG_ID));
+  for (
+    const key of [
+      "job_dispatch_state:select",
+      "job_dispatch_state:insert",
+      "jobs:select",
+    ]
+  ) {
+    const { client, tables } = makeClient(writeBoard(), {
+      fail: { [key]: { message: "boom" } },
+    });
+    await assertRejects(() =>
+      setDispatchStage(
+        client,
+        {
+          job_id: jobId(1),
+          stage: "materials_ordered",
+          expected_stage: "deposit_paid",
+        },
+        STAFF,
+        ORG_ID,
+      )
+    );
     assertEquals(tables.job_events.length, 0, key);
   }
 });
@@ -779,9 +1252,20 @@ Deno.test("set_dispatch_stage: a failed state read or write is an error, never a
 Deno.test("set_dispatch_next_step: saves the cleaned line, keeps the stage, and writes one event", async () => {
   const { client, tables, writes } = makeClient({
     ...writeBoard(),
-    job_dispatch_state: [{ job_id: jobId(1), org_id: ORG_ID, stage: "materials_ordered", stage_set_at: "2026-10-14T00:00:00Z", next_step: null }],
+    job_dispatch_state: [{
+      job_id: jobId(1),
+      org_id: ORG_ID,
+      stage: "materials_ordered",
+      stage_set_at: "2026-10-14T00:00:00Z",
+      next_step: null,
+    }],
   });
-  const answer = await setDispatchNextStep(client, { job_id: jobId(1), text: "  chase   supplier  " }, STAFF, ORG_ID);
+  const answer = await setDispatchNextStep(
+    client,
+    { job_id: jobId(1), text: "  chase   supplier  " },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(answer.success, true);
   assertEquals(answer.dispatch_next_step, "chase supplier");
   assert(answer.next_step_set_at);
@@ -789,40 +1273,97 @@ Deno.test("set_dispatch_next_step: saves the cleaned line, keeps the stage, and 
   assertEquals(tables.job_dispatch_state[0].next_step_set_by, STAFF.userId);
   assertEquals(tables.job_events.length, 1);
   assertEquals(tables.job_events[0].event_type, DISPATCH_NEXT_STEP_SET_EVENT);
-  assertEquals(tables.job_events[0].detail_json, { text: "chase supplier", previous_text: null, operator_email: STAFF.email });
+  assertEquals(tables.job_events[0].detail_json, {
+    text: "chase supplier",
+    previous_text: null,
+    operator_email: STAFF.email,
+  });
   noJobsWrite(writes());
 });
 
 Deno.test("set_dispatch_next_step: a first line creates the row with no stage; an empty line clears it", async () => {
   const { client, tables } = makeClient(writeBoard());
-  await setDispatchNextStep(client, { job_id: jobId(1), text: "BOOK CREW" }, STAFF, ORG_ID);
+  await setDispatchNextStep(
+    client,
+    { job_id: jobId(1), text: "BOOK CREW" },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(tables.job_dispatch_state.length, 1);
   assertEquals(tables.job_dispatch_state[0].stage, null);
-  const cleared = await setDispatchNextStep(client, { job_id: jobId(1), text: "   " }, STAFF, ORG_ID);
+  const cleared = await setDispatchNextStep(
+    client,
+    { job_id: jobId(1), text: "   " },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(cleared.dispatch_next_step, null);
   assertEquals(tables.job_dispatch_state[0].next_step, null);
   assertEquals(tables.job_events.length, 2);
   assertEquals(tables.job_events[1].detail_json.previous_text, "BOOK CREW");
   // The stage read is unchanged by a next-step row.
-  const fields = dispatchRowFields(tables.jobs[0], tables.job_dispatch_state[0]);
+  const fields = dispatchRowFields(
+    tables.jobs[0],
+    tables.job_dispatch_state[0],
+  );
   assertEquals(fields.dispatch_stage_source, "job_status");
   // Saving the same line again writes nothing.
-  const same = await setDispatchNextStep(client, { job_id: jobId(1), text: "" }, STAFF, ORG_ID);
+  const same = await setDispatchNextStep(
+    client,
+    { job_id: jobId(1), text: "" },
+    STAFF,
+    ORG_ID,
+  );
   assertEquals(same.unchanged, true);
   assertEquals(tables.job_events.length, 2);
 });
 
 Deno.test("set_dispatch_next_step: over 40 characters or no text is 400; unknown job 404; make-safe 409", async () => {
   const { client, writes } = makeClient(writeBoard());
-  assertEquals((await refusal(setDispatchNextStep(client, { job_id: jobId(1), text: "x".repeat(41) }, STAFF, ORG_ID))).status, 400);
+  assertEquals(
+    (await refusal(
+      setDispatchNextStep(
+        client,
+        { job_id: jobId(1), text: "x".repeat(41) },
+        STAFF,
+        ORG_ID,
+      ),
+    )).status,
+    400,
+  );
   // Collapsed white space counts once, so this fits.
-  await setDispatchNextStep(client, { job_id: jobId(1), text: "x".repeat(20) + "      " + "y".repeat(19) }, STAFF, ORG_ID);
-  assertEquals((await refusal(setDispatchNextStep(client, { job_id: jobId(1) }, STAFF, ORG_ID))).status, 400);
-  assertEquals((await refusal(setDispatchNextStep(client, { job_id: jobId(99), text: "a" }, STAFF, ORG_ID))).status, 404);
-  const makesafe = await refusal(setDispatchNextStep(client, { job_id: jobId(2), text: "a" }, STAFF, ORG_ID));
+  await setDispatchNextStep(
+    client,
+    { job_id: jobId(1), text: "x".repeat(20) + "      " + "y".repeat(19) },
+    STAFF,
+    ORG_ID,
+  );
+  assertEquals(
+    (await refusal(
+      setDispatchNextStep(client, { job_id: jobId(1) }, STAFF, ORG_ID),
+    )).status,
+    400,
+  );
+  assertEquals(
+    (await refusal(
+      setDispatchNextStep(
+        client,
+        { job_id: jobId(99), text: "a" },
+        STAFF,
+        ORG_ID,
+      ),
+    )).status,
+    404,
+  );
+  const makesafe = await refusal(
+    setDispatchNextStep(client, { job_id: jobId(2), text: "a" }, STAFF, ORG_ID),
+  );
   assertEquals(makesafe.status, 409);
   assertEquals(makesafe.body.code, "not_dispatch_work");
-  assertEquals(writes().filter((w) => w.table === "job_dispatch_state").length, 1);
+  assertEquals(
+    writes().filter((w) => w.table === "job_dispatch_state").length,
+    1,
+  );
 });
 
 // ── Who may call, and what the writes may touch ──────────────────────────────
@@ -842,11 +1383,16 @@ async function routineCall(action: string, body: unknown) {
   try {
     const url = new URL("https://example.invalid/ops-api");
     url.searchParams.set("action", action);
-    const res = await _opsApiRequestHandlerForTest(new Request(url, {
-      method: "POST",
-      headers: { "x-api-key": ROUTINE_KEY, "content-type": "application/json" },
-      body: JSON.stringify(body),
-    }));
+    const res = await _opsApiRequestHandlerForTest(
+      new Request(url, {
+        method: "POST",
+        headers: {
+          "x-api-key": ROUTINE_KEY,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }),
+    );
     return { status: res.status, body: await res.json(), fetches };
   } finally {
     globalThis.fetch = originalFetch;
@@ -858,13 +1404,27 @@ async function routineCall(action: string, body: unknown) {
 
 Deno.test("the two writes are staff-only: refused to trades, the routine key and the agent read list", async () => {
   for (const action of ["set_dispatch_stage", "set_dispatch_next_step"]) {
-    const url = new URL(`https://example.test/functions/v1/ops-api?action=${action}`);
+    const url = new URL(
+      `https://example.test/functions/v1/ops-api?action=${action}`,
+    );
     for (const role of ["admin", "owner", "ops_manager"]) {
-      assertEquals(_authorizeOpsApiAction({ url, authMode: "jwt", authUser: { role } }), { ok: true });
+      assertEquals(
+        _authorizeOpsApiAction({ url, authMode: "jwt", authUser: { role } }),
+        { ok: true },
+      );
       assert(_opsApiCallerIsStaffOperator("jwt", { role }));
     }
-    for (const authUser of [{ role: "installer" }, { role: "lead_installer", managedVerticals: ["fencing"] }]) {
-      const refused = _authorizeOpsApiAction({ url, authMode: "jwt", authUser });
+    for (
+      const authUser of [{ role: "installer" }, {
+        role: "lead_installer",
+        managedVerticals: ["fencing"],
+      }]
+    ) {
+      const refused = _authorizeOpsApiAction({
+        url,
+        authMode: "jwt",
+        authUser,
+      });
       assertEquals((refused as any).status, 403);
       assert(!_opsApiCallerIsStaffOperator("jwt", authUser));
     }
@@ -882,7 +1442,9 @@ Deno.test("the two writes are staff-only: refused to trades, the routine key and
     assertEquals(routine.status, 403, action);
     assertStringIncludes(String(routine.body.error), action);
     assertEquals(
-      routine.fetches.filter((u) => /\/rest\/v1\/(jobs|job_dispatch_state|job_events)\b/.test(u)),
+      routine.fetches.filter((u) =>
+        /\/rest\/v1\/(jobs|job_dispatch_state|job_events)\b/.test(u)
+      ),
       [],
       `${action} reached a table for the routine key`,
     );
@@ -893,10 +1455,19 @@ Deno.test("the two writes call nothing: every path reads jobs only and writes on
   const seed = writeBoard();
   const { client, tables, calls } = makeClient(seed, {
     beforeWrite: (table, op, t) => {
-      if (raceOn === "insert" && table === "job_dispatch_state" && op === "insert") {
-        t.job_dispatch_state.push({ job_id: jobId(4), org_id: ORG_ID, stage: "accepted", stage_set_at: "2026-10-14T00:00:00Z" });
+      if (
+        raceOn === "insert" && table === "job_dispatch_state" && op === "insert"
+      ) {
+        t.job_dispatch_state.push({
+          job_id: jobId(4),
+          org_id: ORG_ID,
+          stage: "accepted",
+          stage_set_at: "2026-10-14T00:00:00Z",
+        });
       }
-      if (raceOn === "update" && table === "job_dispatch_state" && op === "update") {
+      if (
+        raceOn === "update" && table === "job_dispatch_state" && op === "update"
+      ) {
         const row = t.job_dispatch_state.find((r) => r.job_id === jobId(1));
         if (row) row.stage = "materials_on_site";
       }
@@ -920,32 +1491,128 @@ Deno.test("the two writes call nothing: every path reads jobs only and writes on
     return Promise.reject(new Error("no network in the Dispatch writes"));
   }) as typeof fetch;
   try {
-    const stage = (body: Row) => setDispatchStage(onlyFrom, body, STAFF, ORG_ID);
-    const step = (body: Row) => setDispatchNextStep(onlyFrom, body, STAFF, ORG_ID);
+    const stage = (body: Row) =>
+      setDispatchStage(onlyFrom, body, STAFF, ORG_ID);
+    const step = (body: Row) =>
+      setDispatchNextStep(onlyFrom, body, STAFF, ORG_ID);
 
     // First insert, guarded update, unchanged.
-    assertEquals((await stage({ job_id: jobId(1), stage: "materials_ordered", expected_stage: "deposit_paid" })).success, true);
-    assertEquals((await stage({ job_id: jobId(1), stage: "supplier_confirmed", expected_stage: "materials_ordered" })).success, true);
-    assertEquals((await stage({ job_id: jobId(1), stage: "supplier_confirmed", expected_stage: "supplier_confirmed" })).unchanged, true);
+    assertEquals(
+      (await stage({
+        job_id: jobId(1),
+        stage: "materials_ordered",
+        expected_stage: "deposit_paid",
+      })).success,
+      true,
+    );
+    assertEquals(
+      (await stage({
+        job_id: jobId(1),
+        stage: "supplier_confirmed",
+        expected_stage: "materials_ordered",
+      })).success,
+      true,
+    );
+    assertEquals(
+      (await stage({
+        job_id: jobId(1),
+        stage: "supplier_confirmed",
+        expected_stage: "supplier_confirmed",
+      })).unchanged,
+      true,
+    );
     // 400, 404, and the 409s: wrong expected stage, make-safe, raced insert, raced update.
-    assertEquals((await refusal(stage({ job_id: jobId(1), stage: "not_started", expected_stage: "supplier_confirmed" }))).status, 400);
-    assertEquals((await refusal(stage({ job_id: jobId(99), stage: "accepted", expected_stage: "not_started" }))).status, 404);
-    assertEquals((await refusal(stage({ job_id: jobId(1), stage: "accepted", expected_stage: "deposit_paid" }))).body.code, "stage_changed");
-    assertEquals((await refusal(stage({ job_id: jobId(2), stage: "accepted", expected_stage: "not_started" }))).body.code, "not_dispatch_work");
+    assertEquals(
+      (await refusal(
+        stage({
+          job_id: jobId(1),
+          stage: "not_started",
+          expected_stage: "supplier_confirmed",
+        }),
+      )).status,
+      400,
+    );
+    assertEquals(
+      (await refusal(
+        stage({
+          job_id: jobId(99),
+          stage: "accepted",
+          expected_stage: "not_started",
+        }),
+      )).status,
+      404,
+    );
+    assertEquals(
+      (await refusal(
+        stage({
+          job_id: jobId(1),
+          stage: "accepted",
+          expected_stage: "deposit_paid",
+        }),
+      )).body.code,
+      "stage_changed",
+    );
+    assertEquals(
+      (await refusal(
+        stage({
+          job_id: jobId(2),
+          stage: "accepted",
+          expected_stage: "not_started",
+        }),
+      )).body.code,
+      "not_dispatch_work",
+    );
     raceOn = "insert";
-    assertEquals((await refusal(stage({ job_id: jobId(4), stage: "materials_ordered", expected_stage: "trade_scheduled" }))).body.code, "stage_changed");
+    assertEquals(
+      (await refusal(
+        stage({
+          job_id: jobId(4),
+          stage: "materials_ordered",
+          expected_stage: "trade_scheduled",
+        }),
+      )).body.code,
+      "stage_changed",
+    );
     raceOn = "update";
-    assertEquals((await refusal(stage({ job_id: jobId(1), stage: "materials_on_site", expected_stage: "supplier_confirmed" }))).body.code, "stage_changed");
+    assertEquals(
+      (await refusal(
+        stage({
+          job_id: jobId(1),
+          stage: "materials_on_site",
+          expected_stage: "supplier_confirmed",
+        }),
+      )).body.code,
+      "stage_changed",
+    );
     raceOn = null;
 
     // Next step: create a row, update it, clear it, unchanged, and the refusals.
-    assertEquals((await step({ job_id: jobId(3), text: "BOOK CREW" })).dispatch_next_step, "BOOK CREW");
-    assertEquals((await step({ job_id: jobId(1), text: "chase supplier" })).dispatch_next_step, "chase supplier");
-    assertEquals((await step({ job_id: jobId(3), text: "  " })).dispatch_next_step, null);
+    assertEquals(
+      (await step({ job_id: jobId(3), text: "BOOK CREW" })).dispatch_next_step,
+      "BOOK CREW",
+    );
+    assertEquals(
+      (await step({ job_id: jobId(1), text: "chase supplier" }))
+        .dispatch_next_step,
+      "chase supplier",
+    );
+    assertEquals(
+      (await step({ job_id: jobId(3), text: "  " })).dispatch_next_step,
+      null,
+    );
     assertEquals((await step({ job_id: jobId(3), text: "" })).unchanged, true);
-    assertEquals((await refusal(step({ job_id: jobId(1), text: "x".repeat(41) }))).status, 400);
-    assertEquals((await refusal(step({ job_id: jobId(99), text: "a" }))).status, 404);
-    assertEquals((await refusal(step({ job_id: jobId(2), text: "a" }))).body.code, "not_dispatch_work");
+    assertEquals(
+      (await refusal(step({ job_id: jobId(1), text: "x".repeat(41) }))).status,
+      400,
+    );
+    assertEquals(
+      (await refusal(step({ job_id: jobId(99), text: "a" }))).status,
+      404,
+    );
+    assertEquals(
+      (await refusal(step({ job_id: jobId(2), text: "a" }))).body.code,
+      "not_dispatch_work",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -954,9 +1621,16 @@ Deno.test("the two writes call nothing: every path reads jobs only and writes on
   assertEquals(fetches, [], "a network call");
   const touched = [...new Set(calls.map((c) => c.table))].sort();
   assertEquals(touched, ["job_dispatch_state", "job_events", "jobs"]);
-  const jobsWrites = calls.filter((c) => c.table === "jobs" && c.op !== "select");
+  const jobsWrites = calls.filter((c) =>
+    c.table === "jobs" && c.op !== "select"
+  );
   assertEquals(jobsWrites, [], "jobs is only ever read");
-  assertEquals(calls.filter((c) => c.table === "job_events").every((c) => c.op === "insert"), true);
+  assertEquals(
+    calls.filter((c) => c.table === "job_events").every((c) =>
+      c.op === "insert"
+    ),
+    true,
+  );
   assertEquals(tables.jobs, jobsBefore, "the jobs rows changed");
   assertEquals(
     tables.job_events.map((e) => e.event_type).sort(),

@@ -24,8 +24,8 @@ import {
 import {
   DISPATCH_NEXT_STEP_MAX,
   DISPATCH_NOT_STARTED,
-  DISPATCH_STATE_SELECT,
   DISPATCH_STAGES,
+  DISPATCH_STATE_SELECT,
   dispatchRowFields,
   isDispatchStage,
   normaliseDispatchNextStep,
@@ -87,7 +87,9 @@ async function readJob(client: any, jobId: string, orgId: string) {
   // repair (dispatchWorkType) and is allowed.
   if (dispatchWorkType(data) === "makesafe") {
     throw new DispatchStageWriteError(
-      `job ${data.job_number || jobId} is a make-safe job; it has no Dispatch stage`,
+      `job ${
+        data.job_number || jobId
+      } is a make-safe job; it has no Dispatch stage`,
       409,
       { code: "not_dispatch_work" },
     );
@@ -136,7 +138,9 @@ async function stageChanged(
 ): Promise<never> {
   const current = await readState(client, job.id);
   throw new DispatchStageWriteError(
-    `job ${job.job_number || job.id}'s Dispatch stage changed; nothing was written`,
+    `job ${
+      job.job_number || job.id
+    }'s Dispatch stage changed; nothing was written`,
     409,
     {
       code: "stage_changed",
@@ -164,7 +168,9 @@ export async function setDispatchStage(
   }
   if (!isDispatchStage(stage)) {
     throw new DispatchStageWriteError(
-      `unknown Dispatch stage '${stage}'; expected one of ${DISPATCH_STAGES.join(", ")}`,
+      `unknown Dispatch stage '${stage}'; expected one of ${
+        DISPATCH_STAGES.join(", ")
+      }`,
       400,
     );
   }
@@ -186,7 +192,9 @@ export async function setDispatchStage(
   const operatorEmail = cleanEmail(actor.email);
   const userId = actor.userId || null;
 
-  if (before.dispatch_stage_source === "set" && before.dispatch_stage === stage) {
+  if (
+    before.dispatch_stage_source === "set" && before.dispatch_stage === stage
+  ) {
     return {
       success: true,
       unchanged: true,

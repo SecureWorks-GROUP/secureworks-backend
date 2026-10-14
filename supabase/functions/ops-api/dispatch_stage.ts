@@ -44,7 +44,12 @@ export function dispatchStageIndex(stage: string): number {
 
 // The work types with To do. Make-safe is out, and so is any other type (the
 // insurance jobs stay in All jobs only, ruling T8).
-export const DISPATCH_TODO_WORK_TYPES = ["fencing", "patio", "decking", "repair"];
+export const DISPATCH_TODO_WORK_TYPES = [
+  "fencing",
+  "patio",
+  "decking",
+  "repair",
+];
 
 // The job statuses inside the Dispatch window: Accepted until Scheduled.
 export const DISPATCH_WINDOW_STATUSES = [
@@ -82,7 +87,10 @@ const AFTER_SCHEDULED_STATUSES = [
 // _shared/stage-gate/job-state-machine.ts (stage_order 4-5, 6-7, 8, 9-10,
 // 11 and up). Approvals is a patio stage; a fence at it reads the same stop.
 // Materials on site (stop 5) is never read: it exists only once set by hand.
-const STAGE_BY_JOB_STATUS: Record<string, DispatchStage | typeof DISPATCH_NOT_STARTED> = {
+const STAGE_BY_JOB_STATUS: Record<
+  string,
+  DispatchStage | typeof DISPATCH_NOT_STARTED
+> = {
   partially_accepted: DISPATCH_NOT_STARTED,
   accepted: "accepted",
   awaiting_deposit: "accepted",
@@ -133,14 +141,17 @@ export type DispatchStageJob = {
 };
 
 // The job_dispatch_state row as the list and the writes read it.
-export type DispatchStateRow = {
-  stage?: string | null;
-  stage_set_at?: string | null;
-  stage_set_by_email?: string | null;
-  next_step?: string | null;
-  next_step_set_at?: string | null;
-  stage_setter?: { name?: string | null } | null;
-} | null | undefined;
+export type DispatchStateRow =
+  | {
+    stage?: string | null;
+    stage_set_at?: string | null;
+    stage_set_by_email?: string | null;
+    next_step?: string | null;
+    next_step_set_at?: string | null;
+    stage_setter?: { name?: string | null } | null;
+  }
+  | null
+  | undefined;
 
 function repairBoardStage(job: DispatchStageJob): InsuranceRepairStage {
   return insuranceRepairStage({

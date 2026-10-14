@@ -138,9 +138,11 @@ to the top of the list). No call to `updateJobStatus`, `logBusinessEvent`,
 No `business_events` row. No change to a booking, invoice, purchase order or work
 order. The only event rows are the two types above. `job_events` has no type
 check, and its one trigger stands aside for every type but three make-safe report
-types, so these rows start nothing. `dispatch_stage_test.ts` reads
-`dispatch_stage_write.ts` and the dispatch case and fails if any of those names
-appear.
+types, so these rows start nothing. `dispatch_stage_test.ts` drives both writes
+through every success and refusal path and fails on any client call other than
+`from()`, any network call, any table but `jobs` (read only), `job_dispatch_state`
+and `job_events`, or any change to a `jobs` row; it also drives the handler with
+the routine key and expects 403 with no table reached.
 
 ## 4. The rules (`dispatch_stage.ts`)
 
