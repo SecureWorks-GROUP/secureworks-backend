@@ -4,12 +4,15 @@
 -- quote_builder_make_work_order and quote_builder_make_purchase_orders.
 --
 -- The switch is quote_builder_orders_v1, seeded OFF. While it is off, missing
--- or unreadable, those actions refuse before any write and quote_builder_get_job
--- adds no keys. The version id is the idempotency key: a renamed supplier still
--- matches the rows already made for that issued version. Job acceptance
+-- or unreadable, those actions refuse before any write, quote_builder_get_job
+-- adds no keys, job acceptance does not filter on these columns, and
+-- pushPOToXero does not refuse a blank or placeholder supplier. The version id
+-- is the idempotency key: a renamed supplier still matches the rows already
+-- made for that issued version. While the flag is on, job acceptance
 -- (updateJobStatus) excludes any row with this column set, so a quote-made
 -- crew work order is never auto-approved and a quote-made purchase order is
--- never pushed to Xero.
+-- never pushed to Xero, and pushPOToXero refuses a blank or placeholder
+-- supplier before it reads the job.
 --
 -- ON DELETE RESTRICT: clearing the link would make the rows look like ordinary
 -- orders, and acceptance would then approve or push them.
@@ -25,7 +28,7 @@ INSERT INTO public.feature_flags (flag_name, enabled, description)
 SELECT
   'quote_builder_orders_v1',
   false,
-  'Quote builder orders: when on, staff can make one draft crew work order and draft purchase orders from an issued quote-builder version. Off, missing or unreadable: the two make actions refuse and quote_builder_get_job is unchanged. Turn on only on the owner''s word.'
+  'Quote builder orders: when on, staff can make one draft crew work order and draft purchase orders from an issued quote-builder version, acceptance skips those rows, and a blank or placeholder supplier cannot be pushed to Xero. Off, missing or unreadable: the two make actions refuse, quote_builder_get_job is unchanged, acceptance does not filter on the new columns, and pushPOToXero does not refuse a placeholder supplier. Turn on only on the owner''s word.'
 WHERE NOT EXISTS (
   SELECT 1 FROM public.feature_flags
   WHERE flag_name = 'quote_builder_orders_v1'

@@ -660,6 +660,9 @@ than `true` is off. It is not cached. While off:
   return `409` `quote_builder_orders_off` and write nothing;
 - `quote_builder_get_job` is unchanged: no `work_order` or `purchase_orders`
   keys are added (acceptance item 19, the "no new keys" form);
+- job acceptance does not filter on `quote_builder_version_id`, and
+  `pushPOToXero` does not refuse a blank or placeholder supplier (items 28
+  and 29 run only while the flag is on);
 - the app in this change has no make-WO / make-PO button (the button lives in
   the quote-builder app, which this change does not touch).
 
@@ -704,14 +707,21 @@ How the five open points are settled:
    Once any purchase order exists for that version, including a cancelled,
    deleted or renamed one, the next press returns those rows and inserts
    nothing. The work order is unique per version.
-3. **Acceptance leaves them alone.** `updateJobStatus`, when a job becomes
-   `accepted`, approves draft crew work orders and pushes draft purchase orders
-   only where `quote_builder_version_id` is null. A quote-made row stays draft
-   and is not pushed. That filter is not behind the flag.
-4. **No Xero contact from a placeholder.** `pushPOToXero` refuses
-   `409 po_supplier_required` when the supplier is blank or a placeholder
-   (including `Supplier to be named`), before it reads the job and before
-   `getToken`. This is every purchase order, not only a quote-made one.
+3. **Acceptance leaves them alone, while the switch is on.** `updateJobStatus`,
+   when a job becomes `accepted`, reads `quote_builder_orders_v1` the same way
+   the quote builder does: missing or unreadable is off. Only while that flag
+   is on does it approve draft crew work orders and push draft purchase orders
+   where `quote_builder_version_id` is null. A quote-made row stays draft and
+   is not pushed. While the flag is off, those queries do not filter on
+   `quote_builder_version_id` at all: acceptance is the same as before this
+   change.
+4. **No Xero contact from a placeholder, while the switch is on.**
+   `pushPOToXero` refuses `409 po_supplier_required` when the supplier is blank
+   or a placeholder (including `Supplier to be named`), before it reads the job
+   and before `getToken`, and only while `quote_builder_orders_v1` is on. The
+   flag is the same fail-closed read, and the refusal covers every purchase
+   order, not only a quote-made one. While the flag is off, `pushPOToXero`
+   does not refuse a blank or placeholder supplier.
 5. **Who made it.** `created_by` is the user's uuid. The email is only on the
    event. `createWorkOrder` and `createPO` are not changed.
 

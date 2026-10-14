@@ -247,6 +247,7 @@ import {
   makeQuoteBuilderWorkOrder,
   purchaseOrderSupplierIsUnusable,
   quoteBuilderCardRow,
+  quoteBuilderOrdersEnabled,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
   quoteBuilderPhotoCaption,
@@ -35395,16 +35396,20 @@ async function updateJobStatus(client: any, body: any) {
   if (status === 'accepted') {
     (async () => {
       try {
+        // Quote-made rows stay out of acceptance only while quote_builder_orders_v1
+        // is on. Missing or unreadable is off, and off means these queries do
+        // not mention quote_builder_version_id (the column may not exist yet).
+        const ordersOn = await quoteBuilderOrdersEnabled(client)
         // 1. Approve draft work orders for this job
         // Crew work orders only: a job work order is approved by Shaun alone
         // (job_work_orders.ts), never by job acceptance.
-        const { data: draftWOs } = await client.from('work_orders')
+        let draftWoQuery = client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
           .neq('kind', 'job')
           .eq('status', 'draft')
-          // Quote-made crew orders stay draft. Acceptance never approves them.
-          .is('quote_builder_version_id', null)
+        if (ordersOn) draftWoQuery = draftWoQuery.is('quote_builder_version_id', null)
+        const { data: draftWOs } = await draftWoQuery
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
             await client.from('work_orders')
@@ -35420,13 +35425,13 @@ async function updateJobStatus(client: any, body: any) {
         }
 
         // 2. Push draft labour POs to Xero
-        const { data: draftPOs } = await client.from('purchase_orders')
+        let draftPoQuery = client.from('purchase_orders')
           .select('id, po_number')
           .eq('job_id', jId)
           .eq('status', 'draft')
           .is('xero_po_id', null)
-          // Quote-made purchase orders stay local. Acceptance never pushes them.
-          .is('quote_builder_version_id', null)
+        if (ordersOn) draftPoQuery = draftPoQuery.is('quote_builder_version_id', null)
+        const { data: draftPOs } = await draftPoQuery
         if (draftPOs && draftPOs.length > 0) {
           for (const po of draftPOs) {
             try {
@@ -35631,9 +35636,14 @@ async function pushPOToXero(client: any, body: any) {
 
   if (error || !po) throw new Error('PO not found')
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
-  // A blank or placeholder supplier must not become a Xero contact. Refused
-  // before any job read and before getToken, for every purchase order.
-  if (purchaseOrderSupplierIsUnusable(po.supplier_name)) {
+  // A blank or placeholder supplier must not become a Xero contact, and only
+  // while quote_builder_orders_v1 is on. Missing or unreadable is off. While
+  // off this is the same push as before that refusal existed: no 409 here.
+  // The refusal stays before any job read and before getToken.
+  if (
+    purchaseOrderSupplierIsUnusable(po.supplier_name) &&
+    await quoteBuilderOrdersEnabled(client)
+  ) {
     throw new ApiError(
       'A purchase order needs a real supplier name before it can go to Xero.',
       409,

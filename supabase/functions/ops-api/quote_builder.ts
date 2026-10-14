@@ -12,7 +12,9 @@
 // beside it) and job_variations (a variation, from its first issue). While
 // feature flag quote_builder_orders_v1 is on, the two make actions also write
 // one draft crew work_orders row, draft purchase_orders rows, and a job_events
-// row. While it is off they write nothing. The job's own pricing
+// row. While it is off they write nothing, job acceptance does not filter on
+// quote_builder_version_id, and pushPOToXero does not refuse a placeholder
+// supplier. The job's own pricing
 // (jobs.pricing_json) is never written: invoices, the quote send paths and the
 // CRM all read it as authority. The Repairs card takes its money from the
 // issued versions at read time instead (loadQuoteBuilderCardValues). The
@@ -1980,7 +1982,8 @@ export function purchaseOrderSupplierIsUnusable(name: unknown): boolean {
   return UNUSABLE_SUPPLIER_NAMES.has(collapsed);
 }
 
-async function quoteBuilderOrdersEnabled(client: any): Promise<boolean> {
+/** True only when quote_builder_orders_v1 is exactly enabled. Missing or unreadable is off. */
+export async function quoteBuilderOrdersEnabled(client: any): Promise<boolean> {
   try {
     const { data, error } = await client.from("feature_flags")
       .select("enabled")
