@@ -343,6 +343,8 @@ Deno.test("job: a neighbour's invoice shows the neighbour's phone, shares, no bo
   assertEquals(b.contact.linkable, true);
   assertEquals(b.send_block.code, "payer_not_linked");
   assertEquals(rec.conversationReads.at(-1)!.contactIds, []);
+  // No payer contact: no held (unplaced) messages are asked for either.
+  assertEquals(rec.conversationReads.at(-1)!.heldContactIds, []);
 
   // The whole job's thread on request, each message marked by party.
   const all = (await call(deps, "debt_ws_job", STAFF, {
@@ -374,6 +376,10 @@ Deno.test("job: a neighbour's invoice shows the neighbour's phone, shares, no bo
   ]);
   assertEquals(linked.conversation.reason, null);
   assertEquals(rec.conversationReads.at(-1)!.contactIds, [SHARED.neighbourGhl]);
+  // Held (unplaced) messages are read for the PAYER's contact only, never the main client's.
+  assertEquals(rec.conversationReads.at(-1)!.heldContactIds, [
+    SHARED.neighbourGhl,
+  ]);
   assertEquals(linked.contact.candidates, []);
   // A linked neighbour can be texted at their own contact.
   assertEquals(linked.send_block, null);
@@ -574,4 +580,126 @@ Deno.test("agent queue: a neighbour's bundle has their contact and only their me
   assertEquals(linked.messages.map((m: any) => m.id), ["bev:4", "bev:3"]);
   assert(linked.messages.every((m: any) => !String(m.body).includes("Jordan")));
   assertEquals(linked.send_block, null);
+});
+
+// ── Greeting name (Shaun, 14 Oct 2026): drafts greet the payer by their GoHighLevel name ──
+
+const FENCE_GHL = "ghlcontact0000000001";
+
+/** A contact search that knows these GoHighLevel contacts, and counts its calls. */
+function ghlBook(
+  deps: Deps,
+  contacts: Array<{ id: string; name: string; firstName: string }>,
+) {
+  const queries: string[] = [];
+  deps.searchContacts = (q) => {
+    queries.push(q);
+    return Promise.resolve(
+      contacts.map((c) => ({ ...c, phone: "", email: "" })),
+    );
+  };
+  return queries;
+}
+
+Deno.test("greeting: a linked payer is greeted by their GoHighLevel first name, not Xero's", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store);
+  ghlBook(deps, [
+    { id: "ghlsomeoneelse000001", name: "Wrong Person", firstName: "Wrong" },
+    { id: FENCE_GHL, name: "Vincent Sample", firstName: "Vincent" },
+  ]);
+  const b = (await call(deps, "debt_ws_job", STAFF, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(b.payer_contact.greeting_name, "Vincent");
+  assertEquals(b.payer_contact.greeting_name_source, "ghl");
+  assertEquals(b.payer_contact.ghl_name, "Vincent Sample");
+  assert(b.suggestion.text.startsWith("Hi Vincent,"), b.suggestion.text);
+
+  // The agent bundle carries the same first name, and its template draft uses it.
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  const item = q.items.find((i: any) => i.row.xero_invoice_id === IDS.final);
+  assertEquals(item.payer_contact.first_name, "Vincent");
+  assertEquals(item.payer_contact.greeting_name_source, "ghl");
+  assert(item.template_draft.text.startsWith("Hi Vincent,"));
+});
+
+Deno.test("greeting: falls back to the Xero first name when unlinked, or when the contact is not found", async () => {
+  // Unlinked neighbour: never searched for a greeting, Xero's first name.
+  const store = sharedStore();
+  const { deps } = fakeDeps(store);
+  const queries = ghlBook(deps, [
+    { id: SHARED.primaryGhl, name: "Jordan Primary", firstName: "Jordan" },
+  ]);
+  const b = (await call(deps, "debt_ws_job", STAFF, {
+    xero_invoice_id: SHARED.bBal,
+  })).body as any;
+  assertEquals(b.payer_contact.greeting_name, "Riley");
+  assertEquals(b.payer_contact.greeting_name_source, "xero");
+  assertEquals(b.payer_contact.ghl_name, null);
+  assert(b.suggestion.text.startsWith("Hi Riley,"), b.suggestion.text);
+  // Only the link-candidate searches ran (the neighbour's phone and email).
+  assertEquals(queries, [SHARED.neighbourPhone, SHARED.neighbourEmail]);
+
+  // Linked, but the search does not return that contact: Xero's first name.
+  const fence = new FakeStore();
+  const other = fakeDeps(fence).deps;
+  ghlBook(other, [
+    { id: "ghlsomeoneelse000001", name: "Wrong Person", firstName: "Wrong" },
+  ]);
+  const f = (await call(other, "debt_ws_job", STAFF, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(f.payer_contact.greeting_name_source, "xero");
+  assert(!f.suggestion.text.startsWith("Hi Wrong"));
+
+  // A failed search falls back too, and never fails the job read.
+  const broken = fakeDeps(new FakeStore()).deps;
+  broken.searchContacts = () => Promise.reject(new Error("GHL down"));
+  const r = await call(broken, "debt_ws_job", STAFF, {
+    xero_invoice_id: IDS.final,
+  });
+  assertEquals(r.status, 200);
+  assertEquals((r.body as any).payer_contact.greeting_name_source, "xero");
+});
+
+Deno.test("greeting: a shared-fence neighbour is greeted by their OWN contact's name", async () => {
+  const store = sharedStore();
+  linkNeighbour(store);
+  const { deps } = fakeDeps(store);
+  ghlBook(deps, [
+    { id: SHARED.primaryGhl, name: "Jordan Primary", firstName: "Jordan" },
+    { id: SHARED.neighbourGhl, name: "Rhiannon Neighbour", firstName: "Rhiannon" },
+  ]);
+  const b = (await call(deps, "debt_ws_job", STAFF, {
+    xero_invoice_id: SHARED.bBal,
+  })).body as any;
+  assertEquals(b.payer_contact.greeting_name, "Rhiannon");
+  assertEquals(b.payer_contact.greeting_name_source, "ghl");
+  assert(b.suggestion.text.startsWith("Hi Rhiannon,"), b.suggestion.text);
+});
+
+Deno.test("greeting: the GoHighLevel name is read once per contact per Perth day", async () => {
+  const store = new FakeStore();
+  const { deps } = fakeDeps(store);
+  const queries = ghlBook(deps, [
+    { id: FENCE_GHL, name: "Vincent Sample", firstName: "Vincent" },
+  ]);
+  _resetDebtWsBankCacheForTest();
+  const read = () =>
+    runDebtWsAction(
+      "debt_ws_job",
+      "GET",
+      new URLSearchParams({ xero_invoice_id: IDS.final }),
+      {},
+      STAFF,
+      deps,
+    );
+  assertEquals(((await read()).body as any).payer_contact.greeting_name, "Vincent");
+  const first = queries.length;
+  assertEquals(first, 1);
+  assertEquals(((await read()).body as any).payer_contact.greeting_name, "Vincent");
+  assertEquals(queries.length, first);
+  _resetDebtWsBankCacheForTest();
 });

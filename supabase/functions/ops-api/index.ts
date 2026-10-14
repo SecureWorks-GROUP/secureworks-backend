@@ -452,7 +452,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, readBusinessEventsBySourceTime, readCustomerAddresses, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -17479,6 +17479,33 @@ async function getJobConversation(client: any, body: any) {
     if (m.source_system === 'ghl_cache' && m.source_ref && providerIds.has(`ghl:${m.source_ref}`)) messages.splice(k, 1)
   }
   messages.push(...eventMessages)
+
+  // 4b. held_contact_ids (Debt Workshop, 14 Oct 2026): messages held on NO job
+  //     (unplaced or pending_luna, context PR #1013) whose candidate_job_ids
+  //     contain this job and whose GoHighLevel contact is one asked for (the
+  //     payer's). Each is marked unplaced: true. Placement is not changed. A
+  //     message already shown above (same provider message id) shows once.
+  //     Read with the same limit and merged before the newest-first cut, so the
+  //     newest messages are kept. Only callers that ask get these rows.
+  const heldIds: string[] = Array.isArray(body?.held_contact_ids)
+    ? Array.from(new Set<string>(body.held_contact_ids.map((v: unknown) => String(v || '').trim())
+      .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v)))).slice(0, 5)
+    : []
+  if (heldIds.length) {
+    try {
+      const { rows: held, error: heldErr } = await readHeldBusinessEventsBySourceTime(client, {
+        jobId,
+        contactIds: heldIds,
+        limit,
+        since: sinceFilter,
+        until,
+      })
+      if (heldErr) console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
+      messages.push(...heldConversationMessages(held, jobId, heldIds, customerAddresses, messages))
+    } catch (e) {
+      console.log('[ops-api] get_job_conversation held messages read failed:', (e as Error).message)
+    }
+  }
 
   // 5. email_events — emails our system sent to the customer (quotes,
   //    invoices, client updates). A copy already among the event rows shows once.

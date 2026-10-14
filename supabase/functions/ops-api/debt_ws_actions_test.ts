@@ -1359,6 +1359,56 @@ Deno.test("agent queue: off by default, then due steps without a suggestion, wit
   assert(Array.isArray(item.notes));
 });
 
+Deno.test("job and agent queue: the payer's unplaced messages are asked for, shown and marked", async () => {
+  // Live case (14 Oct 2026): a chase text held on no job (unplaced, this job its only
+  // candidate) never reached the Debt tab. The payer's contact is now passed as the held
+  // contact, and the message comes back marked unplaced: true.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const contact = "ghlcontact0000000001";
+  const { deps, rec } = fakeDeps(store, {
+    conversation: [
+      {
+        id: "bev:held-1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-09T03:02:52Z",
+        author: "Shaun",
+        body: "So sorry to bother you",
+        contact_id: contact,
+        unplaced: true,
+      },
+      {
+        id: "ghl:1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-01T03:00:00Z",
+        author: "Shaun",
+        body: "Hi there",
+        contact_id: contact,
+      },
+    ],
+  });
+  const job = (await call(deps, "debt_ws_job", STAFF, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  assertEquals(rec.conversationReads.at(-1)!.heldContactIds, [contact]);
+  assertEquals(job.conversation.messages.map((m: any) => m.id), [
+    "bev:held-1",
+    "ghl:1",
+  ]);
+  assertEquals(job.conversation.messages[0].unplaced, true);
+  assertEquals(job.conversation.messages[0].is_payer, true);
+  assertEquals(job.conversation.messages[1].unplaced, undefined);
+
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  const item = q.items.find((i: any) => i.row.xero_invoice_id === IDS.final);
+  // Oldest first in the bundle; the held message is the newest and is marked.
+  assertEquals(item.messages.map((m: any) => m.id), ["ghl:1", "bev:held-1"]);
+  assertEquals(item.messages[1].unplaced, true);
+  assertEquals("unplaced" in item.messages[0], false);
+});
+
 Deno.test("agent submit: draft supersedes drafts and moves, a flag is logged and supersedes nothing, no_action only stamps", async () => {
   const store = new FakeStore();
   store.settingsRow.agent_enabled = true;

@@ -27,9 +27,12 @@
 //      with the customer (countsAsCustomerContact).
 //   4. Emails our system sent to the customer (email_events) are messages too
 //      (sentCustomerEmailMessages).
+//   5. A message held on no job with this job among its candidates can be
+//      read for one named contact (the Debt Workshop's payer), marked
+//      unplaced (heldConversationMessages).
 //
-// Pure except readBusinessEventsBySourceTime and readCustomerAddresses, which
-// only SELECT.
+// Pure except readBusinessEventsBySourceTime, readHeldBusinessEventsBySourceTime
+// and readCustomerAddresses, which only SELECT.
 
 import {
   emailAddress,
@@ -490,6 +493,143 @@ export function businessEventTimelineMessage(
   };
   m.who = whoToWhom(m);
   return m;
+}
+
+// ── Held messages for one contact (Debt Workshop, 14 Oct 2026) ──
+//
+// When a customer has several jobs, the placement ladder leaves a message that
+// could fit more than one on no job: job_id null, attribution_status unplaced
+// or pending_luna, and the jobs it could be in stored in candidate_job_ids
+// (context PR #1013, 20261012100000_context_held_messages.sql, which reads the
+// same rows in SQL as context_ledger_held_rows). That placement is right and is
+// NOT changed here. The cost was that a job's conversation never showed them:
+// a payment-chase text sent to the customer on 9 Oct 2026 (SWF-261098) sat
+// unplaced with that job as its ONLY candidate, and the Debt tab's thread
+// stopped at 1 Oct.
+//
+// These helpers let one caller (the Debt Workshop, through getJobConversation's
+// held_contact_ids) read such a message on a candidate job, but only when it is
+// with a GoHighLevel contact the caller names (the payer's), and marked
+// unplaced: true so the screen can say it is not yet filed on a job.
+
+/** attribution_status values of a row held on no job (#1013: unplaced, pending_luna). */
+export const HELD_ATTRIBUTION_STATUSES = ["unplaced", "pending_luna"] as const;
+
+/** The columns a held message is built from: the timeline columns plus what the hold check reads. */
+export const HELD_MESSAGE_COLUMNS =
+  `${TIMELINE_MESSAGE_COLUMNS}, job_id, candidate_job_ids, retracted:metadata->>retracted, retracted_at:metadata->>retracted_at, duplicate_of:metadata->>duplicate_of`;
+
+/**
+ * The newest `limit` message rows held on no job that could be this job's and
+ * are with one of `contactIds` (business_events.contact_id), by source time,
+ * the same two indexed reads as readBusinessEventsBySourceTime. The candidate
+ * lookup is answered by the index business_events_candidate_job_ids.
+ */
+export async function readHeldBusinessEventsBySourceTime(
+  client: any,
+  opts: {
+    jobId: string;
+    contactIds: string[];
+    limit: number;
+    since?: string | null;
+    until?: string | null;
+  },
+): Promise<{ rows: any[]; error: string | null }> {
+  if (!opts.contactIds.length) return { rows: [], error: null };
+  const build = (stamped: boolean) => {
+    let q = client.from("business_events").select(HELD_MESSAGE_COLUMNS)
+      .is("job_id", null)
+      .in("attribution_status", [...HELD_ATTRIBUTION_STATUSES])
+      .contains("candidate_job_ids", [opts.jobId])
+      .in("contact_id", opts.contactIds)
+      .or(MESSAGE_ROW_FILTER);
+    if (stamped) {
+      q = q.not("event_at", "is", null);
+      if (opts.since) q = q.gt("event_at", opts.since);
+      if (opts.until) q = q.lte("event_at", opts.until);
+      q = q.order("event_at", { ascending: false });
+    } else {
+      q = q.is("event_at", null);
+      if (opts.since) q = q.gt("occurred_at", opts.since);
+      if (opts.until) q = q.lte("occurred_at", opts.until);
+      q = q.order("occurred_at", { ascending: false });
+    }
+    return q.order("id", { ascending: false }).limit(opts.limit);
+  };
+  const [stamped, unstamped] = await Promise.all([build(true), build(false)]);
+  const errors = [stamped?.error, unstamped?.error].filter(Boolean).map((
+    e: any,
+  ) => String(e?.message ?? e));
+  const seen = new Set<string>();
+  const rows = [...(stamped?.data ?? []), ...(unstamped?.data ?? [])]
+    .filter((r: any) => {
+      const id = String(r?.id ?? "");
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .sort(bySourceTimeDesc)
+    .slice(0, opts.limit);
+  return { rows, error: errors.length ? errors.join("; ") : null };
+}
+
+/**
+ * Held rows as conversation messages on this job, each marked unplaced: true.
+ * Pure. Each row is checked again here (the read's filters are not trusted
+ * alone): on no job, held (unplaced or pending_luna), this job among its
+ * candidates, with one of `contactIds`, never retracted and never a marked
+ * copy. A message already in `existing` (the job's own messages) by provider
+ * message id, or by row id, is left out, so one message shows once and the
+ * placed copy wins.
+ */
+export function heldConversationMessages(
+  rows: any[],
+  jobId: string,
+  contactIds: string[],
+  customer: Set<string>,
+  existing: any[],
+): any[] {
+  const allowed = new Set(contactIds.filter(Boolean));
+  if (!allowed.size) return [];
+  const held = new Set<string>(HELD_ATTRIBUTION_STATUSES);
+  // What is already shown: business_events rows by their provider id, and
+  // GoHighLevel cache messages by theirs (ghl:<message id>).
+  const shownProviderIds = new Set<string>();
+  const shownRowIds = new Set<string>();
+  for (const m of existing ?? []) {
+    if (m?.provider_message_id) {
+      shownProviderIds.add(String(m.provider_message_id));
+    }
+    if (m?.source_system === "ghl_cache" && m?.source_ref) {
+      shownProviderIds.add(`ghl:${m.source_ref}`);
+    }
+    if (m?.source_system === "business_events" && m?.source_ref) {
+      shownRowIds.add(String(m.source_ref));
+    }
+  }
+  const out: any[] = [];
+  for (const r of rows ?? []) {
+    if (!r?.id || (r.job_id !== null && r.job_id !== undefined)) continue;
+    if (!held.has(String(r.attribution_status ?? ""))) continue;
+    const candidates: string[] = Array.isArray(r.candidate_job_ids)
+      ? r.candidate_job_ids.map(String)
+      : [];
+    if (!candidates.includes(jobId)) continue;
+    if (!allowed.has(str(r.contact_id))) continue;
+    if (r.retracted_at || String(r.retracted ?? "") === "true") continue;
+    if (r.duplicate_of) continue;
+    if (shownRowIds.has(String(r.id))) continue;
+    const pid = r.provider_message_id ? String(r.provider_message_id) : "";
+    if (pid && shownProviderIds.has(pid)) continue;
+    if (pid) shownProviderIds.add(pid);
+    shownRowIds.add(String(r.id));
+    const m = businessEventTimelineMessage(r, jobId, customer);
+    // Not filed on a job yet: the ladder held it, with this job a candidate.
+    m.unplaced = true;
+    m.candidate_job_count = candidates.length;
+    out.push(m);
+  }
+  return out;
 }
 
 /** Statuses of an email_events row that mean the email did not go. */
