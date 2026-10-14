@@ -296,6 +296,16 @@ import {
   setDispatchNextStep,
   setDispatchStage,
 } from './dispatch_stage_write.ts'
+import {
+  DISPATCH_MATERIALS_LIST_SELECT,
+  dispatchMaterialCountsByJob,
+  dispatchMaterialListFields,
+} from './dispatch_materials.ts'
+import {
+  DISPATCH_MATERIALS_WRITE_ACTIONS,
+  DispatchMaterialsError,
+  runDispatchMaterialsAction,
+} from './dispatch_materials_store.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -6726,6 +6736,44 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       // Staff-only by the front door's default (not on the trade or routine lists).
       case 'job_notes':
         return json(await jobNotes(client, url.searchParams.get('jobId') || url.searchParams.get('job_id') || ''))
+      // Dispatch slice 4, Materials by supplier (docs/dispatch-slice-4-contract.md):
+      // one read and six writes over three Dispatch-only tables. Gated exactly as
+      // update_repair_stage: staff sessions and the privileged ops key only, and
+      // absent from ROUTINE_ALLOWED_ACTIONS and AGENT_READ_ALLOWED_ACTIONS. None
+      // writes jobs, suppliers or purchase_orders, or any event row.
+      case 'dispatch_materials':
+      case 'dispatch_materials_add_supplier':
+      case 'dispatch_materials_remove_supplier':
+      case 'dispatch_materials_save_line':
+      case 'dispatch_materials_delete_line':
+      case 'dispatch_materials_suggest':
+      case 'dispatch_materials_save_workings': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if ((DISPATCH_MATERIALS_WRITE_ACTIONS as readonly string[]).includes(action) && req.method !== 'POST') {
+          throw new ApiError(`${action} requires POST`, 405)
+        }
+        // A signed-in person is named by the verified session; the ops key has
+        // no user and is attributed by the operator email the screen stamps.
+        const materialsActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchMaterialsAction(client, action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: materialsActor,
+            extractMaterialsFromScope: (scopeJson) => extractMaterialsFromScope(scopeJson, null),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -16053,9 +16101,12 @@ async function pipeline(
   // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
   // absent: nothing below changes for any existing caller.
   const dispatchList = isDispatchListRequested(params)
-  // An empty Dispatch answer still says the stage read had nothing to fail on,
-  // so a search with no match never reads as "Could not load Dispatch stages".
-  const dispatchEmpty = dispatchList ? { dispatch_stages: 'ok', todo_total: 0 } : {}
+  // An empty Dispatch answer still says the stage and materials reads had
+  // nothing to fail on, so a search with no match never reads as a failed
+  // load (docs/dispatch-slice-3-contract.md, docs/dispatch-slice-4-contract.md).
+  const dispatchEmpty = dispatchList
+    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok' }
+    : {}
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
@@ -16214,11 +16265,14 @@ async function pipeline(
   let poEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
   let invoiceEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
   let dispatchStateRes: PipelineEnrichmentResult = { data: [], error: null }
-  // The Dispatch stage is read for every returned job (dispatch_stage.ts).
-  const dispatchStateJobIds = dispatchList ? jobs.map((j: any) => j.id) : []
+  let materialsRes: PipelineEnrichmentResult = { data: [], error: null }
+  // The Dispatch stage and the material lines are read for every returned
+  // job, a draft included, so neither depends on the job's status
+  // (dispatch_stage.ts, dispatch_materials.ts).
+  const dispatchJobIds = dispatchList ? jobs.map((j: any) => j.id) : []
 
-  if (jobIds.length > 0 || dispatchStateJobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes] = await Promise.all([
+  if (jobIds.length > 0 || dispatchJobIds.length > 0) {
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes, materialsRes] = await Promise.all([
       // is_ghost/role feed next_scheduled_date only; assignment_count and
       // first_scheduled_date deliberately keep counting ghost rows as before.
       // `status` is nullable, so a `.neq` would drop NULL-status rows (SQL
@@ -16283,11 +16337,28 @@ async function pipeline(
       // Dispatch slice 3: the stage a person set on the rail and the next-step
       // line. A failed read is never "nothing set" (below).
       dispatchList
-        ? readPipelineEnrichmentRows(dispatchStateJobIds, 'job_dispatch_state', (chunkIds) =>
+        ? readPipelineEnrichmentRows(dispatchJobIds, 'job_dispatch_state', (chunkIds) =>
           client.from('job_dispatch_state').select(DISPATCH_STATE_SELECT).in('job_id', chunkIds), 'job_id')
+        : Promise.resolve({ data: [], error: null }),
+      // Dispatch slice 4: the job's material lines, for "x of y items ready".
+      // Three columns only, never a description and never the sketch table.
+      dispatchList
+        ? readPipelineEnrichmentRows(dispatchJobIds, 'job_material_lines', (chunkIds) =>
+          client.from('job_material_lines').select(DISPATCH_MATERIALS_LIST_SELECT).in('job_id', chunkIds))
         : Promise.resolve({ data: [], error: null }),
     ])
   }
+
+  // A failed materials read leaves both fields off every row and says
+  // `dispatch_materials: 'failed'`: never 0, and never the whole list marked
+  // degraded for it (docs/dispatch-slice-4-contract.md).
+  const dispatchMaterialsOk = dispatchList && !materialsRes.error
+  if (dispatchList && materialsRes.error) {
+    console.error('[pipeline] pipeline.job_material_lines failed:', materialsRes.error)
+  }
+  const materialCountsByJob = dispatchMaterialsOk
+    ? dispatchMaterialCountsByJob(materialsRes.data)
+    : new Map()
 
   const enrichmentResults: Array<[string, PipelineEnrichmentResult]> = [
     ['pipeline.job_assignments', assignRes],
@@ -16473,6 +16544,7 @@ async function pipeline(
           value_inc_gst: dispatchValueIncGst(j),
           work_type: dispatchWorkType(j),
           ...(dispatchStagesOk ? dispatchRowFields(j, dispatchStateMap.get(String(j.id))) : {}),
+          ...(dispatchMaterialsOk ? dispatchMaterialListFields(materialCountsByJob.get(String(j.id))) : {}),
         }
         : {}),
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
@@ -16552,6 +16624,7 @@ async function pipeline(
         }
         : { dispatch_stages: 'failed' }
       : {}),
+    ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
@@ -16559,6 +16632,9 @@ async function pipeline(
 }
 
 export const _pipelineForTest = pipeline
+// Dispatch slice 4's suggestion runs this extractor unchanged; its tests drive
+// the real one rather than a copy.
+export const _extractMaterialsFromScopeForTest = extractMaterialsFromScope
 
 // Every note on a job, newest first (docs/dispatch-slice-1-read-contract.md).
 // job_detail.events is the newest 50 events of every kind, so a busy job's older

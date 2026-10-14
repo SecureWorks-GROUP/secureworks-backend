@@ -747,3 +747,15 @@ ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|column|job_dis
 ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|column|job_dispatch_state.stage_set_by
 ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|column|job_dispatch_state.next_step
 ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|constraint|job_dispatch_state_stage_valid
+# 20261014120000 is Dispatch slice 4's materials store: pipeline dispatch=1 reads
+# job_material_lines (job_id, status, purchase_order_id), and dispatch_materials
+# plus the six dispatch_materials_* writes read and write all three tables, so
+# ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|table|job_material_suppliers
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|table|job_material_lines
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|table|job_dispatch_workings
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|column|job_material_lines.purchase_order_id
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|column|job_material_lines.source
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|column|job_dispatch_workings.sketch_png
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|constraint|job_material_lines_supplier_on_job_fkey
+ops-api|supabase/migrations/20261014120000_job_materials_by_supplier.sql|constraint|job_material_lines_status_valid

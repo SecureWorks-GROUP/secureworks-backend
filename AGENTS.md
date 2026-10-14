@@ -503,6 +503,13 @@ is the `job_dispatch_state` table, written only by `set_dispatch_stage` /
 `set_dispatch_next_step` (`dispatch_stage_write.ts`), never the job status, and
 a failed read of it answers `dispatch_stages: 'failed'`, never "nothing set".
 Contract: `docs/dispatch-slice-3-contract.md`.
+Slice 4's Materials by supplier lives in three private tables
+(`job_material_suppliers`, `job_material_lines`, `job_dispatch_workings`) behind
+`dispatch_materials` and six `dispatch_materials_*` writes
+(`dispatch_materials_store.ts`); its display status and "items ready" count are
+worked out only in `dispatch_materials.ts`, and a failed list read of the lines
+answers `dispatch_materials: 'failed'`, never 0. Contract:
+`docs/dispatch-slice-4-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
