@@ -246,6 +246,14 @@ jobs:
             supabase/functions/_shared/stage-gate/engine_test.ts \
             supabase/functions/ghl-webhook/stage_rank_test.ts
 
+      # The read-only close-out block the Ops board and job view read (staff only,
+      # fencing and patio, one batched read). It imports index.ts, so it runs with
+      # the flags of the other index-importing steps (same --no-check reason).
+      - name: Test the paid close-out read block on pipeline and job_detail
+        run: |
+          deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
+            supabase/functions/ops-api/job_closeout_read_test.ts
+
       # A service-role key committed in 2026-03 stayed live for six months.
       # Refuse any tracked service_role JWT or sb_secret_ key, whatever path
       # it sits under.

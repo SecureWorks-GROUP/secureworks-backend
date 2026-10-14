@@ -1339,6 +1339,7 @@ import {
   reviewRequestMessage as closeoutReviewRequestMessage,
   runJobCloseoutAction,
 } from './job_closeout.ts'
+import { type CloseoutBlock, loadCloseoutBlocks } from './job_closeout_read.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
 import { canonicalCompanyDedupeKey, canonicalExternalObligationRef, canonicalObligationPoCore, loadRefPrefixes } from '../_shared/makesafe_refs.ts'
 
@@ -5815,7 +5816,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(calendarPayload)
       }
-      case 'pipeline': return json(await pipeline(client, url.searchParams))
+      case 'pipeline': return json(await pipeline(client, url.searchParams, {
+        // The paid close-out block reads service-role close-out tables: staff only.
+        includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
+      }))
       case 'makesafe_board': {
         // Outer JWT / projection gates live in makesafeBoardAction so the trade
         // envelope is one function the HTTP case and the deterministic proof share.
@@ -6708,6 +6712,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         return json(await jobDetail(client, jid, {
           slim,
           fillWorkOrderFromQuote: _opsApiCallerIsStaffOperator(authMode, authUser),
+          // The paid close-out block reads service-role close-out tables: staff only.
+          includeCloseout: _opsApiCallerIsStaffOperator(authMode, authUser),
         }))
       }
       // Staff-only by the front door's default (not on the trade or routine lists).
@@ -16000,7 +16006,11 @@ export function _pipelineVisitDateMaps(
   return { next, last }
 }
 
-async function pipeline(client: any, params: URLSearchParams) {
+async function pipeline(
+  client: any,
+  params: URLSearchParams,
+  opts: { includeCloseout?: boolean } = {},
+) {
   const typeFilter = params.get('type')
   const statusFilter = params.get('status')
   const search = params.get('search') || ''
@@ -16144,6 +16154,14 @@ async function pipeline(client: any, params: URLSearchParams) {
   // reads every returned row because the stored status is only a claim.
   const nonDraftJobs = jobs.filter((j: any) => j.status !== 'draft')
   const jobIds = (stageTruth ? jobs : nonDraftJobs).map((j: any) => j.id)
+  // Paid close-out block for fencing and patio rows (job_closeout_read.ts): staff
+  // callers only, read beside the enrichment wave. Never rejects: null on a failed read.
+  const closeoutRead: Promise<Map<string, CloseoutBlock> | null> | null = opts.includeCloseout
+    ? loadCloseoutBlocks(client, jobs).catch((e) => {
+      console.error('[pipeline] closeout read failed:', (e as Error)?.message)
+      return null
+    })
+    : null
 
   // Enrich with assignment/PO/WO/council counts + email activity + invoices
   let assignRes: PipelineEnrichmentResult = { data: [], error: null }
@@ -16254,6 +16272,8 @@ async function pipeline(client: any, params: URLSearchParams) {
   if (repairDetails?.degraded) enrichmentErrors.push('pipeline.makesafe_job_details')
   const quoteBuilderValues = await quoteBuilderValuesRead
   if (quoteBuilderValues?.degraded) enrichmentErrors.push('pipeline.quote_builder_value')
+  const closeoutBlocks = closeoutRead ? await closeoutRead : null
+  if (closeoutRead && !closeoutBlocks) enrichmentErrors.push('pipeline.closeout')
   const stageTruthUnreadable: string[] = []
   if (stageTruth) {
     if (assignEvidenceRes.error) stageTruthUnreadable.push('job_assignments')
@@ -16399,6 +16419,9 @@ async function pipeline(client: any, params: URLSearchParams) {
           work_type: dispatchWorkType(j),
         }
         : {}),
+      ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
+        ? { closeout: closeoutBlocks?.get(String(j.id)) ?? null }
+        : {}),
     }
     if (stageTruth && stageTruthRows) {
       Object.assign(
@@ -16521,7 +16544,7 @@ export const _jobNotesForTest = jobNotes
 async function jobDetail(
   client: any,
   jobId: string,
-  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean } = {},
+  opts: { slim?: boolean; fillWorkOrderFromQuote?: boolean; includeCloseout?: boolean } = {},
 ) {
   if (!jobId) throw new Error('jobId required')
 
@@ -16698,6 +16721,17 @@ async function jobDetail(
   // invoice fields). Additive. A failed read never fails the job detail: the
   // list is then null with the reason, never an empty list.
   const tradeTimeEntries = await loadJobTradeTimeEntries(client, jobId)
+  // Paid close-out block (job_closeout_read.ts), fencing and patio only, staff only:
+  // null when its read fails, absent for every other job type and caller.
+  let closeoutBlock: CloseoutBlock | null | undefined
+  if (opts.includeCloseout && (job?.type === 'fencing' || job?.type === 'patio')) {
+    try {
+      closeoutBlock = (await loadCloseoutBlocks(client, [job]))?.get(String(job.id)) ?? null
+    } catch (e) {
+      console.error('[ops-api] job_detail: closeout unreadable:', (e as Error)?.message)
+      closeoutBlock = null
+    }
+  }
 
   return {
     job: jobLite,
@@ -16737,6 +16771,7 @@ async function jobDetail(
     chase_logs: chaseLogs,
     readiness: jobReadiness,
     business_events: bizEventsRes.data || [],
+    ...(closeoutBlock !== undefined ? { closeout: closeoutBlock } : {}),
   }
 }
 
