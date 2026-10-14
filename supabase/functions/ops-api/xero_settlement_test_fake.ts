@@ -8,7 +8,12 @@ export function settlementFakeClient(
 ) {
   const conflictKeys: Record<string, string[]> = {
     xero_sync_state: ["key"],
-    xero_settlement_evidence: ["org_id", "tenant_id", "record_type", "provider_id"],
+    xero_settlement_evidence: [
+      "org_id",
+      "tenant_id",
+      "record_type",
+      "provider_id",
+    ],
   };
   const upserts: { table: string; rows: Row[] }[] = [];
   function from(table: string) {
@@ -29,16 +34,28 @@ export function settlementFakeClient(
     const builder = {
       select: () => builder,
       eq: (k: string, v: unknown) => (filters.push((r) => r[k] === v), builder),
-      in: (k: string, vs: unknown[]) => (filters.push((r) => vs.includes(r[k])), builder),
+      in: (
+        k: string,
+        vs: unknown[],
+      ) => (filters.push((r) => vs.includes(r[k])), builder),
       order: (k: string) => ((orderBy = k), builder),
       range: (a: number, b: number) => ((window = [a, b]), builder),
       maybeSingle: (): Promise<Result> => {
         const error = fault("select");
-        return Promise.resolve(error ? { data: null, error } : { data: rows()[0] ?? null, error: null });
+        return Promise.resolve(
+          error
+            ? { data: null, error }
+            : { data: rows()[0] ?? null, error: null },
+        );
       },
-      then: (resolve: (r: Result) => unknown, reject?: (e: unknown) => unknown) => {
+      then: (
+        resolve: (r: Result) => unknown,
+        reject?: (e: unknown) => unknown,
+      ) => {
         const error = fault("select");
-        return Promise.resolve(error ? { data: null, error } : { data: rows(), error: null })
+        return Promise.resolve(
+          error ? { data: null, error } : { data: rows(), error: null },
+        )
           .then(resolve, reject);
       },
       upsert: (input: Row | Row[]): Promise<Result> => {
