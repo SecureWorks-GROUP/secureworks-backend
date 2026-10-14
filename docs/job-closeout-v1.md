@@ -102,6 +102,46 @@ Holds (never moved, texted or archived): status `rectification`, or
   lists the fully paid fencing and patio jobs in `complete` that a later step
   may archive, with no review text. It archives nothing.
 
+## What the Ops board and job view read
+
+`job_closeout_state` and `job_review_claims` are service-role only, so screens
+read them through ops-api. For a staff caller (the ops key or a staff session;
+never the routine key, a trade or a division manager), every fencing and patio
+row of `pipeline` and a fencing or patio `job_detail` carry one read-only block
+(`ops-api/job_closeout_read.ts`):
+
+```
+closeout: {
+  paid_less_than_quoted: boolean,
+  shortfall_inc: number | null,
+  review: { status, reason } | null,
+  get_review_entered_at: string | null,
+  archive_due_at: string | null,
+  held: 'rectification' | 'callback' | null
+}
+```
+
+- `paid_less_than_quoted` and `shortfall_inc` are the job's last paid check
+  (false and null when it was never checked; the shortfall only while the marker
+  is on).
+- `review` is the job's claim (`claimed`, `sent`, `skipped`, `unconfirmed`, with
+  its reason). With no claim it is the newest `review_request_not_sent` row as
+  `{ status: 'not_sent', reason }` (`refused`, or the row's reason). With
+  neither, a card in `get_review` whose paying owners have no linked contact
+  reads `{ status: 'not_sent', reason: 'no_contact' }`, because the sender keeps
+  no claim and logs nothing then. Otherwise null (not asked yet, or sender off).
+  A job paid too long ago (`paid_too_long_ago`) also logs nothing and reads null.
+- `get_review_entered_at` is the newest `status_changed` row to `get_review`,
+  the sweep's own rule (`loadGetReviewEntries`). `archive_due_at` is that plus
+  24 hours while the job is in `get_review`, else null. The sweep still decides:
+  it archives only a paid, unheld card whose review is done.
+- `held` is the sweep's hold (`closeoutHold`).
+
+Every other job type, and every non-staff caller, gets no `closeout` key. The
+reads are one batched wave over the whole board (chunked `.in()`), never one per
+row. A failed read gives `closeout: null` on every fencing and patio row, and
+`pipeline` lists `pipeline.closeout` in `enrichment_errors`. It writes nothing.
+
 ## Switches (all off at deploy) and the turn-on order
 
 1. `UPDATE job_closeout_settings SET get_review_move_enabled = true, updated_by = ..., note = ... WHERE id = 1;`
