@@ -11,49 +11,64 @@
 -- job beside it went to review. This is stage 1 of the permanent fix
 -- (diagnosis section 5 items 1, 2 and 3, plus candidate ranking). Property
 -- (several-jobs) placement, opening notes from held rows and the staff tool
--- wait on owner calls and are not here. Note: ranked_recent on aftercare
--- places a finished job's later message on that job, which the 24 Sep 2026
--- aftercare decision (N7, N17) kept for review.
+-- wait on owner calls and are not here. Revised the same day after a
+-- second-model database review (PR 1050): ranking never chooses by status
+-- now or creation date, a message pointing at several jobs is never ranked,
+-- the party rule checks both keys and the message time, and one 48-hour
+-- rule by the message's own time decides relink.
 --
 -- Changed (rules on only; the rules-off ladder, the entry, the insert
 -- trigger, the preview, the timeline, Luna and the flag are unchanged):
 --   1. Machine: makesafe.reconcile.* rows are automated when the ladder
---      decides them (insert, or any re-decision), never unplaced. Non-customer
---      rows are counted in their own lane by the monitor (6). Nothing deleted.
+--      decides them (insert, or any re-decision), never unplaced; the
+--      re-decision writer takes the resting ones out (automated, no job).
+--      Non-customer rows are counted in their own lane by the monitor (6).
+--      Nothing deleted.
 --   2. Identifiers: quote and variation link tokens are references
---      (link_ref); with no reference of ours, a builder purchase order or
---      claim naming exactly one job places the row (builder_ref); our own
---      outbound email or text reads its recipient (payload.to) as identity;
---      a sender or recipient that is a job party (job_contacts) with no CRM
---      contact places on that party's one job, or one open job (job_party).
+--      (link_ref); with no reference of ours, a builder claim naming exactly
+--      one job, or one purchase order of that claim, places the row
+--      (builder_ref; a purchase order alone never places); our own outbound
+--      email or text reads its recipient (payload.to) as identity; a sender
+--      or recipient that is a job party (job_contacts) with no CRM contact
+--      places on that party's job when exactly one job fits the message time
+--      and the email and phone, when both match, name the same parties
+--      (job_party).
 --   3. Re-decision on new evidence: a new live thread binding, an ACCREC
 --      invoice newly linked to a job whose number a resting row carries, and
 --      a job that gets its GHL contact by update (reconsidering from the
 --      job's lead window to the moment of the link) re-decide resting rows.
---   4. Ranking (agreed 14 Oct 2026, step 1 of the context plan): closed,
---      numberless and test (SW*-CANARY-*) jobs leave the candidate set
---      of a contact review (several jobs, a recently finished job beside a
---      live one, aftercare), of a text naming 2 to 5 of our jobs and of an
---      exact address matching 2 to 3 jobs. One live job left places on it
---      (ranked_open); none live places on the most recently created
---      numbered one (ranked_recent); two or more live stay for review. Identity conflicts
---      and loose address matches are never ranked. A known customer with no
---      candidate at the message time whose only live job is X places on X
---      (only_open_job). A ranked placement is single_open: it never makes a
---      thread binding, which only proof may make (X25).
+--   4. Ranking, contact reviews only (several jobs, a recently finished job
+--      beside one): jobs that cannot be a customer's job (no number: a hidden
+--      old-system record; a test job SW*-CANARY-*; a holding job) leave the
+--      set, and quotes already dead at the message time (cancelled, lost,
+--      archived with nothing delivered) leave the recently-finished set.
+--      Exactly one job left and no finished work beside it places there
+--      (ranked_open). Status now and creation date never choose: a job live
+--      at the message time that closed later, finished work and aftercare
+--      stay competitors, and a row whose jobs are all closed keeps today's
+--      handling. A text naming several jobs, an address shared by several
+--      jobs and an identity conflict are never ranked. A known customer
+--      whose only job, of any status, is live now and was created after the
+--      message and within 60 days of it places on it (only_open_job). A
+--      ranked placement is single_open: it never makes a thread binding,
+--      which only proof may make (X25).
 --   5. Monitor: the bucket block of context_pipeline_status counts unplaced
 --      and bucket rows by lane and alarms when the customer lane rises over
 --      context_unplaced_policy().
---   6. Relink: a stored row (captured over an hour ago) that a stage-1 rule
---      or re-decision binds or sends to review is stamped capture_mode
---      relink, prior mode in capture_mode_before, as the 7 Oct repair did and
---      as the daily re-check does in 20261014034549 (PR 1040). This
+--   6. Relink, one rule (context_redecided_metadata) for every stored-row
+--      re-decision this migration adds, by the MESSAGE's own time: a message
+--      within 48 hours is placed as live (news; a customer's fresh reply
+--      still cancels follow-ups); an older one is stamped capture_mode
+--      relink, prior mode in capture_mode_before, also when it goes to the
+--      model and is placed later, as the 7 Oct repair did. PR 1040
+--      (20261014034549) stamps relink on every daily re-check decision; this
 --      migration does not touch rerun_context_attribution or
---      context_core_status, so the two apply in either order.
+--      context_core_status, so the two apply in either order, and the re-check
+--      moves to the same 48-hour rule in a follow-up once 1040 is merged.
 --
 -- No data moves: rows change only when inserted or re-decided. The resting
 -- rows of 14 Oct are re-decided only by a hand run of
--- context_redecide_events (docs/context/unplaced-stage1.md), not run here.
+-- context_redecide_resting (docs/context/unplaced-stage1.md), not run here.
 --
 -- Replaces (built on the live definitions, read with pg_get_functiondef):
 --   resolve_context_attribution(business_events,boolean,boolean) L1g (20261006035000) md5(prosrc) 0faf9b6362c35225b8eca7beba887d99
@@ -69,9 +84,9 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['0faf9b6362c35225b8eca7beba887d99','347d82db89617a0b6e9de65b9d19fd4d']),
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['0faf9b6362c35225b8eca7beba887d99','c71c5fb9fda4edb643f278804a6d862f']),
   ('public.context_event_identity(public.business_events)',ARRAY['cc484b96d670d401a3457347884f5371','ec1f67645b889441791d433d5fe08339']),
-  ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['5f9dbe883f0add7a6987f3ed265a08af','f42d3c1e27207295f39288c24030e5ba']),
+  ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9']),
   ('public.context_bucket_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','1ac0e031034928239810432d213ed77e']),
   -- Read, not replaced.
   ('public.context_ladder_p1a(public.business_events,boolean)',ARRAY['ce620833c851196a00eca328d9b7426a']),
@@ -100,12 +115,49 @@ END $guard$;
 
 -- 1. Helpers (new). Each computes; none places or writes.
 
--- Candidate ranking (agreed 14 Oct 2026, step 1 of the context plan): a
--- live job is one not closed (cancelled, complete, archived, lost,
--- invoiced, closed, or the archived flag), has a job number and is not a
--- test job. Every job with no number is an old-system record from before
--- April 2026 that the dashboard hides (1,245 on 14 Oct 2026), so it never
--- counts as live, not only a numberless draft.
+-- Thresholds for this stage, changed only by migration.
+CREATE OR REPLACE FUNCTION public.context_unplaced_policy()
+RETURNS jsonb
+LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
+ SELECT jsonb_build_object(
+  -- 1,091 customer rows were unplaced on 14 Oct 2026 (diagnosis, 08:45 UTC).
+  -- Above this the pile is growing again; lower it once the hand re-check
+  -- has run.
+  'customer_unplaced_max',1100,
+  -- The live inflow of customer rows was 10 to 20 a day on 14 Oct 2026.
+  'customer_new_24h_max',30,
+  -- A stored row re-decided whose message happened within this many hours
+  -- is still news to the event listener; an older one is a relink.
+  'fresh_message_hours',48)
+$$;
+COMMENT ON FUNCTION public.context_unplaced_policy() IS
+ 'Unplaced stage 1 (20261014170000): customer_unplaced_max: customer-lane unplaced rows above which unplaced_customer_over_threshold fires. customer_new_24h_max: customer-lane rows that became unplaced in the last 24 hours above which unplaced_customer_inflow fires. fresh_message_hours: a stored row re-decided whose message (event_at, else occurred_at) is younger than this keeps its capture_mode; an older one is stamped relink (context_redecided_metadata). Changed only by migration.';
+
+-- The one rule for a stored row this stage re-decides (the ladder's stage-1
+-- placements of stored rows, the evidence triggers, the hand run, and a job
+-- that gets its contact late): by the MESSAGE's own time, never its capture
+-- time. A message within fresh_message_hours (48) is news and keeps its
+-- capture_mode, so a customer's fresh reply still cancels follow-ups. An
+-- older one is stamped capture_mode relink, prior mode in
+-- capture_mode_before, so the event listener never reads it as fresh news,
+-- also when it is queued for the model and placed later (the live Luna
+-- functions keep metadata). backfill and relink rows are left as they are.
+CREATE OR REPLACE FUNCTION public.context_redecided_metadata(p_md jsonb,p_message_at timestamptz)
+RETURNS jsonb
+LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
+ SELECT CASE
+  WHEN coalesce(p_md->>'capture_mode','') IN ('backfill','relink') THEN coalesce(p_md,'{}'::jsonb)
+  WHEN coalesce(p_message_at,'-infinity'::timestamptz)
+    >=clock_timestamp()-make_interval(hours=>(public.context_unplaced_policy()->>'fresh_message_hours')::int)
+   THEN coalesce(p_md,'{}'::jsonb)
+  ELSE coalesce(p_md,'{}'::jsonb)||jsonb_build_object('capture_mode_before',p_md->'capture_mode','capture_mode','relink') END
+$$;
+COMMENT ON FUNCTION public.context_redecided_metadata(jsonb,timestamptz) IS
+ 'Unplaced stage 1 (20261014170000): the one capture_mode rule for a stored row this stage re-decides (placed or sent to review): a message older than context_unplaced_policy().fresh_message_hours (48) is stamped capture_mode relink with the prior mode in capture_mode_before; a younger one, and a backfill or relink row, keeps its metadata. Computes; never writes.';
+
+-- A live job, for only_open_job: not closed (cancelled, complete, archived,
+-- lost, invoiced, closed, or the archived flag), has a job number and is not
+-- a test job.
 CREATE OR REPLACE FUNCTION public.context_job_live(p_job_id uuid)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
@@ -116,28 +168,63 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
   FROM public.jobs j WHERE j.id=p_job_id),false)
 $$;
 COMMENT ON FUNCTION public.context_job_live(uuid) IS
- 'Unplaced stage 1 (20261014170000): a live job for candidate ranking: not closed (cancelled, complete, completed, archived, lost, invoiced, closed, or archived flag), has a job number (a numberless job is a hidden old-system record), and not a test job (SW*-CANARY-*).';
+ 'Unplaced stage 1 (20261014170000): a live job: not closed (cancelled, complete, completed, archived, lost, invoiced, closed, or archived flag), has a job number and is not a test job (SW*-CANARY-*). Read by only_open_job; never chooses between candidates.';
 
--- One job from a candidate set: the one live job (ranked_open); with none
--- live, the most recently created numbered job that is not a test job
--- (ranked_recent); two or more live, none.
-CREATE OR REPLACE FUNCTION public.context_pick_ranked(p_ids uuid[])
-RETURNS TABLE(job_id uuid, how text)
+-- A job that can be a customer's job at all: it has a job number (every job
+-- with none is an old-system record from before April 2026 that the
+-- dashboard hides, 1,245 on 14 Oct 2026), is not a test job (SW*-CANARY-*)
+-- and is not a holding job.
+CREATE OR REPLACE FUNCTION public.context_job_real(p_job_id uuid)
+RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
- WITH c AS (
-  SELECT j.id, j.created_at, public.context_job_live(j.id) AS live,
-   nullif(btrim(coalesce(j.job_number,'')),'') IS NOT NULL AND j.job_number !~* 'CANARY' AS numbered
-  FROM public.jobs j WHERE j.id=ANY(coalesce(p_ids,'{}'::uuid[]))
+ SELECT coalesce((
+  SELECT nullif(btrim(coalesce(j.job_number,'')),'') IS NOT NULL
+   AND coalesce(j.job_number,'') !~* 'CANARY'
    AND coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
- ), n AS (SELECT count(*) FILTER (WHERE live) AS live_n FROM c)
- SELECT c.id, 'ranked_open'::text FROM c, n WHERE n.live_n=1 AND c.live
- UNION ALL
- SELECT x.id, 'ranked_recent'::text FROM n, LATERAL (
-  SELECT c.id FROM c WHERE c.numbered ORDER BY c.created_at DESC NULLS LAST, c.id DESC LIMIT 1) x
- WHERE n.live_n=0
+  FROM public.jobs j WHERE j.id=p_job_id),false)
 $$;
-COMMENT ON FUNCTION public.context_pick_ranked(uuid[]) IS
- 'Unplaced stage 1 (20261014170000): candidate ranking agreed 14 Oct 2026. Closed, numberless and test jobs leave the set (context_job_live); exactly one live job left: that job, how ranked_open; none live: the most recently created numbered, non-test candidate, how ranked_recent (none such: no row); two or more live: no row (stays for review). Never a holding job.';
+COMMENT ON FUNCTION public.context_job_real(uuid) IS
+ 'Unplaced stage 1 (20261014170000): a job that can be a customer''s job: has a job number (a numberless job is a hidden old-system record), is not a test job (SW*-CANARY-*) and is not a holding job (metadata.do_not_schedule).';
+
+-- A dead quote: cancelled or lost, or archived with no work delivered (no
+-- completion, not complete or invoiced, no live customer invoice). Finished
+-- work is never dead: its customer may still write about it (aftercare).
+CREATE OR REPLACE FUNCTION public.context_job_dead(p_job_id uuid)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ SELECT coalesce((
+  SELECT j.status::text IN ('cancelled','lost')
+   OR ((j.status::text='archived' OR coalesce(j.archived,false))
+    AND j.completed_at IS NULL AND j.status::text NOT IN ('complete','completed','invoiced')
+    AND NOT EXISTS (SELECT 1 FROM public.xero_invoices xi WHERE xi.job_id=j.id AND xi.invoice_type='ACCREC'
+     AND coalesce(xi.status,'') NOT IN ('VOIDED','DELETED')))
+  FROM public.jobs j WHERE j.id=p_job_id),false)
+$$;
+COMMENT ON FUNCTION public.context_job_dead(uuid) IS
+ 'Unplaced stage 1 (20261014170000): a quote that never went ahead: cancelled or lost, or archived (status or flag) with no completion, not complete or invoiced and no live ACCREC invoice. Finished work is never dead.';
+
+-- Candidate ranking for a contact review (agreed 14 Oct 2026, narrowed after
+-- the database review the same day). p_ids: the customer's jobs that were
+-- candidates at the message time; p_guard: their jobs that had finished
+-- within 90 days before it. Jobs that cannot be a customer's job
+-- (context_job_real) leave both; a dead quote (context_job_dead) leaves the
+-- finished set only, since a job that was a candidate at the message time
+-- competes whatever happened to it later. Exactly one candidate left and no
+-- finished job left: that job, with every job passed over. Otherwise no row.
+-- Never chooses by status now or by creation date.
+CREATE OR REPLACE FUNCTION public.context_rank_contact_set(p_ids uuid[],p_guard uuid[])
+RETURNS TABLE(job_id uuid, dropped uuid[])
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ WITH i AS (SELECT DISTINCT x FROM unnest(coalesce(p_ids,'{}'::uuid[])) x WHERE x IS NOT NULL AND public.context_job_real(x)),
+ g AS (SELECT DISTINCT y FROM unnest(coalesce(p_guard,'{}'::uuid[])) y
+  WHERE y IS NOT NULL AND public.context_job_real(y) AND NOT public.context_job_dead(y) AND NOT EXISTS (SELECT 1 FROM i WHERE i.x=y))
+ SELECT (SELECT i.x FROM i),
+  ARRAY(SELECT DISTINCT z FROM unnest(coalesce(p_ids,'{}'::uuid[])||coalesce(p_guard,'{}'::uuid[])) z
+   WHERE z IS NOT NULL AND NOT EXISTS (SELECT 1 FROM i WHERE i.x=z) ORDER BY z)
+ WHERE (SELECT count(*) FROM i)=1 AND (SELECT count(*) FROM g)=0
+$$;
+COMMENT ON FUNCTION public.context_rank_contact_set(uuid[],uuid[]) IS
+ 'Unplaced stage 1 (20261014170000): ranking for a contact review (review_several, review_recent_other_job): drops jobs that cannot be a customer''s job (context_job_real: numberless, test, holding) from both sets and dead quotes (context_job_dead) from the finished-within-90-days set; when exactly one at-time candidate and no finished job remain, returns it and the jobs passed over (ranked_open). Never chooses by status now or creation date; aftercare, texts naming several jobs and shared addresses are never ranked.';
 
 -- Quote and variation link tokens (send-quote view?token=<uuid>) to their job.
 CREATE OR REPLACE FUNCTION public.context_link_ref_jobs(p_text text)
@@ -200,27 +287,42 @@ BEGIN
   WHERE coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1') ORDER BY x);
  claim_ids:=ARRAY(SELECT x FROM unnest(claim_ids) x JOIN public.jobs j ON j.id=x
   WHERE coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1') ORDER BY x);
- -- One purchase order names one job; when the text also names a claim, the
- -- purchase order's job must be on that claim.
- IF cardinality(po_ids)=1 AND (n_claims=0 OR po_ids[1]=ANY(claim_ids)) THEN RETURN po_ids; END IF;
- RETURN claim_ids;
+ -- A purchase order alone carries no builder scope (purchase order numbers
+ -- of different builders, and our own, can share digits): only a claim the
+ -- text names places. On that claim, one purchase order of the claim picks
+ -- its job; purchase order evidence that names several jobs or a job off
+ -- the claim conflicts, and nothing places.
+ IF n_claims=0 THEN RETURN '{}'::uuid[]; END IF;
+ IF cardinality(po_ids)=0 THEN RETURN claim_ids; END IF;
+ IF cardinality(po_ids)=1 AND po_ids[1]=ANY(claim_ids) THEN RETURN po_ids; END IF;
+ RETURN '{}'::uuid[];
 END $$;
 COMMENT ON FUNCTION public.context_builder_ref_jobs(text,jsonb) IS
- 'Unplaced stage 1 (20261014170000): our jobs named by a builder''s purchase order (makesafe_job_details.external_ref or jobs.metadata.builder_po_number) or, failing one purchase order, by a builder claim (MLB, MLB-RR/MW, AJ/AJS/AJBR, BW/BWCWA, WB, ACG plus digits) in the text or payload.builder_refs. Whole digit runs only. A purchase order wins when it names exactly one job on any claim the text names. Never a holding job. The ladder places only when exactly one job is returned.';
+ 'Unplaced stage 1 (20261014170000): our jobs named by a builder claim (MLB, MLB-RR/MW, AJ/AJS/AJBR, BW/BWCWA, WB, ACG plus digits) in the text or payload.builder_refs, narrowed by a purchase order (makesafe_job_details.external_ref or jobs.metadata.builder_po_number) that names exactly one job of that claim. No claim: none (a purchase order alone has no builder scope). Purchase order evidence naming several jobs or a job off the claim: none. Whole digit runs only. Never a holding job. The ladder places only when exactly one job is returned.';
 
--- Job parties (job_contacts) by the message's own email or phone key.
-CREATE OR REPLACE FUNCTION public.context_party_key_jobs(p_email_key text,p_phone_key text)
-RETURNS TABLE(job_id uuid, live boolean)
+-- Job parties (job_contacts) by the message's own email or phone key, at
+-- the message time: the job existed by then or within its lead window after
+-- it, was not a quote already dead before it, and had not finished more than
+-- 90 days before it. Each match says which key matched, so the ladder can
+-- refuse a message whose email and phone name different parties.
+CREATE OR REPLACE FUNCTION public.context_party_key_jobs(p_email_key text,p_phone_key text,p_at timestamptz)
+RETURNS TABLE(job_id uuid, party_id uuid, by_email boolean, by_phone boolean)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
- SELECT DISTINCT j.id, public.context_job_live(j.id)
+ SELECT j.id, jc.id,
+  coalesce(p_email_key IS NOT NULL AND public.context_email_key(jc.client_email)=p_email_key,false),
+  coalesce(p_phone_key IS NOT NULL AND public.context_phone_key(jc.client_phone)=p_phone_key,false)
  FROM public.job_contacts jc JOIN public.jobs j ON j.id=jc.job_id
  WHERE jc.removed_at IS NULL AND coalesce(jc.status,'')<>'removed'
-  AND coalesce(j.metadata->>'do_not_schedule','') NOT IN ('true','1')
+  AND p_at IS NOT NULL
   AND ((p_email_key IS NOT NULL AND public.context_email_key(jc.client_email)=p_email_key)
    OR (p_phone_key IS NOT NULL AND public.context_phone_key(jc.client_phone)=p_phone_key))
+  AND public.context_job_real(j.id)
+  AND coalesce(j.created_at,'-infinity'::timestamptz)<=p_at+make_interval(hours=>coalesce(public.context_lead_window_hours(j.type::text),672))
+  AND NOT (public.context_job_dead(j.id) AND coalesce(j.updated_at,j.created_at)<p_at)
+  AND NOT (j.completed_at IS NOT NULL AND j.completed_at<p_at-interval '90 days')
 $$;
-COMMENT ON FUNCTION public.context_party_key_jobs(text,text) IS
- 'Unplaced stage 1 (20261014170000): the jobs on which a live job party (job_contacts, not removed) has this email or phone key, and whether each is live (context_job_live). Never a holding job.';
+COMMENT ON FUNCTION public.context_party_key_jobs(text,text,timestamptz) IS
+ 'Unplaced stage 1 (20261014170000): the live job parties (job_contacts, not removed) whose email or phone key is the message''s, on a job that can be a customer''s (context_job_real) and fits the message time (created by then or within its lead window after it; not a quote already dead before it; not finished over 90 days before it), each with which key matched. Never a holding job.';
 
 -- Which lane an unplaced row counts in: machine, not a customer, customer.
 CREATE OR REPLACE FUNCTION public.context_unplaced_lane(e public.business_events)
@@ -255,11 +357,11 @@ DECLARE
   'bucket_reason','ref_not_found','ref_job_ids','identity_conflict','contact_recovered_by','writer_unknown','custody_rescan',
   'placement_site_keys','placement_retired_binding','placement_preview_bindings','supplier_ref_conflicts','aftercare_unpaid_job_ids',
   'audience','recipient_role_source','placement_held_from',
-  'placement_ranked_from','placement_ranked_below'];
+  'placement_ranked_from','placement_ranked_below','party_key_conflict'];
  writer_job uuid;
  held_job uuid; held_conf numeric; held_match_conf numeric; held_ok boolean:=false; all_ids uuid[]; own_live_ids uuid[];
  -- Unplaced stage 1 (20261014170000).
- link_ids uuid[]; link_only boolean:=false; builder_ids uuid[]; party_ids uuid[]; open_all_ids uuid[]; ranked_from text; ranked_set uuid[];
+ link_ids uuid[]; link_only boolean:=false; builder_ids uuid[]; party_ids uuid[]; party_conflict boolean; open_all_ids uuid[]; ranked_from text; ranked_set uuid[];
 BEGIN
  rules_on:=coalesce(p_rules_on,public.context_unlinked_rules_enabled());
  p_preview:=coalesce(p_preview,false);
@@ -462,17 +564,11 @@ BEGIN
     ELSIF cardinality(ref_ids)=1 THEN
      cand:=ref_ids[1]; e.attribution_status:='direct'; e.attribution_step:=1; rule:=CASE WHEN link_only THEN 'link_ref' ELSE 'direct_ref' END;
     ELSIF cardinality(ref_ids) BETWEEN 2 AND 5 THEN
-     -- Stage 1 (20261014170000): ranked like the contact review.
-     SELECT r.job_id,r.how INTO cand,rule FROM public.context_pick_ranked(ref_ids) r;
-     IF cand IS NULL THEN
-      rule:=NULL;
-      e.attribution_status:='unplaced'; e.attribution_step:=1; e.candidate_job_ids:=ref_ids;
-      e.metadata:=e.metadata||jsonb_build_object('placement_rule','multi_ref');
-      EXIT rules;
-     END IF;
-     ranked_from:='multi_ref'; e.attribution_status:='single_open'; e.attribution_step:=1;
-     e.metadata:=e.metadata||jsonb_build_object('placement_ranked_from',ranked_from,
-      'placement_ranked_below',to_jsonb(ARRAY(SELECT x FROM unnest(ref_ids) x WHERE x<>cand ORDER BY x)));
+     -- A message naming several of our jobs concerns each of them: never
+     -- ranked (stage 1 review, 14 Oct 2026), review as before.
+     e.attribution_status:='unplaced'; e.attribution_step:=1; e.candidate_job_ids:=ref_ids;
+     e.metadata:=e.metadata||jsonb_build_object('placement_rule','multi_ref');
+     EXIT rules;
     ELSIF cardinality(ref_ids)>5 THEN
      e.metadata:=e.metadata||jsonb_build_object('placement_rule','multi_ref_many','bucket_reason','multi_ref_many','ref_job_ids',to_jsonb(ref_ids));
      EXIT rules;
@@ -612,25 +708,34 @@ BEGIN
      e.attribution_step:=CASE prior_status WHEN 'single_open' THEN 3 WHEN 'single_line' THEN 4 ELSE 5 END;
      rule:='held_placement'; review_ids:=NULL;
     END IF;
-    -- Stage 1 (20261014170000), candidate ranking (context_pick_ranked):
-    -- closed, numberless and test jobs leave the candidate set; one live
-    -- job left places on it (ranked_open), none live places on the most
-    -- recent numbered one (ranked_recent), two or more live stay for review.
-    -- Identity conflicts are never ranked.
-    IF cand IS NULL AND review_ids IS NOT NULL AND rule IN ('review_several','review_recent_other_job','review_aftercare') THEN
-     ranked_set:=ARRAY(SELECT DISTINCT x FROM unnest(review_ids) x ORDER BY x);
-     SELECT r.job_id,r.how INTO cand,ranked_from FROM public.context_pick_ranked(ranked_set) r;
+    -- Stage 1 (20261014170000), candidate ranking (context_rank_contact_set),
+    -- for a contact review only: the message names no job of ours, so its
+    -- candidates come from who sent it. Jobs that are not a customer's job
+    -- (no number: a hidden old-system record; a test job) leave the set,
+    -- and a quote that was already dead at the message time (cancelled,
+    -- lost, archived with no work delivered) leaves the recently finished
+    -- set. When exactly one job is left and no finished work competes, the
+    -- row places on it (ranked_open), as single_open would have. Work done,
+    -- a job live at the message time that closed later, and aftercare stay
+    -- competitors; status now and creation date are never evidence. A text
+    -- naming several jobs, an address shared by several jobs and an
+    -- identity conflict are never ranked.
+    IF cand IS NULL AND review_ids IS NOT NULL AND rule IN ('review_several','review_recent_other_job') THEN
+     SELECT r.job_id,r.dropped INTO cand,ranked_set FROM public.context_rank_contact_set(ids,guard_ids) r;
      IF cand IS NOT NULL THEN
-      e.metadata:=e.metadata||jsonb_build_object('placement_ranked_from',rule,
-       'placement_ranked_below',to_jsonb(ARRAY(SELECT x FROM unnest(ranked_set) x WHERE x<>cand ORDER BY x)));
-      rule:=ranked_from; ranked_from:=e.metadata->>'placement_ranked_from';
+      e.metadata:=e.metadata||jsonb_build_object('placement_ranked_from',rule,'placement_ranked_below',to_jsonb(ranked_set));
+      ranked_from:=rule; rule:='ranked_open';
       e.attribution_status:='single_open'; e.attribution_step:=3; review_ids:=NULL;
      END IF;
     END IF;
     -- A known customer with no job at the message time (the bucket) whose
-    -- only open job is X: the row places on X (only_open_job).
-    IF cand IS NULL AND rule IS NULL AND contact IS NOT NULL AND cardinality(ids)=0 AND cardinality(open_all_ids)=1 THEN
-     cand:=open_all_ids[1]; e.attribution_status:='single_open'; e.attribution_step:=3; rule:='only_open_job';
+    -- only job, of any status, is live now and was created after the
+    -- message and within 60 days of it: the row places on it
+    -- (only_open_job), a lead the job's own window just missed.
+    IF cand IS NULL AND rule IS NULL AND contact IS NOT NULL AND cardinality(ids)=0 AND cardinality(open_all_ids)=1
+     AND (SELECT count(*) FROM unnest(all_ids) x WHERE public.context_job_real(x))=1 THEN
+     SELECT j.id INTO cand FROM public.jobs j WHERE j.id=open_all_ids[1] AND j.created_at>v_at AND j.created_at<=v_at+interval '60 days';
+     IF cand IS NOT NULL THEN e.attribution_status:='single_open'; e.attribution_step:=3; rule:='only_open_job'; END IF;
     END IF;
     IF review_ids IS NOT NULL THEN
      -- Rows loaded as history or re-links never go to the model (X27).
@@ -649,14 +754,24 @@ BEGIN
    END IF;
 
    -- Stage 1 (20261014170000): a sender or recipient that is a job party
-   -- (job_contacts) with no CRM contact: exactly one of their jobs, or
-   -- exactly one open one, places the row (job_party).
+   -- (job_contacts) with no CRM contact places the row on that party's job
+   -- (job_party) when exactly one job matches at the message time
+   -- (context_party_key_jobs) and, when both the email and the phone match,
+   -- they name the same parties. Anything else stays where it was.
    IF cand IS NULL AND contact IS NULL AND NOT (e.metadata ? 'identity_conflict') AND (ek IS NOT NULL OR pk IS NOT NULL) THEN
-    SELECT CASE WHEN count(*)=1 THEN array_agg(p.job_id)
-      WHEN count(*) FILTER (WHERE p.live)=1 THEN array_agg(p.job_id) FILTER (WHERE p.live) END
-    INTO party_ids FROM public.context_party_key_jobs(ek,pk) p;
+    SELECT CASE WHEN count(DISTINCT p.job_id)=1
+      AND (NOT (bool_or(p.by_email) AND bool_or(p.by_phone))
+       OR array_agg(DISTINCT p.party_id ORDER BY p.party_id) FILTER (WHERE p.by_email)
+        =array_agg(DISTINCT p.party_id ORDER BY p.party_id) FILTER (WHERE p.by_phone))
+      THEN array_agg(DISTINCT p.job_id) END,
+     count(DISTINCT p.job_id)>1 OR (bool_or(p.by_email) AND bool_or(p.by_phone)
+      AND array_agg(DISTINCT p.party_id ORDER BY p.party_id) FILTER (WHERE p.by_email)
+       IS DISTINCT FROM array_agg(DISTINCT p.party_id ORDER BY p.party_id) FILTER (WHERE p.by_phone))
+    INTO party_ids,party_conflict FROM public.context_party_key_jobs(ek,pk,v_at) p;
     IF cardinality(party_ids)=1 THEN
      cand:=party_ids[1]; e.attribution_status:='single_open'; e.attribution_step:=3; rule:='job_party';
+    ELSIF party_conflict THEN
+     e.metadata:=e.metadata||jsonb_build_object('party_key_conflict',true);
     END IF;
    END IF;
 
@@ -693,18 +808,9 @@ BEGIN
      IF cardinality(exact_ids)=1 THEN
       cand:=exact_ids[1]; e.attribution_status:='content_ref'; e.attribution_step:=6; rule:='site_address';
      ELSIF cardinality(exact_ids) BETWEEN 2 AND 3 THEN
-      -- Stage 1 (20261014170000): ranked like the contact review. A loose
-      -- address match still never places.
-      SELECT r.job_id,r.how INTO cand,rule FROM public.context_pick_ranked(exact_ids) r;
-      IF cand IS NULL THEN
-       rule:=NULL;
-       e.attribution_status:='unplaced'; e.attribution_step:=6; e.candidate_job_ids:=exact_ids;
-       e.metadata:=e.metadata||jsonb_build_object('placement_rule','site_address_several');
-       EXIT rules;
-      END IF;
-      ranked_from:='site_address_several'; e.attribution_status:='single_open'; e.attribution_step:=6;
-      e.metadata:=e.metadata||jsonb_build_object('placement_ranked_from',ranked_from,
-       'placement_ranked_below',to_jsonb(ARRAY(SELECT x FROM unnest(exact_ids) x WHERE x<>cand ORDER BY x)));
+      e.attribution_status:='unplaced'; e.attribution_step:=6; e.candidate_job_ids:=exact_ids;
+      e.metadata:=e.metadata||jsonb_build_object('placement_rule','site_address_several');
+      EXIT rules;
      ELSIF cardinality(exact_ids)>3 THEN
       e.metadata:=e.metadata||jsonb_build_object('placement_rule','site_address_many','bucket_reason','no_identity_site');
       EXIT rules;
@@ -775,19 +881,20 @@ BEGIN
    e.attribution_confidence:=CASE WHEN rule='held_placement' THEN coalesce(held_conf,1) ELSE 1 END; e.attributed_at:=clock_timestamp();
    e.match_status:='matched'; e.match_confidence:=CASE WHEN rule='held_placement' THEN coalesce(held_match_conf,1) ELSE 1 END;
    e.match_method:=CASE WHEN custody THEN source_method WHEN rule='payload_job' THEN 'direct_job_id' WHEN rule IN ('direct_ref','link_ref','builder_ref') THEN 'ladder_ref'
-    WHEN e.attribution_status='content_ref' THEN 'content_ref'
-    WHEN ranked_from='multi_ref' THEN 'ladder_ref' WHEN ranked_from='site_address_several' THEN 'content_ref' ELSE 'contact_id' END;
+    WHEN e.attribution_status='content_ref' THEN 'content_ref' ELSE 'contact_id' END;
    -- Stage 1 (20261014170000): a stored row that rested (bucket, unplaced,
    -- review or never decided) and is placed now by a stage-1 rule or by the
-   -- recipient of our own message is a re-decision, not news: capture_mode
-   -- relink (prior mode in capture_mode_before), as the 7 Oct repair and
-   -- the re-check do, so the event listener never reads it as fresh.
-   IF (prior_status IS NULL OR prior_status IN ('admin_bucket','unplaced','pending_luna'))
-    AND coalesce(e.context_captured_at,e.recorded_at,'-infinity'::timestamptz)<clock_timestamp()-interval '1 hour'
-    AND (rule IN ('link_ref','builder_ref','ranked_open','ranked_recent','only_open_job','job_party')
+   -- recipient of our own message is a re-decision. The one rule for a
+   -- stored-row re-decision (context_redecided_metadata) applies, by the
+   -- message's own time: older than 48 hours it is stamped capture_mode
+   -- relink (prior mode in capture_mode_before), so the event listener never
+   -- reads it as fresh news; within 48 hours it stays news. A row being
+   -- inserted is never stamped here.
+   IF (rule IN ('link_ref','builder_ref','ranked_open','only_open_job','job_party')
      OR (e.direction='outbound' AND e.metadata ? 'contact_recovered_by'))
-    AND coalesce(e.metadata->>'capture_mode','') NOT IN ('backfill','relink') THEN
-    e.metadata:=e.metadata||jsonb_build_object('capture_mode_before',e.metadata->'capture_mode','capture_mode','relink');
+    AND (prior_status IN ('admin_bucket','unplaced','pending_luna')
+     OR (prior_status IS NULL AND EXISTS (SELECT 1 FROM public.business_events x WHERE x.id=e.id))) THEN
+    e.metadata:=public.context_redecided_metadata(e.metadata,coalesce(e.event_at,e.occurred_at));
    END IF;
   EXCEPTION WHEN OTHERS THEN
    e.job_id:=NULL; e.attribution_status:='admin_bucket'; e.attribution_step:=6;
@@ -807,7 +914,7 @@ BEGIN
  RETURN e;
 END $function$;
 COMMENT ON FUNCTION public.resolve_context_attribution(public.business_events,boolean,boolean) IS
- 'L1g plus unplaced stage 1 (20261014170000): the ladder (P4) as L1g left it (20261006035000), rules-on path only. Rules off: P1a''s ladder as L1e left it, unchanged. Rules on: writer check, except that a row the reader never reads (system or audit, no words, automated) keeps a custody job the service role confirmed after the insert (source_job_binding.via: confirmed_custody); a service-role outbound row marked recipient_role crew or staff handled by the L1d rule; a row with no words, an automated row or a make-safe reconcile record (stage 1) is never placed by the rules and keeps a custody job and the job a service-role writer named with no match_method (writer_job); custody with monitor-inbox re-scan; the source''s own payload job unless its writer declared it a guess; identity (payload.from read; an outbound row reads its recipient, stage 1); references, with quote and variation link tokens (link_ref, stage 1), and with no reference of ours a builder purchase order or claim naming one job (builder_ref, stage 1); live thread and supplier order bindings; contact rules with keys and aftercare, where a row a contact rule or Luna already put on a job keeps it instead of going to review or the bucket while that job is still the answer (held_placement, placement_held_from names the rule it outranked; a newer job reopens a placed row only through P1b at its insert); then (stage 1) candidate ranking (context_pick_ranked) of a contact review, a text naming 2 to 5 jobs and an exact address with 2 to 3 jobs: one live job places (ranked_open), none live places on the most recent (ranked_recent), two or more live stay for review and a known customer with no candidate at the message time and one open job places on it (only_open_job); a job party''s key with no CRM contact (job_party, stage 1); exact or loose site address; bucket. A stored row a stage-1 rule places is stamped capture_mode relink. Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
+ 'L1g plus unplaced stage 1 (20261014170000): the ladder (P4) as L1g left it (20261006035000), rules-on path only. Rules off: P1a''s ladder as L1e left it, unchanged. Rules on: writer check, except that a row the reader never reads (system or audit, no words, automated) keeps a custody job the service role confirmed after the insert (source_job_binding.via: confirmed_custody); a service-role outbound row marked recipient_role crew or staff handled by the L1d rule; a row with no words, an automated row or a make-safe reconcile record (stage 1) is never placed by the rules and keeps a custody job and the job a service-role writer named with no match_method (writer_job); custody with monitor-inbox re-scan; the source''s own payload job unless its writer declared it a guess; identity (payload.from read; an outbound row reads its recipient, stage 1); references, with quote and variation link tokens (link_ref, stage 1), a text naming 2 to 5 jobs going to review, and with no reference of ours a builder claim naming one job, narrowed by one purchase order of that claim (builder_ref, stage 1); live thread and supplier order bindings; contact rules with keys and aftercare, where a row a contact rule or Luna already put on a job keeps it instead of going to review or the bucket while that job is still the answer (held_placement, placement_held_from names the rule it outranked; a newer job reopens a placed row only through P1b at its insert); then (stage 1) ranking of a contact review (context_rank_contact_set: jobs that cannot be a customer''s and quotes dead before the message leave; one job left and no finished work places, ranked_open; never by status now or creation date), a known customer whose only job is live and was created within 60 days after the message (only_open_job); a job party''s key with no CRM contact, one job at the message time and no disagreement between email and phone (job_party, stage 1); exact or loose site address (several exact matches go to review); bucket. A stored row a stage-1 rule places follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
 
 -- 3. Identity: our own outbound message names its customer by its recipient.
 -- Inbound rows read exactly as before. An outbound row reads the recipients
@@ -915,14 +1022,13 @@ BEGIN
     attribution_checked_at=resolved.attribution_checked_at,event_at=resolved.event_at,
     match_status=resolved.match_status,match_method=resolved.match_method,match_confidence=resolved.match_confidence,
     candidate_job_ids=resolved.candidate_job_ids,payload=resolved.payload,
-    metadata=coalesce(resolved.metadata,'{}'::jsonb)||jsonb_build_object(
+    -- Stage 1: a stored row placed or sent to review because its job got
+    -- its contact late follows the one re-decision rule by the message's
+    -- time (context_redecided_metadata): older than 48 hours, relink.
+    metadata=CASE WHEN p_reason='job_contact_linked'
+      THEN public.context_redecided_metadata(coalesce(resolved.metadata,'{}'::jsonb),v_at)
+      ELSE coalesce(resolved.metadata,'{}'::jsonb) END||jsonb_build_object(
      'placement_reconsidered',v_note||jsonb_build_object('from_status',coalesce(e.attribution_status,'none')))
-     -- Stage 1: a stored row bound because its job got its contact late is
-     -- a re-decision, not news (relink), unless it arrived within the hour.
-     ||CASE WHEN p_reason='job_contact_linked'
-       AND coalesce(e.context_captured_at,e.recorded_at,'-infinity'::timestamptz)<clock_timestamp()-interval '1 hour'
-       AND coalesce(resolved.metadata->>'capture_mode','') NOT IN ('backfill','relink')
-      THEN jsonb_build_object('capture_mode_before',resolved.metadata->'capture_mode','capture_mode','relink') ELSE '{}'::jsonb END
    WHERE id=e.id;
    IF resolved.job_id IS NOT NULL THEN n_placed:=n_placed+1; ELSE n_review:=n_review+1; END IF;
 
@@ -952,8 +1058,13 @@ BEGIN
    UPDATE public.business_events SET job_id=NULL,attribution_status='pending_luna',attribution_step=5,
     attribution_confidence=NULL,attributed_at=NULL,attribution_checked_at=clock_timestamp(),
     match_status='unresolved',match_method='none',match_confidence=NULL,candidate_job_ids=v_cands,
-    metadata=coalesce(metadata,'{}'::jsonb)||jsonb_build_object('capture_mode','relink','capture_mode_before',v_mode,
-     'placement_rule','reopen_new_job','placement_reconsidered',v_note)
+    -- Stage 1: a resting unplaced row a late contact sends to review follows
+    -- the one re-decision rule by the message's time; a row taken off a job
+    -- it was already placed on is always relink, as P1b does.
+    metadata=CASE WHEN p_reason='job_contact_linked' AND e.job_id IS NULL
+      THEN public.context_redecided_metadata(coalesce(metadata,'{}'::jsonb),v_at)
+      ELSE coalesce(metadata,'{}'::jsonb)||jsonb_build_object('capture_mode','relink','capture_mode_before',v_mode) END
+     ||jsonb_build_object('placement_rule','reopen_new_job','placement_reconsidered',v_note)
    WHERE id=e.id;
    n_reopened:=n_reopened+1;
   END IF;
@@ -963,22 +1074,59 @@ BEGIN
   'truncated',v_truncated);
 END $function$;
 COMMENT ON FUNCTION public.context_reconsider_contact(text,timestamptz,text,uuid) IS
- 'Reconsiders a GHL contact''s messages between p_since and the job''s creation (reason job_created) or, since unplaced stage 1 (20261014170000), the moment the job got this contact by update (reason job_contact_linked), when that job is a candidate at their time: bucket rows re-run the ladder; unplaced rows and rows placed on a sibling by single_open, single_line or luna go back to review once with the job added; review rows gain it as a candidate. Unplaced and sibling reopens are capture_mode relink; a first bind keeps its capture_mode, except that a job_contact_linked first bind of a row stored over an hour ago is relink. Never direct, thread, content_ref or party placements; never waits on a locked row. Returns counts.';
+ 'Reconsiders a GHL contact''s messages between p_since and the job''s creation (reason job_created) or, since unplaced stage 1 (20261014170000), the moment the job got this contact by update (reason job_contact_linked), when that job is a candidate at their time: bucket rows re-run the ladder; unplaced rows and rows placed on a sibling by single_open, single_line or luna go back to review once with the job added; review rows gain it as a candidate. Sibling reopens are capture_mode relink; a job_created first bind or unplaced reopen keeps P1b''s marks; a job_contact_linked placement, review case or unplaced reopen follows context_redecided_metadata (a message older than 48 hours is relink). Never direct, thread, content_ref or party placements; never waits on a locked row. Returns counts.';
 
 -- 5. Re-decide resting rows when new evidence arrives.
--- One writer for the three evidence triggers below and for a hand run: it
--- re-runs the ladder on rows with no job that rest in the bucket or
--- unplaced, and writes only a placement or a review case. Anything else is
--- left exactly as it was. A stored row it binds or sends to review is a
--- re-decision, not news: capture_mode relink, prior mode in
--- capture_mode_before (as 20261014034549 does for the daily re-check), unless
--- the row arrived within the hour. Never waits on a locked row; at most 200
--- rows and 2 seconds a call.
+-- One writer for one row, used by the three evidence triggers below and by
+-- the hand run: it re-runs the ladder on a row with no job that rests in the
+-- bucket or unplaced, and writes only a placement, a review case, or a
+-- machine or empty row taken out (automated or empty, no job). Anything else
+-- is left exactly as it was. A placement or review case follows the one
+-- re-decision rule (context_redecided_metadata): a message older than 48
+-- hours is stamped capture_mode relink. Never waits on a locked row.
+CREATE OR REPLACE FUNCTION public.context_redecide_one(p_id uuid,p_reason text,p_detail jsonb DEFAULT NULL)
+RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE e public.business_events; resolved public.business_events; v_note jsonb; v_outcome text;
+BEGIN
+ IF p_reason IS NULL OR p_reason NOT IN ('thread_bound','invoice_linked','hand_run') THEN
+  RAISE EXCEPTION 'context_redecide_one: unknown reason';
+ END IF;
+ SELECT * INTO e FROM public.business_events b WHERE b.id=p_id FOR UPDATE SKIP LOCKED;
+ IF NOT FOUND THEN
+  RETURN CASE WHEN EXISTS(SELECT 1 FROM public.business_events b WHERE b.id=p_id) THEN 'busy' ELSE 'unchanged' END;
+ END IF;
+ IF e.job_id IS NOT NULL OR coalesce(e.attribution_status,'admin_bucket') NOT IN ('admin_bucket','unplaced') THEN RETURN 'unchanged'; END IF;
+ resolved:=public.resolve_context_attribution(e);
+ v_outcome:=CASE WHEN resolved.job_id IS NOT NULL THEN 'placed'
+  WHEN resolved.attribution_status='pending_luna' THEN 'review'
+  WHEN resolved.attribution_status IN ('automated','empty') THEN 'taken_out' END;
+ IF v_outcome IS NULL THEN RETURN 'unchanged'; END IF;
+ v_note:=jsonb_build_object('reason',p_reason,'at',clock_timestamp(),'from_status',coalesce(e.attribution_status,'none'))
+  ||coalesce(p_detail,'{}'::jsonb);
+ resolved.metadata:=coalesce(resolved.metadata,'{}'::jsonb)||jsonb_build_object('placement_redecided',v_note);
+ IF v_outcome IN ('placed','review') THEN
+  resolved.metadata:=public.context_redecided_metadata(resolved.metadata,coalesce(resolved.event_at,resolved.occurred_at));
+ END IF;
+ UPDATE public.business_events SET
+  job_id=resolved.job_id,contact_id=resolved.contact_id,
+  attribution_status=resolved.attribution_status,attribution_step=resolved.attribution_step,
+  attribution_confidence=resolved.attribution_confidence,attributed_at=resolved.attributed_at,
+  attribution_checked_at=resolved.attribution_checked_at,event_at=resolved.event_at,
+  match_status=resolved.match_status,match_method=resolved.match_method,match_confidence=resolved.match_confidence,
+  candidate_job_ids=resolved.candidate_job_ids,payload=resolved.payload,metadata=resolved.metadata
+ WHERE id=e.id;
+ RETURN v_outcome;
+END $$;
+COMMENT ON FUNCTION public.context_redecide_one(uuid,text,jsonb) IS
+ 'Unplaced stage 1 (20261014170000): re-runs the ladder on one row with no job resting in the bucket or unplaced (reasons thread_bound, invoice_linked, hand_run) and writes only a placement (placed), a review case (review) or a machine or empty row taken out with no job (taken_out), with metadata.placement_redecided; anything else is unchanged. A placement or review case follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). A locked row is busy. Service role only.';
+
+-- The evidence triggers name their rows: at most 200 rows and 2 seconds a call.
 CREATE OR REPLACE FUNCTION public.context_redecide_events(p_ids uuid[],p_reason text,p_detail jsonb DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
-DECLARE x uuid; e public.business_events; resolved public.business_events; v_note jsonb;
- v_start timestamptz:=clock_timestamp(); n_seen int:=0; n_placed int:=0; n_review int:=0; n_unchanged int:=0; n_busy int:=0;
+DECLARE x uuid; v_out text;
+ v_start timestamptz:=clock_timestamp(); n_seen int:=0; n_placed int:=0; n_review int:=0; n_out int:=0; n_unchanged int:=0; n_busy int:=0;
  v_truncated text; v_limit constant int:=200; v_budget constant interval:='2 seconds';
 BEGIN
  IF p_reason IS NULL OR p_reason NOT IN ('thread_bound','invoice_linked','hand_run') THEN
@@ -989,40 +1137,55 @@ BEGIN
   IF n_seen>=v_limit THEN v_truncated:='row_cap'; EXIT; END IF;
   IF clock_timestamp()-v_start>v_budget THEN v_truncated:='time_budget'; EXIT; END IF;
   n_seen:=n_seen+1;
-  SELECT * INTO e FROM public.business_events b WHERE b.id=x FOR UPDATE SKIP LOCKED;
-  IF NOT FOUND THEN
-   IF EXISTS(SELECT 1 FROM public.business_events b WHERE b.id=x) THEN n_busy:=n_busy+1; ELSE n_unchanged:=n_unchanged+1; END IF;
-   CONTINUE;
-  END IF;
-  IF e.job_id IS NOT NULL OR coalesce(e.attribution_status,'admin_bucket') NOT IN ('admin_bucket','unplaced') THEN
-   n_unchanged:=n_unchanged+1; CONTINUE;
-  END IF;
-  resolved:=public.resolve_context_attribution(e);
-  IF resolved.job_id IS NULL AND resolved.attribution_status IS DISTINCT FROM 'pending_luna' THEN
-   n_unchanged:=n_unchanged+1; CONTINUE;
-  END IF;
-  v_note:=jsonb_build_object('reason',p_reason,'at',clock_timestamp(),'from_status',coalesce(e.attribution_status,'none'))
-   ||coalesce(p_detail,'{}'::jsonb);
-  resolved.metadata:=coalesce(resolved.metadata,'{}'::jsonb)||jsonb_build_object('placement_redecided',v_note);
-  IF coalesce(e.context_captured_at,e.recorded_at,'-infinity'::timestamptz)<clock_timestamp()-interval '1 hour'
-   AND coalesce(resolved.metadata->>'capture_mode','') NOT IN ('backfill','relink') THEN
-   resolved.metadata:=resolved.metadata||jsonb_build_object('capture_mode_before',resolved.metadata->'capture_mode','capture_mode','relink');
-  END IF;
-  UPDATE public.business_events SET
-   job_id=resolved.job_id,contact_id=resolved.contact_id,
-   attribution_status=resolved.attribution_status,attribution_step=resolved.attribution_step,
-   attribution_confidence=resolved.attribution_confidence,attributed_at=resolved.attributed_at,
-   attribution_checked_at=resolved.attribution_checked_at,event_at=resolved.event_at,
-   match_status=resolved.match_status,match_method=resolved.match_method,match_confidence=resolved.match_confidence,
-   candidate_job_ids=resolved.candidate_job_ids,payload=resolved.payload,metadata=resolved.metadata
-  WHERE id=e.id;
-  IF resolved.job_id IS NOT NULL THEN n_placed:=n_placed+1; ELSE n_review:=n_review+1; END IF;
+  v_out:=public.context_redecide_one(x,p_reason,p_detail);
+  CASE v_out WHEN 'placed' THEN n_placed:=n_placed+1; WHEN 'review' THEN n_review:=n_review+1;
+   WHEN 'taken_out' THEN n_out:=n_out+1; WHEN 'busy' THEN n_busy:=n_busy+1; ELSE n_unchanged:=n_unchanged+1; END CASE;
  END LOOP;
  RETURN jsonb_build_object('outcome','done','reason',p_reason,'seen',n_seen,'placed',n_placed,'to_review',n_review,
-  'unchanged',n_unchanged,'skipped_busy',n_busy,'truncated',v_truncated);
+  'taken_out',n_out,'unchanged',n_unchanged,'skipped_busy',n_busy,'truncated',v_truncated);
 END $$;
 COMMENT ON FUNCTION public.context_redecide_events(uuid[],text,jsonb) IS
- 'Unplaced stage 1 (20261014170000): re-runs the ladder on the named rows that have no job and rest in the bucket or unplaced (reasons thread_bound, invoice_linked, hand_run) and writes only a placement or a review case, with metadata.placement_redecided; anything else is left as it was. A row stored over an hour ago is stamped capture_mode relink (prior mode in capture_mode_before) so the event listener never reads it as fresh. Skips locked rows; at most 200 rows and 2 seconds a call; returns counts. Service role only.';
+ 'Unplaced stage 1 (20261014170000): context_redecide_one over the named rows (reasons thread_bound, invoice_linked, hand_run); at most 200 rows and 2 seconds a call; skips locked rows; returns counts (placed, to_review, taken_out, unchanged, skipped_busy, truncated). Service role only.';
+
+-- The hand run walks the resting rows newest first with a cursor, so rows
+-- that stay unchanged never hide older ones: each call starts strictly after
+-- the last row the previous call looked at (its answer's next), and answers
+-- finished once it has looked at the oldest. At most 200 rows and 20 seconds
+-- a call. Busy (locked) rows are passed and counted; a second pass from the
+-- start picks them up.
+CREATE OR REPLACE FUNCTION public.context_redecide_resting(p_status text DEFAULT 'unplaced',p_before_at timestamptz DEFAULT NULL,p_before_id uuid DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE c record; v_out text; v_rows int:=0;
+ v_start timestamptz:=clock_timestamp(); n_placed int:=0; n_review int:=0; n_out int:=0; n_unchanged int:=0; n_busy int:=0;
+ v_last_at timestamptz; v_last_id uuid; v_truncated boolean:=false;
+ v_limit constant int:=200; v_budget constant interval:='20 seconds';
+BEGIN
+ IF p_status IS NULL OR p_status NOT IN ('unplaced','admin_bucket') THEN RAISE EXCEPTION 'context_redecide_resting: status must be unplaced or admin_bucket'; END IF;
+ IF (p_before_at IS NULL) <> (p_before_id IS NULL) THEN RAISE EXCEPTION 'context_redecide_resting: pass both cursor parts or neither'; END IF;
+ IF NOT public.automation_lane_enabled('attribution') THEN RETURN jsonb_build_object('outcome','lane_off'); END IF;
+ FOR c IN
+  SELECT b.id, coalesce(b.event_at,b.occurred_at,'-infinity'::timestamptz) AS at FROM public.business_events b
+  WHERE b.job_id IS NULL AND b.attribution_status=p_status
+   AND (p_before_at IS NULL OR (coalesce(b.event_at,b.occurred_at,'-infinity'::timestamptz),b.id)<(p_before_at,p_before_id))
+  ORDER BY coalesce(b.event_at,b.occurred_at,'-infinity'::timestamptz) DESC,b.id DESC
+  LIMIT v_limit
+ LOOP
+  IF clock_timestamp()-v_start>v_budget THEN v_truncated:=true; EXIT; END IF;
+  v_rows:=v_rows+1;
+  v_out:=public.context_redecide_one(c.id,'hand_run',jsonb_build_object('status',p_status));
+  CASE v_out WHEN 'placed' THEN n_placed:=n_placed+1; WHEN 'review' THEN n_review:=n_review+1;
+   WHEN 'taken_out' THEN n_out:=n_out+1; WHEN 'busy' THEN n_busy:=n_busy+1; ELSE n_unchanged:=n_unchanged+1; END CASE;
+  v_last_at:=c.at; v_last_id:=c.id;
+ END LOOP;
+ RETURN jsonb_build_object('outcome','done','status',p_status,'seen',v_rows,'placed',n_placed,'to_review',n_review,
+  'taken_out',n_out,'unchanged',n_unchanged,'skipped_busy',n_busy,
+  'finished',(NOT v_truncated AND v_rows<v_limit),
+  'next',CASE WHEN v_last_id IS NOT NULL AND (v_truncated OR v_rows>=v_limit)
+   THEN jsonb_build_object('before_at',v_last_at,'before_id',v_last_id) END);
+END $$;
+COMMENT ON FUNCTION public.context_redecide_resting(text,timestamptz,uuid) IS
+ 'Unplaced stage 1 (20261014170000): the hand run. Walks rows with no job resting in p_status (unplaced or admin_bucket) newest first by message time then id, strictly before the cursor (p_before_at, p_before_id: the previous answer''s next), through context_redecide_one (hand_run); at most 200 rows and 20 seconds a call; answers counts, finished, and next (the cursor for the following call, null when finished). Never run by the migration. Service role only.';
 
 -- 5a. A new live thread binding re-decides the thread's resting rows.
 CREATE OR REPLACE FUNCTION public.context_thread_bound_redecide()
@@ -1116,20 +1279,6 @@ CREATE TRIGGER context_job_contact_linked_reconsider AFTER UPDATE OF ghl_contact
 
 -- 6. Monitor: the bucket block of context_pipeline_status (F1b stub until
 -- now). Rows on no job by lane, with two alarms on the customer lane.
-CREATE OR REPLACE FUNCTION public.context_unplaced_policy()
-RETURNS jsonb
-LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
- SELECT jsonb_build_object(
-  -- 1,091 customer rows were unplaced on 14 Oct 2026 (diagnosis, 08:45 UTC).
-  -- Above this the pile is growing again; lower it once the hand re-check
-  -- has run.
-  'customer_unplaced_max',1100,
-  -- The live inflow of customer rows was 10 to 20 a day on 14 Oct 2026.
-  'customer_new_24h_max',30)
-$$;
-COMMENT ON FUNCTION public.context_unplaced_policy() IS
- 'Unplaced stage 1 (20261014170000): the bucket block''s thresholds. customer_unplaced_max: customer-lane unplaced rows above which unplaced_customer_over_threshold fires. customer_new_24h_max: customer-lane rows that became unplaced in the last 24 hours above which unplaced_customer_inflow fires. Changed only by migration.';
-
 CREATE OR REPLACE FUNCTION public.context_bucket_status()
 RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
@@ -1175,10 +1324,15 @@ COMMENT ON FUNCTION public.context_bucket_status() IS
 -- 7. Grants. Replaced functions keep theirs (CREATE OR REPLACE). New ones
 -- are private: the service role may run the re-decision and read the block.
 REVOKE ALL ON FUNCTION public.context_job_live(uuid) FROM PUBLIC,anon,authenticated;
-REVOKE ALL ON FUNCTION public.context_pick_ranked(uuid[]) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_rank_contact_set(uuid[],uuid[]) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_job_real(uuid) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_job_dead(uuid) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_redecided_metadata(jsonb,timestamptz) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_redecide_one(uuid,text,jsonb) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_redecide_resting(text,timestamptz,uuid) FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION public.context_link_ref_jobs(text) FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION public.context_builder_ref_jobs(text,jsonb) FROM PUBLIC,anon,authenticated;
-REVOKE ALL ON FUNCTION public.context_party_key_jobs(text,text) FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION public.context_party_key_jobs(text,text,timestamptz) FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION public.context_unplaced_lane(public.business_events) FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION public.context_unplaced_policy() FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION public.context_redecide_events(uuid[],text,jsonb) FROM PUBLIC,anon,authenticated;
@@ -1190,6 +1344,11 @@ GRANT EXECUTE ON FUNCTION public.context_unplaced_lane(public.business_events) T
 GRANT EXECUTE ON FUNCTION public.context_unplaced_policy() TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_link_ref_jobs(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_builder_ref_jobs(text,jsonb) TO service_role;
-GRANT EXECUTE ON FUNCTION public.context_party_key_jobs(text,text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_party_key_jobs(text,text,timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.context_job_live(uuid) TO service_role;
-GRANT EXECUTE ON FUNCTION public.context_pick_ranked(uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_rank_contact_set(uuid[],uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_job_real(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_job_dead(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_redecided_metadata(jsonb,timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_redecide_one(uuid,text,jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.context_redecide_resting(text,timestamptz,uuid) TO service_role;

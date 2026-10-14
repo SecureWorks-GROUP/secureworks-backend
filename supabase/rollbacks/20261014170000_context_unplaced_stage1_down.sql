@@ -10,9 +10,9 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['347d82db89617a0b6e9de65b9d19fd4d','0faf9b6362c35225b8eca7beba887d99']),
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['c71c5fb9fda4edb643f278804a6d862f','0faf9b6362c35225b8eca7beba887d99']),
   ('public.context_event_identity(public.business_events)',ARRAY['ec1f67645b889441791d433d5fe08339','cc484b96d670d401a3457347884f5371']),
-  ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['f42d3c1e27207295f39288c24030e5ba','5f9dbe883f0add7a6987f3ed265a08af']),
+  ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['75aea904fb88a526ee6aed68b4d592b9','5f9dbe883f0add7a6987f3ed265a08af']),
   ('public.context_bucket_status()',ARRAY['1ac0e031034928239810432d213ed77e','155104bfb08b8b3c2f98bdec089d4ee4'])
  ) AS t(sig,accepted) LOOP
   live:=NULL;
@@ -649,11 +649,16 @@ COMMENT ON FUNCTION public.context_bucket_status() IS 'F1b stub. Status block bu
 DROP FUNCTION IF EXISTS public.context_thread_bound_redecide();
 DROP FUNCTION IF EXISTS public.context_invoice_linked_redecide();
 DROP FUNCTION IF EXISTS public.context_job_contact_linked_reconsider();
+DROP FUNCTION IF EXISTS public.context_redecide_resting(text,timestamptz,uuid);
 DROP FUNCTION IF EXISTS public.context_redecide_events(uuid[],text,jsonb);
+DROP FUNCTION IF EXISTS public.context_redecide_one(uuid,text,jsonb);
+DROP FUNCTION IF EXISTS public.context_redecided_metadata(jsonb,timestamptz);
 DROP FUNCTION IF EXISTS public.context_unplaced_policy();
 DROP FUNCTION IF EXISTS public.context_unplaced_lane(public.business_events);
-DROP FUNCTION IF EXISTS public.context_party_key_jobs(text,text);
+DROP FUNCTION IF EXISTS public.context_party_key_jobs(text,text,timestamptz);
 DROP FUNCTION IF EXISTS public.context_builder_ref_jobs(text,jsonb);
 DROP FUNCTION IF EXISTS public.context_link_ref_jobs(text);
-DROP FUNCTION IF EXISTS public.context_pick_ranked(uuid[]);
+DROP FUNCTION IF EXISTS public.context_rank_contact_set(uuid[],uuid[]);
+DROP FUNCTION IF EXISTS public.context_job_dead(uuid);
+DROP FUNCTION IF EXISTS public.context_job_real(uuid);
 DROP FUNCTION IF EXISTS public.context_job_live(uuid);
