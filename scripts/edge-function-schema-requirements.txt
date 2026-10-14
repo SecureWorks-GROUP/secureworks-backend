@@ -759,3 +759,11 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|job_dispatch_workings.sketch_png
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_supplier_on_job_fkey
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_status_valid
+# 20261014140000 quote-builder draft orders is intentionally NOT a preflight
+# requirement for ops-api. work_orders.quote_builder_version_id and
+# purchase_orders.quote_builder_version_id are read and written only while
+# quote_builder_orders_v1 is on. While that flag is off, missing or unreadable,
+# the make actions refuse, get_job adds no order keys, acceptance does not
+# filter on those columns, and pushPOToXero does not refuse a placeholder
+# supplier. ops-api may deploy with the flag off before this migration is
+# applied. Do not add the columns here until they are live.
