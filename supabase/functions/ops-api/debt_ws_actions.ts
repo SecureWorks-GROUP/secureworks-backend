@@ -38,6 +38,7 @@ import {
   type JanListItem,
   janListText,
   longDate,
+  looksLikeCompanyName,
   mondayOf,
   nextMonday,
   perthDate,
@@ -555,7 +556,12 @@ function heldContactIds(entry: BookEntry): string[] {
 export interface GreetingName {
   /** The first name for {name} in a template. */
   name: string;
-  source: "ghl" | "xero";
+  /**
+   * ghl: the linked GoHighLevel contact's first name. xero: the Xero contact's first
+   * name. company_generic: the Xero payer is a company and no linked person was found,
+   * so the draft says "Hi there,".
+   */
+  source: "ghl" | "xero" | "company_generic";
   /** The linked GoHighLevel contact's full name, when it was found. */
   ghl_name: string | null;
 }
@@ -616,21 +622,33 @@ async function ghlContactName(
  * else the Xero contact's first name (firstNameOf the row's payer name). On a shared
  * fence the payer is the neighbour, so it is the neighbour's own contact. A company
  * account is never texted, so it is never searched.
+ *
+ * A payer whose Xero name reads like a company (looksLikeCompanyName, e.g. "Thomasz
+ * Group") is never greeted by the first word of that name: the linked GoHighLevel
+ * contact's first name when that contact is a person, else "there" ("Hi there,") with
+ * source company_generic. A GoHighLevel contact whose own name reads like a company is
+ * never used for the greeting either.
  */
 export async function greetingNameFor(
   deps: DebtWsDeps,
   entry: BookEntry,
 ): Promise<GreetingName> {
-  const xero = firstNameOf(entry.row.payer_name);
+  const company = looksLikeCompanyName(entry.row.payer_name);
+  const fallback = (ghl_name: string | null): GreetingName =>
+    company
+      ? { name: "there", source: "company_generic", ghl_name }
+      : { name: firstNameOf(entry.row.payer_name), source: "xero", ghl_name };
   if (entry.kind === "account" || !entry.payer.ghl_contact_id) {
-    return { name: xero, source: "xero", ghl_name: null };
+    return fallback(null);
   }
   const ghl = await ghlContactName(deps, entry.payer);
-  const first = ghl.first ? firstNameOf(ghl.first) : null;
+  const person = !looksLikeCompanyName(ghl.full) &&
+    !looksLikeCompanyName(ghl.first);
+  const first = ghl.first && person ? firstNameOf(ghl.first) : null;
   if (first && first !== "there") {
     return { name: first, source: "ghl", ghl_name: ghl.full };
   }
-  return { name: xero, source: "xero", ghl_name: ghl.full };
+  return fallback(ghl.full);
 }
 
 /** The payer as the screen and the agent see them, with the name drafts greet them by. */
@@ -645,7 +663,8 @@ function payerView(p: PayerContact, greeting: GreetingName) {
     is_primary: p.is_primary,
     resolved_by: p.resolved_by,
     // {name} in a drafted text: the GoHighLevel contact's first name when linked and
-    // found, else the Xero contact's. first_name is the same value, for the agent.
+    // found, else the Xero contact's; "there" for a company payer with no linked person
+    // (source company_generic). first_name is the same value, for the agent.
     greeting_name: greeting.name,
     greeting_name_source: greeting.source,
     first_name: greeting.name,

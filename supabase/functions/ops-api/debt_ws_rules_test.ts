@@ -28,6 +28,7 @@ import {
   latestReachedStep,
   longDate,
   looksLikeCompany,
+  looksLikeCompanyName,
   mondayOf,
   money,
   nameTokens,
@@ -207,6 +208,27 @@ Deno.test("lane: no linked job is account for a company-looking contact, else ne
   });
   assertEquals(laneFor(null, null).lane, "needs_a_look");
   assert(!looksLikeCompany("Pattie Groupman"));
+});
+
+Deno.test("greeting: looksLikeCompanyName knows the spec's full company token list", () => {
+  for (
+    const name of [
+      "Thomasz Group",
+      "Example Pty Ltd",
+      "Sample Holdings",
+      "Example Enterprises",
+      "Smith & Co",
+      "Example Corporation",
+      "The Fence Company",
+      "Sample Partners",
+      "Somewhere Strata",
+    ]
+  ) {
+    assert(looksLikeCompanyName(name), name);
+  }
+  for (const name of ["Tuan Tran", "Jo Smith", "Pattie Groupman", "Cody Coleman", null]) {
+    assert(!looksLikeCompanyName(name), String(name));
+  }
 });
 
 // ── Section 2: kind ──
