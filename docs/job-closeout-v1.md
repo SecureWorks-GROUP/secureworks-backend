@@ -137,11 +137,14 @@ closeout: {
 - `held` is the sweep's hold (`closeoutHold`).
 
 Every other job type, and every non-staff caller, gets no `closeout` key. A
-draft fencing or patio row gets the empty block without any read (a draft
-cannot be paid, claimed or in `get_review`). The reads are one batched wave over
-the whole board (chunked `.in()`, each table's chunks read in turn so a full
-board holds at most one request per table in flight), never one per row. A failed read gives `closeout: null` on every fencing and patio row, and
-`pipeline` lists `pipeline.closeout` in `enrichment_errors`. It writes nothing.
+draft fencing or patio row is never read (a draft cannot be paid, claimed or in
+`get_review`): its block has no paid check, review or entry time, and `held` is
+`callback` only when the caller's job row already says so. The reads are one
+batched wave over the whole board (chunked `.in()`, each table's chunks read in
+turn so a full board holds at most one request per table in flight), never one
+per row. A failed read gives `closeout: null` on every fencing and patio row,
+and `pipeline` lists `pipeline.closeout` in `enrichment_errors`. It writes
+nothing.
 
 ## Switches (all off at deploy) and the turn-on order
 
