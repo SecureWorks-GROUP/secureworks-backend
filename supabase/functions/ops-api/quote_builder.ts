@@ -9,12 +9,17 @@
 // Writes land in these places and nowhere else: quote_builder_versions (the
 // versioned scope with internal costs), job_media (scope photos), job_documents
 // (the client quote PDF, never marked sent, and the scope of works PDF filed
-// beside it) and job_variations (a variation, from its first issue). The
-// job's own pricing (jobs.pricing_json) is never written: invoices, the quote
-// send paths and the CRM all read it as authority. The Repairs card takes its
-// money from the issued versions at read time instead
-// (loadQuoteBuilderCardValues). The material order list carries our costs and is
-// never filed: the PDF bucket is public. A private quote mints one `miscellaneous` job.
+// beside it) and job_variations (a variation, from its first issue). While
+// feature flag quote_builder_orders_v1 is on, the two make actions also write
+// one draft crew work_orders row, draft purchase_orders rows, and a job_events
+// row. While it is off they write nothing, job acceptance does not filter on
+// quote_builder_version_id, and pushPOToXero does not refuse a placeholder
+// supplier. The job's own pricing
+// (jobs.pricing_json) is never written: invoices, the quote send paths and the
+// CRM all read it as authority. The Repairs card takes its money from the
+// issued versions at read time instead (loadQuoteBuilderCardValues). The
+// material order list carries our costs and is never filed: the PDF bucket is
+// public. A private quote mints one `miscellaneous` job.
 // Repair stage moves go through the injected `moveRepairStage`, which the
 // dispatch binds to the existing update_repair_stage writer, and only ever
 // forward. Pricing settings are read from quote_builder_settings
@@ -30,10 +35,15 @@ import {
   projectInsuranceRepairPipelineRow,
 } from "./insurance_repairs_board.ts";
 import { quoteBuilderRunLabel } from "../_shared/quote_builder_run_label.ts";
+import { tradeTextHasMoneyToken } from "../_shared/trade_quote_pack/pack_trade_quote.ts";
 import { QUOTE_BUILDER_PHOTO_PHASE } from "./makesafe_cycle_evidence.ts";
 import { fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
 
 export const QUOTE_BUILDER_ORG_ID = "00000000-0000-0000-0000-000000000001";
+/** Seeded off in 20261014140000. Missing or unreadable reads as off. */
+export const QUOTE_BUILDER_ORDERS_FLAG = "quote_builder_orders_v1";
+/** Placeholder on a material group whose supplier was left blank. */
+export const QUOTE_BUILDER_UNNAMED_SUPPLIER = "Supplier to be named";
 export const QUOTE_BUILDER_PHOTO_BUCKET = "job-photos";
 export const QUOTE_BUILDER_PDF_BUCKET = "job-pdfs";
 export const QUOTE_BUILDER_MAX_LINES = 200;
@@ -544,6 +554,11 @@ export async function getQuoteBuilderJob(
   }
 
   const versions = (await loadVersions(client, [jobId])).map(versionView);
+  // Flag off (the seed), missing or unreadable: the reply gains no keys.
+  // Flag on: every version, draft included, carries work_order and purchase_orders.
+  if (await quoteBuilderOrdersEnabled(client)) {
+    await attachQuoteBuilderOrders(client, jobId, versions);
+  }
   // The pricing goal is the insurance repair lane's. A private job's reply
   // carries no settings keys at all, so the app opens it as it always has.
   const pricing: {
@@ -1933,6 +1948,372 @@ export async function decideQuoteBuilderVariation(
   return { approved, variation_id: variationId, stage };
 }
 
+// ── Draft crew work order and purchase orders (flag quote_builder_orders_v1) ─
+//
+// Off, missing or unreadable: both actions refuse before any write, and
+// get_job adds nothing. On: one draft crew work order and one draft purchase
+// order per supplier group, from an issued version only. The version id is
+// the idempotency key. Nothing here sends or calls Xero.
+
+const UNUSABLE_SUPPLIER_NAMES = new Set([
+  "supplier to be named",
+  "tbc",
+  "tba",
+  "tbd",
+  "unknown",
+  "unnamed",
+  "n/a",
+  "na",
+  "n.a",
+  "n.a.",
+  "none",
+  "supplier tbc",
+  "supplier tba",
+  "to be named",
+  "placeholder",
+  "supplier unknown",
+  "name tbc",
+]);
+
+/** True when a purchase order must not be pushed: blank or a placeholder name. */
+export function purchaseOrderSupplierIsUnusable(name: unknown): boolean {
+  const collapsed = String(name ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!collapsed) return true;
+  return UNUSABLE_SUPPLIER_NAMES.has(collapsed);
+}
+
+/** True only when quote_builder_orders_v1 is exactly enabled. Missing or unreadable is off. */
+export async function quoteBuilderOrdersEnabled(client: any): Promise<boolean> {
+  try {
+    const { data, error } = await client.from("feature_flags")
+      .select("enabled")
+      .eq("flag_name", QUOTE_BUILDER_ORDERS_FLAG)
+      .maybeSingle();
+    if (error || !data) return false;
+    return data.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+function requireOrdersEnabled(on: boolean): void {
+  if (!on) {
+    fail(
+      "quote_builder_orders_off",
+      "Making a work order or purchase orders from a quote is switched off.",
+      409,
+    );
+  }
+}
+
+function scopeSentences(narrative: unknown): string[] {
+  const raw = typeof narrative === "string" ? narrative.trim() : "";
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const para of raw.split(/\n+/)) {
+    const bit = para.trim();
+    if (!bit) continue;
+    const parts = bit.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+    out.push(...(parts.length ? parts : [bit]));
+  }
+  return out;
+}
+
+/** One scope item per sentence, then one per labour line. Money words are named, not dropped. */
+export function quoteBuilderCrewScope(version: any): {
+  scope_items: Array<Record<string, unknown>>;
+  hidden_lines: string[];
+} {
+  const hidden: string[] = [];
+  const items: Array<Record<string, unknown>> = [];
+  for (const sentence of scopeSentences(version?.narrative)) {
+    if (tradeTextHasMoneyToken(sentence)) hidden.push(sentence);
+    items.push({ description: sentence });
+  }
+  const lines = Array.isArray(version?.cost_lines) ? version.cost_lines : [];
+  for (const line of lines) {
+    if (line?.line_type !== "labour") continue;
+    const description = text(line.description, 2000);
+    if (!description) continue;
+    if (tradeTextHasMoneyToken(description)) hidden.push(description);
+    items.push({
+      description,
+      hours: line.qty,
+      unit: "hr",
+    });
+  }
+  return { scope_items: items, hidden_lines: hidden };
+}
+
+function materialGroups(version: any): Array<{
+  supplier_name: string;
+  lines: any[];
+}> {
+  const groups = new Map<string, { supplier_name: string; lines: any[] }>();
+  const lines = Array.isArray(version?.cost_lines) ? version.cost_lines : [];
+  for (const line of lines) {
+    if (line?.line_type !== "material") continue;
+    const named = text(line.supplier_or_trade, 200);
+    const key = named ? named.toLowerCase() : "";
+    const existing = groups.get(key);
+    if (existing) {
+      existing.lines.push(line);
+    } else {
+      groups.set(key, {
+        supplier_name: named || QUOTE_BUILDER_UNNAMED_SUPPLIER,
+        lines: [line],
+      });
+    }
+  }
+  return [...groups.values()];
+}
+
+function orderStamp(): string {
+  return String(Date.now()).slice(-6);
+}
+
+function workOrderView(row: any) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    wo_number: row.wo_number,
+    status: row.status,
+  };
+}
+
+function purchaseOrderView(row: any) {
+  return {
+    id: row.id,
+    po_number: row.po_number,
+    supplier_name: row.supplier_name,
+    status: row.status,
+  };
+}
+
+function siteLine(job: any): string | null {
+  const address = text(job?.site_address, 500);
+  const suburb = text(job?.site_suburb, 100);
+  if (!address) return suburb;
+  if (!suburb) return address;
+  if (address.toLowerCase().includes(suburb.toLowerCase())) return address;
+  return `${address}, ${suburb}`;
+}
+
+async function loadIssuedQuoteVersion(
+  client: any,
+  body: any,
+  actor: QuoteBuilderActor,
+) {
+  requireOrdersEnabled(await quoteBuilderOrdersEnabled(client));
+  const versionId = requireUuid(body?.version_id, "version_id");
+  const { data: version, error } = await client.from("quote_builder_versions")
+    .select(VERSION_SELECT)
+    .eq("id", versionId)
+    .maybeSingle();
+  if (error) readError("quote builder version read failed", error);
+  if (!version) fail("version_not_found", "Version not found", 404);
+  if (version.status !== "issued") {
+    fail(
+      "version_not_issued",
+      "Only an issued quote can make a work order or purchase orders.",
+      409,
+    );
+  }
+  // The job is the version's job. A job_id on the body is never read.
+  const loaded = await loadJob(client, version.job_id, actor);
+  if (!loaded.lane) {
+    fail(
+      "job_not_quotable",
+      "Only repair and private jobs make orders from a quote",
+      409,
+    );
+  }
+  return { version, job: loaded.job };
+}
+
+async function ordersForVersion(client: any, versionId: string) {
+  const { data: workOrders, error: woError } = await client.from("work_orders")
+    .select("id, wo_number, status, quote_builder_version_id")
+    .eq("quote_builder_version_id", versionId);
+  if (woError) readError("work orders read failed", woError);
+  const { data: purchaseOrders, error: poError } = await client
+    .from("purchase_orders")
+    .select("id, po_number, supplier_name, status, quote_builder_version_id")
+    .eq("quote_builder_version_id", versionId);
+  if (poError) readError("purchase orders read failed", poError);
+  const workOrder = (workOrders || [])[0] ?? null;
+  const pos = [...(purchaseOrders || [])].sort((a, b) =>
+    String(a.po_number || "").localeCompare(String(b.po_number || ""))
+  );
+  return {
+    work_order: workOrderView(workOrder),
+    purchase_orders: pos.map(purchaseOrderView),
+  };
+}
+
+async function attachQuoteBuilderOrders(
+  client: any,
+  jobId: string,
+  versions: any[],
+) {
+  const { data: workOrders, error: woError } = await client.from("work_orders")
+    .select("id, wo_number, status, quote_builder_version_id")
+    .eq("job_id", jobId);
+  if (woError) readError("work orders read failed", woError);
+  const { data: purchaseOrders, error: poError } = await client
+    .from("purchase_orders")
+    .select("id, po_number, supplier_name, status, quote_builder_version_id")
+    .eq("job_id", jobId);
+  if (poError) readError("purchase orders read failed", poError);
+  const woByVersion = new Map<string, any>();
+  for (const row of workOrders || []) {
+    if (row.quote_builder_version_id && !woByVersion.has(row.quote_builder_version_id)) {
+      woByVersion.set(row.quote_builder_version_id, workOrderView(row));
+    }
+  }
+  const poByVersion = new Map<string, any[]>();
+  for (const row of purchaseOrders || []) {
+    if (!row.quote_builder_version_id) continue;
+    const list = poByVersion.get(row.quote_builder_version_id) || [];
+    list.push(purchaseOrderView(row));
+    poByVersion.set(row.quote_builder_version_id, list);
+  }
+  for (const version of versions) {
+    version.work_order = woByVersion.get(version.id) ?? null;
+    version.purchase_orders = poByVersion.get(version.id) ?? [];
+  }
+}
+
+async function recordOrderEvent(
+  client: any,
+  actor: QuoteBuilderActor,
+  jobId: string,
+  eventType: string,
+  detail: Record<string, unknown>,
+) {
+  await client.from("job_events").insert({
+    job_id: jobId,
+    user_id: actor.id,
+    event_type: eventType,
+    detail_json: { ...detail, operator_email: actor.email },
+  }).then(() => {}, () => {});
+}
+
+function ordersReply(version: any, orders: {
+  work_order: ReturnType<typeof workOrderView>;
+  purchase_orders: ReturnType<typeof purchaseOrderView>[];
+}) {
+  return {
+    ...orders,
+    hidden_lines: quoteBuilderCrewScope(version).hidden_lines,
+  };
+}
+
+export async function makeQuoteBuilderWorkOrder(
+  client: any,
+  body: any,
+  actor: QuoteBuilderActor,
+) {
+  const { version, job } = await loadIssuedQuoteVersion(client, body, actor);
+  const existing = await ordersForVersion(client, version.id);
+  if (existing.work_order) return ordersReply(version, existing);
+
+  const scope = quoteBuilderCrewScope(version);
+  const woNumber = `WO-${orderStamp()}`;
+  const { data, error } = await client.from("work_orders").insert({
+    org_id: version.org_id || QUOTE_BUILDER_ORG_ID,
+    job_id: version.job_id,
+    wo_number: woNumber,
+    kind: "crew",
+    status: "draft",
+    scope_items: scope.scope_items,
+    site_address: siteLine(job),
+    created_by: uuidOrNull(actor.id),
+    quote_builder_version_id: version.id,
+  }).select("id, wo_number, status, quote_builder_version_id").maybeSingle();
+  if (error?.code === "23505") {
+    return ordersReply(version, await ordersForVersion(client, version.id));
+  }
+  if (error || !data) readError("work order create failed", error || "no row");
+  await recordOrderEvent(
+    client,
+    actor,
+    version.job_id,
+    "quote_builder_work_order_made",
+    {
+      quote_builder_version_id: version.id,
+      work_order_id: data.id,
+      wo_number: data.wo_number,
+    },
+  );
+  const made = await ordersForVersion(client, version.id);
+  return ordersReply(version, {
+    work_order: made.work_order || workOrderView(data),
+    purchase_orders: made.purchase_orders,
+  });
+}
+
+export async function makeQuoteBuilderPurchaseOrders(
+  client: any,
+  body: any,
+  actor: QuoteBuilderActor,
+) {
+  const { version } = await loadIssuedQuoteVersion(client, body, actor);
+  const existing = await ordersForVersion(client, version.id);
+  // Any row for this version, including a renamed, cancelled or deleted one,
+  // is the order. A second press inserts nothing.
+  if (existing.purchase_orders.length) return ordersReply(version, existing);
+
+  const groups = materialGroups(version);
+  if (!groups.length) return ordersReply(version, existing);
+
+  const stamp = orderStamp();
+  const rows = groups.map((group, i) => {
+    const lineItems = group.lines.map((line) => ({
+      description: text(line.description, 2000),
+      quantity: line.qty,
+      unit: text(line.unit, 32),
+      unit_price: line.unit_cost_ex_gst,
+    }));
+    const subtotal = cents(lineItems.reduce(
+      (sum: number, line: { quantity: number; unit_price: number }) =>
+        sum + (Number(line.quantity) || 0) * (Number(line.unit_price) || 0),
+      0,
+    ));
+    const tax = cents(subtotal * QUOTE_BUILDER_GST_RATE);
+    return {
+      org_id: version.org_id || QUOTE_BUILDER_ORG_ID,
+      job_id: version.job_id,
+      po_number: `PO-${stamp}-${i + 1}`,
+      supplier_name: group.supplier_name,
+      line_items: lineItems,
+      subtotal,
+      tax,
+      total: cents(subtotal + tax),
+      status: "draft",
+      created_by: uuidOrNull(actor.id),
+      quote_builder_version_id: version.id,
+    };
+  });
+  const { data, error } = await client.from("purchase_orders")
+    .insert(rows)
+    .select("id, po_number, supplier_name, status, quote_builder_version_id");
+  if (error) readError("purchase order create failed", error);
+  const inserted = Array.isArray(data) ? data : data ? [data] : [];
+  if (!inserted.length) readError("purchase order create failed", "no row");
+  await recordOrderEvent(
+    client,
+    actor,
+    version.job_id,
+    "quote_builder_purchase_orders_made",
+    {
+      quote_builder_version_id: version.id,
+      purchase_order_ids: inserted.map((row: any) => row.id),
+    },
+  );
+  return ordersReply(version, await ordersForVersion(client, version.id));
+}
+
 export const QUOTE_BUILDER_ACTIONS = new Set([
   "quote_builder_list_jobs",
   "quote_builder_get_job",
@@ -1944,4 +2325,6 @@ export const QUOTE_BUILDER_ACTIONS = new Set([
   "quote_builder_pdf_upload_url",
   "quote_builder_issue",
   "quote_builder_decide_variation",
+  "quote_builder_make_work_order",
+  "quote_builder_make_purchase_orders",
 ]);
