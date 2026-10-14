@@ -16,10 +16,10 @@ writes), the action switch in `index.ts`. Migration:
 `supabase/migrations/20261014150000_dispatch_purchase_orders.sql` (rollback
 `supabase/rollbacks/20261014150000_dispatch_purchase_orders_down.sql`, contract
 case `supabase/tests/migration-contracts/20261014150000_dispatch_purchase_orders/`).
-Tests: `dispatch_orders_test.ts`, `dispatch_order_pdf_test.ts`,
-`dispatch_order_send_test.ts`, `dispatch_orders_store_test.ts`,
-`purchase_order_attribution_test.ts`, `receive-po-email/po_email_tag_test.ts`,
-all in the "Test the Dispatch list and job notes reads" step of
+Tests, by outcome (ruling R46): `dispatch_order_pdf_test.ts` (what the
+supplier reads on the PDF), `dispatch_orders_store_test.ts` (every read and
+write end to end, the send stubbed), `purchase_order_attribution_test.ts` and
+`receive-po-email/po_email_tag_test.ts` (the fixes), all in the "Test the Dispatch list and job notes reads" step of
 `.github/workflows/pr-check.yml`. Recorded answers (made-up job, supplier and
 addresses): `docs/dispatch-slice-5-recorded-answers.json`.
 
