@@ -879,6 +879,11 @@ ROLLBACK;
 BEGIN;
 SELECT to_regprocedure('public.context_cadence_policy_today()') IS NOT NULL AS call_cap_setting_live \gset
 \if :call_cap_setting_live
+-- Roll back the later daily recheck before the body this proof needs.
+SELECT (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure('public.context_core_status()')) = 'bf6a84ad3b2fdcc0f9f1ba2f253b72a2' AS rc_later_live \gset
+\if :rc_later_live
+\ir ../../../rollbacks/20261014034549_context_recheck_messages_first_down.sql
+\endif
 \ir ../../../rollbacks/20261013100000_context_call_cap_setting_down.sql
 \endif
 CREATE TEMP TABLE st_before ON COMMIT DROP AS

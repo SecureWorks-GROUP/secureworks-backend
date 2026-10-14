@@ -437,7 +437,8 @@ BEGIN
     THEN '155104bfb08b8b3c2f98bdec089d4ee4'
     WHEN coalesce(obj_description(to_regprocedure('public.context_parties_status()'),'pg_proc'),'') LIKE '%Since 20261006034000%'
     THEN '5f01b621c22b3cb0840bf04eb32a338f' ELSE '98ca15b42682e9210ac4e6fe8d74ccd3' END)) AS t(sig,md5) LOOP
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid=to_regprocedure(x.sig)) IS DISTINCT FROM x.md5 THEN RAISE EXCEPTION 'f1b moved %',x.sig; END IF;
+  IF (-- The later recheck removes only the retired today_pass key.
+  SELECT md5(replace(prosrc, 'to_jsonb(p)-''attribution_done_at''', 'to_jsonb(p)')) FROM pg_proc WHERE oid=to_regprocedure(x.sig)) IS DISTINCT FROM x.md5 THEN RAISE EXCEPTION 'f1b moved %',x.sig; END IF;
  END LOOP;
  IF to_regprocedure('public.upsert_job_party(uuid,text,jsonb,text,uuid)') IS NULL
   AND obj_description('public.context_parties_status()'::regprocedure,'pg_proc') NOT LIKE 'F1 stub.%' THEN RAISE EXCEPTION 'f1b touched an F1 stub'; END IF;
