@@ -12,6 +12,7 @@ import {
 import {
   _authorizeOpsApiAction,
   _opsApiCallerIsStaffOperator,
+  _opsApiRequestHandlerForTest,
   _pipelineForTest,
   AGENT_READ_ALLOWED_ACTIONS,
   LEAD_INSTALLER_READ_ACTIONS,
@@ -825,10 +826,37 @@ Deno.test("set_dispatch_next_step: over 40 characters or no text is 400; unknown
 });
 
 // ── Who may call, and what the writes may touch ──────────────────────────────
-const SOURCE = Deno.readTextFileSync(new URL("./index.ts", import.meta.url));
-const WRITER = Deno.readTextFileSync(new URL("./dispatch_stage_write.ts", import.meta.url));
+const ROUTINE_KEY = "test-routine-key";
 
-Deno.test("the two writes are staff-only: refused to trades, the routine key and the agent read list", () => {
+async function routineCall(action: string, body: unknown) {
+  const fetches: string[] = [];
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const saved = Deno.env.get("MAKESAFE_ROUTINE_KEY");
+  globalThis.fetch = ((input: Request | URL | string) => {
+    fetches.push(input instanceof Request ? input.url : String(input));
+    return Promise.resolve(new Response("{}", { status: 404 }));
+  }) as typeof fetch;
+  console.log = () => {};
+  Deno.env.set("MAKESAFE_ROUTINE_KEY", ROUTINE_KEY);
+  try {
+    const url = new URL("https://example.invalid/ops-api");
+    url.searchParams.set("action", action);
+    const res = await _opsApiRequestHandlerForTest(new Request(url, {
+      method: "POST",
+      headers: { "x-api-key": ROUTINE_KEY, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+    return { status: res.status, body: await res.json(), fetches };
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+    if (saved === undefined) Deno.env.delete("MAKESAFE_ROUTINE_KEY");
+    else Deno.env.set("MAKESAFE_ROUTINE_KEY", saved);
+  }
+}
+
+Deno.test("the two writes are staff-only: refused to trades, the routine key and the agent read list", async () => {
   for (const action of ["set_dispatch_stage", "set_dispatch_next_step"]) {
     const url = new URL(`https://example.test/functions/v1/ops-api?action=${action}`);
     for (const role of ["admin", "owner", "ops_manager"]) {
@@ -845,50 +873,98 @@ Deno.test("the two writes are staff-only: refused to trades, the routine key and
     assert(!_opsApiCallerIsStaffOperator("agent_read", null));
     assert(!AGENT_READ_ALLOWED_ACTIONS.has(action));
     assert(!LEAD_INSTALLER_READ_ACTIONS.has(action));
-    // The routine allow-list is a local set inside the handler; read it.
-    const routineList = SOURCE.slice(
-      SOURCE.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set(["),
-      SOURCE.indexOf("if (authMode === 'routine' && action && !ROUTINE_ALLOWED_ACTIONS.has(action))"),
+    const routine = await routineCall(action, {
+      job_id: jobId(1),
+      stage: "materials_ordered",
+      expected_stage: "deposit_paid",
+      text: "chase supplier",
+    });
+    assertEquals(routine.status, 403, action);
+    assertStringIncludes(String(routine.body.error), action);
+    assertEquals(
+      routine.fetches.filter((u) => /\/rest\/v1\/(jobs|job_dispatch_state|job_events)\b/.test(u)),
+      [],
+      `${action} reached a table for the routine key`,
     );
-    assert(routineList.length > 0);
-    assert(!routineList.includes(`'${action}'`), `${action} is on the routine allow-list`);
   }
 });
 
-Deno.test("the two writes call nothing: no jobs write, no status writer, no business event, no other service", () => {
-  const code = WRITER.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
-  for (
-    const forbidden of [
-      "updateJobStatus",
-      "update_job_status",
-      "logBusinessEvent",
-      "capture_business_event",
-      "business_events",
-      "ghl-proxy",
-      "reporting-api",
-      "xero",
-      "Xero",
-      "fetch(",
-      "rpc(",
-      "functions.invoke",
-      "sendSms",
-      "send_",
-      "notify",
-    ]
-  ) {
-    assert(!code.includes(forbidden), `dispatch_stage_write.ts names ${forbidden}`);
+Deno.test("the two writes call nothing: every path reads jobs only and writes only job_dispatch_state and job_events", async () => {
+  const seed = writeBoard();
+  const { client, tables, calls } = makeClient(seed, {
+    beforeWrite: (table, op, t) => {
+      if (raceOn === "insert" && table === "job_dispatch_state" && op === "insert") {
+        t.job_dispatch_state.push({ job_id: jobId(4), org_id: ORG_ID, stage: "accepted", stage_set_at: "2026-10-14T00:00:00Z" });
+      }
+      if (raceOn === "update" && table === "job_dispatch_state" && op === "update") {
+        const row = t.job_dispatch_state.find((r) => r.job_id === jobId(1));
+        if (row) row.stage = "materials_on_site";
+      }
+    },
+  });
+  let raceOn: "insert" | "update" | null = null;
+  const foreign: string[] = [];
+  const onlyFrom = new Proxy(client, {
+    get(target: any, prop) {
+      if (prop === "from") return target.from;
+      if (prop === "then") return undefined;
+      foreign.push(String(prop));
+      return undefined;
+    },
+  });
+  const jobsBefore = structuredClone(tables.jobs);
+  const fetches: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: Request | URL | string) => {
+    fetches.push(input instanceof Request ? input.url : String(input));
+    return Promise.reject(new Error("no network in the Dispatch writes"));
+  }) as typeof fetch;
+  try {
+    const stage = (body: Row) => setDispatchStage(onlyFrom, body, STAFF, ORG_ID);
+    const step = (body: Row) => setDispatchNextStep(onlyFrom, body, STAFF, ORG_ID);
+
+    // First insert, guarded update, unchanged.
+    assertEquals((await stage({ job_id: jobId(1), stage: "materials_ordered", expected_stage: "deposit_paid" })).success, true);
+    assertEquals((await stage({ job_id: jobId(1), stage: "supplier_confirmed", expected_stage: "materials_ordered" })).success, true);
+    assertEquals((await stage({ job_id: jobId(1), stage: "supplier_confirmed", expected_stage: "supplier_confirmed" })).unchanged, true);
+    // 400, 404, and the 409s: wrong expected stage, make-safe, raced insert, raced update.
+    assertEquals((await refusal(stage({ job_id: jobId(1), stage: "not_started", expected_stage: "supplier_confirmed" }))).status, 400);
+    assertEquals((await refusal(stage({ job_id: jobId(99), stage: "accepted", expected_stage: "not_started" }))).status, 404);
+    assertEquals((await refusal(stage({ job_id: jobId(1), stage: "accepted", expected_stage: "deposit_paid" }))).body.code, "stage_changed");
+    assertEquals((await refusal(stage({ job_id: jobId(2), stage: "accepted", expected_stage: "not_started" }))).body.code, "not_dispatch_work");
+    raceOn = "insert";
+    assertEquals((await refusal(stage({ job_id: jobId(4), stage: "materials_ordered", expected_stage: "trade_scheduled" }))).body.code, "stage_changed");
+    raceOn = "update";
+    assertEquals((await refusal(stage({ job_id: jobId(1), stage: "materials_on_site", expected_stage: "supplier_confirmed" }))).body.code, "stage_changed");
+    raceOn = null;
+
+    // Next step: create a row, update it, clear it, unchanged, and the refusals.
+    assertEquals((await step({ job_id: jobId(3), text: "BOOK CREW" })).dispatch_next_step, "BOOK CREW");
+    assertEquals((await step({ job_id: jobId(1), text: "chase supplier" })).dispatch_next_step, "chase supplier");
+    assertEquals((await step({ job_id: jobId(3), text: "  " })).dispatch_next_step, null);
+    assertEquals((await step({ job_id: jobId(3), text: "" })).unchanged, true);
+    assertEquals((await refusal(step({ job_id: jobId(1), text: "x".repeat(41) }))).status, 400);
+    assertEquals((await refusal(step({ job_id: jobId(99), text: "a" }))).status, 404);
+    assertEquals((await refusal(step({ job_id: jobId(2), text: "a" }))).body.code, "not_dispatch_work");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
-  // Every table it touches: jobs is read only.
-  const tables = [...code.matchAll(/from\("([a-z_]+)"\)/g)].map((m) => m[1]);
-  assertEquals([...new Set(tables)].sort(), ["job_dispatch_state", "job_events", "jobs"]);
-  const jobsChains = code.split('from("jobs")').slice(1).map((rest) => rest.slice(0, 120));
-  for (const chain of jobsChains) assert(chain.trimStart().startsWith(".select("), "jobs is only ever read");
-  // The dispatch case in index.ts hands straight to the two writers.
-  const caseStart = SOURCE.indexOf("case 'set_dispatch_stage':");
-  const caseBody = SOURCE.slice(caseStart, SOURCE.indexOf("// Quote builder (docs/quote-builder-contract.md)", caseStart));
-  for (const forbidden of ["updateJobStatus", "logBusinessEvent", "from('jobs')", "fetch("]) {
-    assert(!caseBody.includes(forbidden), `the dispatch case names ${forbidden}`);
-  }
+
+  assertEquals(foreign, [], "a client call other than from()");
+  assertEquals(fetches, [], "a network call");
+  const touched = [...new Set(calls.map((c) => c.table))].sort();
+  assertEquals(touched, ["job_dispatch_state", "job_events", "jobs"]);
+  const jobsWrites = calls.filter((c) => c.table === "jobs" && c.op !== "select");
+  assertEquals(jobsWrites, [], "jobs is only ever read");
+  assertEquals(calls.filter((c) => c.table === "job_events").every((c) => c.op === "insert"), true);
+  assertEquals(tables.jobs, jobsBefore, "the jobs rows changed");
+  assertEquals(
+    tables.job_events.map((e) => e.event_type).sort(),
+    [
+      ...Array(2).fill(DISPATCH_STAGE_CHANGED_EVENT),
+      ...Array(3).fill(DISPATCH_NEXT_STEP_SET_EVENT),
+    ].sort(),
+  );
 });
 
 Deno.test("PAGE_SIZE matches the paging helper the list read uses", () => {
