@@ -1,5 +1,5 @@
 -- Rollback contract: 20261014150000_dispatch_purchase_orders. The down drops the held-draft table,
--- the three functions and the nine purchase_orders columns, and leaves purchase_orders, the slice 4
+-- the four functions and the nine purchase_orders columns, and leaves purchase_orders, the slice 4
 -- tables and the sequence in place.
 \set ON_ERROR_STOP on
 DO $$
@@ -9,6 +9,7 @@ BEGIN
  END IF;
  IF to_regprocedure('public.dispatch_commit_order(jsonb)') IS NOT NULL
   OR to_regprocedure('public.dispatch_commit_order_update(jsonb)') IS NOT NULL
+  OR to_regprocedure('public.dispatch_release_unknown_send(jsonb)') IS NOT NULL
   OR to_regprocedure('public.dispatch_next_po_number()') IS NOT NULL THEN
   RAISE EXCEPTION 'dispatch purchase orders rollback contract: a dispatch function still exists';
  END IF;

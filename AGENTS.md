@@ -515,7 +515,8 @@ order (numbers `PO-1000001` on, from `dispatch_next_po_number`), its PDF in the
 private `dispatch-order-pdfs` bucket and a held draft in `job_order_emails`,
 through the `dispatch_order*` actions (`dispatch_orders_store.ts`, rules in
 `dispatch_orders.ts`); multi-table writes go only through
-`dispatch_commit_order` / `_update`. Only `dispatch_order_send` and
+`dispatch_commit_order` / `_update` and the release of an unconfirmed send
+through `dispatch_release_unknown_send` (draft and audit row together). Only `dispatch_order_send` and
 `dispatch_order_reply` email anyone: on a person's press, or the ops key naming
 that person in `operator_email`, after the draft-hash check and the claim, and a
 Resend result that is not a clear yes or no is `send_unknown`, never re-sent on

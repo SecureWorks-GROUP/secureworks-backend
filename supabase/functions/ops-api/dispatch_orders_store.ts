@@ -1304,51 +1304,35 @@ export async function releaseUnknownDispatchSend(
     draftChanged(await draftAnswer(client, draft, order, job, ctx));
   }
   const person = await resolveSender(client, body, ctx);
-  const now = nowIso(ctx);
-  const attempt = Number(draft.send_attempt) || 1;
-  const { data, error } = await client.from("job_order_emails")
-    .update({
-      status: "draft",
-      attempt_to_email: null,
-      attempt_in_reply_to: null,
-      send_attempt: attempt + 1,
-      last_error: `Released as not sent by ${person.email}`.slice(0, 1000),
-      updated_at: now,
-    })
-    .eq("id", draft.id)
-    .eq("status", draft.status)
-    .eq("updated_at", draft.updated_at)
-    .select(DRAFT_SELECT);
-  if (error) writeFailed("draft release", error);
-  const released = Array.isArray(data) ? data[0] : data;
-  if (!released) {
-    draftChanged(
-      await draftAnswer(
-        client,
-        await readDraft(client, draft.id, ctx),
-        order,
-        job,
-        ctx,
-      ),
-    );
-  }
-  const { error: eventError } = await client.from("job_events").insert({
-    job_id: job.id,
-    user_id: person.userId,
-    event_type: "po_email_send_released",
-    detail_json: {
-      po_id: order.id,
-      po_number: order.po_number,
+  // The release and its job_events row are one transaction: a failed audit
+  // write leaves the draft locked as it was, so the person's retry still works.
+  const { data, error } = await client.rpc("dispatch_release_unknown_send", {
+    p: {
       draft_id: draft.id,
+      job_id: job.id,
       prior_status: draft.status,
-      prior_attempt: attempt,
-      released_at: now,
-      operator_email: person.email,
+      prior_updated_at: draft.updated_at,
+      actor: { user_id: person.userId, email: person.email },
       via: ctx.via,
-      source: "dispatch",
     },
   });
-  if (eventError) writeFailed("release event", eventError);
+  if (error) {
+    const word = String(error?.message ?? "").trim();
+    if (word === "draft_changed" || word === "draft_not_unknown") {
+      draftChanged(
+        await draftAnswer(
+          client,
+          await readDraft(client, draft.id, ctx),
+          order,
+          job,
+          ctx,
+        ),
+      );
+    }
+    writeFailed("draft release", error);
+  }
+  const released = data?.draft;
+  if (!released) writeFailed("draft release", { message: "no draft returned" });
   return {
     success: true,
     draft: await draftAnswer(client, released, order, job, ctx),

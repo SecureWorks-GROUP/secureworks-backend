@@ -632,6 +632,12 @@ function makeDb(initial = seed()) {
   const raise = (word: string): never => {
     throw new Raise(word);
   };
+  // A database error inside the transaction: everything it wrote rolls back.
+  class Fault extends Error {
+    constructor(readonly code: string, message: string) {
+      super(message);
+    }
+  }
   function atomically(name: string, fn: () => any) {
     requests.push({
       table: `rpc:${name}`,
@@ -649,6 +655,9 @@ function makeDb(initial = seed()) {
       tables = before;
       if (error instanceof Raise) {
         return { data: null, error: { code: "P0001", message: error.message } };
+      }
+      if (error instanceof Fault) {
+        return violation(error.code, error.message);
       }
       throw error;
     }
@@ -759,6 +768,56 @@ function makeDb(initial = seed()) {
       created_at: now,
     });
     return { order: { ...order }, draft: { ...draft } };
+  }
+
+  function releaseUnknown(p: any) {
+    const email = p.actor?.email || null;
+    if (!email) raise("operator_required");
+    const draft = tables.job_order_emails.find((e) =>
+      e.id === p.draft_id && e.job_id === p.job_id
+    );
+    if (!draft || !["sending", "send_unknown"].includes(draft.status)) {
+      raise("draft_not_unknown");
+    }
+    if (
+      draft!.status !== p.prior_status ||
+      Date.parse(draft!.updated_at) !== Date.parse(p.prior_updated_at)
+    ) raise("draft_changed");
+    const now = tick();
+    const prior = { ...draft! };
+    Object.assign(draft!, {
+      status: "draft",
+      attempt_to_email: null,
+      attempt_in_reply_to: null,
+      send_attempt: (prior.send_attempt ?? 1) + 1,
+      last_error: `Released as not sent by ${email}`.slice(0, 1000),
+      updated_at: now,
+    });
+    if (failures.has("insert:job_events")) {
+      throw new Fault("XX000", "forced failure on insert job_events");
+    }
+    const order = tables.purchase_orders.find((o) =>
+      o.id === prior.purchase_order_id
+    );
+    tables.job_events.push({
+      id: crypto.randomUUID(),
+      job_id: prior.job_id,
+      user_id: p.actor?.user_id ?? null,
+      event_type: "po_email_send_released",
+      detail_json: {
+        po_id: prior.purchase_order_id,
+        po_number: order?.po_number ?? null,
+        draft_id: prior.id,
+        prior_status: prior.status,
+        prior_attempt: prior.send_attempt ?? 1,
+        released_at: now,
+        operator_email: email,
+        via: p.via,
+        source: "dispatch",
+      },
+      created_at: now,
+    });
+    return { draft: { ...draft! } };
   }
 
   function commitUpdate(p: any) {
@@ -931,6 +990,9 @@ function makeDb(initial = seed()) {
       }
       if (name === "dispatch_commit_order_update") {
         return Promise.resolve(atomically(name, () => commitUpdate(args.p)));
+      }
+      if (name === "dispatch_release_unknown_send") {
+        return Promise.resolve(atomically(name, () => releaseUnknown(args.p)));
       }
       return Promise.resolve(
         violation("42883", `function ${name} does not exist`),
@@ -1210,6 +1272,7 @@ const ALLOWED_TABLES = new Set([
   "rpc:dispatch_next_po_number",
   "rpc:dispatch_commit_order",
   "rpc:dispatch_commit_order_update",
+  "rpc:dispatch_release_unknown_send",
 ]);
 // Tables only the RPCs and the send's filing may write; every other write is a defect.
 const WRITABLE_DIRECT = new Set([
@@ -2270,6 +2333,48 @@ Deno.test("release: a person releases a not-confirmed send to draft under a new 
     `dispatch-draft-${draft.id}-a2`,
   ]);
   assertEquals(db.tables.job_order_emails[0].status, "sent");
+});
+
+Deno.test("release: when the audit row cannot be written nothing is released, and the person's retry releases it with its record", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  const t = transport([{ status: 503, body: null }]);
+  await refused(
+    call(db, "dispatch_order_send", {
+      draft_id: draft.id,
+      expected_draft_hash: draft.draft_hash,
+    }, ctx(db, t)),
+    502,
+    "send_unknown",
+  );
+  const unknown = { ...db.tables.job_order_emails[0] };
+  const eventsBefore = db.tables.job_events.length;
+  db.failures.add("insert:job_events");
+  await refused(
+    call(db, "dispatch_order_release_unknown", {
+      draft_id: draft.id,
+      expected_updated_at: unknown.updated_at,
+    }, ctx(db, t)),
+    500,
+    "orders_write_failed",
+  );
+  assertEquals(db.tables.job_order_emails[0], unknown);
+  assertEquals(db.tables.job_events.length, eventsBefore);
+  db.failures.delete("insert:job_events");
+  const answer = await call(db, "dispatch_order_release_unknown", {
+    draft_id: draft.id,
+    expected_updated_at: unknown.updated_at,
+  }, ctx(db, t));
+  assertEquals(answer.success, true);
+  const stored = db.tables.job_order_emails[0];
+  assertEquals(stored.status, "draft");
+  assertEquals(stored.send_attempt, (unknown.send_attempt ?? 1) + 1);
+  const events = db.tables.job_events.slice(eventsBefore);
+  assertEquals(events.map((e) => e.event_type), ["po_email_send_released"]);
+  assertEquals(events[0].user_id, USER.shaun);
+  assertEquals(events[0].detail_json.operator_email, "shaun@ops.test");
+  assertEquals(events[0].detail_json.released_at, stored.updated_at);
+  assertEquals(t.calls.length, 1);
 });
 
 Deno.test("release: the ops key must name the person who checked", async () => {

@@ -1,8 +1,9 @@
 -- Contract: 20261014150000_dispatch_purchase_orders. The held drafts sit where no browser role can
--- reach them; the three functions run only as the service role; numbers start at PO-1000001 and are
+-- reach them; the four functions run only as the service role; numbers start at PO-1000001 and are
 -- unique; one open Dispatch order per job and supplier; create stamps exactly the To order lines it
 -- was given and refuses a line changed elsewhere; update adds and takes off lines and refreshes the
--- draft; cancel releases every line and discards the draft; a send in flight holds the order.
+-- draft; cancel releases every line and discards the draft; a send in flight holds the order; a
+-- not-confirmed send is released only with its audit row.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -36,7 +37,8 @@ BEGIN
    format('service_role (ops-api) must be able to %s public.job_order_emails', p));
  END LOOP;
  FOREACH f IN ARRAY ARRAY['public.dispatch_next_po_number()', 'public.dispatch_commit_order(jsonb)',
-                          'public.dispatch_commit_order_update(jsonb)'] LOOP
+                          'public.dispatch_commit_order_update(jsonb)',
+                          'public.dispatch_release_unknown_send(jsonb)'] LOOP
   PERFORM pg_temp.po_assert(NOT has_function_privilege('anon', f, 'EXECUTE')
    AND NOT has_function_privilege('authenticated', f, 'EXECUTE'),
    format('browser roles must not execute %s', f));
@@ -205,5 +207,54 @@ $q$) IS NOT NULL, 'a draft status outside the five must be refused');
 SELECT pg_temp.po_assert(pg_temp.po_raised($q$
  UPDATE public.job_order_emails SET subject = '' WHERE job_id = '9f000000-0000-4000-8000-000000000001'
 $q$) IS NOT NULL, 'an empty subject must be refused');
+
+-- 12. Releasing a send that was not confirmed: the draft and its audit row commit together or not
+--     at all. With the job_events insert made to fail, the draft stays send_unknown untouched; the
+--     person's retry then releases it under the next attempt with exactly one audit row.
+UPDATE public.job_order_emails e SET status = 'send_unknown', attempt_to_email = 'orders@supplier.example.com'
+  FROM public.purchase_orders o WHERE e.purchase_order_id = o.id AND o.po_number = 'PO-9000003' AND e.status = 'draft';
+CREATE TEMP TABLE po_rel AS
+SELECT jsonb_build_object('draft_id', e.id, 'job_id', e.job_id, 'prior_status', e.status,
+  'prior_updated_at', e.updated_at, 'actor', jsonb_build_object('email', 'shaun@example.com'), 'via', 'terminal') AS p,
+  e.send_attempt AS attempt
+FROM public.job_order_emails e JOIN public.purchase_orders o ON o.id = e.purchase_order_id
+WHERE o.po_number = 'PO-9000003' AND e.status = 'send_unknown';
+SELECT pg_temp.po_assert((SELECT count(*) FROM po_rel) = 1, 'one send_unknown draft to release');
+
+SELECT pg_temp.po_assert(pg_temp.po_raised($q$
+ SELECT public.dispatch_release_unknown_send(p - 'actor') FROM po_rel
+$q$) = 'operator_required', 'a release must name the person who checked');
+SELECT pg_temp.po_assert(pg_temp.po_raised($q$
+ SELECT public.dispatch_release_unknown_send(jsonb_set(p, '{prior_updated_at}', '"2001-01-01T00:00:00Z"')) FROM po_rel
+$q$) = 'draft_changed', 'a release on a stale draft stamp must refuse draft_changed');
+
+CREATE FUNCTION pg_temp.po_refuse_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'audit write refused'; END $$;
+CREATE TRIGGER po_refuse_audit BEFORE INSERT ON public.job_events
+ FOR EACH ROW WHEN (NEW.event_type = 'po_email_send_released') EXECUTE FUNCTION pg_temp.po_refuse_audit();
+SELECT pg_temp.po_assert(pg_temp.po_raised($q$ SELECT public.dispatch_release_unknown_send(p) FROM po_rel $q$)
+ = 'audit write refused', 'the forced audit failure must reach the caller');
+SELECT pg_temp.po_assert((SELECT e.status = 'send_unknown' AND e.send_attempt = r.attempt
+   AND e.attempt_to_email = 'orders@supplier.example.com' AND e.updated_at = (r.p->>'prior_updated_at')::timestamptz
+  FROM public.job_order_emails e JOIN po_rel r ON e.id = (r.p->>'draft_id')::uuid),
+ 'a release whose audit row failed must leave the draft locked exactly as it was');
+SELECT pg_temp.po_assert(NOT EXISTS (SELECT 1 FROM public.job_events WHERE event_type = 'po_email_send_released'),
+ 'a release whose audit row failed must leave no audit row');
+DROP TRIGGER po_refuse_audit ON public.job_events;
+
+SELECT public.dispatch_release_unknown_send(p) FROM po_rel;
+SELECT pg_temp.po_assert((SELECT e.status = 'draft' AND e.send_attempt = r.attempt + 1
+   AND e.attempt_to_email IS NULL AND e.last_error = 'Released as not sent by shaun@example.com'
+  FROM public.job_order_emails e JOIN po_rel r ON e.id = (r.p->>'draft_id')::uuid),
+ 'the retry must release the draft under the next attempt with its fields cleared');
+SELECT pg_temp.po_assert((SELECT count(*) FROM public.job_events ev JOIN po_rel r
+   ON ev.detail_json->>'draft_id' = r.p->>'draft_id'
+  WHERE ev.event_type = 'po_email_send_released' AND ev.detail_json->>'operator_email' = 'shaun@example.com'
+    AND ev.detail_json->>'via' = 'terminal' AND (ev.detail_json->>'prior_attempt')::int = r.attempt
+    AND (ev.detail_json->>'released_at')::timestamptz = (SELECT updated_at FROM public.job_order_emails
+                                                         WHERE id = (r.p->>'draft_id')::uuid)) = 1,
+ 'the release must write exactly one audit row naming who, how and when');
+SELECT pg_temp.po_assert(pg_temp.po_raised($q$ SELECT public.dispatch_release_unknown_send(p) FROM po_rel $q$)
+ = 'draft_not_unknown', 'a released draft cannot be released again');
 
 ROLLBACK;

@@ -68,7 +68,7 @@ with the columns in the build note's section 3.4 plus five:
 open (`draft`, `sending`, `send_unknown`) per order. Row security on, no policy,
 revoked from `anon` and `authenticated`.
 
-**Two transactions**, service role only, each refusing by the message of a
+**Three transactions**, service role only, each refusing by the message of a
 `P0001` (ops-api maps each to a 409 of the same code):
 
 - `dispatch_commit_order(p jsonb)`: inserts the order, stamps each line's
@@ -88,6 +88,13 @@ revoked from `anon` and `authenticated`.
   a `sent` draft counts as sent even when the order's sent stamp did not land,
   refused `order_sent`), releases every line, discards the open draft and
   writes one `job_events` row `po_cancelled`.
+- `dispatch_release_unknown_send(p jsonb)`: locks the draft, refuses
+  `draft_not_unknown` unless it is `sending` or `send_unknown` and
+  `draft_changed` unless its status and `updated_at` are the ones the caller
+  read, then releases it to `draft` and inserts its `po_email_send_released`
+  `job_events` row in the same transaction. If the audit row cannot be written
+  nothing is released: the draft stays locked as it was and the person's retry
+  works. Refuses `operator_required` with no person named.
 
 **Storage**: private bucket `dispatch-order-pdfs` (PDF only, 10 MB), path
 `<job_id>/<po_number>-v<version>.pdf`. Every version is kept. When that path is
@@ -282,7 +289,9 @@ null. The screen echoes the hash it last read.
    `last_error` naming the person. It sends nothing, and nothing releases a
    draft on its own. One `job_events` row `po_email_send_released` records who
    (`user_id`, `operator_email`, `via`) and when (`released_at`), with the draft,
-   the order and the attempt released. The person is resolved as for a send. The
+   the order and the attempt released, written in the same transaction as the
+   release (`dispatch_release_unknown_send`), so a draft is never released
+   without its record. The person is resolved as for a send. The
    draft is then editable, discardable and sendable again, and the order can be
    updated or cancelled.
 

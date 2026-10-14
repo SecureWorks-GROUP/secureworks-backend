@@ -176,7 +176,7 @@ ALTER TABLE public.job_order_emails ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.job_order_emails FROM PUBLIC, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.job_order_emails TO service_role;
 
--- 4. The two transactions ───────────────────────────────────────────────────
+-- 4. The three transactions ───────────────────────────────────────────────────
 
 -- Create: the order, its lines stamped, its draft and one job_events row.
 -- p: { job_id, org_id, supplier_id, supplier_name, po_number, line_items,
@@ -403,6 +403,50 @@ COMMENT ON FUNCTION public.dispatch_commit_order_update(jsonb) IS
   'Dispatch slice 5 update and cancel, one transaction each: guarded on the order''s and every touched line''s updated_at. Raises order_changed, lines_changed, draft_changed or draft_sending.';
 REVOKE ALL ON FUNCTION public.dispatch_commit_order_update(jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.dispatch_commit_order_update(jsonb) TO service_role;
+
+-- Release a send that was not confirmed back to draft, on a person's press, and record who and
+-- when in the same transaction: the draft is never unlocked without its job_events row.
+-- p: { draft_id, job_id, prior_status, prior_updated_at, actor:{user_id,email}, via }
+CREATE OR REPLACE FUNCTION public.dispatch_release_unknown_send(p jsonb) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_user uuid := nullif(p#>>'{actor,user_id}', '')::uuid;
+  v_email text := nullif(p#>>'{actor,email}', '');
+  v_prior public.job_order_emails;
+  v_draft public.job_order_emails;
+  v_order public.purchase_orders;
+  v_now timestamptz := now();
+BEGIN
+  IF v_email IS NULL THEN
+    RAISE EXCEPTION 'operator_required';
+  END IF;
+  SELECT * INTO v_prior FROM public.job_order_emails e
+   WHERE e.id = (p->>'draft_id')::uuid AND e.job_id = (p->>'job_id')::uuid
+   FOR UPDATE;
+  IF NOT FOUND OR v_prior.status NOT IN ('sending', 'send_unknown') THEN
+    RAISE EXCEPTION 'draft_not_unknown';
+  END IF;
+  IF v_prior.status <> p->>'prior_status' OR v_prior.updated_at <> (p->>'prior_updated_at')::timestamptz THEN
+    RAISE EXCEPTION 'draft_changed';
+  END IF;
+  UPDATE public.job_order_emails e
+     SET status = 'draft', attempt_to_email = NULL, attempt_in_reply_to = NULL,
+         send_attempt = v_prior.send_attempt + 1,
+         last_error = left('Released as not sent by ' || v_email, 1000), updated_at = v_now
+   WHERE e.id = v_prior.id
+   RETURNING * INTO v_draft;
+  SELECT * INTO v_order FROM public.purchase_orders o WHERE o.id = v_prior.purchase_order_id;
+  INSERT INTO public.job_events (job_id, user_id, event_type, detail_json)
+  VALUES (v_prior.job_id, v_user, 'po_email_send_released', jsonb_build_object(
+    'po_id', v_prior.purchase_order_id, 'po_number', v_order.po_number, 'draft_id', v_prior.id,
+    'prior_status', v_prior.status, 'prior_attempt', v_prior.send_attempt, 'released_at', v_now,
+    'operator_email', v_email, 'via', p->>'via', 'source', 'dispatch'));
+  RETURN jsonb_build_object('draft', to_jsonb(v_draft));
+END $$;
+COMMENT ON FUNCTION public.dispatch_release_unknown_send(jsonb) IS
+  'Dispatch slice 5: a person releases a sending or send_unknown draft to draft under the next attempt, with its po_email_send_released job_events row, in one transaction. Raises operator_required, draft_not_unknown or draft_changed. Sends nothing.';
+REVOKE ALL ON FUNCTION public.dispatch_release_unknown_send(jsonb) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.dispatch_release_unknown_send(jsonb) TO service_role;
 
 -- 5. The private bucket. Skipped where Supabase storage is absent (contract runner).
 DO $bucket$
