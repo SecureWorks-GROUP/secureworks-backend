@@ -395,7 +395,8 @@ BEGIN
   ('public.context_document_vision_policy()', ARRAY['160abaf805bacd50e6ee570385c67037']),
   ('public.context_document_vision_admission()', ARRAY['f1d33b0f0ee54516941ee313cb7fe756', '6fc6fbe5e932885a6105d462932ee5bb']),
   ('public.context_core_status()', ARRAY['2b6b2c54daeae381cdeff7802d72df81', '07c51159715c91663a1038f01bf6e09c'])) AS t(sig, md5s) LOOP
-  SELECT md5(prosrc) INTO live FROM pg_proc WHERE oid = to_regprocedure(x.sig);
+  -- The later recheck removes only the retired today_pass key.
+  SELECT md5(replace(prosrc, 'to_jsonb(p)-''attribution_done_at''', 'to_jsonb(p)')) INTO live FROM pg_proc WHERE oid = to_regprocedure(x.sig);
   -- The later record-scope body is also accepted for the vision policy.
   PERFORM pg_temp.cb_assert(live = ANY (x.md5s) OR (x.sig = 'public.context_document_vision_policy()' AND live = 'e2fc43a4e4d7189daac5c894423ac5dc'),
    format('%s md5 %s', x.sig, live));
