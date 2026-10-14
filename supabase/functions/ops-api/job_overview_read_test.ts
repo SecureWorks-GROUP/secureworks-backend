@@ -23,6 +23,7 @@ import {
   OVERVIEW_MESSAGE_LIMIT,
   overviewInvoice,
   overviewMessages,
+  overviewStory,
   perthDay,
   perthStamp,
   plainText,
@@ -522,7 +523,8 @@ function fakeClient(opts: {
       if (opts.rpcErrors?.[fn]) {
         return Promise.resolve({ data: null, error: opts.rpcErrors[fn] });
       }
-      const data = opts.rpc?.[fn];
+      const data = opts.rpc?.[fn] ??
+        (fn === "context_job_quote_email_sends" ? [] : undefined);
       return Promise.resolve({
         data: typeof data === "function" ? data(args) : data ?? null,
         error: null,
@@ -667,7 +669,7 @@ Deno.test("GET job_overview: every part, read only, no network, the card passed 
     STORY,
     "the saved story is compared with the card as read, words and all",
   );
-  assertEquals(convo, [{ job_id: JOB, limit: 150 }]);
+  assertEquals(convo, [{ job_id: JOB, limit: 150, held_contact_ids: ["ctT"] }]);
   assertEquals(o.story_text, STORY_TEXT);
   assertEquals(o.job.current_price_inc_gst, 7065.85);
   assertEquals(o.job.job_description, "23m fence, 1800mm, Testvale");
@@ -1260,4 +1262,202 @@ Deno.test("note groups and owners follow the story's rule", () => {
     owner: "us",
     owner_name: null,
   });
+});
+
+Deno.test("B1: held Rowan contact history is requested and stays job-not-certain, including a call twin", async () => {
+  const tables = TABLES();
+  tables.jobs[0].ghl_contact_id = "RowanContact001";
+  const calls: any[] = [];
+  const held = {
+    ...conversation().find((m) => m.source_ref === TRANSCRIPT_ROW),
+    id: "held-call",
+    unplaced: true,
+    candidate_job_count: 2,
+  };
+  const o = await jobOverviewAction(
+    fullClient({ tables }),
+    new URLSearchParams(`jobId=${JOB}`),
+    {
+      ...deps(),
+      getJobConversation: (_c, body) => {
+        calls.push(body);
+        return Promise.resolve({
+          messages: [...conversation(), held, {
+            id: "held-sms",
+            channel: "sms",
+            direction: "outbound",
+            occurred_at: "2026-10-09T02:00:00Z",
+            body: "We will call nearer the start.",
+            unplaced: true,
+            candidate_job_count: 2,
+          }],
+        });
+      },
+    },
+  );
+  assertEquals(calls[0].held_contact_ids, ["RowanContact001"]);
+  const messages = o.messages!;
+  const heldRows = messages.filter((m: any) => m.unplaced);
+  assertEquals(heldRows.length, 2);
+  for (const row of heldRows) {
+    assertEquals(row.job_certain, false);
+    assertEquals(row.certainty, "job_not_certain");
+    assertEquals(row.label, "Held message, job not certain");
+    assertEquals(row.candidate_job_count, 2);
+  }
+  assertEquals(
+    messages.filter((m: any) => m.kind === "call" && !m.unplaced).length,
+    1,
+  );
+  assertEquals(JSON.stringify(messages).includes(TRANSCRIPT_WORDS), false);
+  assertEquals(
+    o.notes?.items.length,
+    LEDGER.items.length,
+    "held history never creates a note",
+  );
+  const card = {
+    held_messages: {
+      certainty: "job_not_certain",
+      count: 2,
+      items: [
+        {
+          id: "held-call",
+          kind: "call.transcript_completed",
+          text: TRANSCRIPT_WORDS,
+          job_certain: false,
+        },
+        {
+          id: "held-sms",
+          kind: "client.sms_out",
+          text: "We will call nearer the start.",
+          job_certain: false,
+        },
+      ],
+    },
+  };
+  const shown = overviewStory(card);
+  assertEquals(shown.held_messages.items[0].text, null);
+  assertEquals(shown.held_messages.items[1], card.held_messages.items[1]);
+  assertEquals(
+    card.held_messages.items[0].text,
+    TRANSCRIPT_WORDS,
+    "source card untouched",
+  );
+  assertEquals(tables.jobs[0].ghl_contact_id, "RowanContact001");
+});
+
+Deno.test("B2: held and unconfirmed future money keeps its explanation without transcript words or changed sums", () => {
+  const card = {
+    loops: [
+      {
+        source: "record",
+        rule: "R8_not_yet_invoiced",
+        status: "not_due",
+        amount: 500,
+        why: TRANSCRIPT_WORDS,
+      },
+      {
+        source: "record",
+        rule: "R8_not_yet_invoiced",
+        status: "not_due",
+        amount: null,
+        why: TRANSCRIPT_WORDS,
+      },
+      {
+        source: "record",
+        rule: "R8_not_yet_invoiced",
+        status: "unconfirmed",
+        amount: null,
+        why: TRANSCRIPT_WORDS,
+      },
+      ...STORY.loops,
+    ],
+    money: {
+      issued: 500,
+      paid: 500,
+      owing: 0,
+      not_yet_invoiced: {
+        amount: 500,
+        held: true,
+        status: "not_due",
+        basis: "held until work is complete, not owed now",
+      },
+    },
+  };
+  const shown = overviewStory(card);
+  assertEquals(
+    shown.loops[0].why,
+    "Held until the work is complete, not owed now.",
+  );
+  assert(shown.loops[1].why.includes("amount is unconfirmed"));
+  assert(shown.loops[2].why.includes("not a payment request"));
+  assertEquals(shown.money, card.money);
+  assertEquals(
+    shown.loops.map((l: any) => l.status),
+    card.loops.map((l) => l.status),
+  );
+  assertEquals(JSON.stringify(shown).includes(TRANSCRIPT_WORDS), false);
+});
+
+Deno.test("B5: a proven emailed quote appears without a send stamp, never borrowing the live price or reviving history", async () => {
+  const tables = TABLES();
+  const doc = tables.job_documents.find((d: any) => d.id === QUOTE_DOC)!;
+  doc.sent_at = null;
+  const proof = {
+    document_id: QUOTE_DOC,
+    job_id: JOB,
+    event_id: SMS_ROW,
+    sent_at: "2026-10-08T05:00:00Z",
+  };
+  const client = fullClient({
+    tables,
+    rpc: {
+      job_quote_values: QUOTE_VALUES.filter((v) => v.document_id !== QUOTE_DOC),
+      context_job_quote_email_sends: [proof],
+    },
+  });
+  const o = await jobOverviewAction(
+    client,
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  const quote = o.files.quotes!.documents.find((d: any) =>
+    d.document_id === QUOTE_DOC
+  )!;
+  assert(quote.current);
+  assertEquals(quote.sent_at, proof.sent_at);
+  assertEquals(quote.send_evidence, {
+    source: "captured_email",
+    event_id: SMS_ROW,
+  });
+  assertEquals(
+    quote.value_inc_gst,
+    null,
+    "no value is invented when the one value reader has none",
+  );
+  assertEquals(
+    o.files.quotes!.documents.find((d: any) => d.document_id === OLD_QUOTE_DOC)!
+      .current,
+    false,
+  );
+  assertEquals(doc.sent_at, null, "read only, never stamp the document");
+  assertEquals(client.writes, []);
+  const failed = await jobOverviewAction(
+    fullClient({
+      rpcErrors: {
+        context_job_quote_email_sends: {
+          code: "57014",
+          message: "unavailable",
+        },
+      },
+    }),
+    new URLSearchParams(`jobId=${JOB}`),
+    deps(),
+  );
+  assertEquals(failed.files.quotes, null);
+  assertEquals(
+    failed.sources.quotes.ok,
+    false,
+    "unreadable send evidence is not no sent quotes",
+  );
 });
