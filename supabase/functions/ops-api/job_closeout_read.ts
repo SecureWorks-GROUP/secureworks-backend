@@ -12,10 +12,10 @@
 //                                          | unconfirmed, with its reason); with no claim,
 //                                          the newest review_request_not_sent row
 //                                          (status not_sent, reason refused or the row's
-//                                          reason); with neither, a get_review card whose
-//                                          paying owners have no linked contact reads
-//                                          not_sent / no_contact (the sender keeps no claim
-//                                          and logs nothing then); otherwise null
+//                                          reason); with neither, null. Only what the
+//                                          sender recorded: a send that kept no claim and
+//                                          logged nothing (no contact, paid too long ago)
+//                                          reads null, never a predicted outcome
 //     get_review_entered_at: string | null, loadGetReviewEntries, the sweep's own rule
 //     archive_due_at: string | null,       entry + CLOSEOUT_ARCHIVE_AFTER_MS while the job
 //                                          is in get_review, else null
@@ -23,7 +23,9 @@
 //   }
 //
 // Every read is batched over the whole job list (chunked .in() filters, one wave), never
-// one query per job. It writes nothing and decides nothing: a card's move, text and
+// one query per job; each table reads its chunks one after another, so a full board holds
+// at most one request per table in flight. A draft is never read: it cannot have been
+// paid, claimed or put in get_review, so it gets the empty block. It writes nothing and decides nothing: a card's move, text and
 // archive are job_closeout.ts's. Any failed read returns null, so a caller shows no tags
 // rather than tags made from a partial read.
 
@@ -33,7 +35,7 @@ import {
   closeoutHold,
   isCloseoutJobType,
 } from "../_shared/job_paid_closeout.ts";
-import { loadGetReviewEntries, reviewRecipients } from "./job_closeout.ts";
+import { loadGetReviewEntries } from "./job_closeout.ts";
 
 export interface CloseoutReview {
   status: string;
@@ -55,16 +57,10 @@ export interface CloseoutReadJob {
   type: string | null;
   status: string | null;
   is_callback?: boolean | null;
-  ghl_contact_id?: string | null;
-  client_name?: string | null;
-  job_number?: string | null;
 }
 
 /** Ids per PostgREST .in() filter. */
 const ID_CHUNK = 50;
-
-const PARTY_COLUMNS =
-  "id, job_id, contact_label, is_primary, share_percentage, removed_at, status, xero_contact_id, client_name, ghl_contact_id";
 
 function chunks<T>(items: T[]): T[][] {
   const out: T[][] = [];
@@ -74,7 +70,8 @@ function chunks<T>(items: T[]): T[][] {
   return out;
 }
 
-/** Rows of `table` for these job ids, one query per chunk; null when any chunk fails. */
+/** Rows of `table` for these job ids, one query per chunk, chunks in turn; null when any
+ *  chunk fails. */
 async function readRows(
   // deno-lint-ignore no-explicit-any
   client: any,
@@ -85,20 +82,19 @@ async function readRows(
   extra?: (q: any) => any,
   // deno-lint-ignore no-explicit-any
 ): Promise<any[] | null> {
-  if (!ids.length) return [];
-  const parts = await Promise.all(
-    chunks(ids).map(async (part) => {
-      let q = client.from(table).select(columns).in(
-        table === "jobs" ? "id" : "job_id",
-        part,
-      );
-      if (extra) q = extra(q);
-      const { data, error } = await q.limit(5000);
-      return error ? null : (data ?? []);
-    }),
-  );
-  if (parts.some((p) => p === null)) return null;
-  return parts.flat();
+  // deno-lint-ignore no-explicit-any
+  const rows: any[] = [];
+  for (const part of chunks(ids)) {
+    let q = client.from(table).select(columns).in(
+      table === "jobs" ? "id" : "job_id",
+      part,
+    );
+    if (extra) q = extra(q);
+    const { data, error } = await q.limit(5000);
+    if (error) return null;
+    rows.push(...(data ?? []));
+  }
+  return rows;
 }
 
 function money(v: unknown): number | null {
@@ -131,19 +127,31 @@ export async function loadCloseoutBlocks(
   client: any,
   jobs: CloseoutReadJob[],
 ): Promise<Map<string, CloseoutBlock> | null> {
-  const closeoutJobs = jobs.filter((j) => isCloseoutJobType(j.type));
   const out = new Map<string, CloseoutBlock>();
+  const closeoutJobs: CloseoutReadJob[] = [];
+  for (const j of jobs) {
+    if (!isCloseoutJobType(j.type)) continue;
+    if (j.status === "draft") {
+      out.set(j.id, {
+        paid_less_than_quoted: false,
+        shortfall_inc: null,
+        review: null,
+        get_review_entered_at: null,
+        archive_due_at: null,
+        held: j.is_callback === true ? "callback" : null,
+      });
+    } else {
+      closeoutJobs.push(j);
+    }
+  }
   if (!closeoutJobs.length) return out;
   const ids = closeoutJobs.map((j) => j.id);
   const missingCallback = closeoutJobs.filter((j) =>
     j.is_callback === undefined
   )
     .map((j) => j.id);
-  const inReview = closeoutJobs.filter((j) =>
-    j.status === CLOSEOUT_REVIEW_STATUS
-  ).map((j) => j.id);
 
-  const [states, claims, notSent, entries, parties, callbacks] = await Promise
+  const [states, claims, notSent, entries, callbacks] = await Promise
     .all([
       readRows(
         client,
@@ -163,10 +171,9 @@ export async function loadCloseoutBlocks(
           }),
       ),
       loadGetReviewEntries(client, ids),
-      readRows(client, "job_contacts", PARTY_COLUMNS, inReview),
       readRows(client, "jobs", "id, is_callback", missingCallback),
     ]);
-  if (!states || !claims || !notSent || !entries || !parties || !callbacks) {
+  if (!states || !claims || !notSent || !entries || !callbacks) {
     return null;
   }
 
@@ -177,12 +184,6 @@ export async function loadCloseoutBlocks(
     if (!notSentBy.has(r.job_id)) {
       notSentBy.set(r.job_id, r.detail_json ?? null);
     }
-  }
-  // deno-lint-ignore no-explicit-any
-  const partiesBy = new Map<string, any[]>();
-  for (const p of parties) {
-    if (!partiesBy.has(p.job_id)) partiesBy.set(p.job_id, []);
-    partiesBy.get(p.job_id)!.push(p);
   }
   const callbackBy = new Map(callbacks.map((r) => [r.id, r.is_callback]));
 
@@ -195,24 +196,6 @@ export async function loadCloseoutBlocks(
       review = { status: claim.status, reason: claim.reason ?? null };
     } else if (notSentBy.has(job.id)) {
       review = reviewFromNotSentEvent(notSentBy.get(job.id) ?? null);
-    } else if (job.status === CLOSEOUT_REVIEW_STATUS) {
-      const recipients = reviewRecipients(
-        {
-          id: job.id,
-          job_number: job.job_number ?? null,
-          type: job.type,
-          status: job.status,
-          is_callback: null,
-          deposit_invoice_id: null,
-          client_name: job.client_name ?? null,
-          client_email: null,
-          ghl_contact_id: job.ghl_contact_id ?? null,
-        },
-        partiesBy.get(job.id) ?? [],
-      );
-      if (!recipients.some((r) => r.ghl_contact_id)) {
-        review = { status: "not_sent", reason: "no_contact" };
-      }
     }
     const entered = entries.get(job.id) ?? null;
     const enteredMs = entered ? new Date(entered).getTime() : NaN;

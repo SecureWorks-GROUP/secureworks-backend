@@ -127,19 +127,20 @@ closeout: {
 - `review` is the job's claim (`claimed`, `sent`, `skipped`, `unconfirmed`, with
   its reason). With no claim it is the newest `review_request_not_sent` row as
   `{ status: 'not_sent', reason }` (`refused`, or the row's reason). With
-  neither, a card in `get_review` whose paying owners have no linked contact
-  reads `{ status: 'not_sent', reason: 'no_contact' }`, because the sender keeps
-  no claim and logs nothing then. Otherwise null (not asked yet, or sender off).
-  A job paid too long ago (`paid_too_long_ago`) also logs nothing and reads null.
+  neither it is null: not asked yet, sender off, or a send the sender kept no
+  claim for and logged nothing about (no linked contact, `paid_too_long_ago`).
+  The block only reports what the sender recorded; it never predicts an outcome.
 - `get_review_entered_at` is the newest `status_changed` row to `get_review`,
   the sweep's own rule (`loadGetReviewEntries`). `archive_due_at` is that plus
   24 hours while the job is in `get_review`, else null. The sweep still decides:
   it archives only a paid, unheld card whose review is done.
 - `held` is the sweep's hold (`closeoutHold`).
 
-Every other job type, and every non-staff caller, gets no `closeout` key. The
-reads are one batched wave over the whole board (chunked `.in()`), never one per
-row. A failed read gives `closeout: null` on every fencing and patio row, and
+Every other job type, and every non-staff caller, gets no `closeout` key. A
+draft fencing or patio row gets the empty block without any read (a draft
+cannot be paid, claimed or in `get_review`). The reads are one batched wave over
+the whole board (chunked `.in()`, each table's chunks read in turn so a full
+board holds at most one request per table in flight), never one per row. A failed read gives `closeout: null` on every fencing and patio row, and
 `pipeline` lists `pipeline.closeout` in `enrichment_errors`. It writes nothing.
 
 ## Switches (all off at deploy) and the turn-on order

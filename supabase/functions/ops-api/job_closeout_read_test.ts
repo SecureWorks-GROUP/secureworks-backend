@@ -134,19 +134,6 @@ function closeoutTables(): Record<string, Row[]> {
         created_at: "2026-10-13T06:00:00.000Z",
       },
     ],
-    job_contacts: [
-      // The only paying party has no GHL contact.
-      {
-        id: "p-1",
-        job_id: NO_CONTACT,
-        contact_label: "A",
-        is_primary: true,
-        share_percentage: null,
-        removed_at: null,
-        status: "active",
-        ghl_contact_id: null,
-      },
-    ],
     jobs: [
       { id: PAID_SHORT, is_callback: false },
       { id: IN_REVIEW, is_callback: false },
@@ -192,11 +179,8 @@ Deno.test("closeout read: the block shape for each case", async () => {
     archive_due_at: "2026-10-14T02:00:00.000Z",
     held: null,
   });
-  // No claim and no event: a get_review card whose owners have no contact.
-  assertEquals(blocks.get(NO_CONTACT)?.review, {
-    status: "not_sent",
-    reason: "no_contact",
-  });
+  // No claim and no event: null, even with no linked contact (nothing was recorded).
+  assertEquals(blocks.get(NO_CONTACT)?.review, null);
   assertEquals(
     blocks.get(NO_CONTACT)?.archive_due_at,
     "2026-10-14T05:00:00.000Z",
@@ -253,7 +237,6 @@ Deno.test("closeout read: one batched query per table, whatever the job count", 
     job_closeout_state: 1,
     job_review_claims: 1,
     job_events: 2, // review_request_not_sent and the get_review entries
-    job_contacts: 1,
     jobs: 1, // is_callback, only because these rows lack it
   });
   for (const c of client.calls) {
@@ -261,6 +244,55 @@ Deno.test("closeout read: one batched query per table, whatever the job count", 
     assert(inFilter, `${c.table} read is not batched`);
     assertEquals((inFilter[2] as string[]).length, 40);
   }
+});
+
+Deno.test("closeout read: a draft gets the empty block and is never read", async () => {
+  const client = fakeClient(closeoutTables());
+  const blocks = await loadCloseoutBlocks(client, [
+    { id: PAID_SHORT, type: "fencing", status: "draft" },
+  ]);
+  assertEquals(blocks?.get(PAID_SHORT), {
+    paid_less_than_quoted: false,
+    shortfall_inc: null,
+    review: null,
+    get_review_entered_at: null,
+    archive_due_at: null,
+    held: null,
+  });
+  assertEquals(client.calls.length, 0);
+});
+
+Deno.test("closeout read: a big board reads each table's chunks one at a time", async () => {
+  const many = Array.from({ length: 120 }, (_, i) => ({
+    id: `00000000-0000-4000-8000-${String(2000 + i).padStart(12, "0")}`,
+    type: "fencing",
+    status: "invoiced",
+    is_callback: false,
+  }));
+  const base = fakeClient(closeoutTables());
+  let inFlight = 0;
+  let peak = 0;
+  const client = {
+    calls: base.calls,
+    from(table: string) {
+      const q = base.from(table);
+      const then = q.then;
+      q.then = (ok: any, bad: any) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        return new Promise((r) => setTimeout(r, 1)).then(() => {
+          inFlight--;
+          return then(ok, bad);
+        });
+      };
+      return q;
+    },
+  };
+  const blocks = await loadCloseoutBlocks(client, many);
+  assertEquals(blocks?.size, 120);
+  // Three chunks of 50 per table, four tables read (no is_callback read): never all at once.
+  assertEquals(client.calls.length, 12);
+  assert(peak <= 4, `peak in-flight ${peak}`);
 });
 
 Deno.test("closeout read: no closeout jobs reads nothing; a failed read is null", async () => {
