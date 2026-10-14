@@ -201,6 +201,9 @@ const SCHEMA: Record<string, string[]> = {
     "line_count",
     "order_lines",
     "to_email_sent",
+    "attempt_to_email",
+    "attempt_in_reply_to",
+    "send_attempt",
     "last_error",
     "communication_id",
     "resend_id",
@@ -2056,6 +2059,111 @@ Deno.test("send: a 5xx or a network failure is not confirmed, called once; a per
     JSON.stringify(t.calls[2].payload),
   );
   assertEquals(db.tables.po_communications.length, 1);
+});
+
+Deno.test("send: a retry after an unknown result is the same request even if a reply landed and the contact changed in between", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  const t = transport();
+  await call(db, "dispatch_order_send", {
+    draft_id: draft.id,
+    expected_draft_hash: draft.draft_hash,
+  }, ctx(db, t));
+  const order = orderRow(db, "PO-1000001");
+  db.tables.po_communications.push({
+    id: uuid("f1", 1),
+    po_id: order.id,
+    job_id: JOB.fence,
+    direction: "inbound",
+    communication_type: "purchase_order",
+    from_email: "orders@steel-supplies.test",
+    subject: "Re: PO",
+    body_text: "Got it",
+    message_id: "<reply-1@steel-supplies.test>",
+    received_at: db.tick(),
+    created_at: db.tick(),
+  });
+  const updated = await call(db, "dispatch_order_update", {
+    job_id: JOB.fence,
+    purchase_order_id: order.id,
+    expected_order_updated_at: order.updated_at,
+    lines: [],
+    remove_line_ids: [line(2)],
+  });
+  t.answers.push({ status: 503, body: null }, {
+    status: 200,
+    body: { id: "resend-retry" },
+  });
+  await refused(
+    call(db, "dispatch_order_send", {
+      draft_id: updated.draft.id,
+      expected_draft_hash: updated.draft.draft_hash,
+    }, ctx(db, t)),
+    502,
+    "send_unknown",
+  );
+  // In between: the supplier writes again, and the contact's address changes.
+  db.tables.po_communications.push({
+    id: uuid("f1", 2),
+    po_id: order.id,
+    job_id: JOB.fence,
+    direction: "inbound",
+    communication_type: "purchase_order",
+    from_email: "orders@steel-supplies.test",
+    subject: "Re: PO",
+    body_text: "Any news?",
+    message_id: "<reply-2@steel-supplies.test>",
+    received_at: db.tick(),
+    created_at: db.tick(),
+  });
+  db.tables.suppliers.find((s) => s.id === SUP.steel)!.email =
+    "new@steel-supplies.test";
+  const read = await get(db, "dispatch_order_emails", { job_id: JOB.fence });
+  assertEquals(read.drafts[0].to.email, "orders@steel-supplies.test");
+  await call(db, "dispatch_order_send", {
+    draft_id: updated.draft.id,
+    expected_draft_hash: read.drafts[0].draft_hash,
+  }, ctx(db, t));
+  const [first, retry] = t.calls.slice(1);
+  assertEquals(retry.idempotencyKey, first.idempotencyKey);
+  assertEquals(JSON.stringify(retry.payload), JSON.stringify(first.payload));
+  assertEquals(
+    retry.payload.headers["In-Reply-To"],
+    "<reply-1@steel-supplies.test>",
+  );
+  assertEquals(retry.payload.to, ["orders@steel-supplies.test"]);
+});
+
+Deno.test("send: after a refusal (nothing went) a corrected send goes under a new key", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  const t = transport([{ status: 422, body: { message: "Invalid subject" } }, {
+    status: 200,
+    body: { id: "resend-2" },
+  }]);
+  await refused(
+    call(db, "dispatch_order_send", {
+      draft_id: draft.id,
+      expected_draft_hash: draft.draft_hash,
+    }, ctx(db, t)),
+    502,
+    "send_refused",
+  );
+  const stored = db.tables.job_order_emails[0];
+  const saved = await call(db, "dispatch_order_draft_save", {
+    draft_id: draft.id,
+    subject: "PO-1000001 for SWF-900001",
+    expected_updated_at: stored.updated_at,
+  }, ctx(db, t));
+  await call(db, "dispatch_order_send", {
+    draft_id: draft.id,
+    expected_draft_hash: saved.draft.draft_hash,
+  }, ctx(db, t));
+  assertEquals(t.calls.map((c) => c.idempotencyKey), [
+    `dispatch-draft-${draft.id}`,
+    `dispatch-draft-${draft.id}-a2`,
+  ]);
+  assertEquals(db.tables.job_order_emails[0].status, "sent");
 });
 
 Deno.test("send: a claim left with no answer for two minutes reads as not confirmed and can be retried", async () => {

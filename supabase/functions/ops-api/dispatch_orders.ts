@@ -649,7 +649,13 @@ export async function projectDispatchDraft(input: {
   currentGeneratedSha: string | null;
 }) {
   const { draft, order, supplier } = input;
-  const address = dispatchAddressCheck(supplier?.email);
+  // A send already attempted (sending or not confirmed) shows, and is retried
+  // to, the address that attempt carried, never a newer one from the contact.
+  const attempted = draft.status !== "draft" &&
+      typeof draft.attempt_to_email === "string" && draft.attempt_to_email
+    ? draft.attempt_to_email
+    : null;
+  const address = dispatchAddressCheck(attempted ?? supplier?.email);
   const bodySha = await sha256Hex(String(draft.body_text ?? ""));
   const edited = bodySha !== draft.body_generated_sha;
   return {

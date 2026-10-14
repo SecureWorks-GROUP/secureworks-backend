@@ -54,12 +54,15 @@ index on `purchase_order_id` (this slice is its first writer). A Dispatch order 
 reused, even when its create fails.
 
 **`job_order_emails`**: one row per held email until it is sent or discarded,
-with the columns in the build note's section 3.4 plus two:
+with the columns in the build note's section 3.4 plus five:
 
 - `order_lines` (jsonb): the order lines this draft's PDF holds, so an update
   email can say which lines were added or taken off since the last one sent;
 - `sent_via`: `screen` (a signed-in person pressed Send) or `terminal` (the ops
-  key, naming the person in `operator_email`).
+  key, naming the person in `operator_email`);
+- `attempt_to_email`, `attempt_in_reply_to`: the address and threading header
+  the current send attempt carries, fixed when it is first claimed (section 5);
+- `send_attempt` (default 1): raised only after Resend refused an attempt.
 
 `status`: `draft`, `sending`, `sent`, `send_unknown`, `discarded`. At most one
 open (`draft`, `sending`, `send_unknown`) per order. Row security on, no policy,
@@ -241,9 +244,14 @@ null. The screen echoes the hash it last read.
    `orders+<po_number>-<job_number>@secureworksgroup.app`, the subject, HTML
    (the reference banner, the message as paragraphs, the signature with the
    order and job) and the plain text, `<po_number>.pdf` attached,
-   `Idempotency-Key: dispatch-draft-<draft_id>`. No CC, no BCC. On an update,
-   `In-Reply-To` and `References` carry the supplier's newest reply's
-   Message-ID when one is on record (section 6, item 2).
+   `Idempotency-Key: dispatch-draft-<draft_id>` (`-a<n>` added from the second
+   attempt). No CC, no BCC. On an update, `In-Reply-To` and `References` carry
+   the supplier's newest reply's Message-ID when one is on record (section 6,
+   item 2). A first attempt fixes its address and that header on the claim
+   (`attempt_to_email`, `attempt_in_reply_to`); a retry after an unknown result
+   reuses exactly those, and the read shows that draft's `to` as the attempted
+   address, so a reply landing or the contact changing in between cannot change
+   the request under the same key.
 5. 2xx: a `po_communications` row (outbound, `purchase_order`, the order and
    job, `message_id` the Resend id, `thread_id` the order's existing thread or
    that id, `attachments_json` naming the bucket, path and sha256); an
@@ -254,7 +262,8 @@ null. The screen echoes the hash it last read.
    `sent` if it was `draft`. Each write reads its error; if one fails the email
    still went: the answer is `success: true, filed: false`.
 6. Any other 4xx except 409: refused, nothing went. Draft back to `draft` with
-   `last_error`; 502 `send_refused` with the reason.
+   `last_error`, its attempt fields cleared and `send_attempt` raised, so the
+   corrected send goes under a new key; 502 `send_refused` with the reason.
 7. 5xx, 409, a timeout (20 seconds) or a network failure: it may have gone.
    Draft to `send_unknown`; 502 `send_unknown`. Never sent again on its own. A
    person's retry repeats the same call with the same key and the same payload.
@@ -265,9 +274,15 @@ of 1 to 256 characters is kept 24 hours; a repeat with the same key and payload
 answers the first answer and sends nothing; the same key with a different payload
 is 409 `invalid_idempotent_request`; a repeat while the first is running is 409
 `concurrent_idempotent_requests`. Both 409s are therefore "not confirmed", never
-"refused". The payload is built only from the stored draft, so a retry is the
-same request. After 24 hours a retry would send again: the claim and the
-person's check of the thread are the guard then.
+"refused". A retry's payload is built only from the stored draft and the
+fixed attempt fields (subject and message cannot change outside `draft`, the
+PDF is checked by its sha256), so a retry is the same request.
+
+**Limit, stated plainly: this is not exactly-once for ever.** Resend keeps a
+key 24 hours. A person who presses "Try the send again" more than 24 hours after
+an unknown result may send a second copy if the first did go. The claim stops
+two presses at once and nothing ever retries on its own; past 24 hours the guard
+is the person checking the thread (and the supplier's mailbox) before pressing.
 
 **`dispatch_order_reply`**: the same rules and writes with these differences.
 The recipient is the sender of the newest inbound message on the thread, which

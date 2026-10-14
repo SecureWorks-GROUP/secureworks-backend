@@ -132,6 +132,14 @@ CREATE TABLE IF NOT EXISTS public.job_order_emails (
   -- lines were added or taken off since the last one sent.
   order_lines jsonb NOT NULL DEFAULT '[]'::jsonb,
   to_email_sent text NULL,
+  -- What the current send attempt carries, fixed when it is first claimed, so a
+  -- person's retry after an unknown result is the same request under the same
+  -- idempotency key even if the contact or the thread moved since.
+  attempt_to_email text NULL,
+  attempt_in_reply_to text NULL,
+  -- Raised only after Resend refused an attempt (nothing went), so a corrected
+  -- send gets a new idempotency key instead of clashing with the refused one.
+  send_attempt integer NOT NULL DEFAULT 1,
   last_error text NULL,
   communication_id uuid NULL REFERENCES public.po_communications(id),
   resend_id text NULL,

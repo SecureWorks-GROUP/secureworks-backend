@@ -226,8 +226,15 @@ export function dispatchBytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-export function dispatchDraftIdempotencyKey(draftId: string): string {
-  return `dispatch-draft-${draftId}`;
+// One key per send attempt of a draft. A retry after an unknown result keeps
+// the attempt (and so the key); only a refusal, where nothing went, moves on.
+export function dispatchDraftIdempotencyKey(
+  draftId: string,
+  attempt = 1,
+): string {
+  return attempt > 1
+    ? `dispatch-draft-${draftId}-a${attempt}`
+    : `dispatch-draft-${draftId}`;
 }
 
 export function dispatchReplyIdempotencyKey(

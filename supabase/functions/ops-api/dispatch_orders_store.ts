@@ -115,7 +115,7 @@ const JOB_SELECT = "id, org_id, job_number, type, site_address, site_suburb, " +
 const ORDER_SELECT =
   "id, org_id, job_id, po_number, supplier_name, supplier_id, source, status, line_items, reference, xero_po_id, created_at, updated_at, pdf_path, pdf_sha256, pdf_version, last_sent_pdf_version, last_sent_at";
 const DRAFT_SELECT =
-  "id, org_id, job_id, purchase_order_id, supplier_id, kind, status, subject, body_text, body_generated_sha, pdf_version, pdf_path, pdf_sha256, line_count, order_lines, to_email_sent, last_error, communication_id, resend_id, sent_at, sent_by_email, sent_via, created_at, updated_at";
+  "id, org_id, job_id, purchase_order_id, supplier_id, kind, status, subject, body_text, body_generated_sha, pdf_version, pdf_path, pdf_sha256, line_count, order_lines, to_email_sent, attempt_to_email, attempt_in_reply_to, send_attempt, last_error, communication_id, resend_id, sent_at, sent_by_email, sent_via, created_at, updated_at";
 const CONTACT_SELECT = "id, org_id, name, email";
 export const DISPATCH_COMMUNICATION_SELECT =
   "id, po_id, job_id, direction, from_email, to_email, subject, body_text, body_html, attachments_json, sent_at, received_at, created_at, communication_type, message_id, thread_id, delivery_status";
@@ -1483,12 +1483,30 @@ export async function sendDispatchOrderDraft(
   const sender = await resolveSender(client, body, ctx);
   const to = projected.to.email as string;
 
+  // What this attempt carries. A first attempt fixes its address and threading
+  // header on the claim; a retry after an unknown result reuses exactly those,
+  // so the same idempotency key always goes with the same request (a reply
+  // that landed in between, or a contact changed, cannot alter it).
+  const thread = await readOrderThread(client, order.id);
+  const firstAttempt = draft.status === "draft";
+  const attemptInReplyTo = firstAttempt
+    ? (draft.kind === "update" ? thread.inReplyTo : null)
+    : (draft.attempt_in_reply_to ?? null);
+  const attempt = Number(draft.send_attempt) || 1;
+
   // The claim: only one press, tab or terminal gets past this line.
   const claimedAt = nowIso(ctx);
   const { data: claimed, error: claimError } = await client.from(
     "job_order_emails",
   )
-    .update({ status: "sending", updated_at: claimedAt, last_error: null })
+    .update({
+      status: "sending",
+      updated_at: claimedAt,
+      last_error: null,
+      ...(firstAttempt
+        ? { attempt_to_email: to, attempt_in_reply_to: attemptInReplyTo }
+        : {}),
+    })
     .eq("id", draft.id)
     .eq("status", draft.status)
     .eq("updated_at", draft.updated_at)
@@ -1498,12 +1516,26 @@ export async function sendDispatchOrderDraft(
     refuse(409, "draft_not_sendable", "This draft is already being sent");
   }
   const priorStatus = draft.status === "draft" ? "draft" : "send_unknown";
-  const release = async (status: string, lastError: string) => {
+  // Back to `draft` means this attempt is over and nothing went: its fixed
+  // address and header are cleared, and after a refusal (`nextAttempt`) the
+  // next press gets a new key.
+  const release = async (
+    status: string,
+    lastError: string,
+    nextAttempt = false,
+  ) => {
     const { error } = await client.from("job_order_emails")
       .update({
         status,
         last_error: lastError.slice(0, 1000),
         updated_at: nowIso(ctx),
+        ...(status === "draft"
+          ? {
+            attempt_to_email: null,
+            attempt_in_reply_to: null,
+            ...(nextAttempt ? { send_attempt: attempt + 1 } : {}),
+          }
+          : {}),
       })
       .eq("id", draft.id)
       .eq("status", "sending");
@@ -1544,7 +1576,6 @@ export async function sendDispatchOrderDraft(
     );
   }
 
-  const thread = await readOrderThread(client, order.id);
   const fileName = dispatchPdfFileName(order.po_number);
   const payload = buildDispatchEmail({
     to,
@@ -1553,15 +1584,15 @@ export async function sendDispatchOrderDraft(
     poNumber: order.po_number,
     jobNumber: job.job_number,
     pdf: { fileName, base64: dispatchBytesToBase64(bytes) },
-    inReplyTo: draft.kind === "update" ? thread.inReplyTo : null,
+    inReplyTo: attemptInReplyTo,
   });
   const outcome = await runDispatchSend(ctx.transport, {
     payload,
-    idempotencyKey: dispatchDraftIdempotencyKey(draft.id),
+    idempotencyKey: dispatchDraftIdempotencyKey(draft.id, attempt),
   });
 
   if (outcome.kind === "refused") {
-    await release("draft", outcome.reason);
+    await release("draft", outcome.reason, true);
     refuse(502, "send_refused", `Not sent: ${outcome.reason}`, {
       reason: outcome.reason,
     });

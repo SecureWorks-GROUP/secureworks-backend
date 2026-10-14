@@ -767,6 +767,8 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constra
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|table|job_order_emails
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.order_lines
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.sent_via
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.attempt_to_email
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.send_attempt
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.supplier_id
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.source
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.created_by_email
