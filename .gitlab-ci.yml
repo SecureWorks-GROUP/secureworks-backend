@@ -49,9 +49,9 @@ deno-check:
     - bash scripts/test/test-edge-schema-preflight.sh
     - bash scripts/test/test-apply-pending-migrations.sh
     - deno test --allow-read supabase/functions/ops-api/visit_outcomes_test.ts
-    # Ported from GitHub pr-check (30 Sep to 1 Oct): debt desk, committed-key
-    # guard, money messages off, service credential verification.
-    - deno test --allow-read --allow-env supabase/functions/ops-api/debt_book_rules_test.ts supabase/functions/ops-api/debt_book_test.ts supabase/functions/ops-api/debt_chase_schedule_test.ts supabase/functions/ops-api/debt_morning_list_test.ts supabase/functions/ops-api/debt_draft_templates_test.ts supabase/functions/ops-api/debt_desk_actions_test.ts
+    # Ported from GitHub pr-check: Debt Workshop (8 Oct; replaced the 30 Sep debt
+    # desk), committed-key guard, money messages off, service credential verification.
+    - deno test --allow-read --allow-env supabase/functions/ops-api/debt_ws_rules_test.ts supabase/functions/ops-api/debt_ws_store_test.ts supabase/functions/ops-api/debt_ws_actions_test.ts
     - bash scripts/test/test-check-no-committed-service-keys.sh
     - bash scripts/check-no-committed-service-keys.sh
     - deno test --no-check --allow-read --allow-env supabase/functions/ops-api/debt_autotexts_off_test.ts supabase/functions/daily-digest/deposit_autotexts_off_test.ts
