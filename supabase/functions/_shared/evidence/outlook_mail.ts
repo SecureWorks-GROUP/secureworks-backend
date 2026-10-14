@@ -87,6 +87,9 @@ export interface OutlookMailItem {
   sentAt?: string | null;
   /** The new words: uniqueBody text, or a group post's body. */
   bodyText?: string | null;
+  /** Complete mailbox body, used only for explicitly forwarded correspondence. */
+  fullBodyText?: string | null;
+  fullBodyIsHtml?: boolean | null;
   /** True when bodyText is HTML (a group post without a text preference). */
   bodyIsHtml?: boolean | null;
   /** Header names lower case. Only a few are read (auto-submitted, list mail, tool marker). */
@@ -457,6 +460,16 @@ export function buildOutlookMailRow(
   const tag = toTag(recipients);
   const head = `Subject: ${subject || "(no subject)"}` +
     (tag ? `\nTo-tag: ${tag}` : "");
+  // uniqueBody can be empty for a forwarded council response: the supplied
+  // correspondence is the payload, not redundant reply history. Keep it labelled
+  // as quoted correspondence, never promote its sender or references to this mail's.
+  let forwarded = source.kind === "user" ? String(item.fullBodyText ?? "") : "";
+  if (item.fullBodyIsHtml) forwarded = htmlToText(forwarded);
+  forwarded = tidyText(forwarded);
+  const isForward = /^(?:fw|fwd):/i.test(subject) ||
+    /(?:begin forwarded message:|[- ]+forwarded message[- ]+)/i.test(forwarded);
+  const hasForwardedBody = isForward && forwarded.length > words.length &&
+    forwarded !== words;
   const full = words ? `${head}\n\n${words}` : head;
   const refs = ourReferences(`${subject}\n${tag ?? ""}\n${words}`);
   const builderRefs = ctx.builderRefPrefixes
@@ -561,6 +574,13 @@ export function buildOutlookMailRow(
     references: refs,
     event_at_source: eventAt ? "provider" : "missing",
   };
+  // Evidence-only field: the placement ladder keeps reading body/uniqueBody.
+  // context_story_message_text appends this separately labelled source content.
+  if (hasForwardedBody) {
+    payload.forwarded_correspondence = clip(forwarded, BODY_MAX_CHARS);
+    payload.forwarded_correspondence_truncated =
+      forwarded.length > BODY_MAX_CHARS;
+  }
   if (tag) payload.to_tag = tag;
   if (builderRefs.length) payload.builder_refs = builderRefs;
   if (audienceBasis) payload.audience_basis = audienceBasis;

@@ -3377,6 +3377,11 @@ BEGIN;
 -- as the story settled notes' refuses while a later story read is live)
 SELECT to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)') IS NOT NULL AS held_messages_live \gset
 \if :held_messages_live
+-- The later story-card read changes are reversed only inside this contract's transaction.
+SELECT to_regprocedure('public.context_job_story_payment_terms(jsonb)') IS NOT NULL AS story_card_causes_live \gset
+\if :story_card_causes_live
+\ir ../../../rollbacks/20261014120000_context_story_card_causes_down.sql
+\endif
 \ir ../../../rollbacks/20261012100000_context_held_messages_down.sql
 \endif
 -- (the story settled notes, 20261011120000, replaced the assembler and the story read since: its down

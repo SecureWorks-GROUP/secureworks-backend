@@ -54,6 +54,11 @@ BEGIN
 END $shape$;
 
 BEGIN;
+-- The later story-card read changes are reversed only inside this contract's transaction.
+SELECT to_regprocedure('public.context_job_story_payment_terms(jsonb)') IS NOT NULL AS story_card_causes_live \gset
+\if :story_card_causes_live
+\ir ../../../rollbacks/20261014120000_context_story_card_causes_down.sql
+\endif
 SET LOCAL session_replication_role = replica;
 CREATE FUNCTION pg_temp.hm_assert(p_ok boolean, p_msg text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN IF p_ok IS NOT TRUE THEN RAISE EXCEPTION 'held messages contract: %', p_msg; END IF; END $$;
@@ -313,6 +318,11 @@ ROLLBACK;
 
 -- 6. Re-applying the migration changes nothing (its guard accepts its own bodies).
 BEGIN;
+-- The later story-card read changes are reversed only inside this contract's transaction.
+SELECT to_regprocedure('public.context_job_story_payment_terms(jsonb)') IS NOT NULL AS story_card_causes_live \gset
+\if :story_card_causes_live
+\ir ../../../rollbacks/20261014120000_context_story_card_causes_down.sql
+\endif
 CREATE TEMP TABLE held_messages_md5 AS
  SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS m, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p
  WHERE p.oid IN (to_regprocedure('public.context_ledger_held_rows(uuid[],timestamptz)'), to_regprocedure('public.context_job_story_held(uuid,timestamptz)'),
