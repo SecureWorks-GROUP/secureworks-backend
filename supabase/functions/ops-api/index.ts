@@ -287,6 +287,7 @@ import {
   isPersonWrittenJobNote,
   JOB_NOTE_EVENT_TYPES,
   projectDispatchJobNote,
+  projectJobDetailDocument,
   stripDispatchListAliases,
 } from './dispatch_job_list.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
@@ -16747,7 +16748,7 @@ async function jobDetail(
       authority: 'typed_job_metadata',
     }),
     assignments: assignRes.data || [],
-    documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, thumbnail_url: d.thumbnail_url, label: d.label, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, accepted_at: d.accepted_at, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number })),
+    documents: (docsRes.data || []).map(projectJobDetailDocument),
     events: eventsRes.data || [],
     media: mediaRes.data || [],
     purchase_orders: posLite,
