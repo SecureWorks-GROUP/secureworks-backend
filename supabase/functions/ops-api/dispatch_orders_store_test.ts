@@ -2199,6 +2199,102 @@ Deno.test("send: a refusal on a retry after an unknown result keeps the draft no
   assertEquals(db.tables.job_order_emails[0].status, "sent");
 });
 
+Deno.test("release: a person releases a not-confirmed send to draft under a new key, recorded, with nothing sent", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  const t = transport([{ status: 503, body: null }, {
+    status: 200,
+    body: { id: "resend-4" },
+  }]);
+  await refused(
+    call(db, "dispatch_order_release_unknown", {
+      draft_id: draft.id,
+      expected_updated_at: db.tables.job_order_emails[0].updated_at,
+    }, ctx(db, t)),
+    409,
+    "draft_not_unknown",
+  );
+  await refused(
+    call(db, "dispatch_order_send", {
+      draft_id: draft.id,
+      expected_draft_hash: draft.draft_hash,
+    }, ctx(db, t)),
+    502,
+    "send_unknown",
+  );
+  const unknown = db.tables.job_order_emails[0];
+  await refused(
+    call(db, "dispatch_order_release_unknown", {
+      draft_id: draft.id,
+      expected_updated_at: "2026-10-14T01:00:00.000000+00:00",
+    }, ctx(db, t)),
+    409,
+    "draft_changed",
+  );
+  const eventsBefore = db.tables.job_events.length;
+  const answer = await call(db, "dispatch_order_release_unknown", {
+    draft_id: draft.id,
+    expected_updated_at: unknown.updated_at,
+  }, ctx(db, t));
+  assertEquals(answer.success, true);
+  assertEquals(t.calls.length, 1);
+  const stored = db.tables.job_order_emails[0];
+  assertEquals(stored.status, "draft");
+  assertEquals(stored.send_attempt, 2);
+  assertEquals(stored.attempt_to_email, null);
+  assertEquals(stored.attempt_in_reply_to, null);
+  const events = db.tables.job_events.slice(eventsBefore);
+  assertEquals(events.length, 1);
+  assertEquals(events[0].event_type, "po_email_send_released");
+  assertEquals(events[0].user_id, USER.shaun);
+  assertEquals(events[0].detail_json.operator_email, "shaun@ops.test");
+  assertEquals(events[0].detail_json.draft_id, draft.id);
+  assertEquals(events[0].detail_json.prior_status, "send_unknown");
+  assertEquals(events[0].detail_json.prior_attempt, 1);
+  assertEquals(events[0].detail_json.released_at, stored.updated_at);
+  await refused(
+    call(db, "dispatch_order_release_unknown", {
+      draft_id: draft.id,
+      expected_updated_at: stored.updated_at,
+    }, ctx(db, t)),
+    409,
+    "draft_not_unknown",
+  );
+  const read = await get(db, "dispatch_order_emails", { job_id: JOB.fence });
+  await call(db, "dispatch_order_send", {
+    draft_id: draft.id,
+    expected_draft_hash: read.drafts[0].draft_hash,
+  }, ctx(db, t));
+  assertEquals(t.calls.map((c) => c.idempotencyKey), [
+    `dispatch-draft-${draft.id}`,
+    `dispatch-draft-${draft.id}-a2`,
+  ]);
+  assertEquals(db.tables.job_order_emails[0].status, "sent");
+});
+
+Deno.test("release: the ops key must name the person who checked", async () => {
+  const db = withLines();
+  const draft = await readyDraft(db);
+  db.tables.job_order_emails[0].status = "send_unknown";
+  await refused(
+    call(
+      db,
+      "dispatch_order_release_unknown",
+      {
+        draft_id: draft.id,
+        expected_updated_at: db.tables.job_order_emails[0].updated_at,
+      },
+      ctx(db, transport(), {
+        via: "terminal",
+        actor: { userId: null, email: null, orgId: null },
+      }),
+    ),
+    400,
+    "operator_required",
+  );
+  assertEquals(db.tables.job_order_emails[0].status, "send_unknown");
+});
+
 Deno.test("send: a claim left with no answer for two minutes reads as not confirmed and can be retried", async () => {
   const db = withLines();
   const draft = await readyDraft(db);
@@ -2867,8 +2963,8 @@ Deno.test("session: create, save, update, send, reply, link and the reads touch 
 
 // ── Who may call ────────────────────────────────────────────────────────────
 
-Deno.test("gate: the ten actions are staff only and on no allow-list", () => {
-  assertEquals(DISPATCH_ORDERS_ACTIONS.length, 10);
+Deno.test("gate: the eleven actions are staff only and on no allow-list", () => {
+  assertEquals(DISPATCH_ORDERS_ACTIONS.length, 11);
   assertEquals([...DISPATCH_ORDERS_SENDING_ACTIONS], [
     "dispatch_order_send",
     "dispatch_order_reply",
@@ -2932,7 +3028,7 @@ async function withEnvAndFetchSpy<T>(
   }
 }
 
-Deno.test("gate: the routine key is refused on all ten before any call; a write by GET is 405", async () => {
+Deno.test("gate: the routine key is refused on all eleven before any call; a write by GET is 405", async () => {
   await withEnvAndFetchSpy(async (calls) => {
     for (const action of DISPATCH_ORDERS_ACTIONS) {
       const isRead = action === "dispatch_order_emails" ||

@@ -93,6 +93,7 @@ export const DISPATCH_ORDERS_WRITE_ACTIONS = [
   "dispatch_order_cancel",
   "dispatch_order_draft_save",
   "dispatch_order_discard",
+  "dispatch_order_release_unknown",
   "dispatch_order_send",
   "dispatch_order_reply",
   "dispatch_email_link_po",
@@ -1282,6 +1283,78 @@ export async function discardDispatchOrderDraft(
   };
 }
 
+export async function releaseUnknownDispatchSend(
+  client: any,
+  body: any,
+  ctx: DispatchOrdersContext,
+) {
+  const expected = requireStamp(
+    body?.expected_updated_at,
+    "expected_updated_at",
+  );
+  const { draft, job, order } = await draftWithJob(client, body?.draft_id, ctx);
+  if (draft.status !== "send_unknown" && !isStaleSending(draft, nowMs(ctx))) {
+    refuse(
+      409,
+      "draft_not_unknown",
+      "Only a send that was not confirmed can be released",
+    );
+  }
+  if (!sameInstant(expected, draft.updated_at)) {
+    draftChanged(await draftAnswer(client, draft, order, job, ctx));
+  }
+  const person = await resolveSender(client, body, ctx);
+  const now = nowIso(ctx);
+  const attempt = Number(draft.send_attempt) || 1;
+  const { data, error } = await client.from("job_order_emails")
+    .update({
+      status: "draft",
+      attempt_to_email: null,
+      attempt_in_reply_to: null,
+      send_attempt: attempt + 1,
+      last_error: `Released as not sent by ${person.email}`.slice(0, 1000),
+      updated_at: now,
+    })
+    .eq("id", draft.id)
+    .eq("status", draft.status)
+    .eq("updated_at", draft.updated_at)
+    .select(DRAFT_SELECT);
+  if (error) writeFailed("draft release", error);
+  const released = Array.isArray(data) ? data[0] : data;
+  if (!released) {
+    draftChanged(
+      await draftAnswer(
+        client,
+        await readDraft(client, draft.id, ctx),
+        order,
+        job,
+        ctx,
+      ),
+    );
+  }
+  const { error: eventError } = await client.from("job_events").insert({
+    job_id: job.id,
+    user_id: person.userId,
+    event_type: "po_email_send_released",
+    detail_json: {
+      po_id: order.id,
+      po_number: order.po_number,
+      draft_id: draft.id,
+      prior_status: draft.status,
+      prior_attempt: attempt,
+      released_at: now,
+      operator_email: person.email,
+      via: ctx.via,
+      source: "dispatch",
+    },
+  });
+  if (eventError) writeFailed("release event", eventError);
+  return {
+    success: true,
+    draft: await draftAnswer(client, released, order, job, ctx),
+  };
+}
+
 // ── Send ────────────────────────────────────────────────────────────────────
 
 async function downloadPdf(
@@ -1913,6 +1986,8 @@ export async function runDispatchOrdersAction(
       return await saveDispatchOrderDraft(client, body, ctx);
     case "dispatch_order_discard":
       return await discardDispatchOrderDraft(client, body, ctx);
+    case "dispatch_order_release_unknown":
+      return await releaseUnknownDispatchSend(client, body, ctx);
     case "dispatch_order_send":
       return await sendDispatchOrderDraft(client, body, ctx);
     case "dispatch_order_reply":

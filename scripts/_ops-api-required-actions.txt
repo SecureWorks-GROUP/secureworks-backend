@@ -144,6 +144,7 @@ dispatch_order_update                # probe=source-only
 dispatch_order_cancel                # probe=source-only
 dispatch_order_draft_save            # probe=source-only
 dispatch_order_discard               # probe=source-only
+dispatch_order_release_unknown       # probe=source-only
 dispatch_order_send                  # probe=source-only
 dispatch_order_reply                 # probe=source-only
 dispatch_email_link_po               # probe=source-only

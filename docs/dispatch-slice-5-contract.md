@@ -195,6 +195,7 @@ shape) and `counts` (by slice 4's one rule, or null when that read fails).
 | `dispatch_order_cancel` | `{ job_id, purchase_order_id, expected_order_updated_at }` | 404; 409 `not_dispatch_order`, `order_cancelled`, `order_sent`, `order_in_xero`, `order_changed`, `draft_sending` |
 | `dispatch_order_draft_save` | `{ draft_id, subject?, body_text?, expected_updated_at }` | 400 lengths (subject 1 to 300 after trim, message 1 to 20,000 and not blank); 409 `draft_not_editable`, `draft_changed` (with the stored draft) |
 | `dispatch_order_discard` | `{ draft_id, expected_updated_at }` | 409 `draft_not_editable`, `draft_changed` |
+| `dispatch_order_release_unknown` | `{ draft_id, expected_updated_at, operator_email? }` | 409 `draft_not_unknown`, `draft_changed`; 400 `operator_required` |
 | `dispatch_order_send` | `{ draft_id, expected_draft_hash, operator_email? }` | section 5 |
 | `dispatch_order_reply` | `{ job_id, thread_key, reply_to_message_id, body_text, operator_email? }` | section 5 |
 | `dispatch_email_link_po` | `{ job_id, thread_key, purchase_order_id }` | 404 `thread_not_found`; 409 `thread_not_supplier`, `thread_has_order`, `order_not_on_job` |
@@ -272,6 +273,17 @@ null. The screen echoes the hash it last read.
 7. 5xx, 409, a timeout (20 seconds) or a network failure: it may have gone.
    Draft to `send_unknown`; 502 `send_unknown`. Never sent again on its own. A
    person's retry repeats the same call with the same key and the same payload.
+8. **Releasing a send that was not confirmed** is `dispatch_order_release_unknown`,
+   only on a person's press after they checked the thread and the supplier's
+   mailbox and found it did not go. It takes a `send_unknown` draft, or a
+   `sending` claim older than two minutes, back to `draft`: attempt fields
+   cleared, `send_attempt` raised (the next send goes under a new key),
+   `last_error` naming the person. It sends nothing, and nothing releases a
+   draft on its own. One `job_events` row `po_email_send_released` records who
+   (`user_id`, `operator_email`, `via`) and when (`released_at`), with the draft,
+   the order and the attempt released. The person is resolved as for a send. The
+   draft is then editable, discardable and sendable again, and the order can be
+   updated or cancelled.
 
 **Resend's idempotency, confirmed** in its documentation
 (`resend.com/docs/dashboard/emails/idempotency-keys`, read 14 Oct 2026): a key

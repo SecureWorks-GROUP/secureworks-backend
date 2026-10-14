@@ -6784,7 +6784,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
       }
       // Dispatch slice 5, a purchase order and its email
-      // (docs/dispatch-slice-5-contract.md): two reads and eight writes, gated
+      // (docs/dispatch-slice-5-contract.md): two reads and nine writes, gated
       // exactly as slice 4. Absent from ROUTINE_ALLOWED_ACTIONS and
       // AGENT_READ_ALLOWED_ACTIONS. Only dispatch_order_send and
       // dispatch_order_reply send an email, each once, on a person's press (or
@@ -6798,6 +6798,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'dispatch_order_cancel':
       case 'dispatch_order_draft_save':
       case 'dispatch_order_discard':
+      case 'dispatch_order_release_unknown':
       case 'dispatch_order_send':
       case 'dispatch_order_reply':
       case 'dispatch_email_link_po': {

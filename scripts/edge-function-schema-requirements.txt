@@ -761,7 +761,7 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constra
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_status_valid
 # 20261014150000 is Dispatch slice 5's purchase orders and their emails:
 # dispatch_materials reads the new purchase_orders columns and job_order_emails,
-# the ten dispatch_order* / dispatch_email_link_po actions read and write
+# the eleven dispatch_order* / dispatch_email_link_po actions read and write
 # job_order_emails and call the three functions, and create_po writes
 # created_by_email, so ops-api must not deploy ahead of it.
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|table|job_order_emails
