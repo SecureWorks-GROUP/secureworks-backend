@@ -35477,9 +35477,11 @@ async function updateJobStatus(client: any, body: any) {
           }
         }
 
-        // 2. Push draft labour POs to Xero, only when the job really moved INTO
-        // Accepted (a re-save or a drag back to Accepted pushes nothing), and
-        // never a Dispatch order (slice 5): it stays draft until its email goes,
+        // 2. Push draft labour POs to Xero, only on a real move INTO Accepted:
+        // accepted -> accepted (a re-save) pushes nothing, while a move from
+        // another status (for example scheduled -> accepted) still pushes
+        // non-Dispatch draft orders. Never a Dispatch order (slice 5): it never
+        // auto-pushes, and stays draft until its email goes,
         // forever when the supplier has no address, and Dispatch never puts an
         // order in Xero. `source` is 'dispatch' or null, so `is null` keeps every
         // other order; `.neq('source', 'dispatch')` would drop them all (NULL).

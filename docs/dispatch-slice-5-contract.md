@@ -368,10 +368,12 @@ booking or a work order; a `business_events` row; a call to `reporting-api`,
 4. Slice 4's `dispatch_materials_remove_supplier`: 409 `supplier_has_orders`
    while the supplier has an order on the job that is not cancelled.
 5. `updateJobStatus`'s acceptance push of draft orders to Xero runs only on a
-   real move into `accepted` (a re-save or a drag back to Accepted pushes
-   nothing) and reads `source IS NULL`, so a Dispatch order, which stays
-   draft until its email goes (for good when the supplier has no address),
-   never reaches Xero and never shows as in Xero. The crew work order
+   real move into `accepted`: `accepted` -> `accepted` (a re-save) pushes
+   nothing, while a move from another status (for example `scheduled` ->
+   `accepted`) still pushes non-Dispatch draft orders. It reads
+   `source IS NULL`, so a Dispatch order never auto-pushes: it stays draft
+   until its email goes (for good when the supplier has no address), never
+   reaches Xero and never shows as in Xero. The crew work order
    auto-approval beside it is unchanged.
 
 `send-po-email` and `update_supplier_email` are unchanged and never called.
