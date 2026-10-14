@@ -759,3 +759,9 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|column|job_dispatch_workings.sketch_png
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_supplier_on_job_fkey
 ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constraint|job_material_lines_status_valid
+# 20261014140000: quote-builder draft orders. Acceptance filters
+# work_orders.quote_builder_version_id and purchase_orders.quote_builder_version_id,
+# and the two make actions read and write them, so ops-api must not deploy
+# ahead of this migration.
+ops-api|supabase/migrations/20261014140000_quote_builder_orders.sql|column|work_orders.quote_builder_version_id
+ops-api|supabase/migrations/20261014140000_quote_builder_orders.sql|column|purchase_orders.quote_builder_version_id

@@ -243,6 +243,9 @@ import {
   issueQuoteBuilderVersion,
   listQuoteBuilderJobs,
   loadQuoteBuilderCardValues,
+  makeQuoteBuilderPurchaseOrders,
+  makeQuoteBuilderWorkOrder,
+  purchaseOrderSupplierIsUnusable,
   quoteBuilderCardRow,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
@@ -8697,7 +8700,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'quote_builder_photo_caption':
       case 'quote_builder_pdf_upload_url':
       case 'quote_builder_issue':
-      case 'quote_builder_decide_variation': {
+      case 'quote_builder_decide_variation':
+      case 'quote_builder_make_work_order':
+      case 'quote_builder_make_purchase_orders': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
         }
@@ -21571,6 +21576,10 @@ export async function dispatchQuoteBuilderAction(
       case 'quote_builder_issue': return json(await issueQuoteBuilderVersion(client, body, actor, { moveRepairStage }))
       case 'quote_builder_decide_variation':
         return json(await decideQuoteBuilderVariation(client, body, actor, { decideVariation, moveRepairStage }))
+      case 'quote_builder_make_work_order':
+        return json(await makeQuoteBuilderWorkOrder(client, body, actor))
+      case 'quote_builder_make_purchase_orders':
+        return json(await makeQuoteBuilderPurchaseOrders(client, body, actor))
       default: return json({ error: `Unknown action: ${action}` }, 400)
     }
   } catch (error) {
@@ -35394,6 +35403,8 @@ async function updateJobStatus(client: any, body: any) {
           .eq('job_id', jId)
           .neq('kind', 'job')
           .eq('status', 'draft')
+          // Quote-made crew orders stay draft. Acceptance never approves them.
+          .is('quote_builder_version_id', null)
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
             await client.from('work_orders')
@@ -35414,6 +35425,8 @@ async function updateJobStatus(client: any, body: any) {
           .eq('job_id', jId)
           .eq('status', 'draft')
           .is('xero_po_id', null)
+          // Quote-made purchase orders stay local. Acceptance never pushes them.
+          .is('quote_builder_version_id', null)
         if (draftPOs && draftPOs.length > 0) {
           for (const po of draftPOs) {
             try {
@@ -35618,6 +35631,18 @@ async function pushPOToXero(client: any, body: any) {
 
   if (error || !po) throw new Error('PO not found')
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
+  // A blank or placeholder supplier must not become a Xero contact. Refused
+  // before any job read and before getToken, for every purchase order.
+  if (purchaseOrderSupplierIsUnusable(po.supplier_name)) {
+    throw new ApiError(
+      'A purchase order needs a real supplier name before it can go to Xero.',
+      409,
+      {
+        error: 'A purchase order needs a real supplier name before it can go to Xero.',
+        code: 'po_supplier_required',
+      },
+    )
+  }
 
   // U2 reference discipline — resolve the canonical outbound job ref ONCE so both
   // the Xero Reference field and the DeliveryInstructions quote-back ask carry the

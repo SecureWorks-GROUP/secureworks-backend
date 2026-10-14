@@ -9,8 +9,10 @@ Status: v1, implemented. Code: `supabase/functions/ops-api/quote_builder.ts`. Mi
 `supabase/migrations/20261009120000_quote_builder_versions.sql` and
 `supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql`
 (pricing settings, line types, the filed scope of works and the Repairs card
-value: sections 2b to 2d and 5.6). Making a work order and purchase orders from an
-issued quote is not built yet (section 6).
+value: sections 2b to 2d and 5.6). Making a draft crew work order and draft
+purchase orders from an issued quote is built and switched off (section 6).
+The switch is `quote_builder_orders_v1` in `public.feature_flags`, seeded off
+by `supabase/migrations/20261014140000_quote_builder_orders.sql`.
 
 No pricing number is written in this file, in the app or in `ops-api` code. The
 owner's numbers live in one database table (section 2c) and reach the app only
@@ -131,9 +133,10 @@ A cost line may carry `line_type`: `material`, `labour` or `other`.
   allowed and `unit_cost_ex_gst` is what an hour costs us.
 - Totals do not change with the type. "Labour allowed" (hours and cost of the
   Labour lines) is worked out by the app when shown.
-- The type is kept so a later change can make orders from it (section 6):
-  Labour lines as work order hours, Material lines as purchase order lines.
-  Nothing on the server acts on it today.
+- The type is what the order actions read (section 6): Labour lines as work
+  order hours, Material lines as purchase order lines. The server acts on it
+  only while `quote_builder_orders_v1` is on. While that flag is off, missing
+  or unreadable, nothing reads the type to make an order.
 
 Charge line (client):
 
@@ -641,61 +644,76 @@ and the call is refused `409 variation_decision_not_recorded`; try again. Return
 (section 2d), where an approval adds the variation and a rejection takes it off
 when it had been counted.
 
-## 6. Not built yet: a work order and purchase orders from an issued quote
+## 6. Draft work order and purchase orders, built and switched off
 
 The owner asked for the quote to carry "information that we can use ... so we
-can create the work order from that". The data for it is kept: every cost line
-may carry `line_type` (2b), a Labour line is in hours, and a Material line has
-its quantity, our unit cost and its supplier. **No action makes an order from a
-quote yet**, and this change leaves the existing work order and purchase order
-flows exactly as they were. Purchase orders are not in use yet (owner, 13 Oct
-2026), so this waits as its own change.
+can create the work order from that". That is built. It stays off until the
+owner turns the switch on.
 
-What it would be, on a button press only, from an issued version, with the job
-always taken from the version and never from the request:
+**Switch (acceptance item 17).** Name: `quote_builder_orders_v1`. Location:
+`public.feature_flags` (column `enabled`). Seeded `false` by
+`supabase/migrations/20261014140000_quote_builder_orders.sql`. The quote builder
+reads that row itself and fails closed: missing, unreadable or any value other
+than `true` is off. It is not cached. While off:
 
-- one draft crew work order (`work_orders.kind = 'crew'`, never the approved
-  job work order of `docs/job-work-orders-v1.md`): the scope of works text,
-  then each Labour line as its description and hours, with no dollar figure,
-  because trades read a crew work order;
-- one draft purchase order per supplier from the Material lines (quantity and
-  our unit cost);
-- a second press returns what the first made and makes nothing more;
-- nothing sent to a customer, builder, supplier or trade, and nothing to Xero.
+- `quote_builder_make_work_order` and `quote_builder_make_purchase_orders`
+  return `409` `quote_builder_orders_off` and write nothing;
+- `quote_builder_get_job` is unchanged: no `work_order` or `purchase_orders`
+  keys are added (acceptance item 19, the "no new keys" form);
+- the app in this change has no make-WO / make-PO button (the button lives in
+  the quote-builder app, which this change does not touch).
 
-Open design points the first attempt raised. The follow-up starts from these:
+While on, both actions take `{ "version_id": "uuid" }`. A `job_id` on the body
+is ignored; the job is the version's job. A draft version is
+`409 version_not_issued`. A missing version is `404`. Only staff
+(`admin` / `owner` / `ops_manager`) or the privileged ops key may call them.
 
-1. **The trade read blanks any text that holds a money word, not only a dollar
-   sign.** An allocated trade reads a work order through
-   `redactTradeWorkOrderScopeItems`, which keeps only the keys on
-   `TRADE_WO_SCOPE_ITEM_ALLOWLIST` (so a line written under any other key
-   reaches the crew blank) and drops a whole string when it contains a money
-   word: total, cost, rate, charge, price, fee, amount, deposit, tax, invoice,
-   GST, pay, paid, balance, a percent sign (`tradeTextHasMoneyToken`,
-   `_shared/trade_quote_pack/pack_trade_quote.ts`). A scope of works put on the
-   work order as one text therefore vanishes for the crew on a sentence like
-   "replace a total of 6 sheets, tip fees included". Decide between one line
-   per scope item with a reply naming the lines the crew will not see, or a
-   check at make time with that same trade rule that refuses or warns by line.
-   Do not write a second, narrower money check.
-2. **A purchase order cannot be keyed on its supplier name.** The name is
-   editable, and an order for materials with no supplier named has to be
-   renamed by staff. A "one order per version and supplier name" rule both
-   lets a renamed order be made twice and blocks renaming the unnamed order to
-   a supplier that already has one. It needs a durable key per group of lines,
-   or the rule "once any live order exists for the version, make nothing more"
-   with no unique index on the name.
-3. **Job acceptance must not move these orders.** The acceptance step in
-   `updateJobStatus` approves every draft crew work order on the job and pushes
-   every draft purchase order to Xero. Orders made from a quote have to be left
-   out of it, so they are approved and pushed only by a person.
-4. **No push to Xero without a named supplier.** `pushPOToXero` creates a Xero
-   contact from the order's supplier name when it finds none, so a placeholder
-   name must be refused there until a real supplier is set.
-5. **Who made it.** `work_orders.created_by` and `purchase_orders.created_by`
-   are uuid columns in production (read 13 Oct 2026), while `createWorkOrder`
-   and `createPO` write the caller's email into them. An order made here must
-   record the signed-in user's id, and the email only on the event.
+From an issued version:
+
+- one draft crew work order (`work_orders.kind = 'crew'`, `status = 'draft'`,
+  never `kind = 'job'`): one scope item per sentence of the narrative, then one
+  item per Labour line (`description`, `hours`, `unit: "hr"`). No dollar figure
+  on the work order. Material lines are not on it;
+- one draft purchase order per supplier group of the Material lines, with
+  quantity and our unit cost (`unit_price`). Lines with no supplier go on one
+  draft named `Supplier to be named`, which staff rename;
+- a second press of either action returns what the first made and inserts
+  nothing, and writes no second event.
+
+With the switch on, `quote_builder_get_job` adds these keys on every version
+(drafts included): `work_order: {id, wo_number, status} | null` and
+`purchase_orders: [{id, po_number, supplier_name, status}]`. Each make action
+returns that same shape, plus `hidden_lines` (the sentences and labour
+descriptions the crew read will blank).
+
+The rows carry `quote_builder_version_id`. That column is the idempotency key.
+`created_by` is the signed-in user's uuid (`null` for the ops key). The email
+is only on the job event (`quote_builder_work_order_made` /
+`quote_builder_purchase_orders_made`, `detail_json.operator_email`). Neither
+action sends anything or calls Xero.
+
+`create_work_order` and `create_po` are unchanged.
+
+How the five open points are settled:
+
+1. **Money words.** The work order is one scope item per sentence, not one
+   blob. A sentence or labour description that `tradeTextHasMoneyToken` matches
+   (`_shared/trade_quote_pack/pack_trade_quote.ts`) is still stored, and the
+   reply names it in `hidden_lines`. There is no second money check.
+2. **Supplier rename.** Purchase orders are not keyed on the supplier name.
+   Once any purchase order exists for that version, including a cancelled,
+   deleted or renamed one, the next press returns those rows and inserts
+   nothing. The work order is unique per version.
+3. **Acceptance leaves them alone.** `updateJobStatus`, when a job becomes
+   `accepted`, approves draft crew work orders and pushes draft purchase orders
+   only where `quote_builder_version_id` is null. A quote-made row stays draft
+   and is not pushed. That filter is not behind the flag.
+4. **No Xero contact from a placeholder.** `pushPOToXero` refuses
+   `409 po_supplier_required` when the supplier is blank or a placeholder
+   (including `Supplier to be named`), before it reads the job and before
+   `getToken`. This is every purchase order, not only a quote-made one.
+5. **Who made it.** `created_by` is the user's uuid. The email is only on the
+   event. `createWorkOrder` and `createPO` are not changed.
 
 Also not built: **a private (miscellaneous) quote shows no money on any
 board.** Its job is not on the Repairs board, and the builder writes no pricing
@@ -706,6 +724,7 @@ filed quote PDF.
 
 GHL, Xero, sending anything to a client, builder, supplier or trade, intake
 changes, the Ambrose Construct Group builder record, actual-cost capture, moving
-a private job's status, changing the pricing settings from the app, work orders
-and purchase orders of any kind (section 6), and the approved job work order
-(`work_orders.kind = 'job'`).
+a private job's status, changing the pricing settings from the app, and the
+approved job work order (`work_orders.kind = 'job'`). Draft crew work orders
+and draft purchase orders from an issued quote are section 6: built, and
+switched off.
