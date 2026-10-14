@@ -144,9 +144,11 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
 
 - `job`: the job header (client, site, CRM ids, `current_price_inc_gst`, the
   job description with dashes as commas).
-- `story`: the card, with call transcript words taken out (`loops[].why`, a
-  last exchange that is a call transcript). The saved story's freshness is
-  checked against the card as read.
+- `story`: the card, with quoted loop reasons and call transcript words withheld
+  (including held transcripts and a transcript last exchange). R8 money loops
+  retain a plain explanation of their published `not_due` or `unconfirmed`
+  status; `money.not_yet_invoiced` and all amounts pass through unchanged. The
+  saved story's freshness is checked against the original card as read.
 - `notes`: `{status, generation_id, evidence_until, reader, unread_rows,
   items}`; each item `{id (item_key), item_type, status, from/to role and name,
   what, due_date, blocks, modality, phase, opened_at, as_at (Perth day),
@@ -159,9 +161,25 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
   "Call, 2 min 5 s" or "Missed call", never what was said), texts with no words
   dropped, `who` (the customer's name, `Us`, `Supplier`, ...), `side` (them |
   us | internal), `at` and `at_perth`; the newest 80, oldest first, at most 400
-  characters.
+  characters. The server asks for held history using the job's own CRM contact;
+  the shared conversation reader still requires the job among the message's
+  candidate jobs. A held row carries `unplaced: true`, `job_certain: false`,
+  `certainty: job_not_certain`, `label` and `candidate_job_count`. A held call
+  cannot merge into a placed call and lose that label. These rows never open
+  notes or become settled job facts. The card's `held_messages` remains a
+  separate, uncertain context block.
 - `files`: `quotes` (job_quote_values is the only value; `view_count` per
-  document from quote_viewed; a superseded quote reads `replaced`),
+  document from quote_viewed; a superseded quote reads `replaced`). Overview
+  also consumes `context_job_quote_email_sends` to show an existing quote
+  document with a proved captured email send, even without a stored `sent_at`.
+  Such a document carries `send_evidence: {source: captured_email, event_id}`.
+  The SQL matcher owns identity and recipient proof. An unreadable send read
+  fails the quote section explicitly. Other commercial readers retain their
+  existing behaviour. No document is stamped. A missing value from
+  `job_quote_values` remains null with its reason; today's price is never
+  substituted. Attachment-only revised quotes still lack an authoritative
+  quote-value/document envelope and are not invented here;
+
   `invoices` (customer invoices on this job only, never by client name; a
   draft reads "draft, cannot be paid" and never counts as invoiced; a deleted or
   voided one counts for nothing), `invoice_totals`, `attachments` (email
@@ -176,3 +194,19 @@ refused), GET only, nothing written. Answers `job-overview-v1`:
 asker is the verified caller (`user:<id>`, or a server caller's actor), never a
 body field. The SQL outcome passes through (`queued`, `already_open`, `recent`,
 `off`).
+
+## 14 October overview read follow-through limits
+
+The read fixes B1's contact-history request and uncertainty labels, B2's money
+explanation, and B5's existing-document email-send omission. The screen must
+render the held labels and safe money explanation. No production or browser
+acceptance was performed by this change.
+
+Two source fields do not yet exist: a sourced obligation summary for a held
+call (raw transcript words stay withheld; creating notes is out of scope), and
+a sent-quote value/document envelope for an attachment-only revised quote.
+`context_job_quote_email_sends` returns document id, job id, event id and sent
+time only. `job_quote_values` still selects stamped-sent documents. Consequently
+an emailed document absent from that value read shows with an unknown amount;
+an attachment-only revision remains attachment evidence, not a fabricated
+current quote. These limits keep the six-job default-switch acceptance open.
