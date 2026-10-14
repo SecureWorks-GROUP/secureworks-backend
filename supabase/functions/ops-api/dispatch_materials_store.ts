@@ -73,7 +73,6 @@ export type DispatchMaterialsContext = {
   // called with null pricing, so the quote-lines fallback can never run.
   extractMaterialsFromScope: (scopeJson: unknown, pricingJson: null) => any[];
   now?: () => string;
-  newId?: () => string;
 };
 
 export const DISPATCH_MATERIALS_ACTIONS = [
@@ -707,6 +706,22 @@ export async function deleteDispatchMaterialLine(
 
 // ── The scope suggestion ────────────────────────────────────────────────────
 
+async function suggestedLineId(jobId: string, index: number) {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`dispatch-scope-line:${jobId}:${index}`),
+    ),
+  ).slice(0, 16);
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
+    hex.slice(16, 20)
+  }-${hex.slice(20)}`;
+}
+
 export async function suggestDispatchMaterialLines(
   client: any,
   body: any,
@@ -763,9 +778,11 @@ export async function suggestDispatchMaterialLines(
   }
 
   const now = nowIso(ctx);
-  const newId = ctx.newId ?? (() => crypto.randomUUID());
+  const ids = await Promise.all(
+    suggested.map((_line, index) => suggestedLineId(job.id, index)),
+  );
   const rows = suggested.map((line, index) => ({
-    id: newId(),
+    id: ids[index],
     org_id: job.org_id,
     job_id: job.id,
     supplier_id: supplierId,
@@ -787,6 +804,13 @@ export async function suggestDispatchMaterialLines(
     .insert(rows)
     .select(DISPATCH_MATERIAL_LINE_SELECT);
   if (insertError) {
+    if (errorCode(insertError) === "23505") {
+      throw new DispatchMaterialsError(
+        409,
+        "lines_exist",
+        "This job already has lines",
+      );
+    }
     if (errorCode(insertError) === "23503") supplierNotOnJob();
     writeFailed("suggested lines insert", insertError);
   }
