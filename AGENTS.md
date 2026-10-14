@@ -498,6 +498,11 @@ description is built from five projected `scope_json` paths; the status floor is
 the heaviest blobs (4.9 s to project every pipeline row against 0.43 s for
 accepted work). Rules: `dispatch_job_list.ts`; contract:
 `docs/dispatch-slice-1-read-contract.md`; tests: `dispatch_job_list_test.ts`.
+Slice 3's stage rail and To do rules live only in `dispatch_stage.ts`; its stage
+is the `job_dispatch_state` table, written only by `set_dispatch_stage` /
+`set_dispatch_next_step` (`dispatch_stage_write.ts`), never the job status, and
+a failed read of it answers `dispatch_stages: 'failed'`, never "nothing set".
+Contract: `docs/dispatch-slice-3-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 

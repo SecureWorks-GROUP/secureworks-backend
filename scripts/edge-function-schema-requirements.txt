@@ -739,3 +739,11 @@ xero-sync|supabase/migrations/20261013150000_job_closeout_review_archive.sql|col
 ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|table|quote_builder_settings
 ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|column|quote_builder_settings.amount
 ops-api|supabase/migrations/20261013160000_quote_builder_pricing_and_documents.sql|index|ux_job_docs_quote_builder_extra
+# 20261014113000 is Dispatch slice 3's stage record: pipeline dispatch=1 reads it
+# (and embeds the setter's name through stage_set_by), and set_dispatch_stage /
+# set_dispatch_next_step write it, so ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|table|job_dispatch_state
+ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|column|job_dispatch_state.stage
+ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|column|job_dispatch_state.stage_set_by
+ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|column|job_dispatch_state.next_step
+ops-api|supabase/migrations/20261014113000_job_dispatch_state.sql|constraint|job_dispatch_state_stage_valid

@@ -72,9 +72,16 @@ export const DISPATCH_FAMILY_PROJECTION = [
   "ds_makesafe_family:metadata->>makesafe_job_family",
 ];
 
+// The Repairs board stage, the one input of a repair job's place on the
+// Dispatch rail (dispatch_stage.ts, slice 3). `->>`: compared as text.
+export const DISPATCH_STAGE_PROJECTION = [
+  "ds_repair_stage:metadata->>repair_stage",
+];
+
 export const DISPATCH_LIST_PROJECTION = [
   ...DISPATCH_SCOPE_PROJECTION,
   ...DISPATCH_FAMILY_PROJECTION,
+  ...DISPATCH_STAGE_PROJECTION,
 ];
 
 export const DISPATCH_LIST_ALIASES = DISPATCH_LIST_PROJECTION.map(

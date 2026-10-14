@@ -384,10 +384,13 @@ jobs:
       # stay exactly as it was, and the list must never drop a job past the
       # 1000-row ceiling or select the whole scope blob. Same --no-check reason
       # as above.
+      # Slice 3 adds the stage rail: its rules, the stage read on the list and
+      # the two staff-only writes, none of which may touch the job status.
       - name: Test the Dispatch list and job notes reads
         run: |
           deno test --no-check --allow-env --allow-net=127.0.0.1 --allow-read \
-            supabase/functions/ops-api/dispatch_job_list_test.ts
+            supabase/functions/ops-api/dispatch_job_list_test.ts \
+            supabase/functions/ops-api/dispatch_stage_test.ts
 
       - name: Test edge deploy workflow classification
         run: |

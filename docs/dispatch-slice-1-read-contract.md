@@ -6,6 +6,9 @@ read-only. Code: `supabase/functions/ops-api/dispatch_job_list.ts` (rules) and
 `pipeline` / `jobNotes` in `supabase/functions/ops-api/index.ts` (reads). Tests:
 `dispatch_job_list_test.ts`.
 
+Slice 3 adds the stage rail fields to the same list read and two writes:
+`docs/dispatch-slice-3-contract.md`.
+
 Nothing here changes an existing caller: `pipeline` without `dispatch=1` runs the
 same selects and returns the same rows and keys as before, and `job_detail` is
 untouched.
