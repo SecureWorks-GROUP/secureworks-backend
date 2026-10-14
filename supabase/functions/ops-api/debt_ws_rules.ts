@@ -191,6 +191,18 @@ export function looksLikeCompany(name: unknown): boolean {
   return COMPANY_WORDS.test(String(name ?? ""));
 }
 
+// The spec's full company token list, for the greeting only (the lane rule above keeps
+// its own shorter list). A payer whose name carries one of these is a business, so a
+// drafted text never greets them by the first word of the company name ("Thomasz
+// Group" is not "Hi Thomasz,").
+const GREETING_COMPANY_WORDS =
+  /\b(pty|ltd|group|builders|building|restoration|housing|strata|insurance|services|construction|trust|council|department|holdings|enterprises|co|corporation|company|partners)\b/i;
+
+/** True when a payer or contact name reads like a business, not a person. */
+export function looksLikeCompanyName(name: unknown): boolean {
+  return GREETING_COMPANY_WORDS.test(String(name ?? ""));
+}
+
 const HOMEOWNER_TYPES = new Set(["fencing", "patio"]);
 // "insurance" is the SWMS- insurance job type; "roof_report" covers a roof report however it
 // is spelled. Both are company work like make-safes and repairs.

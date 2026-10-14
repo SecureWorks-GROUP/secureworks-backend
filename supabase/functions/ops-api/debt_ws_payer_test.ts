@@ -703,3 +703,87 @@ Deno.test("greeting: the GoHighLevel name is read once per contact per Perth day
   assertEquals(queries.length, first);
   _resetDebtWsBankCacheForTest();
 });
+
+// ── Company payers (INV-1705, "Thomasz Group" paying a fencing final) ──
+// A payer whose Xero name reads like a company is never greeted by the first word of
+// that name: the linked GoHighLevel contact's first name when it is a person, else
+// "Hi there," with greeting_name_source company_generic.
+
+/** The fence final's store with the payer renamed and the job linked (or not). */
+function greetingStore(payerName: string, ghl: string | null) {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  store.invoices.find((i) => i.xero_invoice_id === IDS.final)!.contact_name =
+    payerName;
+  store.jobRows.find((j) => j.id === JOBS.fence)!.ghl_contact_id = ghl;
+  return store;
+}
+
+async function greetingOf(deps: Deps) {
+  const b = (await call(deps, "debt_ws_job", STAFF, {
+    xero_invoice_id: IDS.final,
+  })).body as any;
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  const item = q.items.find((i: any) => i.row.xero_invoice_id === IDS.final);
+  return { b, item };
+}
+
+Deno.test("greeting: a company payer with no GoHighLevel contact is greeted Hi there", async () => {
+  _resetDebtWsBankCacheForTest();
+  const { deps } = fakeDeps(greetingStore("Thomasz Group", null));
+  const { b, item } = await greetingOf(deps);
+  assertEquals(b.payer_contact.greeting_name, "there");
+  assertEquals(b.payer_contact.greeting_name_source, "company_generic");
+  assert(b.suggestion.text.startsWith("Hi there,"), b.suggestion.text);
+  assert(!b.suggestion.text.includes("Thomasz"), b.suggestion.text);
+  // The agent bundle says the same.
+  assertEquals(item.payer_contact.first_name, "there");
+  assertEquals(item.payer_contact.greeting_name_source, "company_generic");
+  assert(item.template_draft.text.startsWith("Hi there,"));
+  _resetDebtWsBankCacheForTest();
+});
+
+Deno.test("greeting: a company payer linked to a GoHighLevel person is greeted by that person", async () => {
+  _resetDebtWsBankCacheForTest();
+  const { deps } = fakeDeps(greetingStore("Thomasz Group", FENCE_GHL));
+  ghlBook(deps, [{ id: FENCE_GHL, name: "Jo Smith", firstName: "Jo" }]);
+  const { b, item } = await greetingOf(deps);
+  assertEquals(b.payer_contact.greeting_name, "Jo");
+  assertEquals(b.payer_contact.greeting_name_source, "ghl");
+  assert(b.suggestion.text.startsWith("Hi Jo,"), b.suggestion.text);
+  assertEquals(item.payer_contact.first_name, "Jo");
+  assert(item.template_draft.text.startsWith("Hi Jo,"));
+  _resetDebtWsBankCacheForTest();
+});
+
+Deno.test("greeting: a company payer whose GoHighLevel contact is the company too is greeted Hi there", async () => {
+  _resetDebtWsBankCacheForTest();
+  const { deps } = fakeDeps(greetingStore("Thomasz Group", FENCE_GHL));
+  ghlBook(deps, [{ id: FENCE_GHL, name: "Thomasz Group", firstName: "Thomasz" }]);
+  const { b } = await greetingOf(deps);
+  assertEquals(b.payer_contact.greeting_name, "there");
+  assertEquals(b.payer_contact.greeting_name_source, "company_generic");
+  assertEquals(b.payer_contact.ghl_name, "Thomasz Group");
+  assert(b.suggestion.text.startsWith("Hi there,"), b.suggestion.text);
+  _resetDebtWsBankCacheForTest();
+});
+
+Deno.test("greeting: a person payer is unchanged (GoHighLevel name when linked, else Xero's)", async () => {
+  _resetDebtWsBankCacheForTest();
+  const linked = fakeDeps(greetingStore("Tuan Tran", FENCE_GHL)).deps;
+  ghlBook(linked, [{ id: FENCE_GHL, name: "Vincent Tran", firstName: "Vincent" }]);
+  const l = await greetingOf(linked);
+  assertEquals(l.b.payer_contact.greeting_name, "Vincent");
+  assertEquals(l.b.payer_contact.greeting_name_source, "ghl");
+  assert(l.b.suggestion.text.startsWith("Hi Vincent,"), l.b.suggestion.text);
+  assert(l.item.template_draft.text.startsWith("Hi Vincent,"));
+  _resetDebtWsBankCacheForTest();
+
+  const unlinked = fakeDeps(greetingStore("Tuan Tran", null)).deps;
+  const u = await greetingOf(unlinked);
+  assertEquals(u.b.payer_contact.greeting_name, "Tuan");
+  assertEquals(u.b.payer_contact.greeting_name_source, "xero");
+  assert(u.b.suggestion.text.startsWith("Hi Tuan,"), u.b.suggestion.text);
+  assert(u.item.template_draft.text.startsWith("Hi Tuan,"));
+  _resetDebtWsBankCacheForTest();
+});
