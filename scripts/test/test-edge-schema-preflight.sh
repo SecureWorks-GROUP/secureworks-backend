@@ -884,7 +884,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261013160000", "quote_builder_pricing_and_documents"),
                       # Repair job staff text: the repair recipient list
                       # (loadRepairNotificationConfig).
-                      ("20261013170000", "makesafe_notify_repair_recipients")]:
+                      ("20261013170000", "makesafe_notify_repair_recipients"),
+                      # Dispatch slice 3: the stage record pipeline dispatch=1
+                      # reads and set_dispatch_stage / _next_step write.
+                      ("20261014113000", "job_dispatch_state")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
