@@ -127,6 +127,10 @@ it after deployment. Reverting code leaves the evidence table intact.
 The registered PostgreSQL migration contract checks batch allocation retention,
 nullable reconciliation, newer-observation precedence and private service-only
 access. The no-mistakes/CI lane owns execution of that disposable database test.
+The verdict rules, the not-found result (served as 404) for an unknown or
+non-sales invoice, and the cursor and daily full re-read rules are pinned by
+`ops-api/xero_invoice_settlement_read_test.ts` and
+`xero-sync/settlement_evidence_test.ts`.
 
 BK-03 still decides whether provider reconciliation alone satisfies the business
 definition of bank proof, or whether actual statement lines are also required.
