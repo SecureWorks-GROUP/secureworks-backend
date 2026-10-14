@@ -1,0 +1,1 @@
+job dispatch state contract: browser roles must hold no privilege on job_dispatch_state

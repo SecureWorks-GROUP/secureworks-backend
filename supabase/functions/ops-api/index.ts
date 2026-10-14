@@ -289,6 +289,12 @@ import {
   projectDispatchJobNote,
   stripDispatchListAliases,
 } from './dispatch_job_list.ts'
+import { DISPATCH_STATE_SELECT, dispatchRowFields } from './dispatch_stage.ts'
+import {
+  DispatchStageWriteError,
+  setDispatchNextStep,
+  setDispatchStage,
+} from './dispatch_stage_write.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -8602,6 +8608,31 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
         }
         return json(await updateRepairStage(client, body))
       }
+      // Dispatch slice 3 (docs/dispatch-slice-3-contract.md): the job's own
+      // Dispatch stage and next-step line. Gated exactly as update_repair_stage:
+      // staff sessions and the privileged ops key only, and absent from
+      // ROUTINE_ALLOWED_ACTIONS and AGENT_READ_ALLOWED_ACTIONS. Each writes the
+      // job_dispatch_state row and one job_events row, never the job status.
+      case 'set_dispatch_stage':
+      case 'set_dispatch_next_step': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session` }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        // A signed-in person is named by the verified session; the ops key has
+        // no user and is attributed by the operator email the screen stamps.
+        const dispatchActor = authMode === 'jwt'
+          ? { userId: authUser?.id || null, email: authUser?.email || cleanReviewedString(body?.operator_email) || null }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null }
+        try {
+          return json(action === 'set_dispatch_stage'
+            ? await setDispatchStage(client, body, dispatchActor, DEFAULT_ORG_ID)
+            : await setDispatchNextStep(client, body, dispatchActor, DEFAULT_ORG_ID))
+        } catch (e) {
+          if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       // Quote builder (docs/quote-builder-contract.md). Staff JWT or the
       // privileged ops key only: absent from ROUTINE_ALLOWED_ACTIONS,
       // AGENT_READ_ALLOWED_ACTIONS and the profile-scoped trade list, so the
@@ -15935,13 +15966,14 @@ async function readPipelineEnrichmentRows(
   jobIds: string[],
   label: string,
   buildQueryForChunk: (chunkIds: string[]) => any,
+  uniqueKey = 'id',
 ): Promise<PipelineEnrichmentResult> {
   try {
     const data = await _fetchAllRowsInChunks<any>(
       jobIds,
       buildQueryForChunk,
       `pipeline.${label}`,
-      'id',
+      uniqueKey,
     )
     return { data, error: null }
   } catch (error) {
@@ -16020,12 +16052,15 @@ async function pipeline(
   // Opt-in Dispatch list read (docs/dispatch-slice-1-read-contract.md). Flag
   // absent: nothing below changes for any existing caller.
   const dispatchList = isDispatchListRequested(params)
+  // An empty Dispatch answer still says the stage read had nothing to fail on,
+  // so a search with no match never reads as "Could not load Dispatch stages".
+  const dispatchEmpty = dispatchList ? { dispatch_stages: 'ok', todo_total: 0 } : {}
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
     : null
 
   if (repairJobIds && repairJobIds.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
   }
   // Single source of truth for the row set, shared with the malformed-blob probe
   // below so the two reads can never drift apart.
@@ -16147,7 +16182,7 @@ async function pipeline(
   }
 
   if (!jobs || jobs.length === 0) {
-    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0 }
+    return { columns: { draft: [], quoted: [], accepted: [], approvals: [], processing: [], in_progress: [], complete: [], invoiced: [] }, total: 0, ...dispatchEmpty }
   }
 
   // The default response keeps its non-draft enrichment scope. Stage truth
@@ -16177,9 +16212,12 @@ async function pipeline(
   let assignEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
   let poEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
   let invoiceEvidenceRes: PipelineEnrichmentResult = { data: [], error: null }
+  let dispatchStateRes: PipelineEnrichmentResult = { data: [], error: null }
+  // The Dispatch stage is read for every returned job (dispatch_stage.ts).
+  const dispatchStateJobIds = dispatchList ? jobs.map((j: any) => j.id) : []
 
-  if (jobIds.length > 0) {
-    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes] = await Promise.all([
+  if (jobIds.length > 0 || dispatchStateJobIds.length > 0) {
+    ;[assignRes, poRes, woRes, councilRes, emailRes, invoiceRes, opsNotesRes, neighbourContactRes, commsNotesRes, reportRes, assignEvidenceRes, poEvidenceRes, invoiceEvidenceRes, dispatchStateRes] = await Promise.all([
       // is_ghost/role feed next_scheduled_date only; assignment_count and
       // first_scheduled_date deliberately keep counting ghost rows as before.
       // `status` is nullable, so a `.neq` would drop NULL-status rows (SQL
@@ -16241,6 +16279,12 @@ async function pipeline(
             'job_id, status, invoice_type, reference, id, xero_invoice_id, amount_paid, fully_paid_on',
           ).in('job_id', chunkIds).eq('invoice_type', 'ACCREC'))
         : Promise.resolve({ data: [], error: null }),
+      // Dispatch slice 3: the stage a person set on the rail and the next-step
+      // line. A failed read is never "nothing set" (below).
+      dispatchList
+        ? readPipelineEnrichmentRows(dispatchStateJobIds, 'job_dispatch_state', (chunkIds) =>
+          client.from('job_dispatch_state').select(DISPATCH_STATE_SELECT).in('job_id', chunkIds), 'job_id')
+        : Promise.resolve({ data: [], error: null }),
     ])
   }
 
@@ -16258,6 +16302,7 @@ async function pipeline(
     ...(stageTruth ? [['pipeline.job_assignments_evidence', assignEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
     ...(stageTruth ? [['pipeline.purchase_orders_evidence', poEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
     ...(stageTruth ? [['pipeline.xero_invoices_evidence', invoiceEvidenceRes] as [string, PipelineEnrichmentResult]] : []),
+    ...(dispatchList ? [['pipeline.job_dispatch_state', dispatchStateRes] as [string, PipelineEnrichmentResult]] : []),
   ]
   // Preserve the existing partial-board behaviour, but make a failed dimension
   // loud in server logs and explicit in the response instead of publishing its
@@ -16292,6 +16337,15 @@ async function pipeline(
       unreadable: stageTruthUnreadable,
     }
     : null
+
+  // A failed stage read leaves every dispatch_ field and todo_total off the
+  // answer: a wrong column name or a missing table must never put every job
+  // back on its job status. The error is logged by logQueryErrors above.
+  const dispatchStagesOk = dispatchList && !dispatchStateRes.error
+  const dispatchStateMap = new Map<string, any>()
+  if (dispatchStagesOk) {
+    for (const row of dispatchStateRes.data || []) dispatchStateMap.set(String(row.job_id), row)
+  }
 
   const countMap = (rows: any[]) => {
     const m: Record<string, number> = {}
@@ -16417,6 +16471,7 @@ async function pipeline(
           description: dispatchJobDescription(j),
           value_inc_gst: dispatchValueIncGst(j),
           work_type: dispatchWorkType(j),
+          ...(dispatchStagesOk ? dispatchRowFields(j, dispatchStateMap.get(String(j.id))) : {}),
         }
         : {}),
       ...(closeoutRead && (j.type === 'fencing' || j.type === 'patio')
@@ -16488,6 +16543,14 @@ async function pipeline(
   return {
     columns,
     total: enriched.length,
+    ...(dispatchList
+      ? dispatchStagesOk
+        ? {
+          dispatch_stages: 'ok',
+          todo_total: enriched.filter((j: any) => j.dispatch_todo === true).length,
+        }
+        : { dispatch_stages: 'failed' }
+      : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),
