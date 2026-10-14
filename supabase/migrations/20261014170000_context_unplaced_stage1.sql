@@ -52,6 +52,15 @@
 --      message and within 60 days of it places on it (only_open_job). A
 --      ranked placement is single_open: it never makes a thread binding,
 --      which only proof may make (X25).
+--   4b. Review guards (third review, 15 Oct 2026): a placement made by who
+--      sent or received a message, not by what it names, goes to review with
+--      its job as the one candidate when only_open_job meets another site,
+--      address or claim in the message or the customer's messages within 7
+--      days (review_other_site); a job_party email's subject names a street
+--      address that is not the job's or its parties' (review_party_other_site);
+--      our own outbound message would land on a record with no job number
+--      (review_outbound_no_number); or a call with no words would land on a
+--      job created more than 30 days after it (review_empty_call_before_job).
 --   5. Monitor: the bucket block of context_pipeline_status counts unplaced
 --      and bucket rows by lane and alarms when the customer lane rises over
 --      context_unplaced_policy().
@@ -128,10 +137,14 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
   'customer_new_24h_max',30,
   -- A stored row re-decided whose message happened within this many hours
   -- is still news to the event listener; an older one is a relink.
-  'fresh_message_hours',48)
+  'fresh_message_hours',48,
+  -- only_open_job reads the customer's other messages this many days either
+  -- side of the message: one of them naming another site or claim sends it
+  -- to review.
+  'only_open_job_conversation_days',7)
 $$;
 COMMENT ON FUNCTION public.context_unplaced_policy() IS
- 'Unplaced stage 1 (20261014170000): customer_unplaced_max: customer-lane unplaced rows above which unplaced_customer_over_threshold fires. customer_new_24h_max: customer-lane rows that became unplaced in the last 24 hours above which unplaced_customer_inflow fires. fresh_message_hours: a stored row re-decided whose message (event_at, else occurred_at) is younger than this keeps its capture_mode; an older one is stamped relink (context_redecided_metadata). Changed only by migration.';
+ 'Unplaced stage 1 (20261014170000): customer_unplaced_max: customer-lane unplaced rows above which unplaced_customer_over_threshold fires. customer_new_24h_max: customer-lane rows that became unplaced in the last 24 hours above which unplaced_customer_inflow fires. fresh_message_hours: a stored row re-decided whose message (event_at, else occurred_at) is younger than this keeps its capture_mode; an older one is stamped relink (context_redecided_metadata). only_open_job_conversation_days: an only_open_job placement goes to review when the customer''s messages this many days either side of the message name another site or claim (context_contact_names_other_site). Changed only by migration.';
 
 -- The one rule for a stored row this stage re-decides (the ladder's stage-1
 -- placements of stored rows, the evidence triggers, the hand run, and a job
@@ -325,6 +338,90 @@ END $$;
 COMMENT ON FUNCTION public.context_builder_ref_jobs(text,jsonb) IS
  'Unplaced stage 1 (20261014170000): our jobs named by a builder claim (MLB, MLB-RR/MW, AJ/AJS/AJBR, BW/BWCWA, WB, ACG plus digits) in the text or payload.builder_refs, read from makesafe_job_details.external_ref and from the job''s own mlb_ref, external_ref or builder_claim_ref (a repair on the same claim), narrowed by a purchase order (makesafe_job_details.external_ref or jobs.metadata.builder_po_number) that names exactly one job of that claim. No claim: none (a purchase order alone has no builder scope). Purchase order evidence naming several jobs or a job off the claim: none. Whole digit runs only. Never a holding job. The ladder places only when exactly one job is returned.';
 
+-- Does a text name another site or claim than this job? A typed street
+-- address that is not the job's site (exact key, or a shared loose key), a
+-- builder claim the job does not carry, or one of our job references naming
+-- another job. A slash after a word separates two addresses ("14 Woodlap
+-- Loop/ 22 Stillwater Way"); B0's unit form ("4/6 Smith St") is unchanged.
+-- Untyped number-and-word pairs ("41 seconds") are not read as sites. A job
+-- with no site address matches no typed address, so any typed address in the
+-- text conflicts with it. Computes; never places.
+CREATE OR REPLACE FUNCTION public.context_text_names_other_site(p_text text,p_refs jsonb,p_job_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE j public.jobs; jkey text; jloose text[]; src text; jclaims text[]; t text;
+ claim_re constant text:='(MLB|AJBR|AJS|AJ|BWCWA|BW|WB|ACG)(?:-?(?:RR|MW))?[- ]?([0-9]{4,})(?![0-9])';
+BEGIN
+ SELECT * INTO j FROM public.jobs WHERE id=p_job_id;
+ IF NOT FOUND THEN RETURN true; END IF;
+ t:=regexp_replace(coalesce(p_text,''),'([A-Za-z])\s*/\s*','\1 , ','g');
+ jkey:=public.context_address_key(j.site_address);
+ jloose:=coalesce(public.context_address_loose_keys(j.site_address),'{}'::text[]);
+ IF EXISTS (SELECT 1 FROM public.context_address_mentions(t) m
+  WHERE m.typed AND m.address_key IS DISTINCT FROM jkey AND NOT (coalesce(m.loose_keys,'{}'::text[]) && jloose)) THEN
+  RETURN true;
+ END IF;
+ src:=upper(coalesce(p_text,'')||' '||coalesce((SELECT string_agg(x,' ') FROM jsonb_array_elements_text(
+  CASE WHEN jsonb_typeof(p_refs)='array' THEN p_refs ELSE '[]'::jsonb END) x),''));
+ IF src ~ ('(?<![A-Z0-9])'||claim_re) THEN
+  SELECT coalesce(array_agg(DISTINCT CASE WHEN m[1] IN ('AJ','AJS','AJBR') THEN 'AJ' WHEN m[1] IN ('BW','BWCWA') THEN 'BW' ELSE m[1] END
+    ||':'||ltrim(m[2],'0')),'{}'::text[])
+  INTO jclaims
+  FROM unnest(ARRAY[(SELECT d.external_ref FROM public.makesafe_job_details d WHERE d.job_id=j.id),
+   j.metadata->>'mlb_ref',j.metadata->>'external_ref',j.metadata->>'builder_claim_ref']) r
+  CROSS JOIN LATERAL regexp_matches(upper(coalesce(r,'')),'(?<![A-Z0-9])'||claim_re,'g') m;
+  IF EXISTS (SELECT 1 FROM regexp_matches(src,'(?<![A-Z0-9])'||claim_re,'g') m
+   WHERE NOT ((CASE WHEN m[1] IN ('AJ','AJS','AJBR') THEN 'AJ' WHEN m[1] IN ('BW','BWCWA') THEN 'BW' ELSE m[1] END
+    ||':'||ltrim(m[2],'0'))=ANY(jclaims))) THEN
+   RETURN true;
+  END IF;
+ END IF;
+ RETURN EXISTS (SELECT 1 FROM public.context_ref_jobs(public.context_job_ref_tokens(p_text)) r WHERE r.job_id<>p_job_id);
+END $$;
+COMMENT ON FUNCTION public.context_text_names_other_site(text,jsonb,uuid) IS
+ 'Unplaced stage 1 (20261014170000): true when the text (and payload.builder_refs) names another site or claim than the job: a typed street address not at the job''s site (exact or loose key; a job with no site address matches none), a builder claim the job does not carry (makesafe_job_details.external_ref, metadata mlb_ref, external_ref, builder_claim_ref), or one of our references naming another job. A slash after a word separates two addresses. Sends an only_open_job placement to review (with context_contact_names_other_site); never places.';
+
+-- Does a text name a street address that is not this job's site nor the
+-- site of any of its live parties (job_contacts.site_address)? Typed
+-- addresses only, a slash after a word separating two. For job_party, read on
+-- an email's subject, where the site is named (a body carries signatures and
+-- a neighbour's own address). Computes; never places.
+CREATE OR REPLACE FUNCTION public.context_party_names_other_site(p_text text,p_job_id uuid)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+ WITH s AS (
+  SELECT public.context_address_key(j.site_address) AS k, public.context_address_loose_keys(j.site_address) AS lk
+  FROM public.jobs j WHERE j.id=p_job_id
+  UNION ALL
+  SELECT public.context_address_key(jc.site_address), public.context_address_loose_keys(jc.site_address)
+  FROM public.job_contacts jc WHERE jc.job_id=p_job_id AND jc.removed_at IS NULL AND coalesce(jc.status,'')<>'removed'
+ )
+ SELECT EXISTS (SELECT 1 FROM public.context_address_mentions(regexp_replace(coalesce(p_text,''),'([A-Za-z])\s*/\s*','\1 , ','g')) m
+  WHERE m.typed AND NOT EXISTS (SELECT 1 FROM s
+   WHERE s.k=m.address_key OR coalesce(s.lk,'{}'::text[]) && coalesce(m.loose_keys,'{}'::text[])))
+$$;
+COMMENT ON FUNCTION public.context_party_names_other_site(text,uuid) IS
+ 'Unplaced stage 1 (20261014170000): true when the text names a typed street address that is neither the job''s site nor any live party''s site_address on it (exact or loose key; a slash after a word separates two addresses). The ladder reads an email''s subject (else the words) and sends such a job_party placement to review (review_party_other_site). Never places.';
+
+-- The customer's conversation around a message: the message's own words and
+-- every message of the same CRM contact within only_open_job_conversation_days
+-- either side of it (by the message's own time). True when any of them names
+-- another site or claim than the job, so a builder's contact calling about
+-- one site is never placed on the only other job of that contact.
+CREATE OR REPLACE FUNCTION public.context_contact_names_other_site(p_contact text,p_text text,p_refs jsonb,p_at timestamptz,p_job_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE d interval:=make_interval(days=>(public.context_unplaced_policy()->>'only_open_job_conversation_days')::int);
+BEGIN
+ IF public.context_text_names_other_site(p_text,p_refs,p_job_id) THEN RETURN true; END IF;
+ IF nullif(btrim(p_contact),'') IS NULL OR p_at IS NULL THEN RETURN false; END IF;
+ RETURN EXISTS (SELECT 1 FROM public.business_events b
+  WHERE b.contact_id=p_contact AND coalesce(b.event_at,b.occurred_at) BETWEEN p_at-d AND p_at+d
+   AND public.context_text_names_other_site(public.context_bucket_text(b),b.payload->'builder_refs',p_job_id));
+END $$;
+COMMENT ON FUNCTION public.context_contact_names_other_site(text,text,jsonb,timestamptz,uuid) IS
+ 'Unplaced stage 1 (20261014170000): true when the message''s words, or any message of the same CRM contact within context_unplaced_policy().only_open_job_conversation_days either side of the message time, name another site or claim than the job (context_text_names_other_site). Sends an only_open_job placement to review (review_other_site); never places.';
+
 -- Job parties (job_contacts) by the message's own email or phone key, at
 -- the message time: the job existed by then or within its lead window after
 -- it, was not a quote already dead before it, and had not finished more than
@@ -382,11 +479,12 @@ DECLARE
   'bucket_reason','ref_not_found','ref_job_ids','identity_conflict','contact_recovered_by','writer_unknown','custody_rescan',
   'placement_site_keys','placement_retired_binding','placement_preview_bindings','supplier_ref_conflicts','aftercare_unpaid_job_ids',
   'audience','recipient_role_source','placement_held_from',
-  'placement_ranked_from','placement_ranked_below','party_key_conflict'];
+  'placement_ranked_from','placement_ranked_below','party_key_conflict','placement_guarded_from'];
  writer_job uuid;
  held_job uuid; held_conf numeric; held_match_conf numeric; held_ok boolean:=false; all_ids uuid[]; own_live_ids uuid[];
  -- Unplaced stage 1 (20261014170000).
  link_ids uuid[]; link_only boolean:=false; builder_ids uuid[]; party_ids uuid[]; party_conflict boolean; open_all_ids uuid[]; ranked_from text; ranked_set uuid[];
+ guard_rule text;
 BEGIN
  rules_on:=coalesce(p_rules_on,public.context_unlinked_rules_enabled());
  p_preview:=coalesce(p_preview,false);
@@ -756,7 +854,9 @@ BEGIN
     -- A known customer with no job at the message time (the bucket) whose
     -- only job, of any status, is live now and was created after the
     -- message and within 60 days of it: the row places on it
-    -- (only_open_job), a lead the job's own window just missed.
+    -- (only_open_job), a lead the job's own window just missed. The review
+    -- guards below send it to review when the message, or the customer's
+    -- messages around it, name another site, address or claim.
     IF cand IS NULL AND rule IS NULL AND contact IS NOT NULL AND cardinality(ids)=0 AND cardinality(open_all_ids)=1
      AND (SELECT count(*) FROM unnest(all_ids) x WHERE public.context_job_real(x))=1 THEN
      SELECT j.id INTO cand FROM public.jobs j WHERE j.id=open_all_ids[1] AND j.created_at>v_at AND j.created_at<=v_at+interval '60 days';
@@ -797,6 +897,38 @@ BEGIN
      cand:=party_ids[1]; e.attribution_status:='single_open'; e.attribution_step:=3; rule:='job_party';
     ELSIF party_conflict THEN
      e.metadata:=e.metadata||jsonb_build_object('party_key_conflict',true);
+    END IF;
+   END IF;
+
+   -- Stage 1 review guards (20261014170000, third review). A placement made
+   -- by who sent or received the message, not by what it names, goes to
+   -- review instead, with the job as the one candidate, when:
+   --   review_other_site: only_open_job, and the message or the customer's
+   --     messages within 7 days of it name another site, address or claim
+   --     (context_contact_names_other_site);
+   --   review_party_other_site: job_party, and the email's subject (else the
+   --     words) names a street address that is not the job's site nor any of
+   --     its parties' (context_party_names_other_site);
+   --   review_outbound_no_number: our own outbound message would land on a
+   --     record with no job number, a test job or a holding job;
+   --   review_empty_call_before_job: a call with no words would land on a job
+   --     created more than 30 days after the call.
+   -- A held placement and a placement by a reference, claim, thread or site
+   -- are not guarded here.
+   IF cand IS NOT NULL AND (rule IN ('single_open','single_line','ranked_open','only_open_job','job_party') OR rule LIKE 'identity\_%') THEN
+    guard_rule:=CASE
+     WHEN rule='only_open_job' AND public.context_contact_names_other_site(contact,words,e.payload->'builder_refs',v_at,cand) THEN 'review_other_site'
+     WHEN rule='job_party' AND public.context_party_names_other_site(coalesce(nullif(btrim(subj),''),words),cand) THEN 'review_party_other_site'
+     WHEN e.direction='outbound' AND NOT public.context_job_real(cand) THEN 'review_outbound_no_number'
+     WHEN e.event_type='client.call_logged' AND coalesce(e.payload->>'words','')<>'true'
+      AND (SELECT j.created_at FROM public.jobs j WHERE j.id=cand)>v_at+interval '30 days' THEN 'review_empty_call_before_job'
+    END;
+    IF guard_rule IS NOT NULL THEN
+     e.attribution_status:=CASE WHEN v_mode IN ('backfill','relink') THEN 'unplaced' ELSE 'pending_luna' END;
+     e.attribution_step:=5; e.candidate_job_ids:=ARRAY[cand];
+     e.metadata:=e.metadata||jsonb_build_object('placement_rule',guard_rule,'placement_guarded_from',rule);
+     cand:=NULL;
+     EXIT rules;
     END IF;
    END IF;
 
@@ -939,7 +1071,7 @@ BEGIN
  RETURN e;
 END $function$;
 COMMENT ON FUNCTION public.resolve_context_attribution(public.business_events,boolean,boolean) IS
- 'L1g plus unplaced stage 1 (20261014170000): the ladder (P4) as L1g left it (20261006035000), rules-on path only. Rules off: P1a''s ladder as L1e left it, unchanged. Rules on: writer check, except that a row the reader never reads (system or audit, no words, automated) keeps a custody job the service role confirmed after the insert (source_job_binding.via: confirmed_custody); a service-role outbound row marked recipient_role crew or staff handled by the L1d rule; a row with no words, an automated row or a make-safe reconcile record (stage 1) is never placed by the rules and keeps a custody job and the job a service-role writer named with no match_method (writer_job); custody with monitor-inbox re-scan; the source''s own payload job unless its writer declared it a guess; identity (payload.from read; an outbound row reads its recipient, stage 1); references, with quote and variation link tokens (link_ref, stage 1), a text naming 2 to 5 jobs going to review, and with no reference of ours a builder claim naming one job, narrowed by one purchase order of that claim (builder_ref, stage 1); live thread and supplier order bindings; contact rules with keys and aftercare, where a row a contact rule or Luna already put on a job keeps it instead of going to review or the bucket while that job is still the answer (held_placement, placement_held_from names the rule it outranked; a newer job reopens a placed row only through P1b at its insert); then (stage 1) ranking of a contact review (context_rank_contact_set: jobs that cannot be a customer''s and quotes dead before the message leave; one job left and no finished work places, ranked_open; never by status now or creation date), a known customer whose only job is live and was created within 60 days after the message (only_open_job); a job party''s key with no CRM contact, one job at the message time and no disagreement between email and phone (job_party, stage 1); exact or loose site address (several exact matches go to review); bucket. A stored row a stage-1 rule places follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
+ 'L1g plus unplaced stage 1 (20261014170000): the ladder (P4) as L1g left it (20261006035000), rules-on path only. Rules off: P1a''s ladder as L1e left it, unchanged. Rules on: writer check, except that a row the reader never reads (system or audit, no words, automated) keeps a custody job the service role confirmed after the insert (source_job_binding.via: confirmed_custody); a service-role outbound row marked recipient_role crew or staff handled by the L1d rule; a row with no words, an automated row or a make-safe reconcile record (stage 1) is never placed by the rules and keeps a custody job and the job a service-role writer named with no match_method (writer_job); custody with monitor-inbox re-scan; the source''s own payload job unless its writer declared it a guess; identity (payload.from read; an outbound row reads its recipient, stage 1); references, with quote and variation link tokens (link_ref, stage 1), a text naming 2 to 5 jobs going to review, and with no reference of ours a builder claim naming one job, narrowed by one purchase order of that claim (builder_ref, stage 1); live thread and supplier order bindings; contact rules with keys and aftercare, where a row a contact rule or Luna already put on a job keeps it instead of going to review or the bucket while that job is still the answer (held_placement, placement_held_from names the rule it outranked; a newer job reopens a placed row only through P1b at its insert); then (stage 1) ranking of a contact review (context_rank_contact_set: jobs that cannot be a customer''s and quotes dead before the message leave; one job left and no finished work places, ranked_open; never by status now or creation date), a known customer whose only job is live and was created within 60 days after the message (only_open_job); a job party''s key with no CRM contact, one job at the message time and no disagreement between email and phone (job_party, stage 1); review guards (stage 1, third review): a placement by who sent or received the message goes to review with its job as the one candidate when only_open_job meets another site, address or claim in the message or the customer''s messages within 7 days (review_other_site), a job_party email''s subject names another street address than the job''s or its parties'' (review_party_other_site), our outbound message would land on a record with no job number (review_outbound_no_number), or a call with no words would land on a job created over 30 days after it (review_empty_call_before_job); exact or loose site address (several exact matches go to review); bucket. A stored row a stage-1 rule places follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). Always stamps metadata.bucket_reason on a bucket row. p_preview writes nothing. p_rules_on null reads the flag.';
 
 -- 3. Identity: our own outbound message names its customer by its recipient.
 -- Inbound rows read exactly as before. An outbound row reads the recipients
