@@ -295,6 +295,8 @@ import {
   stripDispatchListAliases,
 } from './dispatch_job_list.ts'
 import { DISPATCH_STATE_SELECT, dispatchRowFields } from './dispatch_stage.ts'
+import { DISPATCH_INSTALL_BOOKING_COLUMNS, dispatchInstallBookingsByJob } from './dispatch_install.ts'
+import { setDispatchInstallConfirmed } from './dispatch_install_write.ts'
 import {
   DispatchStageWriteError,
   setDispatchNextStep,
@@ -8679,8 +8681,29 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           : { userId: null, email: cleanReviewedString(body?.operator_email) || null }
         try {
           return json(action === 'set_dispatch_stage'
-            ? await setDispatchStage(client, body, dispatchActor, DEFAULT_ORG_ID)
+            ? await setDispatchStage(client, body, dispatchActor, DEFAULT_ORG_ID, _perthTodayYmd())
             : await setDispatchNextStep(client, body, dispatchActor, DEFAULT_ORG_ID))
+        } catch (e) {
+          if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
+      // Dispatch slice 7 (docs/dispatch-slice-7-contract.md): Mark confirmed on
+      // the install, and clearing it. Gated exactly as update_repair_stage:
+      // staff sessions and the privileged ops key only, and absent from
+      // ROUTINE_ALLOWED_ACTIONS and AGENT_READ_ALLOWED_ACTIONS. Writes the four
+      // install_confirmed_* columns of job_dispatch_state and one job_events
+      // row; never a booking, the job status, the stage or a message.
+      case 'set_dispatch_install_confirmed': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if (req.method !== 'POST') throw new ApiError(`${action} requires POST`, 405)
+        const installActor = authMode === 'jwt'
+          ? { mode: 'jwt' as const, userId: authUser?.id || null, email: authUser?.email || null }
+          : { mode: 'api_key' as const, userId: null, email: null }
+        try {
+          return json(await setDispatchInstallConfirmed(client, body, installActor, DEFAULT_ORG_ID, _perthTodayYmd()))
         } catch (e) {
           if (e instanceof DispatchStageWriteError) throw new ApiError(e.message, e.status, e.body)
           throw e
@@ -16111,7 +16134,7 @@ async function pipeline(
   // nothing to fail on, so a search with no match never reads as a failed
   // load (docs/dispatch-slice-3-contract.md, docs/dispatch-slice-4-contract.md).
   const dispatchEmpty = dispatchList
-    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok' }
+    ? { dispatch_stages: 'ok', todo_total: 0, dispatch_materials: 'ok', dispatch_installs: 'ok' }
     : {}
   const repairJobIds = typeFilter === 'repair'
     ? await loadInsuranceRepairJobIds(client, DEFAULT_ORG_ID)
@@ -16286,8 +16309,11 @@ async function pipeline(
       // next_scheduled_date. Exclude cancelled rows with an explicit OR that
       // keeps NULL, and re-apply the old exclusion in code for the two legacy
       // fields so their values stay exactly what they were.
+      // Dispatch slice 7: under dispatch=1 only, the same read also carries the
+      // install step's columns (dispatch_install.ts); the plain read is as it was.
       readPipelineEnrichmentRows(jobIds, 'job_assignments', (chunkIds) =>
-        client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role, status').in('job_id', chunkIds).or('status.is.null,status.neq.cancelled')),
+        client.from('job_assignments').select('job_id, scheduled_date, is_ghost, role, status' +
+          (dispatchList ? ', ' + DISPATCH_INSTALL_BOOKING_COLUMNS : '')).in('job_id', chunkIds).or('status.is.null,status.neq.cancelled')),
       readPipelineEnrichmentRows(jobIds, 'purchase_orders', (chunkIds) =>
         client.from('purchase_orders').select('job_id').in('job_id', chunkIds).neq('status', 'deleted')),
       readPipelineEnrichmentRows(jobIds, 'work_orders', (chunkIds) =>
@@ -16419,7 +16445,18 @@ async function pipeline(
   // A failed stage read leaves every dispatch_ field and todo_total off the
   // answer: a wrong column name or a missing table must never put every job
   // back on its job status. The error is logged by logQueryErrors above.
-  const dispatchStagesOk = dispatchList && !dispatchStateRes.error
+  // Slice 7: To do at Trade scheduled turns on the install bookings, so a
+  // failed bookings read fails both (never drawn as "not booked"), and a failed
+  // stage read fails the install step too.
+  const dispatchInstallsOk = dispatchList && !dispatchStateRes.error && !assignRes.error
+  if (dispatchList && assignRes.error) {
+    console.error('[pipeline] dispatch install bookings read failed:', assignRes.error)
+  }
+  const dispatchStagesOk = dispatchInstallsOk
+  const dispatchInstallBookings = dispatchInstallsOk
+    ? dispatchInstallBookingsByJob(assignRes.data)
+    : new Map()
+  const dispatchToday = _perthTodayYmd()
   const dispatchStateMap = new Map<string, any>()
   if (dispatchStagesOk) {
     for (const row of dispatchStateRes.data || []) dispatchStateMap.set(String(row.job_id), row)
@@ -16549,7 +16586,12 @@ async function pipeline(
           description: dispatchJobDescription(j),
           value_inc_gst: dispatchValueIncGst(j),
           work_type: dispatchWorkType(j),
-          ...(dispatchStagesOk ? dispatchRowFields(j, dispatchStateMap.get(String(j.id))) : {}),
+          ...(dispatchStagesOk
+            ? dispatchRowFields(j, dispatchStateMap.get(String(j.id)), {
+              bookings: dispatchInstallBookings.get(String(j.id)) || [],
+              today: dispatchToday,
+            })
+            : {}),
           ...(dispatchMaterialsOk ? dispatchMaterialListFields(materialCountsByJob.get(String(j.id))) : {}),
         }
         : {}),
@@ -16631,6 +16673,7 @@ async function pipeline(
         : { dispatch_stages: 'failed' }
       : {}),
     ...(dispatchList ? { dispatch_materials: dispatchMaterialsOk ? 'ok' : 'failed' } : {}),
+    ...(dispatchList ? { dispatch_installs: dispatchInstallsOk ? 'ok' : 'failed' } : {}),
     ...(enrichmentErrors.length > 0
       ? { degraded: true, enrichment_errors: enrichmentErrors }
       : {}),

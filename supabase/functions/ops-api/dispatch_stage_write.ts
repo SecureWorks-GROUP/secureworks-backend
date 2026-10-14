@@ -9,7 +9,8 @@
 // nothing else. Neither writes `jobs` (no job status, no metadata, no
 // updated_at), neither raises a business event, and neither calls another
 // function, service or message sender: the only client calls in this file are
-// reads of `jobs` and `job_dispatch_state`, the state row write and the one
+// reads of `jobs`, `job_dispatch_state` and (slice 7, so To do is answered by
+// the install rule) `job_assignments`, the state row write and the one
 // job_events insert. Keep it that way; the acceptance run reads this file end
 // to end.
 //
@@ -22,10 +23,15 @@ import {
   dispatchWorkType,
 } from "./dispatch_job_list.ts";
 import {
+  DISPATCH_INSTALL_BOOKING_SELECT,
+  type DispatchInstallBooking,
+} from "./dispatch_install.ts";
+import {
   DISPATCH_NEXT_STEP_MAX,
   DISPATCH_NOT_STARTED,
   DISPATCH_STAGES,
   DISPATCH_STATE_SELECT,
+  type DispatchInstallContext,
   dispatchRowFields,
   isDispatchStage,
   normaliseDispatchNextStep,
@@ -106,6 +112,21 @@ async function readState(client: any, jobId: string) {
   return data || null;
 }
 
+// The job's bookings, read as the list reads them (dispatch_install.ts decides
+// which are the install). Used by set_dispatch_stage and slice 7's
+// set_dispatch_install_confirmed.
+export async function readDispatchInstallBookings(
+  client: any,
+  jobId: string,
+): Promise<DispatchInstallBooking[]> {
+  const { data, error } = await client.from("job_assignments")
+    .select(DISPATCH_INSTALL_BOOKING_SELECT)
+    .eq("job_id", jobId)
+    .or("status.is.null,status.neq.cancelled");
+  if (error) throw error;
+  return data || [];
+}
+
 async function writeEvent(
   client: any,
   row: {
@@ -135,6 +156,7 @@ function isUniqueViolation(error: any): boolean {
 async function stageChanged(
   client: any,
   job: any,
+  install?: DispatchInstallContext,
 ): Promise<never> {
   const current = await readState(client, job.id);
   throw new DispatchStageWriteError(
@@ -146,7 +168,7 @@ async function stageChanged(
       code: "stage_changed",
       job_id: job.id,
       job_number: job.job_number ?? null,
-      ...dispatchRowFields(job, current),
+      ...dispatchRowFields(job, current, install),
     },
   );
 }
@@ -156,6 +178,7 @@ export async function setDispatchStage(
   body: any,
   actor: DispatchWriteActor,
   orgId: string,
+  today?: string,
 ) {
   const jobId = requireJobId(body);
   const stage = String(body?.stage ?? "").trim();
@@ -184,10 +207,17 @@ export async function setDispatchStage(
 
   const job = await readJob(client, jobId, orgId);
   const state = await readState(client, jobId);
-  const before = dispatchRowFields(job, state);
+  // Slice 7: To do at Trade scheduled turns on the install, so the answer is
+  // worked out with the job's bookings (read only; nothing about them changes).
+  const install: DispatchInstallContext | undefined = today
+    ? { bookings: await readDispatchInstallBookings(client, jobId), today }
+    : undefined;
+  const before = dispatchRowFields(job, state, install);
 
   // Two people, or two tabs, cannot both move a job.
-  if (before.dispatch_stage !== expectedStage) await stageChanged(client, job);
+  if (before.dispatch_stage !== expectedStage) {
+    await stageChanged(client, job, install);
+  }
 
   const operatorEmail = cleanEmail(actor.email);
   const userId = actor.userId || null;
@@ -209,6 +239,12 @@ export async function setDispatchStage(
       previous_source: before.dispatch_stage_source,
       dispatch_todo: before.dispatch_todo,
       dispatch_todo_out: before.dispatch_todo_out,
+      ...(install
+        ? {
+          dispatch_install: before.dispatch_install ?? null,
+          dispatch_install_open: before.dispatch_install_open ?? null,
+        }
+        : {}),
       audit_logged: false,
     };
   }
@@ -231,7 +267,7 @@ export async function setDispatchStage(
       .select(DISPATCH_STATE_SELECT)
       .maybeSingle();
     if (error) {
-      if (isUniqueViolation(error)) await stageChanged(client, job);
+      if (isUniqueViolation(error)) await stageChanged(client, job, install);
       throw error;
     }
     written = data;
@@ -249,7 +285,7 @@ export async function setDispatchStage(
     if (error) throw error;
     written = data;
   }
-  if (!written) await stageChanged(client, job);
+  if (!written) await stageChanged(client, job, install);
 
   const auditLogged = await writeEvent(client, {
     job_id: jobId,
@@ -264,7 +300,7 @@ export async function setDispatchStage(
     },
   }, "set_dispatch_stage");
 
-  const after = dispatchRowFields(job, written);
+  const after = dispatchRowFields(job, written, install);
   return {
     success: true,
     job_id: jobId,
@@ -278,6 +314,12 @@ export async function setDispatchStage(
     previous_source: before.dispatch_stage_source,
     dispatch_todo: after.dispatch_todo,
     dispatch_todo_out: after.dispatch_todo_out,
+    ...(install
+      ? {
+        dispatch_install: after.dispatch_install ?? null,
+        dispatch_install_open: after.dispatch_install_open ?? null,
+      }
+      : {}),
     audit_logged: auditLogged,
   };
 }

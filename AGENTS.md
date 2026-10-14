@@ -510,6 +510,11 @@ Slice 4's Materials by supplier lives in three private tables
 worked out only in `dispatch_materials.ts`, and a failed list read of the lines
 answers `dispatch_materials: 'failed'`, never 0. Contract:
 `docs/dispatch-slice-4-contract.md`.
+Slice 7's install step and its To do rule at Trade scheduled live only in
+`dispatch_install.ts`; the mark is Dispatch's own four `job_dispatch_state`
+columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
+by `set_dispatch_install_confirmed`, never the calendar's booking lock.
+Contract: `docs/dispatch-slice-7-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
