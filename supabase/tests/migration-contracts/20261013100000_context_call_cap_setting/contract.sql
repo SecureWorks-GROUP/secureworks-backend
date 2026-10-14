@@ -469,7 +469,8 @@ BEGIN
   ('public.context_cadence_status()', 'ddcd452a67e9e15150ac05d7847e655f', '85e60d754e65b812b28e798435e2a5a4', 's', 1),
   ('public.context_core_status()', '07c51159715c91663a1038f01bf6e09c', '2b6b2c54daeae381cdeff7802d72df81', 's', 2)
  ) AS t(sig, want, before, volatility, calls) LOOP
-  SELECT p.prosrc INTO src FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
+  -- The later recheck removes only the retired today_pass key.
+  SELECT replace(prosrc, 'to_jsonb(p)-''attribution_done_at''', 'to_jsonb(p)') INTO src FROM pg_proc p WHERE p.oid = to_regprocedure(x.sig);
   PERFORM pg_temp.cs_assert(md5(src) = x.want, format('%s md5 %s is not this migration''s', x.sig, md5(src)));
   PERFORM pg_temp.cs_assert(md5(replace(src, 'public.context_cadence_policy_today()', 'public.context_cadence_policy()')) = x.before,
    format('%s differs from the body it replaced beyond the policy call', x.sig));

@@ -243,7 +243,11 @@ import {
   issueQuoteBuilderVersion,
   listQuoteBuilderJobs,
   loadQuoteBuilderCardValues,
+  makeQuoteBuilderPurchaseOrders,
+  makeQuoteBuilderWorkOrder,
+  purchaseOrderSupplierIsUnusable,
   quoteBuilderCardRow,
+  quoteBuilderOrdersEnabled,
   QuoteBuilderError,
   quoteBuilderPdfUploadUrl,
   quoteBuilderPhotoCaption,
@@ -8750,7 +8754,9 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'quote_builder_photo_caption':
       case 'quote_builder_pdf_upload_url':
       case 'quote_builder_issue':
-      case 'quote_builder_decide_variation': {
+      case 'quote_builder_decide_variation':
+      case 'quote_builder_make_work_order':
+      case 'quote_builder_make_purchase_orders': {
         if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
           return json({ error: 'An authorised operator session is required.', code: 'operator_access_required' }, 403)
         }
@@ -21624,6 +21630,10 @@ export async function dispatchQuoteBuilderAction(
       case 'quote_builder_issue': return json(await issueQuoteBuilderVersion(client, body, actor, { moveRepairStage }))
       case 'quote_builder_decide_variation':
         return json(await decideQuoteBuilderVariation(client, body, actor, { decideVariation, moveRepairStage }))
+      case 'quote_builder_make_work_order':
+        return json(await makeQuoteBuilderWorkOrder(client, body, actor))
+      case 'quote_builder_make_purchase_orders':
+        return json(await makeQuoteBuilderPurchaseOrders(client, body, actor))
       default: return json({ error: `Unknown action: ${action}` }, 400)
     }
   } catch (error) {
@@ -35439,14 +35449,20 @@ async function updateJobStatus(client: any, body: any) {
   if (status === 'accepted') {
     (async () => {
       try {
+        // Quote-made rows stay out of acceptance only while quote_builder_orders_v1
+        // is on. Missing or unreadable is off, and off means these queries do
+        // not mention quote_builder_version_id (the column may not exist yet).
+        const ordersOn = await quoteBuilderOrdersEnabled(client)
         // 1. Approve draft work orders for this job
         // Crew work orders only: a job work order is approved by Shaun alone
         // (job_work_orders.ts), never by job acceptance.
-        const { data: draftWOs } = await client.from('work_orders')
+        let draftWoQuery = client.from('work_orders')
           .select('id, wo_number')
           .eq('job_id', jId)
           .neq('kind', 'job')
           .eq('status', 'draft')
+        if (ordersOn) draftWoQuery = draftWoQuery.is('quote_builder_version_id', null)
+        const { data: draftWOs } = await draftWoQuery
         if (draftWOs && draftWOs.length > 0) {
           for (const wo of draftWOs) {
             await client.from('work_orders')
@@ -35462,11 +35478,13 @@ async function updateJobStatus(client: any, body: any) {
         }
 
         // 2. Push draft labour POs to Xero
-        const { data: draftPOs } = await client.from('purchase_orders')
+        let draftPoQuery = client.from('purchase_orders')
           .select('id, po_number')
           .eq('job_id', jId)
           .eq('status', 'draft')
           .is('xero_po_id', null)
+        if (ordersOn) draftPoQuery = draftPoQuery.is('quote_builder_version_id', null)
+        const { data: draftPOs } = await draftPoQuery
         if (draftPOs && draftPOs.length > 0) {
           for (const po of draftPOs) {
             try {
@@ -35673,6 +35691,23 @@ async function pushPOToXero(client: any, body: any) {
 
   if (error || !po) throw new Error('PO not found')
   if (po.xero_po_id) throw new Error('PO already synced to Xero')
+  // A blank or placeholder supplier must not become a Xero contact, and only
+  // while quote_builder_orders_v1 is on. Missing or unreadable is off. While
+  // off this is the same push as before that refusal existed: no 409 here.
+  // The refusal stays before any job read and before getToken.
+  if (
+    purchaseOrderSupplierIsUnusable(po.supplier_name) &&
+    await quoteBuilderOrdersEnabled(client)
+  ) {
+    throw new ApiError(
+      'A purchase order needs a real supplier name before it can go to Xero.',
+      409,
+      {
+        error: 'A purchase order needs a real supplier name before it can go to Xero.',
+        code: 'po_supplier_required',
+      },
+    )
+  }
 
   // U2 reference discipline — resolve the canonical outbound job ref ONCE so both
   // the Xero Reference field and the DeliveryInstructions quote-back ask carry the
