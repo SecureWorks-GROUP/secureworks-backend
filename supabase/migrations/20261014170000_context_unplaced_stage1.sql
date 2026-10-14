@@ -84,7 +84,7 @@ DO $guard$
 DECLARE problems text[]:='{}'; live text; x record;
 BEGIN
  FOR x IN SELECT * FROM (VALUES
-  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['0faf9b6362c35225b8eca7beba887d99','c71c5fb9fda4edb643f278804a6d862f']),
+  ('public.resolve_context_attribution(public.business_events,boolean,boolean)',ARRAY['0faf9b6362c35225b8eca7beba887d99','8051d55455b0d7d1cbce773f0d6ab3c6']),
   ('public.context_event_identity(public.business_events)',ARRAY['cc484b96d670d401a3457347884f5371','ec1f67645b889441791d433d5fe08339']),
   ('public.context_reconsider_contact(text,timestamptz,text,uuid)',ARRAY['5f9dbe883f0add7a6987f3ed265a08af','75aea904fb88a526ee6aed68b4d592b9']),
   ('public.context_bucket_status()',ARRAY['155104bfb08b8b3c2f98bdec089d4ee4','1ac0e031034928239810432d213ed77e']),
@@ -737,8 +737,8 @@ BEGIN
     -- for a contact review only: the message names no job of ours, so its
     -- candidates come from who sent it. Jobs that are not a customer's job
     -- (no number: a hidden old-system record; a test job) leave the set,
-    -- and a quote that was already dead at the message time (cancelled,
-    -- lost, archived with no work delivered) leaves the recently finished
+    -- and a quote that was already dead at the message time (closed with
+    -- no trace of progress, context_job_dead) leaves the recently finished
     -- set. When exactly one job is left and no finished work competes, the
     -- row places on it (ranked_open), as single_open would have. Work done,
     -- a job live at the message time that closed later, and aftercare stay
