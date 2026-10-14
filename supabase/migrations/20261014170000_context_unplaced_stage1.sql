@@ -27,7 +27,7 @@
 --   2. Identifiers: quote and variation link tokens are references
 --      (link_ref); with no reference of ours, a builder claim naming exactly
 --      one job, or one purchase order of that claim, places the row
---      (builder_ref; a purchase order alone never places); our own outbound
+--      (builder_ref; the claim is read from make-safe details and from a repair job's own claim fields, so a claim shared by a make-safe and its repair places neither; a purchase order alone never places); our own outbound
 --      email or text reads its recipient (payload.to) as identity; a sender
 --      or recipient that is a job party (job_contacts) with no CRM contact
 --      places on that party's job when exactly one job fits the message time
@@ -268,6 +268,16 @@ BEGIN
    ltrim(m[2],'0') AS num
   FROM public.makesafe_job_details d
   CROSS JOIN LATERAL regexp_matches(upper(coalesce(d.external_ref,'')),'^\s*'||claim_re) m
+  UNION
+  -- A repair or fence job on the same claim carries it on the job itself
+  -- (mlb_ref, external_ref, builder_claim_ref), so a claim shared by a
+  -- make-safe and its repair names both and places neither.
+  SELECT j.id, CASE WHEN m[1] IN ('AJ','AJS','AJBR') THEN 'AJ' WHEN m[1] IN ('BW','BWCWA') THEN 'BW' ELSE m[1] END,
+   ltrim(m[2],'0')
+  FROM public.jobs j
+  CROSS JOIN LATERAL unnest(ARRAY[j.metadata->>'mlb_ref',j.metadata->>'external_ref',j.metadata->>'builder_claim_ref']) r
+  CROSS JOIN LATERAL regexp_matches(upper(coalesce(r,'')),'^\s*'||claim_re) m
+  WHERE j.metadata ?| ARRAY['mlb_ref','external_ref','builder_claim_ref']
  )
  SELECT (SELECT count(*) FROM c), coalesce(array_agg(DISTINCT jc.job_id),'{}'::uuid[])
  INTO n_claims,claim_ids FROM jc JOIN c USING (scope,num);
@@ -298,7 +308,7 @@ BEGIN
  RETURN '{}'::uuid[];
 END $$;
 COMMENT ON FUNCTION public.context_builder_ref_jobs(text,jsonb) IS
- 'Unplaced stage 1 (20261014170000): our jobs named by a builder claim (MLB, MLB-RR/MW, AJ/AJS/AJBR, BW/BWCWA, WB, ACG plus digits) in the text or payload.builder_refs, narrowed by a purchase order (makesafe_job_details.external_ref or jobs.metadata.builder_po_number) that names exactly one job of that claim. No claim: none (a purchase order alone has no builder scope). Purchase order evidence naming several jobs or a job off the claim: none. Whole digit runs only. Never a holding job. The ladder places only when exactly one job is returned.';
+ 'Unplaced stage 1 (20261014170000): our jobs named by a builder claim (MLB, MLB-RR/MW, AJ/AJS/AJBR, BW/BWCWA, WB, ACG plus digits) in the text or payload.builder_refs, read from makesafe_job_details.external_ref and from the job''s own mlb_ref, external_ref or builder_claim_ref (a repair on the same claim), narrowed by a purchase order (makesafe_job_details.external_ref or jobs.metadata.builder_po_number) that names exactly one job of that claim. No claim: none (a purchase order alone has no builder scope). Purchase order evidence naming several jobs or a job off the claim: none. Whole digit runs only. Never a holding job. The ladder places only when exactly one job is returned.';
 
 -- Job parties (job_contacts) by the message's own email or phone key, at
 -- the message time: the job existed by then or within its lead window after
@@ -1079,9 +1089,12 @@ COMMENT ON FUNCTION public.context_reconsider_contact(text,timestamptz,text,uuid
 -- 5. Re-decide resting rows when new evidence arrives.
 -- One writer for one row, used by the three evidence triggers below and by
 -- the hand run: it re-runs the ladder on a row with no job that rests in the
--- bucket or unplaced, and writes only a placement, a review case, or a
--- machine or empty row taken out (automated or empty, no job). Anything else
--- is left exactly as it was. A placement or review case follows the one
+-- bucket or unplaced, and writes only a placement, a review case for a
+-- bucket row, or a machine or empty row taken out (automated or empty, no
+-- job). Anything else is left exactly as it was. An unplaced row already
+-- rests for review (often the model's own several or undecided answer), so
+-- it is never sent to the model again here; only P1b's named reopen does
+-- that. A placement or review case follows the one
 -- re-decision rule (context_redecided_metadata): a message older than 48
 -- hours is stamped capture_mode relink. Never waits on a locked row.
 CREATE OR REPLACE FUNCTION public.context_redecide_one(p_id uuid,p_reason text,p_detail jsonb DEFAULT NULL)
@@ -1099,7 +1112,8 @@ BEGIN
  IF e.job_id IS NOT NULL OR coalesce(e.attribution_status,'admin_bucket') NOT IN ('admin_bucket','unplaced') THEN RETURN 'unchanged'; END IF;
  resolved:=public.resolve_context_attribution(e);
  v_outcome:=CASE WHEN resolved.job_id IS NOT NULL THEN 'placed'
-  WHEN resolved.attribution_status='pending_luna' THEN 'review'
+  WHEN resolved.attribution_status='pending_luna' AND e.attribution_status IS DISTINCT FROM 'unplaced'
+   AND NOT (coalesce(e.metadata,'{}'::jsonb) ? 'luna_outcome') THEN 'review'
   WHEN resolved.attribution_status IN ('automated','empty') THEN 'taken_out' END;
  IF v_outcome IS NULL THEN RETURN 'unchanged'; END IF;
  v_note:=jsonb_build_object('reason',p_reason,'at',clock_timestamp(),'from_status',coalesce(e.attribution_status,'none'))
@@ -1119,7 +1133,7 @@ BEGIN
  RETURN v_outcome;
 END $$;
 COMMENT ON FUNCTION public.context_redecide_one(uuid,text,jsonb) IS
- 'Unplaced stage 1 (20261014170000): re-runs the ladder on one row with no job resting in the bucket or unplaced (reasons thread_bound, invoice_linked, hand_run) and writes only a placement (placed), a review case (review) or a machine or empty row taken out with no job (taken_out), with metadata.placement_redecided; anything else is unchanged. A placement or review case follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). A locked row is busy. Service role only.';
+ 'Unplaced stage 1 (20261014170000): re-runs the ladder on one row with no job resting in the bucket or unplaced (reasons thread_bound, invoice_linked, hand_run) and writes only a placement (placed), a review case for a bucket row the model has not answered (review) or a machine or empty row taken out with no job (taken_out), with metadata.placement_redecided; anything else is unchanged (an unplaced row is never sent to the model again). A placement or review case follows context_redecided_metadata (a message older than 48 hours is capture_mode relink). A locked row is busy. Service role only.';
 
 -- The evidence triggers name their rows: at most 200 rows and 2 seconds a call.
 CREATE OR REPLACE FUNCTION public.context_redecide_events(p_ids uuid[],p_reason text,p_detail jsonb DEFAULT NULL)
