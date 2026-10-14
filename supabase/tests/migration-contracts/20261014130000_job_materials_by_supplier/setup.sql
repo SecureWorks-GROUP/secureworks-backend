@@ -1,4 +1,4 @@
--- Prerequisites for 20261014120000_job_materials_by_supplier. Earlier registered cases already
+-- Prerequisites for 20261014130000_job_materials_by_supplier. Earlier registered cases already
 -- create public.jobs, public.suppliers, public.purchase_orders and the API roles in reduced shapes
 -- (checked here); the three tables reference only jobs(id), suppliers(id) and purchase_orders(id),
 -- so nothing is added.

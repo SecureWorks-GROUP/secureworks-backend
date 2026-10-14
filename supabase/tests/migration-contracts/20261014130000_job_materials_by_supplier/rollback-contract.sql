@@ -1,4 +1,4 @@
--- Rollback contract: 20261014120000_job_materials_by_supplier. The down drops the three Dispatch
+-- Rollback contract: 20261014130000_job_materials_by_supplier. The down drops the three Dispatch
 -- materials tables and nothing else: jobs, suppliers and purchase_orders remain.
 \set ON_ERROR_STOP on
 DO $$

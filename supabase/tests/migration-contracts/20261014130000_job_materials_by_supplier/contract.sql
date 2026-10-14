@@ -1,4 +1,4 @@
--- Contract: 20261014120000_job_materials_by_supplier. The three Dispatch materials tables sit where
+-- Contract: 20261014130000_job_materials_by_supplier. The three Dispatch materials tables sit where
 -- no browser role can read or write them; a line always sits under a supplier chosen for its job;
 -- only the three hand-set statuses are stored; a supplier with a line cannot be taken off; the
 -- sketch is a size-bounded PNG data URL; and everything goes with its job.

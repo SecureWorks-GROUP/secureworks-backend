@@ -1,4 +1,4 @@
--- Down for 20261014120000_job_materials_by_supplier. Drops the three Dispatch materials tables and
+-- Down for 20261014130000_job_materials_by_supplier. Drops the three Dispatch materials tables and
 -- nothing else: jobs, suppliers and purchase_orders remain, and no purchase order ever pointed at a
 -- line. Roll ops-api back first: the deployed dispatch_materials read, the six dispatch_materials_*
 -- writes and the pipeline dispatch=1 read all name these tables. The lines go first, because their

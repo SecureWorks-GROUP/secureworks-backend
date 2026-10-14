@@ -10,9 +10,9 @@ Code: `supabase/functions/ops-api/dispatch_materials.ts` (the rules, pure),
 `supabase/functions/ops-api/dispatch_materials_store.ts` (the read and the six
 writes), the `pipeline` enrichment wave and the action switch in
 `supabase/functions/ops-api/index.ts`. Migration:
-`supabase/migrations/20261014120000_job_materials_by_supplier.sql` (rollback
-`supabase/rollbacks/20261014120000_job_materials_by_supplier_down.sql`, contract
-case `supabase/tests/migration-contracts/20261014120000_job_materials_by_supplier/`).
+`supabase/migrations/20261014130000_job_materials_by_supplier.sql` (rollback
+`supabase/rollbacks/20261014130000_job_materials_by_supplier_down.sql`, contract
+case `supabase/tests/migration-contracts/20261014130000_job_materials_by_supplier/`).
 Tests: `dispatch_materials_test.ts`, run by the "Test the Dispatch list and job
 notes reads" step of `.github/workflows/pr-check.yml`.
 

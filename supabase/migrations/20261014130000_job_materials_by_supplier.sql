@@ -19,7 +19,7 @@
 -- quote_builder_versions and job_contacts are: only ops-api reaches them. The
 -- sketch is a staff-only working note and must never reach a trade or a client.
 --
--- Rollback: supabase/rollbacks/20261014120000_job_materials_by_supplier_down.sql.
+-- Rollback: supabase/rollbacks/20261014130000_job_materials_by_supplier_down.sql.
 
 CREATE TABLE IF NOT EXISTS public.job_material_suppliers (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
