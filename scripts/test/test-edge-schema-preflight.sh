@@ -901,6 +901,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch slice 3: the stage record pipeline dispatch=1
                       # reads and set_dispatch_stage / _next_step write.
                       ("20261014113000", "job_dispatch_state"),
+                      # Automatic issue of job work orders: the fill and edit
+                      # stamps every job work order read selects
+                      # (job_work_orders.ts).
+                      ("20261014120000", "job_work_order_auto_issue"),
                       # Dispatch slice 4: the materials store pipeline
                       # dispatch=1 reads and dispatch_materials_* write.
                       ("20261014130000", "job_materials_by_supplier"),

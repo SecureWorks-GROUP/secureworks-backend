@@ -746,6 +746,14 @@ ops-api|supabase/migrations/20261013150000_job_closeout_review_archive.sql|colum
 xero-sync|supabase/migrations/20261013150000_job_closeout_review_archive.sql|table|job_closeout_settings
 xero-sync|supabase/migrations/20261013150000_job_closeout_review_archive.sql|column|job_closeout_settings.get_review_move_enabled
 
+# Automatic issue of job work orders: every job work order read selects the
+# two stamps, and the quote fill writes quote_filled_at, so they must exist
+# before this ops-api ships.
+ops-api|supabase/migrations/20261014120000_job_work_order_auto_issue.sql|column|work_orders.quote_filled_at
+ops-api|supabase/migrations/20261014120000_job_work_order_auto_issue.sql|column|work_orders.hand_edited_at
+ops-api|supabase/migrations/20261014120000_job_work_order_auto_issue.sql|constraint|work_orders_auto_issue_check
+ops-api|supabase/migrations/20261014120000_job_work_order_auto_issue.sql|function|auto_issue_job_work_order
+
 # Quote builder pricing settings and the filed scope of works:
 # quote_builder_get_job reads the settings table on every open, so ops-api must
 # not deploy ahead of this migration.

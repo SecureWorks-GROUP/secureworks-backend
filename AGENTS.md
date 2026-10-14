@@ -4606,7 +4606,9 @@ by trigger: any update or delete raises, so a crew-path writer that touches it
 fails loudly. Every crew-pay read or write (`my_work_orders`,
 `submit_work_order_invoice`, weekly blocks, the acceptance auto-approve) filters
 `kind = 'crew'`; a new one must too. Only the users in
-`work_order_settings.approver_user_ids` (Shaun) approve, never a role, and an
+`work_order_settings.approver_user_ids` (Shaun) approve, never a role (the one
+other seal is the system's own `approved_via 'auto'` issue of an unedited
+quote-filled draft, behind `job_work_order_auto_issue_v1`), and an
 approval seals only the draft that was read: `approve_work_order` requires
 `expected_updated_at`, compared under the row lock in `approve_job_work_order`.
 A recorded variation changes only through the staff door

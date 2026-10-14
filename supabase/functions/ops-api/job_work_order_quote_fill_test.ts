@@ -13,10 +13,14 @@ import {
   QuoteFillError,
 } from "./job_work_order_quote_fill.ts";
 import {
+  autoIssueJobWorkOrderForJob,
+  autoIssueJobWorkOrders,
   backfillJobWorkOrders,
   createJobWorkOrder,
   readJobWorkOrder,
+  tradeJobWorkOrderRead,
 } from "./job_work_orders.ts";
+import { tradeJobWorkOrderRedaction } from "./index.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 const JOB = "11111111-1111-4111-8111-111111111111";
@@ -74,6 +78,10 @@ class Query {
   }
   not(col: string, _op: string, val: any) {
     this.filters.push((r) => (get(r, col) ?? null) !== val);
+    return this;
+  }
+  gte(col: string, val: any) {
+    this.filters.push((r) => get(r, col) != null && get(r, col) >= val);
     return this;
   }
   lte(col: string, val: any) {
@@ -803,4 +811,386 @@ Deno.test("front door: the preview is a staff read; a trade session is refused",
   }
   assert(!LEAD_INSTALLER_READ_ACTIONS.has("quote_work_order_lines"));
   assert(!AGENT_READ_ALLOWED_ACTIONS.has("quote_work_order_lines"));
+});
+
+// ── Automatic issue (job_work_order_auto_issue_v1) ───────────────────────────
+
+const AUTO_FLAG = "job_work_order_auto_issue_v1";
+
+function autoIssueOn(db: FakeDb) {
+  db.tables.feature_flags = [{ flag_name: AUTO_FLAG, enabled: true }];
+}
+
+/** auto_issue_job_work_order as the database answers it
+ *  (20261014120000_job_work_order_auto_issue.sql). */
+function autoIssueDoor(db: FakeDb) {
+  const calls: any[] = [];
+  db.rpcImpl = (fn, args) => {
+    calls.push({ fn, args });
+    if (fn !== "auto_issue_job_work_order") return { data: null, error: null };
+    const on = (db.tables.feature_flags || []).some((f) =>
+      f.flag_name === AUTO_FLAG && f.enabled === true
+    );
+    if (!on) {
+      return { data: null, error: { code: "42501", message: "switched off" } };
+    }
+    const wo = db.tables.work_orders.find((w) => w.id === args.p_work_order_id);
+    if (!wo || wo.status !== "draft") {
+      return { data: null, error: { code: "23514", message: "not draft" } };
+    }
+    if (wo.updated_at !== args.p_expected_updated_at) {
+      return { data: null, error: { code: "WO409", message: "changed" } };
+    }
+    if (!wo.quote_filled_at || wo.hand_edited_at) {
+      return { data: null, error: { code: "WO423", message: "not issuable" } };
+    }
+    Object.assign(wo, {
+      status: "approved",
+      approved_by: null,
+      approved_via: "auto",
+      approved_at: "2026-10-14T00:00:00Z",
+      sealed_content_hash: "h".repeat(64),
+    });
+    return { data: { ...wo }, error: null };
+  };
+  return calls;
+}
+
+Deno.test("auto issue: switched off, nothing is filled, issued or written, even on a status change", async () => {
+  const db = baseDb();
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.issued, false);
+  assertEquals(r.reason, "switched_off");
+  assertEquals(calls, []);
+  assertEquals(db.writes(), []);
+  assertEquals(db.tables.work_orders[0].scope_items, []);
+});
+
+Deno.test("auto issue: the draft is filled from the accepted quote and goes to the trades with no human approval", async () => {
+  const db = baseDb();
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.reason, "issued");
+  assertEquals(r.issued, true);
+  assertEquals(r.quote_fill?.filled, true);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.status, "approved");
+  assertEquals(wo.approved_via, "auto");
+  assertEquals(wo.approved_by, null);
+  assertEquals(wo.agreed_labour_ex, ACCEPTED_AGREED);
+  assert(wo.quote_filled_at, "the fill stamps the draft as its own");
+  // The system seals only the draft as the fill wrote it.
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].args.p_work_order_id, DRAFT);
+  assertEquals(calls[0].args.p_expected_updated_at, "updated-1");
+  // Ids and counts only on the job's events.
+  const issued = db.tables.job_events.filter((e) =>
+    e.event_type === "job_work_order_auto_issued"
+  );
+  assertEquals(issued.length, 1);
+  assertEquals(issued[0].user_id, null);
+  const detail = JSON.stringify(issued[0].detail_json);
+  for (const leak of [String(ACCEPTED_AGREED), "160", "80", "647.5"]) {
+    assert(!detail.includes(leak), `event leaked ${leak}: ${detail}`);
+  }
+});
+
+Deno.test("auto issue: a line flagged for review does not hold the work order; the office sees it as needs checking, the trades never do", async () => {
+  const db = baseDb();
+  // An old-style extra saved with no hours ("Root removal, 1 job"): the
+  // fill cannot tell labour from material, so it is flagged.
+  const pricing = JSON.parse(
+    db.tables.scope_revisions[0].pricing_canonical_text,
+  );
+  pricing.line_items.push({
+    unit: "each",
+    category: "custom",
+    quantity: 1,
+    cost_price: 120,
+    description: "Root removal",
+  });
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify(
+    pricing,
+  );
+  autoIssueOn(db);
+  autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.reason, "issued");
+  assert(r.needs_checking_lines >= 2, JSON.stringify(r));
+
+  const staff: any = await readJobWorkOrder(db, { jobId: JOB });
+  const note = staff.needs_checking;
+  assertEquals(note.needs_checking, true);
+  assertEquals(note.issued_automatically, true);
+  assertEquals(note.held, null);
+  const extra = note.lines.find((l: any) => l.description === "Root removal");
+  assert(extra.flags.includes("labour_or_material_unknown"));
+  assert(/went to the trades as it is/.test(note.message));
+
+  // The trade read: hours and quantities only, no flag, note or amount.
+  const trade = await tradeJobWorkOrderRead(
+    db,
+    JOB,
+    "trade-1",
+    tradeJobWorkOrderRedaction,
+  );
+  const text = JSON.stringify(trade);
+  for (
+    const leak of [
+      "needs_review",
+      "needs_checking",
+      "flags",
+      "labour_or_material_unknown",
+      "outside_quote_labour",
+      "quote_cost_ex",
+      "rate",
+      "total",
+      "counted",
+      "agreed",
+      "approved_via",
+      "auto",
+      String(ACCEPTED_AGREED),
+      "120",
+      "160",
+    ]
+  ) {
+    assert(!text.includes(leak), `trade read leaked ${leak}: ${text}`);
+  }
+  const lines = (trade.work_order as any).scope_items;
+  assert(lines.some((l: any) => l.description === "Root removal"));
+  for (const line of lines) {
+    for (const key of Object.keys(line)) {
+      assert(
+        ["description", "qty", "unit", "hours"].includes(key),
+        `trade line carries ${key}`,
+      );
+    }
+  }
+});
+
+Deno.test("auto issue: a draft someone edited by hand waits for the approver", async () => {
+  const db = baseDb({
+    work_orders: [draftRow({
+      scope_items: [{ description: "Typed by the office" }],
+      agreed_labour_ex: 900,
+      hand_edited_at: "2026-10-13T00:00:00Z",
+    })],
+  });
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.reason, "hand_edited");
+  assertEquals(calls, []);
+  assertEquals(db.tables.work_orders[0].status, "draft");
+  const staff: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(staff.needs_checking.held.reason, "hand_edited");
+  assertEquals(staff.needs_checking.needs_checking, true);
+});
+
+Deno.test("auto issue: a draft edited by hand before the fill is filled without the fill's stamp and is not issued", async () => {
+  const db = baseDb({
+    work_orders: [draftRow({
+      special_instructions: "Dog on site",
+      hand_edited_at: "2026-10-13T00:00:00Z",
+    })],
+  });
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.reason, "hand_edited");
+  assertEquals(calls, []);
+  // This door does not fill a draft someone has written into; a staff read
+  // or the backfill still fills it, without the fill's stamp.
+  assertEquals(db.tables.work_orders[0].scope_items, []);
+  const filled = await fillJobWorkOrderDraftFromQuote(db, JOB);
+  assertEquals(filled.filled, true);
+  assertEquals(db.tables.work_orders[0].quote_filled_at, undefined);
+});
+
+Deno.test("auto issue: a quote with no labour figure fills the lines and waits for the agreed labour", async () => {
+  const db = baseDb();
+  const pricing = JSON.parse(
+    db.tables.scope_revisions[0].pricing_canonical_text,
+  );
+  delete pricing.labourCostEstimate;
+  db.tables.scope_revisions[0].pricing_canonical_text = JSON.stringify(
+    pricing,
+  );
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.reason, "agreed_labour_missing");
+  assertEquals(calls, []);
+  const wo = db.tables.work_orders[0];
+  assertEquals(wo.status, "draft");
+  assert(wo.scope_items.length > 0);
+  const staff: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(staff.needs_checking.held.reason, "agreed_labour_missing");
+});
+
+Deno.test("auto issue: no accepted quote leaves the draft empty for the office", async () => {
+  const db = baseDb({ scope_revisions: [] });
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.reason, "not_filled");
+  assertEquals(r.quote_fill?.reason, "no_accepted_quote");
+  assertEquals(calls, []);
+  const staff: any = await readJobWorkOrder(db, { jobId: JOB });
+  assertEquals(staff.needs_checking.held.reason, "not_filled");
+});
+
+Deno.test("auto issue: an approved work order and a job that is not open are never touched", async () => {
+  const sealed = baseDb({
+    work_orders: [draftRow({
+      status: "approved",
+      approved_via: "session",
+      approved_at: "2026-10-10T00:00:00Z",
+    })],
+  });
+  autoIssueOn(sealed);
+  autoIssueDoor(sealed);
+  const a = await autoIssueJobWorkOrderForJob(sealed, JOB);
+  assertEquals(a.reason, "already_approved");
+  assertEquals(sealed.writes(), []);
+
+  const closed = baseDb();
+  closed.tables.jobs[0].status = "complete";
+  autoIssueOn(closed);
+  const calls = autoIssueDoor(closed);
+  const b = await autoIssueJobWorkOrderForJob(closed, JOB);
+  assertEquals(b.reason, "job_not_open");
+  assertEquals(calls, []);
+  assertEquals(closed.writes(), []);
+});
+
+Deno.test("auto issue: a save that lands after the system read is not sealed", async () => {
+  const db = baseDb({
+    work_orders: [draftRow({
+      scope_items: [{ description: "x", source: "quote" }],
+      agreed_labour_ex: 500,
+      quote_filled_at: "2026-10-13T00:00:00Z",
+    })],
+  });
+  autoIssueOn(db);
+  autoIssueDoor(db);
+  const inner = db.rpcImpl;
+  db.rpcImpl = (fn, args) => {
+    // A save between the read and the issue moves updated_at.
+    db.tables.work_orders[0].updated_at = "saved-later";
+    return inner(fn, args);
+  };
+  const r = await autoIssueJobWorkOrderForJob(db, JOB);
+  assertEquals(r.reason, "draft_changed");
+  assertEquals(db.tables.work_orders[0].status, "draft");
+  assertEquals(
+    db.tables.job_events.filter((e) =>
+      e.event_type === "job_work_order_auto_issued"
+    ),
+    [],
+  );
+});
+
+Deno.test("auto issue sweep: switched off writes nothing; on, it issues filled and fresh drafts and leaves old empty or hand-edited ones", async () => {
+  const NOW = new Date("2026-10-14T00:00:00Z");
+  const jobs: any[] = [];
+  const work_orders: any[] = [];
+  const add = (n: number, wo: Record<string, unknown>) => {
+    const jobId = `11111111-1111-4111-8111-1111111110${n}`;
+    jobs.push({
+      id: jobId,
+      org_id: ORG,
+      job_number: `SWF-${n}`,
+      type: "fencing",
+      status: "scheduled",
+      expected_costs: { scope_revision_id: REV_ACCEPTED },
+    });
+    work_orders.push(draftRow({
+      id: `33333333-3333-4333-8333-3333333330${n}`,
+      job_id: jobId,
+      jobs: { type: "fencing", status: "scheduled" },
+      ...wo,
+    }));
+    return jobId;
+  };
+  const filledJob = add(10, {
+    scope_items: [{ description: "Install", source: "quote" }],
+    agreed_labour_ex: 500,
+    quote_filled_at: "2026-10-01T00:00:00Z",
+    created_at: "2026-10-01T00:00:00Z",
+  });
+  const freshJob = add(11, { created_at: "2026-10-13T12:00:00Z" });
+  const oldEmptyJob = add(12, { created_at: "2026-10-01T00:00:00Z" });
+  const editedJob = add(13, {
+    scope_items: [{ description: "Typed" }],
+    agreed_labour_ex: 500,
+    hand_edited_at: "2026-10-02T00:00:00Z",
+    created_at: "2026-10-01T00:00:00Z",
+  });
+  const db = baseDb({
+    jobs,
+    work_orders,
+    scope_revisions: [11].map(() => ({
+      id: REV_ACCEPTED,
+      job_id: freshJob,
+      revision_number: 1,
+      status: "frozen",
+      frozen_at: "2026-10-05T08:55:20Z",
+      pricing_canonical_text: JSON.stringify(ACCEPTED_PRICING),
+    })),
+  });
+  autoIssueDoor(db);
+
+  const off: any = await autoIssueJobWorkOrders(db, {}, NOW);
+  assertEquals(off.switched_on, false);
+  assertEquals(db.writes(), []);
+
+  autoIssueOn(db);
+  const on: any = await autoIssueJobWorkOrders(db, {}, NOW);
+  assertEquals(on.switched_on, true);
+  assertEquals(on.issued, 2);
+  const status = (jobId: string) =>
+    db.tables.work_orders.find((w) => w.job_id === jobId).status;
+  assertEquals(status(filledJob), "approved");
+  assertEquals(status(freshJob), "approved");
+  assertEquals(status(oldEmptyJob), "draft");
+  assertEquals(status(editedJob), "draft");
+  assert(
+    !on.results.some((x: any) =>
+      x.job_id === oldEmptyJob || x.job_id === editedJob
+    ),
+  );
+});
+
+Deno.test("backfill: while automatic issue is on, every draft it fills goes to the trades", async () => {
+  const db = baseDb();
+  autoIssueOn(db);
+  const calls = autoIssueDoor(db);
+  const inner = db.rpcImpl;
+  db.rpcImpl = (fn, args) =>
+    fn === "backfill_job_work_order_drafts"
+      ? {
+        data: { dry_run: !args.p_apply, candidates: 0, opened: 0, job_ids: [] },
+        error: null,
+      }
+      : inner(fn, args);
+
+  const dry: any = await backfillJobWorkOrders(db, {});
+  assertEquals(dry.auto_issue, { dry_run: true, switched_on: true });
+  assertEquals(db.writes(), []);
+
+  const applied: any = await backfillJobWorkOrders(db, { apply: true });
+  assertEquals(applied.quote_fill.filled, 1);
+  assertEquals(applied.auto_issue, {
+    switched_on: true,
+    issued: 1,
+    not_issued: {},
+  });
+  assertEquals(db.tables.work_orders[0].approved_via, "auto");
+  assertEquals(
+    calls.filter((c) => c.fn === "auto_issue_job_work_order").length,
+    1,
+  );
 });

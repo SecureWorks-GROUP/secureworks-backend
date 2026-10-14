@@ -166,6 +166,15 @@ These rules apply to any job type.
   table row it uses changed, and `labour_differs_from_quote` marks every line priced from
   the table. `flags` and `needs_review` are office-only: trades never see them.
 
+## Issuing a draft with flagged lines
+
+While `job_work_order_auto_issue_v1` is on (`docs/job-work-orders-v1.md`, "Automatic
+issue"), a filled draft nobody has edited goes to the trades without an approval, flagged
+lines included: the flags stay on the sealed lines and reach the office as the
+`needs_checking` note, never the trades. The fill stamps `quote_filled_at` on the draft it
+writes (not on a draft someone already edited by hand), which is what the automatic issue
+requires. What follows applies while the switch is off, or to a draft held for the approver.
+
 ## Approving a draft with flagged lines
 
 Approval (`approve_work_order`, `docs/job-work-orders-v1.md`) does not refuse a draft whose

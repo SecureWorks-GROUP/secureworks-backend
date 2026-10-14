@@ -14,6 +14,11 @@
 // - scope_items gets the builder's lines and agreed_labour_ex the quote's own
 //   labour figure. When the quote has none, agreed_labour_ex stays empty for
 //   the approver to set.
+// - The same write stamps quote_filled_at, which marks the draft as the
+//   fill's own: only such a draft, never edited since (hand_edited_at, set by
+//   the database), is issued automatically (job_work_orders.ts,
+//   20261014120000_job_work_order_auto_issue.sql). A draft someone already
+//   edited by hand is filled without the stamp and waits for the approver.
 
 import {
   buildQuoteWorkOrderLines,
@@ -30,7 +35,7 @@ const UUID_RE =
 const MAX_FILLED_SCOPE_ITEMS = 200;
 
 const FILL_WO_COLUMNS =
-  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, created_at, updated_at";
+  "id, org_id, job_id, wo_number, kind, status, scope_items, special_instructions, scheduled_date, site_address, agreed_labour_ex, approved_at, approved_by, approved_via, sealed_content_hash, origin, quote_filled_at, hand_edited_at, created_at, updated_at";
 
 export class QuoteFillError extends Error {
   constructor(
@@ -370,6 +375,11 @@ export async function fillJobWorkOrderDraftFromQuote(
   };
   if (result.agreed_labour_ex !== null) {
     patch.agreed_labour_ex = result.agreed_labour_ex;
+  }
+  // The database refuses this stamp on a draft edited by hand (its
+  // special instructions, say), so such a draft is filled without it.
+  if (!draft.hand_edited_at) {
+    patch.quote_filled_at = new Date().toISOString();
   }
   let update = client.from("work_orders").update(patch)
     .eq("id", draft.id)
