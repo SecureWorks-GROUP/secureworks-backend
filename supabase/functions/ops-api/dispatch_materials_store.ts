@@ -462,9 +462,9 @@ export async function readDispatchMaterials(
     : undefined;
   // Slice 6: lines on a sighted order read Delivered. With the orders read
   // failed nothing is sighted, as before slice 6 (the screen shows the failure).
-  const sightedOrderIds = orderState
-    ? dispatchSightedOrderIds(ordersRes.data || [])
-    : undefined;
+  const sightedOrderIds = ordersRes.error
+    ? undefined
+    : dispatchSightedOrderIds(ordersRes.data || []);
   const names = orderState
     ? await readDispatchPersonNames(client, ordersRes.data || [])
     : new Map<string, string>();
@@ -493,7 +493,7 @@ export async function readDispatchMaterials(
     lines: lines.map((line) =>
       poNumbers
         ? projectDispatchMaterialLineOnOrder(line, poNumbers, sightedOrderIds)
-        : projectDispatchMaterialLine(line)
+        : projectDispatchMaterialLine(line, sightedOrderIds)
     ),
     counts: dispatchMaterialCounts(lines, sightedOrderIds),
     can_suggest: dispatchCanSuggest(job.work_type, lines.length),
