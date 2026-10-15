@@ -15,17 +15,19 @@
 //   .from(t).select(cols).in(c,vals).neq(c,v)           (awaited, proposals)
 //   .from(t).update(patch).eq('id',v).eq('status',v).select().single()
 //   .from(t).delete().eq(c,v)                           (awaited)
+//   .from(t).select(cols).not(c,'is',null).order(c).range(a,b)  (awaited, paged reads)
 // ════════════════════════════════════════════════════════════
 
 export type Store = Record<string, Array<Record<string, any>>>;
 
-type Filter = { kind: "eq" | "ilike" | "in" | "neq"; col: string; val: any };
+type Filter = { kind: "eq" | "ilike" | "in" | "neq" | "not_null"; col: string; val: any };
 
 function rowMatches(row: Record<string, any>, filters: Filter[]): boolean {
   return filters.every((f) => {
     if (f.kind === "eq") return row[f.col] === f.val;
     if (f.kind === "neq") return row[f.col] !== f.val;
     if (f.kind === "in") return (f.val as any[]).includes(row[f.col]);
+    if (f.kind === "not_null") return row[f.col] != null;
     // ilike → case-insensitive full-string equality on trimmed values
     const a = String(row[f.col] ?? "").trim().toLowerCase();
     const b = String(f.val ?? "").trim().toLowerCase();
@@ -42,6 +44,8 @@ class Query {
   private orderCol: string | null = null;
   private orderAsc = true;
   private limitN: number | null = null;
+  private rangeFrom: number | null = null;
+  private rangeTo = 0;
 
   constructor(private store: Store, private table: string) {}
 
@@ -97,6 +101,16 @@ class Query {
     this.limitN = n;
     return this;
   }
+  range(from: number, to: number) {
+    this.rangeFrom = from;
+    this.rangeTo = to;
+    return this;
+  }
+  not(col: string, op: string, val: any) {
+    if (op !== "is" || val !== null) throw new Error(`fake client: unsupported not(${col}, ${op}, ${val})`);
+    this.filters.push({ kind: "not_null", col, val });
+    return this;
+  }
 
   private runSelect(): Array<Record<string, any>> {
     let out = this.rows().filter((r) => rowMatches(r, this.filters));
@@ -111,6 +125,7 @@ class Query {
       });
     }
     if (this.limitN != null) out = out.slice(0, this.limitN);
+    if (this.rangeFrom != null) out = out.slice(this.rangeFrom, this.rangeTo + 1);
     // return clones so callers can't mutate the store by reference
     return out.map((r) => ({ ...r }));
   }

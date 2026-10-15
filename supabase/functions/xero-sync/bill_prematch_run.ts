@@ -382,6 +382,10 @@ export async function runBillPrematch(
         nowIso: now,
         agent: { matchReason: `${d.rule}: ${d.reason}`, matchedPoId: d.po_id },
       });
+      if (d.po_id) {
+        if (!poFactBills.has(d.po_id)) poFactBills.set(d.po_id, []);
+        poFactBills.get(d.po_id)!.push(q.xero_invoice_id);
+      }
       const { error } = await sb.from("materials_bill_proposals")
         .update({ outcome: "assigned", outcome_reason: "placed by the agent", auto_assigned_at: now, updated_at: now })
         .eq("id", ins.id);

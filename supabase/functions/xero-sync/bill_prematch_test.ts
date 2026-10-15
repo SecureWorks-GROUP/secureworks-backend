@@ -10,7 +10,7 @@ import {
   type PrematchJob,
   type PrematchPO,
 } from "./bill_prematch.ts";
-import { emailJobsByBill } from "./bill_prematch_run.ts";
+import { emailJobsByBill, runBillPrematch } from "./bill_prematch_run.ts";
 import { assignReconRow } from "../ops-api/materials_recon.ts";
 import { baseSeed, makeFakeClient, ORG } from "../ops-api/materials_recon_test_support.ts";
 
@@ -149,4 +149,27 @@ Deno.test("a bill placed through the PO it names is matched to that PO, and a PO
   ]);
   const linkedTaken = place(undefined, "xinv-other");
   assertEquals(linkedTaken.kind === "review" && linkedTaken.rule, "po_already_matched");
+});
+
+Deno.test("two bills naming one purchase order in one sync: the first is placed on it, the second waits for staff", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref" || q.id === "q-open-refnojob");
+  seed.jobs = [{ id: "job-fence-1", job_number: "SWF-25010", status: "scheduled", created_at: "2026-06-01", site_address: null, org_id: ORG }];
+  seed.purchase_orders = [{ id: "po-9", po_number: "PO-302382", job_id: "job-fence-1", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null }];
+  const line = (amount: number) => [{ Description: "Your order PO-302382", AccountCode: "305", LineAmount: amount }];
+  seed.xero_invoices = [
+    { xero_invoice_id: "xinv-001", invoice_number: "12345678", status: "AUTHORISED", reference: null, line_items: line(1000), job_id: null },
+    { xero_invoice_id: "xinv-003", invoice_number: "BD-7777", status: "AUTHORISED", reference: null, line_items: line(250), job_id: null },
+  ];
+  seed.context_email_attachments = [];
+  seed.materials_bill_proposals = [];
+  const { client, store } = makeFakeClient(seed);
+
+  const out = await runBillPrematch(client, { orgId: ORG, nowIso: "2026-07-05T06:00:00.000Z" });
+  assertEquals([out.ran, out.assigned], [true, 1]);
+  const facts = store.job_materials_facts;
+  assertEquals(facts.map((f) => [f.xero_invoice_id, f.matched_po_id]), [["xinv-001", "po-9"]]);
+  const second = store.materials_bill_proposals.find((p) => p.xero_invoice_id === "xinv-003")!;
+  assertEquals([second.proposal_kind, second.rule, second.outcome], ["review", "po_already_matched", "queued_for_review"]);
+  assertEquals(store.materials_reconciliation_queue.find((q) => q.id === "q-open-refnojob")!.status, "open");
 });
