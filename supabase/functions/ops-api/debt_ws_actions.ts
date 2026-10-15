@@ -42,6 +42,7 @@ import {
   longDate,
   looksLikeCompanyName,
   mondayOf,
+  money,
   nextMonday,
   perthDate,
   perthDateOf,
@@ -77,11 +78,22 @@ import {
 } from "./debt_ws_payer.ts";
 import {
   DebtWsError,
+  type DebtWsReportSettings,
   type DebtWsSettings,
   type DebtWsStore,
   type WsLogRow,
+  type WsReportRow,
   type WsSuggestion,
 } from "./debt_ws_store.ts";
+import {
+  type BankAccountBalance,
+  buildDebtReport,
+  type DebtReport,
+  debtReportEmail,
+  debtReportFileName,
+  debtReportHtml,
+  debtReportTotals,
+} from "./debt_ws_report.ts";
 
 export { DebtWsError } from "./debt_ws_store.ts";
 
@@ -152,13 +164,29 @@ export interface DebtWsDeps {
       failureReason: string | null;
     }
   >;
-  /** The send-outlook-email edge function. HTML only, never an attachment. */
+  /**
+   * The send-outlook-email edge function. Statements are HTML only, never an attachment.
+   * The debt report alone carries cc and one PDF attachment, and marks itself
+   * internal_report: "debt_report"; send-outlook-email accepts an unanchored PDF only on
+   * that mark and only when every address is on our own domain (secureworkswa.com.au).
+   */
   sendEmail: (payload: {
     from: string;
     to: string;
     subject: string;
     htmlBody: string;
+    cc?: string[];
+    attachments?: Array<
+      { name: string; contentType: string; contentBytes: string }
+    >;
+    internal_report?: "debt_report";
   }) => Promise<{ ok: boolean; status: number; error: string | null }>;
+  /** Xero's Bank Summary read live: one closing balance per bank account. */
+  bankSummary: () => Promise<BankAccountBalance[]>;
+  /** Draws the debt report as a PDF (debt_ws_report_pdf.ts). */
+  renderReportPdf: (
+    report: DebtReport,
+  ) => Promise<{ bytes: Uint8Array; pageCount: number }>;
   /** The existing updateJobStatus (job_events, business_events, the GHL stage move). */
   updateJobStatus: (body: Record<string, unknown>) => Promise<unknown>;
   /**
@@ -3125,6 +3153,463 @@ export async function debtWsAgentSubmit(
   };
 }
 
+// ── The debt report (Shaun approved 15 Oct 2026; README "The debt report") ──
+//
+// debt_ws_report      GET, staff:  the live report, built fresh on every read, with the
+//                                  HTML view, who it goes to and when it last went.
+// debt_ws_report_pdf  GET, staff:  the same report as a PDF (Download PDF).
+// debt_ws_report_send POST, owner: emails the PDF to the report recipients (Marnin, cc
+//                                  Shaun), built fresh at the moment of sending.
+// debt_ws_report_auto POST, server key: the Monday 08:00 Perth cron. Does nothing unless
+//                                  report_auto_send is on; one auto report per week.
+//
+// The report is internal: it holds every client's name and balance, so it only ever goes to
+// our own domain. The recipients are checked here before every send (and the database
+// refuses an outside address in the settings, and send-outlook-email refuses one too).
+
+/** The one domain the debt report may be emailed to. */
+export const DEBT_WS_REPORT_DOMAIN = "secureworkswa.com.au";
+/** A second manual send within this long is refused as a double click. */
+export const DEBT_WS_REPORT_RESEND_MS = 2 * 60_000;
+/** The share_key the report's debt_ws_log rows sit on. */
+export const DEBT_WS_REPORT_LOG_KEY = "debt-report";
+
+const OWN_ADDRESS = /^[a-z0-9._%+-]+@secureworkswa\.com\.au$/;
+
+/** True when every address is one of ours (lower case, @secureworkswa.com.au). */
+export function reportAddressesInternal(addresses: string[]): boolean {
+  return addresses.every((a) => OWN_ADDRESS.test(a));
+}
+
+/** "Marnin" from marnin@secureworkswa.com.au; "all" for more than one recipient. */
+function reportGreeting(to: string[]): string {
+  if (to.length !== 1) return "all";
+  const local = to[0].split("@")[0].split(/[._-]/)[0] || "there";
+  return local.charAt(0).toUpperCase() + local.slice(1);
+}
+
+/** The report, built fresh from the same reads the Debt tab makes, plus the extras. */
+async function loadDebtReport(
+  deps: DebtWsDeps,
+  preparedBy: string,
+): Promise<DebtReport> {
+  const now = deps.now();
+  // One read of the open invoices, shared by the book and the tie to Xero's total.
+  const open = await deps.store.openInvoices();
+  const book = await loadBook(deps.store, { now, openInvoices: open });
+  const today = book.today;
+  const [statements, payments, syncedAt, bank, feed] = await Promise.all([
+    deps.store.statementsForWeek(mondayOf(today)),
+    // The extras never stop the report: a read that fails shows as "not read".
+    deps.store.paymentsBetween(addDays(today, -29), today).catch((error) => {
+      console.error("[debt_ws_report] payments unavailable", error?.name);
+      return null;
+    }),
+    deps.store.lastInvoiceSync().catch(() => null),
+    deps.bankSummary().then((accounts) => ({
+      accounts,
+      read_at: deps.now().toISOString(),
+    })).catch((error) => {
+      console.error("[debt_ws_report] bank summary unavailable", error?.name);
+      return null;
+    }),
+    bankFeedSafe(
+      deps,
+      book.entries.filter((e) => e.open).map((e) => bankFromOf(e.inv)),
+    ),
+  ]);
+  const paidJobIds = [
+    ...new Set(
+      (payments ?? []).map((p) => p.job_id).filter((id): id is string =>
+        !!id && !book.jobs.has(String(id))
+      ),
+    ),
+  ];
+  const paymentJobs = new Map(book.jobs);
+  if (paidJobIds.length) {
+    for (const job of await deps.store.jobs(paidJobIds).catch(() => [])) {
+      paymentJobs.set(String(job.id), job);
+    }
+  }
+  const coversAll = !!feed &&
+    book.entries.every((e) => bankCovers(feed, bankFromOf(e.inv)));
+  return buildDebtReport({
+    now,
+    book,
+    openInvoices: open,
+    statements,
+    payments,
+    paymentJobs,
+    bank,
+    feed: feed ? { txs: feed.txs, truncated: feed.truncated || !coversAll } : null,
+    syncedAt,
+    preparedBy,
+  });
+}
+
+/** Who the report goes to, checked: our own domain only, at least one recipient. */
+function reportAddresses(rs: DebtWsReportSettings | null): {
+  to: string[];
+  cc: string[];
+  problem: { code: string; message: string } | null;
+} {
+  if (!rs) {
+    return {
+      to: [],
+      cc: [],
+      problem: {
+        code: "debt_ws_read_failed",
+        message: "The report settings could not be read",
+      },
+    };
+  }
+  const clean = (xs: string[]) =>
+    [...new Set(xs.map((x) => x.trim().toLowerCase()).filter(Boolean))];
+  const to = clean(rs.recipients);
+  const cc = clean(rs.cc).filter((x) => !to.includes(x));
+  if (!to.length) {
+    return {
+      to,
+      cc,
+      problem: {
+        code: "no_recipients",
+        message: "No one is set to receive the report",
+      },
+    };
+  }
+  if (!reportAddressesInternal([...to, ...cc])) {
+    return {
+      to,
+      cc,
+      problem: {
+        code: "recipient_not_internal",
+        message:
+          "The report only goes to SecureWorks Group addresses (@secureworkswa.com.au)",
+      },
+    };
+  }
+  return { to, cc, problem: null };
+}
+
+function reportSendView(row: WsReportRow | undefined | null) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    at: row.sent_at ?? row.created_at,
+    to: row.to_emails ?? [],
+    cc: row.cc_emails ?? [],
+    by: row.sent_by_name,
+    subject: row.subject,
+    error: row.error,
+  };
+}
+
+const bytesToBase64 = (bytes: Uint8Array) => {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+};
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export async function debtWsReport(deps: DebtWsDeps, caller: DebtWsCaller) {
+  const actor = await actorOf(deps, caller);
+  const report = await loadDebtReport(deps, actor.label);
+  const [settings, rs, sends] = await Promise.all([
+    deps.store.settings(),
+    deps.store.reportSettings().catch(() => null),
+    deps.store.reportSends(20).catch(() => [] as WsReportRow[]),
+  ]);
+  const addresses = reportAddresses(rs);
+  const owner = isOwner(caller, deps.env, settings);
+  const sendingOn = debtWsSendingOn(settings);
+  const whyNot = !owner
+    ? "Only the workshop owner (Shaun) can send the report"
+    : !sendingOn
+    ? "Sending is off until you switch it on"
+    : addresses.problem?.message ?? null;
+  return {
+    ok: true,
+    version: DEBT_WS_VERSION,
+    perth_date: report.today,
+    read_at: report.read_at,
+    report,
+    html: debtReportHtml(report),
+    delivery: {
+      from: DEBT_WS_STATEMENT_FROM,
+      to: addresses.to,
+      cc: addresses.cc,
+      auto_send: rs?.auto_send === true,
+      sending_on: sendingOn,
+      viewer_is_owner: owner,
+      can_send: !whyNot,
+      why_not: whyNot,
+    },
+    last_sent: reportSendView(sends.find((r) => r.status === "sent")),
+    last_attempt: reportSendView(sends[0]),
+  };
+}
+
+export async function debtWsReportPdf(deps: DebtWsDeps, caller: DebtWsCaller) {
+  const actor = await actorOf(deps, caller);
+  const report = await loadDebtReport(deps, actor.label);
+  const pdf = await deps.renderReportPdf(report).catch((error) => {
+    console.error("[debt_ws_report] pdf failed", error?.name);
+    throw new DebtWsError(
+      "The PDF could not be made just now. Try again shortly",
+      502,
+      "report_pdf_failed",
+    );
+  });
+  return {
+    ok: true,
+    version: DEBT_WS_VERSION,
+    filename: debtReportFileName(report),
+    content_type: "application/pdf",
+    pdf_base64: bytesToBase64(pdf.bytes),
+    page_count: pdf.pageCount,
+    read_at: report.read_at,
+  };
+}
+
+/**
+ * One report email: claim the send, build the report fresh, draw the PDF, email it, then
+ * keep the copy and log it. The claim is written first, so an auto report can never go
+ * twice in a week, and an email that may have gone is never retried by itself.
+ */
+async function sendDebtReport(
+  deps: DebtWsDeps,
+  actor: Actor,
+  kind: "manual" | "auto",
+  addresses: { to: string[]; cc: string[] },
+  weekStart: string,
+) {
+  const sentBy = kind === "auto" ? "the Monday auto-send" : actor.label;
+  const claim = await deps.store.claimReport({
+    kind,
+    week_start: weekStart,
+    to_emails: addresses.to,
+    cc_emails: addresses.cc,
+    sent_by: actor.user_id,
+    sent_by_name: sentBy,
+  });
+  if (!claim) return null;
+  let report: DebtReport;
+  let pdf: { bytes: Uint8Array; pageCount: number };
+  try {
+    report = await loadDebtReport(deps, sentBy);
+    pdf = await deps.renderReportPdf(report);
+  } catch (error) {
+    // Nothing was sent: release the claim with the reason.
+    await deps.store.settleReport(claim.id, {
+      status: "failed",
+      error: `not built: ${String((error as Error)?.name ?? error).slice(0, 200)}`,
+    }).catch(() => {});
+    if (error instanceof DebtWsError) throw error;
+    throw new DebtWsError(
+      "The report could not be built just now, so nothing was sent. Try again shortly",
+      502,
+      "report_pdf_failed",
+    );
+  }
+  const email = debtReportEmail(report, {
+    greeting: reportGreeting(addresses.to),
+    sentBy,
+  });
+  const pdfBase64 = bytesToBase64(pdf.bytes);
+  const copy = {
+    subject: email.subject,
+    summary: email.text,
+    totals: debtReportTotals(report),
+    html: debtReportHtml(report),
+    pdf_base64: pdfBase64,
+    pdf_sha256: await sha256Hex(pdf.bytes),
+  };
+  let result: Awaited<ReturnType<DebtWsDeps["sendEmail"]>>;
+  try {
+    result = await deps.sendEmail({
+      from: DEBT_WS_STATEMENT_FROM,
+      to: addresses.to.join(", "),
+      cc: addresses.cc,
+      subject: email.subject,
+      htmlBody: email.html,
+      attachments: [{
+        name: debtReportFileName(report),
+        contentType: "application/pdf",
+        contentBytes: pdfBase64,
+      }],
+      internal_report: "debt_report",
+    });
+  } catch (error) {
+    // The email may have gone: the row stays 'sending' with the reason, never resent by itself.
+    await deps.store.settleReport(claim.id, {
+      ...copy,
+      error: `not confirmed: ${
+        String((error as Error)?.message ?? error).slice(0, 300)
+      }`,
+    }).catch(() => {});
+    throw new DebtWsError(
+      "The email could not be confirmed. Check the admin mailbox's Sent Items before sending again",
+      502,
+      "send_not_confirmed",
+    );
+  }
+  if (!result.ok) {
+    await deps.store.settleReport(claim.id, {
+      ...copy,
+      status: "failed",
+      error: String(result.error ?? `email ${result.status}`).slice(0, 500),
+    }).catch(() => {});
+    throw new DebtWsError(
+      `The email was refused (${result.status}). Nothing was sent`,
+      502,
+      "email_failed",
+      { email_status: result.status },
+    );
+  }
+  const sentAt = deps.now().toISOString();
+  await deps.store.settleReport(claim.id, {
+    ...copy,
+    status: "sent",
+    sent_at: sentAt,
+  });
+  await log(
+    deps,
+    { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+    actor,
+    "email_sent",
+    {
+      body: `Debt report emailed to ${addresses.to.join(", ")}${
+        addresses.cc.length ? `, cc ${addresses.cc.join(", ")}` : ""
+      }: debt ${money(report.debt.amount)} across ${report.debt.count} invoice(s)`,
+      meta: {
+        report_id: claim.id,
+        kind,
+        week_start: weekStart,
+        to: addresses.to,
+        cc: addresses.cc,
+        totals: copy.totals,
+      },
+    },
+  ).catch((error) => {
+    // The send and its copy are recorded already; a missing log line never fails it.
+    console.error("[debt_ws_report] log failed", error?.name);
+  });
+  return {
+    ok: true,
+    version: DEBT_WS_VERSION,
+    sent: true,
+    report_id: claim.id,
+    kind,
+    to: addresses.to,
+    cc: addresses.cc,
+    subject: email.subject,
+    sent_at: sentAt,
+    page_count: pdf.pageCount,
+  };
+}
+
+export async function debtWsReportSend(
+  deps: DebtWsDeps,
+  caller: DebtWsCaller,
+  rawBody: unknown,
+) {
+  const body = asBody(rawBody);
+  onlyKeys(body, []);
+  const actor = await actorOf(deps, caller);
+  const settings = await deps.store.settings();
+  const today = perthDate(deps.now());
+  const refuseReport = async (
+    code: string,
+    message: string,
+    status = 409,
+  ): Promise<never> => {
+    await log(
+      deps,
+      { share_key: DEBT_WS_REPORT_LOG_KEY, ids: [], job_id: null },
+      actor,
+      "send_refused",
+      { body: message, meta: { code, report: true } },
+    ).catch(() => {});
+    throw new DebtWsError(message, status, code);
+  };
+  if (!debtWsSendingOn(settings)) {
+    await refuseReport("sending_off", "Sending is off until you switch it on");
+  }
+  const rs = await deps.store.reportSettings();
+  const addresses = reportAddresses(rs);
+  if (addresses.problem) {
+    await refuseReport(addresses.problem.code, addresses.problem.message);
+  }
+  // A double click: a manual report already went (or is going) in the last two minutes.
+  const recent = (await deps.store.reportSends(5)).find((r) =>
+    r.kind === "manual" && (r.status === "sent" || r.status === "sending") &&
+    deps.now().getTime() - Date.parse(r.created_at) < DEBT_WS_REPORT_RESEND_MS
+  );
+  if (recent) {
+    await refuseReport(
+      "recently_sent",
+      "The report was just sent. Wait two minutes before sending it again",
+    );
+  }
+  const sent = await sendDebtReport(
+    deps,
+    actor,
+    "manual",
+    addresses,
+    mondayOf(today),
+  );
+  if (!sent) {
+    throw new DebtWsError(
+      "The report could not be claimed for sending. Try again shortly",
+      409,
+      "already_sent",
+    );
+  }
+  return sent;
+}
+
+/** The Monday cron. Off unless report_auto_send and sending are both on; once a week. */
+export async function debtWsReportAuto(deps: DebtWsDeps) {
+  const settings = await deps.store.settings();
+  const rs = await deps.store.reportSettings();
+  const today = perthDate(deps.now());
+  const weekStart = mondayOf(today);
+  const skipped = (reason: string) => ({
+    ok: true,
+    version: DEBT_WS_VERSION,
+    sent: false,
+    reason,
+    week_start: weekStart,
+  });
+  if (!rs.auto_send) return skipped("auto_send_off");
+  if (!debtWsSendingOn(settings)) return skipped("sending_off");
+  const addresses = reportAddresses(rs);
+  if (addresses.problem) {
+    throw new DebtWsError(
+      addresses.problem.message,
+      409,
+      addresses.problem.code,
+    );
+  }
+  const sent = await sendDebtReport(
+    deps,
+    { user_id: null, label: "Monday auto-send" },
+    "auto",
+    addresses,
+    weekStart,
+  );
+  return sent ?? skipped("already_sent");
+}
+
 // ── The dispatcher (index.ts wiring) ──
 
 type Who = "staff" | "owner" | "server" | "server_or_owner";
@@ -3148,6 +3633,10 @@ export const DEBT_WS_ACTIONS: Record<
   debt_ws_jan_list_send: { method: "POST", who: "server" },
   debt_ws_agent_queue: { method: "GET", who: "server_or_owner" },
   debt_ws_agent_submit: { method: "POST", who: "server_or_owner" },
+  debt_ws_report: { method: "GET", who: "staff" },
+  debt_ws_report_pdf: { method: "GET", who: "staff" },
+  debt_ws_report_send: { method: "POST", who: "owner" },
+  debt_ws_report_auto: { method: "POST", who: "server" },
 };
 
 export function isDebtWsAction(action: unknown): boolean {
@@ -3265,6 +3754,14 @@ export async function runDebtWsAction(
         return ok(await debtWsJanListSend(deps));
       case "debt_ws_agent_queue":
         return ok(await debtWsAgentQueue(deps));
+      case "debt_ws_report":
+        return ok(await debtWsReport(deps, caller));
+      case "debt_ws_report_pdf":
+        return ok(await debtWsReportPdf(deps, caller));
+      case "debt_ws_report_send":
+        return ok(await debtWsReportSend(deps, caller, body));
+      case "debt_ws_report_auto":
+        return ok(await debtWsReportAuto(deps));
       default:
         return ok(await debtWsAgentSubmit(deps, caller, body));
     }

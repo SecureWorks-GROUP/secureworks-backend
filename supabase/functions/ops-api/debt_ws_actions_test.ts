@@ -2181,6 +2181,8 @@ Deno.test("auth: the server key reaches only the Jan list cron and the agent; st
     "debt_ws_job",
     "debt_ws_note",
     "debt_ws_overview",
+    "debt_ws_report",
+    "debt_ws_report_pdf",
     "debt_ws_statement_preview",
   ]);
   const inputs: Record<string, Record<string, unknown>> = {
@@ -2216,6 +2218,7 @@ Deno.test("auth: the server key reaches only the Jan list cron and the agent; st
       "debt_ws_jan_list_lock",
       "debt_ws_jan_list_send",
       "debt_ws_agent_queue",
+      "debt_ws_report_auto",
     ]
   ) {
     assertEquals((await call(deps, action, SERVER)).status, 200, action);

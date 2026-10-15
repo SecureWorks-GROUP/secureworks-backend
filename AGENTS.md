@@ -4585,10 +4585,17 @@ by `DEBT_CHASE_HISTORY_FILTER` (`debt_chase_history.ts`). Load-bearing rules:
   - then the injected `sendChaseSms` only.
   Never add a second text path.
 - An unconfirmed send keeps its claim. Only a guard refusal releases it.
-- Staff actions need a signed-in staff JWT. The server key reaches only the Jan list crons
-  and the agent queue and submit.
+- Staff actions need a signed-in staff JWT. The server key reaches only the Jan list crons,
+  the Monday report cron and the agent queue and submit.
 - The debt rules are plain code in `debt_ws_rules.ts`. Change them there, with a test.
-- Apply `20261008170000_debt_workshop.sql` before deploying the matching `ops-api`.
+- The debt report (`debt_ws_report*`, `debt_ws_report.ts`, `debt_ws_report_pdf.ts`) reads the
+  tab's own book, so it always matches the tab; its buckets must tie to Xero's open total to the
+  cent. It is internal: it emails only `@secureworkswa.com.au` (database CHECK, ops-api and
+  send-outlook-email all refuse anything else). send-outlook-email lets its unanchored PDF past
+  the PDF fence only on `internal_report: "debt_report"` with every address ours; never widen
+  that mark to another email.
+- Apply `20261008170000_debt_workshop.sql` and `20261015170000_debt_ws_report.sql` before
+  deploying the matching `ops-api`.
 
 ## `work_orders` Holds Two Kinds; Crew Paths Read `kind = 'crew'` Only
 
