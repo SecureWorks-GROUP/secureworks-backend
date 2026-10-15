@@ -1419,6 +1419,172 @@ Deno.test("job and agent queue: the payer's unplaced messages are asked for, sho
   assertEquals("unplaced" in item.messages[0], false);
 });
 
+Deno.test("agent queue: a held message's candidate_job_count reaches the bundle, and several candidates mark it context only", async () => {
+  // 14 Oct 2026 review: one customer with several jobs (SWF-26337) has the same held
+  // text shown on every candidate job's card. The agent must see how many jobs it could
+  // belong to, and the bundle says such a message is context only.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const contact = "ghlcontact0000000001";
+  const { deps } = fakeDeps(store, {
+    conversation: [
+      {
+        id: "bev:held-many",
+        channel: "sms",
+        direction: "inbound",
+        occurred_at: "2026-10-09T03:00:00Z",
+        author: "Client",
+        body: "Paid it yesterday",
+        contact_id: contact,
+        unplaced: true,
+        candidate_job_count: 3,
+      },
+      {
+        id: "bev:held-one",
+        channel: "sms",
+        direction: "inbound",
+        occurred_at: "2026-10-08T03:00:00Z",
+        author: "Client",
+        body: "Will sort it this week",
+        contact_id: contact,
+        unplaced: true,
+        candidate_job_count: 1,
+      },
+      {
+        id: "ghl:1",
+        channel: "sms",
+        direction: "outbound",
+        occurred_at: "2026-10-01T03:00:00Z",
+        author: "Shaun",
+        body: "Hi there",
+        contact_id: contact,
+      },
+    ],
+  });
+  const q = (await call(deps, "debt_ws_agent_queue", SERVER)).body as any;
+  const item = q.items.find((i: any) => i.row.xero_invoice_id === IDS.final);
+  assertEquals(item.messages.map((m: any) => m.id), [
+    "ghl:1",
+    "bev:held-one",
+    "bev:held-many",
+  ]);
+  assertEquals("candidate_job_count" in item.messages[0], false);
+  assertEquals(item.messages[1].candidate_job_count, 1);
+  assertEquals(item.messages[1].context_only, undefined);
+  assertEquals(item.messages[2].candidate_job_count, 3);
+  assertEquals(item.messages[2].context_only, true);
+  assert(String(item.held_message_rule).includes("context only"));
+});
+
+const SAYS_PAID_MOVE = {
+  xero_invoice_id: IDS.final,
+  step: "reply_says_paid",
+  kind: "move",
+  channel: "sms",
+  text: "Thanks Alex! It hasn't shown up our end yet.\n\nCheers,\nShaun",
+  why: 'Client wrote "paid it yesterday".',
+  proposed_category: "says_paid",
+  agent_version: "debt-ws-playbook/v1",
+};
+
+function heldPaidText(candidates: number) {
+  return [
+    {
+      id: "bev:held-paid",
+      channel: "sms",
+      direction: "inbound",
+      occurred_at: "2026-10-09T03:00:00Z",
+      author: "Client",
+      body: "Paid it yesterday",
+      contact_id: "ghlcontact0000000001",
+      unplaced: true,
+      candidate_job_count: candidates,
+    },
+    {
+      id: "ghl:2",
+      channel: "sms",
+      direction: "inbound",
+      occurred_at: "2026-10-05T03:00:00Z",
+      author: "Client",
+      body: "Ok thanks",
+      contact_id: "ghlcontact0000000001",
+    },
+  ];
+}
+
+Deno.test("agent submit: a says-paid move resting on a text held on several jobs becomes a flag to Shaun", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps, rec } = fakeDeps(store, { conversation: heldPaidText(3) });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 200);
+  const body = res.body as any;
+  assertEquals(body.kind, "flag");
+  assertEquals(body.move_refused, {
+    reason: "held_message_several_jobs",
+    proposed_category: "says_paid",
+    message_id: "bev:held-paid",
+    candidate_job_count: 3,
+  });
+  assertEquals(store.suggestionRows.length, 1);
+  const row = store.suggestionRows[0];
+  assertEquals(row.kind, "flag");
+  assertEquals(row.proposed_category, null);
+  assertEquals(row.channel, null);
+  assert(String(row.text).includes("any of 3 jobs"));
+  assert(String(row.text).includes("It hasn't shown up our end yet"));
+  const flag = store.logRows.find((l) => l.kind === "agent_flag")!;
+  assertEquals(
+    (flag.meta as any).move_refused.reason,
+    "held_message_several_jobs",
+  );
+  // Nothing moved: no category state, no status change, nothing sent.
+  assertEquals(
+    store.stateRows.find((s) => s.share_key === IDS.final)?.says_paid_since ??
+      null,
+    null,
+  );
+  assertEquals(rec.statusMoves.length, 0);
+  assertEquals(rec.sms.length, 0);
+
+  // Rectification is held the same way.
+  const rect = await call(deps, "debt_ws_agent_submit", SERVER, {
+    ...SAYS_PAID_MOVE,
+    step: "reply_problem",
+    proposed_category: "rectification",
+    why: "Client says the gate is broken.",
+  });
+  assertEquals((rect.body as any).kind, "flag");
+  assertEquals(
+    (rect.body as any).move_refused.proposed_category,
+    "rectification",
+  );
+});
+
+Deno.test("agent submit: a says-paid move on a text held on this job alone still stands", async () => {
+  // PR 1039's live case (SWF-261098): a held message whose only candidate is this job.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store, { conversation: heldPaidText(1) });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 200);
+  assertEquals((res.body as any).kind, "move");
+  assertEquals((res.body as any).move_refused, undefined);
+  assertEquals(store.suggestionRows[0].kind, "move");
+  assertEquals(store.suggestionRows[0].proposed_category, "says_paid");
+});
+
+Deno.test("agent submit: a move is refused while the payer's messages cannot be read to check it", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store);
+  deps.conversation = () => Promise.reject(new Error("read failed"));
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 503);
+  assertEquals((res.body as any).code, "conversation_unreadable");
+  assertEquals(store.suggestionRows.length, 0);
+});
+
 Deno.test("agent submit: draft supersedes drafts and moves, a flag is logged and supersedes nothing, no_action only stamps", async () => {
   const store = new FakeStore();
   store.settingsRow.agent_enabled = true;

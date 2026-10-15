@@ -47,8 +47,8 @@ Who may call each action:
 | `debt_ws_jan_list_remove` | POST | owner | Takes one share off this week's list. |
 | `debt_ws_jan_list_lock` | POST | server key | The Friday cron. Does nothing unless `jan_list_auto_send` is on. |
 | `debt_ws_jan_list_send` | POST | server key | The Sunday cron. Does nothing unless `jan_list_auto_send` and sending are both on. A failed live Xero read fails the list (`xero_unavailable`), never sending from our copy. An item with a possible payment in the bank feed is dropped and logged as `send_refused` on its share; the rest still go (`dropped[]` in the result). No bank feed at all fails the list (`bank_check_unavailable`). |
-| `debt_ws_agent_queue` | GET | server key or owner | Items for the agent, each with its bundle. Returns no items while `agent_enabled` is off, and none (with `blocked: "bank_feed_unavailable"`) while the bank feed cannot be read. |
-| `debt_ws_agent_submit` | POST | server key or owner | Stores a `draft`, `move` or `flag`, or records `no_action`. Every submit stamps `agent_reviewed_at`. |
+| `debt_ws_agent_queue` | GET | server key or owner | Items for the agent, each with its bundle. Returns no items while `agent_enabled` is off, and none (with `blocked: "bank_feed_unavailable"`) while the bank feed cannot be read. A held message (`unplaced: true`) carries `candidate_job_count`; with more than one candidate job it is also `context_only: true`, and each item carries `held_message_rule`. |
+| `debt_ws_agent_submit` | POST | server key or owner | Stores a `draft`, `move` or `flag`, or records `no_action`. Every submit stamps `agent_reviewed_at`. A `move` whose payer's newest inbound message is held on no job with more than one candidate job is stored as a `flag` to Shaun instead (`move_refused` in the result); a move is refused with `conversation_unreadable` (503) when those messages cannot be read. |
 
 A refusal is `{ok: false, code, error}`, with a plain reason in `error`. The codes include:
 - `sending_off`, `not_owner`, `owner_not_set`, `operator_access_required`, `amount_required`;
