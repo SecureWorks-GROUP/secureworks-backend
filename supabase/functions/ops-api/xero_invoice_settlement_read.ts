@@ -90,6 +90,13 @@ export function invoiceSettlementRead(
   ).map((p) => xeroText(xeroObject(p)?.PaymentID));
   const active = own.filter((p) => p.status === "AUTHORISED");
   const observedAmount = active.reduce((n, p) => n + cents(p.amount ?? 0), 0);
+  const proofs = new Map(own.map((p) => [
+    p,
+    paymentReconciliation(
+      p,
+      p.batch_payment_id ? batchMap.get(p.batch_payment_id) : undefined,
+    ),
+  ]));
   const payments = own.sort((a, b) =>
     a.provider_id.localeCompare(b.provider_id)
   ).map((p) => ({
@@ -104,10 +111,7 @@ export function invoiceSettlementRead(
     is_reconciled: p.is_reconciled,
     captured_at: p.captured_at,
     provider_updated_at: p.provider_updated_at,
-    bank_proof: paymentReconciliation(
-      p,
-      p.batch_payment_id ? batchMap.get(p.batch_payment_id) : undefined,
-    ),
+    bank_proof: proofs.get(p)!,
   }));
   const reasons = new Set<string>();
   if (
@@ -144,10 +148,7 @@ export function invoiceSettlementRead(
     if (
       !currency || !invoice.currency_code || currency !== invoice.currency_code
     ) reasons.add("invoice_payment_currency_unknown_or_conflict");
-    const reconciliation = paymentReconciliation(
-      p,
-      p.batch_payment_id ? batchMap.get(p.batch_payment_id) : undefined,
-    );
+    const reconciliation = proofs.get(p)!;
     if (reconciliation.unknown_reason) {
       reasons.add(reconciliation.unknown_reason);
     }
