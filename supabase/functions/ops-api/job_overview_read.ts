@@ -306,6 +306,11 @@ export function overviewNote(
     // superseded notes and notes whose citations no longer hold stay out of sight by default
     shown: status !== "superseded" && item?.cites_ok !== false,
     receipt: noteReceipt(item, eventTypes),
+    // (held notes, 20261015100000) a note a message held on no job still holds up: the
+    // customer has several jobs and this one is not certain. Only such a note carries the keys.
+    ...(item?.job_certain === false
+      ? { job_certain: false, certainty: "job_not_certain" }
+      : {}),
   };
 }
 

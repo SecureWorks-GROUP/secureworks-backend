@@ -418,6 +418,12 @@ BEGIN
   || 'SWF-96505 checks_failed -, SWF-96506 late_evidence -, SWF-96507 - not_live, SWF-96508 - holding_job',
   'the fixture must hold a job of every reason: ' || got);
 END $covers$;
+-- (held notes, 20261015100000) replaced the judge, the item check, the story's ledger read, the packet and
+-- the story since: its down goes first, inside this transaction only.
+SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
+\if :held_notes_live
+\ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
+\endif
 \ir ../../../rollbacks/20261013153000_context_rebuild_request_down.sql
 DO $same$
 DECLARE diff text;
@@ -457,7 +463,9 @@ BEGIN
   'the judge must stay stable SQL, security definer, search_path pinned: ' || to_jsonb(p)::text);
  PERFORM pg_temp.rr_assert(p.res = 'TABLE(job_id uuid, due boolean, kind text, reason text, priority integer, newest_evidence_at timestamp with time zone, '
   || 'evidence_rows integer, generation_id uuid, blocked_reason text)', 'the judge''s columns changed: ' || p.res);
- PERFORM pg_temp.rr_assert(p.m = '92367db74677cd38612394056aac07fa', 'the live judge is not this migration''s: ' || p.m);
+ -- (held notes, 20261015100000, keeps this body and adds the held-note exemption to its moved citations)
+ PERFORM pg_temp.rr_assert(p.m = ANY(ARRAY['92367db74677cd38612394056aac07fa', '2483ad58fdea93abcb1ca5f4d87658ee']),
+  'the live judge is not this migration''s or its held-notes successor''s: ' || p.m);
  c := obj_description(to_regprocedure(judge), 'pg_proc');
  PERFORM pg_temp.rr_assert(c LIKE 'Context ledger store (20261006013000), story safety (20261006040000): (scoping pipeline, 20261009133000) '
   || '(finished wake, 20261012093500) (rebuild request, 20261013153000) %Earlier (finished wake): The owner''s 12 Oct 2026 ruling: %Earlier (scoping pipeline): %'
@@ -515,6 +523,11 @@ ROLLBACK;
 
 -- 7. Re-applying the migration changes nothing (its guard accepts its own bodies) and keeps a request.
 BEGIN;
+-- (held notes, 20261015100000) replaced the judge since: its down goes first, inside this transaction only.
+SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
+\if :held_notes_live
+\ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
+\endif
 SELECT pg_temp.rr_live();
 SELECT pg_temp.rr_ask(pg_temp.rr_read_job('SWF-96701')) ->> 'request_id' AS kept \gset
 CREATE TEMP TABLE rr_md5 ON COMMIT DROP AS
