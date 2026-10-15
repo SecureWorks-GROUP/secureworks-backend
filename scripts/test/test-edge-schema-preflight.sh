@@ -915,7 +915,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261014190000", "job_dispatch_install_confirmed"),
                       # Debt report: the report settings, debt_ws_reports and
                       # the payments read (debt_ws_report_* actions).
-                      ("20261015170000", "debt_ws_report")]:
+                      ("20261015170000", "debt_ws_report"),
+                      # Bill pre-match: the proposals store materials_recon_queue
+                      # reads and xero-sync writes, the agent fact source and
+                      # the void_in_xero queue status.
+                      ("20261015190000", "materials_bill_proposals")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
