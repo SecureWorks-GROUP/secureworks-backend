@@ -76,11 +76,15 @@ async function readIn<T>(
   const out: T[] = [];
   const uniq = [...new Set(ids.filter(Boolean))];
   for (let i = 0; i < uniq.length; i += CHUNK) {
-    let q = sb.from(table).select(cols).in(col, uniq.slice(i, i + CHUNK));
-    if (extra) q = extra(q);
-    const { data, error } = await q;
-    if (error || !Array.isArray(data)) return null;
-    out.push(...data);
+    const chunk = uniq.slice(i, i + CHUNK);
+    // One chunk can pass 1,000 rows (proposal history), so page it too.
+    const rows = await readAll<T>(() => {
+      let q = sb.from(table).select(cols).in(col, chunk);
+      if (extra) q = extra(q);
+      return q.order("id");
+    });
+    if (!rows) return null;
+    out.push(...rows);
   }
   return out;
 }

@@ -110,6 +110,17 @@ Deno.test("reconStats — pure snapshot of the drain", async () => {
   assertEquals(stats.not_job_related, 1);
 });
 
+Deno.test("reconStats counts every queue row past PostgREST's 1,000-row cap", async () => {
+  const seed = baseSeed();
+  const row = seed.materials_reconciliation_queue.find((q) => q.status === "open")!;
+  for (let i = 0; i < 1205; i++) {
+    seed.materials_reconciliation_queue.push({ ...row, id: `q-bulk-${String(i).padStart(4, "0")}`, xero_invoice_id: `xinv-bulk-${i}` });
+  }
+  const { client } = makeFakeClient(seed);
+  const stats = await reconStats(client, ORG);
+  assertEquals([stats.total_rows, stats.open], [1210, 1208]);
+});
+
 // ── (b) assign-to-job — lands a manual fact, flips the queue row ──
 Deno.test("assign-to-job — writes ONE high_manual fact + flips queue to assigned", async () => {
   const { client, store } = makeFakeClient(baseSeed());

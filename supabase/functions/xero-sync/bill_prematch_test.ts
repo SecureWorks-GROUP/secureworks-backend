@@ -173,3 +173,29 @@ Deno.test("two bills naming one purchase order in one sync: the first is placed 
   assertEquals([second.proposal_kind, second.rule, second.outcome], ["review", "po_already_matched", "queued_for_review"]);
   assertEquals(store.materials_reconciliation_queue.find((q) => q.id === "q-open-refnojob")!.status, "open");
 });
+
+Deno.test("a proposal past the first 1,000 rows of a bill's history still counts: an undone placement is not placed again", async () => {
+  const seed = baseSeed();
+  seed.materials_reconciliation_queue = seed.materials_reconciliation_queue.filter((q) => q.id === "q-open-noref");
+  seed.jobs = [{ id: "job-fence-1", job_number: "SWF-25010", status: "scheduled", created_at: "2026-06-01", site_address: null, org_id: ORG }];
+  seed.purchase_orders = [];
+  seed.xero_invoices = [
+    { xero_invoice_id: "xinv-001", invoice_number: "12345678", status: "AUTHORISED", reference: null, line_items: [{ Description: "Job SWF-25010 posts", AccountCode: "305", LineAmount: 1000 }], job_id: null },
+  ];
+  seed.context_email_attachments = [];
+  seed.materials_bill_proposals = Array.from({ length: 1001 }, (_, i) => ({
+    id: `p-${String(i).padStart(4, "0")}`,
+    xero_invoice_id: "xinv-001",
+    outcome: "superseded",
+    outcome_reason: "bill changed",
+    input_hash: `h-${i}`,
+    // The one earlier agent placement, undone by staff, sorts last.
+    auto_assigned_at: i === 1000 ? "2026-07-01T00:00:00.000Z" : null,
+  }));
+  const { client, store } = makeFakeClient(seed);
+
+  const out = await runBillPrematch(client, { orgId: ORG, nowIso: "2026-07-05T06:00:00.000Z" });
+  assertEquals([out.ran, out.assigned], [true, 0]);
+  assertEquals(store.job_materials_facts ?? [], []);
+  assertEquals(store.materials_reconciliation_queue[0].status, "open");
+});

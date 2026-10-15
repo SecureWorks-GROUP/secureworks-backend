@@ -287,11 +287,20 @@ function logJobEvent(client: any, row: Record<string, unknown>): void {
 // open-count is what the worklist header renders and what a watcher polls.
 // ─────────────────────────────────────────────────────────────
 export async function reconStats(client: any, orgId: string): Promise<Record<string, number>> {
-  const { data, error } = await client
-    .from("materials_reconciliation_queue")
-    .select("status, total, sub_total")
-    .eq("org_id", orgId);
-  if (error) throw error;
+  // Paged: the queue passes PostgREST's 1,000-row cap, which cuts silently.
+  const PAGE = 1000;
+  const data: Array<Record<string, any>> = [];
+  for (let from = 0;; from += PAGE) {
+    const { data: page, error } = await client
+      .from("materials_reconciliation_queue")
+      .select("status, total, sub_total")
+      .eq("org_id", orgId)
+      .order("id")
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    data.push(...(page || []));
+    if (!page || page.length < PAGE) break;
+  }
   const stats = {
     open: 0,
     assigned: 0,
@@ -301,7 +310,7 @@ export async function reconStats(client: any, orgId: string): Promise<Record<str
     open_total_inc: 0,
     open_total_ex: 0,
   };
-  for (const r of (data || []) as Array<Record<string, any>>) {
+  for (const r of data) {
     stats.total_rows += 1;
     if (r.status === "open") {
       stats.open += 1;

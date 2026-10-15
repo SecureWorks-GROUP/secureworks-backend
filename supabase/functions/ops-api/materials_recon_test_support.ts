@@ -18,6 +18,8 @@
 //   .from(t).select(cols).not(c,'is',null).order(c).range(a,b)  (awaited, paged reads)
 // ════════════════════════════════════════════════════════════
 
+const MAX_ROWS = 1000;
+
 export type Store = Record<string, Array<Record<string, any>>>;
 
 type Filter = { kind: "eq" | "ilike" | "in" | "neq" | "not_null"; col: string; val: any };
@@ -126,6 +128,8 @@ class Query {
     }
     if (this.limitN != null) out = out.slice(0, this.limitN);
     if (this.rangeFrom != null) out = out.slice(this.rangeFrom, this.rangeTo + 1);
+    // PostgREST's max-rows: a read returns at most 1,000 rows, with no error.
+    out = out.slice(0, MAX_ROWS);
     // return clones so callers can't mutate the store by reference
     return out.map((r) => ({ ...r }));
   }
