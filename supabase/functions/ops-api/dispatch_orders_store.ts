@@ -17,11 +17,10 @@
 import {
   type DispatchMaterialsActor,
   DispatchMaterialsError,
+  readDispatchJobCounts,
 } from "./dispatch_materials_store.ts";
 import {
   DISPATCH_MATERIAL_LINE_SELECT,
-  DISPATCH_MATERIALS_LIST_SELECT,
-  dispatchMaterialCounts,
   isDispatchUuid,
   projectDispatchMaterialLine,
 } from "./dispatch_materials.ts";
@@ -396,15 +395,9 @@ async function readLastSentLines(client: any, orderIds: string[]) {
   return byOrder;
 }
 
-async function readJobCounts(client: any, jobId: string) {
-  const { data, error } = await client.from("job_material_lines")
-    .select(DISPATCH_MATERIALS_LIST_SELECT)
-    .eq("job_id", jobId);
-  if (error) {
-    console.error("[dispatch_orders] counts read failed:", error);
-    return null;
-  }
-  return dispatchMaterialCounts(data || []);
+// Slice 6: the shared count read, which also counts lines on a sighted order.
+function readJobCounts(client: any, jobId: string) {
+  return readDispatchJobCounts(client, jobId, "dispatch_orders");
 }
 
 // The job's purchase order and client email rows: by job, and every row on
