@@ -1,0 +1,61 @@
+# Bill pre-match v1 (JP-06, 15 Oct 2026)
+
+Owner, 15 Oct 2026, 15:53 Perth: "yeah and agent should be able to work it out
+based off job numbers on the PO sheet. each PO sheet should have a job number.
+otherwise intelligently worked out through the context system right".
+
+Supplier bills in Bills to place (`materials_reconciliation_queue`, status
+`open`) get one proposal each, made after every xero-sync materials step.
+
+## Rules, in order
+
+| # | Signal | Result |
+|---|---|---|
+| 0 | Any money line on account 306 or 301 (subcontractor labour) | left out, no proposal |
+| 1 | A job number in the bill reference or any line, or the job of the PO the bill is linked to (`purchase_orders.xero_bill_id`) or names, naming exactly one live job, nothing disagreeing | **placed by the agent** (confidence high) |
+| 2 | Invoice email filed on one job, one site street address, supplier plus amount equals one PO (2% or $5), Xero links a real job: all naming the same one job | proposal, medium, one staff press |
+| 3 | Two or more jobs from any of the above, a job number not on record or not live, or a bill dated more than 14 days before its job existed | review, low, candidates listed, nothing picked |
+| 4 | Every money line on an overhead account, or every money line tagged Business Unit SW - GROUP | proposal: not job related |
+| 5 | Anything else | no proposal |
+
+Live means not cancelled or lost and not a holding job (`metadata.do_not_schedule`,
+such as SWF-PDF-BUCKET). Every rule reads the full job population; a failed read
+of jobs, purchase orders or filed email attachments stops the matching for that
+run. Rules live in `supabase/functions/xero-sync/bill_prematch.ts`; the run in
+`bill_prematch_run.ts`.
+
+## What it writes
+
+- `materials_bill_proposals`: one live row per bill (`outcome` `queued_for_review`
+  or `assigned`), older rows `superseded` with a reason. The sync never wipes it.
+- A rule-1 bill is placed through `assignReconRow` (the staff press path): one
+  `job_materials_facts` row with `automation_source = 'agent_prematch'`,
+  `confidence = 'high'`, `match_reason = 'agent_prematch:<rule>: <reason>'`, the
+  queue row `assigned` by `agent_prematch`, and a `materials_bill_assigned`
+  job event. It only lands on a row still `open` with no fact.
+- To undo one: delete that fact and set the queue row back to `open`. The agent
+  then never places that bill again; it stays a proposal for staff.
+- Bills voided or deleted in Xero: queue row `status = 'void_in_xero'`,
+  `closed_reason` `xero_bill_voided` or `xero_bill_deleted`. Nothing else changes.
+- No Xero write. At most 150 proposal writes and 25 placements per run.
+
+## Read for the screen
+
+`GET ops-api?action=materials_recon_queue` adds to each row:
+
+- `proposal`: `{ kind, job_id, job_number, confidence, suggestion_confidence,
+  rule, reason, candidates[{job_id, job_number, signals[]}], outcome, updated_at }`
+  or `null`.
+- When the row is open, has no suggested job and the proposal is a job, the
+  existing `suggested_job_id` / `suggested_job_number` / `suggestion_confidence`
+  are filled from it (high reads as `medium`), with `suggestion_source:
+  'agent_prematch'`, so "Use it" (`materials_recon_assign`, `use_suggestion: true`)
+  accepts it as a staff press.
+- Top level `proposals: 'ok' | 'failed'`; `failed` means the proposals could not
+  be read, never "none". `stats.void_in_xero` counts closed voided bills.
+
+## Not in v1
+
+The Bills to place screen changes (secureworks-ux), the subcontractor labour
+lane, reading supplier invoice PDFs for the bills with no signal
+(`materials_email_enrich.ts`), and jp-9.

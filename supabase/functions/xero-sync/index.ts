@@ -34,6 +34,7 @@ import { syncSettlementEvidence } from './settlement_evidence.ts'
 import { placeRecentInvoiceEvidence } from './invoice_evidence_place.ts'
 import { projectNameJobNumber, resolveProjectJobId } from './project_job_link.ts'
 import { isCloseoutJobType } from '../_shared/job_paid_closeout.ts'
+import { runBillPrematch } from './bill_prematch_run.ts'
 // serve is only started when this module is the process entrypoint so unit
 // tests can import matchUnlinkedInvoices without binding a port.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -1481,6 +1482,19 @@ async function ingestMaterialsActuals(
       }
       // skip_mirror / skip_non_accpay: nothing to do (guards above already handled).
     }
+
+    // Bill pre-match (JP-06): after the queue upsert, close bills voided or
+    // deleted in Xero, propose a job (or not job related) for each open bill,
+    // and place the confident ones. Isolated: it can never fail the ingest.
+    let prematch: unknown
+    try {
+      prematch = await runBillPrematch(sb, { orgId: DEFAULT_ORG_ID })
+    } catch (e: any) {
+      if (e instanceof XeroCooldownError) throw e
+      prematch = { ran: false, reason: 'error', error: (e as Error).message }
+      console.error('[materials] bill pre-match failed:', (e as Error).message)
+    }
+    ;(result as Record<string, unknown>).prematch = prematch
 
     await sb.from('webhook_log').insert({
       org_id: DEFAULT_ORG_ID,

@@ -1,0 +1,120 @@
+// Bill pre-match: the owner's rules on bills shaped like the live Bills to place
+// list (JP-06, 15 Oct 2026). Each case is a business outcome: which bills the agent
+// may place on its own, which wait for a staff press, and which it never touches.
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  buildAddressIndex,
+  buildJobMaps,
+  decideBillPrematch,
+  type PrematchBill,
+  type PrematchJob,
+  type PrematchPO,
+} from "./bill_prematch.ts";
+import { emailJobsByBill } from "./bill_prematch_run.ts";
+
+const JOBS: PrematchJob[] = [
+  { id: "j1", job_number: "SWF-26535", status: "complete", created_at: "2026-05-01", site_address: "12 Banksia Street, Wanneroo WA", holding: false },
+  { id: "j2", job_number: "SWF-261009", status: "scheduled", created_at: "2026-08-01", site_address: "7 Acacia Road, Morley WA", holding: false },
+  { id: "j3", job_number: "SWF-26100", status: "cancelled", created_at: "2026-04-01", site_address: "3 Wattle Way, Duncraig WA", holding: false },
+  { id: "j4", job_number: "SWF-PDF-BUCKET", status: "accepted", created_at: "2026-01-01", site_address: null, holding: true },
+  { id: "j5", job_number: "SWP-261283", status: "in_progress", created_at: "2026-08-20", site_address: "40 Marri Crescent, Ellenbrook WA", holding: false },
+];
+
+function ctx(over: { emailJobIds?: string[]; pos?: PrematchPO[] } = {}) {
+  return {
+    ...buildJobMaps(JOBS),
+    addressIndex: buildAddressIndex(JOBS),
+    pos: over.pos ?? [],
+    emailJobIds: over.emailJobIds ?? [],
+  };
+}
+
+function bill(lines: Array<[string | null, string, number, string?]>, over: Partial<PrematchBill> = {}): PrematchBill {
+  return {
+    xero_invoice_id: "x-1",
+    invoice_number: "INV-83831",
+    xero_contact_id: "c-1",
+    contact_name: "Supplier",
+    reference: null,
+    sub_total: lines.reduce((s, l) => s + l[2], 0),
+    invoice_date: "2026-09-01",
+    xero_job_id: null,
+    lines: lines.map(([description, account_code, amount, business_unit]) => ({
+      description,
+      account_code,
+      amount,
+      business_unit: business_unit ?? "SW - FENCING",
+    })),
+    ...over,
+  };
+}
+
+Deno.test("a job number on a line naming one live job is placed automatically", () => {
+  const d = decideBillPrematch(bill([["Fencing Material SWF-26535", "305", 1027.27]]), ctx());
+  assertEquals(d.kind, "job");
+  if (d.kind === "job") {
+    assertEquals([d.confidence, d.job_number, d.rule], ["high", "SWF-26535", "job_number"]);
+  }
+});
+
+Deno.test("the job on the purchase order the bill names is placed automatically", () => {
+  const po: PrematchPO = { id: "p1", po_number: "PO-302382", job_id: "j2", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null };
+  const d = decideBillPrematch(bill([["Your order PO-302382", "305", 410]]), ctx({ pos: [po] }));
+  assertEquals(d.kind === "job" && [d.confidence, d.job_number, d.rule], ["high", "SWF-261009", "po_job_number"]);
+});
+
+Deno.test("a split bill naming two jobs is never placed and picks nothing", () => {
+  const d = decideBillPrematch(bill([["SWF-26535 posts", "305", 300], ["SWF-261009 rails", "305", 200]]), ctx());
+  assertEquals(d.kind, "review");
+  if (d.kind === "review") assertEquals([d.rule, d.candidates.map((c) => c.job_number)], ["split_bill", ["SWF-261009", "SWF-26535"]]);
+});
+
+Deno.test("a job number that disagrees with where the invoice email was filed waits for staff", () => {
+  const d = decideBillPrematch(bill([["SWF-26535", "305", 100]]), ctx({ emailJobIds: ["j5"] }));
+  assertEquals(d.kind === "review" && d.rule, "job_disagrees");
+});
+
+Deno.test("a cancelled job is never proposed, and a holding job is never evidence", () => {
+  const cancelled = decideBillPrematch(bill([["SWF-26100 materials", "305", 34.54]]), ctx());
+  assertEquals(cancelled.kind === "review" && cancelled.rule, "job_number_not_live");
+  const holding = decideBillPrematch(bill([["materials", "305", 50]], { xero_job_id: "j4" }), ctx());
+  assertEquals(holding.kind, "none");
+});
+
+Deno.test("a bill dated well before its job existed waits for staff", () => {
+  const d = decideBillPrematch(bill([["SWP-261283 roof", "305", 900]], { invoice_date: "2026-06-01" }), ctx());
+  assertEquals(d.kind === "review" && d.rule, "job_disagrees");
+});
+
+Deno.test("context signals alone are a proposal for one press, never a placement", () => {
+  const email = decideBillPrematch(bill([["Colorbond sheets", "305", 8970.2]]), ctx({ emailJobIds: ["j5"] }));
+  assertEquals(email.kind === "job" && [email.confidence, email.job_number], ["medium", "SWP-261283"]);
+  const address = decideBillPrematch(bill([["Deliver to 7 Acacia Rd", "305", 7411.65]]), ctx());
+  assertEquals(address.kind === "job" && [address.confidence, address.rule], ["medium", "street_address"]);
+  const po: PrematchPO = { id: "p2", po_number: "PO-1", job_id: "j1", xero_contact_id: "c-1", supplier_name: null, subtotal: 1600, status: "sent", xero_bill_id: null };
+  const amount = decideBillPrematch(bill([["posts", "305", 1593.64]]), ctx({ pos: [po] }));
+  assertEquals(amount.kind === "job" && [amount.confidence, amount.rule], ["medium", "supplier_amount_po"]);
+});
+
+Deno.test("subcontractor labour (306, 301) is left out even with a job number", () => {
+  const d = decideBillPrematch(bill([["Fence Installation - SWF-26535", "306", 338]]), ctx());
+  assertEquals(d.kind, "excluded");
+});
+
+Deno.test("overhead accounts and SW - GROUP lines are proposed not job related", () => {
+  const vehicle = decideBillPrematch(bill([["Engine oil", "449", 5672.73]]), ctx());
+  assertEquals(vehicle.kind === "not_job_related" && vehicle.rule, "overhead_account");
+  const group = decideBillPrematch(bill([["Stationery", "305", 80, "SW - GROUP"]]), ctx());
+  assertEquals(group.kind === "not_job_related" && group.rule, "group_business_unit");
+  const materials = decideBillPrematch(bill([["Post caps", "305", 43.45]]), ctx());
+  assertEquals(materials.kind, "none");
+});
+
+Deno.test("an invoice email counts only when the file name carries the whole invoice number", () => {
+  const bills = [bill([], { xero_invoice_id: "x-1", invoice_number: "1459061" }), bill([], { xero_invoice_id: "x-2", invoice_number: "INV-79502" })];
+  const got = emailJobsByBill(bills, [
+    { file_name: "Tax Invoice 1459061.pdf", job_id: "j5" },
+    { file_name: "Invoice INV-795020.pdf", job_id: "j1" }, // a longer number is a different invoice
+  ]);
+  assertEquals([...got.entries()], [["x-1", ["j5"]]]);
+});

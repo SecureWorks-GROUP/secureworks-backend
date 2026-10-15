@@ -1,0 +1,439 @@
+// ════════════════════════════════════════════════════════════
+// BILL PRE-MATCH — which job an open Bills to place row belongs to (JP-06).
+//
+// Owner, 15 Oct 2026: "agent should be able to work it out based off job
+// numbers on the PO sheet. each PO sheet should have a job number. otherwise
+// intelligently worked out through the context system right".
+//
+// PURE. No I/O: the caller (bill_prematch_run.ts) reads the bill, the FULL job
+// population, the purchase orders and the email attachments the context system
+// filed, and this file decides. One decision per bill, rules in this order:
+//
+//   0. Any money line on subcontractor labour (306, 301): left out (owner call:
+//      its own lane later; some of it is already on the trade app).
+//   1. A job number in the bill reference or any line, or the job of the PO the
+//      bill is linked to or names, naming exactly ONE live job with nothing
+//      disagreeing: confident (high). The caller places it.
+//   2. Context signals (invoice email filed on one job, one street address,
+//      supplier plus amount equals one PO, Xero links a real job), all naming
+//      the same one job: medium. A proposal for one staff press.
+//   3. Two or more jobs from any of the above (a split bill, or signals that
+//      disagree): review, with the candidates listed and nothing picked.
+//   4. Every money line on an overhead account, or every money line tagged
+//      Business Unit SW - GROUP: not job related (a proposal).
+//   5. Anything else: no proposal.
+//
+// Never proposes a cancelled or lost job, or a holding job (metadata
+// do_not_schedule, such as SWF-PDF-BUCKET). Two signals were tested on the live
+// list and dropped: amount near quoted materials and date window alone.
+// ════════════════════════════════════════════════════════════
+
+import { amountWithinTolerance, DEFAULT_MATCH_CONFIG, type MatchConfig } from "./materials_ingest.ts";
+
+// The canonical job-number grammar (materials_ingest.ts JOB_NUMBER_RE), global.
+export const JOB_NUMBER_RE_GLOBAL = /SW(?:MS|[A-Z])-\d{4,6}(?!\d)/gi;
+
+// Subcontractor labour: out of the agent for now (owner call, 15 Oct 2026).
+export const LABOUR_ACCOUNTS = new Set(["306", "301"]);
+
+// Overhead accounts: never a job's cost (fuel, advertising, accounting, training,
+// meals, insurance, licences, motor vehicle, marketing, staff amenities, wages
+// and admin, subscriptions, GST and PAYG). Job-ish accounts (305 materials, 310
+// permits, 311 small tools, 407 engineering, 408 tip fees, 429 drawings, 612
+// verge bonds) are deliberately NOT here.
+export const OVERHEAD_ACCOUNTS = new Set([
+  "302", "400", "412", "413", "420", "433", "441", "449", "461", "474", "475", "485", "820", "825",
+]);
+
+export const GROUP_BUSINESS_UNIT = "SW - GROUP";
+export const DEAD_JOB_STATUSES = new Set(["cancelled", "lost"]);
+// A bill dated this many days before its job existed disagrees with that job.
+export const BILL_BEFORE_JOB_GRACE_DAYS = 14;
+
+export interface PrematchLine {
+  description: string | null;
+  account_code: string | null;
+  amount: number | null;
+  business_unit: string | null;
+}
+
+export interface PrematchBill {
+  xero_invoice_id: string;
+  invoice_number: string | null;
+  xero_contact_id: string | null;
+  contact_name: string | null;
+  reference: string | null;
+  sub_total: number | null;
+  invoice_date: string | null;
+  xero_job_id: string | null; // xero_invoices.job_id (legacy link)
+  lines: PrematchLine[];
+}
+
+export interface PrematchJob {
+  id: string;
+  job_number: string;
+  status: string | null;
+  created_at: string | null;
+  site_address: string | null;
+  holding: boolean; // metadata.do_not_schedule
+}
+
+export interface PrematchPO {
+  id: string;
+  po_number: string | null;
+  job_id: string | null;
+  xero_contact_id: string | null;
+  supplier_name: string | null;
+  subtotal: number | null;
+  status: string | null;
+  xero_bill_id: string | null;
+}
+
+export interface PrematchContext {
+  jobsById: Map<string, PrematchJob>;
+  jobsByNumber: Map<string, PrematchJob>; // unique numbers only
+  duplicateNumbers?: Set<string>; // a number two jobs share names neither
+  addressIndex: Map<string, string[]>; // "12 smith" -> job ids
+  pos: PrematchPO[];
+  emailJobIds: string[]; // jobs the context system filed this bill's invoice email on
+  config?: MatchConfig;
+}
+
+export type SignalName =
+  | "job_number"
+  | "po_job_number"
+  | "invoice_email"
+  | "street_address"
+  | "supplier_amount_po"
+  | "xero_job_link";
+
+export interface PrematchCandidate {
+  job_id: string;
+  job_number: string;
+  signals: SignalName[];
+}
+
+export type PrematchDecision =
+  | { kind: "excluded"; rule: "subcontractor_labour"; reason: string }
+  | { kind: "none"; rule: "no_match"; reason: string }
+  | {
+    kind: "job";
+    confidence: "high" | "medium";
+    rule: string;
+    reason: string;
+    job_id: string;
+    job_number: string;
+    candidates: PrematchCandidate[];
+  }
+  | { kind: "not_job_related"; confidence: "medium"; rule: string; reason: string }
+  | { kind: "review"; confidence: "low"; rule: string; reason: string; candidates: PrematchCandidate[] };
+
+const SIGNAL_WORDS: Record<SignalName, string> = {
+  job_number: "job number on the bill",
+  po_job_number: "job on the purchase order",
+  invoice_email: "invoice email filed on that job",
+  street_address: "site street address on the bill",
+  supplier_amount_po: "supplier and amount equal one purchase order",
+  xero_job_link: "Xero links the bill to that job",
+};
+
+// ─────────────────────────────────────────────────────────────
+// Small pure helpers
+// ─────────────────────────────────────────────────────────────
+export function jobIsLive(job: PrematchJob | null | undefined): boolean {
+  if (!job) return false;
+  if (job.holding) return false;
+  return !DEAD_JOB_STATUSES.has(String(job.status || "").toLowerCase());
+}
+
+export function billTexts(bill: PrematchBill): Array<{ where: string; text: string }> {
+  const out: Array<{ where: string; text: string }> = [];
+  if (bill.reference && bill.reference.trim()) out.push({ where: "reference", text: bill.reference });
+  bill.lines.forEach((l, i) => {
+    if (l.description && l.description.trim()) out.push({ where: `line ${i + 1}`, text: l.description });
+  });
+  return out;
+}
+
+export function jobNumbersIn(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(JOB_NUMBER_RE_GLOBAL)) out.push(m[0].toUpperCase());
+  return out;
+}
+
+function normWords(s: string | null | undefined): string {
+  return ` ${String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+}
+
+/** Street key for an address: the first "number word" pair, e.g. "12 smith". */
+export function addressKey(address: string | null | undefined): string | null {
+  const m = String(address || "").toLowerCase().match(/(\d+[a-z]?)\s+([a-z]{3,})/);
+  return m ? `${m[1]} ${m[2]}` : null;
+}
+
+const ADDRESS_NOISE = new Set([
+  "pcs", "pack", "packs", "box", "boxes", "bag", "bags", "each", "sheets", "sheet", "lengths", "length",
+  "metres", "meters", "mtrs", "days", "day", "hours", "hrs", "weeks", "mins", "litre", "litres", "rolls",
+]);
+
+/** Every "number word" pair in a bill text that could be a street key. */
+export function addressKeysIn(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.toLowerCase().matchAll(/(?<![a-z0-9.-])(\d+[a-z]?)\s+([a-z]{3,})\b/g)) {
+    if (ADDRESS_NOISE.has(m[2])) continue;
+    out.push(`${m[1]} ${m[2]}`);
+  }
+  return out;
+}
+
+/** The job maps a decision reads; a number two jobs share names neither. */
+export function buildJobMaps(jobs: PrematchJob[]): {
+  jobsById: Map<string, PrematchJob>;
+  jobsByNumber: Map<string, PrematchJob>;
+  duplicateNumbers: Set<string>;
+} {
+  const jobsById = new Map(jobs.map((j) => [j.id, j]));
+  const jobsByNumber = new Map<string, PrematchJob>();
+  const duplicateNumbers = new Set<string>();
+  for (const j of jobs) {
+    if (jobsByNumber.has(j.job_number)) duplicateNumbers.add(j.job_number);
+    else jobsByNumber.set(j.job_number, j);
+  }
+  for (const n of duplicateNumbers) jobsByNumber.delete(n);
+  return { jobsById, jobsByNumber, duplicateNumbers };
+}
+
+export function buildAddressIndex(jobs: PrematchJob[]): Map<string, string[]> {
+  const idx = new Map<string, string[]>();
+  for (const j of jobs) {
+    if (!jobIsLive(j)) continue;
+    const key = addressKey(j.site_address);
+    if (!key) continue;
+    if (!idx.has(key)) idx.set(key, []);
+    idx.get(key)!.push(j.id);
+  }
+  return idx;
+}
+
+/** The invoice number as a bounded word run, or null when too short to trust. */
+export function invoiceNumberKey(invoiceNumber: string | null | undefined): string | null {
+  const key = normWords(invoiceNumber).trim();
+  return key.replace(/ /g, "").length >= 5 ? key : null;
+}
+
+/** Does an attachment file name carry this invoice number as whole words? */
+export function fileNameCarriesInvoice(fileName: string | null | undefined, invoiceKey: string): boolean {
+  const grams = new Set(fileNameGrams(fileName));
+  return invoiceKeyForms(invoiceKey).some((k) => grams.has(k));
+}
+
+/**
+ * The invoice keys a file name can carry: every run of up to six whole words,
+ * spaced ("inv 83831") and run together ("inv83831"), plus a word with its letter
+ * prefix dropped ("INV00004047.pdf" carries "00004047"). Never a part of a number.
+ */
+export function fileNameGrams(fileName: string | null | undefined): string[] {
+  const words = normWords(fileName).trim().split(" ").filter(Boolean);
+  const out = new Set<string>();
+  for (let i = 0; i < words.length; i++) {
+    for (let n = 1; n <= 6 && i + n <= words.length; n++) {
+      const run = words.slice(i, i + n);
+      out.add(run.join(" "));
+      out.add(run.join(""));
+    }
+    const tail = words[i].match(/^[a-z]+(\d[a-z0-9]*)$/);
+    if (tail && tail[1].length >= 5) out.add(tail[1]);
+  }
+  return [...out];
+}
+
+/** The forms of an invoice key a file name gram can equal. */
+export function invoiceKeyForms(key: string): string[] {
+  const forms = [key, key.replace(/ /g, "")];
+  // "INV-83831" is also carried by a file named "83831.pdf".
+  const tail = key.match(/^[a-z]+ ?(\d[a-z0-9 ]*)$/);
+  if (tail && tail[1].replace(/ /g, "").length >= 5) forms.push(tail[1], tail[1].replace(/ /g, ""));
+  return [...new Set(forms)];
+}
+
+function poIsDead(po: PrematchPO): boolean {
+  return ["cancelled", "canceled", "voided", "deleted"].includes(String(po.status || "").toLowerCase());
+}
+
+function poNamedIn(po: PrematchPO, text: string): boolean {
+  const n = String(po.po_number || "").trim();
+  if (n.length < 5 || !/\d/.test(n)) return false;
+  return normWords(text).includes(normWords(n));
+}
+
+function moneyLines(bill: PrematchBill): PrematchLine[] {
+  return bill.lines.filter((l) => l.amount != null && Number(l.amount) !== 0);
+}
+
+function daysBetween(fromIso: string, toIso: string): number {
+  return (Date.parse(toIso.slice(0, 10) + "T00:00:00Z") - Date.parse(fromIso.slice(0, 10) + "T00:00:00Z")) /
+    86_400_000;
+}
+
+// ─────────────────────────────────────────────────────────────
+// THE decision.
+// ─────────────────────────────────────────────────────────────
+export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): PrematchDecision {
+  const cfg = ctx.config || DEFAULT_MATCH_CONFIG;
+  const money = moneyLines(bill);
+
+  // 0. Subcontractor labour stays out of the agent for now.
+  if (money.some((l) => LABOUR_ACCOUNTS.has(String(l.account_code || "")))) {
+    return { kind: "excluded", rule: "subcontractor_labour", reason: "Subcontractor labour (account 306 or 301): left for its own lane." };
+  }
+
+  // Evidence per job: which signals name it, and where.
+  const hits = new Map<string, { job: PrematchJob; signals: Set<SignalName>; where: string[] }>();
+  const add = (job: PrematchJob, signal: SignalName, where: string) => {
+    if (!hits.has(job.id)) hits.set(job.id, { job, signals: new Set(), where: [] });
+    const h = hits.get(job.id)!;
+    h.signals.add(signal);
+    if (!h.where.includes(where)) h.where.push(where);
+  };
+  const problems: string[] = [];
+  const texts = billTexts(bill);
+
+  // 1a. Job numbers written on the bill.
+  for (const t of texts) {
+    for (const num of jobNumbersIn(t.text)) {
+      const job = ctx.jobsByNumber.get(num);
+      if (ctx.duplicateNumbers?.has(num)) problems.push(`${num} (${t.where}) is held by more than one job`);
+      else if (!job) problems.push(`${num} (${t.where}) is not a job on record`);
+      else if (job.holding) continue; // a holding job is never evidence
+      else if (!jobIsLive(job)) problems.push(`${num} (${t.where}) is ${String(job.status).toLowerCase()}`);
+      else add(job, "job_number", t.where);
+    }
+  }
+  // 1b. The purchase order the bill is linked to, or names: its job.
+  for (const po of ctx.pos) {
+    if (!po.job_id || poIsDead(po)) continue;
+    let where: string | null = null;
+    if (po.xero_bill_id && po.xero_bill_id === bill.xero_invoice_id) where = `linked ${po.po_number || "PO"}`;
+    else {
+      const t = texts.find((x) => poNamedIn(po, x.text));
+      if (t) where = `${po.po_number} on ${t.where}`;
+    }
+    if (!where) continue;
+    const job = ctx.jobsById.get(po.job_id);
+    if (job && jobIsLive(job)) add(job, "po_job_number", where);
+    else if (job && !job.holding) problems.push(`${po.po_number} is on ${job.job_number}, which is ${String(job.status).toLowerCase()}`);
+  }
+
+  // 2. Context signals.
+  const emailJobs = [...new Set(ctx.emailJobIds)]
+    .map((id) => ctx.jobsById.get(id))
+    .filter((j): j is PrematchJob => !!j && jobIsLive(j));
+  for (const job of emailJobs) add(job, "invoice_email", "invoice email");
+
+  const addrJobIds = new Set<string>();
+  for (const t of texts) {
+    for (const key of addressKeysIn(t.text)) {
+      for (const id of ctx.addressIndex.get(key) || []) addrJobIds.add(id);
+    }
+  }
+  for (const id of addrJobIds) {
+    const job = ctx.jobsById.get(id);
+    if (job && jobIsLive(job)) add(job, "street_address", "street address");
+  }
+
+  const contactKey = normWords(bill.contact_name).trim();
+  for (const po of ctx.pos) {
+    if (!po.job_id || poIsDead(po)) continue;
+    const sameSupplier = (bill.xero_contact_id && po.xero_contact_id === bill.xero_contact_id) ||
+      (contactKey.length > 0 && normWords(po.supplier_name).trim() === contactKey);
+    if (!sameSupplier || !amountWithinTolerance(bill.sub_total, po.subtotal, cfg)) continue;
+    const job = ctx.jobsById.get(po.job_id);
+    if (job && jobIsLive(job)) add(job, "supplier_amount_po", `${po.po_number || "PO"} amount`);
+  }
+
+  if (bill.xero_job_id) {
+    const job = ctx.jobsById.get(bill.xero_job_id);
+    if (job && jobIsLive(job)) add(job, "xero_job_link", "Xero link");
+  }
+
+  const candidates: PrematchCandidate[] = [...hits.values()]
+    .map((h) => ({ job_id: h.job.id, job_number: h.job.job_number, signals: [...h.signals].sort() as SignalName[] }))
+    .sort((a, b) => a.job_number.localeCompare(b.job_number));
+  const strong = candidates.filter((c) => c.signals.includes("job_number") || c.signals.includes("po_job_number"));
+
+  // 3. More than one job: a split bill or signals that disagree. Nothing picked.
+  if (candidates.length > 1) {
+    const rule = strong.length > 1 ? "split_bill" : strong.length === 1 ? "job_disagrees" : "several_candidates";
+    const list = candidates.map((c) => `${c.job_number} (${c.signals.map((s) => SIGNAL_WORDS[s]).join(", ")})`).join("; ");
+    return {
+      kind: "review",
+      confidence: "low",
+      rule,
+      reason: (rule === "split_bill" ? "The bill names more than one job: " : "Signals point at more than one job: ") + list +
+        (problems.length ? `. Also: ${problems.join("; ")}.` : "."),
+      candidates,
+    };
+  }
+
+  if (candidates.length === 1) {
+    const c = candidates[0];
+    const h = hits.get(c.job_id)!;
+    const why = c.signals.map((s) => SIGNAL_WORDS[s]).join(", ");
+    const tooEarly = bill.invoice_date && h.job.created_at &&
+      daysBetween(bill.invoice_date, h.job.created_at) > BILL_BEFORE_JOB_GRACE_DAYS;
+    if (tooEarly) problems.push(`the bill is dated ${bill.invoice_date} but ${c.job_number} was created ${h.job.created_at!.slice(0, 10)}`);
+    if (problems.length) {
+      return {
+        kind: "review",
+        confidence: "low",
+        rule: "job_disagrees",
+        reason: `${c.job_number} (${why}), but ${problems.join("; ")}.`,
+        candidates,
+      };
+    }
+    if (strong.length === 1) {
+      return {
+        kind: "job",
+        confidence: "high",
+        rule: c.signals.includes("job_number") ? "job_number" : "po_job_number",
+        reason: `${c.job_number}: ${why} (${h.where.join(", ")}); it names one live job and nothing points elsewhere.`,
+        job_id: c.job_id,
+        job_number: c.job_number,
+        candidates,
+      };
+    }
+    return {
+      kind: "job",
+      confidence: "medium",
+      rule: c.signals.join("+"),
+      reason: `${c.job_number}: ${why}. Needs a look before placing.`,
+      job_id: c.job_id,
+      job_number: c.job_number,
+      candidates,
+    };
+  }
+
+  // A job number that names no live job, and nothing else.
+  if (problems.length) {
+    return { kind: "review", confidence: "low", rule: "job_number_not_live", reason: `${problems.join("; ")}.`, candidates: [] };
+  }
+
+  // 4. Not job related.
+  if (money.length > 0 && money.every((l) => OVERHEAD_ACCOUNTS.has(String(l.account_code || "")))) {
+    const codes = [...new Set(money.map((l) => String(l.account_code)))].sort().join(", ");
+    return { kind: "not_job_related", confidence: "medium", rule: "overhead_account", reason: `Every line is on an overhead account (${codes}).` };
+  }
+  if (money.length > 0 && money.every((l) => String(l.business_unit || "").trim().toUpperCase() === GROUP_BUSINESS_UNIT)) {
+    return { kind: "not_job_related", confidence: "medium", rule: "group_business_unit", reason: "Every line is tagged Business Unit SW - GROUP." };
+  }
+
+  return { kind: "none", rule: "no_match", reason: "No job number, purchase order, email, address or Xero link names a job." };
+}
+
+/** Stable fingerprint of what a decision says, so an unchanged proposal is not rewritten. */
+export function decisionFingerprint(d: PrematchDecision): string {
+  const job = d.kind === "job" ? d.job_id : "";
+  const cands = "candidates" in d ? d.candidates.map((c) => `${c.job_id}:${c.signals.join(",")}`).join("|") : "";
+  const conf = "confidence" in d ? d.confidence : "";
+  return [d.kind, conf, d.rule, job, cands, d.reason].join("#");
+}

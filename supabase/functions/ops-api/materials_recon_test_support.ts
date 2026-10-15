@@ -12,15 +12,20 @@
 //   .from(t).insert(row).select().single()
 //   .from(t).update(patch).eq('id', v).select().single()
 //   .from(t).insert(row)                                (thenable, for job_events)
+//   .from(t).select(cols).in(c,vals).neq(c,v)           (awaited, proposals)
+//   .from(t).update(patch).eq('id',v).eq('status',v).select().single()
+//   .from(t).delete().eq(c,v)                           (awaited)
 // ════════════════════════════════════════════════════════════
 
 export type Store = Record<string, Array<Record<string, any>>>;
 
-type Filter = { kind: "eq" | "ilike"; col: string; val: any };
+type Filter = { kind: "eq" | "ilike" | "in" | "neq"; col: string; val: any };
 
 function rowMatches(row: Record<string, any>, filters: Filter[]): boolean {
   return filters.every((f) => {
     if (f.kind === "eq") return row[f.col] === f.val;
+    if (f.kind === "neq") return row[f.col] !== f.val;
+    if (f.kind === "in") return (f.val as any[]).includes(row[f.col]);
     // ilike → case-insensitive full-string equality on trimmed values
     const a = String(row[f.col] ?? "").trim().toLowerCase();
     const b = String(f.val ?? "").trim().toLowerCase();
@@ -65,6 +70,18 @@ class Query {
   }
   eq(col: string, val: any) {
     this.filters.push({ kind: "eq", col, val });
+    return this;
+  }
+  in(col: string, vals: any[]) {
+    this.filters.push({ kind: "in", col, val: vals });
+    return this;
+  }
+  neq(col: string, val: any) {
+    this.filters.push({ kind: "neq", col, val });
+    return this;
+  }
+  delete() {
+    this.op = "delete" as any;
     return this;
   }
   ilike(col: string, val: any) {
@@ -131,7 +148,8 @@ class Query {
     }
     if (this.op === "update") {
       const rows = this.runUpdate();
-      return { data: rows[0] ?? null, error: null };
+      if (!rows[0]) return { data: null, error: { code: "PGRST116", message: "no row matched" } };
+      return { data: rows[0], error: null };
     }
     const rows = this.runSelect();
     return { data: rows[0] ?? null, error: null };
@@ -148,6 +166,12 @@ class Query {
       if (this.op === "update") {
         const rows = this.runUpdate();
         resolve({ data: this.selectAfter ? rows : null, error: null });
+        return;
+      }
+      if ((this.op as string) === "delete") {
+        const keep = this.rows().filter((r) => !rowMatches(r, this.filters));
+        this.store[this.table] = keep;
+        resolve({ data: null, error: null });
         return;
       }
       resolve({ data: this.runSelect(), error: null });

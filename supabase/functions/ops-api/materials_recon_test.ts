@@ -250,3 +250,50 @@ Deno.test("assign — unknown queue row throws", async () => {
     Error, "queue row not found",
   );
 });
+
+// ── Bill pre-match (JP-06): the agent's landing and its proposals ──
+Deno.test("agent placement — lands one traceable agent_prematch fact on an open bill", async () => {
+  const { client, store } = makeFakeClient(baseSeed());
+  const out = await assignReconRow(client, {
+    queueId: "q-open-noref", jobId: "job-fence-1", actor: "agent_prematch", orgId: ORG, nowIso: NOW,
+    agent: { matchReason: "job_number: SWF-25010 on line 1" },
+  });
+  assertEquals(out.ok, true);
+  const fact = store.job_materials_facts.find((f) => f.xero_invoice_id === "xinv-001")!;
+  assertEquals([fact.automation_source, fact.confidence, fact.assigned_by], ["agent_prematch", "high", "agent_prematch"]);
+  assertEquals(fact.match_reason, "agent_prematch:job_number: SWF-25010 on line 1");
+  assertEquals(store.materials_reconciliation_queue.find((q) => q.id === "q-open-noref")!.status, "assigned");
+});
+
+Deno.test("agent placement — never moves a bill a person already placed or filed", async () => {
+  const { client, store } = makeFakeClient(baseSeed());
+  const filed = store.materials_reconciliation_queue.find((q) => q.status !== "open")!;
+  const before = (store.job_materials_facts || []).length;
+  await assertRejects(
+    () => assignReconRow(client, { queueId: filed.id, jobId: "job-fence-1", actor: "agent_prematch", orgId: ORG, nowIso: NOW, agent: { matchReason: "x" } }),
+    Error,
+    "never moves a placed or filed bill",
+  );
+  assertEquals((store.job_materials_facts || []).length, before);
+});
+
+Deno.test("worklist — shows the agent's proposal and its reason, and Use it accepts it", async () => {
+  const seed = baseSeed();
+  seed.materials_bill_proposals = [{
+    id: "p-1", xero_invoice_id: "xinv-001", proposal_kind: "job", proposed_job_id: "job-fence-1",
+    proposed_job_number: "SWF-25010", confidence: "medium", rule: "invoice_email",
+    reason: "SWF-25010: invoice email filed on that job. Needs a look before placing.", candidates: [],
+    outcome: "queued_for_review",
+  }];
+  const { client, store } = makeFakeClient(seed);
+  const listed = await listReconQueue(client, { status: "open", orgId: ORG });
+  assertEquals(listed.proposals, "ok");
+  const row = (listed.rows as Array<Record<string, any>>).find((r) => r.xero_invoice_id === "xinv-001")!;
+  assertEquals([row.suggested_job_number, row.suggestion_confidence, row.proposal.reason], [
+    "SWF-25010", "medium", "SWF-25010: invoice email filed on that job. Needs a look before placing.",
+  ]);
+  const out = await assignReconRow(client, { queueId: "q-open-noref", useSuggestion: true, actor: "shaun@secureworkswa.com.au", orgId: ORG, nowIso: NOW });
+  assertEquals(out.action, "accept-suggestion");
+  const fact = store.job_materials_facts.find((f) => f.xero_invoice_id === "xinv-001")!;
+  assertEquals([fact.job_id, fact.automation_source], ["job-fence-1", "manual_queue"]);
+});
