@@ -90,7 +90,11 @@ async function resolveOperator(
     ? body.operator_email.trim()
     : "";
   if (!raw) {
-    refuse(400, "operator_required", "operator_email naming a person is required");
+    refuse(
+      400,
+      "operator_required",
+      "operator_email naming a person is required",
+    );
   }
   const { data, error } = await client.from("users")
     .select("id, email, org_id")
@@ -101,14 +105,22 @@ async function resolveOperator(
     String(u.email || "").toLowerCase() === raw.toLowerCase()
   );
   if (!match) {
-    refuse(400, "operator_required", "operator_email does not name a person in users");
+    refuse(
+      400,
+      "operator_required",
+      "operator_email does not name a person in users",
+    );
   }
   // The key is not that person (as slice 5): the by-id stays null and the
   // email names them.
   return { userId: null, email: String(match.email) };
 }
 
-async function readOrder(client: any, id: string, ctx: DispatchDeliveriesContext) {
+async function readOrder(
+  client: any,
+  id: string,
+  ctx: DispatchDeliveriesContext,
+) {
   const { data, error } = await client.from("purchase_orders")
     .select(ORDER_SELECT)
     .eq("id", id)
@@ -149,7 +161,11 @@ async function loadDeliveryOrder(
   if (error) readFailed("job read", error);
   if (!job) refuse(404, "order_not_found", "Order not found");
   if (dispatchWorkType(job) === "makesafe") {
-    refuse(409, "not_dispatch_work", "Deliveries are not offered on a make-safe job");
+    refuse(
+      409,
+      "not_dispatch_work",
+      "Deliveries are not offered on a make-safe job",
+    );
   }
   if (isDispatchOrderGone(order)) {
     refuse(409, "order_cancelled", "This order is cancelled");
@@ -265,18 +281,35 @@ export async function setDispatchDeliveryExpected(
   const date = dateInput(body?.delivery_date, "delivery_date");
   const { order, expected } = await loadDeliveryOrder(client, body, ctx);
   if (order.xero_po_id) {
-    refuse(409, "order_in_xero", "The expected date of an order in Xero is set in Xero");
+    refuse(
+      409,
+      "order_in_xero",
+      "The expected date of an order in Xero is set in Xero",
+    );
   }
   const operator = await resolveOperator(client, body, ctx);
   if ((order.delivery_date ?? null) === date) {
     return await answer(client, order, ctx, { unchanged: true });
   }
-  const updated = await writeOrder(client, order, expected, { delivery_date: date }, ctx);
-  const logged = await logEvent(client, updated, operator, "po_delivery_expected_set", {
-    from: order.delivery_date ?? null,
-    to: date,
-  });
-  return await answer(client, updated, ctx, logged ? {} : { audit_logged: false });
+  const updated = await writeOrder(client, order, expected, {
+    delivery_date: date,
+  }, ctx);
+  const logged = await logEvent(
+    client,
+    updated,
+    operator,
+    "po_delivery_expected_set",
+    {
+      from: order.delivery_date ?? null,
+      to: date,
+    },
+  );
+  return await answer(
+    client,
+    updated,
+    ctx,
+    logged ? {} : { audit_logged: false },
+  );
 }
 
 export async function setDispatchDeliveryConfirmed(
@@ -284,7 +317,10 @@ export async function setDispatchDeliveryConfirmed(
   body: any,
   ctx: DispatchDeliveriesContext,
 ) {
-  const date = dateInput(body?.confirmed_delivery_date, "confirmed_delivery_date");
+  const date = dateInput(
+    body?.confirmed_delivery_date,
+    "confirmed_delivery_date",
+  );
   const via = body?.via;
   if (via !== "deliveries" && via !== "thread") {
     badRequest("via must be deliveries or thread");
@@ -312,12 +348,23 @@ export async function setDispatchDeliveryConfirmed(
       confirmed_delivery_set_by_email: operator.email,
     };
   const updated = await writeOrder(client, order, expected, patch, ctx);
-  const logged = await logEvent(client, updated, operator, "po_delivery_confirmed_set", {
-    from: stored,
-    to: date,
-    via,
-  });
-  return await answer(client, updated, ctx, logged ? {} : { audit_logged: false });
+  const logged = await logEvent(
+    client,
+    updated,
+    operator,
+    "po_delivery_confirmed_set",
+    {
+      from: stored,
+      to: date,
+      via,
+    },
+  );
+  return await answer(
+    client,
+    updated,
+    ctx,
+    logged ? {} : { audit_logged: false },
+  );
 }
 
 export async function markDispatchDeliverySighted(
@@ -326,11 +373,15 @@ export async function markDispatchDeliverySighted(
   ctx: DispatchDeliveriesContext,
 ) {
   const sighted = body?.sighted;
-  if (sighted !== true && sighted !== false) badRequest("sighted must be true or false");
+  if (sighted !== true && sighted !== false) {
+    badRequest("sighted must be true or false");
+  }
   const { order, expected } = await loadDeliveryOrder(client, body, ctx);
   const operator = await resolveOperator(client, body, ctx);
   const was = !!order.delivery_sighted_at;
-  if (was === sighted) return await answer(client, order, ctx, { unchanged: true });
+  if (was === sighted) {
+    return await answer(client, order, ctx, { unchanged: true });
+  }
   const at = nowIso(ctx);
   const updated = await writeOrder(
     client,
@@ -357,7 +408,12 @@ export async function markDispatchDeliverySighted(
       was_sighted_at: order.delivery_sighted_at,
       was_sighted_by_email: order.delivery_sighted_by_email ?? null,
     });
-  return await answer(client, updated, ctx, logged ? {} : { audit_logged: false });
+  return await answer(
+    client,
+    updated,
+    ctx,
+    logged ? {} : { audit_logged: false },
+  );
 }
 
 export async function runDispatchDeliveriesAction(

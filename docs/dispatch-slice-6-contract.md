@@ -90,7 +90,8 @@ cap.
 Failures: orders read fails, `orders_status: 'failed'` and no `deliveries`
 (slice 4's rule). Only the `users` read fails: names fall back to the stored
 emails, nothing marked failed. `lines[].display_status` and `counts.ready`
-count Delivered lines.
+count Delivered lines; which orders are sighted comes from the orders read
+alone, so a failed slice 5 chip read never hides a Delivered line.
 
 ## 4. `GET pipeline&dispatch=1`
 
@@ -152,7 +153,10 @@ Common:
 `analyseSupplierQuote` selects `confirmed_delivery_set_at`, and in all three
 places it writes `confirmed_delivery_date` leaves that column out when it is
 set: a date a person set by hand is never replaced by a machine's reading of an
-email. Everything else it does is unchanged.
+email. Each of those writes is its own update carrying
+`confirmed_delivery_set_at IS NULL`, so a person's press during the AI call
+still wins (the high-confidence status move is a separate, unguarded update).
+Everything else it does is unchanged.
 
 ## 7. Every Dispatch write's `counts`
 

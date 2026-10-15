@@ -527,10 +527,11 @@ nothing, a move from another status (scheduled -> accepted) still pushes
 non-Dispatch draft orders. Contract:
 `docs/dispatch-slice-5-contract.md`.
 Slice 6's Deliveries rules (rows, counted, the three cells, `step`, the rail
-line) live only in `dispatch_deliveries.ts`; a sighting is the six
-`purchase_orders` columns `confirmed_delivery_set_*` / `delivery_sighted_*`,
-written only by the three `dispatch_delivery_*` actions, never
-`delivery_confirmed_at`. Contract: `docs/dispatch-slice-6-contract.md`.
+line) live only in `dispatch_deliveries.ts`; a hand-set confirmed date
+(`confirmed_delivery_set_*`) and a sighting (`delivery_sighted_*`) are six
+`purchase_orders` columns written only by the three `dispatch_delivery_*`
+actions, never `delivery_confirmed_at`. Contract:
+`docs/dispatch-slice-6-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 

@@ -48,8 +48,8 @@ import {
   dispatchDeliveryPersonIds,
   dispatchDeliveryRows,
   dispatchDeliverySummary,
-  dispatchSightedOrderIds,
   type DispatchPersonNames,
+  dispatchSightedOrderIds,
 } from "./dispatch_deliveries.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 
