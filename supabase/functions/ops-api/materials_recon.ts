@@ -77,6 +77,7 @@ export type AssignAction = "accept-suggestion" | "assign-to-job";
 export const AGENT_PREMATCH_SOURCE = "agent_prematch";
 export interface AgentLanding {
   matchReason: string; // the proposal's rule and reason
+  matchedPoId?: string | null; // the one PO a rule-1b placement rests on
 }
 
 // The live proposal the pre-match agent holds for a bill (materials_bill_proposals).
@@ -141,7 +142,7 @@ export function buildManualFactRow(
     amount_inc_gst: queue.total ?? null,
     confidence: agent ? "high" : "high_manual",
     automation_source: agent ? AGENT_PREMATCH_SOURCE : "manual_queue",
-    matched_po_id: null,
+    matched_po_id: agent?.matchedPoId ?? null,
     match_reason: agent ? `${AGENT_PREMATCH_SOURCE}:${agent.matchReason}` : manualQueueMatchReason(action, job.job_number),
     fact_date: queue.invoice_date,
     assigned_by: actor,

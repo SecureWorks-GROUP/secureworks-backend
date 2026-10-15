@@ -174,7 +174,7 @@ function proposalRow(
     rule: d.rule,
     reason: d.reason,
     candidates: "candidates" in d ? d.candidates : [],
-    signals: {},
+    signals: d.kind === "job" && d.po_id ? { po_id: d.po_id } : {},
     input_hash: hash,
     outcome: "queued_for_review",
     outcome_reason: outcomeReason,
@@ -206,7 +206,7 @@ export async function runBillPrematch(
   // Open rows and their bills.
   const queue = await readAll<any>(() =>
     sb.from("materials_reconciliation_queue")
-      .select("id, org_id, xero_invoice_id, invoice_number, xero_contact_id, contact_name, sub_total, invoice_date, status")
+      .select("id, org_id, xero_invoice_id, invoice_number, xero_contact_id, contact_name, sub_total, invoice_date, status, assigned_by")
       .eq("org_id", opts.orgId).eq("status", "open").order("id")
   );
   if (!queue) return { ...result, reason: "queue_unreadable" };
@@ -254,10 +254,22 @@ export async function runBillPrematch(
   const { jobsById, jobsByNumber, duplicateNumbers } = buildJobMaps(jobs);
   const addressIndex = buildAddressIndex(jobs);
 
-  const { data: poRows, error: poErr } = await sb.from("purchase_orders")
-    .select("id, po_number, job_id, xero_contact_id, supplier_name, subtotal, status, xero_bill_id");
-  if (poErr || !Array.isArray(poRows)) return { ...result, reason: "purchase_orders_unreadable" };
-  const pos = poRows as PrematchPO[];
+  const pos = await readAll<PrematchPO>(() =>
+    sb.from("purchase_orders")
+      .select("id, po_number, job_id, xero_contact_id, supplier_name, subtotal, status, xero_bill_id")
+      .order("id")
+  );
+  if (!pos) return { ...result, reason: "purchase_orders_unreadable" };
+  const poFacts = await readAll<any>(() =>
+    sb.from("job_materials_facts").select("xero_invoice_id, matched_po_id")
+      .not("matched_po_id", "is", null).order("id")
+  );
+  if (!poFacts) return { ...result, reason: "purchase_order_facts_unreadable" };
+  const poFactBills = new Map<string, string[]>();
+  for (const f of poFacts) {
+    if (!poFactBills.has(f.matched_po_id)) poFactBills.set(f.matched_po_id, []);
+    poFactBills.get(f.matched_po_id)!.push(f.xero_invoice_id);
+  }
 
   const bills = live.map((q) => toPrematchBill(q, invById.get(q.xero_invoice_id)));
   const atts = await readAll<any>(() =>
@@ -292,7 +304,9 @@ export async function runBillPrematch(
   if (!facts || !proposals) return { ...result, reason: "existing_rows_unreadable" };
   const hasFact = new Set(facts.map((f) => f.xero_invoice_id));
   const liveProposal = new Map<string, any>();
-  const placedBefore = new Set<string>();
+  const placedBefore = new Set<string>(
+    live.filter((q) => q.assigned_by === AGENT_PREMATCH_SOURCE).map((q) => q.xero_invoice_id),
+  );
   for (const p of proposals) {
     if (p.outcome !== "superseded") liveProposal.set(p.xero_invoice_id, p);
     if (p.auto_assigned_at) placedBefore.add(p.xero_invoice_id);
@@ -318,6 +332,7 @@ export async function runBillPrematch(
       duplicateNumbers,
       addressIndex,
       pos,
+      poFactBills,
       emailJobIds: emailJobs.get(bill.xero_invoice_id) || [],
     });
     const bucket = d.kind === "job" ? `job_${d.confidence}` : d.kind;
@@ -365,7 +380,7 @@ export async function runBillPrematch(
         actor: AGENT_PREMATCH_SOURCE,
         orgId: opts.orgId,
         nowIso: now,
-        agent: { matchReason: `${d.rule}: ${d.reason}` },
+        agent: { matchReason: `${d.rule}: ${d.reason}`, matchedPoId: d.po_id },
       });
       const { error } = await sb.from("materials_bill_proposals")
         .update({ outcome: "assigned", outcome_reason: "placed by the agent", auto_assigned_at: now, updated_at: now })

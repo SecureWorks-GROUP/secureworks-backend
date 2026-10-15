@@ -14,7 +14,7 @@ Supplier bills in Bills to place (`materials_reconciliation_queue`, status
 | 0 | Any money line on account 306 or 301 (subcontractor labour) | left out, no proposal |
 | 1 | A job number in the bill reference or any line, or the job of the PO the bill is linked to (`purchase_orders.xero_bill_id`) or names, naming exactly one live job, nothing disagreeing | **placed by the agent** (confidence high) |
 | 2 | Invoice email filed on one job, one site street address, supplier plus amount equals one PO (2% or $5), Xero links a real job: all naming the same one job | proposal, medium, one staff press |
-| 3 | Two or more jobs from any of the above, a job number not on record or not live, or a bill dated more than 14 days before its job existed | review, low, candidates listed, nothing picked |
+| 3 | Two or more jobs from any of the above, a job number not on record or not live, a bill dated more than 14 days before its job existed, more than one rule-1 PO, or a rule-1 PO already linked to or matched by another bill | review, low, candidates listed, nothing picked |
 | 4 | Every money line on an overhead account, or every money line tagged Business Unit SW - GROUP | proposal: not job related |
 | 5 | Anything else | no proposal |
 
@@ -30,11 +30,14 @@ run. Rules live in `supabase/functions/xero-sync/bill_prematch.ts`; the run in
   or `assigned`), older rows `superseded` with a reason. The sync never wipes it.
 - A rule-1 bill is placed through `assignReconRow` (the staff press path): one
   `job_materials_facts` row with `automation_source = 'agent_prematch'`,
-  `confidence = 'high'`, `match_reason = 'agent_prematch:<rule>: <reason>'`, the
+  `confidence = 'high'`, `match_reason = 'agent_prematch:<rule>: <reason>'`,
+  `matched_po_id` set to the one PO a PO-path placement rests on (so the job
+  profit view stops counting that PO as committed), the
   queue row `assigned` by `agent_prematch`, and a `materials_bill_assigned`
   job event. It only lands on a row still `open` with no fact.
-- To undo one: delete that fact and set the queue row back to `open`. The agent
-  then never places that bill again; it stays a proposal for staff.
+- To undo one: delete that fact and set the queue row back to `open` (leave
+  `assigned_by` as `agent_prematch`). The agent then never places that bill
+  again; it stays a proposal for staff.
 - Bills voided or deleted in Xero: queue row `status = 'void_in_xero'`,
   `closed_reason` `xero_bill_voided` or `xero_bill_deleted`. Nothing else changes.
 - No Xero write. At most 150 proposal writes and 25 placements per run.

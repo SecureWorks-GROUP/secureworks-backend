@@ -11,6 +11,8 @@ import {
   type PrematchPO,
 } from "./bill_prematch.ts";
 import { emailJobsByBill } from "./bill_prematch_run.ts";
+import { assignReconRow } from "../ops-api/materials_recon.ts";
+import { baseSeed, makeFakeClient, ORG } from "../ops-api/materials_recon_test_support.ts";
 
 const JOBS: PrematchJob[] = [
   { id: "j1", job_number: "SWF-26535", status: "complete", created_at: "2026-05-01", site_address: "12 Banksia Street, Wanneroo WA", holding: false },
@@ -117,4 +119,34 @@ Deno.test("an invoice email counts only when the file name carries the whole inv
     { file_name: "Invoice INV-795020.pdf", job_id: "j1" }, // a longer number is a different invoice
   ]);
   assertEquals([...got.entries()], [["x-1", ["j5"]]]);
+});
+
+Deno.test("a bill placed through the PO it names is matched to that PO, and a PO another bill holds waits for staff", async () => {
+  const jobs: PrematchJob[] = [
+    { id: "job-fence-1", job_number: "SWF-25010", status: "scheduled", created_at: "2026-06-01", site_address: null, holding: false },
+  ];
+  const po: PrematchPO = { id: "po-9", po_number: "PO-302382", job_id: "job-fence-1", xero_contact_id: "c-9", supplier_name: null, subtotal: 9000, status: "sent", xero_bill_id: null };
+  const place = (poFactBills?: Map<string, string[]>, linked: string | null = null) =>
+    decideBillPrematch(
+      bill([["Your order PO-302382", "305", 1000]], { xero_invoice_id: "xinv-001", invoice_date: "2026-07-02" }),
+      { ...buildJobMaps(jobs), addressIndex: buildAddressIndex(jobs), pos: [{ ...po, xero_bill_id: linked }], emailJobIds: [], poFactBills },
+    );
+
+  const d = place();
+  if (d.kind !== "job" || d.confidence !== "high") throw new Error(`expected a placement, got ${d.kind}`);
+  assertEquals(d.po_id, "po-9");
+  const { client, store } = makeFakeClient(baseSeed());
+  await assignReconRow(client, {
+    queueId: "q-open-noref", jobId: d.job_id, actor: "agent_prematch", orgId: ORG,
+    agent: { matchReason: `${d.rule}: ${d.reason}`, matchedPoId: d.po_id },
+  });
+  const fact = store.job_materials_facts.find((f) => f.xero_invoice_id === "xinv-001")!;
+  assertEquals([fact.job_id, fact.matched_po_id, fact.kind], ["job-fence-1", "po-9", "actual"]);
+
+  const factTaken = place(new Map([["po-9", ["xinv-other"]]]));
+  assertEquals(factTaken.kind === "review" && [factTaken.rule, factTaken.candidates.map((c) => c.job_number)], [
+    "po_already_matched", ["SWF-25010"],
+  ]);
+  const linkedTaken = place(undefined, "xinv-other");
+  assertEquals(linkedTaken.kind === "review" && linkedTaken.rule, "po_already_matched");
 });

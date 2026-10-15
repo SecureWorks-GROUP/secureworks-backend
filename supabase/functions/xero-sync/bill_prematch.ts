@@ -96,6 +96,7 @@ export interface PrematchContext {
   addressIndex: Map<string, string[]>; // "12 smith" -> job ids
   pos: PrematchPO[];
   emailJobIds: string[]; // jobs the context system filed this bill's invoice email on
+  poFactBills?: Map<string, string[]>; // PO id -> bills whose fact is already matched to it
   config?: MatchConfig;
 }
 
@@ -123,6 +124,7 @@ export type PrematchDecision =
     reason: string;
     job_id: string;
     job_number: string;
+    po_id: string | null; // the one rule-1b PO the placement is matched to
     candidates: PrematchCandidate[];
   }
   | { kind: "not_job_related"; confidence: "medium"; rule: string; reason: string }
@@ -310,6 +312,8 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
     }
   }
   // 1b. The purchase order the bill is linked to, or names: its job.
+  const poByJob = new Map<string, PrematchPO[]>();
+  let poTaken = false;
   for (const po of ctx.pos) {
     if (!po.job_id || poIsDead(po)) continue;
     let where: string | null = null;
@@ -320,8 +324,17 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
     }
     if (!where) continue;
     const job = ctx.jobsById.get(po.job_id);
-    if (job && jobIsLive(job)) add(job, "po_job_number", where);
-    else if (job && !job.holding) problems.push(`${po.po_number} is on ${job.job_number}, which is ${String(job.status).toLowerCase()}`);
+    if (job && jobIsLive(job)) {
+      add(job, "po_job_number", where);
+      if (!poByJob.has(job.id)) poByJob.set(job.id, []);
+      poByJob.get(job.id)!.push(po);
+      const linkedElsewhere = !!po.xero_bill_id && po.xero_bill_id !== bill.xero_invoice_id;
+      const factElsewhere = (ctx.poFactBills?.get(po.id) || []).some((b) => b !== bill.xero_invoice_id);
+      if (linkedElsewhere || factElsewhere) {
+        poTaken = true;
+        problems.push(`${po.po_number || "the purchase order"} is already matched to another bill`);
+      }
+    } else if (job && !job.holding) problems.push(`${po.po_number} is on ${job.job_number}, which is ${String(job.status).toLowerCase()}`);
   }
 
   // 2. Context signals.
@@ -382,11 +395,15 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
     const tooEarly = bill.invoice_date && h.job.created_at &&
       daysBetween(bill.invoice_date, h.job.created_at) > BILL_BEFORE_JOB_GRACE_DAYS;
     if (tooEarly) problems.push(`the bill is dated ${bill.invoice_date} but ${c.job_number} was created ${h.job.created_at!.slice(0, 10)}`);
+    const jobPos = poByJob.get(c.job_id) || [];
+    if (jobPos.length > 1) {
+      problems.push(`the bill names more than one purchase order (${jobPos.map((p) => p.po_number || p.id).join(", ")})`);
+    }
     if (problems.length) {
       return {
         kind: "review",
         confidence: "low",
-        rule: "job_disagrees",
+        rule: poTaken ? "po_already_matched" : "job_disagrees",
         reason: `${c.job_number} (${why}), but ${problems.join("; ")}.`,
         candidates,
       };
@@ -399,6 +416,7 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
         reason: `${c.job_number}: ${why} (${h.where.join(", ")}); it names one live job and nothing points elsewhere.`,
         job_id: c.job_id,
         job_number: c.job_number,
+        po_id: jobPos.length === 1 ? jobPos[0].id : null,
         candidates,
       };
     }
@@ -409,6 +427,7 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
       reason: `${c.job_number}: ${why}. Needs a look before placing.`,
       job_id: c.job_id,
       job_number: c.job_number,
+      po_id: null,
       candidates,
     };
   }
@@ -432,7 +451,7 @@ export function decideBillPrematch(bill: PrematchBill, ctx: PrematchContext): Pr
 
 /** Stable fingerprint of what a decision says, so an unchanged proposal is not rewritten. */
 export function decisionFingerprint(d: PrematchDecision): string {
-  const job = d.kind === "job" ? d.job_id : "";
+  const job = d.kind === "job" ? `${d.job_id}:${d.po_id ?? ""}` : "";
   const cands = "candidates" in d ? d.candidates.map((c) => `${c.job_id}:${c.signals.join(",")}`).join("|") : "";
   const conf = "confidence" in d ? d.confidence : "";
   return [d.kind, conf, d.rule, job, cands, d.reason].join("#");
