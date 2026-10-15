@@ -4603,10 +4603,8 @@ line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
 by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
 before the approval; never set it from code. Only the labour lane of
 `v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
-restate that lane list. One temporary exception lives in
-`workOrderLineIsLabour` (`job_work_orders.ts`): the trade app's Work Order pay
-line (`work order` / `work_order`) counts as labour until that view classifies
-it; remove the exception then. This migration inserts one call,
+restate that lane list (the trade app's `work order` / `work_order` pay
+lines are in it since `20261015093000`). This migration inserts one call,
 `carry_work_order_variations`, into the deployed bodies of the three
 draft-replacing functions (`replace_trade_invoice_draft_v1`,
 `persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a
