@@ -128,7 +128,7 @@ async function resolvePerson(
     .limit(1);
   if (error) throw error;
   const email = cleanText(data?.[0]?.email);
-  if (!email) {
+  if (!email || email.toLowerCase() !== raw.toLowerCase()) {
     throw new DispatchStageWriteError(
       "operator_email does not match a person on record",
       400,
