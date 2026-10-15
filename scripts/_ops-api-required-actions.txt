@@ -369,6 +369,11 @@ debt_ws_jan_list_lock # probe=jwt-fail-closed
 debt_ws_jan_list_send # probe=jwt-fail-closed
 debt_ws_agent_queue # probe=jwt-fail-closed
 debt_ws_agent_submit # probe=jwt-fail-closed
+# The debt report (15 Oct 2026): the view and PDF (staff), the send (owner), the Monday cron.
+debt_ws_report # probe=jwt-fail-closed
+debt_ws_report_pdf # probe=jwt-fail-closed
+debt_ws_report_send # probe=jwt-fail-closed
+debt_ws_report_auto # probe=jwt-fail-closed
 # Job work orders (job_work_orders.ts): one sealed work order per fencing and patio job
 job_work_order # probe=bounded-refusal probe-args=job_id=__deploy_probe__
 approve_work_order # probe=source-only

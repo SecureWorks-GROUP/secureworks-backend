@@ -302,7 +302,11 @@ BEGIN
     RAISE EXCEPTION 'contract: a re-apply changed the sends';
   END IF;
   IF (SELECT count(*) FROM pg_policies WHERE schemaname = 'public'
-        AND tablename LIKE 'debt\_ws\_%') <> 7 THEN
+        -- This migration's seven tables by name: later migrations add debt_ws_ tables of
+        -- their own (20261015170000_debt_ws_report adds debt_ws_reports and its policy).
+        AND tablename IN ('debt_ws_settings', 'debt_ws_log', 'debt_ws_suggestions',
+                          'debt_ws_states', 'debt_ws_sends', 'debt_ws_statements',
+                          'debt_ws_jan_lists')) <> 7 THEN
     RAISE EXCEPTION 'contract: a re-apply duplicated a policy';
   END IF;
 END $$;

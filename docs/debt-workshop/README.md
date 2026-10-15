@@ -20,17 +20,20 @@ Nothing is sent when this merges. Every switch below starts off.
 | `debt_ws_store.ts` | Every database read and write, behind one interface. |
 | `debt_ws_book.ts` | The read model: the debt book worked out once and shared by the overview, the job view, statements, Jan's list and the agent queue. |
 | `debt_ws_payer.ts` | Who pays each invoice (the payer, see below), which messages are theirs, and the shares on a job. |
-| `debt_ws_actions.ts` | The 15 actions, the guarded send, and `runDebtWsAction` (the method, staff, owner and server-key checks). |
+| `debt_ws_actions.ts` | The 19 actions, the guarded send, and `runDebtWsAction` (the method, staff, owner and server-key checks). |
+| `debt_ws_report.ts` | The debt report as plain data, its HTML page and its email (see "The debt report" below). No database, Xero or email in it. |
+| `debt_ws_report_pdf.ts` | The debt report drawn as a PDF with jsPDF (the same import as the purchase order PDF). |
 | `debt_ws_deps.ts` | Builds the dependencies from what `index.ts` owns. |
 | `index.ts` | Wiring only: one `case` block that injects `sendChaseSms`, `getJobConversation`, `getToken`, `xeroReadGet`, `updateJobStatus`, the Outlook send, `getInvoicePdf`, `searchGHLContacts`, the staff SMS path and the job document reads. |
 | `supabase/migrations/20261008170000_debt_workshop.sql` | The seven tables, row-level security, and the two cron jobs. Rollback: `supabase/rollbacks/20261008170000_debt_workshop_down.sql`. |
+| `supabase/migrations/20261015170000_debt_ws_report.sql` | The debt report: three settings, `debt_ws_reports`, `debt_ws_payments_between` and the Monday cron. Rollback: `supabase/rollbacks/20261015170000_debt_ws_report_down.sql`. |
 
 ## The actions
 
 Who may call each action:
 - **staff:** a signed-in staff user (admin, owner or ops_manager). The server key is refused.
 - **owner:** the workshop owner, signed in.
-- **server key:** only the two Jan list crons, and the agent queue and submit (which the owner may also call).
+- **server key:** only the two Jan list crons, the Monday report cron, and the agent queue and submit (which the owner may also call).
 
 | Action | Method | Who | What it does |
 |---|---|---|---|
@@ -47,8 +50,12 @@ Who may call each action:
 | `debt_ws_jan_list_remove` | POST | owner | Takes one share off this week's list. |
 | `debt_ws_jan_list_lock` | POST | server key | The Friday cron. Does nothing unless `jan_list_auto_send` is on. |
 | `debt_ws_jan_list_send` | POST | server key | The Sunday cron. Does nothing unless `jan_list_auto_send` and sending are both on. A failed live Xero read fails the list (`xero_unavailable`), never sending from our copy. An item with a possible payment in the bank feed is dropped and logged as `send_refused` on its share; the rest still go (`dropped[]` in the result). No bank feed at all fails the list (`bank_check_unavailable`). |
-| `debt_ws_agent_queue` | GET | server key or owner | Items for the agent, each with its bundle. Returns no items while `agent_enabled` is off, and none (with `blocked: "bank_feed_unavailable"`) while the bank feed cannot be read. A held message (`unplaced: true`) carries `candidate_job_count`; with more than one candidate job it is also `context_only: true`, and each item carries `held_message_rule`. |
-| `debt_ws_agent_submit` | POST | server key or owner | Stores a `draft`, `move` or `flag`, or records `no_action`. Every submit stamps `agent_reviewed_at`. A `move` whose payer's newest inbound message is held on no job with more than one candidate job is stored as a `flag` to Shaun instead (`move_refused` in the result); a move is refused with `conversation_unreadable` (503) when those messages cannot be read. |
+| `debt_ws_agent_queue` | GET | server key or owner | Items for the agent, each with its bundle. Returns no items while `agent_enabled` is off, and none (with `blocked: "bank_feed_unavailable"`) while the bank feed cannot be read. A held message (`unplaced: true`) carries `candidate_job_count`; with more than one candidate job it is also `context_only: true`, and each item carries `held_message_rule`. A held message that is also in the payer's GoHighLevel cache shows once, as the held copy with these marks. Messages are ordered by parsed time; at one instant a held message comes after an unmarked one, so it counts as the newer. |
+| `debt_ws_report` | GET | staff | The live debt report, built fresh on every read: `report` (every figure as data), `html` (the page the Debt tab shows), `delivery` (from, to, cc, `auto_send`, `sending_on`, `viewer_is_owner`, `can_send`, `why_not`), `last_sent` and `last_attempt`. See "The debt report". |
+| `debt_ws_report_pdf` | GET | staff | The same report as a PDF: `filename`, `content_type`, `pdf_base64`, `page_count`. |
+| `debt_ws_report_send` | POST (no fields) | owner | Emails the report PDF to the report recipients. Refused unless sending is on (`sending_off`), the recipients are set and all ours (`no_recipients`, `recipient_not_internal`), and no manual report went in the last two minutes (`recently_sent`). Built fresh at the moment of sending. |
+| `debt_ws_report_auto` | POST | server key | The Monday 08:00 cron. Does nothing unless `report_auto_send` and sending are both on (`sent: false` with `reason`). One auto report per week. |
+| `debt_ws_agent_submit` | POST | server key or owner | Stores a `draft`, `move` or `flag`, or records `no_action`. Every submit stamps `agent_reviewed_at`. A `move` whose payer's newest inbound message is held on no job with more than one candidate job is stored as a `flag` to Shaun instead (`move_refused` in the result); a move is refused with `conversation_unreadable` (503) when those messages cannot be read, including when the read of the held messages fails (the conversation reader's `held_read_failed`). Nothing is stored or stamped then. Drafts, flags and `no_action` are not checked against the messages. |
 
 A refusal is `{ok: false, code, error}`, with a plain reason in `error`. The codes include:
 - `sending_off`, `not_owner`, `owner_not_set`, `operator_access_required`, `amount_required`;
@@ -56,6 +63,7 @@ A refusal is `{ok: false, code, error}`, with a plain reason in `error`. The cod
 - `possible_payment` (it also carries `possible_payments[]`);
 - `already_sent`, `step_not_due`, `payer_not_linked`, `no_email`, `nothing_due`;
 - `text_not_allowed`, `xero_unavailable`, `bank_check_unavailable`;
+- the debt report: `no_recipients`, `recipient_not_internal`, `recently_sent`, `report_pdf_failed`, `email_failed`;
 - `send_refused_by_guard`, `send_not_confirmed`.
 
 ### The guarded send (`debt_ws_decide` send, and stage 5 auto-send)
@@ -115,6 +123,8 @@ Every switch starts off. Turn one on only when Shaun says so.
 | Jan's list | `debt_ws_settings.jan_list_auto_send` | The Friday 09:00 lock and the Sunday 19:00 text to Jan (the text also needs sending on). |
 | Not chased | `debt_ws_settings.not_chased_contacts` | Contacts that stay in the totals but are never texted or sent a statement. Each entry is a contact name (whole words) or a Xero contact id (matching the invoice's contact or its canonical company). Seeded with Emergency Trade Services and Builderwest, by name and by id. |
 | Statement addresses | `debt_ws_settings.statement_emails` | A JSON map from the canonical Xero contact id to an accounts email; a contact-name key is a fallback only. Seeded with Major Loss Builders (`96abb9b3...`) and AJ Building & Restoration (`71a5e645...`). |
+| Report recipients | `debt_ws_settings.report_recipients` (To) and `report_cc` (Cc) | Who the debt report is emailed to. Defaults: `marnin@secureworkswa.com.au`, cc `shaun@secureworkswa.com.au`. Our own domain only: the database refuses any other address (`debt_ws_settings_report_addresses_internal`), and ops-api and send-outlook-email check again. |
+| Report auto-send | `debt_ws_settings.report_auto_send` AND sending on | The Monday 08:00 Perth email of the debt report. Default OFF. |
 | Company aliases | `debt_ws_settings.company_aliases` | A JSON map from an extra Xero contact id to the canonical one, because one builder can sit on several Xero contacts. Seeded: MLB `4d7121e3...` to `96abb9b3...`, Western Building `2a34b09f...` to `29d70cdc...`, Builderwest `aff63429...` to `c3a479ce...`. |
 
 To turn sending on (Shaun decided 14 Oct 2026 that the database switch alone decides it):
@@ -130,6 +140,7 @@ pg_cron runs in UTC; Perth is UTC+8 with no daylight saving.
 |---|---|---|---|
 | `debt-ws-jan-list-lock` | `0 1 * * 5` | Friday 09:00 | `public.trigger_debt_ws_jan_list('debt_ws_jan_list_lock')` |
 | `debt-ws-jan-list-send` | `0 11 * * 0` | Sunday 19:00 | `public.trigger_debt_ws_jan_list('debt_ws_jan_list_send')` |
+| `debt-ws-report-auto` | `0 0 * * 1` | Monday 08:00 | `public.trigger_debt_ws_report_auto()`, a no-op unless `report_auto_send` is on |
 
 - **How it calls ops-api:** the trigger posts to ops-api with `Bearer sw_service_key()`, like `20260911060000_ses_report_trigger_runs.sql`.
 - **When it calls:** only while `jan_list_auto_send` is on. ops-api checks the switches again before it does anything.
@@ -145,5 +156,29 @@ pg_cron runs in UTC; Perth is UTC+8 with no daylight saving.
   - a read cut short at 10 pages only vouches for the days it reached: an older invoice is `bank_check_unavailable` for a send and `possible_payments_status: "partial"` on the job view.
 - **Pay links** (Xero online-invoice URLs) are cached on `debt_ws_states.pay_link`. A request fetches at most 20 new ones.
 - **Invoice kinds:** final endings are FIN, FINBAL or BAL with up to three digits (FIN25, FINBAL50), FINAL and PRIVATE, with a description starting Balance, Remaining or Remainder. Not final: DEP, MAT and PROG with up to three digits, PLAN and VAR. An ending and description that disagree (FIN25 with "Deposit") still fall to "needs a look".
-- **Tests:** `deno test --allow-read --allow-env supabase/functions/ops-api/debt_ws_rules_test.ts supabase/functions/ops-api/debt_ws_store_test.ts supabase/functions/ops-api/debt_ws_deps_test.ts supabase/functions/ops-api/debt_ws_actions_test.ts supabase/functions/ops-api/debt_ws_payer_test.ts` (CI runs the same), plus `job_conversation_payer_threads_test.ts` for the conversation reader.
-- **Migration contract:** `supabase/tests/migration-contracts/20261008170000_debt_workshop/`.
+- **Tests:** `deno test --allow-read --allow-env supabase/functions/ops-api/debt_ws_rules_test.ts supabase/functions/ops-api/debt_ws_store_test.ts supabase/functions/ops-api/debt_ws_deps_test.ts supabase/functions/ops-api/debt_ws_actions_test.ts supabase/functions/ops-api/debt_ws_payer_test.ts supabase/functions/ops-api/debt_ws_report_test.ts supabase/functions/ops-api/debt_ws_report_pdf_test.ts` (CI runs the same), plus `job_conversation_payer_threads_test.ts` for the conversation reader.
+- **Migration contracts:** `supabase/tests/migration-contracts/20261008170000_debt_workshop/` and `20261015170000_debt_ws_report/`.
+
+## The debt report
+
+Shaun approved it on 15 Oct 2026 (plan: the local Lavish page `debt-collection-fresh/.lavish/debt-report-button-plan.html`). The template is the one-off "Debt position 2026-10-14" report Marnin got: the same sections and the same figures logic.
+
+- **On the screen:** a "Debt report" button, top right of the Debt tab, opens the live report as its own view (`debt_ws_report`). It is built fresh every time it opens. On that view: **Download PDF** (`debt_ws_report_pdf`) and **Send to Marnin** (`debt_ws_report_send`, owner only, a second click to confirm), and "Last sent to Marnin: <day, time>".
+- **What is in it** (`debt_ws_report.ts` `buildDebtReport`):
+  - cash at bank per Xero account (Xero's Bank Summary, read live), grouped into Operations, provisions (any account named "... Provision", or PAYGO) and other accounts;
+  - money received in the last 7 and 30 days: customer payments applied in Xero, by payment date, from `debt_ws_payments_between` (our Xero copy's `raw_json -> Payments`), split fencing and patio against insurance and other, with deposits and planning fees (`DEP` or `PLAN` references) shown;
+  - debt expected in the next 7 and 30 days: the not-due invoices by the tab's due dates (no supplier bills);
+  - total debt by the 5 categories, by job type, homeowners against companies, Xero aging, and the top 10 debtors;
+  - companies after the tab's aliases: past due, not yet due, oldest, next due, and whether this week's statement went out;
+  - every open invoice grouped worst first (payer with "neighbour of" on shared fences, job, type, invoice, date, amount, days, next step, last chase);
+  - not counted as debt: not due yet, go-ahead deposits, needs a look, not chased (Emergency Trade Services, Builderwest), test invoices;
+  - key points and notes (when it was read, unmatched receipts in the bank feed and possible matches), and a line that ties the buckets to Xero's open total to the cent.
+- **Same rules as the tab.** The report reads the tab's own book (`loadBook`, given the same open invoices it ties to Xero), so the categories are the tab's. Like the tab's chart, the debt total leaves out the not-chased contacts; they are listed under not counted as debt, so the total still ties to Xero. (Marnin's one-off report of 14 Oct counted them in the categories; Shaun accepted the difference.) A test checks the report's debt buckets equal the tab's category totals.
+- **Reads that fail** never stop the report: the bank balances, payments or bank feed show as "not read" with a note.
+- **The PDF** is drawn server side with jsPDF (`debt_ws_report_pdf.ts`), the same approach as the purchase order PDF: page 1 portrait (the summary), then landscape pages (companies, every invoice, notes), with "Page x of n" on each.
+- **The email** goes from admin@ through send-outlook-email: a short plain summary in the body (cash, received, debt by category, expected, the biggest debtor, the tie) and the PDF attached. Who it goes to: `report_recipients`, cc `report_cc` (Marnin, cc Shaun).
+- **The internal allow-list.** send-outlook-email's PDF fence refuses any PDF without an invoice or job document behind it. The debt report is the one exception, fenced to this route: the body must say `internal_report: "debt_report"`, be a plain send with no job, invoice or document, come from and go only to `@secureworkswa.com.au` (To, Cc and Bcc), and carry its PDF inline. A body that says `internal_report` but breaks any rule is refused (`internal_report_not_allowed`). Every other email is unchanged. Tests: `send-outlook-email/ses_delivery_fence_test.ts`.
+- **Who:** anyone who can see the Debt tab (staff) reads it and downloads the PDF; only the workshop owner sends it, and only while `sending_enabled` is on.
+- **The record:** each send is claimed first in `debt_ws_reports` (`sending`), then settled `sent` or `failed`, with a copy of the HTML and the attached PDF (base64 and its SHA-256), the subject, the summary and the headline totals. An email that may have gone stays `sending` and is never retried by itself. Each send also writes an `email_sent` line on `debt_ws_log` under share_key `debt-report`; a refusal writes `send_refused`.
+- **The Monday auto-send** (`report_auto_send`, default off) runs `debt_ws_report_auto` from the `debt-ws-report-auto` cron at 08:00 Perth. It also needs sending on, and sends at most once a week (a unique index on `debt_ws_reports`).
+- **Deploy order:** the migration applies before the matching ops-api (the normal merge lane does that). Until it is applied, the report still reads (payments show as not read) but cannot be sent.

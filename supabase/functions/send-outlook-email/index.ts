@@ -454,10 +454,83 @@ export function assertSenderOnlyReplyAllowed(
   }
 }
 
+// ── The internal report allow-list ──
+//
+// A PDF normally needs an authoritative owner (a Xero invoice or a job document) before it
+// may leave by email: that is the PDF fence below. The Debt Workshop's debt report (ops-api
+// debt_ws_report_send and the Monday debt_ws_report_auto) is the one PDF with no job or
+// invoice behind it: it is the whole debt position, emailed to Marnin and Shaun. It may
+// pass the PDF fence ONLY when all of these hold (Shaun approved 15 Oct 2026):
+//   - the body says internal_report: "debt_report" (no other value is known);
+//   - it is a plain send (no reply, forward or draft action);
+//   - it names no job, invoice or job document;
+//   - it is sent from, and only to, our own domain: from, every To, Cc and Bcc address
+//     ends in @secureworkswa.com.au;
+//   - every attachment is carried inline (never fetched from a URL).
+// A body that says internal_report but breaks any rule is refused outright, before Graph.
+// Nothing else changes: every other email still needs its invoice or job document.
+export const INTERNAL_REPORT_KINDS = new Set(['debt_report'])
+export const INTERNAL_REPORT_DOMAIN = 'secureworkswa.com.au'
+
+function ownDomainAddress(address: unknown): boolean {
+  return typeof address === 'string' &&
+    /^[^\s@<>]+@secureworkswa\.com\.au$/i.test(address.trim())
+}
+
+/**
+ * True when the body is an allowed internal report (its unanchored PDF may pass); false
+ * when it does not claim to be one. Throws a refusal when it claims to be one but breaks
+ * a rule above.
+ */
+export function assertInternalReportAllowed(
+  body: Record<string, any>,
+): boolean {
+  if (!hasOwn(body, 'internal_report')) return false
+  const refuse = (fact: string): never => {
+    throw new OutlookFenceError(409, {
+      state: 'refused',
+      code: 'internal_report_not_allowed',
+      fact,
+      recovery_action:
+        'Send the internal report only from and to SecureWorks Group addresses (@secureworkswa.com.au), as a plain send with its PDF inline.',
+    })
+  }
+  if (!INTERNAL_REPORT_KINDS.has(String(body.internal_report))) {
+    refuse('This internal report is not one this route knows.')
+  }
+  if (body.action !== undefined) {
+    refuse('An internal report is a plain send, never a reply, forward or draft.')
+  }
+  if (body.job_id || body.xero_invoice_id || body.job_document_id) {
+    refuse('An internal report names no job, invoice or job document.')
+  }
+  const from = String(body.from ?? body.mailbox ?? '').trim()
+  if (!ownDomainAddress(from)) {
+    refuse('An internal report is sent only from a SecureWorks Group mailbox.')
+  }
+  const addresses: string[] = []
+  for (const field of ['to', 'cc', 'bcc']) {
+    addresses.push(...splitRecipientInput(body[field], field, field === 'to'))
+  }
+  if (!addresses.length || !addresses.every(ownDomainAddress)) {
+    refuse(
+      'An internal report goes only to SecureWorks Group addresses (@secureworkswa.com.au).',
+    )
+  }
+  const attachments = Array.isArray(body.attachments) ? body.attachments : []
+  if (attachments.some((a: any) => !a || typeof a !== 'object' || a.url !== undefined)) {
+    refuse('An internal report carries its attachment inline, never from a URL.')
+  }
+  return true
+}
+
 export async function assertOutlookSesDeliveryAllowed(
   client: any,
   body: Record<string, any>,
 ) {
+  // The internal report rules run first, so a reply or forward that claims to be one is
+  // refused before any other path is chosen.
+  const internalReport = assertInternalReportAllowed(body)
   const recipients = Array.isArray(body.to) ? body.to : [body.to]
   const syntheticInboundFixture = body.sent_by === 'ses_synthetic_livefire_lab' &&
     String(body.from || '').toLowerCase() === 'marnin@secureworkswa.com.au' &&
@@ -740,6 +813,9 @@ export async function assertOutlookSesDeliveryAllowed(
       )
       continue
     }
+
+    // The one exception: the internal debt report, checked above (own domain only).
+    if (internalReport) continue
 
     throw new OutlookFenceError(409, {
       state: 'refused',

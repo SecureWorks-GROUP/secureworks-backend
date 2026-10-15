@@ -1574,6 +1574,51 @@ Deno.test("agent submit: a says-paid move on a text held on this job alone still
   assertEquals(store.suggestionRows[0].proposed_category, "says_paid");
 });
 
+Deno.test("agent submit: at one instant stamped Z and +00:00, the held message is the newest", async () => {
+  // SWF-261423 (15 Oct 2026 review): compared as strings, "...Z" sorted after
+  // "...+00:00", so the unmarked copy was taken as newest and the move stood.
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store, {
+    conversation: [
+      {
+        id: "ghl:call-log",
+        channel: "call",
+        direction: "inbound",
+        occurred_at: "2026-10-05T09:49:46.859Z",
+        body: "",
+        contact_id: "ghlcontact0000000001",
+      },
+      {
+        id: "bev:call-tx",
+        channel: "call",
+        direction: "inbound",
+        occurred_at: "2026-10-05T09:49:46.859+00:00",
+        body: "I paid it yesterday",
+        contact_id: "ghlcontact0000000001",
+        unplaced: true,
+        candidate_job_count: 2,
+      },
+    ],
+  });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 200);
+  assertEquals((res.body as any).kind, "flag");
+  assertEquals((res.body as any).move_refused.message_id, "bev:call-tx");
+});
+
+Deno.test("agent submit: a move is refused when the reader says the held read failed", async () => {
+  const store = new FakeStore();
+  store.settingsRow.agent_enabled = true;
+  const { deps } = fakeDeps(store);
+  deps.conversation = () =>
+    Promise.resolve({ messages: [], held_read_failed: true });
+  const res = await call(deps, "debt_ws_agent_submit", SERVER, SAYS_PAID_MOVE);
+  assertEquals(res.status, 503);
+  assertEquals((res.body as any).code, "conversation_unreadable");
+  assertEquals(store.suggestionRows.length, 0);
+});
+
 Deno.test("agent submit: a move is refused while the payer's messages cannot be read to check it", async () => {
   const store = new FakeStore();
   store.settingsRow.agent_enabled = true;
@@ -2136,6 +2181,8 @@ Deno.test("auth: the server key reaches only the Jan list cron and the agent; st
     "debt_ws_job",
     "debt_ws_note",
     "debt_ws_overview",
+    "debt_ws_report",
+    "debt_ws_report_pdf",
     "debt_ws_statement_preview",
   ]);
   const inputs: Record<string, Record<string, unknown>> = {
@@ -2171,6 +2218,7 @@ Deno.test("auth: the server key reaches only the Jan list cron and the agent; st
       "debt_ws_jan_list_lock",
       "debt_ws_jan_list_send",
       "debt_ws_agent_queue",
+      "debt_ws_report_auto",
     ]
   ) {
     assertEquals((await call(deps, action, SERVER)).status, 200, action);

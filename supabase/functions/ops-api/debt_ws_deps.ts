@@ -9,7 +9,9 @@ import {
   getXeroOnlineInvoiceUrl,
   getXeroReceivable,
   listXeroBankTransactions,
+  readXeroBankSummary,
 } from "./xero_receivables_read.ts";
+import { renderDebtReportPdf } from "./debt_ws_report_pdf.ts";
 import { readJobStory } from "./job_story_read.ts";
 import type { BankTransaction } from "./debt_ws_rules.ts";
 import type { DebtWsDeps } from "./debt_ws_actions.ts";
@@ -37,7 +39,7 @@ export interface DebtWsDepsInput {
   sendStaffSms: DebtWsDeps["sendStaffSms"];
   getJobConversation: (
     body: Record<string, unknown>,
-  ) => Promise<{ messages: Record<string, unknown>[]; summary?: unknown }>;
+  ) => ReturnType<DebtWsDeps["conversation"]>;
   updateJobStatus: DebtWsDeps["updateJobStatus"];
   sendEmail: DebtWsDeps["sendEmail"];
   invoicePdf: DebtWsDeps["invoicePdf"];
@@ -46,6 +48,8 @@ export interface DebtWsDepsInput {
   insuranceRead: (
     params: URLSearchParams,
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
+  /** The report PDF renderer; defaults to debt_ws_report_pdf.ts (tests pass a fake). */
+  renderReportPdf?: DebtWsDeps["renderReportPdf"];
   env?: (name: string) => string | undefined;
   now?: () => Date;
 }
@@ -126,6 +130,16 @@ export function createDebtWsDeps(input: DebtWsDepsInput): DebtWsDeps {
     sendSms: input.sendChaseSms,
     sendStaffSms: input.sendStaffSms,
     sendEmail: input.sendEmail,
+    // The debt report: Xero's Bank Summary for today (closing balance per account).
+    bankSummary: async () => {
+      const result = await readXeroBankSummary(client, {}, read);
+      return result.accounts.map((a) => ({
+        name: typeof a.account_name === "string" ? a.account_name : "",
+        account_id: typeof a.account_id === "string" ? a.account_id : null,
+        closing: typeof a.closing_balance === "number" ? a.closing_balance : null,
+      }));
+    },
+    renderReportPdf: input.renderReportPdf ?? renderDebtReportPdf,
     updateJobStatus: input.updateJobStatus,
     // extra_contact_ids: a neighbour payer's own GoHighLevel thread, read with the job's.
     // held_contact_ids: the payer's messages held on no job with this job a candidate.

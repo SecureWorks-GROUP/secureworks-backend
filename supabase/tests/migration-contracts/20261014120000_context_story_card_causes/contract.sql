@@ -83,6 +83,12 @@ UPDATE public.context_email_attachments SET file_name='Quote_SWP-974101.pdf' WHE
 SELECT pg_temp.sc_assert((SELECT count(*)=0 FROM public.context_job_quote_email_sends(ARRAY['74100000-0000-4000-8000-000000000001']::uuid[],'2026-10-01')),'two same-day documents cannot be picked by job filename');
 ROLLBACK;
 BEGIN;
+-- (held notes, 20261015100000) replaced the judge, the item check, the story's ledger read, the packet and
+-- the story since: its down goes first, inside this transaction only.
+SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
+\if :held_notes_live
+\ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
+\endif
 CREATE TEMP TABLE sc_md5 AS SELECT oid,md5(prosrc) h FROM pg_proc WHERE proname IN
  ('context_ledger_packet','context_job_story','context_job_story_held','context_job_record_value','context_job_quote_email_sends','context_job_story_payment_terms',
   'context_ledger_evidence_rows','context_ledger_cite','context_ledger_held_rows','context_story_message_text');

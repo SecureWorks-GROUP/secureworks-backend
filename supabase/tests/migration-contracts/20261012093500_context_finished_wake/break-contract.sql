@@ -13,6 +13,12 @@ SELECT coalesce(obj_description(to_regprocedure('public.context_ledger_due(integ
 -- finished wake's refuses while a later body is live)
 SELECT to_regprocedure('public.context_ledger_request_rebuild(uuid,text,text)') IS NOT NULL AS rebuild_request_live \gset
 \if :rebuild_request_live
+-- (held notes, 20261015100000) replaced the judge, the item check, the story's ledger read, the packet and
+-- the story since: its down goes first, inside this transaction only.
+SELECT to_regprocedure('public.context_ledger_held_cite(uuid,jsonb)') IS NOT NULL AS held_notes_live \gset
+\if :held_notes_live
+\ir ../../../rollbacks/20261015100000_context_held_notes_down.sql
+\endif
 \ir ../../../rollbacks/20261013153000_context_rebuild_request_down.sql
 \endif
 \ir ../../../rollbacks/20261012093500_context_finished_wake_down.sql

@@ -257,6 +257,12 @@ export interface LoadBookOptions {
   now: Date;
   /** Read only these invoices (any status), with their jobs' history. Default: the open book. */
   invoiceIds?: string[];
+  /**
+   * The open invoices already read (store.openInvoices()), so a caller that also needs the
+   * raw list (the debt report ties every open invoice to Xero's total) reads it once and
+   * the book and the report see exactly the same rows. Ignored with invoiceIds.
+   */
+  openInvoices?: WsInvoice[];
 }
 
 export async function loadBook(
@@ -270,7 +276,7 @@ export async function loadBook(
     ? (await store.invoicesByIds(options.invoiceIds!)).filter((i) =>
       !String(i.reference ?? "").toUpperCase().includes("SAMPLE-")
     )
-    : (await store.openInvoices()).filter(inScope);
+    : (options.openInvoices ?? await store.openInvoices()).filter(inScope);
 
   const jobIds = uniq(invoices.map((i) => i.job_id));
   const janVisitDate = nextMonday(today);

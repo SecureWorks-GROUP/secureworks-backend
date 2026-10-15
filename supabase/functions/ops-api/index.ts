@@ -490,7 +490,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -604,7 +604,11 @@ import {
 import {
   getXeroReceivable,
   listXeroBankTransactions,
+  readXeroAgedPayables,
+  readXeroBalanceSheet,
   readXeroBankSummary,
+  readXeroProfitAndLoss,
+  readXeroTrialBalance,
   listXeroReceivables,
   listXeroSettlementRecords,
   readXeroOrganisation,
@@ -8230,9 +8234,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'list_xero_settlement_records':
       case 'read_xero_settlement_record':
       case 'list_xero_bank_transactions':
-      case 'read_xero_bank_summary': {
+      case 'read_xero_bank_summary':
+      case 'read_xero_profit_and_loss':
+      case 'read_xero_balance_sheet':
+      case 'read_xero_trial_balance':
+      case 'read_xero_aged_payables': {
         if (req.method !== 'GET') {
-          return json({ ok: false, error: 'Xero receivables reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+          return json({ ok: false, error: 'Xero accounting reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
         }
         try {
           const reads = {
@@ -8244,6 +8252,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             read_xero_settlement_record: readXeroSettlementRecord,
             list_xero_bank_transactions: listXeroBankTransactions,
             read_xero_bank_summary: readXeroBankSummary,
+            read_xero_profit_and_loss: readXeroProfitAndLoss,
+            read_xero_balance_sheet: readXeroBalanceSheet,
+            read_xero_trial_balance: readXeroTrialBalance,
+            read_xero_aged_payables: readXeroAgedPayables,
           }
           return json(await reads[action](client, url.searchParams, { getToken, xeroGet: xeroReadGet }))
         } catch (error) {
@@ -8289,7 +8301,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'debt_ws_jan_list_lock':
       case 'debt_ws_jan_list_send':
       case 'debt_ws_agent_queue':
-      case 'debt_ws_agent_submit': {
+      case 'debt_ws_agent_submit':
+      // The debt report (docs/debt-workshop/README.md "The debt report"): the live view and
+      // its PDF for staff, the owner's send to Marnin, and the Monday cron (off by default).
+      case 'debt_ws_report':
+      case 'debt_ws_report_pdf':
+      case 'debt_ws_report_send':
+      case 'debt_ws_report_auto': {
         const debtWsCaller: DebtWsCaller = authMode === 'jwt' && authUser
           ? { kind: 'user', user_id: authUser.id, email: authUser.email || null, staff: _opsApiCallerIsStaffOperator(authMode, authUser) }
           : authMode === 'api_key' && serverSecretPresented
@@ -8316,6 +8334,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           updateJobStatus: (statusBody: Record<string, unknown>) => updateJobStatus(client, statusBody),
           // Company statements: HTML only through send-outlook-email (same auth as the
           // invoice email above). No job_id, invoice id or attachment, so no PDF fence applies.
+          // The debt report also passes cc, its one PDF and internal_report: "debt_report";
+          // send-outlook-email accepts that unanchored PDF only when every address is ours.
           sendEmail: async (payload) => {
             const resp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
               method: 'POST',
@@ -17772,13 +17792,18 @@ async function getJobConversation(client: any, body: any) {
   //     (unplaced or pending_luna, context PR #1013) whose candidate_job_ids
   //     contain this job and whose GoHighLevel contact is one asked for (the
   //     payer's). Each is marked unplaced: true. Placement is not changed. A
-  //     message already shown above (same provider message id) shows once.
+  //     message already shown above as a placed row shows once, as that row; one
+  //     shown only as a GoHighLevel cache copy shows once, as the held row, so
+  //     its unplaced marking reaches the reader (debt review, 15 Oct 2026).
   //     Read with the same limit and merged before the newest-first cut, so the
-  //     newest messages are kept. Only callers that ask get these rows.
+  //     newest messages are kept. Only callers that ask get these rows, and only
+  //     they get held_read_failed (true when this read failed: the Debt Workshop
+  //     then refuses a move rather than read the gap as nothing held).
   const heldIds: string[] = Array.isArray(body?.held_contact_ids)
     ? Array.from(new Set<string>(body.held_contact_ids.map((v: unknown) => String(v || '').trim())
       .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v)))).slice(0, 5)
     : []
+  let heldReadFailed = false
   if (heldIds.length) {
     try {
       const { rows: held, error: heldErr } = await readHeldBusinessEventsBySourceTime(client, {
@@ -17788,9 +17813,15 @@ async function getJobConversation(client: any, body: any) {
         since: sinceFilter,
         until,
       })
-      if (heldErr) console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
-      messages.push(...heldConversationMessages(held, jobId, heldIds, customerAddresses, messages))
+      if (heldErr) {
+        heldReadFailed = true
+        console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
+      }
+      const heldMessages = heldConversationMessages(held, jobId, heldIds, customerAddresses, messages)
+      dropCacheCopiesOfHeld(messages, heldMessages)
+      messages.push(...heldMessages)
     } catch (e) {
+      heldReadFailed = true
       console.log('[ops-api] get_job_conversation held messages read failed:', (e as Error).message)
     }
   }
@@ -17821,12 +17852,9 @@ async function getJobConversation(client: any, body: any) {
   // response keys do not change. Do not re-add it here.
 
   // Newest first by when each message happened (parsed, so mixed timestamp
-  // formats such as Z and +00:00 compare correctly).
-  const at = (m: any) => {
-    const t = Date.parse(String(m.occurred_at || ''))
-    return Number.isFinite(t) ? t : -Infinity
-  }
-  messages.sort((a, b) => at(b) - at(a))
+  // formats such as Z and +00:00 compare correctly); at the same instant a held
+  // message comes first (only held_contact_ids callers have any).
+  messages.sort(compareConversationNewestFirst)
   const sliced = messages.filter((m) => happenedBy(m.occurred_at, until)).slice(0, limit)
 
   const channels: Record<string, number> = {}
@@ -17844,7 +17872,7 @@ async function getJobConversation(client: any, body: any) {
     // newest message shown).
     window: { since, until },
   }
-  return { messages: sliced, summary }
+  return { messages: sliced, summary, ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}) }
 }
 
 // ════════════════════════════════════════════════════════════
