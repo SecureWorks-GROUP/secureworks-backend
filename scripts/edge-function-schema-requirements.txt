@@ -800,3 +800,12 @@ ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order_update
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_release_unknown_send
+
+# 20261014190000 is Dispatch slice 7's install confirmation mark: pipeline
+# dispatch=1 reads the four columns (and embeds the confirmer's name through
+# install_confirmed_by), and set_dispatch_install_confirmed writes them, so
+# ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_at
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by_email
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_for_day

@@ -15,6 +15,15 @@ import {
   insuranceRepairStage,
 } from "./insurance_repairs_board.ts";
 import { dispatchWorkType } from "./dispatch_job_list.ts";
+import {
+  type DispatchInstall,
+  dispatchInstall,
+  type DispatchInstallBooking,
+  dispatchInstallHoldsTodo,
+  type DispatchInstallMarkRow,
+  type DispatchInstallOpen,
+  dispatchInstallOpen,
+} from "./dispatch_install.ts";
 
 export const DISPATCH_NOT_STARTED = "not_started";
 
@@ -149,7 +158,7 @@ export type DispatchStateRow =
     next_step?: string | null;
     next_step_set_at?: string | null;
     stage_setter?: { name?: string | null } | null;
-  }
+  } & NonNullable<DispatchInstallMarkRow>
   | null
   | undefined;
 
@@ -239,10 +248,14 @@ function inDispatchWindow(workType: string, job: DispatchStageJob): boolean {
 
 // Whether a listed job is in To do, and, for a job inside the window that the
 // council rule holds out, why. The caller passes rows already on the Dispatch
-// list (slice 1's ruling R1).
+// list (slice 1's ruling R1). Slice 7: a Trade scheduled job stays in To do
+// until its install is confirmed for the booked day (dispatch_install.ts).
+// Without `install` (a caller that read no bookings) stop 6 is out, as in
+// slice 3.
 export function dispatchTodo(
   job: DispatchStageJob,
   place: DispatchPlace,
+  install?: DispatchInstall | null,
 ): { todo: boolean; out: DispatchTodoHold | null } {
   const workType = dispatchWorkType(job);
   if (!DISPATCH_TODO_WORK_TYPES.includes(workType)) {
@@ -252,6 +265,9 @@ export function dispatchTodo(
   const hold = dispatchCouncilHold(workType, job);
   if (hold) return { todo: false, out: hold };
   const index = place.index ?? 0;
+  if (index === 6 && install) {
+    return { todo: dispatchInstallHoldsTodo(install), out: null };
+  }
   return { todo: index >= 1 && index <= 5, out: null };
 }
 
@@ -273,15 +289,29 @@ export type DispatchRowFields = {
   dispatch_todo: boolean;
   dispatch_todo_out: DispatchTodoHold | null;
   dispatch_next_step: string | null;
+  dispatch_install?: DispatchInstall | null;
+  dispatch_install_open?: DispatchInstallOpen | null;
+};
+
+// The bookings the install fields are worked out from (dispatch_install.ts),
+// and the Perth day. A caller that passes none gets slice 3's fields only.
+export type DispatchInstallContext = {
+  bookings: DispatchInstallBooking[] | null | undefined;
+  today: string;
 };
 
 // Every Dispatch field one list row carries, from the job and its state row.
 export function dispatchRowFields(
   job: DispatchStageJob,
   state: DispatchStateRow,
+  installContext?: DispatchInstallContext,
 ): DispatchRowFields {
   const place = dispatchPlace(job, state);
-  const { todo, out } = dispatchTodo(job, place);
+  // A make-safe job has no rail and no schedule step.
+  const install = installContext && place.stage !== null
+    ? dispatchInstall(installContext.bookings, state, installContext.today)
+    : null;
+  const { todo, out } = dispatchTodo(job, place, install);
   const isSet = place.source === "set";
   return {
     dispatch_stage: place.stage,
@@ -297,13 +327,20 @@ export function dispatchRowFields(
       : (typeof state?.next_step === "string" && state.next_step
         ? state.next_step
         : null),
+    ...(installContext
+      ? {
+        dispatch_install: install,
+        dispatch_install_open: dispatchInstallOpen(install, place.index, todo),
+      }
+      : {}),
   };
 }
 
 // The read of job_dispatch_state the list and the writes share. The setter's
-// name is embedded through the stage_set_by foreign key to users.
+// name is embedded through the stage_set_by foreign key to users, and the
+// install confirmer's (slice 7) through install_confirmed_by.
 export const DISPATCH_STATE_SELECT =
-  "job_id, stage, stage_set_at, stage_set_by, stage_set_by_email, next_step, next_step_set_at, stage_setter:stage_set_by(name)";
+  "job_id, stage, stage_set_at, stage_set_by, stage_set_by_email, next_step, next_step_set_at, stage_setter:stage_set_by(name), install_confirmed_at, install_confirmed_by, install_confirmed_by_email, install_confirmed_for_day, install_confirmer:install_confirmed_by(name)";
 
 export const DISPATCH_NEXT_STEP_MAX = 40;
 

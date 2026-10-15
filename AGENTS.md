@@ -526,6 +526,11 @@ only on a real move into Accepted: a re-save (accepted -> accepted) pushes
 nothing, a move from another status (scheduled -> accepted) still pushes
 non-Dispatch draft orders. Contract:
 `docs/dispatch-slice-5-contract.md`.
+Slice 7's install step and its To do rule at Trade scheduled live only in
+`dispatch_install.ts`; the mark is Dispatch's own four `job_dispatch_state`
+columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
+by `set_dispatch_install_confirmed`, never the calendar's booking lock.
+Contract: `docs/dispatch-slice-7-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 

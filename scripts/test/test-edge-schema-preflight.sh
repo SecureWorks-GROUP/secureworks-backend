@@ -908,7 +908,11 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       ("20261014125951", "xero_settlement_evidence"),
                       # Dispatch slice 5: purchase orders, their held drafts
                       # and the commit functions (dispatch_orders_store.ts).
-                      ("20261014150000", "dispatch_purchase_orders")]:
+                      ("20261014150000", "dispatch_purchase_orders"),
+                      # Dispatch slice 7: the install confirmation columns
+                      # pipeline dispatch=1 reads and
+                      # set_dispatch_install_confirmed writes.
+                      ("20261014190000", "job_dispatch_install_confirmed")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
