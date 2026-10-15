@@ -912,7 +912,10 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch slice 7: the install confirmation columns
                       # pipeline dispatch=1 reads and
                       # set_dispatch_install_confirmed writes.
-                      ("20261014190000", "job_dispatch_install_confirmed")]:
+                      ("20261014190000", "job_dispatch_install_confirmed"),
+                      # Dispatch slice 6: the delivery columns dispatch_materials
+                      # and pipeline dispatch=1 read and dispatch_delivery_* write.
+                      ("20261015120000", "dispatch_deliveries")]:
     digest = hashlib.sha256((Path(os.environ["BOOKING_MIGRATIONS_ROOT"]) / f"{version}_{name}.sql").read_bytes()).hexdigest()
     booking_read_rows.append({
         "function_name": "ops-api", "migration_version": version,
