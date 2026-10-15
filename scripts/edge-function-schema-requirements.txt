@@ -771,3 +771,25 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constra
 # Provider payment/batch evidence: table must precede both capture and reader.
 xero-sync|supabase/migrations/20261014125951_xero_settlement_evidence.sql|table|xero_settlement_evidence
 ops-api|supabase/migrations/20261014125951_xero_settlement_evidence.sql|table|xero_settlement_evidence
+
+# 20261014150000 is Dispatch slice 5's purchase orders and their emails:
+# dispatch_materials reads the new purchase_orders columns and job_order_emails,
+# the eleven dispatch_order* / dispatch_email_link_po actions read and write
+# job_order_emails and call the three functions, and create_po writes
+# created_by_email, so ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|table|job_order_emails
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.order_lines
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.sent_via
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.attempt_to_email
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|job_order_emails.send_attempt
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.supplier_id
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.source
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.created_by_email
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.pdf_version
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.last_sent_pdf_version
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|column|purchase_orders.last_sent_at
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|index|purchase_orders_org_po_number_key
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_next_po_number
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order_update
+ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_release_unknown_send

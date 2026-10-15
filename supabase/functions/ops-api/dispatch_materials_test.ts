@@ -917,9 +917,10 @@ Deno.test("read: the job's orders, oldest first, deleted left out, lines flatten
     assert(!text.includes(money), `${money} leaked into the orders`);
   }
   const ordersRead = db.requests.find((r) => r.table === "purchase_orders")!;
+  // Slice 5 adds the Dispatch order columns; still no price, total or tax.
   assertEquals(
     ordersRead.select,
-    "id, po_number, supplier_name, status, created_at, line_items",
+    "id, po_number, supplier_name, status, created_at, updated_at, line_items, supplier_id, source, pdf_version, last_sent_pdf_version, last_sent_at, xero_po_id",
   );
   assertEquals(db.writes(), []);
 });

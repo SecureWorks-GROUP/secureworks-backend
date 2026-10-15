@@ -27,6 +27,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { Webhook } from 'https://esm.sh/svix@1.15.0'
+import { parseEmailTag, parseSubjectForPO } from './po_email_tag.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -44,38 +45,6 @@ function json(data: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json', ...CORS },
   })
-}
-
-// Parse the +tag from the to-address
-// orders+PO-467989-SWP-25008@secureworksgroup.app → { poNumber: 'PO-467989', jobNumber: 'SWP-25008' }
-// orders+PO-467989@secureworksgroup.app → { poNumber: 'PO-467989', jobNumber: null }
-// orders+PO001-SWP25019@secureworksgroup.app → { poNumber: 'PO001', jobNumber: 'SWP25019' }
-function parseEmailTag(toEmail: string): { poNumber: string | null; jobNumber: string | null } {
-  const match = toEmail.match(/orders\+([^@]+)@/i)
-  if (!match) return { poNumber: null, jobNumber: null }
-
-  const tag = match[1]
-
-  // Try structured match first: PO-NNNNNN-SWP-NNNNN or PO-NNNNNN
-  const structuredMatch = tag.match(/^(PO-?\d+)(?:-(SW[PF]-?\d+))?$/i)
-  if (structuredMatch) {
-    return { poNumber: structuredMatch[1], jobNumber: structuredMatch[2] || null }
-  }
-
-  // Fallback: split on dash between alpha and alpha (e.g. PO001-SWP25019)
-  const fallbackMatch = tag.match(/^([A-Z]+\d+)-([A-Z]+\d+)$/i)
-  if (fallbackMatch) {
-    return { poNumber: fallbackMatch[1], jobNumber: fallbackMatch[2] }
-  }
-
-  // Last resort: treat entire tag as PO number
-  return { poNumber: tag, jobNumber: null }
-}
-
-// Fallback: try to extract PO number from subject line
-function parseSubjectForPO(subject: string): string | null {
-  const match = subject.match(/\bPO\d{3,}\b/i)
-  return match ? match[0].toUpperCase() : null
 }
 
 serve(async (req: Request) => {
