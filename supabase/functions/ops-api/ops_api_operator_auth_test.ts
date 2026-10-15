@@ -1115,6 +1115,10 @@ Deno.test("debt workshop actions are staff JWT or server secret only; trades and
       "debt_ws_jan_list_send",
       "debt_ws_agent_queue",
       "debt_ws_agent_submit",
+      "debt_ws_report",
+      "debt_ws_report_pdf",
+      "debt_ws_report_send",
+      "debt_ws_report_auto",
     ]
   ) {
     assertEquals(_opsApiActionNeedsSignedCaller(actionUrl(action)), true, action);

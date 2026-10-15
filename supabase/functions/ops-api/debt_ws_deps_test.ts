@@ -37,7 +37,7 @@ function tx(k: number, type = "RECEIVE") {
   };
 }
 
-function depsWith(rows: unknown[]) {
+function depsWith(rows: unknown[], data?: Record<string, unknown>) {
   const calls: Array<Record<string, string> | undefined> = [];
   const unused = () => Promise.reject(new Error("not used in this test"));
   const deps = createDebtWsDeps({
@@ -47,7 +47,7 @@ function depsWith(rows: unknown[]) {
     xeroGet: (_path, _token, _tenant, params) => {
       calls.push(params);
       return Promise.resolve({
-        data: { BankTransactions: rows },
+        data: data ?? { BankTransactions: rows },
         metadata: META,
       });
     },
@@ -90,4 +90,63 @@ Deno.test("deps: one bank page per call, the page and date_from passed on, has_m
   assertEquals(last.has_more, false);
   assertEquals(last.transactions.map((t) => t.type), ["RECEIVE", "SPEND"]);
   assert(!short.calls[0]!.where.includes("Date>="));
+});
+
+Deno.test("deps: the debt report's bank balances come from Xero's Bank Summary, one closing balance per account", async () => {
+  const cell = (Value: string, id?: string) =>
+    id ? { Value, Attributes: [{ Id: "accountID", Value: id }] } : { Value };
+  const { deps, calls } = depsWith([], {
+    Reports: [{
+      ReportID: "BankSummary",
+      ReportName: "Bank Summary",
+      Rows: [
+        {
+          RowType: "Header",
+          Cells: [
+            cell("Bank Accounts"),
+            cell("Opening Balance"),
+            cell("Cash Received"),
+            cell("Cash Spent"),
+            cell("Closing Balance"),
+          ],
+        },
+        {
+          RowType: "Section",
+          Rows: [
+            {
+              RowType: "Row",
+              Cells: [
+                cell("Operations", "70000000-0000-4000-8000-00000000000A"),
+                cell("1.00"),
+                cell("2.00"),
+                cell("3.00"),
+                cell("60444.05"),
+              ],
+            },
+            {
+              RowType: "Row",
+              Cells: [
+                cell("Empty Account"),
+                cell(""),
+                cell(""),
+                cell(""),
+                cell(""),
+              ],
+            },
+          ],
+        },
+      ],
+    }],
+  });
+  const accounts = await deps.bankSummary();
+  assertEquals(calls.length, 1);
+  assertEquals(accounts, [
+    {
+      name: "Operations",
+      account_id: "70000000-0000-4000-8000-00000000000a",
+      closing: 60444.05,
+    },
+    // A blank figure is "no figure", never a zero balance.
+    { name: "Empty Account", account_id: null, closing: null },
+  ]);
 });

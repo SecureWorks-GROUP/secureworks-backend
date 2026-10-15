@@ -8252,7 +8252,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'debt_ws_jan_list_lock':
       case 'debt_ws_jan_list_send':
       case 'debt_ws_agent_queue':
-      case 'debt_ws_agent_submit': {
+      case 'debt_ws_agent_submit':
+      // The debt report (docs/debt-workshop/README.md "The debt report"): the live view and
+      // its PDF for staff, the owner's send to Marnin, and the Monday cron (off by default).
+      case 'debt_ws_report':
+      case 'debt_ws_report_pdf':
+      case 'debt_ws_report_send':
+      case 'debt_ws_report_auto': {
         const debtWsCaller: DebtWsCaller = authMode === 'jwt' && authUser
           ? { kind: 'user', user_id: authUser.id, email: authUser.email || null, staff: _opsApiCallerIsStaffOperator(authMode, authUser) }
           : authMode === 'api_key' && serverSecretPresented
@@ -8279,6 +8285,8 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           updateJobStatus: (statusBody: Record<string, unknown>) => updateJobStatus(client, statusBody),
           // Company statements: HTML only through send-outlook-email (same auth as the
           // invoice email above). No job_id, invoice id or attachment, so no PDF fence applies.
+          // The debt report also passes cc, its one PDF and internal_report: "debt_report";
+          // send-outlook-email accepts that unanchored PDF only when every address is ours.
           sendEmail: async (payload) => {
             const resp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
               method: 'POST',
