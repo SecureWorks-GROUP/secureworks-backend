@@ -23,6 +23,7 @@ import {
   OVERVIEW_MESSAGE_LIMIT,
   overviewInvoice,
   overviewMessages,
+  overviewNote,
   overviewStory,
   perthDay,
   perthStamp,
@@ -1460,4 +1461,24 @@ Deno.test("B5: a proven emailed quote appears without a send stamp, never borrow
     false,
     "unreadable send evidence is not no sent quotes",
   );
+});
+
+Deno.test("held notes: a note a held message holds up says job not certain; every other note is unchanged", () => {
+  const base = {
+    item_key: "commitment:none:abc123def456",
+    item_type: "commitment",
+    status: "open",
+    from_role: "us",
+    to_role: "customer",
+    what: "Job not certain: We promised to tell the crew to add extra concrete at the windy rear.",
+    opened_at: "2026-10-06T02:00:00Z",
+    opened_by: [{ table: "business_events", id: "7fb00000-0000-4000-8000-000000000002", excerpt: "tell the crew" }],
+    cites_ok: true,
+  };
+  const held = overviewNote({ ...base, job_certain: false, certainty: "job_not_certain" }, new Map());
+  assertEquals([held.job_certain, held.certainty, held.shown], [false, "job_not_certain", true]);
+  assert(held.what.startsWith("Job not certain: "));
+  const plain = overviewNote(base, new Map());
+  assert(!("job_certain" in plain) && !("certainty" in plain), "a certain note carries no new key");
+  assertEquals(Object.keys(plain).sort(), Object.keys(overviewNote({ ...base, job_certain: true }, new Map())).sort());
 });
