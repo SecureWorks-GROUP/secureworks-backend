@@ -18,9 +18,9 @@ export const JOB_PROFIT_LABELS = {
   profit:
     "Gross profit on direct costs (trade labour, materials, commission and other direct lines), ex GST. No overhead share. Trade labour is the trade's charge; the company's super share is not added.",
   quoted_ex:
-    "What was quoted: the value of a sent or accepted quote, ex GST. Null when no quote was sent. Never the live price. quoted_source names the quote it came from.",
+    "What was quoted: the value of a sent or accepted quote, ex GST. Null when no quote was sent, and null when the value is recorded only in an unverified quote-sent log. Never the live price. quoted_source names the quote it came from.",
   expected_cost_ex:
-    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision or sent_quote_revision. Null when no cost was fixed at a quote, including a quote sent with no cost figures. Never a live pricing estimate.",
+    "Expected cost fixed at the quote, ex GST, with expected_labour_ex, expected_materials_ex and expected_commission_ex. expected_source is frozen_at_acceptance, accepted_quote_revision or sent_quote_revision. A quote revision gives an expected cost only when the job has a quoted figure (one rule for whether the quote was sent), so a superseded or declined quote never does. Null when no cost was fixed at a quote, including a quote sent with no cost figures. Never a live pricing estimate.",
   actual_cost_ex:
     "Actual cost from the job's own lines only: trade charges, supplier bills and materials facts linked to the job (cost_basis is always line_level; line_level_cost_ex is the same figure). Never a Xero Project total.",
   xero_project_expenses_ex:
@@ -33,6 +33,10 @@ export const JOB_PROFIT_LABELS = {
     "Null when job_financials would suppress it (no client invoice, no cost, no labour linked, incomplete trade invoice lines, unclassified lines), when the Xero Project total exceeds the costs linked to the job (xero_project_exceeds_line_costs), or when materials are owed but none is linked (labour-only cost).",
   profit_ex_unsuppressed:
     "Invoiced minus the costs linked so far, shown even where profit is suppressed. Not a profit figure. Null when the Xero Project total exceeds the costs linked to the job.",
+  rollup_expected_vs_actual:
+    "Company view: expected against actual cost counts only jobs whose actual cost is complete (cost_flag ok or text_matched_lines). A job with an expected cost but partial actual cost (no cost linked, materials not linked, labour missing, unclassified or incomplete lines) is not comparable and is counted in jobs_with_expected_not_comparable instead. A group with no publishable job reads profit and margin as null (Unknown), never 0.",
+  holding_jobs:
+    "Holding jobs (costs parked on a bucket card, not a customer's job) are in no company, work-type or month total; their figures are reported on their own under holding_jobs.",
 } as const;
 
 /**

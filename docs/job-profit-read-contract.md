@@ -32,10 +32,10 @@ Legacy jobs have no row.
 
 | Field | Meaning | Null means |
 |---|---|---|
-| `quoted_ex` | Value of a sent or accepted quote | No quote was sent. Never the live price |
+| `quoted_ex` | Value of a sent or accepted quote | No quote was sent, or its value is recorded only in an unverified quote-sent log. Never the live price |
 | `quoted_source` | Which quote: `sent_quote:...` | No quote was sent |
 | `expected_cost_ex`, `expected_labour_ex`, `expected_materials_ex`, `expected_commission_ex` | Cost fixed at the quote | No cost was fixed at a quote, including a quote sent with no cost figures. Never 0 for that, never a live estimate |
-| `expected_source` | `frozen_at_acceptance`, `accepted_quote_revision` or `sent_quote_revision` | No cost was fixed at a quote |
+| `expected_source` | `frozen_at_acceptance`, `accepted_quote_revision` or `sent_quote_revision`. A quote revision counts only when the job has a quoted figure (one rule for whether the quote was sent) | No cost was fixed at a quote |
 | `actual_cost_ex`, `actual_labour_ex`, `actual_materials_ex`, `actual_commission_ex`, `actual_other_ex` | Costs linked to the job line by line: trade charges, supplier bills, materials facts | Never null |
 | `cost_basis`, `line_level_cost_ex` | Always `line_level`; the same figure as `actual_cost_ex` | Never null |
 | `xero_project_expenses_ex` | Expenses on record against the job's Xero Project. Evidence only, not the job's full cost. Trade labour may sit outside it | No project is named after the job |
@@ -84,18 +84,23 @@ job's cost.
 
 ## Rollup fields
 
-Each of `totals`, `by_type[]` and `by_month[]` carries:
+Each of `totals`, `by_type[]`, `by_month[]` and `holding_jobs` carries:
 
 | Field | Meaning |
 |---|---|
 | `jobs` | Jobs in the group |
 | `invoiced_ex`, `collected_ex`, `actual_cost_ex` | Summed over every job in the group |
 | `quoted_ex`, `jobs_with_quote`, `invoiced_on_quoted_ex` | Sent-quote value, how many jobs have one, and what those same jobs invoiced |
-| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost |
-| `profit_ex`, `margin_pct`, `jobs_with_margin`, `published_revenue_ex`, `published_cost_ex` | Only jobs whose profit the engine published |
+| `expected_cost_ex`, `jobs_with_expected`, `actual_cost_on_expected_ex` | Quote-fixed expected cost, how many jobs have one, and what those same jobs cost: only jobs whose actual cost is complete (`cost_flag` `ok` or `text_matched_lines`) |
+| `jobs_with_expected_not_comparable`, `expected_cost_not_comparable_ex` | Jobs with an expected cost whose actual cost is still partial (no cost linked, materials not linked, labour missing, unclassified or incomplete lines, a Xero Project above its lines), and their expected cost. Not compared |
+| `profit_ex`, `margin_pct`, `jobs_with_margin`, `published_revenue_ex`, `published_cost_ex` | Only jobs whose profit the engine published. Null (Unknown) when the group has none, never 0 |
 | `revenue_verified_paid_jobs` | Jobs whose sales invoices are all paid in Xero |
 
 Compare expected with actual through `actual_cost_on_expected_ex`, and quoted
 with invoiced through `invoiced_on_quoted_ex`, so both sides cover the same
 jobs. `by_month` groups jobs by the `date_field` that filtered them; it is a
 job cohort, not an accounting period.
+
+A holding job (`holding_job`, such as SWF-PDF-BUCKET, where unplaced costs are
+parked) is not a customer's job. It is in no `totals`, `by_type` or `by_month`
+figure; `holding_jobs` reports it on its own so the parked cost stays visible.
