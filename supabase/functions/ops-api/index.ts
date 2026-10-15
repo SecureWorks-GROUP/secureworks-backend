@@ -598,7 +598,11 @@ import {
 import {
   getXeroReceivable,
   listXeroBankTransactions,
+  readXeroAgedPayables,
+  readXeroBalanceSheet,
   readXeroBankSummary,
+  readXeroProfitAndLoss,
+  readXeroTrialBalance,
   listXeroReceivables,
   listXeroSettlementRecords,
   readXeroOrganisation,
@@ -8193,9 +8197,13 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
       case 'list_xero_settlement_records':
       case 'read_xero_settlement_record':
       case 'list_xero_bank_transactions':
-      case 'read_xero_bank_summary': {
+      case 'read_xero_bank_summary':
+      case 'read_xero_profit_and_loss':
+      case 'read_xero_balance_sheet':
+      case 'read_xero_trial_balance':
+      case 'read_xero_aged_payables': {
         if (req.method !== 'GET') {
-          return json({ ok: false, error: 'Xero receivables reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
+          return json({ ok: false, error: 'Xero accounting reads require GET', code: 'METHOD_NOT_ALLOWED' }, 405)
         }
         try {
           const reads = {
@@ -8207,6 +8215,10 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
             read_xero_settlement_record: readXeroSettlementRecord,
             list_xero_bank_transactions: listXeroBankTransactions,
             read_xero_bank_summary: readXeroBankSummary,
+            read_xero_profit_and_loss: readXeroProfitAndLoss,
+            read_xero_balance_sheet: readXeroBalanceSheet,
+            read_xero_trial_balance: readXeroTrialBalance,
+            read_xero_aged_payables: readXeroAgedPayables,
           }
           return json(await reads[action](client, url.searchParams, { getToken, xeroGet: xeroReadGet }))
         } catch (error) {
