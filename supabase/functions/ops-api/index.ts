@@ -312,6 +312,15 @@ import {
   DispatchMaterialsError,
   runDispatchMaterialsAction,
 } from './dispatch_materials_store.ts'
+import {
+  DISPATCH_ORDERS_WRITE_ACTIONS,
+  runDispatchOrdersAction,
+} from './dispatch_orders_store.ts'
+import { resendDispatchTransport } from './dispatch_order_send.ts'
+import {
+  purchaseOrderCreatedBy,
+  supplierReplyMayMoveOrder,
+} from './purchase_order_attribution.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
@@ -6780,6 +6789,50 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           throw e
         }
       }
+      // Dispatch slice 5, a purchase order and its email
+      // (docs/dispatch-slice-5-contract.md): two reads and nine writes, gated
+      // exactly as slice 4. Absent from ROUTINE_ALLOWED_ACTIONS and
+      // AGENT_READ_ALLOWED_ACTIONS. Only dispatch_order_send and
+      // dispatch_order_reply send an email, each once, on a person's press (or
+      // the ops key naming the person who gave the yes in operator_email).
+      // Nothing here writes jobs or the Dispatch stage, pushes to Xero, posts a
+      // business event or calls reporting-api, ghl-proxy or send-po-email.
+      case 'dispatch_order_emails':
+      case 'dispatch_order_pdf':
+      case 'dispatch_order_create':
+      case 'dispatch_order_update':
+      case 'dispatch_order_cancel':
+      case 'dispatch_order_draft_save':
+      case 'dispatch_order_discard':
+      case 'dispatch_order_release_unknown':
+      case 'dispatch_order_send':
+      case 'dispatch_order_reply':
+      case 'dispatch_email_link_po': {
+        if (!_opsApiCallerIsStaffOperator(authMode, authUser)) {
+          return json({ error: `forbidden: ${action} requires the privileged ops key or a staff session`, code: 'operator_access_required' }, 403)
+        }
+        if ((DISPATCH_ORDERS_WRITE_ACTIONS as readonly string[]).includes(action) && req.method !== 'POST') {
+          throw new ApiError(`${action} requires POST`, 405)
+        }
+        const ordersActor = authMode === 'jwt'
+          ? {
+            userId: authUser?.id || null,
+            email: authUser?.email || cleanReviewedString(body?.operator_email) || null,
+            orgId: authUser?.orgId || null,
+          }
+          : { userId: null, email: cleanReviewedString(body?.operator_email) || null, orgId: null }
+        try {
+          return json(await runDispatchOrdersAction(client, action, url.searchParams, body, {
+            orgId: DEFAULT_ORG_ID,
+            actor: ordersActor,
+            via: authMode === 'jwt' ? 'screen' : 'terminal',
+            transport: resendDispatchTransport(Deno.env.get('RESEND_API_KEY') || ''),
+          }))
+        } catch (e) {
+          if (e instanceof DispatchMaterialsError) throw new ApiError(e.message, e.status, e.body)
+          throw e
+        }
+      }
       case 'search_jobs': return json(await searchJobs(client, url.searchParams))
       case 'get_org_events': return json(await getOrgEvents(client, url.searchParams))
       case 'my_actions': return json(await myActions(client))
@@ -8736,7 +8789,7 @@ export async function _opsApiRequestHandlerForTest(req: Request): Promise<Respon
           orgId: authUser?.orgId || null,
         })
       }
-      case 'create_po': return json(await createPO(client, body))
+      case 'create_po': return json(await createPO(client, body, authMode === 'jwt' ? authUser?.id || null : null))
       case 'update_po': return json(await updatePO(client, body))
       case 'push_po_to_xero': return json(await pushPOToXero(client, body))
       case 'email_po': return json(await emailPO(client, body))
@@ -35467,12 +35520,21 @@ async function updateJobStatus(client: any, body: any) {
           }
         }
 
-        // 2. Push draft labour POs to Xero
+        // 2. Push draft labour POs to Xero, only on a real move INTO Accepted:
+        // accepted -> accepted (a re-save) pushes nothing, while a move from
+        // another status (for example scheduled -> accepted) still pushes
+        // non-Dispatch draft orders. Never a Dispatch order (slice 5): it never
+        // auto-pushes, and stays draft until its email goes,
+        // forever when the supplier has no address, and Dispatch never puts an
+        // order in Xero. `source` is 'dispatch' or null, so `is null` keeps every
+        // other order; `.neq('source', 'dispatch')` would drop them all (NULL).
+        if (oldStatus === 'accepted') return
         let draftPoQuery = client.from('purchase_orders')
           .select('id, po_number')
           .eq('job_id', jId)
           .eq('status', 'draft')
           .is('xero_po_id', null)
+          .is('source', null)
         if (ordersOn) draftPoQuery = draftPoQuery.is('quote_builder_version_id', null)
         const { data: draftPOs } = await draftPoQuery
         if (draftPOs && draftPOs.length > 0) {
@@ -35496,7 +35558,7 @@ async function updateJobStatus(client: any, body: any) {
 // Test-only export alias (mirrors the `_`-prefixed convention in this file).
 export const _updateJobStatus = updateJobStatus
 
-async function createPO(client: any, body: any) {
+async function createPO(client: any, body: any, sessionUserId: string | null = null) {
   const { job_id, jobId, supplier_name, supplierName, xero_contact_id,
           line_items, lineItems, delivery_date, deliveryDate, delivery_address, reference, notes } = body
 
@@ -35525,7 +35587,9 @@ async function createPO(client: any, body: any) {
       reference: reference || null,
       notes: formatPoDeliveryNotes(delivery_address, notes),
       status: body.status || 'draft',
-      created_by: body.operator_email || body.user_email || null,
+      // created_by is a users.id (uuid, foreign key) or null, never an email;
+      // the person's email goes in created_by_email (purchase_order_attribution.ts).
+      ...purchaseOrderCreatedBy(sessionUserId, body),
     })
     .select()
     .single()
@@ -55754,7 +55818,7 @@ async function analyseSupplierQuote(client: any, body: any) {
 
   // Get the PO with its line items (what we ordered)
   const { data: po, error: poErr } = await client.from('purchase_orders')
-    .select('id, po_number, supplier_name, job_id, line_items, total, reference, status')
+    .select('id, po_number, supplier_name, job_id, line_items, total, reference, status, source')
     .eq('id', pId)
     .single()
 
@@ -55940,8 +56004,17 @@ Return ONLY valid JSON in this exact format:
   const isIssue = classification === 'issue'
   const isInvoice = classification === 'invoice'
 
+  // A Dispatch order is never moved by a reply (ruling O13,
+  // docs/dispatch-slice-5-contract.md): its status, confirmed delivery date and
+  // invoice-received stamp stay, and so does the job. The classification on the
+  // message and the review annotations below are kept.
+  const replyMayMoveOrder = supplierReplyMayMoveOrder(po)
+  if (!replyMayMoveOrder) {
+    console.log(`[ops-api] PO ${po.po_number} is a Dispatch order: reply classified ${classification} (${Math.round(confidence * 100)}%), order left as it is`)
+  }
+
   // Update PO status if this is a HIGH-CONFIDENCE confirmation
-  if (isConfirmation && confidence >= HIGH_CONFIDENCE && po.status !== 'delivered' && po.status !== 'billed') {
+  if (replyMayMoveOrder && isConfirmation && confidence >= HIGH_CONFIDENCE && po.status !== 'delivered' && po.status !== 'billed') {
     const poUpdate: any = { status: 'authorised' }
     if (confirmedDeliveryDate) poUpdate.confirmed_delivery_date = confirmedDeliveryDate
     await client.from('purchase_orders').update(poUpdate).eq('id', po.id)
@@ -55973,7 +56046,7 @@ Return ONLY valid JSON in this exact format:
   } else if (isConfirmation && confidence < HIGH_CONFIDENCE) {
     // Low confidence confirmation — flag for manual review, DON'T change PO status
     console.log(`[ops-api] PO ${po.po_number} classified as confirmation but low confidence (${Math.round(confidence * 100)}%) — flagging for review`)
-    if (confirmedDeliveryDate) {
+    if (replyMayMoveOrder && confirmedDeliveryDate) {
       await client.from('purchase_orders').update({ confirmed_delivery_date: confirmedDeliveryDate }).eq('id', po.id)
     }
     try {
@@ -55990,7 +56063,7 @@ Return ONLY valid JSON in this exact format:
         source: 'ai/analyse_supplier_quote',
       })
     } catch (e) { /* non-blocking */ }
-  } else if (confirmedDeliveryDate && !isConfirmation) {
+  } else if (replyMayMoveOrder && confirmedDeliveryDate && !isConfirmation) {
     // Delivery date mentioned but not a full confirmation — still save it
     await client.from('purchase_orders')
       .update({ confirmed_delivery_date: confirmedDeliveryDate })
@@ -55999,10 +56072,12 @@ Return ONLY valid JSON in this exact format:
 
   // Handle invoice classification — mark PO as invoice received
   if (isInvoice && confidence >= HIGH_CONFIDENCE) {
-    await client.from('purchase_orders')
-      .update({ invoice_received_at: new Date().toISOString() })
-      .eq('id', po.id)
-      .is('invoice_received_at', null) // only set once
+    if (replyMayMoveOrder) {
+      await client.from('purchase_orders')
+        .update({ invoice_received_at: new Date().toISOString() })
+        .eq('id', po.id)
+        .is('invoice_received_at', null) // only set once
+    }
     console.log(`[ops-api] PO ${po.po_number} invoice received from ${po.supplier_name}`)
     if (po.job_id) {
       try {

@@ -1,0 +1,311 @@
+{
+  "dispatch_order_emails": {
+    "job_id": "a1000000-0000-4000-8000-000000000001",
+    "job_number": "SWF-900001",
+    "drafts": [
+      {
+        "id": "b0def466-9291-4d97-9fc5-503560bd2587",
+        "purchase_order_id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+        "po_number": "PO-1000001",
+        "supplier_id": "b1000000-0000-4000-8000-000000000001",
+        "supplier_name": "Example Steel",
+        "kind": "update",
+        "status": "draft",
+        "to": {
+          "email": "orders@steel-supplies.test",
+          "state": "ok"
+        },
+        "subject": "Updated purchase order PO-1000001 for SWF-900001",
+        "body_text": "Hi team,\n\nPlease find attached the updated PO-1000001 for job SWF-900001 (Exampleton).\n\nAdded:\n6 Item 3\n\nThe order now reads:\n2 posts Item 1\n4 Item 2\n6 Item 3\n\nPlease confirm the delivery date, and quote SWF-900001 on your delivery docket and invoice.\n\nThanks,\nSecureWorks Group",
+        "body_edited": false,
+        "order_changed_since_edit": false,
+        "pdf": {
+          "version": 2,
+          "file_name": "PO-1000001.pdf",
+          "line_count": 3
+        },
+        "draft_hash": "02e93d44e5251e2d4dfd7708268a4ecf3ad89fcb95a40bce014028848cbfa03a",
+        "last_error": null,
+        "created_at": "2026-10-14T03:00:24.000000+00:00",
+        "updated_at": "2026-10-14T03:00:24.000000+00:00"
+      }
+    ],
+    "orders_for_link": [
+      {
+        "id": "e1000000-0000-4000-8000-000000000005",
+        "po_number": "PO-683376",
+        "supplier_name": "Example Legacy Supplies"
+      },
+      {
+        "id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+        "po_number": "PO-1000001",
+        "supplier_name": "Example Steel"
+      }
+    ],
+    "threads": [
+      {
+        "key": "th-a585da7c-4bb0-4a37-91a8-39b4e205ee44",
+        "tag": "supplier",
+        "po_id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+        "po_number": "PO-1000001",
+        "subject": "Re: Purchase order PO-1000001 for SWF-900001",
+        "counterpart": "Example Steel",
+        "last_at": "2026-10-14T03:00:22.000000+00:00",
+        "last_preview": "Thanks, booked for Friday.",
+        "can_reply": true,
+        "can_link": false,
+        "messages": [
+          {
+            "id": "a585da7c-4bb0-4a37-91a8-39b4e205ee44",
+            "direction": "outbound",
+            "from_email": "orders@secureworksgroup.app",
+            "to_email": "orders@steel-supplies.test",
+            "subject": "Purchase order PO-1000001 for SWF-900001",
+            "text": "Hi team,\n\nPlease find attached PO-1000001 for job SWF-900001 (Exampleton).\n\n2 posts Item 1\n4 Item 2\n\nPlease confirm the delivery date, and quote SWF-900001 on your delivery docket and invoice.\n\nThanks,\nSecureWorks Group",
+            "at": "2026-10-14T03:00:16.000000+00:00",
+            "attachments": [
+              {
+                "file_name": "PO-1000001.pdf"
+              }
+            ],
+            "delivery_status": "sent"
+          },
+          {
+            "id": "f1000000-0000-4000-8000-000000000002",
+            "direction": "inbound",
+            "from_email": "orders@steel-supplies.test",
+            "to_email": "orders+PO-1000001-SWF-900001@secureworksgroup.app",
+            "subject": "Re: Purchase order PO-1000001 for SWF-900001",
+            "text": "Thanks, booked for Friday.",
+            "at": "2026-10-14T03:00:22.000000+00:00",
+            "attachments": [
+              {
+                "file_name": "confirmation.pdf"
+              }
+            ],
+            "delivery_status": null
+          }
+        ]
+      },
+      {
+        "key": "th-f1000000-0000-4000-8000-000000000003",
+        "tag": "client",
+        "po_id": null,
+        "po_number": null,
+        "subject": "Your fence is booked",
+        "counterpart": "Client",
+        "last_at": "2026-10-10T01:00:00.000000+00:00",
+        "last_preview": "Hi, your fence is booked for next week.",
+        "can_reply": false,
+        "can_link": false,
+        "messages": [
+          {
+            "id": "f1000000-0000-4000-8000-000000000003",
+            "direction": "outbound",
+            "from_email": "quotes@secureworksgroup.app",
+            "to_email": "client@home.test",
+            "subject": "Your fence is booked",
+            "text": "Hi, your fence is booked for next week.",
+            "at": "2026-10-10T01:00:00.000000+00:00",
+            "attachments": [],
+            "delivery_status": "delivered"
+          }
+        ]
+      }
+    ],
+    "threads_status": "ok"
+  },
+  "dispatch_materials": {
+    "job_id": "a1000000-0000-4000-8000-000000000001",
+    "job_number": "SWF-900001",
+    "work_type": "fencing",
+    "suppliers": [
+      {
+        "supplier_id": "b1000000-0000-4000-8000-000000000001",
+        "name": "Example Steel",
+        "email": "orders@steel-supplies.test",
+        "active": true,
+        "position": 1,
+        "added_at": null,
+        "order": {
+          "id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+          "po_number": "PO-1000001",
+          "status": "sent",
+          "chip": {
+            "state": "draft_ready",
+            "text": "PO-1000001 · Draft email ready",
+            "tone": "info",
+            "in_xero": false
+          },
+          "in_xero": false,
+          "pdf_version": 2,
+          "last_sent_pdf_version": 1,
+          "last_sent_at": "2026-10-14T03:00:16.000000+00:00"
+        }
+      },
+      {
+        "supplier_id": "b1000000-0000-4000-8000-000000000002",
+        "name": "Example Sheets",
+        "email": "sales@sheets.test",
+        "active": true,
+        "position": 2,
+        "added_at": null,
+        "order": null
+      },
+      {
+        "supplier_id": "b1000000-0000-4000-8000-000000000003",
+        "name": "No Email Supplies",
+        "email": null,
+        "active": true,
+        "position": 3,
+        "added_at": null,
+        "order": null
+      },
+      {
+        "supplier_id": "b1000000-0000-4000-8000-000000000004",
+        "name": "Our Own Address",
+        "email": "orders@secureworkswa.com.au",
+        "active": true,
+        "position": 4,
+        "added_at": null,
+        "order": null
+      },
+      {
+        "supplier_id": "b1000000-0000-4000-8000-000000000005",
+        "name": "Test Address",
+        "email": "sales@example.com",
+        "active": true,
+        "position": 5,
+        "added_at": null,
+        "order": null
+      },
+      {
+        "supplier_id": "b1000000-0000-4000-8000-000000000006",
+        "name": "Two Addresses",
+        "email": "a@x.test; b@y.test",
+        "active": true,
+        "position": 6,
+        "added_at": null,
+        "order": null
+      }
+    ],
+    "lines": [
+      {
+        "id": "c1000000-0000-4000-8000-000000000001",
+        "supplier_id": "b1000000-0000-4000-8000-000000000001",
+        "description": "Item 1",
+        "quantity": 2,
+        "unit": "posts",
+        "status": "to_order",
+        "display_status": "on_po",
+        "purchase_order_id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+        "source": "manual",
+        "position": 1,
+        "updated_at": "2026-10-14T03:00:10.000000+00:00",
+        "po_number": "PO-1000001"
+      },
+      {
+        "id": "c1000000-0000-4000-8000-000000000002",
+        "supplier_id": "b1000000-0000-4000-8000-000000000001",
+        "description": "Item 2",
+        "quantity": 4,
+        "unit": null,
+        "status": "to_order",
+        "display_status": "on_po",
+        "purchase_order_id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+        "source": "manual",
+        "position": 2,
+        "updated_at": "2026-10-14T03:00:10.000000+00:00",
+        "po_number": "PO-1000001"
+      },
+      {
+        "id": "c1000000-0000-4000-8000-000000000003",
+        "supplier_id": "b1000000-0000-4000-8000-000000000001",
+        "description": "Item 3",
+        "quantity": 6,
+        "unit": null,
+        "status": "to_order",
+        "display_status": "on_po",
+        "purchase_order_id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+        "source": "manual",
+        "position": 3,
+        "updated_at": "2026-10-14T03:00:24.000000+00:00",
+        "po_number": "PO-1000001"
+      },
+      {
+        "id": "c1000000-0000-4000-8000-000000000004",
+        "supplier_id": "b1000000-0000-4000-8000-000000000002",
+        "description": "Item 4",
+        "quantity": 8,
+        "unit": null,
+        "status": "to_order",
+        "display_status": "to_order",
+        "purchase_order_id": null,
+        "source": "manual",
+        "position": 4,
+        "updated_at": "2026-10-14T03:00:08.000000+00:00"
+      }
+    ],
+    "counts": {
+      "total": 4,
+      "ready": 0
+    },
+    "can_suggest": false,
+    "orders": [
+      {
+        "id": "e1000000-0000-4000-8000-000000000005",
+        "po_number": "PO-683376",
+        "supplier_name": "Example Legacy Supplies",
+        "status": "draft",
+        "created_at": "2026-09-01T02:00:00.000000+00:00",
+        "supplier_id": null,
+        "source": null,
+        "pdf_version": null,
+        "last_sent_pdf_version": null,
+        "last_sent_at": null,
+        "in_xero": false,
+        "lines": [
+          {
+            "description": "Sheets",
+            "quantity": 4,
+            "unit": null
+          }
+        ]
+      },
+      {
+        "id": "8abb8b72-b3fe-451f-9075-75db60657ac8",
+        "po_number": "PO-1000001",
+        "supplier_name": "Example Steel",
+        "status": "sent",
+        "created_at": "2026-10-14T03:00:10.000000+00:00",
+        "supplier_id": "b1000000-0000-4000-8000-000000000001",
+        "source": "dispatch",
+        "pdf_version": 2,
+        "last_sent_pdf_version": 1,
+        "last_sent_at": "2026-10-14T03:00:16.000000+00:00",
+        "in_xero": false,
+        "lines": [
+          {
+            "line_id": "c1000000-0000-4000-8000-000000000001",
+            "description": "Item 1",
+            "quantity": 2,
+            "unit": "posts"
+          },
+          {
+            "line_id": "c1000000-0000-4000-8000-000000000002",
+            "description": "Item 2",
+            "quantity": 4,
+            "unit": null
+          },
+          {
+            "line_id": "c1000000-0000-4000-8000-000000000003",
+            "description": "Item 3",
+            "quantity": 6,
+            "unit": null
+          }
+        ]
+      }
+    ],
+    "orders_status": "ok"
+  }
+}

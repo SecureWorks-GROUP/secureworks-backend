@@ -132,6 +132,23 @@ dispatch_materials_delete_line       # probe=source-only
 dispatch_materials_suggest           # probe=source-only
 dispatch_materials_save_workings     # probe=source-only
 
+# ── Ops screen Dispatch tab, a purchase order and its email
+#    (docs/dispatch-slice-5-contract.md). The two reads are pure; a bare call is
+#    refused 400 before any query. The nine writes are staff-guarded and
+#    source-only: two of them send a supplier email, so no smoke run may fire
+#    any of them at production, even with an invalid bound. ──
+dispatch_order_emails
+dispatch_order_pdf
+dispatch_order_create                # probe=source-only
+dispatch_order_update                # probe=source-only
+dispatch_order_cancel                # probe=source-only
+dispatch_order_draft_save            # probe=source-only
+dispatch_order_discard               # probe=source-only
+dispatch_order_release_unknown       # probe=source-only
+dispatch_order_send                  # probe=source-only
+dispatch_order_reply                 # probe=source-only
+dispatch_email_link_po               # probe=source-only
+
 # ── Sales-action write surfaces JARVIS depends on ──
 update_job_status
 log_business_event

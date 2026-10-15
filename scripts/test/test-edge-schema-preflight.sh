@@ -891,6 +891,9 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch slice 4: the materials store pipeline
                       # dispatch=1 reads and dispatch_materials_* write.
                       ("20261014130000", "job_materials_by_supplier"),
+                      # Dispatch slice 5: purchase orders, their held drafts
+                      # and the commit functions (dispatch_orders_store.ts).
+                      ("20261014150000", "dispatch_purchase_orders"),
                       # Dispatch slice 7: the install confirmation columns
                       # pipeline dispatch=1 reads and
                       # set_dispatch_install_confirmed writes.

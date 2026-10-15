@@ -510,6 +510,22 @@ Slice 4's Materials by supplier lives in three private tables
 worked out only in `dispatch_materials.ts`, and a failed list read of the lines
 answers `dispatch_materials: 'failed'`, never 0. Contract:
 `docs/dispatch-slice-4-contract.md`.
+Slice 5 turns a supplier's To order lines into a `source = 'dispatch'` purchase
+order (numbers `PO-1000001` on, from `dispatch_next_po_number`), its PDF in the
+private `dispatch-order-pdfs` bucket and a held draft in `job_order_emails`,
+through the `dispatch_order*` actions (`dispatch_orders_store.ts`, rules in
+`dispatch_orders.ts`); multi-table writes go only through
+`dispatch_commit_order` / `_update` and the release of an unconfirmed send
+through `dispatch_release_unknown_send` (draft and audit row together). Only `dispatch_order_send` and
+`dispatch_order_reply` email anyone: on a person's press, or the ops key naming
+that person in `operator_email`, after the draft-hash check and the claim, and a
+Resend result that is not a clear yes or no is `send_unknown`, never re-sent on
+its own. A supplier reply never moves a Dispatch order, and job acceptance never
+pushes one to Xero (`updateJobStatus` reads `source IS NULL`). That push runs
+only on a real move into Accepted: a re-save (accepted -> accepted) pushes
+nothing, a move from another status (scheduled -> accepted) still pushes
+non-Dispatch draft orders. Contract:
+`docs/dispatch-slice-5-contract.md`.
 Slice 7's install step and its To do rule at Trade scheduled live only in
 `dispatch_install.ts`; the mark is Dispatch's own four `job_dispatch_state`
 columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
