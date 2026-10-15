@@ -90,6 +90,7 @@ Deno.test("create_invoice_draft is privileged server or staff JWT only at the op
 Deno.test("direct Xero evidence reads retain staff/server auth and refuse public or trade callers", () => {
   for (
     const action of [
+      "invoice_settlement",
       "read_xero_organisation",
       "read_xero_tracking_categories",
       "list_xero_receivables",

@@ -774,6 +774,11 @@ ops-api|supabase/migrations/20261014130000_job_materials_by_supplier.sql|constra
 # filter on those columns, and pushPOToXero does not refuse a placeholder
 # supplier. ops-api may deploy with the flag off before this migration is
 # applied. Do not add the columns here until they are live.
+
+# Provider payment/batch evidence: table must precede both capture and reader.
+xero-sync|supabase/migrations/20261014125951_xero_settlement_evidence.sql|table|xero_settlement_evidence
+ops-api|supabase/migrations/20261014125951_xero_settlement_evidence.sql|table|xero_settlement_evidence
+
 # 20261014150000 is Dispatch slice 5's purchase orders and their emails:
 # dispatch_materials reads the new purchase_orders columns and job_order_emails,
 # the eleven dispatch_order* / dispatch_email_link_po actions read and write

@@ -904,6 +904,8 @@ for version, name in [("20260921062158", "ghl_calendar_appointment_requests"),
                       # Dispatch slice 4: the materials store pipeline
                       # dispatch=1 reads and dispatch_materials_* write.
                       ("20261014130000", "job_materials_by_supplier"),
+                      # Xero settlement evidence: the invoice settlement read.
+                      ("20261014125951", "xero_settlement_evidence"),
                       # Dispatch slice 5: purchase orders, their held drafts
                       # and the commit functions (dispatch_orders_store.ts).
                       ("20261014150000", "dispatch_purchase_orders")]:
