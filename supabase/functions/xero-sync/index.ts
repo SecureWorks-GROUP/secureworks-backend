@@ -1060,6 +1060,8 @@ async function syncInvoices(sb: any) {
 
   // Independent payment/batch modification cursor. This capture never calls a
   // provider write or changes invoice amounts, attribution, debt or job state.
+  // It runs after every existing step on purpose: a Xero cooldown it hits is
+  // rethrown, and must not skip the deposit stamps or reconciliation above.
   let settlementEvidence: unknown
   try {
     settlementEvidence = await syncSettlementEvidence(sb, DEFAULT_ORG_ID, tenantId,
