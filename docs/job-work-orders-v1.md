@@ -84,14 +84,13 @@ other lines stay in the work order's `lines[]` with their `cost_lane` and
 `counted: false`. Example: agreed 2,000, billed 1,900 labour and 400 materials
 reads billed 1,900, remaining 100, not over.
 
-Temporary exception, in one place (`workOrderLineIsLabour` in
-`job_work_orders.ts`): the trade app's "Work Order" pay line (`line_type`
-`work order` or `work_order`) is labour and counts, although the shared view
-does not classify it yet and gives it `cost_lane: unclassified`. A job billed
-as one 2,000 Work Order line against an agreed 2,000 reads billed 2,000,
-remaining 0. The shared view is left alone in this change because it also
-feeds the job costing reports; that is the finance desk's change. When the
-view puts those two types in its labour lane, remove the line-type test.
+The trade app's "Work Order" pay line (`line_type` `work order` or
+`work_order`) is labour. The shared view puts both types in its labour lane
+since `20261015093000_trade_charge_work_order_labour.sql` (owner call JP-04).
+`workOrderLineIsLabour` in `job_work_orders.ts` still carries a redundant
+line-type test from before that migration; it agrees with the view and is to
+be removed separately. A job billed as one 2,000 Work Order line against an
+agreed 2,000 reads billed 2,000, remaining 0.
 
 Lines invoiced before the work order is approved (a backfilled job already mid
 install, or a trade who invoices before Shaun approves) are linked by
@@ -111,7 +110,7 @@ and shown as `labour_before_approval`.
 | `customer_variations_price_ex` | what those approved customer variations charge the customer, ex GST |
 | `customer_variation_count` | how many approved customer variations are counted |
 | `agreed_total_ex` | `agreed_ex` plus `customer_variations_ex`: what billed is measured against |
-| `billed_to_date_ex` | labour lines (labour lane, plus Work Order pay lines for now) on billed invoices, stamped against this job's approved work order (variation work included) |
+| `billed_to_date_ex` | labour-lane lines on billed invoices, stamped against this job's approved work order (variation work included) |
 | `variations_ex` | the part of billed the trades marked as variations. A variation counts only while its trade invoice is billed (not draft, not `ops-reject`), the same rule as labour lines |
 | `variation_count` | how many variations are counted in `variations_ex` |
 | `billed_within_agreed_scope_ex` | billed minus variations |
@@ -141,7 +140,7 @@ trade invoice per job, against the approved work order (or none: kept, and
 linked when the work order is approved). A variation is part of the labour its
 invoice bills, so `amount_ex` may not be more than the labour that invoice
 bills on that job, ex GST, by the same labour rule the work order totals use
-(labour lane, plus Work Order pay lines for now; materials, travel and other
+(the labour lane; materials, travel and other
 lines never count). A larger amount is refused 422 `variation_over_invoice`:
 300 labour plus 400 materials refuses 650. It writes two rows in `work_order_variation_emails`: one to
 finance@secureworkswa.com.au and a separate one to admin@secureworkswa.com.au,
