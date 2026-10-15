@@ -663,6 +663,13 @@ ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|column|quo
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|constraint|quote_builder_versions_unique_chain_version
 ops-api|supabase/migrations/20261009120000_quote_builder_versions.sql|trigger|quote_builder_versions.trg_quote_builder_versions_guard
 
+# Job profit engine (job profitability PR 1): job_profit / job_profit_list read
+# these service-role-only views; the migration must land before the ops-api deploy.
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_profit
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_cost_events
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|table|v_job_revenue_events
+ops-api|supabase/migrations/20261009130000_job_profit_engine.sql|function|job_profit
+
 # The deterministic intake stamps each case with its adapter id; the Ambrose
 # adapter is refused on every case insert until this migration admits it. The
 # constraint name is unchanged, so the ledger version is what proves it landed.
