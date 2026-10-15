@@ -37,7 +37,7 @@ export interface DebtWsDepsInput {
   sendStaffSms: DebtWsDeps["sendStaffSms"];
   getJobConversation: (
     body: Record<string, unknown>,
-  ) => Promise<{ messages: Record<string, unknown>[]; summary?: unknown }>;
+  ) => ReturnType<DebtWsDeps["conversation"]>;
   updateJobStatus: DebtWsDeps["updateJobStatus"];
   sendEmail: DebtWsDeps["sendEmail"];
   invoicePdf: DebtWsDeps["invoicePdf"];

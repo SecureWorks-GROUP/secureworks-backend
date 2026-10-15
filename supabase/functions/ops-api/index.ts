@@ -484,7 +484,7 @@ import { contextScorecardAction } from './context_scorecard_read.ts'
 import { buildJobStateCard, stateCardBrief } from './job_state_card.ts'
 import { legacyInboxRowsToShow, readInboxEventCopies, readUnlinkedRulesOn } from './job_conversation_inbox_copy.ts'
 import { searchJobsIncludingClosed } from './search_jobs_closed.ts'
-import { businessEventTimelineMessage, conversationWindow, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
+import { businessEventTimelineMessage, compareConversationNewestFirst, conversationWindow, dropCacheCopiesOfHeld, emailAddresses, emailCustomerParty, happenedBy, heldConversationMessages, readBusinessEventsBySourceTime, readCustomerAddresses, readHeldBusinessEventsBySourceTime, sentCustomerEmailMessages, eventSourceTime, TIMELINE_MESSAGE_COLUMNS, whoToWhom } from './job_conversation_timeline.ts'
 import { DOSSIER_EVENT_SELECT, dossierEventWithPartyRoles, conversationRoleFields } from './job_conversation_party_roles.ts'
 import { customerThreadPartyRoles, readMessagePartyRoles, staffNotePartyRoles } from '../_shared/evidence/party_roles.ts'
 import { INVOICE_EMAILED_BODY_PREVIEW, writeInvoiceAuthorisedEvidence } from './invoice_status_evidence.ts'
@@ -17710,13 +17710,18 @@ async function getJobConversation(client: any, body: any) {
   //     (unplaced or pending_luna, context PR #1013) whose candidate_job_ids
   //     contain this job and whose GoHighLevel contact is one asked for (the
   //     payer's). Each is marked unplaced: true. Placement is not changed. A
-  //     message already shown above (same provider message id) shows once.
+  //     message already shown above as a placed row shows once, as that row; one
+  //     shown only as a GoHighLevel cache copy shows once, as the held row, so
+  //     its unplaced marking reaches the reader (debt review, 15 Oct 2026).
   //     Read with the same limit and merged before the newest-first cut, so the
-  //     newest messages are kept. Only callers that ask get these rows.
+  //     newest messages are kept. Only callers that ask get these rows, and only
+  //     they get held_read_failed (true when this read failed: the Debt Workshop
+  //     then refuses a move rather than read the gap as nothing held).
   const heldIds: string[] = Array.isArray(body?.held_contact_ids)
     ? Array.from(new Set<string>(body.held_contact_ids.map((v: unknown) => String(v || '').trim())
       .filter((v: string) => /^[A-Za-z0-9]{10,40}$/.test(v)))).slice(0, 5)
     : []
+  let heldReadFailed = false
   if (heldIds.length) {
     try {
       const { rows: held, error: heldErr } = await readHeldBusinessEventsBySourceTime(client, {
@@ -17726,9 +17731,15 @@ async function getJobConversation(client: any, body: any) {
         since: sinceFilter,
         until,
       })
-      if (heldErr) console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
-      messages.push(...heldConversationMessages(held, jobId, heldIds, customerAddresses, messages))
+      if (heldErr) {
+        heldReadFailed = true
+        console.error('[ops-api] get_job_conversation held messages read failed:', heldErr)
+      }
+      const heldMessages = heldConversationMessages(held, jobId, heldIds, customerAddresses, messages)
+      dropCacheCopiesOfHeld(messages, heldMessages)
+      messages.push(...heldMessages)
     } catch (e) {
+      heldReadFailed = true
       console.log('[ops-api] get_job_conversation held messages read failed:', (e as Error).message)
     }
   }
@@ -17759,12 +17770,9 @@ async function getJobConversation(client: any, body: any) {
   // response keys do not change. Do not re-add it here.
 
   // Newest first by when each message happened (parsed, so mixed timestamp
-  // formats such as Z and +00:00 compare correctly).
-  const at = (m: any) => {
-    const t = Date.parse(String(m.occurred_at || ''))
-    return Number.isFinite(t) ? t : -Infinity
-  }
-  messages.sort((a, b) => at(b) - at(a))
+  // formats such as Z and +00:00 compare correctly); at the same instant a held
+  // message comes first (only held_contact_ids callers have any).
+  messages.sort(compareConversationNewestFirst)
   const sliced = messages.filter((m) => happenedBy(m.occurred_at, until)).slice(0, limit)
 
   const channels: Record<string, number> = {}
@@ -17782,7 +17790,7 @@ async function getJobConversation(client: any, body: any) {
     // newest message shown).
     window: { since, until },
   }
-  return { messages: sliced, summary }
+  return { messages: sliced, summary, ...(heldIds.length ? { held_read_failed: heldReadFailed } : {}) }
 }
 
 // ════════════════════════════════════════════════════════════
