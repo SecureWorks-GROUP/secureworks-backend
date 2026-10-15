@@ -56069,9 +56069,13 @@ Return ONLY valid JSON in this exact format:
 
   // Update PO status if this is a HIGH-CONFIDENCE confirmation
   if (replyMayMoveOrder && isConfirmation && confidence >= HIGH_CONFIDENCE && po.status !== 'delivered' && po.status !== 'billed') {
-    const poUpdate: any = { status: 'authorised' }
-    if (confirmedDeliveryDate && replyMayWriteConfirmedDate) poUpdate.confirmed_delivery_date = confirmedDeliveryDate
-    await client.from('purchase_orders').update(poUpdate).eq('id', po.id)
+    await client.from('purchase_orders').update({ status: 'authorised' }).eq('id', po.id)
+    if (confirmedDeliveryDate && replyMayWriteConfirmedDate) {
+      await client.from('purchase_orders')
+        .update({ confirmed_delivery_date: confirmedDeliveryDate })
+        .eq('id', po.id)
+        .is('confirmed_delivery_set_at', null)
+    }
     console.log(`[ops-api] PO ${po.po_number} confirmed by supplier (${Math.round(confidence * 100)}% confidence)${confirmedDeliveryDate ? ', delivery ' + confirmedDeliveryDate : ''}`)
 
     // Create job_event for confirmation
@@ -56101,7 +56105,7 @@ Return ONLY valid JSON in this exact format:
     // Low confidence confirmation — flag for manual review, DON'T change PO status
     console.log(`[ops-api] PO ${po.po_number} classified as confirmation but low confidence (${Math.round(confidence * 100)}%) — flagging for review`)
     if (replyMayMoveOrder && confirmedDeliveryDate && replyMayWriteConfirmedDate) {
-      await client.from('purchase_orders').update({ confirmed_delivery_date: confirmedDeliveryDate }).eq('id', po.id)
+      await client.from('purchase_orders').update({ confirmed_delivery_date: confirmedDeliveryDate }).eq('id', po.id).is('confirmed_delivery_set_at', null)
     }
     try {
       await client.from('ai_annotations').insert({
@@ -56122,6 +56126,7 @@ Return ONLY valid JSON in this exact format:
     await client.from('purchase_orders')
       .update({ confirmed_delivery_date: confirmedDeliveryDate })
       .eq('id', po.id)
+      .is('confirmed_delivery_set_at', null)
   }
 
   // Handle invoice classification — mark PO as invoice received
