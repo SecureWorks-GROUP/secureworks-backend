@@ -20,7 +20,7 @@ with identical values. The composer adds:
 | `email_capture` | `context_email_capture_status()` | email EM1 | built |
 | `transcript_capture` | `context_transcript_capture_status()` | transcripts T2 | built |
 | `money` | `context_money_status()` | money MN1 | `null` (F1b stub) |
-| `bucket` | `context_bucket_status()` | bucket B2 | `null` (F1b stub) |
+| `bucket` | `context_bucket_status()` | unplaced stage 1 (`20261014170000`, docs/context/unplaced-stage1.md) | built |
 | `alarms` | every block's `alarms` array, each tagged with `block` | composer | `[]` |
 
 The last four blocks were added by F1b (`20260924152100_context_status_f1b.sql`,
