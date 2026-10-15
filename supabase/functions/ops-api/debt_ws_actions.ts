@@ -196,13 +196,18 @@ export interface DebtWsDeps {
    * (a neighbour payer's own thread on a shared job). heldContactIds: the payer's
    * contact, whose messages held on NO job with this job among their candidates are
    * read too, each marked unplaced: true (getJobConversation held_contact_ids).
+   * held_read_failed is true when heldContactIds were asked for and that read failed.
    */
   conversation: (
     jobId: string,
     limit: number,
     contactIds?: string[],
     heldContactIds?: string[],
-  ) => Promise<{ messages: Record<string, unknown>[]; summary?: unknown }>;
+  ) => Promise<{
+    messages: Record<string, unknown>[];
+    summary?: unknown;
+    held_read_failed?: boolean;
+  }>;
   /** readJobStory: job-story-v1 or null, with its status. */
   story: (jobId: string) => Promise<{ story: unknown; status: unknown }>;
   listDocuments: (jobId: string) => Promise<Record<string, unknown>[]>;
@@ -2696,10 +2701,35 @@ function agentMessage(m: Record<string, unknown>) {
   };
 }
 
+/** A message's time in ms, or -Infinity when it has none that parses. */
+function agentMessageTime(m: { at: unknown }): number {
+  const t = Date.parse(String(m.at ?? ""));
+  return Number.isFinite(t) ? t : -Infinity;
+}
+
+/**
+ * Oldest first by parsed time (a "...Z" and a "...+00:00" stamp of one instant are
+ * equal; comparing the strings put the Z copy later). At the same instant a held
+ * message (unplaced) goes after an unmarked one, so the newest-inbound pick
+ * (moveHeldProblem) takes the held copy: SWF-261423, a call held on 2 jobs whose
+ * call log and transcript share one instant. Otherwise the read's order is kept.
+ */
+export function compareAgentMessagesOldestFirst(
+  a: { at: unknown; unplaced?: unknown },
+  b: { at: unknown; unplaced?: unknown },
+): number {
+  const ta = agentMessageTime(a);
+  const tb = agentMessageTime(b);
+  if (ta !== tb) return ta === -Infinity ? -1 : tb === -Infinity ? 1 : ta - tb;
+  return (a.unplaced === true ? 1 : 0) - (b.unplaced === true ? 1 : 0);
+}
+
 /**
  * The payer's own messages as the agent sees them, oldest first: read wider than kept,
  * only the payer's messages handed over. The queue builds the bundle from this and
- * the submit checks a move against the same read.
+ * the submit checks a move against the same read. With onFail "throw" a failed read
+ * of the held messages throws too (held_read_failed), so a move is never checked
+ * against a read missing them.
  */
 async function payerAgentMessages(
   deps: DebtWsDeps,
@@ -2714,8 +2744,14 @@ async function payerAgentMessages(
     heldContactIds(entry),
   ).catch((error) => {
     if (onFail === "throw") throw error;
-    return { messages: [] as Record<string, unknown>[] };
+    return {
+      messages: [] as Record<string, unknown>[],
+      held_read_failed: undefined as boolean | undefined,
+    };
   });
+  if (onFail === "throw" && conversation.held_read_failed === true) {
+    throw new Error("The payer's held messages could not be read");
+  }
   const split = splitConversation(
     conversation.messages ?? [],
     entry.payer,
@@ -2724,9 +2760,7 @@ async function payerAgentMessages(
   const messages = [...split.payer_messages].slice(
     0,
     DEBT_WS_AGENT_MESSAGES,
-  ).map(agentMessage).sort((a, b) =>
-    String(a.at ?? "").localeCompare(String(b.at ?? ""))
-  );
+  ).map(agentMessage).sort(compareAgentMessagesOldestFirst);
   return { messages, reason: split.reason };
 }
 

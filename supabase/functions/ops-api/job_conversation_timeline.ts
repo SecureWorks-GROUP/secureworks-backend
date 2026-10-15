@@ -578,9 +578,13 @@ export async function readHeldBusinessEventsBySourceTime(
  * Pure. Each row is checked again here (the read's filters are not trusted
  * alone): on no job, held (unplaced or pending_luna), this job among its
  * candidates, with one of `contactIds`, never retracted and never a marked
- * copy. A message already in `existing` (the job's own messages) by provider
- * message id, or by row id, is left out, so one message shows once and the
- * placed copy wins.
+ * copy. A message already among the job's own business_events rows in
+ * `existing` (by provider message id, or by row id) is left out, so one message
+ * shows once and the placed copy wins. A message shown only as a GoHighLevel
+ * cache copy (ghl:<message id>) is NOT left out: the held row is returned and
+ * the caller drops the cache copy (dropCacheCopiesOfHeld), so the one copy
+ * shown carries unplaced and candidate_job_count (debt review, 15 Oct 2026:
+ * an unmarked cache copy let a move stand on SWF-261423).
  */
 export function heldConversationMessages(
   rows: any[],
@@ -592,16 +596,14 @@ export function heldConversationMessages(
   const allowed = new Set(contactIds.filter(Boolean));
   if (!allowed.size) return [];
   const held = new Set<string>(HELD_ATTRIBUTION_STATUSES);
-  // What is already shown: business_events rows by their provider id, and
-  // GoHighLevel cache messages by theirs (ghl:<message id>).
+  // What is already shown as a business_events row, by provider id and row id.
+  // A GoHighLevel cache copy does not count: the held row replaces it.
   const shownProviderIds = new Set<string>();
   const shownRowIds = new Set<string>();
   for (const m of existing ?? []) {
+    if (m?.source_system === "ghl_cache") continue;
     if (m?.provider_message_id) {
       shownProviderIds.add(String(m.provider_message_id));
-    }
-    if (m?.source_system === "ghl_cache" && m?.source_ref) {
-      shownProviderIds.add(`ghl:${m.source_ref}`);
     }
     if (m?.source_system === "business_events" && m?.source_ref) {
       shownRowIds.add(String(m.source_ref));
@@ -630,6 +632,47 @@ export function heldConversationMessages(
     out.push(m);
   }
   return out;
+}
+
+/**
+ * Drops, in place, each GoHighLevel cache message (ghl:<message id>) that a held
+ * message in `held` also carries, so the message shows once, as the held row
+ * with its unplaced marking. Returns how many were dropped.
+ */
+export function dropCacheCopiesOfHeld(messages: any[], held: any[]): number {
+  const heldIds = new Set<string>(
+    (held ?? []).map((m) => m?.provider_message_id).filter(Boolean).map(String),
+  );
+  if (!heldIds.size) return 0;
+  let dropped = 0;
+  for (let k = messages.length - 1; k >= 0; k--) {
+    const m = messages[k];
+    if (
+      m?.source_system === "ghl_cache" && m?.source_ref &&
+      heldIds.has(`ghl:${m.source_ref}`)
+    ) {
+      messages.splice(k, 1);
+      dropped++;
+    }
+  }
+  return dropped;
+}
+
+/**
+ * Newest first by when each message happened (parsed, so Z and +00:00 compare
+ * as the same instant). At the same instant a held message (unplaced: true)
+ * comes first, so a reader taking the newest sees the held copy; otherwise the
+ * order is kept (the sort is stable). Unparseable times go last.
+ */
+export function compareConversationNewestFirst(a: any, b: any): number {
+  const at = (m: any) => {
+    const t = Date.parse(String(m?.occurred_at ?? ""));
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  const ta = at(a);
+  const tb = at(b);
+  if (ta !== tb) return ta === -Infinity ? 1 : tb === -Infinity ? -1 : tb - ta;
+  return (b?.unplaced === true ? 1 : 0) - (a?.unplaced === true ? 1 : 0);
 }
 
 /** Statuses of an email_events row that mean the email did not go. */
