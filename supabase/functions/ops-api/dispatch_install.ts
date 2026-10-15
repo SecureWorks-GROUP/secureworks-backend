@@ -205,12 +205,12 @@ export function dispatchInstall(
   );
   const onDay = dispatchInstallBookingsOnDay(installs, day);
   const confirmed = dispatchInstallMark(state);
-  // A mark for a day stands while a booking still sits on that day; a mark made
-  // with nothing booked stands while nothing is booked ahead.
+  // A mark for a day stands only while that day is the install day shown; a
+  // mark made with nothing booked stands while nothing is booked ahead.
   const confirmedCurrent = confirmed === null
     ? false
     : confirmed.for_day
-    ? installs.some((row) => ymd(row.scheduled_date) === confirmed.for_day)
+    ? confirmed.for_day === day
     : installState !== "ahead";
   return {
     state: installState,
