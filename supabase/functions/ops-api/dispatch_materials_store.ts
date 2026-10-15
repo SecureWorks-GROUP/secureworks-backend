@@ -32,6 +32,7 @@ import {
   dispatchSuggestedLines,
   isDispatchUuid,
   projectDispatchMaterialLine,
+  projectDispatchMaterialLineOnOrder,
   projectDispatchMaterialSupplier,
   projectDispatchOrder,
   projectDispatchWorkings,
@@ -40,6 +41,7 @@ import {
   DISPATCH_FAMILY_PROJECTION,
   dispatchWorkType,
 } from "./dispatch_job_list.ts";
+import { dispatchSupplierOrder } from "./dispatch_orders.ts";
 import { fetchAllRows } from "./makesafe_compact_reads.ts";
 
 export class DispatchMaterialsError extends Error {
@@ -267,6 +269,40 @@ function lineNotOnJob(): never {
   );
 }
 
+// Slice 5: what the order chips need beyond the orders themselves, read only
+// when the job has a Dispatch order: the open drafts and the order emails'
+// direction and time (never a body). Null when either read fails.
+async function readDispatchOrderState(
+  client: any,
+  jobId: string,
+  orders: any[],
+): Promise<{ openDrafts: any[]; messages: any[] } | null> {
+  const dispatchIds = orders
+    .filter((o) => o?.source === "dispatch")
+    .map((o) => String(o.id));
+  if (dispatchIds.length === 0) return { openDrafts: [], messages: [] };
+  const [draftsRes, messagesRes] = await Promise.all([
+    client.from("job_order_emails")
+      .select("id, purchase_order_id, status, updated_at")
+      .eq("job_id", jobId)
+      .in("status", ["draft", "sending", "send_unknown"]),
+    client.from("po_communications")
+      .select("id, po_id, direction, sent_at, received_at, created_at")
+      .in("po_id", dispatchIds),
+  ]);
+  if (draftsRes.error || messagesRes.error) {
+    console.error(
+      "[dispatch_materials] order chip read failed:",
+      draftsRes.error || messagesRes.error,
+    );
+    return null;
+  }
+  return {
+    openDrafts: draftsRes.data || [],
+    messages: messagesRes.data || [],
+  };
+}
+
 // ── The read ────────────────────────────────────────────────────────────────
 
 export async function readDispatchMaterials(
@@ -332,24 +368,59 @@ export async function readDispatchMaterials(
   }
 
   const lines: any[] = linesRes.data || [];
+  // Slice 5 (docs/dispatch-slice-5-contract.md): each chosen supplier's open
+  // Dispatch order and its chip, and each line's order number. A failed read of
+  // the orders or of what the chip needs answers orders_status 'failed' and
+  // leaves `order` off every supplier: never "Not ordered" by mistake.
+  const orderState = ordersRes.error ? null : await readDispatchOrderState(
+    client,
+    job.id,
+    ordersRes.data || [],
+  );
+  const poNumbers = orderState
+    ? new Map<string, string | null>(
+      (ordersRes.data || []).map((
+        o: any,
+      ) => [String(o.id), o.po_number ?? null]),
+    )
+    : undefined;
+  const nowMs = Date.parse(nowIso(ctx));
   const answer: Record<string, unknown> = {
     job_id: job.id,
     job_number: job.job_number,
     work_type: job.work_type,
-    suppliers: chosen.map((row) =>
-      projectDispatchMaterialSupplier(
+    suppliers: chosen.map((row) => ({
+      ...projectDispatchMaterialSupplier(
         row,
         contactsById.get(String(row.supplier_id)),
-      )
+      ),
+      ...(orderState
+        ? {
+          order: dispatchSupplierOrder({
+            orders: ordersRes.data || [],
+            supplierId: String(row.supplier_id),
+            openDrafts: orderState.openDrafts,
+            messages: orderState.messages,
+            nowMs,
+          }),
+        }
+        : {}),
+    })),
+    lines: lines.map((line) =>
+      poNumbers
+        ? projectDispatchMaterialLineOnOrder(line, poNumbers)
+        : projectDispatchMaterialLine(line)
     ),
-    lines: lines.map(projectDispatchMaterialLine),
     counts: dispatchMaterialCounts(lines),
     can_suggest: dispatchCanSuggest(job.work_type, lines.length),
     workings: projectDispatchWorkings(workingsRes.data),
   };
   // A failed orders read must not hide the working lines.
-  if (ordersRes.error) {
-    console.error("[dispatch_materials] orders read failed:", ordersRes.error);
+  if (ordersRes.error || !orderState) {
+    console.error(
+      "[dispatch_materials] orders read failed:",
+      ordersRes.error || "order state read failed",
+    );
     answer.orders_status = "failed";
   } else {
     answer.orders = (ordersRes.data || []).map(projectDispatchOrder);
@@ -469,6 +540,25 @@ export async function removeDispatchMaterialSupplier(
     .limit(1);
   if (lineError) readFailed("supplier lines read", lineError);
   if (Array.isArray(anyLine) && anyLine.length > 0) hasLines();
+  // Slice 5: a supplier with an order on the job that is not cancelled stays.
+  const { data: anyOrder, error: orderError } = await client
+    .from("purchase_orders")
+    .select("id")
+    .eq("job_id", job.id)
+    .eq("org_id", ctx.orgId)
+    .eq("supplier_id", supplierId)
+    // status is NOT NULL live, so neq drops no row it should keep.
+    .neq("status", "cancelled")
+    .neq("status", "deleted")
+    .limit(1);
+  if (orderError) readFailed("supplier orders read", orderError);
+  if (Array.isArray(anyOrder) && anyOrder.length > 0) {
+    throw new DispatchMaterialsError(
+      409,
+      "supplier_has_orders",
+      "This supplier has an order on this job",
+    );
+  }
 
   const { error: deleteError } = await client.from("job_material_suppliers")
     .delete()

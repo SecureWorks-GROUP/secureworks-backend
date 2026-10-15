@@ -23,6 +23,9 @@ type Store = {
   updates?: Array<
     { table: string; row: Record<string, unknown>; id?: unknown }
   >;
+  purchase_orders?: Array<Record<string, unknown>>;
+  // Order ids read one at a time (pushPOToXero's own read before any Xero call).
+  poLookups?: unknown[];
 };
 
 function makeClient(store: Store) {
@@ -30,6 +33,7 @@ function makeClient(store: Store) {
   store.updates = store.updates || [];
   function builder(table: string) {
     const filters: Record<string, unknown> = {};
+    const nullCols: string[] = [];
     let containsFilter: { col: string; arr: unknown[] } | null = null;
     let notNullCol: string | null = null;
     let op: "select" | "insert" | "update" = "select";
@@ -42,6 +46,11 @@ function makeClient(store: Store) {
         return { ...existing, ...(updateRow || {}) };
       }
       if (table === "jobs") return store.jobs?.[String(filters.id)] ?? null;
+      if (table === "purchase_orders") {
+        (store.poLookups ||= []).push(filters.id);
+        return (store.purchase_orders || []).find((o) => o.id === filters.id) ??
+          null;
+      }
       return null;
     };
     const resolveArray = () => {
@@ -58,6 +67,13 @@ function makeClient(store: Store) {
         }
         if (notNullCol) rows = rows.filter((u) => u[notNullCol!] != null);
         return rows;
+      }
+      if (table === "purchase_orders") {
+        // PostgREST eq and is-null: a NULL column never equals a value.
+        return (store.purchase_orders || []).filter((o) =>
+          Object.entries(filters).every(([k, v]) => o[k] === v) &&
+          nullCols.every((k) => o[k] == null)
+        );
       }
       return [];
     };
@@ -85,7 +101,10 @@ function makeClient(store: Store) {
         return b;
       },
       neq: () => b,
-      is: () => b,
+      is: (k: string, v: unknown) => {
+        if (v === null) nullCols.push(k);
+        return b;
+      },
       contains: (col: string, arr: unknown[]) => {
         containsFilter = { col, arr };
         return b;
@@ -423,6 +442,49 @@ Deno.test("U2b: NO text on repeat save, within-set move, non-ready transition, o
       await flush();
       assertEquals(res.success, true, c.label);
       assertEquals(smsCalls(calls).length, 0, `zero SMS: ${c.label}`);
+    } finally {
+      restore();
+    }
+  }
+});
+
+Deno.test("acceptance: only a real move into Accepted pushes draft orders to Xero, and never a Dispatch order", async () => {
+  const orders = () => [
+    {
+      id: "po-labour",
+      job_id: "job-1",
+      po_number: "PO-0101",
+      status: "draft",
+      xero_po_id: null,
+      source: null,
+    },
+    {
+      id: "po-dispatch",
+      job_id: "job-1",
+      po_number: "PO-1000001",
+      status: "draft",
+      xero_po_id: null,
+      source: "dispatch",
+    },
+  ];
+  for (
+    const c of [
+      { from: "quoted", pushed: ["po-labour"], label: "quoted -> accepted" },
+      { from: "accepted", pushed: [], label: "accepted -> accepted" },
+    ]
+  ) {
+    const { restore } = stubFetch();
+    try {
+      const store = jobFixture("fencing", c.from);
+      store.purchase_orders = orders();
+      const res = await _updateJobStatus(makeClient(store), {
+        job_id: "job-1",
+        status: "accepted",
+      });
+      await flush();
+      await flush();
+      assertEquals(res.success, true, c.label);
+      assertEquals(store.poLookups ?? [], c.pushed, c.label);
     } finally {
       restore();
     }
