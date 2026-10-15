@@ -12,9 +12,9 @@ check; nothing else restates them), `dispatch_deliveries_store.ts` (the three
 writes), `dispatch_materials_store.ts` (the read, and the shared count read
 every Dispatch write answers with), `dispatch_materials.ts` (one branch in
 `dispatchMaterialDisplayStatus`), the action switch and the `pipeline` read in
-`index.ts`. Migration: `supabase/migrations/20261015090000_dispatch_deliveries.sql`
-(rollback `supabase/rollbacks/20261015090000_dispatch_deliveries_down.sql`,
-contract case `supabase/tests/migration-contracts/20261015090000_dispatch_deliveries/`).
+`index.ts`. Migration: `supabase/migrations/20261015120000_dispatch_deliveries.sql`
+(rollback `supabase/rollbacks/20261015120000_dispatch_deliveries_down.sql`,
+contract case `supabase/tests/migration-contracts/20261015120000_dispatch_deliveries/`).
 Recorded answers (made-up job, suppliers, person): `docs/dispatch-slice-6-recorded-answers.json`.
 
 Nothing here sends to anyone, calls Xero, writes `jobs` or

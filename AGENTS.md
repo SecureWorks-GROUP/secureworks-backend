@@ -532,6 +532,11 @@ line) live only in `dispatch_deliveries.ts`; a hand-set confirmed date
 `purchase_orders` columns written only by the three `dispatch_delivery_*`
 actions, never `delivery_confirmed_at`. Contract:
 `docs/dispatch-slice-6-contract.md`.
+Slice 7's install step and its To do rule at Trade scheduled live only in
+`dispatch_install.ts`; the mark is Dispatch's own four `job_dispatch_state`
+columns (`install_confirmed_at`, `_by`, `_by_email`, `_for_day`), written only
+by `set_dispatch_install_confirmed`, never the calendar's booking lock.
+Contract: `docs/dispatch-slice-7-contract.md`.
 
 ## `pricing_json` In List Reads: Project, And Keep The Response Byte-Identical
 
@@ -4609,10 +4614,8 @@ line billed on the job is stamped onto `trade_invoice_lines.job_work_order_id`
 by trigger at invoice submit, and by `approve_job_work_order` for lines invoiced
 before the approval; never set it from code. Only the labour lane of
 `v_trade_charge_resolved.cost_lane` counts against the agreed labour; never
-restate that lane list. One temporary exception lives in
-`workOrderLineIsLabour` (`job_work_orders.ts`): the trade app's Work Order pay
-line (`work order` / `work_order`) counts as labour until that view classifies
-it; remove the exception then. This migration inserts one call,
+restate that lane list (the trade app's `work order` / `work_order` pay
+lines are in it since `20261015093000`). This migration inserts one call,
 `carry_work_order_variations`, into the deployed bodies of the three
 draft-replacing functions (`replace_trade_invoice_draft_v1`,
 `persist_weekly_trade_invoice_v1`, `persist_trade_work_order_invoice_v1`) so a

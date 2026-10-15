@@ -10,7 +10,7 @@
 -- untouched. No table, trigger, function or publication. The sighting is kept
 -- apart from delivery_confirmed_at, which keeps its meaning and gains no writer.
 --
--- Rollback: supabase/rollbacks/20261015090000_dispatch_deliveries_down.sql.
+-- Rollback: supabase/rollbacks/20261015120000_dispatch_deliveries_down.sql.
 
 ALTER TABLE public.purchase_orders
   ADD COLUMN IF NOT EXISTS confirmed_delivery_set_at timestamptz NULL,

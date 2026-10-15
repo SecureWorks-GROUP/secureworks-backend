@@ -2619,6 +2619,33 @@ function trimStory(story: unknown): unknown {
   return out;
 }
 
+/**
+ * What the agent is told about held messages (14 Oct 2026 review). A held message with
+ * several candidate jobs is one customer's text that could be about any of their jobs
+ * (SWF-26337: 51 held against 1 placed), and the same text shows on every candidate's
+ * debt card. Enforced in debtWsAgentSubmit, not only said here.
+ */
+export const DEBT_WS_HELD_MESSAGE_RULE =
+  "A message marked unplaced is held on no job. When its candidate_job_count is more " +
+  "than 1 it is marked context_only: it may be about another of this customer's jobs, " +
+  "so use it as context only. Never base a move (says_paid or rectification) on it; " +
+  "flag it to Shaun instead. A move resting on one is turned into a flag.";
+
+/** The number of jobs a held message could belong to, or null when not given. */
+function heldCandidateCount(m: Record<string, unknown>): number | null {
+  const n = m.candidate_job_count;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Held on no job and not known to be this job's alone: any held message whose
+ * candidate count is not exactly 1. A single-candidate held message (SWF-261098) is
+ * treated like a placed one.
+ */
+function heldOnSeveralJobs(m: Record<string, unknown>): boolean {
+  return m.unplaced === true && heldCandidateCount(m) !== 1;
+}
+
 function agentMessage(m: Record<string, unknown>) {
   const channel = String(m.channel ?? "");
   return {
@@ -2629,8 +2656,71 @@ function agentMessage(m: Record<string, unknown>) {
     from: m.author ?? m.who ?? null,
     body: m.body ?? m.preview ?? "",
     transcript: channel === "call" ? m.body ?? null : null,
-    // Held on no job by the placement ladder (this job one of its candidates).
-    ...(m.unplaced === true ? { unplaced: true } : {}),
+    // Held on no job by the placement ladder (this job one of its candidates), with
+    // how many jobs it could belong to. More than one: context only.
+    ...(m.unplaced === true
+      ? {
+        unplaced: true,
+        candidate_job_count: heldCandidateCount(m),
+        ...(heldOnSeveralJobs(m) ? { context_only: true } : {}),
+      }
+      : {}),
+  };
+}
+
+/**
+ * The payer's own messages as the agent sees them, oldest first: read wider than kept,
+ * only the payer's messages handed over. The queue builds the bundle from this and
+ * the submit checks a move against the same read.
+ */
+async function payerAgentMessages(
+  deps: DebtWsDeps,
+  book: Awaited<ReturnType<typeof loadBook>>,
+  entry: BookEntry,
+  onFail: "empty" | "throw",
+) {
+  const conversation = await deps.conversation(
+    entry.job!.id,
+    DEBT_WS_AGENT_MESSAGES * 2,
+    extraContactIds(entry),
+    heldContactIds(entry),
+  ).catch((error) => {
+    if (onFail === "throw") throw error;
+    return { messages: [] as Record<string, unknown>[] };
+  });
+  const split = splitConversation(
+    conversation.messages ?? [],
+    entry.payer,
+    partiesOf(entry.job, book.contacts.get(String(entry.job!.id)) ?? []),
+  );
+  const messages = [...split.payer_messages].slice(
+    0,
+    DEBT_WS_AGENT_MESSAGES,
+  ).map(agentMessage).sort((a, b) =>
+    String(a.at ?? "").localeCompare(String(b.at ?? ""))
+  );
+  return { messages, reason: split.reason };
+}
+
+/**
+ * Why a move may not stand, or null. The agent cites no message ids, so which message
+ * backs a move is not recorded. The rule used: a move answers what the payer said last,
+ * so it may not stand while the payer's NEWEST inbound message is held with more than
+ * one candidate job (nothing the payer said since the last message known to be this
+ * job's). The move is kept as a flag to Shaun instead.
+ */
+function moveHeldProblem(
+  messages: ReturnType<typeof agentMessage>[],
+): { message_id: unknown; candidate_job_count: number | null } | null {
+  const newest = messages.filter((m) =>
+    String(m.direction ?? "").toLowerCase() === "inbound"
+  ).at(-1);
+  if (!newest || !heldOnSeveralJobs(newest as Record<string, unknown>)) {
+    return null;
+  }
+  return {
+    message_id: newest.id,
+    candidate_job_count: heldCandidateCount(newest as Record<string, unknown>),
   };
 }
 
@@ -2709,33 +2799,15 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
   const budget = { left: DEBT_WS_PAY_LINK_FETCH_LIMIT };
   const items = [];
   for (const { entry, why } of take) {
-    const [story, conversation] = await Promise.all([
+    const [story, split] = await Promise.all([
       deps.story(entry.job!.id).catch(() => ({
         story: null,
         status: { ok: false, state: "failed" },
       })),
-      // Read wider than the bundle keeps: only the payer's own messages are handed over.
-      deps.conversation(
-        entry.job!.id,
-        DEBT_WS_AGENT_MESSAGES * 2,
-        extraContactIds(entry),
-        heldContactIds(entry),
-      ).catch(() => ({
-        messages: [] as Record<string, unknown>[],
-      })),
+      payerAgentMessages(deps, book, entry, "empty"),
     ]);
     const payLink = await payLinkFor(deps, entry, budget);
-    const split = splitConversation(
-      conversation.messages ?? [],
-      entry.payer,
-      partiesOf(entry.job, book.contacts.get(String(entry.job!.id)) ?? []),
-    );
-    const messages = [...split.payer_messages].slice(
-      0,
-      DEBT_WS_AGENT_MESSAGES,
-    ).map(agentMessage).sort((a, b) =>
-      String(a.at ?? "").localeCompare(String(b.at ?? ""))
-    );
+    const messages = split.messages;
     const greeting = await greetingNameFor(deps, entry);
     const draft = templateDraftFor(entry, payLink, greeting.name);
     items.push({
@@ -2758,6 +2830,7 @@ export async function debtWsAgentQueue(deps: DebtWsDeps) {
       story: trimStory(story.story),
       story_status: story.status ?? null,
       messages,
+      held_message_rule: DEBT_WS_HELD_MESSAGE_RULE,
       notes: entry.logs.map(noteView),
       possible_payments: bankCheck(bank, entry.inv, payerNames(entry)) ?? [],
       possible_payments_status: "ok",
@@ -2882,24 +2955,63 @@ export async function debtWsAgentSubmit(
     if (proposed !== null) bad("A flag has no proposed_category");
   }
 
+  // A move may not rest on a message held with several candidate jobs: it may be about
+  // another of the customer's jobs (14 Oct 2026 review). Checked against the same read
+  // the agent's bundle comes from; the move is kept as a flag to Shaun.
+  let finalKind = kind as "draft" | "move" | "flag";
+  let finalText = text;
+  let finalProposed = proposed as "says_paid" | "rectification" | null;
+  let moveRefused: Record<string, unknown> | null = null;
+  if (kind === "move" && entry.job) {
+    const read = await payerAgentMessages(deps, book, entry, "throw")
+      .catch(() => {
+        throw new DebtWsError(
+          "The payer's messages could not be read to check this move. Try again.",
+          503,
+          "conversation_unreadable",
+        );
+      });
+    const problem = moveHeldProblem(read.messages);
+    if (problem) {
+      const count = problem.candidate_job_count;
+      const label = proposed === "says_paid" ? "Says paid" : "Rectification";
+      moveRefused = {
+        reason: "held_message_several_jobs",
+        proposed_category: proposed,
+        message_id: problem.message_id,
+        candidate_job_count: count,
+      };
+      finalKind = "flag";
+      finalProposed = null;
+      finalText =
+        `The agent suggested moving this to ${label}, but the payer's ` +
+        `newest message is held on no job and could belong to ` +
+        `${
+          count !== null ? `any of ${count} jobs` : "another job"
+        }, so it may be ` +
+        `about another job. Check it before moving.\n\nThe agent's draft reply was:` +
+        `\n\n${text}`;
+    }
+  }
+
   const suggestion = await deps.store.insertSuggestion({
     share_key: entry.row.share_key,
     xero_invoice_ids: ids,
     job_id: entry.job?.id ?? null,
     cycle_start: entry.dayZero,
     step: step as string | null,
-    kind: kind as "draft" | "move" | "flag",
-    channel: kind === "flag" ? null : "sms",
-    text,
+    kind: finalKind,
+    channel: finalKind === "flag" ? null : "sms",
+    text: finalText,
     why,
-    proposed_category: proposed as "says_paid" | "rectification" | null,
+    proposed_category: finalProposed,
     amount: Math.round(
       entries.reduce((s, e) => s + e!.row.amount_due * 100, 0),
     ) / 100,
     source: "agent",
     agent_version: agentVersion,
   });
-  if (kind === "flag") {
+  if (finalKind === "flag") {
     await log(
       deps,
       {
@@ -2911,8 +3023,12 @@ export async function debtWsAgentSubmit(
       "agent_flag",
       {
         step: step as string | null,
-        body: text,
-        meta: { suggestion_id: suggestion.id, why },
+        body: finalText,
+        meta: {
+          suggestion_id: suggestion.id,
+          why,
+          ...(moveRefused ? { move_refused: moveRefused } : {}),
+        },
       },
     );
   } else {
@@ -2968,7 +3084,8 @@ export async function debtWsAgentSubmit(
   return {
     ok: true,
     version: DEBT_WS_VERSION,
-    kind,
+    kind: finalKind,
+    ...(moveRefused ? { move_refused: moveRefused } : {}),
     suggestion: suggestionView(suggestion),
     auto_send: autoSend,
   };

@@ -84,8 +84,8 @@ export const JOB_WORK_ORDER_BILLED_INVOICE_STATUSES: ReadonlySet<string> =
 
 /**
  * The one cost lane that counts against the agreed labour. The lane of a line
- * is v_trade_charge_resolved.cost_lane (20260831021701), the repo's single
- * definition; this module reads it and never restates it.
+ * is v_trade_charge_resolved.cost_lane (newest definition: 20261015093000),
+ * the repo's single definition; this module reads it and never restates it.
  */
 export const WORK_ORDER_LABOUR_COST_LANE = "labour";
 
@@ -93,12 +93,11 @@ export const WORK_ORDER_LABOUR_COST_LANE = "labour";
  * Whether a line is labour against the agreed labour figure: the one place
  * that decides it.
  *
- * TEMPORARY: the trade app's "Work Order" pay line (line_type 'work order',
- * or 'work_order') is labour, but the shared view does not classify it yet,
- * so it reads 'unclassified' there. It is counted here by line type until
- * v_trade_charge_resolved puts those types in its labour lane (the finance
- * desk's change, since it moves the job costing reports). Remove the
- * line-type test then.
+ * REDUNDANT: the trade app's "Work Order" pay line (line_type 'work order',
+ * or 'work_order') is labour, and v_trade_charge_resolved puts both types in
+ * its labour lane since migration 20261015093000 (owner call JP-04). The
+ * line-type test below predates that and agrees with the view; remove it
+ * separately.
  */
 export function workOrderLineIsLabour(
   line: { cost_lane: string; line_type: string | null },

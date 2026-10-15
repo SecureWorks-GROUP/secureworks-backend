@@ -1,4 +1,4 @@
--- Down for 20261015090000_dispatch_deliveries. Roll ops-api back first: the deployed
+-- Down for 20261015120000_dispatch_deliveries. Roll ops-api back first: the deployed
 -- dispatch_delivery_* actions, the extended dispatch_materials read, the pipeline&dispatch=1 order
 -- read and the reply reader name these columns. Drops the check and the six purchase_orders columns;
 -- every confirmed date, expected date and delivery_confirmed_at stays. Who set a date by hand and every

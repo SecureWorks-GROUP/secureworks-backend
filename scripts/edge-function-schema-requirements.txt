@@ -800,9 +800,18 @@ ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_commit_order_update
 ops-api|supabase/migrations/20261014150000_dispatch_purchase_orders.sql|function|dispatch_release_unknown_send
-ops-api|supabase/migrations/20261015090000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_at
-ops-api|supabase/migrations/20261015090000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by
-ops-api|supabase/migrations/20261015090000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by_email
-ops-api|supabase/migrations/20261015090000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_at
-ops-api|supabase/migrations/20261015090000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_by
-ops-api|supabase/migrations/20261015090000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_by_email
+
+# 20261014190000 is Dispatch slice 7's install confirmation mark: pipeline
+# dispatch=1 reads the four columns (and embeds the confirmer's name through
+# install_confirmed_by), and set_dispatch_install_confirmed writes them, so
+# ops-api must not deploy ahead of it.
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_at
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_by_email
+ops-api|supabase/migrations/20261014190000_job_dispatch_install_confirmed.sql|column|job_dispatch_state.install_confirmed_for_day
+ops-api|supabase/migrations/20261015120000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_at
+ops-api|supabase/migrations/20261015120000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by
+ops-api|supabase/migrations/20261015120000_dispatch_deliveries.sql|column|purchase_orders.confirmed_delivery_set_by_email
+ops-api|supabase/migrations/20261015120000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_at
+ops-api|supabase/migrations/20261015120000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_by
+ops-api|supabase/migrations/20261015120000_dispatch_deliveries.sql|column|purchase_orders.delivery_sighted_by_email

@@ -1,4 +1,4 @@
--- Contract: 20261015090000_dispatch_deliveries. Six nullable columns, a sighting always names a
+-- Contract: 20261015120000_dispatch_deliveries. Six nullable columns, a sighting always names a
 -- person, both "by" columns point at users, existing orders are untouched, and nothing else is
 -- added to purchase_orders (still one trigger).
 \set ON_ERROR_STOP on
