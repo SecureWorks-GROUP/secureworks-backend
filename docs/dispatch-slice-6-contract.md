@@ -162,5 +162,6 @@ Everything else it does is unchanged.
 
 Slices 4 and 5's writes answer `counts` through the same shared read
 (`readDispatchJobCounts`), which now also reads the orders the job's lines are
-on (`id, delivery_sighted_at`, only when a line is on one) so Delivered lines
-count there too. A failed read answers `counts: null`, as before.
+on (`id, delivery_sighted_at`, only when a line is on one, deleted orders left
+out as in the `dispatch_materials` read) so Delivered lines count there too.
+A failed read answers `counts: null`, as before.
